@@ -1,4 +1,4 @@
-import type { CliSessionSummary } from "../cli/session-resolver.js";
+import type { CliSessionSummary } from "@pico/cli/session-resolver";
 import type { SessionBrowserSession } from "./session-browser.js";
 
 export interface CliSessionBrowserSummary extends CliSessionSummary {

@@ -1,144 +1,50 @@
-import type { HookTrustAuthority } from "../hooks/trust/store.js";
+/** @deprecated Resource catalog precedence and projection have moved to @pico/core. */
+import type { HookTrustAuthority } from "@pico/pico-host/hooks/trust/store";
+import {
+  canonicalResourceName as canonicalCoreResourceName,
+  projectResourceCatalog as projectCoreResourceCatalog,
+  resolveResourceCatalog as resolveCoreResourceCatalog,
+} from "@pico/core/resource-catalog";
+import type {
+  ExternalResourceCatalogSource as CoreExternalResourceCatalogSource,
+  ProjectedResourceCatalog as CoreProjectedResourceCatalog,
+  ProjectedResourceCatalogEntry as CoreProjectedResourceCatalogEntry,
+  ResourceCatalogCandidate as CoreResourceCatalogCandidate,
+  ResourceCatalogConflict,
+  ResourceCatalogFormat,
+  ResourceCatalogScope,
+  ResourceCatalogSource as CoreResourceCatalogSource,
+  ResolvedResourceCatalog,
+} from "@pico/core/resource-catalog";
 
-export type ResourceCatalogScope = "project" | "user" | "builtin" | "external";
+export type { ResourceCatalogConflict, ResourceCatalogFormat, ResourceCatalogScope };
 
-export type ResourceCatalogFormat = "pico-native" | "claude-compat" | "builtin" | "external";
+export type ResourceCatalogSource = CoreResourceCatalogSource<HookTrustAuthority>;
+export type ExternalResourceCatalogSource = CoreExternalResourceCatalogSource<HookTrustAuthority>;
+export type ResourceCatalogCandidate<Value> = CoreResourceCatalogCandidate<
+  Value,
+  HookTrustAuthority
+>;
+export type ProjectedResourceCatalogEntry<Value> = CoreProjectedResourceCatalogEntry<
+  Value,
+  HookTrustAuthority
+>;
+export type ProjectedResourceCatalog<Value> = CoreProjectedResourceCatalog<
+  Value,
+  HookTrustAuthority
+>;
+export type { ResolvedResourceCatalog };
 
-export interface ResourceCatalogSource {
-  readonly id: string;
-  readonly scope: ResourceCatalogScope;
-  readonly format: ResourceCatalogFormat;
-  readonly root: string;
-  readonly priority: number;
-  readonly namespace?: string;
-  /** Host-only authority attached to immutable managed Plugin sources. */
-  readonly hookTrustAuthority?: HookTrustAuthority;
+export const canonicalResourceName = canonicalCoreResourceName;
+
+export function resolveResourceCatalog<Value>(
+  candidates: readonly ResourceCatalogCandidate<Value>[],
+): ResolvedResourceCatalog<Value> {
+  return resolveCoreResourceCatalog(candidates);
 }
 
-/**
- * Plugin 贡献等外部来源只需提供已经边界验证的资源根。
- * Catalog 不会自行发现、启用或信任 Plugin runtime。
- */
-export interface ExternalResourceCatalogSource extends ResourceCatalogSource {
-  readonly scope: "external";
-  /** 外部来源仍保留内容方言，便于在 Catalog 边界完成兼容转换。 */
-  readonly format: "external" | "pico-native" | "claude-compat";
-}
-
-export interface ResourceCatalogCandidate<T> {
-  readonly name: string;
-  readonly source: ResourceCatalogSource;
-  readonly sourcePath: string;
-  readonly value?: T;
-  /** 高优先级声明无效时阻止同名低优先级条目回落。 */
-  readonly tombstone?: boolean;
-}
-
-export interface ResourceCatalogConflict {
-  readonly name: string;
-  readonly keptSourcePath: string;
-  readonly ignoredSourcePath: string;
-  readonly priority: number;
-}
-
-export interface ResolvedResourceCatalog<T> {
-  readonly entries: readonly T[];
-  readonly conflicts: readonly ResourceCatalogConflict[];
-}
-
-export interface ProjectedResourceCatalogEntry<T> {
-  readonly candidate: ResourceCatalogCandidate<T> & { readonly value: T };
-  readonly effective: boolean;
-  readonly shadowedBy?: string;
-}
-
-export interface ProjectedResourceCatalog<T> {
-  readonly entries: readonly ProjectedResourceCatalogEntry<T>[];
-  readonly conflicts: readonly ResourceCatalogConflict[];
-}
-
-/** 所有用户可见资源名称共用同一大小写不敏感键。 */
-export function canonicalResourceName(name: string): string {
-  return name.normalize("NFKC").trim().toLocaleLowerCase("en-US");
-}
-
-/**
- * 按整条资源选择最高优先级候选，禁止跨来源拼接字段。
- * 同级冲突保留输入中第一条，并返回可观测诊断。
- */
-export function resolveResourceCatalog<T>(
-  candidates: readonly ResourceCatalogCandidate<T>[],
-): ResolvedResourceCatalog<T> {
-  const { selected, conflicts } = selectResourceCatalogCandidates(candidates);
-
-  const entries = [...selected.values()]
-    .filter(
-      (candidate): candidate is ResourceCatalogCandidate<T> & { readonly value: T } =>
-        candidate.tombstone !== true && candidate.value !== undefined,
-    )
-    .sort((left, right) => left.name.localeCompare(right.name))
-    .map((candidate) => candidate.value);
-
-  return { entries, conflicts };
-}
-
-/**
- * 保留全部可展示候选，同时复用运行时的整条资源优先级决议。
- * 管理界面可据此解释当前生效项以及同名项被哪个来源遮蔽。
- */
-export function projectResourceCatalog<T>(
-  candidates: readonly ResourceCatalogCandidate<T>[],
-): ProjectedResourceCatalog<T> {
-  const { selected, conflicts } = selectResourceCatalogCandidates(candidates);
-  const entries = candidates
-    .filter(
-      (candidate): candidate is ResourceCatalogCandidate<T> & { readonly value: T } =>
-        candidate.tombstone !== true && candidate.value !== undefined,
-    )
-    .map((candidate) => {
-      const winner = selected.get(canonicalResourceName(candidate.name));
-      const effective = winner === candidate && winner.tombstone !== true;
-      return {
-        candidate,
-        effective,
-        ...(effective || !winner ? {} : { shadowedBy: winner.source.id }),
-      };
-    })
-    .sort(
-      (left, right) =>
-        left.candidate.name.localeCompare(right.candidate.name) ||
-        Number(right.effective) - Number(left.effective) ||
-        right.candidate.source.priority - left.candidate.source.priority ||
-        left.candidate.sourcePath.localeCompare(right.candidate.sourcePath),
-    );
-
-  return { entries, conflicts };
-}
-
-function selectResourceCatalogCandidates<T>(candidates: readonly ResourceCatalogCandidate<T>[]): {
-  readonly selected: ReadonlyMap<string, ResourceCatalogCandidate<T>>;
-  readonly conflicts: readonly ResourceCatalogConflict[];
-} {
-  const selected = new Map<string, ResourceCatalogCandidate<T>>();
-  const conflicts: ResourceCatalogConflict[] = [];
-
-  for (const candidate of candidates) {
-    const key = canonicalResourceName(candidate.name);
-    if (!key) continue;
-    const current = selected.get(key);
-    if (!current || candidate.source.priority > current.source.priority) {
-      selected.set(key, candidate);
-      continue;
-    }
-    if (candidate.source.priority === current.source.priority) {
-      conflicts.push({
-        name: candidate.name,
-        keptSourcePath: current.sourcePath,
-        ignoredSourcePath: candidate.sourcePath,
-        priority: candidate.source.priority,
-      });
-    }
-  }
-
-  return { selected, conflicts };
+export function projectResourceCatalog<Value>(
+  candidates: readonly ResourceCatalogCandidate<Value>[],
+): ProjectedResourceCatalog<Value> {
+  return projectCoreResourceCatalog(candidates);
 }

@@ -8,7 +8,7 @@ import { createProductionRuntimeServices } from "../../../src/daemon/production-
 import { WorkspaceRuntimeService } from "../../../src/daemon/workspace-runtime-service.js";
 import { globalSessionManager } from "../../../src/engine/session.js";
 import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
-import { PlanCoordinator } from "../../../src/plan/coordinator.js";
+import { PlanCoordinator } from "@pico/runtime/plan-coordinator";
 import { planReviewOperationId, planReviewRunId } from "../../../src/plan/review-identity.js";
 import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
 import { SqliteRuntimeControlStore } from "../../../src/storage/sqlite/sqlite-runtime-control-store.js";

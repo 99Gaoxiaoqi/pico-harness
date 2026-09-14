@@ -1,7 +1,7 @@
 import {
   configuredSubagentParent,
   readConfiguredSubagentAdmission,
-} from "../runtime/configured-subagent-session.js";
+} from "@pico/runtime/configured-subagent-session";
 import { DesktopProviderConfigService } from "./desktop-provider-config-service.js";
 import {
   errorMessage,
@@ -10,7 +10,7 @@ import {
   requireText,
   isJsonRecord,
   isNodeCode,
-} from "./desktop-protocol-values.js";
+} from "@pico/pico-host";
 import { type AtomicMemoryLifecycle } from "../runtime/atomic-memory-lifecycle.js";
 import { usagePricing } from "./usage-pricing.js";
 import { buildUsageDashboard, type UsageDashboardInput } from "./usage-dashboard.js";
@@ -19,29 +19,29 @@ import { existsSync } from "node:fs";
 import { access, realpath, stat } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { WorkbarTerminalError } from "@pico/runtime-host";
-import { listRewindPointSummaries } from "../cli/file-history.js";
+import { listRewindPointSummaries } from "@pico/pico-host/file-history";
 import {
   createCliSessionId,
   findCliSessionCatalogEntry,
   listCliSessionCatalogEntries,
   removeCliSessionFile,
-} from "../cli/session-resolver.js";
-import { createContextBudget, estimateMessagesTokens } from "../context/context-budget.js";
+} from "@pico/cli/session-resolver";
+import { createContextBudget, estimateMessagesTokens } from "@pico/runtime/context-budget";
 import { FullCompactor } from "../context/full-compactor.js";
 import { recordRuntimeCompactionCheckpoint } from "../context/runtime-compaction-checkpoint.js";
 import { SkillLoader } from "../context/skill.js";
-import { AgentGraphReadOnlyQueryService } from "../agent-graph/query-service.js";
+import { createSqliteAgentGraphRuntimeEventQueryPort } from "../agent-graph/query-service.js";
+import { AgentGraphReadOnlyQueryService } from "@pico/runtime";
 import { findAgentProfile, loadAgentCatalog } from "../agents/catalog.js";
 import { globalSessionPermissionGrants } from "../approval/session-permissions.js";
-import { ResourceDoctor, renderResourceDoctorReport } from "../diagnostics/resource-doctor.js";
-import {
-  runWorkspaceDoctor,
-  workspaceConfigurationDiagnosticFromRuntime,
-} from "../diagnostics/workspace-doctor.js";
+import { ResourceDoctor, renderResourceDoctorReport } from "@pico/pico-host/resource-doctor";
+import { workspaceConfigurationDiagnosticFromRuntime } from "@pico/pico-host/workspace-configuration-diagnostic";
+import { runWorkspaceDoctor } from "@pico/pico-host/workspace-doctor";
+import { StorageDoctor } from "@pico/pico-host/storage-doctor";
 import { SessionForkService } from "../engine/session-fork-service.js";
 import { projectRuntimeSessionState } from "../engine/session-runtime-projection.js";
 import { globalSessionManager, Session } from "../engine/session.js";
-import type { PersistedSessionSettings } from "../engine/session-runtime.js";
+import type { PersistedSessionSettings } from "@pico/core";
 import {
   getOrCreateSessionSettings,
   migrateSessionModelRoute,
@@ -63,8 +63,8 @@ import { renderSkillActivation } from "../input/skill-activation.js";
 import { initializeProjectEntrypoints } from "../input/project-initializer.js";
 import { CostTracker } from "../observability/tracker.js";
 import { logger } from "../observability/logger.js";
-import { summarizeCacheEffectiveness } from "../observability/cache-effectiveness.js";
-import { ensureSessionUsageBaseline } from "../observability/usage-baseline.js";
+import { summarizeCacheEffectiveness } from "@pico/runtime/cache-effectiveness";
+import { ensureSessionUsageBaseline } from "@pico/runtime/usage-baseline";
 import { createProvider, type ProviderKind } from "../provider/factory.js";
 import { type ModelRoute, type ModelRouter } from "../provider/model-router.js";
 import {
@@ -72,7 +72,7 @@ import {
   type EffectiveModelRuntime,
 } from "../provider/effective-model-runtime.js";
 import { type CredentialVault } from "../provider/credential-vault.js";
-import { resolveProviderProfile } from "../provider/profile.js";
+import { resolveProviderProfile } from "@pico/runtime";
 import type { ProviderOperationJournal } from "../provider/provider-operation-journal.js";
 import { resolvePicoHome, resolvePicoPaths } from "../paths/pico-paths.js";
 import {
@@ -80,7 +80,7 @@ import {
   SqliteRuntimeEventStore,
   type SqliteSessionCatalogEntry,
 } from "../storage/sqlite/sqlite-runtime-event-store.js";
-import { SqliteRuntimeControlStore } from "../storage/sqlite/sqlite-runtime-control-store.js";
+import { SqliteRuntimeControlStore } from "@pico/storage/sqlite/sqlite-runtime-control-store";
 import { SqliteAgentGraphControlStore } from "../storage/sqlite/sqlite-agent-graph-control-store.js";
 import {
   SqliteSessionWorkbarRepository,
@@ -91,18 +91,21 @@ import {
 import { RuntimeRun } from "../runtime/runtime-run.js";
 import { createEngineRuntimePort } from "../runtime/engine-runtime-port-adapter.js";
 import { createSessionForkRuntimePort } from "../runtime/session-fork-runtime-port-adapter.js";
-import { WorkspaceTrustStore } from "../security/workspace-trust.js";
-import type { FileHistoryFilePatch } from "../safety/file-history.js";
+import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
+import type {
+  FileHistoryFilePatch,
+  FileHistoryState,
+} from "@pico/pico-host/file-history-runtime";
 import {
   fileHistoryChanges,
   fileHistoryRestoreFile,
   type FileHistoryChanges,
-} from "../safety/file-history.js";
+} from "@pico/pico-host/file-history-runtime";
 import type {
   ProviderCallRecord,
   UsageBaselineRecord,
   UsageLedgerTotals,
-} from "../tasks/runtime-types.js";
+} from "@pico/storage/runtime-control-types";
 import {
   createRuntimeNotification,
   createRuntimeRequest,
@@ -127,22 +130,21 @@ import type {
   DisposableLocalRuntimeService,
   RuntimeNotificationCursor,
   ShutdownOwnershipFence,
-} from "./service.js";
+} from "@pico/pico-host/local-runtime-service";
 import type { DesktopConversationStateStoreLike } from "./desktop-conversation-state.js";
 import { SqliteDesktopConversationStateStore } from "../storage/sqlite/sqlite-desktop-conversation-state-store.js";
-import type { PlanControlPort } from "./plan-control-port.js";
-import { PlanCoordinator } from "../plan/coordinator.js";
-import { createDesktopProviderRequestHandlers } from "./desktop-provider-request-handlers.js";
+import type { PlanControlPort } from "@pico/pico-host/plan-control-port";
+import { PlanCoordinator } from "@pico/runtime/plan-coordinator";
 import {
   createConfiguredSubagentCatalog,
   type ConfiguredSubagentCatalog,
-} from "../agents/configured-subagent-catalog.js";
+} from "@pico/pico-host/configured-subagent-catalog";
 import { DesktopSubagentSettingsService } from "./desktop-subagent-settings-service.js";
-import { listSubagentConnections } from "./subagent-connections.js";
+import { listSubagentConnections } from "@pico/pico-host/subagent-connections";
 import { createDesktopCatalogRequestHandlers } from "./desktop-catalog-request-handlers.js";
 import { createDesktopAutomationRequestHandlers } from "./desktop-automation-request-handlers.js";
-import { canonicalizeWorkspacePath, resolveGitBranch } from "./workspace-registry.js";
-import { WorkspaceStorageRepairService } from "./workspace-storage-repair.js";
+import { canonicalizeWorkspacePath, resolveGitBranch } from "@pico/pico-host/workspace-registry";
+import { WorkspaceStorageRepairService } from "@pico/pico-host/workspace-storage-repair";
 
 function unavailableWorkspaceStatus(workspacePath: string): WorkspaceStatusResult {
   return {
@@ -160,8 +162,8 @@ function unavailableWorkspaceStatus(workspacePath: string): WorkspaceStatusResul
     eventLog: null,
   };
 }
-import { WorkspaceRegistrationStore } from "./workspace-registration.js";
-import { agentGraphLaunchStateFromWorkspaceRun } from "./agent-graph-launch-state.js";
+import { WorkspaceRegistrationStore } from "@pico/pico-host/workspace-registration";
+import { agentGraphLaunchStateFromWorkspaceRun } from "@pico/pico-host/agent-graph-launch-state";
 import {
   WorkspaceRuntimeService,
   workspaceStatusResult,
@@ -174,29 +176,36 @@ import {
   assertDesktopChangesFingerprint,
   projectDesktopCheckpoint,
   type DesktopCheckpointProjection,
-} from "./desktop-review.js";
+} from "@pico/pico-host/desktop-review";
 import {
   ingestDesktopRuntimeNotification,
   isDesktopRunBoundaryNotification,
   isDesktopTranscriptNotification,
-} from "./desktop-transcript-persistence.js";
-import type { TranscriptEvent } from "../presentation/transcript-event-store.js";
+} from "@pico/pico-host/desktop-transcript-persistence";
+import {
+  projectTranscriptEvents,
+  type TranscriptEvent,
+} from "../presentation/transcript-event-store.js";
 import { PluginRuntimeSnapshotRegistry } from "../plugins/plugin-runtime-snapshot-registry.js";
 import { PluginCapabilityActivationScope } from "../plugins/plugin-capability.js";
 import { activatePluginProviderCapabilities } from "../plugins/plugin-provider-activation.js";
 import { UserMcpConfigStore } from "../mcp/user-config-store.js";
-import { DesktopRequestRouter, type DesktopRequestHandlers } from "./desktop-request-router.js";
-import { createDesktopSessionRequestHandlers } from "./desktop-session-request-handlers.js";
-import { TemporaryWorkspaceAuthority } from "./temporary-workspace-authority.js";
-import { createDesktopMemoryRequestHandlers } from "./desktop-memory-request-handlers.js";
-import { createDesktopWorkbarRequestHandlers } from "./desktop-workbar-request-handlers.js";
-import { DesktopWorkbarGitReviewService } from "./desktop-workbar-git-review-service.js";
+import {
+  createDesktopMemoryRequestHandlers,
+  createDesktopProviderRequestHandlers,
+  createDesktopSessionRequestHandlers,
+  createDesktopWorkbarRequestHandlers,
+  DesktopRequestRouter,
+  type DesktopRequestHandlers,
+} from "@pico/pico-host";
+import { TemporaryWorkspaceAuthority } from "@pico/pico-host/temporary-workspace-authority";
+import { DesktopWorkbarGitReviewService } from "@pico/pico-host/desktop-workbar-git-review-service";
 import { DesktopWorkbarTerminalService } from "./desktop-workbar-terminal-service.js";
 import { WorkbarGitReviewError } from "./workbar-git-review.js";
-import { SideChatAuthority, SideChatNoSettledTurnError } from "./side-chat-authority.js";
+import { SideChatAuthority, SideChatNoSettledTurnError } from "@pico/pico-host/side-chat-authority";
 import { DesktopAtomicMemoryService } from "./desktop-atomic-memory-service.js";
-import { sessionMemoryLane } from "../memory/atomic/session-lane.js";
-import { memorySessionKey } from "../memory/atomic/runtime-contracts.js";
+import { sessionMemoryLane } from "@pico/runtime/atomic-memory/session-lane";
+import { memorySessionKey } from "@pico/core/atomic-memory-runtime-contracts";
 import type { ImagePart } from "../schema/message.js";
 import { createModelContextReport } from "../provider/model-runtime-report.js";
 import { createSessionHookRuntime } from "../hooks/runtime.js";
@@ -204,8 +213,8 @@ import { PluginManagementService } from "../plugins/plugin-management-service.js
 import {
   BrowserAgentBrokerError,
   BrowserAgentCommandBroker,
-} from "./browser-agent-command-broker.js";
-import { DesktopRewindService } from "./desktop-rewind-service.js";
+} from "@pico/pico-host/browser-agent-command-broker";
+import { DesktopRewindService } from "@pico/pico-host/desktop-rewind-service";
 
 const UNSUPPORTED_DESKTOP_METHODS: ReadonlySet<string> = new Set([
   "approval.respond",
@@ -319,7 +328,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private readonly ownsMemoryService: boolean;
   private readonly gitReviewService: DesktopWorkbarGitReviewService;
   private readonly terminalService: DesktopWorkbarTerminalService;
-  private readonly rewindService: DesktopRewindService;
+  private readonly rewindService: DesktopRewindService<
+    FileHistoryState,
+    ReturnType<typeof createSessionForkRuntimePort>
+  >;
   private readonly requestRouter: DesktopRequestRouter;
   private readonly unsubscribeRuntimeEvents: () => void;
   private readonly pendingSends = new Map<
@@ -381,6 +393,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       createSessionId: this.createSessionId,
       requireIdleTrustedSession: this.requireIdleTrustedSession.bind(this),
       withSession: this.withSession.bind(this),
+      forkRuntimePort: createSessionForkRuntimePort(),
+      readChanges: fileHistoryChanges,
+      logger,
       notifyCommitted: async ({ workspacePath, sessionId, sourceSessionId, checkpointId }) => {
         const session = await this.requireSession(workspacePath, sessionId);
         this.publishSession(session);
@@ -973,11 +988,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     return toJsonValue(
       await runWorkspaceDoctor({
         workDir: canonical,
-        picoHome: this.picoHome,
         provider: defaults.provider,
         model: defaults.model,
-        env: this.env,
         taskRuntimeAvailable: true,
+        storageDoctor: new StorageDoctor({ workDir: canonical, picoHome: this.picoHome }),
         configuration: workspaceConfigurationDiagnosticFromRuntime(effective),
       }),
     );
@@ -1792,13 +1806,17 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       if (params.action !== "get" || !params.graphId) return toJsonValue(result);
       return toJsonValue({
         ...requireJsonRecord(result, "Graph detail"),
-        ...(await query.queryRuntimeFacts(params.graphId, runtimeStore, {
-          inspect: async ({ sessionId, runId }) =>
-            agentGraphLaunchStateFromWorkspaceRun(
-              await this.options.runtimeService.peekWorkspaceRun(canonical, runId),
-              sessionId,
-            ),
-        })),
+        ...(await query.queryRuntimeFacts(
+          params.graphId,
+          createSqliteAgentGraphRuntimeEventQueryPort(runtimeStore),
+          {
+            inspect: async ({ sessionId, runId }) =>
+              agentGraphLaunchStateFromWorkspaceRun(
+                await this.options.runtimeService.peekWorkspaceRun(canonical, runId),
+                sessionId,
+              ),
+          },
+        )),
       });
     } catch (error) {
       throw new RuntimeProtocolError(
@@ -2449,7 +2467,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       return;
     }
     const persisted = await this.withSession(event.scope.workspacePath, sessionId, (session) =>
-      ingestDesktopRuntimeNotification(session, event),
+      ingestDesktopRuntimeNotification(session, event, projectTranscriptEvents),
     );
     if (persisted) this.publishTranscriptUpdate(event.scope.workspacePath, sessionId, "reload");
   }
@@ -3119,7 +3137,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const canonical = await this.requireTrustedSession(workspacePath, sessionId);
     return this.withSession(canonical, sessionId, async (session) => ({
       workspacePath: canonical,
-      ...(await projectDesktopCheckpoint(session, checkpointId)),
+      ...(await projectDesktopCheckpoint(session, checkpointId, fileHistoryChanges)),
     }));
   }
 

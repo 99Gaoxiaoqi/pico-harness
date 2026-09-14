@@ -2,28 +2,43 @@ import {
   configuredSubagentList,
   type ConfiguredSubagentToolsOptions,
 } from "./configured-subagent-tools.js";
-import type { AgentSwarmStatusResult } from "../agent-graph/swarm-status.js";
+import type { AgentGraphWorkRequest } from "../agent-graph/work-request.js";
+import type { AgentGraphOperator } from "../agent-graph/core/contracts.js";
+export { AGENT_GRAPH_SUPERVISOR_TOOL_NAMES } from "@pico/core/agent-graph-tool-names";
+export type {
+  AgentGraphRequestedAddCommand,
+  AgentGraphRequestedScheduleCommand,
+  CommitAgentGraphUpdateInput,
+} from "@pico/core/agent-graph-update-contracts";
 import type {
-  AgentGraphWorkRequest,
-  CommitAgentGraphWorkInput,
-} from "../agent-graph/work-request.js";
-import type {
-  AgentGraph,
-  AgentGraphActivationClaim,
-  AgentGraphActivationIntent,
-  AgentGraphOperator,
-  AgentGraphOperatorProvision,
-  AgentGraphRecordRef,
-  AgentGraphScheduleCommand,
-  AgentGraphStopCommand,
-  AgentGraphOperationSource,
-} from "../agent-graph/core/contracts.js";
-export { AGENT_GRAPH_SUPERVISOR_TOOL_NAMES } from "../agent-graph/core/tool-names.js";
-import type { AgentGraphOperatorProfileSummary } from "../agent-graph/operator-profile-catalog.js";
-import type { AgentGraphRuntimeStatus } from "../agent-graph/runtime-port.js";
+  AgentGraphRootToolContext,
+  AgentGraphSupervisorProjection,
+  AgentGraphSupervisorView,
+  RegisterAgentGraphYieldResult,
+} from "@pico/core/agent-graph-supervisor-contracts";
+import type { AgentGraphSupervisorToolPort } from "@pico/runtime";
+export type {
+  AgentGraphRootToolContext,
+  AgentGraphSupervisorClaimRuntime,
+  AgentGraphSupervisorIntentReadiness,
+  AgentGraphSupervisorOperator,
+  AgentGraphSupervisorProjection,
+  AgentGraphSupervisorProvision,
+  AgentGraphSupervisorResult,
+  AgentGraphSupervisorView,
+  CommitAgentGraphUpdateResult,
+  ReadAgentGraphProjectionInput,
+  RegisterAgentGraphYieldInput,
+  RegisterAgentGraphYieldResult,
+} from "@pico/core/agent-graph-supervisor-contracts";
+export type { AgentGraphSupervisorToolPort } from "@pico/runtime";
 import type { ToolDefinition } from "../schema/message.js";
 import { ToolAccesses } from "./tool-access.js";
-import { NO_FILE_SIDE_EFFECTS, type BaseTool, type ToolExecutionContext } from "./registry.js";
+import {
+  NO_FILE_SIDE_EFFECTS,
+  type BaseTool,
+  type ToolExecutionContext,
+} from "@pico/pico-host/tool-registry-contract";
 
 export const AGENT_GRAPH_MAX_COMMANDS = 32;
 export const AGENT_GRAPH_MAX_INPUT_REFS = 64;
@@ -38,169 +53,6 @@ const MAX_IDENTITY_BYTES = 1024;
 const MAX_SHORT_TEXT_BYTES = 2 * 1024;
 const AGENT_GRAPH_VIEW_MAX_RECORD_BYTES = 16 * 1024;
 const AGENT_GRAPH_VIEW_MAX_TOTAL_BYTES = 48 * 1024;
-
-/** Runtime-owned identity for the exact root Supervisor activation. */
-export interface AgentGraphRootToolContext {
-  readonly supervision?: AgentGraphActivationIntent["supervision"];
-  readonly kind: "graph_root_supervisor";
-  readonly graphId: string;
-  readonly epoch: number;
-  readonly rootSessionId: string;
-  readonly rootTurnId: string;
-  readonly rootRunId: string;
-  /** Host-selected route for this exact root activation; model arguments cannot set it. */
-  readonly rootModelRouteId?: string;
-}
-
-export interface AgentGraphRequestedAddCommand {
-  readonly kind: "add";
-  readonly operator: Omit<AgentGraphOperator, "profileSnapshot"> & {
-    readonly profileId: string;
-    readonly requireConfiguredPreset?: boolean;
-    readonly legacyCapabilityId?: boolean;
-  };
-  readonly intent: AgentGraphActivationIntent;
-}
-
-export type AgentGraphRequestedScheduleCommand =
-  | AgentGraphRequestedAddCommand
-  | Exclude<AgentGraphScheduleCommand, { readonly kind: "add" }>;
-
-export interface AgentGraphSupervisorOperator extends Omit<AgentGraphOperator, "profileSnapshot"> {
-  readonly profile: {
-    readonly profileId: string;
-    readonly revision: string;
-  };
-}
-
-export interface AgentGraphSupervisorProvision extends Omit<
-  AgentGraphOperatorProvision,
-  "profileSnapshot"
-> {
-  readonly profile: {
-    readonly profileId: string;
-    readonly revision: string;
-  };
-}
-
-/** Stable, authority-free view assembled by the Graph application service. */
-export interface AgentGraphSupervisorProjection {
-  readonly graph: AgentGraph;
-  readonly operators: readonly AgentGraphSupervisorOperator[];
-  readonly intents: readonly AgentGraphActivationIntent[];
-  readonly stops: readonly AgentGraphStopCommand[];
-  readonly provisions: readonly AgentGraphSupervisorProvision[];
-  readonly claims: readonly AgentGraphActivationClaim[];
-  readonly records: readonly AgentGraphRecordRef[];
-}
-
-/** Runtime truth resolved on demand; never persisted in the Graph control tables. */
-export interface AgentGraphSupervisorClaimRuntime {
-  readonly outputStatus?: "success" | "failure";
-  readonly failureReason?: string;
-  readonly claimId: string;
-  readonly status: AgentGraphRuntimeStatus;
-  readonly terminalEventId?: string;
-  readonly outputEventIds: readonly string[];
-}
-
-export interface AgentGraphSupervisorResult {
-  readonly recordId: string;
-  readonly status: "success" | "failure";
-  readonly provenance: {
-    readonly graphId: string;
-    readonly operatorId: string;
-    readonly operatorGeneration: number;
-    readonly claimId: string;
-    readonly sessionId: string;
-    readonly turnId: string;
-    readonly runId: string;
-    readonly invocationId: string;
-    readonly eventId: string;
-  };
-  readonly content: string;
-  readonly bytes: number;
-  readonly truncated: boolean;
-  readonly resources: readonly {
-    readonly resourceId: string;
-    readonly kind: "artifact" | "evidence";
-    readonly ref: string;
-    readonly digest: string;
-    readonly bytes: number;
-    readonly mediaType?: string;
-    readonly title?: string;
-  }[];
-}
-
-export interface AgentGraphSupervisorView extends AgentGraphSupervisorProjection {
-  readonly availableOperatorProfiles: readonly AgentGraphOperatorProfileSummary[];
-  readonly intentReadiness: readonly AgentGraphSupervisorIntentReadiness[];
-  readonly runtimeClaims: readonly AgentGraphSupervisorClaimRuntime[];
-  readonly results: {
-    readonly records: readonly AgentGraphSupervisorResult[];
-    readonly totalBytes: number;
-    readonly truncated: boolean;
-  };
-}
-
-export interface AgentGraphSupervisorIntentReadiness {
-  readonly intentId: string;
-  readonly status: "resolved" | "in_flight" | "failed" | "unknown";
-  readonly resolvedRecordIds: readonly string[];
-  readonly inFlightRecordIds: readonly string[];
-  readonly failedRecordIds: readonly string[];
-  readonly unknownRecordIds: readonly string[];
-}
-
-export interface CommitAgentGraphUpdateInput {
-  readonly supervision?: AgentGraphActivationIntent["supervision"];
-  readonly graphId: string;
-  readonly epoch: number;
-  readonly expectedRevision: number;
-  readonly operationId: string;
-  readonly source: AgentGraphOperationSource;
-  readonly rootModelRouteId: string;
-  readonly commands: readonly AgentGraphRequestedScheduleCommand[];
-}
-
-export interface CommitAgentGraphUpdateResult {
-  readonly revision: number;
-  readonly replayed: boolean;
-  readonly projection: AgentGraphSupervisorProjection;
-}
-
-export interface ReadAgentGraphProjectionInput {
-  readonly graphId: string;
-  readonly epoch: number;
-  readonly rootSessionId: string;
-  /** Omitted means the first bounded page of current Graph RecordRefs. */
-  readonly recordIds?: readonly string[];
-}
-
-export interface RegisterAgentGraphYieldInput {
-  readonly graphId: string;
-  readonly epoch: number;
-  readonly rootSessionId: string;
-  readonly rootTurnId: string;
-  readonly rootRunId: string;
-  readonly toolCallId: string;
-}
-
-export interface RegisterAgentGraphYieldResult {
-  readonly permitId: string;
-  readonly replayed?: boolean;
-  readonly snapshot: AgentGraphSupervisorProjection;
-}
-
-/** Thin application boundary: tools never own Graph storage, reconciliation, or Runtime execution. */
-export interface AgentGraphSupervisorToolPort {
-  readSwarmStatus?(input: ReadAgentGraphProjectionInput): Promise<AgentSwarmStatusResult>;
-  commitWork?(input: CommitAgentGraphWorkInput): Promise<CommitAgentGraphUpdateResult>;
-  commitUpdate(input: CommitAgentGraphUpdateInput): Promise<CommitAgentGraphUpdateResult>;
-  readProjection(input: ReadAgentGraphProjectionInput): Promise<AgentGraphSupervisorView>;
-  registerYield(input: RegisterAgentGraphYieldInput): Promise<RegisterAgentGraphYieldResult>;
-  cancelYield(permitId: string, rootSessionId: string): Promise<void> | void;
-}
 
 export interface CreateAgentGraphSupervisorToolsOptions {
   readonly configuredSubagents?: ConfiguredSubagentToolsOptions;

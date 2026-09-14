@@ -2,14 +2,16 @@
 
 import type { ProviderConfig } from "./config.js";
 import { AiSdkProvider } from "./ai-sdk-provider.js";
-import type { LLMProvider } from "./interface.js";
-import { coordinateReasoningLevel, type ReasoningLevel } from "./reasoning-capability.js";
-import { CapabilityPreflightProvider } from "./capability-preflight.js";
-import { providerProfileForRoute } from "./model-capabilities.js";
+import type { LLMProvider, ProviderKind } from "@pico/core";
+import { coordinateReasoningLevel } from "@pico/runtime";
+import type { ReasoningLevel } from "@pico/core";
+import { CapabilityPreflightProvider } from "@pico/runtime";
+import { providerProfileForRoute } from "@pico/runtime";
 import { withProviderErrorRedaction } from "./error-redaction.js";
 import type { PromptCachePrewarmCoordinator } from "./prompt-cache-prewarm.js";
 
-export type ProviderKind = "openai" | "claude" | "responses";
+/** @deprecated Provider identity is a Core contract. */
+export type { ProviderKind } from "@pico/core";
 
 /** Runtime-owned dependencies that are deliberately kept outside credential-bearing ProviderConfig. */
 export interface ProviderRuntimeDependencies {

@@ -1,9 +1,9 @@
 import { type RuntimeEffectiveConfig } from "@pico/protocol";
 import { type ClientSessionRuntime } from "../client-session-runtime.js";
 import { resolveAutomationCredentialTarget } from "../../provider/automation-credential.js";
-import { resolveModelRouteCapabilities } from "../../provider/model-capabilities.js";
-import { AUTOMATION_TOOL_ALLOWLIST } from "../../safety/automation-tool-policy.js";
-import { normalizeExactHostname } from "../../safety/background-autonomous-policy-schema.js";
+import { resolveModelRouteCapabilities } from "@pico/runtime";
+import { AUTOMATION_TOOL_ALLOWLIST } from "@pico/runtime/automation-tool-policy";
+import { normalizeExactHostname } from "@pico/core/background-autonomous-policy-schema";
 import { AutomationCredentialImportProposalStore } from "../automation-credential-proposal.js";
 import type { ClientCommandRegistryDeps } from "./types.js";
 import { rpcCommand, sessionAccess } from "./shared.js";

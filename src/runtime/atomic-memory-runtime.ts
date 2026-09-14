@@ -1,23 +1,23 @@
 import { AtomicMemoryLifecycle } from "./atomic-memory-lifecycle.js";
 import { join } from "node:path";
-import { withProviderCallContext } from "../observability/provider-call-context.js";
+import { withProviderCallContext } from "@pico/runtime";
 import type { Message, ToolDefinition } from "../schema/message.js";
 import { RUNTIME_MESSAGE_EVENT_ID, isMessageHiddenFromTranscript } from "../schema/message.js";
-import type { LLMProvider } from "../provider/interface.js";
+import type { LLMProvider } from "@pico/core";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
 import { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-store.js";
 import type { RuntimeEventStoreEntry } from "../storage/runtime-event-store-contracts.js";
-import { materializeRuntimeHistory } from "../engine/session-runtime-read-model.js";
-import { SqliteMemoryItemStore } from "../storage/sqlite/sqlite-memory-item-store.js";
-import { AtomicMemoryExtractionEngine } from "../memory/atomic/extraction-engine.js";
-import { sessionMemoryLane } from "../memory/atomic/session-lane.js";
+import { materializeRuntimeHistory } from "@pico/runtime/session-runtime-read-model";
+import { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-store";
+import { AtomicMemoryExtractionEngine } from "@pico/runtime/atomic-memory/extraction-engine";
+import { sessionMemoryLane } from "@pico/runtime/atomic-memory/session-lane";
 import {
   memorySessionKey,
   type AtomicMemoryResult,
   type MemoryExtractionModel,
   type MemoryExtractionSnapshot,
   type MemoryGateResult,
-} from "../memory/atomic/runtime-contracts.js";
+} from "@pico/core/atomic-memory-runtime-contracts";
 import { logger } from "../observability/logger.js";
 
 export function atomicMemoryDatabasePath(picoHome: string): string {

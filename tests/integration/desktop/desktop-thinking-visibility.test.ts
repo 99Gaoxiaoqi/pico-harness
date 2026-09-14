@@ -130,6 +130,41 @@ test("Desktop host uses one stable timeline identity for the inference lifecycle
   assert.deepEqual(applyTimelineNotification(activeTimeline, thinkingNotifications[1]!), []);
 });
 
+test("Desktop keeps repeated model turns out of the conversation while preserving live progress", () => {
+  let timeline: ReturnType<typeof applyTimelineNotification> = [];
+  const service = {
+    publishDesktopNotification: (notification: RuntimeNotification) => {
+      timeline = applyTimelineNotification(timeline, notification);
+    },
+  } as unknown as WorkspaceRuntimeService;
+  let resourceVersion = 0;
+  const reporter = new DesktopReporter({
+    runId: "run-multiple-turns",
+    sessionId: "session-multiple-turns",
+    publish: (event) =>
+      publishDesktopReporterEvent(service, "/workspace", event, () => ++resourceVersion),
+  });
+
+  for (let turn = 1; turn <= 9; turn++) {
+    reporter.onTurnStart(turn);
+    reporter.onThinking();
+    assert.deepEqual(
+      timeline.map((item) => ({ title: item.title, state: item.state })),
+      [{ title: "Pico 正在推理", state: "active" }],
+      `turn ${turn} must show only current progress, without accumulated round markers`,
+    );
+    reporter.onTextDelta("回答内容");
+    assert.deepEqual(timeline, [], "streaming answers must not have stale statuses underneath");
+    reporter.onMessage("回答内容");
+  }
+
+  reporter.onToolCall("read_file", "{}", "call-1");
+  assert.deepEqual(
+    timeline.map((item) => ({ title: item.title, state: item.state })),
+    [{ title: "开始 read_file", state: "active" }],
+  );
+});
+
 test("Desktop host keeps internal assistant suppression out of the user timeline", () => {
   const published: RuntimeNotification[] = [];
   const service = {

@@ -1,0 +1,599 @@
+import { createHash } from "node:crypto";
+import type {
+  DurableTranscriptEvent,
+  SubagentActivityEvent,
+  TranscriptEntryData,
+} from "@pico/core";
+import {
+  isJsonValue,
+  parseApprovalRequestedPayload,
+  type JsonObject,
+  type JsonValue,
+  type RuntimeNotification,
+} from "@pico/protocol";
+
+const RUN_BOUNDARY_TOPICS = new Set(["run.started", "run.updated", "run.finished"]);
+
+export interface DesktopTranscriptHydrationSnapshot {
+  readonly transcriptEvents: readonly DurableTranscriptEvent[];
+}
+
+/** Narrow Session ledger capability required by Desktop Transcript persistence. */
+export interface DesktopTranscriptSessionPort {
+  readHydrationSnapshot(): Promise<DesktopTranscriptHydrationSnapshot>;
+  recordTranscriptEvent(
+    event: DurableTranscriptEvent,
+    options: { readonly eventId: string },
+  ): Promise<unknown>;
+}
+
+/** A presentation layer supplies full sequence/projection validation without coupling Host to UI code. */
+export type ValidateDesktopTranscriptEvents = (
+  events: readonly DurableTranscriptEvent[],
+) => unknown;
+
+export function isDesktopTranscriptNotification(topic: string): boolean {
+  return (
+    RUN_BOUNDARY_TOPICS.has(topic) ||
+    topic === "run.timeline" ||
+    topic === "approval.requested" ||
+    topic === "approval.resolved" ||
+    topic === "prompt.requested" ||
+    topic === "prompt.resolved" ||
+    topic === "changes.updated" ||
+    topic === "changes.applied"
+  );
+}
+
+export function isDesktopRunBoundaryNotification(topic: string): boolean {
+  return RUN_BOUNDARY_TOPICS.has(topic);
+}
+
+/** Project selected live Runtime notifications into the durable Desktop Transcript ledger. */
+export async function ingestDesktopRuntimeNotification(
+  session: DesktopTranscriptSessionPort,
+  notification: RuntimeNotification,
+  validateTranscriptEvents: ValidateDesktopTranscriptEvents,
+): Promise<boolean> {
+  if (RUN_BOUNDARY_TOPICS.has(notification.topic)) {
+    return persistRunBoundary(session, notification, validateTranscriptEvents);
+  }
+  switch (notification.topic) {
+    case "run.timeline":
+      return persistTimelineEvent(session, notification, validateTranscriptEvents);
+    case "approval.requested":
+      return persistApprovalRequested(session, notification, validateTranscriptEvents);
+    case "approval.resolved":
+      return persistApprovalResolved(session, notification, validateTranscriptEvents);
+    case "prompt.requested":
+      return persistPromptRequested(session, notification, validateTranscriptEvents);
+    case "prompt.resolved":
+      return persistPromptResolved(session, notification, validateTranscriptEvents);
+    case "changes.updated":
+    case "changes.applied":
+      return persistChangesEvent(session, notification, validateTranscriptEvents);
+    default:
+      return false;
+  }
+}
+
+async function persistRunBoundary(
+  session: DesktopTranscriptSessionPort,
+  notification: RuntimeNotification,
+  validateTranscriptEvents: ValidateDesktopTranscriptEvents,
+): Promise<boolean> {
+  const sessionId = notification.scope.sessionId;
+  const runId = notification.scope.runId;
+  const payload = isJsonRecord(notification.payload) ? notification.payload : undefined;
+  const run = payload && isJsonRecord(payload["run"]) ? payload["run"] : undefined;
+  if (
+    !sessionId ||
+    !runId ||
+    !run ||
+    run["runId"] !== runId ||
+    run["sessionId"] !== sessionId ||
+    !isRuntimeRunStatus(run["status"]) ||
+    typeof run["startedAt"] !== "number" ||
+    !Number.isFinite(run["startedAt"]) ||
+    !Number.isSafeInteger(run["version"])
+  ) {
+    return false;
+  }
+  return persistTranscriptEntry(
+    session,
+    {
+      sourceEventId: notification.eventId,
+      entryId: `run:${runId}:${run["version"]}:${notification.topic}`,
+      createdAt: notification.at,
+      entry: {
+        kind: "run-boundary",
+        runId,
+        status: run["status"],
+        startedAt: run["startedAt"],
+        ...(typeof run["finishedAt"] === "number" ? { finishedAt: run["finishedAt"] } : {}),
+        ...(typeof run["error"] === "string" && run["error"].trim()
+          ? { error: run["error"].trim() }
+          : {}),
+      },
+    },
+    validateTranscriptEvents,
+  );
+}
+
+async function persistTimelineEvent(
+  session: DesktopTranscriptSessionPort,
+  notification: RuntimeNotification,
+  validateTranscriptEvents: ValidateDesktopTranscriptEvents,
+): Promise<boolean> {
+  const sessionId = notification.scope.sessionId;
+  const runId = notification.scope.runId;
+  const payload = isJsonRecord(notification.payload) ? notification.payload : undefined;
+  const item = payload && isJsonRecord(payload["item"]) ? payload["item"] : undefined;
+  const eventType = item && typeof item["eventType"] === "string" ? item["eventType"] : undefined;
+  const data = item && isJsonRecord(item["data"]) ? item["data"] : undefined;
+  if (!sessionId || !runId || !eventType || !data) return false;
+
+  if (eventType === "tool.started") {
+    const name = optionalNonEmptyText(data["toolName"]);
+    const args = typeof data["args"] === "string" ? data["args"] : "";
+    if (!name) return false;
+    // AgentEngine persisted this structured start atomically before emitting the
+    // live timeline callback. Desktop must not create a second durable projection.
+    if (isJsonRecord(data["canonicalTranscriptStart"])) return false;
+    if (isPlanTimelineTool(name)) {
+      const detail = safePlanDetail(args);
+      return persistTranscriptEntry(
+        session,
+        {
+          sourceEventId: notification.eventId,
+          entryId: runtimeTranscriptId("plan", runId, notification.eventId),
+          createdAt: notification.at,
+          entry: {
+            kind: "plan",
+            title: planTimelineTitle(name),
+            ...(detail ? { detail } : {}),
+            state: "active",
+          },
+        },
+        validateTranscriptEvents,
+      );
+    }
+    const providerCallId = optionalNonEmptyText(data["providerCallId"]);
+    if (!providerCallId) return false;
+    return persistTranscriptEvent(
+      session,
+      {
+        sourceEventId: notification.eventId,
+        create: (_snapshot, sequence, eventId) => ({
+          eventId,
+          sequence,
+          createdAt: notification.at,
+          type: "tool.started",
+          entryId: runtimeTranscriptId("tool-entry", runId, notification.eventId),
+          toolCallId: runtimeTranscriptId("tool-call", runId, notification.eventId),
+          providerCallId,
+          name,
+          args,
+        }),
+      },
+      validateTranscriptEvents,
+    );
+  }
+
+  // Completion and raw output are already derived from canonical durable facts.
+  if (eventType === "tool.completed" || eventType === "tool.output") return false;
+
+  if (eventType === "subagent.activity") {
+    const activity = runtimeSubagentActivity(data);
+    if (!activity || !isTerminalSubagentActivityStatus(activity.activity.status)) return false;
+    return persistTranscriptEvent(
+      session,
+      {
+        sourceEventId: notification.eventId,
+        create: (_snapshot, sequence, eventId) => ({
+          eventId,
+          sequence,
+          createdAt: notification.at,
+          type: "subagent.activity.updated",
+          entryId: runtimeTranscriptId("subagent", runId, activity.activityId),
+          activityId: activity.activityId,
+          activity: activity.activity,
+        }),
+      },
+      validateTranscriptEvents,
+    );
+  }
+
+  return false;
+}
+
+async function persistApprovalRequested(
+  session: DesktopTranscriptSessionPort,
+  notification: RuntimeNotification,
+  validateTranscriptEvents: ValidateDesktopTranscriptEvents,
+): Promise<boolean> {
+  const sessionId = notification.scope.sessionId;
+  const runId = notification.scope.runId;
+  const payload = isJsonRecord(notification.payload) ? notification.payload : undefined;
+  const approval = payload ? parseApprovalRequestedPayload(payload) : undefined;
+  if (!sessionId || !runId || !approval || approval.runId !== runId) return false;
+  return persistTranscriptEntry(
+    session,
+    {
+      sourceEventId: notification.eventId,
+      entryId: runtimeTranscriptId("approval-requested", approval.approvalId, notification.eventId),
+      createdAt: notification.at,
+      entry: {
+        kind: "approval",
+        title: approval.title,
+        detail: approval.detail,
+        state: "waiting",
+        data:
+          approval.kind === "tool"
+            ? compactInteractionData({
+                approvalId: approval.approvalId,
+                runId,
+                kind: approval.kind,
+                title: approval.title,
+                detail: approval.detail,
+                risk: approval.risk,
+                toolName: approval.toolName,
+                args: approval.args,
+                providerCallId: approval.providerCallId,
+                command: approval.command,
+                diff: approval.diff,
+                sessionScope: approval.sessionScope,
+              })
+            : compactInteractionData({
+                approvalId: approval.approvalId,
+                runId,
+                kind: approval.kind,
+                title: approval.title,
+                detail: approval.detail,
+                risk: approval.risk,
+                planId: approval.planId,
+                expectedRevision: approval.expectedRevision,
+                expectedSessionSequence: approval.expectedSessionSequence,
+                controlEpoch: approval.controlEpoch,
+                operationId: approval.operationId,
+              }),
+      },
+    },
+    validateTranscriptEvents,
+  );
+}
+
+async function persistApprovalResolved(
+  session: DesktopTranscriptSessionPort,
+  notification: RuntimeNotification,
+  validateTranscriptEvents: ValidateDesktopTranscriptEvents,
+): Promise<boolean> {
+  const sessionId = notification.scope.sessionId;
+  const payload = isJsonRecord(notification.payload) ? notification.payload : undefined;
+  const approvalId = payload && optionalNonEmptyText(payload["approvalId"]);
+  const decision = payload && optionalNonEmptyText(payload["decision"]);
+  if (!sessionId || !approvalId || !decision) return false;
+  return persistTranscriptEntry(
+    session,
+    {
+      sourceEventId: notification.eventId,
+      entryId: runtimeTranscriptId("approval-resolved", approvalId, notification.eventId),
+      createdAt: notification.at,
+      entry: {
+        kind: "approval",
+        title: decision === "deny" ? "Approval denied" : "Approval granted",
+        state: decision,
+        data: compactInteractionData({ approvalId, runId: notification.scope.runId, decision }),
+      },
+    },
+    validateTranscriptEvents,
+  );
+}
+
+async function persistPromptRequested(
+  session: DesktopTranscriptSessionPort,
+  notification: RuntimeNotification,
+  validateTranscriptEvents: ValidateDesktopTranscriptEvents,
+): Promise<boolean> {
+  const sessionId = notification.scope.sessionId;
+  const payload = isJsonRecord(notification.payload) ? notification.payload : undefined;
+  const promptId = payload && optionalNonEmptyText(payload["promptId"]);
+  const prompt = payload && isJsonRecord(payload["prompt"]) ? payload["prompt"] : undefined;
+  if (!sessionId || !promptId || !prompt) return false;
+  const question = optionalNonEmptyText(prompt["question"]) ?? "Pico needs your input";
+  const header = optionalNonEmptyText(prompt["header"]);
+  return persistTranscriptEntry(
+    session,
+    {
+      sourceEventId: notification.eventId,
+      entryId: runtimeTranscriptId("prompt-requested", promptId, notification.eventId),
+      createdAt: notification.at,
+      entry: {
+        kind: "prompt",
+        title: header ?? question,
+        ...(header ? { detail: question } : {}),
+        state: "waiting",
+        data: compactInteractionData({
+          promptId,
+          runId: notification.scope.runId,
+          options: prompt["options"],
+        }),
+      },
+    },
+    validateTranscriptEvents,
+  );
+}
+
+async function persistPromptResolved(
+  session: DesktopTranscriptSessionPort,
+  notification: RuntimeNotification,
+  validateTranscriptEvents: ValidateDesktopTranscriptEvents,
+): Promise<boolean> {
+  const sessionId = notification.scope.sessionId;
+  const payload = isJsonRecord(notification.payload) ? notification.payload : undefined;
+  const promptId = payload && optionalNonEmptyText(payload["promptId"]);
+  if (!sessionId || !promptId) return false;
+  return persistTranscriptEntry(
+    session,
+    {
+      sourceEventId: notification.eventId,
+      entryId: runtimeTranscriptId("prompt-resolved", promptId, notification.eventId),
+      createdAt: notification.at,
+      entry: {
+        kind: "prompt",
+        title: "Question answered",
+        state: "answered",
+        data: compactInteractionData({ promptId, runId: notification.scope.runId }),
+      },
+    },
+    validateTranscriptEvents,
+  );
+}
+
+async function persistChangesEvent(
+  session: DesktopTranscriptSessionPort,
+  notification: RuntimeNotification,
+  validateTranscriptEvents: ValidateDesktopTranscriptEvents,
+): Promise<boolean> {
+  const sessionId = notification.scope.sessionId;
+  const payload = isJsonRecord(notification.payload) ? notification.payload : undefined;
+  const runId = (payload && optionalNonEmptyText(payload["runId"])) ?? notification.scope.runId;
+  const fingerprint = payload && optionalNonEmptyText(payload["fingerprint"]);
+  if (!sessionId || !runId || !fingerprint) return false;
+  const applied = notification.topic === "changes.applied";
+  return persistTranscriptEntry(
+    session,
+    {
+      sourceEventId: notification.eventId,
+      entryId: runtimeTranscriptId(
+        applied ? "changes-applied" : "changes-updated",
+        runId,
+        notification.eventId,
+      ),
+      createdAt: notification.at,
+      entry: {
+        kind: "changes",
+        title: applied ? "Changes applied" : "Changes updated",
+        state: applied ? "applied" : "ready",
+        data: { runId, fingerprint },
+      },
+    },
+    validateTranscriptEvents,
+  );
+}
+
+function persistTranscriptEntry(
+  session: DesktopTranscriptSessionPort,
+  input: {
+    readonly sourceEventId: string;
+    readonly entryId: string;
+    readonly createdAt: number;
+    readonly entry: TranscriptEntryData;
+  },
+  validateTranscriptEvents: ValidateDesktopTranscriptEvents,
+): Promise<boolean> {
+  return persistTranscriptEvent(
+    session,
+    {
+      sourceEventId: input.sourceEventId,
+      create: (snapshot, sequence, eventId) => {
+        if (
+          snapshot.transcriptEvents.some(
+            (event) => event.type === "entry.appended" && event.entryId === input.entryId,
+          )
+        ) {
+          return undefined;
+        }
+        return {
+          eventId,
+          sequence,
+          createdAt: input.createdAt,
+          type: "entry.appended",
+          entryId: input.entryId,
+          entry: input.entry,
+        };
+      },
+    },
+    validateTranscriptEvents,
+  );
+}
+
+async function persistTranscriptEvent(
+  session: DesktopTranscriptSessionPort,
+  input: {
+    readonly sourceEventId: string;
+    readonly create: (
+      snapshot: DesktopTranscriptHydrationSnapshot,
+      sequence: number,
+      eventId: string,
+    ) => DurableTranscriptEvent | undefined;
+  },
+  validateTranscriptEvents: ValidateDesktopTranscriptEvents,
+): Promise<boolean> {
+  const snapshot = await session.readHydrationSnapshot();
+  const eventId = `runtime:${input.sourceEventId}`;
+  if (snapshot.transcriptEvents.some((event) => event.eventId === eventId)) return false;
+  const sequence = (snapshot.transcriptEvents.at(-1)?.sequence ?? 0) + 1;
+  const event = input.create(snapshot, sequence, eventId);
+  if (!event) return false;
+  validateTranscriptEvents([...snapshot.transcriptEvents, event]);
+  await session.recordTranscriptEvent(event, { eventId: `transcript:${input.sourceEventId}` });
+  return true;
+}
+
+function runtimeTranscriptId(prefix: string, ...parts: readonly string[]): string {
+  const digest = createHash("sha256").update(parts.join("\0")).digest("hex").slice(0, 24);
+  return `${prefix}:${digest}`;
+}
+
+function optionalNonEmptyText(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function compactInteractionData(
+  input: Readonly<Record<string, unknown>>,
+): Readonly<Record<string, JsonValue>> {
+  return Object.fromEntries(
+    Object.entries(input).filter((entry): entry is [string, JsonValue] => isJsonValue(entry[1])),
+  );
+}
+
+function isPlanTimelineTool(name: string): boolean {
+  return name === "todo" || name === "update_plan" || name === "cancel_plan";
+}
+
+function planTimelineTitle(name: string): string {
+  if (name === "cancel_plan") return "Plan cancelled";
+  return name === "todo" ? "Plan updated" : "Plan";
+}
+
+function safePlanDetail(args: string): string | undefined {
+  if (!args.trim()) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(args);
+    if (isJsonRecord(parsed) && Array.isArray(parsed["plan"])) {
+      const lines = parsed["plan"].flatMap((value) => {
+        if (!isJsonRecord(value)) return [];
+        const step = optionalNonEmptyText(value["step"]);
+        if (!step) return [];
+        const status = optionalNonEmptyText(value["status"]);
+        return [`${status ? `[${status}] ` : ""}${step}`];
+      });
+      if (lines.length > 0) return lines.join("\n").slice(0, 16_000);
+    }
+    if (isJsonRecord(parsed)) {
+      const action = optionalNonEmptyText(parsed["action"]);
+      const content = optionalNonEmptyText(parsed["content"]);
+      if (action || content) return [action, content].filter(Boolean).join(": ").slice(0, 16_000);
+    }
+  } catch {
+    // Invalid model arguments are still useful as a bounded diagnostic summary.
+  }
+  return args.slice(0, 16_000);
+}
+
+function runtimeSubagentActivity(data: JsonObject):
+  | {
+      readonly activityId: string;
+      readonly activity: Omit<SubagentActivityEvent, "activityId">;
+    }
+  | undefined {
+  const activityId = optionalNonEmptyText(data["activityId"]);
+  const task = optionalNonEmptyText(data["task"]);
+  const status = data["status"];
+  const mode = data["mode"];
+  const completionPolicy = data["completionPolicy"];
+  if (
+    !activityId ||
+    !task ||
+    !isSubagentActivityStatus(status) ||
+    !isOneOf(mode, ["explore", "worker"]) ||
+    !isOneOf(completionPolicy, ["required", "optional", "detached"])
+  ) {
+    return undefined;
+  }
+  const agentName = optionalNonEmptyText(data["agentName"]);
+  const currentAction = optionalNonEmptyText(data["currentAction"]);
+  const summary = optionalNonEmptyText(data["summary"]);
+  const requestedModelRoute = optionalNonEmptyText(data["requestedModelRoute"]);
+  const resolvedModelRoute = optionalNonEmptyText(data["resolvedModelRoute"]);
+  const thinkingEffort = optionalNonEmptyText(data["thinkingEffort"]);
+  const activity: Omit<SubagentActivityEvent, "activityId"> = {
+    task,
+    status,
+    mode,
+    completionPolicy,
+    ...(optionalNonEmptyText(data["childSessionId"])
+      ? { childSessionId: optionalNonEmptyText(data["childSessionId"])! }
+      : {}),
+    ...(optionalNonEmptyText(data["childWorkspacePath"])
+      ? { childWorkspacePath: optionalNonEmptyText(data["childWorkspacePath"])! }
+      : {}),
+    ...(optionalNonEmptyText(data["toolCallId"])
+      ? { toolCallId: optionalNonEmptyText(data["toolCallId"])! }
+      : {}),
+    ...(typeof data["durationMs"] === "number" &&
+    Number.isFinite(data["durationMs"]) &&
+    data["durationMs"] >= 0
+      ? { durationMs: data["durationMs"] }
+      : {}),
+    ...(agentName ? { agentName } : {}),
+    ...(currentAction ? { currentAction } : {}),
+    ...(summary ? { summary } : {}),
+    ...(requestedModelRoute ? { requestedModelRoute } : {}),
+    ...(resolvedModelRoute ? { resolvedModelRoute } : {}),
+    ...(thinkingEffort ? { thinkingEffort } : {}),
+    ...(isOneOf(data["modelSelectionSource"], ["ephemeral", "profile", "parent"])
+      ? { modelSelectionSource: data["modelSelectionSource"] }
+      : {}),
+  };
+  return { activityId, activity };
+}
+
+function isSubagentActivityStatus(value: unknown): value is SubagentActivityEvent["status"] {
+  return isOneOf(value, [
+    "queued",
+    "running",
+    "completed",
+    "partial",
+    "failed",
+    "timed_out",
+    "cancelled",
+  ]);
+}
+
+function isTerminalSubagentActivityStatus(value: SubagentActivityEvent["status"]): boolean {
+  return (
+    value === "completed" ||
+    value === "partial" ||
+    value === "failed" ||
+    value === "timed_out" ||
+    value === "cancelled"
+  );
+}
+
+function isRuntimeRunStatus(
+  value: unknown,
+): value is Extract<TranscriptEntryData, { kind: "run-boundary" }>["status"] {
+  return isOneOf(value, [
+    "queued",
+    "running",
+    "pause_requested",
+    "paused",
+    "cancelling",
+    "cancelled",
+    "failed",
+    "succeeded",
+  ]);
+}
+
+function isOneOf<const Values extends readonly unknown[]>(
+  value: unknown,
+  values: Values,
+): value is Values[number] {
+  return values.includes(value);
+}
+
+function isJsonRecord(value: unknown): value is JsonObject {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}

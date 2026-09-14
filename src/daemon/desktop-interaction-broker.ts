@@ -9,7 +9,7 @@ import {
   type AskUserAnswer,
   type AskUserHandlerEvent,
   type AskUserRequestId,
-} from "../tools/ask-user.js";
+} from "@pico/pico-host/ask-user-tool";
 import type {
   DesktopInteractionRecord,
   DesktopInteractionResolution,

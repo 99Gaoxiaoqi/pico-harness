@@ -17,7 +17,7 @@ import type { AgentGraphRunLaunchState } from "../../../src/agent-graph/runtime-
 import {
   agentGraphInputRuntimeEventId,
   inspectAgentGraphExactRun,
-} from "../../../src/runtime/agent-graph-exact-run-port.js";
+} from "@pico/runtime/agent-graph-exact-run-inspection";
 import type { RuntimeEvent } from "../../../src/storage/runtime-event.js";
 import type {
   AgentGraphActivationClaimRecord,
@@ -27,7 +27,7 @@ import type {
 } from "../../../src/storage/sqlite/agent-graph-store-types.js";
 import type { CommitAgentOutputInput } from "../../../src/tools/agent-output-tool.js";
 import type { SessionManager } from "../../../src/engine/session-manager.js";
-import type { AgentGraphResourceAuthorityPort } from "../../../src/runtime/agent-graph-resource-authority.js";
+import type { AgentGraphResourceAuthorityPort } from "@pico/core/agent-graph-resource-contracts";
 
 const CLAIM: AgentGraphActivationClaimRecord = {
   claimId: "claim-1",

@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 
 import { createBuiltinAgentGraphOperatorProfileCatalog } from "../../../src/agent-graph/operator-profile-catalog.js";
 import type { AgentGraphProfileSnapshot } from "../../../src/agent-graph/core/contracts.js";
-import { AgentGraphWorkspaceResourceAuthority } from "../../../src/runtime/agent-graph-workspace-resource-authority.js";
+import { AgentGraphWorkspaceResourceAuthority } from "@pico/pico-host/agent-graph-workspace-resource-authority";
 import { SqliteAgentGraphControlStore } from "../../../src/storage/sqlite/sqlite-agent-graph-control-store.js";
 import { Session } from "../../../src/engine/session.js";
 import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";

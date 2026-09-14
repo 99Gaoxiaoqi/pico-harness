@@ -1,9 +1,9 @@
-import type { FileHistorySnapshotSummary } from "../cli/file-history.js";
+import type { FileHistorySnapshotSummary } from "@pico/pico-host/file-history";
 import type {
   FileHistoryChanges,
   FileHistoryDiffStat,
   FileHistoryDiffFileStat,
-} from "../safety/file-history.js";
+} from "@pico/pico-host/file-history-runtime";
 import { createChangesPanelModel, type ChangesPanelModel } from "./changes-panel.js";
 
 /**

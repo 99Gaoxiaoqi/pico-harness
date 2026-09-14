@@ -9,7 +9,7 @@ import {
   SandboxViolationError,
   type SandboxConfig,
   type SandboxProfile,
-} from "./process-sandbox/index.js";
+} from "@pico/pico-host/process-sandbox";
 
 export interface RuntimeProcessSandboxDescriptor {
   readonly profile: SandboxProfile;

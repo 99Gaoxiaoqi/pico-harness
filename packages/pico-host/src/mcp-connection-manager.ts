@@ -1,0 +1,1075 @@
+// McpConnectionManager: MCP server 连接、工具桥接与运行时生命周期编排。
+
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { isAbsolute, resolve } from "node:path";
+import { raceWithDeadlineReject } from "@pico/runtime/deadline";
+import type { ToolExecutionContext } from "./tool-registry-contract.js";
+import {
+  createToolRegistrationOwner,
+  type ToolRegistrationOwner,
+  type ToolRegistry,
+} from "./tool-registry.js";
+import { HttpMcpClient } from "./http-mcp-client.js";
+import { McpToolBridge } from "./mcp-tool.js";
+import { redactSensitiveText } from "@pico/runtime/sensitive-data-redaction";
+import { StdioMcpClient } from "./stdio-mcp-client.js";
+import {
+  assertMcpInputSchema,
+  qualifyMcpToolName,
+  type McpClient,
+  type McpClientDiagnostics,
+  type McpConfig,
+  type McpConnectionStatus,
+  type McpElicitationHandler,
+  type McpPromptGetResult,
+  type McpPromptListResult,
+  type McpResourceListResult,
+  type McpResourceReadResult,
+  type McpServerConfig,
+  type McpTool,
+  type McpToolResult,
+  NOOP_MCP_CLIENT_DIAGNOSTICS,
+} from "./mcp-client-types.js";
+import { parseMcpConfig } from "./mcp-config.js";
+import type { SandboxPolicy } from "./process-sandbox/index.js";
+
+const DEFAULT_CONFIG_RELATIVE = ".pico/mcp.json";
+const DEFAULT_STARTUP_TIMEOUT_MS = 30_000;
+
+interface ServerEntry {
+  name: string;
+  sourceId: string;
+  config: McpServerConfig;
+  status: McpConnectionStatus;
+  client?: McpClient | undefined;
+  closingClient?: McpClient | undefined;
+  tools: McpTool[];
+  toolNames: string[];
+  toolBridges: Map<string, McpToolBridge>;
+  toolOwner?: ToolRegistrationOwner | undefined;
+  error?: string | undefined;
+}
+
+export interface McpServerStatus {
+  readonly name: string;
+  readonly sourceId: string;
+  readonly transport: string;
+  readonly status: McpConnectionStatus;
+  readonly toolCount: number;
+  readonly toolNames: readonly string[];
+  readonly error?: string;
+}
+
+export interface McpStatusSummary {
+  readonly total: number;
+  readonly connected: number;
+  readonly failed: number;
+  readonly disabled: number;
+  readonly pending: number;
+  readonly needsAuth: number;
+  readonly toolCount: number;
+}
+
+export interface McpStatusSnapshot {
+  readonly configPath?: string;
+  readonly configSources?: readonly string[];
+  readonly loadError?: string;
+  readonly servers: readonly McpServerStatus[];
+  readonly summary: McpStatusSummary;
+}
+
+export interface McpConfigSource {
+  /** Stable diagnostic identity, for example project or plugin:formatter. */
+  readonly id: string;
+  readonly path?: string;
+  readonly config?: McpConfig;
+  /** Missing optional files do not turn the whole source set into an error. */
+  readonly optional?: boolean;
+}
+
+/** OAuth 宿主只能返回可安全合并到 transport 的凭据补丁。 */
+export interface McpOAuthCredentials {
+  headers?: Readonly<Record<string, string>>;
+  env?: Readonly<Record<string, string>>;
+}
+
+/** 授权回调收到的是不含现有凭据的 server 描述。 */
+export interface McpOAuthRequest {
+  name: string;
+  transport: McpServerConfig["transport"];
+  url?: string;
+}
+
+export type McpOAuthHandler = (request: McpOAuthRequest) => Promise<McpOAuthCredentials>;
+export type McpStatusListener = (snapshot: McpStatusSnapshot) => void;
+
+export type McpRemoteNetworkOperation =
+  | "initialize_and_list_tools"
+  | "tools/call"
+  | "resources/list"
+  | "resources/read"
+  | "prompts/list"
+  | "prompts/get";
+
+/**
+ * A remote MCP config describes where a server lives; it is not authority to contact it.
+ * The host must admit every physical HTTP/SSE boundary explicitly. The initial operation
+ * covers connect/initialize/tools-list because tool definitions cannot be known offline.
+ */
+export interface McpRemoteNetworkRequest {
+  readonly server: string;
+  readonly transport: "http" | "sse";
+  readonly url: string;
+  readonly operation: McpRemoteNetworkOperation;
+  readonly tool?: string;
+  /** Present for Registry-dispatched MCP tools so the host can consume one-shot authority. */
+  readonly toolCallId?: string;
+  readonly signal?: AbortSignal;
+}
+
+export type McpRemoteNetworkGate = (request: McpRemoteNetworkRequest) => boolean | Promise<boolean>;
+
+export interface McpConnectionManagerOptions {
+  /** stdio 子进程的默认 cwd。 */
+  stdioCwd?: string;
+  /** 由 TUI 宿主实现的 OAuth 交互，manager 不保存中间 token。 */
+  oauthHandler?: McpOAuthHandler;
+  /** 测试/宿主可注入等价 client；仍由 manager 独占其生命周期。 */
+  clientFactory?: (config: McpServerConfig) => McpClient;
+  /** 后台 Job 冻结的配置指纹；校验的字节与随后解析的字节完全相同。 */
+  expectedConfigFingerprint?: string;
+  /** 有完整用户表单 UI 时才注入；无此回调时 client 不声明 elicitation。 */
+  elicitationHandler?: McpElicitationHandler;
+  /** Explicit host precedence for an ordered, already-authorized source assembly. */
+  duplicateServerPolicy?: "reject" | "keep-first";
+  /** stdio MCP 共享的会话策略；策略代次变更后由宿主重建 manager。 */
+  processSandbox?: SandboxPolicy;
+  /**
+   * Host-owned admission for remote HTTP/SSE traffic. Missing means deny. This is
+   * deliberately separate from mcp.json so merely loading config never grants network.
+   */
+  remoteNetworkGate?: McpRemoteNetworkGate;
+  /** Host diagnostics adapter; package defaults to silent operation. */
+  diagnostics?: McpClientDiagnostics;
+}
+
+/**
+ * 连接 manager 与 ToolRegistry 解耦：server 只连一次，每轮新 registry 只重新桥接已发现工具。
+ * 所有修改生命周期的公开操作经同一队列串行，避免 reload/reconnect/close 交叉。
+ */
+export class McpConnectionManager {
+  private readonly processSandboxOverrides = new Map<string, SandboxPolicy>();
+  private readonly entries = new Map<string, ServerEntry>();
+  private readonly listeners = new Set<McpStatusListener>();
+  private registry: ToolRegistry | undefined;
+  private configPath: string | undefined;
+  private configSources: readonly string[] | undefined;
+  private loadError: string | undefined;
+  private lifecycleTail: Promise<void> = Promise.resolve();
+  private reloadPromise: Promise<void> | undefined;
+  private readonly diagnostics: McpClientDiagnostics;
+
+  constructor(
+    registry?: ToolRegistry,
+    private readonly options: McpConnectionManagerOptions = {},
+  ) {
+    this.registry = registry;
+    this.diagnostics = options.diagnostics ?? NOOP_MCP_CLIENT_DIAGNOSTICS;
+  }
+
+  /** 订阅不可变状态快照；订阅时立即推送一次当前状态。 */
+  subscribe(listener: McpStatusListener): () => void {
+    this.listeners.add(listener);
+    try {
+      listener(this.getStatusSnapshot());
+    } catch (err) {
+      this.diagnostics.warn({ err: safeErrorMessage(err) }, `[MCP] 状态订阅者执行失败`);
+    }
+    return () => this.listeners.delete(listener);
+  }
+
+  /** 切换每轮 Agent 的 registry，不重连 server。 */
+  attachRegistry(registry: ToolRegistry): void {
+    if (this.registry === registry) {
+      this.emitSnapshot();
+      return;
+    }
+    this.assertRegistryAttachable(registry);
+    const previousRegistry = this.registry;
+    if (previousRegistry) {
+      for (const entry of this.entries.values()) {
+        this.unregisterEntryTools(entry, previousRegistry);
+      }
+    }
+    this.registry = registry;
+    try {
+      for (const entry of this.entries.values()) this.registerEntryTools(entry);
+    } catch (error) {
+      for (const entry of this.entries.values()) this.unregisterEntryTools(entry, registry);
+      this.registry = previousRegistry;
+      if (previousRegistry) {
+        try {
+          for (const entry of this.entries.values()) this.registerEntryTools(entry);
+        } catch (rollbackError) {
+          this.registry = undefined;
+          this.emitSnapshot();
+          throw new AggregateError(
+            [error, rollbackError],
+            "MCP registry switch and rollback both failed",
+            { cause: rollbackError },
+          );
+        }
+      }
+      this.emitSnapshot();
+      throw error;
+    }
+    this.emitSnapshot();
+  }
+
+  /** 从指定/当前 registry 卸载 MCP 桥接，保留 server 连接与工具定义。 */
+  detachRegistry(registry?: ToolRegistry): void {
+    if (!this.registry || (registry !== undefined && registry !== this.registry)) return;
+    for (const entry of this.entries.values()) this.unregisterEntryTools(entry, this.registry);
+    this.registry = undefined;
+    this.emitSnapshot();
+  }
+
+  async loadConfig(configPath: string): Promise<void> {
+    return this.enqueueLifecycle(async () => {
+      await this.closeEntries();
+      this.entries.clear();
+      this.configSources = undefined;
+      await this.loadConfigInternal(configPath);
+    });
+  }
+
+  /**
+   * Validate the complete replacement before fail-closed teardown of the active generation.
+   * If an external client cannot close, the replacement is not committed and the affected
+   * old entry remains visible as failed with no callable tool bridges.
+   */
+  async replaceSources(sources: readonly McpConfigSource[]): Promise<void> {
+    return this.enqueueLifecycle(async () => {
+      if (this.options.expectedConfigFingerprint !== undefined && sources.length !== 1) {
+        throw new Error("带冻结指纹的后台 MCP 只允许加载一个项目配置源");
+      }
+      const stagedEntries = new Map<string, ServerEntry>();
+      let stagedConfigPath: string | undefined;
+      for (const source of sources) {
+        const staged = await this.readConfigSource(source);
+        if (!staged) continue;
+        if (staged.path) stagedConfigPath = staged.path;
+        this.addValidatedConfigTo(stagedEntries, staged.config, source.id);
+      }
+
+      await this.closeEntries();
+      this.entries.clear();
+      for (const [name, entry] of stagedEntries) this.entries.set(name, entry);
+      this.configPath = stagedConfigPath;
+      this.configSources = Object.freeze(sources.map((source) => source.id));
+      this.loadError = undefined;
+      this.emitSnapshot();
+    });
+  }
+
+  async connectAll(): Promise<void> {
+    return this.enqueueLifecycle(async () => this.connectAllInternal());
+  }
+
+  /** 关闭旧连接并从磁盘重读配置；同时多次 reload 复用同一次执行。 */
+  reload(configPath?: string): Promise<void> {
+    if (this.reloadPromise) return this.reloadPromise;
+    const target = configPath ?? this.configPath ?? DEFAULT_CONFIG_RELATIVE;
+    const running = this.enqueueLifecycle(async () => {
+      await this.closeEntries();
+      this.entries.clear();
+      await this.loadConfigInternal(target);
+      await this.connectAllInternal();
+    });
+    const tracked = running.finally(() => {
+      if (this.reloadPromise === tracked) this.reloadPromise = undefined;
+    });
+    this.reloadPromise = tracked;
+    return tracked;
+  }
+
+  async enable(name: string): Promise<void> {
+    return this.enqueueLifecycle(async () => {
+      const entry = this.requireEntry(name);
+      entry.config = { ...entry.config, enabled: true };
+      if (entry.status === "connected") {
+        this.emitSnapshot();
+        return;
+      }
+      await this.closeEntryClient(entry);
+      this.clearEntryTools(entry);
+      entry.status = "pending";
+      entry.error = undefined;
+      this.emitSnapshot();
+      await this.connectOne(entry);
+    });
+  }
+
+  async disable(name: string): Promise<void> {
+    return this.enqueueLifecycle(async () => {
+      const entry = this.requireEntry(name);
+      entry.config = { ...entry.config, enabled: false };
+      await this.closeEntryClient(entry);
+      this.clearEntryTools(entry);
+      entry.status = "disabled";
+      entry.error = undefined;
+      this.emitSnapshot();
+    });
+  }
+
+  async reconnect(name: string): Promise<void> {
+    return this.enqueueLifecycle(async () => {
+      const entry = this.requireEntry(name);
+      if (entry.config.enabled === false) {
+        throw new Error(`MCP server "${name}" 已禁用，请先 enable`);
+      }
+      await this.closeEntryClient(entry);
+      this.clearEntryTools(entry);
+      entry.status = "pending";
+      entry.error = undefined;
+      this.emitSnapshot();
+      await this.connectOne(entry);
+    });
+  }
+
+  /** 单次 MCP 授权结束后销毁原 stdio 进程，并按当前策略启动新的 server。 */
+  async restartStdioServerForTool(
+    qualifiedToolName: string,
+    oneShotPolicy?: SandboxPolicy,
+  ): Promise<void> {
+    await this.enqueueLifecycle(async () => {
+      const owners = [...this.entries.values()].filter((entry) =>
+        entry.toolNames.some(
+          (toolName) => qualifyMcpToolName(entry.name, toolName) === qualifiedToolName,
+        ),
+      );
+      if (owners.length !== 1) {
+        throw new Error(`无法唯一定位 MCP 工具 "${qualifiedToolName}" 的 server`);
+      }
+      const owner = owners[0]!;
+      if (owner.config.transport !== "stdio") return;
+      if (oneShotPolicy) this.processSandboxOverrides.set(owner.name, oneShotPolicy);
+      else this.processSandboxOverrides.delete(owner.name);
+      const preserveToolBindings = this.canPreserveToolBindings(owner);
+      if (preserveToolBindings) {
+        owner.status = "pending";
+        this.emitSnapshot();
+      }
+      try {
+        await this.closeEntryClient(owner, preserveToolBindings);
+      } catch (error) {
+        if (preserveToolBindings) this.clearEntryTools(owner);
+        throw error;
+      }
+      if (!preserveToolBindings) this.clearEntryTools(owner);
+      owner.status = "pending";
+      owner.error = undefined;
+      this.emitSnapshot();
+      await this.connectOne(owner, preserveToolBindings);
+    });
+  }
+
+  async updateProcessSandbox(policy: SandboxPolicy): Promise<void> {
+    await this.enqueueLifecycle(async () => {
+      if (this.options.processSandbox?.generation === policy.generation) return;
+      this.options.processSandbox = policy;
+      this.processSandboxOverrides.clear();
+      const preservedEntries = new Set<ServerEntry>();
+      for (const entry of this.entries.values()) {
+        const preserveToolBindings = this.canPreserveToolBindings(entry);
+        if (preserveToolBindings) {
+          entry.status = "pending";
+          this.emitSnapshot();
+        }
+        try {
+          await this.closeEntryClient(entry, preserveToolBindings);
+        } catch (error) {
+          if (preserveToolBindings) this.clearEntryTools(entry);
+          throw error;
+        }
+        if (preserveToolBindings) preservedEntries.add(entry);
+        else this.clearEntryTools(entry);
+        entry.status = entry.config.enabled === false ? "disabled" : "pending";
+        entry.error = undefined;
+      }
+      await this.connectAllInternal(preservedEntries);
+    });
+  }
+
+  /** 由宿主完成 OAuth 交互后将凭据补丁合并进内存配置并重连。 */
+  async authenticate(name: string): Promise<void> {
+    return this.enqueueLifecycle(async () => {
+      const entry = this.requireEntry(name);
+      const handler = this.options.oauthHandler;
+      if (!handler) {
+        throw new Error(`MCP server "${name}" 需要授权，但当前宿主未配置 OAuth handler`);
+      }
+      const credentials = await handler({
+        name: entry.name,
+        transport: entry.config.transport,
+        ...(entry.config.url !== undefined ? { url: entry.config.url } : {}),
+      });
+      const nextConfig: McpServerConfig = {
+        ...entry.config,
+        ...(credentials.headers !== undefined
+          ? { headers: { ...entry.config.headers, ...credentials.headers } }
+          : {}),
+        ...(credentials.env !== undefined
+          ? { env: { ...entry.config.env, ...credentials.env } }
+          : {}),
+        enabled: true,
+      };
+      await this.closeEntryClient(entry);
+      entry.config = nextConfig;
+      this.clearEntryTools(entry);
+      entry.status = "pending";
+      entry.error = undefined;
+      this.emitSnapshot();
+      await this.connectOne(entry);
+    });
+  }
+
+  async listResources(name: string, cursor?: string): Promise<McpResourceListResult> {
+    return this.callServer(name, "resources/list", (client) => client.listResources(cursor));
+  }
+
+  async readResource(name: string, uri: string): Promise<McpResourceReadResult> {
+    return this.callServer(name, "resources/read", (client) => client.readResource(uri));
+  }
+
+  async listPrompts(name: string, cursor?: string): Promise<McpPromptListResult> {
+    return this.callServer(name, "prompts/list", (client) => client.listPrompts(cursor));
+  }
+
+  async getPrompt(
+    serverName: string,
+    promptName: string,
+    args?: Record<string, string>,
+  ): Promise<McpPromptGetResult> {
+    return this.callServer(serverName, "prompts/get", (client) =>
+      client.getPrompt(promptName, args),
+    );
+  }
+
+  /**
+   * Hook handler 使用的窄调用面：只允许调用当前已连接且已发现的工具。
+   * 该方法不进入 lifecycle 队列，不会触发 OAuth、重连或配置重载。
+   */
+  async invokeConnectedTool(
+    serverName: string,
+    toolName: string,
+    input: Record<string, unknown>,
+    context?: ToolExecutionContext,
+  ): Promise<McpToolResult> {
+    const entry = this.requireEntry(serverName);
+    if (entry.status !== "connected" || !entry.client) {
+      throw new Error(`MCP server "${serverName}" 未连接(当前状态: ${entry.status})`);
+    }
+    if (!entry.tools.some((tool) => tool.name === toolName)) {
+      throw new Error(`MCP server "${serverName}" 未发现工具 "${toolName}"`);
+    }
+    try {
+      await this.requireRemoteNetworkAccess(entry, "tools/call", context, toolName);
+      return await entry.client.callTool(toolName, input, context);
+    } catch (err) {
+      throw new Error(safeErrorMessage(err), { cause: err });
+    }
+  }
+
+  /** 幂等关闭全部连接，保留配置以便后续 connectAll。 */
+  async closeAll(): Promise<void> {
+    return this.enqueueLifecycle(async () => {
+      await this.closeEntries();
+      this.diagnostics.info(`[MCP] 所有 server 连接已关闭`);
+    });
+  }
+
+  getStatus(): Map<string, McpServerStatus> {
+    const result = new Map<string, McpServerStatus>();
+    for (const entry of this.entries.values()) {
+      result.set(entry.name, freezeServerStatus(entry));
+    }
+    return result;
+  }
+
+  getStatusSnapshot(): McpStatusSnapshot {
+    const servers = Object.freeze([...this.entries.values()].map(freezeServerStatus));
+    const summary = Object.freeze(summarizeServers(servers));
+    return Object.freeze({
+      ...(this.configPath !== undefined ? { configPath: this.configPath } : {}),
+      ...(this.configSources !== undefined ? { configSources: this.configSources } : {}),
+      ...(this.loadError !== undefined ? { loadError: this.loadError } : {}),
+      servers,
+      summary,
+    });
+  }
+
+  getConnectedCount(): number {
+    let count = 0;
+    for (const entry of this.entries.values()) {
+      if (entry.status === "connected") count++;
+    }
+    return count;
+  }
+
+  private async loadConfigInternal(
+    configPath: string,
+    sourceId = "project",
+    optional = false,
+  ): Promise<void> {
+    const baseDir = this.options.stdioCwd ?? process.cwd();
+    const absPath = isAbsolute(configPath) ? configPath : resolve(baseDir, configPath);
+    this.configPath = absPath;
+    this.loadError = undefined;
+    this.emitSnapshot();
+    let content: Buffer;
+    try {
+      content = await readFile(absPath);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") {
+        if (!optional) this.loadError = `配置文件不存在: ${absPath}`;
+        this.emitSnapshot();
+        this.diagnostics.warn({ path: absPath }, `[MCP] 配置文件不存在，跳过 MCP 加载`);
+        return;
+      }
+      this.loadError = redactSensitiveText(
+        `读取 MCP 配置失败: ${absPath}: ${(err as Error).message}`,
+      );
+      this.emitSnapshot();
+      throw new Error(this.loadError, { cause: err });
+    }
+
+    const expectedFingerprint = this.options.expectedConfigFingerprint;
+    if (expectedFingerprint) {
+      const actualFingerprint = createHash("sha256").update(content).digest("hex");
+      if (actualFingerprint !== expectedFingerprint) {
+        this.loadError = "后台 MCP 配置已变化，必须重新确认定时任务";
+        this.emitSnapshot();
+        throw new Error(this.loadError);
+      }
+    }
+
+    let data: unknown;
+    try {
+      data = JSON.parse(content.toString("utf8"));
+    } catch {
+      this.loadError = `MCP 配置不是合法 JSON: ${absPath}`;
+      this.emitSnapshot();
+      throw new Error(this.loadError);
+    }
+
+    try {
+      const config = this.validateConfig(data, absPath);
+      this.addValidatedConfig(config, sourceId);
+    } catch (err) {
+      this.loadError = redactSensitiveText(err instanceof Error ? err.message : String(err));
+      this.emitSnapshot();
+      throw err;
+    }
+    this.emitSnapshot();
+    this.diagnostics.info(
+      { count: this.entries.size },
+      `[MCP] 已加载 ${this.entries.size} 个 server 配置(${absPath})`,
+    );
+  }
+
+  private addValidatedConfig(config: McpConfig | undefined, sourceId: string): void {
+    this.addValidatedConfigTo(this.entries, config, sourceId);
+  }
+
+  private addValidatedConfigTo(
+    target: Map<string, ServerEntry>,
+    config: McpConfig | undefined,
+    sourceId: string,
+  ): void {
+    if (!config) throw new Error(`MCP source ${sourceId} 缺少 config`);
+    const normalized = this.validateConfig(config, sourceId);
+    for (const [name, serverConfig] of Object.entries(normalized.mcpServers)) {
+      const current = target.get(name);
+      if (current) {
+        if (this.options.duplicateServerPolicy === "keep-first") {
+          this.diagnostics.warn(
+            { server: name, keptSourceId: current.sourceId, ignoredSourceId: sourceId },
+            `[MCP] Server 同名，已按宿主来源顺序保留第一项`,
+          );
+          continue;
+        }
+        throw new Error(
+          `MCP server "${name}" 同时来自 ${current.sourceId} 与 ${sourceId}，拒绝静默覆盖`,
+        );
+      }
+      const disabled = serverConfig.enabled === false;
+      target.set(name, {
+        name,
+        sourceId,
+        config: { ...serverConfig, name },
+        status: disabled ? "disabled" : "pending",
+        tools: [],
+        toolNames: [],
+        toolBridges: new Map(),
+      });
+    }
+  }
+
+  private async readConfigSource(
+    source: McpConfigSource,
+  ): Promise<{ readonly config: McpConfig; readonly path?: string } | undefined> {
+    if ((source.path === undefined) === (source.config === undefined)) {
+      throw new Error(`MCP source ${source.id} 必须且只能声明 path 或 config`);
+    }
+    if (source.config !== undefined) return { config: source.config };
+
+    const baseDir = this.options.stdioCwd ?? process.cwd();
+    const absPath = isAbsolute(source.path!) ? source.path! : resolve(baseDir, source.path!);
+    let content: Buffer;
+    try {
+      content = await readFile(absPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT" && source.optional === true) {
+        return undefined;
+      }
+      throw new Error(redactSensitiveText(`读取 MCP 配置失败: ${absPath}`), { cause: error });
+    }
+    const expectedFingerprint = this.options.expectedConfigFingerprint;
+    if (
+      expectedFingerprint !== undefined &&
+      createHash("sha256").update(content).digest("hex") !== expectedFingerprint
+    ) {
+      throw new Error("后台 MCP 配置已变化，必须重新确认定时任务");
+    }
+    let data: unknown;
+    try {
+      data = JSON.parse(content.toString("utf8"));
+    } catch (error) {
+      throw new Error(`MCP 配置不是合法 JSON: ${absPath}`, { cause: error });
+    }
+    return { config: this.validateConfig(data, absPath), path: absPath };
+  }
+
+  private async connectAllInternal(
+    preserveToolBindings: ReadonlySet<ServerEntry> = new Set(),
+  ): Promise<void> {
+    const tasks = [...this.entries.values()]
+      .filter((entry) => entry.status === "pending")
+      .map((entry) => this.connectOne(entry, preserveToolBindings.has(entry)));
+    await Promise.allSettled(tasks);
+    this.emitSnapshot();
+    this.logSummary();
+  }
+
+  private async connectOne(entry: ServerEntry, preserveToolBindings = false): Promise<void> {
+    if (entry.client) {
+      const error = new Error(`MCP server "${entry.name}" 上一客户端尚未成功关闭，拒绝创建新实例`);
+      this.unregisterEntryTools(entry);
+      entry.status = "failed";
+      entry.error = error.message;
+      this.emitSnapshot();
+      throw error;
+    }
+    entry.status = "pending";
+    entry.error = undefined;
+    this.emitSnapshot();
+    let client: McpClient | undefined;
+    try {
+      // Remote discovery necessarily performs initialize + tools/list. It cannot be made
+      // lazy without a trusted cached schema, so require a distinct host admission before
+      // even constructing an injected client (whose factory may itself have side effects).
+      await this.requireRemoteNetworkAccess(entry, "initialize_and_list_tools");
+      const timeoutMs = entry.config.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
+      client = this.createClient(entry.config);
+      entry.client = client;
+      this.attachLifecycle(entry, client);
+      this.emitSnapshot();
+      await raceWithDeadlineReject(
+        client.connect(),
+        timeoutMs,
+        (ms) => new Error(`server "${entry.name}" 启动超时(${ms}ms)`),
+      );
+      const discovered = await raceWithDeadlineReject(
+        client.listTools(),
+        timeoutMs,
+        (ms) => new Error(`server "${entry.name}" 启动超时(${ms}ms)`),
+      );
+      if (entry.client !== client) {
+        await client.close().catch(() => {});
+        return;
+      }
+      const tools = discovered.filter((tool) => {
+        try {
+          assertMcpInputSchema(tool.name, tool.inputSchema);
+          return true;
+        } catch (err) {
+          this.diagnostics.warn(
+            { server: entry.name, tool: tool.name, err: safeErrorMessage(err) },
+            `[MCP] 工具注册失败，已跳过`,
+          );
+          return false;
+        }
+      });
+      if (preserveToolBindings) {
+        this.rebindEntryTools(entry, tools);
+      } else {
+        entry.tools = tools;
+        entry.toolNames = tools.map((tool) => tool.name);
+      }
+      entry.status = "connected";
+      if (!preserveToolBindings) this.registerEntryTools(entry);
+      this.emitSnapshot();
+      this.diagnostics.info(
+        { server: entry.name, tools: entry.tools.length },
+        `[MCP] server "${entry.name}" 连接成功，发现 ${entry.tools.length} 个工具`,
+      );
+    } catch (err) {
+      if (client && entry.client !== client) return;
+      if (client) {
+        try {
+          await this.closeEntryClient(entry);
+        } catch (closeError) {
+          this.diagnostics.error(
+            {
+              server: entry.name,
+              err: safeErrorMessage(err),
+              closeErr: safeErrorMessage(closeError),
+            },
+            `[MCP] server "${entry.name}" 连接失败且旧客户端未能关闭`,
+          );
+          throw closeError;
+        }
+      }
+      this.clearEntryTools(entry);
+      const message = safeErrorMessage(err);
+      entry.status = isAuthenticationError(message) ? "needs_auth" : "failed";
+      entry.error = message;
+      this.emitSnapshot();
+      this.diagnostics.error(
+        { server: entry.name, err: message },
+        `[MCP] server "${entry.name}" 连接失败: ${message}`,
+      );
+    }
+  }
+
+  private async closeEntries(): Promise<void> {
+    const results = await Promise.allSettled(
+      [...this.entries.values()].map(async (entry) => {
+        try {
+          await this.closeEntryClient(entry);
+          entry.status = entry.config.enabled === false ? "disabled" : "pending";
+          entry.error = undefined;
+        } finally {
+          // closeEntryClient unregisters bridges before touching the external client. Keep the
+          // read model consistent even when client.close() itself fails.
+          this.clearEntryTools(entry);
+        }
+      }),
+    );
+    this.emitSnapshot();
+    const failures = results
+      .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+      .map((result) => result.reason);
+    if (failures.length > 0) {
+      throw new AggregateError(failures, `${failures.length} 个 MCP server 未能完成关闭`);
+    }
+  }
+
+  private async closeEntryClient(entry: ServerEntry, preserveToolBindings = false): Promise<void> {
+    const client = entry.client;
+    if (!client) return;
+    if (!preserveToolBindings) this.unregisterEntryTools(entry);
+    entry.closingClient = client;
+    try {
+      await client.close();
+      if (entry.client === client) entry.client = undefined;
+    } catch (err) {
+      const closeError = new Error(safeErrorMessage(err), { cause: err });
+      if (entry.client === client) {
+        entry.status = "failed";
+        entry.error = closeError.message;
+        this.emitSnapshot();
+      }
+      throw closeError;
+    } finally {
+      if (entry.closingClient === client) entry.closingClient = undefined;
+    }
+  }
+
+  private clearEntryTools(entry: ServerEntry): void {
+    this.unregisterEntryTools(entry);
+    entry.tools = [];
+    entry.toolNames = [];
+    entry.toolBridges.clear();
+  }
+
+  private assertRegistryAttachable(registry: ToolRegistry): void {
+    const seen = new Set<string>();
+    for (const entry of this.entries.values()) {
+      if (!entry.client || entry.status !== "connected") continue;
+      for (const toolName of entry.toolNames) {
+        const qualifiedName = qualifyMcpToolName(entry.name, toolName);
+        if (seen.has(qualifiedName)) {
+          throw new Error(`MCP registry switch contains duplicate tool '${qualifiedName}'`);
+        }
+        seen.add(qualifiedName);
+        const existing = registry.getTool(qualifiedName);
+        if (!existing) continue;
+        const owner = registry.getToolOwner(qualifiedName);
+        const ownerLabel = owner ? `${owner.kind}:${owner.id}` : "an existing host tool";
+        throw new Error(`Tool '${qualifiedName}' conflicts with ${ownerLabel}`);
+      }
+    }
+  }
+
+  private registerEntryTools(entry: ServerEntry): void {
+    const registry = this.registry;
+    const client = entry.client;
+    if (!registry || !client || entry.status !== "connected") return;
+    const owner = createToolRegistrationOwner("mcp", entry.name);
+    entry.toolOwner = owner;
+    for (const tool of entry.tools) {
+      const bridge =
+        entry.toolBridges.get(tool.name) ??
+        new McpToolBridge(
+          () => (entry.status === "connected" ? entry.client : undefined),
+          entry.name,
+          tool,
+          async (context) =>
+            await this.requireRemoteNetworkAccess(entry, "tools/call", context, tool.name),
+          this.diagnostics,
+        );
+      bridge.rebindCompatibleTool(tool);
+      entry.toolBridges.set(tool.name, bridge);
+      registry.registerOwned(bridge, owner);
+    }
+  }
+
+  private canPreserveToolBindings(entry: ServerEntry): boolean {
+    return (
+      this.registry !== undefined &&
+      entry.status === "connected" &&
+      entry.toolOwner !== undefined &&
+      entry.toolNames.length > 0 &&
+      entry.toolNames.length === entry.toolBridges.size &&
+      entry.toolNames.every((name) => entry.toolBridges.has(name))
+    );
+  }
+
+  private rebindEntryTools(entry: ServerEntry, tools: readonly McpTool[]): void {
+    if (tools.length !== entry.toolBridges.size) {
+      throw new Error(`MCP server "${entry.name}" changed its tool set during policy restart`);
+    }
+    const nextNames = new Set(tools.map((tool) => tool.name));
+    if (nextNames.size !== tools.length) {
+      throw new Error(`MCP server "${entry.name}" returned duplicate tools during policy restart`);
+    }
+    for (const [name, bridge] of entry.toolBridges) {
+      const tool = tools.find((candidate) => candidate.name === name);
+      if (!tool || !bridge.isCompatibleTool(tool)) {
+        throw new Error(`MCP server "${entry.name}" changed tool "${name}" during policy restart`);
+      }
+    }
+    for (const tool of tools) entry.toolBridges.get(tool.name)!.rebindCompatibleTool(tool);
+    entry.tools = [...tools];
+    entry.toolNames = tools.map((tool) => tool.name);
+  }
+
+  private unregisterEntryTools(entry: ServerEntry, registry = this.registry): void {
+    const owner = entry.toolOwner;
+    if (!registry || !owner) return;
+    for (const toolName of entry.toolNames) {
+      registry.unregisterOwned(qualifyMcpToolName(entry.name, toolName), owner);
+    }
+    entry.toolOwner = undefined;
+  }
+
+  private attachLifecycle(entry: ServerEntry, client: McpClient): void {
+    const markFailed = (err?: Error) => {
+      if (entry.client !== client || entry.status !== "connected") return;
+      if (entry.closingClient === client) return;
+      entry.client = undefined;
+      this.clearEntryTools(entry);
+      const message = safeErrorMessage(err ?? new Error(`MCP server "${entry.name}" 连接已关闭`));
+      entry.status = isAuthenticationError(message) ? "needs_auth" : "failed";
+      entry.error = message;
+      this.emitSnapshot();
+      this.diagnostics.warn(
+        { server: entry.name, err: message },
+        `[MCP] server "${entry.name}" 连接断开: ${message}`,
+      );
+    };
+    client.onClose?.(markFailed);
+    client.onError?.(markFailed);
+  }
+
+  private async callServer<T>(
+    name: string,
+    operation: Exclude<McpRemoteNetworkOperation, "initialize_and_list_tools" | "tools/call">,
+    execute: (client: McpClient) => Promise<T>,
+  ): Promise<T> {
+    const entry = this.requireEntry(name);
+    if (entry.status !== "connected" || !entry.client) {
+      throw new Error(`MCP server "${name}" 未连接(当前状态: ${entry.status})`);
+    }
+    try {
+      await this.requireRemoteNetworkAccess(entry, operation);
+      return await execute(entry.client);
+    } catch (err) {
+      // method not found 只影响本次请求，不把整个 server 标记为失败。
+      throw new Error(safeErrorMessage(err), { cause: err });
+    }
+  }
+
+  private async requireRemoteNetworkAccess(
+    entry: ServerEntry,
+    operation: McpRemoteNetworkOperation,
+    context?: ToolExecutionContext,
+    tool?: string,
+  ): Promise<void> {
+    if (entry.config.transport === "stdio") return;
+    context?.signal?.throwIfAborted();
+    const url = entry.config.url;
+    if (!url) throw new Error(`MCP server "${entry.name}" 缺少远程 URL`);
+    const allowed =
+      (await this.options.remoteNetworkGate?.({
+        server: entry.name,
+        transport: entry.config.transport,
+        url,
+        operation,
+        ...(tool !== undefined ? { tool } : {}),
+        ...(context?.toolCallId !== undefined ? { toolCallId: context.toolCallId } : {}),
+        ...(context?.signal !== undefined ? { signal: context.signal } : {}),
+      })) === true;
+    context?.signal?.throwIfAborted();
+    if (!allowed) {
+      throw new Error(`MCP server "${entry.name}" 的远程网络操作 ${operation} 缺少宿主显式授权`);
+    }
+  }
+
+  private requireEntry(name: string): ServerEntry {
+    const entry = this.entries.get(name);
+    if (!entry) throw new Error(`未知 MCP server "${name}"`);
+    return entry;
+  }
+
+  private createClient(config: McpServerConfig): McpClient {
+    const resolvedConfig =
+      config.transport === "stdio" &&
+      config.cwd === undefined &&
+      this.options.stdioCwd !== undefined
+        ? { ...config, cwd: this.options.stdioCwd }
+        : config;
+    if (this.options.clientFactory) return this.options.clientFactory(resolvedConfig);
+
+    switch (resolvedConfig.transport) {
+      case "stdio": {
+        const processSandbox =
+          this.processSandboxOverrides.get(resolvedConfig.name) ?? this.options.processSandbox;
+        return new StdioMcpClient(resolvedConfig, {
+          ...(this.options.elicitationHandler
+            ? { elicitationHandler: this.options.elicitationHandler }
+            : {}),
+          ...(processSandbox ? { processSandbox } : {}),
+          diagnostics: this.diagnostics,
+        });
+      }
+      case "http":
+        return new HttpMcpClient(resolvedConfig, {
+          ...(this.options.elicitationHandler
+            ? { elicitationHandler: this.options.elicitationHandler }
+            : {}),
+          diagnostics: this.diagnostics,
+        });
+      case "sse":
+        // legacy SSE 没有 2025-06-18 双向请求协商，不声明 elicitation。
+        return new HttpMcpClient(resolvedConfig, { diagnostics: this.diagnostics });
+    }
+  }
+
+  private enqueueLifecycle<T>(operation: () => Promise<T>): Promise<T> {
+    const running = this.lifecycleTail.then(operation, operation);
+    this.lifecycleTail = running.then(
+      () => undefined,
+      () => undefined,
+    );
+    return running;
+  }
+
+  private validateConfig(data: unknown, source: string): McpConfig {
+    return parseMcpConfig(data, source);
+  }
+
+  private emitSnapshot(): void {
+    if (this.listeners.size === 0) return;
+    const snapshot = this.getStatusSnapshot();
+    for (const listener of this.listeners) {
+      try {
+        listener(snapshot);
+      } catch (err) {
+        this.diagnostics.warn({ err: safeErrorMessage(err) }, `[MCP] 状态订阅者执行失败`);
+      }
+    }
+  }
+
+  private logSummary(): void {
+    const summary = this.getStatusSnapshot().summary;
+    this.diagnostics.info(
+      { ...summary },
+      `[MCP] 连接完成: ${summary.connected}/${summary.total} 成功, ${summary.failed} 失败, ${summary.needsAuth} 待授权, ${summary.disabled} 禁用`,
+    );
+  }
+}
+
+function freezeServerStatus(entry: ServerEntry): McpServerStatus {
+  return Object.freeze({
+    name: entry.name,
+    sourceId: entry.sourceId,
+    transport: entry.config.transport,
+    status: entry.status,
+    toolCount: entry.toolNames.length,
+    toolNames: Object.freeze([...entry.toolNames]),
+    ...(entry.error !== undefined ? { error: redactSensitiveText(entry.error) } : {}),
+  });
+}
+
+function summarizeServers(servers: readonly McpServerStatus[]): McpStatusSummary {
+  let connected = 0;
+  let failed = 0;
+  let disabled = 0;
+  let pending = 0;
+  let needsAuth = 0;
+  let toolCount = 0;
+  for (const server of servers) {
+    if (server.status === "connected") connected++;
+    else if (server.status === "failed") failed++;
+    else if (server.status === "disabled") disabled++;
+    else if (server.status === "pending") pending++;
+    else if (server.status === "needs_auth") needsAuth++;
+    toolCount += server.toolCount;
+  }
+  return {
+    total: servers.length,
+    connected,
+    failed,
+    disabled,
+    pending,
+    needsAuth,
+    toolCount,
+  };
+}
+
+function safeErrorMessage(error: unknown): string {
+  return redactSensitiveText(error instanceof Error ? error.message : String(error));
+}
+
+function isAuthenticationError(message: string): boolean {
+  return /(?:\b401\b|\b403\b|unauthori[sz]ed|forbidden|needs?[ _-]?auth|authentication required)/i.test(
+    message,
+  );
+}
+
+export { DEFAULT_CONFIG_RELATIVE };

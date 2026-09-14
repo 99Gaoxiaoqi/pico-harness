@@ -1,532 +1,79 @@
-import { randomUUID } from "node:crypto";
-import { readdir } from "node:fs/promises";
-import { join } from "node:path";
-import { AgentEngine } from "../engine/loop.js";
+import {
+  DEFAULT_CONTINUATION_TERMINAL_MIN_AGE_MS,
+  RuntimeRunExecutor as PicoHostRuntimeRunExecutor,
+  emitRuntimeLifecycleEvent as emitPicoHostRuntimeLifecycleEvent,
+  type RuntimeRunExecutorInput as PicoHostRuntimeRunExecutorInput,
+} from "@pico/pico-host/runtime-run-executor";
+import type { AgentEngine } from "../engine/loop.js";
 import type { Session } from "../engine/session.js";
-import { loadImage } from "../input/prepare-prompt.js";
-import type { HookOutput } from "../hooks/types.js";
-import type { ImagePart, Message } from "../schema/message.js";
-import { resolvePicoPaths } from "../paths/pico-paths.js";
-import type { CliSessionSelection } from "../cli/session-resolver.js";
-import { logger } from "../observability/logger.js";
-import { RuntimeRun } from "./runtime-run.js";
-import type { RuntimeRunContinuationOf } from "../engine/session-runtime-event.js";
-import type { PlanHandoffController } from "../engine/plan-handoff.js";
-import type { PlanCoordinator } from "../plan/coordinator.js";
 import type { SessionRuntime } from "./session-runtime.js";
-import { RuntimeEventStoreIntegrityError } from "../storage/runtime-event-store-contracts.js";
-import type {
-  RunAgentCliResult,
-  RuntimeRunOptions,
-  RuntimeLifecycleEvent,
-  RunAgentUsage,
-} from "./runtime-contract.js";
+import { loadImage } from "../input/prepare-prompt.js";
+import { logger } from "../observability/logger.js";
+import type { RuntimeLifecycleEvent } from "@pico/runtime/runtime-contract";
 
-/** 自动锚定的终态新鲜度窗口缺省(审查 F2):跨进程存活保护的等待期。 */
-export const DEFAULT_CONTINUATION_TERMINAL_MIN_AGE_MS = 10 * 60_000;
+export { DEFAULT_CONTINUATION_TERMINAL_MIN_AGE_MS };
+export type {
+  PrestartedRuntimeRun,
+  PrestartedRuntimeUserInput,
+  RuntimePromptHookOutput,
+  RuntimePromptHookPort,
+  RuntimeRunExecutorDiagnostics,
+  RuntimeRunExecutorEventStore,
+  RuntimeRunExecutorSession,
+} from "@pico/pico-host/runtime-run-executor";
 
-/**
- * The narrow, already-assembled boundary for one foreground/background Agent turn.
- *
- * Resource ownership deliberately stays with AgentRuntime: this executor never
- * creates or closes SessionRuntime, MCP, plugin snapshots, stores, or providers.
- */
-export interface RuntimeRunExecutorInput {
-  readonly atomicMemoryCompleted?: (runId: string) => Promise<void>;
+/** Concrete Engine compatibility input retained while callers move to Pico Host. */
+export type RuntimeRunExecutorInput = Omit<
+  PicoHostRuntimeRunExecutorInput,
+  "session" | "promptHooks" | "executeModel" | "loadImage" | "diagnostics"
+> & {
   readonly session: Session;
   readonly runtimeState: SessionRuntime;
   readonly engine: AgentEngine;
-  readonly sessionSelection: CliSessionSelection;
-  readonly workDir: string;
-  readonly picoHome: string;
-  readonly prompt: string;
-  readonly resumeExistingSession: boolean;
-  /** Approval/resume is a new durable control instruction even when reusing the user turn. */
-  readonly planExecutionPrompt?: { readonly messageId: string; readonly content: string };
-  readonly presentation?: "internal";
-  readonly agentSwarmAuthorization: RuntimeRun["agentSwarmAuthorization"];
-  /**
-   * Durable H+1 admission already published by a recoverable-task adapter.
-   * RuntimeRun.start reuses this exact fact; it must not create another run.started.
-   */
-  readonly prestartedRun?: PrestartedRuntimeRun;
-  /**
-   * Deterministic input identity for a newly admitted Run. This is required when
-   * a prestarted Run is not resuming an existing user turn, so a crash after the
-   * input commit can attach without appending a duplicate prompt.
-   */
-  readonly prestartedUserInput?: PrestartedRuntimeUserInput;
-  /**
-   * ADR 29 续跑声明(可选):声明本次 run 是某个 interrupted run 的续跑。
-   * startContinuation 已将 claim 与 run.started 原子落盘；三元组仅在内存组装期传递
-   * (与 prestartedRun 互斥:prestarted 事实已定形)。
-   */
-  readonly continuationOf?: RuntimeRunContinuationOf;
-  /**
-   * 自动锚定的终态新鲜度门(审查 F2,毫秒,缺省 10 分钟):interrupted 终态
-   * 距今不足该窗口时不锚定不封口——防跨进程 reconcile 把存活 run 误判补终态
-   * 后被立即 claim 封死(未 claim 的终态 run 保持开放语义,存活方可继续写)。
-   * 测试可传 0 关闭窗口。
-   */
-  readonly continuationTerminalMinAgeMs?: number;
-  /** Assembly must match the committed grant, including a raced continuation admission. */
-  readonly expectedAgentSwarmAuthorization?: RuntimeRunOptions["agentSwarmAuthorization"];
-  readonly traceEnabled: boolean;
-  readonly options: RuntimeRunOptions;
-  readonly signal?: AbortSignal;
-  readonly onEvent?: (event: RuntimeLifecycleEvent) => void;
-  readonly rewindPointSink?: (checkpointId: string) => void;
-  /** Trusted host-owned assertion that must pass before the Runtime Run can complete. */
-  readonly completionGuard?: () => Promise<void> | void;
-  readonly onRunAdmission?: (run: RuntimeRun) => Promise<void> | void;
-  /** Trusted host-owned recovery hook invoked while the failed Runtime Run identity is live. */
-  readonly failureGuard?: (input: {
-    readonly sessionId: string;
-    readonly turnId: string;
-    readonly runId: string;
-    readonly error: unknown;
-  }) => Promise<void> | void;
-  readonly planHandoff?: PlanHandoffController;
-  readonly planCoordinator?: () => PlanCoordinator;
-}
-
-export interface PrestartedRuntimeRun {
-  readonly runId: string;
-  readonly turnId?: string;
-  readonly invocationId: string;
-  readonly runStartedEventId: string;
-  readonly runStartedAt: string;
-  readonly parentRunId?: string;
-  readonly presentation?: "internal";
-  readonly agentSwarmAuthorization: RuntimeRun["agentSwarmAuthorization"];
-}
-
-export interface PrestartedRuntimeUserInput {
-  readonly messageId: string;
-  /** Host-owned control-plane input that remains in model history but not user transcript. */
-  readonly presentation?: "internal";
-}
+};
 
 /**
- * Executes one already-assembled RuntimeRun and returns the public CLI result.
- * It owns no resources and is safe to use from TUI, daemon, or compatibility
- * callers as long as the caller keeps the supplied SessionRuntime alive.
+ * Legacy source adapter. The package implementation only sees narrow Host ports;
+ * concrete Engine, SessionRuntime, image loading and logging stay wired here.
  */
 export class RuntimeRunExecutor {
   constructor(private readonly input: RuntimeRunExecutorInput) {}
 
-  async execute(): Promise<RunAgentCliResult> {
-    const {
+  execute() {
+    const { session, runtimeState, engine, ...input } = this.input;
+    return new PicoHostRuntimeRunExecutor({
+      ...input,
       session,
-      runtimeState,
-      engine,
-      sessionSelection,
-      workDir,
-      prompt: initialPrompt,
-      resumeExistingSession,
-      prestartedRun,
-      prestartedUserInput,
-      options,
-      signal,
-      onEvent,
-      rewindPointSink,
-      planHandoff,
-      planCoordinator,
-    } = this.input;
-    if (prestartedRun) {
-      assertPrestartedRuntimeRun(prestartedRun);
-      if (!resumeExistingSession && !prestartedUserInput) {
-        throw new Error(
-          "A new-turn prestarted RuntimeRun requires a deterministic prestartedUserInput",
-        );
-      }
-    }
-    if (prestartedUserInput) {
-      if (!prestartedRun || resumeExistingSession || !prestartedUserInput.messageId.trim()) {
-        throw new Error(
-          "prestartedUserInput requires a non-resume prestarted RuntimeRun and non-empty messageId",
-        );
-      }
-    }
-    if (this.input.continuationOf) {
-      throw new Error(
-        "RuntimeRunExecutor continuationOf is disabled; continuation must be claimed and started atomically",
-      );
-    }
-    let prompt = initialPrompt;
-
-    const result = await session.serialize(async () => {
-      const runtimeCapability = session.runtimeEventCapability;
-      if (!runtimeCapability) {
-        throw new Error(`RuntimeRunExecutor requires a durable Session: ${session.id}`);
-      }
-      await RuntimeRun.reconcileIncompleteRuns({
-        capability: runtimeCapability,
-        ...(prestartedRun ? { prestartedRunId: prestartedRun.runId } : {}),
-        ...(prestartedUserInput
-          ? { prestartedAllowedEventIds: [`user-message:${prestartedUserInput.messageId}`] }
-          : {}),
-      });
-      if (prestartedRun) await assertPersistedPrestartedRuntimeRun(session, prestartedRun);
-      await RuntimeRun.repairSessionProjection(session, {
-        capability: runtimeCapability,
-      });
-      // reconcile 把崩溃 run 定形为 interrupted 后，store 原子落下 claim
-      // 与 target run.started；prestartedRun 走已有的独立 admission 路径。
-      const automaticContinuation = await this.startAutomaticContinuation(session);
-      // Prestarted admissions must be re-attached byte-for-byte; only inherit host provenance
-      // when this executor is admitting a fresh RuntimeRun.
-      const presentation = prestartedRun ? prestartedRun.presentation : this.input.presentation;
-      const runtimeRun =
-        automaticContinuation ??
-        (await RuntimeRun.start({
-          capability: runtimeCapability,
-          agentSwarmAuthorization: prestartedRun
-            ? prestartedRun.agentSwarmAuthorization
-            : this.input.agentSwarmAuthorization,
-          ...(presentation === "internal"
-            ? {
-                presentation: {
-                  audience: "internal" as const,
-                  source: "agent_graph_control" as const,
-                },
-              }
-            : {}),
-          ...(prestartedRun
-            ? {
-                runId: prestartedRun.runId,
-                ...(prestartedRun.turnId ? { turnId: prestartedRun.turnId } : {}),
-                invocationId: prestartedRun.invocationId,
-                runStartedEventId: prestartedRun.runStartedEventId,
-                ...(prestartedRun.parentRunId ? { parentRunId: prestartedRun.parentRunId } : {}),
-                now: prestartedRunClock(prestartedRun.runStartedAt),
-              }
-            : {}),
-        }));
-      emitRuntimeLifecycleEvent(onEvent, {
-        type: "run.started",
-        sessionId: session.id,
-        workDir,
-        at: Date.now(),
-      });
-      const runResult = await runtimeRun.run(async () => {
-        signal?.throwIfAborted();
-        await this.input.onRunAdmission?.(runtimeRun);
-        if (
-          this.input.expectedAgentSwarmAuthorization !== undefined &&
-          runtimeRun.agentSwarmAuthorization !== this.input.expectedAgentSwarmAuthorization
-        ) {
-          throw new Error(
-            "Run authorization changed during assembly; resume with the committed Run identity",
-          );
-        }
-        if (!resumeExistingSession) {
-          const submittedPrompt = prompt;
-          const submitDecision = await runtimeState.dispatchHook(
+      promptHooks: {
+        submit: (prompt, signal) =>
+          runtimeState.dispatchHook(
             "UserPromptSubmit",
-            { prompt: submittedPrompt },
-            { signal },
-          );
-          if (submitDecision.decision === "deny") {
-            throw new Error(
-              `UserPromptSubmit hook 阻断了输入: ${submitDecision.reason ?? "(无原因)"}`,
-            );
-          }
-          prompt = normalizePrompt(applyPromptHookDecision(submittedPrompt, submitDecision));
-          const expansionDecision = await runtimeState.dispatchHook(
+            { prompt },
+            signal ? { signal } : undefined,
+          ),
+        expand: (prompt, expandedPrompt, signal) =>
+          runtimeState.dispatchHook(
             "UserPromptExpansion",
-            {
-              prompt: options.rewindPrompt ?? submittedPrompt,
-              expandedPrompt: prompt,
-            },
-            { signal },
-          );
-          if (expansionDecision.decision === "deny") {
-            throw new Error(
-              `UserPromptExpansion hook 阻断了输入: ${expansionDecision.reason ?? "(无原因)"}`,
-            );
-          }
-          prompt = normalizePrompt(applyPromptHookDecision(prompt, expansionDecision));
-          const images: ImagePart[] | undefined =
-            options.images ??
-            (options.imagePath ? [loadImage(options.imagePath, workDir)] : undefined);
-          const rewindPointId = prestartedUserInput?.messageId ?? randomUUID();
-          if (!session.fileHistory.snapshots.some(({ messageId }) => messageId === rewindPointId)) {
-            await session.beginRewindPoint({
-              userPrompt: options.rewindPrompt ?? prompt,
-              messageId: rewindPointId,
-              ...(options.rewindTranscriptIndex !== undefined
-                ? { transcriptIndex: options.rewindTranscriptIndex }
-                : {}),
-              ...(options.rewindCollaborationMode !== undefined
-                ? { collaborationMode: options.rewindCollaborationMode }
-                : {}),
-              ...(options.rewindPermissionMode !== undefined
-                ? { permissionMode: options.rewindPermissionMode }
-                : {}),
-            });
-          }
-          rewindPointSink?.(rewindPointId);
-          const userReceipt = await session.commitMessageOnce(`user-message:${rewindPointId}`, {
-            role: "user",
-            content: prompt,
-            ...(prestartedUserInput?.presentation === "internal"
-              ? {
-                  providerData: {
-                    picoKind: "agent_graph_control_input",
-                    picoPresentationAudience: "internal",
-                    picoHiddenFromTranscript: true,
-                  },
-                }
-              : {}),
-            ...(images ? { images } : {}),
-          });
-          await session.bindRewindPointSource(rewindPointId, userReceipt);
-        }
-
-        if (this.input.planExecutionPrompt) {
-          await session.commitMessageOnce(this.input.planExecutionPrompt.messageId, {
-            role: "user",
-            content: this.input.planExecutionPrompt.content,
-            providerData: {
-              picoKind: "plan_execution_control_input",
-              picoPresentationAudience: "internal",
-              picoHiddenFromTranscript: true,
-            },
-          });
-        }
-        try {
-          const messages = await engine.run(session, undefined, undefined, signal);
-          await this.input.completionGuard?.();
-          return {
-            sessionId: session.id,
-            sessionSelection,
-            workDir,
-            finalMessage: findFinalMessage(messages),
-            usage: snapshotUsage(session),
-            messages,
-            ...(this.input.traceEnabled
-              ? { tracePath: await findTracePath(workDir, session.id, this.input.picoHome) }
-              : {}),
-          } satisfies RunAgentCliResult;
-        } catch (error) {
-          await this.input.failureGuard?.({
-            sessionId: runtimeRun.sessionId,
-            turnId: runtimeRun.currentTurnId,
-            runId: runtimeRun.runId,
-            error,
-          });
-          throw error;
-        }
-      }, signal);
-      await this.input.atomicMemoryCompleted?.(runtimeRun.runId);
-      const handoff = planHandoff?.result();
-      if (handoff && planCoordinator) {
-        const projection = await planCoordinator().project();
-        const refreshed = planHandoff!.refreshProjection(projection);
-        if (!refreshed)
-          throw new Error("Submitted plan handoff disappeared before projection refresh");
-        return {
-          ...runResult,
-          handoff: refreshed,
-        };
-      }
-      return runResult;
-    });
-
-    emitRuntimeLifecycleEvent(onEvent, {
-      type: "run.finished",
-      sessionId: session.id,
-      workDir,
-      at: Date.now(),
-    });
-    return result;
+            { prompt, expandedPrompt },
+            signal ? { signal } : undefined,
+          ),
+      },
+      executeModel: (signal) => engine.run(session, undefined, undefined, signal),
+      loadImage,
+      diagnostics: {
+        info: (context, message) => logger.info(context, message),
+        warn: (context, message) => logger.warn(context, message),
+      },
+    }).execute();
   }
-
-  /**
-   * ADR 29 调度接入:最新 interrupted 终态且未被 claim 的 run → 为本次 run
-   * 锚定续跑：store 在单事务内返回已起跑的 target RuntimeRun。
-   * 无候选、候选状态变化或使用 prestartedRun 时返回 undefined，本次
-   * run 以普通身份起跑。
-   *
-   * 新鲜度门(审查 F2):终态事件 at 距今不足 continuationTerminalMinAgeMs
-   * (缺省 10 分钟)时跳过锚定——跨进程 reconcile 可能误判存活 run 补了新鲜
-   * interrupted 终态后不立即 continuation，避免对仍存活调度者过早接管。
-   * run.terminal 本身仍是 immutable tail；代价是真实崩溃后的锚定延迟到
-   * 窗口期后的下一次 run 起跑。
-   */
-  private async startAutomaticContinuation(session: Session): Promise<RuntimeRun | undefined> {
-    if (this.input.continuationOf || this.input.prestartedRun) return undefined;
-    const store = session.runtimeEventStore;
-    if (!store) return undefined;
-    const candidate = await store.findLatestInterruptedUnclaimedRun(session.id);
-    if (!candidate) return undefined;
-    const minAgeMs =
-      this.input.continuationTerminalMinAgeMs ?? DEFAULT_CONTINUATION_TERMINAL_MIN_AGE_MS;
-    const terminalAgeMs = Date.now() - Date.parse(candidate.terminalAt);
-    if (!Number.isFinite(terminalAgeMs) || terminalAgeMs < minAgeMs) {
-      logger.info(
-        { sessionId: session.id, sourceRunId: candidate.runId, terminalAgeMs, minAgeMs },
-        "[Continuation] interrupted 终态过于新鲜,暂不锚定(跨进程存活保护),普通起跑",
-      );
-      return undefined;
-    }
-    const run = await RuntimeRun.startContinuation({
-      capability: session.runtimeEventCapability!,
-      sourceRunId: candidate.runId,
-      // A resumed user turn inherits its original grant; a new input gets a new decision.
-      ...(!this.input.resumeExistingSession
-        ? { agentSwarmAuthorization: this.input.agentSwarmAuthorization }
-        : {}),
-      targetRunId: randomUUID(),
-      ...(this.input.presentation === "internal"
-        ? {
-            presentation: {
-              audience: "internal" as const,
-              source: "agent_graph_control" as const,
-            },
-          }
-        : {}),
-    });
-    if (!run) {
-      logger.info(
-        { sessionId: session.id, sourceRunId: candidate.runId },
-        "[Continuation] interrupted run 未锚定自动续跑(已被续跑或状态变化),普通起跑",
-      );
-      return undefined;
-    }
-    return run;
-  }
-}
-
-function assertPrestartedRuntimeRun(value: PrestartedRuntimeRun): void {
-  for (const [field, candidate] of Object.entries(value)) {
-    if (field === "runStartedAt") continue;
-    if (typeof candidate !== "string" || !candidate.trim()) {
-      throw new Error(`Prestarted RuntimeRun ${field} must not be empty`);
-    }
-  }
-  const startedAt = new Date(value.runStartedAt);
-  if (!Number.isFinite(startedAt.getTime()) || startedAt.toISOString() !== value.runStartedAt) {
-    throw new Error("Prestarted RuntimeRun runStartedAt must be a canonical timestamp");
-  }
-  if (
-    value.agentSwarmAuthorization !== "none" &&
-    value.agentSwarmAuthorization !== "session_mode" &&
-    value.agentSwarmAuthorization !== "turn_override"
-  ) {
-    throw new Error("Prestarted RuntimeRun agentSwarmAuthorization is invalid");
-  }
-}
-
-async function assertPersistedPrestartedRuntimeRun(
-  session: Session,
-  expected: PrestartedRuntimeRun,
-): Promise<void> {
-  const events = await session.runtimeEventStore!.readRun(session.id, expected.runId);
-  const starts = events.filter((event) => event.kind === "run.started");
-  const start = starts[0];
-  if (
-    starts.length !== 1 ||
-    !start ||
-    start.eventId !== expected.runStartedEventId ||
-    start.invocationId !== expected.invocationId ||
-    (expected.turnId !== undefined && start.turnId !== expected.turnId) ||
-    start.at !== expected.runStartedAt ||
-    start.data.agentSwarmAuthorization !== expected.agentSwarmAuthorization
-  ) {
-    throw new RuntimeEventStoreIntegrityError(
-      `Prestarted Runtime run ${expected.runId} does not match its persisted run.started fact`,
-    );
-  }
-}
-
-function prestartedRunClock(runStartedAt: string): () => Date {
-  let startPending = true;
-  return () => {
-    if (startPending) {
-      startPending = false;
-      return new Date(runStartedAt);
-    }
-    return new Date();
-  };
 }
 
 export function emitRuntimeLifecycleEvent(
   sink: RuntimeRunExecutorInput["onEvent"],
   event: RuntimeLifecycleEvent,
 ): void {
-  try {
-    sink?.(event);
-  } catch (error) {
-    // Lifecycle events are observational. A UI/telemetry callback must not leave
-    // the canonical RuntimeRun without a terminal fact or turn success into failure.
-    logger.warn(
-      { error: String(error), lifecycleEvent: event.type, sessionId: event.sessionId },
-      "Runtime lifecycle observer failed",
-    );
-  }
-}
-
-function applyPromptHookDecision(prompt: string, decision: HookOutput): string {
-  let next = prompt;
-  if (typeof decision.modifiedInput === "string") {
-    next = decision.modifiedInput;
-  } else if (
-    typeof decision.modifiedInput === "object" &&
-    decision.modifiedInput !== null &&
-    "prompt" in decision.modifiedInput &&
-    typeof Reflect.get(decision.modifiedInput, "prompt") === "string"
-  ) {
-    next = String(Reflect.get(decision.modifiedInput, "prompt"));
-  }
-  return decision.additionalContext ? `${next}\n\n${decision.additionalContext}` : next;
-}
-
-function normalizePrompt(prompt: string): string {
-  if (prompt.trim() === "") throw new Error("Prompt must not be empty.");
-  return prompt;
-}
-
-function findFinalMessage(messages: readonly Message[]): string {
-  for (let index = messages.length - 1; index >= 0; index--) {
-    const message = messages[index]!;
-    if (message.role === "assistant" && (message.toolCalls?.length ?? 0) === 0) {
-      return message.content;
-    }
-  }
-  return "";
-}
-
-function snapshotUsage(session: Session): RunAgentUsage {
-  return {
-    promptTokens: session.totalPromptTokens,
-    completionTokens: session.totalCompletionTokens,
-    costCNY: session.totalCostCNY,
-  };
-}
-
-async function findTracePath(
-  workDir: string,
-  sessionId: string,
-  picoHome: string,
-): Promise<string | undefined> {
-  const traceDir = resolvePicoPaths(workDir, { picoHome }).workspace.traces;
-  let files: string[];
-  try {
-    files = await readdir(traceDir);
-  } catch {
-    return undefined;
-  }
-
-  const prefix = `trace_${sanitizeTracePart(sessionId)}_`;
-  const traceFile = files
-    .filter((file) => file.startsWith(prefix) && file.endsWith(".json"))
-    .sort()
-    .at(-1);
-  return traceFile ? join(traceDir, traceFile) : undefined;
-}
-
-function sanitizeTracePart(value: string): string {
-  return value.replaceAll(/[^a-zA-Z0-9_-]/gu, "_");
+  emitPicoHostRuntimeLifecycleEvent(sink, event, {
+    info: (context, message) => logger.info(context, message),
+    warn: (context, message) => logger.warn(context, message),
+  });
 }

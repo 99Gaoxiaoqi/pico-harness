@@ -3,7 +3,10 @@ import type {
   PluginCapabilityRegistry,
 } from "./plugin-capability.js";
 import type { PluginRuntimeSnapshot } from "./plugin-runtime-snapshot.js";
-import { createToolRegistrationOwner, type ToolRegistry } from "../tools/registry-impl.js";
+import {
+  createToolRegistrationOwner,
+  type ToolRegistry,
+} from "@pico/pico-host/tool-registry";
 
 /** Activate one immutable Plugin snapshot into a normal ToolRegistry ownership boundary. */
 export function registerPluginCapabilityTools(

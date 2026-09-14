@@ -2,7 +2,7 @@ import { CommandRegistry, type RegistrySlashCommand } from "../input/command-reg
 import { createBuiltinCommands } from "../input/builtin-commands.js";
 import { processUserInput } from "../input/process-user-input.js";
 import { parseSlashInput } from "../input/slash-parser.js";
-import { getCommandAvailability } from "../input/command-availability.js";
+import { getCommandAvailability } from "@pico/cli/command-availability";
 import { type InputProcessResult, type LocalCommandResult } from "../input/types.js";
 import { type ClientSessionRuntime } from "./client-session-runtime.js";
 import type { ClientCommandRegistryDeps } from "./commands/types.js";

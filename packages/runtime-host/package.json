@@ -10,6 +10,14 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./mcp-protocol": {
+      "types": "./dist/mcp-protocol.d.ts",
+      "import": "./dist/mcp-protocol.js"
+    },
+    "./mcp-tool-bridge": {
+      "types": "./dist/mcp-tool-bridge.d.ts",
+      "import": "./dist/mcp-tool-bridge.js"
     }
   },
   "files": [
@@ -20,6 +28,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@pico/core": "*",
+    "@pico/runtime": "*",
     "fs-native-extensions": "^1.5.0"
   },
   "optionalDependencies": {

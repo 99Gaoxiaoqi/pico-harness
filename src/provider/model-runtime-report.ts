@@ -2,7 +2,7 @@ import {
   DEFAULT_SAFETY_MARGIN_TOKENS,
   estimateModelInputTokens,
   type ContextBudget,
-} from "../context/context-budget.js";
+} from "@pico/runtime/context-budget";
 import type {
   SessionRuntimeStateSnapshot,
   SessionUsageSnapshot,

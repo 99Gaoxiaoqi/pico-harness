@@ -11,7 +11,10 @@ import {
   type FileHandle,
 } from "node:fs/promises";
 import { join } from "node:path";
-import { normalizePicoSubagentSettings, type PicoSubagentSettings } from "./subagent-settings.js";
+import {
+  normalizePicoSubagentSettings,
+  type PicoSubagentSettings,
+} from "@pico/protocol/subagent-settings";
 import { resolvePicoHome } from "../paths/pico-paths.js";
 import type { ModelProviderConfig } from "../provider/model-router.js";
 import { parseModelProviderConfigs, parseModelRouteId } from "./pico-config.js";

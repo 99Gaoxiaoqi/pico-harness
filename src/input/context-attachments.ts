@@ -1,7 +1,7 @@
 import { constants, type Dir, type Stats } from "node:fs";
 import { open, opendir, type FileHandle } from "node:fs/promises";
 import { relative } from "node:path";
-import { WorkspaceRoots } from "../tools/workspace-roots.js";
+import { WorkspaceRoots } from "@pico/pico-host/workspace-roots";
 import { parseMentions, type MentionReference } from "./mentions.js";
 
 export type ContextAttachmentType = "file" | "directory" | "skill" | "agent" | "missing";

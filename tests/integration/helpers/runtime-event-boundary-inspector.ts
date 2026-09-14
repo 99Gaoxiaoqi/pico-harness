@@ -7,11 +7,11 @@ import type {
   RuntimeBoundaryInspector,
   RuntimeLaunchExpectation,
   RuntimeLaunchReconciliation,
-} from "../../../src/runtime/safe-boundary-resume.js";
+} from "@pico/runtime/safe-boundary-resume";
 import {
   RECOVERABLE_TASK_LAUNCH_RECEIPT_SCHEMA_VERSION,
   type TaskRuntimeBoundary,
-} from "../../../src/tasks/task-run-contract.js";
+} from "@pico/core/task-run-contract";
 
 export interface RuntimeEventBoundaryInspectorOptions {
   /**

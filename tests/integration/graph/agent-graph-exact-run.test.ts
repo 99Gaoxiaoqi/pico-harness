@@ -15,12 +15,14 @@ import {
 } from "../../../src/storage/runtime-event.js";
 import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
 import {
-  agentGraphInputRuntimeEventId,
-  inspectAgentGraphExactRun,
   SqliteAgentGraphExactRunPort,
   type CreateAgentGraphExactRunPortOptions,
   type ExecuteAgentGraphExactRunInput,
 } from "../../../src/runtime/agent-graph-exact-run-port.js";
+import {
+  agentGraphInputRuntimeEventId,
+  inspectAgentGraphExactRun,
+} from "@pico/runtime/agent-graph-exact-run-inspection";
 import type { StartExactAgentGraphRunInput } from "../../../src/runtime/agent-graph-runtime-adapter.js";
 import { RuntimeRunExecutor } from "../../../src/runtime/runtime-run-executor.js";
 import { currentRuntimeRun, RuntimeRun } from "../../../src/runtime/runtime-run.js";

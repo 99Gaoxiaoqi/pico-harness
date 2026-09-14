@@ -1,46 +1,41 @@
 import { SkillLoader, SkillViewTool, type Skill } from "../context/skill.js";
 import { TodoStore } from "../context/todo-store.js";
-import type { PlanHandoffController } from "../engine/plan-handoff.js";
-import { GoalManager } from "../engine/goal-manager.js";
-import { BackgroundManager } from "./background-manager.js";
-import {
-  BashTool,
-  EditFileTool,
-  ReadFileTool,
-  TaskListTool,
-  TaskOutputTool,
-  TaskStopTool,
-  ToolRegistry,
-  WriteFileTool,
-} from "./registry-impl.js";
-import { GlobTool } from "./glob.js";
-import { GrepTool } from "./grep.js";
+import type { PlanHandoffController } from "@pico/runtime/plan-handoff";
+import { GoalManager } from "@pico/runtime/goal-manager";
+import { BackgroundManager } from "@pico/pico-host/background-manager";
+import { ToolRegistry } from "./registry-impl.js";
+import { TaskListTool, TaskOutputTool, TaskStopTool } from "@pico/runtime/background-task-tools";
+import { BashTool } from "@pico/pico-host/bash-tool";
+import { ReadFileTool } from "@pico/pico-host/read-file-tool";
+import { WriteFileTool } from "@pico/pico-host/write-file-tool";
+import { EditFileTool } from "@pico/pico-host/edit-file-tool";
+import { GlobTool } from "@pico/pico-host/glob-tool";
+import { GrepTool } from "@pico/pico-host/grep-tool";
+import { logger } from "../observability/logger.js";
 import {
   CancelPlanTool,
   SubmitPlanTool,
   UpdatePlanTool,
   type PlanCoordinatorFactory,
 } from "./plan-exit.js";
-import { TodoTool } from "./todo.js";
+import { TodoTool } from "@pico/runtime/todo-tool";
 import { CreateGoalTool, GetGoalTool, UpdateGoalTool } from "./goal.js";
-import { FetchURLTool, WebSearchTool } from "./web.js";
+import { FetchURLTool, WebSearchTool } from "@pico/pico-host/web-tools";
 import { ToolDisclosure } from "./tool-disclosure.js";
-import { LoadToolsTool } from "./load-tools.js";
-import { SearchToolsTool } from "./search-tools.js";
+import { LoadToolsTool, SearchToolsTool } from "@pico/runtime/tool-discovery-tools";
 import { getAvailableDeferredGroups, type ToolHostKind } from "./tool-surface.js";
-import { registerAskUserTool } from "./ask-user.js";
-import type { AskUserHandler } from "./ask-user.js";
+import { registerAskUserTool, type AskUserHandler } from "@pico/pico-host/ask-user-tool";
 import { WorkspaceRoots, buildWorkspaceBoundaryMiddleware } from "./workspace-roots.js";
-import type { CodeIntelligenceService } from "../code-intelligence/types.js";
-import { createCodeIntelligenceTools } from "./code-intelligence.js";
-import type { WorkspaceSandboxConfig } from "../safety/workspace-sandbox.js";
-import type { SandboxProfile } from "../safety/process-sandbox/index.js";
-import { ExploreRepoTool } from "./explore-repo.js";
+import type { CodeIntelligenceService } from "@pico/pico-host/code-intelligence/types";
+import { createCodeIntelligenceTools } from "@pico/pico-host/code-intelligence-tools";
+import type { WorkspaceSandboxConfig } from "@pico/pico-host/workspace-sandbox";
+import type { SandboxProfile } from "@pico/pico-host/process-sandbox";
+import { ExploreRepoTool } from "@pico/pico-host/explore-repo-tool";
 import { createSessionTaskTools, type BoundSessionTaskAuthority } from "./session-tasks.js";
 import {
   RequestSandboxBoundaryTool,
   type RequestSandboxBoundaryHandler,
-} from "./request-sandbox-boundary.js";
+} from "@pico/pico-host/request-sandbox-boundary-tool";
 
 export interface DefaultProcessSandboxDescriptor {
   readonly profile: SandboxProfile;
@@ -219,6 +214,7 @@ export function buildDefaultToolRegistry(
   registry.register(new GlobTool(roots));
   registry.register(
     new GrepTool(roots, {
+      diagnostics: logger,
       ...(excludeSensitiveGrepFiles !== undefined
         ? { excludeSensitiveFiles: excludeSensitiveGrepFiles }
         : {}),

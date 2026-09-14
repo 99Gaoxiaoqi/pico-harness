@@ -18,9 +18,9 @@ const DYNAMIC_IMPORT = /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g;
  *
  * 语义：同文件同时出现 `new Promise` 构造与 `setTimeout` 调用，即手写
  * "Promise + 定时器"原语（race-with-deadline 的雏形），应统一收敛到
- * src/util/race-with-deadline.ts。当前基线共 28 个文件，其中：
+ * packages/runtime/src/deadline.ts。当前基线共 28 个文件，其中：
  *
- * - canonical（1）：race-with-deadline.ts 是统一原语本体，豁免。
+ * - canonical（1）：Runtime deadline 模块是统一原语本体，豁免。
  * - 误报（2）：setTimeout 与 new Promise 无语义关联——pending 队列 promise +
  *   worker 调度 debounce、ws close 事件 promise + 独立 auth 定时器。
  *   setTimeout 不在任何 Promise executor 内。
@@ -30,7 +30,7 @@ const DYNAMIC_IMPORT = /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g;
  */
 const HANDWRITTEN_TIMEOUT_WHITELIST = new Map([
   // canonical：统一超时/排空原语本体。
-  ["src/util/race-with-deadline.ts", "canonical 原语本体"],
+  ["packages/runtime/src/deadline.ts", "canonical 原语本体"],
   // 误报：setTimeout 不在 Promise executor 内，与 new Promise 无因果。
   // 既有手写超时原语（收敛迁移候选）。
   ["src/approval/manager.ts", "既有：审批等待超时包装（executor 内 setTimeout reject）"],
@@ -50,8 +50,12 @@ const HANDWRITTEN_TIMEOUT_WHITELIST = new Map([
   ["src/safety/background-autonomous-policy.ts", "既有：hook 超时 fail-closed"],
   ["src/storage/atomic-json.ts", "既有：sleep() helper"],
   ["src/storage/file-history-mutation-lease.ts", "既有：租约冲突重试退避"],
+  ["packages/storage/src/file-history-mutation-lease.ts", "迁移：CAS 变更租约冲突重试退避"],
+  ["packages/storage/src/local-file-storage.ts", "迁移：文件锁冲突重试与本地队列截止"],
+  ["packages/storage/src/race-with-deadline.ts", "迁移：文件锁本地队列截止原语"],
   ["src/storage/local-file-storage.ts", "既有：租约冲突重试退避"],
   ["src/storage/owner-lease.ts", "既有：租约冲突重试退避"],
+  ["packages/storage/src/owner-lease.ts", "迁移：租约所有权确认重试退避"],
   ["src/tasks/worktree-supervisor.ts", "既有：waitForSettlement 超时包装"],
   ["src/tools/background-manager.ts", "既有：后台任务等待超时"],
   ["src/tools/bash.ts", "既有：bash 执行超时 / 强杀定时器"],
@@ -112,6 +116,10 @@ function resolveImportPath(importer, specifier) {
 
 function sourceArea(path, repositoryRoot) {
   const normalized = normalizeRelativePath(path, repositoryRoot);
+  if (normalized.startsWith("packages/core/src/")) return "core";
+  if (normalized.startsWith("packages/storage/src/")) return "storage";
+  if (normalized.startsWith("packages/runtime/src/")) return "runtime";
+  if (normalized.startsWith("packages/pico-host/src/")) return "daemon";
   if (normalized.startsWith("src/input/")) return "input";
   if (normalized.startsWith("src/provider/")) return "provider";
   if (normalized.startsWith("src/engine/")) return "engine";
@@ -135,6 +143,14 @@ function classifyViolation(importer, target, declaration, repositoryRoot, fromAr
   const from = fromArea ?? sourceArea(importer, repositoryRoot);
   const to = toArea ?? sourceArea(target, repositoryRoot);
   if (!from || !to) return undefined;
+
+  // Core owns pure contracts only. It must not reach into any implementation area;
+  // those areas may depend on Core, never the reverse.
+  if (from === "core" && to !== "core") return "core-to-implementation";
+  // Storage may use Core contracts but cannot absorb Runtime, Host or entrypoint logic.
+  if (from === "storage" && to !== "storage" && to !== "core") {
+    return "storage-to-implementation";
+  }
 
   if (from === "input" && to === "daemon" && isDaemonBarrel(target, repositoryRoot)) {
     return "input-to-daemon-barrel";
@@ -419,7 +435,7 @@ function findCyclePath(component, adjacency) {
 }
 
 /**
- * 横切原语唯一性：超时/排空原语应统一用 src/util/race-with-deadline.ts 的
+ * 横切原语唯一性：超时/排空原语应统一用 packages/runtime/src/deadline.ts 的
  * raceWithDeadline / raceWithDeadlineReject，不得在别处重新定义本地副本。
  * 新增本地定义即违规（baseline 容纳过渡期存量，收敛后清空）。
  */
@@ -458,7 +474,7 @@ export function scanCrossCuttingDefinitions({ repositoryRoot = REPOSITORY_ROOT }
 
 /**
  * 手写超时原语语义化检测：同文件内同时出现 `new Promise` 构造与 `setTimeout`
- * 调用即视为手写"Promise + 定时器"原语，应统一收敛到 race-with-deadline.ts。
+ * 调用即视为手写"Promise + 定时器"原语，应统一收敛到 Runtime deadline 模块。
  * 对抗审查（B）的"同文件共现"签名实测：全仓 31 个文件共现，除 canonical 外
  * 均为 pre-existing（白名单见 HANDWRITTEN_TIMEOUT_WHITELIST，含误报 3 +
  * 既有原语 27），因此本规则当前零新增违规，只拦截新引入的共现。
@@ -500,11 +516,11 @@ export function scanHandwrittenTimeoutPrimitives({ repositoryRoot = REPOSITORY_R
 
 /**
  * canonical 原语名唯一性：raceWithDeadline / raceWithDeadlineReject 只允许在
- * src/util/race-with-deadline.ts 内被定义。只匹配"定义形态"（function 声明 /
+ * packages/runtime/src/deadline.ts 内被定义。只匹配"定义形态"（function 声明 /
  * const|let 赋值），import 与调用形态天然不匹配（import 后无 `=`，调用形态
  * 前无 function/const/let 关键字），因此 import { raceWithDeadline } 不算违规。
  */
-const CANONICAL_PRIMITIVE_FILE = "src/util/race-with-deadline.ts";
+const CANONICAL_PRIMITIVE_FILE = "packages/runtime/src/deadline.ts";
 const CANONICAL_PRIMITIVES = ["raceWithDeadline", "raceWithDeadlineReject"];
 
 export function scanCanonicalPrimitiveRedefinitions({ repositoryRoot = REPOSITORY_ROOT } = {}) {

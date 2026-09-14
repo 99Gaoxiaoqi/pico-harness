@@ -1,17 +1,17 @@
 // Pico request policy around the SDK transport: cache routing, capability fallback and budgets.
-import { providerRequestSignal, type LLMProviderRequestOptions } from "./interface.js";
+import { providerRequestSignal, type LLMProviderRequestOptions } from "@pico/core";
 import type { Message, ToolDefinition } from "../schema/message.js";
 import type { ProviderConfig } from "./config.js";
-import { type ProviderProfile } from "./profile.js";
-import { applyReasoningRequestPatch } from "./reasoning-capability.js";
+import type { ProviderProfile } from "@pico/core";
+import { applyReasoningRequestPatch } from "@pico/runtime";
 import { logger } from "../observability/logger.js";
 import {
   openAIPromptCacheKey,
   promptCacheRouteIdentity,
   promptCacheRevisions,
-} from "./prompt-cache.js";
+} from "@pico/runtime/prompt-cache";
 import { openCodeClientHeaders } from "./opencode-headers.js";
-import { appendProviderEndpointPath } from "./provider-endpoint.js";
+import { appendProviderEndpointPath } from "@pico/runtime/provider-endpoint";
 
 export class OpenAIRequestPolicy {
   private static readonly MAX_ROUTE_TRAFFIC_WINDOWS = 1_024;

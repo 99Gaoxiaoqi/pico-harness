@@ -4,7 +4,7 @@ import type {
   FileHistoryChanges,
   FileHistoryDiffFileStatus,
   FileHistoryFilePatch,
-} from "../safety/file-history.js";
+} from "@pico/pico-host/file-history-runtime";
 import { DiffPreview } from "./diff-preview.js";
 import type { DialogRequest } from "./dialog-arbiter.js";
 import { truncateTerminalText } from "./terminal-width.js";

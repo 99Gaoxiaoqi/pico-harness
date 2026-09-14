@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { HookService as HostHookService } from "@pico/pico-host/hooks/service";
 import { AgentEngine } from "../../../src/engine/loop.js";
 import { SilentReporter } from "../../../src/engine/reporter.js";
 import { Session } from "../../../src/engine/session.js";
@@ -18,6 +19,10 @@ import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-por
 import type { BaseTool } from "../../../src/tools/registry.js";
 import { NO_FILE_SIDE_EFFECTS } from "../../../src/tools/registry.js";
 import { ToolRegistry } from "../../../src/tools/registry-impl.js";
+
+test("HookService 包入口与旧入口共享 class identity", () => {
+  assert.equal(HostHookService, HookService);
+});
 
 test("PostToolUse receives one bounded envelope only after canonical commit", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-tool-result-hook-envelope-"));

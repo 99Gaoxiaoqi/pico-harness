@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { loadAgentCatalog } from "../../../src/agents/catalog.js";
 import { SkillLoader } from "../../../src/context/skill.js";
-import { ResourceDoctor } from "../../../src/diagnostics/resource-doctor.js";
+import { ResourceDoctor } from "@pico/pico-host/resource-doctor";
 import { loadHookSnapshot } from "../../../src/hooks/config.js";
 import { createHookifyProposal, loadHookifyRules } from "../../../src/hooks/hookify/rules.js";
 import { resolveProjectMcpConfigPath } from "../../../src/mcp/config-path.js";

@@ -1,13 +1,13 @@
 import { logger } from "../observability/logger.js";
 import type { Message, ToolDefinition } from "../schema/message.js";
 import type { ProviderConfig } from "./config.js";
-import type { LLMProvider, LLMProviderRequestOptions } from "./interface.js";
-import { applyReasoningRequestPatch, coordinateReasoningLevel } from "./reasoning-capability.js";
+import type { LLMProvider, LLMProviderRequestOptions } from "@pico/core";
+import { applyReasoningRequestPatch, coordinateReasoningLevel } from "@pico/runtime";
 import {
   promptCacheRevisions,
   promptCacheRouteIdentity,
   snapshotToolDefinitions,
-} from "./prompt-cache.js";
+} from "@pico/runtime/prompt-cache";
 
 /**
  * Runtime-scoped prewarm dedupe. One instance is shared by a parent route, credential rotations,

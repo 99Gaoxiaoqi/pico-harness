@@ -1,19 +1,14 @@
+import type { LLMProvider, ProviderKind, ReasoningLevel } from "@pico/core";
 import type { Session } from "../engine/session.js";
 import type { ProviderConfig } from "../provider/config.js";
-import {
-  createRawProvider,
-  type ProviderKind,
-  type ProviderRuntimeDependencies,
-} from "../provider/factory.js";
-import type { ReasoningLevel } from "../provider/reasoning-capability.js";
-import { CredentialRotationCoordinator } from "../provider/credential-rotation.js";
-import { CredentialPool } from "../provider/credential-pool.js";
-import type { LLMProvider } from "../provider/interface.js";
-import type { RateLimitFailure } from "../provider/retry.js";
-import { resolveModelRouteCapabilities } from "../provider/model-capabilities.js";
+import { createRawProvider, type ProviderRuntimeDependencies } from "../provider/factory.js";
+import { CredentialRotationCoordinator } from "@pico/runtime/credential-rotation";
+import { CredentialPool } from "@pico/runtime/credential-pool";
+import type { RateLimitFailure } from "@pico/runtime/provider-retry";
+import { resolveModelRouteCapabilities } from "@pico/runtime";
+import { billingRouteForProvider } from "@pico/runtime/provider-billing-route";
 import { ModelRouter } from "../provider/model-router.js";
 import { CostTracker, type CostTrackerOptions } from "../observability/tracker.js";
-import type { BillingRoute } from "../observability/pricing.js";
 import {
   PromptCachePrewarmCoordinator,
   withPromptCachePrewarm,
@@ -191,28 +186,5 @@ function activeRouteModelRouter(
   );
 }
 
-/** Resolve the billing identity without constructing a provider. */
-export function billingRouteForProvider(
-  kind: ProviderKind,
-  config: ProviderConfig,
-): BillingRoute | string {
-  const price = config.capabilities?.price;
-  if (!config.capabilities) return config.model;
-  return {
-    provider: kind,
-    model: config.model,
-    baseUrl: config.baseURL,
-    cacheSupported: config.capabilities.cache,
-    ...(price?.source === "config"
-      ? {
-          pricing: {
-            inputPerMillion: price.inputPerMillion,
-            outputPerMillion: price.outputPerMillion,
-            cacheReadPerMillion: price.cacheReadPerMillion,
-            cacheWritePerMillion: price.cacheWritePerMillion,
-            source: "configured",
-          },
-        }
-      : {}),
-  };
-}
+/** @deprecated Billing-route projection now belongs to @pico/runtime. */
+export { billingRouteForProvider } from "@pico/runtime/provider-billing-route";

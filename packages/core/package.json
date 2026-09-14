@@ -1,0 +1,206 @@
+{
+  "name": "@pico/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Pico 的纯领域契约；不得依赖运行时、存储、宿主或产品入口。",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./agent-graph-contracts": {
+      "types": "./dist/agent-graph-contracts.d.ts",
+      "import": "./dist/agent-graph-contracts.js"
+    },
+    "./background-autonomous-policy-schema": {
+      "types": "./dist/background-autonomous-policy-schema.d.ts",
+      "import": "./dist/background-autonomous-policy-schema.js"
+    },
+    "./agent-graph-store-contracts": {
+      "types": "./dist/agent-graph-store-contracts.d.ts",
+      "import": "./dist/agent-graph-store-contracts.js"
+    },
+    "./agent-graph-identities": {
+      "types": "./dist/agent-graph-identities.d.ts",
+      "import": "./dist/agent-graph-identities.js"
+    },
+    "./agent-graph-diagnostics": {
+      "types": "./dist/agent-graph-diagnostics.d.ts",
+      "import": "./dist/agent-graph-diagnostics.js"
+    },
+    "./agent-graph-readiness": {
+      "types": "./dist/agent-graph-readiness.d.ts",
+      "import": "./dist/agent-graph-readiness.js"
+    },
+    "./agent-graph-schedule": {
+      "types": "./dist/agent-graph-schedule.d.ts",
+      "import": "./dist/agent-graph-schedule.js"
+    },
+    "./agent-graph-control-store": {
+      "types": "./dist/agent-graph-control-store.d.ts",
+      "import": "./dist/agent-graph-control-store.js"
+    },
+    "./agent-graph-tool-names": {
+      "types": "./dist/agent-graph-tool-names.d.ts",
+      "import": "./dist/agent-graph-tool-names.js"
+    },
+    "./agent-graph-update-contracts": {
+      "types": "./dist/agent-graph-update-contracts.d.ts",
+      "import": "./dist/agent-graph-update-contracts.js"
+    },
+    "./agent-graph-runtime-contracts": {
+      "types": "./dist/agent-graph-runtime-contracts.d.ts",
+      "import": "./dist/agent-graph-runtime-contracts.js"
+    },
+    "./agent-graph-profile-contracts": {
+      "types": "./dist/agent-graph-profile-contracts.d.ts",
+      "import": "./dist/agent-graph-profile-contracts.js"
+    },
+    "./agent-graph-supervisor-contracts": {
+      "types": "./dist/agent-graph-supervisor-contracts.d.ts",
+      "import": "./dist/agent-graph-supervisor-contracts.js"
+    },
+    "./subagent-capabilities": {
+      "types": "./dist/subagent-capabilities.d.ts",
+      "import": "./dist/subagent-capabilities.js"
+    },
+    "./known-tool-names": {
+      "types": "./dist/known-tool-names.d.ts",
+      "import": "./dist/known-tool-names.js"
+    },
+    "./agent-output-contracts": {
+      "types": "./dist/agent-output-contracts.d.ts",
+      "import": "./dist/agent-output-contracts.js"
+    },
+    "./agent-graph-resource-contracts": {
+      "types": "./dist/agent-graph-resource-contracts.d.ts",
+      "import": "./dist/agent-graph-resource-contracts.js"
+    },
+    "./agent-graph-runtime-event-contracts": {
+      "types": "./dist/agent-graph-runtime-event-contracts.d.ts",
+      "import": "./dist/agent-graph-runtime-event-contracts.js"
+    },
+    "./durable-transcript-contract": {
+      "types": "./dist/durable-transcript-contract.d.ts",
+      "import": "./dist/durable-transcript-contract.js"
+    },
+    "./checkpoint-digest": {
+      "types": "./dist/checkpoint-digest.d.ts",
+      "import": "./dist/checkpoint-digest.js"
+    },
+    "./claude-tool-compat": {
+      "types": "./dist/claude-tool-compat.d.ts",
+      "import": "./dist/claude-tool-compat.js"
+    },
+    "./cron-draft-contract": {
+      "types": "./dist/cron-draft-contract.d.ts",
+      "import": "./dist/cron-draft-contract.js"
+    },
+    "./permission-profile": {
+      "types": "./dist/permission-profile.d.ts",
+      "import": "./dist/permission-profile.js"
+    },
+    "./permission-state": {
+      "types": "./dist/permission-state.d.ts",
+      "import": "./dist/permission-state.js"
+    },
+    "./provider-identity": {
+      "types": "./dist/provider-identity.d.ts",
+      "import": "./dist/provider-identity.js"
+    },
+    "./plan-contract": {
+      "types": "./dist/plan-contract.d.ts",
+      "import": "./dist/plan-contract.js"
+    },
+    "./plan-review-identity": {
+      "types": "./dist/plan-review-identity.d.ts",
+      "import": "./dist/plan-review-identity.js"
+    },
+    "./plan-events": {
+      "types": "./dist/plan-events.d.ts",
+      "import": "./dist/plan-events.js"
+    },
+    "./session-identity": {
+      "types": "./dist/session-identity.d.ts",
+      "import": "./dist/session-identity.js"
+    },
+    "./session-selection": {
+      "types": "./dist/session-selection.d.ts",
+      "import": "./dist/session-selection.js"
+    },
+    "./session-fork-contract": {
+      "types": "./dist/session-fork-contract.d.ts",
+      "import": "./dist/session-fork-contract.js"
+    },
+    "./session-runtime-state": {
+      "types": "./dist/session-runtime-state.d.ts",
+      "import": "./dist/session-runtime-state.js"
+    },
+    "./task-run-contract": {
+      "types": "./dist/task-run-contract.d.ts",
+      "import": "./dist/task-run-contract.js"
+    },
+    "./runtime-model-message": {
+      "types": "./dist/runtime-model-message.d.ts",
+      "import": "./dist/runtime-model-message.js"
+    },
+    "./reporter-contract": {
+      "types": "./dist/reporter-contract.d.ts",
+      "import": "./dist/reporter-contract.js"
+    },
+    "./resource-catalog": {
+      "types": "./dist/resource-catalog.d.ts",
+      "import": "./dist/resource-catalog.js"
+    },
+    "./recoverable-task-identities": {
+      "types": "./dist/recoverable-task-identities.d.ts",
+      "import": "./dist/recoverable-task-identities.js"
+    },
+    "./tool-recovery-contract": {
+      "types": "./dist/tool-recovery-contract.d.ts",
+      "import": "./dist/tool-recovery-contract.js"
+    },
+    "./tool-argument-audit": {
+      "types": "./dist/tool-argument-audit.d.ts",
+      "import": "./dist/tool-argument-audit.js"
+    },
+    "./tool-permission-policy": {
+      "types": "./dist/tool-permission-policy.d.ts",
+      "import": "./dist/tool-permission-policy.js"
+    },
+    "./transcript-entry-contract": {
+      "types": "./dist/transcript-entry-contract.d.ts",
+      "import": "./dist/transcript-entry-contract.js"
+    },
+    "./transcript-tool-start": {
+      "types": "./dist/transcript-tool-start.d.ts",
+      "import": "./dist/transcript-tool-start.js"
+    },
+    "./session-hydration": {
+      "types": "./dist/session-hydration.d.ts",
+      "import": "./dist/session-hydration.js"
+    },
+    "./workspace-trust-contract": {
+      "types": "./dist/workspace-trust-contract.d.ts",
+      "import": "./dist/workspace-trust-contract.js"
+    },
+    "./atomic-memory-contracts": {
+      "types": "./dist/atomic-memory-contracts.d.ts",
+      "import": "./dist/atomic-memory-contracts.js"
+    },
+    "./atomic-memory-runtime-contracts": {
+      "types": "./dist/atomic-memory-runtime-contracts.d.ts",
+      "import": "./dist/atomic-memory-runtime-contracts.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  }
+}

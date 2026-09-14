@@ -4,8 +4,8 @@ import type {
   PluginScope,
   ResolvedPluginIdentity,
 } from "./plugin-types.js";
-import type { LLMProvider } from "../provider/interface.js";
-import type { BaseTool } from "../tools/registry.js";
+import type { LLMProvider } from "@pico/core";
+import type { BaseTool } from "@pico/pico-host/tool-registry-contract";
 
 /**
  * Host-owned capability factory boundary.

@@ -1,0 +1,523 @@
+{
+  "name": "@pico/pico-host",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Pico workspace/daemon 宿主的业务装配层。",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./background-mcp-policy": {
+      "types": "./dist/background-mcp-policy.d.ts",
+      "import": "./dist/background-mcp-policy.js"
+    },
+    "./approval-diff": {
+      "types": "./dist/approval-diff.d.ts",
+      "import": "./dist/approval-diff.js"
+    },
+    "./approval-manager": {
+      "types": "./dist/approval-manager.d.ts",
+      "import": "./dist/approval-manager.js"
+    },
+    "./session-permission-scope": {
+      "types": "./dist/session-permission-scope.d.ts",
+      "import": "./dist/session-permission-scope.js"
+    },
+    "./temporary-workspace-authority": {
+      "types": "./dist/temporary-workspace-authority.d.ts",
+      "import": "./dist/temporary-workspace-authority.js"
+    },
+    "./workspace-registration": {
+      "types": "./dist/workspace-registration.d.ts",
+      "import": "./dist/workspace-registration.js"
+    },
+    "./workspace-registry": {
+      "types": "./dist/workspace-registry.d.ts",
+      "import": "./dist/workspace-registry.js"
+    },
+    "./workspace-storage-repair": {
+      "types": "./dist/workspace-storage-repair.d.ts",
+      "import": "./dist/workspace-storage-repair.js"
+    },
+    "./runtime-host-operations": {
+      "types": "./dist/runtime-host-operations.d.ts",
+      "import": "./dist/runtime-host-operations.js"
+    },
+    "./runtime-host-session-continuity": {
+      "types": "./dist/runtime-host-session-continuity.d.ts",
+      "import": "./dist/runtime-host-session-continuity.js"
+    },
+    "./session-subscription-owner": {
+      "types": "./dist/session-subscription-owner.d.ts",
+      "import": "./dist/session-subscription-owner.js"
+    },
+    "./runtime-notification-transport": {
+      "types": "./dist/runtime-notification-transport.d.ts",
+      "import": "./dist/runtime-notification-transport.js"
+    },
+    "./runtime-host-events": {
+      "types": "./dist/runtime-host-events.d.ts",
+      "import": "./dist/runtime-host-events.js"
+    },
+    "./side-chat-authority": {
+      "types": "./dist/side-chat-authority.d.ts",
+      "import": "./dist/side-chat-authority.js"
+    },
+    "./plan-control-port": {
+      "types": "./dist/plan-control-port.d.ts",
+      "import": "./dist/plan-control-port.js"
+    },
+    "./workspace-run-lifecycle": {
+      "types": "./dist/workspace-run-lifecycle.d.ts",
+      "import": "./dist/workspace-run-lifecycle.js"
+    },
+    "./agent-graph-launch-state": {
+      "types": "./dist/agent-graph-launch-state.d.ts",
+      "import": "./dist/agent-graph-launch-state.js"
+    },
+    "./agent-graph-exact-run-port": {
+      "types": "./dist/agent-graph-exact-run-port.d.ts",
+      "import": "./dist/agent-graph-exact-run-port.js"
+    },
+    "./agent-graph-root-retirement": {
+      "types": "./dist/agent-graph-root-retirement.d.ts",
+      "import": "./dist/agent-graph-root-retirement.js"
+    },
+    "./agent-graph-workspace-resource-authority": {
+      "types": "./dist/agent-graph-workspace-resource-authority.d.ts",
+      "import": "./dist/agent-graph-workspace-resource-authority.js"
+    },
+    "./agent-graph-workspace-host": {
+      "types": "./dist/agent-graph-workspace-host.d.ts",
+      "import": "./dist/agent-graph-workspace-host.js"
+    },
+    "./agent-profile-loader": {
+      "types": "./dist/agent-profile-loader.d.ts",
+      "import": "./dist/agent-profile-loader.js"
+    },
+    "./agent-catalog": {
+      "types": "./dist/agent-catalog.d.ts",
+      "import": "./dist/agent-catalog.js"
+    },
+    "./background-task-manager": {
+      "types": "./dist/background-task-manager.d.ts",
+      "import": "./dist/background-task-manager.js"
+    },
+    "./background-manager": {
+      "types": "./dist/background-manager.d.ts",
+      "import": "./dist/background-manager.js"
+    },
+    "./worktree-merge-queue": {
+      "types": "./dist/worktree-merge-queue.d.ts",
+      "import": "./dist/worktree-merge-queue.js"
+    },
+    "./worktree-supervisor": {
+      "types": "./dist/worktree-supervisor.d.ts",
+      "import": "./dist/worktree-supervisor.js"
+    },
+    "./task-host-runtime": {
+      "types": "./dist/task-host-runtime.d.ts",
+      "import": "./dist/task-host-runtime.js"
+    },
+    "./agent-recoverable-task-adapter": {
+      "types": "./dist/agent-recoverable-task-adapter.d.ts",
+      "import": "./dist/agent-recoverable-task-adapter.js"
+    },
+    "./workspace-task-runtime": {
+      "types": "./dist/workspace-task-runtime.d.ts",
+      "import": "./dist/workspace-task-runtime.js"
+    },
+    "./workspace-todo-store": {
+      "types": "./dist/workspace-todo-store.d.ts",
+      "import": "./dist/workspace-todo-store.js"
+    },
+    "./process-sandbox": {
+      "types": "./dist/process-sandbox/index.d.ts",
+      "import": "./dist/process-sandbox/index.js"
+    },
+    "./process-sandbox/backend": {
+      "types": "./dist/process-sandbox/backend.d.ts",
+      "import": "./dist/process-sandbox/backend.js"
+    },
+    "./process-sandbox/environment": {
+      "types": "./dist/process-sandbox/environment.d.ts",
+      "import": "./dist/process-sandbox/environment.js"
+    },
+    "./process-sandbox/launcher": {
+      "types": "./dist/process-sandbox/launcher.d.ts",
+      "import": "./dist/process-sandbox/launcher.js"
+    },
+    "./process-sandbox/policy": {
+      "types": "./dist/process-sandbox/policy.d.ts",
+      "import": "./dist/process-sandbox/policy.js"
+    },
+    "./process-sandbox/types": {
+      "types": "./dist/process-sandbox/types.d.ts",
+      "import": "./dist/process-sandbox/types.js"
+    },
+    "./workspace-roots": {
+      "types": "./dist/workspace-roots.d.ts",
+      "import": "./dist/workspace-roots.js"
+    },
+    "./workspace-sandbox": {
+      "types": "./dist/workspace-sandbox.d.ts",
+      "import": "./dist/workspace-sandbox.js"
+    },
+    "./code-intelligence": {
+      "types": "./dist/code-intelligence/index.d.ts",
+      "import": "./dist/code-intelligence/index.js"
+    },
+    "./code-intelligence-tools": {
+      "types": "./dist/code-intelligence-tools.d.ts",
+      "import": "./dist/code-intelligence-tools.js"
+    },
+    "./explore-repo-tool": {
+      "types": "./dist/explore-repo-tool.d.ts",
+      "import": "./dist/explore-repo-tool.js"
+    },
+    "./glob-tool": {
+      "types": "./dist/glob-tool.d.ts",
+      "import": "./dist/glob-tool.js"
+    },
+    "./grep-tool": {
+      "types": "./dist/grep-tool.d.ts",
+      "import": "./dist/grep-tool.js"
+    },
+    "./bash-tool": {
+      "types": "./dist/bash-tool.d.ts",
+      "import": "./dist/bash-tool.js"
+    },
+    "./code-intelligence/code-intelligence-manager": {
+      "types": "./dist/code-intelligence/code-intelligence-manager.d.ts",
+      "import": "./dist/code-intelligence/code-intelligence-manager.js"
+    },
+    "./code-intelligence/lsp-client": {
+      "types": "./dist/code-intelligence/lsp-client.d.ts",
+      "import": "./dist/code-intelligence/lsp-client.js"
+    },
+    "./code-intelligence/lsp-protocol": {
+      "types": "./dist/code-intelligence/lsp-protocol.d.ts",
+      "import": "./dist/code-intelligence/lsp-protocol.js"
+    },
+    "./code-intelligence/lsp-server-discovery": {
+      "types": "./dist/code-intelligence/lsp-server-discovery.d.ts",
+      "import": "./dist/code-intelligence/lsp-server-discovery.js"
+    },
+    "./code-intelligence/lsp-service": {
+      "types": "./dist/code-intelligence/lsp-service.d.ts",
+      "import": "./dist/code-intelligence/lsp-service.js"
+    },
+    "./code-intelligence/repo-map": {
+      "types": "./dist/code-intelligence/repo-map.d.ts",
+      "import": "./dist/code-intelligence/repo-map.js"
+    },
+    "./code-intelligence/types": {
+      "types": "./dist/code-intelligence/types.d.ts",
+      "import": "./dist/code-intelligence/types.js"
+    },
+    "./hooks": {
+      "types": "./dist/hooks/index.d.ts",
+      "import": "./dist/hooks/index.js"
+    },
+    "./hooks/types": {
+      "types": "./dist/hooks/types.d.ts",
+      "import": "./dist/hooks/types.js"
+    },
+    "./hooks/service": {
+      "types": "./dist/hooks/service.d.ts",
+      "import": "./dist/hooks/service.js"
+    },
+    "./hooks/config": {
+      "types": "./dist/hooks/config.d.ts",
+      "import": "./dist/hooks/config.js"
+    },
+    "./hooks/config/command-shell": {
+      "types": "./dist/hooks/config/command-shell.d.ts",
+      "import": "./dist/hooks/config/command-shell.js"
+    },
+    "./hooks/config/reloader": {
+      "types": "./dist/hooks/config/reloader.d.ts",
+      "import": "./dist/hooks/config/reloader.js"
+    },
+    "./hooks/trust/store": {
+      "types": "./dist/hooks/trust/store.d.ts",
+      "import": "./dist/hooks/trust/store.js"
+    },
+    "./hooks/management/state": {
+      "types": "./dist/hooks/management/state.d.ts",
+      "import": "./dist/hooks/management/state.js"
+    },
+    "./hooks/management/service": {
+      "types": "./dist/hooks/management/service.d.ts",
+      "import": "./dist/hooks/management/service.js"
+    },
+    "./hooks/hookify/rules": {
+      "types": "./dist/hooks/hookify/rules.d.ts",
+      "import": "./dist/hooks/hookify/rules.js"
+    },
+    "./hooks/executors": {
+      "types": "./dist/hooks/executors/index.d.ts",
+      "import": "./dist/hooks/executors/index.js"
+    },
+    "./hooks/executors/executor": {
+      "types": "./dist/hooks/executors/executor.d.ts",
+      "import": "./dist/hooks/executors/executor.js"
+    },
+    "./hooks/runtime": {
+      "types": "./dist/hooks/runtime.d.ts",
+      "import": "./dist/hooks/runtime.js"
+    },
+    "./runtime-run-executor": {
+      "types": "./dist/runtime-run-executor.d.ts",
+      "import": "./dist/runtime-run-executor.js"
+    },
+    "./pico-paths": {
+      "types": "./dist/pico-paths.d.ts",
+      "import": "./dist/pico-paths.js"
+    },
+    "./session-active-overlay": {
+      "types": "./dist/session-active-overlay.d.ts",
+      "import": "./dist/session-active-overlay.js"
+    },
+    "./session-runtime-lifecycle": {
+      "types": "./dist/session-runtime-lifecycle.d.ts",
+      "import": "./dist/session-runtime-lifecycle.js"
+    },
+    "./skill-catalog": {
+      "types": "./dist/skill-catalog.d.ts",
+      "import": "./dist/skill-catalog.js"
+    },
+    "./prompt-composer": {
+      "types": "./dist/prompt-composer.d.ts",
+      "import": "./dist/prompt-composer.js"
+    },
+    "./mcp-config": {
+      "types": "./dist/mcp-config.d.ts",
+      "import": "./dist/mcp-config.js"
+    },
+    "./mcp-client-types": {
+      "types": "./dist/mcp-client-types.d.ts",
+      "import": "./dist/mcp-client-types.js"
+    },
+    "./http-mcp-client": {
+      "types": "./dist/http-mcp-client.d.ts",
+      "import": "./dist/http-mcp-client.js"
+    },
+    "./stdio-mcp-client": {
+      "types": "./dist/stdio-mcp-client.d.ts",
+      "import": "./dist/stdio-mcp-client.js"
+    },
+    "./mcp-tool": {
+      "types": "./dist/mcp-tool.d.ts",
+      "import": "./dist/mcp-tool.js"
+    },
+    "./mcp-connection-manager": {
+      "types": "./dist/mcp-connection-manager.d.ts",
+      "import": "./dist/mcp-connection-manager.js"
+    },
+    "./mcp-config-path": {
+      "types": "./dist/mcp-config-path.d.ts",
+      "import": "./dist/mcp-config-path.js"
+    },
+    "./user-mcp-config-store": {
+      "types": "./dist/user-mcp-config-store.d.ts",
+      "import": "./dist/user-mcp-config-store.js"
+    },
+    "./effective-mcp-config": {
+      "types": "./dist/effective-mcp-config.d.ts",
+      "import": "./dist/effective-mcp-config.js"
+    },
+    "./runtime-host-composition": {
+      "types": "./dist/runtime-host-composition.d.ts",
+      "import": "./dist/runtime-host-composition.js"
+    },
+    "./local-runtime-service": {
+      "types": "./dist/local-runtime-service.d.ts",
+      "import": "./dist/local-runtime-service.js"
+    },
+    "./browser-agent-command-broker": {
+      "types": "./dist/browser-agent-command-broker.d.ts",
+      "import": "./dist/browser-agent-command-broker.js"
+    },
+    "./claude-agent-loader": {
+      "types": "./dist/claude-agent-loader.d.ts",
+      "import": "./dist/claude-agent-loader.js"
+    },
+    "./configured-subagent-catalog": {
+      "types": "./dist/configured-subagent-catalog.d.ts",
+      "import": "./dist/configured-subagent-catalog.js"
+    },
+    "./configured-subagent-output-store": {
+      "types": "./dist/configured-subagent-output-store.d.ts",
+      "import": "./dist/configured-subagent-output-store.js"
+    },
+    "./configured-subagent-output-tool": {
+      "types": "./dist/configured-subagent-output-tool.d.ts",
+      "import": "./dist/configured-subagent-output-tool.js"
+    },
+    "./local-daemon-host": {
+      "types": "./dist/local-daemon-host.d.ts",
+      "import": "./dist/local-daemon-host.js"
+    },
+    "./desktop-review": {
+      "types": "./dist/desktop-review.d.ts",
+      "import": "./dist/desktop-review.js"
+    },
+    "./desktop-rewind-service": {
+      "types": "./dist/desktop-rewind-service.d.ts",
+      "import": "./dist/desktop-rewind-service.js"
+    },
+    "./desktop-transcript-persistence": {
+      "types": "./dist/desktop-transcript-persistence.d.ts",
+      "import": "./dist/desktop-transcript-persistence.js"
+    },
+    "./desktop-workbar-git-review-service": {
+      "types": "./dist/desktop-workbar-git-review-service.d.ts",
+      "import": "./dist/desktop-workbar-git-review-service.js"
+    },
+    "./subagent-connections": {
+      "types": "./dist/subagent-connections.d.ts",
+      "import": "./dist/subagent-connections.js"
+    },
+    "./desktop-automation-request-handlers": {
+      "types": "./dist/desktop-automation-request-handlers.d.ts",
+      "import": "./dist/desktop-automation-request-handlers.js"
+    },
+    "./local-runtime-client": {
+      "types": "./dist/local-runtime-client.d.ts",
+      "import": "./dist/local-runtime-client.js"
+    },
+    "./desktop-subagent-settings-service": {
+      "types": "./dist/desktop-subagent-settings-service.d.ts",
+      "import": "./dist/desktop-subagent-settings-service.js"
+    },
+    "./file-history": {
+      "types": "./dist/file-history.d.ts",
+      "import": "./dist/file-history.js"
+    },
+    "./file-change-journal": {
+      "types": "./dist/file-change-journal.d.ts",
+      "import": "./dist/file-change-journal.js"
+    },
+    "./file-history-runtime": {
+      "types": "./dist/file-history-runtime.d.ts",
+      "import": "./dist/file-history-runtime.js"
+    },
+    "./tool-registry-contract": {
+      "types": "./dist/tool-registry-contract.d.ts",
+      "import": "./dist/tool-registry-contract.js"
+    },
+    "./tool-registry": {
+      "types": "./dist/tool-registry.d.ts",
+      "import": "./dist/tool-registry.js"
+    },
+    "./file-tool-helpers": {
+      "types": "./dist/file-tool-helpers.d.ts",
+      "import": "./dist/file-tool-helpers.js"
+    },
+    "./read-file-tool": {
+      "types": "./dist/read-file-tool.d.ts",
+      "import": "./dist/read-file-tool.js"
+    },
+    "./write-file-tool": {
+      "types": "./dist/write-file-tool.d.ts",
+      "import": "./dist/write-file-tool.js"
+    },
+    "./edit-file-tool": {
+      "types": "./dist/edit-file-tool.d.ts",
+      "import": "./dist/edit-file-tool.js"
+    },
+    "./atomic-workspace-file": {
+      "types": "./dist/atomic-workspace-file.d.ts",
+      "import": "./dist/atomic-workspace-file.js"
+    },
+    "./windows-atomic-file": {
+      "types": "./dist/windows-atomic-file.d.ts",
+      "import": "./dist/windows-atomic-file.js"
+    },
+    "./web-tools": {
+      "types": "./dist/web-tools.d.ts",
+      "import": "./dist/web-tools.js"
+    },
+    "./runtime-web-search": {
+      "types": "./dist/runtime-web-search.d.ts",
+      "import": "./dist/runtime-web-search.js"
+    },
+    "./browser-agent-tools": {
+      "types": "./dist/browser-agent-tools.d.ts",
+      "import": "./dist/browser-agent-tools.js"
+    },
+    "./ask-user-tool": {
+      "types": "./dist/ask-user-tool.d.ts",
+      "import": "./dist/ask-user-tool.js"
+    },
+    "./schedule-task-tool": {
+      "types": "./dist/schedule-task-tool.d.ts",
+      "import": "./dist/schedule-task-tool.js"
+    },
+    "./request-sandbox-boundary-tool": {
+      "types": "./dist/request-sandbox-boundary-tool.d.ts",
+      "import": "./dist/request-sandbox-boundary-tool.js"
+    },
+    "./file-index": {
+      "types": "./dist/file-index.d.ts",
+      "import": "./dist/file-index.js"
+    },
+    "./runtime-host-candidate": {
+      "types": "./dist/runtime-host-candidate.d.ts",
+      "import": "./dist/runtime-host-candidate.js"
+    },
+    "./resource-doctor": {
+      "types": "./dist/resource-doctor.d.ts",
+      "import": "./dist/resource-doctor.js"
+    },
+    "./workspace-trust": {
+      "types": "./dist/workspace-trust.d.ts",
+      "import": "./dist/workspace-trust.js"
+    },
+    "./workspace-configuration-diagnostic": {
+      "types": "./dist/workspace-configuration-diagnostic.d.ts",
+      "import": "./dist/workspace-configuration-diagnostic.js"
+    },
+    "./workspace-doctor": {
+      "types": "./dist/workspace-doctor.d.ts",
+      "import": "./dist/workspace-doctor.js"
+    },
+    "./storage-doctor": {
+      "types": "./dist/storage-doctor.d.ts",
+      "import": "./dist/storage-doctor.js"
+    },
+    "./cron-workspace-lifecycle": {
+      "types": "./dist/cron-workspace-lifecycle.d.ts",
+      "import": "./dist/cron-workspace-lifecycle.js"
+    },
+    "./cron-workspace-runtime": {
+      "types": "./dist/cron-workspace-runtime.d.ts",
+      "import": "./dist/cron-workspace-runtime.js"
+    },
+    "./cron-runtime-scheduler": {
+      "types": "./dist/cron-runtime-scheduler.d.ts",
+      "import": "./dist/cron-runtime-scheduler.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "dependencies": {
+    "@pico/core": "*",
+    "@pico/protocol": "*",
+    "@pico/runtime": "*",
+    "@pico/runtime-host": "*",
+    "@pico/storage": "*",
+    "ajv": "8.20.0",
+    "js-yaml": "^5.1.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  }
+}

@@ -1,18 +1,11 @@
-import type {
-  EngineRuntimeHistoryEntry,
-  EngineRuntimePort,
-  EngineRuntimeRepairProjectionOptions,
-  EngineRuntimeReconcileOptions,
-  EngineRuntimeRun,
-  EngineRuntimeRunStartOptions,
-} from "../engine/runtime-port.js";
-import {
-  currentRuntimeRun,
-  currentRuntimeToolCallId,
-  runWithRuntimeToolCall,
-  RuntimeRun,
-} from "./runtime-run.js";
-import type { RuntimeHistoryProjectionEntry } from "../engine/session-runtime-read-model.js";
+import type { EngineRuntimeHistoryEntry, EngineRuntimePort } from "../engine/runtime-port.js";
+import type { RuntimeHistoryProjectionEntry } from "@pico/runtime/session-runtime-read-model";
+import { createRuntimeRunPort } from "@pico/runtime/runtime-run-port-adapter";
+import type { Session } from "../engine/session.js";
+import type { Registry } from "@pico/pico-host/tool-registry-contract";
+
+// Preserve legacy RuntimeRun diagnostics configuration for old Engine callers.
+import "./runtime-run.js";
 
 /**
  * Adapts the concrete durable RuntimeRun to the small port consumed by the
@@ -20,34 +13,7 @@ import type { RuntimeHistoryProjectionEntry } from "../engine/session-runtime-re
  * not import RuntimeRun, RuntimeEventStore, or the runtime projection module.
  */
 export function createEngineRuntimePort(): EngineRuntimePort {
-  return {
-    currentRun: () => currentRuntimeRun(),
-    currentToolCallId: () => currentRuntimeToolCallId(),
-    runWithToolCall: (toolCallId, execute) => runWithRuntimeToolCall(toolCallId, execute),
-    reconcileIncompleteRuns: (options: EngineRuntimeReconcileOptions) =>
-      RuntimeRun.reconcileIncompleteRuns({
-        capability: options.capability,
-      }),
-    repairSessionProjection: (
-      session,
-      options: EngineRuntimeRepairProjectionOptions,
-    ): Promise<boolean> =>
-      RuntimeRun.repairSessionProjection(session, {
-        capability: options.capability,
-      }),
-    startRun: (options: EngineRuntimeRunStartOptions): Promise<EngineRuntimeRun> =>
-      RuntimeRun.start({
-        ...(options.runId ? { runId: options.runId } : {}),
-        ...(options.parentRunId ? { parentRunId: options.parentRunId } : {}),
-        ...(options.parentToolCallId ? { parentToolCallId: options.parentToolCallId } : {}),
-        capability: options.capability,
-        agentSwarmAuthorization: "none",
-      }),
-    commitExternalMessages: (session, messages) =>
-      RuntimeRun.commitExternalMessages(session, messages),
-    commitExternalMessageOnce: (session, eventId, message) =>
-      RuntimeRun.commitExternalMessageOnce(session, eventId, message),
-  };
+  return createRuntimeRunPort<Session, Registry>();
 }
 
 /** Structural assertion used by tests and host assembly. */

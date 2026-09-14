@@ -1,17 +1,17 @@
 import { readFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { resolveModelProtocol, type ModelProviderConfig } from "../provider/model-router.js";
-import type { ModelCapabilityConfig } from "../provider/model-capabilities.js";
 import type {
   JsonValue,
+  ModelCapabilityConfig,
   ModelReasoningCapabilityConfig,
   ReasoningProtocolOptions,
   ReasoningRequestPatch,
   RequestBodyPath,
-} from "../provider/reasoning-capability.js";
+} from "@pico/core";
 import type { ProviderKind } from "../provider/factory.js";
-import type { LspServerConfig } from "../code-intelligence/lsp-server-discovery.js";
-import type { WorkspaceSandboxConfig } from "../safety/workspace-sandbox.js";
+import type { LspServerConfig } from "@pico/pico-host/code-intelligence/lsp-server-discovery";
+import type { WorkspaceSandboxConfig } from "@pico/pico-host/workspace-sandbox";
 import {
   KEYBINDING_ACTIONS,
   KEYBINDING_CONTEXTS,

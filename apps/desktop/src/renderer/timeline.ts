@@ -24,6 +24,9 @@ export function applyTimelineNotification(
   const payload = isRecord(event.payload) ? event.payload : {};
   const item = isRecord(payload.item) ? payload.item : {};
   const eventType = stringValue(item.eventType) || undefined;
+  // Model-loop boundaries are internal bookkeeping, not conversation progress.
+  // Inference and tool events already describe the current activity.
+  if (eventType === "turn.started") return timeline;
   // ScopedSubagentActivityReporter already folds each trace into an activity snapshot.
   // Trace, claim and model notifications are not additional child tasks.
   if (eventType?.startsWith("subagent.") && eventType !== "subagent.activity") return timeline;

@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
 import type { EngineRuntimeRun } from "../engine/runtime-port.js";
-import { buildRuntimeToolResultInput, redactToolResult } from "../engine/tool-result-builder.js";
-import type { HookService } from "../hooks/service.js";
+import { buildRuntimeToolResultInput, redactToolResult } from "@pico/runtime/tool-result-builder";
+import { logger } from "../observability/logger.js";
+import type { HookService } from "@pico/pico-host/hooks/service";
 import type { ToolDefinition } from "../schema/message.js";
-import { sharedCodeCellAdmission, type CodeCellAdmission } from "./code-cell-admission.js";
+import { sharedCodeCellAdmission, type CodeCellAdmission } from "@pico/runtime/code-cell-admission";
 import { executeCodeCell } from "./code-mode.js";
 import {
   WORKSPACE_FILE_SIDE_EFFECTS,
@@ -11,7 +12,7 @@ import {
   type BaseTool,
   type Registry,
   type ToolExecutionContext,
-} from "./registry.js";
+} from "@pico/pico-host/tool-registry-contract";
 
 export interface CodeModeToolOptions {
   readonly registry: Registry;
@@ -161,6 +162,7 @@ class CodeModeTool implements BaseTool {
                   result,
                   result.output,
                   !dispatched ? "rejected" : result.isError ? "failed" : "succeeded",
+                  logger,
                 );
                 try {
                   await childContext.onCommittedResult?.(finalCall, built.envelope);

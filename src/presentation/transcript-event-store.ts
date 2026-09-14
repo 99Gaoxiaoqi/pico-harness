@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { assertDurableTranscriptEvent as assertCoreDurableTranscriptEvent } from "@pico/core";
 import type {
   AssistantResponseSuppressionReason,
   SubagentActivityEvent,
@@ -616,10 +617,7 @@ export function isDurableTranscriptEvent(event: TranscriptEvent): event is Durab
 export function assertDurableTranscriptEvent(
   value: unknown,
 ): asserts value is DurableTranscriptEvent {
-  assertTranscriptEvent(value);
-  if (!isDurableTranscriptEvent(value)) {
-    throw new Error(`Transcript event ${value.type} is presentation-only`);
-  }
+  assertCoreDurableTranscriptEvent(value);
 }
 
 function transcriptStrings(value: Record<string, unknown>, ...keys: string[]): void {

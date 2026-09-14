@@ -3,25 +3,28 @@ import { openai, createOpenAI } from "@ai-sdk/openai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { createOpenResponses } from "@ai-sdk/open-responses";
 import { generateText, streamText, jsonSchema, type LanguageModelUsage, type ToolSet } from "ai";
-import type { Message, ToolDefinition, Usage, UsageReportedField } from "../schema/message.js";
+import type {
+  LLMProvider,
+  LLMProviderRequestOptions,
+  Message,
+  ToolDefinition,
+  Usage,
+  UsageReportedField,
+} from "@pico/core";
 import type { ProviderConfig } from "./config.js";
-import type { ProviderProtocol, ProviderProfile } from "./profile.js";
-import { resolveProviderProfile } from "./profile.js";
-import {
-  providerRequestSignal,
-  type LLMProvider,
-  type LLMProviderRequestOptions,
-} from "./interface.js";
+import type { ProviderProfile, ProviderProtocol } from "@pico/core";
+import { resolveProviderProfile } from "@pico/runtime";
+import { providerRequestSignal } from "@pico/core";
 import { toAiSdkMessages, fromAiSdkContent, restoreResponsesWebSearch } from "./ai-sdk-messages.js";
 import { OpenAIRequestPolicy } from "./openai-request-policy.js";
 import { applyAnthropicCacheControl } from "./anthropic-cache.js";
-import { applyReasoningRequestPatch } from "./reasoning-capability.js";
-import { defaultToolChoiceNoneWithTools } from "./model-capabilities.js";
-import { snapshotToolDefinitions } from "./prompt-cache.js";
+import { applyReasoningRequestPatch } from "@pico/runtime";
+import { defaultToolChoiceNoneWithTools } from "@pico/runtime";
+import { snapshotToolDefinitions } from "@pico/runtime/prompt-cache";
 import { openCodeClientHeaders } from "./opencode-headers.js";
-import { appendProviderEndpointPath } from "./provider-endpoint.js";
-import { parseRateLimitHeaders } from "./ratelimit.js";
-import { ContextOverflowError, isContextOverflowStatus, LLMStatusError } from "./errors.js";
+import { appendProviderEndpointPath } from "@pico/runtime/provider-endpoint";
+import { parseRateLimitHeaders } from "@pico/runtime/rate-limit";
+import { ContextOverflowError, isContextOverflowStatus, LLMStatusError } from "@pico/core";
 
 /** One model step only. Pico owns tools, permissions, retries and conversation persistence. */
 export class AiSdkProvider implements LLMProvider {

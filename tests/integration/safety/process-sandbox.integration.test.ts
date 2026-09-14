@@ -15,6 +15,10 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { test } from "node:test";
 import {
+  managedProcessLauncher as hostManagedProcessLauncher,
+  SandboxViolationError as HostSandboxViolationError,
+} from "@pico/pico-host/process-sandbox";
+import {
   buildBubblewrapArgs,
   buildMacosProfile,
   buildManagedSpawnPlan,
@@ -24,6 +28,7 @@ import {
   isVerifiedBundledExecutable,
   managedProcessLauncher,
   runtimeReadAliases,
+  SandboxViolationError,
   shellRuntimeReadRoots,
   WINDOWS_RESTRICTED_NODE_OPTIONS,
 } from "../../../src/safety/process-sandbox/index.js";
@@ -34,6 +39,11 @@ import type { McpClient } from "../../../src/mcp/types.js";
 import { BashTool } from "../../../src/tools/bash.js";
 import { ToolRegistry } from "../../../src/tools/registry-impl.js";
 import { WorkspaceRoots } from "../../../src/tools/workspace-roots.js";
+
+test("process sandbox 包入口与旧入口共享运行时身份", () => {
+  assert.equal(hostManagedProcessLauncher, managedProcessLauncher);
+  assert.equal(HostSandboxViolationError, SandboxViolationError);
+});
 
 test("sandbox profile 固定模式与网络语义", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-process-sandbox-policy-"));

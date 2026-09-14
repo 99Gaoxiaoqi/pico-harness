@@ -10,14 +10,14 @@ import { deterministicFingerprint, wakeIdFor } from "../../../src/agent-graph/co
 import { Session } from "../../../src/engine/session.js";
 import { SessionManager } from "../../../src/engine/session-manager.js";
 import {
-  assertAgentGraphRootRunSettled,
   createAgentGraphWorkspaceHost,
   type AgentGraphRunToolBinding,
   type CreateAgentGraphWorkspaceHostOptions,
 } from "../../../src/runtime/agent-graph-host.js";
+import { assertAgentGraphRootRunSettled } from "@pico/runtime/agent-graph-root-run-settlement";
 import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
 import { RuntimeRun } from "../../../src/runtime/runtime-run.js";
-import { formatAgentGraphArtifactRef } from "../../../src/runtime/agent-graph-resource-authority.js";
+import { formatAgentGraphArtifactRef } from "@pico/runtime/agent-graph-resource-authority";
 import { WorkspaceTaskRuntime } from "../../../src/runtime/workspace-runtime.js";
 import { RUNTIME_EVENT_SCHEMA_VERSION } from "../../../src/storage/runtime-event.js";
 import {

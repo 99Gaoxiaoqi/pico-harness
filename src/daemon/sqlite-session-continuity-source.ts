@@ -31,10 +31,10 @@ import { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-
 import type {
   SessionContinuityDataSource,
   SessionSubscriptionSnapshot,
-} from "./session-subscription-owner.js";
-import { parseActiveOverlayPayload } from "./session-active-overlay.js";
-import { PLAN_EVENT_KINDS } from "../plan/events.js";
-import { projectPlanEntries } from "../plan/reducer.js";
+} from "@pico/pico-host/session-subscription-owner";
+import { parseActiveOverlayPayload } from "@pico/pico-host/session-active-overlay";
+import { PLAN_EVENT_KINDS } from "@pico/core";
+import { projectPlanEntries } from "@pico/runtime/plan-reducer";
 
 const DEFAULT_TAIL_LIMIT = 100;
 const DEFAULT_PAGE_LIMIT = 100;

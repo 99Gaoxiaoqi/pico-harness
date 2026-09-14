@@ -22,7 +22,7 @@ import {
   createToolResultEnvelope,
   type ToolResultEnvelope,
 } from "../engine/tool-result-contract.js";
-import type { CanonicalTranscriptToolStart } from "../engine/transcript-tool-start.js";
+import type { CanonicalTranscriptToolStart } from "@pico/core/transcript-tool-start";
 import { summarizeTranscriptToolResult } from "../presentation/transcript-tool-result-hydration.js";
 import {
   defaultTranscriptDurabilityPolicy,

@@ -4,7 +4,8 @@ import { SkillLoader } from "../context/skill.js";
 import { projectResourceCatalog } from "../catalog/resource-catalog.js";
 import { loadPicoProjectConfig } from "../input/pico-config.js";
 import { resolveProjectMcpConfigPath } from "../mcp/config-path.js";
-import { McpConnectionManager } from "../mcp/manager.js";
+import { McpConnectionManager } from "@pico/pico-host/mcp-connection-manager";
+import { logger } from "../observability/logger.js";
 import type { PluginRuntimeSnapshot } from "../plugins/plugin-runtime-snapshot.js";
 
 export interface DesktopResourceCatalogOptions {
@@ -133,7 +134,10 @@ export async function listDesktopMcpServers(
   workspacePath: string,
   options: DesktopResourceCatalogOptions,
 ) {
-  const manager = new McpConnectionManager(undefined, { stdioCwd: workspacePath });
+  const manager = new McpConnectionManager(undefined, {
+    stdioCwd: workspacePath,
+    diagnostics: logger,
+  });
   try {
     const resolution = await resolveProjectMcpConfigPath(workspacePath);
     await manager.replaceSources([

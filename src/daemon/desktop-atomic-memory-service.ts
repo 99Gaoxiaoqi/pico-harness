@@ -1,15 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { sanitizeMemoryContent } from "../memory/atomic/content-safety.js";
-import { AtomicMemoryContextBuilder } from "../memory/atomic/context-builder.js";
-import type { MemoryItemRecord, MemoryItemWrite } from "../memory/atomic/contracts.js";
+import { sanitizeMemoryContent } from "@pico/runtime/atomic-memory/content-safety";
+import { AtomicMemoryContextBuilder } from "@pico/runtime/atomic-memory/context-builder";
+import type { MemoryItemRecord, MemoryItemWrite } from "@pico/core/atomic-memory-contracts";
 import {
   MemoryItemStoreConflictError,
   normalizeLongTermMemoryContent,
-} from "../memory/atomic/contracts.js";
-import type { AtomicMemorySettings } from "../memory/atomic/runtime-contracts.js";
+} from "@pico/core/atomic-memory-contracts";
+import type { AtomicMemorySettings } from "@pico/core/atomic-memory-runtime-contracts";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
-import { SqliteMemoryItemStore } from "../storage/sqlite/sqlite-memory-item-store.js";
+import { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-store";
 import type {
   RuntimeMemoryItem,
   RuntimeMemorySettings,

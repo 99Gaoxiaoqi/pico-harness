@@ -10,7 +10,7 @@ import {
   SqliteAgentGraphOutputLedger,
   agentOutputRuntimeEventId,
   type AgentGraphOutputOwnerFencePort,
-} from "../../../src/runtime/agent-graph-output-ledger.js";
+} from "@pico/runtime/agent-graph-output-ledger";
 import { RuntimeEventStoreOwnerFenceError } from "../../../src/storage/runtime-event-store-contracts.js";
 import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
 import { RuntimeEventDecodeError, decodeRuntimeEvent } from "../../../src/storage/runtime-event.js";

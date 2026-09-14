@@ -1,4 +1,3 @@
-import type { EffectiveConfigResolver } from "../input/effective-config.js";
 import type { UserConfigStore } from "../input/user-config-store.js";
 import { mcpToolNameMayBelongToServer } from "../mcp/types.js";
 import type { CredentialVault } from "../provider/credential-vault.js";
@@ -10,11 +9,11 @@ import {
 } from "./desktop-automation-service.js";
 import type { DesktopRequestHandlers } from "./desktop-request-router.js";
 import {
-  RUNTIME_ERROR_CODES,
-  RuntimeProtocolError,
-  type JsonValue,
-  type RuntimeRequest,
-} from "@pico/protocol";
+  createDesktopAutomationRequestHandlers as createHostDesktopAutomationRequestHandlers,
+  type DesktopAutomationPort,
+} from "@pico/pico-host/desktop-automation-request-handlers";
+import { type RuntimeRequest, type JsonValue } from "@pico/protocol";
+import type { EffectiveConfigResolver } from "../input/effective-config.js";
 
 /** Dependencies retained by the Desktop composition root. */
 export interface DesktopAutomationRequestContext {
@@ -29,7 +28,7 @@ export interface DesktopAutomationRequestContext {
   readonly withProviderDependencyLock: (operation: () => Promise<JsonValue>) => Promise<JsonValue>;
 }
 
-/** Build the Automation CRUD/import request boundary. */
+/** @deprecated Desktop Automation request routing has moved to @pico/pico-host. */
 export function createDesktopAutomationRequestHandlers(
   context: DesktopAutomationRequestContext,
 ): Pick<
@@ -44,22 +43,6 @@ export function createDesktopAutomationRequestHandlers(
   | "automation.credential.import"
   | "automation.create"
 > {
-  const requireAutomations = (): DesktopAutomationService => {
-    if (context.automations) return context.automations;
-    throw new RuntimeProtocolError(
-      RUNTIME_ERROR_CODES.METHOD_NOT_FOUND,
-      "Automations 尚未连接到 daemon Cron runtime",
-    );
-  };
-
-  const listJobs = async (workspacePath: string): Promise<JsonValue> => {
-    const [canonical, automations] = await Promise.all([
-      context.requireTrustedWorkspace(workspacePath),
-      Promise.resolve(requireAutomations()),
-    ]);
-    return { jobs: automations.list(canonical) };
-  };
-
   const importAutomationCredential = async (
     params: RuntimeRequest<"automation.credential.import">["params"],
   ): Promise<JsonValue> => {
@@ -71,12 +54,12 @@ export function createDesktopAutomationRequestHandlers(
     });
   };
 
-  const createTrustedAutomation = async (
-    params: RuntimeRequest<"automation.create">["params"],
-  ): Promise<JsonValue> => {
-    const canonical = await context.requireTrustedWorkspace(params.workspacePath);
+  const foregroundOnlyTools = async (
+    canonical: string,
+    allowedTools: readonly string[],
+  ): Promise<ReadonlySet<string>> => {
     const pluginSnapshot = await context.pluginRuntimeSnapshotRegistry.get(canonical);
-    const foregroundOnlyTools = new Set(
+    const tools = new Set(
       context.pluginRuntimeSnapshotRegistry.capabilityRegistry.toolNames(
         pluginSnapshot.capabilities.filter((capability) => capability.kind === "tool"),
       ),
@@ -84,86 +67,46 @@ export function createDesktopAutomationRequestHandlers(
     const pluginMcpServers = pluginSnapshot.mcpSources.flatMap((source) =>
       Object.keys(source.config?.mcpServers ?? {}),
     );
-    for (const toolName of params.allowedTools) {
+    for (const toolName of allowedTools) {
       if (pluginMcpServers.some((server) => mcpToolNameMayBelongToServer(toolName, server))) {
-        foregroundOnlyTools.add(toolName);
+        tools.add(toolName);
       }
     }
-    const job = await createTrustedDesktopAutomation(requireAutomations(), canonical, params, {
-      credentialVault: context.credentialVault,
-      effectiveConfigResolver: context.effectiveConfigResolver,
-      userConfigStore: context.userConfigStore,
-      foregroundOnlyTools,
-      now: context.now,
-    });
-    context.publishJob(job);
-    return { job };
+    return tools;
   };
 
-  const createJob = async (params: RuntimeRequest<"jobs.create">["params"]): Promise<JsonValue> => {
-    const canonical = await context.requireTrustedWorkspace(params.workspacePath);
-    const job = await requireAutomations().create(canonical, params);
-    context.publishJob(job);
-    return { job };
-  };
-
-  const updateJob = async (params: RuntimeRequest<"jobs.update">["params"]): Promise<JsonValue> => {
-    const canonical = await context.requireTrustedWorkspace(params.workspacePath);
-    const job = requireAutomations().update(canonical, params.jobId, params);
-    context.publishJob(job);
-    return { job };
-  };
-
-  const deleteJob = async (workspacePath: string, jobId: string): Promise<JsonValue> => {
-    const canonical = await context.requireTrustedWorkspace(workspacePath);
-    return { deleted: requireAutomations().delete(canonical, jobId) };
-  };
-
-  const setJobEnabled = async (
-    workspacePath: string,
-    jobId: string,
-    enabled: boolean,
-  ): Promise<JsonValue> => {
-    const canonical = await context.requireTrustedWorkspace(workspacePath);
-    const job = await requireAutomations().setEnabled(canonical, jobId, enabled);
-    context.publishJob(job);
-    return { job };
-  };
-
-  const runJobNow = async (workspacePath: string, jobId: string): Promise<JsonValue> => {
-    const canonical = await context.requireTrustedWorkspace(workspacePath);
-    const result = await requireAutomations().runNow(canonical, jobId);
-    context.publishJob(result.job);
-    return result;
-  };
-
-  const jobHistory = async (
-    workspacePath: string,
-    jobId: string,
-    limit?: number,
-  ): Promise<JsonValue> => {
-    const canonical = await context.requireTrustedWorkspace(workspacePath);
-    return { runs: requireAutomations().history(canonical, jobId, limit) };
-  };
+  const automations: DesktopAutomationPort | undefined = context.automations
+    ? {
+        list: (workspacePath) => context.automations!.list(workspacePath),
+        create: (workspacePath, params) => context.automations!.create(workspacePath, params),
+        createTrusted: (workspacePath, params, foregroundOnlyTools) =>
+          createTrustedDesktopAutomation(context.automations!, workspacePath, params, {
+            credentialVault: context.credentialVault,
+            effectiveConfigResolver: context.effectiveConfigResolver,
+            userConfigStore: context.userConfigStore,
+            foregroundOnlyTools,
+            now: context.now,
+          }),
+        update: (workspacePath, jobId, params) =>
+          context.automations!.update(workspacePath, jobId, params),
+        delete: (workspacePath, jobId) => context.automations!.delete(workspacePath, jobId),
+        setEnabled: (workspacePath, jobId, enabled) =>
+          context.automations!.setEnabled(workspacePath, jobId, enabled),
+        runNow: (workspacePath, jobId) => context.automations!.runNow(workspacePath, jobId),
+        history: (workspacePath, jobId, limit) =>
+          context.automations!.history(workspacePath, jobId, limit),
+      }
+    : undefined;
 
   return {
-    "jobs.list": (request) => listJobs(request.params.workspacePath),
-    "jobs.create": (request) => context.withProviderDependencyLock(() => createJob(request.params)),
-    "jobs.update": (request) => updateJob(request.params),
-    "jobs.delete": (request) => deleteJob(request.params.workspacePath, request.params.jobId),
-    "jobs.setEnabled": (request) =>
-      context.withProviderDependencyLock(() =>
-        setJobEnabled(request.params.workspacePath, request.params.jobId, request.params.enabled),
-      ),
-    "jobs.runNow": (request) =>
-      context.withProviderDependencyLock(() =>
-        runJobNow(request.params.workspacePath, request.params.jobId),
-      ),
-    "jobs.history": (request) =>
-      jobHistory(request.params.workspacePath, request.params.jobId, request.params.limit),
+    ...createHostDesktopAutomationRequestHandlers({
+      ...(automations ? { automations } : {}),
+      foregroundOnlyTools,
+      requireTrustedWorkspace: context.requireTrustedWorkspace,
+      publishJob: context.publishJob,
+      withProviderDependencyLock: context.withProviderDependencyLock,
+    }),
     "automation.credential.import": (request) =>
       context.withProviderDependencyLock(() => importAutomationCredential(request.params)),
-    "automation.create": (request) =>
-      context.withProviderDependencyLock(() => createTrustedAutomation(request.params)),
   };
 }

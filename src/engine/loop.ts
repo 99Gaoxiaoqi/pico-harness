@@ -9,79 +9,84 @@ import {
   type SubagentResult,
 } from "./subagent-runner.js";
 export type { SubagentExecutionRuntime } from "./subagent-runner.js";
-import { providerForReporter } from "./provider-reporting.js";
+import { providerForReporter } from "@pico/runtime";
 import {
   buildRuntimeToolResultInput,
   buildEphemeralToolResult,
   redactToolResult,
-} from "./tool-result-builder.js";
-import { buildEvidenceSnapshot, estimateTraceLength } from "./context-evidence.js";
+} from "@pico/runtime/tool-result-builder";
+import { buildEvidenceSnapshot, estimateTraceLength } from "@pico/runtime";
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
-import type { LLMProvider, LLMProviderRequestOptions } from "../provider/interface.js";
-import { ContextOverflowError, isAbortError } from "../provider/errors.js";
-import { generateWithRetry, type RateLimitFailure, type RetryInfo } from "../provider/retry.js";
+import type { LLMProvider, LLMProviderRequestOptions, RuntimeToolResultStatus } from "@pico/core";
+import { ContextOverflowError, isAbortError } from "@pico/core";
+import {
+  generateWithRetry,
+  type RateLimitFailure,
+  type RetryInfo,
+} from "@pico/runtime/provider-retry";
 import {
   type Message,
   type ToolCall,
   type ToolDefinition,
   type ToolResult,
-} from "../schema/message.js";
+} from "@pico/core";
 import {
   ToolCommitBoundaryError,
   type Registry,
   type ToolFileSideEffects,
   type ToolExecutionStep,
-} from "../tools/registry.js";
-import type { Compactor } from "../context/compactor.js";
-import { ContextCompactionError, sanitizeToolPairs } from "../context/compactor.js";
+} from "@pico/pico-host/tool-registry-contract";
+import {
+  ContextCompactionError,
+  sanitizeToolPairs,
+  type Compactor,
+} from "@pico/runtime/compactor";
 import type {
   FullCompactionPreview,
   FullCompactionRequest,
   FullCompactor,
-} from "../context/full-compactor.js";
-import {
-  recordRuntimeCompactionCheckpoint,
-  computeCheckpointSourceDigest,
-} from "../context/runtime-compaction-checkpoint.js";
-import type { ContextBudget } from "../context/context-budget.js";
-import { estimateModelInputTokens, estimateMessagesTokens } from "../context/context-budget.js";
-import { findSafeCompactionCut } from "../context/safe-compaction-boundary.js";
-import { withProviderCallContext } from "../observability/provider-call-context.js";
+} from "@pico/runtime/full-compactor";
+import { recordRuntimeCompactionCheckpoint } from "@pico/runtime/runtime-compaction-checkpoint";
+import { computeCheckpointSourceDigest } from "@pico/core/checkpoint-digest";
+import type { ContextBudget } from "@pico/runtime/context-budget";
+import { estimateModelInputTokens, estimateMessagesTokens } from "@pico/runtime/context-budget";
+import { findSafeCompactionCut } from "@pico/runtime/safe-compaction-boundary";
+import { withProviderCallContext } from "@pico/runtime";
 import { PromptComposer, type PromptLayers } from "../context/composer.js";
 import type { SkillLoader } from "../context/skill.js";
-import { RecoveryManager } from "../context/recovery.js";
-import { TodoStore } from "../context/todo-store.js";
-import { ToolDisclosure, type ToolDisclosureTurn } from "../tools/tool-disclosure.js";
-import { SilentReporter, type Reporter } from "./reporter.js";
-import { SteerQueue } from "./steer-queue.js";
-import { ReminderInjector, ToolGuardrailController, type GuardrailOptions } from "./reminder.js";
-import { IterationBudget, type BudgetConfig, type BudgetDecision } from "./budget.js";
-import type { GoalManager } from "./goal-manager.js";
-import { evaluateGoalCompletion } from "./goal-evaluator.js";
-import { STALL_EVALUATOR_THRESHOLD, STALL_BLOCK_THRESHOLD } from "./goal-manager.js";
+import { RecoveryManager } from "@pico/runtime/recovery";
+import type { TodoStore } from "@pico/storage/todo-store";
+import { ToolDisclosure, type ToolDisclosureTurn } from "@pico/runtime/tool-disclosure";
+import type { Reporter } from "@pico/core";
+import { SilentReporter } from "@pico/runtime/silent-reporter";
+import { IterationBudget, SteerQueue, type BudgetConfig, type BudgetDecision } from "@pico/runtime";
+import {
+  ReminderInjector,
+  ToolGuardrailController,
+  type GuardrailOptions,
+} from "@pico/runtime/reminder";
+import type { GoalManager } from "@pico/runtime/goal-manager";
+import { evaluateGoalCompletion } from "@pico/runtime/goal-evaluator";
+import { STALL_EVALUATOR_THRESHOLD, STALL_BLOCK_THRESHOLD } from "@pico/runtime/goal-manager";
 import { Tracer, exportTraceToFile, truncate, type Span } from "../observability/trace.js";
 import { logger } from "../observability/logger.js";
-import { canonicalizeWorkspacePath } from "../paths/pico-paths.js";
-import { safeResolve } from "../tools/registry-impl.js";
-import type { WorkspaceRoots } from "../tools/workspace-roots.js";
+import { canonicalizeWorkspacePath } from "@pico/pico-host/pico-paths";
+import { safeResolve } from "@pico/pico-host/file-tool-helpers";
+import type { WorkspaceRoots } from "@pico/pico-host/workspace-roots";
 import type { Session } from "./session.js";
-import type {
-  EngineRuntimePort,
-  EngineRuntimeRun,
-  EngineRuntimeToolResultStatus,
-} from "./runtime-port.js";
-import { createToolResultEnvelope, type ToolResultEnvelope } from "./tool-result-contract.js";
-import type { CanonicalTranscriptToolStart } from "./transcript-tool-start.js";
-import { PlanHandoffController } from "./plan-handoff.js";
-import type { HookService } from "../hooks/service.js";
-import { ToolAccesses } from "../tools/tool-access.js";
-import { ToolScheduler } from "../tools/tool-scheduler.js";
+import type { EngineRuntimePort, EngineRuntimeRun } from "./runtime-port.js";
+import { createToolResultEnvelope, type ToolResultEnvelope } from "@pico/core";
+import type { CanonicalTranscriptToolStart } from "@pico/core/transcript-tool-start";
+import { PlanHandoffController } from "@pico/runtime/plan-handoff";
+import type { HookService } from "@pico/pico-host/hooks/service";
+import { ToolAccesses } from "@pico/runtime/tool-access";
+import { ToolScheduler } from "@pico/runtime/tool-scheduler";
 import {
   promptCacheConversationShardSeed,
   snapshotToolDefinitions,
-} from "../provider/prompt-cache.js";
+} from "@pico/runtime/prompt-cache";
 import {
   fileHistoryAddJournalWarning,
   fileHistoryBeginJournal,
@@ -89,8 +94,8 @@ import {
   fileHistoryJournalCoversPath,
   fileHistoryTrackEdit,
   type FileHistoryJournal,
-} from "../safety/file-history.js";
-import { raceWithDeadline } from "../util/race-with-deadline.js";
+} from "@pico/pico-host/file-history-runtime";
+import { raceWithDeadline } from "@pico/runtime/deadline";
 
 const DEFAULT_AUTO_COMPACT_TRIGGER_RATIO = 0.85;
 const DEFAULT_RETAINED_CONTEXT_RATIO = 0.2;
@@ -117,7 +122,7 @@ interface EngineSessionExecutionContext {
 const engineSessionContext = new AsyncLocalStorage<EngineSessionExecutionContext>();
 // Plan 模式工具面单源迁移至 tool-surface.ts 的 PLAN_MODE_TOOL_NAMES
 // （只读侦察 + ask_user/submit_plan 协议闭环），此处仅保留消费接口。
-import { isPlanModeTool } from "../tools/tool-surface.js";
+import { isPlanModeTool } from "@pico/runtime/tool-surface";
 
 function isPlanProviderTool(name: string): boolean {
   return isPlanModeTool(name);
@@ -751,6 +756,7 @@ export class AgentEngine {
         : {}),
       ...(this.hookService ? { hookService: this.hookService } : {}),
       ...(signal ? { signal } : {}),
+      logger,
     });
     if (result) {
       try {
@@ -1078,6 +1084,7 @@ export class AgentEngine {
           ...(promptCacheRequest.active !== undefined
             ? { promptCacheShardActive: promptCacheRequest.active }
             : {}),
+          logger,
           ...requestOptions,
         },
       );
@@ -2174,7 +2181,7 @@ export class AgentEngine {
       const guardDecision = this.guardrail.beforeCall(toolCall);
       const runtimeRun = this.runtimePort?.currentRun();
       let result: ToolResult;
-      let runtimeStatus: EngineRuntimeToolResultStatus;
+      let runtimeStatus: RuntimeToolResultStatus;
       let dispatched = false;
       if (!guardDecision.allowed) {
         await this.hookService?.dispatch(
@@ -2240,7 +2247,7 @@ export class AgentEngine {
             finalOutput,
             runtimeStatus,
           )
-        : buildEphemeralToolResult(toolCall, result, finalOutput, runtimeStatus);
+        : buildEphemeralToolResult(toolCall, result, finalOutput, runtimeStatus, logger);
       const { message, envelope } = builtResult;
 
       try {
@@ -2278,9 +2285,9 @@ export class AgentEngine {
     toolCall: ToolCall,
     result: ToolResult,
     modelOutput: string,
-    status: EngineRuntimeToolResultStatus,
+    status: RuntimeToolResultStatus,
   ): Promise<{ message: Message; envelope: ToolResultEnvelope }> {
-    const built = buildRuntimeToolResultInput(toolCall, result, modelOutput, status);
+    const built = buildRuntimeToolResultInput(toolCall, result, modelOutput, status, logger);
     return {
       message:
         status === "rejected"

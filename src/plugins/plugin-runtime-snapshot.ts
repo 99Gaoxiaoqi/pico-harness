@@ -2,9 +2,9 @@ import { readFile, stat } from "node:fs/promises";
 import { extname } from "node:path";
 import type { AgentExternalCatalogSource } from "../agents/catalog.js";
 import type { ExternalResourceCatalogSource } from "../catalog/resource-catalog.js";
-import type { LspServerConfig } from "../code-intelligence/index.js";
+import type { LspServerConfig } from "@pico/pico-host/code-intelligence";
 import type { HookConfigSourceSpec } from "../hooks/config.js";
-import type { McpConfigSource } from "../mcp/manager.js";
+import type { McpConfigSource } from "@pico/pico-host/mcp-connection-manager";
 import type { McpConfig, McpServerConfig } from "../mcp/types.js";
 import { PluginManagementService } from "./plugin-management-service.js";
 import {
@@ -13,7 +13,7 @@ import {
   type PluginCapabilityRegistry,
 } from "./plugin-capability.js";
 import { createPluginHookTrustAuthority } from "./plugin-hook-trust.js";
-import type { HookTrustAuthority } from "../hooks/trust/store.js";
+import type { HookTrustAuthority } from "@pico/pico-host/hooks/trust/store";
 import { createPluginVariableMap, substitutePluginVariablesDeep } from "./plugin-resolver.js";
 import type {
   PluginCompatibility,

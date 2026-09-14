@@ -1,28 +1,28 @@
-import { createConfiguredSubagentOutputTool } from "../tools/configured-subagent-output.js";
-import { readConfiguredSubagentDefinition } from "./configured-subagent-session.js";
+import { createConfiguredSubagentOutputTool } from "@pico/pico-host/configured-subagent-output-tool";
+import { readConfiguredSubagentDefinition } from "@pico/runtime/configured-subagent-session";
 import {
   createConfiguredSubagentOutputStore,
   ConfiguredSubagentOutputNotFoundError,
-} from "./configured-subagent-output-store.js";
-import { WebSearchTool } from "../tools/web.js";
+} from "@pico/pico-host/configured-subagent-output-store";
+import { WebSearchTool } from "@pico/pico-host/web-tools";
 import { UserConfigStore } from "../input/user-config-store.js";
-import { resolveNativeWebSearchCapability } from "../provider/model-web-search.js";
+import { resolveNativeWebSearchCapability } from "@pico/runtime";
 import {
   DEFAULT_WEB_SEARCH_SETTINGS,
   guardNativeSearchRequests,
-  routeRuntimeWebSearch,
   webSearchUnavailableReason,
   type RuntimeWebSearchSettings,
-} from "./web-search.js";
+} from "@pico/runtime/web-search";
+import { routeRuntimeWebSearch } from "@pico/pico-host/runtime-web-search";
 import {
   ConfiguredAgentListTool,
   ConfiguredAgentSpawnTool,
   type ConfiguredSubagentExecutor,
-} from "../tools/configured-subagent-tools.js";
+} from "@pico/runtime/configured-subagent-tools";
 import type {
   ConfiguredSubagentCatalogPort,
   SubagentCapabilityDefinition,
-} from "../agents/subagent-profiles.js";
+} from "@pico/core/subagent-capabilities";
 import type { RuntimeSubagentPreset } from "@pico/protocol";
 import {
   configuredSubagentExecutionBoundary,
@@ -32,17 +32,17 @@ import {
   CHILD_AGENT_TOOL_CONSTRUCTORS,
   buildChildAgentSafetyMiddleware,
 } from "../tools/child-agent-policy.js";
-import { type AtomicMemoryLifecycle } from "./atomic-memory-lifecycle.js";
-import { createAgentSwarmStatusTool } from "../tools/agent-swarm-status-tool.js";
-import { AGENT_SWARM_SUPERVISOR_TOOL_NAMES } from "../agent-graph/core/tool-names.js";
+import { type AtomicMemoryLifecycle } from "@pico/runtime";
+import { createAgentSwarmStatusTool } from "@pico/runtime/agent-swarm-status-tool";
+import { AGENT_SWARM_SUPERVISOR_TOOL_NAMES } from "@pico/core/agent-graph-tool-names";
 import { isPlanGraphWaiting, reconcilePlanExecution } from "./plan-execution-recovery.js";
 import { randomUUID } from "node:crypto";
 import { mkdir, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { AgentEngine, isPlanProviderTool } from "../engine/loop.js";
-import { PlanHandoffController } from "../engine/plan-handoff.js";
-import type { GoalManager } from "../engine/goal-manager.js";
+import { PlanHandoffController } from "@pico/runtime/plan-handoff";
+import type { GoalManager } from "@pico/runtime/goal-manager";
 import { globalSessionManager, type Session } from "../engine/session.js";
 import { sessionEntryKey } from "../engine/session-manager-state.js";
 import type { SessionManagerLease } from "../engine/session-manager.js";
@@ -50,34 +50,35 @@ import {
   reconcileUnfinishedSessionForksOrThrow,
   SessionForkService,
 } from "../engine/session-fork-service.js";
-import { TerminalReporter, type Reporter } from "../engine/reporter.js";
+import type { Reporter, RuntimeSessionSelection } from "@pico/core";
+import { TerminalReporter } from "@pico/cli/terminal-reporter";
 import { Compactor } from "../context/compactor.js";
 import { FullCompactor } from "../context/full-compactor.js";
 import {
   createContextBudget,
   estimateTokenBudgetAsChars,
   type ContextBudget,
-} from "../context/context-budget.js";
+} from "@pico/runtime/context-budget";
 import { PromptComposer } from "../context/composer.js";
-import type { TodoStore } from "../context/todo-store.js";
-import type { AgentGraphProfileSnapshot } from "../agent-graph/core/contracts.js";
+import type { TodoStore } from "@pico/storage/todo-store";
+import type { AgentGraphProfileSnapshot } from "@pico/core/agent-graph-contracts";
 import { SkillLoader, type Skill } from "../context/skill.js";
-import { ToolDisclosure } from "../tools/tool-disclosure.js";
+import { ToolDisclosure } from "@pico/runtime/tool-disclosure";
 import { createCodeModeTool } from "../tools/code-mode-tool.js";
-import { codeCellAdmissionFor } from "../tools/code-cell-admission.js";
-import type { ToolHostKind } from "../tools/tool-surface.js";
-import { type ProviderKind } from "../provider/factory.js";
-import { ContextOverflowError, isAbortError } from "../provider/errors.js";
-import type { ProviderConfig } from "../provider/config.js";
+import { codeCellAdmissionFor } from "@pico/runtime/code-cell-admission";
+import type { ToolHostKind } from "@pico/runtime/tool-surface";
+import type { ProviderKind } from "@pico/core";
+import { ContextOverflowError, isAbortError } from "@pico/core";
+import type { ProviderConfig } from "@pico/runtime/provider-config";
 import type { CredentialResolver } from "../provider/credential-vault.js";
-import type { LLMProvider } from "../provider/interface.js";
-import { resolveProviderProfile } from "../provider/profile.js";
-import { ToolRegistry } from "../tools/registry-impl.js";
+import type { LLMProvider } from "@pico/core";
+import { resolveProviderProfile } from "@pico/runtime";
+import type { ToolRegistry } from "@pico/pico-host/tool-registry";
 import { buildDefaultToolRegistry } from "../tools/default-registry.js";
-import type { AskUserHandler } from "../tools/ask-user.js";
-import { WorkspaceRoots, workspaceAccessesFromCall } from "../tools/workspace-roots.js";
+import type { AskUserHandler } from "@pico/pico-host/ask-user-tool";
+import { WorkspaceRoots, workspaceAccessesFromCall } from "@pico/pico-host/workspace-roots";
 import type { DefaultToolRegistryOptions } from "../tools/default-registry.js";
-import { FetchURLTool } from "../tools/web.js";
+import { FetchURLTool } from "@pico/pico-host/web-tools";
 import {
   AGENT_GRAPH_SUPERVISOR_TOOL_NAMES,
   createAgentGraphSupervisorTools,
@@ -90,11 +91,11 @@ import {
   type GraphOperatorActivationContext,
 } from "../tools/agent-output-tool.js";
 import { CostTracker, type CostTrackerOptions } from "../observability/tracker.js";
-import { ensureSessionUsageBaseline } from "../observability/usage-baseline.js";
+import { ensureSessionUsageBaseline } from "@pico/runtime/usage-baseline";
 import type { ModelRouter } from "../provider/model-router.js";
 import { Tracer } from "../observability/trace.js";
 import { logger } from "../observability/logger.js";
-import { RuntimeEventStoreIntegrityError } from "../storage/runtime-event-store-contracts.js";
+import { RuntimeEventStoreIntegrityError } from "@pico/storage/runtime-event-store-contracts";
 import {
   globalApprovalManager,
   classifyHardlineCommand,
@@ -111,35 +112,36 @@ import {
   permissionScopeForCall,
   type PermissionRuntimeSettings,
 } from "../approval/session-permissions.js";
-import { bashCommandFromArgs } from "../approval/bash-paths.js";
+import { bashCommandFromArgs } from "@pico/runtime/bash-paths";
 import { computeApprovalDiff } from "../approval/diff.js";
 import {
   classifyToolPermission,
   evaluateToolPermission,
   permissionReasonForCategory,
-  type RuntimePermissionMode,
   type ToolPermissionCategory,
-} from "../approval/tool-permission-policy.js";
+} from "@pico/core/tool-permission-policy";
+import type { RuntimePermissionMode } from "@pico/core";
 import { createSessionRuntime, type SessionRuntime } from "./session-runtime.js";
-import type {
-  PersistedSessionSettings,
-  PersistedSessionSettingsWrite,
-} from "../engine/session-runtime.js";
-import type { MiddlewareFunc } from "../tools/registry.js";
+import type { PersistedSessionSettings, PersistedSessionSettingsWrite } from "@pico/core";
+import type { MiddlewareFunc, ToolExecutionContext } from "@pico/pico-host/tool-registry-contract";
 import {
   McpConnectionManager,
   type McpConfigSource,
   type McpRemoteNetworkRequest,
   type McpStatusSnapshot,
-} from "../mcp/manager.js";
-import { isMcpToolName } from "../mcp/types.js";
-import type { ToolCall } from "../schema/message.js";
+} from "@pico/pico-host/mcp-connection-manager";
+import { isMcpToolName } from "@pico/runtime-host/mcp-protocol";
+import type { ToolCall } from "@pico/core";
 import { createBackgroundMcpClient } from "../safety/background-mcp-client.js";
-import { configuredMcpServerNames, filterPluginMcpSources } from "../mcp/effective-config.js";
-import type { ScheduleDraftCoordinator } from "../tasks/cron-draft.js";
-import { looksLikeScheduleCreationIntent, ScheduleTaskTool } from "../tools/schedule-task.js";
-import { BackgroundManager } from "../tools/background-manager.js";
-import type { HookService } from "../hooks/service.js";
+import {
+  configuredMcpServerNames,
+  filterPluginMcpSources,
+} from "@pico/pico-host/effective-mcp-config";
+import type { ScheduleDraftCoordinator } from "@pico/core/cron-draft-contract";
+import { looksLikeScheduleCreationIntent } from "@pico/runtime/schedule-intent";
+import { ScheduleTaskTool } from "@pico/pico-host/schedule-task-tool";
+import { BackgroundManager } from "@pico/pico-host/background-manager";
+import type { HookService } from "@pico/pico-host/hooks/service";
 import {
   getOrCreateSessionSettings,
   setSessionAdditionalDirectories,
@@ -148,8 +150,8 @@ import {
   type SessionSettings,
 } from "../input/session-settings.js";
 import { createIsolatedPicoConfig, loadPicoProjectConfig } from "../input/pico-config.js";
-import { hasExplicitNetworkIntent } from "../safety/workspace-sandbox.js";
-import { createSandboxPolicy, normalizeRoots } from "../safety/process-sandbox/index.js";
+import { hasExplicitNetworkIntent } from "@pico/pico-host/workspace-sandbox";
+import { createSandboxPolicy, normalizeRoots } from "@pico/pico-host/process-sandbox";
 import { compileRuntimeProcessSandbox } from "../safety/runtime-process-sandbox.js";
 import {
   applyExecutionBoundaryExpansion,
@@ -157,11 +159,10 @@ import {
   canWritePath,
   executionBoundaryContains,
   type ExecutionBoundary,
-} from "../safety/permission-profile.js";
-import { canonicalizeSandboxBoundaryExpansion } from "../safety/sandbox-boundary-path.js";
-import type { CliSessionSelection } from "../cli/session-resolver.js";
-import { SqliteRuntimeControlStore } from "../storage/sqlite/sqlite-runtime-control-store.js";
-import { WorkspaceTrustStore } from "../security/workspace-trust.js";
+} from "@pico/core/permission-profile";
+import { canonicalizeSandboxBoundaryExpansion } from "@pico/runtime/sandbox-boundary-path";
+import { SqliteRuntimeControlStore } from "@pico/storage/sqlite/sqlite-runtime-control-store";
+import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
 import {
   BackgroundPolicyViolationError,
   buildBackgroundAutonomousMiddleware,
@@ -179,18 +180,23 @@ import {
 } from "../plugins/plugin-capability.js";
 import { registerPluginCapabilityTools } from "../plugins/plugin-tool-activation.js";
 import { activatePluginProviderCapabilities } from "../plugins/plugin-provider-activation.js";
-import { resolvePicoHome, resolvePicoPaths } from "../paths/pico-paths.js";
-import { SqliteSessionWorkbarRepository } from "../storage/sqlite/sqlite-session-workbar-repository.js";
-import { buildSessionTaskPromptBlock } from "../tools/session-tasks.js";
+import { resolvePicoHome, resolvePicoPaths } from "@pico/pico-host/pico-paths";
+import { SqliteSessionWorkbarRepository } from "@pico/storage";
+import { buildSessionTaskPromptBlock } from "@pico/runtime/session-task-tools";
 import {
   createBrowserAgentTools,
   type BoundBrowserAgentAuthority,
-} from "../tools/browser-agent.js";
+} from "@pico/pico-host/browser-agent-tools";
 import { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-store.js";
 import { currentRuntimeRun, RuntimeRun } from "./runtime-run.js";
-import { PlanCoordinator } from "../plan/coordinator.js";
-import { PlanConflictError, type PlanProjection, type PlanProposal } from "../plan/contract.js";
-import { RuntimeCleanupScope } from "./runtime-cleanup.js";
+import { PlanCoordinator } from "@pico/runtime/plan-coordinator";
+import { PlanConflictError, type PlanProjection } from "@pico/core";
+import {
+  approvedPlanExecutionPrompt,
+  planRevisionRequestTurnTail,
+  resumedPlanExecutionPrompt,
+} from "@pico/runtime/plan-execution-prompts";
+import { RuntimeCleanupScope } from "@pico/runtime";
 import {
   emitRuntimeLifecycleEvent,
   RuntimeRunExecutor,
@@ -202,13 +208,11 @@ import {
 import { createEngineRuntimePort } from "./engine-runtime-port-adapter.js";
 import { createSessionForkRuntimePort } from "./session-fork-runtime-port-adapter.js";
 import { bindRuntimeHookCapabilities } from "./runtime-hook-assembly.js";
-import type { HookHostNetworkRequest } from "../hooks/executors/index.js";
-import type { RequestSandboxBoundaryHandler } from "../tools/request-sandbox-boundary.js";
+import type { HookHostNetworkRequest } from "@pico/pico-host/hooks/executors";
+import type { RequestSandboxBoundaryHandler } from "@pico/pico-host/request-sandbox-boundary-tool";
 
 const livePlanAdmissions = new Set<string>();
 const liveConfiguredChildAdmissions = new Set<string>();
-const PLAN_REVISION_FEEDBACK_MAX_CHARS = 4_000;
-const PLAN_REVISION_CONTEXT_FIELD_MAX_CHARS = 256;
 import {
   assembleRuntimeModels,
   billingRouteForProvider,
@@ -219,10 +223,10 @@ import type {
   RunAgentCliResult,
   RuntimeExecution,
   RuntimeLifecycleEvent,
-} from "./runtime-contract.js";
-import { AtomicMemoryContextBuilder } from "../memory/atomic/context-builder.js";
+} from "@pico/runtime/runtime-contract";
+import { AtomicMemoryContextBuilder } from "@pico/runtime/atomic-memory/context-builder";
 import { buildMemoryTriggerTools } from "../memory/memory-trigger-tools.js";
-import { SqliteMemoryItemStore } from "../storage/sqlite/sqlite-memory-item-store.js";
+import { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-store";
 import {
   AtomicMemoryRuntime,
   ProviderAtomicMemoryModel,
@@ -235,30 +239,19 @@ export type {
   RunAgentUsage,
   RuntimeExecution,
   RuntimeLifecycleEvent,
-} from "./runtime-contract.js";
+} from "@pico/runtime/runtime-contract";
 
 export { loadImage } from "../input/prepare-prompt.js";
-export * from "./agent-recoverable-task-adapter.js";
+export * from "@pico/pico-host/agent-recoverable-task-adapter";
+export {
+  MAX_HOST_AGENT_MAX_TURNS,
+  MIN_HOST_AGENT_MAX_TURNS,
+  resolveHostAgentMaxTurns,
+} from "@pico/runtime/host-agent-turn-budget";
+import { resolveHostAgentMaxTurns } from "@pico/runtime/host-agent-turn-budget";
 
 export type RunAgentEnv = Record<string, string | undefined>;
 export type RunAgentProviderFactory = RuntimeProviderFactory;
-export const MIN_HOST_AGENT_MAX_TURNS = 1;
-export const MAX_HOST_AGENT_MAX_TURNS = 200;
-
-export function resolveHostAgentMaxTurns(value?: unknown): number | undefined {
-  if (value === undefined) return undefined;
-  if (
-    typeof value !== "number" ||
-    !Number.isInteger(value) ||
-    value < MIN_HOST_AGENT_MAX_TURNS ||
-    value > MAX_HOST_AGENT_MAX_TURNS
-  ) {
-    throw new Error(
-      `maxTurns 必须是 ${MIN_HOST_AGENT_MAX_TURNS}..${MAX_HOST_AGENT_MAX_TURNS} 范围内的整数`,
-    );
-  }
-  return value;
-}
 
 export interface RuntimeSessionResourceChangedNotice {
   readonly workspacePath: string;
@@ -396,7 +389,7 @@ export interface RunAgentCliDependencies extends RuntimeHost {
   /** 宿主装配的会话级 HookService；TUI 后续消息必须复用同一实例。 */
   hookService?: HookService;
   /** 仅结构化 TUI 前台可提供；后台与兼容行模式不得注入。 */
-  scheduleDraftCoordinator?: ScheduleDraftCoordinator;
+  scheduleDraftCoordinator?: ScheduleDraftCoordinator<ToolExecutionContext>;
   /** TUI/宿主已冻结的受信 Plugin 快照；未注入时前台运行自行加载。 */
   pluginSnapshot?: PluginRuntimeSnapshot;
   /** Host-owned restricted capability factories used for snapshot resolution and activation. */
@@ -759,37 +752,6 @@ export interface PlanReplanExecutionRequest extends PlanInterruptedControlReques
   >;
 }
 
-function approvedPlanExecutionPrompt(proposal: PlanProposal): string {
-  return [
-    "[APPROVED PLAN EXECUTION] 用户已批准以下计划。现在按当前权限模式执行；不要重新进入 Plan Mode。",
-    `Plan: ${proposal.title} (${proposal.planId}@${proposal.revision})`,
-    proposal.overview ? `Overview: ${proposal.overview}` : undefined,
-    "Steps:",
-    ...proposal.steps.map((step) => `- ${step.id}: ${step.title}\n  ${step.description}`),
-    proposal.risks?.length
-      ? `Risks:\n${proposal.risks.map((risk) => `- ${risk}`).join("\n")}`
-      : undefined,
-    "开始执行某一步前，先调用 update_plan 将它标记为 in_progress；实施并验证成功后，再调用 update_plan 将它标记为 completed（不再需要的步骤标记为 skipped）。",
-    "Graph 模式允许通过 yield_agent_graph 持久化等待子任务，并在唤醒后继续。除此之外，只要 execution 仍为 active，就不得仅返回文字或结束本轮；必须继续处理未完成步骤，直到 update_plan 返回 execution 已 completed。确实无法继续时调用 cancel_plan。",
-  ]
-    .filter((part): part is string => part !== undefined)
-    .join("\n\n");
-}
-
-function resumedPlanExecutionPrompt(projection: PlanProjection): string {
-  const execution = projection.execution;
-  if (!execution) throw new PlanConflictError("Plan execution is unavailable");
-  return [
-    "[RESUMED PLAN EXECUTION] 用户明确恢复此前中断的计划。只继续尚未完成的步骤。",
-    `Plan: ${execution.planId}@${execution.revision}`,
-    ...execution.steps.map(
-      (step) => `- [${step.status}] ${step.id}: ${step.title}\n  ${step.description}`,
-    ),
-    "恢复某一步前，先调用 update_plan 将它标记为 in_progress；实施并验证成功后，再调用 update_plan 将它标记为 completed（不再需要的步骤标记为 skipped）。",
-    "Graph 模式允许通过 yield_agent_graph 持久化等待子任务，并在唤醒后继续。除此之外，只要 execution 仍为 active，就不得仅返回文字或结束本轮；必须继续处理未完成步骤，直到 update_plan 返回 execution 已 completed。确实无法继续时调用 cancel_plan。",
-  ].join("\n\n");
-}
-
 function planControlContext(sessionId: string, operationId: string, writeGuard?: Session) {
   return {
     sessionId,
@@ -802,30 +764,6 @@ function planControlContext(sessionId: string, operationId: string, writeGuard?:
 
 function planAdmissionKey(sessionId: string, operationId: string): string {
   return `${sessionId}\u0000${operationId}`;
-}
-
-function planRevisionRequestTurnTail(projection: PlanProjection): string | undefined {
-  const request = projection.revisionRequest;
-  if (!request) return undefined;
-  const context = {
-    planId: request.planId.slice(0, PLAN_REVISION_CONTEXT_FIELD_MAX_CHARS),
-    expectedRevision: request.expectedRevision,
-    operationId: request.operationId.slice(0, PLAN_REVISION_CONTEXT_FIELD_MAX_CHARS),
-    requestedAt: request.requestedAt.slice(0, PLAN_REVISION_CONTEXT_FIELD_MAX_CHARS),
-    feedback: boundedPlanRevisionFeedback(request.feedback),
-  };
-  return [
-    "<plan-revision-request>",
-    "这是从持久化事件恢复的用户修订要求。请按该反馈调查并调用 submit_plan 提交同一 planId 的下一修订版；不要批准或执行旧修订。",
-    JSON.stringify(context),
-    "</plan-revision-request>",
-  ].join("\n");
-}
-
-function boundedPlanRevisionFeedback(feedback: string): string {
-  if (feedback.length <= PLAN_REVISION_FEEDBACK_MAX_CHARS) return feedback;
-  const omitted = feedback.length - PLAN_REVISION_FEEDBACK_MAX_CHARS;
-  return `${feedback.slice(0, PLAN_REVISION_FEEDBACK_MAX_CHARS)}\n...[truncated ${omitted} chars]`;
 }
 
 async function acquirePlanControlSession(
@@ -2439,6 +2377,7 @@ export async function executeAgentRuntime(
             workDir,
             picoHome,
             eventStore: session.runtimeEventStore,
+            warningLogger: logger,
           }),
         });
         const graphOutput = registry.getTool("agent_output");
@@ -2500,6 +2439,7 @@ export async function executeAgentRuntime(
           ? new McpConnectionManager(registry, {
               stdioCwd: workDir,
               remoteNetworkGate,
+              diagnostics: logger,
               ...(!backgroundPolicy ? { processSandbox: mainProcessPolicy } : {}),
               ...(backgroundPolicy?.snapshot.mcpConfigFingerprint
                 ? { expectedConfigFingerprint: backgroundPolicy.snapshot.mcpConfigFingerprint }
@@ -2761,7 +2701,7 @@ export async function executeAgentRuntime(
 async function reconcileConfiguredChildExecutionBoundary(
   session: Session,
   expectedBoundary: ExecutionBoundary,
-  sessionMode: CliSessionSelection["mode"],
+  sessionMode: RuntimeSessionSelection["mode"],
 ): Promise<ExecutionBoundary> {
   if (expectedBoundary.kind === "external") {
     throw new Error("Configured child cannot use an external execution boundary");
@@ -2893,7 +2833,7 @@ async function acquireRuntimeSession({
   picoHome,
   resumeExistingSession,
 }: {
-  sessionSelection: CliSessionSelection;
+  sessionSelection: RuntimeSessionSelection;
   workDir: string;
   picoHome: string;
   resumeExistingSession: boolean;
@@ -2923,7 +2863,7 @@ async function acquireRuntimeSessionWithStore(
     picoHome,
     resumeExistingSession,
   }: {
-    sessionSelection: CliSessionSelection;
+    sessionSelection: RuntimeSessionSelection;
     workDir: string;
     picoHome: string;
     resumeExistingSession: boolean;

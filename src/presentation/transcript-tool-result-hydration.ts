@@ -1,7 +1,6 @@
-import type { ToolResultEnvelope } from "../engine/tool-result-contract.js";
+import type { DurableTranscriptEvent, ToolResultEnvelope } from "@pico/core";
 import {
   projectTranscriptEvents,
-  type DurableTranscriptEvent,
   type TranscriptEvent,
 } from "./transcript-event-store.js";
 

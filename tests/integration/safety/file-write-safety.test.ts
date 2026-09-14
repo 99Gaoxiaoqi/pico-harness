@@ -28,11 +28,21 @@ const TEMPORARY_FILE_PREFIX = ".pico-write-";
 const METADATA_PROBE_PREFIX = ".pico-metadata-probe-";
 const execFileAsync = promisify(execFile);
 
-test("Terminal-Bench bundle helper path is resolved from extracted dist/tools", () => {
-  assert.deepEqual(bundledLinuxXattrHelperCandidates("/installed-agent/pico/dist/tools", "x64"), [
+test("Terminal-Bench bundle helper path is resolved from the installed Pico Host package", () => {
+  assert.deepEqual(
+    bundledLinuxXattrHelperCandidates(
+      "/installed-agent/pico/node_modules/@pico/pico-host/dist",
+      "x64",
+    ),
+    [
     "/installed-agent/pico/xattr-helper/bin/xattr-helper-linux-x64",
-    "/installed-agent/pico/scripts/terminal-bench/xattr-helper/bin/xattr-helper-linux-x64",
-  ]);
+      "/installed-agent/pico/node_modules/scripts/terminal-bench/xattr-helper/bin/xattr-helper-linux-x64",
+    ],
+  );
+  assert.equal(
+    bundledLinuxXattrHelperCandidates("/repo/packages/pico-host/src", "arm64")[1],
+    "/repo/scripts/terminal-bench/xattr-helper/bin/xattr-helper-linux-arm64",
+  );
 });
 
 test("write_file atomically creates and overwrites while preserving ordinary metadata", async (context) => {

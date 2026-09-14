@@ -1,6 +1,6 @@
 import React from "react";
-import type { FileHistorySnapshotSummary, RewindMode } from "../cli/file-history.js";
-import type { FileHistoryDiffStat } from "../safety/file-history.js";
+import type { FileHistorySnapshotSummary, RewindMode } from "@pico/pico-host/file-history";
+import type { FileHistoryDiffStat } from "@pico/pico-host/file-history-runtime";
 import type { LocalUiCommandAction } from "../input/types.js";
 import type { DialogRequest } from "./dialog-arbiter.js";
 import {
