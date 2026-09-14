@@ -37,13 +37,19 @@ Memory 集成测试 70/70 均已通过。
 数据库、Journal 与 Blob Store，旧 `src/storage/storage-doctor.ts` 保留兼容导出。Pico Host 构建与
 Storage Doctor 集成测试 4/4 已通过。
 
+随后完成三路并行的增量迁移：`subagent-context` 的私有上下文压缩、溢出降级与 Provider
+调用策略已迁入 Runtime；SQLite Session Continuity 的只读投影与 Desktop Atomic Memory
+管理服务已迁入 Pico Host；CLI 启动分派及终端网格的 CPR/resize/鼠标适配已迁入 CLI 包。
+各旧路径保留兼容导出。三路集成后，根 typecheck、23/23 定向集成测试、`check:architecture`
+（0 条逆依赖）和 `git diff --check` 均通过。
+
 本轮最终完成度审计已通过：根 typecheck（含所有包构建）、`check:architecture`（0 条逆依赖）、
 `git diff --check` 均通过；生产源码没有残留的旧 Atomic Memory 或 StorageDoctor 深路径导入。
 Markdown 依赖图已按 manifest 校正；冻结的 architecture JSON/HTML/visual-check 仍保留其概念关联，
 不得将其中 Protocol→Core 关联当作实际 package dependency。
 阶段 2–5 仍标为进行中，因为 Engine、Context、Provider、Tools、Daemon 与 CLI/TUI 还有按真实消费者
-逐步收敛的长程工作；本轮不将它们误标为完成。工作区包含大量本次迁移及用户既有未提交修改，
-不得 stash、reset、clean、覆盖或提交不明改动；架构图 JSON/HTML/visual-check 产物保持冻结。
+逐步收敛的长程工作；本轮不将它们误标为完成。后续修改必须继续保护未知工作区改动，且架构图
+JSON/HTML/visual-check 产物保持冻结。
 
 目标：让仓库顶层目录能直接表达 Pico 的产品模块，同时逐步建立类似 Maka 的
 `core → storage → runtime → host → entrypoints` 依赖方向。此计划只调整代码组织和
