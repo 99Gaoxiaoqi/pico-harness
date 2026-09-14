@@ -66,6 +66,34 @@
     "./workspace-trust-prompt": {
       "types": "./dist/workspace-trust-prompt.d.ts",
       "import": "./dist/workspace-trust-prompt.js"
+    },
+    "./model-commands": {
+      "types": "./dist/model-commands.d.ts",
+      "import": "./dist/model-commands.js"
+    },
+    "./session-commands": {
+      "types": "./dist/session-commands.d.ts",
+      "import": "./dist/session-commands.js"
+    },
+    "./workspace-commands": {
+      "types": "./dist/workspace-commands.d.ts",
+      "import": "./dist/workspace-commands.js"
+    },
+    "./automation-commands": {
+      "types": "./dist/automation-commands.d.ts",
+      "import": "./dist/automation-commands.js"
+    },
+    "./rpc-command-runtime": {
+      "types": "./dist/rpc-command-runtime.d.ts",
+      "import": "./dist/rpc-command-runtime.js"
+    },
+    "./memory-undo-token": {
+      "types": "./dist/memory-undo-token.d.ts",
+      "import": "./dist/memory-undo-token.js"
+    },
+    "./rewind-snapshots": {
+      "types": "./dist/rewind-snapshots.d.ts",
+      "import": "./dist/rewind-snapshots.js"
     }
   },
   "dependencies": {
