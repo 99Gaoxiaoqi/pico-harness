@@ -21,17 +21,17 @@ import {
 } from "@pico/runtime/configured-subagent-tools";
 import type {
   ConfiguredSubagentCatalogPort,
+  RuntimeSubagentPresetContract,
   SubagentCapabilityDefinition,
 } from "@pico/core/subagent-capabilities";
-import type { RuntimeSubagentPreset } from "@pico/protocol";
 import {
   configuredSubagentExecutionBoundary,
   createConfiguredSubagentExecutor,
 } from "./configured-subagent-executor.js";
 import {
-  CHILD_AGENT_TOOL_CONSTRUCTORS,
+  createChildAgentToolConstructors,
   buildChildAgentSafetyMiddleware,
-} from "../tools/child-agent-policy.js";
+} from "@pico/pico-host/child-agent-policy";
 import { type AtomicMemoryLifecycle } from "@pico/runtime";
 import { createAgentSwarmStatusTool } from "@pico/runtime/agent-swarm-status-tool";
 import { AGENT_SWARM_SUPERVISOR_TOOL_NAMES } from "@pico/core/agent-graph-tool-names";
@@ -295,7 +295,7 @@ export interface RunAgentCliDependencies extends RuntimeHost {
   /** Trusted child identity; disables extensions and enforces fixed capability tools. */
   configuredSubagentChild?: {
     readonly definition: SubagentCapabilityDefinition;
-    readonly preset?: RuntimeSubagentPreset;
+    readonly preset?: RuntimeSubagentPresetContract;
     readonly executionBoundaryCeiling: ExecutionBoundary;
   };
 
@@ -2520,12 +2520,13 @@ export async function executeAgentRuntime(
     }
     if (dependencies.configuredSubagentChild) {
       const definition = dependencies.configuredSubagentChild.definition;
+      const childAgentToolConstructors = createChildAgentToolConstructors(logger);
       const processSandbox = {
         config: { ...picoConfig.sandbox, network: "deny" as const },
         scratchRoot: join(picoHome, "sandboxes", session.id, "subagents"),
       };
       for (const name of definition.tools) {
-        const create = CHILD_AGENT_TOOL_CONSTRUCTORS[name];
+        const create = childAgentToolConstructors[name];
         if (!create) throw new Error(`Unsupported child capability tool: ${name}`);
         registry.unregisterForHostPolicy(name);
         registry.register(
