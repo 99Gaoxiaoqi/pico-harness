@@ -6,7 +6,8 @@ import type { HookHostNetworkGate } from "../hooks/executors/index.js";
 import type { LLMProvider } from "@pico/core";
 import type { WorkspaceSandboxConfig } from "@pico/pico-host/workspace-sandbox";
 import { ToolRegistry } from "../tools/registry-impl.js";
-import { createHookVerifierRegistry } from "../tools/child-agent-policy.js";
+import { createHookVerifierRegistry } from "@pico/pico-host/child-agent-policy";
+import { logger } from "../observability/logger.js";
 import type { WorkspaceRoots } from "@pico/pico-host/workspace-roots";
 import { createEngineRuntimePort } from "./engine-runtime-port-adapter.js";
 import { currentRuntimeRun, RuntimeRun } from "./runtime-run.js";
@@ -57,6 +58,9 @@ export function bindRuntimeHookCapabilities(input: RuntimeHookAssemblyInput): vo
             : {}),
         });
         const verifierRegistry = createHookVerifierRegistry({
+          diagnostics: logger,
+          skillLogger: logger,
+          grepDiagnostics: logger,
           workDir: input.workDir,
           workspaceRoots: input.workspaceRoots,
           processSandbox: {
