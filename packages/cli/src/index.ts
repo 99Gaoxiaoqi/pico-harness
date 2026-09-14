@@ -8,4 +8,5 @@ export * from "./session-arguments.js";
 export * from "./session-args.js";
 export * from "./session-resolver.js";
 export * from "./terminal-reporter.js";
+export * from "./terminal-grid.js";
 export * from "./workspace-trust-prompt.js";

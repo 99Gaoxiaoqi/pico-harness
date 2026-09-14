@@ -60,7 +60,7 @@ const HANDWRITTEN_TIMEOUT_WHITELIST = new Map([
   ["src/tools/background-manager.ts", "既有：后台任务等待超时"],
   ["src/tools/bash.ts", "既有：bash 执行超时 / 强杀定时器"],
   ["src/tui/system-actions.ts", "既有：进程执行超时（2 处）"],
-  ["src/tui/terminal-grid.ts", "既有：grid 读取超时"],
+  ["packages/cli/src/terminal-grid.ts", "迁移：CLI grid 读取超时"],
   // runtime-host 骨架移植（阶段 3-A）：连接机制层的退避/握手超时/idle drain，
   // 移植自 runtime-host 模式，非业务超时原语，不收敛到 race-with-deadline。
   ["packages/runtime-host/src/client/connect-or-spawn.ts", "骨架：选举退避 sleep（backoff 抖动）"],

@@ -19,7 +19,7 @@ import {
   formatPlanControlPanel,
   resolveApprovalPanelKey,
 } from "../../../src/tui/approval-panel.js";
-import { createTuiTerminalGridSession } from "../../../src/tui/terminal-grid.js";
+import { createTuiTerminalGridSession } from "@pico/cli/terminal-grid";
 import { buildTranscriptLayout } from "../../../src/tui/transcript-layout.js";
 import { transcriptContentRows } from "../../../src/tui/viewport-rows.js";
 import { TuiReporter } from "../../../src/tui/tui-reporter.js";
