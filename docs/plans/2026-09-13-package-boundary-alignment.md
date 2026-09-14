@@ -43,6 +43,10 @@ Storage Doctor 集成测试 4/4 已通过。
 各旧路径保留兼容导出。三路集成后，根 typecheck、23/23 定向集成测试、`check:architecture`
 （0 条逆依赖）和 `git diff --check` 均通过。
 
+下一批并行迁移将 Desktop Automation/Cron 产品服务迁入 Pico Host，并将 TUI 资源命令分派迁入
+CLI（仅保留 Protocol RPC 与 CLI 命令契约）；Provider 配置与凭据解析仍经 daemon 的最小端口注入。
+根 typecheck、21/21 相关集成测试、`check:architecture`（0 条逆依赖）和 `git diff --check` 均通过。
+
 本轮最终完成度审计已通过：根 typecheck（含所有包构建）、`check:architecture`（0 条逆依赖）、
 `git diff --check` 均通过；生产源码没有残留的旧 Atomic Memory 或 StorageDoctor 深路径导入。
 Markdown 依赖图已按 manifest 校正；冻结的 architecture JSON/HTML/visual-check 仍保留其概念关联，
