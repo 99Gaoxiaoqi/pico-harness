@@ -5,7 +5,7 @@ import {
   DEFAULT_CODE_MODE_EXECUTION_POLICY,
   executeCodeCell,
   type CodeModeToolDefinition,
-} from "../../../src/tools/code-mode.js";
+} from "@pico/pico-host/code-mode";
 
 const activeTools: readonly CodeModeToolDefinition[] = [
   { name: "read", nesting: "nestable" },
