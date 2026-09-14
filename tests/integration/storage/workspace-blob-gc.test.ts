@@ -19,7 +19,7 @@ import {
   withVerifiedEvidenceDirectory,
 } from "../../../src/context/evidence-blob-store.js";
 import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
-import { WorkspaceRuntimeService } from "../../../src/daemon/workspace-runtime-service.js";
+import { WorkspaceRuntimeService } from "@pico/pico-host/workspace-runtime-service";
 import { createRuntimeRequest } from "../../../packages/protocol/src/index.js";
 import { FileHistoryBlobStore } from "../../../src/storage/file-history-blob-store.js";
 import { closeAllOperationalDatabasesForTest } from "../../../src/storage/sqlite/sqlite-database.js";
