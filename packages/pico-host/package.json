@@ -7,6 +7,14 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
+    "./desktop-resource-catalog": {
+      "types": "./dist/desktop-resource-catalog.d.ts",
+      "import": "./dist/desktop-resource-catalog.js"
+    },
+    "./child-agent-policy": {
+      "types": "./dist/child-agent-policy.d.ts",
+      "import": "./dist/child-agent-policy.js"
+    },
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"

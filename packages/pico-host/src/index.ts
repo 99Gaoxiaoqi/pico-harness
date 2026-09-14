@@ -1,4 +1,6 @@
 export * from "./desktop-protocol-values.js";
+export * from "./desktop-resource-catalog.js";
+export * from "./child-agent-policy.js";
 export * from "./desktop-request-router.js";
 export * from "./desktop-reporter.js";
 export * from "./desktop-transcript-persistence.js";
