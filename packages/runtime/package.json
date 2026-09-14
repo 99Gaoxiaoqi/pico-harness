@@ -279,6 +279,10 @@
       "types": "./dist/subagent-context-policy.d.ts",
       "import": "./dist/subagent-context-policy.js"
     },
+    "./subagent-context": {
+      "types": "./dist/subagent-context.d.ts",
+      "import": "./dist/subagent-context.js"
+    },
     "./subagent-activity-reporter": {
       "types": "./dist/subagent-activity-reporter.d.ts",
       "import": "./dist/subagent-activity-reporter.js"
