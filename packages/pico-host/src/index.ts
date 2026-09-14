@@ -1,4 +1,7 @@
 export * from "./desktop-protocol-values.js";
+export * from "./background-autonomous-policy.js";
+export * from "./runtime-process-sandbox.js";
+export * from "./background-mcp-client.js";
 export * from "./desktop-resource-catalog.js";
 export * from "./child-agent-policy.js";
 export * from "./desktop-request-router.js";
