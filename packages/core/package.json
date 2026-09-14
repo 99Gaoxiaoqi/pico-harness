@@ -7,6 +7,10 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
+    "./slash-parser": {
+      "types": "./dist/slash-parser.d.ts",
+      "import": "./dist/slash-parser.js"
+    },
     "./keybindings-schema": {
       "types": "./dist/keybindings-schema.d.ts",
       "import": "./dist/keybindings-schema.js"
