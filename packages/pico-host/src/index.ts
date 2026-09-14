@@ -3,6 +3,7 @@ export * from "./desktop-request-router.js";
 export * from "./desktop-reporter.js";
 export * from "./desktop-transcript-persistence.js";
 export * from "./desktop-memory-request-handlers.js";
+export * from "./desktop-atomic-memory-service.js";
 export * from "./desktop-provider-request-handlers.js";
 export * from "./desktop-session-request-handlers.js";
 export * from "./desktop-workbar-request-handlers.js";
