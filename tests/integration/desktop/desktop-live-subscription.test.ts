@@ -13,7 +13,7 @@ import { DesktopSessionContinuity } from "../../../apps/desktop/src/renderer/ses
 import { DesktopRuntimeService, WorkspaceRuntimeService } from "../../../src/daemon/index.js";
 import { DesktopReporter } from "../../../src/daemon/desktop-reporter.js";
 import { SessionSubscriptionRegistry } from "../../../src/daemon/session-subscription-owner.js";
-import { SqliteSessionContinuitySource } from "../../../src/daemon/sqlite-session-continuity-source.js";
+import { SqliteSessionContinuitySource } from "@pico/pico-host/sqlite-session-continuity-source";
 import { globalSessionManager } from "../../../src/engine/session.js";
 import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
 import { writeDesktopModelRouting } from "../../fixtures/desktop-model-routing.js";

@@ -1,4 +1,4 @@
-import { SqliteSessionContinuitySource } from "../../../src/daemon/sqlite-session-continuity-source.js";
+import { SqliteSessionContinuitySource } from "@pico/pico-host/sqlite-session-continuity-source";
 import type { SessionSubscriptionRegistry } from "../../../src/daemon/session-subscription-owner.js";
 import assert from "node:assert/strict";
 import test from "node:test";

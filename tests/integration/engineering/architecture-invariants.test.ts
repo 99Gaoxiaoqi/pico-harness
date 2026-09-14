@@ -98,7 +98,7 @@ test("D12 正向不变量：transcript 分页只有 storage projection，rendere
   // 游标只由 SQLite projection 实现，daemon continuity source 仅做协议映射。
   const desktopRuntime = readSource("apps/desktop/src/renderer/runtime.ts");
   const tracker = readSource("apps/desktop/src/renderer/conversation-load-tracker.ts");
-  const continuitySource = readSource("src/daemon/sqlite-session-continuity-source.ts");
+  const continuitySource = readSource("packages/pico-host/src/sqlite-session-continuity-source.ts");
   const storageProjection = readSource("packages/storage/src/sqlite/sqlite-runtime-event-store.ts");
   // 负向：renderer 裸 ref 形态的 generation 追踪已收编。
   assert.doesNotMatch(
@@ -111,7 +111,7 @@ test("D12 正向不变量：transcript 分页只有 storage projection，rendere
   assert.match(
     continuitySource,
     /store\.readTranscriptProjectionPage\(/,
-    "daemon continuity source 应直接消费 storage-backed transcript projection",
+    "Host continuity source 应直接消费 storage-backed transcript projection",
   );
   assert.match(
     storageProjection,

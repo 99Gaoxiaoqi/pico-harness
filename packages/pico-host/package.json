@@ -55,6 +55,10 @@
       "types": "./dist/session-subscription-owner.d.ts",
       "import": "./dist/session-subscription-owner.js"
     },
+    "./sqlite-session-continuity-source": {
+      "types": "./dist/sqlite-session-continuity-source.d.ts",
+      "import": "./dist/sqlite-session-continuity-source.js"
+    },
     "./runtime-notification-transport": {
       "types": "./dist/runtime-notification-transport.d.ts",
       "import": "./dist/runtime-notification-transport.js"
