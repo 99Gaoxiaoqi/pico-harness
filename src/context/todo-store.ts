@@ -1,21 +1,2 @@
-import { WorkspaceTodoStore } from "@pico/pico-host/workspace-todo-store";
-import type { ResolvePicoPathsOptions } from "@pico/pico-host/pico-paths";
-import { logger } from "../observability/logger.js";
-
-export type {
-  TodoItem,
-  TodoPriority,
-  TodoState,
-  TodoStatus,
-  TodoStoreLogger,
-} from "@pico/storage/todo-store";
-
-/**
- * @deprecated Todo 的持久化实现已迁至 @pico/storage；此适配器仅负责把
- * workDir/picoHome 解析为宿主确定的 workspace storageRoot。
- */
-export class TodoStore extends WorkspaceTodoStore {
-  constructor(workDir: string, options: ResolvePicoPathsOptions = {}) {
-    super(workDir, options, logger);
-  }
-}
+/** @deprecated 复用宿主包的产品装配。 */
+export * from "@pico/pico-host/product-todo-store";
