@@ -203,7 +203,7 @@ import { DesktopWorkbarGitReviewService } from "@pico/pico-host/desktop-workbar-
 import { DesktopWorkbarTerminalService } from "./desktop-workbar-terminal-service.js";
 import { WorkbarGitReviewError } from "./workbar-git-review.js";
 import { SideChatAuthority, SideChatNoSettledTurnError } from "@pico/pico-host/side-chat-authority";
-import { DesktopAtomicMemoryService } from "./desktop-atomic-memory-service.js";
+import { DesktopAtomicMemoryService } from "@pico/pico-host/desktop-atomic-memory-service";
 import { sessionMemoryLane } from "@pico/runtime/atomic-memory/session-lane";
 import { memorySessionKey } from "@pico/core/atomic-memory-runtime-contracts";
 import type { ImagePart } from "../schema/message.js";

@@ -15,6 +15,10 @@
       "types": "./dist/background-mcp-policy.d.ts",
       "import": "./dist/background-mcp-policy.js"
     },
+    "./desktop-atomic-memory-service": {
+      "types": "./dist/desktop-atomic-memory-service.d.ts",
+      "import": "./dist/desktop-atomic-memory-service.js"
+    },
     "./approval-diff": {
       "types": "./dist/approval-diff.d.ts",
       "import": "./dist/approval-diff.js"

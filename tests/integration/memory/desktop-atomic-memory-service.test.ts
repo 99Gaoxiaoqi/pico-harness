@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { DesktopAtomicMemoryService } from "../../../src/daemon/desktop-atomic-memory-service.js";
+import { DesktopAtomicMemoryService } from "@pico/pico-host/desktop-atomic-memory-service";
 import { parseRuntimeResult, RuntimeProtocolError } from "@pico/protocol";
 import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
 import { SqliteMemoryItemStore } from "../../../src/storage/sqlite/sqlite-memory-item-store.js";
