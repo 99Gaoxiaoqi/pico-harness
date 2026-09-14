@@ -10,6 +10,110 @@ import {
 import type { PluginRuntimeSnapshot } from "../../../src/plugins/plugin-runtime-snapshot.js";
 import { SkillLoader } from "../../../src/context/skill.js";
 import type { ExternalResourceCatalogSource } from "../../../src/catalog/resource-catalog.js";
+import {
+  listDesktopAgents as listHostDesktopAgents,
+  listDesktopEffectiveSkills as listHostDesktopEffectiveSkills,
+  listDesktopMcpServers as listHostDesktopMcpServers,
+  listDesktopSkills as listHostDesktopSkills,
+  listDesktopUserSkills as listHostDesktopUserSkills,
+  type DesktopResourceCatalogOptions,
+} from "@pico/pico-host/desktop-resource-catalog";
+
+test("Pico Host 桌面目录通过窄配置端口枚举技能、Agent 与只读 Plugin MCP 来源", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-host-desktop-catalog-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const workspace = join(root, "workspace");
+  const homeDir = join(root, "home");
+  const picoHome = join(homeDir, ".pico");
+  const pluginRoot = join(root, "plugin-skills");
+  for (const [path, name] of [
+    [join(workspace, ".pico", "skills"), "native"],
+    [join(workspace, ".claude", "skills"), "claude"],
+    [join(picoHome, "skills"), "user"],
+    [pluginRoot, "plugin"],
+  ] as const) {
+    await writeSkill(path, name, { description: name, body: name });
+  }
+  const claudeAgents = join(workspace, ".claude", "agents");
+  await mkdir(claudeAgents, { recursive: true });
+  await writeFile(
+    join(claudeAgents, "claude-agent.md"),
+    "---\nname: claude-agent\ndescription: Claude agent\n---\nReview code.\n",
+  );
+  const pluginAgentPath = join(root, "plugin-agents.yaml");
+  await writeFile(pluginAgentPath, JSON.stringify({ agents: [{
+    name: "plugin-agent", description: "Plugin agent", systemPrompt: "Review code.",
+    tools: ["read_file"],
+  }] }));
+  await writeFile(join(workspace, ".pico", "mcp.json"), JSON.stringify({ mcpServers: {
+    project: { command: "never-execute", enabled: false },
+  } }));
+
+  let compatibilityEnabled = false;
+  const configReads: string[] = [];
+  const options: DesktopResourceCatalogOptions = {
+    env: { PICO_HOME: picoHome },
+    homeDir,
+    picoHome,
+    logger: {
+      debug: () => undefined,
+      info: () => undefined,
+      warn: () => undefined,
+      error: () => undefined,
+    },
+    loadPicoProjectConfig: async (path) => {
+      configReads.push(path);
+      return { compatibility: { claude: {
+        enabled: compatibilityEnabled, projectResources: true, userResources: false,
+      } } };
+    },
+    pluginSnapshot: {
+      skillSources: pluginSnapshot(pluginRoot).skillSources,
+      agentSources: [{
+        id: "plugin:fixture:agent:0", scope: "external", format: "pico-native",
+        root: pluginAgentPath, priority: 38, adapter: "pico-agent-yaml",
+      }],
+      mcpSources: [{ id: "plugin:fixture:mcp:0", config: { mcpServers: {
+        plugin: { name: "plugin", transport: "stdio", command: "never-execute", enabled: false },
+      } } }],
+    },
+  };
+
+  assert.deepEqual((await listHostDesktopUserSkills(options)).skills.map(({ name }) => name), ["user"]);
+  assert.deepEqual(configReads, []);
+  const effective = await listHostDesktopEffectiveSkills(workspace, options);
+  assert.deepEqual(effective.skills.map(({ name }) => name).sort(), ["native", "plugin", "user"]);
+  assert.equal(effective.skills.find(({ name }) => name === "plugin")?.source.readOnly, true);
+  assert.deepEqual(
+    (await listHostDesktopSkills(workspace, true, options)).map(({ name }) => name).sort(),
+    ["native", "plugin", "user"],
+  );
+  assert.deepEqual(
+    (await listHostDesktopSkills(workspace, false, options)).map(({ name }) => name).sort(),
+    ["claude", "native", "plugin"],
+  );
+  const agents = await listHostDesktopAgents(workspace, options);
+  assert.ok(agents.some(({ name }) => name === "plugin-agent"));
+  assert.ok(!agents.some(({ name }) => name === "claude-agent"));
+  assert.deepEqual(configReads, [workspace, workspace, workspace]);
+
+  compatibilityEnabled = true;
+  assert.ok(
+    (await listHostDesktopEffectiveSkills(workspace, options)).skills.some(({ name }) => name === "claude"),
+  );
+  assert.ok(
+    (await listHostDesktopAgents(workspace, options)).some(({ name }) => name === "claude-agent"),
+  );
+  assert.deepEqual(
+    (await listHostDesktopMcpServers(workspace, options)).map(({ name, sourceId, status }) =>
+      ({ name, sourceId, status })),
+    [
+      { name: "project", sourceId: "project", status: "disabled" },
+      { name: "plugin", sourceId: "plugin:fixture:mcp:0", status: "disabled" },
+    ],
+  );
+  assert.deepEqual(configReads, [workspace, workspace, workspace, workspace, workspace]);
+});
 
 test("用户级 Skill 枚举只读取用户来源并返回稳定修订", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-user-skill-catalog-"));
