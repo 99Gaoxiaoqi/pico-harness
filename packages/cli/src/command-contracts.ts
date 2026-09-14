@@ -1,9 +1,5 @@
-export interface ParsedSlashInput {
-  raw: string;
-  name: string;
-  args: string;
-  argv: readonly string[];
-}
+import type { ParsedSlashInput } from "@pico/core/slash-parser";
+export type { ParsedSlashInput } from "@pico/core/slash-parser";
 
 export type LocalUiPanel = "help" | "model" | "sessions" | "rewind" | "hooks";
 

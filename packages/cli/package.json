@@ -94,6 +94,262 @@
     "./rewind-snapshots": {
       "types": "./dist/rewind-snapshots.d.ts",
       "import": "./dist/rewind-snapshots.js"
+    },
+    "./tui/agent-detail-view": {
+      "types": "./dist/tui/agent-detail-view.d.ts",
+      "import": "./dist/tui/agent-detail-view.js"
+    },
+    "./tui/agent-navigation": {
+      "types": "./dist/tui/agent-navigation.d.ts",
+      "import": "./dist/tui/agent-navigation.js"
+    },
+    "./tui/agent-switcher": {
+      "types": "./dist/tui/agent-switcher.d.ts",
+      "import": "./dist/tui/agent-switcher.js"
+    },
+    "./tui/app": {
+      "types": "./dist/tui/app.d.ts",
+      "import": "./dist/tui/app.js"
+    },
+    "./tui/approval-dialogs": {
+      "types": "./dist/tui/approval-dialogs.d.ts",
+      "import": "./dist/tui/approval-dialogs.js"
+    },
+    "./tui/approval-panel": {
+      "types": "./dist/tui/approval-panel.d.ts",
+      "import": "./dist/tui/approval-panel.js"
+    },
+    "./tui/ask-user-dialog": {
+      "types": "./dist/tui/ask-user-dialog.d.ts",
+      "import": "./dist/tui/ask-user-dialog.js"
+    },
+    "./tui/automation-credential-proposal": {
+      "types": "./dist/tui/automation-credential-proposal.d.ts",
+      "import": "./dist/tui/automation-credential-proposal.js"
+    },
+    "./tui/changes-panel": {
+      "types": "./dist/tui/changes-panel.d.ts",
+      "import": "./dist/tui/changes-panel.js"
+    },
+    "./tui/client-command-host": {
+      "types": "./dist/tui/client-command-host.d.ts",
+      "import": "./dist/tui/client-command-host.js"
+    },
+    "./tui/client-commands": {
+      "types": "./dist/tui/client-commands.d.ts",
+      "import": "./dist/tui/client-commands.js"
+    },
+    "./tui/client-repl": {
+      "types": "./dist/tui/client-repl.d.ts",
+      "import": "./dist/tui/client-repl.js"
+    },
+    "./tui/client-session-runtime": {
+      "types": "./dist/tui/client-session-runtime.d.ts",
+      "import": "./dist/tui/client-session-runtime.js"
+    },
+    "./tui/commands/automation-commands": {
+      "types": "./dist/tui/commands/automation-commands.d.ts",
+      "import": "./dist/tui/commands/automation-commands.js"
+    },
+    "./tui/commands/types": {
+      "types": "./dist/tui/commands/types.d.ts",
+      "import": "./dist/tui/commands/types.js"
+    },
+    "./tui/daemon-event-reporter": {
+      "types": "./dist/tui/daemon-event-reporter.d.ts",
+      "import": "./dist/tui/daemon-event-reporter.js"
+    },
+    "./tui/dialog-arbiter": {
+      "types": "./dist/tui/dialog-arbiter.d.ts",
+      "import": "./dist/tui/dialog-arbiter.js"
+    },
+    "./tui/diff-preview": {
+      "types": "./dist/tui/diff-preview.d.ts",
+      "import": "./dist/tui/diff-preview.js"
+    },
+    "./tui/help-panel": {
+      "types": "./dist/tui/help-panel.d.ts",
+      "import": "./dist/tui/help-panel.js"
+    },
+    "./tui/image-attachments": {
+      "types": "./dist/tui/image-attachments.d.ts",
+      "import": "./dist/tui/image-attachments.js"
+    },
+    "./tui/input-box": {
+      "types": "./dist/tui/input-box.d.ts",
+      "import": "./dist/tui/input-box.js"
+    },
+    "./tui/input-controller": {
+      "types": "./dist/tui/input-controller.d.ts",
+      "import": "./dist/tui/input-controller.js"
+    },
+    "./tui/inspector": {
+      "types": "./dist/tui/inspector.d.ts",
+      "import": "./dist/tui/inspector.js"
+    },
+    "./tui/keybindings/defaults": {
+      "types": "./dist/tui/keybindings/defaults.d.ts",
+      "import": "./dist/tui/keybindings/defaults.js"
+    },
+    "./tui/keybindings/resolver": {
+      "types": "./dist/tui/keybindings/resolver.d.ts",
+      "import": "./dist/tui/keybindings/resolver.js"
+    },
+    "./tui/layout-shell": {
+      "types": "./dist/tui/layout-shell.d.ts",
+      "import": "./dist/tui/layout-shell.js"
+    },
+    "./tui/local-ui-command": {
+      "types": "./dist/tui/local-ui-command.d.ts",
+      "import": "./dist/tui/local-ui-command.js"
+    },
+    "./tui/local-ui-dialog-host": {
+      "types": "./dist/tui/local-ui-dialog-host.d.ts",
+      "import": "./dist/tui/local-ui-dialog-host.js"
+    },
+    "./tui/logo-panel": {
+      "types": "./dist/tui/logo-panel.d.ts",
+      "import": "./dist/tui/logo-panel.js"
+    },
+    "./tui/markdown-text": {
+      "types": "./dist/tui/markdown-text.d.ts",
+      "import": "./dist/tui/markdown-text.js"
+    },
+    "./tui/message-list": {
+      "types": "./dist/tui/message-list.d.ts",
+      "import": "./dist/tui/message-list.js"
+    },
+    "./tui/message-row": {
+      "types": "./dist/tui/message-row.d.ts",
+      "import": "./dist/tui/message-row.js"
+    },
+    "./tui/model-selector": {
+      "types": "./dist/tui/model-selector.d.ts",
+      "import": "./dist/tui/model-selector.js"
+    },
+    "./tui/mouse-input": {
+      "types": "./dist/tui/mouse-input.d.ts",
+      "import": "./dist/tui/mouse-input.js"
+    },
+    "./tui/plan-control-notice": {
+      "types": "./dist/tui/plan-control-notice.d.ts",
+      "import": "./dist/tui/plan-control-notice.js"
+    },
+    "./tui/preload-env": {
+      "types": "./dist/tui/preload-env.d.ts",
+      "import": "./dist/tui/preload-env.js"
+    },
+    "./tui/rewind-client-bridge": {
+      "types": "./dist/tui/rewind-client-bridge.d.ts",
+      "import": "./dist/tui/rewind-client-bridge.js"
+    },
+    "./tui/rewind-command-dialog": {
+      "types": "./dist/tui/rewind-command-dialog.d.ts",
+      "import": "./dist/tui/rewind-command-dialog.js"
+    },
+    "./tui/rewind-selector": {
+      "types": "./dist/tui/rewind-selector.d.ts",
+      "import": "./dist/tui/rewind-selector.js"
+    },
+    "./tui/session-browser-adapter": {
+      "types": "./dist/tui/session-browser-adapter.d.ts",
+      "import": "./dist/tui/session-browser-adapter.js"
+    },
+    "./tui/session-browser": {
+      "types": "./dist/tui/session-browser.d.ts",
+      "import": "./dist/tui/session-browser.js"
+    },
+    "./tui/session-hydration": {
+      "types": "./dist/tui/session-hydration.d.ts",
+      "import": "./dist/tui/session-hydration.js"
+    },
+    "./tui/session-presentation": {
+      "types": "./dist/tui/session-presentation.d.ts",
+      "import": "./dist/tui/session-presentation.js"
+    },
+    "./tui/spinner": {
+      "types": "./dist/tui/spinner.d.ts",
+      "import": "./dist/tui/spinner.js"
+    },
+    "./tui/status-bar": {
+      "types": "./dist/tui/status-bar.d.ts",
+      "import": "./dist/tui/status-bar.js"
+    },
+    "./tui/streaming-text": {
+      "types": "./dist/tui/streaming-text.d.ts",
+      "import": "./dist/tui/streaming-text.js"
+    },
+    "./tui/subagent-activity-card": {
+      "types": "./dist/tui/subagent-activity-card.d.ts",
+      "import": "./dist/tui/subagent-activity-card.js"
+    },
+    "./tui/suggestions": {
+      "types": "./dist/tui/suggestions.d.ts",
+      "import": "./dist/tui/suggestions.js"
+    },
+    "./tui/system-actions": {
+      "types": "./dist/tui/system-actions.d.ts",
+      "import": "./dist/tui/system-actions.js"
+    },
+    "./tui/terminal-markdown-model": {
+      "types": "./dist/tui/terminal-markdown-model.d.ts",
+      "import": "./dist/tui/terminal-markdown-model.js"
+    },
+    "./tui/terminal-width": {
+      "types": "./dist/tui/terminal-width.d.ts",
+      "import": "./dist/tui/terminal-width.js"
+    },
+    "./tui/tool-card": {
+      "types": "./dist/tui/tool-card.d.ts",
+      "import": "./dist/tui/tool-card.js"
+    },
+    "./tui/tool-format": {
+      "types": "./dist/tui/tool-format.d.ts",
+      "import": "./dist/tui/tool-format.js"
+    },
+    "./tui/tool-grouping": {
+      "types": "./dist/tui/tool-grouping.d.ts",
+      "import": "./dist/tui/tool-grouping.js"
+    },
+    "./tui/transcript-item-hydration": {
+      "types": "./dist/tui/transcript-item-hydration.d.ts",
+      "import": "./dist/tui/transcript-item-hydration.js"
+    },
+    "./tui/transcript-layout": {
+      "types": "./dist/tui/transcript-layout.d.ts",
+      "import": "./dist/tui/transcript-layout.js"
+    },
+    "./tui/tui-reporter": {
+      "types": "./dist/tui/tui-reporter.d.ts",
+      "import": "./dist/tui/tui-reporter.js"
+    },
+    "./tui/update-scheduler": {
+      "types": "./dist/tui/update-scheduler.d.ts",
+      "import": "./dist/tui/update-scheduler.js"
+    },
+    "./tui/viewport-rows": {
+      "types": "./dist/tui/viewport-rows.d.ts",
+      "import": "./dist/tui/viewport-rows.js"
+    },
+    "./tui/virtual-transcript": {
+      "types": "./dist/tui/virtual-transcript.d.ts",
+      "import": "./dist/tui/virtual-transcript.js"
+    },
+    "./command-registry": {
+      "types": "./dist/command-registry.d.ts",
+      "import": "./dist/command-registry.js"
+    },
+    "./builtin-commands": {
+      "types": "./dist/builtin-commands.d.ts",
+      "import": "./dist/builtin-commands.js"
+    },
+    "./process-user-input": {
+      "types": "./dist/process-user-input.d.ts",
+      "import": "./dist/process-user-input.js"
+    },
+    "./main": {
+      "types": "./dist/main.d.ts",
+      "import": "./dist/main.js"
     }
   },
   "dependencies": {
@@ -101,7 +357,15 @@
     "@pico/pico-host": "*",
     "@pico/protocol": "*",
     "@pico/storage": "*",
-    "picocolors": "^1.1.1"
+    "picocolors": "^1.1.1",
+    "@pico/runtime": "*",
+    "@pico/runtime-host": "*",
+    "@pico/transcript-replica": "*",
+    "ink": "^7.1.0",
+    "react": "19.2.3",
+    "marked": "^18.0.6",
+    "string-width": "^8.2.1",
+    "wrap-ansi": "^10.0.0"
   },
   "files": [
     "dist"
@@ -109,5 +373,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.17"
   }
 }
