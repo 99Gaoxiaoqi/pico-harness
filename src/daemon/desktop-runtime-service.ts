@@ -170,7 +170,7 @@ import {
   type DaemonRunExecution,
 } from "./workspace-runtime-service.js";
 import type { WorkspaceStatusResult } from "@pico/protocol";
-import { DesktopAutomationService } from "./desktop-automation-service.js";
+import { DesktopAutomationService } from "@pico/pico-host/desktop-automation-service";
 import {
   assertDesktopChangesComplete,
   assertDesktopChangesFingerprint,

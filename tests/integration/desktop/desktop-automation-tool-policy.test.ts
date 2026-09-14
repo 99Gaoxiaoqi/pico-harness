@@ -4,7 +4,7 @@ import {
   createTrustedDesktopAutomation,
   type DesktopAutomationAuthorityDependencies,
   type DesktopAutomationService,
-} from "../../../src/daemon/desktop-automation-service.js";
+} from "@pico/pico-host/desktop-automation-service";
 
 test("Desktop daemon rejects tools outside the explicit Automation allowlist", async () => {
   await assert.rejects(
