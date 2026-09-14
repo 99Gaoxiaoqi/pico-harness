@@ -8,7 +8,7 @@ import { type ClientSessionRuntime } from "./client-session-runtime.js";
 import type { ClientCommandRegistryDeps } from "./commands/types.js";
 export type { ClientCommandRegistryDeps } from "./commands/types.js";
 import { createModelCommands } from "./commands/model-commands.js";
-import { createSettingsCommands } from "./commands/settings-commands.js";
+import { createSettingsCommands } from "@pico/cli/settings-commands";
 import { createSessionCommands } from "./commands/session-commands.js";
 import { createResourcesCommands } from "@pico/cli/resources-commands";
 import { createWorkspaceCommands } from "./commands/workspace-commands.js";
