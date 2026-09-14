@@ -7,7 +7,9 @@ import {
   listDesktopMcpServers,
   listDesktopSkills,
   listDesktopUserSkills,
-} from "./desktop-resource-catalog.js";
+} from "@pico/pico-host/desktop-resource-catalog";
+import { loadPicoProjectConfig } from "../input/pico-config.js";
+import { logger } from "../observability/logger.js";
 import type { DesktopRequestHandlers } from "./desktop-request-router.js";
 import {
   isJsonValue,
@@ -76,6 +78,8 @@ export function createDesktopCatalogRequestHandlers(
     const canonical = await context.requireTrustedWorkspace(workspacePath);
     const pluginSnapshot = await context.pluginRuntimeSnapshotRegistry.get(canonical);
     const agents = await listDesktopAgents(canonical, {
+      loadPicoProjectConfig,
+      logger,
       env: context.env,
       picoHome: context.picoHome,
       pluginSnapshot,
@@ -102,6 +106,8 @@ export function createDesktopCatalogRequestHandlers(
     const canonical = await context.requireTrustedWorkspace(workspacePath);
     const pluginSnapshot = await context.pluginRuntimeSnapshotRegistry.get(canonical);
     const skills = await listDesktopSkills(canonical, includeUserResources, {
+      loadPicoProjectConfig,
+      logger,
       env: context.env,
       picoHome: context.picoHome,
       pluginSnapshot,
@@ -111,6 +117,8 @@ export function createDesktopCatalogRequestHandlers(
 
   const listUserSkills = async (): Promise<JsonValue> => {
     const catalog = await listDesktopUserSkills({
+      loadPicoProjectConfig,
+      logger,
       env: context.env,
       picoHome: context.picoHome,
     });
@@ -124,6 +132,8 @@ export function createDesktopCatalogRequestHandlers(
     const canonical = await context.requireTrustedWorkspace(workspacePath);
     const pluginSnapshot = await context.pluginRuntimeSnapshotRegistry.get(canonical);
     const catalog = await listDesktopEffectiveSkills(canonical, {
+      loadPicoProjectConfig,
+      logger,
       env: context.env,
       picoHome: context.picoHome,
       pluginSnapshot,
@@ -298,6 +308,8 @@ export function createDesktopCatalogRequestHandlers(
     return {
       servers: toJsonValue(
         await listDesktopMcpServers(canonical, {
+          loadPicoProjectConfig,
+          logger,
           env: context.env,
           picoHome: context.picoHome,
           pluginSnapshot,
