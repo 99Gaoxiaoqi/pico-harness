@@ -12,7 +12,7 @@ import { globalSessionManager } from "../../../src/engine/session.js";
 import { HookService } from "../../../src/hooks/service.js";
 import { getOrCreateSessionSettings } from "../../../src/input/session-settings.js";
 import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
-import { PlanCoordinator } from "../../../src/plan/coordinator.js";
+import { PlanCoordinator } from "@pico/runtime/plan-coordinator";
 import type { LLMProvider } from "../../../src/provider/interface.js";
 import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
 import {

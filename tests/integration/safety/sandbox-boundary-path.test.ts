@@ -3,13 +3,18 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { canonicalizeSandboxBoundaryExpansion } from "../../../src/safety/sandbox-boundary-path.js";
+import { WorkspaceRoots as HostWorkspaceRoots } from "@pico/pico-host/workspace-roots";
+import { canonicalizeSandboxBoundaryExpansion } from "@pico/runtime/sandbox-boundary-path";
 import {
   PROTECTED_METADATA_NAMES,
   createReadOnlyPermissionProfile,
   createWorkspaceWritePermissionProfile,
 } from "../../../src/safety/permission-profile.js";
 import { WorkspaceRoots } from "../../../src/tools/workspace-roots.js";
+
+test("WorkspaceRoots 包入口与旧入口共享 class identity", () => {
+  assert.equal(HostWorkspaceRoots, WorkspaceRoots);
+});
 
 test("boundary paths are canonicalized without creating authority-bearing parents", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-boundary-path-"));

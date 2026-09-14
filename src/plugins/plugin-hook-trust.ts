@@ -5,7 +5,10 @@ import {
   type HookShell,
   type ResolvedCommandHookInvocation,
 } from "../hooks/config/command-shell.js";
-import type { HookTrustAuthority, HookTrustSubject } from "../hooks/trust/store.js";
+import type {
+  HookTrustAuthority,
+  HookTrustSubject,
+} from "@pico/pico-host/hooks/trust/store";
 
 export interface PluginHookTrustAuthorityOptions {
   readonly pluginId: string;

@@ -1,6 +1,6 @@
 import { decodeMemoryUndoToken, encodeMemoryUndoToken } from "../../memory/memory-undo-token.js";
 import { snapshotSummariesFromRewindList } from "../rewind-client-bridge.js";
-import { formatRewindSelector } from "../../input/rewind-presentation.js";
+import { formatRewindSelector } from "@pico/cli/rewind-presentation";
 import type { ClientCommandRegistryDeps } from "./types.js";
 import { rpcCommand, sessionAccess } from "./shared.js";
 

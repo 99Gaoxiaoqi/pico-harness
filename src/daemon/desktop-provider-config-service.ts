@@ -1,4 +1,4 @@
-import { resolveNativeWebSearchCapability } from "../provider/model-web-search.js";
+import { resolveNativeWebSearchCapability } from "@pico/runtime";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { unwatchFile, watchFile } from "node:fs";
 import { readFile } from "node:fs/promises";
@@ -47,7 +47,7 @@ import {
   requireJsonRecord,
   requireText,
   toJsonValue,
-} from "./desktop-protocol-values.js";
+} from "@pico/pico-host";
 import {
   RUNTIME_ERROR_CODES,
   RuntimeProtocolError,

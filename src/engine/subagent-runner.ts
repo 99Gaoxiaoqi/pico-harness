@@ -1,33 +1,39 @@
 import { randomUUID } from "node:crypto";
-import type { Message, ToolCall, ToolDefinition } from "../schema/message.js";
-import type { LLMProvider } from "../provider/interface.js";
-import type { RateLimitFailure, RetryInfo } from "../provider/retry.js";
-import { isAbortError } from "../provider/errors.js";
-import type { Compactor } from "../context/compactor.js";
-import type { RecoveryManager } from "../context/recovery.js";
+import type {
+  LLMProvider,
+  Message,
+  Reporter,
+  ToolCall,
+  ToolDefinition,
+  ToolResultEnvelope,
+  ToolResultEnvelopeInput,
+} from "@pico/core";
+import type { RateLimitFailure, RetryInfo } from "@pico/runtime/provider-retry";
+import { isAbortError } from "@pico/core";
+import type { Compactor } from "@pico/runtime/compactor";
+import type { RecoveryManager } from "@pico/runtime/recovery";
 import { SkillLoader } from "../context/skill.js";
 import { logger } from "../observability/logger.js";
 import { truncate } from "../observability/trace.js";
-import type { Registry } from "../tools/registry.js";
-import { ToolScheduler } from "../tools/tool-scheduler.js";
-import { ToolAccesses } from "../tools/tool-access.js";
-import { SUBAGENT_OUTPUT_BUDGET } from "../tools/subagent-budget.js";
+import type { Registry } from "@pico/pico-host/tool-registry-contract";
+import { ToolScheduler } from "@pico/runtime/tool-scheduler";
+import { ToolAccesses } from "@pico/runtime/tool-access";
+import { SUBAGENT_OUTPUT_BUDGET } from "@pico/runtime/subagent-budget";
 import {
   buildOverLimitRejectionText,
   MAX_TOOL_RESULT_BYTES,
-} from "../tools/tool-result-observation.js";
-import { snapshotToolDefinitions } from "../provider/prompt-cache.js";
-import type { EngineRuntimePort, EngineRuntimeToolResultInput } from "./runtime-port.js";
-import type { ToolResultEnvelope } from "./tool-result-contract.js";
-import { SilentReporter, type Reporter } from "./reporter.js";
+} from "@pico/runtime/tool-result-observation";
+import { snapshotToolDefinitions } from "@pico/runtime/prompt-cache";
+import type { EngineRuntimePort } from "./runtime-port.js";
+import { SilentReporter } from "@pico/runtime/silent-reporter";
 import type { Session } from "./session.js";
-import type { BudgetDecision } from "./budget.js";
+import type { BudgetDecision } from "@pico/runtime";
 import { generateSubagentResponse, buildSubagentEvidenceSnapshot } from "./subagent-context.js";
 import {
   buildRuntimeToolResultInput,
   buildEphemeralToolResult,
   redactToolResult,
-} from "./tool-result-builder.js";
+} from "@pico/runtime/tool-result-builder";
 
 export interface SubagentResult {
   status: "completed" | "partial" | "error";
@@ -387,7 +393,7 @@ export class SubagentRunner {
       const completedToolReportIndexes: number[] = [];
       const scheduler = new ToolScheduler<{
         readonly message?: Message;
-        readonly input?: EngineRuntimeToolResultInput;
+        readonly input?: ToolResultEnvelopeInput;
         readonly report: ToolResultEnvelope;
       }>({
         maxConcurrency: this.options.maxToolConcurrency,
@@ -435,6 +441,7 @@ export class SubagentRunner {
                 result,
                 finalOutput,
                 !dispatched ? "rejected" : result.isError ? "failed" : "succeeded",
+                logger,
               );
               completedToolReportIndexes.push(index);
               return { input: builtResult.input, report: builtResult.envelope };
@@ -444,6 +451,7 @@ export class SubagentRunner {
               result,
               finalOutput,
               result.isError ? "failed" : "succeeded",
+              logger,
             );
             completedToolReportIndexes.push(index);
             return { message: builtResult.message, report: builtResult.envelope };
@@ -452,7 +460,7 @@ export class SubagentRunner {
       );
       let subResults: Array<{
         readonly message?: Message;
-        readonly input?: EngineRuntimeToolResultInput;
+        readonly input?: ToolResultEnvelopeInput;
         readonly report: ToolResultEnvelope;
       }>;
       try {

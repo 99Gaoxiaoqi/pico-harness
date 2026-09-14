@@ -15,9 +15,9 @@ import {
   type FileHistoryDurableRewindPlan,
   type FileHistoryIo,
   type FileHistoryRewindTransactionHooks,
-} from "../safety/file-history.js";
+} from "@pico/pico-host/file-history-runtime";
 import type { Message } from "../schema/message.js";
-import { readVersionedJson, writeJsonAtomic } from "../storage/atomic-json.js";
+import { readVersionedJson, writeJsonAtomic } from "@pico/storage";
 import {
   ForkOperationCoordinator,
   ForkOperationConflictError,
@@ -29,20 +29,20 @@ import {
   type ForkReconciliationResult,
   type ForkRuntimePublicationCapability,
   type ForkSourceCursor,
-} from "../storage/fork-operation-coordinator.js";
+} from "@pico/storage/fork-operation-coordinator";
 import {
   StorageOperationJournal,
   type ForkStorageOperation,
   type StorageOperation,
   type StorageOperationDispositionInput,
-} from "../storage/operation-journal.js";
+} from "@pico/storage/operation-journal";
 import type {
   PersistedPermissionMode,
   PersistedSessionSettings,
   PersistedSessionSettingsWrite,
   SessionRuntimeStatePatch,
 } from "./session-runtime.js";
-import { normalizeSessionRuntimeStatePatch } from "./session-runtime.js";
+import { normalizeSessionRuntimeStatePatch } from "@pico/core/session-runtime-state";
 import {
   deriveDurableRuntimeForkCheckpoint,
   globalSessionManager,
@@ -57,29 +57,30 @@ import type {
 import {
   SessionForkPublicationUncertainError,
   SessionForkRuntimeConflictError,
-} from "./session-fork-runtime-port.js";
+} from "@pico/core/session-fork-contract";
 import {
   runtimeEventHasModelHistoryEntry,
   type RuntimeModelHistoryEvent,
-} from "./runtime-model-message.js";
+} from "@pico/core/runtime-model-message";
 import {
   projectRuntimeSessionForkSeedEntries,
   type RuntimeSessionForkSeedEntry,
-} from "./session-runtime-projection.js";
-import {
-  assertDurableTranscriptEvent,
-  projectTranscriptEvents,
-  type DurableTranscriptEvent,
-} from "../presentation/transcript-event-store.js";
-import { decodeRuntimeEvent } from "../storage/runtime-event.js";
+} from "@pico/runtime/session-runtime-projection";
+import { assertDurableTranscriptEvent, type DurableTranscriptEvent } from "@pico/core";
+import { projectTranscriptEvents } from "../presentation/transcript-event-store.js";
+import { decodeRuntimeEvent } from "@pico/storage/runtime-event";
 import type { RuntimePlanEvent } from "./session-runtime-event.js";
-import { planOperationFingerprint, PlanConflictError } from "../plan/contract.js";
-import { projectActivePlanEntries, projectPlanEntries, reducePlanEvent } from "../plan/reducer.js";
+import { planOperationFingerprint, PlanConflictError } from "@pico/core";
+import {
+  projectActivePlanEntries,
+  projectPlanEntries,
+  reducePlanEvent,
+} from "@pico/runtime/plan-reducer";
 import {
   compileRuntimePermissionProfile,
   executionBoundaryContains,
   type ExecutionBoundary,
-} from "../safety/permission-profile.js";
+} from "@pico/core/permission-profile";
 
 const SAFE_SESSION_ID = /^[A-Za-z0-9._-]+$/u;
 const FROZEN_FORK_BUNDLE_VERSION = 8 as const;
@@ -204,8 +205,7 @@ export class SessionForkService {
     this.workspacePaths = paths.workspace;
     this.sessionManager = options.sessionManager ?? globalSessionManager;
     this.journal =
-      options.journal ??
-      new StorageOperationJournal({ workDir: this.workDir, picoHome: this.picoHome });
+      options.journal ?? new StorageOperationJournal({ storageRoot: this.workspacePaths.root });
     this.runtimeStore =
       options.runtimeStore ??
       new SqliteRuntimeEventStore({ storageRoot: this.workspacePaths.root });

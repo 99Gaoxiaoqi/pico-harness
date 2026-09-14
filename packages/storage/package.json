@@ -1,0 +1,129 @@
+{
+  "name": "@pico/storage",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Pico 的持久化策略、Store 契约与 SQLite 实现。",
+  "dependencies": {
+    "@pico/core": "*"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./runtime-event": {
+      "types": "./dist/runtime-event.d.ts",
+      "import": "./dist/runtime-event.js"
+    },
+    "./local-file-storage": {
+      "types": "./dist/local-file-storage.d.ts",
+      "import": "./dist/local-file-storage.js"
+    },
+    "./evidence-archive": {
+      "types": "./dist/evidence-archive.d.ts",
+      "import": "./dist/evidence-archive.js"
+    },
+    "./evidence-blob-store": {
+      "types": "./dist/evidence-blob-store.d.ts",
+      "import": "./dist/evidence-blob-store.js"
+    },
+    "./operation-journal": {
+      "types": "./dist/operation-journal.d.ts",
+      "import": "./dist/operation-journal.js"
+    },
+    "./runtime-event-store-contracts": {
+      "types": "./dist/runtime-event-store-contracts.d.ts",
+      "import": "./dist/runtime-event-store-contracts.js"
+    },
+    "./runtime-control-types": {
+      "types": "./dist/runtime-control-types.d.ts",
+      "import": "./dist/runtime-control-types.js"
+    },
+    "./runtime-control-store-contracts": {
+      "types": "./dist/runtime-control-store-contracts.d.ts",
+      "import": "./dist/runtime-control-store-contracts.js"
+    },
+    "./task-run-store-contracts": {
+      "types": "./dist/task-run-store-contracts.d.ts",
+      "import": "./dist/task-run-store-contracts.js"
+    },
+    "./session-summary": {
+      "types": "./dist/session-summary.d.ts",
+      "import": "./dist/session-summary.js"
+    },
+    "./secure-file": {
+      "types": "./dist/secure-file.d.ts",
+      "import": "./dist/secure-file.js"
+    },
+    "./todo-store": {
+      "types": "./dist/todo-store.d.ts",
+      "import": "./dist/todo-store.js"
+    },
+    "./workspace-path": {
+      "types": "./dist/workspace-path.d.ts",
+      "import": "./dist/workspace-path.js"
+    },
+    "./workspace-blob-gc": {
+      "types": "./dist/workspace-blob-gc.d.ts",
+      "import": "./dist/workspace-blob-gc.js"
+    },
+    "./workspace-trust-store": {
+      "types": "./dist/workspace-trust-store.d.ts",
+      "import": "./dist/workspace-trust-store.js"
+    },
+    "./fork-operation-coordinator": {
+      "types": "./dist/fork-operation-coordinator.d.ts",
+      "import": "./dist/fork-operation-coordinator.js"
+    },
+    "./sqlite/event-log-retention-store": {
+      "types": "./dist/sqlite/sqlite-event-log-retention-store.d.ts",
+      "import": "./dist/sqlite/sqlite-event-log-retention-store.js"
+    },
+    "./sqlite/agent-graph-control-store": {
+      "types": "./dist/sqlite/sqlite-agent-graph-control-store.d.ts",
+      "import": "./dist/sqlite/sqlite-agent-graph-control-store.js"
+    },
+    "./sqlite/sqlite-runtime-event-store": {
+      "types": "./dist/sqlite/sqlite-runtime-event-store.d.ts",
+      "import": "./dist/sqlite/sqlite-runtime-event-store.js"
+    },
+    "./sqlite/sqlite-workspace-storage": {
+      "types": "./dist/sqlite/sqlite-workspace-storage.d.ts",
+      "import": "./dist/sqlite/sqlite-workspace-storage.js"
+    },
+    "./sqlite/workspace-scopes": {
+      "types": "./dist/sqlite/workspace-scopes.d.ts",
+      "import": "./dist/sqlite/workspace-scopes.js"
+    },
+    "./sqlite/sqlite-runtime-control-store": {
+      "types": "./dist/sqlite/sqlite-runtime-control-store.d.ts",
+      "import": "./dist/sqlite/sqlite-runtime-control-store.js"
+    },
+    "./sqlite/sqlite-task-run-store": {
+      "types": "./dist/sqlite/sqlite-task-run-store.d.ts",
+      "import": "./dist/sqlite/sqlite-task-run-store.js"
+    },
+    "./sqlite/file-history-manifest-store": {
+      "types": "./dist/sqlite/file-history-manifest-store.d.ts",
+      "import": "./dist/sqlite/file-history-manifest-store.js"
+    },
+    "./sqlite/atomic-memory-schema": {
+      "types": "./dist/sqlite/atomic-memory-schema.d.ts",
+      "import": "./dist/sqlite/atomic-memory-schema.js"
+    },
+    "./sqlite/sqlite-memory-item-store": {
+      "types": "./dist/sqlite/sqlite-memory-item-store.d.ts",
+      "import": "./dist/sqlite/sqlite-memory-item-store.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  }
+}

@@ -5,17 +5,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { canonicalizeWorkspacePath } from "../../../src/paths/pico-paths.js";
-import { SqliteTaskRunStore } from "../../../src/storage/sqlite/sqlite-task-run-store.js";
+import { SqliteTaskRunStore } from "@pico/storage/sqlite/sqlite-task-run-store";
 import {
   TASK_RUN_EVENT_SCHEMA_VERSION,
   type TaskRunEvent,
   type TaskSafeBoundary,
-} from "../../../src/tasks/task-run-contract.js";
+} from "@pico/core/task-run-contract";
 import {
   hashTaskRunInput,
   TaskRunStoreRevisionConflictError,
   type TaskRunSnapshot,
-} from "../../../src/tasks/task-run-store-contracts.js";
+} from "@pico/storage/task-run-store-contracts";
 
 const AT = "2026-08-18T00:00:00.000Z";
 const EXPIRES_AT = "2026-08-18T00:01:00.000Z";

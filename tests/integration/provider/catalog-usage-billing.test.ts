@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { CostTracker } from "../../../src/observability/tracker.js";
 import { catalogPricing } from "../../../src/observability/catalog-pricing.js";
-import { billingRouteForProvider } from "../../../src/runtime/runtime-assembly.js";
+import { billingRouteForProvider } from "@pico/runtime/provider-billing-route";
 import { resolveModelRouteCapabilities } from "../../../src/provider/model-capabilities.js";
 import { SqliteRuntimeControlStore } from "../../../src/storage/sqlite/sqlite-runtime-control-store.js";
 import { buildUsageDashboard } from "../../../src/daemon/usage-dashboard.js";

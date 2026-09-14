@@ -13,11 +13,13 @@ import { configureAutoUpdates } from "./updater.js";
 import { installApplicationMenu } from "./menu.js";
 import { sleepForRetry } from "../../../../src/provider/retry.js";
 import { createEmbeddedBrowserAuthority } from "./browser-manager.js";
+import { ensureDesktopRuntimeStorageRoot } from "./runtime-storage-recovery.js";
 import {
   cleanupDesktopWorkbarResources,
   createDesktopTerminalCleanupFence,
   DesktopTerminalGenerationController,
 } from "./daemon-controller.js";
+import { resolveCanonicalPicoHome } from "../../../../src/paths/pico-paths.js";
 
 let mainWindow: BrowserWindow | undefined;
 let disposeIpc: (() => void) | undefined;
@@ -129,6 +131,27 @@ if (!app.requestSingleInstanceLock()) {
       if (process.platform === "win32") app.setAppUserModelId("com.squirrel.pico.Pico");
       if (app.dock) app.dock.setIcon(resolveDesktopIconPath());
       await lifecycle.initialize();
+      const runtimeStorageReady = await ensureDesktopRuntimeStorageRoot({
+        rootPath: resolveCanonicalPicoHome(),
+        confirmRepair: async (storagePath) => {
+          if (lifecycle.isQuitting()) return false;
+          const { response } = await dialog.showMessageBox({
+            type: "warning",
+            title: "Pico 数据目录需要修复",
+            message: "本机 Pico 数据目录的磁盘标识发生了变化",
+            detail: `仅当这是本机原来的 Pico 数据目录，而不是复制出的其他目录时，才选择修复。\n\n修复只会更新本机存储身份绑定，保留模型配置、会话和其他数据。\n\n数据目录：${storagePath}`,
+            buttons: ["修复并启动", "退出"],
+            defaultId: 1,
+            cancelId: 1,
+            noLink: true,
+          });
+          return response === 0 && !lifecycle.isQuitting();
+        },
+      });
+      if (!runtimeStorageReady) {
+        requestDesktopShutdown();
+        return;
+      }
       installApplicationMenu(() => mainWindow);
       // 首次 ping 触发 connectOrSpawn：拉起或连上常驻 daemon 后返回。冷启动时
       // daemon 的 recover 窗口（reconcile 注册工作区 + 启动 cron，可达秒级）内

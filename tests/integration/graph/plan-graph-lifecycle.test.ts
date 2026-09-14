@@ -8,7 +8,7 @@ import { SqliteAgentGraphControlStoreAdapter } from "../../../src/agent-graph/sq
 import { SessionManager } from "../../../src/engine/session-manager.js";
 import type { PersistedSessionSettings } from "../../../src/engine/session-runtime.js";
 import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
-import { PlanCoordinator } from "../../../src/plan/coordinator.js";
+import { PlanCoordinator } from "@pico/runtime/plan-coordinator";
 import { AgentRuntime } from "../../../src/runtime/agent-runtime.js";
 import { createAgentGraphWorkspaceHost } from "../../../src/runtime/agent-graph-host.js";
 import { RUNTIME_EVENT_SCHEMA_VERSION } from "../../../src/storage/runtime-event.js";

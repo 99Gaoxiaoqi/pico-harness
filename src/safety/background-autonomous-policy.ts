@@ -3,36 +3,42 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { isHardlineCommand } from "../approval/manager.js";
 import { normalizeCanonicalHooksConfig } from "../hooks/config.js";
-import { HookTrustStore } from "../hooks/trust/store.js";
+import { HookTrustStore } from "@pico/pico-host/hooks/trust/store";
 import type {
   HookHandler,
   HookInput,
   HookMatcherGroup,
   HooksConfig,
   HookSource,
-} from "../hooks/types.js";
+} from "@pico/pico-host/hooks/types";
 import { logger } from "../observability/logger.js";
 import type { ToolCall } from "../schema/message.js";
 import type { ToolResultEnvelope } from "../engine/tool-result-contract.js";
-import type { RequestMiddleware, RequestMiddlewareResult } from "../tools/registry.js";
-import { WorkspaceRoots, workspaceAccessesFromCall } from "../tools/workspace-roots.js";
+import type {
+  RequestMiddleware,
+  RequestMiddlewareResult,
+} from "@pico/pico-host/tool-registry-contract";
+import { WorkspaceRoots, workspaceAccessesFromCall } from "@pico/pico-host/workspace-roots";
 import { isToolSupportedForHost } from "../tools/tool-surface.js";
 import type { WorkspaceTrustStore } from "../security/workspace-trust.js";
-import { verifyBackgroundMcpConfig } from "./background-mcp-policy.js";
-import { evaluateWorkspaceToolCall, type SandboxNetworkPolicy } from "./workspace-sandbox.js";
+import { verifyBackgroundMcpConfig } from "@pico/pico-host/background-mcp-policy";
+import {
+  evaluateWorkspaceToolCall,
+  type SandboxNetworkPolicy,
+} from "@pico/pico-host/workspace-sandbox";
 import {
   createSandboxPolicy,
   defaultSandboxScratchRoot,
   managedProcessLauncher,
   type ManagedSpawnRequest,
-} from "./process-sandbox/index.js";
+} from "@pico/pico-host/process-sandbox";
 import { resolveShell, shellCommandArgs } from "../os/shell.js";
 import {
   BackgroundAutonomousPolicySnapshotError,
   normalizeExactHostname,
   parseBackgroundAutonomousPolicySnapshot,
   type BackgroundAutonomousPolicySnapshotData,
-} from "./background-autonomous-policy-schema.js";
+} from "@pico/core/background-autonomous-policy-schema";
 
 export const BACKGROUND_HARDLINE_VERSION = "builtin-v1" as const;
 export const BACKGROUND_HOOK_VERSION = "workspace-v1" as const;

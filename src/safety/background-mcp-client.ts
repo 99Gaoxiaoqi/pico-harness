@@ -1,12 +1,13 @@
 import { resolve } from "node:path";
-import { HttpMcpClient } from "../mcp/http-client.js";
-import { StdioMcpClient } from "../mcp/stdio-client.js";
-import type { McpClient, McpServerConfig } from "../mcp/types.js";
+import { HttpMcpClient } from "@pico/pico-host/http-mcp-client";
+import { StdioMcpClient } from "@pico/pico-host/stdio-mcp-client";
+import type { McpClient, McpServerConfig } from "@pico/pico-host/mcp-client-types";
+import { logger } from "../observability/logger.js";
 import {
   normalizeExactHostname,
   type ToolNetworkPolicy,
-} from "./background-autonomous-policy-schema.js";
-import { createSandboxPolicy, defaultSandboxScratchRoot } from "./process-sandbox/index.js";
+} from "@pico/core/background-autonomous-policy-schema";
+import { createSandboxPolicy, defaultSandboxScratchRoot } from "@pico/pico-host/process-sandbox";
 
 export function createBackgroundMcpClient(
   config: McpServerConfig,
@@ -30,8 +31,9 @@ export function createBackgroundMcpClient(
           scratchRoot: scratchRoot ?? defaultSandboxScratchRoot(workspacePath),
           config: { network: networkPolicy === "allow" ? "allow" : "deny" },
         }),
+        diagnostics: logger,
       })
-    : new HttpMcpClient(secured);
+    : new HttpMcpClient(secured, { diagnostics: logger });
 }
 
 /**

@@ -14,7 +14,7 @@ import {
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { SilentReporter } from "../engine/reporter.js";
+import { SilentReporter } from "@pico/runtime/silent-reporter";
 import type { EffectiveConfigSnapshot } from "../input/effective-config.js";
 import type { SessionSettings } from "../input/session-settings.js";
 import {
@@ -26,26 +26,28 @@ import {
 import { resolvePicoHome, resolvePicoPaths } from "../paths/pico-paths.js";
 import type { CredentialVault } from "../provider/credential-vault.js";
 import { loadEffectiveModelRuntime } from "../provider/effective-model-runtime.js";
-import { DEFAULT_PROVIDER_TIMEOUT_MS, type LLMProvider } from "../provider/interface.js";
+import { DEFAULT_PROVIDER_TIMEOUT_MS, type LLMProvider } from "@pico/core";
 import type { ModelProviderConfig } from "../provider/model-router.js";
-import { coordinateReasoningLevel } from "../provider/reasoning-capability.js";
+import { coordinateReasoningLevel } from "@pico/runtime";
+import {
+  MAX_HOST_AGENT_MAX_TURNS,
+  MIN_HOST_AGENT_MAX_TURNS,
+} from "@pico/runtime/host-agent-turn-budget";
 import type { PluginRuntimeSnapshot } from "../plugins/plugin-runtime-snapshot.js";
 import {
   executeAgentRuntime,
-  MAX_HOST_AGENT_MAX_TURNS,
-  MIN_HOST_AGENT_MAX_TURNS,
   type RunAgentCliDependencies,
   type RunAgentProviderFactory,
   type RuntimePolicyDenial,
   type RuntimePolicyDenialReasonKind,
 } from "../runtime/agent-runtime.js";
-import type { RunAgentCliResult, RunAgentUsage } from "../runtime/runtime-contract.js";
-import type { PlanHandoff } from "../engine/plan-handoff.js";
+import type { RunAgentCliResult, RunAgentUsage } from "@pico/runtime/runtime-contract";
+import type { PlanHandoff } from "@pico/runtime/plan-handoff";
 import { getSupportedToolNames } from "../tools/tool-surface.js";
 import type { ImagePart } from "../schema/message.js";
 import { LeaseConflictError, OwnerLease } from "../storage/owner-lease.js";
 import { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-store.js";
-import { ensureWorkspaceTrusted, WorkspaceTrustStore } from "../security/workspace-trust.js";
+import { ensureWorkspaceTrusted, WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
 
 const SCHEMA_VERSION = 2 as const;
 const MAX_INPUT_BYTES = 2 * 1024 * 1024;

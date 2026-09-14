@@ -15,20 +15,20 @@ import {
   resolveRootControlNamespace,
   resolveStorageRoot,
 } from "@pico/runtime-host";
-import { LocalRuntimeClient } from "../daemon/client.js";
+import { LocalRuntimeClient } from "@pico/pico-host/local-runtime-client";
 import { resolveCanonicalPicoHome } from "../paths/pico-paths.js";
-import { sleepForRetry } from "../provider/retry.js";
-import { primeTokenizer } from "../context/token-counter.js";
+import { sleepForRetry } from "@pico/runtime/provider-retry";
+import { primeTokenizer } from "@pico/runtime";
 import { isValidThinkingEffort, type ThinkingEffort } from "../provider/thinking.js";
-import { ensureWorkspaceTrusted } from "../security/workspace-trust.js";
+import { ensureWorkspaceTrusted } from "@pico/pico-host/workspace-trust";
 import { startClientRepl, type ClientReplOptions } from "../tui/client-repl.js";
 import {
   resolveCliStartupSession,
   resolveCliWorkDir,
   type CliStartupSession,
   type ResolveCliStartupSessionOptions,
-} from "./session-args.js";
-import { createTerminalWorkspaceTrustPrompt } from "./workspace-trust-prompt.js";
+} from "@pico/cli/session-args";
+import { createTerminalWorkspaceTrustPrompt } from "@pico/cli/workspace-trust-prompt";
 
 const RETIRED_OPTIONS = new Set([
   "--tui",

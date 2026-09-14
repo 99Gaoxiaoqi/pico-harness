@@ -1,12 +1,8 @@
 import type { ProviderConfig } from "./config.js";
 import type { ProviderKind } from "./factory.js";
-import {
-  resolveModelRouteCapabilities,
-  type ModelCapabilityConfig,
-  type ModelRouteCapabilities,
-} from "./model-capabilities.js";
-import type { ReasoningLevel } from "./reasoning-capability.js";
-import { isOfficialEndpoint } from "./model-web-search.js";
+import { resolveModelRouteCapabilities } from "@pico/runtime";
+import type { ModelCapabilityConfig, ModelRouteCapabilities, ReasoningLevel } from "@pico/core";
+import { isOfficialEndpoint } from "@pico/runtime";
 
 const DEFAULT_DISCOVERY_TIMEOUT_MS = 3_000;
 

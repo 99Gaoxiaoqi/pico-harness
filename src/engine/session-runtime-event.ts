@@ -1,401 +1,63 @@
-import type { DurableTranscriptEvent } from "../presentation/transcript-event-store.js";
-import type { Message, Usage } from "../schema/message.js";
-import type { ToolRecoveryMode } from "../tools/registry.js";
-import type {
-  PlanOperationFact,
-  PlanGraphBinding,
-  PlanProposal,
-  PlanReviewAction,
-  PlanReviewedBy,
-  PlanStepStatus,
-} from "../plan/contract.js";
-import type {
-  SessionRuntimeStateWritePatch,
-  SessionRuntimeStateVersion,
-} from "./session-runtime.js";
-import type {
+/**
+ * 兼容 Engine 导入路径。RuntimeEvent 的稳定联合属于 Core；Engine 只在
+ * Transcript 事实处提供展示层的具体类型。
+ */
+import type { RuntimeEvent as CoreRuntimeEvent } from "@pico/core";
+import type { DurableTranscriptEvent } from "@pico/core";
+
+export {
+  isRuntimeMessageEvent,
+  isRuntimeTerminalEvent,
+  RUNTIME_EVENT_SCHEMA_VERSION,
+  runtimeEventHasModelMessage,
+} from "@pico/core";
+
+export type {
+  AgentSwarmAuthorizationSource,
+  RuntimeAgentOutputEvent,
+  RuntimeAgentOutputPayload,
+  RuntimeAgentOutputStatus,
+  RuntimeApprovalRequestedEvent,
+  RuntimeApprovalSettledEvent,
+  RuntimeCheckpointRecordedEvent,
+  RuntimeCheckpointRecordedEventData,
+  RuntimeEventBase,
+  RuntimeEventRefs,
+  RuntimeEventVisibility,
   RuntimeEvidenceReference,
-  RuntimeToolResultBody,
-  RuntimeToolResultProjection,
-  RuntimeToolResultStatus,
-} from "./tool-result-contract.js";
-export type { RuntimeEvidenceReference } from "./tool-result-contract.js";
+  RuntimeMessageCommittedEvent,
+  RuntimeModelCallSettledEvent,
+  RuntimeModelCallStartedEvent,
+  RuntimePlanApprovedEvent,
+  RuntimePlanEvent,
+  RuntimePlanExecutionCancelledEvent,
+  RuntimePlanExecutionCompletedEvent,
+  RuntimePlanExecutionInterruptedEvent,
+  RuntimePlanExecutionReplannedEvent,
+  RuntimePlanExecutionResumedEvent,
+  RuntimePlanExecutionStartedEvent,
+  RuntimePlanProposedEvent,
+  RuntimePlanRejectedEvent,
+  RuntimePlanRevisedEvent,
+  RuntimePlanRevisionRequestedEvent,
+  RuntimePlanReviewClaimedEvent,
+  RuntimePlanStepRecoveredEvent,
+  RuntimePlanStepUpdatedEvent,
+  RuntimeRunContinuationOf,
+  RuntimeRunStartedEvent,
+  RuntimeRunTerminalEvent,
+  RuntimeSessionForkedEvent,
+  RuntimeSessionStateCommittedEvent,
+  RuntimeTerminalStatus,
+  RuntimeToolGroupLoadedEvent,
+  RuntimeToolRecoveryClassification,
+  RuntimeToolRecoveryResolvedEvent,
+  RuntimeToolResultRecordedEvent,
+  RuntimeToolResultRecoveryMarker,
+  RuntimeToolStartedEvent,
+} from "@pico/core";
 
-/** Durable Session event contract. Runtime owns validation and storage adapters. */
-export const RUNTIME_EVENT_SCHEMA_VERSION = 2 as const;
+export type RuntimeTranscriptEventRecordedEvent =
+  import("@pico/core").RuntimeTranscriptEventRecordedEvent<DurableTranscriptEvent>;
 
-export type RuntimeEventVisibility = "model" | "transcript" | "internal";
-export type RuntimeTerminalStatus = "completed" | "failed" | "cancelled" | "interrupted";
-export interface RuntimePresentationProvenance {
-  readonly audience: "internal";
-  readonly source: "agent_graph_control";
-}
-
-export interface RuntimeEventRefs {
-  readonly stepId?: string;
-  readonly toolCallId?: string;
-  readonly parentRunId?: string;
-  readonly parentToolCallId?: string;
-  readonly providerCallId?: string;
-  readonly evidence?: RuntimeEvidenceReference;
-}
-
-export interface RuntimeEventBase {
-  readonly schemaVersion: typeof RUNTIME_EVENT_SCHEMA_VERSION;
-  readonly eventId: string;
-  readonly sessionId: string;
-  readonly invocationId: string;
-  readonly runId: string;
-  readonly turnId: string;
-  readonly at: string;
-  readonly partial: boolean;
-  readonly visibility: RuntimeEventVisibility;
-  readonly refs?: RuntimeEventRefs;
-}
-
-/**
- * ADR 29 续跑锚:目标 run 的 run.started 声明其对某个 interrupted 源 run
- * 前缀的确定性引用。三元组与 `runtime_continuation_claims` 行的
- * source_run_id / source_high_water / source_prefix_digest 同口径,由调用方
- * 在 claim 成功后取得;前缀事件位于同一 session 事件流,模型上下文无需特判。
- */
-export interface RuntimeRunContinuationOf {
-  readonly runId: string;
-  readonly highWater: number;
-  readonly prefixDigest: string;
-}
-
-/** Trusted host decision frozen as part of every current Run admission. */
-export type AgentSwarmAuthorizationSource = "none" | "session_mode" | "turn_override";
-
-export interface RuntimeRunStartedEvent extends RuntimeEventBase {
-  readonly kind: "run.started";
-  readonly data: {
-    readonly workDir: string;
-    readonly agentSwarmAuthorization: AgentSwarmAuthorizationSource;
-    /** Host-owned presentation identity; model/runtime facts remain durable. */
-    readonly presentation?: RuntimePresentationProvenance;
-    /** 仅续跑目标 run 携带;普通 run 不得设置。 */
-    readonly continuationOf?: RuntimeRunContinuationOf;
-  };
-}
-
-export interface RuntimeMessageCommittedEvent extends RuntimeEventBase {
-  readonly kind: "message.committed";
-  readonly data: { readonly message: Message };
-}
-
-export interface RuntimeToolStartedEvent extends RuntimeEventBase {
-  readonly kind: "tool.started";
-  readonly data: {
-    readonly toolName: string;
-    readonly argumentsHash: string;
-    readonly argumentsJson: string;
-    readonly argumentsRedacted: boolean;
-    readonly recoveryMode: ToolRecoveryMode;
-    /** Present only when the committed recovery policy has a stable binding key. */
-    readonly recoveryKey?: string;
-    readonly origin?: "model" | "code_mode";
-  };
-}
-
-/** load_tools 组级激活的 durable 审计事实；新 Turn 不继承历史激活。 */
-export interface RuntimeToolGroupLoadedEvent extends RuntimeEventBase {
-  readonly kind: "tool.group.loaded";
-  readonly data: {
-    readonly groupId: string;
-    readonly toolNames: readonly string[];
-  };
-}
-
-/** A trusted host's explicit evidence, never an inferred replay or replacement result. */
-export interface RuntimeToolRecoveryResolvedEvent extends RuntimeEventBase {
-  readonly kind: "tool.recovery.resolved";
-  readonly data: {
-    readonly recoveryEventId: string;
-    readonly outcome: "effects_verified" | "not_dispatched_verified";
-    readonly evidenceUri: string;
-    readonly summary: string;
-  };
-}
-
-/**
- * ADR 27 P0 恢复分类标记：悬空 tool call 的合成 tool.result.recorded
- * 携带的半执行判定。`indeterminate` = 已派发（tool.started 已落库）但结果未知，
- * 副作用可能已发生；`not_dispatched` = 从未派发，无副作用。
- */
-export type RuntimeToolRecoveryClassification = "indeterminate" | "not_dispatched";
-
-export interface RuntimeToolResultRecoveryMarker {
-  readonly classification: RuntimeToolRecoveryClassification;
-}
-
-export interface RuntimeToolResultRecordedEvent extends RuntimeEventBase {
-  readonly kind: "tool.result.recorded";
-  readonly refs: RuntimeEventRefs & {
-    readonly toolCallId: string;
-    readonly evidence?: RuntimeEvidenceReference;
-  };
-  readonly data: {
-    readonly origin?: "model" | "code_mode";
-    readonly toolName: string;
-    readonly status: RuntimeToolResultStatus;
-    readonly body: RuntimeToolResultBody;
-    readonly projection: RuntimeToolResultProjection;
-    /** 仅恢复期合成结果携带；正常执行路径不得设置。 */
-    readonly recovery?: RuntimeToolResultRecoveryMarker;
-  };
-}
-
-export type RuntimeAgentOutputStatus = "success" | "failure";
-
-/** Stable semantic body committed by the operator-only agent_output tool. */
-export interface RuntimeAgentOutputPayload {
-  readonly schemaVersion: "pico.agent_output.v1";
-  readonly graphId: string;
-  readonly operatorId: string;
-  readonly operatorGeneration: number;
-  readonly activationId: string;
-  readonly status: RuntimeAgentOutputStatus;
-  readonly output: string;
-  readonly outputBytes: number;
-  readonly evidenceRefs: readonly string[];
-  readonly artifactRefs: readonly string[];
-  readonly idempotencyKey: string;
-  readonly fingerprint: string;
-}
-
-/** Canonical reference source for one Graph operator activation output. */
-export interface RuntimeAgentOutputEvent extends RuntimeEventBase {
-  readonly kind: "agent.output";
-  readonly partial: false;
-  readonly visibility: "internal";
-  readonly refs: RuntimeEventRefs & { readonly toolCallId: string };
-  readonly data: {
-    readonly toolCallId: string;
-    readonly idempotencyKey: string;
-    readonly fingerprint: string;
-    readonly payload: RuntimeAgentOutputPayload;
-  };
-}
-
-export interface RuntimeApprovalRequestedEvent extends RuntimeEventBase {
-  readonly kind: "approval.requested";
-  readonly data: { readonly approvalId: string; readonly toolName: string };
-}
-
-export interface RuntimeApprovalSettledEvent extends RuntimeEventBase {
-  readonly kind: "approval.settled";
-  readonly data: { readonly approvalId: string; readonly decision: "approved" | "rejected" };
-}
-
-export interface RuntimeModelCallStartedEvent extends RuntimeEventBase {
-  readonly kind: "model.call.started";
-  readonly data: {
-    readonly providerCallId: string;
-    readonly provider?: string;
-    readonly model?: string;
-    readonly purpose: string;
-  };
-}
-
-export interface RuntimeModelCallSettledEvent extends RuntimeEventBase {
-  readonly kind: "model.call.settled";
-  readonly data: {
-    readonly providerCallId: string;
-    readonly status: "succeeded" | "failed" | "cancelled";
-    readonly latencyMs: number;
-    readonly usage?: Usage;
-    readonly costCNY?: number;
-    readonly costStatus?: "estimated" | "included" | "unknown";
-    readonly error?: string;
-  };
-}
-
-export interface RuntimeCheckpointRecordedEventData {
-  readonly checkpointId: string;
-  readonly coveredEventCount: number;
-  readonly sourceDigest: string;
-  readonly throughEventId: string;
-  readonly memoryExtractionBoundary?: {
-    readonly runtimeEventId: string;
-    readonly disposition: "eligible" | "policy_denied";
-  };
-  readonly summary: Message;
-  /** 滚动摘要链:上一个 checkpoint 的 id(若存在),用于增量更新。 */
-  readonly previousCheckpointId?: string;
-}
-
-export interface RuntimeCheckpointRecordedEvent extends RuntimeEventBase {
-  readonly kind: "context.checkpoint.recorded";
-  readonly data: RuntimeCheckpointRecordedEventData;
-}
-export interface RuntimeSessionForkedEvent extends RuntimeEventBase {
-  readonly kind: "session.forked";
-  readonly data: {
-    readonly parentSessionId: string;
-    readonly throughEventId?: string;
-    readonly sourceDigest?: string;
-    readonly messageCount?: number;
-  };
-}
-export interface RuntimeSessionStateCommittedEvent extends RuntimeEventBase {
-  readonly kind: "session.state.committed";
-  readonly data: {
-    readonly stateVersion: SessionRuntimeStateVersion;
-    readonly patch: SessionRuntimeStateWritePatch;
-  };
-}
-export interface RuntimeTranscriptEventRecordedEvent extends RuntimeEventBase {
-  readonly kind: "transcript.event.recorded";
-  readonly data: { readonly event: DurableTranscriptEvent };
-}
-export interface RuntimeRunTerminalEvent extends RuntimeEventBase {
-  readonly kind: "run.terminal";
-  readonly data: {
-    readonly status: RuntimeTerminalStatus;
-    readonly reason?: string;
-    readonly recovered?: boolean;
-  };
-}
-
-interface RuntimePlanEventBase extends RuntimeEventBase {
-  readonly partial: false;
-  readonly visibility: "internal";
-  readonly data: PlanOperationFact;
-}
-export interface RuntimePlanProposedEvent extends RuntimePlanEventBase {
-  readonly kind: "plan.proposed";
-  readonly data: PlanOperationFact & { readonly proposal: PlanProposal };
-}
-export interface RuntimePlanRevisedEvent extends RuntimePlanEventBase {
-  readonly kind: "plan.revised";
-  readonly data: PlanOperationFact & {
-    readonly planId: string;
-    readonly expectedRevision: number;
-    readonly proposal: PlanProposal;
-  };
-}
-export interface RuntimePlanRevisionRequestedEvent extends RuntimePlanEventBase {
-  readonly kind: "plan.revision.requested";
-  readonly data: PlanOperationFact & {
-    readonly planId: string;
-    readonly expectedRevision: number;
-    readonly feedback: string;
-  };
-}
-export interface RuntimePlanReviewClaimedEvent extends RuntimePlanEventBase {
-  readonly kind: "plan.review.claimed";
-  readonly data: PlanOperationFact & {
-    readonly planId: string;
-    readonly revision: number;
-    readonly controlEpoch: string;
-    readonly action: PlanReviewAction;
-    readonly feedback?: string;
-  };
-}
-interface RuntimePlanReviewedEvent<
-  K extends "plan.approved" | "plan.rejected",
-> extends RuntimePlanEventBase {
-  readonly kind: K;
-  readonly data: PlanOperationFact & {
-    readonly planId: string;
-    readonly expectedRevision: number;
-    readonly reviewedBy: PlanReviewedBy;
-    readonly reason?: string;
-  };
-}
-export type RuntimePlanApprovedEvent = RuntimePlanReviewedEvent<"plan.approved">;
-export type RuntimePlanRejectedEvent = RuntimePlanReviewedEvent<"plan.rejected">;
-export interface RuntimePlanExecutionStartedEvent extends RuntimePlanEventBase {
-  readonly kind: "plan.execution.started";
-  readonly data: PlanOperationFact & {
-    readonly planId: string;
-    readonly revision: number;
-    readonly graph?: PlanGraphBinding;
-  };
-}
-export interface RuntimePlanStepUpdatedEvent extends RuntimePlanEventBase {
-  readonly kind: "plan.step.updated";
-  readonly data: PlanOperationFact & {
-    readonly planId: string;
-    readonly stepId: string;
-    readonly status: PlanStepStatus;
-    readonly note?: string;
-  };
-}
-export interface RuntimePlanStepRecoveredEvent extends RuntimePlanEventBase {
-  readonly kind: "plan.step.recovered";
-  readonly data: PlanOperationFact & {
-    readonly planId: string;
-    readonly stepId: string;
-    readonly note?: string;
-  };
-}
-interface RuntimePlanExecutionLifecycleEvent<
-  K extends
-    | "plan.execution.interrupted"
-    | "plan.execution.resumed"
-    | "plan.execution.replanned"
-    | "plan.execution.completed"
-    | "plan.execution.cancelled",
-> extends RuntimePlanEventBase {
-  readonly kind: K;
-  readonly data: PlanOperationFact & { readonly planId: string; readonly reason?: string };
-}
-export type RuntimePlanExecutionInterruptedEvent =
-  RuntimePlanExecutionLifecycleEvent<"plan.execution.interrupted">;
-export type RuntimePlanExecutionResumedEvent =
-  RuntimePlanExecutionLifecycleEvent<"plan.execution.resumed">;
-export type RuntimePlanExecutionReplannedEvent =
-  RuntimePlanExecutionLifecycleEvent<"plan.execution.replanned">;
-export type RuntimePlanExecutionCompletedEvent =
-  RuntimePlanExecutionLifecycleEvent<"plan.execution.completed">;
-export type RuntimePlanExecutionCancelledEvent =
-  RuntimePlanExecutionLifecycleEvent<"plan.execution.cancelled">;
-export type RuntimePlanEvent =
-  | RuntimePlanProposedEvent
-  | RuntimePlanRevisedEvent
-  | RuntimePlanRevisionRequestedEvent
-  | RuntimePlanReviewClaimedEvent
-  | RuntimePlanApprovedEvent
-  | RuntimePlanRejectedEvent
-  | RuntimePlanExecutionStartedEvent
-  | RuntimePlanStepUpdatedEvent
-  | RuntimePlanStepRecoveredEvent
-  | RuntimePlanExecutionInterruptedEvent
-  | RuntimePlanExecutionResumedEvent
-  | RuntimePlanExecutionReplannedEvent
-  | RuntimePlanExecutionCompletedEvent
-  | RuntimePlanExecutionCancelledEvent;
-
-export type RuntimeEvent =
-  | RuntimeRunStartedEvent
-  | RuntimeMessageCommittedEvent
-  | RuntimeToolStartedEvent
-  | RuntimeToolGroupLoadedEvent
-  | RuntimeToolRecoveryResolvedEvent
-  | RuntimeToolResultRecordedEvent
-  | RuntimeAgentOutputEvent
-  | RuntimeApprovalRequestedEvent
-  | RuntimeApprovalSettledEvent
-  | RuntimeModelCallStartedEvent
-  | RuntimeModelCallSettledEvent
-  | RuntimeCheckpointRecordedEvent
-  | RuntimeSessionForkedEvent
-  | RuntimeSessionStateCommittedEvent
-  | RuntimeTranscriptEventRecordedEvent
-  | RuntimePlanEvent
-  | RuntimeRunTerminalEvent;
-
-export function isRuntimeTerminalEvent(event: RuntimeEvent): event is RuntimeRunTerminalEvent {
-  return event.kind === "run.terminal";
-}
-export function isRuntimeMessageEvent(event: RuntimeEvent): event is RuntimeMessageCommittedEvent {
-  return event.kind === "message.committed";
-}
-export function runtimeEventHasModelMessage(
-  event: RuntimeEvent,
-): event is RuntimeMessageCommittedEvent {
-  return event.kind === "message.committed" && event.visibility === "model" && !event.partial;
-}
+export type RuntimeEvent = CoreRuntimeEvent<DurableTranscriptEvent>;

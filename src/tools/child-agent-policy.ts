@@ -1,31 +1,30 @@
-import { isDangerousCommand, isHardlineCommand } from "../approval/manager.js";
-import { bashCommandFromArgs } from "../approval/bash-paths.js";
-import { classifyBashCommand, type BashSafetyClassification } from "../approval/bash-safety.js";
+import { isDangerousCommand, isHardlineCommand } from "@pico/runtime/approval-policy";
+import { bashCommandFromArgs } from "@pico/runtime/bash-paths";
+import { classifyBashCommand, type BashSafetyClassification } from "@pico/runtime/bash-safety";
 import {
   classifyPowerShellCommand,
   type PowerShellSafetyClassification,
-} from "../approval/powershell-safety.js";
-import { isSensitiveCredentialPath } from "../approval/session-permissions.js";
-import { createCodeIntelligenceTools } from "./code-intelligence.js";
-import type { CodeIntelligenceService } from "../code-intelligence/types.js";
+} from "@pico/runtime/powershell-safety";
+import { isSensitiveCredentialPath } from "@pico/runtime/sensitive-path-policy";
+import { createCodeIntelligenceTools } from "@pico/pico-host/code-intelligence-tools";
+import type { CodeIntelligenceService } from "@pico/pico-host/code-intelligence/types";
 import { SkillLoader, SkillViewTool } from "../context/skill.js";
-import { hostShellDialect } from "../os/shell.js";
-import type { SandboxProfile } from "../safety/process-sandbox/index.js";
+import { hostShellDialect } from "@pico/runtime/host-shell";
+import type { SandboxProfile } from "@pico/pico-host/process-sandbox";
 import {
   evaluateWorkspaceToolCall,
   type WorkspaceSandboxConfig,
-} from "../safety/workspace-sandbox.js";
-import type { BaseTool, RequestMiddleware } from "./registry.js";
-import {
-  BashTool,
-  EditFileTool,
-  ReadFileTool,
-  ToolRegistry,
-  WriteFileTool,
-} from "./registry-impl.js";
-import { GlobTool } from "./glob.js";
-import { GrepTool } from "./grep.js";
-import { WebSearchTool } from "./web.js";
+} from "@pico/pico-host/workspace-sandbox";
+import type { BaseTool, RequestMiddleware } from "@pico/pico-host/tool-registry-contract";
+import { ToolRegistry } from "./registry-impl.js";
+import { BashTool } from "@pico/pico-host/bash-tool";
+import { ReadFileTool } from "@pico/pico-host/read-file-tool";
+import { WriteFileTool } from "@pico/pico-host/write-file-tool";
+import { EditFileTool } from "@pico/pico-host/edit-file-tool";
+import { GlobTool } from "@pico/pico-host/glob-tool";
+import { GrepTool } from "@pico/pico-host/grep-tool";
+import { logger } from "../observability/logger.js";
+import { WebSearchTool } from "@pico/pico-host/web-tools";
 import { buildWorkspaceBoundaryMiddleware, WorkspaceRoots } from "./workspace-roots.js";
 
 export interface ChildAgentProcessSandbox {
@@ -68,6 +67,7 @@ export const CHILD_AGENT_TOOL_CONSTRUCTORS: Readonly<Record<string, ChildAgentTo
   glob: (workDir, roots) => new GlobTool(roots ?? workDir),
   grep: (workDir, roots, processSandbox, profile = "read-only") =>
     new GrepTool(roots ?? workDir, {
+      diagnostics: logger,
       excludeSensitiveFiles: true,
       processSandbox: {
         profile,
@@ -113,6 +113,7 @@ export function createHookVerifierRegistry(options: {
   registry.register(new GlobTool(options.workspaceRoots));
   registry.register(
     new GrepTool(options.workspaceRoots, {
+      diagnostics: logger,
       excludeSensitiveFiles: true,
       processSandbox: {
         profile: "read-only",

@@ -1,8 +1,8 @@
 import { subagentThinkingLevel } from "../runtime/configured-subagent-executor.js";
 import { AtomicMemoryLifecycle } from "../runtime/atomic-memory-lifecycle.js";
 import type { Session } from "../engine/session.js";
-import { createConfiguredSubagentCatalog } from "../agents/configured-subagent-catalog.js";
-import { listSubagentConnections } from "./subagent-connections.js";
+import { createConfiguredSubagentCatalog } from "@pico/pico-host/configured-subagent-catalog";
+import { listSubagentConnections } from "@pico/pico-host/subagent-connections";
 import { loadAgentCatalog } from "../agents/catalog.js";
 import {
   createCatalogAgentGraphOperatorProfileCatalog,
@@ -10,15 +10,15 @@ import {
   type MutableAgentGraphOperatorProfileCatalog,
 } from "../agent-graph/operator-profile-catalog.js";
 import { bindAgentGraphOperatorExecutionBoundary } from "../agent-graph/execution-boundary.js";
-import type { AgentSwarmAuthorizationSource } from "../engine/session-runtime-event.js";
+import type { AgentSwarmAuthorizationSource } from "@pico/core";
 import { SqliteAgentGraphControlStoreAdapter } from "../agent-graph/sqlite-control-store-adapter.js";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { ApprovalNotice, ApprovalNotifier } from "../approval/manager.js";
-import { bashCommandFromArgs } from "../approval/bash-paths.js";
+import { bashCommandFromArgs } from "@pico/runtime/bash-paths";
 import { assertValidAgentGraphOperatorProfileSnapshot } from "../agent-graph/operator-profile-catalog.js";
-import { createCliSessionId, listCliSessionCatalogEntries } from "../cli/session-resolver.js";
+import { createCliSessionId, listCliSessionCatalogEntries } from "@pico/cli/session-resolver";
 import { globalSessionManager } from "../engine/session.js";
 import type { SessionManagerLease } from "../engine/session-manager.js";
 import {
@@ -28,30 +28,30 @@ import {
 } from "../runtime/agent-runtime.js";
 import { currentRuntimeRun, RuntimeRun } from "../runtime/runtime-run.js";
 import type { AgentGraphRunLaunchState } from "../agent-graph/runtime-activation-projection.js";
-import { inspectAgentGraphExactRun } from "../runtime/agent-graph-exact-run-port.js";
-import type { PlanHandoff } from "../engine/plan-handoff.js";
-import { PlanCoordinator } from "../plan/coordinator.js";
-import type { PlanProjection } from "../plan/contract.js";
+import { inspectAgentGraphExactRun } from "@pico/runtime/agent-graph-exact-run-inspection";
+import type { PlanHandoff } from "@pico/runtime/plan-handoff";
+import { PlanCoordinator } from "@pico/runtime/plan-coordinator";
+import type { PlanProjection } from "@pico/core";
 import {
   planReviewOperationId,
   planReviewRunId,
   planReviewTransitionOperationId,
-} from "../plan/review-identity.js";
+} from "@pico/core/plan-review-identity";
 import { createEngineRuntimePort } from "../runtime/engine-runtime-port-adapter.js";
 import {
-  assertAgentGraphRootRunSettled,
   createAgentGraphWorkspaceHost,
   type AgentGraphRunToolBinding,
   type AgentGraphWorkspaceHost,
   type CreateAgentGraphWorkspaceHostOptions,
   type ExecuteHostedAgentGraphRunInput,
 } from "../runtime/agent-graph-host.js";
+import { assertAgentGraphRootRunSettled } from "@pico/runtime/agent-graph-root-run-settlement";
 import { createSessionRuntime } from "../runtime/session-runtime.js";
 import type {
   WorkspaceRunContext,
   WorkspaceRunStatus,
   WorkspaceTaskRuntime,
-} from "../runtime/workspace-runtime.js";
+} from "@pico/pico-host/workspace-task-runtime";
 import { SilentReporter } from "../engine/reporter.js";
 import { loadPicoProjectConfig } from "../input/pico-config.js";
 import { EffectiveConfigResolver } from "../input/effective-config.js";
@@ -67,41 +67,41 @@ import {
   parseProviderCredentialRef,
   type CredentialVault,
 } from "../provider/credential-vault.js";
-import { resolveModelRouteCapabilities } from "../provider/model-capabilities.js";
+import { resolveModelRouteCapabilities } from "@pico/runtime";
 import { loadEffectiveModelRuntime } from "../provider/effective-model-runtime.js";
 import { logger } from "../observability/logger.js";
 import { resolvePicoHome } from "../paths/pico-paths.js";
-import { coordinateReasoningLevel } from "../provider/reasoning-capability.js";
+import { coordinateReasoningLevel } from "@pico/runtime";
 import {
   BACKGROUND_HARDLINE_VERSION,
   BACKGROUND_HOOK_VERSION,
   prepareBackgroundAutonomousPolicy,
 } from "../safety/background-autonomous-policy.js";
-import { automationDeniedTools } from "../safety/automation-tool-policy.js";
+import { automationDeniedTools } from "@pico/runtime/automation-tool-policy";
 import {
   assessSandboxBoundaryExpansion,
   type ExecutionBoundary,
   type SandboxBoundaryExpansion,
 } from "../safety/permission-profile.js";
-import { hasExplicitNetworkIntent } from "../safety/workspace-sandbox.js";
-import { canonicalizeSandboxBoundaryExpansion } from "../safety/sandbox-boundary-path.js";
-import { workspaceAccessesFromCall } from "../tools/workspace-roots.js";
-import { WorkspaceTrustStore } from "../security/workspace-trust.js";
-import type { CronJobRecord, CronRunRecord } from "../tasks/runtime-types.js";
-import { createCronWorkspaceRuntimeFactory } from "./cron-workspace-runtime.js";
+import { hasExplicitNetworkIntent } from "@pico/pico-host/workspace-sandbox";
+import { canonicalizeSandboxBoundaryExpansion } from "@pico/runtime/sandbox-boundary-path";
+import { workspaceAccessesFromCall } from "@pico/pico-host/workspace-roots";
+import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
+import type { CronJobRecord, CronRunRecord } from "@pico/storage/runtime-control-types";
+import { createCronWorkspaceRuntimeFactory } from "@pico/pico-host/cron-workspace-runtime";
 import {
   DesktopInteractionBroker,
   DesktopInteractionVersionConflictError,
   type DesktopInteractionEvent,
 } from "./desktop-interaction-broker.js";
 import { FileDesktopInteractionStore } from "./desktop-interaction-store.js";
-import { DesktopReporter, type DesktopReporterEvent } from "./desktop-reporter.js";
-import type { SessionSubscriptionRegistry } from "./session-subscription-owner.js";
-import { PersistentActiveOverlay } from "./session-active-overlay.js";
+import { DesktopReporter, type DesktopReporterEvent } from "@pico/pico-host";
+import type { SessionSubscriptionRegistry } from "@pico/pico-host/session-subscription-owner";
+import { PersistentActiveOverlay } from "@pico/pico-host/session-active-overlay";
 import { DesktopRuntimeService } from "./desktop-runtime-service.js";
-import type { PlanControlResponse } from "./plan-control-port.js";
+import type { PlanControlResponse } from "@pico/pico-host/plan-control-port";
 import { DesktopAutomationService } from "./desktop-automation-service.js";
-import { buildApprovalRequestedPayload } from "./approval-wire.js";
+import { buildApprovalRequestedPayload } from "@pico/pico-host";
 import {
   createRuntimeNotification,
   isJsonObject,
@@ -110,15 +110,13 @@ import {
   RuntimeProtocolError,
   type JsonObject,
 } from "@pico/protocol";
-import { LocalDaemonHost } from "./runtime-host.js";
-import { canonicalizeWorkspacePath } from "./workspace-registry.js";
-import { WorkspaceRegistrationStore } from "./workspace-registration.js";
-import {
-  INTERRUPTED_DAEMON_RUN_ERROR,
-  WorkspaceRuntimeService,
-} from "./workspace-runtime-service.js";
-import { agentGraphLaunchStateFromWorkspaceRun } from "./agent-graph-launch-state.js";
-import { BrowserAgentCommandBroker } from "./browser-agent-command-broker.js";
+import { LocalDaemonHost } from "@pico/pico-host/local-daemon-host";
+import { canonicalizeWorkspacePath } from "@pico/pico-host/workspace-registry";
+import { WorkspaceRegistrationStore } from "@pico/pico-host/workspace-registration";
+import { WorkspaceRuntimeService } from "./workspace-runtime-service.js";
+import { INTERRUPTED_DAEMON_RUN_ERROR } from "@pico/pico-host/workspace-run-lifecycle";
+import { agentGraphLaunchStateFromWorkspaceRun } from "@pico/pico-host/agent-graph-launch-state";
+import { BrowserAgentCommandBroker } from "@pico/pico-host/browser-agent-command-broker";
 import { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-store.js";
 import type { AgentGraphApplicationService } from "../agent-graph/service.js";
 import type { AgentGraph } from "../agent-graph/core/contracts.js";
@@ -2429,7 +2427,7 @@ function isTerminalWorkspaceRunStatus(status: WorkspaceRunStatus): boolean {
 export function assembleProductionDaemonHost(
   services: ProductionRuntimeServices,
   _options: ProductionLocalDaemonHostOptions,
-): LocalDaemonHost {
+): LocalDaemonHost<CronRunRecord> {
   const {
     service,
     desktopService,
@@ -2486,12 +2484,14 @@ export function assembleProductionDaemonHost(
       };
     },
   });
-  const host: LocalDaemonHost = new LocalDaemonHost({
+  const host: LocalDaemonHost<CronRunRecord> = new LocalDaemonHost({
     service: desktopService,
     cronRuntimeFactory,
     registrationStore,
     onWorkspaceError: (workspacePath, error) =>
       logger.error({ workspacePath, err: error }, "Cron workspace 启动失败"),
+    onStartupCleanupFailure: (cleanupError, startupError) =>
+      logger.error({ cleanupError, startupError }, "Daemon startup failed and cleanup also failed"),
   });
   attachHost(host);
   service.setRegistrationChangedListener(() => host.refreshRegisteredWorkspaces());
@@ -2500,7 +2500,7 @@ export function assembleProductionDaemonHost(
 
 export function createProductionLocalDaemonHost(
   options: ProductionLocalDaemonHostOptions = {},
-): LocalDaemonHost {
+): LocalDaemonHost<CronRunRecord> {
   return assembleProductionDaemonHost(createProductionRuntimeServices(options), options);
 }
 

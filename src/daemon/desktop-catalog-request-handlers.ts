@@ -1,4 +1,4 @@
-import type { ConfiguredSubagentCatalog } from "../agents/configured-subagent-catalog.js";
+import type { ConfiguredSubagentCatalog } from "@pico/pico-host/configured-subagent-catalog";
 import { createHash } from "node:crypto";
 import { basename } from "node:path";
 import {
@@ -18,7 +18,7 @@ import {
   type RuntimeScopedMcpServer,
 } from "@pico/protocol";
 import type { PluginRuntimeSnapshotRegistry } from "../plugins/plugin-runtime-snapshot-registry.js";
-import type { WorkspaceTrustStore } from "../security/workspace-trust.js";
+import type { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
 import type { McpServerConfig } from "../mcp/types.js";
 import {
   resolveTrustedEffectiveMcpSources,

@@ -17,7 +17,7 @@ const readSource = (relativePath: string): string =>
 test("事件账本无事件级 GC（append-only 不变量）", () => {
   // 19 文档 1.8：事件账本内没有事件级 GC，无 prune/trim/prune。
   // 唯一删除是 deleteSession 的整会话级联（SQLite 迁移后为删行），不是事件级回收。
-  const store = readSource("src/storage/sqlite/sqlite-runtime-event-store.ts");
+  const store = readSource("packages/storage/src/sqlite/sqlite-runtime-event-store.ts");
   // 排除 recover/repair（崩溃恢复，不是 GC）；只针对 GC 语义的回收动词。
   assert.doesNotMatch(
     store,
@@ -29,7 +29,7 @@ test("事件账本无事件级 GC（append-only 不变量）", () => {
 test("appendBatch 是 RuntimeEventStore 内唯一写原语", () => {
   // 19 文档 1.2：appendSessionState/appendTranscriptEvent/appendPlanOperation
   // 全是 appendBatch 的包装（SQLite 迁移后契约不变，ADR 24）。
-  const store = readSource("src/storage/sqlite/sqlite-runtime-event-store.ts");
+  const store = readSource("packages/storage/src/sqlite/sqlite-runtime-event-store.ts");
   assert.match(store, /\bappendBatch\b/, "appendBatch 必须存在为唯一写原语");
   // 文档声称的写包装都应存在（委托 appendBatch）。
   for (const wrapper of ["appendSessionState", "appendTranscriptEvent", "appendPlanOperation"]) {
@@ -39,7 +39,7 @@ test("appendBatch 是 RuntimeEventStore 内唯一写原语", () => {
 
 test("投影入口 RuntimeProjectionService 不直接持久化（无第二事实源）", () => {
   // 19 文档 1.4：RuntimeProjectionService 是读模型入口，从账本重算，不写事实。
-  const projection = readSource("src/engine/runtime-projection-service.ts");
+  const projection = readSource("packages/runtime/src/runtime-projection-service.ts");
   // 投影服务不得直接调用账本的写原语（它是纯读侧）。
   assert.doesNotMatch(
     projection,
@@ -99,7 +99,7 @@ test("D12 正向不变量：transcript 分页只有 storage projection，rendere
   const desktopRuntime = readSource("apps/desktop/src/renderer/runtime.ts");
   const tracker = readSource("apps/desktop/src/renderer/conversation-load-tracker.ts");
   const continuitySource = readSource("src/daemon/sqlite-session-continuity-source.ts");
-  const storageProjection = readSource("src/storage/sqlite/sqlite-runtime-event-store.ts");
+  const storageProjection = readSource("packages/storage/src/sqlite/sqlite-runtime-event-store.ts");
   // 负向：renderer 裸 ref 形态的 generation 追踪已收编。
   assert.doesNotMatch(
     desktopRuntime,

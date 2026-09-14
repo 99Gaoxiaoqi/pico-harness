@@ -5,9 +5,10 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import {
-  SqliteMemoryItemStore,
+  SqliteMemoryItemStore as LegacySqliteMemoryItemStore,
   type SqliteMemoryItemStoreFailpoint,
 } from "../../../src/storage/sqlite/sqlite-memory-item-store.js";
+import { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-store";
 import {
   MemoryItemStoreConflictError,
   type MemoryItemWrite,
@@ -49,6 +50,10 @@ const extraction = (
 });
 const conflict = (reason: MemoryItemStoreConflictError["reason"]) => (error: unknown) =>
   error instanceof MemoryItemStoreConflictError && error.reason === reason;
+
+test("legacy Atomic Memory store entry preserves the Storage package implementation identity", () => {
+  assert.equal(LegacySqliteMemoryItemStore, SqliteMemoryItemStore);
+});
 
 async function fixture(
   run: (input: {

@@ -3,9 +3,14 @@ import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promise
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { CodeIntelligenceManager as HostCodeIntelligenceManager } from "@pico/pico-host/code-intelligence";
 import { CodeIntelligenceManager } from "../../../src/code-intelligence/index.js";
 import { Session } from "../../../src/engine/session.js";
 import { createSessionRuntime } from "../../../src/runtime/session-runtime.js";
+
+test("Code Intelligence 包入口与旧入口共享 class identity", () => {
+  assert.equal(HostCodeIntelligenceManager, CodeIntelligenceManager);
+});
 
 test("SessionRuntime atomically detaches scratch before asynchronous cleanup", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-session-sandbox-cleanup-"));

@@ -15,14 +15,14 @@ import {
   type AgentRecoveryLaunchIntent,
   type AgentRecoveryWorkerInstaller,
   type AgentRecoveryWorkerReceipt,
-} from "../../../src/runtime/agent-recoverable-task-adapter.js";
+} from "@pico/pico-host/agent-recoverable-task-adapter";
 import { RuntimeEventBoundaryInspector } from "../helpers/runtime-event-boundary-inspector.js";
 import { RuntimeRunExecutor } from "../../../src/runtime/runtime-run-executor.js";
 import { currentRuntimeRun, RuntimeRun } from "../../../src/runtime/runtime-run.js";
 import {
   deriveRecoverableTaskRuntimeLaunchIdentity,
   type RecoverableTaskResumeContext,
-} from "../../../src/tasks/recoverable-task.js";
+} from "@pico/runtime/recoverable-task";
 import { readWorkspaceSqliteStorageRootIdentitySync } from "../../../src/storage/sqlite/sqlite-workspace-storage.js";
 import { ALL_WORKSPACE_SQLITE_SCOPES } from "../../../src/storage/sqlite/workspace-scopes.js";
 

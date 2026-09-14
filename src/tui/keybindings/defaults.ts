@@ -1,4 +1,4 @@
-import type { KeybindingMap } from "../../input/keybindings-schema.js";
+import type { KeybindingMap } from "@pico/cli/keybindings-schema";
 
 export const DEFAULT_KEYBINDINGS: KeybindingMap = {
   Global: {

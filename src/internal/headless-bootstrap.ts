@@ -8,7 +8,7 @@ import {
 } from "../input/user-config-store.js";
 import { parseModelProviderConfigs, parseModelRouteId } from "../input/pico-config.js";
 import { resolvePicoHome } from "../paths/pico-paths.js";
-import { WorkspaceTrustStore } from "../security/workspace-trust.js";
+import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
 
 const SCHEMA_VERSION = 1 as const;
 const BENCHMARK_OUTPUT_TOKENS_BY_ROUTE = new Map<string, number>([

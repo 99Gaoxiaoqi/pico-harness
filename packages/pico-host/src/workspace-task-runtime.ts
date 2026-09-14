@@ -1,0 +1,775 @@
+import { randomUUID } from "node:crypto";
+import { realpath } from "node:fs/promises";
+import { resolve } from "node:path";
+import type { TaskSnapshot } from "@pico/runtime/task-registry";
+import { TaskHostRuntime, type TaskHostRuntimeOptions } from "./task-host-runtime.js";
+import type {
+  WorktreeTaskRequest,
+  WorktreeTaskRunner,
+  WorktreeTaskSnapshot,
+} from "./worktree-supervisor.js";
+import { raceWithDeadline } from "@pico/runtime/deadline";
+
+export const WORKSPACE_RUN_STATUSES = [
+  "running",
+  "pause_requested",
+  "paused",
+  "cancelling",
+  "succeeded",
+  "failed",
+  "cancelled",
+] as const;
+
+export type WorkspaceRunStatus = (typeof WORKSPACE_RUN_STATUSES)[number];
+
+export interface WorkspaceRunSnapshot {
+  runId: string;
+  workspace: string;
+  /** Runtime-owned linkage used by non-TUI clients to resolve durable session state. */
+  sessionId?: string;
+  /** Exact user-message rewind point created for this Run. */
+  checkpointId?: string;
+  description: string;
+  status: WorkspaceRunStatus;
+  startedAt: number;
+  updatedAt: number;
+  finishedAt?: number;
+  error?: string;
+  result?: Record<string, unknown>;
+  version: number;
+}
+
+export interface WorkspaceRunRequest {
+  description: string;
+  /** Known durable Session linkage. Desktop supplies this before run.started is published. */
+  sessionId?: string;
+}
+
+export interface WorkspaceRunContext {
+  readonly run: WorkspaceRunSnapshot;
+  readonly signal: AbortSignal;
+  /** 取走宿主在运行期间追加的引导消息。 */
+  drainSteers(): string[];
+  /** 在 executor 需要立即响应引导时订阅后续消息。 */
+  onSteer(listener: (message: string) => void): () => void;
+  /** Wait at a host-defined safe boundary while a user pause request is active. */
+  waitAtSafeBoundary(): Promise<void>;
+  /** Bind once the executor has resolved the concrete session. Conflicting rebinds fail closed. */
+  bindSession(sessionId: string): void;
+  /** Bind the exact rewind point created by the executor. Conflicting rebinds fail closed. */
+  bindCheckpoint(checkpointId: string): void;
+}
+
+export type WorkspaceRunExecutor = (
+  context: WorkspaceRunContext,
+) => Promise<Record<string, unknown> | void>;
+
+export interface WorkspaceRuntimeEvent {
+  eventId: string;
+  type:
+    | "workspace.ready"
+    | "run.started"
+    | "run.updated"
+    | "run.steer_requested"
+    | "run.pause_requested"
+    | "run.paused"
+    | "run.resumed"
+    | "run.cancel_requested"
+    | "run.finished"
+    | "task.updated";
+  workspace: string;
+  at: number;
+  resourceVersion: number;
+  run?: WorkspaceRunSnapshot;
+  task?: TaskSnapshot;
+}
+
+export type WorkspaceRuntimeEventSubscriber = (event: WorkspaceRuntimeEvent) => void;
+
+export interface WorkspaceTaskRuntimeOptions {
+  workDir: string;
+  /** 注入时由调用方拥有其创建时机；WorkspaceTaskRuntime 仍负责 close。 */
+  taskHostRuntime?: TaskHostRuntime;
+  taskHostRuntimeOptions?: Omit<TaskHostRuntimeOptions, "workDir">;
+  now?: () => number;
+  generateRunId?: () => string;
+  /** Executor 收到 abort 后的最长排空时间；超时后 Runtime 会强制收敛 Run 终态。 */
+  closeDrainTimeoutMs?: number;
+}
+
+export type WorkspaceMode = "folder" | "git";
+
+export interface WorkspaceCapabilities {
+  readonly foregroundRuns: boolean;
+  readonly fileHistory: boolean;
+  readonly isolatedWorktrees: boolean;
+  readonly branchMerge: boolean;
+}
+
+interface WorkspaceRunRecord {
+  snapshot: WorkspaceRunSnapshot;
+  executionEpoch: number;
+  controller: AbortController;
+  steers: string[];
+  steerSubscribers: Set<(message: string) => void>;
+  pauseRequested: boolean;
+  resumePause?: (() => void) | undefined;
+  promise: Promise<void>;
+}
+
+/**
+ * UI-neutral owner for one canonical workspace.
+ *
+ * It deliberately wraps the current TaskHostRuntime rather than changing TUI ownership in
+ * place. A future daemon can own this class unchanged while the existing TUI keeps using its
+ * compatibility facade.
+ */
+export class WorkspaceTaskRuntime {
+  readonly workspace: string;
+  readonly taskHostRuntime: TaskHostRuntime | undefined;
+  readonly mode: WorkspaceMode;
+  readonly capabilities: WorkspaceCapabilities;
+
+  private readonly now: () => number;
+  private readonly generateRunId: () => string;
+  private readonly closeDrainTimeoutMs: number;
+  private readonly runs = new Map<string, WorkspaceRunRecord>();
+  private readonly subscribers = new Set<WorkspaceRuntimeEventSubscriber>();
+  private readonly unsubscribeTaskRegistry: () => void;
+  private eventSequence = 0;
+  private closed = false;
+  private closePromise?: Promise<void>;
+  private ownershipReleasePending = false;
+  private ownershipReleasePromise: Promise<void> = Promise.resolve();
+
+  private constructor(
+    workspace: string,
+    taskHostRuntime: TaskHostRuntime | undefined,
+    options: Pick<WorkspaceTaskRuntimeOptions, "now" | "generateRunId" | "closeDrainTimeoutMs">,
+  ) {
+    this.workspace = workspace;
+    this.taskHostRuntime = taskHostRuntime;
+    this.mode = taskHostRuntime ? "git" : "folder";
+    this.capabilities = {
+      foregroundRuns: true,
+      fileHistory: true,
+      isolatedWorktrees: taskHostRuntime !== undefined,
+      branchMerge: taskHostRuntime !== undefined,
+    };
+    this.now = options.now ?? Date.now;
+    this.generateRunId = options.generateRunId ?? (() => `run_${randomUUID()}`);
+    this.closeDrainTimeoutMs = normalizeCloseDrainTimeoutMs(options.closeDrainTimeoutMs);
+    this.unsubscribeTaskRegistry =
+      this.taskHostRuntime?.taskRegistry.subscribe((task) => {
+        this.publish({
+          type: "task.updated",
+          resourceVersion: taskVersion(task),
+          task,
+        });
+      }) ?? (() => undefined);
+    this.publish({ type: "workspace.ready", resourceVersion: 1 });
+  }
+
+  static async create(options: WorkspaceTaskRuntimeOptions): Promise<WorkspaceTaskRuntime> {
+    const requestedWorkspace = await realpath(resolve(options.workDir));
+    let taskHostRuntime = options.taskHostRuntime;
+    if (!taskHostRuntime) {
+      try {
+        taskHostRuntime = await TaskHostRuntime.create({
+          workDir: requestedWorkspace,
+          ...(options.taskHostRuntimeOptions ?? {}),
+        });
+      } catch (error) {
+        if (!isFolderModeFallback(error)) throw error;
+      }
+    }
+    const workspace = taskHostRuntime
+      ? await realpath(taskHostRuntime.repoRoot)
+      : requestedWorkspace;
+    return new WorkspaceTaskRuntime(workspace, taskHostRuntime, options);
+  }
+
+  subscribe(subscriber: WorkspaceRuntimeEventSubscriber): () => void {
+    this.assertOpen();
+    this.subscribers.add(subscriber);
+    return () => this.subscribers.delete(subscriber);
+  }
+
+  startRun(request: WorkspaceRunRequest, executor: WorkspaceRunExecutor): WorkspaceRunSnapshot {
+    return this.startRunWithId(this.generateRunId(), request, executor);
+  }
+
+  /** Trusted scheduler entry: binds the workspace launch to a preallocated RuntimeRun id. */
+  startExactRun(
+    runId: string,
+    request: WorkspaceRunRequest,
+    executor: WorkspaceRunExecutor,
+  ): WorkspaceRunSnapshot {
+    return this.installExactRun(runId, request, executor, false);
+  }
+
+  /**
+   * Trusted scheduler entry that may reinstall one failed/cancelled exact Run.
+   * Active and successful replays remain observation-only, so concurrent callers
+   * cannot install more than one executor for the same exact identity.
+   */
+  reattachExactRun(
+    runId: string,
+    request: WorkspaceRunRequest,
+    executor: WorkspaceRunExecutor,
+  ): WorkspaceRunSnapshot {
+    return this.installExactRun(runId, request, executor, true);
+  }
+
+  private installExactRun(
+    runId: string,
+    request: WorkspaceRunRequest,
+    executor: WorkspaceRunExecutor,
+    reattachTerminalFailure: boolean,
+  ): WorkspaceRunSnapshot {
+    const exactRunId = runId.trim();
+    if (!exactRunId || exactRunId !== runId || /\p{Cc}|\s/u.test(exactRunId)) {
+      throw new Error("Exact Run ID 无效");
+    }
+    const existing = this.runs.get(exactRunId);
+    if (existing) {
+      const description = request.description.trim();
+      if (
+        existing.snapshot.description !== description ||
+        existing.snapshot.sessionId !== request.sessionId
+      ) {
+        throw new Error(`Exact Run ID 已绑定到其他请求: ${exactRunId}`);
+      }
+      if (
+        reattachTerminalFailure &&
+        (existing.snapshot.status === "failed" || existing.snapshot.status === "cancelled")
+      ) {
+        return this.reattachRun(existing, executor);
+      }
+      return cloneRun(existing.snapshot);
+    }
+    return this.startRunWithId(exactRunId, request, executor, { allowConcurrent: true });
+  }
+
+  private reattachRun(
+    record: WorkspaceRunRecord,
+    executor: WorkspaceRunExecutor,
+  ): WorkspaceRunSnapshot {
+    this.assertOpen();
+    const previous = record.snapshot;
+    const previousExecution = record.promise;
+    const executionEpoch = record.executionEpoch + 1;
+    const { finishedAt: _finishedAt, error: _error, result: _result, ...stable } = previous;
+    record.snapshot = {
+      ...stable,
+      status: "running",
+      updatedAt: this.now(),
+      version: previous.version + 1,
+    };
+    record.controller = new AbortController();
+    record.executionEpoch = executionEpoch;
+    record.steers = [];
+    record.steerSubscribers.clear();
+    record.pauseRequested = false;
+    record.resumePause?.();
+    record.resumePause = undefined;
+    let admitted = false;
+    record.promise = previousExecution.then(
+      () => {
+        if (!admitted || record.executionEpoch !== executionEpoch) return;
+        return this.executeRun(record, executor, executionEpoch);
+      },
+      () => {
+        if (!admitted || record.executionEpoch !== executionEpoch) return;
+        return this.executeRun(record, executor, executionEpoch);
+      },
+    );
+    this.publish({
+      type: "run.started",
+      resourceVersion: record.snapshot.version,
+      run: cloneRun(record.snapshot),
+    });
+    admitted = true;
+    return cloneRun(record.snapshot);
+  }
+
+  private startRunWithId(
+    runId: string,
+    request: WorkspaceRunRequest,
+    executor: WorkspaceRunExecutor,
+    options: { allowConcurrent?: boolean } = {},
+  ): WorkspaceRunSnapshot {
+    this.assertOpen();
+    const description = request.description.trim();
+    if (!description) throw new Error("Run 描述不能为空");
+    if (
+      !options.allowConcurrent &&
+      this.listRuns().some((run) => !isTerminalRunStatus(run.status))
+    ) {
+      throw new Error(`工作区 ${this.workspace} 已有活跃 Run，拒绝并发执行`);
+    }
+
+    if (this.runs.has(runId)) throw new Error(`Run ID 已存在: ${runId}`);
+    const startedAt = this.now();
+    const record: WorkspaceRunRecord = {
+      snapshot: {
+        runId,
+        workspace: this.workspace,
+        ...(request.sessionId ? { sessionId: request.sessionId } : {}),
+        description,
+        status: "running",
+        startedAt,
+        updatedAt: startedAt,
+        version: 1,
+      },
+      executionEpoch: 1,
+      controller: new AbortController(),
+      steers: [],
+      steerSubscribers: new Set(),
+      pauseRequested: false,
+      promise: Promise.resolve(),
+    };
+    this.runs.set(runId, record);
+    let admitted = false;
+    const executionEpoch = record.executionEpoch;
+    record.promise = Promise.resolve().then(() => {
+      if (!admitted || record.executionEpoch !== executionEpoch) return;
+      return this.executeRun(record, executor, executionEpoch);
+    });
+    try {
+      this.publish({
+        type: "run.started",
+        resourceVersion: record.snapshot.version,
+        run: cloneRun(record.snapshot),
+      });
+      admitted = true;
+    } catch (error) {
+      this.runs.delete(runId);
+      throw error;
+    }
+    return cloneRun(record.snapshot);
+  }
+
+  getRun(runId: string): WorkspaceRunSnapshot | undefined {
+    const record = this.runs.get(runId);
+    return record ? cloneRun(record.snapshot) : undefined;
+  }
+
+  failBeforeExecution(runId: string, error: string): WorkspaceRunSnapshot {
+    const record = this.requireRun(runId);
+    if (isTerminalRunStatus(record.snapshot.status)) return cloneRun(record.snapshot);
+    record.controller.abort(new DOMException(error, "AbortError"));
+    this.finishRun(record, "failed", undefined, error);
+    return cloneRun(record.snapshot);
+  }
+
+  listRuns(): WorkspaceRunSnapshot[] {
+    return [...this.runs.values()]
+      .map((record) => cloneRun(record.snapshot))
+      .sort(
+        (left, right) => left.startedAt - right.startedAt || left.runId.localeCompare(right.runId),
+      );
+  }
+
+  async waitForRun(runId: string): Promise<WorkspaceRunSnapshot> {
+    const record = this.requireRun(runId);
+    await record.promise;
+    return cloneRun(record.snapshot);
+  }
+
+  cancel(runId: string, reason = "cancelled by user"): WorkspaceRunSnapshot {
+    const record = this.requireRun(runId);
+    if (isTerminalRunStatus(record.snapshot.status)) return cloneRun(record.snapshot);
+    if (record.snapshot.status !== "cancelling") {
+      record.snapshot = updateRun(record.snapshot, { status: "cancelling" }, this.now());
+      record.controller.abort(new DOMException(reason, "AbortError"));
+      record.pauseRequested = false;
+      record.resumePause?.();
+      record.resumePause = undefined;
+      this.publish({
+        type: "run.cancel_requested",
+        resourceVersion: record.snapshot.version,
+        run: cloneRun(record.snapshot),
+      });
+    }
+    return cloneRun(record.snapshot);
+  }
+
+  pause(runId: string): WorkspaceRunSnapshot {
+    const record = this.requireRun(runId);
+    if (isTerminalRunStatus(record.snapshot.status) || record.snapshot.status === "cancelling") {
+      return cloneRun(record.snapshot);
+    }
+    if (record.pauseRequested || record.snapshot.status === "paused") {
+      return cloneRun(record.snapshot);
+    }
+    record.pauseRequested = true;
+    record.snapshot = updateRun(record.snapshot, { status: "pause_requested" }, this.now());
+    this.publish({
+      type: "run.pause_requested",
+      resourceVersion: record.snapshot.version,
+      run: cloneRun(record.snapshot),
+    });
+    return cloneRun(record.snapshot);
+  }
+
+  resume(runId: string): WorkspaceRunSnapshot {
+    const record = this.requireRun(runId);
+    if (!record.pauseRequested && record.snapshot.status !== "paused") {
+      return cloneRun(record.snapshot);
+    }
+    record.pauseRequested = false;
+    record.resumePause?.();
+    record.resumePause = undefined;
+    record.snapshot = updateRun(record.snapshot, { status: "running" }, this.now());
+    this.publish({
+      type: "run.resumed",
+      resourceVersion: record.snapshot.version,
+      run: cloneRun(record.snapshot),
+    });
+    return cloneRun(record.snapshot);
+  }
+
+  steer(runId: string, message: string): WorkspaceRunSnapshot {
+    const record = this.requireRun(runId);
+    if (isTerminalRunStatus(record.snapshot.status)) {
+      throw new Error(`Run ${runId} 已结束，无法追加引导`);
+    }
+    const normalized = message.trim();
+    if (!normalized) throw new Error("追加引导不能为空");
+    record.steers.push(normalized);
+    record.snapshot = updateRun(record.snapshot, {}, this.now());
+    for (const subscriber of record.steerSubscribers) subscriber(normalized);
+    this.publish({
+      type: "run.steer_requested",
+      resourceVersion: record.snapshot.version,
+      run: cloneRun(record.snapshot),
+    });
+    return cloneRun(record.snapshot);
+  }
+
+  startTask(request: WorktreeTaskRequest, runner: WorktreeTaskRunner): WorktreeTaskSnapshot {
+    this.assertOpen();
+    return this.requireVersionProtection().start(request, runner);
+  }
+
+  listTasks(): TaskSnapshot[] {
+    return this.taskHostRuntime?.list() ?? [];
+  }
+
+  getTask(taskId: string): TaskSnapshot | undefined {
+    return this.taskHostRuntime?.get(taskId);
+  }
+
+  cancelTask(taskId: string): Promise<WorktreeTaskSnapshot> {
+    this.assertOpen();
+    return this.requireVersionProtection().stop(taskId);
+  }
+
+  steerTask(taskId: string, message: string): WorktreeTaskSnapshot {
+    this.assertOpen();
+    return this.requireVersionProtection().sendMessage(taskId, message);
+  }
+
+  close(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
+    this.closed = true;
+    let resolveClose: () => void = () => undefined;
+    let rejectClose: (reason: unknown) => void = () => undefined;
+    const closePromise = new Promise<void>((resolve, reject) => {
+      resolveClose = resolve;
+      rejectClose = reject;
+    });
+    this.closePromise = closePromise;
+    void this.performClose().then(resolveClose, rejectClose);
+    return closePromise;
+  }
+
+  /** True only when close returned before an executor and its owned resources fully drained. */
+  hasPendingOwnership(): boolean {
+    return this.ownershipReleasePending;
+  }
+
+  /** Resolves after every admitted executor and the TaskHostRuntime it may reference are closed. */
+  waitForOwnershipRelease(): Promise<void> {
+    return this.ownershipReleasePromise;
+  }
+
+  private async performClose(): Promise<void> {
+    this.unsubscribeTaskRegistry();
+    const records = [...this.runs.values()];
+    for (const record of records) {
+      if (!isTerminalRunStatus(record.snapshot.status)) this.cancelDuringClose(record);
+    }
+    const executorDrain = Promise.allSettled(records.map((record) => record.promise)).then(
+      () => undefined,
+    );
+    const drained = await raceWithDeadline([executorDrain], this.closeDrainTimeoutMs);
+    if (!drained) {
+      for (const record of records) {
+        if (!isTerminalRunStatus(record.snapshot.status)) {
+          this.finishRun(
+            record,
+            "cancelled",
+            undefined,
+            "workspace runtime close drain deadline exceeded",
+          );
+        }
+      }
+    }
+
+    if (!drained) {
+      this.deferOwnershipRelease(this.releaseOwnershipAfter(executorDrain));
+      return;
+    }
+
+    await this.taskHostRuntime?.close();
+    const ownershipRelease = this.finishOwnershipRelease();
+    if (this.taskHostRuntime?.hasPendingOwnership()) {
+      this.deferOwnershipRelease(ownershipRelease);
+      return;
+    }
+    await ownershipRelease;
+  }
+
+  private async releaseOwnershipAfter(executorDrain: Promise<void>): Promise<void> {
+    await executorDrain;
+    await this.taskHostRuntime?.close();
+    await this.finishOwnershipRelease();
+  }
+
+  private async finishOwnershipRelease(): Promise<void> {
+    await this.taskHostRuntime?.waitForOwnershipRelease();
+    this.subscribers.clear();
+  }
+
+  private deferOwnershipRelease(ownershipRelease: Promise<void>): void {
+    this.ownershipReleasePending = true;
+    this.ownershipReleasePromise = ownershipRelease;
+    ownershipRelease.then(
+      () => {
+        this.ownershipReleasePending = false;
+      },
+      () => undefined,
+    );
+    // The daemon host observes the original promise and retains its singleton lock on rejection.
+    // This local branch prevents an unhandled rejection when the runtime is used without a host.
+    void ownershipRelease.catch(() => undefined);
+  }
+
+  private async executeRun(
+    record: WorkspaceRunRecord,
+    executor: WorkspaceRunExecutor,
+    executionEpoch: number,
+  ): Promise<void> {
+    try {
+      if (record.executionEpoch !== executionEpoch || isTerminalRunStatus(record.snapshot.status)) {
+        return;
+      }
+      const assertCurrentExecution = (): void => {
+        if (record.executionEpoch !== executionEpoch) {
+          throw new Error(`Run ${record.snapshot.runId} 的 executor 所有权已失效`);
+        }
+      };
+      const result = await executor({
+        run: cloneRun(record.snapshot),
+        signal: record.controller.signal,
+        drainSteers: () => {
+          assertCurrentExecution();
+          return record.steers.splice(0);
+        },
+        onSteer: (subscriber) => {
+          assertCurrentExecution();
+          record.steerSubscribers.add(subscriber);
+          return () => record.steerSubscribers.delete(subscriber);
+        },
+        waitAtSafeBoundary: () => {
+          assertCurrentExecution();
+          return this.waitAtSafeBoundary(record);
+        },
+        bindSession: (sessionId) => {
+          assertCurrentExecution();
+          this.bindRunIdentifier(record, "sessionId", sessionId);
+        },
+        bindCheckpoint: (checkpointId) => {
+          assertCurrentExecution();
+          this.bindRunIdentifier(record, "checkpointId", checkpointId);
+        },
+      });
+      if (record.executionEpoch !== executionEpoch) return;
+      this.finishRun(record, record.controller.signal.aborted ? "cancelled" : "succeeded", result);
+    } catch (error) {
+      if (record.executionEpoch !== executionEpoch) return;
+      this.finishRun(
+        record,
+        record.controller.signal.aborted ? "cancelled" : "failed",
+        undefined,
+        errorMessage(error),
+      );
+    } finally {
+      if (record.executionEpoch === executionEpoch) {
+        record.steerSubscribers.clear();
+        record.resumePause?.();
+        record.resumePause = undefined;
+      }
+    }
+  }
+
+  private async waitAtSafeBoundary(record: WorkspaceRunRecord): Promise<void> {
+    if (!record.pauseRequested) return;
+    record.controller.signal.throwIfAborted();
+    if (record.snapshot.status !== "paused") {
+      record.snapshot = updateRun(record.snapshot, { status: "paused" }, this.now());
+      this.publish({
+        type: "run.paused",
+        resourceVersion: record.snapshot.version,
+        run: cloneRun(record.snapshot),
+      });
+    }
+    await new Promise<void>((resolve) => {
+      if (!record.pauseRequested || record.controller.signal.aborted) {
+        resolve();
+        return;
+      }
+      record.resumePause = resolve;
+    });
+    record.controller.signal.throwIfAborted();
+  }
+
+  private bindRunIdentifier(
+    record: WorkspaceRunRecord,
+    field: "checkpointId" | "sessionId",
+    value: string,
+  ): void {
+    if (isTerminalRunStatus(record.snapshot.status)) {
+      throw new Error(`Run ${record.snapshot.runId} 已结束，无法继续绑定 ${field}`);
+    }
+    const normalized = value.trim();
+    if (!normalized) throw new Error(`Run ${field} 不能为空`);
+    const current = record.snapshot[field];
+    if (current !== undefined && current !== normalized) {
+      throw new Error(`Run ${record.snapshot.runId} 已绑定其他 ${field}`);
+    }
+    if (current === normalized) return;
+    record.snapshot = {
+      ...record.snapshot,
+      [field]: normalized,
+      updatedAt: this.now(),
+      version: record.snapshot.version + 1,
+    };
+    this.publish({
+      type: "run.updated",
+      resourceVersion: record.snapshot.version,
+      run: cloneRun(record.snapshot),
+    });
+  }
+
+  private finishRun(
+    record: WorkspaceRunRecord,
+    status: Extract<WorkspaceRunStatus, "succeeded" | "failed" | "cancelled">,
+    result?: Record<string, unknown> | void,
+    error?: string,
+  ): void {
+    if (isTerminalRunStatus(record.snapshot.status)) return;
+    const finishedAt = this.now();
+    record.snapshot = {
+      ...record.snapshot,
+      status,
+      updatedAt: finishedAt,
+      finishedAt,
+      version: record.snapshot.version + 1,
+      ...(result ? { result: { ...result } } : {}),
+      ...(error ? { error } : {}),
+    };
+    this.publish({
+      type: "run.finished",
+      resourceVersion: record.snapshot.version,
+      run: cloneRun(record.snapshot),
+    });
+  }
+
+  private cancelDuringClose(record: WorkspaceRunRecord): void {
+    record.snapshot = updateRun(record.snapshot, { status: "cancelling" }, this.now());
+    record.controller.abort(new DOMException("workspace runtime closed", "AbortError"));
+    record.pauseRequested = false;
+    record.resumePause?.();
+    record.resumePause = undefined;
+  }
+
+  private publish(input: Omit<WorkspaceRuntimeEvent, "eventId" | "workspace" | "at">): void {
+    const event: WorkspaceRuntimeEvent = {
+      eventId: `${this.workspace}:${++this.eventSequence}`,
+      workspace: this.workspace,
+      at: this.now(),
+      ...input,
+    };
+    for (const subscriber of this.subscribers) subscriber(event);
+  }
+
+  private requireRun(runId: string): WorkspaceRunRecord {
+    this.assertOpen();
+    const record = this.runs.get(runId);
+    if (!record) throw new Error(`未知 Run: ${runId}`);
+    return record;
+  }
+
+  private assertOpen(): void {
+    if (this.closed) throw new Error("WorkspaceTaskRuntime 已关闭");
+  }
+
+  private requireVersionProtection(): TaskHostRuntime {
+    if (this.taskHostRuntime) return this.taskHostRuntime;
+    throw new Error("此功能需要先为项目启用版本保护。当前仍可在基础模式中执行普通任务。");
+  }
+}
+
+function updateRun(
+  snapshot: WorkspaceRunSnapshot,
+  update: Partial<Pick<WorkspaceRunSnapshot, "status">>,
+  now: number,
+): WorkspaceRunSnapshot {
+  return {
+    ...snapshot,
+    ...update,
+    updatedAt: now,
+    version: snapshot.version + 1,
+  };
+}
+
+function cloneRun(snapshot: WorkspaceRunSnapshot): WorkspaceRunSnapshot {
+  return {
+    ...snapshot,
+    ...(snapshot.result ? { result: { ...snapshot.result } } : {}),
+  };
+}
+
+function isTerminalRunStatus(status: WorkspaceRunStatus): boolean {
+  return status === "succeeded" || status === "failed" || status === "cancelled";
+}
+
+function normalizeCloseDrainTimeoutMs(value: number | undefined): number {
+  const timeoutMs = value ?? 5_000;
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
+    throw new RangeError("closeDrainTimeoutMs 必须是非负有限数");
+  }
+  return timeoutMs;
+}
+
+function taskVersion(task: TaskSnapshot): number {
+  const value = task.data?.["runtimeVersion"];
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isFolderModeFallback(error: unknown): boolean {
+  const message = errorMessage(error);
+  return (
+    message.startsWith("所选文件夹不是 Git 仓库") ||
+    message.startsWith("Pico 未找到 Git") ||
+    message.startsWith("当前 Git 工作树处于 detached HEAD") ||
+    message.startsWith("当前 Git 工作区还没有基线提交")
+  );
+}

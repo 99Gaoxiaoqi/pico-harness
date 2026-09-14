@@ -11,12 +11,12 @@ import {
   type TaskResumeLedger,
   type TaskResumeLedgerAppendInput,
   type TaskResumeLedgerAppendResult,
-} from "../../../src/runtime/safe-boundary-resume.js";
+} from "@pico/runtime/safe-boundary-resume";
 import {
   hashRecoverableTaskInput,
   RecoverableTaskRegistry,
   type RecoverableTaskResumeContext,
-} from "../../../src/tasks/recoverable-task.js";
+} from "@pico/runtime/recoverable-task";
 import {
   TASK_RUN_FILE_SCHEMA_VERSION,
   type TaskAttemptProjection,
@@ -25,7 +25,7 @@ import {
   type TaskRunProjection,
   type TaskRuntimeBoundary,
   type TaskSafeBoundary,
-} from "../../../src/tasks/task-run-contract.js";
+} from "@pico/core/task-run-contract";
 
 const WORKSPACE_PATH = resolve("/tmp/pico-safe-boundary-workspace");
 const INPUT = {

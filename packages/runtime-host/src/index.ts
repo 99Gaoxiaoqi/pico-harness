@@ -17,7 +17,9 @@ export {
   assertInteractiveRootOwner,
   authenticateInteractiveRootOwner,
   discoverMarkedStorageRoot,
+  prepareStorageRootIdentityRepair,
   prepareStorageRootControlDirectory,
+  repairStorageRootIdentity,
   resolveExistingStorageRoot,
   resolveExistingStorageRootControlDirectory,
   resolveStorageRoot,
@@ -27,11 +29,14 @@ export {
   type InteractiveRootOwner,
   type InteractiveRootReader,
   type StorageRootCapability,
+  type StorageRootIdentityRepairCandidate,
   type StorageRootKind,
 } from "./control/root-authority.js";
 
 // transport
 export { FramedTransport, RuntimeHostTransportError } from "./transport/framed-transport.js";
+export * from "./mcp-protocol.js";
+export * from "./mcp-tool-bridge.js";
 
 // protocol（裁剪版：核心帧 + bootstrap 操作）
 export * from "./protocol/index.js";

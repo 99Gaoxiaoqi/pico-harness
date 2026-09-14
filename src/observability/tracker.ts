@@ -12,28 +12,25 @@
 // 不把成本监控落到实处,就无法优化 System Prompt 长度,也无从判断上下文压缩是否省钱。
 
 import { randomUUID } from "node:crypto";
-import type {
-  LLMProvider,
-  LLMProviderRequestOptions,
-  PreparedProviderRequest,
-} from "../provider/interface.js";
+import type { LLMProvider, LLMProviderRequestOptions, PreparedProviderRequest } from "@pico/core";
 import type { Message, ToolDefinition } from "../schema/message.js";
 import type { Session } from "../engine/session.js";
-import { isAbortError } from "../provider/errors.js";
-import type { ProviderCallRecord } from "../tasks/runtime-types.js";
-import { estimateCost, type BillingRoute } from "./pricing.js";
+import { isAbortError } from "@pico/core";
+import type { ProviderCallRecord } from "@pico/storage/runtime-control-types";
+import { catalogPricing } from "./catalog-pricing.js";
+import { estimateCost, type BillingRoute } from "@pico/runtime/pricing";
 import { logger } from "./logger.js";
-import { getProviderCallContext, type ProviderCallContext } from "./provider-call-context.js";
+import { getProviderCallContext, type ProviderCallContext } from "@pico/runtime";
 import { currentRuntimeRun } from "../runtime/runtime-run.js";
-import { defaultIsRetryableError } from "../provider/retry.js";
-import { normalizePromptCacheEndpoint } from "../provider/provider-endpoint.js";
+import { defaultIsRetryableError } from "@pico/runtime";
+import { normalizePromptCacheEndpoint } from "@pico/runtime/provider-endpoint";
 import {
   capturePreparedProviderRequest,
   diagnosePreparedProviderRequest,
   parsePreparedRequestCapture,
   type PreparedRequestCapture,
   type PreparedRequestDiagnostic,
-} from "./provider-request-diagnostics.js";
+} from "@pico/runtime/provider-request-diagnostics";
 
 export interface ProviderCallLedger {
   recordProviderCall(record: Omit<ProviderCallRecord, "createdAt"> & { createdAt?: number }): {
@@ -174,7 +171,9 @@ export class CostTracker implements LLMProvider {
     try {
       const response = await invoke(observeRequest);
       const latencyMs = Date.now() - start;
-      const cost = response.usage ? estimateCost(this.modelRoute, response.usage) : undefined;
+      const cost = response.usage
+        ? estimateCost(this.modelRoute, response.usage, catalogPricing)
+        : undefined;
       await runtimeRun?.recordModelCallSettled({
         providerCallId: callId,
         status: "succeeded",
@@ -280,7 +279,7 @@ export class CostTracker implements LLMProvider {
     }
 
     const { promptTokens, completionTokens } = response.usage;
-    const cost = estimateCost(this.modelRoute, response.usage);
+    const cost = estimateCost(this.modelRoute, response.usage, catalogPricing);
     this.session?.recordUsage(
       promptTokens,
       completionTokens,
@@ -318,7 +317,7 @@ export class CostTracker implements LLMProvider {
     if (!this.options.ledger) return;
     const route = normalizeRoute(this.modelRoute);
     const usage = response?.usage;
-    const cost = usage ? estimateCost(this.modelRoute, usage) : undefined;
+    const cost = usage ? estimateCost(this.modelRoute, usage, catalogPricing) : undefined;
     const cacheSupport =
       route.cacheSupported === true
         ? { cacheSupport: "supported" }

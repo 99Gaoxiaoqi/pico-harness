@@ -1,0 +1,64 @@
+{
+  "name": "@pico/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Pico CLI/TUI 的参数与交互适配层。",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./command-availability": {
+      "types": "./dist/command-availability.d.ts",
+      "import": "./dist/command-availability.js"
+    },
+    "./command-contracts": {
+      "types": "./dist/command-contracts.d.ts",
+      "import": "./dist/command-contracts.js"
+    },
+    "./hook-management-commands": {
+      "types": "./dist/hook-management-commands.d.ts",
+      "import": "./dist/hook-management-commands.js"
+    },
+    "./keybindings-schema": {
+      "types": "./dist/keybindings-schema.d.ts",
+      "import": "./dist/keybindings-schema.js"
+    },
+    "./rewind-presentation": {
+      "types": "./dist/rewind-presentation.d.ts",
+      "import": "./dist/rewind-presentation.js"
+    },
+    "./terminal-reporter": {
+      "types": "./dist/terminal-reporter.d.ts",
+      "import": "./dist/terminal-reporter.js"
+    },
+    "./session-resolver": {
+      "types": "./dist/session-resolver.d.ts",
+      "import": "./dist/session-resolver.js"
+    },
+    "./session-args": {
+      "types": "./dist/session-args.d.ts",
+      "import": "./dist/session-args.js"
+    },
+    "./workspace-trust-prompt": {
+      "types": "./dist/workspace-trust-prompt.d.ts",
+      "import": "./dist/workspace-trust-prompt.js"
+    }
+  },
+  "dependencies": {
+    "@pico/core": "*",
+    "@pico/pico-host": "*",
+    "@pico/storage": "*",
+    "picocolors": "^1.1.1"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  }
+}

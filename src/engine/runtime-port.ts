@@ -1,250 +1,61 @@
-import type { Message, ToolCall, ToolResult } from "../schema/message.js";
-import type { Registry, ToolExecutionContext, ToolRecoveryProbeResult } from "../tools/registry.js";
-import type { CommitReceipt } from "./session-persistence.js";
 import type {
-  RuntimeOwnerFence,
-  RuntimePartialSegment,
-  RuntimePartialSnapshot,
-  RuntimeRunPartials,
-} from "../storage/runtime-event-store-contracts.js";
-import { EngineRuntimeCapabilityOwner } from "./runtime-capability-owner.js";
+  RuntimeCheckpointInput,
+  RuntimeHistoryEntry,
+  RuntimeLastCompactionCheckpoint,
+  RuntimePort,
+  RuntimeReconcileOptions,
+  RuntimeRepairProjectionOptions,
+  RuntimeRunPort,
+  RuntimeRunStartOptions,
+  RuntimeToolResultInput,
+} from "@pico/runtime/runtime-port-contract";
+import type {
+  Registry,
+  ToolExecutionContext,
+  ToolRecoveryProbeResult,
+} from "@pico/pico-host/tool-registry-contract";
 import type { Session } from "./session.js";
-import type { CanonicalTranscriptToolStart } from "./transcript-tool-start.js";
-import type {
-  RuntimeEvidenceReference,
-  RuntimeToolResultBody,
-  RuntimeToolResultProjection,
-  RuntimeToolResultStatus,
-} from "./tool-result-contract.js";
 
 /**
- * Engine-facing view of the durable runtime store.
+ * Engine compatibility view of the Runtime execution port.
  *
- * The engine must be able to carry the store through a nested run, but it must
- * not know which database/event-store implementation owns it.  Runtime keeps
- * the concrete adapter and validates this structural capability at the
- * boundary.
+ * The generic, Engine-independent contract belongs to `@pico/runtime`; this
+ * file only binds it to Pico's concrete Session and tool interfaces so legacy
+ * source imports remain stable during the package migration.
  */
-export type EngineRuntimeAuthority = object;
+export {
+  assertIssuedEngineRuntimeCapability,
+  createEngineRuntimeCapability,
+} from "@pico/runtime/runtime-capability";
+export type {
+  EngineRuntimeAuthority,
+  EngineRuntimeCapability,
+  EngineRuntimeCapabilityInput,
+  EngineRuntimeWriteGuard,
+} from "@pico/runtime/runtime-capability";
+export type {
+  RuntimeEvidenceReference as EngineRuntimeEvidenceReference,
+  RuntimeToolResultBody as EngineRuntimeToolResultBody,
+  RuntimeToolResultProjection as EngineRuntimeToolResultProjection,
+  RuntimeToolResultStatus as EngineRuntimeToolResultStatus,
+} from "@pico/core";
 
-const engineRuntimeCapabilityBrand: unique symbol = Symbol("EngineRuntimeCapability");
-const issuedEngineRuntimeCapabilities = new WeakSet<object>();
-
-/** The narrow write capability required by a live canonical run. */
-export interface EngineRuntimeWriteGuard {
-  /** Bind issuance to the durable authority actually owned by this guard. */
-  assertRuntimeEventAuthority(authority: EngineRuntimeAuthority): void;
-  assertRuntimeEventWriteAllowed(): Promise<RuntimeOwnerFence>;
-}
-
-export interface EngineRuntimeCapability {
-  readonly [engineRuntimeCapabilityBrand]: true;
-  readonly sessionId: string;
-  readonly workDir: string;
-  readonly runtimeAuthority: EngineRuntimeAuthority;
-  readonly writeGuard: EngineRuntimeWriteGuard;
-  assertBound(scope: EngineRuntimeCapability): void;
-}
-
-export interface EngineRuntimeCapabilityInput {
-  readonly owner: EngineRuntimeCapabilityOwner;
-  readonly runtimeAuthority: EngineRuntimeAuthority;
-}
-
-/** Issue an exact-identity capability that cannot be recreated by object spread. */
-export function createEngineRuntimeCapability(
-  input: EngineRuntimeCapabilityInput,
-): EngineRuntimeCapability {
-  if (!EngineRuntimeCapabilityOwner.isOwner(input.owner)) {
-    throw new Error("Runtime capability owner must be an actual Session");
-  }
-  const sessionId = input.owner.id;
-  const workDir = input.owner.workDir;
-  const assertAuthority = (): void => {
-    input.owner.assertRuntimeEventAuthority(input.runtimeAuthority);
-  };
-  assertAuthority();
-  const capability: EngineRuntimeCapability = Object.freeze({
-    [engineRuntimeCapabilityBrand]: true as const,
-    sessionId,
-    workDir,
-    runtimeAuthority: input.runtimeAuthority,
-    writeGuard: input.owner,
-    assertBound: (scope: EngineRuntimeCapability): void => {
-      if (scope !== capability) {
-        throw new Error(`Runtime capability is not bound to Session ${sessionId}`);
-      }
-      assertAuthority();
-    },
-  });
-  issuedEngineRuntimeCapabilities.add(capability);
-  return capability;
-}
-
-/** Runtime adapters must reject structural lookalikes before using their authority. */
-export function assertIssuedEngineRuntimeCapability(capability: EngineRuntimeCapability): void {
-  if (!issuedEngineRuntimeCapabilities.has(capability)) {
-    throw new Error(`Runtime capability for Session ${capability.sessionId} was not issued`);
-  }
-  capability.assertBound(capability);
-}
-
-export interface EngineRuntimeHistoryEntry {
-  /** False when this model prefix is not also an immutable source prefix. */
-  readonly compactionBoundarySafe?: boolean;
-  readonly eventId: string;
-  readonly message: Message;
-}
-
-export type EngineRuntimeEvidenceReference = RuntimeEvidenceReference;
-export type EngineRuntimeToolResultStatus = RuntimeToolResultStatus;
-export type EngineRuntimeToolResultBody = RuntimeToolResultBody;
-export type EngineRuntimeToolResultProjection = RuntimeToolResultProjection;
-
-export interface EngineRuntimeToolResultInput {
-  readonly toolCallId: string;
-  readonly toolName: string;
-  readonly status: EngineRuntimeToolResultStatus;
-  readonly body: EngineRuntimeToolResultBody;
-  readonly projection: EngineRuntimeToolResultProjection;
-  readonly evidence?: EngineRuntimeEvidenceReference;
-}
-
-export interface EngineRuntimeCheckpointInput {
-  readonly checkpointId: string;
-  readonly coveredEventCount: number;
-  readonly sourceDigest: string;
-  readonly throughEventId: string;
-  readonly memoryExtractionBoundary?: {
-    readonly runtimeEventId: string;
-    readonly disposition: "eligible" | "policy_denied";
-  };
-  readonly summary: Message;
-  /** 滚动摘要链:上一个 checkpoint 的 id(若存在)。 */
-  readonly previousCheckpointId?: string;
-}
-
-/** 最后一个 compaction checkpoint 的摘要信息(滚动摘要增量更新用)。 */
-export interface LastCompactionCheckpoint {
-  readonly checkpointId: string;
-  /** 摘要正文(去掉 REFERENCE-ONLY 包装),作为下一轮增量更新的基线。 */
-  readonly summaryText: string;
-}
-
-/** A runtime run as seen by the ReAct engine. */
-export interface EngineRuntimeRun {
-  readonly runId: string;
-  readonly invocationId: string;
-  readonly sessionId: string;
-  readonly workDir: string;
-  readonly runtimeEventWriteGuard?: EngineRuntimeWriteGuard;
-  readonly runtimeCapability?: EngineRuntimeCapability;
-
-  claimsSession(session: Session): boolean;
-  commitMessages(session: Session, messages: readonly Message[]): Promise<void>;
-  commitMessageOnce(session: Session, eventId: string, message: Message): Promise<CommitReceipt>;
-  readModelHistory(includeEventIds?: boolean): Promise<Message[]>;
-  readModelHistoryEntries(): Promise<readonly EngineRuntimeHistoryEntry[]>;
-  readSessionProjectionEntries(): Promise<readonly EngineRuntimeHistoryEntry[]>;
-  /**
-   * 查找最后一个 `context.checkpoint.recorded` 事件(滚动摘要链用)。
-   * 返回其 checkpointId 和 summary 正文(去掉 REFERENCE-ONLY 包装),
-   * 供下一轮压缩做增量更新。无 checkpoint 时返回 undefined。
-   */
-  findLastCompactionCheckpoint(): Promise<LastCompactionCheckpoint | undefined>;
-  run<Result>(execute: () => Promise<Result>, signal?: AbortSignal): Promise<Result>;
-  recordTurnStarted(turn: number): Promise<void>;
-  recordCheckpoint(input: EngineRuntimeCheckpointInput): Promise<void>;
-  recordToolStarted(
-    toolCallId: string,
-    toolName: string,
-    argumentsJson: string,
-    context?: ToolExecutionContext,
-  ): Promise<void>;
-  executeNestedTool(
-    call: ToolCall,
-    registry: Registry,
-    context: ToolExecutionContext,
-  ): Promise<ToolResult>;
-  assertNoUnresolvedToolEffects(): Promise<void>;
-  /** Host-only evidence probe; never dispatches or replays the original tool. */
-  reconcileToolRecovery(input: {
-    readonly recoveryEventId: string;
-    readonly registry: Registry;
-    readonly signal?: AbortSignal;
-  }): Promise<ToolRecoveryProbeResult>;
-  resolveToolRecovery(
-    input: {
-      readonly recoveryEventId: string;
-      readonly outcome: "effects_verified" | "not_dispatched_verified";
-      readonly evidenceUri: string;
-      readonly summary: string;
-    },
-    signal?: AbortSignal,
-  ): Promise<void>;
-  recordTranscriptToolStarts(
-    session: Session,
-    toolCalls: readonly ToolCall[],
-  ): Promise<readonly CanonicalTranscriptToolStart[]>;
-  recordTranscriptMessage(message: Message): Promise<void>;
-  recordToolGroupLoaded(groupId: string, toolNames: readonly string[]): Promise<void>;
-  recordTranscriptToolResults(
-    inputs: readonly EngineRuntimeToolResultInput[],
-  ): Promise<readonly Message[]>;
-  registerToolResult(input: EngineRuntimeToolResultInput): Message;
-  /** Records an explicit local rejection/interruption that was never dispatched to a tool. */
-  registerUndispatchedToolResult(input: EngineRuntimeToolResultInput): Message;
-  /** Closes an abnormal batch, settling T2 when dispatch already reached T1. */
-  registerProtocolClosureToolResult(input: EngineRuntimeToolResultInput): Message;
-  upsertPartialSnapshot(
-    partialId: string,
-    kind: string,
-    expectedVersion: number,
-    payload: unknown,
-  ): Promise<RuntimePartialSnapshot>;
-  appendPartialSegment(
-    partialId: string,
-    segmentIndex: number,
-    payload: unknown,
-  ): Promise<{ readonly inserted: boolean; readonly segment: RuntimePartialSegment }>;
-  readPartials(): Promise<RuntimeRunPartials>;
-  clearPartials(): Promise<number>;
-}
-
-export interface EngineRuntimeRunStartOptions {
-  readonly runId?: string;
-  readonly parentRunId?: string;
-  readonly parentToolCallId?: string;
-  readonly capability: EngineRuntimeCapability;
-}
-
-export interface EngineRuntimeReconcileOptions {
-  readonly capability: EngineRuntimeCapability;
-}
-
-export interface EngineRuntimeRepairProjectionOptions {
-  readonly capability: EngineRuntimeCapability;
-}
-
-/**
- * Runtime lifecycle and ambient-context port consumed by AgentEngine.
- * Implementations live in `src/runtime`; this contract intentionally lives in
- * `src/engine` so the dependency direction points toward the abstraction.
- */
-export interface EngineRuntimePort {
-  currentRun(): EngineRuntimeRun | undefined;
-  currentToolCallId(): string | undefined;
-  runWithToolCall<Result>(toolCallId: string, execute: () => Result): Result;
-  reconcileIncompleteRuns(options: EngineRuntimeReconcileOptions): Promise<readonly string[]>;
-  repairSessionProjection(
-    session: Session,
-    options: EngineRuntimeRepairProjectionOptions,
-  ): Promise<boolean>;
-  startRun(options: EngineRuntimeRunStartOptions): Promise<EngineRuntimeRun>;
-  commitExternalMessages(session: Session, messages: readonly Message[]): Promise<boolean>;
-  commitExternalMessageOnce(
-    session: Session,
-    eventId: string,
-    message: Message,
-  ): Promise<CommitReceipt | undefined>;
-}
+export type EngineRuntimeHistoryEntry = RuntimeHistoryEntry;
+export type EngineRuntimeToolResultInput = RuntimeToolResultInput;
+export type EngineRuntimeCheckpointInput = RuntimeCheckpointInput;
+export type LastCompactionCheckpoint = RuntimeLastCompactionCheckpoint;
+export type EngineRuntimeRun = RuntimeRunPort<
+  Session,
+  Registry,
+  ToolExecutionContext,
+  ToolRecoveryProbeResult
+>;
+export type EngineRuntimeRunStartOptions = RuntimeRunStartOptions;
+export type EngineRuntimeReconcileOptions = RuntimeReconcileOptions;
+export type EngineRuntimeRepairProjectionOptions = RuntimeRepairProjectionOptions;
+export type EngineRuntimePort = RuntimePort<
+  Session,
+  Registry,
+  ToolExecutionContext,
+  ToolRecoveryProbeResult
+>;

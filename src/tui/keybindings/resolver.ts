@@ -5,7 +5,7 @@ import type {
   KeybindingContext,
   KeybindingMap,
   KeybindingValue,
-} from "../../input/keybindings-schema.js";
+} from "@pico/cli/keybindings-schema";
 
 export type UserKeybindingConfig = KeybindingMap;
 

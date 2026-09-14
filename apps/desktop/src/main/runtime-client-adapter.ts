@@ -1,9 +1,9 @@
 export {
   LocalRuntimeClient as LocalDaemonRuntimeClientAdapter,
   RuntimeClientError,
-} from "../../../../src/daemon/client.js";
+} from "@pico/pico-host/local-runtime-client";
 
 export type {
   LocalRuntimeClientOptions as LocalDaemonRuntimeClientAdapterOptions,
   RuntimeClient as RuntimeClientAdapter,
-} from "../../../../src/daemon/client.js";
+} from "@pico/pico-host/local-runtime-client";

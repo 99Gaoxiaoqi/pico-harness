@@ -1,7 +1,7 @@
 import { cp, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { resolvePicoPaths, type ResolvePicoPathsOptions } from "../paths/pico-paths.js";
-import { writeJsonAtomic } from "../storage/atomic-json.js";
+import { writeJsonAtomic } from "@pico/storage";
 import { resolvePluginContributions } from "./plugin-resolver.js";
 import {
   PLUGIN_SCOPE_ORDER,

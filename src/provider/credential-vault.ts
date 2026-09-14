@@ -1,17 +1,24 @@
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
-import type { ProviderKind } from "./factory.js";
+import {
+  credentialRefForProvider,
+  parseProviderCredentialRef,
+  type CredentialRef,
+  type ProviderCredentialIdentity,
+} from "@pico/core/provider-identity";
 
-const PROVIDER_CREDENTIAL_REF_PREFIX = "pico-keychain://provider/";
-const PROVIDER_CREDENTIAL_REF_VERSION = "v2";
-const DEFAULT_PROVIDER_CREDENTIAL_SLOT = "api-key";
+/** @deprecated Credential identity is a Core contract. */
+export {
+  assertCredentialRefMatchesProvider,
+  createProviderCredentialRef,
+  credentialRefForProvider,
+  normalizeProviderEndpoint,
+  parseProviderCredentialRef,
+  type CredentialRef,
+  type ParsedProviderCredentialRef,
+  type ProviderCredentialIdentity,
+} from "@pico/core/provider-identity";
+
 const KEYCHAIN_SERVICE = "dev.pico.runtime.provider";
-const PROVIDER_KINDS = ["openai", "claude", "responses"] as const satisfies readonly ProviderKind[];
-
-declare const credentialRefBrand: unique symbol;
-
-/** Opaque, non-secret identifier that may safely be persisted in Runtime storage. */
-export type CredentialRef = string & { readonly [credentialRefBrand]: true };
 
 export interface CredentialVaultCapability {
   available: boolean;
@@ -46,90 +53,6 @@ export class CredentialNotFoundError extends Error {
   }
 }
 
-/**
- * Device-level Provider credential identity.
- *
- * This intentionally excludes workspace, model and environment-variable names so
- * Desktop and TUI can share one secret.
- */
-export interface ProviderCredentialIdentity {
-  readonly providerId: string;
-  readonly protocol: ProviderKind;
-  readonly baseURL: string;
-  readonly credentialSlot?: string;
-}
-
-export interface ParsedProviderCredentialRef {
-  readonly ref: CredentialRef;
-  readonly providerId: string;
-  readonly protocol: ProviderKind;
-  readonly credentialSlot: string;
-  readonly endpointFingerprint: string;
-  readonly identityFingerprint: string;
-}
-
-/** Create a device-level v2 reference shared by Desktop and TUI. */
-export function credentialRefForProvider(identity: ProviderCredentialIdentity): CredentialRef {
-  const normalized = normalizeProviderCredentialIdentity(identity);
-  const endpointFingerprint = fingerprint(normalized.baseURL);
-  const identityFingerprint = fingerprint(
-    JSON.stringify([
-      normalized.providerId,
-      normalized.protocol,
-      normalized.baseURL,
-      normalized.credentialSlot,
-    ]),
-  );
-  return `${PROVIDER_CREDENTIAL_REF_PREFIX}${PROVIDER_CREDENTIAL_REF_VERSION}/${identityFingerprint}/${endpointFingerprint}/${encodeURIComponent(normalized.providerId)}/${normalized.protocol}/${encodeURIComponent(normalized.credentialSlot)}` as CredentialRef;
-}
-
-/** Alias for callers that use create-style credential APIs. */
-export const createProviderCredentialRef = credentialRefForProvider;
-
-export function parseProviderCredentialRef(ref: string): ParsedProviderCredentialRef {
-  if (!ref.startsWith(PROVIDER_CREDENTIAL_REF_PREFIX)) {
-    throw new Error("不支持的 v2 credentialRef");
-  }
-  const parts = ref.slice(PROVIDER_CREDENTIAL_REF_PREFIX.length).split("/");
-  if (
-    parts.length !== 6 ||
-    parts[0] !== PROVIDER_CREDENTIAL_REF_VERSION ||
-    !isFingerprint(parts[1]) ||
-    !isFingerprint(parts[2]) ||
-    !parts[3] ||
-    !isProviderKind(parts[4]) ||
-    !parts[5]
-  ) {
-    throw new Error("Provider credentialRef 结构无效");
-  }
-  const [, identityFingerprint, endpointFingerprint, encodedProviderId, protocol, encodedSlot] =
-    parts as [string, string, string, string, ProviderKind, string];
-  const providerId = decodeCredentialComponent(encodedProviderId, "Provider ID");
-  const credentialSlot = decodeCredentialComponent(encodedSlot, "credential slot");
-  validateProviderId(providerId);
-  validateCredentialSlot(credentialSlot);
-  return {
-    ref: ref as CredentialRef,
-    providerId,
-    protocol,
-    credentialSlot,
-    endpointFingerprint,
-    identityFingerprint,
-  };
-}
-
-export function assertCredentialRefMatchesProvider(
-  ref: CredentialRef,
-  identity: ProviderCredentialIdentity,
-): void {
-  const expected = credentialRefForProvider(identity);
-  if (ref !== expected) {
-    throw new Error(
-      "credentialRef 与当前 Provider ID、协议、Endpoint 或 credential slot 不匹配，凭证读取已阻断",
-    );
-  }
-}
-
 export async function importProviderCredential(input: {
   readonly provider: ProviderCredentialIdentity;
   readonly secret: string;
@@ -141,82 +64,10 @@ export async function importProviderCredential(input: {
   return ref;
 }
 
-function fingerprint(value: string): string {
-  return createHash("sha256").update(value).digest("hex");
-}
-
-/** Canonical form used by the v2 endpoint binding. */
-export function normalizeProviderEndpoint(baseURL: string): string {
-  const trimmed = baseURL.trim();
-  if (!trimmed) throw new Error("Provider Endpoint 不能为空");
-  let parsed: URL;
-  try {
-    parsed = new URL(trimmed);
-  } catch {
-    throw new Error("Provider Endpoint 必须是有效 URL");
-  }
-  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
-    throw new Error("Provider Endpoint 仅支持 http 或 https");
-  }
-  if (parsed.username || parsed.password) {
-    throw new Error("Provider Endpoint 不得包含用户名或密码");
-  }
-  parsed.hash = "";
-  const pathname = parsed.pathname === "/" ? "" : parsed.pathname.replace(/\/+$/u, "");
-  return `${parsed.protocol}//${parsed.host}${pathname}${parsed.search}`;
-}
-
-function normalizeProviderCredentialIdentity(identity: ProviderCredentialIdentity): {
-  providerId: string;
-  protocol: ProviderKind;
-  baseURL: string;
-  credentialSlot: string;
-} {
-  const providerId = identity.providerId.trim();
-  const credentialSlot = (identity.credentialSlot ?? DEFAULT_PROVIDER_CREDENTIAL_SLOT).trim();
-  validateProviderId(providerId);
-  if (!isProviderKind(identity.protocol)) throw new Error("Provider protocol 无效");
-  validateCredentialSlot(credentialSlot);
-  return {
-    providerId,
-    protocol: identity.protocol,
-    baseURL: normalizeProviderEndpoint(identity.baseURL),
-    credentialSlot,
-  };
-}
-
-function validateProviderId(providerId: string): void {
-  if (!/^[^/\s]+$/u.test(providerId)) {
-    throw new Error("Provider ID 不能为空、包含空白或斜杠");
-  }
-}
-
-function validateCredentialSlot(slot: string): void {
-  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(slot)) {
-    throw new Error("credential slot 只能包含字母、数字、点、下划线、冒号或连字符");
-  }
-}
-
-function decodeCredentialComponent(encoded: string, label: string): string {
-  try {
-    return decodeURIComponent(encoded);
-  } catch {
-    throw new Error(`${label} 编码无效`);
-  }
-}
-
-function isProviderKind(value: string | undefined): value is ProviderKind {
-  return PROVIDER_KINDS.some((candidate) => candidate === value);
-}
-
 function validateSecret(secret: string): void {
   if (!secret.trim() || /[\r\n]/u.test(secret)) {
     throw new Error("拒绝保存空白或包含换行的 Provider 凭证");
   }
-}
-
-function isFingerprint(value: string | undefined): value is string {
-  return typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
 }
 
 export function createPlatformCredentialVault(

@@ -1,5 +1,8 @@
-import type { BaseTool, ToolExecutionContext } from "../tools/registry.js";
-import { NO_FILE_SIDE_EFFECTS } from "../tools/registry.js";
+import type {
+  BaseTool,
+  ToolExecutionContext,
+} from "@pico/pico-host/tool-registry-contract";
+import { NO_FILE_SIDE_EFFECTS } from "@pico/pico-host/tool-registry-contract";
 import type { ToolDefinition } from "../schema/message.js";
 import { ToolAccesses } from "../tools/tool-access.js";
 import type { AtomicMemoryResult } from "./atomic/runtime-contracts.js";

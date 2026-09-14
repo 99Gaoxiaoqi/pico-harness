@@ -1,13 +1,13 @@
 import { join } from "node:path";
 import { AgentEngine } from "../engine/loop.js";
 import type { Session } from "../engine/session.js";
-import type { McpConnectionManager } from "../mcp/manager.js";
+import type { McpConnectionManager } from "@pico/pico-host/mcp-connection-manager";
 import type { HookHostNetworkGate } from "../hooks/executors/index.js";
-import type { LLMProvider } from "../provider/interface.js";
-import type { WorkspaceSandboxConfig } from "../safety/workspace-sandbox.js";
+import type { LLMProvider } from "@pico/core";
+import type { WorkspaceSandboxConfig } from "@pico/pico-host/workspace-sandbox";
 import { ToolRegistry } from "../tools/registry-impl.js";
 import { createHookVerifierRegistry } from "../tools/child-agent-policy.js";
-import type { WorkspaceRoots } from "../tools/workspace-roots.js";
+import type { WorkspaceRoots } from "@pico/pico-host/workspace-roots";
 import { createEngineRuntimePort } from "./engine-runtime-port-adapter.js";
 import { currentRuntimeRun, RuntimeRun } from "./runtime-run.js";
 import type { SessionRuntime } from "./session-runtime.js";

@@ -1,0 +1,170 @@
+export interface ParsedSlashInput {
+  raw: string;
+  name: string;
+  args: string;
+  argv: readonly string[];
+}
+
+export type LocalUiPanel = "help" | "model" | "sessions" | "rewind" | "hooks";
+
+export type LocalUiSelector = "model" | "session" | "rewind" | "changes";
+
+export type LocalUiCommandAction =
+  | {
+      kind: "open-panel";
+      panel: LocalUiPanel;
+    }
+  | {
+      kind: "open-selector";
+      selector: LocalUiSelector;
+    };
+
+export type LocalCommandAction =
+  | "help"
+  | "clear"
+  | "exit"
+  | "status"
+  | "model"
+  | "thinking"
+  | "mcp"
+  | "skills"
+  | "agents"
+  | "resume"
+  | "discovery"
+  | "changes"
+  | "message";
+
+export interface ChangesCommandData {
+  messageId: string;
+}
+
+export type ResumeSessionCommandData =
+  | { readonly mode: "new" }
+  | { readonly mode: "resume" | "fork"; readonly sessionId: string };
+
+export interface LocalCommandResult {
+  type: "local";
+  action: LocalCommandAction;
+  message?: string;
+  data?: unknown;
+  ui?: LocalUiCommandAction;
+}
+
+export interface PromptCommandResult {
+  type: "prompt";
+  prompt: string;
+  metadata?: Record<string, unknown>;
+  /** Per-run restrictions from command frontmatter. They never mutate session settings. */
+  execution?: {
+    orchestrationMode?: "graph" | "swarm";
+    model?: string;
+    allowedTools?: readonly string[];
+    discoveryRun?: boolean;
+  };
+}
+
+export interface CommandRegistryView {
+  list(options?: CommandListOptions): readonly SlashCommand[];
+}
+
+export interface CommandExecutionContext {
+  registry?: CommandRegistryView;
+}
+
+export type SlashCommandKind = "local" | "prompt" | "local-jsx";
+
+export type SlashCommandSource =
+  | "builtin"
+  | "project"
+  | "user"
+  | "skill"
+  | "plugin"
+  | "mcp"
+  | (string & {});
+
+export type SlashCommandCategory =
+  | "session"
+  | "workspace"
+  | "model"
+  | "permissions"
+  | "help"
+  | "skill"
+  | "agent"
+  | "mcp"
+  | "system"
+  | (string & {});
+
+export interface SlashArgumentCandidate {
+  /** Human-facing text for the suggestion row; completion still inserts `value` or `insertText`. */
+  label?: string;
+  value: string;
+  /** Optional text inserted into the input after a candidate is selected. */
+  insertText?: string;
+  description?: string;
+}
+
+export type SlashArgumentCompleter = (
+  query: string,
+) => readonly SlashArgumentCandidate[] | Promise<readonly SlashArgumentCandidate[]>;
+
+export interface CommandListOptions {
+  source?: SlashCommandSource;
+  includeHidden?: boolean;
+  includeDisabled?: boolean;
+  availabilityState?: import("./command-availability.js").CommandInputState;
+}
+
+export interface SlashCommand {
+  name: string;
+  aliases?: readonly string[];
+  description: string;
+  usage?: string;
+  argumentHint?: string;
+  category?: SlashCommandCategory;
+  availability?: import("./command-availability.js").CommandAvailability;
+  argumentCompleter?: SlashArgumentCompleter;
+  kind?: SlashCommandKind;
+  source?: SlashCommandSource;
+  isHidden?: boolean;
+  isEnabled?: boolean;
+  execute(
+    input: ParsedSlashInput,
+    context: CommandExecutionContext,
+  ): LocalCommandResult | PromptCommandResult | Promise<LocalCommandResult | PromptCommandResult>;
+}
+
+export type InputProcessResult =
+  | {
+      type: "empty";
+      raw: string;
+    }
+  | {
+      type: "prompt";
+      raw: string;
+      prompt: string;
+    }
+  | {
+      type: "local-command";
+      raw: string;
+      command: string;
+      args: string;
+      argv: readonly string[];
+      result: LocalCommandResult;
+    }
+  | {
+      type: "prompt-command";
+      raw: string;
+      command: string;
+      args: string;
+      argv: readonly string[];
+      result: PromptCommandResult;
+    }
+  | {
+      type: "unknown-command";
+      raw: string;
+      command: string;
+      args: string;
+      argv: readonly string[];
+      message: string;
+      suggestions: readonly string[];
+    };

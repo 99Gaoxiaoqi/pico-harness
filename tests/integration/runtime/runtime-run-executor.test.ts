@@ -7,10 +7,7 @@ import type { AgentEngine } from "../../../src/engine/loop.js";
 import { Session } from "../../../src/engine/session.js";
 import type { HookOutput } from "../../../src/hooks/types.js";
 import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
-import type {
-  RuntimeLifecycleEvent,
-  RuntimeRunOptions,
-} from "../../../src/runtime/runtime-contract.js";
+import type { RuntimeLifecycleEvent, RuntimeRunOptions } from "@pico/runtime/runtime-contract";
 import {
   RuntimeRunExecutor,
   emitRuntimeLifecycleEvent,

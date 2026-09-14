@@ -6,7 +6,7 @@ import type {
   PermissionRecentDenial,
   PermissionRule,
   PermissionState,
-} from "../approval/permission-state.js";
+} from "@pico/core/permission-state";
 import { resolveKeybinding, type UserKeybindingConfig } from "./keybindings/resolver.js";
 import type { PlanControlNotice } from "./plan-control-notice.js";
 import { wrappedVisualRows } from "./terminal-width.js";

@@ -1,19 +1,19 @@
 import { createHash } from "node:crypto";
 import { useCallback, useEffect, useState } from "react";
 import { render } from "ink";
-import { LocalRuntimeClient } from "../daemon/client.js";
+import { LocalRuntimeClient } from "@pico/pico-host/local-runtime-client";
 import {
   projectTranscriptEntriesForRendering,
   type TranscriptProjection,
 } from "../presentation/transcript-event-store.js";
 import { loadPicoProjectConfig } from "../input/pico-config.js";
-import { FileIndex } from "../input/file-index.js";
+import { FileIndex } from "@pico/pico-host/file-index";
 import { App } from "./app.js";
 import type { UserKeybindingConfig } from "./keybindings/resolver.js";
 import { approvalDialogId, planControlDialogId } from "./approval-panel.js";
 import { createApprovalDialogRequest, createPlanControlDialogRequest } from "./approval-dialogs.js";
 import { askUserDialogId, createAskUserDialogRequest } from "./ask-user-dialog.js";
-import type { AskUserRequest } from "../tools/ask-user.js";
+import type { AskUserRequest } from "@pico/pico-host/ask-user-tool";
 import type { InputBoxSubmission } from "./input-box.js";
 import { ClientSessionRuntime } from "./client-session-runtime.js";
 import { createClientCommandRegistry, processClientInput } from "./client-commands.js";
@@ -26,8 +26,8 @@ import {
 } from "./rewind-client-bridge.js";
 import type { ChangesJumpToRewindAction, ChangesRestoreFileAction } from "./changes-panel.js";
 import type { DialogRequest } from "./dialog-arbiter.js";
-import type { FileHistorySnapshotSummary, RewindMode } from "../cli/file-history.js";
-import type { FileHistoryDiffStat } from "../safety/file-history.js";
+import type { FileHistorySnapshotSummary, RewindMode } from "@pico/pico-host/file-history";
+import type { FileHistoryDiffStat } from "@pico/pico-host/file-history-runtime";
 
 /**
  * TUI 客户端 tracer 入口。

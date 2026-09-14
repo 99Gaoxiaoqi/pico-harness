@@ -8,7 +8,7 @@ import { Session, SessionManager } from "../../../src/engine/session.js";
 import { SessionForkService } from "../../../src/engine/session-fork-service.js";
 import type { PersistedSessionSettings } from "../../../src/engine/session-runtime.js";
 import { PlanConflictError } from "../../../src/plan/contract.js";
-import { PlanCoordinator } from "../../../src/plan/coordinator.js";
+import { PlanCoordinator } from "@pico/runtime/plan-coordinator";
 import {
   createDefaultSessionSettings,
   exitSessionPlanMode,

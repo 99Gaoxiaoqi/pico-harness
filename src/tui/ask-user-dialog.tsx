@@ -1,6 +1,10 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Box, Text, useInput } from "ink";
-import type { AskUserHandler, AskUserRequest, AskUserRequestId } from "../tools/ask-user.js";
+import type {
+  AskUserHandler,
+  AskUserRequest,
+  AskUserRequestId,
+} from "@pico/pico-host/ask-user-tool";
 import type { DialogRequest } from "./dialog-arbiter.js";
 import { truncateTerminalText, wrappedVisualRows } from "./terminal-width.js";
 

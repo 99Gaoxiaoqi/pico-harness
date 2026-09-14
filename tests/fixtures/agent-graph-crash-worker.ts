@@ -1,8 +1,8 @@
-import { AgentGraphWorkspaceResourceAuthority } from "../../src/runtime/agent-graph-workspace-resource-authority.js";
+import { AgentGraphWorkspaceResourceAuthority } from "@pico/pico-host/agent-graph-workspace-resource-authority";
 import {
   SqliteAgentGraphOutputLedger,
   agentOutputRuntimeEventId,
-} from "../../src/runtime/agent-graph-output-ledger.js";
+} from "@pico/runtime/agent-graph-output-ledger";
 import {
   agentOutputFingerprint,
   agentOutputIdempotencyKey,

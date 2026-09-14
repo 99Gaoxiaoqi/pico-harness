@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { Box, Text, useInput } from "ink";
-import type { CliSessionSummary } from "../cli/session-resolver.js";
+import type { CliSessionSummary } from "@pico/cli/session-resolver";
 import { presentSession } from "./session-presentation.js";
 import { searchSessionBrowserSessions } from "./session-browser-adapter.js";
 

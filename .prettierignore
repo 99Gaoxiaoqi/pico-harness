@@ -2,3 +2,9 @@ dist/
 node_modules/
 docs/superpowers/
 aihot_summary.md
+
+# Archify delivers these as validated, reproducible rendered artifacts. Their
+# layout and source serialization are intentionally preserved after delivery.
+docs/architecture/pico-package-boundaries.architecture.json
+docs/architecture/pico-package-boundaries.html
+docs/architecture/pico-package-boundaries.visual-check.html

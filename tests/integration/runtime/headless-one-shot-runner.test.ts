@@ -40,10 +40,7 @@ import {
   type HeadlessOneShotRequestV2,
 } from "../../../src/internal/headless-one-shot-runner.js";
 import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
-import type {
-  RunAgentCliOptions,
-  RunAgentCliResult,
-} from "../../../src/runtime/runtime-contract.js";
+import type { RunAgentCliOptions, RunAgentCliResult } from "@pico/runtime/runtime-contract";
 import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
 import { closeAllOperationalDatabasesForTest } from "../../../src/storage/sqlite/sqlite-database.js";
 

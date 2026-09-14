@@ -1,0 +1,176 @@
+// 工具注册与分发接口。
+// 对应课程第 05 讲 internal/tools/registry.go。
+// Main Loop 永远是"瞎子聋子",不该知道工具怎么实现。
+// Registry 是集线器(Hub)+ 路由器(Router):动态挂载、暴露 Schema、路由分发。
+
+import type { ToolCall, ToolDefinition, ToolResult } from "@pico/core";
+import type { ToolAccesses } from "@pico/runtime/tool-access";
+import type { HookService } from "./hooks/service.js";
+import type { ToolPermissionCategory } from "@pico/core/tool-permission-policy";
+import type {
+  RuntimeToolRegistry,
+  ToolExecutionContext,
+  ToolExecutionStep,
+  ToolRecoveryMode,
+  ToolRecoveryPolicy,
+} from "@pico/runtime/runtime-tool-execution";
+
+export {
+  ToolCommitBoundaryError,
+  type ToolExecutionContext,
+  type ToolExecutionStep,
+  type ToolOutputChunk,
+  type ToolOutputStream,
+  type ToolRecoveryMode,
+  type ToolRecoveryPolicy,
+  type ToolRecoveryProbeInput,
+  type ToolRecoveryProbeResult,
+} from "@pico/runtime/runtime-tool-execution";
+
+export type { ToolPermissionCategory } from "@pico/core/tool-permission-policy";
+
+export type ToolFileSideEffects =
+  | { readonly kind: "none" }
+  | { readonly kind: "exact"; readonly paths: readonly string[] }
+  | { readonly kind: "workspace" };
+
+/**
+ * 交互权限只信任工具声明的能力类别，不从参数文本猜测是否安全。
+ * 未声明的非只读工具由 Registry 保守归类为 open_world。
+ */
+export const NO_FILE_SIDE_EFFECTS = { kind: "none" } as const satisfies ToolFileSideEffects;
+export const WORKSPACE_FILE_SIDE_EFFECTS = {
+  kind: "workspace",
+} as const satisfies ToolFileSideEffects;
+
+/**
+ * Middleware 中间件签名 (第 16 讲)。
+ * 在 Registry 收到 ToolCall 后、真正调用 tool.execute() 之前运行。
+ * 返回 allowed=false 则拦截,reason 作为 Error 反馈给大模型;
+ * 返回 allowed=true 则放行,继续下一个中间件或执行工具。
+ *
+ * 异步签名以支持人工审批挂起 (Human-in-the-loop):中间件可阻塞等待
+ * 飞书审批结果,大模型甚至不知道自己被挂起了。
+ */
+export interface RequestMiddlewareResult {
+  allowed: boolean;
+  reason?: string;
+  call?: ToolCall;
+  /** 供 PermissionDenied Hook 诊断使用，不影响旧 middleware 协议。 */
+  denialSource?: string;
+}
+
+export interface RequestMiddlewareContext {
+  /** PreToolUse ask/defer 可将原本自动放行的调用升级为人工审批。 */
+  forceApproval?: boolean;
+}
+export type RequestMiddleware = (
+  call: ToolCall,
+  context?: RequestMiddlewareContext,
+) => Promise<RequestMiddlewareResult>;
+export type ExecutionMiddleware = (
+  call: ToolCall,
+  next: (call: ToolCall) => Promise<string>,
+  context?: ToolExecutionContext,
+) => Promise<string>;
+export type MiddlewareFunc = RequestMiddleware;
+
+/**
+ * BaseTool:所有具体工具必须实现的通用接口。
+ * 一个工具必须能说出自己的名字、给出参数 Schema,并接收原始 JSON 参数执行。
+ * 参数是原始 JSON 字符串,反序列化由各工具内部自行处理 —— 延迟解析、极致解耦。
+ */
+export interface BaseTool {
+  /** Nested code execution is opt-in; absence means direct_only. */
+  nesting?: "nestable" | "direct_only";
+  /** Orchestrators acquire resources through their child calls. */
+  executionMode?: "orchestrator";
+  executionSemantics?: "parallel" | "exclusive_step";
+  recoveryMode?: ToolRecoveryMode;
+  recoveryKey?: string;
+  reconcile?: ToolRecoveryPolicy["reconcile"];
+  /** 返回工具的全局唯一名称 (大模型通过这个名字调用它) */
+  name(): string;
+  /** 返回提交给大模型的工具元信息和参数 JSON Schema */
+  definition(): ToolDefinition;
+  /** 接收大模型吐出的 JSON 参数,执行具体业务逻辑 */
+  execute(args: string, context?: ToolExecutionContext): Promise<string>;
+  /** 声明文件系统副作；未声明的非只读工具默认为 workspace。 */
+  fileSideEffects?: ToolFileSideEffects | ((args: string) => ToolFileSideEffects);
+  /**
+   * 是否为只读工具 (第 08 讲并发调度用)。
+   * 只读工具的批次可并行执行;含写操作的批次退化为串行。
+   * 默认 false (保守视为写操作)。
+   */
+  readOnly?: boolean;
+  /** 用于人工审批的受信能力分类；不声明时 fail closed。 */
+  permissionCategory?: ToolPermissionCategory;
+  /**
+   * 声明本次调用要访问的资源(资源冲突图调度用,对标 kimi-code ToolAccesses)。
+   *
+   * 接收原始 JSON 参数字符串(与 execute 一致,延迟解析),返回资���访问集。
+   * 调度器据此判定同批次工具能否并行:
+   *   - 不冲突(read+read / write 不同文件)→ 并行
+   *   - 冲突(同文件含写 / kind:"all")→ 串行
+   *
+   * 未实现此方法的工具按 ToolAccesses.all() 保守处理(全局互斥)。
+   * readOnly 字段仍保留,供 Guardrail 无进展告警等布尔语义场景使用。
+   */
+  accesses?(args: string): ToolAccesses;
+  /** 工具所属工具集,供未来 subagent/MCP 分组授权 */
+  toolset?: string;
+}
+
+/** 工具的注册与分发接口 */
+export interface Registry extends RuntimeToolRegistry {
+  /** 挂载一个新的工具到系统中 */
+  register(tool: BaseTool): void;
+  /** 按名称卸载工具,用于动态工具生命周期清理 */
+  unregister?(name: string): boolean;
+  /** 【第 16 讲】全局挂载一个安全拦截中间件 */
+  use(mw: MiddlewareFunc): void;
+  /** request 阶段中间件:可拦截或改写参数 */
+  useRequest?(mw: RequestMiddleware): void;
+  /** 不可被 Hook 或人工审批绕过的安全门。 */
+  useSafety?(mw: RequestMiddleware): void;
+  /** 在 PreToolUse 之后运行的交互权限/审批链。 */
+  usePermission?(mw: RequestMiddleware): void;
+  /** execution 阶段中间件:可包裹实际执行 */
+  useExecution?(mw: ExecutionMiddleware): void;
+  /** 返回当前系统挂载的所有工具的 Schema,供 Main Loop 交给 Provider */
+  getAvailableTools(): ToolDefinition[];
+  captureStep?(
+    id: string,
+    visibleToolNames: readonly string[],
+    boundStep?: ToolExecutionStep,
+  ): ToolExecutionStep;
+  getNesting?(name: string, step?: ToolExecutionStep): "nestable" | "direct_only";
+  getRecoveryPolicy?(name: string, step?: ToolExecutionStep): ToolRecoveryPolicy;
+  getExecutionSemantics?(name: string, step?: ToolExecutionStep): "parallel" | "exclusive_step";
+  /**
+   * 路由执行。实现与包装器必须保留完整 context：最终校验/权限/资源准入通过后，
+   * 物理执行前必须 await beforeDispatch(finalCall) 且只调用一次；拒绝不得调用。
+   * 受信的参数审计拒绝返回 isError 结果且不派发；其他回调失败必须作为
+   * ToolCommitBoundaryError 传播并禁止副作用，不能转换为普通 ToolResult。
+   */
+  execute(call: ToolCall, context?: ToolExecutionContext): Promise<ToolResult>;
+  /**
+   * 判断工具是否为只读 (第 08 讲)。
+   * 引擎据此决定批次是否可并发:全只读则并行,有写操作则串行。
+   * 默认返回 false (保守视为写操作)。
+   */
+  isReadOnlyTool?(name: string): boolean;
+  /** 返回受信的工具权限类别；未知或未声明的非只读工具为 open_world。 */
+  getPermissionCategory?(name: string): ToolPermissionCategory;
+  /** 解析单次调用的文件副作范围。 */
+  getFileSideEffects?(call: ToolCall): ToolFileSideEffects;
+  /**
+   * 按 ToolCall 计算资源访问集(资源冲突图调度用)。
+   * 带完整 call 而非仅 name,因为路径信息在 call.arguments 里。
+   * 未实现则调度器按 ToolAccesses.all() 保守处理。
+   */
+  getAccesses?(call: ToolCall): ToolAccesses;
+  setPreWriteHook?(hook: (toolName: string, args: string) => Promise<void>): void;
+  /** 挂载会话级 HookService；Registry 重建时必须复用同一实例。 */
+  setHookService?(service: HookService): void;
+}

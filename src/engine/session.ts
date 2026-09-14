@@ -14,17 +14,14 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import type { ExecutionBoundary } from "../safety/permission-profile.js";
-import { type CanonicalUsage, type Message, type UsageReportedField } from "../schema/message.js";
-import type { CostStatus } from "../observability/pricing.js";
+import type { ExecutionBoundary } from "@pico/core/permission-profile";
+import { type CanonicalUsage, type Message, type UsageReportedField } from "@pico/core";
+import type { CostStatus } from "@pico/runtime/pricing";
 import { logger } from "../observability/logger.js";
-import {
-  assertDurableTranscriptEvent,
-  type DurableTranscriptEvent,
-} from "../presentation/transcript-event-store.js";
-import type { CommitReceipt, SessionCursor } from "./session-persistence.js";
-import { createSessionIdentity, type SessionIdentity } from "./session-identity.js";
-import type { GoalManager } from "./goal-manager.js";
+import { assertDurableTranscriptEvent, type DurableTranscriptEvent } from "@pico/core";
+import type { CommitReceipt, SessionCursor } from "@pico/core";
+import { createSessionIdentity, type SessionIdentity } from "@pico/core/session-identity";
+import type { GoalManager } from "@pico/runtime/goal-manager";
 import {
   normalizeSessionRuntimeStateWritePatch,
   normalizeSessionUsageSnapshot,
@@ -33,12 +30,12 @@ import {
   type PersistedPermissionMode,
   type PersistedSessionSettings,
   type PersistedPromptCacheState,
-  type SessionHydrationSnapshot,
   type SessionRuntimePersistence,
   type SessionRuntimeStateWritePatch,
   type SessionRuntimeStateSnapshot,
   type SessionUsageSnapshot,
-} from "./session-runtime.js";
+} from "@pico/core/session-runtime-state";
+import type { SessionHydrationSnapshot } from "@pico/core/session-hydration";
 import {
   createFileHistoryState,
   type FileHistoryIo,
@@ -56,33 +53,37 @@ import {
   fileHistoryRewind,
   type FileHistoryRewindTransactionHooks,
   type FileHistoryDurableRewindPlan,
-} from "../safety/file-history.js";
-import { resolvePicoHome, resolvePicoPaths, workspaceIdForPath } from "../paths/pico-paths.js";
+} from "@pico/pico-host/file-history-runtime";
+import {
+  resolvePicoHome,
+  resolvePicoPaths,
+  workspaceIdForPath,
+} from "@pico/pico-host/pico-paths";
 import {
   createEngineRuntimeCapability,
   type EngineRuntimeCapability,
   type EngineRuntimePort,
   type EngineRuntimeWriteGuard,
 } from "./runtime-port.js";
-import { EngineRuntimeCapabilityOwner } from "./runtime-capability-owner.js";
+import { EngineRuntimeCapabilityOwner } from "@pico/runtime/runtime-capability-owner";
 import {
   type RuntimeEventBase,
   type RuntimeEvent,
   type RuntimePlanEvent,
 } from "./session-runtime-event.js";
-import { projectActivePlanEntries } from "../plan/reducer.js";
+import { projectActivePlanEntries } from "@pico/runtime/plan-reducer";
 import type { SessionForkRuntimePort } from "./session-fork-runtime-port.js";
 import {
   createCanonicalTranscriptToolStart,
   createRuntimeTranscriptToolStartEvent,
   createTranscriptToolStartIdentity,
   type CanonicalTranscriptToolStart,
-} from "./transcript-tool-start.js";
+} from "@pico/core/transcript-tool-start";
 import {
   projectRuntimeModelMessage,
   runtimeEventHasModelHistoryEntry,
-} from "./runtime-model-message.js";
-import { materializeRuntimeHistoryEntries } from "./session-runtime-read-model.js";
+} from "@pico/core/runtime-model-message";
+import { materializeRuntimeHistoryEntries } from "@pico/runtime/session-runtime-read-model";
 import {
   type RuntimeEventStoreAppendResult,
   type RuntimeEventStoreEntry,
@@ -103,10 +104,10 @@ import {
   projectRuntimeSessionState,
   projectRuntimeSessionTranscriptEventEntries,
   type RuntimeSessionForkSeedEntry,
-} from "./session-runtime-projection.js";
+} from "@pico/runtime/session-runtime-projection";
 import { LeaseConflictError, OwnerLease } from "../storage/owner-lease.js";
 import { sessionOwnerLeaseDirectory } from "../storage/session-owner-lease.js";
-import { SessionMessageLedger } from "./session-message-ledger.js";
+import { SessionMessageLedger } from "@pico/runtime";
 import { configureDefaultSessionFactory, SessionManager } from "./session-manager.js";
 import { registerSessionDrain, sessionEntryKey } from "./session-manager-state.js";
 

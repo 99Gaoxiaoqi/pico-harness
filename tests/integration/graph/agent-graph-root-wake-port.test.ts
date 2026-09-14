@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { AgentGraphExactRunInspection } from "../../../src/runtime/agent-graph-exact-run-port.js";
+import type { AgentGraphExactRunInspection } from "@pico/runtime";
 import {
   AgentGraphRootWakeRuntimePort,
   renderRootWakePrompt,
   rootWakeState,
-} from "../../../src/runtime/agent-graph-root-wake-port.js";
-import type { StartExactAgentGraphRunInput } from "../../../src/runtime/agent-graph-runtime-adapter.js";
+} from "@pico/runtime/agent-graph-root-wake-port";
+import type { StartExactAgentGraphRunInput } from "@pico/runtime";
 
 const identity = {
   wakeId: "wake-1",

@@ -1,0 +1,321 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Pico Harness：当前包边界与依赖方向",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1370,
+      820
+    ],
+    "views": [
+      {
+        "id": "layering",
+        "label": "核心分层",
+        "focus": [
+          "core",
+          "storage",
+          "runtime",
+          "pico-host"
+        ],
+        "note": "稳定契约向上支撑存储、运行策略和宿主组合；依赖方向只向下。"
+      },
+      {
+        "id": "entrypoints",
+        "label": "产品入口",
+        "focus": [
+          "desktop",
+          "cli",
+          "pico-host",
+          "cli-runtime-host"
+        ],
+        "note": "Desktop 与 CLI 通过宿主层接入共享运行时能力。"
+      },
+      {
+        "id": "transition",
+        "label": "迁移过渡层",
+        "focus": [
+          "legacy-src",
+          "runtime",
+          "pico-host",
+          "storage"
+        ],
+        "note": "旧 src 入口保留兼容导出，新增实现持续收敛到 packages。"
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "desktop",
+      "type": "frontend",
+      "label": "apps/desktop",
+      "sublabel": "Electron Main · Preload · Renderer",
+      "tag": "产品入口",
+      "pos": [
+        70,
+        120
+      ],
+      "size": [
+        190,
+        76
+      ]
+    },
+    {
+      "id": "cli",
+      "type": "frontend",
+      "label": "@pico/cli",
+      "sublabel": "argv · TUI · 交互适配",
+      "tag": "产品入口",
+      "pos": [
+        70,
+        300
+      ],
+      "size": [
+        190,
+        76
+      ]
+    },
+    {
+      "id": "legacy-src",
+      "type": "backend",
+      "label": "src/* 兼容层",
+      "sublabel": "Engine 与旧 import 适配",
+      "tag": "渐进迁移",
+      "pos": [
+        70,
+        510
+      ],
+      "size": [
+        190,
+        76
+      ]
+    },
+    {
+      "id": "pico-host",
+      "type": "backend",
+      "label": "@pico/pico-host",
+      "sublabel": "workspace · daemon · Git · 生命周期",
+      "tag": "Host",
+      "pos": [
+        390,
+        210
+      ],
+      "size": [
+        220,
+        86
+      ]
+    },
+    {
+      "id": "cli-runtime-host",
+      "type": "backend",
+      "label": "@pico/runtime-host",
+      "sublabel": "进程 · 连接 · 传输",
+      "tag": "通用宿主",
+      "pos": [
+        390,
+        420
+      ],
+      "size": [
+        220,
+        76
+      ]
+    },
+    {
+      "id": "runtime",
+      "type": "backend",
+      "label": "@pico/runtime",
+      "sublabel": "生命周期 · 策略 · Graph · Plan",
+      "tag": "执行内核",
+      "pos": [
+        730,
+        210
+      ],
+      "size": [
+        230,
+        86
+      ]
+    },
+    {
+      "id": "protocol",
+      "type": "messagebus",
+      "label": "@pico/protocol",
+      "sublabel": "本机 IPC · wire schema",
+      "tag": "独立协议",
+      "pos": [
+        730,
+        450
+      ],
+      "size": [
+        230,
+        76
+      ]
+    },
+    {
+      "id": "storage",
+      "type": "database",
+      "label": "@pico/storage",
+      "sublabel": "SQLite · Store contract · 文件存储",
+      "tag": "持久化",
+      "pos": [
+        1080,
+        210
+      ],
+      "size": [
+        230,
+        86
+      ]
+    },
+    {
+      "id": "core",
+      "type": "security",
+      "label": "@pico/core",
+      "sublabel": "领域契约 · Identity · 不变量",
+      "tag": "无实现依赖",
+      "pos": [
+        1080,
+        450
+      ],
+      "size": [
+        230,
+        76
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "产品入口与兼容适配",
+      "wraps": [
+        "desktop",
+        "cli",
+        "legacy-src"
+      ],
+      "pad": 32
+    },
+    {
+      "kind": "region",
+      "label": "可发布包边界",
+      "wraps": [
+        "pico-host",
+        "cli-runtime-host",
+        "runtime",
+        "protocol",
+        "storage",
+        "core"
+      ],
+      "pad": 32
+    }
+  ],
+  "connections": [
+    {
+      "id": "desktop-host",
+      "from": "desktop",
+      "to": "pico-host",
+      "variant": "emphasis"
+    },
+    {
+      "id": "cli-host",
+      "from": "cli",
+      "to": "pico-host",
+      "variant": "emphasis"
+    },
+    {
+      "id": "legacy-adapts",
+      "from": "legacy-src",
+      "to": "pico-host",
+      "label": "Engine / 旧入口 Port",
+      "variant": "dashed",
+      "labelAt": [
+        300,
+        410
+      ]
+    },
+    {
+      "id": "host-runtime",
+      "from": "pico-host",
+      "to": "runtime",
+      "label": "执行策略与 Graph 运行端口",
+      "variant": "emphasis",
+      "labelAt": [
+        710,
+        310
+      ]
+    },
+    {
+      "id": "host-runtime-host",
+      "from": "pico-host",
+      "to": "cli-runtime-host",
+      "label": "本机进程与连接",
+      "variant": "default",
+      "labelAt": [
+        500,
+        330
+      ]
+    },
+    {
+      "id": "host-protocol",
+      "from": "pico-host",
+      "to": "protocol",
+      "label": "本机 RPC",
+      "variant": "default",
+      "fromSide": "right",
+      "toSide": "top",
+      "labelAt": [
+        670,
+        385
+      ]
+    },
+    {
+      "id": "runtime-storage",
+      "from": "runtime",
+      "to": "storage",
+      "label": "事件账本与 Store",
+      "variant": "emphasis",
+      "labelAt": [
+        1020,
+        310
+      ]
+    },
+    {
+      "id": "storage-core",
+      "from": "storage",
+      "to": "core",
+      "label": "持久化契约",
+      "variant": "default",
+      "labelAt": [
+        1350,
+        360
+      ]
+    },
+    {
+      "id": "protocol-core",
+      "from": "protocol",
+      "to": "core",
+      "label": "wire 领域类型",
+      "variant": "default",
+      "labelAt": [
+        1020,
+        420
+      ]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "已对齐的主路径",
+      "items": [
+        "Core → Storage → Runtime → Pico Host → Desktop / CLI",
+        "Graph、Plan 与配置型子代理按 Port 穿越 Engine/Host 边界"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "仍在迁移",
+      "items": [
+        "src/runtime 中的 Engine 装配和产品执行器保留为兼容/适配层",
+        "实现先迁包，旧 import 最后删除，避免破坏本机 IPC 与 SQLite 事务契约"
+      ]
+    }
+  ]
+}

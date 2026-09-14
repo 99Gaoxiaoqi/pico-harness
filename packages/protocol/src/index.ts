@@ -3,3 +3,4 @@ export * from "./runtime-normalize.js";
 export * from "./runtime-buffer.js";
 export * from "./markdown.js";
 export * from "./usage.js";
+export * from "./subagent-settings.js";

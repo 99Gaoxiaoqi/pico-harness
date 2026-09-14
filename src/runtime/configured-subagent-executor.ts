@@ -2,7 +2,7 @@ import { resolveConfiguredSubagentContinuation } from "./configured-subagent-con
 import type {
   ConfiguredSubagentCatalogPort,
   SubagentCapabilityDefinition,
-} from "../agents/subagent-profiles.js";
+} from "@pico/core/subagent-capabilities";
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -10,17 +10,15 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import type { ModelRouter } from "../provider/model-router.js";
-import {
-  coordinateReasoningLevel,
-  type ResolvedModelReasoningCapability,
-} from "../provider/reasoning-capability.js";
+import { coordinateReasoningLevel } from "@pico/runtime";
+import type { ResolvedModelReasoningCapability } from "@pico/core";
 import { SilentReporter, type Reporter } from "../engine/reporter.js";
-import { ScopedSubagentActivityReporter } from "../tools/subagent-activity-reporter.js";
+import { ScopedSubagentActivityReporter } from "@pico/runtime/subagent-activity-reporter";
 import type {
   ConfiguredSubagentExecutor,
   ConfiguredSubagentExecutionResult,
-} from "../tools/configured-subagent-tools.js";
-import type { WorktreeSupervisor } from "../tasks/worktree-supervisor.js";
+} from "@pico/runtime/configured-subagent-tools";
+import type { WorktreeSupervisor } from "@pico/pico-host/worktree-supervisor";
 import type { AgentRuntime, RunAgentCliDependencies } from "./agent-runtime.js";
 import { currentRuntimeRun, currentRuntimeToolCallId } from "./runtime-run.js";
 import {

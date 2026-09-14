@@ -2,13 +2,13 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { logger } from "../observability/logger.js";
 import { resolvePicoHome, resolvePicoPaths } from "../paths/pico-paths.js";
-import { DEFAULT_EVENT_LOG_RETENTION_POLICY } from "../storage/event-log-retention-policy.js";
+import { DEFAULT_EVENT_LOG_RETENTION_POLICY } from "@pico/storage";
 import { readEventLogStorageStatus } from "../storage/sqlite/sqlite-event-log-retention-store.js";
 import {
   WorkspaceTaskRuntime,
   type WorkspaceRunContext,
   type WorkspaceRunSnapshot,
-} from "../runtime/workspace-runtime.js";
+} from "@pico/pico-host/workspace-task-runtime";
 import {
   CAPABILITY_SCOPE_RUNTIME_CAPABILITY,
   createRuntimeNotification,
@@ -35,24 +35,26 @@ import type {
   DisposableLocalRuntimeService,
   RuntimeNotificationCursor,
   ShutdownOwnershipFence,
-} from "./service.js";
+} from "@pico/pico-host/local-runtime-service";
 import {
   RuntimeConflictError,
   SqliteRuntimeControlStore,
-} from "../storage/sqlite/sqlite-runtime-control-store.js";
-import { type DaemonIdempotentCommandResult } from "../tasks/runtime-store-contracts.js";
+} from "@pico/storage/sqlite/sqlite-runtime-control-store";
+import { type DaemonIdempotentCommandResult } from "@pico/storage/runtime-control-store-contracts";
 import {
   isRuntimeNotificationLedgerEnvelope,
   type DaemonRunRecord,
   type RuntimeEventRecord,
   type RuntimeNotificationEventRecord,
-} from "../tasks/runtime-types.js";
+} from "@pico/storage/runtime-control-types";
 import {
   canonicalizeWorkspacePath,
   resolveGitBranch,
   WorkspaceRuntimeRegistry,
-} from "./workspace-registry.js";
-import { WorkspaceRegistrationStore } from "./workspace-registration.js";
+} from "@pico/pico-host/workspace-registry";
+import { trimRuntimeNotificationToFit } from "@pico/pico-host/runtime-notification-transport";
+import { INTERRUPTED_DAEMON_RUN_ERROR as interruptedDaemonRunError } from "@pico/pico-host/workspace-run-lifecycle";
+import { WorkspaceRegistrationStore } from "@pico/pico-host/workspace-registration";
 import {
   runWorkspaceBlobGcOnce,
   type WorkspaceBlobGcResult,
@@ -149,8 +151,8 @@ const MAX_REPLAY_EVENT_LIMIT = 9_999;
 const MAX_REPLAY_QUERY_LIMIT = 10_000;
 const REPLAY_RESPONSE_METADATA_RESERVE_BYTES = 64 * 1024;
 const MAX_REPLAY_EVENTS_BYTES = MAX_RUNTIME_FRAME_BYTES - REPLAY_RESPONSE_METADATA_RESERVE_BYTES;
-export const INTERRUPTED_DAEMON_RUN_ERROR =
-  "daemon 重启前 Run 未进入终态，当前 executor 无法安全恢复";
+/** @deprecated The host lifecycle fact is defined by @pico/pico-host. */
+export const INTERRUPTED_DAEMON_RUN_ERROR = interruptedDaemonRunError;
 
 function planReviewIntentRequest(input: PlanReviewRunIntentInput): Record<string, unknown> {
   return {
@@ -1077,21 +1079,9 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
 }
 
 function transportSafeRuntimeNotification(notification: RuntimeNotification): RuntimeNotification {
-  if (runtimeNotificationFitsFrame(notification)) return notification;
-  for (const budget of [
-    { maxString: 64 * 1024, maxArray: 256, maxKeys: 256 },
-    { maxString: 16 * 1024, maxArray: 128, maxKeys: 128 },
-    { maxString: 4 * 1024, maxArray: 64, maxKeys: 64 },
-    { maxString: 512, maxArray: 16, maxKeys: 32 },
-  ]) {
-    const candidate = {
-      ...notification,
-      payload: boundedNotificationValue(notification.payload as JsonValue, budget, 0),
-    } as RuntimeNotification;
-    if (runtimeNotificationFitsFrame(candidate)) return candidate;
-  }
-  throw new RuntimeProtocolError(
-    RUNTIME_ERROR_CODES.FRAME_TOO_LARGE,
+  return trimRuntimeNotificationToFit(
+    notification,
+    runtimeNotificationFitsFrame,
     `Runtime notification ${notification.eventId} cannot be represented within the IPC frame limit`,
   );
 }
@@ -1113,61 +1103,6 @@ function runtimeNotificationFitsFrame(notification: RuntimeNotification): boolea
     }
     throw error;
   }
-}
-
-/**
- * Generalized transport-safe trimming: bounds a notification so its JSON
- * serialization fits maxSerializedBytes (callers on transports with a smaller
- * frame limit than the daemon IPC 1MiB — e.g. the 3-B-2 runtime-host bridge
- * with its 96KB frames — reuse the same tiered payload trimming). eventId,
- * topic, and scope are never trimmed, so cursor and dedup semantics survive.
- */
-export function transportSafeRuntimeNotificationWithin(
-  notification: RuntimeNotification,
-  maxSerializedBytes: number,
-): RuntimeNotification {
-  const fits = (candidate: RuntimeNotification): boolean =>
-    Buffer.byteLength(JSON.stringify(candidate), "utf8") <= maxSerializedBytes;
-  if (fits(notification)) return notification;
-  for (const budget of [
-    { maxString: 64 * 1024, maxArray: 256, maxKeys: 256 },
-    { maxString: 16 * 1024, maxArray: 128, maxKeys: 128 },
-    { maxString: 4 * 1024, maxArray: 64, maxKeys: 64 },
-    { maxString: 512, maxArray: 16, maxKeys: 32 },
-  ]) {
-    const candidate = {
-      ...notification,
-      payload: boundedNotificationValue(notification.payload as JsonValue, budget, 0),
-    } as RuntimeNotification;
-    if (fits(candidate)) return candidate;
-  }
-  throw new RuntimeProtocolError(
-    RUNTIME_ERROR_CODES.FRAME_TOO_LARGE,
-    `Runtime notification ${notification.eventId} cannot be represented within ${maxSerializedBytes} bytes`,
-  );
-}
-
-function boundedNotificationValue(
-  value: JsonValue,
-  budget: { readonly maxString: number; readonly maxArray: number; readonly maxKeys: number },
-  depth: number,
-): JsonValue {
-  if (typeof value === "string") {
-    if (value.length <= budget.maxString) return value;
-    return `${value.slice(0, Math.max(0, budget.maxString - 32))}…[truncated ${value.length} chars]`;
-  }
-  if (value === null || typeof value === "number" || typeof value === "boolean") return value;
-  if (depth >= 32) return "[truncated nested value]";
-  if (Array.isArray(value)) {
-    return value
-      .slice(0, budget.maxArray)
-      .map((item) => boundedNotificationValue(item, budget, depth + 1));
-  }
-  return Object.fromEntries(
-    Object.entries(value)
-      .slice(0, budget.maxKeys)
-      .map(([key, item]) => [key, boundedNotificationValue(item, budget, depth + 1)]),
-  );
 }
 
 export function workspaceStatusResult(
@@ -1223,7 +1158,7 @@ function normalizeIdempotencyKey(value: string): string {
 }
 
 function projectWorkspaceRuntimeNotification(
-  event: import("../runtime/workspace-runtime.js").WorkspaceRuntimeEvent,
+  event: import("@pico/pico-host/workspace-task-runtime").WorkspaceRuntimeEvent,
 ): RuntimeNotification | undefined {
   if (event.type === "workspace.ready" || event.type === "task.updated") return undefined;
   if (!event.run) {

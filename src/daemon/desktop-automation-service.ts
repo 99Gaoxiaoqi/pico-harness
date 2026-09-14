@@ -6,21 +6,22 @@ import {
   type CredentialRef,
   type CredentialVault,
 } from "../provider/credential-vault.js";
-import { resolveModelRouteCapabilities } from "../provider/model-capabilities.js";
+import { resolveModelRouteCapabilities } from "@pico/runtime";
 import type { ModelRoute } from "../provider/model-router.js";
-import { fingerprintBackgroundMcpConfig } from "../safety/background-mcp-policy.js";
-import { automationDeniedTools } from "../safety/automation-tool-policy.js";
+import { fingerprintBackgroundMcpConfig } from "@pico/pico-host/background-mcp-policy";
+import { automationDeniedTools } from "@pico/runtime/automation-tool-policy";
 import {
   BACKGROUND_HARDLINE_VERSION,
   BACKGROUND_HOOK_VERSION,
 } from "../safety/background-autonomous-policy.js";
-import { CronService } from "../tasks/cron-service.js";
-import { RuntimeConflictError } from "../storage/sqlite/sqlite-runtime-control-store.js";
+import { resolvePicoPaths } from "@pico/pico-host/pico-paths";
+import { CronService } from "@pico/runtime/cron-service";
+import { RuntimeConflictError } from "@pico/storage/sqlite/sqlite-runtime-control-store";
 import type {
   CronJobRecord,
   CronRunRecord,
   AutonomousPolicySnapshot,
-} from "../tasks/runtime-types.js";
+} from "@pico/storage/runtime-control-types";
 import {
   RUNTIME_ERROR_CODES,
   RuntimeProtocolError,
@@ -298,8 +299,9 @@ export class DesktopAutomationService {
     operation: (cron: CronService) => Result,
   ): Result {
     const cron = new CronService({
-      workDir: workspacePath,
-      ...(this.options.picoHome ? { picoHome: this.options.picoHome } : {}),
+      storageRoot: resolvePicoPaths(workspacePath, {
+        ...(this.options.picoHome ? { picoHome: this.options.picoHome } : {}),
+      }).workspace.root,
       ...(this.options.now ? { now: this.options.now } : {}),
     });
     try {

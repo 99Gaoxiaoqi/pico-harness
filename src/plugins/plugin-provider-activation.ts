@@ -1,4 +1,4 @@
-import type { LLMProvider } from "../provider/interface.js";
+import type { LLMProvider } from "@pico/core";
 import type {
   PluginCapabilityActivationScope,
   PluginCapabilityRegistry,

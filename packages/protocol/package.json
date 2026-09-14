@@ -9,6 +9,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./subagent-settings": {
+      "types": "./dist/subagent-settings.d.ts",
+      "import": "./dist/subagent-settings.js"
     }
   },
   "files": [

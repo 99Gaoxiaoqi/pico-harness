@@ -101,6 +101,52 @@ test("architecture boundary gate rejects Engine type-only imports from Runtime",
   );
 });
 
+test("architecture boundary gate rejects Core imports from implementation areas", async (context) => {
+  const fixtureRoot = await createArchitectureFixture(context, "pico-core-boundary-", {
+    "packages/core/src/contract.ts":
+      'import { runtimeValue } from "../../../src/runtime/private.js"; export const contract = runtimeValue;\n',
+    "src/runtime/private.ts": "export const runtimeValue = 1;\n",
+  });
+
+  assert.deepEqual(
+    scanArchitectureBoundaries({ repositoryRoot: fixtureRoot }).map(({ rule, source, target }) => ({
+      rule,
+      source,
+      target,
+    })),
+    [
+      {
+        rule: "core-to-implementation",
+        source: "packages/core/src/contract.ts",
+        target: "src/runtime/private.ts",
+      },
+    ],
+  );
+});
+
+test("architecture boundary gate rejects Storage imports from Runtime", async (context) => {
+  const fixtureRoot = await createArchitectureFixture(context, "pico-storage-boundary-", {
+    "packages/storage/src/store.ts":
+      'import { runtimeValue } from "../../../src/runtime/private.js"; export const stored = runtimeValue;\n',
+    "src/runtime/private.ts": "export const runtimeValue = 1;\n",
+  });
+
+  assert.deepEqual(
+    scanArchitectureBoundaries({ repositoryRoot: fixtureRoot }).map(({ rule, source, target }) => ({
+      rule,
+      source,
+      target,
+    })),
+    [
+      {
+        rule: "storage-to-implementation",
+        source: "packages/storage/src/store.ts",
+        target: "src/runtime/private.ts",
+      },
+    ],
+  );
+});
+
 test("architecture boundary gate keeps Graph and Runtime independent from daemon composition", async (context) => {
   const fixtureRoot = await createArchitectureFixture(context, "pico-graph-daemon-boundary-", {
     "src/agent-graph/service.ts":
@@ -135,7 +181,7 @@ test("architecture boundary gate keeps Graph and Runtime independent from daemon
 });
 
 test("architecture gate flags locally-defined cross-cutting primitives", async (context) => {
-  // 横切超时原语必须统一用 src/util/race-with-deadline.ts，不得本地重定义。
+  // 横切超时原语必须统一用 Runtime deadline 模块，不得本地重定义。
   const fixtureRoot = await mkdtemp(join(tmpdir(), "pico-cross-cutting-"));
   context.after(() => rm(fixtureRoot, { recursive: true, force: true }));
   await Promise.all(
@@ -257,17 +303,17 @@ test("architecture gate does not mistake string literals for imports", async (co
 
 test("architecture gate flags handwritten new Promise + setTimeout primitives", async (context) => {
   // 语义化横切原语规则：同文件 new Promise + setTimeout 共现 = 手写超时原语。
-  // canonical 文件（src/util/race-with-deadline.ts）白名单豁免。
+  // canonical 文件（packages/runtime/src/deadline.ts）白名单豁免。
   const fixtureRoot = await mkdtemp(join(tmpdir(), "pico-timeout-primitive-"));
   context.after(() => rm(fixtureRoot, { recursive: true, force: true }));
   await Promise.all(
-    ["src/engine", "src/util", "apps", "packages"].map((path) =>
+    ["src/engine", "src/util", "apps", "packages/runtime/src"].map((path) =>
       mkdir(join(fixtureRoot, path), { recursive: true }),
     ),
   );
   const primitive = "const p = new Promise((r) => setTimeout(r, 100));\n";
   await writeFile(join(fixtureRoot, "src/engine/custom.ts"), primitive, "utf8");
-  await writeFile(join(fixtureRoot, "src/util/race-with-deadline.ts"), primitive, "utf8");
+  await writeFile(join(fixtureRoot, "packages/runtime/src/deadline.ts"), primitive, "utf8");
 
   const violations = scanHandwrittenTimeoutPrimitives({ repositoryRoot: fixtureRoot });
   assert.deepEqual(violations, [
@@ -280,12 +326,12 @@ test("architecture gate flags handwritten new Promise + setTimeout primitives", 
 });
 
 test("architecture gate flags canonical primitive redefinition outside the canonical file", async (context) => {
-  // canonical 原语名 raceWithDeadline 只能在 src/util/race-with-deadline.ts 定义；
+  // canonical 原语名 raceWithDeadline 只能在 Runtime deadline 模块定义；
   // import 是引用不是定义，不算违规。
   const fixtureRoot = await mkdtemp(join(tmpdir(), "pico-canonical-redefinition-"));
   context.after(() => rm(fixtureRoot, { recursive: true, force: true }));
   await Promise.all(
-    ["src/engine", "src/util", "apps", "packages"].map((path) =>
+    ["src/engine", "src/util", "apps", "packages/runtime/src"].map((path) =>
       mkdir(join(fixtureRoot, path), { recursive: true }),
     ),
   );
@@ -300,7 +346,7 @@ test("architecture gate flags canonical primitive redefinition outside the canon
     "utf8",
   );
   await writeFile(
-    join(fixtureRoot, "src/util/race-with-deadline.ts"),
+    join(fixtureRoot, "packages/runtime/src/deadline.ts"),
     "export async function raceWithDeadline(p: Promise<unknown>, ms: number): Promise<boolean> { return true; }\n",
     "utf8",
   );

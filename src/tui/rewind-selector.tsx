@@ -1,7 +1,7 @@
 import React from "react";
 import { Box, Text } from "ink";
-import type { FileHistorySnapshotSummary, RewindMode } from "../cli/file-history.js";
-import type { FileHistoryDiffStat } from "../safety/file-history.js";
+import type { FileHistorySnapshotSummary, RewindMode } from "@pico/pico-host/file-history";
+import type { FileHistoryDiffStat } from "@pico/pico-host/file-history-runtime";
 
 export interface RewindSelectorProps {
   sessionId: string;

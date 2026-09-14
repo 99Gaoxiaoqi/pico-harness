@@ -11,7 +11,7 @@ import {
 import {
   RuntimeConflictError,
   SqliteRuntimeControlStore,
-} from "../../../src/storage/sqlite/sqlite-runtime-control-store.js";
+} from "@pico/storage/sqlite/sqlite-runtime-control-store";
 
 /**
  * 票 06 验收:SQLite 版控制面(control scope)。
