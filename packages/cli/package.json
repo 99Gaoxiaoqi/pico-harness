@@ -7,6 +7,14 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
+    "./command-helpers": {
+      "types": "./dist/command-helpers.d.ts",
+      "import": "./dist/command-helpers.js"
+    },
+    "./settings-commands": {
+      "types": "./dist/settings-commands.d.ts",
+      "import": "./dist/settings-commands.js"
+    },
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
