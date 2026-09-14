@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { setImmediate as waitForImmediate } from "node:timers/promises";
-import { PluginRuntimeSnapshotRegistry } from "../../../src/plugins/plugin-runtime-snapshot-registry.js";
-import type { PluginRuntimeSnapshot } from "../../../src/plugins/plugin-runtime-snapshot.js";
+import { PluginRuntimeSnapshotRegistry } from "@pico/pico-host/plugins/plugin-runtime-snapshot-registry";
+import type { PluginRuntimeSnapshot } from "@pico/pico-host/plugins/plugin-runtime-snapshot";
 
 test("invalidate 轮换 workspace generation 并将释放推迟到 owner close", async () => {
   let loadCount = 0;

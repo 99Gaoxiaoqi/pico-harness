@@ -11,13 +11,13 @@ import {
   pluginScopePriority,
   resolvePluginScopeRoots,
   selectPluginScopeWinners,
-} from "../../../src/plugins/plugin-scope.js";
-import { PluginManager } from "../../../src/plugins/plugin-manager.js";
+} from "@pico/pico-host/plugins/plugin-scope";
+import { PluginManager } from "@pico/pico-host/plugins/plugin-manager";
 import {
   formatPluginDiagnostics,
   fromMaterializationDiagnostics,
   fromRuntimeDiagnostics,
-} from "../../../src/plugins/plugin-diagnostics.js";
+} from "@pico/pico-host/plugins/plugin-diagnostics";
 
 test("plugin scopes resolve to isolated roots and deterministic priority winners", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-plugin-scope-"));

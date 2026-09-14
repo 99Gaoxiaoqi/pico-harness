@@ -4,9 +4,9 @@ import {
   defineTrustedPluginCapabilityFactory,
   PluginCapabilityActivationScope,
   PluginCapabilityRegistry,
-} from "../../../src/plugins/plugin-capability.js";
-import type { PluginRuntimeSnapshot } from "../../../src/plugins/plugin-runtime-snapshot.js";
-import { registerPluginCapabilityTools } from "../../../src/plugins/plugin-tool-activation.js";
+} from "@pico/pico-host/plugins/plugin-capability";
+import type { PluginRuntimeSnapshot } from "@pico/pico-host/plugins/plugin-runtime-snapshot";
+import { registerPluginCapabilityTools } from "@pico/pico-host/plugins/plugin-tool-activation";
 import { ToolRegistry } from "../../../src/tools/registry-impl.js";
 
 // 注：原 5 个 in-process TUI 生命周期用例（runTuiAgentPrompt 依赖转发 /
