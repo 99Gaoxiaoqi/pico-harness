@@ -7,6 +7,18 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
+    "./trace": {
+      "types": "./dist/trace.d.ts",
+      "import": "./dist/trace.js"
+    },
+    "./cost-tracker": {
+      "types": "./dist/cost-tracker.d.ts",
+      "import": "./dist/cost-tracker.js"
+    },
+    "./agent-graph-tools": {
+      "types": "./dist/agent-graph-tools.d.ts",
+      "import": "./dist/agent-graph-tools.js"
+    },
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
