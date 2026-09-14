@@ -4,6 +4,7 @@ export * from "./entry-dispatch.js";
 export * from "./hook-management-commands.js";
 export * from "./keybindings-schema.js";
 export * from "./rewind-presentation.js";
+export * from "./resources-commands.js";
 export * from "./session-arguments.js";
 export * from "./session-args.js";
 export * from "./session-resolver.js";

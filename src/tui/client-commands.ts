@@ -10,7 +10,7 @@ export type { ClientCommandRegistryDeps } from "./commands/types.js";
 import { createModelCommands } from "./commands/model-commands.js";
 import { createSettingsCommands } from "./commands/settings-commands.js";
 import { createSessionCommands } from "./commands/session-commands.js";
-import { createResourcesCommands } from "./commands/resources-commands.js";
+import { createResourcesCommands } from "@pico/cli/resources-commands";
 import { createWorkspaceCommands } from "./commands/workspace-commands.js";
 import { createAutomationCommands } from "./commands/automation-commands.js";
 
