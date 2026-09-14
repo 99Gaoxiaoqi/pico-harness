@@ -19,7 +19,7 @@ import {
   type CommitAgentGraphUpdateInput,
   type ReadAgentGraphProjectionInput,
   type RegisterAgentGraphYieldInput,
-} from "../../../src/tools/agent-graph-tools.js";
+} from "@pico/pico-host/agent-graph-tools";
 
 const ROOT: AgentGraphRootToolContext = {
   kind: "graph_root_supervisor",
