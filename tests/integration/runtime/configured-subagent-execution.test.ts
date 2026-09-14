@@ -133,6 +133,13 @@ test("one live preset catalog drives paginated discovery, foreground admission a
     spawn.execute('{"subagent_id":"reader-0","task":"Read","write_back":"patch"}'),
     /write_back/,
   );
+  for (const subagent_id of [null, 1, "", "../reader", "a".repeat(129)]) {
+    await assert.rejects(
+      spawn.execute(JSON.stringify({ subagent_id, task: "Read" })),
+      /Invalid subagent_id/,
+    );
+  }
+  assert.equal(runs, 1, "invalid IDs must not reach child execution");
   f.set([]);
   await assert.rejects(
     spawn.execute('{"subagent_id":"reader-0","profile":"local_read","task":"Read"}'),

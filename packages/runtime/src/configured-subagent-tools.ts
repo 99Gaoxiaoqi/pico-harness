@@ -1,11 +1,8 @@
 import {
-  isSafeSubagentPresetId,
-  type RuntimeSubagentPreset,
-} from "@pico/protocol";
-import {
   SUBAGENT_CAPABILITIES,
   requireSubagentCapability,
   type ConfiguredSubagentCatalogPort,
+  type RuntimeSubagentPresetContract,
   type SubagentCapabilityDefinition,
 } from "@pico/core/subagent-capabilities";
 import type { ToolDefinition } from "@pico/core";
@@ -15,7 +12,7 @@ const NO_FILE_SIDE_EFFECTS = { kind: "none" } as const;
 export interface ConfiguredSubagentExecutionInput {
   readonly task: string;
   readonly definition: SubagentCapabilityDefinition;
-  readonly preset?: RuntimeSubagentPreset & { modelRouteId: string };
+  readonly preset?: RuntimeSubagentPresetContract & { modelRouteId: string };
   readonly signal?: AbortSignal;
   /** Host-validated continuation; never accepted directly from model arguments. */
   readonly continuation?: {
@@ -205,7 +202,10 @@ export class ConfiguredAgentSpawnTool {
     if (input["child_session_id"] !== undefined) return this.continueChild(input, context);
 
     const id = input["subagent_id"];
-    if (id !== undefined && !isSafeSubagentPresetId(id)) throw new Error("Invalid subagent_id");
+    if (
+      id !== undefined &&
+      (typeof id !== "string" || id.length === 0 || id.length > 128 || !/^[A-Za-z0-9._:-]+$/.test(id))
+    ) throw new Error("Invalid subagent_id");
     const preset = id === undefined ? undefined : await this.options.catalog.resolve(id);
     const definition = requireSubagentCapability(preset?.profile ?? String(input["profile"] ?? ""));
     const reason = this.options.capabilityUnavailableReason?.(definition);
