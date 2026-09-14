@@ -72,12 +72,18 @@ export async function configuredSubagentList(
   if (view !== "selection" && view !== "catalog") {
     throw new Error("agent_list: view must be selection or catalog");
   }
-  if (typeof cursor !== "string" || !/^\d+$/.test(cursor) || !Number.isSafeInteger(Number(cursor))) {
+  if (
+    typeof cursor !== "string" ||
+    !/^\d+$/.test(cursor) ||
+    !Number.isSafeInteger(Number(cursor))
+  ) {
     throw new Error("agent_list: invalid cursor");
   }
   const presets = (await options.catalog.list())
     .map((preset) => {
-      const reason = options.capabilityUnavailableReason?.(requireSubagentCapability(preset.profile));
+      const reason = options.capabilityUnavailableReason?.(
+        requireSubagentCapability(preset.profile),
+      );
       const availability =
         preset.availability.status === "unavailable"
           ? preset.availability
@@ -116,7 +122,9 @@ export async function configuredSubagentList(
     page: {
       returned: page.length,
       total: presets.length,
-      ...(offset + page.length < presets.length ? { next_cursor: String(offset + page.length) } : {}),
+      ...(offset + page.length < presets.length
+        ? { next_cursor: String(offset + page.length) }
+        : {}),
     },
   });
   while (page.length > 1 && JSON.stringify(buildPage()).length > 7000) page.pop();
@@ -195,7 +203,11 @@ export class ConfiguredAgentSpawnTool {
     if (!input || typeof input !== "object" || Array.isArray(input)) {
       throw new Error("agent_spawn requires an object");
     }
-    if (typeof input["task"] !== "string" || !input["task"].trim() || input["task"].length > 60000) {
+    if (
+      typeof input["task"] !== "string" ||
+      !input["task"].trim() ||
+      input["task"].length > 60000
+    ) {
       throw new Error("agent_spawn requires a bounded task (1–60000 characters)");
     }
     context?.signal?.throwIfAborted();
@@ -204,8 +216,12 @@ export class ConfiguredAgentSpawnTool {
     const id = input["subagent_id"];
     if (
       id !== undefined &&
-      (typeof id !== "string" || id.length === 0 || id.length > 128 || !/^[A-Za-z0-9._:-]+$/.test(id))
-    ) throw new Error("Invalid subagent_id");
+      (typeof id !== "string" ||
+        id.length === 0 ||
+        id.length > 128 ||
+        !/^[A-Za-z0-9._:-]+$/.test(id))
+    )
+      throw new Error("Invalid subagent_id");
     const preset = id === undefined ? undefined : await this.options.catalog.resolve(id);
     const definition = requireSubagentCapability(preset?.profile ?? String(input["profile"] ?? ""));
     const reason = this.options.capabilityUnavailableReason?.(definition);
@@ -222,7 +238,8 @@ export class ConfiguredAgentSpawnTool {
     if (isolation !== undefined && isolation !== definition.workspace) {
       throw new Error(`Profile ${definition.profile} requires isolation=${definition.workspace}`);
     }
-    if (!this.options.execute) throw new Error("Persistent child executor unavailable in this host");
+    if (!this.options.execute)
+      throw new Error("Persistent child executor unavailable in this host");
     const result = await this.options.execute({
       task: input["task"],
       definition,
@@ -257,7 +274,8 @@ export class ConfiguredAgentSpawnTool {
     ) {
       throw new Error("Continuing a child cannot change its workspace");
     }
-    if (!this.options.execute?.resume) throw new Error("Child continuation unavailable in this host");
+    if (!this.options.execute?.resume)
+      throw new Error("Child continuation unavailable in this host");
     return JSON.stringify({
       kind: "subagent",
       ...(await this.options.execute.resume({
