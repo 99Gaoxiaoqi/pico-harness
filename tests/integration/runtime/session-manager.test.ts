@@ -3,10 +3,14 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { SessionManager } from "../../../src/engine/session.js";
+import { SessionManager, Session, globalSessionManager } from "@pico/pico-host/session";
+import * as legacySession from "../../../src/engine/session.js";
 import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
 
 test("SessionManager reuses an entry and drains it after eviction", async () => {
+  assert.strictEqual(legacySession.Session, Session);
+  assert.strictEqual(legacySession.SessionManager, SessionManager);
+  assert.strictEqual(legacySession.globalSessionManager, globalSessionManager);
   const root = await mkdtemp(join(tmpdir(), "pico-session-manager-"));
   const workDir = join(root, "work");
   const picoHome = join(root, "home");
