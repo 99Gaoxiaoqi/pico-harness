@@ -1,5 +1,20 @@
 # Package 边界对齐（进行中）
 
+## 全部剩余迁移执行清单（2026-09-15）
+
+用户要求完成剩余迁移；主分支基线 `21affa6f`，分批在独立 worktree 实现并在独立集成分支验证。
+完成标准是剩余业务实现归入正确包，旧路径只保留兼容或不可避免的产品启动装配；不以目录删除、
+文件数或编译通过代替验收，不新增无真实共享需求的 UI/Eval 包。
+
+- [ ] CLI 四组剩余命令、公共展示/输入逻辑及实际入口依赖闭合。
+- [ ] Plugin 安装、信任、能力与运行快照迁入 Host。
+- [ ] Provider/凭据/共享配置的实现与纯策略按 Host/Runtime 边界归位。
+- [ ] Code Mode、Graph supervisor 工具与剩余工具适配归位。
+- [ ] Engine/Session/Fork/Subagent 与剩余 Runtime 业务实现通过明确端口归位。
+- [ ] 后台策略、沙箱编译、MCP 装配、Memory 工具与观测适配归位。
+- [ ] Desktop/Workspace/Production Host 服务与交互服务收敛，保留最小产品入口。
+- [ ] 核验生产引用、兼容层、包依赖、冷构建、相关集成与最终工作区状态后更新阶段结论。
+
 ## 接续检查点（2026-09-14，新会话从这里开始）
 
 目标仍是完成 `@pico/core → @pico/storage → @pico/runtime → @pico/pico-host → entrypoints`

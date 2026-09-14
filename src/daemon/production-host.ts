@@ -76,7 +76,7 @@ import {
   BACKGROUND_HARDLINE_VERSION,
   BACKGROUND_HOOK_VERSION,
   prepareBackgroundAutonomousPolicy,
-} from "../safety/background-autonomous-policy.js";
+} from "@pico/pico-host/background-autonomous-policy";
 import { automationDeniedTools } from "@pico/runtime/automation-tool-policy";
 import {
   assessSandboxBoundaryExpansion,
@@ -257,6 +257,7 @@ export function createProductionRuntimeServices(
   ): Promise<{ allowed: boolean; reason?: string }> => {
     try {
       await prepareBackgroundAutonomousPolicy({
+        diagnostics: logger,
         workDir: job.workspacePath,
         policy: job.policySnapshot,
         trustStore,

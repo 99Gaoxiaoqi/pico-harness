@@ -132,7 +132,7 @@ import {
 } from "@pico/pico-host/mcp-connection-manager";
 import { isMcpToolName } from "@pico/runtime-host/mcp-protocol";
 import type { ToolCall } from "@pico/core";
-import { createBackgroundMcpClient } from "../safety/background-mcp-client.js";
+import { createBackgroundMcpClient } from "@pico/pico-host/background-mcp-client";
 import {
   configuredMcpServerNames,
   filterPluginMcpSources,
@@ -152,7 +152,7 @@ import {
 import { createIsolatedPicoConfig, loadPicoProjectConfig } from "../input/pico-config.js";
 import { hasExplicitNetworkIntent } from "@pico/pico-host/workspace-sandbox";
 import { createSandboxPolicy, normalizeRoots } from "@pico/pico-host/process-sandbox";
-import { compileRuntimeProcessSandbox } from "../safety/runtime-process-sandbox.js";
+import { compileRuntimeProcessSandbox } from "@pico/pico-host/runtime-process-sandbox";
 import {
   applyExecutionBoundaryExpansion,
   canReadPath,
@@ -169,7 +169,7 @@ import {
   prepareBackgroundAutonomousPolicy,
   type BackgroundWorkspaceTrustVerifier,
   type PreparedBackgroundAutonomousPolicy,
-} from "../safety/background-autonomous-policy.js";
+} from "@pico/pico-host/background-autonomous-policy";
 import {
   loadPluginRuntimeSnapshot,
   type PluginRuntimeSnapshot,
@@ -2453,6 +2453,7 @@ export async function executeAgentRuntime(
                         backgroundPolicy.snapshot.toolNetworkPolicy,
                         backgroundPolicy.allowedToolNetworkHosts,
                         join(processSandboxScratchRoot, "background-mcp", config.name),
+                        logger,
                       ),
                   }
                 : {}),
@@ -3055,6 +3056,7 @@ async function prepareBackgroundExecution(
     );
   }
   return prepareBackgroundAutonomousPolicy({
+    diagnostics: logger,
     workDir,
     policy: execution.policy,
     trustStore:

@@ -27,7 +27,7 @@ import { resolveModelRouteCapabilities } from "@pico/runtime";
 import {
   BACKGROUND_HARDLINE_VERSION,
   BACKGROUND_HOOK_VERSION,
-} from "../safety/background-autonomous-policy.js";
+} from "@pico/pico-host/background-autonomous-policy";
 
 /** Dependencies retained by the Desktop composition root. */
 export interface DesktopAutomationRequestContext {

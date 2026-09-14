@@ -7,6 +7,18 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
+    "./background-autonomous-policy": {
+      "types": "./dist/background-autonomous-policy.d.ts",
+      "import": "./dist/background-autonomous-policy.js"
+    },
+    "./runtime-process-sandbox": {
+      "types": "./dist/runtime-process-sandbox.d.ts",
+      "import": "./dist/runtime-process-sandbox.js"
+    },
+    "./background-mcp-client": {
+      "types": "./dist/background-mcp-client.d.ts",
+      "import": "./dist/background-mcp-client.js"
+    },
     "./desktop-resource-catalog": {
       "types": "./dist/desktop-resource-catalog.d.ts",
       "import": "./dist/desktop-resource-catalog.js"
