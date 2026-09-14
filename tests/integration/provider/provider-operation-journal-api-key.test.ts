@@ -9,17 +9,17 @@ import {
   parseUserConfig,
   UserConfigStore,
   type PicoUserConfig,
-} from "../../../src/input/user-config-store.js";
+} from "@pico/pico-host/input/user-config-store";
 import {
   credentialRefForProvider,
   parseProviderCredentialRef,
-} from "../../../src/provider/credential-vault.js";
+} from "@pico/pico-host/provider/credential-vault";
 import {
   ProviderOperationLockTimeoutError,
   ProviderOperationJournal,
   type ProviderOperationPrepareInput,
   type ProviderOperationRecord,
-} from "../../../src/provider/provider-operation-journal.js";
+} from "@pico/pico-host/provider/provider-operation-journal";
 
 test("provider journal redacts unrelated config keys and recovery preserves their latest value", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-provider-journal-api-key-"));
