@@ -4,7 +4,6 @@ import { existsSync } from "node:fs";
 import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { agentOutputRecordIdFor } from "@pico/core/agent-graph-identities";
 import { SqliteAgentGraphControlStoreAdapter } from "@pico/runtime";
@@ -1125,9 +1124,7 @@ function spawnRaceProcess(options: {
   readyPath: string;
   startPath: string;
 }): ChildProcess {
-  const storeUrl = pathToFileURL(
-    join(process.cwd(), "src", "storage", "sqlite", "sqlite-agent-graph-control-store.ts"),
-  ).href;
+  const storeUrl = import.meta.resolve("@pico/storage/sqlite/agent-graph-control-store");
   const script = `
     import { existsSync, writeFileSync } from "node:fs";
     import { SqliteAgentGraphControlStore } from ${JSON.stringify(storeUrl)};
