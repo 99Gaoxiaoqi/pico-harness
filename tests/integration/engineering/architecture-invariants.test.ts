@@ -50,7 +50,7 @@ test("投影入口 RuntimeProjectionService 不直接持久化（无第二事实
 
 test("压缩不改账本、只追加 checkpoint（读模型变化）", () => {
   // 19 文档 3.3：压缩永不改账本、永不删事件，只追加 context.checkpoint.recorded。
-  const compactor = readSource("src/context/compactor.ts");
+  const compactor = readSource("packages/runtime/src/compactor.ts");
   // 压缩器不得调用账本写/删原语（它只产出供投影使用的 summary，写入由 engine 负责）。
   assert.doesNotMatch(
     compactor,
@@ -155,7 +155,7 @@ test("D14 正向不变量：src/tui 零引擎装配，连接���一经共�
     );
   }
   // 正向：客户端经共享连接入口（LocalRuntimeClient）接入 kernel。
-  const clientRepl = readSource("src/tui/client-repl.tsx");
+  const clientRepl = readSource("packages/cli/src/tui/client-repl.tsx");
   assert.match(
     clientRepl,
     /\bLocalRuntimeClient\b/,

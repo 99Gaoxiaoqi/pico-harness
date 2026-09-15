@@ -490,6 +490,18 @@
     "./atomic-memory/session-lane": {
       "types": "./dist/atomic-memory/session-lane.d.ts",
       "import": "./dist/atomic-memory/session-lane.js"
+    },
+    "./agent-engine": {
+      "types": "./dist/agent-engine.d.ts",
+      "import": "./dist/agent-engine.js"
+    },
+    "./agent-engine-ports": {
+      "types": "./dist/agent-engine-ports.d.ts",
+      "import": "./dist/agent-engine-ports.js"
+    },
+    "./subagent-runner": {
+      "types": "./dist/subagent-runner.d.ts",
+      "import": "./dist/subagent-runner.js"
     }
   },
   "files": [

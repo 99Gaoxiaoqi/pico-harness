@@ -18,9 +18,18 @@ test("Root CLI cold workflows build and package their runtime-host dependency", 
   assert.equal(manifest.dependencies?.["@pico/runtime-host"], "*");
   for (const lifecycle of ["predev", "prebuild"] as const) {
     assert.ok(
-      manifest.scripts?.[lifecycle]?.includes(RUNTIME_HOST_BUILD),
+      manifest.scripts?.[lifecycle]?.includes("npm run build:packages") &&
+        manifest.scripts?.["build:packages"]?.includes(RUNTIME_HOST_BUILD),
       `${lifecycle} must rebuild runtime-host before the root CLI consumes its dist export`,
     );
+  }
+  const orderedPackages = ["core", "storage", "runtime", "protocol", "transcript-replica", "runtime-host", "pico-host", "cli"];
+  const buildSequence = manifest.scripts?.["build:packages"] ?? "";
+  let previous = -1;
+  for (const name of orderedPackages) {
+    const position = buildSequence.split(" && ").indexOf("npm run build:" + name);
+    assert.ok(position > previous, name + " must build in dependency order");
+    previous = position;
   }
   assert.ok(
     manifest.scripts?.["prepack"]?.includes("npm run build"),
