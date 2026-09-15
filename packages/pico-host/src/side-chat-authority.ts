@@ -1,6 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import type { RuntimeEvent } from "@pico/core";
 import { withWorkspaceSqliteLease } from "@pico/storage";
+import { assertDurableTranscriptEvent } from "./transcript-event-store.js";
 
 const SIDE_CHAT_LEASES_KEY = "desktop.side-chat.leases.v1";
 const DEFAULT_LIVE_LEASE_TTL_MS = 2 * 60 * 1000;
@@ -32,9 +33,28 @@ export class SideChatNoSettledTurnError extends Error {
 export function latestCompletedTurnBoundary(
   events: readonly RuntimeEvent[],
 ): RuntimeEvent | undefined {
-  return [...events]
-    .reverse()
-    .find((event) => event.kind === "run.terminal" && event.data.status === "completed");
+  const index = events.findLastIndex(
+    (event) => event.kind === "run.terminal" && event.data.status === "completed",
+  );
+  if (index < 0) return undefined;
+  let boundary = events[index];
+  // Desktop interaction projections can be appended after the canonical Run
+  // terminal. Include that settled tail, without importing the next turn.
+  for (const event of events.slice(index + 1)) {
+    if (event.kind === "run.started" || event.kind === "message.committed") break;
+    if (event.kind !== "transcript.event.recorded") continue;
+    const fact = event.data.event;
+    assertDurableTranscriptEvent(fact);
+    if (fact.type !== "entry.appended") continue;
+    const entry = fact.entry;
+    if (
+      ((entry.kind === "approval" || entry.kind === "prompt") && entry.state !== "waiting") ||
+      (entry.kind === "run-boundary" && entry.status === "succeeded")
+    ) {
+      boundary = event;
+    }
+  }
+  return boundary;
 }
 
 /** Coordinates one recoverable side-conversation fork lease per panel/source session. */

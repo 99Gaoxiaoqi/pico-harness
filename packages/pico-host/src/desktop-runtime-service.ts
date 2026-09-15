@@ -1280,6 +1280,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       params.workspacePath,
       params.sourceSessionId,
     );
+    // A completed Run can precede the Desktop interaction facts queued by its
+    // final callbacks. Freeze the fork only after those facts reach the ledger.
+    await this.transcriptPersistenceTail;
     const store = new SqliteRuntimeEventStore({
       warningLogger: logger,
       storageRoot: resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.root,
@@ -2481,8 +2484,13 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       }
       return;
     }
-    const persisted = await this.withSession(event.scope.workspacePath, sessionId, (session) =>
-      ingestDesktopRuntimeNotification(session, event, projectTranscriptEvents),
+    // These facts only touch the durable transcript, whose append queue owns
+    // sequence allocation, deduplication and fencing. Waiting for engine.run's
+    // execution lock would delay external interaction resolutions until Run end.
+    const persisted = await this.withPinnedSession(
+      event.scope.workspacePath,
+      sessionId,
+      (session) => ingestDesktopRuntimeNotification(session, event, projectTranscriptEvents),
     );
     if (persisted) this.publishTranscriptUpdate(event.scope.workspacePath, sessionId, "reload");
   }
@@ -3256,13 +3264,23 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     sessionId: string,
     operation: (session: Session) => Promise<T>,
   ): Promise<T> {
+    return this.withPinnedSession(workspacePath, sessionId, (session) =>
+      session.withSerializedExecution(() => operation(session)),
+    );
+  }
+
+  private async withPinnedSession<T>(
+    workspacePath: string,
+    sessionId: string,
+    operation: (session: Session) => Promise<T>,
+  ): Promise<T> {
     const lease = await globalSessionManager.getOrCreatePinned(sessionId, workspacePath, {
       persistence: true,
       picoHome: this.picoHome,
       runtimePort: createEngineRuntimePort(),
     });
     try {
-      return await lease.session.withSerializedExecution(() => operation(lease.session));
+      return await operation(lease.session);
     } finally {
       lease.release();
     }

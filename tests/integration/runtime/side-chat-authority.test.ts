@@ -12,6 +12,16 @@ import {
 import type { RuntimeEvent } from "@pico/storage/runtime-event";
 import type { RuntimeTerminalStatus } from "@pico/core";
 import { closeAllOperationalDatabasesForTest } from "@pico/storage";
+import { Session, SessionManager } from "@pico/pico-host/session";
+import { SessionForkService } from "@pico/pico-host/session-fork-service";
+import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
+import { createSessionForkRuntimePort } from "@pico/pico-host/session-fork-runtime-port-adapter";
+import { RuntimeRun } from "@pico/pico-host/product-runtime-run";
+import { getOrCreateSessionSettings } from "@pico/pico-host/input/session-settings";
+import { ingestDesktopRuntimeNotification } from "@pico/pico-host/desktop-transcript-persistence";
+import { projectTranscriptEvents } from "@pico/pico-host/transcript-event-store";
+import { createRuntimeNotification } from "@pico/protocol";
+import { parseConversation } from "../../../apps/desktop/src/renderer/conversation/runtime-projection.js";
 
 function terminal(eventId: string, status: RuntimeTerminalStatus): RuntimeEvent {
   return {
@@ -33,6 +43,125 @@ test("side chat selects only the latest successfully completed turn", () => {
   const events = [terminal("completed-1", "completed"), terminal("failed", "failed")];
   assert.equal(latestCompletedTurnBoundary(events)?.eventId, "completed-1");
   assert.equal(latestCompletedTurnBoundary([terminal("failed", "failed")]), undefined);
+});
+
+test("侧聊真实 fork 包含完成回合晚到的 answered 记录，并排除下一回合", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-side-chat-settled-tail-"));
+  const workDir = join(root, "workspace");
+  const picoHome = join(root, "home");
+  const manager = new SessionManager();
+  const source = await manager.getOrCreate("source", workDir, {
+    persistence: true,
+    picoHome,
+    runtimePort: createEngineRuntimePort(),
+  });
+  let target: Session | undefined;
+  const service = new SessionForkService({
+    workDir,
+    picoHome,
+    sessionManager: manager,
+    runtimeStore: source.runtimeEventStore!,
+    runtimePort: createSessionForkRuntimePort(),
+  });
+  try {
+    getOrCreateSessionSettings(
+      {
+        sessionId: source.id,
+        cwd: workDir,
+        picoHome,
+        provider: "openai",
+        model: "test",
+        modelRouteId: "openai/test",
+        collaborationMode: "agent",
+        permissionMode: "ask",
+      },
+      { persistence: source },
+    );
+    await source.flushPersistence();
+    const run = await RuntimeRun.start({
+      capability: source.runtimeEventCapability!,
+      agentSwarmAuthorization: "none",
+    });
+    const scope = { workspacePath: workDir, sessionId: source.id, runId: "desktop-run" };
+    await run.run(async () => {
+      await run.commitMessages(source, [{ role: "user", content: "choose a format" }]);
+      await ingestDesktopRuntimeNotification(
+        source,
+        createRuntimeNotification({
+          eventId: "prompt-requested",
+          topic: "prompt.requested",
+          scope,
+          resourceVersion: 1,
+          at: 1,
+          payload: { promptId: "prompt-1", prompt: { question: "YAML?", options: [] } },
+        }),
+        projectTranscriptEvents,
+      );
+    });
+    await ingestDesktopRuntimeNotification(
+      source,
+      createRuntimeNotification({
+        eventId: "prompt-answered",
+        topic: "prompt.resolved",
+        scope,
+        resourceVersion: 2,
+        at: 2,
+        payload: { promptId: "prompt-1" },
+      }),
+      projectTranscriptEvents,
+    );
+    const events = await source.runtimeEventStore!.readSession(source.id);
+    const boundary = latestCompletedTurnBoundary(events);
+    assert.equal(boundary?.eventId, "transcript:prompt-answered");
+    const nextRun = {
+      ...terminal("next", "completed"),
+      kind: "run.started" as const,
+      data: { workDir, agentSwarmAuthorization: "none" as const },
+    };
+    const late = events.at(-1)!;
+    assert.equal(
+      latestCompletedTurnBoundary([...events, nextRun, { ...late, eventId: "later" }])?.eventId,
+      boundary?.eventId,
+    );
+    const authority = new SideChatAuthority({
+      storageRoot: join(root, "leases"),
+      fork: async (input) => {
+        await service.fork(input);
+      },
+      markSideConversation: async () => undefined,
+      removeSession: async () => undefined,
+    });
+    await authority.create({
+      panelId: "panel",
+      sourceSessionId: source.id,
+      targetSessionId: "side",
+      sourceEvents: events,
+    });
+    target = new Session("side", workDir, {
+      persistence: true,
+      picoHome,
+      runtimePort: createEngineRuntimePort(),
+    });
+    await target.recover();
+    const page = await target.runtimeEventStore!.readTranscriptProjectionPage({
+      sessionId: target.id,
+      maxBytes: 512 * 1024,
+    });
+    const conversation = parseConversation(
+      { items: page.items.map(({ payload }) => payload) },
+      workDir,
+      target.id,
+    );
+    const prompts = conversation.items.filter((item) => item.kind === "prompt");
+    assert.equal(prompts.length, 1);
+    assert.equal(prompts[0]?.state, "answered");
+  } finally {
+    await target?.close();
+    service.close();
+    await manager.delete(source.id, workDir, { picoHome })?.close();
+    closeAllOperationalDatabasesForTest();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("side chat persists a recoverable lease and removes it only after cleanup succeeds", async (context) => {
