@@ -620,8 +620,15 @@ function applyFrameToDraft(
 function reopenRunIfNewer(draft: OpenDraft, run: RuntimeRun): void {
   const closedVersion = draft.closedRunVersions.get(run.runId);
   // Exact Run retries are admitted explicitly with a higher control version.
+  // Reopening may observe a retry already paused or cancelling; queued alone
+  // does not establish that a new attempt has started.
   // Already retired streams remain fenced even when a new attempt is admitted.
-  if (closedVersion !== undefined && run.status === "running" && run.version > closedVersion) {
+  if (
+    closedVersion !== undefined &&
+    run.status !== "queued" &&
+    !isTerminalRunStatus(run.status) &&
+    run.version > closedVersion
+  ) {
     draft.closedRunVersions.delete(run.runId);
   }
 }
