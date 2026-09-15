@@ -1,4 +1,4 @@
-# Package 边界对齐（进行中）
+# Package 边界对齐（已完成）
 
 ## 全部剩余迁移执行清单（2026-09-15）
 
@@ -6,16 +6,49 @@
 完成标准是剩余业务实现归入正确包，旧路径只保留兼容或不可避免的产品启动装配；不以目录删除、
 文件数或编译通过代替验收，不新增无真实共享需求的 UI/Eval 包。
 
-- [ ] CLI 四组剩余命令、公共展示/输入逻辑及实际入口依赖闭合。
-- [ ] Plugin 安装、信任、能力与运行快照迁入 Host。
-- [ ] Provider/凭据/共享配置的实现与纯策略按 Host/Runtime 边界归位。
-- [ ] Code Mode、Graph supervisor 工具与剩余工具适配归位。
-- [ ] Engine/Session/Fork/Subagent 与剩余 Runtime 业务实现通过明确端口归位。
-- [ ] 后台策略、沙箱编译、MCP 装配、Memory 工具与观测适配归位。
-- [ ] Desktop/Workspace/Production Host 服务与交互服务收敛，保留最小产品入口。
-- [ ] 核验生产引用、兼容层、包依赖、冷构建、相关集成与最终工作区状态后更新阶段结论。
+- [x] CLI 四组剩余命令、公共展示/输入逻辑及实际入口依赖闭合。
+- [x] Plugin 安装、信任、能力与运行快照迁入 Host。
+- [x] Provider/凭据/共享配置的实现与纯策略按 Host/Runtime 边界归位。
+- [x] Code Mode、Graph supervisor 工具与剩余工具适配归位。
+- [x] Engine/Session/Fork/Subagent 与剩余 Runtime 业务实现通过明确端口归位。
+- [x] 后台策略、沙箱编译、MCP 装配、Memory 工具与观测适配归位。
+- [x] Desktop/Workspace/Production Host 服务与交互服务收敛，保留最小产品入口。
+- [x] 核验生产引用、兼容层、包依赖、冷构建、相关集成与最终工作区状态后更新阶段结论。
 
-## 接续检查点（2026-09-14，新会话从这里开始）
+完成结论（2026-09-15）：阶段 1–5 全部完成，剩余业务实现已归包；保留的旧路径是兼容层，
+不是未迁移实现。最终独立依赖环境全量集成：1773 项，1761 通过、12 项平台相关跳过、0 失败。
+
+### 本轮收敛结果
+
+- Engine 主循环、Subagent runner、Provider 纯策略、Trace/CostTracker 内核归 Runtime；
+  Session/Fork 的物理持久化、文件历史、日志、Provider SDK/凭据以及产品装配归 Host。
+- AgentRuntime、SessionRuntime、配置子代理、Desktop/Workspace/Production 服务和无头运行器
+  已归 Host。SessionRuntime 通过泛型命令工厂接入 CLI；Host 默认 SilentReporter，旧 AgentRuntime
+  入口继续默认 TerminalReporter，不让 Host 反向依赖 CLI。
+- 完整 CLI/TUI 与命令分派归 CLI；共享输入准备、会话目录和 Transcript 投影归 Host。
+  Core 统一 slash 输入与快捷键契约。未创建没有第二个真实消费者的 UI/Eval 包。
+- Daemon 客户端直接选择同包进程入口，不再依赖仓库 src 或根 dist。
+  旧 src 仅保留兼容导出、日志/类型/默认参数适配，以及最小进程启动 shim。
+- 架构门禁新增真实 workspace 包名导入检查，包含 type-only、动态 import、
+  未声明依赖和越出包目录的源码引用，不再仅靠相对路径逆依赖扫描判断迁移完成。
+- 本轮不改变 Runtime 事件、SQLite schema、IPC 契约；冻结架构 JSON/HTML/visual-check 不变。
+
+### 发布与验证边界
+
+- 八包 dist 缓存移开后冷构建、根 typecheck、Desktop main/preload/renderer typecheck、
+  架构门禁、改动文件 ESLint 与 diff 检查通过。
+- 最终全量运行覆盖 345 个集成测试文件，1773 项中 1761 通过、12 跳过、0 失败。
+  无用户源码改动被自动暂存或覆盖，冻结架构产物保持不变。
+- npm pack 后在独立目录离线安装，CLI --version/--help、两个无头入口的单行 JSON/退出码、
+  八个 workspace 包入口均通过；验证时依赖独立安装，不借用原工作区 node_modules。
+- Terminal-Bench 归档包含完整本地 workspace 依赖与根 resources，批准锁及 SHA-256 校验保留。
+  实际归档解包运行通过；沙箱资源解析测试使用明确的 fixture 字节验证 Linux/Windows
+  路径、摘要和篡改拒绝，不冒充原生二进制执行。
+- 仓库的 Linux/Windows 沙箱二进制本来就是按平台生成的忽略产物，当前未生成；
+  本轮未执行 Docker/Linux/Windows 原生沙箱验证，也未运行真实模型计费测试。
+  这些平台/模型验收不属于本次无行为变更的包边界迁移。
+
+## 历史检查点（2026-09-14，以下状态已由本轮清单取代）
 
 目标仍是完成 `@pico/core → @pico/storage → @pico/runtime → @pico/pico-host → entrypoints`
 的渐进式边界迁移；当前目标未完成，不要缩小为只修编译。
@@ -108,11 +141,14 @@ packages/cli ───────────────→ packages/pico-host
 MCP tool bridge），
 两者不得合并。
 
-上图描述实际 workspace 依赖：CLI 直接依赖 Pico Host、Core 与 Storage；Pico Host 直接依赖
+CLI 直接依赖 Pico Host、Core、Storage、Runtime、Protocol、Runtime Host 与 Transcript Replica；
+Transcript Replica 依赖 Protocol。Pico Host 直接依赖
 Protocol、Runtime Host、Runtime、Storage 与 Core；Runtime Host 依赖 Runtime/Core，Runtime 依赖
 Storage/Core，Storage 依赖 Core。Protocol 不依赖 Core。
 
 ## 迁移阶段
+
+以下为各阶段迁移过程的历史明细；最终归属与剩余工作以文首执行清单为准。
 
 - [x] 阶段 1：建立 `@pico/core`，迁出 Message、ToolCall、ToolResult、Usage、图片、
       ToolResult Envelope、持久 Session identity/selection、Provider interface/profile/error/identity、reasoning 与
@@ -121,7 +157,7 @@ Storage/Core，Storage 依赖 Core。Protocol 不依赖 Core。
       Engine 消费方已改为直接消费新包。具体协议翻译、模型默认值和网络调用仍留在外层 Provider
       适配器。Reporter 生命周期事件端口也已归属 Core。保留旧路径的兼容 re-export，并在架构门禁中禁止
       Core 依赖实现层。
-- [ ] 阶段 2：已将 Runtime Event 的通用信封、Run 准入/终止、Message、ToolResult、审批、
+- [x] 阶段 2：已将 Runtime Event 的通用信封、Run 准入/终止、Message、ToolResult、审批、
       模型调用、Checkpoint、Session fork 与 Graph output 事实收敛到 Core；Plan 契约/事件校验、
       可持久化 Session state schema/严格解码，以及 Tool Recovery mode/审计上限也已归属 Core。
       完整 RuntimeEvent union 已作为可由 Transcript 事实专用化的泛型契约归属 Core；durable Transcript/
@@ -140,7 +176,7 @@ Storage/Core，Storage 依赖 Core。Protocol 不依赖 Core。
       TaskRun 的事件、Attempt/lease/checkpoint 投影、恢复停放原因与安全边界，以及恢复 launch/run
       的确定性身份和 Receipt 严格校验也已归属 Core；持久化格式与既有 ID 算法保持不变。
       其余纯契约只在至少两个消费者实际直连后再迁出，届时才删除旧路径。
-- [ ] 阶段 3：已建立 `@pico/storage`，迁出无副作用的 Event Log 保留策略、原子 JSON、OwnerLease、
+- [x] 阶段 3：已建立 `@pico/storage`，迁出无副作用的 Event Log 保留策略、原子 JSON、OwnerLease、
       CAS mutation lease、File History Blob Store、遗留 Evidence Blob CAS/Archive、私有文件锁、全部 SQLite schema scope、connection lease、workspace binding/repair、Workbar、retention 与 Agent Graph Store，以及 Runtime Event codec、Store contract、
       Session catalog fold、工作区路径规范化、Todo SQLite Store、Workspace trust 用户级文件库、Storage Operation Journal 与完整 SQLite Runtime Event Store。Store 的歧义写入告警经可选
       diagnostics 端口由旧宿主入口注入；事务 owner、数据库 scope、schema、文件发布协议与旧入口均保持不变。Graph 的稳定 profile contract、
@@ -151,7 +187,7 @@ Storage/Core，Storage 依赖 Core。Protocol 不依赖 Core。
       和 `src/storage/sqlite/sqlite-runtime-control-store.ts` 仅保留兼容导出。TaskRun Store 契约、稳定输入
       哈希与完整 `SqliteTaskRunStore` 也已迁入 Storage，继续维持原有 transactionId 幂等、revision CAS、
       逐事件重放及 workspace root 校验；旧路径仅保留兼容导出。
-- [ ] 阶段 4：已建立 `@pico/runtime`，迁出 Node 版本策略、Runtime cleanup scope 与
+- [x] 阶段 4：已建立 `@pico/runtime`，迁出 Node 版本策略、Runtime cleanup scope 与
       Atomic Memory 生命周期、Session Message Ledger、Iteration Budget、Steer Queue 与运行投影诊断；
       进程内 TaskRegistry 的身份生成、生命周期、快照隔离、重启中断投影与权威视图幂等更新
       也已归属 Runtime；`task_list/task_output/task_stop` 的参数校验、任务域分流和结果投影
@@ -273,7 +309,7 @@ Storage/Core，Storage 依赖 Core。Protocol 不依赖 Core。
       断言。Exact Run 的耐久分类、预分配身份校验、确定性输入 identity 和 root wake 状态机，以及
       Output Resource 的 Evidence/Artifact 校验保留也已归属 Runtime。继续将 Engine、
       Context、Provider、Tools 和运行策略收敛到该包，仅通过 Core/Storage Port 访问下层。
-- [ ] 阶段 5：已建立 `@pico/pico-host` 与 `@pico/cli`，分别迁出 Host 协议工具、Host-owned
+- [x] 阶段 5：已建立 `@pico/pico-host` 与 `@pico/cli`，分别迁出 Host 协议工具、Host-owned
       Pico 路径模型、Skill Catalog（Pico/Claude/Plugin 来源扫描、优先级/修订与 `skill_view`）、
       原生 Agent Profile YAML 加载/限额/白名单与 fail-closed tombstone（Hook 信任作为不透明泛型能力）、
       Claude Agent Markdown/frontmatter 的用户级与项目级扫描、文件限额、冲突优先级和摘要投影，
