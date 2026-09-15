@@ -21,7 +21,10 @@ test("HookRewakeQueue retains a failed batch and seals admission on close", asyn
 
   failDelivery = false;
   const entries = await queue.deliverPending(ids);
-  assert.deepEqual(entries.map(({ message }) => message), ["first", "second"]);
+  assert.deepEqual(
+    entries.map(({ message }) => message),
+    ["first", "second"],
+  );
   assert.deepEqual(delivered, [ids]);
   assert.deepEqual(queue.pendingIds(), []);
 

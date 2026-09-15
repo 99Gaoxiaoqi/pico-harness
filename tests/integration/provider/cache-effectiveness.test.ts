@@ -4,25 +4,26 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { createRuntimeRequest } from "../../../packages/protocol/src/index.js";
-import { FULL_COMPACTION_SUMMARY_MARKER } from "../../../src/context/compaction-markers.js";
+import { FULL_COMPACTION_SUMMARY_MARKER } from "@pico/core";
 import { parseUsage } from "../../../apps/desktop/src/renderer/usage/runtime-projection.js";
-import { DesktopRuntimeService, WorkspaceRuntimeService } from "../../../src/daemon/index.js";
+import { DesktopRuntimeService } from "@pico/pico-host/desktop-runtime-service";
+import { WorkspaceRuntimeService } from "@pico/pico-host/workspace-runtime-service";
 import {
   capturePreparedProviderRequest,
   diagnosePreparedProviderRequest,
-} from "../../../src/observability/provider-request-diagnostics.js";
-import { summarizeCacheEffectiveness } from "../../../src/observability/cache-effectiveness.js";
+} from "@pico/runtime/provider-request-diagnostics";
+import { summarizeCacheEffectiveness } from "@pico/runtime/cache-effectiveness";
 import {
   createModelUsageReport,
   formatModelUsageReport,
-} from "../../../src/provider/model-runtime-report.js";
-import { resolveModelRouteCapabilities } from "../../../src/provider/model-capabilities.js";
-import { SqliteRuntimeControlStore } from "../../../src/storage/sqlite/sqlite-runtime-control-store.js";
-import { createEmptyUsageSnapshot } from "../../../src/engine/session-runtime.js";
-import type { ProviderCallRecord } from "../../../src/tasks/runtime-types.js";
-import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
-import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
-import { WorkspaceRegistrationStore } from "../../../src/daemon/workspace-registration.js";
+} from "@pico/runtime/provider/model-runtime-report";
+import { resolveModelRouteCapabilities } from "@pico/runtime";
+import { SqliteRuntimeControlStore } from "@pico/storage/sqlite/sqlite-runtime-control-store";
+import { createEmptyUsageSnapshot } from "@pico/core/session-runtime-state";
+import type { ProviderCallRecord } from "@pico/storage/runtime-control-types";
+import { resolvePicoPaths } from "@pico/pico-host";
+import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
+import { WorkspaceRegistrationStore } from "@pico/pico-host/workspace-registration";
 
 test("cache effectiveness only uses detailed calls for ratios and classifies cache misses", () => {
   const firstCapture = preparedCapture("first");

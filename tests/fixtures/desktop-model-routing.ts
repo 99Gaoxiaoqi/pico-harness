@@ -1,4 +1,4 @@
-import { UserConfigStore } from "../../src/input/user-config-store.js";
+import { UserConfigStore } from "@pico/pico-host/input/user-config-store";
 
 export const DESKTOP_TEST_MODEL_ENV = "PICO_TEST_TOKEN";
 

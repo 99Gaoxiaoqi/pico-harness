@@ -5,23 +5,26 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { SqliteAgentGraphControlStoreAdapter } from "../../src/agent-graph/sqlite-control-store-adapter.js";
-import { createProductionRuntimeServices } from "../../src/daemon/production-host.js";
+import { SqliteAgentGraphControlStoreAdapter } from "@pico/runtime";
+import { createProductionRuntimeServices } from "@pico/pico-host/production-host";
 import { createRuntimeRequest } from "../../packages/protocol/src/index.js";
-import { globalSessionManager } from "../../src/engine/session.js";
-import { EMPTY_USER_CONFIG_REVISION, UserConfigStore } from "../../src/input/user-config-store.js";
-import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
-import type { CredentialVault } from "../../src/provider/credential-vault.js";
-import { AgentRuntime } from "../../src/runtime/agent-runtime.js";
+import { globalSessionManager } from "@pico/pico-host/session";
+import {
+  EMPTY_USER_CONFIG_REVISION,
+  UserConfigStore,
+} from "@pico/pico-host/input/user-config-store";
+import { resolvePicoPaths } from "@pico/pico-host";
+import type { CredentialVault } from "@pico/pico-host/provider/credential-vault";
+import { AgentRuntime } from "@pico/pico-host/agent-runtime";
 import {
   createAgentGraphWorkspaceHost,
   type AgentGraphWorkspaceHost,
-} from "../../src/runtime/agent-graph-host.js";
-import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-adapter.js";
-import type { WorkspaceTaskRuntime } from "../../src/runtime/workspace-runtime.js";
-import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
-import type { RuntimeEvent } from "../../src/storage/runtime-event.js";
-import { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
+} from "@pico/pico-host/product-agent-graph-host";
+import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
+import type { WorkspaceTaskRuntime } from "@pico/pico-host/workspace-task-runtime";
+import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
+import type { RuntimeEvent } from "@pico/storage/runtime-event";
+import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
 import { configuredUserDefaultRealModel } from "./real-llm-user-model.js";
 
 const realModelTest = process.env.RUN_LLM_E2E === "1" ? test : test.skip;

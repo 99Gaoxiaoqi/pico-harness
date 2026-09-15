@@ -6,7 +6,7 @@ import {
   EVENT_LOG_CLOSURE_WRITE_INTENTS,
   planEventLogRetention,
   type EventLogRetentionCandidate,
-} from "../../../src/storage/event-log-retention-policy.js";
+} from "@pico/storage";
 
 const MIB = 1024 * 1024;
 

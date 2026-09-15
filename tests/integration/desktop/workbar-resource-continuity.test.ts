@@ -11,7 +11,7 @@ import {
   SessionSubscriptionRegistry,
   type SessionContinuityDataSource,
   type SessionSubscriptionSnapshot,
-} from "../../../src/daemon/session-subscription-owner.js";
+} from "@pico/pico-host/session-subscription-owner";
 
 const workspacePath = "/workspace";
 const sessionId = "session";

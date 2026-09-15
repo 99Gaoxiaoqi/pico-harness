@@ -4,18 +4,18 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { Session } from "../../../src/engine/session.js";
-import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
-import { RuntimeRun } from "../../../src/runtime/runtime-run.js";
+import { Session } from "@pico/pico-host/session";
+import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
+import { RuntimeRun } from "@pico/pico-host/product-runtime-run";
 import {
   RuntimeEventStoreIntegrityError,
   RuntimeEventStoreOwnerFenceError,
   RuntimeEventStoreRunSealedError,
   type StartRuntimeContinuationInput,
-} from "../../../src/storage/runtime-event-store-contracts.js";
-import type { RuntimeEvent } from "../../../src/storage/runtime-event.js";
-import { closeAllOperationalDatabasesForTest } from "../../../src/storage/sqlite/sqlite-database.js";
-import type { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
+} from "@pico/storage/runtime-event-store-contracts";
+import type { RuntimeEvent } from "@pico/storage/runtime-event";
+import { closeAllOperationalDatabasesForTest } from "@pico/storage";
+import type { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
 
 interface Scene {
   readonly session: Session;

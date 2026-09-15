@@ -1,19 +1,19 @@
-import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
-import { closeAllOperationalDatabasesForTest } from "../../../src/storage/sqlite/sqlite-database.js";
+import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
+import { closeAllOperationalDatabasesForTest } from "@pico/storage";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { Session } from "../../../src/engine/session.js";
-import { createEngineRuntimeCapability } from "../../../src/engine/runtime-port.js";
-import { DefaultHookExecutor } from "../../../src/hooks/executors/index.js";
-import type { HookInput, ResolvedHookHandler } from "../../../src/hooks/types.js";
-import { CostTracker } from "../../../src/observability/tracker.js";
-import type { LLMProvider } from "../../../src/provider/interface.js";
+import { Session } from "@pico/pico-host/session";
+import { createEngineRuntimeCapability } from "@pico/pico-host/engine-runtime-port";
+import { DefaultHookExecutor } from "@pico/pico-host/hooks/executors";
+import type { HookInput, ResolvedHookHandler } from "@pico/pico-host/hooks/types";
+import { CostTracker } from "@pico/pico-host/cost-tracker";
+import type { LLMProvider } from "@pico/core";
 
-import { RuntimeRun } from "../../../src/runtime/runtime-run.js";
-import { projectRuntimeSessionUsage } from "../../../src/engine/session-runtime-projection.js";
+import { RuntimeRun } from "@pico/pico-host/product-runtime-run";
+import { projectRuntimeSessionUsage } from "@pico/runtime/session-runtime-projection";
 
 test("CostTracker preserves provider retry classification", () => {
   const retryable = new Error("provider-specific retry");

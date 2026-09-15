@@ -3,21 +3,21 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
-import { ApprovalManager, type ApprovalNotice } from "../../../src/approval/manager.js";
-import { SilentReporter } from "../../../src/engine/reporter.js";
-import { projectRuntimeSessionState } from "../../../src/engine/session-runtime-projection.js";
-import { globalSessionManager } from "../../../src/engine/session.js";
-import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
-import type { LLMProvider } from "../../../src/provider/interface.js";
-import { executeAgentRuntime } from "../../../src/runtime/agent-runtime.js";
+import { ApprovalManager, type ApprovalNotice } from "@pico/pico-host/global-approval-manager";
+import { SilentReporter } from "@pico/runtime/silent-reporter";
+import { projectRuntimeSessionState } from "@pico/runtime/session-runtime-projection";
+import { globalSessionManager } from "@pico/pico-host/session";
+import { resolvePicoPaths } from "@pico/pico-host";
+import type { LLMProvider } from "@pico/core";
+import { executeAgentRuntime } from "@pico/pico-host/agent-runtime";
 import {
   canWritePath,
   compileRuntimePermissionProfile,
   type ExecutionBoundary,
   type RuntimePermissionMode,
   type SandboxBoundaryScope,
-} from "../../../src/safety/permission-profile.js";
-import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
+} from "@pico/core/permission-profile";
+import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
 
 const REQUEST_BOUNDARY_TOOL = "request_sandbox_boundary";
 

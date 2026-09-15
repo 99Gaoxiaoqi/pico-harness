@@ -1,12 +1,13 @@
+import { projectTranscriptEvents } from "@pico/pico-host/transcript-event-store";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { createRuntimeNotification } from "../../../packages/protocol/src/index.js";
-import { buildApprovalRequestedPayload } from "../../../src/daemon/approval-wire.js";
-import { ingestDesktopRuntimeNotification } from "../../../src/daemon/desktop-transcript-persistence.js";
-import { Session } from "../../../src/engine/session.js";
+import { buildApprovalRequestedPayload } from "@pico/pico-host";
+import { ingestDesktopRuntimeNotification } from "@pico/pico-host/desktop-transcript-persistence";
+import { Session } from "@pico/pico-host/session";
 import { parseDesktopToolApproval } from "../../../apps/desktop/src/renderer/runtime-projections/approval.js";
 import {
   parseConversation,
@@ -50,6 +51,7 @@ test("approval preview and exact authorization survive live delivery, durable re
       at: 1,
       payload,
     }),
+    projectTranscriptEvents,
   );
   const replay = async () => {
     const page = await session.runtimeEventStore!.readTranscriptProjectionPage({
@@ -78,6 +80,7 @@ test("approval preview and exact authorization survive live delivery, durable re
       at: 2,
       payload: { approvalId: live.id, decision: "deny" },
     }),
+    projectTranscriptEvents,
   );
   assert.equal(pendingToolApprovalFromTranscript((await replay()).items), undefined);
   const malformed = parseDesktopToolApproval(
@@ -134,6 +137,7 @@ test("重启后的旧待审批记录不会冒充新运行，当前审批仍能�
           runId,
         ),
       }),
+      projectTranscriptEvents,
     );
   const boundary = async (runId: string, status: "running" | "failed") =>
     ingestDesktopRuntimeNotification(
@@ -155,6 +159,7 @@ test("重启后的旧待审批记录不会冒充新运行，当前审批仍能�
           },
         },
       }),
+      projectTranscriptEvents,
     );
   const replay = async () => {
     const page = await session.runtimeEventStore!.readTranscriptProjectionPage({
@@ -212,6 +217,7 @@ test("重启后的旧待审批记录不会冒充新运行，当前审批仍能�
       at: version,
       payload: { approvalId: "new-approval", decision: "deny" },
     }),
+    projectTranscriptEvents,
   );
   assert.equal(
     pendingToolApprovalFromTranscript(await replay(), "new-run"),

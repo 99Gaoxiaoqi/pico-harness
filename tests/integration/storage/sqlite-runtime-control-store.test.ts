@@ -3,11 +3,8 @@ import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { credentialRefForProvider } from "../../../src/provider/credential-vault.js";
-import {
-  operationalDatabasePath,
-  openOperationalDatabaseReadOnly,
-} from "../../../src/storage/sqlite/sqlite-database.js";
+import { credentialRefForProvider } from "@pico/pico-host/provider/credential-vault";
+import { operationalDatabasePath, openOperationalDatabaseReadOnly } from "@pico/storage";
 import {
   RuntimeConflictError,
   SqliteRuntimeControlStore,

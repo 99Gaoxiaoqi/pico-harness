@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseModelProviderConfigs } from "../../../src/input/pico-config.js";
-import { resolveModelRouteCapabilities } from "../../../src/provider/model-capabilities.js";
+import { parseModelProviderConfigs } from "@pico/pico-host/input/pico-config";
+import { resolveModelRouteCapabilities } from "@pico/runtime";
 
 test("prompt-cache policies resolve provider defaults and configured behavior", () => {
   assert.deepEqual(resolveModelRouteCapabilities("claude", "claude-test", undefined).promptCache, {

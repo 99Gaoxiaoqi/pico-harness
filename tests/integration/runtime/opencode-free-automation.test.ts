@@ -1,3 +1,4 @@
+import { resolvePicoPaths } from "@pico/pico-host";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { mkdtemp, mkdir, rm, realpath } from "node:fs/promises";
@@ -9,20 +10,20 @@ import { createRuntimeRequest, type RuntimeResult } from "@pico/protocol";
 import {
   assembleProductionDaemonHost,
   createProductionRuntimeServices,
-} from "../../../src/daemon/production-host.js";
-import { UserConfigStore } from "../../../src/input/user-config-store.js";
+} from "@pico/pico-host/production-host";
+import { UserConfigStore } from "@pico/pico-host/input/user-config-store";
 import {
   OPENCODE_FREE_PROVIDER,
   OPENCODE_FREE_ROUTE_ID,
-} from "../../../src/input/default-provider.js";
+} from "@pico/pico-host/input/default-provider";
 import {
   credentialRefForProvider,
   type CredentialVault,
-} from "../../../src/provider/credential-vault.js";
-import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
-import { CronService } from "../../../src/tasks/cron-service.js";
-import { globalSessionManager } from "../../../src/engine/session.js";
-import { closeAllOperationalDatabasesForTest } from "../../../src/storage/sqlite/sqlite-database.js";
+} from "@pico/pico-host/provider/credential-vault";
+import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
+import { CronService } from "@pico/runtime/cron-service";
+import { globalSessionManager } from "@pico/pico-host/session";
+import { closeAllOperationalDatabasesForTest } from "@pico/storage";
 
 test("anonymous default creates and executes desktop and trusted Cron jobs without vault access while keeping route and trust checks", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-opencode-free-automation-"));
@@ -135,7 +136,9 @@ test("anonymous default creates and executes desktop and trusted Cron jobs witho
   );
   assert.equal(requests, 1);
   assert.equal(vaultCalls, 0);
-  const cron = new CronService({ workDir: workspacePath, picoHome });
+  const cron = new CronService({
+    storageRoot: resolvePicoPaths(workspacePath, { picoHome: picoHome }).workspace.root,
+  });
   const job = cron.list(workspacePath).find((entry) => entry.cronJobId === created.job.jobId)!;
   assert.deepEqual(await services.validateAutomation(job), { allowed: true });
   await assert.rejects(

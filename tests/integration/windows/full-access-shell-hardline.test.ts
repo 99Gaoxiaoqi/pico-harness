@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
-import { classifyHardlineCommand } from "../../../src/approval/manager.js";
-import { classifyPowerShellCommand } from "../../../src/approval/powershell-safety.js";
+import { classifyHardlineCommand } from "@pico/pico-host/global-approval-manager";
+import { classifyPowerShellCommand } from "@pico/runtime/powershell-safety";
 import {
   hasSupportedHostShell,
   hostShellDialect,
@@ -10,7 +10,7 @@ import {
   resolveShell,
   SHELL_PATH_ENV,
   shellCommandArgs,
-} from "../../../src/os/shell.js";
+} from "@pico/runtime/host-shell";
 
 // Windows 宿主方言为 PowerShell:本文件锁定 PowerShell 宿主的
 // 解析、argv、确定性静态红线与只读分类契约。bash hardline 语义回归在 POSIX

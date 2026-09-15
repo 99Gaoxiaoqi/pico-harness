@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { runCli, type CliRuntime } from "@pico/cli/entry-dispatch";
-import { runCli as legacyRunCli } from "../../../src/cli/main.js";
-import type { ClientReplOptions } from "../../../src/tui/client-repl.js";
-import type { CliStartupSession } from "../../../src/cli/session-args.js";
+import { runCli as legacyRunCli } from "@pico/cli/entry-dispatch";
+import type { ClientReplOptions } from "@pico/cli/tui/client-repl";
+import type { CliStartupSession } from "@pico/cli/session-args";
 
 /**
  * 3-D Phase 4/5：CLI 入口分派。交互进程内路径已退役（Phase 5），TUI 唯一

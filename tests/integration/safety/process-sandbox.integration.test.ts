@@ -31,14 +31,14 @@ import {
   SandboxViolationError,
   shellRuntimeReadRoots,
   WINDOWS_RESTRICTED_NODE_OPTIONS,
-} from "../../../src/safety/process-sandbox/index.js";
-import { evaluateSandboxCommand } from "../../../src/safety/workspace-sandbox.js";
-import { createIsolatedPicoConfig } from "../../../src/input/pico-config.js";
-import { McpConnectionManager } from "../../../src/mcp/manager.js";
-import type { McpClient } from "../../../src/mcp/types.js";
-import { BashTool } from "../../../src/tools/bash.js";
-import { ToolRegistry } from "../../../src/tools/registry-impl.js";
-import { WorkspaceRoots } from "../../../src/tools/workspace-roots.js";
+} from "@pico/pico-host/process-sandbox";
+import { evaluateSandboxCommand } from "@pico/pico-host/workspace-sandbox";
+import { createIsolatedPicoConfig } from "@pico/pico-host/input/pico-config";
+import { McpConnectionManager } from "@pico/pico-host/mcp-connection-manager";
+import type { McpClient } from "@pico/pico-host/mcp-client-types";
+import { BashTool } from "@pico/pico-host/bash-tool";
+import { ToolRegistry } from "@pico/pico-host/product-tool-registry";
+import { WorkspaceRoots } from "@pico/pico-host/workspace-roots";
 
 test("process sandbox 包入口与旧入口共享运行时身份", () => {
   assert.equal(hostManagedProcessLauncher, managedProcessLauncher);

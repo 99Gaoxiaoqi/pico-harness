@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { resolveModelRouteCapabilities } from "../../../src/provider/model-capabilities.js";
-import { OpenAIRequestPolicy } from "../../../src/provider/openai-request-policy.js";
+import { resolveModelRouteCapabilities } from "@pico/runtime";
+import { OpenAIRequestPolicy } from "@pico/pico-host/provider/openai-request-policy";
 
 test("Provider reasoning only follows the current route capability profile", () => {
   const withoutRouteCapabilities = new OpenAIRequestPolicy({

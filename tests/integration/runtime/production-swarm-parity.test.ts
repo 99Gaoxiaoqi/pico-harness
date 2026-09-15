@@ -1,25 +1,25 @@
 import { SqliteSessionContinuitySource } from "@pico/pico-host/sqlite-session-continuity-source";
-import type { SessionSubscriptionRegistry } from "../../../src/daemon/session-subscription-owner.js";
+import type { SessionSubscriptionRegistry } from "@pico/pico-host/session-subscription-owner";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdtemp, mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { createProductionRuntimeServices } from "../../../src/daemon/production-host.js";
+import { createProductionRuntimeServices } from "@pico/pico-host/production-host";
 import { createRuntimeRequest } from "../../../packages/protocol/src/index.js";
-import { globalSessionManager } from "../../../src/engine/session.js";
+import { globalSessionManager } from "@pico/pico-host/session";
 import {
   AgentRuntime,
   type RunAgentCliOptions,
   type RunAgentCliDependencies,
-} from "../../../src/runtime/agent-runtime.js";
+} from "@pico/pico-host/agent-runtime";
 import {
   createAgentGraphWorkspaceHost,
   type AgentGraphWorkspaceHost,
-} from "../../../src/runtime/agent-graph-host.js";
-import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
-import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
-import { compileRuntimePermissionProfile } from "../../../src/safety/permission-profile.js";
+} from "@pico/pico-host/product-agent-graph-host";
+import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
+import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
+import { compileRuntimePermissionProfile } from "@pico/core/permission-profile";
 import { writeDesktopModelRouting } from "../../fixtures/desktop-model-routing.js";
 
 for (const planning of [false, true]) {

@@ -4,16 +4,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 
-import { SqliteAgentGraphControlStoreAdapter } from "../../../src/agent-graph/sqlite-control-store-adapter.js";
-import { SessionManager } from "../../../src/engine/session-manager.js";
-import type { PersistedSessionSettings } from "../../../src/engine/session-runtime.js";
-import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
+import { SqliteAgentGraphControlStoreAdapter } from "@pico/runtime";
+import { SessionManager } from "@pico/pico-host/session-manager";
+import type { PersistedSessionSettings } from "@pico/core/session-runtime-state";
+import { resolvePicoPaths } from "@pico/pico-host";
 import { PlanCoordinator } from "@pico/runtime/plan-coordinator";
-import { AgentRuntime } from "../../../src/runtime/agent-runtime.js";
-import { createAgentGraphWorkspaceHost } from "../../../src/runtime/agent-graph-host.js";
-import { RUNTIME_EVENT_SCHEMA_VERSION } from "../../../src/storage/runtime-event.js";
-import { SqliteAgentGraphControlStore } from "../../../src/storage/sqlite/sqlite-agent-graph-control-store.js";
-import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
+import { AgentRuntime } from "@pico/pico-host/agent-runtime";
+import { createAgentGraphWorkspaceHost } from "@pico/pico-host/product-agent-graph-host";
+import { RUNTIME_EVENT_SCHEMA_VERSION } from "@pico/core";
+import { SqliteAgentGraphControlStore } from "@pico/storage/sqlite/agent-graph-control-store";
+import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
 import { initializeRuntimeEventOwner } from "../helpers/runtime-event-owner.js";
 
 const SETTINGS: PersistedSessionSettings = {

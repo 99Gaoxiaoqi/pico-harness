@@ -6,20 +6,20 @@ import {
   managedProcessLauncher,
   SandboxViolationError,
   type ManagedSpawnRequest,
-} from "../../../src/safety/process-sandbox/index.js";
-import { compileRuntimeProcessSandbox } from "../../../src/safety/runtime-process-sandbox.js";
+} from "@pico/pico-host/process-sandbox";
+import { compileRuntimeProcessSandbox } from "@pico/pico-host/runtime-process-sandbox";
 import {
   createManagedExecutionBoundary,
   createReadOnlyPermissionProfile,
   createWorkspaceWritePermissionProfile,
   type ManagedPermissionProfile,
-} from "../../../src/safety/permission-profile.js";
-import { BashTool } from "../../../src/tools/bash.js";
+} from "@pico/core/permission-profile";
+import { BashTool } from "@pico/pico-host/bash-tool";
 import {
   buildDefaultToolRegistry,
   type DefaultProcessSandboxDescriptor,
-} from "../../../src/tools/default-registry.js";
-import { WorkspaceRoots } from "../../../src/tools/workspace-roots.js";
+} from "@pico/pico-host/default-registry";
+import { WorkspaceRoots } from "@pico/pico-host/workspace-roots";
 
 test("Bash schema adds an explicit boundary declaration without changing legacy arguments", () => {
   const schema = new BashTool(process.cwd()).definition().inputSchema;

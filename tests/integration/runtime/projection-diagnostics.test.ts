@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { isHardDiagnostic } from "../../../src/engine/runtime-projection-diagnostics.js";
+import { isHardDiagnostic } from "@pico/runtime";
 import {
   materializeRuntimeHistoryProjection,
   RuntimeEventReadModelIntegrityError,
-} from "../../../src/engine/session-runtime-read-model.js";
-import type { RuntimeEvent } from "../../../src/engine/session-runtime-event.js";
+} from "@pico/runtime/session-runtime-read-model";
+import type { RuntimeEvent } from "@pico/storage/runtime-event";
 
 function makeEvent(
   overrides: Record<string, unknown> & { kind: string; eventId: string },

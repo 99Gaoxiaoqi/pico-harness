@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
-import { Compactor } from "../../../src/context/compactor.js";
-import { projectRuntimeToolResultMessage } from "../../../src/engine/runtime-model-message.js";
-import type { RuntimeToolResultRecordedEvent } from "../../../src/engine/session-runtime-event.js";
-import type { ToolCall, ToolResult } from "../../../src/schema/message.js";
+import { Compactor } from "@pico/pico-host/product-compactor";
+import { projectRuntimeToolResultMessage } from "@pico/core/runtime-model-message";
+import type { RuntimeToolResultRecordedEvent } from "@pico/core";
+import type { ToolCall, ToolResult } from "@pico/core";
 import {
   buildRuntimeToolResultProjection,
   MAX_TOOL_RESULT_BYTES,
-} from "../../../src/tools/tool-result-observation.js";
+} from "@pico/runtime/tool-result-observation";
 
 test("ToolResult projection hashes raw UTF-8 bytes and keeps the full model output inline", () => {
   const rawOutput = "原始结果😀\n";

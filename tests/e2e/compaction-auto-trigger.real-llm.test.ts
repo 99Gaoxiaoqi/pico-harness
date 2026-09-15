@@ -22,13 +22,13 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { test } from "node:test";
-import { Compactor } from "../../src/context/compactor.js";
-import type { ContextBudget } from "../../src/context/context-budget.js";
-import { FullCompactor } from "../../src/context/full-compactor.js";
-import { AgentEngine } from "../../src/engine/loop.js";
-import { Session } from "../../src/engine/session.js";
-import { createProvider } from "../../src/provider/factory.js";
-import { ToolRegistry } from "../../src/tools/registry-impl.js";
+import { Compactor } from "@pico/pico-host/product-compactor";
+import type { ContextBudget } from "@pico/runtime/context-budget";
+import { FullCompactor } from "@pico/pico-host/product-full-compactor";
+import { AgentEngine } from "@pico/pico-host/agent-engine";
+import { Session } from "@pico/pico-host/session";
+import { createProvider } from "@pico/pico-host/provider/factory";
+import { ToolRegistry } from "@pico/pico-host/product-tool-registry";
 import { configuredUserDefaultRealModel } from "./real-llm-user-model.js";
 
 const RUN_COMPACTION_E2E = process.env.RUN_COMPACTION_E2E === "1";
@@ -44,9 +44,7 @@ async function createUserConfiguredProvider() {
  * 构造一段长 history,内嵌一个唯一 marker,模拟"已有多轮对话、接近上下文窗口"的场景。
  * history 足够长(每条带 padding)让 8000 token 预算的第一轮就超 85% 水位。
  */
-function buildLongHistoryWithMarker(
-  marker: string,
-): import("../../src/schema/message.js").Message[] {
+function buildLongHistoryWithMarker(marker: string): import("@pico/core").Message[] {
   // padding 需足够长让 8 条 history 总 token 超 5059(inputBudget 5952 的 85% 水位)。
   // 实测中文 BPE 约 3.3 字/token(repeat(60) 每条约 366 token),需 repeat(200) 才稳妥超水位。
   const padding = "历史对话填充内容用于模拟接近上下文窗口的长会话。".repeat(200);

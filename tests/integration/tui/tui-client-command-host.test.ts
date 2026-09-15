@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CommandRegistry } from "../../../src/input/command-registry.js";
+import { CommandRegistry } from "@pico/cli/command-registry";
 import {
   clientSlashSuggestions,
   handleClientLocalCommand,
   type ClientCommandHostDeps,
-} from "../../../src/tui/client-command-host.js";
-import { TuiReporter } from "../../../src/tui/tui-reporter.js";
+} from "@pico/cli/tui/client-command-host";
+import { TuiReporter } from "@pico/cli/tui/tui-reporter";
 
 /**
  * 3-D Phase 3：客户端命令宿主（无 Ink）——LocalCommandResult 各 action 分支、

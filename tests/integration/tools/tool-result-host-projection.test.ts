@@ -4,19 +4,16 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { DesktopReporter } from "../../../src/daemon/desktop-reporter.js";
-import type { SessionHydrationSnapshot } from "../../../src/engine/session-runtime.js";
-import {
-  createToolResultEnvelope,
-  type ToolResultEnvelope,
-} from "../../../src/engine/tool-result-contract.js";
-import { createCanonicalTranscriptToolStart } from "../../../src/engine/transcript-tool-start.js";
-import { Session } from "../../../src/engine/session.js";
-import type { DurableTranscriptEvent } from "../../../src/presentation/transcript-event-store.js";
-import { RuntimeRun } from "../../../src/runtime/runtime-run.js";
-import { createToolInspectorSource, readInspectorPage } from "../../../src/tui/inspector.js";
-import { hydrateTuiEntries, hydrateTuiReporter } from "../../../src/tui/session-hydration.js";
-import { TuiReporter } from "../../../src/tui/tui-reporter.js";
+import { DesktopReporter } from "@pico/pico-host";
+import type { SessionHydrationSnapshot } from "@pico/core/session-hydration";
+import { createToolResultEnvelope, type ToolResultEnvelope } from "@pico/core";
+import { createCanonicalTranscriptToolStart } from "@pico/core/transcript-tool-start";
+import { Session } from "@pico/pico-host/session";
+import type { DurableTranscriptEvent } from "@pico/pico-host/transcript-event-store";
+import { RuntimeRun } from "@pico/pico-host/product-runtime-run";
+import { createToolInspectorSource, readInspectorPage } from "@pico/cli/tui/inspector";
+import { hydrateTuiEntries, hydrateTuiReporter } from "@pico/cli/tui/session-hydration";
+import { TuiReporter } from "@pico/cli/tui/tui-reporter";
 
 test("TUI derives completion from the canonical envelope without persisting a duplicate fact", async () => {
   const events: DurableTranscriptEvent[] = [];

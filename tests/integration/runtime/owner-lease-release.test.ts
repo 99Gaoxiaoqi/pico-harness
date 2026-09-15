@@ -3,7 +3,7 @@ import { access, mkdtemp, rm, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { OwnerLease } from "../../../src/storage/owner-lease.js";
+import { OwnerLease } from "@pico/pico-host/owner-lease";
 
 test("OwnerLease release can retry after filesystem deletion fails", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-owner-lease-release-"));

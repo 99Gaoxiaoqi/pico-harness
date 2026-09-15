@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { DefaultHookExecutor } from "../../../src/hooks/executors/index.js";
-import type { HookHandler, HookInput, ResolvedHookHandler } from "../../../src/hooks/types.js";
-import { McpConnectionManager, type McpRemoteNetworkRequest } from "../../../src/mcp/manager.js";
-import type { McpClient } from "../../../src/mcp/types.js";
-import { qualifyMcpToolName } from "../../../src/mcp/types.js";
-import { ToolRegistry } from "../../../src/tools/registry-impl.js";
+import { DefaultHookExecutor } from "@pico/pico-host/hooks/executors";
+import type { HookHandler, HookInput, ResolvedHookHandler } from "@pico/pico-host/hooks/types";
+import {
+  McpConnectionManager,
+  type McpRemoteNetworkRequest,
+} from "@pico/pico-host/mcp-connection-manager";
+import type { McpClient } from "@pico/pico-host/mcp-client-types";
+import { qualifyMcpToolName } from "@pico/pico-host/mcp-client-types";
+import { ToolRegistry } from "@pico/pico-host/product-tool-registry";
 
 test("remote MCP config alone cannot construct an HTTP/SSE client", async () => {
   for (const transport of ["http", "sse"] as const) {

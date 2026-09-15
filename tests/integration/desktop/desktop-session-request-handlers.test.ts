@@ -5,11 +5,11 @@ import {
   DESKTOP_RUNTIME_METHODS,
   RUNTIME_METHODS,
 } from "../../../packages/protocol/src/index.js";
-import type { DesktopRequestHandlers } from "../../../src/daemon/desktop-request-router.js";
+import type { DesktopRequestHandlers } from "@pico/pico-host";
 import {
   createDesktopSessionRequestHandlers,
   type DesktopSessionRequestContext,
-} from "../../../src/daemon/desktop-session-request-handlers.js";
+} from "@pico/pico-host";
 
 test("desktop session handlers keep protocol mapping separate from the service owner", async () => {
   const calls: string[] = [];

@@ -1,12 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
-  projectAgentGraphRuntimeActivation,
-  type AgentGraphRunLaunchState,
-} from "../../../src/agent-graph/runtime-activation-projection.js";
-import type { RuntimeEvent } from "../../../src/storage/runtime-event.js";
-import type { AgentGraphActivationClaimRecord } from "../../../src/storage/sqlite/agent-graph-store-types.js";
+import { projectAgentGraphRuntimeActivation, type AgentGraphRunLaunchState } from "@pico/runtime";
+import type { RuntimeEvent } from "@pico/storage/runtime-event";
+import type { AgentGraphActivationClaimRecord } from "@pico/core/agent-graph-store-contracts";
 
 const CLAIM: AgentGraphActivationClaimRecord = {
   claimId: "claim-1",

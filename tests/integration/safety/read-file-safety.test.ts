@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { test } from "node:test";
-import { ReadFileTool } from "../../../src/tools/registry-impl.js";
+import { ReadFileTool } from "@pico/pico-host/product-tool-registry";
 
 const READ_FILE_MAX_BYTES = 16 * 1024 * 1024;
 const execFileAsync = promisify(execFile);

@@ -3,9 +3,9 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { loadHookSnapshot } from "../../../src/hooks/config.js";
-import { HookService } from "../../../src/hooks/service.js";
-import { ToolRegistry } from "../../../src/tools/registry-impl.js";
+import { loadHookSnapshot } from "@pico/pico-host/hooks/config";
+import { HookService } from "@pico/pico-host/hooks/service";
+import { ToolRegistry } from "@pico/pico-host/product-tool-registry";
 
 test("loaded conditional tool hooks require local admission without executing a synthetic query", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-native-hook-admission-"));

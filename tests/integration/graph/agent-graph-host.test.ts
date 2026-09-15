@@ -4,37 +4,37 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { agentOutputRecordIdFor, graphIdFor } from "../../../src/agent-graph/core/index.js";
-import { formatEvidenceUri } from "../../../src/context/evidence-archive.js";
-import { deterministicFingerprint, wakeIdFor } from "../../../src/agent-graph/core/ids.js";
-import { Session } from "../../../src/engine/session.js";
-import { SessionManager } from "../../../src/engine/session-manager.js";
+import { agentOutputRecordIdFor, graphIdFor } from "@pico/core/agent-graph-identities";
+import { formatEvidenceUri } from "@pico/storage/evidence-archive";
+import { deterministicFingerprint, wakeIdFor } from "@pico/core/agent-graph-identities";
+import { Session } from "@pico/pico-host/session";
+import { SessionManager } from "@pico/pico-host/session-manager";
 import {
   createAgentGraphWorkspaceHost,
   type AgentGraphRunToolBinding,
   type CreateAgentGraphWorkspaceHostOptions,
-} from "../../../src/runtime/agent-graph-host.js";
+} from "@pico/pico-host/product-agent-graph-host";
 import { assertAgentGraphRootRunSettled } from "@pico/runtime/agent-graph-root-run-settlement";
-import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
-import { RuntimeRun } from "../../../src/runtime/runtime-run.js";
+import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
+import { RuntimeRun } from "@pico/pico-host/product-runtime-run";
 import { formatAgentGraphArtifactRef } from "@pico/runtime/agent-graph-resource-authority";
-import { WorkspaceTaskRuntime } from "../../../src/runtime/workspace-runtime.js";
-import { RUNTIME_EVENT_SCHEMA_VERSION } from "../../../src/storage/runtime-event.js";
+import { WorkspaceTaskRuntime } from "@pico/pico-host/workspace-task-runtime";
+import { RUNTIME_EVENT_SCHEMA_VERSION } from "@pico/core";
 import {
   agentOutputFingerprint,
   agentOutputIdempotencyKey,
   type CommitAgentOutputInput,
   type GraphOperatorActivationContext,
-} from "../../../src/tools/agent-output-tool.js";
-import { SqliteSessionWorkbarRepository } from "../../../src/storage/sqlite/sqlite-session-workbar-repository.js";
-import { SqliteAgentGraphControlStore } from "../../../src/storage/sqlite/sqlite-agent-graph-control-store.js";
-import { withWorkspaceSqliteLease } from "../../../src/storage/sqlite/workspace-scopes.js";
+} from "@pico/pico-host/agent-output-tool";
+import { SqliteSessionWorkbarRepository } from "@pico/storage";
+import { SqliteAgentGraphControlStore } from "@pico/storage/sqlite/agent-graph-control-store";
+import { withWorkspaceSqliteLease } from "@pico/storage";
 import { seedRuntimeToolExchange } from "../helpers/legacy-evidence-fixture.js";
 import {
   compileRuntimePermissionProfile,
   createBypassExecutionBoundary,
   createManagedExecutionBoundary,
-} from "../../../src/safety/permission-profile.js";
+} from "@pico/core/permission-profile";
 
 test("workspace Graph host exposes one root binding and owns application lifecycle", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-agent-graph-host-"));
@@ -1021,7 +1021,7 @@ async function scheduleOperator(
   fixture: Awaited<ReturnType<typeof createHostFixture>>,
   graphId: string,
   intentId: string,
-  workspacePolicy: import("../../../src/agent-graph/core/contracts.js").AgentGraphWorkspacePolicy = {
+  workspacePolicy: import("@pico/core/agent-graph-contracts").AgentGraphWorkspacePolicy = {
     kind: "shared",
   },
 ): Promise<void> {

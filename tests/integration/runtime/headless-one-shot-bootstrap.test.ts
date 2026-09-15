@@ -3,10 +3,10 @@ import { mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { bootstrapHeadlessCaseJson } from "../../../src/internal/headless-bootstrap.js";
-import { UserConfigStore } from "../../../src/input/user-config-store.js";
-import { loadModelRouter } from "../../../src/provider/model-router.js";
-import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
+import { bootstrapHeadlessCaseJson } from "@pico/pico-host/internal/headless-bootstrap";
+import { UserConfigStore } from "@pico/pico-host/input/user-config-store";
+import { loadModelRouter } from "@pico/pico-host/provider/model-router";
+import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
 
 test("headless bootstrap writes secret-free pinned routes and trusts the isolated workspace", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-headless-bootstrap-"));

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { renderAgentDispatchPrompt } from "../../../src/input/agent-activation.js";
+import { renderAgentDispatchPrompt } from "@pico/pico-host/input/agent-activation";
 
 test("Agent Profile activation uses the current Graph new_agent contract", () => {
   const prompt = renderAgentDispatchPrompt({ name: "reviewer" }, "Review the runtime boundary");

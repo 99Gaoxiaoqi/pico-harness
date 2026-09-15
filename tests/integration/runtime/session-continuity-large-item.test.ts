@@ -12,10 +12,10 @@ import {
   type RuntimeTranscriptWatermark,
 } from "@pico/protocol";
 import { TranscriptReplica } from "@pico/transcript-replica";
-import type { RuntimeEvent } from "../../../src/engine/session-runtime-event.js";
+import type { RuntimeEvent } from "@pico/storage/runtime-event";
 import { SqliteSessionContinuitySource } from "@pico/pico-host/sqlite-session-continuity-source";
-import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
-import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
+import { resolvePicoPaths } from "@pico/pico-host";
+import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
 import { initializeRuntimeEventOwner } from "../helpers/runtime-event-owner.js";
 
 function message(

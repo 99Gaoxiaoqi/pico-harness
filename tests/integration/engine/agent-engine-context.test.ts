@@ -5,11 +5,11 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { AgentEngine } from "@pico/pico-host/agent-engine";
-import { AgentEngine as CompatibilityAgentEngine } from "../../../src/engine/loop.js";
+import { AgentEngine as CompatibilityAgentEngine } from "@pico/pico-host/agent-engine";
 import { AgentEngine as RuntimeAgentEngine } from "@pico/runtime/agent-engine";
-import { Session } from "../../../src/engine/session.js";
-import type { LLMProvider } from "../../../src/provider/interface.js";
-import { ToolRegistry } from "../../../src/tools/registry-impl.js";
+import { Session } from "@pico/pico-host/session";
+import type { LLMProvider } from "@pico/core";
+import { ToolRegistry } from "@pico/pico-host/product-tool-registry";
 
 test("AgentEngine still rejects a live same-Session re-entrant run", async () => {
   assert.equal(CompatibilityAgentEngine, AgentEngine);

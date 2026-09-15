@@ -8,8 +8,8 @@ import { test } from "node:test";
 import {
   captureAtomicFilePrecondition,
   writeAtomicWorkspaceFile,
-} from "../../../src/tools/atomic-workspace-file.js";
-import { EditFileTool, WriteFileTool } from "../../../src/tools/registry-impl.js";
+} from "@pico/pico-host/atomic-workspace-file";
+import { EditFileTool, WriteFileTool } from "@pico/pico-host/product-tool-registry";
 
 const WINDOWS_ONLY = { skip: process.platform !== "win32" } as const;
 const LOW_PRIVILEGE_WINDOWS_ONLY = {

@@ -1,3 +1,4 @@
+import { resolvePicoPaths } from "@pico/pico-host";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -7,24 +8,24 @@ import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { globalSessionManager, Session, SessionManager } from "@pico/pico-host/session";
 import { SessionForkService } from "@pico/pico-host/session-fork-service";
-import { SessionForkRuntimeConflictError } from "../../../src/engine/session-fork-runtime-port.js";
-import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
-import { createSessionForkRuntimePort } from "../../../src/runtime/session-fork-runtime-port-adapter.js";
-import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
+import { SessionForkRuntimeConflictError } from "@pico/pico-host/session-fork-runtime-port";
+import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
+import { createSessionForkRuntimePort } from "@pico/pico-host/session-fork-runtime-port-adapter";
+import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
 import { initializeRuntimeEventOwner } from "../helpers/runtime-event-owner.js";
-import { operationalDatabasePath } from "../../../src/storage/sqlite/sqlite-database.js";
-import { RuntimeRun } from "../../../src/runtime/runtime-run.js";
-import { StorageOperationJournal } from "../../../src/storage/operation-journal.js";
+import { operationalDatabasePath } from "@pico/storage";
+import { RuntimeRun } from "@pico/pico-host/product-runtime-run";
+import { StorageOperationJournal } from "@pico/storage/operation-journal";
 import {
   getOrCreateSessionSettings,
   setSessionCollaborationMode,
   setSessionPermissionMode,
-} from "../../../src/input/session-settings.js";
+} from "@pico/pico-host/input/session-settings";
 import {
   createManagedExecutionBoundary,
   createWorkspaceWritePermissionProfile,
   type ExecutionBoundary,
-} from "../../../src/safety/permission-profile.js";
+} from "@pico/core/permission-profile";
 
 /** Windows:分离的后台任务(memory recovery 等)可能短暂持有 pico.sqlite 句柄,
  * 删除临时目录按 EBUSY 有界重试,等待分离 drain 归还 lease。 */
@@ -331,7 +332,9 @@ test("fork inherits both interaction axes and survives target Resume", async () 
       source.updateRuntimeState({ boundary: sourceBoundary });
       await source.flushPersistence();
 
-      const journal = new StorageOperationJournal({ workDir, picoHome });
+      const journal = new StorageOperationJournal({
+        storageRoot: resolvePicoPaths(workDir, { picoHome: picoHome }).workspace.root,
+      });
       const operationId = `fork-permission-op-${index}`;
       const service = new SessionForkService({
         workDir,
@@ -482,7 +485,9 @@ test("settings-less fork recovery rejects the obsolete frozen bundle", async () 
     picoHome,
     runtimePort: createEngineRuntimePort(),
   });
-  const journal = new StorageOperationJournal({ workDir, picoHome });
+  const journal = new StorageOperationJournal({
+    storageRoot: resolvePicoPaths(workDir, { picoHome: picoHome }).workspace.root,
+  });
   let injectFailure = true;
   const service = new SessionForkService({
     workDir,
@@ -752,7 +757,9 @@ test("SessionForkService explicitly rejects legacy v1-v7 fork bundles", async ()
   const root = await mkdtemp(join(tmpdir(), "pico-session-fork-legacy-bundle-"));
   const workDir = join(root, "workspace");
   const picoHome = join(root, "pico-home");
-  const journal = new StorageOperationJournal({ workDir, picoHome });
+  const journal = new StorageOperationJournal({
+    storageRoot: resolvePicoPaths(workDir, { picoHome: picoHome }).workspace.root,
+  });
   const service = new SessionForkService({
     workDir,
     picoHome,

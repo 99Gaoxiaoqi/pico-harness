@@ -3,16 +3,16 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { FullCompactor } from "../../../src/context/full-compactor.js";
-import { recordRuntimeCompactionCheckpoint } from "../../../src/context/runtime-compaction-checkpoint.js";
-import { materializeRuntimeHistory } from "../../../src/engine/session-runtime-read-model.js";
-import { Session } from "../../../src/engine/session.js";
-import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
-import { RuntimeRun } from "../../../src/runtime/runtime-run.js";
-import { createSessionForkRuntimePort } from "../../../src/runtime/session-fork-runtime-port-adapter.js";
-import { AgentEngine } from "../../../src/engine/loop.js";
-import { ContextOverflowError } from "../../../src/provider/errors.js";
-import { ToolRegistry } from "../../../src/tools/registry-impl.js";
+import { FullCompactor } from "@pico/pico-host/product-full-compactor";
+import { recordRuntimeCompactionCheckpoint } from "@pico/runtime/runtime-compaction-checkpoint";
+import { materializeRuntimeHistory } from "@pico/runtime/session-runtime-read-model";
+import { Session } from "@pico/pico-host/session";
+import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
+import { RuntimeRun } from "@pico/pico-host/product-runtime-run";
+import { createSessionForkRuntimePort } from "@pico/pico-host/session-fork-runtime-port-adapter";
+import { AgentEngine } from "@pico/pico-host/agent-engine";
+import { ContextOverflowError } from "@pico/core";
+import { ToolRegistry } from "@pico/pico-host/product-tool-registry";
 
 test("恢复历史遇到上下文溢出时硬重置保留完整交换，运行中的任务不被补写中断", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-recovery-hard-reset-"));

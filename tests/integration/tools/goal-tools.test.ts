@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { GoalManager } from "@pico/runtime/goal-manager";
-import { CreateGoalTool, GetGoalTool, UpdateGoalTool } from "../../../src/tools/goal.js";
+import { CreateGoalTool, GetGoalTool, UpdateGoalTool } from "@pico/pico-host/goal-tools";
 
 test("goal tools preserve the GoalManager lifecycle and bounded budget validation", async () => {
   const manager = new GoalManager({ now: () => 1_700_000_000_000 });

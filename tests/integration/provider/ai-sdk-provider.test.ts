@@ -5,12 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { createProvider, type ProviderKind } from "@pico/pico-host/provider/factory";
-import { resolveModelRouteCapabilities } from "../../../src/provider/model-capabilities.js";
-import { ContextOverflowError, LLMStatusError } from "../../../src/provider/errors.js";
-import { AgentEngine } from "../../../src/engine/loop.js";
-import { Session } from "../../../src/engine/session.js";
-import { ToolRegistry } from "../../../src/tools/registry-impl.js";
-import type { Message } from "../../../src/schema/message.js";
+import { resolveModelRouteCapabilities } from "@pico/runtime";
+import { ContextOverflowError, LLMStatusError } from "@pico/core";
+import { AgentEngine } from "@pico/pico-host/agent-engine";
+import { Session } from "@pico/pico-host/session";
+import { ToolRegistry } from "@pico/pico-host/product-tool-registry";
+import type { Message } from "@pico/core";
 
 const usage = {
   input_tokens: 8,

@@ -12,9 +12,9 @@ import {
   type RuntimeSubagentConnection,
   type RuntimeSubagentPreset,
 } from "@pico/protocol";
-import { createConfiguredSubagentCatalog } from "../../../src/agents/configured-subagent-catalog.js";
-import { DesktopSubagentSettingsService } from "../../../src/daemon/desktop-subagent-settings-service.js";
-import { UserConfigStore } from "../../../src/input/user-config-store.js";
+import { createConfiguredSubagentCatalog } from "@pico/pico-host/configured-subagent-catalog";
+import { DesktopSubagentSettingsService } from "@pico/pico-host/product-desktop-subagent-settings-service";
+import { UserConfigStore } from "@pico/pico-host/input/user-config-store";
 
 const preset: RuntimeSubagentPreset = {
   id: "Review",

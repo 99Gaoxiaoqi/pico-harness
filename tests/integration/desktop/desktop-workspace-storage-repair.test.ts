@@ -15,10 +15,10 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { createDesktopWorkspaceStorageRecovery } from "../../../apps/desktop/src/main/workspace-storage-recovery.js";
 import type { RuntimeClientAdapter } from "../../../apps/desktop/src/main/runtime-client-adapter.js";
-import { WorkspaceStorageRepairService } from "../../../src/daemon/workspace-storage-repair.js";
-import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
-import { prepareCurrentWorkspaceSqliteStorageSync } from "../../../src/storage/sqlite/workspace-scopes.js";
-import { acquireOperationalDatabase } from "../../../src/storage/sqlite/sqlite-database.js";
+import { WorkspaceStorageRepairService } from "@pico/pico-host/workspace-storage-repair";
+import { resolvePicoPaths } from "@pico/pico-host";
+import { prepareCurrentWorkspaceSqliteStorageSync } from "@pico/storage";
+import { acquireOperationalDatabase } from "@pico/storage";
 import {
   DESKTOP_RUNTIME_METHODS,
   parseStrictRuntimeParams,

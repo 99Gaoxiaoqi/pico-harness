@@ -1,9 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {
-  isSupportedNodeVersion,
-  NODE_RUNTIME_SUPPORT_LABEL,
-} from "../../../src/runtime/node-version-policy.js";
+import { isSupportedNodeVersion, NODE_RUNTIME_SUPPORT_LABEL } from "@pico/runtime";
 
 test("Node runtime policy accepts maintained verified release lines", () => {
   for (const version of ["22.19.0", "v22.23.0", "24.3.0", "24.18.0", "26.0.0", "26.5.0"]) {

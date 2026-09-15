@@ -10,20 +10,20 @@ import {
   McpWorkspaceNotTrustedError,
   resolveTrustedEffectiveMcpSources,
   userMcpDefinitions,
-} from "../../../src/mcp/effective-config.js";
+} from "@pico/pico-host/effective-mcp-config";
 import {
   EMPTY_USER_MCP_REVISION,
   UserMcpConfigStore,
   UserMcpIdempotencyConflictError,
   UserMcpRevisionConflictError,
-} from "../../../src/mcp/user-config-store.js";
-import { McpConnectionManager } from "../../../src/mcp/manager.js";
-import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
-import { executeAgentRuntime } from "../../../src/runtime/agent-runtime.js";
+} from "@pico/pico-host/user-mcp-config-store";
+import { McpConnectionManager } from "@pico/pico-host/mcp-connection-manager";
+import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
+import { executeAgentRuntime } from "@pico/pico-host/agent-runtime";
 import {
   BACKGROUND_HARDLINE_VERSION,
   BACKGROUND_HOOK_VERSION,
-} from "../../../src/safety/background-autonomous-policy.js";
+} from "@pico/pico-host/background-autonomous-policy";
 
 test("user MCP store enforces private permissions, CAS and durable idempotency", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-user-mcp-store-"));

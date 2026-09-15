@@ -1,17 +1,18 @@
+import { createHookManagementCommands } from "@pico/cli/hook-management-commands";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { Session } from "../../../src/engine/session.js";
-import { createSessionRuntime } from "../../../src/runtime/session-runtime.js";
+import { Session } from "@pico/pico-host/session";
+import { createSessionRuntime } from "@pico/pico-host/session-runtime";
 import {
   BashTool,
   DEFAULT_BASH_TIMEOUT_MS,
   MAX_BASH_TIMEOUT_MS,
   MIN_BASH_TIMEOUT_MS,
   resolveBashTimeoutMs,
-} from "../../../src/tools/registry-impl.js";
+} from "@pico/pico-host/product-tool-registry";
 
 test("Bash timeout keeps the 30s default and accepts bounded trusted overrides", () => {
   assert.equal(resolveBashTimeoutMs(), DEFAULT_BASH_TIMEOUT_MS);
@@ -85,6 +86,7 @@ test(
     const root = await mkdtemp(join(tmpdir(), "pico-background-dispose-"));
     const session = new Session("background-dispose", root, { persistence: false });
     const runtime = await createSessionRuntime({
+      hookCommandFactory: createHookManagementCommands,
       session,
       sessionLease: { session, release() {} },
       hooks: false,

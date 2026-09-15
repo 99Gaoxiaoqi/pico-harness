@@ -4,10 +4,10 @@ import {
   fitAtomicMemoryEvidence,
   projectAtomicMemoryEvidence,
   renderAtomicMemoryEvidence,
-} from "../../../src/memory/atomic/extraction-evidence.js";
-import { proposalPrompt } from "../../../src/memory/atomic/extraction-proposal.js";
-import type { MemoryEvidenceEvent } from "../../../src/memory/atomic/runtime-contracts.js";
-import type { Message } from "../../../src/schema/message.js";
+} from "@pico/runtime/atomic-memory/extraction-evidence";
+import { proposalPrompt } from "@pico/runtime/atomic-memory/extraction-proposal";
+import type { MemoryEvidenceEvent } from "@pico/core/atomic-memory-runtime-contracts";
+import type { Message } from "@pico/core";
 
 test("indexed evidence preserves long user-message tails and binds similar messages to their actual source", () => {
   const prefix = "项目背景资料。".repeat(2_000);

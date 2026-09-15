@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { AiSdkProvider } from "../../../src/provider/ai-sdk-provider.js";
-import { toCanonicalUsage, type Usage } from "../../../src/schema/message.js";
+import { AiSdkProvider } from "@pico/pico-host/provider/ai-sdk-provider";
+import { toCanonicalUsage, type Usage } from "@pico/core";
 
 const expectedUsage: Usage = {
   promptTokens: 100,

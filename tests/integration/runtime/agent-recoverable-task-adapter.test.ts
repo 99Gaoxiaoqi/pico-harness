@@ -3,9 +3,9 @@ import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { AgentEngine } from "../../../src/engine/loop.js";
-import { Session } from "../../../src/engine/session.js";
-import type { SessionRuntime } from "../../../src/runtime/session-runtime.js";
+import type { AgentEngine } from "@pico/pico-host/agent-engine";
+import { Session } from "@pico/pico-host/session";
+import type { SessionRuntime } from "@pico/pico-host/session-runtime";
 import {
   AGENT_RECOVERY_WORKER_RECEIPT_SCHEMA_VERSION,
   createAgentRecoverableTaskAdapter,
@@ -17,14 +17,14 @@ import {
   type AgentRecoveryWorkerReceipt,
 } from "@pico/pico-host/agent-recoverable-task-adapter";
 import { RuntimeEventBoundaryInspector } from "../helpers/runtime-event-boundary-inspector.js";
-import { RuntimeRunExecutor } from "../../../src/runtime/runtime-run-executor.js";
-import { currentRuntimeRun, RuntimeRun } from "../../../src/runtime/runtime-run.js";
+import { RuntimeRunExecutor } from "@pico/pico-host/product-runtime-run-executor";
+import { currentRuntimeRun, RuntimeRun } from "@pico/pico-host/product-runtime-run";
 import {
   deriveRecoverableTaskRuntimeLaunchIdentity,
   type RecoverableTaskResumeContext,
 } from "@pico/runtime/recoverable-task";
-import { readWorkspaceSqliteStorageRootIdentitySync } from "../../../src/storage/sqlite/sqlite-workspace-storage.js";
-import { ALL_WORKSPACE_SQLITE_SCOPES } from "../../../src/storage/sqlite/workspace-scopes.js";
+import { readWorkspaceSqliteStorageRootIdentitySync } from "@pico/storage";
+import { ALL_WORKSPACE_SQLITE_SCOPES } from "@pico/storage";
 
 test("core Agent adapter reuses one deterministic admission and never synthesizes a user prompt", async (context) => {
   const fixture = await createFixture(context, "cold-continuation", "turn_override");

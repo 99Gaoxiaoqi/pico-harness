@@ -3,34 +3,34 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { RecoveryManager } from "../../../src/context/recovery.js";
-import { AgentEngine } from "../../../src/engine/loop.js";
-import { SilentReporter } from "../../../src/engine/reporter.js";
-import type { ToolResultEnvelope } from "../../../src/engine/tool-result-contract.js";
-import type { CanonicalTranscriptToolStart } from "../../../src/engine/transcript-tool-start.js";
-import { materializeRuntimeHistory } from "../../../src/engine/session-runtime-read-model.js";
-import { Session } from "../../../src/engine/session.js";
-import { hydrateCanonicalTranscriptEvents } from "../../../src/presentation/transcript-tool-result-hydration.js";
-import { HookService, type HookExecutor } from "../../../src/hooks/service.js";
+import { RecoveryManager } from "@pico/runtime/recovery";
+import { AgentEngine } from "@pico/pico-host/agent-engine";
+import { SilentReporter } from "@pico/runtime/silent-reporter";
+import type { ToolResultEnvelope } from "@pico/core";
+import type { CanonicalTranscriptToolStart } from "@pico/core/transcript-tool-start";
+import { materializeRuntimeHistory } from "@pico/runtime/session-runtime-read-model";
+import { Session } from "@pico/pico-host/session";
+import { hydrateCanonicalTranscriptEvents } from "@pico/pico-host/transcript-tool-result-hydration";
+import { HookService, type HookExecutor } from "@pico/pico-host/hooks/service";
 import {
   HOOK_EVENTS,
   type HookInput,
   type HookSnapshot,
   type ResolvedHookHandler,
-} from "../../../src/hooks/types.js";
-import { Tracer } from "../../../src/observability/trace.js";
-import type { LLMProvider } from "../../../src/provider/interface.js";
-import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
-import type { RuntimeToolResultRecordedEvent } from "../../../src/storage/runtime-event.js";
-import type { Message, ToolCall, ToolDefinition, ToolResult } from "../../../src/schema/message.js";
-import { ToolAccesses } from "../../../src/tools/tool-access.js";
+} from "@pico/pico-host/hooks/types";
+import { Tracer } from "@pico/pico-host/trace";
+import type { LLMProvider } from "@pico/core";
+import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
+import type { RuntimeToolResultRecordedEvent } from "@pico/core";
+import type { Message, ToolCall, ToolDefinition, ToolResult } from "@pico/core";
+import { ToolAccesses } from "@pico/runtime/tool-access";
 import {
   NO_FILE_SIDE_EFFECTS,
   type BaseTool,
   type Registry,
   type ToolExecutionContext,
-} from "../../../src/tools/registry.js";
-import { ToolRegistry } from "../../../src/tools/registry-impl.js";
+} from "@pico/pico-host/tool-registry-contract";
+import { ToolRegistry } from "@pico/pico-host/product-tool-registry";
 
 type PostToolHookEvent = "PostToolUse" | "PostToolUseFailure" | "PostToolBatch";
 

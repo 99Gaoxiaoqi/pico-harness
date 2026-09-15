@@ -5,15 +5,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
-import type { RuntimeEvent } from "../../../src/engine/session-runtime-event.js";
+import type { RuntimeEvent } from "@pico/storage/runtime-event";
 import {
   RuntimeEventStoreHighWaterConflictError,
   RuntimeEventStoreIntegrityError,
-} from "../../../src/storage/runtime-event-store-contracts.js";
-import { operationalDatabasePath } from "../../../src/storage/sqlite/sqlite-database.js";
-import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
-import { PLAN_EVENT_KINDS } from "../../../src/plan/events.js";
-import { projectPlanEntries } from "../../../src/plan/reducer.js";
+} from "@pico/storage/runtime-event-store-contracts";
+import { operationalDatabasePath } from "@pico/storage";
+import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
+import { PLAN_EVENT_KINDS } from "@pico/core/plan-events";
+import { projectPlanEntries } from "@pico/runtime/plan-reducer";
 import { initializeRuntimeEventOwner } from "../helpers/runtime-event-owner.js";
 
 /**

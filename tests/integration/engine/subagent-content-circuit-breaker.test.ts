@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { AgentEngine } from "@pico/pico-host/agent-engine";
-import { ToolRegistry } from "../../../src/tools/registry-impl.js";
-import { MAX_TOOL_RESULT_BYTES } from "../../../src/tools/tool-result-observation.js";
-import type { LLMProvider } from "../../../src/provider/interface.js";
+import { ToolRegistry } from "@pico/pico-host/product-tool-registry";
+import { MAX_TOOL_RESULT_BYTES } from "@pico/runtime/tool-result-observation";
+import type { LLMProvider } from "@pico/core";
 
 // D10④ 内容级熔断：子代理 loop 的"完成"是模型自报（不再调工具 + 可用总结），
 // 流程状态区分不了"真做完"与"做完样子但任务失败"。总结开篇的明确失败宣言

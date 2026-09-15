@@ -6,11 +6,11 @@ import { ConversationTranscript } from "../../../apps/desktop/src/renderer/conve
 import { mergeConversationItemGroups } from "../../../apps/desktop/src/renderer/conversation/items.js";
 import { parseConversation } from "../../../apps/desktop/src/renderer/conversation/runtime-projection.js";
 import { applyTimelineNotification } from "../../../apps/desktop/src/renderer/timeline.js";
-import { DesktopReporter } from "../../../src/daemon/desktop-reporter.js";
+import { DesktopReporter } from "@pico/pico-host";
 import type { RuntimeNotification } from "../../../packages/protocol/src/index.js";
-import { publishDesktopReporterEvent } from "../../../src/daemon/production-host.js";
-import type { WorkspaceRuntimeService } from "../../../src/daemon/workspace-runtime-service.js";
-import { ScopedSubagentActivityReporter } from "../../../src/tools/subagent-activity-reporter.js";
+import { publishDesktopReporterEvent } from "@pico/pico-host/production-host";
+import type { WorkspaceRuntimeService } from "@pico/pico-host/workspace-runtime-service";
+import { ScopedSubagentActivityReporter } from "@pico/runtime/subagent-activity-reporter";
 
 Object.assign(globalThis, { React });
 

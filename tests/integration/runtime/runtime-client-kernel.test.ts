@@ -15,9 +15,9 @@ import {
   LocalRuntimeClient,
   RuntimeClientError,
   type LocalRuntimeClientOptions,
-} from "../../../src/daemon/index.js";
-import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
-import { sessionOwnerLeaseDirectory } from "../../../src/storage/session-owner-lease.js";
+} from "@pico/pico-host/local-runtime-client";
+import { resolvePicoPaths } from "@pico/pico-host";
+import { sessionOwnerLeaseDirectory } from "@pico/storage";
 import { TestRuntimeHostCandidateTracker } from "../helpers/test-runtime-daemon.js";
 
 /**

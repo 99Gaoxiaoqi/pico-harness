@@ -6,12 +6,12 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { promisify } from "node:util";
 
-import { createBuiltinAgentGraphOperatorProfileCatalog } from "../../../src/agent-graph/operator-profile-catalog.js";
-import type { AgentGraphProfileSnapshot } from "../../../src/agent-graph/core/contracts.js";
+import { createBuiltinAgentGraphOperatorProfileCatalog } from "@pico/runtime";
+import type { AgentGraphProfileSnapshot } from "@pico/core/agent-graph-contracts";
 import { AgentGraphWorkspaceResourceAuthority } from "@pico/pico-host/agent-graph-workspace-resource-authority";
-import { SqliteAgentGraphControlStore } from "../../../src/storage/sqlite/sqlite-agent-graph-control-store.js";
-import { Session } from "../../../src/engine/session.js";
-import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
+import { SqliteAgentGraphControlStore } from "@pico/storage/sqlite/agent-graph-control-store";
+import { Session } from "@pico/pico-host/session";
+import { resolvePicoPaths } from "@pico/pico-host";
 
 const execFileAsync = promisify(execFile);
 

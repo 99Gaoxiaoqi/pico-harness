@@ -5,18 +5,18 @@ import {
   getOrCreateSessionSettings,
   normalizePermissionMode,
   setSessionPermissionMode,
-} from "../../../src/input/session-settings.js";
+} from "@pico/pico-host/input/session-settings";
 import {
   createEmptyUsageSnapshot,
   SESSION_RUNTIME_STATE_VERSION,
   type PersistedSessionSettings,
   type SessionRuntimePersistence,
-} from "../../../src/engine/session-runtime.js";
+} from "@pico/core/session-runtime-state";
 import {
   createManagedExecutionBoundary,
   createWorkspaceWritePermissionProfile,
   type ExecutionBoundary,
-} from "../../../src/safety/permission-profile.js";
+} from "@pico/core/permission-profile";
 
 test("legacy permission names are not accepted as compatibility aliases", () => {
   for (const legacyMode of ["default", "yolo", "acceptedits", "bypasspermissions"]) {

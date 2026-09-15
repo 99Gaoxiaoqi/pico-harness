@@ -11,7 +11,7 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { TodoStore } from "../../src/context/todo-store.js";
+import { TodoStore } from "@pico/pico-host/product-todo-store";
 
 test("real llm: TodoTool returns full snapshot after operation", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-layering-snapshot-"));
@@ -27,7 +27,7 @@ test("real llm: TodoTool returns full snapshot after operation", async (context)
   await todoStore.add("初始任务B", "medium");
 
   // 用 TodoTool 执行 toggle，验证返回值包含完整列表
-  const { TodoTool } = await import("../../src/tools/todo.js");
+  const { TodoTool } = await import("@pico/runtime/todo-tool");
   const tool = new TodoTool(todoStore);
   const result = await tool.execute(JSON.stringify({ action: "toggle", id: 1 }));
 
@@ -47,7 +47,7 @@ test("real llm: <env> block appears in prompt layers", async (context) => {
   await mkdir(picoHome, { recursive: true });
   context.after(() => rm(root, { recursive: true, force: true }));
 
-  const { PromptComposer } = await import("../../src/context/composer.js");
+  const { PromptComposer } = await import("@pico/pico-host/product-prompt-composer");
   const composer = new PromptComposer(workDir, false, { picoHome });
   const { systemPrompt, turnTail } = await composer.buildLayers();
 
@@ -78,7 +78,7 @@ test("real llm: PLAN_MODE_SPEC comes after AGENTS.md", async (context) => {
 
   await writeFile(join(workDir, "AGENTS.md"), "project-rule-marker", "utf8");
 
-  const { PromptComposer } = await import("../../src/context/composer.js");
+  const { PromptComposer } = await import("@pico/pico-host/product-prompt-composer");
   const composer = new PromptComposer(workDir, true, { picoHome });
   const { systemPrompt } = await composer.buildLayers();
 

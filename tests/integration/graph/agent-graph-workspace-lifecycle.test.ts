@@ -6,9 +6,9 @@ import { setImmediate as waitForImmediate } from "node:timers/promises";
 import test, { type TestContext } from "node:test";
 
 import { createRuntimeRequest } from "../../../packages/protocol/src/index.js";
-import type { AgentGraphApplicationService } from "../../../src/agent-graph/service.js";
-import { WorkspaceRuntimeService } from "../../../src/daemon/index.js";
-import type { WorkspaceTaskRuntime } from "../../../src/runtime/workspace-runtime.js";
+import type { AgentGraphApplicationService } from "@pico/runtime/agent-graph-service";
+import { WorkspaceRuntimeService } from "@pico/pico-host/workspace-runtime-service";
+import type { WorkspaceTaskRuntime } from "@pico/pico-host/workspace-task-runtime";
 
 test("workspace owns one Graph application and closes it after Runtime drain but before stores", async (context) => {
   const fixture = await createFixture(context, "close-order");

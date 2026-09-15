@@ -19,16 +19,16 @@ import {
   MAX_MODEL_HISTORY_BYTES,
   materializeRuntimeHistoryEntries,
   type RuntimeHistoryProjectionEntry,
-} from "../../../src/engine/session-runtime-read-model.js";
-import { Session } from "../../../src/engine/session.js";
-import { RuntimeRun } from "../../../src/runtime/runtime-run.js";
-import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
+} from "@pico/runtime/session-runtime-read-model";
+import { Session } from "@pico/pico-host/session";
+import { RuntimeRun } from "@pico/pico-host/product-runtime-run";
+import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
 import {
   createCanonicalTranscriptToolStart,
   createRuntimeTranscriptToolStartEvent,
-} from "../../../src/engine/transcript-tool-start.js";
-import type { RuntimeEvent } from "../../../src/engine/session-runtime-event.js";
-import type { Message } from "../../../src/schema/message.js";
+} from "@pico/core/transcript-tool-start";
+import type { RuntimeEvent } from "@pico/storage/runtime-event";
+import type { Message } from "@pico/core";
 import { initializeRuntimeEventOwner } from "../helpers/runtime-event-owner.js";
 
 const DEGRADED_MARKER_PATTERN = /历史输出已按上下文预算裁剪/u;

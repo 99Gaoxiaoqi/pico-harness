@@ -1,15 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {
-  projectAgentSwarmStatus,
-  swarmCheckpointKey,
-} from "../../../src/agent-graph/swarm-status.js";
-import { createAgentSwarmStatusTool } from "../../../src/tools/agent-swarm-status-tool.js";
+import { projectAgentSwarmStatus, swarmCheckpointKey } from "@pico/runtime";
+import { createAgentSwarmStatusTool } from "@pico/runtime/agent-swarm-status-tool";
 import type {
   AgentGraphRootToolContext,
   AgentGraphSupervisorClaimRuntime,
   AgentGraphSupervisorProjection,
-} from "../../../src/tools/agent-graph-tools.js";
+} from "@pico/pico-host/agent-graph-tools";
 
 const root: AgentGraphRootToolContext = {
   kind: "graph_root_supervisor",

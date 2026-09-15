@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createRuntimeRequest } from "../../../packages/protocol/src/index.js";
-import { DesktopRequestRouter } from "../../../src/daemon/desktop-request-router.js";
+import { DesktopRequestRouter } from "@pico/pico-host";
 
 test("desktop request router dispatches registered methods without owning business logic", async () => {
   const router = new DesktopRequestRouter({

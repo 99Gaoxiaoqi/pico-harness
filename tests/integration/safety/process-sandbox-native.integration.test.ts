@@ -16,12 +16,12 @@ import {
   shellRuntimeReadRoots,
   type ManagedSpawnRequest,
   type SandboxProfile,
-} from "../../../src/safety/process-sandbox/index.js";
-import { BashTool } from "../../../src/tools/bash.js";
-import { GrepTool, resetRgCache, setRgAvailable } from "../../../src/tools/grep.js";
-import { WorkspaceRoots } from "../../../src/tools/workspace-roots.js";
-import { McpConnectionManager } from "../../../src/mcp/manager.js";
-import { signalProcessTree } from "../../../src/os/process-tree.js";
+} from "@pico/pico-host/process-sandbox";
+import { BashTool } from "@pico/pico-host/bash-tool";
+import { GrepTool, resetRgCache, setRgAvailable } from "@pico/pico-host/grep-tool";
+import { WorkspaceRoots } from "@pico/pico-host/workspace-roots";
+import { McpConnectionManager } from "@pico/pico-host/mcp-connection-manager";
+import { signalProcessTree } from "@pico/runtime/process-tree";
 
 const nativeAvailable =
   process.platform === "darwin" || process.platform === "linux" || process.platform === "win32";

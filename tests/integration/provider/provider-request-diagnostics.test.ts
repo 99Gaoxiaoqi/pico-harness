@@ -1,18 +1,18 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { FULL_COMPACTION_SUMMARY_MARKER } from "../../../src/context/compaction-markers.js";
+import { FULL_COMPACTION_SUMMARY_MARKER } from "@pico/core";
 import {
   capturePreparedProviderRequest,
   diagnosePreparedProviderRequest,
   parsePreparedRequestCapture,
   type PreparedRequestCacheBreakpointComparison,
-} from "../../../src/observability/provider-request-diagnostics.js";
-import { CostTracker, type ProviderCallLedger } from "../../../src/observability/tracker.js";
-import { applyAnthropicCacheControl } from "../../../src/provider/anthropic-cache.js";
-import { LLMStatusError } from "../../../src/provider/errors.js";
-import type { LLMProvider, LLMProviderRequestOptions } from "../../../src/provider/interface.js";
-import type { Message, ToolDefinition } from "../../../src/schema/message.js";
-import type { ProviderCallRecord } from "../../../src/tasks/runtime-types.js";
+} from "@pico/runtime/provider-request-diagnostics";
+import { CostTracker, type ProviderCallLedger } from "@pico/pico-host/cost-tracker";
+import { applyAnthropicCacheControl } from "@pico/runtime/provider/anthropic-cache";
+import { LLMStatusError } from "@pico/core";
+import type { LLMProvider, LLMProviderRequestOptions } from "@pico/core";
+import type { Message, ToolDefinition } from "@pico/core";
+import type { ProviderCallRecord } from "@pico/storage/runtime-control-types";
 
 class PreparedClaudeProvider implements LLMProvider {
   readonly modelName = "claude-cache-test";

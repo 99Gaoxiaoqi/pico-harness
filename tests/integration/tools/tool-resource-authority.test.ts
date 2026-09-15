@@ -4,10 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { setImmediate } from "node:timers/promises";
-import { ToolResourceAuthority } from "../../../src/tools/tool-resource-authority.js";
-import { ToolAccesses } from "../../../src/tools/tool-access.js";
-import { createBrowserAgentTools } from "../../../src/tools/browser-agent.js";
-import { ToolRegistry } from "../../../src/tools/registry-impl.js";
+import { ToolResourceAuthority } from "@pico/runtime/tool-resource-authority";
+import { ToolAccesses } from "@pico/runtime/tool-access";
+import { createBrowserAgentTools } from "@pico/pico-host/browser-agent-tools";
+import { ToolRegistry } from "@pico/pico-host/product-tool-registry";
 
 function gate() {
   let release!: () => void;

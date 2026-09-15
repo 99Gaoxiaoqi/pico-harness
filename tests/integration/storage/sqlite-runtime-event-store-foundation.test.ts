@@ -5,18 +5,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
-import type { RuntimeEvent } from "../../../src/engine/session-runtime-event.js";
+import type { RuntimeEvent } from "@pico/storage/runtime-event";
 import {
   RuntimeEventStoreIntegrityError,
   RuntimeEventStoreOwnerFenceError,
   RuntimeEventStoreRunSealedError,
   RuntimeEventStoreVersionConflictError,
   type RuntimeOwnerFence,
-} from "../../../src/storage/runtime-event-store-contracts.js";
-import { operationalDatabasePath } from "../../../src/storage/sqlite/sqlite-database.js";
-import { SESSIONS_SCOPE } from "../../../src/storage/sqlite/sessions-scope.js";
-import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
-import { prepareWorkspaceSqliteStorageSync } from "../../../src/storage/sqlite/sqlite-workspace-storage.js";
+} from "@pico/storage/runtime-event-store-contracts";
+import { operationalDatabasePath } from "@pico/storage";
+import { SESSIONS_SCOPE } from "@pico/storage";
+import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
+import { prepareWorkspaceSqliteStorageSync } from "@pico/storage";
 
 interface Fixture {
   readonly root: string;

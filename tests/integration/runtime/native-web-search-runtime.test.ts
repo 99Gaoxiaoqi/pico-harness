@@ -3,15 +3,15 @@ import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { HookService } from "../../../src/hooks/service.js";
-import { globalSessionPermissionGrants } from "../../../src/approval/session-permissions.js";
-import { UserConfigStore } from "../../../src/input/user-config-store.js";
-import { SilentReporter } from "../../../src/engine/reporter.js";
-import { globalSessionManager } from "../../../src/engine/session.js";
-import { executeAgentRuntime } from "../../../src/runtime/agent-runtime.js";
-import { resolveModelRouteCapabilities } from "../../../src/provider/model-capabilities.js";
-import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
-import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
+import { HookService } from "@pico/pico-host/hooks/service";
+import { globalSessionPermissionGrants } from "@pico/pico-host/session-permissions";
+import { UserConfigStore } from "@pico/pico-host/input/user-config-store";
+import { SilentReporter } from "@pico/runtime/silent-reporter";
+import { globalSessionManager } from "@pico/pico-host/session";
+import { executeAgentRuntime } from "@pico/pico-host/agent-runtime";
+import { resolveModelRouteCapabilities } from "@pico/runtime";
+import { resolvePicoPaths } from "@pico/pico-host";
+import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
 
 const searchRecord = {
   calls: [

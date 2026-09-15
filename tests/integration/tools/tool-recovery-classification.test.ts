@@ -20,14 +20,14 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { Session } from "../../../src/engine/session.js";
-import type { EngineRuntimeToolResultInput } from "../../../src/engine/runtime-port.js";
-import type { Message, ToolCall } from "../../../src/schema/message.js";
-import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
-import { RuntimeRun } from "../../../src/runtime/runtime-run.js";
-import type { RuntimeEvent } from "../../../src/storage/runtime-event.js";
-import type { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
-import { closeAllOperationalDatabasesForTest } from "../../../src/storage/sqlite/sqlite-database.js";
+import { Session } from "@pico/pico-host/session";
+import type { EngineRuntimeToolResultInput } from "@pico/pico-host/engine-runtime-port";
+import type { Message, ToolCall } from "@pico/core";
+import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
+import { RuntimeRun } from "@pico/pico-host/product-runtime-run";
+import type { RuntimeEvent } from "@pico/storage/runtime-event";
+import type { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
+import { closeAllOperationalDatabasesForTest } from "@pico/storage";
 
 interface RecoveryScene {
   readonly session: Session;

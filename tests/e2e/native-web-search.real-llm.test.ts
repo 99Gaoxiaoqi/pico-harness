@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { AiSdkProvider } from "../../src/provider/ai-sdk-provider.js";
-import type { Message, ToolDefinition } from "../../src/schema/message.js";
+import { AiSdkProvider } from "@pico/pico-host/provider/ai-sdk-provider";
+import type { Message, ToolDefinition } from "@pico/core";
 
 // Opt in with PICO_NATIVE_SEARCH_E2E=1 and PICO_NATIVE_SEARCH_{WIRE,MODEL,BASE_URL,API_KEY}.
 // The probe sends synthetic prompts and never prints credentials, request bodies or raw errors.
@@ -84,10 +84,8 @@ test(
   "real official DeepSeek Responses answers normally while native search remains unavailable",
   { skip: process.env.PICO_DEEPSEEK_RESPONSES_E2E !== "1", timeout: 130_000 },
   async () => {
-    const { resolveModelRouteCapabilities } =
-      await import("../../src/provider/model-capabilities.js");
-    const { resolveNativeWebSearchCapability } =
-      await import("../../src/provider/model-web-search.js");
+    const { resolveModelRouteCapabilities } = await import("@pico/runtime");
+    const { resolveNativeWebSearchCapability } = await import("@pico/runtime");
     const model = process.env.PICO_NATIVE_SEARCH_MODEL ?? "deepseek-v4-flash";
     const baseURL = "https://api.deepseek.com";
     const apiKey = process.env.PICO_NATIVE_SEARCH_API_KEY;

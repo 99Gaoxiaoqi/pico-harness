@@ -3,16 +3,16 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { AtomicMemoryContextBuilder } from "../../src/memory/atomic/context-builder.js";
-import { AtomicMemoryExtractionEngine } from "../../src/memory/atomic/extraction-engine.js";
+import { AtomicMemoryContextBuilder } from "@pico/runtime/atomic-memory/context-builder";
+import { AtomicMemoryExtractionEngine } from "@pico/runtime/atomic-memory/extraction-engine";
 import type {
   MemoryEvidenceEvent,
   MemoryExtractionSnapshot,
   MemoryModelRequest,
-} from "../../src/memory/atomic/runtime-contracts.js";
-import { createProvider } from "../../src/provider/factory.js";
-import { ProviderAtomicMemoryModel } from "../../src/runtime/atomic-memory-runtime.js";
-import { SqliteMemoryItemStore } from "../../src/storage/sqlite/sqlite-memory-item-store.js";
+} from "@pico/core/atomic-memory-runtime-contracts";
+import { createProvider } from "@pico/pico-host/provider/factory";
+import { ProviderAtomicMemoryModel } from "@pico/pico-host/atomic-memory-runtime";
+import { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-store";
 import { configuredUserDefaultRealModel } from "./real-llm-user-model.js";
 
 const realModelTest = process.env.RUN_LLM_E2E === "1" ? test : test.skip;

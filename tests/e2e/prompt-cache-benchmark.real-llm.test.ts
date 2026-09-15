@@ -4,20 +4,17 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { FullCompactor } from "../../src/context/full-compactor.js";
-import { Session } from "../../src/engine/session.js";
-import { logger } from "../../src/observability/logger.js";
-import type { BillingRoute, PricingEntry } from "../../src/observability/pricing.js";
-import { CostTracker } from "../../src/observability/tracker.js";
-import { LLMStatusError } from "../../src/provider/errors.js";
-import { createProvider, type ProviderKind } from "../../src/provider/factory.js";
-import type { LLMProvider, LLMProviderRequestOptions } from "../../src/provider/interface.js";
-import {
-  resolveModelRouteCapabilities,
-  type ModelCapabilityConfig,
-  type ModelRouteCapabilities,
-} from "../../src/provider/model-capabilities.js";
-import type { Message, ToolDefinition } from "../../src/schema/message.js";
+import { FullCompactor } from "@pico/pico-host/product-full-compactor";
+import { Session } from "@pico/pico-host/session";
+import { logger } from "@pico/pico-host/logger";
+import type { BillingRoute, PricingEntry } from "@pico/runtime/pricing";
+import { CostTracker } from "@pico/pico-host/cost-tracker";
+import { LLMStatusError } from "@pico/core";
+import { createProvider, type ProviderKind } from "@pico/pico-host/provider/factory";
+import type { LLMProvider, LLMProviderRequestOptions } from "@pico/core";
+import { resolveModelRouteCapabilities } from "@pico/runtime";
+import { type ModelCapabilityConfig, type ModelRouteCapabilities } from "@pico/core";
+import type { Message, ToolDefinition } from "@pico/core";
 import {
   comparePromptCacheBenchmarkToCold,
   measurePromptCacheBenchmarkRequest,

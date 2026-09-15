@@ -10,12 +10,6 @@ import {
 } from "@pico/pico-host/child-agent-policy";
 import { ToolRegistry } from "@pico/pico-host/tool-registry";
 import { WorkspaceRoots, buildWorkspaceBoundaryMiddleware } from "@pico/pico-host/workspace-roots";
-import {
-  CHILD_AGENT_TOOL_CONSTRUCTORS,
-  buildChildAgentSafetyMiddleware as legacyChildSafety,
-  createHookVerifierRegistry as createLegacyVerifier,
-} from "../../../src/tools/child-agent-policy.js";
-import { buildWorkspaceBoundaryMiddleware as legacyWorkspaceBoundary } from "../../../src/tools/workspace-roots.js";
 
 test("Host child tools and Hook verifier preserve read-only boundaries and injected diagnostics", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-child-policy-package-"));
@@ -99,7 +93,15 @@ test("Host child tools and Hook verifier preserve read-only boundaries and injec
     assert.equal(await readFile(join(workDir, "evidence.txt"), "utf8"), "CHILD_POLICY_EVIDENCE");
 
     const constructors = createChildAgentToolConstructors(grepDiagnostics);
-    assert.deepEqual(Object.keys(constructors), Object.keys(CHILD_AGENT_TOOL_CONSTRUCTORS));
+    assert.deepEqual(Object.keys(constructors).sort(), [
+      "bash",
+      "edit_file",
+      "glob",
+      "grep",
+      "read_file",
+      "web_search",
+      "write_file",
+    ]);
     const child = new ToolRegistry();
     child.register(constructors.read_file!(workDir, workspaceRoots));
     child.useSafety(buildChildAgentSafetyMiddleware("explore", options));
@@ -114,9 +116,7 @@ test("Host child tools and Hook verifier preserve read-only boundaries and injec
       '{"path":"evidence.txt","pattern":"probe","max_files":1}',
     );
     assert.equal(grepLogs.length, 2);
-    assert.equal(legacyChildSafety, buildChildAgentSafetyMiddleware);
-    assert.equal(legacyWorkspaceBoundary, buildWorkspaceBoundaryMiddleware);
-    assert.ok(createLegacyVerifier(options) instanceof ToolRegistry);
+    assert.ok(createHookVerifierRegistry(options) instanceof ToolRegistry);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
