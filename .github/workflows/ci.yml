@@ -83,7 +83,7 @@ jobs:
             apt-get update
             apt-get install --no-install-recommends -y acl libcap2-bin
             npm ci
-            npm run build:protocol
+            npm run build:packages
             if command -v getfattr >/dev/null; then
               echo "getfattr must be absent during the new-file compatibility check" >&2
               exit 1
@@ -281,6 +281,7 @@ jobs:
           cache: "npm"
 
       - run: npm ci
+      - run: npm run build:packages
       - name: Install ripgrep for the native Grep sandbox path
         run: brew install ripgrep
       - run: npm run verify:sandbox:resources
@@ -313,6 +314,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y libcap-dev meson ninja-build ripgrep xz-utils
       - run: npm ci
+      - run: npm run build:packages
       - run: npm run build:sandbox:linux
       - run: npm run verify:sandbox:resources -- --require-current
       - name: Enable unprivileged user namespaces for Bubblewrap integration
