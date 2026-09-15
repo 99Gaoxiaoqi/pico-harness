@@ -111,7 +111,7 @@ async function persistRunBoundary(
         status: run["status"],
         startedAt: run["startedAt"],
         ...(typeof run["finishedAt"] === "number" ? { finishedAt: run["finishedAt"] } : {}),
-        ...(typeof run["error"] === "string" && run["error"].trim()
+        ...(run["status"] === "failed" && typeof run["error"] === "string" && run["error"].trim()
           ? { error: run["error"].trim() }
           : {}),
       },

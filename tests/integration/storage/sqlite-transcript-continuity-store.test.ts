@@ -9,6 +9,7 @@ import { DatabaseSync } from "node:sqlite";
 import type { RuntimeEvent } from "@pico/storage/runtime-event";
 import {
   RuntimeEventStoreRunSealedError,
+  RUNTIME_TRANSCRIPT_PROJECTOR_VERSION,
   type RuntimeTranscriptChangeCursor,
   type RuntimeTranscriptProjectionCursor,
 } from "@pico/storage/runtime-event-store-contracts";
@@ -793,7 +794,7 @@ test("projector v4 rebuild removes durable Graph control history but keeps same-
 
     store = new SqliteRuntimeEventStore({ storageRoot: storage });
     const rebuilt = await store.readTranscriptProjectionPage({ sessionId, maxBytes: 64 * 1024 });
-    assert.equal(rebuilt.watermark.projectorVersion, 5);
+    assert.equal(rebuilt.watermark.projectorVersion, RUNTIME_TRANSCRIPT_PROJECTOR_VERSION);
     assert.notEqual(rebuilt.watermark.historyEpoch, before.historyEpoch);
     const visible = JSON.stringify(rebuilt.items.map((item) => item.payload));
     assert.doesNotMatch(visible, /Graph Supervisor wake/u);
@@ -1221,7 +1222,7 @@ test("Graph child transcript exposes tools and formal output after upgrading an 
     store = new SqliteRuntimeEventStore({ storageRoot: storage });
     const page = await store.readTranscriptProjectionPage({ sessionId, maxBytes: 64 * 1024 });
     assert.notEqual(page.watermark.historyEpoch, before.historyEpoch);
-    assert.equal(page.watermark.projectorVersion, 5);
+    assert.equal(page.watermark.projectorVersion, RUNTIME_TRANSCRIPT_PROJECTOR_VERSION);
     const serialized = JSON.stringify(page.items);
     assert.match(serialized, /read_file/u);
     assert.match(serialized, /子任务结果：CUA_BRANCH_A_17/u);
