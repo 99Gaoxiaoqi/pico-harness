@@ -5,6 +5,7 @@ import {
   TRANSCRIPT_PROJECTOR_VERSION,
   type RuntimeParams,
   type RuntimeResult,
+  type RuntimeRun,
   type RuntimeSessionSubscriptionFrame,
 } from "../../../packages/protocol/src/index.js";
 import {
@@ -399,6 +400,124 @@ test("completed streams are removed from owner memory and cannot revive after re
   );
   assert.deepEqual(reopened.activeOverlay, []);
 });
+
+for (const status of ["failed", "cancelled", "succeeded"] as const) {
+  for (const retryStatus of ["running", "paused", "pause_requested", "cancelling"] as const) {
+    test(`owner retires ${status} streams across reopen and late deltas while accepting a newer ${retryStatus} retry snapshot`, async () => {
+      const source = new FakeSource();
+      const registry = new SessionSubscriptionRegistry("host-epoch-1", source);
+      const open = () =>
+        registry.open(
+          { workspacePath, sessionId },
+          { connectionId: "test", push: async () => undefined },
+        );
+      const run = (state: RuntimeRun["status"], version: number): RuntimeRun => ({
+        runId: "run-1",
+        workspacePath,
+        sessionId,
+        status: state,
+        description: "test",
+        version,
+        startedAt: 1,
+        updatedAt: version,
+      });
+      const publishRun = (value: RuntimeRun) =>
+        registry.publishRuntimeNotification(
+          createRuntimeNotification({
+            topic: "run.updated",
+            scope: { workspacePath, sessionId, runId: value.runId },
+            resourceVersion: value.version,
+            at: value.version,
+            payload: { run: value },
+          }),
+        );
+      const old = {
+        runId: "run-1",
+        turnId: "old-turn",
+        itemId: "old-item",
+        streamId: "old-stream",
+        kind: "thinking" as const,
+        text: "old",
+        startOffsetBytes: 0,
+        endOffsetBytes: 3,
+        anchorSequence: 1,
+      };
+      try {
+        await open();
+        publishRun(run("running", 1));
+        registry.publishSessionDelta({ workspacePath, sessionId, ...old });
+        publishRun(run(status, 2));
+        registry.publishSessionDelta({
+          workspacePath,
+          sessionId,
+          ...old,
+          text: "late",
+          startOffsetBytes: 3,
+        });
+        registry.publishSessionDelta({
+          workspacePath,
+          sessionId,
+          ...old,
+          itemId: "unseen-late",
+          streamId: "unseen-late",
+          text: "late",
+        });
+        assert.deepEqual(
+          (await open()).activeOverlay,
+          [],
+          "new subscriptions must never inherit terminal owner memory or late deltas",
+        );
+        source.openSnapshot = { ...snapshot(), activeRun: run("queued", 3), activeOverlay: [old] };
+        assert.deepEqual(
+          (await open()).activeOverlay,
+          [],
+          "queued alone cannot revive a retired run",
+        );
+        const next = {
+          ...old,
+          turnId: `${retryStatus}-turn`,
+          itemId: `${retryStatus}-item`,
+          streamId: `${retryStatus}-stream`,
+          text: "new",
+        };
+        source.openSnapshot = {
+          ...snapshot(),
+          activeRun: run(retryStatus, 4),
+          activeOverlay: [old, next],
+        };
+        const reopened = await open();
+        assert.ok(reopened.activeOverlay.some((entry) => entry.itemId === next.itemId));
+        assert.equal(
+          reopened.activeOverlay.some((entry) => entry.itemId === old.itemId),
+          false,
+        );
+        publishRun(run(status, 2));
+        registry.publishSessionDelta({
+          workspacePath,
+          sessionId,
+          ...old,
+          text: "late",
+          startOffsetBytes: 3,
+        });
+        registry.publishSessionDelta({
+          workspacePath,
+          sessionId,
+          ...next,
+          text: " suffix",
+          startOffsetBytes: 3,
+        });
+        const final = await open();
+        assert.equal(
+          final.activeOverlay.some((entry) => entry.itemId === old.itemId),
+          false,
+        );
+        assert.ok(final.activeOverlay.some((entry) => entry.text === "new suffix"));
+      } finally {
+        registry.shutdown();
+      }
+    });
+  }
+}
 
 test("page and advance operations preserve fixed watermark inputs", async () => {
   const source = new FakeSource();
