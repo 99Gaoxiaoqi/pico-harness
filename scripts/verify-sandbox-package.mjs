@@ -3,7 +3,7 @@ import { constants } from "node:fs";
 import { access, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -59,9 +59,17 @@ try {
   }
   await access(join(packageRoot, "resources/licenses/bubblewrap/COPYING"));
 
-  const packagedBackend = await import(
-    pathToFileURL(join(packageRoot, "dist/safety/process-sandbox/backend.js")).href
-  );
+  // Resolve the import-only export from the extracted package, never from this workspace.
+  const packagedBackendUrl = run(
+    process.execPath,
+    [
+      "--input-type=module",
+      "--eval",
+      'console.log(import.meta.resolve("@pico/pico-host/process-sandbox/backend"))',
+    ],
+    packageRoot,
+  ).trim();
+  const packagedBackend = await import(packagedBackendUrl);
   for (const arch of manifest.linux.architectures) {
     const executable = packagedBackend.resolveBundledSandboxExecutable("linux", arch);
     if (!packagedBackend.isVerifiedBundledExecutable(executable, "linux")) {

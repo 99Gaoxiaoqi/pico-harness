@@ -42,7 +42,7 @@ if (listOnly) {
       "--import",
       "tsx",
       "--import",
-      "./src/tui/preload-env.ts",
+      "@pico/cli/tui/preload-env",
       "--test",
       "--test-concurrency=1",
       ...files,
