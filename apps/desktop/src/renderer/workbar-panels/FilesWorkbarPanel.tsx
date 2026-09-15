@@ -149,7 +149,8 @@ export function FilesWorkbarPanel({
                   {onOpenArtifact && (
                     <button
                       type="button"
-                      aria-label="打开生成文件"
+                      aria-label="打开生成文件位置"
+                      title="打开生成文件位置"
                       onClick={() => onOpenArtifact(selected.id)}
                     >
                       <ExternalLink aria-hidden="true" size={14} />
@@ -159,6 +160,7 @@ export function FilesWorkbarPanel({
                     <button
                       type="button"
                       aria-label="另存生成文件"
+                      title="另存生成文件"
                       onClick={() => onSaveArtifactAs(selected.id)}
                     >
                       <Download aria-hidden="true" size={14} />

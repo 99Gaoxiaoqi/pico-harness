@@ -8,6 +8,7 @@ import { TaskListTool, TaskOutputTool, TaskStopTool } from "@pico/runtime/backgr
 import { BashTool } from "@pico/pico-host/bash-tool";
 import { ReadFileTool } from "@pico/pico-host/read-file-tool";
 import { WriteFileTool } from "@pico/pico-host/write-file-tool";
+import type { BoundSessionArtifactAuthority } from "./session-artifact-writer.js";
 import { EditFileTool } from "@pico/pico-host/edit-file-tool";
 import { GlobTool } from "@pico/pico-host/glob-tool";
 import { GrepTool } from "@pico/pico-host/grep-tool";
@@ -68,6 +69,7 @@ export interface DefaultToolRegistryOptions {
   backgroundManager?: BackgroundManager;
   /** Session-scoped durable task authority shared by model tools and prompt injection. */
   sessionTasks?: BoundSessionTaskAuthority;
+  sessionArtifacts?: BoundSessionArtifactAuthority;
   /**
    * Goal Manager 单例(ROADMAP 3.5)。三个 Goal 工具共享此实例,
    * host 创建后同时传给 engine(经 AgentEngineOptions.goalManager),
@@ -132,6 +134,7 @@ export function buildDefaultToolRegistry(
   const {
     backgroundManager = new BackgroundManager(),
     sessionTasks,
+    sessionArtifacts,
     goalManager,
     todoStore,
     toolDisclosure,
@@ -155,7 +158,7 @@ export function buildDefaultToolRegistry(
   // 必须先于 host 后续挂载的审批中间件,避免一次审批扩大文件系统边界。
   if (!deferWorkspaceBoundary) registry.useRequest(buildWorkspaceBoundaryMiddleware(roots));
   registry.register(new ReadFileTool(roots));
-  registry.register(new WriteFileTool(roots));
+  registry.register(new WriteFileTool(roots, sessionArtifacts));
   registry.register(new EditFileTool(roots));
   registry.register(
     new BashTool(workDir, backgroundManager, {
