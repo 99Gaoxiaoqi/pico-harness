@@ -1079,6 +1079,7 @@ export function createProductionRuntimeServices(
               activeOverlay,
               overlayToolCallIds,
               event,
+              currentRuntimeRun()?.currentTurnId ?? overlayRuntimeRun?.currentTurnId,
             );
             if (!handledByOverlay) {
               sessionSubscriptions?.publishReporterEvent(workspacePath, event);
@@ -2858,15 +2859,19 @@ function persistReporterOverlayDelta(
   overlay: PersistentActiveOverlay,
   toolCallIds: Map<string, string>,
   event: DesktopReporterEvent,
+  runtimeTurnId: string | undefined,
 ): boolean {
   const turn =
     typeof event.payload["turn"] === "number" && Number.isSafeInteger(event.payload["turn"])
       ? event.payload["turn"]
       : 0;
-  const stableTurnId = `turn:${event.runId}:${turn}`;
+  // Desktop runId owns the live control lifecycle; Runtime turnId owns the
+  // canonical message identity. They can belong to different runs.
+  const stableTurnId = runtimeTurnId;
   if (event.type === "assistant.delta" || event.type === "assistant.reasoning.delta") {
     const text = firstString(event.payload["delta"]);
     if (!text || !event.sessionId) return true;
+    if (!stableTurnId) throw new Error("Active Overlay 缺少对应 Runtime Turn 身份");
     const thinking = event.type === "assistant.reasoning.delta";
     void overlay.append({
       sessionId: event.sessionId,
@@ -2896,6 +2901,7 @@ function persistReporterOverlayDelta(
     const providerCallId = firstString(event.payload["providerCallId"]);
     const toolCallId = providerCallId ? toolCallIds.get(providerCallId) : undefined;
     if (!text || !event.sessionId || !toolCallId) return false;
+    if (!stableTurnId) throw new Error("Active Overlay 缺少对应 Runtime Turn 身份");
     const stream = event.payload["stream"] === "stderr" ? "stderr" : "stdout";
     void overlay.append({
       sessionId: event.sessionId,
@@ -2913,6 +2919,9 @@ function persistReporterOverlayDelta(
   if (event.type === "assistant.message") {
     void overlay.complete(`assistant:live:${event.runId}:${turn}`);
     void overlay.complete(`thinking:live:${event.runId}:${turn}`);
+    // The canonical message is already committed. The registry's legacy
+    // non-streaming fallback would create another item with the Desktop ID.
+    return true;
   } else if (event.type === "assistant.suppressed") {
     void overlay.complete(`assistant:live:${event.runId}:${turn}`);
     void overlay.complete(`thinking:live:${event.runId}:${turn}`);

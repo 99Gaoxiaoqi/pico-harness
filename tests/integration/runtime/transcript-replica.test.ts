@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   TRANSCRIPT_PROJECTOR_VERSION,
   type RuntimeResult,
+  type RuntimeRun,
   type RuntimeSession,
   type RuntimeSessionSubscriptionFrame,
   type RuntimeTranscriptItemRecord,
@@ -11,6 +12,273 @@ import {
 import { TranscriptReplica } from "@pico/transcript-replica";
 
 const sessionId = "session-replica";
+
+function run(runId: string, status: RuntimeRun["status"] = "running"): RuntimeRun {
+  return {
+    runId,
+    status,
+    sessionId,
+    workspacePath: "/workspace",
+    description: "test",
+    startedAt: 1,
+    updatedAt: 2,
+    version: 2,
+  };
+}
+
+test("transcript replica: durable replacement and terminal fences reject late overlays while retaining the current run", () => {
+  for (const status of ["succeeded", "failed", "cancelled"] as const) {
+    const replica = new TranscriptReplica(sessionId);
+    assert.equal(
+      replica.installOpen(
+        replica.beginOpen(),
+        openResult({ durableTail: [], activeRun: run("desktop-1") }),
+      ),
+      true,
+    );
+    let sequence = 0;
+    const delta = (runId: string, itemId: string, text: string, offset = 0) =>
+      replica.receiveFrame(
+        frame(++sequence, {
+          type: "subscription.session_delta",
+          runId,
+          turnId: "turn:runtime-1:1",
+          itemId,
+          streamId: `${runId}:${itemId}`,
+          kind: "thinking",
+          startOffsetBytes: offset,
+          text,
+        }),
+      );
+    const state = (value: RuntimeRun) =>
+      replica.receiveFrame({
+        hostEpoch: "host-1",
+        subscriptionId: "subscription-1",
+        sessionId,
+        sequence: ++sequence,
+        type: "subscription.run_state",
+        run: value,
+      });
+    const itemId = "message:turn:runtime-1:1:thinking";
+    delta("desktop-1", itemId, "reasoning");
+    const request = replica.beginAdvance(watermark(2))!;
+    replica.applyAdvancePage(request, {
+      after: request.after,
+      through: request.through,
+      changes: [
+        {
+          op: "upsert",
+          record: {
+            ...record(itemId, 2, 2, "reasoning"),
+            item: {
+              id: itemId,
+              kind: "thinking",
+              content: "reasoning",
+              runId: "runtime-1",
+              turnId: "turn:runtime-1:1",
+            },
+          },
+        },
+      ],
+    });
+    assert.equal(
+      replica.view.activeOverlay.length,
+      0,
+      "durable item replaces live item by identity",
+    );
+    delta("desktop-1", itemId, "late", 9);
+    assert.equal(
+      replica.view.phase,
+      "ready",
+      "late durable-covered frame must not trigger an offset recovery",
+    );
+    assert.equal(
+      replica.view.activeOverlay.length,
+      0,
+      "late delta cannot duplicate the durable item",
+    );
+    delta("desktop-1", "pending", "pending");
+    state(run("desktop-1", status));
+    delta("desktop-1", "pending", "late", 7);
+    assert.equal(
+      replica.view.activeOverlay.length,
+      0,
+      `${status} permanently seals the run overlay`,
+    );
+    state(run("desktop-2"));
+    delta("desktop-2", "current", "current");
+    state(run("queued-next", "queued"));
+    state(run("desktop-1", status));
+    delta("desktop-1", "new-late-stream", "late");
+    const lateCommit = replica.beginAdvance(watermark(3))!;
+    replica.applyAdvancePage(lateCommit, {
+      after: lateCommit.after,
+      through: lateCommit.through,
+      changes: [{ op: "upsert", record: record("pending", 3, 3, "committed after terminal") }],
+    });
+    delta("desktop-2", "current", " suffix", 7);
+    assert.equal(replica.view.activeRun?.runId, "desktop-2");
+    assert.deepEqual(
+      replica.view.activeOverlay.map((entry) => entry.text),
+      ["current suffix"],
+    );
+    assert.equal(
+      replica.view.records.length,
+      2,
+      "terminal control frames never remove or reject durable history",
+    );
+  }
+});
+
+test("transcript replica: a new run retires old overlays and open reconciles already durable items", () => {
+  const replica = new TranscriptReplica(sessionId);
+  const overlay = {
+    runId: "old",
+    turnId: "turn-old",
+    itemId: "durable",
+    streamId: "old-stream",
+    kind: "thinking" as const,
+    text: "same",
+    startOffsetBytes: 0,
+    endOffsetBytes: 4,
+    anchorSequence: 1,
+  };
+  assert.equal(
+    replica.installOpen(
+      replica.beginOpen(),
+      openResult({
+        durableTail: [record("durable", 1, 1, "same")],
+        activeOverlay: [overlay],
+        activeRun: run("old"),
+      }),
+    ),
+    true,
+  );
+  assert.equal(
+    replica.view.activeOverlay.length,
+    0,
+    "reopen must not show both durable and overlay copies",
+  );
+  replica.receiveFrame(
+    frame(1, {
+      type: "subscription.session_delta",
+      ...overlay,
+      itemId: "unfinished",
+      text: "pending",
+    }),
+  );
+  replica.receiveFrame({
+    hostEpoch: "host-1",
+    subscriptionId: "subscription-1",
+    sessionId,
+    sequence: 2,
+    type: "subscription.run_state",
+    run: run("new"),
+  });
+  assert.equal(
+    replica.view.activeOverlay.length,
+    0,
+    "new run clears superseded stream even when a terminal event was missed",
+  );
+  replica.receiveFrame(
+    frame(3, {
+      type: "subscription.session_delta",
+      ...overlay,
+      itemId: "unfinished",
+      text: "late",
+      startOffsetBytes: 7,
+    }),
+  );
+  assert.equal(replica.view.phase, "ready");
+  assert.equal(replica.view.activeOverlay.length, 0);
+});
+
+test("transcript replica: durable tool starts preserve current output until a durable removal", () => {
+  const replica = new TranscriptReplica(sessionId);
+  const tool: RuntimeTranscriptItemRecord = {
+    ...record("tool:call-1", 1, 1, ""),
+    item: {
+      id: "tool:call-1",
+      kind: "tool",
+      name: "bash",
+      args: "{}",
+      status: "running",
+      data: { toolCallId: "call-1", providerCallId: "provider-1", entryId: "entry-1" },
+    },
+  };
+  replica.installOpen(
+    replica.beginOpen(),
+    openResult({ durableTail: [tool], activeRun: run("current") }),
+  );
+  const output = {
+    type: "subscription.session_delta" as const,
+    runId: "current",
+    turnId: "turn-current",
+    itemId: tool.itemId,
+    streamId: "stdout-1",
+    kind: "toolOutput" as const,
+    stream: "stdout" as const,
+    text: "output",
+    startOffsetBytes: 0,
+  };
+  replica.receiveFrame(frame(1, output));
+  const update = replica.beginAdvance(watermark(2))!;
+  replica.applyAdvancePage(update, {
+    after: update.after,
+    through: update.through,
+    changes: [{ op: "upsert", record: { ...tool, itemRevision: 2 } }],
+  });
+  replica.receiveFrame(frame(2, { ...output, text: " suffix", startOffsetBytes: 6 }));
+  assert.deepEqual(
+    replica.view.activeOverlay.map((entry) => entry.text),
+    ["output suffix"],
+  );
+  const removal = replica.beginAdvance(watermark(3))!;
+  replica.applyAdvancePage(removal, {
+    after: removal.after,
+    through: removal.through,
+    changes: [{ op: "remove", itemId: tool.itemId, itemRevision: 3 }],
+  });
+  replica.receiveFrame(frame(3, { ...output, text: "late", startOffsetBytes: 13 }));
+  assert.equal(replica.view.activeOverlay.length, 0);
+  assert.equal(replica.view.phase, "ready");
+});
+
+test("transcript replica: an explicit newer exact-run retry accepts new items without reviving retired streams", () => {
+  const replica = new TranscriptReplica(sessionId);
+  replica.installOpen(
+    replica.beginOpen(),
+    openResult({ activeRun: run("retry"), durableTail: [] }),
+  );
+  const delta = {
+    type: "subscription.session_delta" as const,
+    runId: "retry",
+    turnId: "old-turn",
+    itemId: "old-item",
+    streamId: "assistant",
+    kind: "text" as const,
+    text: "old",
+    startOffsetBytes: 0,
+  };
+  replica.receiveFrame(frame(1, delta));
+  const state = {
+    hostEpoch: "host-1",
+    subscriptionId: "subscription-1",
+    sessionId,
+    type: "subscription.run_state" as const,
+  };
+  replica.receiveFrame({ ...state, sequence: 2, run: run("retry", "failed") });
+  replica.receiveFrame({ ...state, sequence: 3, run: { ...run("retry"), version: 3 } });
+  replica.receiveFrame(frame(4, { ...delta, itemId: "new-item", turnId: "new-turn", text: "new" }));
+  replica.receiveFrame(frame(5, { ...delta, text: "late", startOffsetBytes: 3 }));
+  replica.receiveFrame({ ...state, sequence: 6, run: run("retry", "failed") });
+  assert.equal(replica.view.activeRun?.status, "running");
+  assert.deepEqual(
+    replica.view.activeOverlay.map((entry) => entry.text),
+    ["new"],
+  );
+  assert.equal(replica.view.phase, "ready");
+});
 
 function watermark(
   throughSequence: number,
