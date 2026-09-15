@@ -1,4 +1,4 @@
-import { raceWithDeadlineReject } from "../../../../src/util/race-with-deadline.js";
+import { raceWithDeadlineReject } from "@pico/runtime/deadline";
 
 /**
  * Runtime 连接监督器（3-C：fail-stuck 自动恢复）。
