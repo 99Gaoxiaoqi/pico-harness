@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { cp, lstat, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, posix, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
@@ -14,51 +14,28 @@ export async function buildPicoBundle(outputPath) {
   const destination = resolve(outputPath);
   const stage = `${destination}.stage`;
   await rm(stage, { recursive: true, force: true });
-  await mkdir(join(stage, "packages/protocol"), { recursive: true });
-  const rootPackage = JSON.parse(await readFile(join(projectRoot, "package.json"), "utf8"));
-  const protocolPackage = JSON.parse(
-    await readFile(join(projectRoot, "packages/protocol/package.json"), "utf8"),
-  );
-  const deps = Object.fromEntries(
-    Object.entries(rootPackage.dependencies).filter(
-      ([name]) => name !== "@pico/runtime-host" && name !== "@pico/transcript-replica",
-    ),
-  );
-  const packageJson = {
-    name: "pico-headless-benchmark-bundle",
-    version: rootPackage.version,
-    private: true,
-    type: "module",
-    dependencies: {
-      ...deps,
-      "@pico/protocol": "file:packages/protocol",
-    },
-  };
+  await mkdir(stage, { recursive: true });
+  const { packageJson, localPackages } = await createBundlePackagePlan();
   await cp(join(projectRoot, "dist"), join(stage, "dist"), { recursive: true });
-  await cp(join(projectRoot, "packages/protocol/dist"), join(stage, "packages/protocol/dist"), {
-    recursive: true,
-  });
+  for (const local of localPackages) {
+    const target = join(stage, local.path);
+    await mkdir(target, { recursive: true });
+    for (const artifact of local.artifacts) {
+      await cp(join(projectRoot, local.path, artifact), join(target, artifact), {
+        recursive: true,
+      });
+    }
+    await writeFile(
+      join(target, "package.json"),
+      `${JSON.stringify(local.packageJson, null, 2)}\n`,
+    );
+  }
   await cp(
     join(projectRoot, "scripts/terminal-bench/container-launcher.mjs"),
     join(stage, "container-launcher.mjs"),
   );
   await copyVerifiedXattrHelpers(stage);
   await writeFile(join(stage, "package.json"), `${JSON.stringify(packageJson, null, 2)}\n`);
-  await writeFile(
-    join(stage, "packages/protocol/package.json"),
-    `${JSON.stringify(
-      {
-        name: protocolPackage.name,
-        version: protocolPackage.version,
-        type: protocolPackage.type,
-        main: protocolPackage.main,
-        types: protocolPackage.types,
-        exports: protocolPackage.exports,
-      },
-      null,
-      2,
-    )}\n`,
-  );
   const approvedLockfilePath = join(
     projectRoot,
     "benchmarks/terminal_bench_2_1/bundle-package-lock.json",
@@ -82,10 +59,12 @@ export async function buildPicoBundle(outputPath) {
     throw new Error("Terminal-Bench bundle dependency lock is not pre-approved");
   }
   await rm(join(stage, "node_modules/.bin"), { recursive: true, force: true });
-  await rm(join(stage, "node_modules/@pico/protocol"), { recursive: true, force: true });
-  await cp(join(stage, "packages/protocol"), join(stage, "node_modules/@pico/protocol"), {
-    recursive: true,
-  });
+  // npm file dependencies are links. Materialize every workspace package before archiving.
+  for (const local of localPackages) {
+    const installed = join(stage, "node_modules", local.packageJson.name);
+    await rm(installed, { recursive: true, force: true });
+    await cp(join(stage, local.path), installed, { recursive: true });
+  }
   await assertNoLinks(stage);
   await mkdir(dirname(destination), { recursive: true });
   await run("tar", ["-czf", destination, "-C", stage, "."], projectRoot);
@@ -94,6 +73,68 @@ export async function buildPicoBundle(outputPath) {
     .digest("hex");
   await rm(stage, { recursive: true, force: true });
   return { path: destination, sha256: digest, lockfileSha256 };
+}
+
+/** The staged dependency graph is local and independent of unpublished workspace versions. */
+export async function createBundlePackagePlan() {
+  const rootPackage = JSON.parse(await readFile(join(projectRoot, "package.json"), "utf8"));
+  const available = new Map();
+  for (const directory of await readdir(join(projectRoot, "packages"), { withFileTypes: true })) {
+    if (!directory.isDirectory()) continue;
+    const path = `packages/${directory.name}`;
+    const pkg = JSON.parse(await readFile(join(projectRoot, path, "package.json"), "utf8"));
+    available.set(pkg.name, { path, pkg });
+  }
+  const selected = new Map();
+  function localize(dependencies, parentPath = "") {
+    return Object.fromEntries(
+      Object.entries(dependencies).map(([name, version]) => {
+        const local = available.get(name);
+        if (!local) {
+          if (name.startsWith("@pico/"))
+            throw new Error(`Missing local benchmark dependency: ${name}`);
+          return [name, version];
+        }
+        if (!selected.has(name)) {
+          selected.set(name, local);
+          for (const field of ["dependencies", "optionalDependencies", "peerDependencies"]) {
+            localize(local.pkg[field] ?? {}, local.path);
+          }
+        }
+        return [name, `file:${posix.relative(parentPath, local.path)}`];
+      }),
+    );
+  }
+  const packageJson = {
+    name: "pico-headless-benchmark-bundle",
+    version: rootPackage.version,
+    private: true,
+    type: "module",
+    dependencies: localize(rootPackage.dependencies),
+  };
+  // Root file dependencies ensure npm resolves transitive workspaces without consulting a registry.
+  for (const [name, local] of selected) packageJson.dependencies[name] = `file:${local.path}`;
+  const localPackages = [];
+  for (const local of [...selected.values()].sort((a, b) => a.path.localeCompare(b.path))) {
+    const manifest = { ...local.pkg };
+    delete manifest.scripts;
+    delete manifest.devDependencies;
+    delete manifest.workspaces;
+    for (const field of ["dependencies", "optionalDependencies", "peerDependencies"]) {
+      if (manifest[field]) manifest[field] = localize(manifest[field], local.path);
+    }
+    const artifacts = ["dist"];
+    for (const asset of ["resources", "assets"]) {
+      try {
+        if ((await lstat(join(projectRoot, local.path, asset))).isDirectory())
+          artifacts.push(asset);
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
+    }
+    localPackages.push({ path: local.path, packageJson: manifest, artifacts });
+  }
+  return { packageJson, localPackages };
 }
 
 async function copyVerifiedXattrHelpers(stage) {
