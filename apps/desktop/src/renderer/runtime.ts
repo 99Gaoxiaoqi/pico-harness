@@ -25,6 +25,7 @@ import { mergeHydratedConversationItems } from "./conversation/items.js";
 import {
   approvalFromPlanControlSnapshot,
   conversationItemsFromReplica,
+  preserveResolvedInteractions,
   overlayRuntimeItem,
   parseConversation,
   parseGoalItem,
@@ -38,6 +39,7 @@ import {
   type AppData,
   type AppRuntimePhase,
   type CapabilityView,
+  type ChangeView,
   type ConversationView,
   type MemoryItemPatch,
   type MemorySettingsPatch,
@@ -348,6 +350,14 @@ export interface RuntimeActions {
     readonly feedback?: string;
   }): Promise<void>;
   respondPrompt(id: string, answer: string): Promise<void>;
+  queryReview(workspacePath: string, runId: string): Promise<{
+    readonly changes: readonly ChangeView[];
+    readonly fingerprint: string;
+  }>;
+  queryReviewDiff(workspacePath: string, runId: string, path: string): Promise<{
+    readonly patch: string;
+    readonly fingerprint: string;
+  }>;
   loadChangeDiff(input: {
     readonly workspacePath: string;
     readonly sessionId?: string;
@@ -357,9 +367,9 @@ export interface RuntimeActions {
   reviewChanges(
     decision: "approve" | "request_changes",
     message?: string,
-    target?: { readonly runId: string; readonly fingerprint: string },
+    target?: { readonly workspacePath?: string; readonly runId: string; readonly fingerprint: string },
   ): Promise<void>;
-  applyChanges(target?: { readonly runId: string; readonly fingerprint: string }): Promise<void>;
+  applyChanges(target?: { readonly workspacePath?: string; readonly runId: string; readonly fingerprint: string }): Promise<void>;
   previewRewind(ref: WorkspaceSessionRef): Promise<
     | {
         readonly checkpointId: string;
@@ -374,7 +384,7 @@ export interface RuntimeActions {
     readonly name: string;
     readonly prompt: string;
     readonly schedule: string;
-  }): Promise<void>;
+  }): Promise<boolean>;
   runJob(id: string): Promise<void>;
   deleteJob(id: string): Promise<void>;
   loadCapabilityScope(kind: "skills" | "mcp", workspacePath?: string): Promise<void>;
@@ -467,6 +477,8 @@ export function useRuntimeStore(): RuntimeStore {
   const temporaryWorkspaceRequest = useRef(new TemporaryWorkspaceRequest());
   const desktopContinuityRef = useRef<DesktopSessionContinuity | undefined>(undefined);
   const desktopContinuityBridgeRef = useRef<DesktopBridge | undefined>(undefined);
+  const usageRefreshRef = useRef(new Map<string, { stamp: string; timer?: ReturnType<typeof setTimeout> }>());
+  const usageLoadTracker = useRef(new ConversationLoadTracker());
   const pendingSendRef = useRef<
     | {
         readonly identity: string;
@@ -475,6 +487,13 @@ export function useRuntimeStore(): RuntimeStore {
     | undefined
   >(undefined);
   dataRef.current = data;
+
+  useEffect(() => () => {
+    for (const pending of usageRefreshRef.current.values()) {
+      if (pending.timer) clearTimeout(pending.timer);
+    }
+    usageRefreshRef.current.clear();
+  }, []);
 
   const applyReplicaView = useCallback(
     (workspacePath: string, sessionId: string, view: TranscriptReplicaView) => {
@@ -501,7 +520,7 @@ export function useRuntimeStore(): RuntimeStore {
             ...current.conversations,
             [conversationKey]: {
               ...conversationWithoutRun,
-              items: conversationItemsFromReplica(view),
+              items: preserveResolvedInteractions(conversationItemsFromReplica(view), existing.items),
               hasEarlier: view.olderCursor !== undefined,
               queuedCount: view.queuedInputs.length,
               ...(activeRun ? { runId: activeRun.runId } : {}),
@@ -525,6 +544,34 @@ export function useRuntimeStore(): RuntimeStore {
             : current.runs,
         };
       });
+      // Usage is a durable aggregate, not an overlay token estimate. Refresh only
+      // when the session's durable boundary advances, coalescing rapid frames.
+      if (view.phase === "ready" && view.watermark) {
+        const stamp = JSON.stringify(view.watermark);
+        const previous = usageRefreshRef.current.get(conversationKey);
+        if (previous?.stamp === stamp) return;
+        if (previous?.timer) clearTimeout(previous.timer);
+        const load = usageLoadTracker.current.begin(conversationKey);
+        const pending = {
+          stamp,
+          timer: setTimeout(() => {
+            const bridge = getBridge();
+            if (!bridge || usageRefreshRef.current.get(conversationKey) !== pending) return;
+            void optionalInvoke(bridge, "usage.get", { workspacePath, sessionId }).then((result) => {
+              if (result.error || !usageLoadTracker.current.isCurrent(load) ||
+                  usageRefreshRef.current.get(conversationKey) !== pending) return;
+              setData((current) => {
+                const conversation = current.conversations[conversationKey];
+                if (!conversation) return current;
+                return { ...current, conversations: { ...current.conversations,
+                  [conversationKey]: { ...conversation, usage: parseUsage(result.value) },
+                } };
+              });
+            });
+          }, 50),
+        };
+        usageRefreshRef.current.set(conversationKey, pending);
+      }
     },
     [],
   );
@@ -894,7 +941,11 @@ export function useRuntimeStore(): RuntimeStore {
 
   const loadWorkspace = useCallback(async (bridge: DesktopBridge, workspacePath: string) => {
     workspaceLoadIntentRef.current = workspacePath;
-    workspaceIndexLoadGenerationRef.current += 1;
+    // Refreshing the current workspace (notably after a native picker focus event)
+    // must not invalidate a concurrent global index refresh after registration.
+    if (dataRef.current.workspacePath !== workspacePath) {
+      workspaceIndexLoadGenerationRef.current += 1;
+    }
     const generation = workspaceLoadGenerationRef.current + 1;
     workspaceLoadGenerationRef.current = generation;
     const isCurrentLoad = () => workspaceLoadGenerationRef.current === generation;
@@ -1083,7 +1134,10 @@ export function useRuntimeStore(): RuntimeStore {
             ...conversation,
             ...(latestReplicaView
               ? {
-                  items: conversationItemsFromReplica(latestReplicaView),
+                  items: preserveResolvedInteractions(
+                    conversationItemsFromReplica(latestReplicaView),
+                    current.conversations[conversationKey]?.items ?? [],
+                  ),
                   hasEarlier: latestReplicaView.olderCursor !== undefined,
                   queuedCount: latestReplicaView.queuedInputs.length,
                 }
@@ -2085,6 +2139,19 @@ export function useRuntimeStore(): RuntimeStore {
           );
         });
       },
+      async queryReview(workspacePath, runId) {
+        if (preview) return { changes: previewData.changes, fingerprint: previewData.changeFingerprint ?? "preview" };
+        const bridge = getBridge();
+        if (!bridge) throw new Error("桌面安全桥接不可用。");
+        const value = await invoke(bridge, "changes.list", { workspacePath, runId });
+        return { ...parseChanges(value), fingerprint: value.fingerprint };
+      },
+      async queryReviewDiff(workspacePath, runId, path) {
+        if (preview) return { patch: previewData.changes.find((change) => change.path === path)?.patch ?? "", fingerprint: previewData.changeFingerprint ?? "preview" };
+        const bridge = getBridge();
+        if (!bridge) throw new Error("桌面安全桥接不可用。");
+        return invoke(bridge, "changes.diff", { workspacePath, runId, path });
+      },
       async loadChangeDiff(input) {
         const { workspacePath, sessionId, runId, path } = input;
         if (!workspacePath || !runId || !path) return;
@@ -2120,7 +2187,7 @@ export function useRuntimeStore(): RuntimeStore {
         });
       },
       async reviewChanges(decision, reviewMessage, target) {
-        const workspacePath = dataRef.current.workspacePath;
+        const workspacePath = target?.workspacePath ?? dataRef.current.workspacePath;
         const runId =
           target?.runId ??
           dataRef.current.runs.find((run) => run.workspacePath === workspacePath)?.id;
@@ -2135,11 +2202,11 @@ export function useRuntimeStore(): RuntimeStore {
               expectedFingerprint,
               ...(reviewMessage ? { message: reviewMessage } : {}),
             });
-          setMessage(decision === "approve" ? "更改已批准，等待应用。" : "修改意见已发回任务。");
+          setMessage(decision === "approve" ? "更改审阅已批准；工作区文件不会再次写入。" : "修改意见已记录。");
         });
       },
       async applyChanges(target) {
-        const workspacePath = dataRef.current.workspacePath;
+        const workspacePath = target?.workspacePath ?? dataRef.current.workspacePath;
         const runId =
           target?.runId ??
           dataRef.current.runs.find((run) => run.workspacePath === workspacePath)?.id;
@@ -2148,7 +2215,7 @@ export function useRuntimeStore(): RuntimeStore {
         await perform("apply", async (bridge) => {
           if (!preview)
             await invoke(bridge, "changes.apply", { workspacePath, runId, expectedFingerprint });
-          setMessage("更改已应用到工作区。");
+          setMessage("已核验当前工作区内容并确认更改。");
         });
       },
       async previewRewind(ref) {
@@ -2228,8 +2295,8 @@ export function useRuntimeStore(): RuntimeStore {
       async createJob(input) {
         const workspacePath = dataRef.current.workspacePath;
         if (!workspacePath || !input.name.trim() || !input.prompt.trim() || !input.schedule.trim())
-          return;
-        await perform("create-job", async (bridge) => {
+          return false;
+        return perform("create-job", async (bridge) => {
           if (preview) {
             setData((current) => ({
               ...current,

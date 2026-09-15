@@ -34,7 +34,9 @@ export function AutomationsPage() {
               typeof prompt === "string" &&
               typeof schedule === "string"
             )
-              void actions.createJob({ name, prompt, schedule }).then(() => setCreating(false));
+              void actions.createJob({ name, prompt, schedule }).then((succeeded) => {
+                if (succeeded) setCreating(false);
+              });
           }}
         >
           <div>

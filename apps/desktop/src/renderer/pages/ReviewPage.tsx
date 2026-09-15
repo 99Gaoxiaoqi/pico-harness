@@ -1,7 +1,8 @@
-import { FileCode2, FileDiff, History, RotateCcw } from "lucide-react";
+import { isTerminalRunStatus } from "@pico/protocol";
+import { FileCode2, FileDiff, History, RefreshCw, RotateCcw } from "lucide-react";
 import { useEffect, useState } from "react";
-import { useLocation } from "react-router-dom";
-import { Button, CapabilityUnavailable, EmptyState } from "../components.js";
+import { useLocation, useNavigate } from "react-router-dom";
+import { Button, EmptyState, InlineNotice } from "../components.js";
 import type { ChangeView } from "../model.js";
 import { useRuntime } from "../runtime-context.js";
 import {
@@ -11,24 +12,34 @@ import {
 } from "../workspace-session.js";
 
 export function ReviewPage() {
-  const { data, actions, busy } = useRuntime();
+  const { data, actions, busy, preview } = useRuntime();
   const location = useLocation();
+  const navigate = useNavigate();
   const searchParams = new URLSearchParams(location.search);
   const workspacePath = workspacePathFromSearch(location.search) ?? "";
-  const sessionId = searchParams.get("sessionId") ?? undefined;
+  const sessions = data.sessions.filter((session) => session.workspacePath === workspacePath);
+  const requestedSessionId = searchParams.get("sessionId");
+  const sessionId = requestedSessionId ?? sessions[0]?.id;
   const sessionRef =
     workspacePath && sessionId
       ? ({ workspacePath, sessionId } satisfies WorkspaceSessionRef)
       : undefined;
   const conversation = sessionRef ? data.conversations[workspaceSessionKey(sessionRef)] : undefined;
-  const changes = conversation?.changes ?? (sessionId ? [] : data.changes);
-  const fingerprint =
-    conversation?.changeFingerprint ?? (sessionId ? undefined : data.changeFingerprint);
-  const runId =
-    conversation?.runId ??
-    (sessionId ? undefined : data.runs.find((run) => run.workspacePath === workspacePath)?.id);
-  const target = runId && fingerprint ? { runId, fingerprint } : undefined;
+  const runs = data.runs.filter((run) => run.workspacePath === workspacePath &&
+    run.sessionId === sessionId && isTerminalRunStatus(run.status))
+    .sort((left, right) => right.startedAt - left.startedAt);
+  const requestedRunId = searchParams.get("runId");
+  const runId = runs.find((run) => run.id === requestedRunId)?.id ?? runs[0]?.id;
+  const reviewKey = JSON.stringify([workspacePath, sessionId, runId]);
+  const [review, setReview] = useState<{ key: string; changes: readonly ChangeView[]; fingerprint: string }>();
+  const changes = preview ? conversation?.changes ?? data.changes : review?.key === reviewKey ? review.changes : [];
+  const fingerprint = preview ? conversation?.changeFingerprint ?? data.changeFingerprint : review?.key === reviewKey ? review.fingerprint : undefined;
+  const target = runId && fingerprint ? { workspacePath, runId, fingerprint } : undefined;
   const [selectedPath, setSelectedPath] = useState(changes[0]?.path);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string>();
+  const [refresh, setRefresh] = useState(0);
+  const [diff, setDiff] = useState<{ key: string; path: string; patch: string }>();
   const [comment, setComment] = useState("");
   const [rewindOpen, setRewindOpen] = useState(false);
   const [rewindPreview, setRewindPreview] = useState<{
@@ -37,31 +48,70 @@ export function ReviewPage() {
     readonly changeCount: number;
   }>();
   useEffect(() => {
+    setRewindOpen(false);
+    setRewindPreview(undefined);
+    setComment("");
+    setDiff(undefined);
+    setError(undefined);
+    if (preview || !runId || !sessionId) { setLoading(false); return; }
+    let disposed = false;
+    setLoading(true);
+    void actions.queryReview(workspacePath, runId).then((value) => {
+      if (!disposed) setReview({ key: reviewKey, ...value });
+    }).catch((cause: unknown) => {
+      if (!disposed) setError(cause instanceof Error ? cause.message : String(cause));
+    }).finally(() => { if (!disposed) setLoading(false); });
+    return () => { disposed = true; };
+  }, [actions, preview, refresh, reviewKey, runId, sessionId, workspacePath]);
+  useEffect(() => {
     if (!changes.some((change) => change.path === selectedPath)) {
       setSelectedPath(changes[0]?.path);
     }
   }, [changes, selectedPath]);
   const selected = changes.find((change) => change.path === selectedPath);
   useEffect(() => {
-    if (!selected || selected.patch || !runId) return;
-    void actions.loadChangeDiff({
-      workspacePath,
-      ...(sessionId ? { sessionId } : {}),
-      runId,
-      path: selected.path,
+    if (!selected || selected.patch !== undefined || !runId || !fingerprint) return;
+    let disposed = false;
+    void actions.queryReviewDiff(workspacePath, runId, selected.path).then((value) => {
+      if (disposed) return;
+      if (value.fingerprint !== fingerprint) {
+        setError("工作区内容已变化，请刷新审阅后重试。");
+        return;
+      }
+      setDiff({ key: reviewKey, path: selected.path, patch: value.patch });
+    }).catch((cause: unknown) => {
+      if (!disposed) setError(cause instanceof Error ? cause.message : String(cause));
     });
-  }, [actions, runId, selected, sessionId, workspacePath]);
-  if (data.notices.changes)
-    return <CapabilityUnavailable title="无法读取更改" detail={data.notices.changes} />;
-  if (!selected)
-    return (
+    return () => { disposed = true; };
+  }, [actions, fingerprint, reviewKey, runId, selected, workspacePath]);
+  const selectScope = (nextSession: string, nextRun?: string) => {
+    const params = new URLSearchParams({ workspace: workspacePath, sessionId: nextSession });
+    if (nextRun) params.set("runId", nextRun);
+    navigate(`/review?${params}`);
+  };
+  return <div className="page-stack">
+    <section className="page-intro" aria-label="审阅范围">
+      <label>任务<select aria-label="审阅任务" value={sessionId ?? ""}
+        onChange={(event) => selectScope(event.target.value)}>
+        <option value="" disabled>选择任务</option>
+        {sessions.map((session) => <option key={session.id} value={session.id}>{session.title}</option>)}
+      </select></label>
+      <label>运行<select aria-label="审阅运行" value={runId ?? ""}
+        onChange={(event) => sessionId && selectScope(sessionId, event.target.value)}>
+        <option value="" disabled>没有已结束的运行</option>
+        {runs.map((run) => <option key={run.id} value={run.id}>{new Date(run.startedAt).toLocaleString()} · {run.description} · {run.id.slice(-8)}</option>)}
+      </select></label>
+      <Button disabled={loading || Boolean(busy)} onClick={() => setRefresh((value) => value + 1)}><RefreshCw aria-hidden="true" size={15} />刷新审阅</Button>
+    </section>
+    <p>文件已由工具写入工作区；这里核验本次运行的更改并记录审阅结果，不会重复写入文件。</p>
+    {error && <InlineNotice tone="error">{error}</InlineNotice>}
+    {loading ? <p role="status">正在读取运行更改…</p> : !selected ? (
       <EmptyState
         icon={<FileDiff />}
         title="没有待审阅的更改"
-        detail="任务生成文件更改后，会从 Runtime 加载到这里。"
+        detail="请选择发生文件修改的任务和运行；聊天或只读运行可能没有更改。"
       />
-    );
-  return (
+    ) : (
     <div className="review-layout">
       <aside className="file-list" aria-label="已更改文件">
         <div className="file-list__header">
@@ -110,7 +160,7 @@ export function ReviewPage() {
                 <small>
                   {rewindPreview
                     ? `指纹 ${rewindPreview.fingerprint}`
-                    : "先读取预览；执行时会重新验证指纹，冲突时不会写入。"}
+                    : "预览此会话最近检查点；执行时会重新验证指纹，冲突时不会写入。"}
                 </small>
               </span>
             </div>
@@ -142,7 +192,7 @@ export function ReviewPage() {
           </div>
         )}
         <pre className="diff-view" aria-label={`${selected.path} 的差异`}>
-          <code>{renderPatch(selected)}</code>
+          <code>{diff?.key === reviewKey && diff.path === selected.path ? diff.patch : renderPatch(selected)}</code>
         </pre>
         <div className="review-composer">
           <label htmlFor="review-comment">要求修改</label>
@@ -172,23 +222,23 @@ export function ReviewPage() {
           </span>
           <div className="button-row">
             <Button
-              disabled={Boolean(busy) || !target}
+              disabled={Boolean(busy) || !target || Boolean(error)}
               onClick={() => void actions.reviewChanges("approve", undefined, target)}
             >
               批准更改
             </Button>
             <Button
               variant="primary"
-              disabled={Boolean(busy) || !target}
+              disabled={Boolean(busy) || !target || Boolean(error)}
               onClick={() => void actions.applyChanges(target)}
             >
-              批准并应用
+              核验并确认
             </Button>
           </div>
         </footer>
       </section>
     </div>
-  );
+  )}</div>;
 }
 
 function renderPatch(change: ChangeView): string {
