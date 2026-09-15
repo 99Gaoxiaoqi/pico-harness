@@ -164,7 +164,11 @@ test("kernel client: current shutdown waits for response, ownership drain and pr
 
   await client.shutdownDaemon();
   assert.equal(await processAlive(before.pid), false, "shutdown 返回前 daemon PID 必须退出");
-  assert.equal(await readHostRegistration(controlDirectory), undefined);
+  // shutdown targets the connected Host epoch, not late candidates already launched
+  // by the election. A successor may register after the old owner releases its flock;
+  // the harness tracks every launched process and stops them all during teardown.
+  const after = await readHostRegistration(controlDirectory);
+  assert.notEqual(after?.hostEpoch, before.hostEpoch, "已关停的 Host epoch 不得仍注册");
   await assert.rejects(access(leaseDirectory), { code: "ENOENT" });
 });
 
