@@ -1,10 +1,14 @@
 import { defineConfig } from "vite";
 
 const updateFeedUrl = readOptionalHttpsUrl("PICO_UPDATE_FEED_URL");
+const bundledModuleUrlGlobal = "__PICO_MAIN_IMPORT_META_URL__";
 
 export default defineConfig({
   define: {
     __PICO_UPDATE_FEED_URL__: JSON.stringify(updateFeedUrl ?? null),
+    // Shared ESM modules use createRequire(import.meta.url) during startup.
+    // Keep a real file URL after bundling the main process as CommonJS.
+    "import.meta.url": `globalThis.${bundledModuleUrlGlobal}`,
   },
   build: {
     sourcemap: false,
@@ -13,6 +17,7 @@ export default defineConfig({
       // package-relative `require.addon(".")` lookup to the Vite output folder.
       external: ["electron", "fs-native-extensions"],
       output: {
+        banner: `globalThis.${bundledModuleUrlGlobal} = require("node:url").pathToFileURL(__filename).href;`,
         entryFileNames: "main.cjs",
         format: "cjs",
       },
