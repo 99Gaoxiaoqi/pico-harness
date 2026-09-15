@@ -280,6 +280,100 @@ test("transcript replica: an explicit newer exact-run retry accepts new items wi
   assert.equal(replica.view.phase, "ready");
 });
 
+for (const retryStatus of ["paused", "pause_requested", "cancelling"] as const) {
+  test(`transcript replica: reopen retains a newer ${retryStatus} exact-run retry and fences queued or stale attempts`, () => {
+    const replica = new TranscriptReplica(sessionId);
+    replica.installOpen(
+      replica.beginOpen(),
+      openResult({ activeRun: run("retry"), durableTail: [] }),
+    );
+    const oldStream = {
+      runId: "retry",
+      turnId: "old-turn",
+      itemId: "old-item",
+      streamId: "old-stream",
+      kind: "text" as const,
+      text: "old",
+      startOffsetBytes: 0,
+      endOffsetBytes: 3,
+      anchorSequence: 1,
+    };
+    const newStream = {
+      ...oldStream,
+      turnId: "new-turn",
+      itemId: "new-item",
+      streamId: "new-stream",
+      text: "new",
+    };
+    replica.receiveFrame(frame(1, { type: "subscription.session_delta", ...oldStream }));
+    const state = {
+      hostEpoch: "host-1",
+      subscriptionId: "subscription-1",
+      sessionId,
+      type: "subscription.run_state" as const,
+    };
+    replica.receiveFrame({ ...state, sequence: 2, run: run("retry", "failed") });
+    assert.equal(
+      replica.installOpen(
+        replica.beginOpen(),
+        openResult({
+          durableTail: [],
+          activeRun: { ...run("retry", "queued"), version: 3 },
+          activeOverlay: [newStream],
+        }),
+      ),
+      true,
+    );
+    assert.equal(
+      replica.view.activeOverlay.length,
+      0,
+      "queued is not evidence that an exact retry started",
+    );
+    assert.equal(
+      replica.installOpen(
+        replica.beginOpen(),
+        openResult({
+          durableTail: [],
+          activeRun: { ...run("retry", retryStatus), version: 4 },
+          activeOverlay: [oldStream, newStream],
+        }),
+      ),
+      true,
+    );
+    assert.deepEqual(
+      replica.view.activeOverlay.map((entry) => entry.itemId),
+      ["new-item"],
+    );
+    replica.receiveFrame({ ...state, sequence: 1, run: run("retry", "running") });
+    replica.receiveFrame(
+      frame(2, {
+        type: "subscription.session_delta",
+        ...oldStream,
+        text: "late",
+        startOffsetBytes: 3,
+      }),
+    );
+    replica.receiveFrame(
+      frame(3, {
+        type: "subscription.session_delta",
+        ...newStream,
+        text: " suffix",
+        startOffsetBytes: 3,
+      }),
+    );
+    assert.equal(
+      replica.view.activeRun?.status,
+      retryStatus,
+      "old running frames cannot replace the authoritative retry state",
+    );
+    assert.deepEqual(
+      replica.view.activeOverlay.map((entry) => entry.text),
+      ["new suffix"],
+    );
+    assert.equal(replica.view.phase, "ready");
+  });
+}
+
 function watermark(
   throughSequence: number,
   historyEpoch = "history-1",
