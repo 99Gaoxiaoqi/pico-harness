@@ -20,6 +20,8 @@ export interface WorkbarGitChange {
   readonly path: string;
   readonly stage: WorkbarGitReviewStage;
   readonly status: WorkbarGitChangeStatus;
+  readonly additions: number;
+  readonly deletions: number;
 }
 
 export interface WorkbarGitReviewSnapshot {
@@ -184,16 +186,21 @@ export class WorkbarGitReviewAuthority {
           path,
           stage: "unstaged",
           status: "untracked",
+          additions: 0,
+          deletions: 0,
         }),
       ),
     ];
     assertFileLimit(staged.length + unstaged.length, this.limits.maxFiles);
 
-    const [stagedPatch, unstagedPatch] = await Promise.all([
+    const [stagedPatch, unstagedPatch, stagedNumstat, unstagedNumstat] = await Promise.all([
       this.run(diffContentArgs("staged"), this.limits.maxSnapshotBytes),
       this.run(diffContentArgs("unstaged"), this.limits.maxSnapshotBytes),
+      this.run(diffNumstatArgs("staged"), this.limits.maxSnapshotBytes),
+      this.run(diffNumstatArgs("unstaged"), this.limits.maxSnapshotBytes),
     ]);
-    const untrackedHashes: Array<{ path: string; hash: string; bytes: number }> = [];
+    const untrackedHashes: Array<{ path: string; hash: string; bytes: number; additions: number }> =
+      [];
     for (const change of unstaged) {
       if (change.status !== "untracked") continue;
       untrackedHashes.push(await this.hashUntrackedPath(change.path));
@@ -226,12 +233,17 @@ export class WorkbarGitReviewAuthority {
       .update("\0unstaged\0")
       .update(unstagedPatch.stdout)
       .digest("hex");
+    const stagedCounts = parseNumstat(stagedNumstat.stdout);
+    const unstagedCounts = parseNumstat(unstagedNumstat.stdout);
+    for (const item of untrackedHashes) {
+      unstagedCounts.set(item.path, { additions: item.additions, deletions: 0 });
+    }
     return {
       repositoryRoot: this.repositoryRoot,
       branch,
       head,
-      staged,
-      unstaged,
+      staged: staged.map((change) => ({ ...change, ...stagedCounts.get(change.path) })),
+      unstaged: unstaged.map((change) => ({ ...change, ...unstagedCounts.get(change.path) })),
       revision,
     };
   }
@@ -290,7 +302,7 @@ export class WorkbarGitReviewAuthority {
 
   private async hashUntrackedPath(
     path: string,
-  ): Promise<{ path: string; hash: string; bytes: number }> {
+  ): Promise<{ path: string; hash: string; bytes: number; additions: number }> {
     const absolute = resolveContainedPath(this.repositoryRoot, path);
     const stat = await lstat(absolute);
     if (stat.isSymbolicLink()) {
@@ -299,6 +311,7 @@ export class WorkbarGitReviewAuthority {
         path,
         hash: createHash("sha256").update(`symlink\0${target}`).digest("hex"),
         bytes: Buffer.byteLength(target),
+        additions: textLines(target).length,
       };
     }
     if (!stat.isFile()) {
@@ -315,6 +328,7 @@ export class WorkbarGitReviewAuthority {
       path,
       hash: createHash("sha256").update(contents).digest("hex"),
       bytes: contents.byteLength,
+      additions: contents.includes(0) ? 0 : textLines(contents.toString("utf8")).length,
     };
   }
 
@@ -323,7 +337,7 @@ export class WorkbarGitReviewAuthority {
     const stat = await lstat(absolute);
     if (stat.isSymbolicLink()) {
       const target = await readlink(absolute);
-      return `diff --git a/${path} b/${path}\nnew file mode 120000\n--- /dev/null\n+++ b/${path}\n@@ -0,0 +1 @@\n+${target}\n`;
+      return untrackedTextPatch(path, target, "120000");
     }
     if (!stat.isFile()) {
       throw new WorkbarGitReviewError("invalid_request", "Untracked path is not a regular file");
@@ -338,10 +352,7 @@ export class WorkbarGitReviewAuthority {
     if (contents.includes(0)) {
       return `diff --git a/${path} b/${path}\nnew file mode 100644\nBinary files /dev/null and b/${path} differ\n`;
     }
-    const text = contents.toString("utf8");
-    const lines = text.endsWith("\n") ? text.slice(0, -1).split("\n") : text.split("\n");
-    const body = lines.map((line) => `+${line}`).join("\n");
-    return `diff --git a/${path} b/${path}\nnew file mode 100644\n--- /dev/null\n+++ b/${path}\n@@ -0,0 +1,${lines.length} @@\n${body}\n`;
+    return untrackedTextPatch(path, contents.toString("utf8"), "100644");
   }
 }
 
@@ -380,6 +391,40 @@ function diffContentArgs(stage: WorkbarGitReviewStage): string[] {
   ];
 }
 
+function diffNumstatArgs(stage: WorkbarGitReviewStage): string[] {
+  return [...diffNameArgs(stage).filter((arg) => arg !== "--name-status"), "--numstat"];
+}
+
+function parseNumstat(output: string): Map<string, { additions: number; deletions: number }> {
+  const counts = new Map<string, { additions: number; deletions: number }>();
+  for (const entry of parseNulPaths(output)) {
+    const firstTab = entry.indexOf("\t");
+    const secondTab = entry.indexOf("\t", firstTab + 1);
+    if (firstTab < 0 || secondTab < 0) continue;
+    const additions = entry.slice(0, firstTab);
+    const deletions = entry.slice(firstTab + 1, secondTab);
+    counts.set(entry.slice(secondTab + 1), {
+      additions: additions === "-" ? 0 : Number(additions),
+      deletions: deletions === "-" ? 0 : Number(deletions),
+    });
+  }
+  return counts;
+}
+
+function textLines(text: string): string[] {
+  if (text.length === 0) return [];
+  return (text.endsWith("\n") ? text.slice(0, -1) : text).split("\n");
+}
+
+function untrackedTextPatch(path: string, text: string, mode: string): string {
+  const header = `diff --git a/${path} b/${path}\nnew file mode ${mode}\n`;
+  const lines = textLines(text);
+  if (lines.length === 0) return header;
+  const body = lines.map((line) => `+${line}`).join("\n");
+  const end = text.endsWith("\n") ? "" : "\\ No newline at end of file\n";
+  return `${header}--- /dev/null\n+++ b/${path}\n@@ -0,0 +1,${lines.length} @@\n${body}\n${end}`;
+}
+
 function parseNameStatus(output: string, stage: WorkbarGitReviewStage): WorkbarGitChange[] {
   const fields = output.split("\0");
   const changes: WorkbarGitChange[] = [];
@@ -387,7 +432,13 @@ function parseNameStatus(output: string, stage: WorkbarGitReviewStage): WorkbarG
     const rawStatus = fields[index];
     const path = fields[index + 1];
     if (!rawStatus || !path) continue;
-    changes.push({ path, stage, status: decodeStatus(rawStatus[0] ?? "?") });
+    changes.push({
+      path,
+      stage,
+      status: decodeStatus(rawStatus[0] ?? "?"),
+      additions: 0,
+      deletions: 0,
+    });
   }
   return changes;
 }

@@ -61,8 +61,8 @@ function runtimeFile(change: WorkbarGitChange) {
   return {
     path: change.path,
     status: runtimeStatus(change),
-    additions: 0,
-    deletions: 0,
+    additions: change.additions,
+    deletions: change.deletions,
   };
 }
 

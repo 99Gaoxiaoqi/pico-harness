@@ -298,7 +298,7 @@ export class AgentGraphReadOnlyQueryService {
           at: claim.executingAt,
           kind: "activation.executing",
           subjectId: claim.intentId,
-          status: claim.state,
+          status: "executing",
         });
       }
       if (claim.cancelledAt !== undefined) {
