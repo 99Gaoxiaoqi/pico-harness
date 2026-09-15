@@ -39,7 +39,15 @@ async function run(forgeCommand, forgeArgs) {
 
   try {
     const npm = npmInvocation();
-    for (const workspace of ["@pico/protocol", "@pico/transcript-replica", "@pico/runtime-host"]) {
+    for (const workspace of [
+      "@pico/core",
+      "@pico/storage",
+      "@pico/runtime",
+      "@pico/protocol",
+      "@pico/transcript-replica",
+      "@pico/runtime-host",
+      "@pico/pico-host",
+    ]) {
       await runChild(
         npm.executable,
         [...npm.args, "run", "build", "--workspace", workspace],
