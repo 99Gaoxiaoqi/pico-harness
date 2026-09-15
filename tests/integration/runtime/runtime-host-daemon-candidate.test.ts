@@ -6,6 +6,7 @@ import { performance } from "node:perf_hooks";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
+import { LocalRuntimeClient } from "@pico/pico-host/local-runtime-client";
 import {
   connectOrSpawnRuntimeHost,
   connectResolvedRuntimeHost,
@@ -117,6 +118,26 @@ test("daemon candidate: losing the flock election exits as loser", async (t) => 
     env: harness.env,
   });
   assert.equal(result.kind, "loser");
+});
+
+test("daemon candidate: LocalRuntimeClient launches the package-owned entrypoint without root source paths", async (t) => {
+  const harness = await startCandidateHarness(t);
+  let launches = 0;
+  const client = new LocalRuntimeClient({
+    runtimeHostRootPath: harness.picoHome,
+    candidateLauncher: (input) => {
+      const entrypoint = String(input.entrypoint);
+      assert.match(entrypoint, /pico-host\/dist\/daemon-main\.js$/);
+      assert.doesNotMatch(entrypoint, /src\/daemon|dist\/daemon\//);
+      launches += 1;
+      return harness.candidates.launcher(input);
+    },
+  });
+  t.after(() => client.close());
+  await client.connect();
+  assert.ok(await client.request("runtime.ping", {}));
+  assert.ok(launches >= 1, "the election must launch at least one package-owned candidate");
+  await client.shutdownDaemon();
 });
 
 test("daemon candidate: connectOrSpawn spawns the pico daemon entrypoint and reaches ready", async (t) => {
