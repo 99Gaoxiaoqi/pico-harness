@@ -8,7 +8,7 @@
 ```text
 TUI
   pico / npm run dev
-    └─ src/cli + src/tui
+    └─ packages/cli
          └─ LocalRuntimeClient
 
 Desktop
@@ -43,20 +43,31 @@ Electron Main 只转发白名单内的方法，Renderer 只依赖 `DesktopBridge
 基础类型、错误与传输编解码独立复用；统一方法注册表及参数/结果 validator 的完备性约束
 仍由协议包维护，拆分不改变 wire、协议版本或访问白名单。
 
-TUI 的正式命令入口是 `src/tui/client-commands.ts`，领域 RPC、补全和格式化位于
-`src/tui/commands/`；通用输入解析与 CommandRegistry 继续复用。旧进程内命令执行注册器
+TUI 的正式命令入口是 `packages/cli/src/tui/client-commands.ts`，领域 RPC、补全和格式化位于
+CLI 包内的命令模块；通用输入解析与 CommandRegistry 继续复用。旧进程内命令执行注册器
 已退役，记忆撤销 token 的编解码独立为纯模块，客户端不通过它引入 daemon 记忆服务。
 
 ## 分层与所有权
 
-| 层次         | 主要模块                                                                                 | 所有权                                                     |
-| ------------ | ---------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
-| 产品外壳     | `src/cli/`、`src/tui/`、`apps/desktop/`                                                  | 输入、展示、生命周期和宿主交互                             |
-| 本机 Runtime | `src/daemon/`、`packages/protocol/`                                                      | 本机 IPC、认证、Workspace 注册、Desktop/Cron 控制面        |
-| 应用装配     | `src/runtime/agent-runtime.ts`                                                           | 固定一次 Run 的 Session、Provider、工具、环境和路径依赖    |
-| 执行内核     | `src/engine/`                                                                            | ReAct 循环、Session 串行化、预算、压缩触发和 Reporter 事件 |
-| 能力         | `src/provider/`、`src/tools/`、`src/context/`、`src/approval/`、`src/hooks/`、`src/mcp/` | 模型、工具、上下文、安全与扩展能力                         |
-| 持久化       | `src/runtime/`、`src/tasks/`、`src/storage/`、`src/safety/`、`src/memory/`               | 运行事实、控制面、文件恢复和可重建投影                     |
+| 层次       | 主要模块                               | 所有权                                                          |
+| ---------- | -------------------------------------- | --------------------------------------------------------------- |
+| 产品外壳   | `packages/cli/`、`apps/desktop/`       | 输入、展示、客户端生命周期和平台交互                            |
+| 领域与协议 | `packages/core/`、`packages/protocol/` | 领域契约、身份、事件、本机 RPC 与白名单                         |
+| 客户端副本 | `packages/transcript-replica/`         | Transcript 客户端归并，不持有事实所有权                         |
+| 本机传输   | `packages/runtime-host/`               | 通用进程、连接、传输与 MCP wire/bridge 机制                     |
+| 产品装配   | `packages/pico-host/`                  | daemon、workspace、Provider、工具、Hook/MCP、配置与原生安全适配 |
+| 执行内核   | `packages/runtime/`                    | ReAct 循环、Session/Run、预算、压缩、调度与运行策略             |
+| 持久化     | `packages/storage/`                    | Store 契约、SQLite schema/事务、lease、blob 与可重建投影        |
+
+Core 和 Protocol 不依赖其他 workspace 包；Storage 依赖 Core，Runtime 依赖 Storage/Core，
+Runtime Host 依赖 Runtime/Core，Transcript Replica 依赖 Protocol。Pico Host 组合内层包，
+CLI/Desktop 消费共享包的公开 exports；内层不反向依赖产品外壳或根 `src/`。
+精确依赖以各包 manifest 和 `npm run check:architecture` 为准。
+
+正式包和 Desktop 是业务实现的唯一来源，跨包导入必须使用 `@pico/*` 公开 exports。
+根 `src/` 只保留四个进程入口：`cli/main.ts`、`daemon/main.ts`、
+`internal/headless-bootstrap-main.ts`、`internal/headless-one-shot-main.ts`；不保留旧业务兼容树。
+模块导航见[架构总览](docs/architecture/00-overview.md)。
 
 `AgentRuntime` 是共享 composition root。它解析明确的 `picoHome`、`runtimeEnv`、模型
 路由和 Session，然后把已固定的依赖传给 Engine、Provider 和工具。模块不应在调用链深处
@@ -80,9 +91,9 @@ TUI 的正式命令入口是 `src/tui/client-commands.ts`，领域 RPC、补全�
                  └─ Reporter 将生命周期投影给当前外壳
 ```
 
-`src/engine/loop.ts` 负责主循环、父子运行能力与共享预算，不拥有产品 UI 或持久化路径。
-子代理的一次执行由 `subagent-runner.ts` 负责，独立上下文与溢出处理位于
-`subagent-context.ts`；Provider 事件包装与工具结果构造由小型专责模块复用。daemon 将运行状态投影为
+`packages/runtime/src/agent-engine.ts` 负责主循环、父子运行能力与共享预算，不拥有产品 UI 或持久化路径。
+Runtime 包的 `subagent-runner.ts` 负责子代理执行策略，独立上下文与溢出处理位于
+`subagent-context.ts`；Pico Host 注入具体执行与资源适配。Provider 事件包装与工具结果构造由小型专责模块复用。daemon 将运行状态投影为
 协议事件；TUI 的 `DaemonEventReporter` 再转给 `TuiReporter` 更新 Ink 界面，Desktop
 Renderer 则据此构造 Transcript 和 Timeline。
 
