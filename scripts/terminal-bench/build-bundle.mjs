@@ -17,6 +17,7 @@ export async function buildPicoBundle(outputPath) {
   await mkdir(stage, { recursive: true });
   const { packageJson, localPackages } = await createBundlePackagePlan();
   await cp(join(projectRoot, "dist"), join(stage, "dist"), { recursive: true });
+  await copyBundleRootResources(stage);
   for (const local of localPackages) {
     const target = join(stage, local.path);
     await mkdir(target, { recursive: true });
@@ -73,6 +74,14 @@ export async function buildPicoBundle(outputPath) {
     .digest("hex");
   await rm(stage, { recursive: true, force: true });
   return { path: destination, sha256: digest, lockfileSha256 };
+}
+
+// Native sandbox backends and their license/source notices resolve from the bundle root.
+export async function copyBundleRootResources(
+  stage,
+  resourcesRoot = join(projectRoot, "resources"),
+) {
+  await cp(resourcesRoot, join(stage, "resources"), { recursive: true });
 }
 
 /** The staged dependency graph is local and independent of unpublished workspace versions. */
