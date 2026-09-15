@@ -363,6 +363,18 @@ Storage/Core，Storage 依赖 Core。Protocol 不依赖 Core。
       `src/cli` 路径保留兼容导出。UI 与 Eval
       只有产生第二个真实消费者时才抽包。
 
+## 2026-09-15 复核补修
+
+- 修复 Desktop Forge 的冷构建链：`start`、`package`、`make` 均按
+  Core → Storage → Runtime → Protocol → Transcript Replica → Runtime Host → Pico Host 构建。
+  集成测试执行实际 runner，检查三条路径的完整顺序、工作目录和参数透传。
+- 修复 CI 的 macOS/Linux 沙箱任务，以及主测试任务中的全新 Linux 容器：安装后、运行
+  JavaScript 测试前构建全部工作区包；Windows 保留已有 npm 前置构建脚本。
+- Desktop 显式声明 `marked` 运行时依赖，同步根锁文件，不再依赖根项目 hoist。
+- 本轮验证：8 包冷构建、根项目与 Desktop 类型检查、4 条定向集成测试、架构检查及变更文件
+  ESLint/Prettier 通过。独立冷工作区执行 Desktop `start --help`，七包构建和真实 Forge 帮助入口通过。
+  未重新运行全量测试、远端 CI 或实际桌面打包；上文全量测试记录仍对应此前迁移验收。
+
 ## 验收与约束
 
 - 每阶段保留旧 import 路径的 re-export，避免一次性全仓改写。
