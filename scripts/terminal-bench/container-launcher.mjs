@@ -23,7 +23,6 @@ const requestPath = "/logs/agent/headless-request.json";
 const resultPath = "/logs/agent/pico-result.json";
 const exitCodePath = "/logs/agent/pico-exit-code.txt";
 const stderrPath = "/logs/agent/pico-stderr.log";
-const runnerPath = "/installed-agent/pico/dist/internal/headless-one-shot-runner.js";
 
 const frame = readFileSync(0);
 if (frame.length < 10 || frame[8] !== 0x0a) throw new Error("invalid secret frame");
@@ -51,9 +50,8 @@ process.once("SIGINT", () => cancel("SIGINT"));
 process.once("SIGTERM", () => cancel("SIGTERM"));
 
 try {
-  const { runHeadlessOneShotJson, terminalBenchAgentControlledProxyCapability } = await import(
-    runnerPath
-  );
+  const { runHeadlessOneShotJson, terminalBenchAgentControlledProxyCapability } =
+    await import("@pico/pico-host/internal/headless-one-shot-runner");
   const controlledProxyCapability =
     terminalBenchAgentControlledProxyCapability(controlledProxyGate);
   const outcome = await runHeadlessOneShotJson(readFileSync(requestPath, "utf8"), {
