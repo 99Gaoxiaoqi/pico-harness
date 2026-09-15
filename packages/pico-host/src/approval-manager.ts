@@ -1,3 +1,5 @@
+import { scheduleDeadline, type ScheduledDeadline } from "@pico/runtime/deadline";
+
 export interface ApprovalResult {
   allowed: boolean;
   reason: string;
@@ -41,8 +43,7 @@ const NOOP_LOGGER: ApprovalManagerLogger = {
 interface PendingApproval<SessionScope> {
   resolve: (result: ApprovalResult) => void;
   reject: (reason: unknown) => void;
-  timeoutSignal: AbortSignal;
-  timeoutListener: () => void;
+  deadline: ScheduledDeadline;
   toolName: string;
   args: string;
   sessionScope?: SessionScope;
@@ -84,8 +85,8 @@ Agent 试图执行以下动作:
 👉 请回复 "approve ${taskId}" 同意放行,或 "reject ${taskId}" 拒绝执行。`;
 
     return new Promise<ApprovalResult>((resolve, reject) => {
-      const timeoutSignal = AbortSignal.timeout(this.timeoutMs);
-      const timeoutListener = () => {
+      // A pending approval must keep the host alive until settlement; AbortSignal.timeout does not.
+      const deadline = scheduleDeadline(() => {
         const entry = this.takePendingTask(taskId);
         if (!entry) return;
         this.logger.warn(
@@ -96,12 +97,11 @@ Agent 试图执行以下动作:
           allowed: false,
           reason: `审批超时(${Math.floor(this.timeoutMs / 60000)} 分钟无人响应),系统自动拒绝。`,
         });
-      };
+      }, this.timeoutMs);
       const entry: PendingApproval<SessionScope> = {
         resolve,
         reject,
-        timeoutSignal,
-        timeoutListener,
+        deadline,
         toolName,
         args,
         ...(options.sessionScope !== undefined ? { sessionScope: options.sessionScope } : {}),
@@ -117,7 +117,6 @@ Agent 试图执行以下动作:
         };
       }
       this.pendingTasks.set(taskId, entry);
-      timeoutSignal.addEventListener("abort", timeoutListener, { once: true });
       if (signal && entry.abortListener) {
         signal.addEventListener("abort", entry.abortListener, { once: true });
         if (signal.aborted) {
@@ -125,18 +124,23 @@ Agent 试图执行以下动作:
           return;
         }
       }
-      notify({
-        kind: "tool",
-        taskId,
-        toolName,
-        args,
-        providerCallId: options.providerCallId,
-        message,
-        preview: buildApprovalPreview(toolName, args, diff, reason),
-        ...(diff !== undefined ? { diff } : {}),
-        ...(options.sessionScope !== undefined ? { sessionScope: options.sessionScope } : {}),
-      });
-      this.logger.info({ taskId }, `[Approval] 已发送审批请求,执行流挂起等待...`);
+      try {
+        notify({
+          kind: "tool",
+          taskId,
+          toolName,
+          args,
+          providerCallId: options.providerCallId,
+          message,
+          preview: buildApprovalPreview(toolName, args, diff, reason),
+          ...(diff !== undefined ? { diff } : {}),
+          ...(options.sessionScope !== undefined ? { sessionScope: options.sessionScope } : {}),
+        });
+        this.logger.info({ taskId }, `[Approval] 已发送审批请求,执行流挂起等待...`);
+      } catch (error) {
+        this.takePendingTask(taskId);
+        reject(error);
+      }
     });
   }
 
@@ -230,7 +234,7 @@ Agent 试图执行以下动作:
   }
 
   private removeListeners(entry: PendingApproval<SessionScope>): void {
-    entry.timeoutSignal.removeEventListener("abort", entry.timeoutListener);
+    entry.deadline.cancel();
     if (entry.signal && entry.abortListener)
       entry.signal.removeEventListener("abort", entry.abortListener);
   }
