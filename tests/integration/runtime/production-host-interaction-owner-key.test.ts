@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { DesktopInteractionBroker } from "../../../src/daemon/desktop-interaction-broker.js";
-import { createDesktopInteractionOwnerKey } from "../../../src/daemon/production-host.js";
+import { createDesktopInteractionOwnerKey } from "@pico/pico-host/production-host";
 
 test("Desktop run ownerKey 稳定、定长且可被交互 Broker 接受", () => {
   const identity = ["/工作区/项目", "session-1", "run-1"] as const;

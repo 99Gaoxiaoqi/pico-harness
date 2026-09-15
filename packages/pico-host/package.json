@@ -790,6 +790,34 @@
     "./internal/headless-one-shot-main": {
       "types": "./dist/internal/headless-one-shot-main.d.ts",
       "import": "./dist/internal/headless-one-shot-main.js"
+    },
+    "./desktop-runtime-service": {
+      "types": "./dist/desktop-runtime-service.d.ts",
+      "import": "./dist/desktop-runtime-service.js"
+    },
+    "./production-host": {
+      "types": "./dist/production-host.d.ts",
+      "import": "./dist/production-host.js"
+    },
+    "./product-agent-graph-query-service": {
+      "types": "./dist/product-agent-graph-query-service.d.ts",
+      "import": "./dist/product-agent-graph-query-service.js"
+    },
+    "./product-agent-graph-execution-boundary": {
+      "types": "./dist/product-agent-graph-execution-boundary.d.ts",
+      "import": "./dist/product-agent-graph-execution-boundary.js"
+    },
+    "./product-desktop-automation-request-handlers": {
+      "types": "./dist/product-desktop-automation-request-handlers.d.ts",
+      "import": "./dist/product-desktop-automation-request-handlers.js"
+    },
+    "./product-desktop-subagent-settings-service": {
+      "types": "./dist/product-desktop-subagent-settings-service.d.ts",
+      "import": "./dist/product-desktop-subagent-settings-service.js"
+    },
+    "./product-runtime-host-candidate": {
+      "types": "./dist/product-runtime-host-candidate.d.ts",
+      "import": "./dist/product-runtime-host-candidate.js"
     }
   },
   "files": [
