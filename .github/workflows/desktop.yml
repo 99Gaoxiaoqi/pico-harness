@@ -5,7 +5,7 @@ on:
     branches: [main, codex/desktop-app]
     paths:
       - "apps/desktop/**"
-      - "packages/protocol/**"
+      - "packages/**"
       - "src/**"
       - "tests/**"
       - "native/**"
@@ -20,7 +20,7 @@ on:
   pull_request:
     paths:
       - "apps/desktop/**"
-      - "packages/protocol/**"
+      - "packages/**"
       - "src/**"
       - "tests/**"
       - "native/**"
