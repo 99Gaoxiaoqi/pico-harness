@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isTerminalRunStatus } from "@pico/protocol";
 import type {
   JsonObject,
   RuntimeActiveOverlayEntry,
@@ -96,6 +97,8 @@ class SessionSubscriptionOwner {
   readonly #subscriptions = new Map<string, SessionWireSubscription>();
   readonly #streams = new Map<string, LiveStreamState>();
   readonly #toolCallIds = new Map<string, string>();
+  readonly #runStates = new Map<string, RuntimeRun>();
+  readonly #retiredStreams = new Set<string>();
   #lane: Promise<void> = Promise.resolve();
   #watermarkThroughSequence = 0;
   #publishedWatermark: RuntimeTranscriptWatermark | undefined;
@@ -116,6 +119,7 @@ class SessionSubscriptionOwner {
   }
 
   open(options: OpenSubscriptionOptions): SubscriptionOpenResult {
+    if (options.snapshot.activeRun) this.#observeRunState(options.snapshot.activeRun);
     for (const [streamId, state] of this.#streams) {
       if (state.complete) this.#streams.delete(streamId);
     }
@@ -136,7 +140,7 @@ class SessionSubscriptionOwner {
     );
     this.#publishedWatermark = options.snapshot.watermark;
     const activeOverlay = mergeOverlayEntries(
-      options.snapshot.activeOverlay,
+      options.snapshot.activeOverlay.filter((entry) => !this.#isRetiredStream(entry)),
       [...this.#streams.values()].map(projectOverlayEntry),
     );
     return {
@@ -298,7 +302,34 @@ class SessionSubscriptionOwner {
     }
     const run = (notification.payload as { readonly run?: unknown }).run;
     if (!isRuntimeRunLike(run) || run.sessionId !== this.sessionId) return;
+    if (!this.#observeRunState(run)) return;
     this.#publish({ type: "subscription.run_state", run });
+  }
+
+  #observeRunState(run: RuntimeRun): boolean {
+    const current = this.#runStates.get(run.runId);
+    if (current && current.version >= run.version) return false;
+    this.#runStates.set(run.runId, run);
+    // The owner outlives every renderer subscription. Retiring only in the
+    // replica lets open() later merge these streams back into a fresh replica.
+    if (isTerminalRunStatus(run.status)) this.#resetRunStreams(run.runId);
+    return true;
+  }
+
+  #isRetiredStream(
+    stream: Pick<RuntimeActiveOverlayEntry, "runId" | "streamId" | "itemId">,
+  ): boolean {
+    const run = this.#runStates.get(stream.runId);
+    return (
+      (run !== undefined && (isTerminalRunStatus(run.status) || run.status === "queued")) ||
+      this.#retiredStreams.has(JSON.stringify([stream.runId, stream.streamId, stream.itemId]))
+    );
+  }
+
+  #retireStream(state: LiveStreamState): void {
+    if (state.timer) clearTimeout(state.timer);
+    this.#retiredStreams.add(JSON.stringify([state.runId, state.streamId, state.itemId]));
+    this.#streams.delete(state.streamId);
   }
 
   continuityDegraded(reason: "partial_persistence_failed" | "recovery_failed"): void {
@@ -344,6 +375,7 @@ class SessionSubscriptionOwner {
     readonly startOffsetBytes: number;
     readonly text: string;
   }): void {
+    if (this.#isRetiredStream(input)) return;
     let state = this.#streams.get(input.streamId);
     if (!state) {
       state = {
@@ -402,6 +434,7 @@ class SessionSubscriptionOwner {
 
   #installSnapshotOverlay(entries: readonly RuntimeActiveOverlayEntry[]): void {
     for (const entry of entries) {
+      if (this.#isRetiredStream(entry)) continue;
       const current = this.#streams.get(entry.streamId);
       if (current && current.endOffsetBytes >= entry.endOffsetBytes) continue;
       if (current?.timer) clearTimeout(current.timer);
@@ -485,28 +518,27 @@ class SessionSubscriptionOwner {
     this.#flushStream(state);
     state.complete = true;
     this.#publishDelta(state, state.endOffsetBytes, "", { complete: true });
-    this.#streams.delete(streamId);
+    this.#retireStream(state);
   }
 
   #flushRunStreams(runId: string, complete = false): void {
-    for (const [streamId, state] of [...this.#streams]) {
+    for (const state of [...this.#streams.values()]) {
       if (state.runId !== runId) continue;
       this.#flushStream(state);
       if (complete && !state.complete) {
         state.complete = true;
         this.#publishDelta(state, state.endOffsetBytes, "", { complete: true });
-        this.#streams.delete(streamId);
+        this.#retireStream(state);
       }
     }
   }
 
   #resetRunStreams(runId: string): void {
-    for (const [streamId, state] of [...this.#streams]) {
+    for (const state of [...this.#streams.values()]) {
       if (state.runId !== runId) continue;
       this.#flushStream(state);
       this.#publishDelta(state, state.endOffsetBytes, "", { reset: true });
-      if (state.timer) clearTimeout(state.timer);
-      this.#streams.delete(streamId);
+      this.#retireStream(state);
     }
   }
 
