@@ -13,7 +13,11 @@ import {
   type ClientPromptRequest,
   type DaemonSessionClient,
 } from "@pico/cli/tui/client-session-runtime";
-import { LOCAL_RUNTIME_PROTOCOL_VERSION, type RuntimeNotification } from "@pico/protocol";
+import {
+  LOCAL_RUNTIME_PROTOCOL_VERSION,
+  TRANSCRIPT_PROJECTOR_VERSION,
+  type RuntimeNotification,
+} from "@pico/protocol";
 
 /**
  * 3-D Phase 3 自由文本 ask_user 全链路（统一方案：options 可选 0-6 + freeText
@@ -160,7 +164,11 @@ test("TUI 客户端：prompt.requested 事件投影（freeText 透传）+ respon
           hostEpoch: "host-test",
           subscriptionId: "subscription-test",
           nextSequence: 1,
-          watermark: { historyEpoch: "history-test", projectorVersion: 5, throughSequence: 0 },
+          watermark: {
+            historyEpoch: "history-test",
+            projectorVersion: TRANSCRIPT_PROJECTOR_VERSION,
+            throughSequence: 0,
+          },
           durableTail: [],
           activeOverlay: [],
           queuedInputs: [],

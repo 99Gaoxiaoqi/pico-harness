@@ -3,7 +3,11 @@ import { test } from "node:test";
 import { PassThrough } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
 import { render } from "ink";
-import { LOCAL_RUNTIME_PROTOCOL_VERSION, type RuntimeNotification } from "@pico/protocol";
+import {
+  LOCAL_RUNTIME_PROTOCOL_VERSION,
+  TRANSCRIPT_PROJECTOR_VERSION,
+  type RuntimeNotification,
+} from "@pico/protocol";
 import { AUTOMATION_TOOL_ALLOWLIST } from "@pico/runtime/automation-tool-policy";
 import { AutomationCredentialImportProposalStore } from "@pico/cli/tui/automation-credential-proposal";
 import { createClientCommandRegistry, processClientInput } from "@pico/cli/tui/client-commands";
@@ -82,7 +86,7 @@ function createHarness(options?: {
             nextSequence: 1,
             watermark: {
               historyEpoch: "history-test",
-              projectorVersion: 5,
+              projectorVersion: TRANSCRIPT_PROJECTOR_VERSION,
               throughSequence: transcriptItems.length,
             },
             durableTail: transcriptItems.map((item, index) => ({

@@ -5,6 +5,7 @@ import {
   parseStrictRuntimeParams,
   RUNTIME_ERROR_CODES,
   RuntimeProtocolError,
+  TRANSCRIPT_PROJECTOR_VERSION,
 } from "../../../packages/protocol/src/index.js";
 
 test("session.get accepts durable parent navigation and current optional metadata", () => {
@@ -183,7 +184,7 @@ test("session continuity accepts projected tool identity metadata", () => {
     nextSequence: 1,
     watermark: {
       historyEpoch: "history-1",
-      projectorVersion: 5,
+      projectorVersion: TRANSCRIPT_PROJECTOR_VERSION,
       throughSequence: 1,
     },
     durableTail: [
@@ -229,7 +230,7 @@ test("transcript result boundary rejects retired tool, run and interaction alias
   const result = (item: unknown) => ({
     watermark: {
       historyEpoch: "history-1",
-      projectorVersion: 5,
+      projectorVersion: TRANSCRIPT_PROJECTOR_VERSION,
       throughSequence: 1,
     },
     items: [
