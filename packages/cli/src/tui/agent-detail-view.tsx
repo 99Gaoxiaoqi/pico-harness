@@ -56,7 +56,9 @@ export function AgentDetailView({
           wrap="truncate"
           dimColor={row.tone === "muted"}
           bold={row.tone === "current"}
-          {...optionalTextColor(row.tone === "current" ? "cyan" : row.tone === "failed" ? "red" : undefined)}
+          {...optionalTextColor(
+            row.tone === "current" ? "cyan" : row.tone === "failed" ? "red" : undefined,
+          )}
         >
           {row.text || " "}
         </Text>

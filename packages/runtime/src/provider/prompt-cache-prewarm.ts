@@ -26,7 +26,10 @@ export class PromptCachePrewarmCoordinator {
   ) {}
 
   /** Persist dedupe across short-lived AgentRuntime executions in the same workspace process. */
-  static shared(scope: string, diagnostics: ProviderDiagnostics = NOOP_PROVIDER_DIAGNOSTICS): PromptCachePrewarmCoordinator {
+  static shared(
+    scope: string,
+    diagnostics: ProviderDiagnostics = NOOP_PROVIDER_DIAGNOSTICS,
+  ): PromptCachePrewarmCoordinator {
     const existing = this.sharedScopes.get(scope);
     if (existing) {
       this.sharedScopes.delete(scope);

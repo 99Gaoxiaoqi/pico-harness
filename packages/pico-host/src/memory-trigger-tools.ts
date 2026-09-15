@@ -1,7 +1,4 @@
-import type {
-  BaseTool,
-  ToolExecutionContext,
-} from "@pico/pico-host/tool-registry-contract";
+import type { BaseTool, ToolExecutionContext } from "@pico/pico-host/tool-registry-contract";
 import { NO_FILE_SIDE_EFFECTS } from "@pico/pico-host/tool-registry-contract";
 import type { ToolDefinition } from "@pico/core";
 import { ToolAccesses } from "@pico/runtime/tool-access";

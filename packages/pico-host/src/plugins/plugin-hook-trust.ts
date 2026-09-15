@@ -5,10 +5,7 @@ import {
   type HookShell,
   type ResolvedCommandHookInvocation,
 } from "../hooks/config/command-shell.js";
-import type {
-  HookTrustAuthority,
-  HookTrustSubject,
-} from "../hooks/trust/store.js";
+import type { HookTrustAuthority, HookTrustSubject } from "../hooks/trust/store.js";
 
 export interface PluginHookTrustAuthorityOptions {
   readonly pluginId: string;

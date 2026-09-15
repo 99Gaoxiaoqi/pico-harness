@@ -279,7 +279,15 @@ const PACKAGE_DEPENDENCY_LAYERS = {
   "transcript-replica": ["protocol"],
   "runtime-host": ["core", "runtime"],
   "pico-host": ["core", "storage", "runtime", "protocol", "runtime-host"],
-  cli: ["core", "storage", "runtime", "protocol", "runtime-host", "pico-host", "transcript-replica"],
+  cli: [
+    "core",
+    "storage",
+    "runtime",
+    "protocol",
+    "runtime-host",
+    "pico-host",
+    "transcript-replica",
+  ],
 };
 
 /** Check actual workspace specifiers, including erased types and dynamic imports. */
@@ -295,19 +303,33 @@ export function scanWorkspacePackageBoundaries({ repositoryRoot = REPOSITORY_ROO
       : undefined;
     for (const file of listSourceFiles(sourceRoot)) {
       const source = normalizeRelativePath(file, repositoryRoot);
-      const ast = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true);
+      const ast = ts.createSourceFile(
+        file,
+        readFileSync(file, "utf8"),
+        ts.ScriptTarget.Latest,
+        true,
+      );
       const imports = new Set();
       const visit = (node) => {
-        if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
-            node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
+        if (
+          (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
+          node.moduleSpecifier &&
+          ts.isStringLiteral(node.moduleSpecifier)
+        ) {
           imports.add(node.moduleSpecifier.text);
-        } else if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument) &&
-                   ts.isStringLiteral(node.argument.literal)) {
+        } else if (
+          ts.isImportTypeNode(node) &&
+          ts.isLiteralTypeNode(node.argument) &&
+          ts.isStringLiteral(node.argument.literal)
+        ) {
           imports.add(node.argument.literal.text);
-        } else if (ts.isCallExpression(node) &&
-                   (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
-                    (ts.isIdentifier(node.expression) && node.expression.text === "require")) &&
-                   node.arguments[0] && ts.isStringLiteral(node.arguments[0])) {
+        } else if (
+          ts.isCallExpression(node) &&
+          (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
+            (ts.isIdentifier(node.expression) && node.expression.text === "require")) &&
+          node.arguments[0] &&
+          ts.isStringLiteral(node.arguments[0])
+        ) {
           imports.add(node.arguments[0].text);
         }
         ts.forEachChild(node, visit);
@@ -333,7 +355,8 @@ export function scanWorkspacePackageBoundaries({ repositoryRoot = REPOSITORY_ROO
     }
   }
   return violations.sort((left, right) =>
-    (left.source + left.target).localeCompare(right.source + right.target));
+    (left.source + left.target).localeCompare(right.source + right.target),
+  );
 }
 
 /**

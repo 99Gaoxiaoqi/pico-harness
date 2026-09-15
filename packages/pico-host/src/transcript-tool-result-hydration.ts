@@ -1,8 +1,5 @@
 import type { DurableTranscriptEvent, ToolResultEnvelope } from "@pico/core";
-import {
-  projectTranscriptEvents,
-  type TranscriptEvent,
-} from "./transcript-event-store.js";
+import { projectTranscriptEvents, type TranscriptEvent } from "./transcript-event-store.js";
 
 export interface CanonicalTranscriptToolResult {
   readonly sequence: number;

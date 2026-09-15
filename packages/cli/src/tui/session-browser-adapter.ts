@@ -1,8 +1,7 @@
 import type { CliSessionSummary } from "@pico/cli/session-resolver";
 import type { SessionBrowserSession } from "./session-browser.js";
 
-export interface CliSessionBrowserSummary extends CliSessionSummary {
-}
+export type CliSessionBrowserSummary = CliSessionSummary;
 
 export function mapCliSessionsToBrowserSessions(
   summaries: readonly CliSessionBrowserSummary[],

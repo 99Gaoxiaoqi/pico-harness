@@ -22,7 +22,14 @@ export interface CostTrackerSession extends RuntimeProjectionSession {
   /** Opaque presence marker; the tracker never accesses storage internals. */
   readonly runtimeEventStore?: object | undefined;
   recordMissingUsage(): void;
-  recordUsage(promptTokens: number, completionTokens: number, costCNY: number, canonical?: CanonicalUsage, costStatus?: CostStatus, reportedFields?: readonly UsageReportedField[]): void;
+  recordUsage(
+    promptTokens: number,
+    completionTokens: number,
+    costCNY: number,
+    canonical?: CanonicalUsage,
+    costStatus?: CostStatus,
+    reportedFields?: readonly UsageReportedField[],
+  ): void;
 }
 export interface CostTrackerDiagnostics {
   warn(bindings: Record<string, unknown>, message: string): void;
@@ -331,7 +338,9 @@ export class CostTracker implements LLMProvider {
     if (!this.options.ledger) return;
     const route = normalizeRoute(this.modelRoute);
     const usage = response?.usage;
-    const cost = usage ? estimateCost(this.modelRoute, usage, this.options.catalogPricing) : undefined;
+    const cost = usage
+      ? estimateCost(this.modelRoute, usage, this.options.catalogPricing)
+      : undefined;
     const cacheSupport =
       route.cacheSupported === true
         ? { cacheSupport: "supported" }

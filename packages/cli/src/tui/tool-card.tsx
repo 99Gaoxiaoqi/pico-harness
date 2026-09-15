@@ -109,7 +109,9 @@ export function ToolCard(props: ToolCardProps): React.ReactNode {
       {visible.map((row, index) => (
         <Text
           key={`${start + index}:${row.kind}:${row.text}`}
-          {...optionalTextColor(row.kind === "header" ? "cyan" : failed && row.kind === "result" ? "red" : undefined)}
+          {...optionalTextColor(
+            row.kind === "header" ? "cyan" : failed && row.kind === "result" ? "red" : undefined,
+          )}
           dimColor={row.kind !== "header" && !(failed && row.kind === "result")}
           wrap="truncate"
         >

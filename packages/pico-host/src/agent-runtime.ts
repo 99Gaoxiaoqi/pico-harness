@@ -35,7 +35,10 @@ import {
 import { type AtomicMemoryLifecycle } from "@pico/runtime";
 import { createAgentSwarmStatusTool } from "@pico/runtime/agent-swarm-status-tool";
 import { AGENT_SWARM_SUPERVISOR_TOOL_NAMES } from "@pico/core/agent-graph-tool-names";
-import { isPlanGraphWaiting, reconcilePlanExecution } from "@pico/pico-host/product-plan-execution-recovery";
+import {
+  isPlanGraphWaiting,
+  reconcilePlanExecution,
+} from "@pico/pico-host/product-plan-execution-recovery";
 import { randomUUID } from "node:crypto";
 import { mkdir, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -417,7 +420,10 @@ export class AgentRuntime {
     input: PlanApprovalExecutionRequest,
     host: RunAgentCliDependencies = {},
   ): Promise<RunAgentCliResult> {
-    const picoHome = resolvePicoHome({ ...(host.picoHome !== undefined ? { picoHome: host.picoHome } : {}), env: host.env ?? process.env });
+    const picoHome = resolvePicoHome({
+      ...(host.picoHome !== undefined ? { picoHome: host.picoHome } : {}),
+      env: host.env ?? process.env,
+    });
     const workDir = await resolveWorkDir(input.approval.dir);
     const lease = await acquireRuntimeSession({
       sessionSelection: { mode: "resume", sessionId: input.approval.sessionId },
@@ -517,7 +523,10 @@ export class AgentRuntime {
   }
 
   async readPlanProjection(input: PlanSessionRequest): Promise<PlanProjection> {
-    const picoHome = resolvePicoHome({ ...(input.picoHome !== undefined ? { picoHome: input.picoHome } : {}), env: input.env ?? process.env });
+    const picoHome = resolvePicoHome({
+      ...(input.picoHome !== undefined ? { picoHome: input.picoHome } : {}),
+      env: input.env ?? process.env,
+    });
     const workDir = await resolveWorkDir(input.dir);
     const store = new SqliteRuntimeEventStore({
       storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
@@ -771,7 +780,9 @@ async function acquirePlanControlSession(
   host: RunAgentCliDependencies,
 ): Promise<{ session: Session; lease: SessionManagerLease; workDir: string }> {
   const picoHome = resolvePicoHome({
-    ...((input.picoHome ?? host.picoHome) !== undefined ? { picoHome: (input.picoHome ?? host.picoHome)! } : {}),
+    ...((input.picoHome ?? host.picoHome) !== undefined
+      ? { picoHome: (input.picoHome ?? host.picoHome)! }
+      : {}),
     env: input.env ?? host.env ?? process.env,
   });
   const workDir = await resolveWorkDir(input.dir);
@@ -1810,7 +1821,9 @@ export async function executeAgentRuntime(
         profile: mainProcessSandbox.profile,
         workspaceRoots: roots,
         scratchRoot: mainProcessSandbox.scratchRoot ?? processSandboxScratchRoot,
-        ...(mainProcessSandbox.generation !== undefined ? { generation: mainProcessSandbox.generation } : {}),
+        ...(mainProcessSandbox.generation !== undefined
+          ? { generation: mainProcessSandbox.generation }
+          : {}),
         ...(mainProcessSandbox.config ? { config: mainProcessSandbox.config } : {}),
         ...(mainProcessSandbox.readRoots ? { readRoots: mainProcessSandbox.readRoots } : {}),
         ...(mainProcessSandbox.writeRoots ? { writeRoots: mainProcessSandbox.writeRoots } : {}),
@@ -1979,7 +1992,9 @@ export async function executeAgentRuntime(
           registry,
           admission: codeCellAdmissionFor(session),
           getRuntimeRun: currentRuntimeRun,
-          ...(dependencies.toolResultRedactionSecrets ? { redactionSecrets: dependencies.toolResultRedactionSecrets } : {}),
+          ...(dependencies.toolResultRedactionSecrets
+            ? { redactionSecrets: dependencies.toolResultRedactionSecrets }
+            : {}),
           ...(activeHookService ? { hookService: activeHookService } : {}),
         }),
       );
@@ -2063,7 +2078,9 @@ export async function executeAgentRuntime(
       const composed = await new PromptComposer(workDir, collaborationMode() === "plan", {
         goalManager,
         todoStore,
-        ...(dependencies.isolatedHeadless !== undefined ? { isolatedHeadless: dependencies.isolatedHeadless } : {}),
+        ...(dependencies.isolatedHeadless !== undefined
+          ? { isolatedHeadless: dependencies.isolatedHeadless }
+          : {}),
         graphToolsAvailable:
           !!session.runtimeEventStore &&
           !backgroundPolicy &&
@@ -2336,7 +2353,9 @@ export async function executeAgentRuntime(
               modelRouter: subagentModelRouter,
               parentModelRouteId,
               parentExecutionBoundary: () => session.getRuntimeStateSnapshot().boundary,
-              ...(runtimeState.taskHostRuntime?.supervisor ? { worktreeSupervisor: runtimeState.taskHostRuntime.supervisor } : {}),
+              ...(runtimeState.taskHostRuntime?.supervisor
+                ? { worktreeSupervisor: runtimeState.taskHostRuntime.supervisor }
+                : {}),
               reporter,
               childDependencies: {
                 env: runtimeEnv,
@@ -2346,7 +2365,9 @@ export async function executeAgentRuntime(
                 providerDecorator,
                 approvalNotifier,
                 approvalManager,
-                ...(dependencies.toolResultRedactionSecrets ? { toolResultRedactionSecrets: dependencies.toolResultRedactionSecrets } : {}),
+                ...(dependencies.toolResultRedactionSecrets
+                  ? { toolResultRedactionSecrets: dependencies.toolResultRedactionSecrets }
+                  : {}),
               },
             })
           : undefined);
@@ -2389,7 +2410,9 @@ export async function executeAgentRuntime(
           registry.register({
             name: () => "agent_output",
             readOnly: true,
-            ...(childOutput.fileSideEffects ? { fileSideEffects: childOutput.fileSideEffects } : {}),
+            ...(childOutput.fileSideEffects
+              ? { fileSideEffects: childOutput.fileSideEffects }
+              : {}),
             definition: () => ({
               ...childDefinition,
               description: `${childDefinition.description} Graph正式结果也支持view=result与work_ids。`,

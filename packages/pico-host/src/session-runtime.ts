@@ -313,14 +313,8 @@ class DefaultSessionRuntime<Command> implements SessionRuntime<Command> {
             workspaceRoots: processSandbox.workspaceRoots ?? [this.lifecycle.workDir],
             generation: processSandbox.generation ?? 0,
             scratchRoot,
-            readRoots: [
-              ...(processSandbox.readRoots ?? []),
-              ...(processSandbox.writeRoots ?? []),
-            ],
-            readFiles: [
-              ...(processSandbox.readFiles ?? []),
-              ...(processSandbox.writeFiles ?? []),
-            ],
+            readRoots: [...(processSandbox.readRoots ?? []), ...(processSandbox.writeRoots ?? [])],
+            readFiles: [...(processSandbox.readFiles ?? []), ...(processSandbox.writeFiles ?? [])],
             ...(processSandbox.config ? { config: processSandbox.config } : {}),
           });
           this.hookRuntime?.updateProcessSandbox(

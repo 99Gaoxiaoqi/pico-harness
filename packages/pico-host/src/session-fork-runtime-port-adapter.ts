@@ -11,8 +11,7 @@ import { createEngineRuntimePort } from "./engine-runtime-port-adapter.js";
  * physical Session/FileHistory transaction remains outside the Runtime package.
  */
 export function createSessionForkRuntimePort(): SessionForkRuntimePort {
-  let runtimePort!: SessionForkRuntimePort;
-  runtimePort = createRuntimeSessionForkLifecycle<
+  const runtimePort: SessionForkRuntimePort = createRuntimeSessionForkLifecycle<
     Session,
     EngineRuntimePort,
     FileHistoryRewindTransactionHooks

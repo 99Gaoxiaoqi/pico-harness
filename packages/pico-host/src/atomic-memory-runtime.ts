@@ -349,11 +349,15 @@ export class AtomicMemoryRuntime {
         : events
             .filter((e) => e.role !== "other")
             .map((e) => ({ role: e.role as "user" | "assistant", content: e.text })));
-    const sourceEventMessagePositions = source?.positions ??
+    const sourceEventMessagePositions =
+      source?.positions ??
       (trigger === "extract" && this.source?.sourceMessages
         ? this.source.sourceEventMessagePositions
-        : Object.fromEntries(events.filter((event) => event.role !== "other")
-          .map((event, index) => [event.eventId, [index]])));
+        : Object.fromEntries(
+            events
+              .filter((event) => event.role !== "other")
+              .map((event, index) => [event.eventId, [index]]),
+          ));
     return {
       trigger,
       deletionRevision,
@@ -367,8 +371,12 @@ export class AtomicMemoryRuntime {
       checkpoints,
       sourceMessages: messages,
       ...(sourceEventMessagePositions !== undefined ? { sourceEventMessagePositions } : {}),
-      ...(this.options.contextWindowTokens !== undefined ? { contextWindowTokens: this.options.contextWindowTokens } : {}),
-      ...(this.options.reservedOutputTokens !== undefined ? { reservedOutputTokens: this.options.reservedOutputTokens } : {}),
+      ...(this.options.contextWindowTokens !== undefined
+        ? { contextWindowTokens: this.options.contextWindowTokens }
+        : {}),
+      ...(this.options.reservedOutputTokens !== undefined
+        ? { reservedOutputTokens: this.options.reservedOutputTokens }
+        : {}),
       ...(source?.tools
         ? { sourceTools: source.tools }
         : this.source?.sourceTools

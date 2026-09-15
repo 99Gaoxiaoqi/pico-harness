@@ -1,7 +1,10 @@
 import type { LLMProvider, ProviderKind, ReasoningLevel } from "@pico/core";
 import type { Session } from "@pico/pico-host/session";
 import type { ProviderConfig } from "@pico/runtime/provider-config";
-import { createRawProvider, type ProviderRuntimeDependencies } from "@pico/pico-host/provider/factory";
+import {
+  createRawProvider,
+  type ProviderRuntimeDependencies,
+} from "@pico/pico-host/provider/factory";
 import { CredentialRotationCoordinator } from "@pico/runtime/credential-rotation";
 import { CredentialPool } from "@pico/runtime/credential-pool";
 import type { RateLimitFailure } from "@pico/runtime/provider-retry";
