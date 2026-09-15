@@ -738,6 +738,36 @@ export function scanRootSourceLayout({ repositoryRoot = REPOSITORY_ROOT } = {}) 
         true,
       );
       const visit = (node) => {
+        // Child-process scripts can hide imports in strings built from filesystem paths.
+        // Check the statically known repository-relative forms without treating fixture
+        // source strings or arbitrary temporary workspace paths as production imports.
+        let sourcePath;
+        if (
+          ts.isCallExpression(node) &&
+          ["join", "resolve"].includes(node.expression.getText(ast).split(".").at(-1)) &&
+          node.arguments[0]?.getText(ast) === "process.cwd()" &&
+          node.arguments.slice(1).every(ts.isStringLiteral)
+        ) {
+          sourcePath = resolve(repositoryRoot, ...node.arguments.slice(1).map((arg) => arg.text));
+        } else if (
+          ts.isNewExpression(node) &&
+          node.expression.getText(ast) === "URL" &&
+          node.arguments?.[0] &&
+          ts.isStringLiteral(node.arguments[0]) &&
+          node.arguments[1]?.getText(ast) === "import.meta.url" &&
+          node.arguments[0].text.startsWith(".")
+        ) {
+          sourcePath = resolve(dirname(file), node.arguments[0].text);
+        }
+        if (sourcePath) {
+          const target = normalizeRelativePath(sourcePath, repositoryRoot);
+          if (
+            target.startsWith("src/") &&
+            !ROOT_PROCESS_ENTRYPOINTS.has(target.replace(/\.js$/, ".ts"))
+          ) {
+            violations.push({ rule: "root-source-path-reference", source, target });
+          }
+        }
         let specifier;
         if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
           specifier = node.moduleSpecifier;

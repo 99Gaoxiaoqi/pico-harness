@@ -14,6 +14,8 @@ test("root src contains only process entrypoints and consumers use package bound
     "src/engine/legacy.ts": 'export * from "@pico/runtime";',
     "tests/consumer.ts": 'export type T = import("../src/engine/legacy.js").T;',
     "scripts/consumer.mjs": 'await import("../src/engine/legacy.js");',
+    "tests/worker.ts": 'const worker = join(process.cwd(), "src", "engine", "legacy.ts");',
+    "tests/entry.ts": 'const entry = new URL("../src/cli/main.ts", import.meta.url);',
     "packages/runtime/src/consumer.ts": 'import "../../../tests/support.js";',
   })) {
     const file = join(root, path);
@@ -26,5 +28,6 @@ test("root src contains only process entrypoints and consumers use package bound
     "root-source-import",
     "root-source-import",
     "root-source-not-entrypoint",
+    "root-source-path-reference",
   ]);
 });
