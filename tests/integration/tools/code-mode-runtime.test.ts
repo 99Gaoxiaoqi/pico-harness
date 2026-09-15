@@ -3,14 +3,14 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { Session } from "../../../src/engine/session.js";
-import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
-import { RuntimeRun } from "../../../src/runtime/runtime-run.js";
+import { Session } from "@pico/pico-host/session";
+import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
+import { RuntimeRun } from "@pico/pico-host/product-runtime-run";
 import { createCodeModeTool } from "@pico/pico-host/code-mode-tool";
 import type { CodeModeExecutionResult } from "@pico/pico-host/code-mode";
-import { ToolRegistry } from "../../../src/tools/registry-impl.js";
-import { ToolCommitBoundaryError, type BaseTool } from "../../../src/tools/registry.js";
-import { ToolAccesses } from "../../../src/tools/tool-access.js";
+import { ToolRegistry } from "@pico/pico-host/product-tool-registry";
+import { ToolCommitBoundaryError, type BaseTool } from "@pico/pico-host/tool-registry-contract";
+import { ToolAccesses } from "@pico/runtime/tool-access";
 
 function readableTool(name: string, execute: BaseTool["execute"]): BaseTool {
   return {

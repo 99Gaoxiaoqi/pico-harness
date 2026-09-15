@@ -2,7 +2,7 @@ import {
   AgentRuntime,
   type RunAgentCliOptions,
   type RunAgentCliDependencies,
-} from "../../src/runtime/agent-runtime.js";
+} from "@pico/pico-host/agent-runtime";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
@@ -10,23 +10,26 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { wakeIdFor } from "../../src/agent-graph/core/ids.js";
-import { SqliteAgentGraphControlStoreAdapter } from "../../src/agent-graph/sqlite-control-store-adapter.js";
-import { createProductionRuntimeServices } from "../../src/daemon/production-host.js";
-import { globalSessionManager } from "../../src/engine/session.js";
-import { EMPTY_USER_CONFIG_REVISION, UserConfigStore } from "../../src/input/user-config-store.js";
-import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
-import type { CredentialRef, CredentialVault } from "../../src/provider/credential-vault.js";
+import { wakeIdFor } from "@pico/core/agent-graph-identities";
+import { SqliteAgentGraphControlStoreAdapter } from "@pico/runtime";
+import { createProductionRuntimeServices } from "@pico/pico-host/production-host";
+import { globalSessionManager } from "@pico/pico-host/session";
+import {
+  EMPTY_USER_CONFIG_REVISION,
+  UserConfigStore,
+} from "@pico/pico-host/input/user-config-store";
+import { resolvePicoPaths } from "@pico/pico-host";
+import type { CredentialRef, CredentialVault } from "@pico/pico-host/provider/credential-vault";
 import {
   createAgentGraphWorkspaceHost,
   type AgentGraphWorkspaceHost,
-} from "../../src/runtime/agent-graph-host.js";
-import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-adapter.js";
-import type { WorkspaceTaskRuntime } from "../../src/runtime/workspace-runtime.js";
-import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
-import type { RuntimeEvent } from "../../src/storage/runtime-event.js";
-import type { AgentGraphRecord } from "../../src/storage/sqlite/agent-graph-store-types.js";
-import { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
+} from "@pico/pico-host/product-agent-graph-host";
+import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
+import type { WorkspaceTaskRuntime } from "@pico/pico-host/workspace-task-runtime";
+import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
+import type { RuntimeEvent } from "@pico/storage/runtime-event";
+import type { AgentGraphRecord } from "@pico/core/agent-graph-store-contracts";
+import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
 import { configuredUserDefaultRealModel } from "./real-llm-user-model.js";
 
 const TEST_TIMEOUT_MS = 9 * 60_000;

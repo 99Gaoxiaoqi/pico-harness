@@ -4,12 +4,12 @@ import {
   type RuntimeNotification,
   type RuntimeNotificationMap,
 } from "@pico/protocol";
-import { redactProviderErrorText } from "../../../src/provider/error-redaction.js";
+import { redactProviderErrorText } from "@pico/runtime";
 import type {
   ClientSessionRuntime,
   DaemonSessionClient,
-} from "../../../src/tui/client-session-runtime.js";
-import type { TuiReporter } from "../../../src/tui/tui-reporter.js";
+} from "@pico/cli/tui/client-session-runtime";
+import type { TuiReporter } from "@pico/cli/tui/tui-reporter";
 
 /** Observe a new wire Run, never an assistant entry left by an earlier turn. */
 export async function sendTuiTurn(options: {

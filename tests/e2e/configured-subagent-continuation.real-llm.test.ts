@@ -4,10 +4,11 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { AgentRuntime } from "../../src/runtime/agent-runtime.js";
-import { SilentReporter, type Reporter } from "../../src/engine/reporter.js";
-import { globalSessionManager } from "../../src/engine/session.js";
-import type { ConfiguredSubagentCatalogPort } from "../../src/agents/subagent-profiles.js";
+import { AgentRuntime } from "@pico/pico-host/agent-runtime";
+import { SilentReporter } from "@pico/runtime/silent-reporter";
+import { type Reporter } from "@pico/core";
+import { globalSessionManager } from "@pico/pico-host/session";
+import type { ConfiguredSubagentCatalogPort } from "@pico/core/subagent-capabilities";
 import { configuredUserDefaultRealModel } from "./real-llm-user-model.js";
 
 const realTest = process.env.RUN_LLM_E2E === "1" ? test : test.skip;

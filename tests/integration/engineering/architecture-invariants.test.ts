@@ -120,26 +120,26 @@ test("D12 正向不变量：transcript 分页只有 storage projection，rendere
   );
 });
 
-test("D14 正向不变量：src/tui 零引擎装配，连接���一经共享 client（3-D Phase 5）", () => {
-  // 3-D 终态架构（2026-08-15，Phase 5 扩展到整个 src/tui）：交互 TUI =
-  // daemon 瘦客户端——in-process repl 装配链已删除，src/tui 全目录不得
+test("D14 正向不变量：CLI TUI 零引擎装配，连接唯一经共享 client（3-D Phase 5）", () => {
+  // 交互 TUI 是 daemon 瘦客户端，迁入 CLI 包后继续保持这一边界：
+  // in-process repl 装配链已删除，packages/cli/src/tui 全目录不得
   // import 引擎装配面（engine session 构建、globalSessionManager、bundle
   // 装配），引擎执行唯一在 daemon 侧；连接/重连/重生唯一经 LocalRuntimeClient
   // （与 Desktop/cron 同一实现，全仓连接状态机数 = 1）。
-  const tuiDir = join(repositoryRoot, "src", "tui");
+  const tuiDir = join(repositoryRoot, "packages", "cli", "src", "tui");
   const tuiSources = readdirSync(tuiDir).filter((name) => /\.(ts|tsx)$/.test(name));
   assert.ok(
     tuiSources.length > 40,
-    `src/tui 应有大量模块（实际 ${tuiSources.length}），扫描疑似失效`,
+    `CLI TUI 应有大量模块（实际 ${tuiSources.length}），扫描疑似失效`,
   );
   // 引擎 wire 契约例外：tool-result-contract 是 transcript 数据形状工厂
   // （投影层合法消费），不是引擎装配。
   const ALLOWED_ENGINE_VALUE_IMPORTS = new Set(["../engine/tool-result-contract.js"]);
   for (const name of tuiSources) {
-    const source = readSource(`src/tui/${name}`);
+    const source = readSource(`packages/cli/src/tui/${name}`);
     // 引擎/运行时装配面 import：只允许 type 契约或白名单数据形状。
     for (const match of source.matchAll(
-      /import\s+(type\s+)?(?:\{[^}]*\}|[\w$]+|\*\s+as\s+[\w$]+)\s+from\s+"(\.\.\/(?:engine|runtime)\/[^"]+)";/g,
+      /import\s+(type\s+)?(?:\{[^}]*\}|[\w$]+|\*\s+as\s+[\w$]+)\s+from\s+"((?:\.\.\/(?:engine|runtime)\/[^"\n]+)|(?:@pico\/pico-host\/(?:agent-runtime|session-runtime|engine-composition)))";/g,
     )) {
       const isTypeOnly = Boolean(match[1]);
       const importedFrom = match[2] ?? "(unknown)";

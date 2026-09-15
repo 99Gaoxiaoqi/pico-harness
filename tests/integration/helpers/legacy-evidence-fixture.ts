@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 import { dirname } from "node:path";
-import { EvidenceBlobStore } from "../../../src/context/evidence-blob-store.js";
-import type { SubagentReportEvidenceReference } from "../../../src/context/evidence-archive.js";
-import type { RuntimeEvidenceReference } from "../../../src/engine/tool-result-contract.js";
-import { withWorkspaceSqliteLease } from "../../../src/storage/sqlite/workspace-scopes.js";
+import { EvidenceBlobStore } from "@pico/storage/evidence-blob-store";
+import type { SubagentReportEvidenceReference } from "@pico/storage/evidence-archive";
+import type { RuntimeEvidenceReference } from "@pico/core";
+import { withWorkspaceSqliteLease } from "@pico/storage";
 
 /**
  * 票 E3(ADR 26 §2.4)退役了 EvidenceArchive 的写入 API,生产代码不再产生

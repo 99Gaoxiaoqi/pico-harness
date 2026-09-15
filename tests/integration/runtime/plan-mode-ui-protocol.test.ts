@@ -8,7 +8,7 @@ import {
   approvalFromPlanControlSnapshot,
   approvalFromPlanProjection,
 } from "../../../apps/desktop/src/renderer/conversation/runtime-projection.js";
-import { planReviewOperationId } from "../../../src/plan/review-identity.js";
+import { planReviewOperationId } from "@pico/core/plan-review-identity";
 
 test("Plan review protocol exposes CAS-protected three-action requests", () => {
   assert.ok(DESKTOP_RUNTIME_METHODS.includes("plan.respond"));

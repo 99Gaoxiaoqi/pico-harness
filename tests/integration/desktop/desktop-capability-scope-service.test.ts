@@ -3,13 +3,14 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { DesktopRuntimeService, WorkspaceRuntimeService } from "../../../src/daemon/index.js";
+import { DesktopRuntimeService } from "@pico/pico-host/desktop-runtime-service";
+import { WorkspaceRuntimeService } from "@pico/pico-host/workspace-runtime-service";
 import { createRuntimeRequest, RuntimeProtocolError, RUNTIME_ERROR_CODES } from "@pico/protocol";
-import { UserMcpConfigStore } from "../../../src/mcp/user-config-store.js";
-import { PluginRuntimeSnapshotRegistry } from "../../../src/plugins/plugin-runtime-snapshot-registry.js";
-import type { PluginRuntimeSnapshot } from "../../../src/plugins/plugin-runtime-snapshot.js";
-import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
-import { WorkspaceRegistrationStore } from "../../../src/daemon/workspace-registration.js";
+import { UserMcpConfigStore } from "@pico/pico-host/user-mcp-config-store";
+import { PluginRuntimeSnapshotRegistry } from "@pico/pico-host/plugins/plugin-runtime-snapshot-registry";
+import type { PluginRuntimeSnapshot } from "@pico/pico-host/plugins/plugin-runtime-snapshot";
+import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
+import { WorkspaceRegistrationStore } from "@pico/pico-host/workspace-registration";
 
 test("Desktop scoped MCP management is global, CAS-safe, trust-gated and secret-free", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-capability-service-"));

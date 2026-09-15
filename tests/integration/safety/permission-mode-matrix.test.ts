@@ -1,21 +1,21 @@
 import assert from "node:assert/strict";
 import { resolve } from "node:path";
 import { test } from "node:test";
-import { ApprovalManager, type ApprovalNotice } from "../../../src/approval/manager.js";
-import { buildPermissionMiddleware } from "../../../src/runtime/agent-runtime.js";
-import type { ToolCall } from "../../../src/schema/message.js";
-import { BashTool } from "../../../src/tools/bash.js";
-import { EditFileTool } from "../../../src/tools/edit-file.js";
-import { ToolRegistry } from "../../../src/tools/registry-impl.js";
-import type { ToolPermissionCategory } from "../../../src/tools/registry.js";
-import { WebSearchTool } from "../../../src/tools/web.js";
-import { WriteFileTool } from "../../../src/tools/write-file.js";
-import { WorkspaceRoots } from "../../../src/tools/workspace-roots.js";
+import { ApprovalManager, type ApprovalNotice } from "@pico/pico-host/global-approval-manager";
+import { buildPermissionMiddleware } from "@pico/pico-host/agent-runtime";
+import type { ToolCall } from "@pico/core";
+import { BashTool } from "@pico/pico-host/bash-tool";
+import { EditFileTool } from "@pico/pico-host/edit-file-tool";
+import { ToolRegistry } from "@pico/pico-host/product-tool-registry";
+import type { ToolPermissionCategory } from "@pico/pico-host/tool-registry-contract";
+import { WebSearchTool } from "@pico/pico-host/web-tools";
+import { WriteFileTool } from "@pico/pico-host/write-file-tool";
+import { WorkspaceRoots } from "@pico/pico-host/workspace-roots";
 import {
   createManagedExecutionBoundary,
   createReadOnlyPermissionProfile,
   type ExecutionBoundary,
-} from "../../../src/safety/permission-profile.js";
+} from "@pico/core/permission-profile";
 
 type PermissionMode = "ask" | "auto" | "full-access";
 

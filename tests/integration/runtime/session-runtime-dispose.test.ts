@@ -1,12 +1,13 @@
+import { createHookManagementCommands } from "@pico/cli/hook-management-commands";
 import assert from "node:assert/strict";
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { CodeIntelligenceManager as HostCodeIntelligenceManager } from "@pico/pico-host/code-intelligence";
-import { CodeIntelligenceManager } from "../../../src/code-intelligence/index.js";
-import { Session } from "../../../src/engine/session.js";
-import { createSessionRuntime } from "../../../src/runtime/session-runtime.js";
+import { CodeIntelligenceManager } from "@pico/pico-host/code-intelligence";
+import { Session } from "@pico/pico-host/session";
+import { createSessionRuntime } from "@pico/pico-host/session-runtime";
 
 test("Code Intelligence 包入口与旧入口共享 class identity", () => {
   assert.equal(HostCodeIntelligenceManager, CodeIntelligenceManager);
@@ -23,6 +24,7 @@ test("SessionRuntime atomically detaches scratch before asynchronous cleanup", a
   await writeFile(join(scratchRoot, "old-cache"), "old");
   const session = new Session(sessionId, workDir, { persistence: false, picoHome });
   const runtime = await createSessionRuntime({
+    hookCommandFactory: createHookManagementCommands,
     session,
     sessionLease: { session, release: () => undefined },
     hooks: false,
@@ -49,6 +51,7 @@ test("SessionRuntime reaches a terminal released state after owned cleanup fails
   const session = new Session("runtime-dispose-retry", workDir, { persistence: false });
   let releases = 0;
   const runtime = await createSessionRuntime({
+    hookCommandFactory: createHookManagementCommands,
     session,
     sessionLease: {
       session,
@@ -88,6 +91,7 @@ test("SessionRuntime code intelligence policy remains disabled until an Agent Ru
   const workDir = await mkdtemp(join(tmpdir(), "pico-session-runtime-code-isolation-"));
   const session = new Session("runtime-code-isolation", workDir, { persistence: false });
   const runtime = await createSessionRuntime({
+    hookCommandFactory: createHookManagementCommands,
     session,
     sessionLease: { session, release: () => undefined },
     hooks: false,
@@ -171,6 +175,7 @@ test("persisted Plan collaboration disables LSP before SessionRuntime startup", 
     },
   });
   const runtime = await createSessionRuntime({
+    hookCommandFactory: createHookManagementCommands,
     session,
     sessionLease: { session, release: () => undefined },
     hooks: false,

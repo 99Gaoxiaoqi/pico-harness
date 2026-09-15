@@ -15,17 +15,17 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { FullCompactor } from "../../../src/context/full-compactor.js";
+import { FullCompactor } from "@pico/pico-host/product-full-compactor";
 import {
   CONTENT_DIGEST_V1_PREFIX,
   computeCheckpointSourceDigest,
   recordRuntimeCompactionCheckpoint,
-} from "../../../src/context/runtime-compaction-checkpoint.js";
-import { materializeRuntimeHistory } from "../../../src/engine/session-runtime-read-model.js";
-import { Session } from "../../../src/engine/session.js";
-import { RuntimeRun } from "../../../src/runtime/runtime-run.js";
-import type { Message } from "../../../src/schema/message.js";
-import type { LLMProvider } from "../../../src/provider/interface.js";
+} from "@pico/runtime/runtime-compaction-checkpoint";
+import { materializeRuntimeHistory } from "@pico/runtime/session-runtime-read-model";
+import { Session } from "@pico/pico-host/session";
+import { RuntimeRun } from "@pico/pico-host/product-runtime-run";
+import type { Message } from "@pico/core";
+import type { LLMProvider } from "@pico/core";
 
 /**
  * 测试根目录:优先用 PICO_TEST_TMPDIR(允许 fsync 的目录),回退到 os.tmpdir()。

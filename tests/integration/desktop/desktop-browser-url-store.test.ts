@@ -13,7 +13,7 @@ import { BrowserUrlStore } from "../../../apps/desktop/src/main/browser-url-stor
 import {
   BrowserAgentBrokerError,
   BrowserAgentCommandBroker,
-} from "../../../src/daemon/browser-agent-command-broker.js";
+} from "@pico/pico-host/browser-agent-command-broker";
 
 test("browser URL store atomically restores the last HTTP(S) URL per Session", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-browser-url-"));

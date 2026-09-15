@@ -1,13 +1,13 @@
-import { EffectiveConfigResolver } from "../../src/input/effective-config.js";
-import { UserConfigStore } from "../../src/input/user-config-store.js";
-import { resolvePicoHome } from "../../src/paths/pico-paths.js";
+import { EffectiveConfigResolver } from "@pico/pico-host/input/effective-config";
+import { UserConfigStore } from "@pico/pico-host/input/user-config-store";
+import { resolvePicoHome } from "@pico/pico-host";
 import {
   loadEffectiveModelRuntime,
   type EffectiveModelRuntime,
-} from "../../src/provider/effective-model-runtime.js";
-import type { ProviderConfig } from "../../src/provider/config.js";
-import type { ProviderKind } from "../../src/provider/factory.js";
-import type { ModelRoute } from "../../src/provider/model-router.js";
+} from "@pico/pico-host/provider/effective-model-runtime";
+import type { ProviderConfig } from "@pico/runtime/provider-config";
+import type { ProviderKind } from "@pico/pico-host/provider/factory";
+import type { ModelRoute } from "@pico/pico-host/provider/model-router";
 
 export interface RealModel {
   readonly runtime: EffectiveModelRuntime;

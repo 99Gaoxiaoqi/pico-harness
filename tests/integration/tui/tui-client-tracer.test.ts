@@ -8,17 +8,17 @@ import {
   type RuntimeNotificationTopic,
   type RuntimeSessionSubscriptionFrame,
 } from "@pico/protocol";
-import { TranscriptEventStore } from "../../../src/presentation/transcript-event-store.js";
-import { DaemonEventReporter } from "../../../src/tui/daemon-event-reporter.js";
-import { transcriptEventsFromRuntimeItems } from "../../../src/tui/transcript-item-hydration.js";
+import { TranscriptEventStore } from "@pico/pico-host/transcript-event-store";
+import { DaemonEventReporter } from "@pico/cli/tui/daemon-event-reporter";
+import { transcriptEventsFromRuntimeItems } from "@pico/cli/tui/transcript-item-hydration";
 import {
   ClientSessionRuntime,
   type DaemonSessionClient,
-} from "../../../src/tui/client-session-runtime.js";
-import { TuiReporter } from "../../../src/tui/tui-reporter.js";
-import type { ApprovalNotice } from "../../../src/approval/manager.js";
-import type { PlanControlNotice } from "../../../src/tui/plan-control-notice.js";
-import { resolvePlanControlAction } from "../../../src/tui/approval-dialogs.js";
+} from "@pico/cli/tui/client-session-runtime";
+import { TuiReporter } from "@pico/cli/tui/tui-reporter";
+import type { ApprovalNotice } from "@pico/pico-host/global-approval-manager";
+import type { PlanControlNotice } from "@pico/cli/tui/plan-control-notice";
+import { resolvePlanControlAction } from "@pico/cli/tui/approval-dialogs";
 
 /**
  * 3-D Phase 2 TUI 客户端 tracer：驱动组件层之下（无 Ink）——

@@ -7,7 +7,7 @@ import {
 } from "@pico/pico-host/plugins/plugin-capability";
 import type { PluginRuntimeSnapshot } from "@pico/pico-host/plugins/plugin-runtime-snapshot";
 import { registerPluginCapabilityTools } from "@pico/pico-host/plugins/plugin-tool-activation";
-import { ToolRegistry } from "../../../src/tools/registry-impl.js";
+import { ToolRegistry } from "@pico/pico-host/product-tool-registry";
 
 // 注：原 5 个 in-process TUI 生命周期用例（runTuiAgentPrompt 依赖转发 /
 // startTuiRepl 快照释放 / storage 与 endpoint 预检 / mergeTuiToolSnapshot）随

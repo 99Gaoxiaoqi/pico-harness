@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { SessionManager, Session, globalSessionManager } from "@pico/pico-host/session";
-import * as legacySession from "../../../src/engine/session.js";
-import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
+import * as legacySession from "@pico/pico-host/session";
+import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
 
 test("SessionManager reuses an entry and drains it after eviction", async () => {
   assert.strictEqual(legacySession.Session, Session);

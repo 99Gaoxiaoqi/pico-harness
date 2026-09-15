@@ -3,20 +3,17 @@ import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { ApprovalManager, type ApprovalResult } from "../../../src/approval/manager.js";
+import { ApprovalManager, type ApprovalResult } from "@pico/pico-host/global-approval-manager";
 import {
   DesktopInteractionBroker,
   DesktopInteractionVersionConflictError,
 } from "@pico/pico-host/desktop-interaction-broker";
-import {
-  FileDesktopInteractionStore,
-  type DesktopInteractionStore,
-} from "../../../src/daemon/desktop-interaction-store.js";
+import { FileDesktopInteractionStore, type DesktopInteractionStore } from "@pico/pico-host";
 import {
   AskUserHandler,
   createAskUserRequestId,
   type AskUserAnswer,
-} from "../../../src/tools/ask-user.js";
+} from "@pico/pico-host/ask-user-tool";
 
 test("approval 使用 expectedVersion 防止竞争，相同 resolution 幂等", async (context) => {
   const fixture = await createFixture(context, "approval");

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { RuntimeCleanupScope } from "../../../src/runtime/runtime-cleanup.js";
+import { RuntimeCleanupScope } from "@pico/runtime";
 
 test("RuntimeCleanupScope preserves cleanup order and isolates failures", async () => {
   const order: string[] = [];

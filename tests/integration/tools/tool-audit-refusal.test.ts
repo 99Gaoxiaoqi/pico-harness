@@ -3,20 +3,20 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { AgentEngine } from "../../../src/engine/loop.js";
-import { SilentReporter } from "../../../src/engine/reporter.js";
-import { Session } from "../../../src/engine/session.js";
-import { HookService } from "../../../src/hooks/service.js";
-import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
-import { currentRuntimeRun, RuntimeRun } from "../../../src/runtime/runtime-run.js";
-import { createCodeModeTool } from "../../../src/tools/code-mode-tool.js";
-import { ToolCommitBoundaryError } from "../../../src/tools/registry.js";
-import { ToolRegistry } from "../../../src/tools/registry-impl.js";
+import { AgentEngine } from "@pico/pico-host/agent-engine";
+import { SilentReporter } from "@pico/runtime/silent-reporter";
+import { Session } from "@pico/pico-host/session";
+import { HookService } from "@pico/pico-host/hooks/service";
+import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
+import { currentRuntimeRun, RuntimeRun } from "@pico/pico-host/product-runtime-run";
+import { createCodeModeTool } from "@pico/pico-host/code-mode-tool";
+import { ToolCommitBoundaryError } from "@pico/pico-host/tool-registry-contract";
+import { ToolRegistry } from "@pico/pico-host/product-tool-registry";
 import {
   buildToolArgumentAudit,
   MAX_TOOL_ARGUMENT_AUDIT_BYTES,
-} from "../../../src/tools/tool-argument-audit.js";
-import { WriteFileTool } from "../../../src/tools/write-file.js";
+} from "@pico/core/tool-argument-audit";
+import { WriteFileTool } from "@pico/pico-host/write-file-tool";
 
 async function scene(t: test.TestContext) {
   const root = await mkdtemp(join(tmpdir(), "pico-audit-refusal-"));

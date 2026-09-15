@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseModelProviderConfigs } from "../../../src/input/pico-config.js";
-import { createProvider } from "../../../src/provider/factory.js";
-import { resolveModelRouteCapabilities } from "../../../src/provider/model-capabilities.js";
-import { loadModelRouter } from "../../../src/provider/model-router.js";
-import { AiSdkProvider } from "../../../src/provider/ai-sdk-provider.js";
+import { parseModelProviderConfigs } from "@pico/pico-host/input/pico-config";
+import { createProvider } from "@pico/pico-host/provider/factory";
+import { resolveModelRouteCapabilities } from "@pico/runtime";
+import { loadModelRouter } from "@pico/pico-host/provider/model-router";
+import { AiSdkProvider } from "@pico/pico-host/provider/ai-sdk-provider";
 
 function streamResponse(chunks: Uint8Array[]): Response {
   return new Response(

@@ -12,16 +12,16 @@ import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { TodoStore } from "../../src/context/todo-store.js";
-import { PromptComposer } from "../../src/context/composer.js";
-import { GoalManager } from "../../src/engine/goal-manager.js";
-import { AgentEngine } from "../../src/engine/loop.js";
-import { SilentReporter } from "../../src/engine/reporter.js";
-import { Session } from "../../src/engine/session.js";
-import { ToolRegistry } from "../../src/tools/registry-impl.js";
-import { TodoTool } from "../../src/tools/todo.js";
-import type { LLMProvider } from "../../src/provider/interface.js";
-import type { Message } from "../../src/schema/message.js";
+import { TodoStore } from "@pico/pico-host/product-todo-store";
+import { PromptComposer } from "@pico/pico-host/product-prompt-composer";
+import { GoalManager } from "@pico/runtime/goal-manager";
+import { AgentEngine } from "@pico/pico-host/agent-engine";
+import { SilentReporter } from "@pico/runtime/silent-reporter";
+import { Session } from "@pico/pico-host/session";
+import { ToolRegistry } from "@pico/pico-host/product-tool-registry";
+import { TodoTool } from "@pico/runtime/todo-tool";
+import type { LLMProvider } from "@pico/core";
+import type { Message } from "@pico/core";
 
 test("prompt cache safety: systemPrompt frozen while turnTail rebuilds per turn", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-cache-safety-"));

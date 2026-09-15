@@ -5,15 +5,15 @@ import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ConversationTranscript } from "../../../apps/desktop/src/renderer/conversation/ConversationTranscript.js";
 import { applyTimelineNotification } from "../../../apps/desktop/src/renderer/timeline.js";
-import { DesktopReporter } from "../../../src/daemon/desktop-reporter.js";
+import { DesktopReporter } from "@pico/pico-host";
 import type { RuntimeNotification } from "../../../packages/protocol/src/index.js";
-import { publishDesktopReporterEvent } from "../../../src/daemon/production-host.js";
-import type { WorkspaceRuntimeService } from "../../../src/daemon/workspace-runtime-service.js";
-import { AgentEngine } from "../../../src/engine/loop.js";
-import { Session } from "../../../src/engine/session.js";
-import { createCanonicalTranscriptToolStart } from "../../../src/engine/transcript-tool-start.js";
-import { createToolResultEnvelope } from "../../../src/engine/tool-result-contract.js";
-import { ToolRegistry } from "../../../src/tools/registry-impl.js";
+import { publishDesktopReporterEvent } from "@pico/pico-host/production-host";
+import type { WorkspaceRuntimeService } from "@pico/pico-host/workspace-runtime-service";
+import { AgentEngine } from "@pico/pico-host/agent-engine";
+import { Session } from "@pico/pico-host/session";
+import { createCanonicalTranscriptToolStart } from "@pico/core/transcript-tool-start";
+import { createToolResultEnvelope } from "@pico/core";
+import { ToolRegistry } from "@pico/pico-host/product-tool-registry";
 
 test("Desktop run announces model inference before a provider without reasoning content", async (context) => {
   const events: Array<{

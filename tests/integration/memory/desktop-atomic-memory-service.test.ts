@@ -1,4 +1,4 @@
-import { AtomicMemoryContextBuilder } from "../../../src/memory/atomic/context-builder.js";
+import { AtomicMemoryContextBuilder } from "@pico/runtime/atomic-memory/context-builder";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -6,8 +6,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { DesktopAtomicMemoryService } from "@pico/pico-host/desktop-atomic-memory-service";
 import { parseRuntimeResult, RuntimeProtocolError } from "@pico/protocol";
-import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
-import { SqliteMemoryItemStore } from "../../../src/storage/sqlite/sqlite-memory-item-store.js";
+import { resolvePicoPaths } from "@pico/pico-host";
+import { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-store";
 
 test("desktop atomic memory exposes Item edits, archive/restore, delete, preview and settings", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pico-atomic-service-"));

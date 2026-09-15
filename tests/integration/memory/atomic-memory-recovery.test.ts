@@ -3,17 +3,17 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { FullCompactor } from "../../../src/context/full-compactor.js";
-import { recordRuntimeCompactionCheckpoint } from "../../../src/context/runtime-compaction-checkpoint.js";
-import { Session } from "../../../src/engine/session.js";
+import { FullCompactor } from "@pico/pico-host/product-full-compactor";
+import { recordRuntimeCompactionCheckpoint } from "@pico/runtime/runtime-compaction-checkpoint";
+import { Session } from "@pico/pico-host/session";
 import {
   memorySessionKey,
   type MemoryModelRequest,
-} from "../../../src/memory/atomic/runtime-contracts.js";
-import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
-import { AtomicMemoryRuntime } from "../../../src/runtime/atomic-memory-runtime.js";
-import { RuntimeRun } from "../../../src/runtime/runtime-run.js";
-import { SqliteMemoryItemStore } from "../../../src/storage/sqlite/sqlite-memory-item-store.js";
+} from "@pico/core/atomic-memory-runtime-contracts";
+import { resolvePicoPaths } from "@pico/pico-host";
+import { AtomicMemoryRuntime } from "@pico/pico-host/atomic-memory-runtime";
+import { RuntimeRun } from "@pico/pico-host/product-runtime-run";
+import { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-store";
 
 const oldFact = "My previous project uses Rust.";
 const newFact = "I prefer concise Chinese answers.";

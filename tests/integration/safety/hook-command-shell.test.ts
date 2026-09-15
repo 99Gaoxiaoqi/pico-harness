@@ -8,9 +8,9 @@ import {
   resolveCommandHookExecution,
   resolveHookShell,
   sanitizeCommandHookEnvironment,
-} from "../../../src/hooks/config/command-shell.js";
-import { HookTrustStore } from "../../../src/hooks/trust/store.js";
-import type { CommandHookHandler, HookSource } from "../../../src/hooks/types.js";
+} from "@pico/pico-host/hooks/config/command-shell";
+import { HookTrustStore } from "@pico/pico-host/hooks/trust/store";
+import type { CommandHookHandler, HookSource } from "@pico/pico-host/hooks/types";
 
 // 2026-08-17 威胁模型对齐 Claude Code：command hook = 任意 shell 字符串，
 // shell 运行时解释；信任锚 = 规范化 handler 定义指纹审批 + workspace trust。

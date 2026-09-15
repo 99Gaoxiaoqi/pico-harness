@@ -1,26 +1,23 @@
-import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
+import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { resolveCliStartupSession } from "../../../src/cli/session-args.js";
-import {
-  createClientCommandRegistry,
-  processClientInput,
-} from "../../../src/tui/client-commands.js";
+import { resolveCliStartupSession } from "@pico/cli/session-args";
+import { createClientCommandRegistry, processClientInput } from "@pico/cli/tui/client-commands";
 import {
   ClientSessionRuntime,
   type DaemonSessionClient,
-} from "../../../src/tui/client-session-runtime.js";
-import { TuiReporter } from "../../../src/tui/tui-reporter.js";
-import { DesktopRuntimeService } from "../../../src/daemon/desktop-runtime-service.js";
-import { WorkspaceRuntimeService } from "../../../src/daemon/workspace-runtime-service.js";
+} from "@pico/cli/tui/client-session-runtime";
+import { TuiReporter } from "@pico/cli/tui/tui-reporter";
+import { DesktopRuntimeService } from "@pico/pico-host/desktop-runtime-service";
+import { WorkspaceRuntimeService } from "@pico/pico-host/workspace-runtime-service";
 import { createRuntimeRequest, type RuntimeMethod, type JsonValue } from "@pico/protocol";
-import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
-import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
+import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
+import { resolvePicoPaths } from "@pico/pico-host";
 
-import { StorageOperationJournal } from "../../../src/storage/operation-journal.js";
+import { StorageOperationJournal } from "@pico/storage/operation-journal";
 
 test("--resume and -S reject a missing session in the current workspace", async (context) => {
   const fixture = await createFixture("strict-resume");
@@ -131,8 +128,7 @@ test("/resume and /fork reject an unpublished fork target", async (context) => {
     workDir: fixture.workspace,
   });
   await new StorageOperationJournal({
-    workDir: fixture.workspace,
-    picoHome: fixture.picoHome,
+    storageRoot: resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome }).workspace.root,
   }).create({
     kind: "fork",
     operationId: "unfinished-fork-operation",

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { agentGraphRecordRefFingerprint } from "../../../src/agent-graph/core/ids.js";
+import { agentGraphRecordRefFingerprint } from "@pico/core/agent-graph-identities";
 
 import {
   AGENT_GRAPH_HANDOFF_MAX_RECORD_BYTES,
@@ -12,21 +12,21 @@ import {
   type AgentGraphRecordStorePort,
   type CommittedAgentOutputSource,
   type StartExactAgentGraphRunInput,
-} from "../../../src/runtime/agent-graph-runtime-adapter.js";
-import type { AgentGraphRunLaunchState } from "../../../src/agent-graph/runtime-activation-projection.js";
+} from "@pico/pico-host/agent-graph-runtime-adapter";
+import type { AgentGraphRunLaunchState } from "@pico/runtime";
 import {
   agentGraphInputRuntimeEventId,
   inspectAgentGraphExactRun,
 } from "@pico/runtime/agent-graph-exact-run-inspection";
-import type { RuntimeEvent } from "../../../src/storage/runtime-event.js";
+import type { RuntimeEvent } from "@pico/storage/runtime-event";
 import type {
   AgentGraphActivationClaimRecord,
   AgentGraphOperatorProvisionRecord,
   AgentGraphRecordRefRecord,
   PutAgentGraphRecordRefInput,
-} from "../../../src/storage/sqlite/agent-graph-store-types.js";
-import type { CommitAgentOutputInput } from "../../../src/tools/agent-output-tool.js";
-import type { SessionManager } from "../../../src/engine/session-manager.js";
+} from "@pico/core/agent-graph-store-contracts";
+import type { CommitAgentOutputInput } from "@pico/pico-host/agent-output-tool";
+import type { SessionManager } from "@pico/pico-host/session-manager";
 import type { AgentGraphResourceAuthorityPort } from "@pico/core/agent-graph-resource-contracts";
 
 const CLAIM: AgentGraphActivationClaimRecord = {

@@ -4,18 +4,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
-import type { RuntimeEvent } from "../../../src/engine/session-runtime-event.js";
-import { Session } from "../../../src/engine/session.js";
-import { summaryFromRuntimeSession } from "../../../src/engine/session-summary.js";
-import { projectRuntimeSessionMessages } from "../../../src/engine/session-runtime-projection.js";
-import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
-import { operationalDatabasePath } from "../../../src/storage/sqlite/sqlite-database.js";
-import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
+import type { RuntimeEvent } from "@pico/storage/runtime-event";
+import { Session } from "@pico/pico-host/session";
+import { summaryFromRuntimeSession } from "@pico/storage/session-summary";
+import { projectRuntimeSessionMessages } from "@pico/runtime/session-runtime-projection";
+import { resolvePicoPaths } from "@pico/pico-host";
+import { operationalDatabasePath } from "@pico/storage";
+import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
 import {
   findCliSessionSummary,
   listCliSessionSummaries,
   resolveCliSession,
-} from "../../../src/cli/session-resolver.js";
+} from "@pico/cli/session-resolver";
 import { initializeRuntimeEventOwner } from "../helpers/runtime-event-owner.js";
 
 /**

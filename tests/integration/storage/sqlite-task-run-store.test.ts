@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { canonicalizeWorkspacePath } from "../../../src/paths/pico-paths.js";
+import { canonicalizeWorkspacePath } from "@pico/pico-host";
 import { SqliteTaskRunStore } from "@pico/storage/sqlite/sqlite-task-run-store";
 import {
   TASK_RUN_EVENT_SCHEMA_VERSION,

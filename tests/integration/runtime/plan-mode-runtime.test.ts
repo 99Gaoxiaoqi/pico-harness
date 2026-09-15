@@ -1,31 +1,32 @@
+import { createHookManagementCommands } from "@pico/cli/hook-management-commands";
 import assert from "node:assert/strict";
 import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { PromptComposer } from "../../../src/context/composer.js";
-import { PlanHandoffController } from "../../../src/engine/plan-handoff.js";
-import { isPlanProviderTool } from "../../../src/engine/loop.js";
-import { SilentReporter } from "../../../src/engine/reporter.js";
-import { projectRuntimeSessionState } from "../../../src/engine/session-runtime-projection.js";
-import { globalSessionManager } from "../../../src/engine/session.js";
-import { HookService } from "../../../src/hooks/service.js";
-import { getOrCreateSessionSettings } from "../../../src/input/session-settings.js";
-import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
+import { PromptComposer } from "@pico/pico-host/product-prompt-composer";
+import { PlanHandoffController } from "@pico/runtime/plan-handoff";
+import { isPlanProviderTool } from "@pico/pico-host/agent-engine";
+import { SilentReporter } from "@pico/runtime/silent-reporter";
+import { projectRuntimeSessionState } from "@pico/runtime/session-runtime-projection";
+import { globalSessionManager } from "@pico/pico-host/session";
+import { HookService } from "@pico/pico-host/hooks/service";
+import { getOrCreateSessionSettings } from "@pico/pico-host/input/session-settings";
+import { resolvePicoPaths } from "@pico/pico-host";
 import { PlanCoordinator } from "@pico/runtime/plan-coordinator";
-import type { LLMProvider } from "../../../src/provider/interface.js";
-import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
+import type { LLMProvider } from "@pico/core";
+import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
 import {
   AgentRuntime,
   buildForegroundSafetyMiddleware,
   executeAgentRuntime,
-} from "../../../src/runtime/agent-runtime.js";
-import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
-import { createSessionRuntime } from "../../../src/runtime/session-runtime.js";
-import { RuntimeEventStorePlanOperationConflictError } from "../../../src/storage/runtime-event-store-contracts.js";
-import { SubmitPlanTool, UpdatePlanTool } from "../../../src/tools/plan-exit.js";
-import { buildDefaultToolRegistry } from "../../../src/tools/default-registry.js";
-import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
+} from "@pico/pico-host/agent-runtime";
+import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
+import { createSessionRuntime } from "@pico/pico-host/session-runtime";
+import { RuntimeEventStorePlanOperationConflictError } from "@pico/storage/runtime-event-store-contracts";
+import { SubmitPlanTool, UpdatePlanTool } from "@pico/pico-host/plan-tools";
+import { buildDefaultToolRegistry } from "@pico/pico-host/default-registry";
+import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
 import { initializeRuntimeEventOwner } from "../helpers/runtime-event-owner.js";
 
 function runtimeWriteGuard(store: SqliteRuntimeEventStore, sessionId: string) {
@@ -768,6 +769,7 @@ test("resumeExistingSession injects durable revision feedback into the provider 
     runtimePort: createEngineRuntimePort(),
   });
   const runtimeState = await createSessionRuntime({
+    hookCommandFactory: createHookManagementCommands,
     session: sessionLease.session,
     sessionLease,
     hooks: false,
@@ -843,6 +845,7 @@ test("Plan Run isolates and restores code intelligence owned by an injected Sess
     runtimePort: createEngineRuntimePort(),
   });
   const runtimeState = await createSessionRuntime({
+    hookCommandFactory: createHookManagementCommands,
     session: sessionLease.session,
     sessionLease,
     hooks: false,

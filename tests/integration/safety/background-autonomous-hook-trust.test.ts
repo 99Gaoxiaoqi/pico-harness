@@ -3,13 +3,13 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { HookTrustStore } from "../../../src/hooks/trust/store.js";
+import { HookTrustStore } from "@pico/pico-host/hooks/trust/store";
 import {
   BACKGROUND_HARDLINE_VERSION,
   BACKGROUND_HOOK_VERSION,
   BackgroundPolicyViolationError,
   prepareBackgroundAutonomousPolicy,
-} from "../../../src/safety/background-autonomous-policy.js";
+} from "@pico/pico-host/background-autonomous-policy";
 
 test("background policy rejects an untrusted PostToolUseFailure command hook", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-background-failure-hook-trust-"));

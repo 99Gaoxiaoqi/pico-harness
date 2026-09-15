@@ -16,15 +16,15 @@ import { test } from "node:test";
 import {
   enforceSummaryCharLimit,
   wrapFullCompactionSummary,
-} from "../../../src/context/full-compactor.js";
-import { Session } from "../../../src/engine/session.js";
-import { RuntimeRun } from "../../../src/runtime/runtime-run.js";
-import { FULL_COMPACTION_SUMMARY_MARKER } from "../../../src/context/compaction-markers.js";
-import { computeCheckpointSourceDigest } from "../../../src/context/runtime-compaction-checkpoint.js";
+} from "@pico/pico-host/product-full-compactor";
+import { Session } from "@pico/pico-host/session";
+import { RuntimeRun } from "@pico/pico-host/product-runtime-run";
+import { FULL_COMPACTION_SUMMARY_MARKER } from "@pico/core";
+import { computeCheckpointSourceDigest } from "@pico/runtime/runtime-compaction-checkpoint";
 import { compactSubagentContext } from "../../../packages/runtime/src/subagent-context.js";
-import { Compactor, sanitizeToolPairs } from "../../../src/context/compactor.js";
-import { CHARS_PER_TOKEN, estimateModelInputTokens } from "../../../src/context/context-budget.js";
-import type { Message } from "../../../src/schema/message.js";
+import { Compactor, sanitizeToolPairs } from "@pico/pico-host/product-compactor";
+import { CHARS_PER_TOKEN, estimateModelInputTokens } from "@pico/runtime/context-budget";
+import type { Message } from "@pico/core";
 
 const TEST_ROOT = process.env.PICO_TEST_TMPDIR ?? tmpdir();
 async function mkTestDir(prefix: string): Promise<string> {

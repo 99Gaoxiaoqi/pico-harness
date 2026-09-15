@@ -8,17 +8,19 @@ import {
   ForkOperationCoordinator,
   ForkOperationLeaseTimeoutError,
   type ForkRuntimePublicationCapability,
-} from "../../../src/storage/fork-operation-coordinator.js";
-import { StorageOperationJournal } from "../../../src/storage/operation-journal.js";
-import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
-import { sessionOwnerLeaseDirectory } from "../../../src/storage/session-owner-lease.js";
-import { OwnerLease } from "../../../src/storage/owner-lease.js";
+} from "@pico/storage/fork-operation-coordinator";
+import { StorageOperationJournal } from "@pico/storage/operation-journal";
+import { resolvePicoPaths } from "@pico/pico-host";
+import { sessionOwnerLeaseDirectory } from "@pico/storage";
+import { OwnerLease } from "@pico/pico-host/owner-lease";
 
 test("fork coordinator scopes Runtime publication to the active target lease", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-fork-publication-capability-"));
   const workDir = join(root, "workspace");
   const picoHome = join(root, "pico-home");
-  const journal = new StorageOperationJournal({ workDir, picoHome });
+  const journal = new StorageOperationJournal({
+    storageRoot: resolvePicoPaths(workDir, { picoHome: picoHome }).workspace.root,
+  });
   let captured: ForkRuntimePublicationCapability | undefined;
   try {
     const coordinator = new ForkOperationCoordinator({
@@ -76,7 +78,9 @@ test("fork target publication competes with the normal Session owner lease", asy
   let sidecarWrites = 0;
   try {
     const coordinator = new ForkOperationCoordinator({
-      journal: new StorageOperationJournal({ workDir, picoHome }),
+      journal: new StorageOperationJournal({
+        storageRoot: resolvePicoPaths(workDir, { picoHome: picoHome }).workspace.root,
+      }),
       targetLeaseDirectory,
       leaseAcquisitionTimeoutMs: 0,
       callbacks: {
@@ -121,7 +125,9 @@ test("cleanup-only retry and abort share one target lease and version CAS", asyn
   const workDir = join(root, "workspace");
   const picoHome = join(root, "pico-home");
   const workspace = resolvePicoPaths(workDir, { picoHome }).workspace;
-  const journal = new StorageOperationJournal({ workDir, picoHome });
+  const journal = new StorageOperationJournal({
+    storageRoot: resolvePicoPaths(workDir, { picoHome: picoHome }).workspace.root,
+  });
   let cleanupCalls = 0;
   const coordinator = new ForkOperationCoordinator({
     journal,

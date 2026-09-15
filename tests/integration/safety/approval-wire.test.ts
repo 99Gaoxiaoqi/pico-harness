@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ApprovalManager, type ApprovalNotice } from "../../../src/approval/manager.js";
-import { buildApprovalRequestedPayload } from "../../../src/daemon/approval-wire.js";
+import { ApprovalManager, type ApprovalNotice } from "@pico/pico-host/global-approval-manager";
+import { buildApprovalRequestedPayload } from "@pico/pico-host";
 import { parseApprovalRequestedPayload } from "@pico/protocol";
-import { DEFAULT_PERMISSION_MODE } from "../../../src/input/session-settings.js";
-import { buildPermissionMiddleware } from "../../../src/runtime/agent-runtime.js";
-import { globalSessionPermissionGrants } from "../../../src/approval/session-permissions.js";
-import { WorkspaceRoots } from "../../../src/tools/workspace-roots.js";
+import { DEFAULT_PERMISSION_MODE } from "@pico/pico-host/input/session-settings";
+import { buildPermissionMiddleware } from "@pico/pico-host/agent-runtime";
+import { globalSessionPermissionGrants } from "@pico/pico-host/session-permissions";
+import { WorkspaceRoots } from "@pico/pico-host/workspace-roots";
 
 /**
  * approval.requested wire 构造单一来源的形状测试（3-D 漏账补齐）。

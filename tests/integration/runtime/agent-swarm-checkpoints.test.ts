@@ -3,12 +3,9 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { deterministicFingerprint, wakeIdFor } from "../../../src/agent-graph/core/ids.js";
-import {
-  swarmAttentionKey,
-  type AgentSwarmStatusResult,
-} from "../../../src/agent-graph/swarm-status.js";
-import { SqliteAgentGraphControlStore } from "../../../src/storage/sqlite/sqlite-agent-graph-control-store.js";
+import { deterministicFingerprint, wakeIdFor } from "@pico/core/agent-graph-identities";
+import { swarmAttentionKey, type AgentSwarmStatusResult } from "@pico/runtime";
+import { SqliteAgentGraphControlStore } from "@pico/storage/sqlite/agent-graph-control-store";
 
 test("Swarm checkpoints durably replay the enqueue gap, recover attention and distinguish new batches", async () => {
   const storageRoot = await mkdtemp(join(tmpdir(), "pico-swarm-checkpoint-"));

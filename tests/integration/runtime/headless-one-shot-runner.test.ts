@@ -1,4 +1,4 @@
-import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
+import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
 import assert from "node:assert/strict";
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -24,25 +24,25 @@ import {
   providerRequestSignal,
   type LLMProvider,
   type LLMProviderRequestOptions,
-} from "../../../src/provider/interface.js";
-import { AiSdkProvider } from "../../../src/provider/ai-sdk-provider.js";
-import type { Message } from "../../../src/schema/message.js";
-import { createToolResultEnvelope } from "../../../src/engine/tool-result-contract.js";
-import { globalSessionManager } from "../../../src/engine/session.js";
+} from "@pico/core";
+import { AiSdkProvider } from "@pico/pico-host/provider/ai-sdk-provider";
+import type { Message } from "@pico/core";
+import { createToolResultEnvelope } from "@pico/core";
+import { globalSessionManager } from "@pico/pico-host/session";
 import {
   EMPTY_USER_CONFIG_REVISION,
   UserConfigStore,
-} from "../../../src/input/user-config-store.js";
+} from "@pico/pico-host/input/user-config-store";
 import {
   runHeadlessOneShotJson,
   terminalBenchAgentControlledProxyCapability,
   type HeadlessOneShotPolicyDenialSummary,
   type HeadlessOneShotRequestV2,
-} from "../../../src/internal/headless-one-shot-runner.js";
-import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
+} from "@pico/pico-host/internal/headless-one-shot-runner";
+import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
 import type { RunAgentCliOptions, RunAgentCliResult } from "@pico/runtime/runtime-contract";
-import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
-import { closeAllOperationalDatabasesForTest } from "../../../src/storage/sqlite/sqlite-database.js";
+import { resolvePicoPaths } from "@pico/pico-host";
+import { closeAllOperationalDatabasesForTest } from "@pico/storage";
 
 const PROVIDER_ID = "fixture";
 const MODEL_ID = "fixture-model";

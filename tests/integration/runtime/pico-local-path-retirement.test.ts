@@ -3,18 +3,18 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { loadAgentCatalog } from "../../../src/agents/catalog.js";
-import { SkillLoader } from "../../../src/context/skill.js";
+import { loadAgentCatalog } from "@pico/pico-host/agent-catalog";
+import { SkillLoader } from "@pico/pico-host/product-skill-catalog";
 import { ResourceDoctor } from "@pico/pico-host/resource-doctor";
-import { loadHookSnapshot } from "../../../src/hooks/config.js";
-import { createHookifyProposal, loadHookifyRules } from "../../../src/hooks/hookify/rules.js";
-import { resolveProjectMcpConfigPath } from "../../../src/mcp/config-path.js";
+import { loadHookSnapshot } from "@pico/pico-host/hooks/config";
+import { createHookifyProposal, loadHookifyRules } from "@pico/pico-host/hooks/hookify/rules";
+import { resolveProjectMcpConfigPath } from "@pico/pico-host/mcp-config-path";
 import {
   BACKGROUND_HARDLINE_VERSION,
   BACKGROUND_HOOK_VERSION,
   prepareBackgroundAutonomousPolicy,
-} from "../../../src/safety/background-autonomous-policy.js";
-import { AgentProfileLoader } from "../../../src/tools/agent-profile.js";
+} from "@pico/pico-host/background-autonomous-policy";
+import { AgentProfileLoader } from "@pico/pico-host/agent-profile-loader";
 
 test("Pico local resource loaders ignore retired .claw inputs", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-local-path-retired-"));

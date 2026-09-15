@@ -6,10 +6,13 @@ import { test } from "node:test";
 import {
   listDesktopEffectiveSkills,
   listDesktopUserSkills,
-} from "../../../src/daemon/desktop-resource-catalog.js";
-import type { PluginRuntimeSnapshot } from "../../../src/plugins/plugin-runtime-snapshot.js";
-import { SkillLoader } from "../../../src/context/skill.js";
-import type { ExternalResourceCatalogSource } from "../../../src/catalog/resource-catalog.js";
+} from "@pico/pico-host/desktop-resource-catalog";
+import type { PluginRuntimeSnapshot } from "@pico/pico-host/plugins/plugin-runtime-snapshot";
+import { SkillLoader } from "@pico/pico-host/product-skill-catalog";
+import type { ExternalResourceCatalogSource } from "@pico/core/resource-catalog";
+import type { HookTrustAuthority } from "@pico/pico-host/hooks/trust/store";
+import { loadPicoProjectConfig } from "@pico/pico-host/input/pico-config";
+import { logger } from "@pico/pico-host/logger";
 import {
   listDesktopAgents as listHostDesktopAgents,
   listDesktopEffectiveSkills as listHostDesktopEffectiveSkills,
@@ -41,13 +44,27 @@ test("Pico Host 桌面目录通过窄配置端口枚举技能、Agent 与只读 
     "---\nname: claude-agent\ndescription: Claude agent\n---\nReview code.\n",
   );
   const pluginAgentPath = join(root, "plugin-agents.yaml");
-  await writeFile(pluginAgentPath, JSON.stringify({ agents: [{
-    name: "plugin-agent", description: "Plugin agent", systemPrompt: "Review code.",
-    tools: ["read_file"],
-  }] }));
-  await writeFile(join(workspace, ".pico", "mcp.json"), JSON.stringify({ mcpServers: {
-    project: { command: "never-execute", enabled: false },
-  } }));
+  await writeFile(
+    pluginAgentPath,
+    JSON.stringify({
+      agents: [
+        {
+          name: "plugin-agent",
+          description: "Plugin agent",
+          systemPrompt: "Review code.",
+          tools: ["read_file"],
+        },
+      ],
+    }),
+  );
+  await writeFile(
+    join(workspace, ".pico", "mcp.json"),
+    JSON.stringify({
+      mcpServers: {
+        project: { command: "never-execute", enabled: false },
+      },
+    }),
+  );
 
   let compatibilityEnabled = false;
   const configReads: string[] = [];
@@ -63,23 +80,50 @@ test("Pico Host 桌面目录通过窄配置端口枚举技能、Agent 与只读 
     },
     loadPicoProjectConfig: async (path) => {
       configReads.push(path);
-      return { compatibility: { claude: {
-        enabled: compatibilityEnabled, projectResources: true, userResources: false,
-      } } };
+      return {
+        compatibility: {
+          claude: {
+            enabled: compatibilityEnabled,
+            projectResources: true,
+            userResources: false,
+          },
+        },
+      };
     },
     pluginSnapshot: {
       skillSources: pluginSnapshot(pluginRoot).skillSources,
-      agentSources: [{
-        id: "plugin:fixture:agent:0", scope: "external", format: "pico-native",
-        root: pluginAgentPath, priority: 38, adapter: "pico-agent-yaml",
-      }],
-      mcpSources: [{ id: "plugin:fixture:mcp:0", config: { mcpServers: {
-        plugin: { name: "plugin", transport: "stdio", command: "never-execute", enabled: false },
-      } } }],
+      agentSources: [
+        {
+          id: "plugin:fixture:agent:0",
+          scope: "external",
+          format: "pico-native",
+          root: pluginAgentPath,
+          priority: 38,
+          adapter: "pico-agent-yaml",
+        },
+      ],
+      mcpSources: [
+        {
+          id: "plugin:fixture:mcp:0",
+          config: {
+            mcpServers: {
+              plugin: {
+                name: "plugin",
+                transport: "stdio",
+                command: "never-execute",
+                enabled: false,
+              },
+            },
+          },
+        },
+      ],
     },
   };
 
-  assert.deepEqual((await listHostDesktopUserSkills(options)).skills.map(({ name }) => name), ["user"]);
+  assert.deepEqual(
+    (await listHostDesktopUserSkills(options)).skills.map(({ name }) => name),
+    ["user"],
+  );
   assert.deepEqual(configReads, []);
   const effective = await listHostDesktopEffectiveSkills(workspace, options);
   assert.deepEqual(effective.skills.map(({ name }) => name).sort(), ["native", "plugin", "user"]);
@@ -99,14 +143,19 @@ test("Pico Host 桌面目录通过窄配置端口枚举技能、Agent 与只读 
 
   compatibilityEnabled = true;
   assert.ok(
-    (await listHostDesktopEffectiveSkills(workspace, options)).skills.some(({ name }) => name === "claude"),
+    (await listHostDesktopEffectiveSkills(workspace, options)).skills.some(
+      ({ name }) => name === "claude",
+    ),
   );
   assert.ok(
     (await listHostDesktopAgents(workspace, options)).some(({ name }) => name === "claude-agent"),
   );
   assert.deepEqual(
-    (await listHostDesktopMcpServers(workspace, options)).map(({ name, sourceId, status }) =>
-      ({ name, sourceId, status })),
+    (await listHostDesktopMcpServers(workspace, options)).map(({ name, sourceId, status }) => ({
+      name,
+      sourceId,
+      status,
+    })),
     [
       { name: "project", sourceId: "project", status: "disabled" },
       { name: "plugin", sourceId: "plugin:fixture:mcp:0", status: "disabled" },
@@ -143,6 +192,8 @@ test("用户级 Skill 枚举只读取用户来源并返回稳定修订", async (
   });
 
   const options = {
+    loadPicoProjectConfig,
+    logger,
     env: { PICO_HOME: picoHome },
     homeDir,
     picoHome,
@@ -215,6 +266,8 @@ test("可信工作区有效 Skill 枚举复用优先级并标出项目遮蔽", a
   });
 
   const options = {
+    loadPicoProjectConfig,
+    logger,
     env: { PICO_HOME: picoHome },
     homeDir,
     picoHome,
@@ -379,7 +432,7 @@ function externalSkillSource(
     readonly namespace?: string;
     readonly format?: ExternalResourceCatalogSource["format"];
   } = {},
-): ExternalResourceCatalogSource {
+): ExternalResourceCatalogSource<HookTrustAuthority> {
   return {
     id: "plugin:fixture:skill:stable:0",
     scope: "external",
@@ -392,7 +445,7 @@ function externalSkillSource(
 
 function externalSkillLoader(
   workspace: string,
-  source: ExternalResourceCatalogSource,
+  source: ExternalResourceCatalogSource<HookTrustAuthority>,
 ): SkillLoader {
   return new SkillLoader(workspace, {
     includeUserResources: false,
@@ -401,7 +454,10 @@ function externalSkillLoader(
   });
 }
 
-async function externalSkillSnapshot(workspace: string, source: ExternalResourceCatalogSource) {
+async function externalSkillSnapshot(
+  workspace: string,
+  source: ExternalResourceCatalogSource<HookTrustAuthority>,
+) {
   return externalSkillLoader(workspace, source).snapshot();
 }
 

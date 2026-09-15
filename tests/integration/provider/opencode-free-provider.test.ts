@@ -5,21 +5,22 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { createRuntimeRequest, type RuntimeResult } from "@pico/protocol";
-import { DesktopRuntimeService, WorkspaceRuntimeService } from "../../../src/daemon/index.js";
-import { EffectiveConfigResolver } from "../../../src/input/effective-config.js";
+import { DesktopRuntimeService } from "@pico/pico-host/desktop-runtime-service";
+import { WorkspaceRuntimeService } from "@pico/pico-host/workspace-runtime-service";
+import { EffectiveConfigResolver } from "@pico/pico-host/input/effective-config";
 import {
   OPENCODE_FREE_PROVIDER,
   OPENCODE_FREE_ROUTE_ID,
-} from "../../../src/input/default-provider.js";
-import { UserConfigStore } from "../../../src/input/user-config-store.js";
-import { loadEffectiveModelRuntime } from "../../../src/provider/effective-model-runtime.js";
-import { createProvider } from "../../../src/provider/factory.js";
-import { loadModelRouter } from "../../../src/provider/model-router.js";
-import type { CredentialVault } from "../../../src/provider/credential-vault.js";
-import { runHeadlessOneShotJson } from "../../../src/internal/headless-one-shot-runner.js";
-import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
-import { globalSessionManager } from "../../../src/engine/session.js";
-import { closeAllOperationalDatabasesForTest } from "../../../src/storage/sqlite/sqlite-database.js";
+} from "@pico/pico-host/input/default-provider";
+import { UserConfigStore } from "@pico/pico-host/input/user-config-store";
+import { loadEffectiveModelRuntime } from "@pico/pico-host/provider/effective-model-runtime";
+import { createProvider } from "@pico/pico-host/provider/factory";
+import { loadModelRouter } from "@pico/pico-host/provider/model-router";
+import type { CredentialVault } from "@pico/pico-host/provider/credential-vault";
+import { runHeadlessOneShotJson } from "@pico/pico-host/internal/headless-one-shot-runner";
+import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
+import { globalSessionManager } from "@pico/pico-host/session";
+import { closeAllOperationalDatabasesForTest } from "@pico/storage";
 
 const noVault: CredentialVault = {
   capability: () => {

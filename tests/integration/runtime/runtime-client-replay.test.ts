@@ -8,9 +8,9 @@ import {
   RuntimeHostKernel,
   tryAcquireInteractiveRootOwner,
 } from "@pico/runtime-host";
-import { LocalRuntimeClient } from "../../../src/daemon/client.js";
+import { LocalRuntimeClient } from "@pico/pico-host/local-runtime-client";
+import { createRuntimeHostComposition } from "@pico/pico-host/runtime-host-composition";
 import {
-  createRuntimeHostComposition,
   ensurePicoRuntimeHostOperationsRegistered,
   ensurePicoRuntimeHostEventOperationsRegistered,
   ensurePicoRuntimeHostSessionContinuityOperationsRegistered,
@@ -20,11 +20,11 @@ import {
   RUNTIME_HOST_BRIDGE_SESSION_TRANSCRIPT_ADVANCE,
   RUNTIME_HOST_BRIDGE_SESSION_TRANSCRIPT_PAGE,
   RUNTIME_HOST_BRIDGE_RUNTIME_SHUTDOWN,
-} from "../../../src/daemon/index.js";
+} from "@pico/pico-host/runtime-host-operations";
 import type {
   LocalRuntimeService,
   RuntimeNotificationCursor,
-} from "../../../src/daemon/service.js";
+} from "@pico/pico-host/local-runtime-service";
 import {
   createRuntimeNotification,
   type JsonValue,

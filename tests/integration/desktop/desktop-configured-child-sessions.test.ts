@@ -3,23 +3,24 @@ import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { DesktopRuntimeService, WorkspaceRuntimeService } from "../../../src/daemon/index.js";
+import { DesktopRuntimeService } from "@pico/pico-host/desktop-runtime-service";
+import { WorkspaceRuntimeService } from "@pico/pico-host/workspace-runtime-service";
 import { createRuntimeRequest, parseRuntimeResult } from "../../../packages/protocol/src/index.js";
-import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
-import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
-import type { RuntimeEventBase } from "../../../src/engine/session-runtime-event.js";
-import { AgentRuntime } from "../../../src/runtime/agent-runtime.js";
-import { currentRuntimeRun } from "../../../src/runtime/runtime-run.js";
-import { ModelRouter } from "../../../src/provider/model-router.js";
-import { resolveModelRouteCapabilities } from "../../../src/provider/model-capabilities.js";
+import { resolvePicoPaths } from "@pico/pico-host";
+import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
+import type { RuntimeEventBase } from "@pico/core";
+import { AgentRuntime } from "@pico/pico-host/agent-runtime";
+import { currentRuntimeRun } from "@pico/pico-host/product-runtime-run";
+import { ModelRouter } from "@pico/pico-host/provider/model-router";
+import { resolveModelRouteCapabilities } from "@pico/runtime";
 import {
   parseSessionDetail,
   parseSessions,
 } from "../../../apps/desktop/src/renderer/runtime-projections/workspace.js";
 import { subagentParent } from "../../../apps/desktop/src/renderer/conversation/subagent-navigation.js";
 import { workspaceSessionKey } from "../../../apps/desktop/src/renderer/workspace-session.js";
-import { SESSION_RUNTIME_STATE_VERSION } from "../../../src/engine/session-runtime.js";
-import type { RuntimeOwnerFence } from "../../../src/storage/runtime-event-store-contracts.js";
+import { SESSION_RUNTIME_STATE_VERSION } from "@pico/core/session-runtime-state";
+import type { RuntimeOwnerFence } from "@pico/storage/runtime-event-store-contracts";
 import { initializeRuntimeEventOwner } from "../helpers/runtime-event-owner.js";
 
 function base(sessionId: string, suffix: string): RuntimeEventBase {

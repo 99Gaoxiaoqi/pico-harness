@@ -3,26 +3,23 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { SilentReporter } from "../../../src/engine/reporter.js";
-import { getOrCreateSessionSettings } from "../../../src/input/session-settings.js";
-import { AtomicMemoryLifecycle } from "../../../src/runtime/atomic-memory-lifecycle.js";
-import { isAutomationToolAllowed } from "../../../src/safety/automation-tool-policy.js";
-import { globalSessionManager } from "../../../src/engine/session.js";
-import { sessionMemoryLane } from "../../../src/memory/atomic/session-lane.js";
-import { memorySessionKey } from "../../../src/memory/atomic/runtime-contracts.js";
-import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
-import type { LLMProvider } from "../../../src/provider/interface.js";
-import { resolveModelRouteCapabilities } from "../../../src/provider/model-capabilities.js";
-import {
-  executeAgentRuntime,
-  type RunAgentProviderFactory,
-} from "../../../src/runtime/agent-runtime.js";
-import { atomicMemoryDatabasePath } from "../../../src/runtime/atomic-memory-runtime.js";
-import type { Message } from "../../../src/schema/message.js";
-import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
-import { SqliteMemoryItemStore } from "../../../src/storage/sqlite/sqlite-memory-item-store.js";
-import { SqliteRuntimeControlStore } from "../../../src/storage/sqlite/sqlite-runtime-control-store.js";
-import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
+import { SilentReporter } from "@pico/runtime/silent-reporter";
+import { getOrCreateSessionSettings } from "@pico/pico-host/input/session-settings";
+import { AtomicMemoryLifecycle } from "@pico/runtime";
+import { isAutomationToolAllowed } from "@pico/runtime/automation-tool-policy";
+import { globalSessionManager } from "@pico/pico-host/session";
+import { sessionMemoryLane } from "@pico/runtime/atomic-memory/session-lane";
+import { memorySessionKey } from "@pico/core/atomic-memory-runtime-contracts";
+import { resolvePicoPaths } from "@pico/pico-host";
+import type { LLMProvider } from "@pico/core";
+import { resolveModelRouteCapabilities } from "@pico/runtime";
+import { executeAgentRuntime, type RunAgentProviderFactory } from "@pico/pico-host/agent-runtime";
+import { atomicMemoryDatabasePath } from "@pico/pico-host/atomic-memory-runtime";
+import type { Message } from "@pico/core";
+import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
+import { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-store";
+import { SqliteRuntimeControlStore } from "@pico/storage/sqlite/sqlite-runtime-control-store";
+import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
 
 const MEMORY_CANARY = "npm run reviewed-memory-canary";
 

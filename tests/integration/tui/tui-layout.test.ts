@@ -3,26 +3,26 @@ import { PassThrough } from "node:stream";
 import test from "node:test";
 import React from "react";
 import { render } from "ink";
-import type { ApprovalNotice } from "../../../src/approval/manager.js";
-import type { PlanControlNotice } from "../../../src/tui/plan-control-notice.js";
+import type { ApprovalNotice } from "@pico/pico-host/global-approval-manager";
+import type { PlanControlNotice } from "@pico/cli/tui/plan-control-notice";
 import {
   formatSessionReasoningStatus,
   type SessionSettings,
-} from "../../../src/input/session-settings.js";
-import { resolveModelRouteCapabilities } from "../../../src/provider/model-capabilities.js";
-import { ModelRouter, type ModelRoute } from "../../../src/provider/model-router.js";
-import { buildSeparatorLine } from "../../../src/tui/message-list.js";
-import { MarkdownText } from "../../../src/tui/markdown-text.js";
-import { buildStatusBarText } from "../../../src/tui/status-bar.js";
+} from "@pico/pico-host/input/session-settings";
+import { resolveModelRouteCapabilities } from "@pico/runtime";
+import { ModelRouter, type ModelRoute } from "@pico/pico-host/provider/model-router";
+import { buildSeparatorLine } from "@pico/cli/tui/message-list";
+import { MarkdownText } from "@pico/cli/tui/markdown-text";
+import { buildStatusBarText } from "@pico/cli/tui/status-bar";
 import {
   formatApprovalPanel,
   formatPlanControlPanel,
   resolveApprovalPanelKey,
-} from "../../../src/tui/approval-panel.js";
+} from "@pico/cli/tui/approval-panel";
 import { createTuiTerminalGridSession } from "@pico/cli/terminal-grid";
-import { buildTranscriptLayout } from "../../../src/tui/transcript-layout.js";
-import { transcriptContentRows } from "../../../src/tui/viewport-rows.js";
-import { TuiReporter } from "../../../src/tui/tui-reporter.js";
+import { buildTranscriptLayout } from "@pico/cli/tui/transcript-layout";
+import { transcriptContentRows } from "@pico/cli/tui/viewport-rows";
+import { TuiReporter } from "@pico/cli/tui/tui-reporter";
 
 test("一次 resize CPR 超时不会用过期 PTY 高度覆盖可信前端网格", async () => {
   const stdin = new PassThrough();

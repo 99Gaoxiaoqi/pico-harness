@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { DurableTranscriptEvent } from "@pico/core/durable-transcript-contract";
 import { inspectDurableTranscriptEvents } from "@pico/runtime/durable-transcript-state";
-import { projectTranscriptEvents } from "../../../src/presentation/transcript-event-store.js";
+import { projectTranscriptEvents } from "@pico/pico-host/transcript-event-store";
 
 test("Runtime durable Transcript inspector matches the presentation projector tool state", () => {
   const events: DurableTranscriptEvent[] = [

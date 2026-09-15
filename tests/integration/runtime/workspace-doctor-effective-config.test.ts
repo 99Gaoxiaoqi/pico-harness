@@ -3,18 +3,19 @@ import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { DesktopRuntimeService } from "../../../src/daemon/desktop-runtime-service.js";
+import { DesktopRuntimeService } from "@pico/pico-host/desktop-runtime-service";
 import { createRuntimeRequest } from "../../../packages/protocol/src/index.js";
-import { WorkspaceRuntimeService } from "../../../src/daemon/workspace-runtime-service.js";
-import { UserConfigStore } from "../../../src/input/user-config-store.js";
+import { WorkspaceRuntimeService } from "@pico/pico-host/workspace-runtime-service";
+import { UserConfigStore } from "@pico/pico-host/input/user-config-store";
 import {
   CredentialNotFoundError,
   credentialRefForProvider,
   type CredentialRef,
   type CredentialVault,
-} from "../../../src/provider/credential-vault.js";
-import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
-import { runWorkspaceDoctor } from "../../../src/diagnostics/workspace-doctor.js";
+} from "@pico/pico-host/provider/credential-vault";
+import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
+import { runWorkspaceDoctor } from "@pico/pico-host/workspace-doctor";
+import { StorageDoctor } from "@pico/pico-host/storage-doctor";
 
 const PROVIDER_ID = "doctor-fixture";
 const MODEL_ID = "doctor-model";
@@ -116,7 +117,7 @@ test("Workspace Doctor does not use another Provider credential to bless the def
 
   const report = await runWorkspaceDoctor({
     workDir: workspace,
-    picoHome: join(root, "pico-home"),
+    storageDoctor: new StorageDoctor({ workDir: workspace, picoHome: join(root, "pico-home") }),
     provider: "default-provider",
     model: "default-model",
     taskRuntimeAvailable: true,

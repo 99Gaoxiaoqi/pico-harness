@@ -4,16 +4,16 @@ import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { AgentEngine } from "../../../src/engine/loop.js";
-import { SilentReporter } from "../../../src/engine/reporter.js";
-import { Session } from "../../../src/engine/session.js";
-import { HookService } from "../../../src/hooks/service.js";
-import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
+import { AgentEngine } from "@pico/pico-host/agent-engine";
+import { SilentReporter } from "@pico/runtime/silent-reporter";
+import { Session } from "@pico/pico-host/session";
+import { HookService } from "@pico/pico-host/hooks/service";
+import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
 import { RuntimeEventBoundaryInspector } from "../helpers/runtime-event-boundary-inspector.js";
-import { RuntimeRun } from "../../../src/runtime/runtime-run.js";
-import { ToolCommitBoundaryError } from "../../../src/tools/registry.js";
-import { ToolRegistry } from "../../../src/tools/registry-impl.js";
-import { WriteFileTool } from "../../../src/tools/write-file.js";
+import { RuntimeRun } from "@pico/pico-host/product-runtime-run";
+import { ToolCommitBoundaryError } from "@pico/pico-host/tool-registry-contract";
+import { ToolRegistry } from "@pico/pico-host/product-tool-registry";
+import { WriteFileTool } from "@pico/pico-host/write-file-tool";
 
 async function scene(t: test.TestContext) {
   const root = await mkdtemp(join(tmpdir(), "pico-tool-commit-"));

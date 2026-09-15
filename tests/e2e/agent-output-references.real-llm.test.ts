@@ -1,11 +1,11 @@
-import type { Message, ToolDefinition } from "../../src/schema/message.js";
+import type { Message, ToolDefinition } from "@pico/core";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createProvider } from "../../src/provider/factory.js";
+import { createProvider } from "@pico/pico-host/provider/factory";
 import {
   createAgentOutputTool,
   type CommitAgentOutputInput,
-} from "../../src/tools/agent-output-tool.js";
+} from "@pico/pico-host/agent-output-tool";
 import { configuredUserDefaultRealModel } from "./real-llm-user-model.js";
 
 const realModelTest = process.env.RUN_LLM_E2E === "1" ? test : test.skip;

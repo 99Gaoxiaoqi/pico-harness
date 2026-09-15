@@ -10,7 +10,7 @@
  * - anchor 是"压缩后继续工作必须知道的事实",不是细枝末节
  */
 
-import type { Message } from "../../src/schema/message.js";
+import type { Message } from "@pico/core";
 import type { CompactionQualityCase } from "./compaction-quality.js";
 
 /** 构造带 padding 的长文本,模拟真实对话的 token 体量 */

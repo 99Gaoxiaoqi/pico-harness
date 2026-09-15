@@ -4,23 +4,23 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { agentOutputRecordIdFor, graphIdFor } from "../../../src/agent-graph/core/ids.js";
-import { createProductionRuntimeServices } from "../../../src/daemon/production-host.js";
+import { agentOutputRecordIdFor, graphIdFor } from "@pico/core/agent-graph-identities";
+import { createProductionRuntimeServices } from "@pico/pico-host/production-host";
 import { createRuntimeRequest } from "../../../packages/protocol/src/index.js";
-import { globalSessionManager } from "../../../src/engine/session.js";
+import { globalSessionManager } from "@pico/pico-host/session";
 import {
   AgentRuntime,
   type RunAgentCliDependencies,
   type RunAgentCliOptions,
-} from "../../../src/runtime/agent-runtime.js";
+} from "@pico/pico-host/agent-runtime";
 import {
   createAgentGraphWorkspaceHost,
   type AgentGraphWorkspaceHost,
-} from "../../../src/runtime/agent-graph-host.js";
-import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
-import { compileRuntimePermissionProfile } from "../../../src/safety/permission-profile.js";
-import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
-import { RUNTIME_EVENT_SCHEMA_VERSION } from "../../../src/storage/runtime-event.js";
+} from "@pico/pico-host/product-agent-graph-host";
+import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
+import { compileRuntimePermissionProfile } from "@pico/core/permission-profile";
+import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
+import { RUNTIME_EVENT_SCHEMA_VERSION } from "@pico/core";
 import { writeDesktopModelRouting } from "../../fixtures/desktop-model-routing.js";
 
 const ROOT_WAKE_TOOLS = ["view_agent_graph", "update_agent_graph", "yield_agent_graph"] as const;

@@ -4,21 +4,21 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { HookService as HostHookService } from "@pico/pico-host/hooks/service";
-import { AgentEngine } from "../../../src/engine/loop.js";
-import { SilentReporter } from "../../../src/engine/reporter.js";
-import { Session } from "../../../src/engine/session.js";
-import { HookService, type HookExecutor } from "../../../src/hooks/service.js";
+import { AgentEngine } from "@pico/pico-host/agent-engine";
+import { SilentReporter } from "@pico/runtime/silent-reporter";
+import { Session } from "@pico/pico-host/session";
+import { HookService, type HookExecutor } from "@pico/pico-host/hooks/service";
 import {
   HOOK_EVENTS,
   type HookInput,
   type HookSnapshot,
   type ResolvedHookHandler,
-} from "../../../src/hooks/types.js";
-import type { LLMProvider } from "../../../src/provider/interface.js";
-import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
-import type { BaseTool } from "../../../src/tools/registry.js";
-import { NO_FILE_SIDE_EFFECTS } from "../../../src/tools/registry.js";
-import { ToolRegistry } from "../../../src/tools/registry-impl.js";
+} from "@pico/pico-host/hooks/types";
+import type { LLMProvider } from "@pico/core";
+import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
+import type { BaseTool } from "@pico/pico-host/tool-registry-contract";
+import { NO_FILE_SIDE_EFFECTS } from "@pico/pico-host/tool-registry-contract";
+import { ToolRegistry } from "@pico/pico-host/product-tool-registry";
 
 test("HookService 包入口与旧入口共享 class identity", () => {
   assert.equal(HostHookService, HookService);

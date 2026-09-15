@@ -3,15 +3,15 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { AgentEngine } from "../../../src/engine/loop.js";
-import { SilentReporter } from "../../../src/engine/reporter.js";
-import type { RuntimeEvent } from "../../../src/engine/session-runtime-event.js";
-import type { RuntimeMessageCommittedEvent } from "../../../src/engine/session-runtime-event.js";
-import { Session } from "../../../src/engine/session.js";
-import type { LLMProvider } from "../../../src/provider/interface.js";
-import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
-import { NO_FILE_SIDE_EFFECTS, type BaseTool } from "../../../src/tools/registry.js";
-import { ToolRegistry } from "../../../src/tools/registry-impl.js";
+import { AgentEngine } from "@pico/pico-host/agent-engine";
+import { SilentReporter } from "@pico/runtime/silent-reporter";
+import type { RuntimeEvent } from "@pico/storage/runtime-event";
+import type { RuntimeMessageCommittedEvent } from "@pico/core";
+import { Session } from "@pico/pico-host/session";
+import type { LLMProvider } from "@pico/core";
+import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
+import { NO_FILE_SIDE_EFFECTS, type BaseTool } from "@pico/pico-host/tool-registry-contract";
+import { ToolRegistry } from "@pico/pico-host/product-tool-registry";
 
 // ADR 27 决策 4 的守护测试(对抗审查 Finding 2):P0 恢复分类的 F1/F2 判定边界是
 // "声明 toolCall 的 message.committed 先于 tool.started 落库"。本测试走真实

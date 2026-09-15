@@ -9,8 +9,8 @@ import {
   PROTECTED_METADATA_NAMES,
   createReadOnlyPermissionProfile,
   createWorkspaceWritePermissionProfile,
-} from "../../../src/safety/permission-profile.js";
-import { WorkspaceRoots } from "../../../src/tools/workspace-roots.js";
+} from "@pico/core/permission-profile";
+import { WorkspaceRoots } from "@pico/pico-host/workspace-roots";
 
 test("WorkspaceRoots 包入口与旧入口共享 class identity", () => {
   assert.equal(HostWorkspaceRoots, WorkspaceRoots);

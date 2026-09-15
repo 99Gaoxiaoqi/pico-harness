@@ -1,6 +1,6 @@
-import { globalSessionManager } from "../../src/engine/session.js";
-import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-adapter.js";
-import { createSessionForkRuntimePort } from "../../src/runtime/session-fork-runtime-port-adapter.js";
+import { globalSessionManager } from "@pico/pico-host/session";
+import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
+import { createSessionForkRuntimePort } from "@pico/pico-host/session-fork-runtime-port-adapter";
 
 interface Input {
   readonly workDir: string;

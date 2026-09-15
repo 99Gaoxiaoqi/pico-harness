@@ -3,11 +3,12 @@ import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import type { RuntimeEvent, RuntimeEventBase } from "../../../src/engine/session-runtime-event.js";
-import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
-import { createConfiguredSubagentOutputStore } from "../../../src/runtime/configured-subagent-output-store.js";
-import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
-import { createConfiguredSubagentOutputTool } from "../../../src/tools/configured-subagent-output.js";
+import type { RuntimeEvent } from "@pico/storage/runtime-event";
+import type { RuntimeEventBase } from "@pico/core";
+import { resolvePicoPaths } from "@pico/pico-host";
+import { createConfiguredSubagentOutputStore } from "@pico/pico-host/configured-subagent-output-store";
+import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
+import { createConfiguredSubagentOutputTool } from "@pico/pico-host/configured-subagent-output-tool";
 import { initializeRuntimeEventOwner } from "../helpers/runtime-event-owner.js";
 
 test("root agent_output reads only admitted children and reopens canonical history with bounded real results", async (context) => {

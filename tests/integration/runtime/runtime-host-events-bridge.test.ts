@@ -15,14 +15,14 @@ import {
   type RuntimeHostConnection,
 } from "@pico/runtime-host";
 import { createTypedRuntimeRequest } from "@pico/protocol";
+import { createRuntimeHostCompositionFactory } from "@pico/pico-host/runtime-host-composition";
+import { DesktopRuntimeService } from "@pico/pico-host/desktop-runtime-service";
 import {
-  createRuntimeHostCompositionFactory,
-  DesktopRuntimeService,
   ensurePicoRuntimeHostEventOperationsRegistered,
   ensurePicoRuntimeHostOperationsRegistered,
-  WorkspaceRuntimeService,
-  type RuntimeHostEventSource,
-} from "../../../src/daemon/index.js";
+} from "@pico/pico-host/runtime-host-operations";
+import { WorkspaceRuntimeService } from "@pico/pico-host/workspace-runtime-service";
+import { type RuntimeHostEventSource } from "@pico/pico-host/runtime-host-events";
 
 ensurePicoRuntimeHostOperationsRegistered();
 ensurePicoRuntimeHostEventOperationsRegistered();

@@ -5,7 +5,7 @@ import {
   parseStrictRuntimeParams,
   type RuntimeRequest,
 } from "../../../packages/protocol/src/index.js";
-import { createDesktopProviderRequestHandlers } from "../../../src/daemon/desktop-provider-request-handlers.js";
+import { createDesktopProviderRequestHandlers } from "@pico/pico-host";
 
 test("Desktop provider handlers keep protocol mapping and dependency locking in one boundary", async () => {
   const calls: string[] = [];

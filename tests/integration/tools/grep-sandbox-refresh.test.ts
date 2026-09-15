@@ -7,13 +7,13 @@ import {
   managedProcessLauncher,
   SandboxViolationError,
   type ManagedSpawnRequest,
-} from "../../../src/safety/process-sandbox/index.js";
+} from "@pico/pico-host/process-sandbox";
 import {
   buildDefaultToolRegistry,
   type DefaultProcessSandboxDescriptor,
-} from "../../../src/tools/default-registry.js";
-import { resetRgCache, setRgAvailable } from "../../../src/tools/grep.js";
-import { WorkspaceRoots } from "../../../src/tools/workspace-roots.js";
+} from "@pico/pico-host/default-registry";
+import { resetRgCache, setRgAvailable } from "@pico/pico-host/grep-tool";
+import { WorkspaceRoots } from "@pico/pico-host/workspace-roots";
 
 test("Grep refreshes its process sandbox per invocation and rejects unsupported restrictions", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-grep-sandbox-refresh-"));

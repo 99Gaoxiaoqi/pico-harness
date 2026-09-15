@@ -3,8 +3,8 @@ import test from "node:test";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import { generateText, jsonSchema, tool } from "ai";
-import { fromAiSdkContent, toAiSdkMessages } from "../../../src/provider/ai-sdk-messages.js";
-import type { Message } from "../../../src/schema/message.js";
+import { fromAiSdkContent, toAiSdkMessages } from "@pico/pico-host/provider/ai-sdk-messages";
+import type { Message } from "@pico/core";
 
 test("AI SDK clients round-trip signed thinking, Responses metadata, images and Pico tool chronology", async () => {
   const requests: Record<string, unknown>[] = [];

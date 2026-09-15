@@ -3,11 +3,11 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { projectRuntimeSessionState } from "../../../src/engine/session-runtime-projection.js";
-import { Session, SessionManager } from "../../../src/engine/session.js";
-import { SessionForkService } from "../../../src/engine/session-fork-service.js";
-import type { PersistedSessionSettings } from "../../../src/engine/session-runtime.js";
-import { PlanConflictError } from "../../../src/plan/contract.js";
+import { projectRuntimeSessionState } from "@pico/runtime/session-runtime-projection";
+import { Session, SessionManager } from "@pico/pico-host/session";
+import { SessionForkService } from "@pico/pico-host/session-fork-service";
+import type { PersistedSessionSettings } from "@pico/core/session-runtime-state";
+import { PlanConflictError } from "@pico/core/plan-contract";
 import { PlanCoordinator } from "@pico/runtime/plan-coordinator";
 import {
   createDefaultSessionSettings,
@@ -16,15 +16,15 @@ import {
   setSessionCollaborationMode,
   setSessionPermissionMode,
   snapshotSessionSettings,
-} from "../../../src/input/session-settings.js";
-import { RUNTIME_EVENT_SCHEMA_VERSION } from "../../../src/storage/runtime-event.js";
+} from "@pico/pico-host/input/session-settings";
+import { RUNTIME_EVENT_SCHEMA_VERSION } from "@pico/core";
 import {
   RuntimeEventStoreHighWaterConflictError,
   RuntimeEventStorePlanOperationConflictError,
-} from "../../../src/storage/runtime-event-store-contracts.js";
-import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
-import { createSessionForkRuntimePort } from "../../../src/runtime/session-fork-runtime-port-adapter.js";
-import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
+} from "@pico/storage/runtime-event-store-contracts";
+import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
+import { createSessionForkRuntimePort } from "@pico/pico-host/session-fork-runtime-port-adapter";
+import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
 import { initializeRuntimeEventOwner } from "../helpers/runtime-event-owner.js";
 
 function runtimeWriteGuard(store: SqliteRuntimeEventStore, sessionId: string) {

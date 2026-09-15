@@ -4,25 +4,25 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
-import { FileStorageIntegrityError } from "../../../src/storage/local-file-storage.js";
+import { FileStorageIntegrityError } from "@pico/storage";
 import {
   backupOperationalDatabaseSync,
   operationalDatabasePath,
   openOperationalDatabaseReadOnly,
-} from "../../../src/storage/sqlite/sqlite-database.js";
+} from "@pico/storage";
 import {
   migrateOperationalDatabaseSync,
   assertCurrentOperationalTargetSchemaSync,
   readOperationalSchemaVersionsSync,
   type SqliteSchemaScope,
-} from "../../../src/storage/sqlite/sqlite-schema.js";
+} from "@pico/storage";
 import {
   adoptWorkspaceSqliteStorageRootSync,
   assertWorkspaceSqliteStorageRootIdentitySync,
   prepareWorkspaceSqliteStorageSync,
   readWorkspaceSqliteStorageRootIdentitySync,
   withWorkspaceBindingScope,
-} from "../../../src/storage/sqlite/sqlite-workspace-storage.js";
+} from "@pico/storage";
 
 const TEST_DOMAIN_LEVEL_1 = `
 CREATE TABLE test_rows (

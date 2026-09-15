@@ -3,21 +3,18 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { RUNTIME_EVENT_SCHEMA_VERSION } from "../../../src/engine/session-runtime-event.js";
-import { createRuntimeEventId } from "../../../src/storage/runtime-event-store-contracts.js";
-import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
+import { RUNTIME_EVENT_SCHEMA_VERSION } from "@pico/core";
+import { createRuntimeEventId } from "@pico/storage/runtime-event-store-contracts";
+import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
 import { initializeRuntimeEventOwner } from "../helpers/runtime-event-owner.js";
-import { LoadToolsTool, renderGroupCatalog } from "../../../src/tools/load-tools.js";
-import { SearchToolsTool } from "../../../src/tools/search-tools.js";
-import {
-  ToolDisclosure,
-  TOOL_SEARCH_MAX_SCHEMA_CHARS,
-} from "../../../src/tools/tool-disclosure.js";
+import { LoadToolsTool, renderGroupCatalog } from "@pico/runtime/tool-discovery-tools";
+import { SearchToolsTool } from "@pico/runtime/tool-discovery-tools";
+import { ToolDisclosure, TOOL_SEARCH_MAX_SCHEMA_CHARS } from "@pico/runtime/tool-disclosure";
 import {
   AUTOMATION_TOOL_ALLOWLIST,
   filterAutomationAllowedTools,
   isAutomationToolAllowed,
-} from "../../../src/safety/automation-tool-policy.js";
+} from "@pico/runtime/automation-tool-policy";
 import {
   getAvailableDeferredGroups,
   getSupportedToolNames,
@@ -25,9 +22,9 @@ import {
   isPlanModeTool,
   isToolSupportedForHost,
   PICO_TOOL_GROUPS,
-} from "../../../src/tools/tool-surface.js";
-import { searchTools } from "../../../src/tools/tool-search-index.js";
-import type { ToolDefinition } from "../../../src/schema/message.js";
+} from "@pico/runtime/tool-surface";
+import { searchTools } from "@pico/runtime/tool-search-index";
+import type { ToolDefinition } from "@pico/core";
 
 function def(name: string, description = `${name} fixture`): ToolDefinition {
   return { name, description, inputSchema: { type: "object", properties: {} } };

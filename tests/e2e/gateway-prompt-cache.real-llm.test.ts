@@ -9,7 +9,7 @@ import {
   type PreparedRequestCapture,
   type PreparedRequestChangeReason,
   type PreparedRequestDiagnostic,
-} from "../../src/observability/provider-request-diagnostics.js";
+} from "@pico/runtime/provider-request-diagnostics";
 import { configuredUserDefaultRealModel } from "./real-llm-user-model.js";
 
 const RUN_GATEWAY_CACHE_E2E = process.env.RUN_GATEWAY_CACHE_E2E === "1";

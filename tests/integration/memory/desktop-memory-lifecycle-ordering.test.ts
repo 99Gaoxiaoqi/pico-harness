@@ -5,15 +5,13 @@ import { join } from "node:path";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { createRuntimeRequest, RUNTIME_ERROR_CODES, RuntimeProtocolError } from "@pico/protocol";
-import {
-  DesktopAtomicMemoryService,
-  DesktopRuntimeService,
-  WorkspaceRuntimeService,
-} from "../../../src/daemon/index.js";
-import { memorySessionKey } from "../../../src/memory/atomic/runtime-contracts.js";
-import { sessionMemoryLane } from "../../../src/memory/atomic/session-lane.js";
-import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
-import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
+import { DesktopAtomicMemoryService } from "@pico/pico-host/desktop-atomic-memory-service";
+import { DesktopRuntimeService } from "@pico/pico-host/desktop-runtime-service";
+import { WorkspaceRuntimeService } from "@pico/pico-host/workspace-runtime-service";
+import { memorySessionKey } from "@pico/core/atomic-memory-runtime-contracts";
+import { sessionMemoryLane } from "@pico/runtime/atomic-memory/session-lane";
+import { resolvePicoPaths } from "@pico/pico-host";
+import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
 import { writeDesktopModelRouting } from "../../fixtures/desktop-model-routing.js";
 
 test("session deletion waits for atomic memory work and preserves committed items across restart", async (context) => {

@@ -5,7 +5,7 @@ import {
   providerPresets,
   unsupportedProviderPresets,
 } from "../../../apps/desktop/src/renderer/provider-presets.js";
-import { createProvider } from "../../../src/provider/factory.js";
+import { createProvider } from "@pico/pico-host/provider/factory";
 import { parseStrictRuntimeParams } from "../../../packages/protocol/src/index.js";
 
 // This verifies the catalog-to-wire boundary locally. It does not call a model

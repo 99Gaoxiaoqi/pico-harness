@@ -6,13 +6,13 @@ import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
 import {
   CronWorkspaceRuntime,
-  LocalDaemonHost,
-  WorkspaceRegistrationStore,
-  type DisposableLocalRuntimeService,
   type ManagedCronWorkspaceRuntime,
-} from "../../../src/daemon/index.js";
-import { credentialRefForProvider } from "../../../src/provider/credential-vault.js";
-import { WorkspaceTaskRuntime } from "../../../src/runtime/workspace-runtime.js";
+} from "@pico/pico-host/cron-workspace-runtime";
+import { LocalDaemonHost } from "@pico/pico-host/local-daemon-host";
+import { WorkspaceRegistrationStore } from "@pico/pico-host/workspace-registration";
+import { type DisposableLocalRuntimeService } from "@pico/pico-host/local-runtime-service";
+import { credentialRefForProvider } from "@pico/pico-host/provider/credential-vault";
+import { WorkspaceTaskRuntime } from "@pico/pico-host/workspace-task-runtime";
 
 // 本文件覆盖 cron 生命周期编排语义：关闭失败传播、fence 排空、有界 stop、
 // 重注册对账——这些在 Runtime Host candidate 装配里原样生效。

@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { McpConnectionManager } from "../../../src/mcp/manager.js";
+import { McpConnectionManager } from "@pico/pico-host/mcp-connection-manager";
 import {
   mcpToolNameMayBelongToServer,
   qualifyMcpToolName,
   type McpClient,
-} from "../../../src/mcp/types.js";
-import type { BaseTool } from "../../../src/tools/registry.js";
-import { createToolRegistrationOwner, ToolRegistry } from "../../../src/tools/registry-impl.js";
+} from "@pico/pico-host/mcp-client-types";
+import type { BaseTool } from "@pico/pico-host/tool-registry-contract";
+import { createToolRegistrationOwner, ToolRegistry } from "@pico/pico-host/product-tool-registry";
 
 function fixtureTool(name: string): BaseTool {
   return {

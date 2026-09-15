@@ -1,25 +1,25 @@
-import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
+import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { PromptComposer } from "../../../src/context/composer.js";
-import { FullCompactor } from "../../../src/context/full-compactor.js";
-import { TodoStore } from "../../../src/context/todo-store.js";
-import { GoalManager } from "../../../src/engine/goal-manager.js";
-import { AgentEngine } from "../../../src/engine/loop.js";
-import { SilentReporter } from "../../../src/engine/reporter.js";
-import { globalSessionManager, Session } from "../../../src/engine/session.js";
-import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
-import { closeAllOperationalDatabasesForTest } from "../../../src/storage/sqlite/sqlite-database.js";
-import { ContextOverflowError } from "../../../src/provider/errors.js";
-import type { LLMProvider } from "../../../src/provider/interface.js";
-import { executeAgentRuntime } from "../../../src/runtime/agent-runtime.js";
-import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
+import { PromptComposer } from "@pico/pico-host/product-prompt-composer";
+import { FullCompactor } from "@pico/pico-host/product-full-compactor";
+import { TodoStore } from "@pico/pico-host/product-todo-store";
+import { GoalManager } from "@pico/runtime/goal-manager";
+import { AgentEngine } from "@pico/pico-host/agent-engine";
+import { SilentReporter } from "@pico/runtime/silent-reporter";
+import { globalSessionManager, Session } from "@pico/pico-host/session";
+import { resolvePicoPaths } from "@pico/pico-host";
+import { closeAllOperationalDatabasesForTest } from "@pico/storage";
+import { ContextOverflowError } from "@pico/core";
+import type { LLMProvider } from "@pico/core";
+import { executeAgentRuntime } from "@pico/pico-host/agent-runtime";
+import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
 
-import type { Message } from "../../../src/schema/message.js";
-import { ToolRegistry } from "../../../src/tools/registry-impl.js";
+import type { Message } from "@pico/core";
+import { ToolRegistry } from "@pico/pico-host/product-tool-registry";
 
 test("dynamic prompt state stays in the current user request copy across runs and tool steps", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-turn-tail-"));

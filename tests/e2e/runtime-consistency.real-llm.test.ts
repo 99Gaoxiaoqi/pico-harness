@@ -1,4 +1,4 @@
-import { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
+import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -6,28 +6,31 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { globalApprovalManager } from "../../src/approval/manager.js";
-import { SilentReporter } from "../../src/engine/reporter.js";
-import { globalSessionManager } from "../../src/engine/session.js";
+import { globalApprovalManager } from "@pico/pico-host/global-approval-manager";
+import { SilentReporter } from "@pico/runtime/silent-reporter";
+import { globalSessionManager } from "@pico/pico-host/session";
 import type {
   PersistedSessionSettings,
   SessionUsageSnapshot,
-} from "../../src/engine/session-runtime.js";
+} from "@pico/core/session-runtime-state";
 import {
   forgetSessionSettings,
   resolveRestoredSessionModelRoute,
-} from "../../src/input/session-settings.js";
-import { EMPTY_USER_CONFIG_REVISION, UserConfigStore } from "../../src/input/user-config-store.js";
-import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
-import type { ModelRoute } from "../../src/provider/model-router.js";
-import type { ToolCall } from "../../src/schema/message.js";
-import { AgentRuntime, type RunAgentCliOptions } from "../../src/runtime/agent-runtime.js";
-import type { RuntimeEvent } from "../../src/storage/runtime-event.js";
+} from "@pico/pico-host/input/session-settings";
+import {
+  EMPTY_USER_CONFIG_REVISION,
+  UserConfigStore,
+} from "@pico/pico-host/input/user-config-store";
+import { resolvePicoPaths } from "@pico/pico-host";
+import type { ModelRoute } from "@pico/pico-host/provider/model-router";
+import type { ToolCall } from "@pico/core";
+import { AgentRuntime, type RunAgentCliOptions } from "@pico/pico-host/agent-runtime";
+import type { RuntimeEvent } from "@pico/storage/runtime-event";
 
-import { projectRuntimeSessionUsage } from "../../src/engine/session-runtime-projection.js";
-import { SqliteRuntimeControlStore } from "../../src/storage/sqlite/sqlite-runtime-control-store.js";
-import type { ProviderCallRecord } from "../../src/tasks/runtime-types.js";
-import { ReadFileTool } from "../../src/tools/registry-impl.js";
+import { projectRuntimeSessionUsage } from "@pico/runtime/session-runtime-projection";
+import { SqliteRuntimeControlStore } from "@pico/storage/sqlite/sqlite-runtime-control-store";
+import type { ProviderCallRecord } from "@pico/storage/runtime-control-types";
+import { ReadFileTool } from "@pico/pico-host/product-tool-registry";
 import {
   configuredUserDefaultRealModel,
   loadUserDefaultRealModel,

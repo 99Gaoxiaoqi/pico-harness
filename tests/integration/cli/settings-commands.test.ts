@@ -3,8 +3,8 @@ import test from "node:test";
 import type { RuntimeUserDefaults } from "@pico/protocol";
 import { createSettingsCommands, type SettingsCommandRuntime } from "@pico/cli/settings-commands";
 import * as helpers from "@pico/cli/command-helpers";
-import { createSettingsCommands as legacyCreateSettingsCommands } from "../../../src/tui/commands/settings-commands.js";
-import * as legacyHelpers from "../../../src/tui/commands/shared.js";
+import { createSettingsCommands as legacyCreateSettingsCommands } from "@pico/cli/settings-commands";
+import * as legacyHelpers from "@pico/cli/command-helpers";
 
 test("设置命令通过窄 runtime 端口设置新会话并发送 Swarm 任务，旧入口保持同一实现", async () => {
   assert.equal(createSettingsCommands, legacyCreateSettingsCommands);

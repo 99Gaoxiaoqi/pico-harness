@@ -6,23 +6,26 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { test } from "node:test";
-import type { ApprovalNotice } from "../../src/approval/manager.js";
+import type { ApprovalNotice } from "@pico/pico-host/global-approval-manager";
 import {
   readHostRegistration,
   resolveRootControlNamespace,
   resolveStorageRoot,
 } from "@pico/runtime-host";
-import { LocalRuntimeClient } from "../../src/daemon/index.js";
-import { EMPTY_USER_CONFIG_REVISION, UserConfigStore } from "../../src/input/user-config-store.js";
-import { resolvePicoHome } from "../../src/paths/pico-paths.js";
+import { LocalRuntimeClient } from "@pico/pico-host/local-runtime-client";
+import {
+  EMPTY_USER_CONFIG_REVISION,
+  UserConfigStore,
+} from "@pico/pico-host/input/user-config-store";
+import { resolvePicoHome } from "@pico/pico-host";
 import {
   ClientSessionRuntime,
   type ClientPromptRequest,
-} from "../../src/tui/client-session-runtime.js";
-import { createClientCommandRegistry, processClientInput } from "../../src/tui/client-commands.js";
-import { TuiReporter } from "../../src/tui/tui-reporter.js";
-import { diffStatFromRewindPreview } from "../../src/tui/rewind-client-bridge.js";
-import { redactProviderErrorText } from "../../src/provider/error-redaction.js";
+} from "@pico/cli/tui/client-session-runtime";
+import { createClientCommandRegistry, processClientInput } from "@pico/cli/tui/client-commands";
+import { TuiReporter } from "@pico/cli/tui/tui-reporter";
+import { diffStatFromRewindPreview } from "@pico/cli/tui/rewind-client-bridge";
+import { redactProviderErrorText } from "@pico/runtime";
 import { sendTuiTurn } from "./helpers/tui-turn.js";
 
 /**

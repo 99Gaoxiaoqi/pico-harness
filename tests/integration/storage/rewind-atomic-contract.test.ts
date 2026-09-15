@@ -27,36 +27,37 @@ import {
   findCliSessionCatalogEntry,
   listCliSessionCatalogEntries,
   resolveCliSession,
-} from "../../../src/cli/session-resolver.js";
-import { DesktopRuntimeService, WorkspaceRuntimeService } from "../../../src/daemon/index.js";
-import { globalSessionManager, type Session } from "../../../src/engine/session.js";
-import { SessionForkService } from "../../../src/engine/session-fork-service.js";
-import type { SessionForkRuntimePort } from "../../../src/engine/session-fork-runtime-port.js";
-import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
-import { createSessionForkRuntimePort } from "../../../src/runtime/session-fork-runtime-port-adapter.js";
+} from "@pico/cli/session-resolver";
+import { DesktopRuntimeService } from "@pico/pico-host/desktop-runtime-service";
+import { WorkspaceRuntimeService } from "@pico/pico-host/workspace-runtime-service";
+import { globalSessionManager, type Session } from "@pico/pico-host/session";
+import { SessionForkService } from "@pico/pico-host/session-fork-service";
+import type { SessionForkRuntimePort } from "@pico/pico-host/session-fork-runtime-port";
+import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
+import { createSessionForkRuntimePort } from "@pico/pico-host/session-fork-runtime-port-adapter";
 import {
   getOrCreateSessionSettings,
   setSessionPermissionMode,
-} from "../../../src/input/session-settings.js";
+} from "@pico/pico-host/input/session-settings";
 import {
   fileHistoryApplyDurableRewindPlan,
   fileHistoryChanges,
   fileHistoryTrackEdit,
-} from "../../../src/safety/file-history.js";
+} from "@pico/pico-host/file-history-runtime";
 import {
   createBypassExecutionBoundary,
   createManagedExecutionBoundary,
   createWorkspaceWritePermissionProfile,
-} from "../../../src/safety/permission-profile.js";
-import { projectDesktopCheckpoint } from "../../../src/daemon/desktop-review.js";
-import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
-import { operationalDatabasePath } from "../../../src/storage/sqlite/sqlite-database.js";
-import { readFileHistoryManifestRow } from "../../../src/storage/sqlite/file-history-manifest-store.js";
-import { SqliteDesktopConversationStateStore } from "../../../src/storage/sqlite/sqlite-desktop-conversation-state-store.js";
-import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
-import { retireOwnerLeaseForTerminatedProcess } from "../../../src/storage/owner-lease.js";
-import { sessionOwnerLeaseDirectory } from "../../../src/storage/session-owner-lease.js";
-import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
+} from "@pico/core/permission-profile";
+import { projectDesktopCheckpoint } from "@pico/pico-host/desktop-review";
+import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
+import { operationalDatabasePath } from "@pico/storage";
+import { readFileHistoryManifestRow } from "@pico/storage/sqlite/file-history-manifest-store";
+import { SqliteDesktopConversationStateStore } from "@pico/pico-host";
+import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
+import { retireOwnerLeaseForTerminatedProcess } from "@pico/pico-host/owner-lease";
+import { sessionOwnerLeaseDirectory } from "@pico/storage";
+import { resolvePicoPaths } from "@pico/pico-host";
 
 interface RewindFixture {
   readonly root: string;
@@ -768,7 +769,11 @@ test("rewind.apply replays the fixed operation after a real last-file SIGKILL", 
   const operationId = `rewind-${createHash("sha256")
     .update(`${fixture.workDir}\0${idempotencyKey}`)
     .digest("hex")}`;
-  const preview = await projectDesktopCheckpoint(fixture.session, fixture.checkpointId);
+  const preview = await projectDesktopCheckpoint(
+    fixture.session,
+    fixture.checkpointId,
+    fileHistoryChanges,
+  );
   const requestFingerprint = createHash("sha256")
     .update(
       JSON.stringify({
