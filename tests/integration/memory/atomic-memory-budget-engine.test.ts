@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
-import { AtomicMemoryExtractionEngine } from "../../../src/memory/atomic/extraction-engine.js";
-import { ModelCapabilityError } from "../../../src/provider/errors.js";
-import { SqliteMemoryItemStore } from "../../../src/storage/sqlite/sqlite-memory-item-store.js";
+import { AtomicMemoryExtractionEngine } from "@pico/runtime/atomic-memory/extraction-engine";
+import { ModelCapabilityError } from "@pico/core";
+import { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-store";
 import type {
   MemoryEvidenceEvent,
   MemoryExtractionSnapshot,
   MemoryModelRequest,
-} from "../../../src/memory/atomic/runtime-contracts.js";
+} from "@pico/core/atomic-memory-runtime-contracts";
 
 const SESSION = "memory-budget-engine";
 const preference = "我偏好使用 PostgreSQL。";

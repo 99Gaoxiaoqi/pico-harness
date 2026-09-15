@@ -4,10 +4,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { Session } from "../../../src/engine/session.js";
-import { createCanonicalTranscriptToolStart } from "../../../src/engine/transcript-tool-start.js";
-import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
-import { currentRuntimeRun, RuntimeRun } from "../../../src/runtime/runtime-run.js";
+import { Session } from "@pico/pico-host/session";
+import { createCanonicalTranscriptToolStart } from "@pico/core/transcript-tool-start";
+import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
+import { currentRuntimeRun, RuntimeRun } from "@pico/pico-host/product-runtime-run";
 
 test("late async work cannot reuse a terminal RuntimeRun context", async (context) => {
   const fixture = await createFixture(context, "late-context");

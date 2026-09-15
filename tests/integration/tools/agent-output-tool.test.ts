@@ -8,7 +8,7 @@ import {
   type AgentOutputCommitPort,
   type CommitAgentOutputInput,
   type GraphOperatorActivationContext,
-} from "../../../src/tools/agent-output-tool.js";
+} from "@pico/pico-host/agent-output-tool";
 
 const ACTIVATION: GraphOperatorActivationContext = {
   kind: "graph_operator_activation",

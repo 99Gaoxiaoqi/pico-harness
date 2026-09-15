@@ -6,20 +6,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
-import { agentOutputRecordIdFor } from "../../../src/agent-graph/core/ids.js";
-import { SqliteAgentGraphControlStoreAdapter } from "../../../src/agent-graph/sqlite-control-store-adapter.js";
-import { createBuiltinAgentGraphOperatorProfileCatalog } from "../../../src/agent-graph/operator-profile-catalog.js";
+import { agentOutputRecordIdFor } from "@pico/core/agent-graph-identities";
+import { SqliteAgentGraphControlStoreAdapter } from "@pico/runtime";
+import { createBuiltinAgentGraphOperatorProfileCatalog } from "@pico/runtime";
 import {
   AgentGraphStoreConflictError,
   SqliteAgentGraphControlStore,
   type ClaimAgentGraphActivationInput,
   type CommitAgentGraphScheduleInput,
-} from "../../../src/storage/sqlite/sqlite-agent-graph-control-store.js";
-import { withWorkspaceSqliteLease } from "../../../src/storage/sqlite/workspace-scopes.js";
-import { ALL_WORKSPACE_SQLITE_SCOPES } from "../../../src/storage/sqlite/workspace-scopes.js";
-import { AGENT_GRAPH_SCOPE } from "../../../src/storage/sqlite/agent-graph-scope.js";
-import { acquireOperationalDatabase } from "../../../src/storage/sqlite/sqlite-database.js";
-import { migrateOperationalDatabaseSync } from "../../../src/storage/sqlite/sqlite-schema.js";
+} from "@pico/storage/sqlite/agent-graph-control-store";
+import { withWorkspaceSqliteLease } from "@pico/storage";
+import { ALL_WORKSPACE_SQLITE_SCOPES } from "@pico/storage";
+import { AGENT_GRAPH_SCOPE } from "@pico/storage";
+import { acquireOperationalDatabase } from "@pico/storage";
+import { migrateOperationalDatabaseSync } from "@pico/storage";
 
 test("agent graph store persists exact identities, fences finish, and drives durable wakes", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-agent-graph-store-"));

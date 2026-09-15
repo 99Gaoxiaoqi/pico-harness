@@ -5,10 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
-import {
-  WorkbarGitReviewAuthority,
-  WorkbarGitReviewError,
-} from "../../../src/daemon/workbar-git-review.js";
+import { WorkbarGitReviewAuthority, WorkbarGitReviewError } from "@pico/pico-host";
 
 const execFileAsync = promisify(execFile);
 

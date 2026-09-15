@@ -3,28 +3,25 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { runCli, type CliRuntime } from "../../../src/cli/main.js";
+import { runCli, type CliRuntime } from "@pico/cli/entry-dispatch";
 import {
   normalizeSessionRuntimeStatePatch,
   createEmptyUsageSnapshot,
   type SessionRuntimePersistence,
-} from "../../../src/engine/session-runtime.js";
+} from "@pico/core/session-runtime-state";
 import {
   createDefaultSessionSettings,
   getOrCreateSessionSettings,
   snapshotSessionSettings,
-} from "../../../src/input/session-settings.js";
-import {
-  createClientCommandRegistry,
-  processClientInput,
-} from "../../../src/tui/client-commands.js";
+} from "@pico/pico-host/input/session-settings";
+import { createClientCommandRegistry, processClientInput } from "@pico/cli/tui/client-commands";
 import {
   ClientSessionRuntime,
   type DaemonSessionClient,
-} from "../../../src/tui/client-session-runtime.js";
-import { TuiReporter } from "../../../src/tui/tui-reporter.js";
-import { buildStatusBarText } from "../../../src/tui/status-bar.js";
-import { compileRuntimePermissionProfile } from "../../../src/safety/permission-profile.js";
+} from "@pico/cli/tui/client-session-runtime";
+import { TuiReporter } from "@pico/cli/tui/tui-reporter";
+import { buildStatusBarText } from "@pico/cli/tui/status-bar";
+import { compileRuntimePermissionProfile } from "@pico/core/permission-profile";
 
 test("Swarm session settings survive durable hydration", async () => {
   const cwd = await mkdtemp(join(tmpdir(), "pico-swarm-settings-"));

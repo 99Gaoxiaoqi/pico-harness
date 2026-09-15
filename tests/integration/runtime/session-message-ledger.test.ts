@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { assistantMessage, type Message } from "../../../src/schema/message.js";
-import { Session } from "../../../src/engine/session.js";
-import { SessionMessageLedger } from "../../../src/engine/session-message-ledger.js";
+import { assistantMessage, type Message } from "@pico/core";
+import { Session } from "@pico/pico-host/session";
+import { SessionMessageLedger } from "@pico/runtime";
 
 function toolResultMessage(toolCallId: string, output: string): Message {
   return { role: "user", content: output, toolCallId };

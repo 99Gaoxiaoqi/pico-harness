@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ToolAccesses } from "../../../src/tools/tool-access.js";
-import { ToolScheduler } from "../../../src/tools/tool-scheduler.js";
+import { ToolAccesses } from "@pico/runtime/tool-access";
+import { ToolScheduler } from "@pico/runtime/tool-scheduler";
 
 test("ToolScheduler 要求调用方显式提供有限的正整数并发上限", async () => {
   assert.throws(() => new ToolScheduler({} as { maxConcurrency: number }), /positive safe integer/);

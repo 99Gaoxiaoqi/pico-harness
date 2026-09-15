@@ -4,11 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
-import { FileStorageIntegrityError } from "../../../src/storage/local-file-storage.js";
+import { FileStorageIntegrityError } from "@pico/storage";
 import {
   runIdleSqliteRetentionMaintenance,
   SQLITE_RETENTION_VACUUM_RECLAIMED_BYTES,
-} from "../../../src/storage/sqlite/sqlite-retention-maintenance.js";
+} from "@pico/storage";
 
 function withDatabase(operation: (database: DatabaseSync) => void): void {
   const root = mkdtempSync(join(tmpdir(), "pico-retention-maintenance-"));

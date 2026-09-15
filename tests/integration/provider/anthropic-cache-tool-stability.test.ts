@@ -5,12 +5,12 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { AgentEngine } from "../../../src/engine/loop.js";
-import { Session } from "../../../src/engine/session.js";
-import { AiSdkProvider } from "../../../src/provider/ai-sdk-provider.js";
-import type { BaseTool } from "../../../src/tools/registry.js";
-import { ToolDisclosure } from "../../../src/tools/tool-disclosure.js";
-import { ToolRegistry } from "../../../src/tools/registry-impl.js";
+import { AgentEngine } from "@pico/pico-host/agent-engine";
+import { Session } from "@pico/pico-host/session";
+import { AiSdkProvider } from "@pico/pico-host/provider/ai-sdk-provider";
+import type { BaseTool } from "@pico/pico-host/tool-registry-contract";
+import { ToolDisclosure } from "@pico/runtime/tool-disclosure";
+import { ToolRegistry } from "@pico/pico-host/product-tool-registry";
 
 interface CacheMarked {
   cache_control?: { type: string };

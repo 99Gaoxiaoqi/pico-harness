@@ -18,7 +18,7 @@ import {
   WorkbarTerminalError,
   type WorkbarTerminalRecord,
 } from "@pico/runtime-host";
-import { FileWorkbarTerminalStateStore } from "../../../src/daemon/workbar-terminal-state-store.js";
+import { FileWorkbarTerminalStateStore } from "@pico/pico-host";
 
 test("File terminal store 让 Host 重启后把 running 资源持久化为 interrupted", async (context) => {
   const fixture = await createFixture(context, "recover");

@@ -1,14 +1,15 @@
+import { createHookManagementCommands } from "@pico/cli/hook-management-commands";
 import assert from "node:assert/strict";
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { createSessionHookRuntime } from "../../../src/hooks/runtime.js";
-import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
+import { createSessionHookRuntime } from "@pico/pico-host/hooks/runtime";
+import { resolvePicoPaths } from "@pico/pico-host";
 import { PluginManagementService } from "@pico/pico-host/plugins/plugin-management-service";
 import { resolvePluginScopeRoots } from "@pico/pico-host/plugins/plugin-manager";
 import { loadPluginRuntimeSnapshot } from "@pico/pico-host/plugins/plugin-runtime-snapshot";
-import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
+import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
 
 test("materialized plugin Hook requires current workspace trust and is revoked on dispose", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-plugin-hook-trust-"));
@@ -76,6 +77,7 @@ test("materialized plugin Hook requires current workspace trust and is revoked o
   );
   const workspaceTrustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });
   const firstRuntime = await createSessionHookRuntime({
+    commandFactory: createHookManagementCommands,
     workDir: workspace,
     picoHome,
     sessionId: "plugin-hook-first",
@@ -110,6 +112,7 @@ test("materialized plugin Hook requires current workspace trust and is revoked o
   assert.ok(skillTrustAuthority);
   assert.equal(skillTrustAuthority.identity?.resourceDigest, proposal.resourceDigest);
   const componentRuntime = await createSessionHookRuntime({
+    commandFactory: createHookManagementCommands,
     workDir: workspace,
     picoHome,
     sessionId: "plugin-component-hook",
@@ -148,6 +151,7 @@ test("materialized plugin Hook requires current workspace trust and is revoked o
   assert.equal(second.hookSources.length, 1);
   assert.notEqual(second.hookSources[0]!.path, firstSource.path);
   const secondRuntime = await createSessionHookRuntime({
+    commandFactory: createHookManagementCommands,
     workDir: workspace,
     picoHome,
     sessionId: "plugin-hook-second",

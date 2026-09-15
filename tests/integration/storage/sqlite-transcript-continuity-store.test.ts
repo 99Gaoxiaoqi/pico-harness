@@ -1,4 +1,4 @@
-import { agentOutputFingerprint } from "../../../src/tools/agent-output-tool.js";
+import { agentOutputFingerprint } from "@pico/pico-host/agent-output-tool";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
@@ -6,18 +6,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
-import type { RuntimeEvent } from "../../../src/engine/session-runtime-event.js";
+import type { RuntimeEvent } from "@pico/storage/runtime-event";
 import {
   RuntimeEventStoreRunSealedError,
   type RuntimeTranscriptChangeCursor,
   type RuntimeTranscriptProjectionCursor,
-} from "../../../src/storage/runtime-event-store-contracts.js";
-import { operationalDatabasePath } from "../../../src/storage/sqlite/sqlite-database.js";
+} from "@pico/storage/runtime-event-store-contracts";
+import { operationalDatabasePath } from "@pico/storage";
 import {
   RuntimeTranscriptResetRequiredError,
   SqliteRuntimeEventStore,
-} from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
-import { SqliteAgentGraphControlStore } from "../../../src/storage/sqlite/sqlite-agent-graph-control-store.js";
+} from "@pico/pico-host/product-runtime-event-store";
+import { SqliteAgentGraphControlStore } from "@pico/storage/sqlite/agent-graph-control-store";
 import { initializeRuntimeEventOwner } from "../helpers/runtime-event-owner.js";
 
 function eventBase(eventId: string, sessionId: string, runId = "run-1", turnId = "turn-1") {

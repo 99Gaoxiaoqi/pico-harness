@@ -3,13 +3,14 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { CostTracker } from "../../../src/observability/tracker.js";
-import { catalogPricing } from "../../../src/observability/catalog-pricing.js";
+import { CostTracker } from "@pico/pico-host/cost-tracker";
+import { catalogPricing, MODEL_PRICING } from "@pico/pico-host/catalog-pricing";
+import { SqliteRuntimeEventStore } from "@pico/storage/sqlite/sqlite-runtime-event-store";
 import { billingRouteForProvider } from "@pico/runtime/provider-billing-route";
-import { resolveModelRouteCapabilities } from "../../../src/provider/model-capabilities.js";
-import { SqliteRuntimeControlStore } from "../../../src/storage/sqlite/sqlite-runtime-control-store.js";
-import { buildUsageDashboard } from "../../../src/daemon/usage-dashboard.js";
-import { usagePricing } from "../../../src/daemon/usage-pricing.js";
+import { resolveModelRouteCapabilities } from "@pico/runtime";
+import { SqliteRuntimeControlStore } from "@pico/storage/sqlite/sqlite-runtime-control-store";
+import { buildUsageDashboard } from "@pico/pico-host";
+import { usagePricing } from "@pico/pico-host";
 
 test("catalog and override pricing are recorded per call and projected without pricing custom gateways", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-catalog-billing-"));
@@ -76,8 +77,9 @@ test("catalog and override pricing are recorded per call and projected without p
   assert.equal(calls.filter((c) => c.reported?.costStatus === "unknown").length, 1);
   assert.ok(calls.some((c) => Math.abs(c.cost - 21.6) < 1e-9));
   const details = await buildUsageDashboard({
+    createRuntimeEventReader: (storageRoot) => new SqliteRuntimeEventStore({ storageRoot }),
     sources: [{ workspacePath: root, storageRoot: root, calls }],
-    pricing: usagePricing({}),
+    pricing: usagePricing({}, MODEL_PRICING),
     unavailableWorkspaces: [],
   });
   assert.equal(details.activities.filter((a) => a.costStatus === "estimated").length, 2);

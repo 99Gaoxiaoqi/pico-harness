@@ -6,11 +6,12 @@ import { join } from "node:path";
 import { setImmediate as waitForImmediate } from "node:timers/promises";
 import { test } from "node:test";
 import { createRuntimeRequest, RUNTIME_ERROR_CODES, RuntimeProtocolError } from "@pico/protocol";
-import { DesktopRuntimeService, WorkspaceRuntimeService } from "../../../src/daemon/index.js";
-import { globalSessionManager } from "../../../src/engine/session.js";
-import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
-import type { PluginRuntimeSnapshotRegistry } from "../../../src/plugins/plugin-runtime-snapshot-registry.js";
-import { SqliteDesktopConversationStateStore } from "../../../src/storage/sqlite/sqlite-desktop-conversation-state-store.js";
+import { DesktopRuntimeService } from "@pico/pico-host/desktop-runtime-service";
+import { WorkspaceRuntimeService } from "@pico/pico-host/workspace-runtime-service";
+import { globalSessionManager } from "@pico/pico-host/session";
+import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
+import type { PluginRuntimeSnapshotRegistry } from "@pico/pico-host/plugins/plugin-runtime-snapshot-registry";
+import { SqliteDesktopConversationStateStore } from "@pico/pico-host";
 import { writeDesktopModelRouting } from "../../fixtures/desktop-model-routing.js";
 
 test("Desktop close aggregates cleanup failures and always reaches the closed state", async (context) => {

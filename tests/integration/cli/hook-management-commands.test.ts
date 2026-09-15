@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createHookManagementCommands } from "@pico/cli/hook-management-commands";
-import { createHookManagementCommands as legacyCreateHookManagementCommands } from "../../../src/hooks/management/commands.js";
+import { createHookManagementCommands as legacyCreateHookManagementCommands } from "@pico/cli/hook-management-commands";
 import type { HookManagementService } from "@pico/pico-host/hooks/management/service";
 
 test("Hook 管理命令由 CLI 包提供且旧入口保持同一实现", async () => {

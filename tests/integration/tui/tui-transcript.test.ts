@@ -3,11 +3,11 @@ import test from "node:test";
 import {
   TranscriptEventStore as TuiEventStore,
   assertTranscriptEvent,
-} from "../../../src/presentation/transcript-event-store.js";
-import { TuiReporter } from "../../../src/tui/tui-reporter.js";
-import { hydrateTuiEntries, hydrateTuiReporter } from "../../../src/tui/session-hydration.js";
-import type { SessionHydrationSnapshot } from "../../../src/engine/session-runtime.js";
-import type { TranscriptEvent } from "../../../src/presentation/transcript-event-store.js";
+} from "@pico/pico-host/transcript-event-store";
+import { TuiReporter } from "@pico/cli/tui/tui-reporter";
+import { hydrateTuiEntries, hydrateTuiReporter } from "@pico/cli/tui/session-hydration";
+import type { SessionHydrationSnapshot } from "@pico/core/session-hydration";
+import type { TranscriptEvent } from "@pico/pico-host/transcript-event-store";
 
 test("Transcript hard cut rejects legacy event shapes", () => {
   const base = { eventId: "legacy", sequence: 1, createdAt: 0 };

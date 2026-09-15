@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { DesktopInteractionBroker } from "../../../src/daemon/desktop-interaction-broker.js";
+import { DesktopInteractionBroker } from "@pico/pico-host/desktop-interaction-broker";
 import { createDesktopInteractionOwnerKey } from "@pico/pico-host/production-host";
 
 test("Desktop run ownerKey 稳定、定长且可被交互 Broker 接受", () => {

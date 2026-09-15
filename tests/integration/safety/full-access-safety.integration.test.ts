@@ -4,19 +4,19 @@ import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { classifyHardlineBashCommand, isHardlineBashCommand } from "@pico/runtime/bash-hardline";
 import {
-  classifyHardlineBashCommand,
-  isHardlineBashCommand,
-} from "../../../src/approval/bash-hardline.js";
-import { classifyHardlineCommand, isHardlineCommand } from "../../../src/approval/manager.js";
-import { buildForegroundSafetyMiddleware } from "../../../src/runtime/agent-runtime.js";
-import { evaluateWorkspaceToolCall } from "../../../src/safety/workspace-sandbox.js";
-import { WorkspaceRoots } from "../../../src/tools/workspace-roots.js";
+  classifyHardlineCommand,
+  isHardlineCommand,
+} from "@pico/pico-host/global-approval-manager";
+import { buildForegroundSafetyMiddleware } from "@pico/pico-host/agent-runtime";
+import { evaluateWorkspaceToolCall } from "@pico/pico-host/workspace-sandbox";
+import { WorkspaceRoots } from "@pico/pico-host/workspace-roots";
 import {
   resolveShell,
   sanitizeShellProcessEnvironment,
   shellCommandArgs,
-} from "../../../src/os/shell.js";
+} from "@pico/runtime/host-shell";
 
 test("host shell argv 按方言生成且拒绝不支持的 shell", () => {
   const command = "printf safe";

@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import { fork, type ChildProcess } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { promisify } from "node:util";
@@ -12,10 +12,7 @@ const execFileAsync = promisify(execFile);
 const workerPath = fileURLToPath(
   new URL("../../fixtures/agent-graph-crash-worker.ts", import.meta.url),
 );
-const preloadPath = join(
-  dirname(fileURLToPath(import.meta.url)),
-  "../../../src/tui/preload-env.ts",
-);
+const preloadPath = import.meta.resolve("@pico/cli/tui/preload-env");
 
 test("Graph durable windows survive SIGKILL and reopen with exact identities", async (context) => {
   const fixture = await mkdtemp(join(tmpdir(), "pico-agent-graph-process-recovery-"));

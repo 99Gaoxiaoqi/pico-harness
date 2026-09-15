@@ -3,31 +3,27 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import {
-  RUNTIME_EVENT_SCHEMA_VERSION,
-  runtimeEventHasModelMessage,
-} from "../../../src/engine/session-runtime-event.js";
+import { RUNTIME_EVENT_SCHEMA_VERSION, runtimeEventHasModelMessage } from "@pico/core";
 import {
   RUNTIME_EVENT_SCHEMA_VERSION as runtimeSchemaVersion,
-  RuntimeEventDecodeError,
-  decodeRuntimeEvent,
   runtimeEventHasModelMessage as runtimeModelMessageGuard,
-} from "../../../src/storage/runtime-event.js";
-import { materializeRuntimeHistoryEntries } from "../../../src/engine/session-runtime-read-model.js";
-import { materializeRuntimeHistoryEntries as runtimeMaterializeHistoryEntries } from "../../../src/engine/session-runtime-read-model.js";
+} from "@pico/core";
+import { RuntimeEventDecodeError, decodeRuntimeEvent } from "@pico/storage/runtime-event";
+import { materializeRuntimeHistoryEntries } from "@pico/runtime/session-runtime-read-model";
+import { materializeRuntimeHistoryEntries as runtimeMaterializeHistoryEntries } from "@pico/runtime/session-runtime-read-model";
 import {
   SESSION_RUNTIME_STATE_VERSION,
   createEmptyUsageSnapshot,
   normalizeSessionRuntimeStatePatch,
   normalizeSessionRuntimeStateWritePatch,
   normalizeSessionUsageSnapshot,
-} from "../../../src/engine/session-runtime.js";
-import { Session } from "../../../src/engine/session.js";
+} from "@pico/core/session-runtime-state";
+import { Session } from "@pico/pico-host/session";
 import {
   createManagedExecutionBoundary,
   decodeExecutionBoundary,
   type ExecutionBoundary,
-} from "../../../src/safety/permission-profile.js";
+} from "@pico/core/permission-profile";
 
 test("Runtime adapters preserve the engine-owned durable Session contracts", () => {
   assert.equal(runtimeSchemaVersion, RUNTIME_EVENT_SCHEMA_VERSION);

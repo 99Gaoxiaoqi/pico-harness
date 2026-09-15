@@ -4,10 +4,10 @@ import test from "node:test";
 import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ConversationTranscript } from "../../../apps/desktop/src/renderer/conversation/ConversationTranscript.js";
-import { LoadToolsTool } from "../../../src/tools/load-tools.js";
-import { SearchToolsTool } from "../../../src/tools/search-tools.js";
-import { ToolDisclosure } from "../../../src/tools/tool-disclosure.js";
-import { PICO_TOOL_GROUPS } from "../../../src/tools/tool-surface.js";
+import { LoadToolsTool } from "@pico/runtime/tool-discovery-tools";
+import { SearchToolsTool } from "@pico/runtime/tool-discovery-tools";
+import { ToolDisclosure } from "@pico/runtime/tool-disclosure";
+import { PICO_TOOL_GROUPS } from "@pico/runtime/tool-surface";
 import type {
   ConversationItemView,
   SubagentItemView,

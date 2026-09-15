@@ -1,31 +1,31 @@
-import { AtomicMemoryLifecycle } from "../../../src/runtime/atomic-memory-lifecycle.js";
-import { DesktopAtomicMemoryService } from "../../../src/daemon/desktop-atomic-memory-service.js";
+import { AtomicMemoryLifecycle } from "@pico/runtime";
+import { DesktopAtomicMemoryService } from "@pico/pico-host/desktop-atomic-memory-service";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { executeAgentRuntime } from "../../../src/runtime/agent-runtime.js";
+import { executeAgentRuntime } from "@pico/pico-host/agent-runtime";
 import {
   AtomicMemoryRuntime,
   ProviderAtomicMemoryModel,
-} from "../../../src/runtime/atomic-memory-runtime.js";
-import { CostTracker } from "../../../src/observability/tracker.js";
-import { SqliteRuntimeControlStore } from "../../../src/storage/sqlite/sqlite-runtime-control-store.js";
-import { SilentReporter } from "../../../src/engine/reporter.js";
-import { globalSessionManager, Session } from "../../../src/engine/session.js";
-import { RuntimeRun } from "../../../src/runtime/runtime-run.js";
-import { FullCompactor } from "../../../src/context/full-compactor.js";
-import { recordRuntimeCompactionCheckpoint } from "../../../src/context/runtime-compaction-checkpoint.js";
-import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
-import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
-import { SqliteMemoryItemStore } from "../../../src/storage/sqlite/sqlite-memory-item-store.js";
-import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
+} from "@pico/pico-host/atomic-memory-runtime";
+import { CostTracker } from "@pico/pico-host/cost-tracker";
+import { SqliteRuntimeControlStore } from "@pico/storage/sqlite/sqlite-runtime-control-store";
+import { SilentReporter } from "@pico/runtime/silent-reporter";
+import { globalSessionManager, Session } from "@pico/pico-host/session";
+import { RuntimeRun } from "@pico/pico-host/product-runtime-run";
+import { FullCompactor } from "@pico/pico-host/product-full-compactor";
+import { recordRuntimeCompactionCheckpoint } from "@pico/runtime/runtime-compaction-checkpoint";
+import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
+import { resolvePicoPaths } from "@pico/pico-host";
+import { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-store";
+import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
 import {
   memorySessionKey,
   type MemoryExtractionModel,
-} from "../../../src/memory/atomic/runtime-contracts.js";
-import type { ToolCall } from "../../../src/schema/message.js";
+} from "@pico/core/atomic-memory-runtime-contracts";
+import type { ToolCall } from "@pico/core";
 
 const prompt = "请记住：我偏好简洁的中文回答。";
 

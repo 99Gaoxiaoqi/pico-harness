@@ -3,7 +3,7 @@ import { PassThrough } from "node:stream";
 import test from "node:test";
 import { Box, render } from "ink";
 import React from "react";
-import { TerminalMarkdownModel } from "../../../src/tui/terminal-markdown-model.js";
+import { TerminalMarkdownModel } from "@pico/cli/tui/terminal-markdown-model";
 
 test("TerminalMarkdownModel 的测量与 Ink 实际行数一致", async () => {
   const model = new TerminalMarkdownModel(

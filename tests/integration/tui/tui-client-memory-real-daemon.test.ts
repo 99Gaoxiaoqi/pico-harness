@@ -3,13 +3,10 @@ import { access, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { LocalRuntimeClient } from "../../../src/daemon/index.js";
-import { ClientSessionRuntime } from "../../../src/tui/client-session-runtime.js";
-import {
-  createClientCommandRegistry,
-  processClientInput,
-} from "../../../src/tui/client-commands.js";
-import { TuiReporter } from "../../../src/tui/tui-reporter.js";
+import { LocalRuntimeClient } from "@pico/pico-host/local-runtime-client";
+import { ClientSessionRuntime } from "@pico/cli/tui/client-session-runtime";
+import { createClientCommandRegistry, processClientInput } from "@pico/cli/tui/client-commands";
+import { TuiReporter } from "@pico/cli/tui/tui-reporter";
 import { TestRuntimeHostCandidateTracker } from "../helpers/test-runtime-daemon.js";
 
 test("TUI memory commands persist and archive atomic memories through the real daemon", async (t) => {

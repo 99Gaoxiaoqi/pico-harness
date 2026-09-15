@@ -6,7 +6,7 @@
  * 评分:对真实模型生成的摘要做 anchor 匹配,算 recall(关键事实保留率)。
  */
 
-import type { Message } from "../../src/schema/message.js";
+import type { Message } from "@pico/core";
 
 /** anchor 类别:用于区分必须保留的事实类型 */
 export type CompactionAnchorCategory =

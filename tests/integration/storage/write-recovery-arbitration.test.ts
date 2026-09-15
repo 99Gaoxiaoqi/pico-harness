@@ -13,20 +13,20 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import type { Message } from "../../../src/schema/message.js";
-import { Session } from "../../../src/engine/session.js";
-import { RuntimeRun } from "../../../src/runtime/runtime-run.js";
-import type { EngineRuntimePort, EngineRuntimeRun } from "../../../src/engine/runtime-port.js";
+import type { Message } from "@pico/core";
+import { Session } from "@pico/pico-host/session";
+import { RuntimeRun } from "@pico/pico-host/product-runtime-run";
+import type { EngineRuntimePort, EngineRuntimeRun } from "@pico/pico-host/engine-runtime-port";
 import type {
   AppendRuntimeEventBatchOptions,
   RuntimeEventStoreAppendResult,
-} from "../../../src/storage/runtime-event-store-contracts.js";
-import type { RuntimeEvent } from "../../../src/storage/runtime-event.js";
+} from "@pico/storage/runtime-event-store-contracts";
+import type { RuntimeEvent } from "@pico/storage/runtime-event";
 import {
   SqliteRuntimeEventStore,
   type RuntimeEventPointRead,
-} from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
-import { closeAllOperationalDatabasesForTest } from "../../../src/storage/sqlite/sqlite-database.js";
+} from "@pico/pico-host/product-runtime-event-store";
+import { closeAllOperationalDatabasesForTest } from "@pico/storage";
 
 /** 一次性注入计划:只影响 arm() 之后的第一次 appendBatch。 */
 interface FailureSeamPlan {

@@ -2,8 +2,8 @@ import type {
   InitializeRuntimeSessionOptions,
   RuntimeOwnerFence,
   RuntimeSessionManifest,
-} from "../../../src/storage/runtime-event-store-contracts.js";
-import type { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
+} from "@pico/storage/runtime-event-store-contracts";
+import type { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
 
 /** Test owner stand-in: initialize the namespace, then claim one positive fencing epoch. */
 export async function initializeRuntimeEventOwner(

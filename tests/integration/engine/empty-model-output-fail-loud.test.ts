@@ -3,10 +3,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { AgentEngine } from "../../../src/engine/loop.js";
-import { Session } from "../../../src/engine/session.js";
-import { ToolRegistry } from "../../../src/tools/registry-impl.js";
-import type { LLMProvider } from "../../../src/provider/interface.js";
+import { AgentEngine } from "@pico/pico-host/agent-engine";
+import { Session } from "@pico/pico-host/session";
+import { ToolRegistry } from "@pico/pico-host/product-tool-registry";
+import type { LLMProvider } from "@pico/core";
 
 // 空 run 防线：provider 返回空内容（模拟网关 200 + 0 字节 SSE 流）时，
 // 主循环不得把零 assistantMessage 的回合记成成功——必须 fail-loud 抛错，

@@ -4,18 +4,15 @@ import { PassThrough } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
 import { render } from "ink";
 import { LOCAL_RUNTIME_PROTOCOL_VERSION, type RuntimeNotification } from "@pico/protocol";
-import { AUTOMATION_TOOL_ALLOWLIST } from "../../../src/safety/automation-tool-policy.js";
-import { AutomationCredentialImportProposalStore } from "../../../src/tui/automation-credential-proposal.js";
-import {
-  createClientCommandRegistry,
-  processClientInput,
-} from "../../../src/tui/client-commands.js";
+import { AUTOMATION_TOOL_ALLOWLIST } from "@pico/runtime/automation-tool-policy";
+import { AutomationCredentialImportProposalStore } from "@pico/cli/tui/automation-credential-proposal";
+import { createClientCommandRegistry, processClientInput } from "@pico/cli/tui/client-commands";
 import {
   ClientSessionRuntime,
   type DaemonSessionClient,
-} from "../../../src/tui/client-session-runtime.js";
-import { TuiReporter } from "../../../src/tui/tui-reporter.js";
-import { handleClientLocalCommand } from "../../../src/tui/client-command-host.js";
+} from "@pico/cli/tui/client-session-runtime";
+import { TuiReporter } from "@pico/cli/tui/tui-reporter";
+import { handleClientLocalCommand } from "@pico/cli/tui/client-command-host";
 
 /**
  * 3-D Phase 3 tier1：客户端命令注册表全命令矩阵。fake client 记录全部 RPC，

@@ -3,10 +3,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { countTokens } from "../../../src/context/token-counter.js";
-import { AtomicMemoryContextBuilder } from "../../../src/memory/atomic/context-builder.js";
-import type { MemoryItemWrite } from "../../../src/memory/atomic/contracts.js";
-import { SqliteMemoryItemStore } from "../../../src/storage/sqlite/sqlite-memory-item-store.js";
+import { countTokens } from "@pico/runtime";
+import { AtomicMemoryContextBuilder } from "@pico/runtime/atomic-memory/context-builder";
+import type { MemoryItemWrite } from "@pico/core/atomic-memory-contracts";
+import { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-store";
 
 const workspaceKey = "/work/recall";
 

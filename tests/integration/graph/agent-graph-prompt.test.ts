@@ -4,16 +4,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { runCli, type CliRuntime } from "../../../src/cli/main.js";
-import { PromptComposer } from "../../../src/context/composer.js";
-import { createClientCommandRegistry } from "../../../src/tui/client-commands.js";
+import { runCli, type CliRuntime } from "@pico/cli/entry-dispatch";
+import { PromptComposer } from "@pico/pico-host/product-prompt-composer";
+import { createClientCommandRegistry } from "@pico/cli/tui/client-commands";
 import {
   ClientSessionRuntime,
   type DaemonSessionClient,
-} from "../../../src/tui/client-session-runtime.js";
-import { TuiReporter } from "../../../src/tui/tui-reporter.js";
-import type { ClientReplOptions } from "../../../src/tui/client-repl.js";
-import { PICO_TOOL_GROUPS } from "../../../src/tools/tool-surface.js";
+} from "@pico/cli/tui/client-session-runtime";
+import { TuiReporter } from "@pico/cli/tui/tui-reporter";
+import type { ClientReplOptions } from "@pico/cli/tui/client-repl";
+import { PICO_TOOL_GROUPS } from "@pico/runtime/tool-surface";
 
 const GRAPH_SUPERVISOR_TOOLS = [
   "update_agent_graph",

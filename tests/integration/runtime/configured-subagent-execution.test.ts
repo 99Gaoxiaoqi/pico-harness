@@ -1,18 +1,19 @@
-import { ingestDesktopRuntimeNotification } from "../../../src/daemon/desktop-transcript-persistence.js";
+import { projectTranscriptEvents } from "@pico/pico-host/transcript-event-store";
+import { ingestDesktopRuntimeNotification } from "@pico/pico-host/desktop-transcript-persistence";
 import { createRuntimeNotification } from "../../../packages/protocol/src/index.js";
 import { parseConversation } from "../../../apps/desktop/src/renderer/conversation/runtime-projection.js";
 import {
   subagentParent,
   subagentSessionHref,
 } from "../../../apps/desktop/src/renderer/conversation/subagent-navigation.js";
-import type { Reporter, SubagentActivityEvent } from "../../../src/engine/reporter.js";
-import { SqliteAgentGraphControlStoreAdapter } from "../../../src/agent-graph/sqlite-control-store-adapter.js";
+import type { Reporter, SubagentActivityEvent } from "@pico/core";
+import { SqliteAgentGraphControlStoreAdapter } from "@pico/runtime";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { WorktreeSupervisor } from "../../../src/tasks/worktree-supervisor.js";
-import { TaskRegistry } from "../../../src/tasks/task-registry.js";
-import { createAgentGraphApplicationService } from "../../../src/agent-graph/service.js";
-import { SqliteAgentGraphControlStore } from "../../../src/storage/sqlite/sqlite-agent-graph-control-store.js";
+import { WorktreeSupervisor } from "@pico/pico-host/worktree-supervisor";
+import { TaskRegistry } from "@pico/runtime/task-registry";
+import { createAgentGraphApplicationService } from "@pico/runtime/agent-graph-service";
+import { SqliteAgentGraphControlStore } from "@pico/storage/sqlite/agent-graph-control-store";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -22,31 +23,31 @@ import type { RuntimeConfiguredSubagent } from "@pico/protocol";
 import {
   ConfiguredAgentListTool,
   ConfiguredAgentSpawnTool,
-} from "../../../src/tools/configured-subagent-tools.js";
+} from "@pico/runtime/configured-subagent-tools";
 import {
   requireSubagentCapability,
   type ConfiguredSubagentCatalogPort,
-} from "../../../src/agents/subagent-profiles.js";
+} from "@pico/core/subagent-capabilities";
 import {
   createConfiguredAgentGraphOperatorProfileCatalog,
   createCatalogAgentGraphOperatorProfileCatalog,
   assertValidAgentGraphOperatorProfileSnapshot,
-} from "../../../src/agent-graph/operator-profile-catalog.js";
+} from "@pico/runtime";
 import {
   configuredSubagentExecutionBoundary,
   createConfiguredSubagentExecutor,
-} from "../../../src/runtime/configured-subagent-executor.js";
-import { AgentRuntime } from "../../../src/runtime/agent-runtime.js";
-import { SilentReporter } from "../../../src/engine/reporter.js";
-import { ModelRouter } from "../../../src/provider/model-router.js";
-import { resolveModelRouteCapabilities } from "../../../src/provider/model-capabilities.js";
-import { currentRuntimeRun } from "../../../src/runtime/runtime-run.js";
-import { Session, globalSessionManager } from "../../../src/engine/session.js";
+} from "@pico/pico-host/configured-subagent-executor";
+import { AgentRuntime } from "@pico/pico-host/agent-runtime";
+import { SilentReporter } from "@pico/runtime/silent-reporter";
+import { ModelRouter } from "@pico/pico-host/provider/model-router";
+import { resolveModelRouteCapabilities } from "@pico/runtime";
+import { currentRuntimeRun } from "@pico/pico-host/product-runtime-run";
+import { Session, globalSessionManager } from "@pico/pico-host/session";
 import {
   createBypassExecutionBoundary,
   createManagedExecutionBoundary,
   createReadOnlyPermissionProfile,
-} from "../../../src/safety/permission-profile.js";
+} from "@pico/core/permission-profile";
 
 function fixture() {
   let presets: RuntimeConfiguredSubagent[] = Array.from(
@@ -341,6 +342,7 @@ test("foreground agent_spawn uses a separate durable RuntimeRun and exact local 
           resourceVersion: 1,
           payload: { item: { eventType: "subagent.activity", data: { ...completed! } } },
         }),
+        projectTranscriptEvents,
       );
       const page = await parent.runtimeEventStore!.readTranscriptProjectionPage({
         sessionId: parent.id,

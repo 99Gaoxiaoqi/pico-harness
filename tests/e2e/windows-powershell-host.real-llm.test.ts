@@ -1,19 +1,19 @@
-import { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
+import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { ModelRoute } from "../../src/provider/model-router.js";
-import { SilentReporter } from "../../src/engine/reporter.js";
-import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
+import type { ModelRoute } from "@pico/pico-host/provider/model-router";
+import { SilentReporter } from "@pico/runtime/silent-reporter";
+import { resolvePicoPaths } from "@pico/pico-host";
 import {
   AgentRuntime,
   type RunAgentCliDependencies,
   type RunAgentCliOptions,
-} from "../../src/runtime/agent-runtime.js";
-import type { RuntimeEvent } from "../../src/storage/runtime-event.js";
+} from "@pico/pico-host/agent-runtime";
+import type { RuntimeEvent } from "@pico/storage/runtime-event";
 
 import { configuredUserDefaultRealModel } from "./real-llm-user-model.js";
 

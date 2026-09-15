@@ -4,7 +4,7 @@ import { isSafeMarkdownHref, sanitizeMarkdownText } from "@pico/protocol";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MarkdownText } from "../../../apps/desktop/src/renderer/conversation/MarkdownText.js";
-import { sanitizeTerminalText } from "../../../src/tui/terminal-markdown-model.js";
+import { sanitizeTerminalText } from "@pico/cli/tui/terminal-markdown-model";
 
 test("Desktop 与 TUI 共用 Markdown 文本安全策略", () => {
   const input = "第一行\r\n第二行\u0001\u007f\u0080";

@@ -15,9 +15,10 @@ import {
   omitApprovalAuditItems,
   removeSupersededActiveTools,
 } from "../../../apps/desktop/src/renderer/conversation/items.js";
-import { DesktopRuntimeService, WorkspaceRuntimeService } from "../../../src/daemon/index.js";
-import { globalSessionManager } from "../../../src/engine/session.js";
-import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
+import { DesktopRuntimeService } from "@pico/pico-host/desktop-runtime-service";
+import { WorkspaceRuntimeService } from "@pico/pico-host/workspace-runtime-service";
+import { globalSessionManager } from "@pico/pico-host/session";
+import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
 import { writeDesktopModelRouting } from "../../fixtures/desktop-model-routing.js";
 
 function asRecord(value: unknown): Record<string, unknown> {

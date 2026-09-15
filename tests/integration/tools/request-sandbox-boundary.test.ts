@@ -1,13 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildDefaultToolRegistry } from "../../../src/tools/default-registry.js";
+import { buildDefaultToolRegistry } from "@pico/pico-host/default-registry";
 import {
   RequestSandboxBoundaryTool,
   type RequestSandboxBoundaryHandler,
-} from "../../../src/tools/request-sandbox-boundary.js";
-import { ToolRegistry } from "../../../src/tools/registry-impl.js";
-import { NO_FILE_SIDE_EFFECTS, type ToolExecutionContext } from "../../../src/tools/registry.js";
-import { ToolAccesses } from "../../../src/tools/tool-access.js";
+} from "@pico/pico-host/request-sandbox-boundary-tool";
+import { ToolRegistry } from "@pico/pico-host/product-tool-registry";
+import {
+  NO_FILE_SIDE_EFFECTS,
+  type ToolExecutionContext,
+} from "@pico/pico-host/tool-registry-contract";
+import { ToolAccesses } from "@pico/runtime/tool-access";
 
 const VALID_INPUT = {
   expansion: {

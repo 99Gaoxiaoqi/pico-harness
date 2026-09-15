@@ -1,5 +1,5 @@
 import { stdin, stdout } from "node:process";
-import { runHeadlessOneShotJson } from "../../src/internal/headless-one-shot-runner.js";
+import { runHeadlessOneShotJson } from "@pico/pico-host/internal/headless-one-shot-runner";
 
 const chunks: Buffer[] = [];
 for await (const chunk of stdin) chunks.push(Buffer.from(chunk));

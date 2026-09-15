@@ -5,10 +5,10 @@ import {
   type RuntimeNotification,
   type RuntimeNotificationTopic,
 } from "@pico/protocol";
-import { DaemonEventReporter } from "../../../src/tui/daemon-event-reporter.js";
-import { buildTranscriptLayout } from "../../../src/tui/transcript-layout.js";
-import type { TranscriptEntry } from "../../../src/presentation/transcript-event-store.js";
-import { TuiReporter } from "../../../src/tui/tui-reporter.js";
+import { DaemonEventReporter } from "@pico/cli/tui/daemon-event-reporter";
+import { buildTranscriptLayout } from "@pico/cli/tui/transcript-layout";
+import type { TranscriptEntry } from "@pico/pico-host/transcript-event-store";
+import { TuiReporter } from "@pico/cli/tui/tui-reporter";
 
 /**
  * 错误可见性收口（2026-08-17）：provider 运行时失败（run 以 failed 收口）

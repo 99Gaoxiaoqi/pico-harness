@@ -1,19 +1,19 @@
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
-import { SqliteMemoryItemStore } from "../../../src/storage/sqlite/sqlite-memory-item-store.js";
+import { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-store";
 import {
   AtomicMemoryExtractionEngine,
   memoryEvidenceCoverageHash,
-} from "../../../src/memory/atomic/extraction-engine.js";
+} from "@pico/runtime/atomic-memory/extraction-engine";
 import type {
   CommitMemoryExtractionRequest,
   MemoryExtractionReceipt,
-} from "../../../src/memory/atomic/contracts.js";
+} from "@pico/core/atomic-memory-contracts";
 import type {
   MemoryEvidenceEvent,
   MemoryExtractionSnapshot,
   MemoryModelRequest,
-} from "../../../src/memory/atomic/runtime-contracts.js";
+} from "@pico/core/atomic-memory-runtime-contracts";
 
 const SESSION = '["/workspace","session-1"]';
 

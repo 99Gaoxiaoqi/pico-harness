@@ -8,18 +8,18 @@ import {
   coordinateEventLogHardCut,
   EventLogHardCutBlockedError,
   EventLogHardCutIncompatibleEpochError,
-} from "../../../src/storage/event-log-hard-cut-coordinator.js";
+} from "@pico/storage";
 import {
   CURRENT_EVENT_LOG_EPOCH,
   CURRENT_EVENT_LOG_PROTOCOL_MARKER,
   EVENT_LOG_HARD_CUT_SCOPE,
-} from "../../../src/storage/sqlite/event-log-hard-cut-scope.js";
-import { migrateOperationalDatabaseSync } from "../../../src/storage/sqlite/sqlite-schema.js";
-import { prepareWorkspaceSqliteStorageSync } from "../../../src/storage/sqlite/sqlite-workspace-storage.js";
+} from "@pico/storage";
+import { migrateOperationalDatabaseSync } from "@pico/storage";
+import { prepareWorkspaceSqliteStorageSync } from "@pico/storage";
 import {
   ALL_WORKSPACE_SQLITE_SCOPES,
   prepareCurrentWorkspaceSqliteStorageSync,
-} from "../../../src/storage/sqlite/workspace-scopes.js";
+} from "@pico/storage";
 
 const AT = "2026-08-22T00:00:00.000Z";
 const DIGEST_A = "a".repeat(64);

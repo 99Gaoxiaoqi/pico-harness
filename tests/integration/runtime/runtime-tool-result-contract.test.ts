@@ -4,26 +4,24 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { FullCompactor } from "../../../src/context/full-compactor.js";
-import { recordRuntimeCompactionCheckpoint } from "../../../src/context/runtime-compaction-checkpoint.js";
+import { FullCompactor } from "@pico/pico-host/product-full-compactor";
+import { recordRuntimeCompactionCheckpoint } from "@pico/runtime/runtime-compaction-checkpoint";
 import {
   projectRuntimeModelMessage,
   projectRuntimeToolResultMessage,
   runtimeEventHasModelHistoryEntry,
-} from "../../../src/engine/runtime-model-message.js";
-import { materializeRuntimeHistory } from "../../../src/engine/session-runtime-read-model.js";
-import { Session } from "../../../src/engine/session.js";
-import { createToolResultEnvelope } from "../../../src/engine/tool-result-contract.js";
-import type {
-  RuntimeEvent,
-  RuntimeToolResultRecordedEvent,
-} from "../../../src/engine/session-runtime-event.js";
-import type { LLMProvider } from "../../../src/provider/interface.js";
+} from "@pico/core/runtime-model-message";
+import { materializeRuntimeHistory } from "@pico/runtime/session-runtime-read-model";
+import { Session } from "@pico/pico-host/session";
+import { createToolResultEnvelope } from "@pico/core";
+import type { RuntimeEvent } from "@pico/storage/runtime-event";
+import type { RuntimeToolResultRecordedEvent } from "@pico/core";
+import type { LLMProvider } from "@pico/core";
 import { RuntimeEventBoundaryInspector } from "../helpers/runtime-event-boundary-inspector.js";
-import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
-import { RuntimeRun } from "../../../src/runtime/runtime-run.js";
-import type { Message } from "../../../src/schema/message.js";
-import { RuntimeEventDecodeError, decodeRuntimeEvent } from "../../../src/storage/runtime-event.js";
+import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
+import { RuntimeRun } from "@pico/pico-host/product-runtime-run";
+import type { Message } from "@pico/core";
+import { RuntimeEventDecodeError, decodeRuntimeEvent } from "@pico/storage/runtime-event";
 
 test("tool.result.recorded codec enforces inline integrity and evidence refs", () => {
   const inline = toolResultEvent({

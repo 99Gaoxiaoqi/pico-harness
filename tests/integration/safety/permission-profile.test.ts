@@ -22,7 +22,7 @@ import {
   validateSandboxBoundaryExpansion,
   type ManagedPermissionProfile,
   type SandboxBoundaryExpansion,
-} from "../../../src/safety/permission-profile.js";
+} from "@pico/core/permission-profile";
 
 const context = {
   workspaceRoots: ["/workspace", "D:\\source"],

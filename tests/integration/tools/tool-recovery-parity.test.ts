@@ -4,16 +4,14 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { Session } from "../../../src/engine/session.js";
-import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
-import { RuntimeRun } from "../../../src/runtime/runtime-run.js";
-import {
-  assertRuntimeEvent,
-  type RuntimeToolStartedEvent,
-} from "../../../src/storage/runtime-event.js";
-import { ToolRegistry } from "../../../src/tools/registry-impl.js";
-import { ToolCommitBoundaryError, type BaseTool } from "../../../src/tools/registry.js";
-import { ToolAccesses } from "../../../src/tools/tool-access.js";
+import { Session } from "@pico/pico-host/session";
+import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
+import { RuntimeRun } from "@pico/pico-host/product-runtime-run";
+import { assertRuntimeEvent } from "@pico/storage/runtime-event";
+import { type RuntimeToolStartedEvent } from "@pico/core";
+import { ToolRegistry } from "@pico/pico-host/product-tool-registry";
+import { ToolCommitBoundaryError, type BaseTool } from "@pico/pico-host/tool-registry-contract";
+import { ToolAccesses } from "@pico/runtime/tool-access";
 
 async function scene(t: test.TestContext) {
   const root = await mkdtemp(join(tmpdir(), "pico-tool-recovery-parity-"));

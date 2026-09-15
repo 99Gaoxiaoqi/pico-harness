@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
-import { DesktopRuntimeService, WorkspaceRuntimeService } from "../../../src/daemon/index.js";
+import { DesktopRuntimeService } from "@pico/pico-host/desktop-runtime-service";
+import { WorkspaceRuntimeService } from "@pico/pico-host/workspace-runtime-service";
 import {
   createRuntimeRequest,
   parseRuntimeResult,
@@ -16,11 +17,11 @@ import {
   type RuntimeResult,
   type RuntimeSubagentPreset,
 } from "@pico/protocol";
-import { WorkspaceRegistrationStore } from "../../../src/daemon/workspace-registration.js";
-import { UserConfigStore } from "../../../src/input/user-config-store.js";
-import type { CredentialVault } from "../../../src/provider/credential-vault.js";
-import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
-import { SqliteDesktopConversationStateStore } from "../../../src/storage/sqlite/sqlite-desktop-conversation-state-store.js";
+import { WorkspaceRegistrationStore } from "@pico/pico-host/workspace-registration";
+import { UserConfigStore } from "@pico/pico-host/input/user-config-store";
+import type { CredentialVault } from "@pico/pico-host/provider/credential-vault";
+import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
+import { SqliteDesktopConversationStateStore } from "@pico/pico-host";
 
 // The executor seam avoids a model call while exercising production Desktop admission,
 // configuration ownership, catalog projection, and the exact frontend protocol contracts.

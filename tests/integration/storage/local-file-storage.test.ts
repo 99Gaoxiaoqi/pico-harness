@@ -8,7 +8,7 @@ import {
   readJsonFileSync,
   withFileLock,
   writeJsonAtomicSync,
-} from "../../../src/storage/local-file-storage.js";
+} from "@pico/storage";
 
 /**
  * 票 09:JSONL 纪元的锁仪式/commit WAL/能力探针退役后,local-file-storage 只

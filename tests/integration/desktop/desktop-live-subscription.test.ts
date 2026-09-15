@@ -10,12 +10,13 @@ import {
   type RuntimeSessionSubscriptionFrame,
 } from "@pico/protocol";
 import { DesktopSessionContinuity } from "../../../apps/desktop/src/renderer/session-continuity.js";
-import { DesktopRuntimeService, WorkspaceRuntimeService } from "../../../src/daemon/index.js";
-import { DesktopReporter } from "../../../src/daemon/desktop-reporter.js";
-import { SessionSubscriptionRegistry } from "../../../src/daemon/session-subscription-owner.js";
+import { DesktopRuntimeService } from "@pico/pico-host/desktop-runtime-service";
+import { WorkspaceRuntimeService } from "@pico/pico-host/workspace-runtime-service";
+import { DesktopReporter } from "@pico/pico-host";
+import { SessionSubscriptionRegistry } from "@pico/pico-host/session-subscription-owner";
 import { SqliteSessionContinuitySource } from "@pico/pico-host/sqlite-session-continuity-source";
-import { globalSessionManager } from "../../../src/engine/session.js";
-import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
+import { globalSessionManager } from "@pico/pico-host/session";
+import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
 import { writeDesktopModelRouting } from "../../fixtures/desktop-model-routing.js";
 
 test("普通会话运行持锁时，订阅重开、Graph只读查询和工具后推理仍实时到达界面", async () => {

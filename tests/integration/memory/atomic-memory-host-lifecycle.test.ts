@@ -4,23 +4,23 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
-import { createProductionRuntimeServices } from "../../../src/daemon/production-host.js";
-import { globalSessionManager } from "../../../src/engine/session.js";
+import { createProductionRuntimeServices } from "@pico/pico-host/production-host";
+import { globalSessionManager } from "@pico/pico-host/session";
 import {
   AgentRuntime,
   type RunAgentCliOptions,
   type RunAgentCliDependencies,
-} from "../../../src/runtime/agent-runtime.js";
-import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
-import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
-import { SqliteMemoryItemStore } from "../../../src/storage/sqlite/sqlite-memory-item-store.js";
-import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
-import { memorySessionKey } from "../../../src/memory/atomic/runtime-contracts.js";
+} from "@pico/pico-host/agent-runtime";
+import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
+import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
+import { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-store";
+import { resolvePicoPaths } from "@pico/pico-host";
+import { memorySessionKey } from "@pico/core/atomic-memory-runtime-contracts";
 import { writeDesktopModelRouting } from "../../fixtures/desktop-model-routing.js";
 import {
   createManagedExecutionBoundary,
   createWorkspaceWritePermissionProfile,
-} from "../../../src/safety/permission-profile.js";
+} from "@pico/core/permission-profile";
 
 test(
   "production shutdown waits for background memory and disposal after the foreground completes",

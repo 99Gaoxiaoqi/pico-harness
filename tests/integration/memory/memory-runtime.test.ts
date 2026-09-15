@@ -1,28 +1,29 @@
+import { createHookManagementCommands } from "@pico/cli/hook-management-commands";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { DesktopAtomicMemoryService } from "../../../src/daemon/desktop-atomic-memory-service.js";
-import { globalSessionManager } from "../../../src/engine/session.js";
+import { DesktopAtomicMemoryService } from "@pico/pico-host/desktop-atomic-memory-service";
+import { globalSessionManager } from "@pico/pico-host/session";
 import {
   forgetSessionSettings,
   getOrCreateSessionSettings,
-} from "../../../src/input/session-settings.js";
+} from "@pico/pico-host/input/session-settings";
 import {
   memorySessionKey,
   type MemoryExtractionModel,
-} from "../../../src/memory/atomic/runtime-contracts.js";
-import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
-import type { LLMProvider } from "../../../src/provider/interface.js";
-import { executeAgentRuntime } from "../../../src/runtime/agent-runtime.js";
-import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
-import { createSessionRuntime } from "../../../src/runtime/session-runtime.js";
-import type { Message } from "../../../src/schema/message.js";
-import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
-import { closeAllOperationalDatabasesForTest } from "../../../src/storage/sqlite/sqlite-database.js";
-import { SqliteMemoryItemStore } from "../../../src/storage/sqlite/sqlite-memory-item-store.js";
-import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
+} from "@pico/core/atomic-memory-runtime-contracts";
+import { resolvePicoPaths } from "@pico/pico-host";
+import type { LLMProvider } from "@pico/core";
+import { executeAgentRuntime } from "@pico/pico-host/agent-runtime";
+import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
+import { createSessionRuntime } from "@pico/pico-host/session-runtime";
+import type { Message } from "@pico/core";
+import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
+import { closeAllOperationalDatabasesForTest } from "@pico/storage";
+import { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-store";
+import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
 import { initializeRuntimeEventOwner } from "../helpers/runtime-event-owner.js";
 
 /** Windows: release SQLite owners before retrying temporary directory cleanup. */
@@ -237,6 +238,7 @@ test("the second turn in one Session extracts atomic memory only when its model 
     { persistence: session },
   );
   const runtimeState = await createSessionRuntime({
+    hookCommandFactory: createHookManagementCommands,
     session,
     sessionLease,
     hooks: false,

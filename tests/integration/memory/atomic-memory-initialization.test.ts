@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
-import { DesktopAtomicMemoryService } from "../../../src/daemon/desktop-atomic-memory-service.js";
-import { SqliteMemoryItemStore } from "../../../src/storage/sqlite/sqlite-memory-item-store.js";
+import { DesktopAtomicMemoryService } from "@pico/pico-host/desktop-atomic-memory-service";
+import { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-store";
 
 const retiredTables = [
   "memory_workspace_migrations",

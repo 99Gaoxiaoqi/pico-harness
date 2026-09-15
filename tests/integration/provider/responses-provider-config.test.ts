@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { parseStrictRuntimeParams } from "../../../packages/protocol/src/runtime.js";
-import { parseModelProviderConfigs } from "../../../src/input/pico-config.js";
+import { parseModelProviderConfigs } from "@pico/pico-host/input/pico-config";
 import {
   credentialRefForProvider,
   parseProviderCredentialRef,
-} from "../../../src/provider/credential-vault.js";
+} from "@pico/pico-host/provider/credential-vault";
 
 test("Responses config, RPC and v2 credentials accept the protocol and reject invalid values", () => {
   const provider = {

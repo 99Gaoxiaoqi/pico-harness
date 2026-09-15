@@ -23,7 +23,7 @@ import {
   UserConfigRevisionConflictError,
   UserConfigStore,
   type PicoUserConfig,
-} from "../../../src/input/user-config-store.js";
+} from "@pico/pico-host/input/user-config-store";
 
 test("first read removes only strict orphan temporaries while preserving secure modes", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-user-config-temp-recovery-"));

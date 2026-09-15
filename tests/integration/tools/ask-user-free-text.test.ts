@@ -1,18 +1,18 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { DesktopInteractionBroker } from "../../../src/daemon/desktop-interaction-broker.js";
+import { DesktopInteractionBroker } from "@pico/pico-host/desktop-interaction-broker";
 import {
   AskUserHandler,
   AskUserTool,
   createAskUserRequestId,
   type AskUserRequest,
-} from "../../../src/tools/ask-user.js";
-import { TuiReporter } from "../../../src/tui/tui-reporter.js";
+} from "@pico/pico-host/ask-user-tool";
+import { TuiReporter } from "@pico/cli/tui/tui-reporter";
 import {
   ClientSessionRuntime,
   type ClientPromptRequest,
   type DaemonSessionClient,
-} from "../../../src/tui/client-session-runtime.js";
+} from "@pico/cli/tui/client-session-runtime";
 import { LOCAL_RUNTIME_PROTOCOL_VERSION, type RuntimeNotification } from "@pico/protocol";
 
 /**

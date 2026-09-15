@@ -3,8 +3,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { Session } from "../../../src/engine/session.js";
-import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
+import { Session } from "@pico/pico-host/session";
+import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
 
 test("engine runtime port preserves the canonical run and nested tool context", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-engine-runtime-port-"));

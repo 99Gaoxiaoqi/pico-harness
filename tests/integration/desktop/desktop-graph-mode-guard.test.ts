@@ -10,21 +10,22 @@ import {
   RUNTIME_ERROR_CODES,
 } from "@pico/protocol";
 
-import { DesktopRuntimeService, WorkspaceRuntimeService } from "../../../src/daemon/index.js";
-import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
-import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
-import { SqliteAgentGraphControlStore } from "../../../src/storage/sqlite/sqlite-agent-graph-control-store.js";
-import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
-import { createAgentGraphApplicationService } from "../../../src/agent-graph/service.js";
-import type { AgentGraphApplicationService } from "../../../src/agent-graph/service.js";
+import { DesktopRuntimeService } from "@pico/pico-host/desktop-runtime-service";
+import { WorkspaceRuntimeService } from "@pico/pico-host/workspace-runtime-service";
+import { resolvePicoPaths } from "@pico/pico-host";
+import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
+import { SqliteAgentGraphControlStore } from "@pico/storage/sqlite/agent-graph-control-store";
+import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
+import { createAgentGraphApplicationService } from "@pico/runtime/agent-graph-service";
+import type { AgentGraphApplicationService } from "@pico/runtime/agent-graph-service";
 import {
   agentOutputRecordIdFor,
   intentIdFor,
   operatorIdFor,
-} from "../../../src/agent-graph/core/index.js";
-import { createBuiltinAgentGraphOperatorProfileCatalog } from "../../../src/agent-graph/operator-profile-catalog.js";
-import { AgentGraphReconciler } from "../../../src/agent-graph/reconciler.js";
-import { SqliteAgentGraphControlStoreAdapter } from "../../../src/agent-graph/sqlite-control-store-adapter.js";
+} from "@pico/core/agent-graph-identities";
+import { createBuiltinAgentGraphOperatorProfileCatalog } from "@pico/runtime";
+import { AgentGraphReconciler } from "@pico/runtime/agent-graph-reconciler";
+import { SqliteAgentGraphControlStoreAdapter } from "@pico/runtime";
 import { writeDesktopModelRouting } from "../../fixtures/desktop-model-routing.js";
 
 test("desktop rejects orchestration and permission switches while the root epoch is open", async () => {

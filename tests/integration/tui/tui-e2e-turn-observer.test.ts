@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { LOCAL_RUNTIME_PROTOCOL_VERSION, type RuntimeNotification } from "@pico/protocol";
-import { TuiReporter } from "../../../src/tui/tui-reporter.js";
+import { TuiReporter } from "@pico/cli/tui/tui-reporter";
 import { sendTuiTurn } from "../../e2e/helpers/tui-turn.js";
 
 function fixture() {

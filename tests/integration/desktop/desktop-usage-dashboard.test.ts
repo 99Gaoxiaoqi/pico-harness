@@ -5,14 +5,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { createRuntimeRequest } from "../../../packages/protocol/src/index.js";
-import { DesktopRuntimeService, WorkspaceRuntimeService } from "../../../src/daemon/index.js";
-import { WorkspaceRegistrationStore } from "../../../src/daemon/workspace-registration.js";
-import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
-import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
-import { SqliteRuntimeControlStore } from "../../../src/storage/sqlite/sqlite-runtime-control-store.js";
-import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
+import { DesktopRuntimeService } from "@pico/pico-host/desktop-runtime-service";
+import { WorkspaceRuntimeService } from "@pico/pico-host/workspace-runtime-service";
+import { WorkspaceRegistrationStore } from "@pico/pico-host/workspace-registration";
+import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
+import { resolvePicoPaths } from "@pico/pico-host";
+import { SqliteRuntimeControlStore } from "@pico/storage/sqlite/sqlite-runtime-control-store";
+import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
 import { parseUsage } from "../../../apps/desktop/src/renderer/usage/runtime-projection.js";
-import type { RuntimeEvent } from "../../../src/engine/session-runtime-event.js";
+import type { RuntimeEvent } from "@pico/storage/runtime-event";
 import { initializeRuntimeEventOwner } from "../helpers/runtime-event-owner.js";
 
 test("usage dashboard joins real model and tool ledgers across workspaces, preserves partial costs and filters sessions", async (t) => {

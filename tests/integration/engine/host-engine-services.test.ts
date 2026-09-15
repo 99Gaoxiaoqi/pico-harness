@@ -7,7 +7,7 @@ import { AgentEngine } from "@pico/pico-host/agent-engine";
 import { Session } from "@pico/pico-host/session";
 import { resolvePicoPaths } from "@pico/pico-host/pico-paths";
 import { Tracer } from "@pico/runtime/trace";
-import { ToolRegistry } from "../../../src/tools/registry-impl.js";
+import { ToolRegistry } from "@pico/pico-host/product-tool-registry";
 
 test("Host Engine commits a real file journal and exports the Runtime trace under its scoped home", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-host-engine-services-"));

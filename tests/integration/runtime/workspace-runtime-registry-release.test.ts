@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { WorkspaceRuntimeRegistry } from "../../../src/daemon/workspace-registry.js";
+import { WorkspaceRuntimeRegistry } from "@pico/pico-host/workspace-registry";
 
 test("workspace registry peek never constructs a runtime", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-workspace-registry-peek-"));

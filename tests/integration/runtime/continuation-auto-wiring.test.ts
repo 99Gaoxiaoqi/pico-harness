@@ -6,16 +6,16 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import type { AgentEngine } from "../../../src/engine/loop.js";
-import { Session } from "../../../src/engine/session.js";
-import type { HookOutput } from "../../../src/hooks/types.js";
-import type { SessionRuntime } from "../../../src/runtime/session-runtime.js";
+import type { AgentEngine } from "@pico/pico-host/agent-engine";
+import { Session } from "@pico/pico-host/session";
+import type { HookOutput } from "@pico/pico-host/hooks/types";
+import type { SessionRuntime } from "@pico/pico-host/session-runtime";
 import type { RuntimeLifecycleEvent, RuntimeRunOptions } from "@pico/runtime/runtime-contract";
-import { RuntimeRunExecutor } from "../../../src/runtime/runtime-run-executor.js";
-import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
-import { RuntimeRun } from "../../../src/runtime/runtime-run.js";
-import { RuntimeEventStoreRunSealedError } from "../../../src/storage/runtime-event-store-contracts.js";
-import type { RuntimeEvent } from "../../../src/storage/runtime-event.js";
+import { RuntimeRunExecutor } from "@pico/pico-host/product-runtime-run-executor";
+import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
+import { RuntimeRun } from "@pico/pico-host/product-runtime-run";
+import { RuntimeEventStoreRunSealedError } from "@pico/storage/runtime-event-store-contracts";
+import type { RuntimeEvent } from "@pico/storage/runtime-event";
 
 test("executor 自动锚定 interrupted 续跑：claim→targetRunId 起跑→源封口→二次不重复锚定", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-continuation-auto-wiring-"));

@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CodeCellAdmission, codeCellAdmissionFor } from "../../../src/tools/code-cell-admission.js";
-import { createCodeModeTool } from "../../../src/tools/code-mode-tool.js";
-import type { CodeModeExecutionResult } from "../../../src/tools/code-mode.js";
-import { ToolRegistry } from "../../../src/tools/registry-impl.js";
-import type { ToolExecutionContext } from "../../../src/tools/registry.js";
-import { ToolAccesses } from "../../../src/tools/tool-access.js";
+import { CodeCellAdmission, codeCellAdmissionFor } from "@pico/runtime/code-cell-admission";
+import { createCodeModeTool } from "@pico/pico-host/code-mode-tool";
+import type { CodeModeExecutionResult } from "@pico/pico-host/code-mode";
+import { ToolRegistry } from "@pico/pico-host/product-tool-registry";
+import type { ToolExecutionContext } from "@pico/pico-host/tool-registry-contract";
+import { ToolAccesses } from "@pico/runtime/tool-access";
 
 function deferred() {
   let resolve!: () => void;

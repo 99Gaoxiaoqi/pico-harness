@@ -10,9 +10,9 @@ import {
   EvidenceArchive,
   formatEvidenceUri,
   parseEvidenceUri,
-} from "../../../src/context/evidence-archive.js";
+} from "@pico/storage/evidence-archive";
 import { seedRuntimeToolExchange } from "../helpers/legacy-evidence-fixture.js";
-import { TodoStore } from "../../../src/context/todo-store.js";
+import { TodoStore } from "@pico/pico-host/product-todo-store";
 import {
   createFileHistoryState,
   fileHistoryBeginRewindPoint,
@@ -23,9 +23,9 @@ import {
   fileHistoryRewind,
   fileHistoryTrackEdit,
   type FileHistoryIo,
-} from "../../../src/safety/file-history.js";
-import { StorageOperationJournal } from "../../../src/storage/operation-journal.js";
-import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
+} from "@pico/pico-host/file-history-runtime";
+import { StorageOperationJournal } from "@pico/storage/operation-journal";
+import { resolvePicoPaths } from "@pico/pico-host";
 
 /**
  * 票 08(波次 3):attachments/operations/kv 三 scope 的 SQLite 迁移验收。
@@ -85,8 +85,7 @@ function forkOperationInput(overrides: Record<string, unknown> = {}) {
 test("operation journal advances the saga state machine with CAS and recovers interrupts", async (context) => {
   const fixture = await workspaceFixture(context, "pico-ops-journal-");
   const journal = new StorageOperationJournal({
-    workDir: fixture.workDir,
-    picoHome: fixture.picoHome,
+    storageRoot: resolvePicoPaths(fixture.workDir, { picoHome: fixture.picoHome }).workspace.root,
   });
 
   const created = await journal.create(forkOperationInput({ operationId: "fork-op-1" }));
@@ -160,8 +159,7 @@ test("operation journal advances the saga state machine with CAS and recovers in
 test("fork journal accepts only an atomic canonical interaction pair", async (context) => {
   const fixture = await workspaceFixture(context, "pico-ops-fork-permission-pair-");
   const journal = new StorageOperationJournal({
-    workDir: fixture.workDir,
-    picoHome: fixture.picoHome,
+    storageRoot: resolvePicoPaths(fixture.workDir, { picoHome: fixture.picoHome }).workspace.root,
   });
 
   await assert.rejects(
@@ -200,8 +198,7 @@ test("fork journal accepts only an atomic canonical interaction pair", async (co
 test("operation journal rejects retired interaction modes on create and read", async (context) => {
   const fixture = await workspaceFixture(context, "pico-ops-legacy-permission-");
   const journal = new StorageOperationJournal({
-    workDir: fixture.workDir,
-    picoHome: fixture.picoHome,
+    storageRoot: resolvePicoPaths(fixture.workDir, { picoHome: fixture.picoHome }).workspace.root,
   });
   await assert.rejects(
     journal.create(forkOperationInput({ operationId: "new-yolo", targetMode: "yolo" })),
@@ -277,8 +274,7 @@ test("operation journal rejects retired interaction modes on create and read", a
 test("operation journal dispositions recover needs_attention with recorded phase", async (context) => {
   const fixture = await workspaceFixture(context, "pico-ops-disposition-");
   const journal = new StorageOperationJournal({
-    workDir: fixture.workDir,
-    picoHome: fixture.picoHome,
+    storageRoot: resolvePicoPaths(fixture.workDir, { picoHome: fixture.picoHome }).workspace.root,
   });
   await journal.create(forkOperationInput({ operationId: "fork-op-2" }));
   const failed = await journal.advance({
@@ -330,8 +326,7 @@ test("operation journal dispositions recover needs_attention with recorded phase
 test("operation journal serves fork publication lookup as one query", async (context) => {
   const fixture = await workspaceFixture(context, "pico-ops-fork-targets-");
   const journal = new StorageOperationJournal({
-    workDir: fixture.workDir,
-    picoHome: fixture.picoHome,
+    storageRoot: resolvePicoPaths(fixture.workDir, { picoHome: fixture.picoHome }).workspace.root,
   });
   await journal.create(forkOperationInput({ operationId: "fork-a", targetSessionId: "target-a" }));
   await journal.create(forkOperationInput({ operationId: "fork-b", targetSessionId: "target-b" }));

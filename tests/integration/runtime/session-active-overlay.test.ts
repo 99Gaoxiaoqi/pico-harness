@@ -6,7 +6,7 @@ import {
   PersistentActiveOverlay,
   parseActiveOverlayPayload,
   type ActiveOverlayPersistInput,
-} from "../../../src/daemon/session-active-overlay.js";
+} from "@pico/pico-host/session-active-overlay";
 
 const base = {
   sessionId: "session-1",

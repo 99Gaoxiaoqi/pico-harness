@@ -4,28 +4,28 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { graphIdFor } from "../../../src/agent-graph/core/ids.js";
+import { graphIdFor } from "@pico/core/agent-graph-identities";
 import { createRuntimeRequest } from "../../../packages/protocol/src/index.js";
-import { createBuiltinAgentGraphOperatorProfileCatalog } from "../../../src/agent-graph/operator-profile-catalog.js";
-import { createProductionRuntimeServices } from "../../../src/daemon/production-host.js";
-import { globalSessionManager } from "../../../src/engine/session.js";
-import type { SessionManagerLease } from "../../../src/engine/session-manager.js";
-import type { AgentRuntime, RunAgentCliOptions } from "../../../src/runtime/agent-runtime.js";
+import { createBuiltinAgentGraphOperatorProfileCatalog } from "@pico/runtime";
+import { createProductionRuntimeServices } from "@pico/pico-host/production-host";
+import { globalSessionManager } from "@pico/pico-host/session";
+import type { SessionManagerLease } from "@pico/pico-host/session-manager";
+import type { AgentRuntime, RunAgentCliOptions } from "@pico/pico-host/agent-runtime";
 import type {
   AgentGraphWorkspaceHost,
   CreateAgentGraphWorkspaceHostOptions,
   ExecuteHostedAgentGraphRunInput,
-} from "../../../src/runtime/agent-graph-host.js";
-import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
-import type { RunAgentCliDependencies } from "../../../src/runtime/agent-runtime.js";
-import { PluginRuntimeSnapshotRegistry } from "../../../src/plugins/plugin-runtime-snapshot-registry.js";
-import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
+} from "@pico/pico-host/product-agent-graph-host";
+import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
+import type { RunAgentCliDependencies } from "@pico/pico-host/agent-runtime";
+import { PluginRuntimeSnapshotRegistry } from "@pico/pico-host/plugins/plugin-runtime-snapshot-registry";
+import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
 import {
   compileRuntimePermissionProfile,
   createBypassExecutionBoundary,
   createManagedExecutionBoundary,
-} from "../../../src/safety/permission-profile.js";
-import { createAskUserRequestId } from "../../../src/tools/ask-user.js";
+} from "@pico/core/permission-profile";
+import { createAskUserRequestId } from "@pico/pico-host/ask-user-tool";
 import { writeDesktopModelRouting } from "../../fixtures/desktop-model-routing.js";
 
 test("production host binds Graph root and installs detached exact execution", async (context) => {

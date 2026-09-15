@@ -3,8 +3,8 @@ import test from "node:test";
 import {
   BrowserAgentBrokerError,
   BrowserAgentCommandBroker,
-} from "../../../src/daemon/browser-agent-command-broker.js";
-import { createBrowserAgentTools } from "../../../src/tools/browser-agent.js";
+} from "@pico/pico-host/browser-agent-command-broker";
+import { createBrowserAgentTools } from "@pico/pico-host/browser-agent-tools";
 import { DESKTOP_RUNTIME_METHODS, parseStrictRuntimeParams } from "@pico/protocol";
 
 test("Browser Agent 仅在当前 Session 持有可见租约时执行固定命令", async () => {

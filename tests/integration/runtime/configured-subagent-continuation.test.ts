@@ -1,33 +1,27 @@
-import { createConfiguredSubagentOutputStore } from "../../../src/runtime/configured-subagent-output-store.js";
+import { createConfiguredSubagentOutputStore } from "@pico/pico-host/configured-subagent-output-store";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, realpath, rm, readFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import type { ConfiguredSubagentCatalogPort } from "../../../src/agents/subagent-profiles.js";
-import { requireSubagentCapability } from "../../../src/agents/subagent-profiles.js";
-import {
-  SilentReporter,
-  type Reporter,
-  type SubagentActivityEvent,
-} from "../../../src/engine/reporter.js";
-import { TranscriptEventStore } from "../../../src/presentation/transcript-event-store.js";
-import { Session, globalSessionManager } from "../../../src/engine/session.js";
-import { ModelRouter } from "../../../src/provider/model-router.js";
-import { resolveModelRouteCapabilities } from "../../../src/provider/model-capabilities.js";
-import { AgentRuntime } from "../../../src/runtime/agent-runtime.js";
-import { currentRuntimeRun } from "../../../src/runtime/runtime-run.js";
+import type { ConfiguredSubagentCatalogPort } from "@pico/core/subagent-capabilities";
+import { requireSubagentCapability } from "@pico/core/subagent-capabilities";
+import { SilentReporter } from "@pico/runtime/silent-reporter";
+import { type Reporter, type SubagentActivityEvent } from "@pico/core";
+import { TranscriptEventStore } from "@pico/pico-host/transcript-event-store";
+import { Session, globalSessionManager } from "@pico/pico-host/session";
+import { ModelRouter } from "@pico/pico-host/provider/model-router";
+import { resolveModelRouteCapabilities } from "@pico/runtime";
+import { AgentRuntime } from "@pico/pico-host/agent-runtime";
+import { currentRuntimeRun } from "@pico/pico-host/product-runtime-run";
 import {
   createBypassExecutionBoundary,
   createManagedExecutionBoundary,
   createReadOnlyPermissionProfile,
   createWorkspaceWritePermissionProfile,
-} from "../../../src/safety/permission-profile.js";
-import { ApprovalManager } from "../../../src/approval/manager.js";
-import {
-  managedProcessLauncher,
-  type ManagedSpawnRequest,
-} from "../../../src/safety/process-sandbox/index.js";
+} from "@pico/core/permission-profile";
+import { ApprovalManager } from "@pico/pico-host/global-approval-manager";
+import { managedProcessLauncher, type ManagedSpawnRequest } from "@pico/pico-host/process-sandbox";
 
 test("agent_spawn continues its completed child with durable history and rejects another parent's child", async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "pico-child-continuation-")));

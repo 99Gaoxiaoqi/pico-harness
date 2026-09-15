@@ -3,13 +3,13 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { Session } from "../../../src/engine/session.js";
-import { CredentialPool } from "../../../src/provider/credential-pool.js";
-import type { LLMProvider } from "../../../src/provider/interface.js";
+import { Session } from "@pico/pico-host/session";
+import { CredentialPool } from "@pico/runtime/credential-pool";
+import type { LLMProvider } from "@pico/core";
 import {
   assembleRuntimeProvider,
   type RuntimeProviderFactory,
-} from "../../../src/runtime/runtime-assembly.js";
+} from "@pico/pico-host/runtime-assembly";
 
 test("runtime provider assembly decorates an injected provider without taking ownership", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-runtime-assembly-injected-"));

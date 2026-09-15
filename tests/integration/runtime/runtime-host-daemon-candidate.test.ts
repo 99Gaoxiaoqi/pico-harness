@@ -22,10 +22,10 @@ import {
 import {
   ensurePicoRuntimeHostOperationsRegistered,
   ensurePicoRuntimeHostShutdownOperationRegistered,
-  startPicoDaemonRuntimeHostCandidate,
-} from "../../../src/daemon/index.js";
-import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
-import { sessionOwnerLeaseDirectory } from "../../../src/storage/session-owner-lease.js";
+} from "@pico/pico-host/runtime-host-operations";
+import { startPicoDaemonRuntimeHostCandidate } from "@pico/pico-host/product-runtime-host-candidate";
+import { resolvePicoPaths } from "@pico/pico-host";
+import { sessionOwnerLeaseDirectory } from "@pico/storage";
 import {
   stopTestChildProcess,
   TestRuntimeHostCandidateTracker,

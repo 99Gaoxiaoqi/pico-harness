@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import { setImmediate } from "node:timers/promises";
 import { test } from "node:test";
-import { AgentEngine } from "../../../src/engine/loop.js";
-import { SilentReporter } from "../../../src/engine/reporter.js";
-import { Session } from "../../../src/engine/session.js";
-import type { LLMProvider } from "../../../src/provider/interface.js";
-import { ToolRegistry } from "../../../src/tools/registry-impl.js";
-import type { BaseTool } from "../../../src/tools/registry.js";
-import { ToolAccesses } from "../../../src/tools/tool-access.js";
-import { ToolResourceAuthority } from "../../../src/tools/tool-resource-authority.js";
+import { AgentEngine } from "@pico/pico-host/agent-engine";
+import { SilentReporter } from "@pico/runtime/silent-reporter";
+import { Session } from "@pico/pico-host/session";
+import type { LLMProvider } from "@pico/core";
+import { ToolRegistry } from "@pico/pico-host/product-tool-registry";
+import type { BaseTool } from "@pico/pico-host/tool-registry-contract";
+import { ToolAccesses } from "@pico/runtime/tool-access";
+import { ToolResourceAuthority } from "@pico/runtime/tool-resource-authority";
 
 function fixtureTool(execute: BaseTool["execute"]): BaseTool {
   return {

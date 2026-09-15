@@ -15,7 +15,7 @@ import {
   type InteractiveRootOwner,
   type RuntimeHostEndpoint,
 } from "@pico/runtime-host";
-import { ensurePicoRuntimeHostShutdownOperationRegistered } from "../../src/daemon/index.js";
+import { ensurePicoRuntimeHostShutdownOperationRegistered } from "@pico/pico-host/runtime-host-operations";
 
 ensurePicoRuntimeHostShutdownOperationRegistered();
 

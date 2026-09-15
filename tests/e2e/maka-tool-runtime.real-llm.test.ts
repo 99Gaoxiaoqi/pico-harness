@@ -5,19 +5,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
-import { AgentEngine } from "../../src/engine/loop.js";
-import { SilentReporter } from "../../src/engine/reporter.js";
-import { Session } from "../../src/engine/session.js";
-import { createProvider } from "../../src/provider/factory.js";
-import type { LLMProvider } from "../../src/provider/interface.js";
-import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-adapter.js";
-import { currentRuntimeRun } from "../../src/runtime/runtime-run.js";
-import type { Message } from "../../src/schema/message.js";
-import { NO_FILE_SIDE_EFFECTS, type BaseTool } from "../../src/tools/registry.js";
-import { ToolRegistry } from "../../src/tools/registry-impl.js";
-import { SearchToolsTool } from "../../src/tools/search-tools.js";
-import { ToolAccesses } from "../../src/tools/tool-access.js";
-import { ToolDisclosure } from "../../src/tools/tool-disclosure.js";
+import { AgentEngine } from "@pico/pico-host/agent-engine";
+import { SilentReporter } from "@pico/runtime/silent-reporter";
+import { Session } from "@pico/pico-host/session";
+import { createProvider } from "@pico/pico-host/provider/factory";
+import type { LLMProvider } from "@pico/core";
+import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
+import { currentRuntimeRun } from "@pico/pico-host/product-runtime-run";
+import type { Message } from "@pico/core";
+import { NO_FILE_SIDE_EFFECTS, type BaseTool } from "@pico/pico-host/tool-registry-contract";
+import { ToolRegistry } from "@pico/pico-host/product-tool-registry";
+import { SearchToolsTool } from "@pico/runtime/tool-discovery-tools";
+import { ToolAccesses } from "@pico/runtime/tool-access";
+import { ToolDisclosure } from "@pico/runtime/tool-disclosure";
 import { configuredUserDefaultRealModel } from "./real-llm-user-model.js";
 
 const realModelTest = process.env.RUN_LLM_E2E === "1" ? test : test.skip;
@@ -27,7 +27,7 @@ realModelTest(
   "真实默认模型先发现 deferred 工具，再用 exec 并行读取并仅回传聚合结果",
   { timeout: 180_000 },
   async (context) => {
-    const { createCodeModeTool } = await import("../../src/tools/code-mode-tool.js");
+    const { createCodeModeTool } = await import("@pico/pico-host/code-mode-tool");
     const model = await configuredUserDefaultRealModel();
     const root = await mkdtemp(join(tmpdir(), "pico-maka-tools-real-llm-"));
     const workDir = join(root, "workspace");

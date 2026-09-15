@@ -8,12 +8,10 @@ import {
   SideChatNoSettledTurnError,
   latestCompletedTurnBoundary,
   readSideChatLeases,
-} from "../../../src/daemon/side-chat-authority.js";
-import type {
-  RuntimeEvent,
-  RuntimeTerminalStatus,
-} from "../../../src/engine/session-runtime-event.js";
-import { closeAllOperationalDatabasesForTest } from "../../../src/storage/sqlite/sqlite-database.js";
+} from "@pico/pico-host/side-chat-authority";
+import type { RuntimeEvent } from "@pico/storage/runtime-event";
+import type { RuntimeTerminalStatus } from "@pico/core";
+import { closeAllOperationalDatabasesForTest } from "@pico/storage";
 
 function terminal(eventId: string, status: RuntimeTerminalStatus): RuntimeEvent {
   return {

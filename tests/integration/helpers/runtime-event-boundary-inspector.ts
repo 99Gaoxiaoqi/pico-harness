@@ -1,7 +1,7 @@
-import type { RuntimeEvent } from "../../../src/storage/runtime-event.js";
-import type { RuntimeEventStoreEntry } from "../../../src/storage/runtime-event-store-contracts.js";
-import type { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
-import { canonicalizeWorkspacePath } from "../../../src/paths/pico-paths.js";
+import type { RuntimeEvent } from "@pico/storage/runtime-event";
+import type { RuntimeEventStoreEntry } from "@pico/storage/runtime-event-store-contracts";
+import type { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
+import { canonicalizeWorkspacePath } from "@pico/pico-host";
 import type {
   RuntimeBoundaryInspection,
   RuntimeBoundaryInspector,

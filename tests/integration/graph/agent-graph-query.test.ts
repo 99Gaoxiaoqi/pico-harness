@@ -5,10 +5,10 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { AgentGraphReadOnlyQueryService } from "@pico/pico-host/product-agent-graph-query-service";
-import { agentOutputRecordIdFor, graphIdFor } from "../../../src/agent-graph/core/ids.js";
-import { createBuiltinAgentGraphOperatorProfileCatalog } from "../../../src/agent-graph/operator-profile-catalog.js";
-import { SqliteAgentGraphControlStoreAdapter } from "../../../src/agent-graph/sqlite-control-store-adapter.js";
-import { SqliteAgentGraphControlStore } from "../../../src/storage/sqlite/sqlite-agent-graph-control-store.js";
+import { agentOutputRecordIdFor, graphIdFor } from "@pico/core/agent-graph-identities";
+import { createBuiltinAgentGraphOperatorProfileCatalog } from "@pico/runtime";
+import { SqliteAgentGraphControlStoreAdapter } from "@pico/runtime";
+import { SqliteAgentGraphControlStore } from "@pico/storage/sqlite/agent-graph-control-store";
 
 test("read-only Graph query lists epochs and returns a stable paged timeline without side effects", async () => {
   const storageRoot = await mkdtemp(join(tmpdir(), "pico-agent-graph-query-"));

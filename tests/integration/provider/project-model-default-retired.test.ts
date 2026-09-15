@@ -8,9 +8,9 @@ import {
   isRuntimeMethod,
   RUNTIME_METHODS,
 } from "../../../packages/protocol/src/index.js";
-import { EffectiveConfigResolver } from "../../../src/input/effective-config.js";
-import { loadPicoProjectConfig } from "../../../src/input/pico-config.js";
-import { UserConfigStore } from "../../../src/input/user-config-store.js";
+import { EffectiveConfigResolver } from "@pico/pico-host/input/effective-config";
+import { loadPicoProjectConfig } from "@pico/pico-host/input/pico-config";
+import { UserConfigStore } from "@pico/pico-host/input/user-config-store";
 
 test("current project config loads while model routes remain user-scoped", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-project-model-retired-"));

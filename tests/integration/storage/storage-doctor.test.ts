@@ -3,19 +3,14 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
-import { StorageDoctor, type StorageDoctorFinding } from "../../../src/storage/storage-doctor.js";
-import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
+import { resolvePicoPaths } from "@pico/pico-host";
+import { StorageDoctor, type StorageDoctorFinding } from "@pico/pico-host/storage-doctor";
+import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
 import { initializeRuntimeEventOwner } from "../helpers/runtime-event-owner.js";
-import {
-  closeAllOperationalDatabasesForTest,
-  operationalDatabasePath,
-} from "../../../src/storage/sqlite/sqlite-database.js";
-import {
-  RUNTIME_EVENT_SCHEMA_VERSION,
-  type RuntimeEvent,
-} from "../../../src/engine/session-runtime-event.js";
-import { createRuntimeEventId } from "../../../src/storage/runtime-event-store-contracts.js";
+import { closeAllOperationalDatabasesForTest, operationalDatabasePath } from "@pico/storage";
+import { RUNTIME_EVENT_SCHEMA_VERSION } from "@pico/core";
+import { type RuntimeEvent } from "@pico/storage/runtime-event";
+import { createRuntimeEventId } from "@pico/storage/runtime-event-store-contracts";
 
 /**
  * 票 09 验收:SQLite 纪元的 StorageDoctor。

@@ -4,12 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { createRuntimeRequest } from "@pico/protocol";
-import { DesktopRuntimeService, WorkspaceRuntimeService } from "../../../src/daemon/index.js";
-import { globalSessionManager } from "../../../src/engine/session.js";
-import { materializeRuntimeHistory } from "../../../src/engine/session-runtime-read-model.js";
-import { RuntimeRun } from "../../../src/runtime/runtime-run.js";
-import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
-import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
+import { DesktopRuntimeService } from "@pico/pico-host/desktop-runtime-service";
+import { WorkspaceRuntimeService } from "@pico/pico-host/workspace-runtime-service";
+import { globalSessionManager } from "@pico/pico-host/session";
+import { materializeRuntimeHistory } from "@pico/runtime/session-runtime-read-model";
+import { RuntimeRun } from "@pico/pico-host/product-runtime-run";
+import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
+import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
 import { writeDesktopModelRouting } from "../../fixtures/desktop-model-routing.js";
 
 test("Desktop 新输入先收尾中断批次，再开始执行；重复请求不重复入账", async (t) => {

@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { loadHookSnapshot } from "../../../src/hooks/config.js";
+import { loadHookSnapshot } from "@pico/pico-host/hooks/config";
 
 test("Hook 配置拒绝旧 settings wrapper，并加载 canonical .pico 格式", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-hook-format-retirement-"));

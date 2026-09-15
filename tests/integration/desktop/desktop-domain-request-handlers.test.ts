@@ -3,11 +3,11 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { createDesktopAutomationRequestHandlers } from "../../../src/daemon/desktop-automation-request-handlers.js";
+import { createDesktopAutomationRequestHandlers } from "@pico/pico-host/product-desktop-automation-request-handlers";
 import { createDesktopCatalogRequestHandlers } from "@pico/pico-host/desktop-catalog-request-handlers";
 import type { DesktopAutomationService } from "@pico/pico-host/desktop-automation-service";
 import { createTypedRuntimeRequest } from "../../../packages/protocol/src/index.js";
-import { UserMcpConfigStore } from "../../../src/mcp/user-config-store.js";
+import { UserMcpConfigStore } from "@pico/pico-host/user-mcp-config-store";
 
 test("Desktop Automation handlers preserve CRUD routing and dependency locking", async () => {
   const calls: string[] = [];

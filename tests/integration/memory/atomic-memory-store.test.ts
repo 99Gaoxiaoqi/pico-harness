@@ -7,14 +7,14 @@ import { test } from "node:test";
 import {
   SqliteMemoryItemStore as LegacySqliteMemoryItemStore,
   type SqliteMemoryItemStoreFailpoint,
-} from "../../../src/storage/sqlite/sqlite-memory-item-store.js";
+} from "@pico/storage/sqlite/sqlite-memory-item-store";
 import { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-store";
 import {
   MemoryItemStoreConflictError,
   type MemoryItemWrite,
   type MemoryItemSource,
   type CommitMemoryExtractionRequest,
-} from "../../../src/memory/atomic/contracts.js";
+} from "@pico/core/atomic-memory-contracts";
 
 const source = (eventId = "event-1"): MemoryItemSource => ({
   sessionId: '["/workspace/a","session-1"]',

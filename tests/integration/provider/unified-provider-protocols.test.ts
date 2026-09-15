@@ -9,18 +9,18 @@ import { createRuntimeRequest, type RuntimeResult } from "@pico/protocol";
 import {
   assembleProductionDaemonHost,
   createProductionRuntimeServices,
-} from "../../../src/daemon/production-host.js";
-import { UserConfigStore } from "../../../src/input/user-config-store.js";
-import { EffectiveConfigResolver } from "../../../src/input/effective-config.js";
+} from "@pico/pico-host/production-host";
+import { UserConfigStore } from "@pico/pico-host/input/user-config-store";
+import { EffectiveConfigResolver } from "@pico/pico-host/input/effective-config";
 import {
   credentialRefForProvider,
   type CredentialVault,
-} from "../../../src/provider/credential-vault.js";
-import { loadEffectiveModelRuntime } from "../../../src/provider/effective-model-runtime.js";
-import { createProvider } from "../../../src/provider/factory.js";
-import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
-import { globalSessionManager } from "../../../src/engine/session.js";
-import { closeAllOperationalDatabasesForTest } from "../../../src/storage/sqlite/sqlite-database.js";
+} from "@pico/pico-host/provider/credential-vault";
+import { loadEffectiveModelRuntime } from "@pico/pico-host/provider/effective-model-runtime";
+import { createProvider } from "@pico/pico-host/provider/factory";
+import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
+import { globalSessionManager } from "@pico/pico-host/session";
+import { closeAllOperationalDatabasesForTest } from "@pico/storage";
 import {
   providerPresets,
   selectedModelProtocols,

@@ -4,10 +4,10 @@ import {
   categorizeBashCommand,
   classifyToolPermission,
   evaluateToolPermission,
-  type RuntimePermissionMode,
   type ToolPermissionCategory,
-} from "../../../src/approval/tool-permission-policy.js";
-import { ToolRegistry } from "../../../src/tools/registry-impl.js";
+} from "@pico/core/tool-permission-policy";
+import { type RuntimePermissionMode } from "@pico/core/permission-profile";
+import { ToolRegistry } from "@pico/pico-host/product-tool-registry";
 
 const ALL_CATEGORIES: readonly ToolPermissionCategory[] = [
   "read",

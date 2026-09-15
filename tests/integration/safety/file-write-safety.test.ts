@@ -20,8 +20,8 @@ import {
   bundledLinuxXattrHelperCandidates,
   captureAtomicFilePrecondition,
   writeAtomicWorkspaceFile,
-} from "../../../src/tools/atomic-workspace-file.js";
-import { EditFileTool, WriteFileTool } from "../../../src/tools/registry-impl.js";
+} from "@pico/pico-host/atomic-workspace-file";
+import { EditFileTool, WriteFileTool } from "@pico/pico-host/product-tool-registry";
 
 const EDIT_FILE_MAX_BYTES = 16 * 1024 * 1024;
 const TEMPORARY_FILE_PREFIX = ".pico-write-";
@@ -35,7 +35,7 @@ test("Terminal-Bench bundle helper path is resolved from the installed Pico Host
       "x64",
     ),
     [
-    "/installed-agent/pico/xattr-helper/bin/xattr-helper-linux-x64",
+      "/installed-agent/pico/xattr-helper/bin/xattr-helper-linux-x64",
       "/installed-agent/pico/node_modules/scripts/terminal-bench/xattr-helper/bin/xattr-helper-linux-x64",
     ],
   );

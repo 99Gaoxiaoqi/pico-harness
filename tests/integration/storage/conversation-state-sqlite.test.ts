@@ -4,12 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { JsonObject } from "@pico/protocol";
-import {
-  FIRST_SEND_CLAIM_RETENTION_MS,
-  normalizeWorkspacePath,
-} from "../../../src/daemon/desktop-conversation-state.js";
-import { closeAllOperationalDatabasesForTest } from "../../../src/storage/sqlite/sqlite-database.js";
-import { SqliteDesktopConversationStateStore } from "../../../src/storage/sqlite/sqlite-desktop-conversation-state-store.js";
+import { FIRST_SEND_CLAIM_RETENTION_MS, normalizeWorkspacePath } from "@pico/pico-host";
+import { closeAllOperationalDatabasesForTest } from "@pico/storage";
+import { SqliteDesktopConversationStateStore } from "@pico/pico-host";
 
 interface Fixture {
   readonly root: string;

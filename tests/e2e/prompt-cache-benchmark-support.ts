@@ -1,14 +1,11 @@
+import { catalogPricing } from "@pico/pico-host/catalog-pricing";
 import { createHash } from "node:crypto";
 import { performance } from "node:perf_hooks";
-import {
-  estimateCost,
-  type BillingRoute,
-  type CostStatus,
-} from "../../src/observability/pricing.js";
-import { LLMStatusError } from "../../src/provider/errors.js";
-import type { ProviderKind } from "../../src/provider/factory.js";
-import type { LLMProvider, LLMProviderRequestOptions } from "../../src/provider/interface.js";
-import { toCanonicalUsage, type Message, type ToolDefinition } from "../../src/schema/message.js";
+import { estimateCost, type BillingRoute, type CostStatus } from "@pico/runtime/pricing";
+import { LLMStatusError } from "@pico/core";
+import type { ProviderKind } from "@pico/pico-host/provider/factory";
+import type { LLMProvider, LLMProviderRequestOptions } from "@pico/core";
+import { toCanonicalUsage, type Message, type ToolDefinition } from "@pico/core";
 
 export type PromptCacheBenchmarkScenario =
   | "cold-request"
@@ -123,7 +120,7 @@ export async function measurePromptCacheBenchmarkRequest(
   const completedAt = now();
   const canonical = response.usage ? toCanonicalUsage(response.usage) : undefined;
   const cost = response.usage
-    ? estimateCost(input.billingRoute, response.usage)
+    ? estimateCost(input.billingRoute, response.usage, catalogPricing)
     : {
         status: "unknown" as const,
         costUSD: 0,

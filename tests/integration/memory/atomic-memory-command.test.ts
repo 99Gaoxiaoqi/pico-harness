@@ -3,13 +3,10 @@ import { mkdir, mkdtemp, rm, access } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import {
-  decodeMemoryUndoToken,
-  encodeMemoryUndoToken,
-} from "../../../src/memory/memory-undo-token.js";
-import { DesktopAtomicMemoryService } from "../../../src/daemon/desktop-atomic-memory-service.js";
-import { SqliteMemoryItemStore } from "../../../src/storage/sqlite/sqlite-memory-item-store.js";
-import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
+import { decodeMemoryUndoToken, encodeMemoryUndoToken } from "@pico/cli/memory-undo-token";
+import { DesktopAtomicMemoryService } from "@pico/pico-host/desktop-atomic-memory-service";
+import { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-store";
+import { resolvePicoPaths } from "@pico/pico-host";
 
 test("atomic management preserves manual deduplication, sanitizer, settings and versioned undo tokens", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-atomic-command-"));

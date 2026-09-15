@@ -1,24 +1,24 @@
-import { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
+import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { test } from "node:test";
-import { ApprovalManager } from "../../src/approval/manager.js";
-import { SilentReporter } from "../../src/engine/reporter.js";
-import type { LLMProvider } from "../../src/provider/interface.js";
-import type { ModelRoute } from "../../src/provider/model-router.js";
-import type { Message } from "../../src/schema/message.js";
-import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
+import { ApprovalManager } from "@pico/pico-host/global-approval-manager";
+import { SilentReporter } from "@pico/runtime/silent-reporter";
+import type { LLMProvider } from "@pico/core";
+import type { ModelRoute } from "@pico/pico-host/provider/model-router";
+import type { Message } from "@pico/core";
+import { resolvePicoPaths } from "@pico/pico-host";
 import {
   AgentRuntime,
   type RunAgentCliDependencies,
   type RunAgentCliOptions,
-} from "../../src/runtime/agent-runtime.js";
-import type { RuntimeEvent } from "../../src/storage/runtime-event.js";
+} from "@pico/pico-host/agent-runtime";
+import type { RuntimeEvent } from "@pico/storage/runtime-event";
 
-import { AskUserHandler } from "../../src/tools/ask-user.js";
+import { AskUserHandler } from "@pico/pico-host/ask-user-tool";
 import { configuredUserDefaultRealModel, type RealModel } from "./real-llm-user-model.js";
 
 const TEST_TIMEOUT_MS = 5 * 60_000;

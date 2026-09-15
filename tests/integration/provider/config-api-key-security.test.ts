@@ -10,22 +10,23 @@ import {
   RuntimeProtocolError,
   type RuntimeResult,
 } from "@pico/protocol";
-import { DesktopRuntimeService, WorkspaceRuntimeService } from "../../../src/daemon/index.js";
-import { WorkspaceRegistrationStore } from "../../../src/daemon/workspace-registration.js";
-import { EffectiveConfigResolver } from "../../../src/input/effective-config.js";
-import { loadPicoProjectConfig } from "../../../src/input/pico-config.js";
+import { DesktopRuntimeService } from "@pico/pico-host/desktop-runtime-service";
+import { WorkspaceRuntimeService } from "@pico/pico-host/workspace-runtime-service";
+import { WorkspaceRegistrationStore } from "@pico/pico-host/workspace-registration";
+import { EffectiveConfigResolver } from "@pico/pico-host/input/effective-config";
+import { loadPicoProjectConfig } from "@pico/pico-host/input/pico-config";
 import {
   EMPTY_USER_CONFIG_REVISION,
   UserConfigStore,
   type PicoUserConfig,
-} from "../../../src/input/user-config-store.js";
+} from "@pico/pico-host/input/user-config-store";
 import {
   CredentialNotFoundError,
   credentialRefForProvider,
   type CredentialRef,
   type CredentialVault,
-} from "../../../src/provider/credential-vault.js";
-import { loadEffectiveModelRuntime } from "../../../src/provider/effective-model-runtime.js";
+} from "@pico/pico-host/provider/credential-vault";
+import { loadEffectiveModelRuntime } from "@pico/pico-host/provider/effective-model-runtime";
 import { assertPrivatePermissions } from "../helpers/private-file-mode.js";
 import { saveProviderConnection } from "../../../apps/desktop/src/renderer/provider-connection.js";
 
@@ -390,7 +391,7 @@ test("structured logger redacts API-key fields before serialization", async () =
   const secret = syntheticSecret("structured-log");
   const apiKeyEnv = "PICO_VISIBLE_API_KEY_ENV_METADATA";
   const script = [
-    'import { logger } from "./src/observability/logger.ts";',
+    'import { logger } from "@pico/pico-host/logger";',
     "const secret = process.env.PICO_SYNTHETIC_LOG_SECRET;",
     "const apiKeyEnv = process.env.PICO_VISIBLE_API_KEY_ENV_METADATA;",
     'logger.info({ apiKey: secret, apiKeyEnv, config: { providers: { fixture: { apiKey: secret, apiKeyEnv } } }, providers: { fixture: { apiKey: secret, apiKeyEnv } }, req: { body: { config: { providers: { fixture: { apiKey: secret, apiKeyEnv } } } } }, res: { body: { providers: { fixture: { apiKey: secret, apiKeyEnv } } } }, error: { data: { apiKey: secret, providers: { fixture: { apiKey: secret, apiKeyEnv } } } }, err: { data: { config: { providers: { fixture: { apiKey: secret, apiKeyEnv } } } } }, data: { apiKey: secret, config: { providers: { fixture: { apiKey: secret, apiKeyEnv } } } } }, "credential fixture");',

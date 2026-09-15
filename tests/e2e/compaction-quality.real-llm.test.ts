@@ -16,12 +16,12 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { FullCompactor } from "../../src/context/full-compactor.js";
-import { Session } from "../../src/engine/session.js";
+import { FullCompactor } from "@pico/pico-host/product-full-compactor";
+import { Session } from "@pico/pico-host/session";
 import { scoreCompactionQuality } from "../fixtures/compaction-quality.js";
 import { compactionQualityCases } from "../fixtures/compaction-quality-cases.js";
-import type { Message } from "../../src/schema/message.js";
-import { createProvider } from "../../src/provider/factory.js";
+import type { Message } from "@pico/core";
+import { createProvider } from "@pico/pico-host/provider/factory";
 import { configuredUserDefaultRealModel } from "./real-llm-user-model.js";
 
 const RUN_COMPACTION_E2E = process.env.RUN_COMPACTION_E2E === "1";

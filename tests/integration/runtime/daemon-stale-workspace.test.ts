@@ -3,8 +3,8 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { LocalRuntimeClient } from "../../../src/daemon/index.js";
-import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
+import { LocalRuntimeClient } from "@pico/pico-host/local-runtime-client";
+import { resolvePicoPaths } from "@pico/pico-host";
 import { TestRuntimeHostCandidateTracker } from "../helpers/test-runtime-daemon.js";
 
 /**
