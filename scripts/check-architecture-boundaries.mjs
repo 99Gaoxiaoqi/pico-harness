@@ -271,6 +271,71 @@ export function scanArchitectureBoundaries({ repositoryRoot = REPOSITORY_ROOT } 
   );
 }
 
+const PACKAGE_DEPENDENCY_LAYERS = {
+  core: [],
+  storage: ["core"],
+  runtime: ["core", "storage"],
+  protocol: [],
+  "transcript-replica": ["protocol"],
+  "runtime-host": ["core", "runtime"],
+  "pico-host": ["core", "storage", "runtime", "protocol", "runtime-host"],
+  cli: ["core", "storage", "runtime", "protocol", "runtime-host", "pico-host", "transcript-replica"],
+};
+
+/** Check actual workspace specifiers, including erased types and dynamic imports. */
+export function scanWorkspacePackageBoundaries({ repositoryRoot = REPOSITORY_ROOT } = {}) {
+  const violations = [];
+  for (const [name, allowed] of Object.entries(PACKAGE_DEPENDENCY_LAYERS)) {
+    const directory = resolve(repositoryRoot, "packages", name);
+    const sourceRoot = resolve(directory, "src");
+    if (!existsSync(sourceRoot)) continue;
+    const manifestPath = resolve(directory, "package.json");
+    const manifest = existsSync(manifestPath)
+      ? JSON.parse(readFileSync(manifestPath, "utf8"))
+      : undefined;
+    for (const file of listSourceFiles(sourceRoot)) {
+      const source = normalizeRelativePath(file, repositoryRoot);
+      const ast = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true);
+      const imports = new Set();
+      const visit = (node) => {
+        if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
+            node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
+          imports.add(node.moduleSpecifier.text);
+        } else if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument) &&
+                   ts.isStringLiteral(node.argument.literal)) {
+          imports.add(node.argument.literal.text);
+        } else if (ts.isCallExpression(node) &&
+                   (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
+                    (ts.isIdentifier(node.expression) && node.expression.text === "require")) &&
+                   node.arguments[0] && ts.isStringLiteral(node.arguments[0])) {
+          imports.add(node.arguments[0].text);
+        }
+        ts.forEachChild(node, visit);
+      };
+      visit(ast);
+      for (const specifier of imports) {
+        let rule;
+        const targetName = specifier.match(/^@pico\/([^/]+)/)?.[1];
+        if (targetName && targetName !== name) {
+          if (!allowed.includes(targetName)) rule = "workspace-package-reverse-dependency";
+          else if (manifest && !manifest.dependencies?.["@pico/" + targetName]) {
+            rule = "workspace-package-undeclared-dependency";
+          }
+        } else if (specifier.startsWith(".")) {
+          const requested = resolve(dirname(file), specifier);
+          const packageRelative = relative(directory, requested);
+          if (packageRelative === ".." || packageRelative.startsWith(".." + sep)) {
+            rule = "workspace-package-source-escape";
+          }
+        }
+        if (rule) violations.push({ rule, source, target: specifier, specifier });
+      }
+    }
+  }
+  return violations.sort((left, right) =>
+    (left.source + left.target).localeCompare(right.source + right.target));
+}
+
 /**
  * Local TypeScript runtime dependency cycles.
  *
@@ -612,6 +677,7 @@ function main() {
   }
   const violations = [
     ...scanArchitectureBoundaries(),
+    ...scanWorkspacePackageBoundaries(),
     ...scanTypeScriptValueImportCycles(),
     ...scanCrossCuttingDefinitions(),
     ...scanHandwrittenTimeoutPrimitives(),

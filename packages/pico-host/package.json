@@ -722,6 +722,74 @@
     "./cron-runtime-scheduler": {
       "types": "./dist/cron-runtime-scheduler.d.ts",
       "import": "./dist/cron-runtime-scheduler.js"
+    },
+    "./agent-runtime": {
+      "types": "./dist/agent-runtime.d.ts",
+      "import": "./dist/agent-runtime.js"
+    },
+    "./session-runtime": {
+      "types": "./dist/session-runtime.d.ts",
+      "import": "./dist/session-runtime.js"
+    },
+    "./configured-subagent-executor": {
+      "types": "./dist/configured-subagent-executor.d.ts",
+      "import": "./dist/configured-subagent-executor.js"
+    },
+    "./runtime-hook-assembly": {
+      "types": "./dist/runtime-hook-assembly.d.ts",
+      "import": "./dist/runtime-hook-assembly.js"
+    },
+    "./product-runtime-run-executor": {
+      "types": "./dist/product-runtime-run-executor.d.ts",
+      "import": "./dist/product-runtime-run-executor.js"
+    },
+    "./product-runtime-run": {
+      "types": "./dist/product-runtime-run.d.ts",
+      "import": "./dist/product-runtime-run.js"
+    },
+    "./session-resolver": {
+      "types": "./dist/session-resolver.d.ts",
+      "import": "./dist/session-resolver.js"
+    },
+    "./desktop-catalog-request-handlers": {
+      "types": "./dist/desktop-catalog-request-handlers.d.ts",
+      "import": "./dist/desktop-catalog-request-handlers.js"
+    },
+    "./desktop-interaction-broker": {
+      "types": "./dist/desktop-interaction-broker.d.ts",
+      "import": "./dist/desktop-interaction-broker.js"
+    },
+    "./desktop-provider-config-service": {
+      "types": "./dist/desktop-provider-config-service.d.ts",
+      "import": "./dist/desktop-provider-config-service.js"
+    },
+    "./workspace-runtime-service": {
+      "types": "./dist/workspace-runtime-service.d.ts",
+      "import": "./dist/workspace-runtime-service.js"
+    },
+    "./agent-engine": {
+      "types": "./dist/agent-engine.d.ts",
+      "import": "./dist/agent-engine.js"
+    },
+    "./subagent-runner": {
+      "types": "./dist/subagent-runner.d.ts",
+      "import": "./dist/subagent-runner.js"
+    },
+    "./internal/headless-bootstrap": {
+      "types": "./dist/internal/headless-bootstrap.d.ts",
+      "import": "./dist/internal/headless-bootstrap.js"
+    },
+    "./internal/headless-bootstrap-main": {
+      "types": "./dist/internal/headless-bootstrap-main.d.ts",
+      "import": "./dist/internal/headless-bootstrap-main.js"
+    },
+    "./internal/headless-one-shot-runner": {
+      "types": "./dist/internal/headless-one-shot-runner.d.ts",
+      "import": "./dist/internal/headless-one-shot-runner.js"
+    },
+    "./internal/headless-one-shot-main": {
+      "types": "./dist/internal/headless-one-shot-main.d.ts",
+      "import": "./dist/internal/headless-one-shot-main.js"
     }
   },
   "files": [

@@ -11,11 +11,33 @@ import {
   scanCrossCuttingDefinitions,
   scanHandwrittenTimeoutPrimitives,
   scanTypeScriptValueImportCycles,
+  scanWorkspacePackageBoundaries,
 } from "../../../scripts/check-architecture-boundaries.mjs";
 
 const execFileAsync = promisify(execFile);
 const repositoryRoot = resolve(import.meta.dirname, "../../..");
 const checker = resolve(repositoryRoot, "scripts/check-architecture-boundaries.mjs");
+
+test("workspace package gate checks bare, erased, dynamic and source-escape dependencies", async (context) => {
+  const fixtureRoot = await createArchitectureFixture(context, "pico-workspace-boundaries-", {
+    "packages/runtime/package.json": JSON.stringify({ dependencies: { "@pico/core": "*" } }),
+    "packages/runtime/src/valid.ts": 'export type { Message } from "@pico/core";\n',
+    "packages/runtime/src/invalid.ts": [
+      'import type { Session } from "@pico/pico-host/session";',
+      'export const load = () => import("@pico/cli/main");',
+      'export type Store = import("@pico/storage").Store;',
+      'export { legacy } from "../../../src/legacy.js";',
+    ].join("\n"),
+    "src/legacy.ts": "export const legacy = 1;\n",
+  });
+  assert.deepEqual(scanWorkspacePackageBoundaries({ repositoryRoot: fixtureRoot }).map(({ rule }) => rule).sort(), [
+    "workspace-package-reverse-dependency",
+    "workspace-package-reverse-dependency",
+    "workspace-package-source-escape",
+    "workspace-package-undeclared-dependency",
+  ]);
+  assert.deepEqual(scanWorkspacePackageBoundaries({ repositoryRoot }), []);
+});
 
 test("architecture boundary gate passes only with no current violations", async () => {
   const result = await execFileAsync(process.execPath, [checker], {
