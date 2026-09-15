@@ -1,7 +1,7 @@
 // 诊断探针：连接指定用户根；host 未运行时可能启动它。
 import { parseArgs } from "node:util";
-import { resolvePicoHome } from "../../src/paths/pico-paths.js";
-import { LocalRuntimeClient } from "../../src/daemon/index.js";
+import { resolvePicoHome } from "@pico/pico-host/pico-paths";
+import { LocalRuntimeClient } from "@pico/pico-host/local-runtime-client";
 import { connectOrSpawnRuntimeHost, RUNTIME_HOST_PROTOCOL_VERSION } from "@pico/runtime-host";
 
 const { values } = parseArgs({
