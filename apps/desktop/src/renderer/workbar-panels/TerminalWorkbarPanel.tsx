@@ -1,5 +1,6 @@
 import { CircleAlert, Link, Plus, Square, TerminalSquare } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { TerminalOutputView } from "./TerminalOutputView.js";
 
 export type WorkbarTerminalStatus = "starting" | "running" | "interrupted" | "exited";
 
@@ -20,6 +21,9 @@ export interface WorkbarTerminalOutput {
   readonly text: string;
   readonly sequence: number;
   readonly truncated?: boolean;
+  /** UTF-16 offset of the retained snapshot in the current output stream. */
+  readonly startOffset?: number;
+  readonly resetVersion?: number;
 }
 
 export interface WorkbarTerminalGrid {
@@ -44,12 +48,6 @@ export interface TerminalWorkbarPanelProps {
   readonly onSetPollingActive: (active: boolean) => void;
 }
 
-export function terminalGridFromBounds(width: number, height: number): WorkbarTerminalGrid {
-  const columns = Math.min(300, Math.max(20, Math.floor(Math.max(0, width - 20) / 8)));
-  const rows = Math.min(100, Math.max(4, Math.floor(Math.max(0, height - 16) / 18)));
-  return { columns, rows };
-}
-
 export function shouldPollTerminalPanel(active: boolean, terminalId?: string): boolean {
   return active && Boolean(terminalId);
 }
@@ -69,9 +67,7 @@ export function TerminalWorkbarPanel({
   onStop,
   onSetPollingActive,
 }: TerminalWorkbarPanelProps) {
-  const viewportRef = useRef<HTMLDivElement>(null);
   const tabRefs = useRef(new Map<string, HTMLButtonElement>());
-  const lastGridRef = useRef<string>("");
   const [input, setInput] = useState("");
   const selected = terminals.find((terminal) => terminal.id === activeTerminalId);
   const selectedOutput = output?.terminalId === selected?.id ? output : undefined;
@@ -81,23 +77,6 @@ export function TerminalWorkbarPanel({
     onSetPollingActive(polling);
     return () => onSetPollingActive(false);
   }, [active, onSetPollingActive, selected?.id]);
-
-  useEffect(() => {
-    const viewport = viewportRef.current;
-    if (!active || !selected?.resizeSupported || !viewport) return;
-    const sync = () => {
-      const bounds = viewport.getBoundingClientRect();
-      const grid = terminalGridFromBounds(bounds.width, bounds.height);
-      const gridKey = `${selected.id}:${grid.columns}:${grid.rows}`;
-      if (lastGridRef.current === gridKey) return;
-      lastGridRef.current = gridKey;
-      onResize(selected.id, grid);
-    };
-    const observer = new ResizeObserver(sync);
-    observer.observe(viewport);
-    sync();
-    return () => observer.disconnect();
-  }, [active, onResize, selected]);
 
   const submitInput = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -206,15 +185,21 @@ export function TerminalWorkbarPanel({
             </div>
           </div>
           <div
-            ref={viewportRef}
             id={terminalPanelId(selected.id)}
             className="tool-panel__terminal-viewport"
             role="tabpanel"
             aria-labelledby={terminalTabId(selected.id)}
           >
-            <pre role="log" aria-label={`${selected.title} 输出`} aria-live="off" tabIndex={0}>
-              {selectedOutput?.text ?? ""}
-            </pre>
+            <TerminalOutputView
+              key={selected.id}
+              title={selected.title}
+              output={selectedOutput ?? undefined}
+              active={active}
+              capability={selected.capability}
+              onResize={
+                selected.resizeSupported ? (grid) => onResize(selected.id, grid) : undefined
+              }
+            />
             {!selectedOutput && <span className="tool-panel__terminal-placeholder">尚无输出</span>}
             {selectedOutput?.truncated && (
               <span className="tool-panel__terminal-truncated">较早输出已截断</span>

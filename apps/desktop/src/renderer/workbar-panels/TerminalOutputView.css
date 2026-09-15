@@ -1,0 +1,11 @@
+@import "@xterm/xterm/css/xterm.css";
+
+.tool-panel__terminal-screen {
+  position: absolute;
+  inset: 8px 10px;
+  overflow: hidden;
+}
+
+.tool-panel__terminal-screen .xterm {
+  height: 100%;
+}
