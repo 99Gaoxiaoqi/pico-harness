@@ -1,4 +1,5 @@
 import { app, Menu, type BrowserWindow, type MenuItemConstructorOptions } from "electron";
+import { scopedMenuHash } from "./menu-navigation.js";
 
 export function installApplicationMenu(getWindow: () => BrowserWindow | undefined): void {
   const navigate = (hash: string) => navigateWindow(getWindow(), hash);
@@ -79,7 +80,7 @@ function navigateWindow(window: BrowserWindow | undefined, hash: string): void {
   const current = window.webContents.getURL();
   if (!current) return;
   const target = new URL(current);
-  target.hash = `#${hash}`;
+  target.hash = `#${scopedMenuHash(current, hash)}`;
   void window.loadURL(target.toString());
   if (!window.isVisible()) window.show();
   window.focus();

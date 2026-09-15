@@ -534,6 +534,33 @@ export function conversationItemsFromReplica(view: TranscriptReplicaView): Conve
     .filter((item): item is ConversationItemView => item !== undefined);
 }
 
+/** A delayed replica cannot reopen an interaction already settled in this session. */
+export function preserveResolvedInteractions(
+  incoming: readonly ConversationItemView[],
+  current: readonly ConversationItemView[],
+): ConversationItemView[] {
+  const settled = new Map(
+    current.flatMap((item) =>
+      (item.kind === "approval" && item.state !== "pending" && item.approvalKind !== "plan") ||
+      (item.kind === "prompt" && item.state === "answered")
+        ? [[conversationItemKey(item), item] as const]
+        : [],
+    ),
+  );
+  return incoming.map((item) => {
+    const previous = settled.get(conversationItemKey(item));
+    if (!previous) return item;
+    if (item.kind === "approval" && previous.kind === "approval" && item.state === "pending") {
+      if (previous.runId && item.runId && previous.runId !== item.runId) return item;
+      return { ...item, state: previous.state };
+    }
+    if (item.kind === "prompt" && previous.kind === "prompt" && item.state === "pending") {
+      return { ...item, state: previous.state };
+    }
+    return item;
+  });
+}
+
 export function pendingToolApprovalFromTranscript(
   items: readonly ConversationItemView[],
   activeRunId?: string,

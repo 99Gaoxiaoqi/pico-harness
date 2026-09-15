@@ -913,6 +913,13 @@ export function ConversationPage() {
                     <button
                       type="button"
                       disabled={Boolean(activeRun) || Boolean(busy)}
+                      onClick={() => navigate(`/review?${new URLSearchParams({ workspace: workspacePath, sessionId: sessionRef.sessionId })}`)}
+                    >
+                      <FileDiff aria-hidden="true" /> 审阅更改
+                    </button>
+                    <button
+                      type="button"
+                      disabled={Boolean(activeRun) || Boolean(busy)}
                       onClick={() => setEditingTitle(true)}
                     >
                       <Pencil aria-hidden="true" /> 重命名

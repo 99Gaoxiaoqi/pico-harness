@@ -289,17 +289,8 @@ export function MemoryPage({
       <p className="sr-only" role="status" aria-live="polite">
         {announcement}
       </p>
-      {runtime.message && (
-        <InlineNotice
-          tone={
-            ["记忆已更新。", "记忆设置已更新。", "记忆已删除，无法撤销。"].includes(runtime.message)
-              ? "success"
-              : "error"
-          }
-        >
-          {runtime.message}
-        </InlineNotice>
-      )}
+      {/* Action feedback is displayed by the app toast; only memory-scoped load
+          errors belong here. A global message may come from another page. */}
       {memory.error && <InlineNotice tone="error">{memory.error}</InlineNotice>}
       {!data.trusted ? (
         <InlineNotice tone="warning">信任当前工作区后可管理记忆。</InlineNotice>
