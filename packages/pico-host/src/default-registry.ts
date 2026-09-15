@@ -31,7 +31,10 @@ import { createCodeIntelligenceTools } from "@pico/pico-host/code-intelligence-t
 import type { WorkspaceSandboxConfig } from "@pico/pico-host/workspace-sandbox";
 import type { SandboxProfile } from "@pico/pico-host/process-sandbox";
 import { ExploreRepoTool } from "@pico/pico-host/explore-repo-tool";
-import { createSessionTaskTools, type BoundSessionTaskAuthority } from "@pico/pico-host/session-task-tools";
+import {
+  createSessionTaskTools,
+  type BoundSessionTaskAuthority,
+} from "@pico/pico-host/session-task-tools";
 import {
   RequestSandboxBoundaryTool,
   type RequestSandboxBoundaryHandler,

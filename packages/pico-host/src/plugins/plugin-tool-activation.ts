@@ -3,10 +3,7 @@ import type {
   PluginCapabilityRegistry,
 } from "./plugin-capability.js";
 import type { PluginRuntimeSnapshot } from "./plugin-runtime-snapshot.js";
-import {
-  createToolRegistrationOwner,
-  type ToolRegistry,
-} from "../tool-registry.js";
+import { createToolRegistrationOwner, type ToolRegistry } from "../tool-registry.js";
 
 /** Activate one immutable Plugin snapshot into a normal ToolRegistry ownership boundary. */
 export function registerPluginCapabilityTools(

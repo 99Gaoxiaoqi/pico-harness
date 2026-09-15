@@ -23,7 +23,16 @@ test("Root CLI cold workflows build and package their runtime-host dependency", 
       `${lifecycle} must rebuild runtime-host before the root CLI consumes its dist export`,
     );
   }
-  const orderedPackages = ["core", "storage", "runtime", "protocol", "transcript-replica", "runtime-host", "pico-host", "cli"];
+  const orderedPackages = [
+    "core",
+    "storage",
+    "runtime",
+    "protocol",
+    "transcript-replica",
+    "runtime-host",
+    "pico-host",
+    "cli",
+  ];
   const buildSequence = manifest.scripts?.["build:packages"] ?? "";
   let previous = -1;
   for (const name of orderedPackages) {

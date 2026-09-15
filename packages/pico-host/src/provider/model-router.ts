@@ -5,8 +5,18 @@ import type { ReasoningLevel } from "@pico/core";
 
 const DEFAULT_DISCOVERY_TIMEOUT_MS = 3_000;
 
-import { resolveModelProtocol, type ModelProviderConfig, type ModelRoutingConfig, type ModelRoute } from "@pico/runtime/provider/model-route";
-export { resolveModelProtocol, type ModelProviderConfig, type ModelRoutingConfig, type ModelRoute } from "@pico/runtime/provider/model-route";
+import {
+  resolveModelProtocol,
+  type ModelProviderConfig,
+  type ModelRoutingConfig,
+  type ModelRoute,
+} from "@pico/runtime/provider/model-route";
+export {
+  resolveModelProtocol,
+  type ModelProviderConfig,
+  type ModelRoutingConfig,
+  type ModelRoute,
+} from "@pico/runtime/provider/model-route";
 
 export interface LoadModelRouterOptions {
   config: ModelRoutingConfig;

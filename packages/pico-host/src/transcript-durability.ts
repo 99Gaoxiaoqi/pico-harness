@@ -16,7 +16,12 @@ export const defaultTranscriptDurabilityPolicy: TranscriptDurabilityPolicy = () 
 
 /** Session.recordTranscriptEvent 的适配器，复用同一 RuntimeEvent 写入队列。 */
 export function createSessionTranscriptSink(
-  session: { recordTranscriptEvent(event: DurableTranscriptEvent, options: { eventId: string }): Promise<unknown> },
+  session: {
+    recordTranscriptEvent(
+      event: DurableTranscriptEvent,
+      options: { eventId: string },
+    ): Promise<unknown>;
+  },
   options: { readonly eventIdPrefix?: string } = {},
 ): DurableTranscriptSink {
   const prefix = options.eventIdPrefix ?? "tui:transcript:";

@@ -74,7 +74,9 @@ export function AgentSwitcher({
       {layout.rows.map((row) => (
         <Text
           key={row.itemId}
-          {...optionalTextColor(row.selected && focused ? "cyan" : STATUS_PRESENTATION[row.status].color)}
+          {...optionalTextColor(
+            row.selected && focused ? "cyan" : STATUS_PRESENTATION[row.status].color,
+          )}
           bold={row.selected || row.active}
           dimColor={!row.selected && !row.active && row.status !== "running"}
           wrap="truncate"

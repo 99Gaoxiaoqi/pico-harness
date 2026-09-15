@@ -11,7 +11,6 @@
 // startSpan/endSpan stack for simple sequential callers. JSON exports are saved
 // under the workspace state traces directory.
 
-
 export type TraceAttributes = Record<string, unknown>;
 export type TraceAttributePolicy = "full" | "metadata-only";
 
@@ -90,7 +89,13 @@ export class Span {
  * Stack-based tracer for simple sequential instrumentation.
  * startSpan attaches to the current span; endSpan returns to the parent.
  */
-export type TraceFileExporter = (rootSpan: Span, workDir: string, sessionId: string, timestamp?: number, picoHome?: string) => string;
+export type TraceFileExporter = (
+  rootSpan: Span,
+  workDir: string,
+  sessionId: string,
+  timestamp?: number,
+  picoHome?: string,
+) => string;
 
 export interface TracerOptions {
   exportTrace?: TraceFileExporter;

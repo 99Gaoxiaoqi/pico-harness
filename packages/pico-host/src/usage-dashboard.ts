@@ -20,12 +20,14 @@ export interface UsageProviderCallRecord {
   readonly cacheReadTokens: number;
   readonly cacheWriteTokens: number;
   readonly cost: number;
-  readonly reported?: {
-    readonly usageMetadata?: string | undefined;
-    readonly reportedFields?: readonly string[] | undefined;
-    readonly costStatus?: string | undefined;
-    readonly latencyMs?: number | undefined;
-  } | undefined;
+  readonly reported?:
+    | {
+        readonly usageMetadata?: string | undefined;
+        readonly reportedFields?: readonly string[] | undefined;
+        readonly costStatus?: string | undefined;
+        readonly latencyMs?: number | undefined;
+      }
+    | undefined;
 }
 
 export interface UsageRuntimeEventReader {

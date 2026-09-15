@@ -16,7 +16,8 @@ export function exportTraceToFile(
   timestamp: number = Date.now(),
   picoHome?: string,
 ): string {
-  const traceDir = resolvePicoPaths(workDir, { ...(picoHome !== undefined ? { picoHome } : {}) }).workspace.traces;
+  const traceDir = resolvePicoPaths(workDir, { ...(picoHome !== undefined ? { picoHome } : {}) })
+    .workspace.traces;
   mkdirSync(traceDir, { recursive: true, mode: 0o700 });
   chmodSync(traceDir, 0o700);
   const filename = `trace_${sanitizeFilePart(sessionId)}_${timestamp}.json`;

@@ -50,9 +50,8 @@ export class EffectiveConfigResolver {
 
   constructor(options: EffectiveConfigResolverOptions = {}) {
     this.userConfigStore =
-      options.userConfigStore ?? new UserConfigStore(
-        options.picoHome === undefined ? {} : { picoHome: options.picoHome },
-      );
+      options.userConfigStore ??
+      new UserConfigStore(options.picoHome === undefined ? {} : { picoHome: options.picoHome });
   }
 
   async resolve(options: ResolveEffectiveConfigOptions): Promise<EffectiveConfigSnapshot> {

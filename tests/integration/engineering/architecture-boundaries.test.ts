@@ -30,12 +30,17 @@ test("workspace package gate checks bare, erased, dynamic and source-escape depe
     ].join("\n"),
     "src/legacy.ts": "export const legacy = 1;\n",
   });
-  assert.deepEqual(scanWorkspacePackageBoundaries({ repositoryRoot: fixtureRoot }).map(({ rule }) => rule).sort(), [
-    "workspace-package-reverse-dependency",
-    "workspace-package-reverse-dependency",
-    "workspace-package-source-escape",
-    "workspace-package-undeclared-dependency",
-  ]);
+  assert.deepEqual(
+    scanWorkspacePackageBoundaries({ repositoryRoot: fixtureRoot })
+      .map(({ rule }) => rule)
+      .sort(),
+    [
+      "workspace-package-reverse-dependency",
+      "workspace-package-reverse-dependency",
+      "workspace-package-source-escape",
+      "workspace-package-undeclared-dependency",
+    ],
+  );
   assert.deepEqual(scanWorkspacePackageBoundaries({ repositoryRoot }), []);
 });
 

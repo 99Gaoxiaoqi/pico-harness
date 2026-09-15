@@ -1,8 +1,5 @@
 import { AgentOutputTool as RuntimeAgentOutputTool } from "@pico/runtime/agent-output-tool";
-import type {
-  BaseTool,
-  ToolExecutionContext,
-} from "@pico/pico-host/tool-registry-contract";
+import type { BaseTool, ToolExecutionContext } from "@pico/pico-host/tool-registry-contract";
 import { NO_FILE_SIDE_EFFECTS } from "@pico/pico-host/tool-registry-contract";
 
 export type {
