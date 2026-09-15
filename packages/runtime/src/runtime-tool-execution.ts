@@ -1,9 +1,4 @@
-import type {
-  ToolCall,
-  ToolRecoveryMode,
-  ToolResult,
-  ToolResultEnvelope,
-} from "@pico/core";
+import type { ToolCall, ToolRecoveryMode, ToolResult, ToolResultEnvelope } from "@pico/core";
 
 export type ToolOutputStream = "stdout" | "stderr";
 
@@ -61,9 +56,12 @@ export class ToolCommitBoundaryError extends Error {
     readonly phase: "T1" | "T2",
     cause: unknown,
   ) {
-    super(`Tool ${phase} commit failed: ${cause instanceof Error ? cause.message : String(cause)}`, {
-      cause,
-    });
+    super(
+      `Tool ${phase} commit failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+      {
+        cause,
+      },
+    );
     this.name = "ToolCommitBoundaryError";
   }
 }

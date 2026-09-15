@@ -1800,8 +1800,7 @@ export class SqliteRuntimeControlStore {
       let baselineCount = 0;
       let baselineTotals = emptyUsage();
       if (filter.jobId === undefined) {
-        const { clauses: baselineClauses, params: baselineParams } =
-          usageCallFilterClauses(filter);
+        const { clauses: baselineClauses, params: baselineParams } = usageCallFilterClauses(filter);
         const baselineWhere = baselineClauses.length
           ? ` WHERE ${baselineClauses.join(" AND ")}`
           : "";

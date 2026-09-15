@@ -1,10 +1,6 @@
 import { readdir, readFile } from "node:fs/promises";
 import { basename, dirname, resolve, sep } from "node:path";
-import type {
-  HookEvent,
-  HookEventPayloadMap,
-  HookOutput,
-} from "../types.js";
+import type { HookEvent, HookEventPayloadMap, HookOutput } from "../types.js";
 import { writeWorkspaceFileAtomic } from "@pico/storage/secure-file";
 import { resolvePicoPaths } from "../../pico-paths.js";
 

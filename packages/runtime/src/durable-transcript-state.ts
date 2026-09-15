@@ -74,8 +74,7 @@ export function inspectDurableTranscriptEvents(
       case "assistant.stream.interrupted": {
         const stream = streams.get(event.streamId);
         assertStreamTarget(stream, event.entryId);
-        stream.status =
-          event.type === "assistant.stream.completed" ? "completed" : "interrupted";
+        stream.status = event.type === "assistant.stream.completed" ? "completed" : "interrupted";
         break;
       }
 
@@ -146,7 +145,9 @@ export function inspectDurableTranscriptEvents(
           throw new Error(`Unknown Transcript subagent activity: ${event.activityId}`);
         }
         if (current.lifecycle === "active") {
-          throw new Error(`Cannot archive active Transcript subagent activity: ${event.activityId}`);
+          throw new Error(
+            `Cannot archive active Transcript subagent activity: ${event.activityId}`,
+          );
         }
         current.lifecycle = "archived";
         break;
@@ -180,7 +181,10 @@ function assertNewEntry(entries: readonly EntryState[], entryId: string): void {
   }
 }
 
-function assertStreamTarget(stream: StreamState | undefined, entryId: string): asserts stream is StreamState {
+function assertStreamTarget(
+  stream: StreamState | undefined,
+  entryId: string,
+): asserts stream is StreamState {
   if (!stream) throw new Error(`Unknown Transcript stream for entry ${entryId}`);
   if (stream.entryId !== entryId) {
     throw new Error(`Transcript stream entry mismatch: ${stream.entryId} != ${entryId}`);

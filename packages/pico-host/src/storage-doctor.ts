@@ -2,10 +2,7 @@ import { existsSync, type Stats } from "node:fs";
 import { lstat, readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { RuntimeProjectionService } from "@pico/runtime/runtime-projection-service";
-import {
-  createFileHistoryState,
-  fileHistoryLoadState,
-} from "./file-history-runtime.js";
+import { createFileHistoryState, fileHistoryLoadState } from "./file-history-runtime.js";
 import {
   ALL_WORKSPACE_SQLITE_SCOPES,
   assertCurrentOperationalTargetSchemaSync,

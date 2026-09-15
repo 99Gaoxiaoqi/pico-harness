@@ -13,11 +13,7 @@ type ForkSessionInput<Session, EnginePort, RewindHooks> = Parameters<
   RuntimeSessionForkPort<Session, EnginePort, RuntimeEvent, RewindHooks>["forkSession"]
 >[0];
 
-export interface CreateRuntimeSessionForkLifecycleOptions<
-  Session,
-  EnginePort,
-  RewindHooks,
-> {
+export interface CreateRuntimeSessionForkLifecycleOptions<Session, EnginePort, RewindHooks> {
   readonly engineRuntimePort: EnginePort;
   /** Host-owned filesystem/Session fork transaction and settlement. */
   forkSession(input: ForkSessionInput<Session, EnginePort, RewindHooks>): Promise<void>;
@@ -78,9 +74,7 @@ export function createRuntimeSessionForkLifecycle<
         ...(input.operationCreatedAt ? { operationCreatedAt: input.operationCreatedAt } : {}),
         seedEntries: input.seedEntries,
         ...(input.modelCheckpoint ? { modelCheckpoint: input.modelCheckpoint } : {}),
-        ...(input.sourceThroughEventId
-          ? { sourceThroughEventId: input.sourceThroughEventId }
-          : {}),
+        ...(input.sourceThroughEventId ? { sourceThroughEventId: input.sourceThroughEventId } : {}),
         ...(input.statePublication ? { statePublication: input.statePublication } : {}),
         ...(input.workflowEvents ? { workflowEvents: input.workflowEvents } : {}),
         workDir: input.workDir,
@@ -97,9 +91,7 @@ export function createRuntimeSessionForkLifecycle<
         ...(input.operationCreatedAt ? { operationCreatedAt: input.operationCreatedAt } : {}),
         seedEntries: input.seedEntries,
         ...(input.modelCheckpoint ? { modelCheckpoint: input.modelCheckpoint } : {}),
-        ...(input.sourceThroughEventId
-          ? { sourceThroughEventId: input.sourceThroughEventId }
-          : {}),
+        ...(input.sourceThroughEventId ? { sourceThroughEventId: input.sourceThroughEventId } : {}),
         ...(input.statePublication ? { statePublication: input.statePublication } : {}),
         workDir: input.workDir,
         store,

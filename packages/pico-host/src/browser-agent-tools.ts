@@ -2,10 +2,7 @@ import type { JsonObject, RuntimeBrowserAgentAction } from "@pico/protocol";
 import type { ToolPermissionCategory } from "@pico/core/tool-permission-policy";
 import type { ToolDefinition } from "@pico/core";
 import { ToolAccesses } from "@pico/runtime/tool-access";
-import {
-  NO_FILE_SIDE_EFFECTS,
-  type BaseTool,
-} from "./tool-registry-contract.js";
+import { NO_FILE_SIDE_EFFECTS, type BaseTool } from "./tool-registry-contract.js";
 
 export interface BoundBrowserAgentAuthority {
   readonly sessionId: string;

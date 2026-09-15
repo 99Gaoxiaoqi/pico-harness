@@ -10,10 +10,7 @@ import {
   type RuntimeTaskMirrorOptions,
 } from "@pico/runtime/runtime-task-mirror";
 import { resolvePicoPaths } from "./pico-paths.js";
-import {
-  WorktreeMergeQueue,
-  type WorktreeMergeSnapshot,
-} from "./worktree-merge-queue.js";
+import { WorktreeMergeQueue, type WorktreeMergeSnapshot } from "./worktree-merge-queue.js";
 import {
   WorktreeSupervisor,
   type WorktreeTaskFinalization,
@@ -81,11 +78,10 @@ export class TaskHostRuntime {
     this.taskRegistry.hydrate(materializeRuntimeTaskSnapshots(this.jobService), {
       preserveNonTerminal: true,
     });
-    this.runtimeMirror = new RuntimeTaskMirror(
-      this.taskRegistry,
-      this.jobService,
-      { ...runtimeMirrorOptions, logger: this.logger },
-    );
+    this.runtimeMirror = new RuntimeTaskMirror(this.taskRegistry, this.jobService, {
+      ...runtimeMirrorOptions,
+      logger: this.logger,
+    });
     this.mergeQueue = new WorktreeMergeQueue();
     this.supervisor = new WorktreeSupervisor({
       taskRegistry: this.taskRegistry,

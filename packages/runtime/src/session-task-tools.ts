@@ -228,7 +228,8 @@ export function buildSessionTaskPromptBlock(
     const line = `- [${task.status}] ${task.taskId}: ${task.title}${task.detail ? ` — ${task.detail}` : ""}`;
     if (Buffer.byteLength([...lines, line].join("\n"), "utf8") > maxBytes) {
       const omitted = "- … remaining tasks omitted by prompt budget";
-      if (Buffer.byteLength([...lines, omitted].join("\n"), "utf8") <= maxBytes) lines.push(omitted);
+      if (Buffer.byteLength([...lines, omitted].join("\n"), "utf8") <= maxBytes)
+        lines.push(omitted);
       break;
     }
     lines.push(line);
@@ -255,7 +256,8 @@ function nonEmpty(value: unknown, name: string): string {
 }
 
 function nonNegativeInteger(value: unknown, name: string): number {
-  if (!Number.isSafeInteger(value) || (value as number) < 0) throw new Error(`${name} 必须是非负整数`);
+  if (!Number.isSafeInteger(value) || (value as number) < 0)
+    throw new Error(`${name} 必须是非负整数`);
   return value as number;
 }
 

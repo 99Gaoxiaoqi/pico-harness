@@ -186,9 +186,7 @@ export class HostBackgroundTaskManager<SpawnOptions = never> {
     promise: Promise<BackgroundTaskRecord>,
     timeoutMs: number,
   ): Promise<BackgroundTaskRecord | undefined> {
-    return raceWithDeadline(promise, timeoutMs).then((closed) =>
-      closed ? promise : undefined,
-    );
+    return raceWithDeadline(promise, timeoutMs).then((closed) => (closed ? promise : undefined));
   }
 
   private pruneCompletedTasks(): void {

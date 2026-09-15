@@ -1,11 +1,7 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { buildMinimalChildProcessEnv } from "@pico/runtime/minimal-child-process-env";
-import {
-  raceWithDeadline,
-  scheduleDeadline,
-  type ScheduledDeadline,
-} from "@pico/runtime/deadline";
+import { raceWithDeadline, scheduleDeadline, type ScheduledDeadline } from "@pico/runtime/deadline";
 import { redactSensitiveText } from "@pico/runtime/sensitive-data-redaction";
 import type { LspServerConfig } from "./lsp-server-discovery.js";
 import {

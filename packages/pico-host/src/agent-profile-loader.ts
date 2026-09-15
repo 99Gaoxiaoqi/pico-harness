@@ -91,10 +91,7 @@ export class AgentProfileLoader<TrustAuthority = unknown> {
     try {
       parsed = yaml.load(content) as AgentProfilesFile;
     } catch (error) {
-      this.logger.warn(
-        { err: error, filePath },
-        "[agent-profile] YAML 解析失败,已忽略自定义角色",
-      );
+      this.logger.warn({ err: error, filePath }, "[agent-profile] YAML 解析失败,已忽略自定义角色");
       return emptyLoadResult();
     }
     if (!parsed || !Array.isArray(parsed.agents)) return emptyLoadResult();

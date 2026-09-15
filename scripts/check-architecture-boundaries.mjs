@@ -641,6 +641,14 @@ export function scanCanonicalPrimitiveRedefinitions({ repositoryRoot = REPOSITOR
 }
 
 const MODEL_PROCESS_ENTRYPOINTS = new Set([
+  "packages/pico-host/src/bash-tool.ts",
+  "packages/pico-host/src/background-manager.ts",
+  "packages/pico-host/src/grep-tool.ts",
+  "packages/pico-host/src/stdio-mcp-client.ts",
+  "packages/pico-host/src/hooks/executors/executor.ts",
+  "packages/pico-host/src/hooks/config/command-shell.ts",
+  "packages/pico-host/src/code-intelligence/lsp-client.ts",
+  // Preserve checks for historical fixtures while production implementations live above.
   "src/tools/bash.ts",
   "src/tools/background-manager.ts",
   "src/tools/grep.ts",
@@ -692,6 +700,75 @@ function printViolations(title, violations) {
   }
 }
 
+const ROOT_PROCESS_ENTRYPOINTS = new Set([
+  "src/cli/main.ts",
+  "src/daemon/main.ts",
+  "src/internal/headless-bootstrap-main.ts",
+  "src/internal/headless-one-shot-main.ts",
+]);
+
+/** Root src is a finite set of executable shims, never a second module tree. */
+export function scanRootSourceLayout({ repositoryRoot = REPOSITORY_ROOT } = {}) {
+  const violations = [];
+  const rootSource = resolve(repositoryRoot, "src");
+  const visitFiles = (directory) =>
+    existsSync(directory)
+      ? readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+          if (["node_modules", "dist", "out"].includes(entry.name) || entry.name.startsWith(".")) {
+            return [];
+          }
+          const path = resolve(directory, entry.name);
+          return entry.isDirectory() ? visitFiles(path) : [path];
+        })
+      : [];
+  for (const file of visitFiles(rootSource)) {
+    const source = normalizeRelativePath(file, repositoryRoot);
+    if (!ROOT_PROCESS_ENTRYPOINTS.has(source) && source !== "src/README.md") {
+      violations.push({ rule: "root-source-not-entrypoint", source, target: "packages/*/src" });
+    }
+  }
+  for (const directory of ["src", "apps", "packages", "tests", "scripts"]) {
+    for (const file of visitFiles(resolve(repositoryRoot, directory))) {
+      if (!/\.[cm]?[jt]sx?$/.test(file)) continue;
+      const source = normalizeRelativePath(file, repositoryRoot);
+      const ast = ts.createSourceFile(
+        file,
+        readFileSync(file, "utf8"),
+        ts.ScriptTarget.Latest,
+        true,
+      );
+      const visit = (node) => {
+        let specifier;
+        if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
+          specifier = node.moduleSpecifier;
+        } else if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument)) {
+          specifier = node.argument.literal;
+        } else if (
+          ts.isCallExpression(node) &&
+          (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
+            (ts.isIdentifier(node.expression) && node.expression.text === "require"))
+        ) {
+          specifier = node.arguments[0];
+        }
+        if (specifier && ts.isStringLiteral(specifier) && specifier.text.startsWith(".")) {
+          const target = normalizeRelativePath(
+            resolve(dirname(file), specifier.text),
+            repositoryRoot,
+          );
+          if (target.startsWith("src/")) {
+            violations.push({ rule: "root-source-import", source, target });
+          } else if (!source.startsWith("tests/") && target.startsWith("tests/")) {
+            violations.push({ rule: "production-imports-test-support", source, target });
+          }
+        }
+        ts.forEachChild(node, visit);
+      };
+      visit(ast);
+    }
+  }
+  return violations;
+}
+
 function main() {
   if (process.argv.length > 2) {
     console.error("用法: node scripts/check-architecture-boundaries.mjs");
@@ -699,6 +776,7 @@ function main() {
     return;
   }
   const violations = [
+    ...scanRootSourceLayout(),
     ...scanArchitectureBoundaries(),
     ...scanWorkspacePackageBoundaries(),
     ...scanTypeScriptValueImportCycles(),

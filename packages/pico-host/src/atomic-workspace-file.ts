@@ -644,11 +644,7 @@ export function bundledLinuxXattrHelperCandidates(
     // Installed workspace package: node_modules/@pico/pico-host/dist -> bundle root.
     join(runtimeModuleDirectory, "../../../../xattr-helper/bin", helperName),
     // Monorepo package source/dist -> repository helper used by local validation.
-    join(
-      runtimeModuleDirectory,
-      "../../../scripts/terminal-bench/xattr-helper/bin",
-      helperName,
-    ),
+    join(runtimeModuleDirectory, "../../../scripts/terminal-bench/xattr-helper/bin", helperName),
   ];
 }
 

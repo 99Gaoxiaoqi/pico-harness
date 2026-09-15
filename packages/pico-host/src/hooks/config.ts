@@ -4,11 +4,7 @@ import { dirname, join, normalize, resolve } from "node:path";
 import { resolvePicoHome } from "../pico-paths.js";
 import { emptyHookSnapshot } from "./service.js";
 import { HookLocalStateStore } from "./management/state.js";
-import {
-  HookTrustStore,
-  type HookTrustAuthority,
-  type HookTrustStatus,
-} from "./trust/store.js";
+import { HookTrustStore, type HookTrustAuthority, type HookTrustStatus } from "./trust/store.js";
 import {
   HOOK_EVENTS,
   type AgentHookHandler,

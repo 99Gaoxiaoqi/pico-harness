@@ -13,6 +13,10 @@ export function scanArchitectureBoundaries(
   options?: ArchitectureBoundaryScanOptions,
 ): ArchitectureBoundaryViolation[];
 
+export function scanRootSourceLayout(
+  options?: ArchitectureBoundaryScanOptions,
+): Omit<ArchitectureBoundaryViolation, "specifier">[];
+
 export function scanWorkspacePackageBoundaries(
   options?: ArchitectureBoundaryScanOptions,
 ): ArchitectureBoundaryViolation[];
