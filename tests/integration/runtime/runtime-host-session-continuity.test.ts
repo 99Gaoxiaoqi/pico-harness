@@ -26,7 +26,11 @@ import {
   type SessionSubscriptionSnapshot,
 } from "@pico/pico-host/session-subscription-owner";
 import type { RuntimeParams, RuntimeResult, RuntimeSessionSubscriptionFrame } from "@pico/protocol";
-import { RUNTIME_ERROR_CODES, RuntimeProtocolError } from "@pico/protocol";
+import {
+  RUNTIME_ERROR_CODES,
+  RuntimeProtocolError,
+  TRANSCRIPT_PROJECTOR_VERSION,
+} from "@pico/protocol";
 
 ensurePicoRuntimeHostOperationsRegistered();
 ensurePicoRuntimeHostSessionContinuityOperationsRegistered();
@@ -35,7 +39,7 @@ const workspacePath = "/workspace";
 const sessionId = "session-1";
 const watermark = {
   historyEpoch: "history-1",
-  projectorVersion: 5 as const,
+  projectorVersion: TRANSCRIPT_PROJECTOR_VERSION,
   throughSequence: 4,
 };
 

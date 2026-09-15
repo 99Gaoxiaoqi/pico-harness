@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   createRuntimeNotification,
+  TRANSCRIPT_PROJECTOR_VERSION,
   type RuntimeParams,
   type RuntimeResult,
   type RuntimeSessionSubscriptionFrame,
@@ -16,7 +17,7 @@ const workspacePath = "/workspace";
 const sessionId = "session-1";
 const watermark = {
   historyEpoch: "history-1",
-  projectorVersion: 5 as const,
+  projectorVersion: TRANSCRIPT_PROJECTOR_VERSION,
   throughSequence: 7,
 };
 

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   createRuntimeNotification,
+  TRANSCRIPT_PROJECTOR_VERSION,
   type RuntimeParams,
   type RuntimeResult,
   type RuntimeSessionSubscriptionFrame,
@@ -15,7 +16,11 @@ import {
 
 const workspacePath = "/workspace";
 const sessionId = "session";
-const watermark = { historyEpoch: "history", projectorVersion: 5 as const, throughSequence: 2 };
+const watermark = {
+  historyEpoch: "history",
+  projectorVersion: TRANSCRIPT_PROJECTOR_VERSION,
+  throughSequence: 2,
+};
 
 class Source implements SessionContinuityDataSource {
   currentWatermark: RuntimeTranscriptWatermark = watermark;
