@@ -5,15 +5,15 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { AgentEngine } from "../../../src/engine/loop.js";
-import { Session } from "../../../src/engine/session.js";
-import { parseModelProviderConfigs } from "../../../src/input/pico-config.js";
-import { CostTracker } from "../../../src/observability/tracker.js";
-import { createRawProvider } from "../../../src/provider/factory.js";
-import type { LLMProvider, LLMProviderRequestOptions } from "../../../src/provider/interface.js";
-import { resolveModelRouteCapabilities } from "../../../src/provider/model-capabilities.js";
-import type { Message, ToolDefinition } from "../../../src/schema/message.js";
-import { ToolRegistry } from "../../../src/tools/registry-impl.js";
+import { AgentEngine } from "@pico/pico-host/agent-engine";
+import { Session } from "@pico/pico-host/session";
+import { parseModelProviderConfigs } from "@pico/pico-host/input/pico-config";
+import { CostTracker } from "@pico/pico-host/cost-tracker";
+import { createRawProvider } from "@pico/pico-host/provider/factory";
+import type { LLMProvider, LLMProviderRequestOptions } from "@pico/core";
+import { resolveModelRouteCapabilities } from "@pico/runtime";
+import type { Message, ToolDefinition } from "@pico/core";
+import { ToolRegistry } from "@pico/pico-host/product-tool-registry";
 
 interface CacheMarked {
   cache_control?: { type: string };

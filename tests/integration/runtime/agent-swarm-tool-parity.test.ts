@@ -1,18 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { CatalogAgentProfile } from "../../../src/agents/catalog.js";
-import { compileAgentGraphWork } from "../../../src/agent-graph/work-request.js";
+import type { CatalogAgentProfile } from "@pico/pico-host/agent-catalog";
+import { compileAgentGraphWork } from "@pico/runtime";
 import {
   assertValidAgentGraphOperatorProfileSnapshot,
   createCatalogAgentGraphOperatorProfileCatalog,
-} from "../../../src/agent-graph/operator-profile-catalog.js";
+} from "@pico/runtime";
 import {
   createAgentGraphSupervisorTools,
   type AgentGraphRootToolContext,
   type AgentGraphSupervisorToolPort,
   type AgentGraphSupervisorView,
   type ReadAgentGraphProjectionInput,
-} from "../../../src/tools/agent-graph-tools.js";
+} from "@pico/pico-host/agent-graph-tools";
 
 const root: AgentGraphRootToolContext = {
   kind: "graph_root_supervisor",

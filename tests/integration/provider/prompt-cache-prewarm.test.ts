@@ -2,14 +2,14 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { test } from "node:test";
 import { AiSdkProvider } from "@pico/pico-host/provider/ai-sdk-provider";
-import type { ProviderConfig } from "../../../src/provider/config.js";
-import type { LLMProvider, LLMProviderRequestOptions } from "../../../src/provider/interface.js";
-import { resolveModelRouteCapabilities } from "../../../src/provider/model-capabilities.js";
+import type { ProviderConfig } from "@pico/runtime/provider-config";
+import type { LLMProvider, LLMProviderRequestOptions } from "@pico/core";
+import { resolveModelRouteCapabilities } from "@pico/runtime";
 import {
   PromptCachePrewarmCoordinator,
   withPromptCachePrewarm,
 } from "@pico/runtime/provider/prompt-cache-prewarm";
-import type { Message, ToolDefinition } from "../../../src/schema/message.js";
+import type { Message, ToolDefinition } from "@pico/core";
 
 const config = (): ProviderConfig => ({
   baseURL: "https://api.anthropic.com/v1",

@@ -11,14 +11,14 @@ import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { GoalManager } from "../../src/engine/goal-manager.js";
-import { PromptComposer } from "../../src/context/composer.js";
-import { TodoStore } from "../../src/context/todo-store.js";
-import { AgentEngine } from "../../src/engine/loop.js";
-import { SilentReporter } from "../../src/engine/reporter.js";
-import { Session } from "../../src/engine/session.js";
-import { ToolRegistry } from "../../src/tools/registry-impl.js";
-import type { LLMProvider } from "../../src/provider/interface.js";
+import { GoalManager } from "@pico/runtime/goal-manager";
+import { PromptComposer } from "@pico/pico-host/product-prompt-composer";
+import { TodoStore } from "@pico/pico-host/product-todo-store";
+import { AgentEngine } from "@pico/pico-host/agent-engine";
+import { SilentReporter } from "@pico/runtime/silent-reporter";
+import { Session } from "@pico/pico-host/session";
+import { ToolRegistry } from "@pico/pico-host/product-tool-registry";
+import type { LLMProvider } from "@pico/core";
 
 /**
  * 场景 1：模型连续不调工具 + Goal active → 延续协调器应注入续行指令。
@@ -222,7 +222,7 @@ test("real e2e: formatGoal includes budgetUsage and stall status", async (contex
   active.budgetUsage.costCNY = 0.5;
   active.consecutiveNoProgress = 4;
 
-  const { GetGoalTool } = await import("../../src/tools/goal.js");
+  const { GetGoalTool } = await import("@pico/pico-host/goal-tools");
   const tool = new GetGoalTool(goalManager);
   const result = await tool.execute(JSON.stringify({}));
 

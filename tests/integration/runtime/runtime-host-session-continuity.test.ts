@@ -15,16 +15,16 @@ import {
   type RuntimeHostConnection,
   type StorageRootCapability,
 } from "@pico/runtime-host";
-import { createRuntimeHostComposition } from "../../../src/daemon/runtime-host-composition.js";
+import { createRuntimeHostComposition } from "@pico/pico-host/runtime-host-composition";
 import {
   ensurePicoRuntimeHostOperationsRegistered,
   ensurePicoRuntimeHostSessionContinuityOperationsRegistered,
-} from "../../../src/daemon/runtime-host-operations.js";
+} from "@pico/pico-host/runtime-host-operations";
 import {
   SessionSubscriptionRegistry,
   type SessionContinuityDataSource,
   type SessionSubscriptionSnapshot,
-} from "../../../src/daemon/session-subscription-owner.js";
+} from "@pico/pico-host/session-subscription-owner";
 import type { RuntimeParams, RuntimeResult, RuntimeSessionSubscriptionFrame } from "@pico/protocol";
 import { RUNTIME_ERROR_CODES, RuntimeProtocolError } from "@pico/protocol";
 

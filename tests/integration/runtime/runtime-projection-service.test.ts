@@ -5,14 +5,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import test from "node:test";
-import { computeCheckpointSourceDigest } from "../../../src/context/runtime-compaction-checkpoint.js";
-import { RuntimeProjectionService } from "../../../src/engine/runtime-projection-service.js";
-import { SESSION_RUNTIME_STATE_VERSION } from "../../../src/engine/session-runtime.js";
+import { computeCheckpointSourceDigest } from "@pico/runtime/runtime-compaction-checkpoint";
+import { RuntimeProjectionService } from "@pico/runtime/runtime-projection-service";
+import { SESSION_RUNTIME_STATE_VERSION } from "@pico/core/session-runtime-state";
 import {
   materializeRuntimeHistory,
   materializeRuntimeHistoryEntries,
   materializeRuntimeHistoryProjection,
-} from "../../../src/engine/session-runtime-read-model.js";
+} from "@pico/runtime/session-runtime-read-model";
 import {
   projectRuntimeSessionForkSeedEntries,
   projectRuntimeSessionMessages,
@@ -20,24 +20,24 @@ import {
   projectRuntimeSessionState,
   projectRuntimeSessionTranscriptEventEntries,
   projectRuntimeSessionUsage,
-} from "../../../src/engine/session-runtime-projection.js";
-import type { Message } from "../../../src/schema/message.js";
+} from "@pico/runtime/session-runtime-projection";
+import type { Message } from "@pico/core";
 import {
   createManagedExecutionBoundary,
   createWorkspaceWritePermissionProfile,
-} from "../../../src/safety/permission-profile.js";
+} from "@pico/core/permission-profile";
 import {
   createRuntimeEventId,
   type RuntimeEventStoreEntry,
-} from "../../../src/storage/runtime-event-store-contracts.js";
+} from "@pico/storage/runtime-event-store-contracts";
 import {
   RUNTIME_EVENT_SCHEMA_VERSION,
-  type RuntimeEvent,
   type RuntimeMessageCommittedEvent,
   type RuntimeModelCallSettledEvent,
   type RuntimeToolResultRecordedEvent,
-} from "../../../src/storage/runtime-event.js";
-import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
+} from "@pico/core";
+import { type RuntimeEvent } from "@pico/storage/runtime-event";
+import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
 import { initializeRuntimeEventOwner } from "../helpers/runtime-event-owner.js";
 
 const SESSION_ID = "projection-service-equivalence";

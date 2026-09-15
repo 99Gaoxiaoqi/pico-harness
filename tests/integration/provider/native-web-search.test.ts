@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { AiSdkProvider } from "../../../src/provider/ai-sdk-provider.js";
-import type { Message, ToolDefinition } from "../../../src/schema/message.js";
+import { AiSdkProvider } from "@pico/pico-host/provider/ai-sdk-provider";
+import type { Message, ToolDefinition } from "@pico/core";
 
 const url = "https://example.com/news";
 const local: ToolDefinition = {

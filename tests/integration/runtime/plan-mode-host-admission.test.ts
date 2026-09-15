@@ -4,14 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { createRuntimeRequest, RUNTIME_ERROR_CODES, RuntimeProtocolError } from "@pico/protocol";
-import { createProductionRuntimeServices } from "../../../src/daemon/production-host.js";
-import { WorkspaceRuntimeService } from "../../../src/daemon/workspace-runtime-service.js";
-import { globalSessionManager } from "../../../src/engine/session.js";
-import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
+import { createProductionRuntimeServices } from "@pico/pico-host/production-host";
+import { WorkspaceRuntimeService } from "@pico/pico-host/workspace-runtime-service";
+import { globalSessionManager } from "@pico/pico-host/session";
+import { resolvePicoPaths } from "@pico/pico-host";
 import { PlanCoordinator } from "@pico/runtime/plan-coordinator";
-import { planReviewOperationId, planReviewRunId } from "../../../src/plan/review-identity.js";
-import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
-import { SqliteRuntimeControlStore } from "../../../src/storage/sqlite/sqlite-runtime-control-store.js";
+import { planReviewOperationId, planReviewRunId } from "@pico/core/plan-review-identity";
+import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
+import { SqliteRuntimeControlStore } from "@pico/storage/sqlite/sqlite-runtime-control-store";
 
 test("Plan review Run admission replays one durable run for the same operation", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-plan-host-"));

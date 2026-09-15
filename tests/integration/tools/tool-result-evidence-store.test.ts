@@ -25,9 +25,9 @@ import {
   parseEvidenceUri,
   type RuntimeToolResultEvidenceManifestV2,
   type SubagentReportEvidenceManifestV2,
-} from "../../../src/context/evidence-archive.js";
-import { EvidenceBlobStore } from "../../../src/context/evidence-blob-store.js";
-import { buildDefaultToolRegistry } from "../../../src/tools/default-registry.js";
+} from "@pico/storage/evidence-archive";
+import { EvidenceBlobStore } from "@pico/storage/evidence-blob-store";
+import { buildDefaultToolRegistry } from "@pico/pico-host/default-registry";
 import {
   seedRuntimeToolExchange,
   seedSubagentReportEvidence,

@@ -10,27 +10,28 @@ import type {
   AgentGraphScheduleCommand,
   AgentGraphScheduleRevision,
   AgentGraphScheduleState,
-} from "../../../src/agent-graph/core/index.js";
-import { createBuiltinAgentGraphOperatorProfileCatalog } from "../../../src/agent-graph/operator-profile-catalog.js";
+} from "@pico/core/agent-graph-contracts";
+import { createBuiltinAgentGraphOperatorProfileCatalog } from "@pico/runtime";
 import {
   AgentGraphConflictError,
-  AgentGraphReadinessError,
   applyScheduleRevision,
-  agentOutputRecordIdFor,
   canAdmitIntent,
-  claimIdFor,
   createAgentGraphScheduleState,
+  isIntentStopped,
+} from "@pico/core/agent-graph-schedule";
+import { AgentGraphReadinessError, resolveIntentReadiness } from "@pico/core/agent-graph-readiness";
+import {
+  agentOutputRecordIdFor,
+  claimIdFor,
   createScheduleRevision,
   deterministicFingerprint,
   graphIdFor,
   intentIdFor,
-  isIntentStopped,
   operatorIdFor,
   provisionIdFor,
   recordIdFor,
-  resolveIntentReadiness,
   wakeIdFor,
-} from "../../../src/agent-graph/core/index.js";
+} from "@pico/core/agent-graph-identities";
 
 const SOURCE: AgentGraphOperationSource = {
   sessionId: "root-session",

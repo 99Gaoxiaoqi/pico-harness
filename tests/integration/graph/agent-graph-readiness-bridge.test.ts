@@ -9,7 +9,7 @@ import type {
   AgentGraphOperationSource,
   AgentGraphOperator,
   AgentGraphScheduleCommand,
-} from "../../../src/agent-graph/core/index.js";
+} from "@pico/core/agent-graph-contracts";
 import {
   agentOutputRecordIdFor,
   claimIdFor,
@@ -18,18 +18,15 @@ import {
   intentIdFor,
   operatorIdFor,
   provisionIdFor,
-} from "../../../src/agent-graph/core/index.js";
-import { createBuiltinAgentGraphOperatorProfileCatalog } from "../../../src/agent-graph/operator-profile-catalog.js";
-import {
-  AgentGraphRuntimePortBridge,
-  type AgentGraphRuntimeApplicationPort,
-} from "../../../src/agent-graph/runtime-adapter-bridge.js";
-import { SqliteAgentGraphControlStoreAdapter } from "../../../src/agent-graph/sqlite-control-store-adapter.js";
+} from "@pico/core/agent-graph-identities";
+import { createBuiltinAgentGraphOperatorProfileCatalog } from "@pico/runtime";
+import { AgentGraphRuntimePortBridge, type AgentGraphRuntimeApplicationPort } from "@pico/runtime";
+import { SqliteAgentGraphControlStoreAdapter } from "@pico/runtime";
 import type {
   AgentGraphActivationClaimRecord,
   AgentGraphRecordRefRecord,
-} from "../../../src/storage/sqlite/agent-graph-store-types.js";
-import { SqliteAgentGraphControlStore } from "../../../src/storage/sqlite/sqlite-agent-graph-control-store.js";
+} from "@pico/core/agent-graph-store-contracts";
+import { SqliteAgentGraphControlStore } from "@pico/storage/sqlite/agent-graph-control-store";
 
 const SOURCE: AgentGraphOperationSource = {
   sessionId: "readiness-root",

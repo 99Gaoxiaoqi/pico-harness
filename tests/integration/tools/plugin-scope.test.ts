@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { test } from "node:test";
-import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
+import { resolvePicoPaths } from "@pico/pico-host";
 import {
   describePluginScopeRegistry,
   isPluginPathWithinScope,

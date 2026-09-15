@@ -17,14 +17,14 @@ import test from "node:test";
 import {
   EvidenceBlobStore,
   withVerifiedEvidenceDirectory,
-} from "../../../src/context/evidence-blob-store.js";
-import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
+} from "@pico/storage/evidence-blob-store";
+import { resolvePicoPaths } from "@pico/pico-host";
 import { WorkspaceRuntimeService } from "@pico/pico-host/workspace-runtime-service";
 import { createRuntimeRequest } from "../../../packages/protocol/src/index.js";
-import { FileHistoryBlobStore } from "../../../src/storage/file-history-blob-store.js";
-import { closeAllOperationalDatabasesForTest } from "../../../src/storage/sqlite/sqlite-database.js";
-import { withWorkspaceSqliteLease } from "../../../src/storage/sqlite/workspace-scopes.js";
-import { runWorkspaceBlobGcOnce } from "../../../src/storage/workspace-blob-gc.js";
+import { FileHistoryBlobStore } from "@pico/storage";
+import { closeAllOperationalDatabasesForTest } from "@pico/storage";
+import { withWorkspaceSqliteLease } from "@pico/storage";
+import { runWorkspaceBlobGcOnce } from "@pico/storage/workspace-blob-gc";
 
 test("Blob GC consumes retention evidence intents idempotently", async () => {
   const fixture = createFixture("evidence");
@@ -49,8 +49,7 @@ test("Blob GC consumes retention evidence intents idempotently", async () => {
     );
 
     const first = await runWorkspaceBlobGcOnce({
-      workDir: fixture.workDir,
-      picoHome: fixture.picoHome,
+      paths: fixtureBlobGcPaths(fixture.workDir, fixture.picoHome),
     });
     assert.deepEqual(first, {
       status: "completed",
@@ -62,8 +61,7 @@ test("Blob GC consumes retention evidence intents idempotently", async () => {
     assert.equal(existsSync(blobPath), false);
 
     const second = await runWorkspaceBlobGcOnce({
-      workDir: fixture.workDir,
-      picoHome: fixture.picoHome,
+      paths: fixtureBlobGcPaths(fixture.workDir, fixture.picoHome),
     });
     assert.equal(second.processed, 0);
     withWorkspaceSqliteLease(paths.workspace.root, (lease) => {
@@ -159,8 +157,7 @@ test("Blob GC preserves evidence retained by an Agent Graph resource fact", asyn
     );
 
     const retained = await runWorkspaceBlobGcOnce({
-      workDir: fixture.workDir,
-      picoHome: fixture.picoHome,
+      paths: fixtureBlobGcPaths(fixture.workDir, fixture.picoHome),
       now: () => new Date("2026-08-27T00:00:00.000Z"),
     });
     assert.equal(retained.retryable, 1);
@@ -172,8 +169,7 @@ test("Blob GC preserves evidence retained by an Agent Graph resource fact", asyn
         .run();
     });
     const released = await runWorkspaceBlobGcOnce({
-      workDir: fixture.workDir,
-      picoHome: fixture.picoHome,
+      paths: fixtureBlobGcPaths(fixture.workDir, fixture.picoHome),
       now: () => new Date("2026-08-27T01:00:00.000Z"),
     });
     assert.equal(released.completed, 1);
@@ -210,8 +206,7 @@ test("File History GC holds the global mutation lease and waits for all workspac
     });
 
     const blocked = await runWorkspaceBlobGcOnce({
-      workDir: fixture.workDir,
-      picoHome: fixture.picoHome,
+      paths: fixtureBlobGcPaths(fixture.workDir, fixture.picoHome),
       now: () => new Date("2026-08-24T00:00:00.000Z"),
     });
     assert.equal(blocked.retryable, 1);
@@ -221,8 +216,7 @@ test("File History GC holds the global mutation lease and waits for all workspac
       lease.database.prepare("DELETE FROM file_history WHERE session_id = 'survivor'").run();
     });
     const completed = await runWorkspaceBlobGcOnce({
-      workDir: fixture.workDir,
-      picoHome: fixture.picoHome,
+      paths: fixtureBlobGcPaths(fixture.workDir, fixture.picoHome),
       now: () => new Date("2026-08-24T00:00:02.000Z"),
     });
     assert.equal(completed.completed, 1);
@@ -248,8 +242,7 @@ test("Runtime asset GC fails closed for paths outside the workspace storage root
     );
 
     const result = await runWorkspaceBlobGcOnce({
-      workDir: fixture.workDir,
-      picoHome: fixture.picoHome,
+      paths: fixtureBlobGcPaths(fixture.workDir, fixture.picoHome),
       now: () => new Date("2026-08-24T00:00:00.000Z"),
     });
     assert.equal(result.retryable, 1);
@@ -289,8 +282,7 @@ test("Retention runtime asset intents retain their URI and delete only verified 
     );
 
     const result = await runWorkspaceBlobGcOnce({
-      workDir: fixture.workDir,
-      picoHome: fixture.picoHome,
+      paths: fixtureBlobGcPaths(fixture.workDir, fixture.picoHome),
     });
     assert.equal(result.completed, 1);
     assert.equal(existsSync(assetPath), false);
@@ -320,8 +312,7 @@ test("Runtime asset GC rejects a symlink directory ancestor even when its target
     );
 
     const result = await runWorkspaceBlobGcOnce({
-      workDir: fixture.workDir,
-      picoHome: fixture.picoHome,
+      paths: fixtureBlobGcPaths(fixture.workDir, fixture.picoHome),
       now: () => new Date("2026-08-24T00:00:00.000Z"),
     });
     assert.equal(result.retryable, 1);
@@ -619,4 +610,14 @@ function createFixture(label: string): {
 function cleanupFixture(root: string): void {
   closeAllOperationalDatabasesForTest();
   rmSync(root, { recursive: true, force: true });
+}
+
+function fixtureBlobGcPaths(workDir: string, picoHome: string) {
+  const paths = resolvePicoPaths(workDir, { picoHome });
+  return {
+    workspaceRoot: paths.workspace.root,
+    workspaceEvidenceDirectory: paths.workspace.evidence,
+    homeFileHistoryDirectory: paths.home.fileHistory,
+    homeWorkspacesDirectory: paths.home.workspaces,
+  };
 }

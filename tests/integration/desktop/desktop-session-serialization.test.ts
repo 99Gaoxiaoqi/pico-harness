@@ -1,13 +1,15 @@
+import { projectTranscriptEvents } from "@pico/pico-host/transcript-event-store";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createRuntimeNotification } from "../../../packages/protocol/src/index.js";
-import { DesktopRuntimeService, WorkspaceRuntimeService } from "../../../src/daemon/index.js";
-import { ingestDesktopRuntimeNotification } from "../../../src/daemon/desktop-transcript-persistence.js";
-import { globalSessionManager, Session } from "../../../src/engine/session.js";
-import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
+import { DesktopRuntimeService } from "@pico/pico-host/desktop-runtime-service";
+import { WorkspaceRuntimeService } from "@pico/pico-host/workspace-runtime-service";
+import { ingestDesktopRuntimeNotification } from "@pico/pico-host/desktop-transcript-persistence";
+import { globalSessionManager, Session } from "@pico/pico-host/session";
+import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
 
 test(
   "Desktop transcript persistence reuses the active Session serialization scope",
@@ -178,6 +180,7 @@ test("Desktop does not persist a second plan entry for a Runtime-owned tool star
         },
       },
     }),
+    projectTranscriptEvents,
   );
 
   assert.equal(inserted, false);

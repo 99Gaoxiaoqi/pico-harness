@@ -6,12 +6,12 @@ import { test } from "node:test";
 import { createRuntimeRequest } from "../../../packages/protocol/src/index.js";
 import { DesktopRuntimeService } from "@pico/pico-host/desktop-runtime-service";
 import { WorkspaceRuntimeService } from "@pico/pico-host/workspace-runtime-service";
-import { globalSessionManager } from "../../../src/engine/session.js";
+import { globalSessionManager } from "@pico/pico-host/session";
 import { PluginRuntimeSnapshotRegistry } from "@pico/pico-host/plugins/plugin-runtime-snapshot-registry";
 import type { PluginRuntimeSnapshot } from "@pico/pico-host/plugins/plugin-runtime-snapshot";
 import { PluginCapabilityRegistry } from "@pico/pico-host/plugins/plugin-capability";
 import { createProductionLocalDaemonHost } from "@pico/pico-host/production-host";
-import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
+import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
 import {
   createTrustedDesktopAutomation,
   type DesktopAutomationAuthorityDependencies,

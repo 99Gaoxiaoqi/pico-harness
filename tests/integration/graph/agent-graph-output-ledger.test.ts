@@ -4,21 +4,21 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import type { RuntimeEvent } from "../../../src/engine/session-runtime-event.js";
+import type { RuntimeEvent } from "@pico/storage/runtime-event";
 import {
   AgentGraphOutputReplayConflictError,
   SqliteAgentGraphOutputLedger,
   agentOutputRuntimeEventId,
   type AgentGraphOutputOwnerFencePort,
 } from "@pico/runtime/agent-graph-output-ledger";
-import { RuntimeEventStoreOwnerFenceError } from "../../../src/storage/runtime-event-store-contracts.js";
-import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
-import { RuntimeEventDecodeError, decodeRuntimeEvent } from "../../../src/storage/runtime-event.js";
+import { RuntimeEventStoreOwnerFenceError } from "@pico/storage/runtime-event-store-contracts";
+import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
+import { RuntimeEventDecodeError, decodeRuntimeEvent } from "@pico/storage/runtime-event";
 import {
   agentOutputFingerprint,
   agentOutputIdempotencyKey,
   type GraphOperatorActivationContext,
-} from "../../../src/tools/agent-output-tool.js";
+} from "@pico/pico-host/agent-output-tool";
 
 const ACTIVATION: GraphOperatorActivationContext = {
   kind: "graph_operator_activation",

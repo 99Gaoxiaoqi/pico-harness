@@ -5,15 +5,16 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { createRuntimeRequest, RUNTIME_ERROR_CODES, RuntimeProtocolError } from "@pico/protocol";
-import { DesktopRuntimeService, WorkspaceRuntimeService } from "../../../src/daemon/index.js";
-import { WorkspaceRegistrationStore } from "../../../src/daemon/workspace-registration.js";
-import { parseUserConfig, UserConfigStore } from "../../../src/input/user-config-store.js";
+import { DesktopRuntimeService } from "@pico/pico-host/desktop-runtime-service";
+import { WorkspaceRuntimeService } from "@pico/pico-host/workspace-runtime-service";
+import { WorkspaceRegistrationStore } from "@pico/pico-host/workspace-registration";
+import { parseUserConfig, UserConfigStore } from "@pico/pico-host/input/user-config-store";
 import {
   credentialRefForProvider,
   type CredentialVault,
-} from "../../../src/provider/credential-vault.js";
-import { ProviderOperationJournal } from "../../../src/provider/provider-operation-journal.js";
-import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
+} from "@pico/pico-host/provider/credential-vault";
+import { ProviderOperationJournal } from "@pico/pico-host/provider/provider-operation-journal";
+import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
 
 const PROVIDER_ID = "revision-token-fixture";
 

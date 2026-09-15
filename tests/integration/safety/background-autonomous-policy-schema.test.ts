@@ -3,7 +3,7 @@ import test from "node:test";
 import {
   BackgroundAutonomousPolicySnapshotError,
   parseBackgroundAutonomousPolicySnapshot,
-} from "../../../src/safety/background-autonomous-policy-schema.js";
+} from "@pico/core/background-autonomous-policy-schema";
 
 const BASE_POLICY = {
   mode: "full-access",

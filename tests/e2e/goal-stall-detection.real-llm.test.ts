@@ -3,13 +3,13 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { GoalManager } from "../../src/engine/goal-manager.js";
+import { GoalManager } from "@pico/runtime/goal-manager";
 import {
   STALL_EVALUATOR_THRESHOLD,
   STALL_WARN_THRESHOLD,
   STALL_BLOCK_THRESHOLD,
-} from "../../src/engine/goal-manager.js";
-import type { ToolCall } from "../../src/schema/message.js";
+} from "@pico/runtime/goal-manager";
+import type { ToolCall } from "@pico/core";
 
 test("goal stall detection: fingerprint reset on different tool calls", () => {
   const manager = new GoalManager();

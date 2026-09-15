@@ -3,17 +3,17 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { AgentEngine } from "../../../src/engine/loop.js";
-import { SilentReporter } from "../../../src/engine/reporter.js";
-import { Session } from "../../../src/engine/session.js";
-import { HookService } from "../../../src/hooks/service.js";
-import type { HookEventPayloadMap } from "../../../src/hooks/types.js";
-import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
-import { currentRuntimeRun } from "../../../src/runtime/runtime-run.js";
-import { createCodeModeTool } from "../../../src/tools/code-mode-tool.js";
-import { NO_FILE_SIDE_EFFECTS } from "../../../src/tools/registry.js";
-import { ToolRegistry } from "../../../src/tools/registry-impl.js";
-import { ToolAccesses } from "../../../src/tools/tool-access.js";
+import { AgentEngine } from "@pico/pico-host/agent-engine";
+import { SilentReporter } from "@pico/runtime/silent-reporter";
+import { Session } from "@pico/pico-host/session";
+import { HookService } from "@pico/pico-host/hooks/service";
+import type { HookEventPayloadMap } from "@pico/pico-host/hooks/types";
+import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
+import { currentRuntimeRun } from "@pico/pico-host/product-runtime-run";
+import { createCodeModeTool } from "@pico/pico-host/code-mode-tool";
+import { NO_FILE_SIDE_EFFECTS } from "@pico/pico-host/tool-registry-contract";
+import { ToolRegistry } from "@pico/pico-host/product-tool-registry";
+import { ToolAccesses } from "@pico/runtime/tool-access";
 
 for (const persistence of [true, false]) {
   test(`Code Mode dispatches child post hooks after canonical settlement (durable=${persistence})`, async (t) => {

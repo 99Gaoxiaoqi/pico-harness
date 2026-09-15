@@ -98,13 +98,16 @@ test("Runtime background task tools validate scopes and preserve wire projection
     },
   };
 
-  assert.deepEqual(JSON.parse(await new TaskListTool(backgroundTasks).execute('{"scope":"background"}')), [
-    {
-      ...record,
-      startedAt: "2026-09-14T00:00:00.000Z",
-      endedAt: null,
-    },
-  ]);
+  assert.deepEqual(
+    JSON.parse(await new TaskListTool(backgroundTasks).execute('{"scope":"background"}')),
+    [
+      {
+        ...record,
+        startedAt: "2026-09-14T00:00:00.000Z",
+        endedAt: null,
+      },
+    ],
+  );
   assert.deepEqual(
     JSON.parse(await new TaskOutputTool(backgroundTasks).execute('{"taskId":"b_1","tail":2}')),
     { taskId: "b_1", stdout: "ok", stderr: "" },

@@ -5,26 +5,27 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { createRuntimeRequest } from "../../../packages/protocol/src/index.js";
-import type { RuntimeEvent } from "../../../src/engine/session-runtime-event.js";
-import { SESSION_RUNTIME_STATE_VERSION } from "../../../src/engine/session-runtime.js";
+import type { RuntimeEvent } from "@pico/storage/runtime-event";
+import { SESSION_RUNTIME_STATE_VERSION } from "@pico/core/session-runtime-state";
 import {
   SqliteSessionWorkbarRepository,
   WorkbarConflictError,
   WorkbarForbiddenError,
   WorkbarNotFoundError,
-} from "../../../src/storage/sqlite/sqlite-session-workbar-repository.js";
-import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
-import { withWorkspaceSqliteLease } from "../../../src/storage/sqlite/workspace-scopes.js";
-import { DesktopRuntimeService, WorkspaceRuntimeService } from "../../../src/daemon/index.js";
-import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
+} from "@pico/storage";
+import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
+import { withWorkspaceSqliteLease } from "@pico/storage";
+import { DesktopRuntimeService } from "@pico/pico-host/desktop-runtime-service";
+import { WorkspaceRuntimeService } from "@pico/pico-host/workspace-runtime-service";
+import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
 import { writeDesktopModelRouting } from "../../fixtures/desktop-model-routing.js";
 import {
   buildSessionTaskPromptBlock,
   createSessionTaskTools,
-} from "../../../src/tools/session-tasks.js";
-import { BackgroundManager } from "../../../src/tools/background-manager.js";
-import { TaskListTool } from "../../../src/tools/task.js";
-import type { RuntimeOwnerFence } from "../../../src/storage/runtime-event-store-contracts.js";
+} from "@pico/pico-host/session-task-tools";
+import { BackgroundManager } from "@pico/pico-host/background-manager";
+import { TaskListTool } from "@pico/runtime/background-task-tools";
+import type { RuntimeOwnerFence } from "@pico/storage/runtime-event-store-contracts";
 import { initializeRuntimeEventOwner } from "../helpers/runtime-event-owner.js";
 
 test("session workbar authority enforces CAS/idempotency and projects trace", async () => {

@@ -7,7 +7,7 @@ import {
   encodeRuntimeFrame,
   LOCAL_RUNTIME_PROTOCOL_VERSION,
 } from "../../../packages/protocol/src/index.js";
-import { WorkspaceRuntimeService } from "../../../src/daemon/workspace-runtime-service.js";
+import { WorkspaceRuntimeService } from "@pico/pico-host/workspace-runtime-service";
 import { createRuntimeNotification } from "../../../packages/protocol/src/index.js";
 
 test("oversized durable notifications are bounded before entering replay", async (context) => {

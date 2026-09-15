@@ -3,11 +3,11 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { HookTrustStore } from "../../../src/hooks/trust/store.js";
-import type { CommandHookHandler, HookSource } from "../../../src/hooks/types.js";
-import { executeAgentRuntime } from "../../../src/runtime/agent-runtime.js";
-import type { Message } from "../../../src/schema/message.js";
-import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
+import { HookTrustStore } from "@pico/pico-host/hooks/trust/store";
+import type { CommandHookHandler, HookSource } from "@pico/pico-host/hooks/types";
+import { executeAgentRuntime } from "@pico/pico-host/agent-runtime";
+import type { Message } from "@pico/core";
+import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
 
 // shell 化后 hook 全链路验收（2026-08-17）：配置加载 → 指纹审批 → PreToolUse
 // 触发时 shell 执行（命令含 && 组合，证明是 shell 解释而非 argv 直启）→

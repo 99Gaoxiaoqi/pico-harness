@@ -4,24 +4,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import {
-  agentOutputRecordIdFor,
-  claimIdFor,
-  graphIdFor,
-} from "../../../src/agent-graph/core/index.js";
-import { createAgentGraphSupervisorTools } from "../../../src/tools/agent-graph-tools.js";
-import { createBuiltinAgentGraphOperatorProfileCatalog } from "../../../src/agent-graph/operator-profile-catalog.js";
-import { createAgentGraphApplicationService } from "../../../src/agent-graph/service.js";
-import { AgentGraphNeedsAttentionError } from "../../../src/agent-graph/diagnostics.js";
-import type { AgentGraphRootWakePort } from "../../../src/agent-graph/supervisor-service.js";
-import type { AgentGraphRuntimeApplicationPort } from "../../../src/agent-graph/runtime-adapter-bridge.js";
-import type { ResolvedAgentGraphHandoff } from "../../../src/runtime/agent-graph-runtime-adapter.js";
+import { agentOutputRecordIdFor, claimIdFor, graphIdFor } from "@pico/core/agent-graph-identities";
+import { createAgentGraphSupervisorTools } from "@pico/pico-host/agent-graph-tools";
+import { createBuiltinAgentGraphOperatorProfileCatalog } from "@pico/runtime";
+import { createAgentGraphApplicationService } from "@pico/runtime/agent-graph-service";
+import { AgentGraphNeedsAttentionError } from "@pico/core/agent-graph-diagnostics";
+import type { AgentGraphRootWakePort } from "@pico/runtime";
+import type { AgentGraphRuntimeApplicationPort } from "@pico/runtime";
+import type { ResolvedAgentGraphHandoff } from "@pico/pico-host/agent-graph-runtime-adapter";
 import type {
   AgentGraphActivationClaimRecord,
   AgentGraphOperatorProvisionRecord,
   AgentGraphRecordRefRecord,
-} from "../../../src/storage/sqlite/agent-graph-store-types.js";
-import { SqliteAgentGraphControlStore } from "../../../src/storage/sqlite/sqlite-agent-graph-control-store.js";
+} from "@pico/core/agent-graph-store-contracts";
+import { SqliteAgentGraphControlStore } from "@pico/storage/sqlite/agent-graph-control-store";
 
 test("workspace application drives add and follow-up activate to records and finish", async () => {
   const storageRoot = await mkdtemp(join(tmpdir(), "pico-agent-graph-service-"));

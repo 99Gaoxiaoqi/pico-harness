@@ -5,19 +5,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createRuntimeRequest, RUNTIME_ERROR_CODES, RuntimeProtocolError } from "@pico/protocol";
-import {
-  canonicalizeWorkspacePath,
-  resolveGitBranch,
-  WorkspaceRegistrationStore,
-  WorkspaceRuntimeService,
-} from "../../../src/daemon/index.js";
-import type { WorkspaceTaskRuntime } from "../../../src/runtime/workspace-runtime.js";
-import { credentialRefForProvider } from "../../../src/provider/credential-vault.js";
-import { SqliteRuntimeControlStore } from "../../../src/storage/sqlite/sqlite-runtime-control-store.js";
-import { openOperationalDatabaseForBindingRepairSync } from "../../../src/storage/sqlite/sqlite-database.js";
-import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
-import { TaskHostRuntime } from "../../../src/tasks/task-runtime.js";
-import { DesktopRuntimeService } from "../../../src/daemon/desktop-runtime-service.js";
+import { canonicalizeWorkspacePath, resolveGitBranch } from "@pico/pico-host/workspace-registry";
+import { WorkspaceRegistrationStore } from "@pico/pico-host/workspace-registration";
+import { WorkspaceRuntimeService } from "@pico/pico-host/workspace-runtime-service";
+import type { WorkspaceTaskRuntime } from "@pico/pico-host/workspace-task-runtime";
+import { credentialRefForProvider } from "@pico/pico-host/provider/credential-vault";
+import { SqliteRuntimeControlStore } from "@pico/storage/sqlite/sqlite-runtime-control-store";
+import { openOperationalDatabaseForBindingRepairSync } from "@pico/storage";
+import { resolvePicoPaths } from "@pico/pico-host";
+import { TaskHostRuntime } from "@pico/pico-host/task-host-runtime";
+import { DesktopRuntimeService } from "@pico/pico-host/desktop-runtime-service";
 
 test("workspace branch discovery reports the current Git branch", async (context) => {
   const fixture = await createFixture("workspace-branch-discovery");

@@ -3,8 +3,8 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { globalSessionManager } from "../../../src/engine/session.js";
-import { executeAgentRuntime } from "../../../src/runtime/agent-runtime.js";
+import { globalSessionManager } from "@pico/pico-host/session";
+import { executeAgentRuntime } from "@pico/pico-host/agent-runtime";
 
 test("runtime refuses bare LLM environment credentials without a host-resolved user route", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-runtime-user-model-"));

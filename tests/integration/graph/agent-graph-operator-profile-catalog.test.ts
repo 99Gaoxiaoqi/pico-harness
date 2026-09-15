@@ -4,7 +4,7 @@ import test from "node:test";
 import {
   assertValidAgentGraphOperatorProfileSnapshot,
   createBuiltinAgentGraphOperatorProfileCatalog,
-} from "../../../src/agent-graph/operator-profile-catalog.js";
+} from "@pico/runtime";
 
 test("builtin Graph Operator catalog resolves immutable least-privilege snapshots", () => {
   const catalog = createBuiltinAgentGraphOperatorProfileCatalog();

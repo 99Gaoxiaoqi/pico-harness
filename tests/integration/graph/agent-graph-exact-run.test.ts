@@ -4,29 +4,27 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import type { AgentEngine } from "../../../src/engine/loop.js";
-import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
-import { SessionManager } from "../../../src/engine/session-manager.js";
-import { Session } from "../../../src/engine/session.js";
-import type { HookOutput } from "../../../src/hooks/types.js";
-import {
-  RUNTIME_EVENT_SCHEMA_VERSION,
-  type RuntimeEvent,
-} from "../../../src/storage/runtime-event.js";
-import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
+import type { AgentEngine } from "@pico/pico-host/agent-engine";
+import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
+import { SessionManager } from "@pico/pico-host/session-manager";
+import { Session } from "@pico/pico-host/session";
+import type { HookOutput } from "@pico/pico-host/hooks/types";
+import { RUNTIME_EVENT_SCHEMA_VERSION } from "@pico/core";
+import { type RuntimeEvent } from "@pico/storage/runtime-event";
+import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
 import {
   SqliteAgentGraphExactRunPort,
   type CreateAgentGraphExactRunPortOptions,
   type ExecuteAgentGraphExactRunInput,
-} from "../../../src/runtime/agent-graph-exact-run-port.js";
+} from "@pico/pico-host/product-agent-graph-exact-run-port";
 import {
   agentGraphInputRuntimeEventId,
   inspectAgentGraphExactRun,
 } from "@pico/runtime/agent-graph-exact-run-inspection";
-import type { StartExactAgentGraphRunInput } from "../../../src/runtime/agent-graph-runtime-adapter.js";
-import { RuntimeRunExecutor } from "../../../src/runtime/runtime-run-executor.js";
-import { currentRuntimeRun, RuntimeRun } from "../../../src/runtime/runtime-run.js";
-import type { SessionRuntime } from "../../../src/runtime/session-runtime.js";
+import type { StartExactAgentGraphRunInput } from "@pico/pico-host/agent-graph-runtime-adapter";
+import { RuntimeRunExecutor } from "@pico/pico-host/product-runtime-run-executor";
+import { currentRuntimeRun, RuntimeRun } from "@pico/pico-host/product-runtime-run";
+import type { SessionRuntime } from "@pico/pico-host/session-runtime";
 
 const EXACT_RUN: StartExactAgentGraphRunInput = {
   claimId: "claim-exact-1",

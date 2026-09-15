@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { TodoItem, TodoPriority, TodoStatus } from "@pico/storage/todo-store";
-import { TodoTool, type TodoStorePort } from "../../../src/tools/todo.js";
+import { TodoTool, type TodoStorePort } from "@pico/runtime/todo-tool";
 
 class MemoryTodoStore implements TodoStorePort {
   private nextId = 1;
@@ -61,7 +61,9 @@ test("TodoTool keeps the source compatibility entry while Runtime owns validatio
   assert.equal(tool.name(), "todo");
   assert.deepEqual(tool.accesses("{}"), [{ kind: "all" }]);
 
-  const added = await tool.execute(JSON.stringify({ action: "add", content: "迁移工具", priority: "high" }));
+  const added = await tool.execute(
+    JSON.stringify({ action: "add", content: "迁移工具", priority: "high" }),
+  );
   assert.match(added, /已添加任务 #1/u);
   assert.match(added, /#1:pending/u);
 
@@ -76,5 +78,8 @@ test("TodoTool keeps the source compatibility entry while Runtime owns validatio
   assert.match(await tool.execute(JSON.stringify({ action: "list" })), /\[x\]/u);
 
   await assert.rejects(tool.execute(JSON.stringify({ action: "update", id: 1 })), /至少需提供/u);
-  await assert.rejects(tool.execute(JSON.stringify({ action: "add", content: "x", priority: "urgent" })), /非法 priority/u);
+  await assert.rejects(
+    tool.execute(JSON.stringify({ action: "add", content: "x", priority: "urgent" })),
+    /非法 priority/u,
+  );
 });

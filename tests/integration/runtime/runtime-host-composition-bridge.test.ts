@@ -17,13 +17,13 @@ import {
 import type { JsonValue } from "@pico/protocol";
 import {
   createRuntimeHostCompositionFactory,
-  DesktopRuntimeService,
-  ensurePicoRuntimeHostOperationsRegistered,
-  WorkspaceRuntimeService,
   type RuntimeHostBridgeService,
-} from "../../../src/daemon/index.js";
-import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
-import { RUNTIME_REQUEST_RESULT_MAX_BYTES } from "../../../src/daemon/runtime-host-operations.js";
+} from "@pico/pico-host/runtime-host-composition";
+import { DesktopRuntimeService } from "@pico/pico-host/desktop-runtime-service";
+import { ensurePicoRuntimeHostOperationsRegistered } from "@pico/pico-host/runtime-host-operations";
+import { WorkspaceRuntimeService } from "@pico/pico-host/workspace-runtime-service";
+import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
+import { RUNTIME_REQUEST_RESULT_MAX_BYTES } from "@pico/pico-host/runtime-host-operations";
 
 ensurePicoRuntimeHostOperationsRegistered();
 

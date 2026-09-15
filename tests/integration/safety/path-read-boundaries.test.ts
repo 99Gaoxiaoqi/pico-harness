@@ -14,8 +14,8 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { RepoMapService } from "../../../src/code-intelligence/repo-map.js";
-import { expandMentionsToPrompt } from "../../../src/input/context-attachments.js";
+import { RepoMapService } from "@pico/pico-host/code-intelligence/repo-map";
+import { expandMentionsToPrompt } from "@pico/pico-host/input/context-attachments";
 
 const FILE_SECRET_MARKER = "PICO_EXTERNAL_FILE_SECRET";
 const DIRECTORY_SECRET_MARKER = "PICO_EXTERNAL_DIRECTORY_SECRET";

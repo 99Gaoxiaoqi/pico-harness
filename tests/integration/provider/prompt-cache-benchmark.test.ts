@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { BillingRoute } from "../../../src/observability/pricing.js";
-import { LLMStatusError } from "../../../src/provider/errors.js";
-import type { LLMProvider } from "../../../src/provider/interface.js";
-import type { Message, ToolDefinition, Usage } from "../../../src/schema/message.js";
+import type { BillingRoute } from "@pico/runtime/pricing";
+import { LLMStatusError } from "@pico/core";
+import type { LLMProvider } from "@pico/core";
+import type { Message, ToolDefinition, Usage } from "@pico/core";
 import {
   comparePromptCacheBenchmarkToCold,
   measurePromptCacheBenchmarkRequest,

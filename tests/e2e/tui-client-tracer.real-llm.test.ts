@@ -9,13 +9,16 @@ import {
   resolveRootControlNamespace,
   resolveStorageRoot,
 } from "@pico/runtime-host";
-import { LocalRuntimeClient } from "../../src/daemon/index.js";
-import { EMPTY_USER_CONFIG_REVISION, UserConfigStore } from "../../src/input/user-config-store.js";
-import { resolvePicoHome } from "../../src/paths/pico-paths.js";
-import { ClientSessionRuntime } from "../../src/tui/client-session-runtime.js";
-import { createClientCommandRegistry, processClientInput } from "../../src/tui/client-commands.js";
-import { TuiReporter } from "../../src/tui/tui-reporter.js";
-import { redactProviderErrorText } from "../../src/provider/error-redaction.js";
+import { LocalRuntimeClient } from "@pico/pico-host/local-runtime-client";
+import {
+  EMPTY_USER_CONFIG_REVISION,
+  UserConfigStore,
+} from "@pico/pico-host/input/user-config-store";
+import { resolvePicoHome } from "@pico/pico-host";
+import { ClientSessionRuntime } from "@pico/cli/tui/client-session-runtime";
+import { createClientCommandRegistry, processClientInput } from "@pico/cli/tui/client-commands";
+import { TuiReporter } from "@pico/cli/tui/tui-reporter";
+import { redactProviderErrorText } from "@pico/runtime";
 import { sendTuiTurn } from "./helpers/tui-turn.js";
 
 /**

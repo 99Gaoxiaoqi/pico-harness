@@ -1,3 +1,4 @@
+import { resolvePicoPaths } from "@pico/pico-host";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -17,15 +18,15 @@ import { RuntimeClientError } from "../../../apps/desktop/src/main/runtime-clien
 import {
   installLocalDaemonShutdownHandlers,
   LocalDaemonHost,
-  WorkspaceRegistrationStore,
-  WorkspaceRuntimeRegistry,
-  WorkspaceRuntimeService,
-  type DisposableLocalRuntimeService,
-} from "../../../src/daemon/index.js";
-import { loadHookSnapshot } from "../../../src/hooks/config.js";
-import { HookConfigReloader } from "../../../src/hooks/config/reloader.js";
-import { WorkspaceTaskRuntime } from "../../../src/runtime/workspace-runtime.js";
-import { JobService } from "../../../src/tasks/job-service.js";
+} from "@pico/pico-host/local-daemon-host";
+import { WorkspaceRegistrationStore } from "@pico/pico-host/workspace-registration";
+import { WorkspaceRuntimeRegistry } from "@pico/pico-host/workspace-registry";
+import { WorkspaceRuntimeService } from "@pico/pico-host/workspace-runtime-service";
+import { type DisposableLocalRuntimeService } from "@pico/pico-host/local-runtime-service";
+import { loadHookSnapshot } from "@pico/pico-host/hooks/config";
+import { HookConfigReloader } from "@pico/pico-host/hooks/config/reloader";
+import { WorkspaceTaskRuntime } from "@pico/pico-host/workspace-task-runtime";
+import { JobService } from "@pico/runtime/job-service";
 
 test("Workspace registry fences a get still canonicalizing when close begins", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-runtime-registry-close-"));
@@ -398,7 +399,9 @@ test("Daemon stop waits for TaskHost ownership until an abort-ignoring runner se
   assert.equal(settled.status, "stopped");
   assert.equal(settled.registry.status, "killed");
 
-  const { service: probe } = await JobService.create({ workDir: workspace, picoHome });
+  const { service: probe } = await JobService.create({
+    storageRoot: resolvePicoPaths(workspace, { picoHome: picoHome }).workspace.root,
+  });
   try {
     assert.equal(probe.get(task.taskId)?.job.status, "cancelled");
   } finally {
@@ -461,7 +464,9 @@ test("TaskHost fences a task admission whose pending subscriber synchronously cl
   assert.equal(runnerStarted, false);
   assert.equal(taskHost.taskRegistry.get(observed.taskId)?.status, "killed");
 
-  const { service: probe } = await JobService.create({ workDir: workspace, picoHome });
+  const { service: probe } = await JobService.create({
+    storageRoot: resolvePicoPaths(workspace, { picoHome: picoHome }).workspace.root,
+  });
   try {
     assert.equal(probe.get(observed.taskId)?.job.status, "cancelled");
   } finally {

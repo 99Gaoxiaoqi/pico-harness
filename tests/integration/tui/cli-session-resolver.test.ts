@@ -3,13 +3,10 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import {
-  findCliSessionSummary,
-  listCliSessionSummaries,
-} from "../../../src/cli/session-resolver.js";
-import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
-import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
-import type { RuntimeEvent } from "../../../src/engine/session-runtime-event.js";
+import { findCliSessionSummary, listCliSessionSummaries } from "@pico/cli/session-resolver";
+import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
+import { resolvePicoPaths } from "@pico/pico-host";
+import type { RuntimeEvent } from "@pico/storage/runtime-event";
 import { initializeRuntimeEventOwner } from "../helpers/runtime-event-owner.js";
 
 /**

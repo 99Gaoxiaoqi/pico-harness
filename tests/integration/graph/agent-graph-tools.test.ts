@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { AgentGraph } from "../../../src/agent-graph/core/contracts.js";
-import { createBuiltinAgentGraphOperatorProfileCatalog } from "../../../src/agent-graph/operator-profile-catalog.js";
-import type { CommitAgentGraphWorkInput } from "../../../src/agent-graph/work-request.js";
+import type { AgentGraph } from "@pico/core/agent-graph-contracts";
+import { createBuiltinAgentGraphOperatorProfileCatalog } from "@pico/runtime";
+import type { CommitAgentGraphWorkInput } from "@pico/runtime";
 import {
   AGENT_GRAPH_MAX_COMMANDS,
   AGENT_GRAPH_MAX_INPUT_REFS,

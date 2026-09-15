@@ -11,14 +11,14 @@ import {
   type WorkspaceStatusResult,
 } from "../../../packages/protocol/src/index.js";
 import { createRuntimeRequest } from "../../../packages/protocol/src/index.js";
-import { DesktopRuntimeService } from "../../../src/daemon/desktop-runtime-service.js";
+import { DesktopRuntimeService } from "@pico/pico-host/desktop-runtime-service";
 import {
   TemporaryWorkspaceAuthority,
   TemporaryWorkspaceUnavailableError,
-} from "../../../src/daemon/temporary-workspace-authority.js";
-import { WorkspaceRegistrationStore } from "../../../src/daemon/workspace-registration.js";
-import { WorkspaceRuntimeService } from "../../../src/daemon/workspace-runtime-service.js";
-import { Session } from "../../../src/engine/session.js";
+} from "@pico/pico-host/temporary-workspace-authority";
+import { WorkspaceRegistrationStore } from "@pico/pico-host/workspace-registration";
+import { WorkspaceRuntimeService } from "@pico/pico-host/workspace-runtime-service";
+import { Session } from "@pico/pico-host/session";
 
 test("temporary workspace protocol is strict and requires the temporary marker", () => {
   assert.deepEqual(parseStrictRuntimeParams("workspace.temporary.ensure", {}), {});

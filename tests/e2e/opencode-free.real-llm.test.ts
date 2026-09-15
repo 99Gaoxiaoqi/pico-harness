@@ -3,9 +3,9 @@ import test from "node:test";
 import {
   OPENCODE_FREE_PROVIDER,
   OPENCODE_FREE_ROUTE_ID,
-} from "../../src/input/default-provider.js";
-import { loadModelRouter } from "../../src/provider/model-router.js";
-import { AiSdkProvider } from "../../src/provider/ai-sdk-provider.js";
+} from "@pico/pico-host/input/default-provider";
+import { loadModelRouter } from "@pico/pico-host/provider/model-router";
+import { AiSdkProvider } from "@pico/pico-host/provider/ai-sdk-provider";
 
 // Explicit opt-in: sends only a synthetic, non-sensitive prompt to the public free endpoint.
 test(

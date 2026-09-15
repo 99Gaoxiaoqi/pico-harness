@@ -12,7 +12,7 @@ import {
   capSnippet,
   buildEvidence,
   type Candidate,
-} from "../../../src/tools/explore-repo.js";
+} from "@pico/pico-host/explore-repo-tool";
 
 // ============================================================
 // deriveQueries

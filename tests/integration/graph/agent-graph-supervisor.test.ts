@@ -13,7 +13,7 @@ import {
   type RecoverableAgentGraphSupervisorWake,
   type RootSupervisorRunIdentity,
   type RootSupervisorRunState,
-} from "../../../src/agent-graph/supervisor-service.js";
+} from "@pico/runtime";
 import type {
   AgentGraphRecord,
   AgentGraphSupervisorWakeAttemptRecord,
@@ -21,8 +21,8 @@ import type {
   ClaimAgentGraphSupervisorWakeInput,
   ClaimAgentGraphSupervisorWakeResult,
   SettleAgentGraphSupervisorWakeInput,
-} from "../../../src/storage/sqlite/agent-graph-store-types.js";
-import { SqliteAgentGraphControlStore } from "../../../src/storage/sqlite/sqlite-agent-graph-control-store.js";
+} from "@pico/core/agent-graph-store-contracts";
+import { SqliteAgentGraphControlStore } from "@pico/storage/sqlite/agent-graph-control-store";
 
 test("startup recovers open graphs and due supervisor wakes", async () => {
   const store = new SharedWakeStore();

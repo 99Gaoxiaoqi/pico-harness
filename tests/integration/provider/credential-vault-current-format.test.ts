@@ -3,7 +3,7 @@ import test from "node:test";
 import {
   credentialRefForProvider,
   parseProviderCredentialRef,
-} from "../../../src/provider/credential-vault.js";
+} from "@pico/pico-host/provider/credential-vault";
 
 test("credential vault only accepts the current provider-scoped reference", () => {
   const current = credentialRefForProvider({

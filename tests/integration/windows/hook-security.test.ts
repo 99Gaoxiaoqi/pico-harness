@@ -7,17 +7,17 @@ import { test, type TestContext } from "node:test";
 import {
   sanitizeCommandHookEnvironment,
   resolveHookShell,
-} from "../../../src/hooks/config/command-shell.js";
+} from "@pico/pico-host/hooks/config/command-shell";
 import {
   DefaultHookExecutor,
   type HookHandlerExecutorOptions,
-} from "../../../src/hooks/executors/executor.js";
-import { HookTrustStore } from "../../../src/hooks/trust/store.js";
-import type { CommandHookHandler, HookOutput } from "../../../src/hooks/types.js";
+} from "@pico/pico-host/hooks/executors/executor";
+import { HookTrustStore } from "@pico/pico-host/hooks/trust/store";
+import type { CommandHookHandler, HookOutput } from "@pico/pico-host/hooks/types";
 import {
   createSandboxPolicy,
   WINDOWS_RESTRICTED_NODE_OPTIONS,
-} from "../../../src/safety/process-sandbox/index.js";
+} from "@pico/pico-host/process-sandbox";
 
 const WINDOWS_ONLY =
   process.platform === "win32" ? false : "requires Windows executable and process-tree semantics";

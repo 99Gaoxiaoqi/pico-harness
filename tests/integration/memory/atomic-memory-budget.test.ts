@@ -3,12 +3,12 @@ import { test } from "node:test";
 import {
   memoryRequestFits,
   type MemoryRequestBudgetInput,
-} from "../../../src/memory/atomic/extraction-budget.js";
-import { CapabilityPreflightProvider } from "../../../src/provider/capability-preflight.js";
-import { ModelCapabilityError } from "../../../src/provider/errors.js";
-import { resolveModelRouteCapabilities } from "../../../src/provider/model-capabilities.js";
-import { ProviderAtomicMemoryModel } from "../../../src/runtime/atomic-memory-runtime.js";
-import type { MemoryModelRequest } from "../../../src/memory/atomic/runtime-contracts.js";
+} from "@pico/runtime/atomic-memory/extraction-budget";
+import { CapabilityPreflightProvider } from "@pico/runtime";
+import { ModelCapabilityError } from "@pico/core";
+import { resolveModelRouteCapabilities } from "@pico/runtime";
+import { ProviderAtomicMemoryModel } from "@pico/pico-host/atomic-memory-runtime";
+import type { MemoryModelRequest } from "@pico/core/atomic-memory-runtime-contracts";
 
 test("memory budget agrees with actual auxiliary requests for history, Chinese, tools and canonicalization", async () => {
   const contextWindowTokens = 4096;

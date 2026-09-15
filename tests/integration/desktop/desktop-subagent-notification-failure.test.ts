@@ -3,7 +3,8 @@ import { cp, mkdir, mkdtemp, readFile, rename, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { DesktopRuntimeService, WorkspaceRuntimeService } from "../../../src/daemon/index.js";
+import { DesktopRuntimeService } from "@pico/pico-host/desktop-runtime-service";
+import { WorkspaceRuntimeService } from "@pico/pico-host/workspace-runtime-service";
 import {
   createRuntimeRequest,
   isJsonObject,
@@ -11,13 +12,13 @@ import {
   type RuntimeNotification,
   type RuntimeSubagentPreset,
 } from "../../../packages/protocol/src/index.js";
-import { WorkspaceRegistrationStore } from "../../../src/daemon/workspace-registration.js";
-import { UserConfigStore } from "../../../src/input/user-config-store.js";
-import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
-import { logger } from "../../../src/observability/logger.js";
-import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
-import { operationalDatabasePath } from "../../../src/storage/sqlite/sqlite-database.js";
-import { prepareCurrentWorkspaceSqliteStorageSync } from "../../../src/storage/sqlite/workspace-scopes.js";
+import { WorkspaceRegistrationStore } from "@pico/pico-host/workspace-registration";
+import { UserConfigStore } from "@pico/pico-host/input/user-config-store";
+import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
+import { logger } from "@pico/pico-host/logger";
+import { resolvePicoPaths } from "@pico/pico-host";
+import { operationalDatabasePath } from "@pico/storage";
+import { prepareCurrentWorkspaceSqliteStorageSync } from "@pico/storage";
 
 test(
   "committed subagent settings survive notification failures and admit output reading in healthy workspaces",

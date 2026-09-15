@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { LLMStatusError } from "../../../src/provider/errors.js";
-import type { LLMProvider } from "../../../src/provider/interface.js";
+import { LLMStatusError } from "@pico/core";
+import type { LLMProvider } from "@pico/core";
 import {
   classifyProviderError,
   defaultIsRetryableError,
   generateWithRetry,
-} from "../../../src/provider/retry.js";
+} from "@pico/runtime/provider-retry";
 
 test("default retry classification accepts current structured failures only", () => {
   const timeout = new Error("provider timed out");

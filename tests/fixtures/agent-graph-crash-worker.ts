@@ -6,11 +6,11 @@ import {
 import {
   agentOutputFingerprint,
   agentOutputIdempotencyKey,
-} from "../../src/tools/agent-output-tool.js";
-import { SqliteAgentGraphControlStore } from "../../src/storage/sqlite/sqlite-agent-graph-control-store.js";
-import { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
-import type { AgentGraphProfileSnapshot } from "../../src/agent-graph/core/contracts.js";
-import type { RuntimeEvent } from "../../src/storage/runtime-event.js";
+} from "@pico/pico-host/agent-output-tool";
+import { SqliteAgentGraphControlStore } from "@pico/storage/sqlite/agent-graph-control-store";
+import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
+import type { AgentGraphProfileSnapshot } from "@pico/core/agent-graph-contracts";
+import type { RuntimeEvent } from "@pico/storage/runtime-event";
 
 interface Config {
   readonly mode: "prepare" | "recover";

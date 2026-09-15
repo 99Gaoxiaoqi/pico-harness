@@ -3,8 +3,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { EVENT_LOG_CLOSURE_WRITE_INTENTS } from "../../../src/storage/event-log-retention-policy.js";
-import { closeAllOperationalDatabasesForTest } from "../../../src/storage/sqlite/sqlite-database.js";
+import { EVENT_LOG_CLOSURE_WRITE_INTENTS } from "@pico/storage";
+import { closeAllOperationalDatabasesForTest } from "@pico/storage";
 import {
   EventLogQuotaBlockedError,
   admitEventLogNewWork,
@@ -13,8 +13,8 @@ import {
   readEventLogStorageStatus,
   readPendingEventLogBlobGcIntents,
   recordEventLogBlobGcResult,
-} from "../../../src/storage/sqlite/sqlite-event-log-retention-store.js";
-import { withWorkspaceSqliteLease } from "../../../src/storage/sqlite/workspace-scopes.js";
+} from "@pico/storage/sqlite/event-log-retention-store";
+import { withWorkspaceSqliteLease } from "@pico/storage";
 
 const TINY_POLICY = { hardLimitBytes: 2, lowWatermarkBytes: 1 } as const;
 const EVIDENCE_DIGEST = "a".repeat(64);

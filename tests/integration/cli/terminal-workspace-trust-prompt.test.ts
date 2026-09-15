@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { PassThrough } from "node:stream";
 import { createTerminalWorkspaceTrustPrompt } from "@pico/cli/workspace-trust-prompt";
-import { createTerminalWorkspaceTrustPrompt as legacyCreateTerminalWorkspaceTrustPrompt } from "../../../src/cli/workspace-trust-prompt.js";
+import { createTerminalWorkspaceTrustPrompt as legacyCreateTerminalWorkspaceTrustPrompt } from "@pico/cli/workspace-trust-prompt";
 
 function startTrustRequest(workspacePath = "/tmp/pico-workspace") {
   const input = new PassThrough();

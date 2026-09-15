@@ -1,18 +1,18 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { AiSdkProvider } from "../../../src/provider/ai-sdk-provider.js";
-import { LLMStatusError } from "../../../src/provider/errors.js";
-import type { LLMProvider, LLMProviderRequestOptions } from "../../../src/provider/interface.js";
-import { resolveModelRouteCapabilities } from "../../../src/provider/model-capabilities.js";
+import { AiSdkProvider } from "@pico/pico-host/provider/ai-sdk-provider";
+import { LLMStatusError } from "@pico/core";
+import type { LLMProvider, LLMProviderRequestOptions } from "@pico/core";
+import { resolveModelRouteCapabilities } from "@pico/runtime";
 import {
   openAIPromptCacheKey,
   promptCacheRevisions,
   promptCacheRouteIdentity,
   snapshotToolDefinitions,
-} from "../../../src/provider/prompt-cache.js";
-import { normalizePromptCacheEndpoint } from "../../../src/provider/provider-endpoint.js";
-import { generateWithRetry } from "../../../src/provider/retry.js";
-import type { Message, ToolDefinition } from "../../../src/schema/message.js";
+} from "@pico/runtime/prompt-cache";
+import { normalizePromptCacheEndpoint } from "@pico/runtime/provider-endpoint";
+import { generateWithRetry } from "@pico/runtime/provider-retry";
+import type { Message, ToolDefinition } from "@pico/core";
 
 const messages = (question: string): Message[] => [
   { role: "system", content: "stable system rule" },

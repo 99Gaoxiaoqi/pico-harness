@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { SessionPermissionGrants } from "../../../src/approval/session-permissions.js";
-import { compileRuntimeProcessSandbox } from "../../../src/safety/runtime-process-sandbox.js";
+import { SessionPermissionGrants } from "@pico/pico-host/session-permissions";
+import { compileRuntimeProcessSandbox } from "@pico/pico-host/runtime-process-sandbox";
 import {
   applyExecutionBoundaryExpansion,
   createBypassExecutionBoundary,
   createManagedExecutionBoundary,
   createWorkspaceWritePermissionProfile,
-} from "../../../src/safety/permission-profile.js";
+} from "@pico/core/permission-profile";
 
 const scratchRoot = "/tmp/pico-runtime-process-sandbox-test";
 const managedBoundary = createManagedExecutionBoundary(createWorkspaceWritePermissionProfile());

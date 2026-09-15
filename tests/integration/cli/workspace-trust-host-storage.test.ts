@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { ensureWorkspaceTrusted, WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
 import { WorkspaceTrustStore as StorageWorkspaceTrustStore } from "@pico/storage/workspace-trust-store";
-import { ensureWorkspaceTrusted as legacyEnsureWorkspaceTrusted } from "../../../src/security/workspace-trust.js";
+import { ensureWorkspaceTrusted as legacyEnsureWorkspaceTrusted } from "@pico/pico-host/workspace-trust";
 
 test("workspace trust keeps fail-closed policy in Host and durable state in Storage", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-workspace-trust-"));

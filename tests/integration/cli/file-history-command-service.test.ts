@@ -9,7 +9,7 @@ import {
   rewindFileHistoryFromCli,
   type FileHistoryForkSessionPort,
 } from "@pico/pico-host/file-history";
-import { defaultCliSessionId as legacyDefaultCliSessionId } from "../../../src/cli/file-history.js";
+import { defaultCliSessionId as legacyDefaultCliSessionId } from "@pico/pico-host/file-history";
 
 function createSession(): FileHistoryForkSessionPort<{ readonly kind: "fork-runtime" }> {
   return {

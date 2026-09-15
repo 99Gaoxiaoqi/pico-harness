@@ -12,8 +12,8 @@ import {
   fileHistoryLoadState,
   fileHistoryRegisterRoot,
   fileHistoryTrackEdit,
-} from "../../../src/safety/file-history.js";
-import { readFileHistoryManifestRow } from "../../../src/storage/sqlite/file-history-manifest-store.js";
+} from "@pico/pico-host/file-history-runtime";
+import { readFileHistoryManifestRow } from "@pico/storage/sqlite/file-history-manifest-store";
 
 interface FileHistoryFixture {
   readonly root: string;
