@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { writeJsonAtomic } from "../../../../src/storage/atomic-json.js";
+import { writeJsonAtomic } from "@pico/storage";
 import { normalizeBrowserAddress } from "./browser-logic.js";
 
 const BROWSER_URL_STATE_VERSION = 2;

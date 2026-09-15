@@ -11,7 +11,7 @@ import { startRuntimeSupervisor, type RuntimeSupervisorEvent } from "./runtime-s
 import { createDesktopWindow } from "./window.js";
 import { configureAutoUpdates } from "./updater.js";
 import { installApplicationMenu } from "./menu.js";
-import { sleepForRetry } from "../../../../src/provider/retry.js";
+import { sleepForRetry } from "@pico/runtime/provider-retry";
 import { createEmbeddedBrowserAuthority } from "./browser-manager.js";
 import { ensureDesktopRuntimeStorageRoot } from "./runtime-storage-recovery.js";
 import {
@@ -19,7 +19,7 @@ import {
   createDesktopTerminalCleanupFence,
   DesktopTerminalGenerationController,
 } from "./daemon-controller.js";
-import { resolveCanonicalPicoHome } from "../../../../src/paths/pico-paths.js";
+import { resolveCanonicalPicoHome } from "@pico/pico-host/pico-paths";
 
 let mainWindow: BrowserWindow | undefined;
 let disposeIpc: (() => void) | undefined;

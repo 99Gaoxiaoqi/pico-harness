@@ -8,12 +8,15 @@
     "start": "node --env-file-if-exists=../../.env ../../scripts/run-desktop-forge.mjs start",
     "package": "node ../../scripts/run-desktop-forge.mjs package",
     "make": "node ../../scripts/run-desktop-forge.mjs make",
-    "pretypecheck": "npm run build --workspace @pico/protocol && npm run build --workspace @pico/transcript-replica && npm run build --workspace @pico/runtime-host",
+    "pretypecheck": "npm run build --workspace @pico/core && npm run build --workspace @pico/storage && npm run build --workspace @pico/runtime && npm run build --workspace @pico/protocol && npm run build --workspace @pico/transcript-replica && npm run build --workspace @pico/runtime-host && npm run build --workspace @pico/pico-host",
     "typecheck": "tsc --noEmit -p tsconfig.main.json && tsc --noEmit -p tsconfig.preload.json && tsc --noEmit -p tsconfig.renderer.json"
   },
   "dependencies": {
+    "@pico/pico-host": "*",
     "@pico/protocol": "*",
+    "@pico/runtime": "*",
     "@pico/runtime-host": "*",
+    "@pico/storage": "*",
     "@pico/transcript-replica": "*",
     "@radix-ui/react-dialog": "^1.1.19",
     "@radix-ui/react-tooltip": "^1.2.12",

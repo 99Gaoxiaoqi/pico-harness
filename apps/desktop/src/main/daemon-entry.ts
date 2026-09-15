@@ -4,7 +4,7 @@ import {
   parseRuntimeHostCandidateArguments,
   runRuntimeHostProcessLifecycle,
 } from "@pico/runtime-host";
-import { startPicoDaemonRuntimeHostCandidate } from "../../../../src/daemon/runtime-host-candidate.js";
+import { startPicoDaemonRuntimeHostCandidate } from "@pico/pico-host/product-runtime-host-candidate";
 
 async function runDesktopDaemonCandidate(): Promise<void> {
   const options = parseRuntimeHostCandidateArguments(process.argv.slice(2));
