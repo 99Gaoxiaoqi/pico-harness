@@ -8,9 +8,9 @@ export interface UsageLedgerTotals {
 
 export interface UsageBaselineRecord extends UsageLedgerTotals {
   readonly baselineId: string;
-  readonly sessionId?: string;
+  readonly sessionId?: string | undefined;
   readonly importedAt: number;
-  readonly source?: Readonly<Record<string, unknown>>;
+  readonly source?: Readonly<Record<string, unknown>> | undefined;
 }
 
 export interface UsageBaselineSessionPort {

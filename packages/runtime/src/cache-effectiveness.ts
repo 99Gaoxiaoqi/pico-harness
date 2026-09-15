@@ -7,18 +7,18 @@ import {
 /** Read-only per-call facts consumed by cache diagnostics. */
 export interface ProviderCallCacheRecord {
   readonly callId: string;
-  readonly sessionId?: string;
-  readonly conversationId?: string;
-  readonly jobId?: string;
-  readonly attemptId?: string;
+  readonly sessionId?: string | undefined;
+  readonly conversationId?: string | undefined;
+  readonly jobId?: string | undefined;
+  readonly attemptId?: string | undefined;
   readonly purpose: string;
   readonly provider: string;
   readonly model: string;
-  readonly route?: string;
+  readonly route?: string | undefined;
   readonly inputTokens: number;
   readonly cacheReadTokens: number;
   readonly cacheWriteTokens: number;
-  readonly reported?: Readonly<Record<string, unknown>>;
+  readonly reported?: Readonly<Record<string, unknown>> | undefined;
   readonly createdAt: number;
 }
 

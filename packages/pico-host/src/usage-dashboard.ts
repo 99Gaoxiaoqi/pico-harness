@@ -11,8 +11,8 @@ export interface UsageProviderCallRecord {
   readonly callId: string;
   readonly model: string;
   readonly provider: string;
-  readonly route?: string;
-  readonly sessionId?: string;
+  readonly route?: string | undefined;
+  readonly sessionId?: string | undefined;
   readonly createdAt: number;
   readonly status: string;
   readonly inputTokens: number;
@@ -21,11 +21,11 @@ export interface UsageProviderCallRecord {
   readonly cacheWriteTokens: number;
   readonly cost: number;
   readonly reported?: {
-    readonly usageMetadata?: string;
-    readonly reportedFields?: readonly string[];
-    readonly costStatus?: string;
-    readonly latencyMs?: number;
-  };
+    readonly usageMetadata?: string | undefined;
+    readonly reportedFields?: readonly string[] | undefined;
+    readonly costStatus?: string | undefined;
+    readonly latencyMs?: number | undefined;
+  } | undefined;
 }
 
 export interface UsageRuntimeEventReader {
