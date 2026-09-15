@@ -4,12 +4,13 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { createRuntimeRequest } from "../../../packages/protocol/src/index.js";
-import { DesktopRuntimeService, WorkspaceRuntimeService } from "../../../src/daemon/index.js";
+import { DesktopRuntimeService } from "@pico/pico-host/desktop-runtime-service";
+import { WorkspaceRuntimeService } from "@pico/pico-host/workspace-runtime-service";
 import { globalSessionManager } from "../../../src/engine/session.js";
 import { PluginRuntimeSnapshotRegistry } from "@pico/pico-host/plugins/plugin-runtime-snapshot-registry";
 import type { PluginRuntimeSnapshot } from "@pico/pico-host/plugins/plugin-runtime-snapshot";
 import { PluginCapabilityRegistry } from "@pico/pico-host/plugins/plugin-capability";
-import { createProductionLocalDaemonHost } from "../../../src/daemon/production-host.js";
+import { createProductionLocalDaemonHost } from "@pico/pico-host/production-host";
 import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
 import {
   createTrustedDesktopAutomation,

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { AgentGraphReadOnlyQueryService } from "../../../src/agent-graph/query-service.js";
+import { AgentGraphReadOnlyQueryService } from "@pico/pico-host/product-agent-graph-query-service";
 import { agentOutputRecordIdFor, graphIdFor } from "../../../src/agent-graph/core/ids.js";
 import { createBuiltinAgentGraphOperatorProfileCatalog } from "../../../src/agent-graph/operator-profile-catalog.js";
 import { SqliteAgentGraphControlStoreAdapter } from "../../../src/agent-graph/sqlite-control-store-adapter.js";
