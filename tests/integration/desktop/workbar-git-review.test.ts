@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import { WorkbarGitReviewAuthority, WorkbarGitReviewError } from "@pico/pico-host";
+import { DesktopWorkbarGitReviewService } from "../../../packages/pico-host/src/desktop-workbar-git-review-service.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -19,10 +20,12 @@ test("Git Review 用内容 revision 绑定 staged/unstaged/untracked 快照", as
   const authority = await WorkbarGitReviewAuthority.open(repository);
   const initial = await authority.snapshot();
   assert.equal(initial.branch, "main");
-  assert.deepEqual(initial.staged, [{ path: "tracked.txt", stage: "staged", status: "modified" }]);
+  assert.deepEqual(initial.staged, [
+    { path: "tracked.txt", stage: "staged", status: "modified", additions: 1, deletions: 1 },
+  ]);
   assert.deepEqual(initial.unstaged, [
-    { path: "tracked.txt", stage: "unstaged", status: "modified" },
-    { path: "new.txt", stage: "unstaged", status: "untracked" },
+    { path: "tracked.txt", stage: "unstaged", status: "modified", additions: 1, deletions: 1 },
+    { path: "new.txt", stage: "unstaged", status: "untracked", additions: 1, deletions: 0 },
   ]);
 
   const untrackedDiff = await authority.diff({
@@ -49,6 +52,74 @@ test("Git Review 用内容 revision 绑定 staged/unstaged/untracked 快照", as
     }),
     (error: unknown) =>
       error instanceof WorkbarGitReviewError && error.code === "revision_conflict",
+  );
+});
+
+test("Desktop Git list counts match untracked diffs including empty, binary and newline boundaries", async (context) => {
+  const repository = await createRepository(context, "counts");
+  const fixtures = [
+    { path: "new.txt", content: "first\n", additions: 1 },
+    { path: "no-newline.txt", content: "first\nsecond", additions: 2 },
+    { path: "empty.txt", content: "", additions: 0 },
+    { path: "blank.txt", content: "\n\n", additions: 2 },
+    { path: "binary.dat", content: Buffer.from([0, 1, 10]), additions: 0 },
+    {
+      path: process.platform === "win32" ? "spaces and tabs.txt" : "spaces\tand tabs.txt",
+      content: "中文\r\n第二行\r\n",
+      additions: 2,
+    },
+  ];
+  for (const fixture of fixtures) await writeFile(join(repository, fixture.path), fixture.content);
+  if (process.platform !== "win32") {
+    await symlink("../outside-target", join(repository, "link"));
+  }
+  await writeFile(join(repository, "tracked.txt"), "staged\nsecond\n");
+  await git(repository, "add", "tracked.txt");
+  await writeFile(join(repository, "tracked.txt"), "unstaged\n");
+
+  const service = new DesktopWorkbarGitReviewService();
+  const snapshot = await service.snapshot({ workspacePath: repository, source: "unstaged" });
+  for (const fixture of fixtures) {
+    const file = snapshot.files.find((candidate) => candidate.path === fixture.path);
+    assert.deepEqual(file, {
+      path: fixture.path,
+      status: "added",
+      additions: fixture.additions,
+      deletions: 0,
+    });
+    const diff = await service.diff({
+      workspacePath: repository,
+      path: fixture.path,
+      source: "unstaged",
+      expectedRevision: snapshot.revision,
+    });
+    const additions = diff.patch
+      .split("\n")
+      .filter((line) => line.startsWith("+") && !line.startsWith("+++")).length;
+    assert.equal(additions, file.additions, fixture.path);
+    if (fixture.path === "no-newline.txt")
+      assert.match(diff.patch, /\\ No newline at end of file/u);
+    if (fixture.path === "binary.dat") assert.match(diff.patch, /Binary files/u);
+    if (fixture.path === "empty.txt") assert.doesNotMatch(diff.patch, /@@/u);
+  }
+  assert.deepEqual(
+    snapshot.files.find((file) => file.path === "tracked.txt"),
+    { path: "tracked.txt", status: "modified", additions: 1, deletions: 2 },
+  );
+  const staged = await service.snapshot({ workspacePath: repository, source: "staged" });
+  assert.deepEqual(staged.files, [
+    { path: "tracked.txt", status: "modified", additions: 2, deletions: 1 },
+  ]);
+  if (process.platform !== "win32")
+    assert.equal(snapshot.files.find((file) => file.path === "link")?.additions, 1);
+
+  const bounded = await WorkbarGitReviewAuthority.open(repository, {
+    limits: { maxUntrackedFileBytes: 32 },
+  });
+  await writeFile(join(repository, "large.txt"), "a".repeat(33));
+  await assert.rejects(
+    bounded.snapshot(),
+    (error: unknown) => error instanceof WorkbarGitReviewError && error.code === "limit_exceeded",
   );
 });
 

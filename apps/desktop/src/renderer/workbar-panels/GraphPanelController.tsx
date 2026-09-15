@@ -234,15 +234,16 @@ export function graphClaimDisplayState(input: {
   readonly runtimeStatus?: string;
   readonly outputStatus?: "success" | "failure";
 }): string {
-  if (input.controlState === "cancelled" || input.runtimeStatus === "cancelled") {
-    return "cancelled";
-  }
+  // Finishing a Graph cancels control claims for cleanup, including completed runs.
+  // Durable execution outcomes remain authoritative after that control transition.
+  if (input.runtimeStatus === "cancelled") return "cancelled";
   if (input.outputStatus === "failure") return "failed";
   if (input.runtimeStatus === "interrupted") return "interrupted";
   if (input.runtimeStatus === "failed") return "failed";
   if (input.runtimeStatus === "completed") {
     return input.outputStatus === "success" ? "completed" : "failed";
   }
+  if (input.controlState === "cancelled") return "cancelled";
   if (input.runtimeStatus === "waiting_permission") return "waiting_permission";
   if (input.runtimeStatus === "running") return "running";
   if (input.runtimeStatus === "not_started") return "claimed";
