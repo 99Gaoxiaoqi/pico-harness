@@ -45,6 +45,8 @@ for (const planning of [false, true]) {
       const pendingDelta = Promise.withResolvers<void>();
       const externalFlush = Promise.withResolvers<void>();
       const degraded: unknown[] = [];
+      const overlayIdentities: { itemId: string; turnId: string; kind: string }[] = [];
+      const forwardedReporterEvents: string[] = [];
       let graphHost: AgentGraphWorkspaceHost | undefined;
       const runtimeAgent = new (class extends AgentRuntime {
         override execute(options: RunAgentCliOptions, dependencies: RunAgentCliDependencies) {
@@ -94,9 +96,14 @@ for (const planning of [false, true]) {
                   dependencies.reporter?.onTextDelta?.("prefix ");
                   await firstDelta.promise;
                   dependencies.reporter?.onTextDelta?.("suffix");
+                  dependencies.reporter?.onReasoningDelta?.("stream reasoning");
                   await externalFlush.promise;
                 }
-                if (step === 1) return toolCall("read", "read_file", { path: "TASK.txt" });
+                if (step === 1)
+                  return {
+                    ...toolCall("read", "read_file", { path: "TASK.txt" }),
+                    reasoning: "stream reasoning",
+                  };
                 assert.ok(
                   messages.some(
                     (message) =>
@@ -133,14 +140,22 @@ for (const planning of [false, true]) {
       let services = makeServices();
       if (!planning)
         services.attachSessionSubscriptions({
-          publishSessionDelta(delta: { text: string }) {
+          publishSessionDelta(delta: {
+            text: string;
+            itemId: string;
+            turnId: string;
+            kind: string;
+          }) {
+            overlayIdentities.push(delta);
             if (delta.text === "prefix ") firstDelta.resolve();
             if (delta.text === "suffix") pendingDelta.resolve();
           },
           publishContinuityDegraded(...args: unknown[]) {
             degraded.push(args);
           },
-          publishReporterEvent() {},
+          publishReporterEvent(_workspace: string, event: { type: string }) {
+            forwardedReporterEvents.push(event.type);
+          },
           publishTranscriptAdvanced() {},
         } as unknown as SessionSubscriptionRegistry);
       try {
@@ -259,6 +274,30 @@ for (const planning of [false, true]) {
         const starts = events.filter((event) => event.kind === "run.started");
         assert.ok(starts.length);
         assert.ok(starts.every((event) => event.data.agentSwarmAuthorization === "turn_override"));
+        if (!planning) {
+          const committedTurns = new Set(
+            events
+              .filter((event) => event.kind === "message.committed")
+              .map((event) => event.turnId),
+          );
+          assert.ok(overlayIdentities.length > 0);
+          for (const overlay of overlayIdentities) {
+            assert.ok(
+              committedTurns.has(overlay.turnId),
+              "live and durable messages must share the Runtime turn identity",
+            );
+            assert.equal(
+              overlay.itemId,
+              `message:${overlay.turnId}:${overlay.kind === "thinking" ? "thinking" : "assistant"}`,
+            );
+          }
+          assert.ok(overlayIdentities.some((overlay) => overlay.kind === "thinking"));
+          assert.equal(
+            forwardedReporterEvents.includes("assistant.message"),
+            false,
+            "canonical final must not create a second legacy overlay",
+          );
+        }
         if (!planning) {
           const ordinary = (await services.service.startForegroundRun({
             workspacePath,
