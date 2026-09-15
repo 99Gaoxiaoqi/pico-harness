@@ -102,7 +102,9 @@ export class SessionRuntimeLifecycle<ProcessSandbox, ComponentSource> {
   private codeIntelligenceDisposing = false;
   private codeIntelligenceEnabled: boolean;
 
-  constructor(private readonly options: SessionRuntimeLifecycleOptions<ProcessSandbox, ComponentSource>) {
+  constructor(
+    private readonly options: SessionRuntimeLifecycleOptions<ProcessSandbox, ComponentSource>,
+  ) {
     this.workDir = resolve(options.session.workDir);
     this.sessionId = options.session.id;
     this.picoHome = resolvePicoHome({ picoHome: options.session.picoHome });
@@ -254,7 +256,9 @@ export class SessionRuntimeLifecycle<ProcessSandbox, ComponentSource> {
     }
 
     await attempt(() => this.options.componentHooks?.dispose());
-    await attempt(() => detachSessionSandboxRoot(this.picoHome, this.sessionId, this.options.diagnostics));
+    await attempt(() =>
+      detachSessionSandboxRoot(this.picoHome, this.sessionId, this.options.diagnostics),
+    );
     await attempt(() => this.options.hookRewakeQueue.close());
     await attempt(() => this.options.unbindGoalManager());
     await attempt(() => this.options.releaseSessionPin());
@@ -263,7 +267,9 @@ export class SessionRuntimeLifecycle<ProcessSandbox, ComponentSource> {
     }
   }
 
-  private async withCodeIntelligenceTransition<Result>(operation: () => Promise<Result>): Promise<Result> {
+  private async withCodeIntelligenceTransition<Result>(
+    operation: () => Promise<Result>,
+  ): Promise<Result> {
     const previous = this.codeIntelligenceTransition;
     let release!: () => void;
     this.codeIntelligenceTransition = new Promise<void>((resolveTransition) => {

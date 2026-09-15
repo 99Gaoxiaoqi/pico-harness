@@ -9,11 +9,7 @@ import {
   type LoadHookSnapshotResult,
 } from "../config.js";
 import type { HookOutput, HookSnapshot, HookSource } from "../types.js";
-import {
-  raceWithDeadline,
-  scheduleDeadline,
-  type ScheduledDeadline,
-} from "@pico/runtime/deadline";
+import { raceWithDeadline, scheduleDeadline, type ScheduledDeadline } from "@pico/runtime/deadline";
 
 const DEFAULT_STOP_DRAIN_TIMEOUT_MS = 1_000;
 const WATCH_FILE_FALLBACK_INTERVAL_MS = 250;

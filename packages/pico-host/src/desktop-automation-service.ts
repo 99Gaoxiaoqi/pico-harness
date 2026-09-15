@@ -301,7 +301,10 @@ export class DesktopAutomationService {
     };
   }
 
-  private withCron<Result>(workspacePath: string, operation: (cron: CronService) => Result): Result {
+  private withCron<Result>(
+    workspacePath: string,
+    operation: (cron: CronService) => Result,
+  ): Result {
     const cron = new CronService({
       storageRoot: resolvePicoPaths(workspacePath, {
         ...(this.options.picoHome ? { picoHome: this.options.picoHome } : {}),
@@ -323,7 +326,11 @@ export async function importDesktopAutomationCredential(
   input: DesktopAutomationCredentialImport,
   dependencies: DesktopAutomationAuthorityDependencies,
 ): Promise<{ readonly imported: true; readonly credentialRef: CredentialRef }> {
-  const target = await resolveDesktopAutomationTarget(workspacePath, input.modelRouteId, dependencies);
+  const target = await resolveDesktopAutomationTarget(
+    workspacePath,
+    input.modelRouteId,
+    dependencies,
+  );
   if (target.ref !== input.expectedCredentialRef) {
     throw new RuntimeProtocolError(
       RUNTIME_ERROR_CODES.CONFLICT,
@@ -351,7 +358,9 @@ export async function createTrustedDesktopAutomation(
   dependencies: DesktopAutomationAuthorityDependencies,
 ): Promise<RuntimeJob> {
   const requestedTools = uniqueNonEmptyStrings(input.allowedTools, "allowedTools");
-  const foregroundOnlyTools = requestedTools.filter((tool) => dependencies.foregroundOnlyTools?.has(tool));
+  const foregroundOnlyTools = requestedTools.filter((tool) =>
+    dependencies.foregroundOnlyTools?.has(tool),
+  );
   if (foregroundOnlyTools.length > 0) {
     throw new RuntimeProtocolError(
       RUNTIME_ERROR_CODES.FORBIDDEN,
@@ -365,7 +374,11 @@ export async function createTrustedDesktopAutomation(
       `Automation 包含未显式授权的工具: ${deniedTools.join(", ")}`,
     );
   }
-  const target = await resolveDesktopAutomationTarget(workspacePath, input.modelRouteId, dependencies);
+  const target = await resolveDesktopAutomationTarget(
+    workspacePath,
+    input.modelRouteId,
+    dependencies,
+  );
   if (target.ref !== input.expectedCredentialRef) {
     throw new RuntimeProtocolError(
       RUNTIME_ERROR_CODES.CONFLICT,
@@ -469,7 +482,11 @@ function providerIdForRoute(modelRouteId: string): string | undefined {
   return separator > 0 ? modelRouteId.slice(0, separator) : undefined;
 }
 
-function requireWorkspaceJob(cron: CronService, workspacePath: string, jobId: string): CronJobRecord {
+function requireWorkspaceJob(
+  cron: CronService,
+  workspacePath: string,
+  jobId: string,
+): CronJobRecord {
   const job = cron.store.getCronJob(jobId);
   if (!job || job.workspacePath !== workspacePath) {
     throw new RuntimeProtocolError(

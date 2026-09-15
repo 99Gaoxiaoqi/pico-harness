@@ -181,7 +181,8 @@ export class SqliteSessionContinuitySource implements SessionContinuityDataSourc
 
   private openStore(workspacePath: string): SqliteRuntimeEventStore {
     return new SqliteRuntimeEventStore({
-      storageRoot: resolvePicoPaths(workspacePath, { picoHome: this.options.picoHome }).workspace.root,
+      storageRoot: resolvePicoPaths(workspacePath, { picoHome: this.options.picoHome }).workspace
+        .root,
     });
   }
 }
@@ -193,16 +194,20 @@ function planControlSnapshot(
   available: boolean,
 ): RuntimePlanControlSnapshot {
   const intent = projection.reviewClaim
-    ? [...intents].reverse().find(
-        (candidate) =>
-          candidate.operationId === projection.reviewClaim?.operationId &&
-          candidate.controlEpoch === projection.reviewClaim.controlEpoch,
-      )
-    : projection.revisionRequest
-      ? [...intents].reverse().find(
+    ? [...intents]
+        .reverse()
+        .find(
           (candidate) =>
-            `${candidate.operationId}:transition` === projection.revisionRequest?.operationId,
+            candidate.operationId === projection.reviewClaim?.operationId &&
+            candidate.controlEpoch === projection.reviewClaim.controlEpoch,
         )
+    : projection.revisionRequest
+      ? [...intents]
+          .reverse()
+          .find(
+            (candidate) =>
+              `${candidate.operationId}:transition` === projection.revisionRequest?.operationId,
+          )
       : activeRunId
         ? [...intents].reverse().find((candidate) => candidate.runId === activeRunId)
         : undefined;
@@ -279,7 +284,9 @@ function itemRecord(value: {
   };
 }
 
-function itemFragment(value: RuntimeTranscriptProjectedItemFragment): RuntimeTranscriptItemFragment {
+function itemFragment(
+  value: RuntimeTranscriptProjectedItemFragment,
+): RuntimeTranscriptItemFragment {
   return {
     itemId: value.itemId,
     itemRevision: value.itemRevision,
@@ -349,16 +356,25 @@ async function readDisplayRunOverlays(
   displayRunId: string,
   _anchorSequence: number,
 ): Promise<RuntimeActiveOverlayEntry[]> {
-  const exact = projectRunPartials(await store.readRunPartials(sessionId, displayRunId), displayRunId);
+  const exact = projectRunPartials(
+    await store.readRunPartials(sessionId, displayRunId),
+    displayRunId,
+  );
   if (exact.length) return exact;
-  const { entries } = await store.readSessionEntriesOfKinds(sessionId, ["run.started", "run.terminal"]);
+  const { entries } = await store.readSessionEntriesOfKinds(sessionId, [
+    "run.started",
+    "run.terminal",
+  ]);
   const terminal = new Set(
     entries.filter(({ event }) => event.kind === "run.terminal").map(({ event }) => event.runId),
   );
   for (const { event } of [...entries].reverse()) {
     if (event.kind !== "run.started" || event.runId === displayRunId || terminal.has(event.runId))
       continue;
-    const overlays = projectRunPartials(await store.readRunPartials(sessionId, event.runId), displayRunId);
+    const overlays = projectRunPartials(
+      await store.readRunPartials(sessionId, event.runId),
+      displayRunId,
+    );
     if (overlays.length) return overlays;
   }
   return [];

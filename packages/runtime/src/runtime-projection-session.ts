@@ -27,9 +27,7 @@ export interface RuntimeProjectionSession {
   getRuntimeStateSnapshot(): SessionRuntimeStateSnapshot;
   replaceRuntimeProjection(messages: readonly Message[], projectionEventId: string): Promise<void>;
   replaceRuntimeUsage(usage: SessionUsageSnapshot, projectionEventId: string): Promise<void>;
-  commitRuntimeProjectionBatch(
-    commits: readonly RuntimeEventStoreAppendResult[],
-  ): Promise<void>;
+  commitRuntimeProjectionBatch(commits: readonly RuntimeEventStoreAppendResult[]): Promise<void>;
   recordRuntimeTranscriptToolStarts(input: {
     readonly invocationId: string;
     readonly runId: string;

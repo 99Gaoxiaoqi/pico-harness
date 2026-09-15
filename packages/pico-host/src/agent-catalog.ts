@@ -8,11 +8,7 @@ import {
   type ResourceCatalogCandidate,
   type ResourceCatalogSource,
 } from "@pico/core/resource-catalog";
-import {
-  AgentProfileLoader,
-  KNOWN_TOOL_NAMES,
-  type AgentProfile,
-} from "./agent-profile-loader.js";
+import { AgentProfileLoader, KNOWN_TOOL_NAMES, type AgentProfile } from "./agent-profile-loader.js";
 import { loadClaudeAgentsFromDir, type ClaudeAgent } from "./claude-agent-loader.js";
 import { resolvePicoPaths } from "./pico-paths.js";
 
@@ -28,8 +24,9 @@ export interface AgentCatalogLogger {
   warn(bindings: object, message: string): void;
 }
 
-export interface CatalogAgentProfile<TrustAuthority = unknown>
-  extends AgentProfile<TrustAuthority> {
+export interface CatalogAgentProfile<
+  TrustAuthority = unknown,
+> extends AgentProfile<TrustAuthority> {
   readonly source: AgentCatalogSource;
   readonly sourcePath: string;
   readonly hooks?: unknown;
@@ -57,8 +54,9 @@ export interface LoadAgentCatalogOptions<TrustAuthority = unknown> {
   readonly logger?: AgentCatalogLogger;
 }
 
-export interface AgentExternalCatalogSource<TrustAuthority = unknown>
-  extends ExternalResourceCatalogSource<TrustAuthority> {
+export interface AgentExternalCatalogSource<
+  TrustAuthority = unknown,
+> extends ExternalResourceCatalogSource<TrustAuthority> {
   readonly adapter: "pico-agent-yaml" | "claude-agent-directory";
 }
 
@@ -67,7 +65,13 @@ const DEFAULT_CLAUDE_TOOLS = Object.freeze(["read_file", "glob", "grep"]);
 
 type BuiltinAgentProfile = Pick<
   CatalogAgentProfile,
-  "name" | "description" | "systemPrompt" | "systemPromptOverride" | "tools" | "source" | "sourcePath"
+  | "name"
+  | "description"
+  | "systemPrompt"
+  | "systemPromptOverride"
+  | "tools"
+  | "source"
+  | "sourcePath"
 >;
 
 const BUILTIN_PROFILES: readonly BuiltinAgentProfile[] = Object.freeze([
@@ -76,9 +80,20 @@ const BUILTIN_PROFILES: readonly BuiltinAgentProfile[] = Object.freeze([
     "Search and understand codebases without making edits.",
     "Explore the codebase and report findings without changing files.",
     [
-      "read_file", "bash", "skill_view", "glob", "grep", "fetch_url", "web_search",
-      "explore_repo", "repo_map", "code_definition", "code_references", "code_symbols",
-      "code_diagnostics", "code_call_hierarchy",
+      "read_file",
+      "bash",
+      "skill_view",
+      "glob",
+      "grep",
+      "fetch_url",
+      "web_search",
+      "explore_repo",
+      "repo_map",
+      "code_definition",
+      "code_references",
+      "code_symbols",
+      "code_diagnostics",
+      "code_call_hierarchy",
     ],
   ),
   builtinProfile(
@@ -86,8 +101,17 @@ const BUILTIN_PROFILES: readonly BuiltinAgentProfile[] = Object.freeze([
     "Break down implementation work into a clear plan before edits.",
     "Create a concise implementation plan without changing files.",
     [
-      "read_file", "bash", "skill_view", "glob", "grep", "explore_repo", "repo_map",
-      "code_definition", "code_references", "code_symbols", "code_diagnostics",
+      "read_file",
+      "bash",
+      "skill_view",
+      "glob",
+      "grep",
+      "explore_repo",
+      "repo_map",
+      "code_definition",
+      "code_references",
+      "code_symbols",
+      "code_diagnostics",
       "code_call_hierarchy",
     ],
   ),
@@ -96,8 +120,16 @@ const BUILTIN_PROFILES: readonly BuiltinAgentProfile[] = Object.freeze([
     "Handle complex multi-step tasks that need exploration and action.",
     "Complete a complex multi-step task and summarize the result.",
     [
-      "read_file", "write_file", "edit_file", "bash", "skill_view", "glob", "grep",
-      "todo", "fetch_url", "web_search",
+      "read_file",
+      "write_file",
+      "edit_file",
+      "bash",
+      "skill_view",
+      "glob",
+      "grep",
+      "todo",
+      "fetch_url",
+      "web_search",
     ],
   ),
 ]);
@@ -121,17 +153,41 @@ export async function loadAgentCatalog<TrustAuthority = unknown>(
     agentSource<TrustAuthority>("project-pico", "project", "pico-native", paths.project.agents, 50),
     ...(options.includeClaudeProjectResources === false
       ? []
-      : [agentSource<TrustAuthority>("project-claude", "project", "claude-compat", join(options.workDir, ".claude", "agents"), 40)]),
+      : [
+          agentSource<TrustAuthority>(
+            "project-claude",
+            "project",
+            "claude-compat",
+            join(options.workDir, ".claude", "agents"),
+            40,
+          ),
+        ]),
     agentSource<TrustAuthority>("user-pico", "user", "pico-native", paths.home.agents, 30),
     ...(options.includeClaudeUserResources === false
       ? []
-      : [agentSource<TrustAuthority>("user-claude", "user", "claude-compat", join(homeDir, ".claude", "agents"), 20)]),
+      : [
+          agentSource<TrustAuthority>(
+            "user-claude",
+            "user",
+            "claude-compat",
+            join(homeDir, ".claude", "agents"),
+            20,
+          ),
+        ]),
   ];
   const loaded = await Promise.all(sources.map((source) => loadAgentSource(source, logger)));
-  const candidates: ResourceCatalogCandidate<CatalogAgentProfile<TrustAuthority>, TrustAuthority>[] =
-    loaded.flat();
+  const candidates: ResourceCatalogCandidate<
+    CatalogAgentProfile<TrustAuthority>,
+    TrustAuthority
+  >[] = loaded.flat();
   if (options.includeBuiltins !== false) {
-    const builtinSource = agentSource<TrustAuthority>("builtin", "builtin", "builtin", "builtin:agents", 0);
+    const builtinSource = agentSource<TrustAuthority>(
+      "builtin",
+      "builtin",
+      "builtin",
+      "builtin:agents",
+      0,
+    );
     for (const profile of BUILTIN_PROFILES) {
       candidates.push({
         name: profile.name,
@@ -185,7 +241,12 @@ function adaptClaudeAgent<TrustAuthority>(
     tools: mapClaudeTools(agent, logger),
     ...(agent.model ? { modelRouteId: agent.model } : {}),
     ...(agent.hooks === undefined ? {} : { hooks: agent.hooks }),
-    source: source.scope === "project" ? "project-claude" : source.scope === "user" ? "user-claude" : "external",
+    source:
+      source.scope === "project"
+        ? "project-claude"
+        : source.scope === "user"
+          ? "user-claude"
+          : "external",
     sourcePath: agent.sourcePath,
     ...(source.hookTrustAuthority ? { hookTrustAuthority: source.hookTrustAuthority } : {}),
     catalogSource: source,
@@ -209,7 +270,10 @@ async function loadAgentSource<TrustAuthority>(
   logger: AgentCatalogLogger,
 ): Promise<ResourceCatalogCandidate<CatalogAgentProfile<TrustAuthority>, TrustAuthority>[]> {
   if (source.format === "claude-compat") {
-    const agents = await loadClaudeAgentsFromDir(source.root, source.scope === "user" ? "user" : "project");
+    const agents = await loadClaudeAgentsFromDir(
+      source.root,
+      source.scope === "user" ? "user" : "project",
+    );
     return agents.map((agent) => ({
       name: agent.name,
       source,
@@ -217,9 +281,16 @@ async function loadAgentSource<TrustAuthority>(
       value: adaptClaudeAgent(agent, source, logger),
     }));
   }
-  const result = await new AgentProfileLoader<TrustAuthority>(".", { filePath: source.root, logger }).loadWithTombstones();
+  const result = await new AgentProfileLoader<TrustAuthority>(".", {
+    filePath: source.root,
+    logger,
+  }).loadWithTombstones();
   const profileSource: AgentCatalogSource =
-    source.scope === "user" ? "user-native" : source.scope === "external" ? "external" : "project-native";
+    source.scope === "user"
+      ? "user-native"
+      : source.scope === "external"
+        ? "external"
+        : "project-native";
   return [
     ...result.profiles.map((profile) => ({
       name: profile.name,

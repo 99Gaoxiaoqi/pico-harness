@@ -132,14 +132,7 @@ export async function loadClaudeAgentsFromDir(
   if (rootStat.isFile()) {
     if (!agentsDirectory.endsWith(".md") || rootStat.size > MAX_AGENT_FILE_BYTES) return [];
     const content = await readFile(agentsDirectory, "utf8");
-    return [
-      parseClaudeAgent(
-        content,
-        basename(agentsDirectory, ".md"),
-        agentsDirectory,
-        source,
-      ),
-    ];
+    return [parseClaudeAgent(content, basename(agentsDirectory, ".md"), agentsDirectory, source)];
   }
 
   let entries;
@@ -194,7 +187,12 @@ function optionalTools(value: unknown): Partial<ClaudeAgent> {
   if (value === undefined) return {};
   const normalized = normalizeString(value);
   if (!normalized) return { tools: [] };
-  return { tools: normalized.split(",").map((tool) => tool.trim()).filter(Boolean) };
+  return {
+    tools: normalized
+      .split(",")
+      .map((tool) => tool.trim())
+      .filter(Boolean),
+  };
 }
 
 function optionalString<Key extends keyof ClaudeAgent>(

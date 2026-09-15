@@ -1,10 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { ToolDefinition } from "@pico/core";
-import type {
-  BaseTool,
-  Registry,
-  ToolExecutionContext,
-} from "./tool-registry-contract.js";
+import type { BaseTool, Registry, ToolExecutionContext } from "./tool-registry-contract.js";
 import { NO_FILE_SIDE_EFFECTS } from "./tool-registry-contract.js";
 import type { ToolAccesses } from "@pico/runtime/tool-access";
 import { ToolAccesses as ToolAccessesNs } from "@pico/runtime/tool-access";

@@ -92,7 +92,9 @@ export function createAgentSwarmStatusTool(
         ...(item.childSessionId === undefined ? {} : { childSessionId: item.childSessionId }),
         ...(item.runId === undefined ? {} : { runId: item.runId }),
         ...(item.failurePhase === undefined ? {} : { failurePhase: item.failurePhase }),
-        ...(item.failureReason === undefined ? {} : { failureReason: item.failureReason.slice(0, 2048) }),
+        ...(item.failureReason === undefined
+          ? {}
+          : { failureReason: item.failureReason.slice(0, 2048) }),
       }));
       const output = {
         kind: result.kind,
@@ -144,11 +146,15 @@ function isValidRootContext(
 ): root is AgentGraphRootToolContext {
   return Boolean(
     root &&
-      root.kind === "graph_root_supervisor" &&
-      Number.isSafeInteger(root.epoch) &&
-      root.epoch >= 1 &&
-      [root.graphId, root.rootSessionId, root.rootTurnId, root.rootRunId].every(
-        (id) => typeof id === "string" && Boolean(id.trim()) && id === id.trim() && Buffer.byteLength(id) <= 1024,
-      ),
+    root.kind === "graph_root_supervisor" &&
+    Number.isSafeInteger(root.epoch) &&
+    root.epoch >= 1 &&
+    [root.graphId, root.rootSessionId, root.rootTurnId, root.rootRunId].every(
+      (id) =>
+        typeof id === "string" &&
+        Boolean(id.trim()) &&
+        id === id.trim() &&
+        Buffer.byteLength(id) <= 1024,
+    ),
   );
 }

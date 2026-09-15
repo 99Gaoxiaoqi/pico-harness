@@ -138,7 +138,9 @@ export class TodoTool {
     }
     if (parsed["status"] !== undefined) {
       if (typeof parsed["status"] !== "string" || !VALID_STATUSES.has(parsed["status"])) {
-        throw new Error(`非法 status: ${String(parsed["status"])}。合法值:pending/in_progress/completed`);
+        throw new Error(
+          `非法 status: ${String(parsed["status"])}。合法值:pending/in_progress/completed`,
+        );
       }
       patch.status = parsed["status"] as TodoStatus;
     }

@@ -38,7 +38,7 @@ flowchart LR
 [查看 Mermaid 源图](docs/readme-assets/pico-harness-architecture.mmd)
 
 两类正式前台入口都通过 `LocalRuntimeClient` 进入本机 daemon，并最终复用同一个
-[`AgentRuntime`](src/runtime/agent-runtime.ts)：
+[`AgentRuntime`](packages/pico-host/src/agent-runtime.ts)：
 
 - TUI：`CLI → client-repl → LocalRuntimeClient → daemon → WorkspaceRuntimeService → AgentRuntime`。
 - Desktop：`Renderer → sandbox preload bridge → Electron Main → LocalRuntimeClient → daemon → WorkspaceRuntimeService → AgentRuntime`。
@@ -57,21 +57,23 @@ Windows named pipe。当前承重边界是私有 endpoint、进程/文件权限�
 
 ### 模块地图
 
-| 路径                                                               | 职责                                                        |
-| ------------------------------------------------------------------ | ----------------------------------------------------------- |
-| `src/runtime/`                                                     | 共用装配入口、运行策略、Agent 事件事实/投影与子代理编排     |
-| `src/engine/`                                                      | ReAct 主循环、Session、ToolScheduler、Reporter、Reminder    |
-| `src/context/`                                                     | Prompt、Skills、Compaction、Goal/Todo、恢复提示与上下文预算 |
-| `src/provider/`                                                    | OpenAI、Claude 协议适配，模型路由、能力与凭证解析           |
-| `src/tools/`                                                       | Registry、文件/Bash/网络工具、资源访问声明与子代理工具      |
-| `src/safety/`、`src/security/`、`src/approval/`                    | hardline、路径与文件安全、权限判定、人工审批                |
-| `src/hooks/`、`src/mcp/`、`src/plugins/`、`src/code-intelligence/` | Hooks、MCP、受信 Plugin 快照、LSP/Repo Map                  |
-| `src/tasks/`、`src/daemon/`                                        | RuntimeStore、Job、Cron、后台策略、本机 daemon 与通知       |
-| `src/storage/`、`src/memory/`                                      | 原子存储、文件历史、产物与长期记忆                          |
-| `src/input/`、`src/tui/`、`src/cli/`                               | 输入协议、交互式终端和公开 CLI 外壳                         |
-| `apps/desktop/`                                                    | Electron UI                                                 |
-| `packages/protocol/`                                               | Desktop、client 与 daemon 的共用协议                        |
-| `src/paths/`                                                       | `PICO_HOME`、工作区和 Runtime 数据路径的统一解析            |
+| 路径                           | 职责                                                         |
+| ------------------------------ | ------------------------------------------------------------ |
+| `packages/core/`               | 纯契约、消息模型与确定性基础策略                             |
+| `packages/storage/`            | SQLite、运行事件账本、文件历史与持久化原语                   |
+| `packages/runtime/`            | Engine、调度、上下文与 Provider 纯策略；通过端口消费宿主能力 |
+| `packages/protocol/`           | Desktop、client 与 daemon 的线协议契约                       |
+| `packages/transcript-replica/` | 消息副本、事件归并与读模型                                   |
+| `packages/runtime-host/`       | 本机连接、进程驻留与控制面机制                               |
+| `packages/pico-host/`          | 产品装配、Session、Provider SDK、工具、沙箱、MCP、配置与路径 |
+| `packages/cli/`                | CLI/TUI、终端展示与交互                                      |
+| `apps/desktop/`                | Electron 主进程、preload 和 Renderer                         |
+| `src/`                         | 根发行包的 4 个进程入口，不放业务实现或旧目录转发层          |
+| `tests/`                       | 集成/模型验收，直接消费正式包；测试专用装配留在测试支持目录  |
+
+找实现从所属包的 `src/` 开始，跨包通过 `@pico/*` 的正式导出引用，不回到根 `src/`。
+根 `src/cli/main.ts`、`src/daemon/main.ts` 与两个 `src/internal/*-main.ts` 只负责
+启动及发行包身份，继续生成既有可执行路径；旧内部 `src/engine`、`src/tools` 等导入路径不再保留。
 
 ### 状态所有权
 

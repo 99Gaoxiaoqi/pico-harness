@@ -1,8 +1,5 @@
 import { createHash } from "node:crypto";
-import {
-  memoryRequestFits,
-  type MemoryRequestBudgetInput,
-} from "./extraction-budget.js";
+import { memoryRequestFits, type MemoryRequestBudgetInput } from "./extraction-budget.js";
 import {
   normalizeLongTermMemoryContent,
   validateMemoryTemporalBounds,

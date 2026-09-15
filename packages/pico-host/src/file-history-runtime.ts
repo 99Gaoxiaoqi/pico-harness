@@ -17,10 +17,7 @@ import {
 import { join, dirname, isAbsolute, parse, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { resolvePicoHome } from "./pico-paths.js";
-import {
-  FileHistoryBlobStore,
-  type FileHistoryBlobRef,
-} from "@pico/storage";
+import { FileHistoryBlobStore, type FileHistoryBlobRef } from "@pico/storage";
 import {
   deleteFileHistoryManifestRow,
   insertFileHistoryManifestRowIfAbsent,

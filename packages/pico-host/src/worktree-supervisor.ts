@@ -4,11 +4,7 @@ import { randomBytes } from "node:crypto";
 import { mkdir, realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 
-import {
-  TaskRegistry,
-  type TaskSnapshot,
-  isTerminalTaskStatus,
-} from "@pico/runtime/task-registry";
+import { TaskRegistry, type TaskSnapshot, isTerminalTaskStatus } from "@pico/runtime/task-registry";
 import {
   buildSafeGitEnvironment,
   createDisabledHooksPath,
@@ -1032,7 +1028,13 @@ function createTaskAdmission(): WorktreeTaskAdmission {
 }
 
 function waitForSettlement(promise: Promise<void>, timeoutMs: number): Promise<boolean> {
-  return raceWithDeadline(promise.then(() => undefined, () => undefined), timeoutMs);
+  return raceWithDeadline(
+    promise.then(
+      () => undefined,
+      () => undefined,
+    ),
+    timeoutMs,
+  );
 }
 
 async function pathExists(path: string): Promise<boolean> {

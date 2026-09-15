@@ -102,13 +102,27 @@ test("Code Mode: snapshot access and bounded sandbox failure paths", async (t) =
         code,
         tools: activeTools,
         executionPolicy: policy,
-        callTool: async () => {
-          await nextTurn();
+        callTool: async (_name, _args, signal) => {
+          if (policy.maxInFlightBridgeRequests !== undefined) {
+            // Keep the first bridge request physically in flight until the runtime
+            // rejects the second. A single event-loop turn can finish before the
+            // second worker message arrives, making the limit test timing-dependent.
+            await new Promise<void>((resolve) => {
+              if (signal.aborted) resolve();
+              else signal.addEventListener("abort", () => resolve(), { once: true });
+            });
+          } else {
+            await nextTurn();
+          }
           return "x".repeat(100);
         },
       });
       assert.equal(result.ok, false, code);
       if (!result.ok) assert.equal(result.error.kind, "limit_exceeded", JSON.stringify(result));
+      if (!result.ok && policy.maxInFlightBridgeRequests !== undefined) {
+        assert.match(result.error.message, /in-flight bridge request limit/);
+        assert.equal(result.toolCalls.length, 1, "the second request must not reach the host");
+      }
     }
     await assert.rejects(
       executeCodeCell({
