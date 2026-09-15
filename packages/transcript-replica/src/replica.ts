@@ -1,5 +1,6 @@
 import {
   TRANSCRIPT_PROJECTOR_VERSION,
+  isTerminalRunStatus,
   type RuntimeActiveOverlayEntry,
   type RuntimeQueuedInput,
   type RuntimeResult,
@@ -102,6 +103,8 @@ interface OpenDraft {
   readonly records: Map<string, RuntimeTranscriptItemRecord>;
   readonly revisions: Map<string, number>;
   readonly overlays: Map<string, RuntimeActiveOverlayEntry>;
+  readonly closedRunVersions: Map<string, number>;
+  readonly retiredStreams: Set<string>;
   readonly watermark: RuntimeTranscriptWatermark;
   pendingWatermark?: RuntimeTranscriptWatermark;
   readonly hostEpoch: string;
@@ -125,6 +128,8 @@ export class TranscriptReplica {
   #records = new Map<string, RuntimeTranscriptItemRecord>();
   #revisions = new Map<string, number>();
   #overlays = new Map<string, RuntimeActiveOverlayEntry>();
+  #closedRunVersions = new Map<string, number>();
+  #retiredStreams = new Set<string>();
   #queuedInputs: readonly RuntimeQueuedInput[] = [];
   #activeRun: RuntimeRun | undefined;
   #olderCursor: RuntimeTranscriptPageCursor | undefined;
@@ -209,12 +214,30 @@ export class TranscriptReplica {
         records,
         revisions,
         overlays,
+        closedRunVersions: new Map(this.#closedRunVersions),
+        retiredStreams: new Set(this.#retiredStreams),
         watermark: result.watermark,
         hostEpoch: result.hostEpoch,
         subscriptionId: result.subscriptionId,
         nextSequence: result.nextSequence,
         ...(result.activeRun ? { activeRun: result.activeRun } : {}),
       };
+      if (draft.activeRun) {
+        reopenRunIfNewer(draft, draft.activeRun);
+        if (isTerminalRunStatus(draft.activeRun.status))
+          closeRunOverlays(draft, draft.activeRun.runId, draft.activeRun.version);
+        for (const overlay of draft.overlays.values()) {
+          if (overlay.runId !== draft.activeRun.runId) closeRunOverlays(draft, overlay.runId);
+        }
+      }
+      for (const [key, overlay] of draft.overlays) {
+        if (
+          draft.closedRunVersions.has(overlay.runId) ||
+          draft.retiredStreams.has(streamIdentity(overlay))
+        )
+          draft.overlays.delete(key);
+      }
+      reconcileDurableOverlays(draft);
       for (const frame of this.#earlyFrames) {
         const outcome = applyFrameToDraft(draft, frame);
         if (outcome === "gap") {
@@ -225,6 +248,8 @@ export class TranscriptReplica {
       this.#records = draft.records;
       this.#revisions = draft.revisions;
       this.#overlays = draft.overlays;
+      this.#closedRunVersions = draft.closedRunVersions;
+      this.#retiredStreams = draft.retiredStreams;
       this.#watermark = draft.watermark;
       this.#pendingWatermark = draft.pendingWatermark;
       this.#hostEpoch = draft.hostEpoch;
@@ -348,14 +373,7 @@ export class TranscriptReplica {
     this.#records = records;
     this.#revisions = revisions;
     this.#watermark = advance.through;
-    const changedItemIds = new Set(
-      advance.changes.map((change) =>
-        change.op === "upsert" ? change.record.itemId : change.itemId,
-      ),
-    );
-    for (const [key, overlay] of this.#overlays) {
-      if (changedItemIds.has(overlay.itemId)) this.#overlays.delete(key);
-    }
+    reconcileDurableOverlays({ records, revisions, overlays: this.#overlays });
     if (
       this.#pendingWatermark &&
       this.#pendingWatermark.throughSequence <= advance.through.throughSequence
@@ -413,6 +431,7 @@ export class TranscriptReplica {
     }
     this.#records = records;
     this.#revisions = revisions;
+    reconcileDurableOverlays({ records, revisions, overlays: this.#overlays });
     this.#pageFragments = fragments;
     this.#olderCursor = page.nextCursor;
     return "applied";
@@ -429,6 +448,8 @@ export class TranscriptReplica {
     this.#records.clear();
     this.#revisions.clear();
     this.#overlays.clear();
+    this.#closedRunVersions.clear();
+    this.#retiredStreams.clear();
     this.#queuedInputs = [];
     this.#activeRun = undefined;
     this.#olderCursor = undefined;
@@ -457,6 +478,8 @@ export class TranscriptReplica {
       records: new Map(this.#records),
       revisions: new Map(this.#revisions),
       overlays: new Map(this.#overlays),
+      closedRunVersions: new Map(this.#closedRunVersions),
+      retiredStreams: new Set(this.#retiredStreams),
       watermark: this.#watermark!,
       ...(this.#pendingWatermark ? { pendingWatermark: this.#pendingWatermark } : {}),
       hostEpoch: this.#hostEpoch!,
@@ -468,6 +491,8 @@ export class TranscriptReplica {
 
   private installDraftFrameState(draft: OpenDraft): void {
     this.#overlays = draft.overlays;
+    this.#closedRunVersions = draft.closedRunVersions;
+    this.#retiredStreams = draft.retiredStreams;
     this.#watermark = draft.watermark;
     this.#pendingWatermark = draft.pendingWatermark;
     this.#nextSequence = draft.nextSequence;
@@ -503,6 +528,16 @@ function applyFrameToDraft(
   draft.nextSequence += 1;
   switch (frame.type) {
     case "subscription.session_delta": {
+      // A delayed persistence flush may publish after durable commit or Run end.
+      // Consume its transport sequence without resurrecting a stream or testing
+      // byte offsets against an overlay that has already been retired.
+      if (
+        draft.closedRunVersions.has(frame.runId) ||
+        draft.retiredStreams.has(streamIdentity(frame)) ||
+        hasDurableReplacement(draft, frame.itemId)
+      ) {
+        return "applied";
+      }
       const key = overlayKey(frame.runId, frame.streamId);
       if (frame.reset && frame.text === "") {
         draft.overlays.delete(key);
@@ -534,14 +569,33 @@ function applyFrameToDraft(
       });
       return "applied";
     }
-    case "subscription.run_state":
-      draft.activeRun = frame.run;
-      if (["cancelled", "failed", "succeeded"].includes(frame.run.status)) {
-        for (const [key, overlay] of draft.overlays) {
-          if (overlay.runId === frame.run.runId) draft.overlays.delete(key);
+    case "subscription.run_state": {
+      if (draft.activeRun?.runId === frame.run.runId && frame.run.version < draft.activeRun.version)
+        return "applied";
+      reopenRunIfNewer(draft, frame.run);
+      if (draft.closedRunVersions.has(frame.run.runId)) return "applied";
+      if (
+        frame.run.status === "queued" &&
+        draft.activeRun &&
+        draft.activeRun.runId !== frame.run.runId &&
+        !isTerminalRunStatus(draft.activeRun.status)
+      )
+        return "applied";
+      if (isTerminalRunStatus(frame.run.status)) {
+        closeRunOverlays(draft, frame.run.runId, frame.run.version);
+        if (!draft.activeRun || draft.activeRun.runId === frame.run.runId)
+          draft.activeRun = frame.run;
+      } else {
+        if (draft.activeRun && draft.activeRun.runId !== frame.run.runId) {
+          closeRunOverlays(draft, draft.activeRun.runId, draft.activeRun.version);
         }
+        for (const overlay of draft.overlays.values()) {
+          if (overlay.runId !== frame.run.runId) closeRunOverlays(draft, overlay.runId);
+        }
+        draft.activeRun = frame.run;
       }
       return "applied";
+    }
     case "subscription.transcript_advanced":
       if (!sameHistoryIdentity(draft.watermark, frame.watermark)) return "gap";
       if (frame.watermark.throughSequence > draft.watermark.throughSequence) {
@@ -560,6 +614,49 @@ function applyFrameToDraft(
     case "subscription.subagent_update":
     case "subscription.resource_changed":
       return "applied";
+  }
+}
+
+function reopenRunIfNewer(draft: OpenDraft, run: RuntimeRun): void {
+  const closedVersion = draft.closedRunVersions.get(run.runId);
+  // Exact Run retries are admitted explicitly with a higher control version.
+  // Already retired streams remain fenced even when a new attempt is admitted.
+  if (closedVersion !== undefined && run.status === "running" && run.version > closedVersion) {
+    draft.closedRunVersions.delete(run.runId);
+  }
+}
+
+function streamIdentity(
+  stream: Pick<RuntimeActiveOverlayEntry, "runId" | "streamId" | "itemId">,
+): string {
+  return JSON.stringify([stream.runId, stream.streamId, stream.itemId]);
+}
+
+function closeRunOverlays(draft: OpenDraft, runId: string, version = 0): void {
+  draft.closedRunVersions.set(runId, Math.max(version, draft.closedRunVersions.get(runId) ?? 0));
+  for (const [key, overlay] of draft.overlays) {
+    if (overlay.runId === runId) {
+      draft.retiredStreams.add(streamIdentity(overlay));
+      draft.overlays.delete(key);
+    }
+  }
+}
+
+function hasDurableReplacement(
+  draft: Pick<OpenDraft, "records" | "revisions">,
+  itemId: string,
+): boolean {
+  if (!draft.revisions.has(itemId)) return false;
+  const item = draft.records.get(itemId)?.item;
+  // A tool start is durable while its stdout/stderr is still streaming.
+  return item?.kind !== "tool" || item.status !== "running";
+}
+
+function reconcileDurableOverlays(
+  draft: Pick<OpenDraft, "records" | "revisions" | "overlays">,
+): void {
+  for (const [key, overlay] of draft.overlays) {
+    if (hasDurableReplacement(draft, overlay.itemId)) draft.overlays.delete(key);
   }
 }
 
