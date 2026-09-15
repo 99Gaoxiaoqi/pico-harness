@@ -42,7 +42,7 @@ for (const f of files) {
         "--import",
         "tsx",
         "--import",
-        "./src/tui/preload-env.ts",
+        "@pico/cli/tui/preload-env",
         "--test",
         "--test-reporter=tap",
         "--test-concurrency=1",
