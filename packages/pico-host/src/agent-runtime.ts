@@ -259,7 +259,7 @@ export type RunAgentProviderFactory = RuntimeProviderFactory;
 export interface RuntimeSessionResourceChangedNotice {
   readonly workspacePath: string;
   readonly sessionId: string;
-  readonly resource: "tasks";
+  readonly resource: "tasks" | "artifacts";
   readonly revision: number;
 }
 
@@ -1984,6 +1984,17 @@ export async function executeAgentRuntime(
       onToolGroupLoaded,
       sessionTaskAuthority,
       requestSandboxBoundaryHandler,
+      {
+        repository: sessionTaskAuthority.repository,
+        sessionId: session.id,
+        onChanged: (revision) =>
+          dependencies.sessionResourceChangedSink?.({
+            workspacePath: workDir,
+            sessionId: session.id,
+            resource: "artifacts",
+            revision,
+          }),
+      },
     );
     if (collaborationMode() !== "plan") {
       registry.register(
@@ -3013,6 +3024,7 @@ function buildRegistry(
   onToolGroupLoaded?: (groupId: string, toolNames: readonly string[]) => void,
   sessionTasks?: DefaultToolRegistryOptions["sessionTasks"],
   requestSandboxBoundaryHandler?: RequestSandboxBoundaryHandler,
+  sessionArtifacts?: DefaultToolRegistryOptions["sessionArtifacts"],
 ): ToolRegistry {
   return buildDefaultToolRegistry(workDir, {
     deferWorkspaceBoundary: true,
@@ -3033,6 +3045,7 @@ function buildRegistry(
     ...(hostKind !== undefined ? { hostKind } : {}),
     ...(onToolGroupLoaded !== undefined ? { onToolGroupLoaded } : {}),
     ...(sessionTasks !== undefined ? { sessionTasks } : {}),
+    ...(sessionArtifacts !== undefined ? { sessionArtifacts } : {}),
     ...(requestSandboxBoundaryHandler !== undefined ? { requestSandboxBoundaryHandler } : {}),
   });
 }

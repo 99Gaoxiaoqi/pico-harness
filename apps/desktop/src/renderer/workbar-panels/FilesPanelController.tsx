@@ -104,6 +104,16 @@ export function FilesPanelController({ workspacePath, sessionId, active }: Workb
     [loadChunk],
   );
 
+  const exportArtifact = async (artifactId: string, action: "open" | "saveAs") => {
+    setContentError(undefined);
+    try {
+      const result = await window.pico.artifacts[action]({ ...scope, artifactId });
+      if (!result.ok) throw new Error(result.error.message);
+    } catch (cause) {
+      setContentError(workbarErrorMessage(cause));
+    }
+  };
+
   return (
     <FilesWorkbarPanel
       artifacts={artifacts}
@@ -116,6 +126,8 @@ export function FilesPanelController({ workspacePath, sessionId, active }: Workb
       onRefresh={() => void refresh()}
       onSelectArtifact={selectArtifact}
       onLoadChunk={(artifactId, offset) => void loadChunk(artifactId, offset)}
+      onOpenArtifact={(artifactId) => void exportArtifact(artifactId, "open")}
+      onSaveArtifactAs={(artifactId) => void exportArtifact(artifactId, "saveAs")}
     />
   );
 }
