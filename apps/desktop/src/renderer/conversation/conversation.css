@@ -61,6 +61,7 @@
 
 .workspace-frame--conversation .toast {
   top: 66px;
+  bottom: auto;
 }
 
 .page--conversation {
