@@ -1,6 +1,6 @@
 import { realpath } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import {
@@ -833,16 +833,11 @@ function isSessionSubscriptionFrame(
 }
 
 function resolveDaemonCandidateEntrypoint(): string {
-  const sourcePath = fileURLToPath(new URL("../../../src/daemon/main.ts", import.meta.url));
+  const bundledPath = fileURLToPath(new URL("./daemon-main.js", import.meta.url));
+  if (existsSync(bundledPath)) return bundledPath;
+  const sourcePath = fileURLToPath(new URL("./daemon-main.ts", import.meta.url));
   if (existsSync(sourcePath)) return sourcePath;
-  const bundledRootPath = fileURLToPath(new URL("../../../dist/daemon/main.js", import.meta.url));
-  if (existsSync(bundledRootPath)) return bundledRootPath;
-  const callerEntrypoint = process.argv[1];
-  if (callerEntrypoint) {
-    const siblingDaemon = resolve(dirname(callerEntrypoint), "../daemon/main.js");
-    if (existsSync(siblingDaemon)) return siblingDaemon;
-  }
-  return bundledRootPath;
+  return bundledPath;
 }
 
 /** 选举失败的人类可读归因——退出码协议上报的失败原因优先于笼统超时。 */
