@@ -8,6 +8,7 @@ import {
   isMessageHiddenFromTranscript,
   projectRuntimeModelMessage,
   runtimeEventHasModelHistoryEntry,
+  RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX,
   type DurableTranscriptEvent,
   type Message,
   type RuntimeEvent as CoreRuntimeEvent,
@@ -3418,9 +3419,14 @@ function transcriptMutationsForEvent(
       });
       return mutations;
     }
+    // Bootstrap imports preserve each committed message but share one synthetic turn.
+    // Its stable event identity also works for existing fork logs and idempotent retries.
+    const messageIdentity = event.runId.startsWith(RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX)
+      ? event.eventId
+      : event.turnId;
     const reasoning = message.role === "assistant" ? message.reasoning?.trim() : undefined;
     if (reasoning) {
-      const itemId = `message:${event.turnId}:thinking`;
+      const itemId = `message:${messageIdentity}:thinking`;
       mutations.push({
         op: "upsert",
         itemId,
@@ -3440,7 +3446,7 @@ function transcriptMutationsForEvent(
         ? asJsonRecord(message.providerData?.["picoWebSearch"])
         : undefined;
     if (message.role === "assistant" && (content || webSearch)) {
-      const itemId = `message:${event.turnId}:assistant`;
+      const itemId = `message:${messageIdentity}:assistant`;
       mutations.push({
         op: "upsert",
         itemId,
@@ -3755,7 +3761,9 @@ function conversationPayloadForTranscriptEntry(
         status: entry.status,
         startedAt: entry.startedAt,
         ...(entry.finishedAt === undefined ? {} : { finishedAt: entry.finishedAt }),
-        ...(entry.error ? { error: entry.error } : {}),
+        // Old ledgers may carry cancellation reasons in error; only failed boundaries
+        // expose this field in the Desktop protocol. Preserve the original durable fact.
+        ...(entry.status === "failed" && entry.error ? { error: entry.error } : {}),
       };
     case "subagent-activity":
       return {
