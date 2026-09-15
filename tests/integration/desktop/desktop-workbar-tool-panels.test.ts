@@ -27,7 +27,6 @@ import {
 import {
   TerminalWorkbarPanel,
   shouldPollTerminalPanel,
-  terminalGridFromBounds,
 } from "../../../apps/desktop/src/renderer/workbar-panels/TerminalWorkbarPanel.js";
 import {
   WorkbarPanelHost,
@@ -270,7 +269,6 @@ test("Workbar tool panel helpers preserve authority versions, chunks and active 
     complete: false,
     nextOffset: 32,
   });
-  assert.deepEqual(terminalGridFromBounds(820, 376), { columns: 100, rows: 20 });
   assert.equal(shouldPollTerminalPanel(true, "terminal-1"), true);
   assert.equal(shouldPollTerminalPanel(false, "terminal-1"), false);
   assert.equal(shouldPollTerminalPanel(true), false);
@@ -427,7 +425,8 @@ test("Workbar tool panels render real authority snapshots with accessible detail
   assert.match(terminal, /role="tablist"/u);
   assert.match(terminal, /role="tabpanel"/u);
   assert.match(terminal, /role="log"/u);
-  assert.match(terminal, /\$ npm test/u);
+  assert.match(terminal, /tool-panel__terminal-screen/u);
+  assert.doesNotMatch(terminal, /\$ npm test/u, "PTY bytes must only be rendered by the VT parser");
 
   const graph = renderToStaticMarkup(
     React.createElement(GraphWorkbarPanel, {

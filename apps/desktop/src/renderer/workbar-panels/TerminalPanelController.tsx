@@ -26,6 +26,8 @@ interface TerminalAttachmentState {
   readonly sequence: number;
   readonly text: string;
   readonly truncated: boolean;
+  readonly startOffset: number;
+  readonly resetVersion: number;
 }
 
 export interface WorkbarTerminalInstanceScope extends WorkbarScope {
@@ -113,7 +115,8 @@ export function TerminalPanelController({
       replace: boolean,
     ) => {
       const current = attachmentsRef.current.get(value.terminal.terminalId);
-      const text = replace
+      const reset = replace || value.truncated;
+      const text = reset
         ? value.snapshot
         : appendTerminalOutput(current?.text ?? "", value.snapshot, TERMINAL_OUTPUT_BYTES);
       const attachment = {
@@ -121,6 +124,13 @@ export function TerminalPanelController({
         sequence: value.sequence,
         text,
         truncated: value.truncated || current?.truncated === true,
+        startOffset: reset
+          ? 0
+          : (current?.startOffset ?? 0) +
+            (current?.text.length ?? 0) +
+            value.snapshot.length -
+            text.length,
+        resetVersion: (current?.resetVersion ?? 0) + (reset ? 1 : 0),
       } satisfies TerminalAttachmentState;
       attachmentsRef.current.set(value.terminal.terminalId, attachment);
       const key = terminalBindingKey({ workspacePath, sessionId, instanceId });
@@ -426,6 +436,8 @@ function terminalOutputView(
     text: attachment.text,
     sequence: attachment.sequence,
     truncated: attachment.truncated,
+    startOffset: attachment.startOffset,
+    resetVersion: attachment.resetVersion,
   };
 }
 
