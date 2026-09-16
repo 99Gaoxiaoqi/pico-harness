@@ -1021,7 +1021,7 @@ export class SqliteRuntimeControlStore {
     });
   }
 
-  createCronRun(input: CreateCronRunInput): CronRunRecord {
+  createCronRun(input: CreateCronRunInput, ownerId?: string): CronRunRecord {
     return this.write((tx) => {
       const job = this.requireCronJob(input.cronJobId);
       const existing = this.getRow(
@@ -1047,13 +1047,19 @@ export class SqliteRuntimeControlStore {
         reason = "workspace_busy";
       }
       const now = this.now();
+      // Reserve preflight ownership in the same transaction as the queued row.
+      const lease =
+        status === "queued" && ownerId
+          ? this.acquireLease(`cron-run:${input.cronRunId}`, ownerId)
+          : undefined;
       const run: CronRunRecord = compact({
         cronRunId: input.cronRunId,
         cronJobId: input.cronJobId,
         workspacePath: job.workspacePath,
         scheduledFor: input.scheduledFor,
         status,
-        leaseEpoch: 0,
+        ownerId: lease?.ownerId,
+        leaseEpoch: lease?.leaseEpoch ?? 0,
         createdAt: now,
         finishedAt: status === "queued" ? undefined : now,
         reason,
@@ -1063,12 +1069,14 @@ export class SqliteRuntimeControlStore {
         `INSERT INTO cron_runs (cron_run_id, cron_job_id, workspace_path, scheduled_for,
            status, owner_id, lease_epoch, created_at, started_at, finished_at, reason,
            result_json, version)
-         VALUES (?, ?, ?, ?, ?, NULL, 0, ?, NULL, ?, ?, NULL, 1)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, 1)`,
         input.cronRunId,
         input.cronJobId,
         job.workspacePath,
         input.scheduledFor,
         status,
+        run.ownerId ?? null,
+        run.leaseEpoch,
         now,
         run.finishedAt ?? null,
         reason ?? null,
@@ -1130,7 +1138,9 @@ export class SqliteRuntimeControlStore {
     return this.write((tx) => {
       const now = this.now();
       const recovered: CronRunRecord[] = [];
-      for (const row of this.allRows(`SELECT * FROM cron_runs WHERE status = 'running'`)) {
+      for (const row of this.allRows(
+        `SELECT * FROM cron_runs WHERE status IN ('queued','running')`,
+      )) {
         const current = rowToCronRun(row);
         const lease = this.selectLease(`cron-run:${current.cronRunId}`);
         if (lease && lease.expiresAt > now) continue;
@@ -1178,6 +1188,14 @@ export class SqliteRuntimeControlStore {
         );
       }
       this.assertLease(`cron-run:${input.cronRunId}`, input.ownerId, input.leaseEpoch);
+      if (
+        current.ownerId !== undefined &&
+        (current.ownerId !== input.ownerId || current.leaseEpoch !== input.leaseEpoch)
+      ) {
+        throw new RuntimeConflictError(
+          `Cron Run ${input.cronRunId} 的 preflight owner/lease 已变化`,
+        );
+      }
       const now = this.now();
       const run: CronRunRecord = {
         ...current,
@@ -1248,12 +1266,12 @@ export class SqliteRuntimeControlStore {
     });
   }
 
-  blockQueuedCronRun(cronRunId: string, reason: string): CronRunRecord {
-    return this.closeQueuedCronRun(cronRunId, "blocked", reason);
+  blockQueuedCronRun(cronRunId: string, reason: string, ownerId?: string): CronRunRecord {
+    return this.closeQueuedCronRun(cronRunId, "blocked", reason, ownerId);
   }
 
-  skipQueuedCronRun(cronRunId: string, reason = "workspace_busy"): CronRunRecord {
-    return this.closeQueuedCronRun(cronRunId, "skipped", reason);
+  skipQueuedCronRun(cronRunId: string, reason = "workspace_busy", ownerId?: string): CronRunRecord {
+    return this.closeQueuedCronRun(cronRunId, "skipped", reason, ownerId);
   }
 
   listRuntimeEvents(
@@ -2244,6 +2262,7 @@ export class SqliteRuntimeControlStore {
     cronRunId: string,
     status: "blocked" | "skipped",
     reason: string,
+    ownerId?: string,
   ): CronRunRecord {
     return this.write((tx) => {
       const current = this.requireCronRun(cronRunId);
@@ -2254,6 +2273,12 @@ export class SqliteRuntimeControlStore {
             status === "blocked" ? "阻断" : "跳过"
           }`,
         );
+      }
+      if (current.ownerId !== undefined) {
+        this.assertLease(`cron-run:${cronRunId}`, ownerId ?? "", current.leaseEpoch);
+        if (ownerId !== current.ownerId) {
+          throw new RuntimeConflictError(`Cron Run ${cronRunId} 的 preflight owner 已变化`);
+        }
       }
       const now = this.now();
       const run: CronRunRecord = {
