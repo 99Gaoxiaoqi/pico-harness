@@ -196,12 +196,22 @@ test("Graph cleanup preserves durable success, cancellation and failure in deskt
       "cancelled",
       "display must not mutate cleanup facts",
     );
+    store.transitionOperatorProvision({
+      provisionId,
+      expectedVersion: 2,
+      from: "provisioned",
+      to: "stopped",
+    });
     const timeline = query.query({ rootSessionId, action: "timeline", graphId }) as {
       items: AgentGraphTimelineItem[];
     };
     assert.equal(
       timeline.items.find((item) => item.kind === "activation.executing")?.status,
       "executing",
+    );
+    assert.equal(
+      timeline.items.find((item) => item.kind === "operator.provisioned")?.status,
+      "provisioned",
     );
     assert.equal(
       timeline.items.find((item) => item.kind === "activation.cancelled")?.status,
