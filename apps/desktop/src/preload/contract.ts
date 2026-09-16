@@ -6,6 +6,7 @@ import {
   type RuntimeResult,
   type RuntimeSessionSubscriptionFrame,
 } from "@pico/protocol";
+import type { DesktopArtifactsApi } from "./artifact-contract.js";
 
 export { DESKTOP_RUNTIME_METHODS, type DesktopRuntimeMethod };
 
@@ -91,6 +92,7 @@ export interface RuntimeNotificationSubscription {
 }
 
 export interface DesktopBridge {
+  readonly artifacts: DesktopArtifactsApi;
   readonly runtime: DesktopRuntimeApi;
   readonly events: {
     subscribe(

@@ -25,7 +25,7 @@ import { mergeHydratedConversationItems } from "./conversation/items.js";
 import {
   approvalFromPlanControlSnapshot,
   conversationItemsFromReplica,
-  preserveResolvedInteractions,
+  ResolvedInteractionCache,
   overlayRuntimeItem,
   parseConversation,
   parseGoalItem,
@@ -350,11 +350,18 @@ export interface RuntimeActions {
     readonly feedback?: string;
   }): Promise<void>;
   respondPrompt(id: string, answer: string): Promise<void>;
-  queryReview(workspacePath: string, runId: string): Promise<{
+  queryReview(
+    workspacePath: string,
+    runId: string,
+  ): Promise<{
     readonly changes: readonly ChangeView[];
     readonly fingerprint: string;
   }>;
-  queryReviewDiff(workspacePath: string, runId: string, path: string): Promise<{
+  queryReviewDiff(
+    workspacePath: string,
+    runId: string,
+    path: string,
+  ): Promise<{
     readonly patch: string;
     readonly fingerprint: string;
   }>;
@@ -367,9 +374,17 @@ export interface RuntimeActions {
   reviewChanges(
     decision: "approve" | "request_changes",
     message?: string,
-    target?: { readonly workspacePath?: string; readonly runId: string; readonly fingerprint: string },
+    target?: {
+      readonly workspacePath?: string;
+      readonly runId: string;
+      readonly fingerprint: string;
+    },
   ): Promise<void>;
-  applyChanges(target?: { readonly workspacePath?: string; readonly runId: string; readonly fingerprint: string }): Promise<void>;
+  applyChanges(target?: {
+    readonly workspacePath?: string;
+    readonly runId: string;
+    readonly fingerprint: string;
+  }): Promise<void>;
   previewRewind(ref: WorkspaceSessionRef): Promise<
     | {
         readonly checkpointId: string;
@@ -477,8 +492,11 @@ export function useRuntimeStore(): RuntimeStore {
   const temporaryWorkspaceRequest = useRef(new TemporaryWorkspaceRequest());
   const desktopContinuityRef = useRef<DesktopSessionContinuity | undefined>(undefined);
   const desktopContinuityBridgeRef = useRef<DesktopBridge | undefined>(undefined);
-  const usageRefreshRef = useRef(new Map<string, { stamp: string; timer?: ReturnType<typeof setTimeout> }>());
+  const usageRefreshRef = useRef(
+    new Map<string, { stamp: string; timer?: ReturnType<typeof setTimeout> }>(),
+  );
   const usageLoadTracker = useRef(new ConversationLoadTracker());
+  const resolvedInteractions = useRef(new ResolvedInteractionCache());
   const pendingSendRef = useRef<
     | {
         readonly identity: string;
@@ -488,12 +506,15 @@ export function useRuntimeStore(): RuntimeStore {
   >(undefined);
   dataRef.current = data;
 
-  useEffect(() => () => {
-    for (const pending of usageRefreshRef.current.values()) {
-      if (pending.timer) clearTimeout(pending.timer);
-    }
-    usageRefreshRef.current.clear();
-  }, []);
+  useEffect(
+    () => () => {
+      for (const pending of usageRefreshRef.current.values()) {
+        if (pending.timer) clearTimeout(pending.timer);
+      }
+      usageRefreshRef.current.clear();
+    },
+    [],
+  );
 
   const applyReplicaView = useCallback(
     (workspacePath: string, sessionId: string, view: TranscriptReplicaView) => {
@@ -520,7 +541,12 @@ export function useRuntimeStore(): RuntimeStore {
             ...current.conversations,
             [conversationKey]: {
               ...conversationWithoutRun,
-              items: preserveResolvedInteractions(conversationItemsFromReplica(view), existing.items),
+              items: resolvedInteractions.current.project(
+                conversationKey,
+                view.watermark?.historyEpoch ?? "",
+                conversationItemsFromReplica(view),
+                existing.items,
+              ),
               hasEarlier: view.olderCursor !== undefined,
               queuedCount: view.queuedInputs.length,
               ...(activeRun ? { runId: activeRun.runId } : {}),
@@ -557,17 +583,27 @@ export function useRuntimeStore(): RuntimeStore {
           timer: setTimeout(() => {
             const bridge = getBridge();
             if (!bridge || usageRefreshRef.current.get(conversationKey) !== pending) return;
-            void optionalInvoke(bridge, "usage.get", { workspacePath, sessionId }).then((result) => {
-              if (result.error || !usageLoadTracker.current.isCurrent(load) ||
-                  usageRefreshRef.current.get(conversationKey) !== pending) return;
-              setData((current) => {
-                const conversation = current.conversations[conversationKey];
-                if (!conversation) return current;
-                return { ...current, conversations: { ...current.conversations,
-                  [conversationKey]: { ...conversation, usage: parseUsage(result.value) },
-                } };
-              });
-            });
+            void optionalInvoke(bridge, "usage.get", { workspacePath, sessionId }).then(
+              (result) => {
+                if (
+                  result.error ||
+                  !usageLoadTracker.current.isCurrent(load) ||
+                  usageRefreshRef.current.get(conversationKey) !== pending
+                )
+                  return;
+                setData((current) => {
+                  const conversation = current.conversations[conversationKey];
+                  if (!conversation) return current;
+                  return {
+                    ...current,
+                    conversations: {
+                      ...current.conversations,
+                      [conversationKey]: { ...conversation, usage: parseUsage(result.value) },
+                    },
+                  };
+                });
+              },
+            );
           }, 50),
         };
         usageRefreshRef.current.set(conversationKey, pending);
@@ -1082,6 +1118,7 @@ export function useRuntimeStore(): RuntimeStore {
             run.sessionId === sessionId &&
             isTerminalRunStatus(run.status),
         )?.id;
+      const usageLoad = usageLoadTracker.current.begin(conversationKey);
       const [sessionUsage, contextResult, settingsResult, goalResult, sessionResult] =
         await Promise.all([
           optionalInvoke(bridge, "usage.get", { workspacePath, sessionId }),
@@ -1132,9 +1169,14 @@ export function useRuntimeStore(): RuntimeStore {
           ...current.conversations,
           [conversationKey]: {
             ...conversation,
+            ...(!usageLoadTracker.current.isCurrent(usageLoad)
+              ? { usage: current.conversations[conversationKey]?.usage }
+              : {}),
             ...(latestReplicaView
               ? {
-                  items: preserveResolvedInteractions(
+                  items: resolvedInteractions.current.project(
+                    conversationKey,
+                    latestReplicaView.watermark?.historyEpoch ?? "",
                     conversationItemsFromReplica(latestReplicaView),
                     current.conversations[conversationKey]?.items ?? [],
                   ),
@@ -2140,14 +2182,22 @@ export function useRuntimeStore(): RuntimeStore {
         });
       },
       async queryReview(workspacePath, runId) {
-        if (preview) return { changes: previewData.changes, fingerprint: previewData.changeFingerprint ?? "preview" };
+        if (preview)
+          return {
+            changes: previewData.changes,
+            fingerprint: previewData.changeFingerprint ?? "preview",
+          };
         const bridge = getBridge();
         if (!bridge) throw new Error("桌面安全桥接不可用。");
         const value = await invoke(bridge, "changes.list", { workspacePath, runId });
         return { ...parseChanges(value), fingerprint: value.fingerprint };
       },
       async queryReviewDiff(workspacePath, runId, path) {
-        if (preview) return { patch: previewData.changes.find((change) => change.path === path)?.patch ?? "", fingerprint: previewData.changeFingerprint ?? "preview" };
+        if (preview)
+          return {
+            patch: previewData.changes.find((change) => change.path === path)?.patch ?? "",
+            fingerprint: previewData.changeFingerprint ?? "preview",
+          };
         const bridge = getBridge();
         if (!bridge) throw new Error("桌面安全桥接不可用。");
         return invoke(bridge, "changes.diff", { workspacePath, runId, path });
@@ -2202,7 +2252,11 @@ export function useRuntimeStore(): RuntimeStore {
               expectedFingerprint,
               ...(reviewMessage ? { message: reviewMessage } : {}),
             });
-          setMessage(decision === "approve" ? "更改审阅已批准；工作区文件不会再次写入。" : "修改意见已记录。");
+          setMessage(
+            decision === "approve"
+              ? "更改审阅已批准；工作区文件不会再次写入。"
+              : "修改意见已记录。",
+          );
         });
       },
       async applyChanges(target) {
@@ -3117,6 +3171,7 @@ export function useRuntimeStore(): RuntimeStore {
 function createPreviewBridge(): DesktopBridge {
   const success = <T>(value: T): Promise<DesktopResult<T>> => Promise.resolve({ ok: true, value });
   return {
+    artifacts: { open: () => success(undefined), saveAs: () => success(undefined) },
     runtime: new Proxy(
       {},
       {

@@ -78,6 +78,10 @@ test("a stale workspace index cannot remove the newly activated workspace", asyn
     runtimeSource.indexOf("const loadConversation ="),
   );
   assert.match(workspaceLoad, /workspaceIndexLoadGenerationRef\.current \+= 1/u);
+  assert.match(
+    workspaceLoad,
+    /if \(dataRef\.current\.workspacePath !== workspacePath\) \{\s*workspaceIndexLoadGenerationRef\.current \+= 1/u,
+  );
   assert.match(workspaceLoad, /workspaceLoadIntentRef\.current = workspacePath/u);
 
   const focusRefresh = runtimeSource.slice(

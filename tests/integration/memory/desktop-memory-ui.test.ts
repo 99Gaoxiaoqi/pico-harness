@@ -37,6 +37,14 @@ function previewRuntime(): RuntimeStore {
   };
 }
 
+test("Memory 页面不把其他页面的全局操作失败展示为记忆错误", () => {
+  const runtime = { ...previewRuntime(), message: "AUTOMATION_FORBIDDEN_FIXTURE" };
+  assert.doesNotMatch(
+    renderMemoryPage({ runtime, forceNarrow: false }),
+    /AUTOMATION_FORBIDDEN_FIXTURE/u,
+  );
+});
+
 test("atomic memory page renders saved and archived items, scope, provenance and management actions", () => {
   const html = renderMemoryPage({ runtime: previewRuntime(), forceNarrow: false });
   assert.match(html, /工作区记忆/);
@@ -119,5 +127,6 @@ test("memory route, notifications, conflict refetch and Item provenance remain u
   assert.match(html, /当前记忆服务不可用/);
   assert.match(html, /来源会话/);
   assert.match(html, /session-atlas/);
-  assert.match(html, /已重新加载最新内容/);
+  // Global operation notices are rendered by AppShell, never duplicated as page errors.
+  assert.doesNotMatch(html, /已重新加载最新内容/);
 });
