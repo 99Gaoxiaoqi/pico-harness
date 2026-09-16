@@ -1469,18 +1469,21 @@ export function useRuntimeStore(): RuntimeStore {
           ? workspaceSessionKey({ workspacePath, sessionId })
           : undefined;
         if (runId) {
+          const startedRun = {
+            id: runId,
+            workspacePath,
+            sessionId: sessionId || undefined,
+            description: stringValue(run.description, "会话运行"),
+            status: stringValue(run.status, "running"),
+            ...(typeof run.version === "number" ? { version: run.version } : {}),
+            startedAt: numberValue(run.startedAt, event.at),
+            updatedAt: numberValue(run.updatedAt, event.at),
+          };
+          terminalInteractions.current.record([startedRun]);
           setData((current) => ({
             ...current,
             runs: [
-              {
-                id: runId,
-                workspacePath,
-                sessionId: sessionId || undefined,
-                description: stringValue(run.description, "会话运行"),
-                status: stringValue(run.status, "running"),
-                startedAt: numberValue(run.startedAt, event.at),
-                updatedAt: numberValue(run.updatedAt, event.at),
-              },
+              startedRun,
               ...current.runs.filter(
                 (candidate) => candidate.workspacePath !== workspacePath || candidate.id !== runId,
               ),

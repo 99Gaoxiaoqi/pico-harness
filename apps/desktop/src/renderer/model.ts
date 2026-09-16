@@ -48,6 +48,7 @@ export interface RunView {
   readonly sessionId?: string | undefined;
   readonly description: string;
   readonly status: string;
+  readonly version?: number;
   readonly startedAt: number;
   readonly updatedAt: number;
 }

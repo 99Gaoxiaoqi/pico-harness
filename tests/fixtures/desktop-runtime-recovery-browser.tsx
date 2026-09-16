@@ -10,7 +10,7 @@ Object.assign(globalThis, { React, IS_REACT_ACT_ENVIRONMENT: true });
 const workspaceA = "/project-a";
 const workspaceB = "/project-b";
 const trusted = new Set([workspaceA, workspaceB]);
-let runs: { runId: string; status: string }[] = [];
+let runs: { runId: string; status: string; version?: number; updatedAt?: number }[] = [];
 let runsFailure = false;
 let jobsFailure = false;
 let holdTrust: Promise<void> | undefined;
@@ -221,6 +221,8 @@ async function main() {
   runs = ["cancelled", "failed", "succeeded", "active", "unknown", "foreign"].map((runId) => ({
     runId,
     status: "running",
+    version: 1,
+    updatedAt: 10,
   }));
   await refresh();
   await waitFor(() => subscribedWorkspace === workspaceA, "No A subscription");
@@ -250,7 +252,7 @@ async function main() {
     { runId: "unknown", status: "unknown" },
     { runId: "foreign", status: "running" },
     { runId: "plan-hydrate:plan", status: "cancelled" },
-  ];
+  ].map((run) => ({ ...run, version: 2, updatedAt: 20 }));
   await act(async () => notify("run.cancelled", "cancelled"));
   await waitFor(
     () => store.data.prompts.length === 4,
@@ -274,6 +276,33 @@ async function main() {
   await refresh();
   await request("cancelled");
   check(!hasPending("cancelled"), "Omitted terminal history must not revive old requests");
+
+  runs = [{ runId: "failed", status: "running", version: 1, updatedAt: 100 }];
+  await refresh();
+  await request("failed");
+  check(!hasPending("failed"), "Older active revision cannot revive a terminal run");
+  runs = [{ runId: "failed", status: "failed", version: 2, updatedAt: 20 }];
+  await act(async () =>
+    notify("run.started", "failed", {
+      run: { runId: "failed", status: "running", version: 3, startedAt: 10, updatedAt: 20 },
+    }),
+  );
+  await request("failed");
+  check(
+    hasPending("failed"),
+    "Newer run.started revision must immediately allow recovered run requests",
+  );
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  });
+  check(hasPending("failed"), "Older terminal snapshot cannot clear recovered run requests");
+  runs = [{ runId: "failed", status: "failed", version: 4, updatedAt: 30 }];
+  await refresh();
+  check(!hasPending("failed"), "Recovered run can settle again");
+  runs = [{ runId: "failed", status: "running", version: 5, updatedAt: 30 }];
+  await refresh();
+  await request("failed");
+  check(hasPending("failed"), "Newer active snapshot must allow the same run to recover");
 
   trusted.delete(workspaceA);
   await refresh();
