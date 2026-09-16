@@ -981,6 +981,14 @@ test("Plan Run isolates and restores code intelligence owned by an injected Sess
       const prompt = messages.map((message) => message.content).join("\n");
       assert.match(prompt, /先调用 update_plan 将它标记为 in_progress/u);
       assert.match(prompt, /直到 update_plan 返回 execution 已 completed/u);
+      const executionInput =
+        messages.findLast(
+          (message) =>
+            message.role === "user" && message.content.includes("[APPROVED PLAN EXECUTION]"),
+        )?.content ?? "";
+      assert.match(executionInput, /submit_plan、update_plan 或 cancel_plan/u);
+      assert.match(executionInput, /一律省略可选的 operationId，由 runtime 按本次工具调用生成/u);
+      assert.match(executionInput, /不要复用历史工具结果或其他操作中的 operationId/u);
       return { role: "assistant", content: "execution paused" };
     },
   };
@@ -1214,8 +1222,16 @@ test("approval recovers its crash gap and replay never starts a second execution
 
   let executionProviderCalls = 0;
   const executionProvider: LLMProvider = {
-    async generate() {
+    async generate(messages) {
       executionProviderCalls++;
+      const executionInput =
+        messages.findLast(
+          (message) =>
+            message.role === "user" && message.content.includes("[RESUMED PLAN EXECUTION]"),
+        )?.content ?? "";
+      assert.match(executionInput, /submit_plan、update_plan 或 cancel_plan/u);
+      assert.match(executionInput, /一律省略可选的 operationId，由 runtime 按本次工具调用生成/u);
+      assert.match(executionInput, /不要复用历史工具结果或其他操作中的 operationId/u);
       return { role: "assistant", content: "execution stopped before completing the plan" };
     },
   };
