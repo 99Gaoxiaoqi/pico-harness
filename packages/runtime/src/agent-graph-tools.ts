@@ -92,7 +92,7 @@ class UpdateAgentGraphTool extends AgentGraphSupervisorTool {
       name: this.name(),
       description: this.options.swarm
         ? "安排 Graph 子任务。先调用 agent_list，operation=add_work 时提供 add_work 数组，以 target_kind=new_preset 和返回的 subagent_id 新建任务；target_kind=new_agent 和 agent_id 选择内置能力；target_kind=existing_operator 和已有 operator_id 追加任务。填写 instruction、可选 input_ids。替换失败任务时提供 replaces 和 replacement_mode=replace；replacement_mode=none 会忽略 replaces。implementation 自动使用 isolated-worktree，其余任务默认 shared。operation=stop 提供 stop 数组；operation=finish 提供 finish.result_ids。仍有执行中的任务则 yield_agent_graph。"
-        : "安排 Graph 子任务。operation=add_work 的 add_work 数组使用 view_agent_graph 返回的 profile_id 新建任务，或 operator_id 追加任务，填写 instruction 和可选 input_ids。operation=stop 提供 stop 数组；operation=finish 提供 finish.result_ids。仍有执行中的任务则 yield_agent_graph。",
+        : "安排 Graph 子任务。operation=add_work 的 add_work 数组使用 view_agent_graph 返回的 profile_id 新建任务，或 operator_id 追加任务，填写 instruction 和可选 input_ids。需要整合隔离工作区成果时，finish 前先新建具备写入能力的 shared Operator 并传入成果 input_ids，读取整合验证结果后才结束。根没有 shell 工具；finish 永久封闭准入，不会自动合并。operation=stop 提供 stop 数组；operation=finish 提供 finish.result_ids。仍有执行中的任务则 yield_agent_graph。",
       inputSchema: workRequestSchema(this.options.swarm),
     };
   }
@@ -840,6 +840,8 @@ function workRequestSchema(swarm = false): Record<string, unknown> {
       },
       finish: {
         type: "object",
+        description:
+          "永久封闭新工作准入；不会自动合并分支。必须先完成用户要求的整合和验证，之后无法追加任务。",
         properties: {
           result_ids: { ...ids, maxItems: AGENT_GRAPH_MAX_SELECTED_RECORDS },
           reason: { type: "string" },
