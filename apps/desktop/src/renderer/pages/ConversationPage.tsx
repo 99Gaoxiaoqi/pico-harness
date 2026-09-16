@@ -229,8 +229,8 @@ export function ConversationPage() {
   );
   const activeRun = sessionRuns.find((run) => !isTerminalRun(run.status));
   const composerStatus = activeRun
-    ? ["paused", "pause_requested"].includes(activeRun.status)
-      ? "paused"
+    ? activeRun.status === "paused" || activeRun.status === "pause_requested"
+      ? activeRun.status
       : "running"
     : "idle";
   const [newTaskSettingOverrides, setNewTaskSettingOverrides] = useState<
