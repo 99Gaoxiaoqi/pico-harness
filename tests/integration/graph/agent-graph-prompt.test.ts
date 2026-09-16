@@ -54,6 +54,10 @@ test("Graph Mode prompt 只指导持久 Supervisor 工具与完整收口流程",
   assert.match(enabled.systemPrompt, /不得只用文字自报 Graph 完成/u);
   assert.match(enabled.systemPrompt, /Operator 必须使用 \*\*agent_output\*\*/u);
   assert.match(enabled.systemPrompt, /根 Supervisor 不调用 agent_output/u);
+  assert.match(enabled.systemPrompt, /finish 之前完成整合与验证/u);
+  assert.match(enabled.systemPrompt, /新建一个具备写入与验证能力的 Operator/u);
+  assert.match(enabled.systemPrompt, /已有 Operator 的工作区不会改变/u);
+  assert.match(enabled.systemPrompt, /永久封闭新工作准入/u);
 
   const disabled = await new PromptComposer(workDir).buildLayers();
   for (const toolName of [...GRAPH_SUPERVISOR_TOOLS, "agent_output"]) {
