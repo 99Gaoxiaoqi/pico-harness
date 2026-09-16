@@ -55,6 +55,9 @@ test("production host binds Graph root and installs detached exact execution", a
   let brokerApproval: { readonly allowed: boolean; readonly allowForSession?: boolean } | undefined;
   let networkBoundaryApproval: { readonly allowed: boolean; readonly reason: string } | undefined;
   let writeBoundaryApproval: { readonly allowed: boolean; readonly reason: string } | undefined;
+  let managedGitBoundaryApproval:
+    | { readonly allowed: boolean; readonly reason: string }
+    | undefined;
   let fullAccessBoundaryApproval:
     | { readonly allowed: boolean; readonly reason: string }
     | undefined;
@@ -84,14 +87,14 @@ test("production host binds Graph root and installs detached exact execution", a
         const promptId = createAskUserRequestId();
         const approval = host.approvalManager.waitForApproval(
           approvalId,
-          "bash",
-          '{"command":"sensitive"}',
+          "graph_git",
+          '{"operation":"status"}',
           host.approvalNotifier,
           undefined,
           host.signal,
           {
             providerCallId: "provider-call-approval-1",
-            sessionScope: { type: "bash-command", command: "sensitive", match: "exact" },
+            sessionScope: { type: "tool", toolName: "graph_git" },
           },
         );
         const answer = host.askUserHandler.waitForAnswer(
@@ -123,6 +126,18 @@ test("production host binds Graph root and installs detached exact execution", a
         );
       }
       if (options.prompt === "reject operator write approval") {
+        managedGitBoundaryApproval = await host.approvalManager!.waitForApproval(
+          "graph-git-approval",
+          "graph_git",
+          '{"operation":"commit","expected_head":"0000000000000000000000000000000000000000","message":"test"}',
+          host.approvalNotifier!,
+          undefined,
+          host.signal,
+          {
+            providerCallId: "provider-call-git-boundary",
+            sessionScope: { type: "tool", toolName: "graph_git" },
+          },
+        );
         writeBoundaryApproval = await host.approvalManager!.waitForApproval(
           "graph-write-approval",
           "write_file",
@@ -313,6 +328,9 @@ test("production host binds Graph root and installs detached exact execution", a
       executionPermissionMode: "ask",
       getActivationContext: () => undefined,
       outputPort: {} as never,
+      managedGit: {
+        execute: async () => ({ branch: "pico/graph-test", head: "test-head", output: "" }),
+      },
       profileSnapshot: operatorProfile,
     },
     orchestrationMode: "default",
@@ -329,7 +347,12 @@ test("production host binds Graph root and installs detached exact execution", a
   assert.equal(calls[1]?.options.collaborationMode, "agent");
   assert.equal(calls[1]?.options.permissionMode, "ask");
   assert.equal(calls[1]?.options.orchestrationMode, "default");
-  assert.deepEqual(calls[1]?.options.allowedTools, [...operatorProfile.tools, "agent_output"]);
+  assert.deepEqual(calls[1]?.options.allowedTools, [
+    ...operatorProfile.tools,
+    "agent_output",
+    "graph_git",
+  ]);
+  assert.ok(calls[1]?.host.agentGraph?.kind === "operator" && calls[1].host.agentGraph.managedGit);
   assert.equal(calls[1]?.host.agentGraph?.kind, "operator");
   assert.equal(calls[1]?.host.prestartedRun, exactInput.prestartedRun);
   assert.equal(calls[1]?.host.prestartedUserInput, exactInput.prestartedUserInput);
@@ -495,6 +518,7 @@ test("production host binds Graph root and installs detached exact execution", a
     allowed: false,
     reason: "Graph Operator 请求超出父 Session execution boundary，已安全拒绝。",
   });
+  assert.equal(managedGitBoundaryApproval?.allowed, false);
   rootLease.session.updateRuntimeState({ boundary: parentBoundary });
   operatorLease.session.updateRuntimeState({ boundary: parentBoundary });
   await Promise.all([

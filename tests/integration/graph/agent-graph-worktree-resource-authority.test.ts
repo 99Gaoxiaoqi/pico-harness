@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { access, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { promisify } from "node:util";
 
-import { createBuiltinAgentGraphOperatorProfileCatalog } from "@pico/runtime";
+import { createBuiltinAgentGraphOperatorProfileCatalog, GraphManagedGitTool } from "@pico/runtime";
 import type { AgentGraphProfileSnapshot } from "@pico/core/agent-graph-contracts";
 import { AgentGraphWorkspaceResourceAuthority } from "@pico/pico-host/agent-graph-workspace-resource-authority";
 import { SqliteAgentGraphControlStore } from "@pico/storage/sqlite/agent-graph-control-store";
@@ -14,6 +14,148 @@ import { Session } from "@pico/pico-host/session";
 import { resolvePicoPaths } from "@pico/pico-host";
 
 const execFileAsync = promisify(execFile);
+
+test("managed Graph Git commits only its registered branch without executing repository drivers", async (context) => {
+  const fixture = await mkdtemp(join(tmpdir(), "pico-graph-managed-git-"));
+  context.after(() => rm(fixture, { recursive: true, force: true }));
+  const repoRoot = join(fixture, "repo");
+  const storageRoot = join(fixture, "storage");
+  await git(["init", repoRoot], fixture);
+  await git(["config", "user.email", "pico@example.invalid"], repoRoot);
+  await git(["config", "user.name", "Pico Test"], repoRoot);
+  await writeFile(join(repoRoot, "README.md"), "root\n");
+  await git(["add", "README.md"], repoRoot);
+  await git(["commit", "-m", "root"], repoRoot);
+  const rootHead = (await git(["rev-parse", "HEAD"], repoRoot)).stdout.trim();
+  const store = new SqliteAgentGraphControlStore({ storageRoot });
+  context.after(() => store.close());
+  const provision = seedIsolatedProvision(store);
+  const authority = new AgentGraphWorkspaceResourceAuthority({ repoRoot, storageRoot, store });
+  const workspace = await authority.resolve(provision);
+  let active = true;
+  const port = await authority.managedGitForSession(provision.childSessionId, async () => {
+    if (!active) throw new Error("activation stopped");
+  });
+  const tool = new GraphManagedGitTool(port);
+  assert.equal(tool.permissionCategory, "file_write");
+  const marker = join(fixture, "driver-executed");
+  const command = `touch '${marker}'`;
+  const hooks = join(fixture, "hooks");
+  await mkdir(hooks);
+  for (const hook of ["pre-commit", "post-commit", "reference-transaction"]) {
+    await writeFile(join(hooks, hook), `#!/bin/sh\n${command}\n`, { mode: 0o755 });
+  }
+  const included = join(fixture, "included.config");
+  await writeFile(
+    included,
+    `[filter "hostile"]\nclean = ${command}\nprocess = ${command}\nrequired = true\n[diff "hostile"]\ncommand = ${command}\ntextconv = ${command}\n`,
+  );
+  await git(["config", "include.path", included], repoRoot);
+  await git(["config", "core.hooksPath", hooks], repoRoot);
+  await git(["config", "core.fsmonitor", command], repoRoot);
+  await git(["config", "commit.gpgSign", "true"], repoRoot);
+  await git(["config", "gpg.program", command], repoRoot);
+  await writeFile(join(workspace.workDir, ".gitattributes"), "*.txt filter=hostile diff=hostile\n");
+  await writeFile(join(workspace.workDir, "change.txt"), "scoped change\n");
+  await writeFile(join(repoRoot, ".git", "info", "exclude"), "ignored-secret.txt\n");
+  await writeFile(join(workspace.workDir, "ignored-secret.txt"), "must not be committed\n");
+  const status = JSON.parse(await tool.execute('{"operation":"status"}'));
+  assert.equal(status.head, rootHead);
+  assert.match(status.branch, /^pico\/graph-/);
+  assert.match(status.output, /change.txt/);
+  assert.doesNotMatch(status.output, /ignored-secret/);
+  const diff = await port.execute({ operation: "diff" });
+  assert.match(diff.output, /scoped change/);
+  const committed = await port.execute({
+    operation: "commit",
+    expected_head: status.head,
+    message: "feat(测试): 隔离提交",
+  });
+  assert.notEqual(committed.head, rootHead);
+  assert.equal(committed.branch, status.branch);
+  assert.equal((await git(["rev-parse", "HEAD"], repoRoot)).stdout.trim(), rootHead);
+  assert.equal((await git(["rev-parse", status.branch], repoRoot)).stdout.trim(), committed.head);
+  assert.equal(
+    (await git(["show", "-s", "--format=%an <%ae>", committed.head], repoRoot)).stdout.trim(),
+    "Pico Test <pico@example.invalid>",
+  );
+  await assert.rejects(access(marker), /ENOENT/);
+  // Disable the malicious read-side drivers before checking with ordinary Git.
+  await git(["config", "--unset", "include.path"], repoRoot);
+  assert.equal(
+    (await git(["-c", "core.fsmonitor=false", "status", "--porcelain"], workspace.workDir)).stdout,
+    "",
+  );
+  await assert.rejects(
+    port.execute({ operation: "commit", expected_head: status.head, message: "repeat" }),
+    /stale/,
+  );
+  await assert.rejects(
+    port.execute({ operation: "commit", expected_head: committed.head, message: "empty" }),
+    /no changes/,
+  );
+  await assert.rejects(tool.execute('{"operation":"status","cwd":"/"}'), /unexpected input/);
+  active = false;
+  await assert.rejects(port.execute({ operation: "status" }), /stopped/);
+});
+
+test("managed Graph Git rejects overlapping calls, identity tampering and cancellation before publication", async (context) => {
+  const fixture = await mkdtemp(join(tmpdir(), "pico-graph-managed-git-fences-"));
+  context.after(() => rm(fixture, { recursive: true, force: true }));
+  const repoRoot = join(fixture, "repo");
+  const storageRoot = join(fixture, "storage");
+  await git(["init", repoRoot], fixture);
+  await git(["config", "user.email", "pico@example.invalid"], repoRoot);
+  await git(["config", "user.name", "Pico Test"], repoRoot);
+  await writeFile(join(repoRoot, "README.md"), "root\n");
+  await git(["add", "."], repoRoot);
+  await git(["commit", "-m", "root"], repoRoot);
+  const store = new SqliteAgentGraphControlStore({ storageRoot });
+  context.after(() => store.close());
+  const provision = seedIsolatedProvision(store);
+  const authority = new AgentGraphWorkspaceResourceAuthority({ repoRoot, storageRoot, store });
+  const workspace = await authority.resolve(provision);
+  let calls = 0;
+  let stopAt = Infinity;
+  const port = await authority.managedGitForSession(provision.childSessionId, async () => {
+    if (++calls >= stopAt) throw new Error("activation stopped");
+  });
+  const head = (await port.execute({ operation: "status" })).head;
+  await writeFile(join(workspace.workDir, "change.txt"), "change\n");
+  const concurrent = await Promise.allSettled([
+    port.execute({ operation: "status" }),
+    port.execute({ operation: "status" }),
+  ]);
+  assert.equal(concurrent.filter((result) => result.status === "fulfilled").length, 1);
+  assert.match(
+    String(
+      (concurrent.find((result) => result.status === "rejected") as PromiseRejectedResult).reason,
+    ),
+    /already in progress|EEXIST/,
+  );
+  calls = 0;
+  stopAt = 8;
+  await assert.rejects(
+    port.execute({ operation: "commit", expected_head: head, message: "cancelled" }),
+    /stopped/,
+  );
+  assert.equal((await git(["rev-parse", "HEAD"], workspace.workDir)).stdout.trim(), head);
+  stopAt = Infinity;
+  const gitfile = join(workspace.workDir, ".git");
+  const original = await readFile(gitfile, "utf8");
+  await writeFile(gitfile, `gitdir: ${join(repoRoot, ".git")}\n`);
+  await assert.rejects(port.execute({ operation: "status" }), /identity changed/);
+  await writeFile(gitfile, original);
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(
+    port.execute(
+      { operation: "commit", expected_head: head, message: "aborted" },
+      controller.signal,
+    ),
+    /abort/i,
+  );
+});
 
 test("isolated Graph workspace is adopted after reopen and cleaned only when safe", async (context) => {
   const fixture = await mkdtemp(join(tmpdir(), "pico-graph-worktree-authority-"));

@@ -33,3 +33,18 @@ export interface CommitAgentOutputReceipt {
 export interface AgentOutputCommitPort {
   commitAgentOutput(input: CommitAgentOutputInput): Promise<CommitAgentOutputReceipt>;
 }
+
+/** A host-bound capability: no model-controlled repository, branch, path or argv. */
+export type GraphManagedGitRequest =
+  | { readonly operation: "status" | "diff" }
+  | { readonly operation: "commit"; readonly expected_head: string; readonly message: string };
+
+export interface GraphManagedGitResult {
+  readonly branch: string;
+  readonly head: string;
+  readonly output: string;
+}
+
+export interface GraphManagedGitPort {
+  execute(request: GraphManagedGitRequest, signal?: AbortSignal): Promise<GraphManagedGitResult>;
+}
