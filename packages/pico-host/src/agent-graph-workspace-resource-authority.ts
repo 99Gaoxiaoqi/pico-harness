@@ -5,6 +5,8 @@ import { isAbsolute, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import type { AgentGraphOperatorProvision } from "@pico/core/agent-graph-contracts";
+import type { GraphManagedGitPort } from "@pico/core/agent-output-contracts";
+import { createGraphManagedGitPort } from "./graph-managed-git.js";
 import type { ResolvedAgentGraphOperatorWorkspace } from "@pico/runtime";
 import type { AgentGraphWorkspaceResourceRecord } from "@pico/core/agent-graph-store-contracts";
 import type { SqliteAgentGraphControlStore } from "@pico/storage/sqlite/agent-graph-control-store";
@@ -95,6 +97,32 @@ export class AgentGraphWorkspaceResourceAuthority {
 
   resourceForSession(sessionId: string): AgentGraphWorkspaceResourceRecord | undefined {
     return this.options.store.getWorkspaceResourceBySession(sessionId);
+  }
+
+  async managedGitForSession(
+    sessionId: string,
+    assertActive: () => Promise<void>,
+  ): Promise<GraphManagedGitPort> {
+    const resource = this.resourceForSession(sessionId);
+    if (!resource || resource.state !== "active")
+      throw new Error("No active registered Graph worktree");
+    return createGraphManagedGitPort({
+      resource,
+      assertWorkspace: () => this.assertExactWorktree(resource),
+      assertActive: async () => {
+        const current = this.options.store.getWorkspaceResource(resource.resourceId);
+        if (
+          !current ||
+          current.state !== "active" ||
+          current.version !== resource.version ||
+          current.provisionId !== resource.provisionId ||
+          current.childSessionId !== sessionId
+        ) {
+          throw new Error("Managed Git workspace ownership is no longer active");
+        }
+        await assertActive();
+      },
+    });
   }
 
   private async resolveIsolated(
@@ -251,6 +279,11 @@ export class AgentGraphWorkspaceResourceAuthority {
       throw new Error(`Graph worktree repository mismatch: ${resource.resourceId}`);
     }
     requireContained(this.worktreeRoot, resource.worktreePath, "stored worktreePath");
+    requireContained(
+      await realpath(this.worktreeRoot),
+      await realpath(resource.worktreePath),
+      "physical worktreePath",
+    );
     const metadata = await lstat(resource.worktreePath);
     if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
       throw new Error(`Graph worktree path is not a physical directory: ${resource.worktreePath}`);
