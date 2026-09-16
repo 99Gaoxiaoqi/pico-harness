@@ -32,6 +32,7 @@ export class CronRuntimeScheduler {
   private timer?: ReturnType<typeof setTimeout> | undefined;
   private running = false;
   private readonly activeTicks = new Set<Promise<void>>();
+  private readonly dispatchingRuns = new Set<string>();
 
   constructor(private readonly options: CronRuntimeSchedulerOptions) {
     this.now = options.now ?? Date.now;
@@ -100,10 +101,35 @@ export class CronRuntimeScheduler {
 
   private async dispatch(initial: CronRunRecord): Promise<void> {
     if (initial.status !== "queued") return;
+    if (initial.ownerId !== this.options.cronService.ownerId) return;
+    if (this.dispatchingRuns.has(initial.cronRunId)) return;
+    this.dispatchingRuns.add(initial.cronRunId);
+    try {
+      await this.dispatchOwned(initial);
+    } finally {
+      this.dispatchingRuns.delete(initial.cronRunId);
+    }
+  }
+
+  private async dispatchOwned(initial: CronRunRecord): Promise<void> {
     let job: CronJobRecord;
     let runtime: WorkspaceTaskRuntime;
     let claimed: ReturnType<CronService["claim"]>;
+    let preflightLeaseLost = false;
+    const assertPreflightOwnership = () => {
+      if (preflightLeaseLost) throw new Error("cron preflight lease lost");
+      this.options.cronService.heartbeat(initial.cronRunId, initial.leaseEpoch);
+    };
+    const preflightHeartbeat = setInterval(() => {
+      try {
+        assertPreflightOwnership();
+      } catch {
+        preflightLeaseLost = true;
+      }
+    }, this.leaseHeartbeatMs);
+    preflightHeartbeat.unref?.();
     try {
+      assertPreflightOwnership();
       const currentJob = this.options.cronService.store.getCronJob(initial.cronJobId);
       if (!currentJob) {
         this.options.cronService.block(initial.cronRunId, "job_missing");
@@ -111,11 +137,13 @@ export class CronRuntimeScheduler {
       }
       job = currentJob;
       const decision = await this.options.canRun(job);
+      assertPreflightOwnership();
       if (!decision.allowed) {
         this.options.cronService.block(initial.cronRunId, decision.reason ?? "policy_blocked");
         return;
       }
       runtime = await this.options.getWorkspaceRuntime(job.workspacePath);
+      assertPreflightOwnership();
       if (runtime.listRuns().some((run) => !isTerminal(run))) {
         this.options.cronService.skip(initial.cronRunId);
         return;
@@ -124,6 +152,8 @@ export class CronRuntimeScheduler {
     } catch (error) {
       this.blockQueuedAfterPreflightFailure(initial.cronRunId, error);
       return;
+    } finally {
+      clearInterval(preflightHeartbeat);
     }
     if (claimed.run.status !== "running" || !claimed.lease) return;
     let run: WorkspaceRunSnapshot;

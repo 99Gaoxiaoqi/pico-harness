@@ -1,5 +1,5 @@
 // Scheduled jobs and automation credential contracts with their parameter/result rules.
-import type { JobId, JsonObject, RunId, RuntimeJobStatus, WorkspaceParams } from "./base.js";
+import type { JobId, RunId, RuntimeJobStatus, WorkspaceParams } from "./base.js";
 import { runtimeRunResult } from "./session.js";
 import type { RuntimeRun } from "./session.js";
 import {
@@ -13,6 +13,7 @@ import {
   resultFiniteNumber,
   resultNonEmptyString,
   resultOneOf,
+  resultPositiveInteger,
   resultString,
   stringArrayParam,
   stringParam,
@@ -21,7 +22,7 @@ import {
 } from "./validation.js";
 import type { RuntimeParamValidator, RuntimeResultRule } from "./validation.js";
 
-export type RuntimeJob = JsonObject & {
+export type RuntimeJob = {
   readonly jobId: JobId;
   readonly workspacePath: string;
   readonly name: string;
@@ -30,18 +31,30 @@ export type RuntimeJob = JsonObject & {
   readonly enabled: boolean;
   readonly status: RuntimeJobStatus;
   readonly updatedAt: number;
+  readonly timeZone?: string;
+  readonly version?: number;
+  readonly modelRouteId?: string;
+  readonly latestRunId?: RunId;
 };
 
-export const runtimeJobResult = exactResultShape({
-  jobId: resultNonEmptyString,
-  workspacePath: resultNonEmptyString,
-  name: resultNonEmptyString,
-  prompt: resultNonEmptyString,
-  schedule: resultNonEmptyString,
-  enabled: resultBoolean,
-  status: resultOneOf(["idle", "running", "failed", "succeeded"]),
-  updatedAt: resultFiniteNumber,
-});
+export const runtimeJobResult = exactResultShape(
+  {
+    jobId: resultNonEmptyString,
+    workspacePath: resultNonEmptyString,
+    name: resultNonEmptyString,
+    prompt: resultNonEmptyString,
+    schedule: resultNonEmptyString,
+    enabled: resultBoolean,
+    status: resultOneOf(["idle", "running", "failed", "succeeded"]),
+    updatedAt: resultFiniteNumber,
+  },
+  {
+    timeZone: resultNonEmptyString,
+    version: resultPositiveInteger,
+    modelRouteId: resultNonEmptyString,
+    latestRunId: resultNonEmptyString,
+  },
+);
 
 export type AutomationMethodMap = {
   readonly "jobs.list": {
