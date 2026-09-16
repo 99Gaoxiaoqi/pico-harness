@@ -178,7 +178,7 @@ export type ConversationItemView =
   | GoalItemView
   | DiscoveryItemView;
 
-export type ComposerStatus = "idle" | "running" | "paused";
+export type ComposerStatus = "idle" | "running" | "pause_requested" | "paused";
 export type ComposerBehavior = "auto" | "steer" | "queue" | "replace";
 
 export interface ComposerSubmitValue {
