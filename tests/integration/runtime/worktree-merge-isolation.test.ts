@@ -159,6 +159,78 @@ test("resume accepts a changed upstream only after its new commit is explicitly 
   assert.equal(existsSync(blocked.integrationWorktree), false);
 });
 
+for (const change of ["target", "upstream", "unrelated-upstream"] as const) {
+  test(`recovering ${change} drift advances only the second task's accepted baseline`, async (t) => {
+    const fixture = await createFixture(t);
+    const secondSource = join(dirname(fixture.sourceWorktree), "second-source");
+    await git(fixture.targetWorktree, "worktree", "add", "--quiet", "-b", "second", secondSource);
+    await commitFile(secondSource, "second.txt", "second\n");
+    const second = {
+      ...fixture,
+      taskId: "second",
+      sourceBranch: "second",
+      sourceWorktree: secondSource,
+    };
+    let changedWorktree = fixture.targetWorktree;
+    if (change !== "target") {
+      changedWorktree = join(dirname(fixture.sourceWorktree), "upstream");
+      await git(
+        fixture.targetWorktree,
+        "worktree",
+        "add",
+        "--quiet",
+        "-b",
+        "upstream",
+        changedWorktree,
+      );
+      await git(fixture.targetWorktree, "branch", "--set-upstream-to=upstream", "main");
+    }
+    await commitFile(fixture.sourceWorktree, "feature.txt", "feature\n");
+    let drifted = false;
+    const queue = makeQueue(t, async (args, options) => {
+      const result = await executeGit(args, options);
+      if (args.includes("--no-ff") && !drifted) {
+        drifted = true;
+        // Upstream recovery must advance a task queued on the old upstream U0.
+        if (change === "upstream") await queue.enqueue(second);
+        if (change === "unrelated-upstream") {
+          await commitFile(changedWorktree, "intermediate.txt", "intermediate\n");
+          await queue.enqueue(second);
+        }
+        await commitFile(changedWorktree, "concurrent.txt", "concurrent\n");
+      }
+      return result;
+    });
+    await queue.enqueue(fixture);
+    await queue.waitForIdle();
+    const blocked = queue.get(fixture.taskId)!;
+    assert.equal(blocked.status, "blocked");
+    assert.ok(blocked.integrationWorktree);
+    // Target recovery must also advance a task queued after target moved B0 -> B1.
+    if (change === "target") await queue.enqueue(second);
+    assert.equal(queue.get("second")!.status, "queued");
+    await assert.rejects(queue.resumeAfterResolution(fixture.taskId), /已漂移/);
+    const acceptedHead = await git(changedWorktree, "rev-parse", "HEAD");
+    await git(blocked.integrationWorktree, "merge", "--no-edit", acceptedHead);
+    assert.equal((await queue.resumeAfterResolution(fixture.taskId)).status, "merged");
+    await queue.waitForIdle();
+    if (change === "unrelated-upstream") {
+      assert.equal(queue.get("second")!.status, "blocked");
+      assert.match(queue.get("second")!.error!, /已漂移/);
+      assert.equal(existsSync(join(fixture.targetWorktree, "second.txt")), false);
+      return;
+    }
+    assert.equal(queue.get("second")!.status, "merged", queue.get("second")!.error);
+    await git(fixture.targetWorktree, "merge-base", "--is-ancestor", acceptedHead, "HEAD");
+    assert.equal(await readFile(join(fixture.targetWorktree, "feature.txt"), "utf8"), "feature\n");
+    assert.equal(await readFile(join(fixture.targetWorktree, "second.txt"), "utf8"), "second\n");
+    assert.equal(
+      await readFile(join(fixture.targetWorktree, "concurrent.txt"), "utf8"),
+      "concurrent\n",
+    );
+  });
+}
+
 for (const change of ["late commit", "ignored file"] as const) {
   test(`fast-forward refuses a ${change} at the publication boundary without overwriting user data`, async (t) => {
     const fixture = await createFixture(t);
