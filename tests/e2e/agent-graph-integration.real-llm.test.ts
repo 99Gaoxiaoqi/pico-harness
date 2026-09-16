@@ -164,7 +164,7 @@ for (const permissionMode of ["full-access", "ask"] as const) {
                 approval.toolName ?? "",
               ) ||
                 (approval.toolName === "bash" && isSyntheticGitCommand(approval.command ?? "")),
-              `unexpected tool approval: ${approval.toolName}`,
+              `unexpected tool approval: ${approval.toolName}; command=${approval.command?.replaceAll(model.config.apiKey, "[redacted]").slice(0, 500) ?? "none"}`,
             );
             handledApprovals.add(approval.approvalId);
             const result = await services.desktopService.handle(
