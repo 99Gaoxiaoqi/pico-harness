@@ -67,6 +67,11 @@ interface QueueEntry extends WorktreeMergeSnapshot {
   mergeAttempted: boolean;
 }
 
+interface MergeBaseline {
+  targetHead: string;
+  upstreamHead: string | undefined;
+}
+
 /**
  * A fail-closed, serial queue for integrating completed worktree branches.
  *
@@ -165,10 +170,20 @@ export class WorktreeMergeQueue {
         }
         // Explicit recovery accepts a new baseline only after proving it was reintegrated.
         // Publication repeats the checks so a later target/upstream movement still blocks.
+        const previousBaseline = {
+          targetHead: entry.expectedTargetHead,
+          upstreamHead: entry.expectedUpstreamHead,
+        };
         entry.expectedTargetHead = currentHead;
         entry.expectedUpstreamHead = upstreamHead;
-        await this.publishIntegration(entry, mergeHead, lease);
-        await this.finishIntegration(entry, mergeHead);
+        try {
+          await this.publishIntegration(entry, mergeHead, lease);
+        } catch (error) {
+          entry.expectedTargetHead = previousBaseline.targetHead;
+          entry.expectedUpstreamHead = previousBaseline.upstreamHead;
+          throw error;
+        }
+        await this.finishIntegration(entry, mergeHead, previousBaseline);
       } else {
         await this.assertCheckedOutBranch(entry.targetWorktree, entry.targetBranch);
         await this.assertClean(entry.targetWorktree, "目标");
@@ -367,9 +382,13 @@ export class WorktreeMergeQueue {
     entry.integrationWorktree = undefined;
   }
 
-  private async finishIntegration(entry: QueueEntry, mergeHead: string): Promise<void> {
+  private async finishIntegration(
+    entry: QueueEntry,
+    mergeHead: string,
+    previousBaseline?: MergeBaseline,
+  ): Promise<void> {
     this.markMerged(entry, mergeHead);
-    this.advanceExpectedTargetHeads(entry, mergeHead);
+    this.advanceExpectedTargetHeads(entry, mergeHead, previousBaseline);
     try {
       await this.cleanupIntegration(entry);
     } catch (error) {
@@ -388,15 +407,27 @@ export class WorktreeMergeQueue {
   }
 
   /** Queue-owned target advancement must not look like external branch drift. */
-  private advanceExpectedTargetHeads(completed: QueueEntry, mergeHead: string): void {
+  private advanceExpectedTargetHeads(
+    completed: QueueEntry,
+    mergeHead: string,
+    previousBaseline?: MergeBaseline,
+  ): void {
+    const acceptedTargets = [completed.expectedTargetHead];
+    const acceptedUpstreams = [completed.expectedUpstreamHead];
+    if (previousBaseline) {
+      acceptedTargets.push(previousBaseline.targetHead);
+      acceptedUpstreams.push(previousBaseline.upstreamHead);
+    }
     for (const entry of this.entries.values()) {
       if (
         entry.status === "queued" &&
         entry.targetWorktree === completed.targetWorktree &&
         entry.targetBranch === completed.targetBranch &&
-        entry.expectedTargetHead === completed.targetHeadBefore
+        acceptedTargets.includes(entry.expectedTargetHead) &&
+        acceptedUpstreams.includes(entry.expectedUpstreamHead)
       ) {
         entry.expectedTargetHead = mergeHead;
+        entry.expectedUpstreamHead = completed.expectedUpstreamHead;
       }
     }
   }
