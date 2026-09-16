@@ -1,7 +1,10 @@
 /** Pico Host serial integration queue for completed managed worktrees. */
 import { execFile } from "node:child_process";
 import { lstatSync } from "node:fs";
-import { isAbsolute, normalize, resolve } from "node:path";
+import { mkdtemp, rmdir } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, isAbsolute, join, normalize, resolve } from "node:path";
+import { OwnerLease } from "@pico/storage";
 
 import {
   buildSafeGitEnvironment,
@@ -30,6 +33,8 @@ export interface WorktreeMergeSnapshot extends WorktreeMergeCandidate {
   targetHeadBefore?: string | undefined;
   sourceHead?: string | undefined;
   mergeHead?: string | undefined;
+  /** Preserved on failure so a human can resolve and commit the isolated merge. */
+  integrationWorktree?: string | undefined;
   error?: string | undefined;
 }
 
@@ -65,7 +70,7 @@ interface QueueEntry extends WorktreeMergeSnapshot {
 /**
  * A fail-closed, serial queue for integrating completed worktree branches.
  *
- * Conflicts are intentionally left in the target worktree. No automatic
+ * Conflicts are intentionally left in an isolated integration worktree. No automatic
  * reset, stash, hook bypass, or force operation is used.
  */
 export class WorktreeMergeQueue {
@@ -78,7 +83,8 @@ export class WorktreeMergeQueue {
   constructor(options: WorktreeMergeQueueOptions = {}) {
     const rawGit = options.git ?? executeGit;
     const disabledHooksPath = createDisabledHooksPath();
-    this.git = (args, gitOptions) => rawGit(hardenGitArgs(args, disabledHooksPath), gitOptions);
+    this.git = (args, gitOptions) =>
+      rawGit(hardenGitArgs(["--no-optional-locks", ...args], disabledHooksPath), gitOptions);
     this.now = options.now ?? Date.now;
   }
 
@@ -128,7 +134,7 @@ export class WorktreeMergeQueue {
 
   /**
    * Resume after a human resolves the conflict in the preserved worktree.
-   * The resolution must be committed and leave the target worktree clean.
+   * The resolution must be committed and leave the integration worktree clean.
    */
   async resumeAfterResolution(taskId?: string): Promise<WorktreeMergeSnapshot> {
     const entry = taskId
@@ -138,22 +144,28 @@ export class WorktreeMergeQueue {
       throw new Error(taskId ? `任务未处于 blocked: ${taskId}` : "没有待恢复的 blocked 合并任务");
     }
 
-    await this.assertCheckedOutBranch(entry.targetWorktree, entry.targetBranch);
-    await this.assertClean(entry.targetWorktree, "目标");
-    const currentHead = await this.resolveBranchHead(entry.targetWorktree, entry.targetBranch);
-
-    if (entry.mergeAttempted && currentHead !== entry.targetHeadBefore) {
-      this.markMerged(entry, currentHead);
-      this.advanceExpectedTargetHeads(entry, currentHead);
-    } else {
-      entry.status = "queued";
-      entry.error = undefined;
-      entry.expectedTargetHead = currentHead;
-      entry.expectedUpstreamHead = await this.resolveOptionalUpstreamHead(entry.targetWorktree);
-      entry.mergeAttempted = false;
-      entry.startedAt = undefined;
-      entry.finishedAt = undefined;
-      this.emit(entry);
+    const lease = await this.lockTarget(entry);
+    try {
+      if (entry.mergeAttempted && entry.integrationWorktree) {
+        const mergeHead = await this.validateIntegration(entry);
+        await this.publishIntegration(entry, mergeHead, lease);
+        await this.finishIntegration(entry, mergeHead);
+      } else {
+        await this.assertCheckedOutBranch(entry.targetWorktree, entry.targetBranch);
+        await this.assertClean(entry.targetWorktree, "目标");
+        const currentHead = await this.resolveBranchHead(entry.targetWorktree, entry.targetBranch);
+        await this.cleanupIntegration(entry);
+        entry.status = "queued";
+        entry.error = undefined;
+        entry.expectedTargetHead = currentHead;
+        entry.expectedUpstreamHead = await this.resolveOptionalUpstreamHead(entry.targetWorktree);
+        entry.mergeAttempted = false;
+        entry.startedAt = undefined;
+        entry.finishedAt = undefined;
+        this.emit(entry);
+      }
+    } finally {
+      await lease.release();
     }
 
     this.scheduleDrain();
@@ -183,7 +195,9 @@ export class WorktreeMergeQueue {
     entry.error = undefined;
     this.emit(entry);
 
+    let lease: OwnerLease | undefined;
     try {
+      lease = await this.lockTarget(entry);
       await this.assertCheckedOutBranch(entry.sourceWorktree, entry.sourceBranch);
       await this.assertCheckedOutBranch(entry.targetWorktree, entry.targetBranch);
       await this.assertClean(entry.sourceWorktree, "源");
@@ -207,6 +221,13 @@ export class WorktreeMergeQueue {
       await this.assertNoExternalMergeDrivers(entry.targetWorktree);
       await this.assertNoBranchMergeOptions(entry.targetWorktree, entry.targetBranch);
       const filterOverrides = await this.buildDisabledFilterOverrides(entry.targetWorktree);
+      const integrationRoot = await mkdtemp(join(tmpdir(), "pico-merge-"));
+      entry.integrationWorktree = join(integrationRoot, "worktree");
+      await this.runChecked(
+        [...filterOverrides, "worktree", "add", "--detach", entry.integrationWorktree, targetHead],
+        entry.targetWorktree,
+        "无法创建隔离集成工作树",
+      );
       entry.mergeAttempted = true;
       const merge = await this.git(
         [
@@ -217,30 +238,126 @@ export class WorktreeMergeQueue {
           "--no-gpg-sign",
           "--no-verify-signatures",
           "--",
-          entry.sourceBranch,
+          sourceHead,
         ],
         {
-          cwd: entry.targetWorktree,
+          cwd: entry.integrationWorktree,
         },
       );
       if (merge.exitCode !== 0) {
-        throw new Error(commandFailure("git merge 失败，已保留现场", merge));
+        throw new Error(
+          commandFailure(`git merge 失败，已保留隔离现场 ${entry.integrationWorktree}`, merge),
+        );
       }
 
-      await this.assertClean(entry.targetWorktree, "目标");
-      const mergeHead = await this.resolveBranchHead(entry.targetWorktree, entry.targetBranch);
-      if (mergeHead === targetHead) {
-        throw new Error(`源分支 ${entry.sourceBranch} 相对目标分支没有可合并提交`);
-      }
-
-      this.markMerged(entry, mergeHead);
-      this.advanceExpectedTargetHeads(entry, mergeHead);
+      const mergeHead = await this.validateIntegration(entry);
+      await this.publishIntegration(entry, mergeHead, lease);
+      await this.finishIntegration(entry, mergeHead);
     } catch (error) {
       entry.status = "blocked";
       entry.finishedAt = this.now();
       entry.error = errorMessage(error);
+      if (entry.integrationWorktree && !entry.error.includes(entry.integrationWorktree)) {
+        entry.error += `（隔离集成工作树: ${entry.integrationWorktree}）`;
+      }
       this.emit(entry);
+    } finally {
+      await lease?.release();
     }
+  }
+
+  /** Serialize all queue instances sharing this repository, including linked worktrees. */
+  private async lockTarget(entry: QueueEntry): Promise<OwnerLease> {
+    const common = await this.runChecked(
+      ["rev-parse", "--git-common-dir"],
+      entry.targetWorktree,
+      "无法定位 Git 目录",
+    );
+    const lock = resolve(entry.targetWorktree, common.stdout.trim(), "pico-merge.lock");
+    try {
+      return await OwnerLease.acquire({ leaseDirectory: lock, ownerId: `merge:${entry.taskId}` });
+    } catch (error) {
+      throw new Error(`无法取得合并锁（其他队列可能正在合并）: ${lock}`, { cause: error });
+    }
+  }
+
+  private async validateIntegration(entry: QueueEntry): Promise<string> {
+    const worktree = entry.integrationWorktree;
+    if (!worktree || !entry.targetHeadBefore || !entry.sourceHead) {
+      throw new Error("缺少隔离集成现场，无法验证合并");
+    }
+    await this.assertClean(worktree, "集成");
+    const head = (
+      await this.runChecked(["rev-parse", "HEAD"], worktree, "无法读取集成提交")
+    ).stdout.trim();
+    if (head === entry.targetHeadBefore) throw new Error("集成工作树尚未提交合并结果");
+    for (const ancestor of [entry.targetHeadBefore, entry.sourceHead]) {
+      await this.runChecked(
+        ["merge-base", "--is-ancestor", ancestor, head],
+        worktree,
+        "集成提交未包含目标与源提交",
+      );
+    }
+    return head;
+  }
+
+  private async publishIntegration(
+    entry: QueueEntry,
+    mergeHead: string,
+    lease: OwnerLease,
+  ): Promise<void> {
+    await this.assertCheckedOutBranch(entry.targetWorktree, entry.targetBranch);
+    await this.assertClean(entry.targetWorktree, "目标");
+    const currentHead = await this.resolveBranchHead(entry.targetWorktree, entry.targetBranch);
+    if (currentHead !== entry.expectedTargetHead) {
+      throw new Error(
+        `目标分支已漂移: expected ${entry.expectedTargetHead}, actual ${currentHead}`,
+      );
+    }
+    await this.assertUpstreamNotDrifted(entry);
+    await this.assertNoBranchMergeOptions(entry.targetWorktree, entry.targetBranch);
+    const filters = await this.buildDisabledFilterOverrides(entry.targetWorktree);
+    await lease.assertOwnership();
+    // Git's fast-forward checkout refuses overwritten local files and divergent concurrent commits.
+    await this.runChecked(
+      [
+        ...filters,
+        "merge",
+        "--ff-only",
+        "--no-overwrite-ignore",
+        "--no-edit",
+        "--no-gpg-sign",
+        "--no-verify-signatures",
+        "--",
+        mergeHead,
+      ],
+      entry.targetWorktree,
+      "无法安全快进目标分支，已保留隔离集成结果",
+    );
+  }
+
+  private async cleanupIntegration(entry: QueueEntry): Promise<void> {
+    if (!entry.integrationWorktree) return;
+    const path = entry.integrationWorktree;
+    await this.runChecked(
+      ["worktree", "remove", "--", path],
+      entry.targetWorktree,
+      "无法清理集成工作树",
+    );
+    await rmdir(dirname(path));
+    entry.integrationWorktree = undefined;
+  }
+
+  private async finishIntegration(entry: QueueEntry, mergeHead: string): Promise<void> {
+    this.markMerged(entry, mergeHead);
+    this.advanceExpectedTargetHeads(entry, mergeHead);
+    try {
+      await this.cleanupIntegration(entry);
+    } catch (error) {
+      // Publication succeeded; cleanup failure must never turn it into a failed merge.
+      entry.error = errorMessage(error);
+    }
+    this.emit(entry);
   }
 
   private markMerged(entry: QueueEntry, mergeHead: string): void {
