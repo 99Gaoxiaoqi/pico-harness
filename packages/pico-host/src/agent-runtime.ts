@@ -6,7 +6,7 @@ import {
 } from "@pico/pico-host/configured-subagent-output-store";
 import { WebSearchTool } from "@pico/pico-host/web-tools";
 import { UserConfigStore } from "@pico/pico-host/input/user-config-store";
-import { resolveNativeWebSearchCapability } from "@pico/runtime";
+import { GraphManagedGitTool, resolveNativeWebSearchCapability } from "@pico/runtime";
 import {
   DEFAULT_WEB_SEARCH_SETTINGS,
   guardNativeSearchRequests,
@@ -377,6 +377,7 @@ export interface RunAgentCliDependencies extends RuntimeHost {
         readonly kind: "operator";
         readonly getActivationContext: () => GraphOperatorActivationContext | undefined;
         readonly outputPort: AgentOutputCommitPort;
+        readonly managedGit?: import("@pico/core/agent-output-contracts").GraphManagedGitPort;
         readonly profileSnapshot: AgentGraphProfileSnapshot;
         /** Trusted host projection of the inherited durable execution boundary. */
         readonly executionPermissionMode: "ask" | "full-access";
@@ -2049,6 +2050,10 @@ export async function executeAgentRuntime(
         }),
       );
       baselineToolNames.push("agent_output");
+      if (dependencies.agentGraph.managedGit && collaborationMode() !== "plan") {
+        registry.register(new GraphManagedGitTool(dependencies.agentGraph.managedGit));
+        baselineToolNames.push("graph_git");
+      }
     }
     if (!backgroundPolicy && hostKind === "desktop" && dependencies.browserAgent) {
       for (const tool of createBrowserAgentTools(dependencies.browserAgent)) {
@@ -2190,6 +2195,11 @@ export async function executeAgentRuntime(
                 composed.systemPrompt,
                 "<graph-operator-profile>",
                 dependencies.agentGraph.profileSnapshot.systemPrompt.content,
+                ...(dependencies.agentGraph.managedGit
+                  ? [
+                      "隔离工作树 Git 必须使用 graph_git：先 operation=status 获取 head，完成文件修改与验证后用 operation=commit、expected_head 和 message 提交全部变更。不要用 bash 执行 git status/add/commit；不要访问父仓库 .git、切分支、推送或自行合并。正式 agent_output 中报告 graph_git 返回的真实 branch/head。",
+                    ]
+                  : []),
                 "</graph-operator-profile>",
               ].join("\n")
             : composed.systemPrompt,

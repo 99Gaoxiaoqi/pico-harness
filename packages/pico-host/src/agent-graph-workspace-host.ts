@@ -6,6 +6,7 @@ import type {
 import type {
   AgentOutputCommitPort,
   GraphOperatorActivationContext,
+  GraphManagedGitPort,
 } from "@pico/core/agent-output-contracts";
 import type { AgentGraphOperatorProfileCatalog } from "@pico/core/agent-graph-profile-contracts";
 import type { AgentGraphRootToolContext } from "@pico/core/agent-graph-supervisor-contracts";
@@ -94,6 +95,7 @@ export type AgentGraphRunToolBinding =
       readonly executionPermissionMode: "ask" | "full-access";
       readonly getActivationContext: () => GraphOperatorActivationContext | undefined;
       readonly outputPort: AgentOutputCommitPort;
+      readonly managedGit?: GraphManagedGitPort;
       readonly profileSnapshot: AgentGraphProfileSnapshot;
     };
 
@@ -275,6 +277,40 @@ export function createAgentGraphWorkspaceHost(
         if (!childBoundary || childBoundary.kind === "external") {
           throw new Error("Graph Operator is missing its inherited execution boundary");
         }
+        const managedGit =
+          profileSnapshot.tools.some((tool) =>
+            ["write_file", "edit_file", "bash"].includes(tool),
+          ) && workspaceAuthority?.resourceForSession(session.id)
+            ? await workspaceAuthority.managedGitForSession(session.id, async () => {
+                const currentClaim = store.getActivationClaim(activation.activationId);
+                const currentProvision = store
+                  .listOperatorProvisions(activation.graphId)
+                  .find((item) => item.provisionId === provision.provisionId);
+                const run = await options.runtimeEventStore.readRunProjection(
+                  activation.sessionId,
+                  activation.runId,
+                );
+                if (
+                  !liveLaunches.has(activation.runId) ||
+                  activeSessions.get(activation.sessionId) !== session ||
+                  session.getRuntimeStateSnapshot().settings?.collaborationMode === "plan" ||
+                  store.getGraph(activation.graphId)?.phase !== "open" ||
+                  !currentClaim ||
+                  currentClaim.state === "cancelled" ||
+                  currentClaim.targetSessionId !== activation.sessionId ||
+                  currentClaim.targetRunId !== activation.runId ||
+                  currentClaim.targetTurnId !== activation.turnId ||
+                  currentClaim.operatorId !== activation.operatorId ||
+                  currentClaim.operatorGeneration !== activation.operatorGeneration ||
+                  currentProvision?.state !== "provisioned" ||
+                  !run ||
+                  run.terminalEventId !== undefined
+                ) {
+                  throw new Error("Managed Git activation is no longer active");
+                }
+                await session.assertRuntimeEventWriteAllowed();
+              })
+            : undefined;
         binding = {
           kind: "operator",
           rootSessionId: graph.rootSessionId,
@@ -282,11 +318,16 @@ export function createAgentGraphWorkspaceHost(
           executionPermissionMode: childBoundary.kind === "bypass" ? "full-access" : "ask",
           getActivationContext: () => activation,
           outputPort: runtime,
+          ...(managedGit ? { managedGit } : {}),
           profileSnapshot,
         };
         orchestrationMode = "default";
         requestedModel = profileSnapshot.modelRouteId;
-        allowedTools = [...profileSnapshot.tools, "agent_output"];
+        allowedTools = [
+          ...profileSnapshot.tools,
+          "agent_output",
+          ...(managedGit ? ["graph_git"] : []),
+        ];
       } else {
         wakeId = rootWakeIdFromClaim(input.claimId);
         const recoverable = await store.getRecoverableSupervisorWake(wakeId);

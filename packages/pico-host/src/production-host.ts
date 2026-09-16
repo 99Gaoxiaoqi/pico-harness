@@ -519,7 +519,13 @@ export function createProductionRuntimeServices(
           agentSwarmAuthorization: input.prestartedRun.agentSwarmAuthorization,
           ...(reasoningLevel !== undefined ? { thinkingEffort: reasoningLevel } : {}),
           ...(operatorProfile
-            ? { allowedTools: [...operatorProfile.tools, "agent_output"] }
+            ? {
+                allowedTools: [
+                  ...operatorProfile.tools,
+                  "agent_output",
+                  ...(operatorBinding?.managedGit ? ["graph_git"] : []),
+                ],
+              }
             : input.allowedTools
               ? { allowedTools: input.allowedTools }
               : {}),
@@ -535,6 +541,7 @@ export function createProductionRuntimeServices(
             operatorExecutionBoundary?.child.kind === "managed"
               ? boundedAgentGraphOperatorApprovalNotifier({
                   boundary: operatorExecutionBoundary.child,
+                  managedGit: Boolean(operatorBinding?.managedGit),
                   workDir: runWorkDir,
                   manager: broker.approvalManager,
                   notify: broker.notifyApproval,
@@ -2190,11 +2197,17 @@ function requireAgentGraphWorkspaceHost(
 function boundedAgentGraphOperatorApprovalNotifier(input: {
   readonly boundary: ExecutionBoundary;
   readonly workDir: string;
+  readonly managedGit: boolean;
   readonly manager: { resolveApproval(taskId: string, allowed: boolean, reason: string): boolean };
   readonly notify: ApprovalNotifier;
 }): ApprovalNotifier {
   return (notice) => {
-    void agentGraphOperatorApprovalWithinBoundary(notice, input.boundary, input.workDir).then(
+    void agentGraphOperatorApprovalWithinBoundary(
+      notice,
+      input.boundary,
+      input.workDir,
+      input.managedGit,
+    ).then(
       (allowed) => {
         if (allowed) input.notify(notice);
         else rejectAgentGraphOperatorApproval(input.manager, notice.taskId);
@@ -2231,6 +2244,7 @@ async function agentGraphOperatorApprovalWithinBoundary(
   notice: ApprovalNotice,
   boundary: ExecutionBoundary,
   workDir: string,
+  managedGit: boolean,
 ): Promise<boolean> {
   if (boundary.kind !== "managed") return false;
   const command = notice.toolName === "bash" ? bashCommandFromArgs(notice.args) : undefined;
@@ -2368,6 +2382,11 @@ async function agentGraphOperatorApprovalWithinBoundary(
     );
   }
   if (scope.type === "tool") {
+    if (notice.toolName === "graph_git" && scope.toolName === "graph_git" && managedGit) {
+      return approvalExpansionContained(boundary, workDir, [
+        { path: workDir, access: "write", scope: "subtree" },
+      ]);
+    }
     return (
       (notice.toolName === "fetch_url" || notice.toolName === "web_search") &&
       scope.toolName === notice.toolName &&
