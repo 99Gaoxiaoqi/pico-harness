@@ -21,6 +21,12 @@ import {
 import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
 import { resolvePicoPaths } from "@pico/pico-host";
 import { configuredUserDefaultRealModel } from "./real-llm-user-model.js";
+import { compileRuntimePermissionProfile } from "@pico/core/permission-profile";
+import {
+  createRuntimeRequest,
+  parseApprovalRequestedPayload,
+  type RuntimeNotification,
+} from "@pico/protocol";
 
 const exec = promisify(execFile);
 const realModelTest = process.env.RUN_LLM_E2E === "1" ? test : test.skip;
@@ -30,209 +36,283 @@ function workspaceKind(binding: unknown): unknown {
   return binding.kind;
 }
 
-realModelTest(
-  "Graph integrates two isolated commits before finish with the real model",
-  { timeout: 300_000 },
-  async () => {
-    const model = await configuredUserDefaultRealModel();
-    const root = await mkdtemp(join(tmpdir(), "pico-graph-integration-real-"));
-    const workDir = join(root, "workspace");
-    const picoHome = join(root, "home");
-    await mkdir(join(workDir, ".pico"), { recursive: true });
-    await mkdir(picoHome);
-    const workspacePath = await realpath(workDir);
-    const git = async (...args: string[]) =>
-      (await exec("git", args, { cwd: workspacePath })).stdout.trim();
-    await writeFile(
-      join(workDir, ".pico", "config.json"),
-      JSON.stringify({
-        compatibility: {
-          claude: { enabled: false, projectResources: false, userResources: false },
-        },
-      }),
-    );
-    await writeFile(join(workDir, ".gitignore"), ".worktrees/\n");
-    await writeFile(join(workDir, "README.md"), "Synthetic Graph integration test only.\n");
-    await git("init", "-b", "main");
-    await git("config", "user.name", "Pico Acceptance");
-    await git("config", "user.email", "acceptance@example.invalid");
-    await git("add", ".");
-    await git("commit", "-m", "test: synthetic baseline");
-    const base = await git("rev-parse", "HEAD");
-    const userConfigStore = new UserConfigStore({ picoHome });
-    await userConfigStore.write(
-      {
-        version: 1,
-        defaults: { modelRouteId: model.route.id },
-        providers: {
-          [model.route.providerId]: {
-            protocol: model.provider,
-            baseURL: model.config.baseURL,
-            apiKeyEnv: model.route.apiKeyEnv,
-            models: [model.route.model],
-            discoverModels: false,
+for (const permissionMode of ["full-access", "ask"] as const) {
+  realModelTest(
+    `Graph integrates two isolated commits before finish with the real model (${permissionMode})`,
+    { timeout: 300_000 },
+    async () => {
+      const model = await configuredUserDefaultRealModel();
+      const root = await mkdtemp(join(tmpdir(), "pico-graph-integration-real-"));
+      const workDir = join(root, "workspace");
+      const picoHome = join(root, "home");
+      await mkdir(join(workDir, ".pico"), { recursive: true });
+      await mkdir(picoHome);
+      const workspacePath = await realpath(workDir);
+      const git = async (...args: string[]) =>
+        (await exec("git", args, { cwd: workspacePath })).stdout.trim();
+      await writeFile(
+        join(workDir, ".pico", "config.json"),
+        JSON.stringify({
+          compatibility: {
+            claude: { enabled: false, projectResources: false, userResources: false },
+          },
+        }),
+      );
+      await writeFile(join(workDir, ".gitignore"), ".worktrees/\n");
+      await writeFile(join(workDir, "README.md"), "Synthetic Graph integration test only.\n");
+      await git("init", "-b", "main");
+      await git("config", "user.name", "Pico Acceptance");
+      await git("config", "user.email", "acceptance@example.invalid");
+      await git("add", ".");
+      await git("commit", "-m", "test: synthetic baseline");
+      const base = await git("rev-parse", "HEAD");
+      const userConfigStore = new UserConfigStore({ picoHome });
+      await userConfigStore.write(
+        {
+          version: 1,
+          defaults: { modelRouteId: model.route.id },
+          providers: {
+            [model.route.providerId]: {
+              protocol: model.provider,
+              baseURL: model.config.baseURL,
+              apiKeyEnv: model.route.apiKeyEnv,
+              models: [model.route.model],
+              discoverModels: false,
+            },
           },
         },
-      },
-      { expectedRevision: EMPTY_USER_CONFIG_REVISION },
-    );
-    await new WorkspaceTrustStore({ userStateDirectory: picoHome }).trust(workspacePath);
-    let graphHost: AgentGraphWorkspaceHost | undefined;
-    const services = await createProductionRuntimeServices({
-      env: { ...process.env, PICO_HOME: picoHome, [model.route.apiKeyEnv]: model.config.apiKey },
-      userConfigStore,
-      credentialVault: {
-        capability: () => ({
-          available: true,
-          backend: "macos-keychain",
-          diagnostic: "test memory only",
-        }),
-        has: async () => true,
-        resolve: async () => model.config.apiKey,
-        put: async () => undefined,
-        delete: async () => undefined,
-      },
-      agentGraphWorkspaceHostFactory: (options) =>
-        (graphHost = createAgentGraphWorkspaceHost(options)),
-    });
-    const rootSessionId = `graph-integration-${randomUUID()}`;
-    const runtime = await services.service.getWorkspaceRuntime(workspacePath);
-    try {
-      const lease = await globalSessionManager.getOrCreatePinned(rootSessionId, workspacePath, {
-        persistence: true,
-        picoHome,
-        runtimePort: createEngineRuntimePort(),
+        { expectedRevision: EMPTY_USER_CONFIG_REVISION },
+      );
+      await new WorkspaceTrustStore({ userStateDirectory: picoHome }).trust(workspacePath);
+      let graphHost: AgentGraphWorkspaceHost | undefined;
+      const services = await createProductionRuntimeServices({
+        env: { ...process.env, PICO_HOME: picoHome, [model.route.apiKeyEnv]: model.config.apiKey },
+        userConfigStore,
+        credentialVault: {
+          capability: () => ({
+            available: true,
+            backend: "macos-keychain",
+            diagnostic: "test memory only",
+          }),
+          has: async () => true,
+          resolve: async () => model.config.apiKey,
+          put: async () => undefined,
+          delete: async () => undefined,
+        },
+        agentGraphWorkspaceHostFactory: (options) =>
+          (graphHost = createAgentGraphWorkspaceHost(options)),
+      });
+      const rootSessionId = `graph-integration-${randomUUID()}`;
+      const runtime = await services.service.getWorkspaceRuntime(workspacePath);
+      const pendingApprovals: RuntimeNotification[] = [];
+      const handledApprovals = new Set<string>();
+      const unsubscribe = services.desktopService.subscribe((event) => {
+        if (event.topic === "approval.requested" && event.scope.workspacePath === workspacePath)
+          pendingApprovals.push(event);
       });
       try {
-        lease.session.updateRuntimeState({
-          boundary: { kind: "bypass", revision: 0 },
-          settings: {
-            provider: model.provider,
-            model: model.route.model,
-            modelRouteId: model.route.id,
-            collaborationMode: "agent",
-            permissionMode: "full-access",
-            orchestrationMode: "graph",
-            thinkingEffort: "off",
-            thinkingEffortExplicit: false,
-            additionalDirectories: [],
+        const lease = await globalSessionManager.getOrCreatePinned(rootSessionId, workspacePath, {
+          persistence: true,
+          picoHome,
+          runtimePort: createEngineRuntimePort(),
+        });
+        try {
+          lease.session.updateRuntimeState({
+            boundary: compileRuntimePermissionProfile({
+              collaborationMode: "agent",
+              permissionMode,
+              revision: 0,
+            }),
+            settings: {
+              provider: model.provider,
+              model: model.route.model,
+              modelRouteId: model.route.id,
+              collaborationMode: "agent",
+              permissionMode,
+              orchestrationMode: "graph",
+              thinkingEffort: "off",
+              thinkingEffortExplicit: false,
+              additionalDirectories: [],
+            },
+          });
+          await lease.session.flushPersistence();
+        } finally {
+          lease.release();
+        }
+        await services.service.startForegroundRun({
+          workspacePath,
+          sessionId: rootSessionId,
+          prompt: [
+            "在此合成 Git 项目验收并行实现与最终交付。通过一次调度并行派发两个互不依赖的可写子任务，分别使用独立 isolated-worktree。",
+            "A 只创建 alpha.txt，内容精确为 GRAPH_ALPHA_OK 加一个换行；B 只创建 beta.txt，内容精确为 GRAPH_BETA_OK 加一个换行。各自提交并报告分支、完整提交 SHA 和文件内容。",
+            "最终须将两个真实提交都整合进主项目 main，读取文件验证精确内容后才算完成；禁止在主项目重新写同样文件来替代合并。",
+            "不要修改其他文件、不 push、不访问网络或本合成项目以外的数据。使用仓库已配置的 Git 身份。",
+          ].join("\n"),
+          execution: {
+            requestedModel: model.route.id,
+            allowedTools: ["view_agent_graph", "update_agent_graph", "yield_agent_graph"],
           },
         });
-        await lease.session.flushPersistence();
-      } finally {
-        lease.release();
-      }
-      await services.service.startForegroundRun({
-        workspacePath,
-        sessionId: rootSessionId,
-        prompt: [
-          "在此合成 Git 项目验收并行实现与最终交付。通过一次调度并行派发两个互不依赖的可写子任务，分别使用独立 isolated-worktree。",
-          "A 只创建 alpha.txt，内容精确为 GRAPH_ALPHA_OK 加一个换行；B 只创建 beta.txt，内容精确为 GRAPH_BETA_OK 加一个换行。各自提交并报告分支、完整提交 SHA 和文件内容。",
-          "最终须将两个真实提交都整合进主项目 main，读取文件验证精确内容后才算完成；禁止在主项目重新写同样文件来替代合并。",
-          "不要修改其他文件、不 push、不访问网络或本合成项目以外的数据。使用仓库已配置的 Git 身份。",
-        ].join("\n"),
-        execution: {
-          requestedModel: model.route.id,
-          allowedTools: ["view_agent_graph", "update_agent_graph", "yield_agent_graph"],
-        },
-      });
-      const deadline = Date.now() + 240_000;
-      while (Date.now() < deadline) {
+        const deadline = Date.now() + 240_000;
+        while (Date.now() < deadline) {
+          for (const event of pendingApprovals.splice(0)) {
+            const approval = parseApprovalRequestedPayload(event.payload);
+            assert.ok(approval && approval.kind !== "plan", "expected a plain tool approval");
+            if (handledApprovals.has(approval.approvalId)) continue;
+            assert.ok(
+              ["graph_git", "read_file", "write_file", "edit_file", "apply_patch"].includes(
+                approval.toolName ?? "",
+              ) ||
+                (approval.toolName === "bash" && isSyntheticGitCommand(approval.command ?? "")),
+              `unexpected tool approval: ${approval.toolName}`,
+            );
+            handledApprovals.add(approval.approvalId);
+            const result = await services.desktopService.handle(
+              createRuntimeRequest("approval.respond", {
+                workspacePath,
+                sessionId: event.scope.sessionId!,
+                runId: event.scope.runId!,
+                approvalId: approval.approvalId,
+                decision: "allow_once",
+              }),
+            );
+            assert.ok(result && typeof result === "object" && "accepted" in result);
+            assert.equal(result.accepted, true);
+          }
+          const graph = graphHost?.store.listGraphs(rootSessionId)[0];
+          const runs = runtime.listRuns();
+          if (graph?.phase === "finished" && runs.every((run) => terminal.has(run.status))) break;
+          const failed = runs.find((run) => run.status === "failed");
+          assert.equal(failed?.status, undefined, "no Graph Run may fail");
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        }
         const graph = graphHost?.store.listGraphs(rootSessionId)[0];
-        const runs = runtime.listRuns();
-        if (graph?.phase === "finished" && runs.every((run) => terminal.has(run.status))) break;
-        const failed = runs.find((run) => run.status === "failed");
-        assert.equal(failed?.status, undefined, "no Graph Run may fail");
-        await new Promise((resolve) => setTimeout(resolve, 250));
-      }
-      const graph = graphHost?.store.listGraphs(rootSessionId)[0];
-      assert.ok(graph && graphHost, "real production Graph must exist");
-      assert.equal(graph.phase, "finished", "Graph must finish within the bounded deadline");
-      assert.ok(
-        runtime.listRuns().every((run) => run.status === "succeeded"),
-        JSON.stringify(
-          runtime.listRuns().map((run) => ({
-            status: run.status,
-            error: run.error?.replaceAll(model.config.apiKey, "[redacted]").slice(0, 500),
-          })),
-        ),
-      );
-      assert.equal(await readFile(join(workspacePath, "alpha.txt"), "utf8"), "GRAPH_ALPHA_OK\n");
-      assert.equal(await readFile(join(workspacePath, "beta.txt"), "utf8"), "GRAPH_BETA_OK\n");
-      assert.equal(await git("status", "--porcelain"), "");
-      const isolated = graphHost.store
-        .listOperatorProvisions(graph.graphId)
-        .filter((provision) => workspaceKind(provision.workspaceBinding) === "isolated-worktree");
-      assert.equal(isolated.length, 2, "both initial writers must use isolated worktrees");
-      const commits = (await git("rev-list", `${base}..main`, "--no-merges")).split("\n");
-      for (const file of ["alpha.txt", "beta.txt"]) {
-        let matches = 0;
-        for (const sha of commits) {
-          if ((await git("diff-tree", "--no-commit-id", "--name-only", "-r", sha)) === file)
-            matches++;
-        }
-        assert.equal(matches, 1, `${file} must have one original commit reachable from main`);
-      }
-      assert.ok(
-        Number(await git("rev-list", "--count", "--merges", `${base}..main`)) >= 1,
-        "real merge history required",
-      );
-      const eventStore = new SqliteRuntimeEventStore({
-        storageRoot: resolvePicoPaths(workspacePath, { picoHome }).workspace.root,
-      });
-      try {
-        const rootEvents = await eventStore.readSession(rootSessionId);
-        const starts = rootEvents.filter((event) => event.kind === "tool.started");
+        assert.ok(graph && graphHost, "real production Graph must exist");
+        assert.equal(graph.phase, "finished", "Graph must finish within the bounded deadline");
         assert.ok(
-          starts.every((event) =>
-            ["view_agent_graph", "update_agent_graph", "yield_agent_graph"].includes(
-              event.data.toolName,
-            ),
+          runtime.listRuns().every((run) => run.status === "succeeded"),
+          JSON.stringify(
+            runtime.listRuns().map((run) => ({
+              status: run.status,
+              error: run.error?.replaceAll(model.config.apiKey, "[redacted]").slice(0, 500),
+            })),
           ),
-          "root must retain its supervisor-only tool boundary",
         );
-        const shared = graphHost.store
+        assert.equal(await readFile(join(workspacePath, "alpha.txt"), "utf8"), "GRAPH_ALPHA_OK\n");
+        assert.equal(await readFile(join(workspacePath, "beta.txt"), "utf8"), "GRAPH_BETA_OK\n");
+        assert.equal(await git("status", "--porcelain"), "");
+        const isolated = graphHost.store
           .listOperatorProvisions(graph.graphId)
-          .filter((provision) => workspaceKind(provision.workspaceBinding) === "shared");
-        assert.ok(shared.length >= 1, "integration must be delegated before finish");
-        const intervals: { start: number; end: number }[] = [];
-        for (const provision of isolated) {
-          const events = await eventStore.readSession(provision.childSessionId);
-          const start = events.find((event) => event.kind === "run.started");
-          const end = events.find((event) => event.kind === "run.terminal");
-          assert.ok(start && end);
-          intervals.push({ start: Date.parse(start.at), end: Date.parse(end.at) });
+          .filter((provision) => workspaceKind(provision.workspaceBinding) === "isolated-worktree");
+        assert.equal(isolated.length, 2, "both initial writers must use isolated worktrees");
+        const commits = (await git("rev-list", `${base}..main`, "--no-merges")).split("\n");
+        for (const file of ["alpha.txt", "beta.txt"]) {
+          let matches = 0;
+          for (const sha of commits) {
+            if ((await git("diff-tree", "--no-commit-id", "--name-only", "-r", sha)) === file)
+              matches++;
+          }
+          assert.equal(matches, 1, `${file} must have one original commit reachable from main`);
         }
         assert.ok(
-          Math.min(...intervals.map((i) => i.end)) > Math.max(...intervals.map((i) => i.start)),
-          "writer Runs must actually overlap",
+          Number(await git("rev-list", "--count", "--merges", `${base}..main`)) >= 1,
+          "real merge history required",
         );
-        for (const provision of shared) {
-          const events = await eventStore.readSession(provision.childSessionId);
-          const output = events.find((event) => event.kind === "agent.output");
+        const eventStore = new SqliteRuntimeEventStore({
+          storageRoot: resolvePicoPaths(workspacePath, { picoHome }).workspace.root,
+        });
+        try {
+          const rootEvents = await eventStore.readSession(rootSessionId);
+          const starts = rootEvents.filter((event) => event.kind === "tool.started");
           assert.ok(
-            output && Date.parse(output.at) <= graph.finishedAt!,
-            "integration output must precede finish",
+            starts.every((event) =>
+              ["view_agent_graph", "update_agent_graph", "yield_agent_graph"].includes(
+                event.data.toolName,
+              ),
+            ),
+            "root must retain its supervisor-only tool boundary",
           );
+          const shared = graphHost.store
+            .listOperatorProvisions(graph.graphId)
+            .filter((provision) => workspaceKind(provision.workspaceBinding) === "shared");
+          assert.ok(shared.length >= 1, "integration must be delegated before finish");
+          const intervals: { start: number; end: number }[] = [];
+          for (const provision of isolated) {
+            const events = await eventStore.readSession(provision.childSessionId);
+            if (permissionMode === "ask") {
+              assert.ok(
+                events.some(
+                  (event) => event.kind === "tool.started" && event.data.toolName === "graph_git",
+                ),
+                "managed writer must use its registered Host Git capability",
+              );
+              const boundaries = events.flatMap((event) =>
+                event.kind === "session.state.committed" && event.data.patch.boundary
+                  ? [event.data.patch.boundary]
+                  : [],
+              );
+              assert.ok(boundaries.length > 0, "writer must persist its execution boundary");
+              assert.ok(
+                boundaries.every(
+                  (boundary) => boundary.kind === "managed" && boundary.revision === 0,
+                ),
+                "writer must neither bypass nor expand its sandbox",
+              );
+            }
+            const start = events.find((event) => event.kind === "run.started");
+            const end = events.find((event) => event.kind === "run.terminal");
+            assert.ok(start && end);
+            intervals.push({ start: Date.parse(start.at), end: Date.parse(end.at) });
+          }
+          assert.ok(
+            Math.min(...intervals.map((i) => i.end)) > Math.max(...intervals.map((i) => i.start)),
+            "writer Runs must actually overlap",
+          );
+          for (const provision of shared) {
+            const events = await eventStore.readSession(provision.childSessionId);
+            const output = events.find((event) => event.kind === "agent.output");
+            assert.ok(
+              output && Date.parse(output.at) <= graph.finishedAt!,
+              "integration output must precede finish",
+            );
+          }
+        } finally {
+          eventStore.close();
         }
       } finally {
-        eventStore.close();
+        unsubscribe();
+        for (const run of runtime.listRuns())
+          if (!terminal.has(run.status)) runtime.cancel(run.runId, "E2E cleanup");
+        const sessionIds = new Set([
+          rootSessionId,
+          ...(graphHost?.store
+            .listGraphs(rootSessionId)
+            .flatMap((graph) =>
+              graphHost!.store.listOperatorProvisions(graph.graphId).map((p) => p.childSessionId),
+            ) ?? []),
+        ]);
+        await services.desktopService.close();
+        for (const id of sessionIds)
+          await globalSessionManager.delete(id, workspacePath, { picoHome })?.close();
+        await rm(root, { recursive: true, force: true });
       }
-    } finally {
-      for (const run of runtime.listRuns())
-        if (!terminal.has(run.status)) runtime.cancel(run.runId, "E2E cleanup");
-      const sessionIds = new Set([
-        rootSessionId,
-        ...(graphHost?.store
-          .listGraphs(rootSessionId)
-          .flatMap((graph) =>
-            graphHost!.store.listOperatorProvisions(graph.graphId).map((p) => p.childSessionId),
-          ) ?? []),
-      ]);
-      await services.desktopService.close();
-      for (const id of sessionIds)
-        await globalSessionManager.delete(id, workspacePath, { picoHome })?.close();
-      await rm(root, { recursive: true, force: true });
-    }
-  },
-);
+    },
+  );
+}
+
+/** No boundary expansion, arbitrary shell, external paths, pushes or destructive Git in this fixture. */
+function isSyntheticGitCommand(command: string): boolean {
+  if (!command.trim() || /[`$<>|\\]/u.test(command)) return false;
+  return command.split(/&&|;|\n/u).every((part) => {
+    const value = part.trim();
+    return (
+      /^(?:pwd|cat (?:alpha|beta)\.txt(?: (?:alpha|beta)\.txt)?)$/u.test(value) ||
+      /^git (?:status(?: --(?:short|porcelain|branch))*|branch --show-current|rev-parse HEAD|log --oneline(?: -\d+)?|diff(?: --stat)?)$/u.test(
+        value,
+      ) ||
+      /^git merge (?:(?:--no-ff|--no-edit) )*(?:pico\/graph-[a-z0-9]+|[a-f0-9]{40})(?: (?:pico\/graph-[a-z0-9]+|[a-f0-9]{40}))*$/u.test(
+        value,
+      )
+    );
+  });
+}
