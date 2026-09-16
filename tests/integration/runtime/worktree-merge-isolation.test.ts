@@ -107,6 +107,20 @@ for (const change of ["commit", "dirty"] as const) {
       await assert.rejects(queue.resumeAfterResolution(fixture.taskId), /目标分支已漂移/);
       assert.equal(queue.get(fixture.taskId)!.status, "blocked");
       assert.deepEqual(await targetState(fixture.targetWorktree), expected);
+      await git(result.integrationWorktree, "merge", "--no-edit", expected.head);
+      const merged = await queue.resumeAfterResolution(fixture.taskId);
+      assert.equal(merged.status, "merged", merged.error);
+      await git(fixture.targetWorktree, "merge-base", "--is-ancestor", expected.head, "HEAD");
+      await git(fixture.targetWorktree, "merge-base", "--is-ancestor", result.sourceHead!, "HEAD");
+      assert.equal(
+        await readFile(join(fixture.targetWorktree, "shared.txt"), "utf8"),
+        "concurrent\n",
+      );
+      assert.equal(
+        await readFile(join(fixture.targetWorktree, "feature.txt"), "utf8"),
+        "feature\n",
+      );
+      assert.equal(existsSync(result.integrationWorktree), false);
     } else {
       // User clears their own changes; the preserved, verified integration can now publish.
       await writeFile(join(fixture.targetWorktree, "shared.txt"), "baseline\n");
@@ -115,6 +129,35 @@ for (const change of ["commit", "dirty"] as const) {
     }
   });
 }
+
+test("resume accepts a changed upstream only after its new commit is explicitly reintegrated", async (t) => {
+  const fixture = await createFixture(t);
+  const upstream = join(dirname(fixture.sourceWorktree), "upstream");
+  await git(fixture.targetWorktree, "worktree", "add", "--quiet", "-b", "upstream", upstream);
+  await git(fixture.targetWorktree, "branch", "--set-upstream-to=upstream", "main");
+  await commitFile(fixture.sourceWorktree, "feature.txt", "feature\n");
+  const before = await targetState(fixture.targetWorktree);
+  const queue = makeQueue(t, async (args, options) => {
+    const result = await executeGit(args, options);
+    if (args.includes("--no-ff")) await commitFile(upstream, "upstream.txt", "upstream\n");
+    return result;
+  });
+  await queue.enqueue(fixture);
+  await queue.waitForIdle();
+  const blocked = queue.get(fixture.taskId)!;
+  assert.equal(blocked.status, "blocked");
+  assert.match(blocked.error!, /上游已漂移/);
+  await assert.rejects(queue.resumeAfterResolution(fixture.taskId), /尚未包含当前上游提交/);
+  assert.deepEqual(await targetState(fixture.targetWorktree), before);
+  assert.ok(blocked.integrationWorktree);
+  const upstreamHead = await git(upstream, "rev-parse", "HEAD");
+  await git(blocked.integrationWorktree, "merge", "--no-edit", upstreamHead);
+  assert.equal((await queue.resumeAfterResolution(fixture.taskId)).status, "merged");
+  await git(fixture.targetWorktree, "merge-base", "--is-ancestor", upstreamHead, "HEAD");
+  assert.equal(await readFile(join(fixture.targetWorktree, "feature.txt"), "utf8"), "feature\n");
+  assert.equal(await readFile(join(fixture.targetWorktree, "upstream.txt"), "utf8"), "upstream\n");
+  assert.equal(existsSync(blocked.integrationWorktree), false);
+});
 
 for (const change of ["late commit", "ignored file"] as const) {
   test(`fast-forward refuses a ${change} at the publication boundary without overwriting user data`, async (t) => {
