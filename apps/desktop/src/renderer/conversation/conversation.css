@@ -1631,7 +1631,8 @@
     box-shadow 140ms ease;
 }
 
-.conversation-composer[data-status="running"] {
+.conversation-composer[data-status="running"],
+.conversation-composer[data-status="pause_requested"] {
   border-color: color-mix(in srgb, var(--conversation-accent) 44%, var(--conversation-line));
 }
 

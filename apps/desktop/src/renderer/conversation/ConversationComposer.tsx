@@ -102,7 +102,7 @@ export function ConversationComposer({
   const statusId = useId();
   const canSubmit = value.trim().length > 0 && !disabled && !submitDisabled && !busy;
   const effectiveBehavior = status === "idle" ? "auto" : behavior === "auto" ? "steer" : behavior;
-  const resolvedStatusText =
+  const defaultStatusText =
     statusText ??
     (busy
       ? "正在发送…"
@@ -111,6 +111,10 @@ export function ConversationComposer({
         : status === "paused"
           ? "已暂停"
           : undefined);
+  const resolvedStatusText =
+    status === "pause_requested"
+      ? ["等待暂停，将在安全边界暂停", statusText].filter(Boolean).join(" · ")
+      : defaultStatusText;
 
   const submit = () => {
     if (!canSubmit) return;
