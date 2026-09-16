@@ -1,4 +1,5 @@
 import { parseDesktopToolApproval } from "./runtime-projections/approval.js";
+import { TerminalInteractions } from "./runtime-projections/terminal-interactions.js";
 import {
   CAPABILITY_SCOPE_RUNTIME_CAPABILITY,
   isJsonValue,
@@ -497,6 +498,7 @@ export function useRuntimeStore(): RuntimeStore {
   );
   const usageLoadTracker = useRef(new ConversationLoadTracker());
   const resolvedInteractions = useRef(new ResolvedInteractionCache());
+  const terminalInteractions = useRef(new TerminalInteractions());
   const pendingSendRef = useRef<
     | {
         readonly identity: string;
@@ -703,10 +705,11 @@ export function useRuntimeStore(): RuntimeStore {
         .flatMap((item) => item.runs)
         .sort((left, right) => right.updatedAt - left.updatedAt);
       if (workspaceIndexLoadGenerationRef.current !== generation) return workspaces;
+      terminalInteractions.current.record(runs);
       setData((current) => {
         if (workspaceIndexLoadGenerationRef.current !== generation) return current;
         const base = reset ? emptyData : current;
-        return {
+        return terminalInteractions.current.reconcile({
           ...base,
           workspaces,
           sessions,
@@ -715,7 +718,7 @@ export function useRuntimeStore(): RuntimeStore {
             ...base.providerConfig,
             supported: runtimeCapabilitiesRef.current.has(SHARED_CONFIG_CAPABILITY),
           },
-        };
+        });
       });
       return workspaces;
     },
@@ -1011,6 +1014,7 @@ export function useRuntimeStore(): RuntimeStore {
     const trustResult = await optionalInvoke(bridge, "workspace.trustStatus", params);
     if (!isCurrentLoad()) return;
     if (trustResult.error) notices.trust = trustResult.error;
+    terminalInteractions.current.record(parseRuns(values.runs, workspacePath));
     setData((current) => {
       if (current.notices.providers) notices.providers = current.notices.providers;
       else delete notices.providers;
@@ -1035,30 +1039,32 @@ export function useRuntimeStore(): RuntimeStore {
         selectedWorkspace,
         ...current.workspaces.filter((workspace) => workspace.path !== workspacePath),
       ];
-      return mergeLoadedData(
-        {
-          ...current,
-          workspaces,
+      return terminalInteractions.current.reconcile(
+        mergeLoadedData(
+          {
+            ...current,
+            workspaces,
+            workspacePath,
+            trusted,
+            notices,
+            memory:
+              trusted && !switchingWorkspace
+                ? current.memory
+                : { workspacePath, items: [], status: "idle" },
+            ...(switchingWorkspace
+              ? {
+                  timeline: [],
+                  approvals: [],
+                  prompts: [],
+                  changes: [],
+                  changeFingerprint: undefined,
+                  modelRoutes: [],
+                }
+              : {}),
+          },
           workspacePath,
-          trusted,
-          notices,
-          memory:
-            trusted && !switchingWorkspace
-              ? current.memory
-              : { workspacePath, items: [], status: "idle" },
-          ...(switchingWorkspace
-            ? {
-                timeline: [],
-                approvals: [],
-                prompts: [],
-                changes: [],
-                changeFingerprint: undefined,
-                modelRoutes: [],
-              }
-            : {}),
-        },
-        workspacePath,
-        values,
+          values,
+        ),
       );
     });
   }, []);
@@ -1402,7 +1408,7 @@ export function useRuntimeStore(): RuntimeStore {
         // Plan cards are recovery-capable controls, so only the durable PlanControl
         // snapshot/projection may create them. Generic approval replay remains display
         // authority for non-Plan approvals only.
-        if (approval) {
+        if (approval && !terminalInteractions.current.has(workspacePath, approval.runId)) {
           setData((current) => ({
             ...current,
             approvals: [
@@ -1414,6 +1420,8 @@ export function useRuntimeStore(): RuntimeStore {
           }));
         }
       } else if (topic === "prompt.requested") {
+        const runId = stringValue(payload.runId ?? scope.runId);
+        if (terminalInteractions.current.has(workspacePath, runId)) return;
         const prompt = isRecord(payload.prompt) ? payload.prompt : {};
         const options = Array.isArray(prompt.options)
           ? prompt.options.map((item) =>
@@ -1426,7 +1434,7 @@ export function useRuntimeStore(): RuntimeStore {
             ...current.prompts.filter((item) => item.id !== stringValue(payload.promptId)),
             {
               id: stringValue(payload.promptId),
-              runId: stringValue(payload.runId ?? scope.runId),
+              runId,
               question: stringValue(prompt.question ?? prompt.message, "Pico 需要你的选择"),
               options,
             },
@@ -1461,18 +1469,21 @@ export function useRuntimeStore(): RuntimeStore {
           ? workspaceSessionKey({ workspacePath, sessionId })
           : undefined;
         if (runId) {
+          const startedRun = {
+            id: runId,
+            workspacePath,
+            sessionId: sessionId || undefined,
+            description: stringValue(run.description, "会话运行"),
+            status: stringValue(run.status, "running"),
+            ...(typeof run.version === "number" ? { version: run.version } : {}),
+            startedAt: numberValue(run.startedAt, event.at),
+            updatedAt: numberValue(run.updatedAt, event.at),
+          };
+          terminalInteractions.current.record([startedRun]);
           setData((current) => ({
             ...current,
             runs: [
-              {
-                id: runId,
-                workspacePath,
-                sessionId: sessionId || undefined,
-                description: stringValue(run.description, "会话运行"),
-                status: stringValue(run.status, "running"),
-                startedAt: numberValue(run.startedAt, event.at),
-                updatedAt: numberValue(run.updatedAt, event.at),
-              },
+              startedRun,
               ...current.runs.filter(
                 (candidate) => candidate.workspacePath !== workspacePath || candidate.id !== runId,
               ),
@@ -1757,8 +1768,11 @@ export function useRuntimeStore(): RuntimeStore {
           if (!preview) await invoke(bridge, "workspace.trust", { workspacePath, trusted });
           if (!preview) {
             await loadWorkspaceIndex(bridge);
-            if (dataRef.current.workspacePath === workspacePath) {
-              setData((current) => ({ ...current, trusted }));
+            if (
+              dataRef.current.workspacePath === workspacePath &&
+              workspaceLoadIntentRef.current === workspacePath
+            ) {
+              await loadWorkspace(bridge, workspacePath);
             }
             return;
           }
