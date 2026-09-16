@@ -73,6 +73,7 @@ export * from "./schedule-task.js";
 export * from "./minimal-child-process-env.js";
 export * from "./line-endings.js";
 export * from "./git-safety.js";
+export * from "./graph-managed-git-tool.js";
 export * from "./host-shell.js";
 export * from "./host-agent-turn-budget.js";
 export * from "./hook-rewake.js";
