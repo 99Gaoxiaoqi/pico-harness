@@ -2376,7 +2376,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         await this.getSessionSettings(workspacePath, session);
         await session.flushPersistence();
       });
-      await this.commitSessionInputOnce(
+      const checkpointId = await this.commitSessionInputOnce(
         workspacePath,
         sessionId,
         resolved.prompt,
@@ -2390,7 +2390,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           workspacePath,
           sessionId,
           prompt: resolved.prompt,
-          execution: { ...(resolved.execution ?? {}), resumeExistingSession: true },
+          execution: { ...(resolved.execution ?? {}), resumeExistingSession: true, checkpointId },
           idempotencyKey: identity.runStartKey,
         }),
         "run.start result",
@@ -2412,7 +2412,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     input: RuntimeUserInput,
     idempotencyKey: string,
     images?: ImagePart[],
-  ): Promise<void> {
+  ): Promise<string> {
     const digest = createHash("sha256")
       .update(`${workspacePath}\0${sessionId}\0${idempotencyKey}`)
       .digest("hex");
@@ -2452,6 +2452,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       await session.flushPersistence();
     });
     this.publishTranscriptUpdate(workspacePath, sessionId, "reload");
+    return messageId;
   }
 
   private async consumeNextQueued(workspacePath: string, sessionId: string): Promise<void> {
