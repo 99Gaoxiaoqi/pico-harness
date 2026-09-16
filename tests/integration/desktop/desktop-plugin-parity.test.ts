@@ -211,7 +211,9 @@ test("Desktop catalog and session activation share one Plugin snapshot", async (
   assert.equal(prompts.length, 2);
   assert.match(prompts[0]!, /Follow the plugin skill instructions/u);
   assert.match(prompts[1]!, /plugin-agent/u);
-  assert.deepEqual(executions[1], {
+  const { checkpointId, ...activation } = asRecord(executions[1]);
+  assert.match(String(checkpointId), /^desktop-input:/u);
+  assert.deepEqual(activation, {
     orchestrationMode: "swarm",
     allowedTools: ["update_agent_graph", "yield_agent_graph", "agent_output"],
     resumeExistingSession: true,

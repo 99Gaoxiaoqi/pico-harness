@@ -79,6 +79,8 @@ export interface DaemonRunExecution {
   readonly allowedTools?: readonly string[];
   /** Desktop has already committed the visible user input to the canonical RuntimeEvent ledger. */
   readonly resumeExistingSession?: boolean;
+  /** Exact checkpoint already committed with a Desktop input; not accepted from generic IPC. */
+  readonly checkpointId?: string;
   /** Trusted Plan review admission. Generic IPC clients cannot populate this field. */
   readonly planReview?: {
     readonly action: "execute" | "continue_editing" | "resume_execution" | "replan_execution";
@@ -476,15 +478,17 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
     const start = () => {
       const run = runtime.startRun(
         { description: input.prompt, ...(input.sessionId ? { sessionId: input.sessionId } : {}) },
-        (context) =>
-          this.options.execute({
+        (context) => {
+          if (input.execution?.checkpointId) context.bindCheckpoint(input.execution.checkpointId);
+          return this.options.execute({
             workspacePath: runtime.workspace,
             workspaceRuntime: runtime,
             prompt: input.prompt,
             ...(input.sessionId ? { sessionId: input.sessionId } : {}),
             ...(input.execution ? { execution: input.execution } : {}),
             context,
-          }),
+          });
+        },
       );
       return { result: runPayload(run), resourceId: run.runId };
     };
