@@ -1962,10 +1962,35 @@
   .review-link small {
     color: var(--ink-tertiary);
   }
+  .review-page {
+    min-width: 0;
+  }
+  .review-scope {
+    display: grid;
+    min-width: 0;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+    align-items: end;
+    gap: 12px;
+  }
+  .review-scope label {
+    display: grid;
+    min-width: 0;
+    gap: 6px;
+  }
+  .review-scope select {
+    width: 100%;
+    min-width: 0;
+    padding: 8px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+    color: var(--ink);
+    text-overflow: ellipsis;
+  }
   .review-layout {
     display: grid;
-    height: calc(100vh - 121px);
-    min-height: 500px;
+    height: calc(100vh - 280px);
+    min-height: 400px;
     grid-template-columns: 260px minmax(0, 1fr);
     overflow: hidden;
     border: 1px solid var(--line);
@@ -2118,8 +2143,11 @@
     grid-row: 5;
     border-top: 1px solid var(--line);
     border-bottom: 0;
+    flex-wrap: wrap;
   }
   .review-footer > span {
+    min-width: 0;
+    overflow-wrap: anywhere;
     color: var(--ink-tertiary);
     font-size: 10px;
   }
