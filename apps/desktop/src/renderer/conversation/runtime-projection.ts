@@ -535,6 +535,32 @@ export function conversationItemsFromReplica(view: TranscriptReplicaView): Conve
 }
 
 /** A delayed replica cannot reopen an interaction already settled in this session. */
+export class ResolvedInteractionCache {
+  private readonly sessions = new Map<string, { epoch: string; items: ConversationItemView[] }>();
+
+  project(
+    scope: string,
+    epoch: string,
+    incoming: readonly ConversationItemView[],
+    current: readonly ConversationItemView[],
+  ): ConversationItemView[] {
+    const previous = this.sessions.get(scope);
+    const candidates =
+      previous && previous.epoch !== epoch ? [] : [...(previous?.items ?? []), ...current];
+    const projected = preserveResolvedInteractions(incoming, candidates);
+    const settled = new Map<string, ConversationItemView>();
+    for (const item of [...candidates, ...projected]) {
+      if (
+        (item.kind === "approval" && item.state !== "pending" && item.approvalKind !== "plan") ||
+        (item.kind === "prompt" && item.state === "answered")
+      )
+        settled.set(conversationItemKey(item), item);
+    }
+    this.sessions.set(scope, { epoch, items: [...settled.values()] });
+    return projected;
+  }
+}
+
 export function preserveResolvedInteractions(
   incoming: readonly ConversationItemView[],
   current: readonly ConversationItemView[],

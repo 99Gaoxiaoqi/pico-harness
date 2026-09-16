@@ -1,7 +1,59 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { TRANSCRIPT_PROJECTOR_VERSION } from "@pico/protocol";
-import { parseConversation } from "../../../apps/desktop/src/renderer/conversation/runtime-projection.js";
+import {
+  parseConversation,
+  ResolvedInteractionCache,
+} from "../../../apps/desktop/src/renderer/conversation/runtime-projection.js";
+
+test("交互投影跨空快照保留已处理状态且按会话和历史隔离", () => {
+  const snapshot = (settled: boolean) =>
+    parseConversation(
+      {
+        items: [
+          {
+            id: "approval:a",
+            kind: "approval",
+            title: "write",
+            state: settled ? "allow_once" : "waiting",
+            data: {
+              approvalId: "a",
+              runId: "run",
+              kind: "tool",
+              title: "write",
+              detail: "write fixture",
+              risk: "medium",
+              toolName: "write_file",
+              args: JSON.stringify({ path: "fixture.txt", content: "ok" }),
+              providerCallId: "call",
+              decision: settled ? "allow_once" : undefined,
+            },
+          },
+          {
+            id: "prompt:p",
+            kind: "prompt",
+            title: "choose",
+            state: settled ? "answered" : "waiting",
+            data: { promptId: "p", runId: "run" },
+          },
+        ],
+      },
+      "/workspace",
+      "session",
+    ).items;
+  const cache = new ResolvedInteractionCache();
+  const pending = snapshot(false);
+  const settled = snapshot(true);
+  assert.equal(pending.length, 2);
+  assert.deepEqual(cache.project("session", "epoch", [], settled), []);
+  const recovered = cache.project("session", "epoch", pending, []);
+  assert.deepEqual(
+    recovered.map((item) => "state" in item && item.state),
+    ["allowed", "answered"],
+  );
+  assert.deepEqual(cache.project("other", "epoch", pending, []), pending);
+  assert.deepEqual(cache.project("session", "new-epoch", pending, recovered), pending);
+});
 
 test("Desktop conversation only derives hasEarlier from nextCursor", () => {
   const withoutCursor = parseConversation({ items: [] }, "/workspace", "session");

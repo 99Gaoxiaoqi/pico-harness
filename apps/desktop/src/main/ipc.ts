@@ -1,4 +1,5 @@
 import { isAbsolute } from "node:path";
+import { registerArtifactIpcHandlers } from "./artifact-ipc.js";
 import {
   dialog,
   type IpcMain,
@@ -70,6 +71,7 @@ export function registerDesktopIpcHandlers(options: {
 
   const trusted = (event: IpcMainInvokeEvent | IpcMainEvent): boolean =>
     event.sender === options.getTrustedWebContents() && !event.sender.isDestroyed();
+  const disposeArtifacts = registerArtifactIpcHandlers({ ipcMain, runtime, trusted });
 
   const ensureWorkspaceStorage = createDesktopWorkspaceStorageRecovery({
     runtime,
@@ -455,6 +457,7 @@ export function registerDesktopIpcHandlers(options: {
   });
 
   return () => {
+    disposeArtifacts();
     sessionFrames.dispose();
     for (const subscription of subscriptions.values()) subscription.dispose();
     subscriptions.clear();
