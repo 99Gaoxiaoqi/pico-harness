@@ -157,6 +157,7 @@ export function parseRuns(value: unknown, workspacePath: string): readonly RunVi
       sessionId: stringValue(item.sessionId) || undefined,
       description: stringValue(item.description, "任务运行"),
       status: stringValue(item.status, "unknown"),
+      ...(typeof item.version === "number" ? { version: item.version } : {}),
       startedAt: numberValue(item.startedAt, Date.now()),
       updatedAt: numberValue(item.updatedAt, Date.now()),
     }))
