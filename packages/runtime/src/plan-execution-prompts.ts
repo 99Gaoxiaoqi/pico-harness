@@ -40,7 +40,6 @@ export function planRevisionRequestPrompt(projection: PlanProjection): string | 
   const context = {
     planId: request.planId.slice(0, PLAN_REVISION_CONTEXT_FIELD_MAX_CHARS),
     expectedRevision: request.expectedRevision,
-    operationId: request.operationId.slice(0, PLAN_REVISION_CONTEXT_FIELD_MAX_CHARS),
     requestedAt: request.requestedAt.slice(0, PLAN_REVISION_CONTEXT_FIELD_MAX_CHARS),
     feedback: boundedPlanRevisionFeedback(request.feedback),
   };
@@ -48,6 +47,7 @@ export function planRevisionRequestPrompt(projection: PlanProjection): string | 
     "<plan-revision-request>",
     "这是用户在上一版计划提交后发出的最新修订要求，由持久化事件恢复。反馈与此前用户要求或旧计划冲突的部分，以本次反馈为准；其余要求仍然有效。不要仅因这些已明确的变更再次请求确认。",
     "请按该反馈调查并调用 submit_plan 提交同一 planId 的下一修订版，然后等待用户批准；本次修订要求不构成执行授权，不要批准计划或执行任何修订版。",
+    "调用 submit_plan 时省略可选的 operationId，由 runtime 自动分配本次提交的幂等标识。",
     JSON.stringify(context),
     "</plan-revision-request>",
   ].join("\n");
