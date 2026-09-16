@@ -808,7 +808,13 @@ test("Plan revision restores one ordered control input across failed runs and co
       assert.doesNotMatch(originalUser.content, /plan-revision-request|EXTRA-PLAN-REVISED/u);
       assert.match(currentUser, /<plan-revision-request>/u);
       assert.match(currentUser, new RegExp(feedbackPrefix, "u"));
-      assert.match(currentUser, new RegExp(operationId, "u"));
+      assert.equal(
+        messages.some((message) => message.content.includes(operationId)),
+        false,
+        "the internal revision operation identity must not leak into model-visible input",
+      );
+      assert.doesNotMatch(currentUser, /"operationId"\s*:/u);
+      assert.match(currentUser, /省略可选的 operationId，由 runtime 自动分配/u);
       assert.match(currentUser, /\[truncated \d+ chars\]/u);
       assert.doesNotMatch(currentUser, /TAIL_MUST_BE_TRUNCATED/u);
       assert.doesNotMatch(currentUser, /这个 prompt 不会被提交/u);
@@ -825,7 +831,6 @@ test("Plan revision restores one ordered control input across failed runs and co
             arguments: JSON.stringify({
               title: "Write EXTRA-PLAN-REVISED with recovery",
               steps: [{ title: "Recover", description: "Verify cold recovery and replay" }],
-              operationId: "submit-revision-tail-v2",
             }),
           },
         ],
