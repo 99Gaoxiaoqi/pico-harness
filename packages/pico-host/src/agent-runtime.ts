@@ -196,7 +196,7 @@ import { PlanCoordinator } from "@pico/runtime/plan-coordinator";
 import { PlanConflictError, type PlanProjection } from "@pico/core";
 import {
   approvedPlanExecutionPrompt,
-  planRevisionRequestTurnTail,
+  planRevisionRequestPrompt,
   resumedPlanExecutionPrompt,
 } from "@pico/runtime/plan-execution-prompts";
 import { RuntimeCleanupScope } from "@pico/runtime";
@@ -2160,14 +2160,6 @@ export async function executeAgentRuntime(
           "[SessionTasks] prompt injection degraded",
         );
       }
-      if (collaborationMode() === "plan" && session.runtimeEventStore) {
-        const projection = await new PlanCoordinator(
-          session.runtimeEventStore,
-          planControlContext(session.id, "revision-turn-tail", session),
-        ).project();
-        const revisionTail = planRevisionRequestTurnTail(projection);
-        if (revisionTail) turnTailParts.push(revisionTail);
-      }
       if (memoryContextBuilder) {
         try {
           if ((await memoryRecallAllowed()).allowed) {
@@ -2658,7 +2650,30 @@ export async function executeAgentRuntime(
       ...(dependencies.signal ? { signal: dependencies.signal } : {}),
       ...(dependencies.onEvent ? { onEvent: dependencies.onEvent } : {}),
       ...(dependencies.rewindPointSink ? { rewindPointSink: dependencies.rewindPointSink } : {}),
-      ...(dependencies.onRunAdmission ? { onRunAdmission: dependencies.onRunAdmission } : {}),
+      onRunAdmission: async (run) => {
+        await dependencies.onRunAdmission?.(run);
+        if (collaborationMode() !== "plan" || !session.runtimeEventStore) return;
+        const projection = await new PlanCoordinator(
+          session.runtimeEventStore,
+          planControlContext(session.id, "revision-control-input", session),
+        ).project();
+        const content = planRevisionRequestPrompt(projection);
+        if (!content || !projection.revisionRequest) return;
+        // Restore the control input after the old proposal's closed tool batch.
+        // The durable operation identity also closes the crash/retry commit gap.
+        await session.commitMessageOnce(
+          `plan-revision-input:${projection.revisionRequest.operationId}`,
+          {
+            role: "user",
+            content,
+            providerData: {
+              picoKind: "plan_revision_control_input",
+              picoPresentationAudience: "internal",
+              picoHiddenFromTranscript: true,
+            },
+          },
+        );
+      },
       ...(dependencies.runCompletionGuard
         ? { completionGuard: dependencies.runCompletionGuard }
         : {}),
