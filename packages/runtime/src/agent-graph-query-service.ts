@@ -270,7 +270,7 @@ export class AgentGraphReadOnlyQueryService {
           at: provision.provisionedAt,
           kind: "operator.provisioned",
           subjectId: provision.operatorId,
-          status: provision.state,
+          status: "provisioned",
           detail: `generation ${provision.generation}`,
         });
       }
