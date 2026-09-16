@@ -19,6 +19,10 @@ import {
 import type { RuntimeEvent } from "@pico/storage/runtime-event";
 
 import { AskUserHandler } from "@pico/pico-host/ask-user-tool";
+import { createHookManagementCommands } from "@pico/cli/hook-management-commands";
+import { globalSessionManager } from "@pico/pico-host/session";
+import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
+import { createSessionRuntime } from "@pico/pico-host/session-runtime";
 import { configuredUserDefaultRealModel, type RealModel } from "./real-llm-user-model.js";
 
 const TEST_TIMEOUT_MS = 5 * 60_000;
@@ -276,6 +280,91 @@ realModelTest(
     assert.equal(toolCalls(events, "ask_user").length, 1);
     assert.ok(toolCalls(events, "submit_plan").length >= 2);
     assert.ok(successfulToolResults(events, "submit_plan") >= 2);
+    assertMainModelSucceeded(events);
+    assert.deepEqual(await workspaceHashes(sandbox.workDir), before);
+  },
+);
+
+realModelTest(
+  "real plan review resumes conflicting feedback without another ask_user or execution",
+  { timeout: TEST_TIMEOUT_MS },
+  async (context) => {
+    const model = await configuredUserDefaultRealModel();
+    const sandbox = await createSandbox("conflicting-feedback");
+    context.after(() => cleanupSandbox(sandbox));
+    await writeFile(join(sandbox.workDir, "result.txt"), "unchanged\n", "utf8");
+    const before = await workspaceHashes(sandbox.workDir);
+    const askUserHandler = new AskUserHandler();
+    let questions = 0;
+    askUserHandler.subscribe((event) => {
+      if (event.kind !== "pending") return;
+      questions++;
+      queueMicrotask(() => askUserHandler.cancel(event.request.requestId));
+    });
+    const runtime = new AgentRuntime();
+    const first = await runtime.execute(
+      planningRequest(
+        sandbox,
+        model,
+        "读取 result.txt，为将其内容改成 EXTRA-PLAN-OK 制定计划，然后调用 submit_plan 等待批准。",
+        "new",
+        true,
+      ),
+      runtimeHost(sandbox, model, { askUserHandler }),
+    );
+    assert.equal(first.handoff?.revision, 1);
+    assert.match(JSON.stringify(first.handoff?.projection.pendingProposal), /EXTRA-PLAN-OK/u);
+    const operationId = `revise-conflict:${randomUUID()}`;
+    const revisionRequest = {
+      sessionId: sandbox.sessionId,
+      dir: sandbox.workDir,
+      picoHome: sandbox.picoHome,
+      planId: first.handoff!.planId,
+      expectedRevision: first.handoff!.revision,
+      expectedSessionSequence: first.handoff!.expectedSessionSequence,
+      operationId,
+      feedback: "将目标内容改为 EXTRA-PLAN-REVISED，更新计划后继续等待批准。",
+    };
+    assert.equal((await runtime.requestPlanRevision(revisionRequest)).replayed, false);
+    assert.equal((await runtime.requestPlanRevision(revisionRequest)).replayed, true);
+    const sessionLease = await globalSessionManager.getOrCreatePinned(
+      sandbox.sessionId,
+      sandbox.workDir,
+      { persistence: true, picoHome: sandbox.picoHome, runtimePort: createEngineRuntimePort() },
+    );
+    const runtimeState = await createSessionRuntime({
+      hookCommandFactory: createHookManagementCommands,
+      session: sessionLease.session,
+      sessionLease,
+      hooks: false,
+      lspEnabled: false,
+    });
+    let second;
+    try {
+      second = await runtime.execute(
+        planningRequest(sandbox, model, "继续修改计划", "resume", true),
+        {
+          ...runtimeHost(sandbox, model, { askUserHandler }),
+          runtimeState,
+          resumeExistingSession: true,
+        },
+      );
+    } finally {
+      await runtimeState.dispose();
+      const released = globalSessionManager.delete(sandbox.sessionId, sandbox.workDir, {
+        picoHome: sandbox.picoHome,
+      });
+      await released?.close();
+    }
+    const events = await readRuntimeEvents(sandbox);
+    const diagnostic = planEventSummary(events, model.config.apiKey);
+    assert.equal(questions, 0, diagnostic);
+    assert.equal(toolCalls(events, "ask_user").length, 0, diagnostic);
+    assert.equal(second.handoff?.revision, 2, diagnostic);
+    assert.equal(second.handoff?.projection.pendingProposal?.revision, 2, diagnostic);
+    assert.equal(second.handoff?.projection.execution, undefined, diagnostic);
+    assert.match(JSON.stringify(second.handoff?.projection.pendingProposal), /EXTRA-PLAN-REVISED/u);
+    assert.equal(events.filter((event) => event.kind === "plan.approved").length, 0, diagnostic);
     assertMainModelSucceeded(events);
     assert.deepEqual(await workspaceHashes(sandbox.workDir), before);
   },

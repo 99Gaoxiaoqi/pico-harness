@@ -725,7 +725,7 @@ test("a failed Plan Run rejects and never proposes", async (t) => {
   );
 });
 
-test("resumeExistingSession injects durable revision feedback into the provider turn tail", async (t) => {
+test("Plan revision restores one ordered control input across failed runs and cold recovery", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-plan-revision-tail-"));
   const workDir = join(root, "work");
   const picoHome = join(root, "home");
@@ -734,7 +734,7 @@ test("resumeExistingSession injects durable revision feedback into the provider 
   const runtime = new AgentRuntime();
   const planned = await runtime.execute(
     {
-      prompt: "旧用户消息，不包含新的修订要求",
+      prompt: "计划向 result.txt 写入 EXTRA-PLAN-OK，批准前不执行。",
       dir: workDir,
       sessionSelection: { mode: "new", sessionId },
       provider: "openai",
@@ -750,7 +750,8 @@ test("resumeExistingSession injects durable revision feedback into the provider 
   );
   const handoff = planned.handoff;
   assert.ok(handoff);
-  const feedbackPrefix = "必须补充冷启动恢复和 operation replay 的验证步骤";
+  const feedbackPrefix =
+    "改为写入 EXTRA-PLAN-REVISED，并补充冷启动恢复和 operation replay 的验证步骤";
   const feedback = `${feedbackPrefix}${"甲".repeat(4_100)}TAIL_MUST_BE_TRUNCATED`;
   const operationId = "revision-feedback-operation";
   await runtime.requestPlanRevision({
@@ -763,18 +764,21 @@ test("resumeExistingSession injects durable revision feedback into the provider 
     operationId,
     feedback,
   });
-  const sessionLease = await globalSessionManager.getOrCreatePinned(sessionId, workDir, {
-    persistence: true,
-    picoHome,
-    runtimePort: createEngineRuntimePort(),
-  });
-  const runtimeState = await createSessionRuntime({
-    hookCommandFactory: createHookManagementCommands,
-    session: sessionLease.session,
-    sessionLease,
-    hooks: false,
-    lspEnabled: false,
-  });
+  const openRuntimeState = async () => {
+    const sessionLease = await globalSessionManager.getOrCreatePinned(sessionId, workDir, {
+      persistence: true,
+      picoHome,
+      runtimePort: createEngineRuntimePort(),
+    });
+    return createSessionRuntime({
+      hookCommandFactory: createHookManagementCommands,
+      session: sessionLease.session,
+      sessionLease,
+      hooks: false,
+      lspEnabled: false,
+    });
+  };
+  let runtimeState = await openRuntimeState();
   t.after(async () => {
     await runtimeState.dispose();
     const released = globalSessionManager.delete(sessionId, workDir, { picoHome });
@@ -785,15 +789,32 @@ test("resumeExistingSession injects durable revision feedback into the provider 
   const revisionProvider: LLMProvider = {
     async generate(messages) {
       providerCalls++;
-      const currentUser =
-        messages.findLast((message) => message.role === "user" && message.toolCallId === undefined)
-          ?.content ?? "";
+      const revisionInputs = messages.filter(
+        (message) => message.providerData?.picoKind === "plan_revision_control_input",
+      );
+      assert.equal(revisionInputs.length, 1, "retry must not duplicate the durable control input");
+      const revisionInput = revisionInputs[0]!;
+      const currentUser = revisionInput.content;
+      assert.equal(revisionInput.role, "user");
+      const oldResultIndex = messages.findIndex(
+        (message) => message.toolCallId === "submit-revision-tail-v1",
+      );
+      assert.ok(oldResultIndex >= 0, "the old proposal must have a closed tool result");
+      assert.ok(messages.indexOf(revisionInput) > oldResultIndex);
+      const originalUser = messages.find(
+        (message) => message.role === "user" && message.content.includes("计划向 result.txt"),
+      );
+      assert.ok(originalUser);
+      assert.doesNotMatch(originalUser.content, /plan-revision-request|EXTRA-PLAN-REVISED/u);
       assert.match(currentUser, /<plan-revision-request>/u);
       assert.match(currentUser, new RegExp(feedbackPrefix, "u"));
       assert.match(currentUser, new RegExp(operationId, "u"));
       assert.match(currentUser, /\[truncated \d+ chars\]/u);
       assert.doesNotMatch(currentUser, /TAIL_MUST_BE_TRUNCATED/u);
       assert.doesNotMatch(currentUser, /这个 prompt 不会被提交/u);
+      assert.match(currentUser, /以本次反馈为准/u);
+      assert.match(currentUser, /等待用户批准/u);
+      if (providerCalls === 1) throw new Error("stop after revision control input commit");
       return {
         role: "assistant",
         content: "",
@@ -802,7 +823,7 @@ test("resumeExistingSession injects durable revision feedback into the provider 
             id: "submit-revision-tail-v2",
             name: "submit_plan",
             arguments: JSON.stringify({
-              title: "Revision with recovery",
+              title: "Write EXTRA-PLAN-REVISED with recovery",
               steps: [{ title: "Recover", description: "Verify cold recovery and replay" }],
               operationId: "submit-revision-tail-v2",
             }),
@@ -811,26 +832,45 @@ test("resumeExistingSession injects durable revision feedback into the provider 
       };
     },
   };
-  const revised = await executeAgentRuntime(
-    {
-      prompt: "这个 prompt 不会被提交",
-      dir: workDir,
-      sessionSelection: { mode: "resume", sessionId },
-      provider: "openai",
-      modelRouteId: "test/test",
-      collaborationMode: "plan",
-      permissionMode: "ask",
-    },
-    {
-      provider: revisionProvider,
-      picoHome,
-      runtimeState,
-      resumeExistingSession: true,
-      reporter: new SilentReporter(),
-    },
-  );
-  assert.equal(providerCalls, 1);
+  const resumeRevision = () =>
+    executeAgentRuntime(
+      {
+        prompt: "这个 prompt 不会被提交",
+        dir: workDir,
+        sessionSelection: { mode: "resume", sessionId },
+        provider: "openai",
+        modelRouteId: "test/test",
+        collaborationMode: "plan",
+        permissionMode: "ask",
+      },
+      {
+        provider: revisionProvider,
+        picoHome,
+        runtimeState,
+        resumeExistingSession: true,
+        reporter: new SilentReporter(),
+      },
+    );
+  await assert.rejects(resumeRevision(), /stop after revision control input commit/u);
+  await runtimeState.dispose();
+  const released = globalSessionManager.delete(sessionId, workDir, { picoHome });
+  await released?.close();
+  runtimeState = await openRuntimeState();
+  const revised = await resumeRevision();
+  assert.equal(providerCalls, 2);
   assert.equal(revised.handoff?.revision, 2);
+  assert.equal(revised.handoff?.projection.pendingProposal?.revision, 2);
+  assert.equal(revised.handoff?.projection.execution, undefined);
+  await assert.rejects(access(join(workDir, "result.txt")));
+  const store = new SqliteRuntimeEventStore({
+    storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
+  });
+  const events = await store.readSession(sessionId);
+  store.close();
+  assert.equal(
+    events.filter((event) => event.eventId === `plan-revision-input:${operationId}`).length,
+    1,
+  );
 });
 
 test("Plan Run isolates and restores code intelligence owned by an injected SessionRuntime", async (t) => {

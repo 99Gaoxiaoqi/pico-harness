@@ -34,7 +34,7 @@ export function resumedPlanExecutionPrompt(projection: PlanProjection): string {
   ].join("\n\n");
 }
 
-export function planRevisionRequestTurnTail(projection: PlanProjection): string | undefined {
+export function planRevisionRequestPrompt(projection: PlanProjection): string | undefined {
   const request = projection.revisionRequest;
   if (!request) return undefined;
   const context = {
@@ -46,7 +46,8 @@ export function planRevisionRequestTurnTail(projection: PlanProjection): string 
   };
   return [
     "<plan-revision-request>",
-    "这是从持久化事件恢复的用户修订要求。请按该反馈调查并调用 submit_plan 提交同一 planId 的下一修订版；不要批准或执行旧修订。",
+    "这是用户在上一版计划提交后发出的最新修订要求，由持久化事件恢复。反馈与此前用户要求或旧计划冲突的部分，以本次反馈为准；其余要求仍然有效。不要仅因这些已明确的变更再次请求确认。",
+    "请按该反馈调查并调用 submit_plan 提交同一 planId 的下一修订版，然后等待用户批准；本次修订要求不构成执行授权，不要批准计划或执行任何修订版。",
     JSON.stringify(context),
     "</plan-revision-request>",
   ].join("\n");
