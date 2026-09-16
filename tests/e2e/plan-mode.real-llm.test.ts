@@ -112,7 +112,6 @@ realModelTest(
         [
           "Read TASK.txt and produce a one-step implementation plan.",
           "Include in the plan: mark the step in_progress, write the exact requested file, read it back to verify, then mark the step completed.",
-          "For submit_plan and every later update_plan call, omit optional operationId so the runtime assigns a distinct operation identity. Preserve this instruction in the plan overview.",
           "Do not create canary.txt before approval. Finish by calling submit_plan exactly once.",
         ].join("\n"),
         "new",
@@ -188,6 +187,16 @@ realModelTest(
     );
     assert.equal(systems.filter(isPlanSystemPrompt).length >= 1, true, diagnostic);
     assert.equal(isPlanSystemPrompt(systems.at(-1) ?? ""), false, diagnostic);
+    assert.equal(
+      events.filter(
+        (event) =>
+          event.kind === "tool.result.recorded" &&
+          ["submit_plan", "update_plan", "cancel_plan"].includes(event.data.toolName) &&
+          event.data.status !== "succeeded",
+      ).length,
+      0,
+      diagnostic,
+    );
     assertMainModelSucceeded(events);
   },
 );
