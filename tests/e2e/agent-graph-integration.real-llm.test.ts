@@ -147,6 +147,11 @@ for (const permissionMode of ["full-access", "ask"] as const) {
             "A 只创建 alpha.txt，内容精确为 GRAPH_ALPHA_OK 加一个换行；B 只创建 beta.txt，内容精确为 GRAPH_BETA_OK 加一个换行。各自提交并报告分支、完整提交 SHA 和文件内容。",
             "最终须将两个真实提交都整合进主项目 main，读取文件验证精确内容后才算完成；禁止在主项目重新写同样文件来替代合并。",
             "不要修改其他文件、不 push、不访问网络或本合成项目以外的数据。使用仓库已配置的 Git 身份。",
+            ...(permissionMode === "ask"
+              ? [
+                  "本轮采用严格单次审批：文件查看与写入使用原生文件工具，隔离任务使用提供的受控 Git 工具。不要用 shell 做探索、打印、条件判断或写文件。整合任务只使用简单的 git merge --no-ff --no-edit <分支> 命令，之后用文件工具验证内容。",
+                ]
+              : []),
           ].join("\n"),
           execution: {
             requestedModel: model.route.id,
@@ -159,12 +164,19 @@ for (const permissionMode of ["full-access", "ask"] as const) {
             const approval = parseApprovalRequestedPayload(event.payload);
             assert.ok(approval && approval.kind !== "plan", "expected a plain tool approval");
             if (handledApprovals.has(approval.approvalId)) continue;
+            const exactCommand =
+              approval.sessionScope?.type === "bash-command" &&
+              approval.sessionScope.match === "exact"
+                ? approval.sessionScope.command
+                : undefined;
             assert.ok(
               ["graph_git", "read_file", "write_file", "edit_file", "apply_patch"].includes(
                 approval.toolName ?? "",
               ) ||
-                (approval.toolName === "bash" && isSyntheticGitCommand(approval.command ?? "")),
-              `unexpected tool approval: ${approval.toolName}; command=${approval.command?.replaceAll(model.config.apiKey, "[redacted]").slice(0, 500) ?? "none"}`,
+                (approval.toolName === "bash" &&
+                  exactCommand !== undefined &&
+                  isSyntheticGitCommand(exactCommand)),
+              `unexpected tool approval: ${approval.toolName}; command=${(exactCommand ?? approval.command)?.replaceAll(model.config.apiKey, "[redacted]").slice(0, 500) ?? "none"}`,
             );
             handledApprovals.add(approval.approvalId);
             const result = await services.desktopService.handle(
