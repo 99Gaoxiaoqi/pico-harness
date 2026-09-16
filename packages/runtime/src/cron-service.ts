@@ -123,19 +123,23 @@ export class CronService {
 
   /** 仅扫描当前分钟；即使上次 tick 很早以前，也绝不补跑遗漏分钟。 */
   tick(at = this.now()): CronTickResult {
+    this.recoverInterruptedRuns();
     const scheduledFor = floorToMinute(at);
     const runs: CronRunRecord[] = [];
     for (const job of this.store.listCronJobs({ enabled: true })) {
       if (!matchesCron(job.schedule, scheduledFor, job.timeZone)) continue;
       const decision = this.evaluate(job);
       runs.push(
-        this.store.createCronRun({
-          cronRunId: this.generateId("cron_run"),
-          cronJobId: job.cronJobId,
-          scheduledFor,
-          status: decision.allowed ? "queued" : "blocked",
-          ...(decision.reason !== undefined ? { reason: decision.reason } : {}),
-        }),
+        this.store.createCronRun(
+          {
+            cronRunId: this.generateId("cron_run"),
+            cronJobId: job.cronJobId,
+            scheduledFor,
+            status: decision.allowed ? "queued" : "blocked",
+            ...(decision.reason !== undefined ? { reason: decision.reason } : {}),
+          },
+          this.ownerId,
+        ),
       );
     }
     return { evaluatedAt: at, runs };
@@ -143,6 +147,7 @@ export class CronService {
 
   /** Manual triggers are durable but use the exact invocation time, not a schedule minute. */
   runNow(cronJobId: string): CronRunRecord {
+    this.recoverInterruptedRuns();
     const job = this.store.getCronJob(cronJobId);
     if (!job) throw new Error(`未知 Cron Job: ${cronJobId}`);
     const decision = this.evaluate(job);
@@ -151,13 +156,16 @@ export class CronService {
     // invocation is a new request, so avoid aliasing a tick at the same millisecond.
     for (;;) {
       const cronRunId = this.generateId("cron_run");
-      const run = this.store.createCronRun({
-        cronRunId,
-        cronJobId,
-        scheduledFor,
-        status: decision.allowed ? "queued" : "blocked",
-        ...(decision.reason ? { reason: decision.reason } : {}),
-      });
+      const run = this.store.createCronRun(
+        {
+          cronRunId,
+          cronJobId,
+          scheduledFor,
+          status: decision.allowed ? "queued" : "blocked",
+          ...(decision.reason ? { reason: decision.reason } : {}),
+        },
+        this.ownerId,
+      );
       if (run.cronRunId === cronRunId) return run;
       scheduledFor += 1;
     }
@@ -166,15 +174,30 @@ export class CronService {
   claim(cronRunId: string, leaseTtlMs?: number): ClaimCronRunResult {
     const run = this.store.getCronRun(cronRunId);
     if (!run) throw new Error(`未知 Cron Run: ${cronRunId}`);
+    if (run.status !== "queued") {
+      throw new RuntimeConflictError(`Cron Run ${cronRunId} 当前为 ${run.status}，不能启动`);
+    }
     const job = this.store.getCronJob(run.cronJobId);
     if (!job) throw new Error(`Cron Run ${cronRunId} 缺少对应 Job`);
     const decision = this.evaluate(job);
     if (!decision.allowed) {
       return {
-        run: this.store.blockQueuedCronRun(cronRunId, decision.reason ?? "policy_blocked"),
+        run: this.store.blockQueuedCronRun(
+          cronRunId,
+          decision.reason ?? "policy_blocked",
+          this.ownerId,
+        ),
       };
     }
-    const lease = this.store.acquireLease(`cron-run:${cronRunId}`, this.ownerId, leaseTtlMs);
+    const lease =
+      run.ownerId === undefined
+        ? this.store.acquireLease(`cron-run:${cronRunId}`, this.ownerId, leaseTtlMs)
+        : this.store.heartbeatLease(
+            `cron-run:${cronRunId}`,
+            this.ownerId,
+            run.leaseEpoch,
+            leaseTtlMs,
+          );
     try {
       const claimed = this.store.claimCronRun({
         cronRunId,
@@ -197,11 +220,11 @@ export class CronService {
   }
 
   block(cronRunId: string, reason: string): CronRunRecord {
-    return this.store.blockQueuedCronRun(cronRunId, reason);
+    return this.store.blockQueuedCronRun(cronRunId, reason, this.ownerId);
   }
 
   skip(cronRunId: string, reason = "workspace_busy"): CronRunRecord {
-    return this.store.skipQueuedCronRun(cronRunId, reason);
+    return this.store.skipQueuedCronRun(cronRunId, reason, this.ownerId);
   }
 
   finish(input: {
@@ -230,7 +253,7 @@ export class CronService {
     });
   }
 
-  /** daemon 启动恢复：只收口 lease 已过期的 running Run。 */
+  /** 收口无活跃 lease 的 queued/running Run；不重放错过的 trigger。 */
   recoverInterruptedRuns(reason?: string): CronRunRecord[] {
     return this.store.recoverInterruptedCronRuns(reason);
   }
