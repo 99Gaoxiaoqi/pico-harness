@@ -148,6 +148,25 @@ export class WorktreeMergeQueue {
     try {
       if (entry.mergeAttempted && entry.integrationWorktree) {
         const mergeHead = await this.validateIntegration(entry);
+        await this.assertCheckedOutBranch(entry.targetWorktree, entry.targetBranch);
+        const currentHead = await this.resolveBranchHead(entry.targetWorktree, entry.targetBranch);
+        const upstreamHead = await this.resolveOptionalUpstreamHead(entry.targetWorktree);
+        await this.runChecked(
+          ["merge-base", "--is-ancestor", currentHead, mergeHead],
+          entry.integrationWorktree,
+          "目标分支已漂移，隔离集成结果尚未包含当前目标提交",
+        );
+        if (upstreamHead && upstreamHead !== entry.expectedUpstreamHead) {
+          await this.runChecked(
+            ["merge-base", "--is-ancestor", upstreamHead, mergeHead],
+            entry.integrationWorktree,
+            "目标分支的远端上游已漂移，隔离集成结果尚未包含当前上游提交",
+          );
+        }
+        // Explicit recovery accepts a new baseline only after proving it was reintegrated.
+        // Publication repeats the checks so a later target/upstream movement still blocks.
+        entry.expectedTargetHead = currentHead;
+        entry.expectedUpstreamHead = upstreamHead;
         await this.publishIntegration(entry, mergeHead, lease);
         await this.finishIntegration(entry, mergeHead);
       } else {
