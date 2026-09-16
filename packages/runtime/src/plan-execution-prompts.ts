@@ -2,6 +2,8 @@ import { PlanConflictError, type PlanProjection, type PlanProposal } from "@pico
 
 const PLAN_REVISION_FEEDBACK_MAX_CHARS = 4_000;
 const PLAN_REVISION_CONTEXT_FIELD_MAX_CHARS = 256;
+const PLAN_TOOL_OPERATION_ID_INSTRUCTION =
+  "调用 submit_plan、update_plan 或 cancel_plan 时，一律省略可选的 operationId，由 runtime 按本次工具调用生成；不要复用历史工具结果或其他操作中的 operationId。";
 
 export function approvedPlanExecutionPrompt(proposal: PlanProposal): string {
   return [
@@ -14,6 +16,7 @@ export function approvedPlanExecutionPrompt(proposal: PlanProposal): string {
       ? `Risks:\n${proposal.risks.map((risk) => `- ${risk}`).join("\n")}`
       : undefined,
     "开始执行某一步前，先调用 update_plan 将它标记为 in_progress；实施并验证成功后，再调用 update_plan 将它标记为 completed（不再需要的步骤标记为 skipped）。",
+    PLAN_TOOL_OPERATION_ID_INSTRUCTION,
     "Graph 模式允许通过 yield_agent_graph 持久化等待子任务，并在唤醒后继续。除此之外，只要 execution 仍为 active，就不得仅返回文字或结束本轮；必须继续处理未完成步骤，直到 update_plan 返回 execution 已 completed。确实无法继续时调用 cancel_plan。",
   ]
     .filter((part): part is string => part !== undefined)
@@ -30,6 +33,7 @@ export function resumedPlanExecutionPrompt(projection: PlanProjection): string {
       (step) => `- [${step.status}] ${step.id}: ${step.title}\n  ${step.description}`,
     ),
     "恢复某一步前，先调用 update_plan 将它标记为 in_progress；实施并验证成功后，再调用 update_plan 将它标记为 completed（不再需要的步骤标记为 skipped）。",
+    PLAN_TOOL_OPERATION_ID_INSTRUCTION,
     "Graph 模式允许通过 yield_agent_graph 持久化等待子任务，并在唤醒后继续。除此之外，只要 execution 仍为 active，就不得仅返回文字或结束本轮；必须继续处理未完成步骤，直到 update_plan 返回 execution 已 completed。确实无法继续时调用 cancel_plan。",
   ].join("\n\n");
 }
