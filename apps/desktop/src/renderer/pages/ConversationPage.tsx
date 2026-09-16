@@ -257,7 +257,8 @@ export function ConversationPage() {
       collaborationMode: defaults.collaborationMode ?? "agent",
       orchestrationMode: defaults.orchestrationMode ?? "default",
       permissionMode: defaults.permissionMode ?? "ask",
-      ...(defaults.thinkingEffort ? { thinkingEffort: defaults.thinkingEffort } : {}),
+      // Inherited reasoning preferences are coordinated by the Host against the selected
+      // route. Sending them as an explicit override would bypass that reconciliation.
       ...newTaskSettingOverrides[workspacePath || "unbound"],
     };
   }, [

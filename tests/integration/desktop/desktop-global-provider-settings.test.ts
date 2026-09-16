@@ -158,6 +158,17 @@ test("Provider 和用户默认配置协议只接受全局参数", () => {
   );
 });
 
+test("Provider conflicts refresh configuration without replacing actionable server reasons", async () => {
+  const source = await rendererSource("runtime.ts");
+  const start = source.indexOf('label.startsWith("provider-")');
+  assert.ok(start >= 0);
+  const handler = source.slice(start, source.indexOf("reportFailure(error);", start));
+  assert.match(handler, /error\.code === "CONFLICT"/u);
+  assert.match(handler, /await loadGlobalProviderConfig\(bridge\)/u);
+  assert.match(handler, /setMessage\(error\.message\)/u);
+  assert.doesNotMatch(handler, /另一处更新|errorMessage\(error\)/u);
+});
+
 test("已移除的 Gemini 原生协议继续在公共协议边界被拒绝", () => {
   assert.throws(
     () =>

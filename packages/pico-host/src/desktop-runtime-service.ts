@@ -11,7 +11,7 @@ import {
   isJsonRecord,
   isNodeCode,
 } from "./index.js";
-import { type AtomicMemoryLifecycle } from "@pico/runtime";
+import { coordinateReasoningLevel, type AtomicMemoryLifecycle } from "@pico/runtime";
 import { usagePricing } from "./usage-pricing.js";
 import { MODEL_PRICING } from "./catalog-pricing.js";
 import type { HookTrustAuthority } from "./hooks/trust/store.js";
@@ -1099,6 +1099,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     workspacePath: string,
     title?: string,
     sessionId = createCliSessionId(),
+    modelRouteId?: string,
   ): Promise<JsonValue> {
     const canonical = await canonicalizeWorkspacePath(workspacePath);
     const session = new Session(sessionId, canonical, {
@@ -1108,7 +1109,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     });
     try {
       await session.recover();
-      const settings = await this.initializeSessionSettings(canonical, session);
+      const settings = await this.initializeSessionSettings(canonical, session, modelRouteId);
       if (title !== undefined) {
         const result = setSessionTitle(settings, requireText(title, "title"));
         if (!result.ok) {
@@ -1351,53 +1352,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     readonly permissionMode?: string;
     readonly thinkingEffort?: string;
   }): Promise<JsonValue> {
-    if (
-      params.modelRouteId === undefined &&
-      params.collaborationMode === undefined &&
-      params.orchestrationMode === undefined &&
-      params.permissionMode === undefined &&
-      params.thinkingEffort === undefined
-    ) {
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.INVALID_PARAMS,
-        "session.settings.update 至少需要一个设置字段",
-      );
-    }
+    validateRequestedSessionSettings(params);
     const requestedCollaborationMode = params.collaborationMode;
     const requestedPermissionMode = params.permissionMode;
     const requestedOrchestrationMode = params.orchestrationMode;
-    if (
-      requestedCollaborationMode !== undefined &&
-      requestedCollaborationMode !== "agent" &&
-      requestedCollaborationMode !== "plan"
-    ) {
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.INVALID_PARAMS,
-        "collaborationMode 必须是 agent 或 plan",
-      );
-    }
-    if (
-      requestedOrchestrationMode !== undefined &&
-      requestedOrchestrationMode !== "default" &&
-      requestedOrchestrationMode !== "graph" &&
-      requestedOrchestrationMode !== "swarm"
-    ) {
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.INVALID_PARAMS,
-        "orchestrationMode 必须是 default、graph 或 swarm",
-      );
-    }
-    if (
-      requestedPermissionMode !== undefined &&
-      requestedPermissionMode !== "ask" &&
-      requestedPermissionMode !== "auto" &&
-      requestedPermissionMode !== "full-access"
-    ) {
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.INVALID_PARAMS,
-        "permissionMode 必须是 ask、auto 或 full-access",
-      );
-    }
 
     const canonical = await this.requireIdleTrustedSession(
       params.workspacePath,
@@ -2169,6 +2127,18 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         );
       }
       if (!firstSendClaim) {
+        // Reject invalid initial settings before claiming an ID or persisting an empty
+        // session. Explicit values remain strict; inherited defaults are reconciled below.
+        if (params.initialSettings) {
+          validateRequestedSessionSettings(params.initialSettings);
+          const runtime = await this.loadSessionModelRuntime(params.workspacePath);
+          const route =
+            resolveRequestedModelRoute(runtime.router, params.initialSettings.modelRouteId) ??
+            runtime.router.require(runtime.config.defaultModelRouteId);
+          if (params.initialSettings.thinkingEffort !== undefined) {
+            validateRequestedThinkingEffort(route, params.initialSettings.thinkingEffort);
+          }
+        }
         firstSendClaim = await this.conversationStateStore.claimFirstSend(
           params.workspacePath,
           params.idempotencyKey,
@@ -2197,6 +2167,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         params.workspacePath,
         runtimeInputTitle(params.input),
         firstSendClaim.sessionId,
+        params.initialSettings?.modelRouteId,
       );
     }
     const sessionRecord = requireJsonRecord(session, "session");
@@ -2309,6 +2280,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     workspacePath: string,
     message: string,
     sessionId: string,
+    modelRouteId?: string,
   ): Promise<JsonValue> {
     try {
       return await this.requireSession(workspacePath, sessionId);
@@ -2322,7 +2294,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     }
     const title = message.replace(/\s+/gu, " ").trim().slice(0, 80);
     const created = requireJsonRecord(
-      await this.createSession(workspacePath, title, sessionId),
+      await this.createSession(workspacePath, title, sessionId, modelRouteId),
       "session.create result",
     );
     return requireJsonRecord(created["session"], "session.create session");
@@ -3217,11 +3189,16 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     );
   }
 
-  private async initializeSessionSettings(workspacePath: string, session: Session) {
+  private async initializeSessionSettings(
+    workspacePath: string,
+    session: Session,
+    modelRouteId?: string,
+  ) {
     const persisted = session.getRuntimeStateSnapshot().settings;
     if (persisted) return this.getSessionSettings(workspacePath, session);
     const defaults = effectiveSessionSettingDefaults(
       await this.loadSessionModelRuntime(workspacePath),
+      modelRouteId,
     );
     return getOrCreateSessionSettings(
       {
@@ -3881,23 +3858,72 @@ function validateRequestedThinkingEffort(route: ModelRoute, thinkingEffort: stri
   }
 }
 
+function validateRequestedSessionSettings(params: {
+  readonly modelRouteId?: string;
+  readonly collaborationMode?: string;
+  readonly orchestrationMode?: string;
+  readonly permissionMode?: string;
+  readonly thinkingEffort?: string;
+}): asserts params is RuntimeUserDefaults {
+  if (
+    params.modelRouteId === undefined &&
+    params.collaborationMode === undefined &&
+    params.orchestrationMode === undefined &&
+    params.permissionMode === undefined &&
+    params.thinkingEffort === undefined
+  ) {
+    throw invalidSessionSetting("session.settings.update 至少需要一个设置字段");
+  }
+  if (
+    params.collaborationMode !== undefined &&
+    params.collaborationMode !== "agent" &&
+    params.collaborationMode !== "plan"
+  ) {
+    throw invalidSessionSetting("collaborationMode 必须是 agent 或 plan");
+  }
+  if (
+    params.orchestrationMode !== undefined &&
+    params.orchestrationMode !== "default" &&
+    params.orchestrationMode !== "graph" &&
+    params.orchestrationMode !== "swarm"
+  ) {
+    throw invalidSessionSetting("orchestrationMode 必须是 default、graph 或 swarm");
+  }
+  if (
+    params.permissionMode !== undefined &&
+    params.permissionMode !== "ask" &&
+    params.permissionMode !== "auto" &&
+    params.permissionMode !== "full-access"
+  ) {
+    throw invalidSessionSetting("permissionMode 必须是 ask、auto 或 full-access");
+  }
+}
+
 function invalidSessionSetting(message: string): RuntimeProtocolError {
   return new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, message);
 }
 
-function effectiveSessionSettingDefaults(runtime: EffectiveModelRuntime): {
+function effectiveSessionSettingDefaults(
+  runtime: EffectiveModelRuntime,
+  modelRouteId?: string,
+): {
   provider: ProviderKind;
   model: string;
   modelRouteId: string;
   thinkingEffort?: string;
 } {
-  const route = runtime.router.require(runtime.config.defaultModelRouteId);
+  // First-send overrides choose the final route before coordinating the inherited level.
+  const route = runtime.router.require(modelRouteId ?? runtime.config.defaultModelRouteId);
+  const reasoning = coordinateReasoningLevel(
+    route.capabilities.reasoningProfile,
+    runtime.config.defaults.thinkingEffort,
+  );
   return {
     provider: route.provider,
     model: route.model,
     modelRouteId: route.id,
-    ...(runtime.config.defaults.thinkingEffort
-      ? { thinkingEffort: runtime.config.defaults.thinkingEffort }
+    ...(runtime.config.defaults.thinkingEffort && reasoning.level
+      ? { thinkingEffort: reasoning.level }
       : {}),
   };
 }

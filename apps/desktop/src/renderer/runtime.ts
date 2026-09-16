@@ -1656,9 +1656,9 @@ export function useRuntimeStore(): RuntimeStore {
               return false;
             }
           }
-          setMessage(
-            "Provider 配置已被 App 或 TUI 的另一处更新，已重新加载最新内容。请检查后重新应用本次修改。",
-          );
+          // CONFLICT also includes dependency guards (stored keys, default routes, active
+          // runs). Refresh the snapshot, but preserve the actionable server explanation.
+          setMessage(error.message);
           return false;
         }
         reportFailure(error);

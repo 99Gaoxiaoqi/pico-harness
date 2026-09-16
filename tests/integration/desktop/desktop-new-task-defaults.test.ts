@@ -81,6 +81,15 @@ test("new task falls back to the fail-closed Runtime default when user config is
   );
   assert.match(source, /permissionMode: defaults\.permissionMode \?\? "ask"/u);
   assert.doesNotMatch(source, /legacyMode/u);
+  const defaults = source.slice(
+    source.indexOf("const newTaskSettings ="),
+    source.indexOf("const updateNewTaskSettings ="),
+  );
+  assert.doesNotMatch(
+    defaults,
+    /defaults\.thinkingEffort/u,
+    "inherited thinking must be reconciled by the Host, not sent as an explicit override",
+  );
 });
 
 test("desktop permission selectors expose all modes with explicit labels", async () => {
