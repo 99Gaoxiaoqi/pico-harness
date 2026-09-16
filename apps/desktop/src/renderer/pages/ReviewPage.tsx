@@ -35,7 +35,8 @@ export function ReviewPage() {
     .sort((left, right) => right.startedAt - left.startedAt);
   const requestedRunId = searchParams.get("runId");
   const runId = runs.find((run) => run.id === requestedRunId)?.id ?? runs[0]?.id;
-  const reviewKey = JSON.stringify([workspacePath, sessionId, runId]);
+  const [refresh, setRefresh] = useState(0);
+  const reviewKey = JSON.stringify([workspacePath, sessionId, runId, refresh]);
   const [review, setReview] = useState<{
     key: string;
     changes: readonly ChangeView[];
@@ -55,7 +56,6 @@ export function ReviewPage() {
   const [selectedPath, setSelectedPath] = useState(changes[0]?.path);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string>();
-  const [refresh, setRefresh] = useState(0);
   const [diff, setDiff] = useState<{
     key: string;
     path: string;
@@ -129,8 +129,8 @@ export function ReviewPage() {
     navigate(`/review?${params}`);
   };
   return (
-    <div className="page-stack">
-      <section className="page-intro" aria-label="审阅范围">
+    <div className="page-stack review-page">
+      <section className="review-scope" aria-label="审阅范围">
         <label>
           任务
           <select
