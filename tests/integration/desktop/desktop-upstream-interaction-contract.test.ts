@@ -20,6 +20,7 @@ import { WorkspaceRuntimeService } from "@pico/pico-host/workspace-runtime-servi
 import { globalSessionManager } from "@pico/pico-host/session";
 import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
 import { writeDesktopModelRouting } from "../../fixtures/desktop-model-routing.js";
+import { UserConfigStore } from "@pico/pico-host/input/user-config-store";
 
 function asRecord(value: unknown): Record<string, unknown> {
   assert.ok(value && typeof value === "object" && !Array.isArray(value));
@@ -90,6 +91,115 @@ test("new-task send accepts settings that must apply before the first run", asyn
     /initialSettings 只允许用于首次发送/u,
   );
 });
+
+for (const scenario of [
+  { route: "test/coder", thinking: "off", explicit: false, levels: [] },
+  { route: "test/reasoner", thinking: "high", explicit: true, levels: ["low", "high"] },
+] as const) {
+  test(`first send coordinates inherited thinking against ${scenario.route} before persistence`, async (context) => {
+    const root = await mkdtemp(join(tmpdir(), "pico-first-send-reasoning-"));
+    const workspace = join(root, "workspace");
+    const picoHome = join(root, "pico-home");
+    await mkdir(workspace, { recursive: true });
+    await writeDesktopModelRouting(picoHome);
+    const store = new UserConfigStore({ picoHome });
+    const current = await store.read();
+    const provider = current.config.providers.test;
+    assert.ok(provider);
+    // The user switched to a route without adjustable thinking, retaining their preference.
+    await store.write(
+      {
+        ...current.config,
+        defaults: { modelRouteId: "test/coder", thinkingEffort: scenario.thinking },
+        providers: {
+          test: {
+            ...provider,
+            models: ["coder", "reasoner"],
+            modelCapabilities: {
+              reasoner: {
+                reasoning: { enabled: true, levels: ["low", "high"], defaultLevel: "low" },
+              },
+            },
+          },
+        },
+      },
+      { expectedRevision: current.revision },
+    );
+    const canonicalWorkspace = await realpath(workspace);
+    const env = { PICO_HOME: picoHome, PICO_TEST_TOKEN: "test-token" };
+    const trustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });
+    await trustStore.trust(canonicalWorkspace);
+    const runtime = new WorkspaceRuntimeService({ env, execute: async () => ({ ok: true }) });
+    const sessionId = "reasoning-first-send";
+    let created = 0;
+    const desktop = new DesktopRuntimeService({
+      runtimeService: runtime,
+      trustStore,
+      env,
+      createSessionId: () => {
+        created++;
+        return sessionId;
+      },
+    });
+    context.after(async () => {
+      await desktop.close();
+      await runtime.close();
+      const session = globalSessionManager.delete(sessionId, canonicalWorkspace, { picoHome });
+      await session?.close();
+      await rm(root, { recursive: true, force: true });
+    });
+
+    for (const [initialSettings, message] of [
+      [{ modelRouteId: "test/coder", thinkingEffort: "off" }, /不支持 thinking=off/u],
+      [{ modelRouteId: "test/missing" }, /模型路由.*不可用/u],
+      [{}, /至少需要一个设置字段/u],
+    ] as const) {
+      await assert.rejects(
+        desktop.handle(
+          createRuntimeRequest("session.send", {
+            workspacePath: workspace,
+            input: { kind: "text", text: "synthetic reasoning check" },
+            initialSettings,
+            idempotencyKey: "reasoning-check",
+          }),
+        ),
+        message,
+      );
+      assert.equal(created, 0, "invalid settings must not claim a session ID");
+      assert.deepEqual(
+        asRecord(
+          await desktop.handle(createRuntimeRequest("session.list", { workspacePath: workspace })),
+        ).sessions,
+        [],
+      );
+    }
+
+    const request = createRuntimeRequest("session.send", {
+      workspacePath: workspace,
+      input: { kind: "text", text: "synthetic reasoning check" },
+      initialSettings: { modelRouteId: scenario.route, permissionMode: "ask" },
+      idempotencyKey: "reasoning-check",
+    });
+    const sent = asRecord(await desktop.handle(request));
+    assert.equal(asRecord(sent.session).sessionId, sessionId);
+    const settings = asRecord(
+      asRecord(
+        await desktop.handle(
+          createRuntimeRequest("session.settings.get", {
+            workspacePath: workspace,
+            sessionId,
+          }),
+        ),
+      ).settings,
+    );
+    assert.equal(settings.modelRouteId, scenario.route);
+    assert.equal(settings.thinkingEffort, scenario.thinking);
+    assert.equal(settings.thinkingEffortExplicit, scenario.explicit);
+    assert.deepEqual(settings.reasoningLevels, scenario.levels);
+    assert.equal(asRecord(asRecord(await desktop.handle(request)).session).sessionId, sessionId);
+    assert.equal(created, 1, "retry must reuse the one successful first-send claim");
+  });
+}
 
 test("desktop transcript groups execution records under the preceding user turn", () => {
   const turns = groupConversationItemsIntoTurns([
