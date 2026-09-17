@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { anthropic, createAnthropic } from "@ai-sdk/anthropic";
 import { openai, createOpenAI } from "@ai-sdk/openai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
@@ -10,6 +11,8 @@ import type {
   ToolDefinition,
   Usage,
   UsageReportedField,
+  ModelResponseDiagnostic,
+  ModelCommunicationCategory,
 } from "@pico/core";
 import type { ProviderConfig } from "@pico/runtime/provider-config";
 import type { ProviderProfile, ProviderProtocol } from "@pico/core";
@@ -25,6 +28,7 @@ import { openCodeClientHeaders } from "./opencode-headers.js";
 import { appendProviderEndpointPath } from "@pico/runtime/provider-endpoint";
 import { parseRateLimitHeaders } from "@pico/runtime/rate-limit";
 import { ContextOverflowError, isContextOverflowStatus, LLMStatusError } from "@pico/core";
+import { modelCommunicationError } from "./model-communication-error.js";
 
 /** One model step only. Pico owns tools, permissions, retries and conversation persistence. */
 export class AiSdkProvider implements LLMProvider {
@@ -79,6 +83,10 @@ export class AiSdkProvider implements LLMProvider {
     options?: LLMProviderRequestOptions,
   ): Promise<Message> {
     const signal = providerRequestSignal(options?.signal, options?.timeoutMs);
+    const startedAt = performance.now();
+    const diagnosticId = randomUUID();
+    let responseDiagnostic: Partial<ModelResponseDiagnostic> = {};
+    let failureCategory: ModelCommunicationCategory = "request_failed";
     const definitions = snapshotToolDefinitions(availableTools);
     const deepseek =
       this.wire === "responses" && new URL(this.config.baseURL).hostname === "api.deepseek.com";
@@ -137,6 +145,12 @@ export class AiSdkProvider implements LLMProvider {
         });
         if (!response.ok) errorText = await response.text();
       }
+      responseDiagnostic = {
+        ...responseDiagnostic,
+        httpStatus: response.status,
+        headersMs: Math.round(performance.now() - startedAt),
+      };
+      failureCategory = "unknown";
       if (!response.ok) {
         if (isContextOverflowStatus(response.status, errorText ?? ""))
           throw new ContextOverflowError(
@@ -211,7 +225,11 @@ export class AiSdkProvider implements LLMProvider {
     try {
       if (!onDelta) {
         const result = await generateText(request);
-        if (result.finishReason === "error") throw new Error("Model response failed");
+        responseDiagnostic = { ...responseDiagnostic, finishReason: result.finishReason };
+        if (result.finishReason === "error") {
+          failureCategory = "rejected_completion";
+          throw new Error("Model response failed");
+        }
         const usage = translateUsage(
           result.steps.at(-1)!.usage,
           this.wire,
@@ -226,8 +244,30 @@ export class AiSdkProvider implements LLMProvider {
       let finished = false;
       let rawUsage: Record<string, unknown> | undefined;
       for await (const chunk of result.stream) {
+        if (
+          responseDiagnostic.firstChunkMs === undefined &&
+          ["raw", "text-delta", "reasoning-delta", "error"].includes(chunk.type)
+        )
+          responseDiagnostic = {
+            ...responseDiagnostic,
+            firstChunkMs: Math.round(performance.now() - startedAt),
+          };
         if (chunk.type === "raw") {
           const raw = record(chunk.rawValue);
+          const choice = Array.isArray(raw?.choices) ? record(raw.choices[0]) : undefined;
+          const reason = choice?.finish_reason;
+          if (typeof reason === "string")
+            responseDiagnostic = {
+              ...responseDiagnostic,
+              rawFinishReason:
+                reason === "stop" ||
+                reason === "length" ||
+                reason === "tool_calls" ||
+                reason === "content_filter" ||
+                reason === "error"
+                  ? reason
+                  : "unknown",
+            };
           if (raw?.type === "response.output_item.done" && raw.item) responseOutput.push(raw.item);
           const value =
             record(raw?.usage) ??
@@ -236,17 +276,27 @@ export class AiSdkProvider implements LLMProvider {
           if (value) rawUsage = { ...rawUsage, ...value };
         } else if (chunk.type === "text-delta") onDelta(chunk.text);
         else if (chunk.type === "reasoning-delta") options?.onReasoningDelta?.(chunk.text);
-        else if (chunk.type === "error") throw chunk.error;
-        else if (chunk.type === "abort")
+        else if (chunk.type === "error") {
+          throw chunk.error;
+        } else if (chunk.type === "abort")
           throw signal.reason ?? new DOMException("Aborted", "AbortError");
         else if (chunk.type === "finish") {
-          if (chunk.finishReason === "error" || chunk.finishReason === "other")
+          responseDiagnostic = { ...responseDiagnostic, finishReason: chunk.finishReason };
+          if (chunk.finishReason === "error" || chunk.finishReason === "other") {
+            failureCategory =
+              chunk.finishReason === "error" || responseDiagnostic.rawFinishReason === "error"
+                ? "rejected_completion"
+                : "incomplete_stream";
             throw new Error("Model stream ended without a valid completion");
+          }
           finished = true;
         }
       }
       signal.throwIfAborted();
-      if (!finished) throw new Error("Model stream ended before completion");
+      if (!finished) {
+        failureCategory = "incomplete_stream";
+        throw new Error("Model stream ended before completion");
+      }
       const usage = translateUsage((await result.steps).at(-1)!.usage, this.wire, rawUsage);
       return {
         ...fromAiSdkContent(await result.content, this.wire, responseOutput),
@@ -254,17 +304,16 @@ export class AiSdkProvider implements LLMProvider {
       };
     } catch (error) {
       if (signal.aborted) throw signal.reason;
-      // SDK validation errors can embed arbitrary response content; never expose their raw data/cause.
-      let cause: unknown = error;
-      for (let depth = 0; cause instanceof Error && depth < 8; depth++, cause = cause.cause) {
-        if (cause instanceof LLMStatusError) throw cause;
-        if (cause instanceof TypeError)
-          // eslint-disable-next-line preserve-caught-error -- SDK causes may contain credentials and prompt data.
-          throw new TypeError("模型网络请求失败；已省略连接及响应详情");
-        if (cause.name === "AbortError" || cause.name === "TimeoutError") throw cause;
-      }
-      // eslint-disable-next-line preserve-caught-error -- Do not retain SDK request/response objects in errors.
-      throw new Error("模型通信失败：响应格式或连接异常；已省略请求及响应内容");
+      // Only allowlisted classifications cross the SDK boundary.
+      throw modelCommunicationError(
+        error,
+        {
+          ...responseDiagnostic,
+          diagnosticId,
+          durationMs: Math.round(performance.now() - startedAt),
+        },
+        failureCategory,
+      );
     }
   }
 

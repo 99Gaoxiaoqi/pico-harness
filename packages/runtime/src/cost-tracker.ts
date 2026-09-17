@@ -36,7 +36,7 @@ export interface CostTrackerDiagnostics {
   info(bindings: Record<string, unknown>, message: string): void;
   error(bindings: Record<string, unknown>, message: string): void;
 }
-import { isAbortError } from "@pico/core";
+import { isAbortError, ModelCommunicationError } from "@pico/core";
 import type { ProviderCallRecord } from "@pico/storage/runtime-control-types";
 import { estimateCost, type BillingRoute } from "@pico/runtime/pricing";
 import { getProviderCallContext, type ProviderCallContext } from "@pico/runtime";
@@ -446,15 +446,42 @@ function preparedRequestRoute(route: string | BillingRoute): string | undefined 
 
 function runtimeErrorSummary(error: unknown): string {
   const metadata = safeErrorMetadata(error);
+  if (error instanceof ModelCommunicationError)
+    return `${metadata.errorName} category=${error.category} diagnosticId=${error.diagnostic.diagnosticId}; detail omitted`;
   return `${metadata.errorName}${metadata.statusCode === undefined ? "" : ` status=${metadata.statusCode}`}; detail omitted`;
 }
 
-function safeErrorMetadata(error: unknown): { errorName: string; statusCode?: number } {
-  const errorName = error instanceof Error ? error.name : typeof error;
+function safeErrorMetadata(
+  error: unknown,
+): Record<string, unknown> & { errorName: string; statusCode?: number } {
+  if (error instanceof ModelCommunicationError)
+    return {
+      errorName: "ModelCommunicationError",
+      errorCategory: error.category,
+      responseDiagnostic: error.diagnostic,
+    };
+  const errorName =
+    error instanceof Error &&
+    [
+      "Error",
+      "TypeError",
+      "AbortError",
+      "TimeoutError",
+      "LLMStatusError",
+      "ContextOverflowError",
+      "ModelCapabilityError",
+    ].includes(error.name)
+      ? error.name
+      : "Error";
   if (typeof error !== "object" || error === null) return { errorName };
   const statusCode = (error as { statusCode?: unknown }).statusCode;
   return {
     errorName,
-    ...(typeof statusCode === "number" ? { statusCode } : {}),
+    ...(typeof statusCode === "number" &&
+    Number.isInteger(statusCode) &&
+    statusCode >= 400 &&
+    statusCode <= 599
+      ? { statusCode }
+      : {}),
   };
 }
