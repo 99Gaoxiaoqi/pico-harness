@@ -1,6 +1,10 @@
 # Windows Desktop 构建与验收
 
 Windows 当前仍是未签名测试产物，不因打包成功而自动满足公开发布条件。
+Windows 安装标识为 `pico_desktop`，默认安装到 `%LOCALAPPDATA%/pico_desktop`；
+运行时宿主目录仍使用 `%LOCALAPPDATA%/Pico/runtime-hosts`，用户配置仍使用原有
+`PICO_HOME` 或 `~/.pico`；不得将安装目录与数据目录合并。
+旧测试安装标识 `pico` 不再作为更新目标；不要自动卸载该目录，因为其中可能存有数据。
 
 ## 本机确定性检查
 

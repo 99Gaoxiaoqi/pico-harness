@@ -128,7 +128,7 @@ if (!app.requestSingleInstanceLock()) {
   void app
     .whenReady()
     .then(async () => {
-      if (process.platform === "win32") app.setAppUserModelId("com.squirrel.pico.Pico");
+      if (process.platform === "win32") app.setAppUserModelId("com.squirrel.pico_desktop.Pico");
       if (app.dock) app.dock.setIcon(resolveDesktopIconPath());
       await lifecycle.initialize();
       const runtimeStorageReady = await ensureDesktopRuntimeStorageRoot({
