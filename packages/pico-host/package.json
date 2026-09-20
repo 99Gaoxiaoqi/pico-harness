@@ -822,6 +822,10 @@
     "./product-runtime-host-candidate": {
       "types": "./dist/product-runtime-host-candidate.d.ts",
       "import": "./dist/product-runtime-host-candidate.js"
+    },
+    "./deep-research-tools": {
+      "types": "./dist/deep-research-tools.d.ts",
+      "import": "./dist/deep-research-tools.js"
     }
   },
   "files": [

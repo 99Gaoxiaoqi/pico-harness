@@ -1,3 +1,4 @@
+import { DEEP_RESEARCH_SCOPE } from "./deep-research-scope.js";
 import {
   EventLogHardCutBlockedError,
   coordinateEventLogHardCut,
@@ -39,6 +40,7 @@ export const ALL_WORKSPACE_SQLITE_SCOPES: readonly SqliteSchemaScope[] = [
   EVENT_LOG_HARD_CUT_SCOPE,
   WORKBAR_SCOPE,
   AGENT_GRAPH_SCOPE,
+  DEEP_RESEARCH_SCOPE,
 ];
 
 export interface WorkspaceSqliteStorageRootOptions {

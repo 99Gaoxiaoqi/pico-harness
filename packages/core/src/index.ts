@@ -40,3 +40,5 @@ export * from "./tool-exchange.js";
 export * from "./workspace-trust-contract.js";
 export * from "./atomic-memory-contracts.js";
 export * from "./atomic-memory-runtime-contracts.js";
+
+export * from "./deep-research.js";
