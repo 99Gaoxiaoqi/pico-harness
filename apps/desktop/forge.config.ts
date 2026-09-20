@@ -62,7 +62,8 @@ const config = {
         authors: "Pico",
         description: "Pico Agent Harness desktop application",
         exe: "Pico.exe",
-        name: "pico",
+        // Squirrel owns and may replace this directory. Runtime data uses "pico".
+        name: "pico_desktop",
         setupExe: "PicoSetup.exe",
         ...(updateBaseUrl ? { remoteReleases: `${updateBaseUrl}/win32` } : {}),
       },
