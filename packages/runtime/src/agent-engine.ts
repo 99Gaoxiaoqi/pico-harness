@@ -326,7 +326,7 @@ export interface AgentEngineOptions {
   /** 当前主会话的稳定模型路由标识。 */
   modelRouteId?: string | undefined;
   /** Runtime-owned dynamic collaboration mode. */
-  collaborationMode?: (() => "agent" | "plan") | undefined;
+  collaborationMode?: (() => "agent" | "plan" | "research") | undefined;
   /** Run-scoped latch marked by submit_plan after durable proposal creation. */
   planHandoff?: PlanHandoffController | undefined;
   /** Host-owned tools whose successful durable result ends the current engine Run. */
@@ -502,7 +502,7 @@ export class AgentEngine {
   private readonly onRunInterrupted?: AgentEngineOptions["onRunInterrupted"] | undefined;
   private readonly skillLoaderFactory: (workDir: string) => SkillLoader;
   private readonly runtimePort?: EngineRuntimePort | undefined;
-  private readonly collaborationMode?: (() => "agent" | "plan") | undefined;
+  private readonly collaborationMode?: (() => "agent" | "plan" | "research") | undefined;
   private readonly planHandoff?: PlanHandoffController | undefined;
   private readonly stopAfterSuccessfulToolNames: ReadonlySet<string>;
   private readonly controlPlanePresentation: boolean;

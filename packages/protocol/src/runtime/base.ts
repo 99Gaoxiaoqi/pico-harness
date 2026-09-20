@@ -72,7 +72,7 @@ export type SessionSendBehavior = "auto" | "steer" | "queue" | "replace";
 
 export type SessionSendDisposition = "started" | "steered" | "queued" | "replaced";
 
-export type RuntimeCollaborationMode = "agent" | "plan";
+export type RuntimeCollaborationMode = "agent" | "plan" | "research";
 
 export type RuntimeOrchestrationMode = "default" | "graph" | "swarm";
 

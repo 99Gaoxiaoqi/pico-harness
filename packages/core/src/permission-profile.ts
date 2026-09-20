@@ -70,7 +70,7 @@ export type ExecutionBoundary =
   | { readonly kind: "external"; readonly revision: number };
 
 export type RuntimePermissionMode = "ask" | "auto" | "full-access";
-export type RuntimeCollaborationMode = "agent" | "plan";
+export type RuntimeCollaborationMode = "agent" | "plan" | "research";
 
 export interface CompileRuntimePermissionProfileInput {
   readonly permissionMode: RuntimePermissionMode;
@@ -230,7 +230,7 @@ export function compileRuntimePermissionProfile(
 
   // Collaboration mode is the stronger axis: planning never inherits an
   // otherwise unrestricted foreground permission mode.
-  if (input.collaborationMode === "plan") {
+  if (input.collaborationMode === "plan" || input.collaborationMode === "research") {
     return createManagedExecutionBoundary(createReadOnlyPermissionProfile(), revision);
   }
   if (input.permissionMode === "full-access") {

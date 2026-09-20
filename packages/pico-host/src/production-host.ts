@@ -458,7 +458,8 @@ export function createProductionRuntimeServices(
         ...(!operatorProfile && workspaceRuntime.taskHostRuntime
           ? { taskHostRuntime: workspaceRuntime.taskHostRuntime }
           : {}),
-        ...(persistedSettings?.collaborationMode !== "plan" && pluginSnapshot?.hookSources.length
+        ...((persistedSettings?.collaborationMode ?? "agent") === "agent" &&
+        pluginSnapshot?.hookSources.length
           ? { hookExtensionSources: pluginSnapshot.hookSources }
           : {}),
       });
@@ -899,14 +900,16 @@ export function createProductionRuntimeServices(
             : "none"
           : (proposalAuthorization ??
             (persistedSettings?.orchestrationMode === "swarm" ? "session_mode" : "none"));
-        let orchestrationMode = planning
-          ? "default"
-          : (execution?.orchestrationMode ??
-            (agentSwarmAuthorization !== "none"
-              ? "swarm"
-              : resumeGraph
-                ? "graph"
-                : (persistedSettings?.orchestrationMode ?? "default")));
+        const researching = persistedSettings?.collaborationMode === "research";
+        let orchestrationMode =
+          planning || researching
+            ? "default"
+            : (execution?.orchestrationMode ??
+              (agentSwarmAuthorization !== "none"
+                ? "swarm"
+                : resumeGraph
+                  ? "graph"
+                  : (persistedSettings?.orchestrationMode ?? "default")));
         graphHost =
           orchestrationMode === "graph" || orchestrationMode === "swarm"
             ? requireAgentGraphWorkspaceHost(agentGraphHosts, workspacePath)
@@ -966,7 +969,8 @@ export function createProductionRuntimeServices(
           workspaceTrustStore: trustStore,
           processSandbox: {
             profile:
-              persistedSettings?.collaborationMode === "plan"
+              persistedSettings?.collaborationMode === "plan" ||
+              persistedSettings?.collaborationMode === "research"
                 ? "read-only"
                 : persistedSettings?.permissionMode === "full-access"
                   ? "danger-full-access"
@@ -979,7 +983,8 @@ export function createProductionRuntimeServices(
           ...(workspaceRuntime.taskHostRuntime
             ? { taskHostRuntime: workspaceRuntime.taskHostRuntime }
             : {}),
-          ...(persistedSettings?.collaborationMode !== "plan" && pluginSnapshot.hookSources.length
+          ...((persistedSettings?.collaborationMode ?? "agent") === "agent" &&
+          pluginSnapshot.hookSources.length
             ? { hookExtensionSources: pluginSnapshot.hookSources }
             : {}),
         });
@@ -1140,7 +1145,11 @@ export function createProductionRuntimeServices(
             model: route.model,
             modelRouteId: route.modelRouteId,
             modelCapabilities: route.capabilities,
-            collaborationMode: planning ? ("plan" as const) : ("agent" as const),
+            collaborationMode: researching
+              ? ("research" as const)
+              : planning
+                ? ("plan" as const)
+                : ("agent" as const),
             orchestrationMode,
             agentSwarmAuthorization,
             ...(reasoningLevel !== undefined ? { thinkingEffort: reasoningLevel } : {}),

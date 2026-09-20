@@ -1220,7 +1220,7 @@ export function buildDeepResearchSystemPromptFragment(): string {
     "",
     "Mode contract:",
     "- Inspect first. Prefer read_file, glob, grep, and web_search.",
-    "- Do not write, edit, delete, move, or rename user project files; do not install, run migrations, start services, or send network requests unless the user explicitly leaves research mode.",
+    "- Do not write, edit, delete, move, or rename user project files; do not install, run migrations, start services, or send mutating network requests unless the user explicitly leaves research mode.",
     "- The deep_research_* tools are the one write exception: they only update Pico-owned research artifacts and an append-only workspace ledger, never the user project.",
     "- If implementation is needed, produce a concrete plan with files, risks, and verification commands instead of modifying files.",
     "- Keep findings source-grounded: name files, functions, configs, tests, and observed behavior.",
@@ -1282,47 +1282,39 @@ export function projectDeepResearchProgress(run: DeepResearchRun): DeepResearchP
     return result + "…";
   };
   const texts = (values: string[]) => values.slice(0, 4).map((value) => clip(value));
-  const artifacts = run.artifacts
-    .slice(-8)
-    .map((item) => ({
-      ...item,
-      name: clip(item.name),
-      ...(item.summary ? { summary: clip(item.summary) } : {}),
-      ...(item.locator ? { locator: clip(item.locator) } : {}),
-      sourceArtifactIds: item.sourceArtifactIds.slice(0, 8),
-    }));
-  const steps = run.steps
-    .slice(-3)
-    .map((item) => ({
-      ...item,
-      objective: clip(item.objective),
-      summary: clip(item.summary),
-      roots: texts(item.roots),
-      keywords: texts(item.keywords),
-      ignoredPaths: texts(item.ignoredPaths),
-      stoppingCondition: clip(item.stoppingCondition),
-      expectedEvidence: clip(item.expectedEvidence),
-      evidenceArtifactIds: item.evidenceArtifactIds.slice(0, 4),
-      inspectedRefs: item.inspectedRefs
-        .slice(-4)
-        .map((ref) => ({
-          ...ref,
-          locator: clip(ref.locator),
-          ...(ref.label ? { label: clip(ref.label) } : {}),
-        })),
-      workerRunIds: item.workerRunIds.slice(0, 4),
-      ...(item.blockedReason ? { blockedReason: clip(item.blockedReason) } : {}),
-    }));
-  const checkpoints = run.checkpoints
-    .slice(-3)
-    .map((item) => ({
-      ...item,
-      summary: clip(item.summary),
-      openQuestions: texts(item.openQuestions),
-      nextSteps: texts(item.nextSteps),
-      taskIds: item.taskIds.slice(0, 4),
-      artifactIds: item.artifactIds.slice(0, 4),
-    }));
+  const artifacts = run.artifacts.slice(-8).map((item) => ({
+    ...item,
+    name: clip(item.name),
+    ...(item.summary ? { summary: clip(item.summary) } : {}),
+    ...(item.locator ? { locator: clip(item.locator) } : {}),
+    sourceArtifactIds: item.sourceArtifactIds.slice(0, 8),
+  }));
+  const steps = run.steps.slice(-3).map((item) => ({
+    ...item,
+    objective: clip(item.objective),
+    summary: clip(item.summary),
+    roots: texts(item.roots),
+    keywords: texts(item.keywords),
+    ignoredPaths: texts(item.ignoredPaths),
+    stoppingCondition: clip(item.stoppingCondition),
+    expectedEvidence: clip(item.expectedEvidence),
+    evidenceArtifactIds: item.evidenceArtifactIds.slice(0, 4),
+    inspectedRefs: item.inspectedRefs.slice(-4).map((ref) => ({
+      ...ref,
+      locator: clip(ref.locator),
+      ...(ref.label ? { label: clip(ref.label) } : {}),
+    })),
+    workerRunIds: item.workerRunIds.slice(0, 4),
+    ...(item.blockedReason ? { blockedReason: clip(item.blockedReason) } : {}),
+  }));
+  const checkpoints = run.checkpoints.slice(-3).map((item) => ({
+    ...item,
+    summary: clip(item.summary),
+    openQuestions: texts(item.openQuestions),
+    nextSteps: texts(item.nextSteps),
+    taskIds: item.taskIds.slice(0, 4),
+    artifactIds: item.artifactIds.slice(0, 4),
+  }));
   const progress: DeepResearchProgress = {
     schemaVersion: run.schemaVersion,
     sessionId: run.sessionId,

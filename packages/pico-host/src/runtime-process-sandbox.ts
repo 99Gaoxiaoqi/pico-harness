@@ -74,7 +74,7 @@ export function compileRuntimeProcessSandbox(
 
   const configuredBoundary = input.executionBoundary;
   const boundary =
-    input.collaborationMode === "plan"
+    input.collaborationMode !== "agent"
       ? compileRuntimePermissionProfile({
           collaborationMode: "plan",
           permissionMode: "ask",
@@ -82,11 +82,11 @@ export function compileRuntimeProcessSandbox(
         })
       : configuredBoundary;
   const managedNetworkEnabled =
-    input.collaborationMode !== "plan" &&
+    input.collaborationMode === "agent" &&
     boundary.kind === "managed" &&
     (boundary.profile.network.kind === "enabled" || input.networkEnabled === true);
   const profileTag =
-    input.collaborationMode === "plan"
+    input.collaborationMode !== "agent"
       ? 1
       : boundary.kind === "bypass"
         ? 3

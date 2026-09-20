@@ -181,6 +181,10 @@ const runtimeChangeResult = resultShape({
 });
 
 export type WorkbarMethodMap = {
+  readonly "session.research.query": {
+    readonly params: WorkspaceParams & { readonly sessionId: SessionId };
+    readonly result: JsonObject;
+  };
   /** 活跃路由的上下文预算与能力报告（BLOCKED 收口：/context 镜像）。 */
   readonly "session.context.get": {
     readonly params: WorkspaceParams & { readonly sessionId: SessionId };
@@ -523,6 +527,7 @@ export type WorkbarMethodMap = {
 };
 
 export const workbarParamValidators = {
+  "session.research.query": workspaceSessionParams,
   "session.context.get": workspaceSessionParams,
   "session.tasks.query": exactParamShape(
     { workspacePath: stringParam, sessionId: stringParam },
@@ -748,6 +753,7 @@ export const workbarParamValidators = {
 } satisfies Readonly<Record<keyof WorkbarMethodMap, RuntimeParamValidator>>;
 
 export const workbarResultValidators = {
+  "session.research.query": resultJsonObject,
   "session.context.get": exactResultShape({ context: resultJsonObject }),
   "session.tasks.query": exactResultShape(
     { revision: resultNonNegativeInteger, tasks: resultArray(runtimeSessionTaskResult) },

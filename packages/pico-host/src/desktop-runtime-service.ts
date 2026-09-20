@@ -1,3 +1,5 @@
+import { projectDeepResearchProgress } from "@pico/core/deep-research";
+import { SqliteDeepResearchStore } from "@pico/storage";
 import {
   configuredSubagentParent,
   readConfiguredSubagentAdmission,
@@ -711,6 +713,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         runStart: (request) => this.options.runtimeService.handle(request),
       }),
       ...createDesktopWorkbarRequestHandlers({
+        "session.research.query": this.querySessionResearch.bind(this),
         "session.tasks.query": this.querySessionTasks.bind(this),
         "session.tasks.command": this.commandSessionTasks.bind(this),
         "session.artifacts.query": this.querySessionArtifacts.bind(this),
@@ -1364,6 +1367,15 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     );
     const settings = await this.withSession(canonical, params.sessionId, async (session) => {
       const current = await this.getSessionSettings(canonical, session);
+      if (
+        (requestedCollaborationMode ?? current.collaborationMode) === "research" &&
+        (requestedOrchestrationMode ?? current.orchestrationMode) !== "default"
+      ) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.CONFLICT,
+          "研究模式只支持只读线性研究，请先关闭 Graph/Swarm。",
+        );
+      }
       const permissionModeChanging =
         requestedPermissionMode !== undefined && requestedPermissionMode !== current.permissionMode;
       const orchestrationModeChanging =
@@ -1408,7 +1420,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         }
       }
       if (
-        requestedCollaborationMode === "agent" &&
+        requestedCollaborationMode !== undefined &&
+        requestedCollaborationMode !== "plan" &&
         current.collaborationMode === "plan" &&
         session.runtimeEventStore
       ) {
@@ -1592,6 +1605,17 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       revision: result.revision,
     });
     return toJsonValue(result);
+  }
+
+  private async querySessionResearch(
+    params: RuntimeRequest<"session.research.query">["params"],
+  ): Promise<JsonValue> {
+    const canonical = await this.requireTrustedSession(params.workspacePath, params.sessionId);
+    const store = new SqliteDeepResearchStore({
+      storageRoot: resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.root,
+    });
+    const run = store.read(params.sessionId);
+    return toJsonValue({ run: run ? projectDeepResearchProgress(run) : null });
   }
 
   private async querySessionArtifacts(
@@ -2182,6 +2206,18 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       });
     }
 
+    const admittedSettings = await this.getRuntimeSessionSettings(params.workspacePath, sessionId);
+    const collaboration = (admittedSettings as { settings?: { collaborationMode?: string } })
+      .settings?.collaborationMode;
+    if (
+      collaboration === "research" &&
+      (params.input.kind !== "text" || params.input.orchestrationMode)
+    ) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        "研究模式不能激活 Skill、子代理或 Graph/Swarm；请使用普通研究消息。",
+      );
+    }
     if (params.expectedRunId !== undefined && activeRun?.["runId"] !== params.expectedRunId) {
       throw new RuntimeProtocolError(
         RUNTIME_ERROR_CODES.CONFLICT,
@@ -3877,9 +3913,10 @@ function validateRequestedSessionSettings(params: {
   if (
     params.collaborationMode !== undefined &&
     params.collaborationMode !== "agent" &&
-    params.collaborationMode !== "plan"
+    params.collaborationMode !== "plan" &&
+    params.collaborationMode !== "research"
   ) {
-    throw invalidSessionSetting("collaborationMode 必须是 agent 或 plan");
+    throw invalidSessionSetting("collaborationMode 必须是 agent、plan 或 research");
   }
   if (
     params.orchestrationMode !== undefined &&

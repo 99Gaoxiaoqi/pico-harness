@@ -1142,7 +1142,7 @@ function filterForkSettings(
 }
 
 interface ForkInteractionSettings {
-  readonly collaborationMode: "agent" | "plan";
+  readonly collaborationMode: "agent" | "plan" | "research";
   readonly permissionMode: PersistedPermissionMode;
 }
 

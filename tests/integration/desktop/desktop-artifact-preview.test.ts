@@ -190,7 +190,7 @@ test(
   </script>`),
       ),
     );
-    const fixture = new URL("../../fixtures/artifact-preview-electron.cjs", import.meta.url);
+    const fixture = new URL("../../fixtures/artifact-preview-electron.mjs", import.meta.url);
     const output = await new Promise<string>((resolve, reject) => {
       const child = spawn(process.env.PICO_TEST_ELECTRON!, [fixture.pathname, root], {
         env: { ...process.env, ELECTRON_RUN_AS_NODE: "" },

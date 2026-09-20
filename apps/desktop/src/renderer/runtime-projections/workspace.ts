@@ -17,7 +17,9 @@ export function parseSessionSettings(value: unknown): SessionSettingsView | unde
   const modelRouteId = stringValue(settings.modelRouteId);
   const model = stringValue(settings.model);
   const collaborationMode =
-    settings.collaborationMode === "plan" || settings.collaborationMode === "agent"
+    settings.collaborationMode === "plan" ||
+    settings.collaborationMode === "agent" ||
+    settings.collaborationMode === "research"
       ? settings.collaborationMode
       : undefined;
   const permissionMode =
