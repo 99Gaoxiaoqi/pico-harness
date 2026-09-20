@@ -51,8 +51,10 @@ Module._load = function(name, ...args) {
   return originalLoad.call(this, name, ...args);
 };
 require("./main.cjs");
+setImmediate(() => {
 assert.equal(quitCalled, true, "shared imports must load before the single-instance exit");
 console.log("PASS: Desktop main bundle reached Electron startup");
+});
 `,
   );
   const result = spawnSync(process.execPath, [fixture], {
@@ -62,4 +64,60 @@ console.log("PASS: Desktop main bundle reached Electron startup");
   });
   assert.equal(result.status, 0, `${result.error ?? ""}\n${result.stderr}`);
   assert.match(result.stdout, /PASS: Desktop main bundle reached Electron startup/);
+
+  const installerFixture = join(scratch, "installer-event.cjs");
+  await writeFile(
+    installerFixture,
+    `
+const assert = require("node:assert/strict");
+const Module = require("node:module");
+const { EventEmitter } = require("node:events");
+const path = require("node:path");
+const event = process.argv[2];
+Object.defineProperty(process, "platform", { value: "win32" });
+process.argv = [process.execPath, event];
+let exitCode;
+const calls = [];
+const originalLoad = Module._load;
+Module._load = function(name, ...args) {
+  if (name === "electron") return { app: {
+    quit: () => { exitCode = 0; },
+    exit: code => { exitCode = code; },
+    getPath: () => { throw new Error("installer callback entered normal startup"); },
+  } };
+  if (name === "node:child_process") return { spawn: (command, argv, options) => {
+    calls.push({command, argv, options});
+    const child = new EventEmitter();
+    process.nextTick(() => child.emit("close", 0));
+    return child;
+  } };
+  if (name === "fs-native-extensions") throw new Error("installer loaded runtime dependencies");
+  return originalLoad.call(this, name, ...args);
+};
+require("./main.cjs");
+setImmediate(() => {
+  assert.equal(exitCode, 0);
+  if (event === "--squirrel-obsolete") assert.deepEqual(calls, []);
+  else assert.deepEqual(calls, [{
+    command: path.resolve(path.dirname(process.execPath), "..", "Update.exe"),
+    argv: [event === "--squirrel-uninstall" ? "--removeShortcut" : "--createShortcut", path.basename(process.execPath)],
+    options: {windowsHide: true},
+  }]);
+  console.log("PASS: installer callback exited before runtime startup");
+});
+`,
+  );
+  for (const event of [
+    "--squirrel-install",
+    "--squirrel-updated",
+    "--squirrel-uninstall",
+    "--squirrel-obsolete",
+  ]) {
+    const installer = spawnSync(process.execPath, [installerFixture, event], {
+      encoding: "utf8",
+      timeout: 15_000,
+    });
+    assert.equal(installer.status, 0, `${event}: ${installer.error ?? ""}\n${installer.stderr}`);
+    assert.match(installer.stdout, /PASS: installer callback exited before runtime startup/);
+  }
 });

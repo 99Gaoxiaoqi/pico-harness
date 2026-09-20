@@ -17,6 +17,7 @@ export default defineConfig({
       // package-relative `require.addon(".")` lookup to the Vite output folder.
       external: ["electron", "fs-native-extensions"],
       output: {
+        codeSplitting: true,
         banner: `globalThis.${bundledModuleUrlGlobal} = require("node:url").pathToFileURL(__filename).href;`,
         entryFileNames: "main.cjs",
         format: "cjs",
