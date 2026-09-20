@@ -112,7 +112,10 @@ const schemas = {
     },
     ["round", "stage", "summary"],
   ),
-  status: object({}),
+  status: object({
+    artifact_offset: { type: "integer", minimum: 0 },
+    artifact_limit: { type: "integer", minimum: 1, maximum: 50 },
+  }),
   complete: object(
     {
       report_artifact_id: text,
@@ -139,7 +142,7 @@ const descriptions: Record<keyof typeof schemas, string> = {
   checkpoint:
     "Persist a research round with resume artifacts, open questions, next steps and existing task references.",
   status:
-    "Read durable research progress after interruption or restart. Read artifact bodies separately when needed.",
+    "Read durable research progress after interruption or restart. To recover older artifact IDs, pass artifact_offset=0 and optional artifact_limit (1..50); follow artifactPage.nextOffset until absent. Pagination returns a bounded artifact index with complete source IDs instead of progress. Read bodies with read_artifact.",
   complete:
     "Complete research only after four checklist items settle and all five sections are completed. Requires saved report and handoff plus actionable tasks, at least one recommended issue or pull request, and verification commands.",
 };
@@ -184,6 +187,54 @@ export function createDeepResearchTools(options: DeepResearchToolOptions): reado
         switch (operation) {
           case "status": {
             const current = store.read(sessionId);
+            if (args["artifactOffset"] !== undefined || args["artifactLimit"] !== undefined) {
+              const offset = (args["artifactOffset"] as number | undefined) ?? 0;
+              const limit = (args["artifactLimit"] as number | undefined) ?? 20;
+              const candidates = current?.artifacts ?? [];
+              // Full source IDs are needed to recover evidence relationships. Large summaries
+              // belong to the artifact body; the index deliberately excludes them.
+              const artifacts: Array<
+                Pick<
+                  DeepResearchRun["artifacts"][number],
+                  | "artifactId"
+                  | "role"
+                  | "name"
+                  | "createdAt"
+                  | "sourceArtifactIds"
+                  | "reportSectionKey"
+                  | "reportSectionStatus"
+                >
+              > = [];
+              let bytes = 0;
+              for (const artifact of candidates.slice(offset, offset + limit)) {
+                const entry = {
+                  artifactId: artifact.artifactId,
+                  role: artifact.role,
+                  name: artifact.name,
+                  createdAt: artifact.createdAt,
+                  sourceArtifactIds: artifact.sourceArtifactIds,
+                  ...(artifact.reportSectionKey
+                    ? { reportSectionKey: artifact.reportSectionKey }
+                    : {}),
+                  ...(artifact.reportSectionStatus
+                    ? { reportSectionStatus: artifact.reportSectionStatus }
+                    : {}),
+                };
+                const entryBytes = Buffer.byteLength(JSON.stringify(entry)) + 1;
+                if (bytes + entryBytes > 32 * 1024) break;
+                artifacts.push(entry);
+                bytes += entryBytes;
+              }
+              const end = offset + artifacts.length;
+              return JSON.stringify({
+                artifactPage: {
+                  artifacts,
+                  offset,
+                  totalArtifacts: candidates.length,
+                  ...(end < candidates.length ? { nextOffset: end } : {}),
+                },
+              });
+            }
             return JSON.stringify({ run: current ? projectDeepResearchProgress(current) : null });
           }
           case "read_artifact":
