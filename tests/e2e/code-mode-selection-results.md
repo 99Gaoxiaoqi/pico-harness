@@ -49,3 +49,20 @@ JSON 报告包含每次试验的选择、真实读取记录、脚本与执行结
 - 包构建与 `tsc --noEmit`。
 - 两个变更 TypeScript 文件的 ESLint、Prettier 和 `git diff --check`。
 - `code-mode.test.ts`、`code-mode-runtime.test.ts`、`code-mode-hook-boundary.test.ts`、`exclusive-tool-step.test.ts` 共 13 项集成测试。
+
+## 统一实验层复验（2026-09-21）
+
+接入 `scripts/eval/experiment.ts` 后，保留原有提示、任务、5 次重复和通过门槛，在用户默认 `opencode-go/glm-5.2` 再运行 30 次真实模型采样，通过原有验收。以下为独立新一轮，不覆盖上面的历史结果。
+
+| 分组            | 计划/完成/有响应 | 触发  | 正确  | 含执行错误的样本 | 累计耗时 ms | 模型报告 token |
+| --------------- | ---------------- | ----- | ----- | ---------------- | ----------- | -------------- |
+| baseline 批量   | 10/10/10         | 2/10  | 10/10 | 1/10             | 96864       | 28485          |
+| baseline 单文件 | 5/5/5            | 0/5   | 5/5   | 0/5              | 19116       | 6632           |
+| guided 批量     | 10/10/10         | 10/10 | 10/10 | 0/10             | 61822       | 26791          |
+| guided 单文件   | 5/5/5            | 0/5   | 5/5   | 0/5              | 20268       | 9298           |
+
+baseline 第 3 轮订单场景发生一次 `exec` 错误，随后正确完成；该样本同时计入 success 和 error，未丢弃或重抽。整轮约 198 秒，费用因没有可靠计量为 null。这些 token/耗时仅为本轮实测，不足以推断普遍节省比例，仍受上述小样本和非盲测限制。
+
+相同 spec/config 和 run 目录再执行一次通过，约 0.68 秒结束。前后 30 个 attempt 文件 SHA256 完全一致，无新增样本；这次仅验证 resume，不作为第二轮模型采样。确定性集成另验证了部分矩阵续跑、失败样本保留、配置不匹配拒绝、并发锁和异常后的恢复。包构建、root `tsc --noEmit`、相关 ESLint、Prettier 和 diff 检查通过。
+
+续跑使用 `CODE_MODE_SELECTION_RUN_DIR`，完整用法见 [统一实验记录](../../scripts/eval/README.md)。默认不设置目录仍产生独立采样，避免混入旧轮结果。
