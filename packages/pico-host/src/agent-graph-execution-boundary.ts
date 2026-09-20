@@ -19,7 +19,7 @@ export interface AgentGraphOperatorSessionSettings {
   readonly provider: unknown;
   readonly model: string;
   readonly modelRouteId: string;
-  readonly collaborationMode: "agent" | "plan";
+  readonly collaborationMode: "agent" | "plan" | "research";
   readonly permissionMode: "ask" | "auto" | "full-access";
   readonly orchestrationMode: "default" | "graph" | "swarm";
   readonly thinkingEffort: string;

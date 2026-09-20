@@ -1131,7 +1131,10 @@ function normalizeRuntimeUserDefaults(value: unknown): PicoUserConfigDefaults {
       "defaults.modelRouteId 必须使用 providerID/modelID 格式",
     );
   }
-  if (collaborationMode !== undefined && !isOneOf(collaborationMode, ["agent", "plan"] as const)) {
+  if (
+    collaborationMode !== undefined &&
+    !isOneOf(collaborationMode, ["agent", "plan", "research"] as const)
+  ) {
     throw new RuntimeProtocolError(
       RUNTIME_ERROR_CODES.INVALID_PARAMS,
       "defaults.collaborationMode 必须是 agent 或 plan",
@@ -1167,7 +1170,9 @@ function normalizeRuntimeUserDefaults(value: unknown): PicoUserConfigDefaults {
   return {
     ...(webSearch !== undefined ? { webSearch } : {}),
     ...(typeof modelRouteId === "string" ? { modelRouteId: modelRouteId.trim() } : {}),
-    ...(isOneOf(collaborationMode, ["agent", "plan"] as const) ? { collaborationMode } : {}),
+    ...(isOneOf(collaborationMode, ["agent", "plan", "research"] as const)
+      ? { collaborationMode }
+      : {}),
     ...(isOneOf(orchestrationMode, ["default", "graph", "swarm"] as const)
       ? { orchestrationMode }
       : {}),

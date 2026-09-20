@@ -1,10 +1,13 @@
-const { app, BrowserWindow } = require("electron");
-const assert = require("node:assert/strict");
-const { readFileSync, writeFileSync } = require("node:fs");
-const { join } = require("node:path");
-const { createServer } = require("node:http");
+import { app, BrowserWindow } from "electron";
+import assert from "node:assert/strict";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { createServer } from "node:http";
 const root = process.argv[2];
-const { installArtifactPreviewSecurity } = require(join(root, "security.cjs"));
+const { installArtifactPreviewSecurity } = await import(
+  pathToFileURL(join(root, "security.cjs")).href
+);
 let networkRequests = 0;
 const server = createServer((_request, response) => {
   networkRequests++;

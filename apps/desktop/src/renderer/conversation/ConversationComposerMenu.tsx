@@ -1,4 +1,4 @@
-import { Check, ListTodo, Plus, Sparkles, Workflow, Network } from "lucide-react";
+import { Check, ListTodo, Plus, Sparkles, Workflow, Network, Search } from "lucide-react";
 import {
   useEffect,
   useId,
@@ -11,6 +11,8 @@ import {
 
 export interface ConversationComposerModes {
   readonly planActive: boolean;
+  readonly researchActive?: boolean;
+  readonly onResearchChange?: (active: boolean) => void | Promise<void>;
   readonly graphActive: boolean;
   readonly swarmActive?: boolean;
   readonly onSwarmChange?: (active: boolean) => void | Promise<void>;
@@ -39,6 +41,13 @@ export function ConversationComposerMenu({
   const [pending, setPending] = useState(false);
   const locked = disabled || modes?.disabled || pending;
   const options = [
+    {
+      id: "research",
+      label: "深度研究",
+      Icon: Search,
+      active: modes?.researchActive,
+      change: modes?.onResearchChange,
+    },
     {
       id: "plan",
       label: "Plan",
@@ -185,16 +194,22 @@ export function ConversationComposerMenu({
               <button
                 key={option.id}
                 type="button"
-                role={option.id === "plan" ? "menuitemcheckbox" : "menuitemradio"}
+                role={
+                  option.id === "plan" || option.id === "research"
+                    ? "menuitemcheckbox"
+                    : "menuitemradio"
+                }
                 aria-checked={option.active}
                 disabled={locked}
                 tabIndex={-1}
                 title={
-                  option.id === "plan"
-                    ? "先规划，确认计划后执行"
-                    : option.id === "swarm"
-                      ? "并行处理独立任务，完成或遇到问题后统一汇总"
-                      : "按任务依赖进行 Graph 编排"
+                  option.id === "research"
+                    ? "只读研究，保存证据、检查点和报告"
+                    : option.id === "plan"
+                      ? "先规划，确认计划后执行"
+                      : option.id === "swarm"
+                        ? "并行处理独立任务，完成或遇到问题后统一汇总"
+                        : "按任务依赖进行 Graph 编排"
                 }
                 onClick={() => void toggle(option)}
               >

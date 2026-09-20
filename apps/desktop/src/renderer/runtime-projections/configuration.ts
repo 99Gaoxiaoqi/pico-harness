@@ -88,7 +88,11 @@ export function parseUserDefaults(value: unknown): UserDefaultsView {
     ...(stringValue(defaults.modelRouteId)
       ? { modelRouteId: stringValue(defaults.modelRouteId) }
       : {}),
-    ...(collaborationMode === "agent" || collaborationMode === "plan" ? { collaborationMode } : {}),
+    ...(collaborationMode === "agent" ||
+    collaborationMode === "plan" ||
+    collaborationMode === "research"
+      ? { collaborationMode }
+      : {}),
     ...(orchestrationMode === "default" ||
     orchestrationMode === "graph" ||
     orchestrationMode === "swarm"

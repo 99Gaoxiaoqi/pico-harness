@@ -25,6 +25,7 @@ export interface PromptComposerOptions {
   skillLoader?: SkillLoader;
   onInstructionsLoaded?: (paths: readonly string[]) => void | Promise<void>;
   isolatedHeadless?: boolean;
+  researchMode?: boolean;
   picoHome?: string;
   graphToolsAvailable?: boolean;
   swarmMode?: boolean;

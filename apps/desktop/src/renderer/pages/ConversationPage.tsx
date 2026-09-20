@@ -1,3 +1,4 @@
+import { DeepResearchPanel } from "../conversation/DeepResearchPanel.js";
 import {
   subagentMetadata,
   subagentParent,
@@ -277,6 +278,9 @@ export function ConversationPage() {
     },
     [workspacePath],
   );
+  const researchActive =
+    (sessionId ? conversation?.settings?.collaborationMode : newTaskSettings.collaborationMode) ===
+    "research";
   const composerModelRouteId = conversation?.settings?.modelRouteId ?? newTaskSettings.modelRouteId;
   const composerProvider = data.providerConfig.providers.find((provider) =>
     composerModelRouteId?.startsWith(`${provider.id}/`),
@@ -518,7 +522,46 @@ export function ConversationPage() {
     await actions.updateSessionSettings(sessionRef, { collaborationMode });
   };
 
+  const changeResearchMode = async (active: boolean) => {
+    const patch = {
+      collaborationMode: active ? ("research" as const) : ("agent" as const),
+      orchestrationMode: "default" as const,
+    };
+    setActivation(undefined);
+    if (!sessionRef) {
+      updateNewTaskSettings(patch);
+      return;
+    }
+    await actions.updateSessionSettings(sessionRef, patch);
+  };
+
+  const implementResearch = async (prompt: string) => {
+    const result = await actions.sendMessage({
+      workspacePath,
+      text: prompt,
+      initialSettings: {
+        ...newTaskSettings,
+        collaborationMode: "agent",
+        orchestrationMode: "default",
+        ...(conversation?.settings?.modelRouteId
+          ? { modelRouteId: conversation.settings.modelRouteId }
+          : {}),
+      },
+    });
+    if (!result?.sessionId) throw new Error("实施任务未创建，请重试。");
+    navigate(
+      sessionHref({
+        workspacePath: result.workspacePath ?? workspacePath,
+        sessionId: result.sessionId,
+      }),
+    );
+  };
+
   const changeGraphMode = async (active: boolean, mode: "graph" | "swarm" = "graph") => {
+    if (active && researchActive) {
+      actions.showMessage?.("研究模式不启动 Graph/Swarm。请完成研究后新建实施任务。");
+      return;
+    }
     const orchestrationMode = active ? mode : "default";
     if (!sessionRef) {
       updateNewTaskSettings({ orchestrationMode });
@@ -1005,6 +1048,18 @@ export function ConversationPage() {
         }
         composer={
           <>
+            {researchActive && !preview && (
+              <DeepResearchPanel
+                key={conversationKey ?? workspacePath}
+                workspacePath={workspacePath}
+                {...(sessionId ? { sessionId } : {})}
+                refreshKey={`${activeRun?.id ?? "idle"}:${activeRun?.status ?? "idle"}:${conversation?.items.length ?? 0}`}
+                busy={Boolean(activeRun) || Boolean(busy)}
+                onOpenArtifacts={() => openWorkbarTab("files", "right")}
+                onImplement={implementResearch}
+                onStarter={handleDraftChange}
+              />
+            )}
             {sessionRef && !graphParentId && !preview && (
               <ConversationGraphBoard
                 key={conversationKey}
@@ -1100,10 +1155,16 @@ export function ConversationPage() {
                   onPause={activeRun ? () => void actions.pauseRun(activeRun.id) : undefined}
                   onResume={activeRun ? () => void actions.resumeRun(activeRun.id) : undefined}
                   onStop={activeRun ? () => void actions.stopRun(activeRun.id) : undefined}
-                  onAttach={composerStatus === "idle" && workspaceReady ? openCatalog : undefined}
+                  onAttach={
+                    !researchActive && composerStatus === "idle" && workspaceReady
+                      ? openCatalog
+                      : undefined
+                  }
                   modes={
                     composerReady && (!sessionRef || conversation?.settings)
                       ? {
+                          researchActive,
+                          onResearchChange: changeResearchMode,
                           planActive:
                             (sessionRef
                               ? conversation?.settings?.collaborationMode

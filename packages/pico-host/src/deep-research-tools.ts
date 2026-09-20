@@ -173,7 +173,8 @@ export function createDeepResearchTools(options: DeepResearchToolOptions): reado
       }),
       readOnly: operation === "status" || operation === "read_artifact",
       permissionCategory: "read",
-      executionSemantics: "exclusive_step",
+      // Mutations synchronously commit one SQLite transaction before yielding; independent calls may share a step.
+      executionSemantics: "parallel",
       toolset: "deep-research",
       fileSideEffects: NO_FILE_SIDE_EFFECTS,
       execute: async (raw, context) => {

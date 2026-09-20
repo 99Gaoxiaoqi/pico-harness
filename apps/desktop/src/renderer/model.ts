@@ -99,7 +99,7 @@ export interface SessionContextView {
 export interface SessionSettingsView {
   readonly modelRouteId: string;
   readonly model: string;
-  readonly collaborationMode: "agent" | "plan";
+  readonly collaborationMode: "agent" | "plan" | "research";
   readonly orchestrationMode: "default" | "graph" | "swarm";
   readonly permissionMode: "ask" | "auto" | "full-access";
   readonly thinkingEffort: string;

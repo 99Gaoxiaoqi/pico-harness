@@ -66,7 +66,7 @@ export interface RewindStorageOperation extends StorageOperationBase {
     /** TUI 崩溃恢复 handoff 使用同一 canonical 用户输入。 */
     userPrompt: string;
     transcriptIndex?: number;
-    collaborationMode?: "agent" | "plan";
+    collaborationMode?: "agent" | "plan" | "research";
     permissionMode?: "ask" | "auto" | "full-access";
   };
   files: Array<{
@@ -88,7 +88,7 @@ export interface ForkStorageOperation extends StorageOperationBase {
   };
   targetSessionId: string;
   /** 恢复 prepared 操作时不能猜测的目标协作与权限轴。 */
-  targetCollaborationMode: "agent" | "plan";
+  targetCollaborationMode: "agent" | "plan" | "research";
   targetPermissionMode: "ask" | "auto" | "full-access";
   /** Durable disposition: cleanup_only can never be retried forward. */
   recoveryPolicy?: "forward" | "cleanup_only";
@@ -734,8 +734,10 @@ function isRewindMode(value: unknown): value is RewindStorageOperation["mode"] {
   return value === "code" || value === "conversation" || value === "both";
 }
 
-function normalizeCollaborationMode(value: unknown): "agent" | "plan" | undefined {
-  return value === undefined || value === "agent" || value === "plan" ? value : undefined;
+function normalizeCollaborationMode(value: unknown): "agent" | "plan" | "research" | undefined {
+  return value === undefined || value === "agent" || value === "plan" || value === "research"
+    ? value
+    : undefined;
 }
 
 function normalizePermissionMode(value: unknown): "ask" | "auto" | "full-access" | undefined {

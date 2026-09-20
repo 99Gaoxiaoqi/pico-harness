@@ -38,7 +38,7 @@ const USER_CONFIG_TEMPORARY_NAME =
 
 export const EMPTY_USER_CONFIG_REVISION = sha256("");
 
-export type PicoCollaborationMode = "agent" | "plan";
+export type PicoCollaborationMode = "agent" | "plan" | "research";
 export type PicoPermissionMode = "ask" | "auto" | "full-access";
 export type PicoOrchestrationMode = "default" | "graph" | "swarm";
 
@@ -576,9 +576,10 @@ function parseDefaults(value: unknown, configPath: string): PicoUserConfigDefaul
   if (
     collaborationMode !== undefined &&
     collaborationMode !== "agent" &&
-    collaborationMode !== "plan"
+    collaborationMode !== "plan" &&
+    collaborationMode !== "research"
   ) {
-    throw configError(configPath, "defaults.collaborationMode", "must be agent or plan");
+    throw configError(configPath, "defaults.collaborationMode", "must be agent, plan or research");
   }
   const permissionMode = value["permissionMode"];
   if (

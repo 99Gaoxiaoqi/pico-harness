@@ -321,7 +321,7 @@ export interface RuntimeActions {
     ref: WorkspaceSessionRef,
     patch: Readonly<{
       modelRouteId?: string;
-      collaborationMode?: "agent" | "plan";
+      collaborationMode?: "agent" | "plan" | "research";
       orchestrationMode?: "default" | "graph" | "swarm";
       permissionMode?: "ask" | "auto" | "full-access";
       thinkingEffort?: string;

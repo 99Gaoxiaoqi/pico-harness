@@ -2,6 +2,7 @@ import type { JsonValue, RuntimeRequest } from "@pico/protocol";
 import type { DesktopRequestHandlers } from "./desktop-request-router.js";
 
 type WorkbarMethod =
+  | "session.research.query"
   | "session.tasks.query"
   | "session.tasks.command"
   | "session.artifacts.query"
@@ -21,6 +22,7 @@ export function createDesktopWorkbarRequestHandlers(
   context: DesktopWorkbarRequestContext,
 ): Pick<DesktopRequestHandlers, WorkbarMethod> {
   return {
+    "session.research.query": (request) => context["session.research.query"](request.params),
     "session.tasks.query": (request) => context["session.tasks.query"](request.params),
     "session.tasks.command": (request) => context["session.tasks.command"](request.params),
     "session.artifacts.query": (request) => context["session.artifacts.query"](request.params),

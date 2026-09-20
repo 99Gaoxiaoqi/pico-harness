@@ -352,11 +352,7 @@ export function setSessionCollaborationMode(
   settings: SessionSettings,
   mode: CollaborationMode,
 ): SessionSettingResult {
-  if (mode === "plan") {
-    settings.collaborationMode = "plan";
-  } else {
-    settings.collaborationMode = "agent";
-  }
+  settings.collaborationMode = mode;
   persistSessionSettings(settings);
   return { ok: true, message: `Collaboration mode set to ${mode}` };
 }
