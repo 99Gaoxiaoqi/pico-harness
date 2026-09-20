@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { globalSessionManager } from "@pico/pico-host/session";
 import { cp, mkdir, mkdtemp, readFile, rename, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -81,6 +82,7 @@ test(
     context.after(async () => {
       await desktop.close();
       await runtime.close();
+      await globalSessionManager.clearAndDrain();
       await rm(root, { recursive: true, force: true });
     });
     const warnings: unknown[][] = [];

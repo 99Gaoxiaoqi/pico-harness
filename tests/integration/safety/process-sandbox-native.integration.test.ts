@@ -106,6 +106,28 @@ test(
 );
 
 test(
+  "Windows sandbox blocks external files through a directory junction without extra host privileges",
+  { skip: process.platform !== "win32" },
+  async (context) => {
+    const fixture = await fixtureRoot(context, "pico-native-junction-");
+    const external = join(fixture.root, "external");
+    const alias = join(fixture.workspace, "outside-link");
+    await mkdir(external);
+    await writeFile(join(external, "secret.txt"), "junction-secret");
+    await symlink(external, alias, "junction");
+    for (const directory of [external, alias]) {
+      const result = await runNode(
+        fixture,
+        "workspace-write",
+        `process.stdout.write(require("node:fs").readFileSync(${JSON.stringify(join(directory, "secret.txt"))},"utf8"))`,
+      );
+      assert.notEqual(result.code, 0);
+      assert.doesNotMatch(result.stdout, /junction-secret/u);
+    }
+  },
+);
+
+test(
   "native sandbox hides host HOME and credential directories",
   { skip: !nativeAvailable },
   async (context) => {

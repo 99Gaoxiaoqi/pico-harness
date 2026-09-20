@@ -36,7 +36,8 @@ test("browser URL store atomically restores the last HTTP(S) URL per Session", a
       { sessionId: "session-b", generationFloor: 0, url: "http://example.com/path#two" },
     ],
   });
-  assert.equal((await stat(first.filePath)).mode & 0o777, 0o600);
+  // POSIX mode bits do not represent Windows DACLs; native ACL checks live in the Windows suite.
+  if (process.platform !== "win32") assert.equal((await stat(first.filePath)).mode & 0o777, 0o600);
   assert.deepEqual(
     (await readdir(root)).filter((entry) => entry.endsWith(".tmp")),
     [],

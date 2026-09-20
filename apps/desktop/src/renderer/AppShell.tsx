@@ -238,7 +238,9 @@ export function AppShell() {
           >
             <Plus aria-hidden="true" />
             <span>新任务</span>
-            <kbd className="sidebar-shortcut">⌘ N</kbd>
+            <kbd className="sidebar-shortcut">
+              {navigator.platform.startsWith("Mac") ? "⌘ N" : "Ctrl+N"}
+            </kbd>
           </Link>
           <div className="sidebar__body">
             <Link

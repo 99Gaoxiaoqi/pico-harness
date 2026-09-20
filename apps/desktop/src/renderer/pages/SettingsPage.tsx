@@ -312,7 +312,7 @@ export function SystemSettingsPage() {
           </SettingRow>
           <SettingRow
             title="权限与审批"
-            detail="实际权限由每个会话的权限模式和 macOS 系统授权共同决定"
+            detail="实际权限由每个会话的权限模式和操作系统授权共同决定"
           >
             <span className="health-status-text">由会话控制</span>
           </SettingRow>

@@ -142,7 +142,7 @@ import { DesktopSubagentSettingsService } from "./product-desktop-subagent-setti
 import { listSubagentConnections } from "./subagent-connections.js";
 import { createDesktopCatalogRequestHandlers } from "./desktop-catalog-request-handlers.js";
 import { createDesktopAutomationRequestHandlers } from "./product-desktop-automation-request-handlers.js";
-import { canonicalizeWorkspacePath, resolveGitBranch } from "./workspace-registry.js";
+import { resolveGitBranch } from "./workspace-registry.js";
 import { WorkspaceStorageRepairService } from "./workspace-storage-repair.js";
 
 function unavailableWorkspaceStatus(workspacePath: string): WorkspaceStatusResult {
@@ -795,7 +795,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       readonly runStatus?: RuntimeRunRecord["status"];
     }[];
   }> {
-    const canonical = await canonicalizeWorkspacePath(workspacePath);
+    const canonical = await this.options.runtimeService.canonicalizeWorkspacePath(workspacePath);
     await this.options.reconcilePlanControl?.(canonical, sessionId);
     // The subscription reads a fixed durable watermark. Pending desktop entries
     // publish their own advance when committed; waiting for the writer queue here
@@ -1066,7 +1066,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   }
 
   private async listSessions(workspacePath: string, includeArchived = false): Promise<JsonValue> {
-    const canonical = await canonicalizeWorkspacePath(workspacePath);
+    const canonical = await this.options.runtimeService.canonicalizeWorkspacePath(workspacePath);
     const sideChats = this.sideChatAuthority(canonical);
     await sideChats.recover();
     const hiddenSessionIds = new Set(sideChats.list().map((lease) => lease.targetSessionId));
@@ -1091,7 +1091,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   }
 
   private async getSession(workspacePath: string, sessionId: string): Promise<JsonValue> {
-    const canonical = await canonicalizeWorkspacePath(workspacePath);
+    const canonical = await this.options.runtimeService.canonicalizeWorkspacePath(workspacePath);
     return { session: await this.requireSession(canonical, sessionId) };
   }
 
@@ -1101,7 +1101,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     sessionId = createCliSessionId(),
     modelRouteId?: string,
   ): Promise<JsonValue> {
-    const canonical = await canonicalizeWorkspacePath(workspacePath);
+    const canonical = await this.options.runtimeService.canonicalizeWorkspacePath(workspacePath);
     const session = new Session(sessionId, canonical, {
       persistence: true,
       picoHome: this.picoHome,
@@ -1131,7 +1131,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     sessionId: string,
     archived: boolean,
   ): Promise<JsonValue> {
-    const canonical = await canonicalizeWorkspacePath(workspacePath);
+    const canonical = await this.options.runtimeService.canonicalizeWorkspacePath(workspacePath);
     await this.requireSession(canonical, sessionId);
     await sessionMemoryLane.run(
       this.memoryLaneKey(canonical, sessionId),
@@ -1156,7 +1156,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     sessionId: string,
     pinned: boolean,
   ): Promise<JsonValue> {
-    const canonical = await canonicalizeWorkspacePath(workspacePath);
+    const canonical = await this.options.runtimeService.canonicalizeWorkspacePath(workspacePath);
     await this.requireSession(canonical, sessionId);
     await this.withWorkspaceSessionStore(canonical, (store) =>
       store.setSessionPinned(sessionId, pinned, this.now),
@@ -1325,7 +1325,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private async closeSideChat(
     params: RuntimeRequest<"sideChat.close">["params"],
   ): Promise<JsonValue> {
-    const canonical = await canonicalizeWorkspacePath(params.workspacePath);
+    const canonical = await this.options.runtimeService.canonicalizeWorkspacePath(
+      params.workspacePath,
+    );
     this.browserAgentBroker.invalidateSession(params.sessionId);
     await this.sideChatAuthority(canonical).cleanup(params.sessionId);
     return { cleanupScheduled: true };
@@ -2021,7 +2023,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     readonly expectedRunId?: string;
     readonly idempotencyKey: string;
   }): Promise<JsonValue> {
-    const canonical = await canonicalizeWorkspacePath(params.workspacePath);
+    const canonical = await this.options.runtimeService.canonicalizeWorkspacePath(
+      params.workspacePath,
+    );
     const input = normalizeRuntimeUserInput(params.input);
     const idempotencyKey = requireText(params.idempotencyKey, "idempotencyKey");
     const requestFingerprint = firstSendRequestFingerprint({ ...params, input });
@@ -2270,7 +2274,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     );
     const sessionId = typeof result["sessionId"] === "string" ? result["sessionId"] : undefined;
     if (sessionId) {
-      const canonical = await canonicalizeWorkspacePath(workspacePath);
+      const canonical = await this.options.runtimeService.canonicalizeWorkspacePath(workspacePath);
       await this.conversationStateStore.clearQueued(canonical, sessionId);
     }
     return result;
@@ -2473,7 +2477,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     rootSessionId: string,
     runId: string,
   ): Promise<boolean> {
-    const canonical = await canonicalizeWorkspacePath(workspacePath);
+    const canonical = await this.options.runtimeService.canonicalizeWorkspacePath(workspacePath);
     const graphMode = ["graph", "swarm"].includes(
       (await this.readPersistedSessionSettings(canonical, rootSessionId))?.orchestrationMode ??
         "default",

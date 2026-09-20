@@ -5,6 +5,7 @@ import type { ForgeConfig } from "@electron-forge/shared-types";
 import { join } from "node:path";
 
 import { MakerHdiutilDmg } from "./makers/hdiutil-dmg.js";
+import { sandboxPackageHooks } from "./sandbox-package-hooks.js";
 
 const macSigningIdentity = process.env.PICO_MAC_SIGN_IDENTITY;
 const appleId = process.env.PICO_APPLE_ID;
@@ -27,6 +28,10 @@ const macNotarization =
     : undefined;
 
 const config = {
+  hooks: sandboxPackageHooks(
+    join(import.meta.dirname, "../../resources/sandbox"),
+    join(import.meta.dirname, "out"),
+  ),
   packagerConfig: {
     appBundleId: "com.pico.harness",
     appCategoryType: "public.app-category.developer-tools",

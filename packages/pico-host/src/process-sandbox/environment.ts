@@ -126,6 +126,21 @@ export function buildSandboxEnvironment(
   setEnvironmentVariable(env, "TEMP", temp, platform);
   if (platform !== "win32") env.OPENSSL_CONF = "/dev/null";
   if (platform === "win32") {
+    // Policy roots are physical paths. PATH aliases (for example nvm's junction)
+    // may not be traversable inside AppContainer even when their target is allowed.
+    // Use the same physical paths without granting any additional filesystem access.
+    if (env.PATH !== undefined) {
+      env.PATH = env.PATH.split(";")
+        .map((entry) => {
+          if (!isAbsolute(entry)) return entry;
+          try {
+            return realpathSync.native(entry);
+          } catch {
+            return entry;
+          }
+        })
+        .join(";");
+    }
     const localAppData = resolve(home, "AppData", "Local");
     const appData = resolve(home, "AppData", "Roaming");
     setEnvironmentVariable(env, "USERPROFILE", home, platform);

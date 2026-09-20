@@ -126,7 +126,7 @@ test("daemon candidate: LocalRuntimeClient launches the package-owned entrypoint
   const client = new LocalRuntimeClient({
     runtimeHostRootPath: harness.picoHome,
     candidateLauncher: (input) => {
-      const entrypoint = String(input.entrypoint);
+      const entrypoint = String(input.entrypoint).replaceAll("\\", "/");
       assert.match(entrypoint, /pico-host\/dist\/daemon-main\.js$/);
       assert.doesNotMatch(entrypoint, /src\/daemon|dist\/daemon\//);
       launches += 1;
