@@ -43,6 +43,7 @@ const config = {
     ],
     icon: desktopPackageIcon,
     name: "Pico",
+    win32metadata: { CompanyName: "Pico", ProductName: "Pico", FileDescription: "Pico" },
     osxSign: macSigningIdentity ? { identity: macSigningIdentity } : undefined,
     osxNotarize: macNotarization,
   },

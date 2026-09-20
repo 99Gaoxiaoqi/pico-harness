@@ -86,7 +86,7 @@ test("general settings read background mode from main and preserve UI state on s
 
 test("closing the last window exits on macOS unless background mode is enabled", async () => {
   const main = await readFile(
-    new URL("../../../apps/desktop/src/main/index.ts", import.meta.url),
+    new URL("../../../apps/desktop/src/main/application.ts", import.meta.url),
     "utf8",
   );
   const handler = sourceSection(main, 'app.on("window-all-closed"', 'app.on("activate"');
