@@ -1,4 +1,6 @@
 import { CircleAlert, Download, ExternalLink, File, FileText, RefreshCw } from "lucide-react";
+import { ArtifactPreview } from "./ArtifactPreview.js";
+import { artifactPreviewLimit } from "./artifact-preview-model.js";
 
 export interface WorkbarArtifact {
   readonly id: string;
@@ -178,36 +180,42 @@ export function FilesWorkbarPanel({
                 </p>
               ) : !selectedContent ? (
                 <p className="tool-panel__state">内容尚未加载。</p>
-              ) : selectedContent.encoding !== "utf8" ? (
-                <p className="tool-panel__state">二进制文件不能在此预览，请打开或另存后查看。</p>
               ) : (
                 <>
-                  <pre className="tool-panel__artifact-content" tabIndex={0}>
-                    {selectedContent.content}
-                  </pre>
-                  {progress && !progress.complete && (
-                    <div className="tool-panel__chunk-footer">
-                      <div
-                        className="tool-panel__progress"
-                        role="progressbar"
-                        aria-label="文件读取进度"
-                        aria-valuemin={0}
-                        aria-valuemax={100}
-                        aria-valuenow={Math.round(progress.percent)}
-                      >
-                        <span style={{ width: `${progress.percent}%` }} />
+                  <ArtifactPreview
+                    key={selected.id}
+                    artifact={selected}
+                    content={selectedContent}
+                  />
+                  {progress &&
+                    !progress.complete &&
+                    progress.nextOffset < artifactPreviewLimit(selected) && (
+                      <div className="tool-panel__chunk-footer">
+                        <div
+                          className="tool-panel__progress"
+                          role="progressbar"
+                          aria-label="文件读取进度"
+                          aria-valuemin={0}
+                          aria-valuemax={100}
+                          aria-valuenow={Math.round(progress.percent)}
+                        >
+                          <span style={{ width: `${progress.percent}%` }} />
+                        </div>
+                        <button
+                          type="button"
+                          disabled={contentLoading}
+                          onClick={() => onLoadChunk(selected.id, progress.nextOffset)}
+                        >
+                          继续读取
+                        </button>
                       </div>
-                      <button
-                        type="button"
-                        disabled={contentLoading}
-                        onClick={() => onLoadChunk(selected.id, progress.nextOffset)}
-                      >
-                        继续读取
-                      </button>
-                    </div>
-                  )}
+                    )}
                   {(selectedContent.truncated || (progress && !progress.complete)) && (
-                    <p className="tool-panel__notice">当前仅显示已读取的分块内容。</p>
+                    <p className="tool-panel__notice">
+                      {selectedContent.nextOffset >= artifactPreviewLimit(selected)
+                        ? "已达到内嵌预览上限，请另存后查看完整文件。"
+                        : "当前仅显示已读取的分块内容。"}
+                    </p>
                   )}
                 </>
               )}
