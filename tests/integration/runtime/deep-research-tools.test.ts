@@ -269,3 +269,72 @@ test("deep research rejects premature completion, invalid references, request dr
     f.close();
   }
 });
+
+test("research resumes older sources through bounded status pages after tool recreation", async () => {
+  const f = fixture();
+  try {
+    await f.call("start", { objective: "恢复长研究的来源索引" });
+    const savedIds: string[] = [];
+    for (let index = 0; index < 11; index++) {
+      const { run } = await f.call("save_artifact", {
+        role: "source",
+        name: `来源 ${index}`,
+        content: `原始证据 ${index}`,
+        locator: `src/source-${index}.ts`,
+      });
+      savedIds.push(run.artifacts.at(-1)!.artifactId);
+    }
+    await f.call("save_artifact", {
+      role: "evidence_note",
+      name: "引用全部来源",
+      content: "汇总证据",
+      source_artifact_ids: savedIds,
+    });
+    const restarted = createDeepResearchTools({
+      storageRoot: f.storageRoot,
+      sessionId: "research",
+    });
+    const status = restarted.find((tool) => tool.name() === "deep_research_status")!;
+    const defaultStatus = JSON.parse(await status.execute("{}"));
+    assert.equal(defaultStatus.run.artifacts.length, 8);
+    assert.ok(
+      !defaultStatus.run.artifacts.some(
+        (artifact: { artifactId: string }) => artifact.artifactId === savedIds[0],
+      ),
+    );
+    const found: Array<{ artifactId: string; name: string; sourceArtifactIds: string[] }> = [];
+    let offset: number | undefined = 0;
+    while (offset !== undefined) {
+      const response = await status.execute(
+        JSON.stringify({ artifact_offset: offset, artifact_limit: 3 }),
+      );
+      assert.ok(Buffer.byteLength(response) <= 46 * 1024);
+      const page = JSON.parse(response).artifactPage;
+      assert.equal(page.totalArtifacts, 12);
+      assert.ok(page.artifacts.length <= 3);
+      found.push(...page.artifacts);
+      assert.ok(page.nextOffset === undefined || page.nextOffset > offset);
+      offset = page.nextOffset;
+    }
+    assert.equal(found.length, 12);
+    assert.equal(new Set(found.map((artifact) => artifact.artifactId)).size, 12);
+    assert.deepEqual(found.at(-1)!.sourceArtifactIds, savedIds);
+    const first = found.find((artifact) => artifact.name === "来源 0")!;
+    const read = restarted.find((tool) => tool.name() === "deep_research_read_artifact")!;
+    assert.equal(
+      JSON.parse(await read.execute(JSON.stringify({ artifact_id: first.artifactId }))).content,
+      "原始证据 0",
+    );
+    await assert.rejects(status.execute('{"artifact_offset":-1}'), /Invalid/);
+    await assert.rejects(status.execute('{"artifact_limit":51}'), /Invalid/);
+    const other = createDeepResearchTools({ storageRoot: f.storageRoot, sessionId: "other" }).find(
+      (tool) => tool.name() === "deep_research_status",
+    )!;
+    assert.deepEqual(
+      JSON.parse(await other.execute('{"artifact_offset":0}')).artifactPage.artifacts,
+      [],
+    );
+  } finally {
+    f.close();
+  }
+});
