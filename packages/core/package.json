@@ -202,6 +202,10 @@
     "./atomic-memory-runtime-contracts": {
       "types": "./dist/atomic-memory-runtime-contracts.d.ts",
       "import": "./dist/atomic-memory-runtime-contracts.js"
+    },
+    "./deep-research": {
+      "types": "./dist/deep-research.d.ts",
+      "import": "./dist/deep-research.js"
     }
   },
   "files": [

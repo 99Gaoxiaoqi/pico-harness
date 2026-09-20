@@ -44,3 +44,5 @@ export * from "./sqlite/workspace-scopes.js";
 export * from "./sqlite/sqlite-session-workbar-repository.js";
 export * from "./sqlite/atomic-memory-schema.js";
 export * from "./sqlite/sqlite-memory-item-store.js";
+
+export * from "./sqlite/sqlite-deep-research-store.js";
