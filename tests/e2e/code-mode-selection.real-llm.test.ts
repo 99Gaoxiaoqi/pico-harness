@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { runExperiment, summarizeExperiment } from "../../scripts/eval/experiment.js";
 import type { LLMProvider, Message } from "@pico/core";
 import { AgentEngine } from "@pico/pico-host/agent-engine";
 import { createCodeModeTool } from "@pico/pico-host/code-mode-tool";
@@ -90,6 +92,7 @@ interface Trial {
   execFailed: number;
   execEvidence: Array<{ code: string; result: unknown }>;
   elapsedMs: number;
+  tokens: number | null;
   final: string;
   answerFormat: "invalid" | "json" | "json_fence" | "json_fence_with_prose";
   error?: string;
@@ -127,6 +130,7 @@ async function runTrial(
     execFailed: 0,
     execEvidence: [],
     elapsedMs: 0,
+    tokens: null,
     final: "",
     answerFormat: "invalid",
   };
@@ -174,6 +178,8 @@ async function runTrial(
     registry.register(exec);
     const actual = createProvider(model.provider, { ...model.config, sessionId: session.id });
     const responses: Message[] = [];
+    let completeUsage = true;
+    let tokens = 0;
     const provider: LLMProvider = {
       modelName: actual.modelName,
       requestCapabilities: actual.requestCapabilities,
@@ -181,6 +187,13 @@ async function runTrial(
         trial.steps++;
         const response = await actual.generate(messages, tools, { ...options, timeoutMs: 60_000 });
         responses.push(response);
+        completeUsage &&=
+          response.usage !== undefined &&
+          (response.usage.reportedFields === undefined ||
+            (response.usage.reportedFields.includes("prompt") &&
+              response.usage.reportedFields.includes("completion")));
+        if (response.usage) tokens += response.usage.promptTokens + response.usage.completionTokens;
+        trial.tokens = completeUsage ? tokens : null;
         trial.modelResponses++;
         for (const call of response.toolCalls ?? []) {
           trial.toolCalls.push(call.name);
@@ -216,13 +229,21 @@ async function runTrial(
     assert.deepEqual([...new Set(trial.physicalReads)].sort(), Object.keys(scenario.files).sort());
     trial.success = true;
   } catch (error) {
+    if (trial.steps !== trial.modelResponses) trial.tokens = null;
     trial.error = error instanceof Error ? error.message : String(error);
   } finally {
     await session.close();
     await rm(root, { recursive: true, force: true });
     trial.elapsedMs = Date.now() - started;
   }
-  return trial;
+  // Provider errors may contain request context. Never persist the resolved credential.
+  return model.config.apiKey
+    ? (JSON.parse(
+        JSON.stringify(trial, (_key, value: unknown) =>
+          typeof value === "string" ? value.split(model.config.apiKey).join("[REDACTED]") : value,
+        ),
+      ) as Trial)
+    : trial;
 }
 
 const realModelTest = process.env.RUN_LLM_E2E === "1" ? test : test.skip;
@@ -233,42 +254,77 @@ realModelTest(
     const repetitions = Number(process.env.CODE_MODE_SELECTION_REPEATS ?? 5);
     assert.ok(Number.isInteger(repetitions) && repetitions >= 5 && repetitions <= 20);
     const model = await configuredUserDefaultRealModel();
-    const trials: Trial[] = [];
-    context.diagnostic(
-      `model=${model.route.id}; repetitions=${repetitions}; no forced tool choice`,
+    const directory =
+      process.env.CODE_MODE_SELECTION_RUN_DIR ??
+      join("output", "eval", `code-mode-selection-${randomUUID()}`);
+    // Pin fixtures/scoring and the tool implementation without serializing provider credentials.
+    const sources = await Promise.all(
+      [
+        new URL(import.meta.url),
+        new URL("../../packages/pico-host/src/code-mode-tool.ts", import.meta.url),
+      ].map((url) => readFile(fileURLToPath(url))),
     );
-    let unavailableInARow = 0;
-    sampling: for (let repetition = 1; repetition <= repetitions; repetition++) {
-      for (const scenario of scenarios) {
-        // Alternate arm order to reduce order bias; keep provider traffic bounded and serial.
-        const variants: Variant[] =
-          repetition % 2 ? ["baseline", "guided"] : ["guided", "baseline"];
-        for (const variant of variants) {
-          const trial = await runTrial(model, scenario, variant, repetition, context.signal);
-          trials.push(trial);
-          console.info(JSON.stringify(trial));
-          unavailableInARow = trial.modelResponses === 0 ? unavailableInARow + 1 : 0;
-          if (unavailableInARow >= 2) break sampling;
-        }
-      }
-    }
+    const implementation = createHash("sha256").update(Buffer.concat(sources)).digest("hex");
+    context.diagnostic(
+      `model=${model.route.id}; repetitions=${repetitions}; run=${directory}; no forced tool choice`,
+    );
+    const attempts = await runExperiment<Trial>({
+      directory,
+      signal: context.signal,
+      spec: {
+        schemaVersion: 1,
+        id: "code-mode-selection",
+        subjects: ["baseline", "guided"],
+        scenarios: scenarios.map((scenario) => scenario.name),
+        repetitions,
+        config: {
+          implementation,
+          model: model.route.id,
+          provider: model.provider,
+          endpointFingerprint: createHash("sha256").update(model.config.baseURL).digest("hex"),
+          thinkingEffort: model.config.thinkingEffort ?? null,
+          capabilities: JSON.parse(JSON.stringify(model.config.capabilities ?? null)),
+        },
+      },
+      shouldStop: (samples) =>
+        samples.length >= 2 && samples.slice(-2).every((sample) => !sample.measurement.available),
+      execute: async (cell) => {
+        const scenario = scenarios.find((candidate) => candidate.name === cell.scenario)!;
+        const trial = await runTrial(
+          model,
+          scenario,
+          cell.subject as Variant,
+          cell.repetition,
+          context.signal,
+        );
+        return {
+          result: trial,
+          measurement: {
+            available: trial.modelResponses > 0,
+            triggered: trial.triggered,
+            success: trial.success,
+            error: !trial.success || trial.execFailed > 0,
+            elapsedMs: trial.elapsedMs,
+            tokens: trial.tokens,
+            cost: null,
+          },
+        };
+      },
+    });
+    const trials = attempts.map((attempt) => attempt.result);
     const summary = (["baseline", "guided"] as const).flatMap((variant) =>
       [true, false].map((eligible) => {
-        const selected = trials.filter(
-          (trial) => trial.variant === variant && trial.eligible === eligible,
+        const selectedAttempts = attempts.filter(
+          (attempt) => attempt.result.variant === variant && attempt.result.eligible === eligible,
         );
-        const triggered = selected.filter((trial) => trial.triggered).length;
+        const selected = selectedAttempts.map((attempt) => attempt.result);
         return {
           variant,
           eligible,
-          trials: selected.length,
-          triggered,
-          unavailable: selected.filter((trial) => trial.modelResponses === 0).length,
-          triggerRate:
-            selected.length > 0 && selected.every((trial) => trial.modelResponses > 0)
-              ? triggered / selected.length
-              : null,
-          succeeded: selected.filter((trial) => trial.success).length,
+          ...summarizeExperiment(
+            repetitions * scenarios.filter((scenario) => scenario.eligible === eligible).length,
+            selectedAttempts,
+          ),
           execFailed: selected.reduce((total, trial) => total + trial.execFailed, 0),
           answersWithExtraProse: selected.filter(
             (trial) => trial.answerFormat === "json_fence_with_prose",
@@ -280,6 +336,7 @@ realModelTest(
       model: model.route.id,
       timestamp: new Date().toISOString(),
       repetitions,
+      directory,
       summary,
       trials,
     };
