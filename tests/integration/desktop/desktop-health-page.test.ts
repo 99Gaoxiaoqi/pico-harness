@@ -53,4 +53,6 @@ test("健康页区分配置与验证，高级诊断只列正式项目和当前�
   assert.match(html, /value="\/tmp\/current"/);
   assert.doesNotMatch(html, /value="\/tmp\/old"/);
   assert.match(html, /当前无项目任务/);
+  assert.doesNotMatch(html, /macOS 系统授权/);
+  assert.match(html, /操作系统授权/);
 });

@@ -1,6 +1,16 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { access, copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  access,
+  copyFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, extname, join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -158,7 +168,12 @@ test(
       windowsAppContainerCompatible: true,
     });
     assert.equal(restrictedShell.kind, "pwsh", "Windows CI host must provide PowerShell 7");
-    const restrictedPath = `${join(process.execPath, "..")};${dirname(restrictedShell.path)};`;
+    // Model nvm's directory alias even on hosts whose Node install is not linked.
+    const runtimeDirectory = await realpath(dirname(process.execPath));
+    const runtimeAlias = join(fixture.root, "node-toolchain-link");
+    await symlink(runtimeDirectory, runtimeAlias, "junction");
+    const shellDirectory = await realpath(dirname(restrictedShell.path));
+    const restrictedPath = `${runtimeAlias};${shellDirectory};`;
     const environment = withoutExecutionPath(process.env);
     // Keep the AppContainer-compatible shell on the deliberately mixed-case PATH.
     // Removing pwsh here would test the legacy Windows PowerShell fallback instead
@@ -186,7 +201,7 @@ test(
     // deliberately controlled mixed-case PATH with no ambient host directories.
     assert.equal(
       output.additionalContext,
-      `${dirname(restrictedShell.path)};${restrictedPath}`,
+      `${shellDirectory};${runtimeDirectory};${shellDirectory};`,
       JSON.stringify(output),
     );
   },

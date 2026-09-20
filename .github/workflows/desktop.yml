@@ -131,6 +131,10 @@ jobs:
           PICO_WINDOWS_LOW_PRIVILEGE_TEST: "1"
         run: npm run test:integration:windows
 
+      - name: Run Windows desktop and workspace regression suite
+        if: runner.os == 'Windows'
+        run: node scripts/run-integration-tests.mjs desktop/ temporary-workspace workspace-runtime-registry-release workspace-runtime-consistency runtime-host-daemon-candidate process-sandbox.integration process-sandbox-native.integration runtime-process-sandbox
+
       - name: Cleanup temporary Windows ACL users
         if: always() && runner.os == 'Windows'
         shell: powershell

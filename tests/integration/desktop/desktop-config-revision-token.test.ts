@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { globalSessionManager } from "@pico/pico-host/session";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -337,6 +338,7 @@ test(
       release.resolve();
       await Promise.allSettled(pending);
       await desktop.close();
+      await globalSessionManager.clearAndDrain();
       await rm(root, { recursive: true, force: true });
     });
     const initial = asRecord(await desktop.handle(createRuntimeRequest("provider.list", {})));

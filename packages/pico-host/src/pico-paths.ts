@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { homedir, platform as operatingSystemPlatform } from "node:os";
-import { basename, join, normalize, resolve } from "node:path";
+import { basename, dirname, join, normalize, resolve } from "node:path";
 import { canonicalizeWorkspacePath } from "@pico/storage/workspace-path";
 
 // Workspace and device-local path composition belongs to the Pico Host boundary.
@@ -96,6 +96,21 @@ export function resolvePicoIsolatedTemporaryWorkspace(
   options: ResolvePicoPathsOptions = {},
 ): string {
   return join(resolvePicoHome(options), `temporary-workspace-${instanceId}`);
+}
+
+/** Only the host-owned task directory itself is a folder-mode boundary, not its ancestors. */
+export function isPicoIsolatedTemporaryWorkspace(
+  workspacePath: string,
+  options: ResolvePicoPathsOptions = {},
+): boolean {
+  const canonical = canonicalizeWorkspacePath(workspacePath);
+  return (
+    canonicalizeWorkspacePath(dirname(canonical)) ===
+      canonicalizeWorkspacePath(resolvePicoHome(options)) &&
+    /^temporary-workspace-[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+      basename(canonical),
+    )
+  );
 }
 
 export { canonicalizeWorkspacePath } from "@pico/storage/workspace-path";

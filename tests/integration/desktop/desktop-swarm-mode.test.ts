@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { globalSessionManager } from "@pico/pico-host/session";
 import test from "node:test";
 import { mkdtemp, mkdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -94,6 +95,7 @@ test("desktop persists Swarm beside Plan and delivers a single-turn override wit
     assert.match(html, /退出 Swarm|关闭 Swarm/u);
   } finally {
     await desktop.close();
+    await globalSessionManager.clearAndDrain();
     await rm(root, { recursive: true, force: true });
   }
 });

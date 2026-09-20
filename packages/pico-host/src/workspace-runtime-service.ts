@@ -269,47 +269,54 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
     this.registrationStore =
       options.registrationStore ??
       new WorkspaceRegistrationStore(join(this.picoHome, "daemon-workspaces.json"));
-    this.registry = new WorkspaceRuntimeRegistry({
-      create: async (workspacePath) => {
-        const runtimeStore = this.eventStore(workspacePath);
-        const runtime = await (options.createWorkspaceRuntime?.(workspacePath) ??
-          WorkspaceTaskRuntime.create({
-            workDir: workspacePath,
-            taskHostRuntimeOptions: { picoHome: this.picoHome },
-          }));
-        const unsubscribe = runtime.subscribe((event) => {
-          const notification = projectWorkspaceRuntimeNotification(event);
-          if (notification) {
-            this.publish(notification, event.run ? daemonRunRecord(event.run) : undefined);
-          }
-          this.scheduleBlobGc(workspacePath);
-        });
-        this.unsubscribers.set(workspacePath, unsubscribe);
-        let graphApplication: AgentGraphApplicationService | undefined;
-        try {
-          if (options.createAgentGraphApplicationService) {
-            graphApplication = await options.createAgentGraphApplicationService({
-              workspacePath,
-              workspaceRuntime: runtime,
-              runtimeStore,
-              picoHome: this.picoHome,
-            });
-            await graphApplication.start();
-            this.agentGraphApplications.set(workspacePath, graphApplication);
-          }
-          return runtime;
-        } catch (error) {
-          await this.cleanupFailedWorkspaceCreation({
-            workspacePath,
-            runtime,
-            runtimeStore,
-            unsubscribe,
-            ...(graphApplication ? { graphApplication } : {}),
+    this.registry = new WorkspaceRuntimeRegistry(
+      {
+        create: async (workspacePath) => {
+          const runtimeStore = this.eventStore(workspacePath);
+          const runtime = await (options.createWorkspaceRuntime?.(workspacePath) ??
+            WorkspaceTaskRuntime.create({
+              workDir: workspacePath,
+              taskHostRuntimeOptions: { picoHome: this.picoHome },
+            }));
+          const unsubscribe = runtime.subscribe((event) => {
+            const notification = projectWorkspaceRuntimeNotification(event);
+            if (notification) {
+              this.publish(notification, event.run ? daemonRunRecord(event.run) : undefined);
+            }
+            this.scheduleBlobGc(workspacePath);
           });
-          throw error;
-        }
+          this.unsubscribers.set(workspacePath, unsubscribe);
+          let graphApplication: AgentGraphApplicationService | undefined;
+          try {
+            if (options.createAgentGraphApplicationService) {
+              graphApplication = await options.createAgentGraphApplicationService({
+                workspacePath,
+                workspaceRuntime: runtime,
+                runtimeStore,
+                picoHome: this.picoHome,
+              });
+              await graphApplication.start();
+              this.agentGraphApplications.set(workspacePath, graphApplication);
+            }
+            return runtime;
+          } catch (error) {
+            await this.cleanupFailedWorkspaceCreation({
+              workspacePath,
+              runtime,
+              runtimeStore,
+              unsubscribe,
+              ...(graphApplication ? { graphApplication } : {}),
+            });
+            throw error;
+          }
+        },
       },
-    });
+      (workspacePath) => this.canonicalizeWorkspacePath(workspacePath),
+    );
+  }
+
+  canonicalizeWorkspacePath(workspacePath: string): Promise<string> {
+    return canonicalizeWorkspacePath(workspacePath, this.picoHome);
   }
 
   async handle(request: RuntimeRequest): Promise<JsonValue> {
@@ -586,7 +593,7 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
     workspacePath: string,
     sessionId?: string,
   ): Promise<readonly DurablePlanReviewRunIntent[]> {
-    const canonical = await canonicalizeWorkspacePath(workspacePath);
+    const canonical = await this.canonicalizeWorkspacePath(workspacePath);
     return this.eventStore(canonical)
       .listDaemonCommands("plan.review.start")
       .flatMap((command) => {
@@ -598,7 +605,7 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
   }
 
   async replayEvents(cursor: RuntimeNotificationCursor): Promise<RuntimeNotificationPage> {
-    const workspacePath = await canonicalizeWorkspacePath(cursor.workspacePath);
+    const workspacePath = await this.canonicalizeWorkspacePath(cursor.workspacePath);
     const store = this.eventStore(workspacePath);
     if (cursor.afterEventId && !store.hasRuntimeEvent(cursor.afterEventId, workspacePath)) {
       throw new RuntimeProtocolError(
@@ -698,7 +705,7 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
   async getWorkspaceAgentGraphApplicationService(
     workspacePath: string,
   ): Promise<AgentGraphApplicationService | undefined> {
-    const canonical = await canonicalizeWorkspacePath(workspacePath);
+    const canonical = await this.canonicalizeWorkspacePath(workspacePath);
     return this.agentGraphApplications.get(canonical);
   }
 
@@ -726,7 +733,7 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
     },
     execute: () => { result: Result; resourceId?: string },
   ): Promise<DaemonIdempotentCommandResult<Result>> {
-    const canonical = await canonicalizeWorkspacePath(workspacePath);
+    const canonical = await this.canonicalizeWorkspacePath(workspacePath);
     const idempotencyKey = normalizeIdempotencyKey(input.idempotencyKey);
     try {
       const store = this.eventStore(canonical);

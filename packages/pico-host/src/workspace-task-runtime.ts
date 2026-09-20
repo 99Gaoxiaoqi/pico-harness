@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
+import { isPicoIsolatedTemporaryWorkspace } from "./pico-paths.js";
 import type { TaskSnapshot } from "@pico/runtime/task-registry";
 import { TaskHostRuntime, type TaskHostRuntimeOptions } from "./task-host-runtime.js";
 import type {
@@ -173,7 +174,11 @@ export class WorkspaceTaskRuntime {
   static async create(options: WorkspaceTaskRuntimeOptions): Promise<WorkspaceTaskRuntime> {
     const requestedWorkspace = await realpath(resolve(options.workDir));
     let taskHostRuntime = options.taskHostRuntime;
-    if (!taskHostRuntime) {
+    const picoHome = options.taskHostRuntimeOptions?.picoHome;
+    if (
+      !taskHostRuntime &&
+      !isPicoIsolatedTemporaryWorkspace(requestedWorkspace, picoHome ? { picoHome } : {})
+    ) {
       try {
         taskHostRuntime = await TaskHostRuntime.create({
           workDir: requestedWorkspace,

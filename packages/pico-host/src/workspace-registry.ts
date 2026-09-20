@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
+import { isPicoIsolatedTemporaryWorkspace } from "./pico-paths.js";
 
 export interface WorkspaceRuntime {
   readonly workspace: string;
@@ -161,8 +162,13 @@ function isNodeCode(error: unknown, code: string): boolean {
   return error instanceof Error && "code" in error && error.code === code;
 }
 
-export async function canonicalizeWorkspacePath(workspacePath: string): Promise<string> {
+export async function canonicalizeWorkspacePath(
+  workspacePath: string,
+  picoHome?: string,
+): Promise<string> {
   const physicalPath = await realpath(resolve(workspacePath));
+  if (isPicoIsolatedTemporaryWorkspace(physicalPath, picoHome ? { picoHome } : {}))
+    return physicalPath;
   const gitTopLevel = await resolveGitTopLevel(physicalPath);
   return gitTopLevel ? realpath(resolve(gitTopLevel)) : physicalPath;
 }

@@ -21,8 +21,8 @@ export class WorkspaceRegistrationStore {
     let workspaces: readonly string[] = [];
     await this.mutate(async () => {
       const state = await this.read();
-      workspaces = await normalizeWorkspacePaths(state.workspaces, true);
-      const persisted = await normalizeWorkspacePaths(state.workspaces);
+      workspaces = await normalizeWorkspacePaths(state.workspaces, dirname(this.filePath), true);
+      const persisted = await normalizeWorkspacePaths(state.workspaces, dirname(this.filePath));
       if (!samePaths(state.workspaces, persisted)) {
         await this.write({ version: VERSION, workspaces: persisted });
       }
@@ -31,10 +31,10 @@ export class WorkspaceRegistrationStore {
   }
 
   async register(workspacePath: string): Promise<string> {
-    const canonical = await canonicalizeWorkspacePath(workspacePath);
+    const canonical = await canonicalizeWorkspacePath(workspacePath, dirname(this.filePath));
     await this.mutate(async () => {
       const state = await this.read();
-      const normalized = await normalizeWorkspacePaths(state.workspaces);
+      const normalized = await normalizeWorkspacePaths(state.workspaces, dirname(this.filePath));
       const workspaces = [...new Set([...normalized, canonical])].sort();
       if (!samePaths(state.workspaces, workspaces)) {
         await this.write({ version: VERSION, workspaces });
@@ -44,11 +44,11 @@ export class WorkspaceRegistrationStore {
   }
 
   async unregister(workspacePath: string): Promise<string> {
-    const candidates = await unregisterCandidates(workspacePath);
+    const candidates = await unregisterCandidates(workspacePath, dirname(this.filePath));
     let canonical = candidates[0] ?? resolve(workspacePath);
     await this.mutate(async () => {
       const state = await this.read();
-      const normalized = await normalizeWorkspacePaths(state.workspaces);
+      const normalized = await normalizeWorkspacePaths(state.workspaces, dirname(this.filePath));
       canonical = candidates.find((candidate) => normalized.includes(candidate)) ?? canonical;
       const workspaces = normalized.filter((path) => !candidates.includes(path));
       if (!samePaths(state.workspaces, workspaces)) {
@@ -62,11 +62,11 @@ export class WorkspaceRegistrationStore {
   }
 
   async resolveRegisteredPath(workspacePath: string): Promise<string> {
-    const candidates = await unregisterCandidates(workspacePath);
+    const candidates = await unregisterCandidates(workspacePath, dirname(this.filePath));
     let canonical = candidates[0] ?? resolve(workspacePath);
     await this.mutate(async () => {
       const state = await this.read();
-      const normalized = await normalizeWorkspacePaths(state.workspaces);
+      const normalized = await normalizeWorkspacePaths(state.workspaces, dirname(this.filePath));
       canonical = candidates.find((candidate) => normalized.includes(candidate)) ?? canonical;
     });
     return canonical;
@@ -115,17 +115,17 @@ export class WorkspaceRegistrationStore {
   }
 }
 
-async function unregisterCandidates(workspacePath: string): Promise<string[]> {
+async function unregisterCandidates(workspacePath: string, picoHome: string): Promise<string[]> {
   const absolute = resolve(workspacePath);
   try {
-    return [await canonicalizeWorkspacePath(absolute)];
+    return [await canonicalizeWorkspacePath(absolute, picoHome)];
   } catch (error) {
     if (!isErrno(error, "ENOENT")) throw error;
   }
 
   const ancestor = await nearestExistingAncestor(absolute);
   if (!ancestor) return [absolute];
-  const canonicalAncestor = await canonicalizeWorkspacePath(ancestor.physical);
+  const canonicalAncestor = await canonicalizeWorkspacePath(ancestor.physical, picoHome);
   const physicalTarget = resolve(ancestor.physical, relative(ancestor.logical, absolute));
   return [...new Set([canonicalAncestor, physicalTarget, absolute])];
 }
@@ -148,12 +148,13 @@ async function nearestExistingAncestor(
 
 async function normalizeWorkspacePaths(
   paths: readonly string[],
+  picoHome: string,
   dropMissing = false,
 ): Promise<string[]> {
   const normalized = await Promise.all(
     paths.map(
       async (path) =>
-        await canonicalizeWorkspacePath(path).catch((error: unknown) => {
+        await canonicalizeWorkspacePath(path, picoHome).catch((error: unknown) => {
           if (dropMissing && isErrno(error, "ENOENT")) return undefined;
           return path;
         }),

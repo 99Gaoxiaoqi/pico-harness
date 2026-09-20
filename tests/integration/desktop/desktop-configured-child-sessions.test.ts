@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { canonicalizeWorkspacePath } from "@pico/storage/workspace-path";
+import { globalSessionManager } from "@pico/pico-host/session";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -65,6 +67,7 @@ test("session list hides admitted children across workspaces and outcomes while 
     for (const store of stores) store.close();
     await desktop.close();
     await runtime.close();
+    await globalSessionManager.clearAndDrain();
     await rm(root, { recursive: true, force: true });
   });
   const create = async (workspacePath: string, sessionId: string) => {
@@ -176,7 +179,7 @@ test("session list hides admitted children across workspaces and outcomes while 
     );
     assert.deepEqual(detail.session.parentSession, {
       sessionId: "parent",
-      workspacePath: parentPath,
+      workspacePath: canonicalizeWorkspacePath(parentPath),
       agentName: "Reader",
     });
   }
@@ -272,7 +275,7 @@ test("session list hides admitted children across workspaces and outcomes while 
   );
   assert.deepEqual(orphan.session.parentSession, {
     sessionId: "parent",
-    workspacePath: parentPath,
+    workspacePath: canonicalizeWorkspacePath(parentPath),
     agentName: "Reader",
   });
   const remaining = parseRuntimeResult(
@@ -298,6 +301,7 @@ test("real configured executor persists its child admission before model output 
   t.after(async () => {
     await desktop.close();
     await runtime.close();
+    await globalSessionManager.clearAndDrain();
     await rm(root, { recursive: true, force: true });
   });
   const route = {
@@ -400,7 +404,7 @@ test("real configured executor persists its child admission before model output 
   );
   assert.deepEqual(detail.session.parentSession, {
     sessionId: result.sessionId,
-    workspacePath: workDir,
+    workspacePath: canonicalizeWorkspacePath(workDir),
     agentName: "Reader",
   });
   const child = { sessionId: childId, workspacePath: workDir };
@@ -409,7 +413,11 @@ test("real configured executor persists its child admission before model output 
     subagentParent("", child, {
       [workspaceSessionKey(child)]: { ...child, session, items: [], queuedCount: 0 },
     }),
-    { sessionId: result.sessionId, workspacePath: workDir, name: "Reader" },
+    {
+      sessionId: result.sessionId,
+      workspacePath: canonicalizeWorkspacePath(workDir),
+      name: "Reader",
+    },
   );
   assert.deepEqual(
     parseSessions(list, workDir).map((item) => item.id),

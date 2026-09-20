@@ -73,7 +73,7 @@
     "test:compaction-e2e": "node --import tsx --import @pico/cli/tui/preload-env --test --test-concurrency=1 tests/e2e/compaction-quality.real-llm.test.ts tests/e2e/compaction-auto-trigger.real-llm.test.ts",
     "check:storage": "node --import tsx scripts/check-storage-capability.mjs",
     "check:architecture": "node scripts/check-architecture-boundaries.mjs",
-    "lint": "eslint src scripts tests 'apps/**/*.{ts,tsx}' 'packages/**/*.{ts,tsx}' eslint.config.js --no-error-on-unmatched-pattern && npm run check:architecture",
+    "lint": "eslint src scripts tests \"apps/**/*.{ts,tsx}\" \"packages/**/*.{ts,tsx}\" eslint.config.js --no-error-on-unmatched-pattern && npm run check:architecture",
     "format": "prettier --check src scripts tests apps packages .github/workflows docs README.md AGENTS.md package.json package-lock.json tsconfig.json tsconfig.build.json"
   },
   "engines": {

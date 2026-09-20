@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { globalSessionManager } from "@pico/pico-host/session";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -84,6 +85,7 @@ test("desktop rejects orchestration and permission switches while the root epoch
   } finally {
     graphStore?.close();
     await desktop.close();
+    await globalSessionManager.clearAndDrain();
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -232,6 +234,7 @@ test("finished Graph reconciliation retires operator authority before permission
   } finally {
     graphStore.close();
     await desktop.close();
+    await globalSessionManager.clearAndDrain();
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -307,6 +310,7 @@ test("desktop session index excludes durable Graph operator Sessions", async () 
     graphStore.close();
     await reloadedDesktop?.close();
     await desktop.close();
+    await globalSessionManager.clearAndDrain();
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -459,6 +463,7 @@ test("desktop advances completed Graph transcripts without persisting internal r
     }
   } finally {
     if (!closed) await desktop.close();
+    await globalSessionManager.clearAndDrain();
     await rm(root, { recursive: true, force: true });
   }
 });

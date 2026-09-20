@@ -109,7 +109,7 @@ test("Task Runtime Git discovery ignores inherited repository-selection environm
     await rm(fixture.root, { recursive: true, force: true });
   });
   assert.ok(runtime);
-  assert.equal(runtime.repoRoot, await realpath(otherRepository));
+  assert.equal(await realpath(runtime.repoRoot), await realpath(otherRepository));
 });
 
 test("legacy child registrations migrate to the Git identity and remain removable", async (context) => {

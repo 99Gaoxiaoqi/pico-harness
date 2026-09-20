@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, realpath } from "node:fs/promises";
-import { basename, dirname } from "node:path";
 import {
   canonicalizeWorkspacePath,
+  isPicoIsolatedTemporaryWorkspace,
   resolvePicoHome,
   resolvePicoIsolatedTemporaryWorkspace,
 } from "./pico-paths.js";
@@ -10,8 +10,6 @@ import {
 const TEMPORARY_WORKSPACE_MODE = 0o700;
 const TEMPORARY_WORKSPACE_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
-const ISOLATED_TEMPORARY_WORKSPACE_PATTERN =
-  /^temporary-workspace-[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
 export class TemporaryWorkspaceUnavailableError extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -48,11 +46,7 @@ export class TemporaryWorkspaceAuthority {
   }
 
   matches(workspacePath: string): boolean {
-    const canonical = canonicalizeWorkspacePath(workspacePath);
-    return (
-      canonicalizeWorkspacePath(dirname(canonical)) === canonicalizeWorkspacePath(this.picoHome) &&
-      ISOLATED_TEMPORARY_WORKSPACE_PATTERN.test(basename(canonical))
-    );
+    return isPicoIsolatedTemporaryWorkspace(workspacePath, { picoHome: this.picoHome });
   }
 
   private async ensureOnce(): Promise<string> {
@@ -66,6 +60,12 @@ export class TemporaryWorkspaceAuthority {
     await this.prepareDirectory(workspacePath);
     const canonical = await realpath(workspacePath);
     const registered = await this.options.register(canonical);
+    if (
+      !this.matches(registered) ||
+      canonicalizeWorkspacePath(registered) !== canonicalizeWorkspacePath(canonical)
+    ) {
+      throw new TemporaryWorkspaceUnavailableError("Pico 临时工作区注册不能扩大到外层项目");
+    }
     await this.options.trust(registered);
     return registered;
   }

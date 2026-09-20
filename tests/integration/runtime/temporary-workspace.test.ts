@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { lstat, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,7 +19,65 @@ import {
 } from "@pico/pico-host/temporary-workspace-authority";
 import { WorkspaceRegistrationStore } from "@pico/pico-host/workspace-registration";
 import { WorkspaceRuntimeService } from "@pico/pico-host/workspace-runtime-service";
-import { Session } from "@pico/pico-host/session";
+import { Session, globalSessionManager } from "@pico/pico-host/session";
+import { writeDesktopModelRouting } from "../../fixtures/desktop-model-routing.js";
+
+test("desktop temporary tasks stay isolated when Pico home is inside a Git repository", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-temporary-nested-git-"));
+  execFileSync("git", ["init", "--quiet", root], { windowsHide: true });
+  const picoHome = join(root, "pico-home");
+  await writeDesktopModelRouting(picoHome);
+  const env = { PICO_HOME: picoHome };
+  const registrationStore = new WorkspaceRegistrationStore(join(picoHome, "workspaces.json"));
+  const runtime = new WorkspaceRuntimeService({
+    env,
+    registrationStore,
+    execute: async () => undefined,
+  });
+  const desktop = new DesktopRuntimeService({ runtimeService: runtime, registrationStore, env });
+  t.after(async () => {
+    await desktop.close();
+    await globalSessionManager.clearAndDrain();
+    await rm(root, { recursive: true, force: true });
+  });
+  const ensure = async () =>
+    parseRuntimeResult(
+      "workspace.temporary.ensure",
+      await desktop.handle(createRuntimeRequest("workspace.temporary.ensure", {})),
+    );
+  const first = await ensure();
+  const second = await ensure();
+  assert.equal(first.temporary, true);
+  assert.equal(first.mode, "folder");
+  assert.notEqual(first.workspacePath, second.workspacePath);
+  assert.notEqual(first.workspacePath, root);
+  const parentTrust = parseRuntimeResult(
+    "workspace.trustStatus",
+    await desktop.handle(createRuntimeRequest("workspace.trustStatus", { workspacePath: root })),
+  );
+  assert.equal(
+    parentTrust.trusted,
+    false,
+    "a temporary task must never trust its enclosing repository",
+  );
+  const listed = parseRuntimeResult(
+    "workspace.list",
+    await desktop.handle(createRuntimeRequest("workspace.list", {})),
+  );
+  assert.equal(listed.workspaces.length, 2);
+  assert.ok(listed.workspaces.every((workspace) => workspace.temporary));
+  const sent = parseRuntimeResult(
+    "session.send",
+    await desktop.handle(
+      createRuntimeRequest("session.send", {
+        workspacePath: first.workspacePath,
+        input: { kind: "text", text: "isolated first message" },
+        idempotencyKey: "nested-temporary-first-send",
+      }),
+    ),
+  );
+  assert.equal(sent.disposition, "started");
+});
 
 test("temporary workspace protocol is strict and requires the temporary marker", () => {
   assert.deepEqual(parseStrictRuntimeParams("workspace.temporary.ensure", {}), {});
@@ -81,7 +140,7 @@ test("temporary workspace authority allocates one private directory per new task
   assert.equal(first, concurrent);
   assert.equal(registrations, 1);
   assert.equal(trusts, 1);
-  assert.equal((await lstat(first)).mode & 0o777, 0o700);
+  if (process.platform !== "win32") assert.equal((await lstat(first)).mode & 0o777, 0o700);
 
   await writeFile(join(first, "private.txt"), "first task only\n", "utf8");
   const second = await authority.ensure();
@@ -113,7 +172,7 @@ for (const placeholder of ["file", "symlink"] as const) {
     else {
       const target = join(root, "redirected");
       await mkdir(target);
-      await symlink(target, workspacePath);
+      await symlink(target, workspacePath, process.platform === "win32" ? "junction" : "dir");
     }
     t.after(() => rm(root, { recursive: true, force: true }));
     const authority = new TemporaryWorkspaceAuthority({
@@ -180,10 +239,9 @@ test("desktop temporary workspace is registered, trusted, listed and protected",
 
 test("temporary workspace sessions recover without sharing new task directories", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-temporary-restart-"));
+  execFileSync("git", ["init", "--quiet", root], { windowsHide: true });
   const picoHome = join(root, "pico-home");
   const env = { PICO_HOME: picoHome };
-  t.after(() => rm(root, { recursive: true, force: true }));
-
   const firstRegistrationStore = new WorkspaceRegistrationStore(join(picoHome, "workspaces.json"));
   const firstRuntime = new WorkspaceRuntimeService({
     env,
@@ -218,7 +276,11 @@ test("temporary workspace sessions recover without sharing new task directories"
     registrationStore: secondRegistrationStore,
     env,
   });
-  t.after(() => secondDesktop.close());
+  t.after(async () => {
+    await secondDesktop.close();
+    await globalSessionManager.clearAndDrain();
+    await rm(root, { recursive: true, force: true });
+  });
   const secondStatus = (await secondDesktop.handle(
     createRuntimeRequest("workspace.temporary.ensure", {}),
   )) as WorkspaceStatusResult & { readonly temporary: true };
