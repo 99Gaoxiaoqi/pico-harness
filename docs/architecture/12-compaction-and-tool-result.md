@@ -1,5 +1,7 @@
 # pico-harness 上下文管理：语义压缩与 Tool Result 入口定形
 
+> 2026-09-21：上下文压缩已按本地 Maka 移植。当前契约见[上下文压缩](../features/context-compaction.md)。下文的 75%/85% 水位、1500 字符裁剪、主会话硬重置与“无回读”描述属于历史方案，不再代表主会话当前行为。
+
 > 文档状态：Compaction 的动机与批次边界仍可参考；本页的 Tool Result 入口契约已按
 > [决策记录 26](../decisions/26-decision-tool-result-entry-shaping.md)校准。具体实现见
 > `src/tools/tool-result-observation.ts`，上下文读取与压缩细节仍需回查当前 `src/context/` 与

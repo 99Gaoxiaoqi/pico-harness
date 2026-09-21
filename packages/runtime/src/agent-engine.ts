@@ -49,7 +49,7 @@ import type {
 } from "@pico/runtime/full-compactor";
 import { recordRuntimeCompactionCheckpoint } from "@pico/runtime/runtime-compaction-checkpoint";
 import type { ContextBudget } from "@pico/runtime/context-budget";
-import { estimateModelInputTokens, estimateMessagesTokens } from "@pico/runtime/context-budget";
+import { estimateMessagesTokens } from "@pico/runtime/context-budget";
 import { findSafeCompactionCut } from "@pico/runtime/safe-compaction-boundary";
 import { withProviderCallContext } from "@pico/runtime";
 
@@ -463,9 +463,9 @@ export class AgentEngine {
   private readonly budget: IterationBudget;
   private readonly usageSession?: Session | undefined;
   /**
-   * 上一轮 provider 返回的真实输入 token(含工具 schema + 缓存)。
+   * 上一轮 provider 接受的真实输入与输出 token 总和。
    * 用作下一轮 token 估算的锚定基线(对标 maka midTurn estimateNextRequestTokens):
-   * 厂商 usage 是 ground truth,比 BPE 估算更准;冷启动(首轮无 usage)时回退到 BPE。
+   * 只接纳同一模型连接的 usage；无锚定值时不主动压缩。
    */
   private lastAnchoredPromptTokens?: number | undefined;
   /**
@@ -736,6 +736,7 @@ export class AgentEngine {
       !allowFullCompaction ||
       !this.fullCompactor ||
       this.compactionAttemptedThisRun ||
+      this.compactionFailedThisRun ||
       declaredWindow === undefined ||
       baseline === undefined ||
       baseline + reserve < declaredWindow
@@ -841,6 +842,10 @@ export class AgentEngine {
         },
       );
       this.acceptedHistoryPrefixCount = acceptedPrefixCount;
+      // A newly accepted model step earns a new recovery opportunity; a rejected
+      // request still gets only one shaping attempt. Summary failures stay latched.
+      this.overflowRecoveryUsed = false;
+      this.compactionAttemptedThisRun = false;
       return response;
     };
     try {
@@ -1173,6 +1178,15 @@ export class AgentEngine {
           const providerTools = this.isPlanning()
             ? allTools.filter((tool) => isPlanProviderTool(tool.name))
             : availableTools;
+          // A compacted tool result is legal only while this exact tool surface
+          // contains a host-bound reader for the same session archive.
+          this.runtimePort
+            ?.currentRun()
+            ?.setToolResultArchiveAvailable(
+              providerTools.some(
+                (tool) => this.registry.isToolResultArchiveReader?.(tool.name) === true,
+              ),
+            );
           const step = this.registry.captureStep?.(
             randomUUID(),
             providerTools.map((tool) => tool.name),
@@ -1182,8 +1196,7 @@ export class AgentEngine {
             visibleToolNames: new Set(providerTools.map((tool) => tool.name)),
           };
 
-          // 主 Agent 默认投影完整 Session 历史。只有超过 token 水位时，
-          // 才先缩短旧 ToolResult，再在安全工具边界做持久化摘要。
+          // Archive views and safe semantic checkpoints preserve the canonical history.
           const contextChars = estimateTraceLength(
             appendTurnTail(
               [
