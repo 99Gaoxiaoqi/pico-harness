@@ -1,3 +1,7 @@
+import {
+  SECTIONED_SUMMARY_FORMAT,
+  findCheckpointSummaryDefect,
+} from "./history-compact-summary-validation.js";
 import { randomUUID } from "node:crypto";
 import {
   CONTENT_DIGEST_V1_PREFIX,
@@ -98,9 +102,12 @@ export async function recordRuntimeCompactionCheckpoint<
     entries.map(({ message }) => message),
     request,
     signal,
-    lastCheckpoint?.summaryText,
+    lastCheckpoint?.summaryText && !findCheckpointSummaryDefect(lastCheckpoint.summaryText)
+      ? lastCheckpoint.summaryText
+      : undefined,
   );
-  if (!preview) return undefined;
+  if (!preview || !preview.summary.trim() || findCheckpointSummaryDefect(preview.summary))
+    return undefined;
 
   signal?.throwIfAborted();
   const covered = entries.slice(0, preview.compactedCount);
@@ -138,7 +145,11 @@ export async function recordRuntimeCompactionCheckpoint<
     summary: {
       role: "assistant",
       content: preview.wrappedSummary,
-      providerData: { picoKind: "runtime_checkpoint", picoCheckpointId: checkpointId },
+      providerData: {
+        picoKind: "runtime_checkpoint",
+        picoCheckpointId: checkpointId,
+        picoSummaryFormat: SECTIONED_SUMMARY_FORMAT,
+      },
     },
     ...(lastCheckpoint ? { previousCheckpointId: lastCheckpoint.checkpointId } : {}),
   });

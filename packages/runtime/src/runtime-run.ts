@@ -1,3 +1,4 @@
+import { isValidStoredCompactionSummary } from "./history-compact-summary-validation.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { resolve } from "node:path";
@@ -1248,6 +1249,8 @@ export class RuntimeRun {
     // 硬重置 checkpoint 之前的所有 checkpoint 都已失效，不再向前查找。
     if (data.checkpointId.startsWith("hard-reset:")) return undefined;
     const content = data.summary.content;
+    if (!isValidStoredCompactionSummary(content, data.summary.providerData?.["picoSummaryFormat"]))
+      return undefined;
     // 用结构化标签精确定位正文边界。
     const startIdx = content.indexOf(COMPACTION_SUMMARY_OPEN_TAG);
     const endIdx = content.indexOf(COMPACTION_SUMMARY_CLOSE_TAG);

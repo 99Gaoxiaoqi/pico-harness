@@ -72,13 +72,23 @@ export function isSafeCompactionCut(messages: readonly Message[], cut: number): 
 export function findSafeCompactionCut(
   messages: readonly Message[],
   targetRetainedTokens: number,
+  maxCoveredCount = messages.length - 1,
 ): SafeCompactionCut | undefined {
   if (messages.length < 2 || hasIncompleteToolExchange(messages)) return undefined;
   const target = Math.max(1, targetRetainedTokens);
+  // Live steering remains verbatim in the successor suffix. Prior-turn steering
+  // may be summarized once a newer ordinary user task has begun.
+  const anchorIndex = messages.findLastIndex(
+    (message) => isOrdinaryUser(message) && !message.providerData?.["picoKind"],
+  );
+  const pinnedIndex = messages.findIndex(
+    (message, index) => index > anchorIndex && message.providerData?.["picoKind"] === "steer",
+  );
   let retainedTokens = 0;
   for (let cut = messages.length - 1; cut >= 1; cut--) {
     retainedTokens += estimateMessageTokens(messages[cut]!);
-    if (retainedTokens < target) continue;
+    if (cut > maxCoveredCount || retainedTokens < target || (pinnedIndex >= 0 && cut > pinnedIndex))
+      continue;
     if (isSafeCompactionCut(messages, cut)) {
       return { compactedCount: cut, retainedTokens };
     }
