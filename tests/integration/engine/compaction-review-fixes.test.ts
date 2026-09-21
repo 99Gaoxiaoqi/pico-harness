@@ -41,47 +41,9 @@ test("enforceSummaryCharLimit: 短摘要原样返回", () => {
   assert.equal(result, summary);
 });
 
-test("enforceSummaryCharLimit: 超长摘要按优先级裁剪，无双重 ## 前缀", () => {
-  // 构造 6 段超长摘要，每段约 400 字
-  const section = (title: string) => `## ${title}\n${"x".repeat(400)}\n`;
-  const summary =
-    section("任务目标") +
-    section("进展") +
-    section("关键决策与约束") +
-    section("已尝试/失败路径") +
-    section("下一步") +
-    section("关键上下文");
-
-  const result = enforceSummaryCharLimit(summary, 1500);
-  assert.ok(result.length <= 1600, `结果应接近 1500 上限，实际 ${result.length}`);
-  assert.ok(result.includes("[摘要已截断"), "应包含截断标记");
-
-  // 验证无双重 ## 前缀
-  assert.doesNotMatch(result, /## ## /u, "不应有双重 ## 前缀");
-
-  // 验证高优先级 section 被保留
-  assert.match(result, /## 任务目标/u, "应保留任务目标段");
-  assert.match(result, /## 关键上下文/u, "应保留关键上下文段");
-
-  // 验证低优先级 section 被丢弃
-  assert.doesNotMatch(result, /## 进展/u, "进展段应被裁掉");
-  assert.doesNotMatch(result, /## 下一步/u, "下一步段应被裁掉");
-});
-
-test("enforceSummaryCharLimit: 无标题纯文本回退到 head 截断", () => {
-  const summary = "x".repeat(3000); // 无 ## 标题
-  const result = enforceSummaryCharLimit(summary, 500);
-  assert.ok(result.includes("[摘要已截断"), "应包含截断标记");
-  assert.ok(result.length < 600, "应在预算附近");
-  assert.ok(result.includes("x".repeat(100)), "应保留 head 部分");
-});
-
-test("enforceSummaryCharLimit: 单段超预算时截断该段", () => {
-  const summary = `## 任务目标\n${"y".repeat(2000)}`;
-  const result = enforceSummaryCharLimit(summary, 300);
-  assert.ok(result.includes("[摘要已截断"), "应包含截断标记");
-  assert.match(result, /## 任务目标/u, "应保留任务目标标题");
-  assert.ok(result.length <= 400, "应在预算附近");
+test("enforceSummaryCharLimit: 兼容接口不再按字符裁掉摘要章节", () => {
+  const summary = `## Goal\n任务\n## Progress\n${"完成的事实。".repeat(400)}\n## Next Steps\n继续任务\n## Critical Context\n关键文件`;
+  assert.equal(enforceSummaryCharLimit(summary, 1500), summary);
 });
 
 // ============================================================

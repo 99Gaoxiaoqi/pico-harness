@@ -1,3 +1,4 @@
+import { isValidStoredCompactionSummary } from "./history-compact-summary-validation.js";
 import {
   claimKindForEvent,
   computeCheckpointSourceDigest,
@@ -346,6 +347,16 @@ function replaceProjectedPrefixWithCheckpoint(
   eventIndexes: ReadonlyMap<string, number>,
   checkpointEventIndex: number,
 ): void {
+  if (
+    !isValidStoredCompactionSummary(
+      checkpoint.data.summary.content,
+      checkpoint.data.summary.providerData?.["picoSummaryFormat"],
+    )
+  ) {
+    throw new RuntimeEventReadModelIntegrityError(
+      `Runtime checkpoint ${checkpoint.eventId} contains an invalid sectioned summary`,
+    );
+  }
   const throughProjectedIndex = findProjectedEventIndex(
     projected,
     checkpoint.data.throughEventId,
