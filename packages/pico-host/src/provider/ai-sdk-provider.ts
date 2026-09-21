@@ -82,6 +82,11 @@ export class AiSdkProvider implements LLMProvider {
     onDelta: ((delta: string) => void) | undefined,
     options?: LLMProviderRequestOptions,
   ): Promise<Message> {
+    if (
+      options?.maxOutputTokens !== undefined &&
+      (!Number.isSafeInteger(options.maxOutputTokens) || options.maxOutputTokens <= 0)
+    )
+      throw new RangeError("Provider output budget must be a positive integer");
     const signal = providerRequestSignal(options?.signal, options?.timeoutMs);
     const startedAt = performance.now();
     const diagnosticId = randomUUID();
@@ -117,7 +122,10 @@ export class AiSdkProvider implements LLMProvider {
     let nonStreamingUsage: unknown;
     const transport: typeof fetch = async (_url, init) => {
       let body = JSON.parse(String(init?.body)) as Record<string, unknown>;
-      body = this.prepareBody(body, messages, definitions, options);
+      body = this.applyOutputBudget(
+        this.prepareBody(body, messages, definitions, options),
+        options,
+      );
       let response: Response;
       let errorText: string | undefined;
       if (this.wire !== "claude") {
@@ -235,8 +243,10 @@ export class AiSdkProvider implements LLMProvider {
           this.wire,
           nonStreamingUsage ?? record(result.response.body)?.usage,
         );
+        const message = fromAiSdkContent(result.content, this.wire, responseOutput);
         return {
-          ...fromAiSdkContent(result.content, this.wire, responseOutput),
+          ...message,
+          providerData: { ...message.providerData, finishReason: result.finishReason },
           ...(usage === undefined ? {} : { usage }),
         };
       }
@@ -298,8 +308,10 @@ export class AiSdkProvider implements LLMProvider {
         throw new Error("Model stream ended before completion");
       }
       const usage = translateUsage((await result.steps).at(-1)!.usage, this.wire, rawUsage);
+      const message = fromAiSdkContent(await result.content, this.wire, responseOutput);
       return {
-        ...fromAiSdkContent(await result.content, this.wire, responseOutput),
+        ...message,
+        providerData: { ...message.providerData, finishReason: await result.finishReason },
         ...(usage === undefined ? {} : { usage }),
       };
     } catch (error) {
@@ -315,6 +327,40 @@ export class AiSdkProvider implements LLMProvider {
         failureCategory,
       );
     }
+  }
+
+  /** Apply a per-call ceiling after route policy so no later rewrite can raise it. */
+  private applyOutputBudget(
+    body: Record<string, unknown>,
+    options?: LLMProviderRequestOptions,
+  ): Record<string, unknown> {
+    if (options?.maxOutputTokens === undefined || options.promptCachePrewarm) return body;
+    const routeLimit =
+      this.config.capabilities?.maxOutputTokens ??
+      (this.wire === "claude" ? this.profile.maxOutputTokens : undefined);
+    const limit = Math.min(options.maxOutputTokens, routeLimit ?? options.maxOutputTokens);
+    delete body.max_tokens;
+    delete body.max_completion_tokens;
+    delete body.max_output_tokens;
+    const field =
+      this.wire === "responses"
+        ? "max_output_tokens"
+        : this.wire === "claude"
+          ? "max_tokens"
+          : (this.config.capabilities?.outputTokenField ?? "max_tokens");
+    body[field] = limit;
+    const thinking = record(body.thinking);
+    if (
+      this.wire === "claude" &&
+      typeof thinking?.budget_tokens === "number" &&
+      thinking.budget_tokens >= limit
+    ) {
+      // Anthropic requires at least 1024 thinking tokens and budget < max_tokens.
+      // A small bounded summary must not silently expand its output allowance.
+      body.thinking =
+        limit > 1024 ? { ...thinking, budget_tokens: limit - 1 } : { type: "disabled" };
+    }
+    return body;
   }
 
   private endpoint(): string {
