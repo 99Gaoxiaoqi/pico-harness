@@ -29,7 +29,7 @@
 - URI 绑定当前会话并验证原文哈希、字节数；不开放跨会话访问。重启可回读，fork 会重新绑定子会话 URI。
 - 旧 inline 历史无需迁移：保护最近两个 turn，其余适用结果在 checkpoint 验证后生成归档投影，不改变原始事件或摘要来源校验。
 
-Maka 使用独立 archive/transition；Pico 的适配把新原文与投影放在已有原子事件中，旧事件视图确定性重建，避免额外双写。旧 `read_evidence` 不恢复。独立子代理的私有内存压缩策略不在本次主会话移植范围内。
+Maka 使用独立 archive/transition；Pico 的适配把新原文与投影放在已有原子事件中，旧事件视图确定性重建，避免额外双写。旧 `read_evidence` 不恢复。Graph／配置型子代理复用同一会话引擎。Hook 验证器也使用独立持久化子会话，接入相同 usage 窗口、FullCompactor 与会话绑定归档读取；保持只读工具、取消信号、Hook 计费归属，且不挂载 Hook 服务以防递归。最后一次无工具收尾包含在 Hook maxTurns 限制中。旧 `runSub` 私有压缩仍作为兼容接口保留，但仓库内生产调用已迁出。
 
 ## 验证
 

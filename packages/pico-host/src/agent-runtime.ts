@@ -1711,7 +1711,19 @@ export async function executeAgentRuntime(
       }
       return allowed;
     };
+    const contextRouteIdentity = createHash("sha256")
+      .update(
+        JSON.stringify([
+          kind,
+          providerConfig.baseURL,
+          providerConfig.routeId,
+          providerConfig.model,
+        ]),
+      )
+      .digest("hex");
     bindRuntimeHookCapabilities({
+      contextBudget: contextRuntime.budget,
+      contextRouteIdentity,
       session,
       runtimeState,
       provider: trackedProvider,
@@ -2261,16 +2273,7 @@ export async function executeAgentRuntime(
         : {}),
       compactor: contextRuntime.compactor,
       contextBudget: contextRuntime.budget,
-      contextRouteIdentity: createHash("sha256")
-        .update(
-          JSON.stringify([
-            kind,
-            providerConfig.baseURL,
-            providerConfig.routeId,
-            providerConfig.model,
-          ]),
-        )
-        .digest("hex"),
+      contextRouteIdentity,
       // Maka: only declared windows + real provider usage trigger proactive compaction.
       // 始终复用已由宿主从用户模型路由解析并注入的主 Provider。
       fullCompactor: new FullCompactor({

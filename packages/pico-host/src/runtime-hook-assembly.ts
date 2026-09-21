@@ -1,11 +1,15 @@
+import { randomUUID } from "node:crypto";
+import { FullCompactor } from "@pico/pico-host/product-full-compactor";
+import type { ContextBudget } from "@pico/runtime/context-budget";
+import { bindToolResultArchiveReader } from "@pico/runtime/tool-result-archive";
+import { SilentReporter } from "@pico/runtime/silent-reporter";
 import { join } from "node:path";
 import { AgentEngine } from "@pico/pico-host/agent-engine";
-import type { Session } from "@pico/pico-host/session";
+import { Session } from "@pico/pico-host/session";
 import type { McpConnectionManager } from "@pico/pico-host/mcp-connection-manager";
 import type { HookHostNetworkGate } from "@pico/pico-host/hooks/executors";
 import type { LLMProvider } from "@pico/core";
 import type { WorkspaceSandboxConfig } from "@pico/pico-host/workspace-sandbox";
-import { ToolRegistry } from "@pico/pico-host/product-tool-registry";
 import { createHookVerifierRegistry } from "@pico/pico-host/child-agent-policy";
 import { logger } from "@pico/pico-host/logger";
 import type { WorkspaceRoots } from "@pico/pico-host/workspace-roots";
@@ -17,6 +21,8 @@ export interface RuntimeHookAssemblyInput {
   readonly session: Session;
   readonly runtimeState: SessionRuntime;
   readonly provider: LLMProvider;
+  readonly contextBudget?: ContextBudget;
+  readonly contextRouteIdentity?: string;
   readonly workDir: string;
   readonly workspaceRoots: WorkspaceRoots;
   readonly picoHome: string;
@@ -45,44 +51,70 @@ export function bindRuntimeHookCapabilities(input: RuntimeHookAssemblyInput): vo
     ...(input.hostNetworkGate ? { hostNetworkGate: input.hostNetworkGate } : {}),
     agentVerifier: {
       async verify(request) {
-        const verifierEngine = new AgentEngine({
-          provider: hookPurposeProvider(input.provider),
-          registry: new ToolRegistry(),
-          workDir: input.workDir,
-          runtimePort: createEngineRuntimePort(),
-          workspaceRoots: input.workspaceRoots,
-          usageSession: input.session,
-          goalManager: input.runtimeState.goalManager,
-          ...(input.toolResultRedactionSecrets
-            ? { toolResultRedactionSecrets: input.toolResultRedactionSecrets }
-            : {}),
+        request.signal.throwIfAborted();
+        const runtimePort = createEngineRuntimePort();
+        const child = new Session(`hook-verifier-${randomUUID()}`, input.workDir, {
+          persistence: true,
+          picoHome: input.picoHome,
+          runtimePort,
         });
-        const verifierRegistry = createHookVerifierRegistry({
-          diagnostics: logger,
-          skillLogger: logger,
-          grepDiagnostics: logger,
-          workDir: input.workDir,
-          workspaceRoots: input.workspaceRoots,
-          processSandbox: {
-            config: input.sandboxConfig,
-            scratchRoot: join(input.picoHome, "sandboxes", input.session.id, "subagents"),
-          },
-          env: input.runtimeEnv,
-          codeIntelligence: input.runtimeState.codeIntelligence,
-        });
-        const task = [
-          request.prompt,
-          "",
-          "只读核验以下 Hook input。最终只输出单个 JSON 对象：",
-          '{"ok": boolean, "reason": string}',
-          JSON.stringify(request.input),
-        ].join("\n");
-        const result = await verifierEngine.runSub(task, verifierRegistry, undefined, {
-          maxTurns: request.maxTurns,
-          signal: request.signal,
-          workDir: input.workDir,
-        });
-        return result.summary;
+        try {
+          await child.recover();
+          const verifierRegistry = createHookVerifierRegistry({
+            diagnostics: logger,
+            skillLogger: logger,
+            grepDiagnostics: logger,
+            workDir: input.workDir,
+            workspaceRoots: input.workspaceRoots,
+            processSandbox: {
+              config: input.sandboxConfig,
+              scratchRoot: join(input.picoHome, "sandboxes", input.session.id, "subagents"),
+            },
+            env: input.runtimeEnv,
+            codeIntelligence: input.runtimeState.codeIntelligence,
+            toolResultArchive: bindToolResultArchiveReader(child.runtimeEventStore!, child.id),
+          });
+          const task = [
+            request.prompt,
+            "",
+            "只读核验以下 Hook input。最终只输出单个 JSON 对象：",
+            '{"ok": boolean, "reason": string}',
+            JSON.stringify(request.input),
+          ].join("\n");
+          await child.commitMessages({ role: "user", content: task });
+          const provider = hookPurposeProvider(input.provider);
+          const verifierEngine = new AgentEngine({
+            provider,
+            registry: verifierRegistry,
+            workDir: input.workDir,
+            runtimePort,
+            workspaceRoots: input.workspaceRoots,
+            usageSession: child,
+            goalManager: input.runtimeState.goalManager,
+            systemPrompt:
+              '你是只读 Hook 验证器。核验用户提供的任务与证据；最终只输出单个 JSON 对象 {"ok": boolean, "reason": string}。',
+            // Reserve the final tools-disabled grace response within the Hook turn limit.
+            maxTurns: Math.max(0, request.maxTurns - 1),
+            ...(input.contextBudget ? { contextBudget: input.contextBudget } : {}),
+            ...(input.contextRouteIdentity
+              ? { contextRouteIdentity: input.contextRouteIdentity }
+              : {}),
+            fullCompactor: new FullCompactor({ provider, workDir: input.workDir }),
+            reporter: new SilentReporter(),
+            ...(input.toolResultRedactionSecrets
+              ? { toolResultRedactionSecrets: input.toolResultRedactionSecrets }
+              : {}),
+          });
+          // No Hook service is mounted: child tools and compaction cannot recurse into Hooks.
+          const messages = await verifierEngine.run(child, undefined, undefined, request.signal);
+          return (
+            messages.findLast(
+              (message) => message.role === "assistant" && !message.toolCalls?.length,
+            )?.content ?? ""
+          );
+        } finally {
+          await child.close();
+        }
       },
     },
     onAsyncRewake(handler, output) {
