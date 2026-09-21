@@ -9,6 +9,8 @@ export interface LLMProviderRequestOptions {
   signal?: AbortSignal;
   /** 仅供已校验的宿主覆盖单次 Provider 硬超时；普通调用保持 120 秒默认值。 */
   timeoutMs?: number;
+  /** 单次生成的输出 token 上限；Provider 取它与路线输出上限的较小值。 */
+  maxOutputTokens?: number;
   /**
    * 禁止本次响应调用工具。支持该语义的 Provider 可保留工具 Schema，
    * 不支持的 Provider 必须由调用方通过 requestCapabilities 能力门控后传空工具集。
