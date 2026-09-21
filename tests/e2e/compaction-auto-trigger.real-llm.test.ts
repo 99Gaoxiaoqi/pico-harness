@@ -16,7 +16,10 @@ realTest(
   { timeout: 600_000 },
   async () => {
     const configured = await configuredUserDefaultRealModel();
-    const provider = createProvider(configured.provider, { ...configured.config, sessionId: `compaction-e2e-${randomUUID()}` });
+    const provider = createProvider(configured.provider, {
+      ...configured.config,
+      sessionId: `compaction-e2e-${randomUUID()}`,
+    });
     const marker = `PICO_MARKER_${randomUUID().replaceAll("-", "")}`;
     const history: Message[] = [
       {

@@ -217,7 +217,11 @@ test("provider overflow compaction retry preserves one frozen turn tail", async 
   const compactionProvider: LLMProvider = {
     async generate(messages) {
       compactionRequests.push(structuredClone(messages));
-      return { role: "assistant", content: "fixture compacted history" };
+      return {
+        role: "assistant",
+        content:
+          "## Goal\nContinue work.\n## Progress\nReviewed old conversation.\n## Next Steps\nAnswer current user.\n## Critical Context\nfixture compacted history",
+      };
     },
   };
   const engine = new AgentEngine({

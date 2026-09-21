@@ -36,3 +36,11 @@ and `deep-research.ts`, revision `777a2363c141d2ca4cc212eb5c8a4b6b4bb3e63f`.
 Pico adds a canonical SQLite ledger with atomic preview artifacts, session-bound tools,
 Unicode-bounded reads and a bounded client progress projection. The original Apache
 license header is retained; the license and NOTICE are included above.
+
+The context compaction summary format, structural validation, bounded repair,
+usage-based trigger and archive resource behavior are adapted from the local Maka
+revision `584652137` (Apache-2.0), principally `history-compact-summarizer.ts`,
+`history-compact-summary-validation.ts`, `ai-sdk-compaction.ts`, and the
+`tool-result-archive-*` modules. Pico retains its canonical inline event storage,
+1 MiB ingress limit, provider interfaces and session-scoped `read_file` tool.
+Source headers, the Maka NOTICE and Apache license are retained as described above.

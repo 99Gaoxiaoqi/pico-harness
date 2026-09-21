@@ -81,6 +81,11 @@ export function findSafeCompactionCut(
   const anchorIndex = messages.findLastIndex(
     (message) => isOrdinaryUser(message) && !message.providerData?.["picoKind"],
   );
+  // A textual checkpoint cannot carry the current user image. Keep that full
+  // message and the following exchange in the uncompressed suffix.
+  if (anchorIndex >= 0 && messages[anchorIndex]?.images?.length) {
+    maxCoveredCount = Math.min(maxCoveredCount, anchorIndex);
+  }
   const pinnedIndex = messages.findIndex(
     (message, index) => index > anchorIndex && message.providerData?.["picoKind"] === "steer",
   );

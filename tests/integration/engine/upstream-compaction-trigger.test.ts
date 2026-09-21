@@ -118,3 +118,104 @@ test("Provider溢出后仅重试一次；摘要失败保留完整历史且不硬
     );
   }
 });
+
+test("成功接受新工具步骤后可再次恢复溢出，每个拒绝请求只有一次重试", async () => {
+  const session = await seed();
+  const registry = new ToolRegistry();
+  registry.register({
+    name: () => "read_marker",
+    readOnly: true,
+    definition: () => ({
+      name: "read_marker",
+      description: "read marker",
+      inputSchema: { type: "object", properties: {} },
+    }),
+    execute: async () => "TOKEN-42",
+  });
+  let requests = 0;
+  let summaries = 0;
+  const provider: LLMProvider = {
+    async generate() {
+      requests++;
+      if (requests === 1 || requests === 3) throw new ContextOverflowError("step overflow");
+      if (requests === 2)
+        return {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "read-1", name: "read_marker", arguments: "{}" }],
+        };
+      return { role: "assistant", content: "TOKEN-42" };
+    },
+  };
+  const engine = new AgentEngine({
+    provider,
+    registry,
+    workDir: process.cwd(),
+    contextBudget: budget,
+    fullCompactor: new FullCompactor({
+      provider: {
+        async generate() {
+          summaries++;
+          return { role: "assistant", content: validSummary };
+        },
+      },
+    }),
+    maxTurns: 3,
+  });
+  const result = await engine.run(session);
+  assert.equal(result.at(-1)?.content, "TOKEN-42");
+  assert.equal(requests, 4);
+  assert.equal(summaries, 2);
+});
+
+test("当前用户图片和后续工具交换保持原文，不能被纯文本摘要折叠", async () => {
+  const session = new Session(randomUUID(), process.cwd(), { persistence: false });
+  const image: Message["images"] = [
+    { type: "image_base64", mimeType: "image/png", data: "aW1hZ2U=" },
+  ];
+  for (const message of [
+    { role: "user", content: "Old task." },
+    { role: "assistant", content: "Old answer." },
+    { role: "user", content: "Inspect this image.", images: image },
+    {
+      role: "assistant",
+      content: "",
+      toolCalls: [{ id: "image-read", name: "read_marker", arguments: "{}" }],
+    },
+    { role: "user", content: "source", toolCallId: "image-read" },
+    {
+      role: "assistant",
+      content: "Examining.",
+      providerData: { picoContextUsageAnchor: { route: "route-a", input: 7000, output: 1000 } },
+    },
+  ] as Message[])
+    await session.commitMessages(message);
+  const engine = new AgentEngine({
+    provider: {
+      async generate(messages) {
+        assert.deepEqual(
+          messages.find((message) => message.content === "Inspect this image.")?.images,
+          image,
+        );
+        assert.ok(messages.some((message) => message.toolCallId === "image-read"));
+        return { role: "assistant", content: "image retained" };
+      },
+    },
+    registry: new ToolRegistry(),
+    workDir: process.cwd(),
+    contextRouteIdentity: "route-a",
+    contextBudget: { ...budget, declaredContextWindowTokens: 10_000 },
+    fullCompactor: new FullCompactor({
+      provider: {
+        async generate() {
+          return { role: "assistant", content: validSummary };
+        },
+      },
+    }),
+    maxTurns: 1,
+  });
+  await engine.run(session);
+  assert.ok(
+    session.getHistory().some((message) => message.content.includes("<pico_compaction_summary>")),
+  );
+});
