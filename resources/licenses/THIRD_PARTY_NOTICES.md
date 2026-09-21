@@ -41,6 +41,7 @@ The context compaction summary format, structural validation, bounded repair,
 usage-based trigger and archive resource behavior are adapted from the local Maka
 revision `584652137` (Apache-2.0), principally `history-compact-summarizer.ts`,
 `history-compact-summary-validation.ts`, `ai-sdk-compaction.ts`, and the
-`tool-result-archive-*` modules. Pico retains its canonical inline event storage,
-1 MiB ingress limit, provider interfaces and session-scoped `read_file` tool.
+`tool-result-archive-*` modules and `archive-read-tool.ts` (including the resource
+operations in Pico's `tool-result-archive-resource.ts`). Pico retains its canonical inline event storage,
+1 MiB ingress limit, provider interfaces and session-scoped `archive_read` / `read_file` tools.
 Source headers, the Maka NOTICE and Apache license are retained as described above.

@@ -28,11 +28,8 @@ import type { SqliteRuntimeEventStore } from "@pico/storage/sqlite/sqlite-runtim
 
 import type { RuntimeHistoryProjectionEntry } from "./session-runtime-read-model.js";
 
-import {
-  TOOL_RESULT_ARCHIVE_MAX_LIMIT,
-  TOOL_RESULT_ARCHIVE_MAX_RESPONSE_CHARS,
-} from "./tool-result-archive-resource.js";
-export { TOOL_RESULT_ARCHIVE_MAX_RESPONSE_CHARS } from "./tool-result-archive-resource.js";
+export const TOOL_RESULT_ARCHIVE_MAX_LIMIT = 6_000;
+export const TOOL_RESULT_ARCHIVE_MAX_RESPONSE_CHARS = 7_500;
 export const TOOL_RESULT_ARCHIVE_THRESHOLD_CHARS = 2_048 * 4;
 export interface ToolResultArchiveIdentity {
   sessionId: string;

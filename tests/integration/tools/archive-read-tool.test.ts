@@ -12,7 +12,6 @@ import { ArchiveReadTool } from "@pico/pico-host/archive-read-tool";
 import { ReadFileTool } from "@pico/pico-host/read-file-tool";
 import { isResearchToolAllowed } from "../../../packages/pico-host/src/research-mode.js";
 import { SilentReporter } from "@pico/runtime/silent-reporter";
-import { currentRuntimeRun } from "@pico/runtime/runtime-run";
 import { bindToolResultArchiveReader } from "@pico/runtime/tool-result-archive";
 import {
   isPlanModeTool,
@@ -63,11 +62,7 @@ async function fixture(t: TestContext, enableDecoder = true) {
   });
   let calls = 0;
   const provider: LLMProvider = {
-    async generate(messages, tools) {
-      // Explicit host capability fixture; production Engine does this after tool filtering.
-      currentRuntimeRun()?.setToolResultArchiveAvailable(
-        tools.some((tool) => registry.isToolResultArchiveReader(tool.name)),
-      );
+    async generate(messages) {
       if (calls++ === 0)
         return {
           role: "assistant",

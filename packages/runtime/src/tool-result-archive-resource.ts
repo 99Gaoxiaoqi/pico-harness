@@ -19,12 +19,16 @@
 
 import {
   parseToolResultArchiveRef,
+  TOOL_RESULT_ARCHIVE_MAX_LIMIT,
+  TOOL_RESULT_ARCHIVE_MAX_RESPONSE_CHARS,
   type BoundToolResultArchiveReader,
 } from "./tool-result-archive.js";
 export const TOOL_RESULT_ARCHIVE_DEFAULT_LIMIT = 4_000;
-export const TOOL_RESULT_ARCHIVE_MAX_LIMIT = 6_000;
+export {
+  TOOL_RESULT_ARCHIVE_MAX_LIMIT,
+  TOOL_RESULT_ARCHIVE_MAX_RESPONSE_CHARS,
+} from "./tool-result-archive.js";
 export const TOOL_RESULT_ARCHIVE_MAX_BYTES = 4 * 1024 * 1024;
-export const TOOL_RESULT_ARCHIVE_MAX_RESPONSE_CHARS = 7_500;
 const MAX_MANIFEST_ITEMS = 100;
 const MAX_METADATA_STRING_CHARS = 160;
 export const TOOL_RESULT_ARCHIVE_MAX_SEARCH_MATCHES = 50;
