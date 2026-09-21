@@ -1,3 +1,4 @@
+import { currentRuntimeRun } from "@pico/runtime/runtime-run";
 import { createSessionForkRuntimePort } from "@pico/pico-host/session-fork-runtime-port-adapter";
 import {
   bindToolResultArchiveReader,
@@ -51,6 +52,8 @@ test("large Runtime ToolResult keeps inline facts, bounds provider projection, a
   const availableToolsByTurn: string[][] = [];
   const provider: LLMProvider = {
     async generate(messages, availableTools) {
+      // Trusted host fixture binds the decoder before enabling Runtime projection.
+      currentRuntimeRun()?.setToolResultArchiveAvailable(true);
       providerMessages.push(structuredClone(messages));
       availableToolsByTurn.push(availableTools.map((tool) => tool.name));
       if (providerMessages.length === 1) {
@@ -87,6 +90,14 @@ test("large Runtime ToolResult keeps inline facts, bounds provider projection, a
           ],
         };
       }
+      const run = currentRuntimeRun()!;
+      run.setToolResultArchiveAvailable(false);
+      assert.equal(
+        (await run.readModelHistory()).find((message) => message.toolCallId === LARGE_TOOL_CALL_ID)!
+          .content,
+        rawOutput,
+      );
+      run.setToolResultArchiveAvailable(true);
       const page = JSON.parse(
         messages.find((message) => message.toolCallId === "call:archive-read")!.content,
       );
@@ -201,11 +212,20 @@ test("large Runtime ToolResult keeps inline facts, bounds provider projection, a
   }
   assert.equal(reconstructed, rawOutput);
   const forkPort = createSessionForkRuntimePort();
+  const forkSeed = (await recovered.readDurableForkSnapshot()).runtimeSeedEntries;
+  const unknownRef = "pico://archive/other-session/unknown/" + "0".repeat(64) + "/5";
   const fork = {
     sourceSessionId: recovered.id,
     targetSessionId: "archive-fork-target",
     operationId: "archive-fork",
-    seedEntries: (await recovered.readDurableForkSnapshot()).runtimeSeedEntries,
+    seedEntries: forkSeed,
+    modelCheckpoint: {
+      coveredMessageCount: forkSeed.filter((entry) => entry.kind === "model").length,
+      summary: {
+        role: "assistant" as const,
+        content: `Summary known ${ref}; unknown ${unknownRef}`,
+      },
+    },
     workDir: fixture.workDir,
     runtimeAuthority: recovered.runtimeEventStore!,
     publication: { async assertOwned() {} },
@@ -218,6 +238,13 @@ test("large Runtime ToolResult keeps inline facts, bounds provider projection, a
   ) as RuntimeToolResultRecordedEvent;
   const forkRef = forkResult.data.projection.text.match(/pico:\/\/archive\/[^"\s]+/u)![0];
   assert.notEqual(forkRef, ref);
+  const forkCheckpoint = (
+    await recovered.runtimeEventStore!.readSession(fork.targetSessionId)
+  ).find((event) => event.kind === "context.checkpoint.recorded");
+  assert.ok(forkCheckpoint?.kind === "context.checkpoint.recorded");
+  assert.ok(forkCheckpoint.data.summary.content.includes(forkRef));
+  assert.ok(!forkCheckpoint.data.summary.content.includes(ref));
+  assert.ok(forkCheckpoint.data.summary.content.includes(unknownRef));
   assert.equal(
     JSON.parse(
       await bindToolResultArchiveReader(recovered.runtimeEventStore!, fork.targetSessionId).read(

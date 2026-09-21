@@ -32,6 +32,7 @@ function def(name: string, description = `${name} fixture`): ToolDefinition {
 
 test("headless 宿主派生与白名单完全一致（read_evidence 已随 E3 退役）", () => {
   const expected = new Set([
+    "archive_read",
     "bash",
     "edit_file",
     "fetch_url",
@@ -46,7 +47,7 @@ test("headless 宿主派生与白名单完全一致（read_evidence 已随 E3 �
     "write_file",
   ]);
   const derived = getSupportedToolNames("headless");
-  assert.equal(derived.size, 12);
+  assert.equal(derived.size, 13);
   for (const name of expected) assert.ok(derived.has(name), `missing ${name}`);
   for (const name of derived) assert.ok(expected.has(name), `extra ${name}`);
   assert.equal(isToolSupportedForHost("read_evidence", "headless"), false);
@@ -95,7 +96,7 @@ test("core 工具只由活跃 surface 目录声明", () => {
   const core = PICO_TOOL_GROUPS.find((group) => group.id === "core");
   assert.ok(core);
   assert.equal(core.economy, "always");
-  assert.equal(core.toolNames.length, 10);
+  assert.equal(core.toolNames.length, 11);
   assert.ok(core.toolNames.includes("read_file"));
   assert.ok(core.toolNames.includes("ask_user"));
   assert.ok(core.toolNames.includes("request_sandbox_boundary"));

@@ -60,6 +60,7 @@ export interface RuntimeRunPort<Session, Registry, ToolContext, RecoveryProbeRes
   claimsSession(session: Session): boolean;
   commitMessages(session: Session, messages: readonly Message[]): Promise<void>;
   commitMessageOnce(session: Session, eventId: string, message: Message): Promise<CommitReceipt>;
+  setToolResultArchiveAvailable?(available: boolean): void;
   readModelHistory(includeEventIds?: boolean): Promise<Message[]>;
   readModelHistoryEntries(): Promise<readonly RuntimeHistoryEntry[]>;
   readSessionProjectionEntries(): Promise<readonly RuntimeHistoryEntry[]>;

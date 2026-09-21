@@ -28,7 +28,11 @@ import type { SqliteRuntimeEventStore } from "@pico/storage/sqlite/sqlite-runtim
 
 import type { RuntimeHistoryProjectionEntry } from "./session-runtime-read-model.js";
 
-export const TOOL_RESULT_ARCHIVE_MAX_RESPONSE_CHARS = 7_500;
+import {
+  TOOL_RESULT_ARCHIVE_MAX_LIMIT,
+  TOOL_RESULT_ARCHIVE_MAX_RESPONSE_CHARS,
+} from "./tool-result-archive-resource.js";
+export { TOOL_RESULT_ARCHIVE_MAX_RESPONSE_CHARS } from "./tool-result-archive-resource.js";
 export const TOOL_RESULT_ARCHIVE_THRESHOLD_CHARS = 2_048 * 4;
 export interface ToolResultArchiveIdentity {
   sessionId: string;
@@ -84,6 +88,9 @@ export function archiveRuntimeToolResult(
   const { body, projection } = event.data;
   if (
     event.data.status !== "succeeded" ||
+    event.data.toolName === "archive_read" ||
+    (event.data.toolName === "read_file" &&
+      projection.text.startsWith('{"kind":"tool_result_archive",')) ||
     body.storage !== "inline" ||
     JSON.stringify(body.content).length <= TOOL_RESULT_ARCHIVE_THRESHOLD_CHARS ||
     projection.mode !== "full" ||
@@ -112,50 +119,56 @@ export function archiveRuntimeToolResult(
         mode: "preview",
         strategy: "durable-tool-result-archive-v1",
         truncated: true,
-        text: `[工具结果已归档：${event.data.toolName.slice(0, 160)}，${body.content.length} 字符]\n${body.content.slice(0, 500)}\n完整结果仍可读取：read_file ${JSON.stringify({ path: ref, offset: 1, limit: 1000 })}。归档 URI 的 offset/limit 按字符计数（从 1 开始），继续按 nextOffset 分页。`,
+        text: `[工具结果已归档：${event.data.toolName.slice(0, 160)}，${body.content.length} 字符]\n${body.content.slice(0, 500)}\n完整结果仍可读取：archive_read ${JSON.stringify({ ref, operation: "inspect" })}；支持 read（char/line）、search、query，offset 从 0 开始。也可用 read_file ${JSON.stringify({ path: ref, offset: 1, limit: 6000 })} 按字符分页（此兼容接口从 1 开始）。`,
       },
     },
   };
 }
 
 export interface BoundToolResultArchiveReader {
+  readRaw(path: string): Promise<string>;
   read(path: string, offset: number, limit: number): Promise<string>;
 }
 export function bindToolResultArchiveReader(
   store: SqliteRuntimeEventStore,
   sessionId: string,
 ): BoundToolResultArchiveReader {
+  const readRaw = async (path: string): Promise<string> => {
+    const identity = parseToolResultArchiveRef(path);
+    if (!identity || path.length > 1500 || identity.sessionId !== sessionId)
+      throw new Error("归档不可用：URI 无效或不属于当前会话");
+    const row = (await store.readEventRowsByEventIds([identity.eventId])).get(identity.eventId);
+    if (!row || row.sessionId !== sessionId) throw new Error("归档不可用：当前会话不存在该结果");
+    const event = JSON.parse(row.payloadJson) as RuntimeToolResultRecordedEvent;
+    if (
+      event.kind !== "tool.result.recorded" ||
+      event.sessionId !== sessionId ||
+      event.eventId !== identity.eventId ||
+      event.data.body.storage !== "inline"
+    )
+      throw new Error("归档不可用：源结果不匹配");
+    const body = event.data.body;
+    if (
+      body.sha256 !== identity.sha256 ||
+      body.sizeBytes !== identity.sizeBytes ||
+      Buffer.byteLength(body.content, "utf8") !== identity.sizeBytes ||
+      createHash("sha256").update(body.content).digest("hex") !== identity.sha256
+    )
+      throw new Error("归档不可用：完整性校验失败");
+    return body.content;
+  };
   return {
+    readRaw,
     async read(path, offset, limit) {
-      const identity = parseToolResultArchiveRef(path);
-      if (!identity || path.length > 1500 || identity.sessionId !== sessionId)
-        throw new Error("归档不可用：URI 无效或不属于当前会话");
       if (
         !Number.isSafeInteger(offset) ||
         offset < 1 ||
         !Number.isSafeInteger(limit) ||
         limit < 1 ||
-        limit > 1000
+        limit > TOOL_RESULT_ARCHIVE_MAX_LIMIT
       )
-        throw new Error("归档分页要求 offset >= 1，1 <= limit <= 1000");
-      const row = (await store.readEventRowsByEventIds([identity.eventId])).get(identity.eventId);
-      if (!row || row.sessionId !== sessionId) throw new Error("归档不可用：当前会话不存在该结果");
-      const event = JSON.parse(row.payloadJson) as RuntimeToolResultRecordedEvent;
-      if (
-        event.kind !== "tool.result.recorded" ||
-        event.sessionId !== sessionId ||
-        event.eventId !== identity.eventId ||
-        event.data.body.storage !== "inline"
-      )
-        throw new Error("归档不可用：源结果不匹配");
-      const body = event.data.body;
-      if (
-        body.sha256 !== identity.sha256 ||
-        body.sizeBytes !== identity.sizeBytes ||
-        Buffer.byteLength(body.content, "utf8") !== identity.sizeBytes ||
-        createHash("sha256").update(body.content).digest("hex") !== identity.sha256
-      )
-        throw new Error("归档不可用：完整性校验失败");
+        throw new Error(`归档分页要求 offset >= 1，1 <= limit <= ${TOOL_RESULT_ARCHIVE_MAX_LIMIT}`);
+      const body = { content: await readRaw(path) };
       if (offset > body.content.length + 1) throw new Error("归档 offset 超出结果范围");
       const start = offset - 1;
       const render = (end: number) =>
@@ -227,5 +240,21 @@ export function rebindToolResultArchive(
         text: event.data.body.content,
       },
     },
+  });
+}
+
+/** A tool surface without a bound decoder sees original facts, never unusable placeholders. */
+export function restoreArchivedToolResultEntries(
+  events: readonly RuntimeEvent[],
+  entries: readonly RuntimeHistoryProjectionEntry[],
+): readonly RuntimeHistoryProjectionEntry[] {
+  const byId = new Map(events.map((event) => [event.eventId, event]));
+  return entries.map((entry) => {
+    const event = byId.get(entry.eventId);
+    return event?.kind === "tool.result.recorded" &&
+      event.data.body.storage === "inline" &&
+      event.data.projection.strategy === "durable-tool-result-archive-v1"
+      ? { ...entry, message: { ...entry.message, content: event.data.body.content } }
+      : entry;
   });
 }

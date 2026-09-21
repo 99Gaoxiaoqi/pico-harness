@@ -1,6 +1,7 @@
 /** The research session cannot gain mutation tools through discovery, Code Mode or plugins. */
 const RESEARCH_TOOLS = new Set([
   "read_file",
+  "archive_read",
   "glob",
   "grep",
   "web_search",

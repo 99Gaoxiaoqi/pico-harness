@@ -506,6 +506,10 @@
     "./tool-result-archive": {
       "types": "./dist/tool-result-archive.d.ts",
       "import": "./dist/tool-result-archive.js"
+    },
+    "./tool-result-archive-resource": {
+      "types": "./dist/tool-result-archive-resource.d.ts",
+      "import": "./dist/tool-result-archive-resource.js"
     }
   },
   "files": [

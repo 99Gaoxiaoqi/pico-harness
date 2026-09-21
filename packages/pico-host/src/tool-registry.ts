@@ -318,6 +318,10 @@ export class ToolRegistry implements Registry {
     return this.tools.get(name)?.readOnly ?? false;
   }
 
+  isToolResultArchiveReader(name: string): boolean {
+    return this.tools.get(name)?.readsToolResultArchives === true;
+  }
+
   getPermissionCategory(name: string): ToolPermissionCategory {
     const tool = this.tools.get(name);
     return tool?.permissionCategory ?? (tool?.readOnly ? "read" : "custom_tool");
