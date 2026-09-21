@@ -747,7 +747,9 @@ export class AgentEngine {
       inputBudgetTokens: this.contextBudget!.inputBudgetTokens,
       targetRetainedTokens: 1,
       trigger: "auto",
-      ...(this.acceptedHistoryPrefixCount !== undefined ? { acceptedHistoryPrefixCount: this.acceptedHistoryPrefixCount } : {}),
+      ...(this.acceptedHistoryPrefixCount !== undefined
+        ? { acceptedHistoryPrefixCount: this.acceptedHistoryPrefixCount }
+        : {}),
       ...(this.currentTaskAnchor ? { preservedAnchor: this.currentTaskAnchor } : {}),
     };
     try {
@@ -891,7 +893,9 @@ export class AgentEngine {
         inputBudgetTokens,
         targetRetainedTokens,
         trigger: "overflow" as const,
-        ...(this.acceptedHistoryPrefixCount !== undefined ? { acceptedHistoryPrefixCount: this.acceptedHistoryPrefixCount } : {}),
+        ...(this.acceptedHistoryPrefixCount !== undefined
+          ? { acceptedHistoryPrefixCount: this.acceptedHistoryPrefixCount }
+          : {}),
         ...(this.currentTaskAnchor ? { preservedAnchor: this.currentTaskAnchor } : {}),
       };
       const runtimePreview = this.isRuntimeSession(session)

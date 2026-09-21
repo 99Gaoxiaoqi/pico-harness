@@ -31,7 +31,7 @@ const TEST_TIMEOUT_MS = 10 * 60_000;
 
 async function createUserConfiguredProvider() {
   const configured = await configuredUserDefaultRealModel();
-  return createProvider(configured.provider, configured.config);
+  return createProvider(configured.provider, { ...configured.config, sessionId: `compaction-quality-${Date.now()}` });
 }
 
 /** 构造内存 Session(无持久化,避免 fsync 限制)。preview 只读 Session 标识。 */
