@@ -1,3 +1,4 @@
+import type { BoundToolResultArchiveReader } from "@pico/runtime/tool-result-archive";
 import { SkillLoader, SkillViewTool, type Skill } from "@pico/pico-host/product-skill-catalog";
 import { TodoStore } from "@pico/pico-host/product-todo-store";
 import type { PlanHandoffController } from "@pico/runtime/plan-handoff";
@@ -55,6 +56,7 @@ export interface DefaultProcessSandboxDescriptor {
 }
 
 export interface DefaultToolRegistryOptions {
+  toolResultArchive?: BoundToolResultArchiveReader;
   /** Read/Write/Edit/Glob/Grep 与请求边界共享的工作区根集合。 */
   workspaceRoots?: WorkspaceRoots;
   /** Host 将工作区 ask/full-access 与审批合并处理时，关闭这里的严格前置拒绝。 */
@@ -157,7 +159,7 @@ export function buildDefaultToolRegistry(
   const registry = new ToolRegistry();
   // 必须先于 host 后续挂载的审批中间件,避免一次审批扩大文件系统边界。
   if (!deferWorkspaceBoundary) registry.useRequest(buildWorkspaceBoundaryMiddleware(roots));
-  registry.register(new ReadFileTool(roots));
+  registry.register(new ReadFileTool(roots, options.toolResultArchive));
   registry.register(new WriteFileTool(roots, sessionArtifacts));
   registry.register(new EditFileTool(roots));
   registry.register(

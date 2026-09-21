@@ -1,4 +1,9 @@
 import { isValidStoredCompactionSummary } from "./history-compact-summary-validation.js";
+import {
+  archiveRuntimeToolResult,
+  archiveStaleToolResultEntries,
+  rebindToolResultArchive,
+} from "./tool-result-archive.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { resolve } from "node:path";
@@ -1182,9 +1187,15 @@ export class RuntimeRun {
     // ADR 26 §2.3(票 E2):全文 inline 入库后,provider 消息组装按字节预算 gate,
     // 超预算的最旧大内容在 read-model 层降级为带标记的截断视图,末尾工作集不裁。
     const materialized = materializeRuntimeHistoryEntries(entries.map(({ event }) => event));
-    return applyModelHistoryByteBudget(materialized, {
-      maxTotalBytes: MAX_MODEL_HISTORY_BYTES,
-    }).map(({ eventId, message }) =>
+    return applyModelHistoryByteBudget(
+      archiveStaleToolResultEntries(
+        entries.map(({ event }) => event),
+        materialized,
+      ),
+      {
+        maxTotalBytes: MAX_MODEL_HISTORY_BYTES,
+      },
+    ).map(({ eventId, message }) =>
       includeEventIds ? { ...message, [RUNTIME_MESSAGE_EVENT_ID]: eventId } : message,
     );
   }
@@ -1419,7 +1430,7 @@ export class RuntimeRun {
       await this.recordImportedMessage(source.event.data.message, eventId);
       return;
     }
-    const event: RuntimeToolResultRecordedEvent = {
+    const event: RuntimeToolResultRecordedEvent = rebindToolResultArchive({
       ...this.base(eventId),
       refs: {
         ...(this.refs() ?? {}),
@@ -1430,7 +1441,7 @@ export class RuntimeRun {
       },
       kind: "tool.result.recorded",
       data: structuredClone(source.event.data),
-    };
+    });
     assertRuntimeEvent(event);
     await this.append(event);
   }
@@ -1904,7 +1915,7 @@ export class RuntimeRun {
         `Runtime ToolResult ${canonical.toolCallId} is dispatched and cannot use the undispatched path`,
       );
     }
-    const event: RuntimeToolResultRecordedEvent = {
+    const event: RuntimeToolResultRecordedEvent = archiveRuntimeToolResult({
       ...this.base(createRuntimeEventId("tool-result")),
       refs: {
         ...(this.refs() ?? {}),
@@ -1918,7 +1929,7 @@ export class RuntimeRun {
         body: canonical.body,
         projection: canonical.projection,
       },
-    };
+    });
     assertRuntimeEvent(event);
     const message = projectRuntimeModelMessage(event);
     if (!message) {
@@ -3202,7 +3213,18 @@ function matchesImportedForkSeedEvent(
         };
   return (
     isDeepStrictEqual(actual.refs, expectedRefs) &&
-    isDeepStrictEqual(forkHistoryPayload(actual), forkHistoryPayload(expected.event))
+    isDeepStrictEqual(
+      forkHistoryPayload(actual),
+      forkHistoryPayload(
+        expected.event.kind === "tool.result.recorded"
+          ? rebindToolResultArchive({
+              ...expected.event,
+              sessionId: actual.sessionId,
+              eventId: actual.eventId,
+            })
+          : expected.event,
+      ),
+    )
   );
 }
 

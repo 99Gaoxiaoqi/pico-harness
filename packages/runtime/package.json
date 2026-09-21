@@ -502,6 +502,10 @@
     "./subagent-runner": {
       "types": "./dist/subagent-runner.d.ts",
       "import": "./dist/subagent-runner.js"
+    },
+    "./tool-result-archive": {
+      "types": "./dist/tool-result-archive.d.ts",
+      "import": "./dist/tool-result-archive.js"
     }
   },
   "files": [

@@ -1,3 +1,7 @@
+import {
+  parseToolResultArchiveRef,
+  type BoundToolResultArchiveReader,
+} from "@pico/runtime/tool-result-archive";
 // ReadFileTool:按行读取指定路径的文件内容,保留原始行号。
 // 对应课程第 05 讲核心工具。
 //
@@ -36,7 +40,10 @@ export class ReadFileTool implements BaseTool {
   readonly recoveryKey = "pico.read_file.v1";
   private readonly roots: WorkspaceRoots;
 
-  constructor(workDirOrRoots: string | WorkspaceRoots) {
+  constructor(
+    workDirOrRoots: string | WorkspaceRoots,
+    private readonly archive?: BoundToolResultArchiveReader,
+  ) {
     this.roots = workspaceRootsFrom(workDirOrRoots);
   }
 
@@ -47,6 +54,7 @@ export class ReadFileTool implements BaseTool {
   /** 声明读 path 归一化后的绝对路径(与 execute 的 safeResolve 一致) */
   accesses(args: string): ToolAccesses {
     const { path } = JSON.parse(args) as { path?: string };
+    if (typeof path === "string" && parseToolResultArchiveRef(path)) return ToolAccesses.none();
     return ToolAccesses.readFile(this.roots.resolve(path ?? ""));
   }
 
@@ -54,7 +62,7 @@ export class ReadFileTool implements BaseTool {
     return {
       name: "read_file",
       description:
-        "按行读取指定路径的文件内容，保留原始行号。相对路径基于主工作区，绝对路径须位于已授权工作区。大文件请按 PARTIAL 提示继续分页。",
+        "按行读取指定路径的文件内容，保留原始行号。相对路径基于主工作区，绝对路径须位于已授权工作区。大文件请按 PARTIAL 提示继续分页。也可读取当前会话的 pico://archive/ 归档 URI；归档的 offset/limit 按字符计数（从 1 开始），按 nextOffset 继续分页。",
       inputSchema: {
         type: "object",
         properties: {
@@ -102,6 +110,11 @@ export class ReadFileTool implements BaseTool {
             ? err.message
             : "期望 JSON 含 path 字段";
       throw new Error(`参数解析失败: ${reason}`, { cause: err });
+    }
+
+    if (path.startsWith("pico:")) {
+      if (!this.archive) throw new Error("当前会话不支持归档回读");
+      return this.archive.read(path, offset, limit);
     }
 
     // 2. 所有文件访问统一经过共享工作区边界。
