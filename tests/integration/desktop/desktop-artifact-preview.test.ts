@@ -3,6 +3,7 @@ import test from "node:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { createElement } from "react";
 import * as React from "react";
@@ -166,7 +167,7 @@ test(
     await build({
       stdin: {
         contents: `import React from 'react'; import {createRoot} from 'react-dom/client'; import {ArtifactPreview} from './apps/desktop/src/renderer/workbar-panels/ArtifactPreview.tsx'; globalThis.mountPreview=(artifact,content)=>{const node=document.createElement('div');document.body.append(node);const root=createRoot(node);root.render(React.createElement(ArtifactPreview,{artifact,content}));globalThis.unmountPreview=()=>{root.unmount();node.remove()}};`,
-        resolveDir: new URL("../../../", import.meta.url).pathname,
+        resolveDir: fileURLToPath(new URL("../../../", import.meta.url)),
         loader: "tsx",
       },
       bundle: true,
@@ -192,7 +193,7 @@ test(
     );
     const fixture = new URL("../../fixtures/artifact-preview-electron.mjs", import.meta.url);
     const output = await new Promise<string>((resolve, reject) => {
-      const child = spawn(process.env.PICO_TEST_ELECTRON!, [fixture.pathname, root], {
+      const child = spawn(process.env.PICO_TEST_ELECTRON!, [fileURLToPath(fixture), root], {
         env: { ...process.env, ELECTRON_RUN_AS_NODE: "" },
         stdio: ["ignore", "pipe", "pipe"],
       });
