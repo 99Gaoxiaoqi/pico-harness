@@ -826,6 +826,10 @@
     "./deep-research-tools": {
       "types": "./dist/deep-research-tools.d.ts",
       "import": "./dist/deep-research-tools.js"
+    },
+    "./archive-read-tool": {
+      "types": "./dist/archive-read-tool.d.ts",
+      "import": "./dist/archive-read-tool.js"
     }
   },
   "files": [

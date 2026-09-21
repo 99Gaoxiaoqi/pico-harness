@@ -81,6 +81,8 @@ export type MiddlewareFunc = RequestMiddleware;
  * 参数是原始 JSON 字符串,反序列化由各工具内部自行处理 —— 延迟解析、极致解耦。
  */
 export interface BaseTool {
+  /** True only for a decoder bound to the current Session archive authority. */
+  readonly readsToolResultArchives?: boolean;
   /** Nested code execution is opt-in; absence means direct_only. */
   nesting?: "nestable" | "direct_only";
   /** Orchestrators acquire resources through their child calls. */

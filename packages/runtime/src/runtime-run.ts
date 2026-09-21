@@ -1,8 +1,10 @@
 import { isValidStoredCompactionSummary } from "./history-compact-summary-validation.js";
 import {
   archiveRuntimeToolResult,
+  buildToolResultArchiveRef,
   archiveStaleToolResultEntries,
   rebindToolResultArchive,
+  restoreArchivedToolResultEntries,
 } from "./tool-result-archive.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
@@ -356,6 +358,12 @@ export function runWithRuntimeToolCall<Result>(toolCallId: string, run: () => Re
  * and search indexes remain replaceable projections for UI and tooling.
  */
 export class RuntimeRun {
+  private toolResultArchiveAvailable = false;
+
+  setToolResultArchiveAvailable(available: boolean): void {
+    this.toolResultArchiveAvailable = available;
+  }
+
   readonly runId: string;
   readonly invocationId: string;
   readonly store: SqliteRuntimeEventStore;
@@ -862,6 +870,17 @@ export class RuntimeRun {
       canonicalWorkDir,
       operationCreatedAt,
     );
+    const projectedModelCheckpoint = modelCheckpoint
+      ? {
+          ...modelCheckpoint,
+          summary: rebindForkArchiveSummary(
+            modelCheckpoint.summary,
+            seedEntries,
+            options.targetSessionId,
+            identity,
+          ),
+        }
+      : undefined;
     const targetSessionKey = runtimeSessionKey(
       store.storageRoot,
       canonicalWorkDir,
@@ -920,13 +939,18 @@ export class RuntimeRun {
             `Runtime fork target ${options.targetSessionId} published an incomplete canonical seed`,
           );
         }
-        assertRuntimeForkCheckpoint(existingEvents, identity, modelCheckpoint, seedEntries);
+        assertRuntimeForkCheckpoint(
+          existingEvents,
+          identity,
+          projectedModelCheckpoint,
+          seedEntries,
+        );
         assertRuntimeForkState(existingEvents, statePublication, options.targetSessionId, true);
         assertRuntimeForkPublicationOrder(
           existingEvents,
           identity,
           seedEntries,
-          modelCheckpoint,
+          projectedModelCheckpoint,
           statePublication,
           completedMarker,
           options.targetSessionId,
@@ -953,20 +977,20 @@ export class RuntimeRun {
       for (let index = importedCount; index < seedEntries.length; index += 1) {
         await forkRun.recordImportedSeedEntry(seedEntries[index]!, identity.seedEventId(index));
       }
-      if (modelCheckpoint) {
+      if (projectedModelCheckpoint) {
         const coveredEntries = forkCheckpointEntries(
           await store.readSession(options.targetSessionId),
           seedEntries,
           identity,
-          modelCheckpoint.coveredMessageCount,
+          projectedModelCheckpoint.coveredMessageCount,
         );
         await forkRun.recordCheckpoint({
           eventId: identity.checkpointEventId,
           checkpointId: identity.checkpointId,
-          coveredEventCount: modelCheckpoint.coveredMessageCount,
+          coveredEventCount: projectedModelCheckpoint.coveredMessageCount,
           sourceDigest: computeCheckpointSourceDigest(coveredEntries),
           throughEventId: coveredEntries.at(-1)!.eventId,
-          summary: modelCheckpoint.summary,
+          summary: projectedModelCheckpoint.summary,
         });
       }
       // State is part of the published fork payload. Persist it before the marker so every
@@ -979,13 +1003,18 @@ export class RuntimeRun {
         forkRun.requireOwnerFence(),
       );
       const publicationEvents = await store.readSession(options.targetSessionId);
-      assertRuntimeForkCheckpoint(publicationEvents, identity, modelCheckpoint, seedEntries);
+      assertRuntimeForkCheckpoint(
+        publicationEvents,
+        identity,
+        projectedModelCheckpoint,
+        seedEntries,
+      );
       assertRuntimeForkState(publicationEvents, statePublication, options.targetSessionId, true);
       assertRuntimeForkPublicationOrder(
         publicationEvents,
         identity,
         seedEntries,
-        modelCheckpoint,
+        projectedModelCheckpoint,
         statePublication,
         undefined,
         options.targetSessionId,
@@ -1188,7 +1217,9 @@ export class RuntimeRun {
     // 超预算的最旧大内容在 read-model 层降级为带标记的截断视图,末尾工作集不裁。
     const materialized = materializeRuntimeHistoryEntries(entries.map(({ event }) => event));
     return applyModelHistoryByteBudget(
-      archiveStaleToolResultEntries(
+      (this.toolResultArchiveAvailable
+        ? archiveStaleToolResultEntries
+        : restoreArchivedToolResultEntries)(
         entries.map(({ event }) => event),
         materialized,
       ),
@@ -1915,7 +1946,7 @@ export class RuntimeRun {
         `Runtime ToolResult ${canonical.toolCallId} is dispatched and cannot use the undispatched path`,
       );
     }
-    const event: RuntimeToolResultRecordedEvent = archiveRuntimeToolResult({
+    const original: RuntimeToolResultRecordedEvent = {
       ...this.base(createRuntimeEventId("tool-result")),
       refs: {
         ...(this.refs() ?? {}),
@@ -1929,7 +1960,8 @@ export class RuntimeRun {
         body: canonical.body,
         projection: canonical.projection,
       },
-    });
+    };
+    const event = this.toolResultArchiveAvailable ? archiveRuntimeToolResult(original) : original;
     assertRuntimeEvent(event);
     const message = projectRuntimeModelMessage(event);
     if (!message) {
@@ -2775,6 +2807,40 @@ function normalizeForkOperationCreatedAt(value: string | undefined): string | un
     throw new Error(`Fork operation has an invalid createdAt timestamp: ${value}`);
   }
   return new Date(timestamp).toISOString();
+}
+
+/** Rewrite only refs backed by facts actually copied into this fork. */
+function rebindForkArchiveSummary(
+  summary: Message,
+  seed: readonly RuntimeSessionForkSeedEntry[],
+  targetSessionId: string,
+  identity: RuntimeForkBootstrapIdentity,
+): Message {
+  let content = summary.content;
+  for (const [index, entry] of seed.entries()) {
+    if (
+      entry.kind !== "model" ||
+      entry.event.kind !== "tool.result.recorded" ||
+      entry.event.data.body.storage !== "inline"
+    )
+      continue;
+    const event = entry.event;
+    const body = event.data.body;
+    const original = buildToolResultArchiveRef({
+      sessionId: event.sessionId,
+      eventId: event.eventId,
+      sha256: body.sha256,
+      sizeBytes: body.sizeBytes,
+    });
+    const replacement = buildToolResultArchiveRef({
+      sessionId: targetSessionId,
+      eventId: identity.seedEventId(index),
+      sha256: body.sha256,
+      sizeBytes: body.sizeBytes,
+    });
+    content = content.replaceAll(original, replacement);
+  }
+  return { ...summary, content };
 }
 
 function assertRuntimeForkCheckpoint(

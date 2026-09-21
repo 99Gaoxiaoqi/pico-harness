@@ -1,3 +1,4 @@
+import { ArchiveReadTool } from "./archive-read-tool.js";
 import type { BoundToolResultArchiveReader } from "@pico/runtime/tool-result-archive";
 import { SkillLoader, SkillViewTool, type Skill } from "@pico/pico-host/product-skill-catalog";
 import { TodoStore } from "@pico/pico-host/product-todo-store";
@@ -160,6 +161,7 @@ export function buildDefaultToolRegistry(
   // 必须先于 host 后续挂载的审批中间件,避免一次审批扩大文件系统边界。
   if (!deferWorkspaceBoundary) registry.useRequest(buildWorkspaceBoundaryMiddleware(roots));
   registry.register(new ReadFileTool(roots, options.toolResultArchive));
+  if (options.toolResultArchive) registry.register(new ArchiveReadTool(options.toolResultArchive));
   registry.register(new WriteFileTool(roots, sessionArtifacts));
   registry.register(new EditFileTool(roots));
   registry.register(

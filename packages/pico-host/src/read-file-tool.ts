@@ -1,3 +1,4 @@
+import { TOOL_RESULT_ARCHIVE_MAX_LIMIT } from "@pico/runtime/tool-result-archive-resource";
 import {
   parseToolResultArchiveRef,
   type BoundToolResultArchiveReader,
@@ -47,6 +48,10 @@ export class ReadFileTool implements BaseTool {
     this.roots = workspaceRootsFrom(workDirOrRoots);
   }
 
+  get readsToolResultArchives(): boolean {
+    return this.archive !== undefined;
+  }
+
   name(): string {
     return "read_file";
   }
@@ -75,8 +80,8 @@ export class ReadFileTool implements BaseTool {
           limit: {
             type: "integer",
             minimum: 1,
-            maximum: READ_FILE_MAX_LIMIT_LINES,
-            description: `可选，最多读取的行数，默认 ${READ_FILE_DEFAULT_LIMIT_LINES}，最大 ${READ_FILE_MAX_LIMIT_LINES}。`,
+            maximum: TOOL_RESULT_ARCHIVE_MAX_LIMIT,
+            description: `可选，最多读取的行数，默认 ${READ_FILE_DEFAULT_LIMIT_LINES}，普通文件最大 ${READ_FILE_MAX_LIMIT_LINES}；归档 URI 最大 ${TOOL_RESULT_ARCHIVE_MAX_LIMIT}。`,
           },
         },
         required: ["path"],
@@ -99,8 +104,11 @@ export class ReadFileTool implements BaseTool {
       paginationRequested = input.offset !== undefined || input.limit !== undefined;
       offset = parsePositiveInteger(input.offset, "offset", 1);
       limit = parsePositiveInteger(input.limit, "limit", READ_FILE_DEFAULT_LIMIT_LINES);
-      if (limit > READ_FILE_MAX_LIMIT_LINES) {
-        throw new Error(`limit 不能超过 ${READ_FILE_MAX_LIMIT_LINES}`);
+      const maxLimit = path.startsWith("pico:")
+        ? TOOL_RESULT_ARCHIVE_MAX_LIMIT
+        : READ_FILE_MAX_LIMIT_LINES;
+      if (limit > maxLimit) {
+        throw new Error(`limit 不能超过 ${maxLimit}`);
       }
     } catch (err) {
       const reason =
