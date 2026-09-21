@@ -44,7 +44,7 @@ test("large Runtime ToolResult keeps inline facts, bounds provider projection, a
   const registry = new ToolRegistry();
   registry.register(outputTool(LARGE_TOOL_NAME, rawOutput));
 
-  // 渐进披露开启:read_evidence 已随回读协议退役(E3),工具面不披露、不注册。
+  // 由引擎根据实际披露且绑定 reader 的 read_file 开启归档投影。
   const toolDisclosure = new ToolDisclosure();
   toolDisclosure.setBaselineTools([LARGE_TOOL_NAME]);
 
@@ -52,8 +52,6 @@ test("large Runtime ToolResult keeps inline facts, bounds provider projection, a
   const availableToolsByTurn: string[][] = [];
   const provider: LLMProvider = {
     async generate(messages, availableTools) {
-      // Trusted host fixture binds the decoder before enabling Runtime projection.
-      currentRuntimeRun()?.setToolResultArchiveAvailable(true);
       providerMessages.push(structuredClone(messages));
       availableToolsByTurn.push(availableTools.map((tool) => tool.name));
       if (providerMessages.length === 1) {
