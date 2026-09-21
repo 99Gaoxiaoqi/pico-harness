@@ -1,3 +1,4 @@
+import { bindToolResultArchiveReader } from "@pico/runtime/tool-result-archive";
 import { createDeepResearchTools } from "@pico/pico-host/deep-research-tools";
 import { SqliteDeepResearchStore } from "@pico/storage";
 import { isResearchToolAllowed } from "./research-mode.js";
@@ -2001,6 +2002,9 @@ export async function executeAgentRuntime(
             revision,
           }),
       },
+      session.runtimeEventStore
+        ? bindToolResultArchiveReader(session.runtimeEventStore, session.id)
+        : undefined,
     );
     if (collaborationMode() === "agent") {
       registry.register(
@@ -3098,9 +3102,11 @@ function buildRegistry(
   sessionTasks?: DefaultToolRegistryOptions["sessionTasks"],
   requestSandboxBoundaryHandler?: RequestSandboxBoundaryHandler,
   sessionArtifacts?: DefaultToolRegistryOptions["sessionArtifacts"],
+  toolResultArchive?: DefaultToolRegistryOptions["toolResultArchive"],
 ): ToolRegistry {
   return buildDefaultToolRegistry(workDir, {
     deferWorkspaceBoundary: true,
+    ...(toolResultArchive ? { toolResultArchive } : {}),
     backgroundManager,
     ...(goalManager !== undefined ? { goalManager } : {}),
     ...(todoStore !== undefined ? { todoStore } : {}),
