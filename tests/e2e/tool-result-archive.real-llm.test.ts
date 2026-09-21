@@ -49,7 +49,7 @@ realTest("真实模型通过归档URI找回预览之外的精确标记", { timeo
         ? { thinkingEffort: "off" }
         : {}),
       prompt:
-        "仅使用 read_file：先完整读取 evidence.txt，若结果归档，必须使用返回的 pico://archive/ URI 按字符偏移分页回读（可跳到尾部），找到文件最后的 FINAL_MARKER。最终只回复等号后的精确值。不要改文件，不用 shell、grep 或其他工具。",
+        "先用 read_file 完整读取 evidence.txt。若结果归档，必须使用 archive_read 对返回的 pico://archive/ ref 执行 search，pattern 为 FINAL_MARKER，必要时按返回提示继续回读。找到文件最后的 FINAL_MARKER，最终只回复等号后的精确值。不要改文件，不用 shell 或 grep。",
     },
     {
       picoHome,
@@ -62,7 +62,7 @@ realTest("真实模型通过归档URI找回预览之外的精确标记", { timeo
   assert.ok(
     calls.some(
       (call) =>
-        call.name === "read_file" && JSON.parse(call.args).path.startsWith("pico://archive/"),
+        call.name === "archive_read" && JSON.parse(call.args).ref.startsWith("pico://archive/"),
     ),
     "must actually read the archive resource",
   );

@@ -24,7 +24,8 @@
 
 - 保留 1 MiB 单次结果入口限制；超限结果仍拒绝，指引分段重取。
 - 适用成功结果超过 `2048 × 4 = 8192` 个序列化字符时，原文与有界归档投影在同一事务保存。错误及带 Recovery 提示的结果保持原处理。
-- 使用 `pico://archive/<session>/<event>/<sha256>/<bytes>` 定位，模型调用 `read_file` 读取。URI 的 `offset` 从 1 开始、`limit` 为 1–1000 个 JavaScript 字符；完整 JSON 响应不超过 7500 字符，使用 `nextOffset` 续读。普通文件仍按行分页。
+- 归档写入和回读工具是一组能力：每一步只有实际可见且绑定当前会话 reader 的工具存在，才允许归档；工具被裁剪时恢复完整 inline 原文，不留下无法回读的新占位符。
+- 使用 `pico://archive/<session>/<event>/<sha256>/<bytes>` 定位，模型调用 `archive_read` 做 inspect、search、query 和按字符/行 read；offset 从 0 开始，limit 默认 4000、最多 6000，完整 JSON 响应最多 7500 字符。`read_file` 兼容归档 URI，offset 从 1 开始、limit 最多 6000 个 JavaScript 字符，按 nextOffset 续读；普通文件仍按行分页且最多 1000 行。
 - URI 绑定当前会话并验证原文哈希、字节数；不开放跨会话访问。重启可回读，fork 会重新绑定子会话 URI。
 - 旧 inline 历史无需迁移：保护最近两个 turn，其余适用结果在 checkpoint 验证后生成归档投影，不改变原始事件或摘要来源校验。
 
@@ -32,13 +33,13 @@ Maka 使用独立 archive/transition；Pico 的适配把新原文与投影放在
 
 ## 验证
 
-相关集成覆盖声明窗口与路由锚、摘要质量和滚动更新、工具安全边界、中断恢复、失败不重置、当前图片保留、归档完整性/隔离/重启/fork，以及三种 Provider 协议的生成和流式输出预算。
+相关集成覆盖声明窗口与路由锚、摘要质量和滚动更新、工具安全边界、中断恢复、失败不重置、当前图片保留、归档搜索/条目查询/按行与字符读取、完整性/隔离/重启/fork，以及三种 Provider 协议的生成和流式输出预算。
 
 真实模型测试使用用户默认路线，不修改用户配置：
 
 ```sh
 npm run build:packages
-node scripts/run-integration-tests.mjs maka-compaction compaction-rolling-digest compaction-review-fixes compaction-output-budget interrupted-history-resume tool-result-runtime-projection read-file session-fork
+node scripts/run-integration-tests.mjs maka-compaction compaction-rolling-digest compaction-review-fixes compaction-output-budget interrupted-history-resume tool-result-runtime-projection archive-read-tool read-file session-fork
 RUN_COMPACTION_E2E=1 node --import tsx --import @pico/cli/tui/preload-env --test tests/e2e/compaction-auto-trigger.real-llm.test.ts tests/e2e/compaction-quality.real-llm.test.ts tests/e2e/tool-result-archive.real-llm.test.ts
 ```
 
