@@ -42,7 +42,7 @@ import {
   isPlanGraphWaiting,
   reconcilePlanExecution,
 } from "@pico/pico-host/product-plan-execution-recovery";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -1461,7 +1461,7 @@ export async function executeAgentRuntime(
     });
     const { providerFactory, providerDependencies, subagentModelRouter, parentModelRouteId } =
       modelAssembly;
-    const contextRuntime = buildContextRuntime(kind, providerConfig.model);
+    const contextRuntime = buildContextRuntime(kind, providerConfig);
     const nativeSearchAdmissionReason = (): string | undefined => {
       if (backgroundPolicy && backgroundPolicy.snapshot.toolNetworkPolicy !== "allow")
         return "后台网络策略无法授权供应商原生搜索。";
@@ -2257,7 +2257,17 @@ export async function executeAgentRuntime(
         : {}),
       compactor: contextRuntime.compactor,
       contextBudget: contextRuntime.budget,
-      // 模型摘要压缩:85% 水位主动整理 + Provider overflow 紧急重试。
+      contextRouteIdentity: createHash("sha256")
+        .update(
+          JSON.stringify([
+            kind,
+            providerConfig.baseURL,
+            providerConfig.routeId,
+            providerConfig.model,
+          ]),
+        )
+        .digest("hex"),
+      // Maka: only declared windows + real provider usage trigger proactive compaction.
       // 始终复用已由宿主从用户模型路由解析并注入的主 Provider。
       fullCompactor: new FullCompactor({
         provider: trackedProvider,
@@ -3209,11 +3219,19 @@ function pruneRegistryToCommandAllowlist(
 
 function buildContextRuntime(
   kind: ProviderKind,
-  model: string,
+  config: ProviderConfig,
 ): { budget: ContextBudget; compactor: Compactor } {
   const protocol = kind === "openai" ? "openai" : kind;
-  const profile = resolveProviderProfile(protocol, model);
-  const budget = createContextBudget(profile);
+  const profile = resolveProviderProfile(protocol, config.model);
+  const capabilities = config.capabilities;
+  const budget = createContextBudget({
+    ...profile,
+    contextWindowTokens: capabilities?.contextWindowTokens ?? profile.contextWindowTokens,
+    maxOutputTokens: capabilities?.maxOutputTokens ?? profile.maxOutputTokens,
+  });
+  if (capabilities?.contextSource === "config") {
+    budget.declaredContextWindowTokens = capabilities.contextWindowTokens;
+  }
   return {
     budget,
     compactor: new Compactor({

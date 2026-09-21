@@ -7,6 +7,8 @@ export const CHARS_PER_TOKEN = 1.5;
 
 export interface ContextBudget {
   contextWindowTokens: number;
+  /** User-declared proactive target; absent means provider-driven overflow recovery only. */
+  declaredContextWindowTokens?: number;
   reservedOutputTokens: number;
   safetyMarginTokens: number;
   inputBudgetTokens: number;

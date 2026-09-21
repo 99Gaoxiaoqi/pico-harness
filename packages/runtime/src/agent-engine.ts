@@ -15,7 +15,7 @@ import {
   buildEphemeralToolResult,
   redactToolResult,
 } from "@pico/runtime/tool-result-builder";
-import { buildEvidenceSnapshot, estimateTraceLength } from "@pico/runtime";
+import { estimateTraceLength } from "@pico/runtime";
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
@@ -41,14 +41,13 @@ import {
   type EngineDiagnostics,
   SILENT_ENGINE_DIAGNOSTICS,
 } from "./agent-engine-ports.js";
-import { ContextCompactionError, sanitizeToolPairs, type Compactor } from "@pico/runtime/compactor";
+import { sanitizeToolPairs, type Compactor } from "@pico/runtime/compactor";
 import type {
   FullCompactionPreview,
   FullCompactionRequest,
   FullCompactor,
 } from "@pico/runtime/full-compactor";
 import { recordRuntimeCompactionCheckpoint } from "@pico/runtime/runtime-compaction-checkpoint";
-import { computeCheckpointSourceDigest } from "@pico/core/checkpoint-digest";
 import type { ContextBudget } from "@pico/runtime/context-budget";
 import { estimateModelInputTokens, estimateMessagesTokens } from "@pico/runtime/context-budget";
 import { findSafeCompactionCut } from "@pico/runtime/safe-compaction-boundary";
@@ -80,16 +79,6 @@ import {
 } from "@pico/runtime/prompt-cache";
 
 import { raceWithDeadline } from "@pico/runtime/deadline";
-
-const DEFAULT_AUTO_COMPACT_TRIGGER_RATIO = 0.85;
-const DEFAULT_RETAINED_CONTEXT_RATIO = 0.2;
-const EMERGENCY_RETAINED_CONTEXT_RATIO = 0.1;
-/**
- * midTurn proactive 压缩水位(比主动压缩 85% 更激进)。
- * 工具结果 commit 后、下一轮 prepareModelContext 前主动检查:若已超 75% 水位,
- * 提前触发 checkpoint,避免下一轮才 reactive 发现(那时已在 provider 调用紧前)。
- */
-const MID_TURN_COMPACT_TRIGGER_RATIO = 0.75;
 
 /**
  * 工具批次 settle 兜底超时:仅依赖工具协作收口(settleOnAbort/Promise.allSettled)
@@ -335,8 +324,8 @@ export interface AgentEngineOptions {
   controlPlanePresentation?: boolean | undefined;
   /** 当前 route 的统一上下文预算；未注入时仅保留旧 Compactor 兼容路径。 */
   contextBudget?: ContextBudget | undefined;
-  /** 主动整理水位，默认为输入预算的 85%。 */
-  autoCompactTriggerRatio?: number | undefined;
+  /** Stable model + connection identity for durable usage anchors. */
+  contextRouteIdentity?: string | undefined;
   /** Host-owned memory hooks; snapshots are frozen before each actual provider attempt. */
   memoryHooks?: {
     capture(messages: readonly Message[], tools: readonly ToolDefinition[]): Promise<void>;
@@ -456,7 +445,15 @@ export class AgentEngine {
   private readonly thinkingEffort: string;
   private readonly modelRouteId?: string | undefined;
   private readonly contextBudget?: ContextBudget | undefined;
-  private readonly autoCompactTriggerRatio: number;
+  private readonly contextRouteIdentity: string | undefined;
+  private compactionAttemptedThisRun = false;
+  private compactionFailedThisRun = false;
+  private overflowRecoveryUsed = false;
+  private lastReplyTokens = 0;
+  private readonly omittedHistoricalImages = new Set<string>();
+  private readonly historicalImageKeys = new Set<string>();
+  private currentTaskAnchor: Message | undefined;
+  private acceptedHistoryPrefixCount: number | undefined;
   private readonly memoryHooks: AgentEngineOptions["memoryHooks"];
   private readonly maxTurns: number;
   private readonly compactor?: Compactor | undefined;
@@ -522,8 +519,7 @@ export class AgentEngine {
     this.modelRouteId = opts.modelRouteId;
     this.contextBudget = opts.contextBudget;
     this.memoryHooks = opts.memoryHooks;
-    this.autoCompactTriggerRatio =
-      opts.autoCompactTriggerRatio ?? DEFAULT_AUTO_COMPACT_TRIGGER_RATIO;
+    this.contextRouteIdentity = opts.contextRouteIdentity;
     this.maxTurns = opts.maxTurns ?? 50;
     this.compactor = opts.compactor;
     this.fullCompactor = opts.fullCompactor;
@@ -570,6 +566,7 @@ export class AgentEngine {
     const provider = this.rebuildProvider?.(failure);
     if (!provider) return undefined;
     this.provider = provider;
+    this.lastAnchoredPromptTokens = undefined;
     return providerForReporter(provider, reporter, signal);
   }
 
@@ -707,143 +704,6 @@ export class AgentEngine {
     return result?.preview;
   }
 
-  /**
-   * midTurn proactive 压缩(对标 maka midTurn capacity compact)。
-   *
-   * 在工具结果 commit 后、下一轮 prepareModelContext 前主动检查:若上下文已超
-   * 75% 水位,提前触发 Runtime checkpoint,避免下一轮才 reactive 发现。
-   *
-   * 简化设计(相比 maka):
-   * - pico 同步 await 落盘,不需要 maka 的 seq-ack 持久化等待
-   * - pico 无 steering/pinned 事件,turnTail 每轮重建不进 history
-   * - 复用现有 recordRuntimeCheckpoint + findSafeCompactionCut 边界检测
-   * - fail-open:压缩失败不抛错,留给下一轮 prepareModelContext 或 overflow 处理
-   */
-  private async runMidTurnCompaction(
-    session: Session,
-    span: Span | undefined,
-    signal?: AbortSignal,
-  ): Promise<void> {
-    // 仅 Runtime 会话 + 有 fullCompactor + 有 contextBudget 才执行
-    if (!this.fullCompactor || !this.contextBudget || !this.isRuntimeSession(session)) return;
-    const runtimeRun = this.runtimePort?.currentRun();
-    if (!runtimeRun?.claimsSession(session)) return;
-
-    const budget = this.contextBudget.inputBudgetTokens;
-    const triggerTokens = Math.floor(budget * MID_TURN_COMPACT_TRIGGER_RATIO);
-
-    // 优先用上一轮 usage 锚定估算(ground truth),冷启动回退到 BPE。
-    let estimatedInput: number;
-    if (this.lastAnchoredPromptTokens !== undefined) {
-      estimatedInput = this.lastAnchoredPromptTokens;
-    } else {
-      const entries = await runtimeRun.readModelHistoryEntries();
-      estimatedInput = estimateMessagesTokens(entries.map(({ message }) => message));
-    }
-
-    if (estimatedInput <= triggerTokens) return; // 未到 75% 水位,不压
-
-    signal?.throwIfAborted();
-    this.diagnostics.info(
-      {
-        estimatedInput,
-        triggerTokens,
-        triggerRatio: MID_TURN_COMPACT_TRIGGER_RATIO,
-        budget,
-      },
-      "[midTurn] 工具结果落地后上下文已超 75% 水位,主动触发 Runtime checkpoint",
-    );
-    try {
-      const result = await this.recordRuntimeCheckpoint(
-        session,
-        {
-          inputBudgetTokens: budget,
-          trigger: "auto",
-        },
-        signal,
-      );
-      if (result) {
-        span?.addAttributes({
-          midTurnCompacted: true,
-          midTurnCompactedCount: result.compactedCount,
-        });
-      }
-    } catch (err) {
-      // fail-open:压缩失败不抛错,留给下一轮 prepareModelContext 或 overflow 处理
-      if (isAbortError(err)) throw err;
-      this.diagnostics.warn(
-        { err: String(err), sessionId: session.id },
-        "[midTurn] proactive 压缩失败,fail-open:留给下一轮处理",
-      );
-      span?.addAttributes({ midTurnCompactionFailedOpen: true });
-    }
-  }
-
-  /** Replaces prior context with a minimal, auditable checkpoint while preserving this input. */
-  private async hardResetRuntimeHistory(
-    session: Session,
-    currentRequestSessionIndex: number,
-  ): Promise<void> {
-    const runtimeRun = this.runtimePort?.currentRun();
-    if (!runtimeRun?.claimsSession(session)) {
-      throw new Error("Runtime hard reset requires the active canonical run");
-    }
-    const rawProjection = await runtimeRun.readSessionProjectionEntries();
-    const currentRequest = rawProjection[currentRequestSessionIndex];
-    if (!currentRequest) {
-      throw new Error("Runtime hard reset cannot locate the current user request");
-    }
-    const entries = await runtimeRun.readModelHistoryEntries();
-    const currentIndex = entries.findIndex((entry) => entry.eventId === currentRequest.eventId);
-    if (currentIndex === 0) return;
-
-    let coveredCount = currentIndex > 0 ? currentIndex : entries.length;
-    // A hard reset also creates a physical coverage boundary. Keep the whole
-    // recovered exchange (and any intervening user inputs) if it cannot be cut.
-    while (
-      coveredCount > 0 &&
-      (entries[coveredCount - 1]!.compactionBoundarySafe === false ||
-        entries[coveredCount]?.message.toolCallId !== undefined)
-    )
-      coveredCount--;
-    if (coveredCount === 0) {
-      throw new Error(
-        "Runtime hard reset has no safe boundary before interrupted recovery history",
-      );
-    }
-    const covered = entries.slice(0, coveredCount);
-    const through = covered.at(-1);
-    if (!through) return;
-    const checkpointId = `hard-reset:${randomUUID()}`;
-    // 复用 evidence snapshot:从 covered 消息提取结构化证据(最近 8 条工具/助手),
-    // 让硬重置后模型至少能看到"重置前最后的工作线索",而非完全清零。
-    const evidenceSnapshot = buildEvidenceSnapshot(
-      covered.map((entry) => entry.message),
-      0,
-      "[CONTEXT RESET EVIDENCE]",
-    );
-    const summary =
-      currentIndex === -1 &&
-      currentRequest.message.role === "user" &&
-      currentRequest.message.toolCallId === undefined
-        ? structuredClone(currentRequest.message)
-        : {
-            role: "assistant" as const,
-            content: evidenceSnapshot
-              ? "[CONTEXT RESET] Earlier conversation context was intentionally reset after a context-limit recovery. Treat the current user request as the only active task.\n\n" +
-                evidenceSnapshot
-              : "[CONTEXT RESET] Earlier conversation context was intentionally reset after a context-limit recovery. Treat the current user request as the only active task.",
-            providerData: { picoKind: "runtime_hard_reset", picoCheckpointId: checkpointId },
-          };
-    await runtimeRun.recordCheckpoint({
-      checkpointId,
-      coveredEventCount: covered.length,
-      sourceDigest: computeCheckpointSourceDigest(covered),
-      throughEventId: through.eventId,
-      summary,
-    });
-  }
-
   private async prepareModelContext(
     session: Session,
     systemPrompt: string,
@@ -860,90 +720,52 @@ export class AgentEngine {
       turnTail,
     );
 
-    // Compatibility for embedders/tests that have not yet supplied a model profile.
-    if (!this.contextBudget) {
-      return this.compactor ? this.compactor.compactToBudget(context) : context;
-    }
-
-    const budget = this.contextBudget.inputBudgetTokens;
-    const triggerTokens = Math.floor(budget * this.autoCompactTriggerRatio);
-    const bpeEstimate = estimateModelInputTokens(context, tools);
-    // usage 锚定:优先用上一轮 provider 返回的真实 promptTokens 作为估算基线(ground truth),
-    // 与 BPE 估算取大者(保守:确保不低估而漏触发压缩)。冷启动(无锚定值)时纯用 BPE。
-    const beforeTokens =
-      this.lastAnchoredPromptTokens !== undefined
-        ? Math.max(bpeEstimate, this.lastAnchoredPromptTokens)
-        : bpeEstimate;
-    if (beforeTokens <= triggerTokens) return context;
-
-    const targetRetainedTokens = Math.max(1, Math.floor(budget * DEFAULT_RETAINED_CONTEXT_RATIO));
-    const projectedHistory = context.slice(1);
-    const protectedCut = findSafeCompactionCut(projectedHistory, targetRetainedTokens);
-    const protectFromIndex = protectedCut ? protectedCut.compactedCount + 1 : context.length;
-    const toolSchemaTokens = beforeTokens - estimateMessagesTokens(context);
-    const projectionTargetTokens = Math.max(0, triggerTokens - toolSchemaTokens);
-    const projected = this.compactor
-      ? this.compactor.compactOldToolResults(context, {
-          protectFromIndex,
-          targetTokens: projectionTargetTokens,
-        })
-      : context;
-    const projectedTokens = estimateModelInputTokens(projected, tools);
-    this.diagnostics.info(
-      {
-        trigger: "watermark",
-        beforeTokens,
-        projectedTokens,
-        budget,
-        triggerTokens,
-        toolSchemaTokens,
-        projectionTargetTokens,
-        protectFromIndex,
-      },
-      "[Engine] 上下文超过主动水位，已缩短旧 ToolResult 投影",
-    );
-    span?.addAttributes({
-      contextCompactionTrigger: "watermark",
-      contextTokensBefore: beforeTokens,
-      contextTokensAfterProjection: projectedTokens,
-      contextInputBudgetTokens: budget,
-      contextTriggerTokens: triggerTokens,
-      contextToolSchemaTokens: toolSchemaTokens,
-      contextProjectionTargetTokens: projectionTargetTokens,
-      contextProtectedFromIndex: protectFromIndex,
-    });
-    if (projectedTokens <= triggerTokens) return projected;
-
-    if (allowFullCompaction && this.fullCompactor) {
-      const persistentCut = findSafeCompactionCut(rawHistory, targetRetainedTokens);
-      const historyCountBefore = rawHistory.length;
-      const request = {
-        inputBudgetTokens: budget,
-        targetRetainedTokens,
-        trigger: "auto" as const,
+    const projected = context.map((message) => {
+      if (!message.toolCallId || !this.omittedHistoricalImages.has(historicalImageKey(message)))
+        return message;
+      const { images: _images, ...rest } = message;
+      return {
+        ...rest,
+        content: `${message.content}\n[Historical tool image omitted after provider context overflow.]`,
       };
-      const runtimePreview = this.isRuntimeSession(session)
+    });
+    const declaredWindow = this.contextBudget?.declaredContextWindowTokens;
+    const baseline = this.lastAnchoredPromptTokens;
+    const reserve = Math.min(this.lastReplyTokens * 2, 8_000);
+    if (
+      !allowFullCompaction ||
+      !this.fullCompactor ||
+      this.compactionAttemptedThisRun ||
+      declaredWindow === undefined ||
+      baseline === undefined ||
+      baseline + reserve < declaredWindow
+    ) {
+      return projected;
+    }
+    this.compactionAttemptedThisRun = true;
+    const request: FullCompactionRequest = {
+      inputBudgetTokens: this.contextBudget!.inputBudgetTokens,
+      targetRetainedTokens: 1,
+      trigger: "auto",
+      ...(this.acceptedHistoryPrefixCount !== undefined ? { acceptedHistoryPrefixCount: this.acceptedHistoryPrefixCount } : {}),
+      ...(this.currentTaskAnchor ? { preservedAnchor: this.currentTaskAnchor } : {}),
+    };
+    try {
+      const preview = this.isRuntimeSession(session)
         ? await this.recordRuntimeCheckpoint(session, request, signal)
         : undefined;
-      const compacted = runtimePreview
-        ? true
-        : this.isRuntimeSession(session)
-          ? false
-          : await this.fullCompactor.compactInMemorySession(session, request, signal);
-      signal?.throwIfAborted();
+      const compacted =
+        preview !== undefined ||
+        (!this.isRuntimeSession(session) &&
+          (await this.fullCompactor.compactInMemorySession(session, request, signal)));
       if (compacted) {
-        const compactedCount = runtimePreview?.compactedCount ?? persistentCut?.compactedCount;
+        this.lastAnchoredPromptTokens = undefined;
+        this.acceptedHistoryPrefixCount = undefined;
         span?.addAttributes({
           contextFullCompaction: true,
-          contextCompactionTrigger: "watermark",
-          contextCompactionCutIndex: compactedCount,
-          contextCompactedMessageCount: compactedCount,
-          contextRetainedMessageCount: compactedCount
-            ? historyCountBefore - compactedCount
-            : undefined,
-          contextTokensAfterFullCompaction: estimateMessagesTokens(
-            await this.readModelHistory(session),
-          ),
+          contextCompactionTrigger: "declared-window",
+          contextTriggerTokens: declaredWindow,
+          contextTokensBefore: baseline,
         });
         return this.prepareModelContext(
           session,
@@ -955,25 +777,16 @@ export class AgentEngine {
           false,
         );
       }
-      // fail-open:full compaction 失败但字符级投影已完成,不立即硬重置。
-      // 返回 projected(可能略超预算),让 generateWithOverflowRetry 的 provider overflow
-      // 紧急压缩再尝试一次。硬重置只在紧急压缩也失败时才作为最后兜底。
+      this.compactionFailedThisRun = true;
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+      this.compactionFailedThisRun = true;
       this.diagnostics.warn(
-        {
-          trigger: request.trigger,
-          projectedTokens,
-          budget,
-          triggerTokens,
-        },
-        "[Engine] full compaction 失败,fail-open:返回字符级投影,留给 overflow 紧急压缩重试",
+        { error: String(error) },
+        "[Compaction] Failed open; keeping history intact",
       );
-      span?.addAttributes({ contextCompactionFailedOpen: true });
     }
-
-    // fail-open:无论 projected 是否超预算,都返回它(而非抛 ContextCompactionError)。
-    // 超预算的情况由 generateWithOverflowRetry 的 provider overflow 紧急压缩处理;
-    // 紧急压缩也失败时,主循环捕获 ContextOverflowError 触发硬重置兜底。
-    // 这样 full compaction 失败不再立即丢上下文,给 overflow 紧急压缩多一次机会。
+    span?.addAttributes({ contextCompactionFailedOpen: true });
     return projected;
   }
 
@@ -1006,7 +819,8 @@ export class AgentEngine {
           };
     const generate = async (context: Message[]) => {
       await this.memoryHooks?.capture(context, tools);
-      return generateWithRetry(
+      const acceptedPrefixCount = (await this.readModelHistory(session)).length;
+      const response = await generateWithRetry(
         providerForReporter(this.provider, reporter, signal),
         context,
         tools,
@@ -1024,6 +838,8 @@ export class AgentEngine {
           ...requestOptions,
         },
       );
+      this.acceptedHistoryPrefixCount = acceptedPrefixCount;
+      return response;
     };
     try {
       return await generate(baseContext);
@@ -1031,29 +847,53 @@ export class AgentEngine {
       if (
         !(err instanceof ContextOverflowError) ||
         !this.fullCompactor ||
-        !allowEmergencyCompaction
+        !allowEmergencyCompaction ||
+        this.overflowRecoveryUsed
       ) {
         throw err;
       }
       signal?.throwIfAborted();
+      this.overflowRecoveryUsed = true;
+      // Match Maka: old tool images may be omitted, never current user images.
+      const eligible = baseContext.filter(
+        (message) =>
+          message.images?.length && this.historicalImageKeys.has(historicalImageKey(message)),
+      );
+      if (eligible.length > 0) {
+        for (const message of eligible)
+          this.omittedHistoricalImages.add(historicalImageKey(message));
+        this.lastAnchoredPromptTokens = undefined;
+        const retryContext = await this.prepareModelContext(
+          session,
+          systemPrompt,
+          turnTail,
+          tools,
+          span,
+          signal,
+          false,
+        );
+        return generate(retryContext);
+      }
+      if (this.compactionFailedThisRun) throw err;
+      this.compactionAttemptedThisRun = true;
       const inputBudgetTokens =
         this.contextBudget?.inputBudgetTokens ??
         Math.max(1, Math.floor((this.compactor?.maxChars ?? 4_000) / 4));
       const historyBefore = await this.readModelHistory(session);
       const historyTokens = estimateMessagesTokens(historyBefore);
-      const targetRetainedTokens = Math.max(
-        1,
-        Math.min(
-          Math.floor(inputBudgetTokens * EMERGENCY_RETAINED_CONTEXT_RATIO),
-          Math.floor(historyTokens * 0.5),
-        ),
-      );
+      const targetRetainedTokens = 1;
       this.diagnostics.warn(
         { trigger: "provider-overflow", inputBudgetTokens, targetRetainedTokens, historyTokens },
         "[Engine] Provider 报告上下文溢出，执行一次紧急 FullCompaction",
       );
       const emergencyCut = findSafeCompactionCut(historyBefore, targetRetainedTokens);
-      const request = { inputBudgetTokens, targetRetainedTokens, trigger: "overflow" as const };
+      const request = {
+        inputBudgetTokens,
+        targetRetainedTokens,
+        trigger: "overflow" as const,
+        ...(this.acceptedHistoryPrefixCount !== undefined ? { acceptedHistoryPrefixCount: this.acceptedHistoryPrefixCount } : {}),
+        ...(this.currentTaskAnchor ? { preservedAnchor: this.currentTaskAnchor } : {}),
+      };
       const runtimePreview = this.isRuntimeSession(session)
         ? await this.recordRuntimeCheckpoint(session, request, signal)
         : undefined;
@@ -1062,7 +902,12 @@ export class AgentEngine {
         : this.isRuntimeSession(session)
           ? false
           : await this.fullCompactor.compactInMemorySession(session, request, signal);
-      if (!compacted) throw err;
+      if (!compacted) {
+        this.compactionFailedThisRun = true;
+        throw err;
+      }
+      this.lastAnchoredPromptTokens = undefined;
+      this.acceptedHistoryPrefixCount = undefined;
       const retryContext = await this.prepareModelContext(
         session,
         systemPrompt,
@@ -1222,6 +1067,16 @@ export class AgentEngine {
 
     const runHistory = await this.readModelHistory(session);
     const currentUserPrompt = latestVisibleUserInput(runHistory);
+    const taskIndex = runHistory.findLastIndex(
+      (message) =>
+        message.role === "user" && !message.toolCallId && message.content === currentUserPrompt,
+    );
+    this.currentTaskAnchor = taskIndex >= 0 ? structuredClone(runHistory[taskIndex]!) : undefined;
+    this.historicalImageKeys.clear();
+    for (const message of runHistory.slice(0, Math.max(0, taskIndex))) {
+      if (message.toolCallId && message.images?.length)
+        this.historicalImageKeys.add(historicalImageKey(message));
+    }
     const initialPromptLayers = await this.buildPromptLayers(currentUserPrompt, signal);
     const systemPrompt = initialPromptLayers.systemPrompt;
     let turnTail = initialPromptLayers.turnTail;
@@ -1230,7 +1085,32 @@ export class AgentEngine {
     let beforeLen = session.length;
     let turnCount = 0;
     let exhaustedReason: string | undefined;
-    let hardResetTriggered = false;
+    this.compactionAttemptedThisRun = false;
+    this.compactionFailedThisRun = false;
+    this.overflowRecoveryUsed = false;
+    this.omittedHistoricalImages.clear();
+    this.lastAnchoredPromptTokens = undefined;
+    this.lastReplyTokens = 0;
+    this.acceptedHistoryPrefixCount = undefined;
+    for (const message of [...runHistory].reverse()) {
+      const anchor = message.providerData?.["picoContextUsageAnchor"];
+      if (!anchor || typeof anchor !== "object") continue;
+      const value = anchor as Record<string, unknown>;
+      if (
+        this.contextRouteIdentity &&
+        value["route"] === this.contextRouteIdentity &&
+        typeof value["input"] === "number" &&
+        Number.isFinite(value["input"]) &&
+        value["input"] > 0 &&
+        typeof value["output"] === "number" &&
+        Number.isFinite(value["output"]) &&
+        value["output"] >= 0
+      ) {
+        this.lastAnchoredPromptTokens = value["input"] + value["output"];
+        this.lastReplyTokens = value["output"];
+      }
+      break;
+    }
     let consecutiveHookStopBlocks = 0;
     let planStopContinuations = 0;
     let graceCandidateTools: ToolDefinition[] = [];
@@ -1309,45 +1189,14 @@ export class AgentEngine {
               turnTail,
             ),
           );
-          let compactedContext: Message[];
-          try {
-            compactedContext = await this.prepareModelContext(
-              session,
-              systemPrompt,
-              turnTail,
-              providerTools,
-              turnSpan,
-              signal,
-            );
-          } catch (err) {
-            if (err instanceof ContextCompactionError && !hardResetTriggered) {
-              hardResetTriggered = true;
-              this.diagnostics.error(
-                {
-                  beforeChars: err.beforeChars,
-                  afterChars: err.afterChars,
-                  maxChars: err.maxChars,
-                },
-                `[Engine] ⚠ 上下文压缩彻底失败(${err.beforeChars}→${err.afterChars} 仍超 ${err.maxChars}),触发硬重置兜底:清空历史只保留本轮用户输入`,
-              );
-              turnSpan
-                ?.startChild("Context.HardReset", {
-                  beforeChars: err.beforeChars,
-                  afterChars: err.afterChars,
-                  maxChars: err.maxChars,
-                })
-                ?.end();
-              if (this.isRuntimeSession(session)) {
-                await this.hardResetRuntimeHistory(session, beforeLen - 1);
-              } else {
-                await session.truncateTo(beforeLen - 1);
-                // 硬重置改变了 session 起点,更新 beforeLen 让返回值切片正确
-                beforeLen = session.length - 1;
-              }
-              continue;
-            }
-            throw err;
-          }
+          const compactedContext = await this.prepareModelContext(
+            session,
+            systemPrompt,
+            turnTail,
+            providerTools,
+            turnSpan,
+            signal,
+          );
           const compactedChars = estimateTraceLength(compactedContext);
           turnSpan?.addAttributes({
             contextMessageCount: session.length + 1,
@@ -1391,7 +1240,7 @@ export class AgentEngine {
               reporter,
               actionSpan,
               signal,
-              !hardResetTriggered,
+              !this.overflowRecoveryUsed,
             );
             signal?.throwIfAborted();
             // 若本轮内部触发了模型摘要压缩(session.history 被缩短),调整 beforeLen
@@ -1406,29 +1255,6 @@ export class AgentEngine {
             }
           } catch (err) {
             recordTraceError(actionSpan, err);
-            if (err instanceof ContextOverflowError && !hardResetTriggered) {
-              hardResetTriggered = true;
-              const staticTokens = estimateModelInputTokens(
-                [{ role: "system", content: systemPrompt }],
-                providerTools,
-              );
-              this.diagnostics.error(
-                {
-                  staticTokens,
-                  inputBudgetTokens: this.contextBudget?.inputBudgetTokens,
-                  currentRequestChars:
-                    (await this.readModelHistory(session)).at(-1)?.content.length ?? 0,
-                },
-                "[Engine] 紧急摘要重试后仍溢出；系统提示、工具 Schema 或当前请求不可再压缩，触发硬重置",
-              );
-              if (this.isRuntimeSession(session)) {
-                await this.hardResetRuntimeHistory(session, beforeLen - 1);
-              } else {
-                await session.truncateTo(beforeLen - 1);
-                beforeLen = session.length - 1;
-              }
-              continue;
-            }
             throw err;
           } finally {
             reporter.onThinkingEnd?.();
@@ -1809,10 +1635,10 @@ export class AgentEngine {
           // ====================================================================
           // midTurn proactive 压缩(对标 maka midTurn capacity compact):
           // 此时工具结果、reminder、stallWarning、steer 都已 commitMessages 落盘,
-          // 下一轮 prepareModelContext 还未执行。若上下文已超 75% 水位,提前压缩。
+          // 已完成的工具批次在下一次请求前统一检查上下文。
           // 失败 fail-open,不阻塞主循环。
           // ====================================================================
-          await this.runMidTurnCompaction(session, turnSpan, signal);
+          // The next provider request runs the single declared-window compaction gate.
         } finally {
           turnSpan?.end();
         }
@@ -2291,7 +2117,17 @@ export class AgentEngine {
       // 锚定:记录上一轮真实输入 token,供下一轮 prepareModelContext/midTurn 估算。
       // 子代理的 promptTokens 远小于主代理,不能污染主代理的锚定值。
       if (!isSubagent) {
-        this.lastAnchoredPromptTokens = response.usage.promptTokens;
+        const input = response.usage.promptTokens;
+        const output = response.usage.completionTokens;
+        if (Number.isFinite(input) && input > 0 && Number.isFinite(output) && output >= 0) {
+          this.lastAnchoredPromptTokens = input + output;
+          this.lastReplyTokens = output;
+          if (this.contextRouteIdentity)
+            response.providerData = {
+              ...response.providerData,
+              picoContextUsageAnchor: { route: this.contextRouteIdentity, input, output },
+            };
+        }
       }
       decisions.push(this.budget.consumeUsage(response.usage));
       decisions.push(this.goalManager?.consumeUsage(response.usage) ?? { allowed: true });
@@ -2490,4 +2326,11 @@ function assertRunProducedModelOutput(messages: readonly Message[]): void {
 function memoryStepRejects(calls: readonly ToolCall[], index: number): boolean {
   const first = calls.findIndex((call) => call.name === "memory_remember");
   return first === 0 ? index !== 0 : first > 0 && calls[index]?.name === "memory_remember";
+}
+
+/** Content-scoped identity avoids reusing tool-call IDs across different batches. */
+function historicalImageKey(message: Message): string {
+  return createHash("sha256")
+    .update(JSON.stringify([message.toolCallId, message.content, message.images]))
+    .digest("hex");
 }
