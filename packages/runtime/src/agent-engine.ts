@@ -1182,7 +1182,7 @@ export class AgentEngine {
           // contains a host-bound reader for the same session archive.
           this.runtimePort
             ?.currentRun()
-            ?.setToolResultArchiveAvailable(
+            ?.setToolResultArchiveAvailable?.(
               providerTools.some(
                 (tool) => this.registry.isToolResultArchiveReader?.(tool.name) === true,
               ),
