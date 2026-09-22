@@ -303,7 +303,6 @@ export interface UsageView {
   readonly costStatus?: "none" | "estimated" | "included" | "unknown" | "partial" | undefined;
   readonly providerCallCount?: number | undefined;
   readonly usageReportCount?: number | undefined;
-  readonly baselineCount?: number | undefined;
   readonly scope?: "all" | "workspace" | "session" | undefined;
   readonly workspacePath?: string | undefined;
   readonly unavailableWorkspaceCount?: number | undefined;
