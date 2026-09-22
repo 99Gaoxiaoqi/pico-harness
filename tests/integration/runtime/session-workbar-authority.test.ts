@@ -377,6 +377,13 @@ test("desktop runtime exposes real workbar authorities and publishes revision si
     assert.equal(execution["schemaVersion"], 1);
     assert.equal(execution["sessionId"], sessionId);
     assert.ok(Array.isArray(execution["runs"]));
+    const usage = await desktop.handle(
+      createRuntimeRequest("session.execution.summary", {
+        workspacePath: workspace,
+        sessionId,
+      }),
+    );
+    assert.deepEqual(usage, execution["summary"]);
     await desktop.handle(
       createRuntimeRequest("session.archive", { workspacePath: workspace, sessionId }),
     );
@@ -389,8 +396,26 @@ test("desktop runtime exposes real workbar authorities and publishes revision si
       ),
     );
     assert.equal(archivedExecution["sessionId"], sessionId);
+    assert.deepEqual(
+      await desktop.handle(
+        createRuntimeRequest("session.execution.summary", {
+          workspacePath: workspace,
+          sessionId,
+        }),
+      ),
+      usage,
+    );
     await desktop.handle(
       createRuntimeRequest("session.delete", { workspacePath: workspace, sessionId }),
+    );
+    await assert.rejects(
+      desktop.handle(
+        createRuntimeRequest("session.execution.summary", {
+          workspacePath: workspace,
+          sessionId,
+        }),
+      ),
+      (error: unknown) => error instanceof Error && "code" in error && error.code === "NOT_FOUND",
     );
     await assert.rejects(
       desktop.handle(

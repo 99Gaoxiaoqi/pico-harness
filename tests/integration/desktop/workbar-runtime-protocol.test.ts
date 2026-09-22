@@ -244,12 +244,46 @@ test("execution trace crosses the desktop protocol with strict causal and covera
       modelAttempts: "logical_only",
     },
   };
+  assert.ok(DESKTOP_RUNTIME_METHODS.includes("session.execution.summary"));
+  assert.deepEqual(
+    parseStrictRuntimeParams("session.execution.summary", {
+      workspacePath: "/workspace",
+      sessionId: "session",
+    }),
+    { workspacePath: "/workspace", sessionId: "session" },
+  );
+  assert.deepEqual(
+    parseRuntimeResult("session.execution.summary", {
+      ...page.summary,
+      physicalAttempts: 2,
+      retries: 1,
+      cacheCoverage: "partial",
+    }),
+    { ...page.summary, physicalAttempts: 2, retries: 1, cacheCoverage: "partial" },
+  );
+  assert.throws(
+    () =>
+      parseStrictRuntimeParams("session.execution.summary", {
+        workspacePath: "/workspace",
+        sessionId: "session",
+        cursor: "invalid",
+      }),
+    RuntimeProtocolError,
+  );
+  assert.throws(
+    () =>
+      parseRuntimeResult("session.execution.summary", {
+        ...page.summary,
+        physicalAttempts: -1,
+      }),
+    RuntimeProtocolError,
+  );
   assert.deepEqual(parseRuntimeResult("session.execution.query", page), page);
   assert.throws(
     () =>
       parseRuntimeResult("session.execution.query", {
         ...page,
-        coverage: { ...page.coverage, modelAttempts: "physical" },
+        coverage: { ...page.coverage, modelAttempts: "invented" },
       }),
     RuntimeProtocolError,
   );

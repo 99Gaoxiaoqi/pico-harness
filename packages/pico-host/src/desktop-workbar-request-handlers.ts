@@ -9,6 +9,7 @@ type WorkbarMethod =
   | "session.artifacts.command"
   | "session.trace.query"
   | "session.execution.query"
+  | "session.execution.summary"
   | "session.graph.query"
   | "session.graph.retryWake"
   | "session.graph.stop";
@@ -29,6 +30,7 @@ export function createDesktopWorkbarRequestHandlers(
     "session.artifacts.query": (request) => context["session.artifacts.query"](request.params),
     "session.artifacts.command": (request) => context["session.artifacts.command"](request.params),
     "session.execution.query": (request) => context["session.execution.query"](request.params),
+    "session.execution.summary": (request) => context["session.execution.summary"](request.params),
     "session.trace.query": (request) => context["session.trace.query"](request.params),
     "session.graph.stop": (request) => context["session.graph.stop"](request.params),
     "session.graph.query": (request) => context["session.graph.query"](request.params),
