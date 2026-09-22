@@ -2792,6 +2792,7 @@ function physicalAttemptIdentity(record: PhysicalAttemptRecord): unknown {
     error: _error,
     costCNY: _cost,
     costStatus: _costStatus,
+    costUnknownReason: _costUnknownReason,
     ...identity
   } = record;
   return identity;
@@ -2853,6 +2854,7 @@ function physicalAccountingCall(record: PhysicalAttemptRecord): ProviderCallReco
       ...(fields.has("reasoning") ? { reasoningTokens: canonical.reasoningTokens } : {}),
       usageBasis: record.usageBasis,
       costStatus: record.costStatus,
+      ...(record.costUnknownReason ? { costUnknownReason: record.costUnknownReason } : {}),
       lifecycleStatus: record.status,
       observed: record.httpStatus !== undefined || record.status === "succeeded",
       pricingVersion: record.pricingVersion,

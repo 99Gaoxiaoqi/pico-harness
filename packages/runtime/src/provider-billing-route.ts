@@ -15,14 +15,13 @@ export interface ProviderBillingRouteConfig {
 export function billingRouteForProvider(
   kind: ProviderKind,
   config: ProviderBillingRouteConfig,
-): BillingRoute | string {
+): BillingRoute {
   const price = config.capabilities?.price;
-  if (!config.capabilities) return config.model;
   return {
     provider: kind,
     model: config.model,
     baseUrl: config.baseURL,
-    cacheSupported: config.capabilities.cache,
+    ...(config.capabilities ? { cacheSupported: config.capabilities.cache } : {}),
     ...(price?.source === "config"
       ? {
           pricing: {

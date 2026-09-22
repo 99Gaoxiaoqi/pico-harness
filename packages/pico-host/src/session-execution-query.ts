@@ -345,9 +345,19 @@ function attemptMetrics(
       if (attempt[key] !== undefined) totals[key] = (totals[key] ?? 0) + attempt[key];
     }
   const firstToken = attempts.find((a) => a.timeToFirstTokenMs !== undefined);
+  const unknownReasons = [
+    ...new Set(
+      attempts.flatMap((attempt) =>
+        attempt.costStatus === "unknown" && attempt.costUnknownReason
+          ? [attempt.costUnknownReason]
+          : [],
+      ),
+    ),
+  ];
   return {
     ...totals,
     attempts,
+    ...(unknownReasons.length ? { costUnknownReason: unknownReasons.join("；") } : {}),
     retries: retryAttempt + Math.max(0, attempts.length - 1),
     ...(firstToken
       ? {
@@ -533,6 +543,9 @@ function projectRun(
       ...(record.error !== undefined ? { error: preview(record.error) } : {}),
       ...usageMetrics(record.usage),
       costStatus: record.costStatus,
+      ...(record.costStatus === "unknown" && record.costUnknownReason
+        ? { costUnknownReason: preview(record.costUnknownReason) }
+        : {}),
       ...(record.costStatus !== "unknown" && record.costCNY !== undefined
         ? { costCNY: record.costCNY }
         : {}),

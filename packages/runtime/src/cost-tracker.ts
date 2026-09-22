@@ -257,10 +257,11 @@ export class CostTracker implements LLMProvider {
       }
     };
     let frozenPricing: ReturnType<typeof getPricingEntry> = null;
+    let pricingUnavailableReason = "该 endpoint/model 未匹配定价，也未明确配置套餐内计费";
     try {
       frozenPricing = structuredClone(getPricingEntry(route, this.options.catalogPricing));
     } catch {
-      /* Preserve unpriced admission. */
+      pricingUnavailableReason = "请求时定价解析失败，未按当前价格回填";
     }
     const pricingVersion = `route-v1:${createHash("sha256").update(JSON.stringify(frozenPricing)).digest("hex")}`;
     const ledger = this.options.ledger;
@@ -338,7 +339,15 @@ export class CostTracker implements LLMProvider {
           ...snapshot,
           ...(cost && cost.status !== "unknown"
             ? { costCNY: cost.costCNY, costStatus: cost.status }
-            : { costStatus: "unknown" }),
+            : {
+                costStatus: "unknown",
+                costUnknownReason:
+                  snapshot.usageBasis !== "reported" || !snapshot.usage
+                    ? "Provider 未上报可计价用量"
+                    : !frozenPricing
+                      ? pricingUnavailableReason
+                      : "请求使用的 Token 类别缺少单价",
+              }),
         };
         try {
           const written = ledger.recordPhysicalAttempt!(record);
