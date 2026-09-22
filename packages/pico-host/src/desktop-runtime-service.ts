@@ -1,3 +1,7 @@
+import {
+  getLatestContextRequest,
+  createCurrentContextSections,
+} from "./session-context-composition.js";
 import { querySessionExecution, querySessionExecutionSummary } from "./session-execution-query.js";
 import { projectDeepResearchProgress } from "@pico/core/deep-research";
 import { SqliteDeepResearchStore } from "@pico/storage";
@@ -1534,9 +1538,25 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         sessionId,
         limit: 1,
       }).throughSequence;
+      const history = session.getHistory();
+      let latestRequest;
+      try {
+        latestRequest = getLatestContextRequest(
+          resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.root,
+          sessionId,
+        );
+      } catch {
+        latestRequest = {
+          status: "unavailable",
+          source: "none",
+          reason: "请求组成读取失败。",
+        } as const;
+      }
       return toJsonValue({
         context: {
-          ...createModelContextReport(route, session.getHistory()),
+          ...createModelContextReport(route, history),
+          sections: createCurrentContextSections(history),
+          latestRequest,
           version: 2,
           sessionId,
           generatedAt: this.now(),
@@ -2899,7 +2919,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         });
         const filter = params.sessionId ? { sessionId: params.sessionId } : {};
         const calls = store
-          .listProviderCalls(filter)
+          .listAccountingProviderCalls(filter)
           .filter((record) => inTimeRange(record.createdAt, from, to));
         const hasRange = from !== undefined || to !== undefined;
         const baselines = hasRange
@@ -4023,7 +4043,12 @@ function summarizeUsageRecords(
   let unknownCostCallCount = 0;
   for (const call of calls) {
     const reported = call.reported ?? {};
-    if (reported["usageMetadata"] === "reported") usageReportCount += 1;
+    const fields = reported["reportedFields"];
+    if (
+      reported["usageMetadata"] === "reported" &&
+      (!Array.isArray(fields) || (fields.includes("prompt") && fields.includes("completion")))
+    )
+      usageReportCount += 1;
     const reasoning = reported["reasoningTokens"];
     if (typeof reasoning === "number" && Number.isFinite(reasoning) && reasoning >= 0) {
       reasoningTokens += reasoning;

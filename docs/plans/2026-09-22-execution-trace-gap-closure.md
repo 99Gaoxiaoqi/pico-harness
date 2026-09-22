@@ -1,8 +1,8 @@
 # Pico 执行轨迹剩余缺口收口方案
 
-状态：方案草案，尚未实施。基线：`dcf0def8`。日期：2026-09-22。
+状态：已实施并通过最终集成验收。起始基线：`dcf0def8`。日期：2026-09-22。
 
-本轮目标是补齐请求生命周期计量、取消后补账、全局用量统一、上下文组成和真实桌面回归五项缺口。验收以可复现行为和明确数据口径为准，不使用“对齐百分比”。这份方案不表示下列能力已经实现或测试已经通过。
+本轮目标是补齐请求生命周期计量、取消后补账、全局用量统一、上下文组成和真实桌面回归五项缺口。验收以可复现行为和明确数据口径为准，不使用“对齐百分比”。原始设计与验收要求保留在下文；实际实现、验证结果及边界见第 9 节。
 
 ## 1. 当前基线和范围
 
@@ -88,7 +88,7 @@ flowchart LR
 
 ## 4. 验收矩阵
 
-下列用例未执行，实施时逐项记录证据。正常主路径外，只覆盖与本轮风险直接相关的失败路径。
+下列为原始验收要求，实际验证记录见第 9 节。正常主路径外，只覆盖与本轮风险直接相关的失败路径。
 
 | 编号 | 场景                                                              | 明确通过条件                                                                                                                       |
 | ---- | ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
@@ -147,3 +147,52 @@ flowchart LR
 Maka 本地 `packages/core/src/model-call-attempt.ts` 同样明确承认 dispatch 到 settle 之间的崩溃遗漏。Pico 采用 durable start 是针对剩余缺口的加强，不应表述为 Maka 已经保证远端 exactly-once。
 
 最终保证是“已提交事实可恢复、同一事实不重复计量、可识别缺口明确披露”。客户端无法证明远端在断网/取消/崩溃后的全部消耗；只有 Provider 实际送达的证据才可补账。历史无法恢复的明细长期保留 legacy/unknown 标记，这不属于可以通过代码补造的待办。
+
+## 9. 实施与验收记录
+
+### 已实现的数据链
+
+`AiSdkProvider` 在每次真实 dispatch 前等待 SQLite admission。`prepared` 只证明本地持久准入；响应到达写 `observed`，成功、失败、取消分别提交终态 revision。取消立即 abort 网络，最多观察 5 秒已经到达客户端的 SDK 数据。晚到用量替换同一记录，不改变 Run 终态。存储错误只重试相同本地 revision，不能触发第二次 HTTP。
+
+`usage_physical_attempts` 保存最新事实，`usage_attempt_revisions` 保存幂等摘要，`usage_accounting_versions` 使分页发现晚到修订后最多重读一次。读者不恢复或重放请求；写者仅恢复已经退出或明确关闭的 owner。已删除会话的回调被隔离。
+
+统一读取选择 physical、embedded、legacy logical/event；历史汇总只保留扣除可证明重叠后的余额。费用冻结调用时的计价依据，不按当前价格重算旧调用。Session、Run 返回、用量页与轨迹使用相同测量口径；轨迹的模型调用记录数与底层物理尝试数仍是两个不同指标。
+
+当前上下文是消息估算；只读接口无法取得当前生效工具集时明确显示未知，不为读取启动 Agent/MCP。最近成功主请求另以同一物理记录的 diagnostic 与 usage 显示语义 UTF-8 字节组成，工具 Top 8 加余项总量闭合。语义分段不包括 JSON 外层标点等完整 wire 开销，字节不转换成实际 Token。
+
+### 可复现证据
+
+- Provider 真实 HTTP/SSE：`tests/integration/provider/physical-attempt-lifecycle.test.ts`、`physical-attempt-ledger.test.ts`。覆盖准入 0 HTTP、兼容降级、外层重试、取消、Claude 初始部分用量、本地写失败不重发。新加 Provider → CostTracker → SQLite 全链路回归，曾复现终态多带旧 `attemptId` 导致拒绝更新，修正后 terminal revision 正常提交。
+- 存储：`tests/integration/storage/physical-attempt-authority.test.ts`。覆盖真实 SIGKILL 后的 completed/prepared/observed 事实保留、明确 writer 恢复、重复与乱序、owner fence、删除隔离、旧数据迁移与可读备份。
+- 统一查询：`tests/integration/runtime/execution-accounting-consistency.test.ts`。覆盖原 logical 999 被 physical 100 替代、取消后修订、后台无 Runtime 模型事件的调用、游标失效重读与历史基线；查询预算把物理元数据也计入，读取时排除 request diagnostic。
+- 上下文：`tests/integration/runtime/session-context-composition.test.ts`，结合既有 provider diagnostics 测试核对中文、工具、附件、Responses、旧数据缺失、辅助调用不替换主请求。
+- 真 Electron：`tests/integration/desktop/desktop-execution-trace-electron.test.ts`。使用生产 Inspector、preload、main IPC、LocalRuntimeClient、daemon 与 SQLite，只有外部模型替换为本地 HTTP fixture。覆盖 5 页历史、新调用自动刷新、任务切换、停用再激活、选择与收起、实际剪贴板、轨迹损坏时汇总可用、读取故障不清空旧轨迹、恢复及优雅重启重连。集成版自动刷新实测 **286ms**，Electron **43.1.0** / Node **24.18.0**。
+- 1 万次物理请求，Apple M5 / Node **26.7.0**，30 个样本，每次新建只读 SQLite 连接：第一次冷查询后其余为 OS 缓存热查询。首屏 p95 **385ms**，summary p95 **356ms**；单页不超过 **48 KiB**。初版约 2 秒，去除相关子查询重复扫描、复用汇总覆盖结果后通过 500ms 目标。
+- 真实模型：`PICO_PHYSICAL_ACCOUNTING_E2E=1 ... tests/e2e/physical-accounting.real-llm.test.ts`，用户配置的 `glm-5.2` 返回成功，1 次物理请求、HTTP 200、输入 29 / 输出 208、TTFT 2085ms。凭证只在内存使用，隔离测试目录清理。
+- Computer Use：真实 Pico 新任务返回 `PICO_TRACE_DURABLE_OK`。UI 与 SQLite 对应 `attempt_16ee0c30-c836-4363-8f93-8d86ec9bd8ef`，revision 2 / succeeded，输入 **6203**、输出 **239**、缓存 **50**、TTFT **3596ms**、HTTP **200**。语义组成 **24873 B**，完整序列化请求 **24932 B**，两者有意不等。
+
+![真实模型执行轨迹](../assets/trace-acceptance/2026-09-22-real-trace.png)
+
+![当前上下文与历史请求分离展示](../assets/trace-acceptance/2026-09-22-context-overview.png)
+
+### 边界与回退
+
+远端取消后未送达的消耗仍未知。历史明细无法补造。当前工具估算不可用不影响历史实际工具组成。Electron 自动化重连验证使用优雅停止；SIGKILL 计量恢复在独立真实子进程测试中验证，不等于保证整个 App 在 SIGKILL 后立即越过仍有效的会话租约。迁移保留旧账本与原始基线，使用独立扣重项及增量 Schema；回退只能使用理解新 Schema 的修复版本。
+
+### 最终验证结果
+
+最终集成状态通过 **34 项针对性集成测试 + 1 项真实 Electron 测试 + 1 项真实模型 E2E**，没有失败或跳过。真实模型验证在最终历史基线修复前执行，该修复不改变模型请求路径。包构建、根目录与桌面三套 TypeScript 检查、受影响文件 ESLint、架构边界检查、SQLite 能力检查及 macOS arm64 桌面打包全部通过。
+
+打包版在关闭原 App、优雅停止 daemon 后重新启动；通过 Computer Use 打开同一任务，确认仍为 1 次物理请求，输入 6203 / 输出 239 / 缓存 50，历史请求组成 24873 B，终态仍成功。这同时验证了持久记录跨 App 重启读取，未发送新的模型请求。
+
+| 验收项  | 结果与证据                                                                                                                         |
+| ------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| A01–A04 | 通过：HTTP 准入、真实 SIGKILL、writer 恢复、降级与重试；见 Provider/Storage 集成测试。                                             |
+| A05–A08 | 通过：真实取消 Run 的晚到修订、部分 usage、本地写失败不重发、owner 与会话删除隔离。                                                |
+| A09–A10 | 通过：新旧来源优先级、control 5 历史基线扣重、重复迁移、事件保留期后计量、统一入口与后台调用。                                     |
+| A11–A12 | 通过已定义可用性边界：语义字节闭合、最近主请求独立取证、当前估算与历史证据分离；当前工具集不可获取时标为未知，切换会话拒绝旧响应。 |
+| A13–A16 | 通过：真实 Electron 自动刷新、5 页历史、停用/重开、生产 IPC、优雅重连、独立失败和真实剪贴板。                                      |
+| A17     | 通过：1 万次请求 / 30 样本，首次查询 357ms，首屏 p95 385ms / 汇总 p95 356ms，单页 ≤48 KiB。                                        |
+| A18     | 通过：真实 glm-5.2、App 与 SQLite 核对、截图、最终打包版重开验证。                                                                 |
+
+执行命令：`npm run build:packages`、`npx tsc --noEmit`、桌面 `tsconfig.main/preload/renderer.json` 分别检查、`npm run check:architecture`、`npm run check:storage`、`npm run desktop:package`。集成测试使用 `node --import tsx --import @pico/cli/tui/preload-env --test --test-concurrency=1`，文件为本节列出的测试及既有 `session-execution-enrichment`、`session-execution-query`、`trace-app-alignment`、`desktop-preload-bridge`。Electron 测试通过 `PICO_TEST_ELECTRON` 指向安装的 Electron 二进制；真实模型测试需要显式设置 `PICO_PHYSICAL_ACCOUNTING_E2E=1`。
