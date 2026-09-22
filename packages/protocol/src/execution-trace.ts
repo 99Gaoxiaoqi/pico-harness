@@ -18,6 +18,7 @@ export interface RuntimeExecutionAttempt {
   readonly error?: string;
   readonly costCNY?: number;
   readonly costStatus?: "estimated" | "included" | "unknown";
+  readonly costUnknownReason?: string;
 }
 
 /** Read-only causal projection of the existing event ledger; never a second trace store. */
@@ -49,6 +50,7 @@ export interface RuntimeExecutionStep {
   readonly outputTokens?: number;
   readonly costCNY?: number;
   readonly costStatus?: "estimated" | "included" | "unknown";
+  readonly costUnknownReason?: string;
 }
 export interface RuntimeExecutionRun {
   readonly runId: string;
