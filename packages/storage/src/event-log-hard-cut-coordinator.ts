@@ -670,12 +670,6 @@ function optionalString(value: unknown, field: string): string | undefined {
   return value == null ? undefined : requireString(value, field);
 }
 
-function requireDigest(value: unknown, field: string): string {
-  const digest = requireString(value, field);
-  if (!DIGEST_PATTERN.test(digest)) throw new FileStorageIntegrityError(`${field} is invalid`);
-  return digest;
-}
-
 function requireNonNegativeInteger(value: unknown, field: string): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
     throw new FileStorageIntegrityError(`${field} is not a non-negative safe integer`);
