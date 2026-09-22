@@ -2295,7 +2295,6 @@ export async function executeAgentRuntime(
               ),
           }
         : {}),
-      skillLoaderFactory,
       ...(rebuildProvider ? { rebuildProvider } : {}),
     });
 

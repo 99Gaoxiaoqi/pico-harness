@@ -68,13 +68,6 @@ export type RuntimeSessionArtifact = JsonObject & {
   readonly updatedAt: number;
 };
 
-/** Current estimates and completed-request observations are deliberately separate. */
-export type RuntimeContextSection = JsonObject & {
-  readonly id: string;
-  readonly label: string;
-  readonly tokens?: number;
-  readonly state: "included" | "unknown";
-};
 export type RuntimeContextComposition = JsonObject & {
   readonly basis: "semantic_utf8_bytes";
   readonly totalBytes: number;
@@ -242,6 +235,100 @@ const runtimeBrowserAgentCommandResult = exactResultShape({
   createdAt: resultFiniteNumber,
   expiresAt: resultFiniteNumber,
 });
+
+const runtimeContextCompactionResult = exactResultShape(
+  {
+    checkpointId: resultNonEmptyString,
+    throughEventId: resultNonEmptyString,
+    coveredEventCount: resultNonNegativeInteger,
+  },
+  { phase: resultOneOf(["pre_turn", "mid_turn"]), estimatedTokens: resultNonNegativeInteger },
+);
+const runtimeContextCompositionResult = exactResultShape({
+  basis: resultOneOf(["semantic_utf8_bytes"]),
+  totalBytes: resultNonNegativeInteger,
+  segments: resultArray(
+    exactResultShape({
+      kind: resultOneOf(["system", "tools", "messages", "other"]),
+      bytes: resultNonNegativeInteger,
+    }),
+  ),
+  tools: resultArray(
+    exactResultShape({ label: resultNonEmptyString, bytes: resultNonNegativeInteger }),
+  ),
+  remainingTools: exactResultShape({
+    count: resultNonNegativeInteger,
+    bytes: resultNonNegativeInteger,
+  }),
+  unlabelledToolBytes: resultNonNegativeInteger,
+});
+const runtimeLatestContextResult = exactResultShape(
+  {
+    status: resultOneOf(["available", "unavailable"]),
+    source: resultOneOf(["physical", "none"]),
+    usageStatus: resultOneOf(["reported", "partial", "missing"]),
+    compositionStatus: resultOneOf(["available", "unrecorded"]),
+  },
+  {
+    reason: resultString,
+    providerCallId: resultNonEmptyString,
+    physicalAttemptId: resultNonEmptyString,
+    providerId: resultNonEmptyString,
+    modelId: resultNonEmptyString,
+    routeId: resultNonEmptyString,
+    connectionId: resultNonEmptyString,
+    completedAt: resultFiniteNumber,
+    contextWindow: resultPositiveInteger,
+    contextWindowSource: resultNonEmptyString,
+    inputTokens: resultNonNegativeInteger,
+    outputTokens: resultNonNegativeInteger,
+    cachedInputTokens: resultNonNegativeInteger,
+    composition: runtimeContextCompositionResult,
+    compaction: runtimeContextCompactionResult,
+  },
+);
+const runtimeSessionContextResult = exactResultShape(
+  {
+    version: resultOneOf([3]),
+    sessionId: resultNonEmptyString,
+    generatedAt: resultFiniteNumber,
+    selectedRoute: exactResultShape(
+      {
+        routeId: resultNonEmptyString,
+        providerId: resultNonEmptyString,
+        modelId: resultNonEmptyString,
+      },
+      {
+        connectionId: resultNonEmptyString,
+        contextWindow: resultPositiveInteger,
+        declaredContextWindow: resultPositiveInteger,
+      },
+    ),
+    latestRequest: runtimeLatestContextResult,
+    modelHistory: exactResultShape(
+      {
+        throughSequence: resultNonNegativeInteger,
+        messageCount: resultNonNegativeInteger,
+        estimatedTokens: resultNonNegativeInteger,
+        estimationAlgorithm: resultOneOf(["maka_chars_v1"]),
+        projection: resultOneOf(["effective_model_history"]),
+        compactedCount: resultNonNegativeInteger,
+      },
+      { latestCompaction: runtimeContextCompactionResult },
+    ),
+  },
+  {
+    lastRequestAnchor: exactResultShape(
+      {
+        routeId: resultNonEmptyString,
+        modelId: resultNonEmptyString,
+        inputTokens: resultNonNegativeInteger,
+        outputTokens: resultNonNegativeInteger,
+      },
+      { connectionId: resultNonEmptyString },
+    ),
+  },
+);
 
 const runtimeChangeResult = resultShape({
   path: resultString,
@@ -960,7 +1047,7 @@ const runtimeExecutionPageResult = exactResultShape(
 
 export const workbarResultValidators = {
   "session.research.query": resultJsonObject,
-  "session.context.get": exactResultShape({ context: resultJsonObject }),
+  "session.context.get": exactResultShape({ context: runtimeSessionContextResult }),
   "session.tasks.query": exactResultShape(
     { revision: resultNonNegativeInteger, tasks: resultArray(runtimeSessionTaskResult) },
     { nextCursor: resultNonEmptyString },
