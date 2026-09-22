@@ -279,6 +279,41 @@ test("execution trace crosses the desktop protocol with strict causal and covera
     RuntimeProtocolError,
   );
   assert.deepEqual(parseRuntimeResult("session.execution.query", page), page);
+  const physicalPage = {
+    ...page,
+    coverage: { ...page.coverage, modelAttempts: "physical" },
+    runs: [
+      {
+        ...page.runs[0],
+        steps: [
+          {
+            ...page.runs[0]!.steps[0],
+            attempts: [
+              {
+                attemptId: "attempt",
+                attempt: 0,
+                provider: "test",
+                model: "model",
+                startedAt: "2026-09-22T00:00:00.000Z",
+                completedAt: "2026-09-22T00:00:00.010Z",
+                status: "failed",
+                latencyMs: 10,
+                httpStatus: 503,
+                usageBasis: "missing",
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+  assert.deepEqual(parseRuntimeResult("session.execution.query", physicalPage), physicalPage);
+  physicalPage.runs[0]!.steps[0]!.attempts[0]!.attempt = -1;
+  assert.throws(
+    () => parseRuntimeResult("session.execution.query", physicalPage),
+    RuntimeProtocolError,
+  );
+
   assert.throws(
     () =>
       parseRuntimeResult("session.execution.query", {

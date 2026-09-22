@@ -237,6 +237,7 @@ function summary(db: DatabaseSync, sessionId: string, watermark: number): Runtim
     sum(input_tokens) AS input_tokens, sum(output_tokens) AS output_tokens,
     sum(cached_tokens) AS cached_tokens, sum(reasoning_tokens) AS reasoning_tokens, sum(cost) AS cost,
     count(cached_tokens) AS cache_known, count(*) AS measurement_count,
+    sum(CASE WHEN cached_tokens IS NOT NULL AND input_tokens IS NOT NULL AND cached_tokens<=input_tokens THEN 1 ELSE 0 END) AS cache_comparable,
     (SELECT count(*) FROM calls WHERE json_extract(settled,'$.attemptCoverage')='partial') AS partial_calls,
     (SELECT sum(json_extract(settled,'$.latencyMs')) FROM calls) AS latency,
     (SELECT sum(json_array_length(settled,'$.attempts')) FROM calls) AS physical_attempts,
@@ -270,7 +271,7 @@ function summary(db: DatabaseSync, sessionId: string, watermark: number): Runtim
     cacheCoverage:
       Number(row.cache_known) === 0
         ? "missing"
-        : Number(row.cache_known) === Number(row.measurement_count) &&
+        : Number(row.cache_comparable) === Number(row.measurement_count) &&
             Number(row.partial_calls) === 0
           ? "complete"
           : "partial",
