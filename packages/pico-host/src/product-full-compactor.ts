@@ -4,11 +4,7 @@ import {
 } from "@pico/runtime/full-compactor";
 import { logger } from "@pico/pico-host/logger";
 
-export {
-  enforceSummaryCharLimit,
-  MAX_SUMMARY_CHARS,
-  wrapFullCompactionSummary,
-} from "@pico/runtime/full-compactor";
+export { wrapFullCompactionSummary } from "@pico/runtime/full-compactor";
 export type {
   FullCompactionPreview,
   FullCompactionRequest,

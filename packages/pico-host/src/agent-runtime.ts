@@ -2244,7 +2244,6 @@ export async function executeAgentRuntime(
       workDir,
       runtimePort: createEngineRuntimePort(),
       workspaceRoots,
-      usageSession: session,
       ...(effectiveOptions.thinkingEffort !== undefined
         ? { thinkingEffort: effectiveOptions.thinkingEffort }
         : {}),
@@ -2269,7 +2268,6 @@ export async function executeAgentRuntime(
       ...(dependencies.toolResultRedactionSecrets
         ? { toolResultRedactionSecrets: dependencies.toolResultRedactionSecrets }
         : {}),
-      compactor: contextRuntime.compactor,
       contextBudget: contextRuntime.budget,
       contextRouteIdentity,
       // Maka: only declared windows + real provider usage trigger proactive compaction.

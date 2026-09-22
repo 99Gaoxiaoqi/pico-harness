@@ -89,7 +89,6 @@ export function bindRuntimeHookCapabilities(input: RuntimeHookAssemblyInput): vo
             workDir: input.workDir,
             runtimePort,
             workspaceRoots: input.workspaceRoots,
-            usageSession: child,
             goalManager: input.runtimeState.goalManager,
             systemPrompt:
               '你是只读 Hook 验证器。核验用户提供的任务与证据；最终只输出单个 JSON 对象 {"ok": boolean, "reason": string}。',

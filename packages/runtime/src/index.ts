@@ -114,8 +114,6 @@ export * from "./session-manager.js";
 export * from "./session-fork-runtime-port.js";
 export * from "./session-fork-runtime-lifecycle.js";
 export * from "./silent-reporter.js";
-export * from "./subagent-context-policy.js";
-export * from "./subagent-context.js";
 export * from "./subagent-activity-reporter.js";
 export * from "./subagent-budget.js";
 export * from "./steer-queue.js";
