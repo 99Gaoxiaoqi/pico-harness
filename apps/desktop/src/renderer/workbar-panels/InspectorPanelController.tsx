@@ -214,9 +214,11 @@ export function InspectorPanelController({
   );
 }
 
-function contextView(context: RuntimeSessionContextSnapshot): InspectorContextSnapshot {
+export function contextView(context: RuntimeSessionContextSnapshot): InspectorContextSnapshot {
   return {
     version: context.version,
+    ...(context.sections ? { sections: context.sections } : {}),
+    ...(context.latestRequest ? { latestRequest: context.latestRequest } : {}),
     routeId: stringField(context, "routeId"),
     estimatedInputTokens: numberField(context, "estimatedInputTokens"),
     inputBudgetTokens: numberField(context, "inputBudgetTokens"),
