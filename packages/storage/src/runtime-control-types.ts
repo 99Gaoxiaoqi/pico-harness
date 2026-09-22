@@ -148,6 +148,7 @@ export interface MergeRequestRecord {
   updatedAt: number;
 }
 
+/** Display projection derived exclusively from native physical attempt measurements. */
 export interface ProviderCallRecord {
   callId: string;
   sessionId?: string | undefined;

@@ -1848,12 +1848,6 @@ export class SqliteRuntimeControlStore {
     this.bumpAccountingRevision(record.sessionId);
     const json = canonicalJson(record);
     this.mutate(
-      `INSERT OR IGNORE INTO usage_accounting_calls(provider_call_id, source, coverage) VALUES (?, ?, ?)`,
-      record.providerCallId,
-      record.accountingSource,
-      record.attemptCoverage ?? "complete",
-    );
-    this.mutate(
       `INSERT INTO usage_attempt_revisions(physical_attempt_id, revision, snapshot_hash) VALUES (?, ?, ?)`,
       record.physicalAttemptId,
       record.revision,
@@ -1938,76 +1932,6 @@ export class SqliteRuntimeControlStore {
 
   listAccountingProviderCalls(filter: UsageLedgerFilter = {}): ProviderCallRecord[] {
     return this.listPhysicalAttempts(filter).map(physicalAccountingCall);
-  }
-
-  recordProviderCall(record: Omit<ProviderCallRecord, "createdAt"> & { createdAt?: number }): {
-    record: ProviderCallRecord;
-    inserted: boolean;
-  } {
-    return this.write((tx) => {
-      if (record.jobId) this.requireJob(record.jobId);
-      if (record.attemptId) {
-        const attempt = this.requireAttempt(record.attemptId);
-        if (record.jobId && attempt.jobId !== record.jobId) {
-          throw new RuntimeConflictError(
-            `Provider call ${record.callId} 的 attempt ${record.attemptId} 不属于 job ${record.jobId}`,
-          );
-        }
-      }
-      const existingRow = this.getRow(
-        `SELECT * FROM usage_provider_calls WHERE call_id = ?`,
-        record.callId,
-      );
-      if (existingRow) {
-        const existing = rowToProviderCall(existingRow);
-        if (!sameProviderCall(existing, record)) {
-          throw new RuntimeConflictError(`Provider call ID ${record.callId} 已被其他调用使用`);
-        }
-        return { record: existing, inserted: false };
-      }
-      const stored: ProviderCallRecord = compact({
-        ...record,
-        createdAt: record.createdAt ?? this.now(),
-      });
-      this.mutate(
-        `INSERT INTO usage_provider_calls (call_id, tx_id, session_id, conversation_id, goal_id,
-           job_id, attempt_id, purpose, provider, model, route, status, input_tokens,
-           output_tokens, cache_read_tokens, cache_write_tokens, cost, reported_json, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        stored.callId,
-        tx.transactionId,
-        stored.sessionId ?? null,
-        stored.conversationId ?? null,
-        stored.goalId ?? null,
-        stored.jobId ?? null,
-        stored.attemptId ?? null,
-        stored.purpose,
-        stored.provider,
-        stored.model,
-        stored.route ?? null,
-        stored.status,
-        stored.inputTokens,
-        stored.outputTokens,
-        stored.cacheReadTokens,
-        stored.cacheWriteTokens,
-        stored.cost,
-        stored.reported === undefined ? null : canonicalJson(stored.reported),
-        stored.createdAt,
-      );
-      this.bumpAccountingRevision(stored.sessionId);
-      return { record: stored, inserted: true };
-    });
-  }
-
-  listProviderCalls(filter: UsageLedgerFilter = {}): ProviderCallRecord[] {
-    return this.read(() => {
-      const { clauses, params } = usageCallFilterClauses(filter);
-      const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
-      return this.allRows(
-        `SELECT * FROM usage_provider_calls${where} ORDER BY created_at, call_id`,
-        ...params,
-      ).map(rowToProviderCall);
-    });
   }
 
   getUsageSummary(filter: UsageLedgerFilter = {}): UsageLedgerSummary {
@@ -2670,30 +2594,7 @@ function rowToRuntimeEvent(row: Row): RuntimeEventRecord {
   }) as RuntimeNotificationEventRecord;
 }
 
-function rowToProviderCall(row: Row): ProviderCallRecord {
-  return compact({
-    callId: textField(row, "call_id"),
-    sessionId: optionalTextField(row, "session_id"),
-    conversationId: optionalTextField(row, "conversation_id"),
-    goalId: optionalTextField(row, "goal_id"),
-    jobId: optionalTextField(row, "job_id"),
-    attemptId: optionalTextField(row, "attempt_id"),
-    purpose: textField(row, "purpose") as ProviderCallRecord["purpose"],
-    provider: textField(row, "provider"),
-    model: textField(row, "model"),
-    route: optionalTextField(row, "route"),
-    status: textField(row, "status") as ProviderCallRecord["status"],
-    inputTokens: numberField(row, "input_tokens"),
-    outputTokens: numberField(row, "output_tokens"),
-    cacheReadTokens: numberField(row, "cache_read_tokens"),
-    cacheWriteTokens: numberField(row, "cache_write_tokens"),
-    cost: numberField(row, "cost"),
-    reported: jsonRecordField(row, "reported_json"),
-    createdAt: numberField(row, "created_at"),
-  });
-}
-
-// ---- 纯函数辅助(与旧实现同语义的小工具) ----
+// ---- 纯函数辅助 ----
 
 function usageCallFilterClauses(filter: { sessionId?: string; goalId?: string; jobId?: string }): {
   clauses: string[];
@@ -2795,31 +2696,6 @@ function daemonRunRecoveryEvent(run: DaemonRunRecord): RuntimeNotificationEventR
 
 function sameJson(left: unknown, right: unknown): boolean {
   return isDeepStrictEqual(left, right);
-}
-
-function sameProviderCall(
-  stored: ProviderCallRecord,
-  input: Omit<ProviderCallRecord, "createdAt"> & { createdAt?: number },
-): boolean {
-  return (
-    stored.callId === input.callId &&
-    stored.sessionId === input.sessionId &&
-    stored.conversationId === input.conversationId &&
-    stored.goalId === input.goalId &&
-    stored.jobId === input.jobId &&
-    stored.attemptId === input.attemptId &&
-    stored.purpose === input.purpose &&
-    stored.provider === input.provider &&
-    stored.model === input.model &&
-    stored.route === input.route &&
-    stored.status === input.status &&
-    stored.inputTokens === input.inputTokens &&
-    stored.outputTokens === input.outputTokens &&
-    stored.cacheReadTokens === input.cacheReadTokens &&
-    stored.cacheWriteTokens === input.cacheWriteTokens &&
-    stored.cost === input.cost &&
-    isDeepStrictEqual(stored.reported, input.reported)
-  );
 }
 
 function addUsage(left: UsageLedgerTotals, right: UsageLedgerTotals): UsageLedgerTotals {

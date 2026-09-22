@@ -45,7 +45,7 @@ export interface CostTrackerDiagnostics {
 import { isAbortError, ModelCommunicationError } from "@pico/core";
 import type {
   PhysicalAttemptRecord,
-  ProviderCallRecord,
+  PhysicalAttemptFilter,
 } from "@pico/storage/runtime-control-types";
 import { estimateCost, getPricingEntry, type BillingRoute } from "@pico/runtime/pricing";
 import { getProviderCallContext, type ProviderCallContext } from "@pico/runtime";
@@ -68,16 +68,8 @@ export interface ProviderCallLedger {
     record: PhysicalAttemptRecord;
     updated: boolean;
   };
-  recordProviderCall(record: Omit<ProviderCallRecord, "createdAt"> & { createdAt?: number }): {
-    record: ProviderCallRecord;
-    inserted: boolean;
-  };
-  /** 可选读接口：供新建 Tracker 从持久账本恢复上一份请求指纹。 */
-  listProviderCalls?(filter?: {
-    sessionId?: string;
-    goalId?: string;
-    jobId?: string;
-  }): ProviderCallRecord[];
+  /** Restore request fingerprints from the native physical attempt ledger. */
+  listPhysicalAttempts?(filter?: PhysicalAttemptFilter): PhysicalAttemptRecord[];
 }
 
 export interface CostTrackerOptions {
@@ -380,15 +372,6 @@ export class CostTracker implements LLMProvider {
         ...(cost ? { costStatus: cost.status } : {}),
       });
       this.recordSessionUsage(response, latencyMs, streaming);
-      this.recordLedger(
-        callId,
-        context,
-        "succeeded",
-        response,
-        latencyMs,
-        undefined,
-        requestDiagnostic,
-      );
       return response;
     } catch (error) {
       const latencyMs = Date.now() - start;
@@ -402,7 +385,6 @@ export class CostTracker implements LLMProvider {
         latencyMs,
         error: runtimeErrorSummary(error),
       });
-      this.recordLedger(callId, context, status, undefined, latencyMs, error, requestDiagnostic);
       throw error;
     }
   }
@@ -413,13 +395,13 @@ export class CostTracker implements LLMProvider {
     model: string,
     route: string | undefined,
   ): PreparedRequestCapture | undefined {
-    const records = this.options.ledger?.listProviderCalls?.({
+    const records = this.options.ledger?.listPhysicalAttempts?.({
       ...(context.sessionId ? { sessionId: context.sessionId } : {}),
       ...(context.goalId ? { goalId: context.goalId } : {}),
       ...(context.jobId ? { jobId: context.jobId } : {}),
     });
     if (!records) return undefined;
-    let latest: { record: ProviderCallRecord; capture: PreparedRequestCapture } | undefined;
+    let latest: { record: PhysicalAttemptRecord; capture: PreparedRequestCapture } | undefined;
     for (const record of records) {
       if (
         record.purpose !== context.purpose ||
@@ -427,19 +409,19 @@ export class CostTracker implements LLMProvider {
         record.conversationId !== context.conversationId ||
         record.goalId !== context.goalId ||
         record.jobId !== context.jobId ||
-        record.attemptId !== context.attemptId ||
+        record.jobAttemptId !== context.attemptId ||
         record.model !== model ||
         record.route !== route
       ) {
         continue;
       }
-      const capture = parsePreparedRequestCapture(record.reported?.["requestDiagnostic"]);
+      const capture = parsePreparedRequestCapture(record.requestDiagnostic);
       if (capture?.provider !== provider || capture.model !== model) continue;
       if (
         !latest ||
-        record.createdAt > latest.record.createdAt ||
-        (record.createdAt === latest.record.createdAt &&
-          record.callId.localeCompare(latest.record.callId) > 0)
+        record.startedAt > latest.record.startedAt ||
+        (record.startedAt === latest.record.startedAt &&
+          record.physicalAttemptId.localeCompare(latest.record.physicalAttemptId) > 0)
       ) {
         latest = { record, capture };
       }
@@ -503,70 +485,6 @@ export class CostTracker implements LLMProvider {
       },
       "[Tracker] API 完成",
     );
-  }
-
-  private recordLedger(
-    callId: string,
-    context: ProviderCallContext,
-    status: ProviderCallRecord["status"],
-    response: Message | undefined,
-    latencyMs: number,
-    error?: unknown,
-    requestDiagnostic?: PreparedRequestDiagnostic,
-  ): void {
-    if (!this.options.ledger) return;
-    const route = normalizeRoute(this.modelRoute);
-    const usage = response?.usage;
-    const cost = usage
-      ? estimateCost(this.modelRoute, usage, this.options.catalogPricing)
-      : undefined;
-    const cacheSupport =
-      route.cacheSupported === true
-        ? { cacheSupport: "supported" }
-        : route.cacheSupported === false
-          ? { cacheSupport: "unsupported" }
-          : {};
-    try {
-      this.options.ledger.recordProviderCall({
-        callId,
-        ...context,
-        provider: route.provider,
-        model: route.model,
-        ...(route.baseUrl ? { route: safeRouteBaseUrl(route.baseUrl) } : {}),
-        status,
-        inputTokens: cost?.usage.inputTokens ?? 0,
-        // provider_calls 没有独立 reasoning 列；output 保留厂商 completion 总数，
-        // reasoning 明细只放 reported，避免账本静默丢 Token。
-        outputTokens: usage?.completionTokens ?? 0,
-        cacheReadTokens: cost?.usage.cacheReadTokens ?? 0,
-        cacheWriteTokens: cost?.usage.cacheWriteTokens ?? 0,
-        cost: cost?.costCNY ?? 0,
-        reported: usage
-          ? {
-              usageMetadata: "reported",
-              reportedFields: [...(usage.reportedFields ?? ["prompt", "completion"])],
-              reasoningTokens: cost?.usage.reasoningTokens ?? 0,
-              costStatus: cost?.status ?? "unknown",
-              latencyMs,
-              ...cacheSupport,
-              ...(requestDiagnostic ? { requestDiagnostic } : {}),
-            }
-          : {
-              usageMetadata: "unknown",
-              costStatus: "unknown",
-              latencyMs,
-              ...cacheSupport,
-              ...(requestDiagnostic ? { requestDiagnostic } : {}),
-              ...(error ? safeErrorMetadata(error) : {}),
-            },
-      });
-    } catch (ledgerError) {
-      // 模型响应已经产生时不能因观测存储故障丢弃结果；Session 聚合仍保留兼容兜底。
-      this.options.diagnostics?.error(
-        { callId, error: ledgerError instanceof Error ? ledgerError.message : String(ledgerError) },
-        "[Tracker] provider_calls 写入失败",
-      );
-    }
   }
 }
 

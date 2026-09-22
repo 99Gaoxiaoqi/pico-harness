@@ -1,3 +1,4 @@
+import type { PhysicalAttemptRecord } from "@pico/storage/runtime-control-types";
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -524,111 +525,55 @@ test("sqlite control store: cron job/run 生命周期与中断恢复(recoverInte
   }
 });
 
-test("sqlite control store: 逻辑调用仅用于诊断，不进入物理用量统计", () => {
+test("sqlite control store: physical usage survives reopen and filters sessions", () => {
   const root = freshRoot();
   const store = new SqliteRuntimeControlStore({ storageRoot: root });
   try {
-    const inserted1 = store.recordProviderCall({
-      callId: "call-1",
-      sessionId: "session-1",
-      purpose: "main",
-      provider: "test",
-      model: "test",
-      status: "succeeded",
-      inputTokens: 100,
-      outputTokens: 20,
-      cacheReadTokens: 5,
-      cacheWriteTokens: 3,
-      cost: 0.5,
-    });
-    assert.equal(inserted1.inserted, true);
-    assert.equal(inserted1.record.createdAt > 0, true);
-    store.recordProviderCall({
-      callId: "call-2",
-      sessionId: "session-2",
-      purpose: "subagent",
-      provider: "test",
-      model: "test",
-      status: "succeeded",
-      inputTokens: 10,
-      outputTokens: 5,
-      cacheReadTokens: 0,
-      cacheWriteTokens: 0,
-      cost: 0.25,
-    });
-    assert.equal(
-      store.recordProviderCall({
-        callId: "call-1",
-        sessionId: "session-1",
+    const ownerId = store.beginPhysicalAttemptOwner();
+    for (const id of ["1", "2"]) {
+      const prepared: PhysicalAttemptRecord = {
+        physicalAttemptId: `physical-${id}`,
+        providerCallId: `call-${id}`,
+        logicalCallId: `logical-${id}`,
+        ownerId,
+        sessionId: `session-${id}`,
+        accountingVersion: 1,
+        accountingSource: "physical",
+        pricingVersion: "fixture",
         purpose: "main",
         provider: "test",
         model: "test",
-        status: "succeeded",
-        inputTokens: 100,
-        outputTokens: 20,
-        cacheReadTokens: 5,
-        cacheWriteTokens: 3,
-        cost: 0.5,
-      }).inserted,
-      false,
-      "同 callId 同内容 → 幂等不重记",
-    );
-    assert.throws(
-      () =>
-        store.recordProviderCall({
-          callId: "call-1",
-          sessionId: "session-1",
-          purpose: "main",
-          provider: "test",
-          model: "test",
-          status: "failed",
-          inputTokens: 100,
-          outputTokens: 20,
-          cacheReadTokens: 5,
-          cacheWriteTokens: 3,
-          cost: 0.5,
-        }),
-      /已被其他调用使用/u,
-    );
-    assert.throws(
-      () =>
-        store.recordProviderCall({
-          callId: "orphan-call",
-          jobId: "missing-job",
-          purpose: "main",
-          provider: "test",
-          model: "test",
-          status: "succeeded",
-          inputTokens: 1,
-          outputTokens: 1,
-          cacheReadTokens: 0,
-          cacheWriteTokens: 0,
-          cost: 0,
-        }),
-      /未知任务/u,
-    );
-
-    const total = store.getUsageSummary();
-    assert.equal(total.providerCallCount, 0);
-    assert.deepEqual(total.total, {
-      inputTokens: 0,
-      outputTokens: 0,
-      cacheReadTokens: 0,
-      cacheWriteTokens: 0,
-      cost: 0,
-    });
-    assert.deepEqual(store.getUsageSummary({ sessionId: "session-1" }), total);
-    assert.deepEqual(
-      store.listProviderCalls({ sessionId: "session-2" }).map((call) => call.callId),
-      ["call-2"],
-    );
+        retryAttempt: 0,
+        attempt: 0,
+        revision: 0,
+        startedAt: `2026-09-22T00:00:0${id}.000Z`,
+        status: "prepared",
+        usageBasis: "missing",
+        costStatus: "unknown",
+      };
+      store.recordPhysicalAttempt(prepared);
+      const settled = {
+        ...prepared,
+        revision: 1,
+        status: "succeeded" as const,
+        usageBasis: "reported" as const,
+        usage: { promptTokens: 10, completionTokens: 2 },
+        costCNY: 0.5,
+        costStatus: "estimated" as const,
+      };
+      assert.equal(store.recordPhysicalAttempt(settled).updated, true);
+      assert.equal(store.recordPhysicalAttempt(settled).updated, false);
+    }
+    assert.equal(store.getUsageSummary().providerCallCount, 2);
+    assert.equal(store.getUsageSummary().total.cost, 1);
+    assert.equal(store.getUsageSummary({ sessionId: "session-1" }).total.inputTokens, 10);
     store.close();
     const reopened = new SqliteRuntimeControlStore({ storageRoot: root });
     try {
-      assert.deepEqual(reopened.getUsageSummary().total, total.total);
+      assert.equal(reopened.getUsageSummary().total.cost, 1);
       assert.deepEqual(
-        reopened.listProviderCalls().map((call) => call.callId),
-        ["call-1", "call-2"],
+        reopened.listPhysicalAttempts({ sessionId: "session-2" }).map((row) => row.providerCallId),
+        ["call-2"],
       );
     } finally {
       reopened.close();
@@ -655,18 +600,6 @@ test("sqlite control store: control/ 三文件不再产生", () => {
       topic: "run.started",
       workspacePath: root,
       payload: notificationEnvelope(root),
-    });
-    store.recordProviderCall({
-      callId: "call-1",
-      purpose: "main",
-      provider: "test",
-      model: "test",
-      status: "succeeded",
-      inputTokens: 1,
-      outputTokens: 1,
-      cacheReadTokens: 0,
-      cacheWriteTokens: 0,
-      cost: 0,
     });
 
     assert.ok(existsSync(operationalDatabasePath(root)), "pico.sqlite 必须存在");
