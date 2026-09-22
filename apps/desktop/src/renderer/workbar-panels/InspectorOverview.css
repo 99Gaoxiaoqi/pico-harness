@@ -1,6 +1,6 @@
 .tool-panel--inspector :is(.inspector-overview, .inspector-composition, .inspector-history) {
   min-width: 0;
-  padding: 16px 0;
+  padding: 16px;
   border-bottom: 1px solid var(--inspector-border);
   color: var(--inspector-ink);
   font-size: 14px;
@@ -16,7 +16,7 @@
 .tool-panel--inspector .inspector-overview__note {
   margin: 4px 0 8px;
   color: var(--inspector-muted);
-  font-size: 14px;
+  font-size: 12px;
   overflow-wrap: anywhere;
 }
 .tool-panel--inspector
@@ -65,7 +65,7 @@
 }
 .tool-panel--inspector .inspector-overview__ring-label {
   position: absolute;
-  inset: 22%;
+  inset: 16%;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -74,7 +74,7 @@
   line-height: 1.2;
 }
 .tool-panel--inspector .inspector-overview__ring-label strong {
-  font-size: clamp(14px, 3.8cqi, 20px);
+  font-size: clamp(14px, 3.8cqi, 18px);
   overflow-wrap: anywhere;
 }
 .tool-panel--inspector .inspector-overview__ring-label span {
