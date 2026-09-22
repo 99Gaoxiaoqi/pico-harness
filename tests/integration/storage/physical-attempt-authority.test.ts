@@ -1,3 +1,4 @@
+import { LEGACY_CONTROL_SCOPE } from "../helpers/legacy-control-schema.js";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
@@ -365,7 +366,7 @@ test("partial Claude usage ignores unreported intermediate counts and never mark
   }
 });
 
-test("control 6 deletes legacy usage and model traces, preserves native facts and chat, and never resurrects on reopen", async () => {
+test("control 7 deletes legacy usage and model traces, preserves native facts and chat, and never resurrects on reopen", async () => {
   const { ALL_WORKSPACE_SQLITE_SCOPES } = await import("@pico/storage/sqlite/workspace-scopes");
   const { prepareWorkspaceSqliteStorageSync } =
     await import("@pico/storage/sqlite/sqlite-workspace-storage");
@@ -381,8 +382,10 @@ test("control 6 deletes legacy usage and model traces, preserves native facts an
       ALL_WORKSPACE_SQLITE_SCOPES.map((scope) =>
         scope.name === "control"
           ? {
-              ...scope,
-              migrations: new Map([...scope.migrations].filter(([version]) => version <= 5)),
+              ...LEGACY_CONTROL_SCOPE,
+              migrations: new Map(
+                [...LEGACY_CONTROL_SCOPE.migrations].filter(([version]) => version <= 5),
+              ),
             }
           : scope,
       ),
@@ -511,11 +514,11 @@ test("control 6 deletes legacy usage and model traces, preserves native facts an
         );
 
         assert.equal(db.prepare("SELECT COUNT(*) AS n FROM usage_attempt_revisions").get()!.n, 1);
-        assert.equal(db.prepare("SELECT COUNT(*) AS n FROM usage_accounting_calls").get()!.n, 1);
+
         assert.equal(
           db
             .prepare(
-              "SELECT COUNT(*) AS n FROM sqlite_schema WHERE name IN ('usage_baselines','usage_baseline_adjustments','usage_effective_baselines','usage_baseline_reconcile')",
+              "SELECT COUNT(*) AS n FROM sqlite_schema WHERE name IN ('usage_baselines','usage_baseline_adjustments','usage_effective_baselines','usage_baseline_reconcile','usage_provider_calls','usage_accounting_calls','evidence_records','evidence_blobs')",
             )
             .get()!.n,
           0,

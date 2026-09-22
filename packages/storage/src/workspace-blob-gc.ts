@@ -413,15 +413,12 @@ function workspaceDigestIsReferenced(
   const database = openOperationalDatabaseReadOnly(storageRoot);
   try {
     if (kind === "evidence") {
-      return (
-        databaseJsonColumnContains(database, "evidence_records", "content_json", digest) ||
-        databaseColumnContains(
-          database,
-          "agent_graph_resource_refs",
-          "content_digest",
-          digest,
-          "kind = 'evidence'",
-        )
+      return databaseColumnContains(
+        database,
+        "agent_graph_resource_refs",
+        "content_digest",
+        digest,
+        "kind = 'evidence'",
       );
     }
     return false;

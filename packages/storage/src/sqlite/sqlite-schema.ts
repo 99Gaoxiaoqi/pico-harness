@@ -15,10 +15,11 @@ import { FileStorageIntegrityError } from "../local-file-storage.js";
 export interface SqliteSchemaScope {
   readonly name: string;
   readonly migrations: ReadonlyMap<number, string>;
+  readonly baseline?: { readonly version: number; readonly sql: string };
 }
 
 export function scopeCurrentVersion(scope: SqliteSchemaScope): number {
-  let version = 0;
+  let version = scope.baseline?.version ?? 0;
   for (const key of scope.migrations.keys()) version = Math.max(version, key);
   return version;
 }
@@ -54,6 +55,16 @@ export function migrateOperationalDatabaseSync(
       for (const scope of scopes) {
         const target = scopeCurrentVersion(scope);
         let version = readScopeVersion(database, scope.name);
+        if (version === 0 && scope.baseline) {
+          database.exec(scope.baseline.sql);
+          version = scope.baseline.version;
+          database
+            .prepare(
+              `INSERT INTO operational_schema_migrations (scope, version, applied_at)
+            VALUES (?, ?, ?)`,
+            )
+            .run(scope.name, version, new Date().toISOString());
+        }
         while (version < target) {
           const sql = scope.migrations.get(version + 1);
           if (sql === undefined) {
@@ -204,21 +215,7 @@ function freshMigratedDatabase(scopes: readonly SqliteSchemaScope[]): DatabaseSy
   const { DatabaseSync } = loadNodeSqliteForSchema();
   const database = new DatabaseSync(":memory:");
   try {
-    database.exec("BEGIN IMMEDIATE");
-    database.exec(REGISTRY_TABLE_SQL);
-    for (const scope of scopes) {
-      for (const [version, sql] of sortedMigrations(scope)) {
-        database.exec(sql);
-        database
-          .prepare(
-            `INSERT INTO operational_schema_migrations (scope, version, applied_at)
-             VALUES (?, ?, ?)
-             ON CONFLICT(scope) DO UPDATE SET version = excluded.version, applied_at = excluded.applied_at`,
-          )
-          .run(scope.name, version, new Date().toISOString());
-      }
-    }
-    database.exec("COMMIT");
+    migrateOperationalDatabaseSync(database, scopes);
   } catch (error) {
     try {
       database.close();
@@ -248,10 +245,6 @@ function collectSchemaObjects(database: DatabaseSync): Map<string, string> {
     );
   }
   return objects;
-}
-
-function sortedMigrations(scope: SqliteSchemaScope): Array<[number, string]> {
-  return [...scope.migrations.entries()].sort((a, b) => a[0] - b[0]);
 }
 
 /**
