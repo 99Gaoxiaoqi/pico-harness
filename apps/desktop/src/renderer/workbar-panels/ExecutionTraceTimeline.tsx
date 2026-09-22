@@ -242,6 +242,26 @@ function turnCost(steps: readonly RuntimeExecutionStep[]): number | undefined {
   const costs = steps.filter((step) => step.kind === "model" && step.costCNY !== undefined);
   return costs.length ? costs.reduce((total, step) => total + step.costCNY!, 0) : undefined;
 }
+async function copyModelIdentity(value: string): Promise<void> {
+  // The Desktop denies web permission requests. A user-triggered selection copy
+  // works within that boundary without granting general clipboard access.
+  const focused = document.activeElement;
+  const input = document.createElement("textarea");
+  input.value = value;
+  input.setAttribute("readonly", "");
+  input.style.position = "fixed";
+  input.style.opacity = "0";
+  document.body.append(input);
+  try {
+    input.select();
+    if (document.execCommand("copy")) return;
+  } finally {
+    input.remove();
+    if (focused instanceof HTMLElement) focused.focus({ preventScroll: true });
+  }
+  await navigator.clipboard.writeText(value);
+}
+
 function PricingKey({ value }: { value: string }) {
   const [message, setMessage] = useState("");
   return (
@@ -251,7 +271,7 @@ function PricingKey({ value }: { value: string }) {
       <button
         type="button"
         onClick={() => {
-          void navigator.clipboard.writeText(value).then(
+          void copyModelIdentity(value).then(
             () => setMessage("已复制模型标识"),
             () => setMessage("复制失败，请手动选择模型标识"),
           );
