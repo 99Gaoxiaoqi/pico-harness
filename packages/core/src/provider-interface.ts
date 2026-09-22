@@ -72,7 +72,7 @@ export interface LLMProviderRequestOptions {
   onProviderAttempt?: (attempt: ProviderPhysicalAttempt) => void;
   /** 宿主中止信号。Provider 应将它与自身超时合并后传给网络请求。 */
   signal?: AbortSignal;
-  /** 仅供已校验的宿主覆盖单次 Provider 硬超时；普通调用保持 120 秒默认值。 */
+  /** 宿主显式指定的单次硬期限；省略时，普通流式请求使用 120 秒无有效进展超时。 */
   timeoutMs?: number;
   /** 单次生成的输出 token 上限；Provider 取它与路线输出上限的较小值。 */
   maxOutputTokens?: number;
@@ -136,8 +136,8 @@ export interface ProviderStreamReporter {
 /**
  * 合并宿主中止与 Provider 硬超时，任一触发即取消请求。
  *
- * timeoutMs 是纯 wall-clock 整体超时，从请求发出开始计；长流式的 progress timeout
- * 仍是外层传输实现的后续演进项，不能在契约迁移中改变现有取消语义。
+ * timeoutMs 是纯 wall-clock 整体超时。非流式调用与显式硬期限使用此函数；
+ * 普通流式请求的无进展超时由 Provider 管理，不改变此函数的硬期限语义。
  */
 export function providerRequestSignal(
   signal?: AbortSignal,
