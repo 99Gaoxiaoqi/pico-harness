@@ -110,13 +110,14 @@ function createHarness(options?: {
           return {
             context: {
               routeId: "p1/m1",
-              estimatedInputTokens: 1_200,
+              coverage: "model_history_only",
+              estimatedHistoryTokens: 1_200,
+              modelHistoryMessageCount: 3,
+              compactedCount: 1,
               contextWindowTokens: 200_000,
               reservedOutputTokens: 4_096,
               safetyMarginTokens: 512,
               inputBudgetTokens: 195_392,
-              remainingTokens: 194_192,
-              usedPercent: 0.6,
               estimation: "estimated",
               contextLimitSource: "provider_default",
               outputLimitSource: "provider_default",
@@ -1529,7 +1530,9 @@ test("client commands: /context and /snapshots map to session.context.get / rewi
   const ctx = await run("/context");
   const ctxText = String(ctx.result?.message);
   assert.match(ctxText, /Context \(p1\/m1\)/);
-  assert.match(ctxText, /used=0.6%/);
+  assert.match(ctxText, /model history \(estimated\)=1200/);
+  assert.match(ctxText, /System\/tools\/overhead are unknown/);
+  assert.doesNotMatch(ctxText, /used=|remaining=/);
   assert.match(ctxText, /capabilities: vision,reasoning,tool-call/);
   const contextRequest = harness.requests.at(-1);
   assert.equal(contextRequest?.method, "session.context.get");

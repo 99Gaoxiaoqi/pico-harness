@@ -96,14 +96,15 @@ test("prepared request composition reaches Inspector with closed byte totals, bo
       images: [{ type: "image_base64" as const, mimeType: "image/png", data: "SECRET_BASE64" }],
     },
   ];
-  const tools = [{ name: "Read", description: "读取", inputSchema: { type: "object" } }];
   const missingTools = createCurrentContextSections(messages);
   assert.equal(missingTools[1]!.tokens, undefined);
   assert.equal(missingTools[1]!.state, "unknown");
-  const sections = createCurrentContextSections(messages, tools);
+  const sections = createCurrentContextSections(messages);
+  assert.equal(sections[0]!.state, "unknown");
+  assert.equal(sections[0]!.tokens, undefined);
   assert.equal(
     sections.reduce((n, s) => n + (s.tokens ?? 0), 0),
-    estimateModelInputTokens(messages, tools),
+    estimateModelInputTokens(messages, []),
   );
   assert.equal(sections.at(-1)!.tokens, undefined);
   const view = contextView({
@@ -133,7 +134,7 @@ test("prepared request composition reaches Inspector with closed byte totals, bo
     }),
   );
   for (const label of [
-    "当前上下文",
+    "当前模型历史（估算）",
     "最近成功主请求",
     "UTF-8",
     "不是 Token",
