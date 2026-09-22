@@ -19,6 +19,8 @@ export interface UsageActivity {
   readonly totalTokens: number;
   readonly costCNY?: number;
   readonly costStatus: UsageCostStatus;
+  /** Frozen request-time explanation, when available. */
+  readonly costUnknownReason?: string;
   readonly durationMs?: number;
 }
 
@@ -95,6 +97,7 @@ export function parseUsageDashboard(value: unknown): UsageDashboardDetails {
         status: choice(row.status, ["success", "error", "aborted", "running"] as const),
         ...tokens(row),
         costStatus: costStatus(row.costStatus),
+        ...optionalText(row, "costUnknownReason"),
         ...optionalNumber(row, "costCNY"),
         ...optionalNumber(row, "durationMs"),
       };
