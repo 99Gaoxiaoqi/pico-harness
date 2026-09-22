@@ -8,9 +8,30 @@ export async function readExecutionWindow(
 ): Promise<readonly RuntimeExecutionPage[] | undefined> {
   const pages: RuntimeExecutionPage[] = [];
   let cursor: string | undefined;
+  let restarted = false;
   for (let index = 0; index < pageCount; index += 1) {
     if (!current()) return undefined;
-    const page = await query(cursor);
+    let page: RuntimeExecutionPage;
+    try {
+      page = await query(cursor);
+    } catch (error) {
+      // Late accounting revisions invalidate the snapshot. Restart at most once;
+      // sustained updates remain visible as a retryable UI error, never a retry loop.
+      if (
+        cursor &&
+        !restarted &&
+        error instanceof Error &&
+        "code" in error &&
+        error.code === "INVALID_PARAMS"
+      ) {
+        restarted = true;
+        pages.length = 0;
+        cursor = undefined;
+        index = -1;
+        continue;
+      }
+      throw error;
+    }
     if (!current()) return undefined;
     pages.push(page);
     cursor = page.nextCursor;

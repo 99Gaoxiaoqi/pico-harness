@@ -4,9 +4,9 @@ export interface RuntimeExecutionAttempt {
   readonly provider: string;
   readonly model: string;
   readonly startedAt: string;
-  readonly completedAt: string;
-  readonly status: "succeeded" | "failed" | "cancelled" | "interrupted";
-  readonly latencyMs: number;
+  readonly completedAt?: string;
+  readonly status: "prepared" | "observed" | "succeeded" | "failed" | "cancelled" | "interrupted";
+  readonly latencyMs?: number;
   readonly timeToFirstTokenMs?: number;
   readonly httpStatus?: number;
   readonly finishReason?: string;
@@ -64,6 +64,7 @@ export interface RuntimeExecutionSummary {
   readonly scope: "session";
   readonly modelCalls: number;
   readonly failedCalls: number;
+  readonly historicalBaselineCount?: number;
   readonly meteredCalls: number;
   readonly unpricedCalls: number;
   readonly inputTokens?: number;

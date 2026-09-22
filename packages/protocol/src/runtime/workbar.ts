@@ -901,6 +901,7 @@ const runtimeExecutionSummaryResult = exactResultShape(
     toolCalls: resultNonNegativeInteger,
     toolDurationMs: resultFiniteNumber,
     physicalAttempts: resultNonNegativeInteger,
+    historicalBaselineCount: resultNonNegativeInteger,
     retries: resultNonNegativeInteger,
     cacheCoverage: resultOneOf(["complete", "partial", "missing"]),
   },

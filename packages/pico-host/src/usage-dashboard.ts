@@ -26,6 +26,7 @@ export interface UsageProviderCallRecord {
         readonly reportedFields?: readonly string[] | undefined;
         readonly costStatus?: string | undefined;
         readonly latencyMs?: number | undefined;
+        readonly lifecycleStatus?: string | undefined;
       }
     | undefined;
 }
@@ -169,7 +170,11 @@ export async function buildUsageDashboard(
           ? { sessionTitle: titles.get(call.sessionId)! }
           : {}),
         at: call.createdAt,
-        status: activityStatus(call.status),
+        status:
+          call.reported?.lifecycleStatus === "prepared" ||
+          call.reported?.lifecycleStatus === "observed"
+            ? "running"
+            : activityStatus(call.status),
         inputTokens: call.inputTokens + call.cacheReadTokens + call.cacheWriteTokens,
         outputTokens: call.outputTokens,
         cacheReadTokens: call.cacheReadTokens,
