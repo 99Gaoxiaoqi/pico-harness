@@ -7,7 +7,7 @@ export const CONTROL_SCOPE_NAME = "control";
 export const CONTROL_SCOPE: SqliteSchemaScope = {
   name: CONTROL_SCOPE_NAME,
   baseline: {
-    version: 7,
+    version: 8,
     sql: `
       CREATE TABLE control_metadata (key TEXT PRIMARY KEY, value_json TEXT NOT NULL);
       -- rows: revision / lastTransactionId / nextRuntimeEventSequence
@@ -162,8 +162,16 @@ export const CONTROL_SCOPE: SqliteSchemaScope = {
       CREATE INDEX usage_physical_by_call ON usage_physical_attempts(provider_call_id);
       CREATE INDEX usage_physical_by_session ON usage_physical_attempts(session_id, created_at);
       CREATE INDEX usage_physical_by_run ON usage_physical_attempts(run_id, created_at);
+
+      CREATE TABLE session_latest_context (
+        session_id TEXT PRIMARY KEY,
+        physical_attempt_id TEXT NOT NULL REFERENCES usage_physical_attempts(physical_attempt_id) ON DELETE CASCADE,
+        completed_at TEXT NOT NULL,
+        record_json TEXT NOT NULL CHECK(json_valid(record_json))
+      );
       CREATE TRIGGER usage_session_deleted AFTER DELETE ON sessions BEGIN
         DELETE FROM usage_accounting_versions WHERE session_id = OLD.session_id;
+        DELETE FROM session_latest_context WHERE session_id = OLD.session_id;
         INSERT OR IGNORE INTO usage_deleted_sessions(session_id) VALUES (OLD.session_id);
         UPDATE usage_physical_attempts SET session_id = NULL, run_id = NULL,
           record_json = json_remove(record_json, '$.sessionId', '$.conversationId', '$.runId', '$.turnId')
@@ -173,133 +181,28 @@ export const CONTROL_SCOPE: SqliteSchemaScope = {
   },
   migrations: new Map<number, string>([
     [
-      2,
+      8,
       `
-      -- desktop conversation state(ADR 28):原 $PICO_HOME/desktop/conversation-state.json
-      -- 三类状态收编。库按 workspace 分片,但 workspace_path 仍作为列保留:
-      -- 同一分片内路径大小写变体各自成行,与旧 JSON 匹配语义一致。
-      CREATE TABLE desktop_idempotency (
-        workspace_path TEXT NOT NULL,
-        idempotency_key TEXT NOT NULL,
-        request_fingerprint TEXT NOT NULL,
-        result_json TEXT NOT NULL,
-        created_at INTEGER NOT NULL,
-        PRIMARY KEY (workspace_path, idempotency_key)
+      CREATE TEMP TABLE context_upgrade_requires_empty_history (
+        empty INTEGER CHECK(empty = 1)
       );
-      CREATE INDEX desktop_idempotency_by_recency
-        ON desktop_idempotency(created_at DESC);
+      INSERT INTO context_upgrade_requires_empty_history VALUES (
+        (SELECT COUNT(*) = 0 FROM sessions) AND
+        (SELECT COUNT(*) = 0 FROM usage_physical_attempts)
+      );
+      DROP TABLE context_upgrade_requires_empty_history;
 
-      CREATE TABLE desktop_input_queue (
-        queue_id TEXT PRIMARY KEY,
-        workspace_path TEXT NOT NULL,
-        session_id TEXT NOT NULL,
-        input_json TEXT NOT NULL,
-        created_at INTEGER NOT NULL
+      CREATE TABLE session_latest_context (
+        session_id TEXT PRIMARY KEY,
+        physical_attempt_id TEXT NOT NULL REFERENCES usage_physical_attempts(physical_attempt_id) ON DELETE CASCADE,
+        completed_at TEXT NOT NULL,
+        record_json TEXT NOT NULL CHECK(json_valid(record_json))
       );
-      CREATE INDEX desktop_input_queue_by_session
-        ON desktop_input_queue(workspace_path, session_id, created_at, queue_id);
 
-      CREATE TABLE desktop_first_send_claims (
-        workspace_path TEXT NOT NULL,
-        idempotency_key TEXT NOT NULL,
-        session_id TEXT NOT NULL,
-        request_fingerprint TEXT NOT NULL,
-        created_at INTEGER NOT NULL,
-        PRIMARY KEY (workspace_path, idempotency_key)
-      );
-      CREATE INDEX desktop_first_send_claims_by_recency
-        ON desktop_first_send_claims(created_at DESC);
-      `,
-    ],
-    [
-      3,
-      `
-      CREATE TABLE desktop_rewind_claims (
-        workspace_path TEXT NOT NULL,
-        idempotency_key TEXT NOT NULL,
-        source_session_id TEXT NOT NULL,
-        target_session_id TEXT NOT NULL,
-        operation_id TEXT NOT NULL,
-        request_fingerprint TEXT NOT NULL,
-        created_at INTEGER NOT NULL,
-        PRIMARY KEY (workspace_path, idempotency_key),
-        UNIQUE (workspace_path, operation_id)
-      );
-      CREATE INDEX desktop_rewind_claims_by_target
-        ON desktop_rewind_claims(target_session_id, created_at DESC);
-      `,
-    ],
-    [
-      4,
-      `
-      CREATE TABLE usage_accounting_versions (session_id TEXT PRIMARY KEY, revision INTEGER NOT NULL);
-      CREATE TABLE usage_attempt_owners (owner_id TEXT PRIMARY KEY, process_id INTEGER NOT NULL, closed INTEGER NOT NULL DEFAULT 0);
-      CREATE TABLE usage_attempt_revisions (physical_attempt_id TEXT NOT NULL, revision INTEGER NOT NULL, snapshot_hash TEXT NOT NULL, PRIMARY KEY(physical_attempt_id, revision));
-      CREATE TABLE usage_deleted_sessions (session_id TEXT PRIMARY KEY);
-      CREATE TABLE usage_physical_attempts (
-        physical_attempt_id TEXT PRIMARY KEY, provider_call_id TEXT NOT NULL,
-        session_id TEXT, goal_id TEXT, job_id TEXT, run_id TEXT,
-        owner_id TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision >= 0), status TEXT NOT NULL CHECK(status IN ('prepared','observed','succeeded','failed','cancelled','interrupted')),
-        created_at TEXT NOT NULL, record_json TEXT NOT NULL CHECK(json_valid(record_json))
-      );
-      CREATE INDEX usage_physical_by_call ON usage_physical_attempts(provider_call_id);
-      CREATE INDEX usage_physical_by_session ON usage_physical_attempts(session_id, created_at);
-      CREATE INDEX usage_physical_by_run ON usage_physical_attempts(run_id, created_at);
-`,
-    ],
-    [5, ``],
-    [
-      6,
-      `      DELETE FROM usage_physical_attempts
-        WHERE COALESCE(json_extract(record_json, '$.accountingSource'), '') != 'physical';
-      DELETE FROM usage_attempt_revisions WHERE physical_attempt_id NOT IN
-        (SELECT physical_attempt_id FROM usage_physical_attempts);
-      CREATE TEMP TABLE native_usage_affected_sessions AS
-        SELECT DISTINCT session_id FROM runtime_events WHERE kind IN ('model.call.started', 'model.call.settled')
-        AND NOT EXISTS (SELECT 1 FROM usage_physical_attempts p
-          WHERE p.provider_call_id = json_extract(runtime_events.payload_json, '$.data.providerCallId')
-            AND p.session_id = runtime_events.session_id AND p.run_id = runtime_events.run_id);
-      DELETE FROM runtime_events WHERE kind IN ('model.call.started', 'model.call.settled')
-        AND NOT EXISTS (SELECT 1 FROM usage_physical_attempts p
-          WHERE p.provider_call_id = json_extract(runtime_events.payload_json, '$.data.providerCallId')
-            AND p.session_id = runtime_events.session_id AND p.run_id = runtime_events.run_id);
-      UPDATE sessions SET
-        last_event_seq = (SELECT COALESCE(MAX(event_seq), 0) FROM runtime_events e WHERE e.session_id = sessions.session_id),
-        event_count = (SELECT COUNT(*) FROM runtime_events e WHERE e.session_id = sessions.session_id),
-        storage_bytes = (SELECT COALESCE(SUM(length(payload_json)), 0) FROM runtime_events e WHERE e.session_id = sessions.session_id)
-        WHERE session_id IN (SELECT session_id FROM native_usage_affected_sessions);
-      UPDATE session_catalog_projection SET
-        head_sequence = (SELECT last_event_seq FROM sessions s WHERE s.session_id = session_catalog_projection.session_id),
-        event_count = (SELECT event_count FROM sessions s WHERE s.session_id = session_catalog_projection.session_id),
-        storage_bytes = (SELECT storage_bytes FROM sessions s WHERE s.session_id = session_catalog_projection.session_id),
-        fold_json = json_set(fold_json, '$.headSequence', (SELECT last_event_seq FROM sessions s WHERE s.session_id = session_catalog_projection.session_id))
-        WHERE session_id IN (SELECT session_id FROM native_usage_affected_sessions);
-      UPDATE runtime_transcript_projection_state SET
-        history_epoch = lower(hex(randomblob(16))),
-        through_sequence = (SELECT last_event_seq FROM sessions s WHERE s.session_id = runtime_transcript_projection_state.session_id),
-        change_floor_sequence = (SELECT last_event_seq FROM sessions s WHERE s.session_id = runtime_transcript_projection_state.session_id)
-        WHERE session_id IN (SELECT session_id FROM native_usage_affected_sessions);
-      DELETE FROM runtime_transcript_changes WHERE session_id IN (SELECT session_id FROM native_usage_affected_sessions);
-      DROP TABLE native_usage_affected_sessions;
-      UPDATE usage_accounting_versions SET revision = revision + 1;
-      UPDATE control_metadata SET value_json = CAST(CAST(value_json AS INTEGER) + 1 AS TEXT)
-        WHERE key = 'revision';
-`,
-    ],
-    [
-      7,
-      `
-      DROP INDEX IF EXISTS runtime_events_usage_started;
-      DROP TRIGGER IF EXISTS usage_baseline_reconcile;
-      DROP TRIGGER IF EXISTS usage_baseline_adjustment_version;
-      DROP TRIGGER IF EXISTS usage_session_deleted;
-      DROP VIEW IF EXISTS usage_effective_baselines;
-      DROP TABLE IF EXISTS usage_baseline_adjustments;
-      DROP TABLE IF EXISTS usage_baselines;
-      DROP TABLE IF EXISTS usage_provider_calls;
-      DROP TABLE IF EXISTS usage_accounting_calls;
+      DROP TRIGGER usage_session_deleted;
       CREATE TRIGGER usage_session_deleted AFTER DELETE ON sessions BEGIN
         DELETE FROM usage_accounting_versions WHERE session_id = OLD.session_id;
+        DELETE FROM session_latest_context WHERE session_id = OLD.session_id;
         INSERT OR IGNORE INTO usage_deleted_sessions(session_id) VALUES (OLD.session_id);
         UPDATE usage_physical_attempts SET session_id = NULL, run_id = NULL,
           record_json = json_remove(record_json, '$.sessionId', '$.conversationId', '$.runId', '$.turnId')
