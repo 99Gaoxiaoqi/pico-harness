@@ -93,3 +93,30 @@ test("Desktop preload exposes Main-owned Browser viewport generations and page c
     { channel: DESKTOP_IPC_CHANNELS.browserClearPage, args: ["session-a", undefined] },
   ]);
 });
+
+test("Desktop preload forwards durable resource changes to active workbar subscribers", () => {
+  const ipc = new EventEmitter() as EventEmitter & {
+    invoke: (channel: string, ...args: unknown[]) => Promise<unknown>;
+    send: (channel: string, ...args: unknown[]) => void;
+  };
+  ipc.invoke = async () => undefined;
+  ipc.send = () => undefined;
+  const bridge = createDesktopBridge(ipc as unknown as IpcRenderer);
+  const received: unknown[] = [];
+  const subscription = bridge.sessionFrames.subscribe((frame) => received.push(frame));
+  const frame = {
+    hostEpoch: "host",
+    subscriptionId: "subscription",
+    sessionId: "session",
+    sequence: 1,
+    type: "subscription.resource_changed",
+    resource: "trace",
+    watermark: 42,
+  };
+  ipc.emit(DESKTOP_IPC_CHANNELS.sessionFrame, {}, frame);
+  assert.deepEqual(received, [frame]);
+  subscription.dispose();
+  ipc.emit(DESKTOP_IPC_CHANNELS.sessionFrame, {}, { ...frame, sequence: 2 });
+  assert.deepEqual(received, [frame]);
+  assert.equal(ipc.listenerCount(DESKTOP_IPC_CHANNELS.sessionFrame), 0);
+});

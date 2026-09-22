@@ -417,6 +417,7 @@ function isSessionSubscriptionFrame(value: unknown): value is RuntimeSessionSubs
       "subscription.subagent_update",
       "subscription.run_state",
       "subscription.transcript_advanced",
+      "subscription.resource_changed",
       "subscription.continuity_degraded",
       "subscription.closed",
     ].includes(frame["type"])
