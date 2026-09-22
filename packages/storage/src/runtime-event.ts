@@ -74,6 +74,7 @@ export const RUNTIME_EVENT_KINDS = [
   "tool.group.loaded",
   "tool.recovery.resolved",
   "tool.result.recorded",
+  "tool.result.projection.recorded",
   "agent.output",
   "approval.requested",
   "approval.settled",
@@ -226,6 +227,61 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
         );
       }
       return;
+    case "tool.result.projection.recorded": {
+      const data = value["data"];
+      assertOnlyKeys(
+        data,
+        [
+          "sourceEventId",
+          "sourceProjectionSha256",
+          "projection",
+          "reason",
+          "supersededByToolCallId",
+        ],
+        "tool.result.projection.recorded.data",
+      );
+      assertString(data["sourceEventId"], "projection.sourceEventId");
+      if (
+        typeof data["sourceProjectionSha256"] !== "string" ||
+        !/^[a-f0-9]{64}$/.test(data["sourceProjectionSha256"])
+      )
+        throw new RuntimeEventIntegrityError("Invalid source projection digest");
+      if (
+        ![
+          "stale",
+          "active_large",
+          "exact_duplicate",
+          "newer_read_covers_range",
+          "newer_snapshot",
+          "failure_resolved",
+        ].includes(String(data["reason"]))
+      )
+        throw new RuntimeEventIntegrityError("Invalid tool projection reason");
+      if (data["supersededByToolCallId"] !== undefined)
+        assertString(data["supersededByToolCallId"], "projection.supersededByToolCallId");
+      if (
+        value["visibility"] !== "internal" ||
+        value["partial"] !== false ||
+        !isRecord(value["refs"])
+      )
+        throw new RuntimeEventIntegrityError(
+          "Tool projection must be a complete internal fact with refs",
+        );
+      assertString(value["refs"]["toolCallId"], "projection.toolCallId");
+      const projection = data["projection"];
+      if (!isRecord(projection)) throw new RuntimeEventIntegrityError("Invalid tool projection");
+      assertOnlyKeys(
+        projection,
+        ["version", "mode", "text", "strategy", "truncated"],
+        "projection",
+      );
+      assertEqual(projection["version"], 1, "projection.version");
+      assertEqual(projection["mode"], "preview", "projection.mode");
+      if (typeof projection["text"] !== "string" || projection["truncated"] !== true)
+        throw new RuntimeEventIntegrityError("Invalid archived tool projection");
+      assertString(projection["strategy"], "projection.strategy");
+      return;
+    }
     case "tool.result.recorded":
       assertToolOrigin(value);
       assertToolResultRecordedEvent(value);

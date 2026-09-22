@@ -38,6 +38,7 @@ const CLAIM_BY_KIND: Record<RuntimeEvent["kind"], RuntimeEventClaimKind> = {
   "tool.group.loaded": "control",
   "tool.recovery.resolved": "control",
   "tool.result.recorded": "message",
+  "tool.result.projection.recorded": "control",
   "agent.output": "control",
   "approval.requested": "control",
   "approval.settled": "control",
