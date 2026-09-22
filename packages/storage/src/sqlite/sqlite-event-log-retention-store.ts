@@ -1,3 +1,4 @@
+import { SqliteRuntimeControlStore } from "./sqlite-runtime-control-store.js";
 import type { DatabaseSync } from "node:sqlite";
 import {
   DEFAULT_EVENT_LOG_RETENTION_POLICY,
@@ -315,7 +316,12 @@ export function enforceEventLogRetention(
     }
     options.beforeApply?.();
     const applied = lease.transaction("write", () =>
-      applyRetentionPlanLocked(lease.database, before.plan.sessionIdsToDelete, currentSessionId),
+      applyRetentionPlanLocked(
+        lease.database,
+        before.plan.sessionIdsToDelete,
+        currentSessionId,
+        options.storageRoot,
+      ),
     );
     const after = lease.transaction("read", () =>
       readStorageStatusLocked(lease.database, currentSessionId, policy),
@@ -583,6 +589,7 @@ function applyRetentionPlanLocked(
   database: DatabaseSync,
   sessionIds: readonly string[],
   currentSessionId: string | null,
+  storageRoot: string,
 ): RetentionTransactionResult {
   const deletedSessionIds: string[] = [];
   const skippedSessions: EventLogRetentionSkippedSession[] = [];
@@ -592,6 +599,12 @@ function applyRetentionPlanLocked(
     if (reason) {
       skippedSessions.push({ sessionId, reason });
       continue;
+    }
+    const accounting = new SqliteRuntimeControlStore({ storageRoot });
+    try {
+      accounting.preserveLegacyAccounting(sessionId);
+    } finally {
+      accounting.close();
     }
     deleteSessionOwnedRowsLocked(database, sessionId);
     deletedSessionIds.push(sessionId);
@@ -952,6 +965,7 @@ function readUnattributedControlBytes(database: DatabaseSync): number {
       ["physical_attempt_id", "provider_call_id", "owner_id", "record_json"],
       "session_id IS NULL",
     ),
+    unattributedTextQuery("usage_baseline_adjustments", ["baseline_id"]),
     unattributedTextQuery("usage_accounting_calls", ["provider_call_id", "source", "coverage"]),
     unattributedTextQuery("usage_attempt_owners", ["owner_id"]),
     unattributedTextQuery("usage_attempt_revisions", ["physical_attempt_id", "snapshot_hash"]),

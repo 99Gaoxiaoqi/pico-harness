@@ -1,3 +1,4 @@
+import { SqliteRuntimeControlStore } from "./sqlite-runtime-control-store.js";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
@@ -1323,6 +1324,12 @@ export class SqliteRuntimeEventStore {
     return this.write(() => {
       const row = this.readSessionRow(sessionId);
       if (!row) return false;
+      const accounting = new SqliteRuntimeControlStore({ storageRoot: this.lease.storageRoot });
+      try {
+        accounting.preserveLegacyAccounting(sessionId);
+      } finally {
+        accounting.close();
+      }
       this.lease.database.prepare("DELETE FROM runtime_events WHERE session_id = ?").run(sessionId);
       // session_catalog_projection / session_messages 经 FK ON DELETE CASCADE 同事务删除。
       this.lease.database.prepare("DELETE FROM sessions WHERE session_id = ?").run(sessionId);
