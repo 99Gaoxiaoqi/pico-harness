@@ -117,9 +117,12 @@ export class PhysicalAttemptTracker {
       usageBasis: usageBasis(usage),
     };
     active.terminal = fact;
+    // The legacy embedded ledger uses attemptId; the durable lifecycle has a
+    // distinct identity contract and must never receive that extra field.
+    const { attemptId, ...snapshot } = fact;
     this.update(active, {
-      ...fact,
-      physicalAttemptId: active.attemptId,
+      ...snapshot,
+      physicalAttemptId: attemptId,
       revision: active.revision,
     });
     // The old embedded ledger is append-only. Revisions belong only to the new authority.
