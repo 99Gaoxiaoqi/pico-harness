@@ -33,7 +33,11 @@ export function mergeExecutionPages(
     runs: [...runs.values()],
     // Summary is session-wide, never summed once per loaded page.
     coverage: {
-      modelAttempts: "logical_only",
+      modelAttempts: pages.every(
+        (page) => page.coverage.modelAttempts === first.coverage.modelAttempts,
+      )
+        ? first.coverage.modelAttempts
+        : "mixed",
       oversizedRunIds: union("oversizedRunIds"),
       missingModelCallRunIds: union("missingModelCallRunIds"),
       incompleteRunIds: union("incompleteRunIds"),
