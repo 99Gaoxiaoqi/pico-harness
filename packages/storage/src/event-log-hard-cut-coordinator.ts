@@ -376,11 +376,6 @@ function clearControlWeakReferences(database: DatabaseSync): void {
       )
       .run(),
   );
-  changes += sqliteChanges(
-    database
-      .prepare("UPDATE usage_baselines SET session_id = NULL WHERE session_id IS NOT NULL")
-      .run(),
-  );
   changes += sqliteChanges(database.prepare("DELETE FROM desktop_input_queue").run());
   changes += sqliteChanges(database.prepare("DELETE FROM desktop_first_send_claims").run());
   changes += sqliteChanges(database.prepare("DELETE FROM desktop_rewind_claims").run());

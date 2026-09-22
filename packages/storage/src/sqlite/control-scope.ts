@@ -11,35 +11,6 @@ import type { SqliteSchemaScope } from "./sqlite-schema.js";
  * 完整往返。其余列与索引照抄 ADR,含部分索引与 CHECK。
  */
 
-// The original baseline remains audit evidence; offsets are frozen before retention can remove events.
-const BASELINE_RECONCILIATION_SQL = `
-  INSERT OR IGNORE INTO usage_baseline_adjustments
-    (baseline_id, version, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost)
-  SELECT b.baseline_id, 1,
-    COALESCE(SUM(MAX(0, COALESCE(json_extract(e.payload_json, '$.data.usage.inputTokens'),
-      json_extract(e.payload_json, '$.data.usage.promptTokens')
-      - MAX(0, COALESCE(json_extract(e.payload_json, '$.data.usage.cacheReadTokens'), 0))
-      - MAX(0, COALESCE(json_extract(e.payload_json, '$.data.usage.cacheWriteTokens'), 0))))), 0),
-    COALESCE(SUM(MAX(0, json_extract(e.payload_json, '$.data.usage.completionTokens'))), 0),
-    COALESCE(SUM(MAX(0, json_extract(e.payload_json, '$.data.usage.cacheReadTokens'))), 0),
-    COALESCE(SUM(MAX(0, json_extract(e.payload_json, '$.data.usage.cacheWriteTokens'))), 0),
-    COALESCE(SUM(MAX(0, json_extract(e.payload_json, '$.data.costCNY'))), 0)
-  FROM usage_baselines b LEFT JOIN runtime_events e ON e.session_id = b.session_id
-    AND e.kind = 'model.call.settled' AND json_extract(e.payload_json, '$.data.status') = 'succeeded'
-    AND e.committed_at <= strftime('%Y-%m-%dT%H:%M:%fZ', b.imported_at / 1000.0, 'unixepoch')
-    AND NOT EXISTS (SELECT 1 FROM usage_provider_calls c
-      WHERE c.call_id = json_extract(e.payload_json, '$.data.providerCallId')
-        AND c.created_at <= b.imported_at
-        AND COALESCE(json_extract(c.reported_json, '$.accountingSource'), '') != 'legacy_event')
-    AND NOT EXISTS (SELECT 1 FROM usage_physical_attempts p
-      WHERE p.provider_call_id = json_extract(e.payload_json, '$.data.providerCallId')
-        AND json_extract(p.record_json, '$.accountingSource') = 'physical'
-        AND p.created_at <= strftime('%Y-%m-%dT%H:%M:%fZ', b.imported_at / 1000.0, 'unixepoch'))
-  WHERE json_extract(b.source_json, '$.kind') = 'session_runtime_usage'
-    AND json_extract(b.source_json, '$.version') = 1
-  GROUP BY b.baseline_id;
-`;
-
 export const CONTROL_SCOPE_NAME = "control";
 
 export const CONTROL_SCOPE: SqliteSchemaScope = {
@@ -262,11 +233,6 @@ export const CONTROL_SCOPE: SqliteSchemaScope = {
           SELECT session_id, 1 FROM usage_baselines WHERE baseline_id = NEW.baseline_id AND session_id IS NOT NULL
           ON CONFLICT(session_id) DO UPDATE SET revision = revision + 1;
       END;
-      ${BASELINE_RECONCILIATION_SQL}
-      CREATE TRIGGER usage_baseline_reconcile AFTER INSERT ON usage_baselines
-      WHEN json_extract(NEW.source_json, '$.kind') = 'session_runtime_usage'
-        AND json_extract(NEW.source_json, '$.version') = 1
-      BEGIN ${BASELINE_RECONCILIATION_SQL} END;
       CREATE VIEW usage_effective_baselines AS SELECT
         b.baseline_id, b.session_id, b.goal_id,
         MAX(0, b.input_tokens - COALESCE(a.input_tokens, 0)) AS input_tokens,
@@ -276,6 +242,63 @@ export const CONTROL_SCOPE: SqliteSchemaScope = {
         MAX(0, b.cost - COALESCE(a.cost, 0)) AS cost,
         b.imported_at, b.source_json, a.version AS reconciliation_version
       FROM usage_baselines b LEFT JOIN usage_baseline_adjustments a ON a.baseline_id = b.baseline_id;
+    `,
+    ],
+    [
+      6,
+      `
+      DROP TRIGGER IF EXISTS usage_baseline_reconcile;
+      DROP TRIGGER usage_baseline_adjustment_version;
+      DROP VIEW usage_effective_baselines;
+      DROP TABLE usage_baseline_adjustments;
+      DROP TRIGGER usage_session_deleted;
+      DROP TABLE usage_baselines;
+      DELETE FROM usage_physical_attempts
+        WHERE COALESCE(json_extract(record_json, '$.accountingSource'), '') != 'physical';
+      DELETE FROM usage_attempt_revisions WHERE physical_attempt_id NOT IN
+        (SELECT physical_attempt_id FROM usage_physical_attempts);
+      DELETE FROM usage_accounting_calls WHERE source != 'physical' OR provider_call_id NOT IN
+        (SELECT provider_call_id FROM usage_physical_attempts);
+      DELETE FROM usage_provider_calls WHERE call_id NOT IN
+        (SELECT provider_call_id FROM usage_physical_attempts);
+      CREATE TEMP TABLE native_usage_affected_sessions AS
+        SELECT DISTINCT session_id FROM runtime_events WHERE kind IN ('model.call.started', 'model.call.settled')
+        AND NOT EXISTS (SELECT 1 FROM usage_physical_attempts p
+          WHERE p.provider_call_id = json_extract(runtime_events.payload_json, '$.data.providerCallId')
+            AND p.session_id = runtime_events.session_id AND p.run_id = runtime_events.run_id);
+      DELETE FROM runtime_events WHERE kind IN ('model.call.started', 'model.call.settled')
+        AND NOT EXISTS (SELECT 1 FROM usage_physical_attempts p
+          WHERE p.provider_call_id = json_extract(runtime_events.payload_json, '$.data.providerCallId')
+            AND p.session_id = runtime_events.session_id AND p.run_id = runtime_events.run_id);
+      UPDATE sessions SET
+        last_event_seq = (SELECT COALESCE(MAX(event_seq), 0) FROM runtime_events e WHERE e.session_id = sessions.session_id),
+        event_count = (SELECT COUNT(*) FROM runtime_events e WHERE e.session_id = sessions.session_id),
+        storage_bytes = (SELECT COALESCE(SUM(length(payload_json)), 0) FROM runtime_events e WHERE e.session_id = sessions.session_id)
+        WHERE session_id IN (SELECT session_id FROM native_usage_affected_sessions);
+      UPDATE session_catalog_projection SET
+        head_sequence = (SELECT last_event_seq FROM sessions s WHERE s.session_id = session_catalog_projection.session_id),
+        event_count = (SELECT event_count FROM sessions s WHERE s.session_id = session_catalog_projection.session_id),
+        storage_bytes = (SELECT storage_bytes FROM sessions s WHERE s.session_id = session_catalog_projection.session_id),
+        fold_json = json_set(fold_json, '$.headSequence', (SELECT last_event_seq FROM sessions s WHERE s.session_id = session_catalog_projection.session_id))
+        WHERE session_id IN (SELECT session_id FROM native_usage_affected_sessions);
+      UPDATE runtime_transcript_projection_state SET
+        history_epoch = lower(hex(randomblob(16))),
+        through_sequence = (SELECT last_event_seq FROM sessions s WHERE s.session_id = runtime_transcript_projection_state.session_id),
+        change_floor_sequence = (SELECT last_event_seq FROM sessions s WHERE s.session_id = runtime_transcript_projection_state.session_id)
+        WHERE session_id IN (SELECT session_id FROM native_usage_affected_sessions);
+      DELETE FROM runtime_transcript_changes WHERE session_id IN (SELECT session_id FROM native_usage_affected_sessions);
+      DROP TABLE native_usage_affected_sessions;
+      UPDATE usage_accounting_versions SET revision = revision + 1;
+      UPDATE control_metadata SET value_json = CAST(CAST(value_json AS INTEGER) + 1 AS TEXT)
+        WHERE key = 'revision';
+      CREATE TRIGGER usage_session_deleted AFTER DELETE ON sessions BEGIN
+        DELETE FROM usage_accounting_versions WHERE session_id = OLD.session_id;
+        INSERT OR IGNORE INTO usage_deleted_sessions(session_id) VALUES (OLD.session_id);
+        UPDATE usage_physical_attempts SET session_id = NULL, run_id = NULL,
+          record_json = json_remove(record_json, '$.sessionId', '$.conversationId', '$.runId', '$.turnId')
+          WHERE session_id = OLD.session_id;
+        UPDATE usage_provider_calls SET session_id = NULL, conversation_id = NULL WHERE session_id = OLD.session_id;
+      END;
     `,
     ],
   ]),

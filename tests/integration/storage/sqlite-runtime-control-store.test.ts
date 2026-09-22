@@ -15,7 +15,7 @@ import {
  * - job 生命周期(claim/lease/心跳/finish/outbox/投递)与 daemon 重启恢复
  * - cron 调度恢复(recoverInterruptedCronRuns 语义对齐旧 RuntimeStore)
  * - 单 BEGIN IMMEDIATE 事务原子性 + revision CAS
- * - usage 双账本记账与按会话统计
+ * - 逻辑调用仅用于诊断，不进入物理用量统计
  * - control/ 三文件不再产生
  */
 
@@ -524,7 +524,7 @@ test("sqlite control store: cron job/run 生命周期与中断恢复(recoverInte
   }
 });
 
-test("sqlite control store: usage 双账本记账与按会话统计", () => {
+test("sqlite control store: 逻辑调用仅用于诊断，不进入物理用量统计", () => {
   const root = freshRoot();
   const store = new SqliteRuntimeControlStore({ storageRoot: root });
   try {
@@ -608,68 +608,20 @@ test("sqlite control store: usage 双账本记账与按会话统计", () => {
       /未知任务/u,
     );
 
-    const baseline = store.putUsageBaseline({
-      baselineId: "baseline-1",
-      sessionId: "session-1",
-      inputTokens: 40,
+    const total = store.getUsageSummary();
+    assert.equal(total.providerCallCount, 0);
+    assert.deepEqual(total.total, {
+      inputTokens: 0,
       outputTokens: 0,
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
-      cost: 0.125,
-      importedAt: 123,
+      cost: 0,
     });
-    assert.equal(baseline.inserted, true);
-    assert.equal(
-      store.putUsageBaseline({
-        baselineId: "baseline-1",
-        sessionId: "session-1",
-        inputTokens: 40,
-        outputTokens: 0,
-        cacheReadTokens: 0,
-        cacheWriteTokens: 0,
-        cost: 0.125,
-        importedAt: 123,
-      }).inserted,
-      false,
-    );
-
-    const total = store.getUsageSummary();
-    assert.equal(total.providerCallCount, 2);
-    assert.equal(total.baselineCount, 1);
-    assert.deepEqual(total.providerCalls, {
-      inputTokens: 110,
-      outputTokens: 25,
-      cacheReadTokens: 5,
-      cacheWriteTokens: 3,
-      cost: 0.75,
-    });
-    assert.deepEqual(total.total, {
-      inputTokens: 150,
-      outputTokens: 25,
-      cacheReadTokens: 5,
-      cacheWriteTokens: 3,
-      cost: 0.875,
-    });
-
-    const bySession = store.getUsageSummary({ sessionId: "session-1" });
-    assert.equal(bySession.providerCallCount, 1);
-    assert.equal(bySession.baselineCount, 1);
-    assert.deepEqual(bySession.total, {
-      inputTokens: 140,
-      outputTokens: 20,
-      cacheReadTokens: 5,
-      cacheWriteTokens: 3,
-      cost: 0.625,
-    });
+    assert.deepEqual(store.getUsageSummary({ sessionId: "session-1" }), total);
     assert.deepEqual(
       store.listProviderCalls({ sessionId: "session-2" }).map((call) => call.callId),
       ["call-2"],
     );
-    assert.deepEqual(
-      store.listUsageBaselines({ sessionId: "session-1" }).map((entry) => entry.baselineId),
-      ["baseline-1"],
-    );
-
     store.close();
     const reopened = new SqliteRuntimeControlStore({ storageRoot: root });
     try {
