@@ -180,6 +180,7 @@ export function InspectorPanelController({
   const execution = useMemo(() => mergeExecutionPages(pages), [pages]);
   return (
     <InspectorWorkbarPanel
+      key={`${workspacePath}\u0000${sessionId}`}
       summary={summary}
       summaryLoading={summaryLoading}
       summaryError={summaryError}

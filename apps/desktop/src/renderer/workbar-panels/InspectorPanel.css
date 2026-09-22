@@ -1,0 +1,145 @@
+.tool-panel--inspector {
+  --inspector-ink: var(--ink, #262626);
+  --inspector-muted: var(--ink-secondary, #606068);
+  --inspector-border: var(--line, #eaeaea);
+  --inspector-surface: var(--canvas, #fff);
+  --inspector-subtle: var(--surface-muted, #f5f5f5);
+  --inspector-accent: #6045d6;
+  --inspector-danger: var(--danger, #a34235);
+  --inspector-success: #137953;
+  --inspector-purple: #8b6cf0;
+  --inspector-teal: #26a995;
+  --inspector-blue: #417ff5;
+  --inspector-orange: #d28b32;
+  container: inspector / inline-size;
+  background: var(--inspector-surface);
+  color: var(--inspector-ink);
+  font-family: var(--font-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.tool-panel--inspector *,
+.tool-panel--inspector *::before,
+.tool-panel--inspector *::after {
+  box-sizing: border-box;
+}
+
+.tool-panel--inspector .tool-panel__header {
+  min-height: 52px;
+  padding: 12px 16px 8px;
+  border: 0;
+}
+
+.tool-panel--inspector .tool-panel__header strong {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.tool-panel--inspector .tool-panel__icon-button {
+  color: var(--inspector-muted);
+  width: 32px;
+  height: 32px;
+}
+
+.tool-panel--inspector .tool-panel__icon-button:hover {
+  background: var(--inspector-subtle);
+}
+
+.tool-panel--inspector .inspector-tabs {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 24px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--inspector-border);
+}
+
+.tool-panel--inspector .inspector-tabs button {
+  min-height: 40px;
+  padding: 8px 4px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--inspector-muted);
+  background: transparent;
+  cursor: pointer;
+}
+
+.tool-panel--inspector .inspector-tabs button[aria-selected="true"] {
+  color: var(--inspector-accent);
+  border-bottom-color: var(--inspector-accent);
+  font-weight: 600;
+}
+
+.tool-panel--inspector .inspector-page {
+  min-width: 0;
+  padding-bottom: 16px;
+  scrollbar-gutter: stable;
+  overflow-anchor: none;
+}
+
+.tool-panel--inspector [hidden] {
+  display: none !important;
+}
+
+.tool-panel--inspector .tool-panel__section {
+  padding: 16px;
+  gap: 12px;
+  border-color: var(--inspector-border);
+}
+
+.tool-panel--inspector .tool-panel__section h3 {
+  color: var(--inspector-ink);
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.tool-panel--inspector .tool-panel__muted,
+.tool-panel--inspector .tool-panel__state {
+  color: var(--inspector-muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.tool-panel--inspector .tool-panel__error {
+  font-size: 12px;
+  color: var(--inspector-danger);
+  background: var(--inspector-subtle);
+  overflow-wrap: anywhere;
+}
+
+.tool-panel--inspector .tool-panel__load-more {
+  display: flex;
+  justify-content: center;
+  width: calc(100% - 32px);
+  min-height: 36px;
+  margin: 8px 16px 0;
+  padding: 6px 12px;
+  border: 0;
+  background: transparent;
+  color: var(--inspector-muted);
+  cursor: pointer;
+}
+
+.tool-panel--inspector .tool-panel__load-more:hover {
+  background: var(--inspector-subtle);
+}
+
+.tool-panel--inspector :is(button, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--inspector-accent);
+  outline-offset: 2px;
+}
+
+/* The application currently uses a light theme. Honor an explicit host theme
+   without changing system preferences or making the workbar switch alone. */
+[data-theme="dark"] .tool-panel--inspector,
+.tool-panel--inspector[data-theme="dark"] {
+  --inspector-ink: #ececf1;
+  --inspector-muted: #b7b8c4;
+  --inspector-border: #393944;
+  --inspector-surface: #202027;
+  --inspector-subtle: #2c2c35;
+  --inspector-accent: #b29aff;
+  --inspector-danger: #ff9b93;
+  --inspector-success: #77d6b1;
+}

@@ -1,9 +1,11 @@
+import { useId, useState, type KeyboardEvent } from "react";
 import type {
   RuntimeExecutionPage,
   RuntimeExecutionSummary,
   RuntimeSessionContextSnapshot,
 } from "@pico/protocol";
 import { ContextComposition } from "./ContextComposition.js";
+import { CurrentModelHistory } from "./CurrentModelHistory.js";
 import { ExecutionTraceTimeline } from "./ExecutionTraceTimeline.js";
 import { ExecutionUsageSummary } from "./ExecutionUsageSummary.js";
 import { ChevronDown, CircleAlert, RefreshCw, Wrench } from "lucide-react";
@@ -129,6 +131,22 @@ export function InspectorWorkbarPanel({
   onLoadMore,
   onOpenPreview,
 }: InspectorWorkbarPanelProps) {
+  const [tab, setTab] = useState<"timeline" | "overview">("timeline");
+  const tabId = useId();
+  function navigateTabs(event: KeyboardEvent<HTMLDivElement>) {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const next =
+      event.key === "Home"
+        ? "timeline"
+        : event.key === "End"
+          ? "overview"
+          : tab === "timeline"
+            ? "overview"
+            : "timeline";
+    setTab(next);
+    event.currentTarget.querySelector<HTMLButtonElement>(`[data-tab="${next}"]`)?.focus();
+  }
   const traceGroups = groupInspectorTraceItems(trace);
   const visibleTraceCount = traceGroups.reduce((count, group) => count + group.items.length, 0);
 
@@ -136,7 +154,6 @@ export function InspectorWorkbarPanel({
     <section className="tool-panel tool-panel--inspector" aria-label="追踪">
       <header className="tool-panel__header">
         <div>
-          <span className="tool-panel__eyebrow">Context v{context?.version ?? "—"}</span>
           <strong>执行追踪</strong>
         </div>
         <button
@@ -156,8 +173,43 @@ export function InspectorWorkbarPanel({
         </p>
       )}
 
-      <div className="tool-panel__scroll" aria-busy={loading}>
-        {summaryLoading && (
+      <div className="inspector-tabs" role="tablist" aria-label="追踪视图" onKeyDown={navigateTabs}>
+        {(
+          [
+            ["timeline", "时间线"],
+            ["overview", "总览"],
+          ] as const
+        ).map(([value, label]) => (
+          <button
+            key={value}
+            type="button"
+            role="tab"
+            data-tab={value}
+            id={`${tabId}-${value}-tab`}
+            aria-selected={tab === value}
+            aria-controls={`${tabId}-${value}-panel`}
+            tabIndex={tab === value ? 0 : -1}
+            onClick={() => setTab(value)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      <div
+        id={`${tabId}-overview-panel`}
+        role="tabpanel"
+        aria-labelledby={`${tabId}-overview-tab`}
+        hidden={tab !== "overview"}
+        className="inspector-page tool-panel__scroll"
+        tabIndex={0}
+      >
+        {contextError && (
+          <p className="tool-panel__error" role="alert">
+            上下文读取失败：{contextError}
+          </p>
+        )}
+        <ContextComposition request={context?.latestRequest} />
+        {summaryLoading && !summary && !execution && (
           <p className="tool-panel__muted" role="status">
             正在加载会话用量…
           </p>
@@ -170,62 +222,20 @@ export function InspectorWorkbarPanel({
         {(summary ?? execution?.summary) && (
           <ExecutionUsageSummary summary={(summary ?? execution?.summary)!} />
         )}
-        {contextError && (
-          <p className="tool-panel__error" role="alert">
-            上下文读取失败：{contextError}
-          </p>
+        {!summaryLoading && !summary && !execution && !summaryError && (
+          <p className="tool-panel__state">尚无会话用量记录。</p>
         )}
-        <ContextComposition request={context?.latestRequest} />
-        <section className="tool-panel__section" aria-labelledby="inspector-context-title">
-          <div className="tool-panel__section-heading">
-            <h3 id="inspector-context-title">当前模型历史</h3>
-          </div>
-          {!context ? (
-            <p className="tool-panel__muted">尚未生成上下文快照。</p>
-          ) : (
-            <>
-              <p className="tool-panel__muted">
-                压缩摘要与后续消息的有效模型视图；Token
-                按字符与媒体估算，不包含完整请求的系统指令、工具定义及协议开销。
-              </p>
-              <dl className="tool-panel__metrics">
-                <div>
-                  <dt>估算 Token</dt>
-                  <dd>≈{formatTokens(context.modelHistory.estimatedTokens)}</dd>
-                </div>
-                <div>
-                  <dt>历史消息</dt>
-                  <dd>{context.modelHistory.messageCount} 条</dd>
-                </div>
-                <div>
-                  <dt>压缩</dt>
-                  <dd>{context.modelHistory.compactedCount} 次</dd>
-                </div>
-              </dl>
-              <details>
-                <summary>历史投影详情</summary>
-                <p className="tool-panel__muted">
-                  读取水位 {context.modelHistory.throughSequence} · 算法{" "}
-                  {context.modelHistory.estimationAlgorithm}
-                </p>
-                {context.modelHistory.latestCompaction && (
-                  <>
-                    <p className="tool-panel__muted">
-                      最近压缩 · 覆盖 {context.modelHistory.latestCompaction.coveredEventCount} 条
-                    </p>
-                    <p className="tool-panel__muted">
-                      压缩记录 <code>{context.modelHistory.latestCompaction.checkpointId}</code>
-                    </p>
-                    <p className="tool-panel__muted">
-                      覆盖边界 <code>{context.modelHistory.latestCompaction.throughEventId}</code>
-                    </p>
-                  </>
-                )}
-              </details>
-            </>
-          )}
-        </section>
-
+        <CurrentModelHistory context={context} />
+      </div>
+      <div
+        id={`${tabId}-timeline-panel`}
+        role="tabpanel"
+        aria-labelledby={`${tabId}-timeline-tab`}
+        hidden={tab !== "timeline"}
+        className="inspector-page tool-panel__scroll"
+        aria-busy={loading}
+        tabIndex={0}
+      >
         {execution ? (
           <ExecutionTraceTimeline
             execution={execution}
@@ -354,13 +364,6 @@ function PreviewBlock({
       <strong>{label}</strong>
       <pre>{value}</pre>
     </div>
-  );
-}
-
-function formatTokens(value?: number): string {
-  if (value === undefined || !Number.isFinite(value)) return "未知";
-  return new Intl.NumberFormat("zh-CN", { notation: "compact", maximumFractionDigits: 1 }).format(
-    value,
   );
 }
 

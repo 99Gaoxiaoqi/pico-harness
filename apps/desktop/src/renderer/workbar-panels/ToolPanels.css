@@ -1,4 +1,7 @@
 @import "./TerminalOutputView.css";
+@import "./InspectorPanel.css";
+@import "./InspectorOverview.css";
+@import "./InspectorTimeline.css";
 
 .tool-panel {
   display: flex;
