@@ -68,12 +68,46 @@ export type RuntimeSessionArtifact = JsonObject & {
   readonly updatedAt: number;
 };
 
+/** Current estimates and completed-request observations are deliberately separate. */
+export type RuntimeContextSection = JsonObject & {
+  readonly id: string;
+  readonly label: string;
+  readonly tokens?: number;
+  readonly state: "included" | "unknown";
+};
+export type RuntimeContextComposition = JsonObject & {
+  readonly basis: "semantic_utf8_bytes";
+  readonly totalBytes: number;
+  readonly segments: readonly (JsonObject & {
+    readonly kind: "system" | "tools" | "messages" | "other";
+    readonly bytes: number;
+  })[];
+  readonly tools: readonly (JsonObject & { readonly label: string; readonly bytes: number })[];
+  readonly remainingTools: JsonObject & { readonly count: number; readonly bytes: number };
+  readonly unlabelledToolBytes: number;
+};
+export type RuntimeLatestContextRequest = JsonObject & {
+  readonly status: "available" | "unavailable";
+  readonly source: "physical" | "legacy_call" | "none";
+  readonly reason?: string;
+  readonly providerCallId?: string;
+  readonly physicalAttemptId?: string;
+  readonly providerId?: string;
+  readonly modelId?: string;
+  readonly completedAt?: number;
+  readonly inputTokens?: number;
+  readonly cachedInputTokens?: number;
+  readonly composition?: RuntimeContextComposition;
+};
+
 /** Versioned extension of the legacy context JsonObject returned under `context`. */
 export type RuntimeSessionContextSnapshot = JsonObject & {
   readonly version: 2;
   readonly sessionId: SessionId;
   readonly generatedAt: number;
   readonly traceWatermark: number;
+  readonly sections?: readonly RuntimeContextSection[];
+  readonly latestRequest?: RuntimeLatestContextRequest;
 };
 
 export type RuntimeGitReviewSource = "branch" | "staged" | "unstaged";
@@ -781,12 +815,19 @@ const runtimeExecutionAttemptResult = exactResultShape(
     provider: resultString,
     model: resultString,
     startedAt: resultString,
-    completedAt: resultString,
-    status: resultOneOf(["succeeded", "failed", "cancelled", "interrupted"]),
-    latencyMs: resultFiniteNumber,
+    status: resultOneOf([
+      "prepared",
+      "observed",
+      "succeeded",
+      "failed",
+      "cancelled",
+      "interrupted",
+    ]),
     usageBasis: resultOneOf(["reported", "partial", "missing"]),
   },
   {
+    completedAt: resultString,
+    latencyMs: resultFiniteNumber,
     timeToFirstTokenMs: resultFiniteNumber,
     httpStatus: resultNonNegativeInteger,
     finishReason: resultString,

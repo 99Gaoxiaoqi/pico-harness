@@ -1,4 +1,9 @@
-import type { RuntimeExecutionPage, RuntimeExecutionSummary } from "@pico/protocol";
+import type {
+  RuntimeExecutionPage,
+  RuntimeExecutionSummary,
+  RuntimeLatestContextRequest,
+} from "@pico/protocol";
+import { ContextComposition } from "./ContextComposition.js";
 import { ExecutionTraceTimeline, ExecutionUsageSummary } from "./ExecutionTraceTimeline.js";
 import { ChevronDown, CircleAlert, RefreshCw, Wrench } from "lucide-react";
 
@@ -22,6 +27,7 @@ export interface InspectorContextSnapshot {
   readonly estimation?: "actual" | "estimated" | "unknown";
   readonly compactedCount?: number;
   readonly sections?: readonly InspectorContextSection[];
+  readonly latestRequest?: RuntimeLatestContextRequest;
 }
 
 export interface InspectorTraceItem {
@@ -192,7 +198,7 @@ export function InspectorWorkbarPanel({
         )}
         <section className="tool-panel__section" aria-labelledby="inspector-context-title">
           <div className="tool-panel__section-heading">
-            <h3 id="inspector-context-title">上下文</h3>
+            <h3 id="inspector-context-title">当前上下文</h3>
             {context?.routeId && <code>{context.routeId}</code>}
           </div>
           {contextError && (
@@ -205,7 +211,9 @@ export function InspectorWorkbarPanel({
           ) : (
             <>
               {context.estimation === "estimated" && (
-                <p className="tool-panel__muted">上下文 Token 为估算值。</p>
+                <p className="tool-panel__muted">
+                  上下文 Token 为估算值；未估算项单独标注，不代表完整请求占用。
+                </p>
               )}
               <dl className="tool-panel__metrics">
                 <div>
@@ -276,6 +284,8 @@ export function InspectorWorkbarPanel({
             </>
           )}
         </section>
+
+        <ContextComposition request={context?.latestRequest} />
 
         {execution ? (
           <ExecutionTraceTimeline

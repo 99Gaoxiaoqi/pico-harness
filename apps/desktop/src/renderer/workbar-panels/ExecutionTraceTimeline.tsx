@@ -156,7 +156,7 @@ export function ExecutionTraceTimeline({
                   <li key={attempt.attemptId}>
                     第 {attempt.attempt + 1} 次 · {attempt.provider} / {attempt.model} ·{" "}
                     {attempt.status === "succeeded" ? "成功" : status(attempt.status)} ·{" "}
-                    {duration(attempt.latencyMs)}
+                    {attempt.latencyMs === undefined ? "耗时未知" : duration(attempt.latencyMs)}
                     {attempt.httpStatus !== undefined ? ` · HTTP ${attempt.httpStatus}` : ""}
                     {attempt.timeToFirstTokenMs !== undefined
                       ? ` · 首 Token ${duration(attempt.timeToFirstTokenMs)}`
@@ -207,6 +207,8 @@ function status(value: string) {
   return (
     (
       {
+        prepared: "准备请求",
+        observed: "已观察响应",
         running: "进行中",
         completed: "已完成",
         failed: "失败",
