@@ -1,8 +1,10 @@
+import type { Usage, ProviderPhysicalAttempt } from "@pico/core";
 import { DatabaseSync } from "node:sqlite";
 import { operationalDatabasePath } from "@pico/storage";
 import { decodeRuntimeEventJson, type RuntimeEvent } from "@pico/storage/runtime-event";
 import { RuntimeProtocolError } from "@pico/protocol";
 import type {
+  RuntimeExecutionAttempt,
   RuntimeExecutionPage,
   RuntimeExecutionRun,
   RuntimeExecutionStep,
@@ -92,7 +94,7 @@ export function querySessionExecution(
         oversizedRunIds,
         missingModelCallRunIds,
         incompleteRunIds,
-        modelAttempts: "logical_only",
+        modelAttempts: attemptCoverage(db, input.sessionId, cursor.watermark),
       },
     };
     let consumed = 0;
@@ -164,33 +166,235 @@ export function querySessionExecution(
   }
 }
 
+/** Summary stays available even when a run is too large or cannot be projected. */
+export function querySessionExecutionSummary(
+  storageRoot: string,
+  input: { sessionId: string },
+): RuntimeExecutionSummary {
+  if (!input.sessionId) throw new RuntimeProtocolError("INVALID_PARAMS", "Invalid execution query");
+  const db = new DatabaseSync(operationalDatabasePath(storageRoot), { readOnly: true });
+  try {
+    db.exec("BEGIN");
+    if (!db.prepare("SELECT 1 FROM sessions WHERE session_id = ?").get(input.sessionId))
+      throw new RuntimeProtocolError("NOT_FOUND", "Session not found");
+    return summary(db, input.sessionId, Number.MAX_SAFE_INTEGER);
+  } finally {
+    db.close();
+  }
+}
+
 function summary(db: DatabaseSync, sessionId: string, watermark: number): RuntimeExecutionSummary {
-  // One pair per logical call, scoped to its run. Missing values remain NULL.
+  // All expansion and aggregation happens in SQLite: no unbounded ledger reads into JS.
   const row = db
     .prepare(
-      `WITH calls AS (
-    SELECT run_id, json_extract(payload_json, '$.data.providerCallId') AS call_id,
-      max(CASE WHEN kind = 'model.call.settled' THEN json_extract(payload_json, '$.data.status') END) AS status,
-      max(CASE WHEN kind = 'model.call.settled' THEN json_extract(payload_json, '$.data.usage.promptTokens') END) AS input_tokens,
-      max(CASE WHEN kind = 'model.call.settled' THEN json_extract(payload_json, '$.data.usage.completionTokens') END) AS output_tokens,
-      max(CASE WHEN kind = 'model.call.settled' AND json_extract(payload_json, '$.data.costStatus') IN ('estimated','included') THEN json_extract(payload_json, '$.data.costCNY') END) AS cost,
-      max(CASE WHEN kind = 'model.call.settled' THEN json_extract(payload_json, '$.data.latencyMs') END) AS latency
-    FROM runtime_events WHERE session_id = ? AND event_seq <= ? AND kind IN ('model.call.started','model.call.settled') GROUP BY run_id, call_id)
-    SELECT count(*) AS calls, sum(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
-      count(input_tokens) AS metered, count(*) - count(cost) AS unpriced,
-      sum(input_tokens) AS input_tokens, sum(output_tokens) AS output_tokens, sum(cost) AS cost, sum(latency) AS latency FROM calls`,
+      `WITH events AS (
+    SELECT run_id, kind, json_extract(payload_json, '$.data') AS data,
+      coalesce(json_extract(payload_json, '$.refs.toolCallId'), event_id) AS tool_id,
+      json_extract(payload_json, '$.at') AS at
+    FROM runtime_events WHERE session_id = ? AND event_seq <= ? AND json_valid(payload_json)
+      AND kind IN ('model.call.started','model.call.settled','tool.started','tool.result.recorded')
+  ), calls AS (
+    SELECT run_id, json_extract(data,'$.providerCallId') AS call_id,
+      max(CASE WHEN kind = 'model.call.settled' THEN data END) AS settled,
+      max(json_extract(data,'$.retryAttempt')) AS retry_attempt
+    FROM events WHERE kind IN ('model.call.started','model.call.settled') GROUP BY run_id, call_id
+  ), measurements AS (
+    SELECT run_id, call_id, settled AS data FROM calls
+      WHERE json_type(settled,'$.attempts') IS NULL
+    UNION ALL
+    SELECT run_id, call_id, a.value AS data FROM calls, json_each(settled,'$.attempts') a
+      WHERE json_type(settled,'$.attempts') = 'array'
+  ), measured AS (
+    SELECT run_id, call_id,
+      CASE WHEN json_type(data,'$.usage.reportedFields') IS NULL OR EXISTS
+        (SELECT 1 FROM json_each(data,'$.usage.reportedFields') WHERE value='prompt')
+        THEN json_extract(data,'$.usage.promptTokens') END AS input_tokens,
+      CASE WHEN json_type(data,'$.usage.reportedFields') IS NULL OR EXISTS
+        (SELECT 1 FROM json_each(data,'$.usage.reportedFields') WHERE value='completion')
+        THEN json_extract(data,'$.usage.completionTokens') END AS output_tokens,
+      CASE WHEN json_type(data,'$.usage.reportedFields') IS NULL OR EXISTS
+        (SELECT 1 FROM json_each(data,'$.usage.reportedFields') WHERE value='cacheRead')
+        THEN json_extract(data,'$.usage.cacheReadTokens') END AS cached_tokens,
+      CASE WHEN json_type(data,'$.usage.reportedFields') IS NULL OR EXISTS
+        (SELECT 1 FROM json_each(data,'$.usage.reportedFields') WHERE value='reasoning')
+        THEN json_extract(data,'$.usage.reasoningTokens') END AS reasoning_tokens,
+      CASE WHEN json_extract(data,'$.costStatus') IN ('estimated','included')
+        THEN json_extract(data,'$.costCNY') END AS cost
+    FROM measurements
+  ), call_metrics AS (
+    SELECT run_id, call_id, min(input_tokens IS NOT NULL AND output_tokens IS NOT NULL) AS metered,
+      min(cost IS NOT NULL) AS priced FROM measured GROUP BY run_id,call_id
+  ), tools AS (
+    SELECT run_id, tool_id,
+      min(CASE WHEN kind='tool.started' THEN at END) AS started,
+      max(CASE WHEN kind='tool.result.recorded' THEN at END) AS ended
+    FROM events WHERE kind IN ('tool.started','tool.result.recorded') GROUP BY run_id,tool_id
+  ) SELECT
+    (SELECT count(*) FROM calls) AS calls,
+    (SELECT count(*) FROM calls WHERE json_extract(settled,'$.status')='failed') AS failed,
+    (SELECT sum(CASE WHEN coalesce(json_extract(c.settled,'$.attemptCoverage'),'complete')='complete' THEN coalesce(m.metered,0) ELSE 0 END) FROM calls c LEFT JOIN call_metrics m USING(run_id,call_id)) AS metered,
+    (SELECT sum(CASE WHEN json_extract(c.settled,'$.attemptCoverage')='partial' THEN 1 ELSE 1-coalesce(m.priced,0) END) FROM calls c LEFT JOIN call_metrics m USING(run_id,call_id)) AS unpriced,
+    sum(input_tokens) AS input_tokens, sum(output_tokens) AS output_tokens,
+    sum(cached_tokens) AS cached_tokens, sum(reasoning_tokens) AS reasoning_tokens, sum(cost) AS cost,
+    count(cached_tokens) AS cache_known, count(*) AS measurement_count,
+    (SELECT count(*) FROM calls WHERE json_extract(settled,'$.attemptCoverage')='partial') AS partial_calls,
+    (SELECT sum(json_extract(settled,'$.latencyMs')) FROM calls) AS latency,
+    (SELECT sum(json_array_length(settled,'$.attempts')) FROM calls) AS physical_attempts,
+    (SELECT sum(CASE WHEN retry_attempt IS NOT NULL OR json_type(settled,'$.attempts')='array'
+      THEN max(0,coalesce(json_array_length(settled,'$.attempts'),0)-1)
+      + CASE WHEN retry_attempt>0 THEN 1 ELSE 0 END END) FROM calls) AS retries,
+    (SELECT count(*) FROM tools) AS tool_calls,
+    (SELECT sum(CASE WHEN started IS NOT NULL AND ended IS NOT NULL
+      THEN max(0,round((julianday(ended)-julianday(started))*86400000)) END) FROM tools) AS tool_duration
+    FROM measured`,
     )
     .get(sessionId, watermark)!;
+  const optional = (key: string, value: unknown) =>
+    value === null ? {} : { [key]: Number(value) };
   return {
     scope: "session",
     modelCalls: Number(row.calls),
-    failedCalls: Number(row.failed ?? 0),
-    meteredCalls: Number(row.metered),
-    unpricedCalls: Number(row.unpriced),
-    ...(row.input_tokens !== null ? { inputTokens: Number(row.input_tokens) } : {}),
-    ...(row.output_tokens !== null ? { outputTokens: Number(row.output_tokens) } : {}),
-    ...(row.cost !== null ? { costCNY: Number(row.cost) } : {}),
-    ...(row.latency !== null ? { latencyMs: Number(row.latency) } : {}),
+    failedCalls: Number(row.failed),
+    meteredCalls: Number(row.metered ?? 0),
+    unpricedCalls: Number(row.unpriced ?? 0),
+    ...optional("inputTokens", row.input_tokens),
+    ...optional("outputTokens", row.output_tokens),
+    ...optional("costCNY", row.cost),
+    ...optional("latencyMs", row.latency),
+    ...optional("cachedInputTokens", row.cached_tokens),
+    ...optional("reasoningTokens", row.reasoning_tokens),
+    ...optional("physicalAttempts", row.physical_attempts),
+    ...optional("retries", row.retries),
+    toolCalls: Number(row.tool_calls),
+    ...optional("toolDurationMs", row.tool_duration),
+    cacheCoverage:
+      Number(row.cache_known) === 0
+        ? "missing"
+        : Number(row.cache_known) === Number(row.measurement_count) &&
+            Number(row.partial_calls) === 0
+          ? "complete"
+          : "partial",
+  };
+}
+
+function attemptCoverage(
+  db: DatabaseSync,
+  sessionId: string,
+  watermark: number,
+): RuntimeExecutionPage["coverage"]["modelAttempts"] {
+  const row = db
+    .prepare(
+      `WITH calls AS (
+    SELECT run_id, json_extract(payload_json,'$.data.providerCallId') AS id,
+      max(CASE WHEN kind='model.call.settled' THEN json_extract(payload_json,'$.data') END) AS data
+    FROM runtime_events WHERE session_id=? AND event_seq<=? AND json_valid(payload_json)
+      AND kind IN ('model.call.started','model.call.settled') GROUP BY run_id,id
+    ) SELECT count(*) AS calls,
+      sum(CASE WHEN json_type(data,'$.attempts')='array' THEN 1 ELSE 0 END) AS physical,
+      sum(CASE WHEN json_type(data,'$.attempts')='array' AND json_extract(data,'$.attemptCoverage')='complete' THEN 1 ELSE 0 END) AS complete
+    FROM calls`,
+    )
+    .get(sessionId, watermark)!;
+  if (!Number(row.physical)) return "logical_only";
+  return Number(row.complete) === Number(row.calls) ? "physical" : "mixed";
+}
+
+function usageMetrics(
+  usage?: Usage,
+): Pick<
+  RuntimeExecutionAttempt,
+  "inputTokens" | "outputTokens" | "cachedInputTokens" | "reasoningTokens"
+> {
+  if (!usage) return {};
+  const has = (field: NonNullable<Usage["reportedFields"]>[number]) =>
+    usage.reportedFields === undefined || usage.reportedFields.includes(field);
+  return {
+    ...(has("prompt") ? { inputTokens: usage.promptTokens } : {}),
+    ...(has("completion") ? { outputTokens: usage.completionTokens } : {}),
+    ...(has("cacheRead") && usage.cacheReadTokens !== undefined
+      ? { cachedInputTokens: usage.cacheReadTokens }
+      : {}),
+    ...(has("reasoning") && usage.reasoningTokens !== undefined
+      ? { reasoningTokens: usage.reasoningTokens }
+      : {}),
+  };
+}
+
+function projectAttempt(attempt: ProviderPhysicalAttempt): RuntimeExecutionAttempt {
+  return {
+    attemptId: preview(attempt.attemptId),
+    attempt: attempt.attempt,
+    provider: preview(attempt.provider),
+    model: preview(attempt.model),
+    startedAt: attempt.startedAt,
+    completedAt: attempt.completedAt,
+    status: attempt.status,
+    latencyMs: attempt.latencyMs,
+    usageBasis: attempt.usageBasis,
+    ...(attempt.timeToFirstTokenMs !== undefined
+      ? { timeToFirstTokenMs: attempt.timeToFirstTokenMs }
+      : {}),
+    ...(attempt.httpStatus !== undefined ? { httpStatus: attempt.httpStatus } : {}),
+    ...(attempt.finishReason !== undefined ? { finishReason: preview(attempt.finishReason) } : {}),
+    ...usageMetrics(attempt.usage),
+    ...(attempt.error !== undefined ? { error: preview(attempt.error) } : {}),
+    ...(attempt.costCNY !== undefined &&
+    (attempt.costStatus === "estimated" || attempt.costStatus === "included")
+      ? { costCNY: attempt.costCNY }
+      : {}),
+    costStatus: attempt.costStatus ?? "unknown",
+  };
+}
+
+function modelMetrics(
+  data: Extract<RuntimeEvent, { kind: "model.call.settled" }>["data"],
+): Partial<RuntimeExecutionStep> {
+  if (data.attempts === undefined)
+    return {
+      ...usageMetrics(data.usage),
+      ...(data.costCNY !== undefined &&
+      (data.costStatus === "estimated" || data.costStatus === "included")
+        ? { costCNY: data.costCNY }
+        : {}),
+      costStatus: data.costStatus ?? "unknown",
+      ...(data.retryAttempt !== undefined ? { retries: data.retryAttempt } : {}),
+    };
+  const attempts = data.attempts.map(projectAttempt);
+  const totals: Partial<
+    Record<
+      "inputTokens" | "outputTokens" | "cachedInputTokens" | "reasoningTokens" | "costCNY",
+      number
+    >
+  > = {};
+  for (const attempt of attempts)
+    for (const key of [
+      "inputTokens",
+      "outputTokens",
+      "cachedInputTokens",
+      "reasoningTokens",
+      "costCNY",
+    ] as const) {
+      if (attempt[key] !== undefined) totals[key] = (totals[key] ?? 0) + attempt[key];
+    }
+  const firstToken = attempts.find((a) => a.timeToFirstTokenMs !== undefined);
+  return {
+    ...totals,
+    attempts,
+    retries: (data.retryAttempt ?? 0) + Math.max(0, attempts.length - 1),
+    ...(firstToken
+      ? {
+          firstTokenLatencyMs:
+            elapsed(attempts[0]!.startedAt, firstToken.startedAt) + firstToken.timeToFirstTokenMs!,
+        }
+      : {}),
+    costStatus:
+      attempts.length === 0 ||
+      data.attemptCoverage === "partial" ||
+      attempts.some((a) => a.costCNY === undefined)
+        ? "unknown"
+        : attempts.every((a) => a.costStatus === "included")
+          ? "included"
+          : "estimated",
   };
 }
 
@@ -228,7 +432,12 @@ function projectRun(events: RuntimeEvent[], opening: RuntimeEvent): RuntimeExecu
           [event.data.provider, event.data.model].filter(Boolean).join(" / ") || "模型调用",
         );
         models.set(event.data.providerCallId, i);
-        update(i, { purpose: event.data.purpose });
+        update(i, {
+          purpose: preview(event.data.purpose),
+          ...(event.data.provider ? { providerId: preview(event.data.provider) } : {}),
+          ...(event.data.model ? { modelId: preview(event.data.model) } : {}),
+          ...(event.data.retryAttempt !== undefined ? { retries: event.data.retryAttempt } : {}),
+        });
         break;
       }
       case "model.call.settled": {
@@ -236,17 +445,7 @@ function projectRun(events: RuntimeEvent[], opening: RuntimeEvent): RuntimeExecu
         update(i, {
           status: event.data.status === "succeeded" ? "completed" : event.data.status,
           durationMs: event.data.latencyMs,
-          ...(event.data.usage
-            ? {
-                inputTokens: event.data.usage.promptTokens,
-                outputTokens: event.data.usage.completionTokens,
-              }
-            : {}),
-          ...(event.data.costCNY !== undefined &&
-          (event.data.costStatus === "estimated" || event.data.costStatus === "included")
-            ? { costCNY: event.data.costCNY }
-            : {}),
-          costStatus: event.data.costStatus ?? "unknown",
+          ...modelMetrics(event.data),
           ...(event.data.error ? { error: preview(event.data.error) } : {}),
         });
         break;
@@ -310,6 +509,7 @@ function projectRun(events: RuntimeEvent[], opening: RuntimeEvent): RuntimeExecu
         update(i, {
           status: event.data.decision === "approved" ? "completed" : "failed",
           detail: event.data.decision,
+          permissionDecision: event.data.decision,
         });
         break;
       }
