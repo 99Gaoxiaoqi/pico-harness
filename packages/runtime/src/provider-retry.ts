@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   ContextOverflowError,
   isAbortError,
@@ -89,6 +90,8 @@ export async function generateWithRetry(
   const maxAttempts = Math.max(options?.maxAttempts ?? DEFAULT_MAX_RETRY_ATTEMPTS, 1);
   const signal = options?.signal;
   const requestOptions: LLMProviderRequestOptions = {
+    logicalCallId: `logical_${randomUUID()}`,
+    retryAttempt: 0,
     ...(signal ? { signal } : {}),
     ...(options?.toolChoice ? { toolChoice: options.toolChoice } : {}),
     ...(options?.promptCacheShardSeed
@@ -116,7 +119,10 @@ export async function generateWithRetry(
   for (let attempt = 1; ; attempt++) {
     try {
       if (attempt > 1) signal?.throwIfAborted();
-      const result = await activeProvider.generate(messages, tools, requestOptions);
+      const result = await activeProvider.generate(messages, tools, {
+        ...requestOptions,
+        retryAttempt: attempt - 1,
+      });
       signal?.throwIfAborted();
       return result;
     } catch (error) {

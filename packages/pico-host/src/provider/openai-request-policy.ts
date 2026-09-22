@@ -124,6 +124,7 @@ export class OpenAIRequestPolicy {
     requestBody: Record<string, unknown>,
     options?: LLMProviderRequestOptions,
     init?: RequestInit,
+    dispatchPhysical: (send: () => Promise<Response>) => Promise<Response> = (send) => send(),
   ): Promise<{ response: Response; bodyJson: string; errorText?: string }> {
     const dispatch = async (body: Record<string, unknown>): Promise<Response> => {
       options?.onRequestPrepared?.({
@@ -131,17 +132,21 @@ export class OpenAIRequestPolicy {
         model: this.config.model,
         body,
       });
-      return fetch(this.endpoint(), {
-        ...init,
-        method: "POST",
-        headers: {
-          ...(this.config.auth === "none" ? {} : { Authorization: `Bearer ${this.config.apiKey}` }),
-          ...openCodeClientHeaders(this.config),
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(body),
-        signal: init?.signal ?? providerRequestSignal(options?.signal, options?.timeoutMs),
-      });
+      return dispatchPhysical(() =>
+        fetch(this.endpoint(), {
+          ...init,
+          method: "POST",
+          headers: {
+            ...(this.config.auth === "none"
+              ? {}
+              : { Authorization: `Bearer ${this.config.apiKey}` }),
+            ...openCodeClientHeaders(this.config),
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(body),
+          signal: init?.signal ?? providerRequestSignal(options?.signal, options?.timeoutMs),
+        }),
+      );
     };
 
     let actualBody = requestBody;
