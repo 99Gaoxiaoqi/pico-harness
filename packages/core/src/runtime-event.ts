@@ -118,6 +118,25 @@ export interface RuntimeToolResultRecordedEvent extends RuntimeEventBase {
   };
 }
 
+/** Durable change to model visibility; original tool result remains immutable. */
+export interface RuntimeToolResultProjectionRecordedEvent extends RuntimeEventBase {
+  readonly kind: "tool.result.projection.recorded";
+  readonly refs: RuntimeEventRefs & { readonly toolCallId: string };
+  readonly data: {
+    readonly sourceEventId: string;
+    readonly sourceProjectionSha256: string;
+    readonly projection: RuntimeToolResultProjection;
+    readonly reason:
+      | "stale"
+      | "active_large"
+      | "exact_duplicate"
+      | "newer_read_covers_range"
+      | "newer_snapshot"
+      | "failure_resolved";
+    readonly supersededByToolCallId?: string;
+  };
+}
+
 export type RuntimeAgentOutputStatus = "success" | "failure";
 
 export interface RuntimeAgentOutputPayload {
@@ -387,6 +406,7 @@ export type RuntimeEvent<TTranscriptEvent = unknown> =
   | RuntimeToolGroupLoadedEvent
   | RuntimeToolRecoveryResolvedEvent
   | RuntimeToolResultRecordedEvent
+  | RuntimeToolResultProjectionRecordedEvent
   | RuntimeAgentOutputEvent
   | RuntimeApprovalRequestedEvent
   | RuntimeApprovalSettledEvent
