@@ -1869,6 +1869,56 @@ export class SqliteRuntimeControlStore {
       record.startedAt,
       json,
     );
+    this.writeLatestContextProjection(record);
+  }
+
+  /** O(1) healthy read. Only a missing/corrupt disposable row invokes canonical repair. */
+  getLatestContextAttempt(sessionId: string): PhysicalAttemptRecord | undefined {
+    const projected = this.read(() =>
+      this.getRow(
+        `SELECT p.record_json AS canonical_json, c.record_json AS projection_json
+       FROM session_latest_context c JOIN usage_physical_attempts p
+       ON p.physical_attempt_id=c.physical_attempt_id WHERE c.session_id=?`,
+        sessionId,
+      ),
+    );
+    if (projected && projected["canonical_json"] === projected["projection_json"]) {
+      const record = JSON.parse(textField(projected, "canonical_json")) as PhysicalAttemptRecord;
+      if (isLatestContextCandidate(record) && record.sessionId === sessionId) return record;
+    }
+    return this.write(() => {
+      const row = this.getRow(
+        `SELECT record_json FROM usage_physical_attempts
+         WHERE session_id=? AND status='succeeded'
+         AND json_extract(record_json,'$.purpose')='main'
+         AND json_extract(record_json,'$.contextFacts.version')=1
+         ORDER BY json_extract(record_json,'$.completedAt') DESC, physical_attempt_id DESC LIMIT 1`,
+        sessionId,
+      );
+      if (!row) return undefined;
+      const record = JSON.parse(textField(row, "record_json")) as PhysicalAttemptRecord;
+      if (!isLatestContextCandidate(record)) throw new Error("Invalid canonical context request");
+      this.mutate(`DELETE FROM session_latest_context WHERE session_id=?`, sessionId);
+      this.writeLatestContextProjection(record);
+      return record;
+    });
+  }
+
+  private writeLatestContextProjection(record: PhysicalAttemptRecord): void {
+    if (!isLatestContextCandidate(record)) return;
+    this.mutate(
+      `INSERT INTO session_latest_context(session_id,physical_attempt_id,completed_at,record_json)
+       VALUES (?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET
+         physical_attempt_id=excluded.physical_attempt_id, completed_at=excluded.completed_at,
+         record_json=excluded.record_json
+       WHERE excluded.completed_at > session_latest_context.completed_at
+         OR (excluded.completed_at = session_latest_context.completed_at
+           AND excluded.physical_attempt_id >= session_latest_context.physical_attempt_id)`,
+      record.sessionId!,
+      record.physicalAttemptId,
+      record.completedAt!,
+      canonicalJson(record),
+    );
   }
 
   listPhysicalAttempts(filter: PhysicalAttemptFilter = {}): PhysicalAttemptRecord[] {
@@ -2862,4 +2912,16 @@ function physicalAccountingCall(record: PhysicalAttemptRecord): ProviderCallReco
       usage: record.usage,
     },
   };
+}
+
+function isLatestContextCandidate(record: PhysicalAttemptRecord): boolean {
+  return (
+    record.accountingSource === "physical" &&
+    record.status === "succeeded" &&
+    record.purpose === "main" &&
+    !!record.sessionId &&
+    record.contextFacts?.version === 1 &&
+    typeof record.completedAt === "string" &&
+    Number.isFinite(Date.parse(record.completedAt))
+  );
 }

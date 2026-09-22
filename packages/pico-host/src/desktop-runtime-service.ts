@@ -1,7 +1,4 @@
-import {
-  getLatestContextRequest,
-  createCurrentContextSections,
-} from "./session-context-composition.js";
+import { getLatestContextRequest, readLastRequestAnchor } from "./session-context-composition.js";
 import { querySessionExecution, querySessionExecutionSummary } from "./session-execution-query.js";
 import { projectDeepResearchProgress } from "@pico/core/deep-research";
 import { SqliteDeepResearchStore } from "@pico/storage";
@@ -206,7 +203,6 @@ import { sessionMemoryLane } from "@pico/runtime/atomic-memory/session-lane";
 import { memorySessionKey } from "@pico/core/atomic-memory-runtime-contracts";
 import type { ImagePart } from "@pico/core";
 import { readRuntimeModelHistorySnapshot } from "@pico/runtime/session-runtime-read-model";
-import { createModelContextReport } from "@pico/runtime/provider/model-runtime-report";
 import { createSessionHookRuntime } from "./hooks/runtime.js";
 import { PluginManagementService } from "./plugins/plugin-management-service.js";
 import {
@@ -1539,12 +1535,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       if (!store) throw new Error("上下文历史缺少持久化事件源");
       // No run, prompt assembly, tool discovery or provider request is created for inspection.
       const history = await readRuntimeModelHistorySnapshot(store, sessionId);
-      const {
-        estimatedInputTokens,
-        remainingTokens: _remaining,
-        usedPercent: _used,
-        ...limits
-      } = createModelContextReport(route, history.messages);
       let latestRequest;
       try {
         latestRequest = getLatestContextRequest(
@@ -1555,24 +1545,39 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         latestRequest = {
           status: "unavailable",
           source: "none",
-          reason: "请求组成读取失败。",
+          reason: "请求快照读取失败。",
+          usageStatus: "missing",
+          compositionStatus: "unrecorded",
         } as const;
       }
       return toJsonValue({
         context: {
-          ...limits,
-          coverage: "model_history_only",
-          historyProjection: "restored_tool_results",
-          estimatedHistoryTokens: estimatedInputTokens,
-          modelHistoryMessageCount: history.messages.length,
-          compactedCount: history.compactedCount,
-          ...(history.latestCompaction ? { latestCompaction: history.latestCompaction } : {}),
-          sections: createCurrentContextSections(history.messages),
-          latestRequest,
-          version: 2,
+          version: 3,
           sessionId,
           generatedAt: this.now(),
-          traceWatermark: history.throughSequence,
+          selectedRoute: {
+            routeId: route.id,
+            providerId: route.provider,
+            modelId: route.model,
+            connectionId: route.providerId,
+            contextWindow: route.capabilities.contextWindowTokens,
+            ...(route.capabilities.contextSource === "config"
+              ? { declaredContextWindow: route.capabilities.contextWindowTokens }
+              : {}),
+          },
+          latestRequest,
+          ...(readLastRequestAnchor(session.getHistory())
+            ? { lastRequestAnchor: readLastRequestAnchor(session.getHistory()) }
+            : {}),
+          modelHistory: {
+            throughSequence: history.throughSequence,
+            messageCount: history.messages.length,
+            estimatedTokens: estimateMessagesTokens(history.messages),
+            estimationAlgorithm: "maka_chars_v1",
+            projection: "effective_model_history",
+            compactedCount: history.compactedCount,
+            ...(history.latestCompaction ? { latestCompaction: history.latestCompaction } : {}),
+          },
         },
       });
     });

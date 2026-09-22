@@ -18,6 +18,7 @@ import type {
   PreparedProviderRequest,
   ProviderPhysicalAttempt,
   ProviderAttemptLifecycleSnapshot,
+  RequestContextFacts,
 } from "@pico/core";
 import type { Message, ToolDefinition } from "@pico/core";
 import type { RuntimeProjectionSession } from "./runtime-projection-session.js";
@@ -73,6 +74,8 @@ export interface ProviderCallLedger {
 }
 
 export interface CostTrackerOptions {
+  /** Host-owned route facts; cloned before each call, never refreshed at settlement. */
+  contextFacts?: RequestContextFacts;
   onAccountingChanged?: (record: PhysicalAttemptRecord, revision: number) => void;
   catalogPricing?: CatalogPricingResolver;
   diagnostics?: CostTrackerDiagnostics;
@@ -171,6 +174,11 @@ export class CostTracker implements LLMProvider {
     streaming = false,
     options?: LLMProviderRequestOptions,
   ): Promise<Message> {
+    const contextFacts: RequestContextFacts = structuredClone({
+      ...this.options.contextFacts,
+      ...options?.contextFacts,
+      version: 1,
+    });
     const callId = this.options.callId?.() ?? `call_${randomUUID()}`;
     const context = this.resolveContext(options?.purpose);
     const logicalCallId = options?.logicalCallId ?? callId;
@@ -287,6 +295,7 @@ export class CostTracker implements LLMProvider {
         const record: PhysicalAttemptRecord = {
           ...snapshot,
           accountingVersion: 1,
+          contextFacts,
           accountingSource: "physical",
           ownerId,
           providerCallId: callId,
@@ -380,6 +389,25 @@ export class CostTracker implements LLMProvider {
         ...(cost ? { costCNY: cost.costCNY } : {}),
         ...(cost ? { costStatus: cost.status } : {}),
       });
+      const reported = response.usage?.reportedFields ?? [];
+      if (
+        context.purpose === "main" &&
+        contextFacts.routeId &&
+        response.usage &&
+        reported.includes("prompt") &&
+        reported.includes("completion")
+      ) {
+        response.providerData = {
+          ...response.providerData,
+          picoContextRequestAnchor: {
+            routeId: contextFacts.routeId,
+            connectionId: contextFacts.connectionId,
+            modelId: route.model,
+            inputTokens: response.usage.promptTokens,
+            outputTokens: response.usage.completionTokens,
+          },
+        };
+      }
       this.recordSessionUsage(response, latencyMs, streaming);
       return response;
     } catch (error) {
