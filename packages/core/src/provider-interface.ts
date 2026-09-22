@@ -1,10 +1,35 @@
 // 大模型通信的稳定契约。具体协议翻译与网络实现属于外层 Provider 适配器。
 
-import type { Message, ToolDefinition } from "./message.js";
+import type { Message, ToolDefinition, Usage } from "./message.js";
 
 export const DEFAULT_PROVIDER_TIMEOUT_MS = 120_000;
 
+/** A real HTTP dispatch, including compatibility downgrades; never a logical call. */
+export interface ProviderPhysicalAttempt {
+  readonly attemptId: string;
+  readonly attempt: number;
+  readonly provider: string;
+  readonly model: string;
+  readonly startedAt: string;
+  readonly completedAt: string;
+  readonly status: "succeeded" | "failed" | "cancelled" | "interrupted";
+  readonly latencyMs: number;
+  readonly timeToFirstTokenMs?: number;
+  readonly httpStatus?: number;
+  readonly finishReason?: string;
+  readonly usage?: Usage;
+  readonly usageBasis: "reported" | "partial" | "missing";
+  readonly error?: string;
+  readonly costCNY?: number;
+  readonly costStatus?: "estimated" | "included" | "unknown";
+}
+
 export interface LLMProviderRequestOptions {
+  /** Harness identity, shared by every retry of one logical model step. */
+  logicalCallId?: string;
+  retryAttempt?: number;
+  /** Secret-free, settled physical dispatch facts for the canonical event ledger. */
+  onProviderAttempt?: (attempt: ProviderPhysicalAttempt) => void;
   /** 宿主中止信号。Provider 应将它与自身超时合并后传给网络请求。 */
   signal?: AbortSignal;
   /** 仅供已校验的宿主覆盖单次 Provider 硬超时；普通调用保持 120 秒默认值。 */
@@ -47,6 +72,8 @@ export interface PreparedProviderRequest {
 
 /** Provider 对请求级协议选项的显式支持；未声明一律按不支持处理。 */
 export interface LLMProviderRequestCapabilities {
+  /** Every actual dispatch, including internal compatibility retries, is observed. */
+  readonly physicalAttempts?: boolean;
   /** 能否在保留工具 Schema 的同时，通过 wire 参数可靠禁止工具调用。 */
   readonly toolChoiceNoneWithTools: boolean;
   /** Secret-free route identity used for route-scoped prompt-cache traffic accounting. */
