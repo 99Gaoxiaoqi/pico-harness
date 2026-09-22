@@ -838,6 +838,7 @@ const runtimeExecutionAttemptResult = exactResultShape(
     error: resultString,
     costCNY: resultFiniteNumber,
     costStatus: resultOneOf(["estimated", "included", "unknown"]),
+    costUnknownReason: resultString,
   },
 );
 const runtimeExecutionStepResult = exactResultShape(
@@ -871,6 +872,7 @@ const runtimeExecutionStepResult = exactResultShape(
     outputTokens: resultNonNegativeInteger,
     costCNY: resultFiniteNumber,
     costStatus: resultOneOf(["estimated", "included", "unknown"]),
+    costUnknownReason: resultString,
   },
 );
 const runtimeExecutionRunResult = exactResultShape(
