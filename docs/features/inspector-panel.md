@@ -35,3 +35,11 @@
 ![已选设计参考](../assets/inspector/design-reference.png)
 
 图中数值是设计示例；生产图表由当前查询结果绘制。当前桌面主题为浅色，追踪面板同时支持宿主显式指定的深色样式，不改变系统主题。
+
+## 实际界面与验证
+
+![实际时间线与原地详情](../assets/inspector/timeline-inline-desktop.png)
+
+![实际会话累计与当前历史](../assets/inspector/overview-history-desktop.png)
+
+见[测试与桌面验收记录](inspector-panel-validation.md)及[视觉对照](../../design-qa.md)。
