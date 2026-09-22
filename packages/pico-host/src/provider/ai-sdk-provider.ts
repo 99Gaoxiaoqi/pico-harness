@@ -1,3 +1,4 @@
+import { PhysicalAttemptTracker } from "./physical-attempt-tracker.js";
 import { randomUUID } from "node:crypto";
 import { anthropic, createAnthropic } from "@ai-sdk/anthropic";
 import { openai, createOpenAI } from "@ai-sdk/openai";
@@ -52,6 +53,7 @@ export class AiSdkProvider implements LLMProvider {
         ? configuredToolChoiceNone
         : defaultToolChoiceNoneWithTools(wire, config.baseURL) === true;
     this.requestCapabilities = {
+      physicalAttempts: true,
       ...(wire !== "claude" ? this.chatPolicy.requestCapabilities : {}),
       toolChoiceNoneWithTools,
     };
@@ -90,6 +92,13 @@ export class AiSdkProvider implements LLMProvider {
     const signal = providerRequestSignal(options?.signal, options?.timeoutMs);
     const startedAt = performance.now();
     const diagnosticId = randomUUID();
+    const attempts = new PhysicalAttemptTracker(
+      this.wire,
+      this.config.model,
+      signal,
+      options?.onProviderAttempt,
+    );
+    let rawUsage: Record<string, unknown> | undefined;
     let responseDiagnostic: Partial<ModelResponseDiagnostic> = {};
     let failureCategory: ModelCommunicationCategory = "request_failed";
     const definitions = snapshotToolDefinitions(availableTools);
@@ -129,7 +138,12 @@ export class AiSdkProvider implements LLMProvider {
       let response: Response;
       let errorText: string | undefined;
       if (this.wire !== "claude") {
-        const dispatched = await this.chatPolicy.dispatch(body, options, { ...init, signal });
+        const dispatched = await this.chatPolicy.dispatch(
+          body,
+          options,
+          { ...init, signal },
+          (send) => attempts.dispatch(send),
+        );
         response = dispatched.response;
         errorText = dispatched.errorText;
       } else {
@@ -145,12 +159,14 @@ export class AiSdkProvider implements LLMProvider {
           );
         for (const [key, value] of Object.entries(openCodeClientHeaders(this.config)))
           headers.set(key, value);
-        response = await fetch(this.endpoint(), {
-          ...init,
-          headers,
-          body: JSON.stringify(body),
-          signal,
-        });
+        response = await attempts.dispatch(() =>
+          fetch(this.endpoint(), {
+            ...init,
+            headers,
+            body: JSON.stringify(body),
+            signal,
+          }),
+        );
         if (!response.ok) errorText = await response.text();
       }
       responseDiagnostic = {
@@ -243,6 +259,7 @@ export class AiSdkProvider implements LLMProvider {
           this.wire,
           nonStreamingUsage ?? record(result.response.body)?.usage,
         );
+        attempts.settle(signal.aborted ? "cancelled" : "succeeded", usage, result.finishReason);
         const message = fromAiSdkContent(result.content, this.wire, responseOutput);
         return {
           ...message,
@@ -252,8 +269,14 @@ export class AiSdkProvider implements LLMProvider {
       }
       const result = streamText({ ...request, includeRawChunks: true, onError: () => {} });
       let finished = false;
-      let rawUsage: Record<string, unknown> | undefined;
       for await (const chunk of result.stream) {
+        if (
+          (chunk.type === "text-delta" || chunk.type === "reasoning-delta") &&
+          chunk.text.length > 0
+        )
+          attempts.observeOutput();
+        if (chunk.type === "tool-input-delta" && chunk.delta.length > 0) attempts.observeOutput();
+        if (chunk.type === "tool-call" || chunk.type === "tool-result") attempts.observeOutput();
         if (
           responseDiagnostic.firstChunkMs === undefined &&
           ["raw", "text-delta", "reasoning-delta", "error"].includes(chunk.type)
@@ -308,6 +331,7 @@ export class AiSdkProvider implements LLMProvider {
         throw new Error("Model stream ended before completion");
       }
       const usage = translateUsage((await result.steps).at(-1)!.usage, this.wire, rawUsage);
+      attempts.settle(signal.aborted ? "cancelled" : "succeeded", usage, await result.finishReason);
       const message = fromAiSdkContent(await result.content, this.wire, responseOutput);
       return {
         ...message,
@@ -315,6 +339,12 @@ export class AiSdkProvider implements LLMProvider {
         ...(usage === undefined ? {} : { usage }),
       };
     } catch (error) {
+      attempts.settle(
+        signal.aborted ? "cancelled" : "failed",
+        usageFromRaw(rawUsage ?? record(nonStreamingUsage), this.wire),
+        responseDiagnostic.finishReason,
+        signal.aborted ? "请求已取消或超时" : "模型响应未完成",
+      );
       if (signal.aborted) throw signal.reason;
       // Only allowlisted classifications cross the SDK boundary.
       throw modelCommunicationError(
@@ -475,4 +505,30 @@ function translateUsage(
       : {}),
     reportedFields: reported,
   };
+}
+
+/** Preserve provider-reported partial usage even when streaming ends in error or cancellation. */
+function usageFromRaw(
+  raw: Record<string, unknown> | undefined,
+  wire: ProviderProtocol,
+): Usage | undefined {
+  if (!raw) return undefined;
+  const input = wire === "openai" ? raw.prompt_tokens : raw.input_tokens;
+  const output = wire === "openai" ? raw.completion_tokens : raw.output_tokens;
+  const read =
+    wire === "claude" && typeof raw.cache_read_input_tokens === "number"
+      ? raw.cache_read_input_tokens
+      : 0;
+  const write =
+    wire === "claude" && typeof raw.cache_creation_input_tokens === "number"
+      ? raw.cache_creation_input_tokens
+      : 0;
+  return translateUsage(
+    {
+      inputTokens: typeof input === "number" ? input + read + write : undefined,
+      outputTokens: typeof output === "number" ? output : undefined,
+    } as LanguageModelUsage,
+    wire,
+    raw,
+  );
 }

@@ -12,7 +12,12 @@
 // 不把成本监控落到实处,就无法优化 System Prompt 长度,也无从判断上下文压缩是否省钱。
 
 import { randomUUID } from "node:crypto";
-import type { LLMProvider, LLMProviderRequestOptions, PreparedProviderRequest } from "@pico/core";
+import type {
+  LLMProvider,
+  LLMProviderRequestOptions,
+  PreparedProviderRequest,
+  ProviderPhysicalAttempt,
+} from "@pico/core";
 import type { Message, ToolDefinition } from "@pico/core";
 import type { RuntimeProjectionSession } from "./runtime-projection-session.js";
 import type { CanonicalUsage, UsageReportedField } from "@pico/core";
@@ -110,11 +115,15 @@ export class CostTracker implements LLMProvider {
     options?: LLMProviderRequestOptions,
   ): Promise<Message> {
     return this.track(
-      (observeRequest) =>
-        this.next.generate(messages, availableTools, withRequestObserver(options, observeRequest)),
+      (observeRequest, observeAttempt) =>
+        this.next.generate(
+          messages,
+          availableTools,
+          withRequestObserver(options, observeRequest, observeAttempt),
+        ),
       options?.signal,
       false,
-      options?.purpose,
+      options,
     );
   }
 
@@ -131,31 +140,69 @@ export class CostTracker implements LLMProvider {
     }
 
     return this.track(
-      (observeRequest) =>
+      (observeRequest, observeAttempt) =>
         this.next.generateStream!(
           messages,
           availableTools,
           onDelta,
-          withRequestObserver(options, observeRequest),
+          withRequestObserver(options, observeRequest, observeAttempt),
         ),
       options?.signal,
       true,
-      options?.purpose,
+      options,
     );
   }
 
   private async track(
-    invoke: (observeRequest: (request: PreparedProviderRequest) => void) => Promise<Message>,
+    invoke: (
+      observeRequest: (request: PreparedProviderRequest) => void,
+      observeAttempt: (attempt: ProviderPhysicalAttempt) => void,
+    ) => Promise<Message>,
     signal?: AbortSignal,
     streaming = false,
-    purpose?: LLMProviderRequestOptions["purpose"],
+    options?: LLMProviderRequestOptions,
   ): Promise<Message> {
     const callId = this.options.callId?.() ?? `call_${randomUUID()}`;
-    const context = this.resolveContext(purpose);
+    const context = this.resolveContext(options?.purpose);
+    const logicalCallId = options?.logicalCallId ?? callId;
+    const retryAttempt = options?.retryAttempt ?? 0;
+    const attempts = new Map<string, ProviderPhysicalAttempt>();
+    let attemptOverflow = false;
+    const observeAttempt = (attempt: ProviderPhysicalAttempt): void => {
+      if (attempts.size >= 16 && !attempts.has(attempt.attemptId)) {
+        attemptOverflow = true;
+        return;
+      }
+      let cost: ReturnType<typeof estimateCost> | undefined;
+      try {
+        if (attempt.usageBasis === "reported" && attempt.usage)
+          cost = estimateCost(this.modelRoute, attempt.usage, this.options.catalogPricing);
+      } catch {
+        // Preserve the dispatch fact as unpriced when a custom resolver is unavailable.
+      }
+      attempts.set(attempt.attemptId, {
+        ...attempt,
+        ...(cost && cost.status !== "unknown"
+          ? { costCNY: cost.costCNY, costStatus: cost.status }
+          : { costStatus: "unknown" }),
+      });
+    };
+    const attemptFacts = () =>
+      this.next.requestCapabilities?.physicalAttempts === true || attempts.size > 0
+        ? {
+            attempts: [...attempts.values()],
+            attemptCoverage:
+              !attemptOverflow && this.next.requestCapabilities?.physicalAttempts === true
+                ? ("complete" as const)
+                : ("partial" as const),
+          }
+        : {};
     const runtimeRun = this.requireMatchingRuntimeRun();
     const route = normalizeRoute(this.modelRoute);
     await runtimeRun?.recordModelCallStarted({
       providerCallId: callId,
+      logicalCallId,
+      retryAttempt,
       provider: route.provider,
       model: route.model,
       purpose: context.purpose,
@@ -190,13 +237,16 @@ export class CostTracker implements LLMProvider {
     };
     const start = Date.now();
     try {
-      const response = await invoke(observeRequest);
+      const response = await invoke(observeRequest, observeAttempt);
       const latencyMs = Date.now() - start;
       const cost = response.usage
         ? estimateCost(this.modelRoute, response.usage, this.options.catalogPricing)
         : undefined;
       await runtimeRun?.recordModelCallSettled({
         providerCallId: callId,
+        logicalCallId,
+        retryAttempt,
+        ...attemptFacts(),
         status: "succeeded",
         latencyMs,
         ...(response.usage ? { usage: response.usage } : {}),
@@ -219,6 +269,9 @@ export class CostTracker implements LLMProvider {
       const status = signal?.aborted || isAbortError(error) ? "cancelled" : "failed";
       await runtimeRun?.recordModelCallSettled({
         providerCallId: callId,
+        logicalCallId,
+        retryAttempt,
+        ...attemptFacts(),
         status,
         latencyMs,
         error: runtimeErrorSummary(error),
@@ -410,10 +463,15 @@ function safeRouteBaseUrl(value: string): string {
 function withRequestObserver(
   options: LLMProviderRequestOptions | undefined,
   observeRequest: (request: PreparedProviderRequest) => void,
+  observeAttempt: (attempt: ProviderPhysicalAttempt) => void,
 ): LLMProviderRequestOptions {
   const upstream = options?.onRequestPrepared;
   return {
     ...options,
+    onProviderAttempt: (attempt) => {
+      observeAttempt(attempt);
+      options?.onProviderAttempt?.(attempt);
+    },
     onRequestPrepared: (request) => {
       observeRequest(request);
       upstream?.(request);
