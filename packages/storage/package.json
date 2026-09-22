@@ -22,10 +22,6 @@
       "types": "./dist/local-file-storage.d.ts",
       "import": "./dist/local-file-storage.js"
     },
-    "./evidence-archive": {
-      "types": "./dist/evidence-archive.d.ts",
-      "import": "./dist/evidence-archive.js"
-    },
     "./evidence-blob-store": {
       "types": "./dist/evidence-blob-store.d.ts",
       "import": "./dist/evidence-blob-store.js"
