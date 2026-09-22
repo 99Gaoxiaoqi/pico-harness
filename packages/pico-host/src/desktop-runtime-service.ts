@@ -205,6 +205,7 @@ import { DesktopAtomicMemoryService } from "./desktop-atomic-memory-service.js";
 import { sessionMemoryLane } from "@pico/runtime/atomic-memory/session-lane";
 import { memorySessionKey } from "@pico/core/atomic-memory-runtime-contracts";
 import type { ImagePart } from "@pico/core";
+import { readRuntimeModelHistorySnapshot } from "@pico/runtime/session-runtime-read-model";
 import { createModelContextReport } from "@pico/runtime/provider/model-runtime-report";
 import { createSessionHookRuntime } from "./hooks/runtime.js";
 import { PluginManagementService } from "./plugins/plugin-management-service.js";
@@ -1526,14 +1527,24 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   ): Promise<JsonValue> {
     const canonical = await this.requireTrustedSession(workspacePath, sessionId);
     return this.withSession(canonical, sessionId, async (session) => {
-      const settings = await this.getSessionSettings(canonical, session);
+      const settings = session.getRuntimeStateSnapshot().settings;
+      if (!settings)
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.RESET_REQUIRED,
+          `Session ${sessionId} 缺少当前版本 settings，请新建 Session`,
+        );
       const runtime = await this.loadSessionModelRuntime(canonical);
       const route = runtime.router.require(settings.modelRouteId);
-      const traceWatermark = this.workbarRepository(canonical).queryTrace({
-        sessionId,
-        limit: 1,
-      }).throughSequence;
-      const history = session.getHistory();
+      const store = session.runtimeEventStore;
+      if (!store) throw new Error("上下文历史缺少持久化事件源");
+      // No run, prompt assembly, tool discovery or provider request is created for inspection.
+      const history = await readRuntimeModelHistorySnapshot(store, sessionId);
+      const {
+        estimatedInputTokens,
+        remainingTokens: _remaining,
+        usedPercent: _used,
+        ...limits
+      } = createModelContextReport(route, history.messages);
       let latestRequest;
       try {
         latestRequest = getLatestContextRequest(
@@ -1549,13 +1560,19 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       }
       return toJsonValue({
         context: {
-          ...createModelContextReport(route, history),
-          sections: createCurrentContextSections(history),
+          ...limits,
+          coverage: "model_history_only",
+          historyProjection: "restored_tool_results",
+          estimatedHistoryTokens: estimatedInputTokens,
+          modelHistoryMessageCount: history.messages.length,
+          compactedCount: history.compactedCount,
+          ...(history.latestCompaction ? { latestCompaction: history.latestCompaction } : {}),
+          sections: createCurrentContextSections(history.messages),
           latestRequest,
           version: 2,
           sessionId,
           generatedAt: this.now(),
-          traceWatermark,
+          traceWatermark: history.throughSequence,
         },
       });
     });

@@ -217,6 +217,10 @@ export function InspectorPanelController({
 export function contextView(context: RuntimeSessionContextSnapshot): InspectorContextSnapshot {
   return {
     version: context.version,
+    ...(context.coverage ? { coverage: context.coverage } : {}),
+    estimatedHistoryTokens: numberField(context, "estimatedHistoryTokens"),
+    modelHistoryMessageCount: numberField(context, "modelHistoryMessageCount"),
+    ...(context.latestCompaction ? { latestCompaction: context.latestCompaction } : {}),
     ...(context.sections ? { sections: context.sections } : {}),
     ...(context.latestRequest ? { latestRequest: context.latestRequest } : {}),
     routeId: stringField(context, "routeId"),

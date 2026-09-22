@@ -86,13 +86,15 @@ export interface ConversationView {
 
 export interface SessionContextView {
   readonly routeId: string;
-  readonly estimatedInputTokens: number;
+  readonly coverage?: "model_history_only";
+  readonly estimatedHistoryTokens?: number;
+  readonly estimatedInputTokens?: number;
   readonly contextWindowTokens: number;
   readonly reservedOutputTokens: number;
   readonly safetyMarginTokens: number;
   readonly inputBudgetTokens: number;
-  readonly remainingTokens: number;
-  readonly usedPercent: number;
+  readonly remainingTokens?: number;
+  readonly usedPercent?: number;
   readonly estimation: string;
 }
 

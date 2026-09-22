@@ -106,6 +106,18 @@ export type RuntimeSessionContextSnapshot = JsonObject & {
   readonly sessionId: SessionId;
   readonly generatedAt: number;
   readonly traceWatermark: number;
+  /** Full prompt/tool assembly is unavailable; these tokens cover model history only. */
+  readonly coverage?: "model_history_only";
+  readonly historyProjection?: "restored_tool_results";
+  readonly estimatedHistoryTokens?: number;
+  readonly modelHistoryMessageCount?: number;
+  /** Successful compaction checkpoints, excluding fork seeds and hard resets. */
+  readonly compactedCount?: number;
+  readonly latestCompaction?: JsonObject & {
+    readonly checkpointId: string;
+    readonly throughEventId: string;
+    readonly coveredEventCount: number;
+  };
   readonly sections?: readonly RuntimeContextSection[];
   readonly latestRequest?: RuntimeLatestContextRequest;
 };

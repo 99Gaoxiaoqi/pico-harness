@@ -1,5 +1,7 @@
 import { isValidStoredCompactionSummary } from "./history-compact-summary-validation.js";
 import {
+  RUNTIME_MESSAGE_EVENT_ID,
+  RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX,
   claimKindForEvent,
   computeCheckpointSourceDigest,
   projectRuntimeModelMessage,
@@ -8,6 +10,11 @@ import {
   type RuntimeEvent,
   type ToolCall,
 } from "@pico/core";
+import type { SqliteRuntimeEventStore } from "@pico/storage/sqlite/sqlite-runtime-event-store";
+import {
+  archiveStaleToolResultEntries,
+  restoreArchivedToolResultEntries,
+} from "./tool-result-archive.js";
 import { makeDiagnostic, type RuntimeProjectionDiagnostic } from "./projection-diagnostics.js";
 
 export interface RuntimeHistoryProjectionEntry {
@@ -16,6 +23,53 @@ export interface RuntimeHistoryProjectionEntry {
   /** The immutable event that currently contributes this model-visible message. */
   readonly eventId: string;
   readonly message: Message;
+}
+
+/** A read-only projection and its compaction metadata from one durable event snapshot. */
+export async function readRuntimeModelHistorySnapshot(
+  store: Pick<SqliteRuntimeEventStore, "readSessionEntriesOfKinds">,
+  sessionId: string,
+  options: {
+    readonly includeEventIds?: boolean;
+    readonly toolResultArchiveAvailable?: boolean;
+  } = {},
+) {
+  const { entries, headSequence } = await store.readSessionEntriesOfKinds(
+    sessionId,
+    RUNTIME_HISTORY_EVENT_KINDS,
+  );
+  const events = entries.map(({ event }) => event);
+  // Validate checkpoints and preserve the exact model tool-pairing and byte-budget behavior.
+  const materialized = materializeRuntimeHistoryEntries(events);
+  const projected = applyModelHistoryByteBudget(
+    (options.toolResultArchiveAvailable
+      ? archiveStaleToolResultEntries
+      : restoreArchivedToolResultEntries)(events, materialized),
+    { maxTotalBytes: MAX_MODEL_HISTORY_BYTES },
+  );
+  const compactions = events.filter(
+    (event): event is RuntimeCheckpointRecordedEvent =>
+      event.kind === "context.checkpoint.recorded" &&
+      !event.data.checkpointId.startsWith("hard-reset:") &&
+      !event.runId.startsWith(RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX),
+  );
+  const latest = compactions.at(-1);
+  return {
+    messages: projected.map(({ eventId, message }) =>
+      options.includeEventIds ? { ...message, [RUNTIME_MESSAGE_EVENT_ID]: eventId } : message,
+    ),
+    throughSequence: headSequence,
+    compactedCount: compactions.length,
+    ...(latest
+      ? {
+          latestCompaction: {
+            checkpointId: latest.data.checkpointId,
+            throughEventId: latest.data.throughEventId,
+            coveredEventCount: latest.data.coveredEventCount,
+          },
+        }
+      : {}),
+  };
 }
 
 /**

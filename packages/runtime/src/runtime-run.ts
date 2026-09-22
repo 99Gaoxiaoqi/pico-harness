@@ -2,9 +2,7 @@ import { isValidStoredCompactionSummary } from "./history-compact-summary-valida
 import {
   archiveRuntimeToolResult,
   buildToolResultArchiveRef,
-  archiveStaleToolResultEntries,
   rebindToolResultArchive,
-  restoreArchivedToolResultEntries,
 } from "./tool-result-archive.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
@@ -46,7 +44,7 @@ import {
 } from "@pico/core/durable-transcript-contract";
 import { inspectDurableTranscriptEvents } from "./durable-transcript-state.js";
 import { waitForDelay } from "./deadline.js";
-import { RUNTIME_MESSAGE_EVENT_ID, type Message, type ToolCall, type ToolResult } from "@pico/core";
+import type { Message, ToolCall, ToolResult } from "@pico/core";
 import {
   ToolCommitBoundaryError,
   type RuntimeToolRegistry,
@@ -77,6 +75,7 @@ import {
   type RuntimeTranscriptEventRecordedEvent,
 } from "@pico/storage/runtime-event";
 import {
+  readRuntimeModelHistorySnapshot,
   RUNTIME_HISTORY_EVENT_KINDS,
   RUNTIME_MODEL_MESSAGE_EVENT_KINDS,
   materializeRuntimeHistoryEntries,
@@ -1208,33 +1207,11 @@ export class RuntimeRun {
   }
 
   async readModelHistory(includeEventIds = false): Promise<Message[]> {
-    const {
-      applyModelHistoryByteBudget,
-      MAX_MODEL_HISTORY_BYTES,
-      materializeRuntimeHistoryEntries,
-    } = await import("@pico/runtime/session-runtime-read-model");
-    // kind 切片查询(票 04):read-model 只消费 message/tool-result/checkpoint 三类,
-    // 其余 kind 只产 soft 诊断,不进输出——折叠规则不变,数据来源窄化。
-    const { entries } = await this.store.readSessionEntriesOfKinds(
-      this.sessionId,
-      RUNTIME_HISTORY_EVENT_KINDS,
-    );
-    // ADR 26 §2.3(票 E2):全文 inline 入库后,provider 消息组装按字节预算 gate,
-    // 超预算的最旧大内容在 read-model 层降级为带标记的截断视图,末尾工作集不裁。
-    const materialized = materializeRuntimeHistoryEntries(entries.map(({ event }) => event));
-    return applyModelHistoryByteBudget(
-      (this.toolResultArchiveAvailable
-        ? archiveStaleToolResultEntries
-        : restoreArchivedToolResultEntries)(
-        entries.map(({ event }) => event),
-        materialized,
-      ),
-      {
-        maxTotalBytes: MAX_MODEL_HISTORY_BYTES,
-      },
-    ).map(({ eventId, message }) =>
-      includeEventIds ? { ...message, [RUNTIME_MESSAGE_EVENT_ID]: eventId } : message,
-    );
+    const snapshot = await readRuntimeModelHistorySnapshot(this.store, this.sessionId, {
+      includeEventIds,
+      toolResultArchiveAvailable: this.toolResultArchiveAvailable,
+    });
+    return snapshot.messages;
   }
 
   /** True only when this run owns the Session's canonical workspace and durable store. */

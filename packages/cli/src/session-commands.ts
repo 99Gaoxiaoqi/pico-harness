@@ -299,8 +299,16 @@ function formatContextReport(context: unknown): string {
   };
   return [
     `Context (${String(record["routeId"] ?? "?")})`,
-    `  estimated=${numberField("estimatedInputTokens")} · budget=${numberField("inputBudgetTokens")} · remaining=${numberField("remainingTokens")}`,
-    `  window=${numberField("contextWindowTokens")} · reserved=${numberField("reservedOutputTokens")} · used=${numberField("usedPercent")}%`,
+    ...(record["coverage"] === "model_history_only"
+      ? [
+          `  model history (estimated)=${numberField("estimatedHistoryTokens")} · messages=${numberField("modelHistoryMessageCount")} · compactions=${numberField("compactedCount")}`,
+          "  System/tools/overhead are unknown; full context usage and remaining capacity are unavailable.",
+          "  Tool results use restored bodies; actual requests may use archive views.",
+        ]
+      : [
+          `  estimated=${numberField("estimatedInputTokens")} · budget=${numberField("inputBudgetTokens")} · remaining=${numberField("remainingTokens")}`,
+        ]),
+    `  window=${numberField("contextWindowTokens")} · reserved=${numberField("reservedOutputTokens")}`,
     ...(capabilityText ? [`  capabilities: ${capabilityText}`] : []),
   ].join("\n");
 }

@@ -1,12 +1,12 @@
 import { DatabaseSync } from "node:sqlite";
-import type { Message, ToolDefinition } from "@pico/core";
+import type { Message } from "@pico/core";
 import type {
   RuntimeContextComposition,
   RuntimeContextSection,
   RuntimeLatestContextRequest,
 } from "@pico/protocol";
 import { operationalDatabasePath } from "@pico/storage";
-import { estimateMessageTokens, estimateToolDefinitionsTokens } from "@pico/runtime/context-budget";
+import { estimateMessageTokens } from "@pico/runtime/context-budget";
 import { parsePreparedRequestCapture } from "@pico/runtime/provider-request-diagnostics";
 
 const MAX_DIAGNOSTIC_BYTES = 256 * 1024;
@@ -14,29 +14,22 @@ const MAX_TOOLS = 8;
 
 export function createCurrentContextSections(
   messages: readonly Message[],
-  tools?: readonly ToolDefinition[],
 ): RuntimeContextSection[] {
   return [
     {
       id: "system",
-      label: "系统指令（估算）",
-      tokens: messages
-        .filter((m) => m.role === "system")
-        .reduce((n, m) => n + estimateMessageTokens(m), 0),
-      state: "included",
+      label: "系统指令（尚未装配）",
+      state: "unknown",
     },
     {
       id: "tools",
-      label: tools ? "工具定义（估算）" : "工具定义（当前不可用）",
-      ...(tools ? { tokens: estimateToolDefinitionsTokens(tools) } : {}),
-      state: tools ? "included" : "unknown",
+      label: "工具定义（尚未装配）",
+      state: "unknown",
     },
     {
       id: "messages",
-      label: "会话消息（估算）",
-      tokens: messages
-        .filter((m) => m.role !== "system")
-        .reduce((n, m) => n + estimateMessageTokens(m), 0),
+      label: "模型历史消息小计（估算）",
+      tokens: messages.reduce((n, m) => n + estimateMessageTokens(m), 0),
       state: "included",
     },
     {

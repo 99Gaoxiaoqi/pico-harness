@@ -17,6 +17,14 @@ export interface InspectorContextSection {
 export interface InspectorContextSnapshot {
   readonly version: number;
   readonly routeId?: string;
+  readonly coverage?: "model_history_only";
+  readonly estimatedHistoryTokens?: number;
+  readonly modelHistoryMessageCount?: number;
+  readonly latestCompaction?: {
+    readonly checkpointId: string;
+    readonly throughEventId: string;
+    readonly coveredEventCount: number;
+  };
   readonly estimatedInputTokens?: number;
   readonly inputBudgetTokens?: number;
   readonly remainingTokens?: number;
@@ -94,6 +102,7 @@ export interface InspectorWorkbarPanelProps {
 }
 
 export function contextUsagePercent(context?: InspectorContextSnapshot): number | undefined {
+  if (context?.coverage === "model_history_only") return undefined;
   if (context?.usedPercent !== undefined && Number.isFinite(context.usedPercent)) {
     return Math.min(100, Math.max(0, context.usedPercent));
   }
@@ -198,7 +207,7 @@ export function InspectorWorkbarPanel({
         )}
         <section className="tool-panel__section" aria-labelledby="inspector-context-title">
           <div className="tool-panel__section-heading">
-            <h3 id="inspector-context-title">当前上下文</h3>
+            <h3 id="inspector-context-title">当前模型历史（估算）</h3>
             {context?.routeId && <code>{context.routeId}</code>}
           </div>
           {contextError && (
@@ -212,22 +221,25 @@ export function InspectorWorkbarPanel({
             <>
               {context.estimation === "estimated" && (
                 <p className="tool-panel__muted">
-                  上下文 Token 为估算值；未估算项单独标注，不代表完整请求占用。
+                  模型历史包含压缩摘要及后续消息；系统指令、工具定义和协议开销未知，无法计算完整占用与剩余量。
+                </p>
+              )}
+              {context.coverage === "model_history_only" && (
+                <p className="tool-panel__muted">
+                  工具结果按正文估算，实际请求可能使用更短的归档视图。
                 </p>
               )}
               <dl className="tool-panel__metrics">
                 <div>
-                  <dt>已使用</dt>
-                  <dd>{usage === undefined ? "未知" : `${usage.toFixed(1)}%`}</dd>
+                  <dt>消息小计</dt>
+                  <dd>{formatTokens(context.estimatedHistoryTokens)}</dd>
                 </div>
-                <div>
-                  <dt>输入</dt>
-                  <dd>{formatTokens(context.estimatedInputTokens)}</dd>
-                </div>
-                <div>
-                  <dt>剩余</dt>
-                  <dd>{formatTokens(context.remainingTokens)}</dd>
-                </div>
+                {context.modelHistoryMessageCount !== undefined && (
+                  <div>
+                    <dt>历史消息</dt>
+                    <dd>{context.modelHistoryMessageCount} 条</dd>
+                  </div>
+                )}
                 {context.contextWindowTokens !== undefined && (
                   <div>
                     <dt>模型窗口</dt>
@@ -259,6 +271,17 @@ export function InspectorWorkbarPanel({
                   </dd>
                 </div>
               </dl>
+              {context.latestCompaction && (
+                <details>
+                  <summary>最近压缩 · 覆盖 {context.latestCompaction.coveredEventCount} 条</summary>
+                  <p className="tool-panel__muted">
+                    压缩记录 <code>{context.latestCompaction.checkpointId}</code>
+                  </p>
+                  <p className="tool-panel__muted">
+                    覆盖边界 <code>{context.latestCompaction.throughEventId}</code>
+                  </p>
+                </details>
+              )}
               {usage !== undefined && (
                 <div
                   className="tool-panel__progress"

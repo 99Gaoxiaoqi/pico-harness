@@ -9,7 +9,14 @@ import {
   type WorkspaceCapabilities,
   type WorkspaceMode,
 } from "../model.js";
-import { booleanValue, isRecord, numberValue, recordArray, stringValue } from "./values.js";
+import {
+  booleanValue,
+  isRecord,
+  numberValue,
+  optionalNumberValue,
+  recordArray,
+  stringValue,
+} from "./values.js";
 
 export function parseSessionSettings(value: unknown): SessionSettingsView | undefined {
   if (!isRecord(value) || !isRecord(value.settings)) return undefined;
@@ -87,13 +94,17 @@ export function parseSessionContext(value: unknown): SessionContextView {
   const context = isRecord(result.context) ? result.context : {};
   return {
     routeId: stringValue(context.routeId, "未知路由"),
-    estimatedInputTokens: numberValue(context.estimatedInputTokens),
+    ...(context.coverage === "model_history_only"
+      ? { coverage: "model_history_only" as const }
+      : {}),
+    estimatedHistoryTokens: optionalNumberValue(context.estimatedHistoryTokens),
+    estimatedInputTokens: optionalNumberValue(context.estimatedInputTokens),
     contextWindowTokens: numberValue(context.contextWindowTokens),
     reservedOutputTokens: numberValue(context.reservedOutputTokens),
     safetyMarginTokens: numberValue(context.safetyMarginTokens),
     inputBudgetTokens: numberValue(context.inputBudgetTokens),
-    remainingTokens: numberValue(context.remainingTokens),
-    usedPercent: numberValue(context.usedPercent),
+    remainingTokens: optionalNumberValue(context.remainingTokens),
+    usedPercent: optionalNumberValue(context.usedPercent),
     estimation: stringValue(context.estimation, "estimated"),
   };
 }

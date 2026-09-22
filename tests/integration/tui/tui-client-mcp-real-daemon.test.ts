@@ -152,9 +152,10 @@ test("real daemon: /mcp status + enable/disable round trip over user mcp.json", 
   });
   const report = context.context as Record<string, unknown>;
   assert.ok(report["routeId"], "上下文报告应携带活跃路由");
-  assert.equal(typeof report["estimatedInputTokens"], "number");
+  assert.equal(typeof report["estimatedHistoryTokens"], "number");
+  assert.equal(report["coverage"], "model_history_only");
   assert.equal(typeof report["contextWindowTokens"], "number");
-  assert.equal(typeof report["usedPercent"], "number");
+  assert.equal(report["usedPercent"], undefined);
 
   // /add-dir 真 daemon：真实目录校验 + 持久化到会话 settings。
   const extraDir = join(root, "extra");
