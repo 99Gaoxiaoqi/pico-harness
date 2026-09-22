@@ -538,13 +538,14 @@ export class AgentEngine {
 
   private rotateProvider(
     failure: RateLimitFailure,
-    reporter: Reporter,
+    reporter: Pick<Reporter, "onTextDelta" | "onReasoningDelta">,
     signal?: AbortSignal,
   ): LLMProvider | undefined {
     const provider = this.rebuildProvider?.(failure);
     if (!provider) return undefined;
     this.provider = provider;
     this.lastAnchoredPromptTokens = undefined;
+    this.acceptedHistoryPrefixCount = undefined;
     return providerForReporter(provider, reporter, signal);
   }
 
@@ -604,7 +605,7 @@ export class AgentEngine {
    * UI(经 providerForReporter 闭包);中途失败重试时若不撤销,第二次尝试会把完整
    * 内容再流一遍,UI 得到"半截 + 完整"拼接。这里在 onRetry 触发时调用
    * reporter.onAssistantResponseSuppressed("network-retry") 撤销上一轮已投影的临时流。
-   * reporter 未传入(如 compactSubContext 子代理路径)时只打日志,保持原行为。
+   * reporter 未传入时只记录诊断。
    */
   private makeRetryReporter(span?: Span, reporter?: Reporter): (info: RetryInfo) => void {
     return (info: RetryInfo) => {
@@ -827,8 +828,11 @@ export class AgentEngine {
         tools,
         {
           ...(signal === undefined ? {} : { signal }),
-          onRetry: this.makeRetryReporter(span, reporter),
-          onRateLimited: (failure) => this.rotateProvider(failure, reporter, signal),
+          onRetry: (info) => {
+            this.makeRetryReporter(span, reporter)(info);
+            sawObservableOutput = false;
+          },
+          onRateLimited: (failure) => this.rotateProvider(failure, streamReporter, signal),
           ...(promptCacheRequest.shardSeed
             ? { promptCacheShardSeed: promptCacheRequest.shardSeed }
             : {}),
@@ -1117,6 +1121,7 @@ export class AgentEngine {
       ) {
         this.lastAnchoredPromptTokens = value["input"] + value["output"];
         this.lastReplyTokens = value["output"];
+        this.acceptedHistoryPrefixCount = runHistory.lastIndexOf(message);
       }
       break;
     }
