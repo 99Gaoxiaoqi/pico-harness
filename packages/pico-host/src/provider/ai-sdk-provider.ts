@@ -99,6 +99,7 @@ export class AiSdkProvider implements LLMProvider {
       options?.onProviderAttempt,
     );
     let rawUsage: Record<string, unknown> | undefined;
+    let terminalUsageObserved = false;
     let responseDiagnostic: Partial<ModelResponseDiagnostic> = {};
     let failureCategory: ModelCommunicationCategory = "request_failed";
     const definitions = snapshotToolDefinitions(availableTools);
@@ -306,7 +307,23 @@ export class AiSdkProvider implements LLMProvider {
             record(raw?.usage) ??
             record(record(raw?.message)?.usage) ??
             record(record(raw?.response)?.usage);
-          if (value) rawUsage = { ...rawUsage, ...value };
+          if (value) {
+            rawUsage = { ...rawUsage, ...value };
+            // Anthropic message_start already contains output_tokens, but it is only
+            // an initial count. Responses can likewise carry snapshots before settlement.
+            if (
+              (this.wire === "claude" &&
+                raw?.type === "message_delta" &&
+                typeof record(raw.delta)?.stop_reason === "string" &&
+                typeof value.output_tokens === "number") ||
+              (this.wire === "responses" &&
+                ["response.completed", "response.incomplete", "response.failed"].includes(
+                  String(raw?.type),
+                )) ||
+              (this.wire === "openai" && responseDiagnostic.rawFinishReason !== undefined)
+            )
+              terminalUsageObserved = true;
+          }
         } else if (chunk.type === "text-delta") onDelta(chunk.text);
         else if (chunk.type === "reasoning-delta") options?.onReasoningDelta?.(chunk.text);
         else if (chunk.type === "error") {
@@ -341,7 +358,11 @@ export class AiSdkProvider implements LLMProvider {
     } catch (error) {
       attempts.settle(
         signal.aborted ? "cancelled" : "failed",
-        usageFromRaw(rawUsage ?? record(nonStreamingUsage), this.wire),
+        usageFromRaw(
+          rawUsage ?? record(nonStreamingUsage),
+          this.wire,
+          !onDelta || terminalUsageObserved,
+        ),
         responseDiagnostic.finishReason,
         signal.aborted ? "请求已取消或超时" : "模型响应未完成",
       );
@@ -511,8 +532,20 @@ function translateUsage(
 function usageFromRaw(
   raw: Record<string, unknown> | undefined,
   wire: ProviderProtocol,
+  terminalUsageObserved: boolean,
 ): Usage | undefined {
   if (!raw) return undefined;
+  if (!terminalUsageObserved) {
+    // Never promote an intermediate output counter to a final bill after cancellation.
+    const {
+      completion_tokens: _completion,
+      output_tokens: _output,
+      completion_tokens_details: _completionDetails,
+      output_tokens_details: _outputDetails,
+      ...inputUsage
+    } = raw;
+    raw = inputUsage;
+  }
   const input = wire === "openai" ? raw.prompt_tokens : raw.input_tokens;
   const output = wire === "openai" ? raw.completion_tokens : raw.output_tokens;
   const read =
