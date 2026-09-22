@@ -486,3 +486,79 @@ test("legacy migration recovers auxiliary purpose from matching start and never 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("partial Claude usage ignores unreported intermediate counts and never marks completion complete", async () => {
+  const { createModelUsageReport } = await import("@pico/runtime/provider/model-runtime-report");
+  const { resolveModelRouteCapabilities } = await import("@pico/runtime");
+  const root = await mkdtemp(join(tmpdir(), "pico-meter-partial-"));
+  const ledger = new SqliteRuntimeControlStore({ storageRoot: root });
+  try {
+    const prepared = record(ledger.beginPhysicalAttemptOwner());
+    ledger.recordPhysicalAttempt(prepared);
+    const partial: PhysicalAttemptRecord = {
+      ...prepared,
+      revision: 1,
+      status: "cancelled",
+      usageBasis: "partial",
+      usage: {
+        promptTokens: 12,
+        completionTokens: 999,
+        inputTokens: 999,
+        cacheReadTokens: 2,
+        cacheWriteTokens: 999,
+        reasoningTokens: 999,
+        reportedFields: ["prompt", "cacheRead"],
+      },
+    };
+    ledger.recordPhysicalAttempt(partial);
+    const measured = ledger.listAccountingProviderCalls({ sessionId: "session-1" })[0]!;
+    assert.deepEqual(
+      [
+        measured.inputTokens,
+        measured.outputTokens,
+        measured.cacheReadTokens,
+        measured.cacheWriteTokens,
+      ],
+      [10, 0, 2, 0],
+    );
+    assert.equal(measured.reported?.["reasoningTokens"], undefined);
+    const usage = ledger.getAccountingSessionUsage("session-1")!;
+    assert.equal(usage.totalUsageReports, 0);
+    assert.equal(usage.totalPromptTokens, 12);
+    assert.equal(usage.totalCompletionTokens, 0);
+    assert.equal(usage.totalReasoningTokens, 0);
+    const report = createModelUsageReport(
+      {
+        id: "claude/test",
+        providerId: "claude",
+        provider: "claude",
+        model: "test",
+        baseURL: "https://api.anthropic.com",
+        apiKeyEnv: "ANTHROPIC_API_KEY",
+        source: "config",
+        capabilities: resolveModelRouteCapabilities("claude", "test", undefined),
+      },
+      usage,
+    );
+    assert.equal(report.fields.completionTokens.status, "unknown");
+    assert.equal(report.fields.completionTokens.value, null);
+    assert.equal(report.fields.reasoningTokens.status, "unknown");
+    ledger.recordPhysicalAttempt({
+      ...partial,
+      revision: 2,
+      usageBasis: "reported",
+      usage: {
+        promptTokens: 12,
+        completionTokens: 4,
+        reasoningTokens: 1,
+        reportedFields: ["prompt", "completion", "reasoning"],
+      },
+    });
+    assert.equal(ledger.listAccountingProviderCalls()[0]!.reported?.["reasoningTokens"], 1);
+    assert.equal(ledger.getAccountingSessionUsage("session-1")?.totalUsageReports, 1);
+    assert.equal(ledger.getAccountingSessionUsage("session-1")?.totalReasoningTokens, 1);
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});

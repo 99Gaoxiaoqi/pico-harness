@@ -2020,15 +2020,19 @@ export class SqliteRuntimeControlStore {
       for (const call of calls) {
         const reported = call.reported;
         const basis = reported?.["usageBasis"];
-        const hasUsage =
-          basis === "reported" || basis === "partial" || reported?.["usageMetadata"] === "reported";
-        if (hasUsage) usage.totalUsageReports++;
         const rawUsage = reported?.["usage"] as Usage | undefined;
-        const fields = new Set(
-          rawUsage?.reportedFields ?? (reported?.["reportedFields"] as string[] | undefined) ?? [],
-        );
-        usage.totalReasoningTokens +=
-          rawUsage?.reasoningTokens ?? Number(reported?.["reasoningTokens"] ?? 0);
+        const reportedFields =
+          rawUsage?.reportedFields ?? (reported?.["reportedFields"] as string[] | undefined);
+        const fields = new Set(reportedFields ?? []);
+        const completeUsage = fields.has("prompt") && fields.has("completion");
+        const trustedLegacyUsage =
+          reportedFields === undefined &&
+          (basis === "reported" ||
+            (basis === undefined && reported?.["usageMetadata"] === "reported"));
+        if (completeUsage || trustedLegacyUsage) usage.totalUsageReports++;
+        if (fields.has("reasoning"))
+          usage.totalReasoningTokens +=
+            rawUsage?.reasoningTokens ?? Number(reported?.["reasoningTokens"] ?? 0);
         if (fields.has("input")) usage.totalInputReports++;
         if (fields.has("cacheRead")) usage.totalCacheReadReports++;
         if (call.cacheReadTokens > 0) usage.totalCacheHitCalls++;
@@ -3139,6 +3143,22 @@ function physicalAttemptIdentity(record: PhysicalAttemptRecord): unknown {
   return identity;
 }
 function physicalAccountingCall(record: PhysicalAttemptRecord): ProviderCallRecord {
+  const fields = new Set(
+    record.usage?.reportedFields ??
+      (record.usageBasis === "reported" ? ["prompt", "completion"] : []),
+  );
+  const raw = record.usage;
+  const knownUsage: Usage = {
+    promptTokens: fields.has("prompt") ? (raw?.promptTokens ?? 0) : 0,
+    completionTokens: fields.has("completion") ? (raw?.completionTokens ?? 0) : 0,
+    ...(fields.has("input") && raw?.inputTokens !== undefined
+      ? { inputTokens: raw.inputTokens }
+      : {}),
+    ...(fields.has("cacheRead") ? { cacheReadTokens: raw?.cacheReadTokens ?? 0 } : {}),
+    ...(fields.has("cacheWrite") ? { cacheWriteTokens: raw?.cacheWriteTokens ?? 0 } : {}),
+    ...(fields.has("reasoning") ? { reasoningTokens: raw?.reasoningTokens ?? 0 } : {}),
+  };
+  const canonical = toCanonicalUsage(knownUsage);
   return {
     callId: record.physicalAttemptId,
     sessionId: record.sessionId,
@@ -3156,10 +3176,10 @@ function physicalAccountingCall(record: PhysicalAttemptRecord): ProviderCallReco
         : record.status === "cancelled"
           ? "cancelled"
           : "failed",
-    inputTokens: record.usage ? toCanonicalUsage(record.usage).inputTokens : 0,
-    outputTokens: record.usage?.completionTokens ?? 0,
-    cacheReadTokens: record.usage?.cacheReadTokens ?? 0,
-    cacheWriteTokens: record.usage?.cacheWriteTokens ?? 0,
+    inputTokens: canonical.inputTokens,
+    outputTokens: knownUsage.completionTokens,
+    cacheReadTokens: canonical.cacheReadTokens,
+    cacheWriteTokens: canonical.cacheWriteTokens,
     cost: record.costCNY ?? 0,
     createdAt: Date.parse(record.startedAt),
     reported: {
@@ -3169,9 +3189,8 @@ function physicalAccountingCall(record: PhysicalAttemptRecord): ProviderCallReco
       logicalCallId: record.logicalCallId,
       physicalAttemptId: record.physicalAttemptId,
       usageMetadata: record.usage ? "reported" : "unknown",
-      reportedFields:
-        record.usage?.reportedFields ??
-        (record.usageBasis === "reported" ? ["prompt", "completion"] : []),
+      reportedFields: [...fields],
+      ...(fields.has("reasoning") ? { reasoningTokens: canonical.reasoningTokens } : {}),
       usageBasis: record.usageBasis,
       costStatus: record.costStatus,
       lifecycleStatus: record.status,
