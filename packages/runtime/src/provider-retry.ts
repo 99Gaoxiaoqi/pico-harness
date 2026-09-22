@@ -34,6 +34,7 @@ export interface RetryLogger {
 }
 
 export interface RetryOptions {
+  readonly contextFacts?: LLMProviderRequestOptions["contextFacts"];
   readonly maxAttempts?: number;
   readonly signal?: AbortSignal;
   readonly toolChoice?: LLMProviderRequestOptions["toolChoice"];
@@ -92,6 +93,7 @@ export async function generateWithRetry(
   const requestOptions: LLMProviderRequestOptions = {
     logicalCallId: `logical_${randomUUID()}`,
     retryAttempt: 0,
+    ...(options?.contextFacts ? { contextFacts: structuredClone(options.contextFacts) } : {}),
     ...(signal ? { signal } : {}),
     ...(options?.toolChoice ? { toolChoice: options.toolChoice } : {}),
     ...(options?.promptCacheShardSeed

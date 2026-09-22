@@ -1,4 +1,4 @@
-import { hasIncompleteToolExchange, type Message } from "@pico/core";
+import { type Message } from "@pico/core";
 import { estimateMessageTokens } from "./context-budget.js";
 
 export interface SafeCompactionCut {
@@ -11,7 +11,7 @@ export interface SafeCompactionCut {
 interface ToolBatch {
   readonly start: number;
   readonly endExclusive: number;
-  readonly incompleteAtTail: boolean;
+  readonly incomplete: boolean;
   readonly invalid: boolean;
 }
 
@@ -43,7 +43,7 @@ function inspectToolBatches(messages: readonly Message[]): ToolBatch[] {
     batches.push({
       start: index,
       endExclusive,
-      incompleteAtTail: endExclusive === messages.length && seen.size < expected.size,
+      incomplete: seen.size < expected.size,
       invalid,
     });
     index = endExclusive - 1;
@@ -55,14 +55,14 @@ export { hasIncompleteToolExchange } from "@pico/core";
 
 /** A retained suffix may not begin or end in the middle of a tool exchange. */
 export function isSafeCompactionCut(messages: readonly Message[], cut: number): boolean {
-  if (cut <= 0 || cut >= messages.length) return false;
+  if (cut <= 0 || cut > messages.length) return false;
 
   const batches = inspectToolBatches(messages);
-  if (batches.some((batch) => batch.incompleteAtTail || batch.invalid)) return false;
+  if (batches.some((batch) => batch.invalid || (batch.incomplete && batch.start < cut)))
+    return false;
 
   const previous = messages[cut - 1];
   const next = messages[cut];
-  if (isOrdinaryUser(previous)) return false;
   if (previous?.role === "assistant" && (previous.toolCalls?.length ?? 0) > 0) return false;
   if (isToolResult(next)) return false;
   return !batches.some((batch) => batch.start < cut && cut < batch.endExclusive);
@@ -72,10 +72,10 @@ export function isSafeCompactionCut(messages: readonly Message[], cut: number): 
 export function findSafeCompactionCut(
   messages: readonly Message[],
   targetRetainedTokens: number,
-  maxCoveredCount = messages.length - 1,
+  maxCoveredCount = messages.length,
 ): SafeCompactionCut | undefined {
-  if (messages.length < 2 || hasIncompleteToolExchange(messages)) return undefined;
-  const target = Math.max(1, targetRetainedTokens);
+  if (messages.length === 0) return undefined;
+  const target = Math.max(0, targetRetainedTokens);
   // Live steering remains verbatim in the successor suffix. Prior-turn steering
   // may be summarized once a newer ordinary user task has begun.
   const anchorIndex = messages.findLastIndex(
@@ -90,8 +90,8 @@ export function findSafeCompactionCut(
     (message, index) => index > anchorIndex && message.providerData?.["picoKind"] === "steer",
   );
   let retainedTokens = 0;
-  for (let cut = messages.length - 1; cut >= 1; cut--) {
-    retainedTokens += estimateMessageTokens(messages[cut]!);
+  for (let cut = messages.length; cut >= 1; cut--) {
+    if (cut < messages.length) retainedTokens += estimateMessageTokens(messages[cut]!);
     if (cut > maxCoveredCount || retainedTokens < target || (pinnedIndex >= 0 && cut > pinnedIndex))
       continue;
     if (isSafeCompactionCut(messages, cut)) {
