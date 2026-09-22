@@ -27,7 +27,7 @@ function page(runId: string, nextCursor?: string): RuntimeExecutionPage {
       costCNY: 0.2,
     },
     coverage: {
-      modelAttempts: "logical_only",
+      modelAttempts: "missing",
       oversizedRunIds: [],
       missingModelCallRunIds: [],
       incompleteRunIds: [],
@@ -101,7 +101,7 @@ test("execution window refresh keeps page depth and renders causal steps with se
     }),
   );
   assert.match(html, /统计范围：整个会话/u);
-  assert.match(html, /仅记录逻辑调用/u);
+  assert.match(html, /暂无底层调用尝试记录/u);
   assert.match(html, /已知费用不代表完整总额/u);
   assert.match(html, /轮次 1/u);
   assert.match(html, /轮次 2/u);
@@ -133,7 +133,7 @@ test("obsolete execution response is discarded and coverage remains visible with
     ...page("unused"),
     runs: [],
     coverage: {
-      modelAttempts: "logical_only" as const,
+      modelAttempts: "missing" as const,
       oversizedRunIds: ["large"],
       missingModelCallRunIds: ["missing"],
       incompleteRunIds: ["incomplete"],

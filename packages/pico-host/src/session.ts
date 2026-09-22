@@ -898,11 +898,11 @@ export class Session
   private getUsageSnapshot(): SessionUsageSnapshot {
     const accounting = this.readAccountingUsage();
     if (accounting) return accounting;
-    return this.getLegacyUsageSnapshot();
+    return this.getInMemoryUsageSnapshot();
   }
 
-  /** Raw projection exists only for importing historical pre-ledger totals. */
-  getLegacyUsageSnapshot(): SessionUsageSnapshot {
+  /** Ephemeral sessions without durable storage retain their in-memory counters. */
+  private getInMemoryUsageSnapshot(): SessionUsageSnapshot {
     return {
       totalPromptTokens: this.totalPromptTokens,
       totalCompletionTokens: this.totalCompletionTokens,

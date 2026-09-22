@@ -27,7 +27,6 @@ import {
   type PhysicalAttemptFilter,
   type RuntimeLeaseRecord,
   type TerminalJobStatus,
-  type UsageBaselineRecord,
   type UsageLedgerFilter,
   type UsageLedgerSummary,
 } from "@pico/storage/runtime-control-types";
@@ -409,13 +408,6 @@ export class JobService {
     inserted: boolean;
   } {
     return this.store.recordProviderCall(record);
-  }
-
-  putUsageBaseline(record: UsageBaselineRecord): {
-    record: UsageBaselineRecord;
-    inserted: boolean;
-  } {
-    return this.store.putUsageBaseline(record);
   }
 
   getUsageSummary(filter: UsageLedgerFilter = {}): UsageLedgerSummary {

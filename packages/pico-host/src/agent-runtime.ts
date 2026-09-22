@@ -98,7 +98,6 @@ import {
   type GraphOperatorActivationContext,
 } from "@pico/pico-host/agent-output-tool";
 import { CostTracker, type CostTrackerOptions } from "@pico/pico-host/cost-tracker";
-import { ensureSessionUsageBaseline } from "@pico/runtime/usage-baseline";
 import type { ModelRouter } from "@pico/pico-host/provider/model-router";
 import { Tracer } from "@pico/pico-host/trace";
 import { logger } from "@pico/pico-host/logger";
@@ -1416,16 +1415,6 @@ export async function executeAgentRuntime(
       }
     }
     const usageLedger = runtimeState.taskHostRuntime?.jobService ?? ownedUsageStore;
-    if (usageLedger) {
-      try {
-        ensureSessionUsageBaseline(usageLedger, session);
-      } catch (error) {
-        logger.error(
-          { sessionId: session.id, error: error instanceof Error ? error.message : String(error) },
-          "[Tracker] Session usage baseline 导入失败",
-        );
-      }
-    }
     const trackerOptions: CostTrackerOptions = {
       onAccountingChanged: (record, revision) => {
         if (!record.sessionId) return;
