@@ -1,4 +1,5 @@
 .tool-panel--inspector .inspector-timeline {
+  padding: 0 16px;
   color: var(--inspector-ink);
   font-size: 14px;
   line-height: 1.5;
@@ -62,7 +63,7 @@
   background: color-mix(in srgb, var(--inspector-danger) 10%, transparent);
 }
 .tool-panel--inspector .inspector-timeline__badge[data-status="running"] {
-  color: var(--inspector-blue);
+  color: var(--inspector-accent);
   background: color-mix(in srgb, var(--inspector-blue) 10%, transparent);
 }
 .tool-panel--inspector .inspector-timeline__run-duration {
@@ -173,7 +174,7 @@
 .tool-panel--inspector
   .inspector-timeline__step[data-status="running"]
   .inspector-timeline__step-status {
-  color: var(--inspector-blue);
+  color: var(--inspector-accent);
 }
 .tool-panel--inspector .inspector-timeline__detail {
   margin: 0 0 8px 32px;
