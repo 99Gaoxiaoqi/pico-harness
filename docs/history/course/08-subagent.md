@@ -1,226 +1,138 @@
-# 第 8 章 · 一个人不够，招几个帮手
+# 第 8 章 · 把任务交给持久子智能体
 
-> 归档说明：本文保留历史设计与实施记录，不定义当前产品行为或待办。当前入口见 [技术文档索引](../../README.md)。
+> 当前实现教程：按代码 `0092022f`（2026-09-21）重写。保留原路径以兼容已有链接；概念伪代码不作为公开 API。
 
-> 文档状态：历史课程快照。Shared Worker、`writeScopes` 与 OCC 是目标设计，当前可写 worker
-> 仍强制进入独立 Git worktree，隔离条件不足时 fail-closed。当前事实见
-> [多 Agent 并发说明](../architecture/08-multi-agent-concurrency.md)。
+“请检查审批卡片为什么重复显示。”主 Agent 可以自己读代码，也可以把范围明确的调查交给另一个 Agent。委派的价值不只在于分工：子任务会积累自己的阅读过程，主任务先接收结论，需要时再查看证据；后续复查还能继续原来的子会话。
 
-Agent 现在是一个能干的独行侠。但有些任务一个人做太慢了。
+当前 Pico 的配置型入口是 `agent_list`、`agent_spawn` 和 `agent_output`。它复用 AgentRuntime、Session 与 RuntimeRun，不是另写一个临时模型循环。本文先沿这条前台执行链解释，再区分 Agent Graph 和 Hook verifier；不把不同入口的工具、并发和权限语义混为一谈。
 
-比如"分析这个项目的架构"——需要读几十个文件，理解模块依赖，画出结构图。串行读取的话，每个文件需要 IO + 模型理解时间，50 个文件就是几十秒。
+## 先区分四种身份
 
-但如果能同时派出几个"探子"，每人负责一个子目录，读完各自写总结，最后汇总——效率就是几倍提升。
+| 对象       | 保存什么                                | 复用时如何变化           |
+| ---------- | --------------------------------------- | ------------------------ |
+| Preset     | 名称、用途、profile、模型连接和思考配置 | 同一配置可用于多个任务   |
+| Session    | 某项子任务的持久消息和状态              | 同一问题续查保留 Session |
+| RuntimeRun | 一次实际执行及其终态                    | 每次续查产生新 Run       |
+| Activity   | 父任务中的执行卡片与轨迹身份            | 新运行需要独立 Activity  |
 
-这就是 Subagent。
+```mermaid
+flowchart LR
+    P[Preset] --> S[子 Session]
+    S --> R1[首次 Run]
+    S --> R2[续用 Run]
+    R1 --> A1[首次 Activity]
+    R2 --> A2[新的 Activity]
+    A1 -.导航.-> S
+    A2 -.导航.-> S
+```
 
-> 本章保留委派、上下文隔离和总结收敛的教学主线。`spawn_subagent` 是只读 Explore 的兼容入口；可写任务通过 `delegate_task(mode="worker")` 进入 Shared Worker 或 Isolated Worker。Shared Worker 的目标并发契约见[多 Agent 共享工作区并发规范](../architecture/08-multi-agent-concurrency.md)，当前强制 worktree 的 worker 实现将在 OCC 完成后迁移。
+这个区分直接影响产品正确性。如果用 Session ID 永远作为卡片 ID，续查就会更新旧卡片而不是出现新卡片。当前执行器对新任务使用子 Session 身份，对续用生成新的 `subagent-activity-<UUID>`；导航仍指向同一子 Session。实现见 [configured-subagent-executor.ts](../../../packages/pico-host/src/configured-subagent-executor.ts)。
 
----
+## Preset 选择模型，profile 决定能力
 
-## 子代理就是一个工具
+用户通过设置管理设备级的 `subagents.presets`。Preset 最多 64 项；主 Agent 可以列表和选择，当前没有专门创建或修改永久 Preset 的模型工具。列表默认给出可用配置，`view: "catalog"` 则显示停用、连接缺失、Provider 退役或模型不可用等原因。
 
-Subagent 的实现哲学是极简的：**它不是新概念，就是在 Tool Registry 里多注册了一个工具。**
+[配置目录](../../../packages/pico-host/src/configured-subagent-catalog.ts) 在实际启动时重新解析配置，不相信先前列表结果。因为模型选择配置之后，用户可能已经停用该配置或更换连接。配置协议见 [subagents.ts](../../../packages/protocol/src/runtime/subagents.ts)。
 
-```typescript
-// src/tools/subagent.ts
-// spawn_subagent 就是一个普通工具，和其他工具一样注册、一样调用
-class SubagentTool implements BaseTool {
-  name() {
-    return "spawn_subagent";
-  }
+真正的工具边界由 [内置能力定义](../../../packages/core/src/subagent-capabilities.ts) 提供：
 
-  async execute(args: string): Promise<string> {
-    const { task_prompt } = JSON.parse(args);
+| profile          | 工具                                                           | 工作区与结果                   |
+| ---------------- | -------------------------------------------------------------- | ------------------------------ |
+| `local_read`     | `read_file`、`glob`、`grep`                                    | 共享工作区，返回摘要           |
+| `web_research`   | `web_search`                                                   | 共享工作区上下文，返回研究结论 |
+| `implementation` | `read_file`、`glob`、`grep`、`write_file`、`edit_file`、`bash` | 独立 Git worktree，返回补丁    |
 
-    // 1. spawn_subagent 专用于 Explore，创建受限的只读 Registry
-    const readOnlyRegistry = createReadOnlyRegistry(this.baseRegistry);
+把配置命名为“代码审查员”不会让它自动获得不同工具。用途 description 帮助模型选择角色，系统提示词与工具白名单由宿主提供。配置型子任务没有再次启动子任务的工具，因此这里没有默认两层递归委派，也没有 Shared Worker 的 `writeScopes`/OCC 公共契约。
 
-    // 2. 启动子代理循环（阻塞等待完成）
-    const result = await this.runner.runSub(task_prompt, readOnlyRegistry);
+## 一次真实的前台委派
 
-    // 3. 返回总结给主 Agent
-    return result.summary;
-  }
+以下是 `agent_spawn` 的有效参数示例，可由主 Agent 调用；它不是终端命令：
+
+```json
+{
+  "profile": "local_read",
+  "task": "检查审批卡片重复显示的原因。只读 conversation 相关实现与测试，返回文件位置、证据和验证建议。"
 }
 ```
 
-主 Agent 调用 `spawn_subagent(task_prompt="分析 src/tools/ 目录的结构")`，就像调用 `read_file` 一样。子代理跑完返回一段总结，主 Agent 把它当工具输出读。
+已有 Preset 时使用 `subagent_id`；同时提供 profile 时以 Preset 为准。task 必须非空且不超过 60,000 字符，显式 isolation/write_back 必须符合能力定义。[工具协议](../../../packages/runtime/src/configured-subagent-tools.ts) 会校验这些组合。
 
-`spawn_subagent` 默认阻塞等待，因为主 Agent 通常需要探索结论才能继续推理。`delegate_task` 还支持批量和后台生命周期；它通过任务状态与完成事件收敛结果，不要求把所有委派都伪装成同步工具。
+执行器创建新 Session，通过 `sessionSelection.mode = "new"` 调用 AgentRuntime。配置存在时采用配置模型，否则使用父任务模型路由；未指定思考档位表示模型默认，不是复制父任务档位。配置型执行器将 `maxTurns` 设为 20。
 
----
-
-## 上下文隔离：子代理的脑子是干净的
-
-这是 Subagent 最核心的设计：**子代理拥有全新的、独立的上下文。**
-
-它不是主 Agent 上下文的一个分支——它是一张白纸。子代理看不到主 Agent 的历史对话、看不到主 Agent 之前的推理、看不到其他子代理的工作。
-
-```
-主 Agent 上下文                 子 Agent 上下文
-┌──────────────────┐           ┌──────────────────┐
-│ System Prompt    │           │ System Prompt    │
-│ 用户: 分析项目    │           │ 任务: 分析 tools/ │
-│ Agent: 我先看看.. │    ≠     │ Agent: read_file  │
-│ Tool: read_file  │           │ Tool: ls tools/   │
-│ Agent: 结构是...  │           │ Agent: 总结...    │
-└──────────────────┘           └──────────────────┘
-        ↕ 只有最终总结传递
+```mermaid
+sequenceDiagram
+    participant P as 主 Agent
+    participant H as 宿主执行器
+    participant C as 子 Session / Runtime
+    participant D as 持久事件存储
+    P->>H: agent_spawn(task, profile 或 subagent_id)
+    H->>H: 校验配置、父边界和隔离条件
+    H->>C: 新 Session / Run 与受限工具
+    C->>D: 写入子任务 admission
+    C->>C: 模型与工具循环
+    C-->>H: 最终结果
+    H->>D: 写父任务完成记录
+    H-->>P: summary、childSessionId、runId、可选 patch
 ```
 
-子代理疯狂 `read_file`、跑 `bash`、分析代码——但它产生的上下文不会污染主 Agent。子代理完成后，只有一段总结（几百字）回到主 Agent 的上下文。
+`agent_spawn` 前台等待一个子任务完成，然后把结果交回主任务。它不承诺自动后台执行或批量并行；不能看到“子智能体”几个字就推导出速度会提升几倍。
 
-这解决了两个问题：
+子任务不复制父任务完整历史，必要背景应写进 task。但运行时仍会按规则装配自身上下文，因此“独立历史”不表示一个完全没有其他上下文来源的空白环境。最终摘要之外，执行轨迹和工具结果仍有持久记录，主任务可以精确回读。
 
-1. **上下文膨胀**：如果主 Agent 自己读 50 个文件，每条 read_file 的结果都会留在上下文里，迅速撑爆窗口。子代理把 50 个文件的探索结果浓缩成一段总结。
-2. **注意力污染**：探索过程中的错误、弯路、无关发现——都不会进入主 Agent 的视野。主 Agent 只看到"结论"，不看到"过程"。这就像你让实习生去调研一个技术方案——你不需要看他查了多少 StackOverflow、走了多少弯路，你只需要看他的调研报告。
+## 写入隔离与权限继承
 
----
+Implementation 需要可用的 Git worktree 宿主。任务完成后，执行器收集相对基线的补丁，返回补丁路径、worktree 路径和分支；这条流程不会自动把改动合并进父工作区。worktree 隔离的是 Git 工作目录，不等于另一个操作系统。
 
-## 爆炸半径限制：按角色授予最小能力
+managed 父任务启动时，Local Read 的子边界为 read-only + restricted network，Web Research 为 read-only 文件权限 + enabled network，Implementation 为 workspace-write + restricted network，权限模式为 `ask`。父任务边界必须满足相应准入条件。父边界为 bypass 时，专用执行器会使用 bypass 子边界和 `full-access`。
 
-“所有子代理只能读”只适合探索任务，不能作为多 Agent 开发的通用模型。Pico 按任务角色缩小爆炸半径：
+这不等于解除 profile：工具白名单和子任务专用安全检查仍存在。具体逻辑位于 [执行器](../../../packages/pico-host/src/configured-subagent-executor.ts) 与 [子任务安全策略](../../../packages/pico-host/src/child-agent-policy.ts)。用户手动续聊和父任务专用续用的边界来源也不同，不能简单概括为“子任务永远 ask”或“永远继承父任务”。
 
-- **Explore**：只读 Registry，用于搜索、阅读和分析，不能修改工作区。
-- **Shared Worker**：在同一工作目录内写入，仅能触碰 Coordinator 分配的 `writeScopes`；写文件时使用内容指纹 OCC，Git 不是前提。
-- **Isolated Worker**：在独立 worktree/沙箱写入，用于高重叠、动态写、强隔离或独立交付；该模式需要 Git。
+## 续用必须证明身份，而不是相信一个 ID
 
-只读是 Explore 的安全底线；Worker 的安全底线则是最小写入范围、写前版本验证、敏感路径防护和 fail-closed 冲突处理。
+用户说“继续验证刚才的修改”时，主 Agent 可以这样调用：
 
-```typescript
-// Explore Registry：只读 + 有界递归委派
-function createReadOnlyRegistry(baseRegistry: Registry): Registry {
-  const subRegistry = new ToolRegistry();
-
-  // 只复制只读工具
-  for (const tool of baseRegistry.getAllTools()) {
-    if (tool.readOnly) {
-      subRegistry.register(tool);
-    }
-  }
-
-  // 子代理也可以委派（递归深度有限制）
-  subRegistry.register(new SubagentTool(subRegistry, { maxDepth: 2 }));
-
-  return subRegistry;
+```json
+{
+  "child_session_id": "替换为上次返回的子会话ID",
+  "task": "沿用先前调查，确认本次修复是否消除了重复卡片。"
 }
 ```
 
-递归委派的深度限制（默认 2 层）防止无限递归——子代理派孙代理，孙代理派曾孙代理……最终把系统资源耗尽。深度限制就像操作系统的进程树深度限制，是防止 fork bomb 的必要措施。
+专用续用保留 Session 历史，创建新 Run，并返回 `resumedFromRunId`。它不是重新选择同一 Preset 再创建一个空白任务。
 
----
+[续用解析器](../../../packages/runtime/src/configured-subagent-continuation.ts) 会核对当前父 Session 的宿主记录、工作目录与 manifest、最新 Run 与持久终态、子侧 admission，以及保存的模型和 Preset 配置。失败或取消的旧 Run 可以继续，但仍在运行或没有可信终态时不能续用。独立 worktree 子任务暂不支持这条续用方式。
 
-## 两种任务模式，两种 Worker 执行模式
+父子关联通过 `picoConfiguredChild` 宿主消息保存，并标为 `picoHiddenFromTranscript`。它不作为普通聊天气泡展示，但仍是持久事实。任意用户消息里写一个 childSessionId 不会建立同样授权。读取结果时，`agent_output` 也检查父子关系，并支持精确 child Session/Run 查询，而不是接受任意文件路径。
 
-子代理有两种工作模式，对应两种典型的委派场景：
+## 点击卡片后手动发送，也要恢复角色
 
-**explore 模式**（探索者）：用于调研、分析、信息收集。子代理只读，不生产任何产物。典型场景："探索这个目录的结构，告诉我每个文件的作用"。
+如果约束只在 `agent_spawn` 时装配一次，用户进入子会话手动发消息后，就可能按普通主任务获得工具。当前 [AgentRuntime](../../../packages/pico-host/src/agent-runtime.ts) 在取得 Session 后读取它自己的 admission，恢复能力后才装配提示词、工具和安全检查。恢复逻辑见 [configured-subagent-session.ts](../../../packages/runtime/src/configured-subagent-session.ts)。
 
-**worker 模式**（工作者）：接受明确的交付目标和写入范围，直接产生代码或文档变更。默认选择 Shared Worker；高冲突、动态脚本写入或独立分支交付时选择 Isolated Worker。典型场景："修改 `src/api/` 中的缓存实现并运行相关测试"。
+普通手动续聊按 profile 重建 managed 预期边界；既有 bypass 在无活动 Run、revision 校验通过时会被收紧并持久更新。父任务专用续用则可以按当前父边界传入 bypass。边界需要调整但已有活动运行时拒绝，不能中途改变本轮的执行条件。
 
-任务模式决定目标和工具能力，`WorkspaceExecutionMode` 决定 Worker 的隔离强度。`explore` 始终只读；`worker` 必须带任务范围，并在 `shared` 与 `worktree` 之间选择。这里不改变现有 `SubagentRole = "leaf" | "orchestrator"` 的编排语义。工作区是否为普通文件夹或 Git 仓库只决定可用能力，不决定 Worker 是否能写。
+两种入口都固定协作模式为 agent、编排为 default、Swarm 授权为 none，并恢复工具白名单；但业务记账不同。手动续聊不走父任务执行器，不负责生成父侧新活动或更新父记录。它产生新 Run 后，父任务再次专用续用可能因为记录不匹配而拒绝。当前没有自动认领该手动 Run 的调度器。
 
----
+## Graph 与 Hook verifier 是另外的路径
 
-## 并发委派：同时派出多个子代理
+Agent Graph 面向持久任务图，管理 operator、依赖和状态，使用保存的 profile snapshot。它的控制协议与配置型 `agent_spawn` 不同，不能把某条路径里的 `agent_output` 用途直接套到另一条路径。相关装配见 [product-agent-graph-host.ts](../../../packages/pico-host/src/product-agent-graph-host.ts)。
 
-单个子代理已经能提速，但真正的威力在于**并发委派**。
+Hook 的 `agent` 验证器则是内部核验路径：每次创建持久的 `hook-verifier-<UUID>` Session，以独立 AgentEngine 运行，使用固定只读 Registry、自身的 archive reader、上下文预算和 FullCompactor。它不挂载 Hook 服务，避免子工具或压缩递归触发 Hook；模型调用统一计入 `purpose: "hook"`。见 [runtime-hook-assembly.ts](../../../packages/pico-host/src/runtime-hook-assembly.ts)。它的工具范围包含受只读分类约束的 bash 等工具，不能当成 `local_read` 的别名。
 
-```typescript
-// 简化伪代码；真实生命周期由 DelegateTaskTool + DelegationManager 协作
-export class DelegationManager {
-  async delegateBatch(
-    tasks: Array<{ task: string; mode: SubagentMode }>,
-    registry: Registry,
-  ): Promise<DelegationBatchResult> {
-    const results = await Promise.all(
-      tasks.map((t) => this.runSingleSubagent(t.task, t.mode, registry)),
-    );
-    return mergeResults(results);
-  }
-}
+## 验证真正的委派契约
+
+在仓库根目录准备工作区包后，执行相关集成测试：
+
+```bash
+npm run build:packages
+node --import tsx --import @pico/cli/tui/preload-env --test --test-concurrency=1 \
+  tests/integration/runtime/configured-subagent-execution.test.ts \
+  tests/integration/runtime/configured-subagent-continuation.test.ts \
+  tests/integration/runtime/configured-subagent-output.test.ts \
+  tests/integration/runtime/hook-verifier-compaction.test.ts
 ```
 
-主 Agent 可以在一轮中同时派出 3-5 个子代理，分别负责不同的子任务。子代理之间的上下文完全隔离，互不干扰。全部完成后，主 Agent 汇总所有总结，形成全局判断。
+这些测试使用可控 Provider 验证持久执行、权限恢复、补丁、回读和 verifier 压缩，不证明真实模型一定正确完成调查。实际模型的上下文续用另见 [真实模型 E2E](../../../tests/e2e/configured-subagent-continuation.real-llm.test.ts)，需要可用的真实模型配置。桌面卡片和导航还需要桌面测试或实际交互验证。
 
-### Agent Profile：每个子代理有自己的人设
+委派应围绕明确交付来设计：任务需要什么上下文、允许哪些操作、结果如何回查、何时复用原 Session。单文件小修改通常自己完成更直接；边界清楚且有独立调查或交付价值时，子任务才值得新增一次模型运行和一段生命周期。
 
-不同类型的委派需要不同的"人设"。explore 代理需要是"严谨的研究员"——只看不评，客观汇报。worker 代理需要是"务实的工程师"——给出可操作的方案。
-
-```typescript
-// src/tools/agent-profile.ts
-export function getProfile(role: SubagentRole, mode: SubagentMode): AgentProfile {
-  if (mode === "explore") {
-    return {
-      identity: "你是一个代码探索专家。你的任务是对指定目录或文件进行深入分析。",
-      constraints: [
-        "只读操作——只能 read_file 和 bash（ls/find/grep 等）",
-        "不要修改任何文件",
-        "结束时用纯文本输出结构化的分析总结",
-      ],
-    };
-  }
-  if (mode === "worker") {
-    return {
-      identity: "你是一个任务执行专家。主架构师给你分配了一个明确的子任务。",
-      constraints: [
-        "只修改任务授权的 writeScopes，超出范围时停止并报告",
-        "写入冲突后重新读取并重新生成修改，绝不覆盖后来变化",
-        "完成最小相关验证并报告实际变更",
-        "如果有不确定的地方，明确指出而不是猜测",
-      ],
-    };
-  }
-}
-```
-
-Profile 决定了子代理的 System Prompt。它不是硬编码在主代理的逻辑里——主代理只是说"spawn a subagent for exploring src/"，子代理的 Registry 根据 mode 自动加载对应的 Profile。这保持了主代理的简洁性：它不关心子代理是怎么被"教育"的。
-
-### Summary 质量控制
-
-子代理返回的总结可能太短。如果 summary 少于 200 字符，可能暗示子代理"偷懒"了——它没有深入分析，只是草草应付。引擎会触发一轮续写：
-
-```typescript
-if (summary.length < SUBAGENT_SUMMARY_MIN_CHARS) {
-  // 要求子代理重新输出更详细的汇报
-  const continuation = await provider.generate(
-    [
-      {
-        role: "user",
-        content:
-          "你上一轮的总结过于简短。请重新输出一份结构完整、细节充分的总结汇报：包括你探索了哪些文件、发现了什么、关键结论、以及尚存的不确定点。不要调用任何工具，直接用纯文本回答。",
-      },
-    ],
-    [],
-  );
-  summary = continuation.content;
-}
-```
-
-这保证了主 Agent 拿到的每一份子代理报告都有足够的信息密度来做决策。
-
----
-
-## 现在有了什么
-
-委派系统成形了：
-
-- **spawn_subagent 工具**：把子代理伪装成普通工具，主 Agent 无感知
-- **上下文隔离**：子代理白纸一张，不污染主上下文
-- **分层爆炸半径**：Explore 只读；Worker 使用 writeScopes、OCC 或可选 worktree
-- **并发委派**：Promise.all 批量启动，效率数倍提升
-- **Agent Profile**：explore/worker 两套人设，按任务类型自动加载
-- **Summary 质量控制**：短总结自动触发续写
-
-Agent 现在是"总指挥"——自己能做事，也能派探子做调研。
-
-### 什么时候该用 Subagent，什么时候不该
-
-Subagent 不是银弹。有些场景用了反而更慢：
-
-**该用 Subagent：** 探索未知代码库、分析多个独立目录、并行收集信息，或把可写任务拆成文件范围清晰、相互独立的交付。子代理上下文隔离，但 Shared Worker 看到的是同一个实时工作区。
-
-**不该并行使用 Shared Worker：** 多个任务必须反复修改同一文件、主要工作依赖不可追踪的动态脚本，或子任务强依赖主 Agent 未传递的全局状态。前两类任务应串行，或显式升级到 Isolated Worker；简单单文件操作通常仍由主 Agent 直接完成更快。
-
-一个经验法则：如果主 Agent 需要读超过 5 个文件来做一个决定，考虑派子代理。如果只需要读 1-2 个文件，自己做更快。
+[下一章：看清每次运行的成本与证据 →](09-observability.md)

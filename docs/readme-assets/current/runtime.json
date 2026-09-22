@@ -1,0 +1,135 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Pico · 从输入到持久执行",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1120,
+      640
+    ]
+  },
+  "components": [
+    {
+      "id": "clients",
+      "type": "frontend",
+      "label": "TUI / Desktop",
+      "sublabel": "交互与会话展示",
+      "pos": [
+        40,
+        100
+      ],
+      "size": [
+        240,
+        84
+      ]
+    },
+    {
+      "id": "daemon",
+      "type": "messagebus",
+      "label": "本机 daemon",
+      "sublabel": "LocalRuntimeClient → IPC",
+      "pos": [
+        440,
+        100
+      ],
+      "size": [
+        240,
+        84
+      ]
+    },
+    {
+      "id": "engine",
+      "type": "backend",
+      "label": "AgentRuntime / Engine",
+      "sublabel": "上下文 · 模型 · 工具循环",
+      "pos": [
+        840,
+        100
+      ],
+      "size": [
+        240,
+        84
+      ]
+    },
+    {
+      "id": "memory",
+      "type": "database",
+      "label": "用户级长期记忆",
+      "sublabel": "memory.sqlite · 预算召回",
+      "pos": [
+        40,
+        420
+      ],
+      "size": [
+        240,
+        84
+      ]
+    },
+    {
+      "id": "workspace",
+      "type": "database",
+      "label": "工作区事实与状态",
+      "sublabel": "pico.sqlite · Session / Run",
+      "pos": [
+        440,
+        420
+      ],
+      "size": [
+        240,
+        84
+      ]
+    },
+    {
+      "id": "capabilities",
+      "type": "backend",
+      "label": "受控执行能力",
+      "sublabel": "Provider · Tools · 子代理",
+      "pos": [
+        840,
+        420
+      ],
+      "size": [
+        240,
+        84
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "link-clients-daemon",
+      "from": "clients",
+      "to": "daemon",
+      "label": "本机请求"
+    },
+    {
+      "id": "link-daemon-engine",
+      "from": "daemon",
+      "to": "engine",
+      "label": "运行装配"
+    },
+    {
+      "id": "link-engine-capabilities",
+      "from": "engine",
+      "to": "capabilities",
+      "label": "决策与执行",
+      "labelAt": [
+        960,
+        300
+      ]
+    },
+    {
+      "id": "link-capabilities-workspace",
+      "from": "capabilities",
+      "to": "workspace",
+      "label": "记录事实"
+    },
+    {
+      "id": "link-workspace-memory",
+      "from": "workspace",
+      "to": "memory",
+      "label": "提取用户证据"
+    }
+  ]
+}

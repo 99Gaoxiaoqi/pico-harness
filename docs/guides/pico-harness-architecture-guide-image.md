@@ -1,306 +1,213 @@
 ---
-title: 历史快照：从一句话到一次可靠执行
-cover: ./images/pico-harness-architecture/cover.png
+title: 从一句话到一次可靠执行：Pico 当前架构
+cover: ../images/pico-harness-architecture/cover.png
 tags:
   - Agent Harness
   - Architecture
   - pico-harness
-updated: 2026-07-30
-source_commit: a5d598f
+updated: 2026-09-21
+source_commit: 0092022f
 ---
 
-# 历史快照：从一句话到一次可靠执行
+# 从一句话到一次可靠执行：Pico 当前架构
 
-![驾驭大模型：pico-harness 架构文章封面](../images/pico-harness-architecture/cover.png)
+> 本文按 `0092022f` 的生产代码重新编写。文件名与路径保留，方便已有链接继续使用；正文及技术流程图描述当前实现。封面仅表达 Harness 概念，不定义模块、权限或存储协议。
 
-> 文档状态：历史教学快照。本文冻结于提交 `a5d598f`（2026-07-30），正文中的“当前”仅指该
-> 历史时点；其中进程内 TUI、Session JSONL、Evidence CAS 和 `memory/state.json` 均已退役，
-> 不可作为现行 Runtime 契约。当前边界请从[技术文档索引](../README.md)进入，并以
-> [架构总览](../architecture/00-overview.md)和根[架构文档](../../ARCHITECTURE.md)为准。配图保留原貌。
+![Pico Harness 架构文章概念封面](../images/pico-harness-architecture/cover.png)
 
-如果把大模型直接接到一个聊天框里，它只能“说”。如果再给它几个文件工具，它开始能够“做”。但真正把它变成一个可以长期操作代码库的编码 Agent，还需要解决一串更麻烦的问题：上下文会不会爆掉、工具会不会互相冲突、危险命令谁来拦截、程序中断后怎么恢复、改坏的文件怎么撤销，多个子任务怎么隔离执行，以及用户如何看清它到底做了什么。
+用户说“找到登录失败的原因并修复”，模型可以提出猜测，却不能独自保证读取的是正确工作区、修改经过授权、工具结果已经保存，或者中断后能接着做。Harness 的工作就是把这些条件变成执行机制。
 
-`pico-harness` 解决的就是这些问题。
+Pico 把问题拆成三部分：**宿主决定环境与能力，执行内核组织模型和工具，持久事实支撑恢复与展示。** TUI 和 Desktop 是进入系统的两扇门，它们共用执行路径。
 
-它不是一个业务应用，也不是另一个大模型。它更像套在大模型外面的一层“小型操作系统”：大模型负责思考，Harness 负责准备上下文、调度工具、保存状态、设置边界，并把一次不稳定的模型调用组织成一次可控、可恢复的工程执行。
+## 一、两个界面，一条本机执行链
 
-![Agent Harness 像套在推理核心外面的一层微型操作系统](../images/pico-harness-architecture/harness-micro-os.png)
+```mermaid
+flowchart TD
+    T[TUI：输入、命令、展示] --> C[LocalRuntimeClient]
+    D[Desktop Renderer] --> P[类型化 Preload 与 Electron Main]
+    P --> C
+    C --> H[当前用户的本机 daemon]
+    H --> R[AgentRuntime：装配一次执行]
+    R --> E[AgentEngine：模型与工具循环]
+    R --> S[Session / RuntimeRun]
+    S --> DB[(工作区 pico.sqlite)]
+    E --> V[Reporter 与事件投影]
+    V --> H
+```
 
-## 一、先用一句话理解整个系统
+TUI 已经是 daemon 客户端，不再在界面进程里装配 `AgentRuntime`。Desktop Renderer 经受限的类型化桥接调用 Electron Main，再进入同一个 `LocalRuntimeClient`。本机 daemon 管理执行和控制面；它不是公开的远程 Agent 服务。
 
-整个项目可以压缩成下面这条链路：
+这里有两种不同的边界。第一种是通信边界：协议定义可调用的方法、参数、结果与事件，Desktop 还有自己的方法白名单。第二种是事实边界：界面可以缓存消息、归并流式片段，但不能把界面缓存变成另一份 Session 真源。
 
-> 用户从 TUI 或 Desktop 提交任务，Harness 组装上下文交给模型；模型如果要操作代码，就通过受控工具执行；执行结果重新进入上下文，直到模型给出最终答案。
+入口代码见 [TUI client-repl](../../packages/cli/src/tui/client-repl.tsx)、[协议包](../../packages/protocol/src/runtime.ts)与[产品装配](../../packages/pico-host/src/agent-runtime.ts)。
 
-因此，真正的主循环只有四件事：
+## 二、一次请求如何变成一次 Run
 
-1. 准备模型需要看到的内容。
-2. 让模型决定下一步。
-3. 安全地执行模型请求的工具。
-4. 把执行结果送回模型继续判断。
+用户提交任务后，宿主要先确定工作目录、`PICO_HOME`、会话身份、模型路线与权限。恢复已有会话时，还要读取持久设置及运行边界；子会话不能仅凭输入参数换成另一种能力。
 
-Provider、Session、MCP、worker 子代理、代码智能、审批、压缩和 Rewind 看起来模块很多，但它们都只是在支撑这四件事。当前项目的重心已经从“单 Agent 可靠执行”推进到“主 Agent 负责判断与整合，隔离 worker 负责并行探索或写入，前台宿主负责把外部连接和状态托住”。
+随后，`AgentRuntime.execute` 组合 Provider、工具注册表、审批、Hook、MCP、上下文与运行服务，交给 `RuntimeRun` 和 `AgentEngine` 执行。界面状态、会话历史、一次执行和一次模型请求不能混为一谈：
 
-![以 TUI 为例，从用户任务到最终回答的执行闭环](../images/pico-harness-architecture/architecture-overview.png)
+| 对象            | 它回答的问题                                     |
+| --------------- | ------------------------------------------------ |
+| Session         | 这段连续对话是谁，保存了哪些消息和设置？         |
+| RuntimeRun      | 这次执行何时开始，以完成、失败还是取消结束？     |
+| AgentEngine     | 下一步请求模型、执行工具，还是收口？             |
+| Provider 请求   | 本次模型调用携带什么上下文，实际用了多少 token？ |
+| Transcript 投影 | 用户现在应看到哪些聊天内容和活动状态？           |
 
-## 二、两个产品外壳怎样共用一套 Runtime
+一个 Run 可以包含多个 Provider 请求；续聊仍使用原 Session，但产生新的 Run。Provider 超时不等于 Session 消失，卡片显示完成也不能替代持久终态。
 
-当前有两个产品外壳：主要公开入口是运行 `pico` 后进入的 TUI；Pico Desktop 是仓库内的
-Electron 开发入口。两者不各自实现一套 Agent：TUI 在当前进程直接装配 `AgentRuntime`，
-Desktop Renderer 则经过受限 Preload、Electron Main 和认证本机 daemon，最终调用同一个
-Runtime。
+## 三、循环很短，外围契约很多
 
-TUI 也不是简单的“命令行输入框”。它同时承担了几类宿主职责：
+下面是解释职责的概念流程，不是可复制运行的生产代码：
 
-- 接收普通 Prompt、斜杠命令、`@文件`、Skill 和图片附件。
-- 展示流式文本、工具调用、审批状态、文件变化和完整工具输出。
-- 管理运行中的 Queue、Steer、Interrupt 和 AskUser。
-- 管理 Session 的新建、恢复、切换和 Fork。
-- 管理 worker 子代理的活动卡片、详情视图、完成策略和结果回灌。
-- 管理 MCP 连接的 reload、enable、disable、reconnect、OAuth 状态、resources 和 prompts。
-- 提供 `/rewind`，让用户回到某一条顶层消息之前。
-- 提供 `/usage` 和 `/context`，查看真实模型用量、上下文预算与能力来源。
+```text
+读取当前会话的模型历史视图
+→ 组装系统提示、任务与可用工具
+→ 判断是否需要上下文压缩
+→ 请求模型
+→ 保存本步骤响应与真实 usage
+→ 如有工具调用：执行、保存结果，继续下一步骤
+→ 如已完成、失败或取消：记录运行终态
+```
 
-Desktop 用图形化的 Session、Composer、Transcript、Changes、Automations 和设置界面承载
-对应能力，但 Renderer 只消费类型化协议和可重建投影。模型选择、会话、权限、文件历史、
-RuntimeEvent 和后台 Job 的事实仍由共享 Runtime 与 daemon 所有，Desktop 不建立第二套业务
-状态。
+工具调用必须与对应结果保持协议配对。一个工具批次未收齐时，不能随意插入普通消息，或者从中间切掉历史前缀。运行中的用户引导也要通过受控边界进入后续上下文。
 
-历史上的 REST、WebSocket、ACP、飞书和 Docker 外壳都不属于当前产品边界。仓库内
-Headless One-shot Runner 只服务 benchmark，同样不是公开 API。
+因此，可靠性主要来自循环旁边的约束：请求取消要传递到正在执行的工具，工具事实要先保存再用于后续步骤，恢复不能把半次执行伪装成成功。主循环入口是 [agent-engine.ts](../../packages/runtime/src/agent-engine.ts)，运行能力与提交由 [runtime-run.ts](../../packages/runtime/src/runtime-run.ts)管理。
 
-## 三、一条用户消息是怎样跑起来的
+## 四、模型不是直接执行工具的主体
 
-假设用户输入：
+模型输出工具名和参数，宿主决定这个调用能否真正发生。工具定义、工具可见性、调用授权与具体执行是不同层次：发现一个工具，不代表获得了它的全部权限。
 
-> 帮我找到登录失败的原因，并修复它。
+Pico 通过注册表和执行链处理能力白名单、参数、安全中间件、Hook、审批与结果。调度器再根据资源访问关系决定哪些调用可以重叠执行。
 
-这条消息进入系统后，大致会经历下面几个阶段。
+例如，两次互不冲突的读取可以并行；访问同一资源并存在写入冲突时要等待。已经排队的冲突任务也会影响后来的准入，不能让后来的任务抢跑。执行完成的顺序可以不同，结果仍按模型原始调用顺序交付。对应实现是 [tool-scheduler.ts](../../packages/runtime/src/tool-scheduler.ts)。
 
-### 第一步：产品外壳先把输入变成 Runtime 请求
+权限同样不能只看一个模式名字。宿主先确定 managed 或 bypass 执行边界，再结合工具白名单、工作区信任、不可绕过的限制和具体安全检查。`full-access` 不会使原本未注册的工具自动出现，worktree 也不等于独立操作系统。
 
-TUI 输入内核会先区分本地斜杠命令与需要交给 Agent 的 Prompt。像 `/model`、`/help`、
-`/rewind` 这类命令由 TUI 调用对应宿主能力；普通任务会展开文件、Skill 或图片引用，再交给
-Agent。Desktop 则通过图形入口和类型化协议表达同一类 Session、模型、权限与运行控制动作，
-Renderer 不解析出另一套业务逻辑。
+工具结果还有独立入口限制：**单次物理输出超过 1 MiB 时，原文不保存，写入带有分段重取建议的合成错误。** 这与“保存原文、模型先读预览”的归档机制不同。证据见 [tool-result-observation.ts](../../packages/runtime/src/tool-result-observation.ts)。
 
-如果上一轮还在运行，新输入也不是简单地硬塞进去。前台入口可以把它作为 Steer 注入当前
-执行边界、排队等待、打断当前任务，或者替换接下来的工作。
+## 五、上下文增长由两种机制处理
 
-### 第二步：宿主为这一轮装配 Agent
+![两种上下文压缩机制](../assets/context-compaction/architecture-blog.png)
 
-宿主会复用当前 Session 和 Runtime State，但为本次 Prompt 重新装配一套 `AgentEngine`。
+第一种是工具结果归档投影。对于满足条件的大结果，原文仍 inline 保存在 Runtime 事件中，模型先看到有限预览和 `pico://archive/...` 地址，随后按需读取。启用它要求当前可见工具确实绑定了本会话归档 reader；地址本身不授予跨会话访问权。
 
-这句话很重要：**Engine 可以每轮重建，Session 必须持续存在。**
+第二种是历史语义摘要。自动触发依据显式配置的窗口和同路线最后接受请求的真实用量：
 
-Engine 更像一次执行所需的机器和线路；Session 才是连续会话，保存对话、模型设置、Goal、
-Usage、文件历史和恢复信息。前台 Runtime 还会在各自的宿主边界内管理 Goal、Todo、
-SteerQueue、Code Intelligence、MCP Connection Manager 和 worker 活动状态。这样既避免旧
-Engine 残留一次性状态，又能保证连续对话不会失忆。
+```text
+输入 token + 输出 token + min(2 × 输出 token, 8000) >= 显式上下文窗口
+```
 
-### 第三步：构建模型上下文
+没有显式窗口或有效 usage，就不靠本地估算假装满足主动触发条件。Provider 真正报告上下文溢出时，还有受限恢复入口；桌面手动压缩则是另一条不要求达到自动阈值的路径。
 
-模型并不是只看到用户刚输入的一句话。`PromptComposer` 会把多种信息组装起来：
+历史摘要只覆盖安全的已完成前缀。完整工具交换、当前用户图片和实时引导约束切点；有效摘要与未压缩尾部共同构成后续模型输入。摘要通过检查、检查点持久化成功之后，读取视图才切换。
 
-- `AGENTS.md` 中的身份、约束和项目规则。
-- 最近一段 Working Memory。
-- 当前 Goal、Todo 和 Plan。
-- 已激活的 Skill。
-- 长期记忆提醒。
-- 当前已经渐进披露给模型的工具定义。
+模板包含 Goal、Progress、Key Decisions、Next Steps、Critical Context 五段，当前硬性校验要求其中除 Key Decisions 外的四段按序有效。结构有效并不证明每个事实都被模型保留。
 
-随后，上下文治理模块会检查这批内容是否超过模型预算。当前 ToolResult 只做确定性投影；只有旧历史前缀在投影后仍超预算时，才让辅助模型生成结构化 checkpoint 摘要。特别大的工具输出只在 Runtime 留下 canonical 事实，原文写入 Evidence CAS，上下文持有确定性预览、哈希、大小和 `pico://evidence/...` 回读引用。
+原始历史不会因为语义压缩而删除；超过入口 1 MiB 上限、从未保存的物理输出则不在这个承诺之内。完整细节及配图见[上下文压缩技术详解](../pico-context-compaction-technical-guide.md)。
 
-### 第四步：模型决定“回答”还是“行动”
+## 六、Session 的事实保存在 SQLite
 
-模型返回的消息有两种主要形态：
+```mermaid
+flowchart LR
+    R[Runtime 事实提交] --> W[(工作区 pico.sqlite)]
+    W --> S[Session 与模型历史视图]
+    W --> U[TUI / Desktop Transcript]
+    W --> C[TaskRun 与控制面各自的 Store]
+    W --> X[用户证据提取与规范化]
+    X --> M[(用户级 memory.sqlite)]
+    M --> K[按范围和预算召回]
+    K --> S
+```
 
-- 只有文本：说明它认为任务已经完成，可以把答案交给用户。
-- 包含 Tool Calls：说明它还需要读取文件、搜索代码、运行测试或修改内容。
+同一个工作区的 Session、RuntimeEvent、显式 TaskRun 与控制面等 Store 共用 `pico.sqlite`，但仍通过独立 scope、类型化 API 和稳定身份表达所有权。共用一个数据库不意味着所有数据都是会话消息。
 
-这就是 ReAct 的核心：Reasoning 产生 Action，Action 产生 Observation，Observation 再触发下一轮 Reasoning。
+默认位置是：
 
-![ReAct 循环：模型推理、工具执行与观察结果不断闭环](../images/pico-harness-architecture/react-loop.png)
+```text
+$PICO_HOME/                             # 默认 ~/.pico
+├── config.json                        # 用户配置
+├── memory.sqlite                      # 原子长期记忆
+└── workspaces/<workspace-id>/
+    └── pico.sqlite                    # 工作区持久状态
+```
 
-### 第五步：工具不是直接执行的
+SQLite 及其事务承接当前事实存储，生产会话不再以 `session.jsonl` 和跨 JSON 文件提交保存事实；所有权租约与 owner fence 仍承担单写者协调。Session 内存与两种界面的 Transcript 都是可重建投影。
 
-模型请求 `read_file`、`edit_file` 或 `bash` 后，调用会先进入 Tool Registry。Registry 不只是按名字找到工具，它还提供了统一的执行边界。
+长期记忆使用独立用户库。条目的 global/workspace 范围决定内容可见性，记忆开关是所有项目共用的用户策略。提取先基于原始用户证据生成候选，再独立规范化和验证，在记忆库事务中保存内容、来源与进度。
 
-工具真正执行前，会经过：
+记忆库与工作区事件库不是一个跨库原子事务。checkpoint 或 terminal 已提交、后台处理尚未完成时退出，需要靠持久边界、游标、失败范围与后续触发恢复。具体机制见[长期记忆技术博客](../pico-memory-technical-guide.md)。
 
-- Workspace Trust：读取项目级配置、Skill、Hook、MCP 或 LSP 之前，先确认真实工作区受信。
-- Hardline Guard：不可逆的极端危险命令直接阻断。
-- Full-access / Plan / Worker Boundary：主会话的完全访问权限（`full-access`）按当前 OS 用户权限放权；Plan 只允许保守只读；配置型 `implementation` 子任务进入独立 worktree 和 OS 沙箱。共享工作区的配置型子智能体则是只读边界，不应与可写 worker 混为一类。
-- Hooks：允许项目通过 PreToolUse 和 PostToolUse 扩展规则；输入被 Hook 改写后重新经过 Hardline / Plan 检查。
-- Permission / Approval：请求批准（`ask`）与帮我批准（`auto`）按各自策略决定允许、询问还是拒绝；需要用户确认时暂停执行，等待当前前台宿主审批。
-- File History：写入前保存原内容，或者为无法精确预测的 Bash 写入建立变化 Journal。
+## 七、Provider 可替换，但能力不能猜
 
-如果同一轮有多个工具调用，`ToolScheduler` 会根据“读什么、写什么”判断是否冲突。两个读取可以并行，写不同文件也可能并行；同一文件上存在写冲突时则等待。结果最终仍按照模型原始调用顺序返回，避免破坏 Tool Call 与 Tool Result 的配对关系。
+当前协议身份是 `openai`、`responses` 和 `claude`；工厂通过 `AiSdkProvider` 进行协议适配。Engine 面对统一的 `LLMProvider`，协议编码、工具消息转换和响应解析由适配层完成。
 
-代码理解也已经进入同一套工具体系。前台 Runtime 会优先连接项目配置或 PATH 中发现的
-Language Server；LSP 不可用时快速降级为渐进式 Repo Map。定义、引用、符号、诊断、调用
-层级和仓库地图六类工具默认不全部塞进模型上下文，而是通过 `search_tools` 按需披露。
+模型路线同时携带端点、模型和能力信息。图片、推理档位、工具、窗口、输出预算与价格不能仅凭“OpenAI 兼容”就认定支持。能力预检、请求适配、重试、凭据轮换和计费各有职责；某一项未知时，不应把它报告为已支持或零成本。
 
-多 Agent 现在使用两条明确路径：`agent_list` / `agent_spawn` / `agent_output` 负责配置型持久子会话，Agent Graph 负责带依赖的持久 Operator 调度。两条路径都以独立 Session/RuntimeRun 记录执行，主 Agent 根据有界结果统一判断、必要验证并最终回答。
+尤其要区分三个数字：本地估算的上下文大小、Provider 实际报告的 usage，以及结合价格得到的费用。它们来源不同，不能互相替代。
 
-### 第六步：结果重新成为模型的观察
+源码入口：[Provider 工厂](../../packages/pico-host/src/provider/factory.ts)、[AiSdkProvider](../../packages/pico-host/src/provider/ai-sdk-provider.ts)、[能力预检](../../packages/runtime/src/capability-preflight.ts)。
 
-工具输出不会原样无脑回灌。系统会先判断是否执行失败、是否过长、是否应该外存，并在失败时补充针对性的恢复建议。
+## 八、子代理拥有独立历史，而非一个临时循环
 
-例如，`edit_file` 因为旧文本不匹配而失败时，模型得到的不只是一个错误字符串，还会收到“先重新读取文件，再基于最新内容编辑”的恢复方向。连续重复失败时，Reminder 和 Guardrail 会提醒模型停止原地打转。
+配置型子任务通过 `agent_list`、`agent_spawn`、`agent_output` 选择能力、执行和回读。它有独立持久 Session/Run；新建时不会自动复制父任务整段聊天，主代理需要提供必要背景。
 
-处理后的 Observation 写入 Session，然后 ReAct 进入下一轮，直到模型不再请求工具。
+`agent_spawn` 当前前台等待一次子执行，不意味着工具会自动后台并行。`implementation` 使用独立 Git worktree 并返回补丁，不自动合并父工作区；共享会话的续用另有身份和运行终态检查。
 
-## 四、模型层为什么可以被替换
+子任务权限依赖宿主准入。父 managed 边界启动相应受限能力；父 bypass 可通过专用执行器传递 bypass/full-access。两种情况都保留 profile 工具白名单。手动进入子会话续聊时，统一入口恢复能力并按 profile 重建 managed 预期边界。
 
-`AgentEngine` 不直接依赖某一家模型 API。它只依赖统一的 `LLMProvider` 接口：输入消息和工具定义，输出一条模型消息。
+Agent Graph 则负责依赖图与 operator 调度。它同样保存独立执行事实，但不是配置型 `agent_spawn` 的别名。Hook agent 验证器又是内部独立路径，复用 Engine、FullCompactor 与持久子会话，且不再次挂载 Hook 服务。
 
-当前适配了两类协议：
+这三者共享基础执行机制，但准入、控制协议和结果归属不同。详见[子智能体技术博客](../pico-subagents-technical-guide.md)。
 
-- OpenAI Compatible。
-- Anthropic Claude 原生协议。
+## 九、Rewind 不是直接删掉旧聊天
 
-前台入口使用 `providerID/modelID` 选择稳定的模型路由。路由层不仅负责端点、模型发现和
-凭证映射，还记录 Context Window、最大输出、Vision、Reasoning、Tool Call、Cache、Price
-和 Fallback 等能力元数据。没有显式证据的能力保持 `unknown`，不会因为“协议兼容”就擅自
-推断模型一定支持。
+当前 `rewind.apply` 区分 `code`、`conversation` 和 `both`。只恢复代码可以保留源 Session；涉及会话回退时，通过检查点创建目标会话分支，保留源会话事实，而不是将旧日志直接截断后假装没有发生过。
 
-思考强度也已经变成模型级能力，而不是全局固定开关。`/thinking` 会读取当前 route 的真实档位；切换模型时，如果原档位不兼容，会自动回落到目标模型默认档位。OpenAI 和 Anthropic 请求体各自应用对应协议补丁，避免把某一家模型的参数强塞给所有 Provider。
+执行前要确认会话空闲、工作区受信，绑定幂等请求和目标身份。涉及文件时，还要使用期望指纹及恢复操作记录，处理文件副作用与会话分支之间的失败窗口。
 
-真正发出请求前，`CapabilityPreflightProvider` 会检查图片、工具调用、Reasoning 和上下文预算。如果路由明确不支持某项能力，或者估算输入加预留输出已经超过窗口，请求会在本地失败，不浪费一次远端调用。Provider 外面还包着 Streaming、Retry、Rate Limit、Credential Pool、Fallback 和 CostTracker。
+```mermaid
+flowchart TD
+    A[选择检查点与回退模式] --> B[空闲 / 信任 / 幂等校验]
+    B --> C{回退范围}
+    C -->|code| D[恢复文件，保留源会话]
+    C -->|conversation| E[从检查点创建会话分支]
+    C -->|both| F[协调文件恢复与会话分支]
+    D --> G[返回已提交结果]
+    E --> G
+    F --> G
+```
 
-模型返回的 Usage 会按字段记录“完整上报、部分上报或未知”，价格不完整时成本也保持未知。
-TUI 可以通过 `/usage` 查看当前 Session 的真实覆盖情况，通过 `/context` 查看当前路由的
-窗口、预留输出、剩余预算和能力来源；Desktop 消费同一份 Runtime 状态。
+文件历史服务用于记录受控修改；Rewind 不会替代 Git 的分支协作，也不是对外部系统副作用的通用撤销。实际契约见 [desktop-rewind-service.ts](../../packages/pico-host/src/desktop-rewind-service.ts)及 [rewind 原子性集成测试](../../tests/integration/storage/rewind-atomic-contract.test.ts)。
 
-所以从 Engine 的视角看，模型只是一个可替换的推理设备。换模型不会改变 Session、工具系统、文件历史或 ReAct 主循环。
+## 十、从目录找到真正的实现
 
-![隔离 worker 与 MCP 生命周期进入前台宿主的阶段性结构图](../images/pico-harness-architecture/stage13-isolated-runtime.png)
+| 位置                                   | 当前职责                                     |
+| -------------------------------------- | -------------------------------------------- |
+| `packages/cli/`、`apps/desktop/`       | TUI 与 Desktop 产品外壳                      |
+| `packages/core/`、`packages/protocol/` | 领域身份、事件契约、本机协议                 |
+| `packages/transcript-replica/`         | 客户端 Transcript 归并                       |
+| `packages/runtime-host/`               | 通用本机连接、进程与传输机制                 |
+| `packages/pico-host/`                  | 产品装配、Provider、工具、配置与平台适配     |
+| `packages/runtime/`                    | Engine、运行能力、调度、压缩、记忆算法与策略 |
+| `packages/storage/`                    | SQLite、Store、事务与持久化能力              |
+| 根 `src/`                              | 四个发行进程启动入口，不存放业务实现         |
 
-## 五、Session 为什么是整个系统的“硬盘”
+阅读时沿调用链走，比按旧目录名寻找更可靠。先看客户端如何请求，再看宿主怎样装配，最后看 Engine 与 Store 的事实提交边界。
 
-很多 Agent Demo 把历史只放在一个内存数组里，进程一停，任务就消失。`pico-harness` 把 Session 当成需要恢复的正式状态。
+## 十一、怎样验证这些架构判断
 
-消息会作为 RuntimeEvent v2 追加写入 `$PICO_HOME/workspaces/<workspace-id>/sessions/<sha256(sessionId)>/session.jsonl`。这种事件日志不要求频繁重写完整会话，程序异常退出后也可以重放恢复。日志末行即使只写了一半，加载时也会容忍并保留前面的有效记录；旧 Session schema 不迁移。
+在仓库根目录准备构建产物后，可以运行与本文直接相关的确定性检查：
 
-同时，Session 还维护几个关键不变量：
+```sh
+npm run build:packages
+npm run check:architecture
+node scripts/run-integration-tests.mjs \
+  tool-scheduler-contract runtime-tool-result-contract \
+  tool-result-runtime-projection rewind-atomic-contract
+```
 
-- 同一个 Session 的多次运行串行执行，避免同时修改 History。
-- Assistant Tool Call 后面必须跟对应的 Tool Result。
-- Tool Result 未到齐时，后续普通消息暂存，避免产生模型 API 无法接受的顺序。
-- 模型读投影保留完整有效历史，并在预算水位处安全整理旧前缀。
+这些检查覆盖包边界、工具调度、工具结果与回退不变量，不代表真实模型在任意任务中都会作出正确判断。实际运行情况见[本轮博客核对记录](../blog-code-consistency-audit.md)。
 
-对话内容以 Session JSONL 为事实源；进程内 Session、TUI Transcript 和 Desktop ViewModel
-都只是可以从日志重建的投影。显式可恢复任务另写入 `task-runs/`，Cron 与 daemon 控制面写入
-`control/`，三类账本通过 `.storage/` 协调事务，但不会互相复制事实。
-
-大结果进入 workspace Evidence CAS，RuntimeEvent 保留有界投影、哈希和引用；决策链路进入
-`traces/`，摘要以同一 Runtime ledger 中的 checkpoint 事件持久化。结构化长期记忆由
-`memory/state.json` 独立保存 settings、facts、proposals 和审计记录，原始用户证据仍来自
-RuntimeEvent，不会形成第二份 Transcript。这些边界共同构成了 Agent 的“硬盘”。
-
-## 六、Rewind 为什么不等于 Git Reset
-
-编码 Agent 的撤销不只是恢复文件。
-
-假设模型在第三轮修改了三个文件，TUI 已经展示了工具卡片，Session 也保存了相应 Tool Call。如果只恢复代码，不恢复对话，模型下一轮仍会相信修改已经存在；如果只截断对话，不恢复文件，工作区又会留下模型“不知道”的改动。
-
-因此 TUI 的 `/rewind` 与 Desktop 的 Changes/Rewind 都面向一条顶层用户消息，核心要同步
-恢复 Code 与 Conversation：
-
-- Code：恢复这轮之前的文件状态。
-- Conversation：截断这轮之后的消息。
-
-恢复完成后，两种外壳都从 RuntimeEvent 重新投影 Transcript。TUI 还会把原提示词放回输入框，
-并恢复当时的交互模式；Desktop 则使旧 Transcript cursor 失效并重新加载当前 Session。
-
-精确的 Write/Edit 会在写前备份文件；Bash、格式化器和脚本这类副作用范围不完全可预测的操作，则通过文件变化 Journal 对比工作区。它的目标不是代替 Git，而是提供一次 Agent 交互级别的原子撤销。
-
-![pico-harness 的可靠性重点：可控、可恢复、可理解、可复盘](../images/pico-harness-architecture/reliability-net.png)
-
-## 七、项目真正侧重什么
-
-看完整套架构后，可以发现它的重点并不是“工具越多越好”，而是下面八件事。
-
-### 1. 上下文必须可治理
-
-上下文被视为有限内存，需要预算、压缩、摘要、外存和长期检索，而不是无限追加聊天记录。
-
-### 2. 执行必须可中断
-
-AbortSignal 从前台宿主一直传到 Engine、Provider、Scheduler 和具体工具。Bash 不只是
-Promise 返回取消，还会尝试终止真实进程树。
-
-### 3. 修改必须可恢复
-
-Session 可以恢复，文件可以 Rewind，Transcript 可以重新投影，模型设置、Goal、Usage 和授权目录也会持久化。
-
-### 4. 主会话和 worker 必须区别对待
-
-主会话完全访问权限（`full-access`）的目标是少打扰，按当前 OS 用户权限执行普通操作；但可写 worker 是不可信并行
-执行单元，必须进入独立 worktree、独立分支、OS 沙箱和网络策略。这样既让主交互足够顺滑，
-又把并行写入的风险关在更小的空间里。
-
-### 5. 危险能力必须有宿主边界
-
-安全不能只靠 System Prompt 中的一句“不要执行危险命令”。Hardline、Plan 守卫、Hook deny、工作区信任门、Fetch URL 防护、工具执行与宿主投影大小上限、worker 沙箱和写前历史都位于模型之外，不能靠模型自觉维持。
-
-### 6. 代码理解必须可以降级
-
-代码导航优先使用 LSP 获得精确结果，但不能因为用户没有安装 Language Server 就拖垮整个
-前台入口。Repo Map 提供确定性降级，并以渐进索引控制大型仓库的成本。
-
-### 7. 外部工具连接必须生命周期化
-
-MCP 不再只是一个无状态工具列表，而是有明确信任和释放边界的前台 Runtime 能力。TUI
-可以在宿主生命周期复用 Connection Manager；Desktop 的每轮装配仍消费同一份配置、状态与
-安全语义。reload、enable、disable、reconnect、resources、prompts、OAuth needs-auth 和
-脱敏诊断都由宿主边界管理。
-
-### 8. 整个过程必须可观察
-
-用户能看到流式文本、工具状态、审批、文件 Patch、完整输出、worker 活动卡片和详情视图；开发者还能通过 CostTracker、结构化日志和 Trace Span 复盘一次执行。
-
-可以把这些重点概括为四个词：**可控、可恢复、可理解、可复盘。**
-
-## 八、当前产品边界在哪里
-
-理解边界和理解能力同样重要。
-
-当前项目不是多租户 Agent 服务，不提供公开 REST、WebSocket、ACP 或远程 Runtime API，也
-不提供 Docker 部署和 Linux Desktop 发布入口。仓库内 one-shot/headless runner 只服务
-benchmark，不构成公开兼容性承诺。
-
-Cron 已经是当前能力：用户可以从 TUI `/cron` 或 Desktop Automations 创建持久 Job，由本机
-daemon 在当前 OS 用户边界内调度。它是本地控制面，不是远程托管服务。Plugin 也已经能以
-受信、纯数据的 Runtime snapshot 提供 Skill、Command、Agent、Hook、MCP 和 LSP，但项目没有
-开放公共 marketplace，也不会把任意 Plugin 代码直接加载进 Runtime 进程。
-
-当前仍保持几条保守边界：worker Bash 在 macOS 使用 `sandbox-exec`，缺少等价后端时可写
-worker 会 fail-closed；每个前台 Session 只选择一个匹配的 Language Server，不宣称已经具备
-混合语言 server pool。
-
-这些取舍让项目集中解决一件事：在本地工程里，让 TUI 与 Desktop 驱动的编码 Agent 执行得
-足够可靠。
-
-## 九、最后再看一次整体结构
-
-从目录上看，项目可以分成七组：
-
-| 区域                                                        | 主要职责                                                  |
-| ----------------------------------------------------------- | --------------------------------------------------------- |
-| `src/cli/`、`src/tui/`、`src/input/`                        | TUI 产品入口、交互、命令与附件                            |
-| `apps/desktop/`、`src/daemon/`、`packages/protocol/`        | Desktop、认证本机 IPC、Runtime 控制面和共享协议           |
-| `src/runtime/`、`src/engine/`、`src/tasks/`、`src/storage/` | Runtime 装配、ReAct、Session、可恢复任务、Cron 与事实账本 |
-| `src/provider/`                                             | 模型协议、能力预检、路由、计费和凭证                      |
-| `src/code-intelligence/`、`src/tools/`、`src/mcp/`          | 代码导航、工具注册、调度、子代理和外部扩展                |
-| `src/context/`、`src/memory/`                               | Prompt、压缩、Evidence、Skill 和结构化长期记忆            |
-| `src/approval/`、`src/safety/`、`src/observability/`        | 审批、宿主沙箱、文件历史、成本和追踪                      |
-
-但从运行角度看，仍然只有一条主线：
-
-> TUI 或 Desktop 接住用户意图，Session 提供连续状态，Engine 驱动主 Agent 和工具循环，
-> worker 在隔离 worktree 中执行并行任务，MCP 和代码智能作为宿主能力按需接入，daemon 承载
-> Desktop 与持久 Cron，分层账本确保一切可以恢复和复盘。
-
-这正是 `pico-harness` 的核心价值：它不是让模型变得更聪明，而是让模型的聪明能够在真实工程里被可靠地使用。
+当前公开交互是 TUI 与 Desktop；内部 headless runner 服务仓库评测，不应当作对外稳定 API。关于启动与部署使用[部署指南](deployment.md)，模型评测使用[内部 Headless 指南](internal-headless-one-shot.md)。

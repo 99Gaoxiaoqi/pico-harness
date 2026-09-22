@@ -1,5 +1,7 @@
 # 上下文压缩：Maka 机制移植
 
+完整实现原理、失败语义和源码导航见 [Pico 上下文压缩技术详解](../pico-context-compaction-technical-guide.md)。
+
 参考用户本地 Maka `584652137`。移植运行中的主会话上下文策略，接入 Pico 的 Runtime 事件、Provider、权限和 `archive_read` / `read_file`；不引入第二套事件库或 Evidence CAS。
 
 ## 触发与恢复

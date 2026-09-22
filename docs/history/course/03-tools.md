@@ -1,369 +1,128 @@
-# 第 3 章 · 教它用工具
+# 第 3 章 · 教它用工具：从模型意图到受控副作用
 
-> 归档说明：本文保留历史设计与实施记录，不定义当前产品行为或待办。当前入口见 [技术文档索引](../../README.md)。
+> 当前实现教程：按代码 `0092022f`（2026-09-21）重写。保留原路径以兼容已有链接。
 
-> 文档状态：历史课程快照。“四个工具”、旧 `read_file` 截断阈值和 Evidence 回读描述只代表
-> 课程起步阶段；当前工具面按 surface 渐进披露，ToolResult 使用 1 MiB 入口上限。当前事实见
-> [工具系统](../../architecture/02-tools.md)与[入口定形 ADR](../../decisions/26-decision-tool-result-entry-shaping.md)。
+> 本章基于提交 `0092022f` 的当前实现重写。代码链接指向正式 workspace 包；概念例子用于说明调度与边界，不是工具调用成功的运行记录。
 
-Agent 有了大脑（Provider），有了心跳（Main Loop），但还没有手脚。
+模型返回 `edit_file` 只是一段意图。工具系统必须把它转换成参数校验、权限判断、资源访问、物理操作和可恢复结果。真正的设计目标是：每次执行都能回答“谁请求了什么、在哪个边界允许、实际发生了什么”。
 
-Main Loop 里有一行 `registry.execute(tc.name, tc.arguments)`，但如果 registry 是空的，Agent 只能聊天，不能做事。现在我要给它装上真正的工具。
+## 工具接口为什么比一个函数多
 
----
+[BaseTool](../../../packages/pico-host/src/tool-registry-contract.ts) 的基础仍然很直观：给出名称、Schema，并接收 JSON 参数执行。但当前契约还可以描述只读性、资源访问、文件副作用、恢复策略、嵌套执行等属性。
 
-## 工具注册：一个总机接线员
-
-Main Loop 不应该知道工具有哪些、怎么执行。它只是一个"信使"——把模型说的话（ToolCall）原封不动地传给执行层。
-
-这个执行层就是 **ToolRegistry**。我把它设计成"总机接线员"模式：
+下面是概念化节选，不是完整接口：
 
 ```typescript
-// src/tools/registry.ts
-export interface BaseTool {
-  name(): string; // 工具名称，模型通过这个名字调用它
-  definition(): ToolDefinition; // 返回工具的 JSON Schema，供模型理解用法
-  execute(args: string): Promise<string>; // 执行工具，接收 JSON 字符串参数
-  readOnly?: boolean; // 是否只读（并行调度用）
-  accesses?(args: string): ToolAccesses; // 声明资源访问意图（冲突检测用）
+// 概念伪码：省略恢复、嵌套执行和上下文等成员。
+interface Tool {
+  name(): string;
+  definition(): ToolDefinition;
+  execute(args: string): Promise<string>;
+  readOnly?: boolean;
+  accesses?(args: string): ResourceAccesses;
 }
 ```
 
-每个工具是一个 `BaseTool` 实例。注册后，Registry 用 `Map<name, BaseTool>` 做 O(1) 路由。
+Schema 解释模型该如何调用；`accesses` 帮助调度器判断能否并行；副作用与恢复声明支持执行收口；权限分类支持准入。这些属性解决不同问题，不能因为 `readOnly` 为真就推导“没有资源消耗、不会泄漏数据、任何宿主都可用”。
 
-```typescript
-// src/tools/registry-impl.ts
-export class ToolRegistry implements Registry {
-  private readonly tools = new Map<string, BaseTool>();
+[ToolRegistry](../../../packages/pico-host/src/tool-registry.ts) 负责统一分发；[默认注册工厂](../../../packages/pico-host/src/default-registry.ts) 与产品装配按依赖和运行边界提供真实工具。
 
-  register(tool: BaseTool): void {
-    const name = tool.name();
-    if (this.tools.has(name)) {
-      logger.warn(`工具 '${name}' 已被注册,将被覆盖。`);
-    }
-    this.tools.set(name, tool);
-  }
+## 注册、披露与执行是三道不同的门
 
-  async execute(call: ToolCall): Promise<ToolResult> {
-    const tool = this.tools.get(call.name);
-    if (!tool) {
-      // 找不到工具？模型幻觉了。返回 isError 让它自纠。
-      return {
-        toolCallId: call.id,
-        output: `未知工具: ${call.name}`,
-        isError: true,
-      };
-    }
-    const output = await tool.execute(call.arguments);
-    return { toolCallId: call.id, output, isError: false };
-  }
-}
+当前工具不止 read/write/edit/bash。代码搜索、计划、目标、子代理、Graph、记忆以及外部工具都有自己的适用范围。[Surface 目录](../../../packages/runtime/src/tool-surface.ts) 声明工具组、延迟披露和宿主支持，动态连接器再按宿主能力加入。
+
+```mermaid
+flowchart TD
+  A[宿主注册可用工具] --> B[本次执行绑定工具集合]
+  B --> C[直接工具与渐进披露]
+  C --> D[模型步骤的工具 Schema 快照]
+  D --> E[模型提出 ToolCall]
+  E --> F[权限 / Hook / 执行边界检查]
+  F --> G[资源调度与具体工具]
+  G --> H[结果入口门与持久化]
+  H --> I[模型读取投影]
 ```
 
-一个值得注意的设计：`execute` 的参数是 `args: string`（JSON 字符串），不是 `args: object`。解析 JSON 是工具自己的事——Main Loop 不知道、也不该知道每个工具的参数结构。**延迟解析，极致解耦。**
+`load_tools` 与 `search_tools` 用来发现或激活扩展能力。[ToolDisclosureTurn](../../../packages/runtime/src/tool-disclosure.ts) 在一次执行内维护独立集合，按步骤生成冻结快照，并限制披露的数量与 Schema 体积。工具出现于搜索结果不等于获得执行许可，权限仍在实际调用时检查。
 
----
+宿主限制也独立存在：后台运行不能假设有用户交互，Headless 使用明确支持集合。新增工具不能因为实现了接口就自动进入所有后台任务。
 
-## 四个工具，够了
+## 文件读取：有界、可定位、可继续
 
-UNIX 只有几十个系统调用，但能组合出无限可能。pico-harness 只有四个工具：
+[ReadFileTool](../../../packages/pico-host/src/read-file-tool.ts) 使用授权工作区边界解析路径，并通过同一文件描述符读取普通文件，避免 FIFO 等特殊文件让读取永久卡住。普通文件的物理读取有大小上限，模型展示还有独立分页约束。
 
-| 工具         | 能力            | 为什么只读/写             |
-| ------------ | --------------- | ------------------------- |
-| `read_file`  | 读取文件内容    | 只读，加行号前缀          |
-| `write_file` | 创建或覆盖文件  | 自动创建父目录            |
-| `edit_file`  | 局部字符串替换  | 四级模糊匹配              |
-| `bash`       | 执行 Shell 命令 | 超时、输出边界 + 权限策略 |
+当前普通文件默认读取 500 行，最多 1000 行；单页字符上限 30,000，单行展示上限 2000 字符。这些数字描述不同层次的边界，不能用一个“最多 12 KB”笼统替代。输出保留原始行号和行尾风格信息，出现 PARTIAL 提示后应按下一页继续。
 
-选择这四个工具，是因为观察了 Agent 的实际行为模式。Agent 做任何代码相关任务时，只会做四件事：读文件、写新文件、改已有文件、跑命令。没有第五种。给多了反而让它困惑——它会在"该用 replace 还是 edit"之间犹豫。
+概念调用示例：
 
-### read_file：三个坑
-
-读文件听起来简单，但有几个容易被忽略的坑：
-
-**坑 1：路径穿越。** 模型可能被诱导读取 `../../etc/passwd`。必须在读取前校验路径在工作区之内：
-
-```typescript
-function safeResolve(workDir: string, path: string): string {
-  const base = resolve(workDir);
-  const fullPath = resolve(base, path);
-  const rel = relative(base, fullPath);
-  if (rel.startsWith("..") || isAbsolute(rel)) {
-    throw new Error(`路径越界: '${path}' 不在工作区之内`);
-  }
-  return fullPath;
-}
+```json
+{ "path": "packages/core/src/message.ts", "offset": 1, "limit": 80 }
 ```
 
-**坑 2：文件太大。** 一次性读 10MB 的日志文件会撑爆上下文。默认上限 12000 字节，超出截断并标注。这是早期版本遗漏的细节——有一次 Agent 读了一个 50MB 的 JSON 文件，直接把上下文塞爆了，400 错误。
+如果路径是当前 Session 授权的 `pico://archive/` URI，`offset` 和 `limit` 按字符计数，而不是文件行数。普通文件读取与归档读取共享入口，但分页单位不同；工具描述会明确提示，调用者不能套用同一套行号推断。
 
-**坑 3：行号对齐。** 模型看到文件内容后需要用 `edit_file` 改它，所以每行必须加行号前缀。格式是 `行号\t内容`（制表符分隔），这样模型可以直接引用行号。
+## 写入不是直接覆盖，编辑也不能随意猜测
 
-```typescript
-// read_file 的核心逻辑
-const content = await readFile(fullPath, "utf8");
-let truncated = content;
-if (truncated.length > MAX_BYTES) {
-  truncated = truncated.slice(0, MAX_BYTES) + "\n... (文件过大,已截断)";
-}
-const lines = truncated.split("\n");
-const width = String(lines.length).length;
-const numbered = lines
-  .map((line, i) => `${String(i + 1).padStart(width, " ")}\t${line}`)
-  .join("\n");
-return numbered;
+[WriteFileTool](../../../packages/pico-host/src/write-file-tool.ts) 与 [EditFileTool](../../../packages/pico-host/src/edit-file-tool.ts) 通过 [原子工作区文件操作](../../../packages/pico-host/src/atomic-workspace-file.ts) 发布内容。关键过程是取得目标快照、准备同目录临时文件、完整写入并同步、发布前复核，再执行原子替换。
+
+这个机制防止把半写文件暴露给读者，并拒绝可以观察到的目标或路径替换。它不意味着工作区从此不受其他进程修改，也不等价于整个多文件任务的事务。
+
+`edit_file` 对模型的格式误差提供四级匹配：精确匹配、换行归一化、首尾空白处理、逐行去缩进。最后一级还会根据真实文件区域重对齐替换文本的缩进。允许容错的前提是仍能定位操作范围；存在多处匹配时，需要更多上下文，或用户意图明确的 `replace_all`，不能静默挑一处。
+
+匹配失败会给出候选提示，帮助模型重新定位。候选相似度只是下一步读取的线索，不是可以无条件覆盖的证据。发布前版本复核则处理另一种问题：即使旧文本匹配，文件也可能在准备写入期间发生变化。
+
+## Shell 的工作目录不是沙箱
+
+[BashTool](../../../packages/pico-host/src/bash-tool.ts) 在宿主 Shell 上执行命令，传入工作目录、受整理的进程环境和取消信号。主会话完全访问权限的作用范围仍然是当前 OS 用户；仅设置 `cwd` 不能阻止命令访问其他目录。
+
+因此 Shell 执行同时依赖命令安全策略、权限模式和显式执行边界。需要隔离的子任务使用独立 worktree 与相应沙箱机制，不能把主会话的便利权限照搬给 worker。
+
+执行输出也有边界：Shell 捕获缓冲有 10 MiB 上限，结果进入 Runtime 时还有独立的 1 MiB 门。前者控制子进程输出捕获，后者控制持久工具结果；两者不是同一个截断阈值。遇到大量输出，优先在命令内用筛选和分页取得所需片段。
+
+超时或取消时需要处理真实进程收口，而不是仅让等待 Promise 返回。退出码、stderr 与取消状态共同影响结果含义；工具返回了文本不代表命令执行成功。
+
+## 同一批工具怎样安全并行
+
+[ToolAccesses](../../../packages/runtime/src/tool-access.ts) 表达读、写和无法精确描述的全量访问；[ToolScheduler](../../../packages/runtime/src/tool-scheduler.ts) 决定启动顺序。Engine 当前每批最大并发数为 8，结果按原模型调用顺序关联回历史。
+
+| 同批调用                          | 资源关系         | 调度含义     |
+| --------------------------------- | ---------------- | ------------ |
+| 读取 `a.ts` 与读取 `b.ts`         | 不冲突           | 可以重叠执行 |
+| 读取 `a.ts` 与编辑 `a.ts`         | 同路径且存在写入 | 按顺序等待   |
+| 写 `a.ts` 与写 `b.ts`             | 路径不重叠       | 可以重叠执行 |
+| 无法描述副作用的 Shell 与文件访问 | 保守全量访问     | 按冲突处理   |
+
+并发控制只覆盖当前调度范围，不是跨用户、跨进程的工作区锁。因此它不能代替文件发布前检查，也不能代替可写子代理的 worktree 隔离。判断一项保障是否足够，必须同时说清它保护的是哪段时间和哪些参与者。
+
+## 工具结果有两种不同的“变小”
+
+[结果入口门](../../../packages/runtime/src/tool-result-observation.ts) 在原始输出超过 1 MiB 时拒绝该结果，用含有重新获取指引的合成错误替换；超限原文不保存。限内正文 inline 进入事实库，哈希描述实际保存的内容。
+
+之后，模型读取侧可以把较大的已保存结果变成有界预览，并提供 [归档引用](../../../packages/runtime/src/tool-result-archive.ts)。此时 `pico://archive/` 回读的是账本中已经存在、受当前 Session 权限约束的正文，不是把入口拒绝的数据找回来。当前阈值常量为 `2048 * 4` 字符，按具体读取投影策略使用。
+
+这两个阶段必须分开：入口门决定什么能成为事实；读取投影决定一次模型请求看多少。恢复建议也可以进入 Provider 可见投影，而不改变 canonical 正文的哈希语义。
+
+## 权限链在副作用之前，报告在事实之后
+
+执行前会检查 Hardline、Plan、信任与权限边界，并经过 Hook。Hook 改写参数后必须重新检查，不能让改写成为越过门禁的通道。普通审批也不能覆盖不可绕过的拒绝。
+
+工具物理执行完成后还需要提交结果。用户界面、Hook 后置通知和模型观察应服从 Runtime 的提交边界，不能把“物理函数已经返回”直接当成“整个工具操作已耐久完成”。这也是工具系统需要结构化身份与恢复策略、不能只有 `Map<string, Function>` 的原因。
+
+## 验证工具机制
+
+从仓库根目录运行以下针对性检查；这些是验证入口，不是本文声称已经执行的结果：
+
+```bash
+npm run check:storage
+npm run build:packages
+node --import tsx --import @pico/cli/tui/preload-env --test \
+  tests/integration/tools/tool-surface-disclosure.test.ts \
+  tests/integration/tools/tool-scheduler-contract.test.ts \
+  tests/integration/safety/read-file-safety.test.ts
 ```
 
-行号前缀用的是制表符而不是空格——因为代码本身可能包含空格缩进，用制表符确保行号和内容的边界清晰可解析。
+它们分别检查工具披露与宿主边界、批次调度契约以及读取安全。若修改文件发布机制，应再运行 [文件写入安全测试](../../../tests/integration/safety/file-write-safety.test.ts)，而不是用一次成功的 `edit_file` 代替竞争与路径边界验证。
 
-### write_file：极简覆盖
-
-只做一件事：把内容写到文件。没有追加模式、没有版本管理、没有权限设置——保持工具语义最小化，复杂操作让模型自己组合（先 read 再 edit）。
-
-唯一额外做的事：自动创建父目录。
-
-```typescript
-await mkdir(dirname(fullPath), { recursive: true });
-await writeFile(fullPath, content, "utf8");
-```
-
-这样模型不需要先 `bash mkdir -p` 再 `write_file`——一步到位。减少不必要的工具调用就是减少出错机会和 Token 消耗。
-
-### bash：执行边界
-
-Shell 是功能最强大的工具，也是最危险的。前台执行有这些固定边界：
-
-1. **超时控制**：30 秒超时。超过后先 SIGTERM、再 SIGKILL 收口完整子进程树，防止 Agent 在无限循环或遗留孙进程上卡死。
-2. **工作目录绑定**：`cwd` 从工作区启动，但这不是 OS 沙箱；主 Agent 的 YOLO 仍拥有当前 OS 用户权限。需要隔离的 Worker 由独立 worktree 与 OS 沙箱负责，隔离不可用时拒绝启动。
-3. **宿主 Shell 启动收口**：Bash 使用 `--noprofile --norc -c`，进程环境移除 `BASH_ENV`、`ENV`、导出函数等启动代码入口；YOLO hardline 仍会先拒绝可见文本中已建模的高危入口。
-4. **错误与退出状态回传**：stdout、stderr 按到达顺序合并；无输出的非零退出也会返回明确错误。
-5. **有界输出**：执行缓冲上限为 10 MiB，越界时终止完整子进程树。Registry 返回已经完整捕获的结果；Engine 在 canonical ToolResult 边界计算哈希、生成确定性有界投影，并把大正文写入可分页回读的 Evidence CAS。
-
-```typescript
-const shell = resolveShell();
-const child = spawn(shell, shellCommandArgs(shell, command), {
-  cwd: this.workDir,
-  detached: process.platform !== "win32",
-  env: sanitizeShellProcessEnvironment(process.env),
-  stdio: ["ignore", "pipe", "pipe"],
-});
-```
-
----
-
-## edit_file：最难的工具
-
-`read_file`、`write_file`、`bash` 都很直接。但 `edit_file` 让我 debug 了整整两天。
-
-问题出在大模型的行为上。模型被要求"把第 42 行的 `const x = 1` 改成 `const x = 2`"，它会：
-
-1. 调用 `read_file` 读取文件
-2. 在回复里写 `edit_file(old_text="const x = 1", new_text="const x = 2")`
-3. 但 `old_text` 里的缩进可能和文件里的不一样——模型"记错"了是 2 空格还是 4 空格
-4. 精确匹配失败，Agent 报错，然后陷入"重读 → 重试 → 又失败"的死循环
-
-这是 LLM 的"缩进幻觉"——它记住了语义但丢失了格式。我需要一种容错机制。
-
-解决这个问题用了三步。
-
-### 第一步：四级模糊匹配
-
-一个降级匹配链（Chain of Responsibility）。每一级失败后自动降级到更宽松的匹配：
-
-```typescript
-function fuzzyReplace(originalContent, oldText, newText) {
-  // L1: 精确匹配 —— 最严格，要求一模一样
-  const exactCount = countOccurrences(originalContent, oldText);
-  if (exactCount === 1) return originalContent.replace(oldText, newText);
-  if (exactCount > 1) throw new Error("匹配到多处，请提供更多上下文");
-
-  // L2: 换行符归一化 —— \r\n → \n
-  const normalized = originalContent.replaceAll("\r\n", "\n");
-  const normalizedOld = oldText.replaceAll("\r\n", "\n");
-  if (countOccurrences(normalized, normalizedOld) === 1)
-    return normalized.replace(normalizedOld, newText);
-
-  // L3: 去首尾空白 —— 忽略模型多/少加的空行和空格
-  const trimmedOld = normalizedOld.trim();
-  if (countOccurrences(normalized, trimmedOld) === 1)
-    return normalized.replace(trimmedOld, newText);
-
-  // L4: 逐行去缩进 —— 只比较每行的"内容"，不比较缩进
-  return lineByLineReplace(normalized, normalizedOld, newText);
-}
-```
-
-L4 是最精妙的一级。它把 `old_text` 和文件内容都按行切割，去掉每行的首尾空白，然后用滑动窗口匹配。找到匹配后，还有一个关键步骤——**缩进重对齐**。
-
-模型的 `new_text` 可能用了和文件不同的缩进风格（比如模型用 2 空格，文件用 4 空格）。直接写进去会破坏代码风格。所以 L4 会检测文件中匹配区域的真实缩进，把 `new_text` 的缩进对齐到文件风格。
-
-### 第二步：当一切匹配都失败时——EditHint
-
-有时候连 L4 都匹配不到。可能是模型在幻觉——它"记住"的代码根本不在文件里。这时不能只返回"未找到"，需要帮模型定位。
-
-```typescript
-// src/tools/edit-hint.ts
-function findClosestLines(content, oldText) {
-  // 按 oldText 行数滑动窗口，用字符 Dice 系数算相似度
-  const windows = slidingWindows(content, oldText);
-  const scored = windows.map((w) => ({
-    ...w,
-    similarity: charDice(w.text, oldText),
-  }));
-  // 返回 top 3 最相似的候选段
-  return scored
-    .filter((s) => s.similarity > 0.3)
-    .sort((a, b) => b.similarity - a.similarity)
-    .slice(0, 3);
-}
-```
-
-返回给 Agent 的不仅是"未找到"，还附带三行候选提示：
-
-```
-未找到 old_text。以下是文件中最相似的 3 段代码，供您参考：
-
-候选 1 (相似度 92%):
-42 |   const formatDate = (date: Date, locale?: string) => {
-43 |     return date.toLocaleDateString(locale);
-44 |   }
-
-候选 2 (相似度 67%):
-89 |   const formatDate = (date: Date) => {
-90 |     return `${date.getFullYear()}-${date.getMonth() + 1}`;
-91 |   }
-```
-
-模型看到这些候选后，通常会选最相似的那个，修正 old_text 再试一次。这比让它从头重读文件高效得多。
-
-### 第三步：跨平台换行符
-
-还有一个长期隐藏的 bug：Windows 的 `\r\n` 和 Unix 的 `\n`。Agent 在 macOS 上跑，但读取的文件可能是从 Windows 机器 clone 的。精确匹配 `"hello\n"` 会失败，因为文件里是 `"hello\r\n"`。
-
-这就是 L2 在做的事——在匹配前把所有 `\r\n` 统一成 `\n`。一个小小的归一化，解决了一个跨平台的头疼问题。
-
----
-
-## 工具不是孤岛：并行调度
-
-当 Agent 一次性调用多个工具时（比如同时读三个文件），顺序执行是浪费。三个 `read_file` 调用完全可以同时进行。
-
-这里的调度边界必须说清楚：每个 `ToolScheduler` 只管理**一个 Agent、一次模型响应产生的工具调用批次**。资源图不会跨 Agent 共享，也不会在下一轮或整个任务期间持有路径锁。跨 Agent 写入由任务范围、文件版本校验和可选 worktree 共同处理，详见[多 Agent 共享工作区并发规范](../architecture/08-multi-agent-concurrency.md)。
-
-但并行不是无条件的。如果 Agent 同时调用了 `read_file("src/a.ts")` 和 `write_file("src/a.ts", ...)`，它们操作同一个文件——必须先读后写，否则读到的是旧内容还是新内容是不确定的。
-
-我需要一个调度器，它知道每个工具访问了哪些资源，并据此决定哪些可以并行、哪些必须串行。
-
-### ToolAccesses：声明资源意图
-
-首先，每个工具需要声明自己会碰什么资源：
-
-```typescript
-// src/tools/tool-access.ts
-export const ToolAccesses = {
-  /** 无副作用(如 echo)。不与任何工具冲突。 */
-  none(): ToolAccesses {
-    return [];
-  },
-
-  /** 全量互斥。与一切冲突(bash 等无法静态分析的工具用此值)。 */
-  all(): ToolAccesses {
-    return [{ kind: "all" }];
-  },
-
-  /** 读单个文件 */
-  readFile(path: string): ToolAccesses {
-    return [{ kind: "file", operation: "read", path }];
-  },
-
-  /** 写单个文件 */
-  writeFile(path: string): ToolAccesses {
-    return [{ kind: "file", operation: "write", path }];
-  },
-
-  /** 读改写单个文件(edit 必须先读后写，与并发写同文件冲突) */
-  readWriteFile(path: string): ToolAccesses {
-    return [{ kind: "file", operation: "readwrite", path }];
-  },
-};
-```
-
-冲突判定三层短路逻辑：
-
-1. 任一方是 `kind: "all"` → 冲突（bash 和一切串行）
-2. 双方都不含写操作 → 不冲突（read + read 可以并行）
-3. 至少一方含写，且路径重叠 → 冲突（同文件读写串行）
-
-举个例子：
-
-```
-read_file("src/a.ts") + read_file("src/b.ts")  → 并行 ✅
-read_file("src/a.ts") + edit_file("src/a.ts")  → 串行 ❌ (edit 含写，同文件)
-write_file("src/a.ts") + write_file("src/b.ts") → 并行 ✅ (写不同文件)
-bash("npm test")       + read_file("src/a.ts") → 串行 ❌ (bash 是 "all")
-```
-
-### ToolScheduler：贪心并行
-
-有了冲突判定，调度器就很简单了：
-
-```typescript
-// src/tools/tool-scheduler.ts
-class ToolScheduler<R> {
-  async add(task: ToolCallTask<R>): Promise<R> {
-    // 等待，直到 task 与所有正在运行的任务都不冲突
-    while (this.conflictsWithActive(task)) {
-      await Promise.race(this.active.map((t) => t.running));
-    }
-    // 启动执行
-    return this.startTask(task);
-  }
-
-  private conflictsWithActive(task): boolean {
-    return this.active.some((active) => ToolAccesses.conflict(active.accesses, task.accesses));
-  }
-}
-```
-
-每次添加新任务时，调度器检查它是否与正在运行的任务冲突。如果冲突，就等冲突任务完成后再启动。如果不冲突，立即启动。
-
-最终引擎中的调度：
-
-```typescript
-// src/engine/loop.ts —— 工具并行调度
-const scheduler = new ToolScheduler<ToolResult>({ maxConcurrency: 8 });
-const results = await Promise.all(
-  toolCalls.map((tc) =>
-    scheduler.add({
-      accesses: registry.getToolAccesses(tc.name, tc.arguments),
-      start: () => registry.execute(tc),
-    }),
-  ),
-);
-```
-
-`Promise.all` 保证结果按 Provider 返回的顺序排列（调度器内部按 add 顺序保序 resolve）。`maxConcurrency: 8` 限制最大并发数——毕竟 Node.js 是单线程的，太多并发只会争抢 CPU。
-
----
-
-## 现在有了什么
-
-四把工具已经装好：
-
-- **read_file**：安全读取，路径校验 + 大小截断 + 行号标注
-- **write_file**：原子覆盖，自动 mkdir
-- **edit_file**：四级模糊匹配 + EditHint 智能定位 + 缩进重对齐
-- **bash**：30 秒超时 + 工作目录绑定 + 权限策略 + 错误回传
-
-加上 **ToolAccesses** 冲突模型和 **ToolScheduler** 贪心调度器，Agent 可以在同一轮中安全地并行执行多个不冲突的工具，在冲突时自动串行。
-
-这里的“安全”仅指同一 Agent 本轮内的启动顺序正确；其他 Agent、用户或外部进程仍可能修改文件，最终写入必须另外经过文件级 OCC 校验。
-
-Agent 现在能读、能写、能改、能跑命令。但它还有两个问题：
-
-1. 它不记得上次聊了什么——每次启动都是"失忆"状态
-2. 上下文越来越长，Token 账单飞涨
-
-所以接下来，给它装上记忆和理解上下文的能力。
+至此，模型提出的动作已经能经过受控执行并形成观察。下一步是把连续会话和长期知识分开，让系统知道上次发生了什么，以及哪些知识值得留给下次。
 
 [下一章：记住上次聊到哪 →](04-memory.md)

@@ -24,6 +24,10 @@
 
 ## 当前实现的关键边界
 
+![Pico 当前执行架构](readme-assets/current/runtime.png)
+
+[交互架构图](readme-assets/current/runtime.html) · [可编辑图源](readme-assets/current/runtime.json)
+
 旧文档最容易在以下四处误导读者：
 
 1. TUI 已从进程内 Runtime 迁移为 daemon 瘦客户端；TUI 与 Desktop 都通过
@@ -33,9 +37,27 @@
    记忆随后迁出到用户级 `$PICO_HOME/memory.sqlite`，按 global/workspace scope 隔离，经过
    提取和规范化直接保存，旧 Proposal/Worker 执行链已退役。
 3. 新 ToolResult 不再进入 Evidence CAS；限内正文 inline 入库，超过 1 MiB 写合成错误，
-   `read_evidence` 只剩退役协议的兼容/诊断边界。
+   `read_evidence` 只剩退役协议的兼容/诊断边界。较大结果的模型请求预览使用 `pico://archive/...`，通过 `archive_read` 回读，与旧 Evidence CAS 不同。
 4. Plan 不再使用 `PLAN.md` / `TODO.md`。Plan 是 Session RuntimeEvent 状态机，普通 Todo 位于
    SQLite `workspace_kv`。
+
+## 技术博客阅读目录
+
+![Pico 技术博客阅读路线：架构、执行基础、上下文、安全、协作与验证](readme-assets/current/reading.png)
+
+[交互阅读路线图](readme-assets/current/reading.html) · [可编辑图源](readme-assets/current/reading.json)
+
+建议先读架构长文，再按图中对应的课程与专题深入。各篇文章中的源码链接用于追踪实现，验证记录用于区分本轮检查与历史验收。
+
+本轮按代码 `0092022f`（2026-09-21）核对仓库内 15 篇技术博客；详见[核对记录、差异与验证结果](blog-code-consistency-audit.md)。其中原先过期的架构长文与 11 篇课程已按当前实现重写；原路径保留以兼容已有链接。
+
+| 文章                                                                      | 状态              | 阅读主题                         |
+| ------------------------------------------------------------------------- | ----------------- | -------------------------------- |
+| [长期记忆](pico-memory-technical-guide.md)                                | 当前实现，已校准  | 用户级设置、证据提取、恢复与召回 |
+| [子智能体](pico-subagents-technical-guide.md)                             | 当前实现，已校准  | 配置、持久执行、续用和准入边界   |
+| [上下文压缩](pico-context-compaction-technical-guide.md)                  | 当前实现，已校准  | 真实用量触发、摘要校验与工具归档 |
+| [从一句话到一次可靠执行](guides/pico-harness-architecture-guide-image.md) | 当前实现，已重写  | 从输入到持久执行的当前架构       |
+| [课程系列 00–10](#课程式构建记录)                                         | 11 篇当前实现教程 | 按当前代码讲解 Harness           |
 
 ## 架构深入文档
 
@@ -91,26 +113,26 @@
 | [TodoList 实现](guides/todolist-implementation.md)              | 部分过期；当前存储为 SQLite `workspace_kv`  |
 | [Desktop/TUI parity](guides/desktop-tui-parity.md)              | 目标/验收规格，不是完成清单                 |
 | [TUI 交互指南](guides/tui-claude-code-parity.md)                | 使用前按当前 client commands 复核           |
-| [架构配图指南](guides/pico-harness-architecture-guide-image.md) | 历史快照；基于 `a5d598f`，不定义当前行为    |
+| [架构配图指南](guides/pico-harness-architecture-guide-image.md) | 当前实现；按 `0092022f` 重写                |
 
 ## 课程式构建记录
 
-以下章节保留“为什么这样构建”的教学推导，不是当前产品契约。每章顶部已经标注主要失效
-边界；代码示例、路径、工具数量、协议和阈值可能无法在当前版本直接运行。
+以下 11 章按当前代码重新编写，保留教学叙述并区分真实接口与概念伪代码。`history/course/`
+仅为兼容既有链接而保留的路径，已不表示正文停留在历史实现；旧版本可通过 Git 查看。
 
-| 章节                                    | 主题                             |
-| --------------------------------------- | -------------------------------- |
-| [0](history/course/00-why.md)           | 为什么自己写 Harness             |
-| [1](history/course/01-breathing.md)     | 最小循环与 ReAct                 |
-| [2](history/course/02-provider.md)      | Provider 抽象                    |
-| [3](history/course/03-tools.md)         | 工具 Registry                    |
-| [4](history/course/04-memory.md)        | Session 与上下文                 |
-| [5](history/course/05-compaction.md)    | 上下文压缩                       |
-| [6](history/course/06-steering.md)      | Plan、恢复与重复失败             |
-| [7](history/course/07-safety.md)        | 安全与审批                       |
-| [8](history/course/08-subagent.md)      | 子代理与隔离                     |
-| [9](history/course/09-observability.md) | 成本、Trace 与日志               |
-| [10](history/course/10-evaluation.md)   | 内部评测；本组中与当前实现最接近 |
+| 章节                                    | 主题                     |
+| --------------------------------------- | ------------------------ |
+| [0](history/course/00-why.md)           | 为什么自己写 Harness     |
+| [1](history/course/01-breathing.md)     | 最小循环与 ReAct         |
+| [2](history/course/02-provider.md)      | Provider 抽象            |
+| [3](history/course/03-tools.md)         | 工具 Registry            |
+| [4](history/course/04-memory.md)        | Session 与上下文         |
+| [5](history/course/05-compaction.md)    | 上下文压缩               |
+| [6](history/course/06-steering.md)      | Plan、恢复与重复失败     |
+| [7](history/course/07-safety.md)        | 安全与审批               |
+| [8](history/course/08-subagent.md)      | 子代理与隔离             |
+| [9](history/course/09-observability.md) | 成本、Trace 与日志       |
+| [10](history/course/10-evaluation.md)   | 内部 Headless 与评测证据 |
 
 ## 实施计划与历史档案
 
@@ -133,7 +155,7 @@
 | `guides/`                           | 部署、发布与专题说明                                   |
 | `decisions/`                        | 架构取舍和决策；实施状态见决策表                       |
 | `plans/`                            | 当前实施与验收清单                                     |
-| `history/course/`                   | 从最小 Harness 开始的课程记录                          |
+| `history/course/`                   | 当前实现教程；路径保留以兼容已有链接                   |
 | `history/architecture/`             | 已取代设计、研究和阶段审计                             |
 | `history/plans/`、`history/design/` | 历史实施计划与设计记录                                 |
 

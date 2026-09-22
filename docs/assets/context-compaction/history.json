@@ -1,0 +1,159 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "历史压缩前后：替换视图，保留事实",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1080,
+      560
+    ]
+  },
+  "components": [
+    {
+      "id": "old",
+      "label": "已完成历史前缀",
+      "sublabel": "用户请求 + 完整工具交换",
+      "pos": [
+        50,
+        80
+      ],
+      "size": [
+        220,
+        82
+      ],
+      "type": "backend"
+    },
+    {
+      "id": "tail",
+      "label": "未压缩尾部",
+      "sublabel": "最近交换、图片与实时引导",
+      "pos": [
+        430,
+        80
+      ],
+      "size": [
+        220,
+        82
+      ],
+      "type": "backend"
+    },
+    {
+      "id": "raw",
+      "label": "原始事件库",
+      "sublabel": "前缀和尾部都继续保存",
+      "pos": [
+        810,
+        80
+      ],
+      "size": [
+        220,
+        82
+      ],
+      "type": "database"
+    },
+    {
+      "id": "summary",
+      "label": "结构化摘要",
+      "sublabel": "五段摘要 + 当前任务原文",
+      "pos": [
+        50,
+        360
+      ],
+      "size": [
+        220,
+        82
+      ],
+      "type": "backend"
+    },
+    {
+      "id": "kept",
+      "label": "原样保留的尾部",
+      "sublabel": "不能切开工具调用与结果",
+      "pos": [
+        430,
+        360
+      ],
+      "size": [
+        220,
+        82
+      ],
+      "type": "backend"
+    },
+    {
+      "id": "next",
+      "label": "下一次模型输入",
+      "sublabel": "摘要与尾部共同组成上下文",
+      "pos": [
+        810,
+        360
+      ],
+      "size": [
+        220,
+        82
+      ],
+      "type": "external"
+    }
+  ],
+  "connections": [
+    {
+      "id": "old-summary",
+      "from": "old",
+      "to": "summary",
+      "label": "安全切点内折叠",
+      "labelAt": [
+        160,
+        260
+      ]
+    },
+    {
+      "id": "tail-kept",
+      "from": "tail",
+      "to": "kept",
+      "label": "保持原文",
+      "labelAt": [
+        540,
+        260
+      ]
+    },
+    {
+      "id": "summary-kept",
+      "from": "summary",
+      "to": "kept",
+      "label": "拼接"
+    },
+    {
+      "id": "kept-next",
+      "from": "kept",
+      "to": "next",
+      "label": "发送"
+    },
+    {
+      "id": "raw-next",
+      "from": "raw",
+      "to": "next",
+      "label": "重建读取视图",
+      "labelAt": [
+        920,
+        260
+      ]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "violet",
+      "title": "摘要是有损的",
+      "items": [
+        "结构校验不能证明每一个事实都被保留。"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "历史仍可展示",
+      "items": [
+        "聊天界面不必删除被摘要覆盖的旧记录。"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "deliver",
+  "type": "workflow",
+  "input": "/Users/anxuan/geektime-downloader/从0开始构建AgentHarness/pico-harness/docs/assets/context-compaction/trigger.json",
+  "output": "/Users/anxuan/geektime-downloader/从0开始构建AgentHarness/pico-harness/docs/assets/context-compaction/trigger.html",
+  "specification": {
+    "sha256": "ca17d9b823fdee6afe9af0efbde27a66def5a87427136540d326ea4d79a96f75",
+    "bytes": 3208
+  },
+  "artifact": {
+    "sha256": "6192b3c273c97da505b4025dad85a1e2a62f3d30827908e7f2dee27b4cc62bf2",
+    "bytes": 805716
+  },
+  "validation": {
+    "checksPassed": 9,
+    "checkCount": 9,
+    "compositionProfile": "showcase",
+    "compositionStatus": "pass",
+    "errors": 0,
+    "warnings": 0
+  }
+}

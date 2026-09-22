@@ -1,208 +1,144 @@
-# 第 6 章 · 给它装上方向盘
+# 第 6 章 · 让计划、纠偏和停止拥有明确边界
 
-> 归档说明：本文保留历史设计与实施记录，不定义当前产品行为或待办。当前入口见 [技术文档索引](../../README.md)。
+> 当前实现教程：按代码 `0092022f`（2026-09-21）重写。保留原路径以兼容已有链接；代码块中的概念示意不作为公开 API。
 
-> 文档状态：历史课程快照。以 `PLAN.md` / `TODO.md` 外化状态的方案已经退役；当前 Plan 是
-> Session RuntimeEvent 状态机，通过 `submit_plan`、`update_plan` 等入口推进，普通 Todo 存在
-> workspace SQLite scope。恢复提示与重复失败控制的教学动机仍可参考。
+Agent 有了历史和压缩，仍可能偏离目标，或在同一个错误上反复消耗工具调用。增加一句“遇到问题请反思”并不足够：计划需要耐久状态，用户纠偏需要明确的接收点，重复失败还需要程序在下一次执行前作出决定。
 
-Agent 现在有了记忆、工具体系和上下文管理。但它还是会跑偏。
+当前 Pico 把这些工作拆成事件化 Plan、实时 steering、Recovery 提示和工具 guardrail。本章基于当前代码说明它们如何协作，图中的状态流是教学概括；真实状态和工具协议以所链接代码为准。
 
-我见过三种典型的跑偏模式：
+## 1. 计划不是两个 Markdown 文件
 
-1. **任务漂移**：让它重构 `utils.ts`，做着做着它去改 `config.ts` 了——因为"重构 utils 需要先理解 config 的依赖关系"——然后它就忘了最初的任务。
-2. **机械重试**：`edit_file` 匹配失败，它不换策略，用完全相同的参数再试一次。又失败。再试。三次之后还在原地打转。
-3. **无限循环**：遇到一个超出认知的错误，它在同一个节点上不断重试，直到 Token 烧光。
+计划最重要的属性不是“写出来”，而是能回答：当前版本是什么、谁审阅过、执行是否已开始、哪些步骤完成、一次重复点击是否会启动第二个执行。
 
-这三个问题需要三种不同的方向盘。
+Pico 当前的 Plan 是 Session RuntimeEvent 状态机，由 [PlanCoordinator](../../../packages/runtime/src/plan-coordinator.ts) 写入、[PlanReducer](../../../packages/runtime/src/plan-reducer.ts) 重建。没有运行时自动嗅探 `PLAN.md`／`TODO.md` 并将文件当成计划权威的机制。用户当然可以把文档作为任务输入，但编辑一个同名文件不会自动推进产品 Plan 状态。
 
----
+Plan Mode 用于调查、澄清并提交计划。模型通过 `submit_plan` 提出结构化方案，宿主用明确的审阅与执行入口推进它。批准后的执行工具面暴露 `update_plan`、`cancel_plan`，不继续暴露用于提交新提案的同一套入口。
 
-## Plan Mode：把计划写在纸上
-
-第一个问题的根源是：**Agent 的所有状态都在内存里。** 任务目标、当前进度、下一步计划——全在大模型的"脑海"中。问题是，大模型的"记忆"不可靠——它会被新信息冲淡、被上下文压缩裁剪、被注意力偏移覆盖。
-
-你试过这样做吗？Agent 做到第 8 轮，你已经忘了最开始让它干什么。它自己也忘了。大模型的"近因偏差"让它在长对话中逐渐向末尾的上下文倾斜——它更关注最近的几轮对话，而不是最初的任务目标。
-
-解决方法很反直觉：**不要让 Agent 记住计划。让它把计划写出来。**
-
-Plan Mode 的核心机制很简单：在 System Prompt 里注入一条铁律——
-
-```
-你必须在工作区维护两个文件：
-- PLAN.md: 你的总体计划和当前进度
-- TODO.md: 待办事项清单
-
-每次行动前后，检查这两个文件是否反映最新状态。
-人类可能随时修改这些文件来纠正你的方向。
+```mermaid
+flowchart TD
+    A[调查与澄清] --> B[submit_plan\n持久化提案与版本]
+    B --> C[用户审阅]
+    C -->|要求修订| A
+    C -->|拒绝并退出| D[记录拒绝并切换会话状态]
+    C -->|批准| E[持久化批准与执行状态]
+    E --> F[执行步骤]
+    F --> G[update_plan 提交步骤变化]
+    G -->|尚有待办| F
+    G -->|满足完成条件| H[执行完成事件]
+    F -->|取消或中断| I[耐久终态或中断状态]
+    I --> J[宿主续行或重新规划]
 ```
 
-这听起来像是一个 Prompt 技巧，但实现上是**引擎主动嗅探磁盘**：
+这张图省略了内部 claim 与恢复分支，不能把每条箭头理解为一个公开工具。尤其“用户批准”是宿主控制动作，模型生成一句“已批准”不能替代它。
 
-```typescript
-// 原 src/context/plan-store.ts（已删除，现由 PlanCoordinator 替代）
-async buildPlanContext(): Promise<string> {
-  const [plan, todo] = await Promise.all([this.readPlan(), this.readTodo()]);
+## 2. 状态外部化的重点是冲突和恢复
 
-  if (plan === null && todo === null) {
-    // 全新任务：引导 Agent 创建计划文件
-    return `这是全新任务。请先用 write_file 创建 PLAN.md（总体计划）和 TODO.md（待办清单）。`;
-  }
+Plan 操作带有操作身份、预期 Session 水位及计划版本。相同操作重试时，可核对语义指纹并复用已提交状态；同一个操作 ID 携带不同内容则拒绝。
 
-  // 断点续传：把现有计划注入上下文
-  let context = "检测到已有计划文件。请从上次中断处继续，绝对不要覆盖现有内容。\n\n";
-  if (plan !== null) context += `## PLAN.md\n${plan}\n\n`;
-  if (todo !== null) context += `## TODO.md\n${todo}\n\n`;
-  return context;
-}
+这种约束处理的是实际竞态：用户在两个窗口同时操作、批准后进程退出、执行结果已提交但响应丢失。它不只防止模型忘记计划，还防止宿主把一次操作执行两遍。
+
+步骤更新也不是界面直接改一条状态。Coordinator 先依据当前投影检查转移，写入 `plan.step.updated`；若这次更新使执行满足完成条件，则在同一提交中记录 `plan.execution.completed`。因此，之后 Provider 报错不应覆盖已经确立的完成事实。
+
+普通 Todo 是另一个概念。[TodoStore](../../../packages/storage/src/todo-store.ts) 把清单放在工作区 `pico.sqlite` 的 `workspace_kv`，通过 [WorkspaceTodoStore](../../../packages/pico-host/src/workspace-todo-store.ts) 绑定存储根。它是工作区清单，不拥有 Plan 的批准、执行与恢复语义；不能用“Todo 已勾选”代替“计划执行已完成”。
+
+## 3. Plan Mode 的限制必须在运行时成立
+
+只在提示词里写“现在不要修改文件”无法构成执行边界。当前 Plan 的工具投影与 Registry 准入共同限制允许动作，宿主还控制 Hook 等可能产生副作用的路径。
+
+协作模式与权限模式是不同轴：从 Plan 转到 Agent 不意味着自动扩大沙箱或工具权限。Plan 的批准、拒绝和恢复操作都要保持这种区分。对这些边界的集成验证见 [plan-mode-runtime.test.ts](../../../tests/integration/runtime/plan-mode-runtime.test.ts) 和 [plan-mode-host-admission.test.ts](../../../tests/integration/runtime/plan-mode-host-admission.test.ts)。
+
+这也解释了为什么计划正文不能成为新权限来源。“方案需要运行某命令”只是计划内容，真正运行时仍要经过当前工具与权限准入。
+
+## 4. 用户在运行中补充要求，何时被模型看到
+
+用户说“先别提交，先看测试结果”，不应该等下一次无关任务才被处理。实时 steering 由宿主加入 [SteerQueue](../../../packages/runtime/src/steer-queue.ts)，[AgentEngine](../../../packages/runtime/src/agent-engine.ts) 在明确边界消费。
+
+当前有三个重要时机：
+
+1. **调用 Provider 前**：peek 队首文本，临时以带 `picoKind: steer` 标记的消息加入本次请求；这次 peek 不移除队列，也不立即当作正式 Session 消息落盘。
+2. **工具结果提交后**：drain 队列，按顺序把 steering 提交进 Session，让后续模型步骤看到耐久输入。
+3. **模型准备结束时**：再次 drain；若生成期间又到达 steering，就提交并继续当前 run，避免遗留到下一次任务。
+
+这不是对正在执行的外部命令进行任意时刻的语义抢占。已经启动的工具有自己的取消和执行边界，steering 在下一处接收点调整后续动作。需要立即终止时，应走停止或取消入口，不能把一句自然语言纠偏误当成已经中断进程。
+
+steering 与内部提醒都有明确类型标记，但来源不同：前者是用户运行中输入，后者是引擎控制信息。它们不应被长期记忆提取混同为新的用户事实。
+
+## 5. Recovery：原始错误加下一步观察建议
+
+[RecoveryManager](../../../packages/runtime/src/recovery.ts) 根据工具名和错误文本追加恢复指导，原始错误仍然保留。它没有调用另一个模型来诊断，也不能证明建议必然解决问题。
+
+| 错误线索                     | 当前指导方向                     |
+| ---------------------------- | -------------------------------- |
+| edit_file 的 old_text 不匹配 | 重新读取当前文件，核对缩进与换行 |
+| edit_file 匹配不唯一         | 增加上下文，使匹配唯一           |
+| 文件不存在                   | 先定位路径，再重试               |
+| 路径是目录                   | 列目录并定位具体文件             |
+| bash 命令不存在              | 确认命令或寻找替代方式           |
+| 命令超时                     | 判断是否常驻任务，考虑后台或拆分 |
+| 语法、权限、非零退出         | 阅读具体错误，修正后再行动       |
+
+宿主可提供 shell 方言。PowerShell 下的定位与命令检查提示使用 `Get-ChildItem`、`Get-Command`，不无条件输出 POSIX 命令。未知错误没有命中规则时原样返回。
+
+生产执行链先清理宿主登记的敏感值，再构造 Recovery 提示和模型可见结果。建议只是故障处理信息，不会绕过权限、自动安装依赖或自行重新执行工具。
+
+## 6. 提醒与硬阻断是两件不同的事
+
+代码中仍有旧的 `ReminderInjector`：按工具名和参数字符串的 MD5 计数，第三次相同失败时生成提示，任意成功会清空该类自己的失败计数。它适合说明最初的提醒机制，但**当前主引擎使用的是 `ToolGuardrailController`**。
+
+生产 controller 同时观察相同参数失败、同工具失败和只读调用重复返回相同结果，并在 `beforeCall` 检查是否已经阻断。默认阈值为：
+
+| 观察维度                   | 提醒阈值 | 记录阻断阈值 |
+| -------------------------- | -------: | -----------: |
+| 相同工具与参数的失败计数   |        3 |            5 |
+| 同一工具的失败计数         |        3 |            8 |
+| 同参数只读调用返回相同输出 |        2 |            5 |
+
+阈值在 `afterCall` 累积，阻断由之后的 `beforeCall` 执行，所以不是第五次调用尚未执行时就因它自己的结果被拦截。
+
+这里还有两个容易被简化错的细节。其一，参数按原始字符串做指纹，没有先规范化 JSON；语义相同但序列化不同的参数不一定命中同一精确计数。其二，精确失败达到提醒阈值后分支提前返回，同工具失败计数并不是每次失败都无条件增加。
+
+成功结果只清理对应精确键和工具键的失败／阻断状态，不像旧 ReminderInjector 那样清空所有工具的历史。只读重复结果还有单独的输出哈希计数。因此，这些计数是局部启发式控制，不能描述为已经证明的“全局无进展检测”。
+
+## 7. 程序阻断后仍要保留事实
+
+主引擎在工具 dispatch 前执行 guardrail 检查。被拒绝时不调用真实工具，构造 rejected 结果；允许时继续经过 Registry 的最终参数、权限与资源准入，在物理执行前记录工具开始事实。
+
+执行结果随后经过脱敏、Recovery、guardrail 更新和 Runtime 结果构造，提醒作为带 `system_reminder` 类型及隐藏 Transcript 标记的控制消息提交。
+
+```text
+概念流程，非可执行源码：
+beforeCall 检查
+→ 若阻断，生成 rejected 结果；否则经过 Registry 并执行工具
+→ 清理敏感信息
+→ 失败时追加恢复建议
+→ afterCall 更新计数及提醒
+→ 提交工具结果与控制消息
+→ 模型决定下一步
 ```
 
-关键设计：**人类可以随时改 PLAN.md 和 TODO.md。** 不需要打断 Agent、不需要特殊指令、不需要飞书卡片——直接编辑文件。Agent 下一轮启动时会读取最新版本，自动调整方向。
+提醒虽然使用模型消息协议中的 `user` role，但它有内部来源标记，并非真人刚说了一句话。不能把这层设计解释成“伪装用户来获得无限高优先级”，更不能从工具结果里的同样文字推导出系统权限。
 
-这是"人机协同"最自然的形态。Agent 不是黑箱——它的计划暴露在文件系统上，人类可以随时介入、随时纠偏。我在做 pico-harness 自己的 Plan Mode 时也这么用：我写 `TODO.md`，Agent 读它，按我的优先级执行。不需要"飞书消息打断"，不需要"Web UI 控制面板"，一个文本文件就够。
+Guardrail 的作用也有边界：拦住重复工具调用，不等于保证模型整个任务停止；模型可能换策略继续。总轮数、预算、取消、权限等控制仍是独立机制，不能让任意一个提醒承担全部安全职责。
 
-### 为什么 Plan Mode 是"状态外部化"的极致实践
+## 8. 验证：计划事实、工具执行和提醒分别检查
 
-Plan Mode 不仅解决了任务漂移。它还实现了**断点续传**。
+从仓库根目录运行：
 
-早期版本里，如果 Agent 在做第 5 轮时进程崩溃了，重启后它是"失忆"的状态——所有上下文在内存里，随着进程一起消失。Plan Mode 把任务状态锚定在磁盘上——只要 PLAN.md 和 TODO.md 还在，新的进程就能从上次中断处继续。
-
-这还意味着**跨 Session 的记忆传递**。你在 Session A 里启动了一个代码迁移任务，因为 Token 预算用完了被迫停止。下次打开 Session B，Agent 看到同一个工作区里的 PLAN.md，立刻就知道了自己上次的任务。
-
----
-
-## Error Recovery：报错应该是行动指南
-
-第二个问题——机械重试——的根因是：**大模型看不懂报错。**
-
-当 `edit_file` 返回 "未找到 old_text" 时，模型的自然反应不是"让我重新 read_file 确认一下"，而是"可能是我写错了，再试一次"。它不理解这个报错意味着"文件内容已经变了"。
-
-更惨的是 bash 的报错。Agent 执行 `npm install`，返回 200 行输出，最后两行是 `ERR! code E404` 和 `npm ERR! 404 Not Found`。Agent 看了这 200 行，提取出的关键信息是……"安装失败了"。但它不知道该怎么做——是换一个包名？是检查网络？是升级 npm？
-
-我需要把报错从"陈述"变成"行动指南"。不是在工具执行失败时返回原始错误，而是**注入一条救援指令**：
-
-```typescript
-// src/context/recovery.ts
-export class RecoveryManager {
-  analyzeAndInject(toolName: string, rawError: string): string {
-    const hint = this.matchHint(toolName, rawError);
-    if (!hint) return rawError; // 没有匹配的救援方案，原样返回
-
-    // 拼接：原始报错 + 系统救援指南
-    return `${rawError}\n\n[系统救援指南]: ${hint}`;
-  }
-
-  private matchHint(toolName: string, rawError: string): string {
-    switch (toolName) {
-      case "edit_file":
-        if (rawError.includes("未找到") || rawError.includes("old_text")) {
-          return "你提供的 old_text 与文件当前内容不一致。请先使用 read_file 重新查看文件最新内容，确保 old_text 逐字符一致（含缩进与换行），然后再重试。";
-        }
-        if (rawError.includes("多处") || rawError.includes("不唯一")) {
-          return "你的 old_text 不够具体，命中了多个相同代码块。请在 old_text 中增加更多上下文行数，使其唯一匹配后再重试。";
-        }
-        break;
-
-      case "read_file":
-      case "write_file":
-        if (rawError.includes("ENOENT") || rawError.includes("no such file")) {
-          return "路径似乎不正确。请不要凭空猜测，先使用 bash 工具执行 ls -la 或 find 确认文件真实路径，然后再重试。";
-        }
-        if (rawError.includes("permission denied") || rawError.includes("EACCES")) {
-          return "你没有权限操作该文件。请检查工作区限制，或者思考是否需要修改其他文件。";
-        }
-        break;
-
-      case "bash":
-        if (rawError.includes("command not found")) {
-          return "该命令不可用。请使用 which 确认命令是否存在，或尝试替代命令。";
-        }
-        if (rawError.includes("E404") || rawError.includes("404")) {
-          return "包/模块不存在。请检查名称是否拼写正确，或换一个存在的替代方案。";
-        }
-        break;
-    }
-    return "";
-  }
-}
+```sh
+npm run build:packages
+node scripts/run-integration-tests.mjs \
+  plan-mode-state-machine plan-mode-runtime plan-mode-host-admission \
+  runtime/reminder.test.ts runtime/recovery.test.ts tool-recovery-classification
 ```
 
-每一个 rescue hint 都遵循一个铁律：**带一个具体的行动指令。** 不是"请检查"，而是"请先使用 read_file 工具"。具体的祈使句，模型执行顺从度明显高于笼统的建议。
+计划测试覆盖版本、幂等审阅、恢复与完成终态；提醒测试覆盖阈值后的下一次执行阻断；Recovery 测试覆盖方言与未知错误保留。要检查宿主 steering 事件及运行一致性，可单独运行：
 
-注意 RescueManager 用的是**关键字匹配**，不是错误码。这是故意的不优雅——我在注释里写了"生产环境应基于 POSIX 标准错误码做 switch-case"。但关键字匹配有一个好处：它对新出现的报错也能部分命中——只要报错文本里出现了 "not found"，不管是 `ENOENT`、`MODULE_NOT_FOUND` 还是 `404`，都能匹配。这也让 RescueManager 在不需要频繁更新的情况下覆盖了大部分常见错误。
-
----
-
-## System Reminders：死循环斩断
-
-第三个问题是最危险的：**死循环。** Agent 在同一个节点反复重试，每一轮都消耗 Token、增加成本，但没有任何进展。
-
-为什么 System Prompt 拦不住？有两大行为陷阱：
-
-1. **上下文内容分布偏移**：连续同质错误信息在上下文中占据主导，牵引模型下一步继续生成类似的内容。
-2. **近因偏差（Recency Bias）**：模型对上下文末尾的信息响应权重显著高于头部。所以即使 System Prompt 开头写着"连续失败 3 次请停止"，模型也看不到——它眼里只有最近几条报错。
-
-破局之道：**在模型做决定的前一刻，把高优先级引导指令伪装成最新一条 User Message，直接怼到它脸上。**
-
-```typescript
-// src/engine/reminder.ts
-export class ReminderInjector {
-  private readonly consecutiveFailures = new Map<string, number>();
-
-  static fingerprint(toolName: string, args: string): string {
-    return createHash("md5").update(toolName).update(args).digest("hex");
-  }
-
-  checkAndInject(lastToolCall: ToolCall, lastResult: ToolResult): Message | null {
-    const fp = ReminderInjector.fingerprint(lastToolCall.name, lastToolCall.arguments);
-
-    // 工具执行成功 → 清空计数器
-    if (!lastResult.isError) {
-      this.consecutiveFailures.clear();
-      return null;
-    }
-
-    // 失败 → 累加
-    const failCount = (this.consecutiveFailures.get(fp) ?? 0) + 1;
-    this.consecutiveFailures.set(fp, failCount);
-
-    // 连续 3 次同参数失败 → 注入打断消息
-    if (failCount >= 3) {
-      return {
-        role: "user",
-        content: `[SYSTEM REMINDER - 死循环警告]
-你已经连续 ${failCount} 次用完全相同参数调用 ${lastToolCall.name} 且全部失败。
-你的当前策略行不通。请从根本上反思你的方法，不要再次调用 ${lastToolCall.name}。
-换一条路走，或者向用户说明当前的困境并寻求指导。`,
-      };
-    }
-    return null;
-  }
-}
+```sh
+node scripts/run-integration-tests.mjs workspace-runtime-consistency
 ```
 
-关键设计细节：
+这些命令是验证入口，本章不据此声称已经运行或全部通过。受控 Provider 测试能证明状态机分支，不能保证真实模型在每次提醒后都选择最佳策略。
 
-**指纹用 MD5(toolName + args)，不是只有 toolName。** 如果 Agent 用不同参数调用同一个工具但都失败了——比如 `read_file("src/a.ts")` 失败后又试 `read_file("src/b.ts")`——这不一定是死循环，可能是在排查。只有完全相同的参数重复失败，才是真正的"原地打转"。
-
-**成功即清零。** 只要有一次工具执行成功，所有失败计数器清零。这意味着 Agent 在探索阶段可以有容错空间——它试了 A 方案失败了，试了 B 方案也失败了，但 C 方案成功了，计数器重置。只有"连续"失败才触发干预。
-
-**注入位置是上下文的最末尾。** 利用了模型的近因偏差——把警告放在模型做下一轮决策前最后看到的位置，凭最强近因效应击碎局部执念。
-
----
-
-## 现在有了什么
-
-Agent 有了三套方向盘：
-
-- **Plan Mode**：状态外部化到 PLAN.md/TODO.md，任务不漂移、断点可续传、人类随时纠偏
-- **Error Recovery**：报错变成行动指南，带 15+ 场景的特定救援 Suggestion
-- **System Reminders**：MD5 指纹监控死循环，3 次同参失败强行打断
-
-Agent 现在会思考、会执行、会纠错、会停止。但它还有一个致命漏洞：**它可以执行任何 Shell 命令。**
-
-`bash` 工具就是一把上了膛的枪。如果 Agent 被诱导执行 `rm -rf /`，没有任何东西能阻止它。
-
-接下来，给它装上安全阀门。
+设计上的验收标准应落在可观察事实：计划版本没有被过期操作覆盖，批准没有重复启动执行，纠偏输入在当前 run 的正确位置提交，被 guardrail 拒绝的工具没有实际 dispatch。模型是否“反思得足够好”，则需要另行观察真实任务。
 
 [下一章：建一道安全防线 →](07-safety.md)

@@ -1,151 +1,130 @@
-# 第 10 章 · 怎么知道它变聪明了
+# 第 10 章 · 用可复查的评测判断改动
 
-> 归档说明：本文保留历史设计与实施记录，不定义当前产品行为或待办。当前入口见 [技术文档索引](../../README.md)。
+> 当前实现教程：按代码 `0092022f`（2026-09-21）重写。保留原路径以兼容已有链接；概念伪代码不作为公开 API。
 
-Agent 能完成一次任务，不等于我们已经知道它“变聪明了”。模型输出有随机性，工作区会
-变化，工具可能失败，评测环境本身也可能出错。要比较两个版本，至少要先回答三个问题：
+Agent 完成一次任务，并不能证明新版本更可靠。模型输出有随机性，工具可能失败，评测容器也可能没有准备好。若把这些情况都合成一个通过率，数字看起来简单，却无法解释改动到底影响了什么。
 
-1. 能否用机器可判定的合约启动一次完整 Runtime？
-2. 能否把任务失败与基础设施、适配器、Verifier 失败分开？
-3. 能否证明结果来自固定代码、固定题目和完整证据，而不是一段终端故事？
+Pico 当前用两层内部设施组织评测：Headless One-shot Runner 把共享 Runtime 变成严格的机器入口；Terminal-Bench 适配器把它装进 Harbor 的任务容器，由题目自己的 verifier 判分。前者提供可信终态，后者提供独立的任务判断。两者都服务于仓库内测试与评估，不是公开 CLI/API。
 
-pico-harness 当前用两层内部设施回答这些问题：
+## 第一层：固定一次运行的输入和归属
 
-- [Headless One-shot Runner](../../guides/internal-headless-one-shot.md) 把共享 Runtime 适配成严格的
-  单请求机器入口。
-- [Terminal-Bench 2.1 本地 canary](../../../benchmarks/terminal_bench_2_1/README.md) 把该入口
-  装进 Harbor 的 task container，使用题目自带的 Verifier 判分并保存证据。
+[Headless Runner](../../../packages/pico-host/src/internal/headless-one-shot-runner.ts) 复用 `executeAgentRuntime`，不另造“评测版 Engine”。模型、工具、安全门和持久运行仍走产品实现；适配层负责严格输入、非交互预检、隔离租约、超时与输出协议。
 
-它们服务于仓库内 benchmark、可靠性测试和封闭评估，不是公开产品入口。
-
----
-
-## 第一层：让一次运行可以被机器判定
-
-公开的根命令 `pico` 当前启动 TUI。评测不能依赖交互界面，也不能靠抓取彩色终端文本
-猜测是否完成，因此仓库提供了内部 Headless One-shot Runner：
-
-```text
-严格 JSON 与工具预检
-  → 非交互工作区信任
-  → 精确模型路由
-  → PICO_HOME / workspace / Session 独占租约
-  → executeAgentRuntime
-  → 单行 JSON 终态
+```mermaid
+flowchart LR
+    A[单个 JSON 请求] --> B[schema / 工具 / 路径预检]
+    B --> C[工作区信任与精确模型路由]
+    C --> D[获取独占 owner leases]
+    D --> E[共享 AgentRuntime]
+    E --> F[停止确认与 Trace 净化]
+    F --> G[单行 JSON 终态]
 ```
 
-关键点是它复用 [`executeAgentRuntime`](../../../src/runtime/agent-runtime.ts)，而不是另建一套
-“评测版 Engine”。Provider、工具、安全门禁、Session 和运行事件仍走产品 Runtime；
-[`headless-one-shot-runner.ts`](../../../src/internal/headless-one-shot-runner.ts) 只负责严格
-输入、隔离、生命周期和结果投影。
+当前协议只接受 `schemaVersion: 2`。协作方式与权限分别由 `collaborationMode` 和 `permissionMode` 表达：前者为 agent/plan，后者为 ask/auto/full-access。旧的 `permissionMode: "plan"` 或 `yolo` 不属于现行请求契约。
 
-### 一个最小请求
+下面是请求模板，需要先把路径与模型路由替换为真实配置。路径必须是已存在、互不包含的绝对真实目录，模型与工作区信任也必须提前在独占 Pico home 中配置好，不能直接照抄占位值运行：
 
-开发态可以从 stdin 传入一个 `schemaVersion: 1` JSON 对象：
-
-```bash
-npm run --silent internal:headless:dev <<'JSON'
+```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "requestId": "case-001",
   "workspacePath": "/absolute/path/to/workspace-copy",
   "picoHome": "/absolute/path/to/exclusive-pico-home",
   "sessionId": "eval-case-001",
   "prompt": "Inspect the repository and summarize the result.",
   "modelRouteId": "provider-id/model-id",
-  "permissionMode": "plan",
+  "collaborationMode": "plan",
+  "permissionMode": "ask",
   "allowedTools": ["read_file", "grep"],
   "timeoutMs": 2700000,
   "shutdownGraceMs": 10000,
   "trace": true
 }
-JSON
 ```
 
-构建后的机器调用应直接执行入口并保留退出码：
+准备为 `request.json` 后，在仓库根目录调用：
+
+```bash
+npm run --silent internal:headless:dev < request.json
+```
+
+自动化需要精确保留退出码时，可以先构建，再直接运行机器入口：
 
 ```bash
 npm run build
 node dist/internal/headless-one-shot-main.js < request.json
 ```
 
-请求必须显式固定模型路由、权限模式、工具白名单、超时和 Trace 开关。它不接受 API Key、
-`baseURL`、resume、continue 或 fork 等字段，未知字段会在模型调用前拒绝。工作区和
-`PICO_HOME` 必须是互不包含的真实绝对目录；调用方还要预先在隔离的
-`PICO_HOME/trusted-workspaces.json` 中记录该工作区。
+`--silent` 避免 npm 把 lifecycle 标题写入 stdout。机器入口在动态加载 Runtime 前静默内部日志，stdout 只输出一行 JSON。完整准备要求见 [内部 Headless 指南](../../guides/internal-headless-one-shot.md)。
 
-### 终态不是一句“成功了”
+## 严格输入减少的是评测噪声
 
-Runner 的 stdout 始终只输出一行 JSON。核心字段包括：
+Runner 拒绝未知字段，不从请求接受 apiKey、baseURL、resume、continue 或 fork。模型只从独占 Pico home 的用户模型目录精确解析；请求不能偷偷绕到另一个 Provider。thinking 可以显式固定，不支持的档位在模型调用前失败。
 
-- `status`：`completed`、`invalid_request`、`failed`、`policy_blocked`、
-  `timed_out` 或 `canceled`。
-- `usage` 与 `durationMs`：本次运行的用量投影和耗时。
-- `effective`：实际模型路由、thinking、权限模式和工具白名单。
-- `error`：稳定错误码与脱敏摘要，不包含 stack、完整消息或原始 ToolResult。
-- `terminationConfirmed`：Runtime 与工具是否已在宽限期内真正停止。
+Runtime 使用隔离 HOME/XDG 根与空 Plugin 快照，不加载普通宿主或项目的 Plugin、Skill、MCP、Hook、Memory 等资源。每个 case 使用独占 Pico home、独立 workspace copy/worktree 和新的 Session ID，并取得 Pico home、workspace、Session 三项 owner lease；冲突时拒绝执行。
 
-`completed` 只说明 Runtime 正常给出终态，不代表外部任务已经通过 Verifier。
-`terminationConfirmed: false` 也不能被当成普通超时：它意味着仍无法证明外部副作用已经
-停止，评测层必须把它归为基础设施错误。
+这样可以避免一题继承另一题的历史或本机个性化配置。但这些约束仍不是 OS 沙箱。特别是 `full-access`，普通权限链按当前 OS 用户权限直通；外层评测应提供容器或低权限隔离环境。无 UI 的审批请求立即拒绝，不能期待后台任务一直等人点击按钮。
 
-为了让并发 case 不共享状态，Runner 要求独占 `PICO_HOME`、独立 workspace
-copy/worktree 和唯一的新 Session ID。同机并发还会取得三项 owner lease；冲突时
-fail-closed。Trace 在属性进入内存 Span 时就执行 metadata-only 脱敏，并在落盘后再次
-净化，但这仍不把 Runner 变成 OS 沙箱。尤其是 `yolo` 模式，权限边界仍然是当前 OS
-用户；评测调度器必须另行提供一次性低权限账户或容器。
+## Runtime completed 不等于题目 passed
 
-### 它能保证什么
+结果包含 status、usage、durationMs、effective、error、terminationConfirmed 等字段。effective 记录实际采用的 route、thinking、协作方式、权限与工具名单，不能只把原请求复制一遍当成执行事实。
 
-固定 prompt、代码版本、模型 route、thinking、权限、工具白名单和配置快照，可以让输入
-和状态归属可追溯。它不能保证同一模型的最终文本逐字一致，也不能只凭一次运行证明质量
-提升。这就是为什么还需要第二层：外部题目和独立 Verifier。
+| status            | 常见退出码 | 含义                                  |
+| ----------------- | ---------- | ------------------------------------- |
+| `completed`       | 0          | Runtime 正常结束                      |
+| `invalid_request` | 2          | 请求、信任、路由或 Session 等预检失败 |
+| `failed`          | 3          | Runtime 执行失败                      |
+| `policy_blocked`  | 4          | 有效策略阻断执行                      |
+| `timed_out`       | 124        | deadline 到期                         |
+| `canceled`        | 130 / 143  | 取消或信号终止                        |
 
----
+`terminationConfirmed` 必须单独检查。Runner 在 shutdownGraceMs 内无法确认 Runtime 和工具已停止时，会保留超时或取消状态，同时输出 `SHUTDOWN_UNCONFIRMED`。不能因为 JSON 已返回，就认定所有外部副作用已经结束。进程内调用继续持有租约直到 Runtime 真正 settle；外层仍需要独立 hard deadline。
 
-## 第二层：Terminal-Bench 2.1 本地 canary
+Trace 使用 metadata-only 策略，在属性进入内存时替换字符串，并在落盘后补充净化。失败结果只暴露稳定错误码与脱敏摘要，不把原始 Messages、stack 或 ToolResult 塞进机器错误字段。
 
-仓库中的 Terminal-Bench 适配器通过 Harbor `0.20.0` custom installed agent，把 Pico
-安装到 Terminal-Bench 2.1 task container，再由题目自己的 Verifier 产生 reward。数据集
-引用、官方源 commit、Harbor 依赖、Node 运行时和 canary 题目清单都有固定身份。
+## 第二层：让题目自己的 verifier 判分
 
-当前入口只有本地 single/canary：
+[Terminal-Bench 适配器](../../../benchmarks/terminal_bench_2_1/README.md) 使用固定的 Harbor 版本、数据集身份、题目锁和运行时安装协议。Harbor 创建 task container，Pico installed agent 在其中调用 Headless，题目 verifier 再生成 reward 和相应证据。
+
+当前支持四种模式：
+
+| 模式          | 选择范围                                               |
+| ------------- | ------------------------------------------------------ |
+| `single`      | 固定题集中的指定单题                                   |
+| `canary`      | 固定 12 题 canary                                      |
+| `cached-full` | 完整 89 题锁中的本机精确镜像缓存子集，也可指定精确任务 |
+| `full`        | 固定 89 题                                             |
+
+full 已是有效模式，不能再写成“尚未启用”。cached-full 也不是临时下载后随便挑题：它要求完整任务和镜像锁，核对精确 linux/amd64 digest，只选择已缓存的镜像，并把选择与排除清单保存为证据。指定任务缺少锁或缓存时整体失败，不悄悄缩小用户要求的范围。
+
+以下命令会运行真实评测，需要 Docker、要求的离线缓存、干净代码工作区和可用模型路由，并会产生模型费用；应在这些条件已准备好且预算明确时运行：
 
 ```bash
-# 先跑一题，验证环境与路由
 npm run benchmark:terminal-bench:single -- \
   --task terminal-bench/log-summary-date-ranges
 
-# 跑固定的 12 题 canary
 npm run benchmark:terminal-bench:canary
+
+node scripts/terminal-bench/run.mjs --mode cached-full --docker-host-gateway \
+  --concurrency 1 --max-run-cost-cny 250
+
+node scripts/terminal-bench/run.mjs --mode full --docker-host-gateway \
+  --concurrency 1 --max-run-cost-cny 1200
 ```
 
-运行前需要干净的 Pico worktree、Docker、完整的本机 Harbor 离线缓存，以及
-`~/.pico/config.json` 中可用的默认模型路由和凭据。脚本会拒绝 dirty worktree。默认命令
-带 `--docker-host-gateway`；只有配置的 Provider 指向本机 loopback 服务时才需要这层
-地址改写。
+预算值是显式运行配置示例，不是完成全部题目的费用预测。默认 run 总模型预算为 250 CNY；调整 run 预算不解除每个 trial 的独立限制。实际模式与预检实现见 [run.mjs](../../../scripts/terminal-bench/run.mjs)。
 
-一次 canary 的主流程是：
+## 凭据、网络与费用也属于实验条件
 
-1. 校验代码、题目清单、数据集缓存、Harbor wheelhouse 和固定依赖。
-2. 构建当前 commit 的 Pico bundle，为每个 trial 准备隔离的执行身份。
-3. Harbor 创建 task container，installed agent 在容器里调用 Headless Runner。
-4. 题目 Verifier 运行并生成原始 reward 与 CTRF 证据。
-5. Normalizer 将 Runtime、Gateway accounting 和 Verifier 证据分类投影。
-6. 安全与完整性门禁通过后，结果才从 staging 原子发布到 `runs/`。
+真实模型凭据只在宿主侧解析，通过匿名 pipe 交给 Gateway Supervisor，不作为 Harbor、Compose 或任务容器的 ambient 环境变量注入。每个 trial 通过宿主管理的 gateway 访问固定 route，受到身份、TTL、并发、调用次数、Token 和最坏成本限制；撤销会阻止新请求并处理在途请求。
 
-模型真实凭据不会作为 Harbor、Compose 或 task container 的 ambient env 注入。宿主上的
-Gateway Supervisor 通过按 run/trial 绑定的一次性能力转发固定 route，并执行 TTL、并发、
-调用次数、Token 和最坏成本上限。发布前后还会扫描结果树中的多种凭据编码与有界嵌套
-归档；命中、无法支持的归档或扫描超限都会 fail-closed。
+题目公网访问与模型网关分开管理。task.toml 必须明确声明是否允许互联网，符合条件时才启用本 trial 的受限出口；agent 与 verifier 使用独立出口身份，进入 verifier 阶段时才按生命周期启用后者。不能将“模型能够联网”理解为题目容器默认可访问任意公网和宿主网络。
 
-这些措施保护的是当前评测适配边界，不应被外推成“任意 Docker 任务都已安全”。
+Runner 对 Harbor 固定关闭自动重试，避免适配器异常触发整题重跑后丢掉先前费用和失败证据。基础设施失败仍要保存；否则“只统计最后成功的一次”会同时扭曲通过率和成本。
 
----
+## 发布结果前，先确认结果完整
 
-## 结果：先看证据，再算通过率
-
-成功发布的本地结果位于：
+成功发布的结果目录为：
 
 ```text
 output/benchmarks/terminal-bench-2.1/runs/<run-id>/
@@ -158,81 +137,40 @@ output/benchmarks/terminal-bench-2.1/runs/<run-id>/
   cases/<task>/<trial>/
 ```
 
-阅读顺序建议如下：
+原始 Harbor/verifier 结果是事实源，normalized-result 和 summary 是分类投影。发布流程先在 staging 中检查完整性、扫描凭据和受支持归档、生成 hash 与 sealed 标记，再原子发布到 runs；不完整或扫描失败的结果不能当成正常报告。
 
-1. `manifest.json`：确认 Pico commit、bundle hash、模型 route、固定版本、任务数和执行
-   策略。`localCanaryOnly: true` 与 `leaderboardComparable: false` 是当前硬边界。
-2. `harbor-job/job/`：Harbor 的原始任务、Verifier 和 reward 事实源。
-3. `cases/.../normalized-result.json`：查看单个 trial 的基础设施、适配器、Agent、
-   accounting、Verifier 和 reward 分类。
-4. `summary.json`：只有在 `sealed: true` 时，才说明预期 trial 矩阵、唯一身份、
-   基础设施/适配器/Verifier 门禁和原始结果树都完整，可据此汇总。
-5. `source-hashes.json` 与 `PUBLISHED.json`：核对源证据 hash、发布扫描和最终结果树
-   完整性。
+阅读时先确认 manifest 中的代码 commit、bundle、route、题集、attempts 和策略，再检查 raw verifier 证据，最后看 summary。`sealed: true` 表示预期 trial 矩阵与相关门禁满足完整性要求，不表示模型成绩优秀；`PUBLISHED.json` 也不是质量认证。
 
-Normalizer 不把所有非通过都叫做“模型失败”。`primaryStatus` 会区分：
+Normalizer 区分 passed、task_failed、agent_timeout、agent_canceled、agent_error、policy_blocked、infra_error、adapter_error 和 verifier_error。策略拒绝事件与最终成绩是正交维度：一个任务发生过可恢复的拒绝，最终仍可能由 verifier 判定通过。反之，Runtime 正常完成而 verifier 不通过，应该是 task_failed，不能算成功。
 
-| 类别                                               | 含义                                           |
-| -------------------------------------------------- | ---------------------------------------------- |
-| `passed`                                           | Agent 完成，Verifier reward 通过               |
-| `task_failed`                                      | Agent 完成，但 Verifier 没有判定任务通过       |
-| `agent_timeout` / `agent_canceled` / `agent_error` | Runtime 超时、取消或执行失败                   |
-| `policy_blocked`                                   | 有效权限或安全策略阻止了必要动作               |
-| `infra_error`                                      | 隔离、终止确认或 Harbor 基础设施异常           |
-| `adapter_error`                                    | Headless 协议、状态/退出码或 accounting 不一致 |
-| `verifier_error`                                   | Verifier 未完成或证据无效                      |
+## 比较版本时，分母和边界都要固定
 
-因此，`headlessCompleted` 不是通过数；一个 trial 可以正常完成 Runtime，最终仍是
-`task_failed`。`policyIncident` 与 `primaryStatus` 是正交维度：已完成 trial 即使记录了策略
-拒绝，也按 Verifier 投影为 `passed` 或 `task_failed`；只有策略实际阻断运行而未完成时才是
-`policy_blocked`。策略事件计数、原因分类和 clean 指标仍会完整保留。`PUBLISHED.json` 证明
-结果经过本地发布门禁，不证明模型质量优秀。
+只有题集、attempt 数、模型路由、资源策略和完整性条件可比时，`passed / scheduled` 才有解释价值。cached-full 的子集必须报告实际选择清单，不能与 full 的 89 题比例直接对比。费用优先使用 gateway accounting receipt 的实际记录，并保留价格、路由与失败分类；供应商账单仍是最终对账依据。
 
-只有在 run 已 sealed、任务与 attempts 一致、模型和策略可比时，通过率
-`passed / scheduled` 才有解释价值。Token 和成本比较应优先使用 Gateway accounting
-receipt 的实际值，并同时报告 route、pricing hash、attempt 数与失败分类；不要把基础设施
-失败混进模型能力结论。
+当前本地运行仍标为 `localCanaryOnly` 与 `leaderboardComparable: false`，包括运行 full 题集的情况。跑齐题目不自动满足官方榜的 trials、timeout/resource 和完整 trajectory 要求。Headless v2 的严格终态也不等于完整 ATIF 工具轨迹。
 
----
+可复现的含义是输入、代码与证据可追溯，不是模型每次生成相同字符串。一次成功可以验证主路径；要声称成功率或质量提升，需要预先固定比较条件并运行足够的重复实验，而不是挑选最顺的一段终端输出。
 
-## 验证分层
+## 验证评测设施本身
 
-评测设施本身也需要被评测。当前可按成本从低到高验证：
+先用不需要真实模型的集成测试确认协议、分类和题集选择：
 
 ```bash
-# 无真实模型：验证 Headless、Normalizer、容器策略和发布边界等确定性行为
-npm run test:integration
-
-# 有 Docker，但不需要把真实凭据交给 Harbor：验证凭据与 Gateway 边界
-npm run benchmark:terminal-bench:check-secret-boundary
-
-# 有 Docker、固定缓存和真实模型路由：验证一题或 12 题本地闭环
-npm run benchmark:terminal-bench:single -- \
-  --task terminal-bench/log-summary-date-ranges
-npm run benchmark:terminal-bench:canary
+npm run build:packages
+node --import tsx --import @pico/cli/tui/preload-env --test --test-concurrency=1 \
+  tests/integration/runtime/headless-one-shot-runner.test.ts \
+  tests/integration/engineering/terminal-bench-normalizer.test.ts \
+  tests/integration/engineering/terminal-bench-task-selection.test.ts
 ```
 
-第一层适合代码回归门禁；第二层聚焦凭据隔离和撤销/预算协议；第三层才产生模型行为数据。
-真实 canary 受 Provider、网络、Docker 和本机缓存影响，不应伪装成无凭据 CI 的确定性
-测试。
+准备好 Docker 后，可另行验证 Gateway 和凭据隔离：
 
----
+```bash
+npm run benchmark:terminal-bench:check-secret-boundary
+```
 
-## 当前没有哪些承诺
+这些命令是当前验证入口，不表示本文已经运行并通过它们。确定性测试验证设施契约，secret-boundary 检查聚焦安全适配，真实 single/canary/full 才产生模型行为数据。三者的失败含义和执行成本不同，应分别报告。
 
-早期课程草稿曾把若干设想写成已存在能力，当前必须明确收回：
-
-- 没有公开的 positional `pico "任务"` one-shot，也没有公开的 `pico run`。
-- 没有 `pico --serve`、公开 HTTP/REST 入口或飞书 AgentOps 产品入口。
-- 没有通用的 `src/eval/benchmark.ts` Benchmark Runner；当前评测链就是内部 Headless
-  适配器与已跟踪的 Terminal-Bench 脚本。
-- 当前 full 模式被脚本禁用。固定 89 题清单只是 identity matrix；官方榜还要求每题至少
-  5 trials、不覆盖 timeout/resource，并公开完整 trajectory。
-- Headless v1 没有完整 ATIF tool trajectory，因此本地 canary 不具备官方 leaderboard
-  parity，也不应把未经保存的历史成绩故事当成证据。
-
-评测真正带来的不是一个漂亮百分比，而是一条可以追问的证据链：**输入是否固定，运行
-是否隔离，终态是否可信，Verifier 是否完成，结果是否完整，比较边界是否一致。** 先把
-这些问题答清楚，版本之间的“变聪明了”才是可检验的工程结论。
+走到这里，Harness 的教学闭环不再停留在“模型能回答问题”：我们能固定输入，执行工具，恢复状态，核对边界，检查成本，并用独立证据判断任务结果。下一次改变提示词、模型或压缩策略时，就可以把“似乎更好”变成可重复检查的问题。
 
 [回到课程起点：为什么自己写？](00-why.md)
