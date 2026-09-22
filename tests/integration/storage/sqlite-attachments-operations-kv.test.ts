@@ -6,12 +6,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { DatabaseSync } from "node:sqlite";
-import {
-  EvidenceArchive,
-  formatEvidenceUri,
-  parseEvidenceUri,
-} from "@pico/storage/evidence-archive";
-import { seedRuntimeToolExchange } from "../helpers/legacy-evidence-fixture.js";
 import { TodoStore } from "@pico/pico-host/product-todo-store";
 import {
   createFileHistoryState,
@@ -29,9 +23,9 @@ import { resolvePicoPaths } from "@pico/pico-host";
 
 /**
  * 票 08(波次 3):attachments/operations/kv 三 scope 的 SQLite 迁移验收。
- * 覆盖:journal 状态机 + 崩溃中断恢复、evidence 索引入库 + URI/分页、
+ * 覆盖:journal 状态机 + 崩溃中断恢复、
  * file-history manifest 等价 + blob CAS 去重、todo 事务原子性,以及
- * "evidence 清单 JSON / storage-operations / todo.json 不再产生" 的目录断言。
+ * "storage-operations / todo.json 不再产生" 的目录断言。
  */
 
 interface WorkspaceFixture {
@@ -39,7 +33,6 @@ interface WorkspaceFixture {
   readonly workDir: string;
   readonly picoHome: string;
   readonly storageRoot: string;
-  readonly evidenceRoot: string;
   readonly fileHistory: FileHistoryIo;
 }
 
@@ -53,13 +46,11 @@ async function workspaceFixture(context: TestContext, prefix: string): Promise<W
   // 与生产同口径:storageRoot 由 resolvePicoPaths 派生(workspaces/<id> 哈希段)。
   const paths = resolvePicoPaths(workDir, { picoHome });
   const storageRoot = paths.workspace.root;
-  const evidenceRoot = paths.workspace.evidence;
   return {
     root,
     workDir,
     picoHome,
     storageRoot,
-    evidenceRoot,
     fileHistory: { baseDir: paths.home.fileHistory, storageRoot },
   };
 }
@@ -380,111 +371,6 @@ test("operation journal serves fork publication lookup as one query", async (con
 });
 
 // ---------------------------------------------------------------------------
-// attachments scope:evidence 清单入库 + blob 留 FS
-// ---------------------------------------------------------------------------
-
-test("evidence manifests live in sqlite; blobs keep the FS CAS layout", async (context) => {
-  const fixture = await workspaceFixture(context, "pico-evidence-sqlite-");
-  const archive = new EvidenceArchive({ baseDir: fixture.evidenceRoot });
-
-  // 票 E3:生产写路径已退役,清单行由 legacy 夹具直建(存储层行为不变)。
-  const output = "工具原始输出".repeat(50);
-  const reference = await seedRuntimeToolExchange({
-    evidenceRoot: fixture.evidenceRoot,
-    storageRoot: fixture.storageRoot,
-    archivedAt: "2026-08-19T00:00:00.000Z",
-    sessionId: "evidence-session",
-    toolCallId: "call-1",
-    toolName: "bash",
-    rawArguments: '{"cmd":"fixture"}',
-    rawOutput: output,
-    isError: false,
-  });
-
-  // 读回:manifest 行 + blob 完整性。
-  const manifest = await archive.readRuntimeToolExchange(reference);
-  assert.equal(manifest.schemaVersion, 2);
-  assert.equal(await archive.readRuntimeToolOutput(reference), output);
-
-  // 幂等重档:同 content → 同引用,不新增行。
-  const again = await seedRuntimeToolExchange({
-    evidenceRoot: fixture.evidenceRoot,
-    storageRoot: fixture.storageRoot,
-    archivedAt: "2026-08-19T00:00:00.000Z",
-    sessionId: "evidence-session",
-    toolCallId: "call-1",
-    toolName: "bash",
-    rawArguments: '{"cmd":"fixture"}',
-    rawOutput: output,
-    isError: false,
-  });
-  assert.equal(again.contentHash, reference.contentHash);
-
-  // URI 解析 + 字节分页语义保持。
-  const uri = formatEvidenceUri(reference);
-  const parsed = parseEvidenceUri(uri);
-  assert.equal(parsed.sessionId, "evidence-session");
-  const page = await archive.readEvidencePage(parsed, { limitBytes: 12 });
-  assert.equal(page.totalBytes, Buffer.byteLength(output, "utf8"));
-  assert.ok(page.truncated);
-  assert.ok(page.content.length > 0);
-  assert.equal(page.nextOffsetBytes, page.endOffsetBytes);
-  const secondPage = await archive.readEvidencePage(parsed, {
-    offsetBytes: page.nextOffsetBytes!,
-    limitBytes: 1_024 * 64,
-  });
-  assert.equal(secondPage.truncated, false);
-  assert.equal(page.content + secondPage.content, output);
-
-  // 缺失引用:保持 ENOENT 形状。
-  await assert.rejects(
-    archive.readRuntimeToolExchange({
-      ...reference,
-      contentHash: "0".repeat(64),
-    }),
-    { code: "ENOENT" },
-  );
-
-  // 行篡改 → 内容哈希失配 fail-closed。
-  const database = new DatabaseSync(join(fixture.storageRoot, "pico.sqlite"));
-  try {
-    database.prepare("UPDATE evidence_records SET content_json = ? WHERE content_hash = ?").run(
-      JSON.stringify({
-        kind: "tool-exchange",
-        sessionId: "evidence-session",
-        toolCallId: "call-1",
-        toolName: "forged",
-        arguments: '{"cmd":"fixture"}',
-        rawOutput: manifest.content.rawOutput,
-        isError: false,
-      }),
-      reference.contentHash,
-    );
-  } finally {
-    database.close();
-  }
-  await assert.rejects(archive.readRuntimeToolExchange(reference), /content hash mismatch/u);
-
-  // 目录断言:清单 JSON 与会话目录不再产生;blob CAS 目录保持。
-  assert.equal(existsSync(join(fixture.evidenceRoot, "evidence-session")), false);
-  assert.equal(
-    existsSync(join(fixture.evidenceRoot, "evidence-session", `${reference.contentHash}.json`)),
-    false,
-  );
-  const blobPath = join(
-    fixture.evidenceRoot,
-    "blobs",
-    "sha256",
-    manifest.content.rawOutput.digest.slice(0, 2),
-    manifest.content.rawOutput.digest,
-  );
-  assert.equal(await readFile(blobPath, "utf8"), output);
-});
-
-// ---------------------------------------------------------------------------
-// attachments scope:file-history manifest 行化 + blob CAS 去重 + rewind 回放
-// ---------------------------------------------------------------------------
-
 test("file-history snapshots persist as rows and replay rewind with CAS-deduped blobs", async (context) => {
   const fixture = await workspaceFixture(context, "pico-file-history-sqlite-");
   const io = fixture.fileHistory;

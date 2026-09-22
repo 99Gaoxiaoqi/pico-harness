@@ -186,9 +186,9 @@ function insertTerminalWeakReferences(database: DatabaseSync): void {
     .run();
   database
     .prepare(
-      `INSERT INTO usage_provider_calls VALUES (
-         'call', 'tx', 'session-old', 'conversation', NULL, NULL, NULL,
-         'main', 'provider', 'model', NULL, 'succeeded', 1, 1, 0, 0, 0, NULL, 1
+      `INSERT INTO usage_physical_attempts VALUES (
+         'physical', 'call', 'session-old', NULL, NULL, 'run', 'owner', 0,
+         'succeeded', '2026', '{"accountingSource":"physical","sessionId":"session-old","runId":"run"}'
        )`,
     )
     .run();
@@ -210,15 +210,6 @@ function insertTerminalWeakReferences(database: DatabaseSync): void {
 }
 
 function insertAttachments(database: DatabaseSync): void {
-  const evidence = JSON.stringify({
-    kind: "tool-exchange",
-    sessionId: "session-old",
-    rawOutput: { algorithm: "sha256", digest: DIGEST_A, sizeBytes: 9, encoding: "utf8" },
-  });
-  database
-    .prepare("INSERT INTO evidence_records VALUES ('session-old', ?, 'tool-exchange', ?, ?)")
-    .run(DIGEST_B, AT, evidence);
-  database.prepare("INSERT INTO evidence_blobs VALUES (?, 9, ?)").run(DIGEST_A, AT);
   database.prepare("INSERT INTO file_history VALUES ('session-old', 1, 1, ?, ?)").run(
     JSON.stringify({
       backup: { algorithm: "sha256", digest: DIGEST_B, sizeBytes: 11 },
@@ -275,8 +266,6 @@ test("event log hard cut: clears old sessions while preserving independent ledge
       "runtime_checkpoint_projection",
       "runtime_eventlog_metadata",
       "runtime_storage_assets",
-      "evidence_records",
-      "evidence_blobs",
       "file_history",
       "file_history_snapshots",
       "storage_operations",
@@ -284,6 +273,11 @@ test("event log hard cut: clears old sessions while preserving independent ledge
       assert.equal(count(current.database, table), 0, table);
     }
 
+    assert.equal(count(current.database, "usage_physical_attempts"), 1);
+    assert.equal(
+      current.database.prepare("SELECT session_id FROM usage_physical_attempts").get()!.session_id,
+      null,
+    );
     assert.equal(count(current.database, "task_runs"), 1);
     assert.equal(
       (current.database.prepare("SELECT status FROM task_runs").get() as { status: string }).status,
@@ -306,7 +300,6 @@ test("event log hard cut: clears old sessions while preserving independent ledge
     assert.deepEqual(
       result.gcIntents.map((intent) => [intent.assetScope, intent.contentDigest]),
       [
-        ["evidence_blob", DIGEST_A],
         ["file_history_blob", DIGEST_B],
         ["runtime_asset", "opaque-digest"],
       ],
