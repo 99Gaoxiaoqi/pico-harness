@@ -775,10 +775,6 @@
       "types": "./dist/agent-engine.d.ts",
       "import": "./dist/agent-engine.js"
     },
-    "./subagent-runner": {
-      "types": "./dist/subagent-runner.d.ts",
-      "import": "./dist/subagent-runner.js"
-    },
     "./internal/headless-bootstrap": {
       "types": "./dist/internal/headless-bootstrap.d.ts",
       "import": "./dist/internal/headless-bootstrap.js"

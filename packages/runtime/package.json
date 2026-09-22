@@ -291,14 +291,6 @@
       "types": "./dist/session-fork-runtime-lifecycle.d.ts",
       "import": "./dist/session-fork-runtime-lifecycle.js"
     },
-    "./subagent-context-policy": {
-      "types": "./dist/subagent-context-policy.d.ts",
-      "import": "./dist/subagent-context-policy.js"
-    },
-    "./subagent-context": {
-      "types": "./dist/subagent-context.d.ts",
-      "import": "./dist/subagent-context.js"
-    },
     "./subagent-activity-reporter": {
       "types": "./dist/subagent-activity-reporter.d.ts",
       "import": "./dist/subagent-activity-reporter.js"
@@ -494,10 +486,6 @@
     "./agent-engine-ports": {
       "types": "./dist/agent-engine-ports.d.ts",
       "import": "./dist/agent-engine-ports.js"
-    },
-    "./subagent-runner": {
-      "types": "./dist/subagent-runner.d.ts",
-      "import": "./dist/subagent-runner.js"
     },
     "./tool-result-archive": {
       "types": "./dist/tool-result-archive.d.ts",
