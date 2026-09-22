@@ -24,6 +24,7 @@ async function fixture(reply: (res: ServerResponse) => void, cache = false) {
       model: "lifecycle-test",
       capabilities: resolveModelRouteCapabilities("openai", "lifecycle-test", {
         streamUsage: true,
+        ...(cache ? { cache: true, promptCache: { mode: "implicit" as const } } : {}),
       }),
     }),
     requests: () => requests,
