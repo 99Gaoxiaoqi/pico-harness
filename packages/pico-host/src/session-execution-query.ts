@@ -1,4 +1,4 @@
-import type { Usage, ProviderPhysicalAttempt } from "@pico/core";
+import type { Usage } from "@pico/core";
 import { DatabaseSync } from "node:sqlite";
 import { operationalDatabasePath, type PhysicalAttemptRecord } from "@pico/storage";
 import { decodeRuntimeEventJson, type RuntimeEvent } from "@pico/storage/runtime-event";
@@ -93,7 +93,7 @@ export function querySessionExecution(
     const oversizedRunIds: string[] = [],
       missingModelCallRunIds: string[] = [],
       incompleteRunIds: string[] = [];
-    const coverage = { value: "logical_only" as RuntimeExecutionPage["coverage"]["modelAttempts"] };
+    const coverage = { value: "missing" as RuntimeExecutionPage["coverage"]["modelAttempts"] };
     const sessionSummary = summary(db, input.sessionId, cursor.watermark, coverage);
     const page: RuntimeExecutionPage = {
       schemaVersion: 1,
@@ -118,7 +118,7 @@ export function querySessionExecution(
         .get(input.sessionId, opening.run_id, cursor.watermark)!;
       const physicalSize = db
         .prepare(
-          `SELECT count(*) AS count, coalesce(sum(length(CAST(record_json AS BLOB))),0) AS bytes FROM (${physicalRowsSql(db)}) WHERE session_id=? AND run_id=?`,
+          `SELECT count(*) AS count, coalesce(sum(length(CAST(record_json AS BLOB))),0) AS bytes FROM (${physicalRowsSql()}) WHERE session_id=? AND run_id=?`,
         )
         .get(input.sessionId, opening.run_id)!;
       const totalCount = Number(size.count) + Number(physicalSize.count);
@@ -157,16 +157,9 @@ export function querySessionExecution(
       consumed++;
       if (run.status === "running" || run.steps.some((step) => step.status === "running"))
         incompleteRunIds.push(run.runId);
-      const starts = new Set(
-        events.filter((e) => e.kind === "model.call.started").map((e) => e.data.providerCallId),
-      );
-      const ends = new Set(
-        events.filter((e) => e.kind === "model.call.settled").map((e) => e.data.providerCallId),
-      );
       if (
-        [...starts].some((id) => !ends.has(id)) ||
-        [...ends].some((id) => !starts.has(id)) ||
-        (starts.size === 0 &&
+        physical.some((r) => r.status === "prepared" || r.status === "observed") ||
+        (physical.length === 0 &&
           events.some((e) => e.kind === "message.committed" && e.data.message.role === "assistant"))
       )
         missingModelCallRunIds.push(run.runId);
@@ -211,44 +204,22 @@ function summary(
   // All expansion and aggregation happens in SQLite: no unbounded ledger reads into JS.
   const row = db
     .prepare(
-      `WITH physical AS (${physicalRowsSql(db)}), physical_calls AS (
-    SELECT run_id, provider_call_id, json_group_array(json(record_json)) AS attempts,
-      CASE WHEN min(coalesce(json_extract(record_json,'$.attemptCoverage'),'complete') != 'partial') THEN 'complete' ELSE 'partial' END AS coverage
-    FROM physical WHERE session_id=? GROUP BY run_id,provider_call_id
-  ), events AS (
+      `WITH physical AS (${physicalRowsSql()}), events AS (
     SELECT run_id, kind, json_extract(payload_json, '$.data') AS data,
       coalesce(json_extract(payload_json, '$.refs.toolCallId'), event_id) AS tool_id,
       json_extract(payload_json, '$.at') AS at
     FROM runtime_events WHERE session_id = ? AND event_seq <= ? AND json_valid(payload_json)
-      AND kind IN ('model.call.started','model.call.settled','tool.started','tool.result.recorded')
-  ), event_calls AS (
-    SELECT run_id, json_extract(data,'$.providerCallId') AS call_id,
-      max(CASE WHEN kind = 'model.call.settled' THEN data END) AS settled,
-      max(json_extract(data,'$.retryAttempt')) AS retry_attempt
-    FROM events WHERE kind IN ('model.call.started','model.call.settled') GROUP BY run_id, call_id
-  ), raw_calls AS (
-    SELECT * FROM event_calls
-    UNION ALL
-    SELECT coalesce(p.run_id,''), p.provider_call_id, json_object('status',CASE WHEN max(json_extract(p.record_json,'$.status')='succeeded') THEN 'succeeded' WHEN max(json_extract(p.record_json,'$.status')='cancelled') THEN 'cancelled' WHEN max(json_extract(p.record_json,'$.status') IN ('prepared','observed')) THEN 'running' ELSE 'failed' END,'latencyMs',sum(json_extract(p.record_json,'$.latencyMs'))),
-      json_extract(p.record_json,'$.retryAttempt')
-    FROM physical p WHERE p.session_id=? AND p.provider_call_id NOT IN (SELECT call_id FROM event_calls)
-    GROUP BY p.provider_call_id
-    UNION ALL
-    SELECT '', l.call_id, l.data, NULL FROM (${legacyRowsSql(db)}) l
-    WHERE l.session_id=? AND l.call_id NOT IN (SELECT call_id FROM event_calls)
-      AND l.call_id NOT IN (SELECT provider_call_id FROM physical)
+      AND kind IN ('tool.started','tool.result.recorded')
   ), calls AS MATERIALIZED (
-    SELECT c.run_id, c.call_id, c.retry_attempt,
-      CASE WHEN p.provider_call_id IS NOT NULL
-      THEN json_set(coalesce(c.settled,'{}'), '$.attempts', json(p.attempts), '$.attemptCoverage',p.coverage)
-      ELSE c.settled END AS settled
-    FROM raw_calls c LEFT JOIN physical_calls p ON p.provider_call_id=c.call_id
+    SELECT coalesce(run_id,'') AS run_id, provider_call_id AS call_id,
+      max(json_extract(record_json,'$.retryAttempt')) AS retry_attempt,
+      json_object('attempts', json_group_array(json(record_json)),
+        'attemptCoverage', CASE WHEN min(coalesce(json_extract(record_json,'$.attemptCoverage'),'complete') != 'partial') THEN 'complete' ELSE 'partial' END,
+        'status', CASE WHEN max(json_extract(record_json,'$.status')='succeeded') THEN 'succeeded' WHEN max(json_extract(record_json,'$.status')='cancelled') THEN 'cancelled' WHEN max(json_extract(record_json,'$.status') IN ('prepared','observed')) THEN 'running' ELSE 'failed' END,
+        'latencyMs', sum(json_extract(record_json,'$.latencyMs'))) AS settled
+    FROM physical WHERE session_id=? GROUP BY run_id,provider_call_id
   ), measurements AS (
-    SELECT run_id, call_id, settled AS data FROM calls
-      WHERE json_type(settled,'$.attempts') IS NULL
-    UNION ALL
-    SELECT run_id, call_id, a.value AS data FROM calls, json_each(settled,'$.attempts') a
-      WHERE json_type(settled,'$.attempts') = 'array'
+    SELECT coalesce(run_id,'') AS run_id, provider_call_id AS call_id, record_json AS data FROM physical WHERE session_id=?
   ), measured AS MATERIALIZED (
     SELECT run_id, call_id,
       CASE WHEN json_type(data,'$.usage.reportedFields') IS NULL OR EXISTS
@@ -296,39 +267,19 @@ function summary(
       THEN max(0,round((julianday(ended)-julianday(started))*86400000)) END) FROM tools) AS tool_duration
     FROM measured`,
     )
-    .get(sessionId, sessionId, watermark, sessionId, sessionId)!;
+    .get(sessionId, watermark, sessionId, sessionId)!;
   if (coverage)
     coverage.value = !Number(row.physical_calls)
-      ? "logical_only"
+      ? "missing"
       : Number(row.complete_physical_calls) === Number(row.calls)
         ? "physical"
-        : "mixed";
-  const baseline: Record<string, unknown> = db
-    .prepare("SELECT 1 FROM sqlite_master WHERE type='view' AND name='usage_effective_baselines'")
-    .get()
-    ? db
-        .prepare(
-          `SELECT count(*) AS count, sum(input_tokens+cache_read_tokens+cache_write_tokens) AS input,
-        sum(output_tokens) AS output, sum(cache_read_tokens) AS cache, sum(cost) AS cost
-        FROM usage_effective_baselines WHERE session_id=? AND (input_tokens>0 OR output_tokens>0 OR cache_read_tokens>0 OR cache_write_tokens>0 OR cost>0)`,
-        )
-        .get(sessionId)!
-    : { count: 0 };
-  const baselineCount = Number(baseline.count ?? 0);
-  if (baselineCount > 0) {
-    row.input_tokens = Number(row.input_tokens ?? 0) + Number(baseline.input ?? 0);
-    row.output_tokens = Number(row.output_tokens ?? 0) + Number(baseline.output ?? 0);
-    row.cached_tokens = Number(row.cached_tokens ?? 0) + Number(baseline.cache ?? 0);
-    if (Number(baseline.cost) > 0) row.cost = Number(row.cost ?? 0) + Number(baseline.cost);
-    if (coverage) coverage.value = "mixed";
-  }
+        : "partial";
   const optional = (key: string, value: unknown) =>
     value === null ? {} : { [key]: Number(value) };
   return {
     scope: "session",
     modelCalls: Number(row.calls),
     failedCalls: Number(row.failed),
-    ...(baselineCount > 0 ? { historicalBaselineCount: baselineCount } : {}),
     meteredCalls: Number(row.metered ?? 0),
     unpricedCalls: Number(row.unpriced ?? 0),
     ...optional("inputTokens", row.input_tokens),
@@ -342,14 +293,12 @@ function summary(
     toolCalls: Number(row.tool_calls),
     ...optional("toolDurationMs", row.tool_duration),
     cacheCoverage:
-      baselineCount > 0
-        ? "partial"
-        : Number(row.cache_known) === 0
-          ? "missing"
-          : Number(row.cache_comparable) === Number(row.measurement_count) &&
-              Number(row.partial_calls) === 0
-            ? "complete"
-            : "partial",
+      Number(row.cache_known) === 0
+        ? "missing"
+        : Number(row.cache_comparable) === Number(row.measurement_count) &&
+            Number(row.partial_calls) === 0
+          ? "complete"
+          : "partial",
   };
 }
 
@@ -372,49 +321,6 @@ function usageMetrics(
       ? { reasoningTokens: usage.reasoningTokens }
       : {}),
   };
-}
-
-function projectAttempt(attempt: ProviderPhysicalAttempt): RuntimeExecutionAttempt {
-  return {
-    attemptId: preview(attempt.attemptId),
-    attempt: attempt.attempt,
-    provider: preview(attempt.provider),
-    model: preview(attempt.model),
-    startedAt: attempt.startedAt,
-    completedAt: attempt.completedAt,
-    status: attempt.status,
-    latencyMs: attempt.latencyMs,
-    usageBasis: attempt.usageBasis,
-    ...(attempt.timeToFirstTokenMs !== undefined
-      ? { timeToFirstTokenMs: attempt.timeToFirstTokenMs }
-      : {}),
-    ...(attempt.httpStatus !== undefined ? { httpStatus: attempt.httpStatus } : {}),
-    ...(attempt.finishReason !== undefined ? { finishReason: preview(attempt.finishReason) } : {}),
-    ...usageMetrics(attempt.usage),
-    ...(attempt.error !== undefined ? { error: preview(attempt.error) } : {}),
-    ...(attempt.costCNY !== undefined &&
-    (attempt.costStatus === "estimated" || attempt.costStatus === "included")
-      ? { costCNY: attempt.costCNY }
-      : {}),
-    costStatus: attempt.costStatus ?? "unknown",
-  };
-}
-
-function modelMetrics(
-  data: Extract<RuntimeEvent, { kind: "model.call.settled" }>["data"],
-): Partial<RuntimeExecutionStep> {
-  if (data.attempts === undefined)
-    return {
-      ...usageMetrics(data.usage),
-      ...(data.costCNY !== undefined &&
-      (data.costStatus === "estimated" || data.costStatus === "included")
-        ? { costCNY: data.costCNY }
-        : {}),
-      costStatus: data.costStatus ?? "unknown",
-      ...(data.retryAttempt !== undefined ? { retries: data.retryAttempt } : {}),
-    };
-  const attempts = data.attempts.map(projectAttempt);
-  return attemptMetrics(attempts, data.retryAttempt, data.attemptCoverage);
 }
 
 function attemptMetrics(
@@ -489,15 +395,27 @@ function projectRun(
   const update = (index: number, fields: Partial<RuntimeExecutionStep>) => {
     steps[index] = { ...steps[index]!, ...fields };
   };
+  for (const record of physical) {
+    if (models.has(record.providerCallId)) continue;
+    models.set(record.providerCallId, steps.length);
+    steps.push({
+      id: record.physicalAttemptId,
+      eventId: record.physicalAttemptId,
+      turnId: record.turnId ?? opening.turnId,
+      kind: "model",
+      title: preview(`${record.provider} / ${record.model}`),
+      at: record.startedAt,
+      status: "running",
+      purpose: record.purpose,
+      providerId: preview(record.provider),
+      modelId: preview(record.model),
+    });
+  }
   for (const event of events) {
     switch (event.kind) {
       case "model.call.started": {
-        const i = add(
-          event,
-          "model",
-          [event.data.provider, event.data.model].filter(Boolean).join(" / ") || "模型调用",
-        );
-        models.set(event.data.providerCallId, i);
+        const i = models.get(event.data.providerCallId);
+        if (i === undefined) break;
         update(i, {
           purpose: preview(event.data.purpose),
           ...(event.data.provider ? { providerId: preview(event.data.provider) } : {}),
@@ -507,12 +425,10 @@ function projectRun(
         break;
       }
       case "model.call.settled": {
-        const i = models.get(event.data.providerCallId) ?? add(event, "model", "模型调用");
-        models.set(event.data.providerCallId, i);
+        const i = models.get(event.data.providerCallId);
+        if (i === undefined) break;
         update(i, {
           status: event.data.status === "succeeded" ? "completed" : event.data.status,
-          durationMs: event.data.latencyMs,
-          ...modelMetrics(event.data),
           ...(event.data.error ? { error: preview(event.data.error) } : {}),
         });
         break;
@@ -621,19 +537,13 @@ function projectRun(
         ? { costCNY: record.costCNY }
         : {}),
     }));
-    // Replace the complete measurement projection: never retain stale logical totals.
-    const {
-      inputTokens: _i,
-      outputTokens: _o,
-      cachedInputTokens: _c,
-      reasoningTokens: _r,
-      costCNY: _cost,
-      firstTokenLatencyMs: _ttft,
-      ...step
-    } = steps[index]!;
+    const step = steps[index]!;
     const last = records.at(-1)!;
     steps[index] = {
       ...step,
+      ...(records.some((r) => r.latencyMs !== undefined)
+        ? { durationMs: records.reduce((n, r) => n + (r.latencyMs ?? 0), 0) }
+        : {}),
       ...attemptMetrics(
         attempts,
         last.retryAttempt,
@@ -655,7 +565,7 @@ function projectRun(
       ? { reason: preview(terminal.data.reason) }
       : {}),
     ...(opening.refs?.parentRunId ? { parentRunId: opening.refs.parentRunId } : {}),
-    steps,
+    steps: steps.sort((a, b) => Date.parse(a.at) - Date.parse(b.at)),
   };
 }
 function preview(value: string): string {
@@ -665,13 +575,8 @@ function elapsed(start: string, end: string): number {
   return Math.max(0, Date.parse(end) - Date.parse(start));
 }
 
-/** Compatibility with read-only historical databases that have not migrated yet. */
-function physicalRowsSql(db: DatabaseSync): string {
-  return db
-    .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='usage_physical_attempts'")
-    .get()
-    ? "SELECT provider_call_id, session_id, run_id, json_remove(record_json,'$.requestDiagnostic') AS record_json FROM usage_physical_attempts"
-    : "SELECT NULL AS provider_call_id, NULL AS session_id, NULL AS run_id, NULL AS record_json WHERE 0";
+function physicalRowsSql(): string {
+  return "SELECT provider_call_id, session_id, run_id, json_remove(record_json,'$.requestDiagnostic') AS record_json FROM usage_physical_attempts WHERE json_extract(record_json,'$.accountingSource')='physical'";
 }
 function readRunPhysicalAttempts(
   db: DatabaseSync,
@@ -680,33 +585,16 @@ function readRunPhysicalAttempts(
 ): PhysicalAttemptRecord[] {
   const rows = db
     .prepare(
-      `SELECT record_json FROM (${physicalRowsSql(db)}) WHERE session_id=? AND run_id=? ORDER BY json_extract(record_json,'$.startedAt'), json_extract(record_json,'$.attempt') LIMIT 129`,
+      `SELECT record_json FROM (${physicalRowsSql()}) WHERE session_id=? AND run_id=? ORDER BY json_extract(record_json,'$.startedAt'), json_extract(record_json,'$.attempt') LIMIT 129`,
     )
     .all(sessionId, runId);
   // The outer page budget rejects an overlarge projection instead of silently dropping attempts.
   return rows.map((row) => JSON.parse(String(row.record_json)) as PhysicalAttemptRecord);
 }
 
-function legacyRowsSql(db: DatabaseSync): string {
-  return db
-    .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='usage_provider_calls'")
-    .get()
-    ? `SELECT call_id,session_id,json_object('status',status,'latencyMs',json_extract(reported_json,'$.latencyMs'),
-        'costCNY',cost,'costStatus',coalesce(json_extract(reported_json,'$.costStatus'),'unknown'),
-        'usage',json_object('promptTokens',input_tokens+cache_read_tokens+cache_write_tokens,
-          'completionTokens',output_tokens,'cacheReadTokens',cache_read_tokens,
-          'reportedFields',json(coalesce(json_extract(reported_json,'$.reportedFields'),'[]')))) AS data FROM usage_provider_calls`
-    : "SELECT NULL AS call_id,NULL AS session_id,NULL AS data WHERE 0";
-}
-
 function accountingVersion(db: DatabaseSync, sessionId: string): number {
-  return db
-    .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='usage_accounting_versions'")
-    .get()
-    ? Number(
-        db
-          .prepare("SELECT revision FROM usage_accounting_versions WHERE session_id=?")
-          .get(sessionId)?.revision ?? 0,
-      )
-    : 0;
+  return Number(
+    db.prepare("SELECT revision FROM usage_accounting_versions WHERE session_id=?").get(sessionId)
+      ?.revision ?? 0,
+  );
 }

@@ -101,7 +101,7 @@ export function foldContextComposition(
   };
 }
 
-/** Read at most two bounded metadata rows in one SQLite snapshot. Never reads request bodies. */
+/** Read one bounded metadata row in one SQLite snapshot. Never reads request bodies. */
 export function getLatestContextRequest(
   storageRoot: string,
   sessionId: string,
@@ -109,77 +109,35 @@ export function getLatestContextRequest(
   const db = new DatabaseSync(operationalDatabasePath(storageRoot), { readOnly: true });
   try {
     db.exec("BEGIN");
-    const physical = Boolean(
-      db
-        .prepare(
-          "SELECT 1 FROM sqlite_master WHERE type='table' AND name='usage_physical_attempts'",
-        )
-        .get(),
-    );
-    const legacy = Boolean(
-      db
-        .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='usage_provider_calls'")
-        .get(),
-    );
-    const candidates: RuntimeLatestContextRequest[] = [];
-    if (physical) {
-      const row = db
-        .prepare(
-          `SELECT physical_attempt_id, provider_call_id,
+    const row = db
+      .prepare(
+        `SELECT physical_attempt_id, provider_call_id,
         json_extract(record_json,'$.provider') AS provider, json_extract(record_json,'$.model') AS model,
         json_extract(record_json,'$.completedAt') AS completed,
         CASE WHEN length(CAST(json_extract(record_json,'$.usage') AS BLOB))<=8192 THEN json_extract(record_json,'$.usage') END AS usage,
         CASE WHEN length(CAST(json_extract(record_json,'$.requestDiagnostic') AS BLOB))<=? THEN json_extract(record_json,'$.requestDiagnostic') END AS diagnostic
         FROM usage_physical_attempts WHERE session_id=? AND status='succeeded'
-          AND json_valid(record_json) AND json_extract(record_json,'$.purpose')='main'
+          AND json_extract(record_json,'$.accountingSource')='physical' AND json_valid(record_json) AND json_extract(record_json,'$.purpose')='main'
         ORDER BY json_extract(record_json,'$.completedAt') DESC, physical_attempt_id DESC LIMIT 1`,
-        )
-        .get(MAX_DIAGNOSTIC_BYTES, sessionId);
-      if (row) candidates.push(requestView(row, "physical"));
-    }
-    if (legacy) {
-      const row = db
-        .prepare(
-          `SELECT call_id AS provider_call_id, provider, model, created_at AS completed,
-        input_tokens, cache_read_tokens, cache_write_tokens,
-        json_extract(reported_json,'$.usageMetadata') AS usage_metadata,
-        json_extract(reported_json,'$.reportedFields') AS reported_fields,
-        CASE WHEN length(CAST(json_extract(reported_json,'$.requestDiagnostic') AS BLOB))<=? THEN json_extract(reported_json,'$.requestDiagnostic') END AS diagnostic
-        FROM usage_provider_calls c WHERE session_id=? AND status='succeeded' AND purpose='main'
-          AND (reported_json IS NULL OR json_valid(reported_json))
-          ${physical ? "AND NOT EXISTS (SELECT 1 FROM usage_physical_attempts p WHERE p.provider_call_id=c.call_id)" : ""}
-        ORDER BY created_at DESC, call_id DESC LIMIT 1`,
-        )
-        .get(MAX_DIAGNOSTIC_BYTES, sessionId);
-      if (row) candidates.push(requestView(row, "legacy_call"));
-    }
-    return (
-      candidates.sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0))[0] ?? {
-        status: "unavailable",
-        source: "none",
-        reason: "尚无成功的主请求记录。",
-      }
-    );
+      )
+      .get(MAX_DIAGNOSTIC_BYTES, sessionId);
+    return row
+      ? requestView(row)
+      : { status: "unavailable", source: "none", reason: "尚无成功的主请求记录。" };
   } finally {
     db.close();
   }
 }
 
-function requestView(
-  row: Record<string, unknown>,
-  source: "physical" | "legacy_call",
-): RuntimeLatestContextRequest {
+function requestView(row: Record<string, unknown>): RuntimeLatestContextRequest {
   const capture = parsePreparedRequestCapture(parseJson(row.diagnostic));
   const usage = parseJson(row.usage);
-  const fields =
-    source === "physical" && isRecord(usage)
-      ? usage.reportedFields
-      : parseJson(row.reported_fields);
+  const fields = isRecord(usage) ? usage.reportedFields : undefined;
   const reported = (field: string) => Array.isArray(fields) && fields.includes(field);
   const completion =
     typeof row.completed === "number" ? row.completed : Date.parse(String(row.completed));
   const identity = {
-    source,
+    source: "physical" as const,
     providerCallId: String(row.provider_call_id),
     ...(typeof row.physical_attempt_id === "string"
       ? { physicalAttemptId: row.physical_attempt_id }
@@ -189,21 +147,11 @@ function requestView(
     ...(Number.isFinite(completion) ? { completedAt: completion } : {}),
   };
   const inputTokens =
-    source === "physical" && isRecord(usage)
-      ? reported("prompt") || fields === undefined
-        ? usage.promptTokens
-        : undefined
-      : row.usage_metadata === "reported" && reported("prompt")
-        ? Number(row.input_tokens) + Number(row.cache_read_tokens) + Number(row.cache_write_tokens)
-        : undefined;
+    isRecord(usage) && (reported("prompt") || fields === undefined)
+      ? usage.promptTokens
+      : undefined;
   const cachedInputTokens =
-    source === "physical" && isRecord(usage)
-      ? reported("cacheRead")
-        ? usage.cacheReadTokens
-        : undefined
-      : row.usage_metadata === "reported" && reported("cacheRead")
-        ? row.cache_read_tokens
-        : undefined;
+    isRecord(usage) && reported("cacheRead") ? usage.cacheReadTokens : undefined;
   const metering = {
     ...(typeof inputTokens === "number" && Number.isFinite(inputTokens) ? { inputTokens } : {}),
     ...(typeof cachedInputTokens === "number" && Number.isFinite(cachedInputTokens)

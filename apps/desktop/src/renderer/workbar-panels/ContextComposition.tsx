@@ -27,9 +27,7 @@ export function ContextComposition({ request }: { request?: RuntimeLatestContext
             )}
           </p>
           <details>
-            <summary>
-              请求身份 · {request.source === "physical" ? "物理记录" : "旧调用记录"}
-            </summary>
+            <summary>请求身份 · 物理记录</summary>
             <p className="tool-panel__muted">
               调用 <code>{request.providerCallId}</code>
             </p>

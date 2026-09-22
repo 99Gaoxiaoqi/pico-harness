@@ -93,20 +93,6 @@ test("durable revisions replace stale logical usage across execution, ledger, se
     await eventStore.initializeSession({ sessionId: "session", workDir: root });
     const fence = await eventStore.advanceOwnerFence("session", 0);
     await eventStore.appendBatch(events(0, root), { ownerFence: fence });
-    ledger.recordProviderCall({
-      callId: "call-0",
-      sessionId: "session",
-      purpose: "main",
-      provider: "fixture",
-      model: "fixture",
-      status: "cancelled",
-      inputTokens: 999,
-      outputTokens: 999,
-      cacheReadTokens: 0,
-      cacheWriteTokens: 0,
-      cost: 999,
-      createdAt: Date.parse(at),
-    });
     const owner = ledger.beginPhysicalAttemptOwner();
     const start = physical(0, owner);
     ledger.recordPhysicalAttempt(start);
@@ -169,7 +155,11 @@ test("durable revisions replace stale logical usage across execution, ledger, se
     assert.equal(dashboard.activities.filter((a) => a.kind === "model").length, 1);
     assert.equal(dashboard.activities.find((a) => a.kind === "model")?.inputTokens, 100);
     // Background accounting intentionally has no foreground model.call events.
-    const background = { ...physical(999, owner), purpose: "memory_review" as const };
+    const background = {
+      ...physical(999, owner),
+      runId: undefined,
+      purpose: "memory_review" as const,
+    };
     ledger.recordPhysicalAttempt(background);
     ledger.recordPhysicalAttempt({
       ...background,
@@ -180,6 +170,7 @@ test("durable revisions replace stale logical usage across execution, ledger, se
     });
     assert.equal(querySessionExecutionSummary(root, { sessionId: "session" }).inputTokens, 105);
     assert.equal(ledger.getAccountingSessionUsage("session")?.totalPromptTokens, 105);
+    assert.equal(querySessionExecutionSummary(root, { sessionId: "session" }).meteredCalls, 2);
     for (let n = 1; n < 18; n++)
       await eventStore.appendBatch(events(n, root), { ownerFence: fence });
     const cursor = querySessionExecution(root, { sessionId: "session" }).nextCursor!;
@@ -212,23 +203,10 @@ test("durable revisions replace stale logical usage across execution, ledger, se
     assert.equal(window?.length, 2);
     assert.equal(new Set(window?.flatMap((p) => p.runs.map((r) => r.runId))).size, 18);
     await eventStore.initializeSession({ sessionId: "historical-only", workDir: root });
-    ledger.putUsageBaseline({
-      baselineId: "opaque-history",
-      sessionId: "historical-only",
-      inputTokens: 11,
-      outputTokens: 3,
-      cacheReadTokens: 2,
-      cacheWriteTokens: 0,
-      cost: 0.4,
-      importedAt: Date.now(),
-      source: { kind: "historical_import" },
-    });
     const historical = querySessionExecutionSummary(root, { sessionId: "historical-only" });
     assert.equal(historical.modelCalls, 0);
-    assert.equal(historical.historicalBaselineCount, 1);
-    assert.equal(historical.inputTokens, 13);
-    assert.equal(historical.outputTokens, 3);
-    assert.equal(historical.costCNY, 0.4);
+    assert.equal(historical.inputTokens, undefined);
+    assert.equal(historical.costCNY, undefined);
   } finally {
     ledger.close();
     eventStore.close();

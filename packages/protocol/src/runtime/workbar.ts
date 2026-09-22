@@ -88,7 +88,7 @@ export type RuntimeContextComposition = JsonObject & {
 };
 export type RuntimeLatestContextRequest = JsonObject & {
   readonly status: "available" | "unavailable";
-  readonly source: "physical" | "legacy_call" | "none";
+  readonly source: "physical" | "none";
   readonly reason?: string;
   readonly providerCallId?: string;
   readonly physicalAttemptId?: string;
@@ -901,7 +901,6 @@ const runtimeExecutionSummaryResult = exactResultShape(
     toolCalls: resultNonNegativeInteger,
     toolDurationMs: resultFiniteNumber,
     physicalAttempts: resultNonNegativeInteger,
-    historicalBaselineCount: resultNonNegativeInteger,
     retries: resultNonNegativeInteger,
     cacheCoverage: resultOneOf(["complete", "partial", "missing"]),
   },
@@ -916,7 +915,7 @@ const runtimeExecutionPageResult = exactResultShape(
       oversizedRunIds: resultStringArray,
       missingModelCallRunIds: resultStringArray,
       incompleteRunIds: resultStringArray,
-      modelAttempts: resultOneOf(["logical_only", "physical", "mixed"]),
+      modelAttempts: resultOneOf(["missing", "physical", "partial"]),
     }),
   },
   { nextCursor: resultBoundedString(2048) },
