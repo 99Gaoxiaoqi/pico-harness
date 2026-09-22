@@ -105,7 +105,18 @@ test("execution window refresh keeps page depth and renders causal steps with se
   assert.match(html, /轮次 1/u);
   assert.match(html, /轮次 2/u);
   assert.match(html, /费用未知/u);
-  assert.match(html, /输入 未知 \/ 输出 未知 Token/u);
+  const modelDetail = renderToStaticMarkup(
+    React.createElement(InspectorWorkbarPanel, {
+      trace: [],
+      execution,
+      selectedTraceId: "latest-1:model",
+      loading: false,
+      onRefresh() {},
+      onSelectTrace() {},
+    }),
+  );
+  assert.match(modelDetail, /输入 未知 \/ 输出 未知 Token/u);
+  assert.doesNotMatch(html, /输入 未知 \/ 输出 未知 Token/u);
   assert.match(html, /工具执行失败/u);
   assert.match(html, /safe-input/u);
   assert.match(html, /文件不存在/u);

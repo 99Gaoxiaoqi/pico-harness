@@ -5,7 +5,7 @@ import type {
   RuntimeExecutionRun,
   RuntimeExecutionStep,
 } from "@pico/protocol";
-import { partitionTimelineRuns } from "./inspector-timeline-state";
+import { partitionTimelineRuns } from "./inspector-timeline-state.js";
 
 export function ExecutionTraceTimeline({
   execution,

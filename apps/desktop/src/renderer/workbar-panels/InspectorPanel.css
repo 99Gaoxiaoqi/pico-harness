@@ -1,4 +1,4 @@
-.tool-panel--inspector {
+.tool-panel.tool-panel--inspector {
   --inspector-ink: var(--ink, #262626);
   --inspector-muted: var(--ink-secondary, #606068);
   --inspector-border: var(--line, #eaeaea);
