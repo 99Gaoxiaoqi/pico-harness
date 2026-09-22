@@ -4,7 +4,8 @@ import type {
   RuntimeSessionContextSnapshot,
 } from "@pico/protocol";
 import { ContextComposition } from "./ContextComposition.js";
-import { ExecutionTraceTimeline, ExecutionUsageSummary } from "./ExecutionTraceTimeline.js";
+import { ExecutionTraceTimeline } from "./ExecutionTraceTimeline.js";
+import { ExecutionUsageSummary } from "./ExecutionUsageSummary.js";
 import { ChevronDown, CircleAlert, RefreshCw, Wrench } from "lucide-react";
 
 export type InspectorContextSnapshot = RuntimeSessionContextSnapshot;
@@ -67,7 +68,7 @@ export interface InspectorWorkbarPanelProps {
   readonly error?: string | null;
   readonly hasMore?: boolean;
   readonly onRefresh: () => void;
-  readonly onSelectTrace: (traceId: string) => void;
+  readonly onSelectTrace: (traceId: string | undefined) => void;
   readonly onLoadMore?: () => void;
   readonly onOpenPreview?: (traceId: string) => void;
 }
