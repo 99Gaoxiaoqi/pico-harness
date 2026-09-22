@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { SqliteRuntimeEventStore } from "@pico/storage/sqlite/sqlite-runtime-event-store";
+import { SqliteRuntimeControlStore, type PhysicalAttemptRecord } from "@pico/storage";
 import type { RuntimeEvent } from "@pico/storage/runtime-event";
 import { querySessionExecution } from "../../../packages/pico-host/src/session-execution-query.js";
 
@@ -37,13 +38,13 @@ test("execution projection survives reopen and paginates a fixed session snapsho
         {
           ...base("model"),
           kind: "model.call.started",
-          data: { providerCallId: "call", model: "test", purpose: "main" },
+          data: { providerCallId: `call-${n}`, model: "test", purpose: "main" },
         },
         {
           ...base("meter"),
           kind: "model.call.settled",
           data: {
-            providerCallId: "call",
+            providerCallId: `call-${n}`,
             status: "succeeded",
             latencyMs: 20,
             usage: { promptTokens: 5, completionTokens: 7 },
@@ -53,7 +54,7 @@ test("execution projection survives reopen and paginates a fixed session snapsho
         },
         {
           ...base("response"),
-          ...(n === 17 ? { refs: { providerCallId: "call" } } : {}),
+          ...(n === 17 ? { refs: { providerCallId: `call-${n}` } } : {}),
           partial: false,
           visibility: "model",
           kind: "message.committed",
@@ -108,6 +109,36 @@ test("execution projection survives reopen and paginates a fixed session snapsho
         { ...base("end"), partial: false, kind: "run.terminal", data: { status: "completed" } },
       ];
       await store.appendBatch(events, { ownerFence });
+      const ledger = new SqliteRuntimeControlStore({ storageRoot: root });
+      const ownerId = ledger.beginPhysicalAttemptOwner();
+      const record: PhysicalAttemptRecord = {
+        accountingVersion: 1,
+        accountingSource: "physical",
+        physicalAttemptId: `attempt-${n}`,
+        providerCallId: `call-${n}`,
+        logicalCallId: `call-${n}`,
+        ownerId,
+        sessionId: "session",
+        runId,
+        turnId: `turn-${n}`,
+        purpose: "main",
+        retryAttempt: 0,
+        pricingVersion: "test",
+        revision: 1,
+        attempt: 0,
+        provider: "test",
+        model: "test",
+        startedAt: "2026-09-22T00:00:00.000Z",
+        completedAt: "2026-09-22T00:00:00.020Z",
+        status: "succeeded",
+        usageBasis: "reported",
+        usage: { promptTokens: 5, completionTokens: 7 },
+        costCNY: 0.01,
+        costStatus: "estimated",
+      };
+      ledger.recordPhysicalAttempt({ ...record, revision: 0, status: "prepared" });
+      ledger.recordPhysicalAttempt(record);
+      ledger.close();
     }
     store.close();
     const first = querySessionExecution(root, { sessionId: "session" });
@@ -115,7 +146,7 @@ test("execution projection survives reopen and paginates a fixed session snapsho
     assert.equal(first.runs[0]?.runId, "run-17");
     assert.equal(first.summary.modelCalls, 18);
     assert.equal(first.summary.inputTokens, 90);
-    assert.equal(first.coverage.modelAttempts, "logical_only");
+    assert.equal(first.coverage.modelAttempts, "physical");
     assert.equal(first.runs[0]?.steps[0]?.output, "思考：thinking\n\nresponse");
     // Unlinked messages cannot be attributed to the most recent model call.
     assert.equal(first.runs[1]?.steps[0]?.output, undefined);
@@ -211,7 +242,7 @@ test("oversized runs advance cursors and missing settlements remain visible", as
     store.close();
     const page = querySessionExecution(root, { sessionId: "session" });
     assert.deepEqual(page.coverage.oversizedRunIds, ["r16"]);
-    assert.ok(page.coverage.missingModelCallRunIds.includes("r15"));
+    assert.deepEqual(page.coverage.missingModelCallRunIds, []);
     assert.ok(page.coverage.incompleteRunIds.includes("r15"));
     assert.equal(page.summary.costCNY, undefined);
     assert.ok(Buffer.byteLength(JSON.stringify(page)) <= 48 * 1024);

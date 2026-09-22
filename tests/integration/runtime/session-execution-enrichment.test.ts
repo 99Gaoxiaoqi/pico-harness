@@ -6,7 +6,11 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import type { ProviderPhysicalAttempt } from "@pico/core";
-import { operationalDatabasePath } from "@pico/storage";
+import {
+  operationalDatabasePath,
+  SqliteRuntimeControlStore,
+  type PhysicalAttemptRecord,
+} from "@pico/storage";
 import { SqliteRuntimeEventStore } from "@pico/storage/sqlite/sqlite-runtime-event-store";
 import type { RuntimeEvent } from "@pico/storage/runtime-event";
 import {
@@ -14,13 +18,14 @@ import {
   querySessionExecutionSummary,
 } from "../../../packages/pico-host/src/session-execution-query.js";
 
+const nativeFixtures: RuntimeEvent[] = [];
 const at = "2026-09-22T00:00:00.000Z";
 function event<K extends RuntimeEvent["kind"]>(
   id: string,
   kind: K,
   data: object,
 ): Extract<RuntimeEvent, { kind: K }> {
-  return {
+  const result = {
     schemaVersion: 2,
     eventId: id,
     sessionId: "session",
@@ -33,6 +38,8 @@ function event<K extends RuntimeEvent["kind"]>(
     kind,
     data,
   } as Extract<RuntimeEvent, { kind: K }>;
+  if (kind === "model.call.settled") nativeFixtures.push(result);
+  return result;
 }
 function attempt(n: number, extra: Partial<ProviderPhysicalAttempt> = {}): ProviderPhysicalAttempt {
   return {
@@ -47,6 +54,37 @@ function attempt(n: number, extra: Partial<ProviderPhysicalAttempt> = {}): Provi
     usageBasis: "reported",
     ...extra,
   };
+}
+
+function persistNative(root: string) {
+  const ledger = new SqliteRuntimeControlStore({ storageRoot: root });
+  const ownerId = ledger.beginPhysicalAttemptOwner();
+  for (const event of nativeFixtures.splice(0)) {
+    if (event.kind !== "model.call.settled") continue;
+    for (const attempt of event.data.attempts ?? []) {
+      const record: PhysicalAttemptRecord = {
+        ...attempt,
+        physicalAttemptId: `${event.data.providerCallId}-${attempt.attemptId}`,
+        accountingVersion: 1,
+        accountingSource: "physical",
+        providerCallId: event.data.providerCallId,
+        logicalCallId: event.data.providerCallId,
+        sessionId: "session",
+        runId: "run",
+        turnId: "turn",
+        ownerId,
+        purpose: "main",
+        retryAttempt: event.data.retryAttempt ?? 0,
+        revision: 1,
+        pricingVersion: "fixture",
+        costStatus: attempt.costStatus ?? "unknown",
+        attemptCoverage: event.data.attemptCoverage ?? "complete",
+      };
+      ledger.recordPhysicalAttempt({ ...record, revision: 0, status: "prepared" });
+      ledger.recordPhysicalAttempt(record);
+    }
+  }
+  ledger.close();
 }
 
 test("execution summary and steps use physical evidence once, preserve unknown usage, and survive trace decode failure", async () => {
@@ -161,23 +199,25 @@ test("execution summary and steps use physical evidence once, preserve unknown u
       ],
       { ownerFence },
     );
+    persistNative(root);
     const summary = querySessionExecutionSummary(root, { sessionId: "session" });
-    assert.equal(summary.modelCalls, 3);
+    assert.equal(summary.modelCalls, 2);
     assert.equal(summary.toolCalls, 1);
     assert.equal(summary.toolDurationMs, 25);
     assert.equal(summary.physicalAttempts, 3);
     assert.equal(summary.retries, 2);
-    assert.equal(summary.inputTokens, 12);
-    assert.equal(summary.outputTokens, 13);
+    assert.equal(summary.inputTokens, 10);
+    assert.equal(summary.outputTokens, 12);
     assert.equal(summary.cachedInputTokens, 6);
     assert.equal(summary.reasoningTokens, 3);
     assert.equal(summary.cacheCoverage, "partial");
-    assert.equal(summary.meteredCalls, 1);
+    assert.equal(summary.meteredCalls, 0);
     assert.equal(summary.unpricedCalls, 2);
-    assert.ok(Math.abs(summary.costCNY! - 0.3) < 1e-9);
+    assert.ok(Math.abs(summary.costCNY! - 0.2) < 1e-9);
+    persistNative(root);
     const page = querySessionExecution(root, { sessionId: "session" });
     assert.deepEqual(page.summary, summary);
-    assert.equal(page.coverage.modelAttempts, "mixed");
+    assert.equal(page.coverage.modelAttempts, "partial");
     const model = page.runs[0]!.steps[0]!;
     assert.equal(model.providerId, "test-provider");
     assert.equal(model.modelId, "test-model");
@@ -249,16 +289,17 @@ test("explicit zero physical attempts never fallback to logical metrics and repo
       ],
       { ownerFence },
     );
+    persistNative(root);
     const page = querySessionExecution(root, { sessionId: "session" });
     assert.equal(page.coverage.modelAttempts, "physical");
-    assert.equal(page.summary.modelCalls, 2);
+    assert.equal(page.summary.modelCalls, 1);
     assert.equal(page.summary.physicalAttempts, 1);
     assert.equal(page.summary.inputTokens, 4);
     assert.equal(page.summary.costCNY, 0);
     assert.equal(page.summary.cachedInputTokens, 0);
     assert.equal(page.summary.cacheCoverage, "complete");
-    assert.equal(page.runs[0]!.steps[0]!.inputTokens, undefined);
-    assert.deepEqual(page.runs[0]!.steps[0]!.attempts, []);
+    assert.equal(page.runs[0]!.steps.length, 1);
+    assert.equal(page.runs[0]!.steps[0]!.inputTokens, 4);
     await store.appendBatch(
       [
         event("cache-without-input", "model.call.settled", {
@@ -281,6 +322,7 @@ test("explicit zero physical attempts never fallback to logical metrics and repo
       ],
       { ownerFence },
     );
+    persistNative(root);
     const incomplete = querySessionExecutionSummary(root, { sessionId: "session" });
     assert.equal(incomplete.cachedInputTokens, 5);
     assert.equal(incomplete.inputTokens, 4);

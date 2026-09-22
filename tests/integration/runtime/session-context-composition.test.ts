@@ -150,48 +150,10 @@ test("SQLite context selects one successful main request, never borrows missing 
   const root = mkdtempSync(join(tmpdir(), "pico-context-composition-"));
   const store = new SqliteRuntimeControlStore({ storageRoot: root });
   try {
-    const add = (callId: string, createdAt: number, extra: object = {}) =>
-      store.recordProviderCall({
-        callId,
-        sessionId: "s",
-        purpose: "main",
-        provider: "responses",
-        model: "model-a",
-        status: "succeeded",
-        inputTokens: 10,
-        outputTokens: 2,
-        cacheReadTokens: 3,
-        cacheWriteTokens: 1,
-        cost: 0,
-        createdAt,
-        reported: {
-          usageMetadata: "reported",
-          reportedFields: ["prompt", "completion", "cacheRead"],
-          requestDiagnostic: capture(),
-        },
-        ...extra,
-      });
-    add("main", 100);
-    add("failure", 200, { status: "failed" });
-    add("compaction", 300, { purpose: "compaction" });
-    add("other-session", 400, { sessionId: "other" });
     let latest = getLatestContextRequest(root, "s");
-    assert.equal(latest.providerCallId, "main");
-    assert.equal(latest.inputTokens, 14);
-    assert.equal(latest.cachedInputTokens, 3);
-    assert.equal(latest.physicalAttemptId, undefined);
-    add("missing", 500, { reported: { usageMetadata: "unknown" } });
-    latest = getLatestContextRequest(root, "s");
-    assert.equal(latest.providerCallId, "missing");
     assert.equal(latest.status, "unavailable");
-    assert.equal(latest.composition, undefined);
-    assert.equal(latest.inputTokens, undefined);
     const db = new DatabaseSync(operationalDatabasePath(root));
     try {
-      // This fixture models the additive physical store; its own migration is tested by Storage.
-      db.exec(
-        "CREATE TABLE IF NOT EXISTS usage_physical_attempts (physical_attempt_id TEXT PRIMARY KEY,provider_call_id TEXT,session_id TEXT,status TEXT,record_json TEXT,owner_id TEXT NOT NULL,revision INTEGER NOT NULL,created_at TEXT NOT NULL)",
-      );
       const insert = (id: string, completedAt: string, extra: object = {}) =>
         db
           .prepare(
@@ -202,6 +164,7 @@ test("SQLite context selects one successful main request, never borrows missing 
             id,
             "s",
             JSON.stringify({
+              accountingSource: "physical",
               provider: "responses",
               model: "model-a",
               purpose: "main",

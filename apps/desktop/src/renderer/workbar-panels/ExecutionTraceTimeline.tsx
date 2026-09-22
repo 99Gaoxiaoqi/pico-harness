@@ -33,9 +33,9 @@ export function ExecutionTraceTimeline({
         <p className="tool-panel__muted">
           {coverage.modelAttempts === "physical"
             ? "包含底层调用尝试与重试记录。"
-            : coverage.modelAttempts === "mixed"
-              ? "部分调用包含底层尝试；其余仅记录逻辑调用。"
-              : "仅记录逻辑调用，不包含底层重试次数。"}
+            : coverage.modelAttempts === "partial"
+              ? "部分底层调用尝试记录不完整。"
+              : "暂无底层调用尝试记录。"}
         </p>
         {gaps.length > 0 && (
           <p className="tool-panel__error" role="status">
@@ -361,12 +361,7 @@ export function ExecutionUsageSummary({ summary }: { summary: RuntimeExecutionSu
         </div>
       </dl>
       <p className="tool-panel__muted">统计范围：整个会话。费用采用记录时的估算或已包含金额。</p>
-      {!!summary.historicalBaselineCount && (
-        <p className="tool-panel__muted">
-          包含 {summary.historicalBaselineCount}{" "}
-          条历史汇总基线；已扣除可确认的重复用量，缺少逐请求明细与定价依据。
-        </p>
-      )}
+
       {summary.unpricedCalls > 0 && (
         <p className="tool-panel__muted">
           {summary.unpricedCalls} 次调用费用未知，已知费用不代表完整总额。

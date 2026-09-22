@@ -64,7 +64,6 @@ export interface RuntimeExecutionSummary {
   readonly scope: "session";
   readonly modelCalls: number;
   readonly failedCalls: number;
-  readonly historicalBaselineCount?: number;
   readonly meteredCalls: number;
   readonly unpricedCalls: number;
   readonly inputTokens?: number;
@@ -89,7 +88,7 @@ export interface RuntimeExecutionPage {
     readonly missingModelCallRunIds: readonly string[];
     readonly incompleteRunIds: readonly string[];
     /** Historical and uninstrumented calls never imply physical coverage. */
-    readonly modelAttempts: "logical_only" | "physical" | "mixed";
+    readonly modelAttempts: "missing" | "physical" | "partial";
   };
   readonly nextCursor?: string;
 }
