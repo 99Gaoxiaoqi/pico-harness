@@ -86,6 +86,13 @@ export type RuntimeContextComposition = JsonObject & {
   readonly remainingTools: JsonObject & { readonly count: number; readonly bytes: number };
   readonly unlabelledToolBytes: number;
 };
+export type RuntimeContextCompaction = JsonObject & {
+  readonly checkpointId: string;
+  readonly throughEventId: string;
+  readonly coveredEventCount: number;
+  readonly phase?: "pre_turn" | "mid_turn";
+  readonly estimatedTokens?: number;
+};
 export type RuntimeLatestContextRequest = JsonObject & {
   readonly status: "available" | "unavailable";
   readonly source: "physical" | "none";
@@ -94,32 +101,48 @@ export type RuntimeLatestContextRequest = JsonObject & {
   readonly physicalAttemptId?: string;
   readonly providerId?: string;
   readonly modelId?: string;
+  readonly routeId?: string;
+  readonly connectionId?: string;
   readonly completedAt?: number;
+  readonly contextWindow?: number;
+  readonly contextWindowSource?: string;
   readonly inputTokens?: number;
+  readonly outputTokens?: number;
   readonly cachedInputTokens?: number;
+  readonly usageStatus: "reported" | "partial" | "missing";
+  readonly compositionStatus: "available" | "unrecorded";
   readonly composition?: RuntimeContextComposition;
+  readonly compaction?: RuntimeContextCompaction;
 };
-
-/** Versioned extension of the legacy context JsonObject returned under `context`. */
 export type RuntimeSessionContextSnapshot = JsonObject & {
-  readonly version: 2;
+  readonly version: 3;
   readonly sessionId: SessionId;
   readonly generatedAt: number;
-  readonly traceWatermark: number;
-  /** Full prompt/tool assembly is unavailable; these tokens cover model history only. */
-  readonly coverage?: "model_history_only";
-  readonly historyProjection?: "restored_tool_results";
-  readonly estimatedHistoryTokens?: number;
-  readonly modelHistoryMessageCount?: number;
-  /** Successful compaction checkpoints, excluding fork seeds and hard resets. */
-  readonly compactedCount?: number;
-  readonly latestCompaction?: JsonObject & {
-    readonly checkpointId: string;
-    readonly throughEventId: string;
-    readonly coveredEventCount: number;
+  readonly selectedRoute: JsonObject & {
+    readonly routeId: string;
+    readonly providerId: string;
+    readonly modelId: string;
+    readonly connectionId?: string;
+    readonly declaredContextWindow?: number;
+    readonly contextWindow?: number;
   };
-  readonly sections?: readonly RuntimeContextSection[];
-  readonly latestRequest?: RuntimeLatestContextRequest;
+  readonly latestRequest: RuntimeLatestContextRequest;
+  readonly lastRequestAnchor?: JsonObject & {
+    readonly routeId: string;
+    readonly connectionId?: string;
+    readonly modelId: string;
+    readonly inputTokens: number;
+    readonly outputTokens: number;
+  };
+  readonly modelHistory: JsonObject & {
+    readonly throughSequence: number;
+    readonly messageCount: number;
+    readonly estimatedTokens: number;
+    readonly estimationAlgorithm: "maka_chars_v1";
+    readonly projection: "effective_model_history";
+    readonly compactedCount: number;
+    readonly latestCompaction?: RuntimeContextCompaction;
+  };
 };
 
 export type RuntimeGitReviewSource = "branch" | "staged" | "unstaged";

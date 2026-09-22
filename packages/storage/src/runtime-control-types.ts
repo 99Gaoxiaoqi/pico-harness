@@ -3,6 +3,7 @@ import type {
   CredentialRef,
   ProviderCallPurpose,
   ProviderAttemptLifecycleSnapshot,
+  RequestContextFacts,
 } from "@pico/core";
 export { PROVIDER_CALL_PURPOSES, type ProviderCallPurpose } from "@pico/core";
 
@@ -507,6 +508,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /** Revision snapshots are replacement facts; identity and pricing never follow the current session. */
 export interface PhysicalAttemptRecord extends ProviderAttemptLifecycleSnapshot {
   readonly accountingVersion: 1;
+  readonly contextFacts?: RequestContextFacts;
   readonly accountingSource: "physical";
   readonly providerCallId: string;
   readonly logicalCallId: string;

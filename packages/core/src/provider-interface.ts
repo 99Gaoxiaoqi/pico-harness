@@ -43,7 +43,24 @@ export interface ProviderAttemptLifecycleSnapshot {
   readonly error?: string;
 }
 
+/** Harness facts frozen before dispatch; never inferred from later configuration. */
+export interface RequestContextFacts {
+  readonly version: 1;
+  readonly routeId?: string;
+  readonly connectionId?: string;
+  readonly contextWindow?: number;
+  readonly contextWindowSource?: string;
+  readonly compaction?: {
+    readonly checkpointId: string;
+    readonly throughEventId: string;
+    readonly coveredEventCount: number;
+    readonly phase?: "pre_turn" | "mid_turn";
+    readonly estimatedTokens?: number;
+  };
+}
+
 export interface LLMProviderRequestOptions {
+  readonly contextFacts?: RequestContextFacts;
   /** Harness identity, shared by every retry of one logical model step. */
   logicalCallId?: string;
   /** Must resolve before HTTP dispatch. Failure is local and must not be retried as a provider error. */
