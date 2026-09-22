@@ -210,6 +210,10 @@ Graph operator 的工具由保存的 profile snapshot 加控制用途的 `agent_
 
 Hook 的 `agent` 验证器属于另一条内部路径，不通过 Preset 或 `agent_spawn`。每次核验创建独立持久 Session，复用 `AgentEngine`、自身上下文预算及 `FullCompactor`，使用专用只读工具集合，且不挂载 Hook 服务以避免递归。详见[上下文压缩技术详解](pico-context-compaction-technical-guide.md#9-主会话与子代理的统一范围)。
 
+所有生产子路径共享与主会话相同的压缩状态机：一次 send 的尝试标记不在成功步骤后重置，工具归档转换先持久化再应用，checkpoint 只改变模型历史。子会话独立保存 usage、压缩边界和最近请求快照；父会话的窗口占用不能被子调用覆盖。旧 `runSub` 和独立字符裁剪入口已删除，续用仍恢复同一子 Session 并开启新的执行。
+
+![请求快照与当前历史的计量边界](assets/context-compaction/request-snapshot-blog.png)
+
 ## 10. 如何验证这些边界
 
 这类功能应检查真实调用链，而不仅检查卡片文案。当前相关集成测试覆盖创建、续用、补丁、父子授权和桌面子会话关系，可按以下方式运行：
