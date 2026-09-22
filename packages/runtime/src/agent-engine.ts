@@ -32,7 +32,7 @@ import {
   type EngineDiagnostics,
   SILENT_ENGINE_DIAGNOSTICS,
 } from "./agent-engine-ports.js";
-import { sanitizeToolPairs } from "@pico/runtime/compactor";
+import { sanitizeToolPairs } from "@pico/runtime/tool-message-pairs";
 import type {
   FullCompactionPreview,
   FullCompactionRequest,
@@ -313,7 +313,7 @@ export interface AgentEngineOptions {
   stopAfterSuccessfulToolNames?: readonly string[] | undefined;
   /** Host-owned control plane: preserve model/runtime facts without projecting tool rounds to users. */
   controlPlanePresentation?: boolean | undefined;
-  /** 当前 route 的统一上下文预算；未注入时仅保留旧 Compactor 兼容路径。 */
+  /** 当前 route 的上下文预算；仅用户声明窗口用于主动压缩。 */
   contextBudget?: ContextBudget | undefined;
   /** Stable model + connection identity for durable usage anchors. */
   contextRouteIdentity?: string | undefined;

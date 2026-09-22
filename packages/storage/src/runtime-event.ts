@@ -592,7 +592,7 @@ function assertToolResultRecordedEvent(value: Record<string, unknown>): void {
     throw new RuntimeEventIntegrityError("Runtime tool result body must be an object");
   }
   const storage = body["storage"];
-  if (storage !== "inline" && storage !== "evidence") {
+  if (storage !== "inline") {
     throw new RuntimeEventIntegrityError("Runtime tool result body storage is invalid");
   }
   assertSha256(body["sha256"], "tool.result.recorded.body.sha256");
@@ -625,9 +625,6 @@ function assertToolResultRecordedEvent(value: Record<string, unknown>): void {
         "Runtime inline tool result content does not match sha256",
       );
     }
-  } else {
-    assertOnlyKeys(body, ["storage", "sha256", "sizeBytes"], "tool.result.recorded.body");
-    assertRuntimeEvidenceReference(refs["evidence"]);
   }
 
   const projection = data["projection"];
@@ -892,21 +889,6 @@ function assertRuntimeToolResultRecoveryMarker(value: unknown): void {
   if (value["classification"] !== "indeterminate" && value["classification"] !== "not_dispatched") {
     throw new RuntimeEventIntegrityError("Runtime tool result recovery classification is invalid");
   }
-}
-
-function assertRuntimeEvidenceReference(value: unknown): void {
-  if (!isRecord(value)) {
-    throw new RuntimeEventIntegrityError("Runtime tool result evidence ref must be an object");
-  }
-  assertOnlyKeys(
-    value,
-    ["schemaVersion", "contentHash", "sessionId", "kind"],
-    "tool.result.recorded.refs.evidence",
-  );
-  assertEqual(value["schemaVersion"], 2, "tool.result.recorded.refs.evidence.schemaVersion");
-  assertSha256(value["contentHash"], "tool.result.recorded.refs.evidence.contentHash");
-  assertString(value["sessionId"], "tool.result.recorded.refs.evidence.sessionId");
-  assertEqual(value["kind"], "tool-exchange", "tool.result.recorded.refs.evidence.kind");
 }
 
 function assertOnlyKeys(

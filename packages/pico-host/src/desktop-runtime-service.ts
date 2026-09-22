@@ -1,3 +1,4 @@
+import { requestContextForProvider } from "./runtime-assembly.js";
 import { getLatestContextRequest, readLastRequestAnchor } from "./session-context-composition.js";
 import { querySessionExecution, querySessionExecutionSummary } from "./session-execution-query.js";
 import { projectDeepResearchProgress } from "@pico/core/deep-research";
@@ -1535,21 +1536,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       if (!store) throw new Error("上下文历史缺少持久化事件源");
       // No run, prompt assembly, tool discovery or provider request is created for inspection.
       const history = await readRuntimeModelHistorySnapshot(store, sessionId);
-      let latestRequest;
-      try {
-        latestRequest = getLatestContextRequest(
-          resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.root,
-          sessionId,
-        );
-      } catch {
-        latestRequest = {
-          status: "unavailable",
-          source: "none",
-          reason: "请求快照读取失败。",
-          usageStatus: "missing",
-          compositionStatus: "unrecorded",
-        } as const;
-      }
+      const latestRequest = getLatestContextRequest(
+        resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.root,
+        sessionId,
+      );
       return toJsonValue({
         context: {
           version: 3,
@@ -2022,6 +2012,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           session,
           {
             ledger,
+            contextFacts: requestContextForProvider(active.provider, active.config),
             context: {
               purpose: "compaction",
               sessionId: session.id,

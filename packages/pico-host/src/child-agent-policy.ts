@@ -41,9 +41,10 @@ export type ChildAgentToolConstructor = (
 /** Tool constructors for the current configured child-session profiles. */
 export function createChildAgentToolConstructors(
   diagnostics?: GrepDiagnostics,
+  archive?: BoundToolResultArchiveReader,
 ): Readonly<Record<string, ChildAgentToolConstructor>> {
   return {
-    read_file: (workDir, roots) => new ReadFileTool(roots ?? workDir),
+    read_file: (workDir, roots) => new ReadFileTool(roots ?? workDir, archive),
     write_file: (workDir, roots) => new WriteFileTool(roots ?? workDir),
     edit_file: (workDir, roots) => new EditFileTool(roots ?? workDir),
     bash: (workDir, roots, processSandbox, profile = "workspace-write") =>

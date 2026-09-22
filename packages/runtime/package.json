@@ -103,10 +103,6 @@
       "types": "./dist/code-cell-admission.d.ts",
       "import": "./dist/code-cell-admission.js"
     },
-    "./compactor": {
-      "types": "./dist/compactor.d.ts",
-      "import": "./dist/compactor.js"
-    },
     "./full-compactor": {
       "types": "./dist/full-compactor.d.ts",
       "import": "./dist/full-compactor.js"
@@ -494,6 +490,10 @@
     "./tool-result-archive-resource": {
       "types": "./dist/tool-result-archive-resource.d.ts",
       "import": "./dist/tool-result-archive-resource.js"
+    },
+    "./tool-message-pairs": {
+      "types": "./dist/tool-message-pairs.d.ts",
+      "import": "./dist/tool-message-pairs.js"
     }
   },
   "files": [

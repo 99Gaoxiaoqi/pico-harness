@@ -1,7 +1,7 @@
 import type { Message, ProviderProfile, ToolDefinition } from "@pico/core";
 
 export const DEFAULT_SAFETY_MARGIN_TOKENS = 1024;
-/** Conservative character-to-token conversion used only for character-watermark compaction. */
+/** Maka character-based context diagnostic estimate. */
 export const CHARS_PER_TOKEN = 4;
 export const MATERIALIZED_IMAGE_TOKENS = 2_000;
 export const CONTEXT_ESTIMATION_ALGORITHM = "chars_v1" as const;
@@ -57,11 +57,6 @@ export function estimateModelInputTokens(
   tools: readonly ToolDefinition[],
 ): number {
   return estimateMessagesTokens(messages) + estimateToolDefinitionsTokens(tools);
-}
-
-/** Converts a token budget to the existing character-level Compactor watermark. */
-export function estimateTokenBudgetAsChars(tokens: number): number {
-  return Math.max(0, Math.floor(tokens * CHARS_PER_TOKEN));
 }
 
 export function createContextBudget(

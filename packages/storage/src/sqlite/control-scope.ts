@@ -163,6 +163,11 @@ export const CONTROL_SCOPE: SqliteSchemaScope = {
       CREATE INDEX usage_physical_by_session ON usage_physical_attempts(session_id, created_at);
       CREATE INDEX usage_physical_by_run ON usage_physical_attempts(run_id, created_at);
 
+      CREATE INDEX usage_latest_context_repair ON usage_physical_attempts(
+        session_id, json_extract(record_json,'$.completedAt') DESC, physical_attempt_id DESC
+      ) WHERE status='succeeded' AND json_extract(record_json,'$.purpose')='main'
+        AND json_extract(record_json,'$.contextFacts.version')=1;
+
       CREATE TABLE session_latest_context (
         session_id TEXT PRIMARY KEY,
         physical_attempt_id TEXT NOT NULL REFERENCES usage_physical_attempts(physical_attempt_id) ON DELETE CASCADE,
@@ -191,6 +196,11 @@ export const CONTROL_SCOPE: SqliteSchemaScope = {
         (SELECT COUNT(*) = 0 FROM usage_physical_attempts)
       );
       DROP TABLE context_upgrade_requires_empty_history;
+
+      CREATE INDEX usage_latest_context_repair ON usage_physical_attempts(
+        session_id, json_extract(record_json,'$.completedAt') DESC, physical_attempt_id DESC
+      ) WHERE status='succeeded' AND json_extract(record_json,'$.purpose')='main'
+        AND json_extract(record_json,'$.contextFacts.version')=1;
 
       CREATE TABLE session_latest_context (
         session_id TEXT PRIMARY KEY,

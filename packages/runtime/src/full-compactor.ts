@@ -29,7 +29,7 @@ import {
   COMPACTION_SUMMARY_OPEN_TAG,
 } from "@pico/core";
 import { estimateMessagesTokens } from "./context-budget.js";
-import { sanitizeToolPairs } from "./compactor.js";
+import { sanitizeToolPairs } from "./tool-message-pairs.js";
 import { findSafeCompactionCut } from "./safe-compaction-boundary.js";
 import { withProviderCallContext } from "./provider-call-context.js";
 

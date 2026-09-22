@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { contextSummaryMessage } from "../../fixtures/context-summary.js";
 import { mkdtemp, mkdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -83,7 +84,7 @@ test("checkpoint model history reaches read-only context RPC and Inspector uncha
         coveredEventCount: covered.length,
         sourceDigest: computeCheckpointSourceDigest(covered),
         throughEventId: covered.at(-1)!.eventId,
-        summary: { role: "assistant", content: "Summary of the first two exchanges." },
+        summary: contextSummaryMessage("Summary of the first two exchanges."),
       });
       const snapshot = await readRuntimeModelHistorySnapshot(session.runtimeEventStore!, sessionId);
       assert.deepEqual(await run.readModelHistory(), snapshot.messages);
@@ -119,28 +120,23 @@ test("checkpoint model history reaches read-only context RPC and Inspector uncha
     desktop = openDesktop();
     for (let index = 0; index < 2; index += 1) {
       const report = await readContext();
-      assert.equal(report.modelHistoryMessageCount, 3);
-      assert.equal(report.estimatedHistoryTokens, estimateModelInputTokens(expected.messages, []));
-      assert.equal(report.traceWatermark, expected.throughSequence);
-      assert.equal(report.compactedCount, 1);
+      assert.equal(report.modelHistory.messageCount, 3);
+      assert.equal(
+        report.modelHistory.estimatedTokens,
+        estimateModelInputTokens(expected.messages, []),
+      );
+      assert.equal(report.modelHistory.throughSequence, expected.throughSequence);
+      assert.equal(report.modelHistory.compactedCount, 1);
       assert.equal(physicalCount(), originalPhysicalCount);
-      assert.deepEqual(report.latestCompaction, expected.latestCompaction);
-      assert.equal(report.coverage, "model_history_only");
+      assert.deepEqual(report.modelHistory.latestCompaction, expected.latestCompaction);
+      assert.equal(report.version, 3);
+      assert.equal(report.modelHistory.projection, "effective_model_history");
+      assert.equal(report.modelHistory.estimationAlgorithm, "maka_chars_v1");
       assert.equal(report.estimatedInputTokens, undefined);
       assert.equal(report.remainingTokens, undefined);
       assert.equal(report.usedPercent, undefined);
-      assert.equal(report.sections!.find((section) => section.id === "system")!.tokens, undefined);
-      assert.equal(report.sections!.find((section) => section.id === "tools")!.tokens, undefined);
       const view = contextView(report);
-      assert.equal(
-        contextUsagePercent({
-          ...view,
-          usedPercent: 99,
-          estimatedInputTokens: 100,
-          inputBudgetTokens: 1000,
-        }),
-        undefined,
-      );
+      assert.equal(contextUsagePercent(view), undefined);
       const html = renderToStaticMarkup(
         React.createElement(InspectorWorkbarPanel, {
           context: view,
@@ -150,7 +146,7 @@ test("checkpoint model history reaches read-only context RPC and Inspector uncha
           onSelectTrace() {},
         }),
       );
-      assert.match(html, /当前模型历史（估算）/u);
+      assert.match(html, /当前模型历史/u);
       assert.match(html, /compaction-1/u);
       assert.match(html, /1 次/u);
       assert.doesNotMatch(html, /role="progressbar"|<dt>剩余<|<dt>已使用</u);
@@ -206,7 +202,7 @@ test("checkpoint model history reaches read-only context RPC and Inspector uncha
       );
       assert.equal(afterReset.messages.length, 1);
       assert.equal(afterReset.compactedCount, 1);
-      assert.equal(afterReset.latestCompaction?.checkpointId, "compaction-1");
+      assert.equal(afterReset.latestCompaction, undefined);
     } finally {
       await recovered.close();
     }

@@ -11,10 +11,6 @@
       "types": "./dist/daemon-main.d.ts",
       "import": "./dist/daemon-main.js"
     },
-    "./product-compactor": {
-      "types": "./dist/product-compactor.d.ts",
-      "import": "./dist/product-compactor.js"
-    },
     "./product-full-compactor": {
       "types": "./dist/product-full-compactor.d.ts",
       "import": "./dist/product-full-compactor.js"

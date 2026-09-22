@@ -23,7 +23,7 @@ import { RuntimeRun } from "@pico/pico-host/product-runtime-run";
 import type { Message } from "@pico/core";
 import { RuntimeEventDecodeError, decodeRuntimeEvent } from "@pico/storage/runtime-event";
 
-test("tool.result.recorded codec enforces inline integrity and evidence refs", () => {
+test("tool.result.recorded codec enforces inline integrity and rejects retired evidence", () => {
   const inline = toolResultEvent({
     body: inlineBody("你好, tool"),
     projection: {
@@ -76,7 +76,7 @@ test("tool.result.recorded codec enforces inline integrity and evidence refs", (
       truncated: true,
     },
   });
-  assert.deepEqual(decodeRuntimeEvent(evidence), evidence);
+  assert.throws(() => decodeRuntimeEvent(evidence), /storage is invalid/);
   assert.throws(
     () =>
       decodeRuntimeEvent({
@@ -89,10 +89,7 @@ test("tool.result.recorded codec enforces inline integrity and evidence refs", (
     (error: unknown) =>
       error instanceof RuntimeEventDecodeError && error.code === "invalid_payload",
   );
-  const projected = projectRuntimeModelMessage(evidence);
-  assert.match(projected?.content ?? "", /bounded preview/u);
-  assert.match(projected?.content ?? "", /pico:\/\/evidence\/source-session\/[a-f0-9]{64}/u);
-  assert.equal(projected?.providerData, undefined);
+  assert.throws(() => projectRuntimeModelMessage(evidence), /Retired evidence/);
 
   assert.throws(
     () =>
@@ -391,25 +388,26 @@ test("Runtime compaction records a checkpoint and preserves the immutable Sessio
       compactor: new FullCompactor({ provider, maxAttempts: 1 }),
       request: {
         inputBudgetTokens: 4_000,
-        targetRetainedTokens: 1,
+        targetRetainedTokens: 0,
+        phase: "standalone",
         trigger: "manual",
       },
     }),
   );
 
   assert.ok(result);
-  assert.equal(result.preview.compactedCount, 4);
+  assert.equal(result.preview.compactedCount, 6);
   assert.equal(result.beforeMessageCount, 6);
-  assert.equal(result.afterMessageCount, 3);
+  assert.equal(result.afterMessageCount, 1);
   assert.deepEqual(session.getHistory(), originalHistory);
 
   const events = await session.runtimeEventStore!.readSession(session.id);
   assert.equal(events.filter((event) => event.kind === "context.checkpoint.recorded").length, 1);
   const modelHistory = materializeRuntimeHistory(events);
-  assert.equal(modelHistory.length, 3);
+  assert.equal(modelHistory.length, 1);
   assert.equal(modelHistory[0]?.providerData?.["picoKind"], "runtime_checkpoint");
   assert.match(modelHistory[0]?.content ?? "", /canonical checkpoint summary/u);
-  assert.deepEqual(modelHistory.slice(1), originalHistory.slice(4));
+  assert.deepEqual(modelHistory.slice(1), []);
 });
 
 test("RuntimeRun durably records transcript ToolResult without polluting model history", async (t) => {
