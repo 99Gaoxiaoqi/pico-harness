@@ -5,13 +5,12 @@ tags:
   - Agent Harness
   - Architecture
   - pico-harness
-updated: 2026-09-21
-source_commit: 0092022f
+updated: 2026-09-23
 ---
 
 # 从一句话到一次可靠执行：Pico 当前架构
 
-> 本文按 `0092022f` 的生产代码重新编写。文件名与路径保留，方便已有链接继续使用；正文及技术流程图描述当前实现。封面仅表达 Harness 概念，不定义模块、权限或存储协议。
+> 架构主线于 2026-09-21 核对，上下文和请求统计章节于 2026-09-23 同步更新。封面仅表达 Harness 概念，不定义模块、权限或存储协议。
 
 ![Pico Harness 架构文章概念封面](../images/pico-harness-architecture/cover.png)
 
@@ -106,6 +105,10 @@ Pico 通过注册表和执行链处理能力白名单、参数、安全中间件
 模板包含 Goal、Progress、Key Decisions、Next Steps、Critical Context 五段，当前硬性校验要求其中除 Key Decisions 外的四段按序有效。结构有效并不证明每个事实都被模型保留。
 
 原始历史不会因为语义压缩而删除；超过入口 1 MiB 上限、从未保存的物理输出则不在这个承诺之内。完整细节及配图见[上下文压缩技术详解](../pico-context-compaction-technical-guide.md)。
+
+压缩尝试标记属于整次发送，模型步骤成功后不重置。归档转换是持久事件，查询不临时生成投影，重试也不恢复已归档正文。主代理、配置型子代理及 Hook verifier 共用这套执行策略，各自保存 Session 状态。
+
+追踪面板使用最近成功主请求冻结的实际输入／窗口；当前历史采用 `chars_v1` 估算，累计 Token 则来自全部物理请求。组成保存字节事实并另行换算估算值。三个口径分开呈现，压缩完成不会倒改已经发生的请求快照。
 
 ## 六、Session 的事实保存在 SQLite
 
