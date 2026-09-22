@@ -2036,8 +2036,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           agentSwarmAuthorization: "none",
         });
         const checkpoint = await runtimeRun.run(async () => {
-          const entries = await runtimeRun.readModelHistoryEntries();
-          const historyTokens = estimateMessagesTokens(entries.map(({ message }) => message));
           const result = await recordRuntimeCompactionCheckpoint({
             logger,
             session,
@@ -2045,13 +2043,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
             compactor: new FullCompactor({ provider, logger }),
             request: {
               inputBudgetTokens: budget.inputBudgetTokens,
-              targetRetainedTokens: Math.max(
-                1,
-                Math.min(
-                  Math.floor(budget.inputBudgetTokens * 0.5),
-                  Math.floor(historyTokens * 0.5),
-                ),
-              ),
+              phase: "standalone",
+              targetRetainedTokens: 0,
               trigger: "manual",
             },
           });
