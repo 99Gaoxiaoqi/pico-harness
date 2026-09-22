@@ -2,6 +2,8 @@ import type {
   CanonicalTranscriptToolStart,
   CommitReceipt,
   Message,
+  ToolDefinition,
+  RequestContextFacts,
   ToolCall,
   ToolResult,
   ToolResultEnvelopeInput,
@@ -62,6 +64,11 @@ export interface RuntimeRunPort<Session, Registry, ToolContext, RecoveryProbeRes
   commitMessageOnce(session: Session, eventId: string, message: Message): Promise<CommitReceipt>;
   setToolResultArchiveAvailable?(available: boolean): void;
   readModelHistory(includeEventIds?: boolean): Promise<Message[]>;
+  prepareToolResultProjections(options: {
+    readonly stepNumber: number;
+    readonly tools: readonly ToolDefinition[];
+  }): Promise<void>;
+  readContextCompactionBoundary(): Promise<RequestContextFacts["compaction"]>;
   readModelHistoryEntries(): Promise<readonly RuntimeHistoryEntry[]>;
   readSessionProjectionEntries(): Promise<readonly RuntimeHistoryEntry[]>;
   findLastCompactionCheckpoint(): Promise<RuntimeLastCompactionCheckpoint | undefined>;
