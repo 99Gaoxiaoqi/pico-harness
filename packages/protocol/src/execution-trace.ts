@@ -1,3 +1,25 @@
+export interface RuntimeExecutionAttempt {
+  readonly attemptId: string;
+  readonly attempt: number;
+  readonly provider: string;
+  readonly model: string;
+  readonly startedAt: string;
+  readonly completedAt: string;
+  readonly status: "succeeded" | "failed" | "cancelled" | "interrupted";
+  readonly latencyMs: number;
+  readonly timeToFirstTokenMs?: number;
+  readonly httpStatus?: number;
+  readonly finishReason?: string;
+  readonly usageBasis: "reported" | "partial" | "missing";
+  readonly inputTokens?: number;
+  readonly outputTokens?: number;
+  readonly cachedInputTokens?: number;
+  readonly reasoningTokens?: number;
+  readonly error?: string;
+  readonly costCNY?: number;
+  readonly costStatus?: "estimated" | "included" | "unknown";
+}
+
 /** Read-only causal projection of the existing event ledger; never a second trace store. */
 export interface RuntimeExecutionStep {
   readonly id: string;
@@ -9,6 +31,15 @@ export interface RuntimeExecutionStep {
   readonly status: "running" | "completed" | "failed" | "cancelled" | "interrupted";
   readonly durationMs?: number;
   readonly purpose?: string;
+  readonly providerId?: string;
+  readonly modelId?: string;
+  readonly pricingKey?: string;
+  readonly retries?: number;
+  readonly firstTokenLatencyMs?: number;
+  readonly cachedInputTokens?: number;
+  readonly reasoningTokens?: number;
+  readonly permissionDecision?: "approved" | "rejected";
+  readonly attempts?: readonly RuntimeExecutionAttempt[];
   readonly detail?: string;
   readonly input?: string;
   readonly output?: string;
@@ -39,6 +70,13 @@ export interface RuntimeExecutionSummary {
   readonly outputTokens?: number;
   readonly costCNY?: number;
   readonly latencyMs?: number;
+  readonly cachedInputTokens?: number;
+  readonly reasoningTokens?: number;
+  readonly toolCalls?: number;
+  readonly toolDurationMs?: number;
+  readonly physicalAttempts?: number;
+  readonly retries?: number;
+  readonly cacheCoverage?: "complete" | "partial" | "missing";
 }
 export interface RuntimeExecutionPage {
   readonly schemaVersion: 1;
@@ -49,8 +87,8 @@ export interface RuntimeExecutionPage {
     readonly oversizedRunIds: readonly string[];
     readonly missingModelCallRunIds: readonly string[];
     readonly incompleteRunIds: readonly string[];
-    /** Current ledger counts logical calls, not physical provider attempts. */
-    readonly modelAttempts: "logical_only";
+    /** Historical and uninstrumented calls never imply physical coverage. */
+    readonly modelAttempts: "logical_only" | "physical" | "mixed";
   };
   readonly nextCursor?: string;
 }
