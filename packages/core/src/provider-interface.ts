@@ -24,9 +24,32 @@ export interface ProviderPhysicalAttempt {
   readonly costStatus?: "estimated" | "included" | "unknown";
 }
 
+/** Durable admission is prepared evidence, never proof that the server received a request. */
+export interface ProviderAttemptLifecycleSnapshot {
+  readonly physicalAttemptId: string;
+  readonly revision: number;
+  readonly attempt: number;
+  readonly provider: string;
+  readonly model: string;
+  readonly startedAt: string;
+  readonly status: "prepared" | "observed" | "succeeded" | "failed" | "cancelled" | "interrupted";
+  readonly completedAt?: string;
+  readonly latencyMs?: number;
+  readonly timeToFirstTokenMs?: number;
+  readonly httpStatus?: number;
+  readonly finishReason?: string;
+  readonly usage?: Usage;
+  readonly usageBasis: "reported" | "partial" | "missing";
+  readonly error?: string;
+}
+
 export interface LLMProviderRequestOptions {
   /** Harness identity, shared by every retry of one logical model step. */
   logicalCallId?: string;
+  /** Must resolve before HTTP dispatch. Failure is local and must not be retried as a provider error. */
+  onProviderAttemptStart?: (snapshot: ProviderAttemptLifecycleSnapshot) => Promise<void>;
+  /** Observed and terminal revisions; sink failures must never cause another provider request. */
+  onProviderAttemptUpdate?: (snapshot: ProviderAttemptLifecycleSnapshot) => Promise<void>;
   retryAttempt?: number;
   /** Secret-free, settled physical dispatch facts for the canonical event ledger. */
   onProviderAttempt?: (attempt: ProviderPhysicalAttempt) => void;
