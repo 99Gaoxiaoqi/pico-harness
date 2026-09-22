@@ -65,7 +65,7 @@ export interface ModelResponseDiagnostic {
     | "UND_ERR_SOCKET";
 }
 
-/** Does not inherit HTTP/network error types: diagnostics must not change retry policy. */
+/** Safe diagnostics retain enough transport facts for the explicit, bounded retry policy. */
 export class ModelCommunicationError extends Error {
   readonly diagnostic: Readonly<ModelResponseDiagnostic>;
 
