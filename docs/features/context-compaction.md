@@ -60,3 +60,5 @@ node scripts/run-integration-tests.mjs maka-compaction compaction-rolling-digest
 ```
 
 真实模型验证还需执行 `tests/e2e/` 的自动触发、摘要质量、工具归档和 Hook 场景。受控测试能覆盖指定分支，不代表生产负载中的自然触发概率。最终通过数量和实机结果以本轮验收记录为准，不复用旧版本测试结论。
+
+本轮执行结果见[2026-09-23 对齐验收记录](../verification/context-maka-alignment-2026-09-23.md)。
