@@ -216,6 +216,7 @@ const livePlanAdmissions = new Set<string>();
 const liveConfiguredChildAdmissions = new Set<string>();
 import {
   assembleRuntimeModels,
+  requestContextForProvider,
   billingRouteForProvider,
   type RuntimeProviderFactory,
 } from "@pico/pico-host/runtime-assembly";
@@ -1513,6 +1514,7 @@ export async function executeAgentRuntime(
                 {
                   ledger,
                   recordRuntimeEvents: false,
+                  contextFacts: requestContextForProvider(kind, currentConfig),
                   context: { purpose: "memory_review", sessionId: session.id },
                 },
               );
@@ -2581,7 +2583,12 @@ export async function executeAgentRuntime(
     }
     if (dependencies.configuredSubagentChild) {
       const definition = dependencies.configuredSubagentChild.definition;
-      const childAgentToolConstructors = createChildAgentToolConstructors(logger);
+      const childAgentToolConstructors = createChildAgentToolConstructors(
+        logger,
+        session.runtimeEventStore
+          ? bindToolResultArchiveReader(session.runtimeEventStore, session.id)
+          : undefined,
+      );
       const processSandbox = {
         config: { ...picoConfig.sandbox, network: "deny" as const },
         scratchRoot: join(picoHome, "sandboxes", session.id, "subagents"),

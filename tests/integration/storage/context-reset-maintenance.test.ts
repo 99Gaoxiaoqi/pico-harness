@@ -18,7 +18,7 @@ function seed(database: DatabaseSync, version: 7 | 8) {
   migrateOperationalDatabaseSync(database, ALL_WORKSPACE_SQLITE_SCOPES);
   if (version === 7) {
     // Simulate the exact preceding control shape; the maintenance script never migrates it.
-    database.exec(`DROP TRIGGER usage_session_deleted; DROP TABLE session_latest_context;
+    database.exec(`DROP TRIGGER usage_session_deleted; DROP TABLE session_latest_context; DROP INDEX usage_latest_context_repair;
       CREATE TRIGGER usage_session_deleted AFTER DELETE ON sessions BEGIN
         DELETE FROM usage_accounting_versions WHERE session_id=OLD.session_id;
         INSERT OR IGNORE INTO usage_deleted_sessions(session_id) VALUES(OLD.session_id);

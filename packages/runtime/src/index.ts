@@ -34,7 +34,7 @@ export * from "./configured-subagent-tools.js";
 export * from "./context-evidence.js";
 export * from "./context-budget.js";
 export * from "./cron-service.js";
-export * from "./compactor.js";
+export * from "./tool-message-pairs.js";
 export * from "./full-compactor.js";
 export * from "./runtime-compaction-checkpoint.js";
 export * from "./deadline.js";

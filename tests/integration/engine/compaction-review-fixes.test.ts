@@ -1,3 +1,4 @@
+import { contextSummaryMessage } from "../../fixtures/context-summary.js";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -45,10 +46,7 @@ test("findLastCompactionCheckpoint: 遇 hard-reset checkpoint 返回 undefined",
       coveredEventCount: 2,
       sourceDigest: computeCheckpointSourceDigest(beforeNormal.slice(0, 2)),
       throughEventId: beforeNormal[1]!.eventId,
-      summary: {
-        role: "assistant",
-        content: wrapFullCompactionSummary("## 任务目标\n正常摘要"),
-      },
+      summary: contextSummaryMessage("正常摘要"),
     });
     // 再写一个 hard-reset checkpoint
     const beforeReset = await seedRun.readModelHistoryEntries();
