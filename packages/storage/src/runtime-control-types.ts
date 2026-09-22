@@ -524,6 +524,8 @@ export interface PhysicalAttemptRecord extends ProviderAttemptLifecycleSnapshot 
   readonly retryAttempt: number;
   readonly costCNY?: number;
   readonly costStatus: "estimated" | "included" | "unknown";
+  /** Request-time reason only; never reconstructed from the current price catalog. */
+  readonly costUnknownReason?: string;
   readonly pricingVersion: string;
   readonly pricingBasis?: Readonly<Record<string, unknown>>;
   readonly attemptCoverage?: "complete" | "partial";

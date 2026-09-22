@@ -8,7 +8,10 @@ import { Session } from "@pico/pico-host/session";
 import { resolvePicoPaths } from "@pico/pico-host";
 import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
 import { RuntimeRun } from "@pico/pico-host/product-runtime-run";
-import { CostTracker } from "@pico/runtime/cost-tracker";
+import { CostTracker } from "@pico/pico-host/cost-tracker";
+import { catalogPricing } from "@pico/pico-host/catalog-pricing";
+import { billingRouteForProvider } from "@pico/runtime/provider-billing-route";
+import { estimateCost, getPricingEntry } from "@pico/runtime/pricing";
 import { SqliteRuntimeControlStore } from "@pico/storage";
 import { querySessionExecution } from "../../packages/pico-host/src/session-execution-query.js";
 import { getLatestContextRequest } from "../../packages/pico-host/src/session-context-composition.js";
@@ -31,9 +34,11 @@ test(
     });
     try {
       await session.recover();
+      const billingRoute = billingRouteForProvider(model.provider, model.config);
+      const expectedPricing = getPricingEntry(billingRoute, catalogPricing);
       const tracked = new CostTracker(
         new AiSdkProvider(model.provider, { ...model.config, sessionId: session.id }),
-        { provider: model.provider, model: model.config.model, baseUrl: model.config.baseURL },
+        billingRoute,
         session,
         { ledger, context: { purpose: "main", sessionId: session.id } },
       );
@@ -61,8 +66,27 @@ test(
       const succeeded = attempts.find((a) => a.status === "succeeded");
       assert.ok(succeeded);
       assert.equal(succeeded.usageBasis, "reported");
+      assert.equal(succeeded.route, model.config.baseURL.replace(/\/+$/, ""));
+      assert.ok(succeeded.usage);
+      const expectedCost = estimateCost(
+        { ...billingRoute, pricing: expectedPricing },
+        succeeded.usage,
+      );
+      assert.equal(succeeded.costStatus, expectedCost.status);
+      if (expectedCost.status === "unknown") {
+        assert.equal(succeeded.costCNY, undefined);
+        assert.ok(succeeded.costUnknownReason);
+      } else {
+        assert.equal(succeeded.costCNY, expectedCost.costCNY);
+      }
       const page = querySessionExecution(ledger.storageRoot, { sessionId: session.id });
       assert.equal(page.summary.physicalAttempts, attempts.length);
+      const projectedAttempt = page.runs
+        .flatMap((row) => row.steps)
+        .flatMap((step) => step.attempts ?? [])
+        .find((attempt) => attempt.attemptId === succeeded.physicalAttemptId);
+      assert.equal(projectedAttempt?.costStatus, succeeded.costStatus);
+      assert.equal(projectedAttempt?.costUnknownReason, succeeded.costUnknownReason);
       const context = getLatestContextRequest(ledger.storageRoot, session.id);
       assert.equal(context.status, "available");
       assert.equal(context.physicalAttemptId, succeeded.physicalAttemptId);
@@ -75,6 +99,7 @@ test(
           ttftMs: succeeded.timeToFirstTokenMs,
           httpStatus: succeeded.httpStatus,
           costStatus: succeeded.costStatus,
+          costUnknownReason: succeeded.costUnknownReason,
           contextBytes: context.composition?.totalBytes,
         }),
       );
