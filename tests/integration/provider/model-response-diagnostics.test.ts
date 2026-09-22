@@ -1,11 +1,12 @@
+import { capturePhysicalAttempts } from "../../fixtures/native-accounting.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createServer } from "node:http";
 import { ModelCommunicationError, type ModelCommunicationCategory } from "@pico/core";
 import { AiSdkProvider } from "@pico/pico-host/provider/ai-sdk-provider";
-import { CostTracker, type ProviderCallLedger } from "@pico/pico-host/cost-tracker";
+import { CostTracker } from "@pico/pico-host/cost-tracker";
 import { defaultIsRetryableError } from "@pico/runtime/provider-retry";
-import type { ProviderCallRecord } from "@pico/storage/runtime-control-types";
+import type { PhysicalAttemptRecord } from "@pico/storage/runtime-control-types";
 
 test("HTTP stream diagnostics distinguish failures through SDK and ledger without exposing remote data", async (context) => {
   const secret = "PRIVATE_RESPONSE_KEY_PROMPT_MUST_NOT_LEAK";
@@ -32,14 +33,8 @@ test("HTTP stream diagnostics distinguish failures through SDK and ledger withou
     model: "synthetic",
     apiKey: secret,
   });
-  const records: ProviderCallRecord[] = [];
-  const ledger: ProviderCallLedger = {
-    recordProviderCall(record) {
-      const stored = { ...record, createdAt: Date.now() };
-      records.push(stored);
-      return { record: stored, inserted: true };
-    },
-  };
+  const records: PhysicalAttemptRecord[] = [];
+  const ledger = capturePhysicalAttempts(records);
   const tracked = new CostTracker(provider, "synthetic", undefined, { ledger });
   const messages = [{ role: "user" as const, content: secret }];
   const sse = (...events: unknown[]) =>
@@ -108,9 +103,9 @@ test("HTTP stream diagnostics distinguish failures through SDK and ledger withou
         assert.equal(ids.has(error.diagnostic.diagnosticId), false);
         ids.add(error.diagnostic.diagnosticId);
         const record = records.at(-1)!;
-        assert.equal(record.status, "failed");
-        assert.equal(record.reported?.["errorCategory"], entry.category);
-        assert.deepEqual(record.reported?.["responseDiagnostic"], error.diagnostic);
+        assert.ok(["failed", "interrupted"].includes(record.status));
+        assert.equal(record.httpStatus, 200);
+        assert.equal(record.usageBasis, "missing");
         assert.doesNotMatch(
           JSON.stringify(error) + error.message + JSON.stringify(records),
           new RegExp(secret),
@@ -149,32 +144,21 @@ test("SDK failures before HTTP response are not attributed to server stream erro
   );
 });
 
-test("provider ledger does not persist arbitrary error names or invalid HTTP status metadata", async () => {
-  let stored: unknown;
-  const error = Object.assign(new Error("PRIVATE_ERROR_MESSAGE"), {
-    name: "PRIVATE_ERROR_NAME",
-    statusCode: 12345,
-  });
+test("providers without physical lifecycle cannot create accounting facts", async () => {
+  const records: PhysicalAttemptRecord[] = [];
   const tracker = new CostTracker(
     {
-      modelName: "synthetic",
-      generate: async () => {
-        throw error;
+      async generate() {
+        throw Object.assign(new Error("PRIVATE_ERROR_MESSAGE"), {
+          name: "PRIVATE_ERROR_NAME",
+          statusCode: 12345,
+        });
       },
     },
     "synthetic",
     undefined,
-    {
-      ledger: {
-        recordProviderCall(record) {
-          stored = record;
-          return { record: { ...record, createdAt: 1 }, inserted: true };
-        },
-      },
-    },
+    { ledger: capturePhysicalAttempts(records) },
   );
   await assert.rejects(tracker.generate([{ role: "user", content: "synthetic" }], []));
-  const serialized = JSON.stringify(stored);
-  assert.doesNotMatch(serialized, /PRIVATE_ERROR|12345/u);
-  assert.match(serialized, /"errorName":"Error"/u);
+  assert.deepEqual(records, []);
 });

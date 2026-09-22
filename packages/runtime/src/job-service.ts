@@ -396,18 +396,8 @@ export class JobService {
   listPhysicalAttempts(filter: PhysicalAttemptFilter = {}): PhysicalAttemptRecord[] {
     return this.store.listPhysicalAttempts(filter);
   }
-  listProviderCalls(filter: UsageLedgerFilter = {}): ProviderCallRecord[] {
-    return this.store.listProviderCalls(filter);
-  }
   listAccountingProviderCalls(filter: UsageLedgerFilter = {}): ProviderCallRecord[] {
     return this.store.listAccountingProviderCalls(filter);
-  }
-
-  recordProviderCall(record: Omit<ProviderCallRecord, "createdAt"> & { createdAt?: number }): {
-    record: ProviderCallRecord;
-    inserted: boolean;
-  } {
-    return this.store.recordProviderCall(record);
   }
 
   getUsageSummary(filter: UsageLedgerFilter = {}): UsageLedgerSummary {

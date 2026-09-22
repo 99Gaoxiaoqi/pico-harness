@@ -1,12 +1,13 @@
+import { capturePhysicalAttempts } from "../fixtures/native-accounting.js";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { test } from "node:test";
-import { CostTracker, type ProviderCallLedger } from "@pico/pico-host/cost-tracker";
+import { CostTracker } from "@pico/pico-host/cost-tracker";
 import { LLMStatusError } from "@pico/core";
 import { createProvider } from "@pico/pico-host/provider/factory";
 import { toCanonicalUsage } from "@pico/core";
 import type { Message, ToolDefinition, Usage } from "@pico/core";
-import type { ProviderCallRecord } from "@pico/storage/runtime-control-types";
+import type { PhysicalAttemptRecord } from "@pico/storage/runtime-control-types";
 import { configuredUserDefaultRealModel } from "./real-llm-user-model.js";
 
 const TEST_TIMEOUT_MS = 5 * 60_000;
@@ -30,17 +31,8 @@ realModelTest(
     }
     const model = configured.route.model;
     const provider = createProvider(configured.provider, configured.config);
-    const records: ProviderCallRecord[] = [];
-    const ledger: ProviderCallLedger = {
-      recordProviderCall(record) {
-        const stored = { ...record, createdAt: Date.now() + records.length };
-        records.push(stored);
-        return { record: stored, inserted: true };
-      },
-      listProviderCalls() {
-        return records.map((record) => structuredClone(record));
-      },
-    };
+    const records: PhysicalAttemptRecord[] = [];
+    const ledger = capturePhysicalAttempts(records);
     let call = 0;
     const tracked = new CostTracker(provider, { provider: "claude", model }, undefined, {
       ledger,
@@ -219,9 +211,9 @@ function assertCanonicalPromptTotal(usage: Usage): void {
   );
 }
 
-function requestChangeReason(record: ProviderCallRecord | undefined): unknown {
+function requestChangeReason(record: PhysicalAttemptRecord | undefined): unknown {
   assert.ok(record);
-  const diagnostic = record.reported?.["requestDiagnostic"];
+  const diagnostic = record.requestDiagnostic;
   assert.equal(typeof diagnostic, "object");
   assert.ok(diagnostic);
   return (diagnostic as Record<string, unknown>)["changeReason"];

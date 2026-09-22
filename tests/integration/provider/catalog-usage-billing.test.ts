@@ -1,3 +1,5 @@
+import { reportFixtureAttempt } from "../../fixtures/native-accounting.js";
+import type { LLMProvider } from "@pico/core";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -26,8 +28,14 @@ test("catalog and override pricing are recorded per call and projected without p
     apiKey: "unused",
     capabilities,
   };
-  const provider = {
-    async generate() {
+  const provider: LLMProvider = {
+    async generate(_messages, _tools, options) {
+      await reportFixtureAttempt(options, "openai", "gpt-4o", {
+        promptTokens: 1000000,
+        completionTokens: 1000000,
+        inputTokens: 1000000,
+        reportedFields: ["prompt", "completion", "input"],
+      });
       return {
         role: "assistant" as const,
         content: "ok",
@@ -71,7 +79,7 @@ test("catalog and override pricing are recorded per call and projected without p
     undefined,
     { ledger },
   ).generate([], []);
-  const calls = ledger.listProviderCalls();
+  const calls = ledger.listAccountingProviderCalls();
   assert.equal(calls.length, 3);
   assert.equal(calls.filter((c) => c.reported?.costStatus === "estimated").length, 2);
   assert.equal(calls.filter((c) => c.reported?.costStatus === "unknown").length, 1);
