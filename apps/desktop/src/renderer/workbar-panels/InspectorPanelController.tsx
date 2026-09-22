@@ -1,4 +1,8 @@
-import type { RuntimeExecutionPage, RuntimeSessionContextSnapshot } from "@pico/protocol";
+import type {
+  RuntimeExecutionPage,
+  RuntimeExecutionSummary,
+  RuntimeSessionContextSnapshot,
+} from "@pico/protocol";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   InspectorWorkbarPanel,
@@ -21,6 +25,11 @@ export function InspectorPanelController({
   const [pages, setPages] = useState<readonly RuntimeExecutionPage[]>([]);
   const [selectedTraceId, setSelectedTraceId] = useState<string>();
   const [loading, setLoading] = useState(false);
+  const [loadingEarlier, setLoadingEarlier] = useState(false);
+  const [summary, setSummary] = useState<RuntimeExecutionSummary>();
+  const [summaryError, setSummaryError] = useState<string>();
+  const [summaryLoading, setSummaryLoading] = useState(false);
+  const summaryRequest = useRef(0);
   const [error, setError] = useState<string>();
   const [contextError, setContextError] = useState<string>();
   const generation = useRef(0);
@@ -31,6 +40,28 @@ export function InspectorPanelController({
   enabled.current = active;
   const scopeRef = useRef(scope);
   scopeRef.current = scope;
+
+  const refreshSummary = useCallback(async () => {
+    if (!enabled.current) return;
+    const epoch = generation.current;
+    const request = ++summaryRequest.current;
+    const current = () =>
+      enabled.current &&
+      scopeRef.current === scope &&
+      epoch === generation.current &&
+      request === summaryRequest.current;
+    setSummaryLoading(true);
+    try {
+      const result = await invokeWorkbarRuntime(runtime, "session.execution.summary", scope);
+      if (!current()) return;
+      setSummary(result);
+      setSummaryError(undefined);
+    } catch (cause) {
+      if (current()) setSummaryError(workbarErrorMessage(cause));
+    } finally {
+      if (current()) setSummaryLoading(false);
+    }
+  }, [runtime, scope]);
 
   const refreshContext = useCallback(async () => {
     if (!enabled.current) return;
@@ -62,6 +93,7 @@ export function InspectorPanelController({
         epoch === generation.current &&
         request === traceRequest.current;
       setLoading(true);
+      setLoadingEarlier(more);
       setError(undefined);
       try {
         // Re-read from the newest page with fresh cursors: new runs may shift every page.
@@ -80,7 +112,10 @@ export function InspectorPanelController({
       } catch (cause) {
         if (current()) setError(workbarErrorMessage(cause));
       } finally {
-        if (current()) setLoading(false);
+        if (current()) {
+          setLoading(false);
+          setLoadingEarlier(false);
+        }
       }
     },
     [runtime, scope],
@@ -95,17 +130,20 @@ export function InspectorPanelController({
     setError(undefined);
     setContextError(undefined);
     setLoading(false);
-    if (active) {
-      void refreshTrace();
-      void refreshContext();
-    }
+    setSummary(undefined);
+    setSummaryError(undefined);
+    setSummaryLoading(false);
+    setLoadingEarlier(false);
     return () => {
       generation.current += 1;
     };
-  }, [scope, active, refreshTrace, refreshContext]);
+  }, [scope]);
 
   useEffect(() => {
     if (!active) return;
+    void refreshTrace();
+    void refreshContext();
+    void refreshSummary();
     let disposed = false;
     let running = false;
     let dirty = false;
@@ -117,7 +155,7 @@ export function InspectorPanelController({
         if (disposed) return;
         running = true;
         dirty = false;
-        void Promise.all([refreshTrace(), refreshContext()]).finally(() => {
+        void Promise.all([refreshTrace(), refreshContext(), refreshSummary()]).finally(() => {
           running = false;
           if (dirty) schedule();
         });
@@ -138,10 +176,23 @@ export function InspectorPanelController({
       if (timer !== undefined) clearTimeout(timer);
       subscription.dispose();
     };
-  }, [active, sessionId, refreshContext, refreshTrace]);
+  }, [active, sessionId, refreshContext, refreshTrace, refreshSummary]);
   const execution = useMemo(() => mergeExecutionPages(pages), [pages]);
   return (
     <InspectorWorkbarPanel
+      summary={summary}
+      summaryLoading={summaryLoading}
+      summaryError={summaryError}
+      loadingEarlier={loadingEarlier}
+      canHideEarlier={pages.length > 1}
+      onHideEarlier={() => {
+        traceRequest.current += 1;
+        pageCount.current = 1;
+        setPages((current) => current.slice(0, 1));
+        setLoading(false);
+        setLoadingEarlier(false);
+        setSelectedTraceId(undefined);
+      }}
       context={context}
       trace={[]}
       execution={execution}
@@ -153,6 +204,7 @@ export function InspectorPanelController({
       onRefresh={() => {
         void refreshTrace();
         void refreshContext();
+        void refreshSummary();
       }}
       onSelectTrace={setSelectedTraceId}
       onLoadMore={() => {
@@ -170,6 +222,8 @@ function contextView(context: RuntimeSessionContextSnapshot): InspectorContextSn
     inputBudgetTokens: numberField(context, "inputBudgetTokens"),
     remainingTokens: numberField(context, "remainingTokens"),
     contextWindowTokens: numberField(context, "contextWindowTokens"),
+    reservedOutputTokens: numberField(context, "reservedOutputTokens"),
+    safetyMarginTokens: numberField(context, "safetyMarginTokens"),
     usedPercent: numberField(context, "usedPercent"),
     compactedCount: numberField(context, "compactedCount"),
     estimation: context["estimation"] === "estimated" ? "estimated" : "unknown",

@@ -1,5 +1,5 @@
-import type { RuntimeExecutionPage } from "@pico/protocol";
-import { ExecutionTraceTimeline } from "./ExecutionTraceTimeline.js";
+import type { RuntimeExecutionPage, RuntimeExecutionSummary } from "@pico/protocol";
+import { ExecutionTraceTimeline, ExecutionUsageSummary } from "./ExecutionTraceTimeline.js";
 import { ChevronDown, CircleAlert, RefreshCw, Wrench } from "lucide-react";
 
 export interface InspectorContextSection {
@@ -16,6 +16,8 @@ export interface InspectorContextSnapshot {
   readonly inputBudgetTokens?: number;
   readonly remainingTokens?: number;
   readonly contextWindowTokens?: number;
+  readonly reservedOutputTokens?: number;
+  readonly safetyMarginTokens?: number;
   readonly usedPercent?: number;
   readonly estimation?: "actual" | "estimated" | "unknown";
   readonly compactedCount?: number;
@@ -64,6 +66,12 @@ export interface InspectorToolPreview {
 }
 
 export interface InspectorWorkbarPanelProps {
+  readonly summary?: RuntimeExecutionSummary;
+  readonly summaryLoading?: boolean;
+  readonly summaryError?: string;
+  readonly loadingEarlier?: boolean;
+  readonly canHideEarlier?: boolean;
+  readonly onHideEarlier?: () => void;
   readonly execution?: RuntimeExecutionPage;
   readonly contextError?: string;
   readonly context?: InspectorContextSnapshot;
@@ -121,6 +129,12 @@ export function groupInspectorTraceItems(
 
 export function InspectorWorkbarPanel({
   context,
+  summary,
+  summaryLoading,
+  summaryError,
+  loadingEarlier,
+  canHideEarlier,
+  onHideEarlier,
   execution,
   contextError,
   trace,
@@ -163,6 +177,19 @@ export function InspectorWorkbarPanel({
       )}
 
       <div className="tool-panel__scroll" aria-busy={loading}>
+        {summaryLoading && (
+          <p className="tool-panel__muted" role="status">
+            正在加载会话用量…
+          </p>
+        )}
+        {summaryError && (
+          <p className="tool-panel__error" role="status">
+            会话用量读取失败：{summaryError}
+          </p>
+        )}
+        {(summary ?? execution?.summary) && (
+          <ExecutionUsageSummary summary={(summary ?? execution?.summary)!} />
+        )}
         <section className="tool-panel__section" aria-labelledby="inspector-context-title">
           <div className="tool-panel__section-heading">
             <h3 id="inspector-context-title">上下文</h3>
@@ -177,6 +204,9 @@ export function InspectorWorkbarPanel({
             <p className="tool-panel__muted">尚未生成上下文快照。</p>
           ) : (
             <>
+              {context.estimation === "estimated" && (
+                <p className="tool-panel__muted">上下文 Token 为估算值。</p>
+              )}
               <dl className="tool-panel__metrics">
                 <div>
                   <dt>已使用</dt>
@@ -190,6 +220,30 @@ export function InspectorWorkbarPanel({
                   <dt>剩余</dt>
                   <dd>{formatTokens(context.remainingTokens)}</dd>
                 </div>
+                {context.contextWindowTokens !== undefined && (
+                  <div>
+                    <dt>模型窗口</dt>
+                    <dd>{formatTokens(context.contextWindowTokens)}</dd>
+                  </div>
+                )}
+                {context.inputBudgetTokens !== undefined && (
+                  <div>
+                    <dt>输入预算</dt>
+                    <dd>{formatTokens(context.inputBudgetTokens)}</dd>
+                  </div>
+                )}
+                {context.reservedOutputTokens !== undefined && (
+                  <div>
+                    <dt>预留输出</dt>
+                    <dd>{formatTokens(context.reservedOutputTokens)}</dd>
+                  </div>
+                )}
+                {context.safetyMarginTokens !== undefined && (
+                  <div>
+                    <dt>安全余量</dt>
+                    <dd>{formatTokens(context.safetyMarginTokens)}</dd>
+                  </div>
+                )}
                 <div>
                   <dt>压缩</dt>
                   <dd>
@@ -305,7 +359,18 @@ export function InspectorWorkbarPanel({
             onClick={onLoadMore}
           >
             <ChevronDown aria-hidden="true" size={14} />
-            加载更多记录
+            {loadingEarlier ? "正在加载较早记录…" : "加载较早记录"}
+          </button>
+        )}
+
+        {canHideEarlier && onHideEarlier && (
+          <button
+            type="button"
+            className="tool-panel__load-more"
+            disabled={loading}
+            onClick={onHideEarlier}
+          >
+            隐藏较早记录
           </button>
         )}
 
