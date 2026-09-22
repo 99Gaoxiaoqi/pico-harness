@@ -1,3 +1,4 @@
+import { contextSnapshot } from "./context-maka-fixture.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import * as React from "react";
@@ -102,17 +103,7 @@ test("trace inspector integrates physical attempts, independent usage and earlie
     onLoadMore() {},
     canHideEarlier: true,
     onHideEarlier() {},
-    context: {
-      version: 2,
-      estimation: "estimated",
-      coverage: "model_history_only",
-      estimatedHistoryTokens: 300,
-      modelHistoryMessageCount: 5,
-      compactedCount: 1,
-      contextWindowTokens: 2000,
-      reservedOutputTokens: 200,
-      safetyMarginTokens: 100,
-    },
+    context: contextSnapshot(),
   });
   for (const label of [
     "隐藏较早记录",
@@ -128,11 +119,11 @@ test("trace inspector integrates physical attempts, independent usage and earlie
     "复制模型标识",
     "费用未知",
     "未匹配该 endpoint 与模型的定价",
-    "当前模型历史（估算）",
-    "消息小计",
-    "无法计算完整占用与剩余量",
-    "预留输出",
-    "安全余量",
+    "当前模型历史",
+    "估算 Token",
+    "不包含完整请求",
+    "当时模型窗口",
+    "实际输入 Token",
     "部分底层调用尝试记录不完整",
   ])
     assert.ok(html.includes(label), label);

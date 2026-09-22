@@ -1,3 +1,4 @@
+import { ComposerContextGauge } from "../conversation/ComposerContextGauge.js";
 import { DeepResearchPanel } from "../conversation/DeepResearchPanel.js";
 import {
   subagentMetadata,
@@ -1307,6 +1308,22 @@ export function ConversationPage() {
                             }
                             onConfigure={() => navigate("/settings/models")}
                           />
+
+                          {composerProvider && (
+                            <ComposerContextGauge
+                              target={{
+                                workspacePath,
+                                sessionId: sessionRef.sessionId,
+                                routeId: conversation.settings.modelRouteId,
+                                providerId:
+                                  composerProvider.modelProtocols?.[conversation.settings.model] ??
+                                  composerProvider.protocol,
+                                modelId: conversation.settings.model,
+                                connectionId: composerProvider.id,
+                                configurationRevision: composerProvider.fingerprint,
+                              }}
+                            />
+                          )}
 
                           <label className="conversation-context-option">
                             <span className="conversation-sr-only">权限模式</span>

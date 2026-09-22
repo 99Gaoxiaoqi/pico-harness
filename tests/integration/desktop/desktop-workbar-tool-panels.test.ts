@@ -1,3 +1,4 @@
+import { contextSnapshot } from "./context-maka-fixture.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import * as React from "react";
@@ -229,15 +230,15 @@ test("Inspector trace folds runtime lifecycle facts into user-facing run groups"
 });
 
 test("Workbar tool panel helpers preserve authority versions, chunks and active polling gates", () => {
+  assert.equal(contextUsagePercent(contextSnapshot()), 25);
   assert.equal(
-    contextUsagePercent({
-      version: 2,
-      estimatedInputTokens: 2_500,
-      inputBudgetTokens: 10_000,
-    }),
-    25,
+    contextUsagePercent(
+      contextSnapshot({
+        latestRequest: { ...contextSnapshot().latestRequest, inputTokens: 12000 },
+      }),
+    ),
+    100,
   );
-  assert.equal(contextUsagePercent({ version: 2, usedPercent: 120 }), 100);
   assert.equal(reviewSelectionKey({ source: "staged", path: "src/app.ts" }), "staged:src/app.ts");
 
   const task: WorkbarTaskItem = {
@@ -295,15 +296,7 @@ test("Workbar tool panels render real authority snapshots with accessible detail
   Object.assign(globalThis, { React });
   const inspector = renderToStaticMarkup(
     React.createElement(InspectorWorkbarPanel, {
-      context: {
-        version: 2,
-        routeId: "route-main",
-        estimatedInputTokens: 4_000,
-        inputBudgetTokens: 8_000,
-        remainingTokens: 4_000,
-        compactedCount: 1,
-        sections: [{ id: "instructions", label: "Instructions", tokens: 900, state: "included" }],
-      },
+      context: contextSnapshot(),
       trace: [
         {
           id: "trace-1",
