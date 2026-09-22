@@ -967,8 +967,11 @@ function assertModelCallAttemptFacts(data: Record<string, unknown>): void {
   const ids = new Set<string>();
   for (const attempt of attempts) {
     if (!isRecord(attempt)) throw new RuntimeEventIntegrityError("Model attempt is invalid");
-    for (const key of ["attemptId", "provider", "model", "startedAt", "completedAt"])
+    for (const key of ["attemptId", "provider", "model", "startedAt", "completedAt"]) {
       assertString(attempt[key], `model.attempt.${key}`);
+      if ((attempt[key] as string).length > 800)
+        throw new RuntimeEventIntegrityError(`Model attempt ${key} exceeds the bounded record`);
+    }
     if (ids.has(attempt["attemptId"] as string))
       throw new RuntimeEventIntegrityError("Duplicate model attempt");
     ids.add(attempt["attemptId"] as string);

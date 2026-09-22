@@ -238,6 +238,8 @@ export interface RuntimeForkModelCheckpointSeed {
 
 export interface RuntimeModelCallStartedOptions {
   readonly providerCallId: string;
+  readonly logicalCallId?: string;
+  readonly retryAttempt?: number;
   readonly provider?: string;
   readonly model?: string;
   readonly purpose: string;
@@ -245,6 +247,10 @@ export interface RuntimeModelCallStartedOptions {
 
 export interface RuntimeModelCallSettledOptions {
   readonly providerCallId: string;
+  readonly logicalCallId?: string;
+  readonly retryAttempt?: number;
+  readonly attempts?: RuntimeModelCallSettledEvent["data"]["attempts"];
+  readonly attemptCoverage?: RuntimeModelCallSettledEvent["data"]["attemptCoverage"];
   readonly status: "succeeded" | "failed" | "cancelled";
   readonly latencyMs: number;
   readonly usage?: RuntimeModelCallSettledEvent["data"]["usage"];
@@ -2026,6 +2032,12 @@ export class RuntimeRun {
       kind: "model.call.settled",
       data: {
         providerCallId: options.providerCallId,
+        ...(options.logicalCallId !== undefined ? { logicalCallId: options.logicalCallId } : {}),
+        ...(options.retryAttempt !== undefined ? { retryAttempt: options.retryAttempt } : {}),
+        ...(options.attempts !== undefined ? { attempts: options.attempts } : {}),
+        ...(options.attemptCoverage !== undefined
+          ? { attemptCoverage: options.attemptCoverage }
+          : {}),
         status: options.status,
         latencyMs: options.latencyMs,
         ...(options.usage !== undefined ? { usage: options.usage } : {}),
