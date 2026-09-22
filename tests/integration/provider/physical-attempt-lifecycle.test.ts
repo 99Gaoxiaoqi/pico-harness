@@ -396,3 +396,107 @@ test("real cancelled Run accepts already-delivered SSE usage through SQLite with
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("Responses intermediate snapshots stay partially metered after disconnect or cancel without response.completed", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-responses-partial-"));
+  const ledger = new SqliteRuntimeControlStore({ storageRoot: root });
+  const events = new SqliteRuntimeEventStore({ storageRoot: root });
+  let requests = 0;
+  const server = createServer(async (req, res) => {
+    for await (const _chunk of req) {
+      /* consume request */
+    }
+    requests++;
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    const response = {
+      id: "resp_partial",
+      created_at: 1,
+      model: "gpt-test",
+      status: "in_progress",
+      usage: { input_tokens: 12, output_tokens: 999 },
+    };
+    res.end(
+      [
+        { type: "response.created", response },
+        { type: "response.in_progress", response },
+        {
+          type: "response.output_item.added",
+          output_index: 0,
+          item: {
+            type: "message",
+            id: "msg_partial",
+            role: "assistant",
+            status: "in_progress",
+            content: [],
+          },
+        },
+        {
+          type: "response.output_text.delta",
+          output_index: 0,
+          content_index: 0,
+          item_id: "msg_partial",
+          delta: "partial",
+        },
+        // No response.completed/incomplete/failed terminal usage follows this snapshot.
+      ]
+        .map(frame)
+        .join(""),
+    );
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    await events.initializeSession({ sessionId: "responses-partial", workDir: root });
+    const provider = new AiSdkProvider("responses", {
+      baseURL: `http://127.0.0.1:${(server.address() as { port: number }).port}/v1`,
+      apiKey: "fixture",
+      model: "gpt-test",
+    });
+    const tracked = new CostTracker(
+      provider,
+      { provider: "responses", model: "gpt-test", billingMode: "subscription_included" },
+      undefined,
+      {
+        ledger,
+        context: { purpose: "main", sessionId: "responses-partial" },
+        recordRuntimeEvents: false,
+      },
+    );
+    for (const cancel of [false, true]) {
+      const controller = new AbortController();
+      await assert.rejects(
+        tracked.generateStream(
+          messages,
+          [],
+          () => {
+            if (cancel) controller.abort();
+          },
+          { signal: controller.signal },
+        ),
+      );
+    }
+    for (
+      let retry = 0;
+      retry < 30 && ledger.listPhysicalAttempts().some((fact) => fact.status === "observed");
+      retry++
+    )
+      await delay(10);
+    const facts = ledger.listPhysicalAttempts({ sessionId: "responses-partial" });
+    assert.equal(facts.length, 2);
+    assert.deepEqual(facts.map((fact) => fact.status).sort(), ["cancelled", "interrupted"]);
+    for (const fact of facts) {
+      assert.equal(fact.usageBasis, "partial");
+      assert.equal(fact.usage!.promptTokens, 12);
+      assert.equal(fact.usage!.completionTokens, 0);
+      assert.deepEqual(fact.usage!.reportedFields, ["prompt"]);
+      assert.equal(fact.costStatus, "unknown");
+      assert.equal(fact.costCNY, undefined);
+    }
+    assert.equal(requests, 2);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    events.close();
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
