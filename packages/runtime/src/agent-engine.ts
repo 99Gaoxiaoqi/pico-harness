@@ -1,14 +1,6 @@
 // 主 Agent 调度：Session/Runtime 生命周期、模型轮次、工具提交与共享预算。
-// 子代理的独立会话执行和上下文压缩分别由 subagent-runner / subagent-context 承担；
-// 父子运行的权限 capability、归属及共享成本账本仍由本引擎持有。
+// 主代理、独立 Session 子代理与 Hook verifier 共享相同的上下文策略。
 
-import {
-  SubagentRunner,
-  type SubagentExecutionRuntime,
-  type SubagentRunOptions,
-  type SubagentResult,
-} from "./subagent-runner.js";
-export type { SubagentExecutionRuntime } from "./subagent-runner.js";
 import { providerForReporter } from "@pico/runtime";
 import {
   buildRuntimeToolResultInput,
@@ -35,13 +27,12 @@ import {
   type EngineRuntimePort,
   type EngineRuntimeRun,
   type EnginePromptLayers as PromptLayers,
-  type EngineSkillLoader as SkillLoader,
   type EngineHookService as HookService,
   type EngineHostServices,
   type EngineDiagnostics,
   SILENT_ENGINE_DIAGNOSTICS,
 } from "./agent-engine-ports.js";
-import { sanitizeToolPairs, type Compactor } from "@pico/runtime/compactor";
+import { sanitizeToolPairs } from "@pico/runtime/compactor";
 import type {
   FullCompactionPreview,
   FullCompactionRequest,
@@ -335,10 +326,6 @@ export interface AgentEngineOptions {
   /** 主循环最大轮次兜底(默认 50,防止失控烧穿 Token) */
   maxTurns?: number | undefined;
   /**
-   * 字符级 ToolResult 投影压缩器；只在 token 超过主动水位时缩短旧结果。
-   */
-  compactor?: Compactor | undefined;
-  /**
    * token 水位主动摘要器，也用于 Provider 真实 overflow 后的一次紧急压缩。
    */
   fullCompactor?: FullCompactor | undefined;
@@ -356,8 +343,6 @@ export interface AgentEngineOptions {
   guardrailOptions?: GuardrailOptions | undefined;
   /** 轮次/token/成本预算配置 */
   budgetConfig?: BudgetConfig | undefined;
-  /** 被 CostTracker 记账的主 Session，用于并发子代理成本结算。 */
-  usageSession?: Session | undefined;
   /**
    * Goal Manager 单例(ROADMAP 3.5 Goal Mode)。
    * 注入后:Plan 协作模式时 PromptComposer 会把 active goal 注入本轮 turn tail。
@@ -426,8 +411,6 @@ export interface AgentEngineOptions {
   onRunComplete?: (() => Promise<void>) | undefined;
   /** 主循环异常或取消时执行的宿主中断收口。 */
   onRunInterrupted?: ((reason: string) => Promise<void>) | undefined;
-  /** 为主工作区及隔离 worktree 构建同策略 Skill Catalog。 */
-  skillLoaderFactory: (workDir: string) => SkillLoader;
   /** Runtime-owned lifecycle port; the engine never imports the durable implementation. */
   runtimePort?: EngineRuntimePort | undefined;
 }
@@ -449,6 +432,7 @@ export class AgentEngine {
   private compactionAttemptedThisRun = false;
   private compactionFailedThisRun = false;
   private overflowRecoveryUsed = false;
+  private currentStepNumber = 0;
   private lastReplyTokens = 0;
   private readonly omittedHistoricalImages = new Set<string>();
   private readonly historicalImageKeys = new Set<string>();
@@ -456,12 +440,10 @@ export class AgentEngine {
   private acceptedHistoryPrefixCount: number | undefined;
   private readonly memoryHooks: AgentEngineOptions["memoryHooks"];
   private readonly maxTurns: number;
-  private readonly compactor?: Compactor | undefined;
   private readonly fullCompactor?: FullCompactor | undefined;
   private readonly recovery: RecoveryManager;
   private readonly guardrail: ToolGuardrailController;
   private readonly budget: IterationBudget;
-  private readonly usageSession?: Session | undefined;
   /**
    * 上一轮 provider 接受的真实输入与输出 token 总和。
    * 用作下一轮 token 估算的锚定基线(对标 maka midTurn estimateNextRequestTokens):
@@ -497,7 +479,6 @@ export class AgentEngine {
   private readonly postToolResultHook?: AgentEngineOptions["postToolResultHook"] | undefined;
   private readonly onRunComplete?: AgentEngineOptions["onRunComplete"] | undefined;
   private readonly onRunInterrupted?: AgentEngineOptions["onRunInterrupted"] | undefined;
-  private readonly skillLoaderFactory: (workDir: string) => SkillLoader;
   private readonly runtimePort?: EngineRuntimePort | undefined;
   private readonly collaborationMode?: (() => "agent" | "plan" | "research") | undefined;
   private readonly planHandoff?: PlanHandoffController | undefined;
@@ -521,7 +502,6 @@ export class AgentEngine {
     this.memoryHooks = opts.memoryHooks;
     this.contextRouteIdentity = opts.contextRouteIdentity;
     this.maxTurns = opts.maxTurns ?? 50;
-    this.compactor = opts.compactor;
     this.fullCompactor = opts.fullCompactor;
     this.recovery = opts.recovery ?? new RecoveryManager();
     this.guardrail = new ToolGuardrailController(opts.guardrailOptions);
@@ -529,7 +509,6 @@ export class AgentEngine {
       ...opts.budgetConfig,
       maxTurns: opts.budgetConfig?.maxTurns ?? this.maxTurns,
     });
-    this.usageSession = opts.usageSession;
     this.goalManager = opts.goalManager;
     this.toolDisclosure = opts.toolDisclosure;
     this.onTurn = opts.onTurn;
@@ -546,7 +525,6 @@ export class AgentEngine {
     this.postToolResultHook = opts.postToolResultHook;
     this.onRunComplete = opts.onRunComplete;
     this.onRunInterrupted = opts.onRunInterrupted;
-    this.skillLoaderFactory = opts.skillLoaderFactory;
     this.runtimePort = opts.runtimePort;
     this.collaborationMode = opts.collaborationMode;
     this.planHandoff = opts.planHandoff;
@@ -714,6 +692,10 @@ export class AgentEngine {
     allowFullCompaction = true,
   ): Promise<Message[]> {
     signal?.throwIfAborted();
+    const runtimeRun = this.runtimePort?.currentRun();
+    if (runtimeRun?.claimsSession(session)) {
+      await runtimeRun.prepareToolResultProjections({ stepNumber: this.currentStepNumber, tools });
+    }
     const rawHistory = await this.readModelHistory(session);
     const context = appendTurnTail(
       sanitizeToolPairs([{ role: "system", content: systemPrompt }, ...rawHistory]),
@@ -748,6 +730,7 @@ export class AgentEngine {
       inputBudgetTokens: this.contextBudget!.inputBudgetTokens,
       targetRetainedTokens: 1,
       trigger: "auto",
+      phase: this.currentStepNumber === 0 ? "pre_turn" : "mid_turn",
       ...(this.acceptedHistoryPrefixCount !== undefined
         ? { acceptedHistoryPrefixCount: this.acceptedHistoryPrefixCount }
         : {}),
@@ -820,11 +803,26 @@ export class AgentEngine {
             shardSeed: promptCacheConversationShardSeed(baseContext),
             active: routeThresholdActive,
           };
+    let sawObservableOutput = false;
+    const streamReporter = {
+      onTextDelta: (delta: string) => {
+        if (delta.length > 0) sawObservableOutput = true;
+        reporter.onTextDelta?.(delta);
+      },
+      onReasoningDelta: (delta: string) => {
+        if (delta.length > 0) sawObservableOutput = true;
+        reporter.onReasoningDelta?.(delta);
+      },
+    };
     const generate = async (context: Message[]) => {
       await this.memoryHooks?.capture(context, tools);
       const acceptedPrefixCount = (await this.readModelHistory(session)).length;
+      const runtimeRun = this.runtimePort?.currentRun();
+      const compaction = runtimeRun?.claimsSession(session)
+        ? await runtimeRun.readContextCompactionBoundary()
+        : undefined;
       const response = await generateWithRetry(
-        providerForReporter(this.provider, reporter, signal),
+        providerForReporter(this.provider, streamReporter, signal),
         context,
         tools,
         {
@@ -838,14 +836,12 @@ export class AgentEngine {
             ? { promptCacheShardActive: promptCacheRequest.active }
             : {}),
           logger: this.diagnostics,
+          contextFacts: { version: 1, ...(compaction ? { compaction } : {}) },
           ...requestOptions,
         },
       );
       this.acceptedHistoryPrefixCount = acceptedPrefixCount;
-      // A newly accepted model step earns a new recovery opportunity; a rejected
-      // request still gets only one shaping attempt. Summary failures stay latched.
-      this.overflowRecoveryUsed = false;
-      this.compactionAttemptedThisRun = false;
+      // The attempt latch belongs to the whole send, including later successful steps.
       return response;
     };
     try {
@@ -855,7 +851,10 @@ export class AgentEngine {
         !(err instanceof ContextOverflowError) ||
         !this.fullCompactor ||
         !allowEmergencyCompaction ||
-        this.overflowRecoveryUsed
+        this.overflowRecoveryUsed ||
+        this.compactionAttemptedThisRun ||
+        sawObservableOutput ||
+        !this.budget.canStartTurn(this.currentStepNumber + 1).allowed
       ) {
         throw err;
       }
@@ -884,8 +883,7 @@ export class AgentEngine {
       if (this.compactionFailedThisRun) throw err;
       this.compactionAttemptedThisRun = true;
       const inputBudgetTokens =
-        this.contextBudget?.inputBudgetTokens ??
-        Math.max(1, Math.floor((this.compactor?.maxChars ?? 4_000) / 4));
+        this.contextBudget?.inputBudgetTokens ?? this.contextBudget?.contextWindowTokens ?? 1;
       const historyBefore = await this.readModelHistory(session);
       const historyTokens = estimateMessagesTokens(historyBefore);
       const targetRetainedTokens = 1;
@@ -898,6 +896,7 @@ export class AgentEngine {
         inputBudgetTokens,
         targetRetainedTokens,
         trigger: "overflow" as const,
+        phase: this.currentStepNumber === 0 ? ("pre_turn" as const) : ("mid_turn" as const),
         ...(this.acceptedHistoryPrefixCount !== undefined
           ? { acceptedHistoryPrefixCount: this.acceptedHistoryPrefixCount }
           : {}),
@@ -978,7 +977,7 @@ export class AgentEngine {
       const executeTurn = () =>
         engineSessionContext.run(context, async () => {
           try {
-            return await this.runInMainCompactorScope(
+            return await this.executeSession(
               session,
               runtimeReporter,
               runtimeTracer,
@@ -998,7 +997,7 @@ export class AgentEngine {
         ? this.toolDisclosure.runInTurn(disclosureTurn, executeTurn)
         : executeTurn();
     };
-    const execute = () => (this.compactor ? this.compactor.runInMainScope(run) : run());
+    const execute = run;
     const ambientRun = this.runtimePort?.currentRun();
     // Tests and explicit in-memory sessions intentionally skip durable runtime facts.
     if (!session.runtimeEventStore) {
@@ -1049,7 +1048,7 @@ export class AgentEngine {
     return runtimeRun.run(execute, signal);
   }
 
-  private async runInMainCompactorScope(
+  private async executeSession(
     session: Session,
     runtimeReporter?: Reporter,
     runtimeTracer?: Tracer,
@@ -1094,6 +1093,7 @@ export class AgentEngine {
     let beforeLen = session.length;
     let turnCount = 0;
     let exhaustedReason: string | undefined;
+    this.currentStepNumber = 0;
     this.compactionAttemptedThisRun = false;
     this.compactionFailedThisRun = false;
     this.overflowRecoveryUsed = false;
@@ -1133,6 +1133,7 @@ export class AgentEngine {
         await this.waitAtSafeBoundary?.();
         signal?.throwIfAborted();
         turnCount++;
+        this.currentStepNumber = turnCount - 1;
         const turnBudget = this.budget.canStartTurn(turnCount);
         if (!turnBudget.allowed) {
           exhaustedReason = turnBudget.reason ?? `已达到最大轮次 ${this.maxTurns}`;
@@ -2091,7 +2092,7 @@ export class AgentEngine {
           reporter,
           graceSpan,
           signal,
-          true,
+          false,
           preserveToolPrefix ? { toolChoice: "none" } : undefined,
         ),
       );
@@ -2127,13 +2128,11 @@ export class AgentEngine {
     session: Session,
     response: Message,
     costBefore: number,
-    isSubagent = false,
   ): BudgetDecision {
     const decisions: BudgetDecision[] = [];
     if (response.usage) {
-      // 锚定:记录上一轮真实输入 token,供下一轮 prepareModelContext/midTurn 估算。
-      // 子代理的 promptTokens 远小于主代理,不能污染主代理的锚定值。
-      if (!isSubagent) {
+      // Each independent Session owns its usage anchor; children never mutate the parent anchor.
+      {
         const input = response.usage.promptTokens;
         const output = response.usage.completionTokens;
         if (Number.isFinite(input) && input > 0 && Number.isFinite(output) && output >= 0) {
@@ -2161,32 +2160,6 @@ export class AgentEngine {
     return decisions.find((decision) => !decision.allowed) ?? { allowed: true };
   }
 
-  private currentSubagentBudgetDecision(): BudgetDecision {
-    const decisions = [
-      this.budget.currentDecision(),
-      this.goalManager?.currentBudgetDecision() ?? { allowed: true },
-    ];
-    return decisions.find((decision) => !decision.allowed) ?? { allowed: true };
-  }
-
-  private consumeSubagentResponseBudget(
-    runtime: SubagentExecutionRuntime,
-    response: Message,
-    costBefore: number,
-  ): BudgetDecision {
-    const session = runtime.usageSession ?? this.usageSession;
-    if (session) return this.consumeResponseBudget(session, response, costBefore, true);
-
-    // 非 Runtime 宿主可以直接构造 AgentEngine，此时没有可用的 Session 成本账本；
-    // 仍严格结算 Provider 返回的 Token usage。
-    if (!response.usage) return this.currentSubagentBudgetDecision();
-    const decisions = [
-      this.budget.consumeUsage(response.usage),
-      this.goalManager?.consumeUsage(response.usage) ?? { allowed: true },
-    ];
-    return decisions.find((decision) => !decision.allowed) ?? { allowed: true };
-  }
-
   private async reportMessage(
     reporter: Reporter,
     content: string,
@@ -2198,99 +2171,6 @@ export class AgentEngine {
       { role: "assistant", content },
       { ...(signal === undefined ? {} : { signal }) },
     );
-  }
-
-  /** Resolve child execution dependencies, then keep its durable run inside the parent capability. */
-  async runSub(
-    taskPrompt: string,
-    readOnlyRegistry: Registry,
-    reporter?: Reporter,
-    opts: SubagentRunOptions = {},
-  ): Promise<SubagentResult> {
-    const runtime = this.subagentExecutionRuntime();
-    if (runtime.resolvedModelRoute) {
-      reporter?.onSubagentModelResolved?.({
-        ...(runtime.requestedModelRoute
-          ? { requestedModelRoute: runtime.requestedModelRoute }
-          : {}),
-        resolvedModelRoute: runtime.resolvedModelRoute,
-        ...(runtime.thinkingEffort ? { thinkingEffort: runtime.thinkingEffort } : {}),
-        source: runtime.source,
-      });
-    }
-    const runner = new SubagentRunner({
-      workDir: this.workDir,
-      diagnostics: this.diagnostics,
-      usageSession: this.usageSession,
-      runtimePort: this.runtimePort,
-      skillLoaderFactory: this.skillLoaderFactory,
-      recovery: this.recovery,
-      toolResultRedactionSecrets: this.toolResultRedactionSecrets,
-      maxToolConcurrency: AgentEngine.MAX_TOOL_CONCURRENCY,
-      onRetry: this.makeRetryReporter(),
-      budget: {
-        currentDecision: () => this.currentSubagentBudgetDecision(),
-        consumeResponse: (runtime, response, costBefore) =>
-          this.consumeSubagentResponseBudget(runtime, response, costBefore),
-      },
-      publishCommittedToolBatch: (reporter, calls, outcomes, order) =>
-        this.publishCommittedToolBatch(reporter, calls, outcomes, order),
-    });
-    const run = () => runner.run(taskPrompt, readOnlyRegistry, runtime, reporter, opts);
-    const runAttributed = () =>
-      withProviderCallContext({ purpose: "subagent" }, () =>
-        runtime.compactor ? runtime.compactor.runInIsolatedScope(run) : run(),
-      );
-    const runtimePort = this.runtimePort;
-    const parentRun = runtimePort?.currentRun();
-    if (!parentRun) return runAttributed();
-    const runtimeCapability = parentRun.runtimeCapability;
-    if (!runtimeCapability) {
-      throw new Error(
-        `Nested Runtime run ${parentRun.runId} does not hold a live Session write capability`,
-      );
-    }
-
-    if (!runtimePort) {
-      throw new Error("Nested Runtime run requires an injected runtimePort");
-    }
-    const parentToolCallId = runtimePort.currentToolCallId();
-    const childRun = await runtimePort.startRun({
-      // The parent Session owns the durable run directory even when the child operates
-      // in an isolated worktree. This keeps one recoverable session ledger.
-      parentRunId: parentRun.runId,
-      ...(parentToolCallId ? { parentToolCallId } : {}),
-      capability: runtimeCapability,
-    });
-    return childRun.run(async () => {
-      const result = await runAttributed();
-      await childRun.recordTranscriptMessage({
-        role: "assistant",
-        content: result.summary,
-        providerData: {
-          picoKind: "subagent_report",
-          picoSubagentStatus: result.status,
-          ...(result.evidenceRefs.length > 0
-            ? { picoSubagentEvidenceRefs: result.evidenceRefs }
-            : {}),
-        },
-      });
-      return result;
-    }, opts.signal);
-  }
-
-  private subagentExecutionRuntime(): SubagentExecutionRuntime {
-    return {
-      provider: this.provider,
-      ...(this.compactor ? { compactor: this.compactor } : {}),
-      ...(this.usageSession ? { usageSession: this.usageSession } : {}),
-      thinkingEffort: this.thinkingEffort,
-      ...(this.modelRouteId || this.provider.modelName
-        ? { resolvedModelRoute: this.modelRouteId ?? this.provider.modelName }
-        : {}),
-      source: "parent",
-      onRateLimited: (failure, reporter, signal) => this.rotateProvider(failure, reporter, signal),
-    };
   }
 }
 

@@ -162,3 +162,70 @@ test("Maka summarizer overflow retreats only to the last proven accepted prefix"
     assert.equal(result?.compactedCount, acceptedHistoryPrefixCount);
   }
 });
+
+test("Maka safe prefix leaves an open tool batch intact and checkpoint failures never apply history", async () => {
+  const source: Message[] = [
+    { role: "user", content: "old task" },
+    { role: "assistant", content: "old result" },
+    { role: "user", content: "active task" },
+    {
+      role: "assistant",
+      content: "",
+      toolCalls: [{ id: "open-call", name: "read_file", arguments: "{}" }],
+    },
+  ];
+  const compactor = new FullCompactor({
+    provider: {
+      async generate() {
+        return { role: "assistant", content: summary };
+      },
+    },
+  });
+  const preview = await compactor.preview({ id: "open-batch" }, source, {
+    trigger: "manual",
+    inputBudgetTokens: 16000,
+  });
+  assert.equal(preview?.compactedCount, 3);
+  const entries = source.map((message, i) => ({ eventId: `event-${i}`, message }));
+  const before = structuredClone(entries);
+  const failure = new Error("durable write failed");
+  await assert.rejects(
+    recordRuntimeCompactionCheckpoint({
+      session: { id: "write-failure" },
+      compactor,
+      request: { trigger: "manual", inputBudgetTokens: 16000 },
+      runtimeRun: {
+        claimsSession: () => true,
+        readModelHistoryEntries: async () => entries,
+        findLastCompactionCheckpoint: async () => undefined,
+        recordCheckpoint: async () => {
+          throw failure;
+        },
+      },
+    }),
+    (error) => error === failure,
+  );
+  assert.deepEqual(entries, before);
+});
+
+test("Maka exact malformed summary source is latched while changed history remains eligible", async () => {
+  let calls = 0;
+  const compactor = new FullCompactor({
+    maxAttempts: 1,
+    provider: {
+      async generate() {
+        calls++;
+        return { role: "assistant", content: "broken" };
+      },
+    },
+  });
+  const identity = { id: "malformed-circuit" };
+  const request = { trigger: "manual" as const, inputBudgetTokens: 16000 };
+  assert.equal(await compactor.preview(identity, history, request), undefined);
+  assert.equal(calls, 2);
+  assert.equal(await compactor.preview(identity, history, request), undefined);
+  assert.equal(calls, 2);
+  const changed = history.map((message) => ({ ...message, content: `${message.content} changed` }));
+  assert.equal(await compactor.preview(identity, changed, request), undefined);
+  assert.equal(calls, 4);
+});
