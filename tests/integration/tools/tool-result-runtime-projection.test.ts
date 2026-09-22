@@ -1,9 +1,7 @@
+import { readRuntimeModelHistorySnapshot } from "@pico/runtime/session-runtime-read-model";
 import { currentRuntimeRun } from "@pico/runtime/runtime-run";
 import { createSessionForkRuntimePort } from "@pico/pico-host/session-fork-runtime-port-adapter";
-import {
-  bindToolResultArchiveReader,
-  archiveStaleToolResultEntries,
-} from "@pico/runtime/tool-result-archive";
+import { bindToolResultArchiveReader } from "@pico/runtime/tool-result-archive";
 import { ReadFileTool } from "@pico/pico-host/read-file-tool";
 import { WorkspaceRoots, buildWorkspaceBoundaryMiddleware } from "@pico/pico-host/workspace-roots";
 import assert from "node:assert/strict";
@@ -90,10 +88,10 @@ test("large Runtime ToolResult keeps inline facts, bounds provider projection, a
       }
       const run = currentRuntimeRun()!;
       run.setToolResultArchiveAvailable(false);
-      assert.equal(
+      assert.match(
         (await run.readModelHistory()).find((message) => message.toolCallId === LARGE_TOOL_CALL_ID)!
           .content,
-        rawOutput,
+        /工具结果已归档/u,
       );
       run.setToolResultArchiveAvailable(true);
       const page = JSON.parse(
@@ -153,10 +151,16 @@ test("large Runtime ToolResult keeps inline facts, bounds provider projection, a
   assert.equal(largeResult.data.body.content, rawOutput);
   assert.equal(largeResult.data.body.sha256, rawSha256);
   assert.equal(largeResult.data.body.sizeBytes, rawSizeBytes);
-  assert.equal(largeResult.data.projection.mode, "preview");
-  assert.equal(largeResult.data.projection.strategy, "durable-tool-result-archive-v1");
-  assert.ok(largeResult.data.projection.text.length < 7500);
-  assert.ok(!largeResult.data.projection.text.includes(canary));
+  assert.equal(largeResult.data.projection.mode, "full");
+  const archived = events.find(
+    (event) =>
+      event.kind === "tool.result.projection.recorded" &&
+      event.data.sourceEventId === largeResult.eventId,
+  );
+  assert.ok(archived?.kind === "tool.result.projection.recorded");
+  assert.equal(archived.data.projection.strategy, "durable-tool-result-archive-v1");
+  assert.ok(archived.data.projection.text.length < 7500);
+  assert.ok(!archived.data.projection.text.includes(canary));
 
   // 验收 1:无 blob 写——Evidence blob 目录从未产生。
   assert.equal(existsSync(join(fixture.paths.workspace.evidence, "blobs")), false);
@@ -179,7 +183,7 @@ test("large Runtime ToolResult keeps inline facts, bounds provider projection, a
     (message) => message.toolCallId === LARGE_TOOL_CALL_ID,
   );
   assert.ok(secondProviderResult);
-  assert.equal(secondProviderResult.content, largeResult.data.projection.text);
+  assert.equal(secondProviderResult.content, archived.data.projection.text);
   assert.equal(secondProviderResult.providerData, undefined);
 
   const expectedReplay = structuredClone(session.getModelContext());
@@ -193,9 +197,9 @@ test("large Runtime ToolResult keeps inline facts, bounds provider projection, a
   fixture.activeSession = recovered;
   await recovered.recover();
   assert.deepEqual(recovered.getModelContext(), expectedReplay);
-  const replayedLargeResult = recovered
-    .getModelContext()
-    .find((message) => message.toolCallId === LARGE_TOOL_CALL_ID);
+  const replayedLargeResult = (
+    await readRuntimeModelHistorySnapshot(recovered.runtimeEventStore!, recovered.id)
+  ).messages.find((message) => message.toolCallId === LARGE_TOOL_CALL_ID);
   assert.deepEqual(replayedLargeResult, secondProviderResult);
   const ref = secondProviderResult.content.match(/pico:\/\/archive\/[^"\s]+/u)![0];
   const reader = bindToolResultArchiveReader(recovered.runtimeEventStore!, recovered.id);
@@ -263,39 +267,6 @@ test("large Runtime ToolResult keeps inline facts, bounds provider projection, a
     /完整性校验失败/u,
   );
   await assert.rejects(reader.read(ref + "?path=other", 1, 1000), /URI 无效/u);
-
-  // A pre-upgrade inline event is projected after two newer turns, without mutation.
-  const legacy = {
-    ...largeResult,
-    data: {
-      ...largeResult.data,
-      projection: {
-        version: 1 as const,
-        mode: "full" as const,
-        strategy: "original",
-        truncated: false,
-        text: rawOutput,
-      },
-    },
-  };
-  const entry = {
-    eventId: legacy.eventId,
-    message: { role: "user" as const, content: rawOutput, toolCallId: LARGE_TOOL_CALL_ID },
-  };
-  assert.equal(archiveStaleToolResultEntries([legacy], [entry])[0]!.message.content, rawOutput);
-  const newer = [1, 2].map((number) => ({
-    ...legacy,
-    eventId: `newer-${number}`,
-    turnId: `newer-turn-${number}`,
-  }));
-  const projected = archiveStaleToolResultEntries([legacy, ...newer], [entry]);
-  assert.match(projected[0]!.message.content, /pico:\/\/archive/u);
-  assert.equal(legacy.data.projection.text, rawOutput);
-  const legacyRef = projected[0]!.message.content.match(/pico:\/\/archive\/[^"\s]+/u)![0];
-  assert.equal(
-    JSON.parse(await reader.read(legacyRef, rawOutput.indexOf(canary) + 1, canary.length)).content,
-    canary,
-  );
 });
 
 test("over-limit Runtime ToolResult (>1MB) is rejected as a synthetic error with refetch guidance", async (context) => {

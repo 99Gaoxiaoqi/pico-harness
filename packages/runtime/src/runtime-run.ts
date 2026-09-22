@@ -1,9 +1,9 @@
 import { isValidStoredCompactionSummary } from "./history-compact-summary-validation.js";
+import { buildToolResultArchiveRef, rebindToolResultArchive } from "./tool-result-archive.js";
 import {
-  archiveRuntimeToolResult,
-  buildToolResultArchiveRef,
-  rebindToolResultArchive,
-} from "./tool-result-archive.js";
+  planToolResultProjections,
+  toolResultProjectionSha256,
+} from "./tool-result-projections.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { resolve } from "node:path";
@@ -44,7 +44,13 @@ import {
 } from "@pico/core/durable-transcript-contract";
 import { inspectDurableTranscriptEvents } from "./durable-transcript-state.js";
 import { waitForDelay } from "./deadline.js";
-import type { Message, ToolCall, ToolResult } from "@pico/core";
+import type {
+  Message,
+  ToolCall,
+  ToolResult,
+  ToolDefinition,
+  RequestContextFacts,
+} from "@pico/core";
 import {
   ToolCommitBoundaryError,
   type RuntimeToolRegistry,
@@ -1209,9 +1215,49 @@ export class RuntimeRun {
   async readModelHistory(includeEventIds = false): Promise<Message[]> {
     const snapshot = await readRuntimeModelHistorySnapshot(this.store, this.sessionId, {
       includeEventIds,
-      toolResultArchiveAvailable: this.toolResultArchiveAvailable,
     });
     return snapshot.messages;
+  }
+
+  /** The only archive mutation gate: the fact and transition commit precedes replay. */
+  async prepareToolResultProjections(options: {
+    stepNumber: number;
+    tools: readonly ToolDefinition[];
+  }): Promise<void> {
+    if (
+      !this.toolResultArchiveAvailable ||
+      !options.tools.some((tool) => tool.name === "archive_read" || tool.name === "read_file")
+    )
+      return;
+    this.assertOpen();
+    const { entries } = await this.store.readSessionEntriesOfKinds(
+      this.sessionId,
+      RUNTIME_HISTORY_EVENT_KINDS,
+    );
+    const events = entries.map((entry) => entry.event);
+    const history = materializeRuntimeHistoryEntries(events);
+    const plans = planToolResultProjections(events, history, this.runId, options.stepNumber);
+    for (const plan of plans) {
+      await this.append({
+        ...this.base(createRuntimeEventId("tool-result-projection"), false, "internal"),
+        kind: "tool.result.projection.recorded",
+        refs: { toolCallId: plan.source.refs.toolCallId },
+        data: {
+          sourceEventId: plan.source.eventId,
+          sourceProjectionSha256: toolResultProjectionSha256(plan.source.data.projection),
+          projection: plan.projection,
+          reason: plan.reason,
+          ...(plan.supersededByToolCallId
+            ? { supersededByToolCallId: plan.supersededByToolCallId }
+            : {}),
+        },
+      });
+    }
+  }
+
+  async readContextCompactionBoundary(): Promise<RequestContextFacts["compaction"]> {
+    const snapshot = await readRuntimeModelHistorySnapshot(this.store, this.sessionId);
+    return snapshot.latestCompaction;
   }
 
   /** True only when this run owns the Session's canonical workspace and durable store. */
@@ -1944,7 +1990,7 @@ export class RuntimeRun {
         projection: canonical.projection,
       },
     };
-    const event = this.toolResultArchiveAvailable ? archiveRuntimeToolResult(original) : original;
+    const event = original;
     assertRuntimeEvent(event);
     const message = projectRuntimeModelMessage(event);
     if (!message) {

@@ -19,14 +19,8 @@
 
 // Adapted from Maka's archive resource protocol; Pico keeps the original body in its ledger.
 import { createHash } from "node:crypto";
-import {
-  projectRuntimeModelMessage,
-  type RuntimeEvent,
-  type RuntimeToolResultRecordedEvent,
-} from "@pico/core";
+import { type RuntimeToolResultRecordedEvent } from "@pico/core";
 import type { SqliteRuntimeEventStore } from "@pico/storage/sqlite/sqlite-runtime-event-store";
-
-import type { RuntimeHistoryProjectionEntry } from "./session-runtime-read-model.js";
 
 export const TOOL_RESULT_ARCHIVE_MAX_LIMIT = 6_000;
 export const TOOL_RESULT_ARCHIVE_MAX_RESPONSE_CHARS = 7_500;
@@ -81,17 +75,18 @@ export function parseToolResultArchiveRef(ref: string): ToolResultArchiveIdentit
  */
 export function archiveRuntimeToolResult(
   event: RuntimeToolResultRecordedEvent,
+  options: { force?: boolean; supersededByToolCallId?: string; reason?: string } = {},
 ): RuntimeToolResultRecordedEvent {
   const { body, projection } = event.data;
   if (
-    event.data.status !== "succeeded" ||
     event.data.toolName === "archive_read" ||
     (event.data.toolName === "read_file" &&
       projection.text.startsWith('{"kind":"tool_result_archive",')) ||
     body.storage !== "inline" ||
-    JSON.stringify(body.content).length <= TOOL_RESULT_ARCHIVE_THRESHOLD_CHARS ||
-    projection.mode !== "full" ||
-    projection.text !== body.content
+    event.data.recovery !== undefined ||
+    (!options.force &&
+      JSON.stringify(projection.text).length <= TOOL_RESULT_ARCHIVE_THRESHOLD_CHARS) ||
+    projection.strategy === "durable-tool-result-archive-v1"
   )
     return event;
   let ref: string;
@@ -116,7 +111,7 @@ export function archiveRuntimeToolResult(
         mode: "preview",
         strategy: "durable-tool-result-archive-v1",
         truncated: true,
-        text: `[工具结果已归档：${event.data.toolName.slice(0, 160)}，${body.content.length} 字符]\n${body.content.slice(0, 500)}\n完整结果仍可读取：archive_read ${JSON.stringify({ ref, operation: "inspect" })}；支持 read（char/line）、search、query，offset 从 0 开始。也可用 read_file ${JSON.stringify({ path: ref, offset: 1, limit: 6000 })} 按字符分页（此兼容接口从 1 开始）。`,
+        text: `${options.supersededByToolCallId ? `[由 ${options.supersededByToolCallId} 替代：${options.reason}]\n` : ""}[工具结果已归档：${event.data.toolName.slice(0, 160)}，${body.content.length} 字符]\n${projection.text.slice(0, 500)}\n完整结果仍可读取：archive_read ${JSON.stringify({ ref, operation: "inspect" })}；支持 read（char/line）、search、query，offset 从 0 开始。也可用 read_file ${JSON.stringify({ path: ref, offset: 1, limit: 6000 })} 按字符分页（此兼容接口从 1 开始）。`,
       },
     },
   };
@@ -191,31 +186,6 @@ export function bindToolResultArchiveReader(
   };
 }
 
-/** Legacy inline events need no migration: keep the newest two turns full and
- * deterministically derive bounded archive views from durable source facts.
- * Apply only AFTER checkpoint verification; source digests retain raw history.
- */
-export function archiveStaleToolResultEntries(
-  events: readonly RuntimeEvent[],
-  entries: readonly RuntimeHistoryProjectionEntry[],
-): readonly RuntimeHistoryProjectionEntry[] {
-  const protectedTurns = new Set<string>();
-  for (let i = events.length - 1; i >= 0 && protectedTurns.size < 2; i--) {
-    const event = events[i]!;
-    if (!event.partial && event.visibility === "model") protectedTurns.add(event.turnId);
-  }
-  const byId = new Map(events.map((event) => [event.eventId, event]));
-  return entries.map((entry) => {
-    const event = byId.get(entry.eventId);
-    if (!event || event.kind !== "tool.result.recorded" || protectedTurns.has(event.turnId))
-      return entry;
-    const archived = archiveRuntimeToolResult(event);
-    if (archived === event) return entry;
-    const message = projectRuntimeModelMessage(archived);
-    return message ? { ...entry, message } : entry;
-  });
-}
-
 /** Re-address an already archived immutable fact when a fork copies it. */
 export function rebindToolResultArchive(
   event: RuntimeToolResultRecordedEvent,
@@ -237,21 +207,5 @@ export function rebindToolResultArchive(
         text: event.data.body.content,
       },
     },
-  });
-}
-
-/** A tool surface without a bound decoder sees original facts, never unusable placeholders. */
-export function restoreArchivedToolResultEntries(
-  events: readonly RuntimeEvent[],
-  entries: readonly RuntimeHistoryProjectionEntry[],
-): readonly RuntimeHistoryProjectionEntry[] {
-  const byId = new Map(events.map((event) => [event.eventId, event]));
-  return entries.map((entry) => {
-    const event = byId.get(entry.eventId);
-    return event?.kind === "tool.result.recorded" &&
-      event.data.body.storage === "inline" &&
-      event.data.projection.strategy === "durable-tool-result-archive-v1"
-      ? { ...entry, message: { ...entry.message, content: event.data.body.content } }
-      : entry;
   });
 }
