@@ -59,13 +59,8 @@ import {
 } from "@pico/pico-host/session-fork-service";
 import type { Reporter, RuntimeSessionSelection } from "@pico/core";
 import { SilentReporter } from "@pico/runtime/silent-reporter";
-import { Compactor } from "@pico/pico-host/product-compactor";
 import { FullCompactor } from "@pico/pico-host/product-full-compactor";
-import {
-  createContextBudget,
-  estimateTokenBudgetAsChars,
-  type ContextBudget,
-} from "@pico/runtime/context-budget";
+import { createContextBudget, type ContextBudget } from "@pico/runtime/context-budget";
 import { PromptComposer } from "@pico/pico-host/product-prompt-composer";
 import type { TodoStore } from "@pico/storage/todo-store";
 import type { AgentGraphProfileSnapshot } from "@pico/core/agent-graph-contracts";
@@ -3225,7 +3220,7 @@ function pruneRegistryToCommandAllowlist(
 function buildContextRuntime(
   kind: ProviderKind,
   config: ProviderConfig,
-): { budget: ContextBudget; compactor: Compactor } {
+): { budget: ContextBudget } {
   const protocol = kind === "openai" ? "openai" : kind;
   const profile = resolveProviderProfile(protocol, config.model);
   const capabilities = config.capabilities;
@@ -3237,13 +3232,7 @@ function buildContextRuntime(
   if (capabilities?.contextSource === "config") {
     budget.declaredContextWindowTokens = capabilities.contextWindowTokens;
   }
-  return {
-    budget,
-    compactor: new Compactor({
-      maxChars: estimateTokenBudgetAsChars(budget.inputBudgetTokens),
-      retainLastMsgs: 6,
-    }),
-  };
+  return { budget };
 }
 
 export function buildApprovalMiddleware(

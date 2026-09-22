@@ -1,4 +1,4 @@
-import type { LLMProvider, ProviderKind, ReasoningLevel } from "@pico/core";
+import type { LLMProvider, ProviderKind, ReasoningLevel, RequestContextFacts } from "@pico/core";
 import type { Session } from "@pico/pico-host/session";
 import type { ProviderConfig } from "@pico/runtime/provider-config";
 import {
@@ -88,7 +88,10 @@ export function assembleRuntimeProvider(
         decorate(providerFactory(context.kind, config, undefined, context.providerDependencies)),
         billingRouteForProvider(context.kind, config),
         context.session,
-        context.trackerOptions,
+        {
+          ...context.trackerOptions,
+          contextFacts: requestContextForProvider(context.kind, config),
+        },
       ),
       config,
       promptCachePrewarm,
@@ -100,7 +103,10 @@ export function assembleRuntimeProvider(
         decorate(context.provider),
         billingRouteForProvider(context.kind, context.config),
         context.session,
-        context.trackerOptions,
+        {
+          ...context.trackerOptions,
+          contextFacts: requestContextForProvider(context.kind, context.config),
+        },
       ),
     };
   }
@@ -191,3 +197,21 @@ function activeRouteModelRouter(
 
 /** @deprecated Billing-route projection now belongs to @pico/runtime. */
 export { billingRouteForProvider } from "@pico/runtime/provider-billing-route";
+
+/** Public model metadata is frozen by the tracker alongside the admitted request. */
+export function requestContextForProvider(
+  kind: ProviderKind,
+  config: ProviderConfig,
+): RequestContextFacts {
+  const capabilities =
+    config.capabilities ??
+    resolveModelRouteCapabilities(kind, config.model, undefined, { baseURL: config.baseURL });
+  return {
+    version: 1,
+    ...(config.routeId
+      ? { routeId: config.routeId, connectionId: config.routeId.split("/", 1)[0]! }
+      : {}),
+    contextWindow: capabilities.contextWindowTokens,
+    contextWindowSource: capabilities.contextSource,
+  };
+}

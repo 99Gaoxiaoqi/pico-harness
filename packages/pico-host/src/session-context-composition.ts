@@ -1,46 +1,12 @@
-import { DatabaseSync } from "node:sqlite";
 import type { Message } from "@pico/core";
 import type {
   RuntimeContextComposition,
-  RuntimeContextSection,
   RuntimeLatestContextRequest,
+  RuntimeSessionContextSnapshot,
 } from "@pico/protocol";
-import { operationalDatabasePath } from "@pico/storage";
-import { estimateMessageTokens } from "@pico/runtime/context-budget";
+import { SqliteRuntimeControlStore } from "@pico/storage/sqlite/sqlite-runtime-control-store";
 import { parsePreparedRequestCapture } from "@pico/runtime/provider-request-diagnostics";
-
-const MAX_DIAGNOSTIC_BYTES = 256 * 1024;
-const MAX_TOOLS = 8;
-
-export function createCurrentContextSections(
-  messages: readonly Message[],
-): RuntimeContextSection[] {
-  return [
-    {
-      id: "system",
-      label: "系统指令（尚未装配）",
-      state: "unknown",
-    },
-    {
-      id: "tools",
-      label: "工具定义（尚未装配）",
-      state: "unknown",
-    },
-    {
-      id: "messages",
-      label: "模型历史消息小计（估算）",
-      tokens: messages.reduce((n, m) => n + estimateMessageTokens(m), 0),
-      state: "included",
-    },
-    {
-      id: "other",
-      label: messages.some((m) => m.images?.length)
-        ? "附件及协议开销（未估算）"
-        : "协议及其他开销（未估算）",
-      state: "unknown",
-    },
-  ];
-}
+const MAX_TOOLS = 64;
 
 /** Counts serialized semantic segments, not HTTP wire bytes and never inferred tokens. */
 export function foldContextComposition(
@@ -94,82 +60,78 @@ export function foldContextComposition(
   };
 }
 
-/** Read one bounded metadata row in one SQLite snapshot. Never reads request bodies. */
 export function getLatestContextRequest(
   storageRoot: string,
   sessionId: string,
 ): RuntimeLatestContextRequest {
-  const db = new DatabaseSync(operationalDatabasePath(storageRoot), { readOnly: true });
+  const store = new SqliteRuntimeControlStore({ storageRoot });
   try {
-    db.exec("BEGIN");
-    const row = db
-      .prepare(
-        `SELECT physical_attempt_id, provider_call_id,
-        json_extract(record_json,'$.provider') AS provider, json_extract(record_json,'$.model') AS model,
-        json_extract(record_json,'$.completedAt') AS completed,
-        CASE WHEN length(CAST(json_extract(record_json,'$.usage') AS BLOB))<=8192 THEN json_extract(record_json,'$.usage') END AS usage,
-        CASE WHEN length(CAST(json_extract(record_json,'$.requestDiagnostic') AS BLOB))<=? THEN json_extract(record_json,'$.requestDiagnostic') END AS diagnostic
-        FROM usage_physical_attempts WHERE session_id=? AND status='succeeded'
-          AND json_extract(record_json,'$.accountingSource')='physical' AND json_valid(record_json) AND json_extract(record_json,'$.purpose')='main'
-        ORDER BY json_extract(record_json,'$.completedAt') DESC, physical_attempt_id DESC LIMIT 1`,
-      )
-      .get(MAX_DIAGNOSTIC_BYTES, sessionId);
-    return row
-      ? requestView(row)
-      : { status: "unavailable", source: "none", reason: "尚无成功的主请求记录。" };
+    const record = store.getLatestContextAttempt(sessionId);
+    if (!record)
+      return {
+        status: "unavailable",
+        source: "none",
+        usageStatus: "missing",
+        compositionStatus: "unrecorded",
+        reason: "尚无成功的主请求记录。",
+      };
+    const capture = parsePreparedRequestCapture(record.requestDiagnostic);
+    const composition =
+      capture?.model === record.model ? foldContextComposition(capture.segments) : undefined;
+    const usage = record.usage;
+    const fields = usage?.reportedFields ?? [];
+    const facts = record.contextFacts!;
+    return {
+      status: "available",
+      source: "physical",
+      providerCallId: record.providerCallId,
+      physicalAttemptId: record.physicalAttemptId,
+      providerId: record.provider,
+      modelId: record.model,
+      completedAt: Date.parse(record.completedAt!),
+      ...(facts.routeId ? { routeId: facts.routeId } : {}),
+      ...(facts.connectionId ? { connectionId: facts.connectionId } : {}),
+      ...(facts.contextWindow !== undefined ? { contextWindow: facts.contextWindow } : {}),
+      ...(facts.contextWindowSource ? { contextWindowSource: facts.contextWindowSource } : {}),
+      ...(facts.compaction ? { compaction: { ...facts.compaction } } : {}),
+      ...(fields.includes("prompt") ? { inputTokens: usage!.promptTokens } : {}),
+      ...(fields.includes("completion") ? { outputTokens: usage!.completionTokens } : {}),
+      ...(fields.includes("cacheRead") ? { cachedInputTokens: usage!.cacheReadTokens } : {}),
+      usageStatus: record.usageBasis,
+      compositionStatus: composition ? "available" : "unrecorded",
+      ...(composition ? { composition } : { reason: "该请求未记录可用组成；未借用其他请求。" }),
+    };
   } finally {
-    db.close();
+    store.close();
   }
 }
 
-function requestView(row: Record<string, unknown>): RuntimeLatestContextRequest {
-  const capture = parsePreparedRequestCapture(parseJson(row.diagnostic));
-  const usage = parseJson(row.usage);
-  const fields = isRecord(usage) ? usage.reportedFields : undefined;
-  const reported = (field: string) => Array.isArray(fields) && fields.includes(field);
-  const completion =
-    typeof row.completed === "number" ? row.completed : Date.parse(String(row.completed));
-  const identity = {
-    source: "physical" as const,
-    providerCallId: String(row.provider_call_id),
-    ...(typeof row.physical_attempt_id === "string"
-      ? { physicalAttemptId: row.physical_attempt_id }
-      : {}),
-    providerId: String(row.provider),
-    modelId: String(row.model),
-    ...(Number.isFinite(completion) ? { completedAt: completion } : {}),
-  };
-  const inputTokens =
-    isRecord(usage) && (reported("prompt") || fields === undefined)
-      ? usage.promptTokens
-      : undefined;
-  const cachedInputTokens =
-    isRecord(usage) && reported("cacheRead") ? usage.cacheReadTokens : undefined;
-  const metering = {
-    ...(typeof inputTokens === "number" && Number.isFinite(inputTokens) ? { inputTokens } : {}),
-    ...(typeof cachedInputTokens === "number" && Number.isFinite(cachedInputTokens)
-      ? { cachedInputTokens }
-      : {}),
-  };
-  if (!capture || capture.model !== row.model)
+/** The newest transcript anchor stands on its own; never scan past a different route. */
+export function readLastRequestAnchor(
+  messages: readonly Message[],
+): RuntimeSessionContextSnapshot["lastRequestAnchor"] {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const anchor = messages[index]!.providerData?.["picoContextRequestAnchor"];
+    if (!anchor || typeof anchor !== "object") continue;
+    const value = anchor as Record<string, unknown>;
+    if (
+      typeof value.routeId !== "string" ||
+      typeof value.modelId !== "string" ||
+      typeof value.inputTokens !== "number" ||
+      !Number.isFinite(value.inputTokens) ||
+      value.inputTokens <= 0 ||
+      typeof value.outputTokens !== "number" ||
+      !Number.isFinite(value.outputTokens) ||
+      value.outputTokens < 0
+    )
+      return undefined;
     return {
-      ...identity,
-      ...metering,
-      status: "unavailable",
-      reason: "该请求没有可用的无正文组成记录；未借用其他请求。",
+      routeId: value.routeId,
+      modelId: value.modelId,
+      inputTokens: value.inputTokens,
+      outputTokens: value.outputTokens,
+      ...(typeof value.connectionId === "string" ? { connectionId: value.connectionId } : {}),
     };
-  const composition = foldContextComposition(capture.segments);
-  return composition
-    ? { ...identity, ...metering, status: "available", composition }
-    : { ...identity, ...metering, status: "unavailable", reason: "该请求的组成记录为空或无效。" };
-}
-function parseJson(value: unknown): unknown {
-  try {
-    return typeof value === "string" ? JSON.parse(value) : undefined;
-  } catch {
-    return undefined;
   }
-}
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
+  return undefined;
 }
