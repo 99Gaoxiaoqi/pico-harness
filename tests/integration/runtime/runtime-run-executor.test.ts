@@ -13,6 +13,8 @@ import {
   emitRuntimeLifecycleEvent,
 } from "@pico/pico-host/product-runtime-run-executor";
 import { RuntimeRun } from "@pico/pico-host/product-runtime-run";
+import { SqliteRuntimeControlStore } from "@pico/storage/sqlite/sqlite-runtime-control-store";
+import type { PhysicalAttemptRecord } from "@pico/storage/runtime-control-types";
 import type { SessionRuntime } from "@pico/pico-host/session-runtime";
 
 test("RuntimeRunExecutor executes one assembled turn without owning its resources", async () => {
@@ -24,6 +26,7 @@ test("RuntimeRunExecutor executes one assembled turn without owning its resource
     picoHome,
     runtimePort: createEngineRuntimePort(),
   });
+  const ledger = new SqliteRuntimeControlStore({ storageRoot: session.runtimeStorageRoot });
   try {
     await session.recover();
     const hookEvents: string[] = [];
@@ -35,6 +38,36 @@ test("RuntimeRunExecutor executes one assembled turn without owning its resource
     } as unknown as SessionRuntime;
     const engine = {
       run: async (target: Session) => {
+        const attempt: PhysicalAttemptRecord = {
+          physicalAttemptId: "executor-physical",
+          revision: 0,
+          attempt: 0,
+          provider: "openai",
+          model: "test",
+          startedAt: new Date().toISOString(),
+          status: "prepared",
+          usageBasis: "missing",
+          accountingVersion: 1,
+          accountingSource: "physical",
+          providerCallId: "executor-call",
+          logicalCallId: "executor-logical",
+          ownerId: ledger.beginPhysicalAttemptOwner(),
+          sessionId: target.id,
+          purpose: "main",
+          retryAttempt: 0,
+          costStatus: "unknown",
+          pricingVersion: "test-v1",
+        };
+        ledger.recordPhysicalAttempt(attempt);
+        ledger.recordPhysicalAttempt({
+          ...attempt,
+          revision: 1,
+          status: "succeeded",
+          usageBasis: "reported",
+          usage: { promptTokens: 12, completionTokens: 4 },
+          costCNY: 0.02,
+          costStatus: "estimated",
+        });
         await target.commitMessages({ role: "assistant", content: "answer" });
         return target.getHistory();
       },
@@ -61,6 +94,12 @@ test("RuntimeRunExecutor executes one assembled turn without owning its resource
     }).execute();
 
     assert.equal(result.finalMessage, "answer");
+    assert.equal(
+      session.totalPromptTokens,
+      0,
+      "legacy in-memory counter did not receive the physical revision",
+    );
+    assert.deepEqual(result.usage, { promptTokens: 12, completionTokens: 4, costCNY: 0.02 });
     assert.deepEqual(hookEvents, ["UserPromptSubmit", "UserPromptExpansion"]);
     assert.deepEqual(lifecycle, ["run.started", "run.finished"]);
     assert.equal(lifecycleEvents[0]?.sessionId, session.id);
@@ -70,6 +109,7 @@ test("RuntimeRunExecutor executes one assembled turn without owning its resource
     );
     assert.equal(session.runtimeEventStore?.storageRoot !== undefined, true);
   } finally {
+    ledger.close();
     await session.close();
     await rm(root, { recursive: true, force: true });
   }

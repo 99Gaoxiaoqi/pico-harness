@@ -251,10 +251,10 @@ function usageField(value: number, reports: number, totalCalls: number): UsageFi
 }
 
 function costReport(route: ModelRoute, usage: SessionUsageSnapshot): ModelUsageReport["cost"] {
-  const total = usage.totalUsageReports;
+  const total = usage.totalProviderCalls;
   const estimated = usage.totalEstimatedCostReports;
   const included = usage.totalIncludedCostReports;
-  const unknown = usage.totalUnknownCostReports + Math.max(0, total - estimated - included);
+  const unknown = Math.max(usage.totalUnknownCostReports, total - estimated - included);
   if (total === 0 || unknown >= total) {
     return { cny: null, status: "unknown", priceSource: route.capabilities.price.source };
   }

@@ -189,6 +189,9 @@ export const CONTROL_SCOPE: SqliteSchemaScope = {
     [
       4,
       `
+      CREATE INDEX runtime_events_usage_started ON runtime_events(
+        session_id, run_id, json_extract(payload_json, '$.data.providerCallId'), event_seq DESC
+      ) WHERE kind = 'model.call.started';
       CREATE TABLE usage_accounting_versions (session_id TEXT PRIMARY KEY, revision INTEGER NOT NULL);
       CREATE TABLE usage_accounting_calls (provider_call_id TEXT PRIMARY KEY, source TEXT NOT NULL, coverage TEXT NOT NULL);
       CREATE TABLE usage_attempt_owners (owner_id TEXT PRIMARY KEY, process_id INTEGER NOT NULL, closed INTEGER NOT NULL DEFAULT 0);
