@@ -203,7 +203,6 @@ export type {
   RuntimeSessionTask,
   RuntimeSessionArtifact,
   RuntimeSessionContextSnapshot,
-  RuntimeContextSection,
   RuntimeContextComposition,
   RuntimeLatestContextRequest,
   RuntimeGitReviewSource,
