@@ -1,3 +1,4 @@
+import { contextSummaryMessage } from "../../fixtures/context-summary.js";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -155,10 +156,7 @@ test("RuntimeProjectionService outputs are deepStrictEqual with the underlying p
       eventId: event.eventId,
       message: projectToMessage(event),
     }));
-  const checkpointSummary: Message = {
-    role: "assistant",
-    content: "checkpoint summary",
-  };
+  const checkpointSummary = contextSummaryMessage("checkpoint summary");
   await store.append(
     {
       schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,

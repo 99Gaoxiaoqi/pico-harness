@@ -1,3 +1,4 @@
+import { contextSummaryMessage } from "../../fixtures/context-summary.js";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -7,7 +8,11 @@ import { test } from "node:test";
 import { Session } from "@pico/pico-host/session";
 import { RuntimeRun } from "@pico/runtime/runtime-run";
 import { bindToolResultArchiveReader } from "@pico/runtime/tool-result-archive";
-import { readRuntimeModelHistorySnapshot } from "@pico/runtime/session-runtime-read-model";
+import {
+  readRuntimeModelHistorySnapshot,
+  materializeRuntimeHistoryEntries,
+} from "@pico/runtime/session-runtime-read-model";
+import { createSessionForkRuntimePort } from "@pico/pico-host/session-fork-runtime-port-adapter";
 import { estimateMessagesTokens } from "@pico/runtime/context-budget";
 import { computeCheckpointSourceDigest, type ToolDefinition } from "@pico/core";
 
@@ -67,9 +72,34 @@ test("Maka projection decisions are durable, read-only on replay, and bound to t
     await result(session, run, "large", raw);
     await run.prepareToolResultProjections({ stepNumber: 0, tools });
     assert.equal((await run.readModelHistory()).at(-1)?.content, raw);
+    const store = session.runtimeEventStore!;
+    const append = store.appendBatch;
+    store.appendBatch = async (...args) => {
+      if (args[0].some((event) => event.kind === "tool.result.projection.recorded"))
+        throw new Error("injected projection commit failure");
+      return append.apply(store, args);
+    };
+    try {
+      await assert.rejects(
+        run.prepareToolResultProjections({ stepNumber: 1, tools }),
+        /injected projection commit failure/,
+      );
+      assert.equal((await run.readModelHistory()).at(-1)?.content, raw);
+    } finally {
+      store.appendBatch = append;
+    }
     await run.prepareToolResultProjections({ stepNumber: 1, tools });
     const before = await session.runtimeEventStore!.readSession(session.id);
     assert.equal(before.filter((e) => e.kind === "tool.result.projection.recorded").length, 1);
+    const broken = structuredClone(before);
+    const invalid = broken.find((event) => event.kind === "tool.result.projection.recorded");
+    assert.ok(invalid?.kind === "tool.result.projection.recorded");
+    const invalidIndex = broken.indexOf(invalid);
+    broken[invalidIndex] = {
+      ...invalid,
+      data: { ...invalid.data, sourceProjectionSha256: "0".repeat(64) },
+    };
+    assert.throws(() => materializeRuntimeHistoryEntries(broken), /invalid source or digest/);
     const original = before.find((e) => e.kind === "tool.result.recorded");
     assert.ok(original?.kind === "tool.result.recorded");
     assert.equal(original.data.projection.text, raw);
@@ -94,7 +124,7 @@ test("Maka projection decisions are durable, read-only on replay, and bound to t
       coveredEventCount: covered.length,
       throughEventId: covered.at(-1)!.eventId,
       sourceDigest: computeCheckpointSourceDigest(covered),
-      summary: { role: "assistant", content: "Archived the large result." },
+      summary: contextSummaryMessage("Archived the large result."),
     });
     assert.deepEqual(await run.readContextCompactionBoundary(), {
       checkpointId: "checkpoint",
@@ -102,9 +132,35 @@ test("Maka projection decisions are durable, read-only on replay, and bound to t
       throughEventId: covered.at(-1)!.eventId,
     });
     assert.equal((await run.readModelHistory()).length, 1);
+    const persisted = await session.runtimeEventStore!.readSession(session.id);
+    const oldFormat = persisted.map((event) =>
+      event.kind === "context.checkpoint.recorded"
+        ? {
+            ...event,
+            data: {
+              ...event.data,
+              summary: { role: "assistant" as const, content: "unmarked legacy summary" },
+            },
+          }
+        : event,
+    );
+    assert.throws(() => materializeRuntimeHistoryEntries(oldFormat), /invalid sectioned summary/);
+    // Once a source has been folded, a later transition must never rewrite that prefix.
+    const transition = before.find((event) => event.kind === "tool.result.projection.recorded")!;
+    assert.throws(
+      () =>
+        materializeRuntimeHistoryEntries([
+          ...persisted,
+          { ...transition, eventId: "late-transition" },
+        ]),
+      /invalid source or digest|outside current model history/,
+    );
   });
   await session.recover();
-  assert.equal((await run.readModelHistory())[0]?.content, "Archived the large result.");
+  assert.equal(
+    (await run.readModelHistory())[0]?.content,
+    contextSummaryMessage("Archived the large result.").content,
+  );
 });
 
 test("Maka active 2048/256 thresholds and stale two-user-turn protection", async (t) => {
@@ -153,6 +209,31 @@ test("Maka active 2048/256 thresholds and stale two-user-turn protection", async
         },
       ]),
       2001,
+    );
+    const forkPort = createSessionForkRuntimePort();
+    const seed = (await session.readDurableForkSnapshot()).runtimeSeedEntries;
+    const fork = {
+      sourceSessionId: session.id,
+      targetSessionId: "small-archive-fork",
+      operationId: "small-archive-fork",
+      seedEntries: seed,
+      workDir: session.workDir,
+      runtimeAuthority: session.runtimeEventStore!,
+      publication: { async assertOwned() {} },
+    };
+    await forkPort.bootstrapFork(fork);
+    await forkPort.bootstrapFork(fork);
+    const forkHistory = (
+      await readRuntimeModelHistorySnapshot(session.runtimeEventStore!, fork.targetSessionId)
+    ).messages;
+    const forked = forkHistory.find((message) => message.toolCallId === "duplicate1")!.content;
+    assert.match(forked, /exact_duplicate/);
+    const ref = forked.match(/pico:\/\/archive\/[^"\s]+/)![0];
+    assert.equal(
+      await bindToolResultArchiveReader(session.runtimeEventStore!, fork.targetSessionId).readRaw(
+        ref,
+      ),
+      "a".repeat(1024),
     );
   });
 });

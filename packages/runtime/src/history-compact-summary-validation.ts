@@ -247,9 +247,9 @@ function scanSummaryStructure(text: string): SummaryStructureScan {
   };
 }
 
-/** Validate only stamped checkpoints; pre-contract snapshots retain compatibility. */
+/** Every semantic checkpoint must carry the current sectioned contract. */
 export function isValidStoredCompactionSummary(content: string, format: unknown): boolean {
-  if (format !== SECTIONED_SUMMARY_FORMAT) return true;
+  if (format !== SECTIONED_SUMMARY_FORMAT) return false;
   const start = content.indexOf(COMPACTION_SUMMARY_OPEN_TAG);
   const end = content.indexOf(COMPACTION_SUMMARY_CLOSE_TAG);
   if (start < 0 || end <= start) return false;
