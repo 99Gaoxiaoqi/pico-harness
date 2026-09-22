@@ -7,23 +7,25 @@ import type {
 } from "@pico/protocol";
 import type { UsageView, WorkspaceView } from "../model.js";
 
+export interface UsageQuerySelection {
+  readonly workspacePath: string;
+  readonly range: "24h" | "7d" | "30d" | "all";
+}
+
 export interface UsageSettingsPageProps {
+  readonly selection: UsageQuerySelection;
   readonly usage: UsageView & { readonly details?: UsageDashboardDetails };
   readonly workspaces: readonly WorkspaceView[];
   readonly loading: boolean;
   readonly error?: string;
-  readonly onQuery: (input: {
-    workspacePath?: string;
-    from?: number;
-    to?: number;
-  }) => Promise<void>;
+  readonly onQuery: (selection: UsageQuerySelection) => Promise<void>;
   readonly onOpenSession: (workspacePath: string, sessionId: string) => void;
 }
 const ranges = [
-  { id: "24h", label: "24 小时", days: 1 },
-  { id: "7d", label: "7 天", days: 7 },
-  { id: "30d", label: "30 天", days: 30 },
-  { id: "all", label: "全部", days: 0 },
+  { id: "24h", label: "24 小时" },
+  { id: "7d", label: "7 天" },
+  { id: "30d", label: "30 天" },
+  { id: "all", label: "全部" },
 ] as const;
 const tabs = [
   { id: "requests", label: "请求日志" },
@@ -145,39 +147,24 @@ function Table({
 }
 export function UsageSettingsPage({
   usage,
+  selection,
   workspaces,
   loading,
   error,
   onQuery,
   onOpenSession,
 }: UsageSettingsPageProps) {
-  const [range, setRange] = useState<(typeof ranges)[number]["id"]>("all");
-  const [workspacePath, setWorkspacePath] = useState(usage.workspacePath ?? "");
+  const { range, workspacePath } = selection;
   const [tab, setTab] = useState<Tab>("requests");
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("all");
   const [showDetails, setShowDetails] = useState(true);
   const [page, setPage] = useState(0);
-  const [pending, setPending] = useState(false);
-  const [queryError, setQueryError] = useState<string>();
   const details = usage.details;
-  const busy = loading || pending;
-  async function query(nextRange = range, nextWorkspace = workspacePath) {
-    setPending(true);
-    setQueryError(undefined);
+  const busy = loading;
+  function query(next: UsageQuerySelection = selection) {
     setPage(0);
-    const days = ranges.find((item) => item.id === nextRange)?.days ?? 0;
-    const to = Date.now();
-    try {
-      await onQuery({
-        ...(nextWorkspace ? { workspacePath: nextWorkspace } : {}),
-        ...(days ? { from: to - days * 86_400_000, to } : {}),
-      });
-    } catch (cause) {
-      setQueryError(cause instanceof Error ? cause.message : "加载用量失败，请重试");
-    } finally {
-      setPending(false);
-    }
+    return onQuery(next);
   }
   const filtered = useMemo(() => {
     const needle = search.trim().toLocaleLowerCase();
@@ -201,7 +188,21 @@ export function UsageSettingsPage({
   const write = details?.knownCacheWriteTokens ?? usage.cacheWriteTokens;
   const input =
     usage.inputTokens === undefined ? undefined : usage.inputTokens + (read ?? 0) + (write ?? 0);
+  const cacheValue = (value: number | undefined, coverage: number | undefined) => {
+    if (coverage === 0) return "未知（未上报）";
+    if (value === undefined) return "未知";
+    return coverage !== undefined && coverage !== usage.providerCallCount
+      ? `已知 ${number(value)}（覆盖 ${number(coverage)} / ${number(usage.providerCallCount)} 次）`
+      : number(value);
+  };
   const cacheTotal = read === undefined || write === undefined ? undefined : read + write;
+  const cacheComplete = details
+    ? details.cacheReadReportedCallCount === usage.providerCallCount &&
+      details.cacheWriteReportedCallCount === usage.providerCallCount
+    : cacheTotal !== undefined;
+  const hasKnownCache = details
+    ? details.cacheReadReportedCallCount > 0 || details.cacheWriteReportedCallCount > 0
+    : cacheTotal !== undefined;
   const warnings = [...(details?.warnings ?? []), ...(usage.cacheAlerts ?? [])];
   const unavailable = details?.unavailableWorkspaces ?? [];
   const hasDiagnostics =
@@ -253,10 +254,8 @@ export function UsageSettingsPage({
               key={item.id}
               type="button"
               aria-pressed={range === item.id}
-              disabled={busy}
               onClick={() => {
-                setRange(item.id);
-                void query(item.id);
+                void query({ ...selection, range: item.id });
               }}
             >
               {item.label}
@@ -267,12 +266,10 @@ export function UsageSettingsPage({
           项目
           <select
             aria-label="统计项目"
-            disabled={busy}
             value={workspacePath}
             onChange={(event) => {
               const value = event.target.value;
-              setWorkspacePath(value);
-              void query(range, value);
+              void query({ ...selection, workspacePath: value });
             }}
           >
             <option value="">全部项目</option>
@@ -284,9 +281,9 @@ export function UsageSettingsPage({
           </select>
         </label>
       </div>
-      {(error || queryError) && (
+      {error && (
         <div className="usage-error" role="alert">
-          {queryError || error}
+          {error}
           <button type="button" disabled={busy} onClick={() => void query()}>
             重试
           </button>
@@ -304,10 +301,30 @@ export function UsageSettingsPage({
           <br />
           输入包含缓存 Token
         </Metric>
-        <Metric title="缓存 Token" value={number(cacheTotal)}>
-          读取 {number(read)} · 写入 {number(write)}
+        <Metric
+          title="缓存 Token"
+          value={
+            cacheComplete
+              ? number(cacheTotal)
+              : hasKnownCache
+                ? `已知 ${number(cacheTotal)}`
+                : "未知（未上报）"
+          }
+        >
+          读取 {cacheValue(read, details?.cacheReadReportedCallCount)} · 写入{" "}
+          {cacheValue(write, details?.cacheWriteReportedCallCount)}
           <br />
           未缓存输入 {number(usage.uncachedInputTokens ?? usage.inputTokens)}
+          <br />
+          输入 Token 缓存复用率{" "}
+          {usage.cachePromptTokenReuseRate === undefined
+            ? "未知"
+            : `${(usage.cachePromptTokenReuseRate * 100).toFixed(1)}%`}
+          <br />
+          请求缓存命中率{" "}
+          {usage.cacheRequestHitRate === undefined
+            ? "未知"
+            : `${(usage.cacheRequestHitRate * 100).toFixed(1)}%`}
         </Metric>
       </div>
       {details && (
@@ -481,11 +498,19 @@ export function UsageSettingsPage({
                           "未知"
                         ),
                         <span
-                          title={`输入 ${number(row.inputTokens)} · 输出 ${number(row.outputTokens)} · 缓存读取 ${number(row.cacheReadTokens)} · 写入 ${number(row.cacheWriteTokens)}`}
+                          title={`输入 ${number(row.inputTokens)} · 输出 ${number(row.outputTokens)} · 缓存读取 ${row.cacheReadReported ? number(row.cacheReadTokens) : "未知（未上报）"} · 写入 ${row.cacheWriteReported ? number(row.cacheWriteTokens) : "未知（未上报）"}`}
                         >
                           {number(row.totalTokens)}
                         </span>,
-                        cost(row.costCNY, row.costStatus),
+                        <span>
+                          {cost(row.costCNY, row.costStatus)}
+                          {row.costStatus === "unknown" && (
+                            <small className="usage-cell-secondary">
+                              {row.costUnknownReason ??
+                                "请求记录未保存可用定价或完整用量，未按当前价格回填"}
+                            </small>
+                          )}
+                        </span>,
                         duration(row.durationMs),
                         <span className={`usage-status usage-status-${row.status}`}>
                           {statuses[row.status]}

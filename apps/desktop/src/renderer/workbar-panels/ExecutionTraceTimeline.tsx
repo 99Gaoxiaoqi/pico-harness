@@ -144,6 +144,7 @@ export function ExecutionTraceTimeline({
           )}
           {selected.providerId && selected.modelId && selected.costStatus === "unknown" && (
             <PricingKey
+              reason={selected.costUnknownReason}
               value={JSON.stringify({ providerId: selected.providerId, modelId: selected.modelId })}
             />
           )}
@@ -264,11 +265,12 @@ async function copyModelIdentity(value: string): Promise<void> {
   await navigator.clipboard.writeText(value);
 }
 
-function PricingKey({ value }: { value: string }) {
+function PricingKey({ value, reason }: { value: string; reason?: string | undefined }) {
   const [message, setMessage] = useState("");
   return (
     <div className="tool-panel__code-block">
-      <strong>未定价模型</strong>
+      <strong>费用未知</strong>
+      <p>{reason ?? "请求记录未保存可用定价或完整用量，未按当前价格回填"}</p>
       <code>{value}</code>
       <button
         type="button"
@@ -323,7 +325,7 @@ export function ExecutionUsageSummary({ summary }: { summary: RuntimeExecutionSu
           summary.inputTokens > 0 &&
           summary.cachedInputTokens !== undefined && (
             <div>
-              <dt>缓存命中率</dt>
+              <dt>输入 Token 缓存复用率</dt>
               <dd>{((summary.cachedInputTokens / summary.inputTokens) * 100).toFixed(1)}%</dd>
             </div>
           )}

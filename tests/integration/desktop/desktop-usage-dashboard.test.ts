@@ -63,12 +63,12 @@ test("usage dashboard joins real model and tool ledgers across workspaces, prese
       latencyMs: 300,
       usageBasis: "reported",
       usage: {
-        promptTokens: 180,
-        completionTokens: 20,
-        inputTokens: 100,
-        cacheReadTokens: 80,
+        promptTokens: index === 0 ? 15000 : 13100,
+        completionTokens: index === 0 ? 400 : 539,
+        inputTokens: index === 0 ? 5000 : 4611,
+        cacheReadTokens: index === 0 ? 10000 : 8489,
         cacheWriteTokens: 0,
-        reportedFields: ["prompt", "completion", "input", "cacheRead", "cacheWrite"],
+        reportedFields: ["prompt", "completion", "input", "cacheRead"],
       },
       ...(index === 0 ? { costCNY: 0.5, costStatus: "estimated" as const } : {}),
     });
@@ -169,11 +169,19 @@ test("usage dashboard joins real model and tool ledgers across workspaces, prese
   assert.equal(flash.cacheWritePerMillion, null);
   assert.match(flash.sourceUrl!, /^https:\/\/api-docs.deepseek.com/);
   assert.equal(usage.providerCallCount, 2);
-  assert.equal(usage.totalTokens, 400);
+  assert.equal(usage.totalTokens, 29039);
+  assert.equal(usage.inputTokens, 9611);
+  assert.equal(usage.outputTokens, 939);
+  assert.equal(usage.cacheWriteTokens, undefined);
+  assert.equal(details.cacheWriteReportedCallCount, 0);
   assert.equal(usage.costStatus, "partial");
-  assert.equal(details.knownCacheReadTokens, 160);
+  assert.equal(details.knownCacheReadTokens, 18489);
   assert.equal(details.cacheReadReportedCallCount, 2);
   assert.equal(details.activityCount, 4);
+  for (const row of details.activities.filter((row) => row.kind === "model")) {
+    assert.equal(row.cacheReadReported, true);
+    assert.equal(row.cacheWriteReported, false);
+  }
   assert.equal(new Set(details.activities.map((r) => r.id)).size, 4);
   assert.equal(details.providers[0]!.count, 2);
   assert.equal(details.providers[0]!.costStatus, "partial");
@@ -183,6 +191,14 @@ test("usage dashboard joins real model and tool ledgers across workspaces, prese
   assert.equal(details.unavailableWorkspaces.length, 1);
   assert.match(details.unavailableWorkspaces[0]!.error, /信任/);
   assert.doesNotMatch(JSON.stringify(raw), /PRIVATE_TOOL_BODY_MUST_NOT_LEAK/);
+  for (const [index, workspacePath] of paths.slice(0, 2).entries()) {
+    const scoped = parseUsage(
+      await desktop.handle(createRuntimeRequest("usage.get", { workspacePath })),
+    );
+    assert.equal(scoped.workspacePath, workspacePath);
+    assert.equal(scoped.totalTokens, index === 0 ? 15400 : 13639);
+    assert.equal(scoped.details!.unavailableWorkspaces.length, 0);
+  }
   const ranged = parseUsage(
     await desktop.handle(
       createRuntimeRequest("usage.get", {

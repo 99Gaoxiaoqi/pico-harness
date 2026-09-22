@@ -13,10 +13,10 @@ const summary: RuntimeExecutionSummary = {
   failedCalls: 0,
   meteredCalls: 2,
   unpricedCalls: 1,
-  inputTokens: 100,
-  outputTokens: 20,
-  cachedInputTokens: 40,
-  reasoningTokens: 8,
+  inputTokens: 28100,
+  outputTokens: 939,
+  cachedInputTokens: 18489,
+  reasoningTokens: 418,
   cacheCoverage: "complete",
   physicalAttempts: 3,
   retries: 1,
@@ -52,6 +52,7 @@ const page: RuntimeExecutionPage = {
           modelId: "model",
           pricingKey: "provider/model",
           costStatus: "unknown",
+          costUnknownReason: "未匹配该 endpoint 与模型的定价",
           retries: 1,
           firstTokenLatencyMs: 150,
           cachedInputTokens: 40,
@@ -112,8 +113,8 @@ test("trace inspector integrates physical attempts, independent usage and earlie
   for (const label of [
     "隐藏较早记录",
     "加载较早记录",
-    "缓存命中率",
-    "40.0%",
+    "输入 Token 缓存复用率",
+    "65.8%",
     "工具耗时",
     "模型调用记录",
     "重试 1 次",
@@ -121,6 +122,8 @@ test("trace inspector integrates physical attempts, independent usage and earlie
     "第 1 次",
     "首 Token 耗时",
     "复制模型标识",
+    "费用未知",
+    "未匹配该 endpoint 与模型的定价",
     "上下文 Token 为估算值",
     "预留输出",
     "安全余量",
@@ -134,8 +137,8 @@ test("trace inspector integrates physical attempts, independent usage and earlie
   });
   assert.match(unavailable, /会话用量读取失败：计量暂不可用/u);
   assert.match(unavailable, /模型甲/u);
-  assert.doesNotMatch(unavailable, /缓存命中率/u);
+  assert.doesNotMatch(unavailable, /输入 Token 缓存复用率/u);
   const traceFailed = render({ summary, error: "轨迹暂不可用" });
-  assert.match(traceFailed, /40.0%/u);
+  assert.match(traceFailed, /65.8%/u);
   assert.match(traceFailed, /轨迹暂不可用/u);
 });

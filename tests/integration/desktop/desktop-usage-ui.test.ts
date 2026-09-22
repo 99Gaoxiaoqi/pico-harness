@@ -57,6 +57,7 @@ function render(overrides: Partial<UsageSettingsPageProps> = {}) {
       workspaces: [
         { path: "/project", name: "示例项目", mode: "folder", registered: true, trusted: true },
       ],
+      selection: { range: "all", workspacePath: "" },
       loading: false,
       onQuery: async () => {},
       onOpenSession: () => {},
@@ -68,10 +69,11 @@ function render(overrides: Partial<UsageSettingsPageProps> = {}) {
 test("usage page presents canonical totals, provenance, request navigation and bounded pagination", () => {
   const html = render();
   assert.match(html, /输入 330 · 输出 50/);
-  assert.match(html, /读取 200 · 写入 30/);
+  assert.match(html, /读取 已知 200（覆盖 1 \/ 2 次） · 写入 已知 30（覆盖 1 \/ 2 次）/);
   assert.match(html, /未缓存输入 100/);
+  assert.match(html, /缓存读取 未知（未上报） · 写入 未知（未上报）/);
   assert.match(html, /¥0\.012 · 已知部分/);
-  assert.match(html, /<td>未知<\/td>/);
+  assert.match(html, /请求记录未保存可用定价或完整用量，未按当前价格回填/);
   assert.match(html, /缓存上报覆盖：读取 1 \/ 2 次/);
   assert.match(html, /<details class="usage-diagnostics"><summary>/);
   assert.match(html, /EACCES: permission denied/);
@@ -99,4 +101,37 @@ test("usage page separates loading, query failure and unavailable data from zero
   assert.match(empty, /暂无分类明细/);
   assert.match(empty, /总 Token<\/span><strong>未知/);
   assert.doesNotMatch(empty, /¥0/);
+});
+
+test("缓存输入计入累计，未上报写入与真实零区分，复用率与请求命中率口径明确", () => {
+  const usage = {
+    workspacePath: "/project",
+    totalTokens: 29039,
+    inputTokens: 9611,
+    outputTokens: 939,
+    reasoningTokens: 418,
+    cacheReadTokens: 18489,
+    providerCallCount: 5,
+    usageReportCount: 5,
+    cachePromptTokenReuseRate: 18489 / 28100,
+    cacheRequestHitRate: 1,
+    details: {
+      ...details,
+      knownCacheReadTokens: 18489,
+      knownCacheWriteTokens: 0,
+      cacheReadReportedCallCount: 5,
+      cacheWriteReportedCallCount: 0,
+    },
+  };
+  const html = render({ usage });
+  assert.match(html, /总 Token<\/span><strong>29,039/);
+  assert.match(html, /输入 28,100 · 输出 939/);
+  assert.match(html, /读取 18,489 · 写入 未知（未上报）/);
+  assert.match(html, /输入 Token 缓存复用率 65.8%/);
+  assert.match(html, /请求缓存命中率 100.0%/);
+  assert.match(html, /<option value="" selected="">全部项目/);
+  const knownZero = render({
+    usage: { ...usage, details: { ...usage.details, cacheWriteReportedCallCount: 5 } },
+  });
+  assert.match(knownZero, /读取 18,489 · 写入 0/);
 });

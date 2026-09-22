@@ -933,12 +933,13 @@ export function ConversationPage() {
               <div className="conversation-session-header__meta">
                 {preview && <PreviewBadge />}
                 {conversation?.usage && (
-                  <span>
-                    {formatCompact(
-                      (conversation.usage.inputTokens ?? 0) +
-                        (conversation.usage.outputTokens ?? 0),
-                    )}{" "}
-                    tokens
+                  <span
+                    title={`会话累计 Token：${conversation.usage.totalTokens?.toLocaleString("zh-CN") ?? "未知"}`}
+                  >
+                    会话累计 Token{" "}
+                    {conversation.usage.totalTokens === undefined
+                      ? "未知"
+                      : formatCompact(conversation.usage.totalTokens)}
                   </span>
                 )}
                 {activeRun && <StatusPill status={activeRun.status} />}
