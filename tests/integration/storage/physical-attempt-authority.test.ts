@@ -348,3 +348,141 @@ test("control migration writes and verifies a readable pre-migration backup", as
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("same logical call with unreported HTTP 503 and successful outer retry retains partial coverage", async () => {
+  const { createModelUsageReport } = await import("@pico/runtime/provider/model-runtime-report");
+  const { resolveModelRouteCapabilities } = await import("@pico/runtime");
+  const root = await mkdtemp(join(tmpdir(), "pico-meter-retry-coverage-"));
+  const store = new SqliteRuntimeControlStore({ storageRoot: root });
+  try {
+    const first = record(store.beginPhysicalAttemptOwner());
+    store.recordPhysicalAttempt(first);
+    store.recordPhysicalAttempt({ ...first, revision: 1, status: "failed", httpStatus: 503 });
+    const retry: PhysicalAttemptRecord = {
+      ...first,
+      physicalAttemptId: "physical-retry",
+      providerCallId: "call-retry",
+      retryAttempt: 1,
+    };
+    store.recordPhysicalAttempt(retry);
+    store.recordPhysicalAttempt({
+      ...retry,
+      revision: 1,
+      status: "succeeded",
+      httpStatus: 200,
+      usageBasis: "reported",
+      usage: {
+        promptTokens: 12,
+        completionTokens: 4,
+        cacheReadTokens: 2,
+        reportedFields: ["prompt", "completion", "cacheRead"],
+      },
+      costCNY: 0.02,
+      costStatus: "estimated",
+    });
+    assert.equal(
+      new Set(store.listPhysicalAttempts().map((attempt) => attempt.logicalCallId)).size,
+      1,
+    );
+    const usage = store.getAccountingSessionUsage("session-1")!;
+    assert.equal(usage.totalProviderCalls, 2);
+    assert.equal(usage.totalUsageReports, 1);
+    assert.equal(usage.totalCacheReadReports, 1);
+    assert.equal(usage.totalEstimatedCostReports, 1);
+    assert.equal(usage.totalUnknownCostReports, 1);
+    const report = createModelUsageReport(
+      {
+        id: "openai/test",
+        providerId: "openai",
+        provider: "openai",
+        model: "test",
+        baseURL: "https://api.openai.com/v1",
+        apiKeyEnv: "OPENAI_API_KEY",
+        source: "config",
+        capabilities: resolveModelRouteCapabilities("openai", "test", undefined),
+      },
+      usage,
+    );
+    assert.equal(report.fields.promptTokens.status, "partial");
+    assert.equal(report.fields.completionTokens.status, "partial");
+    assert.equal(report.fields.cacheReadTokens.status, "partial");
+    assert.equal(report.cache.requestHitRate, null);
+    assert.equal(report.cost.status, "partial");
+    assert.equal(report.cost.cny, 0.02);
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("legacy migration recovers auxiliary purpose from matching start and never invents main attribution", async () => {
+  const { Session } = await import("@pico/pico-host/session");
+  const { RuntimeRun } = await import("@pico/pico-host/product-runtime-run");
+  const { createEngineRuntimePort } = await import("@pico/pico-host/engine-runtime-port-adapter");
+  const root = await mkdtemp(join(tmpdir(), "pico-meter-legacy-purpose-"));
+  const session = new Session("legacy-purpose", root, {
+    persistence: true,
+    picoHome: join(root, "home"),
+    runtimeStorageRoot: root,
+    runtimePort: createEngineRuntimePort(),
+  });
+  const ledger = new SqliteRuntimeControlStore({ storageRoot: root });
+  try {
+    await session.recover();
+    const run = await RuntimeRun.start({
+      capability: session.runtimeEventCapability!,
+      agentSwarmAuthorization: "none",
+    });
+    await run.run(async () => {
+      await run.recordModelCallStarted({ providerCallId: "aux-call", purpose: "aux" });
+      for (const providerCallId of ["aux-call", "unknown-call"]) {
+        await run.recordModelCallSettled({
+          providerCallId,
+          status: "succeeded",
+          latencyMs: 1,
+          attempts: [
+            {
+              attemptId: providerCallId,
+              attempt: 1,
+              provider: "openai",
+              model: "test",
+              startedAt: snapshot.startedAt,
+              completedAt: snapshot.startedAt,
+              status: "succeeded",
+              latencyMs: 1,
+              usageBasis: "reported",
+              usage: { promptTokens: 7, completionTokens: 2 },
+            },
+          ],
+          attemptCoverage: "complete",
+        });
+      }
+    });
+    assert.deepEqual(
+      ledger
+        .listAccountingProviderCalls({ sessionId: session.id })
+        .map((call) => call.purpose)
+        .sort(),
+      ["aux", "legacy_unknown"],
+    );
+    assert.equal(ledger.migrateLegacyPhysicalAttempts(), 2);
+    assert.equal(ledger.migrateLegacyPhysicalAttempts(), 0);
+    assert.deepEqual(
+      ledger
+        .listPhysicalAttempts({ sessionId: session.id })
+        .map((call) => call.purpose)
+        .sort(),
+      ["aux", "legacy_unknown"],
+    );
+    assert.equal(
+      ledger
+        .listPhysicalAttempts({ sessionId: session.id })
+        .some((call) => call.purpose === "main"),
+      false,
+    );
+  } finally {
+    await session.close();
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});

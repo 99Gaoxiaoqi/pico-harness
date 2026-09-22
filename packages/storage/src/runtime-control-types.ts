@@ -155,7 +155,7 @@ export interface ProviderCallRecord {
   goalId?: string | undefined;
   jobId?: string | undefined;
   attemptId?: string | undefined;
-  purpose: ProviderCallPurpose;
+  purpose: ProviderCallPurpose | "legacy_unknown";
   provider: string;
   model: string;
   route?: string | undefined;
@@ -533,7 +533,7 @@ export interface PhysicalAttemptRecord extends ProviderAttemptLifecycleSnapshot 
   readonly goalId?: string | undefined;
   readonly jobId?: string | undefined;
   readonly jobAttemptId?: string | undefined;
-  readonly purpose: ProviderCallPurpose;
+  readonly purpose: ProviderCallPurpose | "legacy_unknown";
   readonly route?: string | undefined;
   readonly retryAttempt: number;
   readonly costCNY?: number;

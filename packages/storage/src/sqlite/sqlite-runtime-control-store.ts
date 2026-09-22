@@ -1728,7 +1728,12 @@ export class SqliteRuntimeControlStore {
       const rows = this.allRows(
         `SELECT e.session_id, e.run_id, e.turn_id,
         json_extract(e.payload_json, '$.data') AS data_json,
-        c.reported_json, c.purpose, c.route, c.goal_id, c.job_id, c.attempt_id, c.conversation_id
+        c.reported_json, c.purpose, c.route, c.goal_id, c.job_id, c.attempt_id, c.conversation_id,
+        (SELECT json_extract(started.payload_json, '$.data.purpose') FROM runtime_events started
+          WHERE started.session_id = e.session_id AND started.run_id = e.run_id
+            AND started.kind = 'model.call.started'
+            AND json_extract(started.payload_json, '$.data.providerCallId') = json_extract(e.payload_json, '$.data.providerCallId')
+          ORDER BY started.event_seq DESC LIMIT 1) AS started_purpose
         FROM runtime_events e LEFT JOIN usage_provider_calls c ON c.call_id = e.provider_call_id
         WHERE e.kind = 'model.call.settled' AND json_type(e.payload_json, '$.data.attempts') = 'array'
         AND NOT EXISTS (SELECT 1 FROM usage_physical_attempts p WHERE p.provider_call_id = json_extract(e.payload_json, '$.data.providerCallId'))${filterClauses.length ? ` AND ${filterClauses.join(" AND ")}` : ""}`,
@@ -1762,7 +1767,8 @@ export class SqliteRuntimeControlStore {
             jobId: optionalTextField(row, "job_id"),
             jobAttemptId: optionalTextField(row, "attempt_id"),
             purpose: (optionalTextField(row, "purpose") ??
-              "main") as PhysicalAttemptRecord["purpose"],
+              optionalTextField(row, "started_purpose") ??
+              "legacy_unknown") as PhysicalAttemptRecord["purpose"],
             route: optionalTextField(row, "route"),
             retryAttempt: data.retryAttempt ?? 0,
             costStatus: attempt.costStatus ?? "unknown",
@@ -2009,13 +2015,8 @@ export class SqliteRuntimeControlStore {
       usage.totalCacheReadTokens = totals.cacheReadTokens;
       usage.totalCacheWriteTokens = totals.cacheWriteTokens;
       usage.totalCostCNY = totals.cost;
-      usage.totalProviderCalls = new Set(
-        calls.map((call) =>
-          String(
-            call.reported?.["logicalCallId"] ?? call.reported?.["providerCallId"] ?? call.callId,
-          ),
-        ),
-      ).size;
+      // Coverage counters below count selected measurements, including failed attempts.
+      usage.totalProviderCalls = calls.length;
       for (const call of calls) {
         const reported = call.reported;
         const basis = reported?.["usageBasis"];
