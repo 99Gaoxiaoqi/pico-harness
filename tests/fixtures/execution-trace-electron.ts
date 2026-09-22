@@ -22,6 +22,9 @@ const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 async function wait(expression: string, timeout = 10000) {
   const end = Date.now() + timeout;
   while (Date.now() < end) {
+    await window.webContents.executeJavaScript(
+      `(()=>{const b=[...document.querySelectorAll('button')].find(b=>b.textContent.startsWith('无步骤记录')&&b.getAttribute('aria-expanded')==='false');if(b)b.click()})()`,
+    );
     if (await window.webContents.executeJavaScript(expression)) return;
     await pause(30);
   }
@@ -35,7 +38,7 @@ const invoke = (method: string, params: unknown) =>
   );
 const click = (text: string) =>
   window.webContents.executeJavaScript(
-    `(()=>{const b=[...document.querySelectorAll('button')].find(b=>b.textContent.trim()===${JSON.stringify(text)});if(!b)throw Error('Missing button');b.click()})()`,
+    `(()=>{const b=[...document.querySelectorAll('button')].find(b=>b.textContent.trim()===${JSON.stringify(text)}||b.getAttribute('aria-label')===${JSON.stringify(text)});if(!b)throw Error('Missing button');b.click()})()`,
   );
 async function main() {
   await app.whenReady();
@@ -73,34 +76,37 @@ async function main() {
   await window.webContents.executeJavaScript(
     `window.scope=${JSON.stringify(fixture.scope)};window.mount(window.scope)`,
   );
-  await wait("document.querySelectorAll('.tool-panel__trace-group').length===16");
+  await wait("document.querySelectorAll('[data-run-id]').length===16");
   await click("加载较早记录");
-  await wait("document.querySelectorAll('.tool-panel__trace-group').length===32");
+  await wait("document.querySelectorAll('[data-run-id]').length===32");
   await click("加载较早记录");
-  await wait("document.querySelectorAll('.tool-panel__trace-group').length===48");
+  await wait("document.querySelectorAll('[data-run-id]').length===48");
   while (
     await window.webContents.executeJavaScript(
       "[...document.querySelectorAll('button')].some(b=>b.textContent.trim()==='加载较早记录')",
     )
   ) {
     const count = await window.webContents.executeJavaScript(
-      "document.querySelectorAll('.tool-panel__trace-group').length",
+      "document.querySelectorAll('[data-run-id]').length",
     );
     await click("加载较早记录");
-    await wait(`document.querySelectorAll('.tool-panel__trace-group').length>${count}`);
+    await wait(`document.querySelectorAll('[data-run-id]').length>${count}`);
   }
   assert.equal(
-    await window.webContents.executeJavaScript(
-      "document.querySelectorAll('.tool-panel__trace-group').length",
-    ),
+    await window.webContents.executeJavaScript("document.querySelectorAll('[data-run-id]').length"),
     fixture.seedRuns,
   );
   await window.webContents.executeJavaScript(
-    "document.querySelector('.tool-panel__timeline button').click()",
+    "document.querySelector('button[data-step-id]').click()",
   );
   await wait("!!document.querySelector('[aria-label=\"执行步骤详情\"]')");
+  await window.webContents.executeJavaScript(
+    "[...document.querySelectorAll('summary')].find(e=>e.textContent.includes('请求与执行明细'))?.click()",
+  );
   await click("复制模型标识");
-  await wait("document.body.innerText.includes('已复制模型标识')");
+  await wait(
+    "document.querySelector('[aria-label=\"复制模型标识\"]').parentElement.textContent.includes('已复制')",
+  );
   assert.deepEqual(JSON.parse(clipboard.readText()), {
     providerId: "openai",
     modelId: "trace-model",
@@ -111,11 +117,11 @@ async function main() {
     input: { kind: "text", text: "live run" },
     idempotencyKey: "electron-live",
   });
-  await wait("document.querySelectorAll('.tool-panel__trace-group').length===68", 2000);
+  await wait("document.querySelectorAll('[data-run-id]').length===68", 2000);
   const liveRefreshMs = Date.now() - start;
   assert.ok(liveRefreshMs < 2000);
   await wait(
-    "[...document.querySelectorAll('.tool-panel__trace-group')].every(n=>n.dataset.status!=='running')",
+    "[...document.querySelectorAll('[data-run-id]')].every(n=>n.dataset.status!=='running')",
   );
   // Each production run has one model step. Match visible titles against the real paged query.
   const ids: string[] = [];
@@ -132,25 +138,31 @@ async function main() {
   assert.equal(new Set(ids).size, 68);
   await click("隐藏较早记录");
   await wait(
-    "document.querySelectorAll('.tool-panel__trace-group').length===16 && !document.querySelector('[aria-label=\"执行步骤详情\"]')",
+    "document.querySelectorAll('[data-run-id]').length===16 && !document.querySelector('[aria-label=\"执行步骤详情\"]')",
   );
   await window.webContents.executeJavaScript("window.setActive(false)");
   await pause(150);
   await window.webContents.executeJavaScript("window.setActive(true)");
-  await wait("document.querySelectorAll('.tool-panel__trace-group').length===16");
+  await wait("document.querySelectorAll('[data-run-id]').length===16");
   const other = await invoke("session.create", { workspacePath: fixture.scope.workspacePath });
   await window.webContents.executeJavaScript(
     `window.mount(${JSON.stringify({ workspacePath: fixture.scope.workspacePath, sessionId: other.session.sessionId })})`,
   );
-  await wait("document.querySelectorAll('.tool-panel__trace-group').length===0");
+  await wait("document.querySelectorAll('[data-run-id]').length===0");
   await window.webContents.executeJavaScript(`window.mount(${JSON.stringify(fixture.scope)})`);
-  await wait("document.querySelectorAll('.tool-panel__trace-group').length===16");
+  await wait("document.querySelectorAll('[data-run-id]').length===16");
   const fault = async (name: string) =>
     assert.equal((await fetch(fixture.controlURL.replace("/restart", `/${name}`))).status, 200);
   const refresh = () =>
     window.webContents.executeJavaScript(
       "document.querySelector('[aria-label=\"刷新追踪\"]').click()",
     );
+  await window.webContents.executeJavaScript(
+    "document.querySelector('[data-tab=overview]').click()",
+  );
+  await wait(
+    "document.querySelector('[data-tab=overview]').getAttribute('aria-selected')==='true'",
+  );
   try {
     await fault("corrupt");
     await refresh();
@@ -166,7 +178,7 @@ async function main() {
     await fault("fault");
     await refresh();
     await wait(
-      "document.body.innerText.includes('会话用量读取失败') && document.querySelectorAll('.tool-panel__trace-group').length===16",
+      "document.body.innerText.includes('会话用量读取失败') && document.querySelectorAll('[data-run-id]').length===16",
     );
   } finally {
     await fault("restore");
