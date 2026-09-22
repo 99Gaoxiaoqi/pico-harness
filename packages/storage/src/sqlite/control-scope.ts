@@ -186,5 +186,33 @@ export const CONTROL_SCOPE: SqliteSchemaScope = {
         ON desktop_rewind_claims(target_session_id, created_at DESC);
       `,
     ],
+    [
+      4,
+      `
+      CREATE TABLE usage_accounting_versions (session_id TEXT PRIMARY KEY, revision INTEGER NOT NULL);
+      CREATE TABLE usage_accounting_calls (provider_call_id TEXT PRIMARY KEY, source TEXT NOT NULL, coverage TEXT NOT NULL);
+      CREATE TABLE usage_attempt_owners (owner_id TEXT PRIMARY KEY, process_id INTEGER NOT NULL, closed INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE usage_attempt_revisions (physical_attempt_id TEXT NOT NULL, revision INTEGER NOT NULL, snapshot_hash TEXT NOT NULL, PRIMARY KEY(physical_attempt_id, revision));
+      CREATE TABLE usage_deleted_sessions (session_id TEXT PRIMARY KEY);
+      CREATE TABLE usage_physical_attempts (
+        physical_attempt_id TEXT PRIMARY KEY, provider_call_id TEXT NOT NULL,
+        session_id TEXT, goal_id TEXT, job_id TEXT, run_id TEXT,
+        owner_id TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision >= 0), status TEXT NOT NULL CHECK(status IN ('prepared','observed','succeeded','failed','cancelled','interrupted')),
+        created_at TEXT NOT NULL, record_json TEXT NOT NULL CHECK(json_valid(record_json))
+      );
+      CREATE INDEX usage_physical_by_call ON usage_physical_attempts(provider_call_id);
+      CREATE INDEX usage_physical_by_session ON usage_physical_attempts(session_id, created_at);
+      CREATE INDEX usage_physical_by_run ON usage_physical_attempts(run_id, created_at);
+      CREATE TRIGGER usage_session_deleted AFTER DELETE ON sessions BEGIN
+        DELETE FROM usage_accounting_versions WHERE session_id = OLD.session_id;
+        INSERT OR IGNORE INTO usage_deleted_sessions(session_id) VALUES (OLD.session_id);
+        UPDATE usage_physical_attempts SET session_id = NULL, run_id = NULL,
+          record_json = json_remove(record_json, '$.sessionId', '$.conversationId', '$.runId', '$.turnId')
+          WHERE session_id = OLD.session_id;
+        UPDATE usage_provider_calls SET session_id = NULL, conversation_id = NULL WHERE session_id = OLD.session_id;
+        UPDATE usage_baselines SET session_id = NULL WHERE session_id = OLD.session_id;
+      END;
+    `,
+    ],
   ]),
 };

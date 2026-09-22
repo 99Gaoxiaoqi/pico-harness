@@ -948,6 +948,15 @@ function readUnattributedControlBytes(database: DatabaseSync): number {
       "session_id IS NULL",
     ),
     unattributedTextQuery(
+      "usage_physical_attempts",
+      ["physical_attempt_id", "provider_call_id", "owner_id", "record_json"],
+      "session_id IS NULL",
+    ),
+    unattributedTextQuery("usage_accounting_calls", ["provider_call_id", "source", "coverage"]),
+    unattributedTextQuery("usage_attempt_owners", ["owner_id"]),
+    unattributedTextQuery("usage_attempt_revisions", ["physical_attempt_id", "snapshot_hash"]),
+    unattributedTextQuery("usage_deleted_sessions", ["session_id"]),
+    unattributedTextQuery(
       "usage_provider_calls",
       [
         "call_id",
@@ -1287,6 +1296,13 @@ function controlByteQueries(): readonly string[] {
       "status",
       "result_json",
       "error",
+    ]),
+    groupedTextQuery("usage_accounting_versions", "session_id", ["session_id"]),
+    groupedTextQuery("usage_physical_attempts", "session_id", [
+      "physical_attempt_id",
+      "provider_call_id",
+      "owner_id",
+      "record_json",
     ]),
     groupedTextQuery("usage_provider_calls", "session_id", [
       "call_id",

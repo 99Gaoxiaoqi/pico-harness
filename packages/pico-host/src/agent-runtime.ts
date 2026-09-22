@@ -263,7 +263,7 @@ export type RunAgentProviderFactory = RuntimeProviderFactory;
 export interface RuntimeSessionResourceChangedNotice {
   readonly workspacePath: string;
   readonly sessionId: string;
-  readonly resource: "tasks" | "artifacts";
+  readonly resource: "tasks" | "artifacts" | "trace" | "context";
   readonly revision: number;
 }
 
@@ -1427,6 +1427,15 @@ export async function executeAgentRuntime(
       }
     }
     const trackerOptions: CostTrackerOptions = {
+      onAccountingChanged: (record, revision) => {
+        if (!record.sessionId) return;
+        dependencies.sessionResourceChangedSink?.({
+          workspacePath: record.workspacePath ?? workDir,
+          sessionId: record.sessionId,
+          resource: "trace",
+          revision,
+        });
+      },
       ...(usageLedger ? { ledger: usageLedger } : {}),
       context: () => {
         const goalId = runtimeState.goalManager.getActive()?.id;

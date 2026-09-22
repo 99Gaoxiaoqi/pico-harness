@@ -23,6 +23,8 @@ import {
   type MergeRequestRecord,
   type MergeRequestStatus,
   type ProviderCallRecord,
+  type PhysicalAttemptRecord,
+  type PhysicalAttemptFilter,
   type RuntimeLeaseRecord,
   type TerminalJobStatus,
   type UsageBaselineRecord,
@@ -375,6 +377,31 @@ export class JobService {
 
   markCompletionDelivered(completionId: string): CompletionOutboxRecord {
     return this.store.markCompletionDelivered(completionId);
+  }
+
+  beginPhysicalAttemptOwner(): string {
+    return this.store.beginPhysicalAttemptOwner();
+  }
+  recoverPhysicalAttempts(): number {
+    return this.store.recoverPhysicalAttempts();
+  }
+  getAccountingRevision(): number {
+    return this.store.getAccountingRevision();
+  }
+  recordPhysicalAttempt(record: PhysicalAttemptRecord): {
+    record: PhysicalAttemptRecord;
+    updated: boolean;
+  } {
+    return this.store.recordPhysicalAttempt(record);
+  }
+  listPhysicalAttempts(filter: PhysicalAttemptFilter = {}): PhysicalAttemptRecord[] {
+    return this.store.listPhysicalAttempts(filter);
+  }
+  listProviderCalls(filter: UsageLedgerFilter = {}): ProviderCallRecord[] {
+    return this.store.listProviderCalls(filter);
+  }
+  listAccountingProviderCalls(filter: UsageLedgerFilter = {}): ProviderCallRecord[] {
+    return this.store.listAccountingProviderCalls(filter);
   }
 
   recordProviderCall(record: Omit<ProviderCallRecord, "createdAt"> & { createdAt?: number }): {

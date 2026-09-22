@@ -9,6 +9,7 @@ import {
   openOperationalDatabaseReadOnly,
   openOperationalDatabaseForBindingRepairSync,
   hasOperationalDatabaseOwner,
+  verifyOperationalMigrationBackup,
   type OperationalDatabaseLease,
 } from "./sqlite-database.js";
 import {
@@ -139,6 +140,21 @@ function backupBeforeSessionsMigration(
   root: string,
   scopes: readonly SqliteSchemaScope[],
 ): void {
+  const controlTarget = scopes.find((scope) => scope.name === "control");
+  const controlApplied = readOperationalSchemaVersionsSync(database).get("control");
+  if (
+    controlTarget &&
+    controlApplied !== undefined &&
+    controlApplied < 4 &&
+    scopeCurrentVersion(controlTarget) >= 4
+  ) {
+    const destination = join(root, "pico.control-v3-before-physical.sqlite");
+    if (!existsSync(destination)) {
+      database.exec(`VACUUM INTO '${destination.replaceAll("'", "''")}'`);
+      chmodSync(destination, 0o600);
+    }
+    verifyOperationalMigrationBackup(destination, "control", controlApplied);
+  }
   const sessionsScope = scopes.find((scope) => scope.name === "sessions");
   if (!sessionsScope) return;
   const target = scopeCurrentVersion(sessionsScope);

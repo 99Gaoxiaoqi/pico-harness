@@ -1,3 +1,4 @@
+import { SqliteRuntimeControlStore } from "@pico/storage/sqlite/sqlite-runtime-control-store";
 // 会话管理:Session 物理隔离与完整模型历史的底层实现。
 //
 // 解决两个核心痛点:
@@ -877,11 +878,31 @@ export class Session
       transcriptEvents: transcript.map(({ event }) => event),
       transcriptEventSequences: transcript.map(({ sequence }) => sequence),
       toolResults,
-      runtime: projectRuntimeSessionState(events),
+      runtime: {
+        ...projectRuntimeSessionState(events),
+        usage: this.readAccountingUsage() ?? projectRuntimeSessionState(events).usage,
+      },
     };
   }
 
+  private readAccountingUsage(): SessionUsageSnapshot | undefined {
+    if (!this.store) return undefined;
+    const ledger = new SqliteRuntimeControlStore({ storageRoot: this.runtimeStorageRoot });
+    try {
+      return ledger.getAccountingSessionUsage(this.id);
+    } finally {
+      ledger.close();
+    }
+  }
+
   private getUsageSnapshot(): SessionUsageSnapshot {
+    const accounting = this.readAccountingUsage();
+    if (accounting) return accounting;
+    return this.getLegacyUsageSnapshot();
+  }
+
+  /** Raw projection exists only for importing historical pre-ledger totals. */
+  getLegacyUsageSnapshot(): SessionUsageSnapshot {
     return {
       totalPromptTokens: this.totalPromptTokens,
       totalCompletionTokens: this.totalCompletionTokens,
