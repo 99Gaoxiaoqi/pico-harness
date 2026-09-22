@@ -356,3 +356,43 @@ test("Maka overflow before any completed step may retry the final available step
   await engine.run(session);
   assert.equal(requests, 2);
 });
+
+test("Maka failed summary can retreat to the same-route accepted prefix recovered from prior send", async () => {
+  const session = new Session(randomUUID(), process.cwd(), { persistence: false });
+  await session.commitMessages(
+    { role: "user", content: "previous task" },
+    {
+      role: "assistant",
+      content: "accepted reply",
+      providerData: { picoContextUsageAnchor: { route: "route-a", input: 7000, output: 1000 } },
+    },
+    { role: "user", content: "continue current task" },
+  );
+  let summaries = 0;
+  const engine = new AgentEngine({
+    registry: new ToolRegistry(),
+    workDir: process.cwd(),
+    maxTurns: 1,
+    contextRouteIdentity: "route-a",
+    contextBudget: { ...budget, declaredContextWindowTokens: 10_000 },
+    provider: {
+      async generate(messages) {
+        assert.ok(
+          messages.some((message) => message.content.includes("<pico_compaction_summary>")),
+        );
+        return { role: "assistant", content: "done" };
+      },
+    },
+    fullCompactor: new FullCompactor({
+      provider: {
+        async generate() {
+          if (++summaries === 1) throw new ContextOverflowError("summarizer window");
+          return { role: "assistant", content: validSummary };
+        },
+      },
+    }),
+  });
+  await engine.run(session);
+  assert.equal(summaries, 2);
+  assert.ok(session.getHistory().some((message) => message.content === "accepted reply"));
+});
