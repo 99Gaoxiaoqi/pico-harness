@@ -1,0 +1,224 @@
+.tool-panel--inspector :is(.inspector-overview, .inspector-composition, .inspector-history) {
+  min-width: 0;
+  padding: 16px;
+  border-bottom: 1px solid var(--inspector-border);
+  color: var(--inspector-ink);
+  font-size: 14px;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+}
+.tool-panel--inspector :is(.inspector-overview, .inspector-composition, .inspector-history) h3 {
+  margin: 0 0 8px;
+  color: var(--inspector-ink);
+  font-size: 16px;
+  font-weight: 600;
+}
+.tool-panel--inspector .inspector-overview__note {
+  margin: 4px 0 8px;
+  color: var(--inspector-muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.tool-panel--inspector
+  :is(.inspector-overview, .inspector-composition, .inspector-history)
+  details {
+  margin-top: 8px;
+  overflow-wrap: anywhere;
+}
+.tool-panel--inspector
+  :is(.inspector-overview, .inspector-composition, .inspector-history)
+  summary {
+  padding: 4px 0;
+  color: var(--inspector-muted);
+  cursor: pointer;
+}
+.tool-panel--inspector
+  :is(.inspector-overview, .inspector-composition, .inspector-history)
+  summary:focus-visible {
+  outline: 2px solid var(--inspector-accent);
+  outline-offset: 4px;
+  border-radius: 4px;
+}
+.tool-panel--inspector :is(.inspector-overview, .inspector-composition, .inspector-history) code {
+  font-size: inherit;
+  overflow-wrap: anywhere;
+}
+.tool-panel--inspector .inspector-overview__chart {
+  display: grid;
+  grid-template-columns: minmax(88px, 120px) minmax(0, 1fr);
+  align-items: center;
+  gap: 16px;
+  margin: 8px 0;
+}
+.tool-panel--inspector .inspector-overview__ring {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1;
+}
+.tool-panel--inspector .inspector-overview__ring svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.tool-panel--inspector .inspector-overview__ring-track {
+  stroke: var(--inspector-subtle);
+}
+.tool-panel--inspector .inspector-overview__ring-label {
+  position: absolute;
+  inset: 16%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  line-height: 1.2;
+}
+.tool-panel--inspector .inspector-overview__ring-label strong {
+  font-size: clamp(14px, 3.8cqi, 18px);
+  overflow-wrap: anywhere;
+}
+.tool-panel--inspector .inspector-overview__ring-label span {
+  margin-top: 4px;
+  color: var(--inspector-muted);
+  font-size: 12px;
+}
+.tool-panel--inspector
+  :is(.inspector-overview__legend, .inspector-overview__facts, .inspector-overview__cost) {
+  margin: 0;
+}
+.tool-panel--inspector
+  :is(.inspector-overview__legend, .inspector-overview__facts, .inspector-overview__cost)
+  > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 4px 0;
+}
+.tool-panel--inspector
+  :is(.inspector-overview__legend, .inspector-overview__facts, .inspector-overview__cost)
+  dt {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.tool-panel--inspector
+  :is(.inspector-overview__legend, .inspector-overview__facts, .inspector-overview__cost)
+  dd {
+  margin: 0;
+  text-align: right;
+  flex-shrink: 0;
+}
+.tool-panel--inspector :is(.inspector-overview__legend, .inspector-composition__list) i {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 8px;
+  border-radius: 50%;
+}
+.tool-panel--inspector .inspector-overview__cost {
+  border-top: 1px solid var(--inspector-border);
+  margin-top: 8px;
+  padding-top: 8px;
+}
+.tool-panel--inspector .inspector-composition__usage {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  margin: 8px 0;
+  font-size: 20px;
+}
+.tool-panel--inspector .inspector-composition__usage span {
+  color: var(--inspector-muted);
+}
+.tool-panel--inspector .inspector-composition__usage small {
+  margin-left: 8px;
+  font-size: 14px;
+  color: var(--inspector-muted);
+}
+.tool-panel--inspector .inspector-composition__bar {
+  display: flex;
+  height: 10px;
+  margin: 8px 0;
+  border-radius: 4px;
+  background: var(--inspector-subtle);
+  overflow: hidden;
+}
+.tool-panel--inspector .inspector-composition__bar > span + span {
+  box-shadow: -1px 0 var(--inspector-surface);
+}
+.tool-panel--inspector .inspector-composition__heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  border-top: 1px solid var(--inspector-border);
+  margin-top: 16px;
+  padding-top: 16px;
+}
+.tool-panel--inspector .inspector-composition__heading > span {
+  color: var(--inspector-muted);
+}
+.tool-panel--inspector .inspector-composition__list {
+  list-style: none;
+  margin: 8px 0;
+  padding: 0;
+}
+.tool-panel--inspector .inspector-composition__list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 4px 0;
+}
+.tool-panel--inspector .inspector-composition__list li > :first-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.tool-panel--inspector .inspector-composition__list small {
+  font-size: 14px;
+  flex-shrink: 0;
+  text-align: right;
+}
+.tool-panel--inspector .inspector-history__metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 8px 0;
+  text-align: center;
+}
+.tool-panel--inspector .inspector-history__metrics > div {
+  display: flex;
+  flex-direction: column-reverse;
+  padding: 0 4px;
+}
+.tool-panel--inspector .inspector-history__metrics > div + div {
+  border-left: 1px solid var(--inspector-border);
+}
+.tool-panel--inspector .inspector-history__metrics dt {
+  color: var(--inspector-muted);
+}
+.tool-panel--inspector .inspector-history__metrics dd {
+  margin: 0 0 4px;
+  font-size: 20px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+@container inspector (max-width: 360px) {
+  .tool-panel--inspector .inspector-overview__chart {
+    grid-template-columns: 88px minmax(0, 1fr);
+    gap: 8px;
+  }
+  .tool-panel--inspector .inspector-overview__legend > div {
+    flex-wrap: wrap;
+    gap: 0 4px;
+  }
+  .tool-panel--inspector .inspector-overview__legend dd {
+    margin-left: auto;
+  }
+  .tool-panel--inspector .inspector-composition__list li {
+    flex-wrap: wrap;
+    gap: 0 8px;
+  }
+  .tool-panel--inspector .inspector-composition__list small {
+    margin-left: auto;
+  }
+}
