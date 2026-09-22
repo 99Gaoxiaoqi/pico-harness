@@ -119,11 +119,11 @@ ToolResult 投影后仍超过 85% 水位时，FullCompactor 将旧前缀浓缩�
 - Plan Mode 下由 PlanCoordinator.project() 注入当前计划状态
 - （旧的 PlanStore 文件嗅探实现 `plan-store.ts` 已删除）
 
-### EvidenceArchive (`evidence-archive.ts`)
+### 工具结果与 Graph 产物
 
-- ToolResult 原文和长子代理报告写入 workspace Evidence SHA-256 CAS
-- Session/hash/manifest/blob 全链路校验，模型只持有 `pico://evidence/...`
-- `read_evidence` 按 UTF-8 字节分页回读，不暴露任意文件路径
+- 工具结果正文直接保存在 RuntimeEvent 的 inline body 中，不再建立 EvidenceArchive 副本。
+- Graph 通过当前 artifact URI 校验会话归属、内容摘要与大小；`agent_output` 不再接受 `evidence_refs`。
+- 通用 blob CAS 仍服务当前产物和文件内容，保留摘要、UTF-8 分页和路径安全校验；旧 evidence 索引表已删除。
 
 ### SkillLoader (`skill.ts`)
 

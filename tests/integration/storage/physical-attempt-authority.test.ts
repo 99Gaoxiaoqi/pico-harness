@@ -476,7 +476,7 @@ test("control 7 deletes legacy usage and model traces, preserves native facts an
       );
       assert.deepEqual(
         ledger.listAccountingProviderCalls().map((row) => row.callId),
-        ["call-1"],
+        ["physical"],
       );
       const db = openOperationalDatabaseReadOnly(root);
       try {
