@@ -258,3 +258,94 @@ test("cancelling a stream records its dispatch and observed usage exactly once",
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("Anthropic initial output usage stays partial when the stream is interrupted or cancelled", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-claude-partial-"));
+  const server = createServer(async (req, res) => {
+    for await (const _chunk of req) {
+      /* consume request */
+    }
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    const send = (type: string, payload: Record<string, unknown>) =>
+      res.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...payload })}\n\n`);
+    send("message_start", {
+      message: {
+        id: "msg",
+        type: "message",
+        role: "assistant",
+        model: "claude-test",
+        content: [],
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { input_tokens: 10, output_tokens: 1 },
+      },
+    });
+    send("content_block_start", { index: 0, content_block: { type: "text", text: "" } });
+    send("content_block_delta", {
+      index: 0,
+      delta: { type: "text_delta", text: "partial response longer than one token" },
+    });
+    res.end();
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as { port: number }).port;
+  const session = new Session("claude-partial", root, {
+    persistence: true,
+    picoHome: join(root, "home"),
+    runtimePort: createEngineRuntimePort(),
+  });
+  try {
+    await session.recover();
+    const provider = new AiSdkProvider("claude", {
+      baseURL: `http://127.0.0.1:${port}/v1`,
+      apiKey: "test",
+      model: "claude-test",
+    });
+    const tracked = new CostTracker(
+      provider,
+      { provider: "claude", model: "claude-test", billingMode: "subscription_included" },
+      session,
+    );
+    for (const cancel of [false, true]) {
+      const controller = new AbortController();
+      const run = await RuntimeRun.start({
+        capability: session.runtimeEventCapability!,
+        agentSwarmAuthorization: "none",
+      });
+      await assert.rejects(
+        run.run(() =>
+          tracked.generateStream(
+            [{ role: "user", content: "hello" }],
+            [],
+            () => {
+              if (cancel) controller.abort();
+            },
+            { signal: controller.signal },
+          ),
+        ),
+      );
+    }
+    const calls = (await session.runtimeEventStore!.readSession(session.id)).filter(
+      (e) => e.kind === "model.call.settled",
+    );
+    assert.equal(calls.length, 2);
+    const attempts = calls.flatMap((c) => c.data.attempts ?? []);
+    assert.deepEqual(
+      attempts.map((a) => a.status),
+      ["interrupted", "cancelled"],
+    );
+    for (const attempt of attempts) {
+      assert.equal(attempt.usageBasis, "partial");
+      assert.equal(attempt.usage!.promptTokens, 10);
+      assert.ok(attempt.usage!.reportedFields!.includes("prompt"));
+      assert.ok(!attempt.usage!.reportedFields!.includes("completion"));
+      assert.equal(attempt.costStatus, "unknown");
+      assert.equal(attempt.costCNY, undefined);
+    }
+  } finally {
+    await session.close();
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
