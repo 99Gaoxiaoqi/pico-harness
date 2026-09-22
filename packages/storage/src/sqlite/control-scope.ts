@@ -11,6 +11,35 @@ import type { SqliteSchemaScope } from "./sqlite-schema.js";
  * 完整往返。其余列与索引照抄 ADR,含部分索引与 CHECK。
  */
 
+// The original baseline remains audit evidence; offsets are frozen before retention can remove events.
+const BASELINE_RECONCILIATION_SQL = `
+  INSERT OR IGNORE INTO usage_baseline_adjustments
+    (baseline_id, version, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost)
+  SELECT b.baseline_id, 1,
+    COALESCE(SUM(MAX(0, COALESCE(json_extract(e.payload_json, '$.data.usage.inputTokens'),
+      json_extract(e.payload_json, '$.data.usage.promptTokens')
+      - MAX(0, COALESCE(json_extract(e.payload_json, '$.data.usage.cacheReadTokens'), 0))
+      - MAX(0, COALESCE(json_extract(e.payload_json, '$.data.usage.cacheWriteTokens'), 0))))), 0),
+    COALESCE(SUM(MAX(0, json_extract(e.payload_json, '$.data.usage.completionTokens'))), 0),
+    COALESCE(SUM(MAX(0, json_extract(e.payload_json, '$.data.usage.cacheReadTokens'))), 0),
+    COALESCE(SUM(MAX(0, json_extract(e.payload_json, '$.data.usage.cacheWriteTokens'))), 0),
+    COALESCE(SUM(MAX(0, json_extract(e.payload_json, '$.data.costCNY'))), 0)
+  FROM usage_baselines b LEFT JOIN runtime_events e ON e.session_id = b.session_id
+    AND e.kind = 'model.call.settled' AND json_extract(e.payload_json, '$.data.status') = 'succeeded'
+    AND e.committed_at <= strftime('%Y-%m-%dT%H:%M:%fZ', b.imported_at / 1000.0, 'unixepoch')
+    AND NOT EXISTS (SELECT 1 FROM usage_provider_calls c
+      WHERE c.call_id = json_extract(e.payload_json, '$.data.providerCallId')
+        AND c.created_at <= b.imported_at
+        AND COALESCE(json_extract(c.reported_json, '$.accountingSource'), '') != 'legacy_event')
+    AND NOT EXISTS (SELECT 1 FROM usage_physical_attempts p
+      WHERE p.provider_call_id = json_extract(e.payload_json, '$.data.providerCallId')
+        AND json_extract(p.record_json, '$.accountingSource') = 'physical'
+        AND p.created_at <= strftime('%Y-%m-%dT%H:%M:%fZ', b.imported_at / 1000.0, 'unixepoch'))
+  WHERE json_extract(b.source_json, '$.kind') = 'session_runtime_usage'
+    AND json_extract(b.source_json, '$.version') = 1
+  GROUP BY b.baseline_id;
+`;
+
 export const CONTROL_SCOPE_NAME = "control";
 
 export const CONTROL_SCOPE: SqliteSchemaScope = {
@@ -215,6 +244,38 @@ export const CONTROL_SCOPE: SqliteSchemaScope = {
         UPDATE usage_provider_calls SET session_id = NULL, conversation_id = NULL WHERE session_id = OLD.session_id;
         UPDATE usage_baselines SET session_id = NULL WHERE session_id = OLD.session_id;
       END;
+    `,
+    ],
+    [
+      5,
+      `
+      CREATE INDEX IF NOT EXISTS runtime_events_usage_started ON runtime_events(
+        session_id, run_id, json_extract(payload_json, '$.data.providerCallId'), event_seq DESC
+      ) WHERE kind = 'model.call.started';
+      CREATE TABLE usage_baseline_adjustments (
+        baseline_id TEXT PRIMARY KEY, version INTEGER NOT NULL,
+        input_tokens REAL NOT NULL, output_tokens REAL NOT NULL,
+        cache_read_tokens REAL NOT NULL, cache_write_tokens REAL NOT NULL, cost REAL NOT NULL
+      );
+      CREATE TRIGGER usage_baseline_adjustment_version AFTER INSERT ON usage_baseline_adjustments BEGIN
+        INSERT INTO usage_accounting_versions(session_id, revision)
+          SELECT session_id, 1 FROM usage_baselines WHERE baseline_id = NEW.baseline_id AND session_id IS NOT NULL
+          ON CONFLICT(session_id) DO UPDATE SET revision = revision + 1;
+      END;
+      ${BASELINE_RECONCILIATION_SQL}
+      CREATE TRIGGER usage_baseline_reconcile AFTER INSERT ON usage_baselines
+      WHEN json_extract(NEW.source_json, '$.kind') = 'session_runtime_usage'
+        AND json_extract(NEW.source_json, '$.version') = 1
+      BEGIN ${BASELINE_RECONCILIATION_SQL} END;
+      CREATE VIEW usage_effective_baselines AS SELECT
+        b.baseline_id, b.session_id, b.goal_id,
+        MAX(0, b.input_tokens - COALESCE(a.input_tokens, 0)) AS input_tokens,
+        MAX(0, b.output_tokens - COALESCE(a.output_tokens, 0)) AS output_tokens,
+        MAX(0, b.cache_read_tokens - COALESCE(a.cache_read_tokens, 0)) AS cache_read_tokens,
+        MAX(0, b.cache_write_tokens - COALESCE(a.cache_write_tokens, 0)) AS cache_write_tokens,
+        MAX(0, b.cost - COALESCE(a.cost, 0)) AS cost,
+        b.imported_at, b.source_json, a.version AS reconciliation_version
+      FROM usage_baselines b LEFT JOIN usage_baseline_adjustments a ON a.baseline_id = b.baseline_id;
     `,
     ],
   ]),

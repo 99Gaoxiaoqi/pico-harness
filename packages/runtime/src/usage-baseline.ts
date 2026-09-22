@@ -41,7 +41,7 @@ export interface UsageBaselineStorePort {
   };
 }
 
-const USAGE_BASELINE_VERSION = 1;
+const USAGE_BASELINE_VERSION = 2;
 
 /**
  * Import a Session's pre-ledger totals exactly once, subtracting detailed calls in a crash window.
@@ -54,7 +54,7 @@ export function ensureSessionUsageBaseline(
   const existingSummary = jobs.getUsageSummary({ sessionId: session.id });
   const detailed = existingSummary.providerCalls;
   const baseline: UsageBaselineRecord = {
-    baselineId: `session-usage-v${USAGE_BASELINE_VERSION}:${session.id}`,
+    baselineId: `session-usage-v1:${session.id}`,
     sessionId: session.id,
     inputTokens: difference(runtime.totalInputTokens, detailed.inputTokens),
     outputTokens: difference(runtime.totalCompletionTokens, detailed.outputTokens),

@@ -145,10 +145,15 @@ function backupBeforeSessionsMigration(
   if (
     controlTarget &&
     controlApplied !== undefined &&
-    controlApplied < 4 &&
-    scopeCurrentVersion(controlTarget) >= 4
+    controlApplied < 5 &&
+    scopeCurrentVersion(controlTarget) >= (controlApplied < 4 ? 4 : 5)
   ) {
-    const destination = join(root, "pico.control-v3-before-physical.sqlite");
+    const destination = join(
+      root,
+      controlApplied < 4
+        ? "pico.control-v3-before-physical.sqlite"
+        : "pico.control-v4-before-baseline-reconciliation.sqlite",
+    );
     if (!existsSync(destination)) {
       database.exec(`VACUUM INTO '${destination.replaceAll("'", "''")}'`);
       chmodSync(destination, 0o600);

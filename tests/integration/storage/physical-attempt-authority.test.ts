@@ -562,3 +562,189 @@ test("partial Claude usage ignores unreported intermediate counts and never mark
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("control 5 freezes proven old baseline overlap and preserves residual history across migration and retention", async () => {
+  const { ALL_WORKSPACE_SQLITE_SCOPES } = await import("@pico/storage/sqlite/workspace-scopes");
+  const { prepareWorkspaceSqliteStorageSync } =
+    await import("@pico/storage/sqlite/sqlite-workspace-storage");
+  const { openOperationalDatabaseReadOnly } = await import("@pico/storage");
+  const { DatabaseSync } = await import("node:sqlite");
+  const root = await mkdtemp(join(tmpdir(), "pico-meter-baseline-offset-"));
+  const before = "2026-09-20T00:00:00.000Z";
+  const after = "2026-09-22T00:00:00.000Z";
+  const importedAt = Date.parse("2026-09-21T00:00:00.000Z");
+  let ledger: SqliteRuntimeControlStore | undefined;
+  try {
+    const old = prepareWorkspaceSqliteStorageSync(
+      root,
+      ALL_WORKSPACE_SQLITE_SCOPES.map((scope) =>
+        scope.name === "control"
+          ? {
+              ...scope,
+              migrations: new Map([...scope.migrations].filter(([version]) => version <= 4)),
+            }
+          : scope,
+      ),
+    );
+    try {
+      const db = old.lease.database;
+      db.prepare(
+        "INSERT INTO control_metadata(key,value_json) VALUES ('revision','0'),('nextRuntimeEventSequence','1')",
+      ).run();
+      const { coordinateEventLogHardCut } =
+        await import("../../../packages/storage/src/event-log-hard-cut-coordinator.js");
+      coordinateEventLogHardCut(db);
+      db.prepare(
+        "INSERT INTO sessions(session_id, work_dir, created_at, updated_at) VALUES ('old', ?, ?, ?)",
+      ).run(root, before, before);
+      db.prepare("UPDATE sessions SET archived_at = 1 WHERE session_id = 'old'").run();
+      let sequence = 0;
+      for (const [callId, promptTokens, embedded, committedAt] of [
+        ["logical", 7, false, before],
+        ["embedded", 5, true, before],
+        ["covered", 4, false, before],
+        ["late-event", 9, false, after],
+      ] as const) {
+        const data = {
+          providerCallId: callId,
+          status: "succeeded",
+          latencyMs: 1,
+          usage: { promptTokens, completionTokens: 1 },
+          ...(embedded
+            ? {
+                attemptCoverage: "complete",
+                attempts: [
+                  {
+                    attemptId: callId,
+                    attempt: 0,
+                    provider: "openai",
+                    model: "test",
+                    startedAt: before,
+                    completedAt: before,
+                    status: "succeeded",
+                    latencyMs: 1,
+                    usageBasis: "reported",
+                    usage: { promptTokens, completionTokens: 1 },
+                  },
+                ],
+              }
+            : {}),
+        };
+        const event = {
+          schemaVersion: 2,
+          eventId: callId,
+          sessionId: "old",
+          invocationId: "old",
+          runId: "old",
+          turnId: "old",
+          at: before,
+          partial: false,
+          visibility: "internal",
+          kind: "model.call.settled",
+          data,
+        };
+        db.prepare(
+          "INSERT INTO runtime_events(event_id, session_id, invocation_id, run_id, turn_id, event_seq, kind, visibility, partial, tx_id, provider_call_id, payload_json, at, committed_at) VALUES (?, 'old', 'old', 'old', 'old', ?, 'model.call.settled', 'internal', 0, 'old', ?, ?, ?, ?)",
+        ).run(callId, ++sequence, callId, JSON.stringify(event), before, committedAt);
+      }
+      db.prepare(
+        "INSERT INTO usage_provider_calls(call_id,tx_id,session_id,purpose,provider,model,status,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,cost,created_at) VALUES ('covered','old','old','main','openai','test','succeeded',4,1,0,0,0,?)",
+      ).run(Date.parse(before));
+      db.prepare(
+        "INSERT INTO usage_baselines(baseline_id,session_id,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,cost,imported_at,source_json) VALUES ('session-usage-v1:old','old',15,3,0,0,0,?,?)",
+      ).run(
+        importedAt,
+        JSON.stringify({
+          kind: "session_runtime_usage",
+          version: 1,
+          providerCallsAlreadyDetailed: 1,
+        }),
+      );
+    } finally {
+      old.lease.release();
+    }
+    ledger = new SqliteRuntimeControlStore({ storageRoot: root });
+    assert.equal(ledger.getUsageSummary({ sessionId: "old" }).total.inputTokens, 28);
+    assert.equal(ledger.listUsageBaselines({ sessionId: "old" })[0]!.inputTokens, 3);
+    assert.equal(
+      ledger
+        .listAccountingProviderCalls({ sessionId: "old" })
+        .filter((call) => call.reported?.["accountingSource"] === "legacy_event").length,
+      2,
+    );
+    const db = openOperationalDatabaseReadOnly(root);
+    try {
+      assert.equal(
+        (db.prepare("SELECT input_tokens FROM usage_baselines").get() as { input_tokens: number })
+          .input_tokens,
+        15,
+      );
+      assert.equal(
+        (
+          db.prepare("SELECT input_tokens FROM usage_baseline_adjustments").get() as {
+            input_tokens: number;
+          }
+        ).input_tokens,
+        12,
+      );
+    } finally {
+      db.close();
+    }
+    const backup = new DatabaseSync(
+      join(root, "pico.control-v4-before-baseline-reconciliation.sqlite"),
+      { readOnly: true },
+    );
+    try {
+      assert.equal(
+        (
+          backup
+            .prepare("SELECT version FROM operational_schema_migrations WHERE scope='control'")
+            .get() as { version: number }
+        ).version,
+        4,
+      );
+    } finally {
+      backup.close();
+    }
+    ledger.migrateLegacyPhysicalAttempts("old");
+    const epoch = ledger.getAccountingRevision();
+    ledger.migrateLegacyPhysicalAttempts("old");
+    assert.equal(ledger.getAccountingRevision(), epoch);
+    ledger.close();
+    ledger = new SqliteRuntimeControlStore({ storageRoot: root });
+    assert.equal(ledger.getUsageSummary({ sessionId: "old" }).total.inputTokens, 28);
+    const { enforceEventLogRetention } =
+      await import("@pico/storage/sqlite/event-log-retention-store");
+    const retention = enforceEventLogRetention({
+      storageRoot: root,
+      policy: { hardLimitBytes: 2, lowWatermarkBytes: 1 },
+    });
+    assert.deepEqual(retention.deletedSessionIds, ["old"]);
+    assert.equal(ledger.getUsageSummary().total.inputTokens, 28);
+    assert.equal(ledger.listUsageBaselines()[0]!.inputTokens, 3);
+    ledger.close();
+    ledger = new SqliteRuntimeControlStore({ storageRoot: root });
+    assert.equal(ledger.getUsageSummary().total.inputTokens, 28);
+    const v2 = {
+      baselineId: "v2",
+      sessionId: "new",
+      inputTokens: 6,
+      outputTokens: 1,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      cost: 0,
+      importedAt,
+      source: { kind: "session_runtime_usage", version: 2 },
+    };
+    const revision = ledger.getAccountingRevision();
+    ledger.putUsageBaseline(v2);
+    assert.ok(ledger.getAccountingRevision() > revision);
+    const insertedRevision = ledger.getAccountingRevision();
+    ledger.putUsageBaseline(v2);
+    assert.equal(ledger.getAccountingRevision(), insertedRevision);
+    assert.equal(ledger.getUsageSummary({ sessionId: "new" }).total.inputTokens, 6);
+  } finally {
+    ledger?.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
