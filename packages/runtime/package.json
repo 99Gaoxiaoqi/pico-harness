@@ -415,10 +415,6 @@
       "types": "./dist/process-tree.d.ts",
       "import": "./dist/process-tree.js"
     },
-    "./usage-baseline": {
-      "types": "./dist/usage-baseline.d.ts",
-      "import": "./dist/usage-baseline.js"
-    },
     "./credential-pool": {
       "types": "./dist/credential-pool.d.ts",
       "import": "./dist/credential-pool.js"

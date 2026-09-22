@@ -78,7 +78,6 @@ export * from "./host-shell.js";
 export * from "./host-agent-turn-budget.js";
 export * from "./hook-rewake.js";
 export * from "./process-tree.js";
-export * from "./usage-baseline.js";
 export * from "./credential-pool.js";
 export * from "./rate-limit.js";
 export * from "./provider-failure-classification.js";

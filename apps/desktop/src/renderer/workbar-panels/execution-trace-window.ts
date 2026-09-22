@@ -58,7 +58,7 @@ export function mergeExecutionPages(
         (page) => page.coverage.modelAttempts === first.coverage.modelAttempts,
       )
         ? first.coverage.modelAttempts
-        : "mixed",
+        : "partial",
       oversizedRunIds: union("oversizedRunIds"),
       missingModelCallRunIds: union("missingModelCallRunIds"),
       incompleteRunIds: union("incompleteRunIds"),

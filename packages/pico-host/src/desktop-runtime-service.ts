@@ -73,7 +73,6 @@ import { initializeProjectEntrypoints } from "./input/project-initializer.js";
 import { CostTracker } from "./cost-tracker.js";
 import { logger } from "./logger.js";
 import { summarizeCacheEffectiveness } from "@pico/runtime/cache-effectiveness";
-import { ensureSessionUsageBaseline } from "@pico/runtime/usage-baseline";
 import { createProvider, type ProviderKind } from "./provider/factory.js";
 import { type ModelRoute, type ModelRouter } from "./provider/model-router.js";
 import {
@@ -107,11 +106,7 @@ import {
   fileHistoryRestoreFile,
   type FileHistoryChanges,
 } from "./file-history-runtime.js";
-import type {
-  ProviderCallRecord,
-  UsageBaselineRecord,
-  UsageLedgerTotals,
-} from "@pico/storage/runtime-control-types";
+import type { ProviderCallRecord, UsageLedgerTotals } from "@pico/storage/runtime-control-types";
 import {
   createRuntimeNotification,
   createRuntimeRequest,
@@ -1995,7 +1990,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         await RuntimeRun.repairSessionProjection(session, {
           capability: runtimeCapability,
         });
-        ensureSessionUsageBaseline(ledger, session);
         const provider = new CostTracker(
           rawProvider,
           {
@@ -2903,7 +2897,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       ? [await this.requireTrustedWorkspace(params.workspacePath)]
       : await this.registrationStore.list();
     const allCalls: ProviderCallRecord[] = [];
-    const allBaselines: UsageBaselineRecord[] = [];
     const workspaces: JsonValue[] = [];
     const unavailableWorkspaces: { workspacePath: string; error: string }[] = [];
     const sources: Array<UsageDashboardInput["sources"][number]> = [];
@@ -2921,17 +2914,12 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         const calls = store
           .listAccountingProviderCalls(filter)
           .filter((record) => inTimeRange(record.createdAt, from, to));
-        const hasRange = from !== undefined || to !== undefined;
-        const baselines = hasRange
-          ? []
-          : store.listUsageBaselines(params.sessionId ? { sessionId: params.sessionId } : {});
         sources.push({ workspacePath, storageRoot: store.storageRoot, calls });
         allCalls.push(...calls);
-        allBaselines.push(...baselines);
         workspaces.push(
           toJsonValue({
             workspacePath,
-            ...summarizeUsageRecords(calls, baselines),
+            ...summarizeUsageRecords(calls),
           }),
         );
       } catch (error) {
@@ -2944,8 +2932,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         store?.close();
       }
     }
-    const hasRange = from !== undefined || to !== undefined;
-    const summary = summarizeUsageRecords(allCalls, allBaselines);
+    const summary = summarizeUsageRecords(allCalls);
     const userConfig = await this.providerConfig.userConfigStore.read();
     const pricing = usagePricing(userConfig.config.providers, MODEL_PRICING);
     const dashboard = await buildUsageDashboard({
@@ -2958,7 +2945,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       ...(to !== undefined ? { to } : {}),
       ...(params.sessionId ? { sessionId: params.sessionId } : {}),
     });
-    const baselineTotals = sumUsage(allBaselines);
     return toJsonValue({
       usage: {
         scope: params.workspacePath ? (params.sessionId ? "session" : "workspace") : "all",
@@ -2968,14 +2954,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         ...(to !== undefined ? { to } : {}),
         ...summary,
         cache: summarizeCacheEffectiveness(allCalls),
-        details: {
-          ...dashboard,
-          knownCacheReadTokens: dashboard.knownCacheReadTokens + baselineTotals.cacheReadTokens,
-          knownCacheWriteTokens: dashboard.knownCacheWriteTokens + baselineTotals.cacheWriteTokens,
-        },
+        details: dashboard,
         workspaces,
         ...(unavailableWorkspaces.length > 0 ? { unavailableWorkspaces } : {}),
-        rangeAccuracy: hasRange ? "provider_calls_only" : "all_time_with_baselines",
+        rangeAccuracy: "provider_calls_only",
       },
     });
   }
@@ -4029,13 +4011,9 @@ function inTimeRange(at: number, from: number | undefined, to: number | undefine
   return (from === undefined || at >= from) && (to === undefined || at <= to);
 }
 
-function summarizeUsageRecords(
-  calls: readonly ProviderCallRecord[],
-  baselines: readonly UsageBaselineRecord[],
-): JsonObject {
+function summarizeUsageRecords(calls: readonly ProviderCallRecord[]): JsonObject {
   const providerCalls = sumUsage(calls);
-  const baselineTotals = sumUsage(baselines);
-  const total = addUsage(providerCalls, baselineTotals);
+  const total = providerCalls;
   let usageReportCount = 0;
   let reasoningTokens = 0;
   let estimatedCostCallCount = 0;
@@ -4057,10 +4035,10 @@ function summarizeUsageRecords(
     else if (reported["costStatus"] === "included") includedCostCallCount += 1;
     else unknownCostCallCount += 1;
   }
-  const unknownCostRecordCount = unknownCostCallCount + baselines.length;
+  const unknownCostRecordCount = unknownCostCallCount;
   const pricedKinds = Number(estimatedCostCallCount > 0) + Number(includedCostCallCount > 0);
   const costStatus =
-    calls.length === 0 && baselines.length === 0
+    calls.length === 0
       ? "none"
       : unknownCostRecordCount > 0 || pricedKinds > 1
         ? estimatedCostCallCount > 0 || includedCostCallCount > 0
@@ -4072,9 +4050,7 @@ function summarizeUsageRecords(
   return {
     providerCallCount: calls.length,
     usageReportCount,
-    baselineCount: baselines.length,
     providerCalls: { ...providerCalls },
-    baselines: { ...baselineTotals },
     total: {
       ...total,
       costCNY: total.cost,
@@ -4090,9 +4066,7 @@ function summarizeUsageRecords(
   };
 }
 
-function sumUsage(
-  records: readonly (ProviderCallRecord | UsageBaselineRecord)[],
-): UsageLedgerTotals {
+function sumUsage(records: readonly ProviderCallRecord[]): UsageLedgerTotals {
   return records.reduce<UsageLedgerTotals>(
     (total, record) => ({
       inputTokens: total.inputTokens + record.inputTokens,
@@ -4103,16 +4077,6 @@ function sumUsage(
     }),
     emptyUsage(),
   );
-}
-
-function addUsage(left: UsageLedgerTotals, right: UsageLedgerTotals): UsageLedgerTotals {
-  return {
-    inputTokens: left.inputTokens + right.inputTokens,
-    outputTokens: left.outputTokens + right.outputTokens,
-    cacheReadTokens: left.cacheReadTokens + right.cacheReadTokens,
-    cacheWriteTokens: left.cacheWriteTokens + right.cacheWriteTokens,
-    cost: left.cost + right.cost,
-  };
 }
 
 function emptyUsage(): UsageLedgerTotals {

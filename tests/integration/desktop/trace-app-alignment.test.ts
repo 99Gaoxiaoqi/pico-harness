@@ -90,9 +90,9 @@ function render(props: Partial<React.ComponentProps<typeof InspectorWorkbarPanel
 test("trace inspector integrates physical attempts, independent usage and earlier-window controls", () => {
   const execution = mergeExecutionPages([
     page,
-    { ...page, runs: [], coverage: { ...page.coverage, modelAttempts: "logical_only" } },
+    { ...page, runs: [], coverage: { ...page.coverage, modelAttempts: "missing" } },
   ])!;
-  assert.equal(execution.coverage.modelAttempts, "mixed");
+  assert.equal(execution.coverage.modelAttempts, "partial");
   const html = render({
     execution,
     summary,
@@ -124,7 +124,7 @@ test("trace inspector integrates physical attempts, independent usage and earlie
     "上下文 Token 为估算值",
     "预留输出",
     "安全余量",
-    "部分调用包含底层尝试",
+    "部分底层调用尝试记录不完整",
   ])
     assert.ok(html.includes(label), label);
   const unavailable = render({
