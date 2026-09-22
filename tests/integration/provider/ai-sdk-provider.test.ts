@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { createProvider, type ProviderKind } from "@pico/pico-host/provider/factory";
 import { resolveModelRouteCapabilities } from "@pico/runtime";
-import { ContextOverflowError, LLMStatusError } from "@pico/core";
+import { ContextOverflowError, LLMStatusError, ModelCommunicationError } from "@pico/core";
 import { AgentEngine } from "@pico/pico-host/agent-engine";
 import { Session } from "@pico/pico-host/session";
 import { ToolRegistry } from "@pico/pico-host/product-tool-registry";
@@ -300,7 +300,11 @@ test("SDK failures preserve Pico retries, cancellation and invalid-tool ownershi
   };
   await assert.rejects(
     provider.generate(messages, []),
-    (e) => e instanceof TypeError && !e.message.includes("secret"),
+    (e) =>
+      e instanceof ModelCommunicationError &&
+      e.category === "request_failed" &&
+      e.diagnostic.transportCode === undefined &&
+      !e.message.includes("secret"),
   );
   const abort = new AbortController();
   globalThis.fetch = async (_url, init) => {
