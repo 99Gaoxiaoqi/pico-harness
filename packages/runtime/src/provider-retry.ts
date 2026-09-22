@@ -14,9 +14,9 @@ import {
 } from "./provider-failure-classification.js";
 import { waitForAbortableDelay, waitForDelay } from "./deadline.js";
 
-export const DEFAULT_MAX_RETRY_ATTEMPTS = 3;
-const RETRY_MIN_TIMEOUT_MS = 300;
-const RETRY_MAX_TIMEOUT_MS = 5_000;
+export const DEFAULT_MAX_RETRY_ATTEMPTS = 10;
+const RETRY_MIN_TIMEOUT_MS = 1_000;
+const RETRY_MAX_TIMEOUT_MS = 32_000;
 const RETRY_FACTOR = 2;
 const MAX_TIMEOUT_RETRIES = 1;
 
@@ -183,12 +183,9 @@ export function backoffDelays(maxAttempts: number): number[] {
   const delays: number[] = [];
   for (let index = 0; index < Math.max(maxAttempts - 1, 0); index++) {
     const base = Math.min(RETRY_MAX_TIMEOUT_MS, RETRY_MIN_TIMEOUT_MS * RETRY_FACTOR ** index);
-    delays.push(
-      Math.max(
-        RETRY_MIN_TIMEOUT_MS,
-        Math.min(RETRY_MAX_TIMEOUT_MS, Math.round(base * Math.random())),
-      ),
-    );
+    // Match Maka's bounded exponential backoff with positive jitter. The base
+    // caps at 32s; the actual wait is at most 40s and remains abortable.
+    delays.push(Math.ceil(base + Math.random() * base * 0.25));
   }
   return delays;
 }
