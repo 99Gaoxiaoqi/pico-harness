@@ -85,7 +85,7 @@ export function planToolResultProjections(
       !event.data.message.toolCalls?.length
     )
       continue;
-    const stepKey = event.stepId ?? event.turnId;
+    const stepKey = event.refs?.stepId ?? event.turnId;
     if (!steps.has(stepKey)) steps.set(stepKey, steps.size);
     for (const call of event.data.message.toolCalls) {
       if (calls.has(call.id)) ambiguousCalls.add(call.id);

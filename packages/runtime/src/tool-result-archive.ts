@@ -195,17 +195,20 @@ export function rebindToolResultArchive(
     event.data.projection.strategy !== "durable-tool-result-archive-v1"
   )
     return event;
-  return archiveRuntimeToolResult({
+  const ref = buildToolResultArchiveRef({
+    sessionId: event.sessionId,
+    eventId: event.eventId,
+    sha256: event.data.body.sha256,
+    sizeBytes: event.data.body.sizeBytes,
+  });
+  return {
     ...event,
     data: {
       ...event.data,
       projection: {
-        version: 1,
-        mode: "full",
-        strategy: "original",
-        truncated: false,
-        text: event.data.body.content,
+        ...event.data.projection,
+        text: event.data.projection.text.replace(/pico:\/\/archive\/[^"\s]+/gu, ref),
       },
     },
-  });
+  };
 }
