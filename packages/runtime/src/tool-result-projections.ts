@@ -1,3 +1,4 @@
+import { isMessageHiddenFromTranscript } from "@pico/core";
 import { createHash } from "node:crypto";
 import type {
   RuntimeEvent,
@@ -72,7 +73,12 @@ export function planToolResultProjections(
   const turns = new Map<string, number>();
   let turn = 0;
   for (const entry of entries) {
-    if (entry.message.role === "user" && !entry.message.toolCallId) turn++;
+    if (
+      entry.message.role === "user" &&
+      !entry.message.toolCallId &&
+      !isMessageHiddenFromTranscript(entry.message)
+    )
+      turn++;
     turns.set(entry.eventId, turn);
   }
   const calls = new Map<string, { input: unknown; stepNumber: number }>();

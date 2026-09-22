@@ -342,6 +342,8 @@ function replaceProjectedPrefixWithCheckpoint(
   checkpointEventIndex: number,
 ): void {
   if (
+    !checkpoint.data.checkpointId.startsWith("hard-reset:") &&
+    !checkpoint.runId.startsWith(RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX) &&
     !isValidStoredCompactionSummary(
       checkpoint.data.summary.content,
       checkpoint.data.summary.providerData?.["picoSummaryFormat"],

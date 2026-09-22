@@ -1318,7 +1318,11 @@ export class RuntimeRun {
     }
     const data = lastCheckpoint.event.data;
     // 硬重置 checkpoint 之前的所有 checkpoint 都已失效，不再向前查找。
-    if (data.checkpointId.startsWith("hard-reset:")) return undefined;
+    if (
+      data.checkpointId.startsWith("hard-reset:") ||
+      lastCheckpoint.event.runId.startsWith(RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX)
+    )
+      return undefined;
     const content = data.summary.content;
     if (!isValidStoredCompactionSummary(content, data.summary.providerData?.["picoSummaryFormat"]))
       return undefined;

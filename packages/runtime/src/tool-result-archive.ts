@@ -68,10 +68,8 @@ export function parseToolResultArchiveRef(ref: string): ToolResultArchiveIdentit
   }
 }
 
-/** Original body and replacement projection share the same atomic T2 commit.
- * Nothing is delivered to the provider unless the original body is durable.
- * Results with recovery guidance or errors remain intact, and ephemeral runs
- * never call this function. No second archive store can fail or get out of sync.
+/** Build a replacement only. Callers must commit its transition before replay.
+ * Original bodies stay in the ledger; recovery guidance and archive reads remain intact.
  */
 export function archiveRuntimeToolResult(
   event: RuntimeToolResultRecordedEvent,
@@ -111,7 +109,7 @@ export function archiveRuntimeToolResult(
         mode: "preview",
         strategy: "durable-tool-result-archive-v1",
         truncated: true,
-        text: `${options.supersededByToolCallId ? `[由 ${options.supersededByToolCallId} 替代：${options.reason}]\n` : ""}[工具结果已归档：${event.data.toolName.slice(0, 160)}，${body.content.length} 字符]\n${projection.text.slice(0, 500)}\n完整结果仍可读取：archive_read ${JSON.stringify({ ref, operation: "inspect" })}；支持 read（char/line）、search、query，offset 从 0 开始。也可用 read_file ${JSON.stringify({ path: ref, offset: 1, limit: 6000 })} 按字符分页（此兼容接口从 1 开始）。`,
+        text: `${options.supersededByToolCallId ? `[由 ${options.supersededByToolCallId} 替代：${options.reason}]\n` : ""}[工具结果已归档：${event.data.toolName.slice(0, 160)}，${body.content.length} 字符]\n${projection.text.slice(0, 500)}\n完整结果仍可读取：archive_read ${JSON.stringify({ ref, operation: "inspect" })}；支持 read（char/line）、search、query，offset 从 0 开始。也可用 read_file ${JSON.stringify({ path: ref, offset: 1, limit: 6000 })} 按字符分页（此分页接口从 1 开始）。`,
       },
     },
   };
