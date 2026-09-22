@@ -15,7 +15,11 @@ import {
 } from "../../../packages/pico-host/src/session-execution-query.js";
 
 const at = "2026-09-22T00:00:00.000Z";
-function event(id: string, kind: RuntimeEvent["kind"], data: object): RuntimeEvent {
+function event<K extends RuntimeEvent["kind"]>(
+  id: string,
+  kind: K,
+  data: object,
+): Extract<RuntimeEvent, { kind: K }> {
   return {
     schemaVersion: 2,
     eventId: id,
@@ -28,7 +32,7 @@ function event(id: string, kind: RuntimeEvent["kind"], data: object): RuntimeEve
     visibility: "internal",
     kind,
     data,
-  } as RuntimeEvent;
+  } as Extract<RuntimeEvent, { kind: K }>;
 }
 function attempt(n: number, extra: Partial<ProviderPhysicalAttempt> = {}): ProviderPhysicalAttempt {
   return {
@@ -255,6 +259,32 @@ test("explicit zero physical attempts never fallback to logical metrics and repo
     assert.equal(page.summary.cacheCoverage, "complete");
     assert.equal(page.runs[0]!.steps[0]!.inputTokens, undefined);
     assert.deepEqual(page.runs[0]!.steps[0]!.attempts, []);
+    await store.appendBatch(
+      [
+        event("cache-without-input", "model.call.settled", {
+          providerCallId: "cache-without-input",
+          status: "succeeded",
+          latencyMs: 1,
+          attemptCoverage: "complete",
+          attempts: [
+            attempt(0, {
+              usageBasis: "partial",
+              usage: {
+                promptTokens: 0,
+                completionTokens: 0,
+                cacheReadTokens: 5,
+                reportedFields: ["cacheRead"],
+              },
+            }),
+          ],
+        }),
+      ],
+      { ownerFence },
+    );
+    const incomplete = querySessionExecutionSummary(root, { sessionId: "session" });
+    assert.equal(incomplete.cachedInputTokens, 5);
+    assert.equal(incomplete.inputTokens, 4);
+    assert.equal(incomplete.cacheCoverage, "partial");
   } finally {
     store.close();
     rmSync(root, { recursive: true, force: true });

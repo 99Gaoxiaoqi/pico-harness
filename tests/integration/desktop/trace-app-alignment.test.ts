@@ -59,7 +59,7 @@ const page: RuntimeExecutionPage = {
           attempts: [
             {
               attemptId: "a",
-              attempt: 1,
+              attempt: 0,
               provider: "provider",
               model: "model",
               startedAt: "now",
@@ -118,6 +118,7 @@ test("trace inspector integrates physical attempts, independent usage and earlie
     "模型调用记录",
     "重试 1 次",
     "HTTP 429",
+    "第 1 次",
     "首 Token 耗时",
     "复制模型标识",
     "上下文 Token 为估算值",

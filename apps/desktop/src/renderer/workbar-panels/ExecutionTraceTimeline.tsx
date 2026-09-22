@@ -106,7 +106,7 @@ export function ExecutionTraceTimeline({
                               <small>
                                 {duration(step.durationMs)}
                                 {step.kind === "model"
-                                  ? ` · 输入 ${tokens(step.inputTokens)} / 输出 ${tokens(step.outputTokens)} Token · ${step.costStatus === "included" ? "费用已包含" : money(step.costCNY)}${step.costStatus === "estimated" ? "（估算）" : ""}`
+                                  ? ` · 输入 ${tokens(step.inputTokens)} / 输出 ${tokens(step.outputTokens)} Token · ${step.costStatus === "included" ? "费用已包含" : money(step.costCNY)}${step.costStatus === "estimated" ? "（估算）" : step.costStatus === "unknown" && step.costCNY !== undefined ? "（已知部分）" : ""}`
                                   : ""}
                               </small>
                             </span>
@@ -154,7 +154,7 @@ export function ExecutionTraceTimeline({
               <ol>
                 {selected.attempts.map((attempt) => (
                   <li key={attempt.attemptId}>
-                    第 {attempt.attempt} 次 · {attempt.provider} / {attempt.model} ·{" "}
+                    第 {attempt.attempt + 1} 次 · {attempt.provider} / {attempt.model} ·{" "}
                     {attempt.status === "succeeded" ? "成功" : status(attempt.status)} ·{" "}
                     {duration(attempt.latencyMs)}
                     {attempt.httpStatus !== undefined ? ` · HTTP ${attempt.httpStatus}` : ""}
@@ -307,13 +307,13 @@ export function ExecutionUsageSummary({ summary }: { summary: RuntimeExecutionSu
           )}
         {summary.physicalAttempts !== undefined && (
           <div>
-            <dt>底层调用尝试</dt>
+            <dt>已记录底层尝试</dt>
             <dd>{summary.physicalAttempts} 次</dd>
           </div>
         )}
         {summary.retries !== undefined && (
           <div>
-            <dt>重试</dt>
+            <dt>已记录重试</dt>
             <dd>{summary.retries} 次</dd>
           </div>
         )}
