@@ -5,7 +5,7 @@ import { createServer } from "node:http";
 import { ModelCommunicationError, type ModelCommunicationCategory } from "@pico/core";
 import { AiSdkProvider } from "@pico/pico-host/provider/ai-sdk-provider";
 import { CostTracker } from "@pico/pico-host/cost-tracker";
-import { defaultIsRetryableError } from "@pico/runtime/provider-retry";
+import { defaultIsRetryableError, generateWithRetry } from "@pico/runtime/provider-retry";
 import type { PhysicalAttemptRecord } from "@pico/storage/runtime-control-types";
 
 test("HTTP stream diagnostics distinguish failures through SDK and ledger without exposing remote data", async (context) => {
@@ -117,13 +117,15 @@ test("HTTP stream diagnostics distinguish failures through SDK and ledger withou
   assert.equal(calls, cases.length + 1);
 });
 
-test("SDK failures before HTTP response are not attributed to server stream errors", async (context) => {
+test("SDK unwraps fetch failures without losing safe transport retry classification", async (context) => {
   const original = globalThis.fetch;
   context.after(() => {
     globalThis.fetch = original;
   });
   globalThis.fetch = async () => {
-    throw Object.assign(new Error("PRIVATE_CONNECTION_DETAIL"), { code: "ECONNRESET" });
+    throw new TypeError("fetch failed", {
+      cause: Object.assign(new Error("PRIVATE_CONNECTION_DETAIL"), { code: "ECONNRESET" }),
+    });
   };
   const provider = new AiSdkProvider("openai", {
     baseURL: "https://fixture.invalid/v1",
@@ -137,7 +139,8 @@ test("SDK failures before HTTP response are not attributed to server stream erro
       assert.equal(error.category, "request_failed");
       assert.equal(error.diagnostic.httpStatus, undefined);
       assert.equal(error.diagnostic.transportCode, "ECONNRESET");
-      assert.equal(defaultIsRetryableError(error), false);
+      assert.equal(error.diagnostic.sdkError, "APICallError");
+      assert.equal(defaultIsRetryableError(error), true);
       assert.doesNotMatch(JSON.stringify(error) + error.message, /PRIVATE_/u);
       return true;
     },
@@ -161,4 +164,200 @@ test("providers without physical lifecycle cannot create accounting facts", asyn
   );
   await assert.rejects(tracker.generate([{ role: "user", content: "synthetic" }], []));
   assert.deepEqual(records, []);
+});
+
+test("safe pre-response transport failures recover within the existing attempt budget", async (context) => {
+  const original = globalThis.fetch;
+  context.after(() => {
+    globalThis.fetch = original;
+  });
+  const secret = "PRIVATE_NETWORK_CAUSE_AND_REQUEST";
+  const messages = [{ role: "user" as const, content: secret }];
+  const records: PhysicalAttemptRecord[] = [];
+  const provider = new CostTracker(
+    new AiSdkProvider("openai", {
+      baseURL: "https://fixture.invalid/v1",
+      model: "synthetic",
+      apiKey: secret,
+    }),
+    "synthetic",
+    undefined,
+    { ledger: capturePhysicalAttempts(records) },
+  );
+  const success = () =>
+    new Response(
+      JSON.stringify({
+        id: "fixture",
+        object: "chat.completion",
+        created: 1,
+        model: "synthetic",
+        choices: [
+          { index: 0, message: { role: "assistant", content: "Recovered" }, finish_reason: "stop" },
+        ],
+        usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 },
+      }),
+      { headers: { "content-type": "application/json" } },
+    );
+  for (const code of [
+    "ECONNRESET",
+    "EAI_AGAIN",
+    "ETIMEDOUT",
+    "UND_ERR_CONNECT_TIMEOUT",
+    "UND_ERR_HEADERS_TIMEOUT",
+    "UND_ERR_SOCKET",
+  ]) {
+    let calls = 0;
+    globalThis.fetch = async () => {
+      if (++calls === 1)
+        throw new TypeError("fetch failed", {
+          cause: Object.assign(new Error(secret), { code }),
+        });
+      return success();
+    };
+    assert.equal(
+      (await generateWithRetry(provider, messages, [], { maxAttempts: 2 })).content,
+      "Recovered",
+    );
+    assert.equal(calls, 2, code);
+    assert.deepEqual(
+      records.slice(-2).map((record) => record.status),
+      ["failed", "succeeded"],
+    );
+    assert.deepEqual(
+      records.slice(-2).map((record) => record.retryAttempt),
+      [0, 1],
+    );
+    assert.equal(records.at(-1)!.logicalCallId, records.at(-2)!.logicalCallId);
+  }
+  let exhaustedCalls = 0;
+  globalThis.fetch = async () => {
+    exhaustedCalls++;
+    throw new TypeError("fetch failed", {
+      cause: Object.assign(new Error(secret), { code: "ECONNRESET" }),
+    });
+  };
+  await assert.rejects(
+    generateWithRetry(provider, messages, [], { maxAttempts: 3 }),
+    ModelCommunicationError,
+  );
+  assert.equal(exhaustedCalls, 3);
+  assert.deepEqual(
+    records.slice(-3).map((record) => record.retryAttempt),
+    [0, 1, 2],
+  );
+  assert.doesNotMatch(JSON.stringify(records), /PRIVATE_/u);
+});
+
+test("unknown, permanent, cancelled and post-response failures cannot enter transport retry", async (context) => {
+  const original = globalThis.fetch;
+  context.after(() => {
+    globalThis.fetch = original;
+  });
+  const provider = new AiSdkProvider("openai", {
+    baseURL: "https://fixture.invalid/v1",
+    model: "synthetic",
+    apiKey: "PRIVATE_KEY",
+  });
+  const messages = [{ role: "user" as const, content: "synthetic" }];
+  for (const code of [
+    "ECONNREFUSED",
+    "ENOTFOUND",
+    "UND_ERR_BODY_TIMEOUT",
+    "PRIVATE_UNKNOWN_CODE",
+    undefined,
+  ]) {
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls++;
+      if (code === undefined) throw new TypeError("PRIVATE_UNKNOWN_FETCH_FAILURE");
+      throw new TypeError("fetch failed", {
+        cause: Object.assign(new Error("PRIVATE_CAUSE"), { code }),
+      });
+    };
+    await assert.rejects(generateWithRetry(provider, messages, []), (error: unknown) => {
+      assert.ok(error instanceof ModelCommunicationError);
+      assert.equal(defaultIsRetryableError(error), false);
+      assert.doesNotMatch(JSON.stringify(error) + error.message, /PRIVATE_/u);
+      return true;
+    });
+    assert.equal(calls, 1, String(code));
+  }
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    return new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode('data: {"choices":[{"delta":{"content":"visible"}}]}\n\n'),
+          );
+          setTimeout(
+            () =>
+              controller.error(
+                new TypeError("fetch failed", {
+                  cause: Object.assign(new Error("PRIVATE_STREAM_CAUSE"), { code: "ECONNRESET" }),
+                }),
+              ),
+            10,
+          );
+        },
+      }),
+      { headers: { "content-type": "text/event-stream" } },
+    );
+  };
+  let output = "";
+  await assert.rejects(
+    generateWithRetry(
+      {
+        generate: (history, tools, options) =>
+          provider.generateStream(
+            history,
+            tools,
+            (delta) => {
+              output += delta;
+            },
+            options,
+          ),
+      },
+      messages,
+      [],
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof ModelCommunicationError);
+      assert.equal(error.diagnostic.httpStatus, 200);
+      assert.equal(error.diagnostic.transportCode, "ECONNRESET");
+      assert.equal(defaultIsRetryableError(error), false);
+      assert.doesNotMatch(JSON.stringify(error) + error.message, /PRIVATE_/u);
+      return true;
+    },
+  );
+  assert.equal(output, "visible");
+  assert.equal(calls, 1);
+  // Locally classified SDK failures cannot gain retries merely by carrying a transport code.
+  for (const diagnostic of [{ httpStatus: 200 }, { headersMs: 1 }]) {
+    assert.equal(
+      defaultIsRetryableError(
+        new ModelCommunicationError("request_failed", {
+          diagnosticId: "fixture",
+          durationMs: 1,
+          transportCode: "ECONNRESET",
+          ...diagnostic,
+        }),
+      ),
+      false,
+    );
+  }
+  const abort = new AbortController();
+  calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    abort.abort();
+    throw new TypeError("fetch failed", {
+      cause: Object.assign(new Error("PRIVATE_CAUSE"), { code: "ECONNRESET" }),
+    });
+  };
+  await assert.rejects(generateWithRetry(provider, messages, [], { signal: abort.signal }), {
+    name: "AbortError",
+  });
+  assert.equal(calls, 1);
 });

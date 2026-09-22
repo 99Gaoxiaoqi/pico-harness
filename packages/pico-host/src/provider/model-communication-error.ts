@@ -21,9 +21,10 @@ export function modelCommunicationError(
   let category = fallback;
   let sdkError: ModelResponseDiagnostic["sdkError"];
   let transportCode: ModelResponseDiagnostic["transportCode"];
+  // The SDK unwraps fetch TypeError into APICallError with the socket error as its cause.
+  // Classify the safe cause code instead of the wrapper type; never return a raw TypeError.
   for (let cause: unknown = error, depth = 0; cause && depth < 8; depth++) {
     if (cause instanceof ModelCommunicationError || cause instanceof LLMStatusError) return cause;
-    if (cause instanceof TypeError) return new TypeError("模型网络请求失败；已省略连接及响应详情");
     if (cause instanceof Error && (cause.name === "AbortError" || cause.name === "TimeoutError"))
       return cause;
     const code = typeof cause === "object" ? (cause as { code?: unknown }).code : undefined;
