@@ -1,6 +1,6 @@
 # PiCO 子智能体：从配置到持久会话、续用和权限边界
 
-> 当前实现说明。面向开发者与需要理解产品边界的读者。本文以配置型 `agent_spawn` 为主线，并说明它与 Agent Graph 的边界；未实现的能力不计入当前行为。
+> 当前实现说明；2026-09-21 核对至 `0092022f`。面向开发者与需要理解产品边界的读者。本文以配置型 `agent_spawn` 为主线，并说明它与 Agent Graph 的边界；未实现的能力不计入当前行为。
 
 ![PiCO 子智能体概念封面：主智能体协调本地阅读、网络研究和隔离开发](images/pico-subagents/cover.png)
 
@@ -72,7 +72,7 @@ Local Read 是本地只读能力的默认名字，不是子智能体的统一名
 
 实现型需要可用的 worktree 执行宿主。执行器等待独立任务完成后收集相对基线的 Git 补丁，返回补丁路径、worktree 路径、分支与摘要。它不会在这条流程里自动把补丁合并回父工作区。**worktree 提供 Git 工作目录隔离，具体文件、进程与网络限制仍取决于工具和沙箱策略；它不等于独立操作系统。**
 
-能力定义集中在 [`subagent-profiles.ts`](../src/agents/subagent-profiles.ts)，避免配置文件自行声明任意工具权限。
+能力定义集中在 [`subagent-capabilities.ts`](../packages/core/src/subagent-capabilities.ts)，避免配置文件自行声明任意工具权限。
 
 ## 4. 从工具调用到一次持久执行
 
@@ -93,7 +93,7 @@ Local Read 是本地只读能力的默认名字，不是子智能体的统一名
 
 _图 3：图中给出新建任务的主要成功路径。失败、取消也有对应终态；可点击卡片不是执行事实的唯一存储。_
 
-执行器复用 `AgentRuntime.execute`，新任务通过 `sessionSelection: { mode: "new", sessionId }` 启动。配置存在时使用配置模型，否则使用父任务模型路由。子任务默认权限为 `ask`，不直接继承父任务的完全访问模式；配置型执行器将 `maxTurns` 设为 20。共享工作区能力的子边界上限是 managed `read-only` + restricted network；隔离 worktree 实现型的上限是 managed `workspace-write` + restricted network。父 Session 的当前持久边界必须能容纳该上限；父任务即使为 `full-access`，子任务也不会变成 bypass。
+执行器复用 `AgentRuntime.execute`，新任务通过 `sessionSelection: { mode: "new", sessionId }` 启动。配置存在时使用配置模型，否则使用父任务模型路由；配置型执行器将 `maxTurns` 设为 20。父 Session 使用 managed 边界时，子任务权限为 `ask`：`local_read` 使用 read-only 与 restricted network，`web_research` 使用 read-only 文件权限与 enabled network，`implementation` 使用 workspace-write 与 restricted network。父边界必须满足启动条件；父 Session 使用 bypass 时，执行器将子任务边界设为 bypass、权限设为 `full-access`。无论采用哪种执行边界，子任务工具仍按 profile 白名单裁剪。
 
 新子任务有独立的消息历史，不会直接复制父任务整段对话。必要背景需要主智能体放进 `task`。运行时仍会按自身规则组装上下文，所以“独立历史”不应被理解为整个执行环境没有任何其他上下文来源。
 
@@ -172,13 +172,15 @@ _图 5：两条入口共享执行能力边界；各入口的模型选择与父�
 统一入口的约束包括：
 
 1. 不能通过请求传入不同能力覆盖子会话的持久身份；身份已确认但能力快照缺失或未知时拒绝执行。
-2. 有效权限强制为 `ask`，编排模式为 `default`，Swarm 授权为 `none`；普通续聊传入完全访问或 Swarm 不会扩权。
-3. 新建子 Session 会在 Provider 与工具装配前持久它的 `ExecutionBoundary` 上限；续用时在设置恢复前后都复核。缺失、bypass、external 或比能力定义更宽的持久边界都 fail closed，Session network grant 与普通扩权流程不能抬高这个上限。
+2. 有效权限由宿主准入边界确定：managed 对应 `ask`，bypass 对应 `full-access`；协作模式固定为 `agent`，编排模式为 `default`，Swarm 授权为 `none`。普通续聊不能仅凭传入完全访问或 Swarm 参数扩大能力。
+3. 新建子 Session 会在 Provider 与工具装配前持久宿主选定的 `ExecutionBoundary`。续用时，宿主将持久边界与权限设置对齐到本次准入预期；改变边界前必须确认没有活动 Run，并校验 revision 后持久更新。缺失的续用边界、external 边界、活动运行期间的边界改变及 revision 冲突会拒绝执行。普通 network grant 和扩权工具不能自行突破当前运行冻结的边界。
 4. 配置型子任务不加载普通插件快照、不加入额外工作目录，也不获得再次启动子智能体或 `request_sandbox_boundary` 工具。
 5. 工具注册表按能力白名单裁剪；后续请求级 allowlist 只能进一步限制可用工具，不能把已移除工具加回来。
 6. 手动续用独立 worktree 子任务会明确拒绝；不能利用普通会话入口绕过专用续用的类型限制。
 
-工具边界不是只写在系统提示词里。`buildSubagentSafetyMiddleware` 还检查敏感凭据路径和危险操作，并结合具体工具、工作区及沙箱策略处理调用。系统提示词提供行为要求，宿主检查负责执行约束。
+工具边界不是只写在系统提示词里。`buildChildAgentSafetyMiddleware` 还检查敏感凭据路径和危险操作，并结合具体工具、工作区及沙箱策略处理调用。系统提示词提供行为要求，宿主检查负责执行约束。
+
+手动普通续聊依据原 profile 恢复 managed 边界；专用执行器则根据当前父边界决定是否传入 bypass。此前以 bypass 创建的子会话在普通续聊时可以收紧为 managed，不能把初次权限当成永久属性。
 
 这里的收口有一个明确范围：**统一的是能力与执行权限，不是两种续聊方式的所有业务语义。**
 
@@ -194,7 +196,7 @@ _图 5：两条入口共享执行能力边界；各入口的模型选择与父�
 
 ## 9. 配置型子会话与 Agent Graph
 
-当前有两条明确的 Agent 路径，讨论能力时需要说清工具名。
+本文对比的两条持久任务编排路径如下，讨论能力时需要说清工具名。
 
 | 入口                         | 定位             | 当前需要区分的能力                                       |
 | ---------------------------- | ---------------- | -------------------------------------------------------- |
@@ -206,19 +208,22 @@ Graph operator 的工具由保存的 profile snapshot 加控制用途的 `agent_
 
 同名 `agent_output` 也要结合宿主理解：本文讨论的是根会话中的子任务结果读取工具；Graph operator 使用的是其编排协议中的另一种用途。看到名字相同，不代表控制面相同。
 
+Hook 的 `agent` 验证器属于另一条内部路径，不通过 Preset 或 `agent_spawn`。每次核验创建独立持久 Session，复用 `AgentEngine`、自身上下文预算及 `FullCompactor`，使用专用只读工具集合，且不挂载 Hook 服务以避免递归。详见[上下文压缩技术详解](pico-context-compaction-technical-guide.md#9-主会话与子代理的统一范围)。
+
 ## 10. 如何验证这些边界
 
 这类功能应检查真实调用链，而不仅检查卡片文案。当前相关集成测试覆盖创建、续用、补丁、父子授权和桌面子会话关系，可按以下方式运行：
 
 ```bash
-node --import tsx --test \
+npm run build:packages
+node --import tsx --import @pico/cli/tui/preload-env --test --test-concurrency=1 \
   tests/integration/runtime/configured-subagent-continuation.test.ts \
   tests/integration/runtime/configured-subagent-execution.test.ts \
   tests/integration/runtime/configured-subagent-output.test.ts \
   tests/integration/desktop/desktop-configured-child-sessions.test.ts
 ```
 
-截至本文基线，这组 8 项测试通过。手动续聊回归使用真实 `AgentRuntime` 和确定性 Provider：先通过主任务创建子会话，再模拟普通 UI/CLI 续聊，不传 `configuredSubagentChild`，同时请求完全访问权限（`full-access`）与 Swarm。测试确认模型只获得三个只读工具，原角色提示与历史仍在；即使 Provider 强行返回 `write_file` 调用，也不会生成目标文件。
+这组集成测试覆盖创建、续用、补丁、父子授权、执行边界及桌面关系；本轮验证结果见[博客一致性核对记录](blog-code-consistency-audit.md)。手动续聊回归使用真实 `AgentRuntime` 和确定性 Provider：先通过主任务创建子会话，再模拟普通 UI/CLI 续聊，不传 `configuredSubagentChild`，同时请求完全访问权限（`full-access`）与 Swarm。测试确认模型只获得三个只读工具，原角色提示与历史仍在；即使 Provider 强行返回 `write_file` 调用，也不会生成目标文件。
 
 专用续用还有真实模型 E2E：[`configured-subagent-continuation.real-llm.test.ts`](../tests/e2e/configured-subagent-continuation.real-llm.test.ts)。它通过前后两轮回忆虚构标签验证上下文续用，而不是只检查 ID 相等。该测试需要真实模型配置，不属于纯本地确定性检查。
 
@@ -226,17 +231,17 @@ node --import tsx --test \
 
 ## 11. 源码阅读地图与后续扩展边界
 
-| 关注点                 | 主要文件                                                                                                                                                                                                                                                                         |
-| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Preset 协议与数量限制  | [`packages/protocol/src/runtime/subagents.ts`](../packages/protocol/src/runtime/subagents.ts)                                                                                                                                                                                    |
-| 设置界面与原子保存     | [`SubagentSettingsPage.tsx`](../apps/desktop/src/renderer/pages/SubagentSettingsPage.tsx)、[`desktop-subagent-settings-service.ts`](../src/daemon/desktop-subagent-settings-service.ts)                                                                                          |
-| 内置能力与可用性目录   | [`subagent-profiles.ts`](../src/agents/subagent-profiles.ts)、[`configured-subagent-catalog.ts`](../src/agents/configured-subagent-catalog.ts)                                                                                                                                   |
-| 工具参数与结果协议     | [`configured-subagent-tools.ts`](../src/tools/configured-subagent-tools.ts)、[`configured-subagent-output.ts`](../src/tools/configured-subagent-output.ts)                                                                                                                       |
-| 持久子任务执行与补丁   | [`configured-subagent-executor.ts`](../src/runtime/configured-subagent-executor.ts)                                                                                                                                                                                              |
-| 专用续用校验与回读     | [`configured-subagent-continuation.ts`](../src/runtime/configured-subagent-continuation.ts)、[`configured-subagent-output-store.ts`](../src/runtime/configured-subagent-output-store.ts)                                                                                         |
-| 统一能力恢复与执行约束 | [`configured-subagent-session.ts`](../src/runtime/configured-subagent-session.ts)、[`agent-runtime.ts`](../src/runtime/agent-runtime.ts)、[`child-agent-policy.ts`](../src/tools/child-agent-policy.ts)                                                                          |
-| 卡片、事件投影与导航   | [`ConversationTranscript.tsx`](../apps/desktop/src/renderer/conversation/ConversationTranscript.tsx)、[`transcript-event-store.ts`](../src/presentation/transcript-event-store.ts)、[`subagent-navigation.ts`](../apps/desktop/src/renderer/conversation/subagent-navigation.ts) |
-| Agent Graph            | [`agent-graph-host.ts`](../src/runtime/agent-graph-host.ts)、[`agent-graph-tools.ts`](../src/tools/agent-graph-tools.ts)                                                                                                                                                         |
+| 关注点                 | 主要文件                                                                                                                                                                                                                                                                               |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Preset 协议与数量限制  | [`packages/protocol/src/runtime/subagents.ts`](../packages/protocol/src/runtime/subagents.ts)                                                                                                                                                                                          |
+| 设置界面与原子保存     | [`SubagentSettingsPage.tsx`](../apps/desktop/src/renderer/pages/SubagentSettingsPage.tsx)、[`desktop-subagent-settings-service.ts`](../packages/pico-host/src/desktop-subagent-settings-service.ts)                                                                                    |
+| 内置能力与可用性目录   | [`subagent-capabilities.ts`](../packages/core/src/subagent-capabilities.ts)、[`configured-subagent-catalog.ts`](../packages/pico-host/src/configured-subagent-catalog.ts)                                                                                                              |
+| 工具参数与结果协议     | [`configured-subagent-tools.ts`](../packages/runtime/src/configured-subagent-tools.ts)、[`configured-subagent-output.ts`](../packages/runtime/src/configured-subagent-output-tool.ts)                                                                                                  |
+| 持久子任务执行与补丁   | [`configured-subagent-executor.ts`](../packages/pico-host/src/configured-subagent-executor.ts)                                                                                                                                                                                         |
+| 专用续用校验与回读     | [`configured-subagent-continuation.ts`](../packages/runtime/src/configured-subagent-continuation.ts)、[`configured-subagent-output-store.ts`](../packages/runtime/src/configured-subagent-output-store.ts)                                                                             |
+| 统一能力恢复与执行约束 | [`configured-subagent-session.ts`](../packages/runtime/src/configured-subagent-session.ts)、[`agent-runtime.ts`](../packages/pico-host/src/agent-runtime.ts)、[`child-agent-policy.ts`](../packages/pico-host/src/child-agent-policy.ts)                                               |
+| 卡片、事件投影与导航   | [`ConversationTranscript.tsx`](../apps/desktop/src/renderer/conversation/ConversationTranscript.tsx)、[`transcript-event-store.ts`](../packages/pico-host/src/transcript-event-store.ts)、[`subagent-navigation.ts`](../apps/desktop/src/renderer/conversation/subagent-navigation.ts) |
+| Agent Graph            | [`agent-graph-host.ts`](../packages/pico-host/src/product-agent-graph-host.ts)、[`agent-graph-tools.ts`](../packages/runtime/src/agent-graph-tools.ts)                                                                                                                                 |
 
 继续扩展时，应分别解决三个问题：自定义工具组合如何验证，独立 worktree 续用如何保持补丁基线与生命周期，以及手动运行如何被父任务重新接管。它们分别涉及能力模型、隔离执行和父子记账，不能仅靠增加一个按钮完成。
 

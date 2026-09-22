@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "deliver",
+  "type": "architecture",
+  "input": "/Users/anxuan/geektime-downloader/从0开始构建AgentHarness/pico-harness/docs/assets/context-compaction/architecture.json",
+  "output": "/Users/anxuan/geektime-downloader/从0开始构建AgentHarness/pico-harness/docs/assets/context-compaction/architecture.html",
+  "specification": {
+    "sha256": "64ab6dcd3199a24592504c7ce960d5f3fd2f051f6c23aae5e68c92c642cbfeda",
+    "bytes": 2957
+  },
+  "artifact": {
+    "sha256": "599644c75da540627aa06177ac8f909bce7cc4063fbe018149773458239ce5ee",
+    "bytes": 802214
+  },
+  "validation": {
+    "checksPassed": 9,
+    "checkCount": 9,
+    "compositionProfile": "showcase",
+    "compositionStatus": "pass",
+    "errors": 0,
+    "warnings": 0
+  }
+}

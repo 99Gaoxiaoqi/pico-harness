@@ -1,6 +1,6 @@
 # Pico 的长期记忆：从用户证据到可恢复的写入与按需召回
 
-> 本文于 2026-09-08 核对至代码基线 **97cc2a55**。配图保留最初绘制时的基线 **4b64eabd**；图示主流程在本次核对版本中仍成立。面向希望理解 Agent 记忆工程实现的开发者。配图中，蓝色表示模型处理阶段，白色表示程序处理，绿色表示持久化数据。
+> 本文于 2026-09-21 核对至代码基线 **0092022f**。配图保留最初绘制时的基线 **4b64eabd**；正文已校准用户级设置、工具独占规则及模块路径，召回图同步澄清索引词项上限。面向希望理解 Agent 记忆工程实现的开发者。配图中，蓝色表示模型处理阶段，白色表示程序处理，绿色表示持久化数据。
 
 用户告诉 Agent：“这个项目统一使用 pnpm。”如果每次新建会话都需要重复这句话，Agent 就很难形成连续的工作体验。长期记忆要做的，是把这类信息整理成可以复用的背景，在之后的问题需要它时重新提供给模型。
 
@@ -37,7 +37,7 @@ Pico 当前提供三种模型提取入口，以及一条不经过模型的手动
 | **自动压缩 checkpoint**        | checkpoint 保存覆盖边界和记忆准入结果，再触发后台处理  | 不必等待当前 Run 结束，也不要求先调用 memory_extract |
 | **App 添加记忆／手动保存命令** | 本地校验后直接写入当前工作区的 note                    | 不调用提取和规范化模型                               |
 
-两个模型工具都严格无参。memory_remember 必须在独立工具步骤中单独调用；与其他工具混合调用会被运行时拒绝。主模型负责决定是否触发，而不是通过工具参数任意提交一段“记忆正文”。系统会从宿主捕获的消息与事件中重新取得证据。
+两个模型工具都严格无参。memory_remember 要求独占工具步骤。混合调用时，若它位于首位，运行时执行它并拒绝同批其他工具；若它不在首位，则拒绝该 remember 调用。主模型负责决定是否触发，而不是通过工具参数任意提交一段“记忆正文”。系统会从宿主捕获的消息与事件中重新取得证据。
 
 这也解释了“意图识别”发生在哪里：当前没有额外的独立意图分类模型。主对话模型根据用户请求和工具说明决定调用哪个入口；辅助模型随后负责提取内容并分类；程序检查结果是否合法。
 
@@ -124,7 +124,7 @@ Pico 在每次辅助请求前估算：**输入消息 token＋实际发送的工�
 | memory_extraction_receipts       | 提取操作的结果回执                               |
 | memory_extraction_failures       | 当前待重试范围、首次失败原因、触发类型与删除代次 |
 | memory_compaction_policy_denials | 自动压缩范围的策略拒绝记录                       |
-| memory_settings                  | 按工作区保存的记忆开关                           |
+| memory_settings                  | 用户级记忆开关，所有项目共用                     |
 
 提取提交时，系统在一个事务中写入记忆、关键词、来源、进度和回执，避免出现“内容写入成功，进度却没有推进”的中间状态。
 
@@ -174,7 +174,7 @@ _图 3：当前召回完全由本地程序完成。没有 embedding、向量库�
 
 ## 8. 用户管理与执行边界
 
-App 记忆页提供添加、编辑、已保存／已归档列表、归档、恢复、删除，以及按工作区生效的总开关、自动提取开关和召回开关。前后端直接交换原子 Item；协议不再提供旧 Fact/Proposal 审核列表、审核预算或批准／拒绝动作，设置字段直接使用 `enabled`、`autoExtract` 和 `recallEnabled`。
+App 记忆页提供添加、编辑、已保存／已归档列表、归档、恢复和删除；设置页提供用户级总开关、自动提取开关和召回开关，对所有项目生效。记忆条目的 global／workspace 范围仍决定内容可见性。前后端直接交换原子 Item；协议不再提供旧 Fact/Proposal 审核列表、审核预算或批准／拒绝动作，设置字段直接使用 `enabled`、`autoExtract` 和 `recallEnabled`。
 
 手动添加直接经过本地校验，保存为当前工作区 note。系统按工作区和规范化正文生成创建操作身份；如果该操作记录指向的条目仍存在且正文一致，就复用它，已归档时恢复。它不扫描全库查找所有同文条目，也不合并模型提取的相似内容。手动保存也不会绕过后续相关性筛选，因此添加成功不等于每一轮都会注入。
 
@@ -182,22 +182,22 @@ App 记忆页提供添加、编辑、已保存／已归档列表、归档、恢�
 
 为防止删除前已经在途的提取把内容写回来，快照带有删除代次，事务提交及失败结算时重新检查。当前代次是整个用户记忆库级别：一次删除会使该库中所有旧代次的提取任务失效，新任务正常处理。它不是永久遗忘机制，也不等于删除外部备份。
 
-能力还受到运行路径限制。当前 Plan 可以召回但不装配提取工具；Graph operator、普通子代理和隔离 headless 不注入或提取记忆；Responses Provider 可以在符合条件时召回，但提取工具返回 provider_unsupported。旁路对话和后台 Automation 不因会话类型单独禁用记忆，仍要满足信任、开关及任务工具授权。
+能力还受到运行路径限制。当前 Plan 和 Research 可以在其他条件满足时召回，但不装配提取工具；Graph operator、普通子代理和隔离 headless 不注入或提取记忆；Responses Provider 可以在符合条件时召回，但提取工具返回 provider_unsupported。旁路对话和后台 Automation 不因会话类型单独禁用记忆，仍要满足信任、开关及任务工具授权。
 
 这些边界必须体现在技术说明和产品结果中：请求被接受、内容已经保存、保存后能够被召回，是三个不同状态。Pico 用工具回执、数据库事务和召回筛选分别表达它们。
 
 ## 9. 从哪里继续阅读实现
 
-| 关注点                       | 当前代码                                                                                                                                                   |
-| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 生产装配、运行路径与召回注入 | [agent-runtime.ts](../src/runtime/agent-runtime.ts)                                                                                                        |
-| 快照、工具触发与后台生命周期 | [atomic-memory-runtime.ts](../src/runtime/atomic-memory-runtime.ts)、[atomic-memory-lifecycle.ts](../src/runtime/atomic-memory-lifecycle.ts)               |
-| 提取、范围调度、规范化与恢复 | [extraction-engine.ts](../src/memory/atomic/extraction-engine.ts)                                                                                          |
-| 用户证据与模型输出协议       | [extraction-evidence.ts](../src/memory/atomic/extraction-evidence.ts)、[extraction-proposal.ts](../src/memory/atomic/extraction-proposal.ts)               |
-| 完整辅助请求预算             | [extraction-budget.ts](../src/memory/atomic/extraction-budget.ts)                                                                                          |
-| checkpoint 与记忆边界持久化  | [runtime-compaction-checkpoint.ts](../src/context/runtime-compaction-checkpoint.ts)                                                                        |
-| SQLite 数据结构与事务        | [atomic-memory-schema.ts](../src/storage/sqlite/atomic-memory-schema.ts)、[sqlite-memory-item-store.ts](../src/storage/sqlite/sqlite-memory-item-store.ts) |
-| 关键词召回与上下文预算       | [context-builder.ts](../src/memory/atomic/context-builder.ts)                                                                                              |
-| App 记忆管理                 | [desktop-atomic-memory-service.ts](../src/daemon/desktop-atomic-memory-service.ts)                                                                         |
+| 关注点                       | 当前代码                                                                                                                                                                       |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 生产装配、运行路径与召回注入 | [agent-runtime.ts](../packages/pico-host/src/agent-runtime.ts)                                                                                                                 |
+| 快照、工具触发与后台生命周期 | [atomic-memory-runtime.ts](../packages/pico-host/src/atomic-memory-runtime.ts)、[atomic-memory-lifecycle.ts](../packages/runtime/src/atomic-memory-lifecycle.ts)               |
+| 提取、范围调度、规范化与恢复 | [extraction-engine.ts](../packages/runtime/src/atomic-memory/extraction-engine.ts)                                                                                             |
+| 用户证据与模型输出协议       | [extraction-evidence.ts](../packages/runtime/src/atomic-memory/extraction-evidence.ts)、[extraction-proposal.ts](../packages/runtime/src/atomic-memory/extraction-proposal.ts) |
+| 完整辅助请求预算             | [extraction-budget.ts](../packages/runtime/src/atomic-memory/extraction-budget.ts)                                                                                             |
+| checkpoint 与记忆边界持久化  | [runtime-compaction-checkpoint.ts](../packages/runtime/src/runtime-compaction-checkpoint.ts)                                                                                   |
+| SQLite 数据结构与事务        | [atomic-memory-schema.ts](../packages/storage/src/sqlite/atomic-memory-schema.ts)、[sqlite-memory-item-store.ts](../packages/storage/src/sqlite/sqlite-memory-item-store.ts)   |
+| 关键词召回与上下文预算       | [context-builder.ts](../packages/runtime/src/atomic-memory/context-builder.ts)                                                                                                 |
+| App 记忆管理                 | [desktop-atomic-memory-service.ts](../packages/pico-host/src/desktop-atomic-memory-service.ts)                                                                                 |
 
 相关集成测试覆盖证据来源、请求预算、checkpoint 恢复、删除代次、跨会话召回和手动管理；真实模型场景见 [atomic-memory-behavior.real-llm.test.ts](../tests/e2e/atomic-memory-behavior.real-llm.test.ts)。测试用于验证具体行为，不代表语义理解准确率已经获得全面保证。

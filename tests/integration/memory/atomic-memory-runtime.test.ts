@@ -301,7 +301,16 @@ test("atomic compaction persists its covered boundary and records disabled-polic
       compactor: new FullCompactor({
         provider: {
           async generate() {
-            return { role: "assistant", content: "Summary of old project." };
+            return {
+              role: "assistant",
+              content: [
+                "## Goal\nContinue the project discussion.",
+                "## Progress\nThe previous project context was reviewed.",
+                "## Key Decisions\nThe old project uses Rust.",
+                "## Next Steps\nContinue with the latest user request.",
+                "## Critical Context\nThe old project uses Rust.",
+              ].join("\n\n"),
+            };
           },
         },
         maxAttempts: 1,

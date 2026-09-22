@@ -1,0 +1,16 @@
+{
+  "diagram_type": "architecture",
+  "specification_sha256": "cbc9142dea062f35d4b38a87f158bc2d8394f7c5a89204a5e8e24a20b772d10d",
+  "artifact_sha256": "16e5fa0db574407361f84cb72fd68ea8f6f47f3faebcddbe5ea084540e4a21f2",
+  "validation": {
+    "checksPassed": 9,
+    "checkCount": 9,
+    "compositionProfile": "showcase",
+    "compositionStatus": "pass",
+    "errors": 0,
+    "warnings": 0
+  },
+  "browser_evidence": "pass",
+  "visual_review": "passed",
+  "correction_rounds": 1
+}

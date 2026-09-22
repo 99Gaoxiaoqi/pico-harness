@@ -368,7 +368,16 @@ test("Runtime compaction records a checkpoint and preserves the immutable Sessio
 
   const provider: LLMProvider = {
     async generate() {
-      return { role: "assistant", content: "canonical checkpoint summary" };
+      return {
+        role: "assistant",
+        content: [
+          "## Goal\nContinue the latest request.",
+          "## Progress\nReviewed the previous two exchanges.",
+          "## Key Decisions\nKeep the original transcript as durable evidence.",
+          "## Next Steps\nUse the retained tail to continue.",
+          "## Critical Context\ncanonical checkpoint summary",
+        ].join("\n\n"),
+      };
     },
   };
   const compactionRun = await RuntimeRun.start({

@@ -1,315 +1,108 @@
-# 第 1 章 · 让它学会呼吸
+# 第 1 章 · 让它学会呼吸：一次推理怎样变成连续执行
 
-> 归档说明：本文保留历史设计与实施记录，不定义当前产品行为或待办。当前入口见 [技术文档索引](../../README.md)。
+> 当前实现教程：按代码 `0092022f`（2026-09-21）重写。保留原路径以兼容已有链接。
 
-> 文档状态：历史课程快照。Two-Stage ReAct、位置参数 one-shot 启动和早期
-> `--thinking` 语义已经退役；当前 `--thinking <level>` 表示模型推理强度，公开入口是
-> daemon 支撑的交互式 TUI。当前事实见[文档索引](../../README.md)。
+> 本章基于提交 `0092022f` 的当前代码重写。下面的概念伪码只解释控制流，不是可直接替换仓库实现的代码；源码入口是 [AgentEngine](../../../packages/runtime/src/agent-engine.ts)。
 
-一开始，我写了一个非常蠢的 Agent。大概 20 行代码。
+一次模型请求只能得到一次回答。编码任务却需要反复观察世界：读文件，形成判断，修改，运行测试，再根据测试结果决定下一步。AgentEngine 把这个过程组织成循环，但真正困难的不是 `while`，而是每一步发生失败时仍能留下连贯、可恢复的事实。
+
+## 先把一次执行分成三个尺度
+
+Session 是连续会话，Run 是一次受控执行，模型步骤是 Run 内的一次推理。一个 Session 可以经历多次 Run；一个 Run 可以包含多次模型请求；一个模型响应又可能请求多个工具。
+
+这三个尺度不能混用。用户继续对话时不应丢掉 Session；工具批次的并发也不表示允许同一持久 Session 同时运行两条互相修改历史的主循环。
+
+[Engine 的 `run()`](../../../packages/runtime/src/agent-engine.ts) 会检查当前运行能力、拒绝同一 Session 的重入。已有宿主 RuntimeRun 持有正确 Session 能力时复用它；直接调用持久 Session 的路径则通过 `session.serialize()` 建立串行执行与 RuntimeEvent 边界。测试中显式选择的纯内存 Session 是另一条轻量路径，不能拿来替代产品持久化保证。
+
+## 单阶段推理循环
+
+当前模型一次请求可以同时返回文字与工具调用。Engine 不需要先调用一个“思考模型”，再调用一个“行动模型”；推理强度是模型路由上的参数，也不是循环阶段开关。
+
+```mermaid
+flowchart TD
+  A[接纳用户输入 / 进入 RuntimeRun] --> B[检查预算与取消]
+  B --> C[构建模型历史与当前控制信息]
+  C --> D[预算治理 / 工具定义快照]
+  D --> E[Provider 生成一次响应]
+  E --> F[提交 assistant 消息]
+  F --> G{包含工具调用?}
+  G -- 是 --> H[记录调用开始 / 受控并发执行]
+  H --> I[形成并提交结果 / 关闭工具批次]
+  I --> B
+  G -- 否 --> J{计划、Hook、Steer 或目标要求继续?}
+  J -- 是 --> B
+  J -- 否 --> K[完成本次执行]
+```
+
+概念伪码如下，省略了追踪、恢复、文件历史和异常收口：
 
 ```typescript
-// 最简版本：问 → 答 → 结束
-const response = await provider.generate(
-  [{ role: "user", content: "帮我看看 package.json 里有哪些依赖" }],
-  [], // 没有工具
-);
-console.log(response.content);
-```
-
-它能聊天，但不能做事。我需要的是能读文件、改代码、跑命令的助手，不是一个 ChatGPT 套壳。
-
----
-
-## 让大模型"伸手"
-
-关键问题：大模型本身不能读文件。它只能生成文本。要让它"伸手"，需要给它工具。
-
-ReAct 论文（Reason + Act，2022 年）给了答案：**让模型在"思考"和"行动"之间循环。** 模型先推理下一步该干什么（Reason），然后调用工具执行（Act），看到工具返回的结果（Observe），再推理下一步……直到任务完成。
-
-```
-用户输入 → [LLM 推理] → 需要工具? → 执行工具 → 观察结果 → 回到 LLM 推理
-                ↓ 不需要
-              返回答案
-```
-
-翻译成代码，核心循环长这样：
-
-```typescript
-// 上下文历史：从 System Prompt 开始，逐渐追加对话
-const context: Message[] = [
-  { role: "system", content: "你是 pico，一个有文件系统和 Shell 访问权限的编码助手。" },
-  { role: "user", content: "帮我看看 package.json 里有哪些依赖" },
-];
-
-for (let turn = 0; turn < 50; turn++) {
-  // 1. 调用大模型：给它看当前上下文和可用工具列表
-  const response = await provider.generate(context, availableTools);
-
-  // 2. 把模型的回复追加到上下文（无论它是说话还是调工具）
-  context.push(response);
-
-  // 3. 如果模型没有请求任何工具调用 → 任务完成，退出
-  const toolCalls = response.toolCalls ?? [];
-  if (toolCalls.length === 0) {
-    break;
+// 概念伪码：不是仓库 API 用法。
+while (budgetAllowsNextStep() && !cancelled()) {
+  const request = buildBudgetedRequest(session, visibleTools);
+  const response = await inferOneStep(request);
+  await persistAssistant(response);
+  if (response.toolCalls.length > 0) {
+    await acceptToolCalls(response.toolCalls);
+    const results = await executeControlledBatch(response.toolCalls);
+    await persistToolResults(results);
+    continue;
   }
-
-  // 4. 执行工具调用，收集观察结果
-  for (const tc of toolCalls) {
-    const result = await registry.execute(tc.name, tc.arguments);
-    context.push({
-      role: "user",
-      content: result.output,
-      toolCallId: tc.id, // 把结果关联回对应的工具调用
-    });
-  }
+  if (await needsContinuation()) continue;
+  return finish();
 }
 ```
 
-这个循环有四个关键设计决策，我花了很长时间才搞清楚：
+“提交 assistant”出现在工具执行之前不是排版选择。只有调用意图和身份已经成为事实，后续工具结果才有可以关联的因果位置。
 
-### 决策 1：`toolCallId` 是推理的"链条"
+## 为什么必须保住工具调用的配对
 
-注意 `toolCallId` 这个字段。它不是可有可无的元数据——**它是维系推理链条的关键。**
+假设模型同时要求读取 `a.ts` 和 `b.ts`。两次物理读取可能以任意顺序完成，但模型历史必须知道每个结果属于哪个调用。`ToolCall.id` 与结果的 `toolCallId` 共同维持这个关联，定义见 [Core 消息契约](../../../packages/core/src/message.ts)。
 
-大模型调用工具时，会给每次调用一个唯一 ID。当工具执行结果回来时，必须带上这个 ID，模型才知道"这个结果是刚才那个 read_file 的返回，不是那个 bash 的返回"。没有它，模型会在上下文中迷失——它不知道哪个结果对应哪个操作。
+Engine 先提交模型响应，再记录接纳的工具调用，随后调度执行，最后提交观察结果。中间被取消或某个工具失败时，也不能随意丢掉整个结果列表：已提交的 assistant 工具批次需要有明确的关闭路径。
 
-这是 ReAct 范式最容易被忽略但最致命的细节。很多框架把 toolCallId 藏在内部不暴露，结果就是当你需要调试"Agent 为什么在第三步做出了错误判断"时，你根本无法追溯因果链。
+当前 `closeToolProtocolBatch` 与 `failToolProtocol` 处理的正是这类情况。它们区分工具开始是否已耐久记录、结果是否已形成，以及提交边界是否失败。等待执行收口也有截止时间；这能防止不响应取消的工具无限拖住 Run，但不等价于宣称外部副作用已经被撤销。
 
-### 决策 2：`arguments` 是字符串，不是对象
+## 上下文是读取视图，不是会话的另一个真源
 
-```typescript
-interface ToolCall {
-  id: string;
-  name: string;
-  arguments: string; // 注意：是 JSON 字符串，不是 object
-}
-```
+模型调用前会结合 Session 历史、提示词、当前控制信息和工具定义。上下文预算不足时，读取侧可以裁剪工具结果视图或摘要旧历史；持久事实不应因为某次请求太长就被覆盖。
 
-为什么？因为 Main Loop 根本不应该关心工具的参数长什么样。它只是"信使"——把模型说的话（JSON 字符串）原封不动地传给工具。解析 JSON 是工具自己的事。
+工具定义也有生命周期：一次 Engine 执行绑定可用工具集合，渐进披露在这个集合内激活能力，每个模型步骤取得快照。执行结束后封闭该次披露状态，下一次执行不盲目继承旧激活集合。这既限制 Schema 成本，也避免并发执行意外共享可变披露状态。
 
-如果 Main Loop 去 `JSON.parse(tc.arguments)`，它就必须知道每个工具的参数 Schema。那每次加新工具都得改 Main Loop 代码。**延迟解析 = 极致解耦。**
+详细机制分别位于 [ToolDisclosure](../../../packages/runtime/src/tool-disclosure.ts) 与[上下文压缩技术图解](../../pico-context-compaction-technical-guide.md)。学习循环时只需要先记住：一次模型请求是从当前事实构造出来的视图，不是把任意内存数组无限追加后直接发送。
 
-### 决策 3：`maxTurns = 50` 是"理智之墙"
+## “没有工具调用”为什么不总是完成
 
-`for (let turn = 0; turn < 50; turn++)` —— 这个 50 不是随便写的。
+最小 Demo 常把 `toolCalls.length === 0` 当唯一退出条件。真实执行还需要处理控制状态。
 
-没有上限的循环 = Agent 可以永远跑下去。如果模型陷入困惑，反复调用同一个工具但始终得不到满意结果，它会一直烧 Token、烧钱、烧时间。
+Plan 模式下，模型只说“计划好了”却没提交计划，不能视为规划成功；代码会请求有限次数的续接。Stop Hook 可以提出继续，宿主也可以给出续接决定。用户在最后一次模型请求期间送入的 Steer 必须在真正停止前消费，不能泄漏到下一次无关任务。处于活动状态的 Goal 还会参与继续或停止的判断。
 
-50 是一个经验值：大多数任务在 5-15 轮内完成，50 轮意味着 Agent 有充足的容错空间，但不会失控到烧穿你的 API 账单。
+此外，空响应也不是完成。网关返回成功状态，却没有任何可用文字或工具调用时，应产生可诊断失败。[空模型输出回归测试](../../../tests/integration/engine/empty-model-output-fail-loud.test.ts) 同时覆盖空响应失败和普通非空回答成功，防止系统把“什么都没做”显示为成功。
 
-后来我给它加上了更精细的预算管理：
+这些判断意味着 `finish` 是生命周期决策，而不是单纯看最后一条字符串是否存在。
 
-```typescript
-// src/engine/budget.ts —— 三层预算体系
-export class IterationBudget {
-  private turnCount = 0;
-  private tokenCount = 0;
-  private costCents = 0;
+## 预算与取消怎样进入循环
 
-  constructor(
-    private maxTurns: number = 50,
-    private maxTokens: number = 1_000_000, // 100 万 Token 硬上限
-    private maxCostCents: number = 500, // 单次任务最多烧 5 块钱
-  ) {}
+预算限制轮次、Token、成本或时间消耗。耗尽时，Engine 可以尝试一次受限收尾调用，让模型概括已经完成和未完成的工作。当前 Grace Call 会禁止工具执行；能可靠保留 Schema 同时禁用工具的 Provider 使用该能力，否则退到空工具集。即使模型仍返回工具调用，也不能因此重启行动。
 
-  canContinue(): boolean {
-    if (this.turnCount >= this.maxTurns) return false;
-    if (this.tokenCount >= this.maxTokens) return false;
-    if (this.costCents >= this.maxCostCents) return false;
-    return true;
-  }
-}
-```
+取消信号则沿 Engine、Provider 与工具执行传播。Provider 的网络超时和整次 Run 的预算不是一回事：某次请求超时可能进入受限重试，用户取消则应尽快终止当前链路。普通网络重试也不能解决上下文过长；overflow 会交给专门的上下文治理路径。
 
-三层防线：轮次上限防止死循环，Token 上限防止上下文爆炸，成本上限防止账单失控。缺一不可。我见过一个 Agent 在 12 轮内就烧了 80 块钱——因为它每轮都在读一个 10 万行的文件，Token 消耗是指数级的。
+流式增量通过 Reporter 送到宿主展示。增量帮助用户感知进度，最终的消息与工具事实仍由执行链提交，不能用终端渲染内容反向充当会话事实库。
 
-### 决策 4：上下文只会增长，不会缩小
+## 用两个回归检查理解边界
 
-注意 `context.push(response)` 和 `context.push(observation)` —— 每轮都在往数组末尾追加。这个数组永远不会缩短。
-
-这是 ReAct 的"记忆"机制：Agent 能看到自己之前所有的推理和行动，所以它能从错误中学习（"刚才 read_file 失败了，因为路径拼错了，让我修正"）。
-
-但这也是一个定时炸弹。上下文越长，API 调用越贵、越慢，最终会超出模型的上下文窗口（比如 Claude 的 200K Token 或 GPT-4 的 128K Token）。压缩问题我留到第 5 章处理。现在，先让它跑起来。
-
----
-
-## 循环跑了。但我看不到它在干什么。
-
-20 行代码的循环能跑，但所有输出都是 `console.log` 散落在代码各处。更麻烦的是，这些 `console.log` 是为终端设计的——带有 Emoji、彩色输出、换行符。当我后来想接入飞书 Bot 时，这些终端格式的输出在飞书消息里变成了乱码。
-
-我需要把"引擎做了什么"和"怎么展示给别人看"解耦。
-
-这就是 Reporter 模式：
-
-```typescript
-// src/engine/reporter.ts
-export interface Reporter {
-  onStart(workDir: string, enableThinking: boolean): void;
-  onTurnStart(turn: number): void;
-  onThinking(): void;
-  onToolCall(toolName: string, args: string): void;
-  onToolResult(result: ToolResultEnvelope): void;
-  onMessage(content: string): void;
-  onFinish(): void;
-}
-```
-
-这个接口把引擎的生命周期事件全部暴露出来。引擎在关键节点调用 Reporter 的方法，但不关心 Reporter 怎么处理这些事件。你可以注入不同的实现：
-
-- **TerminalReporter**：用 Emoji 和颜色渲染到控制台
-- **SilentReporter**：所有方法都是空函数——用于测试或后台批量运行
-- **FeishuReporter**（后来加的）：把工具调用结果格式化成飞书卡片消息
-
-Reporter 模式是 pico-harness 里第一个"从痛苦中长出来的设计"。它不是一个架构图上的抽象方块——它来自我凌晨三点看着飞书里乱码的终端颜色代码时的那声叹息。
-
-引擎不需要知道自己在哪运行。它只管跑循环，在关键节点"广播"事件。显示交给 Reporter。
-
----
-
-## 它跑起来了。但有一个问题。
-
-Agent 能读文件、改代码了。但它有一个让我抓狂的习惯：**它不思考。**
-
-典型场景：我让它"重构 src/utils.ts，把重复的日期格式化逻辑提取出来"。它二话不说，直接调用 `read_file("src/utils.ts")`。
-
-读到文件内容后，它又二话不说，直接调用 `write_file("src/utils.ts", ...)`——内容是一版未经思考的"重构"，实际上只是把函数换了个名字。
-
-这不是我想要的。人类工程师在动手前会先分析：哪里重复了？提取什么函数？签名怎么设计？影响哪些调用方？Agent 也应该这样。
-
-更糟糕的一次：我让它"把项目从 JavaScript 迁移到 TypeScript"。它第一轮就 `write_file("tsconfig.json", ...)`，第二轮到第十轮依次把所有 `.js` 文件改成 `.ts`，但没有更新 import 路径。所有文件都引用了错误的模块扩展名。我让它修复，它开始用 `edit_file` 逐个改 import——改了 40 个文件后，Token 预算耗尽，任务失败。
-
-问题的根源是：**大模型的思考在调用工具的那一刻就中止了。** 它看到 `write_file` 工具可用，就直接调用。它不会停下来想"等等，迁移到 TypeScript 需要同时改文件扩展名和 import 路径，我应该先列个清单"。
-
----
-
-## 让它先想再做
-
-解决方案很直接，但实现起来有一个巧妙的 trick。
-
-我把它叫做 **Two-Stage ReAct**：每一轮分成两个阶段。
-
-**Phase 1：思考。** 调用大模型，但**不告诉它任何工具**。传入空的工具列表 `[]`。
-
-```typescript
-// Phase 1: Thinking —— 传入空工具列表，强制模型只能输出纯文本
-const thinkingResponse = await provider.generate(context, []);
-// thinkingResponse.content 是模型的思考过程，例如：
-// "我需要重构 utils.ts。先分析当前代码结构：有三个地方重复了日期格式化。
-//  我打算提取一个 formatDate(date, locale) 函数，放在 src/utils/date.ts。
-//  然后更新所有调用点。让我先读一下当前的 utils.ts 确认结构。"
-```
-
-大模型看不到任何 JSON Schema，它只能输出纯文本。这强制它**规划**，而不是冲动行事。
-
-**Phase 2：行动。** 把思考结果追加到上下文，然后恢复正常工具列表，让模型执行。
-
-```typescript
-// 把思考过程追加到上下文
-context.push(thinkingResponse);
-
-// Phase 2: Action —— 恢复完整工具列表
-const actionResponse = await provider.generate(context, availableTools);
-// 模型看到自己刚才的规划，顺着执行对应的工具调用
-```
-
-这里有一个微妙但关键的设计：**Phase 2 能看到 Phase 1 的输出。** 这是大模型自回归特性的巧妙利用——模型生成的下一个 Token 取决于之前所有 Token。当它看到自己刚才写的"让我先读一下当前的 utils.ts 确认结构"，下一个 Token 大概率就是 `read_file("src/utils.ts")` 的工具调用。
-
-不需要额外的规划引擎、不需要 Tree of Thoughts、不需要显式的"计划队列"。**大模型自己就是规划器。**
-
-如果 Phase 1 规划有误（比如模型判断错了文件结构），Phase 2 执行时它会发现"哦，实际读到的文件和我想的不一样"，然后自动调整。这也行得通，因为每一轮都有独立的 Phase 1——Agent 在每轮开始时都能重新审视局势。
-
----
-
-## 开关设计：不是所有任务都需要思考
-
-Two-Stage ReAct 好，但它会让每轮调用变成两次 API 请求。简单任务（"package.json 里有哪些依赖"）不需要思考阶段。每次思考阶段额外消耗几百 Token——累积起来，一个简单任务也会多花几毛钱。
-
-所以我把思考阶段做成一个开关：
-
-```typescript
-// 构造 AgentEngine 时决定是否启用慢思考
-const engine = new AgentEngine({
-  provider,
-  registry,
-  workDir: "./project",
-  enableThinking: false, // 默认关闭。简单任务不需要思考阶段。
-});
-```
-
-`enableThinking` 默认是 `false`。对于复杂任务（重构、调试、架构设计），用户手动开启。这是一个实用主义的折中：**简单任务保持快速，复杂任务获得深度。**
-
-在 CLI 中，用户通过 `--thinking` flag 控制：
+在已安装依赖、使用项目支持的 Node 版本时，从仓库根运行：
 
 ```bash
-# 简单任务，不开思考
-pico "列出 package.json 的依赖"
-
-# 复杂任务，开思考
-pico --thinking "把这个项目从 JS 迁移到 TS，确保所有 import 路径正确"
+npm run check:storage
+npm run build:packages
+node --import tsx --import @pico/cli/tui/preload-env --test \
+  tests/integration/engine/empty-model-output-fail-loud.test.ts \
+  tests/integration/engine/engine-runtime-port.test.ts
 ```
 
-后来我发现，这个开关和模型原生的"思考强度"（比如 Claude 的 extended thinking 或 OpenAI 的 reasoning_effort）是两个正交的维度：
+第一组测试检查空输出不能静默成功；第二组检查 RuntimePort 保持 canonical run 与嵌套工具上下文，以及持久 Session 缺少显式运行端口时拒绝提交。它们使用本地测试替身，不需要真实模型，也不证明模型能够正确完成复杂编码任务。
 
-- `enableThinking`：应用层控制——要不要在调用工具之前先强制模型输出一段文本规划。这是 pico 在 Prompt 层面做的，所有模型都支持。
-- `thinkingEffort`：模型层控制——要不要让模型在生成每个 Token 时投入更多"内部思考"（对用户不可见）。这是模型厂商提供的功能，只有部分模型支持。
-
-两者可以同时开启，互不干扰。`enableThinking` 强制模型"说出"它的计划（对人类可见），`thinkingEffort` 让模型在生成计划时投入更多算力。这个区分是 pico-harness 独有的——大多数框架把它们混为一谈。
-
----
-
-## 回看：loop.ts 的真实结构
-
-上面展示的 20 行循环是概念上的。实际的 `src/engine/loop.ts` 大约 500 行，因为要处理更多现实问题：
-
-```typescript
-// loop.ts 的真实签名（简化）
-export async function runLoop(
-  session: Session,
-  provider: LLMProvider,
-  registry: Registry,
-  reporter: Reporter,
-  options: {
-    enableThinking: boolean;
-    workDir: string;
-    budget: IterationBudget;
-    compactor: Compactor;
-    tracer: Tracer;
-    recoveryManager: RecoveryManager;
-    reminderInjector: ReminderInjector;
-    // ... 更多
-  },
-): Promise<void>;
-```
-
-看起来很多参数，但每一个都是被现实问题逼出来的：
-
-- `Session`：我们不直接操作 `context` 数组了。Session 管理持久化——Agent 可以休眠、被中断、被唤醒（第 4 章）。
-- `Compactor`：上下文太长的时候自动压缩（第 5 章）。
-- `RecoveryManager`：工具报错时注入修复建议（第 6 章）。
-- `ReminderInjector`：检测到死循环时强行打断（第 6 章）。
-- `Tracer`：记录每次决策，事后复盘（第 9 章）。
-
-这些都不是从架构图里来的。每一个都是"Agent 在生产环境里跑崩了"之后加上的。
-
----
-
-## 现在有了什么
-
-我们有一个约 500 行的引擎核心（算上 Reporter 和 Budget）。它能：
-
-- 在"推理 → 行动 → 观察"的循环中自主完成任务
-- 在需要深度规划时切换到 Two-Stage 模式（Phase 1 纯思考 + Phase 2 行动）
-- 通过 Reporter 将执行过程广播给不同的展示层（终端 / 飞书 / HTTP）
-- 在三层预算（轮次 / Token / 成本）的限制下安全运行
-
-但它还有一个致命问题：**它只能用一种大模型。**
-
-代码里直接写了 `provider.generate(context, tools)`，但如果我想从 OpenAI 换成 Claude 呢？两个 API 的请求格式完全不同——OpenAI 用 `messages` 数组和 `tool_calls` 字段，Claude 用 `system` 顶层字段和 `content` 数组里的 `tool_use` block。
-
-如果 Main Loop 直接耦合某个厂商的协议，换模型等于重写全部逻辑。我踩过这个坑——最初用 OpenAI 写的循环，换成 Claude 后整整改了两天。
-
-所以接下来，我要给它装一个"同声传译员"——Provider 抽象层。一个接口，多种实现，引擎不关心背后是谁在推理。
+阅读下一章时，可以把 Provider 看成这个循环的一次外部推理操作：Engine 决定何时调用、怎样继续，Provider 负责把这一次请求正确翻译给目标模型。
 
 [下一章：接上不同的大脑 →](02-provider.md)
