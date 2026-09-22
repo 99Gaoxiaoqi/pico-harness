@@ -83,19 +83,6 @@ test("durable revisions replace usage, preserve cancellation, fence owners, and 
       () => store.recordPhysicalAttempt({ ...late, revision: 3, status: "succeeded" }),
       /Cancelled/,
     );
-    store.recordProviderCall({
-      callId: "call-1",
-      sessionId: "session-1",
-      purpose: "main",
-      provider: "openai",
-      model: "test",
-      status: "cancelled",
-      inputTokens: 999,
-      outputTokens: 999,
-      cacheReadTokens: 0,
-      cacheWriteTokens: 0,
-      cost: 999,
-    });
     const totals = store.getUsageSummary({ sessionId: "session-1" });
     assert.equal(totals.providerCallCount, 1);
     assert.deepEqual(totals.total, {
@@ -208,7 +195,6 @@ test("CostTracker awaits admission, freezes attribution for late revisions, and 
     assert.deepEqual(notices, ["original", "original", "original"]);
     const failing = new CostTracker(provider, "test", undefined, {
       ledger: {
-        recordProviderCall: ledger.recordProviderCall.bind(ledger),
         beginPhysicalAttemptOwner: () => "owner",
         recordPhysicalAttempt() {
           throw new Error("disk full");
@@ -489,7 +475,7 @@ test("control 7 deletes legacy usage and model traces, preserves native facts an
         ["physical"],
       );
       assert.deepEqual(
-        ledger.listProviderCalls().map((row) => row.callId),
+        ledger.listAccountingProviderCalls().map((row) => row.callId),
         ["call-1"],
       );
       const db = openOperationalDatabaseReadOnly(root);
