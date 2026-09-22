@@ -1,4 +1,4 @@
-import type { RuntimeExecutionPage } from "../execution-trace.js";
+import type { RuntimeExecutionPage, RuntimeExecutionSummary } from "../execution-trace.js";
 // Session workbar, Git, browser, terminal, and rewind contracts with their boundary rules.
 import type {
   CheckpointId,
@@ -247,6 +247,10 @@ export type WorkbarMethodMap = {
       readonly expectedSizeBytes?: number;
     };
     readonly result: JsonObject;
+  };
+  readonly "session.execution.summary": {
+    readonly params: WorkspaceParams & { readonly sessionId: SessionId };
+    readonly result: RuntimeExecutionSummary;
   };
   readonly "session.execution.query": {
     readonly params: WorkspaceParams & {
@@ -603,6 +607,10 @@ export const workbarParamValidators = {
       expectedSizeBytes: nonNegativeIntegerParam,
     },
   ),
+  "session.execution.summary": exactParamShape({
+    workspacePath: stringParam,
+    sessionId: boundedNonEmptyStringParam(512),
+  }),
   "session.execution.query": exactParamShape(
     { workspacePath: stringParam, sessionId: boundedNonEmptyStringParam(512) },
     { cursor: boundedNonEmptyStringParam(2048), runId: boundedNonEmptyStringParam(512) },
@@ -766,6 +774,31 @@ export const workbarParamValidators = {
 } satisfies Readonly<Record<keyof WorkbarMethodMap, RuntimeParamValidator>>;
 
 const executionStatus = resultOneOf(["running", "completed", "failed", "cancelled", "interrupted"]);
+const runtimeExecutionAttemptResult = exactResultShape(
+  {
+    attemptId: resultNonEmptyString,
+    attempt: resultNonNegativeInteger,
+    provider: resultString,
+    model: resultString,
+    startedAt: resultString,
+    completedAt: resultString,
+    status: resultOneOf(["succeeded", "failed", "cancelled", "interrupted"]),
+    latencyMs: resultFiniteNumber,
+    usageBasis: resultOneOf(["reported", "partial", "missing"]),
+  },
+  {
+    timeToFirstTokenMs: resultFiniteNumber,
+    httpStatus: resultNonNegativeInteger,
+    finishReason: resultString,
+    inputTokens: resultNonNegativeInteger,
+    outputTokens: resultNonNegativeInteger,
+    cachedInputTokens: resultNonNegativeInteger,
+    reasoningTokens: resultNonNegativeInteger,
+    error: resultString,
+    costCNY: resultFiniteNumber,
+    costStatus: resultOneOf(["estimated", "included", "unknown"]),
+  },
+);
 const runtimeExecutionStepResult = exactResultShape(
   {
     id: resultNonEmptyString,
@@ -779,6 +812,15 @@ const runtimeExecutionStepResult = exactResultShape(
   {
     durationMs: resultFiniteNumber,
     purpose: resultString,
+    providerId: resultString,
+    modelId: resultString,
+    pricingKey: resultString,
+    retries: resultNonNegativeInteger,
+    firstTokenLatencyMs: resultFiniteNumber,
+    cachedInputTokens: resultNonNegativeInteger,
+    reasoningTokens: resultNonNegativeInteger,
+    permissionDecision: resultOneOf(["approved", "rejected"]),
+    attempts: resultArray(runtimeExecutionAttemptResult),
     detail: resultString,
     input: resultString,
     output: resultString,
@@ -800,31 +842,39 @@ const runtimeExecutionRunResult = exactResultShape(
   },
   { durationMs: resultFiniteNumber, reason: resultString, parentRunId: resultString },
 );
+const runtimeExecutionSummaryResult = exactResultShape(
+  {
+    scope: resultOneOf(["session"]),
+    modelCalls: resultNonNegativeInteger,
+    failedCalls: resultNonNegativeInteger,
+    meteredCalls: resultNonNegativeInteger,
+    unpricedCalls: resultNonNegativeInteger,
+  },
+  {
+    inputTokens: resultNonNegativeInteger,
+    outputTokens: resultNonNegativeInteger,
+    costCNY: resultFiniteNumber,
+    latencyMs: resultFiniteNumber,
+    cachedInputTokens: resultNonNegativeInteger,
+    reasoningTokens: resultNonNegativeInteger,
+    toolCalls: resultNonNegativeInteger,
+    toolDurationMs: resultFiniteNumber,
+    physicalAttempts: resultNonNegativeInteger,
+    retries: resultNonNegativeInteger,
+    cacheCoverage: resultOneOf(["complete", "partial", "missing"]),
+  },
+);
 const runtimeExecutionPageResult = exactResultShape(
   {
     schemaVersion: resultOneOf([1]),
     sessionId: resultNonEmptyString,
     runs: resultArray(runtimeExecutionRunResult),
-    summary: exactResultShape(
-      {
-        scope: resultOneOf(["session"]),
-        modelCalls: resultNonNegativeInteger,
-        failedCalls: resultNonNegativeInteger,
-        meteredCalls: resultNonNegativeInteger,
-        unpricedCalls: resultNonNegativeInteger,
-      },
-      {
-        inputTokens: resultNonNegativeInteger,
-        outputTokens: resultNonNegativeInteger,
-        costCNY: resultFiniteNumber,
-        latencyMs: resultFiniteNumber,
-      },
-    ),
+    summary: runtimeExecutionSummaryResult,
     coverage: exactResultShape({
       oversizedRunIds: resultStringArray,
       missingModelCallRunIds: resultStringArray,
       incompleteRunIds: resultStringArray,
-      modelAttempts: resultOneOf(["logical_only"]),
+      modelAttempts: resultOneOf(["logical_only", "physical", "mixed"]),
     }),
   },
   { nextCursor: resultBoundedString(2048) },
@@ -844,6 +894,7 @@ export const workbarResultValidators = {
   "session.artifacts.query": resultJsonObject,
   "session.artifacts.command": resultJsonObject,
   "session.execution.query": runtimeExecutionPageResult,
+  "session.execution.summary": runtimeExecutionSummaryResult,
   "session.trace.query": exactResultShape(
     { throughSequence: resultNonNegativeInteger, events: resultArray(resultJsonObject) },
     { nextAfterSequence: resultNonNegativeInteger },
