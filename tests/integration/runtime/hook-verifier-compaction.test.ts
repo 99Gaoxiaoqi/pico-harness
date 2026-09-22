@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import type { LLMProvider } from "@pico/core";
+import type { LLMProvider, RequestContextFacts } from "@pico/core";
 import { Session } from "@pico/pico-host/session";
 import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
 import { currentRuntimeRun, RuntimeRun } from "@pico/pico-host/product-runtime-run";
@@ -27,6 +27,7 @@ for (const mode of ["compact", "limit"] as const) {
     let steps = 0;
     let summaries = 0;
     const purposes: unknown[] = [];
+    const requestContexts: (RequestContextFacts | undefined)[] = [];
     const provider: LLMProvider = {
       async generate(messages, tools, options) {
         purposes.push(options?.purpose);
@@ -38,6 +39,7 @@ for (const mode of ["compact", "limit"] as const) {
           return { role: "assistant", content: summary };
         }
         steps++;
+        requestContexts.push(options?.contextFacts);
         assert.ok(
           !tools.some((tool) => ["write_file", "edit_file", "agent_swarm"].includes(tool.name)),
         );
@@ -127,14 +129,34 @@ for (const mode of ["compact", "limit"] as const) {
       assert.equal(steps, mode === "compact" ? 3 : 1);
       const childEvents = await parent.runtimeEventStore!.readSession(childId);
       assert.ok(childEvents.some((event) => event.kind === "run.terminal"));
-      if (mode === "compact")
+      if (mode === "compact") {
+        const checkpoint = childEvents.find(
+          (event) => event.kind === "context.checkpoint.recorded",
+        );
+        assert.ok(checkpoint?.kind === "context.checkpoint.recorded");
+        assert.equal(
+          requestContexts.at(-1)?.compaction?.checkpointId,
+          checkpoint.data.checkpointId,
+        );
         assert.ok(
           childEvents.some(
             (event) =>
-              event.kind === "tool.result.recorded" &&
+              event.kind === "tool.result.projection.recorded" &&
               event.data.projection.text.includes("pico://archive/"),
           ),
         );
+        assert.ok(
+          childEvents.some(
+            (event) =>
+              event.kind === "tool.result.recorded" && event.data.projection.mode === "full",
+          ),
+        );
+        assert.ok(
+          !(await parent.runtimeEventStore!.readSession(parent.id)).some(
+            (event) => event.kind === "context.checkpoint.recorded",
+          ),
+        );
+      }
     } finally {
       await parent.close();
       await rm(root, { recursive: true, force: true });
