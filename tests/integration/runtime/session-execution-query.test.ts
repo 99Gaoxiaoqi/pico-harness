@@ -53,6 +53,7 @@ test("execution projection survives reopen and paginates a fixed session snapsho
         },
         {
           ...base("response"),
+          ...(n === 17 ? { refs: { providerCallId: "call" } } : {}),
           partial: false,
           visibility: "model",
           kind: "message.committed",
@@ -116,6 +117,9 @@ test("execution projection survives reopen and paginates a fixed session snapsho
     assert.equal(first.summary.inputTokens, 90);
     assert.equal(first.coverage.modelAttempts, "logical_only");
     assert.equal(first.runs[0]?.steps[0]?.output, "思考：thinking\n\nresponse");
+    // Unlinked messages cannot be attributed to the most recent model call.
+    assert.equal(first.runs[1]?.steps[0]?.output, undefined);
+    assert.equal(first.runs[0]?.steps[0]?.input, undefined);
     assert.equal(first.runs[0]?.steps.find((s) => s.kind === "permission")?.status, "completed");
     assert.equal(first.runs[0]?.steps.find((s) => s.kind === "tool")?.output, "result");
     const reopened = new SqliteRuntimeEventStore({ storageRoot: root });

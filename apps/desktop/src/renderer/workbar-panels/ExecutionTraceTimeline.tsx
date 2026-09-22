@@ -18,7 +18,8 @@ export function ExecutionTraceTimeline({
       `${coverage.oversizedRunIds.length} 次运行过大，步骤未完整展示`,
     coverage.missingModelCallRunIds.length > 0 &&
       `${coverage.missingModelCallRunIds.length} 次运行缺少模型调用记录`,
-    coverage.incompleteRunIds.length > 0 && `${coverage.incompleteRunIds.length} 次运行记录不完整`,
+    coverage.incompleteRunIds.length > 0 &&
+      `${coverage.incompleteRunIds.length} 次运行尚未结束或记录未闭合`,
   ].filter(Boolean);
   return (
     <>
@@ -51,7 +52,7 @@ export function ExecutionTraceTimeline({
           </div>
         </dl>
         <p className="tool-panel__muted">
-          统计范围：整个会话。仅记录逻辑调用，不包含底层重试次数。
+          统计范围：整个会话。费用采用记录时的估算或已包含金额。仅记录逻辑调用，不包含底层重试次数。
         </p>
         {summary.unpricedCalls > 0 && (
           <p className="tool-panel__muted">
