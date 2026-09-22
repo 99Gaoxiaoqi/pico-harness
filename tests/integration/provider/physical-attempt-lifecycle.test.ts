@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
 import { createServer, type ServerResponse } from "node:http";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { CostTracker } from "@pico/runtime/cost-tracker";
+import { SqliteRuntimeControlStore } from "@pico/storage/sqlite/sqlite-runtime-control-store";
+import { SqliteRuntimeEventStore } from "@pico/storage/sqlite/sqlite-runtime-event-store";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import type { ProviderAttemptLifecycleSnapshot } from "@pico/core";
@@ -225,5 +231,50 @@ test("compatibility downgrade admits and settles each HTTP request independently
     }
   } finally {
     await f.close();
+  }
+});
+
+test("real SSE provider through CostTracker commits a succeeded physical fact and authoritative SQLite usage", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-provider-authority-"));
+  const ledger = new SqliteRuntimeControlStore({ storageRoot: root });
+  const events = new SqliteRuntimeEventStore({ storageRoot: root });
+  const f = await fixture(success);
+  try {
+    await events.initializeSession({ sessionId: "full-chain", workDir: root });
+    const tracked = new CostTracker(
+      f.provider,
+      { provider: "openai", model: "lifecycle-test", billingMode: "subscription_included" },
+      undefined,
+      {
+        ledger,
+        context: { purpose: "main", sessionId: "full-chain" },
+        recordRuntimeEvents: false,
+      },
+    );
+    assert.equal((await tracked.generateStream(messages, [], () => {})).content, "answer");
+    assert.equal(f.requests(), 1);
+    const facts = ledger.listPhysicalAttempts({ sessionId: "full-chain" });
+    assert.equal(facts.length, 1);
+    assert.equal(facts[0]!.status, "succeeded");
+    assert.equal(facts[0]!.revision, 2);
+    assert.equal(
+      Object.hasOwn(facts[0]!, "attemptId"),
+      false,
+      "legacy identity must not leak into lifecycle snapshots",
+    );
+    assert.equal(facts[0]!.usageBasis, "reported");
+    assert.equal(facts[0]!.usage!.promptTokens, 10);
+    assert.equal(facts[0]!.usage!.completionTokens, 3);
+    assert.equal(facts[0]!.costStatus, "included");
+    const usage = ledger.getUsageSummary({ sessionId: "full-chain" });
+    assert.equal(usage.providerCallCount, 1);
+    assert.equal(usage.total.inputTokens, 10);
+    assert.equal(usage.total.outputTokens, 3);
+    assert.equal(ledger.getAccountingSessionUsage("full-chain")!.totalPromptTokens, 10);
+  } finally {
+    await f.close();
+    events.close();
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
   }
 });
