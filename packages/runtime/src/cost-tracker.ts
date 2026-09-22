@@ -11,12 +11,13 @@
 // 算明经济账是落地的关键:衡量 Agent 优秀与否除看代码能否跑通,更看 Token 效率。
 // 不把成本监控落到实处,就无法优化 System Prompt 长度,也无从判断上下文压缩是否省钱。
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type {
   LLMProvider,
   LLMProviderRequestOptions,
   PreparedProviderRequest,
   ProviderPhysicalAttempt,
+  ProviderAttemptLifecycleSnapshot,
 } from "@pico/core";
 import type { Message, ToolDefinition } from "@pico/core";
 import type { RuntimeProjectionSession } from "./runtime-projection-session.js";
@@ -42,8 +43,11 @@ export interface CostTrackerDiagnostics {
   error(bindings: Record<string, unknown>, message: string): void;
 }
 import { isAbortError, ModelCommunicationError } from "@pico/core";
-import type { ProviderCallRecord } from "@pico/storage/runtime-control-types";
-import { estimateCost, type BillingRoute } from "@pico/runtime/pricing";
+import type {
+  PhysicalAttemptRecord,
+  ProviderCallRecord,
+} from "@pico/storage/runtime-control-types";
+import { estimateCost, getPricingEntry, type BillingRoute } from "@pico/runtime/pricing";
 import { getProviderCallContext, type ProviderCallContext } from "@pico/runtime";
 import { currentRuntimeRun } from "./runtime-run.js";
 import { defaultIsRetryableError } from "@pico/runtime";
@@ -57,6 +61,13 @@ import {
 } from "@pico/runtime/provider-request-diagnostics";
 
 export interface ProviderCallLedger {
+  beginPhysicalAttemptOwner?(): string;
+  getAccountingRevision?(): number;
+  recoverPhysicalAttempts?(): number;
+  recordPhysicalAttempt?(record: PhysicalAttemptRecord): {
+    record: PhysicalAttemptRecord;
+    updated: boolean;
+  };
   recordProviderCall(record: Omit<ProviderCallRecord, "createdAt"> & { createdAt?: number }): {
     record: ProviderCallRecord;
     inserted: boolean;
@@ -70,6 +81,7 @@ export interface ProviderCallLedger {
 }
 
 export interface CostTrackerOptions {
+  onAccountingChanged?: (record: PhysicalAttemptRecord, revision: number) => void;
   catalogPricing?: CatalogPricingResolver;
   diagnostics?: CostTrackerDiagnostics;
   /** Independent background calls must not append events to an inherited foreground run. */
@@ -87,6 +99,7 @@ export interface CostTrackerOptions {
  * 像安检门:数据必须先经过它,它盖上"时间戳"和"成本戳",再原封不动还给你。
  */
 export class CostTracker implements LLMProvider {
+  private meterOwnerId: string | undefined;
   private readonly preparedRequests = new Map<string, PreparedRequestCapture>();
 
   constructor(
@@ -115,11 +128,11 @@ export class CostTracker implements LLMProvider {
     options?: LLMProviderRequestOptions,
   ): Promise<Message> {
     return this.track(
-      (observeRequest, observeAttempt) =>
+      (observeRequest, observeAttempt, lifecycle) =>
         this.next.generate(
           messages,
           availableTools,
-          withRequestObserver(options, observeRequest, observeAttempt),
+          withRequestObserver({ ...options, ...lifecycle }, observeRequest, observeAttempt),
         ),
       options?.signal,
       false,
@@ -140,12 +153,12 @@ export class CostTracker implements LLMProvider {
     }
 
     return this.track(
-      (observeRequest, observeAttempt) =>
+      (observeRequest, observeAttempt, lifecycle) =>
         this.next.generateStream!(
           messages,
           availableTools,
           onDelta,
-          withRequestObserver(options, observeRequest, observeAttempt),
+          withRequestObserver({ ...options, ...lifecycle }, observeRequest, observeAttempt),
         ),
       options?.signal,
       true,
@@ -157,6 +170,10 @@ export class CostTracker implements LLMProvider {
     invoke: (
       observeRequest: (request: PreparedProviderRequest) => void,
       observeAttempt: (attempt: ProviderPhysicalAttempt) => void,
+      lifecycle: Pick<
+        LLMProviderRequestOptions,
+        "onProviderAttemptStart" | "onProviderAttemptUpdate"
+      >,
     ) => Promise<Message>,
     signal?: AbortSignal,
     streaming = false,
@@ -199,6 +216,18 @@ export class CostTracker implements LLMProvider {
         : {};
     const runtimeRun = this.requireMatchingRuntimeRun();
     const route = normalizeRoute(this.modelRoute);
+    const recordSettled = async (
+      data: Parameters<NonNullable<typeof runtimeRun>["recordModelCallSettled"]>[0],
+    ): Promise<void> => {
+      try {
+        await runtimeRun?.recordModelCallSettled(data);
+      } catch (error) {
+        this.options.diagnostics?.error(
+          { callId, error: String(error) },
+          "[Tracker] 模型结果已确定，运行事件计量写入失败",
+        );
+      }
+    };
     await runtimeRun?.recordModelCallStarted({
       providerCallId: callId,
       logicalCallId,
@@ -235,14 +264,111 @@ export class CostTracker implements LLMProvider {
         );
       }
     };
+    let frozenPricing: ReturnType<typeof getPricingEntry> = null;
+    try {
+      frozenPricing = structuredClone(getPricingEntry(route, this.options.catalogPricing));
+    } catch {
+      /* Preserve unpriced admission. */
+    }
+    const pricingVersion = `route-v1:${createHash("sha256").update(JSON.stringify(frozenPricing)).digest("hex")}`;
+    const ledger = this.options.ledger;
+    const admissions = new Map<string, PhysicalAttemptRecord>();
+    const publishAccounting = (record: PhysicalAttemptRecord): void => {
+      try {
+        this.options.onAccountingChanged?.(record, ledger?.getAccountingRevision?.() ?? Date.now());
+      } catch (error) {
+        this.options.diagnostics?.warn({ error: String(error) }, "[Tracker] 计量更新通知失败");
+      }
+    };
+    const lifecycle: Pick<
+      LLMProviderRequestOptions,
+      "onProviderAttemptStart" | "onProviderAttemptUpdate"
+    > = {};
+    if (ledger?.beginPhysicalAttemptOwner && ledger.recordPhysicalAttempt) {
+      if (!this.meterOwnerId) {
+        this.meterOwnerId = ledger.beginPhysicalAttemptOwner();
+        ledger.recoverPhysicalAttempts?.();
+      }
+      const ownerId = this.meterOwnerId;
+      lifecycle.onProviderAttemptStart = async (snapshot) => {
+        const record: PhysicalAttemptRecord = {
+          ...snapshot,
+          accountingVersion: 1,
+          accountingSource: "physical",
+          ownerId,
+          providerCallId: callId,
+          logicalCallId,
+          retryAttempt,
+          purpose: context.purpose,
+          ...(context.sessionId ? { sessionId: context.sessionId } : {}),
+          ...(context.conversationId ? { conversationId: context.conversationId } : {}),
+          ...(context.goalId ? { goalId: context.goalId } : {}),
+          ...(context.jobId ? { jobId: context.jobId } : {}),
+          ...(context.attemptId ? { jobAttemptId: context.attemptId } : {}),
+          ...(runtimeRun
+            ? {
+                runId: runtimeRun.runId,
+                turnId: runtimeRun.currentTurnId,
+                workspacePath: runtimeRun.workDir,
+              }
+            : {}),
+          ...(route.baseUrl ? { route: safeRouteBaseUrl(route.baseUrl) } : {}),
+          ...(requestDiagnostic
+            ? {
+                requestDiagnostic: requestDiagnostic as unknown as Readonly<
+                  Record<string, unknown>
+                >,
+              }
+            : {}),
+          costStatus: "unknown",
+          pricingVersion,
+          ...(frozenPricing
+            ? { pricingBasis: { ...frozenPricing, currency: "USD", usdToCny: 7.2 } }
+            : {}),
+        };
+        const written = ledger.recordPhysicalAttempt!(record);
+        if (written.updated) publishAccounting(written.record);
+        admissions.set(snapshot.physicalAttemptId, record);
+        await options?.onProviderAttemptStart?.(snapshot);
+      };
+      lifecycle.onProviderAttemptUpdate = async (snapshot: ProviderAttemptLifecycleSnapshot) => {
+        const admitted = admissions.get(snapshot.physicalAttemptId);
+        if (!admitted) throw new Error("Physical attempt update lacks admission");
+        let cost: ReturnType<typeof estimateCost> | undefined;
+        try {
+          if (snapshot.usageBasis === "reported" && snapshot.usage)
+            cost = estimateCost({ ...route, pricing: frozenPricing }, snapshot.usage);
+        } catch {
+          /* Pricing failures keep the actual usage unpriced. */
+        }
+        const record: PhysicalAttemptRecord = {
+          ...admitted,
+          ...snapshot,
+          ...(cost && cost.status !== "unknown"
+            ? { costCNY: cost.costCNY, costStatus: cost.status }
+            : { costStatus: "unknown" }),
+        };
+        try {
+          const written = ledger.recordPhysicalAttempt!(record);
+          if (written.updated) publishAccounting(written.record);
+        } catch (error) {
+          this.options.diagnostics?.error(
+            { physicalAttemptId: snapshot.physicalAttemptId, error: String(error) },
+            "[Tracker] 物理请求计量降级",
+          );
+          throw error; // Provider retries this local sink only; never repeats HTTP.
+        }
+        await options?.onProviderAttemptUpdate?.(snapshot);
+      };
+    }
     const start = Date.now();
     try {
-      const response = await invoke(observeRequest, observeAttempt);
+      const response = await invoke(observeRequest, observeAttempt, lifecycle);
       const latencyMs = Date.now() - start;
       const cost = response.usage
         ? estimateCost(this.modelRoute, response.usage, this.options.catalogPricing)
         : undefined;
-      await runtimeRun?.recordModelCallSettled({
+      await recordSettled({
         providerCallId: callId,
         logicalCallId,
         retryAttempt,
@@ -267,7 +393,7 @@ export class CostTracker implements LLMProvider {
     } catch (error) {
       const latencyMs = Date.now() - start;
       const status = signal?.aborted || isAbortError(error) ? "cancelled" : "failed";
-      await runtimeRun?.recordModelCallSettled({
+      await recordSettled({
         providerCallId: callId,
         logicalCallId,
         retryAttempt,

@@ -15,6 +15,9 @@ export interface UsageBaselineRecord extends UsageLedgerTotals {
 
 export interface UsageBaselineSessionPort {
   readonly id: string;
+  getLegacyUsageSnapshot?(): ReturnType<
+    UsageBaselineSessionPort["getRuntimeStateSnapshot"]
+  >["usage"];
   getRuntimeStateSnapshot(): {
     readonly usage: {
       readonly totalInputTokens: number;
@@ -47,7 +50,7 @@ export function ensureSessionUsageBaseline(
   jobs: UsageBaselineStorePort,
   session: UsageBaselineSessionPort,
 ): { readonly record: UsageBaselineRecord; readonly inserted: boolean } {
-  const runtime = session.getRuntimeStateSnapshot().usage;
+  const runtime = session.getLegacyUsageSnapshot?.() ?? session.getRuntimeStateSnapshot().usage;
   const existingSummary = jobs.getUsageSummary({ sessionId: session.id });
   const detailed = existingSummary.providerCalls;
   const baseline: UsageBaselineRecord = {
