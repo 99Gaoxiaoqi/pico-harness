@@ -1,3 +1,5 @@
+import type { RuntimeExecutionPage } from "@pico/protocol";
+import { ExecutionTraceTimeline } from "./ExecutionTraceTimeline.js";
 import { ChevronDown, CircleAlert, RefreshCw, Wrench } from "lucide-react";
 
 export interface InspectorContextSection {
@@ -62,6 +64,8 @@ export interface InspectorToolPreview {
 }
 
 export interface InspectorWorkbarPanelProps {
+  readonly execution?: RuntimeExecutionPage;
+  readonly contextError?: string;
   readonly context?: InspectorContextSnapshot;
   readonly trace: readonly InspectorTraceItem[];
   readonly selectedTraceId?: string;
@@ -117,6 +121,8 @@ export function groupInspectorTraceItems(
 
 export function InspectorWorkbarPanel({
   context,
+  execution,
+  contextError,
   trace,
   selectedTraceId,
   preview,
@@ -162,6 +168,11 @@ export function InspectorWorkbarPanel({
             <h3 id="inspector-context-title">上下文</h3>
             {context?.routeId && <code>{context.routeId}</code>}
           </div>
+          {contextError && (
+            <p className="tool-panel__error" role="alert">
+              上下文读取失败：{contextError}
+            </p>
+          )}
           {!context ? (
             <p className="tool-panel__muted">尚未生成上下文快照。</p>
           ) : (
@@ -181,7 +192,9 @@ export function InspectorWorkbarPanel({
                 </div>
                 <div>
                   <dt>压缩</dt>
-                  <dd>{context.compactedCount ?? 0} 次</dd>
+                  <dd>
+                    {context.compactedCount === undefined ? "未知" : `${context.compactedCount} 次`}
+                  </dd>
                 </div>
               </dl>
               {usage !== undefined && (
@@ -210,78 +223,91 @@ export function InspectorWorkbarPanel({
           )}
         </section>
 
-        <section className="tool-panel__section" aria-labelledby="inspector-trace-title">
-          <div className="tool-panel__section-heading">
-            <h3 id="inspector-trace-title">时间线</h3>
-            <span>
-              {traceGroups.length} 次运行 · {visibleTraceCount} 项
-            </span>
-          </div>
-          {loading && trace.length === 0 ? (
-            <p className="tool-panel__state" role="status">
-              正在加载追踪…
-            </p>
-          ) : trace.length === 0 ? (
-            <p className="tool-panel__state">当前任务还没有追踪记录。</p>
-          ) : (
-            <div className="tool-panel__trace-groups">
-              {traceGroups.map((group) => (
-                <section
-                  className="tool-panel__trace-group"
-                  data-status={group.status}
-                  key={group.id}
-                >
-                  <header>
-                    <span>
-                      <strong>{group.label}</strong>
-                      {group.status && <small>{statusLabel(group.status)}</small>}
-                    </span>
-                    <small>
-                      {group.durationMs === undefined
-                        ? formatTimestamp(group.createdAt ?? "")
-                        : formatDuration(group.durationMs)}
-                    </small>
-                  </header>
-                  {group.items.length === 0 ? (
-                    <p className="tool-panel__muted">没有可展示的执行步骤。</p>
-                  ) : (
-                    <ol className="tool-panel__timeline">
-                      {group.items.map((item) => (
-                        <li key={item.id} data-status={item.status ?? "completed"}>
-                          <button
-                            type="button"
-                            aria-pressed={selectedTraceId === item.id}
-                            onClick={() => onSelectTrace(item.id)}
-                            onDoubleClick={() => onOpenPreview?.(item.id)}
-                          >
-                            <span className="tool-panel__timeline-marker" aria-hidden="true" />
-                            <span className="tool-panel__timeline-copy">
-                              <strong>{item.title}</strong>
-                              {item.summary && <span>{item.summary}</span>}
-                              <small>
-                                {item.durationMs === undefined
-                                  ? formatTimestamp(item.createdAt)
-                                  : formatDuration(item.durationMs)}
-                                {` · ${item.kind}`}
-                              </small>
-                            </span>
-                            {item.toolCallId && <Wrench aria-label="工具调用" size={13} />}
-                          </button>
-                        </li>
-                      ))}
-                    </ol>
-                  )}
-                </section>
-              ))}
+        {execution ? (
+          <ExecutionTraceTimeline
+            execution={execution}
+            selectedTraceId={selectedTraceId}
+            onSelectTrace={onSelectTrace}
+          />
+        ) : (
+          <section className="tool-panel__section" aria-labelledby="inspector-trace-title">
+            <div className="tool-panel__section-heading">
+              <h3 id="inspector-trace-title">时间线</h3>
+              <span>
+                {traceGroups.length} 次运行 · {visibleTraceCount} 项
+              </span>
             </div>
-          )}
-          {hasMore && onLoadMore && (
-            <button type="button" className="tool-panel__load-more" onClick={onLoadMore}>
-              <ChevronDown aria-hidden="true" size={14} />
-              加载更多记录
-            </button>
-          )}
-        </section>
+            {loading && trace.length === 0 ? (
+              <p className="tool-panel__state" role="status">
+                正在加载追踪…
+              </p>
+            ) : trace.length === 0 ? (
+              <p className="tool-panel__state">当前任务还没有追踪记录。</p>
+            ) : (
+              <div className="tool-panel__trace-groups">
+                {traceGroups.map((group) => (
+                  <section
+                    className="tool-panel__trace-group"
+                    data-status={group.status}
+                    key={group.id}
+                  >
+                    <header>
+                      <span>
+                        <strong>{group.label}</strong>
+                        {group.status && <small>{statusLabel(group.status)}</small>}
+                      </span>
+                      <small>
+                        {group.durationMs === undefined
+                          ? formatTimestamp(group.createdAt ?? "")
+                          : formatDuration(group.durationMs)}
+                      </small>
+                    </header>
+                    {group.items.length === 0 ? (
+                      <p className="tool-panel__muted">没有可展示的执行步骤。</p>
+                    ) : (
+                      <ol className="tool-panel__timeline">
+                        {group.items.map((item) => (
+                          <li key={item.id} data-status={item.status ?? "completed"}>
+                            <button
+                              type="button"
+                              aria-pressed={selectedTraceId === item.id}
+                              onClick={() => onSelectTrace(item.id)}
+                              onDoubleClick={() => onOpenPreview?.(item.id)}
+                            >
+                              <span className="tool-panel__timeline-marker" aria-hidden="true" />
+                              <span className="tool-panel__timeline-copy">
+                                <strong>{item.title}</strong>
+                                {item.summary && <span>{item.summary}</span>}
+                                <small>
+                                  {item.durationMs === undefined
+                                    ? formatTimestamp(item.createdAt)
+                                    : formatDuration(item.durationMs)}
+                                  {` · ${item.kind}`}
+                                </small>
+                              </span>
+                              {item.toolCallId && <Wrench aria-label="工具调用" size={13} />}
+                            </button>
+                          </li>
+                        ))}
+                      </ol>
+                    )}
+                  </section>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
+        {hasMore && onLoadMore && (
+          <button
+            type="button"
+            className="tool-panel__load-more"
+            disabled={loading}
+            onClick={onLoadMore}
+          >
+            <ChevronDown aria-hidden="true" size={14} />
+            加载更多记录
+          </button>
+        )}
 
         {preview && (
           <section className="tool-panel__section tool-panel__preview" aria-label="工具详情预览">

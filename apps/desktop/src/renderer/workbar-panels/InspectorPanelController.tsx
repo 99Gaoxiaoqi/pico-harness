@@ -1,19 +1,14 @@
-import type { RuntimeSessionContextSnapshot } from "@pico/protocol";
+import type { RuntimeExecutionPage, RuntimeSessionContextSnapshot } from "@pico/protocol";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   InspectorWorkbarPanel,
   type InspectorContextSnapshot,
-  type InspectorToolPreview,
   type InspectorTraceItem,
 } from "./InspectorWorkbarPanel.js";
-import { useResourceFrame } from "./useResourceFrame.js";
 import type { WorkbarPanelHostProps } from "./workbar-panel-contract.js";
 import { invokeWorkbarRuntime, workbarErrorMessage } from "./workbar-runtime.js";
 import { numberField, recordField, stringField } from "./workbar-values.js";
-
-const TRACE_QUERY_PAGE_SIZE = 250;
-
-const TRACE_AUTO_LOAD_LIMIT = 2_000;
+import { readExecutionWindow, mergeExecutionPages } from "./execution-trace-window.js";
 
 export function InspectorPanelController({
   workspacePath,
@@ -23,150 +18,146 @@ export function InspectorPanelController({
   const runtime = window.pico.runtime;
   const scope = useMemo(() => ({ workspacePath, sessionId }), [workspacePath, sessionId]);
   const [context, setContext] = useState<InspectorContextSnapshot>();
-  const [trace, setTrace] = useState<readonly InspectorTraceItem[]>([]);
-  const [traceRecords, setTraceRecords] = useState<ReadonlyMap<string, Record<string, unknown>>>(
-    new Map(),
-  );
-  const [throughSequence, setThroughSequence] = useState(0);
-  const [nextAfterSequence, setNextAfterSequence] = useState<number>();
+  const [pages, setPages] = useState<readonly RuntimeExecutionPage[]>([]);
   const [selectedTraceId, setSelectedTraceId] = useState<string>();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string>();
-  const requestRef = useRef(0);
-  const contextRequestRef = useRef(0);
-  const traceRequestRef = useRef(0);
-  const contextGeneratedAtRef = useRef(0);
-  const traceWatermarkRef = useRef(0);
-  const traceEventsRef = useRef<readonly Record<string, unknown>[]>([]);
+  const [contextError, setContextError] = useState<string>();
+  const generation = useRef(0);
+  const traceRequest = useRef(0);
+  const contextRequest = useRef(0);
+  const pageCount = useRef(1);
+  const enabled = useRef(active);
+  enabled.current = active;
+  const scopeRef = useRef(scope);
+  scopeRef.current = scope;
 
   const refreshContext = useCallback(async () => {
-    const request = ++contextRequestRef.current;
-    const value = await invokeWorkbarRuntime(runtime, "session.context.get", scope);
-    if (request !== contextRequestRef.current) return;
-    if (value.context.generatedAt < contextGeneratedAtRef.current) return;
-    contextGeneratedAtRef.current = value.context.generatedAt;
-    setContext(contextView(value.context));
+    if (!enabled.current) return;
+    const epoch = generation.current;
+    const request = ++contextRequest.current;
+    const current = () =>
+      enabled.current &&
+      scopeRef.current === scope &&
+      epoch === generation.current &&
+      request === contextRequest.current;
+    try {
+      const result = await invokeWorkbarRuntime(runtime, "session.context.get", scope);
+      if (!current()) return;
+      setContext(contextView(result.context));
+      setContextError(undefined);
+    } catch (cause) {
+      if (current()) setContextError(workbarErrorMessage(cause));
+    }
   }, [runtime, scope]);
 
   const refreshTrace = useCallback(
-    async (watermark?: number) => {
-      const request = ++traceRequestRef.current;
-      const incremental =
-        watermark !== undefined &&
-        traceWatermarkRef.current > 0 &&
-        watermark >= traceWatermarkRef.current;
-      const priorEvents = incremental ? traceEventsRef.current : [];
-      let cursor = incremental ? traceWatermarkRef.current : 0;
-      let throughSequence = watermark;
-      let nextAfterSequence: number | undefined;
-      const incoming: Record<string, unknown>[] = [];
-      do {
-        const page = await invokeWorkbarRuntime(runtime, "session.trace.query", {
-          ...scope,
-          afterSequence: cursor,
-          limit: TRACE_QUERY_PAGE_SIZE,
-          ...(throughSequence === undefined ? {} : { throughSequence }),
-        });
-        throughSequence = page.throughSequence;
-        incoming.push(...page.events);
-        nextAfterSequence = page.nextAfterSequence;
-        if (nextAfterSequence === undefined) break;
-        cursor = nextAfterSequence;
-      } while (incoming.length < TRACE_AUTO_LOAD_LIMIT);
-      if (request !== traceRequestRef.current) return;
-      if (
-        throughSequence === undefined ||
-        (incremental && throughSequence < traceWatermarkRef.current)
-      ) {
-        return;
+    async (more = false) => {
+      if (!enabled.current) return;
+      const epoch = generation.current;
+      const request = ++traceRequest.current;
+      const current = () =>
+        enabled.current &&
+        scopeRef.current === scope &&
+        epoch === generation.current &&
+        request === traceRequest.current;
+      setLoading(true);
+      setError(undefined);
+      try {
+        // Re-read from the newest page with fresh cursors: new runs may shift every page.
+        const result = await readExecutionWindow(
+          (cursor) =>
+            invokeWorkbarRuntime(runtime, "session.execution.query", {
+              ...scope,
+              ...(cursor ? { cursor } : {}),
+            }),
+          pageCount.current + (more ? 1 : 0),
+          current,
+        );
+        if (!current() || !result) return;
+        pageCount.current = result.length;
+        setPages(result);
+      } catch (cause) {
+        if (current()) setError(workbarErrorMessage(cause));
+      } finally {
+        if (current()) setLoading(false);
       }
-      const source = [...priorEvents, ...incoming];
-      const parsed = tracePageView(source);
-      traceEventsRef.current = source;
-      traceWatermarkRef.current = throughSequence;
-      setTrace(parsed.items);
-      setTraceRecords(parsed.records);
-      setThroughSequence(throughSequence);
-      setNextAfterSequence(nextAfterSequence);
-      setSelectedTraceId((selected) =>
-        selected && parsed.records.has(selected) ? selected : undefined,
-      );
     },
     [runtime, scope],
   );
 
-  const refresh = useCallback(async () => {
-    const request = ++requestRef.current;
-    setLoading(true);
+  useEffect(() => {
+    generation.current += 1;
+    pageCount.current = 1;
+    setPages([]);
+    setContext(undefined);
+    setSelectedTraceId(undefined);
     setError(undefined);
-    try {
-      await Promise.all([refreshContext(), refreshTrace()]);
-    } catch (cause) {
-      if (request === requestRef.current) setError(workbarErrorMessage(cause));
-    } finally {
-      if (request === requestRef.current) setLoading(false);
+    setContextError(undefined);
+    setLoading(false);
+    if (active) {
+      void refreshTrace();
+      void refreshContext();
     }
-  }, [refreshContext, refreshTrace]);
+    return () => {
+      generation.current += 1;
+    };
+  }, [scope, active, refreshTrace, refreshContext]);
 
   useEffect(() => {
-    if (active) void refresh();
-  }, [active, refresh]);
-
-  useResourceFrame({ active, sessionId, resource: "context" }, refreshContext, setError);
-  useResourceFrame(
-    { active, sessionId, resource: "trace", watermark: throughSequence },
-    refreshTrace,
-    setError,
-  );
-
-  const loadMore = useCallback(async () => {
-    if (!active || nextAfterSequence === undefined) return;
-    const request = ++traceRequestRef.current;
-    setLoading(true);
-    setError(undefined);
-    try {
-      const page = await invokeWorkbarRuntime(runtime, "session.trace.query", {
-        ...scope,
-        throughSequence,
-        afterSequence: nextAfterSequence,
-        limit: 100,
-      });
-      if (request !== traceRequestRef.current) return;
-      if (page.throughSequence !== throughSequence) {
-        throw new Error("Trace 分页水位已经变化，请刷新后重试。");
-      }
-      const source = [...traceEventsRef.current, ...page.events];
-      const parsed = tracePageView(source);
-      traceEventsRef.current = source;
-      setTrace(parsed.items);
-      setTraceRecords(parsed.records);
-      setNextAfterSequence(page.nextAfterSequence);
-    } catch (cause) {
-      setError(workbarErrorMessage(cause));
-    } finally {
-      setLoading(false);
-    }
-  }, [active, nextAfterSequence, runtime, scope, throughSequence]);
-
-  const preview = useMemo<InspectorToolPreview | undefined>(() => {
-    if (!selectedTraceId) return undefined;
-    const record = traceRecords.get(selectedTraceId);
-    return record ? tracePreview(record) : undefined;
-  }, [selectedTraceId, traceRecords]);
-
+    if (!active) return;
+    let disposed = false;
+    let running = false;
+    let dirty = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const schedule = () => {
+      if (disposed || running || timer !== undefined) return;
+      timer = setTimeout(() => {
+        timer = undefined;
+        if (disposed) return;
+        running = true;
+        dirty = false;
+        void Promise.all([refreshTrace(), refreshContext()]).finally(() => {
+          running = false;
+          if (dirty) schedule();
+        });
+      }, 100);
+    };
+    const subscription = window.pico.sessionFrames.subscribe((frame) => {
+      if (
+        frame.type !== "subscription.resource_changed" ||
+        frame.sessionId !== sessionId ||
+        (frame.resource !== "trace" && frame.resource !== "context")
+      )
+        return;
+      dirty = true;
+      schedule();
+    });
+    return () => {
+      disposed = true;
+      if (timer !== undefined) clearTimeout(timer);
+      subscription.dispose();
+    };
+  }, [active, sessionId, refreshContext, refreshTrace]);
+  const execution = useMemo(() => mergeExecutionPages(pages), [pages]);
   return (
     <InspectorWorkbarPanel
       context={context}
-      trace={trace}
+      trace={[]}
+      execution={execution}
       selectedTraceId={selectedTraceId}
-      preview={preview}
       loading={loading}
       error={error}
-      hasMore={nextAfterSequence !== undefined}
-      onRefresh={() => void refresh()}
+      contextError={contextError}
+      hasMore={Boolean(pages.at(-1)?.nextCursor)}
+      onRefresh={() => {
+        void refreshTrace();
+        void refreshContext();
+      }}
       onSelectTrace={setSelectedTraceId}
-      onOpenPreview={setSelectedTraceId}
-      onLoadMore={() => void loadMore()}
+      onLoadMore={() => {
+        if (!loading) void refreshTrace(true);
+      }}
     />
   );
 }
@@ -180,6 +171,7 @@ function contextView(context: RuntimeSessionContextSnapshot): InspectorContextSn
     remainingTokens: numberField(context, "remainingTokens"),
     contextWindowTokens: numberField(context, "contextWindowTokens"),
     usedPercent: numberField(context, "usedPercent"),
+    compactedCount: numberField(context, "compactedCount"),
     estimation: context["estimation"] === "estimated" ? "estimated" : "unknown",
   };
 }
@@ -504,22 +496,6 @@ function traceCategory(kind: string): NonNullable<InspectorTraceItem["category"]
   return "other";
 }
 
-function tracePreview(record: Record<string, unknown>): InspectorToolPreview {
-  const event = recordField(record, "event");
-  const data = recordField(event, "data");
-  const id = stringField(record, "eventId") ?? "trace";
-  const kind = stringField(record, "kind") ?? stringField(event, "kind") ?? "runtime.event";
-  return {
-    id,
-    title: stringField(data, "title") ?? stringField(data, "toolName") ?? traceKindLabel(kind),
-    subtitle: kind,
-    input: printableField(data, ["input", "args", "arguments"]),
-    output: printableField(data, ["output", "result", "message"]),
-    error: printableField(data, ["error"]),
-    truncated: Boolean(record["partial"]),
-  };
-}
-
 function traceSummary(data: Record<string, unknown>): string | undefined {
   const direct = stringField(data, "summary") ?? stringField(data, "detail");
   if (direct) return direct;
@@ -546,22 +522,4 @@ function traceKindLabel(kind: string): string {
   if (kind.startsWith("tool.")) return "工具调用";
   if (kind.startsWith("run.")) return "运行状态";
   return kind;
-}
-
-function printableField(
-  value: Record<string, unknown>,
-  keys: readonly string[],
-): string | undefined {
-  for (const key of keys) {
-    const candidate = value[key];
-    if (typeof candidate === "string" && candidate.length > 0) return candidate;
-    if (candidate !== undefined) {
-      try {
-        return JSON.stringify(candidate, null, 2);
-      } catch {
-        return String(candidate);
-      }
-    }
-  }
-  return undefined;
 }
