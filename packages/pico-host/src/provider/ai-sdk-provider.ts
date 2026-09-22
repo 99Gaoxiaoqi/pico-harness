@@ -97,6 +97,7 @@ export class AiSdkProvider implements LLMProvider {
       this.config.model,
       signal,
       options?.onProviderAttempt,
+      options,
     );
     let rawUsage: Record<string, unknown> | undefined;
     let terminalUsageObserved = false;
@@ -230,6 +231,9 @@ export class AiSdkProvider implements LLMProvider {
                 this.config.model,
               )
             : createOpenAI({ apiKey, fetch: transport }).responses(this.config.model);
+    // Abort the transport immediately, while allowing SDK chunks already delivered to
+    // this client to drain for a bounded accounting-only window.
+    const sdkController = new AbortController();
     const request = {
       model,
       messages: toAiSdkMessages(messages, this.wire, { responsesWebSearchAnchors: true }),
@@ -237,7 +241,7 @@ export class AiSdkProvider implements LLMProvider {
       tools,
       ...(this.wire === "claude" ? { maxOutputTokens: this.profile.maxOutputTokens } : {}),
       maxRetries: 0,
-      abortSignal: signal,
+      abortSignal: sdkController.signal,
       ...(options?.toolChoice === "none" &&
       definitions.length &&
       (this.wire !== "claude" || !this.requestCapabilities.toolChoiceNoneWithTools)
@@ -247,137 +251,178 @@ export class AiSdkProvider implements LLMProvider {
         ? { providerOptions: { openai: { store: false, forceReasoning: true } } }
         : {}),
     };
-    try {
-      if (!onDelta) {
-        const result = await generateText(request);
-        responseDiagnostic = { ...responseDiagnostic, finishReason: result.finishReason };
-        if (result.finishReason === "error") {
-          failureCategory = "rejected_completion";
-          throw new Error("Model response failed");
-        }
-        const usage = translateUsage(
-          result.steps.at(-1)!.usage,
-          this.wire,
-          nonStreamingUsage ?? record(result.response.body)?.usage,
-        );
-        attempts.settle(signal.aborted ? "cancelled" : "succeeded", usage, result.finishReason);
-        const message = fromAiSdkContent(result.content, this.wire, responseOutput);
-        return {
-          ...message,
-          providerData: { ...message.providerData, finishReason: result.finishReason },
-          ...(usage === undefined ? {} : { usage }),
-        };
-      }
-      const result = streamText({ ...request, includeRawChunks: true, onError: () => {} });
-      let finished = false;
-      for await (const chunk of result.stream) {
-        if (
-          (chunk.type === "text-delta" || chunk.type === "reasoning-delta") &&
-          chunk.text.length > 0
-        )
-          attempts.observeOutput();
-        if (chunk.type === "tool-input-delta" && chunk.delta.length > 0) attempts.observeOutput();
-        if (chunk.type === "tool-call" || chunk.type === "tool-result") attempts.observeOutput();
-        if (
-          responseDiagnostic.firstChunkMs === undefined &&
-          ["raw", "text-delta", "reasoning-delta", "error"].includes(chunk.type)
-        )
-          responseDiagnostic = {
-            ...responseDiagnostic,
-            firstChunkMs: Math.round(performance.now() - startedAt),
+    const execute = async (): Promise<Message> => {
+      try {
+        if (!onDelta) {
+          const result = await generateText(request);
+          responseDiagnostic = { ...responseDiagnostic, finishReason: result.finishReason };
+          if (result.finishReason === "error") {
+            failureCategory = "rejected_completion";
+            throw new Error("Model response failed");
+          }
+          const usage = translateUsage(
+            result.steps.at(-1)!.usage,
+            this.wire,
+            nonStreamingUsage ?? record(result.response.body)?.usage,
+          );
+          attempts.settle(signal.aborted ? "cancelled" : "succeeded", usage, result.finishReason);
+          const message = fromAiSdkContent(result.content, this.wire, responseOutput);
+          return {
+            ...message,
+            providerData: { ...message.providerData, finishReason: result.finishReason },
+            ...(usage === undefined ? {} : { usage }),
           };
-        if (chunk.type === "raw") {
-          const raw = record(chunk.rawValue);
-          const choice = Array.isArray(raw?.choices) ? record(raw.choices[0]) : undefined;
-          const reason = choice?.finish_reason;
-          if (typeof reason === "string")
+        }
+        const result = streamText({ ...request, includeRawChunks: true, onError: () => {} });
+        let finished = false;
+        for await (const chunk of result.stream) {
+          if (
+            (chunk.type === "text-delta" || chunk.type === "reasoning-delta") &&
+            chunk.text.length > 0
+          )
+            attempts.observeOutput();
+          if (chunk.type === "tool-input-delta" && chunk.delta.length > 0) attempts.observeOutput();
+          if (chunk.type === "tool-call" || chunk.type === "tool-result") attempts.observeOutput();
+          if (
+            responseDiagnostic.firstChunkMs === undefined &&
+            ["raw", "text-delta", "reasoning-delta", "error"].includes(chunk.type)
+          )
             responseDiagnostic = {
               ...responseDiagnostic,
-              rawFinishReason:
-                reason === "stop" ||
-                reason === "length" ||
-                reason === "tool_calls" ||
-                reason === "content_filter" ||
-                reason === "error"
-                  ? reason
-                  : "unknown",
+              firstChunkMs: Math.round(performance.now() - startedAt),
             };
-          if (raw?.type === "response.output_item.done" && raw.item) responseOutput.push(raw.item);
-          const value =
-            record(raw?.usage) ??
-            record(record(raw?.message)?.usage) ??
-            record(record(raw?.response)?.usage);
-          if (value) {
-            rawUsage = { ...rawUsage, ...value };
-            // Anthropic message_start already contains output_tokens, but it is only
-            // an initial count. Responses can likewise carry snapshots before settlement.
-            if (
-              (this.wire === "claude" &&
-                raw?.type === "message_delta" &&
-                typeof record(raw.delta)?.stop_reason === "string" &&
-                typeof value.output_tokens === "number") ||
-              (this.wire === "responses" &&
-                ["response.completed", "response.incomplete", "response.failed"].includes(
-                  String(raw?.type),
-                )) ||
-              (this.wire === "openai" && responseDiagnostic.rawFinishReason !== undefined)
-            )
-              terminalUsageObserved = true;
+          if (chunk.type === "raw") {
+            const raw = record(chunk.rawValue);
+            const choice = Array.isArray(raw?.choices) ? record(raw.choices[0]) : undefined;
+            const reason = choice?.finish_reason;
+            if (typeof reason === "string")
+              responseDiagnostic = {
+                ...responseDiagnostic,
+                rawFinishReason:
+                  reason === "stop" ||
+                  reason === "length" ||
+                  reason === "tool_calls" ||
+                  reason === "content_filter" ||
+                  reason === "error"
+                    ? reason
+                    : "unknown",
+              };
+            if (raw?.type === "response.output_item.done" && raw.item)
+              responseOutput.push(raw.item);
+            const value =
+              record(raw?.usage) ??
+              record(record(raw?.message)?.usage) ??
+              record(record(raw?.response)?.usage);
+            if (value) {
+              rawUsage = { ...rawUsage, ...value };
+              // Anthropic message_start already contains output_tokens, but it is only
+              // an initial count. Responses can likewise carry snapshots before settlement.
+              if (
+                (this.wire === "claude" &&
+                  raw?.type === "message_delta" &&
+                  typeof record(raw.delta)?.stop_reason === "string" &&
+                  typeof value.output_tokens === "number") ||
+                (this.wire === "responses" &&
+                  ["response.completed", "response.incomplete", "response.failed"].includes(
+                    String(raw?.type),
+                  )) ||
+                (this.wire === "openai" && responseDiagnostic.rawFinishReason !== undefined)
+              )
+                terminalUsageObserved = true;
+            }
+          } else if (chunk.type === "text-delta" && !signal.aborted) onDelta(chunk.text);
+          else if (chunk.type === "reasoning-delta" && !signal.aborted)
+            options?.onReasoningDelta?.(chunk.text);
+          else if (chunk.type === "error") {
+            throw chunk.error;
+          } else if (chunk.type === "abort")
+            throw signal.reason ?? new DOMException("Aborted", "AbortError");
+          else if (chunk.type === "finish") {
+            responseDiagnostic = { ...responseDiagnostic, finishReason: chunk.finishReason };
+            if (chunk.finishReason === "error" || chunk.finishReason === "other") {
+              failureCategory =
+                chunk.finishReason === "error" || responseDiagnostic.rawFinishReason === "error"
+                  ? "rejected_completion"
+                  : "incomplete_stream";
+              throw new Error("Model stream ended without a valid completion");
+            }
+            finished = true;
           }
-        } else if (chunk.type === "text-delta") onDelta(chunk.text);
-        else if (chunk.type === "reasoning-delta") options?.onReasoningDelta?.(chunk.text);
-        else if (chunk.type === "error") {
-          throw chunk.error;
-        } else if (chunk.type === "abort")
-          throw signal.reason ?? new DOMException("Aborted", "AbortError");
-        else if (chunk.type === "finish") {
-          responseDiagnostic = { ...responseDiagnostic, finishReason: chunk.finishReason };
-          if (chunk.finishReason === "error" || chunk.finishReason === "other") {
-            failureCategory =
-              chunk.finishReason === "error" || responseDiagnostic.rawFinishReason === "error"
-                ? "rejected_completion"
-                : "incomplete_stream";
-            throw new Error("Model stream ended without a valid completion");
-          }
-          finished = true;
         }
+        signal.throwIfAborted();
+        if (!finished) {
+          failureCategory = "incomplete_stream";
+          throw new Error("Model stream ended before completion");
+        }
+        const usage = translateUsage((await result.steps).at(-1)!.usage, this.wire, rawUsage);
+        attempts.settle(
+          signal.aborted ? "cancelled" : "succeeded",
+          usage,
+          await result.finishReason,
+        );
+        const message = fromAiSdkContent(await result.content, this.wire, responseOutput);
+        return {
+          ...message,
+          providerData: { ...message.providerData, finishReason: await result.finishReason },
+          ...(usage === undefined ? {} : { usage }),
+        };
+      } catch (error) {
+        attempts.settle(
+          signal.aborted ? "cancelled" : "failed",
+          usageFromRaw(
+            rawUsage ?? record(nonStreamingUsage),
+            this.wire,
+            !onDelta || terminalUsageObserved,
+          ),
+          responseDiagnostic.finishReason,
+          signal.aborted ? "请求已取消或超时" : "模型响应未完成",
+        );
+        if (signal.aborted) throw signal.reason;
+        if (attempts.admissionError) throw attempts.admissionError;
+        // Only allowlisted classifications cross the SDK boundary.
+        throw modelCommunicationError(
+          error,
+          {
+            ...responseDiagnostic,
+            diagnosticId,
+            durationMs: Math.round(performance.now() - startedAt),
+          },
+          failureCategory,
+        );
+      } finally {
+        await attempts.flush();
       }
-      signal.throwIfAborted();
-      if (!finished) {
-        failureCategory = "incomplete_stream";
-        throw new Error("Model stream ended before completion");
-      }
-      const usage = translateUsage((await result.steps).at(-1)!.usage, this.wire, rawUsage);
-      attempts.settle(signal.aborted ? "cancelled" : "succeeded", usage, await result.finishReason);
-      const message = fromAiSdkContent(await result.content, this.wire, responseOutput);
-      return {
-        ...message,
-        providerData: { ...message.providerData, finishReason: await result.finishReason },
-        ...(usage === undefined ? {} : { usage }),
+    };
+    return new Promise<Message>((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const abort = () => {
+        attempts.settle(
+          "cancelled",
+          usageFromRaw(
+            rawUsage ?? record(nonStreamingUsage),
+            this.wire,
+            !onDelta || terminalUsageObserved,
+          ),
+          undefined,
+          "请求已取消或超时",
+        );
+        reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+        timer = setTimeout(() => {
+          attempts.close();
+          sdkController.abort(signal.reason);
+        }, 5_000);
+        timer.unref?.();
       };
-    } catch (error) {
-      attempts.settle(
-        signal.aborted ? "cancelled" : "failed",
-        usageFromRaw(
-          rawUsage ?? record(nonStreamingUsage),
-          this.wire,
-          !onDelta || terminalUsageObserved,
-        ),
-        responseDiagnostic.finishReason,
-        signal.aborted ? "请求已取消或超时" : "模型响应未完成",
-      );
-      if (signal.aborted) throw signal.reason;
-      // Only allowlisted classifications cross the SDK boundary.
-      throw modelCommunicationError(
-        error,
-        {
-          ...responseDiagnostic,
-          diagnosticId,
-          durationMs: Math.round(performance.now() - startedAt),
-        },
-        failureCategory,
-      );
-    }
+      signal.addEventListener("abort", abort, { once: true });
+      if (signal.aborted) abort();
+      void execute()
+        .then(resolve, reject)
+        .finally(() => {
+          signal.removeEventListener("abort", abort);
+          if (timer) clearTimeout(timer);
+          attempts.close();
+        });
+    });
   }
 
   /** Apply a per-call ceiling after route policy so no later rewrite can raise it. */
