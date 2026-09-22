@@ -9,6 +9,7 @@ import {
 import { LEGACY_CONTROL_SCOPE } from "../helpers/legacy-control-schema.js";
 
 const retired = [
+  "runtime_events_usage_started",
   "usage_baselines",
   "usage_baseline_adjustments",
   "usage_effective_baselines",
