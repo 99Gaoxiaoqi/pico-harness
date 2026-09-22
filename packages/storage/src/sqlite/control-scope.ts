@@ -149,9 +149,6 @@ export const CONTROL_SCOPE: SqliteSchemaScope = {
       CREATE INDEX desktop_rewind_claims_by_target
         ON desktop_rewind_claims(target_session_id, created_at DESC);
 
-      CREATE INDEX runtime_events_usage_started ON runtime_events(
-        session_id, run_id, json_extract(payload_json, '$.data.providerCallId'), event_seq DESC
-      ) WHERE kind = 'model.call.started';
       CREATE TABLE usage_accounting_versions (session_id TEXT PRIMARY KEY, revision INTEGER NOT NULL);
       CREATE TABLE usage_attempt_owners (owner_id TEXT PRIMARY KEY, process_id INTEGER NOT NULL, closed INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE usage_attempt_revisions (physical_attempt_id TEXT NOT NULL, revision INTEGER NOT NULL, snapshot_hash TEXT NOT NULL, PRIMARY KEY(physical_attempt_id, revision));
@@ -235,9 +232,6 @@ export const CONTROL_SCOPE: SqliteSchemaScope = {
     [
       4,
       `
-      CREATE INDEX runtime_events_usage_started ON runtime_events(
-        session_id, run_id, json_extract(payload_json, '$.data.providerCallId'), event_seq DESC
-      ) WHERE kind = 'model.call.started';
       CREATE TABLE usage_accounting_versions (session_id TEXT PRIMARY KEY, revision INTEGER NOT NULL);
       CREATE TABLE usage_attempt_owners (owner_id TEXT PRIMARY KEY, process_id INTEGER NOT NULL, closed INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE usage_attempt_revisions (physical_attempt_id TEXT NOT NULL, revision INTEGER NOT NULL, snapshot_hash TEXT NOT NULL, PRIMARY KEY(physical_attempt_id, revision));
@@ -295,6 +289,7 @@ export const CONTROL_SCOPE: SqliteSchemaScope = {
     [
       7,
       `
+      DROP INDEX IF EXISTS runtime_events_usage_started;
       DROP TRIGGER IF EXISTS usage_baseline_reconcile;
       DROP TRIGGER IF EXISTS usage_baseline_adjustment_version;
       DROP TRIGGER IF EXISTS usage_session_deleted;
