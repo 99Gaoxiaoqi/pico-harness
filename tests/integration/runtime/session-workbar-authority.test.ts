@@ -366,6 +366,38 @@ test("desktop runtime exposes real workbar authorities and publishes revision si
     );
     assert.equal((query["tasks"] as unknown[]).length, 1);
     assert.ok(notifications.includes("session.resourceChanged"));
+    const execution = asRecord(
+      await desktop.handle(
+        createRuntimeRequest("session.execution.query", {
+          workspacePath: workspace,
+          sessionId,
+        }),
+      ),
+    );
+    assert.equal(execution["schemaVersion"], 1);
+    assert.equal(execution["sessionId"], sessionId);
+    assert.ok(Array.isArray(execution["runs"]));
+    await desktop.handle(
+      createRuntimeRequest("session.archive", { workspacePath: workspace, sessionId }),
+    );
+    const archivedExecution = asRecord(
+      await desktop.handle(
+        createRuntimeRequest("session.execution.query", {
+          workspacePath: workspace,
+          sessionId,
+        }),
+      ),
+    );
+    assert.equal(archivedExecution["sessionId"], sessionId);
+    await desktop.handle(
+      createRuntimeRequest("session.delete", { workspacePath: workspace, sessionId }),
+    );
+    await assert.rejects(
+      desktop.handle(
+        createRuntimeRequest("session.execution.query", { workspacePath: workspace, sessionId }),
+      ),
+      (error: unknown) => error instanceof Error && "code" in error && error.code === "NOT_FOUND",
+    );
   } finally {
     unsubscribe();
     await desktop.close();
