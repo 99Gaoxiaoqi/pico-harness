@@ -1,3 +1,4 @@
+import type { RuntimeExecutionPage } from "../execution-trace.js";
 // Session workbar, Git, browser, terminal, and rewind contracts with their boundary rules.
 import type {
   CheckpointId,
@@ -246,6 +247,14 @@ export type WorkbarMethodMap = {
       readonly expectedSizeBytes?: number;
     };
     readonly result: JsonObject;
+  };
+  readonly "session.execution.query": {
+    readonly params: WorkspaceParams & {
+      readonly sessionId: SessionId;
+      readonly cursor?: string;
+      readonly runId?: string;
+    };
+    readonly result: RuntimeExecutionPage;
   };
   readonly "session.trace.query": {
     readonly params: WorkspaceParams & {
@@ -594,6 +603,10 @@ export const workbarParamValidators = {
       expectedSizeBytes: nonNegativeIntegerParam,
     },
   ),
+  "session.execution.query": exactParamShape(
+    { workspacePath: stringParam, sessionId: boundedNonEmptyStringParam(512) },
+    { cursor: boundedNonEmptyStringParam(2048), runId: boundedNonEmptyStringParam(512) },
+  ),
   "session.trace.query": exactParamShape(
     { workspacePath: stringParam, sessionId: stringParam },
     {
@@ -752,6 +765,71 @@ export const workbarParamValidators = {
   }),
 } satisfies Readonly<Record<keyof WorkbarMethodMap, RuntimeParamValidator>>;
 
+const executionStatus = resultOneOf(["running", "completed", "failed", "cancelled", "interrupted"]);
+const runtimeExecutionStepResult = exactResultShape(
+  {
+    id: resultNonEmptyString,
+    eventId: resultNonEmptyString,
+    turnId: resultString,
+    kind: resultOneOf(["model", "tool", "permission", "compaction", "error"]),
+    title: resultString,
+    at: resultString,
+    status: executionStatus,
+  },
+  {
+    durationMs: resultFiniteNumber,
+    purpose: resultString,
+    detail: resultString,
+    input: resultString,
+    output: resultString,
+    error: resultString,
+    truncated: resultBoolean,
+    inputTokens: resultNonNegativeInteger,
+    outputTokens: resultNonNegativeInteger,
+    costCNY: resultFiniteNumber,
+    costStatus: resultOneOf(["estimated", "included", "unknown"]),
+  },
+);
+const runtimeExecutionRunResult = exactResultShape(
+  {
+    runId: resultNonEmptyString,
+    invocationId: resultString,
+    at: resultString,
+    status: executionStatus,
+    steps: resultArray(runtimeExecutionStepResult),
+  },
+  { durationMs: resultFiniteNumber, reason: resultString, parentRunId: resultString },
+);
+const runtimeExecutionPageResult = exactResultShape(
+  {
+    schemaVersion: resultOneOf([1]),
+    sessionId: resultNonEmptyString,
+    runs: resultArray(runtimeExecutionRunResult),
+    summary: exactResultShape(
+      {
+        scope: resultOneOf(["session"]),
+        modelCalls: resultNonNegativeInteger,
+        failedCalls: resultNonNegativeInteger,
+        meteredCalls: resultNonNegativeInteger,
+        unpricedCalls: resultNonNegativeInteger,
+      },
+      {
+        inputTokens: resultNonNegativeInteger,
+        outputTokens: resultNonNegativeInteger,
+        costCNY: resultFiniteNumber,
+        latencyMs: resultFiniteNumber,
+      },
+    ),
+    coverage: exactResultShape({
+      oversizedRunIds: resultStringArray,
+      missingModelCallRunIds: resultStringArray,
+      incompleteRunIds: resultStringArray,
+      modelAttempts: resultOneOf(["logical_only"]),
+    }),
+  },
+  { nextCursor: resultBoundedString(2048) },
+);
+
 export const workbarResultValidators = {
   "session.research.query": resultJsonObject,
   "session.context.get": exactResultShape({ context: resultJsonObject }),
@@ -765,6 +843,7 @@ export const workbarResultValidators = {
   }),
   "session.artifacts.query": resultJsonObject,
   "session.artifacts.command": resultJsonObject,
+  "session.execution.query": runtimeExecutionPageResult,
   "session.trace.query": exactResultShape(
     { throughSequence: resultNonNegativeInteger, events: resultArray(resultJsonObject) },
     { nextAfterSequence: resultNonNegativeInteger },
