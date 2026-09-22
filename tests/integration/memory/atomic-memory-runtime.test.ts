@@ -1,3 +1,4 @@
+import { physicalProviderFixture } from "../helpers/physical-provider.js";
 import { AtomicMemoryLifecycle } from "@pico/runtime";
 import { DesktopAtomicMemoryService } from "@pico/pico-host/desktop-atomic-memory-service";
 import assert from "node:assert/strict";
@@ -378,16 +379,19 @@ test("background memory billing can settle after the parent run terminal without
   });
   const model = new ProviderAtomicMemoryModel(
     new CostTracker(
-      {
-        async generate() {
-          await barrier;
-          return {
-            role: "assistant",
-            content: "finished",
-            usage: { promptTokens: 10, completionTokens: 2 },
-          };
+      physicalProviderFixture(
+        {
+          async generate() {
+            await barrier;
+            return {
+              role: "assistant",
+              content: "finished",
+              usage: { promptTokens: 10, completionTokens: 2 },
+            };
+          },
         },
-      },
+        "test-model",
+      ),
       "test-model",
       undefined,
       { ledger, recordRuntimeEvents: false, context: { purpose: "main", sessionId: session.id } },
@@ -405,7 +409,7 @@ test("background memory billing can settle after the parent run terminal without
   assert.equal(await pending, "finished");
   const entries = await session.runtimeEventStore!.readSessionEntries(session.id);
   assert.equal(entries.filter((entry) => entry.event.kind === "model.call.started").length, 0);
-  const records = ledger.listProviderCalls({ sessionId: session.id });
+  const records = ledger.listPhysicalAttempts({ sessionId: session.id });
   assert.equal(records.length, 1);
   assert.equal(records[0]!.purpose, "memory_review");
 });

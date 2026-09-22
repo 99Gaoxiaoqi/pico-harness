@@ -6,7 +6,7 @@
 
 每次 HTTP dispatch 前持久化物理请求 `prepared`，收到响应写 `observed`，最终写成功、失败或取消状态。每个请求有稳定的 physicalAttemptId 和递增 revision。取消立即结束交互，最多观察 5 秒已经到达客户端的数据；晚到 usage 修订同一请求，不能重开 Run 或再次发送 HTTP。
 
-SQLite `usage_physical_attempts` 是唯一计量来源。Session、Run 返回、用量页面及执行轨迹均从该来源聚合，不再读取旧 embedded attempts、逻辑账本或历史 baseline 作为替代。旧逻辑账本 API 可用于当前运行的调用记录，但不贡献计量总数和 Token。
+SQLite `usage_physical_attempts` 是唯一计量来源。Session、Run 返回、用量页面及执行轨迹均从该来源聚合，不再读取旧 embedded attempts、逻辑账本或历史 baseline 作为替代。旧逻辑账本和覆盖标记表及其 API 已删除；缓存诊断恢复直接读取原生请求记录。
 
 没有物理记录时，累计量为零，表示没有当前格式计量记录。新请求没有实际上报的字段仍标为未知，不将未知用量补成完整报告，不把部分输出估算成最终费用。冻结调用当时的计价依据，既有新格式请求不按当前价格重算。
 
@@ -16,9 +16,10 @@ Runtime events 继续提供运行、工具及正文时间线。物理请求的�
 
 ## 旧数据清理边界
 
-control schema 6 执行一次清理：
+control schema 7 / attachments schema 2 完成结构清理，新库直接安装当前结构，不再先创建废弃表：
 
-- 删除旧历史汇总、扣重表及相关视图/触发器。
+- 删除旧历史汇总、扣重表及相关视图/触发器，以及 `usage_provider_calls`、`usage_accounting_calls` 和旧专用索引。
+- 删除旧 `evidence_records`、`evidence_blobs` 索引及 EvidenceArchive 读取路径；保留当前 blob CAS、inline 工具结果与 Graph artifact 校验。
 - 删除非原生物理记录、其 revision/覆盖标记及没有原生请求关联的旧调用账本。
 - 删除没有原生物理请求对应的旧 `model.call.started` / `model.call.settled` 事件；事件序号不重排。
 - 保留原生请求及对应事件，保留聊天正文、工具执行、会话配置、项目文件和其他业务记录。
@@ -59,3 +60,13 @@ control schema 6 执行一次清理：
 ![当前上下文与历史请求组成](../assets/trace-acceptance/2026-09-22-context-overview.png)
 
 边界：远端取消或断网后未送达客户端的消耗仍未知；新逻辑不承诺远端 exactly-once。SIGKILL 的计量事实恢复与 App 的活跃租约恢复是不同保证。
+
+## 旧结构彻底清理验收
+
+本轮进一步删除旧逻辑双写及缓存恢复依赖、旧 Graph evidence URI 入口。历史结构定义只留在测试 fixture 中验证真实旧版本升级；生产迁移只执行必要的结构清除，不恢复旧计量。当前新库直接建立 control 7 / attachments 2，不再创建旧表。旧库只清除废弃结构，不做旧数据导入或回填。
+
+本轮最终验证：99 项相关功能集成、2 项统一口径与性能集成、1 项真实 Electron 和 1 项真实 glm-5.2 请求通过。万次请求、30 样本的首次查询 300ms，page p95 381ms，summary p95 305ms；阈值仍为 500ms。真实模型产生 1 条物理记录，输入 29 / 输出 99，HTTP 200，请求组成 121 B。包构建、根目录和桌面三套 TypeScript、变更文件 ESLint、架构检查及 macOS arm64 打包通过。
+
+本机 111 个数据库均为 control 7 / attachments 2；usage_baselines、usage_baseline_adjustments、usage_effective_baselines、usage_provider_calls、usage_accounting_calls、evidence_records、evidence_blobs 和 runtime_events_usage_started 均不存在。逐库 quick_check 正常，重复迁移无变化。sessions、session_messages、runtime_events、文件历史、artifacts、任务、Graph 资源引用、原生 physical attempts 及 workspace binding 的逐表内容哈希与清理前一致。通用 blob CAS 仍用于当前资源，不属于旧 EvidenceArchive 兼容层，未删除其文件。
+
+最终打包版 Computer Use 确认：Runtime 已连接；旧任务正文标记保留、模型调用数为 0；现有原生任务仍显示 1 次调用、输入 6203 / 输出 239 / 缓存 50、组成 24873 B。

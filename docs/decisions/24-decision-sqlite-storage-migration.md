@@ -8,6 +8,8 @@
 workspace 数据库。本文的单库/memory scope 描述仅保留为迁移阶段历史；当前代码已移除该
 scope，不提供兼容读取或迁移。现行边界见[原子长期记忆](../architecture/14-workspace-memory.md)。
 
+后续变更（2026-09-22）：当前计量仅使用原生物理请求，已删除旧逻辑账本、覆盖标记、历史汇总与 EvidenceArchive 索引表。新库直接安装 control 7 / attachments 2 结构；下文相关旧 DDL 仅是历史设计，不代表当前表清单。见[执行轨迹与原生计量](../plans/2026-09-22-execution-trace-gap-closure.md)。
+
 ## 1. 背景实证
 
 文件载体(JSONL/JSON + 目录锁 + 自研 WAL)的三项结构性代价:

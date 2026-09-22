@@ -34,25 +34,43 @@ test("usage dashboard joins real model and tool ledgers across workspaces, prese
     await trustStore.trust(path);
     const storageRoot = resolvePicoPaths(path, { picoHome }).workspace.root;
     const calls = new SqliteRuntimeControlStore({ storageRoot });
-    calls.recordProviderCall({
-      callId: "same-call-id",
+    const prepared = {
+      physicalAttemptId: "same-attempt-id",
+      providerCallId: "same-call-id",
+      logicalCallId: "same-call-id",
       sessionId: index === 0 ? "parent" : "child",
-      purpose: index === 0 ? "main" : "subagent",
+      purpose: index === 0 ? ("main" as const) : ("subagent" as const),
       provider: "openai",
       model: "same-model",
+      status: "prepared" as const,
+      usageBasis: "missing" as const,
+      accountingVersion: 1 as const,
+      accountingSource: "physical" as const,
+      revision: 0,
+      attempt: 0,
+      retryAttempt: 0,
+      ownerId: calls.beginPhysicalAttemptOwner(),
+      startedAt: new Date(2000 + index).toISOString(),
+      costStatus: "unknown" as const,
+      pricingVersion: "fixture",
+    };
+    calls.recordPhysicalAttempt(prepared);
+    calls.recordPhysicalAttempt({
+      ...prepared,
+      revision: 1,
       status: index === 0 ? "succeeded" : "failed",
-      inputTokens: 100,
-      outputTokens: 20,
-      cacheReadTokens: 80,
-      cacheWriteTokens: 0,
-      cost: index === 0 ? 0.5 : 0,
-      createdAt: 2000 + index,
-      reported: {
-        usageMetadata: index === 0 ? "reported" : "unknown",
-        reportedFields: ["input", "cacheRead"],
-        costStatus: index === 0 ? "estimated" : "unknown",
-        latencyMs: 300,
+      completedAt: new Date(2300 + index).toISOString(),
+      latencyMs: 300,
+      usageBasis: "reported",
+      usage: {
+        promptTokens: 180,
+        completionTokens: 20,
+        inputTokens: 100,
+        cacheReadTokens: 80,
+        cacheWriteTokens: 0,
+        reportedFields: ["prompt", "completion", "input", "cacheRead", "cacheWrite"],
       },
+      ...(index === 0 ? { costCNY: 0.5, costStatus: "estimated" as const } : {}),
     });
     calls.close();
     const store = new SqliteRuntimeEventStore({ storageRoot });
@@ -154,7 +172,7 @@ test("usage dashboard joins real model and tool ledgers across workspaces, prese
   assert.equal(usage.totalTokens, 400);
   assert.equal(usage.costStatus, "partial");
   assert.equal(details.knownCacheReadTokens, 160);
-  assert.equal(details.cacheReadReportedCallCount, 1);
+  assert.equal(details.cacheReadReportedCallCount, 2);
   assert.equal(details.activityCount, 4);
   assert.equal(new Set(details.activities.map((r) => r.id)).size, 4);
   assert.equal(details.providers[0]!.count, 2);
