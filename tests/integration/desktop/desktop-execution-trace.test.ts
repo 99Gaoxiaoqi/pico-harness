@@ -151,5 +151,5 @@ test("obsolete execution response is discarded and coverage remains visible with
   assert.match(html, /追踪覆盖不足/u);
   assert.match(html, /步骤未完整展示/u);
   assert.match(html, /缺少模型调用记录/u);
-  assert.match(html, /记录不完整/u);
+  assert.match(html, /运行尚未结束或记录未闭合/u);
 });

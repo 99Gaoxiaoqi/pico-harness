@@ -96,6 +96,8 @@ export function querySessionExecution(
       },
     };
     let consumed = 0;
+    let evidenceBytes = 0;
+    let evidenceEvents = 0;
     for (const opening of openings.slice(0, 16)) {
       const size = db
         .prepare(
@@ -107,6 +109,14 @@ export function querySessionExecution(
         consumed++;
         continue;
       }
+      // The evidence budget is shared by the entire request, not multiplied by page size.
+      if (
+        evidenceEvents + Number(size.count) > 4096 ||
+        evidenceBytes + Number(size.bytes) > 512 * 1024
+      )
+        break;
+      evidenceEvents += Number(size.count);
+      evidenceBytes += Number(size.bytes);
       const rows = db
         .prepare(
           "SELECT payload_json FROM runtime_events WHERE session_id = ? AND run_id = ? AND event_seq <= ? ORDER BY event_seq",
@@ -189,8 +199,6 @@ function projectRun(events: RuntimeEvent[], opening: RuntimeEvent): RuntimeExecu
   const models = new Map<string, number>(),
     tools = new Map<string, number>(),
     permissions = new Map<string, number>();
-  let lastModel: number | undefined;
-  let lastInput: string | undefined;
   const add = (
     event: RuntimeEvent,
     kind: RuntimeExecutionStep["kind"],
@@ -220,18 +228,11 @@ function projectRun(events: RuntimeEvent[], opening: RuntimeEvent): RuntimeExecu
           [event.data.provider, event.data.model].filter(Boolean).join(" / ") || "模型调用",
         );
         models.set(event.data.providerCallId, i);
-        lastModel = i;
-        update(i, {
-          purpose: event.data.purpose,
-          ...(lastInput !== undefined
-            ? { input: preview(lastInput), truncated: lastInput.length > 800 }
-            : {}),
-        });
+        update(i, { purpose: event.data.purpose });
         break;
       }
       case "model.call.settled": {
         const i = models.get(event.data.providerCallId) ?? add(event, "model", "模型调用");
-        lastModel = i;
         update(i, {
           status: event.data.status === "succeeded" ? "completed" : event.data.status,
           durationMs: event.data.latencyMs,
@@ -241,24 +242,29 @@ function projectRun(events: RuntimeEvent[], opening: RuntimeEvent): RuntimeExecu
                 outputTokens: event.data.usage.completionTokens,
               }
             : {}),
-          ...(event.data.costCNY !== undefined && event.data.costStatus !== "unknown"
+          ...(event.data.costCNY !== undefined &&
+          (event.data.costStatus === "estimated" || event.data.costStatus === "included")
             ? { costCNY: event.data.costCNY }
             : {}),
-          ...(event.data.costStatus ? { costStatus: event.data.costStatus } : {}),
+          costStatus: event.data.costStatus ?? "unknown",
           ...(event.data.error ? { error: preview(event.data.error) } : {}),
         });
         break;
       }
       case "message.committed": {
         const m = event.data.message;
-        if (m.role === "user" && !m.toolCallId) lastInput = m.content;
-        if (m.role === "assistant" && lastModel !== undefined) {
+        // Message order does not prove which model request produced it (auxiliary calls
+        // can interleave). Show response content only with an explicit durable link.
+        const modelIndex = event.refs?.providerCallId
+          ? models.get(event.refs.providerCallId)
+          : undefined;
+        if (m.role === "assistant" && modelIndex !== undefined) {
           const text = [m.reasoning ? `思考：${m.reasoning}` : "", m.content]
             .filter(Boolean)
             .join("\n\n");
-          update(lastModel, {
+          update(modelIndex, {
             output: preview(text),
-            truncated: !!steps[lastModel]!.truncated || text.length > 800,
+            truncated: !!steps[modelIndex]!.truncated || text.length > 800,
           });
         }
         break;
