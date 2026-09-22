@@ -278,3 +278,121 @@ test("real SSE provider through CostTracker commits a succeeded physical fact an
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("real cancelled Run accepts already-delivered SSE usage through SQLite without reopening or double counting", async () => {
+  const { Session } = await import("@pico/pico-host/session");
+  const { RuntimeRun } = await import("@pico/pico-host/product-runtime-run");
+  const { createEngineRuntimePort } = await import("@pico/pico-host/engine-runtime-port-adapter");
+  const root = await mkdtemp(join(tmpdir(), "pico-cancel-authority-"));
+  const session = new Session("cancel-full-chain", root, {
+    persistence: true,
+    picoHome: join(root, "home"),
+    runtimeStorageRoot: root,
+    runtimePort: createEngineRuntimePort(),
+  });
+  const ledger = new SqliteRuntimeControlStore({ storageRoot: root });
+  const f = await fixture((res) => {
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.end(
+      frame({
+        id: "cancel",
+        choices: [{ index: 0, delta: { content: "first" }, finish_reason: null }],
+      }) +
+        frame({
+          id: "cancel",
+          choices: [{ index: 0, delta: { content: "must stay hidden" }, finish_reason: null }],
+        }) +
+        frame({
+          id: "cancel",
+          choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+          usage: { prompt_tokens: 10, completion_tokens: 3 },
+        }) +
+        "data: [DONE]\n\n",
+    );
+  });
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const revisions: ReturnType<typeof ledger.listPhysicalAttempts> = [];
+  const controller = new AbortController();
+  let deltas = 0;
+  let cancelledAt = 0;
+  try {
+    await session.recover();
+    const tracked = new CostTracker(
+      f.provider,
+      { provider: "openai", model: "lifecycle-test", billingMode: "subscription_included" },
+      session,
+      { ledger, context: { purpose: "main", sessionId: session.id } },
+    );
+    const run = await RuntimeRun.start({
+      capability: session.runtimeEventCapability!,
+      agentSwarmAuthorization: "none",
+    });
+    await assert.rejects(
+      run.run(() =>
+        tracked.generateStream(
+          messages,
+          [],
+          () => {
+            deltas++;
+            cancelledAt = performance.now();
+            controller.abort();
+          },
+          {
+            signal: controller.signal,
+            async onProviderAttemptUpdate(snapshot) {
+              // Slow only the observer acknowledgement, after the real observed SQLite write.
+              // Cancellation must not await it. Subsequent queued native revisions are then
+              // guaranteed to be committed after the Run's canonical cancelled terminal.
+              if (snapshot.status === "observed") await gate;
+              else revisions.push(...ledger.listPhysicalAttempts({ sessionId: session.id }));
+            },
+          },
+        ),
+      ),
+    );
+    assert.ok(performance.now() - cancelledAt < 500);
+    const before = await session.runtimeEventStore!.readSession(session.id);
+    const terminal = before.filter((event) => event.kind === "run.terminal");
+    assert.equal(terminal.length, 1);
+    assert.equal(terminal[0]!.data.status, "cancelled");
+    assert.equal(ledger.listPhysicalAttempts({ sessionId: session.id })[0]!.status, "observed");
+    release();
+    for (let retry = 0; retry < 50 && revisions.at(-1)?.usageBasis !== "reported"; retry++)
+      await delay(10);
+    const facts = ledger.listPhysicalAttempts({ sessionId: session.id });
+    assert.equal(facts.length, 1);
+    const late = facts[0]!;
+    assert.equal(late.status, "cancelled");
+    assert.equal(late.revision, 3);
+    assert.equal(late.runId, run.runId);
+    assert.equal(late.sessionId, session.id);
+    assert.equal(late.usageBasis, "reported");
+    assert.equal(late.usage!.promptTokens, 10);
+    assert.equal(late.usage!.completionTokens, 3);
+    const earlier = revisions.find((fact) => fact.status === "cancelled" && fact.revision === 2)!;
+    assert.ok(earlier);
+    const totals = ledger.getUsageSummary({ sessionId: session.id });
+    assert.equal(totals.providerCallCount, 1);
+    assert.equal(totals.total.inputTokens, 10);
+    assert.equal(totals.total.outputTokens, 3);
+    assert.equal(ledger.recordPhysicalAttempt(late).updated, false);
+    assert.equal(ledger.recordPhysicalAttempt(earlier).updated, false);
+    assert.deepEqual(ledger.getUsageSummary({ sessionId: session.id }), totals);
+    assert.deepEqual(
+      await session.runtimeEventStore!.readSession(session.id),
+      before,
+      "late accounting cannot append normal events or reopen the terminal Run",
+    );
+    assert.equal(deltas, 1, "buffered post-cancel content is not delivered");
+    assert.equal(f.requests(), 1);
+  } finally {
+    release();
+    await f.close();
+    await session.close();
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
