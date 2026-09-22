@@ -90,7 +90,6 @@ test("execution window refresh keeps page depth and renders causal steps with se
   );
   const html = renderToStaticMarkup(
     React.createElement(InspectorWorkbarPanel, {
-      context: { version: 2 },
       contextError: "暂时不可用",
       trace: [],
       execution,
@@ -112,7 +111,8 @@ test("execution window refresh keeps page depth and renders causal steps with se
   assert.match(html, /文件不存在/u);
   assert.match(html, /内容已截断/u);
   assert.match(html, /上下文读取失败：暂时不可用/u);
-  assert.match(html, /<dt>压缩<\/dt><dd>未知<\/dd>/u);
+  assert.match(html, /尚未生成上下文快照/u);
+  assert.doesNotMatch(html, /<dt>压缩<\/dt><dd>0 次/u);
 });
 
 test("obsolete execution response is discarded and coverage remains visible without runs", async () => {

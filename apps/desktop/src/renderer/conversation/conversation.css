@@ -2227,3 +2227,12 @@
     max-width: 180px;
   }
 }
+
+.conversation-context-gauge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--conversation-muted);
+  white-space: nowrap;
+}

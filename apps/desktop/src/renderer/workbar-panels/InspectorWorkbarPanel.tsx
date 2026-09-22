@@ -1,42 +1,13 @@
 import type {
   RuntimeExecutionPage,
   RuntimeExecutionSummary,
-  RuntimeLatestContextRequest,
+  RuntimeSessionContextSnapshot,
 } from "@pico/protocol";
 import { ContextComposition } from "./ContextComposition.js";
 import { ExecutionTraceTimeline, ExecutionUsageSummary } from "./ExecutionTraceTimeline.js";
 import { ChevronDown, CircleAlert, RefreshCw, Wrench } from "lucide-react";
 
-export interface InspectorContextSection {
-  readonly id: string;
-  readonly label: string;
-  readonly tokens?: number;
-  readonly state?: "included" | "compacted" | "omitted" | "unknown";
-}
-
-export interface InspectorContextSnapshot {
-  readonly version: number;
-  readonly routeId?: string;
-  readonly coverage?: "model_history_only";
-  readonly estimatedHistoryTokens?: number;
-  readonly modelHistoryMessageCount?: number;
-  readonly latestCompaction?: {
-    readonly checkpointId: string;
-    readonly throughEventId: string;
-    readonly coveredEventCount: number;
-  };
-  readonly estimatedInputTokens?: number;
-  readonly inputBudgetTokens?: number;
-  readonly remainingTokens?: number;
-  readonly contextWindowTokens?: number;
-  readonly reservedOutputTokens?: number;
-  readonly safetyMarginTokens?: number;
-  readonly usedPercent?: number;
-  readonly estimation?: "actual" | "estimated" | "unknown";
-  readonly compactedCount?: number;
-  readonly sections?: readonly InspectorContextSection[];
-  readonly latestRequest?: RuntimeLatestContextRequest;
-}
+export type InspectorContextSnapshot = RuntimeSessionContextSnapshot;
 
 export interface InspectorTraceItem {
   readonly id: string;
@@ -102,21 +73,15 @@ export interface InspectorWorkbarPanelProps {
 }
 
 export function contextUsagePercent(context?: InspectorContextSnapshot): number | undefined {
-  if (context?.coverage === "model_history_only") return undefined;
-  if (context?.usedPercent !== undefined && Number.isFinite(context.usedPercent)) {
-    return Math.min(100, Math.max(0, context.usedPercent));
-  }
+  const request = context?.latestRequest;
   if (
-    context?.estimatedInputTokens === undefined ||
-    context.inputBudgetTokens === undefined ||
-    context.inputBudgetTokens <= 0
-  ) {
+    request?.status !== "available" ||
+    request.inputTokens === undefined ||
+    request.usageStatus === "missing" ||
+    !request.contextWindow
+  )
     return undefined;
-  }
-  return Math.min(
-    100,
-    Math.max(0, (context.estimatedInputTokens / context.inputBudgetTokens) * 100),
-  );
+  return Math.min(100, Math.max(0, (request.inputTokens / request.contextWindow) * 100));
 }
 
 export function groupInspectorTraceItems(
@@ -163,7 +128,6 @@ export function InspectorWorkbarPanel({
   onLoadMore,
   onOpenPreview,
 }: InspectorWorkbarPanelProps) {
-  const usage = contextUsagePercent(context);
   const traceGroups = groupInspectorTraceItems(trace);
   const visibleTraceCount = traceGroups.reduce((count, group) => count + group.items.length, 0);
 
@@ -205,110 +169,61 @@ export function InspectorWorkbarPanel({
         {(summary ?? execution?.summary) && (
           <ExecutionUsageSummary summary={(summary ?? execution?.summary)!} />
         )}
+        {contextError && (
+          <p className="tool-panel__error" role="alert">
+            上下文读取失败：{contextError}
+          </p>
+        )}
+        <ContextComposition request={context?.latestRequest} />
         <section className="tool-panel__section" aria-labelledby="inspector-context-title">
           <div className="tool-panel__section-heading">
-            <h3 id="inspector-context-title">当前模型历史（估算）</h3>
-            {context?.routeId && <code>{context.routeId}</code>}
+            <h3 id="inspector-context-title">当前模型历史</h3>
           </div>
-          {contextError && (
-            <p className="tool-panel__error" role="alert">
-              上下文读取失败：{contextError}
-            </p>
-          )}
           {!context ? (
             <p className="tool-panel__muted">尚未生成上下文快照。</p>
           ) : (
             <>
-              {context.estimation === "estimated" && (
-                <p className="tool-panel__muted">
-                  模型历史包含压缩摘要及后续消息；系统指令、工具定义和协议开销未知，无法计算完整占用与剩余量。
-                </p>
-              )}
-              {context.coverage === "model_history_only" && (
-                <p className="tool-panel__muted">
-                  工具结果按正文估算，实际请求可能使用更短的归档视图。
-                </p>
-              )}
+              <p className="tool-panel__muted">
+                压缩摘要与后续消息的有效模型视图；Token
+                按字符与媒体估算，不包含完整请求的系统指令、工具定义及协议开销。
+              </p>
               <dl className="tool-panel__metrics">
                 <div>
-                  <dt>消息小计</dt>
-                  <dd>{formatTokens(context.estimatedHistoryTokens)}</dd>
+                  <dt>估算 Token</dt>
+                  <dd>≈{formatTokens(context.modelHistory.estimatedTokens)}</dd>
                 </div>
-                {context.modelHistoryMessageCount !== undefined && (
-                  <div>
-                    <dt>历史消息</dt>
-                    <dd>{context.modelHistoryMessageCount} 条</dd>
-                  </div>
-                )}
-                {context.contextWindowTokens !== undefined && (
-                  <div>
-                    <dt>模型窗口</dt>
-                    <dd>{formatTokens(context.contextWindowTokens)}</dd>
-                  </div>
-                )}
-                {context.inputBudgetTokens !== undefined && (
-                  <div>
-                    <dt>输入预算</dt>
-                    <dd>{formatTokens(context.inputBudgetTokens)}</dd>
-                  </div>
-                )}
-                {context.reservedOutputTokens !== undefined && (
-                  <div>
-                    <dt>预留输出</dt>
-                    <dd>{formatTokens(context.reservedOutputTokens)}</dd>
-                  </div>
-                )}
-                {context.safetyMarginTokens !== undefined && (
-                  <div>
-                    <dt>安全余量</dt>
-                    <dd>{formatTokens(context.safetyMarginTokens)}</dd>
-                  </div>
-                )}
+                <div>
+                  <dt>历史消息</dt>
+                  <dd>{context.modelHistory.messageCount} 条</dd>
+                </div>
                 <div>
                   <dt>压缩</dt>
-                  <dd>
-                    {context.compactedCount === undefined ? "未知" : `${context.compactedCount} 次`}
-                  </dd>
+                  <dd>{context.modelHistory.compactedCount} 次</dd>
                 </div>
               </dl>
-              {context.latestCompaction && (
-                <details>
-                  <summary>最近压缩 · 覆盖 {context.latestCompaction.coveredEventCount} 条</summary>
-                  <p className="tool-panel__muted">
-                    压缩记录 <code>{context.latestCompaction.checkpointId}</code>
-                  </p>
-                  <p className="tool-panel__muted">
-                    覆盖边界 <code>{context.latestCompaction.throughEventId}</code>
-                  </p>
-                </details>
-              )}
-              {usage !== undefined && (
-                <div
-                  className="tool-panel__progress"
-                  role="progressbar"
-                  aria-label="上下文使用率"
-                  aria-valuemin={0}
-                  aria-valuemax={100}
-                  aria-valuenow={Math.round(usage)}
-                >
-                  <span style={{ width: `${usage}%` }} />
-                </div>
-              )}
-              {context.sections && context.sections.length > 0 && (
-                <ul className="tool-panel__compact-list" aria-label="上下文组成">
-                  {context.sections.map((section) => (
-                    <li key={section.id} data-state={section.state ?? "unknown"}>
-                      <span>{section.label}</span>
-                      <small>{formatTokens(section.tokens)}</small>
-                    </li>
-                  ))}
-                </ul>
-              )}
+              <details>
+                <summary>历史投影详情</summary>
+                <p className="tool-panel__muted">
+                  读取水位 {context.modelHistory.throughSequence} · 算法{" "}
+                  {context.modelHistory.estimationAlgorithm}
+                </p>
+                {context.modelHistory.latestCompaction && (
+                  <>
+                    <p className="tool-panel__muted">
+                      最近压缩 · 覆盖 {context.modelHistory.latestCompaction.coveredEventCount} 条
+                    </p>
+                    <p className="tool-panel__muted">
+                      压缩记录 <code>{context.modelHistory.latestCompaction.checkpointId}</code>
+                    </p>
+                    <p className="tool-panel__muted">
+                      覆盖边界 <code>{context.modelHistory.latestCompaction.throughEventId}</code>
+                    </p>
+                  </>
+                )}
+              </details>
             </>
           )}
         </section>
-
-        <ContextComposition request={context?.latestRequest} />
 
         {execution ? (
           <ExecutionTraceTimeline

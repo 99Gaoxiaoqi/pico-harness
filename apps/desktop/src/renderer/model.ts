@@ -10,6 +10,7 @@ import type {
   RuntimeOrchestrationMode,
   RuntimePermissionMode,
   RuntimeSubagentSettingsSnapshot,
+  RuntimeSessionContextSnapshot,
 } from "@pico/protocol";
 
 export type JsonRecord = Readonly<Record<string, unknown>>;
@@ -84,19 +85,7 @@ export interface ConversationView {
   readonly loadError?: string | undefined;
 }
 
-export interface SessionContextView {
-  readonly routeId: string;
-  readonly coverage?: "model_history_only";
-  readonly estimatedHistoryTokens?: number;
-  readonly estimatedInputTokens?: number;
-  readonly contextWindowTokens: number;
-  readonly reservedOutputTokens: number;
-  readonly safetyMarginTokens: number;
-  readonly inputBudgetTokens: number;
-  readonly remainingTokens?: number;
-  readonly usedPercent?: number;
-  readonly estimation: string;
-}
+export type SessionContextView = RuntimeSessionContextSnapshot;
 
 export interface SessionSettingsView {
   readonly modelRouteId: string;

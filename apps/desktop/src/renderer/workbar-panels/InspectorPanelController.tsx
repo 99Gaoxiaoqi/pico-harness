@@ -215,25 +215,7 @@ export function InspectorPanelController({
 }
 
 export function contextView(context: RuntimeSessionContextSnapshot): InspectorContextSnapshot {
-  return {
-    version: context.version,
-    ...(context.coverage ? { coverage: context.coverage } : {}),
-    estimatedHistoryTokens: numberField(context, "estimatedHistoryTokens"),
-    modelHistoryMessageCount: numberField(context, "modelHistoryMessageCount"),
-    ...(context.latestCompaction ? { latestCompaction: context.latestCompaction } : {}),
-    ...(context.sections ? { sections: context.sections } : {}),
-    ...(context.latestRequest ? { latestRequest: context.latestRequest } : {}),
-    routeId: stringField(context, "routeId"),
-    estimatedInputTokens: numberField(context, "estimatedInputTokens"),
-    inputBudgetTokens: numberField(context, "inputBudgetTokens"),
-    remainingTokens: numberField(context, "remainingTokens"),
-    contextWindowTokens: numberField(context, "contextWindowTokens"),
-    reservedOutputTokens: numberField(context, "reservedOutputTokens"),
-    safetyMarginTokens: numberField(context, "safetyMarginTokens"),
-    usedPercent: numberField(context, "usedPercent"),
-    compactedCount: numberField(context, "compactedCount"),
-    estimation: context["estimation"] === "estimated" ? "estimated" : "unknown",
-  };
+  return context;
 }
 
 interface ParsedTracePage {
