@@ -1,4 +1,4 @@
-import { querySessionExecution } from "./session-execution-query.js";
+import { querySessionExecution, querySessionExecutionSummary } from "./session-execution-query.js";
 import { projectDeepResearchProgress } from "@pico/core/deep-research";
 import { SqliteDeepResearchStore } from "@pico/storage";
 import {
@@ -721,6 +721,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         "session.artifacts.command": this.commandSessionArtifacts.bind(this),
         "session.trace.query": this.querySessionTrace.bind(this),
         "session.execution.query": this.querySessionExecution.bind(this),
+        "session.execution.summary": this.querySessionExecutionSummary.bind(this),
         "session.graph.query": this.querySessionGraph.bind(this),
         "session.graph.retryWake": this.retrySessionGraphWake.bind(this),
         "session.graph.stop": this.stopSessionGraph.bind(this),
@@ -1765,6 +1766,16 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       );
     }
     return toJsonValue(result);
+  }
+
+  private async querySessionExecutionSummary(
+    params: RuntimeRequest<"session.execution.summary">["params"],
+  ): Promise<JsonValue> {
+    const canonical = await this.requireTrustedSession(params.workspacePath, params.sessionId);
+    const storageRoot = resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.root;
+    return this.withWorkbarErrors(() =>
+      toJsonValue(querySessionExecutionSummary(storageRoot, { sessionId: params.sessionId })),
+    );
   }
 
   private async querySessionExecution(
