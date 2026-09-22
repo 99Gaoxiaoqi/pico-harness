@@ -3,7 +3,7 @@ import type {
   RuntimeExecutionSummary,
   RuntimeSessionContextSnapshot,
 } from "@pico/protocol";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   InspectorWorkbarPanel,
   type InspectorContextSnapshot,
@@ -121,7 +121,7 @@ export function InspectorPanelController({
     [runtime, scope],
   );
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     generation.current += 1;
     pageCount.current = 1;
     setPages([]);
