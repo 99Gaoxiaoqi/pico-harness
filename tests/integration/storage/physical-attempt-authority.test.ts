@@ -223,132 +223,6 @@ test("CostTracker awaits admission, freezes attribution for late revisions, and 
   }
 });
 
-test("legacy embedded evidence and empty coverage outrank logical totals before and after repeated migration", async () => {
-  const { Session } = await import("@pico/pico-host/session");
-  const { RuntimeRun } = await import("@pico/pico-host/product-runtime-run");
-  const { createEngineRuntimePort } = await import("@pico/pico-host/engine-runtime-port-adapter");
-  const root = await mkdtemp(join(tmpdir(), "pico-meter-legacy-"));
-  const session = new Session("legacy", root, {
-    persistence: true,
-    picoHome: join(root, "home"),
-    runtimeStorageRoot: root,
-    runtimePort: createEngineRuntimePort(),
-  });
-  const ledger = new SqliteRuntimeControlStore({ storageRoot: root });
-  try {
-    await session.recover();
-    const run = await RuntimeRun.start({
-      capability: session.runtimeEventCapability!,
-      agentSwarmAuthorization: "none",
-    });
-    await run.run(async () => {
-      for (const callId of ["legacy-call", "empty-call"]) {
-        await run.recordModelCallStarted({ providerCallId: callId, purpose: "main" });
-        await run.recordModelCallSettled({
-          providerCallId: callId,
-          status: "succeeded",
-          latencyMs: 1,
-          attempts:
-            callId === "empty-call"
-              ? []
-              : [
-                  {
-                    attemptId: "old-physical",
-                    attempt: 1,
-                    provider: "openai",
-                    model: "test",
-                    startedAt: snapshot.startedAt,
-                    completedAt: snapshot.startedAt,
-                    status: "succeeded",
-                    latencyMs: 1,
-                    usageBasis: "reported",
-                    usage: { promptTokens: 7, completionTokens: 2 },
-                    costCNY: 0.1,
-                    costStatus: "estimated",
-                  },
-                ],
-          attemptCoverage: "partial",
-        });
-        ledger.recordProviderCall({
-          callId,
-          sessionId: session.id,
-          purpose: "main",
-          provider: "openai",
-          model: "test",
-          status: "succeeded",
-          inputTokens: 999,
-          outputTokens: 999,
-          cacheReadTokens: 0,
-          cacheWriteTokens: 0,
-          cost: 999,
-        });
-      }
-    });
-    assert.equal(ledger.getUsageSummary({ sessionId: session.id }).total.inputTokens, 7);
-    assert.equal(ledger.migrateLegacyPhysicalAttempts(), 1);
-    assert.equal(ledger.migrateLegacyPhysicalAttempts(), 0);
-    assert.equal(ledger.listPhysicalAttempts()[0]?.attemptCoverage, "partial");
-    assert.equal(ledger.getUsageSummary({ sessionId: session.id }).total.inputTokens, 7);
-    const hydration = await session.readHydrationSnapshot();
-    assert.equal(hydration.runtime.usage.totalPromptTokens, 7);
-    await session.runtimeEventStore!.deleteSession(session.id);
-    assert.equal(ledger.getUsageSummary().total.inputTokens, 7);
-  } finally {
-    await session.close();
-    ledger.close();
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("control migration writes and verifies a readable pre-migration backup", async () => {
-  const { ALL_WORKSPACE_SQLITE_SCOPES } = await import("@pico/storage/sqlite/workspace-scopes");
-  const { prepareWorkspaceSqliteStorageSync } =
-    await import("@pico/storage/sqlite/sqlite-workspace-storage");
-  const { DatabaseSync } = await import("node:sqlite");
-  const root = await mkdtemp(join(tmpdir(), "pico-meter-upgrade-"));
-  try {
-    const oldScopes = ALL_WORKSPACE_SQLITE_SCOPES.map((scope) =>
-      scope.name === "control"
-        ? {
-            ...scope,
-            migrations: new Map([...scope.migrations].filter(([version]) => version < 4)),
-          }
-        : scope,
-    );
-    const old = prepareWorkspaceSqliteStorageSync(root, oldScopes);
-    old.lease.release();
-    const upgraded = new SqliteRuntimeControlStore({ storageRoot: root });
-    upgraded.close();
-    const backup = new DatabaseSync(join(root, "pico.control-v3-before-physical.sqlite"), {
-      readOnly: true,
-    });
-    try {
-      assert.equal(
-        (backup.prepare("PRAGMA quick_check").get() as { quick_check: string }).quick_check,
-        "ok",
-      );
-      assert.equal(
-        (
-          backup
-            .prepare("SELECT version FROM operational_schema_migrations WHERE scope = 'control'")
-            .get() as { version: number }
-        ).version,
-        3,
-      );
-      assert.equal(
-        backup
-          .prepare("SELECT name FROM sqlite_schema WHERE name = 'usage_physical_attempts'")
-          .get(),
-        undefined,
-      );
-    } finally {
-      backup.close();
-    }
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
 test("same logical call with unreported HTTP 503 and successful outer retry retains partial coverage", async () => {
   const { createModelUsageReport } = await import("@pico/runtime/provider/model-runtime-report");
   const { resolveModelRouteCapabilities } = await import("@pico/runtime");
@@ -411,78 +285,6 @@ test("same logical call with unreported HTTP 503 and successful outer retry reta
     assert.equal(report.cost.cny, 0.02);
   } finally {
     store.close();
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("legacy migration recovers auxiliary purpose from matching start and never invents main attribution", async () => {
-  const { Session } = await import("@pico/pico-host/session");
-  const { RuntimeRun } = await import("@pico/pico-host/product-runtime-run");
-  const { createEngineRuntimePort } = await import("@pico/pico-host/engine-runtime-port-adapter");
-  const root = await mkdtemp(join(tmpdir(), "pico-meter-legacy-purpose-"));
-  const session = new Session("legacy-purpose", root, {
-    persistence: true,
-    picoHome: join(root, "home"),
-    runtimeStorageRoot: root,
-    runtimePort: createEngineRuntimePort(),
-  });
-  const ledger = new SqliteRuntimeControlStore({ storageRoot: root });
-  try {
-    await session.recover();
-    const run = await RuntimeRun.start({
-      capability: session.runtimeEventCapability!,
-      agentSwarmAuthorization: "none",
-    });
-    await run.run(async () => {
-      await run.recordModelCallStarted({ providerCallId: "aux-call", purpose: "aux" });
-      for (const providerCallId of ["aux-call", "unknown-call"]) {
-        await run.recordModelCallSettled({
-          providerCallId,
-          status: "succeeded",
-          latencyMs: 1,
-          attempts: [
-            {
-              attemptId: providerCallId,
-              attempt: 1,
-              provider: "openai",
-              model: "test",
-              startedAt: snapshot.startedAt,
-              completedAt: snapshot.startedAt,
-              status: "succeeded",
-              latencyMs: 1,
-              usageBasis: "reported",
-              usage: { promptTokens: 7, completionTokens: 2 },
-            },
-          ],
-          attemptCoverage: "complete",
-        });
-      }
-    });
-    assert.deepEqual(
-      ledger
-        .listAccountingProviderCalls({ sessionId: session.id })
-        .map((call) => call.purpose)
-        .sort(),
-      ["aux", "legacy_unknown"],
-    );
-    assert.equal(ledger.migrateLegacyPhysicalAttempts(), 2);
-    assert.equal(ledger.migrateLegacyPhysicalAttempts(), 0);
-    assert.deepEqual(
-      ledger
-        .listPhysicalAttempts({ sessionId: session.id })
-        .map((call) => call.purpose)
-        .sort(),
-      ["aux", "legacy_unknown"],
-    );
-    assert.equal(
-      ledger
-        .listPhysicalAttempts({ sessionId: session.id })
-        .some((call) => call.purpose === "main"),
-      false,
-    );
-  } finally {
-    await session.close();
-    ledger.close();
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -563,17 +365,16 @@ test("partial Claude usage ignores unreported intermediate counts and never mark
   }
 });
 
-test("control 5 freezes proven old baseline overlap and preserves residual history across migration and retention", async () => {
+test("control 6 deletes legacy usage and model traces, preserves native facts and chat, and never resurrects on reopen", async () => {
   const { ALL_WORKSPACE_SQLITE_SCOPES } = await import("@pico/storage/sqlite/workspace-scopes");
   const { prepareWorkspaceSqliteStorageSync } =
     await import("@pico/storage/sqlite/sqlite-workspace-storage");
   const { openOperationalDatabaseReadOnly } = await import("@pico/storage");
-  const { DatabaseSync } = await import("node:sqlite");
-  const root = await mkdtemp(join(tmpdir(), "pico-meter-baseline-offset-"));
-  const before = "2026-09-20T00:00:00.000Z";
-  const after = "2026-09-22T00:00:00.000Z";
-  const importedAt = Date.parse("2026-09-21T00:00:00.000Z");
+  const { coordinateEventLogHardCut } =
+    await import("../../../packages/storage/src/event-log-hard-cut-coordinator.js");
+  const root = await mkdtemp(join(tmpdir(), "pico-native-only-migration-"));
   let ledger: SqliteRuntimeControlStore | undefined;
+  const at = snapshot.startedAt;
   try {
     const old = prepareWorkspaceSqliteStorageSync(
       root,
@@ -581,168 +382,203 @@ test("control 5 freezes proven old baseline overlap and preserves residual histo
         scope.name === "control"
           ? {
               ...scope,
-              migrations: new Map([...scope.migrations].filter(([version]) => version <= 4)),
+              migrations: new Map([...scope.migrations].filter(([version]) => version <= 5)),
             }
           : scope,
       ),
     );
     try {
       const db = old.lease.database;
-      db.prepare(
-        "INSERT INTO control_metadata(key,value_json) VALUES ('revision','0'),('nextRuntimeEventSequence','1')",
-      ).run();
-      const { coordinateEventLogHardCut } =
-        await import("../../../packages/storage/src/event-log-hard-cut-coordinator.js");
       coordinateEventLogHardCut(db);
       db.prepare(
-        "INSERT INTO sessions(session_id, work_dir, created_at, updated_at) VALUES ('old', ?, ?, ?)",
-      ).run(root, before, before);
-      db.prepare("UPDATE sessions SET archived_at = 1 WHERE session_id = 'old'").run();
-      let sequence = 0;
-      for (const [callId, promptTokens, embedded, committedAt] of [
-        ["logical", 7, false, before],
-        ["embedded", 5, true, before],
-        ["covered", 4, false, before],
-        ["late-event", 9, false, after],
-      ] as const) {
-        const data = {
-          providerCallId: callId,
+        "INSERT INTO sessions(session_id,work_dir,created_at,updated_at) VALUES ('session-1',?,?,?)",
+      ).run(root, at, at);
+      db.prepare("INSERT INTO runtime_owner_fences VALUES ('session-1',0,?)").run(at);
+      db.prepare(
+        "INSERT INTO runtime_transcript_projection_state VALUES ('session-1','old-epoch',1,8,0)",
+      ).run();
+
+      db.prepare(
+        "INSERT INTO usage_baselines(baseline_id,session_id,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,cost,imported_at) VALUES ('old','session-1',999,999,0,0,999,1)",
+      ).run();
+      db.prepare("INSERT INTO usage_baseline_adjustments VALUES ('old',1,10,1,0,0,1)").run();
+      for (const source of ["physical", "legacy_embedded"]) {
+        const id = source === "physical" ? "call-1" : "legacy-call";
+        const native = {
+          ...record("owner"),
+          physicalAttemptId: source,
+          providerCallId: id,
+          accountingSource: source,
           status: "succeeded",
-          latencyMs: 1,
-          usage: { promptTokens, completionTokens: 1 },
-          ...(embedded
-            ? {
-                attemptCoverage: "complete",
-                attempts: [
-                  {
-                    attemptId: callId,
-                    attempt: 0,
-                    provider: "openai",
-                    model: "test",
-                    startedAt: before,
-                    completedAt: before,
-                    status: "succeeded",
-                    latencyMs: 1,
-                    usageBasis: "reported",
-                    usage: { promptTokens, completionTokens: 1 },
-                  },
-                ],
-              }
-            : {}),
-        };
-        const event = {
-          schemaVersion: 2,
-          eventId: callId,
-          sessionId: "old",
-          invocationId: "old",
-          runId: "old",
-          turnId: "old",
-          at: before,
-          partial: false,
-          visibility: "internal",
-          kind: "model.call.settled",
-          data,
+          usageBasis: "reported",
+          usage: { promptTokens: 7, completionTokens: 2, reportedFields: ["prompt", "completion"] },
         };
         db.prepare(
-          "INSERT INTO runtime_events(event_id, session_id, invocation_id, run_id, turn_id, event_seq, kind, visibility, partial, tx_id, provider_call_id, payload_json, at, committed_at) VALUES (?, 'old', 'old', 'old', 'old', ?, 'model.call.settled', 'internal', 0, 'old', ?, ?, ?, ?)",
-        ).run(callId, ++sequence, callId, JSON.stringify(event), before, committedAt);
+          "INSERT INTO usage_physical_attempts(physical_attempt_id,provider_call_id,session_id,run_id,owner_id,revision,status,created_at,record_json) VALUES (?,?,'session-1','run-1','owner',0,'succeeded',?,?)",
+        ).run(source, id, at, JSON.stringify(native));
+        db.prepare("INSERT INTO usage_attempt_revisions VALUES (?,0,'hash')").run(source);
+        db.prepare("INSERT INTO usage_accounting_calls VALUES (?,?,'complete')").run(id, source);
       }
+      let seq = 0;
+      for (const id of ["call-1", "legacy-call", "logical-call"]) {
+        db.prepare(
+          "INSERT INTO usage_provider_calls(call_id,tx_id,session_id,purpose,provider,model,status,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,cost,created_at) VALUES (?,'tx','session-1','main','openai','test','succeeded',999,999,0,0,999,1)",
+        ).run(id);
+        for (const kind of ["model.call.started", "model.call.settled"]) {
+          const data = kind.endsWith("started")
+            ? { providerCallId: id, purpose: "main" }
+            : {
+                providerCallId: id,
+                status: "succeeded",
+                latencyMs: 1,
+                usage: { promptTokens: 999, completionTokens: 999 },
+              };
+          const eventId = `${id}:${kind}`;
+          const event = {
+            schemaVersion: 2,
+            eventId,
+            sessionId: "session-1",
+            invocationId: "run-1",
+            runId: "run-1",
+            turnId: "turn-1",
+            at,
+            partial: false,
+            visibility: "internal",
+            kind,
+            data,
+          };
+          db.prepare(
+            "INSERT INTO runtime_events(event_id,session_id,invocation_id,run_id,turn_id,event_seq,kind,visibility,partial,tx_id,provider_call_id,payload_json,at,committed_at) VALUES (?,'session-1','run-1','run-1','turn-1',?,?,'internal',0,'tx',?,?,?,?)",
+          ).run(eventId, ++seq, kind, id, JSON.stringify(event), at, at);
+        }
+      }
+      const chat = {
+        schemaVersion: 2,
+        eventId: "chat",
+        sessionId: "session-1",
+        invocationId: "run-1",
+        runId: "run-1",
+        turnId: "turn-1",
+        at,
+        partial: false,
+        visibility: "model",
+        kind: "message.committed",
+        data: { message: { role: "user", content: "keep my conversation" } },
+      };
       db.prepare(
-        "INSERT INTO usage_provider_calls(call_id,tx_id,session_id,purpose,provider,model,status,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,cost,created_at) VALUES ('covered','old','old','main','openai','test','succeeded',4,1,0,0,0,?)",
-      ).run(Date.parse(before));
+        "INSERT INTO runtime_events(event_id,session_id,invocation_id,run_id,turn_id,event_seq,kind,visibility,partial,tx_id,payload_json,at,committed_at) VALUES ('chat','session-1','run-1','run-1','turn-1',?,'message.committed','model',0,'tx',?,?,?)",
+      ).run(++seq, JSON.stringify(chat), at, at);
       db.prepare(
-        "INSERT INTO usage_baselines(baseline_id,session_id,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,cost,imported_at,source_json) VALUES ('session-usage-v1:old','old',15,3,0,0,0,?,?)",
-      ).run(
-        importedAt,
-        JSON.stringify({
-          kind: "session_runtime_usage",
-          version: 1,
-          providerCallsAlreadyDetailed: 1,
-        }),
-      );
+        "INSERT INTO runtime_events SELECT 'legacy-tail', session_id, invocation_id, run_id, turn_id, ?, kind, visibility, partial, tx_id, tool_call_id, provider_call_id, operation_id, json_set(payload_json,'$.eventId','legacy-tail'), at, committed_at FROM runtime_events WHERE event_id='legacy-call:model.call.started'",
+      ).run(++seq);
+      db.prepare(
+        "UPDATE sessions SET last_event_seq=?,event_count=?,storage_bytes=(SELECT SUM(length(payload_json)) FROM runtime_events) WHERE session_id='session-1'",
+      ).run(seq, seq);
     } finally {
       old.lease.release();
     }
-    ledger = new SqliteRuntimeControlStore({ storageRoot: root });
-    assert.equal(ledger.getUsageSummary({ sessionId: "old" }).total.inputTokens, 28);
-    assert.equal(ledger.listUsageBaselines({ sessionId: "old" })[0]!.inputTokens, 3);
-    assert.equal(
-      ledger
-        .listAccountingProviderCalls({ sessionId: "old" })
-        .filter((call) => call.reported?.["accountingSource"] === "legacy_event").length,
-      2,
-    );
-    const db = openOperationalDatabaseReadOnly(root);
-    try {
-      assert.equal(
-        (db.prepare("SELECT input_tokens FROM usage_baselines").get() as { input_tokens: number })
-          .input_tokens,
-        15,
+    for (let reopen = 0; reopen < 2; reopen++) {
+      ledger = new SqliteRuntimeControlStore({ storageRoot: root });
+      assert.equal(ledger.getUsageSummary().total.inputTokens, 7);
+      assert.equal(ledger.getAccountingSessionUsage("missing").totalPromptTokens, 0);
+      assert.deepEqual(
+        ledger.listPhysicalAttempts().map((row) => row.accountingSource),
+        ["physical"],
       );
-      assert.equal(
-        (
-          db.prepare("SELECT input_tokens FROM usage_baseline_adjustments").get() as {
-            input_tokens: number;
-          }
-        ).input_tokens,
-        12,
+      assert.deepEqual(
+        ledger.listProviderCalls().map((row) => row.callId),
+        ["call-1"],
       );
-    } finally {
-      db.close();
+      const db = openOperationalDatabaseReadOnly(root);
+      try {
+        assert.deepEqual(
+          db
+            .prepare("SELECT event_id FROM runtime_events ORDER BY event_seq")
+            .all()
+            .map((row) => row.event_id),
+          ["call-1:model.call.started", "call-1:model.call.settled", "chat"],
+        );
+        assert.equal(db.prepare("SELECT COUNT(*) AS n FROM sessions").get()!.n, 1);
+        assert.notEqual(
+          db.prepare("SELECT history_epoch FROM runtime_transcript_projection_state").get()!
+            .history_epoch,
+          "old-epoch",
+        );
+        assert.equal(
+          db.prepare("SELECT through_sequence FROM runtime_transcript_projection_state").get()!
+            .through_sequence,
+          7,
+        );
+
+        assert.equal(db.prepare("SELECT COUNT(*) AS n FROM usage_attempt_revisions").get()!.n, 1);
+        assert.equal(db.prepare("SELECT COUNT(*) AS n FROM usage_accounting_calls").get()!.n, 1);
+        assert.equal(
+          db
+            .prepare(
+              "SELECT COUNT(*) AS n FROM sqlite_schema WHERE name IN ('usage_baselines','usage_baseline_adjustments','usage_effective_baselines','usage_baseline_reconcile')",
+            )
+            .get()!.n,
+          0,
+        );
+        assert.match(
+          String(
+            db.prepare("SELECT payload_json FROM runtime_events WHERE event_id='chat'").get()!
+              .payload_json,
+          ),
+          /keep my conversation/,
+        );
+      } finally {
+        db.close();
+      }
+      const events = new SqliteRuntimeEventStore({ storageRoot: root });
+      try {
+        const current = await events.readTranscriptWatermark("session-1");
+        await assert.rejects(
+          events.readTranscriptProjectionPage({
+            sessionId: "session-1",
+            through: { ...current, historyEpoch: "old-epoch", throughSequence: 8 },
+            maxBytes: 65536,
+          }),
+          { code: "RESET_REQUIRED" },
+        );
+        const catalog = await events.findSessionCatalogEntry("session-1");
+        assert.equal(catalog?.headEventCount, 3);
+        assert.equal(catalog?.fold.headSequence, 7);
+        assert.equal(
+          (await events.readSessionMessages("session-1"))[0]?.content,
+          "keep my conversation",
+        );
+        assert.equal((await events.getHeadCursor("session-1"))?.seq, 7);
+        assert.equal((await events.readSessionProjection("session-1"))?.entries.length, 3);
+      } finally {
+        events.close();
+      }
+      ledger.close();
     }
-    const backup = new DatabaseSync(
-      join(root, "pico.control-v4-before-baseline-reconciliation.sqlite"),
-      { readOnly: true },
-    );
+    const events = new SqliteRuntimeEventStore({ storageRoot: root });
     try {
-      assert.equal(
-        (
-          backup
-            .prepare("SELECT version FROM operational_schema_migrations WHERE scope='control'")
-            .get() as { version: number }
-        ).version,
-        4,
+      const ownerFence = await events.advanceOwnerFence("session-1", 0);
+      const appended = await events.append(
+        {
+          schemaVersion: 2,
+          eventId: "new-chat",
+          sessionId: "session-1",
+          invocationId: "run-1",
+          runId: "run-1",
+          turnId: "turn-1",
+          at,
+          partial: false,
+          visibility: "model",
+          kind: "message.committed",
+          data: { message: { role: "user", content: "new conversation" } },
+        },
+        { ownerFence },
       );
+      assert.equal(appended.cursor.seq, 8);
+      assert.equal((await events.findSessionCatalogEntry("session-1"))?.headEventCount, 4);
     } finally {
-      backup.close();
+      events.close();
     }
-    ledger.migrateLegacyPhysicalAttempts("old");
-    const epoch = ledger.getAccountingRevision();
-    ledger.migrateLegacyPhysicalAttempts("old");
-    assert.equal(ledger.getAccountingRevision(), epoch);
-    ledger.close();
-    ledger = new SqliteRuntimeControlStore({ storageRoot: root });
-    assert.equal(ledger.getUsageSummary({ sessionId: "old" }).total.inputTokens, 28);
-    const { enforceEventLogRetention } =
-      await import("@pico/storage/sqlite/event-log-retention-store");
-    const retention = enforceEventLogRetention({
-      storageRoot: root,
-      policy: { hardLimitBytes: 2, lowWatermarkBytes: 1 },
-    });
-    assert.deepEqual(retention.deletedSessionIds, ["old"]);
-    assert.equal(ledger.getUsageSummary().total.inputTokens, 28);
-    assert.equal(ledger.listUsageBaselines()[0]!.inputTokens, 3);
-    ledger.close();
-    ledger = new SqliteRuntimeControlStore({ storageRoot: root });
-    assert.equal(ledger.getUsageSummary().total.inputTokens, 28);
-    const v2 = {
-      baselineId: "v2",
-      sessionId: "new",
-      inputTokens: 6,
-      outputTokens: 1,
-      cacheReadTokens: 0,
-      cacheWriteTokens: 0,
-      cost: 0,
-      importedAt,
-      source: { kind: "session_runtime_usage", version: 2 },
-    };
-    const revision = ledger.getAccountingRevision();
-    ledger.putUsageBaseline(v2);
-    assert.ok(ledger.getAccountingRevision() > revision);
-    const insertedRevision = ledger.getAccountingRevision();
-    ledger.putUsageBaseline(v2);
-    assert.equal(ledger.getAccountingRevision(), insertedRevision);
-    assert.equal(ledger.getUsageSummary({ sessionId: "new" }).total.inputTokens, 6);
   } finally {
     ledger?.close();
     await rm(root, { recursive: true, force: true });

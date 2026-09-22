@@ -3,7 +3,6 @@ import {
   toCanonicalUsage,
   type SessionUsageSnapshot,
   type Usage,
-  type RuntimeModelCallSettledEvent,
 } from "@pico/core";
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
@@ -35,7 +34,6 @@ import {
   type RuntimeLeaseRecord,
   type RuntimeNotificationEventRecord,
   type RuntimeNotificationLedgerJsonValue,
-  type UsageBaselineRecord,
   type UsageLedgerFilter,
   type UsageLedgerSummary,
   type UsageLedgerTotals,
@@ -1707,167 +1705,6 @@ export class SqliteRuntimeControlStore {
     ).map(rowToMerge);
   }
 
-  /** Idempotent upgrade of existing settled evidence; never invents physical requests from logical usage. */
-  private listLegacyPhysicalAttempts(filter: UsageLedgerFilter = {}): PhysicalAttemptRecord[] {
-    return this.read(() => {
-      const records: PhysicalAttemptRecord[] = [];
-      const filterClauses: string[] = [];
-      const filterParams: unknown[] = [];
-      if (filter.sessionId !== undefined) {
-        filterClauses.push("e.session_id = ?");
-        filterParams.push(filter.sessionId);
-      }
-      if (filter.goalId !== undefined) {
-        filterClauses.push("c.goal_id = ?");
-        filterParams.push(filter.goalId);
-      }
-      if (filter.jobId !== undefined) {
-        filterClauses.push("c.job_id = ?");
-        filterParams.push(filter.jobId);
-      }
-      const rows = this.allRows(
-        `SELECT e.session_id, e.run_id, e.turn_id,
-        json_extract(e.payload_json, '$.data') AS data_json,
-        c.reported_json, c.purpose, c.route, c.goal_id, c.job_id, c.attempt_id, c.conversation_id,
-        (SELECT json_extract(started.payload_json, '$.data.purpose') FROM runtime_events started
-          WHERE started.session_id = e.session_id AND started.run_id = e.run_id
-            AND started.kind = 'model.call.started'
-            AND json_extract(started.payload_json, '$.data.providerCallId') = json_extract(e.payload_json, '$.data.providerCallId')
-          ORDER BY started.event_seq DESC LIMIT 1) AS started_purpose
-        FROM runtime_events e LEFT JOIN usage_provider_calls c ON c.call_id = e.provider_call_id
-        WHERE e.kind = 'model.call.settled' AND json_type(e.payload_json, '$.data.attempts') = 'array'
-        AND NOT EXISTS (SELECT 1 FROM usage_physical_attempts p WHERE p.provider_call_id = json_extract(e.payload_json, '$.data.providerCallId'))${filterClauses.length ? ` AND ${filterClauses.join(" AND ")}` : ""}`,
-        ...filterParams,
-      );
-      for (const row of rows) {
-        const data = JSON.parse(
-          textField(row, "data_json"),
-        ) as RuntimeModelCallSettledEvent["data"];
-        const seen = new Set<string>();
-        for (const attempt of data.attempts ?? []) {
-          if (seen.has(attempt.attemptId))
-            throw new RuntimeConflictError("Duplicate legacy physical attempt identity");
-          seen.add(attempt.attemptId);
-          const { attemptId, ...snapshot } = attempt;
-          const physicalAttemptId = `legacy:${createHash("sha256").update(`${data.providerCallId}\0${attemptId}`).digest("hex")}`;
-          const record: PhysicalAttemptRecord = compact({
-            ...snapshot,
-            physicalAttemptId,
-            revision: 0,
-            accountingVersion: 1,
-            accountingSource: "legacy_embedded",
-            ownerId: "legacy-embedded-v1",
-            providerCallId: data.providerCallId,
-            logicalCallId: data.logicalCallId ?? data.providerCallId,
-            sessionId: textField(row, "session_id"),
-            runId: textField(row, "run_id"),
-            turnId: textField(row, "turn_id"),
-            conversationId: optionalTextField(row, "conversation_id"),
-            goalId: optionalTextField(row, "goal_id"),
-            jobId: optionalTextField(row, "job_id"),
-            jobAttemptId: optionalTextField(row, "attempt_id"),
-            purpose: (optionalTextField(row, "purpose") ??
-              optionalTextField(row, "started_purpose") ??
-              "legacy_unknown") as PhysicalAttemptRecord["purpose"],
-            route: optionalTextField(row, "route"),
-            retryAttempt: data.retryAttempt ?? 0,
-            costStatus: attempt.costStatus ?? "unknown",
-            pricingVersion: "legacy-recorded-v1",
-            attemptCoverage: data.attemptCoverage ?? "partial",
-          });
-          records.push(record);
-        }
-      }
-      return records;
-    });
-  }
-
-  private listLegacyLogicalCalls(filter: UsageLedgerFilter = {}): ProviderCallRecord[] {
-    if (filter.goalId !== undefined || filter.jobId !== undefined) return [];
-    const rows = this.allRows(
-      `SELECT e.session_id, e.at, json_extract(e.payload_json, '$.data') AS data_json,
-      (SELECT json_extract(s.payload_json, '$.data') FROM runtime_events s
-        WHERE s.session_id = e.session_id AND s.run_id = e.run_id AND s.kind = 'model.call.started'
-          AND json_extract(s.payload_json, '$.data.providerCallId') = json_extract(e.payload_json, '$.data.providerCallId')
-        ORDER BY s.event_seq DESC LIMIT 1) AS started_data
-      FROM runtime_events e WHERE e.kind = 'model.call.settled'
-        AND COALESCE(json_type(e.payload_json, '$.data.attempts'), '') != 'array'
-        AND NOT EXISTS (SELECT 1 FROM usage_provider_calls c WHERE c.call_id = json_extract(e.payload_json, '$.data.providerCallId'))
-        AND NOT EXISTS (SELECT 1 FROM usage_accounting_calls c WHERE c.provider_call_id = json_extract(e.payload_json, '$.data.providerCallId'))
-        ${filter.sessionId !== undefined ? "AND e.session_id = ?" : ""}
-      ORDER BY e.at, e.event_seq`,
-      ...(filter.sessionId !== undefined ? [filter.sessionId] : []),
-    );
-    return rows.map((row) => {
-      const data = JSON.parse(textField(row, "data_json")) as RuntimeModelCallSettledEvent["data"];
-      const started = jsonRecordField(row, "started_data");
-      const basis = data.usage
-        ? !data.usage.reportedFields ||
-          (data.usage.reportedFields.includes("prompt") &&
-            data.usage.reportedFields.includes("completion"))
-          ? "reported"
-          : "partial"
-        : "missing";
-      const { fields, knownUsage, canonical } = reportedAccountingUsage(data.usage, basis);
-      return {
-        callId: data.providerCallId,
-        sessionId: textField(row, "session_id"),
-        purpose: (started?.["purpose"] ?? "legacy_unknown") as ProviderCallRecord["purpose"],
-        provider: String(started?.["provider"] ?? "unknown"),
-        model: String(started?.["model"] ?? "unknown"),
-        status: data.status,
-        inputTokens: canonical.inputTokens,
-        outputTokens: knownUsage.completionTokens,
-        cacheReadTokens: canonical.cacheReadTokens,
-        cacheWriteTokens: canonical.cacheWriteTokens,
-        cost: data.costCNY ?? 0,
-        createdAt: Date.parse(textField(row, "at")),
-        reported: {
-          accountingVersion: 1,
-          accountingSource: "legacy_event",
-          logicalCallId: data.logicalCallId ?? data.providerCallId,
-          providerCallId: data.providerCallId,
-          usageBasis: basis,
-          usageMetadata: data.usage ? "reported" : "unknown",
-          reportedFields: [...fields],
-          ...(fields.has("reasoning") ? { reasoningTokens: canonical.reasoningTokens } : {}),
-          costStatus: data.costStatus ?? "unknown",
-          latencyMs: data.latencyMs,
-          usage: data.usage,
-        },
-      };
-    });
-  }
-
-  /** Preserve selected legacy evidence before deleting its Runtime event source. */
-  preserveLegacyAccounting(sessionId?: string): void {
-    this.write(() => {
-      this.migrateLegacyPhysicalAttempts(sessionId);
-      for (const call of this.listLegacyLogicalCalls(sessionId === undefined ? {} : { sessionId }))
-        this.recordProviderCall(call);
-    });
-  }
-
-  migrateLegacyPhysicalAttempts(sessionId?: string): number {
-    return this.write(() => {
-      const records = this.listLegacyPhysicalAttempts(sessionId === undefined ? {} : { sessionId });
-      for (const row of this.allRows(
-        `SELECT session_id, json_extract(payload_json, '$.data.providerCallId') AS call_id, json_extract(payload_json, '$.data.attemptCoverage') AS coverage FROM runtime_events WHERE kind = 'model.call.settled' AND json_type(payload_json, '$.data.attempts') = 'array' AND (? IS NULL OR session_id = ?)`,
-        sessionId ?? null,
-        sessionId ?? null,
-      )) {
-        const inserted = this.mutate(
-          `INSERT OR IGNORE INTO usage_accounting_calls(provider_call_id, source, coverage) VALUES (?, 'legacy_embedded', ?)`,
-          textField(row, "call_id"),
-          optionalTextField(row, "coverage") ?? "partial",
-        );
-        if (inserted) this.bumpAccountingRevision(textField(row, "session_id"));
-      }
-      for (const record of records) this.writePhysicalAttemptSnapshot(record);
-      return records.length;
-    });
-  }
-
   /** Writer opt-in only: opening a reader never recovers another process's requests. */
   getAccountingRevision(): number {
     return this.read(() => this.readMetadataNumber(REVISION_KEY));
@@ -1880,7 +1717,6 @@ export class SqliteRuntimeControlStore {
         this.attemptOwnerId,
         process.pid,
       );
-      this.preserveLegacyAccounting();
       this.attemptOwnerRegistered = true;
       return this.attemptOwnerId;
     });
@@ -1929,6 +1765,8 @@ export class SqliteRuntimeControlStore {
     updated: boolean;
   } {
     return this.write(() => {
+      if (record.accountingSource !== "physical")
+        throw new RuntimeConflictError("Only native physical attempts may be recorded");
       if (
         !Number.isSafeInteger(record.revision) ||
         record.revision < 0 ||
@@ -2057,20 +1895,10 @@ export class SqliteRuntimeControlStore {
     });
   }
 
-  /** Accounting source selection is per provider call: physical snapshots replace logical records. */
-  /** Undefined preserves the pre-ledger Session baseline import path. */
-  getAccountingSessionUsage(sessionId: string): SessionUsageSnapshot | undefined {
+  /** Native physical attempts are the sole accounting authority, including an empty ledger. */
+  getAccountingSessionUsage(sessionId: string): SessionUsageSnapshot {
     return this.read(() => {
       const calls = this.listAccountingProviderCalls({ sessionId });
-      if (
-        !calls.length &&
-        !this.listUsageBaselines({ sessionId }).length &&
-        !this.getRow(
-          `SELECT 1 FROM runtime_events WHERE session_id = ? AND kind = 'model.call.settled' AND json_type(payload_json, '$.data.attempts') = 'array' LIMIT 1`,
-          sessionId,
-        )
-      )
-        return undefined;
       const totals = this.getUsageSummary({ sessionId }).total;
       const usage = createEmptyUsageSnapshot();
       usage.totalInputTokens = totals.inputTokens;
@@ -2084,17 +1912,12 @@ export class SqliteRuntimeControlStore {
       usage.totalProviderCalls = calls.length;
       for (const call of calls) {
         const reported = call.reported;
-        const basis = reported?.["usageBasis"];
         const rawUsage = reported?.["usage"] as Usage | undefined;
         const reportedFields =
           rawUsage?.reportedFields ?? (reported?.["reportedFields"] as string[] | undefined);
         const fields = new Set(reportedFields ?? []);
         const completeUsage = fields.has("prompt") && fields.has("completion");
-        const trustedLegacyUsage =
-          reportedFields === undefined &&
-          (basis === "reported" ||
-            (basis === undefined && reported?.["usageMetadata"] === "reported"));
-        if (completeUsage || trustedLegacyUsage) usage.totalUsageReports++;
+        if (completeUsage) usage.totalUsageReports++;
         if (fields.has("reasoning"))
           usage.totalReasoningTokens +=
             rawUsage?.reasoningTokens ?? Number(reported?.["reasoningTokens"] ?? 0);
@@ -2114,22 +1937,7 @@ export class SqliteRuntimeControlStore {
   }
 
   listAccountingProviderCalls(filter: UsageLedgerFilter = {}): ProviderCallRecord[] {
-    return this.read(() => {
-      const physical = [
-        ...this.listPhysicalAttempts(filter),
-        ...this.listLegacyPhysicalAttempts(filter),
-      ];
-      const replaced = new Set(physical.map((record) => record.providerCallId));
-      for (const row of this.allRows(
-        `SELECT provider_call_id FROM usage_accounting_calls UNION SELECT json_extract(payload_json, '$.data.providerCallId') AS provider_call_id FROM runtime_events WHERE kind = 'model.call.settled' AND json_type(payload_json, '$.data.attempts') = 'array'`,
-      ))
-        replaced.add(textField(row, "provider_call_id"));
-      return [
-        ...this.listProviderCalls(filter).filter((record) => !replaced.has(record.callId)),
-        ...physical.map((record) => physicalAccountingCall(record)),
-        ...this.listLegacyLogicalCalls(filter),
-      ];
-    });
+    return this.listPhysicalAttempts(filter).map(physicalAccountingCall);
   }
 
   recordProviderCall(record: Omit<ProviderCallRecord, "createdAt"> & { createdAt?: number }): {
@@ -2191,36 +1999,6 @@ export class SqliteRuntimeControlStore {
     });
   }
 
-  putUsageBaseline(record: UsageBaselineRecord): {
-    record: UsageBaselineRecord;
-    inserted: boolean;
-  } {
-    return this.write(() => {
-      const existingRow = this.getRow(
-        `SELECT * FROM usage_baselines WHERE baseline_id = ?`,
-        record.baselineId,
-      );
-      if (existingRow) return { record: rowToBaseline(existingRow), inserted: false };
-      this.mutate(
-        `INSERT INTO usage_baselines (baseline_id, session_id, goal_id, input_tokens,
-           output_tokens, cache_read_tokens, cache_write_tokens, cost, imported_at, source_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        record.baselineId,
-        record.sessionId ?? null,
-        record.goalId ?? null,
-        record.inputTokens,
-        record.outputTokens,
-        record.cacheReadTokens,
-        record.cacheWriteTokens,
-        record.cost,
-        record.importedAt,
-        record.source === undefined ? null : canonicalJson(record.source),
-      );
-      this.bumpAccountingRevision(record.sessionId);
-      return { record, inserted: true };
-    });
-  }
-
   listProviderCalls(filter: UsageLedgerFilter = {}): ProviderCallRecord[] {
     return this.read(() => {
       const { clauses, params } = usageCallFilterClauses(filter);
@@ -2229,17 +2007,6 @@ export class SqliteRuntimeControlStore {
         `SELECT * FROM usage_provider_calls${where} ORDER BY created_at, call_id`,
         ...params,
       ).map(rowToProviderCall);
-    });
-  }
-
-  listUsageBaselines(filter: Omit<UsageLedgerFilter, "jobId"> = {}): UsageBaselineRecord[] {
-    return this.read(() => {
-      const { clauses, params } = usageCallFilterClauses(filter);
-      const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
-      return this.allRows(
-        `SELECT * FROM usage_effective_baselines${where} ORDER BY imported_at, baseline_id`,
-        ...params,
-      ).map(rowToBaseline);
     });
   }
 
@@ -2258,34 +2025,7 @@ export class SqliteRuntimeControlStore {
           }),
         emptyUsage(),
       );
-      let baselineCount = 0;
-      let baselineTotals = emptyUsage();
-      if (filter.jobId === undefined) {
-        const { clauses: baselineClauses, params: baselineParams } = usageCallFilterClauses(filter);
-        const baselineWhere = baselineClauses.length
-          ? ` WHERE ${baselineClauses.join(" AND ")}`
-          : "";
-        baselineCount = this.getNumber(
-          `SELECT COUNT(*) AS n FROM usage_effective_baselines${baselineWhere}`,
-          ...baselineParams,
-        );
-        baselineTotals = this.usageTotals(
-          `SELECT COALESCE(SUM(input_tokens), 0) AS input_tokens,
-             COALESCE(SUM(output_tokens), 0) AS output_tokens,
-             COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
-             COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
-             COALESCE(SUM(cost), 0) AS cost
-           FROM usage_effective_baselines${baselineWhere}`,
-          ...baselineParams,
-        );
-      }
-      return {
-        providerCallCount,
-        baselineCount,
-        providerCalls: providerTotals,
-        baselines: baselineTotals,
-        total: addUsage(providerTotals, baselineTotals),
-      };
+      return { providerCallCount, providerCalls: providerTotals, total: providerTotals };
     });
   }
 
@@ -2387,18 +2127,6 @@ export class SqliteRuntimeControlStore {
     const value = row?.["n"];
     if (typeof value !== "number") throw corrupt("数值聚合结果");
     return value;
-  }
-
-  private usageTotals(sql: string, ...params: unknown[]): UsageLedgerTotals {
-    const row = this.getRow(sql, ...params);
-    if (row === undefined) throw corrupt("usage 聚合结果");
-    return {
-      inputTokens: numberField(row, "input_tokens"),
-      outputTokens: numberField(row, "output_tokens"),
-      cacheReadTokens: numberField(row, "cache_read_tokens"),
-      cacheWriteTokens: numberField(row, "cache_write_tokens"),
-      cost: numberField(row, "cost"),
-    };
   }
 
   private seedControlMetadata(): void {
@@ -2962,21 +2690,6 @@ function rowToProviderCall(row: Row): ProviderCallRecord {
     cost: numberField(row, "cost"),
     reported: jsonRecordField(row, "reported_json"),
     createdAt: numberField(row, "created_at"),
-  });
-}
-
-function rowToBaseline(row: Row): UsageBaselineRecord {
-  return compact({
-    baselineId: textField(row, "baseline_id"),
-    sessionId: optionalTextField(row, "session_id"),
-    goalId: optionalTextField(row, "goal_id"),
-    inputTokens: numberField(row, "input_tokens"),
-    outputTokens: numberField(row, "output_tokens"),
-    cacheReadTokens: numberField(row, "cache_read_tokens"),
-    cacheWriteTokens: numberField(row, "cache_write_tokens"),
-    cost: numberField(row, "cost"),
-    importedAt: numberField(row, "imported_at"),
-    source: jsonRecordField(row, "source_json"),
   });
 }
 

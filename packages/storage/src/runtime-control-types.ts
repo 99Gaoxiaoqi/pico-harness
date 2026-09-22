@@ -155,7 +155,7 @@ export interface ProviderCallRecord {
   goalId?: string | undefined;
   jobId?: string | undefined;
   attemptId?: string | undefined;
-  purpose: ProviderCallPurpose | "legacy_unknown";
+  purpose: ProviderCallPurpose;
   provider: string;
   model: string;
   route?: string | undefined;
@@ -167,19 +167,6 @@ export interface ProviderCallRecord {
   cost: number;
   reported?: Record<string, unknown> | undefined;
   createdAt: number;
-}
-
-export interface UsageBaselineRecord {
-  baselineId: string;
-  sessionId?: string | undefined;
-  goalId?: string | undefined;
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadTokens: number;
-  cacheWriteTokens: number;
-  cost: number;
-  importedAt: number;
-  source?: Record<string, unknown> | undefined;
 }
 
 export interface UsageLedgerFilter {
@@ -198,10 +185,8 @@ export interface UsageLedgerTotals {
 
 export interface UsageLedgerSummary {
   providerCallCount: number;
-  baselineCount: number;
   providerCalls: UsageLedgerTotals;
-  baselines: UsageLedgerTotals;
-  /** baseline + baseline 导入后逐调用明细；调用方无需再叠加 Session 累计值。 */
+  /** Native physical attempt totals. */
   total: UsageLedgerTotals;
 }
 
@@ -521,7 +506,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /** Revision snapshots are replacement facts; identity and pricing never follow the current session. */
 export interface PhysicalAttemptRecord extends ProviderAttemptLifecycleSnapshot {
   readonly accountingVersion: 1;
-  readonly accountingSource: "physical" | "legacy_embedded";
+  readonly accountingSource: "physical";
   readonly providerCallId: string;
   readonly logicalCallId: string;
   readonly ownerId: string;
@@ -533,7 +518,7 @@ export interface PhysicalAttemptRecord extends ProviderAttemptLifecycleSnapshot 
   readonly goalId?: string | undefined;
   readonly jobId?: string | undefined;
   readonly jobAttemptId?: string | undefined;
-  readonly purpose: ProviderCallPurpose | "legacy_unknown";
+  readonly purpose: ProviderCallPurpose;
   readonly route?: string | undefined;
   readonly retryAttempt: number;
   readonly costCNY?: number;

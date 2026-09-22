@@ -194,11 +194,6 @@ function insertTerminalWeakReferences(database: DatabaseSync): void {
     .run();
   database
     .prepare(
-      "INSERT INTO usage_baselines VALUES ('baseline', 'session-old', NULL, 1, 1, 0, 0, 0, 1, NULL)",
-    )
-    .run();
-  database
-    .prepare(
       "INSERT INTO desktop_input_queue VALUES ('queue', '/tmp/work', 'session-old', '{}', 1)",
     )
     .run();

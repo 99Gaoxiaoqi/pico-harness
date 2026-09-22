@@ -421,14 +421,6 @@ test("sqlite EventLog retention: cascades manifests and durably records only zer
           .run();
         lease.database
           .prepare(
-            `INSERT INTO usage_baselines (
-               baseline_id, session_id, input_tokens, output_tokens,
-               cache_read_tokens, cache_write_tokens, cost, imported_at
-             ) VALUES ('baseline-second', 'second', 0, 0, 0, 0, 0, 1)`,
-          )
-          .run();
-        lease.database
-          .prepare(
             `INSERT INTO storage_operations (
                operation_id, kind, version, state, session_id, operation_json, created_at, updated_at
              ) VALUES ('operation-second', 'rewind', 1, 'completed', 'second', '{}', '2026', '2026')`,
@@ -485,7 +477,6 @@ test("sqlite EventLog retention: cascades manifests and durably records only zer
           "merge_requests",
           "daemon_runs",
           "usage_provider_calls",
-          "usage_baselines",
         ]) {
           assert.notEqual(lease.database.prepare(`SELECT 1 FROM ${table}`).get(), undefined, table);
         }
@@ -510,10 +501,6 @@ test("sqlite EventLog retention: cascades manifests and durably records only zer
           .get() as Record<string, unknown>;
         assert.equal(usage["session_id"], null);
         assert.equal(usage["conversation_id"], null);
-        const baseline = lease.database
-          .prepare("SELECT session_id FROM usage_baselines WHERE baseline_id = 'baseline-second'")
-          .get() as Record<string, unknown>;
-        assert.equal(baseline["session_id"], null);
         assert.equal(
           lease.database.prepare("SELECT COUNT(*) AS count FROM retention_gc_intents").get()![
             "count"
