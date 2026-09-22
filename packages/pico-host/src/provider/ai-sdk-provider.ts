@@ -18,7 +18,12 @@ import type {
 import type { ProviderConfig } from "@pico/runtime/provider-config";
 import type { ProviderProfile, ProviderProtocol } from "@pico/core";
 import { resolveProviderProfile } from "@pico/runtime";
-import { providerRequestSignal } from "@pico/core";
+import {
+  DEFAULT_PROVIDER_TIMEOUT_MS,
+  isTimeoutError,
+  ModelCommunicationError,
+  providerRequestSignal,
+} from "@pico/core";
 import { toAiSdkMessages, fromAiSdkContent, restoreResponsesWebSearch } from "./ai-sdk-messages.js";
 import { OpenAIRequestPolicy } from "./openai-request-policy.js";
 import { applyAnthropicCacheControl } from "@pico/runtime/provider/anthropic-cache";
@@ -89,7 +94,33 @@ export class AiSdkProvider implements LLMProvider {
       (!Number.isSafeInteger(options.maxOutputTokens) || options.maxOutputTokens <= 0)
     )
       throw new RangeError("Provider output budget must be a positive integer");
-    const signal = providerRequestSignal(options?.signal, options?.timeoutMs);
+    // Ordinary streams may run longer than two minutes while making progress.
+    // Explicit caller deadlines and non-streaming requests retain a hard deadline.
+    const progressController =
+      onDelta && options?.timeoutMs === undefined ? new AbortController() : undefined;
+    const signal = progressController
+      ? options?.signal
+        ? AbortSignal.any([options.signal, progressController.signal])
+        : progressController.signal
+      : providerRequestSignal(options?.signal, options?.timeoutMs);
+    let progressTimer: ReturnType<typeof setTimeout> | undefined;
+    let observedOutput = false;
+    const clearProgressTimer = () => {
+      if (progressTimer !== undefined) clearTimeout(progressTimer);
+      progressTimer = undefined;
+    };
+    const renewProgressTimeout = () => {
+      if (!progressController || signal.aborted) return;
+      clearProgressTimer();
+      progressTimer = setTimeout(
+        () =>
+          progressController.abort(
+            new DOMException("Model stream made no progress", "TimeoutError"),
+          ),
+        DEFAULT_PROVIDER_TIMEOUT_MS,
+      );
+      progressTimer.unref?.();
+    };
     const startedAt = performance.now();
     const diagnosticId = randomUUID();
     const attempts = new PhysicalAttemptTracker(
@@ -103,6 +134,18 @@ export class AiSdkProvider implements LLMProvider {
     let terminalUsageObserved = false;
     let responseDiagnostic: Partial<ModelResponseDiagnostic> = {};
     let failureCategory: ModelCommunicationCategory = "request_failed";
+    const abortReason = () => {
+      if (options?.signal?.aborted) return options.signal.reason;
+      // Retrying after visible content or tool arguments would regenerate an already
+      // observed response. Preserve its partial projection and require a new send.
+      if (observedOutput && isTimeoutError(signal.reason))
+        return new ModelCommunicationError("incomplete_stream", {
+          ...responseDiagnostic,
+          diagnosticId,
+          durationMs: Math.round(performance.now() - startedAt),
+        });
+      return signal.reason ?? new DOMException("Aborted", "AbortError");
+    };
     const definitions = snapshotToolDefinitions(availableTools);
     const deepseek =
       this.wire === "responses" && new URL(this.config.baseURL).hostname === "api.deepseek.com";
@@ -277,12 +320,16 @@ export class AiSdkProvider implements LLMProvider {
         let finished = false;
         for await (const chunk of result.stream) {
           if (
-            (chunk.type === "text-delta" || chunk.type === "reasoning-delta") &&
-            chunk.text.length > 0
-          )
+            ((chunk.type === "text-delta" || chunk.type === "reasoning-delta") &&
+              chunk.text.length > 0) ||
+            (chunk.type === "tool-input-delta" && chunk.delta.length > 0) ||
+            chunk.type === "tool-call" ||
+            chunk.type === "tool-result"
+          ) {
+            observedOutput = true;
+            renewProgressTimeout();
             attempts.observeOutput();
-          if (chunk.type === "tool-input-delta" && chunk.delta.length > 0) attempts.observeOutput();
-          if (chunk.type === "tool-call" || chunk.type === "tool-result") attempts.observeOutput();
+          }
           if (
             responseDiagnostic.firstChunkMs === undefined &&
             ["raw", "text-delta", "reasoning-delta", "error"].includes(chunk.type)
@@ -377,7 +424,7 @@ export class AiSdkProvider implements LLMProvider {
           responseDiagnostic.finishReason,
           signal.aborted ? "请求已取消或超时" : "模型响应未完成",
         );
-        if (signal.aborted) throw signal.reason;
+        if (signal.aborted) throw abortReason();
         if (attempts.admissionError) throw attempts.admissionError;
         // Only allowlisted classifications cross the SDK boundary.
         throw modelCommunicationError(
@@ -390,12 +437,14 @@ export class AiSdkProvider implements LLMProvider {
           failureCategory,
         );
       } finally {
+        clearProgressTimer();
         await attempts.flush();
       }
     };
     return new Promise<Message>((resolve, reject) => {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const abort = () => {
+        clearProgressTimer();
         attempts.settle(
           "cancelled",
           usageFromRaw(
@@ -406,13 +455,14 @@ export class AiSdkProvider implements LLMProvider {
           undefined,
           "请求已取消或超时",
         );
-        reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+        reject(abortReason());
         timer = setTimeout(() => {
           attempts.close();
           sdkController.abort(signal.reason);
         }, 5_000);
         timer.unref?.();
       };
+      renewProgressTimeout();
       signal.addEventListener("abort", abort, { once: true });
       if (signal.aborted) abort();
       void execute()
