@@ -1,10 +1,13 @@
 import { randomUUID } from "node:crypto";
 import type {
   LLMProviderRequestOptions,
+  ProviderAttemptFailureFacts,
   ProviderAttemptLifecycleSnapshot,
   ProviderPhysicalAttempt,
   Usage,
 } from "@pico/core";
+import { LLMStatusError } from "@pico/core";
+import { classifyProviderError } from "@pico/runtime/provider-retry";
 import { logger } from "../logger.js";
 
 type ActiveAttempt = {
@@ -61,10 +64,17 @@ export class PhysicalAttemptTracker {
       const response = await send();
       active.httpStatus = response.status;
       if (!active.terminal) this.update(active, this.snapshot(active, "observed"));
-      if (!response.ok) this.settle("failed", undefined, undefined, `HTTP ${response.status}`);
+      if (!response.ok)
+        this.settle("failed", undefined, undefined, `HTTP ${response.status}`, {
+          errorClass: "LLMStatusError",
+          retryable: classifyProviderError(
+            new LLMStatusError(response.status, "HTTP response omitted"),
+          ).retryable,
+        });
       return response;
     } catch (error) {
-      this.settle(this.signal.aborted ? "cancelled" : "failed", undefined, undefined, "请求未完成");
+      // SDK wraps transport failures. Let the outer adapter normalize the final error
+      // before committing diagnostics, so this dispatch does not preempt them.
       throw error;
     }
   }
@@ -82,6 +92,7 @@ export class PhysicalAttemptTracker {
     usage?: Usage,
     finishReason?: string,
     error?: string,
+    failure?: ProviderAttemptFailureFacts,
   ): void {
     const active = this.active;
     if (!active || this.closed) return;
@@ -96,6 +107,8 @@ export class PhysicalAttemptTracker {
         JSON.stringify(previous.usage) === JSON.stringify(usage))
     )
       return;
+    const failureFacts = previous ?? failure;
+    const errorText = error ?? previous?.error;
     const fact: ProviderPhysicalAttempt = {
       attemptId: active.attemptId,
       attempt: active.attempt,
@@ -113,7 +126,12 @@ export class PhysicalAttemptTracker {
         : {}),
       ...(usage ? { usage } : {}),
       ...(finishReason ? { finishReason: finishReason.slice(0, 80) } : {}),
-      ...(error ? { error } : {}),
+      ...(errorText ? { error: errorText } : {}),
+      ...(failureFacts?.errorClass ? { errorClass: failureFacts.errorClass } : {}),
+      ...(failureFacts?.errorCategory ? { errorCategory: failureFacts.errorCategory } : {}),
+      ...(failureFacts?.transportCode ? { transportCode: failureFacts.transportCode } : {}),
+      ...(failureFacts?.retryable !== undefined ? { retryable: failureFacts.retryable } : {}),
+      ...(failureFacts?.diagnosticId ? { diagnosticId: failureFacts.diagnosticId } : {}),
       usageBasis: usageBasis(usage),
     };
     active.terminal = fact;

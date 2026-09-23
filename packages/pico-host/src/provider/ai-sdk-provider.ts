@@ -14,12 +14,14 @@ import type {
   UsageReportedField,
   ModelResponseDiagnostic,
   ModelCommunicationCategory,
+  ProviderAttemptFailureFacts,
 } from "@pico/core";
 import type { ProviderConfig } from "@pico/runtime/provider-config";
 import type { ProviderProfile, ProviderProtocol } from "@pico/core";
 import { resolveProviderProfile } from "@pico/runtime";
 import {
   DEFAULT_PROVIDER_TIMEOUT_MS,
+  isAbortError,
   isTimeoutError,
   ModelCommunicationError,
   providerRequestSignal,
@@ -35,6 +37,7 @@ import { appendProviderEndpointPath } from "@pico/runtime/provider-endpoint";
 import { parseRateLimitHeaders } from "@pico/runtime/rate-limit";
 import { ContextOverflowError, isContextOverflowStatus, LLMStatusError } from "@pico/core";
 import { modelCommunicationError } from "./model-communication-error.js";
+import { classifyProviderError } from "@pico/runtime/provider-retry";
 
 /** One model step only. Pico owns tools, permissions, retries and conversation persistence. */
 export class AiSdkProvider implements LLMProvider {
@@ -228,6 +231,7 @@ export class AiSdkProvider implements LLMProvider {
         throw new LLMStatusError(
           response.status,
           `Model API request failed [${response.status}]; response omitted`,
+          retryAfterDelayMs(response.headers),
         );
       }
       const rate = this.config.onRateLimitInfo && parseRateLimitHeaders(response.headers);
@@ -414,6 +418,19 @@ export class AiSdkProvider implements LLMProvider {
           ...(usage === undefined ? {} : { usage }),
         };
       } catch (error) {
+        const normalized = signal.aborted
+          ? abortReason()
+          : (attempts.admissionError ??
+            modelCommunicationError(
+              error,
+              {
+                ...responseDiagnostic,
+                diagnosticId,
+                durationMs: Math.round(performance.now() - startedAt),
+                observableOutput: observedOutput,
+              },
+              failureCategory,
+            ));
         attempts.settle(
           signal.aborted ? "cancelled" : "failed",
           usageFromRaw(
@@ -423,19 +440,9 @@ export class AiSdkProvider implements LLMProvider {
           ),
           responseDiagnostic.finishReason,
           signal.aborted ? "请求已取消或超时" : "模型响应未完成",
+          providerAttemptFailureFacts(normalized),
         );
-        if (signal.aborted) throw abortReason();
-        if (attempts.admissionError) throw attempts.admissionError;
-        // Only allowlisted classifications cross the SDK boundary.
-        throw modelCommunicationError(
-          error,
-          {
-            ...responseDiagnostic,
-            diagnosticId,
-            durationMs: Math.round(performance.now() - startedAt),
-          },
-          failureCategory,
-        );
+        throw normalized;
       } finally {
         clearProgressTimer();
         await attempts.flush();
@@ -445,6 +452,7 @@ export class AiSdkProvider implements LLMProvider {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const abort = () => {
         clearProgressTimer();
+        const normalized = abortReason();
         attempts.settle(
           "cancelled",
           usageFromRaw(
@@ -454,8 +462,9 @@ export class AiSdkProvider implements LLMProvider {
           ),
           undefined,
           "请求已取消或超时",
+          providerAttemptFailureFacts(normalized),
         );
-        reject(abortReason());
+        reject(normalized);
         timer = setTimeout(() => {
           attempts.close();
           sdkController.abort(signal.reason);
@@ -576,6 +585,47 @@ export class AiSdkProvider implements LLMProvider {
     if (options?.promptCachePrewarm) body.max_tokens = 0;
     return body;
   }
+}
+
+function providerAttemptFailureFacts(error: unknown): ProviderAttemptFailureFacts {
+  if (error instanceof ModelCommunicationError) {
+    const diagnostic = error.diagnostic;
+    return {
+      errorClass: "ModelCommunicationError",
+      errorCategory: error.category,
+      retryable:
+        classifyProviderError(error).retryable ||
+        (error.category === "incomplete_stream" &&
+          diagnostic.httpStatus === 200 &&
+          diagnostic.observableOutput === false),
+      diagnosticId: diagnostic.diagnosticId,
+      ...(diagnostic.transportCode ? { transportCode: diagnostic.transportCode } : {}),
+    };
+  }
+  if (error instanceof ContextOverflowError)
+    return { errorClass: "ContextOverflowError", retryable: false };
+  if (error instanceof LLMStatusError)
+    return { errorClass: "LLMStatusError", retryable: classifyProviderError(error).retryable };
+  if (isTimeoutError(error)) return { errorClass: "TimeoutError", retryable: true };
+  if (isAbortError(error)) return { errorClass: "AbortError", retryable: false };
+  return { errorClass: "Unknown", retryable: false };
+}
+
+function retryAfterDelayMs(headers: Headers): number | undefined {
+  const milliseconds = headers.get("retry-after-ms");
+  const secondsOrDate = headers.get("retry-after");
+  if (milliseconds === null && secondsOrDate === null) return undefined;
+  const millisecondsValue = milliseconds === null ? NaN : Number(milliseconds);
+  const secondsValue = secondsOrDate === null ? NaN : Number(secondsOrDate);
+  const delay =
+    milliseconds !== null
+      ? millisecondsValue
+      : Number.isFinite(secondsValue)
+        ? secondsValue * 1_000
+        : Date.parse(secondsOrDate!) - Date.now();
+  return Number.isFinite(delay) && delay > 0 && delay <= 2_147_483_647
+    ? Math.ceil(delay)
+    : undefined;
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {

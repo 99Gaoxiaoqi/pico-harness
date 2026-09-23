@@ -1,11 +1,27 @@
 // 大模型通信的稳定契约。具体协议翻译与网络实现属于外层 Provider 适配器。
 
 import type { Message, ToolDefinition, Usage } from "./message.js";
+import type { ModelCommunicationCategory, ModelResponseDiagnostic } from "./provider-errors.js";
 
 export const DEFAULT_PROVIDER_TIMEOUT_MS = 120_000;
 
+/** Locally normalized, allowlisted failure evidence; never remote text or headers. */
+export interface ProviderAttemptFailureFacts {
+  readonly errorClass?:
+    | "ModelCommunicationError"
+    | "LLMStatusError"
+    | "ContextOverflowError"
+    | "TimeoutError"
+    | "AbortError"
+    | "Unknown";
+  readonly errorCategory?: ModelCommunicationCategory;
+  readonly transportCode?: ModelResponseDiagnostic["transportCode"];
+  readonly retryable?: boolean;
+  readonly diagnosticId?: string;
+}
+
 /** A real HTTP dispatch, including compatibility downgrades; never a logical call. */
-export interface ProviderPhysicalAttempt {
+export interface ProviderPhysicalAttempt extends ProviderAttemptFailureFacts {
   readonly attemptId: string;
   readonly attempt: number;
   readonly provider: string;
@@ -25,7 +41,7 @@ export interface ProviderPhysicalAttempt {
 }
 
 /** Durable admission is prepared evidence, never proof that the server received a request. */
-export interface ProviderAttemptLifecycleSnapshot {
+export interface ProviderAttemptLifecycleSnapshot extends ProviderAttemptFailureFacts {
   readonly physicalAttemptId: string;
   readonly revision: number;
   readonly attempt: number;

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
 import { setImmediate as nextTurn } from "node:timers/promises";
-import { ModelCommunicationError } from "@pico/core";
+import { LLMStatusError, ModelCommunicationError } from "@pico/core";
 import { AiSdkProvider } from "@pico/pico-host/provider/ai-sdk-provider";
 import { generateWithRetry, type RetryInfo } from "@pico/runtime/provider-retry";
 
@@ -147,4 +147,116 @@ test("user cancellation interrupts scheduled backoff without dispatching another
   context.mock.timers.tick(400_000);
   await nextTurn();
   assert.equal(fixture.calls, 1);
+});
+
+test("a no-output incomplete stream recovers once and emits both retry phases", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  context.mock.method(Math, "random", () => 0);
+  let calls = 0;
+  context.mock.method(globalThis, "fetch", async () => {
+    calls++;
+    const events =
+      calls === 1
+        ? 'data: {"choices":[{"delta":{}}]}\n\n'
+        : 'data: {"choices":[{"delta":{"content":"Recovered"}}]}\n\ndata: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n';
+    return new Response(events, { headers: { "content-type": "text/event-stream" } });
+  });
+  const scheduled: RetryInfo[] = [];
+  const started: RetryInfo[] = [];
+  let output = "";
+  const provider = new AiSdkProvider("openai", {
+    baseURL: "https://fixture.invalid/v1",
+    apiKey: "test-key",
+    model: "synthetic",
+  });
+  const call = observe(
+    generateWithRetry(
+      {
+        generate: (history, tools, options) =>
+          provider.generateStream(
+            history,
+            tools,
+            (delta) => {
+              output += delta;
+            },
+            options,
+          ),
+      },
+      messages,
+      [],
+      {
+        maxAttempts: 3,
+        onRetry: (info) => scheduled.push(info),
+        onRetryStarted: (info) => started.push(info),
+      },
+    ),
+  );
+  await drive(context, call, scheduled);
+  const result = await call.result;
+  assert.ok("value" in result);
+  assert.equal(result.value.content, "Recovered");
+  assert.equal(output, "Recovered");
+  assert.equal(calls, 2);
+  assert.deepEqual(
+    scheduled.map(({ failedAttempt }) => failedAttempt),
+    [1],
+  );
+  assert.deepEqual(
+    started.map(({ nextAttempt }) => nextAttempt),
+    [2],
+  );
+});
+
+test("Retry-After controls a retryable status delay without exposing the response", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  let calls = 0;
+  const retries: RetryInfo[] = [];
+  const call = observe(
+    generateWithRetry(
+      {
+        async generate() {
+          if (++calls === 1) throw new LLMStatusError(429, "response omitted", 2_500);
+          return { role: "assistant", content: "Recovered" };
+        },
+      },
+      messages,
+      [],
+      { maxAttempts: 2, onRetry: (info) => retries.push(info) },
+    ),
+  );
+  await drive(context, call, retries);
+  assert.ok("value" in (await call.result));
+  assert.equal(calls, 2);
+  assert.equal(retries[0]?.delayMs, 2_500);
+});
+
+test("a no-output incomplete stream spends only one recovery opportunity", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  let calls = 0;
+  const retries: RetryInfo[] = [];
+  const failure = () =>
+    new ModelCommunicationError("incomplete_stream", {
+      diagnosticId: "fixture",
+      durationMs: 1,
+      httpStatus: 200,
+      observableOutput: false,
+    });
+  const call = observe(
+    generateWithRetry(
+      {
+        async generate() {
+          calls++;
+          throw failure();
+        },
+      },
+      messages,
+      [],
+      { maxAttempts: 10, onRetry: (info) => retries.push(info) },
+    ),
+  );
+  await drive(context, call, retries);
+  const result = await call.result;
+  assert.ok("error" in result && result.error instanceof ModelCommunicationError);
+  assert.equal(calls, 2);
+  assert.equal(retries.length, 1);
 });

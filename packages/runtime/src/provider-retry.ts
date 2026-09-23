@@ -3,6 +3,8 @@ import {
   ContextOverflowError,
   isAbortError,
   isTimeoutError,
+  LLMStatusError,
+  ModelCommunicationError,
   type LLMProvider,
   type LLMProviderRequestOptions,
   type Message,
@@ -41,6 +43,7 @@ export interface RetryOptions {
   readonly promptCacheShardSeed?: LLMProviderRequestOptions["promptCacheShardSeed"];
   readonly promptCacheShardActive?: LLMProviderRequestOptions["promptCacheShardActive"];
   readonly onRetry?: (info: RetryInfo) => void;
+  readonly onRetryStarted?: (info: RetryInfo) => void;
   readonly onRateLimited?: (failure: RateLimitFailure) => LLMProvider | undefined;
   /** Observability belongs to composition; omission never changes retry decisions. */
   readonly logger?: RetryLogger;
@@ -104,6 +107,7 @@ export async function generateWithRetry(
       : {}),
   };
   let timeoutRetries = 0;
+  let incompleteStreamRetries = 0;
   if (maxAttempts <= 1) {
     try {
       const result = await provider.generate(messages, tools, requestOptions);
@@ -130,11 +134,19 @@ export async function generateWithRetry(
     } catch (error) {
       signal?.throwIfAborted();
       const classification = classifyProviderError(error);
+      const incompleteStreamRecovery =
+        error instanceof ModelCommunicationError &&
+        error.category === "incomplete_stream" &&
+        error.diagnostic.httpStatus === 200 &&
+        error.diagnostic.observableOutput === false &&
+        incompleteStreamRetries === 0;
       const retryable = isHardClassifiedError(error)
         ? classification.retryable
-        : typeof activeProvider.isRetryableError === "function"
-          ? activeProvider.isRetryableError(error)
-          : classification.retryable;
+        : error instanceof ModelCommunicationError || error instanceof LLMStatusError
+          ? classification.retryable || incompleteStreamRecovery
+          : typeof activeProvider.isRetryableError === "function"
+            ? activeProvider.isRetryableError(error)
+            : classification.retryable;
       const timeoutLimitReached =
         classification.status === "timed_out" && timeoutRetries >= MAX_TIMEOUT_RETRIES;
       if (attempt >= maxAttempts || !retryable || timeoutLimitReached) {
@@ -149,23 +161,25 @@ export async function generateWithRetry(
         throw error;
       }
       if (classification.status === "timed_out") timeoutRetries++;
+      if (incompleteStreamRecovery) incompleteStreamRetries++;
 
+      let rotated = false;
       if (maybeStatusCode(error) === 429 && options?.onRateLimited) {
-        const rotated = options.onRateLimited(buildRateLimitFailure(activeProvider, error));
-        if (rotated && rotated !== activeProvider) {
+        const nextProvider = options.onRateLimited(buildRateLimitFailure(activeProvider, error));
+        if (nextProvider && nextProvider !== activeProvider) {
           options.logger?.warn(
             { attempt: `${attempt}/${maxAttempts}`, keyRotated: true },
             "[Retry] 429 限流,已切换凭证重试",
           );
-          activeProvider = rotated;
-          continue;
+          activeProvider = nextProvider;
+          rotated = true;
         }
       }
 
-      const delayMs = delays[attempt - 1] ?? 0;
+      const delayMs = rotated ? 0 : (retryAfterDelay(error) ?? delays[attempt - 1] ?? 0);
       signal?.throwIfAborted();
       const statusCode = maybeStatusCode(error);
-      options?.onRetry?.({
+      const retryInfo: RetryInfo = {
         failedAttempt: attempt,
         nextAttempt: attempt + 1,
         maxAttempts,
@@ -173,8 +187,11 @@ export async function generateWithRetry(
         error,
         ...(statusCode !== undefined ? { statusCode } : {}),
         failureStatus: classification.status,
-      });
+      };
+      options?.onRetry?.(retryInfo);
       await sleepForRetry(delayMs, signal);
+      signal?.throwIfAborted();
+      options?.onRetryStarted?.(retryInfo);
     }
   }
 }
@@ -243,4 +260,12 @@ function maybeStatusCode(error: unknown): number | undefined {
   if (typeof error !== "object" || error === null) return undefined;
   const statusCode = (error as { readonly statusCode?: unknown }).statusCode;
   return typeof statusCode === "number" ? statusCode : undefined;
+}
+
+function retryAfterDelay(error: unknown): number | undefined {
+  if (!(error instanceof LLMStatusError)) return undefined;
+  const delay = error.retryAfterMs;
+  return delay !== undefined && Number.isSafeInteger(delay) && delay > 0 && delay <= 2_147_483_647
+    ? delay
+    : undefined;
 }

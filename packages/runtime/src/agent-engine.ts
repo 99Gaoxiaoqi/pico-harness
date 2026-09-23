@@ -12,7 +12,7 @@ import { estimateTraceLength } from "@pico/runtime";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import type { LLMProvider, LLMProviderRequestOptions, RuntimeToolResultStatus } from "@pico/core";
-import { ContextOverflowError, isAbortError } from "@pico/core";
+import { ContextOverflowError, isAbortError, ModelCommunicationError } from "@pico/core";
 import {
   generateWithRetry,
   type RateLimitFailure,
@@ -607,27 +607,50 @@ export class AgentEngine {
    * reporter.onAssistantResponseSuppressed("network-retry") 撤销上一轮已投影的临时流。
    * reporter 未传入时只记录诊断。
    */
-  private makeRetryReporter(span?: Span, reporter?: Reporter): (info: RetryInfo) => void {
-    return (info: RetryInfo) => {
-      this.diagnostics.warn(
-        {
-          attempt: `${info.failedAttempt}/${info.maxAttempts}`,
-          nextAttempt: info.nextAttempt,
-          delayMs: info.delayMs,
-          statusCode: info.statusCode,
-          model: this.provider.modelName,
-        },
-        `[Retry] 第 ${info.failedAttempt}/${info.maxAttempts} 次调用失败,${info.delayMs}ms 后重试`,
-      );
-      span?.addAttributes({
-        retryAttempt: info.nextAttempt,
-        retryDelayMs: info.delayMs,
-      });
-      // attempt>1 表示之前已有一次失败尝试;流式路径下其部分 token 可能已投影到 UI。
-      // 通知 reporter 撤销该临时投影,避免重试成功后 UI 出现"半截 + 完整"重复。
-      if (info.nextAttempt > 1) {
+  private makeRetryReporter(
+    span?: Span,
+    reporter?: Reporter,
+  ): (info: RetryInfo, phase: "scheduled" | "started") => void {
+    return (info: RetryInfo, phase: "scheduled" | "started") => {
+      if (phase === "scheduled") {
+        this.diagnostics.warn(
+          {
+            attempt: `${info.failedAttempt}/${info.maxAttempts}`,
+            nextAttempt: info.nextAttempt,
+            delayMs: info.delayMs,
+            statusCode: info.statusCode,
+            model: this.provider.modelName,
+          },
+          `[Retry] 第 ${info.failedAttempt}/${info.maxAttempts} 次调用失败,${info.delayMs}ms 后重试`,
+        );
+        span?.addAttributes({
+          retryAttempt: info.nextAttempt,
+          retryDelayMs: info.delayMs,
+        });
+        // Clear only this attempt's transient output before any replay.
         reporter?.onAssistantResponseSuppressed?.("network-retry");
       }
+      const diagnostic =
+        info.error instanceof ModelCommunicationError ? info.error.diagnostic : undefined;
+      const httpStatus = info.statusCode ?? diagnostic?.httpStatus;
+      reporter?.onProviderRetry?.({
+        phase,
+        failedAttempt: info.failedAttempt,
+        nextAttempt: info.nextAttempt,
+        maxAttempts: info.maxAttempts,
+        delayMs: info.delayMs,
+        failureStatus: info.failureStatus,
+        ...(info.error instanceof ModelCommunicationError
+          ? { errorCategory: info.error.category }
+          : {}),
+        ...(httpStatus !== undefined ? { httpStatus } : {}),
+        ...(diagnostic?.transportCode !== undefined
+          ? { transportCode: diagnostic.transportCode }
+          : {}),
+        ...(diagnostic?.diagnosticId !== undefined
+          ? { diagnosticId: diagnostic.diagnosticId }
+          : {}),
+      });
     };
   }
 
@@ -829,9 +852,10 @@ export class AgentEngine {
         {
           ...(signal === undefined ? {} : { signal }),
           onRetry: (info) => {
-            this.makeRetryReporter(span, reporter)(info);
+            this.makeRetryReporter(span, reporter)(info, "scheduled");
             sawObservableOutput = false;
           },
+          onRetryStarted: (info) => this.makeRetryReporter(span, reporter)(info, "started"),
           onRateLimited: (failure) => this.rotateProvider(failure, streamReporter, signal),
           ...(promptCacheRequest.shardSeed
             ? { promptCacheShardSeed: promptCacheRequest.shardSeed }
