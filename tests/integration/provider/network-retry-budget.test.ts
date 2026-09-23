@@ -205,6 +205,7 @@ test("a no-output incomplete stream recovers once and emits both retry phases", 
     started.map(({ nextAttempt }) => nextAttempt),
     [2],
   );
+  assert.equal(scheduled[0]?.maxAttempts, 2);
 });
 
 test("Retry-After controls a retryable status delay without exposing the response", async (context) => {
@@ -259,4 +260,5 @@ test("a no-output incomplete stream spends only one recovery opportunity", async
   assert.ok("error" in result && result.error instanceof ModelCommunicationError);
   assert.equal(calls, 2);
   assert.equal(retries.length, 1);
+  assert.equal(retries[0]?.maxAttempts, 2);
 });
