@@ -6,6 +6,7 @@ import type {
   RuntimeExecutionStep,
 } from "@pico/protocol";
 import { partitionTimelineRuns } from "./inspector-timeline-state.js";
+import { displayExecutionError } from "../provider-retry.js";
 
 export function ExecutionTraceTimeline({
   execution,
@@ -175,7 +176,9 @@ function RunSteps({
   for (const step of run.steps) turns.set(step.turnId, [...(turns.get(step.turnId) ?? []), step]);
   return (
     <div id={contentId} className="inspector-timeline__run-content">
-      {runReason(run) && <p className="inspector-timeline__full-reason">{runReason(run)}</p>}
+      {runReason(run, true) && (
+        <p className="inspector-timeline__full-reason">{runReason(run, true)}</p>
+      )}
       {turns.size === 0 && <p className="inspector-timeline__empty">没有可展示的执行步骤。</p>}
       <div className="inspector-timeline__turns">
         {[...turns].map(([turnId, steps], index) => (
@@ -224,7 +227,7 @@ function RunSteps({
                           {step.kind === "permission"
                             ? ` · ${permission(step.permissionDecision)}`
                             : ""}
-                          {step.error ? ` · ${step.error}` : ""}
+                          {step.error ? ` · ${displayExecutionError(step.error)}` : ""}
                         </span>
                       )}
                     </button>
@@ -274,7 +277,7 @@ function StepDetail({
       {step.truncated && <p className="inspector-timeline__warning">内容已截断</p>}
       {step.input !== undefined && <Detail label="输入" value={step.input} />}
       {step.output !== undefined && <Detail label="输出" value={step.output} />}
-      {step.error && <Detail label="错误" value={step.error} />}
+      {step.error && <Detail label="错误" value={displayExecutionError(step.error, true)} />}
       <details className="inspector-timeline__metadata">
         <summary>请求与执行明细</summary>
         <dl>
@@ -410,7 +413,11 @@ function StepDetail({
                     <p>推理 {tokens(attempt.reasoningTokens)} Token（包含在输出中）</p>
                   )}
                   {attempt.costUnknownReason && <p>{attempt.costUnknownReason}</p>}
-                  {attempt.error && <p className="inspector-timeline__warning">{attempt.error}</p>}
+                  {attempt.error && (
+                    <p className="inspector-timeline__warning">
+                      {displayExecutionError(attempt.error, true)}
+                    </p>
+                  )}
                 </li>
               ))}
             </ol>
@@ -589,6 +596,7 @@ function turnDuration(steps: readonly RuntimeExecutionStep[]): number | undefine
   return durations.length ? durations.reduce((sum, value) => sum + value, 0) : undefined;
 }
 
-function runReason(run: RuntimeExecutionRun) {
-  return run.reason ?? run.steps.find((step) => step.status === "failed" && step.error)?.error;
+function runReason(run: RuntimeExecutionRun, includeDiagnostic = false) {
+  const raw = run.reason ?? run.steps.find((step) => step.status === "failed" && step.error)?.error;
+  return raw ? displayExecutionError(raw, includeDiagnostic) : undefined;
 }

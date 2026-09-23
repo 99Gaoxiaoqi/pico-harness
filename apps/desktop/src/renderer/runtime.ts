@@ -52,6 +52,11 @@ import {
 } from "./model.js";
 import { saveProviderConnection } from "./provider-connection.js";
 import {
+  applyProviderRetryNotification,
+  clearProviderRetry,
+  providerRetryKey,
+} from "./provider-retry.js";
+import {
   parseCatalogAgents,
   parseCatalogSkills,
   parseModelRoutes,
@@ -530,6 +535,26 @@ export function useRuntimeStore(): RuntimeStore {
           items: [],
           queuedCount: 0,
         };
+        const retryRunId = activeRun?.runId;
+        const retryState = retryRunId
+          ? current.providerRetries[providerRetryKey(workspacePath, retryRunId)]
+          : undefined;
+        const newModelOutput =
+          retryState?.notice &&
+          view.activeOverlay.some((entry) => {
+            if (
+              entry.runId !== retryRunId ||
+              (entry.kind !== "text" && entry.kind !== "thinking") ||
+              !entry.text
+            )
+              return false;
+            const existingOutput = existing.items.find((item) => item.id === entry.itemId);
+            return (
+              !existingOutput ||
+              ((existingOutput.kind === "assistantMessage" || existingOutput.kind === "thinking") &&
+                existingOutput.text !== entry.text)
+            );
+          });
         // A failed open may recover through the continuity controller's background retry.
         // Once a ready replica arrives, the old load error is no longer authoritative.
         const {
@@ -539,6 +564,10 @@ export function useRuntimeStore(): RuntimeStore {
         } = existing;
         return {
           ...current,
+          providerRetries:
+            newModelOutput && retryRunId
+              ? clearProviderRetry(current.providerRetries, workspacePath, retryRunId, Date.now())
+              : current.providerRetries,
           conversations: {
             ...current.conversations,
             [conversationKey]: {
@@ -1396,7 +1425,24 @@ export function useRuntimeStore(): RuntimeStore {
       }
       const payload = isRecord(event.payload) ? event.payload : {};
       const topic = stringValue(event.topic);
-      if (isMemoryNotificationTopic(topic)) {
+      if (topic === "run.providerRetry") {
+        const runId = stringValue(scope.runId);
+        const sessionId = stringValue(scope.sessionId);
+        setData((current) => {
+          const run = current.runs.find(
+            (candidate) =>
+              candidate.workspacePath === workspacePath &&
+              candidate.id === runId &&
+              candidate.sessionId === sessionId &&
+              !isTerminalRunStatus(candidate.status),
+          );
+          if (!run) return current;
+          const providerRetries = applyProviderRetryNotification(current.providerRetries, event);
+          return providerRetries === current.providerRetries
+            ? current
+            : { ...current, providerRetries };
+        });
+      } else if (isMemoryNotificationTopic(topic)) {
         scheduleMemoryRefresh();
       } else if (topic === "approval.requested") {
         // wire 语义读取经 @pico/protocol parseApprovalRequestedPayload（与 TUI
@@ -1517,7 +1563,14 @@ export function useRuntimeStore(): RuntimeStore {
         setData((current) => ({
           ...current,
           timeline: applyTimelineNotification(current.timeline, event),
+          providerRetries: applyProviderRetryNotification(current.providerRetries, event),
         }));
+      } else if (topic === "run.finished") {
+        setData((current) => ({
+          ...current,
+          providerRetries: applyProviderRetryNotification(current.providerRetries, event),
+        }));
+        scheduleHydration(stringValue(scope.sessionId) || undefined);
       } else if (topic === "config.updated") {
         const changedCapabilities = Array.isArray(payload.capabilities)
           ? payload.capabilities.map((item) => stringValue(item))

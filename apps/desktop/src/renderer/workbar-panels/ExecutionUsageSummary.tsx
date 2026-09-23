@@ -156,11 +156,11 @@ export function ExecutionUsageSummary({ summary }: { summary: RuntimeExecutionSu
         <summary>完整用量明细</summary>
         <dl className="inspector-overview__facts">
           <div>
-            <dt>模型调用记录</dt>
+            <dt>模型请求</dt>
             <dd>{summary.modelCalls} 次</dd>
           </div>
           <div>
-            <dt>失败调用</dt>
+            <dt>最终失败请求</dt>
             <dd>{summary.failedCalls} 次</dd>
           </div>
           <div>

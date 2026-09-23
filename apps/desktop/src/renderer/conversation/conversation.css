@@ -1102,6 +1102,126 @@
   color: var(--conversation-danger);
 }
 
+.conversation-provider-retry,
+.conversation-provider-failure {
+  display: flex;
+  gap: 16px;
+  max-width: 736px;
+  margin: 14px auto 4px;
+  padding: 16px 20px;
+  border-radius: 14px;
+  font-size: 13px;
+}
+
+.conversation-provider-retry {
+  border: 1px solid color-mix(in srgb, var(--conversation-warning) 17%, transparent);
+  background: color-mix(in srgb, var(--conversation-warning) 6%, var(--conversation-bg));
+}
+
+.conversation-provider-retry__icon,
+.conversation-provider-failure__icon {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  margin-top: 1px;
+}
+
+.conversation-provider-retry__icon {
+  color: var(--conversation-warning);
+  animation: conversation-spin 2s linear infinite;
+}
+
+.conversation-provider-retry__body,
+.conversation-provider-failure__body {
+  flex: 1;
+  min-width: 0;
+}
+
+.conversation-provider-retry__topline {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.conversation-provider-retry__topline strong,
+.conversation-provider-failure strong {
+  color: var(--conversation-ink);
+  font-weight: 650;
+}
+
+.conversation-provider-retry__topline span {
+  color: var(--conversation-ink-muted);
+  white-space: nowrap;
+}
+
+.conversation-provider-retry p,
+.conversation-provider-failure p {
+  margin: 5px 0 0;
+  color: var(--conversation-ink-muted);
+}
+
+.conversation-provider-retry__track {
+  height: 3px;
+  margin-top: 14px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--conversation-ink) 13%, transparent);
+}
+
+.conversation-provider-retry__track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--conversation-warning);
+  transition: width 180ms linear;
+}
+
+.conversation-provider-failure {
+  background: transparent;
+}
+
+.conversation-provider-failure__icon {
+  color: var(--conversation-danger);
+}
+
+.conversation-provider-failure__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.conversation-provider-failure__actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 31px;
+  padding: 5px 11px;
+  border: 1px solid var(--conversation-line-strong);
+  border-radius: 7px;
+  background: var(--conversation-bg);
+  color: var(--conversation-ink);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.conversation-provider-failure__actions button:hover {
+  background: var(--conversation-bg-subtle);
+}
+
+.conversation-provider-failure__actions button.is-quiet {
+  color: var(--conversation-ink-muted);
+  font-weight: 500;
+}
+
+.conversation-provider-failure__actions svg {
+  width: 13px;
+  height: 13px;
+}
+
 .conversation-inline-card {
   display: grid;
   gap: 5px;

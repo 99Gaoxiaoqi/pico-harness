@@ -9,6 +9,7 @@ const previewSessionKey = workspaceSessionKey({
 });
 
 export const previewData: AppData = {
+  providerRetries: {},
   workspaces: [
     {
       path: previewWorkspacePath,

@@ -53,6 +53,8 @@ import {
   type ConversationItemView,
 } from "../conversation/index.js";
 import { pendingToolApprovalFromTranscript } from "../conversation/runtime-projection.js";
+import { ProviderFailureCard, ProviderRetryBanner } from "../conversation/ProviderRequestStatus.js";
+import { modelCommunicationDiagnostic, providerRetryKey } from "../provider-retry.js";
 import type { ApprovalView, PlanApprovalView, TimelineItem, ToolApprovalView } from "../model.js";
 import { useRuntime } from "../runtime-context.js";
 import { parseSwarmCommand } from "../swarm-command.js";
@@ -230,6 +232,10 @@ export function ConversationPage() {
     (run) => run.workspacePath === workspacePath && run.sessionId === sessionId,
   );
   const activeRun = sessionRuns.find((run) => !isTerminalRun(run.status));
+  const retryState = activeRun
+    ? data.providerRetries[providerRetryKey(workspacePath, activeRun.id)]
+    : undefined;
+  const retryNotice = retryState?.notice?.sessionId === sessionId ? retryState?.notice : undefined;
   const composerStatus = activeRun
     ? activeRun.status === "paused" || activeRun.status === "pause_requested"
       ? activeRun.status
@@ -1406,13 +1412,71 @@ export function ConversationPage() {
               </div>
             )}
             <ConversationTranscript
-              items={items}
+              items={
+                retryNotice
+                  ? [
+                      ...items,
+                      {
+                        id: `provider-retry:${retryNotice.runId}`,
+                        kind: "status" as const,
+                        title: "模型请求重试中",
+                        at: retryNotice.at,
+                      },
+                    ]
+                  : items
+              }
               assistantLabel={
                 parentRef
                   ? `子智能体 · ${childParent?.name ?? session?.title ?? "执行记录"}`
                   : "主智能体 · Pico"
               }
               onOpenItem={openItem}
+              renderItem={(item, fallback) => {
+                if (item.id === `provider-retry:${retryNotice?.runId}` && retryNotice) {
+                  return <ProviderRetryBanner notice={retryNotice} />;
+                }
+                if (item.kind !== "runBoundary" || item.status !== "failed") return fallback;
+                const failureState = item.runId
+                  ? data.providerRetries[providerRetryKey(workspacePath, item.runId)]
+                  : undefined;
+                const failureNotice =
+                  failureState?.lastFailure?.sessionId === sessionId
+                    ? failureState?.lastFailure
+                    : undefined;
+                const diagnostic = modelCommunicationDiagnostic(item.detail ?? "");
+                if (!failureNotice && !diagnostic) return fallback;
+                const latestBoundary = items.findLast(
+                  (candidate) => candidate.kind === "runBoundary" && candidate.status !== "started",
+                );
+                const boundaryIndex = items.findIndex((candidate) => candidate.id === item.id);
+                const originalRequest = items
+                  .slice(0, boundaryIndex)
+                  .findLast((candidate) => candidate.kind === "userMessage");
+                const canRetry =
+                  latestBoundary?.id === item.id &&
+                  !activeRun &&
+                  session?.status !== "archived" &&
+                  !draft.trim() &&
+                  originalRequest?.kind === "userMessage" &&
+                  Boolean(originalRequest.text.trim());
+                return (
+                  <ProviderFailureCard
+                    notice={failureNotice}
+                    title={diagnostic?.title ?? "暂时无法连接模型"}
+                    canRetry={Boolean(canRetry)}
+                    onRetry={() => {
+                      if (originalRequest?.kind !== "userMessage" || draft.trim()) return;
+                      handleDraftChange(originalRequest.text);
+                      window.requestAnimationFrame(() =>
+                        document
+                          .querySelector<HTMLTextAreaElement>(".conversation-composer textarea")
+                          ?.focus(),
+                      );
+                    }}
+                    onDiagnostics={() => openWorkbarTab("inspector", "right")}
+                  />
+                );
+              }}
               emptyState={
                 busy === "load-session" ? (
                   <div className="conversation-empty-state">
@@ -1487,11 +1551,12 @@ function timelineItemToConversationItem(item: TimelineItem): ConversationItemVie
   if (item.eventType === "assistant.message") {
     return { id: item.id, kind: "assistantMessage", text: item.detail ?? item.title, at: item.at };
   }
+  const modelDiagnostic = modelCommunicationDiagnostic(item.detail ?? item.title);
   return {
     id: item.id,
     kind: "status",
-    title: item.title,
-    detail: item.detail,
+    title: item.state === "failed" && modelDiagnostic ? modelDiagnostic.title : item.title,
+    detail: item.state === "failed" && modelDiagnostic ? undefined : item.detail,
     tone: item.state === "failed" ? "error" : item.state === "done" ? "success" : "neutral",
     at: item.at,
   };
