@@ -1,4 +1,5 @@
 import type { ConversationItemView } from "./conversation/types.js";
+import type { ProviderRetryStates } from "./provider-retry.js";
 import type {
   UsageDashboardDetails,
   ApprovalSessionScopeView,
@@ -337,6 +338,7 @@ export interface AppData {
   readonly sessions: readonly SessionView[];
   readonly runs: readonly RunView[];
   readonly timeline: readonly TimelineItem[];
+  readonly providerRetries: ProviderRetryStates;
   readonly conversations: Readonly<Record<string, ConversationView>>;
   readonly approvals: readonly ApprovalView[];
   readonly prompts: readonly PromptView[];
@@ -386,6 +388,7 @@ export const emptyData: AppData = {
   sessions: [],
   runs: [],
   timeline: [],
+  providerRetries: {},
   conversations: {},
   approvals: [],
   prompts: [],
