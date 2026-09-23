@@ -4,7 +4,7 @@
 // 独立文件实现,不进 registry-impl.ts,由 default-registry.ts 在合并阶段统一挂载。
 
 import { access, constants, mkdir } from "node:fs/promises";
-import { dirname } from "node:path";
+import { dirname, extname } from "node:path";
 import type { BaseTool, ToolFileSideEffects } from "./tool-registry-contract.js";
 import type { ToolDefinition } from "@pico/core";
 import { ToolAccesses } from "@pico/runtime/tool-access";
@@ -55,7 +55,7 @@ export class WriteFileTool implements BaseTool {
       description:
         "创建或覆盖写入一个文件。如果目录不存在会自动创建。支持主工作区相对路径或已授权工作区内绝对路径。" +
         (this.artifacts
-          ? "生成供用户查看、下载的报告、文档等交付文件时必须设 artifact:true，成功后会出现在会话的生成文件面板。普通源代码修改不要设置 artifact。"
+          ? "HTML 文件成功写入后会自动出现在会话的生成文件面板。其他供用户查看、下载的交付文件需设 artifact:true；普通源代码修改不要设置 artifact。"
           : ""),
       inputSchema: {
         type: "object",
@@ -67,7 +67,7 @@ export class WriteFileTool implements BaseTool {
                 artifact: {
                   type: "boolean",
                   description:
-                    "将此交付文件的内容快照登记到当前会话生成文件面板；普通源码修改不设置。",
+                    "将此交付文件的内容快照登记到当前会话生成文件面板；HTML 文件会自动登记，普通源码修改不设置。",
                 },
               }
             : {}),
@@ -113,7 +113,8 @@ export class WriteFileTool implements BaseTool {
     const action = isNewFile ? "新建" : "覆盖";
     const sizeInfo = `(${content.length} 字符)`;
     let artifactInfo = "";
-    if (artifact && this.artifacts) {
+    const isHtml = [".html", ".htm"].includes(extname(fullPath).toLowerCase());
+    if ((artifact || isHtml) && this.artifacts) {
       try {
         artifactInfo = `\n已登记生成文件: ${publishWrittenArtifact(this.artifacts, path, content)}`;
       } catch (cause) {
