@@ -14,13 +14,17 @@ export interface ArtifactExportServices {
   readonly query: ArtifactQuery;
   readonly chooseSavePath: (name: string) => Promise<string | undefined>;
   readonly revealFile: (path: string) => void;
+  readonly openDefaultApp?: (path: string) => Promise<void>;
 }
 
 /** All bytes originate in the session authority. Renderer supplies no source or output path. */
 export function createArtifactExporter(services: ArtifactExportServices) {
-  const revealedDirectories = new Set<string>();
+  const retainedDirectories = new Set<string>();
   return {
-    async export(reference: DesktopArtifactReference, action: "open" | "saveAs"): Promise<void> {
+    async export(
+      reference: DesktopArtifactReference,
+      action: "open" | "openInDefaultApp" | "saveAs",
+    ): Promise<void> {
       if (!isArtifactReference(reference)) throw new Error("生成文件引用无效");
       const metadata = record(await services.query({ ...reference, action: "get" }));
       if (!Array.isArray(metadata.artifacts) || metadata.artifacts.length !== 1) {
@@ -37,6 +41,13 @@ export function createArtifactExporter(services: ArtifactExportServices) {
       )
         throw new Error("生成文件元数据无效");
       const filename = safeArtifactFilename(artifact.title);
+      if (
+        action === "openInDefaultApp" &&
+        (!/\.html?$/iu.test(filename) ||
+          typeof artifact.mimeType !== "string" ||
+          artifact.mimeType.split(";", 1)[0]?.trim().toLowerCase() !== "text/html")
+      )
+        throw new Error("仅 HTML 生成文件可用默认应用打开");
       const destination = action === "saveAs" ? await services.chooseSavePath(filename) : undefined;
       if (action === "saveAs" && !destination) return;
       const directory = await mkdtemp(join(tmpdir(), "pico-artifact-"));
@@ -77,10 +88,15 @@ export function createArtifactExporter(services: ArtifactExportServices) {
           await file.close();
         }
         if (destination) await copyFile(filePath, destination);
-        else {
+        else if (action === "openInDefaultApp") {
+          if (!services.openDefaultApp) throw new Error("默认应用打开能力不可用");
+          await services.openDefaultApp(filePath);
+          retainedDirectories.add(directory);
+          retained = true;
+        } else {
           // Showing the file does not execute script/executable artifacts through an OS association.
           services.revealFile(filePath);
-          revealedDirectories.add(directory);
+          retainedDirectories.add(directory);
           retained = true;
         }
       } finally {
@@ -89,11 +105,11 @@ export function createArtifactExporter(services: ArtifactExportServices) {
     },
     async dispose(): Promise<void> {
       await Promise.all(
-        [...revealedDirectories].map((directory) =>
+        [...retainedDirectories].map((directory) =>
           rm(directory, { recursive: true, force: true }),
         ),
       );
-      revealedDirectories.clear();
+      retainedDirectories.clear();
     },
   };
 }

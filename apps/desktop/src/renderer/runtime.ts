@@ -3238,7 +3238,11 @@ export function useRuntimeStore(): RuntimeStore {
 function createPreviewBridge(): DesktopBridge {
   const success = <T>(value: T): Promise<DesktopResult<T>> => Promise.resolve({ ok: true, value });
   return {
-    artifacts: { open: () => success(undefined), saveAs: () => success(undefined) },
+    artifacts: {
+      open: () => success(undefined),
+      openInDefaultApp: () => success(undefined),
+      saveAs: () => success(undefined),
+    },
     runtime: new Proxy(
       {},
       {
