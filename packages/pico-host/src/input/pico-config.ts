@@ -384,6 +384,15 @@ export function parseModelProviderConfigs(
     if (discoverModels !== undefined && typeof discoverModels !== "boolean") {
       throw configError(configPath, `${field}.discoverModels`, "must be a boolean");
     }
+    const rawDisabledModels = rawProvider["disabledModels"];
+    if (
+      rawDisabledModels !== undefined &&
+      (!Array.isArray(rawDisabledModels) ||
+        rawDisabledModels.some((model) => typeof model !== "string" || !model.trim()))
+    ) {
+      throw configError(configPath, `${field}.disabledModels`, "must be a string array");
+    }
+    const disabledModels = rawDisabledModels as string[] | undefined;
     providers[id] = {
       protocol,
       ...(rawModelProtocols !== undefined ? { modelProtocols } : {}),
@@ -391,6 +400,9 @@ export function parseModelProviderConfigs(
       apiKeyEnv,
       ...(auth !== undefined ? { auth } : {}),
       models: parsedModels.models,
+      ...(disabledModels
+        ? { disabledModels: [...new Set(disabledModels.map((model) => model.trim()))] }
+        : {}),
       discoverModels: discoverModels ?? protocol === "openai",
       ...(Object.keys(modelCapabilities).length > 0 ? { modelCapabilities } : {}),
     };

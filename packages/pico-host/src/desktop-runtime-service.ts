@@ -638,6 +638,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         getUserConfig: this.providerConfig.getUserConfig.bind(this.providerConfig),
         updateUserConfig: this.providerConfig.updateUserConfig.bind(this.providerConfig),
         listUserProviders: this.providerConfig.listUserProviders.bind(this.providerConfig),
+        testProviderConnection: this.providerConfig.testProviderConnection.bind(this.providerConfig),
         upsertUserProvider: this.providerConfig.upsertUserProvider.bind(this.providerConfig),
         importEnvironmentProvider: this.providerConfig.importEnvironmentProvider.bind(
           this.providerConfig,
