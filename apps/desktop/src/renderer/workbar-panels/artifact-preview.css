@@ -19,11 +19,22 @@
 }
 .artifact-preview__frame {
   width: 100%;
+  box-sizing: border-box;
   min-height: 420px;
   height: 60vh;
   border: 1px solid #80808040;
   border-radius: 6px;
   background: white;
+}
+.tool-panel--files .artifact-preview {
+  padding: 0 12px 12px;
+}
+.tool-panel--files .artifact-preview__frame {
+  display: block;
+  height: min(72vh, 860px);
+}
+.tool-panel--files .artifact-preview__image {
+  max-height: 72vh;
 }
 .artifact-preview__image {
   display: block;

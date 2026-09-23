@@ -25,6 +25,7 @@ export function FilesPanelController({ workspacePath, sessionId, active }: Workb
   const [contentLoading, setContentLoading] = useState(false);
   const [error, setError] = useState<string>();
   const [contentError, setContentError] = useState<string>();
+  const [notice, setNotice] = useState<string>();
   const streamRef = useRef<ArtifactStreamAccumulator | undefined>(undefined);
   const requestRef = useRef(0);
   const contentRequestRef = useRef(0);
@@ -39,15 +40,17 @@ export function FilesPanelController({ workspacePath, sessionId, active }: Workb
       if (request !== requestRef.current) return;
       setArtifacts(next.artifacts);
       setRevision(next.revision);
-      setSelectedArtifactId((selected) => {
-        if (selected && next.artifacts.some((artifact) => artifact.id === selected))
-          return selected;
+      const selected = selectedArtifactRef.current;
+      if (selected && !next.artifacts.some((artifact) => artifact.id === selected)) {
         selectedArtifactRef.current = undefined;
         contentRequestRef.current += 1;
         streamRef.current = undefined;
+        setSelectedArtifactId(undefined);
         setContent(undefined);
-        return undefined;
-      });
+        setContentLoading(false);
+        setContentError(undefined);
+        setNotice("该生成文件已不存在，已返回列表。");
+      }
     } catch (cause) {
       if (request === requestRef.current) setError(workbarErrorMessage(cause));
     } finally {
@@ -121,6 +124,8 @@ export function FilesPanelController({ workspacePath, sessionId, active }: Workb
     (artifactId: string) => {
       selectedArtifactRef.current = artifactId;
       setSelectedArtifactId(artifactId);
+      setNotice(undefined);
+      setContentError(undefined);
       streamRef.current = undefined;
       setContent(undefined);
       void loadChunk(artifactId, 0);
@@ -128,10 +133,26 @@ export function FilesPanelController({ workspacePath, sessionId, active }: Workb
     [loadChunk],
   );
 
-  const exportArtifact = async (artifactId: string, action: "open" | "saveAs") => {
+  const backToList = useCallback(() => {
+    selectedArtifactRef.current = undefined;
+    contentRequestRef.current += 1;
+    streamRef.current = undefined;
+    setSelectedArtifactId(undefined);
+    setContent(undefined);
+    setContentLoading(false);
+    setContentError(undefined);
+  }, []);
+
+  const exportArtifact = async (
+    artifactId: string,
+    action: "open" | "saveAs" | "openInDefaultApp",
+  ) => {
     setContentError(undefined);
     try {
-      const result = await window.pico.artifacts[action]({ ...scope, artifactId });
+      const artifactApi = window.pico.artifacts as typeof window.pico.artifacts & {
+        openInDefaultApp: typeof window.pico.artifacts.open;
+      };
+      const result = await artifactApi[action]({ ...scope, artifactId });
       if (!result.ok) throw new Error(result.error.message);
     } catch (cause) {
       setContentError(workbarErrorMessage(cause));
@@ -147,10 +168,13 @@ export function FilesPanelController({ workspacePath, sessionId, active }: Workb
       contentLoading={contentLoading}
       error={error}
       contentError={contentError}
+      notice={notice}
       onRefresh={() => void refresh()}
       onSelectArtifact={selectArtifact}
+      onBack={backToList}
       onLoadChunk={(artifactId, offset) => void loadChunk(artifactId, offset)}
       onOpenArtifact={(artifactId) => void exportArtifact(artifactId, "open")}
+      onOpenDefaultApp={(artifactId) => void exportArtifact(artifactId, "openInDefaultApp")}
       onSaveArtifactAs={(artifactId) => void exportArtifact(artifactId, "saveAs")}
     />
   );
