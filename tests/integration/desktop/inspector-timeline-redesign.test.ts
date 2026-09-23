@@ -222,6 +222,24 @@ test("inspector timeline keeps projected run/turn ownership, honest unknowns and
     assert.match(initial, /已批准/u);
     assert.doesNotMatch(initial, /replay_safe|主任务|输入 未知|aria-pressed/u);
     const normal = execution.runs.find((run) => run.runId === "normal")!;
+    const recovered = {
+      ...normal,
+      steps: [
+        {
+          ...normal.steps[0]!,
+          status: "failed" as const,
+          error: "LLMStatusError status=503; detail omitted",
+        },
+        ...normal.steps.slice(1),
+      ],
+    };
+    const recoveredMarkup = render({ ...execution, runs: [recovered] });
+    const recoveredRunHeader = recoveredMarkup.match(
+      /<button[^>]*class="inspector-timeline__run-toggle"[^>]*>[\s\S]*?<\/button>/u,
+    )?.[0];
+    assert.ok(recoveredRunHeader);
+    assert.match(recoveredRunHeader, /已完成/u);
+    assert.doesNotMatch(recoveredRunHeader, /HTTP 503|inspector-timeline__reason/u);
     const tool = normal.steps.find((step) => step.kind === "tool")!;
     const selected = render(execution, tool.id);
     assert.equal((selected.match(/aria-label="执行步骤详情"/gu) ?? []).length, 1);
