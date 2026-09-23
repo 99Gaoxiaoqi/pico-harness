@@ -20,10 +20,14 @@ export function parseModelRoutes(value: unknown): readonly ModelRouteView[] {
   const result = isRecord(value) ? value : {};
   return recordArray(result.providers).flatMap((provider) => {
     const providerId = stringValue(provider.id);
-    if (!providerId || !Array.isArray(provider.models)) return [];
-    return provider.models
+    const models = Array.isArray(provider.availableModels)
+      ? provider.availableModels
+      : provider.models;
+    if (!providerId || !Array.isArray(models)) return [];
+    const disabled = Array.isArray(provider.disabledModels) ? provider.disabledModels : [];
+    return models
       .map((model) => stringValue(model))
-      .filter(Boolean)
+      .filter((model) => Boolean(model) && !disabled.includes(model))
       .map((model) => ({ id: `${providerId}/${model}`, label: model }));
   });
 }
@@ -66,6 +70,14 @@ function parseProviderProfile(value: JsonRecord, index: number): ProviderView {
     models: Array.isArray(value.models)
       ? value.models.map((model) => stringValue(model)).filter(Boolean)
       : [],
+    ...(Array.isArray(value.disabledModels)
+      ? { disabledModels: value.disabledModels.map((model) => stringValue(model)).filter(Boolean) }
+      : {}),
+    ...(Array.isArray(value.availableModels)
+      ? {
+          availableModels: value.availableModels.map((model) => stringValue(model)).filter(Boolean),
+        }
+      : {}),
     discoverModels: booleanValue(value.discoverModels),
     ...(isRecord(value.modelCapabilities) ? { modelCapabilities: value.modelCapabilities } : {}),
     ...(isRecord(value.resolvedModelCapabilities)

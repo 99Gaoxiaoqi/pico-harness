@@ -133,6 +133,9 @@ function freezeProvider(provider: ModelProviderConfig): ModelProviderConfig {
     apiKeyEnv: provider.apiKeyEnv,
     ...(provider.auth ? { auth: provider.auth } : {}),
     models: Object.freeze([...provider.models]),
+    ...(provider.disabledModels
+      ? { disabledModels: Object.freeze([...provider.disabledModels]) }
+      : {}),
     discoverModels: provider.discoverModels,
     ...(provider.modelProtocols !== undefined
       ? { modelProtocols: Object.freeze({ ...provider.modelProtocols }) }

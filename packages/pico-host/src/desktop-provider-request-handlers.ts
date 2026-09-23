@@ -19,6 +19,9 @@ export interface DesktopProviderRequestContext {
   readonly listUserProviders: (
     params: RuntimeRequest<"provider.list">["params"],
   ) => Awaitable<JsonValue>;
+  readonly testProviderConnection: (
+    params: RuntimeRequest<"provider.test">["params"],
+  ) => Awaitable<JsonValue>;
   readonly upsertUserProvider: (
     params: RuntimeRequest<"provider.upsert">["params"],
   ) => Awaitable<JsonValue>;
@@ -48,6 +51,7 @@ export function createDesktopProviderRequestHandlers(
   | "config.user.get"
   | "config.user.update"
   | "provider.list"
+  | "provider.test"
   | "provider.upsert"
   | "provider.importEnvironment"
   | "provider.delete"
@@ -62,6 +66,7 @@ export function createDesktopProviderRequestHandlers(
         Promise.resolve(context.updateUserConfig(request.params)),
       ),
     "provider.list": (request) => context.listUserProviders(request.params),
+    "provider.test": (request) => context.testProviderConnection(request.params),
     "provider.upsert": (request) =>
       context.withProviderDependencyLock(() =>
         Promise.resolve(context.upsertUserProvider(request.params)),

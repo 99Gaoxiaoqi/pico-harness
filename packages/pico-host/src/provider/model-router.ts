@@ -40,11 +40,11 @@ export interface ResolvedModelSecrets {
 interface ProviderSource {
   id: string;
   config: ModelProviderConfig;
-  explicitModels: boolean;
 }
 
 export class ModelRouter {
   readonly defaultRouteId?: string;
+  readonly catalogModelsByProvider: Readonly<Record<string, readonly string[]>>;
   private readonly byId: ReadonlyMap<string, ModelRoute>;
   private readonly providerSecrets: ReadonlyMap<string, string>;
   private readonly providerPools: ReadonlyMap<string, readonly string[]>;
@@ -54,12 +54,14 @@ export class ModelRouter {
     private readonly env: Readonly<Record<string, string | undefined>>,
     defaultRouteId?: string,
     resolvedSecrets: ResolvedModelSecrets = {},
+    catalogModelsByProvider: Readonly<Record<string, readonly string[]>> = {},
   ) {
     this.routes = Object.freeze(routes.map((route) => Object.freeze({ ...route })));
     this.byId = new Map(this.routes.map((route) => [route.id, route]));
     if (defaultRouteId !== undefined) this.defaultRouteId = defaultRouteId;
     this.providerSecrets = secretMap(resolvedSecrets.providers);
     this.providerPools = secretListMap(resolvedSecrets.providerPools);
+    this.catalogModelsByProvider = Object.freeze({ ...catalogModelsByProvider });
   }
 
   readonly routes: readonly ModelRoute[];
@@ -185,38 +187,41 @@ export async function loadModelRouter(options: LoadModelRouterOptions): Promise<
   const discovered = await Promise.all(
     providers.map((provider) => discoverProviderModels(provider, env, options)),
   );
-  const routes = discovered.flatMap(({ provider, models, discoveredModels }) =>
-    models.map<ModelRoute>((model) => ({
-      id: `${provider.id}/${model}`,
-      providerId: provider.id,
-      provider: resolveModelProtocol(provider.config, model),
-      model,
-      baseURL: provider.config.baseURL,
-      apiKeyEnv: provider.config.apiKeyEnv,
-      ...(provider.config.auth ? { auth: provider.config.auth } : {}),
-      capabilities: resolveModelRouteCapabilities(
-        resolveModelProtocol(provider.config, model),
+  const routes = discovered.flatMap(({ provider, models }) =>
+    models
+      .filter((model) => !provider.config.disabledModels?.includes(model))
+      .map<ModelRoute>((model) => ({
+        id: `${provider.id}/${model}`,
+        providerId: provider.id,
+        provider: resolveModelProtocol(provider.config, model),
         model,
-        provider.config.modelCapabilities?.[model],
-        { baseURL: provider.config.baseURL },
-      ),
-      source: provider.explicitModels
-        ? "config"
-        : discoveredModels.has(model)
-          ? "discovered"
-          : "config",
-    })),
+        baseURL: provider.config.baseURL,
+        apiKeyEnv: provider.config.apiKeyEnv,
+        ...(provider.config.auth ? { auth: provider.config.auth } : {}),
+        capabilities: resolveModelRouteCapabilities(
+          resolveModelProtocol(provider.config, model),
+          model,
+          provider.config.modelCapabilities?.[model],
+          { baseURL: provider.config.baseURL },
+        ),
+        source: provider.config.models.includes(model) ? "config" : "discovered",
+      })),
   );
 
   const configuredDefault = options.config.model?.trim();
-  return new ModelRouter(routes, env, configuredDefault, options.resolvedSecrets);
+  return new ModelRouter(
+    routes,
+    env,
+    configuredDefault,
+    options.resolvedSecrets,
+    Object.fromEntries(discovered.map(({ provider, models }) => [provider.id, models])),
+  );
 }
 
 function configuredProviders(config: ModelRoutingConfig): ProviderSource[] {
   return Object.entries(config.providers).map(([id, provider]) => ({
     id,
     config: provider,
-    explicitModels: provider.models.length > 0,
   }));
 }
 
@@ -224,8 +229,15 @@ async function discoverProviderModels(
   provider: ProviderSource,
   env: Readonly<Record<string, string | undefined>>,
   options: LoadModelRouterOptions,
-): Promise<{ provider: ProviderSource; models: string[]; discoveredModels: Set<string> }> {
-  const configured = unique(provider.config.models);
+): Promise<{ provider: ProviderSource; models: string[] }> {
+  const defaultForProvider = options.config.model?.startsWith(`${provider.id}/`)
+    ? options.config.model.slice(provider.id.length + 1)
+    : undefined;
+  const configured = unique([
+    ...provider.config.models,
+    ...(provider.config.disabledModels ?? []),
+    ...(provider.config.discoverModels && defaultForProvider ? [defaultForProvider] : []),
+  ]);
   const apiKey =
     provider.config.auth === "none"
       ? undefined
@@ -237,7 +249,7 @@ async function discoverProviderModels(
     !provider.config.baseURL ||
     (provider.config.auth !== "none" && !apiKey)
   ) {
-    return { provider, models: configured, discoveredModels: new Set() };
+    return { provider, models: configured };
   }
 
   const discovered = await fetchModelIds(
@@ -247,14 +259,11 @@ async function discoverProviderModels(
     options.discoveryTimeoutMs ?? DEFAULT_DISCOVERY_TIMEOUT_MS,
   );
   if (discovered === undefined) {
-    return { provider, models: configured, discoveredModels: new Set() };
+    return { provider, models: configured };
   }
 
-  const discoveredSet = new Set(discovered);
-  // Explicit models are the provider whitelist and remain authoritative. Discovery fills an
-  // otherwise empty catalog; it never widens or removes an explicit allowlist.
-  const models = provider.explicitModels ? configured : discovered;
-  return { provider, models, discoveredModels: discoveredSet };
+  const models = unique([...configured, ...discovered]);
+  return { provider, models };
 }
 
 async function fetchModelIds(
