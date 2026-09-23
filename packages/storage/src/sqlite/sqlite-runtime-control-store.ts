@@ -1,3 +1,9 @@
+import {
+  createEmptyUsageSnapshot,
+  toCanonicalUsage,
+  type SessionUsageSnapshot,
+  type Usage,
+} from "@pico/core";
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { resolve } from "node:path";
@@ -21,12 +27,13 @@ import {
   type MergeRequestRecord,
   type MergeRequestStatus,
   type ProviderCallRecord,
+  type PhysicalAttemptRecord,
+  type PhysicalAttemptFilter,
   type CronAuditEventRecord,
   type RuntimeEventRecord,
   type RuntimeLeaseRecord,
   type RuntimeNotificationEventRecord,
   type RuntimeNotificationLedgerJsonValue,
-  type UsageBaselineRecord,
   type UsageLedgerFilter,
   type UsageLedgerSummary,
   type UsageLedgerTotals,
@@ -137,6 +144,8 @@ export class SqliteRuntimeControlStore {
   private readonly lease: OperationalDatabaseLease;
   private readonly statements = new Map<string, StatementSync>();
   private closed = false;
+  private attemptOwnerRegistered = false;
+  private readonly attemptOwnerId = `meter:${process.pid}:${randomUUID()}`;
 
   constructor(options: SqliteRuntimeControlStoreOptions) {
     if (!options.storageRoot.trim()) {
@@ -155,6 +164,13 @@ export class SqliteRuntimeControlStore {
 
   close(): void {
     if (this.closed) return;
+    if (this.attemptOwnerRegistered)
+      this.write(() => {
+        this.mutate(
+          `UPDATE usage_attempt_owners SET closed = 1 WHERE owner_id = ?`,
+          this.attemptOwnerId,
+        );
+      });
     this.closed = true;
     this.lease.release();
   }
@@ -1689,160 +1705,301 @@ export class SqliteRuntimeControlStore {
     ).map(rowToMerge);
   }
 
-  recordProviderCall(record: Omit<ProviderCallRecord, "createdAt"> & { createdAt?: number }): {
-    record: ProviderCallRecord;
-    inserted: boolean;
-  } {
-    return this.write((tx) => {
-      if (record.jobId) this.requireJob(record.jobId);
-      if (record.attemptId) {
-        const attempt = this.requireAttempt(record.attemptId);
-        if (record.jobId && attempt.jobId !== record.jobId) {
-          throw new RuntimeConflictError(
-            `Provider call ${record.callId} 的 attempt ${record.attemptId} 不属于 job ${record.jobId}`,
-          );
-        }
-      }
-      const existingRow = this.getRow(
-        `SELECT * FROM usage_provider_calls WHERE call_id = ?`,
-        record.callId,
-      );
-      if (existingRow) {
-        const existing = rowToProviderCall(existingRow);
-        if (!sameProviderCall(existing, record)) {
-          throw new RuntimeConflictError(`Provider call ID ${record.callId} 已被其他调用使用`);
-        }
-        return { record: existing, inserted: false };
-      }
-      const stored: ProviderCallRecord = compact({
-        ...record,
-        createdAt: record.createdAt ?? this.now(),
-      });
+  /** Writer opt-in only: opening a reader never recovers another process's requests. */
+  getAccountingRevision(): number {
+    return this.read(() => this.readMetadataNumber(REVISION_KEY));
+  }
+
+  beginPhysicalAttemptOwner(): string {
+    return this.write(() => {
       this.mutate(
-        `INSERT INTO usage_provider_calls (call_id, tx_id, session_id, conversation_id, goal_id,
-           job_id, attempt_id, purpose, provider, model, route, status, input_tokens,
-           output_tokens, cache_read_tokens, cache_write_tokens, cost, reported_json, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        stored.callId,
-        tx.transactionId,
-        stored.sessionId ?? null,
-        stored.conversationId ?? null,
-        stored.goalId ?? null,
-        stored.jobId ?? null,
-        stored.attemptId ?? null,
-        stored.purpose,
-        stored.provider,
-        stored.model,
-        stored.route ?? null,
-        stored.status,
-        stored.inputTokens,
-        stored.outputTokens,
-        stored.cacheReadTokens,
-        stored.cacheWriteTokens,
-        stored.cost,
-        stored.reported === undefined ? null : canonicalJson(stored.reported),
-        stored.createdAt,
+        `INSERT OR IGNORE INTO usage_attempt_owners(owner_id, process_id) VALUES (?, ?)`,
+        this.attemptOwnerId,
+        process.pid,
       );
-      return { record: stored, inserted: true };
+      this.attemptOwnerRegistered = true;
+      return this.attemptOwnerId;
     });
   }
 
-  putUsageBaseline(record: UsageBaselineRecord): {
-    record: UsageBaselineRecord;
-    inserted: boolean;
+  /** Only an exited process or explicitly closed owner can be fenced and recovered. */
+  recoverPhysicalAttempts(): number {
+    return this.write(() => {
+      let recovered = 0;
+      for (const owner of this.allRows(`SELECT * FROM usage_attempt_owners`)) {
+        const ownerId = textField(owner, "owner_id");
+        if (ownerId === this.attemptOwnerId) continue;
+        let dead = numberField(owner, "closed") === 1;
+        if (!dead) {
+          try {
+            process.kill(numberField(owner, "process_id"), 0);
+          } catch (error) {
+            dead = (error as NodeJS.ErrnoException).code === "ESRCH";
+          }
+        }
+        if (!dead) continue;
+        this.mutate(`UPDATE usage_attempt_owners SET closed = 1 WHERE owner_id = ?`, ownerId);
+        for (const row of this.allRows(
+          `SELECT record_json FROM usage_physical_attempts WHERE owner_id = ? AND status IN ('prepared', 'observed')`,
+          ownerId,
+        )) {
+          const old = JSON.parse(textField(row, "record_json")) as PhysicalAttemptRecord;
+          const record: PhysicalAttemptRecord = {
+            ...old,
+            revision: old.revision + 1,
+            status: "interrupted",
+            completedAt: new Date(this.now()).toISOString(),
+            usageBasis: old.usage ? "partial" : "missing",
+            costStatus: "unknown",
+          };
+          this.writePhysicalAttemptSnapshot(record);
+          recovered++;
+        }
+      }
+      return recovered;
+    });
+  }
+
+  recordPhysicalAttempt(record: PhysicalAttemptRecord): {
+    record: PhysicalAttemptRecord;
+    updated: boolean;
   } {
     return this.write(() => {
-      const existingRow = this.getRow(
-        `SELECT * FROM usage_baselines WHERE baseline_id = ?`,
-        record.baselineId,
+      if (record.accountingSource !== "physical")
+        throw new RuntimeConflictError("Only native physical attempts may be recorded");
+      if (
+        !Number.isSafeInteger(record.revision) ||
+        record.revision < 0 ||
+        !record.physicalAttemptId.trim()
+      )
+        throw new Error("Invalid physical attempt identity/revision");
+      for (const value of [
+        record.usage?.promptTokens,
+        record.usage?.completionTokens,
+        record.usage?.inputTokens,
+        record.usage?.cacheReadTokens,
+        record.usage?.cacheWriteTokens,
+        record.usage?.reasoningTokens,
+        record.costCNY,
+        record.latencyMs,
+        record.timeToFirstTokenMs,
+      ]) {
+        if (value !== undefined && (!Number.isFinite(value) || value < 0))
+          throw new Error("Invalid physical attempt numeric observation");
+      }
+      const owner = this.getRow(
+        `SELECT closed FROM usage_attempt_owners WHERE owner_id = ?`,
+        record.ownerId,
       );
-      if (existingRow) return { record: rowToBaseline(existingRow), inserted: false };
+      if (record.ownerId !== this.attemptOwnerId || !owner || numberField(owner, "closed") !== 0)
+        throw new RuntimeConflictError("Physical attempt owner is fenced");
+      if (
+        record.sessionId &&
+        this.getRow(`SELECT 1 FROM usage_deleted_sessions WHERE session_id = ?`, record.sessionId)
+      )
+        throw new RuntimeConflictError("Physical attempt session was deleted");
+      const hash = createHash("sha256").update(canonicalJson(record)).digest("hex");
+      const revision = this.getRow(
+        `SELECT snapshot_hash FROM usage_attempt_revisions WHERE physical_attempt_id = ? AND revision = ?`,
+        record.physicalAttemptId,
+        record.revision,
+      );
+      if (revision && textField(revision, "snapshot_hash") !== hash)
+        throw new RuntimeConflictError("Conflicting physical attempt revision");
+      const row = this.getRow(
+        `SELECT record_json FROM usage_physical_attempts WHERE physical_attempt_id = ?`,
+        record.physicalAttemptId,
+      );
+      if (row) {
+        const old = JSON.parse(textField(row, "record_json")) as PhysicalAttemptRecord;
+        if (
+          canonicalJson(physicalAttemptIdentity(old)) !==
+          canonicalJson(physicalAttemptIdentity(record))
+        )
+          throw new RuntimeConflictError("Physical attempt identity is immutable");
+        if (record.revision <= old.revision) return { record: old, updated: false };
+        if (old.usageBasis === "reported" && record.usageBasis !== "reported")
+          throw new RuntimeConflictError("Physical attempt cannot discard complete usage");
+        if (old.usage && !record.usage)
+          throw new RuntimeConflictError("Physical attempt cannot discard observed usage");
+        if (old.status === "cancelled" && record.status !== "cancelled")
+          throw new RuntimeConflictError("Cancelled physical attempt cannot reopen");
+        if (!["prepared", "observed"].includes(old.status) && record.status !== old.status)
+          throw new RuntimeConflictError("Terminal physical attempt cannot change outcome");
+        if (old.status === "observed" && record.status === "prepared")
+          throw new RuntimeConflictError("Physical attempt cannot regress to prepared");
+      } else if (record.status !== "prepared" || record.revision !== 0) {
+        throw new RuntimeConflictError("Physical attempt requires durable admission");
+      }
+      this.writePhysicalAttemptSnapshot(record);
+      return { record, updated: true };
+    });
+  }
+
+  private bumpAccountingRevision(sessionId: string | undefined): void {
+    if (sessionId)
       this.mutate(
-        `INSERT INTO usage_baselines (baseline_id, session_id, goal_id, input_tokens,
-           output_tokens, cache_read_tokens, cache_write_tokens, cost, imported_at, source_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        record.baselineId,
-        record.sessionId ?? null,
-        record.goalId ?? null,
-        record.inputTokens,
-        record.outputTokens,
-        record.cacheReadTokens,
-        record.cacheWriteTokens,
-        record.cost,
-        record.importedAt,
-        record.source === undefined ? null : canonicalJson(record.source),
+        `INSERT INTO usage_accounting_versions(session_id, revision) VALUES (?, 1) ON CONFLICT(session_id) DO UPDATE SET revision = revision + 1`,
+        sessionId,
       );
-      return { record, inserted: true };
+  }
+
+  private writePhysicalAttemptSnapshot(record: PhysicalAttemptRecord): void {
+    this.bumpAccountingRevision(record.sessionId);
+    const json = canonicalJson(record);
+    this.mutate(
+      `INSERT INTO usage_attempt_revisions(physical_attempt_id, revision, snapshot_hash) VALUES (?, ?, ?)`,
+      record.physicalAttemptId,
+      record.revision,
+      createHash("sha256").update(json).digest("hex"),
+    );
+    this.mutate(
+      `INSERT INTO usage_physical_attempts(physical_attempt_id, provider_call_id, session_id, goal_id, job_id, run_id, owner_id, revision, status, created_at, record_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(physical_attempt_id) DO UPDATE SET revision=excluded.revision, status=excluded.status, record_json=excluded.record_json`,
+      record.physicalAttemptId,
+      record.providerCallId,
+      record.sessionId ?? null,
+      record.goalId ?? null,
+      record.jobId ?? null,
+      record.runId ?? null,
+      record.ownerId,
+      record.revision,
+      record.status,
+      record.startedAt,
+      json,
+    );
+    this.writeLatestContextProjection(record);
+  }
+
+  /** O(1) healthy read. Only a missing/corrupt disposable row invokes canonical repair. */
+  getLatestContextAttempt(sessionId: string): PhysicalAttemptRecord | undefined {
+    const projected = this.read(() =>
+      this.getRow(
+        `SELECT p.record_json AS canonical_json, c.record_json AS projection_json
+       FROM session_latest_context c JOIN usage_physical_attempts p
+       ON p.physical_attempt_id=c.physical_attempt_id WHERE c.session_id=?`,
+        sessionId,
+      ),
+    );
+    if (projected && projected["canonical_json"] === projected["projection_json"]) {
+      const record = JSON.parse(textField(projected, "canonical_json")) as PhysicalAttemptRecord;
+      if (isLatestContextCandidate(record) && record.sessionId === sessionId) return record;
+    }
+    return this.write(() => {
+      const row = this.getRow(
+        `SELECT record_json FROM usage_physical_attempts
+         WHERE session_id=? AND status='succeeded'
+         AND json_extract(record_json,'$.purpose')='main'
+         AND json_extract(record_json,'$.contextFacts.version')=1
+         ORDER BY json_extract(record_json,'$.completedAt') DESC, physical_attempt_id DESC LIMIT 1`,
+        sessionId,
+      );
+      if (!row) return undefined;
+      const record = JSON.parse(textField(row, "record_json")) as PhysicalAttemptRecord;
+      if (!isLatestContextCandidate(record)) throw new Error("Invalid canonical context request");
+      this.mutate(`DELETE FROM session_latest_context WHERE session_id=?`, sessionId);
+      this.writeLatestContextProjection(record);
+      return record;
     });
   }
 
-  listProviderCalls(filter: UsageLedgerFilter = {}): ProviderCallRecord[] {
+  private writeLatestContextProjection(record: PhysicalAttemptRecord): void {
+    if (!isLatestContextCandidate(record)) return;
+    this.mutate(
+      `INSERT INTO session_latest_context(session_id,physical_attempt_id,completed_at,record_json)
+       VALUES (?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET
+         physical_attempt_id=excluded.physical_attempt_id, completed_at=excluded.completed_at,
+         record_json=excluded.record_json
+       WHERE excluded.completed_at > session_latest_context.completed_at
+         OR (excluded.completed_at = session_latest_context.completed_at
+           AND excluded.physical_attempt_id >= session_latest_context.physical_attempt_id)`,
+      record.sessionId!,
+      record.physicalAttemptId,
+      record.completedAt!,
+      canonicalJson(record),
+    );
+  }
+
+  listPhysicalAttempts(filter: PhysicalAttemptFilter = {}): PhysicalAttemptRecord[] {
     return this.read(() => {
       const { clauses, params } = usageCallFilterClauses(filter);
-      const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
+      if (filter.providerCallId !== undefined) {
+        clauses.push("provider_call_id = ?");
+        params.push(filter.providerCallId);
+      }
+      if (filter.runId !== undefined) {
+        clauses.push("run_id = ?");
+        params.push(filter.runId);
+      }
       return this.allRows(
-        `SELECT * FROM usage_provider_calls${where} ORDER BY created_at, call_id`,
+        `SELECT record_json FROM usage_physical_attempts${clauses.length ? ` WHERE ${clauses.join(" AND ")}` : ""} ORDER BY created_at, physical_attempt_id`,
         ...params,
-      ).map(rowToProviderCall);
+      ).map((row) => JSON.parse(textField(row, "record_json")) as PhysicalAttemptRecord);
     });
   }
 
-  listUsageBaselines(filter: Omit<UsageLedgerFilter, "jobId"> = {}): UsageBaselineRecord[] {
+  /** Native physical attempts are the sole accounting authority, including an empty ledger. */
+  getAccountingSessionUsage(sessionId: string): SessionUsageSnapshot {
     return this.read(() => {
-      const { clauses, params } = usageCallFilterClauses(filter);
-      const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
-      return this.allRows(
-        `SELECT * FROM usage_baselines${where} ORDER BY imported_at, baseline_id`,
-        ...params,
-      ).map(rowToBaseline);
+      const calls = this.listAccountingProviderCalls({ sessionId });
+      const totals = this.getUsageSummary({ sessionId }).total;
+      const usage = createEmptyUsageSnapshot();
+      usage.totalInputTokens = totals.inputTokens;
+      usage.totalPromptTokens =
+        totals.inputTokens + totals.cacheReadTokens + totals.cacheWriteTokens;
+      usage.totalCompletionTokens = totals.outputTokens;
+      usage.totalCacheReadTokens = totals.cacheReadTokens;
+      usage.totalCacheWriteTokens = totals.cacheWriteTokens;
+      usage.totalCostCNY = totals.cost;
+      // Coverage counters below count selected measurements, including failed attempts.
+      usage.totalProviderCalls = calls.length;
+      for (const call of calls) {
+        const reported = call.reported;
+        const rawUsage = reported?.["usage"] as Usage | undefined;
+        const reportedFields =
+          rawUsage?.reportedFields ?? (reported?.["reportedFields"] as string[] | undefined);
+        const fields = new Set(reportedFields ?? []);
+        const completeUsage = fields.has("prompt") && fields.has("completion");
+        if (completeUsage) usage.totalUsageReports++;
+        if (fields.has("reasoning"))
+          usage.totalReasoningTokens +=
+            rawUsage?.reasoningTokens ?? Number(reported?.["reasoningTokens"] ?? 0);
+        if (fields.has("input")) usage.totalInputReports++;
+        if (fields.has("cacheRead")) usage.totalCacheReadReports++;
+        if (call.cacheReadTokens > 0) usage.totalCacheHitCalls++;
+        if (fields.has("cacheWrite")) usage.totalCacheWriteReports++;
+        if (fields.has("reasoning")) usage.totalReasoningReports++;
+        const status = reported?.["costStatus"];
+        if (status === "estimated") usage.totalEstimatedCostReports++;
+        else if (status === "included") usage.totalIncludedCostReports++;
+        else usage.totalUnknownCostReports++;
+        usage.lastCostStatus = status === "estimated" || status === "included" ? status : "unknown";
+      }
+      return usage;
     });
+  }
+
+  listAccountingProviderCalls(filter: UsageLedgerFilter = {}): ProviderCallRecord[] {
+    return this.listPhysicalAttempts(filter).map(physicalAccountingCall);
   }
 
   getUsageSummary(filter: UsageLedgerFilter = {}): UsageLedgerSummary {
     return this.read(() => {
-      const { clauses, params } = usageCallFilterClauses(filter);
-      const callWhere = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
-      const providerCallCount = this.getNumber(
-        `SELECT COUNT(*) AS n FROM usage_provider_calls${callWhere}`,
-        ...params,
+      const calls = this.listAccountingProviderCalls(filter);
+      const providerCallCount = calls.length;
+      const providerTotals = calls.reduce(
+        (total, call) =>
+          addUsage(total, {
+            inputTokens: call.inputTokens,
+            outputTokens: call.outputTokens,
+            cacheReadTokens: call.cacheReadTokens,
+            cacheWriteTokens: call.cacheWriteTokens,
+            cost: call.cost,
+          }),
+        emptyUsage(),
       );
-      const providerTotals = this.usageTotals(
-        `SELECT COALESCE(SUM(input_tokens), 0) AS input_tokens,
-           COALESCE(SUM(output_tokens), 0) AS output_tokens,
-           COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
-           COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
-           COALESCE(SUM(cost), 0) AS cost
-         FROM usage_provider_calls${callWhere}`,
-        ...params,
-      );
-      let baselineCount = 0;
-      let baselineTotals = emptyUsage();
-      if (filter.jobId === undefined) {
-        const { clauses: baselineClauses, params: baselineParams } = usageCallFilterClauses(filter);
-        const baselineWhere = baselineClauses.length
-          ? ` WHERE ${baselineClauses.join(" AND ")}`
-          : "";
-        baselineCount = this.getNumber(
-          `SELECT COUNT(*) AS n FROM usage_baselines${baselineWhere}`,
-          ...baselineParams,
-        );
-        baselineTotals = this.usageTotals(
-          `SELECT COALESCE(SUM(input_tokens), 0) AS input_tokens,
-             COALESCE(SUM(output_tokens), 0) AS output_tokens,
-             COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
-             COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
-             COALESCE(SUM(cost), 0) AS cost
-           FROM usage_baselines${baselineWhere}`,
-          ...baselineParams,
-        );
-      }
-      return {
-        providerCallCount,
-        baselineCount,
-        providerCalls: providerTotals,
-        baselines: baselineTotals,
-        total: addUsage(providerTotals, baselineTotals),
-      };
+      return { providerCallCount, providerCalls: providerTotals, total: providerTotals };
     });
   }
 
@@ -1944,18 +2101,6 @@ export class SqliteRuntimeControlStore {
     const value = row?.["n"];
     if (typeof value !== "number") throw corrupt("数值聚合结果");
     return value;
-  }
-
-  private usageTotals(sql: string, ...params: unknown[]): UsageLedgerTotals {
-    const row = this.getRow(sql, ...params);
-    if (row === undefined) throw corrupt("usage 聚合结果");
-    return {
-      inputTokens: numberField(row, "input_tokens"),
-      outputTokens: numberField(row, "output_tokens"),
-      cacheReadTokens: numberField(row, "cache_read_tokens"),
-      cacheWriteTokens: numberField(row, "cache_write_tokens"),
-      cost: numberField(row, "cost"),
-    };
   }
 
   private seedControlMetadata(): void {
@@ -2499,45 +2644,7 @@ function rowToRuntimeEvent(row: Row): RuntimeEventRecord {
   }) as RuntimeNotificationEventRecord;
 }
 
-function rowToProviderCall(row: Row): ProviderCallRecord {
-  return compact({
-    callId: textField(row, "call_id"),
-    sessionId: optionalTextField(row, "session_id"),
-    conversationId: optionalTextField(row, "conversation_id"),
-    goalId: optionalTextField(row, "goal_id"),
-    jobId: optionalTextField(row, "job_id"),
-    attemptId: optionalTextField(row, "attempt_id"),
-    purpose: textField(row, "purpose") as ProviderCallRecord["purpose"],
-    provider: textField(row, "provider"),
-    model: textField(row, "model"),
-    route: optionalTextField(row, "route"),
-    status: textField(row, "status") as ProviderCallRecord["status"],
-    inputTokens: numberField(row, "input_tokens"),
-    outputTokens: numberField(row, "output_tokens"),
-    cacheReadTokens: numberField(row, "cache_read_tokens"),
-    cacheWriteTokens: numberField(row, "cache_write_tokens"),
-    cost: numberField(row, "cost"),
-    reported: jsonRecordField(row, "reported_json"),
-    createdAt: numberField(row, "created_at"),
-  });
-}
-
-function rowToBaseline(row: Row): UsageBaselineRecord {
-  return compact({
-    baselineId: textField(row, "baseline_id"),
-    sessionId: optionalTextField(row, "session_id"),
-    goalId: optionalTextField(row, "goal_id"),
-    inputTokens: numberField(row, "input_tokens"),
-    outputTokens: numberField(row, "output_tokens"),
-    cacheReadTokens: numberField(row, "cache_read_tokens"),
-    cacheWriteTokens: numberField(row, "cache_write_tokens"),
-    cost: numberField(row, "cost"),
-    importedAt: numberField(row, "imported_at"),
-    source: jsonRecordField(row, "source_json"),
-  });
-}
-
-// ---- 纯函数辅助(与旧实现同语义的小工具) ----
+// ---- 纯函数辅助 ----
 
 function usageCallFilterClauses(filter: { sessionId?: string; goalId?: string; jobId?: string }): {
   clauses: string[];
@@ -2641,31 +2748,6 @@ function sameJson(left: unknown, right: unknown): boolean {
   return isDeepStrictEqual(left, right);
 }
 
-function sameProviderCall(
-  stored: ProviderCallRecord,
-  input: Omit<ProviderCallRecord, "createdAt"> & { createdAt?: number },
-): boolean {
-  return (
-    stored.callId === input.callId &&
-    stored.sessionId === input.sessionId &&
-    stored.conversationId === input.conversationId &&
-    stored.goalId === input.goalId &&
-    stored.jobId === input.jobId &&
-    stored.attemptId === input.attemptId &&
-    stored.purpose === input.purpose &&
-    stored.provider === input.provider &&
-    stored.model === input.model &&
-    stored.route === input.route &&
-    stored.status === input.status &&
-    stored.inputTokens === input.inputTokens &&
-    stored.outputTokens === input.outputTokens &&
-    stored.cacheReadTokens === input.cacheReadTokens &&
-    stored.cacheWriteTokens === input.cacheWriteTokens &&
-    stored.cost === input.cost &&
-    isDeepStrictEqual(stored.reported, input.reported)
-  );
-}
-
 function addUsage(left: UsageLedgerTotals, right: UsageLedgerTotals): UsageLedgerTotals {
   return {
     inputTokens: left.inputTokens + right.inputTokens,
@@ -2684,6 +2766,7 @@ function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   if (isRecord(value)) {
     return `{${Object.keys(value)
+      .filter((key) => value[key] !== undefined)
       .sort()
       .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
       .join(",")}}`;
@@ -2744,3 +2827,106 @@ function jsonRecordField(row: Row, key: string): Record<string, unknown> | undef
 }
 
 export { generateRuntimeId } from "../runtime-control-store-contracts.js";
+
+function physicalAttemptIdentity(record: PhysicalAttemptRecord): unknown {
+  const {
+    revision: _revision,
+    status: _status,
+    completedAt: _completedAt,
+    latencyMs: _latencyMs,
+    timeToFirstTokenMs: _ttft,
+    httpStatus: _http,
+    finishReason: _finish,
+    usage: _usage,
+    usageBasis: _basis,
+    error: _error,
+    errorClass: _errorClass,
+    errorCategory: _errorCategory,
+    transportCode: _transportCode,
+    retryable: _retryable,
+    diagnosticId: _diagnosticId,
+    costCNY: _cost,
+    costStatus: _costStatus,
+    costUnknownReason: _costUnknownReason,
+    ...identity
+  } = record;
+  return identity;
+}
+function reportedAccountingUsage(raw: Usage | undefined, basis: string) {
+  const fields = new Set(
+    raw?.reportedFields ?? (basis === "reported" ? ["prompt", "completion"] : []),
+  );
+  const knownUsage: Usage = {
+    promptTokens: fields.has("prompt") ? (raw?.promptTokens ?? 0) : 0,
+    completionTokens: fields.has("completion") ? (raw?.completionTokens ?? 0) : 0,
+    ...(fields.has("input") && raw?.inputTokens !== undefined
+      ? { inputTokens: raw.inputTokens }
+      : {}),
+    ...(fields.has("cacheRead") ? { cacheReadTokens: raw?.cacheReadTokens ?? 0 } : {}),
+    ...(fields.has("cacheWrite") ? { cacheWriteTokens: raw?.cacheWriteTokens ?? 0 } : {}),
+    ...(fields.has("reasoning") ? { reasoningTokens: raw?.reasoningTokens ?? 0 } : {}),
+  };
+  const canonical = toCanonicalUsage(knownUsage);
+  return { fields, knownUsage, canonical };
+}
+
+function physicalAccountingCall(record: PhysicalAttemptRecord): ProviderCallRecord {
+  const { fields, knownUsage, canonical } = reportedAccountingUsage(
+    record.usage,
+    record.usageBasis,
+  );
+  return {
+    callId: record.physicalAttemptId,
+    sessionId: record.sessionId,
+    conversationId: record.conversationId,
+    goalId: record.goalId,
+    jobId: record.jobId,
+    attemptId: record.jobAttemptId,
+    purpose: record.purpose,
+    provider: record.provider,
+    model: record.model,
+    route: record.route,
+    status:
+      record.status === "succeeded"
+        ? "succeeded"
+        : record.status === "cancelled"
+          ? "cancelled"
+          : "failed",
+    inputTokens: canonical.inputTokens,
+    outputTokens: knownUsage.completionTokens,
+    cacheReadTokens: canonical.cacheReadTokens,
+    cacheWriteTokens: canonical.cacheWriteTokens,
+    cost: record.costCNY ?? 0,
+    createdAt: Date.parse(record.startedAt),
+    reported: {
+      accountingVersion: record.accountingVersion,
+      accountingSource: record.accountingSource,
+      providerCallId: record.providerCallId,
+      logicalCallId: record.logicalCallId,
+      physicalAttemptId: record.physicalAttemptId,
+      usageMetadata: record.usage ? "reported" : "unknown",
+      reportedFields: [...fields],
+      ...(fields.has("reasoning") ? { reasoningTokens: canonical.reasoningTokens } : {}),
+      usageBasis: record.usageBasis,
+      costStatus: record.costStatus,
+      ...(record.costUnknownReason ? { costUnknownReason: record.costUnknownReason } : {}),
+      lifecycleStatus: record.status,
+      observed: record.httpStatus !== undefined || record.status === "succeeded",
+      pricingVersion: record.pricingVersion,
+      latencyMs: record.latencyMs,
+      usage: record.usage,
+    },
+  };
+}
+
+function isLatestContextCandidate(record: PhysicalAttemptRecord): boolean {
+  return (
+    record.accountingSource === "physical" &&
+    record.status === "succeeded" &&
+    record.purpose === "main" &&
+    !!record.sessionId &&
+    record.contextFacts?.version === 1 &&
+    typeof record.completedAt === "string" &&
+    Number.isFinite(Date.parse(record.completedAt))
+  );
+}

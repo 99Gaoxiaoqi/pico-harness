@@ -4,3 +4,4 @@ export * from "./runtime-buffer.js";
 export * from "./markdown.js";
 export * from "./usage.js";
 export * from "./subagent-settings.js";
+export * from "./execution-trace.js";

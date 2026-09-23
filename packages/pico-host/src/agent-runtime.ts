@@ -1,3 +1,7 @@
+import { bindToolResultArchiveReader } from "@pico/runtime/tool-result-archive";
+import { createDeepResearchTools } from "@pico/pico-host/deep-research-tools";
+import { SqliteDeepResearchStore } from "@pico/storage";
+import { isResearchToolAllowed } from "./research-mode.js";
 import { createConfiguredSubagentOutputTool } from "@pico/pico-host/configured-subagent-output-tool";
 import { readConfiguredSubagentDefinition } from "@pico/runtime/configured-subagent-session";
 import {
@@ -39,7 +43,7 @@ import {
   isPlanGraphWaiting,
   reconcilePlanExecution,
 } from "@pico/pico-host/product-plan-execution-recovery";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -55,13 +59,8 @@ import {
 } from "@pico/pico-host/session-fork-service";
 import type { Reporter, RuntimeSessionSelection } from "@pico/core";
 import { SilentReporter } from "@pico/runtime/silent-reporter";
-import { Compactor } from "@pico/pico-host/product-compactor";
 import { FullCompactor } from "@pico/pico-host/product-full-compactor";
-import {
-  createContextBudget,
-  estimateTokenBudgetAsChars,
-  type ContextBudget,
-} from "@pico/runtime/context-budget";
+import { createContextBudget, type ContextBudget } from "@pico/runtime/context-budget";
 import { PromptComposer } from "@pico/pico-host/product-prompt-composer";
 import type { TodoStore } from "@pico/storage/todo-store";
 import type { AgentGraphProfileSnapshot } from "@pico/core/agent-graph-contracts";
@@ -94,7 +93,6 @@ import {
   type GraphOperatorActivationContext,
 } from "@pico/pico-host/agent-output-tool";
 import { CostTracker, type CostTrackerOptions } from "@pico/pico-host/cost-tracker";
-import { ensureSessionUsageBaseline } from "@pico/runtime/usage-baseline";
 import type { ModelRouter } from "@pico/pico-host/provider/model-router";
 import { Tracer } from "@pico/pico-host/trace";
 import { logger } from "@pico/pico-host/logger";
@@ -218,6 +216,7 @@ const livePlanAdmissions = new Set<string>();
 const liveConfiguredChildAdmissions = new Set<string>();
 import {
   assembleRuntimeModels,
+  requestContextForProvider,
   billingRouteForProvider,
   type RuntimeProviderFactory,
 } from "@pico/pico-host/runtime-assembly";
@@ -259,7 +258,7 @@ export type RunAgentProviderFactory = RuntimeProviderFactory;
 export interface RuntimeSessionResourceChangedNotice {
   readonly workspacePath: string;
   readonly sessionId: string;
-  readonly resource: "tasks" | "artifacts";
+  readonly resource: "tasks" | "artifacts" | "trace" | "context";
   readonly revision: number;
 }
 
@@ -1066,11 +1065,11 @@ export async function executeAgentRuntime(
       return boundary;
     };
     const sideConversation = settings.sideConversation === true;
-    const collaborationMode = (): "agent" | "plan" =>
+    const collaborationMode = (): "agent" | "plan" | "research" =>
       dependencies.configuredSubagentChild || dependencies.agentGraph?.kind === "operator"
         ? "agent"
         : settings.collaborationMode;
-    planRun = collaborationMode() === "plan";
+    planRun = collaborationMode() !== "agent";
     const inheritedAuthorization = await readInheritedRunSwarmAuthorization(
       session,
       dependencies.prestartedRun,
@@ -1087,7 +1086,7 @@ export async function executeAgentRuntime(
             : "session_mode"
           : "none"));
     const orchestrationMode = (): "default" | "graph" | "swarm" =>
-      dependencies.configuredSubagentChild || collaborationMode() === "plan"
+      dependencies.configuredSubagentChild || collaborationMode() !== "agent"
         ? "default"
         : inheritedAuthorization !== undefined
           ? inheritedAuthorization !== "none"
@@ -1188,7 +1187,7 @@ export async function executeAgentRuntime(
         : { allowed: false as const, reason: "workspace_untrusted" };
     };
     const memoryExtractionAllowed = async () =>
-      collaborationMode() === "plan"
+      collaborationMode() !== "agent"
         ? { allowed: false as const, reason: "runtime_profile_disabled" }
         : memoryRecallAllowed();
     try {
@@ -1347,7 +1346,7 @@ export async function executeAgentRuntime(
           !backgroundPolicy &&
           !dependencies.configuredSubagentChild &&
           dependencies.agentGraph?.kind !== "operator" &&
-          collaborationMode() !== "plan",
+          collaborationMode() === "agent",
         lspServers: [...picoConfig.lspServers, ...(pluginSnapshot?.lspServers ?? [])],
         processSandbox: {
           ...currentMainProcessSandbox(),
@@ -1360,13 +1359,13 @@ export async function executeAgentRuntime(
         ...(backgroundPolicy ||
         dependencies.configuredSubagentChild ||
         dependencies.isolatedHeadless ||
-        collaborationMode() === "plan"
+        collaborationMode() !== "agent"
           ? { hooks: false as const }
           : {}),
-        ...(collaborationMode() !== "plan" && dependencies.hookService
+        ...(collaborationMode() === "agent" && dependencies.hookService
           ? { hookService: dependencies.hookService }
           : {}),
-        ...(collaborationMode() !== "plan" && pluginSnapshot?.hookSources
+        ...(collaborationMode() === "agent" && pluginSnapshot?.hookSources
           ? { hookExtensionSources: pluginSnapshot.hookSources }
           : {}),
       }));
@@ -1374,7 +1373,7 @@ export async function executeAgentRuntime(
     cleanupRuntimeState = runtimeState;
     if (!ownsRuntimeState) {
       const codeIntelligenceEnabled =
-        dependencies.agentGraph?.kind !== "operator" && collaborationMode() !== "plan";
+        dependencies.agentGraph?.kind !== "operator" && collaborationMode() === "agent";
       // 关闭时先停进程再换边界；开启时先换边界再启动，确保一次切换且
       // LSP 从未短暂运行在上一种权限模式的进程沙箱中。
       if (!codeIntelligenceEnabled) {
@@ -1388,10 +1387,11 @@ export async function executeAgentRuntime(
         await runtimeState.setCodeIntelligenceEnabled(true);
       }
     }
-    if (collaborationMode() !== "plan" && dependencies.hookService) {
+    if (collaborationMode() === "agent" && dependencies.hookService) {
       runtimeState.attachHookService(dependencies.hookService);
     }
-    const activeHookService = collaborationMode() === "plan" ? undefined : runtimeState.hookService;
+    const activeHookService =
+      collaborationMode() !== "agent" ? undefined : runtimeState.hookService;
     if (
       dependencies.toolDisclosure !== undefined &&
       dependencies.toolDisclosure !== runtimeState.toolDisclosure
@@ -1411,17 +1411,16 @@ export async function executeAgentRuntime(
       }
     }
     const usageLedger = runtimeState.taskHostRuntime?.jobService ?? ownedUsageStore;
-    if (usageLedger) {
-      try {
-        ensureSessionUsageBaseline(usageLedger, session);
-      } catch (error) {
-        logger.error(
-          { sessionId: session.id, error: error instanceof Error ? error.message : String(error) },
-          "[Tracker] Session usage baseline 导入失败",
-        );
-      }
-    }
     const trackerOptions: CostTrackerOptions = {
+      onAccountingChanged: (record, revision) => {
+        if (!record.sessionId) return;
+        dependencies.sessionResourceChangedSink?.({
+          workspacePath: record.workspacePath ?? workDir,
+          sessionId: record.sessionId,
+          resource: "trace",
+          revision,
+        });
+      },
       ...(usageLedger ? { ledger: usageLedger } : {}),
       context: () => {
         const goalId = runtimeState.goalManager.getActive()?.id;
@@ -1457,7 +1456,7 @@ export async function executeAgentRuntime(
     });
     const { providerFactory, providerDependencies, subagentModelRouter, parentModelRouteId } =
       modelAssembly;
-    const contextRuntime = buildContextRuntime(kind, providerConfig.model);
+    const contextRuntime = buildContextRuntime(kind, providerConfig);
     const nativeSearchAdmissionReason = (): string | undefined => {
       if (backgroundPolicy && backgroundPolicy.snapshot.toolNetworkPolicy !== "allow")
         return "后台网络策略无法授权供应商原生搜索。";
@@ -1515,6 +1514,7 @@ export async function executeAgentRuntime(
                 {
                   ledger,
                   recordRuntimeEvents: false,
+                  contextFacts: requestContextForProvider(kind, currentConfig),
                   context: { purpose: "memory_review", sessionId: session.id },
                 },
               );
@@ -1532,7 +1532,7 @@ export async function executeAgentRuntime(
     const approvalManager = dependencies.approvalManager ?? globalApprovalManager;
     const approvalNotifier =
       dependencies.approvalNotifier ?? buildFailClosedApprovalNotifier(approvalManager);
-    let activeMcpManager = collaborationMode() === "plan" ? undefined : dependencies.mcpManager;
+    let activeMcpManager = collaborationMode() !== "agent" ? undefined : dependencies.mcpManager;
     const oneShotMcpCalls = new Set<string>();
     const oneShotRemoteMcpCalls = new Set<string>();
     const admittedHookMcpCalls = new Set<string>();
@@ -1706,7 +1706,19 @@ export async function executeAgentRuntime(
       }
       return allowed;
     };
+    const contextRouteIdentity = createHash("sha256")
+      .update(
+        JSON.stringify([
+          kind,
+          providerConfig.baseURL,
+          providerConfig.routeId,
+          providerConfig.model,
+        ]),
+      )
+      .digest("hex");
     bindRuntimeHookCapabilities({
+      contextBudget: contextRuntime.budget,
+      contextRouteIdentity,
       session,
       runtimeState,
       provider: trackedProvider,
@@ -1945,8 +1957,9 @@ export async function executeAgentRuntime(
       dependencies.askUserHandler,
       runtimeState.codeIntelligence,
       (path) => {
+        if (collaborationMode() !== "agent") return true;
         if (permissionMode() === "full-access") return false;
-        if (collaborationMode() === "plan" || path === undefined) return true;
+        if (path === undefined) return true;
         return !isSensitiveCredentialPath(workspaceRoots.resolveUnchecked(path));
       },
       {
@@ -1996,8 +2009,11 @@ export async function executeAgentRuntime(
             revision,
           }),
       },
+      session.runtimeEventStore
+        ? bindToolResultArchiveReader(session.runtimeEventStore, session.id)
+        : undefined,
     );
-    if (collaborationMode() !== "plan") {
+    if (collaborationMode() === "agent") {
       registry.register(
         createCodeModeTool({
           diagnostics: logger,
@@ -2050,7 +2066,7 @@ export async function executeAgentRuntime(
         }),
       );
       baselineToolNames.push("agent_output");
-      if (dependencies.agentGraph.managedGit && collaborationMode() !== "plan") {
+      if (dependencies.agentGraph.managedGit && collaborationMode() === "agent") {
         registry.register(new GraphManagedGitTool(dependencies.agentGraph.managedGit));
         baselineToolNames.push("graph_git");
       }
@@ -2092,6 +2108,7 @@ export async function executeAgentRuntime(
       readonly currentUserPrompt: string;
     }) => {
       const composed = await new PromptComposer(workDir, collaborationMode() === "plan", {
+        researchMode: collaborationMode() === "research",
         goalManager,
         todoStore,
         ...(dependencies.isolatedHeadless !== undefined
@@ -2117,7 +2134,17 @@ export async function executeAgentRuntime(
             }
           : {}),
       }).buildLayers();
+      const researchMode = collaborationMode() === "research";
       const turnTailParts = composed.turnTail ? [composed.turnTail] : [];
+      if (researchMode) {
+        const research = new SqliteDeepResearchStore({ storageRoot: sessionStorageRoot }).read(
+          session.id,
+        );
+        if (research)
+          turnTailParts.push(
+            `Saved research workspace: ${research.status}. Call deep_research_status and read saved artifacts to resume; do not restart completed work.`,
+          );
+      }
       if (searchUnavailableReason) {
         turnTailParts.push(`[WEB SEARCH] ${searchUnavailableReason} 不得声称已经完成联网搜索。`);
       } else if (
@@ -2214,7 +2241,6 @@ export async function executeAgentRuntime(
       workDir,
       runtimePort: createEngineRuntimePort(),
       workspaceRoots,
-      usageSession: session,
       ...(effectiveOptions.thinkingEffort !== undefined
         ? { thinkingEffort: effectiveOptions.thinkingEffort }
         : {}),
@@ -2239,9 +2265,9 @@ export async function executeAgentRuntime(
       ...(dependencies.toolResultRedactionSecrets
         ? { toolResultRedactionSecrets: dependencies.toolResultRedactionSecrets }
         : {}),
-      compactor: contextRuntime.compactor,
       contextBudget: contextRuntime.budget,
-      // 模型摘要压缩:85% 水位主动整理 + Provider overflow 紧急重试。
+      contextRouteIdentity,
+      // Maka: only declared windows + real provider usage trigger proactive compaction.
       // 始终复用已由宿主从用户模型路由解析并注入的主 Provider。
       fullCompactor: new FullCompactor({
         provider: trackedProvider,
@@ -2271,7 +2297,6 @@ export async function executeAgentRuntime(
               ),
           }
         : {}),
-      skillLoaderFactory,
       ...(rebuildProvider ? { rebuildProvider } : {}),
     });
 
@@ -2458,7 +2483,7 @@ export async function executeAgentRuntime(
 
     // MCP 服务器:加载配置 → 并行连接 → 自动注册工具到 registry。
     // per-server 失败隔离,一个 server 挂了不影响其他。
-    const planMcpDisabled = collaborationMode() === "plan";
+    const planMcpDisabled = collaborationMode() !== "agent";
     const mcpConfigPath = planMcpDisabled
       ? undefined
       : (backgroundPolicy?.mcpConfigPath ?? options.mcpConfigPath);
@@ -2558,7 +2583,12 @@ export async function executeAgentRuntime(
     }
     if (dependencies.configuredSubagentChild) {
       const definition = dependencies.configuredSubagentChild.definition;
-      const childAgentToolConstructors = createChildAgentToolConstructors(logger);
+      const childAgentToolConstructors = createChildAgentToolConstructors(
+        logger,
+        session.runtimeEventStore
+          ? bindToolResultArchiveReader(session.runtimeEventStore, session.id)
+          : undefined,
+      );
       const processSandbox = {
         config: { ...picoConfig.sandbox, network: "deny" as const },
         scratchRoot: join(picoHome, "sandboxes", session.id, "subagents"),
@@ -2613,6 +2643,28 @@ export async function executeAgentRuntime(
         }),
       runtimeEnv,
     );
+    if (collaborationMode() === "research") {
+      for (const tool of createDeepResearchTools({
+        sessionId: session.id,
+        storageRoot: sessionStorageRoot,
+        onChanged: () =>
+          dependencies.sessionResourceChangedSink?.({
+            workspacePath: workDir,
+            sessionId: session.id,
+            resource: "artifacts",
+            revision: sessionTaskAuthority.repository.queryArtifacts({
+              sessionId: session.id,
+              limit: 1,
+            }).revision,
+          }),
+      }))
+        registry.register(tool);
+      for (const tool of registry.getAvailableTools()) {
+        if (!isResearchToolAllowed(tool.name)) registry.unregisterForHostPolicy(tool.name);
+      }
+      baselineToolNames.length = 0;
+      baselineToolNames.push(...registry.getAvailableTools().map((tool) => tool.name));
+    }
     if (registry.getTool("web_search")) baselineToolNames.push("web_search");
     dependencies.toolStatusSink?.(toolStatusFromRegistry(registry));
     toolDisclosure.setBaselineTools(baselineToolNames);
@@ -3050,9 +3102,11 @@ function buildRegistry(
   sessionTasks?: DefaultToolRegistryOptions["sessionTasks"],
   requestSandboxBoundaryHandler?: RequestSandboxBoundaryHandler,
   sessionArtifacts?: DefaultToolRegistryOptions["sessionArtifacts"],
+  toolResultArchive?: DefaultToolRegistryOptions["toolResultArchive"],
 ): ToolRegistry {
   return buildDefaultToolRegistry(workDir, {
     deferWorkspaceBoundary: true,
+    ...(toolResultArchive ? { toolResultArchive } : {}),
     backgroundManager,
     ...(goalManager !== undefined ? { goalManager } : {}),
     ...(todoStore !== undefined ? { todoStore } : {}),
@@ -3082,7 +3136,7 @@ async function prepareBackgroundExecution(
   dependencies: RunAgentCliDependencies,
   picoHome: string,
 ): Promise<PreparedBackgroundAutonomousPolicy> {
-  if (options.collaborationMode === "plan") {
+  if (options.collaborationMode === "plan" || options.collaborationMode === "research") {
     throw new BackgroundPolicyViolationError(
       "invalid_policy",
       "后台无人值守执行不支持 Plan 协作模式。",
@@ -3171,18 +3225,20 @@ function pruneRegistryToCommandAllowlist(
 
 function buildContextRuntime(
   kind: ProviderKind,
-  model: string,
-): { budget: ContextBudget; compactor: Compactor } {
+  config: ProviderConfig,
+): { budget: ContextBudget } {
   const protocol = kind === "openai" ? "openai" : kind;
-  const profile = resolveProviderProfile(protocol, model);
-  const budget = createContextBudget(profile);
-  return {
-    budget,
-    compactor: new Compactor({
-      maxChars: estimateTokenBudgetAsChars(budget.inputBudgetTokens),
-      retainLastMsgs: 6,
-    }),
-  };
+  const profile = resolveProviderProfile(protocol, config.model);
+  const capabilities = config.capabilities;
+  const budget = createContextBudget({
+    ...profile,
+    contextWindowTokens: capabilities?.contextWindowTokens ?? profile.contextWindowTokens,
+    maxOutputTokens: capabilities?.maxOutputTokens ?? profile.maxOutputTokens,
+  });
+  if (capabilities?.contextSource === "config") {
+    budget.declaredContextWindowTokens = capabilities.contextWindowTokens;
+  }
+  return { budget };
 }
 
 export function buildApprovalMiddleware(
@@ -3218,7 +3274,7 @@ export function buildForegroundSafetyMiddleware(
   settings?: Pick<SessionSettings, "collaborationMode">,
   workspaceRoots?: WorkspaceRoots,
   denialSink?: (event: RuntimePolicyDenial) => void,
-  collaborationMode?: () => "agent" | "plan",
+  collaborationMode?: () => "agent" | "plan" | "research",
 ): MiddlewareFunc {
   return async (call) => {
     const mode = collaborationMode?.() ?? settings?.collaborationMode ?? "agent";
@@ -3584,10 +3640,20 @@ async function externalAuthorizationDirectories(
 
 async function planModeDenialReason(
   call: { name: string; arguments: string },
-  mode: "agent" | "plan",
+  mode: "agent" | "plan" | "research",
   workDir: string,
   workspaceRoots?: WorkspaceRoots,
 ): Promise<string | undefined> {
+  if (mode === "research") {
+    if (!isResearchToolAllowed(call.name))
+      return `Research Mode 守卫：工具 ${call.name} 不在只读研究白名单中。`;
+    if (
+      ["read_file", "grep", "glob"].includes(call.name) &&
+      bypassImmuneSafetyPath(call, workDir, workspaceRoots) !== undefined
+    )
+      return "Research Mode 守卫：不能读取密钥与凭据文件。";
+    return undefined;
+  }
   if (mode !== "plan") return undefined;
   if (!isPlanProviderTool(call.name)) {
     return `Plan Mode 守卫：工具 ${call.name} 不在显式只读白名单中。`;

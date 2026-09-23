@@ -1,231 +1,155 @@
-# 第 9 章 · 看清每一步在干什么
+# 第 9 章 · 看清每次运行的成本与证据
 
-> 归档说明：本文保留历史设计与实施记录，不定义当前产品行为或待办。当前入口见 [技术文档索引](../../README.md)。
+> 当前实现教程：按代码 `0092022f`（2026-09-21）重写。保留原路径以兼容已有链接；概念伪代码不作为公开 API。
 
-> 文档状态：历史课程快照。价格表、Tracer/logger API 和 Evidence 归档示例是阶段性快照；
-> 当前价格以 `src/observability/pricing.ts` 为准，日志使用 pino，新 ToolResult 不再写
-> Evidence CAS。可观测性的设计动机仍可参考。
+Agent 返回了答案，仍有很多问题没有回答：它用了哪个模型，消耗了多少 Token，时间花在请求还是工具上，某次失败是否真的重试成功？仅打印最终文本，无法区分这些情况。
 
-Agent 能做事了。但我不知道它在做什么。
+Pico 把观测拆成互相补充的几种事实：Provider 调用与用量账本、Runtime 事件、Trace 和结构化日志。工具原始结果与模型当前看到的上下文也分开保存。这样可以追查一次运行，而不必让模型背着全部历史原文继续推理。
 
-它调了多少次 API？每次花了多少 Token？哪个步骤最耗时？为什么选了方案 A 而不是方案 B？月底老板拿着几千块的 API 账单问我"哪个任务消耗最多"，我哑口无言。
+## 先选择正确的事实源
 
-我需要可观测性。三个维度：**成本、轨迹、日志。**
+| 问题                         | 优先查看的记录                        |
+| ---------------------------- | ------------------------------------- |
+| 哪个模型调用成功、失败或取消 | Provider call 记录与 Runtime 模型事件 |
+| Token 和估算成本是多少       | CanonicalUsage、价格来源与 costStatus |
+| 哪个步骤耗时                 | Trace 中的 Run、Turn 和子 Span        |
+| 工具究竟返回了什么           | `tool.result.recorded` 的持久结果     |
+| 宿主连接或装配为何异常       | 结构化诊断日志                        |
 
----
+这些记录不能相互替代。活动卡片是展示，日志是诊断，Trace 是时间结构；它们都不应私自制造第二份工具执行事实。当前持久 Runtime 以事件和投影管理 Session/Run，工具结果契约见 [tool-result-builder.ts](../../../packages/runtime/src/tool-result-builder.ts)。
 
-## CostTracker：装饰器模式的妙用
+## CostTracker：在 Provider 边界记录调用
 
-成本追踪最怕的是侵入性——在每次 API 调用前后手动写计时代码。Main Loop、Subagent、Plan Mode、Error Recovery……到处都是 `provider.generate()` 调用。每个地方都加一行计时，代码就烂了。
+若在每个 `generate()` 调用点手工统计，很容易漏掉压缩、验证器或失败分支。当前 [CostTracker](../../../packages/runtime/src/cost-tracker.ts) 实现 LLMProvider 接口，包装真实 Provider，统一转发普通和流式请求，记录调用身份、耗时、结算状态与用量。
 
-装饰器模式给出了完美的解法：**创建一个"假"的 Provider，包裹"真"的 Provider。** Main Loop 根本不知道自己在被监控。
+下面是解释责任边界的概念伪代码，省略了真实实现中的运行归属校验、流式路径和账本字段：
 
-```typescript
-// src/observability/tracker.ts
-export class CostTracker implements LLMProvider {
-  constructor(
-    private readonly next: LLMProvider, // 真正的 Provider
-    private readonly modelRoute: BillingRoute, // 计费路由（哪个模型，什么价格）
-    private readonly session?: Session, // 累计到哪个 Session
-  ) {}
-
-  async generate(messages: Message[], tools: ToolDefinition[]): Promise<Message> {
-    const start = Date.now();
-    const resp = await this.next.generate(messages, tools); // 透明转发
-    const latencyMs = Date.now() - start;
-
-    if (resp.usage) {
-      // 计算本次调用的成本
-      const cost = estimateCost(this.modelRoute, resp.usage);
-
-      // 累计到 Session
-      if (this.session) {
-        this.session.recordUsage(
-          resp.usage.promptTokens,
-          resp.usage.completionTokens,
-          cost.costCNY,
-        );
-      }
-    }
-
-    return resp; // 原封不动返回，Main Loop 无感知
+```ts
+async function trackedGenerate(request) {
+  const callId = newCallId();
+  await recordStarted(callId, currentRun, request.purpose);
+  const start = now();
+  try {
+    const response = await provider.generate(request);
+    await recordSucceeded(callId, now() - start, response.usage);
+    return response;
+  } catch (error) {
+    await recordFailedOrCancelled(callId, now() - start, error);
+    throw error;
   }
 }
 ```
 
-注入方式极其简洁：
+真实 Tracker 为每次逻辑调用分配 callId，向匹配的 RuntimeRun 写 started/settled 事件，并写 Provider ledger。上下文可在每次请求前求值，让 Session、goal、job 和 purpose 归属跟随真实运行，而不是沿用构造 Tracker 时的旧值。独立后台调用也有禁止写入继承前台 Run 的选项。
 
-```typescript
-// 创建真实 Provider
-const realProvider = createProvider("openai", config);
+Hook verifier 是值得检查的例子：它使用独立 Session，模型请求的 purpose 为 `hook`；即使触发内部摘要请求，也通过同一 purpose 包装器转发。不能仅看“调用的是同一个 Provider 对象”就把费用算入父会话的普通答复。
 
-// 包裹一层 CostTracker
-const trackedProvider = new CostTracker(realProvider, modelRoute, session);
+## Token 口径要先统一，再谈价格
 
-// Main Loop 用的是 trackedProvider，但它以为是 realProvider
-const engine = new AgentEngine({ provider: trackedProvider, ... });
+Provider 的 usage 字段并非天然可相加。有的输入统计包含缓存 Token，输出统计又可能包含 reasoning Token。Pico 先归一化为五个桶：input、output、cache read、cache write、reasoning，再按 [pricing.ts](../../../packages/runtime/src/pricing.ts) 的规则估算。
+
+概念上，当前估算公式是：
+
+```text
+USD = [input × inputPrice
+     + (output + reasoning) × outputPrice
+     + cacheRead × cacheReadPrice
+     + cacheWrite × cacheWritePrice] / 1,000,000
 ```
 
-这就像给 API 调用装了一个安检门——数据必须经过它，它盖上"时间戳"和"成本戳"，再原封不动放行。
+价格选择也有顺序：订阅包含用量、显式 route pricing、宿主目录价格解析，再到适用的内置快照。`pricing: null` 可以明确禁止隐式价格表。宿主目录适配见 [catalog-pricing.ts](../../../packages/pico-host/src/catalog-pricing.ts)。同名模型经过不同端点，不能仅凭模型名就假定相同计费条件。
 
-装饰器模式的美妙在于：它不需要 Main Loop 的一行改动。所有 Provider 消费者——Main Loop、Subagent Runner、Error Recovery——都自动被追踪。因为 CostTracker 实现了相同的 `LLMProvider` 接口，对调用方完全透明。
+| costStatus  | 应如何解释                                    |
+| ----------- | --------------------------------------------- |
+| `estimated` | 根据已知价格与报告用量计算的估算              |
+| `included`  | 当前路由声明订阅内包含，不是逐 Token 计费估算 |
+| `unknown`   | 缺少必要价格，不能得出可靠金额                |
 
----
+缺少 usage 同样不是零消耗。Tracker 记录 missing usage；unknown 的数值占位也不能拿来宣称“免费”。当前 USD 到 CNY 使用代码中的固定折算系数，而非实时汇率，所以 UI 显示到分也不意味着与供应商最终账单精确一致。本文不重复粘贴会过期的模型价格表；查账应同时记录 route、价格来源、用量完整性和估算状态。
 
-## 计费：精确到分
+## 请求诊断帮助解释缓存，不等于替代账单
 
-成本计算不是简单的"Token × 单价"。不同模型有不同的计价维度：
+Tracker 可以观察准备发送给 Provider 的请求，生成请求指纹并与先前请求比较。这样能定位某一轮提示词、工具定义或请求形状发生变化，帮助解释缓存行为。诊断序列化失败会记录警告，不应为了观测本身阻断模型请求。
 
-```typescript
-// src/observability/pricing.ts
-const OFFICIAL_PRICING = {
-  "glm-5.2": {
-    inputPerMillion: 1.0, // 输入 1 元/百万 Token
-    outputPerMillion: 3.0, // 输出 3 元/百万 Token
-    cacheReadPerMillion: 0.1, // 缓存命中 0.1 元/百万 Token
-  },
-  "claude-3-5-sonnet": {
-    inputPerMillion: 22.0, // 输入 22 元/百万 Token
-    outputPerMillion: 88.0, // 输出 88 元/百万 Token
-    cacheReadPerMillion: 2.2, // 缓存命中 2.2 元/百万 Token
-    cacheWritePerMillion: 27.5, // 缓存写入 27.5 元/百万 Token
-  },
-};
+这些诊断只提供变化证据。请求形状相似，不证明供应商一定命中缓存；Provider 返回的 cache usage 与账单口径仍是必要依据。看到耗时下降也不能直接推出“压缩让模型质量提升”。观测数据可以提出假设，因果结论需要控制其他条件的评测。
+
+## Trace：把时间组织成运行树
+
+[运行时 Tracer](../../../packages/runtime/src/trace.ts) 保存 Span 树；[宿主导出器](../../../packages/pico-host/src/trace.ts) 负责写入工作区状态目录中的 traces。AgentEngine 使用明确父节点创建子 Span，避免并行工具因共享一个隐式栈而串错父子关系。
+
+下面是结构示意，不是真实性能测量：
+
+```text
+Agent.Run
+├── Turn-1
+│   ├── LLM.Action
+│   └── Tool.Execute
+├── Turn-2
+│   ├── Context.Compaction
+│   ├── LLM.Action
+│   └── Tool.Execute
+└── LLM.GraceCall（需要收尾时）
 ```
 
-Claude Sonnet 的输出价格是 GLM-5.2 的近 30 倍。这意味着同样一个任务，用 GLM 可能花 ¥0.50，用 Claude 花 ¥15。如果不追踪，你根本不知道这笔钱花在了哪里。
+Span 记录开始、结束、耗时与属性，JSON 导出路径采用 `trace_<sessionId>_<timestamp>.json`。文件落盘由宿主控制，不是把 `traces/` 随意写进项目源码目录。具体路径以运行返回值和宿主路径解析为准。
 
-计价还分了四个维度：输入（新 Token）、输出（生成的 Token）、缓存读取（命中 Prompt Cache 的 Token，价格是输入的 10%）、缓存写入（创建缓存的 Token，价格是输入的 125%）。Prompt Cache 的使用效果直接体现在成本差异上——同一段 System Prompt，第一次写入时按 125% 计价，后续 20 轮都按 10% 计价。
+Tracer 支持 full 与 metadata-only 属性策略。后者在字符串进入内存属性时就递归替换为 `[REDACTED]`，而不是等文件写出后才清洗；内部 Headless 使用这一策略，并保留落盘后的额外净化。普通交互 Trace 不应被误认为天然只有无敏感元数据，分享前要理解实际启用的策略。
 
----
+## 工具结果：保存原始事实，只给模型必要部分
 
-## Tracing：逐帧复盘
+一个终端命令可能返回很长的日志。把全部原文不断放进模型输入会增加成本；直接截掉又无法复查。当前路径是将规范工具结果内联保存为 RuntimeEvent，再为模型构造有界观察。
 
-成本告诉你"花了多少钱"，但没法告诉你"为什么这个任务失败了"。链路追踪就是为此而生的。
+```mermaid
+flowchart LR
+    A[工具返回结果] --> B[规范化与持久 tool.result.recorded]
+    B --> C[构造模型可见观察]
+    C --> D[必要预览与 archive 引用]
+    D --> E[模型需要细节]
+    E --> F[archive_read 有界回读]
+    F --> B
+```
 
-```typescript
-// src/observability/trace.ts
-export class Tracer {
-  private rootSpan: Span;
+当前归档引用形如：
 
-  startTurn(turnNumber: number): Span {
-    return this.rootSpan.startChild(`Turn #${turnNumber}`);
-  }
+```text
+pico://archive/<sessionId>/<eventId>/<sha256>/<sizeBytes>
+```
 
-  async traceToolCall(
-    span: Span,
-    toolName: string,
-    args: string,
-    fn: () => Promise<string>,
-  ): Promise<string> {
-    const toolSpan = span.startChild(`Tool.${toolName}`, { args });
-    try {
-      const result = await fn();
-      toolSpan.finish({ status: "ok" });
-      return result;
-    } catch (error) {
-      toolSpan.finish({ status: "error", error: String(error) });
-      throw error;
-    }
-  }
+[归档 reader](../../../packages/runtime/src/tool-result-archive.ts) 绑定当前 Session，核对事件身份、哈希和大小。它回读的是已保存的工具结果，不是把 URI 解释成任意本机文件路径，也不通过新写 Evidence CAS 来保存这条主路径。
+
+[archive_read](../../../packages/pico-host/src/archive-read-tool.ts) 提供 inspect、read、query、search；read 可以按字符或行分页，offset 从零开始，search 是有界的字面子串检索。以下是工具参数示例，ref 必须替换为工具真实返回值：
+
+```json
+{
+  "ref": "替换为当前会话实际返回的pico://archive引用",
+  "operation": "read",
+  "unit": "line",
+  "offset": 0,
+  "limit": 40
 }
 ```
 
-追踪的数据结构是一棵 Span 树：
+因此，不能继续教模型使用 `read_evidence` 或把当前 archive 描述为旧的 `pico://evidence/` CAS。文件读取、会话归档和跨子任务结果读取各有自己的授权路径。
 
-```
-Session "refactor-utils"
-├── Turn #1 (3.2s)
-│   ├── Phase 1: Thinking (2.1s, 450 tokens)
-│   └── Phase 2: Action (1.1s)
-│       ├── Tool.read_file (50ms, src/utils.ts)
-│       └── Tool.read_file (45ms, src/types.ts)
-├── Turn #2 (4.8s)
-│   ├── Phase 1: Thinking (2.3s, 520 tokens)
-│   └── Phase 2: Action (2.5s)
-│       ├── Tool.edit_file (80ms) ✓
-│       └── Tool.bash (2.3s, npx tsc --noEmit) ✗ (exit 1)
-└── Turn #3 (5.1s, final answer)
-```
+## 日志服务于诊断，不能冒充执行证据
 
-这棵树可以导出为 JSON，存到 `traces/` 目录。你可以看到：哪个 Turn 最耗时？哪个工具调用最常失败？Two-Stage ReAct 的 Thinking 阶段是否真的减少了工具错误？
+[logger.ts](../../../packages/pico-host/src/logger.ts) 使用 pino，支持 LOG_LEVEL，并对明确的凭据字段进行脱敏。开发态可以通过 pino-pretty 输出便于人读的内容；测试和 Electron 环境使用 plain pino。不同入口还会设置输出策略，例如机器 Headless 在加载 Runtime 前固定日志静默，以保证单行 JSON 终态协议。
 
-### 用 Trace 回答真实问题
+日志字段应帮助定位组件、调用身份和失败原因，不应默认记录完整提示词或凭据。精确字段脱敏也不等于扫描任意字符串中的所有秘密。持久事件、Trace、日志、用户界面有不同读者和保存目的，新增观测点时先明确必要信息与敏感边界。
 
-我在发现 Tracing 的价值之前，Agent 失败时只能猜测原因。"大概是 Third Turn 出了问题？"有了 Tracing，我可以问具体的问题：
+## 怎样证明观测没有说谎
 
-- "为什么这次重构任务失败了？" → 查 Trace，发现 Turn 3 的 `edit_file` 因为 old_text 不匹配失败了，Recovery 注入了救援指南但 Agent 没遵从
-- "为什么这个任务花了 ¥15？" → 查 Trace，发现 Turn 5 的 `read_file` 读了一个不需要的大文件（12K Token），后面几轮都在处理无效上下文
-- "Two-Stage ReAct 对重构任务有帮助吗？" → 对比开启/关闭 thinking 的 Trace，发现 Thinking 阶段平均多花 2 秒但减少了 40% 的工具调用错误
+在仓库根目录运行下列针对性检查：
 
-没有 Trace，这些都是猜测。有了 Trace，它们是因果关系。
-
----
-
-## 结构化日志
-
-结构化日志是第三根支柱。它不是 `console.log`——那些在生产环境里搜索不到。
-
-```typescript
-// src/observability/logger.ts
-export const logger = {
-  info: (msg: string, meta?: Record<string, unknown>) => {
-    console.log(
-      JSON.stringify({
-        level: "info",
-        timestamp: new Date().toISOString(),
-        message: msg,
-        ...meta,
-      }),
-    );
-  },
-  warn: (msg: string, meta?: Record<string, unknown>) => {
-    /* 类似，level: "warn" */
-  },
-  error: (msg: string, meta?: Record<string, unknown>) => {
-    /* 类似，level: "error" */
-  },
-};
+```bash
+npm run build:packages
+node --import tsx --import @pico/cli/tui/preload-env --test --test-concurrency=1 \
+  tests/integration/provider/catalog-usage-billing.test.ts \
+  tests/integration/runtime/runtime-tool-result-contract.test.ts \
+  tests/integration/tools/archive-read-tool.test.ts \
+  tests/integration/tui/tui-client-tracer.test.ts
 ```
 
-每行日志都是独立的 JSON 对象。这意味着可以用 `jq` 过滤、用 ELK 聚合、用 Grafana 可视化。不是"读日志文件"，而是"查询日志数据库"。
+这些确定性测试分别检查计费口径、工具持久结果、归档回读和 TUI trace 消费。它们不验证供应商实际账单，也不证明任何性能提升百分比。要研究成本或成功率变化，应固定任务和模型路线，保存实际数据，再进入下一章的评测链。
 
-这一点很重要。在飞书 AgentOps 场景中，用户可能报告"Agent 昨天下午的响应很慢"。你不用翻几百行日志——你只需要 `jq 'select(.timestamp > "2026-07-04T12:00:00" and .latencyMs > 5000)'`，三秒钟定位到慢请求。
-
-### Evidence 外部化：不让大数据进上下文
-
-还有一个容易被忽略的观测维度：可回读证据。Agent 执行 `bash "cat /var/log/app.log"` 时，输出可能有 50K 字符。如果这个输出原样进入上下文，会迅速撑爆窗口；如果直接丢弃，主 Agent 又没法事后查阅。
-
-解决方案是 **Evidence CAS**。Engine 把原始输出按内容哈希写入 workspace Evidence，并在
-canonical ToolResult 中保存大小、SHA-256、有界投影和不可伪造为任意路径的 URI：
-
-```
-pico://evidence/<session-id>/<sha256>
-```
-
-主 Agent 需要细节时使用 `read_evidence` 按 UTF-8 字节分页回读，不能用 `read_file` 绕过
-Session 和哈希校验。长子代理报告使用同一个 Evidence CAS，主上下文只接收有界预览和引用。
-
----
-
-## 现在有了什么
-
-可观测性系统就位：
-
-- **CostTracker**：装饰器模式无侵入拦截，每轮 API 调用的 Token 和成本精确到分
-- **Tracing**：Span 树导出 JSON，逐帧复盘 Agent 的全部决策路径
-- **结构化日志**：每行 JSON，可被 jq/ELK/Grafana 消费
-
-这三个系统合在一起，回答了三类问题：
-
-- **成本**："这个 Session 花了 ¥3.42，其中 Claude 输出占了 ¥2.80"
-- **轨迹**："Turn 3 的 edit_file 失败了，因为 old_text 不匹配。之后 Recovery 注入了救援指南，Turn 4 重试成功"
-- **日志**："12:34:56 飞书 Bot 收到消息，分配 Session `wxid_abc`，开始处理"
-
-Agent 现在能做一切：思考、执行、纠错、安全、委派、追踪。但最后一个问题：**它真的在变好吗？**
-
-加了 Two-Stage ReAct，成功率从 60% 提到 75% 还是降低到 50%？改了压缩策略，上下文质量是提升还是下降？换了新模型，值得吗？
-
-接下来，给它设计一场考试。
-
-[下一章：怎么知道它变聪明了 →](10-evaluation.md)
+[下一章：用可复查的评测判断改动 →](10-evaluation.md)

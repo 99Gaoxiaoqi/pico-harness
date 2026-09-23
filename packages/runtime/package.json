@@ -103,10 +103,6 @@
       "types": "./dist/code-cell-admission.d.ts",
       "import": "./dist/code-cell-admission.js"
     },
-    "./compactor": {
-      "types": "./dist/compactor.d.ts",
-      "import": "./dist/compactor.js"
-    },
     "./full-compactor": {
       "types": "./dist/full-compactor.d.ts",
       "import": "./dist/full-compactor.js"
@@ -291,14 +287,6 @@
       "types": "./dist/session-fork-runtime-lifecycle.d.ts",
       "import": "./dist/session-fork-runtime-lifecycle.js"
     },
-    "./subagent-context-policy": {
-      "types": "./dist/subagent-context-policy.d.ts",
-      "import": "./dist/subagent-context-policy.js"
-    },
-    "./subagent-context": {
-      "types": "./dist/subagent-context.d.ts",
-      "import": "./dist/subagent-context.js"
-    },
     "./subagent-activity-reporter": {
       "types": "./dist/subagent-activity-reporter.d.ts",
       "import": "./dist/subagent-activity-reporter.js"
@@ -415,10 +403,6 @@
       "types": "./dist/process-tree.d.ts",
       "import": "./dist/process-tree.js"
     },
-    "./usage-baseline": {
-      "types": "./dist/usage-baseline.d.ts",
-      "import": "./dist/usage-baseline.js"
-    },
     "./credential-pool": {
       "types": "./dist/credential-pool.d.ts",
       "import": "./dist/credential-pool.js"
@@ -499,9 +483,17 @@
       "types": "./dist/agent-engine-ports.d.ts",
       "import": "./dist/agent-engine-ports.js"
     },
-    "./subagent-runner": {
-      "types": "./dist/subagent-runner.d.ts",
-      "import": "./dist/subagent-runner.js"
+    "./tool-result-archive": {
+      "types": "./dist/tool-result-archive.d.ts",
+      "import": "./dist/tool-result-archive.js"
+    },
+    "./tool-result-archive-resource": {
+      "types": "./dist/tool-result-archive-resource.d.ts",
+      "import": "./dist/tool-result-archive-resource.js"
+    },
+    "./tool-message-pairs": {
+      "types": "./dist/tool-message-pairs.d.ts",
+      "import": "./dist/tool-message-pairs.js"
     }
   },
   "files": [

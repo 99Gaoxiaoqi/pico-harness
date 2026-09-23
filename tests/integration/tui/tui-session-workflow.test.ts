@@ -198,7 +198,6 @@ async function createCommandClient(
     runtimeService: new WorkspaceRuntimeService({ env, execute: async () => undefined }),
     trustStore,
     env,
-    initializeDefaultProvider: false,
     providerFactory: () => {
       calls += 1;
       throw new Error("unexpected model provider activation");

@@ -23,9 +23,10 @@ import {
   type MergeRequestRecord,
   type MergeRequestStatus,
   type ProviderCallRecord,
+  type PhysicalAttemptRecord,
+  type PhysicalAttemptFilter,
   type RuntimeLeaseRecord,
   type TerminalJobStatus,
-  type UsageBaselineRecord,
   type UsageLedgerFilter,
   type UsageLedgerSummary,
 } from "@pico/storage/runtime-control-types";
@@ -377,18 +378,26 @@ export class JobService {
     return this.store.markCompletionDelivered(completionId);
   }
 
-  recordProviderCall(record: Omit<ProviderCallRecord, "createdAt"> & { createdAt?: number }): {
-    record: ProviderCallRecord;
-    inserted: boolean;
-  } {
-    return this.store.recordProviderCall(record);
+  beginPhysicalAttemptOwner(): string {
+    return this.store.beginPhysicalAttemptOwner();
   }
-
-  putUsageBaseline(record: UsageBaselineRecord): {
-    record: UsageBaselineRecord;
-    inserted: boolean;
+  recoverPhysicalAttempts(): number {
+    return this.store.recoverPhysicalAttempts();
+  }
+  getAccountingRevision(): number {
+    return this.store.getAccountingRevision();
+  }
+  recordPhysicalAttempt(record: PhysicalAttemptRecord): {
+    record: PhysicalAttemptRecord;
+    updated: boolean;
   } {
-    return this.store.putUsageBaseline(record);
+    return this.store.recordPhysicalAttempt(record);
+  }
+  listPhysicalAttempts(filter: PhysicalAttemptFilter = {}): PhysicalAttemptRecord[] {
+    return this.store.listPhysicalAttempts(filter);
+  }
+  listAccountingProviderCalls(filter: UsageLedgerFilter = {}): ProviderCallRecord[] {
+    return this.store.listAccountingProviderCalls(filter);
   }
 
   getUsageSummary(filter: UsageLedgerFilter = {}): UsageLedgerSummary {

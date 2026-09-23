@@ -1323,6 +1323,7 @@ export class SqliteRuntimeEventStore {
     return this.write(() => {
       const row = this.readSessionRow(sessionId);
       if (!row) return false;
+
       this.lease.database.prepare("DELETE FROM runtime_events WHERE session_id = ?").run(sessionId);
       // session_catalog_projection / session_messages 经 FK ON DELETE CASCADE 同事务删除。
       this.lease.database.prepare("DELETE FROM sessions WHERE session_id = ?").run(sessionId);
@@ -1660,6 +1661,8 @@ export class SqliteRuntimeEventStore {
       }
       this.insertSessionMessageLocked(sessionId, sequence, event.eventId, event.at, message);
     }
+    // Native-only accounting cleanup can leave gaps in immutable event sequences.
+    fold.headSequence = row.last_event_seq;
     this.upsertCatalogRowLocked(sessionId, manifestFromRow(row), fold, {
       lastEventSeq: row.last_event_seq,
       eventCount: row.event_count,

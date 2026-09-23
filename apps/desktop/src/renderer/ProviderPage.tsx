@@ -146,11 +146,14 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
           provider.auth === "none" &&
           provider.baseURL.replace(/\/+$/u, "") === "https://opencode.ai/zen/v1",
       ) && (
-        <div className="provider-free-notice">
-          <strong>OpenCode Free · 免费试用</strong>
-          <p>无需 API Key，按 IP 限流。免费模型与额度可能变化，请勿提交个人或机密信息。</p>
-          <a href="https://opencode.ai/docs/zen#privacy" target="_blank" rel="noreferrer">
-            查看数据使用说明
+        <div className="provider-warning-notice">
+          <strong>OpenCode 匿名连接已不可用</strong>
+          <p>
+            OpenCode 的免费模型仅限其客户端使用，Pico 请求会返回
+            403。请添加其他模型连接，切换默认模型及受影响会话的模型。
+          </p>
+          <a href="https://opencode.ai/docs/zen/" target="_blank" rel="noreferrer">
+            查看 OpenCode Zen 接入说明
           </a>
         </div>
       )}

@@ -68,6 +68,7 @@ export class ToolCommitBoundaryError extends Error {
 
 /** Narrow tool-dispatch surface required by the durable RuntimeRun coordinator. */
 export interface RuntimeToolRegistry {
+  isToolResultArchiveReader?(name: string): boolean;
   captureStep?(
     id: string,
     visibleToolNames: readonly string[],

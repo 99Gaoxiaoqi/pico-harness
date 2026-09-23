@@ -1,14 +1,97 @@
 // 大模型通信的稳定契约。具体协议翻译与网络实现属于外层 Provider 适配器。
 
-import type { Message, ToolDefinition } from "./message.js";
+import type { Message, ToolDefinition, Usage } from "./message.js";
+import type { ModelCommunicationCategory, ModelResponseDiagnostic } from "./provider-errors.js";
 
 export const DEFAULT_PROVIDER_TIMEOUT_MS = 120_000;
 
+/** Locally normalized, allowlisted failure evidence; never remote text or headers. */
+export interface ProviderAttemptFailureFacts {
+  readonly errorClass?:
+    | "ModelCommunicationError"
+    | "LLMStatusError"
+    | "ContextOverflowError"
+    | "TimeoutError"
+    | "AbortError"
+    | "Unknown";
+  readonly errorCategory?: ModelCommunicationCategory;
+  readonly transportCode?: ModelResponseDiagnostic["transportCode"];
+  readonly retryable?: boolean;
+  readonly diagnosticId?: string;
+}
+
+/** A real HTTP dispatch, including compatibility downgrades; never a logical call. */
+export interface ProviderPhysicalAttempt extends ProviderAttemptFailureFacts {
+  readonly attemptId: string;
+  readonly attempt: number;
+  readonly provider: string;
+  readonly model: string;
+  readonly startedAt: string;
+  readonly completedAt: string;
+  readonly status: "succeeded" | "failed" | "cancelled" | "interrupted";
+  readonly latencyMs: number;
+  readonly timeToFirstTokenMs?: number;
+  readonly httpStatus?: number;
+  readonly finishReason?: string;
+  readonly usage?: Usage;
+  readonly usageBasis: "reported" | "partial" | "missing";
+  readonly error?: string;
+  readonly costCNY?: number;
+  readonly costStatus?: "estimated" | "included" | "unknown";
+}
+
+/** Durable admission is prepared evidence, never proof that the server received a request. */
+export interface ProviderAttemptLifecycleSnapshot extends ProviderAttemptFailureFacts {
+  readonly physicalAttemptId: string;
+  readonly revision: number;
+  readonly attempt: number;
+  readonly provider: string;
+  readonly model: string;
+  readonly startedAt: string;
+  readonly status: "prepared" | "observed" | "succeeded" | "failed" | "cancelled" | "interrupted";
+  readonly completedAt?: string;
+  readonly latencyMs?: number;
+  readonly timeToFirstTokenMs?: number;
+  readonly httpStatus?: number;
+  readonly finishReason?: string;
+  readonly usage?: Usage;
+  readonly usageBasis: "reported" | "partial" | "missing";
+  readonly error?: string;
+}
+
+/** Harness facts frozen before dispatch; never inferred from later configuration. */
+export interface RequestContextFacts {
+  readonly version: 1;
+  readonly routeId?: string;
+  readonly connectionId?: string;
+  readonly contextWindow?: number;
+  readonly contextWindowSource?: string;
+  readonly compaction?: {
+    readonly checkpointId: string;
+    readonly throughEventId: string;
+    readonly coveredEventCount: number;
+    readonly phase?: "pre_turn" | "mid_turn";
+    readonly estimatedTokens?: number;
+  };
+}
+
 export interface LLMProviderRequestOptions {
+  readonly contextFacts?: RequestContextFacts;
+  /** Harness identity, shared by every retry of one logical model step. */
+  logicalCallId?: string;
+  /** Must resolve before HTTP dispatch. Failure is local and must not be retried as a provider error. */
+  onProviderAttemptStart?: (snapshot: ProviderAttemptLifecycleSnapshot) => Promise<void>;
+  /** Observed and terminal revisions; sink failures must never cause another provider request. */
+  onProviderAttemptUpdate?: (snapshot: ProviderAttemptLifecycleSnapshot) => Promise<void>;
+  retryAttempt?: number;
+  /** Secret-free, settled physical dispatch facts for the canonical event ledger. */
+  onProviderAttempt?: (attempt: ProviderPhysicalAttempt) => void;
   /** 宿主中止信号。Provider 应将它与自身超时合并后传给网络请求。 */
   signal?: AbortSignal;
-  /** 仅供已校验的宿主覆盖单次 Provider 硬超时；普通调用保持 120 秒默认值。 */
+  /** 宿主显式指定的单次硬期限；省略时，普通流式请求使用 120 秒无有效进展超时。 */
   timeoutMs?: number;
+  /** 单次生成的输出 token 上限；Provider 取它与路线输出上限的较小值。 */
+  maxOutputTokens?: number;
   /**
    * 禁止本次响应调用工具。支持该语义的 Provider 可保留工具 Schema，
    * 不支持的 Provider 必须由调用方通过 requestCapabilities 能力门控后传空工具集。
@@ -45,6 +128,8 @@ export interface PreparedProviderRequest {
 
 /** Provider 对请求级协议选项的显式支持；未声明一律按不支持处理。 */
 export interface LLMProviderRequestCapabilities {
+  /** Every actual dispatch, including internal compatibility retries, is observed. */
+  readonly physicalAttempts?: boolean;
   /** 能否在保留工具 Schema 的同时，通过 wire 参数可靠禁止工具调用。 */
   readonly toolChoiceNoneWithTools: boolean;
   /** Secret-free route identity used for route-scoped prompt-cache traffic accounting. */
@@ -67,8 +152,8 @@ export interface ProviderStreamReporter {
 /**
  * 合并宿主中止与 Provider 硬超时，任一触发即取消请求。
  *
- * timeoutMs 是纯 wall-clock 整体超时，从请求发出开始计；长流式的 progress timeout
- * 仍是外层传输实现的后续演进项，不能在契约迁移中改变现有取消语义。
+ * timeoutMs 是纯 wall-clock 整体超时。非流式调用与显式硬期限使用此函数；
+ * 普通流式请求的无进展超时由 Provider 管理，不改变此函数的硬期限语义。
  */
 export function providerRequestSignal(
   signal?: AbortSignal,

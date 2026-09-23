@@ -1,0 +1,164 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "自动压缩：触发、校验与失败保留",
+    "locale": "zh-CN",
+    "quality_profile": "showcase"
+  },
+  "lanes": [
+    {
+      "id": "main",
+      "label": "压缩路径"
+    },
+    {
+      "id": "fallback",
+      "label": "保留与继续",
+      "variant": "exception"
+    }
+  ],
+  "mainPath": [
+    "usage",
+    "gate",
+    "cut",
+    "summarize",
+    "checkpoint"
+  ],
+  "nodes": [
+    {
+      "id": "usage",
+      "lane": "main",
+      "col": 0,
+      "type": "backend",
+      "label": "真实用量",
+      "sublabel": "同路线已接受请求",
+      "width": 170
+    },
+    {
+      "id": "gate",
+      "lane": "main",
+      "col": 1,
+      "type": "backend",
+      "label": "达到声明窗口？",
+      "sublabel": "输入 + 输出 + 余量",
+      "width": 170
+    },
+    {
+      "id": "cut",
+      "lane": "main",
+      "col": 2,
+      "type": "backend",
+      "label": "安全切点？",
+      "sublabel": "不拆分工具交换",
+      "width": 170
+    },
+    {
+      "id": "summarize",
+      "lane": "main",
+      "col": 3,
+      "type": "backend",
+      "label": "摘要有效？",
+      "sublabel": "五段结构与有限修复",
+      "width": 170
+    },
+    {
+      "id": "checkpoint",
+      "lane": "main",
+      "col": 4,
+      "type": "backend",
+      "label": "提交检查点",
+      "sublabel": "随后重建模型视图",
+      "width": 170
+    },
+    {
+      "id": "keep",
+      "lane": "fallback",
+      "col": 2,
+      "type": "security",
+      "label": "保留原历史",
+      "sublabel": "无切点或摘要失败",
+      "width": 170
+    },
+    {
+      "id": "send",
+      "lane": "fallback",
+      "col": 4,
+      "type": "external",
+      "label": "继续模型请求",
+      "sublabel": "超限另走一次恢复",
+      "width": 170
+    }
+  ],
+  "edges": [
+    {
+      "id": "usage-gate",
+      "from": "usage",
+      "to": "gate",
+      "label": "计算"
+    },
+    {
+      "id": "gate-cut",
+      "from": "gate",
+      "to": "cut",
+      "label": "达到"
+    },
+    {
+      "id": "cut-summarize",
+      "from": "cut",
+      "to": "summarize",
+      "label": "有"
+    },
+    {
+      "id": "summarize-checkpoint",
+      "from": "summarize",
+      "to": "checkpoint",
+      "label": "有效"
+    },
+    {
+      "id": "cut-keep",
+      "from": "cut",
+      "to": "keep",
+      "label": "无"
+    },
+    {
+      "id": "summarize-keep",
+      "from": "summarize",
+      "to": "keep",
+      "label": "失败"
+    },
+    {
+      "id": "checkpoint-send",
+      "from": "checkpoint",
+      "to": "send",
+      "label": "新上下文"
+    },
+    {
+      "id": "gate-send",
+      "from": "gate",
+      "to": "send",
+      "label": "未达到"
+    },
+    {
+      "id": "keep-send",
+      "from": "keep",
+      "to": "send",
+      "label": "原上下文"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "amber",
+      "title": "余量计算",
+      "items": [
+        "reserve = min(2 × outputTokens, 8000)"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "失败有界",
+      "items": [
+        "自动摘要未成功会锁存本轮失败；原始历史保留。"
+      ]
+    }
+  ]
+}

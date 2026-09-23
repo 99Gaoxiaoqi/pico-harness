@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-export type CollaborationMode = "agent" | "plan";
+export type CollaborationMode = "agent" | "plan" | "research";
 export type PermissionMode = "ask" | "auto" | "full-access";
 export type PlanReviewedBy = "user" | "system";
 export type PlanProposalStatus = "pending" | "stale" | "approved" | "rejected";

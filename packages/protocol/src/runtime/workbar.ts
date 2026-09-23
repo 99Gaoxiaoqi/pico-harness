@@ -1,3 +1,4 @@
+import type { RuntimeExecutionPage, RuntimeExecutionSummary } from "../execution-trace.js";
 // Session workbar, Git, browser, terminal, and rewind contracts with their boundary rules.
 import type {
   CheckpointId,
@@ -67,12 +68,74 @@ export type RuntimeSessionArtifact = JsonObject & {
   readonly updatedAt: number;
 };
 
-/** Versioned extension of the legacy context JsonObject returned under `context`. */
+export type RuntimeContextComposition = JsonObject & {
+  readonly basis: "semantic_utf8_bytes";
+  readonly totalBytes: number;
+  readonly segments: readonly (JsonObject & {
+    readonly kind: "system" | "tools" | "messages" | "other";
+    readonly bytes: number;
+  })[];
+  readonly tools: readonly (JsonObject & { readonly label: string; readonly bytes: number })[];
+  readonly remainingTools: JsonObject & { readonly count: number; readonly bytes: number };
+  readonly unlabelledToolBytes: number;
+};
+export type RuntimeContextCompaction = JsonObject & {
+  readonly checkpointId: string;
+  readonly throughEventId: string;
+  readonly coveredEventCount: number;
+  readonly phase?: "pre_turn" | "mid_turn";
+  readonly estimatedTokens?: number;
+};
+export type RuntimeLatestContextRequest = JsonObject & {
+  readonly status: "available" | "unavailable";
+  readonly source: "physical" | "none";
+  readonly reason?: string;
+  readonly providerCallId?: string;
+  readonly physicalAttemptId?: string;
+  readonly providerId?: string;
+  readonly modelId?: string;
+  readonly routeId?: string;
+  readonly connectionId?: string;
+  readonly completedAt?: number;
+  readonly contextWindow?: number;
+  readonly contextWindowSource?: string;
+  readonly inputTokens?: number;
+  readonly outputTokens?: number;
+  readonly cachedInputTokens?: number;
+  readonly usageStatus: "reported" | "partial" | "missing";
+  readonly compositionStatus: "available" | "unrecorded";
+  readonly composition?: RuntimeContextComposition;
+  readonly compaction?: RuntimeContextCompaction;
+};
 export type RuntimeSessionContextSnapshot = JsonObject & {
-  readonly version: 2;
+  readonly version: 3;
   readonly sessionId: SessionId;
   readonly generatedAt: number;
-  readonly traceWatermark: number;
+  readonly selectedRoute: JsonObject & {
+    readonly routeId: string;
+    readonly providerId: string;
+    readonly modelId: string;
+    readonly connectionId?: string;
+    readonly declaredContextWindow?: number;
+    readonly contextWindow?: number;
+  };
+  readonly latestRequest: RuntimeLatestContextRequest;
+  readonly lastRequestAnchor?: JsonObject & {
+    readonly routeId: string;
+    readonly connectionId?: string;
+    readonly modelId: string;
+    readonly inputTokens: number;
+    readonly outputTokens: number;
+  };
+  readonly modelHistory: JsonObject & {
+    readonly throughSequence: number;
+    readonly messageCount: number;
+    readonly estimatedTokens: number;
+    readonly estimationAlgorithm: "maka_chars_v1";
+    readonly projection: "effective_model_history";
+    readonly compactedCount: number;
+    readonly latestCompaction?: RuntimeContextCompaction;
+  };
 };
 
 export type RuntimeGitReviewSource = "branch" | "staged" | "unstaged";
@@ -173,6 +236,100 @@ const runtimeBrowserAgentCommandResult = exactResultShape({
   expiresAt: resultFiniteNumber,
 });
 
+const runtimeContextCompactionResult = exactResultShape(
+  {
+    checkpointId: resultNonEmptyString,
+    throughEventId: resultNonEmptyString,
+    coveredEventCount: resultNonNegativeInteger,
+  },
+  { phase: resultOneOf(["pre_turn", "mid_turn"]), estimatedTokens: resultNonNegativeInteger },
+);
+const runtimeContextCompositionResult = exactResultShape({
+  basis: resultOneOf(["semantic_utf8_bytes"]),
+  totalBytes: resultNonNegativeInteger,
+  segments: resultArray(
+    exactResultShape({
+      kind: resultOneOf(["system", "tools", "messages", "other"]),
+      bytes: resultNonNegativeInteger,
+    }),
+  ),
+  tools: resultArray(
+    exactResultShape({ label: resultNonEmptyString, bytes: resultNonNegativeInteger }),
+  ),
+  remainingTools: exactResultShape({
+    count: resultNonNegativeInteger,
+    bytes: resultNonNegativeInteger,
+  }),
+  unlabelledToolBytes: resultNonNegativeInteger,
+});
+const runtimeLatestContextResult = exactResultShape(
+  {
+    status: resultOneOf(["available", "unavailable"]),
+    source: resultOneOf(["physical", "none"]),
+    usageStatus: resultOneOf(["reported", "partial", "missing"]),
+    compositionStatus: resultOneOf(["available", "unrecorded"]),
+  },
+  {
+    reason: resultString,
+    providerCallId: resultNonEmptyString,
+    physicalAttemptId: resultNonEmptyString,
+    providerId: resultNonEmptyString,
+    modelId: resultNonEmptyString,
+    routeId: resultNonEmptyString,
+    connectionId: resultNonEmptyString,
+    completedAt: resultFiniteNumber,
+    contextWindow: resultPositiveInteger,
+    contextWindowSource: resultNonEmptyString,
+    inputTokens: resultNonNegativeInteger,
+    outputTokens: resultNonNegativeInteger,
+    cachedInputTokens: resultNonNegativeInteger,
+    composition: runtimeContextCompositionResult,
+    compaction: runtimeContextCompactionResult,
+  },
+);
+const runtimeSessionContextResult = exactResultShape(
+  {
+    version: resultOneOf([3]),
+    sessionId: resultNonEmptyString,
+    generatedAt: resultFiniteNumber,
+    selectedRoute: exactResultShape(
+      {
+        routeId: resultNonEmptyString,
+        providerId: resultNonEmptyString,
+        modelId: resultNonEmptyString,
+      },
+      {
+        connectionId: resultNonEmptyString,
+        contextWindow: resultPositiveInteger,
+        declaredContextWindow: resultPositiveInteger,
+      },
+    ),
+    latestRequest: runtimeLatestContextResult,
+    modelHistory: exactResultShape(
+      {
+        throughSequence: resultNonNegativeInteger,
+        messageCount: resultNonNegativeInteger,
+        estimatedTokens: resultNonNegativeInteger,
+        estimationAlgorithm: resultOneOf(["maka_chars_v1"]),
+        projection: resultOneOf(["effective_model_history"]),
+        compactedCount: resultNonNegativeInteger,
+      },
+      { latestCompaction: runtimeContextCompactionResult },
+    ),
+  },
+  {
+    lastRequestAnchor: exactResultShape(
+      {
+        routeId: resultNonEmptyString,
+        modelId: resultNonEmptyString,
+        inputTokens: resultNonNegativeInteger,
+        outputTokens: resultNonNegativeInteger,
+      },
+      { connectionId: resultNonEmptyString },
+    ),
+  },
+);
+
 const runtimeChangeResult = resultShape({
   path: resultString,
   status: resultOneOf(["added", "modified", "deleted", "renamed"]),
@@ -181,6 +338,10 @@ const runtimeChangeResult = resultShape({
 });
 
 export type WorkbarMethodMap = {
+  readonly "session.research.query": {
+    readonly params: WorkspaceParams & { readonly sessionId: SessionId };
+    readonly result: JsonObject;
+  };
   /** 活跃路由的上下文预算与能力报告（BLOCKED 收口：/context 镜像）。 */
   readonly "session.context.get": {
     readonly params: WorkspaceParams & { readonly sessionId: SessionId };
@@ -242,6 +403,18 @@ export type WorkbarMethodMap = {
       readonly expectedSizeBytes?: number;
     };
     readonly result: JsonObject;
+  };
+  readonly "session.execution.summary": {
+    readonly params: WorkspaceParams & { readonly sessionId: SessionId };
+    readonly result: RuntimeExecutionSummary;
+  };
+  readonly "session.execution.query": {
+    readonly params: WorkspaceParams & {
+      readonly sessionId: SessionId;
+      readonly cursor?: string;
+      readonly runId?: string;
+    };
+    readonly result: RuntimeExecutionPage;
   };
   readonly "session.trace.query": {
     readonly params: WorkspaceParams & {
@@ -523,6 +696,7 @@ export type WorkbarMethodMap = {
 };
 
 export const workbarParamValidators = {
+  "session.research.query": workspaceSessionParams,
   "session.context.get": workspaceSessionParams,
   "session.tasks.query": exactParamShape(
     { workspacePath: stringParam, sessionId: stringParam },
@@ -588,6 +762,14 @@ export const workbarParamValidators = {
       expectedDigest: boundedNonEmptyStringParam(64),
       expectedSizeBytes: nonNegativeIntegerParam,
     },
+  ),
+  "session.execution.summary": exactParamShape({
+    workspacePath: stringParam,
+    sessionId: boundedNonEmptyStringParam(512),
+  }),
+  "session.execution.query": exactParamShape(
+    { workspacePath: stringParam, sessionId: boundedNonEmptyStringParam(512) },
+    { cursor: boundedNonEmptyStringParam(2048), runId: boundedNonEmptyStringParam(512) },
   ),
   "session.trace.query": exactParamShape(
     { workspacePath: stringParam, sessionId: stringParam },
@@ -747,8 +929,130 @@ export const workbarParamValidators = {
   }),
 } satisfies Readonly<Record<keyof WorkbarMethodMap, RuntimeParamValidator>>;
 
+const executionStatus = resultOneOf(["running", "completed", "failed", "cancelled", "interrupted"]);
+const runtimeExecutionAttemptResult = exactResultShape(
+  {
+    attemptId: resultNonEmptyString,
+    attempt: resultNonNegativeInteger,
+    provider: resultString,
+    model: resultString,
+    startedAt: resultString,
+    status: resultOneOf([
+      "prepared",
+      "observed",
+      "succeeded",
+      "failed",
+      "cancelled",
+      "interrupted",
+    ]),
+    usageBasis: resultOneOf(["reported", "partial", "missing"]),
+  },
+  {
+    completedAt: resultString,
+    latencyMs: resultFiniteNumber,
+    timeToFirstTokenMs: resultFiniteNumber,
+    httpStatus: resultNonNegativeInteger,
+    finishReason: resultString,
+    inputTokens: resultNonNegativeInteger,
+    outputTokens: resultNonNegativeInteger,
+    cachedInputTokens: resultNonNegativeInteger,
+    reasoningTokens: resultNonNegativeInteger,
+    error: resultString,
+    errorClass: resultString,
+    errorCategory: resultString,
+    transportCode: resultString,
+    retryable: resultBoolean,
+    diagnosticId: resultString,
+    costCNY: resultFiniteNumber,
+    costStatus: resultOneOf(["estimated", "included", "unknown"]),
+    costUnknownReason: resultString,
+  },
+);
+const runtimeExecutionStepResult = exactResultShape(
+  {
+    id: resultNonEmptyString,
+    eventId: resultNonEmptyString,
+    turnId: resultString,
+    kind: resultOneOf(["model", "tool", "permission", "compaction", "error"]),
+    title: resultString,
+    at: resultString,
+    status: executionStatus,
+  },
+  {
+    durationMs: resultFiniteNumber,
+    purpose: resultString,
+    providerId: resultString,
+    modelId: resultString,
+    pricingKey: resultString,
+    retries: resultNonNegativeInteger,
+    firstTokenLatencyMs: resultFiniteNumber,
+    cachedInputTokens: resultNonNegativeInteger,
+    reasoningTokens: resultNonNegativeInteger,
+    permissionDecision: resultOneOf(["approved", "rejected"]),
+    attempts: resultArray(runtimeExecutionAttemptResult),
+    detail: resultString,
+    input: resultString,
+    output: resultString,
+    error: resultString,
+    truncated: resultBoolean,
+    inputTokens: resultNonNegativeInteger,
+    outputTokens: resultNonNegativeInteger,
+    costCNY: resultFiniteNumber,
+    costStatus: resultOneOf(["estimated", "included", "unknown"]),
+    costUnknownReason: resultString,
+  },
+);
+const runtimeExecutionRunResult = exactResultShape(
+  {
+    runId: resultNonEmptyString,
+    invocationId: resultString,
+    at: resultString,
+    status: executionStatus,
+    steps: resultArray(runtimeExecutionStepResult),
+  },
+  { durationMs: resultFiniteNumber, reason: resultString, parentRunId: resultString },
+);
+const runtimeExecutionSummaryResult = exactResultShape(
+  {
+    scope: resultOneOf(["session"]),
+    modelCalls: resultNonNegativeInteger,
+    failedCalls: resultNonNegativeInteger,
+    meteredCalls: resultNonNegativeInteger,
+    unpricedCalls: resultNonNegativeInteger,
+  },
+  {
+    inputTokens: resultNonNegativeInteger,
+    outputTokens: resultNonNegativeInteger,
+    costCNY: resultFiniteNumber,
+    latencyMs: resultFiniteNumber,
+    cachedInputTokens: resultNonNegativeInteger,
+    reasoningTokens: resultNonNegativeInteger,
+    toolCalls: resultNonNegativeInteger,
+    toolDurationMs: resultFiniteNumber,
+    physicalAttempts: resultNonNegativeInteger,
+    retries: resultNonNegativeInteger,
+    cacheCoverage: resultOneOf(["complete", "partial", "missing"]),
+  },
+);
+const runtimeExecutionPageResult = exactResultShape(
+  {
+    schemaVersion: resultOneOf([1]),
+    sessionId: resultNonEmptyString,
+    runs: resultArray(runtimeExecutionRunResult),
+    summary: runtimeExecutionSummaryResult,
+    coverage: exactResultShape({
+      oversizedRunIds: resultStringArray,
+      missingModelCallRunIds: resultStringArray,
+      incompleteRunIds: resultStringArray,
+      modelAttempts: resultOneOf(["missing", "physical", "partial"]),
+    }),
+  },
+  { nextCursor: resultBoundedString(2048) },
+);
+
 export const workbarResultValidators = {
-  "session.context.get": exactResultShape({ context: resultJsonObject }),
+  "session.research.query": resultJsonObject,
+  "session.context.get": exactResultShape({ context: runtimeSessionContextResult }),
   "session.tasks.query": exactResultShape(
     { revision: resultNonNegativeInteger, tasks: resultArray(runtimeSessionTaskResult) },
     { nextCursor: resultNonEmptyString },
@@ -759,6 +1063,8 @@ export const workbarResultValidators = {
   }),
   "session.artifacts.query": resultJsonObject,
   "session.artifacts.command": resultJsonObject,
+  "session.execution.query": runtimeExecutionPageResult,
+  "session.execution.summary": runtimeExecutionSummaryResult,
   "session.trace.query": exactResultShape(
     { throughSequence: resultNonNegativeInteger, events: resultArray(resultJsonObject) },
     { nextAfterSequence: resultNonNegativeInteger },

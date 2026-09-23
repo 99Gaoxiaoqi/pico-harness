@@ -1,3 +1,7 @@
+import {
+  SECTIONED_SUMMARY_FORMAT,
+  findCheckpointSummaryDefect,
+} from "./history-compact-summary-validation.js";
 import { randomUUID } from "node:crypto";
 import {
   CONTENT_DIGEST_V1_PREFIX,
@@ -79,13 +83,7 @@ export async function recordRuntimeCompactionCheckpoint<
   if (entries.length < 2) return undefined;
 
   // 滚动摘要:读取上一个 checkpoint,启用增量更新而非重算全部前缀。
-  const lastCheckpoint = await runtimeRun.findLastCompactionCheckpoint().catch((err: unknown) => {
-    logger.warn(
-      { err: String(err), sessionId: session.id },
-      "[RuntimeCompaction] findLastCompactionCheckpoint 失败,退回全量摘要",
-    );
-    return undefined;
-  });
+  const lastCheckpoint = await runtimeRun.findLastCompactionCheckpoint();
 
   const source = request.trigger === "manual" ? "manual" : "auto";
   await hookService?.dispatch(
@@ -98,9 +96,12 @@ export async function recordRuntimeCompactionCheckpoint<
     entries.map(({ message }) => message),
     request,
     signal,
-    lastCheckpoint?.summaryText,
+    lastCheckpoint?.summaryText && !findCheckpointSummaryDefect(lastCheckpoint.summaryText)
+      ? lastCheckpoint.summaryText
+      : undefined,
   );
-  if (!preview) return undefined;
+  if (!preview || !preview.summary.trim() || findCheckpointSummaryDefect(preview.summary))
+    return undefined;
 
   signal?.throwIfAborted();
   const covered = entries.slice(0, preview.compactedCount);
@@ -138,7 +139,11 @@ export async function recordRuntimeCompactionCheckpoint<
     summary: {
       role: "assistant",
       content: preview.wrappedSummary,
-      providerData: { picoKind: "runtime_checkpoint", picoCheckpointId: checkpointId },
+      providerData: {
+        picoKind: "runtime_checkpoint",
+        picoCheckpointId: checkpointId,
+        picoSummaryFormat: SECTIONED_SUMMARY_FORMAT,
+      },
     },
     ...(lastCheckpoint ? { previousCheckpointId: lastCheckpoint.checkpointId } : {}),
   });

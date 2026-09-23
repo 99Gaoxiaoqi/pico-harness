@@ -1,3 +1,4 @@
+import { PhysicalAttemptTracker } from "./physical-attempt-tracker.js";
 import { randomUUID } from "node:crypto";
 import { anthropic, createAnthropic } from "@ai-sdk/anthropic";
 import { openai, createOpenAI } from "@ai-sdk/openai";
@@ -13,11 +14,18 @@ import type {
   UsageReportedField,
   ModelResponseDiagnostic,
   ModelCommunicationCategory,
+  ProviderAttemptFailureFacts,
 } from "@pico/core";
 import type { ProviderConfig } from "@pico/runtime/provider-config";
 import type { ProviderProfile, ProviderProtocol } from "@pico/core";
 import { resolveProviderProfile } from "@pico/runtime";
-import { providerRequestSignal } from "@pico/core";
+import {
+  DEFAULT_PROVIDER_TIMEOUT_MS,
+  isAbortError,
+  isTimeoutError,
+  ModelCommunicationError,
+  providerRequestSignal,
+} from "@pico/core";
 import { toAiSdkMessages, fromAiSdkContent, restoreResponsesWebSearch } from "./ai-sdk-messages.js";
 import { OpenAIRequestPolicy } from "./openai-request-policy.js";
 import { applyAnthropicCacheControl } from "@pico/runtime/provider/anthropic-cache";
@@ -29,6 +37,7 @@ import { appendProviderEndpointPath } from "@pico/runtime/provider-endpoint";
 import { parseRateLimitHeaders } from "@pico/runtime/rate-limit";
 import { ContextOverflowError, isContextOverflowStatus, LLMStatusError } from "@pico/core";
 import { modelCommunicationError } from "./model-communication-error.js";
+import { classifyProviderError } from "@pico/runtime/provider-retry";
 
 /** One model step only. Pico owns tools, permissions, retries and conversation persistence. */
 export class AiSdkProvider implements LLMProvider {
@@ -52,6 +61,7 @@ export class AiSdkProvider implements LLMProvider {
         ? configuredToolChoiceNone
         : defaultToolChoiceNoneWithTools(wire, config.baseURL) === true;
     this.requestCapabilities = {
+      physicalAttempts: true,
       ...(wire !== "claude" ? this.chatPolicy.requestCapabilities : {}),
       toolChoiceNoneWithTools,
     };
@@ -82,11 +92,63 @@ export class AiSdkProvider implements LLMProvider {
     onDelta: ((delta: string) => void) | undefined,
     options?: LLMProviderRequestOptions,
   ): Promise<Message> {
-    const signal = providerRequestSignal(options?.signal, options?.timeoutMs);
+    if (
+      options?.maxOutputTokens !== undefined &&
+      (!Number.isSafeInteger(options.maxOutputTokens) || options.maxOutputTokens <= 0)
+    )
+      throw new RangeError("Provider output budget must be a positive integer");
+    // Ordinary streams may run longer than two minutes while making progress.
+    // Explicit caller deadlines and non-streaming requests retain a hard deadline.
+    const progressController =
+      onDelta && options?.timeoutMs === undefined ? new AbortController() : undefined;
+    const signal = progressController
+      ? options?.signal
+        ? AbortSignal.any([options.signal, progressController.signal])
+        : progressController.signal
+      : providerRequestSignal(options?.signal, options?.timeoutMs);
+    let progressTimer: ReturnType<typeof setTimeout> | undefined;
+    let observedOutput = false;
+    const clearProgressTimer = () => {
+      if (progressTimer !== undefined) clearTimeout(progressTimer);
+      progressTimer = undefined;
+    };
+    const renewProgressTimeout = () => {
+      if (!progressController || signal.aborted) return;
+      clearProgressTimer();
+      progressTimer = setTimeout(
+        () =>
+          progressController.abort(
+            new DOMException("Model stream made no progress", "TimeoutError"),
+          ),
+        DEFAULT_PROVIDER_TIMEOUT_MS,
+      );
+      progressTimer.unref?.();
+    };
     const startedAt = performance.now();
     const diagnosticId = randomUUID();
+    const attempts = new PhysicalAttemptTracker(
+      this.wire,
+      this.config.model,
+      signal,
+      options?.onProviderAttempt,
+      options,
+    );
+    let rawUsage: Record<string, unknown> | undefined;
+    let terminalUsageObserved = false;
     let responseDiagnostic: Partial<ModelResponseDiagnostic> = {};
     let failureCategory: ModelCommunicationCategory = "request_failed";
+    const abortReason = () => {
+      if (options?.signal?.aborted) return options.signal.reason;
+      // Retrying after visible content or tool arguments would regenerate an already
+      // observed response. Preserve its partial projection and require a new send.
+      if (observedOutput && isTimeoutError(signal.reason))
+        return new ModelCommunicationError("incomplete_stream", {
+          ...responseDiagnostic,
+          diagnosticId,
+          durationMs: Math.round(performance.now() - startedAt),
+        });
+      return signal.reason ?? new DOMException("Aborted", "AbortError");
+    };
     const definitions = snapshotToolDefinitions(availableTools);
     const deepseek =
       this.wire === "responses" && new URL(this.config.baseURL).hostname === "api.deepseek.com";
@@ -117,11 +179,19 @@ export class AiSdkProvider implements LLMProvider {
     let nonStreamingUsage: unknown;
     const transport: typeof fetch = async (_url, init) => {
       let body = JSON.parse(String(init?.body)) as Record<string, unknown>;
-      body = this.prepareBody(body, messages, definitions, options);
+      body = this.applyOutputBudget(
+        this.prepareBody(body, messages, definitions, options),
+        options,
+      );
       let response: Response;
       let errorText: string | undefined;
       if (this.wire !== "claude") {
-        const dispatched = await this.chatPolicy.dispatch(body, options, { ...init, signal });
+        const dispatched = await this.chatPolicy.dispatch(
+          body,
+          options,
+          { ...init, signal },
+          (send) => attempts.dispatch(send),
+        );
         response = dispatched.response;
         errorText = dispatched.errorText;
       } else {
@@ -137,12 +207,14 @@ export class AiSdkProvider implements LLMProvider {
           );
         for (const [key, value] of Object.entries(openCodeClientHeaders(this.config)))
           headers.set(key, value);
-        response = await fetch(this.endpoint(), {
-          ...init,
-          headers,
-          body: JSON.stringify(body),
-          signal,
-        });
+        response = await attempts.dispatch(() =>
+          fetch(this.endpoint(), {
+            ...init,
+            headers,
+            body: JSON.stringify(body),
+            signal,
+          }),
+        );
         if (!response.ok) errorText = await response.text();
       }
       responseDiagnostic = {
@@ -159,6 +231,7 @@ export class AiSdkProvider implements LLMProvider {
         throw new LLMStatusError(
           response.status,
           `Model API request failed [${response.status}]; response omitted`,
+          retryAfterDelayMs(response.headers),
         );
       }
       const rate = this.config.onRateLimitInfo && parseRateLimitHeaders(response.headers);
@@ -205,6 +278,9 @@ export class AiSdkProvider implements LLMProvider {
                 this.config.model,
               )
             : createOpenAI({ apiKey, fetch: transport }).responses(this.config.model);
+    // Abort the transport immediately, while allowing SDK chunks already delivered to
+    // this client to drain for a bounded accounting-only window.
+    const sdkController = new AbortController();
     const request = {
       model,
       messages: toAiSdkMessages(messages, this.wire, { responsesWebSearchAnchors: true }),
@@ -212,7 +288,7 @@ export class AiSdkProvider implements LLMProvider {
       tools,
       ...(this.wire === "claude" ? { maxOutputTokens: this.profile.maxOutputTokens } : {}),
       maxRetries: 0,
-      abortSignal: signal,
+      abortSignal: sdkController.signal,
       ...(options?.toolChoice === "none" &&
       definitions.length &&
       (this.wire !== "claude" || !this.requestCapabilities.toolChoiceNoneWithTools)
@@ -222,99 +298,224 @@ export class AiSdkProvider implements LLMProvider {
         ? { providerOptions: { openai: { store: false, forceReasoning: true } } }
         : {}),
     };
-    try {
-      if (!onDelta) {
-        const result = await generateText(request);
-        responseDiagnostic = { ...responseDiagnostic, finishReason: result.finishReason };
-        if (result.finishReason === "error") {
-          failureCategory = "rejected_completion";
-          throw new Error("Model response failed");
-        }
-        const usage = translateUsage(
-          result.steps.at(-1)!.usage,
-          this.wire,
-          nonStreamingUsage ?? record(result.response.body)?.usage,
-        );
-        return {
-          ...fromAiSdkContent(result.content, this.wire, responseOutput),
-          ...(usage === undefined ? {} : { usage }),
-        };
-      }
-      const result = streamText({ ...request, includeRawChunks: true, onError: () => {} });
-      let finished = false;
-      let rawUsage: Record<string, unknown> | undefined;
-      for await (const chunk of result.stream) {
-        if (
-          responseDiagnostic.firstChunkMs === undefined &&
-          ["raw", "text-delta", "reasoning-delta", "error"].includes(chunk.type)
-        )
-          responseDiagnostic = {
-            ...responseDiagnostic,
-            firstChunkMs: Math.round(performance.now() - startedAt),
+    const execute = async (): Promise<Message> => {
+      try {
+        if (!onDelta) {
+          const result = await generateText(request);
+          responseDiagnostic = { ...responseDiagnostic, finishReason: result.finishReason };
+          if (result.finishReason === "error") {
+            failureCategory = "rejected_completion";
+            throw new Error("Model response failed");
+          }
+          const usage = translateUsage(
+            result.steps.at(-1)!.usage,
+            this.wire,
+            nonStreamingUsage ?? record(result.response.body)?.usage,
+          );
+          attempts.settle(signal.aborted ? "cancelled" : "succeeded", usage, result.finishReason);
+          const message = fromAiSdkContent(result.content, this.wire, responseOutput);
+          return {
+            ...message,
+            providerData: { ...message.providerData, finishReason: result.finishReason },
+            ...(usage === undefined ? {} : { usage }),
           };
-        if (chunk.type === "raw") {
-          const raw = record(chunk.rawValue);
-          const choice = Array.isArray(raw?.choices) ? record(raw.choices[0]) : undefined;
-          const reason = choice?.finish_reason;
-          if (typeof reason === "string")
+        }
+        const result = streamText({ ...request, includeRawChunks: true, onError: () => {} });
+        let finished = false;
+        for await (const chunk of result.stream) {
+          if (
+            ((chunk.type === "text-delta" || chunk.type === "reasoning-delta") &&
+              chunk.text.length > 0) ||
+            (chunk.type === "tool-input-delta" && chunk.delta.length > 0) ||
+            chunk.type === "tool-call" ||
+            chunk.type === "tool-result"
+          ) {
+            observedOutput = true;
+            renewProgressTimeout();
+            attempts.observeOutput();
+          }
+          if (
+            responseDiagnostic.firstChunkMs === undefined &&
+            ["raw", "text-delta", "reasoning-delta", "error"].includes(chunk.type)
+          )
             responseDiagnostic = {
               ...responseDiagnostic,
-              rawFinishReason:
-                reason === "stop" ||
-                reason === "length" ||
-                reason === "tool_calls" ||
-                reason === "content_filter" ||
-                reason === "error"
-                  ? reason
-                  : "unknown",
+              firstChunkMs: Math.round(performance.now() - startedAt),
             };
-          if (raw?.type === "response.output_item.done" && raw.item) responseOutput.push(raw.item);
-          const value =
-            record(raw?.usage) ??
-            record(record(raw?.message)?.usage) ??
-            record(record(raw?.response)?.usage);
-          if (value) rawUsage = { ...rawUsage, ...value };
-        } else if (chunk.type === "text-delta") onDelta(chunk.text);
-        else if (chunk.type === "reasoning-delta") options?.onReasoningDelta?.(chunk.text);
-        else if (chunk.type === "error") {
-          throw chunk.error;
-        } else if (chunk.type === "abort")
-          throw signal.reason ?? new DOMException("Aborted", "AbortError");
-        else if (chunk.type === "finish") {
-          responseDiagnostic = { ...responseDiagnostic, finishReason: chunk.finishReason };
-          if (chunk.finishReason === "error" || chunk.finishReason === "other") {
-            failureCategory =
-              chunk.finishReason === "error" || responseDiagnostic.rawFinishReason === "error"
-                ? "rejected_completion"
-                : "incomplete_stream";
-            throw new Error("Model stream ended without a valid completion");
+          if (chunk.type === "raw") {
+            const raw = record(chunk.rawValue);
+            const choice = Array.isArray(raw?.choices) ? record(raw.choices[0]) : undefined;
+            const reason = choice?.finish_reason;
+            if (typeof reason === "string")
+              responseDiagnostic = {
+                ...responseDiagnostic,
+                rawFinishReason:
+                  reason === "stop" ||
+                  reason === "length" ||
+                  reason === "tool_calls" ||
+                  reason === "content_filter" ||
+                  reason === "error"
+                    ? reason
+                    : "unknown",
+              };
+            if (raw?.type === "response.output_item.done" && raw.item)
+              responseOutput.push(raw.item);
+            const value =
+              record(raw?.usage) ??
+              record(record(raw?.message)?.usage) ??
+              record(record(raw?.response)?.usage);
+            if (value) {
+              rawUsage = { ...rawUsage, ...value };
+              // Anthropic message_start already contains output_tokens, but it is only
+              // an initial count. Responses can likewise carry snapshots before settlement.
+              if (
+                (this.wire === "claude" &&
+                  raw?.type === "message_delta" &&
+                  typeof record(raw.delta)?.stop_reason === "string" &&
+                  typeof value.output_tokens === "number") ||
+                (this.wire === "responses" &&
+                  ["response.completed", "response.incomplete", "response.failed"].includes(
+                    String(raw?.type),
+                  )) ||
+                (this.wire === "openai" && responseDiagnostic.rawFinishReason !== undefined)
+              )
+                terminalUsageObserved = true;
+            }
+          } else if (chunk.type === "text-delta" && !signal.aborted) onDelta(chunk.text);
+          else if (chunk.type === "reasoning-delta" && !signal.aborted)
+            options?.onReasoningDelta?.(chunk.text);
+          else if (chunk.type === "error") {
+            throw chunk.error;
+          } else if (chunk.type === "abort")
+            throw signal.reason ?? new DOMException("Aborted", "AbortError");
+          else if (chunk.type === "finish") {
+            responseDiagnostic = { ...responseDiagnostic, finishReason: chunk.finishReason };
+            if (chunk.finishReason === "error" || chunk.finishReason === "other") {
+              failureCategory =
+                chunk.finishReason === "error" || responseDiagnostic.rawFinishReason === "error"
+                  ? "rejected_completion"
+                  : "incomplete_stream";
+              throw new Error("Model stream ended without a valid completion");
+            }
+            finished = true;
           }
-          finished = true;
         }
+        signal.throwIfAborted();
+        if (!finished) {
+          failureCategory = "incomplete_stream";
+          throw new Error("Model stream ended before completion");
+        }
+        const usage = translateUsage((await result.steps).at(-1)!.usage, this.wire, rawUsage);
+        attempts.settle(
+          signal.aborted ? "cancelled" : "succeeded",
+          usage,
+          await result.finishReason,
+        );
+        const message = fromAiSdkContent(await result.content, this.wire, responseOutput);
+        return {
+          ...message,
+          providerData: { ...message.providerData, finishReason: await result.finishReason },
+          ...(usage === undefined ? {} : { usage }),
+        };
+      } catch (error) {
+        const normalized = signal.aborted
+          ? abortReason()
+          : (attempts.admissionError ??
+            modelCommunicationError(
+              error,
+              {
+                ...responseDiagnostic,
+                diagnosticId,
+                durationMs: Math.round(performance.now() - startedAt),
+                observableOutput: observedOutput,
+              },
+              failureCategory,
+            ));
+        attempts.settle(
+          signal.aborted ? "cancelled" : "failed",
+          usageFromRaw(
+            rawUsage ?? record(nonStreamingUsage),
+            this.wire,
+            !onDelta || terminalUsageObserved,
+          ),
+          responseDiagnostic.finishReason,
+          signal.aborted ? "请求已取消或超时" : "模型响应未完成",
+          providerAttemptFailureFacts(normalized),
+        );
+        throw normalized;
+      } finally {
+        clearProgressTimer();
+        await attempts.flush();
       }
-      signal.throwIfAborted();
-      if (!finished) {
-        failureCategory = "incomplete_stream";
-        throw new Error("Model stream ended before completion");
-      }
-      const usage = translateUsage((await result.steps).at(-1)!.usage, this.wire, rawUsage);
-      return {
-        ...fromAiSdkContent(await result.content, this.wire, responseOutput),
-        ...(usage === undefined ? {} : { usage }),
+    };
+    return new Promise<Message>((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const abort = () => {
+        clearProgressTimer();
+        const normalized = abortReason();
+        attempts.settle(
+          "cancelled",
+          usageFromRaw(
+            rawUsage ?? record(nonStreamingUsage),
+            this.wire,
+            !onDelta || terminalUsageObserved,
+          ),
+          undefined,
+          "请求已取消或超时",
+          providerAttemptFailureFacts(normalized),
+        );
+        reject(normalized);
+        timer = setTimeout(() => {
+          attempts.close();
+          sdkController.abort(signal.reason);
+        }, 5_000);
+        timer.unref?.();
       };
-    } catch (error) {
-      if (signal.aborted) throw signal.reason;
-      // Only allowlisted classifications cross the SDK boundary.
-      throw modelCommunicationError(
-        error,
-        {
-          ...responseDiagnostic,
-          diagnosticId,
-          durationMs: Math.round(performance.now() - startedAt),
-        },
-        failureCategory,
-      );
+      renewProgressTimeout();
+      signal.addEventListener("abort", abort, { once: true });
+      if (signal.aborted) abort();
+      void execute()
+        .then(resolve, reject)
+        .finally(() => {
+          signal.removeEventListener("abort", abort);
+          if (timer) clearTimeout(timer);
+          attempts.close();
+        });
+    });
+  }
+
+  /** Apply a per-call ceiling after route policy so no later rewrite can raise it. */
+  private applyOutputBudget(
+    body: Record<string, unknown>,
+    options?: LLMProviderRequestOptions,
+  ): Record<string, unknown> {
+    if (options?.maxOutputTokens === undefined || options.promptCachePrewarm) return body;
+    const routeLimit =
+      this.config.capabilities?.maxOutputTokens ??
+      (this.wire === "claude" ? this.profile.maxOutputTokens : undefined);
+    const limit = Math.min(options.maxOutputTokens, routeLimit ?? options.maxOutputTokens);
+    delete body.max_tokens;
+    delete body.max_completion_tokens;
+    delete body.max_output_tokens;
+    const field =
+      this.wire === "responses"
+        ? "max_output_tokens"
+        : this.wire === "claude"
+          ? "max_tokens"
+          : (this.config.capabilities?.outputTokenField ?? "max_tokens");
+    body[field] = limit;
+    const thinking = record(body.thinking);
+    if (
+      this.wire === "claude" &&
+      typeof thinking?.budget_tokens === "number" &&
+      thinking.budget_tokens >= limit
+    ) {
+      // Anthropic requires at least 1024 thinking tokens and budget < max_tokens.
+      // A small bounded summary must not silently expand its output allowance.
+      body.thinking =
+        limit > 1024 ? { ...thinking, budget_tokens: limit - 1 } : { type: "disabled" };
     }
+    return body;
   }
 
   private endpoint(): string {
@@ -386,6 +587,47 @@ export class AiSdkProvider implements LLMProvider {
   }
 }
 
+function providerAttemptFailureFacts(error: unknown): ProviderAttemptFailureFacts {
+  if (error instanceof ModelCommunicationError) {
+    const diagnostic = error.diagnostic;
+    return {
+      errorClass: "ModelCommunicationError",
+      errorCategory: error.category,
+      retryable:
+        classifyProviderError(error).retryable ||
+        (error.category === "incomplete_stream" &&
+          diagnostic.httpStatus === 200 &&
+          diagnostic.observableOutput === false),
+      diagnosticId: diagnostic.diagnosticId,
+      ...(diagnostic.transportCode ? { transportCode: diagnostic.transportCode } : {}),
+    };
+  }
+  if (error instanceof ContextOverflowError)
+    return { errorClass: "ContextOverflowError", retryable: false };
+  if (error instanceof LLMStatusError)
+    return { errorClass: "LLMStatusError", retryable: classifyProviderError(error).retryable };
+  if (isTimeoutError(error)) return { errorClass: "TimeoutError", retryable: true };
+  if (isAbortError(error)) return { errorClass: "AbortError", retryable: false };
+  return { errorClass: "Unknown", retryable: false };
+}
+
+function retryAfterDelayMs(headers: Headers): number | undefined {
+  const milliseconds = headers.get("retry-after-ms");
+  const secondsOrDate = headers.get("retry-after");
+  if (milliseconds === null && secondsOrDate === null) return undefined;
+  const millisecondsValue = milliseconds === null ? NaN : Number(milliseconds);
+  const secondsValue = secondsOrDate === null ? NaN : Number(secondsOrDate);
+  const delay =
+    milliseconds !== null
+      ? millisecondsValue
+      : Number.isFinite(secondsValue)
+        ? secondsValue * 1_000
+        : Date.parse(secondsOrDate!) - Date.now();
+  return Number.isFinite(delay) && delay > 0 && delay <= 2_147_483_647
+    ? Math.ceil(delay)
+    : undefined;
+}
+
 function record(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -429,4 +671,42 @@ function translateUsage(
       : {}),
     reportedFields: reported,
   };
+}
+
+/** Preserve provider-reported partial usage even when streaming ends in error or cancellation. */
+function usageFromRaw(
+  raw: Record<string, unknown> | undefined,
+  wire: ProviderProtocol,
+  terminalUsageObserved: boolean,
+): Usage | undefined {
+  if (!raw) return undefined;
+  if (!terminalUsageObserved) {
+    // Never promote an intermediate output counter to a final bill after cancellation.
+    const {
+      completion_tokens: _completion,
+      output_tokens: _output,
+      completion_tokens_details: _completionDetails,
+      output_tokens_details: _outputDetails,
+      ...inputUsage
+    } = raw;
+    raw = inputUsage;
+  }
+  const input = wire === "openai" ? raw.prompt_tokens : raw.input_tokens;
+  const output = wire === "openai" ? raw.completion_tokens : raw.output_tokens;
+  const read =
+    wire === "claude" && typeof raw.cache_read_input_tokens === "number"
+      ? raw.cache_read_input_tokens
+      : 0;
+  const write =
+    wire === "claude" && typeof raw.cache_creation_input_tokens === "number"
+      ? raw.cache_creation_input_tokens
+      : 0;
+  return translateUsage(
+    {
+      inputTokens: typeof input === "number" ? input + read + write : undefined,
+      outputTokens: typeof output === "number" ? output : undefined,
+    } as LanguageModelUsage,
+    wire,
+    raw,
+  );
 }

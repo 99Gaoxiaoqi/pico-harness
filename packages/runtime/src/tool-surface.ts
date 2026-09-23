@@ -26,6 +26,7 @@ export const PICO_TOOL_GROUPS: readonly ToolGroupDef[] = [
     description: "基本文件操作、搜索、执行、交互与编排",
     toolNames: [
       "read_file",
+      "archive_read",
       "write_file",
       "edit_file",
       "bash",
@@ -112,6 +113,7 @@ const TOOL_HOST_AFFINITY: Readonly<Record<string, Partial<Record<ToolHostKind, T
     request_sandbox_boundary: { background: "unsupported" },
     // headless 是 fail-closed 白名单；新工具必须显式加入。
     read_file: { headless: "supported" },
+    archive_read: { headless: "supported" },
     write_file: { headless: "supported" },
     edit_file: { headless: "supported" },
     bash: { headless: "supported" },
@@ -181,6 +183,7 @@ export function getSupportedToolNames(host: ToolHostKind): Set<string> {
 /** Plan 模式下允许进入 provider tools 数组的工具面。 */
 export const PLAN_MODE_TOOL_NAMES: ReadonlySet<string> = new Set([
   "read_file",
+  "archive_read",
   "glob",
   "grep",
   "skill_view",

@@ -1,3 +1,4 @@
+import { contextSnapshot } from "./context-maka-fixture.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import * as React from "react";
@@ -229,15 +230,15 @@ test("Inspector trace folds runtime lifecycle facts into user-facing run groups"
 });
 
 test("Workbar tool panel helpers preserve authority versions, chunks and active polling gates", () => {
+  assert.equal(contextUsagePercent(contextSnapshot()), 25);
   assert.equal(
-    contextUsagePercent({
-      version: 2,
-      estimatedInputTokens: 2_500,
-      inputBudgetTokens: 10_000,
-    }),
-    25,
+    contextUsagePercent(
+      contextSnapshot({
+        latestRequest: { ...contextSnapshot().latestRequest, inputTokens: 12000 },
+      }),
+    ),
+    100,
   );
-  assert.equal(contextUsagePercent({ version: 2, usedPercent: 120 }), 100);
   assert.equal(reviewSelectionKey({ source: "staged", path: "src/app.ts" }), "staged:src/app.ts");
 
   const task: WorkbarTaskItem = {
@@ -295,15 +296,7 @@ test("Workbar tool panels render real authority snapshots with accessible detail
   Object.assign(globalThis, { React });
   const inspector = renderToStaticMarkup(
     React.createElement(InspectorWorkbarPanel, {
-      context: {
-        version: 2,
-        routeId: "route-main",
-        estimatedInputTokens: 4_000,
-        inputBudgetTokens: 8_000,
-        remainingTokens: 4_000,
-        compactedCount: 1,
-        sections: [{ id: "instructions", label: "Instructions", tokens: 900, state: "included" }],
-      },
+      context: contextSnapshot(),
       trace: [
         {
           id: "trace-1",
@@ -389,12 +382,13 @@ test("Workbar tool panels render real authority snapshots with accessible detail
       loading: false,
       onRefresh: () => undefined,
       onSelectArtifact: () => undefined,
+      onBack: () => undefined,
       onLoadChunk: () => undefined,
     }),
   );
   assert.match(files, /aria-label="文件读取进度"/u);
   assert.match(files, /继续读取/u);
-  assert.match(files, /# Report/u);
+  assert.match(files, /<h1><span>Report<\/span><\/h1>/u);
 
   const terminal = renderToStaticMarkup(
     React.createElement(TerminalWorkbarPanel, {
@@ -564,6 +558,7 @@ test("Workbar tool panels expose honest loading, error and empty states", () => 
       loading: false,
       onRefresh: () => undefined,
       onSelectArtifact: () => undefined,
+      onBack: () => undefined,
       onLoadChunk: () => undefined,
     }),
   );

@@ -1,3 +1,4 @@
+import type { RuntimeSessionContextSnapshot } from "@pico/protocol";
 import { type SlashCommand } from "./command-contracts.js";
 import type { RpcCommandRuntime } from "./rpc-command-runtime.js";
 import { rpcCommand, cachedArgumentCompleter, sessionAccess } from "./command-helpers.js";
@@ -123,7 +124,7 @@ export function createSessionCommands(deps: SessionCommandRegistryDeps) {
     }),
     context: rpcCommand({
       name: "context",
-      description: "Show the active route context budget and capabilities",
+      description: "查看最近请求实际用量与当前模型历史",
       usage: "/context",
       category: "model",
       availability: "always",
@@ -278,30 +279,41 @@ function formatUsage(usage: unknown): string {
   return parts.length > 0 ? `用量：${parts.join(" · ")}` : "(无用量数据)";
 }
 
-function formatContextReport(context: unknown): string {
-  if (context === null || typeof context !== "object") return "(无上下文数据)";
-  const record = context as Record<string, unknown>;
-  const capabilities = record["capabilities"];
-  const capabilityText =
-    capabilities !== null && typeof capabilities === "object"
-      ? [
-          (capabilities as Record<string, unknown>)["vision"] === true ? "vision" : undefined,
-          (capabilities as Record<string, unknown>)["reasoning"] === true ? "reasoning" : undefined,
-          (capabilities as Record<string, unknown>)["toolCall"] === true ? "tool-call" : undefined,
-          (capabilities as Record<string, unknown>)["cache"] === true ? "cache" : undefined,
-        ]
-          .filter(Boolean)
-          .join(",")
-      : "";
-  const numberField = (key: string): string => {
-    const value = record[key];
-    return typeof value === "number" ? String(value) : "?";
-  };
+function formatContextReport(context: RuntimeSessionContextSnapshot): string {
+  const request = context.latestRequest;
+  const history = context.modelHistory;
+  const count = (value: number | undefined) => (value === undefined ? "未知" : String(value));
+  const input = request.usageStatus === "missing" ? undefined : request.inputTokens;
+  const percent =
+    input !== undefined && request.contextWindow
+      ? ((input / request.contextWindow) * 100).toFixed(1)
+      : undefined;
   return [
-    `Context (${String(record["routeId"] ?? "?")})`,
-    `  estimated=${numberField("estimatedInputTokens")} · budget=${numberField("inputBudgetTokens")} · remaining=${numberField("remainingTokens")}`,
-    `  window=${numberField("contextWindowTokens")} · reserved=${numberField("reservedOutputTokens")} · used=${numberField("usedPercent")}%`,
-    ...(capabilityText ? [`  capabilities: ${capabilityText}`] : []),
+    `Context (${context.selectedRoute.routeId})`,
+    ...(request.status === "available"
+      ? [
+          `  最近成功主请求 ${request.providerCallId} · ${request.providerId}/${request.modelId}`,
+          `  实际输入=${count(input)} Token · 其中缓存=${count(request.cachedInputTokens)} Token · 当时窗口=${count(request.contextWindow)} Token`,
+          `  上下文占用=${percent === undefined ? "未知" : `${percent}%`} · 窗口空余=${input !== undefined && request.contextWindow ? Math.max(0, request.contextWindow - input) : "未知"} Token（对应这次请求）`,
+          ...(request.compaction
+            ? [
+                `  请求所用压缩=${request.compaction.checkpointId} · 覆盖=${request.compaction.coveredEventCount}`,
+              ]
+            : []),
+        ]
+      : [`  最近成功主请求：${request.reason ?? "尚无记录"}`]),
+    ...(request.compositionStatus === "available" && request.composition
+      ? [
+          `  请求组成（字节 ÷ 4 估算，非实际 Token）：${request.composition.segments.map((section) => `${section.kind}=≈${Math.ceil(section.bytes / 4)}`).join(" · ")}`,
+        ]
+      : ["  请求组成：未知（未记录）"]),
+    `  当前模型历史：≈${history.estimatedTokens} Token · ${history.messageCount} 条消息 · 压缩 ${history.compactedCount} 次`,
+    `  估算算法=${history.estimationAlgorithm} · 投影水位=${history.throughSequence}；不含完整系统指令、工具定义和协议开销。`,
+    ...(history.latestCompaction
+      ? [
+          `  当前压缩=${history.latestCompaction.checkpointId} · 覆盖=${history.latestCompaction.coveredEventCount}`,
+        ]
+      : []),
   ].join("\n");
 }
 

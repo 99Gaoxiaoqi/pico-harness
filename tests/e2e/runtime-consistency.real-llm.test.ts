@@ -29,7 +29,7 @@ import type { RuntimeEvent } from "@pico/storage/runtime-event";
 
 import { projectRuntimeSessionUsage } from "@pico/runtime/session-runtime-projection";
 import { SqliteRuntimeControlStore } from "@pico/storage/sqlite/sqlite-runtime-control-store";
-import type { ProviderCallRecord } from "@pico/storage/runtime-control-types";
+import type { PhysicalAttemptRecord } from "@pico/storage/runtime-control-types";
 import { ReadFileTool } from "@pico/pico-host/product-tool-registry";
 import {
   configuredUserDefaultRealModel,
@@ -204,7 +204,7 @@ realModelTest(
       storageRoot: resolvePicoPaths(sandbox.workDir, { picoHome: sandbox.picoHome }).workspace.root,
     });
     const providerCalls = usageStore
-      .listProviderCalls({ sessionId: sandbox.sessionId })
+      .listPhysicalAttempts({ sessionId: sandbox.sessionId })
       .filter((record) => record.purpose === "main" && record.status === "succeeded");
     usageStore.close();
     assert.equal(providerCalls.length, 2);
@@ -547,9 +547,9 @@ function assertUsageEquals(actual: SessionUsageSnapshot, expected: SessionUsageS
   }
 }
 
-function requestDiagnostic(record: ProviderCallRecord | undefined): Record<string, unknown> {
+function requestDiagnostic(record: PhysicalAttemptRecord | undefined): Record<string, unknown> {
   assert.ok(record);
-  const diagnostic = record.reported?.["requestDiagnostic"];
+  const diagnostic = record.requestDiagnostic;
   assert.equal(typeof diagnostic, "object");
   assert.ok(diagnostic);
   return diagnostic as Record<string, unknown>;

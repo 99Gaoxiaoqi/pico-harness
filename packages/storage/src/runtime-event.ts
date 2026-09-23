@@ -74,6 +74,7 @@ export const RUNTIME_EVENT_KINDS = [
   "tool.group.loaded",
   "tool.recovery.resolved",
   "tool.result.recorded",
+  "tool.result.projection.recorded",
   "agent.output",
   "approval.requested",
   "approval.settled",
@@ -226,6 +227,61 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
         );
       }
       return;
+    case "tool.result.projection.recorded": {
+      const data = value["data"];
+      assertOnlyKeys(
+        data,
+        [
+          "sourceEventId",
+          "sourceProjectionSha256",
+          "projection",
+          "reason",
+          "supersededByToolCallId",
+        ],
+        "tool.result.projection.recorded.data",
+      );
+      assertString(data["sourceEventId"], "projection.sourceEventId");
+      if (
+        typeof data["sourceProjectionSha256"] !== "string" ||
+        !/^[a-f0-9]{64}$/.test(data["sourceProjectionSha256"])
+      )
+        throw new RuntimeEventIntegrityError("Invalid source projection digest");
+      if (
+        ![
+          "stale",
+          "active_large",
+          "exact_duplicate",
+          "newer_read_covers_range",
+          "newer_snapshot",
+          "failure_resolved",
+        ].includes(String(data["reason"]))
+      )
+        throw new RuntimeEventIntegrityError("Invalid tool projection reason");
+      if (data["supersededByToolCallId"] !== undefined)
+        assertString(data["supersededByToolCallId"], "projection.supersededByToolCallId");
+      if (
+        value["visibility"] !== "internal" ||
+        value["partial"] !== false ||
+        !isRecord(value["refs"])
+      )
+        throw new RuntimeEventIntegrityError(
+          "Tool projection must be a complete internal fact with refs",
+        );
+      assertString(value["refs"]["toolCallId"], "projection.toolCallId");
+      const projection = data["projection"];
+      if (!isRecord(projection)) throw new RuntimeEventIntegrityError("Invalid tool projection");
+      assertOnlyKeys(
+        projection,
+        ["version", "mode", "text", "strategy", "truncated"],
+        "projection",
+      );
+      assertEqual(projection["version"], 1, "projection.version");
+      assertEqual(projection["mode"], "preview", "projection.mode");
+      if (typeof projection["text"] !== "string" || projection["truncated"] !== true)
+        throw new RuntimeEventIntegrityError("Invalid archived tool projection");
+      assertString(projection["strategy"], "projection.strategy");
+      return;
+    }
     case "tool.result.recorded":
       assertToolOrigin(value);
       assertToolResultRecordedEvent(value);
@@ -258,10 +314,12 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
       }
       return;
     case "model.call.started":
+      assertModelCallAttemptFacts(value["data"]);
       assertString(value["data"]["providerCallId"], "model.call.started.providerCallId");
       assertString(value["data"]["purpose"], "model.call.started.purpose");
       return;
     case "model.call.settled":
+      assertModelCallAttemptFacts(value["data"]);
       assertString(value["data"]["providerCallId"], "model.call.settled.providerCallId");
       if (!isModelCallStatus(value["data"]["status"])) {
         throw new RuntimeEventIntegrityError("Runtime model call status is invalid");
@@ -534,7 +592,7 @@ function assertToolResultRecordedEvent(value: Record<string, unknown>): void {
     throw new RuntimeEventIntegrityError("Runtime tool result body must be an object");
   }
   const storage = body["storage"];
-  if (storage !== "inline" && storage !== "evidence") {
+  if (storage !== "inline") {
     throw new RuntimeEventIntegrityError("Runtime tool result body storage is invalid");
   }
   assertSha256(body["sha256"], "tool.result.recorded.body.sha256");
@@ -567,9 +625,6 @@ function assertToolResultRecordedEvent(value: Record<string, unknown>): void {
         "Runtime inline tool result content does not match sha256",
       );
     }
-  } else {
-    assertOnlyKeys(body, ["storage", "sha256", "sizeBytes"], "tool.result.recorded.body");
-    assertRuntimeEvidenceReference(refs["evidence"]);
   }
 
   const projection = data["projection"];
@@ -836,21 +891,6 @@ function assertRuntimeToolResultRecoveryMarker(value: unknown): void {
   }
 }
 
-function assertRuntimeEvidenceReference(value: unknown): void {
-  if (!isRecord(value)) {
-    throw new RuntimeEventIntegrityError("Runtime tool result evidence ref must be an object");
-  }
-  assertOnlyKeys(
-    value,
-    ["schemaVersion", "contentHash", "sessionId", "kind"],
-    "tool.result.recorded.refs.evidence",
-  );
-  assertEqual(value["schemaVersion"], 2, "tool.result.recorded.refs.evidence.schemaVersion");
-  assertSha256(value["contentHash"], "tool.result.recorded.refs.evidence.contentHash");
-  assertString(value["sessionId"], "tool.result.recorded.refs.evidence.sessionId");
-  assertEqual(value["kind"], "tool-exchange", "tool.result.recorded.refs.evidence.kind");
-}
-
 function assertOnlyKeys(
   value: Record<string, unknown>,
   allowed: readonly string[],
@@ -945,4 +985,61 @@ function isNonNegativeInteger(value: unknown): boolean {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** Bounded additive records preserve the decoder for historical logical-only events. */
+function assertModelCallAttemptFacts(data: Record<string, unknown>): void {
+  if (data["logicalCallId"] !== undefined)
+    assertString(data["logicalCallId"], "model.logicalCallId");
+  if (data["retryAttempt"] !== undefined && !isNonNegativeInteger(data["retryAttempt"]))
+    throw new RuntimeEventIntegrityError("Model retry ordinal is invalid");
+  const attempts = data["attempts"];
+  const coverage = data["attemptCoverage"];
+  if (attempts === undefined && coverage === undefined) return;
+  if (
+    !Array.isArray(attempts) ||
+    attempts.length > 16 ||
+    (coverage !== "complete" && coverage !== "partial")
+  )
+    throw new RuntimeEventIntegrityError("Model attempt coverage is invalid");
+  const ids = new Set<string>();
+  for (const attempt of attempts) {
+    if (!isRecord(attempt)) throw new RuntimeEventIntegrityError("Model attempt is invalid");
+    for (const key of ["attemptId", "provider", "model", "startedAt", "completedAt"]) {
+      assertString(attempt[key], `model.attempt.${key}`);
+      if ((attempt[key] as string).length > 800)
+        throw new RuntimeEventIntegrityError(`Model attempt ${key} exceeds the bounded record`);
+    }
+    if (ids.has(attempt["attemptId"] as string))
+      throw new RuntimeEventIntegrityError("Duplicate model attempt");
+    ids.add(attempt["attemptId"] as string);
+    if (
+      !isNonNegativeInteger(attempt["attempt"]) ||
+      !isNonNegativeNumber(attempt["latencyMs"]) ||
+      !["succeeded", "failed", "cancelled", "interrupted"].includes(String(attempt["status"])) ||
+      !["reported", "partial", "missing"].includes(String(attempt["usageBasis"])) ||
+      !Number.isFinite(Date.parse(attempt["startedAt"] as string)) ||
+      !Number.isFinite(Date.parse(attempt["completedAt"] as string))
+    )
+      throw new RuntimeEventIntegrityError("Model attempt timing or status is invalid");
+    for (const key of ["timeToFirstTokenMs", "costCNY"])
+      if (attempt[key] !== undefined && !isNonNegativeNumber(attempt[key]))
+        throw new RuntimeEventIntegrityError(`Model attempt ${key} is invalid`);
+    if (
+      attempt["httpStatus"] !== undefined &&
+      (!Number.isInteger(attempt["httpStatus"]) ||
+        Number(attempt["httpStatus"]) < 100 ||
+        Number(attempt["httpStatus"]) > 599)
+    )
+      throw new RuntimeEventIntegrityError("Model attempt HTTP status is invalid");
+    if (attempt["usage"] !== undefined) assertUsage(attempt["usage"]);
+    if (attempt["costStatus"] !== undefined && !isCostStatus(attempt["costStatus"]))
+      throw new RuntimeEventIntegrityError("Model attempt cost status is invalid");
+    for (const key of ["finishReason", "error"])
+      if (
+        attempt[key] !== undefined &&
+        (typeof attempt[key] !== "string" || (attempt[key] as string).length > 800)
+      )
+        throw new RuntimeEventIntegrityError(`Model attempt ${key} is invalid`);
+  }
 }

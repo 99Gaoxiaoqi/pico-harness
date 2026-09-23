@@ -1,7 +1,10 @@
+import { randomUUID } from "node:crypto";
 import {
   ContextOverflowError,
   isAbortError,
   isTimeoutError,
+  LLMStatusError,
+  ModelCommunicationError,
   type LLMProvider,
   type LLMProviderRequestOptions,
   type Message,
@@ -13,9 +16,9 @@ import {
 } from "./provider-failure-classification.js";
 import { waitForAbortableDelay, waitForDelay } from "./deadline.js";
 
-export const DEFAULT_MAX_RETRY_ATTEMPTS = 3;
-const RETRY_MIN_TIMEOUT_MS = 300;
-const RETRY_MAX_TIMEOUT_MS = 5_000;
+export const DEFAULT_MAX_RETRY_ATTEMPTS = 10;
+const RETRY_MIN_TIMEOUT_MS = 1_000;
+const RETRY_MAX_TIMEOUT_MS = 32_000;
 const RETRY_FACTOR = 2;
 const MAX_TIMEOUT_RETRIES = 1;
 
@@ -33,12 +36,14 @@ export interface RetryLogger {
 }
 
 export interface RetryOptions {
+  readonly contextFacts?: LLMProviderRequestOptions["contextFacts"];
   readonly maxAttempts?: number;
   readonly signal?: AbortSignal;
   readonly toolChoice?: LLMProviderRequestOptions["toolChoice"];
   readonly promptCacheShardSeed?: LLMProviderRequestOptions["promptCacheShardSeed"];
   readonly promptCacheShardActive?: LLMProviderRequestOptions["promptCacheShardActive"];
   readonly onRetry?: (info: RetryInfo) => void;
+  readonly onRetryStarted?: (info: RetryInfo) => void;
   readonly onRateLimited?: (failure: RateLimitFailure) => LLMProvider | undefined;
   /** Observability belongs to composition; omission never changes retry decisions. */
   readonly logger?: RetryLogger;
@@ -89,6 +94,9 @@ export async function generateWithRetry(
   const maxAttempts = Math.max(options?.maxAttempts ?? DEFAULT_MAX_RETRY_ATTEMPTS, 1);
   const signal = options?.signal;
   const requestOptions: LLMProviderRequestOptions = {
+    logicalCallId: `logical_${randomUUID()}`,
+    retryAttempt: 0,
+    ...(options?.contextFacts ? { contextFacts: structuredClone(options.contextFacts) } : {}),
     ...(signal ? { signal } : {}),
     ...(options?.toolChoice ? { toolChoice: options.toolChoice } : {}),
     ...(options?.promptCacheShardSeed
@@ -99,6 +107,7 @@ export async function generateWithRetry(
       : {}),
   };
   let timeoutRetries = 0;
+  let incompleteStreamRetries = 0;
   if (maxAttempts <= 1) {
     try {
       const result = await provider.generate(messages, tools, requestOptions);
@@ -116,17 +125,28 @@ export async function generateWithRetry(
   for (let attempt = 1; ; attempt++) {
     try {
       if (attempt > 1) signal?.throwIfAborted();
-      const result = await activeProvider.generate(messages, tools, requestOptions);
+      const result = await activeProvider.generate(messages, tools, {
+        ...requestOptions,
+        retryAttempt: attempt - 1,
+      });
       signal?.throwIfAborted();
       return result;
     } catch (error) {
       signal?.throwIfAborted();
       const classification = classifyProviderError(error);
+      const incompleteStreamRecovery =
+        error instanceof ModelCommunicationError &&
+        error.category === "incomplete_stream" &&
+        error.diagnostic.httpStatus === 200 &&
+        error.diagnostic.observableOutput === false &&
+        incompleteStreamRetries === 0;
       const retryable = isHardClassifiedError(error)
         ? classification.retryable
-        : typeof activeProvider.isRetryableError === "function"
-          ? activeProvider.isRetryableError(error)
-          : classification.retryable;
+        : error instanceof ModelCommunicationError || error instanceof LLMStatusError
+          ? classification.retryable || incompleteStreamRecovery
+          : typeof activeProvider.isRetryableError === "function"
+            ? activeProvider.isRetryableError(error)
+            : classification.retryable;
       const timeoutLimitReached =
         classification.status === "timed_out" && timeoutRetries >= MAX_TIMEOUT_RETRIES;
       if (attempt >= maxAttempts || !retryable || timeoutLimitReached) {
@@ -141,32 +161,42 @@ export async function generateWithRetry(
         throw error;
       }
       if (classification.status === "timed_out") timeoutRetries++;
+      if (incompleteStreamRecovery) incompleteStreamRetries++;
 
+      let rotated = false;
       if (maybeStatusCode(error) === 429 && options?.onRateLimited) {
-        const rotated = options.onRateLimited(buildRateLimitFailure(activeProvider, error));
-        if (rotated && rotated !== activeProvider) {
+        const nextProvider = options.onRateLimited(buildRateLimitFailure(activeProvider, error));
+        if (nextProvider && nextProvider !== activeProvider) {
           options.logger?.warn(
             { attempt: `${attempt}/${maxAttempts}`, keyRotated: true },
             "[Retry] 429 限流,已切换凭证重试",
           );
-          activeProvider = rotated;
-          continue;
+          activeProvider = nextProvider;
+          rotated = true;
         }
       }
 
-      const delayMs = delays[attempt - 1] ?? 0;
+      const delayMs = rotated ? 0 : (retryAfterDelay(error) ?? delays[attempt - 1] ?? 0);
       signal?.throwIfAborted();
       const statusCode = maybeStatusCode(error);
-      options?.onRetry?.({
+      const retryInfo: RetryInfo = {
         failedAttempt: attempt,
         nextAttempt: attempt + 1,
-        maxAttempts,
+        // A guarded one-time recovery must not advertise the generic ten-attempt
+        // budget as if the same failure could keep replaying.
+        maxAttempts:
+          incompleteStreamRecovery || classification.status === "timed_out"
+            ? attempt + 1
+            : maxAttempts,
         delayMs,
         error,
         ...(statusCode !== undefined ? { statusCode } : {}),
         failureStatus: classification.status,
-      });
+      };
+      options?.onRetry?.(retryInfo);
       await sleepForRetry(delayMs, signal);
+      signal?.throwIfAborted();
+      options?.onRetryStarted?.(retryInfo);
     }
   }
 }
@@ -175,12 +205,9 @@ export function backoffDelays(maxAttempts: number): number[] {
   const delays: number[] = [];
   for (let index = 0; index < Math.max(maxAttempts - 1, 0); index++) {
     const base = Math.min(RETRY_MAX_TIMEOUT_MS, RETRY_MIN_TIMEOUT_MS * RETRY_FACTOR ** index);
-    delays.push(
-      Math.max(
-        RETRY_MIN_TIMEOUT_MS,
-        Math.min(RETRY_MAX_TIMEOUT_MS, Math.round(base * Math.random())),
-      ),
-    );
+    // Match Maka's bounded exponential backoff with positive jitter. The base
+    // caps at 32s; the actual wait is at most 40s and remains abortable.
+    delays.push(Math.ceil(base + Math.random() * base * 0.25));
   }
   return delays;
 }
@@ -238,4 +265,12 @@ function maybeStatusCode(error: unknown): number | undefined {
   if (typeof error !== "object" || error === null) return undefined;
   const statusCode = (error as { readonly statusCode?: unknown }).statusCode;
   return typeof statusCode === "number" ? statusCode : undefined;
+}
+
+function retryAfterDelay(error: unknown): number | undefined {
+  if (!(error instanceof LLMStatusError)) return undefined;
+  const delay = error.retryAfterMs;
+  return delay !== undefined && Number.isSafeInteger(delay) && delay > 0 && delay <= 2_147_483_647
+    ? delay
+    : undefined;
 }

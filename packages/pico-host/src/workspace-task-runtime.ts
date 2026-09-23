@@ -10,6 +10,7 @@ import type {
   WorktreeTaskSnapshot,
 } from "./worktree-supervisor.js";
 import { raceWithDeadline } from "@pico/runtime/deadline";
+import { ModelCommunicationError } from "@pico/core";
 
 export const WORKSPACE_RUN_STATUSES = [
   "running",
@@ -766,6 +767,8 @@ function taskVersion(task: TaskSnapshot): number {
 }
 
 function errorMessage(error: unknown): string {
+  if (error instanceof ModelCommunicationError)
+    return `ModelCommunicationError category=${error.category} diagnosticId=${error.diagnostic.diagnosticId}; detail omitted`;
   return error instanceof Error ? error.message : String(error);
 }
 

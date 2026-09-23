@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { BrowserWindow, session } from "electron";
 import { createWindowState, WindowStateStore } from "./window-state.js";
+import { installArtifactPreviewSecurity } from "./artifact-preview-security.js";
 
 export interface DesktopWindowOptions {
   readonly iconPath: string;
@@ -76,6 +77,7 @@ function configureWebContentsSecurity(
   onRendererGone: (() => void) | undefined,
 ): void {
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  installArtifactPreviewSecurity(window.webContents);
   window.webContents.on("will-navigate", (event, target) => {
     if (!isAllowedNavigation(target, window.webContents.getURL())) event.preventDefault();
   });

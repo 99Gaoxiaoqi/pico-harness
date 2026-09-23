@@ -11,10 +11,6 @@
       "types": "./dist/daemon-main.d.ts",
       "import": "./dist/daemon-main.js"
     },
-    "./product-compactor": {
-      "types": "./dist/product-compactor.d.ts",
-      "import": "./dist/product-compactor.js"
-    },
     "./product-full-compactor": {
       "types": "./dist/product-full-compactor.d.ts",
       "import": "./dist/product-full-compactor.js"
@@ -775,10 +771,6 @@
       "types": "./dist/agent-engine.d.ts",
       "import": "./dist/agent-engine.js"
     },
-    "./subagent-runner": {
-      "types": "./dist/subagent-runner.d.ts",
-      "import": "./dist/subagent-runner.js"
-    },
     "./internal/headless-bootstrap": {
       "types": "./dist/internal/headless-bootstrap.d.ts",
       "import": "./dist/internal/headless-bootstrap.js"
@@ -822,6 +814,14 @@
     "./product-runtime-host-candidate": {
       "types": "./dist/product-runtime-host-candidate.d.ts",
       "import": "./dist/product-runtime-host-candidate.js"
+    },
+    "./deep-research-tools": {
+      "types": "./dist/deep-research-tools.d.ts",
+      "import": "./dist/deep-research-tools.js"
+    },
+    "./archive-read-tool": {
+      "types": "./dist/archive-read-tool.d.ts",
+      "import": "./dist/archive-read-tool.js"
     }
   },
   "files": [

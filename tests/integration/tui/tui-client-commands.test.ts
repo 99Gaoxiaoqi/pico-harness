@@ -109,18 +109,36 @@ function createHarness(options?: {
         case "session.context.get":
           return {
             context: {
-              routeId: "p1/m1",
-              estimatedInputTokens: 1_200,
-              contextWindowTokens: 200_000,
-              reservedOutputTokens: 4_096,
-              safetyMarginTokens: 512,
-              inputBudgetTokens: 195_392,
-              remainingTokens: 194_192,
-              usedPercent: 0.6,
-              estimation: "estimated",
-              contextLimitSource: "provider_default",
-              outputLimitSource: "provider_default",
-              capabilities: { vision: true, reasoning: true, toolCall: true, cache: false },
+              version: 3,
+              sessionId: "s1",
+              generatedAt: 1,
+              selectedRoute: {
+                routeId: "p1/m1",
+                providerId: "openai",
+                modelId: "m1",
+                connectionId: "p1",
+              },
+              latestRequest: {
+                status: "available",
+                source: "physical",
+                providerCallId: "call-1",
+                physicalAttemptId: "attempt-1",
+                providerId: "openai",
+                modelId: "m1",
+                inputTokens: 10000,
+                contextWindow: 200000,
+                cachedInputTokens: 5000,
+                usageStatus: "reported",
+                compositionStatus: "unrecorded",
+              },
+              modelHistory: {
+                throughSequence: 9,
+                estimatedTokens: 1200,
+                messageCount: 3,
+                compactedCount: 1,
+                estimationAlgorithm: "maka_chars_v1",
+                projection: "effective_model_history",
+              },
             },
           };
         case "session.directories.add":
@@ -1524,13 +1542,16 @@ test("client commands: /context and /snapshots map to session.context.get / rewi
     return outcome;
   };
 
-  // /context：session.context.get（BLOCKED 收口——daemon 复用 createModelContextReport）。
+  // /context：v3 同时展示历史估算和同次请求的实际用量。
   harness.requests.length = 0;
   const ctx = await run("/context");
   const ctxText = String(ctx.result?.message);
   assert.match(ctxText, /Context \(p1\/m1\)/);
-  assert.match(ctxText, /used=0.6%/);
-  assert.match(ctxText, /capabilities: vision,reasoning,tool-call/);
+  assert.match(ctxText, /当前模型历史：≈1200 Token/);
+  assert.match(ctxText, /实际输入=10000 Token/);
+  assert.match(ctxText, /上下文占用=5.0%/);
+  assert.match(ctxText, /请求组成：未知（未记录）/);
+  assert.doesNotMatch(ctxText, /estimated=|reserved=/);
   const contextRequest = harness.requests.at(-1);
   assert.equal(contextRequest?.method, "session.context.get");
   assert.deepEqual(contextRequest?.params, { workspacePath: "C:\\ws", sessionId: "s1" });
@@ -1914,7 +1935,7 @@ test("client commands preserve public metadata and registration order", () => {
     {
       name: "context",
       aliases: [],
-      description: "Show the active route context budget and capabilities",
+      description: "查看最近请求实际用量与当前模型历史",
       usage: "/context",
       category: "model",
       availability: "always",

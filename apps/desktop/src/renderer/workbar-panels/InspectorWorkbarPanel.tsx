@@ -1,24 +1,16 @@
+import { useId, useState, type KeyboardEvent } from "react";
+import type {
+  RuntimeExecutionPage,
+  RuntimeExecutionSummary,
+  RuntimeSessionContextSnapshot,
+} from "@pico/protocol";
+import { ContextComposition } from "./ContextComposition.js";
+import { CurrentModelHistory } from "./CurrentModelHistory.js";
+import { ExecutionTraceTimeline } from "./ExecutionTraceTimeline.js";
+import { ExecutionUsageSummary } from "./ExecutionUsageSummary.js";
 import { ChevronDown, CircleAlert, RefreshCw, Wrench } from "lucide-react";
 
-export interface InspectorContextSection {
-  readonly id: string;
-  readonly label: string;
-  readonly tokens?: number;
-  readonly state?: "included" | "compacted" | "omitted" | "unknown";
-}
-
-export interface InspectorContextSnapshot {
-  readonly version: number;
-  readonly routeId?: string;
-  readonly estimatedInputTokens?: number;
-  readonly inputBudgetTokens?: number;
-  readonly remainingTokens?: number;
-  readonly contextWindowTokens?: number;
-  readonly usedPercent?: number;
-  readonly estimation?: "actual" | "estimated" | "unknown";
-  readonly compactedCount?: number;
-  readonly sections?: readonly InspectorContextSection[];
-}
+export type InspectorContextSnapshot = RuntimeSessionContextSnapshot;
 
 export interface InspectorTraceItem {
   readonly id: string;
@@ -62,6 +54,14 @@ export interface InspectorToolPreview {
 }
 
 export interface InspectorWorkbarPanelProps {
+  readonly summary?: RuntimeExecutionSummary;
+  readonly summaryLoading?: boolean;
+  readonly summaryError?: string;
+  readonly loadingEarlier?: boolean;
+  readonly canHideEarlier?: boolean;
+  readonly onHideEarlier?: () => void;
+  readonly execution?: RuntimeExecutionPage;
+  readonly contextError?: string;
   readonly context?: InspectorContextSnapshot;
   readonly trace: readonly InspectorTraceItem[];
   readonly selectedTraceId?: string;
@@ -70,26 +70,21 @@ export interface InspectorWorkbarPanelProps {
   readonly error?: string | null;
   readonly hasMore?: boolean;
   readonly onRefresh: () => void;
-  readonly onSelectTrace: (traceId: string) => void;
+  readonly onSelectTrace: (traceId: string | undefined) => void;
   readonly onLoadMore?: () => void;
   readonly onOpenPreview?: (traceId: string) => void;
 }
 
 export function contextUsagePercent(context?: InspectorContextSnapshot): number | undefined {
-  if (context?.usedPercent !== undefined && Number.isFinite(context.usedPercent)) {
-    return Math.min(100, Math.max(0, context.usedPercent));
-  }
+  const request = context?.latestRequest;
   if (
-    context?.estimatedInputTokens === undefined ||
-    context.inputBudgetTokens === undefined ||
-    context.inputBudgetTokens <= 0
-  ) {
+    request?.status !== "available" ||
+    request.inputTokens === undefined ||
+    request.usageStatus === "missing" ||
+    !request.contextWindow
+  )
     return undefined;
-  }
-  return Math.min(
-    100,
-    Math.max(0, (context.estimatedInputTokens / context.inputBudgetTokens) * 100),
-  );
+  return Math.min(100, Math.max(0, (request.inputTokens / request.contextWindow) * 100));
 }
 
 export function groupInspectorTraceItems(
@@ -117,6 +112,14 @@ export function groupInspectorTraceItems(
 
 export function InspectorWorkbarPanel({
   context,
+  summary,
+  summaryLoading,
+  summaryError,
+  loadingEarlier,
+  canHideEarlier,
+  onHideEarlier,
+  execution,
+  contextError,
   trace,
   selectedTraceId,
   preview,
@@ -128,7 +131,22 @@ export function InspectorWorkbarPanel({
   onLoadMore,
   onOpenPreview,
 }: InspectorWorkbarPanelProps) {
-  const usage = contextUsagePercent(context);
+  const [tab, setTab] = useState<"timeline" | "overview">("timeline");
+  const tabId = useId();
+  function navigateTabs(event: KeyboardEvent<HTMLDivElement>) {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const next =
+      event.key === "Home"
+        ? "timeline"
+        : event.key === "End"
+          ? "overview"
+          : tab === "timeline"
+            ? "overview"
+            : "timeline";
+    setTab(next);
+    event.currentTarget.querySelector<HTMLButtonElement>(`[data-tab="${next}"]`)?.focus();
+  }
   const traceGroups = groupInspectorTraceItems(trace);
   const visibleTraceCount = traceGroups.reduce((count, group) => count + group.items.length, 0);
 
@@ -136,7 +154,6 @@ export function InspectorWorkbarPanel({
     <section className="tool-panel tool-panel--inspector" aria-label="追踪">
       <header className="tool-panel__header">
         <div>
-          <span className="tool-panel__eyebrow">Context v{context?.version ?? "—"}</span>
           <strong>执行追踪</strong>
         </div>
         <button
@@ -156,132 +173,165 @@ export function InspectorWorkbarPanel({
         </p>
       )}
 
-      <div className="tool-panel__scroll" aria-busy={loading}>
-        <section className="tool-panel__section" aria-labelledby="inspector-context-title">
-          <div className="tool-panel__section-heading">
-            <h3 id="inspector-context-title">上下文</h3>
-            {context?.routeId && <code>{context.routeId}</code>}
-          </div>
-          {!context ? (
-            <p className="tool-panel__muted">尚未生成上下文快照。</p>
-          ) : (
-            <>
-              <dl className="tool-panel__metrics">
-                <div>
-                  <dt>已使用</dt>
-                  <dd>{usage === undefined ? "未知" : `${usage.toFixed(1)}%`}</dd>
-                </div>
-                <div>
-                  <dt>输入</dt>
-                  <dd>{formatTokens(context.estimatedInputTokens)}</dd>
-                </div>
-                <div>
-                  <dt>剩余</dt>
-                  <dd>{formatTokens(context.remainingTokens)}</dd>
-                </div>
-                <div>
-                  <dt>压缩</dt>
-                  <dd>{context.compactedCount ?? 0} 次</dd>
-                </div>
-              </dl>
-              {usage !== undefined && (
-                <div
-                  className="tool-panel__progress"
-                  role="progressbar"
-                  aria-label="上下文使用率"
-                  aria-valuemin={0}
-                  aria-valuemax={100}
-                  aria-valuenow={Math.round(usage)}
-                >
-                  <span style={{ width: `${usage}%` }} />
-                </div>
-              )}
-              {context.sections && context.sections.length > 0 && (
-                <ul className="tool-panel__compact-list" aria-label="上下文组成">
-                  {context.sections.map((section) => (
-                    <li key={section.id} data-state={section.state ?? "unknown"}>
-                      <span>{section.label}</span>
-                      <small>{formatTokens(section.tokens)}</small>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </>
-          )}
-        </section>
-
-        <section className="tool-panel__section" aria-labelledby="inspector-trace-title">
-          <div className="tool-panel__section-heading">
-            <h3 id="inspector-trace-title">时间线</h3>
-            <span>
-              {traceGroups.length} 次运行 · {visibleTraceCount} 项
-            </span>
-          </div>
-          {loading && trace.length === 0 ? (
-            <p className="tool-panel__state" role="status">
-              正在加载追踪…
-            </p>
-          ) : trace.length === 0 ? (
-            <p className="tool-panel__state">当前任务还没有追踪记录。</p>
-          ) : (
-            <div className="tool-panel__trace-groups">
-              {traceGroups.map((group) => (
-                <section
-                  className="tool-panel__trace-group"
-                  data-status={group.status}
-                  key={group.id}
-                >
-                  <header>
-                    <span>
-                      <strong>{group.label}</strong>
-                      {group.status && <small>{statusLabel(group.status)}</small>}
-                    </span>
-                    <small>
-                      {group.durationMs === undefined
-                        ? formatTimestamp(group.createdAt ?? "")
-                        : formatDuration(group.durationMs)}
-                    </small>
-                  </header>
-                  {group.items.length === 0 ? (
-                    <p className="tool-panel__muted">没有可展示的执行步骤。</p>
-                  ) : (
-                    <ol className="tool-panel__timeline">
-                      {group.items.map((item) => (
-                        <li key={item.id} data-status={item.status ?? "completed"}>
-                          <button
-                            type="button"
-                            aria-pressed={selectedTraceId === item.id}
-                            onClick={() => onSelectTrace(item.id)}
-                            onDoubleClick={() => onOpenPreview?.(item.id)}
-                          >
-                            <span className="tool-panel__timeline-marker" aria-hidden="true" />
-                            <span className="tool-panel__timeline-copy">
-                              <strong>{item.title}</strong>
-                              {item.summary && <span>{item.summary}</span>}
-                              <small>
-                                {item.durationMs === undefined
-                                  ? formatTimestamp(item.createdAt)
-                                  : formatDuration(item.durationMs)}
-                                {` · ${item.kind}`}
-                              </small>
-                            </span>
-                            {item.toolCallId && <Wrench aria-label="工具调用" size={13} />}
-                          </button>
-                        </li>
-                      ))}
-                    </ol>
-                  )}
-                </section>
-              ))}
+      <div className="inspector-tabs" role="tablist" aria-label="追踪视图" onKeyDown={navigateTabs}>
+        {(
+          [
+            ["timeline", "时间线"],
+            ["overview", "总览"],
+          ] as const
+        ).map(([value, label]) => (
+          <button
+            key={value}
+            type="button"
+            role="tab"
+            data-tab={value}
+            id={`${tabId}-${value}-tab`}
+            aria-selected={tab === value}
+            aria-controls={`${tabId}-${value}-panel`}
+            tabIndex={tab === value ? 0 : -1}
+            onClick={() => setTab(value)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      <div
+        id={`${tabId}-overview-panel`}
+        role="tabpanel"
+        aria-labelledby={`${tabId}-overview-tab`}
+        hidden={tab !== "overview"}
+        className="inspector-page tool-panel__scroll"
+        tabIndex={0}
+      >
+        {contextError && (
+          <p className="tool-panel__error" role="alert">
+            上下文读取失败：{contextError}
+          </p>
+        )}
+        <ContextComposition request={context?.latestRequest} />
+        {summaryLoading && !summary && !execution && (
+          <p className="tool-panel__muted" role="status">
+            正在加载会话用量…
+          </p>
+        )}
+        {summaryError && (
+          <p className="tool-panel__error" role="status">
+            会话用量读取失败：{summaryError}
+          </p>
+        )}
+        {(summary ?? execution?.summary) && (
+          <ExecutionUsageSummary summary={(summary ?? execution?.summary)!} />
+        )}
+        {!summaryLoading && !summary && !execution && !summaryError && (
+          <p className="tool-panel__state">尚无会话用量记录。</p>
+        )}
+        <CurrentModelHistory context={context} />
+      </div>
+      <div
+        id={`${tabId}-timeline-panel`}
+        role="tabpanel"
+        aria-labelledby={`${tabId}-timeline-tab`}
+        hidden={tab !== "timeline"}
+        className="inspector-page tool-panel__scroll"
+        aria-busy={loading}
+        tabIndex={0}
+      >
+        {execution ? (
+          <ExecutionTraceTimeline
+            execution={execution}
+            selectedTraceId={selectedTraceId}
+            onSelectTrace={onSelectTrace}
+          />
+        ) : (
+          <section className="tool-panel__section" aria-labelledby="inspector-trace-title">
+            <div className="tool-panel__section-heading">
+              <h3 id="inspector-trace-title">时间线</h3>
+              <span>
+                {traceGroups.length} 次运行 · {visibleTraceCount} 项
+              </span>
             </div>
-          )}
-          {hasMore && onLoadMore && (
-            <button type="button" className="tool-panel__load-more" onClick={onLoadMore}>
-              <ChevronDown aria-hidden="true" size={14} />
-              加载更多记录
-            </button>
-          )}
-        </section>
+            {loading && trace.length === 0 ? (
+              <p className="tool-panel__state" role="status">
+                正在加载追踪…
+              </p>
+            ) : trace.length === 0 ? (
+              <p className="tool-panel__state">当前任务还没有追踪记录。</p>
+            ) : (
+              <div className="tool-panel__trace-groups">
+                {traceGroups.map((group) => (
+                  <section
+                    className="tool-panel__trace-group"
+                    data-status={group.status}
+                    key={group.id}
+                  >
+                    <header>
+                      <span>
+                        <strong>{group.label}</strong>
+                        {group.status && <small>{statusLabel(group.status)}</small>}
+                      </span>
+                      <small>
+                        {group.durationMs === undefined
+                          ? formatTimestamp(group.createdAt ?? "")
+                          : formatDuration(group.durationMs)}
+                      </small>
+                    </header>
+                    {group.items.length === 0 ? (
+                      <p className="tool-panel__muted">没有可展示的执行步骤。</p>
+                    ) : (
+                      <ol className="tool-panel__timeline">
+                        {group.items.map((item) => (
+                          <li key={item.id} data-status={item.status ?? "completed"}>
+                            <button
+                              type="button"
+                              aria-pressed={selectedTraceId === item.id}
+                              onClick={() => onSelectTrace(item.id)}
+                              onDoubleClick={() => onOpenPreview?.(item.id)}
+                            >
+                              <span className="tool-panel__timeline-marker" aria-hidden="true" />
+                              <span className="tool-panel__timeline-copy">
+                                <strong>{item.title}</strong>
+                                {item.summary && <span>{item.summary}</span>}
+                                <small>
+                                  {item.durationMs === undefined
+                                    ? formatTimestamp(item.createdAt)
+                                    : formatDuration(item.durationMs)}
+                                  {` · ${item.kind}`}
+                                </small>
+                              </span>
+                              {item.toolCallId && <Wrench aria-label="工具调用" size={13} />}
+                            </button>
+                          </li>
+                        ))}
+                      </ol>
+                    )}
+                  </section>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
+        {hasMore && onLoadMore && (
+          <button
+            type="button"
+            className="tool-panel__load-more"
+            disabled={loading}
+            onClick={onLoadMore}
+          >
+            <ChevronDown aria-hidden="true" size={14} />
+            {loadingEarlier ? "正在加载较早记录…" : "加载较早记录"}
+          </button>
+        )}
+
+        {canHideEarlier && onHideEarlier && (
+          <button
+            type="button"
+            className="tool-panel__load-more"
+            disabled={loading}
+            onClick={onHideEarlier}
+          >
+            隐藏较早记录
+          </button>
+        )}
 
         {preview && (
           <section className="tool-panel__section tool-panel__preview" aria-label="工具详情预览">
@@ -314,13 +364,6 @@ function PreviewBlock({
       <strong>{label}</strong>
       <pre>{value}</pre>
     </div>
-  );
-}
-
-function formatTokens(value?: number): string {
-  if (value === undefined || !Number.isFinite(value)) return "未知";
-  return new Intl.NumberFormat("zh-CN", { notation: "compact", maximumFractionDigits: 1 }).format(
-    value,
   );
 }
 

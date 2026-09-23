@@ -206,7 +206,7 @@ const runtimeUserDefaultsResult = exactResultShape(
   {},
   {
     modelRouteId: resultString,
-    collaborationMode: resultOneOf(["agent", "plan"]),
+    collaborationMode: resultOneOf(["agent", "plan", "research"]),
     orchestrationMode: resultOneOf(["default", "graph", "swarm"]),
     permissionMode: resultOneOf(["ask", "auto", "full-access"]),
     thinkingEffort: resultString,

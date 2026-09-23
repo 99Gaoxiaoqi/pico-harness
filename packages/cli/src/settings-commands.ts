@@ -41,11 +41,18 @@ export function createSettingsCommands(deps: SettingsCommandRegistryDeps) {
     mode: rpcCommand({
       name: "mode",
       description: "查看或切换协作与权限模式",
-      usage: "/mode <agent|plan|ask|auto|full-access>",
-      argumentHint: "<agent|plan|ask|auto|full-access>",
+      usage: "/mode <agent|plan|research|ask|auto|full-access>",
+      argumentHint: "<agent|plan|research|ask|auto|full-access>",
       category: "session",
       availability: "idle",
-      argumentCompleter: staticCompleter(["agent", "plan", "ask", "auto", "full-access"]),
+      argumentCompleter: staticCompleter([
+        "agent",
+        "plan",
+        "research",
+        "ask",
+        "auto",
+        "full-access",
+      ]),
       execute: async (input) => {
         const target = input.argv[0];
         const sid = session();
@@ -67,14 +74,15 @@ export function createSettingsCommands(deps: SettingsCommandRegistryDeps) {
             message: `协作模式：${current.settings.collaborationMode ?? "agent"} · 权限：${permissionModeLabel(current.settings.permissionMode ?? "ask")}`,
           };
         }
-        if (!["agent", "plan", "ask", "auto", "full-access"].includes(target)) {
+        if (!["agent", "plan", "research", "ask", "auto", "full-access"].includes(target)) {
           return {
             type: "local",
             action: "message",
-            message: "Usage: /mode <agent|plan|ask|auto|full-access>",
+            message: "Usage: /mode <agent|plan|research|ask|auto|full-access>",
           };
         }
-        const collaborationTarget = target === "agent" || target === "plan";
+        const collaborationTarget =
+          target === "agent" || target === "plan" || target === "research";
         if (sid === undefined) {
           const updated = collaborationTarget
             ? runtime.setPreSessionCollaborationMode(target)

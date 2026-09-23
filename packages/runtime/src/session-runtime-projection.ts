@@ -1,3 +1,4 @@
+import { effectiveRuntimeToolResults } from "./tool-result-projections.js";
 import {
   SESSION_RUNTIME_STATE_VERSION,
   createEmptyUsageSnapshot,
@@ -54,6 +55,7 @@ export const RUNTIME_MODEL_MESSAGE_EVENT_KINDS = [
 /** fork seed 投影(model + transcript 事实)消费的 kind 集。 */
 export const RUNTIME_SESSION_FORK_SEED_EVENT_KINDS = [
   ...RUNTIME_MODEL_MESSAGE_EVENT_KINDS,
+  "tool.result.projection.recorded",
   "transcript.event.recorded",
 ] as const;
 
@@ -157,6 +159,7 @@ export function projectRuntimeSessionForkSeedEntries(
   const sequenceByEventId = new Map(
     entries.map(({ sequence, event }) => [event.eventId, sequence] as const),
   );
+  const effectiveResults = effectiveRuntimeToolResults(entries.map(({ event }) => event));
   const model = projectRuntimeSessionModelHistoryEntries(entries.map(({ event }) => event)).map(
     ({ event }) => {
       const sourceSequence = sequenceByEventId.get(event.eventId);
@@ -166,7 +169,11 @@ export function projectRuntimeSessionForkSeedEntries(
       return {
         kind: "model" as const,
         sourceSequence,
-        event: structuredClone(event),
+        event: structuredClone(
+          event.kind === "tool.result.recorded"
+            ? (effectiveResults.get(event.eventId) ?? event)
+            : event,
+        ),
       };
     },
   );

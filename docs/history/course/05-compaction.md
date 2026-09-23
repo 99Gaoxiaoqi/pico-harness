@@ -1,202 +1,144 @@
-# 第 5 章 · 别让它撑爆上下文
+# 第 5 章 · 在有限窗口中保住工作现场
 
-> 归档说明：本文保留历史设计与实施记录，不定义当前产品行为或待办。当前入口见 [技术文档索引](../../README.md)。
+> 当前实现教程：按代码 `0092022f`（2026-09-21）重写。保留原路径以兼容已有链接；代码块中的概念示意不作为公开 API。
 
-> 文档状态：历史课程快照。Evidence CAS、`read_evidence`、精确 token 计数和旧阈值阶梯已被
-> 后续实现取代；当前 ToolResult inline 入库并受 1 MiB 入口门约束，压缩发生在读取侧。当前
-> 决策见[入口定形 ADR](../../decisions/26-decision-tool-result-entry-shaping.md)。
+上下文管理的难点不是把字符串变短，而是在窗口有限时仍让 Agent 知道目标、已完成的动作和下一步该做什么。粗暴截断工具结果会丢证据，摘要掉半个工具交换会破坏协议；保存一份摘要，也不能证明它足以接替原始历史。
 
-完整 Model Context 保住了工作链，但也要求主动管理输入预算：**不能等 Provider 已经 overflow 才处理。**
+当前 Pico 使用两层机制：**工具结果归档投影**和**历史语义摘要**。本章讲它们的当前实现；完整边界见[上下文压缩技术指南](../../pico-context-compaction-technical-guide.md)。图和计算示例用于解释机制，不是额外的执行 API。
 
-Agent 读了一个 1MB 的日志文件。单条 ToolResult 就可能把上下文撑爆，因此 Engine 在 durable
-边界一次性生成有界投影，并把可回读原文写入 Evidence CAS；正常历史接近输入预算的 85% 时再整理。
+## 1. 先区分入口限制、归档预览和语义压缩
 
-整理顺序是：缩短旧 ToolResult 请求副本 → 在完整工具批次边界摘要旧前缀 → Provider 仍 overflow 时用更紧 token 目标紧急摘要一次。
+工具执行结果首先经过入口定形。单次结果超过 1 MiB 时，入口拒绝正文并提示分段获取；不能承诺所有超大原文都已经保存成可回读档案。
 
----
+对于已经允许入库的结果，归档投影可以只向模型展示短预览，正文仍在 Runtime 事件中。模型需要细节时，使用已授权的归档 reader 回读。再往后，如果整个历史接近容量，才由模型总结安全前缀。
 
-## 一次真实的崩溃
-
-这个故事让我意识到压缩不是可选项。
-
-有一天我让 Agent 排查一个生产环境的 bug。它的操作序列是：
-
-1. `bash "cat /var/log/app.log"` → 工具返回 48,000 字符的日志
-2. `read_file("src/middleware/auth.ts")` → 文件 3,200 字符
-3. `bash "grep ERROR /var/log/app.log | tail -50"` → 又 12,000 字符
-4. `read_file("src/database/connection.ts")` → 4,100 字符
-
-第 5 轮时，上下文累计超过 200K Token。API 返回 400。Agent 没有自动恢复机制——它只是沉默了。用户等了 30 秒后收到一条"任务失败"的飞书消息。
-
-不只是失败。前三轮推理花费了大约 ¥2.8 的 API 费用，全部白费。因为 Agent 在第 5 轮失败时无法恢复任何进度——所有成果都在内存里，随着进程重启消失。
-
-这让我明白：**上下文压缩不是性能优化，是生存必需品。**
-
----
-
-## 为什么不一上来就用模型摘要
-
-直觉上，解决上下文过长的方案是让大模型自己写摘要——把 100 轮对话浓缩成 500 字。很多框架就是这么做的。
-
-模型摘要只在字符级 ToolResult 投影仍不足时使用，原因有三个：
-
-1. **太贵。** 摘要本身需要一次 API 调用，消耗的 Token 可能比它节省的还多。如果 100 轮对话有 50K Token，一次摘要需要把 50K 全部发给模型再收回 500 字——这 50K 输入就要 ¥0.15（按 DeepSeek 价格），省下的输出可能只有 ¥0.02。
-
-2. **太慢。** 等待摘要生成需要几秒到几十秒。在 Agent 的实时交互中，每多等一秒，用户体验就下降一截。
-
-3. **丢失细节。** 摘要可能丢掉关键信息。"那个报错里有一个 IP 地址 `10.0.3.42`"被摘要成了"有个网络错误"。Agent 在后续排查中需要那个 IP 地址，但已经被摘要吃掉了。
-
-因此先采用零成本的 ToolResult 投影；达到水位且投影仍不足时，再调用 FullCompactor 生成摘要并追加 Runtime checkpoint。已有历史不改写，读模型投影为“摘要 + 完整安全尾部”。
-
----
-
-## 阶梯降级：四道防线
-
-压缩器的核心逻辑是 `compactToBudget(contextHistory)`——接收完整上下文，输出裁剪后的版本，保证下发给模型时总字符数不超过预算。
-
-降级顺序从"最不伤害"到"最伤害"：
-
-### 第一道防线：远期历史温和摘要
-
-离当前对话最远的那些消息，它们的工具输出不再保留全文，而是替换成一行可读的摘要：
-
-```
-原文: "Error: Cannot find module './utils' at Object.<anonymous>..."
-摘要: [工具 read_file 输出已清理, exit 1, 原始 2341 字符, 47 行]
+```mermaid
+flowchart TD
+    A[工具输出] --> B{超过 1 MiB 入口限制?}
+    B -->|是| C[拒绝原文并返回分段提示]
+    B -->|否| D[正文与工具事实入库]
+    D --> E{符合归档条件且 reader 可见?}
+    E -->|是| F[模型看到预览与回读地址]
+    E -->|否| G[模型看到 inline 正文]
+    F --> H[组装模型历史]
+    G --> H
+    H --> I{达到摘要触发条件?}
+    I -->|否| J[主模型请求]
+    I -->|是| K[安全切点与结构化摘要]
+    K --> L{校验和提交成功?}
+    L -->|是| M[检查点摘要与安全尾部]
+    L -->|否| H2[保留原历史]
+    M --> J
+    H2 --> J
 ```
 
-摘要保留了关键信息（工具名、退出码、规模），释放了 99% 的空间。Agent 仍然知道"刚才读文件失败了"，只是不记得文件里每一行的具体内容。
+这三个步骤限制的是不同对象。1 MiB 是原始结果字节限制，归档门槛是序列化字符长度，模型窗口才以 token 表达。不能把它们写成同一条“80%／90%／100%”阶梯。
 
-```typescript
-// src/context/compactor.ts
-function makeToolResultSummary(msg, allMsgs, index): string {
-  const toolName = findMatchingToolCall(allMsgs, msg.toolCallId)?.name;
+## 2. 归档投影：正文在库，模型按需读取
 
-  // 生成 1 行摘要: "[工具 {name} 输出已清理, 原始 {N} 字符, {M} 行]"
-  return `[工具 ${toolName ?? "unknown"} 输出已清理, 原始 ${msg.content.length} 字符, ${lineCount} 行]`;
-}
+[tool-result-archive.ts](../../../packages/runtime/src/tool-result-archive.ts) 对满足条件的成功 inline 结果生成预览。关键门槛是 `JSON.stringify(body.content).length > 8192`，它是 JavaScript 字符长度，不是 UTF-8 字节数。
+
+结果还必须处于可安全替换的全文投影状态；错误、附有额外恢复提示、已分页回读的归档结果不走同样的替换路径。当前步骤实际可见工具中必须有绑定本会话 reader 的读取能力，否则只给一个 URI 会让模型失去证据。
+
+预览包含工具名、长度、前 500 字符、归档 URI 和读取说明。正文与投影在同一次工具结果提交中保存。归档地址形如：
+
+```text
+pico://archive/<session>/<event>/<sha256>/<bytes>
 ```
 
-### 第二道防线：远期历史全量掩码
+它定位现有事件正文，不是新的 Evidence CAS。回读验证会话归属、事件类型、哈希与字节数；知道其他会话 URI 不等于获得读取权限。
 
-如果温和摘要还不够，对更早期的工具输出直接掩码：
+`archive_read` 支持 inspect、search、query、read。search 是不区分大小写的字面子串查询，不是正则。read 的 offset 从 0 开始；`read_file` 的归档兼容入口按字符且从 1 开始，普通文件读取则按行。默认 limit 为 4000、最高 6000，完整 JSON 响应还受 7500 字符限制。
 
-```
-[为了节省内存,早期的工具输出已被系统清理。原始长度: 8453 字节]
-```
+工具被隐藏或裁剪时，归档能力会重新计算；没有 reader 的模型视图恢复 inline 正文。旧历史的读取侧归档保护最近两个 turn，先校验检查点再做投影，不改写原始来源摘要。
 
-比摘要更激进——连工具名和退出码都不保留了。但注意：**ToolCall 本身绝不删除。** 删了 ToolCall，Agent 会困惑"我的命令发出去没有？"。删了 ToolResult 但保留 ToolCall，Agent 至少知道"那个时间点我调用过 read_file，但结果已经被清理了"。掩码替换（保留调用记录，删除结果内容）既释放内存又保住推理链条。
+## 3. 自动压缩依赖显式窗口与真实用量
 
-### 第三道防线：近期安全尾部
+当前主动触发不再采用本地估算达到固定 85% 的规则。宿主只有取得用户明确声明的上下文容量，才设置 `declaredContextWindowTokens`；默认 Provider profile 不独自开启主动压缩。
 
-近期安全尾部默认保持 canonical 投影，不在并发工具批次中间切断。单条超大输出在进入
-Session 前已经留下确定性预览、内容哈希、原始字节数和 Evidence 回读引用：
+判断使用最后一次已接受请求的真实 usage：
 
-```
-[前 500 字符内容...]
-
-...[内容过长,中间 8234 字节已被系统截断]...
-
-[后 500 字符内容...]
+```text
+baseline = inputTokens + outputTokens
+reserve = min(2 × outputTokens, 8000)
+触发条件：baseline + reserve >= declaredContextWindowTokens
 ```
 
-`HEAD_TAIL_KEEP = 500` 是一个精心选择的值。首尾各保留 500 字符意味着总共 1000 字符——足够让 Agent 看到报错的开头（通常是错误类型）和结尾（通常是堆栈的最后几帧），但不会撑爆上下文。
+例如窗口 128000，上次输入 119000、输出 3500，判断值为 129500，达到阈值。这个 reserve 是根据上次输出推算的余量，不是本次输出上限，也没有精确预言下一次工具输出的大小。
 
-这个值来源于反复实验。200 字符太少，Agent 看不到足够的上下文；1000 字符太多，三条截断消息就占了 3000 字符。500 是一个甜点。
+usage 锚随助手消息保存，绑定 Provider、base URL、route ID 和模型名形成的路线身份。恢复时必须匹配当前路线，不能拿旧模型的历史用量决定新模型何时压缩。
 
-### 第四道防线：token 水位模型摘要
+本地 token 估算仍用于切点、手动保留预算与诊断；它不是各厂商计费 tokenizer 的精确复现，更不能声称对所有模型误差小于 1%。
 
-请求投影后仍超过 85% 水位时调用模型摘要压缩——按 token 目标选择安全切分点，把早期对话浓缩成结构化摘要。持久化模式追加 Runtime checkpoint，由读模型替换请求投影中的旧前缀；只有显式 `persistence:false` 模式才替换内存 Session。Provider 实际 overflow 时只再做一次更紧的摘要重试。
+## 4. 手动压缩与溢出恢复是另外两个入口
 
-```typescript
-// 13-section 结构化摘要模板
-const SUMMARY_SECTIONS = [
-  "1. 任务目标",
-  "2. 当前进度",
-  "3. 已完成的步骤",
-  "4. 关键发现",
-  "5. 遇到的问题",
-  "6. 错误与修复",
-  "7. 当前状态",
-  "8. 文件变更摘要",
-  "9. 待办事项",
-  "10. 重要上下文",
-  "11. 用户偏好与约束",
-  "12. 下一步计划",
-  "13. 不确定/待确认事项",
-];
+桌面手动压缩不要求先达到主动阈值。保留目标是输入预算一半与历史估算一半中的较小值，最低为 1；随后仍服从安全切点，所以不是机械删除一半消息。
+
+自动与 Provider 溢出入口使用 `targetRetainedTokens = 1`，含义是在安全约束下尽量折叠已完成前缀，不是最后只留下一个 token。
+
+Provider 明确报告 `ContextOverflowError` 后，同一个未被接受的请求最多恢复一次：有可省略的历史工具图片则先省略图片，否则尝试历史摘要，然后重试。当前用户图片不属于可删除的旧工具图片。网络错误和鉴权错误不能泛化为上下文溢出。
+
+成功接受一个新模型步骤后，会重新获得单步压缩及溢出恢复机会；但主动摘要失败会在本次 run 内锁存，避免不断调用摘要模型。当前“无安全切点、未产生摘要”也可能触发这一锁存。
+
+## 5. 切点首先必须保持工具协议完整
+
+[safe-compaction-boundary.ts](../../../packages/runtime/src/safe-compaction-boundary.ts) 寻找可折叠前缀，而不是按第 N 条消息直接切开。
+
+它不能拆开 assistant 的工具调用及其结果，不能让保留尾部从结果中间开始，也不能把用户问题和对应回复任意分置两侧。尾部存在未完成工具交换时，先保留历史。当前用户图片及相关后续交换、任务之后到达的 steering 也受到保护。
+
+当前任务文本可作为 `preservedAnchor` 原文附在摘要包装中，避免完全依赖摘要模型保留用户目标。Runtime 提交前还检查中断恢复历史的特殊边界是否允许覆盖。
+
+这解释了一个容易误判的现象：历史虽然“看起来很长”，仍可能没有合法前缀可压缩。宁可返回未压缩，也不能制造工具协议断裂的请求。
+
+## 6. 摘要必须通过结构校验
+
+[FullCompactor](../../../packages/runtime/src/full-compactor.ts) 的提示词使用五段模板：Goal、Progress、Key Decisions、Next Steps、Critical Context。正文可以使用中文，路径、命令和错误信息应保留必要的精确文本。
+
+硬校验只要求 **Goal、Progress、Next Steps、Critical Context 四段按顺序出现并含有效内容**；Key Decisions 在模板中，但不是必须段。校验还检查代码围栏、结尾截断迹象与模板占位内容，不能只写几个标题就通过。
+
+首次摘要若有真实 usage，输入超过 10000 token 时，输出至少应有 200 token。滚动摘要和无 usage 情况不使用这个下限，不能靠字符数换算冒充真实用量。
+
+摘要输出预算为 8000 token，Provider 适配器再与路线输出上限取较小值。当前实际生成不使用旧的 1500 字符裁剪。
+
+质量修复有两个独立阶段：长度截断后可重试一次更短摘要；格式或内容缺陷后可请求一次完整替换。两个阶段可以先后发生，因此最多有三个生成阶段；每阶段的普通调用异常重试另算。取消和摘要请求本身的窗口溢出不会被当成普通异常反复发送。
+
+程序验证的是最低结构与来源完整性，无法证明每个语义事实都没有丢失。精确标记、只读要求和关键命令需要真实模型测试另行检查。
+
+## 7. 检查点发布之后，才切换读取视图
+
+[recordRuntimeCompactionCheckpoint](../../../packages/runtime/src/runtime-compaction-checkpoint.ts) 读取当前历史与来源事件，生成预览，验证摘要，然后追加检查点。检查点固定 ID、覆盖事件数、终点事件 ID、来源摘要与上一检查点身份，新格式标记为 `sections_v1`。
+
+成功提交后，模型读取视图使用“检查点摘要＋未覆盖尾部”，原始消息和工具结果继续保留。检查点不是覆盖聊天正文，也不是长期记忆条目。
+
+下一轮压缩以“上一份有效摘要＋新增的可折叠历史”滚动生成，不把旧摘要再作为普通前缀重复发送。加载也会验证新格式与来源；旧格式保留兼容读取边界。
+
+装配 Hook 服务的入口在提交后派发 `PostCompact`，派发失败记录诊断，不回滚已提交检查点。桌面手动入口当前未传入 Hook 服务，不能假设按钮操作必然触发这两个 Hook。
+
+## 8. 用不变量验证，而不是用压缩率证明正确
+
+最有价值的断言是：工具交换未被切开，当前任务仍在，失败不发布检查点，重启能读取原文，无 reader 时不遗留不可读预览。
+
+从仓库根目录执行：
+
+```sh
+npm run build:packages
+node scripts/run-integration-tests.mjs \
+  maka-compaction-trigger maka-compaction-summary \
+  compaction-review-fixes compaction-rolling-digest \
+  archive-read-tool tool-result-runtime-projection
 ```
 
-13 个固定 section 确保摘要的结构完整——不会遗漏关键信息。每个 section 都是一个具体的"信息槽位"，模型只需要填空，不需要自己判断该写什么。
+真实模型验证需要已有模型配置，并实际消耗额度：
 
-但有硬限制：**每次 Main Loop 调用最多触发一次模型摘要压缩。** 原因很惨：有一次 Agent 的第 5 轮触发了摘要压缩，压缩后上下文仍然超预算，又触发了一次……然后又触发了一次。总共执行了 7 次摘要压缩，每次都要把压缩后的内容再发给模型再压缩——Token 消耗反而比不压缩更多。从此加了硬上限：每轮最多一次。
-
----
-
-## 不止是压缩：Token 计数必须精确
-
-字符级压缩需要一个准确的计量单位。我一开始用 `chars / 4` 估算 Token 数——简单但误差很大。中文一个字符可能等于 1.5-3 个 Token，代码里的符号分布也和自然语言完全不同。
-
-后来换成了 BPE（Byte Pair Encoding）精确计数：
-
-```typescript
-// src/context/token-counter.ts
-export class TokenCounter {
-  private readonly encoder: BPEEncoder;
-
-  countTokens(text: string): number {
-    // 对长文本分片计数，避免单次编码 OOM
-    const chunks = this.chunkByMaxLength(text, 50_000);
-    return chunks.reduce((sum, chunk) => sum + this.encoder.encode(chunk).length, 0);
-  }
-}
+```sh
+RUN_COMPACTION_E2E=1 node --import tsx --import @pico/cli/tui/preload-env \
+  --test --test-concurrency=1 \
+  tests/e2e/compaction-auto-trigger.real-llm.test.ts \
+  tests/e2e/compaction-quality.real-llm.test.ts
 ```
 
-BPE（Byte Pair Encoding）是大模型训练时使用的分词算法。cl100k_base 是 GPT-4 和 Claude 通用的编码器。使用真实的分词器计数，误差在 1% 以内。加上 LRU 缓存避免重复计数，高频文本（比如固定的 System Prompt 部分）只算一次。
+本章没有把命令列出等同于验证通过。确定性测试证明分支与持久化不变量；真实模型测试证明指定样本的保留行为，都不等于任意长任务不会遗忘。
 
-精确计数至关重要——误差 10% 意味着 200K 预算的实际用量可能是 180K 到 220K。如果你以为是 180K 但实际是 220K，API 就会 400。**压缩需要精确的"秤"，否则你不知道什么时候该触发。**
-
----
-
-## 上下文预算管理：一扇可调的门
-
-有了计数和压缩，还需要一个"什么时候触发"的决策层：
-
-```typescript
-// src/context/context-budget.ts
-export class ContextBudget {
-  constructor(
-    private maxTokens: number, // 硬上限，如 180K
-    private softLimit: number = 0.8, // 软限制比例，达到 80% 时开始温和压缩
-  ) {}
-
-  shouldCompact(currentTokens: number): "none" | "gentle" | "aggressive" | "full" {
-    const ratio = currentTokens / this.maxTokens;
-    if (ratio < this.softLimit) return "none";
-    if (ratio < 0.9) return "gentle"; // 温和摘要
-    if (ratio < 1.0) return "aggressive"; // 掩码 + 掐头去尾
-    return "full"; // 模型摘要兜底
-  }
-}
-```
-
-预算不是固定的。不同模型有不同的上下文窗口——DeepSeek V3 支持 128K，Claude Sonnet 支持 200K，GLM-4 支持 128K。Budget 从 Provider 配置中读取模型的实际窗口大小，动态调整阈值。
-
-还有额外保护：**溢出重试。** 如果 API 返回 400（context length exceeded），引擎不直接放弃——而是强制触发一次 full compaction，用模型摘要大幅缩减上下文，然后重试。这是最后一道防线，在日志中标注 `[overflow-retry]`。
-
----
-
-## 现在有了什么
-
-上下文的"垃圾回收"系统形成了：
-
-- **四道阶梯防线**：温和摘要 → 全量掩码 → 掐头去尾 → 模型摘要。从轻到重，不越级
-- **精确 Token 计数**：BPE 编码器 + LRU 缓存，误差 < 1%
-- **动态预算管理**：根据模型窗口大小自动调整阈值，80% 预警 / 90% 主动压缩 / 100% 全力压缩
-- **溢出重试**：API 400 不放弃，强制 compact 后重试
-
-Agent 现在有记忆（Session）、有心跳（Main Loop）、有大脑（Provider）、有手脚（Tools）、有垃圾回收（Compaction）。但它还是会跑偏——任务做到一半忘了目标、工具报错就机械重试、陷入同一个错误来回打转。
-
-接下来，给它装上方向盘和刹车。
+入口限制见 [tool-result-observation.ts](../../../packages/runtime/src/tool-result-observation.ts)，摘要契约见 [history-compact-summary-validation.ts](../../../packages/runtime/src/history-compact-summary-validation.ts)，主动触发和溢出恢复见 [agent-engine.ts](../../../packages/runtime/src/agent-engine.ts)。
 
 [下一章：给它装上方向盘 →](06-steering.md)

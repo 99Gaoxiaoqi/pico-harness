@@ -44,7 +44,6 @@ import {
 } from "./agent-graph-exact-run-port.js";
 import { retireAgentGraphRootSession } from "./agent-graph-root-retirement.js";
 import { AgentGraphWorkspaceResourceAuthority } from "./agent-graph-workspace-resource-authority.js";
-import { resolvePicoPaths } from "./pico-paths.js";
 
 /** Session capabilities the Graph Host needs from the outer Engine adapter. */
 export interface AgentGraphWorkspaceHostSession
@@ -402,9 +401,6 @@ export function createAgentGraphWorkspaceHost(
     recordStore: store,
     resourceAuthority: new AgentGraphResourceAuthority({
       storageRoot: options.storageRoot,
-      evidenceBaseDir: resolvePicoPaths(options.workDir, {
-        ...(options.sessionOptions?.picoHome ? { picoHome: options.sessionOptions.picoHome } : {}),
-      }).workspace.evidence,
       store,
     }),
   });

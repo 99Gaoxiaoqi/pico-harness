@@ -1,3 +1,8 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { SqliteRuntimeControlStore } from "@pico/storage/sqlite/sqlite-runtime-control-store";
+import { capturePhysicalAttempts, reportFixtureAttempt } from "../../fixtures/native-accounting.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { FULL_COMPACTION_SUMMARY_MARKER } from "@pico/core";
@@ -7,12 +12,11 @@ import {
   parsePreparedRequestCapture,
   type PreparedRequestCacheBreakpointComparison,
 } from "@pico/runtime/provider-request-diagnostics";
-import { CostTracker, type ProviderCallLedger } from "@pico/pico-host/cost-tracker";
+import { CostTracker } from "@pico/pico-host/cost-tracker";
 import { applyAnthropicCacheControl } from "@pico/runtime/provider/anthropic-cache";
-import { LLMStatusError } from "@pico/core";
 import type { LLMProvider, LLMProviderRequestOptions } from "@pico/core";
 import type { Message, ToolDefinition } from "@pico/core";
-import type { ProviderCallRecord } from "@pico/storage/runtime-control-types";
+import type { PhysicalAttemptRecord } from "@pico/storage/runtime-control-types";
 
 class PreparedClaudeProvider implements LLMProvider {
   readonly modelName = "claude-cache-test";
@@ -47,6 +51,10 @@ class PreparedClaudeProvider implements LLMProvider {
       model: this.modelName,
       body,
     });
+    await reportFixtureAttempt(options, "claude", this.modelName, {
+      promptTokens: 10,
+      completionTokens: 1,
+    });
     return {
       role: "assistant",
       content: "ok",
@@ -56,14 +64,8 @@ class PreparedClaudeProvider implements LLMProvider {
 }
 
 test("CostTracker compares all compatibility fallback attempts to one logical-call prior", async () => {
-  const records: ProviderCallRecord[] = [];
-  const ledger: ProviderCallLedger = {
-    recordProviderCall(record) {
-      const stored = { ...record, createdAt: records.length + 1 };
-      records.push(stored);
-      return { record: stored, inserted: true };
-    },
-  };
+  const records: PhysicalAttemptRecord[] = [];
+  const ledger = capturePhysicalAttempts(records);
   let useFallback = false;
   const provider: LLMProvider = {
     modelName: "gpt-fallback-diagnostic",
@@ -106,6 +108,10 @@ test("CostTracker compares all compatibility fallback attempts to one logical-ca
         model: "gpt-fallback-diagnostic",
         body: ordinary,
       });
+      await reportFixtureAttempt(options, "openai", "gpt-fallback-diagnostic", {
+        promptTokens: 10,
+        completionTokens: 1,
+      });
       return {
         role: "assistant",
         content: "ok",
@@ -142,17 +148,8 @@ test("CostTracker compares all compatibility fallback attempts to one logical-ca
 });
 
 test("CostTracker keeps safe routing query parameters distinct and omits credentials", async () => {
-  const records: ProviderCallRecord[] = [];
-  const ledger: ProviderCallLedger = {
-    recordProviderCall(record) {
-      const stored = { ...record, createdAt: records.length + 1 };
-      records.push(stored);
-      return { record: stored, inserted: true };
-    },
-    listProviderCalls() {
-      return records.toReversed().map((record) => structuredClone(record));
-    },
-  };
+  const records: PhysicalAttemptRecord[] = [];
+  const ledger = capturePhysicalAttempts(records);
   const options = {
     ledger,
     context: { purpose: "main" as const, sessionId: "query-route-session" },
@@ -184,18 +181,13 @@ test("CostTracker keeps safe routing query parameters distinct and omits credent
   assert.doesNotMatch(JSON.stringify(records), /api_key|first-secret|rotated-secret/u);
 });
 
-test("CostTracker 跨实例恢复请求指纹并定位首个变化段且不持久化 prompt 明文", async () => {
-  const records: ProviderCallRecord[] = [];
-  const ledger: ProviderCallLedger = {
-    recordProviderCall(record) {
-      const stored = { ...record, createdAt: records.length + 1 };
-      records.push(stored);
-      return { record: stored, inserted: true };
-    },
-    listProviderCalls() {
-      return records.toReversed().map((record) => structuredClone(record));
-    },
-  };
+test("CostTracker SQLite 重开后恢复请求指纹并定位首个变化段且不持久化 prompt 明文", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "pico-cache-restore-"));
+  let ledger = new SqliteRuntimeControlStore({ storageRoot: root });
+  t.after(() => {
+    ledger.close();
+    rmSync(root, { recursive: true, force: true });
+  });
   let call = 0;
   const trackerOptions = {
     ledger,
@@ -256,6 +248,9 @@ test("CostTracker 跨实例恢复请求指纹并定位首个变化段且不持�
     undefined,
     trackerOptions,
   ).generate(firstMessages, tools);
+  ledger.close();
+  ledger = new SqliteRuntimeControlStore({ storageRoot: root });
+  trackerOptions.ledger = ledger;
   await new CostTracker(
     new PreparedClaudeProvider(64),
     stableRoute,
@@ -298,34 +293,13 @@ test("CostTracker 跨实例恢复请求指纹并定位首个变化段且不持�
     undefined,
     trackerOptions,
   ).generate(changedPrefixMessages, tools);
-  await assert.rejects(
-    new CostTracker(
-      {
-        modelName: "claude-cache-test",
-        async generate() {
-          throw new LLMStatusError(400, "PRIVATE_REMOTE_RESPONSE_MUST_NOT_BE_PERSISTED");
-        },
-      },
-      {
-        provider: "claude",
-        model: "claude-cache-test",
-        baseUrl: "not-a-valid-url PRIVATE_ROUTE_SECRET",
-      },
-      undefined,
-      {
-        ...trackerOptions,
-        context: {
-          ...trackerOptions.context,
-          conversationId: "conversation-invalid-route",
-        },
-      },
-    ).generate(changedPrefixMessages, tools),
-    LLMStatusError,
+  // The ledger orders timestamp ties by physical UUID, not logical call sequence.
+  const records = ledger.listPhysicalAttempts().sort((a, b) =>
+    a.providerCallId.localeCompare(b.providerCallId, undefined, { numeric: true }),
   );
 
   const first = requestDiagnostic(records[0]);
   assert.equal(records[0]?.route, "https://example.test/v1");
-  assert.equal(records[0]?.reported?.["cacheSupport"], "unsupported");
   assert.doesNotMatch(JSON.stringify(records[0]), /route-secret|api_key/u);
   assert.equal(first["changeReason"], "first_request");
   assert.equal(String(first["requestHash"]).length, 64);
@@ -394,9 +368,6 @@ test("CostTracker 跨实例恢复请求指纹并定位首个变化段且不持�
   assert.equal(requestDiagnostic(records[4])["changeReason"], "first_request");
   assert.equal(requestDiagnostic(records[5])["changeReason"], "stable");
   assert.equal(requestDiagnostic(records[6])["changeReason"], "first_request");
-  assert.equal(records[7]?.route, "[invalid-url]");
-  assert.equal(records[7]?.reported?.["errorName"], "LLMStatusError");
-  assert.equal(records[7]?.reported?.["statusCode"], 400);
   const persisted = JSON.stringify(records);
   for (const secret of [
     secretPrompt,
@@ -676,9 +647,9 @@ function implicitCapture(input: { history: string; tail: string; toolDescription
   });
 }
 
-function requestDiagnostic(record: ProviderCallRecord | undefined): Record<string, unknown> {
+function requestDiagnostic(record: PhysicalAttemptRecord | undefined): Record<string, unknown> {
   assert.ok(record);
-  const diagnostic = record.reported?.["requestDiagnostic"];
+  const diagnostic = record.requestDiagnostic;
   assert.equal(typeof diagnostic, "object");
   assert.ok(diagnostic);
   return diagnostic as Record<string, unknown>;

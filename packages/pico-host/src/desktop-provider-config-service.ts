@@ -66,7 +66,6 @@ export interface DesktopProviderConfigServiceOptions {
   readonly effectiveConfigResolver?: EffectiveConfigResolver;
   readonly credentialVault?: CredentialVault;
   readonly providerOperationJournal?: ProviderOperationJournal;
-  readonly initializeDefaultProvider?: boolean;
   readonly listWorkspacePaths: () => Promise<readonly string[]>;
   readonly requireTrustedWorkspace: (workspacePath: string) => Promise<string>;
   readonly assertNoActiveRuns: (
@@ -748,9 +747,7 @@ export class DesktopProviderConfigService {
 
   private async startUserConfigWatch(): Promise<void> {
     try {
-      this.observedUserConfig = this.options.initializeDefaultProvider
-        ? await this.userConfigStore.ensureDefaultProvider(this.env)
-        : await this.userConfigStore.read();
+      this.observedUserConfig = await this.userConfigStore.read();
     } catch {
       // The typed config methods surface corrupt state. Keep watching so an external repair
       // is detected without requiring a daemon restart.
@@ -1131,7 +1128,10 @@ function normalizeRuntimeUserDefaults(value: unknown): PicoUserConfigDefaults {
       "defaults.modelRouteId 必须使用 providerID/modelID 格式",
     );
   }
-  if (collaborationMode !== undefined && !isOneOf(collaborationMode, ["agent", "plan"] as const)) {
+  if (
+    collaborationMode !== undefined &&
+    !isOneOf(collaborationMode, ["agent", "plan", "research"] as const)
+  ) {
     throw new RuntimeProtocolError(
       RUNTIME_ERROR_CODES.INVALID_PARAMS,
       "defaults.collaborationMode 必须是 agent 或 plan",
@@ -1167,7 +1167,9 @@ function normalizeRuntimeUserDefaults(value: unknown): PicoUserConfigDefaults {
   return {
     ...(webSearch !== undefined ? { webSearch } : {}),
     ...(typeof modelRouteId === "string" ? { modelRouteId: modelRouteId.trim() } : {}),
-    ...(isOneOf(collaborationMode, ["agent", "plan"] as const) ? { collaborationMode } : {}),
+    ...(isOneOf(collaborationMode, ["agent", "plan", "research"] as const)
+      ? { collaborationMode }
+      : {}),
     ...(isOneOf(orchestrationMode, ["default", "graph", "swarm"] as const)
       ? { orchestrationMode }
       : {}),

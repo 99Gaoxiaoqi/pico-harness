@@ -1,3 +1,8 @@
+import { requestContextForProvider } from "./runtime-assembly.js";
+import { getLatestContextRequest, readLastRequestAnchor } from "./session-context-composition.js";
+import { querySessionExecution, querySessionExecutionSummary } from "./session-execution-query.js";
+import { projectDeepResearchProgress } from "@pico/core/deep-research";
+import { SqliteDeepResearchStore } from "@pico/storage";
 import {
   configuredSubagentParent,
   readConfiguredSubagentAdmission,
@@ -66,7 +71,6 @@ import { initializeProjectEntrypoints } from "./input/project-initializer.js";
 import { CostTracker } from "./cost-tracker.js";
 import { logger } from "./logger.js";
 import { summarizeCacheEffectiveness } from "@pico/runtime/cache-effectiveness";
-import { ensureSessionUsageBaseline } from "@pico/runtime/usage-baseline";
 import { createProvider, type ProviderKind } from "./provider/factory.js";
 import { type ModelRoute, type ModelRouter } from "./provider/model-router.js";
 import {
@@ -100,11 +104,7 @@ import {
   fileHistoryRestoreFile,
   type FileHistoryChanges,
 } from "./file-history-runtime.js";
-import type {
-  ProviderCallRecord,
-  UsageBaselineRecord,
-  UsageLedgerTotals,
-} from "@pico/storage/runtime-control-types";
+import type { ProviderCallRecord, UsageLedgerTotals } from "@pico/storage/runtime-control-types";
 import {
   createRuntimeNotification,
   createRuntimeRequest,
@@ -203,7 +203,7 @@ import { DesktopAtomicMemoryService } from "./desktop-atomic-memory-service.js";
 import { sessionMemoryLane } from "@pico/runtime/atomic-memory/session-lane";
 import { memorySessionKey } from "@pico/core/atomic-memory-runtime-contracts";
 import type { ImagePart } from "@pico/core";
-import { createModelContextReport } from "@pico/runtime/provider/model-runtime-report";
+import { readRuntimeModelHistorySnapshot } from "@pico/runtime/session-runtime-read-model";
 import { createSessionHookRuntime } from "./hooks/runtime.js";
 import { PluginManagementService } from "./plugins/plugin-management-service.js";
 import {
@@ -236,7 +236,6 @@ export interface DesktopRuntimeServiceOptions {
   readonly planControl?: PlanControlPort;
   readonly automations?: DesktopAutomationService;
   readonly userConfigStore?: UserConfigStore;
-  readonly initializeDefaultProvider?: boolean;
   readonly userMcpConfigStore?: UserMcpConfigStore;
   readonly effectiveConfigResolver?: EffectiveConfigResolver;
   readonly credentialVault?: CredentialVault;
@@ -439,9 +438,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       ...(options.providerOperationJournal === undefined
         ? {}
         : { providerOperationJournal: options.providerOperationJournal }),
-      ...(options.initializeDefaultProvider === undefined
-        ? {}
-        : { initializeDefaultProvider: options.initializeDefaultProvider }),
       listWorkspacePaths: () => this.registrationStore.list(),
       requireTrustedWorkspace: this.requireTrustedWorkspace.bind(this),
       assertNoActiveRuns: this.assertNoActiveRuns.bind(this),
@@ -711,11 +707,14 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         runStart: (request) => this.options.runtimeService.handle(request),
       }),
       ...createDesktopWorkbarRequestHandlers({
+        "session.research.query": this.querySessionResearch.bind(this),
         "session.tasks.query": this.querySessionTasks.bind(this),
         "session.tasks.command": this.commandSessionTasks.bind(this),
         "session.artifacts.query": this.querySessionArtifacts.bind(this),
         "session.artifacts.command": this.commandSessionArtifacts.bind(this),
         "session.trace.query": this.querySessionTrace.bind(this),
+        "session.execution.query": this.querySessionExecution.bind(this),
+        "session.execution.summary": this.querySessionExecutionSummary.bind(this),
         "session.graph.query": this.querySessionGraph.bind(this),
         "session.graph.retryWake": this.retrySessionGraphWake.bind(this),
         "session.graph.stop": this.stopSessionGraph.bind(this),
@@ -1366,6 +1365,15 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     );
     const settings = await this.withSession(canonical, params.sessionId, async (session) => {
       const current = await this.getSessionSettings(canonical, session);
+      if (
+        (requestedCollaborationMode ?? current.collaborationMode) === "research" &&
+        (requestedOrchestrationMode ?? current.orchestrationMode) !== "default"
+      ) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.CONFLICT,
+          "研究模式只支持只读线性研究，请先关闭 Graph/Swarm。",
+        );
+      }
       const permissionModeChanging =
         requestedPermissionMode !== undefined && requestedPermissionMode !== current.permissionMode;
       const orchestrationModeChanging =
@@ -1410,7 +1418,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         }
       }
       if (
-        requestedCollaborationMode === "agent" &&
+        requestedCollaborationMode !== undefined &&
+        requestedCollaborationMode !== "plan" &&
         current.collaborationMode === "plan" &&
         session.runtimeEventStore
       ) {
@@ -1513,20 +1522,50 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   ): Promise<JsonValue> {
     const canonical = await this.requireTrustedSession(workspacePath, sessionId);
     return this.withSession(canonical, sessionId, async (session) => {
-      const settings = await this.getSessionSettings(canonical, session);
+      const settings = session.getRuntimeStateSnapshot().settings;
+      if (!settings)
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.RESET_REQUIRED,
+          `Session ${sessionId} 缺少当前版本 settings，请新建 Session`,
+        );
       const runtime = await this.loadSessionModelRuntime(canonical);
       const route = runtime.router.require(settings.modelRouteId);
-      const traceWatermark = this.workbarRepository(canonical).queryTrace({
+      const store = session.runtimeEventStore;
+      if (!store) throw new Error("上下文历史缺少持久化事件源");
+      // No run, prompt assembly, tool discovery or provider request is created for inspection.
+      const history = await readRuntimeModelHistorySnapshot(store, sessionId);
+      const latestRequest = getLatestContextRequest(
+        resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.root,
         sessionId,
-        limit: 1,
-      }).throughSequence;
+      );
       return toJsonValue({
         context: {
-          ...createModelContextReport(route, session.getHistory()),
-          version: 2,
+          version: 3,
           sessionId,
           generatedAt: this.now(),
-          traceWatermark,
+          selectedRoute: {
+            routeId: route.id,
+            providerId: route.provider,
+            modelId: route.model,
+            connectionId: route.providerId,
+            contextWindow: route.capabilities.contextWindowTokens,
+            ...(route.capabilities.contextSource === "config"
+              ? { declaredContextWindow: route.capabilities.contextWindowTokens }
+              : {}),
+          },
+          latestRequest,
+          ...(readLastRequestAnchor(session.getHistory())
+            ? { lastRequestAnchor: readLastRequestAnchor(session.getHistory()) }
+            : {}),
+          modelHistory: {
+            throughSequence: history.throughSequence,
+            messageCount: history.messages.length,
+            estimatedTokens: estimateMessagesTokens(history.messages),
+            estimationAlgorithm: "maka_chars_v1",
+            projection: "effective_model_history",
+            compactedCount: history.compactedCount,
+            ...(history.latestCompaction ? { latestCompaction: history.latestCompaction } : {}),
+          },
         },
       });
     });
@@ -1594,6 +1633,17 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       revision: result.revision,
     });
     return toJsonValue(result);
+  }
+
+  private async querySessionResearch(
+    params: RuntimeRequest<"session.research.query">["params"],
+  ): Promise<JsonValue> {
+    const canonical = await this.requireTrustedSession(params.workspacePath, params.sessionId);
+    const store = new SqliteDeepResearchStore({
+      storageRoot: resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.root,
+    });
+    const run = store.read(params.sessionId);
+    return toJsonValue({ run: run ? projectDeepResearchProgress(run) : null });
   }
 
   private async querySessionArtifacts(
@@ -1741,6 +1791,32 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       );
     }
     return toJsonValue(result);
+  }
+
+  private async querySessionExecutionSummary(
+    params: RuntimeRequest<"session.execution.summary">["params"],
+  ): Promise<JsonValue> {
+    const canonical = await this.requireTrustedSession(params.workspacePath, params.sessionId);
+    const storageRoot = resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.root;
+    return this.withWorkbarErrors(() =>
+      toJsonValue(querySessionExecutionSummary(storageRoot, { sessionId: params.sessionId })),
+    );
+  }
+
+  private async querySessionExecution(
+    params: RuntimeRequest<"session.execution.query">["params"],
+  ): Promise<JsonValue> {
+    const canonical = await this.requireTrustedSession(params.workspacePath, params.sessionId);
+    const storageRoot = resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.root;
+    return this.withWorkbarErrors(() =>
+      toJsonValue(
+        querySessionExecution(storageRoot, {
+          sessionId: params.sessionId,
+          ...(params.cursor === undefined ? {} : { cursor: params.cursor }),
+          ...(params.runId === undefined ? {} : { runId: params.runId }),
+        }),
+      ),
+    );
   }
 
   private async querySessionTrace(
@@ -1924,7 +2000,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         await RuntimeRun.repairSessionProjection(session, {
           capability: runtimeCapability,
         });
-        ensureSessionUsageBaseline(ledger, session);
         const provider = new CostTracker(
           rawProvider,
           {
@@ -1935,6 +2010,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           session,
           {
             ledger,
+            contextFacts: requestContextForProvider(active.provider, active.config),
             context: {
               purpose: "compaction",
               sessionId: session.id,
@@ -1949,8 +2025,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           agentSwarmAuthorization: "none",
         });
         const checkpoint = await runtimeRun.run(async () => {
-          const entries = await runtimeRun.readModelHistoryEntries();
-          const historyTokens = estimateMessagesTokens(entries.map(({ message }) => message));
           const result = await recordRuntimeCompactionCheckpoint({
             logger,
             session,
@@ -1958,13 +2032,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
             compactor: new FullCompactor({ provider, logger }),
             request: {
               inputBudgetTokens: budget.inputBudgetTokens,
-              targetRetainedTokens: Math.max(
-                1,
-                Math.min(
-                  Math.floor(budget.inputBudgetTokens * 0.5),
-                  Math.floor(historyTokens * 0.5),
-                ),
-              ),
+              phase: "standalone",
+              targetRetainedTokens: 0,
               trigger: "manual",
             },
           });
@@ -2186,6 +2255,18 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       });
     }
 
+    const admittedSettings = await this.getRuntimeSessionSettings(params.workspacePath, sessionId);
+    const collaboration = (admittedSettings as { settings?: { collaborationMode?: string } })
+      .settings?.collaborationMode;
+    if (
+      collaboration === "research" &&
+      (params.input.kind !== "text" || params.input.orchestrationMode)
+    ) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        "研究模式不能激活 Skill、子代理或 Graph/Swarm；请使用普通研究消息。",
+      );
+    }
     if (params.expectedRunId !== undefined && activeRun?.["runId"] !== params.expectedRunId) {
       throw new RuntimeProtocolError(
         RUNTIME_ERROR_CODES.CONFLICT,
@@ -2822,7 +2903,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       ? [await this.requireTrustedWorkspace(params.workspacePath)]
       : await this.registrationStore.list();
     const allCalls: ProviderCallRecord[] = [];
-    const allBaselines: UsageBaselineRecord[] = [];
     const workspaces: JsonValue[] = [];
     const unavailableWorkspaces: { workspacePath: string; error: string }[] = [];
     const sources: Array<UsageDashboardInput["sources"][number]> = [];
@@ -2838,19 +2918,14 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         });
         const filter = params.sessionId ? { sessionId: params.sessionId } : {};
         const calls = store
-          .listProviderCalls(filter)
+          .listAccountingProviderCalls(filter)
           .filter((record) => inTimeRange(record.createdAt, from, to));
-        const hasRange = from !== undefined || to !== undefined;
-        const baselines = hasRange
-          ? []
-          : store.listUsageBaselines(params.sessionId ? { sessionId: params.sessionId } : {});
         sources.push({ workspacePath, storageRoot: store.storageRoot, calls });
         allCalls.push(...calls);
-        allBaselines.push(...baselines);
         workspaces.push(
           toJsonValue({
             workspacePath,
-            ...summarizeUsageRecords(calls, baselines),
+            ...summarizeUsageRecords(calls),
           }),
         );
       } catch (error) {
@@ -2863,8 +2938,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         store?.close();
       }
     }
-    const hasRange = from !== undefined || to !== undefined;
-    const summary = summarizeUsageRecords(allCalls, allBaselines);
+    const summary = summarizeUsageRecords(allCalls);
     const userConfig = await this.providerConfig.userConfigStore.read();
     const pricing = usagePricing(userConfig.config.providers, MODEL_PRICING);
     const dashboard = await buildUsageDashboard({
@@ -2877,7 +2951,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       ...(to !== undefined ? { to } : {}),
       ...(params.sessionId ? { sessionId: params.sessionId } : {}),
     });
-    const baselineTotals = sumUsage(allBaselines);
     return toJsonValue({
       usage: {
         scope: params.workspacePath ? (params.sessionId ? "session" : "workspace") : "all",
@@ -2887,14 +2960,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         ...(to !== undefined ? { to } : {}),
         ...summary,
         cache: summarizeCacheEffectiveness(allCalls),
-        details: {
-          ...dashboard,
-          knownCacheReadTokens: dashboard.knownCacheReadTokens + baselineTotals.cacheReadTokens,
-          knownCacheWriteTokens: dashboard.knownCacheWriteTokens + baselineTotals.cacheWriteTokens,
-        },
+        details: dashboard,
         workspaces,
         ...(unavailableWorkspaces.length > 0 ? { unavailableWorkspaces } : {}),
-        rangeAccuracy: hasRange ? "provider_calls_only" : "all_time_with_baselines",
+        rangeAccuracy: "provider_calls_only",
       },
     });
   }
@@ -3881,9 +3950,10 @@ function validateRequestedSessionSettings(params: {
   if (
     params.collaborationMode !== undefined &&
     params.collaborationMode !== "agent" &&
-    params.collaborationMode !== "plan"
+    params.collaborationMode !== "plan" &&
+    params.collaborationMode !== "research"
   ) {
-    throw invalidSessionSetting("collaborationMode 必须是 agent 或 plan");
+    throw invalidSessionSetting("collaborationMode 必须是 agent、plan 或 research");
   }
   if (
     params.orchestrationMode !== undefined &&
@@ -3947,13 +4017,9 @@ function inTimeRange(at: number, from: number | undefined, to: number | undefine
   return (from === undefined || at >= from) && (to === undefined || at <= to);
 }
 
-function summarizeUsageRecords(
-  calls: readonly ProviderCallRecord[],
-  baselines: readonly UsageBaselineRecord[],
-): JsonObject {
+function summarizeUsageRecords(calls: readonly ProviderCallRecord[]): JsonObject {
   const providerCalls = sumUsage(calls);
-  const baselineTotals = sumUsage(baselines);
-  const total = addUsage(providerCalls, baselineTotals);
+  const total = providerCalls;
   let usageReportCount = 0;
   let reasoningTokens = 0;
   let estimatedCostCallCount = 0;
@@ -3961,7 +4027,12 @@ function summarizeUsageRecords(
   let unknownCostCallCount = 0;
   for (const call of calls) {
     const reported = call.reported ?? {};
-    if (reported["usageMetadata"] === "reported") usageReportCount += 1;
+    const fields = reported["reportedFields"];
+    if (
+      reported["usageMetadata"] === "reported" &&
+      (!Array.isArray(fields) || (fields.includes("prompt") && fields.includes("completion")))
+    )
+      usageReportCount += 1;
     const reasoning = reported["reasoningTokens"];
     if (typeof reasoning === "number" && Number.isFinite(reasoning) && reasoning >= 0) {
       reasoningTokens += reasoning;
@@ -3970,10 +4041,10 @@ function summarizeUsageRecords(
     else if (reported["costStatus"] === "included") includedCostCallCount += 1;
     else unknownCostCallCount += 1;
   }
-  const unknownCostRecordCount = unknownCostCallCount + baselines.length;
+  const unknownCostRecordCount = unknownCostCallCount;
   const pricedKinds = Number(estimatedCostCallCount > 0) + Number(includedCostCallCount > 0);
   const costStatus =
-    calls.length === 0 && baselines.length === 0
+    calls.length === 0
       ? "none"
       : unknownCostRecordCount > 0 || pricedKinds > 1
         ? estimatedCostCallCount > 0 || includedCostCallCount > 0
@@ -3985,9 +4056,7 @@ function summarizeUsageRecords(
   return {
     providerCallCount: calls.length,
     usageReportCount,
-    baselineCount: baselines.length,
     providerCalls: { ...providerCalls },
-    baselines: { ...baselineTotals },
     total: {
       ...total,
       costCNY: total.cost,
@@ -4003,9 +4072,7 @@ function summarizeUsageRecords(
   };
 }
 
-function sumUsage(
-  records: readonly (ProviderCallRecord | UsageBaselineRecord)[],
-): UsageLedgerTotals {
+function sumUsage(records: readonly ProviderCallRecord[]): UsageLedgerTotals {
   return records.reduce<UsageLedgerTotals>(
     (total, record) => ({
       inputTokens: total.inputTokens + record.inputTokens,
@@ -4016,16 +4083,6 @@ function sumUsage(
     }),
     emptyUsage(),
   );
-}
-
-function addUsage(left: UsageLedgerTotals, right: UsageLedgerTotals): UsageLedgerTotals {
-  return {
-    inputTokens: left.inputTokens + right.inputTokens,
-    outputTokens: left.outputTokens + right.outputTokens,
-    cacheReadTokens: left.cacheReadTokens + right.cacheReadTokens,
-    cacheWriteTokens: left.cacheWriteTokens + right.cacheWriteTokens,
-    cost: left.cost + right.cost,
-  };
 }
 
 function emptyUsage(): UsageLedgerTotals {

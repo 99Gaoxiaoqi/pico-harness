@@ -1,5 +1,6 @@
 import type { ToolResultEnvelope } from "./tool-result.js";
 import type { CanonicalTranscriptToolStart } from "./transcript-tool-start.js";
+import type { ModelCommunicationCategory, ModelResponseDiagnostic } from "./provider-errors.js";
 
 export type SubagentActivityStatus =
   | "queued"
@@ -11,6 +12,20 @@ export type SubagentActivityStatus =
   | "cancelled";
 
 export type AssistantResponseSuppressionReason = "internal-control" | "network-retry";
+
+/** Safe, bounded model retry progress. Never carries remote error text or request content. */
+export interface ProviderRetryNotice {
+  readonly phase: "scheduled" | "started";
+  readonly failedAttempt: number;
+  readonly nextAttempt: number;
+  readonly maxAttempts: number;
+  readonly delayMs: number;
+  readonly failureStatus: "timed_out" | "cancelled" | "error";
+  readonly errorCategory?: ModelCommunicationCategory;
+  readonly httpStatus?: number;
+  readonly transportCode?: ModelResponseDiagnostic["transportCode"];
+  readonly diagnosticId?: string;
+}
 
 /** 宿主可见的子代理活动快照；activityId 只用于更新同一张卡片。 */
 export interface SubagentActivityEvent {
@@ -84,4 +99,5 @@ export interface Reporter {
   onTextDelta?(delta: string): void;
   onReasoningDelta?(delta: string): void;
   onAssistantResponseSuppressed?(reason: AssistantResponseSuppressionReason): void;
+  onProviderRetry?(notice: ProviderRetryNotice): void;
 }

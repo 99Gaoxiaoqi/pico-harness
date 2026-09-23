@@ -4,7 +4,7 @@ import { decodeExecutionBoundary, type ExecutionBoundary } from "./permission-pr
 export const SESSION_RUNTIME_STATE_VERSION = 3 as const;
 export type SessionRuntimeStateVersion = typeof SESSION_RUNTIME_STATE_VERSION;
 
-export type PersistedCollaborationMode = "agent" | "plan";
+export type PersistedCollaborationMode = "agent" | "plan" | "research";
 export type PersistedPermissionMode = "ask" | "auto" | "full-access";
 export type PersistedProviderKind = "openai" | "claude" | "responses";
 export type PersistedCostStatus = "estimated" | "included" | "unknown";
@@ -300,7 +300,11 @@ function normalizePersistedSessionSettings(value: unknown): PersistedSessionSett
   if (!isProviderKind(provider) || typeof model !== "string" || model.trim().length === 0) {
     return undefined;
   }
-  if (collaborationMode !== "agent" && collaborationMode !== "plan") {
+  if (
+    collaborationMode !== "agent" &&
+    collaborationMode !== "plan" &&
+    collaborationMode !== "research"
+  ) {
     return undefined;
   }
   if (!isNonPlanMode(permissionMode)) return undefined;

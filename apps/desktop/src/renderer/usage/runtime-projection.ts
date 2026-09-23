@@ -44,7 +44,6 @@ export function parseUsage(value: unknown): UsageView {
         : undefined,
     providerCallCount: optionalNumberValue(usage.providerCallCount),
     usageReportCount: optionalNumberValue(usage.usageReportCount),
-    baselineCount: optionalNumberValue(usage.baselineCount),
     scope:
       usage.scope === "all" || usage.scope === "workspace" || usage.scope === "session"
         ? usage.scope

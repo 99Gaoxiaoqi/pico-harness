@@ -25,7 +25,9 @@ export interface UsageProviderCallRecord {
         readonly usageMetadata?: string | undefined;
         readonly reportedFields?: readonly string[] | undefined;
         readonly costStatus?: string | undefined;
+        readonly costUnknownReason?: string | undefined;
         readonly latencyMs?: number | undefined;
+        readonly lifecycleStatus?: string | undefined;
       }
     | undefined;
 }
@@ -145,10 +147,14 @@ export async function buildUsageDashboard(
       knownCacheReadTokens += call.cacheReadTokens;
       knownCacheWriteTokens += call.cacheWriteTokens;
       const reportedFields = call.reported?.["reportedFields"];
-      if (call.reported?.["usageMetadata"] === "reported" && Array.isArray(reportedFields)) {
-        if (reportedFields.includes("cacheRead")) cacheReadReportedCallCount++;
-        if (reportedFields.includes("cacheWrite")) cacheWriteReportedCallCount++;
-      }
+      const cacheReadReported =
+        call.reported?.usageMetadata === "reported" &&
+        reportedFields?.includes("cacheRead") === true;
+      const cacheWriteReported =
+        call.reported?.usageMetadata === "reported" &&
+        reportedFields?.includes("cacheWrite") === true;
+      if (cacheReadReported) cacheReadReportedCallCount++;
+      if (cacheWriteReported) cacheWriteReportedCallCount++;
       const costStatus =
         call.reported?.["costStatus"] === "estimated"
           ? "estimated"
@@ -169,14 +175,27 @@ export async function buildUsageDashboard(
           ? { sessionTitle: titles.get(call.sessionId)! }
           : {}),
         at: call.createdAt,
-        status: activityStatus(call.status),
+        status:
+          call.reported?.lifecycleStatus === "prepared" ||
+          call.reported?.lifecycleStatus === "observed"
+            ? "running"
+            : activityStatus(call.status),
         inputTokens: call.inputTokens + call.cacheReadTokens + call.cacheWriteTokens,
         outputTokens: call.outputTokens,
         cacheReadTokens: call.cacheReadTokens,
         cacheWriteTokens: call.cacheWriteTokens,
+        cacheReadReported,
+        cacheWriteReported,
         totalTokens:
           call.inputTokens + call.cacheReadTokens + call.cacheWriteTokens + call.outputTokens,
         costStatus,
+        ...(costStatus === "unknown"
+          ? {
+              costUnknownReason:
+                call.reported?.costUnknownReason ??
+                "请求记录未保存可用定价或完整用量，未按当前价格回填",
+            }
+          : {}),
         ...(costStatus !== "unknown" ? { costCNY: call.cost } : {}),
         ...(typeof latency === "number" && Number.isFinite(latency) && latency >= 0
           ? { durationMs: latency }

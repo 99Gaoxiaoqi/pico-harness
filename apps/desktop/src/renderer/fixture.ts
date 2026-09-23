@@ -9,6 +9,7 @@ const previewSessionKey = workspaceSessionKey({
 });
 
 export const previewData: AppData = {
+  providerRetries: {},
   workspaces: [
     {
       path: previewWorkspacePath,
@@ -387,7 +388,6 @@ export const previewData: AppData = {
     costStatus: "estimated",
     providerCallCount: 42,
     usageReportCount: 42,
-    baselineCount: 0,
     scope: "all",
     period: "本月",
   },

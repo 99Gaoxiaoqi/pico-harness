@@ -158,7 +158,7 @@ async function createPinnedSessionRuntime<Command>(
   const goalManager = new GoalManager();
   const unbindGoalManager = session.bindGoalManager(goalManager);
   const persistedPlanMode =
-    session.getRuntimeStateSnapshot().settings?.collaborationMode === "plan";
+    (session.getRuntimeStateSnapshot().settings?.collaborationMode ?? "agent") !== "agent";
   const codeIntelligenceEnabled = options.lspEnabled ?? !persistedPlanMode;
   const codeIntelligenceManager = new CodeIntelligenceManager({
     rootDir: workDir,
@@ -188,7 +188,7 @@ async function createPinnedSessionRuntime<Command>(
     });
   });
   const hookRuntime =
-    options.hooks === false || options.hookService
+    persistedPlanMode || options.hooks === false || options.hookService
       ? undefined
       : await createSessionHookRuntime<Command>({
           logger,
@@ -231,7 +231,7 @@ async function createPinnedSessionRuntime<Command>(
     releaseSessionPin,
     sessionStartSource: options.sessionStartSource ?? "startup",
     ...(hookRuntime ? { hookRuntime } : {}),
-    ...(options.hookService ? { hookService: options.hookService } : {}),
+    ...(!persistedPlanMode && options.hookService ? { hookService: options.hookService } : {}),
     ...(options.processSandbox ? { processSandbox: options.processSandbox } : {}),
   });
 }

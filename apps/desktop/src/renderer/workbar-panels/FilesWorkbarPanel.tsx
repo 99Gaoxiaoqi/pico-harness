@@ -1,4 +1,16 @@
-import { CircleAlert, Download, ExternalLink, File, FileText, RefreshCw } from "lucide-react";
+import { useEffect, useRef } from "react";
+import {
+  ArrowLeft,
+  CircleAlert,
+  Download,
+  ExternalLink,
+  File,
+  FileText,
+  MoreHorizontal,
+  RefreshCw,
+} from "lucide-react";
+import { ArtifactPreview } from "./ArtifactPreview.js";
+import { artifactPreviewKind, artifactPreviewLimit } from "./artifact-preview-model.js";
 
 export interface WorkbarArtifact {
   readonly id: string;
@@ -36,10 +48,13 @@ export interface FilesWorkbarPanelProps {
   readonly contentLoading?: boolean;
   readonly error?: string | null;
   readonly contentError?: string | null;
+  readonly notice?: string | null;
   readonly onRefresh: () => void;
   readonly onSelectArtifact: (artifactId: string) => void;
+  readonly onBack: () => void;
   readonly onLoadChunk: (artifactId: string, offset: number) => void;
   readonly onOpenArtifact?: (artifactId: string) => void;
+  readonly onOpenDefaultApp?: (artifactId: string) => void;
   readonly onSaveArtifactAs?: (artifactId: string) => void;
 }
 
@@ -63,15 +78,38 @@ export function FilesWorkbarPanel({
   contentLoading = false,
   error,
   contentError,
+  notice,
   onRefresh,
   onSelectArtifact,
+  onBack,
   onLoadChunk,
   onOpenArtifact,
+  onOpenDefaultApp,
   onSaveArtifactAs,
 }: FilesWorkbarPanelProps) {
   const selected = artifacts.find((artifact) => artifact.id === selectedArtifactId);
   const selectedContent = content?.artifactId === selected?.id ? content : undefined;
   const progress = selectedContent ? artifactChunkProgress(selectedContent) : undefined;
+  const backRef = useRef<HTMLButtonElement>(null);
+  const refreshRef = useRef<HTMLButtonElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const previousSelectionRef = useRef<string | undefined>(undefined);
+
+  useEffect(() => {
+    if (selected) {
+      backRef.current?.focus();
+    } else if (previousSelectionRef.current) {
+      const previous = previousSelectionRef.current;
+      (
+        Array.from(listRef.current?.querySelectorAll<HTMLButtonElement>("li > button") ?? []).find(
+          (button) => button.dataset.artifactId === previous,
+        ) ??
+        listRef.current?.querySelector<HTMLButtonElement>("li > button") ??
+        refreshRef.current
+      )?.focus();
+    }
+    previousSelectionRef.current = selected?.id;
+  }, [selected?.id]);
 
   return (
     <section className="tool-panel tool-panel--files" aria-label="生成文件">
@@ -81,6 +119,7 @@ export function FilesWorkbarPanel({
           <strong>生成文件</strong>
         </div>
         <button
+          ref={refreshRef}
           type="button"
           className="tool-panel__icon-button"
           aria-label="刷新生成文件"
@@ -98,94 +137,85 @@ export function FilesWorkbarPanel({
         </p>
       )}
 
-      <div className="tool-panel__split" aria-busy={loading}>
-        <div className="tool-panel__sidebar" aria-label="产物列表">
-          {loading && artifacts.length === 0 ? (
-            <p className="tool-panel__state" role="status">
-              正在加载生成文件…
-            </p>
-          ) : artifacts.length === 0 ? (
-            <div className="tool-panel__state">
-              <File aria-hidden="true" size={20} />
-              <strong>没有生成文件</strong>
-              <span>当前任务生成的产物会显示在这里。</span>
-            </div>
-          ) : (
-            <ul className="tool-panel__artifact-list">
-              {artifacts.map((artifact) => (
-                <li key={artifact.id}>
-                  <button
-                    type="button"
-                    aria-pressed={artifact.id === selectedArtifactId}
-                    onClick={() => onSelectArtifact(artifact.id)}
-                  >
-                    <FileText aria-hidden="true" size={15} />
-                    <span>
-                      <strong title={artifact.name}>{artifact.name}</strong>
-                      <small>
-                        {formatBytes(artifact.size)} · {formatArtifactTimestamp(artifact.createdAt)}
-                      </small>
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-
-        <div className="tool-panel__detail">
-          {!selected ? (
-            <p className="tool-panel__state">选择一个生成文件查看内容。</p>
-          ) : (
-            <section className="tool-panel__artifact" aria-label={`${selected.name} 内容`}>
-              <header>
-                <div>
-                  <strong title={selected.name}>{selected.name}</strong>
-                  <span>
-                    {selected.mimeType} · {formatBytes(selected.size)}
-                  </span>
-                </div>
-                <div>
-                  {onOpenArtifact && (
-                    <button
-                      type="button"
-                      aria-label="打开生成文件位置"
-                      title="打开生成文件位置"
-                      onClick={() => onOpenArtifact(selected.id)}
-                    >
-                      <ExternalLink aria-hidden="true" size={14} />
-                    </button>
-                  )}
-                  {onSaveArtifactAs && (
-                    <button
-                      type="button"
-                      aria-label="另存生成文件"
-                      title="另存生成文件"
-                      onClick={() => onSaveArtifactAs(selected.id)}
-                    >
-                      <Download aria-hidden="true" size={14} />
-                    </button>
-                  )}
-                </div>
-              </header>
-              {contentError ? (
-                <p className="tool-panel__error" role="alert">
-                  {contentError}
-                </p>
-              ) : contentLoading && !selectedContent ? (
-                <p className="tool-panel__state" role="status">
-                  正在读取文件内容…
-                </p>
-              ) : !selectedContent ? (
-                <p className="tool-panel__state">内容尚未加载。</p>
-              ) : selectedContent.encoding !== "utf8" ? (
-                <p className="tool-panel__state">二进制文件不能在此预览，请打开或另存后查看。</p>
-              ) : (
-                <>
-                  <pre className="tool-panel__artifact-content" tabIndex={0}>
-                    {selectedContent.content}
-                  </pre>
-                  {progress && !progress.complete && (
+      {selected ? (
+        <div
+          className="tool-panel__preview-page"
+          aria-busy={contentLoading}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") {
+              event.stopPropagation();
+              onBack();
+            }
+          }}
+        >
+          <section className="tool-panel__artifact" aria-label={`${selected.name} 内容`}>
+            <header>
+              <button
+                ref={backRef}
+                type="button"
+                className="tool-panel__back"
+                onClick={onBack}
+                aria-label="返回生成文件列表"
+              >
+                <ArrowLeft aria-hidden="true" size={16} />
+                返回
+              </button>
+              <div className="tool-panel__artifact-title">
+                <strong title={selected.name}>{selected.name}</strong>
+                <span>
+                  {selected.mimeType} · {formatBytes(selected.size)}
+                </span>
+              </div>
+              {(onOpenArtifact ||
+                onSaveArtifactAs ||
+                (artifactPreviewKind(selected) === "html" && onOpenDefaultApp)) && (
+                <details className="tool-panel__artifact-actions">
+                  <summary aria-label="生成文件操作" title="生成文件操作">
+                    <MoreHorizontal aria-hidden="true" size={16} />
+                  </summary>
+                  <div role="group" aria-label="生成文件操作">
+                    {artifactPreviewKind(selected) === "html" && onOpenDefaultApp && (
+                      <button type="button" onClick={() => onOpenDefaultApp(selected.id)}>
+                        用默认应用打开
+                      </button>
+                    )}
+                    {onOpenArtifact && (
+                      <button type="button" onClick={() => onOpenArtifact(selected.id)}>
+                        <ExternalLink aria-hidden="true" size={14} />
+                        在访达中显示
+                      </button>
+                    )}
+                    {onSaveArtifactAs && (
+                      <button type="button" onClick={() => onSaveArtifactAs(selected.id)}>
+                        <Download aria-hidden="true" size={14} />
+                        另存生成文件
+                      </button>
+                    )}
+                  </div>
+                </details>
+              )}
+            </header>
+            {contentError ? (
+              <p className="tool-panel__error" role="alert">
+                {contentError}
+              </p>
+            ) : contentLoading && !selectedContent ? (
+              <p className="tool-panel__state" role="status">
+                正在读取文件内容…
+              </p>
+            ) : !selectedContent ? (
+              <p className="tool-panel__state">内容尚未加载。</p>
+            ) : (
+              <>
+                <ArtifactPreview
+                  key={selected.id}
+                  artifact={selected}
+                  content={selectedContent}
+                  onEscape={onBack}
+                />
+                {progress &&
+                  !progress.complete &&
+                  progress.nextOffset < artifactPreviewLimit(selected) && (
                     <div className="tool-panel__chunk-footer">
                       <div
                         className="tool-panel__progress"
@@ -206,15 +236,65 @@ export function FilesWorkbarPanel({
                       </button>
                     </div>
                   )}
-                  {(selectedContent.truncated || (progress && !progress.complete)) && (
-                    <p className="tool-panel__notice">当前仅显示已读取的分块内容。</p>
-                  )}
-                </>
-              )}
-            </section>
+                {(selectedContent.truncated || (progress && !progress.complete)) && (
+                  <p className="tool-panel__notice">
+                    {selectedContent.nextOffset >= artifactPreviewLimit(selected)
+                      ? "已达到内嵌预览上限，请另存后查看完整文件。"
+                      : "当前仅显示已读取的分块内容。"}
+                  </p>
+                )}
+              </>
+            )}
+          </section>
+        </div>
+      ) : (
+        <div
+          ref={listRef}
+          className="tool-panel__files-list-page"
+          aria-label="产物列表"
+          aria-busy={loading}
+        >
+          {notice && (
+            <p className="tool-panel__notice" role="status">
+              {notice}
+            </p>
+          )}
+          {loading && artifacts.length === 0 ? (
+            <p className="tool-panel__state" role="status">
+              正在加载生成文件…
+            </p>
+          ) : artifacts.length === 0 ? (
+            <div className="tool-panel__state">
+              <File aria-hidden="true" size={20} />
+              <strong>没有生成文件</strong>
+              <span>当前任务生成的产物会显示在这里。</span>
+            </div>
+          ) : (
+            <ul className="tool-panel__artifact-list">
+              {artifacts.map((artifact) => (
+                <li key={artifact.id}>
+                  <button
+                    type="button"
+                    data-artifact-id={artifact.id}
+                    onClick={() => onSelectArtifact(artifact.id)}
+                  >
+                    <FileText aria-hidden="true" size={15} />
+                    <span>
+                      <strong title={artifact.name}>{artifact.name}</strong>
+                      <small>
+                        {formatBytes(artifact.size)} · {formatArtifactTimestamp(artifact.createdAt)}
+                      </small>
+                      {artifactPreviewKind(artifact) === "html" && (
+                        <small className="tool-panel__artifact-hint">在 Pico 中查看</small>
+                      )}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
           )}
         </div>
-      </div>
+      )}
     </section>
   );
 }

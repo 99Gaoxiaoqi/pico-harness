@@ -239,7 +239,7 @@ export const runtimeSessionSettingsResult = exactResultShape(
     provider: resultOneOf(["openai", "claude", "responses"]),
     model: resultString,
     modelRouteId: resultString,
-    collaborationMode: resultOneOf(["agent", "plan"]),
+    collaborationMode: resultOneOf(["agent", "plan", "research"]),
     orchestrationMode: resultOneOf(["default", "graph", "swarm"]),
     permissionMode: resultOneOf(["ask", "auto", "full-access"]),
     thinkingEffort: resultString,

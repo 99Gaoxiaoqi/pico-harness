@@ -85,7 +85,8 @@ export function getPricingEntry(
 ): PricingEntry | null {
   if (route.billingMode === "subscription_included") return INCLUDED_PRICING;
   if (Object.hasOwn(route, "pricing")) return route.pricing ?? null;
-  if (route.baseUrl && catalogPricing) return catalogPricing(route);
+  // An explicit endpoint is a distinct billing route; a model name alone cannot price it.
+  if (route.baseUrl !== undefined) return catalogPricing?.(route) ?? null;
   return OFFICIAL_PRICING[normalizeModelName(route.model)] ?? null;
 }
 

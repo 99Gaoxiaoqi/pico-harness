@@ -1,4 +1,4 @@
-import type { ToolResultEnvelope } from "@pico/core";
+import type { ProviderRetryNotice, ToolResultEnvelope } from "@pico/core";
 
 export type AssistantResponseSuppressionReason = "internal-control" | "network-retry";
 
@@ -216,6 +216,21 @@ export class DesktopReporter {
   onAssistantResponseSuppressed(reason: AssistantResponseSuppressionReason): void {
     this.onThinkingEnd();
     this.emit("assistant.suppressed", { reason, turn: this.turn });
+  }
+
+  onProviderRetry(notice: ProviderRetryNotice): void {
+    this.emit("provider.retry", {
+      phase: notice.phase,
+      failedAttempt: notice.failedAttempt,
+      nextAttempt: notice.nextAttempt,
+      maxAttempts: notice.maxAttempts,
+      delayMs: notice.delayMs,
+      failureStatus: notice.failureStatus,
+      ...(notice.errorCategory ? { errorCategory: notice.errorCategory } : {}),
+      ...(notice.httpStatus !== undefined ? { httpStatus: notice.httpStatus } : {}),
+      ...(notice.transportCode ? { transportCode: notice.transportCode } : {}),
+      ...(notice.diagnosticId ? { diagnosticId: notice.diagnosticId } : {}),
+    });
   }
 
   onFinish(): void {

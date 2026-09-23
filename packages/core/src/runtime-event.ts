@@ -1,3 +1,4 @@
+import type { ProviderPhysicalAttempt } from "./provider-interface.js";
 import type { Message, Usage } from "./message.js";
 import type {
   PlanGraphBinding,
@@ -117,6 +118,25 @@ export interface RuntimeToolResultRecordedEvent extends RuntimeEventBase {
   };
 }
 
+/** Durable change to model visibility; original tool result remains immutable. */
+export interface RuntimeToolResultProjectionRecordedEvent extends RuntimeEventBase {
+  readonly kind: "tool.result.projection.recorded";
+  readonly refs: RuntimeEventRefs & { readonly toolCallId: string };
+  readonly data: {
+    readonly sourceEventId: string;
+    readonly sourceProjectionSha256: string;
+    readonly projection: RuntimeToolResultProjection;
+    readonly reason:
+      | "stale"
+      | "active_large"
+      | "exact_duplicate"
+      | "newer_read_covers_range"
+      | "newer_snapshot"
+      | "failure_resolved";
+    readonly supersededByToolCallId?: string;
+  };
+}
+
 export type RuntimeAgentOutputStatus = "success" | "failure";
 
 export interface RuntimeAgentOutputPayload {
@@ -161,6 +181,8 @@ export interface RuntimeModelCallStartedEvent extends RuntimeEventBase {
   readonly kind: "model.call.started";
   readonly data: {
     readonly providerCallId: string;
+    readonly logicalCallId?: string;
+    readonly retryAttempt?: number;
     readonly provider?: string;
     readonly model?: string;
     readonly purpose: string;
@@ -171,6 +193,11 @@ export interface RuntimeModelCallSettledEvent extends RuntimeEventBase {
   readonly kind: "model.call.settled";
   readonly data: {
     readonly providerCallId: string;
+    readonly logicalCallId?: string;
+    readonly retryAttempt?: number;
+    /** Settled facts only: a crash before this event leaves the started call incomplete. */
+    readonly attempts?: readonly ProviderPhysicalAttempt[];
+    readonly attemptCoverage?: "complete" | "partial";
     readonly status: "succeeded" | "failed" | "cancelled";
     readonly latencyMs: number;
     readonly usage?: Usage;
@@ -379,6 +406,7 @@ export type RuntimeEvent<TTranscriptEvent = unknown> =
   | RuntimeToolGroupLoadedEvent
   | RuntimeToolRecoveryResolvedEvent
   | RuntimeToolResultRecordedEvent
+  | RuntimeToolResultProjectionRecordedEvent
   | RuntimeAgentOutputEvent
   | RuntimeApprovalRequestedEvent
   | RuntimeApprovalSettledEvent

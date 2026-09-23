@@ -29,11 +29,11 @@
 class AgentEngine {
   constructor(opts: AgentEngineOptions);
   async run(session: Session, runtimeReporter?, runtimeTracer?): Promise<Message[]>;
-  async runSub(taskPrompt, readOnlyRegistry, reporter?, opts?): Promise<SubagentResult>; // 子代理
-  exitPlanMode(): void; // 审批通过后退出 Plan Mode
   setSteerQueue(q: SteerQueue): void; // host 后注入
 }
 ```
+
+配置子代理与 Hook verifier 使用独立 Session 和同一个 `AgentEngine.run()`；不再提供独立子代理字符裁剪入口。当前上下文事实与验收见[上下文体系](../features/context-compaction.md)。
 
 ### `run()` 主循环完整流程
 
@@ -53,7 +53,7 @@ class AgentEngine {
 │   contextHistory = [systemPrompt, ...modelContext]               │
 ├─────────────────────────────────────────────────────────────────┤
 │ 步骤 2: token 水位整理                                           │
-│   < 85%: 原样发送；超水位:旧 ToolResult 投影 → FullCompaction     │
+│   已提交工具投影 → checkpoint 重放；主动条件只看真实用量与声明窗口 │
 │   切分仅落在完整 toolCalls/results 批次之外                       │
 ├─────────────────────────────────────────────────────────────────┤
 │ 步骤 2.5: Steer A 点(peek 不 drain)                               │
@@ -94,9 +94,9 @@ class AgentEngine {
 ```
 generateWithOverflowRetry (主 Agent)
   ├─ attempt 0: 完整安全投影
-  ├─ Provider overflow:更紧 token 目标 FullCompaction 一次
-  ├─ attempt 1: 用“摘要 + 完整安全尾部”重试
-  └─ 仍失败 → 明确诊断静态提示/当前请求/工具 Schema，再硬重置
+  ├─ 真实 overflow：无可观察输出、有步骤预算且 send 未尝试压缩才恢复
+  ├─ 先省略合适的历史工具图片，否则生成并持久化安全前缀摘要
+  └─ 恢复一次后仍失败则上报；不隐式裁剪，不硬重置
       │
       ▼
 generateWithRetry (内层:普通重试)
@@ -105,15 +105,14 @@ generateWithRetry (内层:普通重试)
   └─ ContextOverflowError → 不重试(冒泡到外层)
 ```
 
-### 关键常量
+主动条件为 `I + O + min(2O, 8000) >= 用户声明窗口`。一次 send 共享一次尝试标记；成功步骤不重置。
 
-| 常量                                 | 值   | 作用              |
-| ------------------------------------ | ---- | ----------------- |
-| `DEFAULT_AUTO_COMPACT_TRIGGER_RATIO` | 0.85 | 主动整理输入水位  |
-| `DEFAULT_RETAINED_CONTEXT_RATIO`     | 0.20 | 主动摘要尾部目标  |
-| `EMERGENCY_RETAINED_CONTEXT_RATIO`   | 0.10 | overflow 紧急目标 |
-| `MAX_TOOL_CONCURRENCY`               | 8    | 工具并发上限      |
-| `maxTurns` 默认                      | 50   | 主循环兜底        |
+### 其他执行预算
+
+| 常量                   | 值  | 作用         |
+| ---------------------- | --- | ------------ |
+| `MAX_TOOL_CONCURRENCY` | 8   | 工具并发上限 |
+| `maxTurns` 默认        | 50  | 主循环兜底   |
 
 ---
 

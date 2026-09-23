@@ -36,10 +36,13 @@ async function mkTestDir(prefix: string): Promise<string> {
   return mkdtemp(join(TEST_ROOT, prefix));
 }
 
+function validSummary(content: string): string {
+  return `## Goal\n${content}\n## Progress\n### Done\n已检查文件。\n### In Progress\n继续验证。\n## Key Decisions\n保留事实。\n## Next Steps\n完成验证。\n## Critical Context\n- 文件 src/test.ts、a.ts。`;
+}
 function mockProvider(content: string): LLMProvider {
   return {
     async generate() {
-      return { role: "assistant", content };
+      return { role: "assistant", content: validSummary(content) };
     },
   };
 }
@@ -130,6 +133,21 @@ test("Runtime checkpoint 使用内容哈希 digest 且重放校验通过", async
   // 重放校验通过(内容未变)
   const modelHistory = materializeRuntimeHistory(events);
   assert.ok(modelHistory.length < originalHistory.length, "压缩后 history 应更短");
+  const malformedEvents = events.map((event) =>
+    event.kind === "context.checkpoint.recorded"
+      ? {
+          ...event,
+          data: {
+            ...event.data,
+            summary: {
+              ...event.data.summary,
+              content: "<pico_compaction_summary>broken</pico_compaction_summary>",
+            },
+          },
+        }
+      : event,
+  );
+  assert.throws(() => materializeRuntimeHistory(malformedEvents), /invalid sectioned summary/);
 });
 
 test("滚动摘要:连续两次压缩,第二个 checkpoint 带 previousCheckpointId 指向第一个", async (t) => {
@@ -161,7 +179,7 @@ test("滚动摘要:连续两次压缩,第二个 checkpoint 带 previousCheckpoin
       callCount++;
       return {
         role: "assistant",
-        content: `## 任务目标\n压缩摘要 #${callCount}\n\n## 关键上下文\n- 文件 src/test.ts`,
+        content: validSummary(`压缩摘要 #${callCount}`),
       };
     },
   };
@@ -263,7 +281,7 @@ test("findLastCompactionCheckpoint 返回上一个 checkpoint 的摘要正文", 
       session,
       runtimeRun: run1,
       compactor: new FullCompactor({
-        provider: mockProvider("## 任务目标\nfindLast 测试\n\n## 关键上下文\n- 文件 a.ts"),
+        provider: mockProvider("findLast 测试"),
         maxAttempts: 1,
       }),
       request: { inputBudgetTokens: 4_000, targetRetainedTokens: 1, trigger: "manual" },
@@ -312,7 +330,7 @@ test("findLastCompactionCheckpoint:末条为 hard-reset checkpoint 时增量基�
       session,
       runtimeRun: compactRun,
       compactor: new FullCompactor({
-        provider: mockProvider("## 任务目标\nhard-reset 基线\n\n## 关键上下文\n- 文件 a.ts"),
+        provider: mockProvider("hard-reset 基线"),
         maxAttempts: 1,
       }),
       request: { inputBudgetTokens: 4_000, targetRetainedTokens: 1, trigger: "manual" },

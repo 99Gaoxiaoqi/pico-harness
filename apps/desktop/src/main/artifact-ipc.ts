@@ -16,8 +16,12 @@ export function registerArtifactIpcHandlers(options: {
       return result.canceled ? undefined : result.filePath;
     },
     revealFile: (path) => shell.showItemInFolder(path),
+    openDefaultApp: async (path) => {
+      const error = await shell.openPath(path);
+      if (error) throw new Error(error);
+    },
   });
-  for (const action of ["open", "saveAs"] as const) {
+  for (const action of ["open", "openInDefaultApp", "saveAs"] as const) {
     options.ipcMain.handle(
       DESKTOP_ARTIFACT_CHANNELS[action],
       async (event, value: unknown): Promise<DesktopResult<void>> => {

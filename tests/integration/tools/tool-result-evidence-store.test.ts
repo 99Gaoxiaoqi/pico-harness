@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
 import {
   mkdir,
   mkdtemp,
@@ -17,236 +16,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
-import { DatabaseSync } from "node:sqlite";
-import {
-  EvidenceArchive,
-  formatEvidenceUri,
-  MAX_EVIDENCE_PAGE_LIMIT_BYTES,
-  parseEvidenceUri,
-  type RuntimeToolResultEvidenceManifestV2,
-  type SubagentReportEvidenceManifestV2,
-} from "@pico/storage/evidence-archive";
 import { EvidenceBlobStore } from "@pico/storage/evidence-blob-store";
-import { buildDefaultToolRegistry } from "@pico/pico-host/default-registry";
-import {
-  seedRuntimeToolExchange,
-  seedSubagentReportEvidence,
-} from "../helpers/legacy-evidence-fixture.js";
-
-interface EvidenceFixture {
-  readonly root: string;
-  readonly evidenceRoot: string;
-  readonly archive: EvidenceArchive;
-}
-
-test("Runtime Evidence v2 stores one immutable blob and no inline raw copy", async (context) => {
-  const fixture = await evidenceFixture(context, "pico-evidence-v2-");
-  const canary = `canary-${"raw-body-".repeat(2_000)}`;
-  const first = await seedRuntimeToolExchange({
-    evidenceRoot: fixture.evidenceRoot,
-    sessionId: "session/one",
-    toolCallId: "call-1",
-    toolName: "bash",
-    rawArguments: '{"cmd":"fixture"}',
-    rawOutput: canary,
-    isError: false,
-  });
-  const second = await seedRuntimeToolExchange({
-    evidenceRoot: fixture.evidenceRoot,
-    sessionId: "session/one",
-    toolCallId: "call-2",
-    toolName: "grep",
-    rawArguments: '{"pattern":"fixture"}',
-    rawOutput: canary,
-    isError: false,
-  });
-
-  const firstManifest = await fixture.archive.readRuntimeToolExchange(first);
-  const secondManifest = await fixture.archive.readRuntimeToolExchange(second);
-  assert.equal(firstManifest.schemaVersion, 2);
-  assert.equal(secondManifest.schemaVersion, 2);
-  assert.deepEqual(firstManifest.content.rawOutput, secondManifest.content.rawOutput);
-  assert.equal(await fixture.archive.readRuntimeToolOutput(first), canary);
-  assert.equal(await fixture.archive.readRuntimeToolOutput(second), canary);
-
-  // 票 08:清单进 evidence_records 行,清单 JSON 文件不再产生;raw 正文只存
-  // 一份 immutable blob(清单行内不得出现 canary)。
-  const manifestPath = pathForManifest(fixture.evidenceRoot, first);
-  assert.equal(existsSync(manifestPath), false);
-  const recordRow = readEvidenceRecordRow(fixture, first);
-  assert.doesNotMatch(recordRow.content_json, /canary-/u);
-  assert.doesNotMatch(recordRow.content_json, /modelVisibleOutput/u);
-  const v2Manifest = firstManifest as RuntimeToolResultEvidenceManifestV2;
-  const blobPath = pathForBlob(fixture.evidenceRoot, v2Manifest.content.rawOutput.digest);
-  assert.equal(await readFile(blobPath, "utf8"), canary);
-  assert.deepEqual(await readdir(join(fixture.evidenceRoot, "blobs", "sha256")), [
-    v2Manifest.content.rawOutput.digest.slice(0, 2),
-  ]);
-  assert.deepEqual(
-    await readdir(
-      join(
-        fixture.evidenceRoot,
-        "blobs",
-        "sha256",
-        v2Manifest.content.rawOutput.digest.slice(0, 2),
-      ),
-    ),
-    [v2Manifest.content.rawOutput.digest],
-  );
-  if (process.platform !== "win32") {
-    assert.equal((await stat(blobPath)).mode & 0o777, 0o600);
-    assert.equal(
-      (
-        await stat(
-          join(
-            fixture.evidenceRoot,
-            "blobs",
-            "sha256",
-            v2Manifest.content.rawOutput.digest.slice(0, 2),
-          ),
-        )
-      ).mode & 0o777,
-      0o700,
-    );
-  }
-});
-
-test("Subagent reports use the same Evidence URI reader and immutable blob CAS", async (context) => {
-  const fixture = await evidenceFixture(context, "pico-subagent-evidence-");
-  const report = `完整报告\n${"证据行\n".repeat(2_000)}`;
-  const reference = await seedSubagentReportEvidence({
-    evidenceRoot: fixture.evidenceRoot,
-    sessionId: "subagent/session",
-    taskPrompt: "核验 Evidence 硬切换",
-    report,
-    status: "partial",
-  });
-  const uri = formatEvidenceUri(reference);
-  const parsed = parseEvidenceUri(uri);
-
-  assert.deepEqual(parsed, {
-    schemaVersion: 2,
-    contentHash: reference.contentHash,
-    sessionId: reference.sessionId,
-  });
-  assert.equal(await fixture.archive.readSubagentReport(reference), report);
-  const page = await fixture.archive.readEvidencePage(parsed, { limitBytes: 17 });
-  assert.equal(page.kind, "subagent-report");
-  assert.equal(report.startsWith(page.content), true);
-  assert.equal(page.truncated, true);
-
-  const manifest = await fixture.archive.readSubagentReportEvidence(reference);
-  const typedManifest = manifest as SubagentReportEvidenceManifestV2;
-  assert.equal(typedManifest.schemaVersion, 2);
-  assert.equal(typedManifest.content.status, "partial");
-  assert.equal(
-    await readFile(pathForBlob(fixture.evidenceRoot, typedManifest.content.report.digest), "utf8"),
-    report,
-  );
-  // 票 08:清单行内不得出现报告正文;清单 JSON 文件不再产生。
-  assert.doesNotMatch(readEvidenceRecordRow(fixture, reference).content_json, /证据行/u);
-  assert.equal(existsSync(pathForManifest(fixture.evidenceRoot, reference)), false);
-});
-
-test("Runtime Evidence rejects rows whose kind column disagrees with the content", async (context) => {
-  const fixture = await evidenceFixture(context, "pico-evidence-kind-mismatch-");
-  const reference = await seedRuntimeToolExchange({
-    evidenceRoot: fixture.evidenceRoot,
-    sessionId: "kind-mismatch-session",
-    toolCallId: "call-1",
-    toolName: "bash",
-    rawArguments: "{}",
-    rawOutput: "kind mismatch canary",
-    isError: false,
-  });
-
-  // 直连库把 kind 列改写为另一类:重建 manifest 时 content.kind 与信封不匹配。
-  const database = new DatabaseSync(join(fixture.root, "pico.sqlite"));
-  try {
-    database
-      .prepare("UPDATE evidence_records SET kind = 'subagent-report' WHERE content_hash = ?")
-      .run(reference.contentHash);
-  } finally {
-    database.close();
-  }
-  await assert.rejects(
-    fixture.archive.readRuntimeToolExchange(reference),
-    /invalid content|does not match manifest/u,
-  );
-});
-
-test("Runtime Evidence rejects manifest and blob tampering", async (context) => {
-  const fixture = await evidenceFixture(context, "pico-evidence-tamper-");
-  const reference = await seedRuntimeToolExchange({
-    evidenceRoot: fixture.evidenceRoot,
-    sessionId: "tamper-session",
-    toolCallId: "call-1",
-    toolName: "bash",
-    rawArguments: "{}",
-    rawOutput: "integrity canary",
-    isError: false,
-  });
-  const manifest = await fixture.archive.readRuntimeToolExchange(reference);
-  assert.equal(manifest.schemaVersion, 2);
-  const blobPath = pathForBlob(fixture.evidenceRoot, manifest.content.rawOutput.digest);
-  await writeFile(blobPath, "x".repeat(manifest.content.rawOutput.sizeBytes), "utf8");
-  await assert.rejects(
-    fixture.archive.readRuntimeToolOutput(reference),
-    /failed integrity validation/u,
-  );
-
-  const second = await seedRuntimeToolExchange({
-    evidenceRoot: fixture.evidenceRoot,
-    sessionId: "tamper-session",
-    toolCallId: "call-2",
-    toolName: "grep",
-    rawArguments: "{}",
-    rawOutput: "separate body",
-    isError: false,
-  });
-  // 票 08:清单行篡改(直连库改写 toolName)→ 内容哈希失配 fail-closed。
-  const database = new DatabaseSync(join(fixture.root, "pico.sqlite"));
-  try {
-    const row = database
-      .prepare("SELECT content_json FROM evidence_records WHERE content_hash = ?")
-      .get(second.contentHash) as { content_json: string };
-    const content = JSON.parse(row.content_json) as { toolName: string };
-    content.toolName = "forged";
-    database
-      .prepare("UPDATE evidence_records SET content_json = ? WHERE content_hash = ?")
-      .run(JSON.stringify(content), second.contentHash);
-  } finally {
-    database.close();
-  }
-  await assert.rejects(fixture.archive.readRuntimeToolExchange(second), /content hash mismatch/u);
-});
-
-test(
-  "Runtime Evidence rejects symlink blobs",
-  { skip: process.platform === "win32" },
-  async (context) => {
-    const fixture = await evidenceFixture(context, "pico-evidence-symlink-");
-    const blobReference = await seedRuntimeToolExchange({
-      evidenceRoot: fixture.evidenceRoot,
-      sessionId: "blob-link-session",
-      toolCallId: "blob-call",
-      toolName: "bash",
-      rawArguments: "{}",
-      rawOutput: "blob symlink canary",
-      isError: false,
-    });
-    const blobManifest = await fixture.archive.readRuntimeToolExchange(blobReference);
-    assert.equal(blobManifest.schemaVersion, 2);
-    const blobPath = pathForBlob(fixture.evidenceRoot, blobManifest.content.rawOutput.digest);
-    const realBlobPath = `${blobPath}.real`;
-    await rename(blobPath, realBlobPath);
-    await symlink(realBlobPath, blobPath);
-    await assert.rejects(
-      fixture.archive.readRuntimeToolOutput(blobReference),
-      /regular non-symlink file/u,
-    );
-  },
-);
 
 test(
   "Runtime Evidence rejects symlink directory ancestors without touching their targets",
@@ -326,182 +96,46 @@ test(
   },
 );
 
-test("Runtime Evidence enforces strict UTF-8 byte page boundaries", async (context) => {
-  const fixture = await evidenceFixture(context, "pico-evidence-utf8-boundary-");
-  const rawOutput = "🙂a开";
-  const reference = await seedRuntimeToolExchange({
-    evidenceRoot: fixture.evidenceRoot,
-    sessionId: "utf8-session",
-    toolCallId: "call-1",
-    toolName: "bash",
-    rawArguments: "{}",
-    rawOutput,
-    isError: false,
-  });
-
-  // 宽容起点对齐:offsetBytes 落在多字节字符中间时回退到该字符起点而不是报错,
-  // 返回的 offsetBytes 报告对齐后的真实起点(内容零丢失、续读自洽)。
-  const aligned = await fixture.archive.readEvidencePage(reference, {
-    offsetBytes: 1,
-    limitBytes: 4,
-  });
+test("blob CAS preserves UTF-8 page boundaries and validates cached content", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-blob-pages-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const blobs = new EvidenceBlobStore(root);
+  const { ref: utf8 } = await blobs.putUtf8("🙂a开");
+  const aligned = await blobs.readPage(utf8, 1, 4);
   assert.equal(aligned.offsetBytes, 0);
-  assert.equal(aligned.content, "🙂");
-  for (const limitBytes of [1, 2, 3]) {
+  assert.equal(aligned.bytes.toString("utf8"), "🙂");
+  for (const limit of [1, 2, 3]) {
     await assert.rejects(
-      fixture.archive.readEvidencePage(reference, { limitBytes }),
+      blobs.readPage(utf8, 0, limit),
       /cannot contain the next complete UTF-8 code point/u,
     );
   }
-
-  const emoji = await fixture.archive.readEvidencePage(reference, {
-    offsetBytes: 0,
-    limitBytes: 4,
-  });
-  assert.equal(emoji.content, "🙂");
-  assert.equal(Buffer.byteLength(emoji.content, "utf8"), 4);
-  assert.equal(emoji.nextOffsetBytes, 4);
-
-  const ascii = await fixture.archive.readEvidencePage(reference, {
-    offsetBytes: 4,
-    limitBytes: 2,
-  });
-  assert.equal(ascii.content, "a");
-  assert.ok(Buffer.byteLength(ascii.content, "utf8") <= ascii.limitBytes);
-  assert.equal(ascii.nextOffsetBytes, 5);
+  assert.equal((await blobs.readPage(utf8, 4, 2)).bytes.toString("utf8"), "a");
+  const body = "a".repeat(2 * 1024 * 1024);
+  const { ref } = await blobs.putUtf8(body);
+  assert.deepEqual(await blobs.putUtf8(body), { ref, created: false });
+  const path = join(root, "blobs", "sha256", ref.digest.slice(0, 2), ref.digest);
+  const tracker = await trackFileHandleReads(context, path);
+  const reader = new EvidenceBlobStore(root);
+  assert.equal((await reader.readPage(ref, 0, 7)).bytes.toString("utf8"), "a".repeat(7));
+  assert.equal(tracker.bytesRead, body.length + 8);
+  const before = tracker.bytesRead;
+  assert.equal((await reader.readPage(ref, 7, 7)).bytes.toString("utf8"), "a".repeat(7));
+  assert.equal(tracker.bytesRead - before, 8);
+  await writeFile(path, "b".repeat(body.length), "utf8");
+  await assert.rejects(reader.readPage(ref, 14, 7), /failed integrity validation/u);
 });
 
-test("Runtime Evidence v2 validates once, reads bounded pages, and invalidates cache", async (context) => {
-  const fixture = await evidenceFixture(context, "pico-evidence-page-cache-");
-  const rawOutput = "a".repeat(2 * 1024 * 1024);
-  const reference = await seedRuntimeToolExchange({
-    evidenceRoot: fixture.evidenceRoot,
-    sessionId: "page-cache-session",
-    toolCallId: "call-1",
-    toolName: "read_file",
-    rawArguments: "{}",
-    rawOutput,
-    isError: false,
-  });
-  const manifest = await fixture.archive.readRuntimeToolExchange(reference);
-  assert.equal(manifest.schemaVersion, 2);
-  const blobPath = pathForBlob(fixture.evidenceRoot, manifest.content.rawOutput.digest);
-  const tracker = await trackFileHandleReads(context, blobPath);
-  const reader = new EvidenceArchive({ baseDir: fixture.evidenceRoot });
-
-  const beforeFirst = tracker.bytesRead;
-  const first = await reader.readEvidencePage(reference, {
-    offsetBytes: 0,
-    limitBytes: 7,
-  });
-  const firstReadBytes = tracker.bytesRead - beforeFirst;
-  assert.equal(first.content, "a".repeat(7));
-  assert.equal(firstReadBytes, rawOutput.length + 8);
-
-  const beforeSecond = tracker.bytesRead;
-  const second = await reader.readEvidencePage(reference, {
-    offsetBytes: 7,
-    limitBytes: 7,
-  });
-  const secondReadBytes = tracker.bytesRead - beforeSecond;
-  assert.equal(second.content, "a".repeat(7));
-  assert.equal(secondReadBytes, 8);
-
-  await writeFile(blobPath, "b".repeat(rawOutput.length), "utf8");
-  const beforeTamper = tracker.bytesRead;
-  await assert.rejects(
-    reader.readEvidencePage(reference, {
-      offsetBytes: 14,
-      limitBytes: 7,
-    }),
-    /failed integrity validation/u,
-  );
-  assert.equal(tracker.bytesRead - beforeTamper, rawOutput.length);
-});
-
-test("legacy evidence refs paginate UTF-8 without loss; read_evidence is retired", async (context) => {
-  const fixture = await evidenceFixture(context, "pico-read-evidence-");
-  const rawOutput = "开头🙂middle-数据-终点";
-  const reference = await seedRuntimeToolExchange({
-    evidenceRoot: fixture.evidenceRoot,
-    sessionId: "source/session with space",
-    toolCallId: "call-1",
-    toolName: "bash",
-    rawArguments: "{}",
-    rawOutput,
-    isError: false,
-  });
-  const ref = formatEvidenceUri(reference);
-  assert.deepEqual(parseEvidenceUri(ref), {
-    schemaVersion: 2,
-    contentHash: reference.contentHash,
-    sessionId: reference.sessionId,
-  });
-
-  let offsetBytes = 0;
-  let recovered = "";
-  const totalBytes = Buffer.byteLength(rawOutput, "utf8");
-  while (offsetBytes < totalBytes) {
-    const page = await fixture.archive.readEvidencePage(reference, {
-      offsetBytes,
-      limitBytes: 5,
-    });
-    assert.doesNotMatch(page.content, /\uFFFD/u);
-    recovered += page.content;
-    if (page.nextOffsetBytes === undefined) break;
-    assert.ok(page.nextOffsetBytes > offsetBytes);
-    offsetBytes = page.nextOffsetBytes;
-  }
-  assert.equal(recovered, rawOutput);
-
-  const hash = reference.contentHash;
-  for (const invalid of [
-    "file:///etc/passwd",
-    `pico://evidence/session/${hash}?path=../../etc/passwd`,
-    `pico://evidence/%61/${hash}`,
-    `pico://evidence/a%2fb/${hash}`,
-    `pico://evidence/session/${hash}/extra`,
-  ]) {
-    assert.throws(() => parseEvidenceUri(invalid), /Evidence ref/u);
-  }
-  await assert.rejects(
-    fixture.archive.readEvidencePage(reference, {
-      limitBytes: MAX_EVIDENCE_PAGE_LIMIT_BYTES + 1,
-    }),
-    /limitBytes must be an integer between/u,
-  );
-  await assert.rejects(
-    fixture.archive.readEvidencePage(
-      { ...reference, sessionId: "wrong-session" },
-      { limitBytes: 7 },
-    ),
-    { code: "ENOENT" },
-  );
-  await assert.rejects(
-    fixture.archive.readEvidencePage(
-      { ...reference, contentHash: "0".repeat(64) },
-      { limitBytes: 7 },
-    ),
-    { code: "ENOENT" },
-  );
-
-  // 票 E3:read_evidence 工具退役——默认注册表不再注册。
-  const registry = buildDefaultToolRegistry(fixture.root);
-  const names = registry.getAvailableTools().map((definition) => definition.name);
-  assert.equal(names.includes("read_evidence"), false);
-  assert.equal(names.includes("read_artifact"), false);
-});
-
-async function evidenceFixture(context: TestContext, prefix: string): Promise<EvidenceFixture> {
-  const root = await mkdtemp(join(tmpdir(), prefix));
+test("blob CAS rejects symlink files", { skip: process.platform === "win32" }, async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-blob-symlink-"));
   context.after(() => rm(root, { recursive: true, force: true }));
-  const evidenceRoot = join(root, "evidence");
-  return {
-    root,
-    evidenceRoot,
-    archive: new EvidenceArchive({ baseDir: evidenceRoot }),
-  };
-}
+  const blobs = new EvidenceBlobStore(root);
+  const { ref } = await blobs.putUtf8("symlink canary");
+  const path = join(root, "blobs", "sha256", ref.digest.slice(0, 2), ref.digest);
+  await rename(path, `${path}.real`);
+  await symlink(`${path}.real`, path);
+  await assert.rejects(blobs.read(ref), /regular non-symlink file/u);
+});
 
 interface FileReadTracker {
   readonly bytesRead: number;
@@ -538,38 +172,4 @@ async function trackFileHandleReads(context: TestContext, path: string): Promise
       return bytesRead;
     },
   };
-}
-
-function pathForManifest(
-  evidenceRoot: string,
-  reference: { readonly sessionId: string; readonly contentHash: string },
-): string {
-  return join(evidenceRoot, sanitizeFilePart(reference.sessionId), `${reference.contentHash}.json`);
-}
-
-/** 直连 pico.sqlite 读取 evidence_records 行(清单在库,不在 FS)。 */
-function readEvidenceRecordRow(
-  fixture: EvidenceFixture,
-  reference: { readonly sessionId: string; readonly contentHash: string },
-): { content_json: string } {
-  const database = new DatabaseSync(join(fixture.root, "pico.sqlite"), { readOnly: true });
-  try {
-    const row = database
-      .prepare(
-        "SELECT content_json FROM evidence_records WHERE session_id = ? AND content_hash = ?",
-      )
-      .get(reference.sessionId, reference.contentHash) as { content_json: string } | undefined;
-    assert.ok(row, "evidence_records 行必须存在");
-    return row;
-  } finally {
-    database.close();
-  }
-}
-
-function pathForBlob(evidenceRoot: string, digest: string): string {
-  return join(evidenceRoot, "blobs", "sha256", digest.slice(0, 2), digest);
-}
-
-function sanitizeFilePart(value: string): string {
-  return value.replaceAll(/[^a-zA-Z0-9_-]/gu, "_");
 }
