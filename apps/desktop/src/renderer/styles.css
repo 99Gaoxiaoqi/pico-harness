@@ -4116,7 +4116,7 @@
   padding: 6px 12px;
   font-size: 12px;
 }
-.provider-free-notice {
+.provider-warning-notice {
   margin-bottom: 18px;
   padding: 14px 16px;
   border: 1px solid var(--line);
@@ -4124,13 +4124,13 @@
   background: var(--surface-muted);
   font-size: 12px;
 }
-.provider-free-notice p {
+.provider-warning-notice p {
   margin: 6px 0;
   color: var(--ink-secondary);
   line-height: 1.7;
 }
-.provider-free-notice a,
-.conversation-free-notice a {
+.provider-warning-notice a,
+.conversation-model-notice a {
   color: var(--accent);
 }
 .provider-unavailable {
@@ -4153,7 +4153,7 @@
   font-size: 11px;
   line-height: 1.6;
 }
-.conversation-free-notice {
+.conversation-model-notice {
   margin: 0 10px 8px;
   font-size: 11px;
   line-height: 1.6;

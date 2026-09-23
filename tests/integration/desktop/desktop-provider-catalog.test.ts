@@ -109,8 +109,7 @@ test("Desktop catalog selections produce the matching Chat, Messages or Response
   }
 
   const byId = new Map(providerPresets.map((preset) => [preset.id, preset]));
-  assert.equal(byId.get("opencode-free")?.auth, "none");
-  assert.deepEqual(byId.get("opencode-free")?.models, ["nemotron-3-ultra-free"]);
+  assert.equal(byId.has("opencode-free"), false);
   for (const id of ["ollama", "lm-studio", "localai"]) assert.equal(byId.get(id)?.auth, "none");
   for (const id of ["opencode", "opencode-go"]) {
     assert.equal(byId.get(id)?.protocol, "openai");

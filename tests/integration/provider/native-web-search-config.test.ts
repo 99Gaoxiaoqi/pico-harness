@@ -32,7 +32,6 @@ test("search defaults survive strict RPC, private persistence and provider updat
     env: {},
     userConfigStore: store,
     revisionTokenKey: Buffer.alloc(32, 7),
-    initializeDefaultProvider: false,
     listWorkspacePaths: async () => [],
     requireTrustedWorkspace: async (path) => path,
     assertNoActiveRuns: async () => undefined,
