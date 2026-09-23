@@ -11,7 +11,7 @@ import { EffectiveConfigResolver } from "@pico/pico-host/input/effective-config"
 import {
   OPENCODE_FREE_PROVIDER,
   OPENCODE_FREE_ROUTE_ID,
-} from "@pico/pico-host/input/default-provider";
+} from "../../fixtures/anonymous-provider.js";
 import { UserConfigStore } from "@pico/pico-host/input/user-config-store";
 import { loadEffectiveModelRuntime } from "@pico/pico-host/provider/effective-model-runtime";
 import { createProvider } from "@pico/pico-host/provider/factory";
@@ -40,7 +40,7 @@ const noVault: CredentialVault = {
   },
 };
 
-test("production startup seeds an anonymous default; config projection and real local HTTP omit credentials", async (context) => {
+test("production startup leaves a fresh config empty; a local anonymous connection still works", async (context) => {
   const picoHome = await mkdtemp(join(tmpdir(), "pico-opencode-free-"));
   const userConfigStore = new UserConfigStore({ picoHome });
   const env = {
@@ -55,7 +55,6 @@ test("production startup seeds an anonymous default; config projection and real 
     userConfigStore,
     env,
     credentialVault: noVault,
-    initializeDefaultProvider: true,
   });
   context.after(async () => {
     await desktop.close();
@@ -65,24 +64,12 @@ test("production startup seeds an anonymous default; config projection and real 
   const projected = (await desktop.handle(
     createRuntimeRequest("config.user.get", {}),
   )) as RuntimeResult<"config.user.get">;
-  assert.equal(projected.config.defaults.modelRouteId, OPENCODE_FREE_ROUTE_ID);
-  assert.equal(projected.config.providers[0]!.auth, "none");
+  assert.equal(projected.config.defaults.modelRouteId, undefined);
+  assert.deepEqual(projected.config.providers, []);
   const listed = (await desktop.handle(
     createRuntimeRequest("provider.list", {}),
   )) as RuntimeResult<"provider.list">;
-  assert.equal(listed.providers[0]!.credentialStatus, "ready");
-  assert.equal(listed.providers[0]!.credentialSource, "none");
-  assert.equal(listed.providers[0]!.storedCredentialPresent, false);
-  await assert.rejects(
-    desktop.handle(
-      createRuntimeRequest("provider.credential.set", {
-        providerId: "opencode-free",
-        secret: "synthetic-not-a-real-key",
-        expectedRevision: projected.revision,
-      }),
-    ),
-    /免密钥/,
-  );
+  assert.deepEqual(listed.providers, []);
   const seen: { url: string; authorization: string | undefined }[] = [];
   const server = createServer((request, response) => {
     seen.push({ url: request.url!, authorization: request.headers.authorization });
@@ -127,6 +114,22 @@ test("production startup seeds an anonymous default; config projection and real 
     }),
   )) as RuntimeResult<"provider.upsert">;
   assert.equal(upserted.provider.auth, "none");
+  const afterUpsert = (await desktop.handle(
+    createRuntimeRequest("provider.list", {}),
+  )) as RuntimeResult<"provider.list">;
+  assert.equal(afterUpsert.providers[0]!.credentialStatus, "ready");
+  assert.equal(afterUpsert.providers[0]!.credentialSource, "none");
+  assert.equal(afterUpsert.providers[0]!.storedCredentialPresent, false);
+  await assert.rejects(
+    desktop.handle(
+      createRuntimeRequest("provider.credential.set", {
+        providerId: "opencode-free",
+        secret: "synthetic-not-a-real-key",
+        expectedRevision: upserted.revision,
+      }),
+    ),
+    /免密钥/,
+  );
   const effective = await loadEffectiveModelRuntime({
     workDir: picoHome,
     projectTrusted: false,
@@ -166,13 +169,12 @@ test("production startup seeds an anonymous default; config projection and real 
   assert.throws(() => ordinary.providerConfig(undefined), /缺少凭证/);
 });
 
-test("first-run default initialization preserves existing providers, defaults and explicit environment", async (context) => {
+test("reading config preserves existing providers and defaults", async (context) => {
   const picoHome = await mkdtemp(join(tmpdir(), "pico-opencode-free-preserve-"));
   context.after(() => rm(picoHome, { recursive: true, force: true }));
   const store = new UserConfigStore({ picoHome });
   const empty = await store.read();
-  const environment = await store.ensureDefaultProvider({ LLM_MODEL: "explicit-model" });
-  assert.equal(environment.revision, empty.revision);
+  assert.deepEqual(await store.read(), empty);
   const existing = await store.write(
     {
       version: 1,
@@ -183,17 +185,17 @@ test("first-run default initialization preserves existing providers, defaults an
     },
     { expectedRevision: empty.revision },
   );
-  assert.deepEqual(await store.ensureDefaultProvider({}), existing);
+  assert.deepEqual(await store.read(), existing);
   const noDefault = await store.write(
     { version: 1, providers: existing.config.providers },
     { expectedRevision: existing.revision },
   );
-  assert.deepEqual(await store.ensureDefaultProvider({}), noDefault);
+  assert.deepEqual(await store.read(), noDefault);
   const explicitDefault = await store.write(
     { version: 1, providers: {}, defaults: { modelRouteId: "explicit/model" } },
     { expectedRevision: noDefault.revision },
   );
-  assert.deepEqual(await store.ensureDefaultProvider({}), explicitDefault);
+  assert.deepEqual(await store.read(), explicitDefault);
 });
 
 test("OpenAI and Claude send Pico session headers only to documented Zen and Go endpoints", async (context) => {
@@ -271,10 +273,11 @@ test("headless uses the trusted anonymous route through the real Runtime and loc
   const address = server.address();
   assert.ok(address && typeof address !== "string");
   const store = new UserConfigStore({ picoHome });
-  const seeded = await store.ensureDefaultProvider({});
+  const seeded = await store.read();
   await store.write(
     {
       ...seeded.config,
+      defaults: { modelRouteId: OPENCODE_FREE_ROUTE_ID },
       providers: {
         "opencode-free": {
           ...OPENCODE_FREE_PROVIDER,

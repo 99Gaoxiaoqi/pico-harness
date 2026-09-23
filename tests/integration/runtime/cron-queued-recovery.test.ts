@@ -20,7 +20,7 @@ import { UserConfigStore } from "@pico/pico-host/input/user-config-store";
 import {
   OPENCODE_FREE_PROVIDER,
   OPENCODE_FREE_ROUTE_ID,
-} from "@pico/pico-host/input/default-provider";
+} from "../../fixtures/anonymous-provider.js";
 import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
 import { WorkspaceRegistrationStore } from "@pico/pico-host/workspace-registration";
 import {
@@ -262,9 +262,13 @@ test("production daemon startup terminalizes orphan queued rows and executes the
   const workspacePath = join(root, "workspace");
   await mkdir(workspacePath);
   const config = new UserConfigStore({ picoHome });
-  const initial = await config.ensureDefaultProvider({});
+  const initial = await config.read();
   await config.write(
-    { ...initial.config, providers: { "opencode-free": { ...OPENCODE_FREE_PROVIDER, baseURL } } },
+    {
+      ...initial.config,
+      defaults: { modelRouteId: OPENCODE_FREE_ROUTE_ID },
+      providers: { "opencode-free": { ...OPENCODE_FREE_PROVIDER, baseURL } },
+    },
     { expectedRevision: initial.revision },
   );
   const trustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });

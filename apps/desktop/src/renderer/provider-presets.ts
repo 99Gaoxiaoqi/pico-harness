@@ -26,19 +26,6 @@ export interface ProviderPreset {
 // while keeping one provider connection and credential.
 export const providerPresets: readonly ProviderPreset[] = [
   {
-    id: "opencode-free",
-    name: "OpenCode Free",
-    description: "无需 API Key 的免费模型；供应和额度以服务方为准",
-    category: "plans",
-    protocol: "openai",
-    baseURL: "https://opencode.ai/zen/v1",
-    apiKeyEnv: "OPENCODE_FREE_API_KEY",
-    models: ["nemotron-3-ultra-free"],
-    docs: "https://opencode.ai/docs/zen/",
-    icon: "opencode",
-    auth: "none",
-  },
-  {
     id: "opencode-go",
     name: "OpenCode Go",
     description: "订阅制编码模型精选，一次连接即可切换使用",

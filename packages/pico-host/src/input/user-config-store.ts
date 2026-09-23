@@ -20,13 +20,6 @@ import { resolvePicoHome } from "../pico-paths.js";
 import type { ModelProviderConfig } from "../provider/model-router.js";
 import { parseModelProviderConfigs, parseModelRouteId } from "./pico-config.js";
 
-import {
-  OPENCODE_FREE_PROVIDER_ID,
-  OPENCODE_FREE_PROVIDER,
-  OPENCODE_FREE_ROUTE_ID,
-  hasExplicitModelEnvironment,
-} from "./default-provider.js";
-
 const USER_CONFIG_VERSION = 1 as const;
 const DIRECTORY_MODE = 0o700;
 const FILE_MODE = 0o600;
@@ -165,33 +158,6 @@ export class UserConfigStore {
     await this.secureDirectory();
     await this.recoverTemporaryFilesOnce();
     return this.readUnlocked();
-  }
-
-  /** Production startup only: preserve every explicit user route and concurrent edit. */
-  async ensureDefaultProvider(
-    env: Readonly<Record<string, string | undefined>>,
-  ): Promise<UserConfigSnapshot> {
-    const current = await this.read();
-    if (
-      Object.keys(current.config.providers).length > 0 ||
-      current.config.defaults?.modelRouteId !== undefined ||
-      hasExplicitModelEnvironment(env)
-    ) {
-      return current;
-    }
-    try {
-      return await this.write(
-        {
-          ...current.config,
-          defaults: { ...current.config.defaults, modelRouteId: OPENCODE_FREE_ROUTE_ID },
-          providers: { [OPENCODE_FREE_PROVIDER_ID]: OPENCODE_FREE_PROVIDER },
-        },
-        { expectedRevision: current.revision },
-      );
-    } catch (error) {
-      if (error instanceof UserConfigRevisionConflictError) return this.read();
-      throw error;
-    }
   }
 
   async write(

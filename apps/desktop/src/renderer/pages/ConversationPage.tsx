@@ -424,7 +424,7 @@ export function ConversationPage() {
   ]);
 
   const submit = async (text: string, nextBehavior: ComposerBehavior) => {
-    if (sendingRef.current || !composerReady) return;
+    if (sendingRef.current || !composerReady || !composerModelRouteId || usingOpenCodeFree) return;
     const swarmCommand = !activation ? parseSwarmCommand(text) : undefined;
     if (swarmCommand) {
       if (swarmCommand.kind !== "status" && activeRun) {
@@ -1110,12 +1110,15 @@ export function ConversationPage() {
               </div>
             ) : (
               <div className="conversation-composer-region">
+                {!composerModelRouteId && (
+                  <p className="conversation-model-notice">
+                    请先配置模型连接。<Link to="/settings/models">添加连接</Link>
+                  </p>
+                )}
                 {usingOpenCodeFree && (
-                  <p className="conversation-free-notice">
-                    OpenCode Free 免费试用 · 按 IP 限流，请勿提交个人或机密信息。
-                    <a href="https://opencode.ai/docs/zen#privacy" target="_blank" rel="noreferrer">
-                      数据使用说明
-                    </a>
+                  <p className="conversation-model-notice">
+                    此 OpenCode 免费模型仅限 OpenCode 客户端使用，Pico 无法发送请求。
+                    <Link to="/settings/models">先添加连接，再返回会话切换模型</Link>
                   </p>
                 )}
                 {catalogOpen && (
@@ -1143,7 +1146,7 @@ export function ConversationPage() {
                   onBehaviorChange={setBehavior}
                   busy={preparingSend || busy === "send-message"}
                   disabled={Boolean(conversation?.loadError)}
-                  submitDisabled={!composerReady}
+                  submitDisabled={!composerReady || !composerModelRouteId || usingOpenCodeFree}
                   placeholder={
                     activation?.kind === "skill"
                       ? `输入 ${activation.name} 的参数或补充要求…`

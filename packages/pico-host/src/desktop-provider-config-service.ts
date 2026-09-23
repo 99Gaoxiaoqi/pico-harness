@@ -66,7 +66,6 @@ export interface DesktopProviderConfigServiceOptions {
   readonly effectiveConfigResolver?: EffectiveConfigResolver;
   readonly credentialVault?: CredentialVault;
   readonly providerOperationJournal?: ProviderOperationJournal;
-  readonly initializeDefaultProvider?: boolean;
   readonly listWorkspacePaths: () => Promise<readonly string[]>;
   readonly requireTrustedWorkspace: (workspacePath: string) => Promise<string>;
   readonly assertNoActiveRuns: (
@@ -748,9 +747,7 @@ export class DesktopProviderConfigService {
 
   private async startUserConfigWatch(): Promise<void> {
     try {
-      this.observedUserConfig = this.options.initializeDefaultProvider
-        ? await this.userConfigStore.ensureDefaultProvider(this.env)
-        : await this.userConfigStore.read();
+      this.observedUserConfig = await this.userConfigStore.read();
     } catch {
       // The typed config methods surface corrupt state. Keep watching so an external repair
       // is detected without requiring a daemon restart.

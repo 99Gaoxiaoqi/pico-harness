@@ -1625,7 +1625,6 @@ export function createProductionRuntimeServices(
   const desktopService: DesktopRuntimeService = new DesktopRuntimeService({
     runtimeService: service,
     memoryLifecycle: atomicMemoryLifecycle,
-    initializeDefaultProvider: true,
     registrationStore,
     trustStore,
     browserAgentBroker,

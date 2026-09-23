@@ -236,7 +236,6 @@ export interface DesktopRuntimeServiceOptions {
   readonly planControl?: PlanControlPort;
   readonly automations?: DesktopAutomationService;
   readonly userConfigStore?: UserConfigStore;
-  readonly initializeDefaultProvider?: boolean;
   readonly userMcpConfigStore?: UserMcpConfigStore;
   readonly effectiveConfigResolver?: EffectiveConfigResolver;
   readonly credentialVault?: CredentialVault;
@@ -439,9 +438,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       ...(options.providerOperationJournal === undefined
         ? {}
         : { providerOperationJournal: options.providerOperationJournal }),
-      ...(options.initializeDefaultProvider === undefined
-        ? {}
-        : { initializeDefaultProvider: options.initializeDefaultProvider }),
       listWorkspacePaths: () => this.registrationStore.list(),
       requireTrustedWorkspace: this.requireTrustedWorkspace.bind(this),
       assertNoActiveRuns: this.assertNoActiveRuns.bind(this),
