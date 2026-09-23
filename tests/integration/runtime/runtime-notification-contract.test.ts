@@ -91,6 +91,13 @@ test("run.providerRetry 只接受安全的重试进度字段", () => {
     isRuntimeNotification({ ...retry, payload: { ...retry.payload, nextAttempt: 3 } }),
     false,
   );
+  assert.equal(
+    isRuntimeNotification({
+      ...retry,
+      payload: { ...retry.payload, transportCode: "Bearer secret" },
+    }),
+    false,
+  );
 });
 
 test("approval.requested 保持当前 tool 判别联合并校验 run identity", () => {

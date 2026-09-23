@@ -413,6 +413,18 @@ function StepDetail({
                     <p>推理 {tokens(attempt.reasoningTokens)} Token（包含在输出中）</p>
                   )}
                   {attempt.costUnknownReason && <p>{attempt.costUnknownReason}</p>}
+                  {(attempt.errorClass || attempt.errorCategory || attempt.transportCode) && (
+                    <p>
+                      失败诊断：
+                      {[attempt.errorClass, attempt.errorCategory, attempt.transportCode]
+                        .filter(Boolean)
+                        .join(" · ")}
+                      {attempt.retryable !== undefined
+                        ? ` · ${attempt.retryable ? "可重试" : "不可重试"}`
+                        : ""}
+                    </p>
+                  )}
+                  {attempt.diagnosticId && <p>诊断 ID：{attempt.diagnosticId}</p>}
                   {attempt.error && (
                     <p className="inspector-timeline__warning">
                       {displayExecutionError(attempt.error, true)}
