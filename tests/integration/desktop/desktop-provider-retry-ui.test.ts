@@ -7,6 +7,7 @@ import {
   applyProviderRetryNotification,
   displayExecutionError,
   modelCommunicationDiagnostic,
+  providerStatusDiagnostic,
   providerRetryKey,
   type ProviderRetryNotice,
 } from "../../../apps/desktop/src/renderer/provider-retry.js";
@@ -131,6 +132,27 @@ test("retry and failure presentation keeps transport details out of conversation
   });
   assert.equal(displayExecutionError(raw), "模型连接失败");
   assert.equal(displayExecutionError(raw, true), "模型连接失败 · 诊断 ID：diag-safe-1");
+  const statusError = "Model API request failed [403]; response omitted";
+  assert.deepEqual(providerStatusDiagnostic(statusError), {
+    title: "模型服务拒绝请求",
+    httpStatus: 403,
+  });
+  assert.equal(displayExecutionError(statusError), "模型服务拒绝请求 · HTTP 403");
+  assert.equal(
+    displayExecutionError("LLMStatusError status=403; detail omitted"),
+    "模型服务拒绝请求 · HTTP 403",
+  );
+  const statusFailure = renderToStaticMarkup(
+    createElement(ProviderFailureCard, {
+      httpStatus: 403,
+      title: providerStatusDiagnostic(statusError)!.title,
+      canRetry: true,
+      onRetry: () => undefined,
+      onDiagnostics: () => undefined,
+    }),
+  );
+  assert.match(statusFailure, /请检查当前模型或连接设置/);
+  assert.doesNotMatch(statusFailure, /Model API request failed|response omitted/);
   assert.equal(
     displayExecutionError("PermissionDenied: access required"),
     "PermissionDenied: access required",

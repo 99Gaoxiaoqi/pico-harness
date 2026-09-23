@@ -50,18 +50,20 @@ export function ProviderRetryBanner({ notice }: { readonly notice: ProviderRetry
 
 export function ProviderFailureCard({
   notice,
+  httpStatus,
   title,
   canRetry,
   onRetry,
   onDiagnostics,
 }: {
   readonly notice?: ProviderRetryNotice;
+  readonly httpStatus?: number;
   readonly title: string;
   readonly canRetry: boolean;
   readonly onRetry: () => void;
   readonly onDiagnostics: () => void;
 }) {
-  const detail = providerFailureDescription(notice);
+  const detail = providerFailureDescription(notice, httpStatus);
   return (
     <section className="conversation-provider-failure" role="alert">
       <AlertCircle aria-hidden="true" className="conversation-provider-failure__icon" />
