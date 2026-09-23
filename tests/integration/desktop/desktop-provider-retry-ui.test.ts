@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { RuntimeNotification } from "@pico/protocol";
+import type { JsonObject, RuntimeNotification } from "@pico/protocol";
 import {
   applyProviderRetryNotification,
   displayExecutionError,
@@ -20,7 +20,7 @@ function notification(
   at: number,
   sessionId = "session-a",
   runId = "run-a",
-  payload: Record<string, unknown> = {},
+  payload: JsonObject = {},
 ): RuntimeNotification {
   return {
     protocolVersion: 2,

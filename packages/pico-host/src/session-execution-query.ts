@@ -541,6 +541,11 @@ function projectRun(
       ...(record.httpStatus !== undefined ? { httpStatus: record.httpStatus } : {}),
       ...(record.finishReason !== undefined ? { finishReason: preview(record.finishReason) } : {}),
       ...(record.error !== undefined ? { error: preview(record.error) } : {}),
+      ...(record.errorClass !== undefined ? { errorClass: record.errorClass } : {}),
+      ...(record.errorCategory !== undefined ? { errorCategory: record.errorCategory } : {}),
+      ...(record.transportCode !== undefined ? { transportCode: record.transportCode } : {}),
+      ...(record.retryable !== undefined ? { retryable: record.retryable } : {}),
+      ...(record.diagnosticId !== undefined ? { diagnosticId: record.diagnosticId } : {}),
       ...usageMetrics(record.usage),
       costStatus: record.costStatus,
       ...(record.costStatus === "unknown" && record.costUnknownReason

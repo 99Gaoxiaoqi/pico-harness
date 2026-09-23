@@ -3050,10 +3050,10 @@ function timelineItem(event: DesktopReporterEvent): JsonObject {
     ...(event.type === "provider.retry"
       ? { id: `status:provider-retry:${event.runId}:${String(safePayload["failedAttempt"])}` }
       : thinkingStatus
-      ? { id: thinkingStatusId(event.runId, safePayload["turn"]) }
-      : explicitId
-        ? { id: explicitId }
-        : {}),
+        ? { id: thinkingStatusId(event.runId, safePayload["turn"]) }
+        : explicitId
+          ? { id: explicitId }
+          : {}),
     kind,
     title: timelineTitle(event.type, safePayload),
     ...(detail ? { detail } : {}),

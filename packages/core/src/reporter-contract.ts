@@ -1,5 +1,6 @@
 import type { ToolResultEnvelope } from "./tool-result.js";
 import type { CanonicalTranscriptToolStart } from "./transcript-tool-start.js";
+import type { ModelCommunicationCategory, ModelResponseDiagnostic } from "./provider-errors.js";
 
 export type SubagentActivityStatus =
   | "queued"
@@ -20,9 +21,9 @@ export interface ProviderRetryNotice {
   readonly maxAttempts: number;
   readonly delayMs: number;
   readonly failureStatus: "timed_out" | "cancelled" | "error";
-  readonly errorCategory?: string;
+  readonly errorCategory?: ModelCommunicationCategory;
   readonly httpStatus?: number;
-  readonly transportCode?: string;
+  readonly transportCode?: ModelResponseDiagnostic["transportCode"];
   readonly diagnosticId?: string;
 }
 

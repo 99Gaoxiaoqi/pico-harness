@@ -100,7 +100,14 @@ test("inspector timeline keeps projected run/turn ownership, honest unknowns and
           usageBasis: "missing",
           costStatus: "unknown",
           costUnknownReason: "未匹配该 endpoint 与模型的定价",
-          ...(runId === "failed" ? { error: "请求失败 · HTTP 402", httpStatus: 402 } : {}),
+          ...(runId === "failed"
+            ? {
+                error: "请求失败 · HTTP 402",
+                httpStatus: 402,
+                errorClass: "LLMStatusError" as const,
+                retryable: false,
+              }
+            : {}),
         };
         ledger.recordPhysicalAttempt({ ...record, revision: 0, status: "prepared" });
         ledger.recordPhysicalAttempt(record);
@@ -237,6 +244,7 @@ test("inspector timeline keeps projected run/turn ownership, honest unknowns and
     assert.match(failedSelected, /底层调用尝试/u);
     assert.match(failedSelected, /首 Token 耗时/u);
     assert.match(failedSelected, /第 1 次/u);
+    assert.match(failedSelected, /失败诊断：LLMStatusError · 不可重试/u);
     assert.doesNotMatch(render(execution, "not-in-window"), /aria-label="执行步骤详情"/u);
   } finally {
     ledger.close();

@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { ModelCommunicationError } from "@pico/core";
 import type { AgentEngine } from "@pico/pico-host/agent-engine";
 import { Session } from "@pico/pico-host/session";
 import type { HookOutput } from "@pico/pico-host/hooks/types";
@@ -406,6 +407,42 @@ test("commitMessageOnce remains idempotent inside an active RuntimeRun", async (
       true,
     );
     await session.commitMessages({ role: "assistant", content: "still writable" });
+  } finally {
+    await session.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("RuntimeRun terminal preserves only safe model diagnostics", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-runtime-model-failure-"));
+  const session = new Session("runtime-model-failure", join(root, "workspace"), {
+    persistence: true,
+    picoHome: join(root, "pico-home"),
+    runtimePort: createEngineRuntimePort(),
+  });
+  try {
+    await session.recover();
+    const run = await RuntimeRun.start({
+      capability: session.runtimeEventCapability!,
+      agentSwarmAuthorization: "none",
+    });
+    await assert.rejects(
+      run.run(async () => {
+        throw new ModelCommunicationError("request_failed", {
+          diagnosticId: "safe-terminal",
+          durationMs: 10,
+          transportCode: "ECONNRESET",
+        });
+      }),
+      ModelCommunicationError,
+    );
+    const terminal = (await session.runtimeEventStore!.readSession(session.id)).find(
+      (event) => event.kind === "run.terminal" && event.runId === run.runId,
+    );
+    assert.equal(
+      terminal?.kind === "run.terminal" ? terminal.data.reason : undefined,
+      "ModelCommunicationError category=request_failed diagnosticId=safe-terminal; detail omitted",
+    );
   } finally {
     await session.close();
     await rm(root, { recursive: true, force: true });

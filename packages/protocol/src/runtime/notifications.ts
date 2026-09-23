@@ -519,7 +519,8 @@ function isProviderRetryPayload(payload: unknown): boolean {
       ["phase", "failedAttempt", "nextAttempt", "maxAttempts", "delayMs", "failureStatus"],
       ["errorCategory", "httpStatus", "transportCode", "diagnosticId"],
     )
-  ) return false;
+  )
+    return false;
   return (
     (payload.phase === "scheduled" || payload.phase === "started") &&
     nonNegativeSafeInteger(payload.failedAttempt) &&
@@ -530,10 +531,30 @@ function isProviderRetryPayload(payload: unknown): boolean {
     payload.maxAttempts >= payload.nextAttempt &&
     nonNegativeSafeInteger(payload.delayMs) &&
     ["timed_out", "cancelled", "error"].includes(String(payload.failureStatus)) &&
-    (payload.errorCategory === undefined || nonEmptyString(payload.errorCategory)) &&
-    (payload.httpStatus === undefined || nonNegativeSafeInteger(payload.httpStatus)) &&
-    (payload.transportCode === undefined || nonEmptyString(payload.transportCode)) &&
-    (payload.diagnosticId === undefined || nonEmptyString(payload.diagnosticId))
+    (payload.errorCategory === undefined ||
+      (typeof payload.errorCategory === "string" &&
+        [
+          "request_failed",
+          "invalid_json",
+          "invalid_response",
+          "invalid_tool_call",
+          "stream_error",
+          "incomplete_stream",
+          "rejected_completion",
+          "unknown",
+        ].includes(payload.errorCategory))) &&
+    (payload.httpStatus === undefined ||
+      (nonNegativeSafeInteger(payload.httpStatus) &&
+        payload.httpStatus >= 100 &&
+        payload.httpStatus <= 599)) &&
+    (payload.transportCode === undefined ||
+      (typeof payload.transportCode === "string" &&
+        /^(?:ECONNRESET|ECONNREFUSED|ECONNABORTED|EHOSTUNREACH|ENETUNREACH|EPIPE|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|(?:UND_ERR|ERR_SSL|ERR_TLS)_[A-Z0-9_]{1,64})$/.test(
+          payload.transportCode,
+        ))) &&
+    (payload.diagnosticId === undefined ||
+      (typeof payload.diagnosticId === "string" &&
+        /^[A-Za-z0-9_-]{1,128}$/.test(payload.diagnosticId)))
   );
 }
 

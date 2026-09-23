@@ -8,7 +8,11 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { isAbortError, RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX } from "@pico/core";
+import {
+  isAbortError,
+  ModelCommunicationError,
+  RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX,
+} from "@pico/core";
 import { LeaseConflictError } from "@pico/storage";
 import { canonicalizeWorkspacePath } from "@pico/storage/workspace-path";
 import type { CommitReceipt } from "@pico/core";
@@ -3437,6 +3441,8 @@ function requireExactRunStartedEvent(
 
 function runtimeFailureReason(error: unknown): string {
   if (isAbortError(error)) return "aborted";
+  if (error instanceof ModelCommunicationError)
+    return `ModelCommunicationError category=${error.category} diagnosticId=${error.diagnostic.diagnosticId}; detail omitted`;
   const detail = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
   return detail.slice(0, 1_000);
 }

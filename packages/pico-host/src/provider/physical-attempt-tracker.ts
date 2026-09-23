@@ -59,24 +59,19 @@ export class PhysicalAttemptTracker {
       throw this.admissionError;
     }
     this.active = active;
-    try {
-      this.signal.throwIfAborted();
-      const response = await send();
-      active.httpStatus = response.status;
-      if (!active.terminal) this.update(active, this.snapshot(active, "observed"));
-      if (!response.ok)
-        this.settle("failed", undefined, undefined, `HTTP ${response.status}`, {
-          errorClass: "LLMStatusError",
-          retryable: classifyProviderError(
-            new LLMStatusError(response.status, "HTTP response omitted"),
-          ).retryable,
-        });
-      return response;
-    } catch (error) {
-      // SDK wraps transport failures. Let the outer adapter normalize the final error
-      // before committing diagnostics, so this dispatch does not preempt them.
-      throw error;
-    }
+    // The outer adapter normalizes transport errors before committing diagnostics.
+    this.signal.throwIfAborted();
+    const response = await send();
+    active.httpStatus = response.status;
+    if (!active.terminal) this.update(active, this.snapshot(active, "observed"));
+    if (!response.ok)
+      this.settle("failed", undefined, undefined, `HTTP ${response.status}`, {
+        errorClass: "LLMStatusError",
+        retryable: classifyProviderError(
+          new LLMStatusError(response.status, "HTTP response omitted"),
+        ).retryable,
+      });
+    return response;
   }
 
   observeOutput(): void {
