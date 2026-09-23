@@ -182,7 +182,12 @@ export async function generateWithRetry(
       const retryInfo: RetryInfo = {
         failedAttempt: attempt,
         nextAttempt: attempt + 1,
-        maxAttempts,
+        // A guarded one-time recovery must not advertise the generic ten-attempt
+        // budget as if the same failure could keep replaying.
+        maxAttempts:
+          incompleteStreamRecovery || classification.status === "timed_out"
+            ? attempt + 1
+            : maxAttempts,
         delayMs,
         error,
         ...(statusCode !== undefined ? { statusCode } : {}),
