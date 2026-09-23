@@ -1,11 +1,13 @@
 /** HTTP 状态码错误，带 statusCode 供调用侧进行精确判定。 */
 export class LLMStatusError extends Error {
   readonly statusCode: number;
+  readonly retryAfterMs?: number;
 
-  constructor(statusCode: number, message: string) {
+  constructor(statusCode: number, message: string, retryAfterMs?: number) {
     super(message);
     this.name = "LLMStatusError";
     this.statusCode = statusCode;
+    this.retryAfterMs = retryAfterMs;
   }
 }
 
@@ -53,16 +55,27 @@ export interface ModelResponseDiagnostic {
     | "InvalidResponseDataError"
     | "StreamProviderError"
     | "SyntaxError";
+  /** SDK's own transport retry verdict, used only before an HTTP response. */
+  readonly sdkRetryable?: boolean;
+  /** Any text, reasoning, or tool data already produced by this attempt. */
+  readonly observableOutput?: boolean;
   readonly transportCode?:
     | "ECONNRESET"
     | "ECONNREFUSED"
+    | "ECONNABORTED"
+    | "EHOSTUNREACH"
+    | "ENETUNREACH"
+    | "EPIPE"
     | "ENOTFOUND"
     | "EAI_AGAIN"
     | "ETIMEDOUT"
     | "UND_ERR_CONNECT_TIMEOUT"
     | "UND_ERR_HEADERS_TIMEOUT"
     | "UND_ERR_BODY_TIMEOUT"
-    | "UND_ERR_SOCKET";
+    | "UND_ERR_SOCKET"
+    | `UND_ERR_${string}`
+    | `ERR_SSL_${string}`
+    | `ERR_TLS_${string}`;
 }
 
 /** Safe diagnostics retain enough transport facts for the explicit, bounded retry policy. */

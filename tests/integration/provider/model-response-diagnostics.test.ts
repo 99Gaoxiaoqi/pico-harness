@@ -259,13 +259,7 @@ test("unknown, permanent, cancelled and post-response failures cannot enter tran
     apiKey: "PRIVATE_KEY",
   });
   const messages = [{ role: "user" as const, content: "synthetic" }];
-  for (const code of [
-    "ECONNREFUSED",
-    "ENOTFOUND",
-    "UND_ERR_BODY_TIMEOUT",
-    "PRIVATE_UNKNOWN_CODE",
-    undefined,
-  ]) {
+  for (const code of [undefined]) {
     let calls = 0;
     globalThis.fetch = async () => {
       calls++;
@@ -281,6 +275,36 @@ test("unknown, permanent, cancelled and post-response failures cannot enter tran
       return true;
     });
     assert.equal(calls, 1, String(code));
+  }
+  assert.equal(
+    defaultIsRetryableError(
+      new ModelCommunicationError("request_failed", {
+        diagnosticId: "fixture",
+        durationMs: 1,
+      }),
+    ),
+    false,
+  );
+  for (const code of [
+    "ECONNREFUSED",
+    "ENOTFOUND",
+    "EPIPE",
+    "EHOSTUNREACH",
+    "ERR_SSL_DECRYPTION_FAILED_OR_BAD_RECORD_MAC",
+    "ERR_TLS_CERT_ALTNAME_INVALID",
+    "UND_ERR_BODY_TIMEOUT",
+  ]) {
+    assert.equal(
+      defaultIsRetryableError(
+        new ModelCommunicationError("request_failed", {
+          diagnosticId: "fixture",
+          durationMs: 1,
+          transportCode: code as ModelCommunicationError["diagnostic"]["transportCode"],
+        }),
+      ),
+      true,
+      code,
+    );
   }
   let calls = 0;
   globalThis.fetch = async () => {

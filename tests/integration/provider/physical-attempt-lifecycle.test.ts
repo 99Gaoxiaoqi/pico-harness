@@ -8,7 +8,7 @@ import { SqliteRuntimeControlStore } from "@pico/storage/sqlite/sqlite-runtime-c
 import { SqliteRuntimeEventStore } from "@pico/storage/sqlite/sqlite-runtime-event-store";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
-import type { ProviderAttemptLifecycleSnapshot } from "@pico/core";
+import { ModelCommunicationError, type ProviderAttemptLifecycleSnapshot } from "@pico/core";
 import { AiSdkProvider } from "@pico/pico-host/provider/ai-sdk-provider";
 import { resolveModelRouteCapabilities } from "@pico/runtime";
 
@@ -274,6 +274,55 @@ test("real SSE provider through CostTracker commits a succeeded physical fact an
   } finally {
     await f.close();
     events.close();
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a pre-response transport failure persists only allowlisted diagnostics in physical record_json", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-physical-diagnostics-"));
+  const ledger = new SqliteRuntimeControlStore({ storageRoot: root });
+  const secret = "PRIVATE_SOCKET_DETAIL";
+  context.mock.method(globalThis, "fetch", async () => {
+    throw new TypeError("fetch failed", {
+      cause: Object.assign(new Error(secret), { code: "EHOSTUNREACH" }),
+    });
+  });
+  try {
+    const tracked = new CostTracker(
+      new AiSdkProvider("openai", {
+        baseURL: "https://fixture.invalid/v1",
+        apiKey: secret,
+        model: "lifecycle-test",
+      }),
+      { provider: "openai", model: "lifecycle-test", billingMode: "subscription_included" },
+      undefined,
+      {
+        ledger,
+        context: { purpose: "main", sessionId: "transport-failure" },
+        recordRuntimeEvents: false,
+      },
+    );
+    let diagnosticId: string | undefined;
+    await assert.rejects(
+      tracked.generateStream(messages, [], () => {}),
+      (error: unknown) => {
+        assert.ok(error instanceof ModelCommunicationError);
+        diagnosticId = error.diagnostic.diagnosticId;
+        return true;
+      },
+    );
+    const facts = ledger.listPhysicalAttempts({ sessionId: "transport-failure" });
+    assert.equal(facts.length, 1);
+    assert.equal(facts[0]!.status, "failed");
+    assert.equal(facts[0]!.httpStatus, undefined);
+    assert.equal(facts[0]!.errorClass, "ModelCommunicationError");
+    assert.equal(facts[0]!.errorCategory, "request_failed");
+    assert.equal(facts[0]!.transportCode, "EHOSTUNREACH");
+    assert.equal(facts[0]!.retryable, true);
+    assert.equal(facts[0]!.diagnosticId, diagnosticId);
+    assert.doesNotMatch(JSON.stringify(facts), /PRIVATE_SOCKET_DETAIL/u);
+  } finally {
     ledger.close();
     await rm(root, { recursive: true, force: true });
   }

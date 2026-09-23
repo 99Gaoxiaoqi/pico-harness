@@ -9,15 +9,18 @@ import {
 /** 可重试的 HTTP 状态码：限流与常见瞬时 5xx。 */
 const RETRYABLE_STATUS_CODES = new Set([429, 500, 502, 503, 504]);
 
-// Only failures before any HTTP response are safe for transport recovery. DNS misses,
-// refused connections and response-body failures are deliberately excluded.
+// Transport identifiers are safe only before any HTTP response. A post-response
+// socket/body failure might follow visible output and cannot be replayed.
 const RETRYABLE_TRANSPORT_CODES = new Set([
   "ECONNRESET",
+  "ECONNREFUSED",
+  "ECONNABORTED",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "EPIPE",
+  "ENOTFOUND",
   "EAI_AGAIN",
   "ETIMEDOUT",
-  "UND_ERR_CONNECT_TIMEOUT",
-  "UND_ERR_HEADERS_TIMEOUT",
-  "UND_ERR_SOCKET",
 ]);
 
 export type ProviderFailureStatus = "timed_out" | "cancelled" | "error";
@@ -41,14 +44,20 @@ export function classifyProviderError(error: unknown): ProviderErrorClassificati
     return { status: "error", retryable: RETRYABLE_STATUS_CODES.has(error.statusCode) };
   }
   if (error instanceof ModelCommunicationError) {
+    const diagnostic = error.diagnostic;
+    const code = diagnostic.transportCode;
     return {
       status: "error",
       retryable:
         error.category === "request_failed" &&
-        error.diagnostic.httpStatus === undefined &&
-        error.diagnostic.headersMs === undefined &&
-        error.diagnostic.transportCode !== undefined &&
-        RETRYABLE_TRANSPORT_CODES.has(error.diagnostic.transportCode),
+        diagnostic.httpStatus === undefined &&
+        diagnostic.headersMs === undefined &&
+        (diagnostic.sdkRetryable === true ||
+          (code !== undefined &&
+            (RETRYABLE_TRANSPORT_CODES.has(code) ||
+              code.startsWith("UND_ERR_") ||
+              code.startsWith("ERR_SSL_") ||
+              code.startsWith("ERR_TLS_")))),
     };
   }
   return { status: "error", retryable: error instanceof TypeError };
