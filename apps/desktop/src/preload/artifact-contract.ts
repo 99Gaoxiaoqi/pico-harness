@@ -2,6 +2,7 @@ import type { DesktopResult } from "./contract.js";
 
 export const DESKTOP_ARTIFACT_CHANNELS = {
   open: "pico:artifact:open",
+  openInDefaultApp: "pico:artifact:open-in-default-app",
   saveAs: "pico:artifact:save-as",
 } as const;
 
@@ -13,6 +14,7 @@ export interface DesktopArtifactReference {
 
 export interface DesktopArtifactsApi {
   open(reference: DesktopArtifactReference): Promise<DesktopResult<void>>;
+  openInDefaultApp(reference: DesktopArtifactReference): Promise<DesktopResult<void>>;
   saveAs(reference: DesktopArtifactReference): Promise<DesktopResult<void>>;
 }
 

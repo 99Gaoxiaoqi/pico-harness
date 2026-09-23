@@ -24,6 +24,8 @@ export function createArtifactBridge(
   return Object.freeze({
     open: (reference: DesktopArtifactReference) =>
       invoke(DESKTOP_ARTIFACT_CHANNELS.open, reference),
+    openInDefaultApp: (reference: DesktopArtifactReference) =>
+      invoke(DESKTOP_ARTIFACT_CHANNELS.openInDefaultApp, reference),
     saveAs: (reference: DesktopArtifactReference) =>
       invoke(DESKTOP_ARTIFACT_CHANNELS.saveAs, reference),
   });
