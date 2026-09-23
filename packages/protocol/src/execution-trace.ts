@@ -16,6 +16,11 @@ export interface RuntimeExecutionAttempt {
   readonly cachedInputTokens?: number;
   readonly reasoningTokens?: number;
   readonly error?: string;
+  readonly errorClass?: string;
+  readonly errorCategory?: string;
+  readonly transportCode?: string;
+  readonly retryable?: boolean;
+  readonly diagnosticId?: string;
   readonly costCNY?: number;
   readonly costStatus?: "estimated" | "included" | "unknown";
   readonly costUnknownReason?: string;
