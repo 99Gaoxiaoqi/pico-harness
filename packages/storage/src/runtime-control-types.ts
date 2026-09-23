@@ -1,5 +1,10 @@
 import type { BackgroundAutonomousPolicySnapshotData } from "@pico/core/background-autonomous-policy-schema";
-import type { CredentialRef, ProviderCallPurpose } from "@pico/core";
+import type {
+  CredentialRef,
+  ProviderCallPurpose,
+  ProviderAttemptLifecycleSnapshot,
+  RequestContextFacts,
+} from "@pico/core";
 export { PROVIDER_CALL_PURPOSES, type ProviderCallPurpose } from "@pico/core";
 
 export const JOB_STATUSES = [
@@ -144,6 +149,7 @@ export interface MergeRequestRecord {
   updatedAt: number;
 }
 
+/** Display projection derived exclusively from native physical attempt measurements. */
 export interface ProviderCallRecord {
   callId: string;
   sessionId?: string | undefined;
@@ -165,19 +171,6 @@ export interface ProviderCallRecord {
   createdAt: number;
 }
 
-export interface UsageBaselineRecord {
-  baselineId: string;
-  sessionId?: string | undefined;
-  goalId?: string | undefined;
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadTokens: number;
-  cacheWriteTokens: number;
-  cost: number;
-  importedAt: number;
-  source?: Record<string, unknown> | undefined;
-}
-
 export interface UsageLedgerFilter {
   sessionId?: string;
   goalId?: string;
@@ -194,10 +187,8 @@ export interface UsageLedgerTotals {
 
 export interface UsageLedgerSummary {
   providerCallCount: number;
-  baselineCount: number;
   providerCalls: UsageLedgerTotals;
-  baselines: UsageLedgerTotals;
-  /** baseline + baseline 导入后逐调用明细；调用方无需再叠加 Session 累计值。 */
+  /** Native physical attempt totals. */
   total: UsageLedgerTotals;
 }
 
@@ -512,4 +503,37 @@ function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[]): b
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Revision snapshots are replacement facts; identity and pricing never follow the current session. */
+export interface PhysicalAttemptRecord extends ProviderAttemptLifecycleSnapshot {
+  readonly accountingVersion: 1;
+  readonly contextFacts?: RequestContextFacts;
+  readonly accountingSource: "physical";
+  readonly providerCallId: string;
+  readonly logicalCallId: string;
+  readonly ownerId: string;
+  readonly sessionId?: string | undefined;
+  readonly workspacePath?: string | undefined;
+  readonly runId?: string | undefined;
+  readonly turnId?: string | undefined;
+  readonly conversationId?: string | undefined;
+  readonly goalId?: string | undefined;
+  readonly jobId?: string | undefined;
+  readonly jobAttemptId?: string | undefined;
+  readonly purpose: ProviderCallPurpose;
+  readonly route?: string | undefined;
+  readonly retryAttempt: number;
+  readonly costCNY?: number;
+  readonly costStatus: "estimated" | "included" | "unknown";
+  /** Request-time reason only; never reconstructed from the current price catalog. */
+  readonly costUnknownReason?: string;
+  readonly pricingVersion: string;
+  readonly pricingBasis?: Readonly<Record<string, unknown>>;
+  readonly attemptCoverage?: "complete" | "partial";
+  readonly requestDiagnostic?: Readonly<Record<string, unknown>>;
+}
+export interface PhysicalAttemptFilter extends UsageLedgerFilter {
+  providerCallId?: string | undefined;
+  runId?: string | undefined;
 }

@@ -10,6 +10,7 @@ import { useResourceFrame } from "./useResourceFrame.js";
 import type { WorkbarPanelHostProps, WorkbarScope } from "./workbar-panel-contract.js";
 import { invokeWorkbarRuntime, QUERY_PAGE_SIZE, workbarErrorMessage } from "./workbar-runtime.js";
 import { isRecord, numberField, stringField, timestampText } from "./workbar-values.js";
+import { artifactPreviewKind, artifactPreviewLimit } from "./artifact-preview-model.js";
 
 const ARTIFACT_CHUNK_BYTES = 32 * 1024;
 
@@ -24,6 +25,7 @@ export function FilesPanelController({ workspacePath, sessionId, active }: Workb
   const [contentLoading, setContentLoading] = useState(false);
   const [error, setError] = useState<string>();
   const [contentError, setContentError] = useState<string>();
+  const [notice, setNotice] = useState<string>();
   const streamRef = useRef<ArtifactStreamAccumulator | undefined>(undefined);
   const requestRef = useRef(0);
   const contentRequestRef = useRef(0);
@@ -38,15 +40,17 @@ export function FilesPanelController({ workspacePath, sessionId, active }: Workb
       if (request !== requestRef.current) return;
       setArtifacts(next.artifacts);
       setRevision(next.revision);
-      setSelectedArtifactId((selected) => {
-        if (selected && next.artifacts.some((artifact) => artifact.id === selected))
-          return selected;
+      const selected = selectedArtifactRef.current;
+      if (selected && !next.artifacts.some((artifact) => artifact.id === selected)) {
         selectedArtifactRef.current = undefined;
         contentRequestRef.current += 1;
         streamRef.current = undefined;
+        setSelectedArtifactId(undefined);
         setContent(undefined);
-        return undefined;
-      });
+        setContentLoading(false);
+        setContentError(undefined);
+        setNotice("该生成文件已不存在，已返回列表。");
+      }
     } catch (cause) {
       if (request === requestRef.current) setError(workbarErrorMessage(cause));
     } finally {
@@ -55,7 +59,13 @@ export function FilesPanelController({ workspacePath, sessionId, active }: Workb
   }, [runtime, scope]);
 
   useEffect(() => {
+    setContentLoading(false);
+    if (streamRef.current) setContent(artifactContentView(streamRef.current));
     if (active) void refresh();
+    return () => {
+      requestRef.current += 1;
+      contentRequestRef.current += 1;
+    };
   }, [active, refresh]);
 
   useResourceFrame({ active, sessionId, resource: "artifacts", revision }, refresh);
@@ -67,23 +77,40 @@ export function FilesPanelController({ workspacePath, sessionId, active }: Workb
       setContentLoading(true);
       setContentError(undefined);
       try {
-        const value = await invokeWorkbarRuntime(runtime, "session.artifacts.query", {
-          ...scope,
-          action: "read_chunk",
-          artifactId,
-          offsetBytes: offset,
-          limitBytes: ARTIFACT_CHUNK_BYTES,
-        });
-        if (request !== contentRequestRef.current || selectedArtifactRef.current !== artifactId) {
-          return;
-        }
-        const envelope = parseArtifactChunk(value);
         const artifact = artifacts.find((candidate) => candidate.id === artifactId);
         if (!artifact) throw new Error("生成文件已从当前 Session 移除。");
-        const previous = offset === 0 ? undefined : streamRef.current;
-        const next = appendArtifactStreamChunk(previous, artifact, envelope);
-        streamRef.current = next;
-        setContent(artifactContentView(next));
+        const limit = artifactPreviewLimit(artifact);
+        const kind = artifactPreviewKind(artifact);
+        if (kind === "unsupported")
+          throw new Error("此文件格式不支持内嵌预览，请打开或另存后查看。");
+        if ((kind === "image" || kind === "pdf") && artifact.size > limit)
+          throw new Error(`文件超过 ${limit / (1024 * 1024)} MiB 预览上限，请另存后查看。`);
+        if (offset >= limit) throw new Error("已达到内嵌预览上限，请另存后查看。");
+        let nextOffset = offset;
+        do {
+          const value = await invokeWorkbarRuntime(runtime, "session.artifacts.query", {
+            ...scope,
+            action: "read_chunk",
+            artifactId,
+            offsetBytes: nextOffset,
+            limitBytes: Math.min(ARTIFACT_CHUNK_BYTES, limit - nextOffset),
+          });
+          if (request !== contentRequestRef.current || selectedArtifactRef.current !== artifactId) {
+            return;
+          }
+          const envelope = parseArtifactChunk(value);
+          const previous = nextOffset === 0 ? undefined : streamRef.current;
+          const next = appendArtifactStreamChunk(previous, artifact, envelope);
+          streamRef.current = next;
+          // Avoid repeatedly encoding the entire accumulated binary for every
+          // 32 KiB chunk. Binary decoders only receive a complete bounded file.
+          if (next.complete || (kind !== "image" && kind !== "pdf")) {
+            setContent(artifactContentView(next));
+          }
+          nextOffset = next.nextOffset;
+          if (next.complete || nextOffset >= limit || !["html", "image", "pdf"].includes(kind))
+            break;
+        } while (request === contentRequestRef.current);
       } catch (cause) {
         if (request === contentRequestRef.current) setContentError(workbarErrorMessage(cause));
       } finally {
@@ -97,6 +124,8 @@ export function FilesPanelController({ workspacePath, sessionId, active }: Workb
     (artifactId: string) => {
       selectedArtifactRef.current = artifactId;
       setSelectedArtifactId(artifactId);
+      setNotice(undefined);
+      setContentError(undefined);
       streamRef.current = undefined;
       setContent(undefined);
       void loadChunk(artifactId, 0);
@@ -104,7 +133,20 @@ export function FilesPanelController({ workspacePath, sessionId, active }: Workb
     [loadChunk],
   );
 
-  const exportArtifact = async (artifactId: string, action: "open" | "saveAs") => {
+  const backToList = useCallback(() => {
+    selectedArtifactRef.current = undefined;
+    contentRequestRef.current += 1;
+    streamRef.current = undefined;
+    setSelectedArtifactId(undefined);
+    setContent(undefined);
+    setContentLoading(false);
+    setContentError(undefined);
+  }, []);
+
+  const exportArtifact = async (
+    artifactId: string,
+    action: "open" | "saveAs" | "openInDefaultApp",
+  ) => {
     setContentError(undefined);
     try {
       const result = await window.pico.artifacts[action]({ ...scope, artifactId });
@@ -123,10 +165,13 @@ export function FilesPanelController({ workspacePath, sessionId, active }: Workb
       contentLoading={contentLoading}
       error={error}
       contentError={contentError}
+      notice={notice}
       onRefresh={() => void refresh()}
       onSelectArtifact={selectArtifact}
+      onBack={backToList}
       onLoadChunk={(artifactId, offset) => void loadChunk(artifactId, offset)}
       onOpenArtifact={(artifactId) => void exportArtifact(artifactId, "open")}
+      onOpenDefaultApp={(artifactId) => void exportArtifact(artifactId, "openInDefaultApp")}
       onSaveArtifactAs={(artifactId) => void exportArtifact(artifactId, "saveAs")}
     />
   );
@@ -196,12 +241,30 @@ export function appendArtifactStreamChunk(
   if (decoded.byteLength !== chunk.endOffsetBytes - chunk.offsetBytes) {
     throw new Error("生成文件分块长度与 authority 返回的字节范围不一致。");
   }
+  if (
+    chunk.totalBytes < chunk.endOffsetBytes ||
+    (previous && previous.totalSize !== chunk.totalBytes) ||
+    (chunk.truncated && (chunk.nextOffsetBytes !== chunk.endOffsetBytes || decoded.length === 0)) ||
+    (!chunk.truncated && chunk.endOffsetBytes !== chunk.totalBytes)
+  ) {
+    throw new Error("生成文件分块范围或总长度发生变化。");
+  }
+  if (chunk.endOffsetBytes > artifactPreviewLimit(artifact))
+    throw new Error("生成文件内容超过内嵌预览上限。");
+  if (
+    ["image", "pdf"].includes(artifactPreviewKind(artifact)) &&
+    chunk.totalBytes > artifactPreviewLimit(artifact)
+  )
+    throw new Error("生成文件内容超过内嵌预览上限。");
   const bytes = concatBytes(previous?.bytes, decoded);
   const nextOffset = chunk.nextOffsetBytes ?? chunk.endOffsetBytes;
   const complete = !chunk.truncated || nextOffset >= chunk.totalBytes;
   return {
     artifactId: artifact.id,
-    encoding: isTextArtifact(artifact.mimeType) ? "utf8" : "base64",
+    encoding:
+      isTextArtifact(artifact.mimeType) || artifactPreviewKind(artifact) === "diff"
+        ? "utf8"
+        : "base64",
     bytes,
     nextOffset,
     totalSize: chunk.totalBytes,

@@ -126,7 +126,11 @@ const REQUIRED_REQUEST_FIELDS = [
   "shutdownGraceMs",
   "trace",
 ] as const;
-const COLLABORATION_MODES = new Set<SessionSettings["collaborationMode"]>(["agent", "plan"]);
+const COLLABORATION_MODES = new Set<SessionSettings["collaborationMode"]>([
+  "agent",
+  "plan",
+  "research",
+]);
 const PERMISSION_MODES = new Set<SessionSettings["permissionMode"]>(["ask", "auto", "full-access"]);
 const EMPTY_USAGE: RunAgentUsage = Object.freeze({
   promptTokens: 0,

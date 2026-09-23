@@ -191,3 +191,143 @@ test("review, terminal and side chat contracts are renderer allowlisted and stri
     RuntimeProtocolError,
   );
 });
+
+test("execution trace crosses the desktop protocol with strict causal and coverage shapes", () => {
+  assert.ok(DESKTOP_RUNTIME_METHODS.includes("session.execution.query"));
+  assert.deepEqual(
+    parseStrictRuntimeParams("session.execution.query", {
+      workspacePath: "/workspace",
+      sessionId: "session",
+      cursor: "page-2",
+    }),
+    { workspacePath: "/workspace", sessionId: "session", cursor: "page-2" },
+  );
+  assert.throws(
+    () =>
+      parseStrictRuntimeParams("session.execution.query", {
+        workspacePath: "/workspace",
+        sessionId: "session",
+        cursor: "x".repeat(2049),
+      }),
+    RuntimeProtocolError,
+  );
+  const page = {
+    schemaVersion: 1,
+    sessionId: "session",
+    runs: [
+      {
+        runId: "run",
+        invocationId: "invocation",
+        at: "2026-09-22T00:00:00.000Z",
+        status: "failed",
+        reason: "provider unavailable",
+        steps: [
+          {
+            id: "step",
+            eventId: "event",
+            turnId: "turn",
+            kind: "model",
+            title: "model",
+            at: "2026-09-22T00:00:00.000Z",
+            status: "failed",
+            costStatus: "unknown",
+            error: "provider unavailable",
+          },
+        ],
+      },
+    ],
+    summary: { scope: "session", modelCalls: 1, failedCalls: 1, meteredCalls: 0, unpricedCalls: 1 },
+    coverage: {
+      oversizedRunIds: [],
+      missingModelCallRunIds: [],
+      incompleteRunIds: [],
+      modelAttempts: "logical_only",
+    },
+  };
+  assert.ok(DESKTOP_RUNTIME_METHODS.includes("session.execution.summary"));
+  assert.deepEqual(
+    parseStrictRuntimeParams("session.execution.summary", {
+      workspacePath: "/workspace",
+      sessionId: "session",
+    }),
+    { workspacePath: "/workspace", sessionId: "session" },
+  );
+  assert.deepEqual(
+    parseRuntimeResult("session.execution.summary", {
+      ...page.summary,
+      physicalAttempts: 2,
+      retries: 1,
+      cacheCoverage: "partial",
+    }),
+    { ...page.summary, physicalAttempts: 2, retries: 1, cacheCoverage: "partial" },
+  );
+  assert.throws(
+    () =>
+      parseStrictRuntimeParams("session.execution.summary", {
+        workspacePath: "/workspace",
+        sessionId: "session",
+        cursor: "invalid",
+      }),
+    RuntimeProtocolError,
+  );
+  assert.throws(
+    () =>
+      parseRuntimeResult("session.execution.summary", {
+        ...page.summary,
+        physicalAttempts: -1,
+      }),
+    RuntimeProtocolError,
+  );
+  assert.deepEqual(parseRuntimeResult("session.execution.query", page), page);
+  const physicalPage = {
+    ...page,
+    coverage: { ...page.coverage, modelAttempts: "physical" },
+    runs: [
+      {
+        ...page.runs[0],
+        steps: [
+          {
+            ...page.runs[0]!.steps[0],
+            attempts: [
+              {
+                attemptId: "attempt",
+                attempt: 0,
+                provider: "test",
+                model: "model",
+                startedAt: "2026-09-22T00:00:00.000Z",
+                completedAt: "2026-09-22T00:00:00.010Z",
+                status: "failed",
+                latencyMs: 10,
+                httpStatus: 503,
+                usageBasis: "missing",
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+  assert.deepEqual(parseRuntimeResult("session.execution.query", physicalPage), physicalPage);
+  physicalPage.runs[0]!.steps[0]!.attempts[0]!.attempt = -1;
+  assert.throws(
+    () => parseRuntimeResult("session.execution.query", physicalPage),
+    RuntimeProtocolError,
+  );
+
+  assert.throws(
+    () =>
+      parseRuntimeResult("session.execution.query", {
+        ...page,
+        coverage: { ...page.coverage, modelAttempts: "invented" },
+      }),
+    RuntimeProtocolError,
+  );
+  assert.throws(
+    () =>
+      parseRuntimeResult("session.execution.query", {
+        ...page,
+        summary: { ...page.summary, costCNY: "unknown" },
+      }),
+    RuntimeProtocolError,
+  );
+});

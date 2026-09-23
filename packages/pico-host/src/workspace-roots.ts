@@ -1,3 +1,4 @@
+import { parseToolResultArchiveRef } from "@pico/runtime/tool-result-archive";
 import { realpathSync, statSync } from "node:fs";
 import { realpath as realpathAsync, stat as statAsync } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
@@ -382,6 +383,8 @@ export function workspaceAccessesFromCall(call: ToolCall): WorkspaceAccess[] {
   }
   const path = (input as Record<string, unknown>)["path"];
   if (typeof path === "string") {
+    // Archive resources are authorized against the bound Session ledger, never the filesystem.
+    if (call.name === "read_file" && parseToolResultArchiveRef(path)) return [];
     return [{ path: path || ".", access: READ_ONLY_PATH_TOOLS.has(call.name) ? "read" : "write" }];
   }
   return call.name === "glob" || call.name === "grep" ? [{ path: ".", access: "read" }] : [];

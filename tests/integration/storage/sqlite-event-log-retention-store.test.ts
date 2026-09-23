@@ -17,7 +17,6 @@ import {
 import { withWorkspaceSqliteLease } from "@pico/storage";
 
 const TINY_POLICY = { hardLimitBytes: 2, lowWatermarkBytes: 1 } as const;
-const EVIDENCE_DIGEST = "a".repeat(64);
 const FILE_HISTORY_DIGEST = "b".repeat(64);
 const ASSET_DIGEST = "c".repeat(64);
 
@@ -298,28 +297,12 @@ test("sqlite EventLog retention: cascades manifests and durably records only zer
   try {
     seedSession(storageRoot, "first");
     seedSession(storageRoot, "second");
-    const evidenceJson = JSON.stringify({
-      // DB inventory is authoritative when a manifest's cached size is stale.
-      blob: { algorithm: "sha256", digest: EVIDENCE_DIGEST, sizeBytes: 999 },
-    });
     const historyJson = JSON.stringify({
       blob: { algorithm: "sha256", digest: FILE_HISTORY_DIGEST, sizeBytes: 202 },
     });
     withWorkspaceSqliteLease(storageRoot, (lease) =>
       lease.transaction("write", () => {
-        lease.database
-          .prepare(
-            "INSERT INTO evidence_blobs (digest, size_bytes, created_at) VALUES (?, 101, '2026')",
-          )
-          .run(EVIDENCE_DIGEST);
         for (const sessionId of ["first", "second"]) {
-          lease.database
-            .prepare(
-              `INSERT INTO evidence_records (
-                 session_id, content_hash, kind, archived_at, content_json
-               ) VALUES (?, ?, 'tool-exchange', '2026', ?)`,
-            )
-            .run(sessionId, sessionId === "first" ? "1".repeat(64) : "2".repeat(64), evidenceJson);
           lease.database
             .prepare(
               `INSERT INTO file_history (
@@ -410,21 +393,10 @@ test("sqlite EventLog retention: cascades manifests and durably records only zer
           .run();
         lease.database
           .prepare(
-            `INSERT INTO usage_provider_calls (
-               call_id, tx_id, session_id, purpose, provider, model, status,
-               input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost, created_at
-             ) VALUES (
-               'usage-second', 'tx', 'second', 'test', 'provider', 'model', 'succeeded',
-               0, 0, 0, 0, 0, 1
+            `INSERT INTO usage_physical_attempts VALUES (
+               'physical-second', 'usage-second', 'second', NULL, NULL, 'run', 'owner', 0,
+               'succeeded', '2026', '{"accountingSource":"physical","sessionId":"second","runId":"run"}'
              )`,
-          )
-          .run();
-        lease.database
-          .prepare(
-            `INSERT INTO usage_baselines (
-               baseline_id, session_id, input_tokens, output_tokens,
-               cache_read_tokens, cache_write_tokens, cost, imported_at
-             ) VALUES ('baseline-second', 'second', 0, 0, 0, 0, 0, 1)`,
           )
           .run();
         lease.database
@@ -452,7 +424,6 @@ test("sqlite EventLog retention: cascades manifests and durably records only zer
     assert.deepEqual(
       second.blobGcIntents.map(({ kind, digest, byteLength }) => ({ kind, digest, byteLength })),
       [
-        { kind: "evidence", digest: EVIDENCE_DIGEST, byteLength: 101 },
         { kind: "file_history", digest: FILE_HISTORY_DIGEST, byteLength: 202 },
         { kind: "runtime_asset", digest: ASSET_DIGEST, byteLength: 303 },
       ],
@@ -462,13 +433,11 @@ test("sqlite EventLog retention: cascades manifests and durably records only zer
       "cas://shared",
     );
     closeAllOperationalDatabasesForTest();
-    assert.equal(readPendingEventLogBlobGcIntents({ storageRoot }).length, 3);
+    assert.equal(readPendingEventLogBlobGcIntents({ storageRoot }).length, 2);
     withWorkspaceSqliteLease(storageRoot, (lease) =>
       lease.transaction("read", () => {
         assert.equal(lease.database.prepare("SELECT 1 FROM sessions").get(), undefined);
-        assert.equal(lease.database.prepare("SELECT 1 FROM evidence_records").get(), undefined);
         assert.equal(lease.database.prepare("SELECT 1 FROM file_history").get(), undefined);
-        assert.equal(lease.database.prepare("SELECT 1 FROM evidence_blobs").get(), undefined);
         for (const table of [
           "desktop_idempotency",
           "desktop_first_send_claims",
@@ -484,8 +453,7 @@ test("sqlite EventLog retention: cascades manifests and durably records only zer
           "completion_outbox",
           "merge_requests",
           "daemon_runs",
-          "usage_provider_calls",
-          "usage_baselines",
+          "usage_physical_attempts",
         ]) {
           assert.notEqual(lease.database.prepare(`SELECT 1 FROM ${table}`).get(), undefined, table);
         }
@@ -505,44 +473,40 @@ test("sqlite EventLog retention: cascades manifests and durably records only zer
         assert.equal(daemonRun["checkpoint_id"], null);
         const usage = lease.database
           .prepare(
-            "SELECT session_id, conversation_id FROM usage_provider_calls WHERE call_id = 'usage-second'",
+            "SELECT session_id, run_id FROM usage_physical_attempts WHERE provider_call_id = 'usage-second'",
           )
           .get() as Record<string, unknown>;
         assert.equal(usage["session_id"], null);
-        assert.equal(usage["conversation_id"], null);
-        const baseline = lease.database
-          .prepare("SELECT session_id FROM usage_baselines WHERE baseline_id = 'baseline-second'")
-          .get() as Record<string, unknown>;
-        assert.equal(baseline["session_id"], null);
+        assert.equal(usage["run_id"], null);
         assert.equal(
           lease.database.prepare("SELECT COUNT(*) AS count FROM retention_gc_intents").get()![
             "count"
           ],
-          3,
+          2,
         );
       }),
     );
 
-    const evidenceIntent = second.blobGcIntents.find(({ kind }) => kind === "evidence")!;
+    const historyIntent = second.blobGcIntents.find(({ kind }) => kind === "file_history")!;
     recordEventLogBlobGcResult({
       storageRoot,
-      intentId: evidenceIntent.intentId,
+      intentId: historyIntent.intentId,
       result: { status: "failed", error: "busy" },
     });
     const failed = readPendingEventLogBlobGcIntents({ storageRoot }).find(
-      ({ intentId }) => intentId === evidenceIntent.intentId,
+      ({ intentId }) => intentId === historyIntent.intentId,
     )!;
     assert.equal(failed.status, "failed");
     assert.equal(failed.attemptCount, 1);
     assert.equal(failed.lastError, "busy");
     recordEventLogBlobGcResult({
       storageRoot,
-      intentId: evidenceIntent.intentId,
+      intentId: historyIntent.intentId,
       result: { status: "completed" },
     });
     assert.equal(
       readPendingEventLogBlobGcIntents({ storageRoot }).some(
-        ({ intentId }) => intentId === evidenceIntent.intentId,
+        ({ intentId }) => intentId === historyIntent.intentId,
       ),
       false,
     );

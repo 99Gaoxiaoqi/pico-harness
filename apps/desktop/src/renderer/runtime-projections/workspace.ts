@@ -1,3 +1,4 @@
+import { parseRuntimeResult } from "@pico/protocol";
 import {
   folderWorkspaceCapabilities,
   type ChangeView,
@@ -17,7 +18,9 @@ export function parseSessionSettings(value: unknown): SessionSettingsView | unde
   const modelRouteId = stringValue(settings.modelRouteId);
   const model = stringValue(settings.model);
   const collaborationMode =
-    settings.collaborationMode === "plan" || settings.collaborationMode === "agent"
+    settings.collaborationMode === "plan" ||
+    settings.collaborationMode === "agent" ||
+    settings.collaborationMode === "research"
       ? settings.collaborationMode
       : undefined;
   const permissionMode =
@@ -81,19 +84,7 @@ export function parseChanges(value: unknown): {
 }
 
 export function parseSessionContext(value: unknown): SessionContextView {
-  const result = isRecord(value) ? value : {};
-  const context = isRecord(result.context) ? result.context : {};
-  return {
-    routeId: stringValue(context.routeId, "未知路由"),
-    estimatedInputTokens: numberValue(context.estimatedInputTokens),
-    contextWindowTokens: numberValue(context.contextWindowTokens),
-    reservedOutputTokens: numberValue(context.reservedOutputTokens),
-    safetyMarginTokens: numberValue(context.safetyMarginTokens),
-    inputBudgetTokens: numberValue(context.inputBudgetTokens),
-    remainingTokens: numberValue(context.remainingTokens),
-    usedPercent: numberValue(context.usedPercent),
-    estimation: stringValue(context.estimation, "estimated"),
-  };
+  return parseRuntimeResult("session.context.get", value).context;
 }
 
 export function parseWorkspaceList(value: unknown): readonly JsonRecord[] {

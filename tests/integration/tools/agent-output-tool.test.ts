@@ -41,11 +41,14 @@ function fixture(context: GraphOperatorActivationContext | null = ACTIVATION) {
 
 test("agent_output commits a stable success RuntimeEvent payload through its port", async () => {
   const { tool, commits } = fixture();
+  assert.equal(
+    "evidence_refs" in (tool.definition().inputSchema as { properties: object }).properties,
+    false,
+  );
   const raw = await tool.execute(
     JSON.stringify({
       status: "success",
       output: "  已完成调研  ",
-      evidence_refs: ["evidence://finding-1"],
       artifact_refs: ["artifact://report-1"],
     }),
     { toolCallId: "call-agent-output-1" },
@@ -70,7 +73,7 @@ test("agent_output commits a stable success RuntimeEvent payload through its por
     status: "success",
     output: "已完成调研",
     outputBytes: Buffer.byteLength("已完成调研", "utf8"),
-    evidenceRefs: ["evidence://finding-1"],
+    evidenceRefs: [],
     artifactRefs: ["artifact://report-1"],
     idempotencyKey: commits[0]?.idempotencyKey,
     fingerprint: commits[0]?.fingerprint,
@@ -124,10 +127,10 @@ test("agent_output rejects empty and byte-bounded output plus invalid refs", asy
   );
   await assert.rejects(
     tool.execute(
-      JSON.stringify({ status: "success", output: "done", evidence_refs: ["evidence://x", ""] }),
+      JSON.stringify({ status: "success", output: "done", artifact_refs: ["artifact://x", ""] }),
       { toolCallId: "call-empty-ref" },
     ),
-    /evidence_refs\[1\] 必须是非空字符串/u,
+    /artifact_refs\[1\] 必须是非空字符串/u,
   );
   assert.equal(commits.length, 0);
 });
@@ -149,15 +152,15 @@ test("agent_output enforces exact UTF-8 byte and reference-count boundaries", as
   );
 
   const exactRef = "r".repeat(AGENT_OUTPUT_MAX_REF_BYTES);
-  const half = AGENT_OUTPUT_MAX_REFS / 2;
-  const evidenceRefs = Array.from({ length: half }, (_, index) => `evidence://${index}`);
-  const artifactRefs = Array.from({ length: half }, (_, index) => `artifact://${index}`);
-  evidenceRefs[0] = exactRef;
+  const artifactRefs = Array.from(
+    { length: AGENT_OUTPUT_MAX_REFS },
+    (_, index) => `artifact://${index}`,
+  );
+  artifactRefs[0] = exactRef;
   await tool.execute(
     JSON.stringify({
       status: "failure",
       output: "bounded refs",
-      evidence_refs: evidenceRefs,
       artifact_refs: artifactRefs,
     }),
     { toolCallId: "call-exact-refs" },
@@ -167,7 +170,7 @@ test("agent_output enforces exact UTF-8 byte and reference-count boundaries", as
     AGENT_OUTPUT_MAX_REFS,
   );
   assert.equal(
-    Buffer.byteLength(commits[1]!.eventPayload.evidenceRefs[0]!, "utf8"),
+    Buffer.byteLength(commits[1]!.eventPayload.artifactRefs[0]!, "utf8"),
     exactRef.length,
   );
 
@@ -176,23 +179,22 @@ test("agent_output enforces exact UTF-8 byte and reference-count boundaries", as
       JSON.stringify({
         status: "success",
         output: "over ref bytes",
-        evidence_refs: [`${exactRef}a`],
+        artifact_refs: [`${exactRef}a`],
       }),
       { toolCallId: "call-over-ref-bytes" },
     ),
-    /evidence_refs\[0\] 不得超过/u,
+    /artifact_refs\[0\] 不得超过/u,
   );
   await assert.rejects(
     tool.execute(
       JSON.stringify({
         status: "success",
         output: "over total refs",
-        evidence_refs: [...evidenceRefs, "evidence://overflow"],
-        artifact_refs: artifactRefs,
+        artifact_refs: [...artifactRefs, "artifact://overflow"],
       }),
       { toolCallId: "call-over-total-refs" },
     ),
-    new RegExp(`合计不得超过 ${AGENT_OUTPUT_MAX_REFS} 项`, "u"),
+    new RegExp(`artifact_refs 不得超过 ${AGENT_OUTPUT_MAX_REFS} 项`, "u"),
   );
   assert.equal(commits.length, 2);
 });
@@ -210,16 +212,16 @@ test("agent_output rejects exact-shape, status, and malformed ref extremes witho
     { input: { status: true, output: "done" }, error: /status 必须是/u },
     { input: { status: null, output: "done" }, error: /status 必须是/u },
     {
-      input: { status: "success", output: "done", evidence_refs: "evidence://not-array" },
-      error: /evidence_refs 必须是字符串数组/u,
+      input: { status: "success", output: "done", artifact_refs: "artifact://not-array" },
+      error: /artifact_refs 必须是字符串数组/u,
     },
     {
       input: {
         status: "success",
         output: "done",
-        evidence_refs: ["evidence://same", "evidence://same"],
+        artifact_refs: ["artifact://same", "artifact://same"],
       },
-      error: /evidence_refs 不得包含重复引用/u,
+      error: /artifact_refs 不得包含重复引用/u,
     },
     {
       input: { status: "success", output: "done", artifact_refs: ["artifact://bad\nref"] },
@@ -230,17 +232,16 @@ test("agent_output rejects exact-shape, status, and malformed ref extremes witho
       error: /output 包含非法 UTF-16\/UTF-8/u,
     },
     {
-      input: { status: "success", output: "done", evidence_refs: ["evidence://\udc00"] },
-      error: /evidence_refs\[0\] 包含非法 UTF-16\/UTF-8/u,
+      input: { status: "success", output: "done", artifact_refs: ["artifact://\udc00"] },
+      error: /artifact_refs\[0\] 包含非法 UTF-16\/UTF-8/u,
     },
     {
       input: {
         status: "success",
         output: "done",
-        evidence_refs: [" provenance://same "],
-        artifact_refs: ["provenance://same"],
+        evidence_refs: [],
       },
-      error: /evidence_refs 与 artifact_refs 不得包含相同引用/u,
+      error: /不支持字段 evidence_refs/u,
     },
   ];
 
@@ -296,7 +297,7 @@ test("agent_output passes the same activation idempotency key across replayed to
   const args = JSON.stringify({
     status: "success",
     output: "deterministic result",
-    evidence_refs: ["evidence://one"],
+    artifact_refs: ["artifact://one"],
   });
 
   await tool.execute(args, { toolCallId: "call-first" });

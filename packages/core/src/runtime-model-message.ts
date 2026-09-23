@@ -38,6 +38,7 @@ const CLAIM_BY_KIND: Record<RuntimeEvent["kind"], RuntimeEventClaimKind> = {
   "tool.group.loaded": "control",
   "tool.recovery.resolved": "control",
   "tool.result.recorded": "message",
+  "tool.result.projection.recorded": "control",
   "agent.output": "control",
   "approval.requested": "control",
   "approval.settled": "control",
@@ -90,19 +91,13 @@ export function projectRuntimeModelMessage<TTranscriptEvent>(
 
 /** Shared projection for model-visible and transcript-only structured ToolResult facts. */
 export function projectRuntimeToolResultMessage(event: RuntimeToolResultRecordedEvent): Message {
-  const evidence = event.refs.evidence;
-  const evidenceUri = evidence
-    ? `pico://evidence/${encodeURIComponent(evidence.sessionId)}/${evidence.contentHash}`
-    : undefined;
-  const content =
-    event.data.body.storage === "evidence" && evidence && evidenceUri
-      ? renderEvidenceProjection(event, evidenceUri)
-      : event.data.projection.text;
+  if (event.data.body.storage !== "inline" || event.refs.evidence) {
+    throw new Error("Retired evidence ToolResult requires session maintenance cleanup");
+  }
   return {
     role: "user",
-    content,
+    content: event.data.projection.text,
     toolCallId: event.refs.toolCallId,
-    ...(evidenceUri ? { toolResultEvidenceUri: evidenceUri } : {}),
   };
 }
 
@@ -118,26 +113,4 @@ export function projectRuntimeToolResultEnvelope(
     projection: event.data.projection,
     ...(event.refs.evidence ? { evidence: event.refs.evidence } : {}),
   });
-}
-
-/**
- * 旧账本 `storage:"evidence"` 事件的只读投影(ADR 26 §2.5):decode 容忍、
- * 预览仍在,但回读协议已退役——投影明示"不可回读",不再指引模型调用
- * 已不存在的 read_evidence。
- */
-function renderEvidenceProjection(
-  event: RuntimeToolResultRecordedEvent,
-  evidenceUri: string,
-): string {
-  const metadata = [
-    `工具: ${event.data.toolName}`,
-    `状态: ${event.data.status}`,
-    `原始输出: ${event.data.body.sizeBytes} bytes`,
-    `SHA-256: ${event.data.body.sha256}`,
-    `Evidence: ${evidenceUri}`,
-    "Evidence 回读协议已退役(ADR 26):完整原文不可回读,以下仅为入库预览。",
-  ].join("\n");
-  return event.data.projection.text
-    ? `${metadata}\n\n预览:\n${event.data.projection.text}`
-    : metadata;
 }

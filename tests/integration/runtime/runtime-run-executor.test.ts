@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { ModelCommunicationError } from "@pico/core";
 import type { AgentEngine } from "@pico/pico-host/agent-engine";
 import { Session } from "@pico/pico-host/session";
 import type { HookOutput } from "@pico/pico-host/hooks/types";
@@ -13,6 +14,8 @@ import {
   emitRuntimeLifecycleEvent,
 } from "@pico/pico-host/product-runtime-run-executor";
 import { RuntimeRun } from "@pico/pico-host/product-runtime-run";
+import { SqliteRuntimeControlStore } from "@pico/storage/sqlite/sqlite-runtime-control-store";
+import type { PhysicalAttemptRecord } from "@pico/storage/runtime-control-types";
 import type { SessionRuntime } from "@pico/pico-host/session-runtime";
 
 test("RuntimeRunExecutor executes one assembled turn without owning its resources", async () => {
@@ -24,6 +27,7 @@ test("RuntimeRunExecutor executes one assembled turn without owning its resource
     picoHome,
     runtimePort: createEngineRuntimePort(),
   });
+  const ledger = new SqliteRuntimeControlStore({ storageRoot: session.runtimeStorageRoot });
   try {
     await session.recover();
     const hookEvents: string[] = [];
@@ -35,6 +39,36 @@ test("RuntimeRunExecutor executes one assembled turn without owning its resource
     } as unknown as SessionRuntime;
     const engine = {
       run: async (target: Session) => {
+        const attempt: PhysicalAttemptRecord = {
+          physicalAttemptId: "executor-physical",
+          revision: 0,
+          attempt: 0,
+          provider: "openai",
+          model: "test",
+          startedAt: new Date().toISOString(),
+          status: "prepared",
+          usageBasis: "missing",
+          accountingVersion: 1,
+          accountingSource: "physical",
+          providerCallId: "executor-call",
+          logicalCallId: "executor-logical",
+          ownerId: ledger.beginPhysicalAttemptOwner(),
+          sessionId: target.id,
+          purpose: "main",
+          retryAttempt: 0,
+          costStatus: "unknown",
+          pricingVersion: "test-v1",
+        };
+        ledger.recordPhysicalAttempt(attempt);
+        ledger.recordPhysicalAttempt({
+          ...attempt,
+          revision: 1,
+          status: "succeeded",
+          usageBasis: "reported",
+          usage: { promptTokens: 12, completionTokens: 4 },
+          costCNY: 0.02,
+          costStatus: "estimated",
+        });
         await target.commitMessages({ role: "assistant", content: "answer" });
         return target.getHistory();
       },
@@ -61,6 +95,12 @@ test("RuntimeRunExecutor executes one assembled turn without owning its resource
     }).execute();
 
     assert.equal(result.finalMessage, "answer");
+    assert.equal(
+      session.totalPromptTokens,
+      0,
+      "legacy in-memory counter did not receive the physical revision",
+    );
+    assert.deepEqual(result.usage, { promptTokens: 12, completionTokens: 4, costCNY: 0.02 });
     assert.deepEqual(hookEvents, ["UserPromptSubmit", "UserPromptExpansion"]);
     assert.deepEqual(lifecycle, ["run.started", "run.finished"]);
     assert.equal(lifecycleEvents[0]?.sessionId, session.id);
@@ -70,6 +110,7 @@ test("RuntimeRunExecutor executes one assembled turn without owning its resource
     );
     assert.equal(session.runtimeEventStore?.storageRoot !== undefined, true);
   } finally {
+    ledger.close();
     await session.close();
     await rm(root, { recursive: true, force: true });
   }
@@ -366,6 +407,42 @@ test("commitMessageOnce remains idempotent inside an active RuntimeRun", async (
       true,
     );
     await session.commitMessages({ role: "assistant", content: "still writable" });
+  } finally {
+    await session.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("RuntimeRun terminal preserves only safe model diagnostics", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-runtime-model-failure-"));
+  const session = new Session("runtime-model-failure", join(root, "workspace"), {
+    persistence: true,
+    picoHome: join(root, "pico-home"),
+    runtimePort: createEngineRuntimePort(),
+  });
+  try {
+    await session.recover();
+    const run = await RuntimeRun.start({
+      capability: session.runtimeEventCapability!,
+      agentSwarmAuthorization: "none",
+    });
+    await assert.rejects(
+      run.run(async () => {
+        throw new ModelCommunicationError("request_failed", {
+          diagnosticId: "safe-terminal",
+          durationMs: 10,
+          transportCode: "ECONNRESET",
+        });
+      }),
+      ModelCommunicationError,
+    );
+    const terminal = (await session.runtimeEventStore!.readSession(session.id)).find(
+      (event) => event.kind === "run.terminal" && event.runId === run.runId,
+    );
+    assert.equal(
+      terminal?.kind === "run.terminal" ? terminal.data.reason : undefined,
+      "ModelCommunicationError category=request_failed diagnosticId=safe-terminal; detail omitted",
+    );
   } finally {
     await session.close();
     await rm(root, { recursive: true, force: true });

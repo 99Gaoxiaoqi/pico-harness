@@ -1,3 +1,4 @@
+import { physicalProviderFixture } from "../helpers/physical-provider.js";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -542,7 +543,7 @@ test("atomic extraction failure cannot replace foreground terminal success", asy
   }
 });
 
-test("default priced atomic extraction records memory_review without changing main Session usage", async () => {
+test("default priced atomic extraction accounts memory_review separately from main physical requests", async () => {
   const fixture = await createFixture("priced-worker");
   const trustStore = await trustWorkspaces(fixture.picoHome, fixture.workspace);
   const sessionId = "quality-priced-worker";
@@ -550,38 +551,41 @@ test("default priced atomic extraction records memory_review without changing ma
     generateCalls = 0;
   const providerFactory: RunAgentProviderFactory = () => {
     providerInstances++;
-    return {
-      async generate(messages, tools) {
-        const extractionPrompt = messages.at(-1)?.content ?? "";
-        if (
-          extractionPrompt.includes("<memory_evidence>") ||
-          extractionPrompt.includes("<user_evidence_candidates>")
-        ) {
+    return physicalProviderFixture(
+      {
+        async generate(messages, tools) {
+          const extractionPrompt = messages.at(-1)?.content ?? "";
+          if (
+            extractionPrompt.includes("<memory_evidence>") ||
+            extractionPrompt.includes("<user_evidence_candidates>")
+          ) {
+            return {
+              role: "assistant",
+              content: successfulExtraction(
+                extractionPrompt,
+                "npm run priced-review",
+                messages.slice(0, -1),
+              ),
+              usage: { promptTokens: 40, completionTokens: 20 },
+            };
+          }
+          if (++generateCalls === 1 && tools.some((tool) => tool.name === "memory_extract")) {
+            return {
+              role: "assistant",
+              content: "",
+              toolCalls: [{ id: "priced", name: "memory_extract", arguments: "{}" }],
+              usage: { promptTokens: 100, completionTokens: 50 },
+            };
+          }
           return {
             role: "assistant",
-            content: successfulExtraction(
-              extractionPrompt,
-              "npm run priced-review",
-              messages.slice(0, -1),
-            ),
-            usage: { promptTokens: 40, completionTokens: 20 },
-          };
-        }
-        if (++generateCalls === 1 && tools.some((tool) => tool.name === "memory_extract")) {
-          return {
-            role: "assistant",
-            content: "",
-            toolCalls: [{ id: "priced", name: "memory_extract", arguments: "{}" }],
+            content: "priced foreground complete",
             usage: { promptTokens: 100, completionTokens: 50 },
           };
-        }
-        return {
-          role: "assistant",
-          content: "priced foreground complete",
-          usage: { promptTokens: 100, completionTokens: 50 },
-        };
+        },
       },
-    };
+      "quality-priced-model",
+    );
   };
   const capabilities = resolveModelRouteCapabilities(
     "openai",
@@ -623,12 +627,12 @@ test("default priced atomic extraction records memory_review without changing ma
       picoHome: fixture.picoHome,
     });
     assert.ok(session);
-    const usageBeforeExtraction = structuredClone(session.getRuntimeStateSnapshot().usage);
     await drainExtraction(fixture, sessionId);
     await waitForProviderCalls(fixture, 4);
     const usageAfterExtraction = session.getRuntimeStateSnapshot().usage;
-    assert.deepEqual(usageAfterExtraction, usageBeforeExtraction);
-    assert.equal(usageAfterExtraction.totalProviderCalls, 2);
+    assert.equal(usageAfterExtraction.totalProviderCalls, 4);
+    assert.equal(usageAfterExtraction.totalPromptTokens, 280);
+    assert.equal(usageAfterExtraction.totalCompletionTokens, 140);
     const store = openStore(fixture);
     try {
       assert.equal(
@@ -644,7 +648,7 @@ test("default priced atomic extraction records memory_review without changing ma
         .root,
     });
     try {
-      const calls = ledger.listProviderCalls();
+      const calls = ledger.listAccountingProviderCalls();
       assert.deepEqual(calls.map((call) => call.purpose).sort(), [
         "main",
         "main",
@@ -813,7 +817,7 @@ async function waitForProviderCalls(fixture: RuntimeFixture, expected: number): 
         .root,
     });
     try {
-      if (ledger.listProviderCalls().length === expected) return;
+      if (ledger.listAccountingProviderCalls().length === expected) return;
     } finally {
       ledger.close();
     }

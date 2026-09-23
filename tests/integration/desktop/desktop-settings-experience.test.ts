@@ -101,7 +101,6 @@ test("usage parser preserves global token and CNY cost semantics", () => {
       scope: "all",
       providerCallCount: 4,
       usageReportCount: 3,
-      baselineCount: 1,
       costStatus: "partial",
       unavailableWorkspaces: [{ workspacePath: "/missing", error: "unavailable" }],
       total: {
@@ -160,7 +159,6 @@ test("usage settings expose an accessible time filter and CNY cost summaries", a
   assert.doesNotMatch(summary, /\$\$\{/u);
   assert.match(host, /request !== sequence.current/u);
   assert.match(page, /usage\.unavailableWorkspaceCount/u);
-  assert.match(page, /这些记录没有逐次调用明细/u);
 });
 
 test("changing the default model preserves every independent default axis", async () => {

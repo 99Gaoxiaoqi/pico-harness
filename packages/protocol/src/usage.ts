@@ -16,9 +16,14 @@ export interface UsageActivity {
   readonly outputTokens: number;
   readonly cacheReadTokens: number;
   readonly cacheWriteTokens: number;
+  /** Missing coverage must not imply a provider-reported zero. */
+  readonly cacheReadReported?: boolean;
+  readonly cacheWriteReported?: boolean;
   readonly totalTokens: number;
   readonly costCNY?: number;
   readonly costStatus: UsageCostStatus;
+  /** Frozen request-time explanation, when available. */
+  readonly costUnknownReason?: string;
   readonly durationMs?: number;
 }
 
@@ -94,7 +99,10 @@ export function parseUsageDashboard(value: unknown): UsageDashboardDetails {
         at: number(row.at),
         status: choice(row.status, ["success", "error", "aborted", "running"] as const),
         ...tokens(row),
+        ...optionalBoolean(row, "cacheReadReported"),
+        ...optionalBoolean(row, "cacheWriteReported"),
         costStatus: costStatus(row.costStatus),
+        ...optionalText(row, "costUnknownReason"),
         ...optionalNumber(row, "costCNY"),
         ...optionalNumber(row, "durationMs"),
       };
@@ -205,4 +213,11 @@ function optionalNumber<K extends string>(
   key: K,
 ): Partial<Record<K, number>> {
   return row[key] === undefined ? {} : ({ [key]: number(row[key]) } as Record<K, number>);
+}
+
+function optionalBoolean<K extends string>(
+  row: Record<string, unknown>,
+  key: K,
+): Partial<Record<K, boolean>> {
+  return row[key] === undefined ? {} : ({ [key]: boolean(row[key]) } as Record<K, boolean>);
 }

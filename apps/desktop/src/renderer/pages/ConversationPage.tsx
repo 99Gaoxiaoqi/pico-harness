@@ -1,3 +1,5 @@
+import { ComposerContextGauge } from "../conversation/ComposerContextGauge.js";
+import { DeepResearchPanel } from "../conversation/DeepResearchPanel.js";
 import {
   subagentMetadata,
   subagentParent,
@@ -51,6 +53,12 @@ import {
   type ConversationItemView,
 } from "../conversation/index.js";
 import { pendingToolApprovalFromTranscript } from "../conversation/runtime-projection.js";
+import { ProviderFailureCard, ProviderRetryBanner } from "../conversation/ProviderRequestStatus.js";
+import {
+  modelCommunicationDiagnostic,
+  providerRetryKey,
+  providerStatusDiagnostic,
+} from "../provider-retry.js";
 import type { ApprovalView, PlanApprovalView, TimelineItem, ToolApprovalView } from "../model.js";
 import { useRuntime } from "../runtime-context.js";
 import { parseSwarmCommand } from "../swarm-command.js";
@@ -228,6 +236,10 @@ export function ConversationPage() {
     (run) => run.workspacePath === workspacePath && run.sessionId === sessionId,
   );
   const activeRun = sessionRuns.find((run) => !isTerminalRun(run.status));
+  const retryState = activeRun
+    ? data.providerRetries[providerRetryKey(workspacePath, activeRun.id)]
+    : undefined;
+  const retryNotice = retryState?.notice?.sessionId === sessionId ? retryState?.notice : undefined;
   const composerStatus = activeRun
     ? activeRun.status === "paused" || activeRun.status === "pause_requested"
       ? activeRun.status
@@ -277,6 +289,9 @@ export function ConversationPage() {
     },
     [workspacePath],
   );
+  const researchActive =
+    (sessionId ? conversation?.settings?.collaborationMode : newTaskSettings.collaborationMode) ===
+    "research";
   const composerModelRouteId = conversation?.settings?.modelRouteId ?? newTaskSettings.modelRouteId;
   const composerProvider = data.providerConfig.providers.find((provider) =>
     composerModelRouteId?.startsWith(`${provider.id}/`),
@@ -409,7 +424,7 @@ export function ConversationPage() {
   ]);
 
   const submit = async (text: string, nextBehavior: ComposerBehavior) => {
-    if (sendingRef.current || !composerReady) return;
+    if (sendingRef.current || !composerReady || !composerModelRouteId || usingOpenCodeFree) return;
     const swarmCommand = !activation ? parseSwarmCommand(text) : undefined;
     if (swarmCommand) {
       if (swarmCommand.kind !== "status" && activeRun) {
@@ -518,7 +533,46 @@ export function ConversationPage() {
     await actions.updateSessionSettings(sessionRef, { collaborationMode });
   };
 
+  const changeResearchMode = async (active: boolean) => {
+    const patch = {
+      collaborationMode: active ? ("research" as const) : ("agent" as const),
+      orchestrationMode: "default" as const,
+    };
+    setActivation(undefined);
+    if (!sessionRef) {
+      updateNewTaskSettings(patch);
+      return;
+    }
+    await actions.updateSessionSettings(sessionRef, patch);
+  };
+
+  const implementResearch = async (prompt: string) => {
+    const result = await actions.sendMessage({
+      workspacePath,
+      text: prompt,
+      initialSettings: {
+        ...newTaskSettings,
+        collaborationMode: "agent",
+        orchestrationMode: "default",
+        ...(conversation?.settings?.modelRouteId
+          ? { modelRouteId: conversation.settings.modelRouteId }
+          : {}),
+      },
+    });
+    if (!result?.sessionId) throw new Error("实施任务未创建，请重试。");
+    navigate(
+      sessionHref({
+        workspacePath: result.workspacePath ?? workspacePath,
+        sessionId: result.sessionId,
+      }),
+    );
+  };
+
   const changeGraphMode = async (active: boolean, mode: "graph" | "swarm" = "graph") => {
+    if (active && researchActive) {
+      actions.showMessage?.("研究模式不启动 Graph/Swarm。请完成研究后新建实施任务。");
+      return;
+    }
     const orchestrationMode = active ? mode : "default";
     if (!sessionRef) {
       updateNewTaskSettings({ orchestrationMode });
@@ -890,12 +944,13 @@ export function ConversationPage() {
               <div className="conversation-session-header__meta">
                 {preview && <PreviewBadge />}
                 {conversation?.usage && (
-                  <span>
-                    {formatCompact(
-                      (conversation.usage.inputTokens ?? 0) +
-                        (conversation.usage.outputTokens ?? 0),
-                    )}{" "}
-                    tokens
+                  <span
+                    title={`会话累计 Token：${conversation.usage.totalTokens?.toLocaleString("zh-CN") ?? "未知"}`}
+                  >
+                    会话累计 Token{" "}
+                    {conversation.usage.totalTokens === undefined
+                      ? "未知"
+                      : formatCompact(conversation.usage.totalTokens)}
                   </span>
                 )}
                 {activeRun && <StatusPill status={activeRun.status} />}
@@ -1005,6 +1060,18 @@ export function ConversationPage() {
         }
         composer={
           <>
+            {researchActive && !preview && (
+              <DeepResearchPanel
+                key={conversationKey ?? workspacePath}
+                workspacePath={workspacePath}
+                {...(sessionId ? { sessionId } : {})}
+                refreshKey={`${activeRun?.id ?? "idle"}:${activeRun?.status ?? "idle"}:${conversation?.items.length ?? 0}`}
+                busy={Boolean(activeRun) || Boolean(busy)}
+                onOpenArtifacts={() => openWorkbarTab("files", "right")}
+                onImplement={implementResearch}
+                onStarter={handleDraftChange}
+              />
+            )}
             {sessionRef && !graphParentId && !preview && (
               <ConversationGraphBoard
                 key={conversationKey}
@@ -1043,12 +1110,15 @@ export function ConversationPage() {
               </div>
             ) : (
               <div className="conversation-composer-region">
+                {!composerModelRouteId && (
+                  <p className="conversation-model-notice">
+                    请先配置模型连接。<Link to="/settings/models">添加连接</Link>
+                  </p>
+                )}
                 {usingOpenCodeFree && (
-                  <p className="conversation-free-notice">
-                    OpenCode Free 免费试用 · 按 IP 限流，请勿提交个人或机密信息。
-                    <a href="https://opencode.ai/docs/zen#privacy" target="_blank" rel="noreferrer">
-                      数据使用说明
-                    </a>
+                  <p className="conversation-model-notice">
+                    此 OpenCode 免费模型仅限 OpenCode 客户端使用，Pico 无法发送请求。
+                    <Link to="/settings/models">先添加连接，再返回会话切换模型</Link>
                   </p>
                 )}
                 {catalogOpen && (
@@ -1076,7 +1146,7 @@ export function ConversationPage() {
                   onBehaviorChange={setBehavior}
                   busy={preparingSend || busy === "send-message"}
                   disabled={Boolean(conversation?.loadError)}
-                  submitDisabled={!composerReady}
+                  submitDisabled={!composerReady || !composerModelRouteId || usingOpenCodeFree}
                   placeholder={
                     activation?.kind === "skill"
                       ? `输入 ${activation.name} 的参数或补充要求…`
@@ -1100,10 +1170,16 @@ export function ConversationPage() {
                   onPause={activeRun ? () => void actions.pauseRun(activeRun.id) : undefined}
                   onResume={activeRun ? () => void actions.resumeRun(activeRun.id) : undefined}
                   onStop={activeRun ? () => void actions.stopRun(activeRun.id) : undefined}
-                  onAttach={composerStatus === "idle" && workspaceReady ? openCatalog : undefined}
+                  onAttach={
+                    !researchActive && composerStatus === "idle" && workspaceReady
+                      ? openCatalog
+                      : undefined
+                  }
                   modes={
                     composerReady && (!sessionRef || conversation?.settings)
                       ? {
+                          researchActive,
+                          onResearchChange: changeResearchMode,
                           planActive:
                             (sessionRef
                               ? conversation?.settings?.collaborationMode
@@ -1246,6 +1322,22 @@ export function ConversationPage() {
                             onConfigure={() => navigate("/settings/models")}
                           />
 
+                          {composerProvider && (
+                            <ComposerContextGauge
+                              target={{
+                                workspacePath,
+                                sessionId: sessionRef.sessionId,
+                                routeId: conversation.settings.modelRouteId,
+                                providerId:
+                                  composerProvider.modelProtocols?.[conversation.settings.model] ??
+                                  composerProvider.protocol,
+                                modelId: conversation.settings.model,
+                                connectionId: composerProvider.id,
+                                configurationRevision: composerProvider.fingerprint,
+                              }}
+                            />
+                          )}
+
                           <label className="conversation-context-option">
                             <span className="conversation-sr-only">权限模式</span>
                             <select
@@ -1327,13 +1419,73 @@ export function ConversationPage() {
               </div>
             )}
             <ConversationTranscript
-              items={items}
+              items={
+                retryNotice
+                  ? [
+                      ...items,
+                      {
+                        id: `provider-retry:${retryNotice.runId}`,
+                        kind: "status" as const,
+                        title: "模型请求重试中",
+                        at: retryNotice.at,
+                      },
+                    ]
+                  : items
+              }
               assistantLabel={
                 parentRef
                   ? `子智能体 · ${childParent?.name ?? session?.title ?? "执行记录"}`
                   : "主智能体 · Pico"
               }
               onOpenItem={openItem}
+              renderItem={(item, fallback) => {
+                if (item.id === `provider-retry:${retryNotice?.runId}` && retryNotice) {
+                  return <ProviderRetryBanner notice={retryNotice} />;
+                }
+                if (item.kind !== "runBoundary" || item.status !== "failed") return fallback;
+                const failureState = item.runId
+                  ? data.providerRetries[providerRetryKey(workspacePath, item.runId)]
+                  : undefined;
+                const failureNotice =
+                  failureState?.lastFailure?.sessionId === sessionId
+                    ? failureState?.lastFailure
+                    : undefined;
+                const diagnostic = modelCommunicationDiagnostic(item.detail ?? "");
+                const status = providerStatusDiagnostic(item.detail ?? "");
+                if (!failureNotice && !diagnostic && !status) return fallback;
+                const latestBoundary = items.findLast(
+                  (candidate) => candidate.kind === "runBoundary" && candidate.status !== "started",
+                );
+                const boundaryIndex = items.findIndex((candidate) => candidate.id === item.id);
+                const originalRequest = items
+                  .slice(0, boundaryIndex)
+                  .findLast((candidate) => candidate.kind === "userMessage");
+                const canRetry =
+                  latestBoundary?.id === item.id &&
+                  !activeRun &&
+                  session?.status !== "archived" &&
+                  !draft.trim() &&
+                  originalRequest?.kind === "userMessage" &&
+                  Boolean(originalRequest.text.trim());
+                return (
+                  <ProviderFailureCard
+                    notice={failureNotice}
+                    httpStatus={status?.httpStatus}
+                    title={diagnostic?.title ?? status?.title ?? "暂时无法连接模型"}
+                    canRetry={Boolean(canRetry)}
+                    onRetry={() => {
+                      if (originalRequest?.kind !== "userMessage" || draft.trim()) return;
+                      handleDraftChange(originalRequest.text);
+                      window.requestAnimationFrame(() =>
+                        document
+                          .querySelector<HTMLTextAreaElement>(".conversation-composer textarea")
+                          ?.focus(),
+                      );
+                    }}
+                    onDiagnostics={() => openWorkbarTab("inspector", "right")}
+                  />
+                );
+              }}
               emptyState={
                 busy === "load-session" ? (
                   <div className="conversation-empty-state">
@@ -1408,11 +1560,17 @@ function timelineItemToConversationItem(item: TimelineItem): ConversationItemVie
   if (item.eventType === "assistant.message") {
     return { id: item.id, kind: "assistantMessage", text: item.detail ?? item.title, at: item.at };
   }
+  const modelDiagnostic = modelCommunicationDiagnostic(item.detail ?? item.title);
+  const statusDiagnostic = providerStatusDiagnostic(item.detail ?? item.title);
   return {
     id: item.id,
     kind: "status",
-    title: item.title,
-    detail: item.detail,
+    title:
+      item.state === "failed" && (modelDiagnostic || statusDiagnostic)
+        ? (modelDiagnostic?.title ?? statusDiagnostic?.title ?? item.title)
+        : item.title,
+    detail:
+      item.state === "failed" && (modelDiagnostic || statusDiagnostic) ? undefined : item.detail,
     tone: item.state === "failed" ? "error" : item.state === "done" ? "success" : "neutral",
     at: item.at,
   };

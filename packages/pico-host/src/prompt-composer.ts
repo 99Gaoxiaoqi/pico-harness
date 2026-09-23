@@ -1,3 +1,4 @@
+import { buildDeepResearchSystemPrompt } from "@pico/core/deep-research";
 // Pico Host Prompt 动态组装器：像搭积木一样拼接极简内核 + AGENTS.md + Skills。
 // 对应课程第 10 讲 internal/context/composer.go。
 //
@@ -50,6 +51,7 @@ export interface PromptComposerOptions {
   skillLoader?: PromptSkillLoader;
   onInstructionsLoaded?: (paths: readonly string[]) => void | Promise<void>;
   isolatedHeadless?: boolean;
+  researchMode?: boolean;
   picoHome?: string;
   graphToolsAvailable?: boolean;
   swarmMode?: boolean;
@@ -74,6 +76,7 @@ export class PromptComposer {
   private graphToolsAvailable: boolean;
   private readonly swarmMode: boolean;
   private readonly isolatedHeadless: boolean;
+  private readonly researchMode: boolean;
   private readonly todoStore: PromptTodoStore;
   /** GoalManager 单例(可选):由 host 注入,注入后把 active goal 渲染进 prompt */
   private readonly goalManager: PromptGoalManager | undefined;
@@ -96,6 +99,7 @@ export class PromptComposer {
    */
   constructor(workDir: string, planMode = false, options?: PromptComposerOptions) {
     this.workDir = workDir;
+    this.researchMode = options?.researchMode ?? false;
     this.skillLoader = options?.skillLoader ?? new SkillLoader(workDir);
     this.planMode = planMode;
     this.isolatedHeadless = options?.isolatedHeadless ?? false;
@@ -137,7 +141,12 @@ export class PromptComposer {
 </env>`);
 
     // 1. 极简内核:仅确立基本身份与最底线红线纪律
-    stableParts.push(`# 核心身份
+    if (this.researchMode)
+      stableParts.push(
+        "你是 Pico 的只读研究助手。使用 glob 查看目录、read_file 读取文件。始终用中文回复。",
+      );
+    else
+      stableParts.push(`# 核心身份
 你名叫 pico,一个由驾驭工程 (Harness Engineering) 驱动的骨灰级研发助手。
 你具备极简主义哲学,拒绝废话。你能通过系统提供的内置工具,创建、读取、修改和执行工作区中的代码。
 
@@ -148,7 +157,7 @@ export class PromptComposer {
 4. 遇到工具执行报错时,仔细阅读 stderr,尝试自己修正命令并重试。
 5. 始终用中文回复,以便传达你的进展和想法。`);
 
-    if (this.isolatedHeadless && !this.planMode) {
+    if (this.isolatedHeadless && !this.planMode && !this.researchMode) {
       stableParts.push(ISOLATED_HEADLESS_COMPLETION_CONTRACT);
     }
 
@@ -189,20 +198,22 @@ ${agentsContent}
       stableParts.push(PLAN_MODE_SPEC);
     }
 
+    if (this.researchMode) stableParts.push(buildDeepResearchSystemPrompt());
+
     // 2d. (可选) Graph Mode 工具使用指南
     if (this.graphToolsAvailable) {
       stableParts.push(this.swarmMode ? SWARM_TOOLS_SPEC : GRAPH_TOOLS_SPEC);
     }
 
     // 3. 动态加载技能外挂 (Skills)
-    const skillsContent = await this.skillLoader.loadAll();
+    const skillsContent = this.researchMode ? undefined : await this.skillLoader.loadAll();
     if (skillsContent) {
       stableParts.push(skillsContent);
     }
 
     // 4. 结构化 TodoList:注入当前任务清单状态(空清单不注入)
     // todo 失败不阻断 prompt 组装,降级为跳过
-    if (!this.planMode) {
+    if (!this.planMode && !this.researchMode) {
       try {
         const todoContext = await this.todoStore.buildTodoContext();
         if (todoContext) {
@@ -217,7 +228,7 @@ ${agentsContent}
     // 对标 todo 注入,让模型每轮"看到"自己追的长程目标与 budget 约束。
     // GoalManager 单例由 host 注入;未注入(goalManager=undefined)则跳过。
     try {
-      if (this.goalManager) {
+      if (this.goalManager && !this.researchMode) {
         const goalCtx = this.goalManager.buildGoalContext();
         if (goalCtx) {
           turnTailParts.push(goalCtx);

@@ -1,6 +1,5 @@
 export * from "./atomic-json.js";
 export * from "./event-log-retention-policy.js";
-export * from "./evidence-archive.js";
 export * from "./evidence-blob-store.js";
 export * from "./event-log-hard-cut-coordinator.js";
 export * from "./file-history-blob-store.js";
@@ -44,3 +43,5 @@ export * from "./sqlite/workspace-scopes.js";
 export * from "./sqlite/sqlite-session-workbar-repository.js";
 export * from "./sqlite/atomic-memory-schema.js";
 export * from "./sqlite/sqlite-memory-item-store.js";
+
+export * from "./sqlite/sqlite-deep-research-store.js";

@@ -15,6 +15,8 @@ export interface PreparedRequestSegment {
   hash: string;
   bytes: number;
   role?: string;
+  /** Tool identifier only; descriptions and schema bodies never leave the capture. */
+  label?: string;
 }
 
 export type PreparedRequestCacheBreakpointLayer = "tools" | "tools+system" | "history";
@@ -163,7 +165,7 @@ export function parsePreparedRequestCapture(value: unknown): PreparedRequestCapt
   const rawCacheBreakpoints = value["cacheBreakpoints"];
   const fullCompactionSummaryHash = value["fullCompactionSummaryHash"];
   if (
-    (provider !== "claude" && provider !== "openai") ||
+    (provider !== "claude" && provider !== "openai" && provider !== "responses") ||
     typeof model !== "string" ||
     typeof requestHash !== "string" ||
     !isNonNegativeInteger(requestBytes) ||
@@ -241,7 +243,13 @@ function cacheSegments(request: PreparedProviderRequest): PreparedRequestCacheSe
   appendValueSegments(candidates, body["system"], "system_prompt");
   claimed.add("system");
 
-  if (request.provider === "openai") {
+  if (request.provider === "responses") {
+    appendValueSegments(candidates, body["instructions"], "system_prompt");
+    claimed.add("instructions");
+    if (Array.isArray(body["input"])) appendOpenAIMessages(candidates, body["input"]);
+    else appendValueSegments(candidates, body["input"], "message");
+    claimed.add("input");
+  } else if (request.provider === "openai") {
     appendOpenAIMessages(candidates, body["messages"]);
   } else {
     appendArraySegments(candidates, body["messages"], "message", true);
@@ -370,7 +378,15 @@ function segment(
     hash: hash(serialized),
     bytes: Buffer.byteLength(serialized, "utf8"),
     ...(role ? { role } : {}),
+    ...(kind === "tool_schema" && toolLabel(value) ? { label: toolLabel(value)! } : {}),
   };
+}
+
+function toolLabel(value: unknown): string | undefined {
+  if (!isRecord(value)) return undefined;
+  const fn = isRecord(value["function"]) ? value["function"] : value;
+  const name = fn["name"];
+  return typeof name === "string" && /^[A-Za-z0-9_.:-]{1,128}$/u.test(name) ? name : undefined;
 }
 
 function collectExplicitCacheBreakpoints(
@@ -606,6 +622,7 @@ function parseSegment(value: unknown): PreparedRequestSegment | undefined {
   const segmentHash = value["hash"];
   const bytes = value["bytes"];
   const role = value["role"];
+  const label = value["label"];
   if (
     (kind !== "tool_schema" &&
       kind !== "system_prompt" &&
@@ -615,7 +632,8 @@ function parseSegment(value: unknown): PreparedRequestSegment | undefined {
     typeof cacheable !== "boolean" ||
     typeof segmentHash !== "string" ||
     !isNonNegativeInteger(bytes) ||
-    (role !== undefined && typeof role !== "string")
+    (role !== undefined && typeof role !== "string") ||
+    (label !== undefined && (typeof label !== "string" || !/^[A-Za-z0-9_.:-]{1,128}$/u.test(label)))
   ) {
     return undefined;
   }
@@ -626,6 +644,7 @@ function parseSegment(value: unknown): PreparedRequestSegment | undefined {
     hash: segmentHash,
     bytes,
     ...(role ? { role } : {}),
+    ...(typeof label === "string" ? { label } : {}),
   };
 }
 

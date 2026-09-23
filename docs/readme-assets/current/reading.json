@@ -1,0 +1,135 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Pico · 技术博客阅读路线",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1120,
+      640
+    ]
+  },
+  "components": [
+    {
+      "id": "start",
+      "type": "frontend",
+      "label": "01 架构总览",
+      "sublabel": "从一句话到一次可靠执行",
+      "pos": [
+        40,
+        100
+      ],
+      "size": [
+        240,
+        84
+      ]
+    },
+    {
+      "id": "loop",
+      "type": "backend",
+      "label": "02 执行基础",
+      "sublabel": "课程 00–03 · 循环与工具",
+      "pos": [
+        440,
+        100
+      ],
+      "size": [
+        240,
+        84
+      ]
+    },
+    {
+      "id": "context",
+      "type": "database",
+      "label": "03 记忆与压缩",
+      "sublabel": "课程 04–05 · 两篇专题",
+      "pos": [
+        840,
+        100
+      ],
+      "size": [
+        240,
+        84
+      ]
+    },
+    {
+      "id": "proof",
+      "type": "external",
+      "label": "06 验证与证据",
+      "sublabel": "课程 09–10 · 成本与评测",
+      "pos": [
+        40,
+        420
+      ],
+      "size": [
+        240,
+        84
+      ]
+    },
+    {
+      "id": "agents",
+      "type": "backend",
+      "label": "05 子代理协作",
+      "sublabel": "课程 08 · 子智能体专题",
+      "pos": [
+        440,
+        420
+      ],
+      "size": [
+        240,
+        84
+      ]
+    },
+    {
+      "id": "safety",
+      "type": "security",
+      "label": "04 控制与安全",
+      "sublabel": "课程 06–07 · Steering",
+      "pos": [
+        840,
+        420
+      ],
+      "size": [
+        240,
+        84
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "link-start-loop",
+      "from": "start",
+      "to": "loop",
+      "label": "进入实现"
+    },
+    {
+      "id": "link-loop-context",
+      "from": "loop",
+      "to": "context",
+      "label": "管理上下文"
+    },
+    {
+      "id": "link-context-safety",
+      "from": "context",
+      "to": "safety",
+      "label": "约束执行",
+      "labelAt": [
+        960,
+        300
+      ]
+    },
+    {
+      "id": "link-safety-agents",
+      "from": "safety",
+      "to": "agents",
+      "label": "隔离委派"
+    },
+    {
+      "id": "link-agents-proof",
+      "from": "agents",
+      "to": "proof",
+      "label": "验证结果"
+    }
+  ]
+}

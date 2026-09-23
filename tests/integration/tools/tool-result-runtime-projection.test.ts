@@ -1,3 +1,9 @@
+import { readRuntimeModelHistorySnapshot } from "@pico/runtime/session-runtime-read-model";
+import { currentRuntimeRun } from "@pico/runtime/runtime-run";
+import { createSessionForkRuntimePort } from "@pico/pico-host/session-fork-runtime-port-adapter";
+import { bindToolResultArchiveReader } from "@pico/runtime/tool-result-archive";
+import { ReadFileTool } from "@pico/pico-host/read-file-tool";
+import { WorkspaceRoots, buildWorkspaceBoundaryMiddleware } from "@pico/pico-host/workspace-roots";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -22,7 +28,7 @@ import { MAX_TOOL_RESULT_BYTES } from "@pico/runtime/tool-result-observation";
 const LARGE_TOOL_NAME = "large_fixture";
 const LARGE_TOOL_CALL_ID = "call:large-fixture";
 
-test("large Runtime ToolResult (2048 token < size < 1MB) persists full inline without Evidence", async (context) => {
+test("large Runtime ToolResult keeps inline facts, bounds provider projection, and reads pages across restart", async (context) => {
   const sessionId = "runtime-tool-result-inline";
   const fixture = await createFixture("pico-runtime-tool-result-inline-");
   context.after(async () => {
@@ -36,7 +42,7 @@ test("large Runtime ToolResult (2048 token < size < 1MB) persists full inline wi
   const registry = new ToolRegistry();
   registry.register(outputTool(LARGE_TOOL_NAME, rawOutput));
 
-  // 渐进披露开启:read_evidence 已随回读协议退役(E3),工具面不披露、不注册。
+  // 由引擎根据实际披露且绑定 reader 的 read_file 开启归档投影。
   const toolDisclosure = new ToolDisclosure();
   toolDisclosure.setBaselineTools([LARGE_TOOL_NAME]);
 
@@ -60,6 +66,38 @@ test("large Runtime ToolResult (2048 token < size < 1MB) persists full inline wi
           ],
         };
       }
+      if (providerMessages.length === 2) {
+        const result = messages.find((message) => message.toolCallId === LARGE_TOOL_CALL_ID)!;
+        const ref = result.content.match(/pico:\/\/archive\/[^"\s]+/u)?.[0];
+        assert.ok(ref);
+        return {
+          role: "assistant",
+          content: "",
+          toolCalls: [
+            {
+              id: "call:archive-read",
+              name: "read_file",
+              arguments: JSON.stringify({
+                path: ref,
+                offset: rawOutput.indexOf(canary) + 1,
+                limit: canary.length,
+              }),
+            },
+          ],
+        };
+      }
+      const run = currentRuntimeRun()!;
+      run.setToolResultArchiveAvailable(false);
+      assert.match(
+        (await run.readModelHistory()).find((message) => message.toolCallId === LARGE_TOOL_CALL_ID)!
+          .content,
+        /工具结果已归档/u,
+      );
+      run.setToolResultArchiveAvailable(true);
+      const page = JSON.parse(
+        messages.find((message) => message.toolCallId === "call:archive-read")!.content,
+      );
+      assert.equal(page.content, canary);
       return { role: "assistant", content: "done" };
     },
   };
@@ -71,6 +109,14 @@ test("large Runtime ToolResult (2048 token < size < 1MB) persists full inline wi
   });
   fixture.activeSession = session;
   await session.recover();
+  registry.register(
+    new ReadFileTool(
+      fixture.workDir,
+      bindToolResultArchiveReader(session.runtimeEventStore!, session.id),
+    ),
+  );
+  registry.useRequest(buildWorkspaceBoundaryMiddleware(WorkspaceRoots.createSync(fixture.workDir)));
+  toolDisclosure.setBaselineTools([LARGE_TOOL_NAME, "read_file"]);
   await session.commitMessages({ role: "user", content: "Run the fixture." });
   const engine = new AgentEngine({
     provider,
@@ -84,7 +130,7 @@ test("large Runtime ToolResult (2048 token < size < 1MB) persists full inline wi
 
   await engine.run(session);
 
-  assert.equal(providerMessages.length, 2);
+  assert.equal(providerMessages.length, 3);
   // 验收 4(E3):read_evidence 已退役,工具面永不披露。
   assert.equal(availableToolsByTurn[1]?.includes("read_evidence"), false);
   assert.equal(toolDisclosure.getDisclosedTools().includes("read_evidence"), false);
@@ -94,7 +140,7 @@ test("large Runtime ToolResult (2048 token < size < 1MB) persists full inline wi
   const toolResults = events.filter(
     (event): event is RuntimeToolResultRecordedEvent => event.kind === "tool.result.recorded",
   );
-  assert.equal(toolResults.length, 1);
+  assert.equal(toolResults.length, 2);
   const largeResult = requireToolResult(toolResults, LARGE_TOOL_CALL_ID);
   assert.equal(largeResult.data.status, "succeeded");
   assert.equal(largeResult.refs.evidence, undefined);
@@ -105,13 +151,16 @@ test("large Runtime ToolResult (2048 token < size < 1MB) persists full inline wi
   assert.equal(largeResult.data.body.content, rawOutput);
   assert.equal(largeResult.data.body.sha256, rawSha256);
   assert.equal(largeResult.data.body.sizeBytes, rawSizeBytes);
-  assert.deepEqual(largeResult.data.projection, {
-    version: 1,
-    mode: "full",
-    text: rawOutput,
-    strategy: "original",
-    truncated: false,
-  });
+  assert.equal(largeResult.data.projection.mode, "full");
+  const archived = events.find(
+    (event) =>
+      event.kind === "tool.result.projection.recorded" &&
+      event.data.sourceEventId === largeResult.eventId,
+  );
+  assert.ok(archived?.kind === "tool.result.projection.recorded");
+  assert.equal(archived.data.projection.strategy, "durable-tool-result-archive-v1");
+  assert.ok(archived.data.projection.text.length < 7500);
+  assert.ok(!archived.data.projection.text.includes(canary));
 
   // 验收 1:无 blob 写——Evidence blob 目录从未产生。
   assert.equal(existsSync(join(fixture.paths.workspace.evidence, "blobs")), false);
@@ -129,12 +178,12 @@ test("large Runtime ToolResult (2048 token < size < 1MB) persists full inline wi
   // JSON 转义后的全文(换行 → \n)仍完整在账本里。
   assert.equal(ledger.includes(JSON.stringify(rawOutput).slice(1, -1)), true);
 
-  // Provider 收到的就是全文投影。
+  // Provider 收到有界投影，并通过 read_file 取回指定原文。
   const secondProviderResult = providerMessages[1]?.find(
     (message) => message.toolCallId === LARGE_TOOL_CALL_ID,
   );
   assert.ok(secondProviderResult);
-  assert.equal(secondProviderResult.content, rawOutput);
+  assert.equal(secondProviderResult.content, archived.data.projection.text);
   assert.equal(secondProviderResult.providerData, undefined);
 
   const expectedReplay = structuredClone(session.getModelContext());
@@ -148,10 +197,76 @@ test("large Runtime ToolResult (2048 token < size < 1MB) persists full inline wi
   fixture.activeSession = recovered;
   await recovered.recover();
   assert.deepEqual(recovered.getModelContext(), expectedReplay);
-  const replayedLargeResult = recovered
-    .getModelContext()
-    .find((message) => message.toolCallId === LARGE_TOOL_CALL_ID);
+  const replayedLargeResult = (
+    await readRuntimeModelHistorySnapshot(recovered.runtimeEventStore!, recovered.id)
+  ).messages.find((message) => message.toolCallId === LARGE_TOOL_CALL_ID);
   assert.deepEqual(replayedLargeResult, secondProviderResult);
+  const ref = secondProviderResult.content.match(/pico:\/\/archive\/[^"\s]+/u)![0];
+  const reader = bindToolResultArchiveReader(recovered.runtimeEventStore!, recovered.id);
+  let reconstructed = "";
+  let offset: number | null = 1;
+  while (offset !== null) {
+    const encoded = await reader.read(ref, offset, 1000);
+    assert.ok(encoded.length <= 7500);
+    const page = JSON.parse(encoded);
+    reconstructed += page.content;
+    offset = page.nextOffset;
+  }
+  assert.equal(reconstructed, rawOutput);
+  const forkPort = createSessionForkRuntimePort();
+  const forkSeed = (await recovered.readDurableForkSnapshot()).runtimeSeedEntries;
+  const unknownRef = "pico://archive/other-session/unknown/" + "0".repeat(64) + "/5";
+  const fork = {
+    sourceSessionId: recovered.id,
+    targetSessionId: "archive-fork-target",
+    operationId: "archive-fork",
+    seedEntries: forkSeed,
+    modelCheckpoint: {
+      coveredMessageCount: forkSeed.filter((entry) => entry.kind === "model").length,
+      summary: {
+        role: "assistant" as const,
+        content: `Summary known ${ref}; unknown ${unknownRef}`,
+      },
+    },
+    workDir: fixture.workDir,
+    runtimeAuthority: recovered.runtimeEventStore!,
+    publication: { async assertOwned() {} },
+  };
+  await forkPort.bootstrapFork(fork);
+  await forkPort.bootstrapFork(fork); // Durable idempotency compares the rebound projection.
+  const forkResult = (await recovered.runtimeEventStore!.readSession(fork.targetSessionId)).find(
+    (event) =>
+      event.kind === "tool.result.recorded" && event.refs.toolCallId === LARGE_TOOL_CALL_ID,
+  ) as RuntimeToolResultRecordedEvent;
+  const forkRef = forkResult.data.projection.text.match(/pico:\/\/archive\/[^"\s]+/u)![0];
+  assert.notEqual(forkRef, ref);
+  const forkCheckpoint = (
+    await recovered.runtimeEventStore!.readSession(fork.targetSessionId)
+  ).find((event) => event.kind === "context.checkpoint.recorded");
+  assert.ok(forkCheckpoint?.kind === "context.checkpoint.recorded");
+  assert.ok(forkCheckpoint.data.summary.content.includes(forkRef));
+  assert.ok(!forkCheckpoint.data.summary.content.includes(ref));
+  assert.ok(forkCheckpoint.data.summary.content.includes(unknownRef));
+  assert.equal(
+    JSON.parse(
+      await bindToolResultArchiveReader(recovered.runtimeEventStore!, fork.targetSessionId).read(
+        forkRef,
+        rawOutput.indexOf(canary) + 1,
+        canary.length,
+      ),
+    ).content,
+    canary,
+  );
+  await assert.rejects(reader.read(forkRef, 1, 1000), /不属于当前会话/u);
+  await assert.rejects(
+    bindToolResultArchiveReader(recovered.runtimeEventStore!, "another-session").read(ref, 1, 1000),
+    /不属于当前会话/u,
+  );
+  await assert.rejects(
+    reader.read(ref.replace(largeResult.data.body.sha256, "0".repeat(64)), 1, 1000),
+    /完整性校验失败/u,
+  );
+  await assert.rejects(reader.read(ref + "?path=other", 1, 1000), /URI 无效/u);
 });
 
 test("over-limit Runtime ToolResult (>1MB) is rejected as a synthetic error with refetch guidance", async (context) => {
@@ -265,106 +380,6 @@ test("over-limit Runtime ToolResult (>1MB) is rejected as a synthetic error with
   );
   assert.ok(terminal?.kind === "run.terminal");
   assert.equal(terminal.data.status, "completed");
-});
-
-test("subagent Runtime ToolResult persists full inline before the transcript projection", async (context) => {
-  const sessionId = "runtime-subagent-tool-result-inline";
-  const fixture = await createFixture("pico-runtime-subagent-tool-result-");
-  context.after(async () => {
-    await fixture.activeSession?.close();
-    await rm(fixture.root, { recursive: true, force: true });
-  });
-  const toolName = "subagent_large_fixture";
-  const toolCallId = "call:subagent-large-fixture";
-  const canary = "PICO_SUBAGENT_MIDDLE_CANARY_IN_INLINE_BODY";
-  const rawOutput = buildLargeOutput(canary);
-  assert.ok(rawOutput.length > 8_000);
-  const providerMessages: Message[][] = [];
-  const fullReport =
-    "已完成子代理大型工具结果核验，原始结果全文 inline 且模型上下文接收完整投影。\n".repeat(120);
-  const provider: LLMProvider = {
-    async generate(messages, availableTools) {
-      providerMessages.push(structuredClone(messages));
-      if (providerMessages.length === 1) {
-        assert.ok(availableTools.some((tool) => tool.name === toolName));
-        return {
-          role: "assistant",
-          content: "",
-          toolCalls: [{ id: toolCallId, name: toolName, arguments: "{}" }],
-        };
-      }
-      if (providerMessages.length === 2) {
-        const projected = messages.find((message) => message.toolCallId === toolCallId);
-        assert.ok(projected);
-        assert.equal(projected.content, rawOutput);
-        return { role: "assistant", content: fullReport };
-      }
-      throw new Error("unexpected subagent Provider turn");
-    },
-  };
-  const runtimePort = createEngineRuntimePort();
-  const session = new Session(sessionId, fixture.workDir, {
-    persistence: true,
-    picoHome: fixture.picoHome,
-    runtimePort,
-  });
-  fixture.activeSession = session;
-  await session.recover();
-  const engine = new AgentEngine({
-    provider,
-    registry: new ToolRegistry(),
-    workDir: fixture.workDir,
-    runtimePort,
-    reporter: new SilentReporter(),
-  });
-  const subagentRegistry = new ToolRegistry();
-  subagentRegistry.register(outputTool(toolName, rawOutput));
-
-  const parentRun = await runtimePort.startRun({
-    capability: session.runtimeEventCapability!,
-  });
-  const result = await parentRun.run(() =>
-    engine.runSub("核验大型工具输出。", subagentRegistry, new SilentReporter(), {
-      maxTurns: 3,
-      workDir: fixture.workDir,
-    }),
-  );
-
-  assert.equal(result.status, "completed");
-  // 票 E3:报告全文 inline 进 summary/事件,不再外部化为 Evidence 引用。
-  assert.ok(result.summary.length > 2_000);
-  assert.equal(result.summary, fullReport);
-  assert.deepEqual(result.evidenceRefs, []);
-  assert.equal(existsSync(join(fixture.paths.workspace.evidence, "blobs")), false);
-  assert.equal(providerMessages.length, 2);
-  const events = await session.runtimeEventStore!.readSession(session.id);
-  const recorded = requireToolResult(
-    events.filter(
-      (event): event is RuntimeToolResultRecordedEvent => event.kind === "tool.result.recorded",
-    ),
-    toolCallId,
-  );
-  assert.equal(recorded.visibility, "transcript");
-  assert.equal(recorded.refs.evidence, undefined);
-  assert.equal(recorded.data.body.storage, "inline");
-  if (recorded.data.body.storage !== "inline") {
-    assert.fail("subagent large ToolResult must be inline");
-  }
-  assert.equal(recorded.data.body.content, rawOutput);
-  assert.equal(recorded.data.body.sha256, sha256(rawOutput));
-  assert.equal(recorded.data.body.sizeBytes, Buffer.byteLength(rawOutput, "utf8"));
-  assert.equal(recorded.data.projection.mode, "full");
-  assert.equal(recorded.data.projection.truncated, false);
-  // subagent_report transcript 消息携带全文(E3:报告全文 inline 进事件)。
-  const reportMessage = events.find(
-    (event) =>
-      event.kind === "message.committed" &&
-      (event as { data: { message: Message } }).data.message.providerData?.["picoKind"] ===
-        "subagent_report",
-  ) as unknown as { data: { message: Message } } | undefined;
-  assert.ok(reportMessage);
-  assert.equal(reportMessage.data.message.content, fullReport);
-  assert.deepEqual(session.getModelContext(), []);
 });
 
 interface RuntimeFixture {

@@ -1,11 +1,4 @@
-/**
- * 票 E2(ADR 26 §2.3)读取侧瘦身验收:
- * 1) 模型历史组装(readModelHistory)按字节预算 gate:大输出会话的 provider
- *    消息总字节有界(票面:上下文组装按预算裁剪,provider 消息有界);
- * 2) 超预算降级为带诊断标记的截断视图(事件定位),不静默;末尾工作集永不裁剪;
- * 3) transcript 直接读取 storage projection，在固定 watermark 下按页数和字节预算
- *    返回稳定窗口，超大项使用可续传分片。
- */
+/** Model history retains committed content; transport paging remains bounded. */
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -14,12 +7,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import {
-  applyModelHistoryByteBudget,
-  MAX_MODEL_HISTORY_BYTES,
-  materializeRuntimeHistoryEntries,
-  type RuntimeHistoryProjectionEntry,
-} from "@pico/runtime/session-runtime-read-model";
+import { materializeRuntimeHistoryEntries } from "@pico/runtime/session-runtime-read-model";
 import { Session } from "@pico/pico-host/session";
 import { RuntimeRun } from "@pico/pico-host/product-runtime-run";
 import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
@@ -31,98 +19,11 @@ import type { RuntimeEvent } from "@pico/storage/runtime-event";
 import type { Message } from "@pico/core";
 import { initializeRuntimeEventOwner } from "../helpers/runtime-event-owner.js";
 
-const DEGRADED_MARKER_PATTERN = /历史输出已按上下文预算裁剪/u;
-
-function historyEntry(
-  eventId: string,
-  content: string,
-  extra: Partial<Message> = {},
-): RuntimeHistoryProjectionEntry {
-  return { eventId, message: { role: "user", content, ...extra } };
-}
-
 function messageJsonBytes(message: Message): number {
   return Buffer.byteLength(JSON.stringify(message), "utf8");
 }
 
-// ============================================================
-// 1) 预算 gate 纯逻辑(read-model 层)
-// ============================================================
-
-test("applyModelHistoryByteBudget: 预算内原样返回,超预算从最旧大内容降级且带标记", () => {
-  const smallTail = Array.from({ length: 12 }, (_, index) =>
-    historyEntry(`tail-${index}`, `tail content ${index}`),
-  );
-  const withinBudget = [
-    historyEntry("old-1", "x".repeat(2048)),
-    historyEntry("old-2", "y".repeat(4096)),
-    ...smallTail,
-  ];
-  assert.deepStrictEqual(
-    applyModelHistoryByteBudget(withinBudget, { maxTotalBytes: 1024 * 1024 }),
-    withinBudget,
-  );
-
-  // 3 条 100KB 旧消息 + 12 条尾部消息,预算 250KB:只降级最旧的 old-1。
-  const big = (eventId: string, fill: string) => historyEntry(eventId, fill.repeat(100 * 1024));
-  const overBudget = [big("old-1", "a"), big("old-2", "b"), big("old-3", "c"), ...smallTail];
-  const budgeted = applyModelHistoryByteBudget(overBudget, { maxTotalBytes: 250 * 1024 });
-
-  const totalBytes = budgeted.reduce((sum, { message }) => sum + messageJsonBytes(message), 0);
-  assert.ok(totalBytes <= 250 * 1024, `降级后总字节应落入预算,实际 ${totalBytes}`);
-  assert.match(budgeted[0]!.message.content, DEGRADED_MARKER_PATTERN);
-  assert.ok(budgeted[0]!.message.content.includes("old-1"), "标记必须定位原始事件,不静默");
-  assert.equal(budgeted[1]!.message.content, overBudget[1]!.message.content);
-  assert.equal(budgeted[2]!.message.content, overBudget[2]!.message.content);
-  for (const [index, entry] of smallTail.entries()) {
-    assert.equal(budgeted[3 + index]!.message.content, entry.message.content);
-  }
-});
-
-test("applyModelHistoryByteBudget: 降级保留 role/toolCallId 配对字段,小消息与末尾大消息不裁", () => {
-  const tail = Array.from({ length: 4 }, (_, index) =>
-    historyEntry(`tail-${index}`, `tail ${index}`),
-  );
-  const entries = [
-    historyEntry("tool-old", "x".repeat(8192), { toolCallId: "call-1" }),
-    historyEntry("small-old", "keep me"),
-    historyEntry("huge-tail", "z".repeat(64 * 1024)),
-    ...tail,
-  ];
-  const budgeted = applyModelHistoryByteBudget(entries, {
-    maxTotalBytes: 8 * 1024,
-    preservedTailMessages: 5,
-  });
-  // 末尾 5 条(huge-tail + 4 tail)永不裁剪;唯一可降级的是 tool-old。
-  assert.match(budgeted[0]!.message.content, DEGRADED_MARKER_PATTERN);
-  assert.equal(budgeted[0]!.message.role, "user");
-  assert.equal(budgeted[0]!.message.toolCallId, "call-1");
-  assert.ok(budgeted[0]!.message.content.includes("call-1"));
-  assert.equal(budgeted[1]!.message.content, "keep me");
-  assert.equal(budgeted[2]!.message.content, entries[2]!.message.content);
-  // 末尾工作集超出预算也不裁(best-effort gate,交给压缩/溢出轨道)。
-  const totalBytes = budgeted.reduce((sum, { message }) => sum + messageJsonBytes(message), 0);
-  assert.ok(totalBytes > 8 * 1024, "末尾工作集永不裁剪,即使预算装不下");
-});
-
-test("applyModelHistoryByteBudget: 非法预算参数 fail-closed", () => {
-  const entries = [historyEntry("e-1", "x")];
-  assert.throws(() => applyModelHistoryByteBudget(entries, { maxTotalBytes: 0 }), /maxTotalBytes/u);
-  assert.throws(
-    () => applyModelHistoryByteBudget(entries, { maxTotalBytes: 1.5 }),
-    /maxTotalBytes/u,
-  );
-  assert.throws(
-    () => applyModelHistoryByteBudget(entries, { maxTotalBytes: 1024, preservedTailMessages: -1 }),
-    /preservedTailMessages/u,
-  );
-});
-
-// ============================================================
-// 2) RuntimeRun.readModelHistory 集成:大输出会话 provider 消息有界
-// ============================================================
-
-test("readModelHistory: 大全文会话组装字节有界,末尾工作集完整,降级带事件定位标记", async (t) => {
+test("readModelHistory: 大全文会话不再隐式按1MiB裁剪，原始内容完整", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-e2-history-budget-"));
   const session = new Session("e2-history-budget", join(root, "workspace"), {
     persistence: true,
@@ -185,16 +86,13 @@ test("readModelHistory: 大全文会话组装字节有界,末尾工作集完整,
   assert.equal(gated.length, raw.length);
 
   const totalBytes = gated.reduce((sum, message) => sum + messageJsonBytes(message), 0);
-  assert.ok(
-    totalBytes <= MAX_MODEL_HISTORY_BYTES,
-    `provider 消息总字节必须有界(<=${MAX_MODEL_HISTORY_BYTES}),实际 ${totalBytes}`,
+  assert.ok(totalBytes > 1024 * 1024);
+  assert.deepEqual(
+    gated,
+    raw.map((entry) => entry.message),
   );
-
-  // 最旧的大全文(工具结果,总账第 2 条)被降级:带标记 + 事件定位 + 配对字段保留。
-  assert.match(gated[1]!.content, DEGRADED_MARKER_PATTERN);
-  assert.ok(gated[1]!.content.includes(raw[1]!.eventId));
+  assert.equal(gated[1]!.content, bigOutput);
   assert.equal(gated[1]!.toolCallId, "call-big");
-  assert.equal(raw[1]!.message.content, bigOutput);
   // 预算收敛后,后续大消息保留原文。
   assert.ok(gated[2]!.content.startsWith("paste-0:"));
   assert.ok(gated[4]!.content.startsWith("paste-1:"));
@@ -422,7 +320,7 @@ test("readTranscriptProjectionPage: 工具开始与结果投影为同一张完�
   assert.equal(page.watermark.throughSequence, 3);
 });
 
-test("materializeRuntimeHistoryEntries 与 gate 组合后仍满足工具配对不变量(降级保留 toolCallId)", () => {
+test("materializeRuntimeHistoryEntries 保留大全文及工具配对", () => {
   // 组合校验:纯投影 + gate 输出的消息序列,assistant 工具批次与观察结果
   // 的先后配对不被降级破坏(降级只替换 content)。
   const big = "r".repeat(32 * 1024);
@@ -472,13 +370,8 @@ test("materializeRuntimeHistoryEntries 与 gate 组合后仍满足工具配对�
     } as RuntimeEvent,
   ];
   const entries = materializeRuntimeHistoryEntries(events);
-  // preservedTailMessages: 0 使 2 条消息的历史也可降级(默认 12 会保护短历史)。
-  const budgeted = applyModelHistoryByteBudget(entries, {
-    maxTotalBytes: 1024,
-    preservedTailMessages: 0,
-  });
-  const messages = budgeted.map(({ message }) => message);
-  assert.match(messages[1]!.content, DEGRADED_MARKER_PATTERN);
+  const messages = entries.map(({ message }) => message);
+  assert.equal(messages[1]!.content, big);
   assert.equal(messages[1]!.toolCallId, "call-pair");
   assert.deepEqual(
     messages[0]!.toolCalls?.map((call) => call.id),

@@ -316,3 +316,23 @@ function escapeSqlString(value: string): string {
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
+
+/** Read back a migration snapshot before touching the live schema. */
+export function verifyOperationalMigrationBackup(
+  path: string,
+  scope: string,
+  version: number,
+): void {
+  const { DatabaseSync } = loadNodeSqlite();
+  const database = new DatabaseSync(path, { readOnly: true });
+  try {
+    const check = database.prepare("PRAGMA quick_check").get() as Record<string, unknown>;
+    const saved = database
+      .prepare("SELECT version FROM operational_schema_migrations WHERE scope = ?")
+      .get(scope) as { version?: number } | undefined;
+    if (check["quick_check"] !== "ok" || saved?.version !== version)
+      throw new Error("Migration backup verification failed");
+  } finally {
+    database.close();
+  }
+}

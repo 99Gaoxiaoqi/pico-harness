@@ -15,7 +15,7 @@ import { UserConfigStore } from "@pico/pico-host/input/user-config-store";
 import {
   OPENCODE_FREE_PROVIDER,
   OPENCODE_FREE_ROUTE_ID,
-} from "@pico/pico-host/input/default-provider";
+} from "../../fixtures/anonymous-provider.js";
 import {
   credentialRefForProvider,
   type CredentialVault,
@@ -25,7 +25,7 @@ import { CronService } from "@pico/runtime/cron-service";
 import { globalSessionManager } from "@pico/pico-host/session";
 import { closeAllOperationalDatabasesForTest } from "@pico/storage";
 
-test("anonymous default creates and executes desktop and trusted Cron jobs without vault access while keeping route and trust checks", async (context) => {
+test("configured anonymous route creates and executes desktop and trusted Cron jobs without vault access while keeping route and trust checks", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-opencode-free-automation-"));
   const picoHome = join(root, "home");
   await mkdir(join(root, "workspace"));
@@ -44,9 +44,13 @@ test("anonymous default creates and executes desktop and trusted Cron jobs witho
   assert.ok(address && typeof address !== "string");
   const baseURL = `http://127.0.0.1:${address.port}/v1`;
   const store = new UserConfigStore({ picoHome });
-  const seeded = await store.ensureDefaultProvider({});
+  const seeded = await store.read();
   await store.write(
-    { ...seeded.config, providers: { "opencode-free": { ...OPENCODE_FREE_PROVIDER, baseURL } } },
+    {
+      ...seeded.config,
+      defaults: { modelRouteId: OPENCODE_FREE_ROUTE_ID },
+      providers: { "opencode-free": { ...OPENCODE_FREE_PROVIDER, baseURL } },
+    },
     { expectedRevision: seeded.revision },
   );
   let vaultCalls = 0;

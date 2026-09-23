@@ -73,13 +73,6 @@ export class AgentOutputTool<TContext extends AgentOutputExecutionContext> {
             type: "string",
             description: `正式输出正文；UTF-8 编码后最多 ${AGENT_OUTPUT_MAX_BYTES} 字节。`,
           },
-          evidence_refs: {
-            type: "array",
-            maxItems: AGENT_OUTPUT_MAX_REFS,
-            items: { type: "string" },
-            description:
-              "可选。只接受当前子任务工具实际返回的 pico://evidence/<sessionId>/<contentHash> 证据 URI，必须原样复制。普通文件路径（如 branch-a.txt、./branch-a.txt）、绝对路径和 file:// URL 均无效。工具未返回证据 URI 时省略此字段或传 []，把文件路径与读取结果写在 output 中。",
-          },
           artifact_refs: {
             type: "array",
             maxItems: AGENT_OUTPUT_MAX_REFS,
@@ -179,7 +172,7 @@ function parseAgentOutputInput(args: string): NormalizedAgentOutputInput {
   if (!isRecord(value)) {
     throw new Error("agent_output 参数无效：期望 JSON 对象。");
   }
-  const allowedKeys = new Set(["status", "output", "evidence_refs", "artifact_refs"]);
+  const allowedKeys = new Set(["status", "output", "artifact_refs"]);
   const unknownKey = Object.keys(value).find((key) => !allowedKeys.has(key));
   if (unknownKey) {
     throw new Error(`agent_output 参数无效：不支持字段 ${unknownKey}。`);
@@ -190,18 +183,8 @@ function parseAgentOutputInput(args: string): NormalizedAgentOutputInput {
     throw new Error("agent_output 参数无效：status 必须是 success 或 failure。");
   }
   const output = requiredBoundedText(value["output"], "output", AGENT_OUTPUT_MAX_BYTES);
-  const evidenceRefs = normalizeRefs(value["evidence_refs"], "evidence_refs");
   const artifactRefs = normalizeRefs(value["artifact_refs"], "artifact_refs");
-  if (evidenceRefs.length + artifactRefs.length > AGENT_OUTPUT_MAX_REFS) {
-    throw new Error(
-      `agent_output 参数无效：evidence_refs 与 artifact_refs 合计不得超过 ${AGENT_OUTPUT_MAX_REFS} 项。`,
-    );
-  }
-  const evidenceRefSet = new Set(evidenceRefs);
-  if (artifactRefs.some((ref) => evidenceRefSet.has(ref))) {
-    throw new Error("agent_output 参数无效：evidence_refs 与 artifact_refs 不得包含相同引用。");
-  }
-  return { status, output, evidenceRefs, artifactRefs };
+  return { status, output, evidenceRefs: [], artifactRefs };
 }
 
 function normalizeRefs(value: unknown, field: string): readonly string[] {

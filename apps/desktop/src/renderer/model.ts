@@ -1,4 +1,5 @@
 import type { ConversationItemView } from "./conversation/types.js";
+import type { ProviderRetryStates } from "./provider-retry.js";
 import type {
   UsageDashboardDetails,
   ApprovalSessionScopeView,
@@ -10,6 +11,7 @@ import type {
   RuntimeOrchestrationMode,
   RuntimePermissionMode,
   RuntimeSubagentSettingsSnapshot,
+  RuntimeSessionContextSnapshot,
 } from "@pico/protocol";
 
 export type JsonRecord = Readonly<Record<string, unknown>>;
@@ -84,22 +86,12 @@ export interface ConversationView {
   readonly loadError?: string | undefined;
 }
 
-export interface SessionContextView {
-  readonly routeId: string;
-  readonly estimatedInputTokens: number;
-  readonly contextWindowTokens: number;
-  readonly reservedOutputTokens: number;
-  readonly safetyMarginTokens: number;
-  readonly inputBudgetTokens: number;
-  readonly remainingTokens: number;
-  readonly usedPercent: number;
-  readonly estimation: string;
-}
+export type SessionContextView = RuntimeSessionContextSnapshot;
 
 export interface SessionSettingsView {
   readonly modelRouteId: string;
   readonly model: string;
-  readonly collaborationMode: "agent" | "plan";
+  readonly collaborationMode: "agent" | "plan" | "research";
   readonly orchestrationMode: "default" | "graph" | "swarm";
   readonly permissionMode: "ask" | "auto" | "full-access";
   readonly thinkingEffort: string;
@@ -303,7 +295,6 @@ export interface UsageView {
   readonly costStatus?: "none" | "estimated" | "included" | "unknown" | "partial" | undefined;
   readonly providerCallCount?: number | undefined;
   readonly usageReportCount?: number | undefined;
-  readonly baselineCount?: number | undefined;
   readonly scope?: "all" | "workspace" | "session" | undefined;
   readonly workspacePath?: string | undefined;
   readonly unavailableWorkspaceCount?: number | undefined;
@@ -347,6 +338,7 @@ export interface AppData {
   readonly sessions: readonly SessionView[];
   readonly runs: readonly RunView[];
   readonly timeline: readonly TimelineItem[];
+  readonly providerRetries: ProviderRetryStates;
   readonly conversations: Readonly<Record<string, ConversationView>>;
   readonly approvals: readonly ApprovalView[];
   readonly prompts: readonly PromptView[];
@@ -396,6 +388,7 @@ export const emptyData: AppData = {
   sessions: [],
   runs: [],
   timeline: [],
+  providerRetries: {},
   conversations: {},
   approvals: [],
   prompts: [],

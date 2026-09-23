@@ -116,7 +116,7 @@ export interface FileHistorySnapshot {
   /** 该用户消息进入 TUI transcript 前的条目下标。 */
   transcriptIndex?: number;
   /** 该用户消息发送时的协作轴。 */
-  collaborationMode?: "agent" | "plan";
+  collaborationMode?: "agent" | "plan" | "research";
   /** 该用户消息发送时的权限轴。 */
   permissionMode?: "ask" | "auto" | "full-access";
   /** 本条用户消息执行期间实际触碰过的文件。 */
@@ -661,7 +661,7 @@ export async function fileHistoryBeginRewindPoint(
     messageIndex: number;
     userPrompt: string;
     transcriptIndex?: number;
-    collaborationMode?: "agent" | "plan";
+    collaborationMode?: "agent" | "plan" | "research";
     permissionMode?: "ask" | "auto" | "full-access";
   },
   sessionId: string,
@@ -2079,7 +2079,7 @@ interface PersistedFileHistorySnapshotV2 {
   }>;
   timestamp: string;
   transcriptIndex?: number;
-  collaborationMode?: "agent" | "plan";
+  collaborationMode?: "agent" | "plan" | "research";
   permissionMode?: "ask" | "auto" | "full-access";
   editedFilePaths: PersistedFileLocationV2[];
   journalWarnings?: string[];

@@ -5,7 +5,6 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { agentOutputRecordIdFor, graphIdFor } from "@pico/core/agent-graph-identities";
-import { formatEvidenceUri } from "@pico/storage/evidence-archive";
 import { deterministicFingerprint, wakeIdFor } from "@pico/core/agent-graph-identities";
 import { Session } from "@pico/pico-host/session";
 import { SessionManager } from "@pico/pico-host/session-manager";
@@ -29,7 +28,6 @@ import {
 import { SqliteSessionWorkbarRepository } from "@pico/storage";
 import { SqliteAgentGraphControlStore } from "@pico/storage/sqlite/agent-graph-control-store";
 import { withWorkspaceSqliteLease } from "@pico/storage";
-import { seedRuntimeToolExchange } from "../helpers/legacy-evidence-fixture.js";
 import {
   compileRuntimePermissionProfile,
   createBypassExecutionBoundary,
@@ -173,23 +171,13 @@ test("workspace Graph host executes an exact operator with owner-fenced output a
       artifactId: committedArtifact.artifactId,
       digest: committedArtifact.digest,
     });
-    const evidenceRef = await seedRuntimeToolExchange({
-      evidenceRoot: join(storageRoot, "evidence"),
-      storageRoot,
-      sessionId: input.session.id,
-      toolCallId: "operator-source-tool",
-      toolName: "read_file",
-      rawArguments: "{}",
-      rawOutput: "durable evidence",
-      isError: false,
-    });
     await assert.rejects(
       input.binding.outputPort.commitAgentOutput(
         agentOutputInput(activation, "operator result", {
-          evidenceRefs: ["branch-a.txt"],
+          evidenceRefs: [`pico://evidence/${input.session.id}/${"a".repeat(64)}`],
         }),
       ),
-      /evidence_refs.*pico:\/\/evidence.*不能填文件路径.*省略/u,
+      /evidence_refs 已退役/u,
     );
     await assert.rejects(
       input.binding.outputPort.commitAgentOutput(
@@ -208,7 +196,6 @@ test("workspace Graph host executes an exact operator with owner-fenced output a
     );
     const committed = await input.binding.outputPort.commitAgentOutput(
       agentOutputInput(activation, "operator result", {
-        evidenceRefs: [formatEvidenceUri(evidenceRef)],
         artifactRefs: [artifactRef],
       }),
     );
@@ -232,10 +219,7 @@ test("workspace Graph host executes an exact operator with owner-fenced output a
     assert.equal(projection.records.length, 1);
     assert.deepEqual(
       projection.results.records[0]?.resources.map(({ kind, bytes }) => ({ kind, bytes })),
-      [
-        { kind: "evidence", bytes: Buffer.byteLength("durable evidence", "utf8") },
-        { kind: "artifact", bytes: Buffer.byteLength("durable artifact", "utf8") },
-      ],
+      [{ kind: "artifact", bytes: Buffer.byteLength("durable artifact", "utf8") }],
     );
     const reopened = new SqliteAgentGraphControlStore({
       storageRoot: fixture.owner.session.runtimeEventStore!.storageRoot,
@@ -246,7 +230,7 @@ test("workspace Graph host executes an exact operator with owner-fenced output a
           .listResourceRefsByClaim(projection.claims[0]!.claimId)
           .map(({ kind }) => kind)
           .sort(),
-        ["artifact", "evidence"],
+        ["artifact"],
       );
     } finally {
       reopened.close();

@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { FullCompactor } from "@pico/pico-host/product-full-compactor";
+import { FullCompactor, wrapFullCompactionSummary } from "@pico/pico-host/product-full-compactor";
 import { recordRuntimeCompactionCheckpoint } from "@pico/runtime/runtime-compaction-checkpoint";
 import { materializeRuntimeHistory } from "@pico/runtime/session-runtime-read-model";
 import { Session } from "@pico/pico-host/session";
@@ -14,7 +14,7 @@ import { AgentEngine } from "@pico/pico-host/agent-engine";
 import { ContextOverflowError } from "@pico/core";
 import { ToolRegistry } from "@pico/pico-host/product-tool-registry";
 
-test("恢复历史遇到上下文溢出时硬重置保留完整交换，运行中的任务不被补写中断", async (t) => {
+test("恢复历史遇到无法压缩的上下文溢出时保留完整交换并报告错误", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-recovery-hard-reset-"));
   const runtimePort = createEngineRuntimePort();
   const session = new Session("recovery-hard-reset", join(root, "workspace"), {
@@ -68,13 +68,18 @@ test("恢复历史遇到上下文溢出时硬重置保留完整交换，运行�
     capability: session.runtimeEventCapability!,
     agentSwarmAuthorization: "none",
   });
-  await run.run(() => engine.run(session));
-  assert.equal(calls, 2);
+  await assert.rejects(
+    run.run(() => engine.run(session)),
+    ContextOverflowError,
+  );
+  assert.equal(calls, 1);
   const events = await session.runtimeEventStore!.readSession(session.id);
   const checkpoint = events.find((e) => e.kind === "context.checkpoint.recorded");
-  assert.ok(checkpoint && checkpoint.kind === "context.checkpoint.recorded");
-  assert.equal(checkpoint.data.coveredEventCount, 1, "退回整个恢复区间前，而非切在乱序回执内");
-  assert.equal(materializeRuntimeHistory(events).at(-1)!.content, "recovered after overflow");
+  assert.equal(checkpoint, undefined, "不得用硬重置摘要替换未压缩的历史");
+  const history = materializeRuntimeHistory(events);
+  assert.ok(history.some((message) => message.toolCallId === "pending"));
+  assert.ok(history.some((message) => message.content === "retry one"));
+  assert.equal(history.at(-1)!.content, "retry two");
 });
 
 test("旧错序中断历史只读恢复，多工具分类保留，安全压缩后可重载并再次压缩", async (t) => {
@@ -130,6 +135,9 @@ test("旧错序中断历史只读恢复，多工具分类保留，安全压缩�
     true,
   );
 
+  const summary =
+    "## Goal\nContinue work.\n## Progress\nRecovered tool exchange.\n## Next Steps\nContinue checking.\n## Critical Context\nTool batch must remain complete.";
+  const wrappedSummary = wrapFullCompactionSummary(summary);
   let cut = 4;
   const compactor = new FullCompactor({
     provider: {
@@ -139,8 +147,8 @@ test("旧错序中断历史只读恢复，多工具分类保留，安全压缩�
     },
   });
   t.mock.method(compactor, "preview", async () => ({
-    summary: "summary",
-    wrappedSummary: "summary",
+    summary,
+    wrappedSummary,
     compactedCount: cut,
     beforeTokens: 100,
     targetRetainedTokens: 1,
@@ -181,7 +189,7 @@ test("旧错序中断历史只读恢复，多工具分类保留，安全压缩�
   });
   assert.deepEqual(
     (await next.readModelHistory()).map((m) => m.content),
-    ["summary", "continued"],
+    [wrappedSummary, "continued"],
   );
   await next.run(async () => {
     await next.commitMessages(session, [
@@ -195,7 +203,7 @@ test("旧错序中断历史只读恢复，多工具分类保留，安全压缩�
   assert.deepEqual(final.slice(0, recovered.length), recovered, "原始事件逐条不变");
   assert.deepEqual(
     materializeRuntimeHistory(final).map((m) => m.content),
-    ["summary", "done"],
+    [wrappedSummary, "done"],
   );
   const snapshot = await session.readDurableForkSnapshot();
   const fork = {
@@ -212,7 +220,7 @@ test("旧错序中断历史只读恢复，多工具分类保留，安全压缩�
   const forkEvents = await session.runtimeEventStore!.readSession("recovered-fork");
   assert.deepEqual(
     materializeRuntimeHistory(forkEvents).map((m) => m.content),
-    ["summary", "done"],
+    [wrappedSummary, "done"],
   );
   await port.bootstrapFork(fork);
   assert.deepEqual(await session.runtimeEventStore!.readSession("recovered-fork"), forkEvents);

@@ -1,0 +1,161 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Pico：两层压缩，共用一份原始事实",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1080,
+      560
+    ]
+  },
+  "components": [
+    {
+      "id": "facts",
+      "label": "Runtime 事件库",
+      "sublabel": "原始消息与工具全文",
+      "pos": [
+        50,
+        80
+      ],
+      "size": [
+        220,
+        82
+      ],
+      "type": "database"
+    },
+    {
+      "id": "projection",
+      "label": "归档投影",
+      "sublabel": "大结果 → 预览与 URI",
+      "pos": [
+        430,
+        80
+      ],
+      "size": [
+        220,
+        82
+      ],
+      "type": "backend"
+    },
+    {
+      "id": "reader",
+      "label": "归档回读",
+      "sublabel": "搜索、查询、分页",
+      "pos": [
+        810,
+        80
+      ],
+      "size": [
+        220,
+        82
+      ],
+      "type": "backend"
+    },
+    {
+      "id": "checkpoint",
+      "label": "语义检查点",
+      "sublabel": "摘要 + 覆盖范围 + 摘要校验",
+      "pos": [
+        50,
+        360
+      ],
+      "size": [
+        220,
+        82
+      ],
+      "type": "database"
+    },
+    {
+      "id": "context",
+      "label": "模型上下文",
+      "sublabel": "有效摘要 + 未覆盖历史",
+      "pos": [
+        430,
+        360
+      ],
+      "size": [
+        220,
+        82
+      ],
+      "type": "backend"
+    },
+    {
+      "id": "model",
+      "label": "模型请求",
+      "sublabel": "继续执行当前任务",
+      "pos": [
+        810,
+        360
+      ],
+      "size": [
+        220,
+        82
+      ],
+      "type": "external"
+    }
+  ],
+  "connections": [
+    {
+      "id": "facts-projection",
+      "from": "facts",
+      "to": "projection",
+      "label": "读取正文"
+    },
+    {
+      "id": "projection-reader",
+      "from": "projection",
+      "to": "reader",
+      "label": "按需读取"
+    },
+    {
+      "id": "facts-checkpoint",
+      "from": "facts",
+      "to": "checkpoint",
+      "label": "摘要成功后提交",
+      "labelAt": [
+        160,
+        260
+      ]
+    },
+    {
+      "id": "projection-context",
+      "from": "projection",
+      "to": "context",
+      "label": "有界预览",
+      "labelAt": [
+        540,
+        260
+      ]
+    },
+    {
+      "id": "checkpoint-context",
+      "from": "checkpoint",
+      "to": "context",
+      "label": "替换覆盖前缀"
+    },
+    {
+      "id": "context-model",
+      "from": "context",
+      "to": "model",
+      "label": "发送请求"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "原始记录仍保留",
+      "items": [
+        "压缩改变模型读取视图，不删除原始事件。"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "回读需要能力",
+      "items": [
+        "只有可见且绑定当前会话的 reader 才启用归档。"
+      ]
+    }
+  ]
+}

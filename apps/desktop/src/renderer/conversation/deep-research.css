@@ -1,0 +1,57 @@
+.deep-research-panel {
+  margin: 8px 16px;
+  padding: 12px 16px;
+  border: 1px solid var(--border, #80808040);
+  border-radius: 12px;
+  max-height: 38vh;
+  overflow: auto;
+  font-size: 13px;
+}
+.deep-research-heading,
+.deep-research-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.deep-research-heading {
+  justify-content: space-between;
+}
+.deep-research-panel button {
+  border: 1px solid var(--border, #80808040);
+  border-radius: 6px;
+  padding: 4px 9px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.deep-research-panel button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.deep-research-panel p {
+  margin: 8px 0;
+  overflow-wrap: anywhere;
+}
+.deep-research-panel ul {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0;
+}
+.deep-research-panel li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: space-between;
+  padding: 3px 0;
+}
+.deep-research-panel small {
+  flex-basis: 100%;
+}
+.deep-research-meta {
+  opacity: 0.7;
+}
+.deep-research-reference {
+  font-family: monospace;
+  overflow-wrap: anywhere;
+}

@@ -14,7 +14,7 @@ export interface FileHistorySnapshotSummary {
   readonly changeSummary?: string;
   readonly messageIndex: number;
   readonly transcriptIndex?: number;
-  readonly collaborationMode?: "agent" | "plan";
+  readonly collaborationMode?: "agent" | "plan" | "research";
   readonly permissionMode?: "ask" | "auto" | "full-access";
   readonly addedLines?: number;
   readonly removedLines?: number;
@@ -35,7 +35,7 @@ export interface FileHistorySnapshotPort {
   readonly userPrompt: string;
   readonly messageIndex: number;
   readonly transcriptIndex?: number;
-  readonly collaborationMode?: "agent" | "plan";
+  readonly collaborationMode?: "agent" | "plan" | "research";
   readonly permissionMode?: "ask" | "auto" | "full-access";
   readonly editedFilePaths: ReadonlySet<string>;
   readonly trackedFileBackups: ReadonlyMap<string, { readonly backupFileName: string | null }>;

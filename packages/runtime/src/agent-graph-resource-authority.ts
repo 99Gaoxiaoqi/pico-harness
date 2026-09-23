@@ -7,11 +7,6 @@ import type {
   AgentGraphResourceAuthorityPort,
   RetainAgentGraphOutputResourcesInput,
 } from "@pico/core/agent-graph-resource-contracts";
-import {
-  EvidenceArchive,
-  formatEvidenceUri,
-  parseEvidenceUri,
-} from "@pico/storage/evidence-archive";
 import { SqliteSessionWorkbarRepository } from "@pico/storage";
 import { SqliteAgentGraphControlStore } from "@pico/storage/sqlite/agent-graph-control-store";
 
@@ -22,29 +17,25 @@ export type {
 
 export interface AgentGraphResourceAuthorityOptions {
   readonly storageRoot: string;
-  readonly evidenceBaseDir: string;
   readonly store: SqliteAgentGraphControlStore;
 }
 
 /** Validates external resources and converts them into restart-safe Graph facts. */
 export class AgentGraphResourceAuthority implements AgentGraphResourceAuthorityPort {
   private readonly artifacts: SqliteSessionWorkbarRepository;
-  private readonly evidence: EvidenceArchive;
 
   constructor(private readonly options: AgentGraphResourceAuthorityOptions) {
     this.artifacts = new SqliteSessionWorkbarRepository({ storageRoot: options.storageRoot });
-    this.evidence = new EvidenceArchive({
-      baseDir: options.evidenceBaseDir,
-      storageRoot: options.storageRoot,
-    });
   }
 
   async retainOutputResources(
     input: RetainAgentGraphOutputResourcesInput,
   ): Promise<readonly AgentGraphResourceRefRecord[]> {
     const retained: AgentGraphResourceRefRecord[] = [];
-    for (const sourceRef of input.evidenceRefs) {
-      retained.push(await this.retainEvidence(input.claim, sourceRef));
+    if (input.evidenceRefs.length > 0) {
+      throw new Error(
+        "agent_output 的 evidence_refs 已退役；请将来源与读取结果写入 output，制品使用 artifact_refs。",
+      );
     }
     for (const sourceRef of input.artifactRefs) {
       retained.push(this.retainArtifact(input.claim, sourceRef));
@@ -54,57 +45,6 @@ export class AgentGraphResourceAuthority implements AgentGraphResourceAuthorityP
 
   listClaimResources(claimId: string): readonly AgentGraphResourceRefRecord[] {
     return this.options.store.listResourceRefsByClaim(claimId);
-  }
-
-  private async retainEvidence(
-    claim: AgentGraphActivationClaimRecord,
-    sourceRef: string,
-  ): Promise<AgentGraphResourceRefRecord> {
-    let reference;
-    try {
-      reference = parseEvidenceUri(sourceRef);
-    } catch {
-      throw new Error(
-        "agent_output 的 evidence_refs 必须原样使用当前子任务工具返回的 pico://evidence/<sessionId>/<contentHash> URI，不能填文件路径。工具没有返回证据 URI 时，请省略 evidence_refs 或传 []，将文件路径与读取结果写入 output。",
-      );
-    }
-    if (
-      reference.sessionId !== claim.targetSessionId ||
-      formatEvidenceUri(reference) !== sourceRef
-    ) {
-      throw new Error(`Graph evidence ref must belong to activation Session: ${sourceRef}`);
-    }
-    const page = await this.evidence.readEvidencePage(reference, { limitBytes: 1 });
-    const blob =
-      page.kind === "tool-exchange"
-        ? (await this.evidence.readRuntimeToolExchange({ ...reference, kind: "tool-exchange" }))
-            .content.rawOutput
-        : (
-            await this.evidence.readSubagentReportEvidence({
-              ...reference,
-              kind: "subagent-report",
-            })
-          ).content.report;
-    if (blob.sizeBytes !== page.totalBytes) {
-      throw new Error(`Graph evidence size does not match its manifest: ${sourceRef}`);
-    }
-    return this.options.store.putResourceRef({
-      resourceId: graphResourceIdFor(claim.graphId, claim.claimId, "evidence", sourceRef),
-      graphId: claim.graphId,
-      claimId: claim.claimId,
-      kind: "evidence",
-      sourceRef,
-      sourceSessionId: claim.targetSessionId,
-      sourceResourceId: reference.contentHash,
-      contentDigest: blob.digest,
-      contentBytes: blob.sizeBytes,
-      mediaType: "text/plain; charset=utf-8",
-      metadata: {
-        schemaVersion: reference.schemaVersion,
-        contentHash: reference.contentHash,
-        evidenceKind: page.kind,
-      },
-    }).record;
   }
 
   private retainArtifact(

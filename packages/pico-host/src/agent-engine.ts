@@ -14,7 +14,6 @@ import type { EngineRuntimePort } from "./engine-runtime-port.js";
 import type { HookService } from "./hooks/service.js";
 import type { HookEventPayloadMap } from "./hooks/types.js";
 import { PromptComposer } from "./product-prompt-composer.js";
-import { SkillLoader } from "./product-skill-catalog.js";
 import type { TodoStore } from "./product-todo-store.js";
 import { logger } from "./logger.js";
 import { exportTraceToFile } from "./trace.js";
@@ -28,46 +27,28 @@ import {
 } from "./file-history-runtime.js";
 
 export { isPlanProviderTool } from "@pico/runtime/agent-engine";
-export type { SubagentExecutionRuntime } from "@pico/runtime/subagent-runner";
 
 export interface AgentEngineOptions extends Omit<
   RuntimeAgentEngineOptions,
-  | "host"
-  | "diagnostics"
-  | "registry"
-  | "runtimePort"
-  | "usageSession"
-  | "hookService"
-  | "skillLoaderFactory"
+  "host" | "diagnostics" | "registry" | "runtimePort" | "hookService"
 > {
   registry: Registry;
   runtimePort?: EngineRuntimePort;
-  usageSession?: Session;
   hookService?: HookService;
   workspaceRoots?: WorkspaceRoots;
   /** Shared with tools and the host-owned dynamic Plan prompt. */
   todoStore?: TodoStore;
-  skillLoaderFactory?: (workDir: string) => SkillLoader;
 }
 
 /** Product defaults and physical services are injected once; model execution stays in Runtime. */
 export class AgentEngine extends RuntimeAgentEngine {
   constructor(options: AgentEngineOptions) {
-    const {
-      registry,
-      runtimePort,
-      usageSession,
-      hookService,
-      workspaceRoots,
-      skillLoaderFactory,
-      todoStore,
-      ...runtimeOptions
-    } = options;
+    const { registry, runtimePort, hookService, workspaceRoots, todoStore, ...runtimeOptions } =
+      options;
     super({
       ...runtimeOptions,
       registry,
       ...(runtimePort ? { runtimePort } : {}),
-      ...(usageSession ? { usageSession } : {}),
       ...(hookService
         ? {
             hookService: {
@@ -80,7 +61,6 @@ export class AgentEngine extends RuntimeAgentEngine {
             },
           }
         : {}),
-      skillLoaderFactory: skillLoaderFactory ?? ((workDir) => new SkillLoader(workDir)),
       diagnostics: logger,
       host: {
         sessionCapability(session: Session) {

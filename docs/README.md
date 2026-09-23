@@ -24,6 +24,10 @@
 
 ## 当前实现的关键边界
 
+![Pico 当前执行架构](readme-assets/current/runtime.png)
+
+[交互架构图](readme-assets/current/runtime.html) · [可编辑图源](readme-assets/current/runtime.json)
+
 旧文档最容易在以下四处误导读者：
 
 1. TUI 已从进程内 Runtime 迁移为 daemon 瘦客户端；TUI 与 Desktop 都通过
@@ -33,9 +37,27 @@
    记忆随后迁出到用户级 `$PICO_HOME/memory.sqlite`，按 global/workspace scope 隔离，经过
    提取和规范化直接保存，旧 Proposal/Worker 执行链已退役。
 3. 新 ToolResult 不再进入 Evidence CAS；限内正文 inline 入库，超过 1 MiB 写合成错误，
-   `read_evidence` 只剩退役协议的兼容/诊断边界。
+   `read_evidence` 只剩退役协议的兼容/诊断边界。较大结果的模型请求预览使用 `pico://archive/...`，通过 `archive_read` 回读，与旧 Evidence CAS 不同。
 4. Plan 不再使用 `PLAN.md` / `TODO.md`。Plan 是 Session RuntimeEvent 状态机，普通 Todo 位于
    SQLite `workspace_kv`。
+
+## 技术博客阅读目录
+
+![Pico 技术博客阅读路线：架构、执行基础、上下文、安全、协作与验证](readme-assets/current/reading.png)
+
+[交互阅读路线图](readme-assets/current/reading.html) · [可编辑图源](readme-assets/current/reading.json)
+
+建议先读架构长文，再按图中对应的课程与专题深入。各篇文章中的源码链接用于追踪实现，验证记录用于区分本轮检查与历史验收。
+
+本轮按代码 `0092022f`（2026-09-21）核对仓库内 15 篇技术博客；详见[核对记录、差异与验证结果](blog-code-consistency-audit.md)。其中原先过期的架构长文与 11 篇课程已按当前实现重写；原路径保留以兼容已有链接。
+
+| 文章                                                                      | 状态              | 阅读主题                                       |
+| ------------------------------------------------------------------------- | ----------------- | ---------------------------------------------- |
+| [长期记忆](pico-memory-technical-guide.md)                                | 当前实现，已校准  | 用户级设置、证据提取、恢复与召回               |
+| [子智能体](pico-subagents-technical-guide.md)                             | 当前实现，已校准  | 配置、持久执行、续用和准入边界                 |
+| [上下文压缩](pico-context-compaction-technical-guide.md)                  | 当前实现，已校准  | 真实请求快照、历史估算、单次发送压缩与持久归档 |
+| [从一句话到一次可靠执行](guides/pico-harness-architecture-guide-image.md) | 当前实现，已重写  | 从输入到持久执行的当前架构                     |
+| [课程系列 00–10](#课程式构建记录)                                         | 11 篇当前实现教程 | 按当前代码讲解 Harness                         |
 
 ## 架构深入文档
 
@@ -43,26 +65,26 @@
 
 [子智能体技术图解](pico-subagents-technical-guide.md)：从配置创建、持久执行到续用、活动卡片与统一权限边界，附概念封面和五张技术图，并说明配置型子会话与 Graph。
 
-| 文档                                                                                 | 状态       | 阅读提示                                                   |
-| ------------------------------------------------------------------------------------ | ---------- | ---------------------------------------------------------- |
-| [01 Engine](architecture/01-engine.md)                                               | 部分过期   | Engine 主线可参考；JSONL/commit marker 存储段已过期        |
-| [02 Tools](architecture/02-tools.md)                                                 | 部分过期   | Registry/调度可参考；Evidence 与 `read_evidence` 已退役    |
-| [03 Context](architecture/03-context.md)                                             | 部分过期   | Prompt/压缩可参考；Evidence、Todo 路径和摘要段数需回查代码 |
-| [04 Provider 与入口](architecture/04-provider-entry.md)                              | 当前主线   | TUI daemon 路径已校准；协议细节仍以代码为准                |
-| [05 Infra 与安全](architecture/05-infra-safety.md)                                   | 部分过期   | 安全分层可参考；文件存储描述已被 SQLite 取代               |
-| [06 数据流](architecture/06-data-flow.md)                                            | 部分过期   | 主执行链可参考；ToolResult/Evidence 局部仍是旧方案         |
-| [07 Hooks](architecture/07-hooks.md)                                                 | 当前主线   | Hook 来源、信任、热重载和前后台边界                        |
-| [08 多 Agent 并发](history/architecture/08-multi-agent-concurrency.md)               | 历史提案   | Shared Worker/OCC 尚未成为当前可写 worker 主路径           |
-| [09 架构债务](history/architecture/09-architecture-debt-remediation.md)              | 历史审计   | 不作为当前待办                                             |
-| [10 架构质量评估](history/architecture/10-architecture-quality-assessment.md)        | 历史评估   | 评分和规模为阶段快照                                       |
-| [11 ToolResult Evidence](history/architecture/11-tool-result-evidence-projection.md) | 已取代     | 由决策记录 26 取代                                         |
-| [12 Compaction/ToolResult](architecture/12-compaction-and-tool-result.md)            | 部分过期   | Compaction 动机可参考；ToolResult 归档段已取代             |
-| [13 渐进披露](architecture/13-progressive-disclosure.md)                             | 部分过期   | 工具披露看 ADR 30；ToolResult 看 ADR 26                    |
-| [14 原子长期记忆](architecture/14-workspace-memory.md)                               | 当前事实   | 用户级原子库、提取/召回、管理及后台恢复边界                |
-| [15 Prompt Cache](architecture/15-prompt-cache.md)                                   | 待专项复核 | 原理可参考，阈值和 Provider 细节以代码为准                 |
-| [18 Graph Mode](architecture/18-graph-mode.md)                                       | 当前主线   | Graph v2 控制面、exact Run 与 yield/wake 恢复              |
-| [19 核心概念地图](history/architecture/19-concepts-map.md)                           | 历史快照   | 旧 JSONL、Evidence 与 Graph v1 叙述不代表当前实现          |
-| [Plugin scope](architecture/plugin-scope-contract.md)                                | 当前约束   | Plugin 物理根与 scope 边界                                 |
+| 文档                                                                                 | 状态       | 阅读提示                                                |
+| ------------------------------------------------------------------------------------ | ---------- | ------------------------------------------------------- |
+| [01 Engine](architecture/01-engine.md)                                               | 部分过期   | Engine 主线可参考；JSONL/commit marker 存储段已过期     |
+| [02 Tools](architecture/02-tools.md)                                                 | 部分过期   | Registry/调度可参考；Evidence 与 `read_evidence` 已退役 |
+| [03 Context](architecture/03-context.md)                                             | 当前事实   | 有效历史、请求快照、估算与执行所有权                    |
+| [04 Provider 与入口](architecture/04-provider-entry.md)                              | 当前主线   | TUI daemon 路径已校准；协议细节仍以代码为准             |
+| [05 Infra 与安全](architecture/05-infra-safety.md)                                   | 部分过期   | 安全分层可参考；文件存储描述已被 SQLite 取代            |
+| [06 数据流](architecture/06-data-flow.md)                                            | 部分过期   | 主执行链可参考；ToolResult/Evidence 局部仍是旧方案      |
+| [07 Hooks](architecture/07-hooks.md)                                                 | 当前主线   | Hook 来源、信任、热重载和前后台边界                     |
+| [08 多 Agent 并发](history/architecture/08-multi-agent-concurrency.md)               | 历史提案   | Shared Worker/OCC 尚未成为当前可写 worker 主路径        |
+| [09 架构债务](history/architecture/09-architecture-debt-remediation.md)              | 历史审计   | 不作为当前待办                                          |
+| [10 架构质量评估](history/architecture/10-architecture-quality-assessment.md)        | 历史评估   | 评分和规模为阶段快照                                    |
+| [11 ToolResult Evidence](history/architecture/11-tool-result-evidence-projection.md) | 已取代     | 由决策记录 26 取代                                      |
+| [12 Compaction/ToolResult](architecture/12-compaction-and-tool-result.md)            | 当前事实   | 入口准入、持久归档与单次发送压缩                        |
+| [13 渐进披露](architecture/13-progressive-disclosure.md)                             | 部分过期   | 工具披露看 ADR 30；ToolResult 看 ADR 26                 |
+| [14 原子长期记忆](architecture/14-workspace-memory.md)                               | 当前事实   | 用户级原子库、提取/召回、管理及后台恢复边界             |
+| [15 Prompt Cache](architecture/15-prompt-cache.md)                                   | 待专项复核 | 原理可参考，阈值和 Provider 细节以代码为准              |
+| [18 Graph Mode](architecture/18-graph-mode.md)                                       | 当前主线   | Graph v2 控制面、exact Run 与 yield/wake 恢复           |
+| [19 核心概念地图](history/architecture/19-concepts-map.md)                           | 历史快照   | 旧 JSONL、Evidence 与 Graph v1 叙述不代表当前实现       |
+| [Plugin scope](architecture/plugin-scope-contract.md)                                | 当前约束   | Plugin 物理根与 scope 边界                              |
 
 ## 架构决策与研究
 
@@ -91,26 +113,26 @@
 | [TodoList 实现](guides/todolist-implementation.md)              | 部分过期；当前存储为 SQLite `workspace_kv`  |
 | [Desktop/TUI parity](guides/desktop-tui-parity.md)              | 目标/验收规格，不是完成清单                 |
 | [TUI 交互指南](guides/tui-claude-code-parity.md)                | 使用前按当前 client commands 复核           |
-| [架构配图指南](guides/pico-harness-architecture-guide-image.md) | 历史快照；基于 `a5d598f`，不定义当前行为    |
+| [架构配图指南](guides/pico-harness-architecture-guide-image.md) | 当前实现；按 `0092022f` 重写                |
 
 ## 课程式构建记录
 
-以下章节保留“为什么这样构建”的教学推导，不是当前产品契约。每章顶部已经标注主要失效
-边界；代码示例、路径、工具数量、协议和阈值可能无法在当前版本直接运行。
+以下 11 章按当前代码重新编写，保留教学叙述并区分真实接口与概念伪代码。`history/course/`
+仅为兼容既有链接而保留的路径，已不表示正文停留在历史实现；旧版本可通过 Git 查看。
 
-| 章节                                    | 主题                             |
-| --------------------------------------- | -------------------------------- |
-| [0](history/course/00-why.md)           | 为什么自己写 Harness             |
-| [1](history/course/01-breathing.md)     | 最小循环与 ReAct                 |
-| [2](history/course/02-provider.md)      | Provider 抽象                    |
-| [3](history/course/03-tools.md)         | 工具 Registry                    |
-| [4](history/course/04-memory.md)        | Session 与上下文                 |
-| [5](history/course/05-compaction.md)    | 上下文压缩                       |
-| [6](history/course/06-steering.md)      | Plan、恢复与重复失败             |
-| [7](history/course/07-safety.md)        | 安全与审批                       |
-| [8](history/course/08-subagent.md)      | 子代理与隔离                     |
-| [9](history/course/09-observability.md) | 成本、Trace 与日志               |
-| [10](history/course/10-evaluation.md)   | 内部评测；本组中与当前实现最接近 |
+| 章节                                    | 主题                     |
+| --------------------------------------- | ------------------------ |
+| [0](history/course/00-why.md)           | 为什么自己写 Harness     |
+| [1](history/course/01-breathing.md)     | 最小循环与 ReAct         |
+| [2](history/course/02-provider.md)      | Provider 抽象            |
+| [3](history/course/03-tools.md)         | 工具 Registry            |
+| [4](history/course/04-memory.md)        | Session 与上下文         |
+| [5](history/course/05-compaction.md)    | 上下文压缩               |
+| [6](history/course/06-steering.md)      | Plan、恢复与重复失败     |
+| [7](history/course/07-safety.md)        | 安全与审批               |
+| [8](history/course/08-subagent.md)      | 子代理与隔离             |
+| [9](history/course/09-observability.md) | 成本、Trace 与日志       |
+| [10](history/course/10-evaluation.md)   | 内部 Headless 与评测证据 |
 
 ## 实施计划与历史档案
 
@@ -133,7 +155,7 @@
 | `guides/`                           | 部署、发布与专题说明                                   |
 | `decisions/`                        | 架构取舍和决策；实施状态见决策表                       |
 | `plans/`                            | 当前实施与验收清单                                     |
-| `history/course/`                   | 从最小 Harness 开始的课程记录                          |
+| `history/course/`                   | 当前实现教程；路径保留以兼容已有链接                   |
 | `history/architecture/`             | 已取代设计、研究和阶段审计                             |
 | `history/plans/`、`history/design/` | 历史实施计划与设计记录                                 |
 

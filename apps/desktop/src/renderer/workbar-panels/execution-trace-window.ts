@@ -1,0 +1,68 @@
+import type { RuntimeExecutionPage } from "@pico/protocol";
+
+/** Every refresh rebuilds the visible window from fresh server cursors. */
+export async function readExecutionWindow(
+  query: (cursor?: string) => Promise<RuntimeExecutionPage>,
+  pageCount: number,
+  current: () => boolean,
+): Promise<readonly RuntimeExecutionPage[] | undefined> {
+  const pages: RuntimeExecutionPage[] = [];
+  let cursor: string | undefined;
+  let restarted = false;
+  for (let index = 0; index < pageCount; index += 1) {
+    if (!current()) return undefined;
+    let page: RuntimeExecutionPage;
+    try {
+      page = await query(cursor);
+    } catch (error) {
+      // Late accounting revisions invalidate the snapshot. Restart at most once;
+      // sustained updates remain visible as a retryable UI error, never a retry loop.
+      if (
+        cursor &&
+        !restarted &&
+        error instanceof Error &&
+        "code" in error &&
+        error.code === "INVALID_PARAMS"
+      ) {
+        restarted = true;
+        pages.length = 0;
+        cursor = undefined;
+        index = -1;
+        continue;
+      }
+      throw error;
+    }
+    if (!current()) return undefined;
+    pages.push(page);
+    cursor = page.nextCursor;
+    if (!cursor) break;
+  }
+  return pages;
+}
+
+export function mergeExecutionPages(
+  pages: readonly RuntimeExecutionPage[],
+): RuntimeExecutionPage | undefined {
+  const first = pages[0];
+  if (!first) return undefined;
+  const runs = new Map(pages.flatMap((page) => page.runs.map((run) => [run.runId, run] as const)));
+  const union = (field: "oversizedRunIds" | "missingModelCallRunIds" | "incompleteRunIds") => [
+    ...new Set(pages.flatMap((page) => page.coverage[field])),
+  ];
+  return {
+    ...first,
+    runs: [...runs.values()],
+    // Summary is session-wide, never summed once per loaded page.
+    coverage: {
+      modelAttempts: pages.every(
+        (page) => page.coverage.modelAttempts === first.coverage.modelAttempts,
+      )
+        ? first.coverage.modelAttempts
+        : "partial",
+      oversizedRunIds: union("oversizedRunIds"),
+      missingModelCallRunIds: union("missingModelCallRunIds"),
+      incompleteRunIds: union("incompleteRunIds"),
+    },
+    nextCursor: pages.at(-1)?.nextCursor,
+  };
+}

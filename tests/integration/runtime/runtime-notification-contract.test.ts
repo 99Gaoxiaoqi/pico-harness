@@ -65,6 +65,41 @@ test("Runtime notification scope 与 payload identity 必须一致且拒绝额�
   );
 });
 
+test("run.providerRetry 只接受安全的重试进度字段", () => {
+  const retry = createRuntimeNotification({
+    topic: "run.providerRetry",
+    scope: { workspacePath, sessionId: "session-1", runId: "run-1" },
+    resourceVersion: 3,
+    at: 100,
+    payload: {
+      phase: "scheduled",
+      failedAttempt: 1,
+      nextAttempt: 2,
+      maxAttempts: 10,
+      delayMs: 1200,
+      failureStatus: "error",
+      transportCode: "ECONNRESET",
+      diagnosticId: "diagnostic-1",
+    },
+  });
+  assert.equal(isRuntimeNotification(retry), true);
+  assert.equal(
+    isRuntimeNotification({ ...retry, payload: { ...retry.payload, message: "remote secret" } }),
+    false,
+  );
+  assert.equal(
+    isRuntimeNotification({ ...retry, payload: { ...retry.payload, nextAttempt: 3 } }),
+    false,
+  );
+  assert.equal(
+    isRuntimeNotification({
+      ...retry,
+      payload: { ...retry.payload, transportCode: "Bearer secret" },
+    }),
+    false,
+  );
+});
+
 test("approval.requested 保持当前 tool 判别联合并校验 run identity", () => {
   const approval = createRuntimeNotification({
     eventId: "event-approval",

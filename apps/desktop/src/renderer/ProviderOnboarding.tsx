@@ -175,7 +175,6 @@ function ProviderSetup({
   readonly onComplete: () => void;
 }) {
   const anonymous = preset.auth === "none";
-  const free = preset.id === "opencode-free";
   const [id, setId] = useState(() =>
     nextProviderId(
       preset.id,
@@ -311,19 +310,7 @@ function ProviderSetup({
         {runtime.data.notices.providers && (
           <InlineNotice tone="error">{runtime.data.notices.providers}</InlineNotice>
         )}
-        {free && (
-          <div className="provider-free-notice">
-            <strong>免费试用 · 无需 API Key</strong>
-            <p>
-              通过 OpenCode Zen 访问免费模型，按 IP
-              限流。免费额度和可用模型可能变化；请勿提交个人或机密信息。
-            </p>
-            <a href="https://opencode.ai/docs/zen#privacy" target="_blank" rel="noreferrer">
-              了解免费模型与数据使用说明
-            </a>
-          </div>
-        )}
-        {anonymous && !free && (
+        {anonymous && (
           <p className="provider-model-hint">
             此连接无需 API Key，请确认本地服务已启动并填写已安装的模型。
           </p>
@@ -383,7 +370,6 @@ function ProviderSetup({
                 type="url"
                 required
                 value={baseURL}
-                readOnly={free}
                 placeholder={preset.baseURLPlaceholder ?? "https://api.example.com/v1"}
                 onChange={(event) => setBaseURL(event.currentTarget.value)}
               />
@@ -410,11 +396,9 @@ function ProviderSetup({
             选择模型
           </h4>
           <p className="provider-model-hint">
-            {free
-              ? "使用内置免费模型。服务不可用时会提示错误，不会自动切换到付费模型。"
-              : preset.modelProtocols
-                ? "选择要使用的模型，Pico 会自动适配连接。同一份 API Key 即可使用所选模型；可用性以账户权限为准。"
-                : "预设模型可按需选择，也可填写其他模型 ID。可用性以你的账户权限为准。"}
+            {preset.modelProtocols
+              ? "选择要使用的模型，Pico 会自动适配连接。同一份 API Key 即可使用所选模型；可用性以账户权限为准。"
+              : "预设模型可按需选择，也可填写其他模型 ID。可用性以你的账户权限为准。"}
           </p>
           <div className="provider-model-choices">
             {preset.models.map((model) => (
@@ -434,18 +418,16 @@ function ProviderSetup({
               </label>
             ))}
           </div>
-          {!free && (
-            <label>
-              <span>{preset.models.length ? "其他模型 ID（可选）" : "模型 ID"}</span>
-              <textarea
-                value={customModels}
-                rows={3}
-                placeholder="填写模型 ID，每行一个"
-                onChange={(event) => setCustomModels(event.currentTarget.value)}
-              />
-            </label>
-          )}
-          {preset.protocol === "openai" && !free && (
+          <label>
+            <span>{preset.models.length ? "其他模型 ID（可选）" : "模型 ID"}</span>
+            <textarea
+              value={customModels}
+              rows={3}
+              placeholder="填写模型 ID，每行一个"
+              onChange={(event) => setCustomModels(event.currentTarget.value)}
+            />
+          </label>
+          {preset.protocol === "openai" && (
             <label className="provider-discovery-toggle">
               <input
                 type="checkbox"

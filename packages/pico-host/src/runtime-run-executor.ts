@@ -36,9 +36,6 @@ export interface RuntimeRunExecutorSession extends RuntimeProjectionSession {
   readonly fileHistory: {
     readonly snapshots: readonly { readonly messageId: string }[];
   };
-  readonly totalPromptTokens: number;
-  readonly totalCompletionTokens: number;
-  readonly totalCostCNY: number;
 
   serialize<Result>(execute: () => Promise<Result>): Promise<Result>;
   beginRewindPoint(input: {
@@ -569,10 +566,11 @@ function findFinalMessage(messages: readonly Message[]): string {
 }
 
 function snapshotUsage(session: RuntimeRunExecutorSession): RunAgentUsage {
+  const usage = session.getRuntimeStateSnapshot().usage;
   return {
-    promptTokens: session.totalPromptTokens,
-    completionTokens: session.totalCompletionTokens,
-    costCNY: session.totalCostCNY,
+    promptTokens: usage.totalPromptTokens,
+    completionTokens: usage.totalCompletionTokens,
+    costCNY: usage.totalCostCNY,
   };
 }
 

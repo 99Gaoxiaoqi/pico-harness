@@ -20,7 +20,10 @@ import {
 import { resolveModelRouteCapabilities } from "@pico/runtime";
 import { SqliteRuntimeControlStore } from "@pico/storage/sqlite/sqlite-runtime-control-store";
 import { createEmptyUsageSnapshot } from "@pico/core/session-runtime-state";
-import type { ProviderCallRecord } from "@pico/storage/runtime-control-types";
+import type {
+  PhysicalAttemptRecord,
+  ProviderCallRecord,
+} from "@pico/storage/runtime-control-types";
 import { resolvePicoPaths } from "@pico/pico-host";
 import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
 import { WorkspaceRegistrationStore } from "@pico/pico-host/workspace-registration";
@@ -319,14 +322,14 @@ test("explicit full-compaction markers take precedence over generic history rewr
   assert.doesNotMatch(JSON.stringify(changed), /PRIVATE_COMPACTION_SUMMARY/u);
 });
 
-test("usage.get excludes baselines from cache ratios and honors the call time range", async (context) => {
+test("usage.get measures native physical attempts and honors the call time range", async (context) => {
   const workspacePath = await mkdtemp(join(tmpdir(), "pico-cache-effectiveness-"));
   const picoHome = join(workspacePath, "pico-home");
   const env = { PICO_HOME: picoHome };
   const store = new SqliteRuntimeControlStore({
     storageRoot: resolvePicoPaths(workspacePath, { picoHome }).workspace.root,
   });
-  store.recordProviderCall({
+  recordNativeProviderCall(store, {
     ...providerCall(
       "old",
       1_024,
@@ -336,18 +339,9 @@ test("usage.get excludes baselines from cache ratios and honors the call time ra
     ),
     createdAt: 1_000,
   });
-  store.recordProviderCall({
+  recordNativeProviderCall(store, {
     ...providerCall("new", 2_048, 0, 0, diagnosePreparedProviderRequest(preparedCapture("new"))),
     createdAt: 2_000,
-  });
-  store.putUsageBaseline({
-    baselineId: "baseline",
-    inputTokens: 99_999,
-    outputTokens: 1,
-    cacheReadTokens: 99_999,
-    cacheWriteTokens: 1,
-    cost: 0,
-    importedAt: 3_000,
   });
   store.close();
 
@@ -363,10 +357,10 @@ test("usage.get excludes baselines from cache ratios and honors the call time ra
   const all = asRecord(await desktop.handle(createRuntimeRequest("usage.get", { workspacePath })));
   const allUsage = asRecord(all["usage"]);
   const allCache = asRecord(allUsage["cache"]);
-  assert.equal(asRecord(allUsage["total"])["inputTokens"], 103_071);
+  assert.equal(asRecord(allUsage["total"])["inputTokens"], 3_072);
   assert.equal(
     asRecord(allUsage["total"])["totalTokens"],
-    203_674,
+    3_674,
     "总 Token 必须包含未缓存输入、缓存读写与输出，不重复计入 reasoning",
   );
   assert.equal(allCache["cacheReadTokens"], 500);
@@ -377,7 +371,6 @@ test("usage.get excludes baselines from cache ratios and honors the call time ra
     await desktop.handle(createRuntimeRequest("usage.get", { workspacePath, from: 1_500 })),
   );
   const rangeUsage = asRecord(range["usage"]);
-  assert.equal(rangeUsage["baselineCount"], 0);
   assert.equal(rangeUsage["providerCallCount"], 1);
   assert.equal(asRecord(rangeUsage["cache"])["requestHitRate"], 0);
 });
@@ -408,7 +401,8 @@ test("global usage.get returns trusted records plus explicit partial failures", 
   const healthyStore = new SqliteRuntimeControlStore({
     storageRoot: resolvePicoPaths(healthyWorkspace, { picoHome }).workspace.root,
   });
-  healthyStore.recordProviderCall(
+  recordNativeProviderCall(
+    healthyStore,
     providerCall(
       "healthy",
       100,
@@ -484,22 +478,12 @@ test("Desktop usage parser reads canonical cache fields and preserves zero value
       costStatus: undefined,
       providerCallCount: undefined,
       usageReportCount: undefined,
-      baselineCount: undefined,
       scope: undefined,
       workspacePath: undefined,
       unavailableWorkspaceCount: undefined,
       period: "",
     },
   );
-
-  const baselineSeparated = parseUsage({
-    usage: {
-      total: { inputTokens: 10_000, cacheReadTokens: 9_000, cacheWriteTokens: 8_000 },
-      cache: { cacheReadTokens: 50, cacheWriteTokens: 25, requestHitRate: 0.5 },
-    },
-  });
-  assert.equal(baselineSeparated.cacheReadTokens, 50);
-  assert.equal(baselineSeparated.cacheWriteTokens, 25);
 });
 
 test("/model usage reports session cache hit and token ratios", () => {
@@ -577,6 +561,47 @@ test("/model usage reports session cache hit and token ratios", () => {
     "missing provider usage must keep the request hit rate unknown",
   );
 });
+
+function recordNativeProviderCall(store: SqliteRuntimeControlStore, call: ProviderCallRecord) {
+  const prepared: PhysicalAttemptRecord = {
+    accountingVersion: 1,
+    accountingSource: "physical",
+    physicalAttemptId: `physical-${call.callId}`,
+    providerCallId: call.callId,
+    logicalCallId: `logical-${call.callId}`,
+    ownerId: store.beginPhysicalAttemptOwner(),
+    revision: 0,
+    attempt: 1,
+    retryAttempt: 0,
+    provider: call.provider,
+    model: call.model,
+    purpose: call.purpose,
+    startedAt: new Date(call.createdAt).toISOString(),
+    status: "prepared",
+    usageBasis: "missing",
+    costStatus: "unknown",
+    pricingVersion: "test-v1",
+    requestDiagnostic: call.reported?.["requestDiagnostic"] as Record<string, unknown>,
+  };
+  store.recordPhysicalAttempt(prepared);
+  store.recordPhysicalAttempt({
+    ...prepared,
+    revision: 1,
+    completedAt: new Date(call.createdAt + 1).toISOString(),
+    status: "succeeded",
+    usageBasis: "reported",
+    usage: {
+      promptTokens: call.inputTokens + call.cacheReadTokens + call.cacheWriteTokens,
+      inputTokens: call.inputTokens,
+      completionTokens: call.outputTokens,
+      cacheReadTokens: call.cacheReadTokens,
+      cacheWriteTokens: call.cacheWriteTokens,
+      reportedFields: ["prompt", "completion", "input", "cacheRead", "cacheWrite"],
+    },
+    costCNY: call.cost,
+    costStatus: "estimated",
+  });
+}
 
 function providerCall(
   callId: string,

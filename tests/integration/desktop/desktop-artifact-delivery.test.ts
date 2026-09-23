@@ -96,6 +96,31 @@ test("正式 write_file 交付物经过会话查询、分块预览及另存/文�
   assert.deepEqual(bridgeCalls, [["pico:artifact:save-as", reference]]);
 });
 
+test("write_file 自动登记 HTML 和 HTM，显式标记不重复登记，普通源码仍需显式标记", async (t) => {
+  const fixture = await createFixture(t);
+  const tool = fixture.registry.getTool("write_file")!;
+  const files = [
+    { path: "pages/preview.html", content: "<h1>预览</h1>" },
+    { path: "pages/legacy.HTM", content: "<p>旧扩展名</p>", artifact: false },
+    { path: "pages/explicit.HTML", content: "<p>显式登记</p>", artifact: true },
+  ];
+  for (const file of files) {
+    assert.match(await tool.execute(JSON.stringify(file)), /已登记生成文件/u);
+    assert.equal(await readFile(join(fixture.workspace, file.path), "utf8"), file.content);
+  }
+  await tool.execute(
+    JSON.stringify({ path: "src/index.ts", content: "export const ready = true;" }),
+  );
+
+  const listed = fixture.repository.queryArtifacts({ sessionId: fixture.sessionId }).artifacts;
+  assert.deepEqual(listed.map((artifact) => artifact.title).sort(), [
+    "explicit.HTML",
+    "legacy.HTM",
+    "preview.html",
+  ]);
+  assert.deepEqual(fixture.revisions, [1, 2, 3]);
+});
+
 test("交付物保留路径授权、跨会话隔离和导出取消语义", async (t) => {
   const fixture = await createFixture(t);
   const tool = fixture.registry.getTool("write_file")!;

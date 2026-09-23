@@ -368,19 +368,6 @@ function clearControlWeakReferences(database: DatabaseSync): void {
       )
       .run(),
   );
-  changes += sqliteChanges(
-    database
-      .prepare(
-        `UPDATE usage_provider_calls SET session_id = NULL, conversation_id = NULL
-         WHERE session_id IS NOT NULL OR conversation_id IS NOT NULL`,
-      )
-      .run(),
-  );
-  changes += sqliteChanges(
-    database
-      .prepare("UPDATE usage_baselines SET session_id = NULL WHERE session_id IS NOT NULL")
-      .run(),
-  );
   changes += sqliteChanges(database.prepare("DELETE FROM desktop_input_queue").run());
   changes += sqliteChanges(database.prepare("DELETE FROM desktop_first_send_claims").run());
   changes += sqliteChanges(database.prepare("DELETE FROM desktop_rewind_claims").run());
@@ -390,22 +377,8 @@ function clearControlWeakReferences(database: DatabaseSync): void {
 }
 
 function clearAttachmentRows(database: DatabaseSync): void {
-  database.prepare("DELETE FROM evidence_records").run();
   database.prepare("DELETE FROM file_history_snapshots").run();
   database.prepare("DELETE FROM file_history").run();
-  // A blob index row is removed only after every DB manifest reference is gone.
-  database
-    .prepare(
-      `DELETE FROM evidence_blobs
-       WHERE NOT EXISTS (
-         SELECT 1 FROM evidence_records AS records, json_tree(records.content_json) AS node
-         WHERE node.key = 'digest' AND node.value = evidence_blobs.digest
-       ) AND NOT EXISTS (
-         SELECT 1 FROM agent_graph_resource_refs
-         WHERE kind = 'evidence' AND content_digest = evidence_blobs.digest
-       )`,
-    )
-    .run();
 }
 
 function clearSessionOwnedRows(database: DatabaseSync): void {
@@ -476,30 +449,6 @@ function collectGcCandidates(database: DatabaseSync): GcCandidate[] {
     });
   }
 
-  const evidenceRows = database
-    .prepare("SELECT digest, size_bytes FROM evidence_blobs ORDER BY digest")
-    .all() as Array<Record<string, unknown>>;
-  for (const row of evidenceRows) {
-    add({
-      assetScope: "evidence_blob",
-      contentDigest: requireDigest(row["digest"], "evidence_blobs.digest"),
-      byteLength: requireNonNegativeInteger(row["size_bytes"], "evidence_blobs.size_bytes"),
-      requiresReferenceCheck: true,
-    });
-  }
-  for (const json of readJsonColumn(
-    database,
-    "SELECT content_json AS json FROM evidence_records",
-  )) {
-    collectSha256BlobRefs(json).forEach((ref) =>
-      add({
-        assetScope: "evidence_blob",
-        contentDigest: ref.digest,
-        ...(ref.sizeBytes === undefined ? {} : { byteLength: ref.sizeBytes }),
-        requiresReferenceCheck: true,
-      }),
-    );
-  }
   for (const json of readJsonColumn(
     database,
     `SELECT state_json AS json FROM file_history
@@ -719,12 +668,6 @@ function requireString(value: unknown, field: string): string {
 
 function optionalString(value: unknown, field: string): string | undefined {
   return value == null ? undefined : requireString(value, field);
-}
-
-function requireDigest(value: unknown, field: string): string {
-  const digest = requireString(value, field);
-  if (!DIGEST_PATTERN.test(digest)) throw new FileStorageIntegrityError(`${field} is invalid`);
-  return digest;
 }
 
 function requireNonNegativeInteger(value: unknown, field: string): number {

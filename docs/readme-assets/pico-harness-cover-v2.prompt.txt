@@ -1,0 +1,5 @@
+Tool: built-in image_gen
+Use: conceptual README cover; not a UI screenshot or implementation diagram.
+
+Prompt:
+Create a wide 16:9 editorial technical-blog cover for the GitHub README of pico-harness, a local TypeScript agent runtime. Premium restrained editorial illustration, warm ivory paper background, dark navy precise linework, teal and amber accents. A compact central engineering workbench / runtime core with carefully arranged modular layers, a terminal pane on one side and desktop window on the other, connected to small contextual memory cards, tools, and a database cylinder. Conceptual cutaway illustration with subtle depth and tactile print texture, generous whitespace, clean composition legible at README width. Not a screenshot and not a literal architecture diagram. Text only: large exact title 'pico-harness', smaller exact subtitle 'Model + Harness'. No other text, no robot, no brain, no neon glow, no watermark. Make this a finished polished open-source project cover.

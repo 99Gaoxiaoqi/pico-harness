@@ -1,8 +1,18 @@
+import { isValidStoredCompactionSummary } from "./history-compact-summary-validation.js";
+import { buildToolResultArchiveRef, rebindToolResultArchive } from "./tool-result-archive.js";
+import {
+  planToolResultProjections,
+  toolResultProjectionSha256,
+} from "./tool-result-projections.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { isAbortError, RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX } from "@pico/core";
+import {
+  isAbortError,
+  ModelCommunicationError,
+  RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX,
+} from "@pico/core";
 import { LeaseConflictError } from "@pico/storage";
 import { canonicalizeWorkspacePath } from "@pico/storage/workspace-path";
 import type { CommitReceipt } from "@pico/core";
@@ -38,7 +48,13 @@ import {
 } from "@pico/core/durable-transcript-contract";
 import { inspectDurableTranscriptEvents } from "./durable-transcript-state.js";
 import { waitForDelay } from "./deadline.js";
-import { RUNTIME_MESSAGE_EVENT_ID, type Message, type ToolCall, type ToolResult } from "@pico/core";
+import type {
+  Message,
+  ToolCall,
+  ToolResult,
+  ToolDefinition,
+  RequestContextFacts,
+} from "@pico/core";
 import {
   ToolCommitBoundaryError,
   type RuntimeToolRegistry,
@@ -69,6 +85,7 @@ import {
   type RuntimeTranscriptEventRecordedEvent,
 } from "@pico/storage/runtime-event";
 import {
+  readRuntimeModelHistorySnapshot,
   RUNTIME_HISTORY_EVENT_KINDS,
   RUNTIME_MODEL_MESSAGE_EVENT_KINDS,
   materializeRuntimeHistoryEntries,
@@ -230,6 +247,8 @@ export interface RuntimeForkModelCheckpointSeed {
 
 export interface RuntimeModelCallStartedOptions {
   readonly providerCallId: string;
+  readonly logicalCallId?: string;
+  readonly retryAttempt?: number;
   readonly provider?: string;
   readonly model?: string;
   readonly purpose: string;
@@ -237,6 +256,10 @@ export interface RuntimeModelCallStartedOptions {
 
 export interface RuntimeModelCallSettledOptions {
   readonly providerCallId: string;
+  readonly logicalCallId?: string;
+  readonly retryAttempt?: number;
+  readonly attempts?: RuntimeModelCallSettledEvent["data"]["attempts"];
+  readonly attemptCoverage?: RuntimeModelCallSettledEvent["data"]["attemptCoverage"];
   readonly status: "succeeded" | "failed" | "cancelled";
   readonly latencyMs: number;
   readonly usage?: RuntimeModelCallSettledEvent["data"]["usage"];
@@ -350,6 +373,12 @@ export function runWithRuntimeToolCall<Result>(toolCallId: string, run: () => Re
  * and search indexes remain replaceable projections for UI and tooling.
  */
 export class RuntimeRun {
+  private toolResultArchiveAvailable = false;
+
+  setToolResultArchiveAvailable(available: boolean): void {
+    this.toolResultArchiveAvailable = available;
+  }
+
   readonly runId: string;
   readonly invocationId: string;
   readonly store: SqliteRuntimeEventStore;
@@ -856,6 +885,17 @@ export class RuntimeRun {
       canonicalWorkDir,
       operationCreatedAt,
     );
+    const projectedModelCheckpoint = modelCheckpoint
+      ? {
+          ...modelCheckpoint,
+          summary: rebindForkArchiveSummary(
+            modelCheckpoint.summary,
+            seedEntries,
+            options.targetSessionId,
+            identity,
+          ),
+        }
+      : undefined;
     const targetSessionKey = runtimeSessionKey(
       store.storageRoot,
       canonicalWorkDir,
@@ -914,13 +954,18 @@ export class RuntimeRun {
             `Runtime fork target ${options.targetSessionId} published an incomplete canonical seed`,
           );
         }
-        assertRuntimeForkCheckpoint(existingEvents, identity, modelCheckpoint, seedEntries);
+        assertRuntimeForkCheckpoint(
+          existingEvents,
+          identity,
+          projectedModelCheckpoint,
+          seedEntries,
+        );
         assertRuntimeForkState(existingEvents, statePublication, options.targetSessionId, true);
         assertRuntimeForkPublicationOrder(
           existingEvents,
           identity,
           seedEntries,
-          modelCheckpoint,
+          projectedModelCheckpoint,
           statePublication,
           completedMarker,
           options.targetSessionId,
@@ -947,20 +992,20 @@ export class RuntimeRun {
       for (let index = importedCount; index < seedEntries.length; index += 1) {
         await forkRun.recordImportedSeedEntry(seedEntries[index]!, identity.seedEventId(index));
       }
-      if (modelCheckpoint) {
+      if (projectedModelCheckpoint) {
         const coveredEntries = forkCheckpointEntries(
           await store.readSession(options.targetSessionId),
           seedEntries,
           identity,
-          modelCheckpoint.coveredMessageCount,
+          projectedModelCheckpoint.coveredMessageCount,
         );
         await forkRun.recordCheckpoint({
           eventId: identity.checkpointEventId,
           checkpointId: identity.checkpointId,
-          coveredEventCount: modelCheckpoint.coveredMessageCount,
+          coveredEventCount: projectedModelCheckpoint.coveredMessageCount,
           sourceDigest: computeCheckpointSourceDigest(coveredEntries),
           throughEventId: coveredEntries.at(-1)!.eventId,
-          summary: modelCheckpoint.summary,
+          summary: projectedModelCheckpoint.summary,
         });
       }
       // State is part of the published fork payload. Persist it before the marker so every
@@ -973,13 +1018,18 @@ export class RuntimeRun {
         forkRun.requireOwnerFence(),
       );
       const publicationEvents = await store.readSession(options.targetSessionId);
-      assertRuntimeForkCheckpoint(publicationEvents, identity, modelCheckpoint, seedEntries);
+      assertRuntimeForkCheckpoint(
+        publicationEvents,
+        identity,
+        projectedModelCheckpoint,
+        seedEntries,
+      );
       assertRuntimeForkState(publicationEvents, statePublication, options.targetSessionId, true);
       assertRuntimeForkPublicationOrder(
         publicationEvents,
         identity,
         seedEntries,
-        modelCheckpoint,
+        projectedModelCheckpoint,
         statePublication,
         undefined,
         options.targetSessionId,
@@ -1167,25 +1217,51 @@ export class RuntimeRun {
   }
 
   async readModelHistory(includeEventIds = false): Promise<Message[]> {
-    const {
-      applyModelHistoryByteBudget,
-      MAX_MODEL_HISTORY_BYTES,
-      materializeRuntimeHistoryEntries,
-    } = await import("@pico/runtime/session-runtime-read-model");
-    // kind 切片查询(票 04):read-model 只消费 message/tool-result/checkpoint 三类,
-    // 其余 kind 只产 soft 诊断,不进输出——折叠规则不变,数据来源窄化。
+    const snapshot = await readRuntimeModelHistorySnapshot(this.store, this.sessionId, {
+      includeEventIds,
+    });
+    return snapshot.messages;
+  }
+
+  /** The only archive mutation gate: the fact and transition commit precedes replay. */
+  async prepareToolResultProjections(options: {
+    stepNumber: number;
+    tools: readonly ToolDefinition[];
+  }): Promise<void> {
+    if (
+      !this.toolResultArchiveAvailable ||
+      !options.tools.some((tool) => tool.name === "archive_read" || tool.name === "read_file")
+    )
+      return;
+    this.assertOpen();
     const { entries } = await this.store.readSessionEntriesOfKinds(
       this.sessionId,
       RUNTIME_HISTORY_EVENT_KINDS,
     );
-    // ADR 26 §2.3(票 E2):全文 inline 入库后,provider 消息组装按字节预算 gate,
-    // 超预算的最旧大内容在 read-model 层降级为带标记的截断视图,末尾工作集不裁。
-    const materialized = materializeRuntimeHistoryEntries(entries.map(({ event }) => event));
-    return applyModelHistoryByteBudget(materialized, {
-      maxTotalBytes: MAX_MODEL_HISTORY_BYTES,
-    }).map(({ eventId, message }) =>
-      includeEventIds ? { ...message, [RUNTIME_MESSAGE_EVENT_ID]: eventId } : message,
-    );
+    const events = entries.map((entry) => entry.event);
+    const history = materializeRuntimeHistoryEntries(events);
+    const plans = planToolResultProjections(events, history, this.runId, options.stepNumber);
+    for (const plan of plans) {
+      await this.append({
+        ...this.base(createRuntimeEventId("tool-result-projection"), false, "internal"),
+        kind: "tool.result.projection.recorded",
+        refs: { toolCallId: plan.source.refs.toolCallId },
+        data: {
+          sourceEventId: plan.source.eventId,
+          sourceProjectionSha256: toolResultProjectionSha256(plan.source.data.projection),
+          projection: plan.projection,
+          reason: plan.reason,
+          ...(plan.supersededByToolCallId
+            ? { supersededByToolCallId: plan.supersededByToolCallId }
+            : {}),
+        },
+      });
+    }
+  }
+
+  async readContextCompactionBoundary(): Promise<RequestContextFacts["compaction"]> {
+    const snapshot = await readRuntimeModelHistorySnapshot(this.store, this.sessionId);
+    return snapshot.latestCompaction;
   }
 
   /** True only when this run owns the Session's canonical workspace and durable store. */
@@ -1246,8 +1322,14 @@ export class RuntimeRun {
     }
     const data = lastCheckpoint.event.data;
     // 硬重置 checkpoint 之前的所有 checkpoint 都已失效，不再向前查找。
-    if (data.checkpointId.startsWith("hard-reset:")) return undefined;
+    if (
+      data.checkpointId.startsWith("hard-reset:") ||
+      lastCheckpoint.event.runId.startsWith(RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX)
+    )
+      return undefined;
     const content = data.summary.content;
+    if (!isValidStoredCompactionSummary(content, data.summary.providerData?.["picoSummaryFormat"]))
+      return undefined;
     // 用结构化标签精确定位正文边界。
     const startIdx = content.indexOf(COMPACTION_SUMMARY_OPEN_TAG);
     const endIdx = content.indexOf(COMPACTION_SUMMARY_CLOSE_TAG);
@@ -1416,7 +1498,7 @@ export class RuntimeRun {
       await this.recordImportedMessage(source.event.data.message, eventId);
       return;
     }
-    const event: RuntimeToolResultRecordedEvent = {
+    const event: RuntimeToolResultRecordedEvent = rebindToolResultArchive({
       ...this.base(eventId),
       refs: {
         ...(this.refs() ?? {}),
@@ -1427,7 +1509,7 @@ export class RuntimeRun {
       },
       kind: "tool.result.recorded",
       data: structuredClone(source.event.data),
-    };
+    });
     assertRuntimeEvent(event);
     await this.append(event);
   }
@@ -1901,7 +1983,7 @@ export class RuntimeRun {
         `Runtime ToolResult ${canonical.toolCallId} is dispatched and cannot use the undispatched path`,
       );
     }
-    const event: RuntimeToolResultRecordedEvent = {
+    const original: RuntimeToolResultRecordedEvent = {
       ...this.base(createRuntimeEventId("tool-result")),
       refs: {
         ...(this.refs() ?? {}),
@@ -1916,6 +1998,7 @@ export class RuntimeRun {
         projection: canonical.projection,
       },
     };
+    const event = original;
     assertRuntimeEvent(event);
     const message = projectRuntimeModelMessage(event);
     if (!message) {
@@ -1980,6 +2063,12 @@ export class RuntimeRun {
       kind: "model.call.settled",
       data: {
         providerCallId: options.providerCallId,
+        ...(options.logicalCallId !== undefined ? { logicalCallId: options.logicalCallId } : {}),
+        ...(options.retryAttempt !== undefined ? { retryAttempt: options.retryAttempt } : {}),
+        ...(options.attempts !== undefined ? { attempts: options.attempts } : {}),
+        ...(options.attemptCoverage !== undefined
+          ? { attemptCoverage: options.attemptCoverage }
+          : {}),
         status: options.status,
         latencyMs: options.latencyMs,
         ...(options.usage !== undefined ? { usage: options.usage } : {}),
@@ -2763,6 +2852,40 @@ function normalizeForkOperationCreatedAt(value: string | undefined): string | un
   return new Date(timestamp).toISOString();
 }
 
+/** Rewrite only refs backed by facts actually copied into this fork. */
+function rebindForkArchiveSummary(
+  summary: Message,
+  seed: readonly RuntimeSessionForkSeedEntry[],
+  targetSessionId: string,
+  identity: RuntimeForkBootstrapIdentity,
+): Message {
+  let content = summary.content;
+  for (const [index, entry] of seed.entries()) {
+    if (
+      entry.kind !== "model" ||
+      entry.event.kind !== "tool.result.recorded" ||
+      entry.event.data.body.storage !== "inline"
+    )
+      continue;
+    const event = entry.event;
+    const body = event.data.body;
+    const original = buildToolResultArchiveRef({
+      sessionId: event.sessionId,
+      eventId: event.eventId,
+      sha256: body.sha256,
+      sizeBytes: body.sizeBytes,
+    });
+    const replacement = buildToolResultArchiveRef({
+      sessionId: targetSessionId,
+      eventId: identity.seedEventId(index),
+      sha256: body.sha256,
+      sizeBytes: body.sizeBytes,
+    });
+    content = content.replaceAll(original, replacement);
+  }
+  return { ...summary, content };
+}
+
 function assertRuntimeForkCheckpoint(
   events: readonly RuntimeEvent[],
   identity: RuntimeForkBootstrapIdentity,
@@ -3199,7 +3322,18 @@ function matchesImportedForkSeedEvent(
         };
   return (
     isDeepStrictEqual(actual.refs, expectedRefs) &&
-    isDeepStrictEqual(forkHistoryPayload(actual), forkHistoryPayload(expected.event))
+    isDeepStrictEqual(
+      forkHistoryPayload(actual),
+      forkHistoryPayload(
+        expected.event.kind === "tool.result.recorded"
+          ? rebindToolResultArchive({
+              ...expected.event,
+              sessionId: actual.sessionId,
+              eventId: actual.eventId,
+            })
+          : expected.event,
+      ),
+    )
   );
 }
 
@@ -3307,6 +3441,8 @@ function requireExactRunStartedEvent(
 
 function runtimeFailureReason(error: unknown): string {
   if (isAbortError(error)) return "aborted";
+  if (error instanceof ModelCommunicationError)
+    return `ModelCommunicationError category=${error.category} diagnosticId=${error.diagnostic.diagnosticId}; detail omitted`;
   const detail = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
   return detail.slice(0, 1_000);
 }

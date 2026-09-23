@@ -15,6 +15,8 @@ import { evaluateWorkspaceToolCall, type WorkspaceSandboxConfig } from "./worksp
 import type { BaseTool, RequestMiddleware } from "./tool-registry-contract.js";
 import { ToolRegistry, type ToolRegistryDiagnostics } from "./tool-registry.js";
 import { BashTool } from "./bash-tool.js";
+import type { BoundToolResultArchiveReader } from "@pico/runtime/tool-result-archive";
+import { ArchiveReadTool } from "./archive-read-tool.js";
 import { ReadFileTool } from "./read-file-tool.js";
 import { WriteFileTool } from "./write-file-tool.js";
 import { EditFileTool } from "./edit-file-tool.js";
@@ -39,9 +41,10 @@ export type ChildAgentToolConstructor = (
 /** Tool constructors for the current configured child-session profiles. */
 export function createChildAgentToolConstructors(
   diagnostics?: GrepDiagnostics,
+  archive?: BoundToolResultArchiveReader,
 ): Readonly<Record<string, ChildAgentToolConstructor>> {
   return {
-    read_file: (workDir, roots) => new ReadFileTool(roots ?? workDir),
+    read_file: (workDir, roots) => new ReadFileTool(roots ?? workDir, archive),
     write_file: (workDir, roots) => new WriteFileTool(roots ?? workDir),
     edit_file: (workDir, roots) => new EditFileTool(roots ?? workDir),
     bash: (workDir, roots, processSandbox, profile = "workspace-write") =>
@@ -88,12 +91,14 @@ export function createHookVerifierRegistry(options: {
   readonly processSandbox: ChildAgentProcessSandbox;
   readonly env: Readonly<Record<string, string | undefined>>;
   readonly codeIntelligence?: CodeIntelligenceService;
+  readonly toolResultArchive?: BoundToolResultArchiveReader;
   readonly diagnostics?: ToolRegistryDiagnostics;
   readonly skillLogger?: SkillCatalogLogger;
   readonly grepDiagnostics?: GrepDiagnostics;
 }): ToolRegistry {
   const registry = new ToolRegistry(undefined, options.diagnostics);
-  registry.register(new ReadFileTool(options.workspaceRoots));
+  registry.register(new ReadFileTool(options.workspaceRoots, options.toolResultArchive));
+  if (options.toolResultArchive) registry.register(new ArchiveReadTool(options.toolResultArchive));
   registry.register(
     new SkillViewTool(
       new SkillLoader(options.workDir, {

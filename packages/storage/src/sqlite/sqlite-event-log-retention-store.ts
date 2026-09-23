@@ -159,7 +159,6 @@ interface BlobReference {
 }
 
 interface BlobReferenceSnapshot {
-  readonly evidence: readonly BlobReference[];
   readonly fileHistory: readonly BlobReference[];
   readonly runtimeAsset: readonly BlobReference[];
 }
@@ -518,13 +517,6 @@ function readStorageStatusLocked(
     ]),
   ]);
   addGroupedBytes(database, breakdowns, "attachmentManifestBytes", [
-    groupedTextQuery("evidence_records", "session_id", [
-      "session_id",
-      "content_hash",
-      "kind",
-      "archived_at",
-      "content_json",
-    ]),
     groupedTextQuery("file_history", "session_id", ["session_id", "state_json", "updated_at"]),
     groupedTextQuery("file_history_snapshots", "session_id", [
       "session_id",
@@ -593,12 +585,12 @@ function applyRetentionPlanLocked(
       skippedSessions.push({ sessionId, reason });
       continue;
     }
+
     deleteSessionOwnedRowsLocked(database, sessionId);
     deletedSessionIds.push(sessionId);
   }
   const afterRefs = readBlobReferences(database);
   const newBlobGcIntents = collectOrphanGcIntents(
-    database,
     beforeRefs,
     afterRefs,
     new Set(deletedSessionIds),
@@ -712,14 +704,7 @@ function deleteSessionOwnedRowsLocked(database: DatabaseSync, sessionId: string)
   database
     .prepare("UPDATE daemon_runs SET session_id = NULL, checkpoint_id = NULL WHERE session_id = ?")
     .run(sessionId);
-  database
-    .prepare(
-      "UPDATE usage_provider_calls SET session_id = NULL, conversation_id = NULL WHERE session_id = ?",
-    )
-    .run(sessionId);
-  database
-    .prepare("UPDATE usage_baselines SET session_id = NULL WHERE session_id = ?")
-    .run(sessionId);
+
   database
     .prepare("DELETE FROM storage_operations WHERE session_id = ? OR target_session_id = ?")
     .run(sessionId, sessionId);
@@ -727,7 +712,6 @@ function deleteSessionOwnedRowsLocked(database: DatabaseSync, sessionId: string)
     .prepare("DELETE FROM runtime_continuation_claims WHERE target_session_id = ?")
     .run(sessionId);
 
-  database.prepare("DELETE FROM evidence_records WHERE session_id = ?").run(sessionId);
   database.prepare("DELETE FROM file_history_snapshots WHERE session_id = ?").run(sessionId);
   database.prepare("DELETE FROM file_history WHERE session_id = ?").run(sessionId);
   // runtime_events is the one sessions child whose original schema predates ON DELETE CASCADE.
@@ -739,13 +723,12 @@ function deleteSessionOwnedRowsLocked(database: DatabaseSync, sessionId: string)
 }
 
 function collectOrphanGcIntents(
-  database: DatabaseSync,
   before: BlobReferenceSnapshot,
   after: BlobReferenceSnapshot,
   deletedSessionIds: ReadonlySet<string>,
 ): NewBlobGcIntent[] {
   const intents: NewBlobGcIntent[] = [];
-  for (const kind of ["evidence", "fileHistory", "runtimeAsset"] as const) {
+  for (const kind of ["fileHistory", "runtimeAsset"] as const) {
     const survivors = new Set(
       after[kind].map((reference) => blobReferenceIdentity(kind, reference)),
     );
@@ -763,25 +746,12 @@ function collectOrphanGcIntents(
     for (const [identity, reference] of candidates) {
       if (survivors.has(identity)) continue;
       const { digest, byteLength, storageUri } = reference;
-      if (kind === "evidence") {
-        const row = database
-          .prepare("SELECT size_bytes FROM evidence_blobs WHERE digest = ?")
-          .get(digest) as { size_bytes?: unknown } | undefined;
-        if (!row) continue;
-        database.prepare("DELETE FROM evidence_blobs WHERE digest = ?").run(digest);
-        intents.push({
-          kind: "evidence",
-          digest,
-          byteLength: requireNonNegativeInteger(row.size_bytes, "evidence_blobs.size_bytes"),
-        });
-      } else {
-        intents.push({
-          kind: kind === "fileHistory" ? "file_history" : "runtime_asset",
-          digest,
-          byteLength,
-          ...(storageUri === undefined ? {} : { storageUri }),
-        });
-      }
+      intents.push({
+        kind: kind === "fileHistory" ? "file_history" : "runtime_asset",
+        digest,
+        byteLength,
+        ...(storageUri === undefined ? {} : { storageUri }),
+      });
     }
   }
   return intents.toSorted(
@@ -948,28 +918,13 @@ function readUnattributedControlBytes(database: DatabaseSync): number {
       "session_id IS NULL",
     ),
     unattributedTextQuery(
-      "usage_provider_calls",
-      [
-        "call_id",
-        "tx_id",
-        "conversation_id",
-        "goal_id",
-        "job_id",
-        "attempt_id",
-        "purpose",
-        "provider",
-        "model",
-        "route",
-        "status",
-        "reported_json",
-      ],
+      "usage_physical_attempts",
+      ["physical_attempt_id", "provider_call_id", "owner_id", "record_json"],
       "session_id IS NULL",
     ),
-    unattributedTextQuery(
-      "usage_baselines",
-      ["baseline_id", "goal_id", "source_json"],
-      "session_id IS NULL",
-    ),
+    unattributedTextQuery("usage_attempt_owners", ["owner_id"]),
+    unattributedTextQuery("usage_attempt_revisions", ["physical_attempt_id", "snapshot_hash"]),
+    unattributedTextQuery("usage_deleted_sessions", ["session_id"]),
     unattributedTextQuery("retention_gc_intents", [
       "intent_id",
       "blob_kind",
@@ -1004,55 +959,9 @@ function unattributedJobChildTextQuery(table: string, columns: readonly string[]
 
 function readBlobReferences(database: DatabaseSync): BlobReferenceSnapshot {
   return {
-    evidence: readEvidenceReferences(database),
     fileHistory: readFileHistoryReferences(database),
     runtimeAsset: readRuntimeAssetReferences(database),
   };
-}
-
-function readEvidenceReferences(database: DatabaseSync): BlobReference[] {
-  const blobSizes = new Map(
-    (
-      database.prepare("SELECT digest, size_bytes FROM evidence_blobs").all() as Array<
-        Record<string, unknown>
-      >
-    ).map((row) => [
-      requireDigest(row["digest"], "evidence_blobs.digest"),
-      requireNonNegativeInteger(row["size_bytes"], "evidence_blobs.size_bytes"),
-    ]),
-  );
-  const rows = database
-    .prepare("SELECT session_id, content_json FROM evidence_records")
-    .all() as Array<Record<string, unknown>>;
-  const manifestReferences = rows.flatMap((row) =>
-    extractBlobReferences(
-      requireString(row["session_id"], "evidence_records.session_id"),
-      parseJson(row["content_json"], "evidence_records.content_json"),
-    ).map((reference) => ({
-      ...reference,
-      byteLength: blobSizes.get(reference.digest) ?? reference.byteLength,
-    })),
-  );
-  const graphReferences = database
-    .prepare(
-      `SELECT source_session_id, content_digest, content_bytes
-       FROM agent_graph_resource_refs WHERE kind = 'evidence'`,
-    )
-    .all() as Array<Record<string, unknown>>;
-  return [
-    ...manifestReferences,
-    ...graphReferences.map((row) => ({
-      sessionId: requireString(
-        row["source_session_id"],
-        "agent_graph_resource_refs.source_session_id",
-      ),
-      digest: requireDigest(row["content_digest"], "agent_graph_resource_refs.content_digest"),
-      byteLength: requireNonNegativeInteger(
-        row["content_bytes"],
-        "agent_graph_resource_refs.content_bytes",
-      ),
-    })),
-  ];
 }
 
 function readFileHistoryReferences(database: DatabaseSync): BlobReference[] {
@@ -1145,7 +1054,7 @@ function attributeExclusiveBlobBytes(
   snapshots: BlobReferenceSnapshot,
 ): { readonly sharedBytes: number } {
   let sharedBytes = 0;
-  for (const references of [snapshots.evidence, snapshots.fileHistory, snapshots.runtimeAsset]) {
+  for (const references of [snapshots.fileHistory, snapshots.runtimeAsset]) {
     const byDigest = new Map<string, { byteLength: number; sessionIds: Set<string> }>();
     for (const reference of references) {
       const entry = byDigest.get(reference.digest) ?? {
@@ -1171,19 +1080,6 @@ function attributeExclusiveBlobBytes(
       }
       sharedBytes = safeAdd(sharedBytes, byteLength, "shared blob bytes");
     }
-  }
-  const referencedEvidenceDigests = new Set(snapshots.evidence.map(({ digest }) => digest));
-  const evidenceRows = database
-    .prepare("SELECT digest, size_bytes FROM evidence_blobs")
-    .all() as Array<Record<string, unknown>>;
-  for (const row of evidenceRows) {
-    const digest = requireDigest(row["digest"], "evidence_blobs.digest");
-    if (referencedEvidenceDigests.has(digest)) continue;
-    sharedBytes = safeAdd(
-      sharedBytes,
-      requireNonNegativeInteger(row["size_bytes"], "evidence_blobs.size_bytes"),
-      "orphan evidence blob bytes",
-    );
   }
   return { sharedBytes };
 }
@@ -1288,26 +1184,12 @@ function controlByteQueries(): readonly string[] {
       "result_json",
       "error",
     ]),
-    groupedTextQuery("usage_provider_calls", "session_id", [
-      "call_id",
-      "tx_id",
-      "session_id",
-      "conversation_id",
-      "goal_id",
-      "job_id",
-      "attempt_id",
-      "purpose",
-      "provider",
-      "model",
-      "route",
-      "status",
-      "reported_json",
-    ]),
-    groupedTextQuery("usage_baselines", "session_id", [
-      "baseline_id",
-      "session_id",
-      "goal_id",
-      "source_json",
+    groupedTextQuery("usage_accounting_versions", "session_id", ["session_id"]),
+    groupedTextQuery("usage_physical_attempts", "session_id", [
+      "physical_attempt_id",
+      "provider_call_id",
+      "owner_id",
+      "record_json",
     ]),
     groupedTextQuery("storage_operations", "session_id", [
       "operation_id",
