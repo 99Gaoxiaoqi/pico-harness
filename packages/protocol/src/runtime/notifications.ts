@@ -61,6 +61,18 @@ export type RuntimeNotificationMap = {
   readonly "run.updated": { readonly run: RuntimeRun };
   readonly "run.finished": { readonly run: RuntimeRun };
   readonly "run.timeline": { readonly runId: RunId; readonly item: JsonObject };
+  readonly "run.providerRetry": {
+    readonly phase: "scheduled" | "started";
+    readonly failedAttempt: number;
+    readonly nextAttempt: number;
+    readonly maxAttempts: number;
+    readonly delayMs: number;
+    readonly failureStatus: "timed_out" | "cancelled" | "error";
+    readonly errorCategory?: string;
+    readonly httpStatus?: number;
+    readonly transportCode?: string;
+    readonly diagnosticId?: string;
+  };
   readonly "approval.requested": {
     readonly approvalId: ApprovalId;
     readonly runId: RunId;
@@ -138,6 +150,7 @@ export const RUNTIME_NOTIFICATION_TOPICS = [
   "run.updated",
   "run.finished",
   "run.timeline",
+  "run.providerRetry",
   "approval.requested",
   "approval.resolved",
   "plan.updated",
@@ -248,6 +261,7 @@ const RUNTIME_NOTIFICATION_SCOPE_IDS = {
   "run.updated": { required: ["runId"], optional: ["sessionId"] },
   "run.finished": { required: ["runId"], optional: ["sessionId"] },
   "run.timeline": { required: ["runId"], optional: ["sessionId"] },
+  "run.providerRetry": { required: ["runId"], optional: ["sessionId"] },
   "approval.requested": { required: ["sessionId", "runId"], optional: [] },
   "approval.resolved": { required: ["sessionId", "runId"], optional: [] },
   "plan.updated": { required: ["sessionId"], optional: [] },
@@ -348,6 +362,8 @@ export function isRuntimeNotification(value: unknown): value is RuntimeNotificat
       return isRunPayload(payload, scope);
     case "run.timeline":
       return isRunTimelinePayload(payload, scope.runId);
+    case "run.providerRetry":
+      return isProviderRetryPayload(payload);
     case "approval.requested":
       return parseApprovalRequestedPayload(payload)?.runId === scope.runId;
     case "approval.resolved":
@@ -493,6 +509,31 @@ function isRunTimelinePayload(payload: unknown, runId: unknown): boolean {
     nonEmptyString(payload.runId) &&
     payload.runId === runId &&
     isJsonObject(payload.item)
+  );
+}
+
+function isProviderRetryPayload(payload: unknown): boolean {
+  if (
+    !isExactObject(
+      payload,
+      ["phase", "failedAttempt", "nextAttempt", "maxAttempts", "delayMs", "failureStatus"],
+      ["errorCategory", "httpStatus", "transportCode", "diagnosticId"],
+    )
+  ) return false;
+  return (
+    (payload.phase === "scheduled" || payload.phase === "started") &&
+    nonNegativeSafeInteger(payload.failedAttempt) &&
+    nonNegativeSafeInteger(payload.nextAttempt) &&
+    nonNegativeSafeInteger(payload.maxAttempts) &&
+    payload.failedAttempt >= 1 &&
+    payload.nextAttempt === payload.failedAttempt + 1 &&
+    payload.maxAttempts >= payload.nextAttempt &&
+    nonNegativeSafeInteger(payload.delayMs) &&
+    ["timed_out", "cancelled", "error"].includes(String(payload.failureStatus)) &&
+    (payload.errorCategory === undefined || nonEmptyString(payload.errorCategory)) &&
+    (payload.httpStatus === undefined || nonNegativeSafeInteger(payload.httpStatus)) &&
+    (payload.transportCode === undefined || nonEmptyString(payload.transportCode)) &&
+    (payload.diagnosticId === undefined || nonEmptyString(payload.diagnosticId))
   );
 }
 

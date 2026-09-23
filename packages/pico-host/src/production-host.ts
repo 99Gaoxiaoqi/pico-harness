@@ -2978,6 +2978,21 @@ export function publishDesktopReporterEvent(
   event: DesktopReporterEvent,
   nextResourceVersion: () => number,
 ): void {
+  if (event.type === "provider.retry") {
+    service.publishDesktopNotification(
+      createRuntimeNotification({
+        topic: "run.providerRetry",
+        scope: {
+          workspacePath,
+          runId: event.runId,
+          ...(event.sessionId ? { sessionId: event.sessionId } : {}),
+        },
+        resourceVersion: nextResourceVersion(),
+        at: event.at,
+        payload: event.payload as JsonObject,
+      }),
+    );
+  }
   if (
     [
       "run.started",
@@ -3019,7 +3034,9 @@ function timelineItem(event: DesktopReporterEvent): JsonObject {
     ? safePayload["active"] === false
       ? "done"
       : "active"
-    : event.type.endsWith("completed") || event.type === "run.finished"
+    : event.type.endsWith("completed") ||
+        event.type === "run.finished" ||
+        (event.type === "provider.retry" && safePayload["phase"] === "started")
       ? "done"
       : "active";
   const detail = firstString(
@@ -3030,7 +3047,9 @@ function timelineItem(event: DesktopReporterEvent): JsonObject {
   );
   const explicitId = firstString(safePayload["timelineItemId"]);
   return jsonObject({
-    ...(thinkingStatus
+    ...(event.type === "provider.retry"
+      ? { id: `status:provider-retry:${event.runId}:${String(safePayload["failedAttempt"])}` }
+      : thinkingStatus
       ? { id: thinkingStatusId(event.runId, safePayload["turn"]) }
       : explicitId
         ? { id: explicitId }
@@ -3071,6 +3090,8 @@ function safeTimelinePayload(
 }
 
 function timelineTitle(type: string, payload: Readonly<Record<string, unknown>>): string {
+  if (type === "provider.retry")
+    return payload["phase"] === "started" ? "正在重新连接模型" : "模型连接中断，准备重试";
   if (type === "assistant.thinking") return "Pico 正在推理";
   if (type === "tool.started") return `开始 ${firstString(payload["toolName"]) ?? "工具"}`;
   if (type === "tool.completed") {
