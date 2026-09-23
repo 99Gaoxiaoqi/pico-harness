@@ -609,6 +609,7 @@ function turnDuration(steps: readonly RuntimeExecutionStep[]): number | undefine
 }
 
 function runReason(run: RuntimeExecutionRun, includeDiagnostic = false) {
+  if (run.status === "completed" || run.status === "running") return undefined;
   const raw = run.reason ?? run.steps.find((step) => step.status === "failed" && step.error)?.error;
   return raw ? displayExecutionError(raw, includeDiagnostic) : undefined;
 }
