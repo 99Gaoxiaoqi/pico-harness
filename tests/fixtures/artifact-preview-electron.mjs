@@ -55,6 +55,14 @@ app
       await frame.executeJavaScript("document.querySelector('button').textContent"),
       "交互成功",
     );
+    await frame.executeJavaScript(
+      "document.dispatchEvent(new KeyboardEvent('keydown', {key:'Escape',bubbles:true}))",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(
+      await window.webContents.executeJavaScript("window.result"),
+      "pico:artifact:escape",
+    );
     assert.equal(
       await frame.executeJavaScript(
         `(()=>{const child=document.createElement('iframe');document.body.append(child);try{return typeof child.contentWindow.RTCPeerConnection==='function'}catch{return false}finally{child.remove()}})()`,

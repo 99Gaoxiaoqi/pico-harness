@@ -95,5 +95,7 @@ export function artifactHtmlDocument(html: string): string {
   // any artifact code; workers and nested realms are prohibited by the CSP above.
   const lockRtc =
     "for(const name of ['RTCPeerConnection','webkitRTCPeerConnection'])Object.defineProperty(globalThis,name,{value:undefined,writable:false,configurable:false});";
-  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${policy}"><meta http-equiv="x-dns-prefetch-control" content="off"><script>${lockRtc}</script></head><body>${html}</body></html>`;
+  const escapeToPreview =
+    "addEventListener('keydown',event=>{if(event.key==='Escape')parent.postMessage('pico:artifact:escape','*')},true);";
+  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${policy}"><meta http-equiv="x-dns-prefetch-control" content="off"><script>${lockRtc}${escapeToPreview}</script></head><body>${html}</body></html>`;
 }

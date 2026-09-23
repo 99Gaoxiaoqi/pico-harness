@@ -149,10 +149,7 @@ export function FilesPanelController({ workspacePath, sessionId, active }: Workb
   ) => {
     setContentError(undefined);
     try {
-      const artifactApi = window.pico.artifacts as typeof window.pico.artifacts & {
-        openInDefaultApp: typeof window.pico.artifacts.open;
-      };
-      const result = await artifactApi[action]({ ...scope, artifactId });
+      const result = await window.pico.artifacts[action]({ ...scope, artifactId });
       if (!result.ok) throw new Error(result.error.message);
     } catch (cause) {
       setContentError(workbarErrorMessage(cause));

@@ -207,7 +207,12 @@ export function FilesWorkbarPanel({
               <p className="tool-panel__state">内容尚未加载。</p>
             ) : (
               <>
-                <ArtifactPreview key={selected.id} artifact={selected} content={selectedContent} />
+                <ArtifactPreview
+                  key={selected.id}
+                  artifact={selected}
+                  content={selectedContent}
+                  onEscape={onBack}
+                />
                 {progress &&
                   !progress.complete &&
                   progress.nextOffset < artifactPreviewLimit(selected) && (
