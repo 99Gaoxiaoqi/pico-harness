@@ -54,7 +54,11 @@ import {
 } from "../conversation/index.js";
 import { pendingToolApprovalFromTranscript } from "../conversation/runtime-projection.js";
 import { ProviderFailureCard, ProviderRetryBanner } from "../conversation/ProviderRequestStatus.js";
-import { modelCommunicationDiagnostic, providerRetryKey } from "../provider-retry.js";
+import {
+  modelCommunicationDiagnostic,
+  providerRetryKey,
+  providerStatusDiagnostic,
+} from "../provider-retry.js";
 import type { ApprovalView, PlanApprovalView, TimelineItem, ToolApprovalView } from "../model.js";
 import { useRuntime } from "../runtime-context.js";
 import { parseSwarmCommand } from "../swarm-command.js";
@@ -1444,7 +1448,8 @@ export function ConversationPage() {
                     ? failureState?.lastFailure
                     : undefined;
                 const diagnostic = modelCommunicationDiagnostic(item.detail ?? "");
-                if (!failureNotice && !diagnostic) return fallback;
+                const status = providerStatusDiagnostic(item.detail ?? "");
+                if (!failureNotice && !diagnostic && !status) return fallback;
                 const latestBoundary = items.findLast(
                   (candidate) => candidate.kind === "runBoundary" && candidate.status !== "started",
                 );
@@ -1462,7 +1467,8 @@ export function ConversationPage() {
                 return (
                   <ProviderFailureCard
                     notice={failureNotice}
-                    title={diagnostic?.title ?? "暂时无法连接模型"}
+                    httpStatus={status?.httpStatus}
+                    title={diagnostic?.title ?? status?.title ?? "暂时无法连接模型"}
                     canRetry={Boolean(canRetry)}
                     onRetry={() => {
                       if (originalRequest?.kind !== "userMessage" || draft.trim()) return;
@@ -1552,11 +1558,16 @@ function timelineItemToConversationItem(item: TimelineItem): ConversationItemVie
     return { id: item.id, kind: "assistantMessage", text: item.detail ?? item.title, at: item.at };
   }
   const modelDiagnostic = modelCommunicationDiagnostic(item.detail ?? item.title);
+  const statusDiagnostic = providerStatusDiagnostic(item.detail ?? item.title);
   return {
     id: item.id,
     kind: "status",
-    title: item.state === "failed" && modelDiagnostic ? modelDiagnostic.title : item.title,
-    detail: item.state === "failed" && modelDiagnostic ? undefined : item.detail,
+    title:
+      item.state === "failed" && (modelDiagnostic || statusDiagnostic)
+        ? (modelDiagnostic?.title ?? statusDiagnostic?.title ?? item.title)
+        : item.title,
+    detail:
+      item.state === "failed" && (modelDiagnostic || statusDiagnostic) ? undefined : item.detail,
     tone: item.state === "failed" ? "error" : item.state === "done" ? "success" : "neutral",
     at: item.at,
   };

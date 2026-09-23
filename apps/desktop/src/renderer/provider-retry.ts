@@ -47,11 +47,32 @@ export function modelCommunicationDiagnostic(
   return title && match ? { title, diagnosticId: match[2]! } : undefined;
 }
 
+/** Recognize only Pico's fixed, locally produced HTTP error text. */
+export function providerStatusDiagnostic(
+  raw: string,
+): { readonly title: string; readonly httpStatus: number } | undefined {
+  const match =
+    /^(?:LLMStatusError: )?Model API request failed \[([1-5]\d\d)\]; response omitted$/.exec(raw) ??
+    /^LLMStatusError status=([1-5]\d\d); detail omitted$/.exec(raw);
+  if (!match) return undefined;
+  const httpStatus = Number(match[1]);
+  const title =
+    httpStatus === 401 || httpStatus === 403
+      ? "模型服务拒绝请求"
+      : httpStatus === 429
+        ? "模型服务请求过多"
+        : httpStatus >= 500
+          ? "模型服务暂时不可用"
+          : "模型请求未能完成";
+  return { title, httpStatus };
+}
+
 export function displayExecutionError(raw: string, includeDiagnostic = false): string {
   const diagnostic = modelCommunicationDiagnostic(raw);
-  return diagnostic
-    ? `${diagnostic.title}${includeDiagnostic ? ` · 诊断 ID：${diagnostic.diagnosticId}` : ""}`
-    : raw;
+  if (diagnostic)
+    return `${diagnostic.title}${includeDiagnostic ? ` · 诊断 ID：${diagnostic.diagnosticId}` : ""}`;
+  const status = providerStatusDiagnostic(raw);
+  return status ? `${status.title} · HTTP ${status.httpStatus}` : raw;
 }
 
 export function providerRetryKey(workspacePath: string, runId: string): string {
@@ -164,10 +185,16 @@ export function applyProviderRetryNotification(
   return clearProviderRetry(states, workspacePath, runId, event.at, event.topic === "run.finished");
 }
 
-export function providerFailureDescription(notice?: ProviderRetryNotice): string {
-  if (notice?.httpStatus === 429 || notice?.errorCategory === "rate_limited")
+export function providerFailureDescription(
+  notice?: ProviderRetryNotice,
+  httpStatus?: number,
+): string {
+  const status = httpStatus ?? notice?.httpStatus;
+  if (status === 401 || status === 403)
+    return `模型服务拒绝了本次请求（HTTP ${status}）。请检查当前模型或连接设置，任务内容已保留。`;
+  if (status === 429 || notice?.errorCategory === "rate_limited")
     return "模型服务当前请求过多，任务内容已保留。";
-  if (notice?.httpStatus && notice.httpStatus >= 500) return "模型服务暂时不可用，任务内容已保留。";
+  if (status && status >= 500) return "模型服务暂时不可用，任务内容已保留。";
   if (notice?.errorCategory === "request_failed" || notice?.transportCode)
     return "暂时无法连接模型，任务内容已保留。";
   return "模型请求未能完成，任务内容已保留。";
