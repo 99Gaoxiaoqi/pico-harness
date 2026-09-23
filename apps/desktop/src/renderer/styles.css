@@ -1,6 +1,5 @@
 @import "./conversation/deep-research.css";
 @layer reset, tokens, base, components, pages, utilities;
-@import "./workbar-panels/artifact-preview.css" layer(components);
 
 @layer reset {
   *,

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { MarkdownText } from "../conversation/MarkdownText.js";
 import type { WorkbarArtifact, WorkbarArtifactContent } from "./FilesWorkbarPanel.js";
 import {
@@ -12,16 +12,28 @@ import {
 export function ArtifactPreview({
   artifact,
   content,
+  onEscape,
 }: {
   artifact: WorkbarArtifact;
   content: WorkbarArtifactContent;
+  onEscape?: () => void;
 }) {
   const kind = artifactPreviewKind(artifact);
   const [source, setSource] = useState(false);
+  const frameRef = useRef<HTMLIFrameElement>(null);
   const html = useMemo(
     () => (kind === "html" && content.complete ? artifactHtmlDocument(content.content) : ""),
     [kind, content.content, content.complete],
   );
+  useEffect(() => {
+    if (kind !== "html" || !onEscape) return;
+    const handleMessage = (event: MessageEvent) => {
+      if (event.source === frameRef.current?.contentWindow && event.data === "pico:artifact:escape")
+        onEscape();
+    };
+    window.addEventListener("message", handleMessage);
+    return () => window.removeEventListener("message", handleMessage);
+  }, [kind, onEscape]);
   if (kind === "unsupported")
     return <p className="tool-panel__state">此文件格式不支持内嵌预览，请打开或另存后查看。</p>;
   if (kind === "image" || kind === "pdf")
@@ -45,6 +57,7 @@ export function ArtifactPreview({
               隔离预览：支持内联脚本，外链、联网和文件访问已禁用。
             </p>
             <iframe
+              ref={frameRef}
               className="artifact-preview__frame"
               title={`${artifact.name} HTML 预览`}
               sandbox="allow-scripts"
