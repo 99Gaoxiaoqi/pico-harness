@@ -120,6 +120,10 @@ class SessionSubscriptionOwner {
 
   open(options: OpenSubscriptionOptions): SubscriptionOpenResult {
     if (options.snapshot.activeRun) this.#observeRunState(options.snapshot.activeRun);
+    // The snapshot includes each live stream's full text. Flush bytes already captured
+    // before admitting a new subscriber, otherwise its first frame can replay a suffix
+    // whose UTF-8 offset is behind the snapshot's endOffsetBytes.
+    for (const stream of this.#streams.values()) this.#flushStream(stream);
     for (const [streamId, state] of this.#streams) {
       if (state.complete) this.#streams.delete(streamId);
     }

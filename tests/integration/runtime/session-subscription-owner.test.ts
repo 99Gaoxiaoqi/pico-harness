@@ -13,6 +13,7 @@ import {
   type SessionContinuityDataSource,
   type SessionSubscriptionSnapshot,
 } from "@pico/pico-host/session-subscription-owner";
+import { TranscriptReplica } from "@pico/transcript-replica";
 
 const workspacePath = "/workspace";
 const sessionId = "session-1";
@@ -187,6 +188,49 @@ test("open bootstrap seeds absolute offsets and drops a concurrently queued dupl
     received[0]?.type === "subscription.session_delta" ? received[0].startOffsetBytes : undefined,
     5,
   );
+});
+
+test("opening during a coalesced UTF-8 delta does not replay bytes already in the snapshot", async (context) => {
+  const registry = new SessionSubscriptionRegistry("host-epoch-1", new FakeSource());
+  context.after(() => registry.shutdown());
+  const firstFrames: RuntimeSessionSubscriptionFrame[] = [];
+  const first = await registry.open(
+    { workspacePath, sessionId },
+    { connectionId: "connection-1", push: async (frame) => void firstFrames.push(frame) },
+  );
+  registry.activate(workspacePath, sessionId, first.subscriptionId, "connection-1");
+
+  for (const delta of ["你", "好"]) {
+    registry.publishReporterEvent(workspacePath, {
+      runId: "run-1",
+      sessionId,
+      type: "assistant.delta",
+      resourceVersion: 1,
+      at: 1,
+      payload: { turn: 1, delta },
+    });
+  }
+  await waitFor(() => firstFrames.length === 1);
+
+  const replica = new TranscriptReplica(sessionId);
+  const token = replica.beginOpen();
+  const secondFrames: RuntimeSessionSubscriptionFrame[] = [];
+  const second = await registry.open(
+    { workspacePath, sessionId },
+    {
+      connectionId: "connection-2",
+      push: async (frame) => {
+        secondFrames.push(frame);
+        replica.receiveFrame(frame);
+      },
+    },
+  );
+  registry.activate(workspacePath, sessionId, second.subscriptionId, "connection-2");
+  assert.equal(second.activeOverlay[0]?.text, "你好");
+  await waitFor(() => firstFrames.length === 2);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.deepEqual(secondFrames, []);
+  assert.equal(replica.installOpen(token, second), true);
 });
 
 test("session subscription coalesces later deltas and preserves UTF-8 byte offsets", async () => {
