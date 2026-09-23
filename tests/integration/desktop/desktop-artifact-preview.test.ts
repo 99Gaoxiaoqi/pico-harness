@@ -82,6 +82,7 @@ test("产物分块经过工作栏渲染为 Markdown、隔离 HTML 和 diff，跨
         loading: false,
         onRefresh() {},
         onSelectArtifact() {},
+        onBack() {},
         onLoadChunk() {},
       }),
     );
@@ -113,6 +114,63 @@ test("产物分块经过工作栏渲染为 Markdown、隔离 HTML 和 diff，跨
     validateArtifactBinary(new TextEncoder().encode("%PDF-1.7\n"), "application/pdf"),
     "application/pdf",
   );
+});
+
+test("生成文件先显示全宽列表，再为五类文件显示独立预览与返回入口", () => {
+  const artifacts = [
+    artifact("text/markdown", "report.md"),
+    artifact("text/x-diff", "change.patch"),
+    artifact("text/html", "pelican-ride.html"),
+    artifact("image/png", "figure.png"),
+    artifact("application/pdf", "report.pdf"),
+  ].map((item, index) => ({ ...item, id: `artifact-${index}` }));
+  const handlers = {
+    loading: false,
+    onRefresh() {},
+    onSelectArtifact() {},
+    onBack() {},
+    onLoadChunk() {},
+    onOpenArtifact() {},
+    onSaveArtifactAs() {},
+    onOpenDefaultApp() {},
+  };
+  const list = renderToStaticMarkup(createElement(FilesWorkbarPanel, { artifacts, ...handlers }));
+  assert.match(list, /tool-panel__files-list-page/u);
+  assert.match(list, /在 Pico 中查看/u);
+  assert.doesNotMatch(list, /tool-panel__preview-page/u);
+
+  for (const item of artifacts) {
+    const bytes =
+      item.mimeType === "image/png"
+        ? "\u0089PNG"
+        : item.mimeType === "application/pdf"
+          ? "%PDF-1.7"
+          : "# 内容";
+    const preview = renderToStaticMarkup(
+      createElement(FilesWorkbarPanel, {
+        artifacts,
+        selectedArtifactId: item.id,
+        content: { ...contentFor(bytes, item), artifactId: item.id },
+        ...handlers,
+      }),
+    );
+    assert.match(preview, /tool-panel__preview-page/u);
+    assert.match(preview, /返回生成文件列表/u);
+    assert.match(preview, /生成文件操作/u);
+    assert.doesNotMatch(preview, /tool-panel__files-list-page/u);
+    assert.equal(preview.includes("用默认应用打开"), item.mimeType === "text/html");
+  }
+
+  const gone = renderToStaticMarkup(
+    createElement(FilesWorkbarPanel, {
+      artifacts: artifacts.slice(1),
+      selectedArtifactId: artifacts[0]!.id,
+      notice: "该生成文件已不存在，已返回列表。",
+      ...handlers,
+    }),
+  );
+  assert.match(gone, /该生成文件已不存在，已返回列表。/u);
+  assert.match(gone, /tool-panel__files-list-page/u);
 });
 
 test("拒绝伪装图片、非法 Base64、越界与不前进的分块", () => {
