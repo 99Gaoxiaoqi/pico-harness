@@ -418,6 +418,8 @@ export interface RuntimeActions {
   ): Promise<boolean>;
   deleteProvider(providerId: string): Promise<boolean>;
   setDefaultModelRoute(modelRouteId?: string): Promise<boolean>;
+  refreshProviders(): Promise<void>;
+  testProviderConnection(providerId: string, model: string): Promise<RuntimeResult<"provider.test">>;
   setWebSearch(settings: WebSearchSettingsView): Promise<boolean>;
   queryUsage(input?: {
     readonly workspacePath?: string;
@@ -2697,6 +2699,7 @@ export function useRuntimeStore(): RuntimeStore {
             baseURL: provider.baseURL,
             apiKeyEnv: provider.apiKeyEnv,
             models: provider.models,
+            ...(provider.disabledModels ? { disabledModels: provider.disabledModels } : {}),
             discoverModels: provider.discoverModels,
             ...(provider.modelCapabilities
               ? { modelCapabilities: provider.modelCapabilities }
@@ -2794,6 +2797,21 @@ export function useRuntimeStore(): RuntimeStore {
           }
           setMessage(modelRouteId ? "默认模型已更新。" : "已清除用户默认模型。");
         });
+      },
+      async refreshProviders() {
+        await perform("provider-refresh", async (bridge) => {
+          if (!preview) {
+            await loadGlobalProviderConfig(bridge);
+            const workspacePath = dataRef.current.workspacePath;
+            if (workspacePath) await loadWorkspace(bridge, workspacePath);
+          }
+        });
+      },
+      async testProviderConnection(providerId, model) {
+        if (preview) return { ok: false, durationMs: 0, message: "预览模式无法测试连接" };
+        const bridge = getBridge();
+        if (!bridge) throw new Error("本地 Runtime 未连接");
+        return invoke(bridge, "provider.test", { providerId, model });
       },
       async setWebSearch(webSearch) {
         const providerConfig = dataRef.current.providerConfig;

@@ -1,4 +1,4 @@
-import { resolveNativeWebSearchCapability } from "@pico/runtime";
+import { resolveModelRouteCapabilities } from "@pico/runtime";
 import { scheduleUnrefDeadline, type ScheduledDeadline } from "@pico/runtime/deadline";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { unwatchFile, watchFile } from "node:fs";
@@ -32,6 +32,9 @@ import {
   type CredentialVault,
 } from "./provider/credential-vault.js";
 import { resolveModelProtocol, type ModelProviderConfig } from "./provider/model-router.js";
+import { loadEffectiveModelRuntime } from "./provider/effective-model-runtime.js";
+import { createProvider } from "./provider/factory.js";
+import { catalogModelCapabilities } from "./catalog-model-capabilities.js";
 import {
   ProviderOperationJournal,
   type ProviderOperationRecord,
@@ -187,10 +190,15 @@ export class DesktopProviderConfigService {
     const workspacePath = await this.options.requireTrustedWorkspace(
       requireText(record["workspacePath"], "workspacePath"),
     );
-    const snapshot = await this.effectiveConfigResolver.resolve({
+    const runtime = await loadEffectiveModelRuntime({
       workDir: workspacePath,
       projectTrusted: true,
+      env: this.env,
+      userConfigStore: this.userConfigStore,
+      configResolver: this.effectiveConfigResolver,
+      credentialVault: this.credentialVault,
     });
+    const snapshot = runtime.config;
     const userProviders = (await this.userConfigStore.read()).config.providers;
     const providers = await Promise.all(
       Object.entries(snapshot.providers)
@@ -209,6 +217,7 @@ export class DesktopProviderConfigService {
             origin,
             supportsSharedCredential,
             supportsSharedCredential && userProvider ? userProvider : provider,
+            runtime.router.catalogModelsByProvider[id] ?? provider.models,
           );
         }),
     );
@@ -231,12 +240,63 @@ export class DesktopProviderConfigService {
   async listUserProviders(params: unknown): Promise<JsonValue> {
     assertExactObjectKeys(params, [], "provider.list params");
     const snapshot = await this.userConfigStore.read();
+    const runtime = await loadEffectiveModelRuntime({
+      workDir: this.options.picoHome,
+      projectTrusted: false,
+      env: this.env,
+      userConfigStore: this.userConfigStore,
+      configResolver: this.effectiveConfigResolver,
+      credentialVault: this.credentialVault,
+    });
     const providers = await Promise.all(
       Object.entries(snapshot.config.providers)
         .toSorted(([left], [right]) => left.localeCompare(right))
-        .map(([id, provider]) => this.projectProviderProfile(id, provider, "user")),
+        .map(([id, provider]) =>
+          this.projectProviderProfile(
+            id,
+            provider,
+            "user",
+            true,
+            provider,
+            runtime.router.catalogModelsByProvider[id] ?? provider.models,
+          ),
+        ),
     );
     return { providers, revision: this.projectUserConfigRevision(snapshot.revision) };
+  }
+
+  async testProviderConnection(params: unknown): Promise<JsonValue> {
+    assertExactObjectKeys(params, ["providerId", "model"], "provider.test params");
+    const input = requireJsonRecord(params, "provider.test params");
+    const providerId = requireText(input.providerId, "providerId");
+    const model = requireText(input.model, "model");
+    const started = Date.now();
+    try {
+      const runtime = await loadEffectiveModelRuntime({
+        workDir: this.options.picoHome,
+        projectTrusted: false,
+        env: this.env,
+        userConfigStore: this.userConfigStore,
+        configResolver: this.effectiveConfigResolver,
+        credentialVault: this.credentialVault,
+      });
+      const routeId = `${providerId}/${model}`;
+      const validation = runtime.router.validate(routeId);
+      if (!validation.ok) throw new Error(validation.message);
+      const selected = runtime.router.providerConfig(routeId, "off");
+      const provider = createProvider(selected.provider, selected.config, "off");
+      await provider.generate([{ role: "user", content: "请回复 OK。" }], [], {
+        maxOutputTokens: 8,
+        timeoutMs: 15_000,
+      });
+      return { ok: true, durationMs: Date.now() - started, message: `${model} 已成功响应` };
+    } catch (error) {
+      return {
+        ok: false,
+        durationMs: Date.now() - started,
+        message: errorMessage(error),
+      };
+    }
   }
 
   async upsertUserProvider(params: unknown): Promise<JsonValue> {
@@ -625,26 +685,50 @@ export class DesktopProviderConfigService {
     origin: "user" | "environment",
     supportsSharedCredential = true,
     credentialProvider = provider,
+    availableModels: readonly string[] = provider.models,
   ): Promise<JsonObject> {
     return {
       ...runtimeProviderInput(id, provider),
-      resolvedModelCapabilities: Object.fromEntries(
-        provider.models.map((model) => [
-          model,
-          {
-            nativeWebSearch: toJsonValue(
-              resolveNativeWebSearchCapability({
-                provider: resolveModelProtocol(provider, model),
-                model,
-                baseURL: provider.baseURL,
-                ...(provider.modelCapabilities?.[model]?.webSearch === undefined
-                  ? {}
-                  : { webSearch: provider.modelCapabilities[model]!.webSearch! }),
-              }),
-            ),
-          },
-        ]),
-      ),
+      availableModels: [...availableModels],
+      resolvedModelCapabilities: toJsonValue(Object.fromEntries(
+        availableModels.map((model) => {
+          const catalog = catalogModelCapabilities(provider.baseURL, model);
+          const capabilities = resolveModelRouteCapabilities(
+            resolveModelProtocol(provider, model),
+            model,
+            provider.modelCapabilities?.[model],
+            { baseURL: provider.baseURL },
+          );
+          return [model, {
+            nativeWebSearch: toJsonValue(capabilities.nativeWebSearch),
+            ...(catalog?.name ? { displayName: catalog.name } : {}),
+            ...(catalog ? { metadataSource: "models_dev_snapshot" } : {}),
+            contextWindowTokens: capabilities.contextSource === "config"
+              ? capabilities.contextWindowTokens
+              : catalog?.context ?? capabilities.contextWindowTokens,
+            contextSource: capabilities.contextSource === "config"
+              ? "config"
+              : catalog?.context !== undefined ? "catalog_snapshot" : "profile_default",
+            ...(capabilities.maxOutputTokens === undefined && catalog?.output === undefined
+              ? {}
+              : { maxOutputTokens: capabilities.maxOutputTokens ?? catalog?.output }),
+            outputSource: capabilities.maxOutputTokens !== undefined
+              ? "config"
+              : catalog?.output !== undefined ? "catalog_snapshot" : "provider_default",
+            vision: capabilities.vision !== "unknown"
+              ? capabilities.vision : catalog?.vision ?? "unknown",
+            reasoning: capabilities.reasoningProfile.source === "config"
+              ? capabilities.reasoning
+              : catalog?.reasoning ?? capabilities.reasoning,
+            reasoningSource: capabilities.reasoningProfile.source === "config"
+              ? "config"
+              : catalog?.reasoning !== undefined
+                ? "catalog_snapshot" : capabilities.reasoningProfile.source,
+            toolCall: capabilities.toolCall !== "unknown"
+              ? capabilities.toolCall : catalog?.toolCall ?? "unknown",
+          }];
+        }),
+      )),
       origin,
       fingerprint: providerFingerprint(id, provider),
       ...(await this.projectCredentialStatus(id, credentialProvider, supportsSharedCredential)),
@@ -815,7 +899,11 @@ export class DesktopProviderConfigService {
       const modelRouteId = reference.modelRouteId;
       const separator = modelRouteId?.indexOf("/") ?? -1;
       const model = separator > 0 ? modelRouteId!.slice(separator + 1) : undefined;
-      if (!model || !provider.models.includes(model)) {
+      if (
+        !model ||
+        provider.disabledModels?.includes(model) ||
+        (!provider.models.includes(model) && !provider.discoverModels)
+      ) {
         throw new RuntimeProtocolError(
           RUNTIME_ERROR_CODES.CONFLICT,
           `Provider ${providerId} 的模型变更会破坏 Automation ${reference.jobId} 固定的路由 ${modelRouteId ?? "<unknown>"}`,
@@ -1046,6 +1134,7 @@ function runtimeProviderInput(id: string, provider: ModelProviderConfig): JsonOb
     apiKeyEnv: provider.apiKeyEnv,
     ...(provider.auth ? { auth: provider.auth } : {}),
     models: [...provider.models],
+    ...(provider.disabledModels ? { disabledModels: [...provider.disabledModels] } : {}),
     discoverModels: provider.discoverModels,
     ...(provider.modelProtocols ? { modelProtocols: { ...provider.modelProtocols } } : {}),
     ...(modelCapabilities ? { modelCapabilities } : {}),
@@ -1191,6 +1280,7 @@ function normalizeRuntimeProvider(value: unknown): {
       "apiKeyEnv",
       "auth",
       "models",
+      "disabledModels",
       "discoverModels",
       "modelCapabilities",
       "modelProtocols",
@@ -1234,6 +1324,18 @@ function normalizeRuntimeProvider(value: unknown): {
     );
   }
   const models = rawModels.map((model) => String(model).trim()).filter(Boolean);
+  const rawDisabledModels = record["disabledModels"];
+  if (
+    rawDisabledModels !== undefined &&
+    (!Array.isArray(rawDisabledModels) ||
+      rawDisabledModels.some((model) => typeof model !== "string" || !model.trim()))
+  ) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+      "provider.disabledModels 必须是非空模型 ID 的数组",
+    );
+  }
+  const disabledModels = rawDisabledModels as string[] | undefined;
   if (new Set(models).size !== models.length) {
     throw new RuntimeProtocolError(
       RUNTIME_ERROR_CODES.INVALID_PARAMS,
@@ -1247,10 +1349,10 @@ function normalizeRuntimeProvider(value: unknown): {
       "provider.discoverModels 必须是布尔值",
     );
   }
-  if (models.length === 0) {
+  if (models.length === 0 && !discoverModels) {
     throw new RuntimeProtocolError(
       RUNTIME_ERROR_CODES.INVALID_PARAMS,
-      "provider.models 首版必须至少包含一个显式模型",
+      "未启用动态发现时，provider.models 必须至少包含一个模型",
     );
   }
   if (discoverModels && protocol !== "openai") {
@@ -1271,6 +1373,9 @@ function normalizeRuntimeProvider(value: unknown): {
     apiKeyEnv,
     ...(auth !== undefined ? { auth } : {}),
     discoverModels,
+    ...(disabledModels
+      ? { disabledModels: [...new Set(disabledModels.map((model) => model.trim()))] }
+      : {}),
     models:
       modelCapabilities === undefined
         ? models
@@ -1325,7 +1430,11 @@ function assertUserDefaultRoute(config: PicoUserConfig): void {
   const providerId = routeId.slice(0, separator);
   const model = routeId.slice(separator + 1);
   const provider = config.providers[providerId];
-  if (!provider || !provider.models.includes(model)) {
+  if (
+    !provider ||
+    provider.disabledModels?.includes(model) ||
+    (!provider.models.includes(model) && !provider.discoverModels)
+  ) {
     throw new RuntimeProtocolError(
       RUNTIME_ERROR_CODES.INVALID_PARAMS,
       `默认模型路由 ${routeId} 不在用户 Provider 模型列表中`,
@@ -1343,6 +1452,7 @@ function providerFingerprint(providerId: string, provider: ModelProviderConfig):
         apiKeyEnv: provider.apiKeyEnv,
         ...(provider.auth ? { auth: provider.auth } : {}),
         models: [...provider.models],
+        disabledModels: provider.disabledModels ?? [],
         discoverModels: provider.discoverModels,
         modelCapabilities: provider.modelCapabilities ?? {},
         ...(provider.modelProtocols ? { modelProtocols: provider.modelProtocols } : {}),

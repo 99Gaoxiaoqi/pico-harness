@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,6 +10,7 @@ import { DesktopProviderConfigService } from "@pico/pico-host/desktop-provider-c
 import { parseModelProviderConfigs } from "@pico/pico-host/input/pico-config";
 import { parseUserConfig, UserConfigStore } from "@pico/pico-host/input/user-config-store";
 import { loadModelRouter } from "@pico/pico-host/provider/model-router";
+import { parseModelRoutes } from "../../../apps/desktop/src/renderer/runtime-projections/configuration.js";
 
 const provider = {
   protocol: "openai" as const,
@@ -17,6 +19,194 @@ const provider = {
   discoverModels: false,
   models: ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat"],
 };
+
+test("empty known models discover selectable models through desktop provider and workspace projections", async (context) => {
+  const picoHome = await mkdtemp(join(tmpdir(), "pico-discovered-models-"));
+  const requests: string[] = [];
+  const server = createServer((request, response) => {
+    requests.push(request.url ?? "");
+    response.setHeader("Content-Type", "application/json");
+    if (request.url?.endsWith("/chat/completions")) {
+      response.end(JSON.stringify({
+        id: "test-connection",
+        object: "chat.completion",
+        created: 1,
+        model: "remote-model",
+        choices: [{ index: 0, message: { role: "assistant", content: "OK" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 4, completion_tokens: 1, total_tokens: 5 },
+      }));
+      return;
+    }
+    response.end(JSON.stringify({ data: [{ id: "remote-model" }] }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const service = new DesktopProviderConfigService({
+    picoHome,
+    env: {},
+    revisionTokenKey: Buffer.alloc(32, 8),
+    listWorkspacePaths: async () => [],
+    requireTrustedWorkspace: async (path) => path,
+    assertNoActiveRuns: async () => undefined,
+    providerReferences: () => [],
+    publishUserConfigUpdated: async () => undefined,
+  });
+  context.after(async () => {
+    await service.close();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(picoHome, { recursive: true, force: true });
+  });
+  await service.ready;
+  const current = (await service.getUserConfig({})) as RuntimeResult<"config.user.get">;
+  const baseURL = `http://127.0.0.1:${address.port}/v1`;
+  await service.upsertUserProvider({
+    provider: {
+      id: "local",
+      protocol: "openai",
+      auth: "none",
+      baseURL,
+      apiKeyEnv: "LOCAL_API_KEY",
+      models: [],
+      discoverModels: true,
+    },
+    expectedRevision: current.revision,
+  });
+  const listed = (await service.listUserProviders({})) as RuntimeResult<"provider.list">;
+  configResultValidators["provider.list"](listed, "result");
+  assert.deepEqual(listed.providers[0]?.models, []);
+  assert.deepEqual(listed.providers[0]?.availableModels, ["remote-model"]);
+  assert.equal(listed.providers[0]?.resolvedModelCapabilities?.["remote-model"]?.contextSource, "profile_default");
+  assert.equal(listed.providers[0]?.resolvedModelCapabilities?.["remote-model"]?.vision, "unknown");
+  const tested = (await service.testProviderConnection({
+    providerId: "local",
+    model: "remote-model",
+  })) as RuntimeResult<"provider.test">;
+  configResultValidators["provider.test"](tested, "result");
+  assert.equal(tested.ok, true, tested.message);
+  assert.ok(requests.includes("/v1/chat/completions"));
+  const effective = (await service.getEffectiveConfig({
+    workspacePath: picoHome,
+  })) as RuntimeResult<"config.effective.get">;
+  configResultValidators["config.effective.get"](effective, "result");
+  assert.deepEqual(effective.config.providers[0]?.availableModels, ["remote-model"]);
+  assert.deepEqual(parseModelRoutes(effective.config), [
+    { id: "local/remote-model", label: "remote-model" },
+  ]);
+  const withDefault = (await service.updateUserConfig({
+    defaults: { modelRouteId: "local/remote-model" },
+    expectedRevision: listed.revision,
+  })) as RuntimeResult<"config.user.update">;
+  assert.equal(withDefault.config.defaults.modelRouteId, "local/remote-model");
+  await assert.rejects(
+    service.upsertUserProvider({
+      provider: {
+        id: "local",
+        protocol: "openai",
+        auth: "none",
+        baseURL,
+        apiKeyEnv: "LOCAL_API_KEY",
+        models: [],
+        disabledModels: ["remote-model"],
+        discoverModels: true,
+      },
+      expectedRevision: withDefault.revision,
+    }),
+    /默认模型路由/u,
+  );
+  const cleared = (await service.updateUserConfig({
+    defaults: {},
+    expectedRevision: withDefault.revision,
+  })) as RuntimeResult<"config.user.update">;
+  await service.upsertUserProvider({
+    provider: {
+      id: "local",
+      protocol: "openai",
+      auth: "none",
+      baseURL,
+      apiKeyEnv: "LOCAL_API_KEY",
+      models: [],
+      disabledModels: ["remote-model"],
+      discoverModels: true,
+    },
+    expectedRevision: cleared.revision,
+  });
+  const disabled = (await service.getEffectiveConfig({
+    workspacePath: picoHome,
+  })) as RuntimeResult<"config.effective.get">;
+  assert.deepEqual(disabled.config.providers[0]?.availableModels, ["remote-model"]);
+  assert.deepEqual(parseModelRoutes(disabled.config), []);
+  const disabledTest = (await service.testProviderConnection({
+    providerId: "local",
+    model: "remote-model",
+  })) as RuntimeResult<"provider.test">;
+  assert.equal(disabledTest.ok, false);
+  assert.match(disabledTest.message, /不可用/u);
+  const routed = await loadModelRouter({
+    config: {
+      providers: {
+        local: {
+          protocol: "openai",
+          auth: "none",
+          baseURL,
+          apiKeyEnv: "LOCAL_API_KEY",
+          models: [],
+          disabledModels: ["remote-model"],
+          discoverModels: true,
+        },
+      },
+    },
+  });
+  assert.deepEqual(routed.catalogModelsByProvider.local, ["remote-model"]);
+  assert.deepEqual(routed.routes, []);
+  assert.ok(requests.every((url) => ["/v1/models", "/v1/chat/completions"].includes(url)));
+});
+
+test("provider detail uses exact endpoint catalog metadata and keeps user overrides first", async (context) => {
+  const picoHome = await mkdtemp(join(tmpdir(), "pico-model-capabilities-"));
+  const service = new DesktopProviderConfigService({
+    picoHome,
+    env: {},
+    revisionTokenKey: Buffer.alloc(32, 9),
+    listWorkspacePaths: async () => [],
+    requireTrustedWorkspace: async (path) => path,
+    assertNoActiveRuns: async () => undefined,
+    providerReferences: () => [],
+    publishUserConfigUpdated: async () => undefined,
+  });
+  context.after(async () => {
+    await service.close();
+    await rm(picoHome, { recursive: true, force: true });
+  });
+  await service.ready;
+  const current = (await service.getUserConfig({})) as RuntimeResult<"config.user.get">;
+  await service.upsertUserProvider({
+    provider: {
+      id: "opencode-go",
+      protocol: "openai",
+      auth: "none",
+      baseURL: "https://opencode.ai/zen/go/v1",
+      apiKeyEnv: "OPENAI_API_KEY",
+      models: ["minimax-m3", "glm-5.2"],
+      discoverModels: false,
+      modelCapabilities: { "glm-5.2": { context: 32_768, vision: true } },
+    },
+    expectedRevision: current.revision,
+  });
+  const listed = (await service.listUserProviders({})) as RuntimeResult<"provider.list">;
+  configResultValidators["provider.list"](listed, "result");
+  const capabilities = listed.providers[0]?.resolvedModelCapabilities;
+  assert.equal(capabilities?.["minimax-m3"]?.displayName, "MiniMax-M3");
+  assert.equal(capabilities?.["minimax-m3"]?.contextWindowTokens, 1_000_000);
+  assert.equal(capabilities?.["minimax-m3"]?.maxOutputTokens, 131_072);
+  assert.equal(capabilities?.["minimax-m3"]?.vision, true);
+  assert.equal(capabilities?.["minimax-m3"]?.reasoning, true);
+  assert.equal(capabilities?.["minimax-m3"]?.toolCall, true);
+  assert.equal(capabilities?.["minimax-m3"]?.metadataSource, "models_dev_snapshot");
+  assert.equal(capabilities?.["glm-5.2"]?.contextWindowTokens, 32_768);
+  assert.equal(capabilities?.["glm-5.2"]?.contextSource, "config");
+  assert.equal(capabilities?.["glm-5.2"]?.vision, true);
+});
 
 test("search defaults survive strict RPC, private persistence and provider updates with resolved capabilities", async (context) => {
   const picoHome = await mkdtemp(join(tmpdir(), "pico-search-config-"));

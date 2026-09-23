@@ -47,11 +47,22 @@ export type RuntimeProviderInput = JsonObject & {
   readonly apiKeyEnv: string;
   readonly auth?: "api-key" | "none";
   readonly models: readonly string[];
+  readonly disabledModels?: readonly string[];
   readonly discoverModels: boolean;
   readonly modelCapabilities?: JsonObject;
 };
 
 export type RuntimeModelRouteCapabilities = {
+  readonly contextWindowTokens?: number;
+  readonly contextSource?: "config" | "profile_default" | "catalog_snapshot";
+  readonly maxOutputTokens?: number;
+  readonly outputSource?: "config" | "provider_default" | "catalog_snapshot";
+  readonly displayName?: string;
+  readonly metadataSource?: "models_dev_snapshot";
+  readonly vision?: boolean | "unknown";
+  readonly reasoning?: boolean | "unknown";
+  readonly reasoningSource?: "config" | "provider_metadata" | "model_rule" | "unknown" | "catalog_snapshot";
+  readonly toolCall?: boolean | "unknown";
   readonly nativeWebSearch: {
     readonly available: boolean;
     readonly reason: string;
@@ -122,6 +133,7 @@ const runtimeProviderParam: RuntimeParamRule = (value, path) => {
       discoverModels: booleanParam,
     },
     {
+      disabledModels: stringArrayParam,
       modelCapabilities: jsonObjectParam,
       modelProtocols: modelProtocolsParam,
       auth: oneOfParam(["api-key", "none"]),
@@ -159,6 +171,7 @@ const runtimeProviderInputResult = resultShape(
     discoverModels: resultBoolean,
   },
   {
+    disabledModels: resultStringArray,
     modelCapabilities: resultJsonObject,
     modelProtocols: resultJsonObject,
     auth: resultOneOf(["api-key", "none"]),
@@ -167,15 +180,26 @@ const runtimeProviderInputResult = resultShape(
 
 const resolvedModelCapabilitiesResult: RuntimeResultRule = (value, path) => {
   resultJsonObject(value, path);
-  const capability = exactResultShape({
-    nativeWebSearch: exactResultShape(
-      {
-        available: resultBoolean,
-        reason: resultString,
-      },
-      { adapter: resultOneOf(["openai-web-search", "anthropic-web-search"]) },
-    ),
-  });
+  const capability = exactResultShape(
+    {
+      nativeWebSearch: exactResultShape(
+        { available: resultBoolean, reason: resultString },
+        { adapter: resultOneOf(["openai-web-search", "anthropic-web-search"]) },
+      ),
+    },
+    {
+      contextWindowTokens: resultFiniteNumber,
+      contextSource: resultOneOf(["config", "profile_default", "catalog_snapshot"]),
+      maxOutputTokens: resultFiniteNumber,
+      outputSource: resultOneOf(["config", "provider_default", "catalog_snapshot"]),
+      displayName: resultString,
+      metadataSource: resultOneOf(["models_dev_snapshot"]),
+      vision: resultOneOf([true, false, "unknown"]),
+      reasoning: resultOneOf([true, false, "unknown"]),
+      reasoningSource: resultOneOf(["config", "provider_metadata", "model_rule", "unknown", "catalog_snapshot"]),
+      toolCall: resultOneOf([true, false, "unknown"]),
+    },
+  );
   for (const [model, metadata] of Object.entries(value as JsonObject))
     capability(metadata, `${path}.${model}`);
 };
@@ -195,6 +219,8 @@ const runtimeProviderProfileResult = resultShape(
     storedCredentialPresent: resultBoolean,
   },
   {
+    disabledModels: resultStringArray,
+    availableModels: resultStringArray,
     resolvedModelCapabilities: resolvedModelCapabilitiesResult,
     modelCapabilities: resultJsonObject,
     modelProtocols: resultJsonObject,
@@ -266,6 +292,10 @@ export type ConfigMethodMap = {
       readonly providers: readonly RuntimeProviderProfile[];
       readonly revision: string;
     };
+  };
+  readonly "provider.test": {
+    readonly params: { readonly providerId: string; readonly model: string };
+    readonly result: { readonly ok: boolean; readonly durationMs: number; readonly message: string };
   };
   readonly "provider.upsert": {
     readonly params: {
@@ -352,6 +382,7 @@ export const configParamValidators = {
   }),
   "config.effective.get": workspaceParams,
   "provider.list": noParams,
+  "provider.test": exactParamShape({ providerId: stringParam, model: stringParam }),
   "provider.upsert": exactParamShape({
     provider: runtimeProviderParam,
     expectedRevision: stringParam,
@@ -390,6 +421,11 @@ export const configResultValidators = {
   "provider.list": exactResultShape({
     providers: resultArray(runtimeProviderProfileResult),
     revision: resultString,
+  }),
+  "provider.test": exactResultShape({
+    ok: resultBoolean,
+    durationMs: resultFiniteNumber,
+    message: resultString,
   }),
   "provider.upsert": exactResultShape({
     provider: runtimeProviderProfileResult,
