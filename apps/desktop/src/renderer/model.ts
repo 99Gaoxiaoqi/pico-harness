@@ -116,6 +116,8 @@ export interface ProviderView {
   readonly baseURL: string;
   readonly apiKeyEnv: string;
   readonly models: readonly string[];
+  readonly disabledModels?: readonly string[];
+  readonly availableModels?: readonly string[];
   readonly discoverModels: boolean;
   readonly modelCapabilities?: JsonRecord | undefined;
   readonly resolvedModelCapabilities?: JsonRecord | undefined;
@@ -135,6 +137,7 @@ export type ProviderDraft = Pick<
   | "baseURL"
   | "apiKeyEnv"
   | "models"
+  | "disabledModels"
   | "discoverModels"
   | "modelCapabilities"
 >;

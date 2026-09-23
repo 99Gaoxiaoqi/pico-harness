@@ -110,6 +110,7 @@ function AppStateRouter() {
         <Route path="settings" element={<SettingsPage />} />
         <Route path="settings/workspaces" element={<WorkspaceSettingsPage />} />
         <Route path="settings/models" element={<ProviderPageRoute />} />
+        <Route path="settings/models/:providerId" element={<ProviderPageRoute />} />
         <Route path="settings/subagents" element={<SubagentSettingsRoute />} />
         <Route path="settings/memory" element={<UserMemorySettingsPage />} />
         <Route path="settings/usage" element={<UsagePage />} />

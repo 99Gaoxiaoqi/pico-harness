@@ -9,6 +9,8 @@ export interface ModelProviderConfig {
   apiKeyEnv: string;
   auth?: "api-key" | "none";
   models: readonly string[];
+  /** Models hidden from selection while retaining their catalog entries. */
+  disabledModels?: readonly string[];
   discoverModels: boolean;
   /** Optional per-model metadata; built-in defaults cover omitted and discovery-only entries. */
   modelCapabilities?: Readonly<Record<string, ModelCapabilityConfig>>;
