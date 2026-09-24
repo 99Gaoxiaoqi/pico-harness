@@ -382,7 +382,13 @@ async function runFileWorker(
     if (!expected || expected !== actual) {
       throw new SandboxViolationError("sandbox_unavailable", "桌面 File Worker 资源摘要不匹配。");
     }
-    codeDirectories = [dirname(entry)];
+    const executableRoot =
+      process.platform === "darwin"
+        ? dirname(dirname(dirname(process.execPath)))
+        : dirname(process.execPath);
+    // Electron loads its Frameworks and helper libraries from its application
+    // installation after dyld starts, so the executable alone is insufficient.
+    codeDirectories = [dirname(entry), executableRoot];
     args = [entry];
   } else {
     const sourceUrl = new URL(import.meta.url);

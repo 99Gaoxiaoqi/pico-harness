@@ -286,6 +286,8 @@ jobs:
         run: brew install ripgrep
       - run: npm run verify:sandbox:resources
       - run: node --import tsx --import @pico/cli/tui/preload-env --test --test-concurrency=1 tests/integration/safety/process-sandbox.integration.test.ts tests/integration/safety/process-sandbox-native.integration.test.ts tests/integration/safety/file-worker.integration.test.ts
+      - name: Verify bundled File Worker under Electron as Node
+        run: PICO_FILE_WORKER_TEST_EXECUTABLE="$(node -p "require('electron')")" node --import tsx --test --test-name-pattern="standalone packaged" tests/integration/safety/file-worker.integration.test.ts
 
   linux-process-sandbox:
     name: Linux process sandbox (${{ matrix.arch }})
