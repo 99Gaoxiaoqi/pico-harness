@@ -29,6 +29,15 @@ export function browserNavigationOrigin(address: string): string | undefined {
   return browserHttpOrigin(candidate);
 }
 
+/** Changes on any mode or boundary transition, including equal-looking boundary profiles. */
+export function clientCapabilityAuthorityEpoch(input: {
+  readonly boundary: unknown;
+  readonly permissionMode: string;
+  readonly collaborationMode: string;
+}): string {
+  return createHash("sha256").update(JSON.stringify(input)).digest("hex");
+}
+
 function scopeKey(scope: ClientCapabilityScope): string {
   switch (scope.kind) {
     case "browser_origin": {

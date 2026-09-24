@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   browserHttpOrigin,
   browserNavigationOrigin,
+  clientCapabilityAuthorityEpoch,
   ClientCapabilityGrants,
   DurableClientCapabilityGrants,
 } from "@pico/pico-host/client-capability-grants";
@@ -60,6 +61,45 @@ test("client grants survive restart only for the same session, workspace and aut
   const afterRollback = new DurableClientCapabilityGrants();
   await afterRollback.bindSession("task-a", workspace, "epoch-1");
   assert.equal(afterRollback.allows("task-a", origin, workspace), false);
+});
+
+test("same execution boundary cannot revive grants after permission or collaboration mode changes", async (context) => {
+  const workspace = await mkdtemp(join(tmpdir(), "pico-client-grants-modes-"));
+  context.after(async () => rm(workspace, { recursive: true, force: true }));
+  const boundary = { kind: "managed", revision: 3 };
+  const epoch = (permissionMode: string, collaborationMode: string): string =>
+    clientCapabilityAuthorityEpoch({ boundary, permissionMode, collaborationMode });
+  const scope = { kind: "browser_origin", origin: "https://example.com" } as const;
+  const first = new DurableClientCapabilityGrants();
+  await first.bindSession("task-a", workspace, epoch("auto", "default"));
+  await first.grant("task-a", scope, workspace);
+
+  const afterModeSwitch = new DurableClientCapabilityGrants();
+  await afterModeSwitch.bindSession("task-a", workspace, epoch("ask", "default"));
+  assert.equal(afterModeSwitch.allows("task-a", scope, workspace), false);
+  await afterModeSwitch.bindSession("task-a", workspace, epoch("auto", "plan"));
+  assert.equal(afterModeSwitch.allows("task-a", scope, workspace), false);
+});
+
+test("old grant file cannot revive after mode rollback and return even when deletion failed", async (context) => {
+  const workspace = await mkdtemp(join(tmpdir(), "pico-client-grants-rollback-"));
+  context.after(async () => rm(workspace, { recursive: true, force: true }));
+  const scope = { kind: "browser_origin", origin: "https://example.com" } as const;
+  const epoch = (revision: number, permissionMode: string): string =>
+    clientCapabilityAuthorityEpoch({
+      boundary: { kind: "managed", revision },
+      permissionMode,
+      collaborationMode: "default",
+    });
+  const first = new DurableClientCapabilityGrants();
+  await first.bindSession("task-a", workspace, epoch(4, "auto"));
+  await first.grant("task-a", scope, workspace);
+  // Simulate a crash before persistent grant deletion: the old file remains.
+  const resumed = new DurableClientCapabilityGrants();
+  await resumed.bindSession("task-a", workspace, epoch(5, "ask"));
+  assert.equal(resumed.allows("task-a", scope, workspace), false);
+  await resumed.bindSession("task-a", workspace, epoch(6, "auto"));
+  assert.equal(resumed.allows("task-a", scope, workspace), false);
 });
 
 test("durable client grants reject unknown keys and never cross workspace identities", async (context) => {
