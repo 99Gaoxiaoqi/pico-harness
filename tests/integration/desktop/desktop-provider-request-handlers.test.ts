@@ -22,6 +22,10 @@ test("Desktop provider handlers keep protocol mapping and dependency locking in 
       calls.push("provider.list");
       return { providers: [] };
     },
+    testProviderConnection: () => {
+      calls.push("provider.test");
+      return { status: "ready" };
+    },
     upsertUserProvider: () => {
       calls.push("provider.upsert");
       return { updated: true };

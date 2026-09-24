@@ -88,7 +88,13 @@ export function buildManagedSpawnPlan(request: ManagedSpawnRequest): SandboxSpaw
       return {
         backend,
         command: backendPath,
-        args: buildBubblewrapArgs(policy, request.command, request.args, request.cwd),
+        args: buildBubblewrapArgs(
+          policy,
+          request.command,
+          request.args,
+          request.cwd,
+          request.origin === "file-worker",
+        ),
         env,
         sandboxed: true,
         profile: policy.profile,
@@ -266,6 +272,7 @@ export function buildBubblewrapArgs(
   command: string,
   args: readonly string[],
   cwd: string,
+  createEmptyCwd = false,
 ): string[] {
   const writeRoots = normalizeRoots(policy.writeRoots);
   const readRoots = normalizeRoots(policy.readRoots).filter(
@@ -283,6 +290,9 @@ export function buildBubblewrapArgs(
     "--dev",
     "/dev",
   ];
+  // A new exact file has no bind target yet. Give File Worker an empty cwd path in
+  // its private mount namespace without exposing siblings from the host workspace.
+  if (createEmptyCwd) result.push("--dir", cwd);
   // Keep the conventional loader and executable paths visible even on usr-merged hosts.
   // Policy normalization resolves symlinks such as /bin -> /usr/bin and /lib64 ->
   // /usr/lib64; binding the lexical aliases restores those ABI paths without granting

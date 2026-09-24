@@ -42,7 +42,10 @@ test("desktop mode downgrade revokes earlier session approvals", async () => {
     let lastRevision = -1;
     const assertAdvanced = () => {
       const current = boundaryRevision();
-      assert.ok(current > lastRevision, `boundary revision must advance: ${lastRevision} → ${current}`);
+      assert.ok(
+        current > lastRevision,
+        `boundary revision must advance: ${lastRevision} → ${current}`,
+      );
       lastRevision = current;
     };
     const call = { id: "call-1", name: "bash", arguments: '{"command":"pwd"}' };
@@ -78,7 +81,10 @@ test("desktop mode downgrade revokes earlier session approvals", async () => {
         ),
         false,
       );
-      assert.equal(globalClientCapabilityGrants.allows(sessionId!, browserScope, workspaceRoot), false);
+      assert.equal(
+        globalClientCapabilityGrants.allows(sessionId!, browserScope, workspaceRoot),
+        false,
+      );
     };
     const update = async (permissionMode: "ask" | "auto" | "full-access") =>
       desktop.handle(

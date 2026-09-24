@@ -1,10 +1,7 @@
 import { lstat, realpath } from "node:fs/promises";
 import { isAbsolute, dirname, resolve } from "node:path";
 import { stdin, stdout } from "node:process";
-import {
-  writeAtomicWorkspaceFile,
-  type AtomicFilePrecondition,
-} from "../atomic-workspace-file.js";
+import { writeAtomicWorkspaceFile, type AtomicFilePrecondition } from "../atomic-workspace-file.js";
 
 const MAX_REQUEST_BYTES = 64 * 1024 * 1024;
 
@@ -19,12 +16,14 @@ async function main(): Promise<void> {
     chunks.push(bytes);
   }
   const request: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-  if (!isRecord(request) ||
-      typeof request.targetPath !== "string" ||
-      typeof request.boundParent !== "string" ||
-      typeof request.content !== "string" ||
-      !isAbsolute(request.targetPath) ||
-      !isAbsolute(request.boundParent)) {
+  if (
+    !isRecord(request) ||
+    typeof request.targetPath !== "string" ||
+    typeof request.boundParent !== "string" ||
+    typeof request.content !== "string" ||
+    !isAbsolute(request.targetPath) ||
+    !isAbsolute(request.boundParent)
+  ) {
     throw new Error("invalid commit request");
   }
   const targetPath = resolve(request.targetPath);
@@ -33,11 +32,13 @@ async function main(): Promise<void> {
     throw new Error("commit target differs from Broker-bound target");
   }
   const boundParent = resolve(request.boundParent);
-  if (!isRecord(request.boundParentIdentity) ||
-      typeof request.boundParentIdentity.dev !== "string" ||
-      typeof request.boundParentIdentity.ino !== "string" ||
-      !/^\d{1,20}$/u.test(request.boundParentIdentity.dev) ||
-      !/^\d{1,20}$/u.test(request.boundParentIdentity.ino)) {
+  if (
+    !isRecord(request.boundParentIdentity) ||
+    typeof request.boundParentIdentity.dev !== "string" ||
+    typeof request.boundParentIdentity.ino !== "string" ||
+    !/^\d{1,20}$/u.test(request.boundParentIdentity.dev) ||
+    !/^\d{1,20}$/u.test(request.boundParentIdentity.ino)
+  ) {
     throw new Error("invalid commit parent identity");
   }
   const boundParentDev = BigInt(request.boundParentIdentity.dev);
@@ -49,8 +50,12 @@ async function main(): Promise<void> {
       throw new Error("Windows commit parent changed");
     }
     const currentParentInfo = await lstat(currentParent, { bigint: true });
-    if (!currentParentInfo.isDirectory() || currentParentInfo.isSymbolicLink() ||
-        currentParentInfo.dev !== boundParentDev || currentParentInfo.ino !== boundParentIno) {
+    if (
+      !currentParentInfo.isDirectory() ||
+      currentParentInfo.isSymbolicLink() ||
+      currentParentInfo.dev !== boundParentDev ||
+      currentParentInfo.ino !== boundParentIno
+    ) {
       throw new Error("Windows commit parent identity changed");
     }
     try {
@@ -67,17 +72,26 @@ async function main(): Promise<void> {
       throw error;
     }
   };
-  await writeAtomicWorkspaceFile({ targetPath, content: request.content, precondition, revalidateTarget });
+  await writeAtomicWorkspaceFile({
+    targetPath,
+    content: request.content,
+    precondition,
+    revalidateTarget,
+  });
   stdout.write("OK\n");
 }
 
 function decodePrecondition(value: unknown): AtomicFilePrecondition {
   if (!isRecord(value)) throw new Error("invalid commit precondition");
   if (value.kind === "missing") return { kind: "missing" };
-  if (value.kind !== "file" || !isRecord(value.version) ||
-      typeof value.permissionMode !== "number" ||
-      !Number.isInteger(value.permissionMode) ||
-      value.permissionMode < 0 || value.permissionMode > 0o777) {
+  if (
+    value.kind !== "file" ||
+    !isRecord(value.version) ||
+    typeof value.permissionMode !== "number" ||
+    !Number.isInteger(value.permissionMode) ||
+    value.permissionMode < 0 ||
+    value.permissionMode > 0o777
+  ) {
     throw new Error("invalid commit file precondition");
   }
   const version = value.version;
@@ -112,8 +126,12 @@ function normalizeWindowsPath(path: string): string {
 }
 
 function hasErrnoCode(error: unknown, code: string): boolean {
-  return typeof error === "object" && error !== null && "code" in error &&
-    (error as NodeJS.ErrnoException).code === code;
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as NodeJS.ErrnoException).code === code
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -121,6 +139,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 void main().catch((error: unknown) => {
-  process.stderr.write(`pico-windows-file-commit: ${error instanceof Error ? error.message : String(error)}\n`);
+  process.stderr.write(
+    `pico-windows-file-commit: ${error instanceof Error ? error.message : String(error)}\n`,
+  );
   process.exitCode = 1;
 });
