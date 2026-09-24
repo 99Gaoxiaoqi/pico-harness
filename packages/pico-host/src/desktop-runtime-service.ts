@@ -1377,6 +1377,17 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       }
       const permissionModeChanging =
         requestedPermissionMode !== undefined && requestedPermissionMode !== current.permissionMode;
+      // A new authority epoch must not inherit process-local approvals from an
+      // earlier one. In particular, a network grant from before Full Access
+      // must not reappear when the durable boundary becomes managed again.
+      const revokeSessionGrants =
+        (permissionModeChanging &&
+          (current.permissionMode === "full-access" ||
+            requestedPermissionMode === "full-access" ||
+            (current.permissionMode === "auto" && requestedPermissionMode === "ask"))) ||
+        (requestedCollaborationMode !== undefined &&
+          requestedCollaborationMode !== current.collaborationMode &&
+          requestedCollaborationMode !== "agent");
       const orchestrationModeChanging =
         requestedOrchestrationMode !== undefined &&
         requestedOrchestrationMode !== current.orchestrationMode &&
@@ -1467,6 +1478,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         if (!result.ok) throw invalidSessionSetting(result.message);
       }
       await session.flushPersistence();
+      if (revokeSessionGrants) {
+        globalSessionPermissionGrants.clear(params.sessionId, canonical, this.picoHome);
+      }
       return runtimeSessionSettings(current, router);
     });
     this.publish(
