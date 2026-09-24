@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -47,16 +48,46 @@ test("client grants survive restart only for the same session, workspace and aut
   const origin = { kind: "browser_origin", origin: "https://example.com" } as const;
   const first = new DurableClientCapabilityGrants();
   await first.bindSession("task-a", workspace, "epoch-1");
-  await first.grant("task-a", origin);
+  await first.grant("task-a", origin, workspace);
 
   const resumed = new DurableClientCapabilityGrants();
   await resumed.bindSession("task-a", workspace, "epoch-1");
-  assert.equal(resumed.allows("task-a", origin), true);
+  assert.equal(resumed.allows("task-a", origin, workspace), true);
   await resumed.bindSession("task-a", workspace, "epoch-2");
-  assert.equal(resumed.allows("task-a", origin), false);
+  assert.equal(resumed.allows("task-a", origin, workspace), false);
   await resumed.revokeSession("task-a", workspace);
 
   const afterRollback = new DurableClientCapabilityGrants();
   await afterRollback.bindSession("task-a", workspace, "epoch-1");
-  assert.equal(afterRollback.allows("task-a", origin), false);
+  assert.equal(afterRollback.allows("task-a", origin, workspace), false);
+});
+
+test("durable client grants reject unknown keys and never cross workspace identities", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-client-grants-scope-"));
+  context.after(async () => rm(root, { recursive: true, force: true }));
+  const firstWorkspace = join(root, "first");
+  const secondWorkspace = join(root, "second");
+  const file = join(
+    firstWorkspace,
+    "client-capabilities",
+    `${createHash("sha256").update("task-a").digest("hex")}.json`,
+  );
+  await mkdir(join(firstWorkspace, "client-capabilities"), { recursive: true });
+  await writeFile(
+    file,
+    JSON.stringify({
+      version: 1,
+      sessionId: "task-a",
+      authorityEpoch: "epoch-1",
+      grants: ["browser_origin:https://example.com", "unknown:all"],
+    }),
+  );
+  const grants = new DurableClientCapabilityGrants();
+  const scope = { kind: "browser_origin", origin: "https://example.com" } as const;
+  await grants.bindSession("task-a", firstWorkspace, "epoch-1");
+  assert.equal(grants.allows("task-a", scope, firstWorkspace), false);
+  await grants.grant("task-a", scope, firstWorkspace);
+  await grants.bindSession("task-a", secondWorkspace, "epoch-1");
+  assert.equal(grants.allows("task-a", scope, secondWorkspace), false);
+  assert.equal(grants.allows("task-a", scope, firstWorkspace), true);
 });
