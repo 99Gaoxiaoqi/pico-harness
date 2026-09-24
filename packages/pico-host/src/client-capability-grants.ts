@@ -67,4 +67,111 @@ export class ClientCapabilityGrants {
   }
 }
 
-export const globalClientCapabilityGrants = new ClientCapabilityGrants();
+interface DurableSession {
+  readonly filePath: string;
+  readonly authorityEpoch: string;
+  readonly keys: Set<string>;
+}
+
+/** Durable, workspace-scoped grants. A changed authority epoch never reuses old approvals. */
+export class DurableClientCapabilityGrants {
+  private readonly sessions = new Map<string, DurableSession>();
+  private readonly writes = new Map<string, Promise<void>>();
+
+  async bindSession(
+    sessionId: string,
+    workspaceRoot: string,
+    authorityEpoch: string,
+  ): Promise<void> {
+    if (!sessionId.trim() || !workspaceRoot || !authorityEpoch) {
+      throw new Error("客户端能力授权缺少可信 Session 身份");
+    }
+    const filePath = this.filePath(sessionId, workspaceRoot);
+    const current = this.sessions.get(sessionId);
+    if (current?.filePath === filePath && current.authorityEpoch === authorityEpoch) return;
+    await this.writes.get(sessionId);
+    let keys = new Set<string>();
+    try {
+      const raw = JSON.parse(await readFile(filePath, "utf8")) as unknown;
+      if (
+        raw &&
+        typeof raw === "object" &&
+        !Array.isArray(raw) &&
+        (raw as Record<string, unknown>)["version"] === 1 &&
+        (raw as Record<string, unknown>)["sessionId"] === sessionId &&
+        (raw as Record<string, unknown>)["authorityEpoch"] === authorityEpoch
+      ) {
+        const grants = (raw as Record<string, unknown>)["grants"];
+        if (
+          Array.isArray(grants) &&
+          grants.every((item) => typeof item === "string" && item.length <= 512)
+        ) {
+          keys = new Set(grants);
+        }
+      }
+    } catch {
+      // Missing or corrupt grant state fails closed.
+    }
+    this.sessions.set(sessionId, { filePath, authorityEpoch, keys });
+  }
+
+  allows(sessionId: string, scope: ClientCapabilityScope): boolean {
+    return this.sessions.get(sessionId)?.keys.has(scopeKey(scope)) ?? false;
+  }
+
+  async grant(sessionId: string, scope: ClientCapabilityScope): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (!session) throw new Error("客户端能力授权尚未绑定 Session");
+    session.keys.add(scopeKey(scope));
+    await this.persist(sessionId, session);
+  }
+
+  async revokeSession(sessionId: string, workspaceRoot?: string): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    this.sessions.delete(sessionId);
+    await this.writes.get(sessionId);
+    const filePath =
+      session?.filePath ?? (workspaceRoot ? this.filePath(sessionId, workspaceRoot) : undefined);
+    if (filePath) await rm(filePath, { force: true });
+  }
+
+  private filePath(sessionId: string, workspaceRoot: string): string {
+    const digest = createHash("sha256").update(sessionId).digest("hex");
+    return join(workspaceRoot, "client-capabilities", `${digest}.json`);
+  }
+
+  private async persist(sessionId: string, session: DurableSession): Promise<void> {
+    const previous = this.writes.get(sessionId) ?? Promise.resolve();
+    const next = previous.then(async () => {
+      await mkdir(join(session.filePath, ".."), { recursive: true, mode: 0o700 });
+      const temporary = `${session.filePath}.${randomUUID()}.tmp`;
+      try {
+        await writeFile(
+          temporary,
+          JSON.stringify({
+            version: 1,
+            sessionId,
+            authorityEpoch: session.authorityEpoch,
+            grants: [...session.keys].sort(),
+          }),
+          { mode: 0o600, flag: "wx" },
+        );
+        await rename(temporary, session.filePath);
+      } finally {
+        await rm(temporary, { force: true });
+      }
+    });
+    this.writes.set(sessionId, next);
+    try {
+      await next;
+    } finally {
+      if (this.writes.get(sessionId) === next) this.writes.delete(sessionId);
+    }
+  }
+}
+
+export const globalDurableClientCapabilityGrants = new DurableClientCapabilityGrants();
+export const globalClientCapabilityGrants = globalDurableClientCapabilityGrants;
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
