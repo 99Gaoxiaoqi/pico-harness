@@ -2078,6 +2078,9 @@ export async function executeAgentRuntime(
     }
     if (!backgroundPolicy && hostKind === "desktop" && dependencies.browserAgent) {
       const browserAgent = dependencies.browserAgent;
+      const clientCapabilityWorkspaceRoot = resolvePicoPaths(workDir, {
+        picoHome: session.picoHome,
+      }).workspace.root;
       const guardedBrowserAgent: BoundBrowserAgentAuthority = {
         sessionId: browserAgent.sessionId,
         execute: async (action, input = {}) => {
@@ -2088,7 +2091,7 @@ export async function executeAgentRuntime(
           if (mode !== "full-access") {
             await globalDurableClientCapabilityGrants.bindSession(
               session.id,
-              resolvePicoPaths(workDir, { picoHome: session.picoHome }).workspace.root,
+              clientCapabilityWorkspaceRoot,
               authorityEpoch,
             );
           }
@@ -2108,7 +2111,13 @@ export async function executeAgentRuntime(
           if (!origin) throw new Error("浏览器页面缺少有效的 HTTP/HTTPS origin");
           if (mode !== "full-access") {
             const scope = { kind: "browser_origin", origin } as const;
-            if (!globalDurableClientCapabilityGrants.allows(session.id, scope)) {
+            if (
+              !globalDurableClientCapabilityGrants.allows(
+                session.id,
+                scope,
+                clientCapabilityWorkspaceRoot,
+              )
+            ) {
               const { result } = await waitForRuntimeApproval({
                 toolName: `browser_${action}`,
                 providerCallId: `browser-origin:${randomUUID()}`,
@@ -2123,7 +2132,11 @@ export async function executeAgentRuntime(
                 throw new Error("浏览器授权期间任务权限已变化，请重试操作");
               }
               if (result.allowForSession) {
-                await globalDurableClientCapabilityGrants.grant(session.id, scope);
+                await globalDurableClientCapabilityGrants.grant(
+                  session.id,
+                  scope,
+                  clientCapabilityWorkspaceRoot,
+                );
               }
             }
             const latestEpoch = createHash("sha256")

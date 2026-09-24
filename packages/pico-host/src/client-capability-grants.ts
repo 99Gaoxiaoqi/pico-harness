@@ -1,3 +1,7 @@
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+
 /**
  * Client-side capabilities are separate from the host process network boundary. A grant
  * belongs to one task session and never implies network access for Shell or File Worker.
@@ -40,7 +44,7 @@ function scopeKey(scope: ClientCapabilityScope): string {
   }
 }
 
-/** In-memory grants: approval must be repeated after process restart or mode rollback. */
+/** In-memory implementation for callers that intentionally do not persist approvals. */
 export class ClientCapabilityGrants {
   private readonly grants = new Map<string, Set<string>>();
 
@@ -69,6 +73,7 @@ export class ClientCapabilityGrants {
 
 interface DurableSession {
   readonly filePath: string;
+  readonly workspaceRoot: string;
   readonly authorityEpoch: string;
   readonly keys: Set<string>;
 }
@@ -87,9 +92,10 @@ export class DurableClientCapabilityGrants {
       throw new Error("客户端能力授权缺少可信 Session 身份");
     }
     const filePath = this.filePath(sessionId, workspaceRoot);
-    const current = this.sessions.get(sessionId);
+    const identity = this.identity(sessionId, workspaceRoot);
+    const current = this.sessions.get(identity);
     if (current?.filePath === filePath && current.authorityEpoch === authorityEpoch) return;
-    await this.writes.get(sessionId);
+    await this.writes.get(identity);
     let keys = new Set<string>();
     try {
       const raw = JSON.parse(await readFile(filePath, "utf8")) as unknown;
@@ -102,37 +108,50 @@ export class DurableClientCapabilityGrants {
         (raw as Record<string, unknown>)["authorityEpoch"] === authorityEpoch
       ) {
         const grants = (raw as Record<string, unknown>)["grants"];
-        if (
-          Array.isArray(grants) &&
-          grants.every((item) => typeof item === "string" && item.length <= 512)
-        ) {
+        if (Array.isArray(grants) && grants.every(isValidScopeKey)) {
           keys = new Set(grants);
         }
       }
     } catch {
       // Missing or corrupt grant state fails closed.
     }
-    this.sessions.set(sessionId, { filePath, authorityEpoch, keys });
+    this.sessions.set(identity, { filePath, workspaceRoot, authorityEpoch, keys });
   }
 
-  allows(sessionId: string, scope: ClientCapabilityScope): boolean {
-    return this.sessions.get(sessionId)?.keys.has(scopeKey(scope)) ?? false;
+  allows(sessionId: string, scope: ClientCapabilityScope, workspaceRoot: string): boolean {
+    return (
+      this.sessions.get(this.identity(sessionId, workspaceRoot))?.keys.has(scopeKey(scope)) ?? false
+    );
   }
 
-  async grant(sessionId: string, scope: ClientCapabilityScope): Promise<void> {
-    const session = this.sessions.get(sessionId);
+  async grant(
+    sessionId: string,
+    scope: ClientCapabilityScope,
+    workspaceRoot: string,
+  ): Promise<void> {
+    const identity = this.identity(sessionId, workspaceRoot);
+    const session = this.sessions.get(identity);
     if (!session) throw new Error("客户端能力授权尚未绑定 Session");
     session.keys.add(scopeKey(scope));
-    await this.persist(sessionId, session);
+    await this.persist(identity, sessionId, session);
   }
 
   async revokeSession(sessionId: string, workspaceRoot?: string): Promise<void> {
-    const session = this.sessions.get(sessionId);
-    this.sessions.delete(sessionId);
-    await this.writes.get(sessionId);
-    const filePath =
-      session?.filePath ?? (workspaceRoot ? this.filePath(sessionId, workspaceRoot) : undefined);
-    if (filePath) await rm(filePath, { force: true });
+    const identities = workspaceRoot
+      ? [this.identity(sessionId, workspaceRoot)]
+      : [...this.sessions.keys()].filter((key) => key.endsWith(`\0${sessionId}`));
+    for (const identity of identities) {
+      const session = this.sessions.get(identity);
+      this.sessions.delete(identity);
+      await this.writes.get(identity);
+      const filePath =
+        session?.filePath ?? (workspaceRoot ? this.filePath(sessionId, workspaceRoot) : undefined);
+      if (filePath) await rm(filePath, { force: true });
+    }
+  }
+
+  private identity(sessionId: string, workspaceRoot: string): string {
+    return `${workspaceRoot}\0${sessionId}`;
   }
 
   private filePath(sessionId: string, workspaceRoot: string): string {
@@ -140,10 +159,14 @@ export class DurableClientCapabilityGrants {
     return join(workspaceRoot, "client-capabilities", `${digest}.json`);
   }
 
-  private async persist(sessionId: string, session: DurableSession): Promise<void> {
-    const previous = this.writes.get(sessionId) ?? Promise.resolve();
+  private async persist(
+    identity: string,
+    sessionId: string,
+    session: DurableSession,
+  ): Promise<void> {
+    const previous = this.writes.get(identity) ?? Promise.resolve();
     const next = previous.then(async () => {
-      await mkdir(join(session.filePath, ".."), { recursive: true, mode: 0o700 });
+      await mkdir(dirname(session.filePath), { recursive: true, mode: 0o700 });
       const temporary = `${session.filePath}.${randomUUID()}.tmp`;
       try {
         await writeFile(
@@ -161,17 +184,37 @@ export class DurableClientCapabilityGrants {
         await rm(temporary, { force: true });
       }
     });
-    this.writes.set(sessionId, next);
+    this.writes.set(identity, next);
     try {
       await next;
     } finally {
-      if (this.writes.get(sessionId) === next) this.writes.delete(sessionId);
+      if (this.writes.get(identity) === next) this.writes.delete(identity);
     }
   }
 }
 
 export const globalDurableClientCapabilityGrants = new DurableClientCapabilityGrants();
 export const globalClientCapabilityGrants = globalDurableClientCapabilityGrants;
-import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+
+function isValidScopeKey(value: unknown): value is string {
+  if (typeof value !== "string" || value.length > 512) return false;
+  if (value === "computer_use") return true;
+  if (value.startsWith("browser_origin:")) {
+    const origin = value.slice("browser_origin:".length);
+    return browserHttpOrigin(origin) === origin;
+  }
+  if (value.startsWith("desktop_mcp:")) {
+    try {
+      const pair = JSON.parse(value.slice("desktop_mcp:".length)) as unknown;
+      return (
+        Array.isArray(pair) &&
+        pair.length === 2 &&
+        pair.every((item) => typeof item === "string" && item.trim().length > 0) &&
+        value === scopeKey({ kind: "desktop_mcp", server: pair[0], tool: pair[1] })
+      );
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
