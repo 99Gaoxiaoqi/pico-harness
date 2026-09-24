@@ -125,6 +125,7 @@ import { INTERRUPTED_DAEMON_RUN_ERROR } from "./workspace-run-lifecycle.js";
 import { agentGraphLaunchStateFromWorkspaceRun } from "./agent-graph-launch-state.js";
 import { BrowserAgentCommandBroker } from "./browser-agent-command-broker.js";
 import { ClientCapabilityCommandBroker } from "./client-capability-command-broker.js";
+import { loadDesktopClientToken } from "./desktop-client-token.js";
 import { SqliteRuntimeEventStore } from "@pico/storage/sqlite/sqlite-runtime-event-store";
 import type { AgentGraphApplicationService } from "@pico/runtime/agent-graph-service";
 import type { AgentGraph } from "@pico/core/agent-graph-contracts";
@@ -226,7 +227,9 @@ export function createProductionRuntimeServices(
   const agentRuntime = options.agentRuntime ?? new AgentRuntime();
   const atomicMemoryLifecycle = new AtomicMemoryLifecycle(options.acquireMemoryResidency);
   const browserAgentBroker = new BrowserAgentCommandBroker();
-  const clientCapabilityBroker = new ClientCapabilityCommandBroker();
+  const clientCapabilityBroker = new ClientCapabilityCommandBroker({
+    loadClientToken: () => loadDesktopClientToken(picoHome),
+  });
   if (
     options.pluginRuntimeSnapshotRegistry &&
     options.pluginCapabilityRegistry &&

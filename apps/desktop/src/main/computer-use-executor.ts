@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { app, desktopCapturer, powerMonitor, screen, systemPreferences } from "electron";
+import { scheduleDeadline } from "@pico/runtime/deadline";
 import type { JsonObject, RuntimeClientCapabilityCommand } from "@pico/protocol";
 import {
   resolveObservedElement,
@@ -161,11 +162,11 @@ export class ComputerUseExecutor {
       if (length > 256_000) child.kill();
       else output.push(chunk);
     });
-    const timer = setTimeout(() => child.kill(), 5_000);
+    const deadline = scheduleDeadline(() => child.kill(), 5_000);
     const exitCode = await new Promise<number | null>((resolveExit, reject) => {
       child.once("error", reject);
       child.once("close", resolveExit);
-    }).finally(() => clearTimeout(timer));
+    }).finally(() => deadline.cancel());
     if (exitCode !== 0 || length > 256_000) throw new Error("macOS 电脑操作执行器失败或超时");
     const value = JSON.parse(Buffer.concat(output).toString("utf8")) as unknown;
     if (!isRecord(value)) throw new Error("macOS 电脑操作响应无效");

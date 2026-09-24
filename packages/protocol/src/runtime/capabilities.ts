@@ -70,6 +70,7 @@ type RuntimeMcpServerCommon = JsonObject & {
   readonly startupTimeoutMs?: number;
   readonly toolTimeoutMs?: number;
   readonly enabled?: boolean;
+  readonly desktopExecution?: boolean;
 };
 
 export type RuntimeMcpServerInput =
@@ -90,6 +91,7 @@ type RuntimeScopedMcpServerCommon = JsonObject & {
   readonly startupTimeoutMs?: number;
   readonly toolTimeoutMs?: number;
   readonly enabled?: boolean;
+  readonly desktopExecution?: boolean;
   readonly source: RuntimeCapabilitySourceMetadata;
 };
 
@@ -130,6 +132,7 @@ const runtimeMcpServerParam: RuntimeParamRule = (value, path) => {
     startupTimeoutMs: positiveIntegerParam,
     toolTimeoutMs: positiveIntegerParam,
     enabled: booleanParam,
+    desktopExecution: booleanParam,
   } as const;
   if (value["transport"] === "stdio") {
     assertNestedShape(
@@ -187,6 +190,7 @@ const runtimeScopedMcpServerResult: RuntimeResultRule = (value, path) => {
     startupTimeoutMs: resultPositiveInteger,
     toolTimeoutMs: resultPositiveInteger,
     enabled: resultBoolean,
+    desktopExecution: resultBoolean,
   } as const;
   if (value["transport"] === "stdio") {
     exactResultShape(

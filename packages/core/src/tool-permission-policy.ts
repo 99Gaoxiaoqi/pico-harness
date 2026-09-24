@@ -20,6 +20,7 @@ export type ToolPermissionCategory =
   | "privileged"
   | "browser"
   | "computer_use"
+  | "desktop_mcp"
   | "client_capability"
   | "custom_tool"
   | "subagent"
@@ -103,6 +104,8 @@ export function permissionReasonForCategory(category: ToolPermissionCategory): s
       return "工具将操作当前登录态下的浏览器页面";
     case "computer_use":
       return "工具将观察或操作本机应用程序";
+    case "desktop_mcp":
+      return "工具将调用 Desktop 客户端连接的 MCP 服务";
     case "client_capability":
       return "客户端开放能力无法由 Host 沙箱约束";
     case "custom_tool":

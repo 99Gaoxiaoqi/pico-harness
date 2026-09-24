@@ -15,6 +15,10 @@ import { installApplicationMenu } from "./menu.js";
 import { sleepForRetry } from "@pico/runtime/provider-retry";
 import { createEmbeddedBrowserAuthority } from "./browser-manager.js";
 import { ComputerUseExecutor } from "./computer-use-executor.js";
+import {
+  revokeDesktopClientToken,
+  rotateDesktopClientToken,
+} from "@pico/pico-host/desktop-client-token";
 import { ensureDesktopRuntimeStorageRoot } from "./runtime-storage-recovery.js";
 import {
   cleanupDesktopWorkbarResources,
@@ -85,9 +89,10 @@ const terminalCleanupFence = createDesktopTerminalCleanupFence(
 // 的重试窗口本身就会尝试重生，重启循环只会掩盖配置错误。
 let stopRuntimeProbe: (() => void) | undefined;
 let stopClientCapabilityPoller: (() => void) | undefined;
+let clientCapabilityToken: string | undefined;
 const computerUseExecutor = new ComputerUseExecutor();
 
-function startClientCapabilityPoller(): () => void {
+function startClientCapabilityPoller(clientToken: string): () => void {
   const clientId = randomUUID();
   let stopped = false;
   const run = async (): Promise<void> => {
@@ -95,7 +100,7 @@ function startClientCapabilityPoller(): () => void {
       try {
         const { command } = parseRuntimeResult(
           "client.capability.next",
-          await runtime.request("client.capability.next", { clientId, waitMs: 1_000 }),
+          await runtime.request("client.capability.next", { clientId, clientToken, waitMs: 1_000 }),
         );
         if (!command || stopped) continue;
         let outcome:
@@ -117,6 +122,7 @@ function startClientCapabilityPoller(): () => void {
             "client.capability.resolve",
             await runtime.request("client.capability.resolve", {
               clientId,
+              clientToken,
               commandId: command.commandId,
               ...outcome,
             }),
@@ -163,6 +169,9 @@ if (!app.requestSingleInstanceLock()) {
   app.on("will-quit", () => {
     stopRuntimeProbe?.();
     stopClientCapabilityPoller?.();
+    if (clientCapabilityToken) {
+      revokeDesktopClientToken(resolveCanonicalPicoHome(), clientCapabilityToken);
+    }
     disposeIpc?.();
     disposeUpdater?.();
     runtime.close();
@@ -205,6 +214,7 @@ if (!app.requestSingleInstanceLock()) {
         requestDesktopShutdown();
         return;
       }
+      clientCapabilityToken = await rotateDesktopClientToken(resolveCanonicalPicoHome());
       installApplicationMenu(() => mainWindow);
       // 首次 ping 触发 connectOrSpawn：拉起或连上常驻 daemon 后返回。冷启动时
       // daemon 的 recover 窗口（reconcile 注册工作区 + 启动 cron，可达秒级）内
@@ -224,7 +234,7 @@ if (!app.requestSingleInstanceLock()) {
       });
       disposeUpdater = configureAutoUpdates(() => lifecycle.markQuitting());
       await openMainWindow();
-      stopClientCapabilityPoller = startClientCapabilityPoller();
+      stopClientCapabilityPoller = startClientCapabilityPoller(clientCapabilityToken);
       stopRuntimeProbe = startRuntimeProbe();
     })
     .catch(async (error: unknown) => {
