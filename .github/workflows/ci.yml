@@ -285,7 +285,7 @@ jobs:
       - name: Install ripgrep for the native Grep sandbox path
         run: brew install ripgrep
       - run: npm run verify:sandbox:resources
-      - run: node --import tsx --import @pico/cli/tui/preload-env --test --test-concurrency=1 tests/integration/safety/process-sandbox.integration.test.ts tests/integration/safety/process-sandbox-native.integration.test.ts
+      - run: node --import tsx --import @pico/cli/tui/preload-env --test --test-concurrency=1 tests/integration/safety/process-sandbox.integration.test.ts tests/integration/safety/process-sandbox-native.integration.test.ts tests/integration/safety/file-worker.integration.test.ts
 
   linux-process-sandbox:
     name: Linux process sandbox (${{ matrix.arch }})
@@ -339,7 +339,7 @@ jobs:
       - name: Run Linux process sandbox integration
         run: |
           node_executable="$(command -v node)"
-          PATH="/usr/bin:/bin:$PATH" "$node_executable" --import tsx --import @pico/cli/tui/preload-env --test --test-concurrency=1 tests/integration/safety/process-sandbox.integration.test.ts tests/integration/safety/process-sandbox-native.integration.test.ts
+          PATH="/usr/bin:/bin:$PATH" "$node_executable" --import tsx --import @pico/cli/tui/preload-env --test --test-concurrency=1 tests/integration/safety/process-sandbox.integration.test.ts tests/integration/safety/process-sandbox-native.integration.test.ts tests/integration/safety/file-worker.integration.test.ts
 
   sandbox-publication:
     name: Verify complete native sandbox publication

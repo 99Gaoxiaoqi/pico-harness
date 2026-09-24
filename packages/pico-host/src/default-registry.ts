@@ -34,6 +34,9 @@ import { createCodeIntelligenceTools } from "@pico/pico-host/code-intelligence-t
 import type { WorkspaceSandboxConfig } from "@pico/pico-host/workspace-sandbox";
 import type { SandboxProfile } from "@pico/pico-host/process-sandbox";
 import { ExploreRepoTool } from "@pico/pico-host/explore-repo-tool";
+import { FileWorkerTool } from "./file-worker-tool.js";
+import { guardManagedHostRead } from "./managed-host-read-guard.js";
+import type { BaseTool } from "./tool-registry-contract.js";
 import {
   createSessionTaskTools,
   type BoundSessionTaskAuthority,
@@ -45,6 +48,7 @@ import {
 
 export interface DefaultProcessSandboxDescriptor {
   readonly profile: SandboxProfile;
+  readonly bypass?: boolean;
   readonly config?: Partial<WorkspaceSandboxConfig>;
   readonly scratchRoot?: string;
   readonly generation?: number;
@@ -158,12 +162,26 @@ export function buildDefaultToolRegistry(
   } = options;
   const roots = workspaceRoots ?? WorkspaceRoots.createSync(workDir);
   const registry = new ToolRegistry();
+  const fileTool = (tool: BaseTool): BaseTool =>
+    processSandbox
+      ? new FileWorkerTool(tool, {
+          roots,
+          workDir,
+          resolveSandbox: processSandbox.resolveSandbox ?? (() => processSandbox),
+          ...(sessionArtifacts ? { artifacts: sessionArtifacts } : {}),
+          excludeSensitiveFiles: Boolean(excludeSensitiveGrepFiles),
+        })
+      : tool;
+  const hostReadTool = (tool: BaseTool): BaseTool =>
+    processSandbox
+      ? guardManagedHostRead(tool, processSandbox.resolveSandbox ?? (() => processSandbox))
+      : tool;
   // 必须先于 host 后续挂载的审批中间件,避免一次审批扩大文件系统边界。
   if (!deferWorkspaceBoundary) registry.useRequest(buildWorkspaceBoundaryMiddleware(roots));
-  registry.register(new ReadFileTool(roots, options.toolResultArchive));
+  registry.register(fileTool(new ReadFileTool(roots, options.toolResultArchive)));
   if (options.toolResultArchive) registry.register(new ArchiveReadTool(options.toolResultArchive));
-  registry.register(new WriteFileTool(roots, sessionArtifacts));
-  registry.register(new EditFileTool(roots));
+  registry.register(fileTool(new WriteFileTool(roots, sessionArtifacts)));
+  registry.register(fileTool(new EditFileTool(roots)));
   registry.register(
     new BashTool(workDir, backgroundManager, {
       ...(processSandbox
@@ -220,43 +238,47 @@ export function buildDefaultToolRegistry(
   if (sessionTasks) {
     for (const tool of createSessionTaskTools(sessionTasks)) registry.register(tool);
   }
-  registry.register(new SkillViewTool(skillLoader ?? new SkillLoader(workDir), activateSkillHooks));
-  registry.register(new GlobTool(roots));
   registry.register(
-    new GrepTool(roots, {
-      diagnostics: logger,
-      ...(excludeSensitiveGrepFiles !== undefined
-        ? { excludeSensitiveFiles: excludeSensitiveGrepFiles }
-        : {}),
-      ...(processSandbox
-        ? {
-            processSandbox: {
-              profile: processSandbox.profile,
-              ...(processSandbox.config ? { config: processSandbox.config } : {}),
-              ...(processSandbox.scratchRoot ? { scratchRoot: processSandbox.scratchRoot } : {}),
-              ...(processSandbox.generation !== undefined
-                ? { generation: processSandbox.generation }
-                : {}),
-              ...(processSandbox.hasUnsupportedDenyEntries !== undefined
-                ? { hasUnsupportedDenyEntries: processSandbox.hasUnsupportedDenyEntries }
-                : {}),
-              ...(processSandbox.readRoots ? { readRoots: processSandbox.readRoots } : {}),
-              ...(processSandbox.writeRoots ? { writeRoots: processSandbox.writeRoots } : {}),
-              ...(processSandbox.readFiles ? { readFiles: processSandbox.readFiles } : {}),
-              ...(processSandbox.writeFiles ? { writeFiles: processSandbox.writeFiles } : {}),
-              ...(env ? { env } : {}),
-            },
-          }
-        : {}),
-      ...(processSandbox?.resolveSandbox
-        ? {
-            resolveSandbox: () => ({
-              ...processSandbox.resolveSandbox!(),
-              ...(env ? { env } : {}),
-            }),
-          }
-        : {}),
-    }),
+    hostReadTool(new SkillViewTool(skillLoader ?? new SkillLoader(workDir), activateSkillHooks)),
+  );
+  registry.register(fileTool(new GlobTool(roots)));
+  registry.register(
+    fileTool(
+      new GrepTool(roots, {
+        diagnostics: logger,
+        ...(excludeSensitiveGrepFiles !== undefined
+          ? { excludeSensitiveFiles: excludeSensitiveGrepFiles }
+          : {}),
+        ...(processSandbox
+          ? {
+              processSandbox: {
+                profile: processSandbox.profile,
+                ...(processSandbox.config ? { config: processSandbox.config } : {}),
+                ...(processSandbox.scratchRoot ? { scratchRoot: processSandbox.scratchRoot } : {}),
+                ...(processSandbox.generation !== undefined
+                  ? { generation: processSandbox.generation }
+                  : {}),
+                ...(processSandbox.hasUnsupportedDenyEntries !== undefined
+                  ? { hasUnsupportedDenyEntries: processSandbox.hasUnsupportedDenyEntries }
+                  : {}),
+                ...(processSandbox.readRoots ? { readRoots: processSandbox.readRoots } : {}),
+                ...(processSandbox.writeRoots ? { writeRoots: processSandbox.writeRoots } : {}),
+                ...(processSandbox.readFiles ? { readFiles: processSandbox.readFiles } : {}),
+                ...(processSandbox.writeFiles ? { writeFiles: processSandbox.writeFiles } : {}),
+                ...(env ? { env } : {}),
+              },
+            }
+          : {}),
+        ...(processSandbox?.resolveSandbox
+          ? {
+              resolveSandbox: () => ({
+                ...processSandbox.resolveSandbox!(),
+                ...(env ? { env } : {}),
+              }),
+            }
+          : {}),
+      }),
+    ),
   );
   // TodoTool 持有 host 注入的 TodoStore 单例,与 PromptComposer 共享同一实例。
   // 未注入时降级为内部 new,保持向后兼容(单实例场景不受跨实例 bug 影响)。
@@ -289,9 +311,9 @@ export function buildDefaultToolRegistry(
   registry.register(new WebSearchTool(env));
   if (codeIntelligence) {
     for (const tool of createCodeIntelligenceTools(workDir, codeIntelligence)) {
-      registry.register(tool);
+      registry.register(hostReadTool(tool));
     }
-    registry.register(new ExploreRepoTool(workDir, codeIntelligence));
+    registry.register(fileTool(new ExploreRepoTool(workDir, codeIntelligence)));
   }
   // 渐进披露(ROADMAP 5.4):注入 disclosure 时注册 load_tools + search_tools。
   // load_tools 组级激活（枚举选择当前宿主可用的 deferred 组，零歧义）；

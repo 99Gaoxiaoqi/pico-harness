@@ -292,26 +292,17 @@ export class EditFileTool implements BaseTool {
     const fullPath = await this.roots.assertAllowed(path, { access: "write" });
     const snapshot = await readBoundedFileSnapshot(fullPath, READ_FILE_MAX_BYTES, path);
     await access(fullPath, constants.W_OK);
-    const modelView = toModelTextView(snapshot.content);
-    const content = modelView.text;
-    let replacement: { content: string; level: number };
-    try {
-      replacement = fuzzyReplace(content, oldText, newText, replaceAll);
-    } catch (err) {
-      throw this.enrichNotFoundError(err, content, oldText);
-    }
+    const prepared = prepareEditContent(snapshot.content, oldText, newText, replaceAll);
 
     await writeAtomicWorkspaceFile({
       targetPath: fullPath,
-      content: materializeModelText(replacement.content, modelView.lineEndingStyle),
+      content: prepared.content,
       precondition: snapshot.precondition,
       revalidateTarget: () => assertSameResolvedTarget(this.roots, path, fullPath),
     });
 
     // 5. 生成 diff 预览(简单 before/after 对比,供用户审批时查看)
-    const diffPreview = generateSimpleDiff(oldText, newText);
-    const allNote = replaceAll ? ", 全部替换" : "";
-    return `✅ 成功修改文件: ${path} (匹配级别 L${replacement.level}${allNote})\n\n${diffPreview}`;
+    return formatEditResult(path, prepared.level, oldText, newText, replaceAll);
   }
 
   /**
@@ -319,7 +310,7 @@ export class EditFileTool implements BaseTool {
    * 用 findClosestLines 在文件里找最相似的几段,附在错误信息末尾帮模型重定位。
    * 其他错误(如 IO 失败、多处匹配、参数解析失败)原样返回,不附候选。
    */
-  private enrichNotFoundError(err: unknown, content: string, oldText: string): Error {
+  static enrichNotFoundError(err: unknown, content: string, oldText: string): Error {
     const errMsg = err instanceof Error ? err.message : String(err);
     if (!/未找到|找不到|not found/i.test(errMsg)) {
       return err instanceof Error ? err : new Error(String(err));
@@ -330,6 +321,38 @@ export class EditFileTool implements BaseTool {
     }
     return new Error(`${errMsg}${formatCandidateHint(hints)}`);
   }
+}
+
+/** Worker and direct execution share one edit algorithm and model-facing result. */
+export function prepareEditContent(
+  raw: string,
+  oldText: string,
+  newText: string,
+  replaceAll: boolean,
+): { content: string; level: number } {
+  const modelView = toModelTextView(raw);
+  let replacement: { content: string; level: number };
+  try {
+    replacement = fuzzyReplace(modelView.text, oldText, newText, replaceAll);
+  } catch (error) {
+    throw EditFileTool.enrichNotFoundError(error, modelView.text, oldText);
+  }
+  return {
+    content: materializeModelText(replacement.content, modelView.lineEndingStyle),
+    level: replacement.level,
+  };
+}
+
+export function formatEditResult(
+  path: string,
+  level: number,
+  oldText: string,
+  newText: string,
+  replaceAll: boolean,
+): string {
+  const diffPreview = generateSimpleDiff(oldText, newText);
+  const allNote = replaceAll ? ", 全部替换" : "";
+  return `✅ 成功修改文件: ${path} (匹配级别 L${level}${allNote})\n\n${diffPreview}`;
 }
 
 // ==========================================

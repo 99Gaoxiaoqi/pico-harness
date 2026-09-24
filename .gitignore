@@ -16,6 +16,8 @@ resources/sandbox/win32-*/pico-appcontainer-host-prep.exe.sha256
 resources/licenses/bubblewrap/COPYING
 resources/licenses/bubblewrap/SOURCE.sha256
 resources/licenses/bubblewrap/bubblewrap-*.tar.xz
+resources/file-worker/file-worker.mjs
+resources/file-worker/file-worker.mjs.sha256
 
 # Test and browser automation output
 coverage/

@@ -13,6 +13,8 @@ import {
 
 export interface RuntimeProcessSandboxDescriptor {
   readonly profile: SandboxProfile;
+  /** A managed unrestricted profile must still use the isolated file execution path. */
+  readonly bypass?: boolean;
   readonly config?: Partial<SandboxConfig>;
   readonly scratchRoot: string;
   /** Changes whenever roots or the effective profile/network boundary changes. */
@@ -101,6 +103,7 @@ export function compileRuntimeProcessSandbox(
   if (boundary.kind === "bypass") {
     return {
       profile: "danger-full-access",
+      bypass: true,
       scratchRoot: input.scratchRoot,
       generation,
     };
@@ -112,6 +115,7 @@ export function compileRuntimeProcessSandbox(
   const paths = processPathsForProfile(boundary.profile);
   return {
     profile,
+    bypass: false,
     config: {
       network:
         managedNetworkEnabled || boundary.profile.network.kind === "enabled" ? "allow" : "deny",

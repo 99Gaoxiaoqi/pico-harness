@@ -449,11 +449,31 @@ export function createProductionRuntimeServices(
       const pluginSnapshot = operatorProfile
         ? undefined
         : await pluginRuntimeSnapshotRegistry.get(runWorkDir);
+      const graphExecutionBoundary =
+        operatorExecutionBoundary?.child ?? input.session.getRuntimeStateSnapshot().boundary;
+      if (!graphExecutionBoundary) {
+        throw new Error(`Graph Session ${targetSessionId} 缺少持久执行边界`);
+      }
       runtimeState = await createSessionRuntime({
         session: input.session,
         sessionLease,
         env,
         workspaceTrustStore: trustStore,
+        processSandbox: {
+          profile:
+            persistedSettings?.collaborationMode === "plan" ||
+            persistedSettings?.collaborationMode === "research"
+              ? "read-only"
+              : graphExecutionBoundary.kind === "bypass"
+                ? "danger-full-access"
+                : "workspace-write",
+          bypass:
+            graphExecutionBoundary.kind === "bypass" &&
+            (persistedSettings?.collaborationMode ?? "agent") === "agent",
+          scratchRoot: join(picoHome, "sandboxes", targetSessionId),
+          workspaceRoots: [runWorkDir],
+          generation: 0,
+        },
         ...(operatorProfile ? { lspEnabled: false as const, hooks: false as const } : {}),
         ...(!operatorProfile && workspaceRuntime.taskHostRuntime
           ? { taskHostRuntime: workspaceRuntime.taskHostRuntime }
@@ -953,6 +973,10 @@ export function createProductionRuntimeServices(
         const pluginSnapshot = await pluginRuntimeSnapshotRegistry.get(workspacePath);
         if (graphHost) await refreshGraphOperatorCatalog(workspacePath);
         const projectConfig = await loadPicoProjectConfig(workspacePath);
+        const foregroundExecutionBoundary = session.getRuntimeStateSnapshot().boundary;
+        if (!foregroundExecutionBoundary) {
+          throw new Error(`Session ${targetSessionId} 缺少持久执行边界`);
+        }
         const persistedAdditionalDirectories = persistedSettings?.additionalDirectories ?? [];
         const processWorkspaceRoots = [
           workspacePath,
@@ -972,9 +996,12 @@ export function createProductionRuntimeServices(
               persistedSettings?.collaborationMode === "plan" ||
               persistedSettings?.collaborationMode === "research"
                 ? "read-only"
-                : persistedSettings?.permissionMode === "full-access"
+                : foregroundExecutionBoundary.kind === "bypass"
                   ? "danger-full-access"
                   : "workspace-write",
+            bypass:
+              foregroundExecutionBoundary.kind === "bypass" &&
+              (persistedSettings?.collaborationMode ?? "agent") === "agent",
             config: projectConfig.sandbox,
             scratchRoot: join(picoHome, "sandboxes", targetSessionId),
             workspaceRoots: processWorkspaceRoots,

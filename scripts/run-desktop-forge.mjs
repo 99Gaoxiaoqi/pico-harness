@@ -54,6 +54,7 @@ async function run(forgeCommand, forgeArgs) {
         repositoryRoot,
       );
     }
+    await runChild(npm.executable, [...npm.args, "run", "build:file-worker"], repositoryRoot);
 
     const forgeCli = join(
       repositoryRoot,
