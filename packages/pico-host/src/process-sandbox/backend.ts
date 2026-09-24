@@ -94,12 +94,6 @@ export function buildManagedSpawnPlan(request: ManagedSpawnRequest): SandboxSpaw
         profile: policy.profile,
       };
     case "windows-appcontainer": {
-      if ((policy.readFiles?.length ?? 0) > 0 || (policy.writeFiles?.length ?? 0) > 0) {
-        throw new SandboxViolationError(
-          "policy_compilation_failed",
-          "Windows AppContainer 暂不支持精确文件边界，已拒绝扩大到父目录。",
-        );
-      }
       const controlRoot =
         request.controlRoot ?? resolve(dirname(policy.scratchRoot), ".windows-broker-control");
       if (policy.readRoots.some((root) => isWithinRoot(root, controlRoot))) {
@@ -149,6 +143,8 @@ export function buildWindowsBrokerArgs(
   ];
   for (const root of policy.readRoots) result.push("--read-root", root);
   for (const root of policy.writeRoots) result.push("--write-root", root);
+  for (const path of policy.readFiles ?? []) result.push("--read-file", path);
+  for (const path of policy.writeFiles ?? []) result.push("--write-file", path);
   result.push("--", command, ...args);
   return result;
 }

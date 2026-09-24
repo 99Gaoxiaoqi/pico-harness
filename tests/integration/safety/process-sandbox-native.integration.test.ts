@@ -22,6 +22,8 @@ import { GrepTool, resetRgCache, setRgAvailable } from "@pico/pico-host/grep-too
 import { WorkspaceRoots } from "@pico/pico-host/workspace-roots";
 import { McpConnectionManager } from "@pico/pico-host/mcp-connection-manager";
 import { signalProcessTree } from "@pico/runtime/process-tree";
+import { captureAtomicFilePrecondition } from "../../../packages/pico-host/src/atomic-workspace-file.js";
+import { commitWindowsFile } from "../../../packages/pico-host/src/process-sandbox/windows-file-commit.js";
 
 const nativeAvailable =
   process.platform === "darwin" || process.platform === "linux" || process.platform === "win32";
@@ -81,6 +83,94 @@ test(
       assert.equal(result.code, 0, result.stderr);
       assert.equal(result.stdout, "ok");
     }
+  },
+);
+
+test(
+  "Windows exact-file grants never expose a sibling or permit parent-directory creation",
+  { skip: process.platform !== "win32" },
+  async (context) => {
+    const fixture = await fixtureRoot(context, "pico-native-exact-file-");
+    const external = join(fixture.root, "external");
+    await mkdir(external);
+    const readable = join(external, "readable.txt");
+    const writable = join(external, "writable.txt");
+    const sibling = join(external, "sibling.txt");
+    const newFile = join(external, "new.txt");
+    await writeFile(readable, "visible");
+    await writeFile(writable, "old");
+    await writeFile(sibling, "private");
+    const script = [
+      'const fs=require("node:fs");',
+      `const paths=${JSON.stringify({ readable, writable, sibling, newFile, external })};`,
+      'const result={};',
+      'const attempt=(name,fn)=>{try{result[name]=fn()}catch{result[name]="DENIED"}};',
+      'attempt("read",()=>fs.readFileSync(paths.readable,"utf8"));',
+      'attempt("write",()=>{fs.writeFileSync(paths.writable,"changed");return "OK"});',
+      'attempt("siblingRead",()=>fs.readFileSync(paths.sibling,"utf8"));',
+      'attempt("siblingWrite",()=>{fs.writeFileSync(paths.sibling,"unsafe");return "OK"});',
+      'attempt("create",()=>{fs.writeFileSync(paths.newFile,"unsafe");return "OK"});',
+      'attempt("list",()=>fs.readdirSync(paths.external).join(","));',
+      'process.stdout.write(JSON.stringify(result));',
+    ].join("");
+    const result = await runNode(
+      fixture,
+      "read-only",
+      script,
+      fixture.workspace,
+      process.env,
+      [],
+      "deny",
+      [readable],
+      [writable, newFile],
+    );
+    assert.equal(result.code, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), {
+      read: "visible",
+      write: "OK",
+      siblingRead: "DENIED",
+      siblingWrite: "DENIED",
+      create: "DENIED",
+      list: "DENIED",
+    });
+    assert.equal(await readFile(writable, "utf8"), "changed");
+    assert.equal(await readFile(sibling, "utf8"), "private");
+    await assert.rejects(readFile(newFile));
+  },
+);
+
+test(
+  "Windows trusted Broker commits a new exact file and rejects a stale precondition",
+  { skip: process.platform !== "win32" },
+  async (context) => {
+    const fixture = await fixtureRoot(context, "pico-native-exact-commit-");
+    const external = join(fixture.root, "external");
+    await mkdir(external);
+    await mkdir(fixture.scratch);
+    const targetPath = join(external, "new.txt");
+    const sibling = join(external, "sibling.txt");
+    await writeFile(sibling, "private");
+    const boundExternal = realpathSync.native(external);
+    const precondition = await captureAtomicFilePrecondition(targetPath);
+    assert.equal(precondition.kind, "missing");
+    const input = {
+      targetPath,
+      content: "committed",
+      precondition,
+      revalidateTarget: () => {
+        assert.equal(realpathSync.native(external), boundExternal);
+      },
+      scratchRoot: fixture.scratch,
+      writableRoots: [fixture.workspace, fixture.scratch],
+    };
+    await commitWindowsFile(input);
+    assert.equal(await readFile(targetPath, "utf8"), "committed");
+    assert.equal(await readFile(sibling, "utf8"), "private");
+
+    const stale = await captureAtomicFilePrecondition(targetPath);
+    await writeFile(targetPath, "concurrent");
+    await assert.rejects(commitWindowsFile({ ...input, content: "rejected", precondition: stale }));
+    assert.equal(await readFile(targetPath, "utf8"), "concurrent");
   },
 );
 
@@ -561,12 +651,16 @@ async function runNode(
   env: NodeJS.ProcessEnv = process.env,
   readRoots: readonly string[] = [],
   network: "allow" | "deny" = "allow",
+  readFiles: readonly string[] = [],
+  writeFiles: readonly string[] = [],
 ): Promise<{ code: number | null; stdout: string; stderr: string }> {
   const policy = createSandboxPolicy({
     profile,
     workspaceRoots: [fixture.workspace],
     scratchRoot: fixture.scratch,
     readRoots,
+    readFiles,
+    writeFiles,
     config: { network },
   });
   const request: ManagedSpawnRequest = {
