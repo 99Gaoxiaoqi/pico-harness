@@ -115,6 +115,29 @@ test("Windows Broker 获取完整根目录与策略代次且不接受网络放�
   assert.equal(args.includes("--network"), false);
 });
 
+test("Windows Broker 将精确文件授权传给原生后端，不扩大到父目录", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-process-sandbox-winfiles-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const workspace = join(root, "workspace");
+  const external = join(root, "external");
+  await mkdir(workspace);
+  await mkdir(external);
+  const readable = join(external, "read.txt");
+  const writable = join(external, "write.txt");
+  await writeFile(readable, "read");
+  const policy = createSandboxPolicy({
+    profile: "read-only",
+    workspaceRoots: [workspace],
+    scratchRoot: join(root, "scratch"),
+    readFiles: [readable],
+    writeFiles: [writable],
+  });
+  const args = buildWindowsBrokerArgs(policy, "node.exe", ["-e", "0"], workspace);
+  assert.equal(args[args.indexOf("--read-file") + 1], await realpath(readable));
+  assert.equal(args[args.indexOf("--write-file") + 1], writable);
+  assert.equal(args.includes(external), false);
+});
+
 test("Windows 受限进程只获得宿主固定的 Node 路径兼容参数", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-process-sandbox-win-node-options-"));
   context.after(() => rm(root, { recursive: true, force: true }));

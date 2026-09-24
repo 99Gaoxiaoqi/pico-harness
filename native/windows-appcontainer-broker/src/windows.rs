@@ -1,9 +1,11 @@
 use std::collections::HashSet;
 use std::ffi::{c_void, OsStr, OsString};
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Write};
 use std::mem::{size_of, zeroed};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::os::windows::fs::OpenOptionsExt;
+use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::ptr::{null, null_mut};
@@ -20,6 +22,10 @@ const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x0000_2000;
 const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x0000_1000;
 const ERROR_ACCESS_DENIED: u32 = 5;
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+const FILE_SHARE_READ: u32 = 0x0000_0001;
+const FILE_SHARE_WRITE: u32 = 0x0000_0002;
 const INVALID_FILE_ATTRIBUTES: u32 = 0xffff_ffff;
 const WAIT_OBJECT_0: u32 = 0;
 const WAIT_ABANDONED: u32 = 0x0000_0080;
@@ -88,6 +94,20 @@ struct ProcessInformation {
 struct FileTime {
     low_date_time: u32,
     high_date_time: u32,
+}
+
+#[repr(C)]
+struct ByHandleFileInformation {
+    file_attributes: u32,
+    creation_time: FileTime,
+    last_access_time: FileTime,
+    last_write_time: FileTime,
+    volume_serial_number: u32,
+    file_size_high: u32,
+    file_size_low: u32,
+    number_of_links: u32,
+    file_index_high: u32,
+    file_index_low: u32,
 }
 
 #[repr(C)]
@@ -178,6 +198,7 @@ extern "system" {
         user_time: *mut FileTime,
     ) -> i32;
     fn GetFileAttributesW(file_name: *const u16) -> u32;
+    fn GetFileInformationByHandle(file: Handle, information: *mut ByHandleFileInformation) -> i32;
     fn GetStdHandle(standard_handle: u32) -> Handle;
     fn GetSystemDirectoryW(buffer: *mut u16, size: u32) -> u32;
     fn CreateMutexW(attributes: *const c_void, initial_owner: i32, name: *const u16) -> Handle;
@@ -217,6 +238,8 @@ struct Policy {
     generation: u64,
     read_roots: Vec<PathBuf>,
     write_roots: Vec<PathBuf>,
+    read_files: Vec<PathBuf>,
+    write_files: Vec<PathBuf>,
     command: String,
     args: Vec<String>,
 }
@@ -267,7 +290,14 @@ impl Drop for AclMutationGuard {
 }
 
 pub fn run() -> Result<(), String> {
-    let policy = parse_args(std::env::args().skip(1).collect())?;
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args
+        .first()
+        .is_some_and(|argument| argument == "--commit-file")
+    {
+        return run_commit_file(&args[1..]);
+    }
+    let policy = parse_args(args)?;
     fs::create_dir_all(&policy.scratch).map_err(error_text)?;
     fs::create_dir_all(&policy.control_root).map_err(error_text)?;
     recover_stale(&policy.control_root)?;
@@ -299,6 +329,7 @@ pub fn run() -> Result<(), String> {
             return Err(error);
         }
     };
+    let mut exact_path_guards: Vec<File> = Vec::new();
     let launch_result = (|| -> Result<u32, String> {
         let write_keys = policy
             .write_roots
@@ -313,13 +344,151 @@ pub fn run() -> Result<(), String> {
         for root in &policy.write_roots {
             journal.grant(root, &target_capability_sid, "M")?;
         }
+        for path in &policy.read_files {
+            grant_exact_file(
+                &mut journal,
+                &policy,
+                path,
+                &target_capability_sid,
+                "RX",
+                false,
+                &mut exact_path_guards,
+            )?;
+        }
+        for path in &policy.write_files {
+            grant_exact_file(
+                &mut journal,
+                &policy,
+                path,
+                &target_capability_sid,
+                "M",
+                true,
+                &mut exact_path_guards,
+            )?;
+        }
         unsafe { launch_in_appcontainer(&policy, package_sid, &target_capability_sid) }
     })();
     let cleanup_result = journal.cleanup();
+    drop(exact_path_guards);
     unsafe { FreeSid(package_sid) };
-    let exit_code = launch_result?;
-    cleanup_result?;
+    let exit_code = match (launch_result, cleanup_result) {
+        (Ok(code), Ok(())) => code,
+        (Err(launch), Ok(())) => return Err(launch),
+        (Ok(_), Err(cleanup)) => return Err(cleanup),
+        (Err(launch), Err(cleanup)) => {
+            return Err(format!(
+                "target failed: {launch}; ACL cleanup also failed: {cleanup}"
+            ));
+        }
+    };
     std::process::exit(exit_code as i32);
+}
+
+fn run_commit_file(args: &[String]) -> Result<(), String> {
+    if args.len() != 6 || args[0] != "--node" || args[2] != "--helper" || args[4] != "--target" {
+        return Err("commit-file accepts only --node, --helper and --target".into());
+    }
+    let node = Path::new(&args[1]);
+    let helper = Path::new(&args[3]);
+    let target = Path::new(&args[5]);
+    if !node.is_absolute()
+        || !helper.is_absolute()
+        || helper.file_name() != Some(OsStr::new("windows-file-commit-entry.js"))
+        || !target.is_absolute()
+    {
+        return Err("commit-file requires absolute Node, helper and target paths".into());
+    }
+    let target_parent = target.parent().ok_or("commit-file target has no parent")?;
+    assert_not_reparse_point(target_parent)?;
+    let _parent_guard = pin_path(target_parent, true)?;
+    assert_pinned_identity(target_parent, &_parent_guard, true)?;
+    for path in [node, helper] {
+        let mut current = Some(path);
+        while let Some(component) = current {
+            if component.parent().is_none() {
+                break;
+            }
+            assert_not_reparse_point(component)?;
+            current = component.parent();
+        }
+        if !fs::symlink_metadata(path).map_err(error_text)?.is_file() {
+            return Err(format!(
+                "commit-file trusted path is not a file: {}",
+                path.display()
+            ));
+        }
+    }
+    let system_directory = system_directory()?;
+    let system_root = system_directory
+        .parent()
+        .ok_or("Windows system directory has no parent")?;
+    let mut request = Vec::new();
+    std::io::stdin()
+        .take(64 * 1024 * 1024 + 1)
+        .read_to_end(&mut request)
+        .map_err(error_text)?;
+    if request.is_empty() || request.len() > 64 * 1024 * 1024 {
+        return Err("commit-file request is empty or exceeds 64 MiB".into());
+    }
+    let mut child = Command::new(node)
+        .arg(helper)
+        .current_dir(&system_directory)
+        .env_clear()
+        .env("SystemRoot", system_root)
+        .env("WINDIR", system_root)
+        .env("ComSpec", system_directory.join("cmd.exe"))
+        .env("PATH", &system_directory)
+        .env("TEMP", std::env::temp_dir())
+        .env("TMP", std::env::temp_dir())
+        .env("ELECTRON_RUN_AS_NODE", "1")
+        .env("PICO_COMMIT_BOUND_TARGET", target)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(error_text)?;
+    let job = unsafe { CreateJobObjectW(null(), null()) };
+    if job.is_null() {
+        let error = last_error("CreateJobObjectW(commit-file)");
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
+    let mut limits: JobObjectExtendedLimitInformation = unsafe { zeroed() };
+    limits.basic_limit_information.limit_flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if unsafe {
+        SetInformationJobObject(
+            job,
+            JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
+            (&limits as *const JobObjectExtendedLimitInformation).cast(),
+            size_of::<JobObjectExtendedLimitInformation>() as u32,
+        ) == 0
+            || AssignProcessToJobObject(job, child.as_raw_handle()) == 0
+    } {
+        let error = last_error("configure commit-file Job Object");
+        let _ = child.kill();
+        let _ = child.wait();
+        unsafe { CloseHandle(job) };
+        return Err(error);
+    }
+    let write_result = child
+        .stdin
+        .take()
+        .ok_or("commit-file helper stdin unavailable")?
+        .write_all(&request);
+    if let Err(error) = write_result {
+        let _ = child.kill();
+        let _ = child.wait();
+        unsafe { CloseHandle(job) };
+        return Err(error_text(error));
+    }
+    let status = child.wait().map_err(error_text)?;
+    unsafe { CloseHandle(job) };
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("trusted file-commit helper failed with {status}"))
+    }
 }
 
 fn parse_args(args: Vec<String>) -> Result<Policy, String> {
@@ -337,6 +506,8 @@ fn parse_args(args: Vec<String>) -> Result<Policy, String> {
     let mut generation = 0;
     let mut read_roots = Vec::new();
     let mut write_roots = Vec::new();
+    let mut read_files = Vec::new();
+    let mut write_files = Vec::new();
     let mut index = 0;
     while index < separator {
         let key = &args[index];
@@ -351,6 +522,8 @@ fn parse_args(args: Vec<String>) -> Result<Policy, String> {
             "--generation" => generation = value.parse().map_err(|_| "invalid generation")?,
             "--read-root" => read_roots.push(PathBuf::from(value)),
             "--write-root" => write_roots.push(PathBuf::from(value)),
+            "--read-file" => read_files.push(PathBuf::from(value)),
+            "--write-file" => write_files.push(PathBuf::from(value)),
             _ => return Err(format!("unknown policy argument: {key}")),
         }
         index += 2;
@@ -366,6 +539,8 @@ fn parse_args(args: Vec<String>) -> Result<Policy, String> {
         generation,
         read_roots,
         write_roots,
+        read_files,
+        write_files,
         command: args[separator + 1].clone(),
         args: args[separator + 2..].to_vec(),
     })
@@ -569,6 +744,15 @@ impl RecoveryJournal {
         run_icacls("grant", [&path_text, "/grant", &grant, "/C", "/L"])
     }
 
+    fn grant_exact(&mut self, path: &Path, sid: &str, rights: &str) -> Result<(), String> {
+        assert_not_reparse_point(path)?;
+        let path_text = path.to_string_lossy().to_string();
+        self.record("acl", &path_text, sid)?;
+        // No (OI)/(CI): a file or ancestor directory grant must never flow to siblings.
+        let grant = format!("*{sid}:({rights})");
+        run_icacls("grant-exact", [&path_text, "/grant", &grant, "/L"])
+    }
+
     fn record(&mut self, kind: &str, target: &str, sid: &str) -> Result<(), String> {
         self.entries.push((kind.into(), target.into(), sid.into()));
         let mut file = OpenOptions::new()
@@ -586,6 +770,109 @@ impl RecoveryJournal {
             .or_else(ignore_not_found)
             .map_err(error_text)
     }
+}
+
+fn grant_exact_file(
+    journal: &mut RecoveryJournal,
+    policy: &Policy,
+    path: &Path,
+    sid: &str,
+    rights: &str,
+    allow_missing: bool,
+    guards: &mut Vec<File>,
+) -> Result<(), String> {
+    if !path.is_absolute() || path.file_name().is_none() {
+        return Err(format!(
+            "exact-file grant requires an absolute file path: {}",
+            path.display()
+        ));
+    }
+    if path == policy.control_root || path.starts_with(&policy.control_root) {
+        return Err("exact-file grant overlaps the broker control directory".into());
+    }
+    let parent = path.parent().ok_or("exact-file grant has no parent")?;
+    let parent_info = fs::symlink_metadata(parent).map_err(error_text)?;
+    assert_not_reparse_point(parent)?;
+    if !parent_info.is_dir() {
+        return Err(format!(
+            "exact-file parent is not a directory: {}",
+            parent.display()
+        ));
+    }
+    let mut ancestors = Vec::new();
+    let mut current = Some(parent);
+    while let Some(directory) = current {
+        if directory.parent().is_none() {
+            break;
+        }
+        assert_not_reparse_point(directory)?;
+        ancestors.push(directory);
+        current = directory.parent();
+    }
+    // Pin every ancestor against rename/reparse while the child runs. Only the immediate
+    // parent needs a new ACE: Windows' traverse privilege covers the higher components.
+    // This mask excludes FILE_LIST_DIRECTORY, FILE_ADD_FILE and DELETE_CHILD.
+    for directory in ancestors.into_iter().rev() {
+        let pinned = pin_path(directory, true)?;
+        assert_not_reparse_point(directory)?;
+        assert_pinned_identity(directory, &pinned, true)?;
+        guards.push(pinned);
+        if directory == parent {
+            journal.grant_exact(directory, sid, "0x1200a0")?;
+        }
+    }
+    match fs::symlink_metadata(path) {
+        Ok(info) => {
+            assert_not_reparse_point(path)?;
+            if !info.is_file() {
+                return Err(format!(
+                    "exact-file target is not a regular file: {}",
+                    path.display()
+                ));
+            }
+            let pinned = pin_path(path, false)?;
+            assert_not_reparse_point(path)?;
+            assert_pinned_identity(path, &pinned, false)?;
+            guards.push(pinned);
+            journal.grant_exact(path, sid, rights)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound && allow_missing => Ok(()),
+        Err(error) => Err(error_text(error)),
+    }
+}
+
+fn assert_pinned_identity(path: &Path, pinned: &File, directory: bool) -> Result<(), String> {
+    let current = pin_path(path, directory)?;
+    if file_identity(&current)? != file_identity(pinned)? {
+        return Err(format!(
+            "exact-file path changed while binding: {}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn file_identity(file: &File) -> Result<(u32, u64), String> {
+    let mut information: ByHandleFileInformation = unsafe { zeroed() };
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) } == 0 {
+        return Err(last_error("GetFileInformationByHandle"));
+    }
+    Ok((
+        information.volume_serial_number,
+        (u64::from(information.file_index_high) << 32) | u64::from(information.file_index_low),
+    ))
+}
+
+fn pin_path(path: &Path, directory: bool) -> Result<File, String> {
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    if directory {
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
+    }
+    options.open(path).map_err(error_text)
 }
 
 fn is_system_root(path: &Path) -> bool {
