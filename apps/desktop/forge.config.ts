@@ -65,6 +65,10 @@ const config = {
         // Squirrel owns and may replace this directory. Runtime data uses "pico".
         name: "pico_desktop",
         setupExe: "PicoSetup.exe",
+        // Packager's icon only brands Pico.exe; Squirrel has separate defaults.
+        setupIcon: desktopAssetPath("icon.ico"),
+        iconUrl:
+          "https://raw.githubusercontent.com/99Gaoxiaoqi/pico-harness/main/apps/desktop/assets/icon.ico",
         ...(updateBaseUrl ? { remoteReleases: `${updateBaseUrl}/win32` } : {}),
       },
       ["win32"],
