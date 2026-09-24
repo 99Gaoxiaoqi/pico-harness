@@ -47,7 +47,9 @@ async function verifyFileWorker(root: string): Promise<void> {
   const entry = join(root, "file-worker.mjs");
   await access(entry, constants.F_OK);
   const expected = (await readFile(`${entry}.sha256`, "utf8")).trim().split(/\s/u)[0];
-  const actual = createHash("sha256").update(await readFile(entry)).digest("hex");
+  const actual = createHash("sha256")
+    .update(await readFile(entry))
+    .digest("hex");
   if (!expected || expected !== actual) {
     throw new Error(`Desktop File Worker resource SHA-256 mismatch: ${entry}`);
   }

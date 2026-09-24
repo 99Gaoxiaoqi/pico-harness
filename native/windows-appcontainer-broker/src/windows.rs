@@ -811,14 +811,15 @@ fn grant_exact_file(
     }
     // Pin every ancestor against rename/reparse while the child runs. Only the immediate
     // parent needs a new ACE: Windows' traverse privilege covers the higher components.
-    // This mask excludes FILE_LIST_DIRECTORY, FILE_ADD_FILE and DELETE_CHILD.
+    // Only traverse, read attributes/control, and synchronize. In particular,
+    // no list-directory, add-file, or delete-child right reaches siblings.
     for directory in ancestors.into_iter().rev() {
         let pinned = pin_path(directory, true)?;
         assert_not_reparse_point(directory)?;
         assert_pinned_identity(directory, &pinned, true)?;
         guards.push(pinned);
         if directory == parent {
-            journal.grant_exact(directory, sid, "0x1200a0")?;
+            journal.grant_exact(directory, sid, "X,RA,RC,S")?;
         }
     }
     match fs::symlink_metadata(path) {

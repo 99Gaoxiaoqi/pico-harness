@@ -103,7 +103,7 @@ test(
     const script = [
       'const fs=require("node:fs");',
       `const paths=${JSON.stringify({ readable, writable, sibling, newFile, external })};`,
-      'const result={};',
+      "const result={};",
       'const attempt=(name,fn)=>{try{result[name]=fn()}catch{result[name]="DENIED"}};',
       'attempt("read",()=>fs.readFileSync(paths.readable,"utf8"));',
       'attempt("write",()=>{fs.writeFileSync(paths.writable,"changed");return "OK"});',
@@ -111,7 +111,7 @@ test(
       'attempt("siblingWrite",()=>{fs.writeFileSync(paths.sibling,"unsafe");return "OK"});',
       'attempt("create",()=>{fs.writeFileSync(paths.newFile,"unsafe");return "OK"});',
       'attempt("list",()=>fs.readdirSync(paths.external).join(","));',
-      'process.stdout.write(JSON.stringify(result));',
+      "process.stdout.write(JSON.stringify(result));",
     ].join("");
     const result = await runNode(
       fixture,

@@ -5,6 +5,7 @@ import { dirname, extname, isAbsolute, relative, resolve, sep } from "node:path"
 import { fileURLToPath } from "node:url";
 import { parseToolResultArchiveRef } from "@pico/runtime/tool-result-archive";
 import { ToolAccesses } from "@pico/runtime/tool-access";
+import { scheduleDeadline } from "@pico/runtime/deadline";
 import type { BaseTool, ToolExecutionContext } from "./tool-registry-contract.js";
 import { NO_FILE_SIDE_EFFECTS } from "./tool-registry-contract.js";
 import type { WorkspaceRoots } from "./workspace-roots.js";
@@ -454,7 +455,7 @@ async function runFileWorker(
         .map((target) => target.path),
     ],
     readFiles: targets
-      .filter((target) => target.identity.kind !== "directory")
+      .filter((target) => target.identity.kind === "file")
       .map((target) => target.path),
     config: { network: "deny" },
     generation: request.boundaryRevision,
@@ -494,11 +495,11 @@ async function runFileWorker(
         );
     };
     const cleanup = () => {
-      clearTimeout(timer);
+      deadline.cancel();
       signal?.removeEventListener("abort", onAbort);
     };
     const onAbort = () => fail("操作已取消");
-    const timer = setTimeout(() => fail("Worker 超时"), timeoutMs);
+    const deadline = scheduleDeadline(() => fail("Worker 超时"), timeoutMs);
     signal?.addEventListener("abort", onAbort, { once: true });
     child.stdout?.on("data", (chunk: Buffer) => {
       stdout += chunk.toString("utf8");
