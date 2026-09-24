@@ -9,6 +9,7 @@ import { WorkspaceRuntimeService } from "@pico/pico-host/workspace-runtime-servi
 import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
 import { globalSessionManager } from "@pico/pico-host/session";
 import { globalSessionPermissionGrants } from "@pico/pico-host/session-permissions";
+import { globalClientCapabilityGrants } from "@pico/pico-host/client-capability-grants";
 import { writeDesktopModelRouting } from "../../fixtures/desktop-model-routing.js";
 
 test("desktop mode downgrade revokes earlier session approvals", async () => {
@@ -30,6 +31,7 @@ test("desktop mode downgrade revokes earlier session approvals", async () => {
     )) as { session: { sessionId: string } };
     sessionId = created.session.sessionId;
     const call = { id: "call-1", name: "bash", arguments: '{"command":"pwd"}' };
+    const browserScope = { kind: "browser_origin", origin: "https://example.com" } as const;
     const grant = () => {
       globalSessionPermissionGrants.addNetwork(sessionId!, canonical, picoHome);
       globalSessionPermissionGrants.add(
@@ -39,6 +41,7 @@ test("desktop mode downgrade revokes earlier session approvals", async () => {
         picoHome,
       );
       globalSessionPermissionGrants.authorizeNetworkOnce(sessionId!, canonical, "once", picoHome);
+      globalClientCapabilityGrants.grant(sessionId!, browserScope);
     };
     const assertRevoked = () => {
       assert.equal(
@@ -58,6 +61,7 @@ test("desktop mode downgrade revokes earlier session approvals", async () => {
         ),
         false,
       );
+      assert.equal(globalClientCapabilityGrants.allows(sessionId!, browserScope), false);
     };
     const update = async (permissionMode: "ask" | "auto" | "full-access") =>
       desktop.handle(
@@ -92,6 +96,7 @@ test("desktop mode downgrade revokes earlier session approvals", async () => {
     assertRevoked();
   } finally {
     if (sessionId) globalSessionPermissionGrants.clear(sessionId, canonical, picoHome);
+    if (sessionId) globalClientCapabilityGrants.revokeSession(sessionId);
     await desktop.close();
     await globalSessionManager.clearAndDrain();
     await rm(root, { recursive: true, force: true });
