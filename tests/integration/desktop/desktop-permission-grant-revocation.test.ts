@@ -32,6 +32,19 @@ test("desktop mode downgrade revokes earlier session approvals", async () => {
       createRuntimeRequest("session.create", { workspacePath: canonical }),
     )) as { session: { sessionId: string } };
     sessionId = created.session.sessionId;
+    const boundaryRevision = () => {
+      const boundary = globalSessionManager
+        .get(sessionId!, canonical, { picoHome })
+        ?.getRuntimeStateSnapshot().boundary;
+      assert.ok(boundary);
+      return boundary.revision;
+    };
+    let lastRevision = -1;
+    const assertAdvanced = () => {
+      const current = boundaryRevision();
+      assert.ok(current > lastRevision, `boundary revision must advance: ${lastRevision} → ${current}`);
+      lastRevision = current;
+    };
     const call = { id: "call-1", name: "bash", arguments: '{"command":"pwd"}' };
     const browserScope = { kind: "browser_origin", origin: "https://example.com" } as const;
     let epoch = 0;
@@ -78,15 +91,19 @@ test("desktop mode downgrade revokes earlier session approvals", async () => {
 
     await grant();
     await update("full-access");
+    assertAdvanced();
     assertRevoked();
 
     await grant();
     await update("ask");
+    assertAdvanced();
     assertRevoked();
 
     await update("auto");
+    assertAdvanced();
     await grant();
     await update("ask");
+    assertAdvanced();
     assertRevoked();
 
     await grant();
@@ -97,6 +114,7 @@ test("desktop mode downgrade revokes earlier session approvals", async () => {
         collaborationMode: "plan",
       }),
     );
+    assertAdvanced();
     assertRevoked();
   } finally {
     if (sessionId) globalSessionPermissionGrants.clear(sessionId, canonical, picoHome);
