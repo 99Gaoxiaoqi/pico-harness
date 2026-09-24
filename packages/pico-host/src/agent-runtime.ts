@@ -191,6 +191,7 @@ import {
 import {
   browserHttpOrigin,
   browserNavigationOrigin,
+  clientCapabilityAuthorityEpoch,
   globalDurableClientCapabilityGrants,
 } from "@pico/pico-host/client-capability-grants";
 import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
@@ -2085,9 +2086,13 @@ export async function executeAgentRuntime(
         sessionId: browserAgent.sessionId,
         execute: async (action, input = {}) => {
           const mode = permissionMode();
-          const authorityEpoch = createHash("sha256")
-            .update(JSON.stringify(runtimeExecutionBoundary() ?? null))
-            .digest("hex");
+          const currentAuthorityEpoch = (): string =>
+            clientCapabilityAuthorityEpoch({
+              boundary: runtimeExecutionBoundary() ?? null,
+              permissionMode: permissionMode(),
+              collaborationMode: collaborationMode(),
+            });
+          const authorityEpoch = currentAuthorityEpoch();
           if (mode !== "full-access") {
             await globalDurableClientCapabilityGrants.bindSession(
               session.id,
@@ -2125,9 +2130,7 @@ export async function executeAgentRuntime(
                 reason: `允许当前任务在 ${origin} 执行浏览器 ${action} 操作`,
               });
               if (!result.allowed) throw new Error(`未批准浏览器来源 ${origin}`);
-              const approvedEpoch = createHash("sha256")
-                .update(JSON.stringify(runtimeExecutionBoundary() ?? null))
-                .digest("hex");
+              const approvedEpoch = currentAuthorityEpoch();
               if (permissionMode() !== mode || approvedEpoch !== authorityEpoch) {
                 throw new Error("浏览器授权期间任务权限已变化，请重试操作");
               }
@@ -2139,9 +2142,7 @@ export async function executeAgentRuntime(
                 );
               }
             }
-            const latestEpoch = createHash("sha256")
-              .update(JSON.stringify(runtimeExecutionBoundary() ?? null))
-              .digest("hex");
+            const latestEpoch = currentAuthorityEpoch();
             if (permissionMode() !== mode || latestEpoch !== authorityEpoch) {
               throw new Error("浏览器授权期间任务权限已变化，请重试操作");
             }

@@ -410,39 +410,31 @@ export function registerDesktopIpcHandlers(options: {
         if (!isBoundedString(url, 8_192, false)) return invalidBrowserRequest();
         if (origin) browser.guardAgentOrigin(sessionId, origin, url);
         else browser.clearAgentOrigin(sessionId);
-        try {
-          return success({ state: await browser.navigate(sessionId, url) });
-        } finally {
-          if (origin) browser.releaseAgentOrigin(sessionId);
-        }
+        return success({ state: await browser.navigate(sessionId, url) });
       }
       if (origin) browser.guardAgentOrigin(sessionId, origin);
       else browser.clearAgentOrigin(sessionId);
-      try {
-        if (action === "back") return success({ state: browser.back(sessionId) });
-        if (action === "forward") return success({ state: browser.forward(sessionId) });
-        if (action === "reload") return success({ state: browser.reload(sessionId) });
-        if (action === "click") {
-          const selector = input["selector"];
-          if (!isBoundedString(selector, 2_048, false)) return invalidBrowserRequest();
-          return success(await browser.click(sessionId, selector));
-        }
-        if (action === "type") {
-          const selector = input["selector"];
-          const text = input["text"];
-          const clear = input["clear"];
-          if (
-            !isBoundedString(selector, 2_048, false) ||
-            !isBoundedString(text, 32_000, true) ||
-            typeof clear !== "boolean"
-          )
-            return invalidBrowserRequest();
-          return success(await browser.type(sessionId, selector, text, clear));
-        }
-        return invalidBrowserRequest();
-      } finally {
-        if (origin) browser.releaseAgentOrigin(sessionId);
+      if (action === "back") return success({ state: browser.back(sessionId) });
+      if (action === "forward") return success({ state: browser.forward(sessionId) });
+      if (action === "reload") return success({ state: browser.reload(sessionId) });
+      if (action === "click") {
+        const selector = input["selector"];
+        if (!isBoundedString(selector, 2_048, false)) return invalidBrowserRequest();
+        return success(await browser.click(sessionId, selector));
       }
+      if (action === "type") {
+        const selector = input["selector"];
+        const text = input["text"];
+        const clear = input["clear"];
+        if (
+          !isBoundedString(selector, 2_048, false) ||
+          !isBoundedString(text, 32_000, true) ||
+          typeof clear !== "boolean"
+        )
+          return invalidBrowserRequest();
+        return success(await browser.type(sessionId, selector, text, clear));
+      }
+      return invalidBrowserRequest();
     } catch (error) {
       return failure(error);
     }

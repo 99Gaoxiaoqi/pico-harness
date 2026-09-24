@@ -6,9 +6,43 @@ import test from "node:test";
 import {
   BrowserSessionCloseFence,
   commitBrowserRevocations,
+  guardBrowserAgentOrigin,
   persistBrowserNavigationForCurrentEntry,
   PersistentBrowserViewportGenerationAuthority,
 } from "../../../apps/desktop/src/main/browser-logic.js";
+
+test("approved browser origin remains fenced for delayed page redirects", async () => {
+  const approved = "https://example.com";
+  let prevented = false;
+  await new Promise<void>((resolve) => {
+    setTimeout(() => {
+      const allowed = guardBrowserAgentOrigin(
+        {
+          preventDefault: () => {
+            prevented = true;
+          },
+        },
+        "https://other.example/redirect",
+        approved,
+      );
+      assert.equal(allowed, false);
+      resolve();
+    }, 1_500);
+  });
+  assert.equal(prevented, true);
+  assert.equal(
+    guardBrowserAgentOrigin(
+      {
+        preventDefault: () => {
+          throw new Error("same origin blocked");
+        },
+      },
+      "https://example.com/ok",
+      approved,
+    ),
+    true,
+  );
+});
 import { BrowserUrlStore } from "../../../apps/desktop/src/main/browser-url-store.js";
 import {
   BrowserAgentBrokerError,

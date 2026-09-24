@@ -96,6 +96,27 @@ export function guardBrowserNavigation(event: { preventDefault(): void }, url: s
   return false;
 }
 
+/** Persistent fence for model-triggered page navigation, including delayed redirects. */
+export function guardBrowserAgentOrigin(
+  event: { preventDefault(): void },
+  url: string,
+  approvedOrigin: string | undefined,
+): boolean {
+  if (!approvedOrigin) return true;
+  try {
+    const parsed = new URL(url);
+    if (
+      (parsed.protocol === "http:" || parsed.protocol === "https:") &&
+      parsed.origin === approvedOrigin
+    )
+      return true;
+  } catch {
+    // Invalid navigation is denied by the ordinary browser navigation guard.
+  }
+  event.preventDefault();
+  return false;
+}
+
 export class BrowserViewportGenerationAuthority {
   readonly #generations = new Map<
     string,
