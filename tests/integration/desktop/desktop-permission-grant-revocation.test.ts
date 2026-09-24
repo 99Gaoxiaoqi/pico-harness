@@ -10,6 +10,7 @@ import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
 import { globalSessionManager } from "@pico/pico-host/session";
 import { globalSessionPermissionGrants } from "@pico/pico-host/session-permissions";
 import { globalClientCapabilityGrants } from "@pico/pico-host/client-capability-grants";
+import { resolvePicoPaths } from "@pico/pico-host";
 import { writeDesktopModelRouting } from "../../fixtures/desktop-model-routing.js";
 
 test("desktop mode downgrade revokes earlier session approvals", async () => {
@@ -19,6 +20,7 @@ test("desktop mode downgrade revokes earlier session approvals", async () => {
   await Promise.all([mkdir(workspace, { recursive: true }), mkdir(picoHome, { recursive: true })]);
   await writeDesktopModelRouting(picoHome);
   const canonical = await realpath(workspace);
+  const workspaceRoot = resolvePicoPaths(canonical, { picoHome }).workspace.root;
   const env = { PICO_HOME: picoHome };
   const trustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });
   await trustStore.trust(canonical);
@@ -32,7 +34,9 @@ test("desktop mode downgrade revokes earlier session approvals", async () => {
     sessionId = created.session.sessionId;
     const call = { id: "call-1", name: "bash", arguments: '{"command":"pwd"}' };
     const browserScope = { kind: "browser_origin", origin: "https://example.com" } as const;
-    const grant = () => {
+    let epoch = 0;
+    const grant = async () => {
+      await globalClientCapabilityGrants.bindSession(sessionId!, workspaceRoot, `epoch-${++epoch}`);
       globalSessionPermissionGrants.addNetwork(sessionId!, canonical, picoHome);
       globalSessionPermissionGrants.add(
         sessionId!,
@@ -41,7 +45,7 @@ test("desktop mode downgrade revokes earlier session approvals", async () => {
         picoHome,
       );
       globalSessionPermissionGrants.authorizeNetworkOnce(sessionId!, canonical, "once", picoHome);
-      globalClientCapabilityGrants.grant(sessionId!, browserScope);
+      await globalClientCapabilityGrants.grant(sessionId!, browserScope);
     };
     const assertRevoked = () => {
       assert.equal(
@@ -72,20 +76,20 @@ test("desktop mode downgrade revokes earlier session approvals", async () => {
         }),
       );
 
-    grant();
+    await grant();
     await update("full-access");
     assertRevoked();
 
-    grant();
+    await grant();
     await update("ask");
     assertRevoked();
 
     await update("auto");
-    grant();
+    await grant();
     await update("ask");
     assertRevoked();
 
-    grant();
+    await grant();
     await desktop.handle(
       createRuntimeRequest("session.settings.update", {
         workspacePath: canonical,
@@ -96,7 +100,7 @@ test("desktop mode downgrade revokes earlier session approvals", async () => {
     assertRevoked();
   } finally {
     if (sessionId) globalSessionPermissionGrants.clear(sessionId, canonical, picoHome);
-    if (sessionId) globalClientCapabilityGrants.revokeSession(sessionId);
+    if (sessionId) await globalClientCapabilityGrants.revokeSession(sessionId, workspaceRoot);
     await desktop.close();
     await globalSessionManager.clearAndDrain();
     await rm(root, { recursive: true, force: true });

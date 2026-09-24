@@ -1146,7 +1146,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     if (archived) {
       this.browserAgentBroker.invalidateSession(sessionId, "浏览器 Session 已归档");
       globalSessionPermissionGrants.clear(sessionId, canonical, this.picoHome);
-      globalClientCapabilityGrants.revokeSession(sessionId);
+      await globalClientCapabilityGrants.revokeSession(
+        sessionId,
+        resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.root,
+      );
     }
     const session = await this.requireSession(canonical, sessionId);
     this.publishSession(session);
@@ -1191,7 +1194,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     }
     this.browserAgentBroker.invalidateSession(sessionId);
     globalSessionPermissionGrants.clear(sessionId, canonical, this.picoHome);
-    globalClientCapabilityGrants.revokeSession(sessionId);
+    await globalClientCapabilityGrants.revokeSession(
+      sessionId,
+      resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.root,
+    );
     await this.terminalService.stopSession({ workspacePath: canonical, sessionId });
     await sessionMemoryLane.run(
       this.memoryLaneKey(canonical, sessionId),
@@ -1483,7 +1489,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       await session.flushPersistence();
       if (revokeSessionGrants) {
         globalSessionPermissionGrants.clear(params.sessionId, canonical, this.picoHome);
-        globalClientCapabilityGrants.revokeSession(params.sessionId);
+        await globalClientCapabilityGrants.revokeSession(
+          params.sessionId,
+          resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.root,
+        );
       }
       return runtimeSessionSettings(current, router);
     });
@@ -3724,7 +3733,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private async removeEphemeralSideChat(workspacePath: string, sessionId: string): Promise<void> {
     await this.terminalService.stopSession({ workspacePath, sessionId });
     globalSessionPermissionGrants.clear(sessionId, workspacePath, this.picoHome);
-    globalClientCapabilityGrants.revokeSession(sessionId);
+    await globalClientCapabilityGrants.revokeSession(
+      sessionId,
+      resolvePicoPaths(workspacePath, { picoHome: this.picoHome }).workspace.root,
+    );
     const managed = globalSessionManager.delete(sessionId, workspacePath, {
       picoHome: this.picoHome,
     });
