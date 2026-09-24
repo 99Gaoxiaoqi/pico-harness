@@ -1,6 +1,7 @@
 import { app } from "electron";
 import { spawn } from "node:child_process";
-import { basename, dirname, resolve } from "node:path";
+import { basename } from "node:path";
+import { resolveSquirrelUpdaterPath } from "./squirrel-paths.js";
 
 export function handleSquirrelStartup(): boolean {
   if (process.platform !== "win32") return false;
@@ -16,7 +17,7 @@ export function handleSquirrelStartup(): boolean {
   )
     return false;
 
-  const updater = resolve(dirname(process.execPath), "..", "Update.exe");
+  const updater = resolveSquirrelUpdaterPath(process.execPath);
   const command = event === "--squirrel-uninstall" ? "--removeShortcut" : "--createShortcut";
   const child = spawn(updater, [command, basename(process.execPath)], { windowsHide: true });
   const timeout = setTimeout(() => {
