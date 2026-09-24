@@ -91,3 +91,36 @@ test("durable client grants reject unknown keys and never cross workspace identi
   assert.equal(grants.allows("task-a", scope, secondWorkspace), false);
   assert.equal(grants.allows("task-a", scope, firstWorkspace), true);
 });
+
+test("failed publish never grants in memory and concurrent revocation cannot resurrect a grant", async (context) => {
+  const workspace = await mkdtemp(join(tmpdir(), "pico-client-grants-race-"));
+  context.after(async () => rm(workspace, { recursive: true, force: true }));
+  const scope = { kind: "browser_origin", origin: "https://example.com" } as const;
+  const failed = new DurableClientCapabilityGrants(async () => {
+    throw new Error("disk unavailable");
+  });
+  await failed.bindSession("task-a", workspace, "epoch-1");
+  await assert.rejects(failed.grant("task-a", scope, workspace), /disk unavailable/);
+  assert.equal(failed.allows("task-a", scope, workspace), false);
+
+  const publishing = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const racing = new DurableClientCapabilityGrants(async (path, contents) => {
+    publishing.resolve();
+    await release.promise;
+    await mkdir(join(workspace, "client-capabilities"), { recursive: true });
+    await writeFile(path, contents);
+  });
+  await racing.bindSession("task-a", workspace, "epoch-1");
+  const granting = racing.grant("task-a", scope, workspace);
+  const denied = assert.rejects(granting, /已撤销/);
+  await publishing.promise;
+  const revoking = racing.revokeSession("task-a", workspace);
+  assert.equal(racing.allows("task-a", scope, workspace), false);
+  release.resolve();
+  await denied;
+  await revoking;
+  const resumed = new DurableClientCapabilityGrants();
+  await resumed.bindSession("task-a", workspace, "epoch-1");
+  assert.equal(resumed.allows("task-a", scope, workspace), false);
+});

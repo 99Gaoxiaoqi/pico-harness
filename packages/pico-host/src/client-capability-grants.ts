@@ -75,13 +75,19 @@ interface DurableSession {
   readonly filePath: string;
   readonly workspaceRoot: string;
   readonly authorityEpoch: string;
-  readonly keys: Set<string>;
+  keys: Set<string>;
+  revoked: boolean;
 }
 
 /** Durable, workspace-scoped grants. A changed authority epoch never reuses old approvals. */
 export class DurableClientCapabilityGrants {
   private readonly sessions = new Map<string, DurableSession>();
   private readonly writes = new Map<string, Promise<void>>();
+  private readonly revisions = new Map<string, number>();
+
+  constructor(
+    private readonly publish: (path: string, contents: string) => Promise<void> = publishGrantFile,
+  ) {}
 
   async bindSession(
     sessionId: string,
@@ -93,6 +99,7 @@ export class DurableClientCapabilityGrants {
     }
     const filePath = this.filePath(sessionId, workspaceRoot);
     const identity = this.identity(sessionId, workspaceRoot);
+    const revision = this.revisions.get(identity) ?? 0;
     const current = this.sessions.get(identity);
     if (current?.filePath === filePath && current.authorityEpoch === authorityEpoch) return;
     await this.writes.get(identity);
@@ -115,7 +122,10 @@ export class DurableClientCapabilityGrants {
     } catch {
       // Missing or corrupt grant state fails closed.
     }
-    this.sessions.set(identity, { filePath, workspaceRoot, authorityEpoch, keys });
+    if ((this.revisions.get(identity) ?? 0) !== revision) {
+      throw new Error("客户端能力授权在恢复期间已撤销");
+    }
+    this.sessions.set(identity, { filePath, workspaceRoot, authorityEpoch, keys, revoked: false });
   }
 
   allows(sessionId: string, scope: ClientCapabilityScope, workspaceRoot: string): boolean {
@@ -132,8 +142,27 @@ export class DurableClientCapabilityGrants {
     const identity = this.identity(sessionId, workspaceRoot);
     const session = this.sessions.get(identity);
     if (!session) throw new Error("客户端能力授权尚未绑定 Session");
-    session.keys.add(scopeKey(scope));
-    await this.persist(identity, sessionId, session);
+    const key = scopeKey(scope);
+    await this.serialize(identity, async () => {
+      if (session.revoked || this.sessions.get(identity) !== session) {
+        throw new Error("客户端能力授权已撤销");
+      }
+      const staged = new Set(session.keys);
+      staged.add(key);
+      await this.publish(
+        session.filePath,
+        JSON.stringify({
+          version: 1,
+          sessionId,
+          authorityEpoch: session.authorityEpoch,
+          grants: [...staged].sort(),
+        }),
+      );
+      if (session.revoked || this.sessions.get(identity) !== session) {
+        throw new Error("客户端能力授权已撤销");
+      }
+      session.keys = staged;
+    });
   }
 
   async revokeSession(sessionId: string, workspaceRoot?: string): Promise<void> {
@@ -142,11 +171,12 @@ export class DurableClientCapabilityGrants {
       : [...this.sessions.keys()].filter((key) => key.endsWith(`\0${sessionId}`));
     for (const identity of identities) {
       const session = this.sessions.get(identity);
+      if (session) session.revoked = true;
       this.sessions.delete(identity);
-      await this.writes.get(identity);
+      this.revisions.set(identity, (this.revisions.get(identity) ?? 0) + 1);
       const filePath =
         session?.filePath ?? (workspaceRoot ? this.filePath(sessionId, workspaceRoot) : undefined);
-      if (filePath) await rm(filePath, { force: true });
+      if (filePath) await this.serialize(identity, async () => rm(filePath, { force: true }));
     }
   }
 
@@ -159,37 +189,30 @@ export class DurableClientCapabilityGrants {
     return join(workspaceRoot, "client-capabilities", `${digest}.json`);
   }
 
-  private async persist(
-    identity: string,
-    sessionId: string,
-    session: DurableSession,
-  ): Promise<void> {
+  private async serialize(identity: string, operation: () => Promise<void>): Promise<void> {
     const previous = this.writes.get(identity) ?? Promise.resolve();
-    const next = previous.then(async () => {
-      await mkdir(dirname(session.filePath), { recursive: true, mode: 0o700 });
-      const temporary = `${session.filePath}.${randomUUID()}.tmp`;
-      try {
-        await writeFile(
-          temporary,
-          JSON.stringify({
-            version: 1,
-            sessionId,
-            authorityEpoch: session.authorityEpoch,
-            grants: [...session.keys].sort(),
-          }),
-          { mode: 0o600, flag: "wx" },
-        );
-        await rename(temporary, session.filePath);
-      } finally {
-        await rm(temporary, { force: true });
-      }
-    });
-    this.writes.set(identity, next);
+    const next = previous.then(operation);
+    const settled = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.writes.set(identity, settled);
     try {
       await next;
     } finally {
-      if (this.writes.get(identity) === next) this.writes.delete(identity);
+      if (this.writes.get(identity) === settled) this.writes.delete(identity);
     }
+  }
+}
+
+async function publishGrantFile(path: string, contents: string): Promise<void> {
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporary, contents, { mode: 0o600, flag: "wx" });
+    await rename(temporary, path);
+  } finally {
+    await rm(temporary, { force: true });
   }
 }
 
