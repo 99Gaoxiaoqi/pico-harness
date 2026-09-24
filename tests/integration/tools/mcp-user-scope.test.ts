@@ -34,10 +34,11 @@ test("user MCP store enforces private permissions, CAS and durable idempotency",
   const initial = await store.read();
   assert.equal(initial.revision, EMPTY_USER_MCP_REVISION);
   const configured = await store.upsert(
-    { name: "docs", transport: "stdio", command: "node", args: ["server.js"] },
+    { name: "docs", transport: "stdio", command: "node", args: ["server.js"], desktopExecution: true },
     { expectedRevision: initial.revision, idempotencyKey: "add-docs" },
   );
   assert.equal(configured.snapshot.config.mcpServers.docs?.command, "node");
+  assert.equal(configured.snapshot.config.mcpServers.docs?.desktopExecution, true);
   // POSIX 权限位在 NTFS 上不可观测（stat 恒报 0o666），win32 跳过位断言
   //（先例：task-run-file-store.test.ts；产品代码仍按 0o700/0o600 设置）。
   if (process.platform !== "win32") {
@@ -46,11 +47,12 @@ test("user MCP store enforces private permissions, CAS and durable idempotency",
   }
 
   const replayedAfterRestart = await new UserMcpConfigStore({ picoHome }).upsert(
-    { name: "docs", transport: "stdio", command: "node", args: ["server.js"] },
+    { name: "docs", transport: "stdio", command: "node", args: ["server.js"], desktopExecution: true },
     { expectedRevision: initial.revision, idempotencyKey: "add-docs" },
   );
   assert.equal(replayedAfterRestart.resultRevision, configured.resultRevision);
   assert.equal(replayedAfterRestart.replayed, true);
+  assert.equal((await new UserMcpConfigStore({ picoHome }).read()).config.mcpServers.docs?.desktopExecution, true);
   await assert.rejects(
     store.upsert(
       { name: "other", transport: "stdio", command: "node" },
@@ -69,7 +71,7 @@ test("user MCP store enforces private permissions, CAS and durable idempotency",
   });
   assert.deepEqual(deleted.snapshot.config.mcpServers, {});
   const replayedAfterDelete = await new UserMcpConfigStore({ picoHome }).upsert(
-    { name: "docs", transport: "stdio", command: "node", args: ["server.js"] },
+    { name: "docs", transport: "stdio", command: "node", args: ["server.js"], desktopExecution: true },
     { expectedRevision: initial.revision, idempotencyKey: "add-docs" },
   );
   assert.equal(replayedAfterDelete.replayed, true);

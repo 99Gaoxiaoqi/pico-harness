@@ -353,6 +353,9 @@ function projectPublicMcpServer(definition: PublicMcpDefinition): RuntimeScopedM
       ? {}
       : { toolTimeoutMs: definition.config.toolTimeoutMs }),
     ...(definition.config.enabled === undefined ? {} : { enabled: definition.config.enabled }),
+    ...(definition.scope === "user" && definition.config.desktopExecution !== undefined
+      ? { desktopExecution: definition.config.desktopExecution }
+      : {}),
     source: {
       scope: definition.scope,
       sourceId: definition.sourceId,

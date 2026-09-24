@@ -219,7 +219,7 @@ export function scopedMcpServer(server: RuntimeScopedMcpServer, index: number): 
   return {
     id: `${server.source.sourceId}:${server.name}:${index}`,
     name: server.name,
-    description: endpoint ? `${server.transport.toUpperCase()} · ${endpoint}` : server.transport,
+    description: `${endpoint ? `${server.transport.toUpperCase()} · ${endpoint}` : server.transport}${server.desktopExecution ? " · Desktop 执行" : ""}`,
     state: server.enabled === false ? "disabled" : server.source.effective ? "ready" : "attention",
     meta: server.transport,
     source: capabilitySource(server.source),

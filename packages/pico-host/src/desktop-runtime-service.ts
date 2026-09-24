@@ -212,6 +212,7 @@ import {
   BrowserAgentCommandBroker,
 } from "./browser-agent-command-broker.js";
 import { ClientCapabilityCommandBroker } from "./client-capability-command-broker.js";
+import { loadDesktopClientToken } from "./desktop-client-token.js";
 import { DesktopRewindService } from "./desktop-rewind-service.js";
 
 const UNSUPPORTED_DESKTOP_METHODS: ReadonlySet<string> = new Set([
@@ -359,7 +360,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     this.terminalService = new DesktopWorkbarTerminalService({ picoHome: this.picoHome });
     this.browserAgentBroker = options.browserAgentBroker ?? new BrowserAgentCommandBroker();
     this.clientCapabilityBroker =
-      options.clientCapabilityBroker ?? new ClientCapabilityCommandBroker();
+      options.clientCapabilityBroker ??
+      new ClientCapabilityCommandBroker({
+        loadClientToken: () => loadDesktopClientToken(this.picoHome),
+      });
     this.registrationStore =
       options.registrationStore ??
       new WorkspaceRegistrationStore(join(this.picoHome, "daemon-workspaces.json"));
@@ -566,6 +570,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         this.clientCapabilityBroker.nextCommand(request.params),
       "client.capability.resolve": (request) =>
         this.clientCapabilityBroker.resolveCommand(request.params),
+      "client.capability.authorize": (request) =>
+        this.clientCapabilityBroker.authorizeCommand(request.params),
       "terminal.create": (request) =>
         this.withHostWorkbarErrors(() => this.terminalService.create(request.params)),
       "terminal.list": (request) =>

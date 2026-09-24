@@ -61,6 +61,7 @@ export const RUNTIME_METHODS = [
   "browser.agent.resolve",
   "client.capability.next",
   "client.capability.resolve",
+  "client.capability.authorize",
   "terminal.create",
   "terminal.list",
   "terminal.attach",

@@ -165,6 +165,7 @@ function McpAddForm({
   const [command, setCommand] = useState("");
   const [args, setArgs] = useState("");
   const [url, setUrl] = useState("");
+  const [desktopExecution, setDesktopExecution] = useState(false);
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const serverName = name.trim();
@@ -185,12 +186,13 @@ function McpAddForm({
             }
           : {}),
         enabled: true,
+        desktopExecution,
       });
       return;
     }
     const endpoint = url.trim();
     if (!endpoint) return;
-    void onSubmit({ name: serverName, transport, url: endpoint, enabled: true });
+    void onSubmit({ name: serverName, transport, url: endpoint, enabled: true, desktopExecution });
   };
   return (
     <form className="capability-add-form" onSubmit={submit}>
@@ -243,6 +245,14 @@ function McpAddForm({
           />
         </label>
       )}
+      <label className="capability-add-form__wide">
+        <input
+          type="checkbox"
+          checked={desktopExecution}
+          onChange={(event) => setDesktopExecution(event.target.checked)}
+        />
+        <span>允许通过 Desktop 客户端执行（每次连接和工具调用仍需任务授权）</span>
+      </label>
       <div className="button-row capability-add-form__wide">
         <Button disabled={busy} onClick={onCancel}>
           取消
