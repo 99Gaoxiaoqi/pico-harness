@@ -45,7 +45,7 @@ test("desktop mode downgrade revokes earlier session approvals", async () => {
         picoHome,
       );
       globalSessionPermissionGrants.authorizeNetworkOnce(sessionId!, canonical, "once", picoHome);
-      await globalClientCapabilityGrants.grant(sessionId!, browserScope);
+      await globalClientCapabilityGrants.grant(sessionId!, browserScope, workspaceRoot);
     };
     const assertRevoked = () => {
       assert.equal(
@@ -65,7 +65,7 @@ test("desktop mode downgrade revokes earlier session approvals", async () => {
         ),
         false,
       );
-      assert.equal(globalClientCapabilityGrants.allows(sessionId!, browserScope), false);
+      assert.equal(globalClientCapabilityGrants.allows(sessionId!, browserScope, workspaceRoot), false);
     };
     const update = async (permissionMode: "ask" | "auto" | "full-access") =>
       desktop.handle(
