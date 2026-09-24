@@ -191,7 +191,7 @@ import {
 import {
   browserHttpOrigin,
   browserNavigationOrigin,
-  globalClientCapabilityGrants,
+  globalDurableClientCapabilityGrants,
 } from "@pico/pico-host/client-capability-grants";
 import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
 import { currentRuntimeRun, RuntimeRun } from "@pico/pico-host/product-runtime-run";
@@ -2081,20 +2081,34 @@ export async function executeAgentRuntime(
       const guardedBrowserAgent: BoundBrowserAgentAuthority = {
         sessionId: browserAgent.sessionId,
         execute: async (action, input = {}) => {
-          if (action === "get_state") return browserAgent.execute(action, input);
+          const mode = permissionMode();
+          const authorityEpoch = createHash("sha256")
+            .update(JSON.stringify(runtimeExecutionBoundary() ?? null))
+            .digest("hex");
+          if (mode !== "full-access") {
+            await globalDurableClientCapabilityGrants.bindSession(
+              session.id,
+              resolvePicoPaths(workDir, { picoHome: session.picoHome }).workspace.root,
+              authorityEpoch,
+            );
+          }
           let origin: string | undefined;
+          let observedState: Awaited<ReturnType<typeof browserAgent.execute>> | undefined;
           if (action === "navigate") {
             const address = input["url"];
             origin = typeof address === "string" ? browserNavigationOrigin(address) : undefined;
           } else {
-            const state = await browserAgent.execute("get_state");
-            const url = state["url"];
+            observedState = await browserAgent.execute("get_state");
+            const url = observedState["url"];
             origin = typeof url === "string" ? browserHttpOrigin(url) : undefined;
           }
+          if (!origin && action === "get_state" && observedState?.["hasPage"] === false) {
+            return observedState;
+          }
           if (!origin) throw new Error("浏览器页面缺少有效的 HTTP/HTTPS origin");
-          if (permissionMode() !== "full-access") {
+          if (mode !== "full-access") {
             const scope = { kind: "browser_origin", origin } as const;
-            if (!globalClientCapabilityGrants.allows(session.id, scope)) {
+            if (!globalDurableClientCapabilityGrants.allows(session.id, scope)) {
               const { result } = await waitForRuntimeApproval({
                 toolName: `browser_${action}`,
                 providerCallId: `browser-origin:${randomUUID()}`,
@@ -2102,8 +2116,29 @@ export async function executeAgentRuntime(
                 reason: `允许当前任务在 ${origin} 执行浏览器 ${action} 操作`,
               });
               if (!result.allowed) throw new Error(`未批准浏览器来源 ${origin}`);
-              if (result.allowForSession) globalClientCapabilityGrants.grant(session.id, scope);
+              const approvedEpoch = createHash("sha256")
+                .update(JSON.stringify(runtimeExecutionBoundary() ?? null))
+                .digest("hex");
+              if (permissionMode() !== mode || approvedEpoch !== authorityEpoch) {
+                throw new Error("浏览器授权期间任务权限已变化，请重试操作");
+              }
+              if (result.allowForSession) {
+                await globalDurableClientCapabilityGrants.grant(session.id, scope);
+              }
             }
+            const latestEpoch = createHash("sha256")
+              .update(JSON.stringify(runtimeExecutionBoundary() ?? null))
+              .digest("hex");
+            if (permissionMode() !== mode || latestEpoch !== authorityEpoch) {
+              throw new Error("浏览器授权期间任务权限已变化，请重试操作");
+            }
+          }
+          if (action === "get_state") {
+            const latest = await browserAgent.execute("get_state");
+            if (browserHttpOrigin(String(latest["url"] ?? "")) !== origin) {
+              throw new Error("浏览器页面已切换来源，请重新请求授权");
+            }
+            return latest;
           }
           return browserAgent.execute(action, input, { expectedOrigin: origin });
         },
