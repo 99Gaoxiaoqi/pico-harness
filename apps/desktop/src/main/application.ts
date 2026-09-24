@@ -1,4 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain } from "electron";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { parseRuntimeResult } from "@pico/protocol";
 import { DESKTOP_IPC_CHANNELS } from "../preload/contract.js";
@@ -13,6 +14,7 @@ import { configureAutoUpdates } from "./updater.js";
 import { installApplicationMenu } from "./menu.js";
 import { sleepForRetry } from "@pico/runtime/provider-retry";
 import { createEmbeddedBrowserAuthority } from "./browser-manager.js";
+import { ComputerUseExecutor } from "./computer-use-executor.js";
 import { ensureDesktopRuntimeStorageRoot } from "./runtime-storage-recovery.js";
 import {
   cleanupDesktopWorkbarResources,
@@ -82,6 +84,56 @@ const terminalCleanupFence = createDesktopTerminalCleanupFence(
 // re-bootstrap，消除 fail-stuck）。不自动重启 daemon——kernel 承载下幂等 ping
 // 的重试窗口本身就会尝试重生，重启循环只会掩盖配置错误。
 let stopRuntimeProbe: (() => void) | undefined;
+let stopClientCapabilityPoller: (() => void) | undefined;
+const computerUseExecutor = new ComputerUseExecutor();
+
+function startClientCapabilityPoller(): () => void {
+  const clientId = randomUUID();
+  let stopped = false;
+  const run = async (): Promise<void> => {
+    while (!stopped) {
+      try {
+        const { command } = parseRuntimeResult(
+          "client.capability.next",
+          await runtime.request("client.capability.next", { clientId, waitMs: 1_000 }),
+        );
+        if (!command || stopped) continue;
+        let outcome:
+          | {
+              readonly ok: true;
+              readonly result: Awaited<ReturnType<ComputerUseExecutor["execute"]>>;
+            }
+          | { readonly ok: false; readonly error: string };
+        try {
+          if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible()) {
+            throw new Error("Desktop 窗口不可见，已拒绝电脑操作");
+          }
+          outcome = { ok: true, result: await computerUseExecutor.execute(command) };
+        } catch (error) {
+          outcome = { ok: false, error: error instanceof Error ? error.message : String(error) };
+        }
+        if (!stopped) {
+          parseRuntimeResult(
+            "client.capability.resolve",
+            await runtime.request("client.capability.resolve", {
+              clientId,
+              commandId: command.commandId,
+              ...outcome,
+            }),
+          );
+        }
+      } catch (error) {
+        if (stopped) return;
+        console.error("Pico Desktop client capability channel retrying", error);
+        await sleepForRetry(1_000);
+      }
+    }
+  };
+  void run();
+  return () => {
+    stopped = true;
+  };
+}
 function startRuntimeProbe(): () => void {
   const notify = (event: RuntimeSupervisorEvent): void => {
     const window = mainWindow;
@@ -110,6 +162,7 @@ if (!app.requestSingleInstanceLock()) {
   });
   app.on("will-quit", () => {
     stopRuntimeProbe?.();
+    stopClientCapabilityPoller?.();
     disposeIpc?.();
     disposeUpdater?.();
     runtime.close();
@@ -171,6 +224,7 @@ if (!app.requestSingleInstanceLock()) {
       });
       disposeUpdater = configureAutoUpdates(() => lifecycle.markQuitting());
       await openMainWindow();
+      stopClientCapabilityPoller = startClientCapabilityPoller();
       stopRuntimeProbe = startRuntimeProbe();
     })
     .catch(async (error: unknown) => {

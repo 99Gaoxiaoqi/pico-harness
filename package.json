@@ -52,6 +52,7 @@
     "build:sandbox:linux": "node scripts/build-bubblewrap.mjs",
     "build:file-worker": "node scripts/build-file-worker.mjs",
     "build:sandbox:windows": "node scripts/build-windows-broker.mjs",
+    "build:computer-use:mac": "node scripts/build-mac-computer-use.mjs",
     "verify:sandbox:resources": "node scripts/verify-sandbox-resources.mjs",
     "verify:sandbox:package": "node scripts/verify-sandbox-package.mjs",
     "prebuild": "npm run clean && npm run check:storage && npm run build:packages",

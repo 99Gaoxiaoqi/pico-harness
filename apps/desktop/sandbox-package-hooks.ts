@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { access, readFile, readdir } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { ForgeHookMap } from "@electron-forge/shared-types";
 
 /** Validate both the build inputs and the actual copied resources; never publish a partial sandbox. */
@@ -9,10 +9,19 @@ export function sandboxPackageHooks(sourceRoot: string, outputRoot: string) {
   return {
     prePackage: async (_config, platform, arch) => {
       await verifySandbox(sourceRoot, platform, arch);
+      if (platform === "darwin")
+        await verifyComputerUse(join(dirname(sourceRoot), "computer-use"), arch);
     },
     postPackage: async (_config, { platform, arch, outputPaths }) => {
       for (const outputPath of outputPaths) {
-        await verifySandbox(join(outputPath, "resources", "sandbox"), platform, arch);
+        const resourceRoot =
+          platform === "darwin"
+            ? join(outputPath, "Pico.app", "Contents", "Resources")
+            : join(outputPath, "resources");
+        await verifySandbox(join(resourceRoot, "sandbox"), platform, arch);
+        if (platform === "darwin") {
+          await verifyComputerUse(join(resourceRoot, "computer-use"), arch);
+        }
       }
     },
     preMake: async () => {
@@ -29,6 +38,19 @@ export function sandboxPackageHooks(sourceRoot: string, outputRoot: string) {
       }
     },
   } satisfies ForgeHookMap;
+}
+
+async function verifyComputerUse(root: string, arch: string): Promise<void> {
+  if (arch !== "arm64" && arch !== "x64")
+    throw new Error(`Unsupported macOS Computer Use target: ${arch}`);
+  const executable = join(root, `darwin-${arch}`, "pico-computer-use");
+  await access(executable, constants.X_OK);
+  const expected = (await readFile(`${executable}.sha256`, "utf8")).trim().split(/\s/u)[0];
+  const actual = createHash("sha256")
+    .update(await readFile(executable))
+    .digest("hex");
+  if (!expected || expected !== actual)
+    throw new Error("macOS Computer Use resource SHA-256 mismatch");
 }
 
 async function verifySandbox(root: string, platform: string, arch: string): Promise<void> {
