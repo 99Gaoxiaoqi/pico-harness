@@ -225,6 +225,19 @@ export function createDesktopBridge(ipcRenderer: IpcRenderer): DesktopBridge {
       quit: () => ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.quit),
     }),
     browser: Object.freeze({
+      agentExecute: (command: {
+        readonly sessionId: string;
+        readonly action:
+          | "navigate"
+          | "back"
+          | "forward"
+          | "reload"
+          | "get_state"
+          | "click"
+          | "type";
+        readonly input: Record<string, unknown>;
+        readonly expectedOrigin?: string;
+      }) => ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.browserAgentExecute, command),
       acquireViewport: (sessionId: string) =>
         invokeBrowserSession<number>(
           ipcRenderer,

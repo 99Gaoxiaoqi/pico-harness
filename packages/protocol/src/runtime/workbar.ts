@@ -180,6 +180,8 @@ export type RuntimeBrowserAgentCommand = JsonObject & {
   readonly sessionId: SessionId;
   readonly action: RuntimeBrowserAgentAction;
   readonly input: JsonObject;
+  /** The HTTP origin approved for this model command; absent for state inspection/full access. */
+  readonly expectedOrigin?: string;
   readonly createdAt: number;
   readonly expiresAt: number;
 };
@@ -227,14 +229,17 @@ const runtimeTerminalSessionResult = exactResultShape(
   { exitCode: resultFiniteNumber },
 );
 
-const runtimeBrowserAgentCommandResult = exactResultShape({
-  commandId: resultNonEmptyString,
-  sessionId: resultNonEmptyString,
-  action: resultOneOf(["navigate", "back", "forward", "reload", "get_state", "click", "type"]),
-  input: resultJsonObject,
-  createdAt: resultFiniteNumber,
-  expiresAt: resultFiniteNumber,
-});
+const runtimeBrowserAgentCommandResult = exactResultShape(
+  {
+    commandId: resultNonEmptyString,
+    sessionId: resultNonEmptyString,
+    action: resultOneOf(["navigate", "back", "forward", "reload", "get_state", "click", "type"]),
+    input: resultJsonObject,
+    createdAt: resultFiniteNumber,
+    expiresAt: resultFiniteNumber,
+  },
+  { expectedOrigin: resultString },
+);
 
 const runtimeContextCompactionResult = exactResultShape(
   {

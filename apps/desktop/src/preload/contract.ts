@@ -41,6 +41,7 @@ export const DESKTOP_IPC_CHANNELS = {
   browserClearData: "pico:browser:clear-data",
   browserClick: "pico:browser:click",
   browserType: "pico:browser:type",
+  browserAgentExecute: "pico:browser:agent-execute",
   browserState: "pico:browser:state",
 } as const;
 
@@ -129,6 +130,12 @@ export interface DesktopBridge {
     quit(): Promise<DesktopResult<void>>;
   };
   readonly browser: {
+    agentExecute(command: {
+      readonly sessionId: string;
+      readonly action: "navigate" | "back" | "forward" | "reload" | "get_state" | "click" | "type";
+      readonly input: Record<string, unknown>;
+      readonly expectedOrigin?: string;
+    }): Promise<DesktopResult<Record<string, unknown>>>;
     acquireViewport(sessionId: string): Promise<DesktopResult<number>>;
     setActiveSession(sessionId: string | null): Promise<DesktopResult<void>>;
     setViewport(input: {

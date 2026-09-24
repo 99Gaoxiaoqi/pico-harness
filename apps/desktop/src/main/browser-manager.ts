@@ -35,6 +35,9 @@ export interface EmbeddedBrowserAuthority {
   reload(sessionId: string): DesktopBrowserState;
   stop(sessionId: string): DesktopBrowserState;
   getState(sessionId: string): DesktopBrowserState | null;
+  /** Pins model-driven operations to one previously approved HTTP origin. */
+  guardAgentOrigin(sessionId: string, expectedOrigin: string, targetUrl?: string): void;
+  clearAgentOrigin(sessionId: string): void;
   clearPage(sessionId: string): Promise<DesktopBrowserState>;
   click(sessionId: string, selector: string): Promise<DesktopBrowserElementResult>;
   type(
@@ -52,6 +55,7 @@ interface BrowserEntry {
   readonly view: WebContentsView;
   generation: number;
   visible: boolean;
+  agentOrigin?: string;
 }
 
 export function createEmbeddedBrowserAuthority(options: {
@@ -166,14 +170,18 @@ export function createEmbeddedBrowserAuthority(options: {
     view.webContents.on("did-fail-load", refresh);
     view.webContents.setWindowOpenHandler(({ url }) => {
       const navigable = normalizeBrowserAddress(url);
-      if (navigable) void view.webContents.loadURL(navigable).catch(() => undefined);
+      if (navigable && (!entry.agentOrigin || httpOrigin(navigable) === entry.agentOrigin)) {
+        void view.webContents.loadURL(navigable).catch(() => undefined);
+      }
       return { action: "deny" };
     });
     view.webContents.on("will-navigate", (event, url) => {
       guardBrowserNavigation(event, url);
+      if (entry.agentOrigin && httpOrigin(url) !== entry.agentOrigin) event.preventDefault();
     });
     view.webContents.on("will-redirect", (event, url) => {
       guardBrowserNavigation(event, url);
+      if (entry.agentOrigin && httpOrigin(url) !== entry.agentOrigin) event.preventDefault();
     });
     const restoredUrl = urlStore.get(sessionId);
     if (restoredUrl) void view.webContents.loadURL(restoredUrl).catch(() => undefined);
@@ -291,6 +299,28 @@ export function createEmbeddedBrowserAuthority(options: {
     getState(sessionId) {
       const entry = entries.get(sessionId);
       return entry ? stateOf(sessionId, entry) : null;
+    },
+
+    guardAgentOrigin(sessionId, expectedOrigin, targetUrl) {
+      const entry = requireVisible(sessionId);
+      if (httpOrigin(expectedOrigin) !== expectedOrigin) {
+        throw new Error("浏览器模型操作缺少有效的 HTTP origin 授权");
+      }
+      const actualOrigin = httpOrigin(entry.view.webContents.getURL());
+      if (targetUrl) {
+        const normalizedTarget = normalizeBrowserAddress(targetUrl);
+        if (!normalizedTarget || httpOrigin(normalizedTarget) !== expectedOrigin) {
+          throw new Error("浏览器导航目标与已批准的 origin 不符");
+        }
+      } else if (actualOrigin !== expectedOrigin) {
+        throw new Error("浏览器页面已切换到未批准的 origin，请重新请求授权");
+      }
+      entry.agentOrigin = expectedOrigin;
+    },
+
+    clearAgentOrigin(sessionId) {
+      const entry = entries.get(sessionId);
+      if (entry) entry.agentOrigin = undefined;
     },
 
     async clearPage(sessionId) {
@@ -420,6 +450,15 @@ export function createEmbeddedBrowserAuthority(options: {
     },
   };
   return authority;
+}
+
+function httpOrigin(value: string): string | undefined {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:" ? url.origin : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 async function withDocumentNode<T>(
