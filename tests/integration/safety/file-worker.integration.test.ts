@@ -106,17 +106,24 @@ test("standalone packaged File Worker runs with an exact file grant", async (con
   const targetPath = WorkspaceRoots.createSync(workspace).resolveUnchecked("allowed.txt");
   const info = await lstat(allowed, { bigint: true });
   const operationId = randomUUID();
+  const executable = process.env.PICO_FILE_WORKER_TEST_EXECUTABLE ?? process.execPath;
+  const executableRoot =
+    executable === process.execPath
+      ? undefined
+      : process.platform === "darwin"
+        ? dirname(dirname(dirname(executable)))
+        : dirname(executable);
   const policy = createSandboxPolicy({
     profile: "read-only",
     workspaceRoots: [],
     scratchRoot,
-    readRoots: [dirname(bundle)],
+    readRoots: [dirname(bundle), ...(executableRoot ? [executableRoot] : [])],
     readFiles: [targetPath],
     config: { network: "deny" },
   });
   const { child, lease, plan } = managedProcessLauncher.launch(
     {
-      command: process.execPath,
+      command: executable,
       args: [bundle],
       cwd: workspace,
       origin: "file-worker",
