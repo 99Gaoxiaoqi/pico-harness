@@ -56,6 +56,14 @@ async function run(forgeCommand, forgeArgs) {
     }
     await runChild(npm.executable, [...npm.args, "run", "build:file-worker"], repositoryRoot);
 
+    if (process.platform === "darwin") {
+      await runChild(
+        npm.executable,
+        [...npm.args, "run", "build:computer-use:mac"],
+        repositoryRoot,
+      );
+    }
+
     const forgeCli = join(
       repositoryRoot,
       "node_modules",

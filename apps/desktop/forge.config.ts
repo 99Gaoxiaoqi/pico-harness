@@ -39,6 +39,7 @@ const config = {
     extraResource: [
       desktopAssetPath("icon.png"),
       "../../resources/sandbox",
+      "../../resources/computer-use",
       "../../resources/licenses",
     ],
     icon: desktopPackageIcon,

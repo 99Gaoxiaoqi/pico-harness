@@ -212,6 +212,7 @@ export type {
   RuntimeTerminalSession,
   RuntimeBrowserAgentAction,
   RuntimeBrowserAgentCommand,
+  RuntimeClientCapabilityCommand,
   RuntimeChange,
 } from "./runtime/workbar.js";
 

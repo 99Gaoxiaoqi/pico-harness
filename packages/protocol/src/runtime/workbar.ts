@@ -186,6 +186,16 @@ export type RuntimeBrowserAgentCommand = JsonObject & {
   readonly expiresAt: number;
 };
 
+/** Fixed desktop operation sent from the daemon to the trusted Electron main process. */
+export type RuntimeClientCapabilityCommand = JsonObject & {
+  readonly commandId: string;
+  readonly sessionId: SessionId;
+  readonly action: "computer.observe" | "computer.click" | "computer.type" | "desktop_mcp.call";
+  readonly input: JsonObject;
+  readonly createdAt: number;
+  readonly expiresAt: number;
+};
+
 export type RuntimeChange = JsonObject & {
   readonly path: string;
   readonly status: "added" | "modified" | "deleted" | "renamed";
@@ -240,6 +250,15 @@ const runtimeBrowserAgentCommandResult = exactResultShape(
   },
   { expectedOrigin: resultString },
 );
+
+const runtimeClientCapabilityCommandResult = exactResultShape({
+  commandId: resultNonEmptyString,
+  sessionId: resultNonEmptyString,
+  action: resultOneOf(["computer.observe", "computer.click", "computer.type", "desktop_mcp.call"]),
+  input: resultJsonObject,
+  createdAt: resultFiniteNumber,
+  expiresAt: resultFiniteNumber,
+});
 
 const runtimeContextCompactionResult = exactResultShape(
   {
@@ -505,6 +524,20 @@ export type WorkbarMethodMap = {
     readonly params: {
       readonly sessionId: SessionId;
       readonly leaseId: string;
+      readonly commandId: string;
+      readonly ok: boolean;
+      readonly result?: JsonObject;
+      readonly error?: string;
+    };
+    readonly result: { readonly accepted: true };
+  };
+  readonly "client.capability.next": {
+    readonly params: { readonly clientId: string; readonly waitMs?: number };
+    readonly result: { readonly command: RuntimeClientCapabilityCommand | null };
+  };
+  readonly "client.capability.resolve": {
+    readonly params: {
+      readonly clientId: string;
       readonly commandId: string;
       readonly ok: boolean;
       readonly result?: JsonObject;
@@ -844,6 +877,18 @@ export const workbarParamValidators = {
       error: boundedNonEmptyStringParam(4_000),
     },
   ),
+  "client.capability.next": exactParamShape(
+    { clientId: boundedNonEmptyStringParam(512) },
+    { waitMs: nonNegativeIntegerParam },
+  ),
+  "client.capability.resolve": exactParamShape(
+    {
+      clientId: boundedNonEmptyStringParam(512),
+      commandId: boundedNonEmptyStringParam(512),
+      ok: booleanParam,
+    },
+    { result: jsonObjectParam, error: boundedNonEmptyStringParam(4_000) },
+  ),
   "terminal.create": exactParamShape(
     { workspacePath: stringParam, sessionId: stringParam },
     { cols: positiveIntegerParam, rows: positiveIntegerParam },
@@ -1100,6 +1145,10 @@ export const workbarResultValidators = {
     command: resultNullable(runtimeBrowserAgentCommandResult),
   }),
   "browser.agent.resolve": exactResultShape({ accepted: resultOneOf([true]) }),
+  "client.capability.next": exactResultShape({
+    command: resultNullable(runtimeClientCapabilityCommandResult),
+  }),
+  "client.capability.resolve": exactResultShape({ accepted: resultOneOf([true]) }),
   "terminal.create": exactResultShape({
     terminal: runtimeTerminalSessionResult,
     resourceEpoch: resultNonEmptyString,

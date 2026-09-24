@@ -124,6 +124,7 @@ import { WorkspaceRuntimeService } from "./workspace-runtime-service.js";
 import { INTERRUPTED_DAEMON_RUN_ERROR } from "./workspace-run-lifecycle.js";
 import { agentGraphLaunchStateFromWorkspaceRun } from "./agent-graph-launch-state.js";
 import { BrowserAgentCommandBroker } from "./browser-agent-command-broker.js";
+import { ClientCapabilityCommandBroker } from "./client-capability-command-broker.js";
 import { SqliteRuntimeEventStore } from "@pico/storage/sqlite/sqlite-runtime-event-store";
 import type { AgentGraphApplicationService } from "@pico/runtime/agent-graph-service";
 import type { AgentGraph } from "@pico/core/agent-graph-contracts";
@@ -225,6 +226,7 @@ export function createProductionRuntimeServices(
   const agentRuntime = options.agentRuntime ?? new AgentRuntime();
   const atomicMemoryLifecycle = new AtomicMemoryLifecycle(options.acquireMemoryResidency);
   const browserAgentBroker = new BrowserAgentCommandBroker();
+  const clientCapabilityBroker = new ClientCapabilityCommandBroker();
   if (
     options.pluginRuntimeSnapshotRegistry &&
     options.pluginCapabilityRegistry &&
@@ -588,6 +590,9 @@ export function createProductionRuntimeServices(
           picoHome,
           env,
           ...(operatorProfile ? {} : { browserAgent: browserAgentBroker.bind(targetSessionId) }),
+          ...(operatorProfile
+            ? {}
+            : { clientCapability: clientCapabilityBroker.bind(targetSessionId) }),
           prestartedRun: input.prestartedRun,
           prestartedUserInput: input.prestartedUserInput,
           agentGraph: graphBinding,
@@ -1231,6 +1236,7 @@ export function createProductionRuntimeServices(
             picoHome,
             env,
             browserAgent: browserAgentBroker.bind(targetSessionId),
+            clientCapability: clientCapabilityBroker.bind(targetSessionId),
             ...(foregroundGraphRuntime
               ? {
                   agentGraph: foregroundGraphRuntime.binding,
@@ -1655,6 +1661,7 @@ export function createProductionRuntimeServices(
     registrationStore,
     trustStore,
     browserAgentBroker,
+    clientCapabilityBroker,
     env,
     automations,
     userConfigStore,

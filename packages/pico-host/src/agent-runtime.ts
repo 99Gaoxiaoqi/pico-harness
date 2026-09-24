@@ -188,6 +188,8 @@ import {
   createBrowserAgentTools,
   type BoundBrowserAgentAuthority,
 } from "@pico/pico-host/browser-agent-tools";
+import { createComputerUseTools } from "@pico/pico-host/computer-use-tools";
+import type { BoundClientCapabilityAuthority } from "@pico/pico-host/client-capability-command-broker";
 import {
   browserHttpOrigin,
   browserNavigationOrigin,
@@ -411,6 +413,8 @@ export interface RunAgentCliDependencies extends RuntimeHost {
   isolatedHeadless?: boolean;
   /** Visible Electron browser authority. Omitted for CLI, background and headless hosts. */
   browserAgent?: BoundBrowserAgentAuthority;
+  /** Trusted Electron main-process fixed computer capability channel. */
+  clientCapability?: BoundClientCapabilityAuthority;
 }
 
 /** Runtime-first entry point. CLI/TUI compatibility wrappers call this method. */
@@ -2160,6 +2164,60 @@ export async function executeAgentRuntime(
       for (const tool of createBrowserAgentTools(guardedBrowserAgent)) {
         registry.register(tool);
       }
+    }
+    if (!backgroundPolicy && hostKind === "desktop" && dependencies.clientCapability) {
+      const capability = dependencies.clientCapability;
+      const capabilityWorkspaceRoot = resolvePicoPaths(workDir, {
+        picoHome: session.picoHome,
+      }).workspace.root;
+      const currentEpoch = (): string =>
+        clientCapabilityAuthorityEpoch({
+          boundary: runtimeExecutionBoundary() ?? null,
+          permissionMode: permissionMode(),
+          collaborationMode: collaborationMode(),
+        });
+      const guardedCapability: BoundClientCapabilityAuthority = {
+        sessionId: capability.sessionId,
+        execute: async (action, input = {}) => {
+          const mode = permissionMode();
+          const epoch = currentEpoch();
+          if (mode !== "full-access") {
+            await globalDurableClientCapabilityGrants.bindSession(
+              session.id,
+              capabilityWorkspaceRoot,
+              epoch,
+            );
+            const scope = { kind: "computer_use" } as const;
+            if (
+              !globalDurableClientCapabilityGrants.allows(
+                session.id,
+                scope,
+                capabilityWorkspaceRoot,
+              )
+            ) {
+              const { result } = await waitForRuntimeApproval({
+                toolName: action.replace(".", "_"),
+                providerCallId: `computer-use:${randomUUID()}`,
+                args: JSON.stringify({ action, ...input }),
+                reason:
+                  "允许当前任务观察或操作 macOS 桌面；系统屏幕录制、辅助功能及锁屏门控仍会检查",
+              });
+              if (!result.allowed) throw new Error("未批准电脑操作能力");
+              if (currentEpoch() !== epoch) throw new Error("电脑操作授权期间任务权限已变化");
+              if (result.allowForSession) {
+                await globalDurableClientCapabilityGrants.grant(
+                  session.id,
+                  scope,
+                  capabilityWorkspaceRoot,
+                );
+              }
+            }
+            if (currentEpoch() !== epoch) throw new Error("电脑操作期间任务权限已变化");
+          }
+          return capability.execute(action, input);
+        },
+      };
+      for (const tool of createComputerUseTools(guardedCapability)) registry.register(tool);
     }
     registerPluginCapabilityTools(
       registry,
