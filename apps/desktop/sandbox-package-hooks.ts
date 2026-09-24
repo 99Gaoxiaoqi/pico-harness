@@ -9,6 +9,7 @@ export function sandboxPackageHooks(sourceRoot: string, outputRoot: string) {
   return {
     prePackage: async (_config, platform, arch) => {
       await verifySandbox(sourceRoot, platform, arch);
+      await verifyFileWorker(join(dirname(sourceRoot), "file-worker"));
       if (platform === "darwin")
         await verifyComputerUse(join(dirname(sourceRoot), "computer-use"), arch);
     },
@@ -19,6 +20,7 @@ export function sandboxPackageHooks(sourceRoot: string, outputRoot: string) {
             ? join(outputPath, "Pico.app", "Contents", "Resources")
             : join(outputPath, "resources");
         await verifySandbox(join(resourceRoot, "sandbox"), platform, arch);
+        await verifyFileWorker(join(resourceRoot, "file-worker"));
         if (platform === "darwin") {
           await verifyComputerUse(join(resourceRoot, "computer-use"), arch);
         }
@@ -35,9 +37,20 @@ export function sandboxPackageHooks(sourceRoot: string, outputRoot: string) {
           target[1]!,
           target[2]!,
         );
+        await verifyFileWorker(join(outputRoot, entry.name, "resources", "file-worker"));
       }
     },
   } satisfies ForgeHookMap;
+}
+
+async function verifyFileWorker(root: string): Promise<void> {
+  const entry = join(root, "file-worker.mjs");
+  await access(entry, constants.F_OK);
+  const expected = (await readFile(`${entry}.sha256`, "utf8")).trim().split(/\s/u)[0];
+  const actual = createHash("sha256").update(await readFile(entry)).digest("hex");
+  if (!expected || expected !== actual) {
+    throw new Error(`Desktop File Worker resource SHA-256 mismatch: ${entry}`);
+  }
 }
 
 async function verifyComputerUse(root: string, arch: string): Promise<void> {
