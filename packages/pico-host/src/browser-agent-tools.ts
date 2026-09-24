@@ -6,7 +6,11 @@ import { NO_FILE_SIDE_EFFECTS, type BaseTool } from "./tool-registry-contract.js
 
 export interface BoundBrowserAgentAuthority {
   readonly sessionId: string;
-  execute(action: RuntimeBrowserAgentAction, input?: JsonObject): Promise<JsonObject>;
+  execute(
+    action: RuntimeBrowserAgentAction,
+    input?: JsonObject,
+    options?: { readonly expectedOrigin?: string },
+  ): Promise<JsonObject>;
 }
 
 abstract class BrowserAgentTool implements BaseTool {

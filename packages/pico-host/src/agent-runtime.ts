@@ -188,6 +188,11 @@ import {
   createBrowserAgentTools,
   type BoundBrowserAgentAuthority,
 } from "@pico/pico-host/browser-agent-tools";
+import {
+  browserHttpOrigin,
+  browserNavigationOrigin,
+  globalClientCapabilityGrants,
+} from "@pico/pico-host/client-capability-grants";
 import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
 import { currentRuntimeRun, RuntimeRun } from "@pico/pico-host/product-runtime-run";
 import { PlanCoordinator } from "@pico/runtime/plan-coordinator";
@@ -2072,7 +2077,38 @@ export async function executeAgentRuntime(
       }
     }
     if (!backgroundPolicy && hostKind === "desktop" && dependencies.browserAgent) {
-      for (const tool of createBrowserAgentTools(dependencies.browserAgent)) {
+      const browserAgent = dependencies.browserAgent;
+      const guardedBrowserAgent: BoundBrowserAgentAuthority = {
+        sessionId: browserAgent.sessionId,
+        execute: async (action, input = {}) => {
+          if (action === "get_state") return browserAgent.execute(action, input);
+          let origin: string | undefined;
+          if (action === "navigate") {
+            const address = input["url"];
+            origin = typeof address === "string" ? browserNavigationOrigin(address) : undefined;
+          } else {
+            const state = await browserAgent.execute("get_state");
+            const url = state["url"];
+            origin = typeof url === "string" ? browserHttpOrigin(url) : undefined;
+          }
+          if (!origin) throw new Error("浏览器页面缺少有效的 HTTP/HTTPS origin");
+          if (permissionMode() !== "full-access") {
+            const scope = { kind: "browser_origin", origin } as const;
+            if (!globalClientCapabilityGrants.allows(session.id, scope)) {
+              const { result } = await waitForRuntimeApproval({
+                toolName: `browser_${action}`,
+                providerCallId: `browser-origin:${randomUUID()}`,
+                args: JSON.stringify({ origin, action }),
+                reason: `允许当前任务在 ${origin} 执行浏览器 ${action} 操作`,
+              });
+              if (!result.allowed) throw new Error(`未批准浏览器来源 ${origin}`);
+              if (result.allowForSession) globalClientCapabilityGrants.grant(session.id, scope);
+            }
+          }
+          return browserAgent.execute(action, input, { expectedOrigin: origin });
+        },
+      };
+      for (const tool of createBrowserAgentTools(guardedBrowserAgent)) {
         registry.register(tool);
       }
     }

@@ -109,64 +109,25 @@ export function BrowserWorkbarPanel({ bridge, sessionId, active }: BrowserWorkba
     };
 
     const executeCommand = async (command: RuntimeBrowserAgentCommand): Promise<JsonObject> => {
-      switch (command.action) {
-        case "navigate": {
-          const url = command.input["url"];
-          if (typeof url !== "string") throw new Error("browser_navigate 缺少 url");
-          const result = await bridge.browser.navigate(sessionId, url);
-          if (!result.ok) throw new Error(result.error.message);
-          consume(result.value);
-          return browserStateResult(result.value);
-        }
-        case "back":
-        case "forward":
-        case "reload": {
-          const result = await bridge.browser[command.action](sessionId);
-          if (!result.ok) throw new Error(result.error.message);
-          consume(result.value);
-          return browserStateResult(result.value);
-        }
-        case "get_state": {
-          const result = await bridge.browser.getState(sessionId);
-          if (!result.ok) throw new Error(result.error.message);
-          if (!result.value?.visible) throw new Error("浏览器面板当前不可见");
-          consume(result.value);
-          return browserStateResult(result.value);
-        }
-        case "click": {
-          const selector = command.input["selector"];
-          if (typeof selector !== "string") throw new Error("browser_click 缺少 selector");
-          const result = await bridge.browser.click(sessionId, selector);
-          if (!result.ok) throw new Error(result.error.message);
-          consume(result.value.state);
-          return {
-            selector: result.value.selector,
-            tagName: result.value.tagName,
-            state: browserStateResult(result.value.state),
-          };
-        }
-        case "type": {
-          const selector = command.input["selector"];
-          const text = command.input["text"];
-          const clear = command.input["clear"];
-          if (typeof selector !== "string" || typeof text !== "string") {
-            throw new Error("browser_type 缺少 selector 或 text");
-          }
-          const result = await bridge.browser.type(
-            sessionId,
-            selector,
-            text,
-            typeof clear === "boolean" ? clear : true,
-          );
-          if (!result.ok) throw new Error(result.error.message);
-          consume(result.value.state);
-          return {
-            selector: result.value.selector,
-            tagName: result.value.tagName,
-            state: browserStateResult(result.value.state),
-          };
-        }
+      const result = await bridge.browser.agentExecute({
+        sessionId,
+        action: command.action,
+        input: command.input,
+        ...(command.expectedOrigin ? { expectedOrigin: command.expectedOrigin } : {}),
+      });
+      if (!result.ok) throw new Error(result.error.message);
+      const rawState = result.value["state"];
+      if (!rawState || typeof rawState !== "object") throw new Error("浏览器状态响应无效");
+      const state = rawState as DesktopBrowserState;
+      consume(state);
+      if (command.action === "click" || command.action === "type") {
+        return {
+          selector: String(result.value["selector"] ?? ""),
+          tagName: String(result.value["tagName"] ?? ""),
+          state: browserStateResult(state),
+        };
       }
+      return browserStateResult(state);
     };
 
     const run = async (): Promise<void> => {

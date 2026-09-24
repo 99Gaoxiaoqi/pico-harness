@@ -419,7 +419,10 @@ export interface RuntimeActions {
   deleteProvider(providerId: string): Promise<boolean>;
   setDefaultModelRoute(modelRouteId?: string): Promise<boolean>;
   refreshProviders(): Promise<void>;
-  testProviderConnection(providerId: string, model: string): Promise<RuntimeResult<"provider.test">>;
+  testProviderConnection(
+    providerId: string,
+    model: string,
+  ): Promise<RuntimeResult<"provider.test">>;
   setWebSearch(settings: WebSearchSettingsView): Promise<boolean>;
   queryUsage(input?: {
     readonly workspacePath?: string;
@@ -3291,6 +3294,7 @@ function createPreviewBridge(): DesktopBridge {
       quit: () => success(undefined),
     },
     browser: {
+      agentExecute: () => success({}),
       acquireViewport: () => success(1),
       setActiveSession: () => success(undefined),
       setViewport: (input) =>

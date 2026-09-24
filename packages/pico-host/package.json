@@ -671,6 +671,10 @@
       "types": "./dist/browser-agent-tools.d.ts",
       "import": "./dist/browser-agent-tools.js"
     },
+    "./client-capability-grants": {
+      "types": "./dist/client-capability-grants.d.ts",
+      "import": "./dist/client-capability-grants.js"
+    },
     "./ask-user-tool": {
       "types": "./dist/ask-user-tool.d.ts",
       "import": "./dist/ask-user-tool.js"
