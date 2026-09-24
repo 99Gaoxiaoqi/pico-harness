@@ -10,6 +10,7 @@ export type ManagedProcessOrigin =
   | "command-hook"
   | "lsp"
   | "grep"
+  | "file-worker"
   | "subagent";
 
 export type SandboxBackend =

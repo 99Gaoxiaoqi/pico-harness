@@ -61,6 +61,7 @@ test("SessionRuntime reaches a terminal released state after owned cleanup fails
     },
     hooks: false,
     lspServers: [],
+    processSandbox: { profile: "danger-full-access", bypass: true, generation: 1 },
   });
   context.after(async () => {
     await runtime.dispose().catch(() => undefined);
@@ -95,7 +96,9 @@ test("SessionRuntime code intelligence policy remains disabled until an Agent Ru
     session,
     sessionLease: { session, release: () => undefined },
     hooks: false,
+    lspEnabled: true,
     lspServers: [],
+    processSandbox: { profile: "danger-full-access", bypass: true, generation: 1 },
   });
   context.after(async () => {
     await runtime.dispose();
@@ -127,6 +130,36 @@ test("SessionRuntime code intelligence policy remains disabled until an Agent Ru
   assert.equal(closes, 2);
   assert.equal(starts, 2);
   assert.equal(runtime.codeIntelligence.backend, "repo-map");
+});
+
+test("managed boundary keeps LSP disabled through enable requests and mode changes", async (context) => {
+  const workDir = await mkdtemp(join(tmpdir(), "pico-session-managed-lsp-"));
+  const session = new Session("runtime-managed-lsp", workDir, { persistence: false });
+  const runtime = await createSessionRuntime({
+    session,
+    sessionLease: { session, release: () => undefined },
+    hooks: false,
+    lspEnabled: true,
+    lspServers: [],
+    processSandbox: { profile: "workspace-write", bypass: false, generation: 1 },
+  });
+  context.after(async () => {
+    await runtime.dispose();
+    await session.close();
+    await rm(workDir, { recursive: true, force: true });
+  });
+  assert.match(runtime.codeIntelligenceManager.status().reason, /运行时策略禁用/u);
+  await runtime.setCodeIntelligenceEnabled(true);
+  assert.match(runtime.codeIntelligenceManager.status().reason, /运行时策略禁用/u);
+  await runtime.refreshProcessSandbox({
+    profile: "danger-full-access",
+    bypass: true,
+    generation: 2,
+  });
+  await runtime.setCodeIntelligenceEnabled(true);
+  assert.doesNotMatch(runtime.codeIntelligenceManager.status().reason, /运行时策略禁用/u);
+  await runtime.refreshProcessSandbox({ profile: "workspace-write", bypass: false, generation: 3 });
+  assert.match(runtime.codeIntelligenceManager.status().reason, /运行时策略禁用/u);
 });
 
 test("disabled LSP policy skips configured process discovery and spawn", async (context) => {
@@ -200,7 +233,7 @@ test("persisted Plan collaboration disables LSP before SessionRuntime startup", 
   assert.match(runtime.codeIntelligenceManager.status().reason, /运行时策略禁用/u);
   await assert.rejects(access(spawnedMarker));
   await runtime.setCodeIntelligenceEnabled(true);
-  // LSP 始终使用 read-only profile：启动已尝试，但测试 server 不得写 marker。
+  // Persisted Plan/managed boundary never starts an LSP, even if a caller requests it.
   await assert.rejects(access(spawnedMarker));
-  assert.match(runtime.codeIntelligenceManager.status().reason, /启动失败/u);
+  assert.match(runtime.codeIntelligenceManager.status().reason, /运行时策略禁用/u);
 });
