@@ -331,20 +331,18 @@ test("daemon candidate: current shutdown drains cached Session lease before succ
   const currentConnection = currentConnectionResult.connection;
   await waitForReadyStatus(currentConnection, 15_000);
 
-  const created = await currentConnection.requestRegistered<{
+  const created = await requestLeaseTestRuntime<{
     result: { session: { sessionId: string } };
-  }>("runtime.request", { method: "session.create", params: { workspacePath } }, 10_000);
+  }>(currentConnection, "current session.create", "session.create", { workspacePath });
   const sessionId = created.result.session.sessionId;
-  await currentConnection.requestRegistered(
-    "runtime.request",
-    { method: "workspace.trust", params: { workspacePath, trusted: true } },
-    10_000,
-  );
-  await currentConnection.requestRegistered(
-    "runtime.request",
-    { method: "goal.get", params: { workspacePath, sessionId } },
-    10_000,
-  );
+  await requestLeaseTestRuntime(currentConnection, "current workspace.trust", "workspace.trust", {
+    workspacePath,
+    trusted: true,
+  });
+  await requestLeaseTestRuntime(currentConnection, "current goal.get", "goal.get", {
+    workspacePath,
+    sessionId,
+  });
   const ownerPath = join(
     sessionOwnerLeaseDirectory(
       resolvePicoPaths(workspacePath, { picoHome: harness.picoHome }).workspace,
@@ -360,6 +358,7 @@ test("daemon candidate: current shutdown drains cached Session lease before succ
   assert.equal(await pathExists(ownerPath), false, "当前 PID 退出前必须主动释放 Session lease");
   await currentConnection.close().catch(() => undefined);
 
+  const successorConnectStarted = performance.now();
   const successor = await connectOrSpawnRuntimeHost({
     rootPath: harness.picoHome,
     surface: "tui",
@@ -372,6 +371,9 @@ test("daemon candidate: current shutdown drains cached Session lease before succ
     env: harness.env,
     candidateLauncher: harness.candidates.launcher,
   });
+  console.log(
+    `daemon lease takeover: successor connect completed in ${Math.round(performance.now() - successorConnectStarted)}ms`,
+  );
   assert.equal(successor.kind, "connected", `新 daemon 接管失败：${JSON.stringify(successor)}`);
   if (successor.kind !== "connected") return;
   const successorStatus = await waitForReadyStatus(successor.connection, 15_000);
@@ -379,15 +381,40 @@ test("daemon candidate: current shutdown drains cached Session lease before succ
   const successorRegistration = await readHostRegistration(controlDirectory);
   assert.ok(successorRegistration);
   assert.notEqual(successorRegistration.pid, currentRegistration.pid);
-  await successor.connection.requestRegistered(
-    "runtime.request",
-    { method: "goal.get", params: { workspacePath, sessionId } },
-    10_000,
-  );
+  await requestLeaseTestRuntime(successor.connection, "successor goal.get", "goal.get", {
+    workspacePath,
+    sessionId,
+  });
   assert.equal(await pathExists(ownerPath), true, "新 daemon 应无需等待 30s 即可接管 Session");
   await successor.connection.requestRegistered("runtime.shutdown", {}, 10_000);
   await waitForProcessExit(successorRegistration.pid, 15_000);
 });
+
+async function requestLeaseTestRuntime<Output = unknown>(
+  connection: RuntimeHostConnection,
+  phase: string,
+  method: string,
+  params: Record<string, unknown>,
+): Promise<Output> {
+  const started = performance.now();
+  console.log(`daemon lease takeover: ${phase} started`);
+  try {
+    const result = await connection.requestRegistered<Output>(
+      "runtime.request",
+      { method, params },
+      10_000,
+    );
+    console.log(
+      `daemon lease takeover: ${phase} completed in ${Math.round(performance.now() - started)}ms`,
+    );
+    return result;
+  } catch (error) {
+    throw new Error(
+      `daemon lease takeover: ${phase} failed after ${Math.round(performance.now() - started)}ms`,
+      { cause: error },
+    );
+  }
+}
 
 async function processAlive(pid: number): Promise<boolean> {
   try {
