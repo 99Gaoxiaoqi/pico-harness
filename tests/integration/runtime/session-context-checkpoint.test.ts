@@ -148,7 +148,7 @@ test("checkpoint model history reaches read-only context RPC and Inspector uncha
       );
       assert.match(html, /当前模型历史/u);
       assert.match(html, /compaction-1/u);
-      assert.match(html, /1 次/u);
+      assert.match(html, /<dt>压缩次数<\/dt><dd>1<\/dd>/u);
       assert.doesNotMatch(html, /role="progressbar"|<dt>剩余<|<dt>已使用</u);
       await desktop.close();
       await globalSessionManager.delete(sessionId, canonical, { picoHome })?.close();
