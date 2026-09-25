@@ -260,6 +260,12 @@ jobs:
           PICO_SANDBOX_ACL_TRACE: "1"
         run: node --import tsx --import @pico/cli/tui/preload-env --test --test-concurrency=1 tests/integration/safety/process-sandbox-native.integration.test.ts
 
+      - name: Prove task-scoped Windows network capability and loopback revocation
+        timeout-minutes: 5
+        env:
+          PICO_WINDOWS_TASK_NETWORK_PROOF: "1"
+        run: node --import tsx --import @pico/cli/tui/preload-env --test --test-concurrency=1 tests/integration/safety/windows-task-network-native.integration.test.ts
+
       - name: Cleanup temporary Windows ACL users
         if: always()
         shell: powershell
