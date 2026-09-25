@@ -39,6 +39,9 @@ export function buildManagedSpawnPlan(request: ManagedSpawnRequest): SandboxSpaw
     // AppContainer 不获得盘符根 DACL；Node 默认 realpath 会逐级 lstat 到 C:\\。
     // 这是宿主在清洗后固定的兼容参数，不恢复用户提供的 NODE_OPTIONS。
     env.NODE_OPTIONS = WINDOWS_RESTRICTED_NODE_OPTIONS;
+    if (process.env.PICO_SANDBOX_ACL_TRACE === "1") {
+      env.PICO_SANDBOX_ACL_TRACE = "1";
+    }
   }
 
   const policy = withRuntimeRoots(request.policy, request.command, env, platform);

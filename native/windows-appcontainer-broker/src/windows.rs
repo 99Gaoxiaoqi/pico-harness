@@ -9,6 +9,7 @@ use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::ptr::{null, null_mut};
+use std::time::Instant;
 
 type Handle = *mut c_void;
 type Sid = *mut c_void;
@@ -465,9 +466,24 @@ fn grant_exact_metadata_chain(
     }
     let mut within_authorized_root = false;
     for directory in ancestors.into_iter().rev() {
-        assert_not_reparse_point(directory)?;
-        let pinned = pin_path(directory, true)?;
-        assert_not_reparse_point(directory)?;
+        assert_not_reparse_point(directory).map_err(|error| {
+            format!(
+                "目标真实路径发生变化：目录 {} 无法检查：{error}",
+                directory.display()
+            )
+        })?;
+        let pinned = pin_path(directory, true).map_err(|error| {
+            format!(
+                "目标真实路径发生变化：目录 {} 无法固定：{error}",
+                directory.display()
+            )
+        })?;
+        assert_not_reparse_point(directory).map_err(|error| {
+            format!(
+                "目标真实路径发生变化：目录 {} 无法复核：{error}",
+                directory.display()
+            )
+        })?;
         assert_pinned_identity(directory, &pinned, true)?;
         if !pinned.metadata().map_err(error_text)?.is_dir() {
             return Err(format!(
@@ -483,9 +499,11 @@ fn grant_exact_metadata_chain(
         if !within_authorized_root {
             continue;
         }
-        // realpath needs metadata access within this user-specific profile or the
-        // Host-bound task root. The ACE cannot list or create children.
-        journal.grant_exact(directory, sid, "X,RA,RC,S")?;
+        // Only the requested directory receives an ACE. Shared profile/Temp
+        // ancestors stay unchanged; the Worker must use Host-bound canonical paths.
+        if directory == leaf {
+            journal.grant_exact_metadata(directory, identity, sid)?;
+        }
     }
     if within_authorized_root {
         Ok(())
@@ -867,6 +885,7 @@ fn create_or_derive_package_sid(name: &str) -> Result<Sid, String> {
 struct RecoveryJournal {
     path: PathBuf,
     entries: Vec<(String, String, String)>,
+    exact_metadata_grants: HashSet<(u32, u64)>,
 }
 
 impl RecoveryJournal {
@@ -879,6 +898,7 @@ impl RecoveryJournal {
         Ok(Self {
             path: path.to_path_buf(),
             entries: Vec::new(),
+            exact_metadata_grants: HashSet::new(),
         })
     }
 
@@ -899,6 +919,20 @@ impl RecoveryJournal {
         // No (OI)/(CI): a file or ancestor directory grant must never flow to siblings.
         let grant = format!("*{sid}:({rights})");
         run_icacls("grant-exact", [&path_text, "/grant", &grant, "/L"])
+    }
+
+    fn grant_exact_metadata(
+        &mut self,
+        path: &Path,
+        identity: (u32, u64),
+        sid: &str,
+    ) -> Result<(), String> {
+        if self.exact_metadata_grants.contains(&identity) {
+            return Ok(());
+        }
+        self.grant_exact(path, sid, "X,RA,RC,S")?;
+        self.exact_metadata_grants.insert(identity);
+        Ok(())
     }
 
     fn record(&mut self, kind: &str, target: &str, sid: &str) -> Result<(), String> {
@@ -939,8 +973,18 @@ fn grant_exact_file(
         return Err("exact-file grant overlaps the broker control directory".into());
     }
     let parent = path.parent().ok_or("exact-file grant has no parent")?;
-    let parent_info = fs::symlink_metadata(parent).map_err(error_text)?;
-    assert_not_reparse_point(parent)?;
+    let parent_info = fs::symlink_metadata(parent).map_err(|error| {
+        format!(
+            "目标真实路径发生变化：精确文件父目录 {} 无法访问：{error}",
+            parent.display()
+        )
+    })?;
+    assert_not_reparse_point(parent).map_err(|error| {
+        format!(
+            "目标真实路径发生变化：精确文件父目录 {} 无法检查：{error}",
+            parent.display()
+        )
+    })?;
     if !parent_info.is_dir() {
         return Err(format!(
             "exact-file parent is not a directory: {}",
@@ -950,15 +994,30 @@ fn grant_exact_file(
     grant_exact_metadata_chain(journal, policy, parent, sid, guards)?;
     match fs::symlink_metadata(path) {
         Ok(info) => {
-            assert_not_reparse_point(path)?;
+            assert_not_reparse_point(path).map_err(|error| {
+                format!(
+                    "目标真实路径发生变化：文件 {} 无法检查：{error}",
+                    path.display()
+                )
+            })?;
             if !info.is_file() {
                 return Err(format!(
                     "exact-file target is not a regular file: {}",
                     path.display()
                 ));
             }
-            let pinned = pin_path(path, false)?;
-            assert_not_reparse_point(path)?;
+            let pinned = pin_path(path, false).map_err(|error| {
+                format!(
+                    "目标真实路径发生变化：文件 {} 无法固定：{error}",
+                    path.display()
+                )
+            })?;
+            assert_not_reparse_point(path).map_err(|error| {
+                format!(
+                    "目标真实路径发生变化：文件 {} 无法复核：{error}",
+                    path.display()
+                )
+            })?;
             assert_pinned_identity(path, &pinned, false)?;
             if file_information(&pinned)?.number_of_links != 1 {
                 return Err(format!(
@@ -975,12 +1034,14 @@ fn grant_exact_file(
 }
 
 fn assert_pinned_identity(path: &Path, pinned: &File, directory: bool) -> Result<(), String> {
-    let current = pin_path(path, directory)?;
-    if file_identity(&current)? != file_identity(pinned)? {
-        return Err(format!(
-            "exact-file path changed while binding: {}",
+    let current = pin_path(path, directory).map_err(|error| {
+        format!(
+            "目标真实路径发生变化：路径 {} 无法复核：{error}",
             path.display()
-        ));
+        )
+    })?;
+    if file_identity(&current)? != file_identity(pinned)? {
+        return Err(format!("目标身份已变化：精确文件路径 {}", path.display()));
     }
     Ok(())
 }
@@ -1178,6 +1239,14 @@ fn delete_appcontainer_profile(name: &str) -> Result<(), String> {
 }
 
 fn run_icacls<const N: usize>(operation: &str, args: [&str; N]) -> Result<(), String> {
+    let trace = std::env::var_os("PICO_SANDBOX_ACL_TRACE").is_some_and(|value| value == "1");
+    let started = Instant::now();
+    if trace {
+        eprintln!(
+            "pico-appcontainer-broker: ACL {operation} begin path={:?}",
+            args[0]
+        );
+    }
     let _mutation_guard = AclMutationGuard::acquire()?;
     // The broker starts in the target workspace and inherits its environment. Resolve both the
     // executable and cwd from Kernel32 so neither a workspace file nor PATH/SystemRoot can select
@@ -1193,6 +1262,13 @@ fn run_icacls<const N: usize>(operation: &str, args: [&str; N]) -> Result<(), St
         .stdout(Stdio::null())
         .status()
         .map_err(error_text)?;
+    if trace {
+        eprintln!(
+            "pico-appcontainer-broker: ACL {operation} end path={:?} elapsed_ms={} status={status}",
+            args[0],
+            started.elapsed().as_millis()
+        );
+    }
     if status.success() {
         Ok(())
     } else {
