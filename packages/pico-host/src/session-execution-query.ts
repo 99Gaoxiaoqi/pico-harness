@@ -213,10 +213,10 @@ function summary(
   ), calls AS MATERIALIZED (
     SELECT coalesce(run_id,'') AS run_id, provider_call_id AS call_id,
       max(json_extract(record_json,'$.retryAttempt')) AS retry_attempt,
-      json_object('attempts', json_group_array(json(record_json)),
-        'attemptCoverage', CASE WHEN min(coalesce(json_extract(record_json,'$.attemptCoverage'),'complete') != 'partial') THEN 'complete' ELSE 'partial' END,
-        'status', CASE WHEN max(json_extract(record_json,'$.status')='succeeded') THEN 'succeeded' WHEN max(json_extract(record_json,'$.status')='cancelled') THEN 'cancelled' WHEN max(json_extract(record_json,'$.status') IN ('prepared','observed')) THEN 'running' ELSE 'failed' END,
-        'latencyMs', sum(json_extract(record_json,'$.latencyMs'))) AS settled
+      count(*) AS attempt_count,
+      CASE WHEN min(coalesce(json_extract(record_json,'$.attemptCoverage'),'complete') != 'partial') THEN 'complete' ELSE 'partial' END AS attempt_coverage,
+      CASE WHEN max(json_extract(record_json,'$.status')='succeeded') THEN 'succeeded' WHEN max(json_extract(record_json,'$.status')='cancelled') THEN 'cancelled' WHEN max(json_extract(record_json,'$.status') IN ('prepared','observed')) THEN 'running' ELSE 'failed' END AS status,
+      sum(json_extract(record_json,'$.latencyMs')) AS latency_ms
     FROM physical WHERE session_id=? GROUP BY run_id,provider_call_id
   ), measurements AS (
     SELECT coalesce(run_id,'') AS run_id, provider_call_id AS call_id, record_json AS data FROM physical WHERE session_id=?
@@ -247,20 +247,20 @@ function summary(
     FROM events WHERE kind IN ('tool.started','tool.result.recorded') GROUP BY run_id,tool_id
   ) SELECT
     (SELECT count(*) FROM calls) AS calls,
-    (SELECT count(*) FROM calls WHERE json_type(settled,'$.attempts')='array') AS physical_calls,
-    (SELECT count(*) FROM calls WHERE json_type(settled,'$.attempts')='array' AND json_extract(settled,'$.attemptCoverage')='complete') AS complete_physical_calls,
-    (SELECT count(*) FROM calls WHERE json_extract(settled,'$.status')='failed') AS failed,
-    (SELECT sum(CASE WHEN coalesce(json_extract(c.settled,'$.attemptCoverage'),'complete')='complete' THEN coalesce(m.metered,0) ELSE 0 END) FROM calls c LEFT JOIN call_metrics m USING(run_id,call_id)) AS metered,
-    (SELECT sum(CASE WHEN json_extract(c.settled,'$.attemptCoverage')='partial' THEN 1 ELSE 1-coalesce(m.priced,0) END) FROM calls c LEFT JOIN call_metrics m USING(run_id,call_id)) AS unpriced,
+    (SELECT count(*) FROM calls) AS physical_calls,
+    (SELECT count(*) FROM calls WHERE attempt_coverage='complete') AS complete_physical_calls,
+    (SELECT count(*) FROM calls WHERE status='failed') AS failed,
+    (SELECT sum(CASE WHEN c.attempt_coverage='complete' THEN coalesce(m.metered,0) ELSE 0 END) FROM calls c LEFT JOIN call_metrics m USING(run_id,call_id)) AS metered,
+    (SELECT sum(CASE WHEN c.attempt_coverage='partial' THEN 1 ELSE 1-coalesce(m.priced,0) END) FROM calls c LEFT JOIN call_metrics m USING(run_id,call_id)) AS unpriced,
     sum(input_tokens) AS input_tokens, sum(output_tokens) AS output_tokens,
     sum(cached_tokens) AS cached_tokens, sum(reasoning_tokens) AS reasoning_tokens, sum(cost) AS cost,
     count(cached_tokens) AS cache_known, count(*) AS measurement_count,
     sum(CASE WHEN cached_tokens IS NOT NULL AND input_tokens IS NOT NULL AND cached_tokens<=input_tokens THEN 1 ELSE 0 END) AS cache_comparable,
-    (SELECT count(*) FROM calls WHERE json_extract(settled,'$.attemptCoverage')='partial') AS partial_calls,
-    (SELECT sum(json_extract(settled,'$.latencyMs')) FROM calls) AS latency,
-    (SELECT sum(json_array_length(settled,'$.attempts')) FROM calls) AS physical_attempts,
-    (SELECT sum(CASE WHEN retry_attempt IS NOT NULL OR json_type(settled,'$.attempts')='array'
-      THEN max(0,coalesce(json_array_length(settled,'$.attempts'),0)-1)
+    (SELECT count(*) FROM calls WHERE attempt_coverage='partial') AS partial_calls,
+    (SELECT sum(latency_ms) FROM calls) AS latency,
+    (SELECT sum(attempt_count) FROM calls) AS physical_attempts,
+    (SELECT sum(CASE WHEN retry_attempt IS NOT NULL OR attempt_count > 0
+      THEN max(0,attempt_count-1)
       + CASE WHEN retry_attempt>0 THEN 1 ELSE 0 END END) FROM calls) AS retries,
     (SELECT count(*) FROM tools) AS tool_calls,
     (SELECT sum(CASE WHEN started IS NOT NULL AND ended IS NOT NULL
