@@ -247,6 +247,7 @@ jobs:
       - name: Run Windows security integration suite
         env:
           PICO_WINDOWS_LOW_PRIVILEGE_TEST: "1"
+          PICO_SANDBOX_ACL_TRACE: "1"
         run: npm run test:integration:windows
 
       - name: Run Windows process sandbox contract integration
@@ -255,6 +256,8 @@ jobs:
 
       - name: Run Windows native process sandbox integration
         timeout-minutes: 5
+        env:
+          PICO_SANDBOX_ACL_TRACE: "1"
         run: node --import tsx --import @pico/cli/tui/preload-env --test --test-concurrency=1 tests/integration/safety/process-sandbox-native.integration.test.ts
 
       - name: Cleanup temporary Windows ACL users
