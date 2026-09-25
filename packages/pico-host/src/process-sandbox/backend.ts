@@ -39,6 +39,9 @@ export function buildManagedSpawnPlan(request: ManagedSpawnRequest): SandboxSpaw
     // AppContainer 不获得盘符根 DACL；Node 默认 realpath 会逐级 lstat 到 C:\\。
     // 这是宿主在清洗后固定的兼容参数，不恢复用户提供的 NODE_OPTIONS。
     env.NODE_OPTIONS = WINDOWS_RESTRICTED_NODE_OPTIONS;
+    if (process.env.PICO_SANDBOX_ACL_TRACE === "1") {
+      env.PICO_SANDBOX_ACL_TRACE = "1";
+    }
   }
 
   const policy = withRuntimeRoots(request.policy, request.command, env, platform);
@@ -88,18 +91,18 @@ export function buildManagedSpawnPlan(request: ManagedSpawnRequest): SandboxSpaw
       return {
         backend,
         command: backendPath,
-        args: buildBubblewrapArgs(policy, request.command, request.args, request.cwd),
+        args: buildBubblewrapArgs(
+          policy,
+          request.command,
+          request.args,
+          request.cwd,
+          request.origin === "file-worker",
+        ),
         env,
         sandboxed: true,
         profile: policy.profile,
       };
     case "windows-appcontainer": {
-      if ((policy.readFiles?.length ?? 0) > 0 || (policy.writeFiles?.length ?? 0) > 0) {
-        throw new SandboxViolationError(
-          "policy_compilation_failed",
-          "Windows AppContainer 暂不支持精确文件边界，已拒绝扩大到父目录。",
-        );
-      }
       const controlRoot =
         request.controlRoot ?? resolve(dirname(policy.scratchRoot), ".windows-broker-control");
       if (policy.readRoots.some((root) => isWithinRoot(root, controlRoot))) {
@@ -117,6 +120,7 @@ export function buildManagedSpawnPlan(request: ManagedSpawnRequest): SandboxSpaw
           request.args,
           request.cwd,
           controlRoot,
+          request.origin === "file-worker" ? request.cwd : undefined,
         ),
         env,
         sandboxed: true,
@@ -134,6 +138,7 @@ export function buildWindowsBrokerArgs(
   args: readonly string[],
   cwd: string,
   controlRoot = resolve(dirname(policy.scratchRoot), ".windows-broker-control"),
+  metadataRoot?: string,
 ): string[] {
   const result = [
     "--profile",
@@ -149,6 +154,9 @@ export function buildWindowsBrokerArgs(
   ];
   for (const root of policy.readRoots) result.push("--read-root", root);
   for (const root of policy.writeRoots) result.push("--write-root", root);
+  for (const path of policy.readFiles ?? []) result.push("--read-file", path);
+  for (const path of policy.writeFiles ?? []) result.push("--write-file", path);
+  if (metadataRoot !== undefined) result.push("--metadata-root", metadataRoot);
   result.push("--", command, ...args);
   return result;
 }
@@ -270,6 +278,7 @@ export function buildBubblewrapArgs(
   command: string,
   args: readonly string[],
   cwd: string,
+  createEmptyCwd = false,
 ): string[] {
   const writeRoots = normalizeRoots(policy.writeRoots);
   const readRoots = normalizeRoots(policy.readRoots).filter(
@@ -287,6 +296,17 @@ export function buildBubblewrapArgs(
     "--dev",
     "/dev",
   ];
+  // A new exact file has no bind target yet. Give File Worker an empty cwd path in
+  // its private mount namespace without exposing siblings from the host workspace.
+  if (createEmptyCwd) {
+    result.push("--dir", cwd);
+    // Missing exact-file targets cannot be bind-mounted. Recreate only their
+    // directory path in the private namespace so the Worker can verify an
+    // existing nested parent without exposing any host siblings.
+    for (const parent of new Set((policy.readFiles ?? []).map((path) => dirname(path)))) {
+      if (parent !== cwd) result.push("--dir", parent);
+    }
+  }
   // Keep the conventional loader and executable paths visible even on usr-merged hosts.
   // Policy normalization resolves symlinks such as /bin -> /usr/bin and /lib64 ->
   // /usr/lib64; binding the lexical aliases restores those ABI paths without granting

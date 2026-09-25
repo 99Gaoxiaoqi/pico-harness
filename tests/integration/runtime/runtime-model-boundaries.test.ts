@@ -1,5 +1,5 @@
 import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
-import { closeAllOperationalDatabasesForTest } from "@pico/storage";
+import { closeAllOperationalDatabasesForTest, SqliteRuntimeControlStore } from "@pico/storage";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -10,10 +10,12 @@ import { createEngineRuntimeCapability } from "@pico/pico-host/engine-runtime-po
 import { DefaultHookExecutor } from "@pico/pico-host/hooks/executors";
 import type { HookInput, ResolvedHookHandler } from "@pico/pico-host/hooks/types";
 import { CostTracker } from "@pico/pico-host/cost-tracker";
+import { resolvePicoPaths } from "@pico/pico-host";
 import type { LLMProvider } from "@pico/core";
 
 import { RuntimeRun } from "@pico/pico-host/product-runtime-run";
 import { projectRuntimeSessionUsage } from "@pico/runtime/session-runtime-projection";
+import { physicalProviderFixture } from "../helpers/physical-provider.js";
 
 test("CostTracker preserves provider retry classification", () => {
   const retryable = new Error("provider-specific retry");
@@ -36,8 +38,12 @@ test("durable CostTracker requires and records the matching host RuntimeRun", as
   const workDir = join(root, "workspace");
   const picoHome = join(root, "pico-home");
   const session = new Session("cost-tracker-boundary", workDir, { persistence: true, picoHome });
+  const ledger = new SqliteRuntimeControlStore({
+    storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
+  });
   context.after(async () => {
     await session.close();
+    ledger.close();
     closeAllOperationalDatabasesForTest();
     await rm(root, { recursive: true, force: true });
   });
@@ -56,7 +62,12 @@ test("durable CostTracker requires and records the matching host RuntimeRun", as
       };
     },
   };
-  const tracked = new CostTracker(provider, "unknown-model", session);
+  const tracked = new CostTracker(
+    physicalProviderFixture(provider, "unknown-model"),
+    "unknown-model",
+    session,
+    { ledger, context: { purpose: "main", sessionId: session.id } },
+  );
 
   await assert.rejects(
     tracked.generate([{ role: "user", content: "outside" }], []),

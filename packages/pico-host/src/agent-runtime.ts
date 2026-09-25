@@ -188,6 +188,15 @@ import {
   createBrowserAgentTools,
   type BoundBrowserAgentAuthority,
 } from "@pico/pico-host/browser-agent-tools";
+import { createComputerUseTools } from "@pico/pico-host/computer-use-tools";
+import type { BoundClientCapabilityAuthority } from "@pico/pico-host/client-capability-command-broker";
+import { DesktopMcpCallTool } from "@pico/pico-host/desktop-mcp-call-tool";
+import {
+  browserHttpOrigin,
+  browserNavigationOrigin,
+  clientCapabilityAuthorityEpoch,
+  globalDurableClientCapabilityGrants,
+} from "@pico/pico-host/client-capability-grants";
 import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
 import { currentRuntimeRun, RuntimeRun } from "@pico/pico-host/product-runtime-run";
 import { PlanCoordinator } from "@pico/runtime/plan-coordinator";
@@ -405,6 +414,8 @@ export interface RunAgentCliDependencies extends RuntimeHost {
   isolatedHeadless?: boolean;
   /** Visible Electron browser authority. Omitted for CLI, background and headless hosts. */
   browserAgent?: BoundBrowserAgentAuthority;
+  /** Trusted Electron main-process fixed computer capability channel. */
+  clientCapability?: BoundClientCapabilityAuthority;
 }
 
 /** Runtime-first entry point. CLI/TUI compatibility wrappers call this method. */
@@ -2028,6 +2039,11 @@ export async function executeAgentRuntime(
       );
       baselineToolNames.push("exec");
     }
+    const graphManagedGitAvailable =
+      dependencies.agentGraph?.kind === "operator" &&
+      dependencies.agentGraph.managedGit !== undefined &&
+      collaborationMode() === "agent" &&
+      currentMainProcessSandbox().bypass === true;
     if (dependencies.agentGraph?.kind === "root") {
       if (backgroundPolicy || orchestrationMode() === "default") {
         throw new Error("Graph root tools require a foreground Graph Mode Runtime");
@@ -2066,15 +2082,198 @@ export async function executeAgentRuntime(
         }),
       );
       baselineToolNames.push("agent_output");
-      if (dependencies.agentGraph.managedGit && collaborationMode() === "agent") {
-        registry.register(new GraphManagedGitTool(dependencies.agentGraph.managedGit));
+      if (graphManagedGitAvailable) {
+        registry.register(new GraphManagedGitTool(dependencies.agentGraph.managedGit!));
         baselineToolNames.push("graph_git");
       }
     }
     if (!backgroundPolicy && hostKind === "desktop" && dependencies.browserAgent) {
-      for (const tool of createBrowserAgentTools(dependencies.browserAgent)) {
+      const browserAgent = dependencies.browserAgent;
+      const clientCapabilityWorkspaceRoot = resolvePicoPaths(workDir, {
+        picoHome: session.picoHome,
+      }).workspace.root;
+      const guardedBrowserAgent: BoundBrowserAgentAuthority = {
+        sessionId: browserAgent.sessionId,
+        execute: async (action, input = {}) => {
+          const mode = permissionMode();
+          const currentAuthorityEpoch = (): string =>
+            clientCapabilityAuthorityEpoch({
+              boundary: runtimeExecutionBoundary() ?? null,
+              permissionMode: permissionMode(),
+              collaborationMode: collaborationMode(),
+            });
+          const authorityEpoch = currentAuthorityEpoch();
+          if (mode !== "full-access") {
+            await globalDurableClientCapabilityGrants.bindSession(
+              session.id,
+              clientCapabilityWorkspaceRoot,
+              authorityEpoch,
+            );
+          }
+          let origin: string | undefined;
+          let observedState: Awaited<ReturnType<typeof browserAgent.execute>> | undefined;
+          if (action === "navigate") {
+            const address = input["url"];
+            origin = typeof address === "string" ? browserNavigationOrigin(address) : undefined;
+          } else {
+            observedState = await browserAgent.execute("get_state");
+            const url = observedState["url"];
+            origin = typeof url === "string" ? browserHttpOrigin(url) : undefined;
+          }
+          if (!origin && action === "get_state" && observedState?.["hasPage"] === false) {
+            return observedState;
+          }
+          if (!origin) throw new Error("浏览器页面缺少有效的 HTTP/HTTPS origin");
+          if (mode !== "full-access") {
+            const scope = { kind: "browser_origin", origin } as const;
+            if (
+              !globalDurableClientCapabilityGrants.allows(
+                session.id,
+                scope,
+                clientCapabilityWorkspaceRoot,
+              )
+            ) {
+              const { result } = await waitForRuntimeApproval({
+                toolName: `browser_${action}`,
+                providerCallId: `browser-origin:${randomUUID()}`,
+                args: JSON.stringify({ origin, action }),
+                reason: `允许当前任务在 ${origin} 执行浏览器 ${action} 操作`,
+              });
+              if (!result.allowed) throw new Error(`未批准浏览器来源 ${origin}`);
+              const approvedEpoch = currentAuthorityEpoch();
+              if (permissionMode() !== mode || approvedEpoch !== authorityEpoch) {
+                throw new Error("浏览器授权期间任务权限已变化，请重试操作");
+              }
+              if (result.allowForSession) {
+                await globalDurableClientCapabilityGrants.grant(
+                  session.id,
+                  scope,
+                  clientCapabilityWorkspaceRoot,
+                );
+              }
+            }
+            const latestEpoch = currentAuthorityEpoch();
+            if (permissionMode() !== mode || latestEpoch !== authorityEpoch) {
+              throw new Error("浏览器授权期间任务权限已变化，请重试操作");
+            }
+          }
+          if (action === "get_state") {
+            const latest = await browserAgent.execute("get_state");
+            if (browserHttpOrigin(String(latest["url"] ?? "")) !== origin) {
+              throw new Error("浏览器页面已切换来源，请重新请求授权");
+            }
+            return latest;
+          }
+          return browserAgent.execute(action, input, { expectedOrigin: origin });
+        },
+      };
+      for (const tool of createBrowserAgentTools(guardedBrowserAgent)) {
         registry.register(tool);
       }
+    }
+    if (!backgroundPolicy && hostKind === "desktop" && dependencies.clientCapability) {
+      const capability = dependencies.clientCapability;
+      const capabilityWorkspaceRoot = resolvePicoPaths(workDir, {
+        picoHome: session.picoHome,
+      }).workspace.root;
+      const currentEpoch = (): string =>
+        clientCapabilityAuthorityEpoch({
+          boundary: runtimeExecutionBoundary() ?? null,
+          permissionMode: permissionMode(),
+          collaborationMode: collaborationMode(),
+        });
+      const guardedCapability: BoundClientCapabilityAuthority = {
+        sessionId: capability.sessionId,
+        execute: async (action, input = {}) => {
+          if (
+            action !== "desktop_mcp.call" &&
+            action !== "computer.observe" &&
+            action !== "computer.click" &&
+            action !== "computer.type"
+          ) {
+            throw new Error("不支持的 Desktop 能力操作");
+          }
+          const mode = permissionMode();
+          const epoch = currentEpoch();
+          const server = input["server"];
+          const tool = input["tool"];
+          const scope =
+            action === "desktop_mcp.call"
+              ? typeof server === "string" &&
+                server.trim() === server &&
+                server &&
+                typeof tool === "string" &&
+                tool.trim() === tool &&
+                tool
+                ? ({ kind: "desktop_mcp", server, tool } as const)
+                : undefined
+              : ({ kind: "computer_use" } as const);
+          if (!scope) throw new Error("Desktop MCP server/tool 授权范围无效");
+          let approvedOnce = false;
+          if (mode !== "full-access") {
+            await globalDurableClientCapabilityGrants.bindSession(
+              session.id,
+              capabilityWorkspaceRoot,
+              epoch,
+            );
+            if (
+              !globalDurableClientCapabilityGrants.allows(
+                session.id,
+                scope,
+                capabilityWorkspaceRoot,
+              )
+            ) {
+              const { result } = await waitForRuntimeApproval({
+                toolName:
+                  action === "desktop_mcp.call" ? "desktop_mcp_call" : action.replace(".", "_"),
+                providerCallId: `client-capability:${randomUUID()}`,
+                args: JSON.stringify({ action, ...input }),
+                reason:
+                  action === "desktop_mcp.call"
+                    ? `允许当前任务通过 Desktop 调用 MCP ${server}/${tool}；连接服务器和实际工具调用前会重新校验`
+                    : "允许当前任务观察或操作 macOS 桌面；系统屏幕录制、辅助功能及锁屏门控仍会检查",
+              });
+              if (!result.allowed) throw new Error("未批准 Desktop 客户端能力");
+              if (currentEpoch() !== epoch) throw new Error("客户端能力授权期间任务权限已变化");
+              if (result.allowForSession) {
+                await globalDurableClientCapabilityGrants.grant(
+                  session.id,
+                  scope,
+                  capabilityWorkspaceRoot,
+                );
+              } else approvedOnce = true;
+            }
+            if (currentEpoch() !== epoch) throw new Error("客户端能力执行前任务权限已变化");
+          }
+          const stillAuthorized = (): boolean =>
+            currentEpoch() === epoch &&
+            permissionMode() === mode &&
+            (mode === "full-access" ||
+              approvedOnce ||
+              globalDurableClientCapabilityGrants.allows(
+                session.id,
+                scope,
+                capabilityWorkspaceRoot,
+              ));
+          const commandInput =
+            action === "desktop_mcp.call"
+              ? { ...input, workspacePath: workDir, authorityEpoch: epoch }
+              : input;
+          return capability.execute(action, commandInput, stillAuthorized);
+        },
+      };
+      for (const tool of createComputerUseTools(guardedCapability)) registry.register(tool);
+      registry.register(
+        new DesktopMcpCallTool(async (input, context) => {
+          const result = await guardedCapability.execute("desktop_mcp.call", {
+            server: input.server,
+            tool: input.tool,
+            args: input.args as import("@pico/protocol").JsonObject,
+            ...(context?.toolCallId ? { toolCallId: context.toolCallId } : {}),
+          });
+          return result as unknown as import("@pico/pico-host/mcp-client-types").McpToolResult;
+        }),
+      );
     }
     registerPluginCapabilityTools(
       registry,
@@ -2109,6 +2308,7 @@ export async function executeAgentRuntime(
     }) => {
       const composed = await new PromptComposer(workDir, collaborationMode() === "plan", {
         researchMode: collaborationMode() === "research",
+        managedWorkspaceRead: currentMainProcessSandbox().bypass !== true,
         goalManager,
         todoStore,
         ...(dependencies.isolatedHeadless !== undefined
@@ -2222,7 +2422,7 @@ export async function executeAgentRuntime(
                 composed.systemPrompt,
                 "<graph-operator-profile>",
                 dependencies.agentGraph.profileSnapshot.systemPrompt.content,
-                ...(dependencies.agentGraph.managedGit
+                ...(graphManagedGitAvailable
                   ? [
                       "隔离工作树 Git 必须使用 graph_git：先 operation=status 获取 head，完成文件修改与验证后用 operation=commit、expected_head 和 message 提交全部变更。不要用 bash 执行 git status/add/commit；不要访问父仓库 .git、切分支、推送或自行合并。正式 agent_output 中报告 graph_git 返回的真实 branch/head。",
                     ]
@@ -2623,7 +2823,15 @@ export async function executeAgentRuntime(
         ...(collaborationMode() === "plan" ? ["submit_plan"] : []),
         ...(activeExecutionPlanId ? ["update_plan", "cancel_plan"] : []),
       ];
-      const commandAllowlist = [...effectiveOptions.allowedTools, ...requiredControlTools];
+      const commandAllowlist = [
+        ...effectiveOptions.allowedTools.filter(
+          (tool) =>
+            tool !== "graph_git" ||
+            dependencies.agentGraph?.kind !== "operator" ||
+            graphManagedGitAvailable,
+        ),
+        ...requiredControlTools,
+      ];
       pruneRegistryToCommandAllowlist(registry, commandAllowlist);
       // 命令级 allowlist 是宿主/请求方的显式选择——存活工具必须对模型可见，
       // 不能被渐进披露层藏掉（否则 headless/skill 激活场景下白名单里的

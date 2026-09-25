@@ -96,6 +96,136 @@ export function guardBrowserNavigation(event: { preventDefault(): void }, url: s
   return false;
 }
 
+/** Persistent fence for model-triggered page navigation, including delayed redirects. */
+export function guardBrowserAgentOrigin(
+  event: { preventDefault(): void },
+  url: string,
+  approvedOrigin: string | undefined,
+): boolean {
+  if (!approvedOrigin) return true;
+  try {
+    const parsed = new URL(url);
+    if (
+      (parsed.protocol === "http:" || parsed.protocol === "https:") &&
+      parsed.origin === approvedOrigin
+    )
+      return true;
+  } catch {
+    // Invalid navigation is denied by the ordinary browser navigation guard.
+  }
+  event.preventDefault();
+  return false;
+}
+
+export interface BrowserAgentOperationToken {
+  readonly origin: string;
+  readonly generation: number;
+}
+
+/** A page change or a newer command invalidates every in-flight model DOM operation. */
+export class BrowserAgentOperationFence {
+  private generation = 0;
+  private approvedOrigin?: string;
+  private active = 0;
+  private userAction?: Promise<void>;
+  private readonly idleWaiters = new Set<() => void>();
+
+  get origin(): string | undefined {
+    return this.approvedOrigin;
+  }
+
+  begin(origin: string): BrowserAgentOperationToken {
+    if (httpOrigin(origin) !== origin) throw new Error("浏览器模型操作缺少有效的 HTTP origin 授权");
+    if (this.active > 0 || this.userAction) {
+      throw new Error("已有浏览器模型操作正在执行或取消中，请稍后重试");
+    }
+    this.advance();
+    this.approvedOrigin = origin;
+    return { origin, generation: this.generation };
+  }
+
+  pageChanged(): void {
+    this.advance();
+  }
+
+  revoke(): void {
+    this.advance();
+    this.approvedOrigin = undefined;
+  }
+
+  enter(token: BrowserAgentOperationToken, url: string): () => void {
+    this.assert(token, url);
+    return this.hold();
+  }
+
+  enterNavigation(token: BrowserAgentOperationToken, targetUrl: string): () => void {
+    this.assert(token, targetUrl);
+    return this.hold();
+  }
+
+  private hold(): () => void {
+    this.active++;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.active--;
+      if (this.active === 0) {
+        for (const wake of this.idleWaiters) wake();
+        this.idleWaiters.clear();
+      }
+    };
+  }
+
+  /** Keep model commands blocked through the entire user action, including its async waits. */
+  async runUserAction<T>(operation: () => T | Promise<T>): Promise<T> {
+    const previous = this.userAction;
+    let finish!: () => void;
+    const turn = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    this.userAction = turn;
+    this.advance();
+    try {
+      if (previous) await previous;
+      if (this.active > 0) {
+        await new Promise<void>((resolve) => this.idleWaiters.add(resolve));
+      }
+      this.approvedOrigin = undefined;
+      return await operation();
+    } finally {
+      finish();
+      if (this.userAction === turn) this.userAction = undefined;
+    }
+  }
+
+  assert(token: BrowserAgentOperationToken, url: string): void {
+    if (
+      token.generation !== this.generation ||
+      token.origin !== this.approvedOrigin ||
+      httpOrigin(url) !== token.origin
+    ) {
+      throw new Error("浏览器页面或模型操作代际已变化，请重新请求来源授权");
+    }
+  }
+
+  private advance(): void {
+    if (this.generation >= Number.MAX_SAFE_INTEGER) {
+      throw new Error("浏览器模型操作代际已耗尽");
+    }
+    this.generation++;
+  }
+}
+
+function httpOrigin(value: string): string | undefined {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:" ? url.origin : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export class BrowserViewportGenerationAuthority {
   readonly #generations = new Map<
     string,

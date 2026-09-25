@@ -10,6 +10,7 @@ import { ClientSessionRuntime } from "@pico/cli/tui/client-session-runtime";
 import { createClientCommandRegistry, processClientInput } from "@pico/cli/tui/client-commands";
 import { TuiReporter } from "@pico/cli/tui/tui-reporter";
 import { TestRuntimeHostCandidateTracker } from "../helpers/test-runtime-daemon.js";
+import { startRejectedModelServer } from "../helpers/rejected-model-server.js";
 
 /**
  * 3-D Phase 2 真机冒烟：ClientSessionRuntime 挂真实 LocalRuntimeClient（kernel
@@ -17,15 +18,13 @@ import { TestRuntimeHostCandidateTracker } from "../helpers/test-runtime-daemon.
  * 信任工作区 → 订阅 → session.send（daemon 物化会话并启动 run）→ 事件流
  * （run.started/live/timeline/finished + transcriptUpdated reload 对账）→ 投影。
  *
- * 模型路由指向死端点（127.0.0.1:9）：session.send 被接受、run 正常启动、模型
- * 调用快速失败——生命周期事件与对账照常流动，无需真实模型/外部依赖。
+ * 模型路由指向本地临时 HTTP 服务：session.send 被接受、run 正常启动、模型
+ * 调用收到不可重试的 400 后快速失败；生命周期事件与对账照常流动。
  *
  * 已知竞态容忍：慢环境 connectOrSpawn 可能连到将死候选的残留 socket
  * （A6），非幂等 session.send 不自动重试（P1-2）——冒烟层对 retryable 断连
  * 做一次手动重试（新 idempotencyKey，daemon 未收到首发的场景安全）。
  */
-
-const DEAD_ENDPOINT = "http://127.0.0.1:9";
 
 test("client session runtime over a real spawned daemon: send + lifecycle + reconcile", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-client-smoke-"));
@@ -34,8 +33,10 @@ test("client session runtime over a real spawned daemon: send + lifecycle + reco
   await mkdir(picoHome, { recursive: true });
   await mkdir(workspaceSeed, { recursive: true });
   const workspaceDir = await realpath(workspaceSeed);
+  const modelServer = await startRejectedModelServer();
+  t.after(() => modelServer.close());
   process.env.PICO_HOME = picoHome;
-  await configureDeadEndpointModel(picoHome);
+  await configureRejectedModel(picoHome, modelServer.baseURL);
   const candidates = new TestRuntimeHostCandidateTracker();
   t.after(() => {
     delete process.env.PICO_HOME;
@@ -78,14 +79,14 @@ test("client session runtime over a real spawned daemon: send + lifecycle + reco
   assert.ok(accepted, "session.send 应被 daemon 接受（容忍一次残留 socket 竞态重试）");
   assert.ok(runtime.activeSessionId, "send 结果应带回 sessionId");
 
-  // 等生命周期流动 + 对账：run 启动（running=true）→ 死端点模型调用失败 →
+  // 等生命周期流动 + 对账：run 启动（running=true）→ 模型拒绝请求 →
   // run 终态（running=false）→ transcript reload 对账。对账按内容断言（只有
   // transcript 能供给的 runBoundary 终态条目），不按计数（对抗评审 P1：本地
   // pushUserMessage/pushError 也能撑起计数）。
   const started = await waitForCondition(() => runningStates.includes(true), 90_000);
   assert.ok(started, "run.started 应驱动 running=true（live 事件流经真实传输）");
   const settled = await waitForCondition(() => runningStates.includes(false), 90_000);
-  assert.ok(settled, "run 终态（死端点快速失败）应驱动 running=false");
+  assert.ok(settled, "run 终态（模型不可重试错误）应驱动 running=false");
   const reconciled = await waitForCondition(
     () =>
       reporter
@@ -98,15 +99,17 @@ test("client session runtime over a real spawned daemon: send + lifecycle + reco
   runtime.dispose();
 });
 
-test("client commands over a real spawned daemon: slash chains (dead-endpoint model)", async (t) => {
+test("client commands over a real spawned daemon: slash chains (rejected model request)", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-client-slash-"));
   const picoHome = join(root, "pico-home");
   const workspaceSeed = join(root, "workspace");
   await mkdir(picoHome, { recursive: true });
   await mkdir(workspaceSeed, { recursive: true });
   const workspaceDir = await realpath(workspaceSeed);
+  const modelServer = await startRejectedModelServer();
+  t.after(() => modelServer.close());
   process.env.PICO_HOME = picoHome;
-  await configureDeadEndpointModel(picoHome);
+  await configureRejectedModel(picoHome, modelServer.baseURL);
   const candidates = new TestRuntimeHostCandidateTracker();
   t.after(() => {
     delete process.env.PICO_HOME;
@@ -130,7 +133,7 @@ test("client commands over a real spawned daemon: slash chains (dead-endpoint mo
   const registry = createClientCommandRegistry({ runtime, workspacePath: workspaceDir });
   await runtime.start();
 
-  // 物化会话；等 run 终态（死端点快速失败，但引擎重试有窗口）——投影出现终态
+  // 物化会话；等 run 终态（模型返回不可重试错误）——投影出现终态
   // runBoundary（transcript 对账内容性信号）即 idle，idle-only 命令可执行。
   let accepted = await runtime.sendText("slash 链路冒烟");
   if (!accepted) accepted = await runtime.sendText("slash 链路冒烟");
@@ -143,7 +146,7 @@ test("client commands over a real spawned daemon: slash chains (dead-endpoint mo
         .entries.some(({ entry }) => entry.kind === "run-boundary" && entry.status !== "running"),
     90_000,
   );
-  assert.ok(runSettled, "死端点 run 终态后 transcript 对账应带回终态 runBoundary");
+  assert.ok(runSettled, "模型拒绝后 transcript 对账应带回终态 runBoundary");
   const settledIdle = await waitForCondition(() => !runtime.running, 30_000);
   assert.ok(settledIdle, "run 应已终态（供 idle-only 命令执行）");
 
@@ -175,7 +178,7 @@ test("client commands over a real spawned daemon: slash chains (dead-endpoint mo
   assert.ok(second);
   const secondSessionId = runtime.activeSessionId;
   assert.notEqual(secondSessionId, firstSessionId);
-  // 第二个死端点 run 终态后再 /resume（idle-only；丢弃布尔必须断言——对抗评审）。
+  // 第二个 run 终态后再 /resume（idle-only；丢弃布尔必须断言——对抗评审）。
   assert.ok(
     await waitForCondition(() => !runtime.running, 90_000),
     "第二会话 run 应终态（供 /resume 执行）",
@@ -190,7 +193,7 @@ test("client commands over a real spawned daemon: slash chains (dead-endpoint mo
     "切回应水化出第一会话历史",
   );
 
-  // /interrupt：死端点 run 快速失败，竞态容忍——断言消息方向（已执行或被门拦，
+  // /interrupt：模型请求快速失败，竞态容忍——断言消息方向（已执行或被门拦，
   // 对抗评审 P0：kind==="local" 三种结局都满足）。run 可能已终态。
   const third = await runtime.sendInput({ kind: "text", text: "中断目标" });
   assert.ok(third);
@@ -206,7 +209,7 @@ test("client commands over a real spawned daemon: slash chains (dead-endpoint mo
   runtime.dispose();
 });
 
-async function configureDeadEndpointModel(picoHome: string): Promise<void> {
+async function configureRejectedModel(picoHome: string, baseURL: string): Promise<void> {
   const store = new UserConfigStore({ picoHome });
   const current = await store.read();
   await store.write(
@@ -216,7 +219,7 @@ async function configureDeadEndpointModel(picoHome: string): Promise<void> {
       providers: {
         "daemon-smoke": {
           protocol: "openai",
-          baseURL: DEAD_ENDPOINT,
+          baseURL,
           apiKeyEnv: "PICO_DAEMON_SMOKE_API_KEY",
           apiKey: "smoke-test-key",
           models: ["smoke-test-model"],

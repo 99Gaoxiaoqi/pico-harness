@@ -41,6 +41,7 @@ import { createSqliteAgentGraphRuntimeEventQueryPort } from "./product-agent-gra
 import { AgentGraphReadOnlyQueryService } from "@pico/runtime";
 import { findAgentProfile, loadAgentCatalog } from "./agent-catalog.js";
 import { globalSessionPermissionGrants } from "./session-permissions.js";
+import { globalClientCapabilityGrants } from "./client-capability-grants.js";
 import { ResourceDoctor, renderResourceDoctorReport } from "./resource-doctor.js";
 import { workspaceConfigurationDiagnosticFromRuntime } from "./workspace-configuration-diagnostic.js";
 import { runWorkspaceDoctor } from "./workspace-doctor.js";
@@ -210,6 +211,8 @@ import {
   BrowserAgentBrokerError,
   BrowserAgentCommandBroker,
 } from "./browser-agent-command-broker.js";
+import { ClientCapabilityCommandBroker } from "./client-capability-command-broker.js";
+import { loadDesktopClientToken } from "./desktop-client-token.js";
 import { DesktopRewindService } from "./desktop-rewind-service.js";
 
 const UNSUPPORTED_DESKTOP_METHODS: ReadonlySet<string> = new Set([
@@ -254,6 +257,7 @@ export interface DesktopRuntimeServiceOptions {
   readonly onTranscriptAdvanced?: (workspacePath: string, sessionId: string) => void;
   readonly reconcilePlanControl?: (workspacePath: string, sessionId: string) => Promise<void>;
   readonly browserAgentBroker?: BrowserAgentCommandBroker;
+  readonly clientCapabilityBroker?: ClientCapabilityCommandBroker;
   readonly stopAgentGraph?: (
     workspacePath: string,
     rootSessionId: string,
@@ -341,6 +345,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private queuedInputDispatchTail: Promise<void> = Promise.resolve();
   private resourceVersion = 0;
   private readonly browserAgentBroker: BrowserAgentCommandBroker;
+  private readonly clientCapabilityBroker: ClientCapabilityCommandBroker;
   private readonly storageRepair: WorkspaceStorageRepairService;
 
   constructor(private readonly options: DesktopRuntimeServiceOptions) {
@@ -354,6 +359,11 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     this.gitReviewService = new DesktopWorkbarGitReviewService();
     this.terminalService = new DesktopWorkbarTerminalService({ picoHome: this.picoHome });
     this.browserAgentBroker = options.browserAgentBroker ?? new BrowserAgentCommandBroker();
+    this.clientCapabilityBroker =
+      options.clientCapabilityBroker ??
+      new ClientCapabilityCommandBroker({
+        loadClientToken: () => loadDesktopClientToken(this.picoHome),
+      });
     this.registrationStore =
       options.registrationStore ??
       new WorkspaceRegistrationStore(join(this.picoHome, "daemon-workspaces.json"));
@@ -556,6 +566,14 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         this.withBrowserAgentErrors(() => this.browserAgentBroker.nextCommand(request.params)),
       "browser.agent.resolve": (request) =>
         this.withBrowserAgentErrors(() => this.browserAgentBroker.resolveCommand(request.params)),
+      "client.capability.next": (request) =>
+        this.clientCapabilityBroker.nextCommand(request.params),
+      "client.capability.resolve": (request) =>
+        this.clientCapabilityBroker.resolveCommand(request.params),
+      "client.capability.authorize": (request) =>
+        this.clientCapabilityBroker.authorizeCommand(request.params),
+      "client.capability.check": (request) =>
+        this.clientCapabilityBroker.checkCommand(request.params),
       "terminal.create": (request) =>
         this.withHostWorkbarErrors(() => this.terminalService.create(request.params)),
       "terminal.list": (request) =>
@@ -638,7 +656,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         getUserConfig: this.providerConfig.getUserConfig.bind(this.providerConfig),
         updateUserConfig: this.providerConfig.updateUserConfig.bind(this.providerConfig),
         listUserProviders: this.providerConfig.listUserProviders.bind(this.providerConfig),
-        testProviderConnection: this.providerConfig.testProviderConnection.bind(this.providerConfig),
+        testProviderConnection: this.providerConfig.testProviderConnection.bind(
+          this.providerConfig,
+        ),
         upsertUserProvider: this.providerConfig.upsertUserProvider.bind(this.providerConfig),
         importEnvironmentProvider: this.providerConfig.importEnvironmentProvider.bind(
           this.providerConfig,
@@ -881,6 +901,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       if (this.ownsMemoryService) await attempt(() => this.memoryService.close());
       await attempt(() => this.terminalService.close());
       this.browserAgentBroker.close();
+      this.clientCapabilityBroker.close();
     } finally {
       this.lifecycleState = "closed";
     }
@@ -1144,7 +1165,12 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     );
     if (archived) {
       this.browserAgentBroker.invalidateSession(sessionId, "浏览器 Session 已归档");
+      this.clientCapabilityBroker.invalidateSession(sessionId, "Desktop 能力 Session 已归档");
       globalSessionPermissionGrants.clear(sessionId, canonical, this.picoHome);
+      await globalClientCapabilityGrants.revokeSession(
+        sessionId,
+        resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.root,
+      );
     }
     const session = await this.requireSession(canonical, sessionId);
     this.publishSession(session);
@@ -1179,16 +1205,23 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const leases = sideChats.list();
     if (leases.some((lease) => lease.targetSessionId === sessionId)) {
       this.browserAgentBroker.invalidateSession(sessionId);
+      this.clientCapabilityBroker.invalidateSession(sessionId);
       await sideChats.cleanup(sessionId);
       return { sessionId, deleted: true };
     }
     const childLeases = leases.filter((candidate) => candidate.sourceSessionId === sessionId);
     for (const lease of childLeases) {
       this.browserAgentBroker.invalidateSession(lease.targetSessionId);
+      this.clientCapabilityBroker.invalidateSession(lease.targetSessionId);
       await sideChats.cleanup(lease.targetSessionId);
     }
     this.browserAgentBroker.invalidateSession(sessionId);
+    this.clientCapabilityBroker.invalidateSession(sessionId);
     globalSessionPermissionGrants.clear(sessionId, canonical, this.picoHome);
+    await globalClientCapabilityGrants.revokeSession(
+      sessionId,
+      resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.root,
+    );
     await this.terminalService.stopSession({ workspacePath: canonical, sessionId });
     await sessionMemoryLane.run(
       this.memoryLaneKey(canonical, sessionId),
@@ -1329,6 +1362,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       params.workspacePath,
     );
     this.browserAgentBroker.invalidateSession(params.sessionId);
+    this.clientCapabilityBroker.invalidateSession(params.sessionId);
     await this.sideChatAuthority(canonical).cleanup(params.sessionId);
     return { cleanupScheduled: true };
   }
@@ -1377,6 +1411,17 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       }
       const permissionModeChanging =
         requestedPermissionMode !== undefined && requestedPermissionMode !== current.permissionMode;
+      // A new authority epoch must not inherit process-local approvals from an
+      // earlier one. In particular, a network grant from before Full Access
+      // must not reappear when the durable boundary becomes managed again.
+      const revokeSessionGrants =
+        (permissionModeChanging &&
+          (current.permissionMode === "full-access" ||
+            requestedPermissionMode === "full-access" ||
+            (current.permissionMode === "auto" && requestedPermissionMode === "ask"))) ||
+        (requestedCollaborationMode !== undefined &&
+          requestedCollaborationMode !== current.collaborationMode &&
+          requestedCollaborationMode !== "agent");
       const orchestrationModeChanging =
         requestedOrchestrationMode !== undefined &&
         requestedOrchestrationMode !== current.orchestrationMode &&
@@ -1467,8 +1512,18 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         if (!result.ok) throw invalidSessionSetting(result.message);
       }
       await session.flushPersistence();
+      if (revokeSessionGrants) {
+        globalSessionPermissionGrants.clear(params.sessionId, canonical, this.picoHome);
+        await globalClientCapabilityGrants.revokeSession(
+          params.sessionId,
+          resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.root,
+        );
+      }
       return runtimeSessionSettings(current, router);
     });
+    if (requestedPermissionMode || requestedCollaborationMode) {
+      this.clientCapabilityBroker.invalidateSession(params.sessionId, "任务权限模式已变化");
+    }
     this.publish(
       createRuntimeNotification({
         topic: "session.settingsUpdated",
@@ -3706,6 +3761,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private async removeEphemeralSideChat(workspacePath: string, sessionId: string): Promise<void> {
     await this.terminalService.stopSession({ workspacePath, sessionId });
     globalSessionPermissionGrants.clear(sessionId, workspacePath, this.picoHome);
+    await globalClientCapabilityGrants.revokeSession(
+      sessionId,
+      resolvePicoPaths(workspacePath, { picoHome: this.picoHome }).workspace.root,
+    );
     const managed = globalSessionManager.delete(sessionId, workspacePath, {
       picoHome: this.picoHome,
     });

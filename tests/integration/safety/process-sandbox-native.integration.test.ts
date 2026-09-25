@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { realpathSync } from "node:fs";
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { link, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
@@ -22,6 +22,8 @@ import { GrepTool, resetRgCache, setRgAvailable } from "@pico/pico-host/grep-too
 import { WorkspaceRoots } from "@pico/pico-host/workspace-roots";
 import { McpConnectionManager } from "@pico/pico-host/mcp-connection-manager";
 import { signalProcessTree } from "@pico/runtime/process-tree";
+import { captureAtomicFilePrecondition } from "../../../packages/pico-host/src/atomic-workspace-file.js";
+import { commitWindowsFile } from "../../../packages/pico-host/src/process-sandbox/windows-file-commit.js";
 
 const nativeAvailable =
   process.platform === "darwin" || process.platform === "linux" || process.platform === "win32";
@@ -81,6 +83,263 @@ test(
       assert.equal(result.code, 0, result.stderr);
       assert.equal(result.stdout, "ok");
     }
+  },
+);
+
+test(
+  "Windows exact-file grants never expose a sibling or permit parent-directory creation",
+  { skip: process.platform !== "win32" },
+  async (context) => {
+    const fixture = await fixtureRoot(context, "pico-native-exact-file-");
+    const external = join(fixture.root, "external");
+    await mkdir(external);
+    const readable = join(external, "readable.txt");
+    const writable = join(external, "writable.txt");
+    const sibling = join(external, "sibling.txt");
+    const newFile = join(external, "new.txt");
+    await writeFile(readable, "visible");
+    await writeFile(writable, "old");
+    await writeFile(sibling, "private");
+    const script = [
+      'const fs=require("node:fs");',
+      `const paths=${JSON.stringify({ readable, writable, sibling, newFile, external })};`,
+      "const result={};",
+      'const attempt=(name,fn)=>{try{result[name]=fn()}catch{result[name]="DENIED"}};',
+      'attempt("read",()=>fs.readFileSync(paths.readable,"utf8"));',
+      'attempt("targetStat",()=>fs.statSync(paths.readable).isFile());',
+      'attempt("missingParentStat",()=>fs.statSync(paths.external).isDirectory());',
+      'attempt("write",()=>{fs.writeFileSync(paths.writable,"changed");return "OK"});',
+      'attempt("siblingRead",()=>fs.readFileSync(paths.sibling,"utf8"));',
+      'attempt("siblingWrite",()=>{fs.writeFileSync(paths.sibling,"unsafe");return "OK"});',
+      'attempt("create",()=>{fs.writeFileSync(paths.newFile,"unsafe");return "OK"});',
+      'attempt("list",()=>fs.readdirSync(paths.external).join(","));',
+      "process.stdout.write(JSON.stringify(result));",
+    ].join("");
+    const result = await runNode(
+      fixture,
+      "read-only",
+      script,
+      fixture.workspace,
+      process.env,
+      [],
+      "deny",
+      [readable],
+      [writable, newFile],
+    );
+    assert.equal(result.code, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), {
+      read: "visible",
+      targetStat: true,
+      missingParentStat: true,
+      write: "OK",
+      siblingRead: "DENIED",
+      siblingWrite: "DENIED",
+      create: "DENIED",
+      list: "DENIED",
+    });
+    assert.equal(await readFile(writable, "utf8"), "changed");
+    assert.equal(await readFile(sibling, "utf8"), "private");
+    await assert.rejects(readFile(newFile));
+  },
+);
+
+test(
+  "Windows exact-file grants let the child stat its cwd without exposing nested siblings",
+  { skip: process.platform !== "win32" },
+  async (context) => {
+    const fixture = await fixtureRoot(context, "pico-native-exact-cwd-");
+    const nested = join(fixture.workspace, "nested");
+    await mkdir(nested);
+    const readable = join(nested, "allowed.txt");
+    const sibling = join(nested, "private.txt");
+    const created = join(nested, "created.txt");
+    await writeFile(readable, "visible");
+    await writeFile(sibling, "private");
+    const script = [
+      'const fs=require("node:fs");',
+      `const paths=${JSON.stringify({ workspace: fixture.workspace, nested, readable, sibling, created })};`,
+      "const result={cwdStat:fs.statSync(paths.workspace).isDirectory(),nestedStat:fs.statSync(paths.nested).isDirectory(),read:fs.readFileSync(paths.readable,'utf8')};",
+      'const attempt=(name,fn)=>{try{result[name]=fn()}catch{result[name]="DENIED"}};',
+      'attempt("siblingRead",()=>fs.readFileSync(paths.sibling,"utf8"));',
+      'attempt("siblingWrite",()=>{fs.writeFileSync(paths.sibling,"unsafe");return "OK"});',
+      'attempt("create",()=>{fs.writeFileSync(paths.created,"unsafe");return "OK"});',
+      "process.stdout.write(JSON.stringify(result));",
+    ].join("");
+    const result = await runNode(
+      fixture,
+      "read-only",
+      script,
+      fixture.workspace,
+      process.env,
+      [],
+      "deny",
+      [readable],
+      [created],
+      [],
+    );
+    assert.equal(result.code, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), {
+      cwdStat: true,
+      nestedStat: true,
+      read: "visible",
+      siblingRead: "DENIED",
+      siblingWrite: "DENIED",
+      create: "DENIED",
+    });
+    assert.equal(await readFile(sibling, "utf8"), "private");
+    await assert.rejects(readFile(created));
+  },
+);
+
+test(
+  "Windows exact-file grants reject a target with another hard link",
+  { skip: process.platform !== "win32" },
+  async (context) => {
+    const fixture = await fixtureRoot(context, "pico-native-exact-hardlink-");
+    const readable = join(fixture.workspace, "allowed.txt");
+    const alias = join(fixture.workspace, "alias.txt");
+    await writeFile(readable, "private");
+    await link(readable, alias);
+    const result = await runNode(
+      fixture,
+      "read-only",
+      `process.stdout.write(require("node:fs").readFileSync(${JSON.stringify(readable)},"utf8"))`,
+      fixture.workspace,
+      process.env,
+      [],
+      "deny",
+      [readable],
+      [],
+      [],
+    );
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /multiple hard links/u);
+    assert.doesNotMatch(result.stdout, /private/u);
+  },
+);
+
+test(
+  "Windows file-worker task root outside the profile keeps exact files isolated",
+  { skip: process.platform !== "win32" },
+  async (context) => {
+    const fixture = await fixtureRoot(context, "pico-native-exact-task-root-", true, process.cwd());
+    const nested = join(fixture.workspace, "nested");
+    await mkdir(nested);
+    const readable = join(nested, "allowed.txt");
+    const sibling = join(nested, "private.txt");
+    const created = join(nested, "created.txt");
+    await writeFile(readable, "visible");
+    await writeFile(sibling, "private");
+    const script = [
+      'const fs=require("node:fs");',
+      `const paths=${JSON.stringify({ workspace: fixture.workspace, nested, readable, sibling, created })};`,
+      "const result={cwdStat:fs.statSync(paths.workspace).isDirectory(),targetStat:fs.statSync(paths.readable).isFile(),parentStat:fs.statSync(paths.nested).isDirectory(),read:fs.readFileSync(paths.readable,'utf8')};",
+      'const attempt=(name,fn)=>{try{result[name]=fn()}catch{result[name]="DENIED"}};',
+      'attempt("siblingRead",()=>fs.readFileSync(paths.sibling,"utf8"));',
+      'attempt("siblingWrite",()=>{fs.writeFileSync(paths.sibling,"unsafe");return "OK"});',
+      'attempt("create",()=>{fs.writeFileSync(paths.created,"unsafe");return "OK"});',
+      "process.stdout.write(JSON.stringify(result));",
+    ].join("");
+    const result = await runNode(
+      fixture,
+      "read-only",
+      script,
+      fixture.workspace,
+      process.env,
+      [],
+      "deny",
+      [readable],
+      [created],
+      [],
+      "file-worker",
+    );
+    assert.equal(result.code, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), {
+      cwdStat: true,
+      targetStat: true,
+      parentStat: true,
+      read: "visible",
+      siblingRead: "DENIED",
+      siblingWrite: "DENIED",
+      create: "DENIED",
+    });
+    assert.equal(await readFile(sibling, "utf8"), "private");
+    await assert.rejects(readFile(created));
+  },
+);
+
+test(
+  "Windows directory-scoped File Worker can stat cwd without exact-file grants",
+  { skip: process.platform !== "win32" },
+  async (context) => {
+    const fixture = await fixtureRoot(context, "pico-native-directory-worker-");
+    const nested = join(fixture.workspace, "nested");
+    await mkdir(nested);
+    const allowed = join(nested, "allowed.txt");
+    const sibling = join(fixture.workspace, "sibling.txt");
+    await writeFile(allowed, "visible");
+    await writeFile(sibling, "private");
+    const script = [
+      'const fs=require("node:fs");',
+      `const paths=${JSON.stringify({ workspace: fixture.workspace, allowed, sibling })};`,
+      "const result={cwdStat:fs.lstatSync(paths.workspace).isDirectory(),read:fs.readFileSync(paths.allowed,'utf8')};",
+      'try{result.sibling=fs.readFileSync(paths.sibling,"utf8")}catch{result.sibling="DENIED"}',
+      "process.stdout.write(JSON.stringify(result));",
+    ].join("");
+    const result = await runNode(
+      fixture,
+      "read-only",
+      script,
+      fixture.workspace,
+      process.env,
+      [nested],
+      "deny",
+      [],
+      [],
+      [],
+      "file-worker",
+    );
+    assert.equal(result.code, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), {
+      cwdStat: true,
+      read: "visible",
+      sibling: "DENIED",
+    });
+  },
+);
+
+test(
+  "Windows trusted Broker commits a new exact file and rejects a stale precondition",
+  { skip: process.platform !== "win32" },
+  async (context) => {
+    const fixture = await fixtureRoot(context, "pico-native-exact-commit-");
+    const external = join(fixture.root, "external");
+    await mkdir(external);
+    await mkdir(fixture.scratch);
+    const targetPath = join(external, "new.txt");
+    const sibling = join(external, "sibling.txt");
+    await writeFile(sibling, "private");
+    const boundExternal = realpathSync.native(external);
+    const precondition = await captureAtomicFilePrecondition(targetPath);
+    assert.equal(precondition.kind, "missing");
+    const input = {
+      targetPath,
+      content: "committed",
+      precondition,
+      revalidateTarget: () => {
+        assert.equal(realpathSync.native(external), boundExternal);
+      },
+      scratchRoot: fixture.scratch,
+      writableRoots: [fixture.workspace, fixture.scratch],
+    };
+    await commitWindowsFile(input);
+    assert.equal(await readFile(targetPath, "utf8"), "committed");
+    assert.equal(await readFile(sibling, "utf8"), "private");
+
+    const stale = await captureAtomicFilePrecondition(targetPath);
+    await writeFile(targetPath, "concurrent");
+    await assert.rejects(commitWindowsFile({ ...input, content: "rejected", precondition: stale }));
+    assert.equal(await readFile(targetPath, "utf8"), "concurrent");
   },
 );
 
@@ -542,8 +801,9 @@ async function fixtureRoot(
   context: { after(callback: () => unknown): void },
   prefix: string,
   autoCleanup = true,
+  parent = tmpdir(),
 ): Promise<Fixture> {
-  const root = await mkdtemp(join(tmpdir(), prefix));
+  const root = await mkdtemp(join(parent, prefix));
   const workspace = join(root, "workspace");
   const scratch = join(root, "scratch");
   const control = join(root, "control");
@@ -561,12 +821,18 @@ async function runNode(
   env: NodeJS.ProcessEnv = process.env,
   readRoots: readonly string[] = [],
   network: "allow" | "deny" = "allow",
+  readFiles: readonly string[] = [],
+  writeFiles: readonly string[] = [],
+  workspaceRoots: readonly string[] = [fixture.workspace],
+  origin: ManagedSpawnRequest["origin"] = "bash",
 ): Promise<{ code: number | null; stdout: string; stderr: string }> {
   const policy = createSandboxPolicy({
     profile,
-    workspaceRoots: [fixture.workspace],
+    workspaceRoots,
     scratchRoot: fixture.scratch,
     readRoots,
+    readFiles,
+    writeFiles,
     config: { network },
   });
   const request: ManagedSpawnRequest = {
@@ -574,7 +840,7 @@ async function runNode(
     args: ["-e", script],
     cwd,
     env,
-    origin: "bash",
+    origin,
     policy,
     controlRoot: fixture.control,
   };

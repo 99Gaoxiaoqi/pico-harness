@@ -650,9 +650,15 @@ function bindSessionSettingsPersistence(
 function persistSessionSettings(settings: SessionSettings): void {
   const persistence = persistenceBySettings.get(settings);
   if (!persistence) return;
+  const previous = persistence.getRuntimeStateSnapshot();
+  const authorityChanged =
+    previous.settings !== undefined &&
+    (previous.settings.permissionMode !== settings.permissionMode ||
+      previous.settings.collaborationMode !== settings.collaborationMode);
   const boundary = reconcileExecutionBoundary(
-    persistence.getRuntimeStateSnapshot().boundary,
+    previous.boundary,
     settings.permissionMode,
+    authorityChanged,
   );
   persistence.updateRuntimeState({ settings: snapshotSessionSettings(settings), boundary });
 }
@@ -661,6 +667,7 @@ function persistSessionSettings(settings: SessionSettings): void {
 function reconcileExecutionBoundary(
   current: ExecutionBoundary | undefined,
   permissionMode: SessionSettings["permissionMode"],
+  authorityChanged = false,
 ): ExecutionBoundary {
   if (!current) {
     return compileRuntimePermissionProfile({
@@ -673,10 +680,24 @@ function reconcileExecutionBoundary(
   if (current.kind === "external") return current;
   if (permissionMode === "full-access") {
     return current.kind === "bypass"
-      ? current
-      : createBypassExecutionBoundary(current.revision + 1);
+      ? authorityChanged
+        ? { ...current, revision: nextAuthorityRevision(current.revision) }
+        : current
+      : createBypassExecutionBoundary(nextAuthorityRevision(current.revision));
   }
   return current.kind === "managed"
-    ? current
-    : createManagedExecutionBoundary(createWorkspaceWritePermissionProfile(), current.revision + 1);
+    ? authorityChanged
+      ? { ...current, revision: nextAuthorityRevision(current.revision) }
+      : current
+    : createManagedExecutionBoundary(
+        createWorkspaceWritePermissionProfile(),
+        nextAuthorityRevision(current.revision),
+      );
+}
+
+function nextAuthorityRevision(current: number): number {
+  if (!Number.isSafeInteger(current) || current >= Number.MAX_SAFE_INTEGER) {
+    throw new Error("任务授权代际已耗尽，无法切换权限模式");
+  }
+  return current + 1;
 }

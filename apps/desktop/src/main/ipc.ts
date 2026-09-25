@@ -305,12 +305,14 @@ export function registerDesktopIpcHandlers(options: {
       }
     });
   };
-  browserSessionHandler(DESKTOP_IPC_CHANNELS.browserBack, (sessionId) => browser.back(sessionId));
+  browserSessionHandler(DESKTOP_IPC_CHANNELS.browserBack, (sessionId) =>
+    browser.withUserAction(sessionId, () => browser.back(sessionId)),
+  );
   browserSessionHandler(DESKTOP_IPC_CHANNELS.browserForward, (sessionId) =>
-    browser.forward(sessionId),
+    browser.withUserAction(sessionId, () => browser.forward(sessionId)),
   );
   browserSessionHandler(DESKTOP_IPC_CHANNELS.browserReload, (sessionId) =>
-    browser.reload(sessionId),
+    browser.withUserAction(sessionId, () => browser.reload(sessionId)),
   );
   browserSessionHandler(DESKTOP_IPC_CHANNELS.browserStop, (sessionId) => browser.stop(sessionId));
   browserSessionHandler(DESKTOP_IPC_CHANNELS.browserGetState, (sessionId) =>
@@ -329,7 +331,9 @@ export function registerDesktopIpcHandlers(options: {
         return invalidBrowserRequest();
       }
       try {
-        return success(await browser.navigate(sessionId, address));
+        return success(
+          await browser.withUserAction(sessionId, () => browser.navigate(sessionId, address)),
+        );
       } catch (error) {
         return failure(error);
       }
@@ -354,7 +358,9 @@ export function registerDesktopIpcHandlers(options: {
         return invalidBrowserRequest();
       }
       try {
-        return success(await browser.click(sessionId, selector));
+        return success(
+          await browser.withUserAction(sessionId, () => browser.click(sessionId, selector)),
+        );
       } catch (error) {
         return failure(error);
       }
@@ -374,12 +380,65 @@ export function registerDesktopIpcHandlers(options: {
         return invalidBrowserRequest();
       }
       try {
-        return success(await browser.type(sessionId, selector, text, clear));
+        return success(
+          await browser.withUserAction(sessionId, () =>
+            browser.type(sessionId, selector, text, clear),
+          ),
+        );
       } catch (error) {
         return failure(error);
       }
     },
   );
+
+  ipcMain.handle(DESKTOP_IPC_CHANNELS.browserAgentExecute, async (event, value: unknown) => {
+    if (!trusted(event)) return unauthorized();
+    if (!isRecord(value) || !isNonEmptyString(value["sessionId"]) || !isRecord(value["input"])) {
+      return invalidBrowserRequest();
+    }
+    const sessionId = value["sessionId"];
+    const action = value["action"];
+    const input = value["input"];
+    try {
+      if (action === "get_state") {
+        const state = browser.getState(sessionId);
+        if (!state?.visible) throw new Error("浏览器面板当前不可见");
+        return success({ state });
+      }
+      const origin = value["expectedOrigin"];
+      if (!isNonEmptyString(origin)) return invalidBrowserRequest();
+      if (action === "navigate") {
+        const url = input["url"];
+        if (!isBoundedString(url, 8_192, false)) return invalidBrowserRequest();
+        const token = browser.guardAgentOrigin(sessionId, origin, url);
+        return success({ state: await browser.navigate(sessionId, url, token) });
+      }
+      const token = browser.guardAgentOrigin(sessionId, origin);
+      if (action === "back") return success({ state: browser.back(sessionId) });
+      if (action === "forward") return success({ state: browser.forward(sessionId) });
+      if (action === "reload") return success({ state: browser.reload(sessionId) });
+      if (action === "click") {
+        const selector = input["selector"];
+        if (!isBoundedString(selector, 2_048, false)) return invalidBrowserRequest();
+        return success(await browser.click(sessionId, selector, token));
+      }
+      if (action === "type") {
+        const selector = input["selector"];
+        const text = input["text"];
+        const clear = input["clear"];
+        if (
+          !isBoundedString(selector, 2_048, false) ||
+          !isBoundedString(text, 32_000, true) ||
+          typeof clear !== "boolean"
+        )
+          return invalidBrowserRequest();
+        return success(await browser.type(sessionId, selector, text, clear, token));
+      }
+      return invalidBrowserRequest();
+    } catch (error) {
+      return failure(error);
+    }
+  });
 
   ipcMain.handle(DESKTOP_IPC_CHANNELS.chooseWorkspace, async (event) => {
     if (!trusted(event)) return unauthorized();

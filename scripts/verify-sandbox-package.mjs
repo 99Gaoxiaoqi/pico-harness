@@ -37,6 +37,9 @@ try {
     if (relativeExecutable.includes("/linux-")) await access(executable, constants.X_OK);
     await verifySidecarDigest(executable);
   }
+  for (const filename of ["file-worker.mjs", "windows-file-commit-entry.mjs"]) {
+    await verifySidecarDigest(join(packageRoot, "resources/file-worker", filename));
+  }
 
   const sourceArchive = join(
     packageRoot,

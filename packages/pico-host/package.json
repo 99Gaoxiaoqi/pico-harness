@@ -671,6 +671,26 @@
       "types": "./dist/browser-agent-tools.d.ts",
       "import": "./dist/browser-agent-tools.js"
     },
+    "./client-capability-grants": {
+      "types": "./dist/client-capability-grants.d.ts",
+      "import": "./dist/client-capability-grants.js"
+    },
+    "./client-capability-command-broker": {
+      "types": "./dist/client-capability-command-broker.d.ts",
+      "import": "./dist/client-capability-command-broker.js"
+    },
+    "./desktop-client-token": {
+      "types": "./dist/desktop-client-token.d.ts",
+      "import": "./dist/desktop-client-token.js"
+    },
+    "./desktop-mcp-call-tool": {
+      "types": "./dist/desktop-mcp-call-tool.d.ts",
+      "import": "./dist/desktop-mcp-call-tool.js"
+    },
+    "./computer-use-tools": {
+      "types": "./dist/computer-use-tools.d.ts",
+      "import": "./dist/computer-use-tools.js"
+    },
     "./ask-user-tool": {
       "types": "./dist/ask-user-tool.d.ts",
       "import": "./dist/ask-user-tool.js"

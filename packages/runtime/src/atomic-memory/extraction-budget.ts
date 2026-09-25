@@ -1,5 +1,6 @@
-import { DEFAULT_SAFETY_MARGIN_TOKENS, estimateMessagesTokens } from "../context-budget.js";
-import { countTokens, primeTokenizer } from "../token-counter.js";
+import { DEFAULT_SAFETY_MARGIN_TOKENS } from "../context-budget.js";
+import { estimateRequestTokens } from "../capability-preflight.js";
+import { primeTokenizer } from "../token-counter.js";
 import type { Message, ToolDefinition } from "@pico/core";
 
 export interface MemoryRequestBudgetInput {
@@ -35,8 +36,7 @@ export async function memoryRequestFits(
     ...prefix,
     { role: prefix.length ? "user" : "system", content: prompt },
   ];
-  // Count the serialized catalog, matching capability-preflight's tool accounting.
-  const inputTokens =
-    estimateMessagesTokens(messages) + (tools.length ? countTokens(JSON.stringify(tools)) : 0);
+  // Match the preflight check for the request that ProviderAtomicMemoryModel sends.
+  const inputTokens = estimateRequestTokens(messages, tools);
   return inputTokens + outputReserve + DEFAULT_SAFETY_MARGIN_TOKENS <= contextWindow;
 }

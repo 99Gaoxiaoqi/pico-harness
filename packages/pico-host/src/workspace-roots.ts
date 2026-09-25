@@ -65,6 +65,7 @@ export class WorkspaceRoots {
   private constructor(
     private readonly primaryRoot: string,
     private readonly roots: string[],
+    private readonly preboundFileWorker = false,
   ) {}
 
   static async create(
@@ -96,6 +97,15 @@ export class WorkspaceRoots {
     }
     const normalizedPrimary = realpathSync.native(absolutePath);
     return new WorkspaceRoots(normalizedPrimary, [normalizedPrimary]);
+  }
+
+  /** Windows File Worker only: Host has already canonicalized and bound every target. */
+  static createPreboundFileWorker(primaryRoot: string): WorkspaceRoots {
+    if (!isAbsolute(primaryRoot) || resolve(primaryRoot) !== primaryRoot) {
+      throw new Error("File Worker 工作区根不是规范化绝对路径");
+    }
+    // No implicit workspace grant: replaceBoundaryEntries supplies only this request's targets.
+    return new WorkspaceRoots(primaryRoot, [], true);
   }
 
   /** Keep paths relative to the workspace while physically limiting access to branch roots. */
@@ -222,7 +232,7 @@ export class WorkspaceRoots {
 
   resolveUnchecked(path: string): string {
     const lexicalTarget = isAbsolute(path) ? resolve(path) : resolve(this.primaryRoot, path);
-    return canonicalizeTargetSync(lexicalTarget);
+    return this.preboundFileWorker ? lexicalTarget : canonicalizeTargetSync(lexicalTarget);
   }
 
   isAllowedPath(path: string, access: WorkspaceAccess["access"] = "read"): boolean {
@@ -248,6 +258,10 @@ export class WorkspaceRoots {
     const target = this.resolveUnchecked(path);
     const requestedAccess = options.access ?? "read";
     if (this.isPolicyDenied(target, requestedAccess)) throw outsideWorkspaceError(path);
+    if (this.preboundFileWorker) {
+      if (!this.isAllowed(target, requestedAccess)) throw outsideWorkspaceError(path);
+      return target;
+    }
     let usedOneCallPermission = false;
     if (!this.isAllowed(target, requestedAccess)) {
       const authorization = [...this.oneCallPaths.keys()].find((root) => isWithin(root, target));

@@ -111,7 +111,7 @@ test("trace inspector integrates physical attempts, independent usage and earlie
     "输入 Token 缓存复用率",
     "65.8%",
     "工具耗时",
-    "模型调用记录",
+    "执行时间线",
     "重试 1 次",
     "HTTP 429",
     "第 1 次",
@@ -133,7 +133,7 @@ test("trace inspector integrates physical attempts, independent usage and earlie
     summaryError: "计量暂不可用",
   });
   assert.match(unavailable, /会话用量读取失败：计量暂不可用/u);
-  assert.match(unavailable, /模型甲/u);
+  assert.match(unavailable, /data-step-id="step"/u);
   assert.doesNotMatch(unavailable, /输入 Token 缓存复用率/u);
   const traceFailed = render({ summary, error: "轨迹暂不可用" });
   assert.match(traceFailed, /65.8%/u);

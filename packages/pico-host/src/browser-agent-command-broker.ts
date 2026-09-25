@@ -14,7 +14,11 @@ const TIMEOUT = Symbol("browser-command-timeout");
 /** Fixed-operation authority supplied to browser tools without exposing an eval primitive. */
 export interface BrowserAgentCommandAuthority {
   readonly sessionId: string;
-  execute(action: RuntimeBrowserAgentAction, input?: JsonObject): Promise<JsonObject>;
+  execute(
+    action: RuntimeBrowserAgentAction,
+    input?: JsonObject,
+    options?: { readonly expectedOrigin?: string },
+  ): Promise<JsonObject>;
 }
 
 export type BrowserAgentBrokerErrorCode =
@@ -74,8 +78,11 @@ export class BrowserAgentCommandBroker {
   bind(sessionId: string): BrowserAgentCommandAuthority {
     return Object.freeze({
       sessionId,
-      execute: (action: RuntimeBrowserAgentAction, input: JsonObject = {}) =>
-        this.execute(sessionId, action, input),
+      execute: (
+        action: RuntimeBrowserAgentAction,
+        input: JsonObject = {},
+        options?: { readonly expectedOrigin?: string },
+      ) => this.execute(sessionId, action, input, options),
     });
   }
 
@@ -195,6 +202,7 @@ export class BrowserAgentCommandBroker {
     sessionId: string,
     action: RuntimeBrowserAgentAction,
     input: JsonObject,
+    options?: { readonly expectedOrigin?: string },
   ): Promise<JsonObject> {
     this.assertOpen();
     const lease = this.requireVisibleLease(sessionId);
@@ -204,6 +212,7 @@ export class BrowserAgentCommandBroker {
       sessionId,
       action,
       input,
+      ...(options?.expectedOrigin ? { expectedOrigin: options.expectedOrigin } : {}),
       createdAt: this.now(),
       expiresAt: this.now() + timeoutMs,
     };

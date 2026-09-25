@@ -124,6 +124,8 @@ import { WorkspaceRuntimeService } from "./workspace-runtime-service.js";
 import { INTERRUPTED_DAEMON_RUN_ERROR } from "./workspace-run-lifecycle.js";
 import { agentGraphLaunchStateFromWorkspaceRun } from "./agent-graph-launch-state.js";
 import { BrowserAgentCommandBroker } from "./browser-agent-command-broker.js";
+import { ClientCapabilityCommandBroker } from "./client-capability-command-broker.js";
+import { loadDesktopClientToken } from "./desktop-client-token.js";
 import { SqliteRuntimeEventStore } from "@pico/storage/sqlite/sqlite-runtime-event-store";
 import type { AgentGraphApplicationService } from "@pico/runtime/agent-graph-service";
 import type { AgentGraph } from "@pico/core/agent-graph-contracts";
@@ -225,6 +227,9 @@ export function createProductionRuntimeServices(
   const agentRuntime = options.agentRuntime ?? new AgentRuntime();
   const atomicMemoryLifecycle = new AtomicMemoryLifecycle(options.acquireMemoryResidency);
   const browserAgentBroker = new BrowserAgentCommandBroker();
+  const clientCapabilityBroker = new ClientCapabilityCommandBroker({
+    loadClientToken: () => loadDesktopClientToken(picoHome),
+  });
   if (
     options.pluginRuntimeSnapshotRegistry &&
     options.pluginCapabilityRegistry &&
@@ -449,11 +454,31 @@ export function createProductionRuntimeServices(
       const pluginSnapshot = operatorProfile
         ? undefined
         : await pluginRuntimeSnapshotRegistry.get(runWorkDir);
+      const graphExecutionBoundary =
+        operatorExecutionBoundary?.child ?? input.session.getRuntimeStateSnapshot().boundary;
+      if (!graphExecutionBoundary) {
+        throw new Error(`Graph Session ${targetSessionId} 缺少持久执行边界`);
+      }
       runtimeState = await createSessionRuntime({
         session: input.session,
         sessionLease,
         env,
         workspaceTrustStore: trustStore,
+        processSandbox: {
+          profile:
+            persistedSettings?.collaborationMode === "plan" ||
+            persistedSettings?.collaborationMode === "research"
+              ? "read-only"
+              : graphExecutionBoundary.kind === "bypass"
+                ? "danger-full-access"
+                : "workspace-write",
+          bypass:
+            graphExecutionBoundary.kind === "bypass" &&
+            (persistedSettings?.collaborationMode ?? "agent") === "agent",
+          scratchRoot: join(picoHome, "sandboxes", targetSessionId),
+          workspaceRoots: [runWorkDir],
+          generation: 0,
+        },
         ...(operatorProfile ? { lspEnabled: false as const, hooks: false as const } : {}),
         ...(!operatorProfile && workspaceRuntime.taskHostRuntime
           ? { taskHostRuntime: workspaceRuntime.taskHostRuntime }
@@ -568,6 +593,9 @@ export function createProductionRuntimeServices(
           picoHome,
           env,
           ...(operatorProfile ? {} : { browserAgent: browserAgentBroker.bind(targetSessionId) }),
+          ...(operatorProfile
+            ? {}
+            : { clientCapability: clientCapabilityBroker.bind(targetSessionId) }),
           prestartedRun: input.prestartedRun,
           prestartedUserInput: input.prestartedUserInput,
           agentGraph: graphBinding,
@@ -953,6 +981,10 @@ export function createProductionRuntimeServices(
         const pluginSnapshot = await pluginRuntimeSnapshotRegistry.get(workspacePath);
         if (graphHost) await refreshGraphOperatorCatalog(workspacePath);
         const projectConfig = await loadPicoProjectConfig(workspacePath);
+        const foregroundExecutionBoundary = session.getRuntimeStateSnapshot().boundary;
+        if (!foregroundExecutionBoundary) {
+          throw new Error(`Session ${targetSessionId} 缺少持久执行边界`);
+        }
         const persistedAdditionalDirectories = persistedSettings?.additionalDirectories ?? [];
         const processWorkspaceRoots = [
           workspacePath,
@@ -972,9 +1004,12 @@ export function createProductionRuntimeServices(
               persistedSettings?.collaborationMode === "plan" ||
               persistedSettings?.collaborationMode === "research"
                 ? "read-only"
-                : persistedSettings?.permissionMode === "full-access"
+                : foregroundExecutionBoundary.kind === "bypass"
                   ? "danger-full-access"
                   : "workspace-write",
+            bypass:
+              foregroundExecutionBoundary.kind === "bypass" &&
+              (persistedSettings?.collaborationMode ?? "agent") === "agent",
             config: projectConfig.sandbox,
             scratchRoot: join(picoHome, "sandboxes", targetSessionId),
             workspaceRoots: processWorkspaceRoots,
@@ -1204,6 +1239,7 @@ export function createProductionRuntimeServices(
             picoHome,
             env,
             browserAgent: browserAgentBroker.bind(targetSessionId),
+            clientCapability: clientCapabilityBroker.bind(targetSessionId),
             ...(foregroundGraphRuntime
               ? {
                   agentGraph: foregroundGraphRuntime.binding,
@@ -1628,6 +1664,7 @@ export function createProductionRuntimeServices(
     registrationStore,
     trustStore,
     browserAgentBroker,
+    clientCapabilityBroker,
     env,
     automations,
     userConfigStore,

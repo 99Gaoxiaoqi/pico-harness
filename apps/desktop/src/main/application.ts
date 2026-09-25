@@ -1,4 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain } from "electron";
+import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { parseRuntimeResult } from "@pico/protocol";
 import { DESKTOP_IPC_CHANNELS } from "../preload/contract.js";
@@ -12,7 +13,17 @@ import { createDesktopWindow } from "./window.js";
 import { configureAutoUpdates } from "./updater.js";
 import { installApplicationMenu } from "./menu.js";
 import { sleepForRetry } from "@pico/runtime/provider-retry";
+import { scheduleDeadline } from "@pico/runtime/deadline";
 import { createEmbeddedBrowserAuthority } from "./browser-manager.js";
+import { ComputerUseExecutor } from "./computer-use-executor.js";
+import { DesktopMcpExecutor } from "./desktop-mcp-executor.js";
+import { UserMcpConfigStore } from "@pico/pico-host/user-mcp-config-store";
+import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
+import { createSandboxPolicy } from "@pico/pico-host/process-sandbox";
+import {
+  revokeDesktopClientToken,
+  rotateDesktopClientToken,
+} from "@pico/pico-host/desktop-client-token";
 import { ensureDesktopRuntimeStorageRoot } from "./runtime-storage-recovery.js";
 import {
   cleanupDesktopWorkbarResources,
@@ -82,6 +93,152 @@ const terminalCleanupFence = createDesktopTerminalCleanupFence(
 // re-bootstrap，消除 fail-stuck）。不自动重启 daemon——kernel 承载下幂等 ping
 // 的重试窗口本身就会尝试重生，重启循环只会掩盖配置错误。
 let stopRuntimeProbe: (() => void) | undefined;
+let stopClientCapabilityPoller: (() => void) | undefined;
+let clientCapabilityToken: string | undefined;
+const computerUseExecutor = new ComputerUseExecutor();
+
+function startClientCapabilityPoller(clientToken: string): () => void {
+  const clientId = randomUUID();
+  const picoHome = resolveCanonicalPicoHome();
+  const trustedWorkspaces = new WorkspaceTrustStore({ userStateDirectory: picoHome });
+  const activeMcpTools = new Map<string, string>();
+  const desktopMcpExecutor = new DesktopMcpExecutor({
+    userConfigStore: new UserMcpConfigStore({ picoHome }),
+    isTrustedWorkspace: (workspacePath) => trustedWorkspaces.isTrusted(workspacePath),
+    createSandboxPolicy: ({ workspacePath, server }) => {
+      const scope = createHash("sha256")
+        .update(`${workspacePath}\0${server}`)
+        .digest("hex")
+        .slice(0, 24);
+      return createSandboxPolicy({
+        profile: "read-only",
+        workspaceRoots: [workspacePath],
+        scratchRoot: join(picoHome, "sandboxes", "desktop-mcp", scope),
+        config: { network: "deny" },
+      });
+    },
+    authorize: async (request) => {
+      const tool = activeMcpTools.get(request.commandId);
+      if (!tool || (request.tool && request.tool !== tool)) return false;
+      const { allowed } = parseRuntimeResult(
+        "client.capability.authorize",
+        await runtime.request("client.capability.authorize", {
+          clientId,
+          clientToken,
+          commandId: request.commandId,
+          sessionId: request.sessionId,
+          authorityEpoch: request.authorityEpoch,
+          server: request.server,
+          tool,
+          phase: request.phase,
+        }),
+      );
+      return allowed;
+    },
+  });
+  let stopped = false;
+  const run = async (): Promise<void> => {
+    while (!stopped) {
+      try {
+        const { command } = parseRuntimeResult(
+          "client.capability.next",
+          await runtime.request("client.capability.next", { clientId, clientToken, waitMs: 1_000 }),
+        );
+        if (!command || stopped) continue;
+        let outcome:
+          | {
+              readonly ok: true;
+              readonly result: Awaited<ReturnType<ComputerUseExecutor["execute"]>>;
+            }
+          | { readonly ok: false; readonly error: string };
+        try {
+          if (!mainWindow || mainWindow.isDestroyed()) {
+            throw new Error("Desktop 客户端窗口已关闭，能力操作被拒绝");
+          }
+          if (command.action === "desktop_mcp.call") {
+            const { workspacePath, authorityEpoch, server, tool, args, toolCallId } = command.input;
+            if (
+              typeof workspacePath !== "string" ||
+              typeof authorityEpoch !== "string" ||
+              typeof server !== "string" ||
+              typeof tool !== "string" ||
+              !args ||
+              typeof args !== "object" ||
+              Array.isArray(args)
+            ) {
+              throw new Error("Desktop MCP 命令参数无效");
+            }
+            activeMcpTools.set(command.commandId, tool);
+            const controller = new AbortController();
+            const deadline = scheduleDeadline(
+              () => controller.abort(new Error("Desktop MCP 命令已超时")),
+              Math.max(0, command.expiresAt - Date.now()),
+            );
+            try {
+              outcome = {
+                ok: true,
+                result: (await desktopMcpExecutor.call({
+                  commandId: command.commandId,
+                  sessionId: command.sessionId,
+                  authorityEpoch,
+                  workspacePath,
+                  server,
+                  tool,
+                  args: args as Record<string, unknown>,
+                  signal: controller.signal,
+                  ...(typeof toolCallId === "string" ? { toolCallId } : {}),
+                })) as unknown as Awaited<ReturnType<ComputerUseExecutor["execute"]>>,
+              };
+            } finally {
+              deadline.cancel();
+              activeMcpTools.delete(command.commandId);
+            }
+          } else {
+            if (!mainWindow.isVisible()) throw new Error("Desktop 窗口不可见，已拒绝电脑操作");
+            outcome = {
+              ok: true,
+              result: await computerUseExecutor.execute(command, async () => {
+                parseRuntimeResult(
+                  "client.capability.check",
+                  await runtime.request("client.capability.check", {
+                    clientId,
+                    clientToken,
+                    commandId: command.commandId,
+                    sessionId: command.sessionId,
+                  }),
+                );
+              }),
+            };
+          }
+        } catch (error) {
+          outcome = { ok: false, error: error instanceof Error ? error.message : String(error) };
+        }
+        if (!stopped) {
+          parseRuntimeResult(
+            "client.capability.resolve",
+            await runtime.request("client.capability.resolve", {
+              clientId,
+              clientToken,
+              commandId: command.commandId,
+              ...outcome,
+            }),
+          );
+        }
+      } catch (error) {
+        if (stopped) return;
+        console.error("Pico Desktop client capability channel retrying", error);
+        await sleepForRetry(1_000);
+      }
+    }
+  };
+  void run();
+  return () => {
+    stopped = true;
+    void desktopMcpExecutor
+      .close()
+      .catch((error: unknown) => console.error("Pico Desktop MCP cleanup failed", error));
+  };
+}
 function startRuntimeProbe(): () => void {
   const notify = (event: RuntimeSupervisorEvent): void => {
     const window = mainWindow;
@@ -110,6 +267,10 @@ if (!app.requestSingleInstanceLock()) {
   });
   app.on("will-quit", () => {
     stopRuntimeProbe?.();
+    stopClientCapabilityPoller?.();
+    if (clientCapabilityToken) {
+      revokeDesktopClientToken(resolveCanonicalPicoHome(), clientCapabilityToken);
+    }
     disposeIpc?.();
     disposeUpdater?.();
     runtime.close();
@@ -152,6 +313,7 @@ if (!app.requestSingleInstanceLock()) {
         requestDesktopShutdown();
         return;
       }
+      clientCapabilityToken = await rotateDesktopClientToken(resolveCanonicalPicoHome());
       installApplicationMenu(() => mainWindow);
       // 首次 ping 触发 connectOrSpawn：拉起或连上常驻 daemon 后返回。冷启动时
       // daemon 的 recover 窗口（reconcile 注册工作区 + 启动 cron，可达秒级）内
@@ -171,6 +333,7 @@ if (!app.requestSingleInstanceLock()) {
       });
       disposeUpdater = configureAutoUpdates(() => lifecycle.markQuitting());
       await openMainWindow();
+      stopClientCapabilityPoller = startClientCapabilityPoller(clientCapabilityToken);
       stopRuntimeProbe = startRuntimeProbe();
     })
     .catch(async (error: unknown) => {

@@ -61,7 +61,12 @@ export type RuntimeModelRouteCapabilities = {
   readonly metadataSource?: "models_dev_snapshot";
   readonly vision?: boolean | "unknown";
   readonly reasoning?: boolean | "unknown";
-  readonly reasoningSource?: "config" | "provider_metadata" | "model_rule" | "unknown" | "catalog_snapshot";
+  readonly reasoningSource?:
+    | "config"
+    | "provider_metadata"
+    | "model_rule"
+    | "unknown"
+    | "catalog_snapshot";
   readonly toolCall?: boolean | "unknown";
   readonly nativeWebSearch: {
     readonly available: boolean;
@@ -196,7 +201,13 @@ const resolvedModelCapabilitiesResult: RuntimeResultRule = (value, path) => {
       metadataSource: resultOneOf(["models_dev_snapshot"]),
       vision: resultOneOf([true, false, "unknown"]),
       reasoning: resultOneOf([true, false, "unknown"]),
-      reasoningSource: resultOneOf(["config", "provider_metadata", "model_rule", "unknown", "catalog_snapshot"]),
+      reasoningSource: resultOneOf([
+        "config",
+        "provider_metadata",
+        "model_rule",
+        "unknown",
+        "catalog_snapshot",
+      ]),
       toolCall: resultOneOf([true, false, "unknown"]),
     },
   );
@@ -295,7 +306,11 @@ export type ConfigMethodMap = {
   };
   readonly "provider.test": {
     readonly params: { readonly providerId: string; readonly model: string };
-    readonly result: { readonly ok: boolean; readonly durationMs: number; readonly message: string };
+    readonly result: {
+      readonly ok: boolean;
+      readonly durationMs: number;
+      readonly message: string;
+    };
   };
   readonly "provider.upsert": {
     readonly params: {
