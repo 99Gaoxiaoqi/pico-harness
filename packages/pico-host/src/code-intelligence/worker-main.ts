@@ -38,11 +38,11 @@ async function main(): Promise<void> {
   const generation = config.generation as number;
   const preboundPaths = process.platform === "win32";
   const rootDir = preboundPaths ? config.rootDir : await realpath(config.rootDir);
-  if (
-    path.resolve(config.rootDir) !== rootDir ||
-    (await identity(rootDir)) !== config.rootIdentity
-  ) {
-    throw new Error("代码智能 Worker 工作区真实路径不匹配");
+  if (path.resolve(config.rootDir) !== rootDir) {
+    throw new Error("代码智能 Worker 工作区路径格式不匹配");
+  }
+  if ((await directoryIdentity(rootDir)) !== config.rootIdentity) {
+    throw new Error("代码智能 Worker 工作区目录身份不匹配");
   }
   const boundRoots = (config.roots as string[]).map(
     (root, index) => [root, (config.rootIdentities as string[])[index]!] as const,
@@ -179,10 +179,18 @@ async function identity(target: string): Promise<string> {
   return fileIdentity(info);
 }
 
+async function directoryIdentity(target: string): Promise<string> {
+  const info = await lstat(target, { bigint: true });
+  if (!info.isDirectory() || info.isSymbolicLink()) {
+    throw new Error(`代码智能 Worker 根不是普通目录: ${target}`);
+  }
+  return `${info.dev}:${info.ino}`;
+}
+
 async function assertRoots(roots: readonly (readonly [string, string])[]): Promise<void> {
   for (const [root, expected] of roots) {
     if (
-      (await identity(root)) !== expected ||
+      (await directoryIdentity(root)) !== expected ||
       (process.platform !== "win32" && (await realpath(root)) !== root)
     ) {
       throw new Error("代码智能 Worker 工作区根身份已变化");

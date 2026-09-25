@@ -316,7 +316,7 @@ async function directoryIdentity(target: string): Promise<string> {
       `代码智能 Worker 根不是普通目录: ${target}`,
     );
   }
-  return `${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`;
+  return `${info.dev}:${info.ino}`;
 }
 
 async function resolveWorkerEntry(): Promise<{
