@@ -260,6 +260,10 @@ jobs:
           PICO_SANDBOX_ACL_TRACE: "1"
         run: node --import tsx --import @pico/cli/tui/preload-env --test --test-concurrency=1 tests/integration/safety/process-sandbox-native.integration.test.ts
 
+      - name: Verify Windows restricted skill and code reads
+        timeout-minutes: 5
+        run: node --import tsx --import @pico/cli/tui/preload-env --test --test-concurrency=1 tests/integration/safety/skill-view-worker.integration.test.ts tests/integration/safety/code-intelligence-worker.integration.test.ts
+
       - name: Prove task-scoped Windows network capability and loopback revocation
         timeout-minutes: 5
         env:
@@ -294,7 +298,7 @@ jobs:
       - name: Install ripgrep for the native Grep sandbox path
         run: brew install ripgrep
       - run: npm run verify:sandbox:resources
-      - run: node --import tsx --import @pico/cli/tui/preload-env --test --test-concurrency=1 tests/integration/safety/process-sandbox.integration.test.ts tests/integration/safety/process-sandbox-native.integration.test.ts tests/integration/safety/file-worker.integration.test.ts
+      - run: node --import tsx --import @pico/cli/tui/preload-env --test --test-concurrency=1 tests/integration/safety/process-sandbox.integration.test.ts tests/integration/safety/process-sandbox-native.integration.test.ts tests/integration/safety/file-worker.integration.test.ts tests/integration/safety/skill-view-worker.integration.test.ts tests/integration/safety/code-intelligence-worker.integration.test.ts
       - name: Verify bundled File Worker under Electron as Node
         run: |
           electron_executable="$(node -p "require('electron')" | tail -n 1)"
@@ -353,7 +357,7 @@ jobs:
       - name: Run Linux process sandbox integration
         run: |
           node_executable="$(command -v node)"
-          PATH="/usr/bin:/bin:$PATH" "$node_executable" --import tsx --import @pico/cli/tui/preload-env --test --test-concurrency=1 tests/integration/safety/process-sandbox.integration.test.ts tests/integration/safety/process-sandbox-native.integration.test.ts tests/integration/safety/file-worker.integration.test.ts
+          PATH="/usr/bin:/bin:$PATH" "$node_executable" --import tsx --import @pico/cli/tui/preload-env --test --test-concurrency=1 tests/integration/safety/process-sandbox.integration.test.ts tests/integration/safety/process-sandbox-native.integration.test.ts tests/integration/safety/file-worker.integration.test.ts tests/integration/safety/skill-view-worker.integration.test.ts tests/integration/safety/code-intelligence-worker.integration.test.ts
 
   sandbox-publication:
     name: Verify complete native sandbox publication
