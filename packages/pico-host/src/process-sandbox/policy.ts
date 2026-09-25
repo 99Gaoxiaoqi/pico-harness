@@ -20,6 +20,10 @@ export interface CreateSandboxPolicyOptions {
   writeFiles?: readonly string[];
   config?: Partial<SandboxConfig>;
   generation?: number;
+  boundaryRevision?: number;
+  windowsNetworkReceipt?: string;
+  windowsTaskId?: string;
+  windowsControlRoot?: string;
 }
 
 export function createSandboxPolicy(options: CreateSandboxPolicyOptions): SandboxPolicy {
@@ -59,6 +63,16 @@ export function createSandboxPolicy(options: CreateSandboxPolicyOptions): Sandbo
     ...(writeFiles.length > 0 ? { writeFiles: Object.freeze(writeFiles) } : {}),
     scratchRoot,
     generation: options.generation ?? 0,
+    ...(options.boundaryRevision !== undefined
+      ? { boundaryRevision: options.boundaryRevision }
+      : {}),
+    ...(options.windowsNetworkReceipt
+      ? { windowsNetworkReceipt: resolve(options.windowsNetworkReceipt) }
+      : {}),
+    ...(options.windowsTaskId ? { windowsTaskId: options.windowsTaskId } : {}),
+    ...(options.windowsControlRoot
+      ? { windowsControlRoot: resolve(options.windowsControlRoot) }
+      : {}),
   });
 }
 

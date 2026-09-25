@@ -132,7 +132,7 @@ test("SessionRuntime code intelligence policy remains disabled until an Agent Ru
   assert.equal(runtime.codeIntelligence.backend, "repo-map");
 });
 
-test("managed boundary keeps LSP disabled through enable requests and mode changes", async (context) => {
+test("managed boundary keeps code intelligence in the current read-only worker", async (context) => {
   const workDir = await mkdtemp(join(tmpdir(), "pico-session-managed-lsp-"));
   const session = new Session("runtime-managed-lsp", workDir, { persistence: false });
   const runtime = await createSessionRuntime({
@@ -148,9 +148,10 @@ test("managed boundary keeps LSP disabled through enable requests and mode chang
     await session.close();
     await rm(workDir, { recursive: true, force: true });
   });
-  assert.match(runtime.codeIntelligenceManager.status().reason, /运行时策略禁用/u);
+  assert.equal(runtime.codeIntelligenceManager.canRunManagedReads(1), true);
+  assert.match(runtime.codeIntelligenceManager.status().reason, /Repo Map/u);
   await runtime.setCodeIntelligenceEnabled(true);
-  assert.match(runtime.codeIntelligenceManager.status().reason, /运行时策略禁用/u);
+  assert.equal(runtime.codeIntelligenceManager.canRunManagedReads(1), true);
   await runtime.refreshProcessSandbox({
     profile: "danger-full-access",
     bypass: true,
@@ -159,7 +160,8 @@ test("managed boundary keeps LSP disabled through enable requests and mode chang
   await runtime.setCodeIntelligenceEnabled(true);
   assert.doesNotMatch(runtime.codeIntelligenceManager.status().reason, /运行时策略禁用/u);
   await runtime.refreshProcessSandbox({ profile: "workspace-write", bypass: false, generation: 3 });
-  assert.match(runtime.codeIntelligenceManager.status().reason, /运行时策略禁用/u);
+  assert.equal(runtime.codeIntelligenceManager.canRunManagedReads(1), false);
+  assert.equal(runtime.codeIntelligenceManager.canRunManagedReads(3), true);
 });
 
 test("disabled LSP policy skips configured process discovery and spawn", async (context) => {

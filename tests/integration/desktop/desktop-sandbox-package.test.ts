@@ -65,13 +65,31 @@ test("desktop packaging rejects missing and corrupt Windows sandbox inputs and c
       createHash("sha256").update(content).digest("hex"),
     );
   }
+  const codeWorkerSource = join(root, "code-intelligence-worker");
+  await mkdir(codeWorkerSource);
+  const codeWorker = Buffer.from("fixture code intelligence worker");
+  await writeFile(join(codeWorkerSource, "worker.mjs"), codeWorker);
+  await writeFile(
+    join(codeWorkerSource, "worker.mjs.sha256"),
+    createHash("sha256").update(codeWorker).digest("hex"),
+  );
   await hooks.prePackage(config, "win32", "x64");
   const result = { platform: "win32" as const, arch: "x64" as const, outputPaths: [target] };
   await assert.rejects(hooks.postPackage(config, result), { code: "ENOENT" });
   await cp(source, join(target, "resources", "sandbox"), { recursive: true });
   await cp(fileWorkerSource, join(target, "resources", "file-worker"), { recursive: true });
+  await cp(codeWorkerSource, join(target, "resources", "code-intelligence-worker"), {
+    recursive: true,
+  });
   await hooks.postPackage(config, result);
   await hooks.preMake();
+  const copiedCodeWorker = join(target, "resources", "code-intelligence-worker", "worker.mjs");
+  await writeFile(copiedCodeWorker, "corrupted");
+  await assert.rejects(
+    hooks.postPackage(config, result),
+    /Code Intelligence Worker resource SHA-256 mismatch/,
+  );
+  await cp(join(codeWorkerSource, "worker.mjs"), copiedCodeWorker);
   const copiedHelper = join(target, "resources", "file-worker", "windows-file-commit-entry.mjs");
   await writeFile(copiedHelper, "corrupted");
   await assert.rejects(hooks.postPackage(config, result), /resource SHA-256 mismatch/);

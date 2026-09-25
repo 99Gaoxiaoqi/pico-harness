@@ -52,12 +52,16 @@ export interface DefaultProcessSandboxDescriptor {
   readonly config?: Partial<WorkspaceSandboxConfig>;
   readonly scratchRoot?: string;
   readonly generation?: number;
+  readonly boundaryRevision?: number;
   /** True when deny/protected-metadata rules cannot be represented by the OS process policy. */
   readonly hasUnsupportedDenyEntries?: boolean;
   readonly readRoots?: readonly string[];
   readonly writeRoots?: readonly string[];
   readonly readFiles?: readonly string[];
   readonly writeFiles?: readonly string[];
+  readonly windowsNetworkReceipt?: string;
+  readonly windowsTaskId?: string;
+  readonly windowsControlRoot?: string;
 }
 
 export interface DefaultToolRegistryOptions {
@@ -71,7 +75,7 @@ export interface DefaultToolRegistryOptions {
     /** Resolve the latest durable Session boundary for each Bash invocation. */
     resolveSandbox?: () => DefaultProcessSandboxDescriptor;
     /** Consumes a Host-approved one-shot expansion or reads a Session expansion. */
-    consumeNetworkAuthorization?: (toolCallId: string | undefined) => boolean;
+    consumeNetworkAuthorization?: (toolCallId: string | undefined) => boolean | string;
   };
   backgroundManager?: BackgroundManager;
   /** Session-scoped durable task authority shared by model tools and prompt injection. */
@@ -115,6 +119,8 @@ export interface DefaultToolRegistryOptions {
   excludeSensitiveGrepFiles?: boolean | ((path: string | undefined) => boolean);
   /** 宿主启动后注入的 LSP / Repo Map 统一服务。 */
   codeIntelligence?: CodeIntelligenceService;
+  /** Proves the session's read-only code worker matches the current managed boundary. */
+  canRunManagedCodeIntelligence?: (generation: number) => boolean;
   /** Skill frontmatter hooks 只在当前 Agent run 激活。 */
   activateSkillHooks?: (skill: Skill) => void | Promise<void>;
   /** 宿主冻结的统一 Skill Catalog（含受信 Plugin 来源）。 */
@@ -149,6 +155,7 @@ export function buildDefaultToolRegistry(
     requestSandboxBoundaryHandler,
     excludeSensitiveGrepFiles,
     codeIntelligence,
+    canRunManagedCodeIntelligence,
     activateSkillHooks,
     skillLoader,
     plan,
@@ -172,9 +179,18 @@ export function buildDefaultToolRegistry(
           excludeSensitiveFiles: Boolean(excludeSensitiveGrepFiles),
         })
       : tool;
-  const hostReadTool = (tool: BaseTool): BaseTool =>
+  const codeReadTool = (tool: BaseTool): BaseTool =>
     processSandbox
-      ? guardManagedHostRead(tool, processSandbox.resolveSandbox ?? (() => processSandbox))
+      ? guardManagedHostRead(tool, () => {
+          const sandbox = processSandbox.resolveSandbox?.() ?? processSandbox;
+          return {
+            ...sandbox,
+            bypass:
+              sandbox.bypass === true ||
+              (sandbox.generation !== undefined &&
+                canRunManagedCodeIntelligence?.(sandbox.generation) === true),
+          };
+        })
       : tool;
   // 必须先于 host 后续挂载的审批中间件,避免一次审批扩大文件系统边界。
   if (!deferWorkspaceBoundary) registry.useRequest(buildWorkspaceBoundaryMiddleware(roots));
@@ -194,6 +210,9 @@ export function buildDefaultToolRegistry(
               ...(processSandbox.generation !== undefined
                 ? { generation: processSandbox.generation }
                 : {}),
+              ...(processSandbox.boundaryRevision !== undefined
+                ? { boundaryRevision: processSandbox.boundaryRevision }
+                : {}),
               ...(processSandbox.hasUnsupportedDenyEntries !== undefined
                 ? { hasUnsupportedDenyEntries: processSandbox.hasUnsupportedDenyEntries }
                 : {}),
@@ -201,6 +220,15 @@ export function buildDefaultToolRegistry(
               ...(processSandbox.writeRoots ? { writeRoots: processSandbox.writeRoots } : {}),
               ...(processSandbox.readFiles ? { readFiles: processSandbox.readFiles } : {}),
               ...(processSandbox.writeFiles ? { writeFiles: processSandbox.writeFiles } : {}),
+              ...(processSandbox.windowsNetworkReceipt
+                ? { windowsNetworkReceipt: processSandbox.windowsNetworkReceipt }
+                : {}),
+              ...(processSandbox.windowsTaskId
+                ? { windowsTaskId: processSandbox.windowsTaskId }
+                : {}),
+              ...(processSandbox.windowsControlRoot
+                ? { windowsControlRoot: processSandbox.windowsControlRoot }
+                : {}),
               ...(processSandbox.consumeNetworkAuthorization
                 ? { consumeNetworkAuthorization: processSandbox.consumeNetworkAuthorization }
                 : {}),
@@ -239,7 +267,24 @@ export function buildDefaultToolRegistry(
     for (const tool of createSessionTaskTools(sessionTasks)) registry.register(tool);
   }
   registry.register(
-    hostReadTool(new SkillViewTool(skillLoader ?? new SkillLoader(workDir), activateSkillHooks)),
+    new SkillViewTool(
+      skillLoader ?? new SkillLoader(workDir),
+      activateSkillHooks,
+      processSandbox
+        ? {
+            workDir,
+            resolveSandbox: processSandbox.resolveSandbox ?? (() => processSandbox),
+            writablePaths: () => [
+              ...roots.list(),
+              ...roots
+                .boundarySnapshot()
+                .filter((entry) => entry.access === "write")
+                .map((entry) => entry.path),
+              ...((processSandbox.resolveSandbox?.() ?? processSandbox).writeRoots ?? []),
+            ],
+          }
+        : undefined,
+    ),
   );
   registry.register(fileTool(new GlobTool(roots)));
   registry.register(
@@ -311,7 +356,7 @@ export function buildDefaultToolRegistry(
   registry.register(new WebSearchTool(env));
   if (codeIntelligence) {
     for (const tool of createCodeIntelligenceTools(workDir, codeIntelligence)) {
-      registry.register(hostReadTool(tool));
+      registry.register(codeReadTool(tool));
     }
     registry.register(fileTool(new ExploreRepoTool(workDir, codeIntelligence)));
   }

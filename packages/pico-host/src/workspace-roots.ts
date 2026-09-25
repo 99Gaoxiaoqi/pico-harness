@@ -1,6 +1,10 @@
 import { parseToolResultArchiveRef } from "@pico/runtime/tool-result-archive";
 import { realpathSync, statSync } from "node:fs";
-import { realpath as realpathAsync, stat as statAsync } from "node:fs/promises";
+import {
+  lstat as lstatAsync,
+  realpath as realpathAsync,
+  stat as statAsync,
+} from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import type { ToolCall } from "@pico/core";
 import type { RequestMiddleware } from "./tool-registry-contract.js";
@@ -66,6 +70,7 @@ export class WorkspaceRoots {
     private readonly primaryRoot: string,
     private readonly roots: string[],
     private readonly preboundFileWorker = false,
+    private readonly preboundReadOnly = false,
   ) {}
 
   static async create(
@@ -106,6 +111,22 @@ export class WorkspaceRoots {
     }
     // No implicit workspace grant: replaceBoundaryEntries supplies only this request's targets.
     return new WorkspaceRoots(primaryRoot, [], true);
+  }
+
+  /** Windows read-only worker: Host and Broker have bound these canonical roots already. */
+  static createPreboundReadOnly(
+    primaryRoot: string,
+    allowedRoots: readonly string[],
+  ): WorkspaceRoots {
+    if (!isAbsolute(primaryRoot) || resolve(primaryRoot) !== primaryRoot) {
+      throw new Error("只读 Worker 工作区根不是规范化绝对路径");
+    }
+    for (const root of allowedRoots) {
+      if (!isAbsolute(root) || resolve(root) !== root) {
+        throw new Error("只读 Worker 授权根不是规范化绝对路径");
+      }
+    }
+    return new WorkspaceRoots(primaryRoot, [...allowedRoots], true, true);
   }
 
   /** Keep paths relative to the workspace while physically limiting access to branch roots. */
@@ -260,6 +281,19 @@ export class WorkspaceRoots {
     if (this.isPolicyDenied(target, requestedAccess)) throw outsideWorkspaceError(path);
     if (this.preboundFileWorker) {
       if (!this.isAllowed(target, requestedAccess)) throw outsideWorkspaceError(path);
+      if (this.preboundReadOnly) {
+        const root = [...this.roots]
+          .filter((candidate) => isWithin(candidate, target))
+          .sort((left, right) => right.length - left.length)[0];
+        if (!root) throw outsideWorkspaceError(path);
+        let current = root;
+        for (const component of ["", ...relative(root, target).split(sep).filter(Boolean)]) {
+          if (component) current = resolve(current, component);
+          if ((await lstatAsync(current)).isSymbolicLink()) {
+            throw new Error(`只读 Worker 拒绝链接路径: ${current}`);
+          }
+        }
+      }
       return target;
     }
     let usedOneCallPermission = false;

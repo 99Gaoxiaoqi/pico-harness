@@ -527,6 +527,7 @@ test(
         workspaceRoots: roots,
         profile: "workspace-write",
         scratchRoot: fixture.scratch,
+        config: { network: "deny" },
       },
     });
     const firstResult = await bash.execute(JSON.stringify({ command }));
@@ -750,6 +751,7 @@ test(
       profile: "workspace-write",
       workspaceRoots: [fixture.workspace],
       scratchRoot: fixture.scratch,
+      config: { network: "deny" },
     });
     const manager = new McpConnectionManager(undefined, {
       stdioCwd: fixture.workspace,
@@ -820,7 +822,7 @@ async function runNode(
   cwd = fixture.workspace,
   env: NodeJS.ProcessEnv = process.env,
   readRoots: readonly string[] = [],
-  network: "allow" | "deny" = "allow",
+  network: "allow" | "deny" = process.platform === "win32" ? "deny" : "allow",
   readFiles: readonly string[] = [],
   writeFiles: readonly string[] = [],
   workspaceRoots: readonly string[] = [fixture.workspace],

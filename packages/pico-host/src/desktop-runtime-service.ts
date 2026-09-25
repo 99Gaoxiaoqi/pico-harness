@@ -42,6 +42,11 @@ import { AgentGraphReadOnlyQueryService } from "@pico/runtime";
 import { findAgentProfile, loadAgentCatalog } from "./agent-catalog.js";
 import { globalSessionPermissionGrants } from "./session-permissions.js";
 import { globalClientCapabilityGrants } from "./client-capability-grants.js";
+import {
+  managedProcessLauncher,
+  WindowsTaskNetworkAuthority,
+  windowsTaskNetworkControlRoot,
+} from "./process-sandbox/index.js";
 import { ResourceDoctor, renderResourceDoctorReport } from "./resource-doctor.js";
 import { workspaceConfigurationDiagnosticFromRuntime } from "./workspace-configuration-diagnostic.js";
 import { runWorkspaceDoctor } from "./workspace-doctor.js";
@@ -1158,6 +1163,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       this.memoryLaneKey(canonical, sessionId),
       "foreground",
       async () => {
+        if (archived) await this.revokeWindowsTaskNetwork(sessionId);
         await this.withWorkspaceSessionStore(canonical, (store) =>
           store.setSessionArchived(sessionId, archived, this.now),
         );
@@ -1197,8 +1203,24 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     return `${this.picoHome}:${memorySessionKey(paths.workspace.id, sessionId)}`;
   }
 
+  private async revokeWindowsTaskNetwork(sessionId: string): Promise<void> {
+    if (process.platform !== "win32") return;
+    const controlRoot = windowsTaskNetworkControlRoot(this.picoHome, sessionId);
+    const authority = new WindowsTaskNetworkAuthority(sessionId, controlRoot);
+    managedProcessLauncher.blockWindowsNetworkTask(controlRoot);
+    if (!(await authority.hasPreparationState())) {
+      managedProcessLauncher.unblockWindowsNetworkTask(controlRoot);
+      return;
+    }
+    await authority.blockNewLaunches();
+    await managedProcessLauncher.terminateWindowsNetworkProcesses(controlRoot);
+    await authority.revoke();
+    managedProcessLauncher.unblockWindowsNetworkTask(controlRoot);
+  }
+
   private async deleteSession(workspacePath: string, sessionId: string): Promise<JsonValue> {
     const canonical = await this.requireIdleTrustedSession(workspacePath, sessionId, "删除");
+    await this.revokeWindowsTaskNetwork(sessionId);
     await this.options.retireAgentGraphRootSession?.(canonical, sessionId, "Root Session deleted");
     const sideChats = this.sideChatAuthority(canonical);
     await sideChats.recover();
@@ -1490,6 +1512,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           params.thinkingEffort,
         );
       }
+
+      if (revokeSessionGrants) await this.revokeWindowsTaskNetwork(params.sessionId);
 
       if (selectedRoute) migrateSessionModelRoute(current, selectedRoute);
       if (requestedCollaborationMode) {
@@ -3759,6 +3783,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   }
 
   private async removeEphemeralSideChat(workspacePath: string, sessionId: string): Promise<void> {
+    await this.revokeWindowsTaskNetwork(sessionId);
     await this.terminalService.stopSession({ workspacePath, sessionId });
     globalSessionPermissionGrants.clear(sessionId, workspacePath, this.picoHome);
     await globalClientCapabilityGrants.revokeSession(

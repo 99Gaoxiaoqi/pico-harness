@@ -159,8 +159,7 @@ async function createPinnedSessionRuntime<Command>(
   const unbindGoalManager = session.bindGoalManager(goalManager);
   const persistedPlanMode =
     (session.getRuntimeStateSnapshot().settings?.collaborationMode ?? "agent") !== "agent";
-  const codeIntelligenceEnabled =
-    (options.lspEnabled ?? !persistedPlanMode) && options.processSandbox?.bypass !== false;
+  const codeIntelligenceEnabled = (options.lspEnabled ?? !persistedPlanMode) && !persistedPlanMode;
   const codeIntelligenceManager = new CodeIntelligenceManager({
     rootDir: workDir,
     lspEnabled: codeIntelligenceEnabled,
@@ -228,7 +227,7 @@ async function createPinnedSessionRuntime<Command>(
     steerQueue,
     codeIntelligenceManager,
     codeIntelligenceEnabled,
-    lspAllowed: !persistedPlanMode && options.processSandbox?.bypass !== false,
+    lspAllowed: !persistedPlanMode,
     unbindGoalManager,
     releaseSessionPin,
     sessionStartSource: options.sessionStartSource ?? "startup",
@@ -317,6 +316,7 @@ class DefaultSessionRuntime<Command> implements SessionRuntime<Command> {
           await this.codeIntelligenceManager.updateProcessSandbox({
             workspaceRoots: processSandbox.workspaceRoots ?? [this.lifecycle.workDir],
             generation: processSandbox.generation ?? 0,
+            bypass: processSandbox.bypass === true,
             scratchRoot,
             readRoots: [...(processSandbox.readRoots ?? []), ...(processSandbox.writeRoots ?? [])],
             readFiles: [...(processSandbox.readFiles ?? []), ...(processSandbox.writeFiles ?? [])],
@@ -328,6 +328,18 @@ class DefaultSessionRuntime<Command> implements SessionRuntime<Command> {
               workspaceRoots: processSandbox.workspaceRoots ?? [this.lifecycle.workDir],
               scratchRoot,
               generation: processSandbox.generation ?? 0,
+              ...(processSandbox.boundaryRevision !== undefined
+                ? { boundaryRevision: processSandbox.boundaryRevision }
+                : {}),
+              ...(processSandbox.windowsNetworkReceipt
+                ? { windowsNetworkReceipt: processSandbox.windowsNetworkReceipt }
+                : {}),
+              ...(processSandbox.windowsTaskId
+                ? { windowsTaskId: processSandbox.windowsTaskId }
+                : {}),
+              ...(processSandbox.windowsControlRoot
+                ? { windowsControlRoot: processSandbox.windowsControlRoot }
+                : {}),
               ...(processSandbox.readRoots ? { readRoots: processSandbox.readRoots } : {}),
               ...(processSandbox.writeRoots ? { writeRoots: processSandbox.writeRoots } : {}),
               ...(processSandbox.readFiles ? { readFiles: processSandbox.readFiles } : {}),
@@ -374,9 +386,6 @@ class DefaultSessionRuntime<Command> implements SessionRuntime<Command> {
   }
 
   async refreshProcessSandbox(processSandbox: SessionProcessSandboxConfig): Promise<void> {
-    const nextAllowed = processSandbox.bypass === true;
-    if (!nextAllowed) await this.lifecycle.setCodeIntelligenceEnabled(false);
-    this.lspAllowed = nextAllowed;
     await this.lifecycle.refreshProcessSandbox({
       ...processSandbox,
       ...(processSandbox.workspaceRoots

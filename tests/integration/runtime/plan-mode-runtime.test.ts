@@ -971,8 +971,8 @@ test("Plan Run isolates and restores code intelligence owned by an injected Sess
   );
 
   assert.equal(result.handoff?.kind, "plan_handoff");
-  assert.equal(closes, 1);
-  assert.equal(starts, 1, "Plan keeps only the process-free Repo Map backend active");
+  assert.equal(closes, 2, "Plan 切换时关闭原服务并清理受限只读 Worker");
+  assert.equal(starts, 2, "Plan 进入只读模式并在退出时恢复代码智能服务");
   assert.match(manager.status().reason, /运行时策略禁用/u);
   const handoff = result.handoff;
   assert.ok(handoff);
@@ -1012,8 +1012,8 @@ test("Plan Run isolates and restores code intelligence owned by an injected Sess
     },
     { provider: executionProvider, picoHome, runtimeState, reporter: new SilentReporter() },
   );
-  assert.equal(closes, 2);
-  assert.equal(starts, 2);
+  assert.equal(closes, 4);
+  assert.equal(starts, 4);
   assert.equal(runtimeState.codeIntelligence.backend, "repo-map");
 });
 

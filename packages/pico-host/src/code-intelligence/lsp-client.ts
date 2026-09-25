@@ -1,7 +1,7 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { buildMinimalChildProcessEnv } from "@pico/runtime/minimal-child-process-env";
-import { raceWithDeadline, scheduleDeadline, type ScheduledDeadline } from "@pico/runtime/deadline";
+import { scheduleDeadline, type ScheduledDeadline } from "@pico/runtime/deadline";
 import { redactSensitiveText } from "@pico/runtime/sensitive-data-redaction";
 import type { LspServerConfig } from "./lsp-server-discovery.js";
 import {
@@ -9,6 +9,7 @@ import {
   defaultSandboxScratchRoot,
   managedProcessLauncher,
   type SandboxPolicy,
+  type SandboxLease,
 } from "@pico/pico-host/process-sandbox";
 import {
   isJsonRpcNotification,
@@ -58,12 +59,14 @@ export type LspNotificationHandler = (params: unknown) => void;
 /** LSP 3.17 stdio transport：Content-Length 帧 + JSON-RPC 请求关联。 */
 export class StdioLspClient {
   private child: ChildProcessWithoutNullStreams | undefined;
+  private lease: SandboxLease | undefined;
   private nextId = 1;
   private inputBuffer = Buffer.alloc(0);
   private expectedBodyLength: number | undefined;
   private readonly pending = new Map<JsonRpcId, PendingRequest>();
   private readonly notificationHandlers = new Map<string, Set<LspNotificationHandler>>();
   private state: "new" | "starting" | "ready" | "closing" | "closed" = "new";
+  private closePromise: Promise<void> | undefined;
   private terminalError: Error | undefined;
   private stderrBytes = 0;
   private stderrLimitReported = false;
@@ -79,7 +82,7 @@ export class StdioLspClient {
     if (this.state === "ready") return;
     if (this.state !== "new") throw new Error(`LSP client 当前状态为 ${this.state}，无法启动`);
     this.state = "starting";
-    this.child = managedProcessLauncher.launch(
+    const launched = managedProcessLauncher.launch(
       {
         command: this.config.command,
         args: [...(this.config.args ?? [])],
@@ -98,7 +101,9 @@ export class StdioLspClient {
           }),
       },
       { stdio: ["pipe", "pipe", "pipe"], windowsHide: true },
-    ).child as ChildProcessWithoutNullStreams;
+    );
+    this.child = launched.child as ChildProcessWithoutNullStreams;
+    this.lease = launched.lease;
     this.wireChild(this.child);
 
     try {
@@ -188,7 +193,10 @@ export class StdioLspClient {
   }
 
   async close(): Promise<void> {
-    if (this.state === "closed") return;
+    if (this.state === "closed") {
+      await this.closePromise;
+      return;
+    }
     if (this.state === "new") {
       this.state = "closed";
       return;
@@ -416,20 +424,24 @@ export class StdioLspClient {
     stdin.write(body);
   }
 
-  private async forceClose(error: Error): Promise<void> {
+  private forceClose(error: Error): Promise<void> {
+    this.closePromise ??= this.forceCloseOnce(error);
+    return this.closePromise;
+  }
+
+  private async forceCloseOnce(error: Error): Promise<void> {
     if (this.state === "closed") return;
     this.terminalError = error;
     this.state = "closed";
     for (const id of [...this.pending.keys()]) this.settlePending(id, error);
     const child = this.child;
+    const lease = this.lease;
     this.child = undefined;
-    if (!child || child.exitCode !== null || child.signalCode !== null) return;
+    this.lease = undefined;
+    if (!child) return;
     child.stdin.end();
-    child.kill("SIGTERM");
-    const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
-    if (!(await raceWithDeadline(exited, CLOSE_TIMEOUT_MS))) {
-      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-    }
+    if (!lease) throw new Error(`LSP server ${this.config.id} 缺少进程租约`);
+    await lease.terminate();
   }
 }
 

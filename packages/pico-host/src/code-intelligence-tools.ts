@@ -1,6 +1,10 @@
 import path from "node:path";
 import type { CodeIntelligenceService, PositionQuery } from "./code-intelligence/types.js";
-import { REPO_MAP_MAX_FILES, RepoMapService } from "./code-intelligence/repo-map.js";
+import {
+  REPO_MAP_MAX_FILES,
+  RepoMapService,
+  type RepoMapSnapshot,
+} from "./code-intelligence/repo-map.js";
 import type { ToolDefinition } from "@pico/core";
 import { ToolAccesses, type ToolAccesses as ToolAccessSet } from "@pico/runtime/tool-access";
 import type { BaseTool, ToolExecutionContext } from "./tool-registry-contract.js";
@@ -171,11 +175,17 @@ export class CodeCallHierarchyTool extends CodeIntelligenceTool {
 }
 
 export class RepoMapTool extends CodeIntelligenceTool {
-  private readonly repoMap: RepoMapService;
+  private readonly repoMap: RepoMapSnapshotReader;
 
-  constructor(rootDir: string, service: CodeIntelligenceService) {
+  constructor(rootDir: string, service: CodeIntelligenceService, repoMap?: RepoMapSnapshotReader) {
     super(rootDir, service);
-    this.repoMap = service instanceof RepoMapService ? service : new RepoMapService(rootDir);
+    this.repoMap =
+      repoMap ??
+      (hasSnapshot(service)
+        ? service
+        : service instanceof RepoMapService
+          ? service
+          : new RepoMapService(rootDir));
   }
 
   name(): string {
@@ -233,6 +243,7 @@ function queryOptions(context?: ToolExecutionContext): { readonly signal?: Abort
 export function createCodeIntelligenceTools(
   rootDir: string,
   service: CodeIntelligenceService,
+  repoMap?: RepoMapSnapshotReader,
 ): readonly BaseTool[] {
   return [
     new CodeDefinitionTool(rootDir, service),
@@ -240,8 +251,22 @@ export function createCodeIntelligenceTools(
     new CodeSymbolsTool(rootDir, service),
     new CodeDiagnosticsTool(rootDir, service),
     new CodeCallHierarchyTool(rootDir, service),
-    new RepoMapTool(rootDir, service),
+    new RepoMapTool(rootDir, service, repoMap),
   ];
+}
+
+export interface RepoMapSnapshotReader {
+  snapshot(options?: {
+    readonly query?: string;
+    readonly maxFiles?: number;
+    readonly signal?: AbortSignal;
+  }): Promise<RepoMapSnapshot>;
+}
+
+function hasSnapshot(
+  service: CodeIntelligenceService,
+): service is CodeIntelligenceService & RepoMapSnapshotReader {
+  return "snapshot" in service && typeof service.snapshot === "function";
 }
 
 function positionDefinition(name: string, description: string): ToolDefinition {
