@@ -26,6 +26,7 @@ const FILE_MODE = 0o600;
 const DEFAULT_LOCK_TIMEOUT_MS = 2_000;
 const DEFAULT_STALE_LOCK_MS = 30_000;
 const LOCK_RETRY_MS = 10;
+const WINDOWS_RENAME_RETRY_DELAYS_MS = [25, 50, 100, 200, 400, 800] as const;
 const USER_CONFIG_TEMPORARY_NAME =
   /^\.config\.json\.[1-9]\d*\.\d+\.[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.tmp$/u;
 
@@ -210,7 +211,9 @@ export class UserConfigStore {
       ) {
         throw new Error(`读取用户配置时文件已被替换: ${this.filePath}`);
       }
-      await handle.chmod(FILE_MODE);
+      // Windows chmod changes the read-only attribute, not the ACL. A read must not
+      // mutate a config file while another process is atomically replacing it.
+      if (process.platform !== "win32") await handle.chmod(FILE_MODE);
       const raw = await handle.readFile("utf8");
       let parsed: unknown;
       try {
@@ -453,8 +456,25 @@ export class UserConfigStore {
       await handle.close();
       handle = undefined;
 
-      await beforePublish();
-      await rename(temporaryPath, this.filePath);
+      for (let attempt = 0; ; attempt += 1) {
+        // The lock protects cooperating writers; a Windows reader or indexer can
+        // still transiently deny replacement. Recheck the lock and exact revision
+        // after every wait so a retry cannot publish over an external change.
+        await beforePublish();
+        try {
+          await rename(temporaryPath, this.filePath);
+          break;
+        } catch (error) {
+          if (
+            process.platform !== "win32" ||
+            (!isErrnoCode(error, "EPERM") && !isErrnoCode(error, "EACCES")) ||
+            attempt >= WINDOWS_RENAME_RETRY_DELAYS_MS.length
+          ) {
+            throw error;
+          }
+          await waitForDelay(WINDOWS_RENAME_RETRY_DELAYS_MS[attempt]!);
+        }
+      }
       published = true;
       await syncDirectory(this.directoryPath);
     } finally {
