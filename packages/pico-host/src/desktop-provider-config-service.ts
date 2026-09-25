@@ -690,45 +690,64 @@ export class DesktopProviderConfigService {
     return {
       ...runtimeProviderInput(id, provider),
       availableModels: [...availableModels],
-      resolvedModelCapabilities: toJsonValue(Object.fromEntries(
-        availableModels.map((model) => {
-          const catalog = catalogModelCapabilities(provider.baseURL, model);
-          const capabilities = resolveModelRouteCapabilities(
-            resolveModelProtocol(provider, model),
-            model,
-            provider.modelCapabilities?.[model],
-            { baseURL: provider.baseURL },
-          );
-          return [model, {
-            nativeWebSearch: toJsonValue(capabilities.nativeWebSearch),
-            ...(catalog?.name ? { displayName: catalog.name } : {}),
-            ...(catalog ? { metadataSource: "models_dev_snapshot" } : {}),
-            contextWindowTokens: capabilities.contextSource === "config"
-              ? capabilities.contextWindowTokens
-              : catalog?.context ?? capabilities.contextWindowTokens,
-            contextSource: capabilities.contextSource === "config"
-              ? "config"
-              : catalog?.context !== undefined ? "catalog_snapshot" : "profile_default",
-            ...(capabilities.maxOutputTokens === undefined && catalog?.output === undefined
-              ? {}
-              : { maxOutputTokens: capabilities.maxOutputTokens ?? catalog?.output }),
-            outputSource: capabilities.maxOutputTokens !== undefined
-              ? "config"
-              : catalog?.output !== undefined ? "catalog_snapshot" : "provider_default",
-            vision: capabilities.vision !== "unknown"
-              ? capabilities.vision : catalog?.vision ?? "unknown",
-            reasoning: capabilities.reasoningProfile.source === "config"
-              ? capabilities.reasoning
-              : catalog?.reasoning ?? capabilities.reasoning,
-            reasoningSource: capabilities.reasoningProfile.source === "config"
-              ? "config"
-              : catalog?.reasoning !== undefined
-                ? "catalog_snapshot" : capabilities.reasoningProfile.source,
-            toolCall: capabilities.toolCall !== "unknown"
-              ? capabilities.toolCall : catalog?.toolCall ?? "unknown",
-          }];
-        }),
-      )),
+      resolvedModelCapabilities: toJsonValue(
+        Object.fromEntries(
+          availableModels.map((model) => {
+            const catalog = catalogModelCapabilities(provider.baseURL, model);
+            const capabilities = resolveModelRouteCapabilities(
+              resolveModelProtocol(provider, model),
+              model,
+              provider.modelCapabilities?.[model],
+              { baseURL: provider.baseURL },
+            );
+            return [
+              model,
+              {
+                nativeWebSearch: toJsonValue(capabilities.nativeWebSearch),
+                ...(catalog?.name ? { displayName: catalog.name } : {}),
+                ...(catalog ? { metadataSource: "models_dev_snapshot" } : {}),
+                contextWindowTokens:
+                  capabilities.contextSource === "config"
+                    ? capabilities.contextWindowTokens
+                    : (catalog?.context ?? capabilities.contextWindowTokens),
+                contextSource:
+                  capabilities.contextSource === "config"
+                    ? "config"
+                    : catalog?.context !== undefined
+                      ? "catalog_snapshot"
+                      : "profile_default",
+                ...(capabilities.maxOutputTokens === undefined && catalog?.output === undefined
+                  ? {}
+                  : { maxOutputTokens: capabilities.maxOutputTokens ?? catalog?.output }),
+                outputSource:
+                  capabilities.maxOutputTokens !== undefined
+                    ? "config"
+                    : catalog?.output !== undefined
+                      ? "catalog_snapshot"
+                      : "provider_default",
+                vision:
+                  capabilities.vision !== "unknown"
+                    ? capabilities.vision
+                    : (catalog?.vision ?? "unknown"),
+                reasoning:
+                  capabilities.reasoningProfile.source === "config"
+                    ? capabilities.reasoning
+                    : (catalog?.reasoning ?? capabilities.reasoning),
+                reasoningSource:
+                  capabilities.reasoningProfile.source === "config"
+                    ? "config"
+                    : catalog?.reasoning !== undefined
+                      ? "catalog_snapshot"
+                      : capabilities.reasoningProfile.source,
+                toolCall:
+                  capabilities.toolCall !== "unknown"
+                    ? capabilities.toolCall
+                    : (catalog?.toolCall ?? "unknown"),
+              },
+            ];
+          }),
+        ),
+      ),
       origin,
       fingerprint: providerFingerprint(id, provider),
       ...(await this.projectCredentialStatus(id, credentialProvider, supportsSharedCredential)),

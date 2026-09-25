@@ -294,9 +294,9 @@ test("CostTracker SQLite 重开后恢复请求指纹并定位首个变化段且�
     trackerOptions,
   ).generate(changedPrefixMessages, tools);
   // The ledger orders timestamp ties by physical UUID, not logical call sequence.
-  const records = ledger.listPhysicalAttempts().sort((a, b) =>
-    a.providerCallId.localeCompare(b.providerCallId, undefined, { numeric: true }),
-  );
+  const records = ledger
+    .listPhysicalAttempts()
+    .sort((a, b) => a.providerCallId.localeCompare(b.providerCallId, undefined, { numeric: true }));
 
   const first = requestDiagnostic(records[0]);
   assert.equal(records[0]?.route, "https://example.test/v1");
