@@ -138,6 +138,10 @@ export class FileWorkerTool implements BaseTool {
     }
     const operationId = randomUUID();
     const revision = sandbox.generation ?? this.options.roots.generation();
+    // macOS may expose the workspace through /var -> /private/var. The
+    // per-target Seatbelt grant uses the canonical path, so the worker's cwd
+    // and its own workspace identity check must use that same spelling.
+    const workDir = await realpath(this.options.workDir);
     const scratchRoot = resolve(
       defaultSandboxScratchRoot(this.options.workDir),
       "file-worker",
@@ -148,7 +152,7 @@ export class FileWorkerTool implements BaseTool {
       boundaryRevision: revision,
       operation,
       args,
-      workDir: this.options.workDir,
+      workDir,
       stagePath: resolve(scratchRoot, "prepared"),
       targets,
       excludeSensitiveFiles: this.options.excludeSensitiveFiles ?? false,
@@ -455,7 +459,7 @@ async function runFileWorker(
         .map((target) => target.path),
     ],
     readFiles: targets
-      .filter((target) => target.identity.kind === "file")
+      .filter((target) => target.identity.kind !== "directory")
       .map((target) => target.path),
     config: { network: "deny" },
     generation: request.boundaryRevision,

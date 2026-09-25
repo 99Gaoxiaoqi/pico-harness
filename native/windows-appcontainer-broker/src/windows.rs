@@ -351,7 +351,7 @@ pub fn run() -> Result<(), String> {
                 path,
                 &target_capability_sid,
                 "RX",
-                false,
+                true,
                 &mut exact_path_guards,
             )?;
         }
