@@ -527,6 +527,7 @@ test(
         workspaceRoots: roots,
         profile: "workspace-write",
         scratchRoot: fixture.scratch,
+        config: { network: "deny" },
       },
     });
     const firstResult = await bash.execute(JSON.stringify({ command }));
@@ -750,6 +751,7 @@ test(
       profile: "workspace-write",
       workspaceRoots: [fixture.workspace],
       scratchRoot: fixture.scratch,
+      config: { network: "deny" },
     });
     const manager = new McpConnectionManager(undefined, {
       stdioCwd: fixture.workspace,

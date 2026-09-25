@@ -72,7 +72,7 @@ class ChildProcessSandboxLease implements SandboxLease {
   }
 
   async terminate(signal: NodeJS.Signals | number = "SIGTERM"): Promise<void> {
-    if (this.released || this.child.exitCode !== null || this.child.signalCode !== null) {
+    if (this.child.exitCode !== null || this.child.signalCode !== null) {
       await this.release();
       return;
     }

@@ -294,6 +294,38 @@ test("SandboxLease 统一终止进程并在退出后幂等释放", async (contex
   assert.equal(managed.lease.released, true);
 });
 
+test("SandboxLease 不会把终止失败当成已撤销", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-process-sandbox-kill-failed-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const managed = managedProcessLauncher.launch(
+    {
+      command: process.execPath,
+      args: ["-e", "setInterval(()=>{},1000)"],
+      cwd: root,
+      origin: "bash",
+      policy: createSandboxPolicy({
+        profile: "danger-full-access",
+        workspaceRoots: [root],
+        scratchRoot: join(root, "scratch"),
+      }),
+    },
+    { stdio: "ignore" },
+  );
+  await new Promise<void>((resolve, reject) => {
+    managed.child.once("spawn", resolve);
+    managed.child.once("error", reject);
+  });
+  const originalKill = managed.child.kill.bind(managed.child);
+  managed.child.kill = () => false;
+  try {
+    await assert.rejects(managed.lease.terminate(), /联网进程未确认终止/u);
+    await managed.lease.release();
+  } finally {
+    managed.child.kill = originalKill;
+    await managed.lease.terminate("SIGKILL");
+  }
+});
+
 test("会话授权提升策略代次并重启 stdio MCP", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-process-sandbox-mcp-generation-"));
   context.after(() => rm(root, { recursive: true, force: true }));
