@@ -55,14 +55,16 @@ test("desktop packaging rejects missing and corrupt Windows sandbox inputs and c
       createHash("sha256").update(data).digest("hex"),
     );
   }
-  const fileWorker = Buffer.from("fixture file-worker.mjs");
   const fileWorkerSource = join(root, "file-worker");
   await mkdir(fileWorkerSource);
-  await writeFile(join(fileWorkerSource, "file-worker.mjs"), fileWorker);
-  await writeFile(
-    join(fileWorkerSource, "file-worker.mjs.sha256"),
-    createHash("sha256").update(fileWorker).digest("hex"),
-  );
+  for (const name of ["file-worker.mjs", "windows-file-commit-entry.mjs"]) {
+    const content = Buffer.from(`fixture ${name}`);
+    await writeFile(join(fileWorkerSource, name), content);
+    await writeFile(
+      join(fileWorkerSource, `${name}.sha256`),
+      createHash("sha256").update(content).digest("hex"),
+    );
+  }
   await hooks.prePackage(config, "win32", "x64");
   const result = { platform: "win32" as const, arch: "x64" as const, outputPaths: [target] };
   await assert.rejects(hooks.postPackage(config, result), { code: "ENOENT" });
@@ -70,6 +72,11 @@ test("desktop packaging rejects missing and corrupt Windows sandbox inputs and c
   await cp(fileWorkerSource, join(target, "resources", "file-worker"), { recursive: true });
   await hooks.postPackage(config, result);
   await hooks.preMake();
+  const copiedHelper = join(target, "resources", "file-worker", "windows-file-commit-entry.mjs");
+  await writeFile(copiedHelper, "corrupted");
+  await assert.rejects(hooks.postPackage(config, result), /resource SHA-256 mismatch/);
+  await assert.rejects(hooks.preMake(), /resource SHA-256 mismatch/);
+  await cp(join(fileWorkerSource, "windows-file-commit-entry.mjs"), copiedHelper);
   await writeFile(
     join(target, "resources", "sandbox", "win32-x64", "pico-appcontainer-broker.exe"),
     "corrupted",
