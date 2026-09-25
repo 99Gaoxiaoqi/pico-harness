@@ -8,6 +8,7 @@ abstract class ComputerTool implements BaseTool {
   readonly toolset = "computer";
   readonly readOnly = false;
   readonly permissionCategory = "computer_use" as const;
+  readonly recoveryMode = "never_auto_retry" as const;
 
   constructor(protected readonly authority: BoundClientCapabilityAuthority) {}
   abstract name(): string;
