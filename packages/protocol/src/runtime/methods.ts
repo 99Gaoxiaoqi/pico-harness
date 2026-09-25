@@ -62,6 +62,7 @@ export const RUNTIME_METHODS = [
   "client.capability.next",
   "client.capability.resolve",
   "client.capability.authorize",
+  "client.capability.check",
   "terminal.create",
   "terminal.list",
   "terminal.attach",

@@ -563,6 +563,15 @@ export type WorkbarMethodMap = {
     };
     readonly result: { readonly allowed: true };
   };
+  readonly "client.capability.check": {
+    readonly params: {
+      readonly clientId: string;
+      readonly clientToken: string;
+      readonly commandId: string;
+      readonly sessionId: SessionId;
+    };
+    readonly result: { readonly allowed: true };
+  };
   readonly "terminal.create": {
     readonly params: WorkspaceParams & {
       readonly sessionId: SessionId;
@@ -918,6 +927,12 @@ export const workbarParamValidators = {
     tool: boundedNonEmptyStringParam(256),
     phase: oneOfParam(["server-connect", "tool-call", "remote-network", "stdio-network"]),
   }),
+  "client.capability.check": exactParamShape({
+    clientId: boundedNonEmptyStringParam(512),
+    clientToken: boundedNonEmptyStringParam(128),
+    commandId: boundedNonEmptyStringParam(512),
+    sessionId: boundedNonEmptyStringParam(512),
+  }),
   "terminal.create": exactParamShape(
     { workspacePath: stringParam, sessionId: stringParam },
     { cols: positiveIntegerParam, rows: positiveIntegerParam },
@@ -1179,6 +1194,7 @@ export const workbarResultValidators = {
   }),
   "client.capability.resolve": exactResultShape({ accepted: resultOneOf([true]) }),
   "client.capability.authorize": exactResultShape({ allowed: resultOneOf([true]) }),
+  "client.capability.check": exactResultShape({ allowed: resultOneOf([true]) }),
   "terminal.create": exactResultShape({
     terminal: runtimeTerminalSessionResult,
     resourceEpoch: resultNonEmptyString,

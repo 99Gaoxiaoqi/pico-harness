@@ -572,6 +572,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         this.clientCapabilityBroker.resolveCommand(request.params),
       "client.capability.authorize": (request) =>
         this.clientCapabilityBroker.authorizeCommand(request.params),
+      "client.capability.check": (request) =>
+        this.clientCapabilityBroker.checkCommand(request.params),
       "terminal.create": (request) =>
         this.withHostWorkbarErrors(() => this.terminalService.create(request.params)),
       "terminal.list": (request) =>
