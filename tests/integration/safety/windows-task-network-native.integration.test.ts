@@ -80,6 +80,10 @@ test(
     try {
       const blocked = await runSandboxed(loopbackOnlyScript);
       assert.notEqual(blocked.code, 0, "a process without a receipt reached host loopback");
+      const externalOnlyScript =
+        'const s=require("node:net").connect({host:"1.1.1.1",port:443});s.setTimeout(4000,()=>s.destroy(new Error("timeout")));s.on("connect",()=>process.exit(0));s.on("error",()=>process.exit(23));';
+      const blockedExternal = await runSandboxed(externalOnlyScript);
+      assert.notEqual(blockedExternal.code, 0, "a process without a receipt reached the Internet");
 
       const prepare = await runBroker([
         "--task-network",
