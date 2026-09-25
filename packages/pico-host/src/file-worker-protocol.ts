@@ -52,5 +52,7 @@ export interface FileWorkerResponse {
   readonly result?: string;
   readonly preparedDigest?: string;
   readonly preparedBytes?: number;
+  /** Digest of the source bytes used to prepare an edit. */
+  readonly sourceDigest?: string;
   readonly error?: string;
 }

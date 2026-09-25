@@ -63,6 +63,7 @@ async function execute(request: FileWorkerRequest): Promise<FileWorkerResponse> 
   }
   let result: string;
   let preparedContent: string | undefined;
+  let sourceDigest: string | undefined;
   switch (request.operation) {
     case "read_file":
       result = await new ReadFileTool(roots).execute(request.args);
@@ -99,6 +100,7 @@ async function execute(request: FileWorkerRequest): Promise<FileWorkerResponse> 
       const oldText = String(input.old_text ?? "");
       const newText = String(input.new_text ?? "");
       const snapshot = await readBoundedFileSnapshot(single.path, READ_FILE_MAX_BYTES, single.path);
+      sourceDigest = createHash("sha256").update(snapshot.content).digest("hex");
       const prepared = prepareEditContent(
         snapshot.content,
         oldText,
@@ -124,6 +126,7 @@ async function execute(request: FileWorkerRequest): Promise<FileWorkerResponse> 
     boundaryRevision: request.boundaryRevision,
     ok: true,
     result,
+    ...(sourceDigest ? { sourceDigest } : {}),
     ...(preparedContent !== undefined
       ? {
           preparedDigest: createHash("sha256").update(preparedContent).digest("hex"),
