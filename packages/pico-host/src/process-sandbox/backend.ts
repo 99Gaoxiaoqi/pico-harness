@@ -298,7 +298,15 @@ export function buildBubblewrapArgs(
   ];
   // A new exact file has no bind target yet. Give File Worker an empty cwd path in
   // its private mount namespace without exposing siblings from the host workspace.
-  if (createEmptyCwd) result.push("--dir", cwd);
+  if (createEmptyCwd) {
+    result.push("--dir", cwd);
+    // Missing exact-file targets cannot be bind-mounted. Recreate only their
+    // directory path in the private namespace so the Worker can verify an
+    // existing nested parent without exposing any host siblings.
+    for (const parent of new Set((policy.readFiles ?? []).map((path) => dirname(path)))) {
+      if (parent !== cwd) result.push("--dir", parent);
+    }
+  }
   // Keep the conventional loader and executable paths visible even on usr-merged hosts.
   // Policy normalization resolves symlinks such as /bin -> /usr/bin and /lib64 ->
   // /usr/lib64; binding the lexical aliases restores those ABI paths without granting
