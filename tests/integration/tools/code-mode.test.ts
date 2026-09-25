@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { setImmediate as nextTurn } from "node:timers/promises";
+import { setImmediate as nextTurn, setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
 import {
   DEFAULT_CODE_MODE_EXECUTION_POLICY,
@@ -17,6 +17,7 @@ test("Code Mode: real QuickJS aggregates parallel calls and has no ambient host 
   const calls: unknown[] = [];
   let inFlight = 0;
   let peak = 0;
+  const secondStarted = Promise.withResolvers<void>();
   const result = await executeCodeCell({
     code: `
       const values = await Promise.all([1, 2, 3].map(id => tools.read({ id })));
@@ -32,9 +33,28 @@ test("Code Mode: real QuickJS aggregates parallel calls and has no ambient host 
       assert.equal(signal.aborted, false);
       calls.push(args);
       peak = Math.max(peak, ++inFlight);
-      await nextTurn();
-      inFlight--;
-      return { value: (args as { id: number }).id * 10 };
+      try {
+        if (calls.length === 1) {
+          // Keep the first physical call pending until another call enters the host.
+          // A single event-loop turn can finish before the next QuickJS bridge message arrives.
+          const timeout = new AbortController();
+          try {
+            await Promise.race([
+              secondStarted.promise,
+              delay(5_000, undefined, { signal: timeout.signal }).then(() => {
+                throw new Error("parallel child operation never started");
+              }),
+            ]);
+          } finally {
+            timeout.abort();
+          }
+        } else {
+          secondStarted.resolve();
+        }
+        return { value: (args as { id: number }).id * 10 };
+      } finally {
+        inFlight--;
+      }
     },
   });
   assert.deepEqual(result, {
