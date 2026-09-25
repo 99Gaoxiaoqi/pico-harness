@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { CodeIntelligenceManager } from "@pico/pico-host/code-intelligence";
+import { buildDefaultToolRegistry } from "@pico/pico-host/default-registry";
+import { WorkspaceRoots } from "@pico/pico-host/workspace-roots";
 
 test("managed Repo Map keeps a progressive index inside a network-denied session worker", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-managed-code-"));
@@ -43,6 +45,37 @@ test("managed Repo Map keeps a progressive index inside a network-denied session
   assert.equal(manager.canRunManagedReads(42), true);
   await assert.rejects(priorWorker.snapshot({ maxFiles: 1 }), /已关闭|不可用/u);
   assert.equal((await manager.repoMap().snapshot({ maxFiles: 1 })).cursor, 1);
+});
+
+test("managed registry admits Repo Map only for the current worker generation", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-managed-code-registry-"));
+  await writeFile(join(root, "source.ts"), "export function example() {}\n");
+  const manager = new CodeIntelligenceManager({
+    rootDir: root,
+    lspEnabled: false,
+    processSandbox: { bypass: false, generation: 9, workspaceRoots: [root] },
+  });
+  context.after(async () => {
+    await manager.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await manager.start();
+  let generation = 9;
+  const registry = buildDefaultToolRegistry(root, {
+    workspaceRoots: WorkspaceRoots.createSync(root),
+    codeIntelligence: manager.service()!,
+    canRunManagedCodeIntelligence: (value) => manager.canRunManagedReads(value),
+    processSandbox: {
+      profile: "workspace-write",
+      generation,
+      resolveSandbox: () => ({ profile: "workspace-write", generation }),
+    },
+  });
+  const repoMap = registry.getTool("repo_map");
+  assert.ok(repoMap);
+  assert.match(await repoMap.execute("{}"), /example/u);
+  generation = 10;
+  await assert.rejects(repoMap.execute("{}"), /sandbox_unavailable/u);
 });
 
 test("managed document reads reject a symlink outside the bound workspace", async (context) => {

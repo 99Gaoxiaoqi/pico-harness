@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { SkillLoader, SkillViewTool } from "../../../packages/pico-host/src/skill-catalog.js";
 import { detectSandboxBackend } from "../../../packages/pico-host/src/process-sandbox/index.js";
+import { buildDefaultToolRegistry } from "../../../packages/pico-host/src/default-registry.js";
+import { WorkspaceRoots } from "../../../packages/pico-host/src/workspace-roots.js";
 
 test("managed skill_view reads the discovered exact source in an isolated File Worker", async (context) => {
   assert.notEqual(detectSandboxBackend(), "unavailable");
@@ -82,4 +84,30 @@ test("managed skill_view reads the discovered exact source in an isolated File W
   );
   await assert.rejects(tool.execute('{"name":"example"}'), /技能来源身份已变化/u);
   assert.equal(activations, 1);
+});
+
+test("managed registry exposes the isolated skill reader after catalog preparation", async (context) => {
+  const workspace = await mkdtemp(join(tmpdir(), "pico-registry-skill-view-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+  const skillDirectory = join(workspace, ".pico", "skills", "example");
+  await mkdir(skillDirectory, { recursive: true });
+  await writeFile(
+    join(skillDirectory, "SKILL.md"),
+    "---\nname: example\ndescription: Example\n---\nVisible through the worker\n",
+  );
+  const loader = new SkillLoader(workspace);
+  await loader.loadAll();
+  const roots = WorkspaceRoots.createSync(workspace);
+  const registry = buildDefaultToolRegistry(workspace, {
+    workspaceRoots: roots,
+    skillLoader: loader,
+    processSandbox: {
+      profile: "workspace-write",
+      generation: 1,
+      resolveSandbox: () => ({ profile: "workspace-write", generation: 1 }),
+    },
+  });
+  const tool = registry.getTool("skill_view");
+  assert.ok(tool);
+  assert.equal(await tool.execute('{"name":"example"}'), "Visible through the worker");
 });

@@ -820,7 +820,7 @@ async function runNode(
   cwd = fixture.workspace,
   env: NodeJS.ProcessEnv = process.env,
   readRoots: readonly string[] = [],
-  network: "allow" | "deny" = "allow",
+  network: "allow" | "deny" = process.platform === "win32" ? "deny" : "allow",
   readFiles: readonly string[] = [],
   writeFiles: readonly string[] = [],
   workspaceRoots: readonly string[] = [fixture.workspace],
