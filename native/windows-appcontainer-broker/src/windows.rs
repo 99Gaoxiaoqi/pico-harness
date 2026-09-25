@@ -38,9 +38,6 @@ const STD_INPUT_HANDLE: u32 = (-10i32) as u32;
 const STD_OUTPUT_HANDLE: u32 = (-11i32) as u32;
 const STD_ERROR_HANDLE: u32 = (-12i32) as u32;
 const TOKEN_QUERY: u32 = 0x0000_0008;
-const TOKEN_USER: i32 = 1;
-const SE_FILE_OBJECT: i32 = 1;
-const OWNER_SECURITY_INFORMATION: u32 = 0x0000_0001;
 
 #[repr(C)]
 struct SecurityCapabilities {
@@ -226,6 +223,7 @@ extern "system" {
     ) -> i32;
     fn DeriveAppContainerSidFromAppContainerName(name: *const u16, sid: *mut Sid) -> i32;
     fn DeleteAppContainerProfile(name: *const u16) -> i32;
+    fn GetUserProfileDirectoryW(token: Handle, profile_dir: *mut u16, size: *mut u32) -> i32;
 }
 
 #[link(name = "advapi32")]
@@ -233,24 +231,6 @@ extern "system" {
     fn ConvertStringSidToSidW(string_sid: *const u16, sid: *mut Sid) -> i32;
     fn FreeSid(sid: Sid) -> *mut c_void;
     fn OpenProcessToken(process: Handle, desired_access: u32, token: *mut Handle) -> i32;
-    fn GetTokenInformation(
-        token: Handle,
-        information_class: i32,
-        information: *mut c_void,
-        information_length: u32,
-        return_length: *mut u32,
-    ) -> i32;
-    fn GetSecurityInfo(
-        handle: Handle,
-        object_type: i32,
-        security_information: u32,
-        owner: *mut Sid,
-        group: *mut Sid,
-        dacl: *mut *mut c_void,
-        sacl: *mut *mut c_void,
-        security_descriptor: *mut *mut c_void,
-    ) -> u32;
-    fn EqualSid(sid1: Sid, sid2: Sid) -> i32;
 }
 
 #[derive(Debug)]
@@ -436,6 +416,13 @@ fn grant_exact_metadata_chain(
     sid: &str,
     guards: &mut Vec<File>,
 ) -> Result<(), String> {
+    let profile = current_user_profile_path()?;
+    assert_not_reparse_point(&profile)?;
+    let profile_guard = pin_path(&profile, true)?;
+    assert_not_reparse_point(&profile)?;
+    assert_pinned_identity(&profile, &profile_guard, true)?;
+    let profile_identity = file_identity(&profile_guard)?;
+    guards.push(profile_guard);
     let mut ancestors = Vec::new();
     let mut current = Some(leaf);
     while let Some(directory) = current {
@@ -445,12 +432,7 @@ fn grant_exact_metadata_chain(
         ancestors.push(directory);
         current = directory.parent();
     }
-    let user_token_information = current_user_token_information()?;
-    let user_sid = unsafe { (*(user_token_information.as_ptr() as *const SidAndAttributes)).sid };
-    if user_sid.is_null() {
-        return Err("current user token has no SID".into());
-    }
-    let mut user_owned_chain_started = false;
+    let mut within_user_profile = false;
     for directory in ancestors.into_iter().rev() {
         assert_not_reparse_point(directory)?;
         let pinned = pin_path(directory, true)?;
@@ -462,27 +444,22 @@ fn grant_exact_metadata_chain(
                 directory.display()
             ));
         }
-        let user_owned = file_owned_by(&pinned, user_sid)?;
+        if file_identity(&pinned)? == profile_identity {
+            within_user_profile = true;
+        }
         guards.push(pinned);
-        if !user_owned {
-            if user_owned_chain_started {
-                return Err(format!(
-                    "exact-file metadata ancestor is not owned by the current user: {}",
-                    directory.display()
-                ));
-            }
+        if !within_user_profile {
             continue;
         }
-        user_owned_chain_started = true;
-        // realpath needs metadata access on each user-owned component. The ACE has no
-        // inheritance and does not allow listing or creating children.
+        // realpath needs metadata access on each component within this user-specific
+        // profile. The ACE has no inheritance and cannot list or create children.
         journal.grant_exact(directory, sid, "X,RA,RC,S")?;
     }
-    if user_owned_chain_started {
+    if within_user_profile {
         Ok(())
     } else {
         Err(format!(
-            "exact-file metadata path has no user-owned directory: {}",
+            "exact-file metadata path is outside the current user profile: {}",
             leaf.display()
         ))
     }
@@ -957,32 +934,24 @@ fn file_information(file: &File) -> Result<ByHandleFileInformation, String> {
     Ok(information)
 }
 
-fn current_user_token_information() -> Result<Vec<usize>, String> {
+fn current_user_profile_path() -> Result<PathBuf, String> {
     let mut token: Handle = null_mut();
     if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
         return Err(last_error("OpenProcessToken"));
     }
     let mut needed = 0u32;
     unsafe {
-        GetTokenInformation(token, TOKEN_USER, null_mut(), 0, &mut needed);
+        GetUserProfileDirectoryW(token, null_mut(), &mut needed);
     }
-    if needed < size_of::<SidAndAttributes>() as u32 {
+    if needed == 0 {
+        let error = last_error("GetUserProfileDirectoryW");
         unsafe { CloseHandle(token) };
-        return Err("GetTokenInformation returned a short TokenUser buffer".into());
+        return Err(error);
     }
-    let words = (needed as usize).div_ceil(size_of::<usize>());
-    let mut information = vec![0usize; words];
-    let result = unsafe {
-        GetTokenInformation(
-            token,
-            TOKEN_USER,
-            information.as_mut_ptr().cast(),
-            needed,
-            &mut needed,
-        )
-    };
+    let mut profile = vec![0u16; needed as usize];
+    let result = unsafe { GetUserProfileDirectoryW(token, profile.as_mut_ptr(), &mut needed) };
     let error = if result == 0 {
-        Some(last_error("GetTokenInformation"))
+        Some(last_error("GetUserProfileDirectoryW"))
     } else {
         None
     };
@@ -990,32 +959,14 @@ fn current_user_token_information() -> Result<Vec<usize>, String> {
     if let Some(error) = error {
         return Err(error);
     }
-    Ok(information)
-}
-
-fn file_owned_by(file: &File, user_sid: Sid) -> Result<bool, String> {
-    let mut owner: Sid = null_mut();
-    let mut security_descriptor: *mut c_void = null_mut();
-    let result = unsafe {
-        GetSecurityInfo(
-            file.as_raw_handle(),
-            SE_FILE_OBJECT,
-            OWNER_SECURITY_INFORMATION,
-            &mut owner,
-            null_mut(),
-            null_mut(),
-            null_mut(),
-            &mut security_descriptor,
-        )
-    };
-    if result != 0 {
-        return Err(format!(
-            "GetSecurityInfo failed with Windows error {result}"
-        ));
+    let length = profile
+        .iter()
+        .position(|&unit| unit == 0)
+        .unwrap_or(profile.len());
+    if length == 0 {
+        return Err("GetUserProfileDirectoryW returned an empty path".into());
     }
-    let owned = !owner.is_null() && unsafe { EqualSid(owner, user_sid) } != 0;
-    unsafe { LocalFree(security_descriptor) };
-    Ok(owned)
+    Ok(PathBuf::from(OsString::from_wide(&profile[..length])))
 }
 
 fn pin_path(path: &Path, directory: bool) -> Result<File, String> {
