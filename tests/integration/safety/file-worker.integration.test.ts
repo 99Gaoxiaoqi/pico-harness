@@ -231,6 +231,7 @@ test(
       readFiles?: readonly string[];
       writeRoots: readonly string[];
     }> = [];
+    const workerArgs: string[][] = [];
     context.mock.method(
       managedProcessLauncher,
       "launch",
@@ -240,6 +241,7 @@ test(
       ) => {
         if (request.origin === "file-worker") {
           policies.push(request.policy);
+          workerArgs.push([...request.args]);
         }
         return originalLaunch(request, options);
       },
@@ -278,6 +280,12 @@ test(
       /source\.ts/u,
     );
     assert.equal(policies.length, 5);
+    if (process.platform === "win32") {
+      assert.ok(
+        workerArgs.every((args) => args.length === 1 && args[0]?.endsWith("file-worker.mjs")),
+        "Windows 受限 File Worker 必须直接启动已构建 bundle",
+      );
+    }
     assert.ok(policies.every((policy) => policy.network === "deny"));
     assert.ok(policies.every((policy) => !policy.writeRoots.includes(workspace)));
     assert.ok(
