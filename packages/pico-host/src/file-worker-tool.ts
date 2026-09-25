@@ -34,7 +34,6 @@ import {
   type FileWorkerRequest,
   type FileWorkerResponse,
 } from "./file-worker-protocol.js";
-import { sameFileTargetIdentity } from "./file-worker-protocol.js";
 
 export interface FileWorkerSandboxDescriptor {
   readonly profile: SandboxProfile;
