@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { app, desktopCapturer, powerMonitor, screen, systemPreferences } from "electron";
 import { scheduleDeadline } from "@pico/runtime/deadline";
 import type { JsonObject, RuntimeClientCapabilityCommand } from "@pico/protocol";
@@ -109,7 +110,15 @@ export class ComputerUseExecutor {
     ) {
       throw new Error("目标不是可输入文本的元素，请重新观察");
     }
+    const text = command.action === "computer.type" ? command.input["text"] : undefined;
+    if (command.action === "computer.type" && (typeof text !== "string" || text.length > 4_096)) {
+      throw new Error("输入文本无效");
+    }
     await validate?.();
+    this.checkSystemGates();
+    // The observation is consumed before the first possible native side effect.
+    // A partial click or text insertion must require a fresh observation.
+    this.observations.delete(command.sessionId);
     await this.native({
       action: "click",
       expectedPid: previous!.pid,
@@ -123,18 +132,49 @@ export class ComputerUseExecutor {
       expectedHeight: fresh.height,
     });
     if (command.action === "computer.type") {
-      const text = command.input["text"];
-      if (typeof text !== "string" || text.length > 4_096) throw new Error("输入文本无效");
       this.checkSystemGates();
       await validate?.();
       const focused = await this.native({ action: "status" });
       if (readInteger(focused["frontmostPid"]) !== previous!.pid) {
         throw new Error("输入前前台应用已切换");
       }
-      await validate?.();
-      await this.native({ action: "type", text, expectedPid: previous!.pid });
+      const revoked = new AbortController();
+      const stopMonitoring = new AbortController();
+      const monitor = validate
+        ? (async () => {
+            while (!stopMonitoring.signal.aborted) {
+              try {
+                await validate();
+              } catch (error) {
+                revoked.abort(error);
+                return;
+              }
+              try {
+                await delay(50, undefined, { signal: stopMonitoring.signal });
+              } catch {
+                return;
+              }
+            }
+          })()
+        : undefined;
+      try {
+        for (const part of splitTextForNativeInput(text as string)) {
+          this.checkSystemGates();
+          await validate?.();
+          if (revoked.signal.aborted) throw revoked.signal.reason;
+          await this.native(
+            { action: "type", text: part, expectedPid: previous!.pid },
+            revoked.signal,
+          );
+        }
+        await validate?.();
+        if (revoked.signal.aborted) throw revoked.signal.reason;
+      } finally {
+        stopMonitoring.abort();
+        await monitor;
+      }
+      if (revoked.signal.aborted) throw revoked.signal.reason;
     }
-    this.observations.delete(command.sessionId);
     return { accepted: true, observationConsumed: true };
   }
 
@@ -165,9 +205,17 @@ export class ComputerUseExecutor {
     }
   }
 
-  private async native(input: JsonObject): Promise<JsonObject> {
+  private async native(input: JsonObject, signal?: AbortSignal): Promise<JsonObject> {
+    if (signal?.aborted)
+      throw new Error("电脑输入授权已撤销，可能已输入部分文本", { cause: signal.reason });
     const executable = await this.verifiedExecutable();
+    if (signal?.aborted)
+      throw new Error("电脑输入授权已撤销，可能已输入部分文本", { cause: signal.reason });
     const child = spawn(executable, [], { stdio: ["pipe", "pipe", "pipe"], shell: false });
+    const abort = () => child.kill();
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+    child.stdin.on("error", () => undefined);
     child.stdin.end(JSON.stringify(input));
     const output: Buffer[] = [];
     let length = 0;
@@ -180,7 +228,13 @@ export class ComputerUseExecutor {
     const exitCode = await new Promise<number | null>((resolveExit, reject) => {
       child.once("error", reject);
       child.once("close", resolveExit);
-    }).finally(() => deadline.cancel());
+    }).finally(() => {
+      deadline.cancel();
+      signal?.removeEventListener("abort", abort);
+    });
+    if (signal?.aborted) {
+      throw new Error("电脑输入授权已撤销，可能已输入部分文本", { cause: signal.reason });
+    }
     if (exitCode !== 0 || length > 256_000) throw new Error("macOS 电脑操作执行器失败或超时");
     const value = JSON.parse(Buffer.concat(output).toString("utf8")) as unknown;
     if (!isRecord(value)) throw new Error("macOS 电脑操作响应无效");
@@ -201,6 +255,23 @@ export class ComputerUseExecutor {
     if (checksum.trim().split(/\s/u)[0] !== actual) throw new Error("macOS 电脑操作执行器校验失败");
     return path;
   }
+}
+
+function splitTextForNativeInput(text: string): string[] {
+  const parts: string[] = [];
+  let part = "";
+  let units = 0;
+  for (const scalar of text) {
+    if (part && units + scalar.length > 128) {
+      parts.push(part);
+      part = "";
+      units = 0;
+    }
+    part += scalar;
+    units += scalar.length;
+  }
+  if (part) parts.push(part);
+  return parts;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
