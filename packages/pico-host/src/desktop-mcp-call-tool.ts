@@ -33,7 +33,8 @@ export class DesktopMcpCallTool implements BaseTool {
   definition(): ToolDefinition {
     return {
       name: this.name(),
-      description: "调用用户已启用且当前任务已获授权的 Desktop MCP 工具。server 和 tool 必须是已连接后发现的真实名称。",
+      description:
+        "调用用户已启用且当前任务已获授权的 Desktop MCP 工具。server 和 tool 必须是已连接后发现的真实名称。",
       inputSchema: {
         type: "object",
         properties: {
