@@ -906,11 +906,12 @@ test("Plan Run isolates and restores code intelligence owned by an injected Sess
       model: "glm-5.2",
       modelRouteId: "test/test",
       collaborationMode: "plan",
-      permissionMode: "ask",
+      permissionMode: "full-access",
     },
     { persistence: sessionLease.session },
   );
   await sessionLease.session.flushPersistence();
+  assert.equal(sessionLease.session.getRuntimeStateSnapshot().boundary?.kind, "bypass");
   t.after(async () => {
     await runtimeState.dispose();
     const released = globalSessionManager.delete(sessionId, workDir, { picoHome });
