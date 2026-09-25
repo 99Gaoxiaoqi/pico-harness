@@ -25,6 +25,7 @@ import {
 } from "@pico/pico-host/runtime-host-operations";
 import { startPicoDaemonRuntimeHostCandidate } from "@pico/pico-host/product-runtime-host-candidate";
 import { resolvePicoPaths } from "@pico/pico-host";
+import { UserConfigStore } from "@pico/pico-host/input/user-config-store";
 import { sessionOwnerLeaseDirectory } from "@pico/storage";
 import {
   stopTestChildProcess,
@@ -262,6 +263,25 @@ test("daemon candidate: runtime.shutdown gracefully stops the resident daemon", 
 
 test("daemon candidate: current shutdown drains cached Session lease before successor takeover", async (t) => {
   const harness = await startCandidateHarness(t);
+  const userConfig = new UserConfigStore({ picoHome: harness.picoHome });
+  const initialConfig = await userConfig.read();
+  await userConfig.write(
+    {
+      version: 1,
+      defaults: { modelRouteId: "fixture/fixture-model" },
+      providers: {
+        fixture: {
+          protocol: "openai",
+          baseURL: "http://127.0.0.1:1/v1",
+          apiKeyEnv: "PICO_DAEMON_CANDIDATE_UNUSED_KEY",
+          auth: "none",
+          models: ["fixture-model"],
+          discoverModels: false,
+        },
+      },
+    },
+    { expectedRevision: initialConfig.revision },
+  );
   const workspacePath = join(harness.picoHome, "shutdown-workspace");
   await mkdir(workspacePath, { recursive: true });
   const mainPath = fileURLToPath(new URL("../../../src/daemon/main.ts", import.meta.url));

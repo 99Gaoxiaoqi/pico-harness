@@ -137,7 +137,7 @@ test("Desktop storage repair: cancellation is read-only, confirmation preserves 
       );
     }
   } finally {
-    rmSync(f.base, { recursive: true, force: true });
+    rmSync(f.base, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -204,7 +204,7 @@ test("Desktop storage repair refuses stale confirmation and active connections w
       );
     } finally {
       lease?.release();
-      rmSync(f.base, { recursive: true, force: true });
+      rmSync(f.base, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   }
 });
