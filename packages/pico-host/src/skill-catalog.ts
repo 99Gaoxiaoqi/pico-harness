@@ -7,7 +7,7 @@
 // 渐进式暴露:启动时只加载元数据与正文,按需提供给智能体。
 
 import { createHash } from "node:crypto";
-import { open, readdir, realpath, stat } from "node:fs/promises";
+import { readdir, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import type { Dirent } from "node:fs";
@@ -23,6 +23,16 @@ import {
   type ToolDefinition,
 } from "@pico/core";
 import { resolvePicoPaths } from "./pico-paths.js";
+import { readBoundedFileSnapshot } from "./atomic-workspace-file.js";
+import type { ToolExecutionContext } from "./tool-registry-contract.js";
+import type { FileWorkerSandboxDescriptor } from "./file-worker-tool.js";
+import { SandboxViolationError } from "./process-sandbox/index.js";
+import {
+  captureDiscoveredSkillSource,
+  readDiscoveredSkillViaWorker,
+  verifyDiscoveredSkillSource,
+  type DiscoveredSkillSource,
+} from "./skill-view-worker.js";
 
 // agentskills.io 规范的元数据长度上限,超长截断避免撑爆渐进式暴露清单
 const MAX_NAME_LENGTH = 64;
@@ -108,6 +118,7 @@ export class SkillLoader<TrustAuthority = unknown> {
     revision: string;
     scopeRevisions: Readonly<Record<ResourceCatalogSource["scope"], string>>;
     signature: string;
+    sourceBindings: ReadonlyMap<Skill<TrustAuthority>, DiscoveredSkillSource>;
   };
 
   constructor(
@@ -171,6 +182,21 @@ export class SkillLoader<TrustAuthority = unknown> {
     return skills.find((skill) => canonicalResourceName(skill.name) === key);
   }
 
+  /** Uses only the already-built catalog. A managed tool call must never trigger a Host file scan. */
+  viewDiscovered(
+    name: string,
+  ): { skill: Skill<TrustAuthority>; source: DiscoveredSkillSource } | undefined {
+    const skill = this.cache?.skills.find(
+      (candidate) => canonicalResourceName(candidate.name) === canonicalResourceName(name),
+    );
+    const source = skill ? this.cache?.sourceBindings.get(skill) : undefined;
+    return skill && source ? { skill, source } : undefined;
+  }
+
+  discoveredSummaries(): SkillSummary[] | undefined {
+    return this.cache?.skills.map(({ name, description }) => ({ name, description }));
+  }
+
   private async loadSkillCatalog(): Promise<{
     readonly skills: Skill<TrustAuthority>[];
     readonly candidates: ResourceCatalogCandidate<Skill<TrustAuthority>, TrustAuthority>[];
@@ -203,13 +229,22 @@ export class SkillLoader<TrustAuthority = unknown> {
     }
 
     const candidates: ResourceCatalogCandidate<Skill<TrustAuthority>, TrustAuthority>[] = [];
+    const sourceBindings = new Map<Skill<TrustAuthority>, DiscoveredSkillSource>();
     const revisionParts: Array<{
       readonly part: string;
       readonly scope: ResourceCatalogSource["scope"];
     }> = [];
     for (const { file, source, relativePath } of skillFiles) {
       try {
-        const content = await readBoundedUtf8(file, MAX_SKILL_FILE_BYTES);
+        const before = await captureDiscoveredSkillSource(file, source.root);
+        const content = (
+          await readBoundedFileSnapshot(before.physicalPath, MAX_SKILL_FILE_BYTES, file)
+        ).content;
+        const binding: DiscoveredSkillSource = {
+          ...before,
+          contentDigest: createHash("sha256").update(content).digest("hex"),
+        };
+        await verifyDiscoveredSkillSource(binding);
         // frontmatter 无 name 时回退到 SKILL.md 所在目录名(对齐 Hermes)
         const fallbackName = basename(dirname(file));
         const parsed = parseSkillMD(content, fallbackName);
@@ -225,17 +260,19 @@ export class SkillLoader<TrustAuthority = unknown> {
           scope: source.scope,
           part: `${stableSourceIdentity(source)}\0${relativePath}\0${createHash("sha256").update(content).digest("hex")}`,
         });
+        const skill = {
+          ...parsed,
+          name,
+          ...(allowedTools === undefined ? {} : { allowedTools }),
+          sourcePath: file,
+          source,
+        } satisfies Skill<TrustAuthority>;
+        sourceBindings.set(skill, binding);
         candidates.push({
           name,
           source,
           sourcePath: file,
-          value: {
-            ...parsed,
-            name,
-            ...(allowedTools === undefined ? {} : { allowedTools }),
-            sourcePath: file,
-            source,
-          } satisfies Skill<TrustAuthority>,
+          value: skill,
         });
       } catch (err) {
         // 区分权限/编码类可预期错误(debug 跳过)与其他异常(warn 跳过)
@@ -267,7 +304,14 @@ export class SkillLoader<TrustAuthority = unknown> {
         revisionParts.filter(({ scope }) => scope === "external").map(({ part }) => part),
       ),
     } satisfies Readonly<Record<ResourceCatalogSource["scope"], string>>;
-    this.cache = { skills: sorted, candidates, revision, scopeRevisions, signature };
+    this.cache = {
+      skills: sorted,
+      candidates,
+      revision,
+      scopeRevisions,
+      signature,
+      sourceBindings,
+    };
     return this.cache;
   }
 
@@ -415,12 +459,21 @@ function compareStableText(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
+export interface ManagedSkillViewOptions {
+  readonly workDir: string;
+  readonly resolveSandbox: () => FileWorkerSandboxDescriptor;
+  /** The Worker code and executable must not overlap any model-writable path. */
+  readonly writablePaths: () => readonly string[];
+  readonly timeoutMs?: number;
+}
+
 export class SkillViewTool<TrustAuthority = unknown> {
   readonly readOnly = true;
 
   constructor(
     private readonly loader: SkillLoader<TrustAuthority>,
     private readonly onActivateHooks?: (skill: Skill<TrustAuthority>) => void | Promise<void>,
+    private readonly managed?: ManagedSkillViewOptions,
   ) {}
 
   name(): string {
@@ -442,7 +495,7 @@ export class SkillViewTool<TrustAuthority = unknown> {
     };
   }
 
-  async execute(args: string): Promise<string> {
+  async execute(args: string, context?: ToolExecutionContext): Promise<string> {
     let parsed: { name?: unknown };
     try {
       parsed = JSON.parse(args) as { name?: unknown };
@@ -456,6 +509,56 @@ export class SkillViewTool<TrustAuthority = unknown> {
     const name = parsed.name.trim();
     if (!name) {
       throw new Error("skill_view 缺少 name 参数");
+    }
+    const sandbox = this.managed?.resolveSandbox();
+    if (sandbox && !sandbox.bypass && sandbox.profile !== "danger-full-access") {
+      if (sandbox.hasUnsupportedDenyEntries) {
+        throw new SandboxViolationError(
+          "policy_compilation_failed",
+          "技能读取边界含系统沙箱无法表达的拒绝规则。",
+        );
+      }
+      const revision = sandbox.generation;
+      if (!Number.isSafeInteger(revision) || revision === undefined || revision < 0) {
+        throw new SandboxViolationError("sandbox_boundary_required", "技能读取缺少任务边界版本。");
+      }
+      const summaries = this.loader.discoveredSummaries();
+      if (!summaries) {
+        throw new SandboxViolationError(
+          "sandbox_unavailable",
+          "技能目录尚未建立，受限读取已拒绝。",
+        );
+      }
+      const selected = this.loader.viewDiscovered(name);
+      if (!selected?.skill.body) {
+        throw new Error(
+          `未找到技能: ${name}。可用技能: ${summaries.map((skill) => skill.name).join(", ")}`,
+        );
+      }
+      await readDiscoveredSkillViaWorker(selected.source, {
+        workDir: this.managed!.workDir,
+        boundaryRevision: revision,
+        writablePaths: this.managed!.writablePaths(),
+        ...(context?.signal ? { signal: context.signal } : {}),
+        ...(this.managed!.timeoutMs ? { timeoutMs: this.managed!.timeoutMs } : {}),
+      });
+      const after = this.managed!.resolveSandbox();
+      if (after.bypass || after.profile === "danger-full-access" || after.generation !== revision) {
+        throw new SandboxViolationError(
+          "sandbox_boundary_required",
+          "技能读取期间任务边界已变化，请重新提交调用。",
+        );
+      }
+      await verifyDiscoveredSkillSource(selected.source);
+      if (this.loader.viewDiscovered(name)?.source !== selected.source) {
+        throw new SandboxViolationError(
+          "sandbox_boundary_required",
+          "技能目录在读取期间已更新，请重新提交调用。",
+        );
+      }
+      context?.signal?.throwIfAborted();
+      if (selected.skill.hooks !== undefined) await this.onActivateHooks?.(selected.skill);
+      return selected.skill.body;
     }
     const skill = await this.loader.view(name);
     if (!skill?.body) {
@@ -572,20 +675,6 @@ async function walkSkillDirectory(
     }
   }
   return results;
-}
-
-async function readBoundedUtf8(file: string, maxBytes: number): Promise<string> {
-  const handle = await open(file, "r");
-  try {
-    const buffer = Buffer.allocUnsafe(maxBytes + 1);
-    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-    if (bytesRead > maxBytes) {
-      throw new Error(`SKILL.md 超过 ${maxBytes} 字节上限: ${file}`);
-    }
-    return buffer.subarray(0, bytesRead).toString("utf8");
-  } finally {
-    await handle.close();
-  }
 }
 
 function isWithinPath(root: string, target: string): boolean {
