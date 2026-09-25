@@ -75,7 +75,7 @@ function routeOptions(providers: readonly ProviderView[]) {
 function modelCapability(provider: ProviderView, model: string): Record<string, unknown> {
   const value = provider.resolvedModelCapabilities?.[model];
   return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
+    ? (value as Record<string, unknown>)
     : {};
 }
 
@@ -84,13 +84,18 @@ function modelCapabilitySummary(provider: ProviderView, model: string): string {
   const parts = [provider.models.includes(model) ? "已知模型" : "服务商目录"];
   if (capability.displayName && capability.displayName !== model) parts.push(model);
   if (typeof capability.contextWindowTokens === "number") {
-    const count = Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 0 })
-      .format(capability.contextWindowTokens);
-    parts.push(`上下文 ${count}${capability.contextSource === "config" ? "（已配置）" : capability.contextSource === "catalog_snapshot" ? "（目录）" : "（Pico 运行默认）"}`);
+    const count = Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 0 }).format(
+      capability.contextWindowTokens,
+    );
+    parts.push(
+      `上下文 ${count}${capability.contextSource === "config" ? "（已配置）" : capability.contextSource === "catalog_snapshot" ? "（目录）" : "（Pico 运行默认）"}`,
+    );
   }
-  parts.push(typeof capability.maxOutputTokens === "number"
-    ? `最大输出 ${Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 0 }).format(capability.maxOutputTokens)}${capability.outputSource === "catalog_snapshot" ? "（目录）" : "（已配置）"}`
-    : "最大输出未知");
+  parts.push(
+    typeof capability.maxOutputTokens === "number"
+      ? `最大输出 ${Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 0 }).format(capability.maxOutputTokens)}${capability.outputSource === "catalog_snapshot" ? "（目录）" : "（已配置）"}`
+      : "最大输出未知",
+  );
   const supportLabel = (name: string, support: unknown) =>
     `${name}${support === true ? "支持" : support === false ? "不支持" : "未知"}`;
   parts.push(supportLabel("视觉", capability.vision));
@@ -275,7 +280,9 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
                       type="button"
                       className="provider-card__entry"
                       aria-label={`查看 ${provider.id} 连接详情`}
-                      onClick={() => navigate(`/settings/models/${encodeURIComponent(provider.id)}`)}
+                      onClick={() =>
+                        navigate(`/settings/models/${encodeURIComponent(provider.id)}`)
+                      }
                     >
                       <span className="provider-card__icon" aria-hidden="true">
                         <Server size={17} />
@@ -379,7 +386,10 @@ function ProviderDetail({
   readonly onSave: (provider: ProviderDraft) => Promise<boolean>;
   readonly onDefault: (routeId?: string) => Promise<boolean>;
   readonly onRefresh: () => Promise<void>;
-  readonly onTest: (providerId: string, model: string) => Promise<{
+  readonly onTest: (
+    providerId: string,
+    model: string,
+  ) => Promise<{
     readonly ok: boolean;
     readonly durationMs: number;
     readonly message: string;
@@ -403,7 +413,8 @@ function ProviderDetail({
     model.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()),
   );
   const providerDefault = defaultRouteId?.startsWith(`${provider.id}/`) ? defaultRouteId : "";
-  const testModel = enabled.find((model) => `${provider.id}/${model}` === providerDefault) ?? enabled[0];
+  const testModel =
+    enabled.find((model) => `${provider.id}/${model}` === providerDefault) ?? enabled[0];
   const testConnection = async () => {
     if (!testModel) return;
     setTesting(true);
@@ -554,7 +565,11 @@ function ProviderDetail({
                 : "尚未测试"}
           </small>
         </div>
-        <Button variant="quiet" onClick={() => void testConnection()} disabled={busy || testing || !testModel}>
+        <Button
+          variant="quiet"
+          onClick={() => void testConnection()}
+          disabled={busy || testing || !testModel}
+        >
           测试连接
         </Button>
       </div>
@@ -624,9 +639,11 @@ function ProviderDetail({
         visible.map((model) => (
           <div className="provider-detail__row provider-detail__model" key={model}>
             <div>
-              <strong>{typeof modelCapability(provider, model).displayName === "string"
-                ? String(modelCapability(provider, model).displayName)
-                : model}</strong>
+              <strong>
+                {typeof modelCapability(provider, model).displayName === "string"
+                  ? String(modelCapability(provider, model).displayName)
+                  : model}
+              </strong>
               <small>{modelCapabilitySummary(provider, model)}</small>
             </div>
             <button

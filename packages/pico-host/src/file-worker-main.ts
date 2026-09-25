@@ -15,6 +15,7 @@ import type {
   FileWorkerRequest,
   FileWorkerResponse,
 } from "./file-worker-protocol.js";
+import { sameFileTargetIdentity } from "./file-worker-protocol.js";
 
 async function identity(path: string): Promise<FileTargetIdentity> {
   try {
@@ -39,7 +40,7 @@ async function execute(request: FileWorkerRequest): Promise<FileWorkerResponse> 
     throw new Error("无效的任务边界版本");
   }
   for (const target of request.targets) {
-    if (JSON.stringify(await identity(target.path)) !== JSON.stringify(target.identity)) {
+    if (!sameFileTargetIdentity(target.identity, await identity(target.path))) {
       throw new Error(`File Worker 目标身份已变化: ${target.path}`);
     }
   }
