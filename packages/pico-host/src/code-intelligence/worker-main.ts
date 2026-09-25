@@ -132,11 +132,11 @@ async function readDocument(
   filePath: string,
 ): Promise<WorkerDocument> {
   const requestedPath = path.resolve(rootDir, filePath);
+  const physicalPath = await roots.assertAllowed(filePath);
   if ((await lstat(requestedPath)).isSymbolicLink()) {
     throw new Error("代码智能拒绝读取链接文件");
   }
   const requestedIdentity = await identity(requestedPath);
-  const physicalPath = await roots.assertAllowed(filePath);
   const handle = await open(physicalPath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
   try {
     const before = await handle.stat({ bigint: true });

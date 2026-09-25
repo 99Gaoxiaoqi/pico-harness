@@ -224,9 +224,12 @@ export class ReadOnlyCodeWorker implements CodeIntelligenceService {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    this.fail(new Error("代码智能 Worker 已关闭"));
-    await this.lease?.terminate().catch(() => undefined);
-    await rm(this.scratchRoot, { recursive: true, force: true }).catch(() => undefined);
+    try {
+      await this.lease?.terminate();
+    } finally {
+      this.fail(new Error("代码智能 Worker 已关闭"));
+      await rm(this.scratchRoot, { recursive: true, force: true }).catch(() => undefined);
+    }
   }
 
   private call(call: CodeIntelligenceWorkerCall, signal?: AbortSignal): Promise<unknown> {

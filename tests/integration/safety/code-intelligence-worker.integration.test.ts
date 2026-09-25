@@ -44,7 +44,7 @@ test("managed Repo Map keeps a progressive index inside a network-denied session
   await manager.updateProcessSandbox({ bypass: false, generation: 42, workspaceRoots: [root] });
   assert.equal(manager.canRunManagedReads(41), false);
   assert.equal(manager.canRunManagedReads(42), true);
-  await assert.rejects(priorWorker.snapshot({ maxFiles: 1 }), /已关闭|不可用/u);
+  await assert.rejects(priorWorker.snapshot({ maxFiles: 1 }), /已关闭|不可用|退出/u);
   assert.equal((await manager.repoMap().snapshot({ maxFiles: 1 })).cursor, 1);
 });
 
@@ -111,7 +111,6 @@ test("managed document reads reject a symlink outside the bound workspace", asyn
 
 test("managed LSP opens documents through the worker and falls back to its Repo Map", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-managed-lsp-"));
-  context.after(() => rm(root, { recursive: true, force: true }));
   await writeFile(join(root, "source.ts"), "export function workerDocument() {}\n");
   const serverPath = join(root, "server.mjs");
   await writeFile(
@@ -146,7 +145,10 @@ process.stdin.on("data", (chunk) => {
     lspServers: [{ id: "fixture", command: process.execPath, args: [serverPath] }],
     processSandbox: { bypass: false, generation: 12, workspaceRoots: [root] },
   });
-  context.after(() => manager.close());
+  context.after(async () => {
+    await manager.close();
+    await rm(root, { recursive: true, force: true });
+  });
   assert.equal((await manager.start()).backend, "lsp");
   assert.equal(manager.canRunManagedReads(12), true);
   const definitions = await manager.service()!.definitions({
