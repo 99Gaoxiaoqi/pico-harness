@@ -414,6 +414,7 @@ async function runFileWorker(
 ): Promise<FileWorkerResponse> {
   signal?.throwIfAborted();
   const electron = Boolean(process.versions.electron);
+  const bundled = electron || process.platform === "win32";
   let entry: string;
   let codeDirectories: string[];
   let args: string[];
@@ -423,13 +424,6 @@ async function runFileWorker(
       throw new SandboxViolationError("sandbox_unavailable", "桌面 File Worker 资源目录不存在。");
     }
     entry = resolve(resourcesPath, "file-worker", "file-worker.mjs");
-    const expected = (await readFile(`${entry}.sha256`, "utf8")).trim().split(/\s/u)[0];
-    const actual = createHash("sha256")
-      .update(await readFile(entry))
-      .digest("hex");
-    if (!expected || expected !== actual) {
-      throw new SandboxViolationError("sandbox_unavailable", "桌面 File Worker 资源摘要不匹配。");
-    }
     const executableRoot =
       process.platform === "darwin"
         ? dirname(dirname(dirname(process.execPath)))
@@ -437,6 +431,14 @@ async function runFileWorker(
     // Electron loads its Frameworks and helper libraries from its application
     // installation after dyld starts, so the executable alone is insufficient.
     codeDirectories = [dirname(entry), executableRoot];
+    args = [entry];
+  } else if (process.platform === "win32") {
+    // Node's ESM loader treats an absolute D:\... TypeScript entry as a d: URL
+    // inside AppContainer. The standalone bundle is built with the host packages.
+    entry = fileURLToPath(
+      new URL("../../../resources/file-worker/file-worker.mjs", import.meta.url),
+    );
+    codeDirectories = [dirname(entry)];
     args = [entry];
   } else {
     const sourceUrl = new URL(import.meta.url);
@@ -467,14 +469,25 @@ async function runFileWorker(
       return realpath(path);
     }),
   );
-  for (const path of [entry, ...(electron ? [`${entry}.sha256`] : [])]) {
-    const info = await lstat(path);
+  for (const path of [entry, ...(bundled ? [`${entry}.sha256`] : [])]) {
+    const info = await lstat(path).catch(() => {
+      throw new SandboxViolationError("sandbox_unavailable", `File Worker 资源不存在: ${path}`);
+    });
     if (!info.isFile() || info.isSymbolicLink()) {
       throw new SandboxViolationError("sandbox_unavailable", "File Worker 资源不是受信普通文件。");
     }
   }
+  if (bundled) {
+    const expected = (await readFile(`${entry}.sha256`, "utf8")).trim().split(/\s/u)[0];
+    const actual = createHash("sha256")
+      .update(await readFile(entry))
+      .digest("hex");
+    if (!expected || expected !== actual) {
+      throw new SandboxViolationError("sandbox_unavailable", "File Worker 资源摘要不匹配。");
+    }
+  }
   const trustedEntries = await Promise.all(
-    [entry, ...(electron ? [`${entry}.sha256`] : []), process.execPath].map((path) =>
+    [entry, ...(bundled ? [`${entry}.sha256`] : []), process.execPath].map((path) =>
       realpath(path),
     ),
   );
