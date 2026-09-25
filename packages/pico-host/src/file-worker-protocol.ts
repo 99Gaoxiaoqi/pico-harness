@@ -22,9 +22,21 @@ export function sameFileTargetIdentity(
 ): boolean {
   if (expected.kind !== actual.kind) return false;
   if (expected.kind === "missing") return true;
-  if (process.platform !== "win32") return JSON.stringify(expected) === JSON.stringify(actual);
   const valid = (value: string | undefined): value is string =>
     value !== undefined && /^\d+$/u.test(value);
+  // Creating a scratch entry or binding a sandbox mount changes a directory's
+  // size and timestamps without replacing that directory. Its device/inode
+  // pair remains the identity that matters for a path swap.
+  if (expected.kind === "directory") {
+    return (
+      valid(expected.dev) &&
+      valid(expected.ino) &&
+      (process.platform !== "win32" || expected.ino !== "0") &&
+      expected.dev === actual.dev &&
+      expected.ino === actual.ino
+    );
+  }
+  if (process.platform !== "win32") return JSON.stringify(expected) === JSON.stringify(actual);
   return (
     valid(expected.dev) &&
     valid(expected.ino) &&
