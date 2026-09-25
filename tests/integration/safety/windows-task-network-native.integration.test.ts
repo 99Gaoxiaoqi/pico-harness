@@ -46,7 +46,10 @@ test(
     const otherProfileName = `PicoTaskNetwork.${randomBytes(16).toString("hex")}`;
     const taskId = `test-${randomBytes(8).toString("hex")}`;
     const boundaryRevision = 1;
-    const loopback = createServer((socket) => socket.end("loopback-ok"));
+    const loopback = createServer((socket) => {
+      socket.on("error", () => undefined);
+      socket.end("loopback-ok");
+    });
     const privateAddress = Object.values(networkInterfaces())
       .flat()
       .find(
@@ -56,7 +59,10 @@ test(
           /^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.)/u.test(address.address),
       )?.address;
     assert.ok(privateAddress, "Windows native proof requires a private IPv4 interface");
-    const lan = createServer((socket) => socket.end("lan-ok"));
+    const lan = createServer((socket) => {
+      socket.on("error", () => undefined);
+      socket.end("lan-ok");
+    });
     await listen(loopback, "127.0.0.1");
     await listen(lan, privateAddress);
     const loopbackPort = portOf(loopback);
