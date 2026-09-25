@@ -39,9 +39,9 @@ workspace. `/dev/null`, `/dev/tty`, and Windows `NUL` are treated as devices rat
 write paths.
 
 Approved exact-file grants stay exact on macOS and Linux rather than widening to their parent
-directory. Windows AppContainer currently cannot express exact-file grants, so a managed process
-that needs one fails closed instead of widening it; direct file tools still enforce the exact
-boundary. Managed profiles containing explicit deny entries, protected-metadata write denial, or
+directory. On Windows, the Broker grants only file metadata traversal to ancestors and an exact
+capability ACL on the target file; it does not grant sibling contents or parent-directory creation.
+Managed profiles containing explicit deny entries, protected-metadata write denial, or
 unrestricted filesystem combined with restricted network also fail process-policy compilation
 when the OS policy cannot represent them without broadening authority.
 
@@ -52,11 +52,32 @@ when the OS policy cannot represent them without broadening authority.
 - Linux packages Bubblewrap for x64 and arm64. The build script pins the upstream release and
   source digest, creates mount/user/PID/IPC/UTS namespaces, and packages the exact corresponding
   source archive and license.
-- Windows packages Pico's MIT-licensed Rust x64 one-shot AppContainer Broker. It creates an
-  ephemeral AppContainer, grants a process-specific capability SID to policy roots, supplies no
-  network capability to restricted profiles, uses a kill-on-close Job Object, and journals
-  temporary ACL changes for idempotent recovery. The Broker is launched per target process and is
-  not installed as a persistent Windows service. It never requests elevation.
+- Windows packages Pico's MIT-licensed Rust x64 one-shot AppContainer Broker. It grants a
+  process-specific capability SID to policy roots, uses a kill-on-close Job Object, and journals
+  temporary ACL changes for idempotent recovery. Denied processes and File Worker use isolated
+  identities without network capability. An approved network process uses a task-specific
+  AppContainer identity and receives `internetClient` plus `privateNetworkClientServer` only
+  after the Broker verifies a current task/revision receipt, a live task helper, and the OS
+  loopback exemption. The Broker is launched per target process; no persistent service is installed.
+
+### Windows task network preparation
+
+The first network approval for a task asks for administrator confirmation. The Broker creates the
+task's AppContainer profile in the Host user's account, then starts a task-scoped elevated helper
+that installs a loopback exemption for that profile SID. The helper stays alive only while its Host
+task is running. On task revocation or Host exit, it removes the exemption and exits; normal
+revocation does not ask for another administrator confirmation. The Broker rejects new networked
+processes if the helper exits unexpectedly or the exemption disappears. A helper crash can leave
+an orphaned OS exception; the unique task identity is still unusable by Pico until an administrator
+prepares or removes the exception. Restarted and unattended tasks must verify preparation again
+and fail closed if it is absent. The File Worker never receives a network receipt.
+
+These are separate Windows gates: an AppContainer token needs network capability SIDs for Internet
+and private-network traffic, while outbound `127.0.0.1` also needs a loopback exemption for the
+task's own AppContainer SID. The native Windows proof checks denied traffic, public/private/
+loopback connections, task separation, and revocation before this path is enabled. See
+[Microsoft's AppContainer capability guidance](https://learn.microsoft.com/en-us/windows/win32/secauthz/implementing-an-appcontainer)
+and [Windows loopback guidance](https://learn.microsoft.com/en-us/windows/security/operating-system-security/network-security/windows-firewall/troubleshooting-uwp-firewall).
 
 ### Windows host preparation
 
@@ -82,8 +103,9 @@ target is:
 O:BAG:SYD:(A;;GRGWGX;;;WD)(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGX;;;RC)(A;;GRGWGX;;;AC)(A;;GRGWGX;;;S-1-15-2-2)S:(ML;;NW;;;LW)
 ```
 
-This host-prep command does not grant access on the system-drive root and does not modify any
-system-drive DACL. The per-process Broker remains unprivileged and never invokes host-prep or UAC.
+This NUL host-prep command does not grant access on the system-drive root and does not modify any
+system-drive DACL. The per-process Broker remains unprivileged; only the separate task network
+preparation described above asks for UAC.
 The design and target descriptor follow Microsoft's published MXC host-preparation contract at
 [microsoft/mxc@066bab2](https://github.com/microsoft/mxc/blob/066bab24bb8c787f1a962271a6d9aa2a84d24f44/docs/host-prep.md#prepare-null-device).
 
