@@ -26,6 +26,7 @@ export interface PromptComposerOptions {
   onInstructionsLoaded?: (paths: readonly string[]) => void | Promise<void>;
   isolatedHeadless?: boolean;
   researchMode?: boolean;
+  managedWorkspaceRead?: boolean;
   picoHome?: string;
   graphToolsAvailable?: boolean;
   swarmMode?: boolean;

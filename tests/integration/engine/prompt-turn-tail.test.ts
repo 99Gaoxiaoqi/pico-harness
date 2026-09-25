@@ -1,6 +1,6 @@
 import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -480,4 +480,36 @@ test("user-level AGENTS.md is skipped without picoHome", async (context) => {
 
   assert.match(systemPrompt, /project-level-only/u, "项目级 AGENTS.md 应正常加载");
   assert.doesNotMatch(systemPrompt, /用户级指南/u, "未注入 picoHome 时不应加载用户级 AGENTS.md");
+});
+
+test("managed project instructions reject external symlinks while accepting regular files", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-managed-agents-"));
+  const workDir = join(root, "workspace");
+  await mkdir(workDir);
+  context.after(async () => {
+    closeAllOperationalDatabasesForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+  const agentsPath = join(workDir, "AGENTS.md");
+  const outside = join(root, "outside-secret.md");
+  await writeFile(outside, "OUTSIDE_SECRET_123", "utf8");
+  try {
+    await symlink(outside, agentsPath, "file");
+  } catch (error) {
+    if (process.platform === "win32" && (error as NodeJS.ErrnoException).code === "EPERM") {
+      context.skip("Windows host does not permit symlink creation");
+      return;
+    }
+    throw error;
+  }
+  const composer = new PromptComposer(workDir, false, { managedWorkspaceRead: true });
+  assert.doesNotMatch((await composer.buildLayers()).systemPrompt, /OUTSIDE_SECRET_123/u);
+  await rm(agentsPath);
+  await writeFile(agentsPath, "SAFE_PROJECT_INSTRUCTIONS_456", "utf8");
+  const regular = (await composer.buildLayers()).systemPrompt;
+  if (process.platform === "win32") {
+    assert.doesNotMatch(regular, /SAFE_PROJECT_INSTRUCTIONS_456/u);
+  } else {
+    assert.match(regular, /SAFE_PROJECT_INSTRUCTIONS_456/u);
+  }
 });

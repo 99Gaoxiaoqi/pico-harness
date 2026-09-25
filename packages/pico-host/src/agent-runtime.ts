@@ -2039,6 +2039,11 @@ export async function executeAgentRuntime(
       );
       baselineToolNames.push("exec");
     }
+    const graphManagedGitAvailable =
+      dependencies.agentGraph?.kind === "operator" &&
+      dependencies.agentGraph.managedGit !== undefined &&
+      collaborationMode() === "agent" &&
+      currentMainProcessSandbox().bypass === true;
     if (dependencies.agentGraph?.kind === "root") {
       if (backgroundPolicy || orchestrationMode() === "default") {
         throw new Error("Graph root tools require a foreground Graph Mode Runtime");
@@ -2077,8 +2082,8 @@ export async function executeAgentRuntime(
         }),
       );
       baselineToolNames.push("agent_output");
-      if (dependencies.agentGraph.managedGit && collaborationMode() === "agent") {
-        registry.register(new GraphManagedGitTool(dependencies.agentGraph.managedGit));
+      if (graphManagedGitAvailable) {
+        registry.register(new GraphManagedGitTool(dependencies.agentGraph.managedGit!));
         baselineToolNames.push("graph_git");
       }
     }
@@ -2303,6 +2308,7 @@ export async function executeAgentRuntime(
     }) => {
       const composed = await new PromptComposer(workDir, collaborationMode() === "plan", {
         researchMode: collaborationMode() === "research",
+        managedWorkspaceRead: currentMainProcessSandbox().bypass !== true,
         goalManager,
         todoStore,
         ...(dependencies.isolatedHeadless !== undefined
@@ -2416,7 +2422,7 @@ export async function executeAgentRuntime(
                 composed.systemPrompt,
                 "<graph-operator-profile>",
                 dependencies.agentGraph.profileSnapshot.systemPrompt.content,
-                ...(dependencies.agentGraph.managedGit
+                ...(graphManagedGitAvailable
                   ? [
                       "隔离工作树 Git 必须使用 graph_git：先 operation=status 获取 head，完成文件修改与验证后用 operation=commit、expected_head 和 message 提交全部变更。不要用 bash 执行 git status/add/commit；不要访问父仓库 .git、切分支、推送或自行合并。正式 agent_output 中报告 graph_git 返回的真实 branch/head。",
                     ]
@@ -2817,7 +2823,15 @@ export async function executeAgentRuntime(
         ...(collaborationMode() === "plan" ? ["submit_plan"] : []),
         ...(activeExecutionPlanId ? ["update_plan", "cancel_plan"] : []),
       ];
-      const commandAllowlist = [...effectiveOptions.allowedTools, ...requiredControlTools];
+      const commandAllowlist = [
+        ...effectiveOptions.allowedTools.filter(
+          (tool) =>
+            tool !== "graph_git" ||
+            dependencies.agentGraph?.kind !== "operator" ||
+            graphManagedGitAvailable,
+        ),
+        ...requiredControlTools,
+      ];
       pruneRegistryToCommandAllowlist(registry, commandAllowlist);
       // 命令级 allowlist 是宿主/请求方的显式选择——存活工具必须对模型可见，
       // 不能被渐进披露层藏掉（否则 headless/skill 激活场景下白名单里的
