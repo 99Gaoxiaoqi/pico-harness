@@ -117,6 +117,7 @@ export function buildManagedSpawnPlan(request: ManagedSpawnRequest): SandboxSpaw
           request.args,
           request.cwd,
           controlRoot,
+          request.origin === "file-worker" ? request.cwd : undefined,
         ),
         env,
         sandboxed: true,
@@ -134,6 +135,7 @@ export function buildWindowsBrokerArgs(
   args: readonly string[],
   cwd: string,
   controlRoot = resolve(dirname(policy.scratchRoot), ".windows-broker-control"),
+  metadataRoot?: string,
 ): string[] {
   const result = [
     "--profile",
@@ -151,6 +153,7 @@ export function buildWindowsBrokerArgs(
   for (const root of policy.writeRoots) result.push("--write-root", root);
   for (const path of policy.readFiles ?? []) result.push("--read-file", path);
   for (const path of policy.writeFiles ?? []) result.push("--write-file", path);
+  if (metadataRoot !== undefined) result.push("--metadata-root", metadataRoot);
   result.push("--", command, ...args);
   return result;
 }

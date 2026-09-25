@@ -220,6 +220,61 @@ test(
 );
 
 test(
+  "Windows file-worker task root outside the profile keeps exact files isolated",
+  { skip: process.platform !== "win32" },
+  async (context) => {
+    const fixture = await fixtureRoot(
+      context,
+      "pico-native-exact-task-root-",
+      true,
+      process.cwd(),
+    );
+    const nested = join(fixture.workspace, "nested");
+    await mkdir(nested);
+    const readable = join(nested, "allowed.txt");
+    const sibling = join(nested, "private.txt");
+    const created = join(nested, "created.txt");
+    await writeFile(readable, "visible");
+    await writeFile(sibling, "private");
+    const script = [
+      'const fs=require("node:fs");',
+      `const paths=${JSON.stringify({ workspace: fixture.workspace, nested, readable, sibling, created })};`,
+      "const result={cwdRealpath:fs.realpathSync.native(paths.workspace).length>0,targetRealpath:fs.realpathSync.native(paths.readable).length>0,parentRealpath:fs.realpathSync.native(paths.nested).length>0,read:fs.readFileSync(paths.readable,'utf8')};",
+      'const attempt=(name,fn)=>{try{result[name]=fn()}catch{result[name]="DENIED"}};',
+      'attempt("siblingRead",()=>fs.readFileSync(paths.sibling,"utf8"));',
+      'attempt("siblingWrite",()=>{fs.writeFileSync(paths.sibling,"unsafe");return "OK"});',
+      'attempt("create",()=>{fs.writeFileSync(paths.created,"unsafe");return "OK"});',
+      'process.stdout.write(JSON.stringify(result));',
+    ].join("");
+    const result = await runNode(
+      fixture,
+      "read-only",
+      script,
+      fixture.workspace,
+      process.env,
+      [],
+      "deny",
+      [readable],
+      [created],
+      [],
+      "file-worker",
+    );
+    assert.equal(result.code, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), {
+      cwdRealpath: true,
+      targetRealpath: true,
+      parentRealpath: true,
+      read: "visible",
+      siblingRead: "DENIED",
+      siblingWrite: "DENIED",
+      create: "DENIED",
+    });
+    assert.equal(await readFile(sibling, "utf8"), "private");
+    await assert.rejects(readFile(created));
+  },
+);
+
+test(
   "Windows trusted Broker commits a new exact file and rejects a stale precondition",
   { skip: process.platform !== "win32" },
   async (context) => {
@@ -712,8 +767,9 @@ async function fixtureRoot(
   context: { after(callback: () => unknown): void },
   prefix: string,
   autoCleanup = true,
+  parent = tmpdir(),
 ): Promise<Fixture> {
-  const root = await mkdtemp(join(tmpdir(), prefix));
+  const root = await mkdtemp(join(parent, prefix));
   const workspace = join(root, "workspace");
   const scratch = join(root, "scratch");
   const control = join(root, "control");
@@ -734,6 +790,7 @@ async function runNode(
   readFiles: readonly string[] = [],
   writeFiles: readonly string[] = [],
   workspaceRoots: readonly string[] = [fixture.workspace],
+  origin: ManagedSpawnRequest["origin"] = "bash",
 ): Promise<{ code: number | null; stdout: string; stderr: string }> {
   const policy = createSandboxPolicy({
     profile,
@@ -749,7 +806,7 @@ async function runNode(
     args: ["-e", script],
     cwd,
     env,
-    origin: "bash",
+    origin,
     policy,
     controlRoot: fixture.control,
   };
