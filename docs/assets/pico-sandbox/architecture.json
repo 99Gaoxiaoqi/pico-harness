@@ -1,0 +1,213 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Pico 沙箱操作架构",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "viewBox": [1160, 560],
+    "views": [
+      {
+        "id": "restricted-execution",
+        "label": "受限执行",
+        "focus": ["user", "host", "boundary", "file-worker", "process", "os"],
+        "note": "从用户权限选择到文件与命令进入各自的系统隔离路径。"
+      },
+      {
+        "id": "approval-revocation",
+        "label": "审批与撤销",
+        "focus": ["boundary", "approval", "host", "process", "mcp", "targets"],
+        "note": "审批更新任务边界版本；回退时撤销能力并停止活跃进程。"
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "user",
+      "type": "external",
+      "label": "用户与任务",
+      "sublabel": "ask / auto / full-access",
+      "pos": [35, 250],
+      "size": [150, 72]
+    },
+    {
+      "id": "host",
+      "type": "backend",
+      "label": "Pico Host",
+      "sublabel": "准入 · 路由 · 检查版本",
+      "pos": [250, 250],
+      "size": [165, 78]
+    },
+    {
+      "id": "boundary",
+      "type": "security",
+      "label": "任务权限边界",
+      "sublabel": "文件范围 · 联网许可 · 版本",
+      "pos": [250, 90],
+      "size": [180, 82]
+    },
+    {
+      "id": "approval",
+      "type": "frontend",
+      "label": "审批与持久更新",
+      "sublabel": "同意 / 拒绝 / 取消",
+      "pos": [520, 90],
+      "size": [185, 76]
+    },
+    {
+      "id": "file-worker",
+      "type": "security",
+      "label": "File Worker",
+      "sublabel": "单次目标 · 始终断网",
+      "pos": [500, 200],
+      "size": [185, 76]
+    },
+    {
+      "id": "process",
+      "type": "security",
+      "label": "受限进程",
+      "sublabel": "Shell / MCP / Hooks / LSP",
+      "pos": [500, 310],
+      "size": [185, 76]
+    },
+    {
+      "id": "mcp",
+      "type": "backend",
+      "label": "客户端能力路径",
+      "sublabel": "浏览器来源 / Desktop MCP 工具",
+      "pos": [500, 430],
+      "size": [200, 76]
+    },
+    {
+      "id": "os",
+      "type": "cloud",
+      "label": "操作系统隔离",
+      "sublabel": "Seatbelt · Bubblewrap · AppContainer",
+      "pos": [790, 200],
+      "size": [200, 76]
+    },
+    {
+      "id": "targets",
+      "type": "external",
+      "label": "文件 / 网络目标",
+      "sublabel": "系统按策略限制可访问范围",
+      "pos": [1025, 200],
+      "size": [130, 76]
+    },
+    {
+      "id": "client-target",
+      "type": "external",
+      "label": "浏览器 / 桌面应用",
+      "sublabel": "按会话能力授权",
+      "pos": [790, 430],
+      "size": [200, 76]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Pico 本机任务安全边界",
+      "wraps": ["host", "boundary", "approval", "file-worker", "process", "mcp"],
+      "pad": 22
+    }
+  ],
+  "connections": [
+    { "id": "user-host", "from": "user", "to": "host", "label": "工具请求", "variant": "emphasis" },
+    {
+      "id": "host-boundary",
+      "from": "host",
+      "to": "boundary",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "id": "boundary-approval",
+      "from": "boundary",
+      "to": "approval",
+      "label": "越界申请",
+      "variant": "dashed"
+    },
+    {
+      "id": "approval-host",
+      "from": "approval",
+      "to": "host",
+      "variant": "dashed",
+      "fromSide": "right",
+      "toSide": "top",
+      "via": [
+        [740, 128],
+        [740, 180],
+        [332.5, 180]
+      ]
+    },
+    {
+      "id": "host-file",
+      "from": "host",
+      "to": "file-worker",
+      "variant": "emphasis",
+      "via": [
+        [455, 289],
+        [455, 238]
+      ]
+    },
+    {
+      "id": "host-process",
+      "from": "host",
+      "to": "process",
+      "via": [
+        [455, 289],
+        [455, 348]
+      ]
+    },
+    {
+      "id": "host-client",
+      "from": "host",
+      "to": "mcp",
+      "via": [
+        [455, 289],
+        [455, 468]
+      ]
+    },
+    {
+      "id": "file-os",
+      "from": "file-worker",
+      "to": "os",
+      "label": "单目标 / 无网络",
+      "variant": "security"
+    },
+    {
+      "id": "process-os",
+      "from": "process",
+      "to": "os",
+      "label": "系统进程策略",
+      "variant": "security",
+      "via": [
+        [730, 348],
+        [730, 238]
+      ]
+    },
+    { "id": "os-target", "from": "os", "to": "targets" },
+    { "id": "client-target", "from": "mcp", "to": "client-target", "label": "来源 / 工具授权" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "每次调用都受边界约束",
+      "items": ["Host 检查工具是否可调用及当前边界版本", "范围获批后更新持久边界，再重试原操作"]
+    },
+    {
+      "dot": "amber",
+      "title": "不同能力走不同隔离路径",
+      "items": [
+        "文件 Worker 每次只处理本次目标且始终断网",
+        "Shell 与 MCP 子进程由系统沙箱隔离",
+        "浏览器和 Desktop MCP 使用各自的会话授权"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "无法证明安全时停止执行",
+      "items": ["沙箱组件缺失或策略无法表达时 fail-closed", "回退权限时撤销授权并终止活跃进程"]
+    }
+  ]
+}

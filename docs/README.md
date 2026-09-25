@@ -18,6 +18,7 @@
 | [架构导航](architecture/00-overview.md)                      | 执行路径、模块地图和阅读顺序                     | 当前事实             |
 | [部署与运行](guides/deployment.md)                           | TUI/Desktop 启动、配置和运行边界                 | 当前事实             |
 | [Desktop 架构](guides/desktop-architecture.md)               | Renderer、Main、daemon 与平台适配边界            | 当前事实             |
+| [Pico 沙箱技术图解](guides/process-sandbox.md)               | 权限模式、File Worker、进程隔离、联网审批与撤销  | 当前实现，面向读者   |
 | [本机 IPC 安全](architecture/local-ipc-security.md)          | runtime-host endpoint、root authority 与信任模型 | 当前事实             |
 | [Desktop 发布](guides/desktop-release.md)                    | macOS 发布工作流、签名、公证和门禁               | 当前事实             |
 | [内部 Headless Runner](guides/internal-headless-one-shot.md) | 仓库内 benchmark/评测机器入口                    | 当前事实，非公开 API |
@@ -60,6 +61,8 @@
 | [课程系列 00–10](#课程式构建记录)                                         | 11 篇当前实现教程 | 按当前代码讲解 Harness                         |
 
 ## 架构深入文档
+
+[Pico 沙箱技术图解](guides/process-sandbox.md)：以通俗说明和架构图介绍当前工具准入、File Worker、Shell/MCP 系统隔离、客户端授权、Windows 联网准备与失败关闭流程。
 
 [记忆功能技术图解](pico-memory-technical-guide.md)：从用户证据、提取与规范化，到事务保存、失败恢复和关键词召回，附三张流程图。
 
