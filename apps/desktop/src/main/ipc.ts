@@ -305,17 +305,14 @@ export function registerDesktopIpcHandlers(options: {
       }
     });
   };
-  browserSessionHandler(DESKTOP_IPC_CHANNELS.browserBack, (sessionId) => {
-    browser.clearAgentOrigin(sessionId);
-    return browser.back(sessionId);
-  });
-  browserSessionHandler(
-    DESKTOP_IPC_CHANNELS.browserForward,
-    (sessionId) => (browser.clearAgentOrigin(sessionId), browser.forward(sessionId)),
+  browserSessionHandler(DESKTOP_IPC_CHANNELS.browserBack, (sessionId) =>
+    browser.withUserAction(sessionId, () => browser.back(sessionId)),
   );
-  browserSessionHandler(
-    DESKTOP_IPC_CHANNELS.browserReload,
-    (sessionId) => (browser.clearAgentOrigin(sessionId), browser.reload(sessionId)),
+  browserSessionHandler(DESKTOP_IPC_CHANNELS.browserForward, (sessionId) =>
+    browser.withUserAction(sessionId, () => browser.forward(sessionId)),
+  );
+  browserSessionHandler(DESKTOP_IPC_CHANNELS.browserReload, (sessionId) =>
+    browser.withUserAction(sessionId, () => browser.reload(sessionId)),
   );
   browserSessionHandler(DESKTOP_IPC_CHANNELS.browserStop, (sessionId) => browser.stop(sessionId));
   browserSessionHandler(DESKTOP_IPC_CHANNELS.browserGetState, (sessionId) =>
@@ -334,8 +331,9 @@ export function registerDesktopIpcHandlers(options: {
         return invalidBrowserRequest();
       }
       try {
-        browser.clearAgentOrigin(sessionId);
-        return success(await browser.navigate(sessionId, address));
+        return success(
+          await browser.withUserAction(sessionId, () => browser.navigate(sessionId, address)),
+        );
       } catch (error) {
         return failure(error);
       }
@@ -360,8 +358,9 @@ export function registerDesktopIpcHandlers(options: {
         return invalidBrowserRequest();
       }
       try {
-        browser.clearAgentOrigin(sessionId);
-        return success(await browser.click(sessionId, selector));
+        return success(
+          await browser.withUserAction(sessionId, () => browser.click(sessionId, selector)),
+        );
       } catch (error) {
         return failure(error);
       }
@@ -381,8 +380,11 @@ export function registerDesktopIpcHandlers(options: {
         return invalidBrowserRequest();
       }
       try {
-        browser.clearAgentOrigin(sessionId);
-        return success(await browser.type(sessionId, selector, text, clear));
+        return success(
+          await browser.withUserAction(sessionId, () =>
+            browser.type(sessionId, selector, text, clear),
+          ),
+        );
       } catch (error) {
         return failure(error);
       }
@@ -404,23 +406,21 @@ export function registerDesktopIpcHandlers(options: {
         return success({ state });
       }
       const origin = value["expectedOrigin"];
-      if (origin !== undefined && !isNonEmptyString(origin)) return invalidBrowserRequest();
+      if (!isNonEmptyString(origin)) return invalidBrowserRequest();
       if (action === "navigate") {
         const url = input["url"];
         if (!isBoundedString(url, 8_192, false)) return invalidBrowserRequest();
-        if (origin) browser.guardAgentOrigin(sessionId, origin, url);
-        else browser.clearAgentOrigin(sessionId);
-        return success({ state: await browser.navigate(sessionId, url) });
+        const token = browser.guardAgentOrigin(sessionId, origin, url);
+        return success({ state: await browser.navigate(sessionId, url, token) });
       }
-      if (origin) browser.guardAgentOrigin(sessionId, origin);
-      else browser.clearAgentOrigin(sessionId);
+      const token = browser.guardAgentOrigin(sessionId, origin);
       if (action === "back") return success({ state: browser.back(sessionId) });
       if (action === "forward") return success({ state: browser.forward(sessionId) });
       if (action === "reload") return success({ state: browser.reload(sessionId) });
       if (action === "click") {
         const selector = input["selector"];
         if (!isBoundedString(selector, 2_048, false)) return invalidBrowserRequest();
-        return success(await browser.click(sessionId, selector));
+        return success(await browser.click(sessionId, selector, token));
       }
       if (action === "type") {
         const selector = input["selector"];
@@ -432,7 +432,7 @@ export function registerDesktopIpcHandlers(options: {
           typeof clear !== "boolean"
         )
           return invalidBrowserRequest();
-        return success(await browser.type(sessionId, selector, text, clear));
+        return success(await browser.type(sessionId, selector, text, clear, token));
       }
       return invalidBrowserRequest();
     } catch (error) {
