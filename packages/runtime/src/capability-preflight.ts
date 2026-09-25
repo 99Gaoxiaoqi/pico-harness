@@ -146,7 +146,7 @@ export class CapabilityPreflightProvider implements LLMProvider {
   }
 }
 
-function estimateRequestTokens(
+export function estimateRequestTokens(
   messages: readonly Message[],
   availableTools: readonly ToolDefinition[],
 ): number {
