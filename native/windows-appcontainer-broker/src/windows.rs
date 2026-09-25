@@ -336,7 +336,10 @@ pub fn run() -> Result<(), String> {
     };
     let mut exact_path_guards: Vec<File> = Vec::new();
     let launch_result = (|| -> Result<u32, String> {
-        if !policy.read_files.is_empty() || !policy.write_files.is_empty() {
+        if !policy.read_files.is_empty()
+            || !policy.write_files.is_empty()
+            || policy.metadata_root.is_some()
+        {
             grant_exact_cwd(
                 &mut journal,
                 &policy,
