@@ -19,6 +19,7 @@ export interface RuntimeProcessSandboxDescriptor {
   readonly scratchRoot: string;
   /** Changes whenever roots or the effective profile/network boundary changes. */
   readonly generation: number;
+  readonly boundaryRevision?: number;
   /** Deny/protected-metadata restrictions are not yet expressible by the OS process policy. */
   readonly hasUnsupportedDenyEntries?: boolean;
   readonly readRoots?: readonly string[];
@@ -71,6 +72,7 @@ export function compileRuntimeProcessSandbox(
       config: { network },
       scratchRoot: input.scratchRoot,
       generation: generationFor(input.workspaceGeneration, network === "allow" ? 5 : 4),
+      boundaryRevision: 0,
     };
   }
 
@@ -106,6 +108,7 @@ export function compileRuntimeProcessSandbox(
       bypass: true,
       scratchRoot: input.scratchRoot,
       generation,
+      boundaryRevision: boundary.revision,
     };
   }
   if (boundary.kind !== "managed") {
@@ -122,6 +125,7 @@ export function compileRuntimeProcessSandbox(
     },
     scratchRoot: input.scratchRoot,
     generation,
+    boundaryRevision: boundary.revision,
     ...(paths.readRoots.length > 0 ? { readRoots: paths.readRoots } : {}),
     ...(paths.writeRoots.length > 0 ? { writeRoots: paths.writeRoots } : {}),
     ...(paths.readFiles.length > 0 ? { readFiles: paths.readFiles } : {}),

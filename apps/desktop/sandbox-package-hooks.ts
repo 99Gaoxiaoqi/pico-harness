@@ -10,6 +10,7 @@ export function sandboxPackageHooks(sourceRoot: string, outputRoot: string) {
     prePackage: async (_config, platform, arch) => {
       await verifySandbox(sourceRoot, platform, arch);
       await verifyFileWorker(join(dirname(sourceRoot), "file-worker"));
+      await verifyCodeIntelligenceWorker(join(dirname(sourceRoot), "code-intelligence-worker"));
       if (platform === "darwin")
         await verifyComputerUse(join(dirname(sourceRoot), "computer-use"), arch);
     },
@@ -21,6 +22,7 @@ export function sandboxPackageHooks(sourceRoot: string, outputRoot: string) {
             : join(outputPath, "resources");
         await verifySandbox(join(resourceRoot, "sandbox"), platform, arch);
         await verifyFileWorker(join(resourceRoot, "file-worker"));
+        await verifyCodeIntelligenceWorker(join(resourceRoot, "code-intelligence-worker"));
         if (platform === "darwin") {
           await verifyComputerUse(join(resourceRoot, "computer-use"), arch);
         }
@@ -38,6 +40,9 @@ export function sandboxPackageHooks(sourceRoot: string, outputRoot: string) {
           target[2]!,
         );
         await verifyFileWorker(join(outputRoot, entry.name, "resources", "file-worker"));
+        await verifyCodeIntelligenceWorker(
+          join(outputRoot, entry.name, "resources", "code-intelligence-worker"),
+        );
       }
     },
   } satisfies ForgeHookMap;
@@ -54,6 +59,16 @@ async function verifyFileWorker(root: string): Promise<void> {
     if (!expected || expected !== actual) {
       throw new Error(`Desktop File Worker resource SHA-256 mismatch: ${entry}`);
     }
+  }
+}
+
+async function verifyCodeIntelligenceWorker(root: string): Promise<void> {
+  const entry = join(root, "worker.mjs");
+  await access(entry, constants.F_OK);
+  const expected = (await readFile(`${entry}.sha256`, "utf8")).trim().split(/\s/u)[0];
+  const actual = createHash("sha256").update(await readFile(entry)).digest("hex");
+  if (!expected || expected !== actual) {
+    throw new Error(`Desktop Code Intelligence Worker resource SHA-256 mismatch: ${entry}`);
   }
 }
 

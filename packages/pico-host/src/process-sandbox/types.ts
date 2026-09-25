@@ -39,6 +39,11 @@ export interface SandboxPolicy {
   writeFiles?: readonly string[];
   scratchRoot: string;
   generation: number;
+  boundaryRevision?: number;
+  /** Host-issued receipt for a task-scoped Windows AppContainer network identity. */
+  windowsNetworkReceipt?: string;
+  windowsTaskId?: string;
+  windowsControlRoot?: string;
 }
 
 export interface ManagedSpawnRequest {

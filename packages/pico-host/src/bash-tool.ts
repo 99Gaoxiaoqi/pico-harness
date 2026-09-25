@@ -76,17 +76,21 @@ export interface BashSandboxPolicyDescriptor {
   readonly config?: Partial<WorkspaceSandboxConfig>;
   readonly scratchRoot?: string;
   readonly generation?: number;
+  readonly boundaryRevision?: number;
   /** True when deny/protected-metadata rules cannot be represented by the OS process policy. */
   readonly hasUnsupportedDenyEntries?: boolean;
   readonly readRoots?: readonly string[];
   readonly writeRoots?: readonly string[];
   readonly readFiles?: readonly string[];
   readonly writeFiles?: readonly string[];
+  readonly windowsNetworkReceipt?: string;
+  readonly windowsTaskId?: string;
+  readonly windowsControlRoot?: string;
 }
 
 export interface BashSandboxDescriptor extends BashSandboxPolicyDescriptor {
   readonly workspaceRoots: WorkspaceRoots;
-  readonly consumeNetworkAuthorization?: (toolCallId: string | undefined) => boolean;
+  readonly consumeNetworkAuthorization?: (toolCallId: string | undefined) => boolean | string;
 }
 
 export interface BashToolOptions {
@@ -271,7 +275,8 @@ export class BashTool implements BaseTool {
   ): ManagedSpawnRequest {
     const roots = sandbox?.workspaceRoots.processRoots() ?? [this.workDir];
     const profile = sandbox?.profile ?? "danger-full-access";
-    const networkAuthorized = sandbox?.consumeNetworkAuthorization?.(toolCallId) === true;
+    const networkAuthorization = sandbox?.consumeNetworkAuthorization?.(toolCallId);
+    const networkAuthorized = networkAuthorization === true || typeof networkAuthorization === "string";
     const sandboxConfig = networkAuthorized
       ? { ...sandbox?.config, network: "allow" as const }
       : sandbox?.config;
@@ -311,6 +316,22 @@ export class BashTool implements BaseTool {
         ...(sandbox?.writeFiles ? { writeFiles: sandbox.writeFiles } : {}),
         ...(sandboxConfig ? { config: sandboxConfig } : {}),
         generation: sandbox?.generation ?? sandbox?.workspaceRoots.generation() ?? 0,
+        ...(sandbox?.boundaryRevision !== undefined
+          ? { boundaryRevision: sandbox.boundaryRevision }
+          : {}),
+        ...(sandboxConfig?.network === "allow" &&
+        (typeof networkAuthorization === "string" || sandbox?.windowsNetworkReceipt)
+          ? {
+              windowsNetworkReceipt:
+                typeof networkAuthorization === "string"
+                  ? networkAuthorization
+                  : sandbox!.windowsNetworkReceipt!,
+            }
+          : {}),
+        ...(sandbox?.windowsTaskId ? { windowsTaskId: sandbox.windowsTaskId } : {}),
+        ...(sandbox?.windowsControlRoot
+          ? { windowsControlRoot: sandbox.windowsControlRoot }
+          : {}),
       }),
     };
     sandbox?.workspaceRoots.consumeAllProcessAuthorizations();

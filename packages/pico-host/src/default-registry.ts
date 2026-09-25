@@ -52,12 +52,16 @@ export interface DefaultProcessSandboxDescriptor {
   readonly config?: Partial<WorkspaceSandboxConfig>;
   readonly scratchRoot?: string;
   readonly generation?: number;
+  readonly boundaryRevision?: number;
   /** True when deny/protected-metadata rules cannot be represented by the OS process policy. */
   readonly hasUnsupportedDenyEntries?: boolean;
   readonly readRoots?: readonly string[];
   readonly writeRoots?: readonly string[];
   readonly readFiles?: readonly string[];
   readonly writeFiles?: readonly string[];
+  readonly windowsNetworkReceipt?: string;
+  readonly windowsTaskId?: string;
+  readonly windowsControlRoot?: string;
 }
 
 export interface DefaultToolRegistryOptions {
@@ -71,7 +75,7 @@ export interface DefaultToolRegistryOptions {
     /** Resolve the latest durable Session boundary for each Bash invocation. */
     resolveSandbox?: () => DefaultProcessSandboxDescriptor;
     /** Consumes a Host-approved one-shot expansion or reads a Session expansion. */
-    consumeNetworkAuthorization?: (toolCallId: string | undefined) => boolean;
+    consumeNetworkAuthorization?: (toolCallId: string | undefined) => boolean | string;
   };
   backgroundManager?: BackgroundManager;
   /** Session-scoped durable task authority shared by model tools and prompt injection. */
@@ -194,6 +198,9 @@ export function buildDefaultToolRegistry(
               ...(processSandbox.generation !== undefined
                 ? { generation: processSandbox.generation }
                 : {}),
+              ...(processSandbox.boundaryRevision !== undefined
+                ? { boundaryRevision: processSandbox.boundaryRevision }
+                : {}),
               ...(processSandbox.hasUnsupportedDenyEntries !== undefined
                 ? { hasUnsupportedDenyEntries: processSandbox.hasUnsupportedDenyEntries }
                 : {}),
@@ -201,6 +208,15 @@ export function buildDefaultToolRegistry(
               ...(processSandbox.writeRoots ? { writeRoots: processSandbox.writeRoots } : {}),
               ...(processSandbox.readFiles ? { readFiles: processSandbox.readFiles } : {}),
               ...(processSandbox.writeFiles ? { writeFiles: processSandbox.writeFiles } : {}),
+              ...(processSandbox.windowsNetworkReceipt
+                ? { windowsNetworkReceipt: processSandbox.windowsNetworkReceipt }
+                : {}),
+              ...(processSandbox.windowsTaskId
+                ? { windowsTaskId: processSandbox.windowsTaskId }
+                : {}),
+              ...(processSandbox.windowsControlRoot
+                ? { windowsControlRoot: processSandbox.windowsControlRoot }
+                : {}),
               ...(processSandbox.consumeNetworkAuthorization
                 ? { consumeNetworkAuthorization: processSandbox.consumeNetworkAuthorization }
                 : {}),

@@ -15,6 +15,7 @@
     "dist",
     "resources/sandbox",
     "resources/file-worker",
+    "resources/code-intelligence-worker",
     "resources/licenses"
   ],
   "bundleDependencies": [
@@ -44,7 +45,7 @@
     "build:core": "npm run build --workspace @pico/core",
     "build:cli": "npm run build --workspace @pico/cli",
     "build:pico-host": "npm run build --workspace @pico/pico-host",
-    "build:packages": "npm run build:core && npm run build:storage && npm run build:runtime && npm run build:protocol && npm run build:transcript-replica && npm run build:runtime-host && npm run build:pico-host && npm run build:cli && npm run build:file-worker",
+    "build:packages": "npm run build:core && npm run build:storage && npm run build:runtime && npm run build:protocol && npm run build:transcript-replica && npm run build:runtime-host && npm run build:pico-host && npm run build:cli && npm run build:file-worker && npm run build:code-intelligence-worker",
     "build:storage": "npm run build --workspace @pico/storage",
     "build:runtime": "npm run build:core && npm run build --workspace @pico/runtime",
     "build:protocol": "npm run build:core && npm run build --workspace @pico/protocol",
@@ -52,6 +53,7 @@
     "build:runtime-host": "npm run build --workspace @pico/runtime-host",
     "build:sandbox:linux": "node scripts/build-bubblewrap.mjs",
     "build:file-worker": "node scripts/build-file-worker.mjs",
+    "build:code-intelligence-worker": "node scripts/build-code-intelligence-worker.mjs",
     "build:sandbox:windows": "node scripts/build-windows-broker.mjs",
     "build:computer-use:mac": "node scripts/build-mac-computer-use.mjs",
     "verify:sandbox:resources": "node scripts/verify-sandbox-resources.mjs",

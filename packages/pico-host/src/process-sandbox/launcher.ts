@@ -8,6 +8,8 @@ import type {
 } from "./types.js";
 
 export class ManagedProcessLauncher {
+  private readonly activeWindowsNetwork = new Map<ChildProcessSandboxLease, string>();
+
   launch(request: ManagedSpawnRequest, options: ManagedLaunchOptions = {}): ManagedProcess {
     const plan = buildManagedSpawnPlan(request);
     const child = spawn(plan.command, plan.args, {
@@ -16,7 +18,20 @@ export class ManagedProcessLauncher {
       env: plan.env,
     });
     const lease = new ChildProcessSandboxLease(child, request.policy, plan.backend);
+    if (plan.backend === "windows-appcontainer" && request.policy.windowsNetworkReceipt) {
+      this.activeWindowsNetwork.set(lease, request.policy.windowsNetworkReceipt);
+      child.once("close", () => this.activeWindowsNetwork.delete(lease));
+      child.once("error", () => this.activeWindowsNetwork.delete(lease));
+    }
     return { child, lease, plan };
+  }
+
+  /** Revoke the task's active processes before removing its OS loopback exception. */
+  async terminateWindowsNetworkProcesses(receiptDirectory: string): Promise<void> {
+    const leases = [...this.activeWindowsNetwork]
+      .filter(([, path]) => path.startsWith(`${receiptDirectory}\\`) || path.startsWith(`${receiptDirectory}/`))
+      .map(([lease]) => lease);
+    await Promise.all(leases.map((lease) => lease.terminate()));
   }
 }
 
