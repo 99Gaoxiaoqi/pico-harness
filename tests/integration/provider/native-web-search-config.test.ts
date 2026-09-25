@@ -27,14 +27,18 @@ test("empty known models discover selectable models through desktop provider and
     requests.push(request.url ?? "");
     response.setHeader("Content-Type", "application/json");
     if (request.url?.endsWith("/chat/completions")) {
-      response.end(JSON.stringify({
-        id: "test-connection",
-        object: "chat.completion",
-        created: 1,
-        model: "remote-model",
-        choices: [{ index: 0, message: { role: "assistant", content: "OK" }, finish_reason: "stop" }],
-        usage: { prompt_tokens: 4, completion_tokens: 1, total_tokens: 5 },
-      }));
+      response.end(
+        JSON.stringify({
+          id: "test-connection",
+          object: "chat.completion",
+          created: 1,
+          model: "remote-model",
+          choices: [
+            { index: 0, message: { role: "assistant", content: "OK" }, finish_reason: "stop" },
+          ],
+          usage: { prompt_tokens: 4, completion_tokens: 1, total_tokens: 5 },
+        }),
+      );
       return;
     }
     response.end(JSON.stringify({ data: [{ id: "remote-model" }] }));
@@ -76,7 +80,10 @@ test("empty known models discover selectable models through desktop provider and
   configResultValidators["provider.list"](listed, "result");
   assert.deepEqual(listed.providers[0]?.models, []);
   assert.deepEqual(listed.providers[0]?.availableModels, ["remote-model"]);
-  assert.equal(listed.providers[0]?.resolvedModelCapabilities?.["remote-model"]?.contextSource, "profile_default");
+  assert.equal(
+    listed.providers[0]?.resolvedModelCapabilities?.["remote-model"]?.contextSource,
+    "profile_default",
+  );
   assert.equal(listed.providers[0]?.resolvedModelCapabilities?.["remote-model"]?.vision, "unknown");
   const tested = (await service.testProviderConnection({
     providerId: "local",

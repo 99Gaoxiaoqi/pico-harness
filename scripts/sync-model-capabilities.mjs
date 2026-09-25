@@ -29,8 +29,8 @@ for (const provider of Object.values(catalog)) {
   }
 }
 if (rows.length < 1000) throw new Error("Capability catalog is unexpectedly small");
-rows.sort((left, right) =>
-  left.api.localeCompare(right.api) || left.model.localeCompare(right.model),
+rows.sort(
+  (left, right) => left.api.localeCompare(right.api) || left.model.localeCompare(right.model),
 );
 const payload = JSON.stringify(rows);
 const hash = createHash("sha256").update(payload).digest("hex");
@@ -49,5 +49,8 @@ export const MODEL_CAPABILITY_CATALOG: readonly {
   readonly toolCall?: boolean;
 }[] = ${payload};
 `;
-await writeFile(new URL("../packages/pico-host/src/model-capabilities.generated.ts", import.meta.url), source);
+await writeFile(
+  new URL("../packages/pico-host/src/model-capabilities.generated.ts", import.meta.url),
+  source,
+);
 console.log(`Generated ${rows.length} model capability records`);
