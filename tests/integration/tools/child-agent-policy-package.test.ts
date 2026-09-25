@@ -11,7 +11,7 @@ import {
 import { ToolRegistry } from "@pico/pico-host/tool-registry";
 import { WorkspaceRoots, buildWorkspaceBoundaryMiddleware } from "@pico/pico-host/workspace-roots";
 
-test("Host child tools and Hook verifier preserve read-only boundaries and injected diagnostics", async () => {
+test("Host child tools and Hook verifier preserve isolated read-only boundaries", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-child-policy-package-"));
   try {
     const workDir = join(root, "workspace");
@@ -73,13 +73,12 @@ test("Host child tools and Hook verifier preserve read-only boundaries and injec
       (await execute("read_file", { path: "evidence.txt" })).output,
       /CHILD_POLICY_EVIDENCE/,
     );
-    assert.match(
-      (await execute("skill_view", { name: "child-policy-probe" })).output,
-      /SKILL_POLICY_EVIDENCE/,
-    );
-    assert.ok(skillLogs.some((message) => message.includes("同级 Skill 名称冲突")));
+    const skill = await execute("skill_view", { name: "child-policy-probe" });
+    assert.equal(skill.isError, true);
+    assert.match(skill.output, /sandbox_unavailable/u);
+    assert.deepEqual(skillLogs, []);
     await execute("grep", { path: "evidence.txt", pattern: "probe", max_files: 1 });
-    assert.ok(grepLogs.some((message) => message.includes("grep 扫描子目录失败")));
+    assert.deepEqual(grepLogs, []);
 
     for (const [name, args] of [
       ["read_file", { path: "../outside.txt" }],
@@ -115,7 +114,7 @@ test("Host child tools and Hook verifier preserve read-only boundaries and injec
     await constructors.grep!(workDir, workspaceRoots).execute(
       '{"path":"evidence.txt","pattern":"probe","max_files":1}',
     );
-    assert.equal(grepLogs.length, 2);
+    assert.equal(grepLogs.length, 0);
     assert.ok(createHookVerifierRegistry(options) instanceof ToolRegistry);
   } finally {
     await rm(root, { recursive: true, force: true });

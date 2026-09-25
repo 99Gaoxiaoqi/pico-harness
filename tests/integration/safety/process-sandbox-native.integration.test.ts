@@ -159,7 +159,7 @@ test(
       'attempt("siblingRead",()=>fs.readFileSync(paths.sibling,"utf8"));',
       'attempt("siblingWrite",()=>{fs.writeFileSync(paths.sibling,"unsafe");return "OK"});',
       'attempt("create",()=>{fs.writeFileSync(paths.created,"unsafe");return "OK"});',
-      'process.stdout.write(JSON.stringify(result));',
+      "process.stdout.write(JSON.stringify(result));",
     ].join("");
     const result = await runNode(
       fixture,
