@@ -284,7 +284,7 @@ test(
       `const paths=${JSON.stringify({ workspace: fixture.workspace, allowed, sibling })};`,
       "const result={cwdStat:fs.lstatSync(paths.workspace).isDirectory(),read:fs.readFileSync(paths.allowed,'utf8')};",
       'try{result.sibling=fs.readFileSync(paths.sibling,"utf8")}catch{result.sibling="DENIED"}',
-      'process.stdout.write(JSON.stringify(result));',
+      "process.stdout.write(JSON.stringify(result));",
     ].join("");
     const result = await runNode(
       fixture,

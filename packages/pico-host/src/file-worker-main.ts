@@ -39,9 +39,14 @@ async function identity(path: string): Promise<FileTargetIdentity> {
 }
 
 async function verifyBindings(request: FileWorkerRequest): Promise<void> {
+  if (request.syntheticCwd && process.platform !== "linux") {
+    throw new Error("合成工作目录只允许 Linux File Worker");
+  }
+  const workDir = await identity(request.workDir);
   if (
     request.workDirIdentity.kind !== "directory" ||
-    !sameFileTargetIdentity(request.workDirIdentity, await identity(request.workDir))
+    workDir.kind !== "directory" ||
+    (!request.syntheticCwd && !sameFileTargetIdentity(request.workDirIdentity, workDir))
   ) {
     throw new Error("File Worker 工作区身份已变化");
   }
@@ -53,9 +58,11 @@ async function verifyBindings(request: FileWorkerRequest): Promise<void> {
       throw new Error(`File Worker 目标身份已变化: ${target.path}`);
     }
     if (target.identity.kind === "missing") {
+      const parent = await identity(dirname(target.path));
       if (
         target.parentIdentity?.kind !== "directory" ||
-        !sameFileTargetIdentity(target.parentIdentity, await identity(dirname(target.path)))
+        parent.kind !== "directory" ||
+        (!request.syntheticCwd && !sameFileTargetIdentity(target.parentIdentity, parent))
       ) {
         throw new Error(`File Worker 新建目标父目录身份已变化: ${target.path}`);
       }

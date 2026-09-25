@@ -62,6 +62,8 @@ export interface FileWorkerRequest {
   readonly args: string;
   readonly workDir: string;
   readonly workDirIdentity: FileTargetIdentity;
+  /** Linux Bubblewrap supplies an empty private cwd rather than bind-mounting the workspace. */
+  readonly syntheticCwd?: boolean;
   readonly stagePath: string;
   readonly targets: readonly {
     path: string;
