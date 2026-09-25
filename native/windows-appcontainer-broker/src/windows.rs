@@ -265,13 +265,6 @@ extern "system" {
 #[link(name = "advapi32")]
 extern "system" {
     fn ConvertStringSidToSidW(string_sid: *const u16, sid: *mut Sid) -> i32;
-    fn DeriveCapabilitySidsFromName(
-        name: *const u16,
-        group_sids: *mut *mut Sid,
-        group_count: *mut u32,
-        capability_sids: *mut *mut Sid,
-        capability_count: *mut u32,
-    ) -> i32;
     fn FreeSid(sid: Sid) -> *mut c_void;
     fn OpenProcessToken(process: Handle, desired_access: u32, token: *mut Handle) -> i32;
     fn GetTokenInformation(
@@ -1304,7 +1297,13 @@ unsafe fn launch_in_appcontainer(
     let mut capability_entries = Vec::new();
     // The filesystem SID is per process. Network SIDs are absent unless a current,
     // task-bound receipt and a verified loopback exception were both present.
-    for capability in std::iter::once(target_capability_sid) {
+    let mut requested_capabilities = vec![target_capability_sid];
+    if network_receipt.is_some() {
+        // Windows' documented WFP capability SIDs: internetClient and
+        // privateNetworkClientServer. No inbound Internet capability is granted.
+        requested_capabilities.extend(["S-1-15-3-1", "S-1-15-3-3"]);
+    }
+    for capability in requested_capabilities {
         let mut sid = null_mut();
         let wide = wide_null(capability);
         if ConvertStringSidToSidW(wide.as_ptr(), &mut sid) == 0 {
@@ -1316,16 +1315,6 @@ unsafe fn launch_in_appcontainer(
             sid,
             attributes: 0x4,
         });
-    }
-    if network_receipt.is_some() {
-        for capability in ["internetClient", "privateNetworkClientServer"] {
-            let sid = derive_capability_sid(capability)?;
-            allocated_capability_sids.push(sid);
-            capability_entries.push(SidAndAttributes {
-                sid,
-                attributes: 0x4,
-            });
-        }
     }
     let mut capabilities = SecurityCapabilities {
         app_container_sid: package_sid,
@@ -1441,52 +1430,6 @@ unsafe fn launch_in_appcontainer(
     CloseHandle(job);
     close_process(process);
     Ok(exit_code)
-}
-
-fn derive_capability_sid(name: &str) -> Result<Sid, String> {
-    let wide = wide_null(name);
-    let mut group_sids: *mut Sid = null_mut();
-    let mut group_count = 0u32;
-    let mut capability_sids: *mut Sid = null_mut();
-    let mut capability_count = 0u32;
-    let result = unsafe {
-        DeriveCapabilitySidsFromName(
-            wide.as_ptr(),
-            &mut group_sids,
-            &mut group_count,
-            &mut capability_sids,
-            &mut capability_count,
-        )
-    };
-    if result == 0 || capability_count != 1 || capability_sids.is_null() {
-        unsafe {
-            free_sid_array(group_sids, group_count);
-            free_sid_array(capability_sids, capability_count);
-        }
-        return Err(format!(
-            "DeriveCapabilitySidsFromName({name}) failed: {}",
-            unsafe { GetLastError() }
-        ));
-    }
-    let sid = unsafe { *capability_sids };
-    unsafe {
-        free_sid_array(group_sids, group_count);
-        LocalFree(capability_sids.cast());
-    }
-    Ok(sid)
-}
-
-unsafe fn free_sid_array(array: *mut Sid, count: u32) {
-    if array.is_null() {
-        return;
-    }
-    for index in 0..count as usize {
-        let sid = *array.add(index);
-        if !sid.is_null() {
-            LocalFree(sid);
-        }
-    }
-    LocalFree(array.cast());
 }
 
 unsafe fn close_process(process: ProcessInformation) {
