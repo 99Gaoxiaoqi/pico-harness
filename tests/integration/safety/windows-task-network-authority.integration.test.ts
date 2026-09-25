@@ -22,10 +22,10 @@ if (control.includes("cancel") && op === "prepare") process.exit(5);
 const marker = path.join(control, "system-ready");
 let result;
 if (op === "prepare") { fs.writeFileSync(marker, profileName); result = "applied"; }
-else if (op === "verify") result = fs.existsSync(marker) ? "match" : "drift";
+else if (op === "verify") result = fs.existsSync(marker) && !fs.existsSync(path.join(control, "revoking")) ? "match" : "drift";
 else if (op === "revoke") { fs.rmSync(marker, {force: true}); result = "revoked"; }
 else process.exit(6);
-process.stdout.write(JSON.stringify({op, result, profileName}));
+process.stdout.write(JSON.stringify({op: op + "-task-network", result, profileName}));
 `;
   await writeFile(broker, script);
   await chmod(broker, 0o755);
@@ -50,9 +50,13 @@ process.stdout.write(JSON.stringify({op, result, profileName}));
     [receipt.taskId, receipt.boundaryRevision, receipt.generation, receipt.scope],
     ["task-a", 3, 23, "once"],
   );
+  await authority.blockNewLaunches();
+  assert.equal(await authority.verify(), false);
+  await assert.rejects(authority.issueReceipt({ boundaryRevision: 3, generation: 23, scope: "once" }));
   await authority.revoke();
   assert.equal(await authority.verify(), false);
   await assert.rejects(access(receiptPath));
+  await assert.rejects(access(join(root, "task-a", "revoking")));
 
   const cancelled = new WindowsTaskNetworkAuthority("task-b", join(root, "cancel-task-b"), broker);
   await assert.rejects(cancelled.prepare(), /Windows 任务联网prepare失败/u);

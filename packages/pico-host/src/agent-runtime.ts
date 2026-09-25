@@ -1943,7 +1943,13 @@ export async function executeAgentRuntime(
             });
             sessionWindowsReceiptGeneration = next.generation;
           }
-        } else if (sessionWindowsNetworkReceipt) {
+        } else if (
+          sessionWindowsNetworkReceipt ||
+          oneShotWindowsNetworkReceipts.size > 0 ||
+          (await windowsNetworkAuthority.hasPreparationState())
+        ) {
+          managedProcessLauncher.blockWindowsNetworkTask(windowsNetworkAuthority.controlRoot);
+          await windowsNetworkAuthority.blockNewLaunches();
           await managedProcessLauncher.terminateWindowsNetworkProcesses(
             windowsNetworkAuthority.receiptDirectory,
           );
@@ -1951,6 +1957,7 @@ export async function executeAgentRuntime(
           sessionWindowsNetworkReceipt = undefined;
           sessionWindowsReceiptGeneration = undefined;
           oneShotWindowsNetworkReceipts.clear();
+          managedProcessLauncher.unblockWindowsNetworkTask(windowsNetworkAuthority.controlRoot);
         }
       }
       mainProcessSandbox = currentMainProcessSandbox();

@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { buildManagedSpawnPlan } from "./backend.js";
+import { SandboxViolationError } from "./types.js";
 import type {
   ManagedLaunchOptions,
   ManagedProcess,
@@ -9,8 +10,24 @@ import type {
 
 export class ManagedProcessLauncher {
   private readonly activeWindowsNetwork = new Map<ChildProcessSandboxLease, string>();
+  private readonly blockedWindowsNetworkTasks = new Set<string>();
+
+  blockWindowsNetworkTask(controlRoot: string): void {
+    this.blockedWindowsNetworkTasks.add(controlRoot);
+  }
+
+  unblockWindowsNetworkTask(controlRoot: string): void {
+    this.blockedWindowsNetworkTasks.delete(controlRoot);
+  }
 
   launch(request: ManagedSpawnRequest, options: ManagedLaunchOptions = {}): ManagedProcess {
+    if (
+      request.policy.windowsNetworkReceipt &&
+      request.policy.windowsControlRoot &&
+      this.blockedWindowsNetworkTasks.has(request.policy.windowsControlRoot)
+    ) {
+      throw new SandboxViolationError("sandbox_unavailable", "Windows 任务联网权限正在撤销。");
+    }
     const plan = buildManagedSpawnPlan(request);
     const child = spawn(plan.command, plan.args, {
       ...options,

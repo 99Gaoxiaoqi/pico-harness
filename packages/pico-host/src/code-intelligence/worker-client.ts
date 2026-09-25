@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, relative, resolve, sep, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ChildProcess } from "node:child_process";
+import { scheduleUnrefDeadline, type ScheduledDeadline } from "@pico/runtime/deadline";
 import {
   createSandboxPolicy,
   defaultSandboxScratchRoot,
@@ -43,7 +44,7 @@ export interface ReadOnlyCodeWorkerSandbox {
 interface Pending {
   readonly resolve: (value: unknown) => void;
   readonly reject: (error: Error) => void;
-  readonly timer: ReturnType<typeof setTimeout>;
+  readonly timer: ScheduledDeadline;
   readonly signal?: AbortSignal;
   readonly onAbort?: () => void;
 }
@@ -233,11 +234,10 @@ export class ReadOnlyCodeWorker implements CodeIntelligenceService {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       const onAbort = signal ? () => this.fail(new Error("代码智能 Worker 调用已取消")) : undefined;
-      const timer = setTimeout(
+      const timer = scheduleUnrefDeadline(
         () => this.fail(new Error("代码智能 Worker 请求超时")),
         REQUEST_TIMEOUT_MS,
       );
-      timer.unref();
       this.pending.set(id, {
         resolve,
         reject,
@@ -283,7 +283,7 @@ export class ReadOnlyCodeWorker implements CodeIntelligenceService {
         return;
       }
       this.pending.delete(response.id);
-      clearTimeout(pending.timer);
+      pending.timer.cancel();
       if (pending.onAbort) pending.signal?.removeEventListener("abort", pending.onAbort);
       if (response.ok) pending.resolve(response.result);
       else pending.reject(new Error(response.error ?? "代码智能 Worker 执行失败"));
@@ -295,7 +295,7 @@ export class ReadOnlyCodeWorker implements CodeIntelligenceService {
     this.unavailable = error;
     this.attested = false;
     for (const pending of this.pending.values()) {
-      clearTimeout(pending.timer);
+      pending.timer.cancel();
       if (pending.onAbort) pending.signal?.removeEventListener("abort", pending.onAbort);
       pending.reject(error);
     }

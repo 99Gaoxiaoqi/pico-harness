@@ -217,26 +217,26 @@ test(
           "--json",
         ]);
       }
+      if (crashPrepared) {
+        const helper = join(dirname(broker), "pico-appcontainer-host-prep.exe");
+        await runProcess(
+          helper,
+          ["recover-task-network", "--profile-name", otherProfileName],
+          process.env,
+        );
+        await runBroker([
+          "--task-network",
+          "revoke",
+          "--profile-name",
+          otherProfileName,
+          "--control-root",
+          control,
+          "--json",
+        ]);
+      }
       loopback.close();
       lan.close();
       await rm(root, { recursive: true, force: true });
-    }
-    if (crashPrepared) {
-      const helper = join(dirname(broker), "pico-appcontainer-host-prep.exe");
-      await runProcess(
-        helper,
-        ["recover-task-network", "--profile-name", otherProfileName],
-        process.env,
-      );
-      await runBroker([
-        "--task-network",
-        "revoke",
-        "--profile-name",
-        otherProfileName,
-        "--control-root",
-        control,
-        "--json",
-      ]);
     }
 
     async function writeReceipt(profile: string, scope: "session" | "once"): Promise<string> {

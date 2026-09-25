@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
+import { scheduleDeadline } from "@pico/runtime/deadline";
 import { isVerifiedBundledExecutable, resolveBundledSandboxExecutable } from "./backend.js";
 import { SandboxViolationError } from "./types.js";
 
@@ -30,6 +31,16 @@ export class WindowsTaskNetworkAuthority {
   private state: NetworkState | undefined;
 
   get receiptDirectory(): string { return this.controlRoot; }
+
+  async hasPreparationState(): Promise<boolean> { return (await this.loadState()) !== undefined; }
+
+  /** The Broker checks this marker at admission and again before process resume. */
+  async blockNewLaunches(): Promise<void> {
+    await this.assertPrivateRoot();
+    await writeFile(join(this.controlRoot, "revoking"), "", { flag: "wx", mode: 0o600 }).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "EEXIST") throw error;
+    });
+  }
 
   constructor(
     readonly taskId: string,
@@ -112,10 +123,11 @@ export class WindowsTaskNetworkAuthority {
       throw new SandboxViolationError("sandbox_cleanup_failed", "Windows 任务联网回环例外撤销失败。");
     }
     for (const entry of await readdir(this.controlRoot)) {
-      if (/^[a-f0-9]{64}\.json$/u.test(entry)) await rm(join(this.controlRoot, entry), { force: true });
+      if (/^[a-f0-9]{64}\.(?:json|consumed)$/u.test(entry)) await rm(join(this.controlRoot, entry), { force: true });
     }
     await rm(this.statePath, { force: true });
     this.state = undefined;
+    await rm(join(this.controlRoot, "revoking"), { force: true });
   }
 
   private async loadState(): Promise<NetworkState | undefined> {
@@ -166,7 +178,7 @@ export class WindowsTaskNetworkAuthority {
       );
       let stdout = "";
       let stderr = "";
-      const timer = setTimeout(() => child.kill(), 120_000);
+      const timer = scheduleDeadline(() => child.kill(), 120_000);
       child.stdout?.on("data", (chunk: Buffer) => {
         stdout += chunk.toString("utf8");
         if (stdout.length > 16_384) child.kill();
@@ -175,9 +187,9 @@ export class WindowsTaskNetworkAuthority {
         stderr += chunk.toString("utf8");
         if (stderr.length > 16_384) child.kill();
       });
-      child.once("error", (error) => { clearTimeout(timer); reject(error); });
+      child.once("error", (error) => { timer.cancel(); reject(error); });
       child.once("close", (code) => {
-        clearTimeout(timer);
+        timer.cancel();
         if (code !== 0) {
           reject(new SandboxViolationError("sandbox_unavailable", `Windows 任务联网${operation}失败：${stderr.trim() || String(code)}`));
         } else resolveOutput(stdout);
@@ -188,7 +200,7 @@ export class WindowsTaskNetworkAuthority {
       throw new SandboxViolationError("sandbox_unavailable", "Windows Broker 返回了无效的联网准备响应。");
     }
     const parsed = response as { op?: unknown; result?: unknown; profileName?: unknown };
-    if (parsed.op !== operation || parsed.profileName !== profileName || typeof parsed.result !== "string") {
+    if (parsed.op !== `${operation}-task-network` || parsed.profileName !== profileName || typeof parsed.result !== "string") {
       throw new SandboxViolationError("sandbox_unavailable", "Windows Broker 联网准备响应不匹配。");
     }
     return parsed.result;

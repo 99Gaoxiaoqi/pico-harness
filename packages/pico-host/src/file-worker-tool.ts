@@ -44,7 +44,7 @@ export interface FileWorkerSandboxDescriptor {
 }
 
 export interface FileWorkerToolOptions {
-  readonly roots: WorkspaceRoots;
+  readonly roots: Pick<WorkspaceRoots, "assertAllowed" | "generation" | "list" | "boundarySnapshot" | "resolveUnchecked">;
   readonly workDir: string;
   readonly resolveSandbox: () => FileWorkerSandboxDescriptor;
   readonly artifacts?: BoundSessionArtifactAuthority;
@@ -362,7 +362,7 @@ export class FileWorkerTool implements BaseTool {
 
 /** Node path-based mkdir cannot exclude a concurrent parent-link swap; fail closed. */
 async function assertManagedParentDirectory(
-  roots: WorkspaceRoots,
+  roots: Pick<WorkspaceRoots, "resolveUnchecked">,
   requestedPath: string,
   expectedPath: string,
 ): Promise<void> {

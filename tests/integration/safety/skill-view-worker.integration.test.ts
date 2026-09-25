@@ -3,10 +3,10 @@ import { mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { SkillLoader, SkillViewTool } from "../../../packages/pico-host/src/skill-catalog.js";
+import { SkillLoader, SkillViewTool } from "@pico/pico-host/product-skill-catalog";
 import { detectSandboxBackend } from "../../../packages/pico-host/src/process-sandbox/index.js";
 import { buildDefaultToolRegistry } from "../../../packages/pico-host/src/default-registry.js";
-import { WorkspaceRoots } from "../../../packages/pico-host/src/workspace-roots.js";
+import { WorkspaceRoots } from "@pico/pico-host/workspace-roots";
 
 test("managed skill_view reads the discovered exact source in an isolated File Worker", async (context) => {
   assert.notEqual(detectSandboxBackend(), "unavailable");
