@@ -269,6 +269,46 @@ test(
 );
 
 test(
+  "Windows directory-scoped File Worker can stat cwd without exact-file grants",
+  { skip: process.platform !== "win32" },
+  async (context) => {
+    const fixture = await fixtureRoot(context, "pico-native-directory-worker-");
+    const nested = join(fixture.workspace, "nested");
+    await mkdir(nested);
+    const allowed = join(nested, "allowed.txt");
+    const sibling = join(fixture.workspace, "sibling.txt");
+    await writeFile(allowed, "visible");
+    await writeFile(sibling, "private");
+    const script = [
+      'const fs=require("node:fs");',
+      `const paths=${JSON.stringify({ workspace: fixture.workspace, allowed, sibling })};`,
+      "const result={cwdStat:fs.lstatSync(paths.workspace).isDirectory(),read:fs.readFileSync(paths.allowed,'utf8')};",
+      'try{result.sibling=fs.readFileSync(paths.sibling,"utf8")}catch{result.sibling="DENIED"}',
+      'process.stdout.write(JSON.stringify(result));',
+    ].join("");
+    const result = await runNode(
+      fixture,
+      "read-only",
+      script,
+      fixture.workspace,
+      process.env,
+      [nested],
+      "deny",
+      [],
+      [],
+      [],
+      "file-worker",
+    );
+    assert.equal(result.code, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), {
+      cwdStat: true,
+      read: "visible",
+      sibling: "DENIED",
+    });
+  },
+);
+
+test(
   "Windows trusted Broker commits a new exact file and rejects a stale precondition",
   { skip: process.platform !== "win32" },
   async (context) => {
