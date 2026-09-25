@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import { lstat, realpath } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { lstat, readFile, realpath } from "node:fs/promises";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { scheduleDeadline } from "@pico/runtime/deadline";
@@ -43,13 +44,38 @@ export async function commitWindowsFile(input: WindowsFileCommitInput): Promise<
     throw new WindowsFileCommitError("Windows 文件提交目标必须是绝对路径", false);
   }
   const broker = resolveBundledSandboxExecutable("win32", process.arch);
-  const helper = fileURLToPath(new URL("./windows-file-commit-entry.js", import.meta.url));
+  const resourcesPath = (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath;
+  const helper = resourcesPath
+    ? resolve(resourcesPath, "file-worker", "windows-file-commit-entry.mjs")
+    : fileURLToPath(
+        new URL("../../../../resources/file-worker/windows-file-commit-entry.mjs", import.meta.url),
+      );
   const node = process.execPath;
   if (!isVerifiedBundledExecutable(broker, "win32")) {
     throw new WindowsFileCommitError("Windows Broker 完整性校验失败", false);
   }
+  const helperInfo = await lstat(helper).catch(() => {
+    throw new WindowsFileCommitError("Windows 文件提交资源不存在", false);
+  });
+  if (!helperInfo.isFile() || helperInfo.isSymbolicLink()) {
+    throw new WindowsFileCommitError("Windows 文件提交资源不是受信普通文件", false);
+  }
+  const expectedDigest = (
+    await readFile(`${helper}.sha256`).catch(() => {
+      throw new WindowsFileCommitError("Windows 文件提交摘要不存在", false);
+    })
+  )
+    .toString("utf8")
+    .trim()
+    .split(/\s/u)[0];
+  const actualDigest = createHash("sha256")
+    .update(await readFile(helper))
+    .digest("hex");
+  if (!expectedDigest || expectedDigest !== actualDigest) {
+    throw new WindowsFileCommitError("Windows 文件提交资源摘要不匹配", false);
+  }
   const trustedPaths = await Promise.all(
-    [broker, helper, node].map(async (path) => {
+    [broker, helper, node, `${helper}.sha256`].map(async (path) => {
       const info = await lstat(path);
       if (!info.isFile() || info.isSymbolicLink()) {
         throw new WindowsFileCommitError(`受信执行文件不是普通文件: ${path}`, false);

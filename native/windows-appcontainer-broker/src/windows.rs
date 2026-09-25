@@ -559,10 +559,25 @@ fn run_commit_file(args: &[String]) -> Result<(), String> {
     let target = Path::new(&args[5]);
     if !node.is_absolute()
         || !helper.is_absolute()
-        || helper.file_name() != Some(OsStr::new("windows-file-commit-entry.js"))
+        || helper.file_name() != Some(OsStr::new("windows-file-commit-entry.mjs"))
         || !target.is_absolute()
     {
         return Err("commit-file requires absolute Node, helper and target paths".into());
+    }
+    let broker_executable = fs::canonicalize(std::env::current_exe().map_err(error_text)?)
+        .map_err(error_text)?;
+    let resources_root = broker_executable
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .ok_or("commit-file Broker has no resources root")?;
+    let expected_helper = resources_root
+        .join("file-worker")
+        .join("windows-file-commit-entry.mjs");
+    if fs::canonicalize(helper).map_err(error_text)?
+        != fs::canonicalize(expected_helper).map_err(error_text)?
+    {
+        return Err("commit-file helper is outside the Broker's resources directory".into());
     }
     let target_parent = target.parent().ok_or("commit-file target has no parent")?;
     assert_not_reparse_point(target_parent)?;
