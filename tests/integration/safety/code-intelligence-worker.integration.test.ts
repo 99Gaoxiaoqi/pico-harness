@@ -22,8 +22,9 @@ test("managed Repo Map keeps a progressive index inside a network-denied session
   await writeFile(join(root, "b.ts"), "export function beta() {}\n");
 
   assert.throws(() => manager.repoMap(), /Worker 尚未就绪/u);
-  assert.equal((await manager.start()).backend, "repo-map");
-  assert.equal(manager.canRunManagedReads(41), true);
+  const started = await manager.start();
+  assert.equal(started.backend, "repo-map");
+  assert.equal(manager.canRunManagedReads(41), true, started.reason);
   assert.equal(manager.canRunManagedReads(40), false);
 
   const first = await manager.repoMap().snapshot({ maxFiles: 1 });
