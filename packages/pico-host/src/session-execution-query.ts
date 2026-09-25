@@ -204,7 +204,11 @@ function summary(
   // All expansion and aggregation happens in SQLite: no unbounded ledger reads into JS.
   const row = db
     .prepare(
-      `WITH physical AS (${physicalRowsSql()}), events AS (
+      `WITH physical AS MATERIALIZED (
+    SELECT provider_call_id, run_id, json_remove(record_json,'$.requestDiagnostic') AS record_json
+    FROM usage_physical_attempts
+    WHERE session_id = ? AND json_extract(record_json,'$.accountingSource')='physical'
+  ), events AS (
     SELECT run_id, kind, json_extract(payload_json, '$.data') AS data,
       coalesce(json_extract(payload_json, '$.refs.toolCallId'), event_id) AS tool_id,
       json_extract(payload_json, '$.at') AS at
@@ -217,9 +221,9 @@ function summary(
       CASE WHEN min(coalesce(json_extract(record_json,'$.attemptCoverage'),'complete') != 'partial') THEN 'complete' ELSE 'partial' END AS attempt_coverage,
       CASE WHEN max(json_extract(record_json,'$.status')='succeeded') THEN 'succeeded' WHEN max(json_extract(record_json,'$.status')='cancelled') THEN 'cancelled' WHEN max(json_extract(record_json,'$.status') IN ('prepared','observed')) THEN 'running' ELSE 'failed' END AS status,
       sum(json_extract(record_json,'$.latencyMs')) AS latency_ms
-    FROM physical WHERE session_id=? GROUP BY run_id,provider_call_id
+    FROM physical GROUP BY run_id,provider_call_id
   ), measurements AS (
-    SELECT coalesce(run_id,'') AS run_id, provider_call_id AS call_id, record_json AS data FROM physical WHERE session_id=?
+    SELECT coalesce(run_id,'') AS run_id, provider_call_id AS call_id, record_json AS data FROM physical
   ), measured AS MATERIALIZED (
     SELECT run_id, call_id,
       CASE WHEN json_type(data,'$.usage.reportedFields') IS NULL OR EXISTS
@@ -267,7 +271,7 @@ function summary(
       THEN max(0,round((julianday(ended)-julianday(started))*86400000)) END) FROM tools) AS tool_duration
     FROM measured`,
     )
-    .get(sessionId, watermark, sessionId, sessionId)!;
+    .get(sessionId, sessionId, watermark)!;
   if (coverage)
     coverage.value = !Number(row.physical_calls)
       ? "missing"
