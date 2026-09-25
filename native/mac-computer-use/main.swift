@@ -99,16 +99,21 @@ func observedElements() -> [[String: Any]] {
     return results
 }
 
+func actionGateFailure(expectedPid: Int32?) -> String? {
+    if screenLocked() { return "屏幕已锁定或无法确认锁屏状态" }
+    if !CGPreflightScreenCaptureAccess() { return "缺少屏幕录制权限" }
+    if !AXIsProcessTrusted() { return "缺少辅助功能权限" }
+    if let expectedPid = expectedPid,
+       NSWorkspace.shared.frontmostApplication?.processIdentifier != expectedPid {
+        return "前台应用已切换"
+    }
+    return nil
+}
+
 func perform(_ request: Request) -> [String: Any] {
     if request.action == "status" { return status() }
-    if screenLocked() { return ["ok": false, "error": "屏幕已锁定或无法确认锁屏状态"] }
-    if !CGPreflightScreenCaptureAccess() {
-        return ["ok": false, "error": "缺少屏幕录制权限"]
-    }
-    if !AXIsProcessTrusted() { return ["ok": false, "error": "缺少辅助功能权限"] }
-    if let expectedPid = request.expectedPid,
-       NSWorkspace.shared.frontmostApplication?.processIdentifier != expectedPid {
-        return ["ok": false, "error": "前台应用已切换"]
+    if let failure = actionGateFailure(expectedPid: request.expectedPid) {
+        return ["ok": false, "error": failure]
     }
     if request.action == "observe" {
         return ["ok": true, "frontmostApp": NSWorkspace.shared.frontmostApplication?.localizedName ?? "",
@@ -142,6 +147,9 @@ func perform(_ request: Request) -> [String: Any] {
                                mouseCursorPosition: point, mouseButton: .left) else {
             return ["ok": false, "error": "无法创建鼠标事件"]
         }
+        if let failure = actionGateFailure(expectedPid: request.expectedPid) {
+            return ["ok": false, "error": failure]
+        }
         down.post(tap: .cghidEventTap)
         up.post(tap: .cghidEventTap)
         return ["ok": true]
@@ -159,6 +167,9 @@ func perform(_ request: Request) -> [String: Any] {
             units.withUnsafeBufferPointer { pointer in
                 down.keyboardSetUnicodeString(stringLength: units.count, unicodeString: pointer.baseAddress!)
                 up.keyboardSetUnicodeString(stringLength: units.count, unicodeString: pointer.baseAddress!)
+            }
+            if let failure = actionGateFailure(expectedPid: request.expectedPid) {
+                return ["ok": false, "error": failure]
             }
             down.post(tap: .cghidEventTap)
             up.post(tap: .cghidEventTap)
