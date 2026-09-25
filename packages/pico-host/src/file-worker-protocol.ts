@@ -15,6 +15,25 @@ export interface FileTargetIdentity {
   readonly ctimeNs?: string;
 }
 
+export function sameFileTargetIdentity(
+  expected: FileTargetIdentity,
+  actual: FileTargetIdentity,
+): boolean {
+  if (expected.kind !== actual.kind) return false;
+  if (expected.kind === "missing") return true;
+  // AppContainer's exact ACL grant changes Windows change-time even though the
+  // pinned file object and its data have not changed. The Broker pins its
+  // handle against replacement while the worker runs; compare the stable file
+  // identity, size and data modification time here.
+  return (
+    expected.dev === actual.dev &&
+    expected.ino === actual.ino &&
+    expected.size === actual.size &&
+    expected.mtimeNs === actual.mtimeNs &&
+    (process.platform === "win32" || expected.ctimeNs === actual.ctimeNs)
+  );
+}
+
 export interface FileWorkerRequest {
   readonly operationId: string;
   readonly boundaryRevision: number;

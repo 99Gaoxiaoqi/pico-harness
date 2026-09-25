@@ -34,7 +34,13 @@ test("user MCP store enforces private permissions, CAS and durable idempotency",
   const initial = await store.read();
   assert.equal(initial.revision, EMPTY_USER_MCP_REVISION);
   const configured = await store.upsert(
-    { name: "docs", transport: "stdio", command: "node", args: ["server.js"], desktopExecution: true },
+    {
+      name: "docs",
+      transport: "stdio",
+      command: "node",
+      args: ["server.js"],
+      desktopExecution: true,
+    },
     { expectedRevision: initial.revision, idempotencyKey: "add-docs" },
   );
   assert.equal(configured.snapshot.config.mcpServers.docs?.command, "node");
@@ -47,12 +53,21 @@ test("user MCP store enforces private permissions, CAS and durable idempotency",
   }
 
   const replayedAfterRestart = await new UserMcpConfigStore({ picoHome }).upsert(
-    { name: "docs", transport: "stdio", command: "node", args: ["server.js"], desktopExecution: true },
+    {
+      name: "docs",
+      transport: "stdio",
+      command: "node",
+      args: ["server.js"],
+      desktopExecution: true,
+    },
     { expectedRevision: initial.revision, idempotencyKey: "add-docs" },
   );
   assert.equal(replayedAfterRestart.resultRevision, configured.resultRevision);
   assert.equal(replayedAfterRestart.replayed, true);
-  assert.equal((await new UserMcpConfigStore({ picoHome }).read()).config.mcpServers.docs?.desktopExecution, true);
+  assert.equal(
+    (await new UserMcpConfigStore({ picoHome }).read()).config.mcpServers.docs?.desktopExecution,
+    true,
+  );
   await assert.rejects(
     store.upsert(
       { name: "other", transport: "stdio", command: "node" },
@@ -71,7 +86,13 @@ test("user MCP store enforces private permissions, CAS and durable idempotency",
   });
   assert.deepEqual(deleted.snapshot.config.mcpServers, {});
   const replayedAfterDelete = await new UserMcpConfigStore({ picoHome }).upsert(
-    { name: "docs", transport: "stdio", command: "node", args: ["server.js"], desktopExecution: true },
+    {
+      name: "docs",
+      transport: "stdio",
+      command: "node",
+      args: ["server.js"],
+      desktopExecution: true,
+    },
     { expectedRevision: initial.revision, idempotencyKey: "add-docs" },
   );
   assert.equal(replayedAfterDelete.replayed, true);

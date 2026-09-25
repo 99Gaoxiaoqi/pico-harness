@@ -33,6 +33,7 @@ import type {
   FileWorkerRequest,
   FileWorkerResponse,
 } from "./file-worker-protocol.js";
+import { sameFileTargetIdentity } from "./file-worker-protocol.js";
 
 export interface FileWorkerSandboxDescriptor {
   readonly profile: SandboxProfile;
@@ -189,9 +190,7 @@ export class FileWorkerTool implements BaseTool {
         );
       }
       for (const target of targets) {
-        if (
-          JSON.stringify(await fileTargetIdentity(target.path)) !== JSON.stringify(target.identity)
-        ) {
+        if (!sameFileTargetIdentity(target.identity, await fileTargetIdentity(target.path))) {
           throw new Error(`File Worker 目标身份已变化: ${target.path}`);
         }
       }
@@ -234,7 +233,7 @@ export class FileWorkerTool implements BaseTool {
       const fullPath = await this.options.roots.assertAllowed(originalPath, { access: "write" });
       if (fullPath !== target.path) throw new Error("写入前目标真实路径发生变化");
       const precondition = await captureAtomicFilePrecondition(fullPath);
-      if (JSON.stringify(await fileTargetIdentity(fullPath)) !== JSON.stringify(target.identity)) {
+      if (!sameFileTargetIdentity(target.identity, await fileTargetIdentity(fullPath))) {
         throw new Error("写入前目标身份发生变化");
       }
       if (operation === "edit_file" && precondition.kind !== "file") {
