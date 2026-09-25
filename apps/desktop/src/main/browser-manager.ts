@@ -5,8 +5,11 @@ import type {
   DesktopBrowserState,
 } from "../preload/contract.js";
 import {
+  BrowserAgentOperationFence,
+  type BrowserAgentOperationToken,
   BrowserSessionCloseFence,
   commitBrowserRevocations,
+  guardBrowserAgentOrigin,
   guardBrowserNavigation,
   normalizeActiveBrowserViewport,
   normalizeBrowserAddress,
@@ -14,6 +17,7 @@ import {
   persistBrowserNavigationForCurrentEntry,
   replaceVisibleBrowserEntry,
 } from "./browser-logic.js";
+import { executeBrowserElementAction } from "./browser-element-action.js";
 import { BrowserUrlStore } from "./browser-url-store.js";
 
 export const PICO_BROWSER_PARTITION = "persist:pico-browser";
@@ -29,19 +33,35 @@ export interface EmbeddedBrowserAuthority {
     rect: DesktopBrowserRect | null,
     generation: number,
   ): DesktopBrowserState;
-  navigate(sessionId: string, address: string): Promise<DesktopBrowserState>;
+  navigate(
+    sessionId: string,
+    address: string,
+    token?: BrowserAgentOperationToken,
+  ): Promise<DesktopBrowserState>;
   back(sessionId: string): DesktopBrowserState;
   forward(sessionId: string): DesktopBrowserState;
   reload(sessionId: string): DesktopBrowserState;
   stop(sessionId: string): DesktopBrowserState;
   getState(sessionId: string): DesktopBrowserState | null;
+  /** Pins model-driven operations to one previously approved HTTP origin. */
+  guardAgentOrigin(
+    sessionId: string,
+    expectedOrigin: string,
+    targetUrl?: string,
+  ): BrowserAgentOperationToken;
+  withUserAction<T>(sessionId: string, operation: () => T | Promise<T>): Promise<T>;
   clearPage(sessionId: string): Promise<DesktopBrowserState>;
-  click(sessionId: string, selector: string): Promise<DesktopBrowserElementResult>;
+  click(
+    sessionId: string,
+    selector: string,
+    token?: BrowserAgentOperationToken,
+  ): Promise<DesktopBrowserElementResult>;
   type(
     sessionId: string,
     selector: string,
     text: string,
     clear: boolean,
+    token?: BrowserAgentOperationToken,
   ): Promise<DesktopBrowserElementResult>;
   close(sessionId: string): Promise<void>;
   clearData(): Promise<void>;
@@ -52,6 +72,7 @@ interface BrowserEntry {
   readonly view: WebContentsView;
   generation: number;
   visible: boolean;
+  readonly agentOperations: BrowserAgentOperationFence;
 }
 
 export function createEmbeddedBrowserAuthority(options: {
@@ -136,6 +157,7 @@ export function createEmbeddedBrowserAuthority(options: {
       view,
       generation: viewportGenerations.current(sessionId),
       visible: false,
+      agentOperations: new BrowserAgentOperationFence(),
     };
     entries.set(sessionId, entry);
     window.contentView.addChildView(view);
@@ -158,22 +180,35 @@ export function createEmbeddedBrowserAuthority(options: {
         refresh,
       });
     };
-    view.webContents.on("did-navigate", (_event, url) => persistNavigation(url, true));
+    view.webContents.on("did-navigate", (_event, url) => {
+      entry.agentOperations.pageChanged();
+      persistNavigation(url, true);
+    });
     view.webContents.on("did-navigate-in-page", (_event, url, isMainFrame) => {
+      if (isMainFrame) entry.agentOperations.pageChanged();
       persistNavigation(url, isMainFrame);
     });
     view.webContents.on("page-title-updated", refresh);
     view.webContents.on("did-fail-load", refresh);
     view.webContents.setWindowOpenHandler(({ url }) => {
       const navigable = normalizeBrowserAddress(url);
-      if (navigable) void view.webContents.loadURL(navigable).catch(() => undefined);
+      if (
+        navigable &&
+        (!entry.agentOperations.origin || httpOrigin(navigable) === entry.agentOperations.origin)
+      ) {
+        void view.webContents.loadURL(navigable).catch(() => undefined);
+      }
       return { action: "deny" };
     });
     view.webContents.on("will-navigate", (event, url) => {
       guardBrowserNavigation(event, url);
+      guardBrowserAgentOrigin(event, url, entry.agentOperations.origin);
+      entry.agentOperations.pageChanged();
     });
     view.webContents.on("will-redirect", (event, url) => {
       guardBrowserNavigation(event, url);
+      guardBrowserAgentOrigin(event, url, entry.agentOperations.origin);
+      entry.agentOperations.pageChanged();
     });
     const restoredUrl = urlStore.get(sessionId);
     if (restoredUrl) void view.webContents.loadURL(restoredUrl).catch(() => undefined);
@@ -181,6 +216,7 @@ export function createEmbeddedBrowserAuthority(options: {
   };
 
   const destroyEntry = (sessionId: string, entry: BrowserEntry): void => {
+    entry.agentOperations.revoke();
     entries.delete(sessionId);
     const window = options.getWindow();
     if (window && !window.isDestroyed()) window.contentView.removeChildView(entry.view);
@@ -196,6 +232,7 @@ export function createEmbeddedBrowserAuthority(options: {
   };
 
   const hide = (sessionId: string, entry: BrowserEntry): void => {
+    entry.agentOperations.pageChanged();
     entry.visible = false;
     if (!entry.view.webContents.isDestroyed()) entry.view.webContents.setBackgroundThrottling(true);
     entry.view.setVisible(false);
@@ -252,12 +289,24 @@ export function createEmbeddedBrowserAuthority(options: {
       return emit(sessionId, entry);
     },
 
-    async navigate(sessionId, address) {
+    async navigate(sessionId, address, token) {
       const url = normalizeBrowserAddress(address);
       if (!url) throw new Error("仅允许打开 HTTP 或 HTTPS 地址");
       const entry = requireVisible(sessionId);
-      await entry.view.webContents.loadURL(url);
-      return emit(sessionId, entry);
+      const release = token ? entry.agentOperations.enterNavigation(token, url) : () => undefined;
+      try {
+        await entry.view.webContents.loadURL(url);
+        if (
+          token &&
+          (entry.agentOperations.origin !== token.origin ||
+            httpOrigin(entry.view.webContents.getURL()) !== token.origin)
+        ) {
+          throw new Error("浏览器导航期间来源已变化，请重新请求授权");
+        }
+        return emit(sessionId, entry);
+      } finally {
+        release();
+      }
     },
 
     back(sessionId) {
@@ -293,118 +342,115 @@ export function createEmbeddedBrowserAuthority(options: {
       return entry ? stateOf(sessionId, entry) : null;
     },
 
+    guardAgentOrigin(sessionId, expectedOrigin, targetUrl) {
+      const entry = requireVisible(sessionId);
+      if (httpOrigin(expectedOrigin) !== expectedOrigin) {
+        throw new Error("浏览器模型操作缺少有效的 HTTP origin 授权");
+      }
+      const actualOrigin = httpOrigin(entry.view.webContents.getURL());
+      if (targetUrl) {
+        const normalizedTarget = normalizeBrowserAddress(targetUrl);
+        if (!normalizedTarget || httpOrigin(normalizedTarget) !== expectedOrigin) {
+          throw new Error("浏览器导航目标与已批准的 origin 不符");
+        }
+      } else if (actualOrigin !== expectedOrigin) {
+        throw new Error("浏览器页面已切换到未批准的 origin，请重新请求授权");
+      }
+      return entry.agentOperations.begin(expectedOrigin);
+    },
+
+    async withUserAction(sessionId, operation) {
+      const entry = entries.get(sessionId);
+      return entry ? entry.agentOperations.runUserAction(operation) : operation();
+    },
+
     async clearPage(sessionId) {
-      const entry = requireVisible(sessionId);
-      const deletionRevision = urlStore.delete(sessionId);
-      const replacement = replaceVisibleBrowserEntry({
-        current: entry,
-        generation: (current) => current.generation,
-        bounds: (current) => current.view.getBounds(),
-        destroy: (current) => destroyEntry(sessionId, current),
-        create: () => getOrCreate(sessionId),
-        show: (current, bounds, generation) => {
-          current.generation = generation;
-          current.visible = true;
-          current.view.setBounds(bounds);
-          current.view.setVisible(true);
-          if (!current.view.webContents.isDestroyed()) {
-            current.view.webContents.setBackgroundThrottling(false);
-          }
-        },
+      return authority.withUserAction(sessionId, async () => {
+        const entry = requireVisible(sessionId);
+        const deletionRevision = urlStore.delete(sessionId);
+        const replacement = replaceVisibleBrowserEntry({
+          current: entry,
+          generation: (current) => current.generation,
+          bounds: (current) => current.view.getBounds(),
+          destroy: (current) => destroyEntry(sessionId, current),
+          create: () => getOrCreate(sessionId),
+          show: (current, bounds, generation) => {
+            current.generation = generation;
+            current.visible = true;
+            current.view.setBounds(bounds);
+            current.view.setVisible(true);
+            if (!current.view.webContents.isDestroyed()) {
+              current.view.webContents.setBackgroundThrottling(false);
+            }
+          },
+        });
+        const state = emit(sessionId, replacement);
+        if (deletionRevision !== undefined) await urlStore.flushThrough(deletionRevision);
+        return state;
       });
-      const state = emit(sessionId, replacement);
-      if (deletionRevision !== undefined) await urlStore.flushThrough(deletionRevision);
-      return state;
     },
 
-    async click(sessionId, selector) {
+    async click(sessionId, selector, token) {
       const entry = requireVisible(sessionId);
-      const tagName = await withDocumentNode(entry, selector, async (nodeId) => {
-        await entry.view.webContents.debugger.sendCommand("DOM.scrollIntoViewIfNeeded", {
-          nodeId,
-        });
-        const result = await entry.view.webContents.debugger.sendCommand("DOM.getBoxModel", {
-          nodeId,
-        });
-        const quad = readQuad(result);
-        const x = (quad[0] + quad[2] + quad[4] + quad[6]) / 4;
-        const y = (quad[1] + quad[3] + quad[5] + quad[7]) / 4;
-        await entry.view.webContents.debugger.sendCommand("Input.dispatchMouseEvent", {
-          type: "mouseMoved",
-          x,
-          y,
-        });
-        await entry.view.webContents.debugger.sendCommand("Input.dispatchMouseEvent", {
-          type: "mousePressed",
-          x,
-          y,
-          button: "left",
-          clickCount: 1,
-        });
-        await entry.view.webContents.debugger.sendCommand("Input.dispatchMouseEvent", {
-          type: "mouseReleased",
-          x,
-          y,
-          button: "left",
-          clickCount: 1,
-        });
-        return readNodeName(
-          await entry.view.webContents.debugger.sendCommand("DOM.describeNode", { nodeId }),
+      const assertCurrent = () => {
+        if (entries.get(sessionId) !== entry || !entry.visible || activeSessionId !== sessionId) {
+          throw new Error("浏览器模型操作期间页面已关闭或隐藏");
+        }
+        if (token) entry.agentOperations.assert(token, entry.view.webContents.getURL());
+      };
+      const release = token
+        ? entry.agentOperations.enter(token, entry.view.webContents.getURL())
+        : () => undefined;
+      try {
+        const tagName = await executeBrowserElementAction(
+          entry.view.webContents.debugger,
+          selector,
+          { kind: "click" },
+          assertCurrent,
         );
-      });
-      return { state: emit(sessionId, entry), selector, tagName };
+        return { state: emit(sessionId, entry), selector, tagName };
+      } finally {
+        release();
+      }
     },
 
-    async type(sessionId, selector, text, clear) {
+    async type(sessionId, selector, text, clear, token) {
       const entry = requireVisible(sessionId);
-      const tagName = await withDocumentNode(entry, selector, async (nodeId) => {
-        await entry.view.webContents.debugger.sendCommand("DOM.focus", { nodeId });
-        if (clear) {
-          const modifier = process.platform === "darwin" ? 4 : 2;
-          await entry.view.webContents.debugger.sendCommand("Input.dispatchKeyEvent", {
-            type: "keyDown",
-            key: "a",
-            code: "KeyA",
-            modifiers: modifier,
-          });
-          await entry.view.webContents.debugger.sendCommand("Input.dispatchKeyEvent", {
-            type: "keyUp",
-            key: "a",
-            code: "KeyA",
-            modifiers: modifier,
-          });
-          await entry.view.webContents.debugger.sendCommand("Input.dispatchKeyEvent", {
-            type: "keyDown",
-            key: "Backspace",
-            code: "Backspace",
-          });
-          await entry.view.webContents.debugger.sendCommand("Input.dispatchKeyEvent", {
-            type: "keyUp",
-            key: "Backspace",
-            code: "Backspace",
-          });
+      const assertCurrent = () => {
+        if (entries.get(sessionId) !== entry || !entry.visible || activeSessionId !== sessionId) {
+          throw new Error("浏览器模型操作期间页面已关闭或隐藏");
         }
-        if (text.length > 0) {
-          await entry.view.webContents.debugger.sendCommand("Input.insertText", { text });
-        }
-        return readNodeName(
-          await entry.view.webContents.debugger.sendCommand("DOM.describeNode", { nodeId }),
+        if (token) entry.agentOperations.assert(token, entry.view.webContents.getURL());
+      };
+      const release = token
+        ? entry.agentOperations.enter(token, entry.view.webContents.getURL())
+        : () => undefined;
+      try {
+        const tagName = await executeBrowserElementAction(
+          entry.view.webContents.debugger,
+          selector,
+          { kind: "type", text, clear },
+          assertCurrent,
         );
-      });
-      return { state: emit(sessionId, entry), selector, tagName };
+        return { state: emit(sessionId, entry), selector, tagName };
+      } finally {
+        release();
+      }
     },
 
     async close(sessionId) {
       await closeFence.run(sessionId, async () => {
-        const entry = entries.get(sessionId);
-        if (entry) destroyEntry(sessionId, entry);
-        const revocation = viewportGenerations.revoke(sessionId, { deleteUrl: true });
-        options.onState(emptyState(sessionId, revocation.generation));
-        await commitBrowserRevocations(
-          revocation.persistence,
-          [{ sessionId, generation: revocation.generation }],
-          options.onRevoke,
-        );
+        await authority.withUserAction(sessionId, async () => {
+          const entry = entries.get(sessionId);
+          if (entry) destroyEntry(sessionId, entry);
+          const revocation = viewportGenerations.revoke(sessionId, { deleteUrl: true });
+          options.onState(emptyState(sessionId, revocation.generation));
+          await commitBrowserRevocations(
+            revocation.persistence,
+            [{ sessionId, generation: revocation.generation }],
+            options.onRevoke,
+          );
+        });
       });
     },
 
@@ -413,62 +459,26 @@ export function createEmbeddedBrowserAuthority(options: {
     },
 
     async dispose() {
+      await Promise.all(
+        [...entries].map(([sessionId, entry]) =>
+          authority.withUserAction(sessionId, () => {
+            if (entries.get(sessionId) === entry) destroyEntry(sessionId, entry);
+          }),
+        ),
+      );
       const revoked = viewportGenerations.revokeAll();
       await commitBrowserRevocations(revoked.persistence, revoked.revocations, options.onRevoke);
-      for (const [sessionId, entry] of [...entries]) destroyEntry(sessionId, entry);
       viewportGenerations.clear();
     },
   };
   return authority;
 }
 
-async function withDocumentNode<T>(
-  entry: BrowserEntry,
-  selector: string,
-  operation: (nodeId: number) => Promise<T>,
-): Promise<T> {
-  const contents = entry.view.webContents;
-  if (contents.isDestroyed()) throw new Error("浏览器页面已经关闭");
-  const attachedHere = !contents.debugger.isAttached();
-  if (attachedHere) contents.debugger.attach("1.3");
+function httpOrigin(value: string): string | undefined {
   try {
-    const document = await contents.debugger.sendCommand("DOM.getDocument", { depth: 0 });
-    const rootNodeId = readNodeId(document);
-    const match = await contents.debugger.sendCommand("DOM.querySelector", {
-      nodeId: rootNodeId,
-      selector,
-    });
-    const nodeId = readNodeId(match);
-    if (nodeId === 0) throw new Error(`网页中找不到元素: ${selector}`);
-    return await operation(nodeId);
-  } finally {
-    if (attachedHere && contents.debugger.isAttached()) contents.debugger.detach();
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:" ? url.origin : undefined;
+  } catch {
+    return undefined;
   }
-}
-
-function readNodeId(value: unknown): number {
-  if (!value || typeof value !== "object") throw new Error("浏览器 DOM 响应无效");
-  const direct = (value as { nodeId?: unknown }).nodeId;
-  if (typeof direct === "number" && Number.isSafeInteger(direct)) return direct;
-  const root = (value as { root?: { nodeId?: unknown } }).root?.nodeId;
-  if (typeof root === "number" && Number.isSafeInteger(root)) return root;
-  throw new Error("浏览器 DOM 节点响应无效");
-}
-
-function readNodeName(value: unknown): string {
-  if (!value || typeof value !== "object") return "";
-  const nodeName = (value as { node?: { nodeName?: unknown } }).node?.nodeName;
-  return typeof nodeName === "string" ? nodeName.toLowerCase() : "";
-}
-
-function readQuad(
-  value: unknown,
-): readonly [number, number, number, number, number, number, number, number] {
-  if (!value || typeof value !== "object") throw new Error("网页元素当前不可见");
-  const model = (value as { model?: { border?: unknown } }).model;
-  const border = model?.border;
-  if (!Array.isArray(border) || border.length !== 8 || !border.every(Number.isFinite)) {
-    throw new Error("网页元素当前不可见或没有可点击区域");
-  }
-  return border as [number, number, number, number, number, number, number, number];
 }

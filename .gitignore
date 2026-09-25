@@ -13,9 +13,15 @@ resources/sandbox/win32-*/pico-appcontainer-broker.exe
 resources/sandbox/win32-*/pico-appcontainer-broker.exe.sha256
 resources/sandbox/win32-*/pico-appcontainer-host-prep.exe
 resources/sandbox/win32-*/pico-appcontainer-host-prep.exe.sha256
+resources/computer-use/darwin-*/pico-computer-use
+resources/computer-use/darwin-*/pico-computer-use.sha256
 resources/licenses/bubblewrap/COPYING
 resources/licenses/bubblewrap/SOURCE.sha256
 resources/licenses/bubblewrap/bubblewrap-*.tar.xz
+resources/file-worker/file-worker.mjs
+resources/file-worker/file-worker.mjs.sha256
+resources/file-worker/windows-file-commit-entry.mjs
+resources/file-worker/windows-file-commit-entry.mjs.sha256
 
 # Test and browser automation output
 coverage/

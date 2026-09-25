@@ -26,7 +26,11 @@ test("Browser Agent 仅在当前 Session 持有可见租约时执行固定命令
     visible: true,
     generation: 1,
   });
-  const pending = sessionA.execute("navigate", { url: "https://example.com/" });
+  const pending = sessionA.execute(
+    "navigate",
+    { url: "https://example.com/" },
+    { expectedOrigin: "https://example.com" },
+  );
 
   assert.equal(
     (await broker.nextCommand({ sessionId: "session-b", leaseId: leaseB.leaseId, waitMs: 0 }))
@@ -38,6 +42,7 @@ test("Browser Agent 仅在当前 Session 持有可见租约时执行固定命令
   ).command;
   assert.equal(command?.action, "navigate");
   assert.equal(command?.input["url"], "https://example.com/");
+  assert.equal(command?.expectedOrigin, "https://example.com");
 
   assert.throws(
     () =>

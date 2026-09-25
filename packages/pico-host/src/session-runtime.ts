@@ -159,7 +159,8 @@ async function createPinnedSessionRuntime<Command>(
   const unbindGoalManager = session.bindGoalManager(goalManager);
   const persistedPlanMode =
     (session.getRuntimeStateSnapshot().settings?.collaborationMode ?? "agent") !== "agent";
-  const codeIntelligenceEnabled = options.lspEnabled ?? !persistedPlanMode;
+  const codeIntelligenceEnabled =
+    (options.lspEnabled ?? !persistedPlanMode) && options.processSandbox?.bypass !== false;
   const codeIntelligenceManager = new CodeIntelligenceManager({
     rootDir: workDir,
     lspEnabled: codeIntelligenceEnabled,
@@ -227,6 +228,7 @@ async function createPinnedSessionRuntime<Command>(
     steerQueue,
     codeIntelligenceManager,
     codeIntelligenceEnabled,
+    lspAllowed: !persistedPlanMode && options.processSandbox?.bypass !== false,
     unbindGoalManager,
     releaseSessionPin,
     sessionStartSource: options.sessionStartSource ?? "startup",
@@ -249,6 +251,7 @@ interface DefaultSessionRuntimeOptions<Command> {
   steerQueue: SteerQueue;
   codeIntelligenceManager: CodeIntelligenceManager;
   codeIntelligenceEnabled: boolean;
+  lspAllowed: boolean;
   unbindGoalManager: () => void;
   releaseSessionPin: () => void;
   sessionStartSource: "startup" | "resume";
@@ -271,6 +274,7 @@ class DefaultSessionRuntime<Command> implements SessionRuntime<Command> {
   readonly fileIndex: FileIndex;
   readonly steerQueue: SteerQueue;
   readonly codeIntelligenceManager: CodeIntelligenceManager;
+  private lspAllowed: boolean;
   private _hookService?: HookService;
   private readonly hookRuntime?: SessionHookRuntime<Command> | undefined;
   private readonly lifecycle: SessionRuntimeLifecycle<
@@ -279,6 +283,7 @@ class DefaultSessionRuntime<Command> implements SessionRuntime<Command> {
   >;
 
   constructor(options: DefaultSessionRuntimeOptions<Command>) {
+    this.lspAllowed = options.lspAllowed;
     this.goalManager = options.goalManager;
     this.todoStore = options.todoStore;
     this.toolDisclosure = options.toolDisclosure;
@@ -365,10 +370,13 @@ class DefaultSessionRuntime<Command> implements SessionRuntime<Command> {
   }
 
   async setCodeIntelligenceEnabled(enabled: boolean): Promise<void> {
-    await this.lifecycle.setCodeIntelligenceEnabled(enabled);
+    await this.lifecycle.setCodeIntelligenceEnabled(enabled && this.lspAllowed);
   }
 
   async refreshProcessSandbox(processSandbox: SessionProcessSandboxConfig): Promise<void> {
+    const nextAllowed = processSandbox.bypass === true;
+    if (!nextAllowed) await this.lifecycle.setCodeIntelligenceEnabled(false);
+    this.lspAllowed = nextAllowed;
     await this.lifecycle.refreshProcessSandbox({
       ...processSandbox,
       ...(processSandbox.workspaceRoots

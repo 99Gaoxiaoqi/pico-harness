@@ -169,6 +169,7 @@ async function collect(
   for (const entry of entries) {
     signal?.throwIfAborted();
     if (budget.attempted >= budget.maxFiles) return;
+    if (entry.isSymbolicLink()) continue;
     if (entry.isDirectory()) {
       if (IGNORED_DIRS.has(entry.name)) continue;
       await collect(join(dir, entry.name), root, matcher, out, budget, signal);

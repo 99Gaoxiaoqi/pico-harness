@@ -21,6 +21,7 @@ test("foreground subprocesses compile only from the durable execution boundary",
     scratchRoot,
   });
   assert.equal(descriptor.profile, "workspace-write");
+  assert.equal(descriptor.bypass, false, "managed foreground processes must remain sandboxed");
   assert.deepEqual(descriptor.config, { network: "deny" });
   assert.equal(descriptor.scratchRoot, scratchRoot);
   assert.equal(descriptor.generation, 34);
@@ -35,6 +36,7 @@ test("foreground subprocesses compile only from the durable execution boundary",
     }),
     {
       profile: "danger-full-access",
+      bypass: true,
       scratchRoot,
       generation: 35,
     },
@@ -51,6 +53,7 @@ test("Plan remains read-only even when full access or a network grant is selecte
   });
   assert.deepEqual(descriptor, {
     profile: "read-only",
+    bypass: false,
     config: { network: "deny" },
     scratchRoot,
     generation: 33,

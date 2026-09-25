@@ -16,7 +16,7 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v7
@@ -247,6 +247,7 @@ jobs:
       - name: Run Windows security integration suite
         env:
           PICO_WINDOWS_LOW_PRIVILEGE_TEST: "1"
+          PICO_SANDBOX_ACL_TRACE: "1"
         run: npm run test:integration:windows
 
       - name: Run Windows process sandbox contract integration
@@ -255,6 +256,8 @@ jobs:
 
       - name: Run Windows native process sandbox integration
         timeout-minutes: 5
+        env:
+          PICO_SANDBOX_ACL_TRACE: "1"
         run: node --import tsx --import @pico/cli/tui/preload-env --test --test-concurrency=1 tests/integration/safety/process-sandbox-native.integration.test.ts
 
       - name: Cleanup temporary Windows ACL users
@@ -285,7 +288,12 @@ jobs:
       - name: Install ripgrep for the native Grep sandbox path
         run: brew install ripgrep
       - run: npm run verify:sandbox:resources
-      - run: node --import tsx --import @pico/cli/tui/preload-env --test --test-concurrency=1 tests/integration/safety/process-sandbox.integration.test.ts tests/integration/safety/process-sandbox-native.integration.test.ts
+      - run: node --import tsx --import @pico/cli/tui/preload-env --test --test-concurrency=1 tests/integration/safety/process-sandbox.integration.test.ts tests/integration/safety/process-sandbox-native.integration.test.ts tests/integration/safety/file-worker.integration.test.ts
+      - name: Verify bundled File Worker under Electron as Node
+        run: |
+          electron_executable="$(node -p "require('electron')" | tail -n 1)"
+          test -x "$electron_executable"
+          PICO_FILE_WORKER_TEST_EXECUTABLE="$electron_executable" node --import tsx --test --test-name-pattern="standalone packaged" tests/integration/safety/file-worker.integration.test.ts
 
   linux-process-sandbox:
     name: Linux process sandbox (${{ matrix.arch }})
@@ -339,7 +347,7 @@ jobs:
       - name: Run Linux process sandbox integration
         run: |
           node_executable="$(command -v node)"
-          PATH="/usr/bin:/bin:$PATH" "$node_executable" --import tsx --import @pico/cli/tui/preload-env --test --test-concurrency=1 tests/integration/safety/process-sandbox.integration.test.ts tests/integration/safety/process-sandbox-native.integration.test.ts
+          PATH="/usr/bin:/bin:$PATH" "$node_executable" --import tsx --import @pico/cli/tui/preload-env --test --test-concurrency=1 tests/integration/safety/process-sandbox.integration.test.ts tests/integration/safety/process-sandbox-native.integration.test.ts tests/integration/safety/file-worker.integration.test.ts
 
   sandbox-publication:
     name: Verify complete native sandbox publication

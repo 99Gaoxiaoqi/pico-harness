@@ -50,7 +50,7 @@ test("投影入口 RuntimeProjectionService 不直接持久化（无第二事实
 
 test("压缩不改账本、只追加 checkpoint（读模型变化）", () => {
   // 19 文档 3.3：压缩永不改账本、永不删事件，只追加 context.checkpoint.recorded。
-  const compactor = readSource("packages/runtime/src/compactor.ts");
+  const compactor = readSource("packages/runtime/src/full-compactor.ts");
   // 压缩器不得调用账本写/删原语（它只产出供投影使用的 summary，写入由 engine 负责）。
   assert.doesNotMatch(
     compactor,

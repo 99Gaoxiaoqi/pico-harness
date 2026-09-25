@@ -43,6 +43,7 @@ import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
 import type { RunAgentCliOptions, RunAgentCliResult } from "@pico/runtime/runtime-contract";
 import { resolvePicoPaths } from "@pico/pico-host";
 import { closeAllOperationalDatabasesForTest } from "@pico/storage";
+import { physicalProviderFixture } from "../helpers/physical-provider.js";
 
 const PROVIDER_ID = "fixture";
 const MODEL_ID = "fixture-model";
@@ -104,12 +105,15 @@ test("internal headless runner succeeds through the shared Runtime and redacts r
     providerFactory: (_kind, config) => {
       assert.equal(config.routeId, ROUTE_ID);
       assert.equal(config.apiKey, secret);
-      return {
-        async generate() {
-          providerCalls++;
-          return assistant(`done ${secret}`, { promptTokens: 7, completionTokens: 3 });
+      return physicalProviderFixture(
+        {
+          async generate() {
+            providerCalls++;
+            return assistant(`done ${secret}`, { promptTokens: 7, completionTokens: 3 });
+          },
         },
-      };
+        MODEL_ID,
+      );
     },
   });
 
@@ -1568,37 +1572,41 @@ test("incident mode recovers from an undisclosed tool rejection without counting
     }),
     {
       env: {},
-      providerFactory: () => ({
-        async generate(messages, tools) {
-          calls++;
-          if (calls === 1) {
-            assert.deepEqual(
-              tools?.map((tool) => tool.name),
-              ["submit_plan"],
-            );
-            return assistant("", { promptTokens: 7, completionTokens: 3 }, [
-              {
-                id: "write-1",
-                name: "write_file",
-                arguments: JSON.stringify({ path: "blocked.txt", content: "blocked" }),
-              },
-            ]);
-          }
-          const rejection = messages.find((message) => message.toolCallId === "write-1");
-          assert.match(rejection?.content ?? "", /not available in this Step snapshot/u);
-          return assistant("", { promptTokens: 5, completionTokens: 2 }, [
-            {
-              id: "submit-after-policy-denial",
-              name: "submit_plan",
-              arguments: JSON.stringify({
-                title: "记录受阻后的安全计划",
-                steps: [{ title: "等待审批", description: "保持工作区不变" }],
-                operationId: "policy-denial-submit-plan",
-              }),
+      providerFactory: () =>
+        physicalProviderFixture(
+          {
+            async generate(messages, tools) {
+              calls++;
+              if (calls === 1) {
+                assert.deepEqual(
+                  tools?.map((tool) => tool.name),
+                  ["submit_plan"],
+                );
+                return assistant("", { promptTokens: 7, completionTokens: 3 }, [
+                  {
+                    id: "write-1",
+                    name: "write_file",
+                    arguments: JSON.stringify({ path: "blocked.txt", content: "blocked" }),
+                  },
+                ]);
+              }
+              const rejection = messages.find((message) => message.toolCallId === "write-1");
+              assert.match(rejection?.content ?? "", /not available in this Step snapshot/u);
+              return assistant("", { promptTokens: 5, completionTokens: 2 }, [
+                {
+                  id: "submit-after-policy-denial",
+                  name: "submit_plan",
+                  arguments: JSON.stringify({
+                    title: "记录受阻后的安全计划",
+                    steps: [{ title: "等待审批", description: "保持工作区不变" }],
+                    operationId: "policy-denial-submit-plan",
+                  }),
+                },
+              ]);
             },
-          ]);
-        },
-      }),
+          },
+          MODEL_ID,
+        ),
     },
   );
 

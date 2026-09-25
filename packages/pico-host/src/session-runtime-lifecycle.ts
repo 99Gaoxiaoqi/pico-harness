@@ -14,6 +14,8 @@ import { resolvePicoHome } from "./pico-paths.js";
 
 export interface HostSessionProcessSandboxConfig<Profile = unknown, Config = unknown> {
   readonly profile?: Profile;
+  /** True only for a persisted bypass ExecutionBoundary. */
+  readonly bypass?: boolean;
   readonly config?: Partial<Config>;
   readonly scratchRoot?: string;
   readonly generation?: number;

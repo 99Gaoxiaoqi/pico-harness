@@ -3,7 +3,11 @@ import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import type { LLMProvider, RuntimeToolResultRecordedEvent } from "@pico/core";
+import type {
+  LLMProvider,
+  RuntimeToolResultProjectionRecordedEvent,
+  RuntimeToolResultRecordedEvent,
+} from "@pico/core";
 import { Session } from "@pico/pico-host/session";
 import { AgentEngine } from "@pico/pico-host/agent-engine";
 import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
@@ -87,13 +91,20 @@ async function fixture(t: TestContext, enableDecoder = true) {
     reporter: new SilentReporter(),
     maxTurns: 2,
   }).run(session);
-  const results = (await session.runtimeEventStore!.readSession(session.id)).filter(
+  const events = await session.runtimeEventStore!.readSession(session.id);
+  const results = events.filter(
     (event): event is RuntimeToolResultRecordedEvent => event.kind === "tool.result.recorded",
   );
-  const ref = (kind: string) =>
-    results
-      .find((event) => event.refs.toolCallId === `call:${kind}`)!
+  const projections = events.filter(
+    (event): event is RuntimeToolResultProjectionRecordedEvent =>
+      event.kind === "tool.result.projection.recorded",
+  );
+  const ref = (kind: string) => {
+    const source = results.find((event) => event.refs.toolCallId === `call:${kind}`)!;
+    return projections
+      .find((event) => event.data.sourceEventId === source.eventId)!
       .data.projection.text.match(/pico:\/\/archive\/[^"\s]+/u)![0];
+  };
   return { reader, registry, ref, session, results, workDir };
 }
 

@@ -130,17 +130,25 @@ test("persisted permission modes reconcile the durable execution boundary withou
     durableBoundary = expanded;
 
     assert.equal(setSessionPermissionMode(settings, "auto").ok, true);
-    assert.deepEqual(durableBoundary, expanded, "ask to auto must retain the expanded boundary");
+    assert.deepEqual(
+      durableBoundary,
+      { ...expanded, revision: 8 },
+      "ask to auto must retain managed grants and advance the authority revision",
+    );
     assert.equal(setSessionPermissionMode(settings, "ask").ok, true);
-    assert.deepEqual(durableBoundary, expanded, "auto to ask must retain the expanded boundary");
+    assert.deepEqual(
+      durableBoundary,
+      { ...expanded, revision: 9 },
+      "auto to ask must retain managed grants and advance the authority revision again",
+    );
 
     assert.equal(setSessionPermissionMode(settings, "full-access").ok, true);
-    assert.deepEqual(durableBoundary, { kind: "bypass", revision: 8 });
+    assert.deepEqual(durableBoundary, { kind: "bypass", revision: 10 });
 
     assert.equal(setSessionPermissionMode(settings, "ask").ok, true);
     assert.deepEqual(
       durableBoundary,
-      createManagedExecutionBoundary(createWorkspaceWritePermissionProfile(), 9),
+      createManagedExecutionBoundary(createWorkspaceWritePermissionProfile(), 11),
       "leaving full-access must rebuild a managed workspace boundary",
     );
   } finally {

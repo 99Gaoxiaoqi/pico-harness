@@ -11,6 +11,8 @@ export interface McpServerConfig {
   startupTimeoutMs?: number;
   toolTimeoutMs?: number;
   enabled?: boolean;
+  /** Explicitly offer this user-level server through the Desktop client capability path. */
+  desktopExecution?: boolean;
 }
 
 /** MCP configuration document used by user, workspace, and plugin source assembly. */
@@ -47,6 +49,10 @@ export function parseMcpConfig(value: unknown, source: string): McpConfig {
     if (enabled !== undefined && typeof enabled !== "boolean") {
       throw new Error(`MCP server "${name}" 的 enabled 必须是 boolean`);
     }
+    const desktopExecution = rawConfig["desktopExecution"];
+    if (desktopExecution !== undefined && typeof desktopExecution !== "boolean") {
+      throw new Error(`MCP server "${name}" 的 desktopExecution 必须是 boolean`);
+    }
     mcpServers[name] = {
       name,
       transport,
@@ -59,6 +65,7 @@ export function parseMcpConfig(value: unknown, source: string): McpConfig {
       ...optionalPositiveIntegerProperty(rawConfig, source, name, "startupTimeoutMs"),
       ...optionalPositiveIntegerProperty(rawConfig, source, name, "toolTimeoutMs"),
       ...(enabled !== undefined ? { enabled } : {}),
+      ...(desktopExecution !== undefined ? { desktopExecution } : {}),
     };
   }
   return { mcpServers };

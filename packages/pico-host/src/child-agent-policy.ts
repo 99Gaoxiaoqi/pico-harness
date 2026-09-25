@@ -22,6 +22,8 @@ import { WriteFileTool } from "./write-file-tool.js";
 import { EditFileTool } from "./edit-file-tool.js";
 import { GlobTool } from "./glob-tool.js";
 import { GrepTool, type GrepDiagnostics } from "./grep-tool.js";
+import { FileWorkerTool } from "./file-worker-tool.js";
+import { guardManagedHostRead } from "./managed-host-read-guard.js";
 import { WebSearchTool } from "./web-tools.js";
 import { buildWorkspaceBoundaryMiddleware, WorkspaceRoots } from "./workspace-roots.js";
 
@@ -43,10 +45,29 @@ export function createChildAgentToolConstructors(
   diagnostics?: GrepDiagnostics,
   archive?: BoundToolResultArchiveReader,
 ): Readonly<Record<string, ChildAgentToolConstructor>> {
+  const isolated = (
+    tool: BaseTool,
+    workDir: string,
+    roots: WorkspaceRoots | undefined,
+    sandbox: ChildAgentProcessSandbox | undefined,
+    profile: SandboxProfile,
+  ): BaseTool =>
+    new FileWorkerTool(tool, {
+      roots: roots ?? WorkspaceRoots.createSync(workDir),
+      workDir,
+      resolveSandbox: () => ({
+        profile,
+        generation: sandbox?.generation ?? roots?.generation() ?? 0,
+      }),
+      excludeSensitiveFiles: true,
+    });
   return {
-    read_file: (workDir, roots) => new ReadFileTool(roots ?? workDir, archive),
-    write_file: (workDir, roots) => new WriteFileTool(roots ?? workDir),
-    edit_file: (workDir, roots) => new EditFileTool(roots ?? workDir),
+    read_file: (workDir, roots, sandbox, profile = "read-only") =>
+      isolated(new ReadFileTool(roots ?? workDir, archive), workDir, roots, sandbox, profile),
+    write_file: (workDir, roots, sandbox, profile = "workspace-write") =>
+      isolated(new WriteFileTool(roots ?? workDir), workDir, roots, sandbox, profile),
+    edit_file: (workDir, roots, sandbox, profile = "workspace-write") =>
+      isolated(new EditFileTool(roots ?? workDir), workDir, roots, sandbox, profile),
     bash: (workDir, roots, processSandbox, profile = "workspace-write") =>
       new BashTool(workDir, undefined, {
         allowBackground: false,
@@ -66,20 +87,27 @@ export function createChildAgentToolConstructors(
             }
           : {}),
       }),
-    glob: (workDir, roots) => new GlobTool(roots ?? workDir),
+    glob: (workDir, roots, sandbox, profile = "read-only") =>
+      isolated(new GlobTool(roots ?? workDir), workDir, roots, sandbox, profile),
     grep: (workDir, roots, processSandbox, profile = "read-only") =>
-      new GrepTool(roots ?? workDir, {
-        ...(diagnostics ? { diagnostics } : {}),
-        excludeSensitiveFiles: true,
-        processSandbox: {
-          profile,
-          ...(processSandbox?.config ? { config: processSandbox.config } : {}),
-          ...(processSandbox?.scratchRoot ? { scratchRoot: processSandbox.scratchRoot } : {}),
-          ...(processSandbox?.generation !== undefined
-            ? { generation: processSandbox.generation }
-            : {}),
-        },
-      }),
+      isolated(
+        new GrepTool(roots ?? workDir, {
+          ...(diagnostics ? { diagnostics } : {}),
+          excludeSensitiveFiles: true,
+          processSandbox: {
+            profile,
+            ...(processSandbox?.config ? { config: processSandbox.config } : {}),
+            ...(processSandbox?.scratchRoot ? { scratchRoot: processSandbox.scratchRoot } : {}),
+            ...(processSandbox?.generation !== undefined
+              ? { generation: processSandbox.generation }
+              : {}),
+          },
+        }),
+        workDir,
+        roots,
+        processSandbox,
+        profile,
+      ),
     web_search: () => new WebSearchTool(),
   };
 }
@@ -97,13 +125,28 @@ export function createHookVerifierRegistry(options: {
   readonly grepDiagnostics?: GrepDiagnostics;
 }): ToolRegistry {
   const registry = new ToolRegistry(undefined, options.diagnostics);
-  registry.register(new ReadFileTool(options.workspaceRoots, options.toolResultArchive));
+  const isolatedVerifier = (tool: BaseTool): BaseTool =>
+    new FileWorkerTool(tool, {
+      roots: options.workspaceRoots,
+      workDir: options.workDir,
+      resolveSandbox: () => ({
+        profile: "read-only",
+        generation: options.processSandbox.generation ?? options.workspaceRoots.generation(),
+      }),
+      excludeSensitiveFiles: true,
+    });
+  registry.register(
+    isolatedVerifier(new ReadFileTool(options.workspaceRoots, options.toolResultArchive)),
+  );
   if (options.toolResultArchive) registry.register(new ArchiveReadTool(options.toolResultArchive));
   registry.register(
-    new SkillViewTool(
-      new SkillLoader(options.workDir, {
-        ...(options.skillLogger ? { logger: options.skillLogger } : {}),
-      }),
+    guardManagedHostRead(
+      new SkillViewTool(
+        new SkillLoader(options.workDir, {
+          ...(options.skillLogger ? { logger: options.skillLogger } : {}),
+        }),
+      ),
+      () => ({ profile: "read-only" }),
     ),
   );
   const bash = new BashTool(options.workDir, undefined, {
@@ -124,27 +167,29 @@ export function createHookVerifierRegistry(options: {
   });
   (bash as BashTool & { readOnly?: boolean }).readOnly = true;
   registry.register(bash);
-  registry.register(new GlobTool(options.workspaceRoots));
+  registry.register(isolatedVerifier(new GlobTool(options.workspaceRoots)));
   registry.register(
-    new GrepTool(options.workspaceRoots, {
-      ...(options.grepDiagnostics ? { diagnostics: options.grepDiagnostics } : {}),
-      excludeSensitiveFiles: true,
-      processSandbox: {
-        profile: "read-only",
-        ...(options.processSandbox.config ? { config: options.processSandbox.config } : {}),
-        ...(options.processSandbox.scratchRoot
-          ? { scratchRoot: options.processSandbox.scratchRoot }
-          : {}),
-        ...(options.processSandbox.generation !== undefined
-          ? { generation: options.processSandbox.generation }
-          : {}),
-        env: { ...options.env },
-      },
-    }),
+    isolatedVerifier(
+      new GrepTool(options.workspaceRoots, {
+        ...(options.grepDiagnostics ? { diagnostics: options.grepDiagnostics } : {}),
+        excludeSensitiveFiles: true,
+        processSandbox: {
+          profile: "read-only",
+          ...(options.processSandbox.config ? { config: options.processSandbox.config } : {}),
+          ...(options.processSandbox.scratchRoot
+            ? { scratchRoot: options.processSandbox.scratchRoot }
+            : {}),
+          ...(options.processSandbox.generation !== undefined
+            ? { generation: options.processSandbox.generation }
+            : {}),
+          env: { ...options.env },
+        },
+      }),
+    ),
   );
   if (options.codeIntelligence) {
     for (const tool of createCodeIntelligenceTools(options.workDir, options.codeIntelligence)) {
-      registry.register(tool);
+      registry.register(guardManagedHostRead(tool, () => ({ profile: "read-only" })));
     }
   }
   registry.use(buildChildAgentSafetyMiddleware("explore", options));
