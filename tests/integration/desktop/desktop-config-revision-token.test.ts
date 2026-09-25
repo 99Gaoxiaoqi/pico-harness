@@ -309,6 +309,7 @@ test(
     const env = { PICO_HOME: picoHome };
     const userConfigStore = new UserConfigStore({ picoHome });
     const trustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });
+    await trustStore.trust(await trustStore.canonicalize(workspace));
     const runtime = new WorkspaceRuntimeService({ env, execute: async () => undefined });
     const entered = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
