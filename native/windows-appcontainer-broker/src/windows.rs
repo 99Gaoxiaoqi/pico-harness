@@ -857,30 +857,34 @@ fn run_task_network(args: &[String]) -> Result<(), String> {
             }
             let sid = create_or_derive_package_sid(profile_name)?;
             unsafe { FreeSid(sid) };
-            if task_network_helper_alive(&control_root, profile_name)
-                && windows_network::loopback_exempt(profile_name)?
-            {
-                "no-change"
-            } else {
-                if task_network_helper_alive(&control_root, profile_name) {
+            let helper_alive = task_network_helper_alive(&control_root, profile_name);
+            let exempt = windows_network::loopback_exempt(profile_name)?;
+            match (helper_alive, exempt) {
+                (true, true) => "no-change",
+                (true, false) => {
                     return Err(
                         "task network helper is active while its OS exception is absent".into(),
-                    );
+                    )
                 }
-                for path in task_network_markers(&control_root, profile_name) {
-                    fs::remove_file(path)
-                        .or_else(ignore_not_found)
-                        .map_err(error_text)?;
+                (false, true) => {
+                    return Err("task network helper is unavailable while its OS exception remains; administrator recovery is required".into());
                 }
-                elevate_task_network_helper(profile_name, &control_root, host_pid)?;
-                if !task_network_helper_alive(&control_root, profile_name)
-                    || !windows_network::loopback_exempt(profile_name)?
-                {
-                    return Err(
-                        "elevated task network helper did not establish a live boundary".into(),
-                    );
+                (false, false) => {
+                    for path in task_network_markers(&control_root, profile_name) {
+                        fs::remove_file(path)
+                            .or_else(ignore_not_found)
+                            .map_err(error_text)?;
+                    }
+                    elevate_task_network_helper(profile_name, &control_root, host_pid)?;
+                    if !task_network_helper_alive(&control_root, profile_name)
+                        || !windows_network::loopback_exempt(profile_name)?
+                    {
+                        return Err(
+                            "elevated task network helper did not establish a live boundary".into(),
+                        );
+                    }
+                    "applied"
                 }
-                "applied"
             }
         }
         "verify" => {
