@@ -19,6 +19,7 @@ import {
 import { resolvePicoPaths } from "@pico/pico-host";
 import { sessionOwnerLeaseDirectory } from "@pico/storage";
 import { TestRuntimeHostCandidateTracker } from "../helpers/test-runtime-daemon.js";
+import { writeDesktopModelRouting } from "../../fixtures/desktop-model-routing.js";
 
 /**
  * 3-B-3 kernel 承载客户端实盘验证：LocalRuntimeClient
@@ -140,6 +141,7 @@ test("kernel client: killing the daemon makes the next request respawn it", asyn
 
 test("kernel client: current shutdown waits for response, ownership drain and process exit", async (t) => {
   const harness = await startKernelClientHarness(t);
+  await writeDesktopModelRouting(harness.picoHome);
   const client = harness.createClient();
   t.after(() => client.close());
   await client.connect();
