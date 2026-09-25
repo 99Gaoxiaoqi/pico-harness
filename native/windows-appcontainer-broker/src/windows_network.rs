@@ -33,12 +33,11 @@ extern "system" {
     fn LocalFree(memory: *mut c_void) -> *mut c_void;
 }
 
-#[link(name = "Firewallapi")]
+#[link(name = "kernel32")]
 extern "system" {
-    fn NetworkIsolationGetAppContainerConfig(
-        count: *mut u32,
-        entries: *mut *mut SidAndAttributes,
-    ) -> u32;
+    fn LoadLibraryW(path: *const u16) -> *mut c_void;
+    fn GetProcAddress(module: *mut c_void, name: *const u8) -> *mut c_void;
+    fn FreeLibrary(module: *mut c_void) -> i32;
 }
 
 pub fn validate_profile_name(name: &str) -> Result<(), String> {
@@ -92,6 +91,7 @@ pub fn profile_sid_string(name: &str) -> Result<String, String> {
 
 pub fn loopback_exempt(name: &str) -> Result<bool, String> {
     validate_profile_name(name)?;
+    let library_path = wide_null(system_directory()?.join("Firewallapi.dll"));
     let wide = wide_null(name);
     let mut target: Sid = null_mut();
     let status = unsafe { DeriveAppContainerSidFromAppContainerName(wide.as_ptr(), &mut target) };
@@ -100,9 +100,30 @@ pub fn loopback_exempt(name: &str) -> Result<bool, String> {
             "DeriveAppContainerSidFromAppContainerName failed: HRESULT 0x{status:08x}"
         ));
     }
+    let library = unsafe { LoadLibraryW(library_path.as_ptr()) };
+    if library.is_null() {
+        unsafe { FreeSid(target) };
+        return Err(format!(
+            "LoadLibraryW(Firewallapi.dll) failed: {}",
+            unsafe { GetLastError() }
+        ));
+    }
+    let address =
+        unsafe { GetProcAddress(library, b"NetworkIsolationGetAppContainerConfig\0".as_ptr()) };
+    if address.is_null() {
+        let error = unsafe { GetLastError() };
+        unsafe { FreeLibrary(library) };
+        unsafe { FreeSid(target) };
+        return Err(format!(
+            "GetProcAddress(NetworkIsolationGetAppContainerConfig) failed: {error}"
+        ));
+    }
+    let get_config: unsafe extern "system" fn(*mut u32, *mut *mut SidAndAttributes) -> u32 =
+        unsafe { std::mem::transmute(address) };
     let mut count = 0u32;
     let mut entries: *mut SidAndAttributes = null_mut();
-    let query = unsafe { NetworkIsolationGetAppContainerConfig(&mut count, &mut entries) };
+    let query = unsafe { get_config(&mut count, &mut entries) };
+    unsafe { FreeLibrary(library) };
     if query != 0 {
         unsafe { FreeSid(target) };
         return Err(format!(
