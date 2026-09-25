@@ -254,6 +254,7 @@ async function collectFiles(
     for (const entry of entries) {
       signal?.throwIfAborted();
       if (results.length >= maxFiles) return;
+      if (entry.isSymbolicLink()) continue;
       if (entry.isDirectory()) {
         if (EXCLUDED_DIRS.has(entry.name)) continue;
         await walk(join(dir, entry.name));

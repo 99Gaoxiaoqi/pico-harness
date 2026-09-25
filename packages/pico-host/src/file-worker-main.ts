@@ -2,6 +2,7 @@
 import { lstat, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { createInterface } from "node:readline";
+import { dirname, isAbsolute, resolve } from "node:path";
 import { ReadFileTool } from "./read-file-tool.js";
 import { GlobTool } from "./glob-tool.js";
 import { GrepTool } from "./grep-tool.js";
@@ -10,18 +11,21 @@ import { formatEditResult, prepareEditContent } from "./edit-file-tool.js";
 import { readBoundedFileSnapshot } from "./atomic-workspace-file.js";
 import { READ_FILE_MAX_BYTES } from "./file-tool-helpers.js";
 import { WorkspaceRoots } from "./workspace-roots.js";
-import type {
-  FileTargetIdentity,
-  FileWorkerRequest,
-  FileWorkerResponse,
+import {
+  sameFileTargetIdentity,
+  type FileTargetIdentity,
+  type FileWorkerRequest,
+  type FileWorkerResponse,
 } from "./file-worker-protocol.js";
-import { sameFileTargetIdentity } from "./file-worker-protocol.js";
 
 async function identity(path: string): Promise<FileTargetIdentity> {
   try {
     const info = await lstat(path, { bigint: true });
+    if (!info.isFile() && !info.isDirectory()) {
+      throw new Error(`File Worker 目标不是普通文件或目录: ${path}`);
+    }
     return {
-      kind: info.isFile() ? "file" : info.isDirectory() ? "directory" : "missing",
+      kind: info.isFile() ? "file" : "directory",
       dev: String(info.dev),
       ino: String(info.ino),
       size: String(info.size),
@@ -34,17 +38,41 @@ async function identity(path: string): Promise<FileTargetIdentity> {
   }
 }
 
+async function verifyBindings(request: FileWorkerRequest): Promise<void> {
+  if (
+    request.workDirIdentity.kind !== "directory" ||
+    !sameFileTargetIdentity(request.workDirIdentity, await identity(request.workDir))
+  ) {
+    throw new Error("File Worker 工作区身份已变化");
+  }
+  for (const target of request.targets) {
+    if (!isAbsolute(target.path) || resolve(target.path) !== target.path) {
+      throw new Error("File Worker 目标不是规范化绝对路径");
+    }
+    if (!sameFileTargetIdentity(target.identity, await identity(target.path))) {
+      throw new Error(`File Worker 目标身份已变化: ${target.path}`);
+    }
+    if (target.identity.kind === "missing") {
+      if (
+        target.parentIdentity?.kind !== "directory" ||
+        !sameFileTargetIdentity(target.parentIdentity, await identity(dirname(target.path)))
+      ) {
+        throw new Error(`File Worker 新建目标父目录身份已变化: ${target.path}`);
+      }
+    }
+  }
+}
+
 async function execute(request: FileWorkerRequest): Promise<FileWorkerResponse> {
   if (!/^[a-f0-9-]{36}$/u.test(request.operationId)) throw new Error("无效的 File Worker 操作 ID");
   if (!Number.isSafeInteger(request.boundaryRevision) || request.boundaryRevision < 0) {
     throw new Error("无效的任务边界版本");
   }
-  for (const target of request.targets) {
-    if (!sameFileTargetIdentity(target.identity, await identity(target.path))) {
-      throw new Error(`File Worker 目标身份已变化: ${target.path}`);
-    }
-  }
-  const roots = WorkspaceRoots.createSync(request.workDir);
+  await verifyBindings(request);
+  const roots =
+    process.platform === "win32"
+      ? WorkspaceRoots.createPreboundFileWorker(request.workDir)
+      : WorkspaceRoots.createSync(request.workDir);
   roots.replaceBoundaryEntries(
     request.targets.map((target) => ({
       path: target.path,
@@ -121,6 +149,7 @@ async function execute(request: FileWorkerRequest): Promise<FileWorkerResponse> 
   if (preparedContent !== undefined) {
     await writeFile(request.stagePath, preparedContent, { flag: "wx", mode: 0o600 });
   }
+  await verifyBindings(request);
   return {
     operationId: request.operationId,
     boundaryRevision: request.boundaryRevision,
