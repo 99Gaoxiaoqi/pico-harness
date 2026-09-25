@@ -125,9 +125,12 @@ test("Desktop storage repair: cancellation is read-only, confirmation preserves 
     assert.deepEqual(businessRecords(f.dbPath), records);
     assert.equal(readFileSync(join(f.root, "evidence.txt"), "utf8"), "keep original evidence");
     const reopened = prepareCurrentWorkspaceSqliteStorageSync(f.root);
-    assert.equal(reopened.rootIdentity.storageRootId, f.storageRootId);
-    assert.equal(reopened.rootIdentity.canonicalPath, f.root);
-    reopened.lease.release();
+    try {
+      assert.equal(reopened.rootIdentity.storageRootId, f.storageRootId);
+      assert.equal(reopened.rootIdentity.canonicalPath, realpathSync.native(f.root));
+    } finally {
+      reopened.lease.release();
+    }
     await confirm(f.workspace);
     assert.equal(dialogs, 2, "healthy storage never asks again");
     for (const method of ["workspace.storageRepair.prepare", "workspace.storageRepair.respond"]) {
@@ -137,7 +140,7 @@ test("Desktop storage repair: cancellation is read-only, confirmation preserves 
       );
     }
   } finally {
-    rmSync(f.base, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    rmSync(f.base, { recursive: true, force: true });
   }
 });
 
@@ -204,7 +207,7 @@ test("Desktop storage repair refuses stale confirmation and active connections w
       );
     } finally {
       lease?.release();
-      rmSync(f.base, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+      rmSync(f.base, { recursive: true, force: true });
     }
   }
 });
