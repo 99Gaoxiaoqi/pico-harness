@@ -5,6 +5,7 @@ import {
   type Skill as HostSkill,
   type SkillCatalogSnapshot as HostSkillCatalogSnapshot,
   type SkillLoaderOptions as HostSkillLoaderOptions,
+  type ManagedSkillViewOptions as HostManagedSkillViewOptions,
 } from "@pico/pico-host/skill-catalog";
 import type { HookTrustAuthority } from "@pico/pico-host/hooks/trust/store";
 import { logger } from "@pico/pico-host/logger";
@@ -13,6 +14,7 @@ export type Skill = HostSkill<HookTrustAuthority>;
 export type SkillSummary = { name: string; description: string };
 export type SkillLoaderOptions = Omit<HostSkillLoaderOptions<HookTrustAuthority>, "logger">;
 export type SkillCatalogSnapshot = HostSkillCatalogSnapshot<HookTrustAuthority>;
+export type ManagedSkillViewOptions = HostManagedSkillViewOptions;
 export type { SkillCatalogLogger } from "@pico/pico-host/skill-catalog";
 
 /** @deprecated Skill 文件扫描和来源优先级已移至 @pico/pico-host。 */
@@ -24,8 +26,12 @@ export class SkillLoader extends HostSkillLoader<HookTrustAuthority> {
 
 /** @deprecated Skill 工具实现已移至 @pico/pico-host。 */
 export class SkillViewTool extends HostSkillViewTool<HookTrustAuthority> {
-  constructor(loader: SkillLoader, onActivateHooks?: (skill: Skill) => void | Promise<void>) {
-    super(loader, onActivateHooks);
+  constructor(
+    loader: SkillLoader,
+    onActivateHooks?: (skill: Skill) => void | Promise<void>,
+    managed?: ManagedSkillViewOptions,
+  ) {
+    super(loader, onActivateHooks, managed);
   }
 }
 
