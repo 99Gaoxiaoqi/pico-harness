@@ -331,6 +331,14 @@ pub fn run() -> Result<(), String> {
     };
     let mut exact_path_guards: Vec<File> = Vec::new();
     let launch_result = (|| -> Result<u32, String> {
+        if !policy.read_files.is_empty() || !policy.write_files.is_empty() {
+            grant_exact_cwd(
+                &mut journal,
+                &policy,
+                &target_capability_sid,
+                &mut exact_path_guards,
+            )?;
+        }
         let write_keys = policy
             .write_roots
             .iter()
@@ -382,6 +390,43 @@ pub fn run() -> Result<(), String> {
         }
     };
     std::process::exit(exit_code as i32);
+}
+
+fn grant_exact_cwd(
+    journal: &mut RecoveryJournal,
+    policy: &Policy,
+    sid: &str,
+    guards: &mut Vec<File>,
+) -> Result<(), String> {
+    if !policy.cwd.is_absolute()
+        || policy.cwd == policy.control_root
+        || policy.cwd.starts_with(&policy.control_root)
+    {
+        return Err("exact-file working directory is invalid or overlaps broker control".into());
+    }
+    let mut ancestors = Vec::new();
+    let mut current = Some(policy.cwd.as_path());
+    while let Some(directory) = current {
+        if directory.parent().is_none() {
+            break;
+        }
+        ancestors.push(directory);
+        current = directory.parent();
+    }
+    for directory in ancestors.into_iter().rev() {
+        assert_not_reparse_point(directory)?;
+        let pinned = pin_path(directory, true)?;
+        assert_not_reparse_point(directory)?;
+        assert_pinned_identity(directory, &pinned, true)?;
+        if !pinned.metadata().map_err(error_text)?.is_dir() {
+            return Err(format!(
+                "exact-file working directory ancestor is not a directory: {}",
+                directory.display()
+            ));
+        }
+        guards.push(pinned);
+    }
+    journal.grant_exact(&policy.cwd, sid, "X,RA,RC,S")
 }
 
 fn run_commit_file(args: &[String]) -> Result<(), String> {
@@ -834,6 +879,12 @@ fn grant_exact_file(
             let pinned = pin_path(path, false)?;
             assert_not_reparse_point(path)?;
             assert_pinned_identity(path, &pinned, false)?;
+            if file_information(&pinned)?.number_of_links != 1 {
+                return Err(format!(
+                    "exact-file target has multiple hard links: {}",
+                    path.display()
+                ));
+            }
             guards.push(pinned);
             journal.grant_exact(path, sid, rights)
         }
@@ -854,14 +905,19 @@ fn assert_pinned_identity(path: &Path, pinned: &File, directory: bool) -> Result
 }
 
 fn file_identity(file: &File) -> Result<(u32, u64), String> {
-    let mut information: ByHandleFileInformation = unsafe { zeroed() };
-    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) } == 0 {
-        return Err(last_error("GetFileInformationByHandle"));
-    }
+    let information = file_information(file)?;
     Ok((
         information.volume_serial_number,
         (u64::from(information.file_index_high) << 32) | u64::from(information.file_index_low),
     ))
+}
+
+fn file_information(file: &File) -> Result<ByHandleFileInformation, String> {
+    let mut information: ByHandleFileInformation = unsafe { zeroed() };
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) } == 0 {
+        return Err(last_error("GetFileInformationByHandle"));
+    }
+    Ok(information)
 }
 
 fn pin_path(path: &Path, directory: bool) -> Result<File, String> {

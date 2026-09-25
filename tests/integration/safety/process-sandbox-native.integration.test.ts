@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { realpathSync } from "node:fs";
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { link, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
@@ -136,6 +136,81 @@ test(
     assert.equal(await readFile(writable, "utf8"), "changed");
     assert.equal(await readFile(sibling, "utf8"), "private");
     await assert.rejects(readFile(newFile));
+  },
+);
+
+test(
+  "Windows exact-file grants let the child stat its cwd without exposing nested siblings",
+  { skip: process.platform !== "win32" },
+  async (context) => {
+    const fixture = await fixtureRoot(context, "pico-native-exact-cwd-");
+    const nested = join(fixture.workspace, "nested");
+    await mkdir(nested);
+    const readable = join(nested, "allowed.txt");
+    const sibling = join(nested, "private.txt");
+    const created = join(nested, "created.txt");
+    await writeFile(readable, "visible");
+    await writeFile(sibling, "private");
+    const script = [
+      'const fs=require("node:fs");',
+      `const paths=${JSON.stringify({ workspace: fixture.workspace, readable, sibling, created })};`,
+      "const result={cwdStat:fs.statSync(paths.workspace).isDirectory(),cwdRealpath:fs.realpathSync.native(paths.workspace).length>0,read:fs.readFileSync(paths.readable,'utf8')};",
+      'const attempt=(name,fn)=>{try{result[name]=fn()}catch{result[name]="DENIED"}};',
+      'attempt("siblingRead",()=>fs.readFileSync(paths.sibling,"utf8"));',
+      'attempt("siblingWrite",()=>{fs.writeFileSync(paths.sibling,"unsafe");return "OK"});',
+      'attempt("create",()=>{fs.writeFileSync(paths.created,"unsafe");return "OK"});',
+      'process.stdout.write(JSON.stringify(result));',
+    ].join("");
+    const result = await runNode(
+      fixture,
+      "read-only",
+      script,
+      fixture.workspace,
+      process.env,
+      [],
+      "deny",
+      [readable],
+      [],
+      [],
+    );
+    assert.equal(result.code, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), {
+      cwdStat: true,
+      cwdRealpath: true,
+      read: "visible",
+      siblingRead: "DENIED",
+      siblingWrite: "DENIED",
+      create: "DENIED",
+    });
+    assert.equal(await readFile(sibling, "utf8"), "private");
+    await assert.rejects(readFile(created));
+  },
+);
+
+test(
+  "Windows exact-file grants reject a target with another hard link",
+  { skip: process.platform !== "win32" },
+  async (context) => {
+    const fixture = await fixtureRoot(context, "pico-native-exact-hardlink-");
+    const readable = join(fixture.workspace, "allowed.txt");
+    const alias = join(fixture.workspace, "alias.txt");
+    await writeFile(readable, "private");
+    await link(readable, alias);
+    const result = await runNode(
+      fixture,
+      "read-only",
+      `process.stdout.write(require("node:fs").readFileSync(${JSON.stringify(readable)},"utf8"))`,
+      fixture.workspace,
+      process.env,
+      [],
+      "deny",
+      [readable],
+      [],
+      [],
+    );
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /multiple hard links/u);
+    assert.doesNotMatch(result.stdout, /private/u);
   },
 );
 
@@ -653,10 +728,11 @@ async function runNode(
   network: "allow" | "deny" = "allow",
   readFiles: readonly string[] = [],
   writeFiles: readonly string[] = [],
+  workspaceRoots: readonly string[] = [fixture.workspace],
 ): Promise<{ code: number | null; stdout: string; stderr: string }> {
   const policy = createSandboxPolicy({
     profile,
-    workspaceRoots: [fixture.workspace],
+    workspaceRoots,
     scratchRoot: fixture.scratch,
     readRoots,
     readFiles,
