@@ -1,5 +1,8 @@
 import { realpath, stat } from "node:fs/promises";
-import { McpConnectionManager, type McpConnectionManagerOptions } from "@pico/pico-host/mcp-connection-manager";
+import {
+  McpConnectionManager,
+  type McpConnectionManagerOptions,
+} from "@pico/pico-host/mcp-connection-manager";
 import type { McpToolResult, McpServerConfig } from "@pico/pico-host/mcp-client-types";
 import type { UserMcpConfigStore } from "@pico/pico-host/user-mcp-config-store";
 import { isWithinRoot, type SandboxPolicy } from "@pico/pico-host/process-sandbox";
@@ -68,21 +71,43 @@ export class DesktopMcpExecutor {
 
     const snapshot = await this.options.userConfigStore.read();
     const config = snapshot.config.mcpServers[server];
-    if (!config || config.enabled === false || (config as McpServerConfig & { desktopExecution?: boolean }).desktopExecution !== true) {
+    if (
+      !config ||
+      config.enabled === false ||
+      (config as McpServerConfig & { desktopExecution?: boolean }).desktopExecution !== true
+    ) {
       throw new Error(`Desktop MCP server "${server}" 未配置、未启用 Desktop 执行或已禁用`);
     }
-    await this.requireAuthorization({
-      phase: "server-connect", commandId, sessionId, authorityEpoch, workspacePath, server, transport: config.transport,
-    }, input.signal);
+    await this.requireAuthorization(
+      {
+        phase: "server-connect",
+        commandId,
+        sessionId,
+        authorityEpoch,
+        workspacePath,
+        server,
+        transport: config.transport,
+      },
+      input.signal,
+    );
     await this.requireTrust(workspacePath, input.signal);
     this.requireAllowedServer(server);
 
     const policy = this.options.createSandboxPolicy({ workspacePath, server });
     assertIsolatedPolicy(policy, workspacePath);
     if (config.transport === "stdio" && policy.network === "allow") {
-      await this.requireAuthorization({
-        phase: "stdio-network", commandId, sessionId, authorityEpoch, workspacePath, server, transport: config.transport,
-      }, input.signal);
+      await this.requireAuthorization(
+        {
+          phase: "stdio-network",
+          commandId,
+          sessionId,
+          authorityEpoch,
+          workspacePath,
+          server,
+          transport: config.transport,
+        },
+        input.signal,
+      );
     }
     if (config.transport === "stdio" && config.cwd) {
       const cwd = await realpath(config.cwd);
@@ -98,27 +123,50 @@ export class DesktopMcpExecutor {
       remoteNetworkGate: async (request) => {
         await this.requireTrust(workspacePath, input.signal);
         this.requireAllowedServer(server);
-        await this.requireAuthorization({
-          phase: "remote-network", commandId, sessionId, authorityEpoch, workspacePath, server,
-          transport: request.transport,
-          ...(request.tool ? { tool: request.tool } : {}),
-        }, input.signal);
+        await this.requireAuthorization(
+          {
+            phase: "remote-network",
+            commandId,
+            sessionId,
+            authorityEpoch,
+            workspacePath,
+            server,
+            transport: request.transport,
+            ...(request.tool ? { tool: request.tool } : {}),
+          },
+          input.signal,
+        );
         return true;
       },
     });
     this.activeManagers.add(manager);
     try {
       this.assertOpen(input.signal);
-      await manager.replaceSources([{ id: "desktop-user", config: { mcpServers: { [server]: config } } }]);
+      await manager.replaceSources([
+        { id: "desktop-user", config: { mcpServers: { [server]: config } } },
+      ]);
       await this.requireTrust(workspacePath, input.signal);
       this.requireAllowedServer(server);
-      await this.requireAuthorization({
-        phase: "server-connect", commandId, sessionId, authorityEpoch, workspacePath, server, transport: config.transport,
-      }, input.signal);
+      await this.requireAuthorization(
+        {
+          phase: "server-connect",
+          commandId,
+          sessionId,
+          authorityEpoch,
+          workspacePath,
+          server,
+          transport: config.transport,
+        },
+        input.signal,
+      );
       const prestart = await this.options.userConfigStore.read();
       if (
         prestart.revision !== snapshot.revision ||
-        (prestart.config.mcpServers[server] as McpServerConfig & { desktopExecution?: boolean } | undefined)?.desktopExecution !== true
+        (
+          prestart.config.mcpServers[server] as
+            | (McpServerConfig & { desktopExecution?: boolean })
+            | undefined
+        )?.desktopExecution !== true
       ) {
         throw new Error("Desktop MCP 用户级配置已变化，请重新发起操作");
       }
@@ -135,15 +183,29 @@ export class DesktopMcpExecutor {
       const current = await this.options.userConfigStore.read();
       if (
         current.revision !== snapshot.revision ||
-        (current.config.mcpServers[server] as McpServerConfig & { desktopExecution?: boolean } | undefined)?.desktopExecution !== true
+        (
+          current.config.mcpServers[server] as
+            | (McpServerConfig & { desktopExecution?: boolean })
+            | undefined
+        )?.desktopExecution !== true
       ) {
         throw new Error("Desktop MCP 用户级配置已变化，请重新发起操作");
       }
       await this.requireTrust(workspacePath, input.signal);
       this.requireAllowedServer(server);
-      await this.requireAuthorization({
-        phase: "tool-call", commandId, sessionId, authorityEpoch, workspacePath, server, tool, transport: config.transport,
-      }, input.signal);
+      await this.requireAuthorization(
+        {
+          phase: "tool-call",
+          commandId,
+          sessionId,
+          authorityEpoch,
+          workspacePath,
+          server,
+          tool,
+          transport: config.transport,
+        },
+        input.signal,
+      );
       this.assertOpen(input.signal);
       return await manager.invokeConnectedTool(server, tool, input.args, {
         ...(input.signal ? { signal: input.signal } : {}),
@@ -160,7 +222,9 @@ export class DesktopMcpExecutor {
 
   async close(): Promise<void> {
     this.closed = true;
-    const results = await Promise.allSettled([...this.activeManagers].map((manager) => manager.closeAll()));
+    const results = await Promise.allSettled(
+      [...this.activeManagers].map((manager) => manager.closeAll()),
+    );
     const failed = results.find((result) => result.status === "rejected");
     if (failed?.status === "rejected") throw failed.reason;
   }
@@ -186,7 +250,9 @@ export class DesktopMcpExecutor {
   ): Promise<void> {
     this.assertOpen(signal);
     if ((await this.options.authorize(request)) !== true) {
-      throw new Error(`Desktop MCP ${request.phase} 未获授权: ${request.server}${request.tool ? `/${request.tool}` : ""}`);
+      throw new Error(
+        `Desktop MCP ${request.phase} 未获授权: ${request.server}${request.tool ? `/${request.tool}` : ""}`,
+      );
     }
     this.assertOpen(signal);
   }
