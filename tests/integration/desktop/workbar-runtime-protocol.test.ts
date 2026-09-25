@@ -241,7 +241,7 @@ test("execution trace crosses the desktop protocol with strict causal and covera
       oversizedRunIds: [],
       missingModelCallRunIds: [],
       incompleteRunIds: [],
-      modelAttempts: "logical_only",
+      modelAttempts: "missing",
     },
   };
   assert.ok(DESKTOP_RUNTIME_METHODS.includes("session.execution.summary"));
