@@ -76,7 +76,12 @@ class ChildProcessSandboxLease implements SandboxLease {
       await this.release();
       return;
     }
-    if (!this.child.kill(signal)) return;
+    if (!this.child.kill(signal)) {
+      throw new SandboxViolationError(
+        "sandbox_cleanup_failed",
+        "联网进程未确认终止，任务授权保持阻断。",
+      );
+    }
     await this.settled;
   }
 

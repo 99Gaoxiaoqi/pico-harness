@@ -46,7 +46,7 @@ import {
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { AgentEngine, isPlanProviderTool } from "@pico/pico-host/agent-engine";
 import { PlanHandoffController } from "@pico/runtime/plan-handoff";
 import type { GoalManager } from "@pico/runtime/goal-manager";
@@ -157,6 +157,7 @@ import {
   managedProcessLauncher,
   normalizeRoots,
   WindowsTaskNetworkAuthority,
+  windowsTaskNetworkControlRoot,
 } from "@pico/pico-host/process-sandbox";
 import { compileRuntimeProcessSandbox } from "@pico/pico-host/runtime-process-sandbox";
 import {
@@ -1240,11 +1241,7 @@ export async function executeAgentRuntime(
       process.platform === "win32"
         ? new WindowsTaskNetworkAuthority(
             session.id,
-            join(
-              dirname(processSandboxScratchRoot),
-              ".windows-broker-control",
-              createHash("sha256").update(session.id).digest("hex").slice(0, 32),
-            ),
+            windowsTaskNetworkControlRoot(picoHome, session.id),
           )
         : undefined;
     let sessionWindowsNetworkReceipt: string | undefined;

@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
@@ -22,6 +22,15 @@ export interface WindowsNetworkReceipt {
   scope: "session" | "once";
   ticket: string;
   expiresAtMs: number;
+}
+
+export function windowsTaskNetworkControlRoot(picoHome: string, taskId: string): string {
+  return join(
+    picoHome,
+    "sandboxes",
+    ".windows-broker-control",
+    createHash("sha256").update(taskId).digest("hex").slice(0, 32),
+  );
 }
 
 /** Host-owned state for one persisted task. The control directory is never granted to AppContainer. */
@@ -79,14 +88,41 @@ export class WindowsTaskNetworkAuthority {
       profileName: `PicoTaskNetwork.${randomBytes(16).toString("hex")}`,
     };
     await this.assertPrivateRoot();
+    if (existsSync(join(this.controlRoot, "revoking"))) {
+      throw new SandboxViolationError("sandbox_unavailable", "Windows 任务联网权限正在撤销。");
+    }
     const outcome = await this.runBroker("prepare", state.profileName);
     if (outcome !== "applied" && outcome !== "no-change") {
       throw new SandboxViolationError("sandbox_unavailable", "Windows 任务联网准备未完成。");
     }
     this.state = state;
-    await this.atomicWrite(this.statePath, state);
-    if (!(await this.verify())) {
-      throw new SandboxViolationError("sandbox_unavailable", "Windows 任务联网状态验证失败。");
+    try {
+      await this.atomicWrite(this.statePath, state);
+      if (!(await this.verify())) {
+        throw new SandboxViolationError("sandbox_unavailable", "Windows 任务联网状态验证失败。");
+      }
+    } catch (error) {
+      let blockError: unknown;
+      try {
+        await this.blockNewLaunches();
+      } catch (cause) {
+        blockError = cause;
+      }
+      try {
+        await this.revoke();
+      } catch (cleanup) {
+        throw new SandboxViolationError(
+          "sandbox_cleanup_failed",
+          `Windows 联网准备失败且任务例外无法撤销：${cleanup instanceof Error ? cleanup.message : String(cleanup)}`,
+        );
+      }
+      if (blockError) {
+        throw new SandboxViolationError(
+          "sandbox_cleanup_failed",
+          `Windows 联网准备失败且撤销门禁无法建立：${blockError instanceof Error ? blockError.message : String(blockError)}`,
+        );
+      }
+      throw error;
     }
   }
 
@@ -112,7 +148,8 @@ export class WindowsTaskNetworkAuthority {
       profileName: state.profileName,
       scope: input.scope,
       ticket: randomBytes(32).toString("hex"),
-      expiresAtMs: Date.now() + (input.scope === "once" ? 5 * 60_000 : 60 * 60_000),
+      // Durable approval ends at explicit task revocation or helper death.
+      expiresAtMs: input.scope === "once" ? Date.now() + 5 * 60_000 : Number.MAX_SAFE_INTEGER,
     };
     const target = join(this.controlRoot, `${receipt.ticket}.json`);
     await writeFile(target, `${JSON.stringify(receipt)}\n`, { flag: "wx", mode: 0o600 });

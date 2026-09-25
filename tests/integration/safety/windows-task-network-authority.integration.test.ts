@@ -22,7 +22,7 @@ if (control.includes("cancel") && op === "prepare") process.exit(5);
 const marker = path.join(control, "system-ready");
 let result;
 if (op === "prepare") { fs.writeFileSync(marker, profileName); result = "applied"; }
-else if (op === "verify") result = fs.existsSync(marker) && !fs.existsSync(path.join(control, "revoking")) ? "match" : "drift";
+else if (op === "verify") result = fs.existsSync(marker) && !control.includes("drift") && !fs.existsSync(path.join(control, "revoking")) ? "match" : "drift";
 else if (op === "revoke") { fs.rmSync(marker, {force: true}); result = "revoked"; }
 else process.exit(6);
 process.stdout.write(JSON.stringify({op: op + "-task-network", result, profileName}));
@@ -64,4 +64,10 @@ process.stdout.write(JSON.stringify({op: op + "-task-network", result, profileNa
   await assert.rejects(cancelled.prepare(), /Windows 任务联网prepare失败/u);
   assert.equal(await cancelled.verify(), false);
   await assert.rejects(access(join(root, "cancel-task-b", "state.json")));
+
+  const drifted = new WindowsTaskNetworkAuthority("task-c", join(root, "drift-task-c"), broker);
+  await assert.rejects(drifted.prepare(), /状态验证失败/u);
+  assert.equal(await drifted.verify(), false);
+  await assert.rejects(access(join(root, "drift-task-c", "system-ready")));
+  await assert.rejects(access(join(root, "drift-task-c", "state.json")));
 });
