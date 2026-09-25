@@ -181,6 +181,22 @@ test(
         "--json",
       ]);
       assert.notEqual(crashVerify.code, 0, "crashed helper still verified as prepared");
+      const crashPrepareAgain = await runBroker([
+        "--task-network",
+        "prepare",
+        "--profile-name",
+        otherProfileName,
+        "--control-root",
+        control,
+        "--host-pid",
+        String(process.pid),
+        "--json",
+      ]);
+      assert.notEqual(
+        crashPrepareAgain.code,
+        0,
+        "prepare reused an orphaned loopback exception after helper crash",
+      );
       const crashRevoke = await runBroker([
         "--task-network",
         "revoke",
@@ -210,37 +226,46 @@ test(
       assert.equal(finalRevoke.code, 0, finalRevoke.stderr);
       crashPrepared = false;
     } finally {
-      if (prepared) {
-        await runBroker([
-          "--task-network",
-          "revoke",
-          "--profile-name",
-          profileName,
-          "--control-root",
-          control,
-          "--json",
-        ]);
+      try {
+        if (prepared) {
+          await runBroker([
+            "--task-network",
+            "revoke",
+            "--profile-name",
+            profileName,
+            "--control-root",
+            control,
+            "--json",
+          ]);
+        }
+        if (crashPrepared) {
+          const revokeArgs = [
+            "--task-network",
+            "revoke",
+            "--profile-name",
+            otherProfileName,
+            "--control-root",
+            control,
+            "--json",
+          ];
+          let cleanup = await runBroker(revokeArgs);
+          if (cleanup.code !== 0) {
+            const helper = join(dirname(broker), "pico-appcontainer-host-prep.exe");
+            const recover = await runProcess(
+              helper,
+              ["recover-task-network", "--profile-name", otherProfileName, "--json"],
+              process.env,
+            );
+            assert.equal(recover.code, 0, recover.stderr);
+            cleanup = await runBroker(revokeArgs);
+          }
+          assert.equal(cleanup.code, 0, cleanup.stderr);
+        }
+      } finally {
+        loopback.close();
+        lan.close();
+        await rm(root, { recursive: true, force: true });
       }
-      loopback.close();
-      lan.close();
-      await rm(root, { recursive: true, force: true });
-    }
-    if (crashPrepared) {
-      const helper = join(dirname(broker), "pico-appcontainer-host-prep.exe");
-      await runProcess(
-        helper,
-        ["recover-task-network", "--profile-name", otherProfileName],
-        process.env,
-      );
-      await runBroker([
-        "--task-network",
-        "revoke",
-        "--profile-name",
-        otherProfileName,
-        "--control-root",
-        control,
-        "--json",
-      ]);
     }
 
     async function writeReceipt(profile: string, scope: "session" | "once"): Promise<string> {
