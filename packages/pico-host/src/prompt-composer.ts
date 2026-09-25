@@ -10,8 +10,9 @@ import { buildDeepResearchSystemPrompt } from "@pico/core/deep-research";
 // System Prompt 被视为大模型运行时的"操作系统内核",模块化编译、动态链接。
 // 冗长的无关信息会消耗 Token 并稀释注意力,故按需加载。
 
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { constants, type BigIntStats } from "node:fs";
+import { lstat, open, readFile, realpath } from "node:fs/promises";
+import { isAbsolute, join, relative, sep } from "node:path";
 import { hostShellDialect, type HostShellDialect } from "@pico/runtime/host-shell";
 import { TodoStore } from "@pico/storage/todo-store";
 import { resolvePicoPaths } from "./pico-paths.js";
@@ -52,6 +53,8 @@ export interface PromptComposerOptions {
   onInstructionsLoaded?: (paths: readonly string[]) => void | Promise<void>;
   isolatedHeadless?: boolean;
   researchMode?: boolean;
+  /** Project instructions in a managed run must be read without following workspace links. */
+  managedWorkspaceRead?: boolean;
   picoHome?: string;
   graphToolsAvailable?: boolean;
   swarmMode?: boolean;
@@ -77,6 +80,7 @@ export class PromptComposer {
   private readonly swarmMode: boolean;
   private readonly isolatedHeadless: boolean;
   private readonly researchMode: boolean;
+  private readonly managedWorkspaceRead: boolean;
   private readonly todoStore: PromptTodoStore;
   /** GoalManager 单例(可选):由 host 注入,注入后把 active goal 渲染进 prompt */
   private readonly goalManager: PromptGoalManager | undefined;
@@ -100,6 +104,7 @@ export class PromptComposer {
   constructor(workDir: string, planMode = false, options?: PromptComposerOptions) {
     this.workDir = workDir;
     this.researchMode = options?.researchMode ?? false;
+    this.managedWorkspaceRead = options?.managedWorkspaceRead ?? false;
     this.skillLoader = options?.skillLoader ?? new SkillLoader(workDir);
     this.planMode = planMode;
     this.isolatedHeadless = options?.isolatedHeadless ?? false;
@@ -181,7 +186,9 @@ ${userAgentsContent}
     // 2b. 项目级指南 (来自 AGENTS.md)
     const agentsPath = join(this.workDir, "AGENTS.md");
     try {
-      const agentsContent = await readFile(agentsPath, "utf8");
+      const agentsContent = this.managedWorkspaceRead
+        ? await readManagedProjectInstructions(this.workDir, agentsPath)
+        : await readFile(agentsPath, "utf8");
       loadedInstructionPaths.push(agentsPath);
       stableParts.push(`# 项目专属指南 (来自 AGENTS.md)
 以下是当前工作区特有的架构规范与注意事项,你的行为必须绝对遵守:
@@ -257,6 +264,56 @@ ${agentsContent}
   private shellDialectLabel(): string {
     return this.isPowerShellHost() ? "PowerShell" : "bash";
   }
+}
+
+async function readManagedProjectInstructions(
+  workDir: string,
+  agentsPath: string,
+): Promise<string> {
+  // Windows reparse points need handle-relative no-follow checks. Until those are available,
+  // omit project instructions rather than let the host follow a workspace-controlled link.
+  if (process.platform === "win32") throw new Error("Managed project instructions unavailable");
+  const root = await realpath(workDir);
+  const before = await lstat(agentsPath, { bigint: true });
+  if (!before.isFile() || !isWithin(root, await realpath(agentsPath))) {
+    throw new Error("Project instructions are not a regular in-workspace file");
+  }
+  const handle = await open(agentsPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const opened = await handle.stat({ bigint: true });
+    if (!sameFileVersion(before, opened)) throw new Error("Project instructions changed");
+    const content = await handle.readFile({ encoding: "utf8" });
+    const after = await handle.stat({ bigint: true });
+    const pathAfter = await lstat(agentsPath, { bigint: true });
+    if (
+      !sameFileVersion(before, after) ||
+      !sameFileVersion(before, pathAfter) ||
+      (await realpath(workDir)) !== root ||
+      !isWithin(root, await realpath(agentsPath))
+    ) {
+      throw new Error("Project instructions changed while reading");
+    }
+    return content;
+  } finally {
+    await handle.close();
+  }
+}
+
+function sameFileVersion(left: BigIntStats, right: BigIntStats): boolean {
+  return (
+    left.isFile() &&
+    right.isFile() &&
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.size === right.size &&
+    left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs
+  );
+}
+
+function isWithin(root: string, target: string): boolean {
+  const path = relative(root, target);
+  return path === "" || (path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path));
 }
 
 /** Plan Mode 的稳定 system 约束；结构化计划由 RuntimeEvent JSONL 持久化。 */
