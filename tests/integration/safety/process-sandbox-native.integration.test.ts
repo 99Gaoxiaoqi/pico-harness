@@ -106,6 +106,8 @@ test(
       "const result={};",
       'const attempt=(name,fn)=>{try{result[name]=fn()}catch{result[name]="DENIED"}};',
       'attempt("read",()=>fs.readFileSync(paths.readable,"utf8"));',
+      'attempt("targetRealpath",()=>fs.realpathSync.native(paths.readable).length>0);',
+      'attempt("missingParentRealpath",()=>fs.realpathSync.native(paths.external).length>0);',
       'attempt("write",()=>{fs.writeFileSync(paths.writable,"changed");return "OK"});',
       'attempt("siblingRead",()=>fs.readFileSync(paths.sibling,"utf8"));',
       'attempt("siblingWrite",()=>{fs.writeFileSync(paths.sibling,"unsafe");return "OK"});',
@@ -127,6 +129,8 @@ test(
     assert.equal(result.code, 0, result.stderr);
     assert.deepEqual(JSON.parse(result.stdout), {
       read: "visible",
+      targetRealpath: true,
+      missingParentRealpath: true,
       write: "OK",
       siblingRead: "DENIED",
       siblingWrite: "DENIED",
@@ -153,8 +157,8 @@ test(
     await writeFile(sibling, "private");
     const script = [
       'const fs=require("node:fs");',
-      `const paths=${JSON.stringify({ workspace: fixture.workspace, readable, sibling, created })};`,
-      "const result={cwdStat:fs.statSync(paths.workspace).isDirectory(),cwdRealpath:fs.realpathSync.native(paths.workspace).length>0,read:fs.readFileSync(paths.readable,'utf8')};",
+      `const paths=${JSON.stringify({ workspace: fixture.workspace, nested, readable, sibling, created })};`,
+      "const result={cwdStat:fs.statSync(paths.workspace).isDirectory(),cwdRealpath:fs.realpathSync.native(paths.workspace).length>0,nestedRealpath:fs.realpathSync.native(paths.nested).length>0,read:fs.readFileSync(paths.readable,'utf8')};",
       'const attempt=(name,fn)=>{try{result[name]=fn()}catch{result[name]="DENIED"}};',
       'attempt("siblingRead",()=>fs.readFileSync(paths.sibling,"utf8"));',
       'attempt("siblingWrite",()=>{fs.writeFileSync(paths.sibling,"unsafe");return "OK"});',
@@ -170,13 +174,14 @@ test(
       [],
       "deny",
       [readable],
-      [],
+      [created],
       [],
     );
     assert.equal(result.code, 0, result.stderr);
     assert.deepEqual(JSON.parse(result.stdout), {
       cwdStat: true,
       cwdRealpath: true,
+      nestedRealpath: true,
       read: "visible",
       siblingRead: "DENIED",
       siblingWrite: "DENIED",
