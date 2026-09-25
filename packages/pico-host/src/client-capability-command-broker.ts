@@ -119,6 +119,31 @@ export class ClientCapabilityCommandBroker {
     return { allowed: true };
   }
 
+  async checkCommand(input: {
+    readonly clientId: string;
+    readonly clientToken: string;
+    readonly commandId: string;
+    readonly sessionId: string;
+  }): Promise<{ readonly allowed: true }> {
+    const tokenDigest = await this.authenticate(input.clientToken);
+    const pending = this.pending.get(input.commandId);
+    if (
+      !pending ||
+      pending.claimedBy !== input.clientId ||
+      this.owner?.clientId !== input.clientId ||
+      this.owner.tokenDigest !== tokenDigest ||
+      pending.command.sessionId !== input.sessionId ||
+      pending.command.expiresAt <= this.now() ||
+      !pending.validate
+    ) {
+      throw new Error("Desktop 能力命令已撤销或过期");
+    }
+    if (!(await pending.validate()) || this.pending.get(input.commandId) !== pending) {
+      throw new Error("Desktop 能力当前任务授权已撤销");
+    }
+    return { allowed: true };
+  }
+
   private async resolveAuthenticated(input: {
     readonly clientId: string;
     readonly clientToken: string;

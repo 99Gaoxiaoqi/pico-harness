@@ -17,12 +17,16 @@ export class ComputerUseExecutor {
   private lockedByEvent = false;
   private monitorInstalled = false;
 
-  async execute(command: RuntimeClientCapabilityCommand): Promise<JsonObject> {
+  async execute(
+    command: RuntimeClientCapabilityCommand,
+    validate?: () => Promise<void>,
+  ): Promise<JsonObject> {
     if (process.platform !== "darwin") throw new Error("电脑操作目前只支持 macOS");
+    await validate?.();
     this.checkSystemGates();
-    if (command.action === "computer.observe") return this.observe(command.sessionId);
+    if (command.action === "computer.observe") return this.observe(command.sessionId, validate);
     if (command.action === "computer.click" || command.action === "computer.type") {
-      return this.act(command);
+      return this.act(command, validate);
     }
     throw new Error(`未提供 Desktop MCP 工具执行器: ${command.action}`);
   }
@@ -31,7 +35,8 @@ export class ComputerUseExecutor {
     this.observations.delete(sessionId);
   }
 
-  private async observe(sessionId: string): Promise<JsonObject> {
+  private async observe(sessionId: string, validate?: () => Promise<void>): Promise<JsonObject> {
+    await validate?.();
     const native = await this.native({ action: "observe" });
     const pid = readInteger(native["frontmostPid"]);
     const elements = readElements(native["elements"]);
@@ -47,6 +52,7 @@ export class ComputerUseExecutor {
         y < bounds.y + bounds.height
       );
     });
+    await validate?.();
     const sources = await desktopCapturer.getSources({
       types: ["screen"],
       thumbnailSize: { width: 900, height: 900 },
@@ -56,6 +62,7 @@ export class ComputerUseExecutor {
     const image = source.thumbnail.toJPEG(55);
     if (image.byteLength > 600_000) throw new Error("观察截图超过安全传输上限");
     const observationId = randomUUID();
+    await validate?.();
     this.observations.set(sessionId, { id: observationId, at: Date.now(), pid, elements: visible });
     return {
       observationId,
@@ -76,13 +83,17 @@ export class ComputerUseExecutor {
     };
   }
 
-  private async act(command: RuntimeClientCapabilityCommand): Promise<JsonObject> {
+  private async act(
+    command: RuntimeClientCapabilityCommand,
+    validate?: () => Promise<void>,
+  ): Promise<JsonObject> {
     const observationId = command.input["observationId"];
     const elementIndex = command.input["elementIndex"];
     if (typeof observationId !== "string" || !Number.isSafeInteger(elementIndex)) {
       throw new Error("电脑操作缺少有效观察编号或元素 index");
     }
     const previous = this.observations.get(command.sessionId);
+    await validate?.();
     const current = await this.native({ action: "observe" });
     const fresh = resolveObservedElement({
       previous,
@@ -98,6 +109,7 @@ export class ComputerUseExecutor {
     ) {
       throw new Error("目标不是可输入文本的元素，请重新观察");
     }
+    await validate?.();
     await this.native({
       action: "click",
       expectedPid: previous!.pid,
@@ -114,10 +126,12 @@ export class ComputerUseExecutor {
       const text = command.input["text"];
       if (typeof text !== "string" || text.length > 4_096) throw new Error("输入文本无效");
       this.checkSystemGates();
+      await validate?.();
       const focused = await this.native({ action: "status" });
       if (readInteger(focused["frontmostPid"]) !== previous!.pid) {
         throw new Error("输入前前台应用已切换");
       }
+      await validate?.();
       await this.native({ action: "type", text, expectedPid: previous!.pid });
     }
     this.observations.delete(command.sessionId);

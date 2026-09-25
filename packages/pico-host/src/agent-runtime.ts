@@ -190,6 +190,7 @@ import {
 } from "@pico/pico-host/browser-agent-tools";
 import { createComputerUseTools } from "@pico/pico-host/computer-use-tools";
 import type { BoundClientCapabilityAuthority } from "@pico/pico-host/client-capability-command-broker";
+import { DesktopMcpCallTool } from "@pico/pico-host/desktop-mcp-call-tool";
 import {
   browserHttpOrigin,
   browserNavigationOrigin,
@@ -2179,15 +2180,37 @@ export async function executeAgentRuntime(
       const guardedCapability: BoundClientCapabilityAuthority = {
         sessionId: capability.sessionId,
         execute: async (action, input = {}) => {
+          if (
+            action !== "desktop_mcp.call" &&
+            action !== "computer.observe" &&
+            action !== "computer.click" &&
+            action !== "computer.type"
+          ) {
+            throw new Error("不支持的 Desktop 能力操作");
+          }
           const mode = permissionMode();
           const epoch = currentEpoch();
+          const server = input["server"];
+          const tool = input["tool"];
+          const scope =
+            action === "desktop_mcp.call"
+              ? typeof server === "string" &&
+                server.trim() === server &&
+                server &&
+                typeof tool === "string" &&
+                tool.trim() === tool &&
+                tool
+                ? ({ kind: "desktop_mcp", server, tool } as const)
+                : undefined
+              : ({ kind: "computer_use" } as const);
+          if (!scope) throw new Error("Desktop MCP server/tool 授权范围无效");
+          let approvedOnce = false;
           if (mode !== "full-access") {
             await globalDurableClientCapabilityGrants.bindSession(
               session.id,
               capabilityWorkspaceRoot,
               epoch,
             );
-            const scope = { kind: "computer_use" } as const;
             if (
               !globalDurableClientCapabilityGrants.allows(
                 session.id,
@@ -2196,28 +2219,56 @@ export async function executeAgentRuntime(
               )
             ) {
               const { result } = await waitForRuntimeApproval({
-                toolName: action.replace(".", "_"),
-                providerCallId: `computer-use:${randomUUID()}`,
+                toolName:
+                  action === "desktop_mcp.call" ? "desktop_mcp_call" : action.replace(".", "_"),
+                providerCallId: `client-capability:${randomUUID()}`,
                 args: JSON.stringify({ action, ...input }),
                 reason:
-                  "允许当前任务观察或操作 macOS 桌面；系统屏幕录制、辅助功能及锁屏门控仍会检查",
+                  action === "desktop_mcp.call"
+                    ? `允许当前任务通过 Desktop 调用 MCP ${server}/${tool}；连接服务器和实际工具调用前会重新校验`
+                    : "允许当前任务观察或操作 macOS 桌面；系统屏幕录制、辅助功能及锁屏门控仍会检查",
               });
-              if (!result.allowed) throw new Error("未批准电脑操作能力");
-              if (currentEpoch() !== epoch) throw new Error("电脑操作授权期间任务权限已变化");
+              if (!result.allowed) throw new Error("未批准 Desktop 客户端能力");
+              if (currentEpoch() !== epoch) throw new Error("客户端能力授权期间任务权限已变化");
               if (result.allowForSession) {
                 await globalDurableClientCapabilityGrants.grant(
                   session.id,
                   scope,
                   capabilityWorkspaceRoot,
                 );
-              }
+              } else approvedOnce = true;
             }
-            if (currentEpoch() !== epoch) throw new Error("电脑操作期间任务权限已变化");
+            if (currentEpoch() !== epoch) throw new Error("客户端能力执行前任务权限已变化");
           }
-          return capability.execute(action, input);
+          const stillAuthorized = (): boolean =>
+            currentEpoch() === epoch &&
+            permissionMode() === mode &&
+            (mode === "full-access" ||
+              approvedOnce ||
+              globalDurableClientCapabilityGrants.allows(
+                session.id,
+                scope,
+                capabilityWorkspaceRoot,
+              ));
+          const commandInput =
+            action === "desktop_mcp.call"
+              ? { ...input, workspacePath: workDir, authorityEpoch: epoch }
+              : input;
+          return capability.execute(action, commandInput, stillAuthorized);
         },
       };
       for (const tool of createComputerUseTools(guardedCapability)) registry.register(tool);
+      registry.register(
+        new DesktopMcpCallTool(async (input, context) => {
+          const result = await guardedCapability.execute("desktop_mcp.call", {
+            server: input.server,
+            tool: input.tool,
+            args: input.args as import("@pico/protocol").JsonObject,
+            ...(context?.toolCallId ? { toolCallId: context.toolCallId } : {}),
+          });
+          return result as unknown as import("@pico/pico-host/mcp-client-types").McpToolResult;
+        }),
+      );
     }
     registerPluginCapabilityTools(
       registry,

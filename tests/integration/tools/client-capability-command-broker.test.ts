@@ -200,6 +200,29 @@ test("Desktop MCP phase authorization is bound to the claimed command, exact too
   await rejected;
 });
 
+test("Computer command live check fails after task capability revocation", async () => {
+  const broker = new ClientCapabilityCommandBroker({ ...authenticated, commandTimeoutMs: 500 });
+  await broker.nextCommand({ clientId: "desktop-a", clientToken, waitMs: 0 });
+  let allowed = true;
+  const pending = broker.bind("task-a").execute("computer.click", {}, () => allowed);
+  const rejected = assert.rejects(pending, /能力已撤销/);
+  const command = (await broker.nextCommand({ clientId: "desktop-a", clientToken, waitMs: 0 }))
+    .command;
+  assert.ok(command);
+  const check = {
+    clientId: "desktop-a",
+    clientToken,
+    commandId: command.commandId,
+    sessionId: "task-a",
+  };
+  assert.deepEqual(await broker.checkCommand(check), { allowed: true });
+  allowed = false;
+  await assert.rejects(broker.checkCommand(check), /当前任务授权已撤销/);
+  broker.invalidateSession("task-a");
+  await assert.rejects(broker.checkCommand(check), /已撤销或过期/);
+  await rejected;
+});
+
 test("Computer tools expose fixed operations and Desktop client polling is not renderer-accessible", async () => {
   const calls: Array<{ action: string; input: unknown }> = [];
   const tools = createComputerUseTools({

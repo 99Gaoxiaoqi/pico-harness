@@ -683,6 +683,10 @@
       "types": "./dist/desktop-client-token.d.ts",
       "import": "./dist/desktop-client-token.js"
     },
+    "./desktop-mcp-call-tool": {
+      "types": "./dist/desktop-mcp-call-tool.d.ts",
+      "import": "./dist/desktop-mcp-call-tool.js"
+    },
     "./computer-use-tools": {
       "types": "./dist/computer-use-tools.d.ts",
       "import": "./dist/computer-use-tools.js"
