@@ -10,15 +10,14 @@ import { ClientSessionRuntime } from "@pico/cli/tui/client-session-runtime";
 import { createClientCommandRegistry, processClientInput } from "@pico/cli/tui/client-commands";
 import { TuiReporter } from "@pico/cli/tui/tui-reporter";
 import { TestRuntimeHostCandidateTracker } from "../helpers/test-runtime-daemon.js";
+import { startRejectedModelServer } from "../helpers/rejected-model-server.js";
 
 /**
  * 3-D BLOCKED 收口（/mcp 镜像）：真 daemon 上验证用户级 MCP 服务器配置面
  * 的 status/enable/disable 全链路——daemon 读取 picoHome/mcp.json →
  * mcp.effective.list → 客户端 /mcp 命令 → mcp.user.setEnabled（新协议方法，
- * 含 revision 冲突语义）。不需要真实模型（死端点即可，不启动 run）。
+ * 含 revision 冲突语义）。本地模型端点返回不可重试错误，无需真实模型。
  */
-
-const DEAD_ENDPOINT = "http://127.0.0.1:9";
 
 test("protocol gate: mcp.user.setEnabled 严格参数（accept + 必填拒绝）", () => {
   const ok = parseStrictRuntimeParams("mcp.user.setEnabled", {
@@ -51,6 +50,8 @@ test("real daemon: /mcp status + enable/disable round trip over user mcp.json", 
   await mkdir(picoHome, { recursive: true });
   await mkdir(workspaceSeed, { recursive: true });
   const workspaceDir = await realpath(workspaceSeed);
+  const modelServer = await startRejectedModelServer();
+  t.after(() => modelServer.close());
   // 用户级 MCP fixture：先于 daemon 启动写入（daemon 读 picoHome/mcp.json）。
   await writeFile(
     join(picoHome, "mcp.json"),
@@ -67,7 +68,7 @@ test("real daemon: /mcp status + enable/disable round trip over user mcp.json", 
     "utf8",
   );
   process.env.PICO_HOME = picoHome;
-  await configureDeadEndpointModel(picoHome);
+  await configureRejectedModel(picoHome, modelServer.baseURL);
   const candidates = new TestRuntimeHostCandidateTracker();
   t.after(() => {
     delete process.env.PICO_HOME;
@@ -130,13 +131,13 @@ test("real daemon: /mcp status + enable/disable round trip over user mcp.json", 
   const missing = await run("/mcp disable ghost-server");
   assert.match(String(missing.result?.message), /未在用户级配置中找到/);
 
-  // /context 真 daemon：session.context.get 需要真实会话——死端点 send 建会话
-  // （run 快速失败但会话与 settings 物化），再取上下文预算报告。
+  // /context 真 daemon：session.context.get 需要真实会话——本地模型拒绝请求后
+  // 会话与 settings 仍已物化，再取上下文预算报告。
   const sent = await runtime.sendText("冒烟：请回复 ok");
-  assert.ok(sent, "死端点 send 应被接受（会话物化）");
+  assert.ok(sent, "模型拒绝前 send 应被接受（会话物化）");
   const sessionId = runtime.activeSessionId;
   assert.ok(sessionId, "send 应带回 sessionId");
-  // 死端点 run 快速失败——等终态再执行 idle 命令（/add-dir availability 门，
+  // 不可重试的模型错误使 run 快速失败——等终态再执行 idle 命令（/add-dir availability 门，
   // 竞态下会拒"仅 idle"命令，造成假阴性）。
   const settled = await waitForCondition(async () => {
     const { runs } = await client.request("runs.list", { workspacePath: workspaceDir, sessionId });
@@ -144,7 +145,7 @@ test("real daemon: /mcp status + enable/disable round trip over user mcp.json", 
       runs.length > 0 && runs.every((run) => isTerminalRunStatus(run.status)) && !runtime.running
     );
   }, 60_000);
-  assert.ok(settled, "死端点 run 应快速终态");
+  assert.ok(settled, "不可重试的模型错误应使 run 快速终态");
 
   const context = await client.request("session.context.get", {
     workspacePath: workspaceDir,
@@ -204,7 +205,7 @@ test("real daemon: /mcp status + enable/disable round trip over user mcp.json", 
   runtime.dispose();
 });
 
-async function configureDeadEndpointModel(picoHome: string): Promise<void> {
+async function configureRejectedModel(picoHome: string, baseURL: string): Promise<void> {
   const store = new UserConfigStore({ picoHome });
   const current = await store.read();
   await store.write(
@@ -214,7 +215,7 @@ async function configureDeadEndpointModel(picoHome: string): Promise<void> {
       providers: {
         "mcp-smoke": {
           protocol: "openai",
-          baseURL: DEAD_ENDPOINT,
+          baseURL,
           apiKeyEnv: "PICO_MCP_SMOKE_API_KEY",
           apiKey: "mcp-smoke-key",
           models: ["mcp-smoke-model"],
