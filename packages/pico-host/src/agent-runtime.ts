@@ -1923,6 +1923,9 @@ export async function executeAgentRuntime(
         ? { windowsControlRoot: mainProcessSandbox.windowsControlRoot }
         : {}),
     });
+    if (backgroundPolicy && windowsNetworkAuthority && mainProcessPolicy.network === "allow") {
+      backgroundPolicy.hookRunner?.bindProcessSandbox?.(mainProcessPolicy);
+    }
     refreshRuntimeBoundary = async ({ updateMcp = true } = {}) => {
       applyExecutionBoundaryToWorkspaceRoots(workspaceRoots, runtimeExecutionBoundary());
       const roots = workspaceRoots.list();
@@ -2913,6 +2916,7 @@ export async function executeAgentRuntime(
                         backgroundPolicy.allowedToolNetworkHosts,
                         join(processSandboxScratchRoot, "background-mcp", config.name),
                         logger,
+                        windowsNetworkAuthority ? mainProcessPolicy : undefined,
                       ),
                   }
                 : {}),
