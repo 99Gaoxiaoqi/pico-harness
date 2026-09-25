@@ -156,9 +156,12 @@ export class RepoMapService implements CodeIntelligenceService {
     rootDir: string,
     scanBatchSize = DEFAULT_SCAN_BATCH,
     workspaceRoots = WorkspaceRoots.createSync(rootDir),
+    private readonly preboundPaths = false,
   ) {
     this.workspaceRoots = workspaceRoots;
-    this.rootDir = realpathSync.native(path.resolve(rootDir));
+    this.rootDir = preboundPaths
+      ? path.resolve(rootDir)
+      : realpathSync.native(path.resolve(rootDir));
     this.scanBatchSize = clampMaxFiles(scanBatchSize);
   }
 
@@ -338,7 +341,13 @@ export class RepoMapService implements CodeIntelligenceService {
           output.push(path.relative(this.rootDir, root));
         }
       } else {
-        await collectSourceFiles(this.workspaceRoots, this.rootDir, root, output);
+        await collectSourceFiles(
+          this.workspaceRoots,
+          this.rootDir,
+          root,
+          output,
+          this.preboundPaths,
+        );
       }
     }
     this.discoveredFiles = [...new Set(output)].sort();
@@ -364,6 +373,9 @@ export class RepoMapService implements CodeIntelligenceService {
     throwIfAborted(signal);
     const lexicalPath = path.resolve(this.rootDir, filePath);
     const absolutePath = await this.workspaceRoots.assertAllowed(filePath);
+    if ((await lstat(lexicalPath)).isSymbolicLink()) {
+      throw new RepoMapStalePathError(`Repo Map 拒绝链接文件: ${filePath}`);
+    }
     const lexicalIdentity = await targetIdentity(lexicalPath);
     const targetBefore = await targetIdentity(absolutePath);
     const cached = this.indexedFiles.get(absolutePath);
@@ -465,6 +477,7 @@ async function collectSourceFiles(
   rootDir: string,
   dir: string,
   output: string[],
+  preboundPaths = false,
 ): Promise<void> {
   let physicalDirectory: string;
   try {
@@ -474,11 +487,14 @@ async function collectSourceFiles(
   }
   let entries: Dirent[];
   try {
+    if ((await lstat(physicalDirectory)).isSymbolicLink()) {
+      throw new RepoMapStalePathError(`Repo Map 拒绝链接目录: ${dir}`);
+    }
     const before = await targetIdentity(physicalDirectory);
     entries = await readdir(physicalDirectory, { withFileTypes: true });
     if (
       (await targetIdentity(physicalDirectory)) !== before ||
-      (await realpath(dir)) !== physicalDirectory
+      (!preboundPaths && (await realpath(dir)) !== physicalDirectory)
     ) {
       throw new RepoMapStalePathError(`Repo Map 目录身份已变化: ${dir}`);
     }
@@ -494,6 +510,7 @@ async function collectSourceFiles(
           rootDir,
           path.join(physicalDirectory, entry.name),
           output,
+          preboundPaths,
         );
       }
       continue;

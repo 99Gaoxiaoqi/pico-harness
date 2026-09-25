@@ -89,6 +89,8 @@ export class ReadOnlyCodeWorker implements CodeIntelligenceService {
     const workspaceRoots = await Promise.all(
       this.sandbox.workspaceRoots.map((root) => realpath(root)),
     );
+    const rootIdentity = await directoryIdentity(rootDir);
+    const rootIdentities = await Promise.all(workspaceRoots.map(directoryIdentity));
     if (workspaceRoots.some((root) => within(root, this.scratchRoot))) {
       throw new SandboxViolationError(
         "sandbox_unavailable",
@@ -114,7 +116,9 @@ export class ReadOnlyCodeWorker implements CodeIntelligenceService {
           ...args,
           JSON.stringify({
             rootDir,
+            rootIdentity,
             roots: workspaceRoots,
+            rootIdentities,
             generation: this.sandbox.generation,
           }),
         ],
@@ -302,6 +306,17 @@ export class ReadOnlyCodeWorker implements CodeIntelligenceService {
     this.pending.clear();
     if (this.child && this.child.exitCode === null) this.child.kill();
   }
+}
+
+async function directoryIdentity(target: string): Promise<string> {
+  const info = await lstat(target, { bigint: true });
+  if (!info.isDirectory() || info.isSymbolicLink()) {
+    throw new SandboxViolationError(
+      "sandbox_unavailable",
+      `代码智能 Worker 根不是普通目录: ${target}`,
+    );
+  }
+  return `${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`;
 }
 
 async function resolveWorkerEntry(): Promise<{

@@ -17,28 +17,42 @@ const MAX_DOCUMENT_BYTES = 4 * 1024 * 1024;
 async function main(): Promise<void> {
   const config = JSON.parse(process.argv[2] ?? "null") as {
     rootDir?: unknown;
+    rootIdentity?: unknown;
     roots?: unknown;
+    rootIdentities?: unknown;
     generation?: unknown;
   } | null;
   if (
     !config ||
     typeof config.rootDir !== "string" ||
+    typeof config.rootIdentity !== "string" ||
     !Array.isArray(config.roots) ||
     !config.roots.every((root) => typeof root === "string") ||
+    !Array.isArray(config.rootIdentities) ||
+    config.rootIdentities.length !== config.roots.length ||
+    !config.rootIdentities.every((value) => typeof value === "string") ||
     !Number.isSafeInteger(config.generation)
   ) {
     throw new Error("代码智能 Worker 初始化参数无效");
   }
   const generation = config.generation as number;
-  const rootDir = await realpath(config.rootDir);
-  if (path.resolve(config.rootDir) !== rootDir) {
+  const preboundPaths = process.platform === "win32";
+  const rootDir = preboundPaths ? config.rootDir : await realpath(config.rootDir);
+  if (
+    path.resolve(config.rootDir) !== rootDir ||
+    (await identity(rootDir)) !== config.rootIdentity
+  ) {
     throw new Error("代码智能 Worker 工作区真实路径不匹配");
   }
-  const roots = await WorkspaceRoots.create(rootDir, config.roots as string[]);
-  const boundRoots = await Promise.all(
-    roots.list().map(async (root) => [root, await identity(root)] as const),
+  const boundRoots = (config.roots as string[]).map(
+    (root, index) => [root, (config.rootIdentities as string[])[index]!] as const,
   );
-  const repoMap = new RepoMapService(rootDir, undefined, roots);
+  boundRoots.push([rootDir, config.rootIdentity]);
+  await assertRoots(boundRoots);
+  const roots = preboundPaths
+    ? WorkspaceRoots.createPreboundReadOnly(rootDir, config.roots as string[])
+    : await WorkspaceRoots.create(rootDir, config.roots as string[]);
+  const repoMap = new RepoMapService(rootDir, undefined, roots, preboundPaths);
   const reader = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
   try {
     for await (const line of reader) {
@@ -118,6 +132,9 @@ async function readDocument(
   filePath: string,
 ): Promise<WorkerDocument> {
   const requestedPath = path.resolve(rootDir, filePath);
+  if ((await lstat(requestedPath)).isSymbolicLink()) {
+    throw new Error("代码智能拒绝读取链接文件");
+  }
   const requestedIdentity = await identity(requestedPath);
   const physicalPath = await roots.assertAllowed(filePath);
   const handle = await open(physicalPath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
@@ -164,7 +181,10 @@ async function identity(target: string): Promise<string> {
 
 async function assertRoots(roots: readonly (readonly [string, string])[]): Promise<void> {
   for (const [root, expected] of roots) {
-    if ((await identity(root)) !== expected || (await realpath(root)) !== root) {
+    if (
+      (await identity(root)) !== expected ||
+      (process.platform !== "win32" && (await realpath(root)) !== root)
+    ) {
       throw new Error("代码智能 Worker 工作区根身份已变化");
     }
   }
