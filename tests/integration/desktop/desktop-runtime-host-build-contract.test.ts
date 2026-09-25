@@ -102,6 +102,10 @@ test("Desktop cold workflows build the complete dependency chain before invoking
           args: ["run", "build", "--workspace", workspace],
           cwd: root,
         })),
+        { args: ["run", "build:file-worker"], cwd: root },
+        ...(process.platform === "darwin"
+          ? [{ args: ["run", "build:computer-use:mac"], cwd: root }]
+          : []),
         { args: [lifecycle, "--fixture-argument"], cwd: desktop },
       ],
       `${lifecycle} must finish every workspace build in dependency order before invoking Forge`,
