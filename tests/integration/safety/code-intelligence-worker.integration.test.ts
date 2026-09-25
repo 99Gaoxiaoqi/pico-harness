@@ -101,10 +101,10 @@ test("managed document reads reject a symlink outside the bound workspace", asyn
   assert.ok("readDocument" in worker);
   const readDocument = worker.readDocument.bind(worker);
   assert.match((await readDocument("safe.ts")).text, /safe/u);
-  await assert.rejects(readDocument("linked.ts"), /路径越界|工作区|EPERM|EACCES/u);
+  await assert.rejects(readDocument("linked.ts"), /路径越界|工作区|EPERM|EACCES|ELOOP/u);
   await assert.rejects(
     manager.service()!.symbols({ filePath: "linked.ts" }),
-    /路径越界|工作区|EPERM|EACCES/u,
+    /路径越界|工作区|EPERM|EACCES|ELOOP/u,
   );
 });
 
