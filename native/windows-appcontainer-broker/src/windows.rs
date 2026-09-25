@@ -9,7 +9,10 @@ use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::ptr::{null, null_mut};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+#[path = "windows_network.rs"]
+mod windows_network;
 
 type Handle = *mut c_void;
 type Sid = *mut c_void;
@@ -39,6 +42,12 @@ const STD_INPUT_HANDLE: u32 = (-10i32) as u32;
 const STD_OUTPUT_HANDLE: u32 = (-11i32) as u32;
 const STD_ERROR_HANDLE: u32 = (-12i32) as u32;
 const TOKEN_QUERY: u32 = 0x0000_0008;
+const TOKEN_IS_APP_CONTAINER_CLASS: u32 = 29;
+const SEE_MASK_NOCLOSEPROCESS: u32 = 0x0000_0040;
+const ERROR_CANCELLED: u32 = 1223;
+const UAC_HELPER_TIMEOUT_MS: u32 = 120_000;
+const SYNCHRONIZE: u32 = 0x0010_0000;
+const MUTEX_MODIFY_STATE: u32 = 0x0000_0001;
 
 #[repr(C)]
 struct SecurityCapabilities {
@@ -46,6 +55,25 @@ struct SecurityCapabilities {
     capabilities: *mut SidAndAttributes,
     capability_count: u32,
     reserved: u32,
+}
+
+#[repr(C)]
+struct ShellExecuteInfoW {
+    cb_size: u32,
+    mask: u32,
+    hwnd: Handle,
+    verb: *const u16,
+    file: *const u16,
+    parameters: *const u16,
+    directory: *const u16,
+    show: i32,
+    instance: Handle,
+    id_list: *mut c_void,
+    class: *const u16,
+    class_key: Handle,
+    hot_key: u32,
+    icon: Handle,
+    process: Handle,
 }
 
 #[repr(C)]
@@ -203,8 +231,15 @@ extern "system" {
     fn GetFileInformationByHandle(file: Handle, information: *mut ByHandleFileInformation) -> i32;
     fn GetStdHandle(standard_handle: u32) -> Handle;
     fn GetSystemDirectoryW(buffer: *mut u16, size: u32) -> u32;
+    fn GetModuleFileNameW(module: Handle, buffer: *mut u16, size: u32) -> u32;
     fn CreateMutexW(attributes: *const c_void, initial_owner: i32, name: *const u16) -> Handle;
+    fn OpenMutexW(desired_access: u32, inherit_handle: i32, name: *const u16) -> Handle;
     fn ReleaseMutex(mutex: Handle) -> i32;
+}
+
+#[link(name = "shell32")]
+extern "system" {
+    fn ShellExecuteExW(info: *mut ShellExecuteInfoW) -> i32;
 }
 
 #[link(name = "bcrypt")]
@@ -232,6 +267,13 @@ extern "system" {
     fn ConvertStringSidToSidW(string_sid: *const u16, sid: *mut Sid) -> i32;
     fn FreeSid(sid: Sid) -> *mut c_void;
     fn OpenProcessToken(process: Handle, desired_access: u32, token: *mut Handle) -> i32;
+    fn GetTokenInformation(
+        token: Handle,
+        information_class: u32,
+        information: *mut c_void,
+        information_length: u32,
+        return_length: *mut u32,
+    ) -> i32;
 }
 
 #[derive(Debug)]
@@ -241,12 +283,23 @@ struct Policy {
     scratch: PathBuf,
     control_root: PathBuf,
     generation: u64,
+    boundary_revision: Option<u64>,
+    task_id: Option<String>,
+    origin: Option<String>,
+    network_receipt: Option<PathBuf>,
     read_roots: Vec<PathBuf>,
     write_roots: Vec<PathBuf>,
     read_files: Vec<PathBuf>,
     write_files: Vec<PathBuf>,
     command: String,
     args: Vec<String>,
+}
+
+struct NetworkReceipt {
+    profile_name: String,
+    scope: String,
+    source: PathBuf,
+    contents: Vec<u8>,
 }
 
 struct AclMutationGuard {
@@ -295,7 +348,22 @@ impl Drop for AclMutationGuard {
 }
 
 pub fn run() -> Result<(), String> {
+    if current_process_is_appcontainer()? {
+        return Err("AppContainer processes cannot invoke the trusted broker control plane".into());
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args
+        .first()
+        .is_some_and(|argument| argument == "--task-network")
+    {
+        return run_task_network(&args[1..]);
+    }
+    if args
+        .first()
+        .is_some_and(|argument| argument == "--release-task-network-profile")
+    {
+        return run_release_task_network_profile(&args[1..]);
+    }
     if args
         .first()
         .is_some_and(|argument| argument == "--commit-file")
@@ -305,15 +373,33 @@ pub fn run() -> Result<(), String> {
     let policy = parse_args(args)?;
     fs::create_dir_all(&policy.scratch).map_err(error_text)?;
     fs::create_dir_all(&policy.control_root).map_err(error_text)?;
+    assert_not_reparse_point(&policy.control_root)?;
+    if policy
+        .read_roots
+        .iter()
+        .chain(policy.write_roots.iter())
+        .any(|root| policy.control_root.starts_with(root))
+    {
+        return Err("broker control root overlaps a sandbox-visible filesystem root".into());
+    }
     recover_stale(&policy.control_root)?;
 
+    let network_receipt = match &policy.network_receipt {
+        Some(source) => Some(read_network_receipt(&policy, source)?),
+        None => None,
+    };
     let nonce = secure_random_bytes()?;
-    let package_name = format!(
-        "PicoSandbox.{}.{}.{}",
-        stable_hash(policy.scratch.to_string_lossy().as_bytes()),
-        policy.generation,
-        hex_prefix(&nonce, 8)
-    );
+    let package_name = network_receipt
+        .as_ref()
+        .map(|receipt| receipt.profile_name.clone())
+        .unwrap_or_else(|| {
+            format!(
+                "PicoSandbox.{}.{}.{}",
+                stable_hash(policy.scratch.to_string_lossy().as_bytes()),
+                policy.generation,
+                hex_prefix(&nonce, 8)
+            )
+        });
     let target_capability_sid = target_capability_sid(&nonce);
     let process_started_at = current_process_started_at()?;
     let log_path = policy.control_root.join(format!(
@@ -326,7 +412,9 @@ pub fn run() -> Result<(), String> {
     // AppContainer ACLs are capability-scoped and recorded before mutation. A crash leaves
     // enough information for the next broker invocation to remove every temporary ACE.
     let mut journal = RecoveryJournal::open(&log_path)?;
-    journal.record("profile", &package_name, "")?;
+    if network_receipt.is_none() {
+        journal.record("profile", &package_name, "")?;
+    }
     let package_sid = match create_or_derive_package_sid(&package_name) {
         Ok(sid) => sid,
         Err(error) => {
@@ -382,7 +470,17 @@ pub fn run() -> Result<(), String> {
                 &mut exact_path_guards,
             )?;
         }
-        unsafe { launch_in_appcontainer(&policy, package_sid, &target_capability_sid) }
+        if let Some(receipt) = &network_receipt {
+            verify_network_receipt(&policy, receipt, true)?;
+        }
+        unsafe {
+            launch_in_appcontainer(
+                &policy,
+                package_sid,
+                &target_capability_sid,
+                network_receipt.as_ref(),
+            )
+        }
     })();
     let cleanup_result = journal.cleanup();
     drop(exact_path_guards);
@@ -398,6 +496,34 @@ pub fn run() -> Result<(), String> {
         }
     };
     std::process::exit(exit_code as i32);
+}
+
+fn current_process_is_appcontainer() -> Result<bool, String> {
+    let mut token: Handle = null_mut();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return Err(last_error("OpenProcessToken"));
+    }
+    let mut is_appcontainer = 0u32;
+    let mut returned = 0u32;
+    let status = unsafe {
+        GetTokenInformation(
+            token,
+            TOKEN_IS_APP_CONTAINER_CLASS,
+            (&mut is_appcontainer as *mut u32).cast(),
+            size_of::<u32>() as u32,
+            &mut returned,
+        )
+    };
+    let error = if status == 0 {
+        Some(last_error("GetTokenInformation(TokenIsAppContainer)"))
+    } else {
+        None
+    };
+    unsafe { CloseHandle(token) };
+    if let Some(error) = error {
+        return Err(error);
+    }
+    Ok(is_appcontainer != 0)
 }
 
 fn grant_exact_cwd(
@@ -564,8 +690,8 @@ fn run_commit_file(args: &[String]) -> Result<(), String> {
     {
         return Err("commit-file requires absolute Node, helper and target paths".into());
     }
-    let broker_executable = fs::canonicalize(std::env::current_exe().map_err(error_text)?)
-        .map_err(error_text)?;
+    let broker_executable =
+        fs::canonicalize(std::env::current_exe().map_err(error_text)?).map_err(error_text)?;
     let resources_root = broker_executable
         .parent()
         .and_then(Path::parent)
@@ -672,6 +798,403 @@ fn run_commit_file(args: &[String]) -> Result<(), String> {
     }
 }
 
+fn run_task_network(args: &[String]) -> Result<(), String> {
+    let operation = args
+        .first()
+        .ok_or("missing task network operation")?
+        .as_str();
+    if !matches!(operation, "prepare" | "verify" | "revoke") {
+        return Err("invalid task network operation".into());
+    }
+    let mut profile_name = None;
+    let mut control_root = None;
+    let mut host_pid = None;
+    let mut json = false;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--profile-name" if profile_name.is_none() => {
+                profile_name = Some(args.get(index + 1).ok_or("missing --profile-name value")?);
+                index += 2;
+            }
+            "--control-root" if control_root.is_none() => {
+                control_root = Some(PathBuf::from(
+                    args.get(index + 1).ok_or("missing --control-root value")?,
+                ));
+                index += 2;
+            }
+            "--host-pid" if host_pid.is_none() => {
+                host_pid = Some(
+                    args.get(index + 1)
+                        .ok_or("missing --host-pid value")?
+                        .parse::<u32>()
+                        .map_err(|_| "invalid --host-pid")?,
+                );
+                index += 2;
+            }
+            "--json" if !json => {
+                json = true;
+                index += 1;
+            }
+            _ => return Err(format!("invalid task network argument: {}", args[index])),
+        }
+    }
+    let profile_name = profile_name.ok_or("missing --profile-name")?;
+    windows_network::validate_profile_name(profile_name)?;
+    let control_root = control_root.ok_or("missing --control-root")?;
+    if !control_root.is_absolute() || !control_root.is_dir() {
+        return Err("task network control root must be an existing absolute directory".into());
+    }
+    if operation != "prepare" && host_pid.is_some() {
+        return Err("--host-pid is only accepted for task network preparation".into());
+    }
+    assert_not_reparse_point(&control_root)?;
+    let result = match operation {
+        "prepare" => {
+            let host_pid = host_pid.ok_or("prepare requires --host-pid")?;
+            if host_pid == 0 {
+                return Err("prepare requires a nonzero Host PID".into());
+            }
+            let sid = create_or_derive_package_sid(profile_name)?;
+            unsafe { FreeSid(sid) };
+            let helper_alive = task_network_helper_alive(&control_root, profile_name);
+            let exempt = windows_network::loopback_exempt(profile_name)?;
+            match (helper_alive, exempt) {
+                (true, true) => "no-change",
+                (true, false) => {
+                    return Err(
+                        "task network helper is active while its OS exception is absent".into(),
+                    )
+                }
+                (false, true) => {
+                    return Err("task network helper is unavailable while its OS exception remains; administrator recovery is required".into());
+                }
+                (false, false) => {
+                    for path in task_network_markers(&control_root, profile_name) {
+                        fs::remove_file(path)
+                            .or_else(ignore_not_found)
+                            .map_err(error_text)?;
+                    }
+                    elevate_task_network_helper(profile_name, &control_root, host_pid)?;
+                    if !task_network_helper_alive(&control_root, profile_name)
+                        || !windows_network::loopback_exempt(profile_name)?
+                    {
+                        return Err(
+                            "elevated task network helper did not establish a live boundary".into(),
+                        );
+                    }
+                    "applied"
+                }
+            }
+        }
+        "verify" => {
+            if !control_root.join("revoking").exists()
+                && task_network_helper_alive(&control_root, profile_name)
+                && windows_network::loopback_exempt(profile_name)?
+            {
+                "match"
+            } else {
+                "drift"
+            }
+        }
+        "revoke" => {
+            let was_exempt = windows_network::loopback_exempt(profile_name)?;
+            if task_network_helper_alive(&control_root, profile_name) {
+                let revoke = task_network_markers(&control_root, profile_name)[1].clone();
+                OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&revoke)
+                    .or_else(|error| {
+                        if error.kind() == io::ErrorKind::AlreadyExists {
+                            OpenOptions::new().write(true).open(&revoke)
+                        } else {
+                            Err(error)
+                        }
+                    })
+                    .map_err(error_text)?;
+                let start = Instant::now();
+                while task_network_helper_alive(&control_root, profile_name)
+                    || windows_network::loopback_exempt(profile_name)?
+                {
+                    if start.elapsed().as_secs() >= 20 {
+                        return Err("timed out waiting for task helper to revoke loopback".into());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            }
+            if windows_network::loopback_exempt(profile_name)? {
+                return Err("task helper is unavailable while loopback exemption remains; network is disabled until administrator recovery".into());
+            }
+            delete_appcontainer_profile(profile_name)?;
+            for path in task_network_markers(&control_root, profile_name) {
+                fs::remove_file(path)
+                    .or_else(ignore_not_found)
+                    .map_err(error_text)?;
+            }
+            if was_exempt {
+                "revoked"
+            } else {
+                "no-change"
+            }
+        }
+        _ => unreachable!(),
+    };
+    let output_operation = format!("{operation}-task-network");
+    if json {
+        println!(
+            r#"{{"op":"{output_operation}","result":"{result}","profileName":"{profile_name}"}}"#
+        );
+    } else {
+        println!("{output_operation}: {result} ({profile_name})");
+    }
+    if result == "drift" {
+        return Err("task loopback exception is not prepared".into());
+    }
+    Ok(())
+}
+
+fn run_release_task_network_profile(args: &[String]) -> Result<(), String> {
+    if args.len() != 1 {
+        return Err("usage: --release-task-network-profile NAME".into());
+    }
+    windows_network::validate_profile_name(&args[0])?;
+    if windows_network::loopback_exempt(&args[0])? {
+        return Err("cannot delete task profile while its loopback exemption remains".into());
+    }
+    delete_appcontainer_profile(&args[0])
+}
+
+fn elevate_task_network_helper(
+    profile_name: &str,
+    control_root: &Path,
+    host_pid: u32,
+) -> Result<(), String> {
+    let executable = current_executable()?;
+    let helper = executable
+        .parent()
+        .ok_or("broker executable has no parent directory")?
+        .join("pico-appcontainer-host-prep.exe");
+    assert_not_reparse_point(&helper)?;
+    let helper_text = wide_null(helper.as_os_str());
+    let verb = wide_null("runas");
+    // Profile names are restricted to a fixed ASCII prefix and hexadecimal suffix.
+    let parameters = wide_null(format!(
+        "serve-task-network --profile-name {profile_name} --control-root {} --host-pid {host_pid}",
+        quote_windows_arg(&control_root.to_string_lossy())
+    ));
+    let cwd = wide_null(system_directory()?.as_os_str());
+    let mut info: ShellExecuteInfoW = unsafe { zeroed() };
+    info.cb_size = size_of::<ShellExecuteInfoW>() as u32;
+    info.mask = SEE_MASK_NOCLOSEPROCESS;
+    info.verb = verb.as_ptr();
+    info.file = helper_text.as_ptr();
+    info.parameters = parameters.as_ptr();
+    info.directory = cwd.as_ptr();
+    info.show = 0;
+    if unsafe { ShellExecuteExW(&mut info) } == 0 {
+        let code = unsafe { GetLastError() };
+        if code == ERROR_CANCELLED {
+            return Err("administrator confirmation was cancelled".into());
+        }
+        return Err(format!("ShellExecuteExW(runas) failed: {code}"));
+    }
+    if info.process.is_null() {
+        return Err("elevated helper returned no process handle".into());
+    }
+    let start = Instant::now();
+    loop {
+        if task_network_helper_alive(control_root, profile_name) {
+            unsafe { CloseHandle(info.process) };
+            return Ok(());
+        }
+        let waited = unsafe { WaitForSingleObject(info.process, 100) };
+        if waited == WAIT_OBJECT_0 {
+            let mut exit_code = 1u32;
+            unsafe {
+                GetExitCodeProcess(info.process, &mut exit_code);
+                CloseHandle(info.process);
+            }
+            return Err(format!(
+                "elevated task network helper exited before ready: {exit_code}"
+            ));
+        }
+        if waited != WAIT_TIMEOUT
+            || start.elapsed().as_millis() >= u128::from(UAC_HELPER_TIMEOUT_MS)
+        {
+            // The helper may already have installed the OS exception. Leave it alive so its
+            // Host-lifetime watcher can revoke the exception; never kill it mid-cleanup.
+            unsafe { CloseHandle(info.process) };
+            return Err("elevated task network helper did not become ready".into());
+        }
+    }
+}
+
+fn task_network_markers(control_root: &Path, profile_name: &str) -> [PathBuf; 3] {
+    ["ready", "revoke", "revoked"]
+        .map(|suffix| control_root.join(format!("network-{profile_name}.{suffix}")))
+}
+
+fn task_network_helper_alive(control_root: &Path, profile_name: &str) -> bool {
+    let [ready, _, _] = task_network_markers(control_root, profile_name);
+    if !ready.is_file() || assert_not_reparse_point(&ready).is_err() {
+        return false;
+    }
+    let mutex_name = match windows_network::helper_mutex_name(profile_name) {
+        Ok(name) => name,
+        Err(_) => return false,
+    };
+    let wide = wide_null(mutex_name);
+    let mutex = unsafe { OpenMutexW(SYNCHRONIZE | MUTEX_MODIFY_STATE, 0, wide.as_ptr()) };
+    if mutex.is_null() {
+        return false;
+    }
+    let status = unsafe { WaitForSingleObject(mutex, 0) };
+    if status == WAIT_OBJECT_0 || status == WAIT_ABANDONED {
+        unsafe { ReleaseMutex(mutex) };
+    }
+    unsafe { CloseHandle(mutex) };
+    status == WAIT_TIMEOUT
+}
+
+fn current_executable() -> Result<PathBuf, String> {
+    let mut buffer = vec![0u16; 32_768];
+    let length =
+        unsafe { GetModuleFileNameW(null_mut(), buffer.as_mut_ptr(), buffer.len() as u32) };
+    if length == 0 || length as usize >= buffer.len() {
+        return Err(last_error("GetModuleFileNameW"));
+    }
+    Ok(PathBuf::from(OsString::from_wide(
+        &buffer[..length as usize],
+    )))
+}
+
+fn read_network_receipt(policy: &Policy, source: &Path) -> Result<NetworkReceipt, String> {
+    if policy.control_root.join("revoking").exists() {
+        return Err("task network boundary is being revoked".into());
+    }
+    if policy.origin.as_deref() == Some("file-worker") || policy.metadata_root.is_some() {
+        return Err("File Worker may never receive network authority".into());
+    }
+    if !source.is_absolute()
+        || source.parent() != Some(policy.control_root.as_path())
+        || source.extension().and_then(|value| value.to_str()) != Some("json")
+    {
+        return Err(
+            "network receipt must be a JSON file directly inside the broker control root".into(),
+        );
+    }
+    assert_not_reparse_point(&policy.control_root)?;
+    assert_not_reparse_point(source)?;
+    let metadata = fs::symlink_metadata(source).map_err(error_text)?;
+    if !metadata.is_file() || metadata.len() > 4096 || metadata.len() < 32 {
+        return Err("network receipt is not a valid regular file".into());
+    }
+    let pinned = pin_path(source, false)?;
+    if file_information(&pinned)?.number_of_links != 1 {
+        return Err("network receipt must not have hard links".into());
+    }
+    let contents = fs::read(source).map_err(error_text)?;
+    let value: serde_json::Value = serde_json::from_slice(&contents)
+        .map_err(|error| format!("invalid network receipt JSON: {error}"))?;
+    let object = value
+        .as_object()
+        .ok_or("network receipt must be a JSON object")?;
+    if object.len() != 8 || value.get("schema").and_then(|item| item.as_u64()) != Some(1) {
+        return Err("unsupported network receipt schema".into());
+    }
+    let task_id = value
+        .get("taskId")
+        .and_then(|item| item.as_str())
+        .ok_or("network receipt missing taskId")?;
+    if task_id.is_empty()
+        || task_id.len() > 128
+        || !task_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+    {
+        return Err("network receipt taskId is invalid".into());
+    }
+    if policy.task_id.as_deref() != Some(task_id) {
+        return Err("network receipt taskId mismatch".into());
+    }
+    if value.get("boundaryRevision").and_then(|item| item.as_u64()) != policy.boundary_revision {
+        return Err("network receipt boundary revision mismatch".into());
+    }
+    if value.get("generation").and_then(|item| item.as_u64()) != Some(policy.generation) {
+        return Err("network receipt process generation mismatch".into());
+    }
+    let profile_name = value
+        .get("profileName")
+        .and_then(|item| item.as_str())
+        .ok_or("network receipt missing profileName")?;
+    windows_network::validate_profile_name(profile_name)?;
+    let scope = value
+        .get("scope")
+        .and_then(|item| item.as_str())
+        .ok_or("network receipt missing scope")?;
+    if scope != "session" && scope != "once" {
+        return Err("network receipt scope must be session or once".into());
+    }
+    let ticket = value
+        .get("ticket")
+        .and_then(|item| item.as_str())
+        .ok_or("network receipt missing ticket")?;
+    if ticket.len() != 64
+        || !ticket
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        return Err(
+            "network receipt ticket must contain 64 lowercase hexadecimal characters".into(),
+        );
+    }
+    if source.file_name().and_then(|name| name.to_str()) != Some(&format!("{ticket}.json")) {
+        return Err("network receipt filename does not match its ticket".into());
+    }
+    let expires_at = value
+        .get("expiresAtMs")
+        .and_then(|item| item.as_u64())
+        .ok_or("network receipt missing expiresAtMs")?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(error_text)?
+        .as_millis();
+    if u128::from(expires_at) <= now {
+        return Err("network receipt expired".into());
+    }
+    if !task_network_helper_alive(&policy.control_root, profile_name)
+        || !windows_network::loopback_exempt(profile_name)?
+    {
+        return Err("task network helper or loopback exemption is not prepared".into());
+    }
+    Ok(NetworkReceipt {
+        profile_name: profile_name.into(),
+        scope: scope.into(),
+        source: source.into(),
+        contents,
+    })
+}
+
+fn verify_network_receipt(
+    policy: &Policy,
+    receipt: &NetworkReceipt,
+    consume_once: bool,
+) -> Result<(), String> {
+    let latest = read_network_receipt(policy, &receipt.source)?;
+    if latest.contents != receipt.contents {
+        return Err("network receipt changed before process launch".into());
+    }
+    if consume_once && receipt.scope == "once" {
+        let consumed = receipt.source.with_extension("consumed");
+        if consumed.exists() {
+            return Err("one-shot network receipt was already consumed".into());
+        }
+        fs::rename(&receipt.source, &consumed).map_err(error_text)?;
+    }
+    Ok(())
+}
+
 fn parse_args(args: Vec<String>) -> Result<Policy, String> {
     let separator = args
         .iter()
@@ -686,6 +1209,10 @@ fn parse_args(args: Vec<String>) -> Result<Policy, String> {
     let mut control_root = None;
     let mut metadata_root = None;
     let mut generation = 0;
+    let mut boundary_revision = None;
+    let mut task_id = None;
+    let mut origin = None;
+    let mut network_receipt = None;
     let mut read_roots = Vec::new();
     let mut write_roots = Vec::new();
     let mut read_files = Vec::new();
@@ -703,6 +1230,12 @@ fn parse_args(args: Vec<String>) -> Result<Policy, String> {
             "--control-root" => control_root = Some(PathBuf::from(value)),
             "--metadata-root" => metadata_root = Some(PathBuf::from(value)),
             "--generation" => generation = value.parse().map_err(|_| "invalid generation")?,
+            "--boundary-revision" => {
+                boundary_revision = Some(value.parse().map_err(|_| "invalid boundary revision")?)
+            }
+            "--task-id" => task_id = Some(value.clone()),
+            "--origin" => origin = Some(value.clone()),
+            "--network-receipt" => network_receipt = Some(PathBuf::from(value)),
             "--read-root" => read_roots.push(PathBuf::from(value)),
             "--write-root" => write_roots.push(PathBuf::from(value)),
             "--read-file" => read_files.push(PathBuf::from(value)),
@@ -715,12 +1248,30 @@ fn parse_args(args: Vec<String>) -> Result<Policy, String> {
     if profile != "read-only" && profile != "workspace-write" {
         return Err("broker only accepts restricted profiles".into());
     }
+    if network_receipt.is_some()
+        && (origin.as_deref() == Some("file-worker") || metadata_root.is_some())
+    {
+        return Err("File Worker may never receive network authority".into());
+    }
+    if network_receipt.is_some() && origin.is_none() {
+        return Err("networked broker launch requires an explicit process origin".into());
+    }
+    if network_receipt.is_some() && boundary_revision.is_none() {
+        return Err("networked broker launch requires a boundary revision".into());
+    }
+    if network_receipt.is_some() && task_id.is_none() {
+        return Err("networked broker launch requires a task ID".into());
+    }
     Ok(Policy {
         cwd: cwd.ok_or("missing --cwd")?,
         metadata_root,
         scratch: scratch.ok_or("missing --scratch")?,
         control_root: control_root.ok_or("missing --control-root")?,
         generation,
+        boundary_revision,
+        task_id,
+        origin,
+        network_receipt,
         read_roots,
         write_roots,
         read_files,
@@ -734,6 +1285,7 @@ unsafe fn launch_in_appcontainer(
     policy: &Policy,
     package_sid: Sid,
     target_capability_sid: &str,
+    network_receipt: Option<&NetworkReceipt>,
 ) -> Result<u32, String> {
     let mut attribute_bytes = 0usize;
     InitializeProcThreadAttributeList(null_mut(), 1, 0, &mut attribute_bytes);
@@ -747,9 +1299,15 @@ unsafe fn launch_in_appcontainer(
     }
     let mut allocated_capability_sids: Vec<Sid> = Vec::new();
     let mut capability_entries = Vec::new();
-    // Windows restricted profiles intentionally receive no network capabilities. The only
-    // capability SID is process-specific and exists solely to scope temporary filesystem ACLs.
-    for capability in std::iter::once(target_capability_sid) {
+    // The filesystem SID is per process. Network SIDs are absent unless a current,
+    // task-bound receipt and a verified loopback exception were both present.
+    let mut requested_capabilities = vec![target_capability_sid];
+    if network_receipt.is_some() {
+        // Windows' documented WFP capability SIDs: internetClient and
+        // privateNetworkClientServer. No inbound Internet capability is granted.
+        requested_capabilities.extend(["S-1-15-3-1", "S-1-15-3-3"]);
+    }
+    for capability in requested_capabilities {
         let mut sid = null_mut();
         let wide = wide_null(capability);
         if ConvertStringSidToSidW(wide.as_ptr(), &mut sid) == 0 {
@@ -841,6 +1399,20 @@ unsafe fn launch_in_appcontainer(
         close_process(process);
         return Err(error);
     }
+    if let Some(receipt) = network_receipt {
+        let still_prepared = !policy.control_root.join("revoking").exists()
+            && task_network_helper_alive(&policy.control_root, &receipt.profile_name)
+            && windows_network::loopback_exempt(&receipt.profile_name)?;
+        let still_authorized =
+            receipt.scope == "once" || verify_network_receipt(policy, receipt, false).is_ok();
+        if !still_prepared || !still_authorized {
+            TerminateProcess(process.process, 1);
+            WaitForSingleObject(process.process, INFINITE);
+            CloseHandle(job);
+            close_process(process);
+            return Err("task network authority was revoked before process resume".into());
+        }
+    }
     if ResumeThread(process.thread) == u32::MAX {
         let error = last_error("ResumeThread");
         CloseHandle(job);
@@ -890,6 +1462,13 @@ fn create_or_derive_package_sid(name: &str) -> Result<Sid, String> {
     };
     if result >= 0 {
         return Ok(sid);
+    }
+    // Only an already-registered profile may be derived. Other failures (including
+    // access denied) must never be mistaken for a usable task identity.
+    if result as u32 != 0x8007_00b7 {
+        return Err(format!(
+            "AppContainer profile creation failed: HRESULT 0x{result:08x}"
+        ));
     }
     let derived = unsafe { DeriveAppContainerSidFromAppContainerName(wide.as_ptr(), &mut sid) };
     if derived < 0 || sid.is_null() {

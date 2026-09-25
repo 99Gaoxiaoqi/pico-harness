@@ -103,6 +103,7 @@ test("Desktop cold workflows build the complete dependency chain before invoking
           cwd: root,
         })),
         { args: ["run", "build:file-worker"], cwd: root },
+        { args: ["run", "build:code-intelligence-worker"], cwd: root },
         ...(process.platform === "darwin"
           ? [{ args: ["run", "build:computer-use:mac"], cwd: root }]
           : []),

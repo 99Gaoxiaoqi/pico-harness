@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { constants, realpathSync, type Dirent } from "node:fs";
-import { open, readdir, stat, type FileHandle } from "node:fs/promises";
+import { lstat, open, readdir, realpath, stat, type FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { WorkspaceRoots } from "@pico/pico-host/workspace-roots";
 import type {
@@ -51,6 +51,8 @@ const MAX_SOURCE_BYTES = 1_000_000;
 export const REPO_MAP_MAX_FILES = 200;
 const DEFAULT_SCAN_BATCH = REPO_MAP_MAX_FILES;
 const DEFAULT_RESULT_LIMIT = 100;
+
+class RepoMapStalePathError extends Error {}
 
 export interface RepoMapScanReport {
   /** 本次调用真正尝试读取的工作区相对源码路径，包含读取失败的条目。 */
@@ -154,9 +156,12 @@ export class RepoMapService implements CodeIntelligenceService {
     rootDir: string,
     scanBatchSize = DEFAULT_SCAN_BATCH,
     workspaceRoots = WorkspaceRoots.createSync(rootDir),
+    private readonly preboundPaths = false,
   ) {
     this.workspaceRoots = workspaceRoots;
-    this.rootDir = realpathSync.native(path.resolve(rootDir));
+    this.rootDir = preboundPaths
+      ? path.resolve(rootDir)
+      : realpathSync.native(path.resolve(rootDir));
     this.scanBatchSize = clampMaxFiles(scanBatchSize);
   }
 
@@ -315,6 +320,7 @@ export class RepoMapService implements CodeIntelligenceService {
       reportRepoMapScans([filePath]);
       const file = await this.indexFileUnlocked(filePath, signal).catch((error: unknown) => {
         if (signal?.aborted) throw error;
+        if (error instanceof RepoMapStalePathError) throw error;
         return undefined;
       });
       if (file) indexed.push(file);
@@ -335,7 +341,13 @@ export class RepoMapService implements CodeIntelligenceService {
           output.push(path.relative(this.rootDir, root));
         }
       } else {
-        await collectSourceFiles(this.workspaceRoots, this.rootDir, root, output);
+        await collectSourceFiles(
+          this.workspaceRoots,
+          this.rootDir,
+          root,
+          output,
+          this.preboundPaths,
+        );
       }
     }
     this.discoveredFiles = [...new Set(output)].sort();
@@ -359,7 +371,13 @@ export class RepoMapService implements CodeIntelligenceService {
 
   private async indexFileUnlocked(filePath: string, signal?: AbortSignal): Promise<IndexedFile> {
     throwIfAborted(signal);
+    const lexicalPath = path.resolve(this.rootDir, filePath);
     const absolutePath = await this.workspaceRoots.assertAllowed(filePath);
+    if ((await lstat(lexicalPath)).isSymbolicLink()) {
+      throw new RepoMapStalePathError(`Repo Map 拒绝链接文件: ${filePath}`);
+    }
+    const lexicalIdentity = await targetIdentity(lexicalPath);
+    const targetBefore = await targetIdentity(absolutePath);
     const cached = this.indexedFiles.get(absolutePath);
     const handle = await open(
       absolutePath,
@@ -367,14 +385,25 @@ export class RepoMapService implements CodeIntelligenceService {
     );
     let text: string;
     try {
-      const info = await handle.stat();
+      const info = await handle.stat({ bigint: true });
       if (!info.isFile()) throw new Error(`Repo Map 只能索引普通文件: ${filePath}`);
-      if (info.size > MAX_SOURCE_BYTES) {
+      if (info.size > BigInt(MAX_SOURCE_BYTES)) {
         throw new Error(`Repo Map 跳过超过 ${MAX_SOURCE_BYTES} 字节的文件: ${filePath}`);
       }
       text = await readBoundedUtf8(handle, MAX_SOURCE_BYTES, filePath, signal);
+      const afterRead = await handle.stat({ bigint: true });
+      if (targetIdentityFromInfo(afterRead) !== targetIdentityFromInfo(info)) {
+        throw new RepoMapStalePathError(`Repo Map 读取期间文件身份发生变化: ${filePath}`);
+      }
     } finally {
       await handle.close();
+    }
+    if (
+      (await targetIdentity(lexicalPath)) !== lexicalIdentity ||
+      (await targetIdentity(absolutePath)) !== targetBefore ||
+      (await this.workspaceRoots.assertAllowed(filePath)) !== absolutePath
+    ) {
+      throw new RepoMapStalePathError(`Repo Map 读取期间路径被替换: ${filePath}`);
     }
     if (cached?.text === text) return cached;
     const lines = text.split(/\r?\n/);
@@ -448,6 +477,7 @@ async function collectSourceFiles(
   rootDir: string,
   dir: string,
   output: string[],
+  preboundPaths = false,
 ): Promise<void> {
   let physicalDirectory: string;
   try {
@@ -457,9 +487,20 @@ async function collectSourceFiles(
   }
   let entries: Dirent[];
   try {
+    if ((await lstat(physicalDirectory)).isSymbolicLink()) {
+      throw new RepoMapStalePathError(`Repo Map 拒绝链接目录: ${dir}`);
+    }
+    const before = await targetIdentity(physicalDirectory);
     entries = await readdir(physicalDirectory, { withFileTypes: true });
-  } catch {
-    return;
+    if (
+      (await targetIdentity(physicalDirectory)) !== before ||
+      (!preboundPaths && (await realpath(dir)) !== physicalDirectory)
+    ) {
+      throw new RepoMapStalePathError(`Repo Map 目录身份已变化: ${dir}`);
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
   }
   for (const entry of entries) {
     if (entry.isDirectory()) {
@@ -469,6 +510,7 @@ async function collectSourceFiles(
           rootDir,
           path.join(physicalDirectory, entry.name),
           output,
+          preboundPaths,
         );
       }
       continue;
@@ -477,6 +519,20 @@ async function collectSourceFiles(
       continue;
     output.push(path.relative(rootDir, path.join(physicalDirectory, entry.name)));
   }
+}
+
+function targetIdentityFromInfo(info: {
+  dev: bigint;
+  ino: bigint;
+  size: bigint;
+  mtimeNs: bigint;
+  ctimeNs: bigint;
+}): string {
+  return `${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`;
+}
+
+async function targetIdentity(filePath: string): Promise<string> {
+  return targetIdentityFromInfo(await lstat(filePath, { bigint: true }));
 }
 
 async function readBoundedUtf8(

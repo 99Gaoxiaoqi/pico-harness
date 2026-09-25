@@ -14,6 +14,8 @@ export interface LspServerConfig {
 
 export interface LspServerDiscoveryOptions {
   readonly rootDir: string;
+  /** Restricted sessions obtain this listing from the read-only Worker. */
+  readonly workspaceEntries?: readonly string[];
   /** 项目/宿主显式配置永远优先于 PATH 自动发现。 */
   readonly configuredServers?: readonly LspServerConfig[];
   readonly pathEnv?: string;
@@ -73,7 +75,9 @@ export async function discoverLspServer(
     }
   }
 
-  const entries = new Set(await safeDirectoryEntries(options.rootDir));
+  const entries = new Set(
+    options.workspaceEntries ?? (await safeDirectoryEntries(options.rootDir)),
+  );
   for (const known of KNOWN_SERVERS) {
     if (!known.markers.some((marker) => entries.has(marker))) continue;
     const executable = await resolveExecutable(known.command, options.pathEnv);

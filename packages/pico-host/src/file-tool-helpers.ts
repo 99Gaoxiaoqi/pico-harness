@@ -45,7 +45,7 @@ export function workspaceRootsFrom(input: string | WorkspaceRoots): WorkspaceRoo
  * 防止父目录在 mkdir / 原子写中间窗口被替换为越界符号链接。
  */
 export function assertSameResolvedTarget(
-  roots: WorkspaceRoots,
+  roots: Pick<WorkspaceRoots, "resolveUnchecked">,
   requestedPath: string,
   expectedPath: string,
 ): void {

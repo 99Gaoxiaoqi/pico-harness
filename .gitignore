@@ -22,6 +22,8 @@ resources/file-worker/file-worker.mjs
 resources/file-worker/file-worker.mjs.sha256
 resources/file-worker/windows-file-commit-entry.mjs
 resources/file-worker/windows-file-commit-entry.mjs.sha256
+resources/code-intelligence-worker/worker.mjs
+resources/code-intelligence-worker/worker.mjs.sha256
 
 # Test and browser automation output
 coverage/

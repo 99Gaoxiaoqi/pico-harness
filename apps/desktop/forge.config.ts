@@ -40,6 +40,7 @@ const config = {
       desktopAssetPath("icon.png"),
       "../../resources/sandbox",
       "../../resources/file-worker",
+      "../../resources/code-intelligence-worker",
       "../../resources/computer-use",
       "../../resources/licenses",
     ],

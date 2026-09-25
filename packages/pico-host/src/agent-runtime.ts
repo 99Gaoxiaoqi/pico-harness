@@ -44,7 +44,7 @@ import {
   reconcilePlanExecution,
 } from "@pico/pico-host/product-plan-execution-recovery";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, realpath } from "node:fs/promises";
+import { mkdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { AgentEngine, isPlanProviderTool } from "@pico/pico-host/agent-engine";
@@ -152,7 +152,13 @@ import {
 } from "@pico/pico-host/input/session-settings";
 import { createIsolatedPicoConfig, loadPicoProjectConfig } from "@pico/pico-host/input/pico-config";
 import { hasExplicitNetworkIntent } from "@pico/pico-host/workspace-sandbox";
-import { createSandboxPolicy, normalizeRoots } from "@pico/pico-host/process-sandbox";
+import {
+  createSandboxPolicy,
+  managedProcessLauncher,
+  normalizeRoots,
+  WindowsTaskNetworkAuthority,
+  windowsTaskNetworkControlRoot,
+} from "@pico/pico-host/process-sandbox";
 import { compileRuntimeProcessSandbox } from "@pico/pico-host/runtime-process-sandbox";
 import {
   applyExecutionBoundaryExpansion,
@@ -1231,27 +1237,67 @@ export async function executeAgentRuntime(
     applyExecutionBoundaryToWorkspaceRoots(workspaceRoots, runtimeExecutionBoundary());
     setSessionAdditionalDirectories(settings, workspaceRoots.list().slice(1));
     const processSandboxScratchRoot = join(picoHome, "sandboxes", session.id);
+    const windowsNetworkAuthority =
+      process.platform === "win32"
+        ? new WindowsTaskNetworkAuthority(
+            session.id,
+            windowsTaskNetworkControlRoot(picoHome, session.id),
+          )
+        : undefined;
+    let sessionWindowsNetworkReceipt: string | undefined;
+    let sessionWindowsReceiptGeneration: number | undefined;
+    const oneShotWindowsNetworkReceipts = new Map<string, string>();
     const currentMainProcessSandbox = (): NonNullable<
       DefaultToolRegistryOptions["processSandbox"]
     > => {
+      let descriptor: ReturnType<typeof compileRuntimeProcessSandbox>;
       if (backgroundPolicy) {
-        return compileRuntimeProcessSandbox({
+        descriptor = compileRuntimeProcessSandbox({
           workspaceGeneration: workspaceRoots.generation(),
           scratchRoot: processSandboxScratchRoot,
           backgroundNetworkPolicy: backgroundPolicy.snapshot.toolNetworkPolicy,
         });
+      } else {
+        const executionBoundary = runtimeExecutionBoundary();
+        descriptor = compileRuntimeProcessSandbox({
+          collaborationMode: collaborationMode(),
+          workspaceGeneration: workspaceRoots.generation(),
+          scratchRoot: processSandboxScratchRoot,
+          networkEnabled:
+            !dependencies.configuredSubagentChild &&
+            globalSessionPermissionGrants.allowsNetwork(session.id, workDir, session.picoHome),
+          executionBoundary,
+        });
       }
-      const executionBoundary = runtimeExecutionBoundary();
-      return compileRuntimeProcessSandbox({
-        collaborationMode: collaborationMode(),
-        workspaceGeneration: workspaceRoots.generation(),
-        scratchRoot: processSandboxScratchRoot,
-        networkEnabled:
-          !dependencies.configuredSubagentChild &&
-          globalSessionPermissionGrants.allowsNetwork(session.id, workDir, session.picoHome),
-        executionBoundary,
-      });
+      return {
+        ...descriptor,
+        ...(windowsNetworkAuthority
+          ? {
+              windowsTaskId: session.id,
+              windowsControlRoot: windowsNetworkAuthority.controlRoot,
+            }
+          : {}),
+        ...(descriptor.profile !== "danger-full-access" &&
+        descriptor.config?.network === "allow" &&
+        sessionWindowsNetworkReceipt
+          ? { windowsNetworkReceipt: sessionWindowsNetworkReceipt }
+          : {}),
+      };
     };
+    if (windowsNetworkAuthority) {
+      const initial = currentMainProcessSandbox();
+      if (initial.profile !== "danger-full-access" && initial.config?.network === "allow") {
+        if (!(await windowsNetworkAuthority.verify())) {
+          throw new Error("Windows 任务联网准备状态缺失；请在交互任务中重新批准并完成管理员确认。");
+        }
+        sessionWindowsNetworkReceipt = await windowsNetworkAuthority.issueReceipt({
+          boundaryRevision: runtimeExecutionBoundary()?.revision ?? 0,
+          generation: initial.generation ?? 0,
+          scope: "session",
+        });
+        sessionWindowsReceiptGeneration = initial.generation;
+      }
+    }
     const traceEnabled = options.trace === true || isTruthyEnv(runtimeEnv.PICO_TRACE);
     const effectiveOptions: RunAgentCliOptions = {
       ...options,
@@ -1327,6 +1373,10 @@ export async function executeAgentRuntime(
         env: runtimeEnv,
         picoHome,
       });
+    const sessionSkillLoader = skillLoaderFactory(workDir);
+    if (collaborationMode() === "agent" && currentMainProcessSandbox().bypass !== true) {
+      await sessionSkillLoader.snapshot();
+    }
 
     // 阶段 3：装配 Provider、工具、Hook 与 AgentEngine 能力图。
     // headless/folder 装配不注入 taskHostRuntime：提前创建独立 usage ledger。
@@ -1569,6 +1619,7 @@ export async function executeAgentRuntime(
     };
     const ensureDurableNetworkBoundary = async (): Promise<boolean> => {
       if (dependencies.configuredSubagentChild) return false;
+      if (windowsNetworkAuthority) await windowsNetworkAuthority.prepare();
       let changed = false;
       await session.withSerializedExecution(async () => {
         const current = session.getRuntimeStateSnapshot().boundary;
@@ -1582,6 +1633,20 @@ export async function executeAgentRuntime(
           executionBoundaryContext(),
         );
         if (applied.outcome !== "applied") return;
+        if (windowsNetworkAuthority) {
+          const nextProcess = compileRuntimeProcessSandbox({
+            collaborationMode: collaborationMode(),
+            workspaceGeneration: workspaceRoots.generation(),
+            scratchRoot: processSandboxScratchRoot,
+            executionBoundary: applied.boundary,
+          });
+          sessionWindowsNetworkReceipt = await windowsNetworkAuthority.issueReceipt({
+            boundaryRevision: applied.boundary.revision,
+            generation: nextProcess.generation,
+            scope: "session",
+          });
+          sessionWindowsReceiptGeneration = nextProcess.generation;
+        }
         session.updateRuntimeState({ boundary: applied.boundary });
         await session.flushPersistence();
         changed = true;
@@ -1648,15 +1713,24 @@ export async function executeAgentRuntime(
         ...(input.deferMcpRefresh ? {} : { sessionScope: { type: "network" as const } }),
       });
       if (!result.allowed) return false;
-      if (
-        result.allowForSession &&
-        !input.deferMcpRefresh &&
-        !dependencies.configuredSubagentChild
-      ) {
-        globalSessionPermissionGrants.addNetwork(session.id, workDir, session.picoHome);
-        if (await ensureDurableNetworkBoundary()) {
-          await refreshRuntimeBoundary();
+      try {
+        if (windowsNetworkAuthority) await windowsNetworkAuthority.prepare();
+        if (
+          result.allowForSession &&
+          !input.deferMcpRefresh &&
+          !dependencies.configuredSubagentChild
+        ) {
+          if (await ensureDurableNetworkBoundary()) {
+            await refreshRuntimeBoundary();
+          }
+          globalSessionPermissionGrants.addNetwork(session.id, workDir, session.picoHome);
         }
+      } catch (error) {
+        logger.warn(
+          { error: error instanceof Error ? error.message : String(error) },
+          "Windows 任务联网准备未完成，已拒绝本次授权",
+        );
+        return false;
       }
       return true;
     };
@@ -1836,10 +1910,56 @@ export async function executeAgentRuntime(
       ...(mainProcessSandbox.generation !== undefined
         ? { generation: mainProcessSandbox.generation }
         : {}),
+      ...(mainProcessSandbox.boundaryRevision !== undefined
+        ? { boundaryRevision: mainProcessSandbox.boundaryRevision }
+        : {}),
+      ...(mainProcessSandbox.windowsNetworkReceipt
+        ? { windowsNetworkReceipt: mainProcessSandbox.windowsNetworkReceipt }
+        : {}),
+      ...(mainProcessSandbox.windowsTaskId
+        ? { windowsTaskId: mainProcessSandbox.windowsTaskId }
+        : {}),
+      ...(mainProcessSandbox.windowsControlRoot
+        ? { windowsControlRoot: mainProcessSandbox.windowsControlRoot }
+        : {}),
     });
+    if (backgroundPolicy && windowsNetworkAuthority && mainProcessPolicy.network === "allow") {
+      backgroundPolicy.hookRunner?.bindProcessSandbox?.(mainProcessPolicy);
+    }
     refreshRuntimeBoundary = async ({ updateMcp = true } = {}) => {
       applyExecutionBoundaryToWorkspaceRoots(workspaceRoots, runtimeExecutionBoundary());
       const roots = workspaceRoots.list();
+      if (windowsNetworkAuthority) {
+        const next = currentMainProcessSandbox();
+        if (next.profile !== "danger-full-access" && next.config?.network === "allow") {
+          if (
+            sessionWindowsReceiptGeneration !== next.generation ||
+            !sessionWindowsNetworkReceipt
+          ) {
+            sessionWindowsNetworkReceipt = await windowsNetworkAuthority.issueReceipt({
+              boundaryRevision: next.boundaryRevision ?? 0,
+              generation: next.generation ?? 0,
+              scope: "session",
+            });
+            sessionWindowsReceiptGeneration = next.generation;
+          }
+        } else if (
+          sessionWindowsNetworkReceipt ||
+          oneShotWindowsNetworkReceipts.size > 0 ||
+          (await windowsNetworkAuthority.hasPreparationState())
+        ) {
+          managedProcessLauncher.blockWindowsNetworkTask(windowsNetworkAuthority.controlRoot);
+          await windowsNetworkAuthority.blockNewLaunches();
+          await managedProcessLauncher.terminateWindowsNetworkProcesses(
+            windowsNetworkAuthority.receiptDirectory,
+          );
+          await windowsNetworkAuthority.revoke();
+          sessionWindowsNetworkReceipt = undefined;
+          sessionWindowsReceiptGeneration = undefined;
+          oneShotWindowsNetworkReceipts.clear();
+          managedProcessLauncher.unblockWindowsNetworkTask(windowsNetworkAuthority.controlRoot);
+        }
+      }
       mainProcessSandbox = currentMainProcessSandbox();
       mainProcessPolicy = createSandboxPolicy({
         profile: mainProcessSandbox.profile,
@@ -1847,6 +1967,18 @@ export async function executeAgentRuntime(
         scratchRoot: mainProcessSandbox.scratchRoot ?? processSandboxScratchRoot,
         ...(mainProcessSandbox.generation !== undefined
           ? { generation: mainProcessSandbox.generation }
+          : {}),
+        ...(mainProcessSandbox.boundaryRevision !== undefined
+          ? { boundaryRevision: mainProcessSandbox.boundaryRevision }
+          : {}),
+        ...(mainProcessSandbox.windowsNetworkReceipt
+          ? { windowsNetworkReceipt: mainProcessSandbox.windowsNetworkReceipt }
+          : {}),
+        ...(mainProcessSandbox.windowsTaskId
+          ? { windowsTaskId: mainProcessSandbox.windowsTaskId }
+          : {}),
+        ...(mainProcessSandbox.windowsControlRoot
+          ? { windowsControlRoot: mainProcessSandbox.windowsControlRoot }
           : {}),
         ...(mainProcessSandbox.config ? { config: mainProcessSandbox.config } : {}),
         ...(mainProcessSandbox.readRoots ? { readRoots: mainProcessSandbox.readRoots } : {}),
@@ -1918,6 +2050,37 @@ export async function executeAgentRuntime(
               };
             }
 
+            let preparedWindowsReceipt: string | undefined;
+            let preparedWindowsGeneration: number | undefined;
+            if (
+              windowsNetworkAuthority &&
+              assessment.boundary.kind === "managed" &&
+              assessment.boundary.profile.network.kind === "enabled"
+            ) {
+              try {
+                await windowsNetworkAuthority.prepare();
+                const prepared = compileRuntimeProcessSandbox({
+                  collaborationMode: collaborationMode(),
+                  workspaceGeneration: workspaceRoots.generation(),
+                  scratchRoot: processSandboxScratchRoot,
+                  executionBoundary: assessment.boundary,
+                });
+                preparedWindowsGeneration = prepared.generation;
+                preparedWindowsReceipt = await windowsNetworkAuthority.issueReceipt({
+                  boundaryRevision: assessment.boundary.revision,
+                  generation: prepared.generation,
+                  scope: "session",
+                });
+              } catch (error) {
+                return {
+                  status: "denied",
+                  requestId: approvalId,
+                  boundaryRevision: base.revision,
+                  reason: `Windows 联网系统准备失败：${error instanceof Error ? error.message : String(error)}`,
+                };
+              }
+            }
+
             let settlement:
               | { status: "applied"; boundaryRevision: number }
               | { status: "noop"; boundaryRevision: number }
@@ -1950,6 +2113,10 @@ export async function executeAgentRuntime(
                 settlement = { status: "noop", boundaryRevision: applied.boundary.revision };
                 return;
               }
+              if (preparedWindowsReceipt) {
+                sessionWindowsNetworkReceipt = preparedWindowsReceipt;
+                sessionWindowsReceiptGeneration = preparedWindowsGeneration;
+              }
               session.updateRuntimeState({ boundary: applied.boundary });
               await session.flushPersistence();
               settlement = { status: "applied", boundaryRevision: applied.boundary.revision };
@@ -1979,13 +2146,21 @@ export async function executeAgentRuntime(
         // Process-backed tools must sample the new descriptor at invocation
         // time instead of retaining the registry-construction snapshot.
         resolveSandbox: currentMainProcessSandbox,
-        consumeNetworkAuthorization: (toolCallId) =>
-          globalSessionPermissionGrants.consumeNetworkAuthorization(
+        consumeNetworkAuthorization: (toolCallId) => {
+          const authorized = globalSessionPermissionGrants.consumeNetworkAuthorization(
             session.id,
             workDir,
             toolCallId,
             session.picoHome,
-          ),
+          );
+          if (!authorized) return false;
+          if (!windowsNetworkAuthority) return true;
+          return (
+            (toolCallId ? oneShotWindowsNetworkReceipts.get(toolCallId) : undefined) ??
+            sessionWindowsNetworkReceipt ??
+            false
+          );
+        },
       },
       activeHookService
         ? async (skill) => {
@@ -2001,7 +2176,7 @@ export async function executeAgentRuntime(
             });
           }
         : undefined,
-      skillLoaderFactory(workDir),
+      sessionSkillLoader,
       runtimeEnv,
       dependencies.bashTimeoutMs,
       collaborationMode() === "plan" || activeExecutionPlanId ? planRegistryOptions : undefined,
@@ -2020,6 +2195,7 @@ export async function executeAgentRuntime(
             revision,
           }),
       },
+      (generation) => runtimeState.codeIntelligenceManager.canRunManagedReads(generation),
       session.runtimeEventStore
         ? bindToolResultArchiveReader(session.runtimeEventStore, session.id)
         : undefined,
@@ -2320,7 +2496,7 @@ export async function executeAgentRuntime(
           orchestrationMode() !== "default" &&
           dependencies.agentGraph?.kind === "root",
         swarmMode: orchestrationMode() === "swarm",
-        skillLoader: skillLoaderFactory(workDir),
+        skillLoader: sessionSkillLoader,
         ...(dependencies.isolatedHeadless ? {} : { picoHome }),
         ...(activeHookService
           ? {
@@ -2539,12 +2715,30 @@ export async function executeAgentRuntime(
               }
               await refreshRuntimeBoundary();
             },
+            onApprovedProcessNetwork: async (call, scope) => {
+              if (!windowsNetworkAuthority) return;
+              await windowsNetworkAuthority.prepare();
+              if (scope === "session") {
+                if (await ensureDurableNetworkBoundary()) await refreshRuntimeBoundary();
+              } else {
+                const current = currentMainProcessSandbox();
+                const receipt = await windowsNetworkAuthority.issueReceipt({
+                  boundaryRevision: current.boundaryRevision ?? 0,
+                  generation: current.generation ?? 0,
+                  scope: "once",
+                });
+                oneShotWindowsNetworkReceipts.set(call.id, receipt);
+              }
+            },
             onOneShotMcpAuthorization: async (call, directories) => {
               oneShotMcpCalls.add(call.id);
               oneShotRemoteMcpCalls.add(call.id);
               await activeMcpManager?.restartStdioServerForTool(call.name, {
                 ...mainProcessPolicy,
                 network: "allow",
+                ...(oneShotWindowsNetworkReceipts.get(call.id)
+                  ? { windowsNetworkReceipt: oneShotWindowsNetworkReceipts.get(call.id)! }
+                  : {}),
                 readRoots: normalizeRoots([...mainProcessPolicy.readRoots, ...directories]),
                 writeRoots: normalizeRoots([...mainProcessPolicy.writeRoots, ...directories]),
               });
@@ -2566,8 +2760,14 @@ export async function executeAgentRuntime(
         } finally {
           oneShotRemoteMcpCalls.delete(call.id);
           admittedHookMcpCalls.delete(call.id);
-          if (oneShotMcpCalls.delete(call.id)) {
-            await activeMcpManager?.restartStdioServerForTool(call.name);
+          try {
+            if (oneShotMcpCalls.delete(call.id)) {
+              await activeMcpManager?.restartStdioServerForTool(call.name);
+            }
+          } finally {
+            const receipt = oneShotWindowsNetworkReceipts.get(call.id);
+            oneShotWindowsNetworkReceipts.delete(call.id);
+            if (receipt) await rm(receipt, { force: true });
           }
         }
       });
@@ -2716,6 +2916,7 @@ export async function executeAgentRuntime(
                         backgroundPolicy.allowedToolNetworkHosts,
                         join(processSandboxScratchRoot, "background-mcp", config.name),
                         logger,
+                        windowsNetworkAuthority ? mainProcessPolicy : undefined,
                       ),
                   }
                 : {}),
@@ -3310,6 +3511,7 @@ function buildRegistry(
   sessionTasks?: DefaultToolRegistryOptions["sessionTasks"],
   requestSandboxBoundaryHandler?: RequestSandboxBoundaryHandler,
   sessionArtifacts?: DefaultToolRegistryOptions["sessionArtifacts"],
+  canRunManagedCodeIntelligence?: DefaultToolRegistryOptions["canRunManagedCodeIntelligence"],
   toolResultArchive?: DefaultToolRegistryOptions["toolResultArchive"],
 ): ToolRegistry {
   return buildDefaultToolRegistry(workDir, {
@@ -3333,6 +3535,7 @@ function buildRegistry(
     ...(onToolGroupLoaded !== undefined ? { onToolGroupLoaded } : {}),
     ...(sessionTasks !== undefined ? { sessionTasks } : {}),
     ...(sessionArtifacts !== undefined ? { sessionArtifacts } : {}),
+    ...(canRunManagedCodeIntelligence !== undefined ? { canRunManagedCodeIntelligence } : {}),
     ...(requestSandboxBoundaryHandler !== undefined ? { requestSandboxBoundaryHandler } : {}),
   });
 }
@@ -3549,6 +3752,7 @@ export function buildPermissionMiddleware(
       call: ToolCall,
       externalDirectories: readonly string[],
     ) => Promise<void>;
+    onApprovedProcessNetwork?: (call: ToolCall, scope: "session" | "once") => Promise<void>;
     allowSessionGrants?: boolean;
     /** Hard ceiling for a configured child; human approval cannot widen it. */
     executionBoundaryCeiling?: ExecutionBoundary;
@@ -3736,6 +3940,21 @@ export function buildPermissionMiddleware(
     }
     if (!result.allowed || !workspaceRoots || !settings) {
       return result.allowed ? result : { ...result, denialSource: "human" };
+    }
+
+    if (callRequiresProcessNetwork(call)) {
+      try {
+        await options.onApprovedProcessNetwork?.(
+          call,
+          result.allowForSession && allowSessionGrants ? "session" : "once",
+        );
+      } catch (error) {
+        return {
+          allowed: false,
+          reason: `联网系统准备失败：${error instanceof Error ? error.message : String(error)}`,
+          denialSource: "permission",
+        };
+      }
     }
 
     if (result.allowForSession && allowSessionGrants) {

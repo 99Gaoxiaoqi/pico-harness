@@ -39,6 +39,7 @@ test("foreground subprocesses compile only from the durable execution boundary",
       bypass: true,
       scratchRoot,
       generation: 35,
+      boundaryRevision: 0,
     },
   );
 });
@@ -57,6 +58,7 @@ test("Plan remains read-only even when full access or a network grant is selecte
     config: { network: "deny" },
     scratchRoot,
     generation: 33,
+    boundaryRevision: 0,
   });
 });
 
@@ -134,6 +136,7 @@ test("background jobs keep their frozen network boundary", () => {
         config: { network: "deny" },
         scratchRoot,
         generation: 20,
+        boundaryRevision: 0,
       },
     );
   }
@@ -149,6 +152,7 @@ test("background jobs keep their frozen network boundary", () => {
       config: { network: "allow" },
       scratchRoot,
       generation: 21,
+      boundaryRevision: 0,
     },
   );
 });

@@ -44,7 +44,10 @@ export interface FileWorkerSandboxDescriptor {
 }
 
 export interface FileWorkerToolOptions {
-  readonly roots: WorkspaceRoots;
+  readonly roots: Pick<
+    WorkspaceRoots,
+    "assertAllowed" | "generation" | "list" | "boundarySnapshot" | "resolveUnchecked"
+  >;
   readonly workDir: string;
   readonly resolveSandbox: () => FileWorkerSandboxDescriptor;
   readonly artifacts?: BoundSessionArtifactAuthority;
@@ -362,7 +365,7 @@ export class FileWorkerTool implements BaseTool {
 
 /** Node path-based mkdir cannot exclude a concurrent parent-link swap; fail closed. */
 async function assertManagedParentDirectory(
-  roots: WorkspaceRoots,
+  roots: Pick<WorkspaceRoots, "resolveUnchecked">,
   requestedPath: string,
   expectedPath: string,
 ): Promise<void> {
@@ -388,7 +391,7 @@ function within(root: string, path: string): boolean {
   return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 
-async function fileTargetIdentity(path: string): Promise<FileTargetIdentity> {
+export async function fileTargetIdentity(path: string): Promise<FileTargetIdentity> {
   try {
     const info = await lstat(path, { bigint: true });
     if (!info.isFile() && !info.isDirectory()) throw new Error(`目标不是普通文件或目录: ${path}`);
@@ -406,7 +409,7 @@ async function fileTargetIdentity(path: string): Promise<FileTargetIdentity> {
   }
 }
 
-async function runFileWorker(
+export async function runFileWorker(
   request: FileWorkerRequest,
   writablePaths: readonly string[],
   signal?: AbortSignal,
@@ -592,7 +595,7 @@ async function runFileWorker(
   });
 }
 
-async function canonicalizePossiblyMissing(path: string): Promise<string> {
+export async function canonicalizePossiblyMissing(path: string): Promise<string> {
   const absolute = resolve(path);
   let ancestor = absolute;
   for (;;) {

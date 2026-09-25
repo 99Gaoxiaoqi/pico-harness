@@ -406,7 +406,7 @@ test("managed worker refuses mutable runtime code inside the task workspace", as
   );
 });
 
-test("managed mode closes host-side repo map and skill reads", async (context) => {
+test("managed mode closes unprepared host-side code and skill reads", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-file-worker-host-read-"));
   context.after(() => rm(root, { recursive: true, force: true }));
   const workspace = join(root, "workspace");
@@ -416,9 +416,12 @@ test("managed mode closes host-side repo map and skill reads", async (context) =
     processSandbox: { profile: "workspace-write", generation: 1 },
     codeIntelligence: new RepoMapService(workspace),
   });
-  for (const name of ["repo_map", "code_definition", "skill_view"]) {
+  for (const name of ["repo_map", "code_definition"]) {
     const tool = registry.getTool(name);
     assert.ok(tool, name);
     await assert.rejects(tool.execute("{}"), /仍需宿主直接读取工作区/u);
   }
+  const skill = registry.getTool("skill_view");
+  assert.ok(skill);
+  await assert.rejects(skill.execute('{"name":"unprepared"}'), /技能目录尚未建立/u);
 });

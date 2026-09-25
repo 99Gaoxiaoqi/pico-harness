@@ -4,7 +4,8 @@ export type FileWorkerOperation =
   | "edit_file"
   | "glob"
   | "grep"
-  | "explore_repo";
+  | "explore_repo"
+  | "skill_view";
 
 export interface FileTargetIdentity {
   readonly kind: "missing" | "file" | "directory";

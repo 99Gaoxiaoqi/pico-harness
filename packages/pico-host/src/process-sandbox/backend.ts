@@ -104,12 +104,23 @@ export function buildManagedSpawnPlan(request: ManagedSpawnRequest): SandboxSpaw
       };
     case "windows-appcontainer": {
       const controlRoot =
-        request.controlRoot ?? resolve(dirname(policy.scratchRoot), ".windows-broker-control");
+        request.controlRoot ??
+        policy.windowsControlRoot ??
+        resolve(dirname(policy.scratchRoot), ".windows-broker-control");
       if (policy.readRoots.some((root) => isWithinRoot(root, controlRoot))) {
         throw new SandboxViolationError(
           "policy_compilation_failed",
           "Windows Broker 控制目录不得对目标进程可见。",
         );
+      }
+      if (policy.network === "allow" && !policy.windowsNetworkReceipt) {
+        throw new SandboxViolationError(
+          "sandbox_unavailable",
+          "Windows 受限进程缺少当前任务的联网准备凭据，已拒绝启动。",
+        );
+      }
+      if (request.origin === "file-worker" && policy.network !== "deny") {
+        throw new SandboxViolationError("network_denied", "File Worker 始终禁止联网。");
       }
       return {
         backend,
@@ -121,6 +132,7 @@ export function buildManagedSpawnPlan(request: ManagedSpawnRequest): SandboxSpaw
           request.cwd,
           controlRoot,
           request.origin === "file-worker" ? request.cwd : undefined,
+          request.origin,
         ),
         env,
         sandboxed: true,
@@ -139,6 +151,7 @@ export function buildWindowsBrokerArgs(
   cwd: string,
   controlRoot = resolve(dirname(policy.scratchRoot), ".windows-broker-control"),
   metadataRoot?: string,
+  origin?: ManagedSpawnRequest["origin"],
 ): string[] {
   const result = [
     "--profile",
@@ -152,6 +165,21 @@ export function buildWindowsBrokerArgs(
     "--control-root",
     controlRoot,
   ];
+  if (origin) result.push("--origin", origin);
+  if (policy.network === "allow") {
+    if (!policy.windowsNetworkReceipt) {
+      throw new SandboxViolationError("sandbox_unavailable", "Windows 联网凭据缺失。");
+    }
+    if (policy.boundaryRevision === undefined) {
+      throw new SandboxViolationError("sandbox_unavailable", "Windows 联网边界版本缺失。");
+    }
+    if (!policy.windowsTaskId) {
+      throw new SandboxViolationError("sandbox_unavailable", "Windows 联网任务标识缺失。");
+    }
+    result.push("--network-receipt", policy.windowsNetworkReceipt);
+    result.push("--boundary-revision", String(policy.boundaryRevision));
+    result.push("--task-id", policy.windowsTaskId);
+  }
   for (const root of policy.readRoots) result.push("--read-root", root);
   for (const root of policy.writeRoots) result.push("--write-root", root);
   for (const path of policy.readFiles ?? []) result.push("--read-file", path);

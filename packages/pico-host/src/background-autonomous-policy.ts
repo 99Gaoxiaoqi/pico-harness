@@ -32,6 +32,7 @@ import {
   defaultSandboxScratchRoot,
   managedProcessLauncher,
   type ManagedSpawnRequest,
+  type SandboxPolicy,
 } from "@pico/pico-host/process-sandbox";
 import { resolveShell, shellCommandArgs } from "@pico/runtime/host-shell";
 import {
@@ -71,6 +72,7 @@ export interface PreparedBackgroundAutonomousPolicy {
 }
 
 export interface BackgroundHookRunner {
+  bindProcessSandbox?(policy: SandboxPolicy): void;
   runPreToolUse(toolName: string, toolInput: unknown, sessionId: string): Promise<StrictHookResult>;
   runPostToolResult(
     toolName: string,
@@ -493,6 +495,12 @@ export class StrictBackgroundHookRunner {
           });
         }
       }
+    }
+  }
+
+  bindProcessSandbox(policy: SandboxPolicy): void {
+    for (const [handler, request] of this.plans) {
+      this.plans.set(handler, { ...request, policy });
     }
   }
 

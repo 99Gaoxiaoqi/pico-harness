@@ -485,6 +485,7 @@ function createHookExecutor(
       profile,
       workspaceRoots: [fixture.workspace],
       scratchRoot: join(fixture.root, "sandbox-scratch"),
+      config: { network: "deny" },
     }),
   });
 }

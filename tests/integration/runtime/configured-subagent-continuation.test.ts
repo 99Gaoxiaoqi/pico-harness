@@ -614,11 +614,12 @@ test("managed configured child freezes its physical boundary for the admitted Ru
 
     assert.equal(result.finalMessage, "Escape remained sandboxed");
     assert.equal(providerCalls, 2);
-    assert.equal(launches.length, 1);
-    assert.equal(launches[0]?.policy.profile, "workspace-write");
-    assert.equal(launches[0]?.policy.network, "deny");
+    const commandLaunches = launches.filter((request) => request.origin !== "file-worker");
+    assert.equal(commandLaunches.length, 1);
+    assert.equal(commandLaunches[0]?.policy.profile, "workspace-write");
+    assert.equal(commandLaunches[0]?.policy.network, "deny");
     assert.equal(
-      launches[0]?.policy.writeRoots.some((root) => target.startsWith(root)),
+      commandLaunches[0]?.policy.writeRoots.some((root) => target.startsWith(root)),
       false,
     );
     await assert.rejects(readFile(target), { code: "ENOENT" });

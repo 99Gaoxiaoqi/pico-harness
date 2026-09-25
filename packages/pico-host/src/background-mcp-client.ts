@@ -7,7 +7,11 @@ import {
   normalizeExactHostname,
   type ToolNetworkPolicy,
 } from "@pico/core/background-autonomous-policy-schema";
-import { createSandboxPolicy, defaultSandboxScratchRoot } from "@pico/pico-host/process-sandbox";
+import {
+  createSandboxPolicy,
+  defaultSandboxScratchRoot,
+  type SandboxPolicy,
+} from "@pico/pico-host/process-sandbox";
 
 export function createBackgroundMcpClient(
   config: McpServerConfig,
@@ -16,6 +20,7 @@ export function createBackgroundMcpClient(
   allowedHosts: ReadonlySet<string>,
   scratchRoot?: string,
   diagnostics?: McpClientDiagnostics,
+  processSandbox?: SandboxPolicy,
 ): McpClient {
   const secured = secureBackgroundMcpServerConfig(
     config,
@@ -26,12 +31,14 @@ export function createBackgroundMcpClient(
   );
   return secured.transport === "stdio"
     ? new StdioMcpClient(secured, {
-        processSandbox: createSandboxPolicy({
-          profile: "workspace-write",
-          workspaceRoots: [workspacePath],
-          scratchRoot: scratchRoot ?? defaultSandboxScratchRoot(workspacePath),
-          config: { network: networkPolicy === "allow" ? "allow" : "deny" },
-        }),
+        processSandbox:
+          processSandbox ??
+          createSandboxPolicy({
+            profile: "workspace-write",
+            workspaceRoots: [workspacePath],
+            scratchRoot: scratchRoot ?? defaultSandboxScratchRoot(workspacePath),
+            config: { network: networkPolicy === "allow" ? "allow" : "deny" },
+          }),
         ...(diagnostics ? { diagnostics } : {}),
       })
     : new HttpMcpClient(secured, diagnostics ? { diagnostics } : {});

@@ -76,6 +76,25 @@ async function execute(request: FileWorkerRequest): Promise<FileWorkerResponse> 
     throw new Error("无效的任务边界版本");
   }
   await verifyBindings(request);
+  if (request.operation === "skill_view") {
+    const target = request.targets[0];
+    const input = JSON.parse(request.args) as { path?: unknown };
+    if (
+      request.targets.length !== 1 ||
+      target?.identity.kind !== "file" ||
+      input.path !== target.path
+    ) {
+      throw new Error("File Worker 技能读取目标与授权目标不一致");
+    }
+    const snapshot = await readBoundedFileSnapshot(target.path, 256 * 1024, target.path);
+    await verifyBindings(request);
+    return {
+      operationId: request.operationId,
+      boundaryRevision: request.boundaryRevision,
+      ok: true,
+      result: snapshot.content,
+    };
+  }
   const roots =
     process.platform === "win32"
       ? WorkspaceRoots.createPreboundFileWorker(request.workDir)

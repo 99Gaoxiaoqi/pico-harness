@@ -19,6 +19,10 @@ export interface HostSessionProcessSandboxConfig<Profile = unknown, Config = unk
   readonly config?: Partial<Config>;
   readonly scratchRoot?: string;
   readonly generation?: number;
+  readonly boundaryRevision?: number;
+  readonly windowsNetworkReceipt?: string;
+  readonly windowsTaskId?: string;
+  readonly windowsControlRoot?: string;
   readonly workspaceRoots?: readonly string[];
   readonly readRoots?: readonly string[];
   readonly writeRoots?: readonly string[];

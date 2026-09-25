@@ -55,6 +55,11 @@ async function run(forgeCommand, forgeArgs) {
       );
     }
     await runChild(npm.executable, [...npm.args, "run", "build:file-worker"], repositoryRoot);
+    await runChild(
+      npm.executable,
+      [...npm.args, "run", "build:code-intelligence-worker"],
+      repositoryRoot,
+    );
 
     if (process.platform === "darwin") {
       await runChild(

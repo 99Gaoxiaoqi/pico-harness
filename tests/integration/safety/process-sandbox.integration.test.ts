@@ -98,7 +98,7 @@ test("sandbox profile 固定模式与网络语义", async (context) => {
   assert.equal(createIsolatedPicoConfig(workspace).sandbox.network, "allow");
 });
 
-test("Windows Broker 获取完整根目录与策略代次且不接受网络放行", async (context) => {
+test("Windows Broker 获取完整根目录与策略代次并默认断网", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-process-sandbox-winargs-"));
   context.after(() => rm(root, { recursive: true, force: true }));
   const policy = createSandboxPolicy({
@@ -106,6 +106,7 @@ test("Windows Broker 获取完整根目录与策略代次且不接受网络放�
     workspaceRoots: [root],
     scratchRoot: join(root, "scratch"),
     generation: 7,
+    config: { network: "deny" },
   });
   const args = buildWindowsBrokerArgs(policy, "node.exe", ["-e", "0"], root);
   assert.deepEqual(args.slice(-4), ["--", "node.exe", "-e", "0"]);
@@ -148,6 +149,36 @@ test("Windows Broker 将精确文件授权传给原生后端，不扩大到父�
   assert.equal(workerArgs[workerArgs.indexOf("--metadata-root") + 1], workspace);
 });
 
+test("Windows 联网启动必须带任务、边界版本和 Host 凭据", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-process-sandbox-winnet-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const receipt = join(root, "control", `${"a".repeat(64)}.json`);
+  const denied = createSandboxPolicy({
+    profile: "workspace-write",
+    workspaceRoots: [root],
+    scratchRoot: join(root, "scratch"),
+    config: { network: "allow" },
+    generation: 42,
+    boundaryRevision: 4,
+    windowsTaskId: "task-1",
+  });
+  assert.throws(() => buildWindowsBrokerArgs(denied, "node.exe", [], root), /联网凭据缺失/u);
+  const allowed = { ...denied, windowsNetworkReceipt: receipt };
+  const args = buildWindowsBrokerArgs(
+    allowed,
+    "node.exe",
+    [],
+    root,
+    join(root, "control"),
+    undefined,
+    "bash",
+  );
+  assert.equal(args[args.indexOf("--network-receipt") + 1], receipt);
+  assert.equal(args[args.indexOf("--task-id") + 1], "task-1");
+  assert.equal(args[args.indexOf("--boundary-revision") + 1], "4");
+  assert.equal(args[args.indexOf("--origin") + 1], "bash");
+});
+
 test("Windows 受限进程只获得宿主固定的 Node 路径兼容参数", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-process-sandbox-win-node-options-"));
   context.after(() => rm(root, { recursive: true, force: true }));
@@ -157,6 +188,7 @@ test("Windows 受限进程只获得宿主固定的 Node 路径兼容参数", asy
     profile: "workspace-write",
     workspaceRoots: [workspace],
     scratchRoot: join(root, "restricted-scratch"),
+    config: { network: "deny" },
   });
   const restrictedPlan = buildManagedSpawnPlan({
     command: "powershell.exe",
@@ -260,6 +292,38 @@ test("SandboxLease 统一终止进程并在退出后幂等释放", async (contex
   assert.equal(managed.lease.released, true);
   await managed.lease.release();
   assert.equal(managed.lease.released, true);
+});
+
+test("SandboxLease 不会把终止失败当成已撤销", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-process-sandbox-kill-failed-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const managed = managedProcessLauncher.launch(
+    {
+      command: process.execPath,
+      args: ["-e", "setInterval(()=>{},1000)"],
+      cwd: root,
+      origin: "bash",
+      policy: createSandboxPolicy({
+        profile: "danger-full-access",
+        workspaceRoots: [root],
+        scratchRoot: join(root, "scratch"),
+      }),
+    },
+    { stdio: "ignore" },
+  );
+  await new Promise<void>((resolve, reject) => {
+    managed.child.once("spawn", resolve);
+    managed.child.once("error", reject);
+  });
+  const originalKill = managed.child.kill.bind(managed.child);
+  managed.child.kill = () => false;
+  try {
+    await assert.rejects(managed.lease.terminate(), /联网进程未确认终止/u);
+    await managed.lease.release();
+  } finally {
+    managed.child.kill = originalKill;
+    await managed.lease.terminate("SIGKILL");
+  }
 });
 
 test("会话授权提升策略代次并重启 stdio MCP", async (context) => {
