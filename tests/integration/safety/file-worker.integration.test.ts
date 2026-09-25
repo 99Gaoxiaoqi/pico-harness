@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { existsSync, renameSync, symlinkSync } from "node:fs";
-import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createServer } from "node:net";
@@ -120,9 +120,10 @@ test("standalone packaged File Worker runs with an exact file grant", async (con
   await mkdir(scratchRoot);
   const allowed = join(workspace, "allowed.txt");
   await writeFile(allowed, "bundle-readable");
+  const canonicalWorkspace = await realpath(workspace);
   const targetPath = WorkspaceRoots.createSync(workspace).resolveUnchecked("allowed.txt");
   const info = await lstat(allowed, { bigint: true });
-  const workDirInfo = await lstat(workspace, { bigint: true });
+  const workDirInfo = await lstat(canonicalWorkspace, { bigint: true });
   const operationId = randomUUID();
   const executable = process.env.PICO_FILE_WORKER_TEST_EXECUTABLE ?? process.execPath;
   const executableRoot =
@@ -143,7 +144,7 @@ test("standalone packaged File Worker runs with an exact file grant", async (con
     {
       command: executable,
       args: [bundle],
-      cwd: workspace,
+      cwd: canonicalWorkspace,
       origin: "file-worker",
       policy,
       env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
@@ -161,7 +162,7 @@ test("standalone packaged File Worker runs with an exact file grant", async (con
     boundaryRevision: 1,
     operation: "read_file",
     args: JSON.stringify({ path: "allowed.txt" }),
-    workDir: workspace,
+    workDir: canonicalWorkspace,
     workDirIdentity: {
       kind: "directory",
       dev: String(workDirInfo.dev),
@@ -170,6 +171,7 @@ test("standalone packaged File Worker runs with an exact file grant", async (con
       mtimeNs: String(workDirInfo.mtimeNs),
       ctimeNs: String(workDirInfo.ctimeNs),
     },
+    ...(process.platform === "linux" ? { syntheticCwd: true } : {}),
     stagePath: join(scratchRoot, "prepared"),
     targets: [
       {

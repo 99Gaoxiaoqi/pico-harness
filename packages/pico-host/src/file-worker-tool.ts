@@ -178,6 +178,7 @@ export class FileWorkerTool implements BaseTool {
       args,
       workDir,
       workDirIdentity,
+      ...(process.platform === "linux" ? { syntheticCwd: true } : {}),
       stagePath: resolve(scratchRoot, "prepared"),
       targets: boundTargets,
       excludeSensitiveFiles: this.options.excludeSensitiveFiles ?? false,
