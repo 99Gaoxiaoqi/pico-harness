@@ -136,6 +136,16 @@ test("Windows Broker 将精确文件授权传给原生后端，不扩大到父�
   assert.equal(args[args.indexOf("--read-file") + 1], await realpath(readable));
   assert.equal(args[args.indexOf("--write-file") + 1], writable);
   assert.equal(args.includes(external), false);
+  assert.equal(args.includes("--metadata-root"), false);
+  const workerArgs = buildWindowsBrokerArgs(
+    policy,
+    "node.exe",
+    ["-e", "0"],
+    workspace,
+    join(root, "control"),
+    workspace,
+  );
+  assert.equal(workerArgs[workerArgs.indexOf("--metadata-root") + 1], workspace);
 });
 
 test("Windows 受限进程只获得宿主固定的 Node 路径兼容参数", async (context) => {

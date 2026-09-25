@@ -236,6 +236,7 @@ extern "system" {
 #[derive(Debug)]
 struct Policy {
     cwd: PathBuf,
+    metadata_root: Option<PathBuf>,
     scratch: PathBuf,
     control_root: PathBuf,
     generation: u64,
@@ -407,11 +408,12 @@ fn grant_exact_cwd(
     {
         return Err("exact-file working directory is invalid or overlaps broker control".into());
     }
-    grant_exact_metadata_chain(journal, &policy.cwd, sid, guards)
+    grant_exact_metadata_chain(journal, policy, &policy.cwd, sid, guards)
 }
 
 fn grant_exact_metadata_chain(
     journal: &mut RecoveryJournal,
+    policy: &Policy,
     leaf: &Path,
     sid: &str,
     guards: &mut Vec<File>,
@@ -423,6 +425,35 @@ fn grant_exact_metadata_chain(
     assert_pinned_identity(&profile, &profile_guard, true)?;
     let profile_identity = file_identity(&profile_guard)?;
     guards.push(profile_guard);
+    let metadata_root_identity = match policy.metadata_root.as_deref() {
+        Some(root) => {
+            if !root.is_absolute()
+                || root != policy.cwd
+                || root.parent().is_none()
+                || is_system_root(root)
+            {
+                return Err(
+                    "file-worker metadata root must be its non-system working directory".into(),
+                );
+            }
+            assert_not_reparse_point(root)?;
+            let guard = pin_path(root, true)?;
+            assert_not_reparse_point(root)?;
+            assert_pinned_identity(root, &guard, true)?;
+            let identity = file_identity(&guard)?;
+            if is_profile_ancestor(identity, &profile)? {
+                return Err("file-worker metadata root is a shared profile ancestor".into());
+            }
+            if identity != profile_identity
+                && is_other_profile_subtree(root, &profile, profile_identity)?
+            {
+                return Err("file-worker metadata root is another user profile".into());
+            }
+            guards.push(guard);
+            Some(identity)
+        }
+        None => None,
+    };
     let mut ancestors = Vec::new();
     let mut current = Some(leaf);
     while let Some(directory) = current {
@@ -432,7 +463,7 @@ fn grant_exact_metadata_chain(
         ancestors.push(directory);
         current = directory.parent();
     }
-    let mut within_user_profile = false;
+    let mut within_authorized_root = false;
     for directory in ancestors.into_iter().rev() {
         assert_not_reparse_point(directory)?;
         let pinned = pin_path(directory, true)?;
@@ -444,25 +475,58 @@ fn grant_exact_metadata_chain(
                 directory.display()
             ));
         }
-        if file_identity(&pinned)? == profile_identity {
-            within_user_profile = true;
+        let identity = file_identity(&pinned)?;
+        if identity == profile_identity || metadata_root_identity == Some(identity) {
+            within_authorized_root = true;
         }
         guards.push(pinned);
-        if !within_user_profile {
+        if !within_authorized_root {
             continue;
         }
-        // realpath needs metadata access on each component within this user-specific
-        // profile. The ACE has no inheritance and cannot list or create children.
+        // realpath needs metadata access within this user-specific profile or the
+        // Host-bound task root. The ACE cannot list or create children.
         journal.grant_exact(directory, sid, "X,RA,RC,S")?;
     }
-    if within_user_profile {
+    if within_authorized_root {
         Ok(())
     } else {
         Err(format!(
-            "exact-file metadata path is outside the current user profile: {}",
+            "exact-file metadata path is outside the current user profile and task root: {}",
             leaf.display()
         ))
     }
+}
+
+fn is_profile_ancestor(identity: (u32, u64), profile: &Path) -> Result<bool, String> {
+    let mut current = profile.parent();
+    while let Some(directory) = current {
+        let pinned = pin_path(directory, true)?;
+        if file_identity(&pinned)? == identity {
+            return Ok(true);
+        }
+        current = directory.parent();
+    }
+    Ok(false)
+}
+
+fn is_other_profile_subtree(
+    root: &Path,
+    profile: &Path,
+    profile_identity: (u32, u64),
+) -> Result<bool, String> {
+    let profile_parent = profile.parent().ok_or("user profile has no parent")?;
+    let profile_parent_guard = pin_path(profile_parent, true)?;
+    let profile_parent_identity = file_identity(&profile_parent_guard)?;
+    let mut current = root;
+    while let Some(parent) = current.parent() {
+        let parent_guard = pin_path(parent, true)?;
+        if file_identity(&parent_guard)? == profile_parent_identity {
+            let child_guard = pin_path(current, true)?;
+            return Ok(file_identity(&child_guard)? != profile_identity);
+        }
+        current = parent;
+    }
+    Ok(false)
 }
 
 fn run_commit_file(args: &[String]) -> Result<(), String> {
@@ -584,6 +648,7 @@ fn parse_args(args: Vec<String>) -> Result<Policy, String> {
     let mut cwd = None;
     let mut scratch = None;
     let mut control_root = None;
+    let mut metadata_root = None;
     let mut generation = 0;
     let mut read_roots = Vec::new();
     let mut write_roots = Vec::new();
@@ -600,6 +665,7 @@ fn parse_args(args: Vec<String>) -> Result<Policy, String> {
             "--cwd" => cwd = Some(PathBuf::from(value)),
             "--scratch" => scratch = Some(PathBuf::from(value)),
             "--control-root" => control_root = Some(PathBuf::from(value)),
+            "--metadata-root" => metadata_root = Some(PathBuf::from(value)),
             "--generation" => generation = value.parse().map_err(|_| "invalid generation")?,
             "--read-root" => read_roots.push(PathBuf::from(value)),
             "--write-root" => write_roots.push(PathBuf::from(value)),
@@ -615,6 +681,7 @@ fn parse_args(args: Vec<String>) -> Result<Policy, String> {
     }
     Ok(Policy {
         cwd: cwd.ok_or("missing --cwd")?,
+        metadata_root,
         scratch: scratch.ok_or("missing --scratch")?,
         control_root: control_root.ok_or("missing --control-root")?,
         generation,
@@ -880,7 +947,7 @@ fn grant_exact_file(
             parent.display()
         ));
     }
-    grant_exact_metadata_chain(journal, parent, sid, guards)?;
+    grant_exact_metadata_chain(journal, policy, parent, sid, guards)?;
     match fs::symlink_metadata(path) {
         Ok(info) => {
             assert_not_reparse_point(path)?;
