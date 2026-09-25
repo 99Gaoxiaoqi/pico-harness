@@ -216,6 +216,10 @@ enum Command {
         control_root: PathBuf,
         host_pid: u32,
     },
+    RecoverTaskNetwork {
+        profile_name: String,
+        json: bool,
+    },
 }
 
 #[derive(Debug)]
@@ -338,6 +342,13 @@ pub fn run() -> i32 {
             "serve-task-network",
             Some(profile_name),
         ),
+        Command::RecoverTaskNetwork { profile_name, json } => (
+            windows_network::set_loopback_exempt(profile_name, false)
+                .map_err(|message| HostPrepError::new(4, message)),
+            *json,
+            "recover-task-network",
+            Some(profile_name),
+        ),
     };
     match result {
         Ok(label) => {
@@ -431,6 +442,13 @@ fn parse_command(args: impl IntoIterator<Item = String>) -> Result<Command, Host
                 host_pid,
             })
         }
+        "recover-task-network" if control_root.is_none() && host_pid.is_none() => {
+            let profile_name =
+                profile_name.ok_or_else(|| HostPrepError::new(64, "missing --profile-name"))?;
+            windows_network::validate_profile_name(&profile_name)
+                .map_err(|message| HostPrepError::new(64, message))?;
+            Ok(Command::RecoverTaskNetwork { profile_name, json })
+        }
         _ => Err(HostPrepError::new(
             64,
             format!("unknown operation: {operation}"),
@@ -440,7 +458,7 @@ fn parse_command(args: impl IntoIterator<Item = String>) -> Result<Command, Host
 
 fn print_usage() {
     eprintln!(
-        "usage: pico-appcontainer-host-prep <prepare-null-device|verify-null-device|serve-task-network> [--profile-name NAME] [--control-root ROOT] [--host-pid PID] [--json]"
+        "usage: pico-appcontainer-host-prep <prepare-null-device|verify-null-device|serve-task-network|recover-task-network> [--profile-name NAME] [--control-root ROOT] [--host-pid PID] [--json]"
     );
 }
 

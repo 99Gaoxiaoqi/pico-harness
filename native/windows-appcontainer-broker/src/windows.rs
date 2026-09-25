@@ -891,7 +891,8 @@ fn run_task_network(args: &[String]) -> Result<(), String> {
             }
         }
         "verify" => {
-            if task_network_helper_alive(&control_root, profile_name)
+            if !control_root.join("revoking").exists()
+                && task_network_helper_alive(&control_root, profile_name)
                 && windows_network::loopback_exempt(profile_name)?
             {
                 "match"
@@ -1072,6 +1073,9 @@ fn current_executable() -> Result<PathBuf, String> {
 }
 
 fn read_network_receipt(policy: &Policy, source: &Path) -> Result<NetworkReceipt, String> {
+    if policy.control_root.join("revoking").exists() {
+        return Err("task network boundary is being revoked".into());
+    }
     if policy.origin.as_deref() == Some("file-worker") || policy.metadata_root.is_some() {
         return Err("File Worker may never receive network authority".into());
     }
@@ -1403,7 +1407,8 @@ unsafe fn launch_in_appcontainer(
         return Err(error);
     }
     if let Some(receipt) = network_receipt {
-        let still_prepared = task_network_helper_alive(&policy.control_root, &receipt.profile_name)
+        let still_prepared = !policy.control_root.join("revoking").exists()
+            && task_network_helper_alive(&policy.control_root, &receipt.profile_name)
             && windows_network::loopback_exempt(&receipt.profile_name)?;
         let still_authorized =
             receipt.scope == "once" || verify_network_receipt(policy, receipt, false).is_ok();
