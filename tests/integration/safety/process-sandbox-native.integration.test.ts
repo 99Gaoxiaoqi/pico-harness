@@ -223,12 +223,7 @@ test(
   "Windows file-worker task root outside the profile keeps exact files isolated",
   { skip: process.platform !== "win32" },
   async (context) => {
-    const fixture = await fixtureRoot(
-      context,
-      "pico-native-exact-task-root-",
-      true,
-      process.cwd(),
-    );
+    const fixture = await fixtureRoot(context, "pico-native-exact-task-root-", true, process.cwd());
     const nested = join(fixture.workspace, "nested");
     await mkdir(nested);
     const readable = join(nested, "allowed.txt");
@@ -244,7 +239,7 @@ test(
       'attempt("siblingRead",()=>fs.readFileSync(paths.sibling,"utf8"));',
       'attempt("siblingWrite",()=>{fs.writeFileSync(paths.sibling,"unsafe");return "OK"});',
       'attempt("create",()=>{fs.writeFileSync(paths.created,"unsafe");return "OK"});',
-      'process.stdout.write(JSON.stringify(result));',
+      "process.stdout.write(JSON.stringify(result));",
     ].join("");
     const result = await runNode(
       fixture,
