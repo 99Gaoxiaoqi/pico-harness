@@ -3534,9 +3534,7 @@ function buildRegistry(
     ...(onToolGroupLoaded !== undefined ? { onToolGroupLoaded } : {}),
     ...(sessionTasks !== undefined ? { sessionTasks } : {}),
     ...(sessionArtifacts !== undefined ? { sessionArtifacts } : {}),
-    ...(canRunManagedCodeIntelligence !== undefined
-      ? { canRunManagedCodeIntelligence }
-      : {}),
+    ...(canRunManagedCodeIntelligence !== undefined ? { canRunManagedCodeIntelligence } : {}),
     ...(requestSandboxBoundaryHandler !== undefined ? { requestSandboxBoundaryHandler } : {}),
   });
 }
@@ -3753,10 +3751,7 @@ export function buildPermissionMiddleware(
       call: ToolCall,
       externalDirectories: readonly string[],
     ) => Promise<void>;
-    onApprovedProcessNetwork?: (
-      call: ToolCall,
-      scope: "session" | "once",
-    ) => Promise<void>;
+    onApprovedProcessNetwork?: (call: ToolCall, scope: "session" | "once") => Promise<void>;
     allowSessionGrants?: boolean;
     /** Hard ceiling for a configured child; human approval cannot widen it. */
     executionBoundaryCeiling?: ExecutionBoundary;

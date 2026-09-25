@@ -52,7 +52,9 @@ process.stdout.write(JSON.stringify({op: op + "-task-network", result, profileNa
   );
   await authority.blockNewLaunches();
   assert.equal(await authority.verify(), false);
-  await assert.rejects(authority.issueReceipt({ boundaryRevision: 3, generation: 23, scope: "once" }));
+  await assert.rejects(
+    authority.issueReceipt({ boundaryRevision: 3, generation: 23, scope: "once" }),
+  );
   await authority.revoke();
   assert.equal(await authority.verify(), false);
   await assert.rejects(access(receiptPath));

@@ -46,7 +46,10 @@ export class ManagedProcessLauncher {
   /** Revoke the task's active processes before removing its OS loopback exception. */
   async terminateWindowsNetworkProcesses(receiptDirectory: string): Promise<void> {
     const leases = [...this.activeWindowsNetwork]
-      .filter(([, path]) => path.startsWith(`${receiptDirectory}\\`) || path.startsWith(`${receiptDirectory}/`))
+      .filter(
+        ([, path]) =>
+          path.startsWith(`${receiptDirectory}\\`) || path.startsWith(`${receiptDirectory}/`),
+      )
       .map(([lease]) => lease);
     await Promise.all(leases.map((lease) => lease.terminate()));
   }

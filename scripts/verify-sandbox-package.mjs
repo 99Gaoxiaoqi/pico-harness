@@ -40,9 +40,7 @@ try {
   for (const filename of ["file-worker.mjs", "windows-file-commit-entry.mjs"]) {
     await verifySidecarDigest(join(packageRoot, "resources/file-worker", filename));
   }
-  await verifySidecarDigest(
-    join(packageRoot, "resources/code-intelligence-worker", "worker.mjs"),
-  );
+  await verifySidecarDigest(join(packageRoot, "resources/code-intelligence-worker", "worker.mjs"));
 
   const sourceArchive = join(
     packageRoot,

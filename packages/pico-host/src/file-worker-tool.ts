@@ -44,7 +44,10 @@ export interface FileWorkerSandboxDescriptor {
 }
 
 export interface FileWorkerToolOptions {
-  readonly roots: Pick<WorkspaceRoots, "assertAllowed" | "generation" | "list" | "boundarySnapshot" | "resolveUnchecked">;
+  readonly roots: Pick<
+    WorkspaceRoots,
+    "assertAllowed" | "generation" | "list" | "boundarySnapshot" | "resolveUnchecked"
+  >;
   readonly workDir: string;
   readonly resolveSandbox: () => FileWorkerSandboxDescriptor;
   readonly artifacts?: BoundSessionArtifactAuthority;

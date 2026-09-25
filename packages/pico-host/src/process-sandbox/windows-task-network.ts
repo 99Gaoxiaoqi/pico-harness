@@ -30,16 +30,22 @@ export class WindowsTaskNetworkAuthority {
   private readonly broker: string;
   private state: NetworkState | undefined;
 
-  get receiptDirectory(): string { return this.controlRoot; }
+  get receiptDirectory(): string {
+    return this.controlRoot;
+  }
 
-  async hasPreparationState(): Promise<boolean> { return (await this.loadState()) !== undefined; }
+  async hasPreparationState(): Promise<boolean> {
+    return (await this.loadState()) !== undefined;
+  }
 
   /** The Broker checks this marker at admission and again before process resume. */
   async blockNewLaunches(): Promise<void> {
     await this.assertPrivateRoot();
-    await writeFile(join(this.controlRoot, "revoking"), "", { flag: "wx", mode: 0o600 }).catch((error: NodeJS.ErrnoException) => {
-      if (error.code !== "EEXIST") throw error;
-    });
+    await writeFile(join(this.controlRoot, "revoking"), "", { flag: "wx", mode: 0o600 }).catch(
+      (error: NodeJS.ErrnoException) => {
+        if (error.code !== "EEXIST") throw error;
+      },
+    );
   }
 
   constructor(
@@ -67,12 +73,11 @@ export class WindowsTaskNetworkAuthority {
   async prepare(): Promise<void> {
     const prior = await this.loadState();
     if (prior && (await this.verify())) return;
-    const state: NetworkState =
-      prior ?? {
-        schema: 1,
-        taskId: this.taskId,
-        profileName: `PicoTaskNetwork.${randomBytes(16).toString("hex")}`,
-      };
+    const state: NetworkState = prior ?? {
+      schema: 1,
+      taskId: this.taskId,
+      profileName: `PicoTaskNetwork.${randomBytes(16).toString("hex")}`,
+    };
     await this.assertPrivateRoot();
     const outcome = await this.runBroker("prepare", state.profileName);
     if (outcome !== "applied" && outcome !== "no-change") {
@@ -120,10 +125,14 @@ export class WindowsTaskNetworkAuthority {
     if (!state) return;
     const outcome = await this.runBroker("revoke", state.profileName);
     if (outcome !== "revoked" && outcome !== "no-change") {
-      throw new SandboxViolationError("sandbox_cleanup_failed", "Windows 任务联网回环例外撤销失败。");
+      throw new SandboxViolationError(
+        "sandbox_cleanup_failed",
+        "Windows 任务联网回环例外撤销失败。",
+      );
     }
     for (const entry of await readdir(this.controlRoot)) {
-      if (/^[a-f0-9]{64}\.(?:json|consumed)$/u.test(entry)) await rm(join(this.controlRoot, entry), { force: true });
+      if (/^[a-f0-9]{64}\.(?:json|consumed)$/u.test(entry))
+        await rm(join(this.controlRoot, entry), { force: true });
     }
     await rm(this.statePath, { force: true });
     this.state = undefined;
@@ -154,12 +163,19 @@ export class WindowsTaskNetworkAuthority {
   private async assertPrivateRoot(): Promise<void> {
     await mkdir(this.controlRoot, { recursive: true, mode: 0o700 });
     const info = await stat(this.controlRoot);
-    if (!info.isDirectory() || !existsSync(this.broker) || !isVerifiedBundledExecutable(this.broker, "win32")) {
+    if (
+      !info.isDirectory() ||
+      !existsSync(this.broker) ||
+      !isVerifiedBundledExecutable(this.broker, "win32")
+    ) {
       throw new SandboxViolationError("sandbox_unavailable", "Windows Broker 缺失或控制目录无效。");
     }
   }
 
-  private async runBroker(operation: "prepare" | "verify" | "revoke", profileName: string): Promise<string> {
+  private async runBroker(
+    operation: "prepare" | "verify" | "revoke",
+    profileName: string,
+  ): Promise<string> {
     await this.assertPrivateRoot();
     const output = await new Promise<string>((resolveOutput, reject) => {
       const child = spawn(
@@ -187,20 +203,37 @@ export class WindowsTaskNetworkAuthority {
         stderr += chunk.toString("utf8");
         if (stderr.length > 16_384) child.kill();
       });
-      child.once("error", (error) => { timer.cancel(); reject(error); });
+      child.once("error", (error) => {
+        timer.cancel();
+        reject(error);
+      });
       child.once("close", (code) => {
         timer.cancel();
         if (code !== 0) {
-          reject(new SandboxViolationError("sandbox_unavailable", `Windows 任务联网${operation}失败：${stderr.trim() || String(code)}`));
+          reject(
+            new SandboxViolationError(
+              "sandbox_unavailable",
+              `Windows 任务联网${operation}失败：${stderr.trim() || String(code)}`,
+            ),
+          );
         } else resolveOutput(stdout);
       });
     });
     let response: unknown;
-    try { response = JSON.parse(output.trim()); } catch {
-      throw new SandboxViolationError("sandbox_unavailable", "Windows Broker 返回了无效的联网准备响应。");
+    try {
+      response = JSON.parse(output.trim());
+    } catch {
+      throw new SandboxViolationError(
+        "sandbox_unavailable",
+        "Windows Broker 返回了无效的联网准备响应。",
+      );
     }
     const parsed = response as { op?: unknown; result?: unknown; profileName?: unknown };
-    if (parsed.op !== `${operation}-task-network` || parsed.profileName !== profileName || typeof parsed.result !== "string") {
+    if (
+      parsed.op !== `${operation}-task-network` ||
+      parsed.profileName !== profileName ||
+      typeof parsed.result !== "string"
+    ) {
       throw new SandboxViolationError("sandbox_unavailable", "Windows Broker 联网准备响应不匹配。");
     }
     return parsed.result;
@@ -209,6 +242,11 @@ export class WindowsTaskNetworkAuthority {
   private async atomicWrite(path: string, value: NetworkState): Promise<void> {
     const temporary = `${path}.${randomBytes(8).toString("hex")}.tmp`;
     await writeFile(temporary, `${JSON.stringify(value)}\n`, { flag: "wx", mode: 0o600 });
-    try { await rename(temporary, path); } catch (error) { await rm(temporary, { force: true }); throw error; }
+    try {
+      await rename(temporary, path);
+    } catch (error) {
+      await rm(temporary, { force: true });
+      throw error;
+    }
   }
 }

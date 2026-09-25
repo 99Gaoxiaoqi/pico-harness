@@ -276,7 +276,8 @@ export class BashTool implements BaseTool {
     const roots = sandbox?.workspaceRoots.processRoots() ?? [this.workDir];
     const profile = sandbox?.profile ?? "danger-full-access";
     const networkAuthorization = sandbox?.consumeNetworkAuthorization?.(toolCallId);
-    const networkAuthorized = networkAuthorization === true || typeof networkAuthorization === "string";
+    const networkAuthorized =
+      networkAuthorization === true || typeof networkAuthorization === "string";
     const sandboxConfig = networkAuthorized
       ? { ...sandbox?.config, network: "allow" as const }
       : sandbox?.config;
@@ -329,9 +330,7 @@ export class BashTool implements BaseTool {
             }
           : {}),
         ...(sandbox?.windowsTaskId ? { windowsTaskId: sandbox.windowsTaskId } : {}),
-        ...(sandbox?.windowsControlRoot
-          ? { windowsControlRoot: sandbox.windowsControlRoot }
-          : {}),
+        ...(sandbox?.windowsControlRoot ? { windowsControlRoot: sandbox.windowsControlRoot } : {}),
       }),
     };
     sandbox?.workspaceRoots.consumeAllProcessAuthorizations();

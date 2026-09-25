@@ -85,7 +85,10 @@ test("desktop packaging rejects missing and corrupt Windows sandbox inputs and c
   await hooks.preMake();
   const copiedCodeWorker = join(target, "resources", "code-intelligence-worker", "worker.mjs");
   await writeFile(copiedCodeWorker, "corrupted");
-  await assert.rejects(hooks.postPackage(config, result), /Code Intelligence Worker resource SHA-256 mismatch/);
+  await assert.rejects(
+    hooks.postPackage(config, result),
+    /Code Intelligence Worker resource SHA-256 mismatch/,
+  );
   await cp(join(codeWorkerSource, "worker.mjs"), copiedCodeWorker);
   const copiedHelper = join(target, "resources", "file-worker", "windows-file-commit-entry.mjs");
   await writeFile(copiedHelper, "corrupted");
