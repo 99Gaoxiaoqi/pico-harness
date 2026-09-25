@@ -1,7 +1,13 @@
 use std::ffi::{c_void, OsStr};
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::mem::{size_of, zeroed};
 use std::os::windows::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
+
+#[path = "windows_network.rs"]
+mod windows_network;
 
 type Handle = *mut c_void;
 type Sid = *mut c_void;
@@ -43,6 +49,26 @@ const TARGET_SECURITY_INFORMATION: u32 = OWNER_SECURITY_INFORMATION
     | SACL_SECURITY_INFORMATION
     | LABEL_SECURITY_INFORMATION;
 const SDDL_REVISION_1: u32 = 1;
+const SYNCHRONIZE: u32 = 0x0010_0000;
+const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x0000_1000;
+const WAIT_OBJECT_0: u32 = 0;
+const WAIT_TIMEOUT: u32 = 0x0000_0102;
+const ERROR_ALREADY_EXISTS: u32 = 183;
+const NETWORK_MUTEX_SDDL: &str = "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x00100001;;;AU)";
+
+#[repr(C)]
+struct SecurityAttributes {
+    length: u32,
+    security_descriptor: SecurityDescriptor,
+    inherit_handle: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct FileTime {
+    low_date_time: u32,
+    high_date_time: u32,
+}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -93,6 +119,21 @@ extern "system" {
     fn GetLastError() -> u32;
     fn LocalFree(memory: *mut c_void) -> *mut c_void;
     fn SetLastError(error: u32);
+    fn GetCurrentProcessId() -> u32;
+    fn OpenProcess(desired_access: u32, inherit_handle: i32, process_id: u32) -> Handle;
+    fn WaitForSingleObject(handle: Handle, milliseconds: u32) -> u32;
+    fn GetProcessTimes(
+        process: Handle,
+        creation_time: *mut FileTime,
+        exit_time: *mut FileTime,
+        kernel_time: *mut FileTime,
+        user_time: *mut FileTime,
+    ) -> i32;
+    fn CreateMutexW(
+        attributes: *const SecurityAttributes,
+        initial_owner: i32,
+        name: *const u16,
+    ) -> Handle;
 }
 
 #[link(name = "advapi32")]
@@ -162,10 +203,19 @@ extern "system" {
     ) -> i32;
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Command {
-    Prepare { json: bool },
-    Verify { json: bool },
+    Prepare {
+        json: bool,
+    },
+    Verify {
+        json: bool,
+    },
+    ServeTaskNetwork {
+        profile_name: String,
+        control_root: PathBuf,
+        host_pid: u32,
+    },
 }
 
 #[derive(Debug)]
@@ -263,18 +313,41 @@ pub fn run() -> i32 {
         return error.exit_code;
     }
 
-    let (result, json) = match command {
-        Command::Prepare { json } => (prepare_null_device().map(PrepareResult::label), json),
-        Command::Verify { json } => (verify_null_device().map(VerifyResult::label), json),
+    let (result, json, operation, profile_name) = match &command {
+        Command::Prepare { json } => (
+            prepare_null_device().map(PrepareResult::label),
+            *json,
+            "prepare-null-device",
+            None,
+        ),
+        Command::Verify { json } => (
+            verify_null_device().map(VerifyResult::label),
+            *json,
+            "verify-null-device",
+            None,
+        ),
+        Command::ServeTaskNetwork {
+            profile_name,
+            control_root,
+            host_pid,
+        } => (
+            serve_task_network(profile_name, control_root, *host_pid)
+                .map(|()| "revoked")
+                .map_err(|message| HostPrepError::new(4, message)),
+            false,
+            "serve-task-network",
+            Some(profile_name),
+        ),
     };
     match result {
         Ok(label) => {
-            let operation = match command {
-                Command::Prepare { .. } => "prepare-null-device",
-                Command::Verify { .. } => "verify-null-device",
-            };
             if json {
-                println!(r#"{{"op":"{operation}","result":"{label}"}}"#);
+                match profile_name {
+                    Some(profile_name) => println!(
+                        r#"{{"op":"{operation}","result":"{label}","profileName":"{profile_name}"}}"#
+                    ),
+                    None => println!(r#"{{"op":"{operation}","result":"{label}"}}"#),
+                }
             } else {
                 println!("{operation}: {label}");
             }
@@ -297,9 +370,29 @@ fn parse_command(args: impl IntoIterator<Item = String>) -> Result<Command, Host
         .next()
         .ok_or_else(|| HostPrepError::new(64, "missing operation"))?;
     let mut json = false;
-    for argument in args {
+    let mut profile_name = None;
+    let mut control_root = None;
+    let mut host_pid = None;
+    while let Some(argument) = args.next() {
         if argument == "--json" && !json {
             json = true;
+        } else if profile_name.is_none() && argument == "--profile-name" {
+            profile_name = Some(
+                args.next()
+                    .ok_or_else(|| HostPrepError::new(64, "missing --profile-name value"))?,
+            );
+        } else if control_root.is_none() && argument == "--control-root" {
+            control_root =
+                Some(PathBuf::from(args.next().ok_or_else(|| {
+                    HostPrepError::new(64, "missing --control-root value")
+                })?));
+        } else if host_pid.is_none() && argument == "--host-pid" {
+            host_pid = Some(
+                args.next()
+                    .ok_or_else(|| HostPrepError::new(64, "missing --host-pid value"))?
+                    .parse::<u32>()
+                    .map_err(|_| HostPrepError::new(64, "invalid --host-pid"))?,
+            );
         } else {
             return Err(HostPrepError::new(
                 64,
@@ -308,8 +401,36 @@ fn parse_command(args: impl IntoIterator<Item = String>) -> Result<Command, Host
         }
     }
     match operation.as_str() {
-        "prepare-null-device" => Ok(Command::Prepare { json }),
-        "verify-null-device" => Ok(Command::Verify { json }),
+        "prepare-null-device"
+            if profile_name.is_none() && control_root.is_none() && host_pid.is_none() =>
+        {
+            Ok(Command::Prepare { json })
+        }
+        "verify-null-device"
+            if profile_name.is_none() && control_root.is_none() && host_pid.is_none() =>
+        {
+            Ok(Command::Verify { json })
+        }
+        "serve-task-network" if !json => {
+            let profile_name =
+                profile_name.ok_or_else(|| HostPrepError::new(64, "missing --profile-name"))?;
+            windows_network::validate_profile_name(&profile_name)
+                .map_err(|message| HostPrepError::new(64, message))?;
+            let control_root =
+                control_root.ok_or_else(|| HostPrepError::new(64, "missing --control-root"))?;
+            let host_pid = host_pid.ok_or_else(|| HostPrepError::new(64, "missing --host-pid"))?;
+            if host_pid == 0 || !control_root.is_absolute() || !control_root.is_dir() {
+                return Err(HostPrepError::new(
+                    64,
+                    "invalid task network lifetime parameters",
+                ));
+            }
+            Ok(Command::ServeTaskNetwork {
+                profile_name,
+                control_root,
+                host_pid,
+            })
+        }
         _ => Err(HostPrepError::new(
             64,
             format!("unknown operation: {operation}"),
@@ -319,7 +440,7 @@ fn parse_command(args: impl IntoIterator<Item = String>) -> Result<Command, Host
 
 fn print_usage() {
     eprintln!(
-        "usage: pico-appcontainer-host-prep <prepare-null-device|verify-null-device> [--json]"
+        "usage: pico-appcontainer-host-prep <prepare-null-device|verify-null-device|serve-task-network> [--profile-name NAME] [--control-root ROOT] [--host-pid PID] [--json]"
     );
 }
 
@@ -351,6 +472,122 @@ impl VerifyResult {
             Self::Drift => "drift",
         }
     }
+}
+
+fn serve_task_network(
+    profile_name: &str,
+    control_root: &Path,
+    host_pid: u32,
+) -> Result<(), String> {
+    let host = unsafe { OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, 0, host_pid) };
+    if host.is_null() {
+        return Err(format!("cannot open task Host process: {}", unsafe {
+            GetLastError()
+        }));
+    }
+    let host = OwnedHandle(host);
+    if unsafe { WaitForSingleObject(host.0, 0) } != WAIT_TIMEOUT {
+        return Err("task Host exited before network preparation".into());
+    }
+    let mutex_sddl = wide_null(NETWORK_MUTEX_SDDL);
+    let mut descriptor: SecurityDescriptor = null_mut();
+    if unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            mutex_sddl.as_ptr(),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            null_mut(),
+        )
+    } == 0
+    {
+        return Err(format!("cannot create task helper mutex ACL: {}", unsafe {
+            GetLastError()
+        }));
+    }
+    let descriptor = OwnedSecurityDescriptor::from_local(descriptor);
+    let security = SecurityAttributes {
+        length: size_of::<SecurityAttributes>() as u32,
+        security_descriptor: descriptor.pointer,
+        inherit_handle: 0,
+    };
+    let mutex_name = windows_network::helper_mutex_name(profile_name)?;
+    let mutex_wide = wide_null(mutex_name);
+    let mutex = unsafe { CreateMutexW(&security, 1, mutex_wide.as_ptr()) };
+    if mutex.is_null() {
+        return Err(format!("cannot create task helper mutex: {}", unsafe {
+            GetLastError()
+        }));
+    }
+    let already_exists = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
+    let _mutex = OwnedHandle(mutex);
+    if already_exists {
+        return Err("task network helper is already active".into());
+    }
+    let ready = control_root.join(format!("network-{profile_name}.ready"));
+    let revoke = control_root.join(format!("network-{profile_name}.revoke"));
+    let revoked = control_root.join(format!("network-{profile_name}.revoked"));
+    windows_network::set_loopback_exempt(profile_name, true)?;
+    let run = (|| -> Result<(), String> {
+        let started_at = current_process_started_at()?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&ready)
+            .map_err(|error| format!("cannot publish task network helper state: {error}"))?;
+        write!(
+            file,
+            "{}:{}:{}",
+            unsafe { GetCurrentProcessId() },
+            started_at,
+            host_pid
+        )
+        .map_err(|error| format!("cannot write task network helper state: {error}"))?;
+        file.sync_all()
+            .map_err(|error| format!("cannot persist task network helper state: {error}"))?;
+        loop {
+            if revoke.exists() {
+                break;
+            }
+            match unsafe { WaitForSingleObject(host.0, 250) } {
+                WAIT_TIMEOUT => continue,
+                WAIT_OBJECT_0 => break,
+                status => return Err(format!("task Host lifetime wait failed: 0x{status:08x}")),
+            }
+        }
+        Ok(())
+    })();
+    let _ = fs::remove_file(&ready);
+    let cleanup = windows_network::set_loopback_exempt(profile_name, false);
+    if cleanup.is_ok() {
+        let _ = fs::remove_file(&revoke);
+        fs::write(&revoked, b"revoked")
+            .map_err(|error| format!("cannot publish task network revocation: {error}"))?;
+    }
+    run?;
+    cleanup?;
+    Ok(())
+}
+
+fn current_process_started_at() -> Result<u64, String> {
+    let mut creation: FileTime = unsafe { zeroed() };
+    let mut exit: FileTime = unsafe { zeroed() };
+    let mut kernel: FileTime = unsafe { zeroed() };
+    let mut user: FileTime = unsafe { zeroed() };
+    if unsafe {
+        GetProcessTimes(
+            GetCurrentProcess(),
+            &mut creation,
+            &mut exit,
+            &mut kernel,
+            &mut user,
+        )
+    } == 0
+    {
+        return Err(format!("GetProcessTimes failed: {}", unsafe {
+            GetLastError()
+        }));
+    }
+    Ok((u64::from(creation.high_date_time) << 32) | u64::from(creation.low_date_time))
 }
 
 fn prepare_null_device() -> Result<PrepareResult, HostPrepError> {
