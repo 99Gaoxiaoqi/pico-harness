@@ -15,7 +15,7 @@ import {
   writeAtomicWorkspaceFile,
   type AtomicWorkspaceFileWrite,
 } from "./atomic-workspace-file.js";
-import { assertSameResolvedTarget } from "./file-tool-helpers.js";
+import { assertSameResolvedTarget, READ_FILE_MAX_BYTES } from "./file-tool-helpers.js";
 import {
   publishWrittenArtifact,
   type BoundSessionArtifactAuthority,
@@ -239,6 +239,15 @@ export class FileWorkerTool implements BaseTool {
       if (operation === "edit_file" && precondition.kind !== "file") {
         throw new Error("编辑目标已消失");
       }
+      if (operation === "edit_file") {
+        const current = await readBoundedFileSnapshot(fullPath, READ_FILE_MAX_BYTES, fullPath);
+        if (
+          !/^[a-f0-9]{64}$/u.test(response.sourceDigest ?? "") ||
+          createHash("sha256").update(current.content).digest("hex") !== response.sourceDigest
+        ) {
+          throw new Error("编辑期间源文件内容已变化，请重新读取后重试");
+        }
+      }
       if (precondition.kind === "file") await access(fullPath, constants.W_OK);
       const beforeCommitSandbox = this.options.resolveSandbox();
       if (
@@ -254,7 +263,7 @@ export class FileWorkerTool implements BaseTool {
         targetPath: fullPath,
         content: preparedContent,
         precondition,
-        revalidateTarget: () => {
+        revalidateTarget: async () => {
           const latest = this.options.resolveSandbox();
           if (
             (latest.generation ?? this.options.roots.generation()) !== revision ||
@@ -265,7 +274,15 @@ export class FileWorkerTool implements BaseTool {
               "提交期间任务边界已变化。",
             );
           }
-          return assertSameResolvedTarget(this.options.roots, originalPath, fullPath);
+          await assertSameResolvedTarget(this.options.roots, originalPath, fullPath);
+          if (operation === "edit_file") {
+            const current = await readBoundedFileSnapshot(fullPath, READ_FILE_MAX_BYTES, fullPath);
+            if (
+              createHash("sha256").update(current.content).digest("hex") !== response.sourceDigest
+            ) {
+              throw new Error("编辑期间源文件内容已变化，请重新读取后重试");
+            }
+          }
         },
       };
       if (process.platform === "win32") {
@@ -274,11 +291,13 @@ export class FileWorkerTool implements BaseTool {
             input: AtomicWorkspaceFileWrite & {
               scratchRoot: string;
               writableRoots: readonly string[];
+              expectedSourceDigest?: string;
             },
           ): Promise<void>;
         };
         await module.commitWindowsFile({
           ...commit,
+          ...(operation === "edit_file" ? { expectedSourceDigest: response.sourceDigest } : {}),
           scratchRoot,
           writableRoots: [
             ...this.options.roots.list(),

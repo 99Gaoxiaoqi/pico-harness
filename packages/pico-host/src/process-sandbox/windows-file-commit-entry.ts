@@ -1,7 +1,10 @@
+import { createHash } from "node:crypto";
 import { lstat, realpath } from "node:fs/promises";
 import { isAbsolute, dirname, resolve } from "node:path";
 import { stdin, stdout } from "node:process";
 import { writeAtomicWorkspaceFile, type AtomicFilePrecondition } from "../atomic-workspace-file.js";
+import { readBoundedFileSnapshot } from "../atomic-workspace-file.js";
+import { READ_FILE_MAX_BYTES } from "../file-tool-helpers.js";
 
 const MAX_REQUEST_BYTES = 64 * 1024 * 1024;
 
@@ -44,6 +47,13 @@ async function main(): Promise<void> {
   const boundParentDev = BigInt(request.boundParentIdentity.dev);
   const boundParentIno = BigInt(request.boundParentIdentity.ino);
   const precondition = decodePrecondition(request.precondition);
+  const sourceDigest = request.expectedSourceDigest;
+  if (
+    sourceDigest !== undefined &&
+    (typeof sourceDigest !== "string" || !/^[a-f0-9]{64}$/u.test(sourceDigest))
+  ) {
+    throw new Error("invalid edit source digest");
+  }
   const revalidateTarget = async (): Promise<void> => {
     const currentParent = await realpath(dirname(targetPath));
     if (normalizeWindowsPath(currentParent) !== normalizeWindowsPath(boundParent)) {
@@ -66,6 +76,12 @@ async function main(): Promise<void> {
       const currentTarget = await realpath(targetPath);
       if (normalizeWindowsPath(currentTarget) !== normalizeWindowsPath(targetPath)) {
         throw new Error("Windows commit target resolved elsewhere");
+      }
+      if (typeof sourceDigest === "string") {
+        const current = await readBoundedFileSnapshot(targetPath, READ_FILE_MAX_BYTES, targetPath);
+        if (createHash("sha256").update(current.content).digest("hex") !== sourceDigest) {
+          throw new Error("Windows edit source changed before commit");
+        }
       }
     } catch (error) {
       if (precondition.kind === "missing" && hasErrnoCode(error, "ENOENT")) return;

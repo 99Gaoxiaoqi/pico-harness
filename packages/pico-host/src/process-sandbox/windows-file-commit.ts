@@ -13,6 +13,7 @@ const COMMIT_TIMEOUT_MS = 60_000;
 
 export interface WindowsFileCommitInput extends AtomicWorkspaceFileWrite {
   readonly scratchRoot: string;
+  readonly expectedSourceDigest?: string;
   /** All roots that the restricted worker or model-controlled shell may write. */
   readonly writableRoots: readonly string[];
 }
@@ -81,6 +82,7 @@ export async function commitWindowsFile(input: WindowsFileCommitInput): Promise<
       },
       content: input.content,
       precondition: input.precondition,
+      ...(input.expectedSourceDigest ? { expectedSourceDigest: input.expectedSourceDigest } : {}),
     },
     (_key, value: unknown) => (typeof value === "bigint" ? value.toString() : value),
   );
