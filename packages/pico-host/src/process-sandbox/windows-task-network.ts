@@ -159,6 +159,7 @@ export class WindowsTaskNetworkAuthority {
           profileName,
           "--control-root",
           this.controlRoot,
+          ...(operation === "prepare" ? ["--host-pid", String(process.pid)] : []),
           "--json",
         ],
         { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] },

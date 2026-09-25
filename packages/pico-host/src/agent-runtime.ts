@@ -1376,6 +1376,10 @@ export async function executeAgentRuntime(
         env: runtimeEnv,
         picoHome,
       });
+    const sessionSkillLoader = skillLoaderFactory(workDir);
+    if (collaborationMode() === "agent" && currentMainProcessSandbox().bypass !== true) {
+      await sessionSkillLoader.snapshot();
+    }
 
     // 阶段 3：装配 Provider、工具、Hook 与 AgentEngine 能力图。
     // headless/folder 装配不注入 taskHostRuntime：提前创建独立 usage ledger。
@@ -2165,7 +2169,7 @@ export async function executeAgentRuntime(
             });
           }
         : undefined,
-      skillLoaderFactory(workDir),
+      sessionSkillLoader,
       runtimeEnv,
       dependencies.bashTimeoutMs,
       collaborationMode() === "plan" || activeExecutionPlanId ? planRegistryOptions : undefined,
@@ -2184,6 +2188,7 @@ export async function executeAgentRuntime(
             revision,
           }),
       },
+      (generation) => runtimeState.codeIntelligenceManager.canRunManagedReads(generation),
       session.runtimeEventStore
         ? bindToolResultArchiveReader(session.runtimeEventStore, session.id)
         : undefined,
@@ -2484,7 +2489,7 @@ export async function executeAgentRuntime(
           orchestrationMode() !== "default" &&
           dependencies.agentGraph?.kind === "root",
         swarmMode: orchestrationMode() === "swarm",
-        skillLoader: skillLoaderFactory(workDir),
+        skillLoader: sessionSkillLoader,
         ...(dependencies.isolatedHeadless ? {} : { picoHome }),
         ...(activeHookService
           ? {
@@ -3498,6 +3503,7 @@ function buildRegistry(
   sessionTasks?: DefaultToolRegistryOptions["sessionTasks"],
   requestSandboxBoundaryHandler?: RequestSandboxBoundaryHandler,
   sessionArtifacts?: DefaultToolRegistryOptions["sessionArtifacts"],
+  canRunManagedCodeIntelligence?: DefaultToolRegistryOptions["canRunManagedCodeIntelligence"],
   toolResultArchive?: DefaultToolRegistryOptions["toolResultArchive"],
 ): ToolRegistry {
   return buildDefaultToolRegistry(workDir, {
@@ -3521,6 +3527,9 @@ function buildRegistry(
     ...(onToolGroupLoaded !== undefined ? { onToolGroupLoaded } : {}),
     ...(sessionTasks !== undefined ? { sessionTasks } : {}),
     ...(sessionArtifacts !== undefined ? { sessionArtifacts } : {}),
+    ...(canRunManagedCodeIntelligence !== undefined
+      ? { canRunManagedCodeIntelligence }
+      : {}),
     ...(requestSandboxBoundaryHandler !== undefined ? { requestSandboxBoundaryHandler } : {}),
   });
 }
