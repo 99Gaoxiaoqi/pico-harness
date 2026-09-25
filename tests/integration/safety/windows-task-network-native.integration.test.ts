@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { networkInterfaces, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import {
   buildManagedSpawnPlan,
@@ -76,6 +76,7 @@ test(
       '});s.setTimeout(4000,()=>s.destroy(new Error("timeout")));s.on("data",()=>process.stdout.write("connected"));s.on("end",()=>process.exit(0));s.on("error",()=>process.exit(23));',
     ].join("");
     let prepared = false;
+    let crashPrepared = false;
     try {
       const blocked = await runSandboxed(loopbackOnlyScript);
       assert.notEqual(blocked.code, 0, "a process without a receipt reached host loopback");
@@ -111,6 +112,12 @@ test(
       assert.equal(allowed.code, 0, allowed.stderr);
       assert.equal(allowed.stdout, "all-ok");
 
+      const revoking = join(control, "revoking");
+      await writeFile(revoking, "1", { flag: "wx" });
+      const duringRevocation = await runSandboxed(loopbackOnlyScript, receipt);
+      assert.notEqual(duringRevocation.code, 0, "a revoking task launched a network process");
+      await rm(revoking);
+
       const fileWorker = await runSandboxed(loopbackOnlyScript, receipt, "file-worker");
       assert.notEqual(fileWorker.code, 0, "File Worker accepted network authority");
 
@@ -138,6 +145,66 @@ test(
       prepared = false;
       const afterRevoke = await runSandboxed(loopbackOnlyScript, receipt);
       assert.notEqual(afterRevoke.code, 0, "revoked task receipt still reached host loopback");
+
+      const crashPrepare = await runBroker([
+        "--task-network",
+        "prepare",
+        "--profile-name",
+        otherProfileName,
+        "--control-root",
+        control,
+        "--host-pid",
+        String(process.pid),
+        "--json",
+      ]);
+      assert.equal(crashPrepare.code, 0, crashPrepare.stderr);
+      crashPrepared = true;
+      const crashReceipt = await writeReceipt(otherProfileName, "session");
+      const ready = await readFile(join(control, `network-${otherProfileName}.ready`), "utf8");
+      const helperPid = Number(ready.split(":")[0]);
+      assert.ok(Number.isSafeInteger(helperPid) && helperPid > 0);
+      process.kill(helperPid);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const afterCrash = await runSandboxed(loopbackOnlyScript, crashReceipt);
+      assert.notEqual(afterCrash.code, 0, "a crashed helper left a usable network receipt");
+      const crashVerify = await runBroker([
+        "--task-network",
+        "verify",
+        "--profile-name",
+        otherProfileName,
+        "--control-root",
+        control,
+        "--json",
+      ]);
+      assert.notEqual(crashVerify.code, 0, "crashed helper still verified as prepared");
+      const crashRevoke = await runBroker([
+        "--task-network",
+        "revoke",
+        "--profile-name",
+        otherProfileName,
+        "--control-root",
+        control,
+        "--json",
+      ]);
+      assert.notEqual(crashRevoke.code, 0, "crashed helper cleanup silently succeeded");
+      const helper = join(dirname(broker), "pico-appcontainer-host-prep.exe");
+      const recover = await runProcess(
+        helper,
+        ["recover-task-network", "--profile-name", otherProfileName, "--json"],
+        process.env,
+      );
+      assert.equal(recover.code, 0, recover.stderr);
+      const finalRevoke = await runBroker([
+        "--task-network",
+        "revoke",
+        "--profile-name",
+        otherProfileName,
+        "--control-root",
+        control,
+        "--json",
+      ]);
+      assert.equal(finalRevoke.code, 0, finalRevoke.stderr);
+      crashPrepared = false;
     } finally {
       if (prepared) {
         await runBroker([
@@ -153,6 +220,23 @@ test(
       loopback.close();
       lan.close();
       await rm(root, { recursive: true, force: true });
+    }
+    if (crashPrepared) {
+      const helper = join(dirname(broker), "pico-appcontainer-host-prep.exe");
+      await runProcess(
+        helper,
+        ["recover-task-network", "--profile-name", otherProfileName],
+        process.env,
+      );
+      await runBroker([
+        "--task-network",
+        "revoke",
+        "--profile-name",
+        otherProfileName,
+        "--control-root",
+        control,
+        "--json",
+      ]);
     }
 
     async function writeReceipt(profile: string, scope: "session" | "once"): Promise<string> {

@@ -67,9 +67,12 @@ task's AppContainer profile in the Host user's account, then starts a task-scope
 that installs a loopback exemption for that profile SID. The helper stays alive only while its Host
 task is running. On task revocation or Host exit, it removes the exemption and exits; normal
 revocation does not ask for another administrator confirmation. The Broker rejects new networked
-processes if the helper exits unexpectedly or the exemption disappears. A helper crash can leave
-an orphaned OS exception; the unique task identity is still unusable by Pico until an administrator
-prepares or removes the exception. Restarted and unattended tasks must verify preparation again
+processes if the helper exits unexpectedly or the exemption disappears. Before revocation the Host
+creates a `revoking` marker in the task control directory; the Broker checks it when reading a
+receipt and immediately before resuming a process. A helper crash can leave an orphaned OS
+exception; the unique task identity is still unusable by Pico. An administrator can remove that
+orphan with `pico-appcontainer-host-prep.exe recover-task-network --profile-name NAME`, after which
+the task profile can be deleted. Restarted and unattended tasks must verify preparation again
 and fail closed if it is absent. The File Worker never receives a network receipt.
 
 These are separate Windows gates: an AppContainer token needs network capability SIDs for Internet
