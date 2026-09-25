@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { existsSync, symlinkSync } from "node:fs";
+import { existsSync, renameSync, symlinkSync } from "node:fs";
 import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -21,6 +21,20 @@ import { WorkspaceRoots as SourceWorkspaceRoots } from "../../../packages/pico-h
 import { ExploreRepoTool } from "@pico/pico-host/explore-repo-tool";
 
 const nativeAvailable = detectSandboxBackend() !== "unavailable";
+
+test("prebound File Worker roots accept only the Host-bound lexical target", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-file-worker-prebound-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const workspace = join(root, "workspace");
+  await mkdir(workspace);
+  const allowed = join(workspace, "allowed.txt");
+  const roots = WorkspaceRoots.createPreboundFileWorker(workspace);
+  roots.replaceBoundaryEntries([{ path: allowed, access: "read", scope: "exact" }]);
+  assert.equal(await roots.assertAllowed("allowed.txt"), allowed);
+  await assert.rejects(roots.assertAllowed("sibling.txt"), /路径越界/u);
+  await assert.rejects(roots.assertAllowed("../outside.txt"), /路径越界/u);
+  await assert.rejects(roots.assertAllowed("ALLOWED.TXT"), /路径越界/u);
+});
 
 test("native file-worker process reads only its target and cannot connect to loopback", async (context) => {
   assert.equal(nativeAvailable, true, "本机缺少 File Worker 系统沙箱后端");
@@ -79,7 +93,10 @@ test("native file-worker process reads only its target and cannot connect to loo
         child.once("close", resolve);
       }),
       new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error("File Worker 原生隔离探针超时")), 10_000);
+        timer = setTimeout(
+          () => reject(new Error(`File Worker 原生隔离探针超时: ${stderr}`)),
+          10_000,
+        );
       }),
     ]);
     assert.equal(exitCode, 0, stderr);
@@ -105,6 +122,7 @@ test("standalone packaged File Worker runs with an exact file grant", async (con
   await writeFile(allowed, "bundle-readable");
   const targetPath = WorkspaceRoots.createSync(workspace).resolveUnchecked("allowed.txt");
   const info = await lstat(allowed, { bigint: true });
+  const workDirInfo = await lstat(workspace, { bigint: true });
   const operationId = randomUUID();
   const executable = process.env.PICO_FILE_WORKER_TEST_EXECUTABLE ?? process.execPath;
   const executableRoot =
@@ -144,6 +162,14 @@ test("standalone packaged File Worker runs with an exact file grant", async (con
     operation: "read_file",
     args: JSON.stringify({ path: "allowed.txt" }),
     workDir: workspace,
+    workDirIdentity: {
+      kind: "directory",
+      dev: String(workDirInfo.dev),
+      ino: String(workDirInfo.ino),
+      size: String(workDirInfo.size),
+      mtimeNs: String(workDirInfo.mtimeNs),
+      ctimeNs: String(workDirInfo.ctimeNs),
+    },
     stagePath: join(scratchRoot, "prepared"),
     targets: [
       {
@@ -169,7 +195,10 @@ test("standalone packaged File Worker runs with an exact file grant", async (con
         child.once("close", resolve);
       }),
       new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error("独立 File Worker bundle 超时")), 10_000);
+        timer = setTimeout(
+          () => reject(new Error(`独立 File Worker bundle 超时: ${stderr}`)),
+          10_000,
+        );
       }),
     ]);
     assert.equal(exitCode, 0, stderr);
@@ -269,6 +298,7 @@ test(
     const external = join(root, "external");
     await mkdir(workspace);
     await mkdir(external);
+    await mkdir(join(workspace, "swapped", "sub"), { recursive: true });
     const roots = WorkspaceRoots.createSync(workspace);
     const explore = new FileWorkerTool(new ExploreRepoTool(workspace, undefined), {
       roots: SourceWorkspaceRoots.createSync(workspace),
@@ -288,7 +318,10 @@ test(
         generation: 1,
         resolveSandbox: () => {
           calls++;
-          if (calls === 2) symlinkSync(external, join(workspace, "swapped"));
+          if (calls === 2) {
+            renameSync(join(workspace, "swapped"), join(workspace, "swapped-original"));
+            symlinkSync(external, join(workspace, "swapped"), "dir");
+          }
           return { profile: "workspace-write", generation: 1 };
         },
       },

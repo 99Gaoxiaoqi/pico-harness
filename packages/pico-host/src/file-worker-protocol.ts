@@ -15,22 +15,31 @@ export interface FileTargetIdentity {
   readonly ctimeNs?: string;
 }
 
+/** AppContainer ACL grant/cleanup changes Windows ctime without changing file content or identity. */
 export function sameFileTargetIdentity(
   expected: FileTargetIdentity,
   actual: FileTargetIdentity,
 ): boolean {
   if (expected.kind !== actual.kind) return false;
   if (expected.kind === "missing") return true;
-  // AppContainer's exact ACL grant changes Windows change-time even though the
-  // pinned file object and its data have not changed. The Broker pins its
-  // handle against replacement while the worker runs; compare the stable file
-  // identity, size and data modification time here.
+  if (process.platform !== "win32") return JSON.stringify(expected) === JSON.stringify(actual);
+  const valid = (value: string | undefined): value is string =>
+    value !== undefined && /^\d+$/u.test(value);
   return (
+    valid(expected.dev) &&
+    valid(expected.ino) &&
+    expected.ino !== "0" &&
+    valid(expected.size) &&
+    valid(expected.mtimeNs) &&
+    valid(actual.dev) &&
+    valid(actual.ino) &&
+    actual.ino !== "0" &&
+    valid(actual.size) &&
+    valid(actual.mtimeNs) &&
     expected.dev === actual.dev &&
     expected.ino === actual.ino &&
     expected.size === actual.size &&
-    expected.mtimeNs === actual.mtimeNs &&
-    (process.platform === "win32" || expected.ctimeNs === actual.ctimeNs)
+    expected.mtimeNs === actual.mtimeNs
   );
 }
 
@@ -40,8 +49,14 @@ export interface FileWorkerRequest {
   readonly operation: FileWorkerOperation;
   readonly args: string;
   readonly workDir: string;
+  readonly workDirIdentity: FileTargetIdentity;
   readonly stagePath: string;
-  readonly targets: readonly { path: string; identity: FileTargetIdentity }[];
+  readonly targets: readonly {
+    path: string;
+    identity: FileTargetIdentity;
+    /** Required for a not-yet-existing exact write target. */
+    parentIdentity?: FileTargetIdentity;
+  }[];
   readonly excludeSensitiveFiles: boolean;
 }
 

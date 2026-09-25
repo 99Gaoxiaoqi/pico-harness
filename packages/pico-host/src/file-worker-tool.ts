@@ -27,11 +27,12 @@ import {
   SandboxViolationError,
   type SandboxProfile,
 } from "./process-sandbox/index.js";
-import type {
-  FileTargetIdentity,
-  FileWorkerOperation,
-  FileWorkerRequest,
-  FileWorkerResponse,
+import {
+  sameFileTargetIdentity,
+  type FileTargetIdentity,
+  type FileWorkerOperation,
+  type FileWorkerRequest,
+  type FileWorkerResponse,
 } from "./file-worker-protocol.js";
 import { sameFileTargetIdentity } from "./file-worker-protocol.js";
 
@@ -137,12 +138,35 @@ export class FileWorkerTool implements BaseTool {
     if (operation === "read_file" || operation === "edit_file") {
       if (targets[0]?.identity.kind !== "file") throw new Error(`文件不是普通文件: ${paths[0]}`);
     }
+    if (operation === "write_file") {
+      await assertManagedParentDirectory(this.options.roots, paths[0]!, targets[0]!.path);
+    }
+    // Use the same canonical spelling for the OS grant and the Worker binding.
+    const workDir = await realpath(this.options.workDir);
+    const workDirIdentity = await fileTargetIdentity(workDir);
+    if (workDirIdentity.kind !== "directory") {
+      throw new Error("File Worker 工作区不是普通目录");
+    }
+    const boundTargets: FileWorkerRequest["targets"] = await Promise.all(
+      targets.map(async (target) =>
+        target.identity.kind === "missing"
+          ? {
+              ...target,
+              parentIdentity: await fileTargetIdentity(dirname(target.path)),
+            }
+          : target,
+      ),
+    );
+    if (
+      boundTargets.some(
+        (target) =>
+          target.identity.kind === "missing" && target.parentIdentity?.kind !== "directory",
+      )
+    ) {
+      throw new Error("File Worker 新建目标的父目录不存在或已被替换");
+    }
     const operationId = randomUUID();
     const revision = sandbox.generation ?? this.options.roots.generation();
-    // macOS may expose the workspace through /var -> /private/var. The
-    // per-target Seatbelt grant uses the canonical path, so the worker's cwd
-    // and its own workspace identity check must use that same spelling.
-    const workDir = await realpath(this.options.workDir);
     const scratchRoot = resolve(
       defaultSandboxScratchRoot(this.options.workDir),
       "file-worker",
@@ -154,8 +178,9 @@ export class FileWorkerTool implements BaseTool {
       operation,
       args,
       workDir,
+      workDirIdentity,
       stagePath: resolve(scratchRoot, "prepared"),
-      targets,
+      targets: boundTargets,
       excludeSensitiveFiles: this.options.excludeSensitiveFiles ?? false,
     };
     try {
