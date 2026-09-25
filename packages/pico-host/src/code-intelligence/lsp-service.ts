@@ -3,6 +3,7 @@ import { open, realpath } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { StdioLspClient } from "./lsp-client.js";
+import type { WorkerDocument } from "./worker-protocol.js";
 import type { LspPosition } from "./lsp-protocol.js";
 import type {
   CodeCall,
@@ -66,6 +67,7 @@ export class LspCodeIntelligenceService implements CodeIntelligenceService {
   constructor(
     private readonly rootDir: string,
     private readonly client: StdioLspClient,
+    private readonly readDocument?: (filePath: string) => Promise<WorkerDocument>,
   ) {
     this.unsubscribeDiagnostics = client.onNotification(
       "textDocument/publishDiagnostics",
@@ -176,6 +178,16 @@ export class LspCodeIntelligenceService implements CodeIntelligenceService {
   }
 
   private async ensureOpen(filePath: string): Promise<string> {
+    if (this.readDocument) {
+      const document = await this.readDocument(filePath);
+      if (
+        !path.isAbsolute(document.filePath) ||
+        Buffer.byteLength(document.text) > MAX_LSP_DOCUMENT_BYTES
+      ) {
+        throw new Error("代码智能 Worker 返回了无效文档");
+      }
+      return this.publishDocument(document.filePath, document.text);
+    }
     const rootPath = await realpath(this.rootDir);
     const requestedPath = path.resolve(rootPath, filePath);
     let physicalPath: string;
@@ -203,6 +215,10 @@ export class LspCodeIntelligenceService implements CodeIntelligenceService {
     } finally {
       await handle.close();
     }
+    return this.publishDocument(physicalPath, text);
+  }
+
+  private publishDocument(physicalPath: string, text: string): string {
     const uri = pathToFileURL(physicalPath).href;
     const opened = this.openedDocuments.get(uri);
     if (opened) {

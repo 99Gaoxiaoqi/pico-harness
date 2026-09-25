@@ -5,7 +5,8 @@ import {
   type LspServerDiscoveryResult,
 } from "./lsp-server-discovery.js";
 import { LspCodeIntelligenceService } from "./lsp-service.js";
-import { RepoMapService } from "./repo-map.js";
+import { RepoMapService, type RepoMapSnapshot } from "./repo-map.js";
+import { ReadOnlyCodeWorker } from "./worker-client.js";
 import type { CodeIntelligenceService } from "./types.js";
 import {
   createSandboxPolicy,
@@ -29,6 +30,7 @@ export interface CodeIntelligenceManagerOptions {
   readonly pathEnv?: string;
   readonly logger?: LspDiagnosticLogger;
   readonly processSandbox?: {
+    bypass?: boolean;
     config?: Partial<SandboxConfig>;
     scratchRoot?: string;
     generation?: number;
@@ -44,11 +46,15 @@ export interface CodeIntelligenceManagerOptions {
  */
 export class CodeIntelligenceManager {
   private client: StdioLspClient | undefined;
+  private worker: ReadOnlyCodeWorker | undefined;
+  private repoMapService: RepoMapService | ReadOnlyCodeWorker | undefined;
   private currentService: CodeIntelligenceService | undefined;
   private startPromise: Promise<CodeIntelligenceStatus> | undefined;
   private lspEnabled: boolean;
   private processSandbox: CodeIntelligenceManagerOptions["processSandbox"];
   private readonly serviceProxy: CodeIntelligenceService;
+  private serviceGeneration: number | undefined;
+  private lifecycleRevision = 0;
   private currentStatus: CodeIntelligenceStatus = {
     backend: "repo-map",
     reason: "代码智能尚未启动，使用 Repo Map",
@@ -57,7 +63,13 @@ export class CodeIntelligenceManager {
   constructor(private readonly options: CodeIntelligenceManagerOptions) {
     this.lspEnabled = options.lspEnabled !== false;
     this.processSandbox = options.processSandbox;
-    const serviceProxy: CodeIntelligenceService = {
+    const serviceProxy: CodeIntelligenceService & {
+      snapshot(options?: {
+        readonly query?: string;
+        readonly maxFiles?: number;
+        readonly signal?: AbortSignal;
+      }): Promise<RepoMapSnapshot>;
+    } = {
       backend: "repo-map",
       definitions: (query, requestOptions) =>
         this.requireService().definitions(query, requestOptions),
@@ -68,6 +80,10 @@ export class CodeIntelligenceManager {
         this.requireService().diagnostics(filePath, requestOptions),
       callHierarchy: (query, direction, requestOptions) =>
         this.requireService().callHierarchy(query, direction, requestOptions),
+      snapshot: (options) => {
+        this.requireService();
+        return this.repoMap().snapshot(options);
+      },
       close: async () => undefined,
     };
     Object.defineProperty(serviceProxy, "backend", {
@@ -83,14 +99,44 @@ export class CodeIntelligenceManager {
   }
 
   private async startOnce(): Promise<CodeIntelligenceStatus> {
+    const lifecycleRevision = this.lifecycleRevision;
+    const managed = this.processSandbox?.bypass === false;
+    let workspaceEntries: readonly string[] | undefined;
+    if (managed) {
+      const sandbox = this.processSandbox!;
+      this.worker = new ReadOnlyCodeWorker({
+        rootDir: this.options.rootDir,
+        generation: sandbox.generation ?? 0,
+        workspaceRoots: sandbox.workspaceRoots ?? [this.options.rootDir],
+        ...(sandbox.readRoots ? { readRoots: sandbox.readRoots } : {}),
+        ...(sandbox.readFiles ? { readFiles: sandbox.readFiles } : {}),
+      });
+      this.repoMapService = this.worker;
+      try {
+        await this.worker.start();
+        workspaceEntries = await this.worker.rootEntries();
+        if (this.lifecycleRevision !== lifecycleRevision) return this.currentStatus;
+      } catch (error) {
+        if (this.lifecycleRevision !== lifecycleRevision) return this.currentStatus;
+        this.currentService = this.worker;
+        this.serviceGeneration = sandbox.generation ?? 0;
+        this.currentStatus = {
+          backend: "repo-map",
+          reason: `只读代码智能 Worker 不可用: ${errorMessage(error)}`,
+        };
+        return this.currentStatus;
+      }
+    }
     if (!this.lspEnabled) {
       return this.fallback({ source: "none", reason: "LSP 已由运行时策略禁用" });
     }
     const discovery = await discoverLspServer({
       rootDir: this.options.rootDir,
+      ...(workspaceEntries ? { workspaceEntries } : {}),
       ...(this.options.lspServers ? { configuredServers: this.options.lspServers } : {}),
       ...(this.options.pathEnv !== undefined ? { pathEnv: this.options.pathEnv } : {}),
     });
+    if (this.lifecycleRevision !== lifecycleRevision) return this.currentStatus;
     if (!discovery.config) return this.fallback(discovery);
 
     const client = new StdioLspClient(
@@ -110,18 +156,29 @@ export class CodeIntelligenceManager {
       }),
       this.options.logger,
     );
+    this.client = client;
     try {
       await client.start();
-      this.client = client;
-      this.currentService = new LspCodeIntelligenceService(this.options.rootDir, client);
+      if (this.lifecycleRevision !== lifecycleRevision) {
+        await client.close();
+        return this.currentStatus;
+      }
+      this.currentService = new LspCodeIntelligenceService(
+        this.options.rootDir,
+        client,
+        this.worker ? (filePath) => this.worker!.readDocument(filePath) : undefined,
+      );
+      this.serviceGeneration = this.processSandbox?.generation ?? 0;
       this.currentStatus = {
         backend: "lsp",
         reason: discovery.reason,
         serverId: discovery.config.id,
       };
     } catch (error) {
+      if (this.lifecycleRevision !== lifecycleRevision) return this.currentStatus;
       this.client = undefined;
-      this.currentService = new RepoMapService(this.options.rootDir);
+      this.currentService = this.repoMap();
+      this.serviceGeneration = this.processSandbox?.generation ?? 0;
       this.currentStatus = {
         backend: "repo-map",
         reason: `LSP server ${discovery.config.id} 启动失败，已降级为 Repo Map: ${errorMessage(error)}`,
@@ -142,15 +199,38 @@ export class CodeIntelligenceManager {
     return this.currentService ? this.serviceProxy : undefined;
   }
 
+  /** Explicit Repo Map owner used by the repo_map tool even while LSP is active. */
+  repoMap(): RepoMapService | ReadOnlyCodeWorker {
+    if (this.processSandbox?.bypass === false) {
+      if (!this.worker) throw new Error("受限 Repo Map Worker 尚未就绪");
+      return this.worker;
+    }
+    this.repoMapService ??= new RepoMapService(this.options.rootDir);
+    return this.repoMapService;
+  }
+
+  /** The registry may expose managed reads only after this exact generation is attested. */
+  canRunManagedReads(generation: number): boolean {
+    return (
+      this.processSandbox?.bypass === false &&
+      this.processSandbox.generation === generation &&
+      this.serviceGeneration === generation &&
+      this.worker?.isReady() === true &&
+      this.currentService !== undefined &&
+      (this.currentService.backend !== "lsp" || this.client?.isReady() === true)
+    );
+  }
+
   async updateProcessSandbox(
     processSandbox: NonNullable<CodeIntelligenceManagerOptions["processSandbox"]>,
   ): Promise<CodeIntelligenceStatus> {
-    if (this.processSandbox?.generation === processSandbox.generation) return this.currentStatus;
-    this.processSandbox = processSandbox;
-    // Repo Map 不启动子进程。禁用 LSP 时只替换下一次启动将使用的边界，
-    // 避免先按新边界重启、随后又因 Plan 策略关闭的双重生命周期切换。
-    if (!this.lspEnabled) return this.currentStatus;
+    if (
+      this.processSandbox?.generation === processSandbox.generation &&
+      this.processSandbox?.bypass === processSandbox.bypass
+    )
+      return this.currentStatus;
     await this.close();
+    this.processSandbox = processSandbox;
     return await this.start();
   }
 
@@ -163,21 +243,40 @@ export class CodeIntelligenceManager {
   }
 
   async close(): Promise<void> {
-    if (this.currentService) await this.currentService.close();
-    else await this.client?.close();
+    this.lifecycleRevision++;
+    const service = this.currentService;
+    const client = this.client;
+    const worker = this.worker;
+    const repoMap = this.repoMapService;
     this.currentService = undefined;
     this.client = undefined;
+    this.worker = undefined;
+    this.repoMapService = undefined;
+    this.serviceGeneration = undefined;
     this.startPromise = undefined;
+    await worker?.close();
+    if (service && service !== worker) await service.close();
+    else await client?.close();
+    if (repoMap && repoMap !== service && repoMap !== worker) {
+      await repoMap.close();
+    }
   }
 
   private fallback(discovery: LspServerDiscoveryResult): CodeIntelligenceStatus {
-    this.currentService = new RepoMapService(this.options.rootDir);
+    this.currentService = this.repoMap();
+    this.serviceGeneration = this.processSandbox?.generation ?? 0;
     this.currentStatus = { backend: "repo-map", reason: discovery.reason };
     return this.currentStatus;
   }
 
   private requireService(): CodeIntelligenceService {
     if (!this.currentService) throw new Error("代码智能服务当前不可用");
+    if (
+      this.processSandbox?.bypass === false &&
+      !this.canRunManagedReads(this.processSandbox.generation ?? 0)
+    ) {
+      throw new Error("受限代码智能 Worker 与当前任务边界不匹配或不可用");
+    }
     return this.currentService;
   }
 }
