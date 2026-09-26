@@ -1,3 +1,5 @@
+import { Button as AstryxButton } from "@astryxdesign/core/Button";
+import { TextField, SelectField } from "../ui-controls.js";
 import { isTerminalRunStatus } from "@pico/protocol";
 import { FileCode2, FileDiff, History, RefreshCw, RotateCcw } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -131,40 +133,35 @@ export function ReviewPage() {
   return (
     <div className="page-stack review-page">
       <section className="review-scope" aria-label="审阅范围">
-        <label>
+        <div className="review-scope-field">
           任务
-          <select
-            aria-label="审阅任务"
+          <SelectField
+            label="审阅任务"
             value={sessionId ?? ""}
-            onChange={(event) => selectScope(event.target.value)}
-          >
-            <option value="" disabled>
-              选择任务
-            </option>
-            {sessions.map((session) => (
-              <option key={session.id} value={session.id}>
-                {session.title}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
+            onValueChange={(value) => selectScope(value)}
+            options={[
+              { value: "", label: "选择任务", disabled: true },
+              ...sessions.map((session) => ({ value: session.id, label: session.title })),
+            ]}
+          />
+        </div>
+        <div className="review-scope-field">
           运行
-          <select
-            aria-label="审阅运行"
+          <SelectField
+            label="审阅运行"
             value={runId ?? ""}
-            onChange={(event) => sessionId && selectScope(sessionId, event.target.value)}
-          >
-            <option value="" disabled>
-              没有已结束的运行
-            </option>
-            {runs.map((run) => (
-              <option key={run.id} value={run.id}>
-                {new Date(run.startedAt).toLocaleString()} · {run.description} · {run.id.slice(-8)}
-              </option>
-            ))}
-          </select>
-        </label>
+            onValueChange={(value) => {
+              if (sessionId) selectScope(sessionId, value);
+            }}
+            options={[
+              { value: "", label: "没有已结束的运行", disabled: true },
+              ...runs.map((run) => ({
+                value: run.id,
+                label: `${new Date(run.startedAt).toLocaleString()} · ${run.description} · ${run.id.slice(-8)}`,
+              })),
+            ]}
+          />
+        </div>
         <Button
           disabled={loading || Boolean(busy)}
           onClick={() => setRefresh((value) => value + 1)}
@@ -191,10 +188,12 @@ export function ReviewPage() {
               <span>{changes.length} 个文件</span>
             </div>
             {changes.map((change) => (
-              <button
+              <AstryxButton
+                label={change.path}
+                variant="ghost"
                 key={change.path}
                 type="button"
-                className={change.path === selected.path ? "is-active" : ""}
+                className={`pico-page-control ${change.path === selected.path ? "is-active" : ""}`}
                 onClick={() => setSelectedPath(change.path)}
               >
                 <FileCode2 aria-hidden="true" />
@@ -205,7 +204,7 @@ export function ReviewPage() {
                 <em>
                   +{change.additions} −{change.deletions}
                 </em>
-              </button>
+              </AstryxButton>
             ))}
           </aside>
           <section className="diff-workspace">
@@ -284,7 +283,8 @@ export function ReviewPage() {
             <div className="review-composer">
               <label htmlFor="review-comment">要求修改</label>
               <div className="input-action">
-                <input
+                <TextField
+                  label="要求修改"
                   id="review-comment"
                   value={comment}
                   autoComplete="off"

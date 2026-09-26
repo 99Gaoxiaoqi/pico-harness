@@ -1,0 +1,99 @@
+/* Astryx owns interaction while the existing pages keep their visual layout. */
+:where(.pico-page-control) {
+  height: auto;
+  min-width: 0;
+  background-image: none;
+  font: inherit;
+  -webkit-app-region: no-drag;
+}
+.pico-page-control > span:not([role="status"]),
+.pico-page-control > span:not([role="status"]) > span {
+  display: contents;
+}
+.search-field > .astryx-field,
+.input-action > .astryx-field {
+  flex: 1;
+  min-width: 0;
+}
+.search-field .pico-text-field {
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+.search-field .pico-text-field input,
+.automation-form .pico-text-field input,
+.automation-form .pico-textarea-field textarea {
+  border: 0;
+  background: transparent;
+}
+.automation-form .pico-text-field input {
+  padding: 0;
+}
+.review-scope-field {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+}
+.review-scope-field .pico-select-field {
+  width: 100%;
+  min-width: 0;
+  border-color: var(--line-strong);
+  background: var(--surface);
+}
+.conversation-interaction-slot__feedback .pico-textarea-field {
+  border: 1px solid var(--conversation-line);
+  border-radius: 8px;
+  background: var(--conversation-bg);
+}
+.conversation-interaction-slot__feedback .pico-textarea-field textarea {
+  min-height: 64px;
+  padding: 8px;
+  border: 0;
+  background: transparent;
+  color: var(--conversation-ink);
+  font: inherit;
+}
+.conversation-graph-board .pico-select-field {
+  height: 28px;
+  border: 0;
+  border-radius: 7px;
+  background: var(--conversation-bg-subtle);
+  color: inherit;
+  font-size: 12px;
+}
+.composer-model-trigger.pico-page-control {
+  height: 28px;
+  min-height: 0;
+  padding: 4px 7px;
+  font-size: 12px;
+}
+.pico-composer-model-menu.composer-model-menu {
+  /* The Astryx layer can leave the conversation surface that defines these tokens. */
+  --conversation-bg: var(--surface-raised, #fff);
+  --conversation-bg-subtle: var(--surface-muted, #f4f4f2);
+  --conversation-ink: var(--ink, #252522);
+  --conversation-ink-muted: var(--ink-secondary, #66645f);
+  --conversation-ink-faint: var(--ink-tertiary, #77746e);
+  --conversation-line: var(--line, #dedcd5);
+  position: static;
+  width: 100%;
+  max-height: 328px;
+  -webkit-app-region: no-drag;
+}
+.pico-composer-model-menu .astryx-dropdown-menu-radio {
+  display: none;
+}
+.pico-composer-model-menu .composer-model-item {
+  padding: 7px;
+  gap: 9px;
+  font-size: 12px;
+}
+.pico-composer-model-menu .composer-model-item[aria-disabled="true"] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.pico-page-control[aria-disabled="true"] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}

@@ -1,3 +1,4 @@
+import { TextField, TextAreaField, SwitchField } from "../ui-controls.js";
 import { Clock3, Plus, Workflow } from "lucide-react";
 import { useState } from "react";
 import { Button, EmptyState, InlineNotice, StatusPill } from "../components.js";
@@ -7,6 +8,7 @@ import { formatRelative } from "../view-format.js";
 export function AutomationsPage() {
   const { data, actions, busy } = useRuntime();
   const [creating, setCreating] = useState(false);
+  const [draft, setDraft] = useState({ name: "", schedule: "", prompt: "" });
   return (
     <div className="page-stack">
       <section className="page-intro">
@@ -15,7 +17,13 @@ export function AutomationsPage() {
           <h2>定时任务</h2>
           <p>让 Pico 按计划重复执行任务；审批与信任规则始终有效。</p>
         </div>
-        <Button variant="primary" onClick={() => setCreating((value) => !value)}>
+        <Button
+          variant="primary"
+          onClick={() => {
+            if (!creating) setDraft({ name: "", schedule: "", prompt: "" });
+            setCreating((value) => !value);
+          }}
+        >
           <Plus aria-hidden="true" size={16} />
           新建定时任务
         </Button>
@@ -41,7 +49,10 @@ export function AutomationsPage() {
         >
           <div>
             <label htmlFor="automation-name">名称</label>
-            <input
+            <TextField
+              label="名称"
+              value={draft.name}
+              onValueChange={(name) => setDraft((current) => ({ ...current, name }))}
               id="automation-name"
               name="name"
               required
@@ -51,7 +62,10 @@ export function AutomationsPage() {
           </div>
           <div>
             <label htmlFor="automation-schedule">计划</label>
-            <input
+            <TextField
+              label="计划"
+              value={draft.schedule}
+              onValueChange={(schedule) => setDraft((current) => ({ ...current, schedule }))}
               id="automation-schedule"
               name="schedule"
               required
@@ -61,7 +75,10 @@ export function AutomationsPage() {
           </div>
           <div className="automation-form__prompt">
             <label htmlFor="automation-prompt">任务说明</label>
-            <textarea
+            <TextAreaField
+              label="任务说明"
+              value={draft.prompt}
+              onValueChange={(prompt) => setDraft((current) => ({ ...current, prompt }))}
               id="automation-prompt"
               name="prompt"
               required
@@ -93,15 +110,12 @@ export function AutomationsPage() {
                 <span className="automation-card__icon">
                   <Clock3 aria-hidden="true" />
                 </span>
-                <label className="switch">
-                  <input
-                    type="checkbox"
-                    checked={job.enabled}
-                    disabled={busy === "toggle-job"}
-                    onChange={(event) => void actions.toggleJob(job.id, event.target.checked)}
-                  />
-                  <span />
-                </label>
+                <SwitchField
+                  label={`启用 ${job.name}`}
+                  checked={job.enabled}
+                  disabled={busy === "toggle-job"}
+                  onCheckedChange={(enabled) => void actions.toggleJob(job.id, enabled)}
+                />
               </header>
               <h3>{job.name}</h3>
               <p>{job.prompt}</p>
