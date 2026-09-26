@@ -1,0 +1,81 @@
+/* Keep Pico's existing prose rules authoritative over Astryx's list/table substrate. */
+.desktop-markdown.astryx-markdown {
+  font-family: inherit;
+  font-size: inherit;
+  line-height: 1.66;
+  color: inherit;
+}
+
+.desktop-markdown .astryx-markdown-list,
+.desktop-markdown .astryx-markdown-table {
+  margin-block: 0.54em;
+  max-width: 100%;
+}
+
+.desktop-markdown .astryx-markdown-list:first-child,
+.desktop-markdown .astryx-markdown-table:first-child {
+  margin-top: 0;
+}
+
+.desktop-markdown .astryx-markdown-list:last-child,
+.desktop-markdown .astryx-markdown-table:last-child {
+  margin-bottom: 0;
+}
+
+.desktop-markdown .astryx-markdown-list > ul,
+.desktop-markdown .astryx-markdown-list > ol {
+  margin: 0;
+  padding-left: 1.45em;
+}
+
+.desktop-markdown .astryx-markdown-table {
+  overflow-x: auto;
+}
+
+.desktop-markdown .astryx-markdown-table table {
+  margin: 0;
+  font-family: inherit;
+}
+
+.desktop-markdown.astryx-markdown.desktop-markdown--dim {
+  color: var(--conversation-ink-faint);
+  font-size: 12px;
+}
+
+/* Astryx's List uses flex rows and a separate marker; prose keeps native markers. */
+.desktop-markdown .astryx-list {
+  display: block;
+  gap: 0;
+  font: inherit;
+}
+
+.desktop-markdown ul.astryx-list {
+  list-style: disc;
+}
+
+.desktop-markdown ol.astryx-list {
+  list-style: decimal;
+}
+
+.desktop-markdown .astryx-list-item {
+  display: list-item;
+  padding: 0;
+  min-height: 0;
+  line-height: inherit;
+  font: inherit;
+}
+
+.desktop-markdown .astryx-list-item > span:first-child {
+  display: none;
+}
+
+.desktop-markdown .astryx-list-item > span:last-child,
+.desktop-markdown .astryx-list-item > span:last-child > span {
+  display: contents;
+  font: inherit;
+}
+
+/* Let the library's layered alignment atoms preserve GFM column alignment. */
+.desktop-markdown .astryx-table :is(th, td) {
+  text-align: revert-layer;
+}
