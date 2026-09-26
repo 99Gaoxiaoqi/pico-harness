@@ -79,7 +79,9 @@
     "check:storage": "node --import tsx scripts/check-storage-capability.mjs",
     "check:architecture": "node scripts/check-architecture-boundaries.mjs",
     "lint": "eslint src scripts tests \"apps/**/*.{ts,tsx}\" \"packages/**/*.{ts,tsx}\" eslint.config.js --no-error-on-unmatched-pattern && npm run check:architecture",
-    "format": "prettier --check src scripts tests apps packages .github/workflows docs README.md AGENTS.md package.json package-lock.json tsconfig.json tsconfig.build.json"
+    "format": "prettier --check src scripts tests apps packages .github/workflows docs README.md AGENTS.md package.json package-lock.json tsconfig.json tsconfig.build.json",
+    "astryx:theme": "node scripts/build-astryx-theme.mjs",
+    "postinstall": "patch-package --error-on-fail"
   },
   "engines": {
     "node": ">=22.19 <23 || >=24.3 <25 || >=26 <27"

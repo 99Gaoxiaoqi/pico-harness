@@ -1,0 +1,84 @@
+@layer components {
+  .button,
+  .icon-button {
+    font-family: var(--font-ui);
+    font-size: inherit;
+    box-shadow: none;
+  }
+  .button {
+    height: auto;
+  }
+  .button > span {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+  }
+  .button--quiet {
+    min-height: 30px;
+  }
+  .pico-text-field,
+  .pico-select-field {
+    min-width: 0;
+    height: 36px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--surface-raised);
+    color: var(--ink);
+    font: inherit;
+    box-shadow: none;
+  }
+  .pico-text-field {
+    padding: 0 10px;
+  }
+  .pico-text-field input {
+    width: 100%;
+    min-width: 0;
+    height: 100%;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    outline: none;
+  }
+  .pico-textarea-field {
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--surface-raised);
+    box-shadow: none;
+  }
+  .pico-textarea-field textarea {
+    width: 100%;
+    min-width: 0;
+    padding: 10px;
+    border: 0;
+    background: transparent;
+    color: var(--ink);
+    font: inherit;
+  }
+  .pico-switch-field .astryx-switch {
+    width: 34px;
+    height: 20px;
+  }
+  .pico-switch-field .astryx-switch-thumb {
+    width: 14px;
+    height: 14px;
+  }
+  .pico-text-field:focus-within,
+  .pico-textarea-field:focus-within {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+  }
+  .pico-text-field:has(input:disabled),
+  .pico-textarea-field:has(textarea:disabled) {
+    opacity: 0.5;
+  }
+  .astryx-button,
+  .astryx-selector,
+  .astryx-text-input,
+  [role="dialog"],
+  [role="menu"] {
+    -webkit-app-region: no-drag;
+  }
+}
