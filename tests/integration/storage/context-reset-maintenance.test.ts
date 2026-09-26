@@ -131,7 +131,6 @@ test("offline context reset clears v7/v8 execution facts atomically and preserve
       );
       const initialized = coordinateEventLogHardCut(verify);
       assert.equal(initialized.status, "cut");
-      if (initialized.status === "blocked") assert.fail("empty history must initialize");
       assert.equal(initialized.marker.protocolMarker, CURRENT_EVENT_LOG_PROTOCOL_MARKER);
       assert.equal(initialized.marker.protocolMarker, "runtime-event-v2");
       assert.equal(coordinateEventLogHardCut(verify).status, "already_current");
