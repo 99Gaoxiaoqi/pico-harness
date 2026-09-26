@@ -1,6 +1,6 @@
 {
   "source": "https://models.dev/api.json",
-  "provenance": "Maka committed models.dev snapshot 85b25f334b65929079ea6dab9b0a2a66f433e3d66710fcd1aadff5f611b37345",
+  "provenance": "Imported models.dev pricing projection; origin and license: resources/licenses/models-dev.txt",
   "rows": [
     {
       "provider": "anthropic",
