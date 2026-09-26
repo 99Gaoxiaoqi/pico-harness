@@ -48,7 +48,7 @@ test("Side Chat helpers gate data activity without coupling it to rendered state
   assert.equal(sideChatCanSend("live", false, "   "), false);
 });
 
-test("inactive Side Chat keeps its transcript and controlled draft rendered", () => {
+test("inactive Side Chat keeps its transcript and editable composer mounted", () => {
   const markup = renderToStaticMarkup(
     React.createElement(SideChatWorkbarPanel, {
       child: {
@@ -81,7 +81,7 @@ test("inactive Side Chat keeps its transcript and controlled draft rendered", ()
   assert.match(markup, /aria-label="临时分支会话记录"/u);
   assert.match(markup, /只分析这个失败原因/u);
   assert.match(markup, /先检查重连水位/u);
-  assert.match(markup, /保留中的草稿/u);
+  assert.match(markup, /aria-label="发送给临时分支" contentEditable="true" role="textbox"/u);
   assert.match(markup, /aria-label="发送消息"/u);
 });
 
@@ -146,7 +146,7 @@ test("Side Chat exposes pending interactions and running controls", () => {
   assert.match(markup, /允许修改文件/u);
   assert.match(markup, /Agent 正在运行/u);
   assert.match(markup, />停止</u);
-  assert.match(markup, /下一步/u);
+  assert.match(markup, /aria-label="发送给临时分支" contentEditable="true" role="textbox"/u);
 });
 
 test("侧聊中的一次编辑审批只显示一个操作卡，审计记录不重复展示", async () => {

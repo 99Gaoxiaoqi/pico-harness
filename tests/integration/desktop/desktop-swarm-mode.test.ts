@@ -91,7 +91,7 @@ test("desktop persists Swarm beside Plan and delivers a single-turn override wit
       }),
     );
     assert.match(html, /Swarm/u);
-    assert.match(html, /aria-checked="true"[^>]*title="并行处理独立任务/u);
+    assert.match(html, /data-mode="swarm"/u);
     assert.match(html, /退出 Swarm|关闭 Swarm/u);
   } finally {
     await desktop.close();

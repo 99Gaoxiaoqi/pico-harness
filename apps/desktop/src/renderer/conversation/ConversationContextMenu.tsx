@@ -1,3 +1,5 @@
+import { Button } from "@astryxdesign/core/Button";
+import { TextInput } from "@astryxdesign/core/TextInput";
 import { Bot, Search, WandSparkles, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CatalogAgentView, CatalogSkillView } from "../model.js";
@@ -50,45 +52,54 @@ export function ConversationContextMenu({
           <strong>添加上下文</strong>
           <span>选择 Skill 或子代理</span>
         </div>
-        <button type="button" onClick={onClose} aria-label="关闭上下文菜单">
-          <X aria-hidden="true" />
-        </button>
+        <Button
+          label="关闭上下文菜单"
+          isIconOnly
+          icon={<X aria-hidden="true" />}
+          variant="ghost"
+          size="sm"
+          onClick={onClose}
+        />
       </header>
-      <label className="conversation-context-search">
-        <Search aria-hidden="true" />
-        <span className="conversation-sr-only">搜索 Skill 或子代理</span>
-        <input
+      <div className="conversation-context-search">
+        <TextInput
+          label="搜索 Skill 或子代理"
+          isLabelHidden
+          startIcon={<Search aria-hidden="true" />}
           ref={inputRef}
           value={query}
           placeholder="搜索名称或说明"
-          onChange={(event) => setQuery(event.target.value)}
+          onChange={setQuery}
           onKeyDown={(event) => {
             if (event.key === "Escape") onClose();
             if (event.key === "Enter" && entries[0]) onSelect(entries[0]);
           }}
         />
-      </label>
+      </div>
       <div className="conversation-context-results">
         {entries.length === 0 ? (
           <p>没有匹配的上下文。</p>
         ) : (
           entries.map((entry) => (
-            <button
-              type="button"
+            <Button
+              label={entry.name}
+              variant="ghost"
               key={`${entry.kind}:${entry.subagentId ?? entry.name}`}
               onClick={() => onSelect(entry)}
+              icon={
+                entry.kind === "skill" ? (
+                  <WandSparkles aria-hidden="true" />
+                ) : (
+                  <Bot aria-hidden="true" />
+                )
+              }
+              endContent={<em>{entry.kind === "skill" ? "Skill" : "Agent"}</em>}
             >
-              {entry.kind === "skill" ? (
-                <WandSparkles aria-hidden="true" />
-              ) : (
-                <Bot aria-hidden="true" />
-              )}
               <span>
                 <strong>{entry.name}</strong>
                 <small>{entry.description}</small>
               </span>
-              <em>{entry.kind === "skill" ? "Skill" : "Agent"}</em>
-            </button>
+            </Button>
           ))
         )}
       </div>

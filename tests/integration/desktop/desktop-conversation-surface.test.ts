@@ -103,6 +103,6 @@ test("conversation keeps tool output behind a disclosure while retaining failure
   assert.match(tools[1]![2]!, /缺少配置文件/u);
   assert.match(markup, /<strong>(?:<span>)?配置文件(?:<\/span>)?<\/strong>/u);
   assert.match(markup, /aria-label="会话内容"/u);
-  assert.match(markup, /<textarea\b[^>]*>第一行\n第二行<\/textarea>/u);
+  assert.match(markup, /aria-label="消息" contentEditable="true" role="textbox"/u);
   assert.match(markup, /aria-label="发送消息"/u);
 });

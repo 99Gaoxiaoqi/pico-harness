@@ -49,6 +49,7 @@ import {
   usePersistentDraft,
   writePersistentDraft,
   type ComposerBehavior,
+  type ConversationComposerHandle,
   type ConversationInspectorView,
   type ConversationItemView,
 } from "../conversation/index.js";
@@ -161,6 +162,7 @@ export function ConversationPage() {
     update: handleDraftChange,
     clear: clearDraft,
   } = usePersistentDraft(draftKey);
+  const composerInputRef = useRef<ConversationComposerHandle>(null);
   const [behavior, setBehavior] = useState<ComposerBehavior>("steer");
   const [inspector, setInspector] = useState<ConversationInspectorView>();
   const [catalogOpen, setCatalogOpen] = useState(false);
@@ -1129,15 +1131,12 @@ export function ConversationPage() {
                     onSelect={(nextActivation) => {
                       setActivation(nextActivation);
                       setCatalogOpen(false);
-                      window.requestAnimationFrame(() =>
-                        document
-                          .querySelector<HTMLTextAreaElement>(".conversation-composer textarea")
-                          ?.focus(),
-                      );
+                      window.requestAnimationFrame(() => composerInputRef.current?.focus());
                     }}
                   />
                 )}
                 <ConversationComposer
+                  inputRef={composerInputRef}
                   value={draft}
                   onValueChange={handleDraftChange}
                   onSubmit={(value) => void submit(value.text, value.behavior)}
@@ -1476,11 +1475,7 @@ export function ConversationPage() {
                     onRetry={() => {
                       if (originalRequest?.kind !== "userMessage" || draft.trim()) return;
                       handleDraftChange(originalRequest.text);
-                      window.requestAnimationFrame(() =>
-                        document
-                          .querySelector<HTMLTextAreaElement>(".conversation-composer textarea")
-                          ?.focus(),
-                      );
+                      window.requestAnimationFrame(() => composerInputRef.current?.focus());
                     }}
                     onDiagnostics={() => openWorkbarTab("inspector", "right")}
                   />
