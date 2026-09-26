@@ -12,6 +12,8 @@ interface FieldBase {
   readonly required?: boolean | undefined;
   readonly name?: string | undefined;
   readonly style?: CSSProperties | undefined;
+  readonly "aria-invalid"?: ComponentProps<"input">["aria-invalid"];
+  readonly "aria-describedby"?: string | undefined;
 }
 
 export type TextFieldProps = Omit<ComponentProps<"input">, "value" | "size" | "children"> &
@@ -36,6 +38,11 @@ export function TextField({
   return (
     <TextInput
       {...props}
+      status={
+        props["aria-invalid"] === true || props["aria-invalid"] === "true"
+          ? { type: "error" }
+          : undefined
+      }
       label={label}
       isLabelHidden
       // TextInput forwards type to its native input; keep URL/search validation.
@@ -76,6 +83,11 @@ export function TextAreaField({
   return (
     <TextArea
       {...props}
+      status={
+        props["aria-invalid"] === true || props["aria-invalid"] === "true"
+          ? { type: "error" }
+          : undefined
+      }
       label={label}
       isLabelHidden
       htmlName={name}
@@ -116,6 +128,11 @@ export function SelectField({
   return (
     <Selector
       {...props}
+      status={
+        props["aria-invalid"] === true || props["aria-invalid"] === "true"
+          ? { type: "error" }
+          : undefined
+      }
       label={label}
       isLabelHidden
       size="lg"
@@ -147,6 +164,11 @@ export function SwitchField({
   return (
     <Switch
       {...props}
+      status={
+        props["aria-invalid"] === true || props["aria-invalid"] === "true"
+          ? { type: "error" }
+          : undefined
+      }
       label={label}
       isLabelHidden
       value={checked}
@@ -172,6 +194,11 @@ export function CheckboxField({
   return (
     <CheckboxInput
       {...props}
+      status={
+        props["aria-invalid"] === true || props["aria-invalid"] === "true"
+          ? { type: "error" }
+          : undefined
+      }
       label={label}
       isLabelHidden
       value={checked}
