@@ -1,3 +1,4 @@
+import "../../apps/desktop/src/renderer/layers.css";
 import { ChatLayout } from "@astryxdesign/core/Chat";
 import { createRoot } from "react-dom/client";
 import { useRef, useState } from "react";

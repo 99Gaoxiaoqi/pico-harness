@@ -7,7 +7,7 @@ export default defineConfig({
   base: "./",
   plugins: [react()],
   resolve: {
-    // The desktop workspace and hoisted Radix dependencies must share the same
+    // The desktop workspace and hoisted UI dependencies must share the same
     // React dispatcher. Rolldown otherwise optimizes nested peer paths as a
     // second React instance and every hook call fails at runtime.
     dedupe: ["react", "react-dom"],

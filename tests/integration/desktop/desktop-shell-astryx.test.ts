@@ -120,6 +120,7 @@ test("Astryx 桌面外壳保留侧栏尺寸、任务菜单和搜索键盘焦点"
 });
 
 const shellScenario = `
+import "./apps/desktop/src/renderer/layers.css";
 import * as React from "react";
 import {act} from "react";
 import {createRoot} from "react-dom/client";
@@ -128,8 +129,8 @@ import {AppShell} from "./apps/desktop/src/renderer/AppShell.tsx";
 import {RuntimeContext} from "./apps/desktop/src/renderer/runtime-context.tsx";
 import {previewData} from "./apps/desktop/src/renderer/fixture.ts";
 import {PicoTheme} from "./apps/desktop/src/renderer/astryx-provider.tsx";
-import "./apps/desktop/src/renderer/astryx-controls.css";
 import "./apps/desktop/src/renderer/styles.css";
+import "./apps/desktop/src/renderer/astryx-controls.css";
 import "./apps/desktop/src/renderer/shell-astryx.css";
 Object.assign(globalThis, {React, IS_REACT_ACT_ENVIRONMENT: true});
 const target = document.getElementById("app");

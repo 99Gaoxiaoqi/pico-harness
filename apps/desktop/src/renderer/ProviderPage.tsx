@@ -128,6 +128,7 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
   const [adding, setAdding] = useState(false);
   const [editor, setEditor] = useState<ProviderView | null>();
   const [credentialEditor, setCredentialEditor] = useState<{
+    readonly open: boolean;
     readonly provider: ProviderView;
     readonly revision: string;
   }>();
@@ -214,7 +215,11 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
           onBack={() => navigate("/settings/models")}
           onEdit={() => setEditor(selectedProvider)}
           onCredential={() =>
-            setCredentialEditor({ provider: selectedProvider, revision: config.revision })
+            setCredentialEditor({
+              open: true,
+              provider: selectedProvider,
+              revision: config.revision,
+            })
           }
           onSave={actions.upsertProvider}
           onDefault={actions.setDefaultModelRoute}
@@ -340,12 +345,12 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
         onSave={actions.upsertProvider}
       />
       <CredentialDialog
-        open={credentialEditor !== undefined}
+        open={credentialEditor?.open ?? false}
         provider={credentialEditor?.provider}
         expectedRevision={credentialEditor?.revision}
         busy={isBusy}
         onOpenChange={(open) => {
-          if (!open) setCredentialEditor(undefined);
+          if (!open) setCredentialEditor((current) => current && { ...current, open: false });
         }}
         onSave={actions.setProviderCredential}
         onDelete={actions.deleteProviderCredential}

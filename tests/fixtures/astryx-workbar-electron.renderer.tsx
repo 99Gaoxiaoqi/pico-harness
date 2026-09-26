@@ -1,3 +1,4 @@
+import "../../apps/desktop/src/renderer/layers.css";
 import { createRoot } from "react-dom/client";
 import { useState } from "react";
 import { PicoTheme } from "../../apps/desktop/src/renderer/astryx-provider.js";
@@ -6,9 +7,9 @@ import { FilesWorkbarPanel } from "../../apps/desktop/src/renderer/workbar-panel
 import { BrowserWorkbarPanel } from "../../apps/desktop/src/renderer/workbar-panels/BrowserWorkbarPanel.js";
 import { TerminalWorkbarPanel } from "../../apps/desktop/src/renderer/workbar-panels/TerminalWorkbarPanel.js";
 import type { DesktopBridge } from "../../apps/desktop/src/preload/contract.js";
-import "../../apps/desktop/src/renderer/styles.css";
 import "../../apps/desktop/src/renderer/workbar-panels/ToolPanels.css";
 import "../../apps/desktop/src/renderer/workbar-panels/workbar-panels.css";
+import "../../apps/desktop/src/renderer/styles.css";
 import "../../apps/desktop/src/renderer/astryx-controls.css";
 import "../../apps/desktop/src/renderer/workbar/workbar-astryx.css";
 const host = window as unknown as { mode: (value: string) => void; calls: unknown[][] };

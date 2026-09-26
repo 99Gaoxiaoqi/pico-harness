@@ -55,6 +55,51 @@ async function run() {
   await key("Up");
   assert.equal(await js("window.draft"), "", "history recall stays disabled");
 
+  await window.webContents.insertText("abc");
+  await pause();
+  await js(
+    `document.querySelector('${editor}').dispatchEvent(new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:(()=>{const d=new DataTransfer();d.setData('text/plain','PASTE');return d})()}))`,
+  );
+  await wait("window.draft==='abcPASTE'");
+  window.webContents.undo();
+  await wait("window.draft==='abc'");
+  window.webContents.redo();
+  await wait("window.draft==='abcPASTE'");
+  await js(
+    `(()=>{const e=document.querySelector('${editor}');const s=getSelection();const r=document.createRange();r.selectNodeContents(e);s.removeAllRanges();s.addRange(r)})()`,
+  );
+  await window.webContents.insertText("替换选区");
+  await wait("window.draft==='替换选区'");
+  await js("window.setDraft('')");
+  await pause();
+  // Include the native char event: keyDown alone does not edit contenteditable.
+  const lineBreak = async () => {
+    window.webContents.sendInputEvent({ type: "keyDown", keyCode: "Enter", modifiers: ["shift"] });
+    window.webContents.sendInputEvent({ type: "char", keyCode: "\r", modifiers: ["shift"] });
+    window.webContents.sendInputEvent({ type: "keyUp", keyCode: "Enter", modifiers: ["shift"] });
+    await pause();
+  };
+  await window.webContents.insertText("abc");
+  await lineBreak();
+  await wait("window.draft==='abc\\n'");
+  await lineBreak();
+  await wait("window.draft==='abc\\n\\n'");
+  await js("window.setDraft('恢复\\n\\n')");
+  await pause();
+  await window.webContents.insertText("末尾");
+  await wait("window.draft==='恢复\\n\\n末尾'");
+  await js("window.setDraft('')");
+  await pause();
+  await lineBreak();
+  await wait("window.draft==='\\n'");
+  await js("window.setDraft('')");
+  await pause();
+  await js(
+    `document.querySelector('${editor}').dispatchEvent(new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:(()=>{const d=new DataTransfer();d.setData('text/plain','X\\nY\\n\\n');return d})()}))`,
+  );
+  await wait("window.draft==='X\\nY\\n\\n'");
+  await js("window.setDraft('')");
+  await pause();
   const pasted = "长文本".repeat(100);
   await js(
     `document.querySelector('${editor}').dispatchEvent(new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:(()=>{const d=new DataTransfer();d.setData('text/plain',${JSON.stringify(pasted)});return d})()}))`,

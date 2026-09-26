@@ -1,8 +1,74 @@
 diff --git a/node_modules/@astryxdesign/core/dist/Chat/ChatComposerInput.js b/node_modules/@astryxdesign/core/dist/Chat/ChatComposerInput.js
-index 87dfdea..7ec2ee1 100644
+index 87dfdea..768c255 100644
 --- a/node_modules/@astryxdesign/core/dist/Chat/ChatComposerInput.js
 +++ b/node_modules/@astryxdesign/core/dist/Chat/ChatComposerInput.js
-@@ -505,7 +505,7 @@ export function ChatComposerInput(props) {
+@@ -95,18 +95,34 @@ function selectAll(el) {
+ }
+ function serialize(node) {
+   let result = '';
+-  for (const child of Array.from(node.childNodes)) {
+-    if (child.nodeType === Node.TEXT_NODE) {
+-      result += child.textContent ?? '';
+-    } else if (child instanceof HTMLElement) {
+-      if (child.hasAttribute('data-astryx-token')) {
+-        result += child.getAttribute('data-astryx-token-value') ?? '';
+-      } else if (child.tagName === 'BR') {
+-        result += '\n';
+-      } else {
+-        result += serialize(child);
++  let lastLeaf;
++  const walk = (parent) => {
++    for (const child of Array.from(parent.childNodes)) {
++      if (child.nodeType === Node.TEXT_NODE) {
++        const text = child.textContent ?? '';
++        result += text;
++        if (text) lastLeaf = child;
++      } else if (child instanceof HTMLElement) {
++        if (child.hasAttribute('data-astryx-token')) {
++          result += child.getAttribute('data-astryx-token-value') ?? '';
++          lastLeaf = child;
++        } else if (child.tagName === 'BR') {
++          result += '\n';
++          lastLeaf = child;
++        } else {
++          if ((child.tagName === 'DIV' || child.tagName === 'P') && result && !result.endsWith('\n')) {
++            result += '\n';
++          }
++          walk(child);
++        }
+       }
+     }
++  };
++  walk(node);
++  // Chromium keeps one terminal line break solely to place the caret.
++  if ((lastLeaf instanceof HTMLElement && lastLeaf.tagName === 'BR') ||
++      (lastLeaf?.nodeType === Node.TEXT_NODE && lastLeaf.textContent?.endsWith('\n'))) {
++    result = result.slice(0, -1);
+   }
+   return result;
+ }
+@@ -280,7 +296,7 @@ export function ChatComposerInput(props) {
+       // echo before we rewrite the DOM.
+       pendingEchoValueRef.current = undefined;
+       const wasFocused = document.activeElement === editable;
+-      editable.textContent = controlledValue;
++      editable.textContent = controlledValue.endsWith('\n') ? controlledValue + '\n' : controlledValue;
+       // Setting `textContent` tears down the existing text node,
+       // which collapses any Selection inside this editable to
+       // offset 0. If the user was focused (e.g. a programmatic
+@@ -309,9 +325,9 @@ export function ChatComposerInput(props) {
+     }
+     const text = serialize(editableRef.current);
+     // Browsers may leave a trailing <br> when all content is deleted,
+-    // which serializes to "\n". Treat whitespace-only as empty.
++    // which serialize() excludes; preserve intentional whitespace in drafts.
+     const hasTokens = editableRef.current.querySelector('[data-astryx-token], [data-astryx-dictation-interim]') != null;
+-    const trimmedEmpty = text.trim().length === 0 && !hasTokens;
++    const trimmedEmpty = text.length === 0 && !hasTokens;
+     const nextValue = trimmedEmpty ? '' : text;
+     pendingEchoValueRef.current = nextValue;
+     setIsEmpty(trimmedEmpty);
+@@ -505,7 +521,7 @@ export function ChatComposerInput(props) {
        return;
      }
      const files = Array.from(e.clipboardData.files);
@@ -11,6 +77,18 @@ index 87dfdea..7ec2ee1 100644
        e.preventDefault();
        onFiles?.(files);
        return;
+@@ -525,7 +541,10 @@ export function ChatComposerInput(props) {
+       emitChange();
+       return;
+     }
+-    insertTextAtCursor(editable, text);
++    // Keep plain-text paste in the native editing history (undo/redo).
++    if (!document.execCommand('insertText', false, text)) {
++      insertTextAtCursor(editable, text);
++    }
+     emitChange();
+   }, [onFiles, onPasteProp, emitChange, tokens, pasteAsToken]);
+   const maxHeight = maxRows * LINE_HEIGHT_PX;
 diff --git a/node_modules/@astryxdesign/core/dist/Chat/ChatLayout.d.ts b/node_modules/@astryxdesign/core/dist/Chat/ChatLayout.d.ts
 index ff34874..a1eb352 100644
 --- a/node_modules/@astryxdesign/core/dist/Chat/ChatLayout.d.ts
@@ -47,10 +125,79 @@ index ff9b9fa..0457a68 100644
    const newMsgs = useChatNewMessages({
      isLocked: scroll.isLocked,
 diff --git a/node_modules/@astryxdesign/core/src/Chat/ChatComposerInput.tsx b/node_modules/@astryxdesign/core/src/Chat/ChatComposerInput.tsx
-index a45cc2f..7666741 100644
+index a45cc2f..9ab0350 100644
 --- a/node_modules/@astryxdesign/core/src/Chat/ChatComposerInput.tsx
 +++ b/node_modules/@astryxdesign/core/src/Chat/ChatComposerInput.tsx
-@@ -741,7 +741,7 @@ export function ChatComposerInput(props: ChatComposerInputProps) {
+@@ -287,18 +287,34 @@ function selectAll(el: HTMLElement): void {
+
+ function serialize(node: Node): string {
+   let result = '';
+-  for (const child of Array.from(node.childNodes)) {
+-    if (child.nodeType === Node.TEXT_NODE) {
+-      result += child.textContent ?? '';
+-    } else if (child instanceof HTMLElement) {
+-      if (child.hasAttribute('data-astryx-token')) {
+-        result += child.getAttribute('data-astryx-token-value') ?? '';
+-      } else if (child.tagName === 'BR') {
+-        result += '\n';
+-      } else {
+-        result += serialize(child);
++  let lastLeaf: Node | undefined;
++  const walk = (parent: Node) => {
++    for (const child of Array.from(parent.childNodes)) {
++      if (child.nodeType === Node.TEXT_NODE) {
++        const text = child.textContent ?? '';
++        result += text;
++        if (text) lastLeaf = child;
++      } else if (child instanceof HTMLElement) {
++        if (child.hasAttribute('data-astryx-token')) {
++          result += child.getAttribute('data-astryx-token-value') ?? '';
++          lastLeaf = child;
++        } else if (child.tagName === 'BR') {
++          result += '\n';
++          lastLeaf = child;
++        } else {
++          if ((child.tagName === 'DIV' || child.tagName === 'P') && result && !result.endsWith('\n')) {
++            result += '\n';
++          }
++          walk(child);
++        }
+       }
+     }
++  };
++  walk(node);
++  // Chromium keeps one terminal line break solely to place the caret.
++  if ((lastLeaf instanceof HTMLElement && lastLeaf.tagName === 'BR') ||
++      (lastLeaf?.nodeType === Node.TEXT_NODE && lastLeaf.textContent?.endsWith('\n'))) {
++    result = result.slice(0, -1);
+   }
+   return result;
+ }
+@@ -484,7 +500,7 @@ export function ChatComposerInput(props: ChatComposerInputProps) {
+       // echo before we rewrite the DOM.
+       pendingEchoValueRef.current = undefined;
+       const wasFocused = document.activeElement === editable;
+-      editable.textContent = controlledValue;
++      editable.textContent = controlledValue.endsWith('\n') ? controlledValue + '\n' : controlledValue;
+       // Setting `textContent` tears down the existing text node,
+       // which collapses any Selection inside this editable to
+       // offset 0. If the user was focused (e.g. a programmatic
+@@ -515,12 +531,12 @@ export function ChatComposerInput(props: ChatComposerInputProps) {
+     }
+     const text = serialize(editableRef.current);
+     // Browsers may leave a trailing <br> when all content is deleted,
+-    // which serializes to "\n". Treat whitespace-only as empty.
++    // which serialize() excludes; preserve intentional whitespace in drafts.
+     const hasTokens =
+       editableRef.current.querySelector(
+         '[data-astryx-token], [data-astryx-dictation-interim]',
+       ) != null;
+-    const trimmedEmpty = text.trim().length === 0 && !hasTokens;
++    const trimmedEmpty = text.length === 0 && !hasTokens;
+     const nextValue = trimmedEmpty ? '' : text;
+     pendingEchoValueRef.current = nextValue;
+     setIsEmpty(trimmedEmpty);
+@@ -741,7 +757,7 @@ export function ChatComposerInput(props: ChatComposerInputProps) {
        }
 
        const files = Array.from(e.clipboardData.files);
@@ -59,6 +206,18 @@ index a45cc2f..7666741 100644
          e.preventDefault();
          onFiles?.(files);
          return;
+@@ -763,7 +779,10 @@ export function ChatComposerInput(props: ChatComposerInputProps) {
+         return;
+       }
+
+-      insertTextAtCursor(editable, text);
++      // Keep plain-text paste in the native editing history (undo/redo).
++      if (!document.execCommand('insertText', false, text)) {
++        insertTextAtCursor(editable, text);
++      }
+       emitChange();
+     },
+     [onFiles, onPasteProp, emitChange, tokens, pasteAsToken],
 diff --git a/node_modules/@astryxdesign/core/src/Chat/ChatLayout.tsx b/node_modules/@astryxdesign/core/src/Chat/ChatLayout.tsx
 index d45a912..050207f 100644
 --- a/node_modules/@astryxdesign/core/src/Chat/ChatLayout.tsx
