@@ -1,13 +1,14 @@
-import { Check, ListTodo, Plus, Sparkles, Workflow, Network, Search } from "lucide-react";
+import { ListTodo, Plus, Sparkles, Workflow, Network, Search } from "lucide-react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { Button } from "@astryxdesign/core/Button";
 import {
-  useEffect,
-  useId,
-  useLayoutEffect,
-  useRef,
-  useState,
-  type KeyboardEvent,
-  type ReactNode,
-} from "react";
+  DropdownMenu,
+  DropdownMenuItem,
+  DropdownMenuDivider,
+  DropdownMenuCheckboxItem,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+} from "@astryxdesign/core/DropdownMenu";
 
 export interface ConversationComposerModes {
   readonly planActive: boolean;
@@ -33,9 +34,6 @@ export function ConversationComposerMenu({
   disabled?: boolean | undefined;
   onAttach?: (() => void) | undefined;
 }) {
-  const id = useId();
-  const trigger = useRef<HTMLButtonElement>(null);
-  const menu = useRef<HTMLDivElement>(null);
   const inFlight = useRef(false);
   const [open, setOpen] = useState(false);
   const [pending, setPending] = useState(false);
@@ -70,59 +68,9 @@ export function ConversationComposerMenu({
       change: modes?.onGraphChange,
     },
   ] as const;
-  const items = () => [
-    ...(menu.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? []),
-  ];
-  const close = () => {
-    menu.current?.hidePopover();
-    trigger.current?.focus();
-  };
-  const position = () => {
-    if (!trigger.current || !menu.current) return;
-    const rect = trigger.current.getBoundingClientRect();
-    const width = Math.min(232, window.innerWidth - 24);
-    Object.assign(menu.current.style, {
-      width: `${width}px`,
-      left: `${Math.max(12, Math.min(rect.left, window.innerWidth - width - 12))}px`,
-      bottom: `${window.innerHeight - rect.top + 7}px`,
-      maxHeight: `${Math.max(80, rect.top - 19)}px`,
-    });
-  };
-  useLayoutEffect(() => {
-    if (!open) return;
-    position();
-    items()[0]?.focus({ preventScroll: true });
-    window.addEventListener("resize", position);
-    const observer = new ResizeObserver(position);
-    if (trigger.current) observer.observe(trigger.current.closest("form") ?? trigger.current);
-    return () => {
-      window.removeEventListener("resize", position);
-      observer.disconnect();
-    };
-  }, [open]);
   useEffect(() => {
-    if (disabled) menu.current?.hidePopover();
+    if (disabled) setOpen(false);
   }, [disabled]);
-
-  function navigate(event: KeyboardEvent<HTMLDivElement>) {
-    const choices = items();
-    const index = choices.indexOf(document.activeElement as HTMLButtonElement);
-    let target: HTMLButtonElement | undefined;
-    if (event.key === "ArrowDown") target = choices[(index + 1) % choices.length];
-    else if (event.key === "ArrowUp")
-      target = choices[(index - 1 + choices.length) % choices.length];
-    else if (event.key === "Home") target = choices[0];
-    else if (event.key === "End") target = choices.at(-1);
-    else if (event.key === "Escape" || event.key === "Tab") {
-      if (event.key === "Escape") event.preventDefault();
-      close();
-      return;
-    }
-    if (target) {
-      event.preventDefault();
-      target.focus();
-    }
-  }
 
   async function toggle(option: (typeof options)[number]) {
     if (locked || inFlight.current || !option.change) return;
@@ -140,104 +88,87 @@ export function ConversationComposerMenu({
 
   return (
     <>
-      <button
-        ref={trigger}
-        type="button"
-        className="conversation-icon-button conversation-plus-trigger"
-        disabled={disabled || (!onAttach && !modes)}
-        popoverTarget={id}
-        aria-label="添加上下文与模式"
-        title="添加上下文与模式"
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-controls={id}
-        onKeyDown={(event) => {
-          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-            event.preventDefault();
-            menu.current?.showPopover();
-          }
+      <DropdownMenu
+        className="pico-composer-menu"
+        button={{
+          label: "添加上下文与模式",
+          icon: <Plus aria-hidden="true" />,
+          isIconOnly: true,
+          variant: "ghost",
+          size: "sm",
+          className: "conversation-icon-button conversation-plus-trigger",
+          isDisabled: disabled || (!onAttach && !modes),
         }}
+        hasChevron={false}
+        placement="above"
+        alignment="start"
+        menuWidth={232}
+        isMenuOpen={open}
+        onOpenChange={setOpen}
       >
-        <Plus aria-hidden="true" />
-      </button>
-      <div
-        ref={menu}
-        id={id}
-        popover="auto"
-        role="menu"
-        aria-label="添加上下文与模式"
-        className="conversation-plus-menu"
-        onBeforeToggle={(event) => {
-          if (event.newState === "open") position();
-        }}
-        onToggle={(event) => setOpen(event.newState === "open")}
-        onKeyDown={navigate}
-      >
-        <button
-          type="button"
-          role="menuitem"
-          tabIndex={-1}
-          disabled={!onAttach || disabled}
-          title={onAttach ? "选择 Skill 或子代理" : "选择项目后，可在空闲时添加 Skill 或子代理"}
-          onClick={() => {
-            close();
-            onAttach?.();
-          }}
-        >
-          <Sparkles aria-hidden="true" />
-          <span>选择 Skill 或子代理</span>
-        </button>
+        <DropdownMenuItem
+          label="选择 Skill 或子代理"
+          icon={<Sparkles aria-hidden="true" />}
+          isDisabled={!onAttach || disabled}
+          onClick={() => onAttach?.()}
+        />
         {modes && (
           <>
-            <div role="separator" className="conversation-plus-divider" />
-            {options.map((option) => (
-              <button
-                key={option.id}
-                type="button"
-                role={
-                  option.id === "plan" || option.id === "research"
-                    ? "menuitemcheckbox"
-                    : "menuitemradio"
-                }
-                aria-checked={option.active}
-                disabled={locked}
-                tabIndex={-1}
-                title={
-                  option.id === "research"
-                    ? "只读研究，保存证据、检查点和报告"
-                    : option.id === "plan"
-                      ? "先规划，确认计划后执行"
-                      : option.id === "swarm"
-                        ? "并行处理独立任务，完成或遇到问题后统一汇总"
-                        : "按任务依赖进行 Graph 编排"
-                }
-                onClick={() => void toggle(option)}
-              >
-                <option.Icon aria-hidden="true" />
-                <span>{option.label}</span>
-                {option.active && <Check className="conversation-plus-check" aria-hidden="true" />}
-              </button>
-            ))}
+            <DropdownMenuDivider />
+            {options
+              .filter((option) => option.id === "plan" || option.id === "research")
+              .map((option) => (
+                <DropdownMenuCheckboxItem
+                  key={option.id}
+                  label={option.label}
+                  icon={<option.Icon aria-hidden="true" />}
+                  value={Boolean(option.active)}
+                  isDisabled={Boolean(locked)}
+                  onChange={() => void toggle(option)}
+                />
+              ))}
+            <DropdownMenuRadioGroup
+              label="编排模式"
+              value={modes.swarmActive ? "swarm" : modes.graphActive ? "graph" : undefined}
+              hasCloseOnSelect={false}
+              onChange={(id) => {
+                const option = options.find((option) => option.id === id);
+                if (option) void toggle(option);
+              }}
+            >
+              {options
+                .filter((option) => option.id === "swarm" || option.id === "graph")
+                .map((option) => (
+                  <DropdownMenuRadioItem
+                    key={option.id}
+                    value={option.id}
+                    label={option.label}
+                    icon={<option.Icon aria-hidden="true" />}
+                    isDisabled={Boolean(locked)}
+                  />
+                ))}
+            </DropdownMenuRadioGroup>
           </>
         )}
-      </div>
+      </DropdownMenu>
       {children}
       {options
         .filter((option) => option.active)
         .map((option) => (
-          <button
+          <Button
             key={option.id}
-            type="button"
             className="conversation-mode-mark"
             data-mode={option.id}
-            disabled={locked}
-            aria-label={`关闭 ${option.label} 模式`}
-            title={`${option.label} 模式已启用，点击关闭`}
+            isDisabled={Boolean(locked)}
+            label={`关闭 ${option.label} 模式`}
+            tooltip={`${option.label} 模式已启用，点击关闭`}
             onClick={() => void toggle(option)}
+            icon={<option.Icon aria-hidden="true" />}
+            variant="ghost"
+            size="sm"
           >
-            <option.Icon aria-hidden="true" />
             {option.label}
-          </button>
+          </Button>
         ))}
     </>
   );
