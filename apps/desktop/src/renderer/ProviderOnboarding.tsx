@@ -1,3 +1,4 @@
+import { TextField, SelectField, CheckboxField, TextAreaField } from "./ui-controls.js";
 import {
   ArrowLeft,
   ChevronDown,
@@ -93,32 +94,33 @@ export function ProviderOnboarding({
             </div>
           </div>
           <div className="provider-catalog-filters">
-            <label className="provider-catalog-search">
+            <div className="settings-field provider-catalog-search">
               <Search size={15} aria-hidden="true" />
-              <input
+              <TextField
+                label="搜索模型服务商"
                 ref={searchRef}
-                aria-label="搜索模型服务商"
                 placeholder="搜索服务商"
                 value={query}
                 onChange={(event) => setQuery(event.currentTarget.value)}
               />
-            </label>
-            <select
-              aria-label="分类"
+            </div>
+            <SelectField
+              label="分类"
               value={category}
-              onChange={(event) => setCategory(event.currentTarget.value)}
-            >
-              <option value="all">全部</option>
-              <option value="api">官方 API</option>
-              <option value="plans">订阅计划</option>
-              <option value="aggregator">聚合服务</option>
-              <option value="local">本地模型</option>
-              <option value="custom">自定义</option>
-            </select>
+              onValueChange={(value) => setCategory(value)}
+              options={[
+                { value: "all", label: "全部" },
+                { value: "api", label: "官方 API" },
+                { value: "plans", label: "订阅计划" },
+                { value: "aggregator", label: "聚合服务" },
+                { value: "local", label: "本地模型" },
+                { value: "custom", label: "自定义" },
+              ]}
+            />
           </div>
           <div className="provider-catalog-list" aria-label="模型服务商目录">
             {matches.map((item) => (
-              <button
+              <Button
                 type="button"
                 className="provider-catalog-row"
                 key={item.id}
@@ -130,7 +132,7 @@ export function ProviderOnboarding({
                   <small>{item.description}</small>
                 </span>
                 <ChevronRight size={16} aria-hidden="true" />
-              </button>
+              </Button>
             ))}
           </div>
           {unsupportedMatches.length > 0 && (
@@ -340,7 +342,7 @@ function ProviderSetup({
               </div>
             </>
           )}
-          <button
+          <Button
             type="button"
             className="provider-advanced-toggle"
             aria-expanded={advanced}
@@ -349,31 +351,35 @@ function ProviderSetup({
           >
             {advanced ? "收起" : "展开"}高级请求设置
             <ChevronDown size={16} />
-          </button>
+          </Button>
           <div
             id="provider-advanced-fields"
             className="provider-advanced-fields"
             hidden={!advanced}
           >
-            <label>
+            <div className="settings-field">
               <span>连接 ID</span>
-              <input
+              <TextField
+                label="连接 ID"
                 value={id}
                 required
                 pattern="[a-zA-Z0-9_-]+"
                 onChange={(event) => setId(event.currentTarget.value)}
+                disabled={blocked}
               />
-            </label>
-            <label>
+            </div>
+            <div className="settings-field">
               <span>Base URL</span>
-              <input
+              <TextField
+                label="Base URL"
                 type="url"
                 required
                 value={baseURL}
                 placeholder={preset.baseURLPlaceholder ?? "https://api.example.com/v1"}
                 onChange={(event) => setBaseURL(event.currentTarget.value)}
+                disabled={blocked}
               />
-            </label>
+            </div>
             <p>
               协议：
               {preset.modelProtocols
@@ -402,40 +408,42 @@ function ProviderSetup({
           </p>
           <div className="provider-model-choices">
             {preset.models.map((model) => (
-              <label key={model}>
-                <input
-                  type="checkbox"
+              <div className="settings-field" key={model}>
+                <CheckboxField
+                  label={model}
+                  labelHidden={false}
                   checked={selected.includes(model)}
-                  onChange={(event) =>
+                  onCheckedChange={(checked) =>
                     setSelected(
-                      event.currentTarget.checked
-                        ? [...selected, model]
-                        : selected.filter((value) => value !== model),
+                      checked ? [...selected, model] : selected.filter((value) => value !== model),
                     )
                   }
+                  disabled={blocked}
                 />
-                <span>{model}</span>
-              </label>
+              </div>
             ))}
           </div>
-          <label>
+          <div className="settings-field">
             <span>{preset.models.length ? "其他模型 ID（可选）" : "模型 ID"}</span>
-            <textarea
+            <TextAreaField
+              label={preset.models.length ? "其他模型 ID（可选）" : "模型 ID"}
               value={customModels}
               rows={3}
               placeholder="填写模型 ID，每行一个"
               onChange={(event) => setCustomModels(event.currentTarget.value)}
+              disabled={blocked}
             />
-          </label>
+          </div>
           {preset.protocol === "openai" && (
-            <label className="provider-discovery-toggle">
-              <input
-                type="checkbox"
+            <div className="settings-field provider-discovery-toggle">
+              <CheckboxField
+                label="允许获取服务商模型列表"
+                labelHidden={false}
                 checked={discoverModels}
-                onChange={(event) => setDiscoverModels(event.currentTarget.checked)}
+                onCheckedChange={(checked) => setDiscoverModels(checked)}
+                disabled={blocked}
               />
-              <span>允许获取服务商模型列表</span>
-            </label>
+            </div>
           )}
           {preset.docs && (
             <a className="provider-doc-link" href={preset.docs} target="_blank" rel="noreferrer">

@@ -1,3 +1,4 @@
+import { CheckboxField } from "../ui-controls.js";
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import type { RuntimeMemorySettings } from "@pico/protocol";
@@ -55,17 +56,18 @@ export function UserMemorySettingsPage() {
                 ["recallEnabled", "会话召回", "根据当前问题召回相关记忆，遵循项目隔离。"],
               ] as const
             ).map(([key, label, detail]) => (
-              <label key={key}>
-                <input
-                  type="checkbox"
+              <div className="settings-field" key={key}>
+                <CheckboxField
+                  label={label}
+                  labelHidden={false}
                   checked={settings[key]}
-                  onChange={async (event) => {
+                  onCheckedChange={async (checked) => {
                     setSaving(true);
                     setError("");
                     try {
                       setSettings(
                         await actions.updateUserMemorySettings(settings.version, {
-                          [key]: event.target.checked,
+                          [key]: checked,
                         }),
                       );
                     } catch {
@@ -74,12 +76,12 @@ export function UserMemorySettingsPage() {
                       setSaving(false);
                     }
                   }}
+                  disabled={saving}
                 />
                 <span>
-                  <strong>{label}</strong>
                   <small>{detail}</small>
                 </span>
-              </label>
+              </div>
             ))}
           </fieldset>
         </section>

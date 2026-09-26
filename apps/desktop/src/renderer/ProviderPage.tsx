@@ -1,4 +1,11 @@
-import * as Dialog from "@radix-ui/react-dialog";
+import {
+  SelectField,
+  TextField,
+  CheckboxField,
+  TextAreaField,
+  SwitchField,
+} from "./ui-controls.js";
+import { Dialog } from "@astryxdesign/core/Dialog";
 import {
   BrainCircuit,
   Check,
@@ -232,21 +239,19 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
               </p>
             </div>
           </div>
-          <label className="provider-default-select">
+          <div className="settings-field provider-default-select">
             <span>默认模型</span>
-            <select
+            <SelectField
+              label="默认模型"
               value={config.userDefaults.modelRouteId ?? ""}
               disabled={isBusy || !config.writable || models.length === 0}
-              onChange={(event) => handleDefaultChange(event.currentTarget.value)}
-            >
-              <option value="">不设置用户默认值</option>
-              {models.map((model) => (
-                <option key={model.id} value={model.id}>
-                  {model.label}
-                </option>
-              ))}
-            </select>
-          </label>
+              onValueChange={(value) => handleDefaultChange(value)}
+              options={[
+                { value: "", label: "不设置用户默认值" },
+                ...models.map((model) => ({ value: model.id, label: model.label })),
+              ]}
+            />
+          </div>
         </section>
       )}
 
@@ -276,7 +281,7 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
                   : undefined;
                 return (
                   <article className="provider-card" key={provider.id}>
-                    <button
+                    <Button
                       type="button"
                       className="provider-card__entry"
                       aria-label={`查看 ${provider.id} 连接详情`}
@@ -311,7 +316,7 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
                       <span className="provider-card__open" aria-hidden="true">
                         查看详情 <ChevronRight size={16} />
                       </span>
-                    </button>
+                    </Button>
                   </article>
                 );
               })}
@@ -475,24 +480,21 @@ function ProviderDetail({
           </p>
         </div>
         <span className="provider-detail__spacer" />
-        <label className="provider-detail__default">
+        <div className="settings-field provider-detail__default">
           <span>默认模型</span>
-          <select
-            aria-label={`${provider.id} 默认模型`}
+          <SelectField
+            label={`${provider.id} 默认模型`}
             value={providerDefault}
             disabled={busy || provider.origin !== "user" || enabled.length === 0}
-            onChange={(event) => {
-              if (event.currentTarget.value) void onDefault(event.currentTarget.value);
+            onValueChange={(value) => {
+              if (value) void onDefault(value);
             }}
-          >
-            <option value="">{providerDefault ? "选择模型" : "其他连接或未设置"}</option>
-            {enabled.map((model) => (
-              <option key={model} value={`${provider.id}/${model}`}>
-                {model}
-              </option>
-            ))}
-          </select>
-        </label>
+            options={[
+              { value: "", label: providerDefault ? "选择模型" : "其他连接或未设置" },
+              ...enabled.map((model) => ({ value: `${provider.id}/${model}`, label: model })),
+            ]}
+          />
+        </div>
       </div>
 
       <div className="provider-detail__section-head">
@@ -607,8 +609,8 @@ function ProviderDetail({
             void addModel();
           }}
         >
-          <input
-            aria-label="新模型 ID"
+          <TextField
+            label="新模型 ID"
             placeholder="输入模型 ID"
             value={newModel}
             onChange={(event) => setNewModel(event.currentTarget.value)}
@@ -622,10 +624,10 @@ function ProviderDetail({
           </Button>
         </form>
       )}
-      <input
+      <TextField
+        label="搜索模型"
         className="provider-detail__search"
         type="search"
-        aria-label="搜索模型"
         placeholder="搜索模型名称或 ID"
         value={search}
         onChange={(event) => setSearch(event.currentTarget.value)}
@@ -646,17 +648,13 @@ function ProviderDetail({
               </strong>
               <small>{modelCapabilitySummary(provider, model)}</small>
             </div>
-            <button
-              className="provider-detail__switch"
-              type="button"
-              role="switch"
-              aria-label={`启用模型 ${model}`}
-              aria-checked={!disabled.has(model)}
+            <SwitchField
+              className="provider-model-switch"
+              label={`启用模型 ${model}`}
+              checked={!disabled.has(model)}
               disabled={busy || provider.origin !== "user"}
-              onClick={() => void toggleModel(model)}
-            >
-              <span />
-            </button>
+              onCheckedChange={() => void toggleModel(model)}
+            />
           </div>
         ))
       )}
@@ -739,101 +737,106 @@ function ProviderEditorDialog({
   };
 
   return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="dialog-overlay" />
-        <Dialog.Content
-          className="dialog provider-dialog"
-          aria-describedby="provider-editor-detail"
-        >
-          <Dialog.Title>{provider ? `编辑 ${provider.id}` : "添加模型服务商"}</Dialog.Title>
-          <Dialog.Description id="provider-editor-detail">
-            {provider?.auth === "none"
-              ? "此连接无需 API Key。修改模型或地址后，将继续使用匿名请求。"
-              : "配置服务商或网关渠道。保存后，在服务商卡片中点击“API Key”添加凭证。"}
-          </Dialog.Description>
-          <Dialog.Close asChild>
-            <IconButton className="dialog__close" label="关闭 Provider 编辑器">
-              <X aria-hidden="true" size={17} />
-            </IconButton>
-          </Dialog.Close>
-          <form className="provider-form" onSubmit={(event) => void handleSubmit(event)}>
-            <label>
-              <span>服务商 / 渠道 ID</span>
-              <input
-                required
-                value={id}
-                disabled={Boolean(provider)}
-                placeholder="openai"
-                onChange={(event) => setId(event.currentTarget.value)}
-              />
-              {provider && <small>ID 创建后不可修改。</small>}
-            </label>
-            <label>
-              <span>{provider?.modelProtocols ? "默认 API 协议" : "API 协议"}</span>
-              <select
-                value={protocol}
-                onChange={(event) =>
-                  handleProtocolChange(event.currentTarget.value as ProviderProtocol)
-                }
-              >
-                <option value="openai">OpenAI-compatible</option>
-                <option value="claude">Anthropic-compatible</option>
-                <option value="responses">OpenAI Responses</option>
-              </select>
-              <small>
-                {provider?.modelProtocols
-                  ? "已配置的模型会自动使用各自的协议；此项仅用于其他模型。"
-                  : "协议只决定请求格式，不限制模型厂商。"}
-              </small>
-            </label>
-            <label className="provider-form__wide">
-              <span>{protocolLabels[protocol]} Base URL</span>
-              <input
-                required
-                type="url"
-                value={baseURL}
-                placeholder={protocolBaseURLPlaceholders[protocol]}
-                onChange={(event) => setBaseURL(event.currentTarget.value)}
-              />
-              <small>填写与所选协议兼容的服务商、网关或团队渠道地址。</small>
-            </label>
-            <label className="provider-discovery-toggle">
-              <input
-                type="checkbox"
-                checked={discoverModels}
-                disabled={protocol !== "openai"}
-                onChange={(event) => setDiscoverModels(event.currentTarget.checked)}
-              />
-              <span>允许从服务商动态发现模型</span>
-            </label>
-            <label className="provider-form__wide">
-              <span>已知模型</span>
-              <textarea
-                aria-label="已知模型"
-                required={!discoverModels}
-                rows={4}
-                value={models}
-                placeholder={"gpt-5.4\ngpt-5.4-mini"}
-                onChange={(event) => setModels(event.currentTarget.value)}
-              />
-              <small>
-                开启动态发现时可留空；否则至少填写一个模型。每行一个，也可以使用逗号分隔。
-              </small>
-            </label>
-            <div className="dialog__actions provider-form__wide">
-              <Dialog.Close asChild>
-                <Button disabled={busy}>取消</Button>
-              </Dialog.Close>
-              <Button type="submit" variant="primary" disabled={busy}>
-                <Check aria-hidden="true" size={16} />
-                {provider ? "保存更改" : "添加服务商"}
-              </Button>
-            </div>
-          </form>
-        </Dialog.Content>
-      </Dialog.Portal>
-    </Dialog.Root>
+    <Dialog
+      isOpen={open}
+      onOpenChange={onOpenChange}
+      purpose="info"
+      width={620}
+      className="dialog provider-dialog pico-settings-dialog"
+      aria-labelledby="provider-editor-title"
+      aria-describedby="provider-editor-detail"
+    >
+      <h2 id="provider-editor-title">{provider ? `编辑 ${provider.id}` : "添加模型服务商"}</h2>
+      <p id="provider-editor-detail">
+        {provider?.auth === "none"
+          ? "此连接无需 API Key。修改模型或地址后，将继续使用匿名请求。"
+          : "配置服务商或网关渠道。保存后，在服务商卡片中点击“API Key”添加凭证。"}
+      </p>
+
+      <IconButton
+        className="dialog__close"
+        onClick={() => onOpenChange(false)}
+        label="关闭 Provider 编辑器"
+      >
+        <X aria-hidden="true" size={17} />
+      </IconButton>
+
+      <form className="provider-form" onSubmit={(event) => void handleSubmit(event)}>
+        <div className="settings-field">
+          <span>服务商 / 渠道 ID</span>
+          <TextField
+            label="服务商 / 渠道 ID"
+            required
+            value={id}
+            disabled={Boolean(provider)}
+            placeholder="openai"
+            onChange={(event) => setId(event.currentTarget.value)}
+          />
+          {provider && <small>ID 创建后不可修改。</small>}
+        </div>
+        <div className="settings-field">
+          <span>{provider?.modelProtocols ? "默认 API 协议" : "API 协议"}</span>
+          <SelectField
+            label={provider?.modelProtocols ? "默认 API 协议" : "API 协议"}
+            value={protocol}
+            onValueChange={(value) => handleProtocolChange(value as ProviderProtocol)}
+            options={[
+              { value: "openai", label: "OpenAI-compatible" },
+              { value: "claude", label: "Anthropic-compatible" },
+              { value: "responses", label: "OpenAI Responses" },
+            ]}
+          />
+          <small>
+            {provider?.modelProtocols
+              ? "已配置的模型会自动使用各自的协议；此项仅用于其他模型。"
+              : "协议只决定请求格式，不限制模型厂商。"}
+          </small>
+        </div>
+        <div className="settings-field provider-form__wide">
+          <span>{protocolLabels[protocol]} Base URL</span>
+          <TextField
+            label={`${protocolLabels[protocol]} Base URL`}
+            required
+            type="url"
+            value={baseURL}
+            placeholder={protocolBaseURLPlaceholders[protocol]}
+            onChange={(event) => setBaseURL(event.currentTarget.value)}
+          />
+          <small>填写与所选协议兼容的服务商、网关或团队渠道地址。</small>
+        </div>
+        <div className="settings-field provider-discovery-toggle">
+          <CheckboxField
+            label="允许从服务商动态发现模型"
+            labelHidden={false}
+            checked={discoverModels}
+            disabled={protocol !== "openai"}
+            onCheckedChange={(checked) => setDiscoverModels(checked)}
+          />
+        </div>
+        <div className="settings-field provider-form__wide">
+          <span>已知模型</span>
+          <TextAreaField
+            label="已知模型"
+            required={!discoverModels}
+            rows={4}
+            value={models}
+            placeholder={"gpt-5.4\ngpt-5.4-mini"}
+            onChange={(event) => setModels(event.currentTarget.value)}
+          />
+          <small>开启动态发现时可留空；否则至少填写一个模型。每行一个，也可以使用逗号分隔。</small>
+        </div>
+        <div className="dialog__actions provider-form__wide">
+          <Button disabled={busy} onClick={() => onOpenChange(false)}>
+            取消
+          </Button>
+
+          <Button type="submit" variant="primary" disabled={busy}>
+            <Check aria-hidden="true" size={16} />
+            {provider ? "保存更改" : "添加服务商"}
+          </Button>
+        </div>
+      </form>
+    </Dialog>
   );
 }
 
@@ -906,64 +909,70 @@ function CredentialDialog({
   const canDelete = provider.credentialSource === "config";
 
   return (
-    <Dialog.Root open={open} onOpenChange={handleOpenChange}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="dialog-overlay" />
-        <Dialog.Content
-          className="dialog provider-dialog provider-credential-dialog"
-          aria-describedby="provider-credential-detail"
-        >
-          <Dialog.Title>{provider.id} API Key</Dialog.Title>
-          <Dialog.Description id="provider-credential-detail">
-            API Key 会保存到 ~/.pico/config.json，文件权限为 0600；不会进入会话或 App 渲染状态。
-          </Dialog.Description>
-          <Dialog.Close asChild>
-            <IconButton className="dialog__close" label="关闭凭证编辑器">
-              <X aria-hidden="true" size={17} />
-            </IconButton>
-          </Dialog.Close>
-          <div className="provider-credential-status">
-            <span>当前状态</span>
-            <strong>{credentialLabels[provider.credentialStatus]}</strong>
-          </div>
-          {provider.credentialSource === "environment" && (
-            <InlineNotice tone="neutral">
-              当前从环境变量 {provider.apiKeyEnv} 读取 API Key。在这里保存后，用户配置将优先生效。
-            </InlineNotice>
+    <Dialog
+      isOpen={open}
+      onOpenChange={handleOpenChange}
+      purpose="info"
+      width={620}
+      className="dialog provider-dialog provider-credential-dialog pico-settings-dialog"
+      aria-labelledby="provider-credential-title"
+      aria-describedby="provider-credential-detail"
+    >
+      <h2 id="provider-credential-title">{provider.id} API Key</h2>
+      <p id="provider-credential-detail">
+        API Key 会保存到 ~/.pico/config.json，文件权限为 0600；不会进入会话或 App 渲染状态。
+      </p>
+
+      <IconButton
+        className="dialog__close"
+        onClick={() => handleOpenChange(false)}
+        label="关闭凭证编辑器"
+      >
+        <X aria-hidden="true" size={17} />
+      </IconButton>
+
+      <div className="provider-credential-status">
+        <span>当前状态</span>
+        <strong>{credentialLabels[provider.credentialStatus]}</strong>
+      </div>
+      {provider.credentialSource === "environment" && (
+        <InlineNotice tone="neutral">
+          当前从环境变量 {provider.apiKeyEnv} 读取 API Key。在这里保存后，用户配置将优先生效。
+        </InlineNotice>
+      )}
+      {provider.credentialSource === "keychain" && (
+        <InlineNotice tone="neutral">
+          当前使用 Pico 系统安全存储中的凭证。在这里保存 API Key 后，用户配置将优先生效。
+        </InlineNotice>
+      )}
+      <form className="provider-credential-form" onSubmit={(event) => void handleSubmit(event)}>
+        <label>
+          <span>API Key / Token</span>
+          <input
+            ref={secretInputRef}
+            required
+            type="password"
+            autoComplete="off"
+            placeholder="输入新凭证"
+          />
+        </label>
+        <div className="dialog__actions">
+          {canDelete && (
+            <Button type="button" variant="danger" disabled={busy} onClick={handleDelete}>
+              删除配置中的 Key
+            </Button>
           )}
-          {provider.credentialSource === "keychain" && (
-            <InlineNotice tone="neutral">
-              当前使用 Pico 系统安全存储中的凭证。在这里保存 API Key 后，用户配置将优先生效。
-            </InlineNotice>
-          )}
-          <form className="provider-credential-form" onSubmit={(event) => void handleSubmit(event)}>
-            <label>
-              <span>API Key / Token</span>
-              <input
-                ref={secretInputRef}
-                required
-                type="password"
-                autoComplete="off"
-                placeholder="输入新凭证"
-              />
-            </label>
-            <div className="dialog__actions">
-              {canDelete && (
-                <Button type="button" variant="danger" disabled={busy} onClick={handleDelete}>
-                  删除配置中的 Key
-                </Button>
-              )}
-              <span className="provider-dialog-spacer" />
-              <Dialog.Close asChild>
-                <Button disabled={busy}>取消</Button>
-              </Dialog.Close>
-              <Button type="submit" variant="primary" disabled={busy}>
-                保存凭证
-              </Button>
-            </div>
-          </form>
-        </Dialog.Content>
-      </Dialog.Portal>
-    </Dialog.Root>
+          <span className="provider-dialog-spacer" />
+
+          <Button disabled={busy} onClick={() => handleOpenChange(false)}>
+            取消
+          </Button>
+
+          <Button type="submit" variant="primary" disabled={busy}>
+            保存凭证
+          </Button>
+        </div>
+      </form>
+    </Dialog>
   );
 }

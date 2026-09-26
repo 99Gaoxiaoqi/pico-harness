@@ -1,3 +1,5 @@
+import { TabList, Tab } from "@astryxdesign/core/TabList";
+import { TextAreaField } from "./ui-controls.js";
 import {
   Archive,
   ArchiveRestore,
@@ -7,7 +9,7 @@ import {
   RefreshCw,
   Trash2,
 } from "lucide-react";
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import type { RuntimeMemoryItem } from "@pico/protocol";
 import { Button, EmptyState, IconButton, InlineNotice } from "./components.js";
@@ -117,7 +119,6 @@ export function MemoryPage({
       creatingRef.current = false;
     }
   };
-  const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const groups = {
     saved: memory.items.filter((item) => item.lifecycleState === "active"),
     archived: memory.items.filter((item) => item.lifecycleState === "archived"),
@@ -131,13 +132,6 @@ export function MemoryPage({
       void actions.refreshMemory();
   }, [actions, data.trusted, data.workspacePath, memory.status, memory.workspacePath]);
 
-  const handleTabKey = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
-    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
-    event.preventDefault();
-    const next = nextMemoryTabIndex(index, event.key);
-    setActivePanel(panels[next]!);
-    tabRefs.current[next]?.focus();
-  };
   const changeState = async (item: RuntimeMemoryItem) => {
     const lifecycleState = item.lifecycleState === "active" ? "archived" : "active";
     if (await actions.updateMemoryItem(item.itemId, item.version, { lifecycleState }))
@@ -177,9 +171,10 @@ export function MemoryPage({
             </header>
             {editor?.id === item.itemId ? (
               <div className="memory-editor">
-                <label>
+                <div className="settings-field">
                   记忆内容
-                  <textarea
+                  <TextAreaField
+                    label="记忆内容"
                     rows={5}
                     maxLength={2000}
                     value={editor.content}
@@ -187,7 +182,7 @@ export function MemoryPage({
                       setEditor({ id: item.itemId, content: event.target.value })
                     }
                   />
-                </label>
+                </div>
               </div>
             ) : (
               <p>{item.content}</p>
@@ -324,8 +319,9 @@ export function MemoryPage({
                 。内容直接保存，不调用模型；在相关对话中按需召回。相同内容会复用已有记忆，归档内容会恢复。
               </p>
               <div className="memory-editor">
-                <label htmlFor="memory-add-content">记忆内容</label>
-                <textarea
+                <span className="settings-field-label">记忆内容</span>
+                <TextAreaField
+                  label="记忆内容"
                   id="memory-add-content"
                   ref={contentRef}
                   rows={4}
@@ -361,26 +357,25 @@ export function MemoryPage({
           )}
           {narrow ? (
             <div className="memory-tabs">
-              <div className="memory-tablist" role="tablist" aria-label="记忆状态">
-                {panels.map((panel, index) => (
-                  <button
+              <TabList
+                className="memory-tablist"
+                role="tablist"
+                aria-label="记忆状态"
+                value={activePanel}
+                onChange={(value) => setActivePanel(value as PanelId)}
+              >
+                {panels.map((panel) => (
+                  <Tab
                     key={panel}
-                    ref={(element) => {
-                      tabRefs.current[index] = element;
-                    }}
-                    type="button"
-                    role="tab"
+                    value={panel}
+                    onFocus={() => setActivePanel(panel)}
                     id={`memory-tab-${panel}`}
-                    aria-controls={`memory-panel-${panel}`}
-                    aria-selected={activePanel === panel}
-                    tabIndex={activePanel === panel ? 0 : -1}
-                    onClick={() => setActivePanel(panel)}
-                    onKeyDown={(event) => handleTabKey(event, index)}
-                  >
-                    {panelLabels[panel]} <span>{groups[panel].length}</span>
-                  </button>
+                    panelId={`memory-panel-${panel}`}
+                    label={panelLabels[panel]}
+                    endContent={<span>{groups[panel].length}</span>}
+                  />
                 ))}
-              </div>
+              </TabList>
               <section
                 role="tabpanel"
                 id={`memory-panel-${activePanel}`}

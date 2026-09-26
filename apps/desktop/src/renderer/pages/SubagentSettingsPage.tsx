@@ -1,3 +1,4 @@
+import { SwitchField, TextField, TextAreaField, SelectField } from "../ui-controls.js";
 import {
   isSafeSubagentPresetId,
   MAX_SUBAGENT_PRESETS,
@@ -148,25 +149,22 @@ export function SubagentSettingsPage({ snapshot, onUpdate }: SubagentSettingsPag
                       </div>
                       <p>{item.description || "说明何时适合将任务交给这个子 Agent。"}</p>
                     </div>
-                    <label className="subagent-settings__switch">
-                      <input
-                        type="checkbox"
-                        role="switch"
-                        aria-label={`启用：${item.name}`}
+                    <div className="settings-field subagent-settings__astryx-switch">
+                      <SwitchField
+                        label={`启用：${item.name}`}
                         checked={item.enabled}
                         disabled={saving}
-                        onChange={(event) =>
+                        onCheckedChange={(checked) =>
                           void persist(
                             snapshot.presets.map((candidate) =>
                               candidate.id === item.id
-                                ? { ...candidate, enabled: event.target.checked }
+                                ? { ...candidate, enabled: checked }
                                 : candidate,
                             ),
                           )
                         }
                       />
-                      <span aria-hidden="true" />
-                    </label>
+                    </div>
                     <Button
                       variant="quiet"
                       aria-label={`配置 ${item.name}`}
@@ -333,9 +331,10 @@ function SubagentPresetEditor({
     >
       <fieldset className="panel subagent-settings__group" disabled={saving}>
         <legend>用途</legend>
-        <label>
+        <div className="settings-field">
           <span>名称</span>
-          <input
+          <TextField
+            label="名称"
             value={draft.name}
             placeholder="例如：代码审查"
             aria-invalid={Boolean(submitted && errors.name)}
@@ -350,12 +349,14 @@ function SubagentPresetEditor({
                   : {}),
               }));
             }}
+            disabled={saving}
           />
           {errorNode("name")}
-        </label>
-        <label>
+        </div>
+        <div className="settings-field">
           <span>使用说明（可选）</span>
-          <textarea
+          <TextAreaField
+            label="使用说明（可选）"
             rows={3}
             placeholder="描述主 Agent 应在什么情况下使用它。"
             value={draft.description}
@@ -368,11 +369,12 @@ function SubagentPresetEditor({
                 ),
               }))
             }
+            disabled={saving}
           />
           <small className="subagent-settings__counter">
             {draft.description.trim().length} / {SUBAGENT_PRESET_DESCRIPTION_MAX_CHARS}
           </small>
-        </label>
+        </div>
         {preset ? (
           <div className="subagent-settings__id">
             <span>ID</span>
@@ -380,9 +382,10 @@ function SubagentPresetEditor({
             <small>创建后保持不变，主 Agent 和历史任务会用它识别此配置。</small>
           </div>
         ) : (
-          <label>
+          <div className="settings-field">
             <span>ID</span>
-            <input
+            <TextField
+              label="ID"
               value={draft.id}
               placeholder="例如：code-review"
               aria-invalid={Boolean(submitted && errors.id)}
@@ -391,47 +394,53 @@ function SubagentPresetEditor({
                 setIdWasEdited(true);
                 setDraft((current) => ({ ...current, id: event.target.value }));
               }}
+              disabled={saving}
             />
             <small>创建后保持不变，主 Agent 和历史任务会用它识别此配置。</small>
             {errorNode("id")}
-          </label>
+          </div>
         )}
       </fieldset>
       <fieldset className="panel subagent-settings__group" disabled={saving}>
         <legend>能力与模型</legend>
-        <label>
+        <div className="settings-field">
           <span>能力</span>
-          <select
+          <SelectField
+            label="能力"
+            name="profile"
             value={draft.profile}
-            onChange={(event) =>
+            onValueChange={(value) =>
               setDraft((current) => ({
                 ...current,
-                profile: event.target.value as SubagentProfile,
+                profile: value as SubagentProfile,
               }))
             }
-          >
-            {SUBAGENT_PROFILES.map((profile) => (
-              <option key={profile} value={profile}>
-                {SUBAGENT_PROFILE_COPY[profile].label}
-              </option>
-            ))}
-          </select>
+            disabled={saving}
+            options={[
+              ...SUBAGENT_PROFILES.map((profile) => ({
+                value: profile,
+                label: SUBAGENT_PROFILE_COPY[profile].label,
+              })),
+            ]}
+          />
           <small>{SUBAGENT_PROFILE_COPY[draft.profile].description}</small>
-        </label>
+        </div>
         {draft.profile === "implementation" && (
           <InlineNotice tone="warning">
             实现代码可以写文件和执行命令，并会在隔离 worktree 中运行。
           </InlineNotice>
         )}
-        <label>
+        <div className="settings-field">
           <span>连接</span>
-          <select
+          <SelectField
+            label="连接"
+            name="connectionSlug"
             value={draft.connectionSlug}
             disabled={saving || usableConnections.length === 0}
             aria-invalid={Boolean(submitted && errors.connection)}
             aria-describedby={errorId("connection")}
-            onChange={(event) => {
-              const connectionSlug = event.target.value;
+            onValueChange={(value) => {
+              const connectionSlug = value;
               const next = usableConnections.find((item) => item.id === connectionSlug);
               setDraft((current) => ({
                 ...current,
@@ -440,95 +449,97 @@ function SubagentPresetEditor({
                 thinkingLevel: "",
               }));
             }}
-          >
-            {!draft.connectionSlug && <option value="">请选择连接</option>}
-            {draft.connectionSlug && !connection && (
-              <option value={draft.connectionSlug} disabled>
-                {draft.connectionSlug} · 连接已删除
-              </option>
-            )}
-            {snapshot.connections.map((item) => (
-              <option key={item.id} value={item.id} disabled={!selectableSubagentConnection(item)}>
-                {item.name}
-                {item.retired ? " · 服务商已停止支持" : !item.enabled ? " · 已停用" : ""}
-              </option>
-            ))}
-          </select>
+            options={[
+              ...(!draft.connectionSlug ? [{ value: "", label: "请选择连接" }] : []),
+              ...(draft.connectionSlug && !connection
+                ? [
+                    {
+                      value: draft.connectionSlug,
+                      label: draft.connectionSlug + "· 连接已删除",
+                      disabled: true,
+                    },
+                  ]
+                : []),
+              ...snapshot.connections.map((item) => ({
+                value: item.id,
+                label:
+                  item.name +
+                  (item.retired ? " · 服务商已停止支持" : !item.enabled ? " · 已停用" : ""),
+                disabled: !selectableSubagentConnection(item),
+              })),
+            ]}
+          />
           {usableConnections.length === 0 && <small>请先在模型设置中添加并启用连接。</small>}
           {errorNode("connection")}
-        </label>
-        <label>
+        </div>
+        <div className="settings-field">
           <span>模型</span>
-          <select
+          <SelectField
+            label="模型"
+            name="model"
             value={draft.model}
             disabled={saving || models.length === 0}
             aria-invalid={Boolean(submitted && errors.model)}
             aria-describedby={errorId("model")}
-            onChange={(event) =>
-              setDraft((current) => ({ ...current, model: event.target.value, thinkingLevel: "" }))
+            onValueChange={(value) =>
+              setDraft((current) => ({ ...current, model: value, thinkingLevel: "" }))
             }
-          >
-            {!draft.model && <option value="">请选择模型</option>}
-            {draft.model && !validModel && (
-              <option value={draft.model} disabled>
-                {draft.model} · 模型不可用
-              </option>
-            )}
-            {models.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.id}
-              </option>
-            ))}
-          </select>
+            options={[
+              ...(!draft.model ? [{ value: "", label: "请选择模型" }] : []),
+              ...(draft.model && !validModel
+                ? [{ value: draft.model, label: draft.model + "· 模型不可用", disabled: true }]
+                : []),
+              ...models.map((item) => ({ value: item.id, label: item.id })),
+            ]}
+          />
           {models.length === 0 && <small>此连接没有可用模型。</small>}
           {errorNode("model")}
-        </label>
+        </div>
         {thinkingLevels.length > 0 && (
-          <label>
+          <div className="settings-field">
             <span>思考级别</span>
-            <select
+            <SelectField
+              label="思考级别"
+              name="thinkingLevel"
               value={
                 draft.thinkingLevel && thinkingLevels.includes(draft.thinkingLevel)
                   ? draft.thinkingLevel
                   : ""
               }
-              onChange={(event) =>
+              onValueChange={(value) =>
                 setDraft((current) => ({
                   ...current,
-                  thinkingLevel: event.target.value as SubagentThinkingLevel | "",
+                  thinkingLevel: value as SubagentThinkingLevel | "",
                 }))
               }
-            >
-              <option value="">跟随模型默认</option>
-              {thinkingLevels.map((level) => (
-                <option key={level} value={level}>
-                  {
-                    {
-                      off: "关闭",
-                      minimal: "最少",
-                      low: "低",
-                      medium: "中",
-                      high: "高",
-                      xhigh: "更高",
-                      max: "最高",
-                    }[level]
-                  }
-                </option>
-              ))}
-            </select>
-          </label>
+              disabled={saving}
+              options={[
+                { value: "", label: "跟随模型默认" },
+                ...thinkingLevels.map((level) => ({
+                  value: level,
+                  label: {
+                    off: "关闭",
+                    minimal: "最少",
+                    low: "低",
+                    medium: "中",
+                    high: "高",
+                    xhigh: "更高",
+                    max: "最高",
+                  }[level],
+                })),
+              ]}
+            />
+          </div>
         )}
-        <label className="subagent-settings__enabled">
-          <input
-            type="checkbox"
-            role="switch"
+        <div className="settings-field subagent-settings__enabled">
+          <SwitchField
+            label="启用此子 Agent"
+            labelHidden={false}
             checked={draft.enabled}
-            onChange={(event) =>
-              setDraft((current) => ({ ...current, enabled: event.target.checked }))
-            }
+            onCheckedChange={(checked) => setDraft((current) => ({ ...current, enabled: checked }))}
+            disabled={saving}
           />
-          <span>启用此子 Agent</span>
-        </label>
+        </div>
         <small>启用后，主 Agent 可以选择此配置来委派任务。</small>
       </fieldset>
       {atLimit && (
