@@ -1,3 +1,5 @@
+import { TextField, SelectField } from "../ui-controls.js";
+import { IconButton } from "../components.js";
 import { CircleAlert, ListChecks, Plus, RefreshCw } from "lucide-react";
 import { useState, type FormEvent } from "react";
 
@@ -94,7 +96,8 @@ export function TasksWorkbarPanel({
         </div>
         <div className="tool-panel__header-meta">
           <span>{ledger ? `已同步 ${ledger.tasks.length} 项` : "正在同步"}</span>
-          <button
+          <IconButton
+            label="刷新待办"
             type="button"
             className="tool-panel__icon-button"
             aria-label="刷新待办"
@@ -102,7 +105,7 @@ export function TasksWorkbarPanel({
             onClick={onRefresh}
           >
             <RefreshCw aria-hidden="true" size={15} />
-          </button>
+          </IconButton>
         </div>
       </header>
 
@@ -115,9 +118,9 @@ export function TasksWorkbarPanel({
       {readOnly && <p className="tool-panel__notice">当前任务只读，待办状态不能修改。</p>}
 
       <form className="tool-panel__create" onSubmit={submitCreate}>
-        <label>
-          <span className="sr-only">新待办标题</span>
-          <input
+        <div className="tool-panel__task-title">
+          <TextField
+            label="新待办标题"
             name="workbar-task-title"
             autoComplete="off"
             value={title}
@@ -125,14 +128,15 @@ export function TasksWorkbarPanel({
             disabled={readOnly || creating || !ledger}
             onChange={(event) => setTitle(event.target.value)}
           />
-        </label>
-        <button
+        </div>
+        <IconButton
+          label="添加待办"
           type="submit"
           aria-label="添加待办"
           disabled={readOnly || creating || !ledger || title.trim().length === 0}
         >
           <Plus aria-hidden="true" size={15} />
-        </button>
+        </IconButton>
       </form>
 
       <div className="tool-panel__scroll" aria-busy={loading}>
@@ -168,25 +172,23 @@ export function TasksWorkbarPanel({
                       {task.updatedAt ? ` · ${formatTaskTimestamp(task.updatedAt)}` : ""}
                     </small>
                   </div>
-                  <label className="tool-panel__task-status">
-                    <span className="sr-only">更新“{task.title}”状态</span>
-                    <select
-                      name={`workbar-task-status-${task.id}`}
-                      value={task.status}
-                      disabled={readOnly || updating}
-                      onChange={(event) => {
-                        if (!ledger) return;
-                        const status = event.target.value as WorkbarTaskStatus;
-                        onUpdate(createTaskUpdateRequest(task, status, ledger.revision));
-                      }}
-                    >
-                      {WORKBAR_TASK_STATUSES.map((status) => (
-                        <option key={status} value={status}>
-                          {taskStatusLabel(status)}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
+                  <SelectField
+                    className="tool-panel__task-status"
+                    label={`更新“${task.title}”状态`}
+                    name={`workbar-task-status-${task.id}`}
+                    value={task.status}
+                    disabled={readOnly || updating}
+                    onValueChange={(next) => {
+                      if (!ledger) return;
+                      onUpdate(
+                        createTaskUpdateRequest(task, next as WorkbarTaskStatus, ledger.revision),
+                      );
+                    }}
+                    options={WORKBAR_TASK_STATUSES.map((value) => ({
+                      value,
+                      label: taskStatusLabel(value),
+                    }))}
+                  />
                 </li>
               );
             })}

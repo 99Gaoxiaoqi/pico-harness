@@ -1,0 +1,100 @@
+/* Keep the existing workbar grid/flex geometry through Astryx's label wrappers. */
+:is(.session-workbar-shell, .tool-panel:not(.tool-panel--side-chat), .workbar-browser)
+  .astryx-button
+  > span:first-child,
+:is(.session-workbar-shell, .tool-panel:not(.tool-panel--side-chat), .workbar-browser)
+  .astryx-button
+  > span:first-child
+  > span {
+  display: contents;
+}
+
+:is(.session-workbar-shell, .tool-panel:not(.tool-panel--side-chat)) .button {
+  height: auto;
+  min-height: 0;
+  white-space: normal;
+  transform: none;
+}
+
+.session-workbar-shell .session-workbar__tab {
+  height: 100%;
+}
+
+.session-workbar-shell .session-workbar__launcher-menu button {
+  min-height: 34px;
+  justify-content: start;
+}
+
+.session-workbar-shell .session-workbar__context-menu button {
+  justify-content: start;
+}
+
+.tool-panel .tool-panel__terminal-tabs [role="tab"] {
+  height: 34px;
+}
+
+.tool-panel
+  :is(
+    .tool-panel__create,
+    .tool-panel__terminal-input,
+    .tool-panel__chunk-footer,
+    .tool-panel__terminal-meta
+  )
+  > .button,
+.tool-panel .tool-panel__artifact > header .button {
+  min-height: 28px;
+}
+
+.tool-panel__task-title,
+.tool-panel__terminal-command,
+.workbar-browser__address > .astryx-field {
+  min-width: 0;
+  flex: 1;
+}
+
+:is(.tool-panel__task-title, .tool-panel__terminal-command, .workbar-browser__address)
+  .pico-text-field {
+  height: 29px;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  box-shadow: none;
+}
+
+.workbar-browser__address .pico-text-field {
+  height: 28px;
+}
+
+.workbar-browser__address .pico-text-field input {
+  padding: 0;
+}
+
+.tool-panel .tool-panel__task-status {
+  width: 76px;
+  min-width: 0;
+  height: 26px;
+  min-height: 0;
+  border-radius: 5px;
+  font-size: 10px;
+}
+
+.tool-panel .pico-artifact-menu {
+  width: auto;
+  flex: 0 0 auto;
+}
+
+.tool-panel .pico-artifact-menu button {
+  width: 28px;
+  height: 28px;
+  min-height: 0;
+  padding: 0;
+  justify-content: center;
+}
+
+/* Only the original epoch label owns the active-cycle dot. */
+.graph-panel__epochs .astryx-button > span::after,
+.graph-panel__epochs .astryx-button > span > span::after {
+  content: none;
+}
