@@ -20,12 +20,14 @@ revision `c4eacc19c6e26bebd270f7a1cd3a81017c0fe5c9`.
 - Upstream: https://github.com/maka-agent/maka-agent
 - License: Apache License, Version 2.0
 - Included source notices: `resources/licenses/maka/NOTICE`
-- Complete upstream license file: `resources/licenses/maka/LICENSE`
+- Apache license and retained upstream notices: `resources/licenses/maka/LICENSE`
 
-The upstream license file is retained verbatim, including its third-party appendix.
-That appendix describes the upstream distribution; it is not a list of components
-shipped by Pico. Retaining it does not establish that every listed component is
-used here. The applicable adaptations identified in Pico are recorded below.
+The Apache license text and retained third-party notices are reproduced verbatim.
+The appendix entry covering the upstream reasoning UI, generated theme, and UI-core
+dependency patch is omitted: source review confirmed that these components are not
+included in Pico. Other appendix entries remain as upstream notices and do not
+establish that every listed component is shipped here. The applicable adaptations
+identified in Pico are recorded below.
 
 Pico adapts the storage driver and event/provider boundaries, and adds workspace migration,
 settings, recall, desktop management, and permanent item deletion with source suppression.

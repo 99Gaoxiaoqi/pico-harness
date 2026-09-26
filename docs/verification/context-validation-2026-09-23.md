@@ -12,13 +12,13 @@ Pico 起点 `caad78e4`。本记录覆盖上下文估算、压缩、工具结果�
 
 | 验收行为                                                                                        | 对应集成测试                                                                              | 结果       |
 | ----------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- | ---------- |
-| 用户声明窗口、真实 I/O 阈值、路由锚、一次 send 多步、主动失败阻断恢复、图片优先和步骤耗尽       | `engine/compaction-trigger.test.ts`                                                  | 通过       |
-| 安全连续前缀、任务锚、滚动摘要、截断／格式修复、已接受边界回退、checkpoint 写失败               | `engine/compaction-summary.test.ts`、`compaction-rolling-digest.test.ts`             | 通过       |
+| 用户声明窗口、真实 I/O 阈值、路由锚、一次 send 多步、主动失败阻断恢复、图片优先和步骤耗尽       | `engine/compaction-trigger.test.ts`                                                       | 通过       |
+| 安全连续前缀、任务锚、滚动摘要、截断／格式修复、已接受边界回退、checkpoint 写失败               | `engine/compaction-summary.test.ts`、`compaction-rolling-digest.test.ts`                  | 通过       |
 | 2,048／256 阈值、最近两个用户 turn、投影先提交、完整原文、重启、分叉和来源 digest               | `engine/durable-tool-projections.test.ts`、`tools/tool-result-runtime-projection.test.ts` | 通过       |
 | 冻结身份／窗口／组成／边界、迟到结算、失败与 Hook／摘要不覆盖、缺失字段不拼接、损坏投影修复     | `runtime/session-context-composition.test.ts`                                             | 通过       |
 | OpenAI / Responses / Claude 本地 HTTP → CostTracker → SQLite；usage 缺失、显式零、缓存、失败    | `provider/context-facts-protocols.test.ts`                                                | 三协议通过 |
 | 配置 agent_spawn 子会话自动压缩、归档、续接，Hook verifier 独立状态和只读工具                   | `runtime/context-production-subagent.test.ts`、`hook-verifier-compaction.test.ts`         | 通过       |
-| 实时 I / 回退 I+O、缓存为输入子集、切换／乱序／错误保留、组成明细和压缩后快照不变               | `desktop/context-ui.test.ts`、`runtime/session-context-checkpoint.test.ts`           | 通过       |
+| 实时 I / 回退 I+O、缓存为输入子集、切换／乱序／错误保留、组成明细和压缩后快照不变               | `desktop/context-ui.test.ts`、`runtime/session-context-checkpoint.test.ts`                | 通过       |
 | 一万 canonical 请求下，一千次正常快照读取小于一秒；修复查询走专用索引，无临时排序；查询不添事件 | `runtime/session-context-composition.test.ts`                                             | 通过       |
 | 维护 dry-run、v7/v8、事务失败回滚、配置／cron／memory 保留、维护后升级、拒绝未知表              | `storage/context-reset-maintenance.test.ts`                                               | 通过       |
 
