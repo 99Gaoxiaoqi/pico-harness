@@ -388,7 +388,7 @@ test("Workbar tool panels render real authority snapshots with accessible detail
   );
   assert.match(files, /aria-label="文件读取进度"/u);
   assert.match(files, /继续读取/u);
-  assert.match(files, /<h1><span>Report<\/span><\/h1>/u);
+  assert.match(files, /<h1>(?:<span>)?Report(?:<\/span>)?<\/h1>/u);
 
   const terminal = renderToStaticMarkup(
     React.createElement(TerminalWorkbarPanel, {

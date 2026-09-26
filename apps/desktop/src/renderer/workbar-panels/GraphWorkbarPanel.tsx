@@ -1,3 +1,4 @@
+import { IconButton, Button } from "../components.js";
 import { Activity, CircleAlert, GitFork, RefreshCw } from "lucide-react";
 
 export interface WorkbarGraphSummary {
@@ -98,7 +99,8 @@ export function GraphWorkbarPanel({
         </div>
         <div className="tool-panel__header-meta">
           <span>{detail ? `epoch ${detail.summary.epoch}` : `${graphs.length} 个周期`}</span>
-          <button
+          <IconButton
+            label="刷新 Graph"
             type="button"
             className="tool-panel__icon-button"
             aria-label="刷新 Graph"
@@ -106,7 +108,7 @@ export function GraphWorkbarPanel({
             onClick={onRefresh}
           >
             <RefreshCw aria-hidden="true" size={15} />
-          </button>
+          </IconButton>
         </div>
       </header>
 
@@ -119,7 +121,8 @@ export function GraphWorkbarPanel({
 
       <div className="graph-panel__epochs" aria-label="Graph 周期">
         {graphs.map((graph) => (
-          <button
+          <Button
+            variant="quiet"
             type="button"
             key={graph.graphId}
             data-active={graph.graphId === selectedGraphId || undefined}
@@ -128,7 +131,7 @@ export function GraphWorkbarPanel({
           >
             <span>e{graph.epoch}</span>
             <small>{graph.phase === "open" ? "运行中" : "已完成"}</small>
-          </button>
+          </Button>
         ))}
       </div>
 
@@ -179,9 +182,13 @@ export function GraphWorkbarPanel({
                           <p>{wake.lastError ?? "连续失败达到自动重试上限。"}</p>
                           <small>已尝试 {wake.attemptCount} 次</small>
                         </div>
-                        <button type="button" onClick={() => onRetryWake?.(wake.wakeId)}>
+                        <Button
+                          variant="quiet"
+                          type="button"
+                          onClick={() => onRetryWake?.(wake.wakeId)}
+                        >
                           重试
-                        </button>
+                        </Button>
                       </li>
                     ))}
                 </ul>

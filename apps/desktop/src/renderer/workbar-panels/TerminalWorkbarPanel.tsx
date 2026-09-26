@@ -1,3 +1,5 @@
+import { TextField } from "../ui-controls.js";
+import { Button, IconButton } from "../components.js";
 import { CircleAlert, Link, Plus, Square, TerminalSquare } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { TerminalOutputView } from "./TerminalOutputView.js";
@@ -103,7 +105,8 @@ export function TerminalWorkbarPanel({
       <header className="tool-panel__terminal-tabs">
         <div role="tablist" aria-label="终端实例">
           {terminals.map((terminal, index) => (
-            <button
+            <Button
+              variant="quiet"
               key={terminal.id}
               ref={(node) => {
                 if (node) tabRefs.current.set(terminal.id, node);
@@ -122,17 +125,18 @@ export function TerminalWorkbarPanel({
               <TerminalSquare aria-hidden="true" size={13} />
               <span>{terminal.title}</span>
               <small aria-label={terminalStatusLabel(terminal.status)} />
-            </button>
+            </Button>
           ))}
         </div>
-        <button
+        <IconButton
+          label="新建终端"
           type="button"
           className="tool-panel__icon-button"
           aria-label="新建终端"
           onClick={onCreate}
         >
           <Plus aria-hidden="true" size={15} />
-        </button>
+        </IconButton>
       </header>
 
       {error && (
@@ -148,9 +152,9 @@ export function TerminalWorkbarPanel({
           <strong>{loading ? "正在加载终端…" : "没有终端"}</strong>
           <span>新建终端后，进程由 Runtime Host 持续托管。</span>
           {!loading && (
-            <button type="button" onClick={onCreate}>
+            <Button variant="quiet" type="button" onClick={onCreate}>
               新建终端
-            </button>
+            </Button>
           )}
         </div>
       ) : (
@@ -171,16 +175,16 @@ export function TerminalWorkbarPanel({
             )}
             <div>
               {!selected.attached && selected.status !== "exited" && (
-                <button type="button" onClick={() => onAttach(selected.id)}>
+                <Button variant="quiet" type="button" onClick={() => onAttach(selected.id)}>
                   <Link aria-hidden="true" size={13} />
                   连接
-                </button>
+                </Button>
               )}
               {selected.status !== "exited" && (
-                <button type="button" onClick={() => onStop(selected.id)}>
+                <Button variant="quiet" type="button" onClick={() => onStop(selected.id)}>
                   <Square aria-hidden="true" size={12} />
                   停止
-                </button>
+                </Button>
               )}
             </div>
           </div>
@@ -206,9 +210,9 @@ export function TerminalWorkbarPanel({
             )}
           </div>
           <form className="tool-panel__terminal-input" onSubmit={submitInput}>
-            <label>
-              <span className="sr-only">终端输入</span>
-              <input
+            <div className="tool-panel__terminal-command">
+              <TextField
+                label="终端输入"
                 name="workbar-terminal-command"
                 autoComplete="off"
                 value={input}
@@ -217,13 +221,14 @@ export function TerminalWorkbarPanel({
                 spellCheck={false}
                 onChange={(event) => setInput(event.target.value)}
               />
-            </label>
-            <button
+            </div>
+            <Button
+              variant="quiet"
               type="submit"
               disabled={selected.status !== "running" || !selected.attached || input.length === 0}
             >
               发送
-            </button>
+            </Button>
           </form>
         </>
       )}

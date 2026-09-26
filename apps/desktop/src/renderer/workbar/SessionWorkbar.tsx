@@ -1,3 +1,4 @@
+import { IconButton, Button } from "../components.js";
 import {
   ArrowDownToLine,
   ArrowRightToLine,
@@ -326,7 +327,8 @@ export function SessionWorkbarDock({
       data-has-restore={showRestoreButton}
       style={rootStyle}
     >
-      <button
+      <IconButton
+        label={`展开${dock === "right" ? "右侧" : "底部"}任务工作栏`}
         ref={restoreButtonRef}
         type="button"
         className="session-workbar-restore"
@@ -341,7 +343,7 @@ export function SessionWorkbarDock({
         ) : (
           <PanelBottomOpen aria-hidden="true" size={18} />
         )}
-      </button>
+      </IconButton>
 
       <aside
         id={rootId}
@@ -371,7 +373,8 @@ export function SessionWorkbarDock({
             <strong>{dock === "right" ? "右侧工作栏" : "底部工作栏"}</strong>
           </div>
           <div className="session-workbar__actions">
-            <button
+            <IconButton
+              label={`在${dock === "right" ? "右侧" : "底部"}打开工具启动器`}
               ref={launcherButtonRef}
               type="button"
               className="session-workbar__icon-button"
@@ -379,8 +382,9 @@ export function SessionWorkbarDock({
               onClick={() => onOpenLauncher(dock)}
             >
               <Plus aria-hidden="true" size={17} />
-            </button>
-            <button
+            </IconButton>
+            <IconButton
+              label={`折叠${dock === "right" ? "右侧" : "底部"}任务工作栏`}
               type="button"
               className="session-workbar__icon-button"
               aria-label={`折叠${dock === "right" ? "右侧" : "底部"}任务工作栏`}
@@ -393,7 +397,7 @@ export function SessionWorkbarDock({
               ) : (
                 <PanelBottomClose aria-hidden="true" size={17} />
               )}
-            </button>
+            </IconButton>
           </div>
         </header>
 
@@ -442,7 +446,8 @@ export function SessionWorkbarDock({
                 }}
               >
                 <GripVertical className="session-workbar__drag-mark" aria-hidden="true" size={13} />
-                <button
+                <Button
+                  variant="quiet"
                   ref={(node) => {
                     if (node) tabRefs.current.set(tab.id, node);
                     else tabRefs.current.delete(tab.id);
@@ -468,16 +473,17 @@ export function SessionWorkbarDock({
                       {tab.badge}
                     </span>
                   )}
-                </button>
+                </Button>
                 {tab.closable && (
-                  <button
+                  <IconButton
+                    label={`关闭“${tab.label}”`}
                     type="button"
                     className="session-workbar__close"
                     aria-label={`关闭“${tab.label}”`}
                     onClick={() => handleClose(tab.id)}
                   >
                     <X aria-hidden="true" size={13} />
-                  </button>
+                  </IconButton>
                 )}
               </div>
             );
@@ -510,14 +516,15 @@ export function SessionWorkbarDock({
               onDrop={(event) => handleDrop(event, 0)}
             >
               <p>还没有打开的面板</p>
-              <button
+              <Button
+                variant="quiet"
                 type="button"
                 className="session-workbar__launcher"
                 onClick={() => onOpenLauncher(dock)}
               >
                 <Plus aria-hidden="true" size={16} />
                 打开工具启动器
-              </button>
+              </Button>
             </div>
           )}
         </div>
@@ -532,7 +539,8 @@ export function SessionWorkbarDock({
           onPointerDown={(event) => event.stopPropagation()}
         >
           {contextTab.preview && (
-            <button
+            <Button
+              variant="quiet"
               type="button"
               role="menuitem"
               onClick={() => {
@@ -542,9 +550,10 @@ export function SessionWorkbarDock({
             >
               <Pin aria-hidden="true" size={14} />
               固定预览
-            </button>
+            </Button>
           )}
-          <button
+          <Button
+            variant="quiet"
             type="button"
             role="menuitem"
             onClick={() => {
@@ -558,9 +567,10 @@ export function SessionWorkbarDock({
               <ArrowRightToLine aria-hidden="true" size={14} />
             )}
             移到{targetDock === "right" ? "右侧" : "底部"}工作栏
-          </button>
+          </Button>
           <span className="session-workbar__menu-separator" role="separator" />
-          <button
+          <Button
+            variant="quiet"
             type="button"
             role="menuitem"
             onClick={() => {
@@ -570,8 +580,9 @@ export function SessionWorkbarDock({
             disabled={tabs.length < 2}
           >
             关闭其他标签
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="quiet"
             type="button"
             role="menuitem"
             onClick={() => {
@@ -581,8 +592,9 @@ export function SessionWorkbarDock({
             disabled={tabs.findIndex((tab) => tab.id === contextTab.id) === tabs.length - 1}
           >
             关闭右侧标签
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="quiet"
             type="button"
             role="menuitem"
             onClick={() => {
@@ -592,7 +604,7 @@ export function SessionWorkbarDock({
             disabled={!contextTab.closable}
           >
             关闭标签
-          </button>
+          </Button>
         </div>
       )}
     </div>

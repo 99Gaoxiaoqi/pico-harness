@@ -1,3 +1,4 @@
+import { Button } from "../components.js";
 import { useEffect, useRef, type KeyboardEvent, type ReactNode } from "react";
 
 import { WORKBAR_TOOL_REGISTRY, type WorkbarToolDefinition } from "./registry.js";
@@ -82,7 +83,8 @@ export function WorkbarLauncher({
       {tools.map((tool) => {
         const status = availability?.(tool.kind) ?? { available: true };
         return (
-          <button
+          <Button
+            variant="quiet"
             key={tool.kind}
             ref={(node) => {
               if (node) buttonRefs.current.set(tool.kind, node);
@@ -115,7 +117,7 @@ export function WorkbarLauncher({
                 </span>
               )}
             </span>
-          </button>
+          </Button>
         );
       })}
     </div>
