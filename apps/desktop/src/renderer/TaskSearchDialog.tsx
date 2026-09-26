@@ -1,6 +1,8 @@
-import * as Dialog from "@radix-ui/react-dialog";
+import { Dialog } from "@astryxdesign/core/Dialog";
+import { Button } from "@astryxdesign/core/Button";
+import { TextInput } from "@astryxdesign/core/TextInput";
 import { ArrowUpRight, Search, X } from "lucide-react";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import type { SessionView, WorkspaceView } from "./model.js";
 import { sortSidebarTasks } from "./navigation.js";
 import { workspaceDisplayName, workspaceSessionKey } from "./workspace-session.js";
@@ -18,8 +20,11 @@ export function TaskSearchDialog({
   readonly workspaces: readonly WorkspaceView[];
   readonly onSelect: (session: SessionView) => void;
 }) {
-  const previousFocusRef = useRef<HTMLElement | null>(null);
+  const descriptionId = useId();
   const [query, setQuery] = useState("");
+  useEffect(() => {
+    if (!open) setQuery("");
+  }, [open]);
   const results = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase();
     return sortSidebarTasks(sessions.filter((session) => session.status !== "archived")).filter(
@@ -32,81 +37,83 @@ export function TaskSearchDialog({
     );
   }, [query, sessions, workspaces]);
   return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="dialog-overlay task-search-overlay" />
-        <Dialog.Content
-          className="task-search"
-          onOpenAutoFocus={() => {
-            previousFocusRef.current = document.activeElement as HTMLElement;
+    <Dialog
+      isOpen={open}
+      onOpenChange={onOpenChange}
+      className="task-search pico-task-search"
+      aria-label="搜索任务"
+      aria-describedby={descriptionId}
+      purpose="info"
+      padding={0}
+      width="min(580px, calc(100vw - 48px))"
+      position={{ top: "18%" }}
+    >
+      <p id={descriptionId} className="conversation-sr-only">
+        按任务标题或项目名称查找，按 Tab 选择结果。
+      </p>
+      <div className="task-search__input">
+        <Search aria-hidden="true" />
+        <TextInput
+          label="搜索任务标题或项目"
+          isLabelHidden
+          hasAutoFocus
+          className="pico-task-search-field"
+          placeholder="搜索任务或项目…"
+          value={query}
+          onChange={setQuery}
+          onKeyDown={(event) => {
+            if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
+            if (event.key === "Enter" && results[0]) onSelect(results[0]);
+            if (event.key === "ArrowDown") {
+              event.preventDefault();
+              event.currentTarget
+                .closest(".task-search")
+                ?.querySelector<HTMLButtonElement>(".task-search__result")
+                ?.focus();
+            }
           }}
-          onCloseAutoFocus={(event) => {
-            event.preventDefault();
-            setQuery("");
-            previousFocusRef.current?.focus();
-          }}
+        />
+        <Button
+          label="关闭搜索"
+          variant="ghost"
+          className="task-search__close"
+          onClick={() => onOpenChange(false)}
         >
-          <Dialog.Title className="conversation-sr-only">搜索任务</Dialog.Title>
-          <Dialog.Description className="conversation-sr-only">
-            按任务标题或项目名称查找，按 Tab 选择结果。
-          </Dialog.Description>
-          <div className="task-search__input">
-            <Search aria-hidden="true" />
-            <input
-              aria-label="搜索任务标题或项目"
-              placeholder="搜索任务或项目…"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
-                if (event.key === "Enter" && results[0]) onSelect(results[0]);
-                if (event.key === "ArrowDown") {
-                  event.preventDefault();
-                  event.currentTarget
-                    .closest(".task-search")
-                    ?.querySelector<HTMLButtonElement>(".task-search__result")
-                    ?.focus();
-                }
-              }}
-            />
-            <Dialog.Close className="task-search__close" aria-label="关闭搜索">
-              <X aria-hidden="true" />
-            </Dialog.Close>
+          <X aria-hidden="true" />
+        </Button>
+      </div>
+      <div className="task-search__results" aria-label="搜索结果">
+        <p role="status">{query ? `${results.length} 个结果` : "最近的任务"}</p>
+        {results.length ? (
+          results.map((session) => (
+            <Button
+              label={session.title}
+              variant="ghost"
+              key={workspaceSessionKey({
+                workspacePath: session.workspacePath,
+                sessionId: session.id,
+              })}
+              className="task-search__result"
+              onClick={() => onSelect(session)}
+            >
+              <span>
+                <strong>{session.title}</strong>
+                <small>
+                  {workspaceDisplayName(
+                    session.workspacePath,
+                    workspaces.find((item) => item.path === session.workspacePath),
+                  )}
+                </small>
+              </span>
+              <ArrowUpRight aria-hidden="true" />
+            </Button>
+          ))
+        ) : (
+          <div className="task-search__empty">
+            {query ? "没有匹配的任务，试试其他关键词。" : "发送第一条消息后，就能在这里找到任务。"}
           </div>
-          <div className="task-search__results" aria-label="搜索结果">
-            <p role="status">{query ? `${results.length} 个结果` : "最近的任务"}</p>
-            {results.length ? (
-              results.map((session) => (
-                <button
-                  key={workspaceSessionKey({
-                    workspacePath: session.workspacePath,
-                    sessionId: session.id,
-                  })}
-                  className="task-search__result"
-                  onClick={() => onSelect(session)}
-                >
-                  <span>
-                    <strong>{session.title}</strong>
-                    <small>
-                      {workspaceDisplayName(
-                        session.workspacePath,
-                        workspaces.find((item) => item.path === session.workspacePath),
-                      )}
-                    </small>
-                  </span>
-                  <ArrowUpRight aria-hidden="true" />
-                </button>
-              ))
-            ) : (
-              <div className="task-search__empty">
-                {query
-                  ? "没有匹配的任务，试试其他关键词。"
-                  : "发送第一条消息后，就能在这里找到任务。"}
-              </div>
-            )}
-          </div>
-        </Dialog.Content>
-      </Dialog.Portal>
-    </Dialog.Root>
+        )}
+      </div>
+    </Dialog>
   );
 }

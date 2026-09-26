@@ -1,0 +1,173 @@
+/* Keep the desktop geometry while Astryx owns the shell and overlay behavior. */
+.app-shell.pico-astryx-shell {
+  display: flex;
+  height: 100%;
+  --pico-sidebar-width: 226px;
+}
+.pico-astryx-shell.is-sidebar-collapsed {
+  --pico-sidebar-width: 62px;
+}
+.pico-astryx-shell .astryx-app-shell-sidenav {
+  width: var(--pico-sidebar-width);
+  overflow: hidden;
+}
+.pico-astryx-shell .sidebar {
+  height: 100%;
+}
+.pico-astryx-shell #astryx-app-shell-main {
+  min-width: 0;
+  overflow: hidden;
+}
+.pico-astryx-shell .workspace-frame {
+  height: 100%;
+}
+.pico-astryx-shell :where(.sidebar .astryx-button),
+.pico-astryx-shell .toast__dismiss {
+  min-height: 0;
+  min-width: 0;
+  padding: 0;
+  background-image: none;
+  -webkit-app-region: no-drag;
+}
+.pico-astryx-shell .sidebar .astryx-button > span:not([role="status"]),
+.pico-astryx-shell .sidebar .astryx-button > span:not([role="status"]) > span,
+.pico-task-search .astryx-button > span:not([role="status"]),
+.pico-task-search .astryx-button > span:not([role="status"]) > span {
+  display: contents;
+}
+.pico-astryx-shell .sidebar-task-grouping button {
+  flex: 1;
+  min-height: 26px;
+  height: auto;
+  padding: 3px 7px;
+  border: 0;
+  border-radius: 5px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--sidebar-muted);
+}
+.pico-astryx-shell .sidebar-project__header {
+  display: grid;
+  width: 100%;
+  min-height: 30px;
+  height: auto;
+  grid-template-columns: 16px minmax(0, 1fr) auto 14px;
+  gap: 7px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 7px;
+  font-size: 11px;
+  font-weight: 680;
+  text-align: left;
+  color: var(--sidebar-ink);
+}
+.pico-astryx-shell .sidebar__collapse {
+  display: inline-grid;
+  width: 30px;
+  height: 30px;
+  border: 0;
+  border-radius: 7px;
+  color: var(--sidebar-muted);
+}
+.pico-astryx-shell .sidebar__collapse svg {
+  width: 16px;
+  height: 16px;
+}
+.pico-astryx-shell .sidebar__collapse:hover,
+.pico-astryx-shell .sidebar-project__header:hover {
+  background: var(--sidebar-raised);
+}
+.pico-astryx-shell .sidebar-task-grouping button.is-active,
+.pico-astryx-shell .sidebar-task-grouping button:hover {
+  background: var(--surface-raised);
+  color: var(--sidebar-ink);
+}
+.pico-sidebar-menu-trigger.astryx-button {
+  position: absolute;
+  top: 3px;
+  right: 4px;
+  width: 26px;
+  height: 24px;
+  border: 0;
+  border-radius: 5px;
+  background: var(--sidebar);
+  opacity: 0;
+}
+.sidebar-session-row:hover .pico-sidebar-menu-trigger,
+.sidebar-session-row:focus-within .pico-sidebar-menu-trigger,
+.pico-sidebar-menu-trigger[aria-expanded="true"] {
+  opacity: 1;
+}
+.pico-sidebar-menu-trigger[aria-expanded="true"] {
+  background: var(--sidebar-raised);
+}
+.pico-sidebar-menu-trigger svg {
+  width: 15px;
+  height: 15px;
+}
+.pico-sidebar-menu {
+  border: 1px solid var(--line);
+  background: var(--surface-raised);
+  color: var(--sidebar-ink);
+  box-shadow: var(--shadow-sm);
+  -webkit-app-region: no-drag;
+}
+.pico-sidebar-menu .astryx-dropdown-menu-item {
+  min-height: 28px;
+  font-size: 12px;
+  -webkit-app-region: no-drag;
+}
+.pico-task-search.task-search {
+  margin: 0 auto;
+  inset-inline: 0;
+  left: 0;
+  transform: none;
+  animation: none;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--surface-raised);
+  color: var(--ink);
+  box-shadow: var(--shadow-lg);
+  -webkit-app-region: no-drag;
+}
+.pico-task-search::backdrop {
+  background: rgb(0 0 0 / 0.14);
+  backdrop-filter: none;
+}
+.pico-task-search .task-search__input > .astryx-field {
+  flex: 1;
+  min-width: 0;
+}
+.pico-task-search-field.astryx-text-input {
+  height: auto;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.pico-task-search .task-search__close {
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0;
+  background-image: none;
+}
+.pico-task-search .task-search__result {
+  display: flex;
+  width: 100%;
+  height: auto;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 11px 12px;
+  border: 0;
+  border-radius: 8px;
+  text-align: left;
+  background-image: none;
+  color: var(--ink);
+}
+@media (max-width: 980px) {
+  .app-shell.pico-astryx-shell:not(.is-sidebar-collapsed) {
+    --pico-sidebar-width: 220px;
+  }
+}
