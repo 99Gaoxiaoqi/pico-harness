@@ -1,3 +1,5 @@
+import { Button } from "@astryxdesign/core/Button";
+import { ChatComposer, ChatComposerInput } from "@astryxdesign/core/Chat";
 import { CircleAlert, GitFork, LoaderCircle, Send, Square, X } from "lucide-react";
 import type { FormEvent, KeyboardEvent, ReactNode } from "react";
 
@@ -85,8 +87,14 @@ export function SideChatWorkbarPanel({
     event.preventDefault();
     send();
   };
-  const handleDraftKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
+  const handleDraftKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (
+      event.key !== "Enter" ||
+      event.shiftKey ||
+      event.nativeEvent.isComposing ||
+      event.nativeEvent.keyCode === 229
+    )
+      return;
     event.preventDefault();
     send();
   };
@@ -109,14 +117,15 @@ export function SideChatWorkbarPanel({
             <small>{sideChatStateLabel(child.state, running)}</small>
           </span>
         </div>
-        <button
-          type="button"
+        <Button
+          label="关闭侧边对话"
+          isIconOnly
+          icon={<X aria-hidden="true" size={15} />}
           className="tool-panel__icon-button"
-          aria-label="关闭侧边对话"
+          variant="ghost"
+          size="sm"
           onClick={onClose}
-        >
-          <X aria-hidden="true" size={15} />
-        </button>
+        />
       </header>
 
       <p className="side-chat__boundary" role="note">
@@ -147,9 +156,7 @@ export function SideChatWorkbarPanel({
           <div className="side-chat__state">
             <CircleAlert aria-hidden="true" size={20} />
             <strong>临时分支不可用</strong>
-            <button type="button" onClick={onRetryCreate}>
-              重新创建
-            </button>
+            <Button label="重新创建" onClick={onRetryCreate} size="sm" />
           </div>
         ) : child.state === "live" ? (
           <ConversationTranscript
@@ -182,37 +189,53 @@ export function SideChatWorkbarPanel({
       )}
 
       <form className="side-chat__composer" onSubmit={submit}>
-        <label>
-          <span className="sr-only">发送给临时分支</span>
-          <textarea
-            name="workbar-side-chat-message"
-            autoComplete="off"
-            value={draft}
-            rows={2}
-            placeholder={unavailable ? "临时分支就绪后可发送消息…" : "在临时分支中继续…"}
-            disabled={unavailable}
-            onChange={(event) => onDraftChange(event.target.value)}
-            onKeyDown={handleDraftKeyDown}
-          />
-        </label>
-        <div>
-          <span>{running ? "Agent 正在运行" : "Enter 发送 · Shift+Enter 换行"}</span>
-          {running ? (
-            <button type="button" className="side-chat__stop" onClick={onStop}>
-              <Square aria-hidden="true" size={12} />
-              停止
-            </button>
-          ) : (
-            <button
-              type="submit"
-              className="side-chat__send"
-              aria-label="发送消息"
-              disabled={!sideChatCanSend(child.state, running, draft)}
-            >
-              <Send aria-hidden="true" size={14} />
-            </button>
-          )}
-        </div>
+        <ChatComposer
+          className="pico-astryx-composer"
+          value={draft}
+          onChange={onDraftChange}
+          onSubmit={send}
+          isDisabled={unavailable}
+          elevation="none"
+          input={
+            <ChatComposerInput
+              className="pico-chat-input"
+              label="发送给临时分支"
+              value={draft}
+              onChange={onDraftChange}
+              onSubmit={send}
+              hasHistory={false}
+              pasteAsToken={false}
+              maxRows={200 / 22}
+              placeholder={unavailable ? "临时分支就绪后可发送消息…" : "在临时分支中继续…"}
+              isDisabled={unavailable}
+              onKeyDown={handleDraftKeyDown}
+            />
+          }
+          footerActions={
+            <span>{running ? "Agent 正在运行" : "Enter 发送 · Shift+Enter 换行"}</span>
+          }
+          sendButton={
+            running ? (
+              <Button
+                label="停止"
+                className="side-chat__stop"
+                onClick={onStop}
+                icon={<Square aria-hidden="true" size={12} />}
+                size="sm"
+              />
+            ) : (
+              <Button
+                type="submit"
+                className="side-chat__send"
+                label="发送消息"
+                isIconOnly
+                icon={<Send aria-hidden="true" size={14} />}
+                isDisabled={!sideChatCanSend(child.state, running, draft)}
+                size="sm"
+              />
+            )
+          }
+        />
       </form>
     </section>
   );
@@ -235,9 +258,12 @@ function SideChatErrorState({
         <strong>{noTurn ? "需要一个已完成的回合" : "无法创建临时分支"}</strong>
         <p>{error.message}</p>
       </div>
-      <button type="button" disabled={retrying} onClick={onRetry}>
-        {retrying ? "重试中…" : "重试"}
-      </button>
+      <Button
+        label={retrying ? "重试中…" : "重试"}
+        isDisabled={retrying}
+        onClick={onRetry}
+        size="sm"
+      />
     </section>
   );
 }

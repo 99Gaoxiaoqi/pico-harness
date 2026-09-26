@@ -1,0 +1,131 @@
+/* Pico owns the geometry and the draft; Astryx supplies the accessible controls.
+   These scoped slot selectors describe the pinned 0.6.2 layout shell, never
+   generated StyleX classes. The browser integration covers their geometry. */
+.conversation-surface .conversation-surface__main {
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.conversation-surface:not([data-has-header]) .conversation-surface__main {
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.pico-chat-layout {
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
+}
+
+.pico-chat-layout > div:has(> .conversation-surface__content) {
+  padding: 0;
+}
+
+.pico-chat-layout > div:has(.conversation-surface__composer) {
+  background: var(--conversation-bg);
+  z-index: 2;
+}
+
+.pico-chat-layout > div > div:has(> div > .conversation-surface__composer) {
+  padding: 0;
+}
+
+.pico-chat-layout .conversation-scroll-to-bottom {
+  bottom: calc(100% + 14px);
+  pointer-events: auto;
+}
+
+.pico-astryx-composer {
+  min-width: 0;
+  width: 100%;
+}
+
+/* With drawer and status absent, this is the documented composer body. */
+.pico-astryx-composer > div {
+  padding: 0;
+  gap: 6px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.pico-astryx-composer > div > div:last-child {
+  min-height: 28px;
+  gap: 8px;
+}
+
+.pico-astryx-composer > div > div:last-child > div:first-child {
+  min-width: 0;
+  flex: 1;
+}
+
+.pico-astryx-composer > div:hover,
+.pico-astryx-composer > div:focus-within {
+  box-shadow: none;
+}
+
+.pico-chat-input {
+  min-width: 0;
+  min-height: 28px;
+}
+
+.pico-chat-input [contenteditable] {
+  min-height: 28px;
+  max-height: 200px;
+  overflow-y: auto;
+  padding: 1px 3px;
+  color: var(--conversation-ink, var(--ink));
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.pico-chat-input > [aria-hidden="true"] {
+  padding: 1px 3px;
+  color: var(--conversation-ink-faint, var(--ink-tertiary));
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.pico-chat-input:focus-within {
+  outline: none;
+}
+
+.side-chat__composer > .pico-astryx-composer {
+  display: block;
+}
+
+.side-chat__composer .pico-chat-input [contenteditable] {
+  min-height: 44px;
+}
+
+.conversation-context-search > .astryx-field {
+  flex: 1;
+  min-width: 0;
+}
+
+.conversation-context-results .astryx-button {
+  height: auto;
+  min-height: 50px;
+  justify-content: flex-start;
+  white-space: normal;
+}
+
+.conversation-context-search {
+  padding: 0;
+  border: 0;
+  box-shadow: none;
+}
+
+.conversation-context-search:focus-within {
+  box-shadow: none;
+}
+
+.conversation-context-results .astryx-button > span:first-child {
+  display: contents;
+}
+
+.conversation-context-results .astryx-button svg {
+  width: 15px;
+  height: 15px;
+}
