@@ -115,6 +115,7 @@
     "ws": "^8.21.1"
   },
   "devDependencies": {
+    "@astryxdesign/cli": "0.6.2",
     "@eslint/js": "^10.0.1",
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.20.0",
@@ -124,6 +125,7 @@
     "esbuild": "^0.28.1",
     "eslint": "^10.5.0",
     "globals": "^17.6.0",
+    "patch-package": "8.0.1",
     "prettier": "^3.8.4",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
