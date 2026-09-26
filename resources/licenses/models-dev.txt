@@ -1,5 +1,10 @@
 models.dev data (https://github.com/anomalyco/models.dev)
 Initial pricing snapshot obtained via Apache Maka (https://github.com/apache/maka).
+Pico input: scripts/model-pricing/snapshot.json
+Recorded import provenance: Maka committed models.dev snapshot
+85b25f334b65929079ea6dab9b0a2a66f433e3d66710fcd1aadff5f611b37345
+Upstream data endpoint: https://models.dev/api.json
+The imported projection and prices are retained without a catalog refresh.
 
 MIT License
 Copyright (c) 2025 models.dev
