@@ -1,3 +1,5 @@
+import { TextField } from "../ui-controls.js";
+import { IconButton } from "../components.js";
 import { ArrowLeft, ArrowRight, Globe2, LoaderCircle, RefreshCw, X } from "lucide-react";
 import type { JsonObject, RuntimeBrowserAgentCommand } from "@pico/protocol";
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
@@ -242,23 +244,26 @@ export function BrowserWorkbarPanel({ bridge, sessionId, active }: BrowserWorkba
   return (
     <section className="workbar-browser" aria-label="浏览器">
       <form className="workbar-browser__toolbar" onSubmit={submit}>
-        <button
+        <IconButton
+          label="后退"
           type="button"
           aria-label="后退"
           disabled={!state?.canGoBack}
           onClick={() => void perform(() => bridge.browser.back(sessionId))}
         >
           <ArrowLeft aria-hidden="true" size={15} />
-        </button>
-        <button
+        </IconButton>
+        <IconButton
+          label="前进"
           type="button"
           aria-label="前进"
           disabled={!state?.canGoForward}
           onClick={() => void perform(() => bridge.browser.forward(sessionId))}
         >
           <ArrowRight aria-hidden="true" size={15} />
-        </button>
-        <button
+        </IconButton>
+        <IconButton
+          label={state?.loading ? "停止加载" : "重新加载"}
           type="button"
           aria-label={state?.loading ? "停止加载" : "重新加载"}
           onClick={() =>
@@ -272,11 +277,11 @@ export function BrowserWorkbarPanel({ bridge, sessionId, active }: BrowserWorkba
           ) : (
             <RefreshCw aria-hidden="true" size={15} />
           )}
-        </button>
-        <label className="workbar-browser__address">
+        </IconButton>
+        <div className="workbar-browser__address">
           <Globe2 aria-hidden="true" size={14} />
-          <span className="sr-only">地址</span>
-          <input
+          <TextField
+            label="地址"
             name="workbar-browser-address"
             inputMode="url"
             autoComplete="off"
@@ -285,8 +290,9 @@ export function BrowserWorkbarPanel({ bridge, sessionId, active }: BrowserWorkba
             spellCheck={false}
             onChange={(event) => setAddress(event.target.value)}
           />
-        </label>
-        <button
+        </div>
+        <IconButton
+          label="关闭当前页面"
           type="button"
           aria-label="关闭当前页面"
           disabled={!state?.hasPage}
@@ -295,7 +301,7 @@ export function BrowserWorkbarPanel({ bridge, sessionId, active }: BrowserWorkba
           }}
         >
           <X aria-hidden="true" size={15} />
-        </button>
+        </IconButton>
       </form>
       {message && (
         <p className="workbar-browser__error" role="alert">

@@ -1,3 +1,4 @@
+import { IconButton, Button } from "../components.js";
 import { CircleAlert, FileDiff, GitBranch, RefreshCw } from "lucide-react";
 
 export type ReviewChangeSource = "staged" | "unstaged";
@@ -75,7 +76,8 @@ export function ReviewWorkbarPanel({
             {snapshot?.branch || "未识别分支"}
           </strong>
         </div>
-        <button
+        <IconButton
+          label="刷新 Git 变更"
           type="button"
           className="tool-panel__icon-button"
           aria-label="刷新 Git 变更"
@@ -83,7 +85,7 @@ export function ReviewWorkbarPanel({
           onClick={onRefresh}
         >
           <RefreshCw aria-hidden="true" size={15} />
-        </button>
+        </IconButton>
       </header>
 
       {error && (
@@ -183,7 +185,8 @@ function ReviewFileGroup({
             selection && reviewSelectionKey(selection) === reviewSelectionKey(candidate);
           return (
             <li key={file.path}>
-              <button
+              <Button
+                variant="quiet"
                 type="button"
                 aria-pressed={Boolean(selected)}
                 data-status={file.status}
@@ -201,7 +204,7 @@ function ReviewFileGroup({
                     <span>−{file.deletions ?? 0}</span>
                   </small>
                 )}
-              </button>
+              </Button>
             </li>
           );
         })}
