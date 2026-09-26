@@ -1,3 +1,4 @@
+import { Button as AstryxButton } from "@astryxdesign/core/Button";
 import {
   AlertCircle,
   Check,
@@ -114,10 +115,16 @@ function DetailButton({
   readonly onClick: () => void;
 }) {
   return (
-    <button type="button" className="conversation-detail-button" onClick={onClick}>
+    <AstryxButton
+      label={label}
+      variant="ghost"
+      type="button"
+      className="pico-page-control conversation-detail-button"
+      onClick={onClick}
+    >
       <span>{label}</span>
       <ChevronRight aria-hidden="true" size={15} />
-    </button>
+    </AstryxButton>
   );
 }
 
@@ -142,13 +149,15 @@ function SubagentRow({
     .filter(Boolean)
     .join(" · ");
   return (
-    <button
+    <AstryxButton
+      label={canOpen ? `查看${item.name}的会话` : `${item.name} · ${metadata}`}
+      variant="ghost"
       type="button"
-      className="conversation-subagent-row"
+      className="pico-page-control conversation-subagent-row"
       data-state={item.state}
-      disabled={!canOpen}
+      isDisabled={!canOpen}
       aria-label={canOpen ? `查看${item.name}的会话` : `${item.name} · ${metadata}`}
-      title={summary}
+      tooltip={summary}
       onClick={canOpen ? () => onOpenItem?.(item) : undefined}
     >
       <span className="conversation-subagent-row__identity">
@@ -169,7 +178,7 @@ function SubagentRow({
           <ChevronRight className="conversation-subagent-row__chevron" aria-hidden="true" />
         </span>
       )}
-    </button>
+    </AstryxButton>
   );
 }
 

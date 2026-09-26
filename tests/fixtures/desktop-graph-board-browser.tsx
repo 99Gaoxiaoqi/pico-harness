@@ -138,12 +138,14 @@ async function main() {
   // Multiple epochs remain selectable in ordinary chat, including an active latest epoch.
   listed = [summary, { ...summary, graphId: "current", epoch: 2, phase: "open" }];
   await render("multiple-history");
-  const select = target.querySelector<HTMLSelectElement>('[aria-label="Graph 周期"]');
-  check(select && select.options.length === 2, "Historical Graph selection must remain available");
-  await act(async () => {
-    select.value = "history";
-    select.dispatchEvent(new Event("change", { bubbles: true }));
-  });
+  const select = target.querySelector<HTMLButtonElement>('[role="combobox"]');
+  check(select, "Historical Graph selection must remain available");
+  await act(async () => select.click());
+  const choices = [...document.querySelectorAll<HTMLElement>('[role="option"]')];
+  check(choices.length === 2, "Both Graph epochs remain selectable");
+  const history = choices.find((choice) => choice.textContent?.includes("历史"));
+  check(history, "Historical Graph option is available");
+  await act(async () => history.click());
   check(calls.at(-1)?.graphId === "history", "Selecting history must query that epoch");
   check(Number(timers.size) === 1, "An open latest epoch must continue polling");
 
