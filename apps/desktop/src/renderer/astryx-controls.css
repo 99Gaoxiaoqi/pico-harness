@@ -8,10 +8,12 @@
   .button {
     height: auto;
   }
-  .button > span {
-    display: inline-flex;
-    align-items: center;
-    gap: 7px;
+  .button > span:not([role="status"]),
+  .button > span:not([role="status"]) > span {
+    display: contents;
+  }
+  .astryx-button[hidden] {
+    display: none;
   }
   .button--quiet {
     min-height: 30px;

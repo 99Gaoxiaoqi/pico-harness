@@ -58,10 +58,10 @@ test("extracted desktop pages share the supplied runtime context and route scope
   assert.match(html, /来自同一 Runtime 的定时任务/u);
   assert.match(html, /shared-context\.ts/u);
   assert.match(html, /\+shared-runtime/u);
-  assert.match(html, /aria-label="审阅任务"/u);
-  assert.match(html, /aria-label="审阅运行"/u);
+  assert.match(html, />审阅任务</u);
+  assert.match(html, />审阅运行</u);
   assert.match(html, /不会重复写入文件/u);
-  assert.match(html, /<option value="enabled" selected="">继续后台运行<\/option>/u);
+  assert.match(html, />继续后台运行</u);
   assert.match(html, new RegExp(`workspace=${encodeURIComponent(session.workspacePath)}`, "u"));
 });
 

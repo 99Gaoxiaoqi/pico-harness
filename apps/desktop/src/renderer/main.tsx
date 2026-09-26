@@ -1,3 +1,4 @@
+import "./layers.css";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { AppErrorBoundary, DesktopApp } from "./App.js";
@@ -6,6 +7,9 @@ import "./styles.css";
 import "./workbar-panels/artifact-preview.css";
 import "./astryx-controls.css";
 import "./shell-astryx.css";
+import "./pages-astryx.css";
+import "./settings-astryx.css";
+import "./workbar/workbar-astryx.css";
 import "./conversation/markdown-astryx.css";
 import "./conversation/astryx-chat.css";
 

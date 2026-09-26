@@ -97,7 +97,7 @@ test("desktop permission selectors expose all modes with explicit labels", async
     new URL("../../../apps/desktop/src/renderer/pages/ConversationPage.tsx", import.meta.url),
     "utf8",
   );
-  assert.match(source, /<option value="ask">权限：请求批准<\/option>/u);
-  assert.match(source, /<option value="auto">权限：帮我批准<\/option>/u);
-  assert.match(source, /<option value="full-access">权限：完全访问权限<\/option>/u);
+  assert.match(source, /value: "ask", label: "权限：请求批准"/u);
+  assert.match(source, /value: "auto", label: "权限：帮我批准"/u);
+  assert.match(source, /value: "full-access", label: "权限：完全访问权限"/u);
 });

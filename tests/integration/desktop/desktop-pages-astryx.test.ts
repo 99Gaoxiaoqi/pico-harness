@@ -134,6 +134,7 @@ test("Astryx 页面控件保留任务表单、模型切换和审批交互", { ti
 });
 
 const pagesScenario = `
+import "./apps/desktop/src/renderer/layers.css";
 import * as React from "react";
 import {act,useState} from "react";
 import {createRoot} from "react-dom/client";

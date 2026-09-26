@@ -199,3 +199,20 @@
 .memory-editor .pico-textarea-field {
   border-color: var(--line-strong);
 }
+
+.setting-row .pico-select-field {
+  height: 34px;
+  padding: 6px 9px;
+}
+.setting-row .pico-select-field span {
+  color: inherit;
+  font: inherit;
+}
+.pico-switch-field .astryx-switch:not([data-checked]) {
+  border: 1px solid var(--line-strong);
+  background: var(--surface-strong);
+}
+.pico-switch-field .astryx-switch-thumb {
+  background: white;
+  box-shadow: 0 1px 3px #0002;
+}
