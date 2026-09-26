@@ -33,6 +33,7 @@ import {
   type ReactNode,
 } from "react";
 import { Link, Navigate, useLocation, useNavigate, useParams } from "react-router-dom";
+import { SelectField, TextField } from "../ui-controls.js";
 import { ComposerModelPicker } from "../ComposerModelPicker.js";
 import { Button, InlineNotice, PreviewBadge, StatusPill } from "../components.js";
 import { ConversationGraphBoard } from "../conversation/ConversationGraphBoard.js";
@@ -913,7 +914,8 @@ export function ConversationPage() {
                     <label className="conversation-sr-only" htmlFor="conversation-title">
                       会话标题
                     </label>
-                    <input
+                    <TextField
+                      label="会话标题"
                       id="conversation-title"
                       name="conversation-title"
                       autoComplete="off"
@@ -957,18 +959,20 @@ export function ConversationPage() {
                 )}
                 {activeRun && <StatusPill status={activeRun.status} />}
                 {conversation?.settings?.orchestrationMode === "graph" && (
-                  <button
+                  <Button
+                    variant="quiet"
                     type="button"
                     className="conversation-graph-status"
                     aria-label="打开 Graph 面板"
                     onClick={() => openWorkbarTab("graph", "right")}
                   >
                     <GitFork aria-hidden="true" /> Graph
-                  </button>
+                  </Button>
                 )}
                 {sessionRef && (
                   <div className="conversation-session-actions" aria-label="会话操作">
-                    <button
+                    <Button
+                      variant="quiet"
                       type="button"
                       disabled={Boolean(activeRun) || Boolean(busy)}
                       onClick={() =>
@@ -978,15 +982,17 @@ export function ConversationPage() {
                       }
                     >
                       <FileDiff aria-hidden="true" /> 审阅更改
-                    </button>
-                    <button
+                    </Button>
+                    <Button
+                      variant="quiet"
                       type="button"
                       disabled={Boolean(activeRun) || Boolean(busy)}
                       onClick={() => setEditingTitle(true)}
                     >
                       <Pencil aria-hidden="true" /> 重命名
-                    </button>
-                    <button
+                    </Button>
+                    <Button
+                      variant="quiet"
                       type="button"
                       disabled={Boolean(activeRun) || Boolean(busy)}
                       onClick={() =>
@@ -996,8 +1002,9 @@ export function ConversationPage() {
                       }
                     >
                       <GitFork aria-hidden="true" /> 分叉
-                    </button>
-                    <button
+                    </Button>
+                    <Button
+                      variant="quiet"
                       type="button"
                       disabled={Boolean(activeRun) || Boolean(busy)}
                       onClick={() => {
@@ -1011,11 +1018,12 @@ export function ConversationPage() {
                       }}
                     >
                       <Minimize2 aria-hidden="true" /> {confirmCompact ? "确认压缩" : "压缩"}
-                    </button>
+                    </Button>
                   </div>
                 )}
                 {sessionRef && (
-                  <button
+                  <Button
+                    variant="quiet"
                     type="button"
                     id="workbar-toggle-bottom"
                     className="conversation-panel-toggle"
@@ -1032,10 +1040,11 @@ export function ConversationPage() {
                     }
                   >
                     <PanelBottomOpen aria-hidden="true" />
-                  </button>
+                  </Button>
                 )}
                 {sessionRef && (
-                  <button
+                  <Button
+                    variant="quiet"
                     type="button"
                     className="conversation-panel-toggle"
                     id="workbar-toggle-right"
@@ -1054,7 +1063,7 @@ export function ConversationPage() {
                     ) : (
                       <PanelRightClose aria-hidden="true" />
                     )}
-                  </button>
+                  </Button>
                 )}
               </div>
             </div>
@@ -1200,33 +1209,33 @@ export function ConversationPage() {
                   }
                   trailingAccessory={
                     activation ? (
-                      <button
+                      <Button
+                        variant="quiet"
                         type="button"
                         className="conversation-activation-chip"
                         onClick={() => setActivation(undefined)}
                         aria-label={`移除 ${activation.kind === "skill" ? "Skill" : "子代理"} ${activation.name}`}
                       >
                         {activation.kind === "skill" ? "Skill" : "Agent"}: {activation.name} ×
-                      </button>
+                      </Button>
                     ) : undefined
                   }
                   leadingAccessory={
                     <>
                       {!sessionRef ? (
                         <>
-                          <label className="conversation-context-option conversation-project-option">
+                          <div className="conversation-context-option conversation-project-option">
                             <span className="conversation-sr-only">项目</span>
                             <Folder aria-hidden="true" />
-                            <select
+                            <SelectField
                               name="workspace"
-                              aria-label="项目"
+                              label="项目"
                               value={
                                 workspace?.temporary
                                   ? TEMPORARY_PROJECT_OPTION_VALUE
                                   : workspacePath || ""
                               }
-                              onChange={(event) => {
-                                const nextWorkspacePath = event.target.value;
+                              onValueChange={(nextWorkspacePath) => {
                                 if (nextWorkspacePath === CHOOSE_PROJECT_OPTION_VALUE) {
                                   void chooseProjectFolder();
                                   return;
@@ -1243,21 +1252,24 @@ export function ConversationPage() {
                                   );
                                 navigate(newSessionHref(nextWorkspacePath));
                               }}
-                            >
-                              <option value="">无项目</option>
-                              <option value={CHOOSE_PROJECT_OPTION_VALUE}>打开项目文件夹…</option>
-                              {workspace?.temporary && (
-                                <option value={TEMPORARY_PROJECT_OPTION_VALUE}>
-                                  {workspaceLabel}
-                                </option>
-                              )}
-                              {projectWorkspaceOptions.map((workspace) => (
-                                <option key={workspace.path} value={workspace.path}>
-                                  {workspaceDisplayName(workspace.path, workspace)}
-                                </option>
-                              ))}
-                            </select>
-                          </label>
+                              options={[
+                                { value: "", label: "无项目" },
+                                { value: CHOOSE_PROJECT_OPTION_VALUE, label: "打开项目文件夹…" },
+                                ...(workspace?.temporary
+                                  ? [
+                                      {
+                                        value: TEMPORARY_PROJECT_OPTION_VALUE,
+                                        label: workspaceLabel,
+                                      },
+                                    ]
+                                  : []),
+                                ...projectWorkspaceOptions.map((workspace) => ({
+                                  value: workspace.path,
+                                  label: workspaceDisplayName(workspace.path, workspace),
+                                })),
+                              ]}
+                            />
+                          </div>
                           {composerReady && (
                             <>
                               <ComposerModelPicker
@@ -1268,31 +1280,29 @@ export function ConversationPage() {
                                 onConfigure={() => navigate("/settings/models")}
                               />
 
-                              <label
+                              <div
                                 className={`conversation-context-option conversation-icon-select ${newTaskSettings.permissionMode === "full-access" ? "is-danger" : ""}`}
                                 title={`权限：${PERMISSION_MODE_LABELS[newTaskSettings.permissionMode ?? "ask"]}`}
                               >
                                 <ShieldCheck aria-hidden="true" />
                                 <span className="conversation-sr-only">权限模式</span>
-                                <select
+                                <SelectField
                                   name="initial-permission-mode"
-                                  aria-label="权限模式"
+                                  label="权限模式"
                                   title={`权限：${PERMISSION_MODE_LABELS[newTaskSettings.permissionMode ?? "ask"]}`}
                                   value={newTaskSettings.permissionMode ?? "ask"}
-                                  onChange={(event) =>
+                                  onValueChange={(value) =>
                                     updateNewTaskSettings({
-                                      permissionMode: event.target.value as
-                                        | "ask"
-                                        | "auto"
-                                        | "full-access",
+                                      permissionMode: value as "ask" | "auto" | "full-access",
                                     })
                                   }
-                                >
-                                  <option value="ask">权限：请求批准</option>
-                                  <option value="auto">权限：帮我批准</option>
-                                  <option value="full-access">权限：完全访问权限</option>
-                                </select>
-                              </label>
+                                  options={[
+                                    { value: "ask", label: "权限：请求批准" },
+                                    { value: "auto", label: "权限：帮我批准" },
+                                    { value: "full-access", label: "权限：完全访问权限" },
+                                  ]}
+                                />
+                              </div>
                             </>
                           )}
                         </>
@@ -1337,50 +1347,46 @@ export function ConversationPage() {
                             />
                           )}
 
-                          <label className="conversation-context-option">
+                          <div className="conversation-context-option">
                             <span className="conversation-sr-only">权限模式</span>
-                            <select
+                            <SelectField
                               name="permission-mode"
-                              aria-label="权限模式"
+                              label="权限模式"
                               title={`权限：${PERMISSION_MODE_LABELS[conversation.settings.permissionMode]}`}
                               value={conversation.settings.permissionMode}
                               disabled={Boolean(activeRun) || Boolean(busy)}
-                              onChange={(event) =>
+                              onValueChange={(value) =>
                                 void actions.updateSessionSettings(sessionRef, {
-                                  permissionMode: event.target.value as
-                                    | "ask"
-                                    | "auto"
-                                    | "full-access",
+                                  permissionMode: value as "ask" | "auto" | "full-access",
                                 })
                               }
-                            >
-                              <option value="ask">权限：请求批准</option>
-                              <option value="auto">权限：帮我批准</option>
-                              <option value="full-access">权限：完全访问权限</option>
-                            </select>
-                          </label>
+                              options={[
+                                { value: "ask", label: "权限：请求批准" },
+                                { value: "auto", label: "权限：帮我批准" },
+                                { value: "full-access", label: "权限：完全访问权限" },
+                              ]}
+                            />
+                          </div>
 
                           {conversation.settings.reasoningLevels.length > 0 && (
-                            <label className="conversation-context-option">
+                            <div className="conversation-context-option">
                               <span className="conversation-sr-only">Thinking</span>
-                              <select
+                              <SelectField
                                 name="thinking-effort"
-                                aria-label="Thinking"
+                                label="Thinking"
                                 value={conversation.settings.thinkingEffort}
                                 disabled={Boolean(activeRun) || Boolean(busy)}
-                                onChange={(event) =>
+                                onValueChange={(value) =>
                                   void actions.updateSessionSettings(sessionRef, {
-                                    thinkingEffort: event.target.value,
+                                    thinkingEffort: value,
                                   })
                                 }
-                              >
-                                {conversation.settings.reasoningLevels.map((level) => (
-                                  <option key={level} value={level}>
-                                    {level}
-                                  </option>
-                                ))}
-                              </select>
-                            </label>
+                                options={conversation.settings.reasoningLevels.map((level) => ({
+                                  value: level,
+                                  label: level,
+                                }))}
+                              />
+                            </div>
                           )}
                         </>
                       )}

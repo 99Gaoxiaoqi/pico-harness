@@ -61,6 +61,12 @@ async function run() {
   );
   await wait(`window.draft===${JSON.stringify(pasted)}`);
   assert.equal(await js(`document.querySelector('${editor} [data-astryx-token]')===null`), true);
+  await js("window.setDraft('')");
+  await pause();
+  await js(
+    `document.querySelector('${editor}').dispatchEvent(new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:(()=>{const d=new DataTransfer();d.setData('text/plain','文件旁的文本');d.items.add(new File(['image'],'example.png',{type:'image/png'}));return d})()}))`,
+  );
+  await wait("window.draft==='文件旁的文本'");
   await js(`window.setDraft('高输入\\n'.repeat(30))`);
   await wait(
     `document.querySelector('${editor}').clientHeight<=202 && document.querySelector('${editor}').scrollHeight>200`,
@@ -119,6 +125,11 @@ async function run() {
     await js(
       `(()=>{const s=document.querySelector('${scroller}'),c=document.querySelector('.conversation-composer');return c.getBoundingClientRect().bottom<=s.getBoundingClientRect().bottom+1})()`,
     ),
+  );
+  assert.deepEqual(
+    await js("window.disabledScrollWrites"),
+    [],
+    "disabled Astryx scrolling never writes on mount, append or resize",
   );
   console.log("ASTRYX_CHAT_ELECTRON_OK");
 }

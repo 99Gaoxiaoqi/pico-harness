@@ -127,7 +127,8 @@ import {MemoryRouter, Routes, Route, useLocation} from "react-router-dom";
 import {AppShell} from "./apps/desktop/src/renderer/AppShell.tsx";
 import {RuntimeContext} from "./apps/desktop/src/renderer/runtime-context.tsx";
 import {previewData} from "./apps/desktop/src/renderer/fixture.ts";
-import "@astryxdesign/core/astryx.css";
+import {PicoTheme} from "./apps/desktop/src/renderer/astryx-provider.tsx";
+import "./apps/desktop/src/renderer/astryx-controls.css";
 import "./apps/desktop/src/renderer/styles.css";
 import "./apps/desktop/src/renderer/shell-astryx.css";
 Object.assign(globalThis, {React, IS_REACT_ACT_ENVIRONMENT: true});
@@ -159,7 +160,7 @@ const key = async (element, key, options = {}) => {
 };
 const frame = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
 async function scenario() {
-  await act(async () => root.render(<RuntimeContext value={runtime}><MemoryRouter initialEntries={["/task/new"]}><Routes><Route element={<AppShell/>}><Route path="*" element={<Page/>}/></Route></Routes></MemoryRouter></RuntimeContext>));
+  await act(async () => root.render(<PicoTheme><RuntimeContext value={runtime}><MemoryRouter initialEntries={["/task/new"]}><Routes><Route element={<AppShell/>}><Route path="*" element={<Page/>}/></Route></Routes></MemoryRouter></RuntimeContext></PicoTheme>));
   await frame();
   const sidebar = () => document.querySelector(".sidebar").getBoundingClientRect();
   check(Math.abs(sidebar().width - 226) < 1, "Expanded sidebar width: " + sidebar().width);
