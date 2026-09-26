@@ -1,3 +1,5 @@
+import { Button } from "@astryxdesign/core/Button";
+import { ChatLayout } from "@astryxdesign/core/Chat";
 import { ArrowDown } from "lucide-react";
 import { useCallback, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
@@ -70,31 +72,33 @@ export function ConversationSurface({
       <div className="conversation-surface__main">
         {header && <header className="conversation-surface__header">{header}</header>}
         <div className="conversation-surface__viewport">
-          <div
+          <ChatLayout
             ref={scrollRef}
-            className="conversation-surface__scroll"
+            autoScroll={false}
+            className="conversation-surface__scroll pico-chat-layout"
             role="region"
             aria-label="会话内容"
             tabIndex={0}
             onScroll={updateFollowState}
+            composer={composer && <div className="conversation-surface__composer">{composer}</div>}
+            scrollButton={
+              showScrollToBottom ? (
+                <Button
+                  label="回到最新消息"
+                  isIconOnly
+                  icon={<ArrowDown aria-hidden="true" />}
+                  className="conversation-scroll-to-bottom"
+                  onClick={scrollToBottom}
+                  tooltip="回到最新消息"
+                />
+              ) : null
+            }
           >
             <div ref={contentRef} className="conversation-surface__content">
               {children}
             </div>
-          </div>
-          {showScrollToBottom && (
-            <button
-              type="button"
-              className="conversation-scroll-to-bottom"
-              onClick={scrollToBottom}
-              aria-label="回到最新消息"
-              title="回到最新消息"
-            >
-              <ArrowDown aria-hidden="true" />
-            </button>
-          )}
+          </ChatLayout>
         </div>
-        {composer && <div className="conversation-surface__composer">{composer}</div>}
       </div>
       {inspector}
     </section>

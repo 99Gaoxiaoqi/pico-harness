@@ -1,12 +1,19 @@
+import { Button } from "@astryxdesign/core/Button";
+import {
+  ChatComposer,
+  ChatComposerInput,
+  type ChatComposerInputHandle,
+} from "@astryxdesign/core/Chat";
+import { Selector } from "@astryxdesign/core/Selector";
 import { ArrowUp, Pause, Play, Square } from "lucide-react";
 import {
   useId,
-  useLayoutEffect,
   useRef,
-  type ChangeEvent,
+  useImperativeHandle,
   type FormEvent,
   type KeyboardEvent,
   type ReactNode,
+  type Ref,
 } from "react";
 import type {
   ComposerBehavior,
@@ -19,7 +26,10 @@ import {
   type ConversationComposerModes,
 } from "./ConversationComposerMenu.js";
 
+export type ConversationComposerHandle = Pick<ChatComposerInputHandle, "focus">;
+
 export interface ConversationComposerProps {
+  readonly inputRef?: Ref<ConversationComposerHandle> | undefined;
   readonly value: string;
   readonly onValueChange: (value: string) => void;
   readonly onSubmit: (value: ComposerSubmitValue) => void;
@@ -54,6 +64,7 @@ function defaultBehavior(status: ComposerStatus): ComposerBehavior {
 }
 
 export function ConversationComposer({
+  inputRef,
   value,
   onValueChange,
   onSubmit,
@@ -76,29 +87,8 @@ export function ConversationComposer({
   leadingAccessory,
   trailingAccessory,
 }: ConversationComposerProps) {
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const textareaId = useId();
-
-  useLayoutEffect(() => {
-    const textarea = textareaRef.current;
-    if (!textarea) return;
-    const resize = () => {
-      textarea.style.height = "auto";
-      const maxHeight = Number.parseFloat(getComputedStyle(textarea).maxHeight) || 200;
-      textarea.style.height = `${Math.min(textarea.scrollHeight, maxHeight)}px`;
-      textarea.style.overflowY = textarea.scrollHeight > maxHeight ? "auto" : "hidden";
-    };
-    resize();
-    // A narrower window can wrap the same draft onto more lines.
-    let previousWidth = textarea.clientWidth;
-    const observer = new ResizeObserver(() => {
-      if (textarea.clientWidth === previousWidth) return;
-      previousWidth = textarea.clientWidth;
-      resize();
-    });
-    observer.observe(textarea);
-    return () => observer.disconnect();
-  }, [value]);
+  const editorRef = useRef<ChatComposerInputHandle>(null);
+  useImperativeHandle(inputRef, () => ({ focus: () => editorRef.current?.focus() }), []);
   const statusId = useId();
   const canSubmit = value.trim().length > 0 && !disabled && !submitDisabled && !busy;
   const effectiveBehavior = status === "idle" ? "auto" : behavior === "auto" ? "steer" : behavior;
@@ -126,7 +116,7 @@ export function ConversationComposer({
     submit();
   };
 
-  const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+  const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (
       event.key !== "Enter" ||
       event.shiftKey ||
@@ -136,10 +126,6 @@ export function ConversationComposer({
       return;
     event.preventDefault();
     submit();
-  };
-
-  const handleBehaviorChange = (event: ChangeEvent<HTMLSelectElement>) => {
-    onBehaviorChange?.(event.target.value as ComposerBehavior);
   };
 
   return (
@@ -152,115 +138,124 @@ export function ConversationComposer({
       aria-busy={busy}
       onSubmit={handleSubmit}
     >
-      <label className="conversation-sr-only" htmlFor={textareaId}>
-        消息
-      </label>
-      <textarea
-        ref={textareaRef}
-        id={textareaId}
-        name="message"
-        autoComplete="off"
+      <ChatComposer
+        className="pico-astryx-composer"
         value={value}
-        rows={1}
-        disabled={disabled}
-        placeholder={placeholder}
-        aria-describedby={resolvedStatusText ? statusId : undefined}
-        onChange={(event) => onValueChange(event.target.value)}
-        onKeyDown={handleKeyDown}
-      />
-      <div className="conversation-composer__footer">
-        <div className="conversation-composer__controls">
-          <ConversationComposerMenu onAttach={onAttach} modes={modes} disabled={disabled || busy}>
-            {leadingAccessory}
-          </ConversationComposerMenu>
-          {status !== "idle" && (
-            <label className="conversation-behavior">
-              <span className="conversation-sr-only">运行中消息行为</span>
-              <select
-                name="send-behavior"
+        onChange={onValueChange}
+        onSubmit={submit}
+        isDisabled={disabled}
+        elevation="none"
+        input={
+          <ChatComposerInput
+            handleRef={editorRef}
+            className="pico-chat-input"
+            value={value}
+            onChange={onValueChange}
+            onSubmit={submit}
+            hasHistory={false}
+            pasteAsToken={false}
+            maxRows={200 / 22}
+            label="消息"
+            isDisabled={disabled}
+            placeholder={placeholder}
+            aria-describedby={resolvedStatusText ? statusId : undefined}
+            onKeyDown={handleKeyDown}
+          />
+        }
+        footerActions={
+          <div className="conversation-composer__controls">
+            <ConversationComposerMenu onAttach={onAttach} modes={modes} disabled={disabled || busy}>
+              {leadingAccessory}
+            </ConversationComposerMenu>
+            {status !== "idle" && (
+              <Selector
+                className="conversation-behavior"
+                label="运行中消息行为"
+                isLabelHidden
+                variant="ghost"
+                size="sm"
                 value={effectiveBehavior}
-                disabled={disabled || !onBehaviorChange}
-                onChange={handleBehaviorChange}
-              >
-                {Object.entries(behaviorLabels).map(([key, label]) => (
-                  <option key={key} value={key}>
-                    {label}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
-          {options.length > 0 && (
-            <label className="conversation-context-option">
-              <span className="conversation-sr-only">会话选项</span>
-              <select
-                name="conversation-option"
+                isDisabled={disabled || !onBehaviorChange}
+                onChange={(next) => onBehaviorChange?.(next as ComposerBehavior)}
+                options={Object.entries(behaviorLabels).map(([value, label]) => ({ value, label }))}
+              />
+            )}
+            {options.length > 0 && (
+              <Selector
+                className="conversation-context-option"
+                label="会话选项"
+                isLabelHidden
+                variant="ghost"
+                size="sm"
                 value={selectedOption}
-                disabled={disabled || !onOptionChange}
-                onChange={(event) => onOptionChange?.(event.target.value)}
-              >
-                {options.map((option) => (
-                  <option key={option.id} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
-        </div>
-        <div className="conversation-composer__actions">
-          {resolvedStatusText && (
-            <span id={statusId} className="conversation-composer__status" role="status">
-              {resolvedStatusText}
-            </span>
-          )}
-          {trailingAccessory}
-          {status === "running" && onPause && (
-            <button
-              type="button"
-              className="conversation-icon-button"
-              onClick={onPause}
-              aria-label="暂停运行"
-            >
-              <Pause aria-hidden="true" />
-            </button>
-          )}
-          {status === "paused" && onResume && (
-            <button
-              type="button"
-              className="conversation-icon-button"
-              onClick={onResume}
-              aria-label="继续运行"
-            >
-              <Play aria-hidden="true" />
-            </button>
-          )}
-          {status !== "idle" && onStop && (
-            <button
-              type="button"
-              className="conversation-icon-button"
-              onClick={onStop}
-              aria-label="停止运行"
-            >
-              <Square aria-hidden="true" />
-            </button>
-          )}
-          <button
+                isDisabled={disabled || !onOptionChange}
+                onChange={onOptionChange}
+                options={options.map(({ value, label }) => ({ value, label }))}
+              />
+            )}
+          </div>
+        }
+        sendActions={
+          <div className="conversation-composer__actions">
+            {resolvedStatusText && (
+              <span id={statusId} className="conversation-composer__status" role="status">
+                {resolvedStatusText}
+              </span>
+            )}
+            {trailingAccessory}
+            {status === "running" && onPause && (
+              <Button
+                label="暂停运行"
+                isIconOnly
+                icon={<Pause aria-hidden="true" />}
+                variant="ghost"
+                size="sm"
+                className="conversation-icon-button"
+                onClick={onPause}
+              />
+            )}
+            {status === "paused" && onResume && (
+              <Button
+                label="继续运行"
+                isIconOnly
+                icon={<Play aria-hidden="true" />}
+                variant="ghost"
+                size="sm"
+                className="conversation-icon-button"
+                onClick={onResume}
+              />
+            )}
+            {status !== "idle" && onStop && (
+              <Button
+                label="停止运行"
+                isIconOnly
+                icon={<Square aria-hidden="true" />}
+                variant="ghost"
+                size="sm"
+                className="conversation-icon-button"
+                onClick={onStop}
+              />
+            )}
+          </div>
+        }
+        sendButton={
+          <Button
             type="submit"
             className="conversation-send-button"
-            disabled={!canSubmit}
-            aria-label={
+            isDisabled={!canSubmit}
+            isIconOnly
+            icon={<ArrowUp aria-hidden="true" />}
+            size="sm"
+            label={
               effectiveBehavior === "queue"
                 ? "将消息排到下一轮"
                 : effectiveBehavior === "replace"
                   ? "停止当前执行并发送"
                   : "发送消息"
             }
-          >
-            <ArrowUp aria-hidden="true" />
-          </button>
-        </div>
-      </div>
+          />
+        }
+      />
     </form>
   );
 }
