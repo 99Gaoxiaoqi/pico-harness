@@ -22,7 +22,7 @@ export function runtimeEventHasModelHistoryEntry<TTranscriptEvent>(
 
 /**
  * Claim coverage 契约：每个事件 kind 必须显式标注它在投影里如何被 claim。
- * 参考 maka 的 claim coverage 不变量——reader 可见的 kind 落空时要么是
+ * reader 可见的 kind 未被 claim 时，要么是
  * unclaimed_control_fact（soft），要么是 unsupported_event_kind（hard）。
  *
  * - "message"：产出行（message.committed / tool.result.recorded）

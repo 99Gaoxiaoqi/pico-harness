@@ -41,7 +41,7 @@ export type RuntimeSubagentPreset = JsonObject & {
   readonly name: string;
   readonly description: string;
   readonly profile: SubagentProfile;
-  /** Pico Provider ID is the stable counterpart of Maka's connection slug. */
+  /** Stable Pico Provider ID used to resolve the model connection. */
   readonly connectionSlug: string;
   readonly model: string;
   /** Absent means model default, not the parent's thinking level. */

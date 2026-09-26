@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { RuntimeToolResultProjection, ToolCall, ToolResult } from "@pico/core";
 
 /**
- * 入口上限门(ADR 26 §2.2,对齐 maka maxToolOutputBytes):单次工具结果
+ * 入口上限门(ADR 26 §2.2)：单次工具结果
  * 超过 1MB 时在门口拒绝——原始输出不落盘,inline 正文与 Provider 投影均
  * 替换为带重取指引的合成错误。写入不再做 token 阈值分叉;上下文瘦身全部
  * 移到读取侧(ADR 26 §2.3,票 E2)。

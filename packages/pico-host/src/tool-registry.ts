@@ -436,7 +436,7 @@ export class ToolRegistry implements Registry {
     const invalidInput = validate();
     if (invalidInput) return invalidInput;
 
-    // Like Maka, the first admitted call owns the Step: a later exclusive call,
+    // The first admitted call owns the Step: a later exclusive call,
     // or a sibling after an exclusive call, is rejected rather than merely queued.
     // Nested leaves belong to the admitted exec tree, not to the provider batch.
     if (context?.step && context.origin !== "code_mode") {

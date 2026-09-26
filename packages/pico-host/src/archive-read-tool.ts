@@ -140,7 +140,7 @@ export class ArchiveReadTool implements BaseTool {
       context?.signal,
     );
     const encoded = JSON.stringify(result);
-    // Pico's URI embeds Session and event identity and can exceed Maka's URI length.
+    // Archive URIs embed Session and event identity, so their length varies.
     // Keep the complete envelope bounded even for pathological metadata and error lists.
     return encoded.length <= TOOL_RESULT_ARCHIVE_MAX_RESPONSE_CHARS
       ? encoded

@@ -1189,7 +1189,7 @@ export async function executeAgentRuntime(
     }
     const memoryTrustStore =
       dependencies.memoryTrustStore ?? new WorkspaceTrustStore({ userStateDirectory: picoHome });
-    // Maka separates prompt reads from extraction admission. Plan can read;
+    // Prompt reads are independent of extraction admission. Plan can read;
     // side conversations and scheduled runs use the ordinary memory policy.
     const memoryRecallAllowed = async () => {
       if (
@@ -2643,7 +2643,7 @@ export async function executeAgentRuntime(
         : {}),
       contextBudget: contextRuntime.budget,
       contextRouteIdentity,
-      // Maka: only declared windows + real provider usage trigger proactive compaction.
+      // Only declared windows + real provider usage trigger proactive compaction.
       // 始终复用已由宿主从用户模型路由解析并注入的主 Provider。
       fullCompactor: new FullCompactor({
         provider: trackedProvider,

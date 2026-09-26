@@ -17,7 +17,7 @@ import type { SqliteSchemaScope } from "./sqlite-schema.js";
  * (票 03 并入,epoch 毫秒)。
  *
  * migration 2(票 03,ADR 24 §4.1 + 决策 25 第 3 条):catalog 投影表与消息表。
- * - `session_catalog_projection`:maka 双轨——is_archived/is_pinned/
+ * - `session_catalog_projection`：is_archived/is_pinned/
  *   fork_parent_session_id/activity_at 是 sessions 结构列,由 AFTER UPDATE 触发器
  *   维护;title/first/last preview/message_count/fold_json 由 append 事务应用层
  *   增量维护(复用 engine/session-summary.ts 折叠器,禁止另写口径)。行内持久化

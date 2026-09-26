@@ -3,7 +3,7 @@ import type { SqliteSchemaScope } from "./sqlite-schema.js";
 
 export const EVENT_LOG_HARD_CUT_SCOPE_NAME = "event_log_hard_cut";
 export const CURRENT_EVENT_LOG_EPOCH = 1;
-export const CURRENT_EVENT_LOG_PROTOCOL_MARKER = "runtime-event-v2-maka-v1";
+export const CURRENT_EVENT_LOG_PROTOCOL_MARKER = "runtime-event-v2";
 
 /**
  * Workspace-level singleton cutover marker plus durable file-GC outbox.

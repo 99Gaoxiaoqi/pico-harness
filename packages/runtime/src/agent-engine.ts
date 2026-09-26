@@ -446,7 +446,7 @@ export class AgentEngine {
   private readonly budget: IterationBudget;
   /**
    * 上一轮 provider 接受的真实输入与输出 token 总和。
-   * 用作下一轮 token 估算的锚定基线(对标 maka midTurn estimateNextRequestTokens):
+   * 用作下一轮 token 估算的锚定基线：
    * 只接纳同一模型连接的 usage；无锚定值时不主动压缩。
    */
   private lastAnchoredPromptTokens?: number | undefined;
@@ -888,7 +888,7 @@ export class AgentEngine {
       }
       signal?.throwIfAborted();
       this.overflowRecoveryUsed = true;
-      // Match Maka: old tool images may be omitted, never current user images.
+      // Old tool images may be omitted, never current user images.
       const eligible = baseContext.filter(
         (message) =>
           message.images?.length && this.historicalImageKeys.has(historicalImageKey(message)),
@@ -1680,7 +1680,7 @@ export class AgentEngine {
           }
 
           // ====================================================================
-          // midTurn proactive 压缩(对标 maka midTurn capacity compact):
+          // 在工具批次结束后检查是否需要主动压缩：
           // 此时工具结果、reminder、stallWarning、steer 都已 commitMessages 落盘,
           // 已完成的工具批次在下一次请求前统一检查上下文。
           // 失败 fail-open,不阻塞主循环。

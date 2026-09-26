@@ -457,7 +457,7 @@ export class FullCompactor {
   }
 
   /**
-   * 渲染摘要指令:Maka 结构模板 + 当前历史前缀。
+   * 渲染摘要指令：结构化模板 + 当前历史前缀。
    * 存在 previousSummary 时改用增量模板(滚动摘要),让模型基于上一轮摘要更新而非重算。
    * 注入环境元信息(workDir/platform)让 summarizer 知道任务所在仓库。
    */

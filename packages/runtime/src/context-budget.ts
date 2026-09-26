@@ -1,7 +1,7 @@
 import type { Message, ProviderProfile, ToolDefinition } from "@pico/core";
 
 export const DEFAULT_SAFETY_MARGIN_TOKENS = 1024;
-/** Maka character-based context diagnostic estimate. */
+/** Character-based context diagnostic estimate. */
 export const CHARS_PER_TOKEN = 4;
 export const MATERIALIZED_IMAGE_TOKENS = 2_000;
 export const CONTEXT_ESTIMATION_ALGORITHM = "chars_v1" as const;
@@ -33,8 +33,8 @@ export function estimateMessagesTokens(messages: readonly Message[]): number {
     for (const call of message.toolCalls ?? []) names.set(call.id, call.name);
     if (message.toolCallId) chars += names.get(message.toolCallId)?.length ?? 0;
   }
-  // User attachments are accounted by request composition. This diagnostic mirrors
-  // Maka's effective history estimator, which counts materialized tool images only.
+  // User attachments are accounted by request composition. This diagnostic
+  // counts materialized tool images only.
   const images = messages.reduce(
     (total, message) => total + (message.toolCallId ? (message.images?.length ?? 0) : 0),
     0,

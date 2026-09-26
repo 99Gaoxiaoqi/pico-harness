@@ -205,7 +205,7 @@ export function backoffDelays(maxAttempts: number): number[] {
   const delays: number[] = [];
   for (let index = 0; index < Math.max(maxAttempts - 1, 0); index++) {
     const base = Math.min(RETRY_MAX_TIMEOUT_MS, RETRY_MIN_TIMEOUT_MS * RETRY_FACTOR ** index);
-    // Match Maka's bounded exponential backoff with positive jitter. The base
+    // Use bounded exponential backoff with positive jitter. The base
     // caps at 32s; the actual wait is at most 40s and remains abortable.
     delays.push(Math.ceil(base + Math.random() * base * 0.25));
   }

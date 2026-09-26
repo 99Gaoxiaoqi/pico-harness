@@ -1,10 +1,10 @@
 // Runtime 的跨平台 Shell 抽象层：统一 Windows/macOS/Linux 的命令执行语义。
 //
 // 策略:POSIX 用 /bin/bash;Windows 用 PowerShell(pwsh 优先,回退 Windows
-// PowerShell),不再探测 Git Bash——对齐 maka 的宿主选择(企业安全软件常删
+// PowerShell),不再探测 Git Bash(企业安全软件常删
 // bash.exe 造成残缺安装,而 PowerShell 是 Windows 必装组件)。
 // shell 方言(hostShellDialect)作为安全分派的依据:bash 宿主沿用 bash-hardline
-// 静态红线;PowerShell 宿主没有静态红线,由审批层把关(maka 立场:进程内命令
+// 静态红线;PowerShell 宿主没有静态红线,由审批层把关(进程内命令
 // 文本分析不是安全边界,承重边界是 OS 沙箱,沙箱落地后再复评)。
 //
 // 探测结果在进程内缓存,避免每次 exec 都走一遍文件系统。

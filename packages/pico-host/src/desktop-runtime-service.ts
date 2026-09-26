@@ -1641,7 +1641,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
             throughSequence: history.throughSequence,
             messageCount: history.messages.length,
             estimatedTokens: estimateMessagesTokens(history.messages),
-            estimationAlgorithm: "maka_chars_v1",
+            estimationAlgorithm: "chars_v1",
             projection: "effective_model_history",
             compactedCount: history.compactedCount,
             ...(history.latestCompaction ? { latestCompaction: history.latestCompaction } : {}),

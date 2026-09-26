@@ -131,7 +131,7 @@ export type RuntimeSessionContextSnapshot = JsonObject & {
     readonly throughSequence: number;
     readonly messageCount: number;
     readonly estimatedTokens: number;
-    readonly estimationAlgorithm: "maka_chars_v1";
+    readonly estimationAlgorithm: "chars_v1";
     readonly projection: "effective_model_history";
     readonly compactedCount: number;
     readonly latestCompaction?: RuntimeContextCompaction;
@@ -334,7 +334,7 @@ const runtimeSessionContextResult = exactResultShape(
         throughSequence: resultNonNegativeInteger,
         messageCount: resultNonNegativeInteger,
         estimatedTokens: resultNonNegativeInteger,
-        estimationAlgorithm: resultOneOf(["maka_chars_v1"]),
+        estimationAlgorithm: resultOneOf(["chars_v1"]),
         projection: resultOneOf(["effective_model_history"]),
         compactedCount: resultNonNegativeInteger,
       },

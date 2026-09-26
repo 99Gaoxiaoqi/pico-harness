@@ -27,8 +27,8 @@ import {
 const DEFAULT_ELECTION_DEADLINE_MS = 45_000;
 const DEFAULT_BACKOFF_MIN_MS = 20;
 const DEFAULT_BACKOFF_MAX_MS = 250;
-// 候选 launch 有意不设数量上限（2026-08-17 回滚 A6 封顶与名额返还，对齐
-// maka 形态）：仅靠 250ms 最小间隔 + 45s 选举窗口 + flock 淘汰 loser 约束。
+// 候选 launch 有意不设数量上限：仅靠 250ms 最小间隔 + 45s 选举窗口
+// + flock 淘汰 loser 约束。
 // 已知代价：慢冷启动环境（实测候选 19-31s 就绪）单窗口可积数十在途候选；
 // 确定性失败场景（候选秒退循环）缺 fast-fail 刹车，会以 ~4/s 空转到 deadline。
 const MIN_CANDIDATE_INTERVAL_MS = 250;

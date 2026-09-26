@@ -4,8 +4,8 @@ import type { RuntimePermissionMode } from "./permission-profile.js";
 /**
  * 受信工具能力分类。
  *
- * 名称与 Maka 的公开能力分类对齐；`bounded_control` 是 Pico 对仅修改当前
- * Session 内部状态的额外细分。分类用于选择审批策略和解释原因，真正的文件、
+ * `bounded_control` 细分仅修改当前 Session 内部状态的操作。
+ * 分类用于选择审批策略和解释原因，真正的文件、
  * 网络与进程权限仍由 Execution Boundary / OS sandbox 执行。
  */
 export type ToolPermissionCategory =
