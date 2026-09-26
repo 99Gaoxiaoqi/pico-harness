@@ -1,4 +1,4 @@
-import * as Tooltip from "@radix-ui/react-tooltip";
+import { Button as AstryxButton } from "@astryxdesign/core/Button";
 import {
   AlertTriangle,
   Check,
@@ -9,39 +9,66 @@ import {
   ShieldCheck,
   Sparkles,
 } from "lucide-react";
-import type { ComponentProps, ReactNode } from "react";
+import { Children, isValidElement, type ComponentProps, type ReactNode } from "react";
 import type { CapabilityView, WorkspaceMode } from "./model.js";
 
 export function IconButton({
   label,
+  children,
+  disabled,
+  className = "icon-button",
   ...props
 }: ComponentProps<"button"> & { readonly label: string }) {
   return (
-    <Tooltip.Provider delayDuration={350}>
-      <Tooltip.Root>
-        <Tooltip.Trigger asChild>
-          <button type="button" className="icon-button" aria-label={label} {...props} />
-        </Tooltip.Trigger>
-        <Tooltip.Portal>
-          <Tooltip.Content className="tooltip" sideOffset={6}>
-            {label}
-          </Tooltip.Content>
-        </Tooltip.Portal>
-      </Tooltip.Root>
-    </Tooltip.Provider>
+    <AstryxButton
+      {...props}
+      type={props.type ?? "button"}
+      label={label}
+      className={className}
+      variant="ghost"
+      isIconOnly
+      icon={children}
+      isDisabled={disabled ?? false}
+      tooltip={label}
+    />
   );
 }
 
 export function Button({
   variant = "secondary",
   className = "",
+  children,
+  disabled,
   ...props
 }: ComponentProps<"button"> & {
   readonly variant?: "primary" | "secondary" | "quiet" | "danger";
 }) {
   return (
-    <button type="button" className={`button button--${variant} ${className}`.trim()} {...props} />
+    <AstryxButton
+      {...props}
+      type={props.type ?? "button"}
+      label={props["aria-label"] ?? nodeLabel(children) ?? props.title ?? "操作"}
+      variant={variant === "quiet" ? "ghost" : variant === "danger" ? "destructive" : variant}
+      isDisabled={disabled ?? false}
+      size="lg"
+      className={`button button--${variant} ${className}`.trim()}
+    >
+      {children}
+    </AstryxButton>
   );
+}
+
+function nodeLabel(children: ReactNode): string | undefined {
+  const text = Children.toArray(children)
+    .map((child) => {
+      if (typeof child === "string" || typeof child === "number") return String(child);
+      return isValidElement<{ children?: ReactNode }>(child)
+        ? (nodeLabel(child.props.children) ?? "")
+        : "";
+    })
+    .join("")
+    .trim();
+  return text || undefined;
 }
 
 export function EmptyState({

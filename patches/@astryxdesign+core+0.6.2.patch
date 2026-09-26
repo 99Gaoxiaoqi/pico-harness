@@ -1,0 +1,65 @@
+diff --git a/node_modules/@astryxdesign/core/dist/Chat/ChatLayout.d.ts b/node_modules/@astryxdesign/core/dist/Chat/ChatLayout.d.ts
+index ff34874..a1eb352 100644
+--- a/node_modules/@astryxdesign/core/dist/Chat/ChatLayout.d.ts
++++ b/node_modules/@astryxdesign/core/dist/Chat/ChatLayout.d.ts
+@@ -69,6 +69,8 @@ export interface ChatLayoutProps extends BaseProps<HTMLDivElement> {
+      * @default 'balanced'
+      */
+     density?: Density;
++  /** Disable built-in following when the host owns scrolling. */
++  autoScroll?: boolean;
+ }
+ export declare function ChatLayout({ children, composer, density, emptyState, scrollButton, scrollRef: externalScrollRef, xstyle, className, style, 'data-testid': testId, ref, ...rest }: ChatLayoutProps): import("react").JSX.Element;
+ export declare namespace ChatLayout {
+diff --git a/node_modules/@astryxdesign/core/dist/Chat/ChatLayout.js b/node_modules/@astryxdesign/core/dist/Chat/ChatLayout.js
+index ff9b9fa..0457a68 100644
+--- a/node_modules/@astryxdesign/core/dist/Chat/ChatLayout.js
++++ b/node_modules/@astryxdesign/core/dist/Chat/ChatLayout.js
+@@ -188,6 +188,7 @@ export function ChatLayout({
+   children,
+   composer,
+   density = 'balanced',
++  autoScroll = true,
+   emptyState,
+   scrollButton,
+   scrollRef: externalScrollRef,
+@@ -205,7 +206,8 @@ export function ChatLayout({
+ 
+   // --- Default scroll behavior ---
+   const scroll = useChatStreamScroll({
+-    scrollRef: scrollContainerRef
++    scrollRef: scrollContainerRef,
++    enabled: autoScroll
+   });
+   const newMsgs = useChatNewMessages({
+     isLocked: scroll.isLocked,
+diff --git a/node_modules/@astryxdesign/core/src/Chat/ChatLayout.tsx b/node_modules/@astryxdesign/core/src/Chat/ChatLayout.tsx
+index d45a912..050207f 100644
+--- a/node_modules/@astryxdesign/core/src/Chat/ChatLayout.tsx
++++ b/node_modules/@astryxdesign/core/src/Chat/ChatLayout.tsx
+@@ -96,6 +96,8 @@ export interface ChatLayoutProps extends BaseProps<HTMLDivElement> {
+    * @default 'balanced'
+    */
+   density?: Density;
++  /** Disable built-in following when the host owns scrolling. */
++  autoScroll?: boolean;
+ }
+ 
+ // =============================================================================
+@@ -272,6 +274,7 @@ export function ChatLayout({
+   children,
+   composer,
+   density = 'balanced',
++  autoScroll = true,
+   emptyState,
+   scrollButton,
+   scrollRef: externalScrollRef,
+@@ -289,7 +292,7 @@ export function ChatLayout({
+   const isSelfScrolling = !externalScrollRef;
+ 
+   // --- Default scroll behavior ---
+-  const scroll = useChatStreamScroll({scrollRef: scrollContainerRef});
++  const scroll = useChatStreamScroll({scrollRef: scrollContainerRef, enabled: autoScroll});
+   const newMsgs = useChatNewMessages({
+     isLocked: scroll.isLocked,
+     onResize: scroll.scrollIfLocked,

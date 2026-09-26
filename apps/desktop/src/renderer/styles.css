@@ -1,5 +1,8 @@
+@layer reset, tokens, base, astryx-components, astryx-tokens, components, pages, utilities;
+@import "@astryxdesign/core/reset.css";
+@import "@astryxdesign/core/astryx.css" layer(astryx-components);
+@import "./astryx-theme/pico.css" layer(astryx-tokens);
 @import "./conversation/deep-research.css";
-@layer reset, tokens, base, components, pages, utilities;
 
 @layer reset {
   *,
