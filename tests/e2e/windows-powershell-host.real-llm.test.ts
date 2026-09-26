@@ -21,7 +21,7 @@ const TEST_TIMEOUT_MS = 5 * 60_000;
 const RUN_REAL_MODEL = process.env.RUN_LLM_E2E === "1";
 const realModelTest = RUN_REAL_MODEL ? test : test.skip;
 
-// Windows 宿主方言为 PowerShell(对齐 maka)。真实模型收到 PowerShell 工具
+// Windows 宿主方言为 PowerShell。真实模型收到 PowerShell 工具
 // 描述后,bash 工具调用必须经 PowerShell 宿主成功执行——用含随机 UUID 的
 // canary 文件名证明输出来自真实 spawn(模型无法凭空猜出 UUID)。
 realModelTest(

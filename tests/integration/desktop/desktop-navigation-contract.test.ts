@@ -7,7 +7,7 @@ import {
   sortSidebarTasks,
 } from "../../../apps/desktop/src/renderer/navigation.js";
 
-test("desktop main sidebar follows the Maka task-first information architecture", async () => {
+test("desktop main sidebar follows the task-first information architecture", async () => {
   assert.deepEqual(
     appPrimaryNavigation.map(({ label, to }) => ({ label, to })),
     [{ label: "定时任务", to: "/automations" }],

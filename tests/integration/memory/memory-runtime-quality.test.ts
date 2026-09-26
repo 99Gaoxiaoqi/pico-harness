@@ -24,7 +24,7 @@ import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-s
 
 const MEMORY_CANARY = "npm run reviewed-memory-canary";
 
-test("Maka memory admission separates recall from extraction across runtime profiles", async (t) => {
+test("Memory admission separates recall from extraction across runtime profiles", async (t) => {
   const profiles = [
     "plan",
     "side",

@@ -18,11 +18,10 @@ export interface ProviderPreset {
   readonly icon?: string;
 }
 
-// Compared with Maka's 60 registered provider types on 2026-09-06.
 // Endpoint/auth facts are backed by each entry's first-party documentation.
 // Models are a small editable starting list, never a promise of account access.
 // Empty lists require a user-selected model; do not infer an entire live catalog.
-// Like Maka's model metadata, modelProtocols selects the adapter per model
+// modelProtocols selects the adapter per model
 // while keeping one provider connection and credential.
 export const providerPresets: readonly ProviderPreset[] = [
   {
@@ -774,7 +773,7 @@ export const unsupportedProviderPresets: readonly {
   {
     id: "claude-subscription",
     name: "Claude Subscription (Pro / Max OAuth)",
-    reason: "Maka 已停用此订阅连接；不能使用订阅凭证代替 Anthropic API Key",
+    reason: "Pico 尚未支持此订阅连接；请使用 Anthropic API Key",
   },
   {
     id: "openai-codex",

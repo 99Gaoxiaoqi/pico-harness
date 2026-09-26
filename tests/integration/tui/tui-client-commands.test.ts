@@ -136,7 +136,7 @@ function createHarness(options?: {
                 estimatedTokens: 1200,
                 messageCount: 3,
                 compactedCount: 1,
-                estimationAlgorithm: "maka_chars_v1",
+                estimationAlgorithm: "chars_v1",
                 projection: "effective_model_history",
               },
             },

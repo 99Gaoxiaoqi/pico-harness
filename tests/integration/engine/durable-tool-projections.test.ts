@@ -64,7 +64,7 @@ async function result(
   await run.commitMessages(session, [message]);
 }
 
-test("Maka projection decisions are durable, read-only on replay, and bound to the checkpoint digest", async (t) => {
+test("Tool projection decisions are durable, read-only on replay, and bound to the checkpoint digest", async (t) => {
   const { session, run } = await fixture(t);
   const raw = "正文".repeat(5_000);
   await run.run(async () => {
@@ -163,7 +163,7 @@ test("Maka projection decisions are durable, read-only on replay, and bound to t
   );
 });
 
-test("Maka active 2048/256 thresholds and stale two-user-turn protection", async (t) => {
+test("Tool projection active 2048/256 thresholds and stale two-user-turn protection", async (t) => {
   const { session, run } = await fixture(t);
   await run.run(async () => {
     await run.commitMessages(session, [{ role: "user", content: "first user turn" }]);

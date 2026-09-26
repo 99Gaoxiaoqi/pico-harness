@@ -6,7 +6,7 @@ import type { RuntimeExecutionSummary, RuntimeSessionContextSnapshot } from "@pi
 import { ExecutionUsageSummary } from "../../../apps/desktop/src/renderer/workbar-panels/ExecutionUsageSummary.js";
 import { ContextComposition } from "../../../apps/desktop/src/renderer/workbar-panels/ContextComposition.js";
 import { CurrentModelHistory } from "../../../apps/desktop/src/renderer/workbar-panels/CurrentModelHistory.js";
-import { contextSnapshot } from "./context-maka-fixture.js";
+import { contextSnapshot } from "./context-fixture.js";
 Object.assign(globalThis, { React });
 
 const summary: RuntimeExecutionSummary = {

@@ -9,7 +9,7 @@
  * 三层验收:
  * - L2 单步摘要质量:FullCompactor.preview 生成摘要 → scoreCompactionQuality recall >= 0.8
  * - L3 滚动摘要增量更新:第一次压缩 → 追加内容 → 第二次压缩 → 第二次摘要保留第一次 anchor
- * - L4 模板验证:摘要包含 Maka 结构化标题,不含旧 13-section 标题
+ * - L4 模板验证:摘要包含结构化标题,不含旧 13-section 标题
  *
  * 成本控制:每 case 1-2 次模型调用,用廉价 fast 模型。
  */
@@ -43,7 +43,7 @@ function createInMemorySession(): Session {
 }
 
 compactionTest(
-  "L2: 真实模型生成的 Maka 结构化摘要保留关键事实(recall >= 0.8)",
+  "L2: 真实模型生成的结构化摘要保留关键事实(recall >= 0.8)",
   { timeout: TEST_TIMEOUT_MS },
   async () => {
     const provider = await createUserConfiguredProvider();
@@ -62,7 +62,7 @@ compactionTest(
       assert.equal(findCheckpointSummaryDefect(summary), undefined);
       console.log(`\n=== case ${testCase.id} 摘要 ===\n${summary}\n`);
 
-      // L4:验证同源 Maka 摘要格式。
+      // L4:验证结构化摘要格式。
       assert.ok(
         /任务目标|## Goal/i.test(summary),
         `case ${testCase.id}: 摘要应包含"任务目标/Goal"段`,

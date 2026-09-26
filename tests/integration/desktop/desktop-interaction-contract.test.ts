@@ -39,7 +39,7 @@ test("new-task send accepts settings that must apply before the first run", asyn
   const trustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });
   await trustStore.trust(canonicalWorkspace);
   const runtime = new WorkspaceRuntimeService({ env, execute: async () => ({ ok: true }) });
-  const sessionId = "maka-style-first-send";
+  const sessionId = "initial-settings-first-send";
   const desktop = new DesktopRuntimeService({
     runtimeService: runtime,
     trustStore,

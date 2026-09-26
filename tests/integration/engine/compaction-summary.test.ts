@@ -27,7 +27,7 @@ const history: Message[] = [
   { role: "assistant", content: "下一步验证。" },
 ];
 
-test("Maka summary checkpoint repairs once, retains full source and active directives, then rolls forward", async () => {
+test("Compaction summary checkpoint repairs once, retains full source and active directives, then rolls forward", async () => {
   const requests: Message[][] = [];
   const options: unknown[] = [];
   const provider: LLMProvider = {
@@ -44,7 +44,7 @@ test("Maka summary checkpoint repairs once, retains full source and active direc
         Parameters<typeof recordRuntimeCompactionCheckpoint>[0]["runtimeRun"]["recordCheckpoint"]
       >[0]
     | undefined;
-  const session = { id: "maka-summary-integration" };
+  const session = { id: "compaction-summary-integration" };
   const runtimeRun = {
     claimsSession: () => true,
     readModelHistoryEntries: async () => entries,
@@ -97,7 +97,7 @@ test("Maka summary checkpoint repairs once, retains full source and active direc
   assert.ok(requests.at(-1)![1]!.content.includes(longSource));
 });
 
-test("Maka summary rejects repeated malformed or output-truncated completions without checkpoint writes", async () => {
+test("Compaction summary rejects repeated malformed or output-truncated completions without checkpoint writes", async () => {
   for (const response of [
     { role: "assistant" as const, content: "```\n## Goal\nplaceholder" },
     { role: "assistant" as const, content: summary, providerData: { finishReason: "length" } },
@@ -133,7 +133,7 @@ test("Maka summary rejects repeated malformed or output-truncated completions wi
   }
 });
 
-test("Maka summarizer overflow retreats only to the last proven accepted prefix", async () => {
+test("Compaction summarizer overflow retreats only to the last proven accepted prefix", async () => {
   const { ContextOverflowError } = await import("@pico/core");
   const source: Message[] = [
     ...history.slice(0, 3),
@@ -163,7 +163,7 @@ test("Maka summarizer overflow retreats only to the last proven accepted prefix"
   }
 });
 
-test("Maka safe prefix leaves an open tool batch intact and checkpoint failures never apply history", async () => {
+test("Compaction safe prefix leaves an open tool batch intact and checkpoint failures never apply history", async () => {
   const source: Message[] = [
     { role: "user", content: "old task" },
     { role: "assistant", content: "old result" },
@@ -208,7 +208,7 @@ test("Maka safe prefix leaves an open tool batch intact and checkpoint failures 
   assert.deepEqual(entries, before);
 });
 
-test("Maka exact malformed summary source is latched while changed history remains eligible", async () => {
+test("Exact malformed summary source is latched while changed history remains eligible", async () => {
   let calls = 0;
   const compactor = new FullCompactor({
     maxAttempts: 1,
