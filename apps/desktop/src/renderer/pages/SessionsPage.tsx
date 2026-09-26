@@ -1,3 +1,5 @@
+import { CheckboxInput } from "@astryxdesign/core/CheckboxInput";
+import { TextField } from "../ui-controls.js";
 import { Archive, Code2, Folder, Plus, Search } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
@@ -38,25 +40,24 @@ export function SessionsPage() {
         </Link>
       </section>
       <div className="toolbar">
-        <label className="search-field">
+        <div className="search-field">
           <Search aria-hidden="true" />
           <span className="sr-only">搜索会话</span>
-          <input
+          <TextField
+            label="搜索会话"
             name="session-search"
             value={query}
             autoComplete="off"
             onChange={(event) => setQuery(event.target.value)}
             placeholder="搜索会话…"
           />
-        </label>
-        <label className="check-control">
-          <input
-            type="checkbox"
-            checked={showArchived}
-            onChange={(event) => setShowArchived(event.target.checked)}
-          />
-          显示已归档
-        </label>
+        </div>
+        <CheckboxInput
+          className="check-control"
+          label="显示已归档"
+          value={showArchived}
+          onChange={setShowArchived}
+        />
       </div>
       <section className="panel">
         {sessions.length === 0 ? (

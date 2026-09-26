@@ -1,13 +1,11 @@
 import { AlertTriangle, Check, Cpu, LoaderCircle, Settings } from "lucide-react";
+import { useEffect, useId, useMemo, useState } from "react";
+import { Button } from "@astryxdesign/core/Button";
 import {
-  useEffect,
-  useId,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-  type KeyboardEvent,
-} from "react";
+  DropdownMenu,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+} from "@astryxdesign/core/DropdownMenu";
 import type { ModelRouteView, ProviderView } from "./model.js";
 import { providerPresets } from "./provider-presets.js";
 
@@ -42,7 +40,7 @@ function Mark({ source }: { source?: string | undefined }) {
   );
 }
 
-/** Composer-only menu. Native popovers provide top-layer clipping, Escape and light dismissal. */
+/** Composer-only model menu; Astryx owns positioning, dismissal and keyboard navigation. */
 export function ComposerModelPicker({
   routes,
   providers,
@@ -63,9 +61,6 @@ export function ComposerModelPicker({
   onConfigure: () => void;
 }) {
   const id = useId();
-  const trigger = useRef<HTMLButtonElement>(null);
-  const menu = useRef<HTMLDivElement>(null);
-  const typeahead = useRef({ value: "", time: 0 });
   const [open, setOpen] = useState(false);
   const [pending, setPending] = useState(false);
   const locked = disabled || pending;
@@ -103,86 +98,23 @@ export function ComposerModelPicker({
   const current = currentGroup?.choices.find((choice) => choice.id === value);
   const label =
     current?.label ?? currentLabel ?? (value ? value.slice(value.indexOf("/") + 1) : "选择模型");
-  const items = () => [
-    ...(menu.current?.querySelectorAll<HTMLButtonElement>(
-      '[role="menuitemradio"]:not(:disabled)',
-    ) ?? []),
-  ];
-  const close = (restoreFocus = true) => {
-    menu.current?.hidePopover();
-    if (restoreFocus) trigger.current?.focus();
-  };
-  const position = () => {
-    if (!trigger.current || !menu.current) return;
-    const rect = trigger.current.getBoundingClientRect();
-    const width = Math.min(292, window.innerWidth - 24);
-    Object.assign(menu.current.style, {
-      width: `${width}px`,
-      left: `${Math.max(12, Math.min(rect.left, window.innerWidth - width - 12))}px`,
-      bottom: `${window.innerHeight - rect.top + 7}px`,
-      maxHeight: `${Math.max(80, Math.min(328, rect.top - 19))}px`,
-    });
-  };
-  useLayoutEffect(() => {
-    if (!open) return;
-    position();
-    const selected =
-      items().find((item) => item.getAttribute("aria-checked") === "true") ?? items()[0];
-    selected?.focus({ preventScroll: true });
-    selected?.scrollIntoView({ block: "nearest" });
-    window.addEventListener("resize", position);
-    // Layout can move when the draft wraps or the sidebar is resized.
-    const observer = new ResizeObserver(position);
-    if (trigger.current) observer.observe(trigger.current.closest("form") ?? trigger.current);
-    return () => {
-      window.removeEventListener("resize", position);
-      observer.disconnect();
-    };
-  }, [open]);
   useEffect(() => {
-    if (locked) menu.current?.hidePopover();
+    if (locked) setOpen(false);
   }, [locked]);
-
-  function navigateMenu(event: KeyboardEvent<HTMLDivElement>) {
-    const choices = items();
-    const index = choices.indexOf(document.activeElement as HTMLButtonElement);
-    let target: HTMLButtonElement | undefined;
-    if (event.key === "ArrowDown") target = choices[(index + 1) % choices.length];
-    else if (event.key === "ArrowUp")
-      target = choices[(index - 1 + choices.length) % choices.length];
-    else if (event.key === "Home") target = choices[0];
-    else if (event.key === "End") target = choices.at(-1);
-    else if (event.key === "Escape") {
-      event.preventDefault();
-      close();
-      return;
-    } else if (event.key === "Tab") {
-      close();
-      return;
-    } else if (
-      event.key.length === 1 &&
-      event.key !== " " &&
-      !event.metaKey &&
-      !event.ctrlKey &&
-      !event.altKey
-    ) {
-      const now = Date.now();
-      typeahead.current.value =
-        (now - typeahead.current.time > 700 ? "" : typeahead.current.value) +
-        event.key.toLocaleLowerCase();
-      typeahead.current.time = now;
-      target = [...choices.slice(index + 1), ...choices.slice(0, index + 1)].find((item) =>
-        item.dataset.label?.toLocaleLowerCase().startsWith(typeahead.current.value),
+  useEffect(() => {
+    if (!open) return;
+    const frame = requestAnimationFrame(() => {
+      const selected = document.querySelector<HTMLElement>(
+        `[data-pico-model-picker="${id}"] [role="menuitemradio"][aria-checked="true"]`,
       );
-    }
-    if (target) {
-      event.preventDefault();
-      target.focus();
-    }
-  }
+      selected?.focus({ preventScroll: true });
+      selected?.scrollIntoView({ block: "nearest" });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [id, open]);
   async function pick(next: string) {
     if (locked) return;
-    close();
+    setOpen(false);
     if (next === value) return;
     setPending(true);
     try {
@@ -196,87 +128,68 @@ export function ComposerModelPicker({
 
   if (!routes.length)
     return (
-      <button
-        type="button"
-        className="composer-model-trigger"
+      <Button
+        label="配置模型"
+        variant="ghost"
+        className="composer-model-trigger pico-page-control"
         onClick={onConfigure}
-        disabled={locked}
-        title="添加模型厂商"
+        isDisabled={locked}
+        tooltip="添加模型厂商"
       >
         <Settings aria-hidden="true" />
         <span>配置模型</span>
-      </button>
+      </Button>
     );
   return (
-    <>
-      <button
-        type="button"
-        ref={trigger}
-        className="composer-model-trigger"
-        disabled={locked}
-        popoverTarget={id}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-controls={id}
-        aria-label={`选择模型：${label}`}
-        title={
-          disabled
-            ? "任务执行中，结束后可切换模型"
-            : pending
-              ? "正在切换模型…"
-              : `切换模型 · ${label}`
-        }
-        onKeyDown={(event) => {
-          if (!locked && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
-            event.preventDefault();
-            menu.current?.showPopover();
-          }
-        }}
-      >
-        {pending ? (
-          <LoaderCircle className="composer-model-loading" aria-hidden="true" />
-        ) : (
-          <Mark source={currentGroup?.icon} />
-        )}
-        <span>{label}</span>
-      </button>
-      <div
-        id={id}
-        ref={menu}
-        popover="auto"
-        role="menu"
-        aria-label="选择模型"
-        className="composer-model-menu"
-        onBeforeToggle={(event) => {
-          if (event.newState === "open") position();
-        }}
-        onToggle={(event) => setOpen(event.newState === "open")}
-        onKeyDown={navigateMenu}
-      >
-        {hasHistory && (
-          <p className="composer-model-notice">
-            <AlertTriangle aria-hidden="true" />
-            <span>切换模型可能需要重建提示缓存，下一次回复可能更慢或成本更高。</span>
-          </p>
-        )}
+    <DropdownMenu
+      isMenuOpen={open}
+      onOpenChange={(next) => setOpen(next && !locked)}
+      className="composer-model-menu pico-composer-model-menu"
+      data-pico-model-picker={id}
+      placement="above"
+      alignment="start"
+      menuWidth={292}
+      hasChevron={false}
+      presentation="popover"
+      button={{
+        label: `选择模型：${label}`,
+        children: (
+          <>
+            {pending ? (
+              <LoaderCircle className="composer-model-loading" aria-hidden="true" />
+            ) : (
+              <Mark source={currentGroup?.icon} />
+            )}
+            <span>{label}</span>
+          </>
+        ),
+        className: "composer-model-trigger pico-page-control",
+        variant: "ghost",
+        isDisabled: locked,
+        tooltip: disabled
+          ? "任务执行中，结束后可切换模型"
+          : pending
+            ? "正在切换模型…"
+            : `切换模型 · ${label}`,
+      }}
+    >
+      {hasHistory && (
+        <p className="composer-model-notice">
+          <AlertTriangle aria-hidden="true" />
+          <span>切换模型可能需要重建提示缓存，下一次回复可能更慢或成本更高。</span>
+        </p>
+      )}
+      <DropdownMenuRadioGroup value={value} label="选择模型" onChange={(next) => void pick(next)}>
         {value && !current && (
-          <button
-            type="button"
-            role="menuitemradio"
-            aria-checked="true"
-            tabIndex={-1}
+          <DropdownMenuRadioItem
+            value={value}
             className="composer-model-item"
-            data-label={label}
-            disabled={locked}
-            onClick={() => close()}
-          >
-            <Mark />
-            <span>
-              <strong>{label}</strong>
-              <small>当前模型 · 暂不在可选列表中</small>
-            </span>
-            <Check aria-hidden="true" />
-          </button>
+            label={<strong>{label}</strong>}
+            description="当前模型 · 暂不在可选列表中"
+            icon={<Mark />}
+            endContent={<Check className="composer-model-check" aria-hidden="true" />}
+            isDisabled={locked}
+          />
         )}
         {groups.map(([key, group]) => (
           <div role="group" aria-label={group.heading} key={key}>
@@ -284,31 +197,26 @@ export function ComposerModelPicker({
               {group.heading}
             </div>
             {group.choices.map((choice) => (
-              <button
-                type="button"
-                role="menuitemradio"
-                aria-checked={choice.id === value}
-                tabIndex={-1}
-                className="composer-model-item"
+              <DropdownMenuRadioItem
                 key={choice.id}
-                data-label={choice.label}
-                disabled={locked}
-                title={choice.model}
-                onClick={() => void pick(choice.id)}
-              >
-                <Mark source={group.icon} />
-                <span>
-                  <strong>{choice.label}</strong>
-                  {choice.label !== choice.model && <small>{choice.model}</small>}
-                </span>
-                {choice.id === value && (
-                  <Check className="composer-model-check" aria-hidden="true" />
-                )}
-              </button>
+                value={choice.id}
+                className="composer-model-item"
+                label={<strong>{choice.label}</strong>}
+                description={
+                  choice.label !== choice.model ? <small>{choice.model}</small> : undefined
+                }
+                icon={<Mark source={group.icon} />}
+                endContent={
+                  choice.id === value ? (
+                    <Check className="composer-model-check" aria-hidden="true" />
+                  ) : undefined
+                }
+                isDisabled={locked}
+              />
             ))}
           </div>
         ))}
-      </div>
-    </>
+      </DropdownMenuRadioGroup>
+    </DropdownMenu>
   );
 }

@@ -1,3 +1,5 @@
+import { Button as AstryxButton } from "@astryxdesign/core/Button";
+import { TextAreaField } from "../ui-controls.js";
 import { GitBranch, ShieldAlert, Square } from "lucide-react";
 import { useEffect, useState } from "react";
 import { ApprovalDetails, approvalActionTitle, approvalScopeLabel } from "../ApprovalDetails.js";
@@ -45,19 +47,29 @@ export function ConversationInteractionSlot({
         </div>
         <div className="conversation-interaction-slot__actions">
           {prompt.options.map((option) => (
-            <button
+            <AstryxButton
+              className="pico-page-control"
+              label={option}
+              variant="ghost"
               key={option}
               type="button"
-              disabled={busy}
+              isDisabled={busy}
               onClick={() => onPromptAnswer(option)}
             >
               {option}
-            </button>
+            </AstryxButton>
           ))}
           {onStop && (
-            <button type="button" className="is-danger" disabled={busy} onClick={onStop}>
+            <AstryxButton
+              label="停止任务"
+              variant="ghost"
+              type="button"
+              className="pico-page-control is-danger"
+              isDisabled={busy}
+              onClick={onStop}
+            >
               <Square aria-hidden="true" /> 停止任务
-            </button>
+            </AstryxButton>
           )}
         </div>
       </section>
@@ -99,109 +111,138 @@ export function ConversationInteractionSlot({
         </ol>
       )}
       {planApproval && !revisionPlan && !interruptedPlan && !activeGraphPlan && (
-        <label className="conversation-interaction-slot__feedback">
+        <div className="conversation-interaction-slot__feedback">
           <span>需要调整时说明原因</span>
-          <textarea value={feedback} onChange={(event) => setFeedback(event.target.value)} />
-        </label>
+          <TextAreaField
+            label="需要调整时说明原因"
+            value={feedback}
+            onChange={(event) => setFeedback(event.target.value)}
+          />
+        </div>
       )}
       <div className="conversation-interaction-slot__actions">
         {activeGraphPlan ? (
-          <button
+          <AstryxButton
+            label="取消执行"
+            variant="ghost"
             type="button"
-            className="is-danger"
-            disabled={busy}
+            className="pico-page-control is-danger"
+            isDisabled={busy}
             onClick={() => onApprovalDecision("cancel_execution")}
           >
             取消执行
-          </button>
+          </AstryxButton>
         ) : interruptedPlan ? (
           <>
-            <button
+            <AstryxButton
+              label="取消执行"
+              variant="ghost"
               type="button"
-              className="is-danger"
-              disabled={busy}
+              className="pico-page-control is-danger"
+              isDisabled={busy}
               onClick={() => onApprovalDecision("cancel_execution")}
             >
               取消执行
-            </button>
-            <button
+            </AstryxButton>
+            <AstryxButton
+              className="pico-page-control"
+              label="重新规划"
+              variant="ghost"
               type="button"
-              disabled={busy}
+              isDisabled={busy}
               onClick={() => onApprovalDecision("replan_execution")}
             >
               重新规划
-            </button>
-            <button
+            </AstryxButton>
+            <AstryxButton
+              label="继续执行"
+              variant="ghost"
               type="button"
-              className="is-primary"
-              disabled={busy}
+              className="pico-page-control is-primary"
+              isDisabled={busy}
               onClick={() => onApprovalDecision("resume_execution")}
             >
               继续执行
-            </button>
+            </AstryxButton>
           </>
         ) : revisionPlan ? (
-          <button
+          <AstryxButton
+            label="恢复继续修改"
+            variant="ghost"
             type="button"
-            className="is-primary"
-            disabled={busy}
+            className="pico-page-control is-primary"
+            isDisabled={busy}
             onClick={() => onApprovalDecision("continue_editing", approval.planFeedback)}
           >
             恢复继续修改
-          </button>
+          </AstryxButton>
         ) : planApproval ? (
           <>
-            <button
+            <AstryxButton
+              label="拒绝并退出"
+              variant="ghost"
               type="button"
-              className="is-danger"
-              disabled={busy}
+              className="pico-page-control is-danger"
+              isDisabled={busy}
               onClick={() => onApprovalDecision("reject_exit")}
             >
               拒绝并退出
-            </button>
-            <button
+            </AstryxButton>
+            <AstryxButton
+              className="pico-page-control"
+              label="继续修改"
+              variant="ghost"
               type="button"
-              disabled={busy || !feedback.trim()}
+              isDisabled={busy || !feedback.trim()}
               onClick={() => onApprovalDecision("continue_editing", feedback.trim())}
             >
               继续修改
-            </button>
-            <button
+            </AstryxButton>
+            <AstryxButton
+              label="执行计划"
+              variant="ghost"
               type="button"
-              className="is-primary"
-              disabled={busy}
+              className="pico-page-control is-primary"
+              isDisabled={busy}
               onClick={() => onApprovalDecision("execute")}
             >
               执行计划
-            </button>
+            </AstryxButton>
           </>
         ) : (
           <>
-            <button
+            <AstryxButton
+              label="拒绝"
+              variant="ghost"
               type="button"
-              className="is-danger"
-              disabled={busy}
+              className="pico-page-control is-danger"
+              isDisabled={busy}
               onClick={() => onApprovalDecision("deny")}
             >
               拒绝
-            </button>
+            </AstryxButton>
             {approval.sessionScope && (
-              <button
+              <AstryxButton
+                className="pico-page-control"
+                label={approvalScopeLabel(approval.sessionScope)}
+                variant="ghost"
                 type="button"
-                disabled={busy}
+                isDisabled={busy}
                 onClick={() => onApprovalDecision("allow_session")}
               >
                 {approvalScopeLabel(approval.sessionScope)}
-              </button>
+              </AstryxButton>
             )}
-            <button
+            <AstryxButton
+              label="仅允许这次"
+              variant="ghost"
               type="button"
-              className="is-primary"
-              disabled={busy}
+              className="pico-page-control is-primary"
+              isDisabled={busy}
               onClick={() => onApprovalDecision("allow_once")}
             >
               仅允许这次
-            </button>
+            </AstryxButton>
           </>
         )}
       </div>
