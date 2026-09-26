@@ -18,21 +18,21 @@ scope，不提供兼容读取或迁移。现行边界见[原子长期记忆](../
 2. **锁仪式**:`.storage/lock` 全局 OwnerLease + 每锁 `recoverFileTransactionSync` ≈ 40ms/会话(TUI 历史加载慢的根因,2026-08-18 的 A/B 优化只消放大不消锁)。
 3. **自研 WAL**:`commit.json` 三阶段 + 前后哈希 CAS,是在文件系统上模拟数据库事务;control/memory 整文档重写。
 
-maka 深潜关键结论(修正先前认知):maka 事实表 `runtime_events.payload_json` = **完整 canonical JSON 原样**,不裁剪不拆列。"深"在结构:身份列拆出做索引 + 大量投影表**同事务增量维护** + 消息独立成表。pico 的"payload=事实本体、裁剪 taboo"语义与之一致,无需放弃。
+事实表 `runtime_events.payload_json` 保存完整 canonical JSON，身份列用于索引，投影在同事务内增量维护。事件 payload 保留事实本体，不在存储入口裁剪或拆成投影增量。
 
 ## 2. 决策
 
-1. **深迁移,照 maka 做法**:事实进 SQLite 结构化表,投影同事务物化,消息独立成表;事件 payload 完整保留。
+1. **深迁移**:事实进 SQLite 结构化表,投影同事务物化,消息独立成表;事件 payload 完整保留。
 2. **单库**:每 workspace 一个 `<storageRoot>/pico.sqlite`(WAL),所有 scope 共库共连接;跨域事务消灭 `commit.json`。
 3. **锁模型整套退役**:`.storage/lock`、`commit.json`、能力探针、`withLedgerStoreLock` 仪式全部退役,换 `BEGIN IMMEDIATE`(写)+ WAL + `busy_timeout=5000` + 只读连接(`readOnly:true` + `query_only=ON`)。单写者成立:全部客户端(含 headless-one-shot-runner)只经 daemon connect-or-spawn 连接。
 4. **不做存量迁移/导入**:切换即新纪元,旧 JSONL workspace 不导入、历史作废。以 layout 版本门禁 fail-closed 拒绝新旧混写(检测到 session-centric-v1 布局 = 旧纪元,拒绝打开并提示)。
-5. **blob 本体留文件系统**:evidence/file-history 的 CAS blob 目录结构不变,库内只存索引(≈maka artifact 模式)。
+5. **blob 本体留文件系统**:evidence/file-history 的 CAS blob 目录结构不变,库内只存索引。
 6. **配置面不迁**:`PICO_HOME` 级 config/mcp/hooks/plugins/trust 等继续 JSON(用户手可编辑性);traces 留 FS;fork-staging 留 FS。
 
 ### 弃案
 
 - **浅迁移(仅换载体)**:治标不治本,投影/锁/事务三痛点一个不消。
-- **拆 payload 为投影增量**:maka 实测也不这么做(payload 完整存储);pico 17 个 durable topic 实证余量三个数量级,无压力。
+- **拆 payload 为投影增量**:pico 17 个 durable topic 实证余量三个数量级,无压力。
 - **双写过渡/导入工具**:单用户本地产品,无在线迁移需求;用户拍板存量作废,导入工具整体砍掉。
 - **不迁 SQLite(2026-08-18 上午的分期结论)**:被本决策推翻——TUI 慢根因链显示锁成本不随放大优化消失,终态结构消除优于逐项修剪。
 
@@ -40,7 +40,7 @@ maka 深潜关键结论(修正先前认知):maka 事实表 `runtime_events.paylo
 
 - JSONL 人类直读性(cat/grep 肉眼检查)消失;补偿=doctor 查询化 + 后续可加 SQL 导出命令。
 - `engines` 提窗 `>=22.13` → `>=22.19`(node:sqlite `backup()` 等模块级 API)。
-- `synchronous=FULL`(maka 同款,每 commit fsync)写吞吐低于 NORMAL;**2026-08-18 本机(Windows/NTFS)实测**:模拟 pico 写模式(每事务 5 事件×~2KB payload + 会话水位 UPDATE)FULL=3.7~7.9ms/tx、NORMAL=1.2~2.2ms/tx(FULL 波动来自 AV/索引器),远低于 50ms 复评阈值——采用 FULL,基准脚本 `.scratch/sqlite-migration/bench-sync.mjs`。
+- `synchronous=FULL`(每 commit fsync)写吞吐低于 NORMAL;**2026-08-18 本机(Windows/NTFS)实测**:模拟 pico 写模式(每事务 5 事件×~2KB payload + 会话水位 UPDATE)FULL=3.7~7.9ms/tx、NORMAL=1.2~2.2ms/tx(FULL 波动来自 AV/索引器),远低于 50ms 复评阈值——采用 FULL,基准脚本 `.scratch/sqlite-migration/bench-sync.mjs`。
 - 测试面对 JSONL 形状的断言成批改写。
 
 ### 复评条件
@@ -48,7 +48,7 @@ maka 深潜关键结论(修正先前认知):maka 事实表 `runtime_events.paylo
 - 若 Windows AV/索引器反复锁 `-wal/-shm` 导致 daemon 不可用 → 评估 `journal_mode=DELETE` 回退。
 - 若 FULL 同步成为可测瓶颈(批提交 >50ms)→ 降 NORMAL 并补崩溃一致性测试。
 
-## 3. 连接层设计(照抄 maka)
+## 3. 连接层设计
 
 - 进程内单连接 Owner + Lease 引用计数(`acquireOperationalDatabase(storageRoot)`),无连接池;事务集中:写 `BEGIN IMMEDIATE`、读 `BEGIN`(deferred),嵌套折叠。
 - 打开即 PRAGMA:`busy_timeout=5000`、WAL(持久属性:老库只校验,设置撞 BUSY 以 10ms 重试至 5s)、`synchronous=FULL`、`foreign_keys=ON`。
@@ -113,7 +113,7 @@ CREATE TABLE sessions (
 );
 ```
 
-目录投影表(结构列随 sessions UPDATE 触发器维护;title/preview/message_count 由 append 事务应用层维护,maka 双轨):
+目录投影表(结构列随 sessions UPDATE 触发器维护;title/preview/message_count 由 append 事务应用层维护,双轨维护):
 
 ```sql
 CREATE TABLE session_catalog_projection (

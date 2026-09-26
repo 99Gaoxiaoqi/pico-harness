@@ -10,7 +10,7 @@
 
 | 验证                                                                                                       | 结果                                                                       |
 | ---------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
-| `desktop-execution-trace`、`context-maka-ui`、`inspector-overview-redesign`、`inspector-timeline-redesign` | 9 条通过                                                                   |
+| `desktop-execution-trace`、`context-ui`、`inspector-overview-redesign`、`inspector-timeline-redesign` | 9 条通过                                                                   |
 | 既有 Workbar 中 Host、Inspector、helpers、honest 相关测试                                                  | 5 条通过                                                                   |
 | 生产 IPC／daemon／SQLite 的执行轨迹 Electron 测试                                                          | 通过；历史分页覆盖 68 次运行，实际刷新延迟 538ms；验证重连、失败恢复和复制 |
 | 追踪面板 Electron 交互测试                                                                                 | 通过；独立滚动、页签键盘操作、折叠选择、刷新状态和会话切换                 |
@@ -24,7 +24,7 @@
 复现入口：
 
 ```sh
-node --import tsx --test tests/integration/desktop/desktop-execution-trace.test.ts tests/integration/desktop/context-maka-ui.test.ts tests/integration/desktop/inspector-overview-redesign.test.ts tests/integration/desktop/inspector-timeline-redesign.test.ts
+node --import tsx --test tests/integration/desktop/desktop-execution-trace.test.ts tests/integration/desktop/context-ui.test.ts tests/integration/desktop/inspector-overview-redesign.test.ts tests/integration/desktop/inspector-timeline-redesign.test.ts
 node --import tsx --test --test-name-pattern='Workbar Host|Inspector|helpers|honest' tests/integration/desktop/desktop-workbar-tool-panels.test.ts
 node --import tsx --test --test-concurrency=1 tests/integration/desktop/desktop-execution-trace-electron.test.ts tests/integration/desktop/inspector-redesign-electron.test.ts
 npm run desktop:typecheck

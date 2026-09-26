@@ -1,6 +1,6 @@
-# 上下文体系：对齐 Maka
+# 上下文体系与压缩契约
 
-本文对应 2026-09-23 的上下文对齐实现，固定参考 Maka `5846521372d2dd0d3d2d33dc7784dd046dc3f7c8`。详细原理及配图见[技术详解](../pico-context-compaction-technical-guide.md)。
+本文描述上下文估算、压缩和归档回读的当前契约。实现来源见[第三方声明](../../resources/licenses/THIRD_PARTY_NOTICES.md)。详细原理及配图见[技术详解](../pico-context-compaction-technical-guide.md)。
 
 ## 历史与归档
 
@@ -56,9 +56,9 @@ I + O + min(2 × O, 8000) >= 用户明确声明的窗口
 
 ```sh
 npm run build:packages
-node scripts/run-integration-tests.mjs maka-compaction compaction-rolling-digest compaction-review-fixes compaction-output-budget tool-result-runtime-projection hook-verifier-compaction
+node scripts/run-integration-tests.mjs compaction-trigger compaction-summary compaction-rolling-digest compaction-review-fixes compaction-output-budget tool-result-runtime-projection hook-verifier-compaction
 ```
 
 真实模型验证还需执行 `tests/e2e/` 的自动触发、摘要质量、工具归档和 Hook 场景。受控测试能覆盖指定分支，不代表生产负载中的自然触发概率。最终通过数量和实机结果以本轮验收记录为准，不复用旧版本测试结论。
 
-本轮执行结果见[2026-09-23 对齐验收记录](../verification/context-maka-alignment-2026-09-23.md)。
+本轮执行结果见[2026-09-23 上下文验收记录](../verification/context-validation-2026-09-23.md)。

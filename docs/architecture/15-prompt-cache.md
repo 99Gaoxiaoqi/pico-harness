@@ -329,18 +329,11 @@ Pico 有一套比"看命中率"更完整的诊断系统，分布在两个文件�
 
 ---
 
-## 十一、与 Maka 策略的对比
+## 十一、动态状态与缓存取舍
 
-| 维度                | Maka                                       | Pico                                   |
-| ------------------- | ------------------------------------------ | -------------------------------------- |
-| active/稳定记忆放哪 | system prompt                              | turnTail                               |
-| fresh update 放哪   | turn tail                                  | turnTail（一致）                       |
-| system prompt 内容  | 含动态记忆                                 | 严格只含文件型静态内容                 |
-| 设计取舍            | 用"破缓存风险"换"记忆在 system 的强注意力" | 用"记忆位置靠后"换"记忆变化永不破缓存" |
-| 缓存诊断            | `systemPromptHash` 变化检测                | 三层稳定率 + 冷启动归因 + 运营告警     |
-| 预热机制            | 无                                         | 有（Claude 专属）                      |
+Pico 将 Todo、Goal、环境、日期及动态记忆放在 user 消息尾部 `<current-turn-context>`，system prompt 只包含文件型静态内容。这样能减少动态状态变化对稳定缓存前缀的影响；代价是动态状态不在 system prompt 顶部，需要通过明确的结构和提示让模型识别。
 
-Pico 更激进地保守——把一切可能变化的运行状态（Todo/Goal/env/date/memory）都赶出 system prompt。代价是模型看到的动态状态位于 user 消息尾部 `<current-turn-context>`，注意力权重弱于 system prompt 顶部。
+缓存诊断保留三层稳定率、冷启动归因和运营告警；Claude 路径支持预热。
 
 ---
 

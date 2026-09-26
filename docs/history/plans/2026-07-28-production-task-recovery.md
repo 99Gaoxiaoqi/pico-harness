@@ -4,7 +4,7 @@
 
 ## 原始请求
 
-- 参考 Maka 的安全边界 continuation，把 Pico 已有的 TaskRun / Attempt 恢复协议接入生产 Agent 执行链。
+- 通过安全边界 continuation，把 Pico 已有的 TaskRun / Attempt 恢复协议接入生产 Agent 执行链。
 - 旧 Attempt 中断后创建新 Attempt 和新 Runtime Run，不复活旧 JavaScript 调用栈。
 - 从 canonical RuntimeEvent 高水位重建上下文，不伪造“继续”用户消息。
 - 启动扫描与手动恢复先通过功能开关上线。

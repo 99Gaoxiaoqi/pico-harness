@@ -101,5 +101,5 @@ src/
   [数据流](06-data-flow.md)、[Hooks](07-hooks.md)：按主题深入；局部旧段落以当前源码和状态索引为准。
 - [本机 IPC 安全](local-ipc-security.md)、[原子长期记忆](14-workspace-memory.md)、
   [Graph Mode](18-graph-mode.md)：专项机制与所有权。
-- [工具运行时决策 30](../decisions/30-decision-maka-tool-runtime.md)：取代早期工具披露决策。
+- [工具运行时决策 30](../decisions/30-decision-tool-runtime.md)：取代早期工具披露决策。
 - [实施计划](../plans/)与[历史资料](../history/)记录演进背景，不定义当前实现边界。

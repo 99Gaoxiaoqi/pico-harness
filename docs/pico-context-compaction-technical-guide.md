@@ -1,6 +1,6 @@
 # Pico 上下文压缩技术详解
 
-> 2026-09-23 上下文对齐版。行为基线固定为 Maka `5846521372d2dd0d3d2d33dc7784dd046dc3f7c8`；保留 Pico 的包边界、Runtime 事件和 SQLite 事实账本。
+> 本文介绍 Pico 的上下文压缩、Runtime 事件与 SQLite 事实账本。实现来源见[第三方声明](../resources/licenses/THIRD_PARTY_NOTICES.md)。
 
 ## 1. 解决的问题与设计边界
 
@@ -272,7 +272,7 @@ Hook 子会话不挂载 Hook 服务，避免工具执行或摘要再次递归触
 ```sh
 npm run build:packages
 node scripts/run-integration-tests.mjs \
-  maka-compaction-trigger maka-compaction-summary \
+  compaction-trigger compaction-summary \
   compaction-review-fixes compaction-rolling-digest compaction-output-budget \
   archive-read-tool tool-result-runtime-projection \
   hook-verifier-compaction
@@ -347,7 +347,7 @@ RUN_COMPACTION_E2E=1 node --import tsx --import @pico/cli/tui/preload-env \
 
 用量和组成可用性分别表达。最新请求缺少其中一项，不借用更早请求凑齐，也不拿当前模型配置补当时窗口。普通读取不新增事件和模型调用；必要的投影修复只能从新格式 canonical 记录重建。
 
-输入框还保留 Maka 的两条路径：实时值是 `I`，不可用时使用同模型／连接最新锚点的 `I+O`；窗口优先取用户声明，再取请求冻结值，最后取模型元数据。当回退锚点没有可匹配的冻结请求窗口时，只使用声明窗口或模型元数据，不借用其他请求的窗口。切换会话、模型、连接会清除不匹配值；迟到结果不能覆盖新目标，同目标查询失败保留最后有效值并显示读取错误。
+输入框有两条读数路径：实时值是 `I`，不可用时使用同模型／连接最新锚点的 `I+O`；窗口优先取用户声明，再取请求冻结值，最后取模型元数据。当回退锚点没有可匹配的冻结请求窗口时，只使用声明窗口或模型元数据，不借用其他请求的窗口。切换会话、模型、连接会清除不匹配值；迟到结果不能覆盖新目标，同目标查询失败保留最后有效值并显示读取错误。
 
 桌面追踪面板默认进入“时间线”；切到“总览”查看最近请求、会话累计和当前历史。步骤详情在时间线原位置展开，具体交互见[追踪面板](features/inspector-panel.md)。
 

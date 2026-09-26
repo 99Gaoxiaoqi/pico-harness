@@ -123,7 +123,7 @@ Provider 明确报告 `ContextOverflowError` 后，同一个未被接受的请�
 ```sh
 npm run build:packages
 node scripts/run-integration-tests.mjs \
-  maka-compaction-trigger maka-compaction-summary \
+  compaction-trigger compaction-summary \
   compaction-review-fixes compaction-rolling-digest \
   archive-read-tool tool-result-runtime-projection
 ```

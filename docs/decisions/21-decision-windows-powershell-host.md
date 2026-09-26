@@ -17,7 +17,6 @@
 
 | 产品        | Windows 策略                       | bash.exe 被删时 |
 | ----------- | ---------------------------------- | --------------- |
-| maka        | pwsh > powershell > cmd，不用 bash | 免疫            |
 | Claude Code | 强制 Git Bash，找不到直接退出进程  | 完全不可用      |
 | kimi-code   | 强制 Git Bash，找不到抛错          | 完全不可用      |
 | pico（旧）  | 强制 Git Bash，fail-closed         | 完全不可用      |
@@ -25,15 +24,8 @@
 **安全层调研：Windows 上的 bash 静态红线是纸面承诺。** pico 旧模型依赖
 bash-hardline 静态分类器作为不可绕过的拒绝地板。但调研确认：
 
-1. maka 曾实现过更强的危险命令分类器，后在其 SECURITY.md 中明确降级立场——
-   "agent 进程内对命令文本的任何分析，都是对攻击者可控字符串的启发式，不作为
-   安全保证"，把强制性下沉到 OS 沙箱。
-2. Windows 的 OS 沙箱现实：AppContainer 零能力下 `cmd.exe`/`pwsh.exe` 死于 DLL
-   初始化失败（`0xC0000142`），**任意 shell 无法被沙箱化**。maka 只沙箱化
-   专用 filesystem worker，shell 沙箱化（其 W2 里程碑）至今未交付。
-3. 本决策落地时，pico 在 Windows 还没有可用的 OS 沙箱后端。
-   换言之，pico 在 Windows 上的安全当时**完全押在静态分析上**，而静态分析的
-   承诺在同行业中最激进的实现方都已放弃。
+1. 命令文本的静态分析只能提供启发式拒绝规则，不能证明任意 shell 命令安全，强制隔离需要 OS 沙箱。
+2. 本决策落地时，Pico 在 Windows 尚无可用的 OS 沙箱后端。后来引入的 AppContainer Broker 及当前边界见本页开头的复评说明。
 
 ## 决策
 

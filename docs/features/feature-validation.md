@@ -1,6 +1,6 @@
-# Maka 功能对齐验收记录
+# 功能验收记录
 
-日期：2026-09-21。参考 Maka `777a2363c141d2ca4cc212eb5c8a4b6b4bb3e63f`，Pico 基线 `c3936b85`。
+日期：2026-09-21。Pico 基线 `c3936b85`。实现来源见[第三方声明](../../resources/licenses/THIRD_PARTY_NOTICES.md)。
 
 ## 结果
 

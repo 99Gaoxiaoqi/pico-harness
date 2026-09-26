@@ -1,14 +1,11 @@
 # 决策记录 28：desktop conversation-state 收编 SQLite control scope（2026-08-19）
 
-> 分支：`scratch/maka-gap-analysis`（调研依据：[历史调研记录](../history/architecture/pico-vs-maka-flow-gap-investigation.md) §2 P2；
-> 对照系 maka：`core_message_receipts` + `core_root_source_message_proofs` + `admitRootTurn`）。
-
 ## 背景与实证
 
 请求级幂等 key、首条消息 claim、steer/queue 消息队列存于
 `$PICO_HOME/desktop/conversation-state.json`（src/daemon/desktop-conversation-state.ts，
 writeJsonAtomic）：原子性靠 rename 不靠 WAL，daemon 崩溃窗口无事务保护——与决策 24
-"事实全部进 SQLite"方向相悖。maka 对应状态全部库内事务（receipt/proof/admission）。
+"事实全部进 SQLite"方向相悖。
 
 ## 决策
 

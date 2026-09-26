@@ -37,7 +37,7 @@
 - 待办 2：删除无 JSX 消费的 Desktop Environment/Inspector 组件、旧 Workbar wrapper、四个公共死组件及专属样式；保留 `ConversationPage` 活跃 inspector 样式。
 - 待办 2：根 typecheck、Desktop typecheck、严格架构检查、变更 TS/TSX ESLint/Prettier 与 `git diff --check` 通过；Desktop 29 项、Runtime/工具 69 项、TUI 12 项聚焦集成测试全部通过。
 - 待办 2：`EvidenceArchive` / `EvidenceBlobStore`、agent-graph evidence authority 与 TUI inspector legacy evidence 安全读取保持不变。
-- 待办 3：三份已结束计划、子智能体能力卡片验收与已落地的 Pico/Maka 故障流程调研已迁入 `docs/history/`；Desktop 全流程原型迁入 `apps/desktop/prototypes/` 并保留预览入口。
+- 待办 3：三份已结束计划、子智能体能力卡片验收与已落地的 写入与故障流程调研已迁入 `docs/history/`；Desktop 全流程原型迁入 `apps/desktop/prototypes/` 并保留预览入口。
 - 待办 3：Terminal-Bench 交付状态仍为 `release-readiness: active`，发布、观察与接受待完成，因此保留 `.delivery/` 机器工作流原位并在文档索引说明。Windows 内网包说明与双击 TUI 入口互相引用后保留根目录。
 - 待办 3：旧资产路径全仓引用扫描无残留；变更 Markdown 相对链接、Prettier 和 `git diff --check` 通过；原型 JavaScript 语法检查通过，本地 HTTP 预览的 HTML / JS / CSS 均返回 200。
 - 待办 4：`executeAgentRuntime` 将主 Provider / 子代理模型路由装配下沉到 `runtime-assembly.ts`，将 Hook 模型运行端口下沉到 `runtime-hook-assembly.ts`；顶层函数保留装配顺序和资源生命周期，`agent-runtime.ts` 由 3444 行降至 3242 行。

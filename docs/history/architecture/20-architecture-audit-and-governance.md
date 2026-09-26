@@ -35,7 +35,7 @@ pico 的 4 条设计原则在**叙事态**（账本核心）执行扎实（4/5�
 ### 三个跨态系统性根因
 
 **根因 A — 内存层承担事实权威（违反 P1/P2）**
-该 durable 或非权威缓存的东西，留在了进程内且不能丢。典型：`DelegationManager.records`（`src/tools/delegation-manager.ts:171`）既是活跃工作表又是历史状态表，终态不敢 delete；更糟的是它**设计性不可持久化**——孤儿检测依赖"重启后 records 清空返回空集"这个负信号。这是结构性悖论：**作为事实权威的层恰好是禁止持久化的层**。对比 maka：durable CAS admission 保证"重读重派不变双派"，内存层从一开始就非权威、可丢弃。
+该 durable 或非权威缓存的东西，留在了进程内且不能丢。典型：`DelegationManager.records`（`src/tools/delegation-manager.ts:171`）既是活跃工作表又是历史状态表，终态不敢 delete；更糟的是它**设计性不可持久化**——孤儿检测依赖"重启后 records 清空返回空集"这个负信号。这是结构性悖论：**作为事实权威的层恰好是禁止持久化的层**。持久化 CAS 准入可防止重读重派导致重复执行，让内存仅承担可丢弃的缓存职责。
 
 **根因 B — 同一职责多套实现（补丁驱动）**
 
@@ -44,7 +44,7 @@ pico 的 4 条设计原则在**叙事态**（账本核心）执行扎实（4/5�
 - 去重：durable CAS 被降级为 best-effort、内存层升为 load-bearing 权威（权威倒挂）。
 
 **根因 C — Graph Mode 架构欠账**
-无真 DAG、无法预声明；`DelegationManager`（tools 层）承载 graph/plan 调度职责（`onGraphWorkSettled`/graphWorkId 去重），职责错位；子代理自报完成掩盖失败，无内容级熔断。**最讽刺的发现**：pico 的 `CronRuntimeScheduler.claim`（`src/tasks/cron-runtime-scheduler.ts:123`）和 `TaskRunStore.claims`（`src/tasks/task-run-store.ts:170`）**已经实现了 maka 式 durable claim admission**，但 graph/delegation 层没复用，而是另起"内存权威"炉灶。
+无真 DAG、无法预声明；`DelegationManager`（tools 层）承载 graph/plan 调度职责（`onGraphWorkSettled`/graphWorkId 去重），职责错位；子代理自报完成掩盖失败，无内容级熔断。**最讽刺的发现**：pico 的 `CronRuntimeScheduler.claim`（`src/tasks/cron-runtime-scheduler.ts:123`）和 `TaskRunStore.claims`（`src/tasks/task-run-store.ts:170`）**已经实现了 durable claim admission**，但 graph/delegation 层没复用，而是另起"内存权威"炉灶。
 
 ## 3. 治理机制（让原则有牙齿）
 
@@ -113,16 +113,16 @@ pico 的 4 条设计原则在**叙事态**（账本核心）执行扎实（4/5�
 
 ## 5. 北极星：统一网关层
 
-**问题**：pico 多外壳不一致（根因 B）的根因是**缺统一接入层**。maka 的所有外壳（Desktop/TUI/CLI/bot）都经由同一个 `RuntimeHostConnection` 契约（`packages/runtime-host/src/client/connection.ts:156`）连接到同一个 `RuntimeHostKernel` 守护进程——连接状态机、重连、transcript 分页/连续性、超时全部在网关层收口，外壳只做展示。maka 全仓只有**一套**连接状态机、**一个** transcript 分页实现。pico 则是 desktop 直连 daemon IPC、TUI 进程内装配——两条不同构路径（移动端已于 2026-08 移除）。
+**问题**：当时 Pico 缺统一接入层：Desktop 直连 daemon IPC，TUI 进程内装配，连接状态、重连和 transcript 分页没有统一收口。
 
 **目标**：引入统一 `RuntimeHostConnection` 契约，所有外壳经由它接入，状态/重连/transcript/连续性在网关层统一。
 
-**借鉴 maka**：
+**契约与接入要求**：
 
-- 契约可直接借鉴：`RuntimeHostConnection`（单一状态机：握手、pending 请求、存活检测、订阅复用）+ `ClientSurface` 枚举 + `ClientSessionSubscription.loadTranscript`（统一分页 + `snapshot_expired`）+ `SessionContinuityService`（重连状态）。
-- **决定性差异**：maka 的 TUI 是经 socket 连接的客户端（`surface: 'tui'`），**不是进程内装配**。pico 的 TUI 需同样改为客户端。
+- 连接契约包括：`RuntimeHostConnection`（单一状态机：握手、pending 请求、存活检测、订阅复用）+ `ClientSurface` 枚举 + `ClientSessionSubscription.loadTranscript`（统一分页 + `snapshot_expired`）+ `SessionContinuityService`（重连状态）。
+- **TUI 接入**：从进程内装配改为经 socket 连接的客户端（`surface: 'tui'`）。
 
-**不照搬（传输）**：maka 只有本地 socket（`node:net`），pico 外壳同样只走本地 socket（移动端已于 2026-08 移除，不再需要 WS/远程传输）。外壳代码（及状态/transcript/连续性逻辑）传输无关。
+**传输边界**：Pico 外壳只走本地 socket（移动端已于 2026-08 移除，不再需要 WS/远程传输）。外壳状态、transcript 和连续性逻辑不依赖具体传输。
 
 **迁移路径**（顺序）：
 
@@ -142,7 +142,7 @@ pico 的 4 条设计原则在**叙事态**（账本核心）执行扎实（4/5�
 
 - 网关 = `packages/runtime-host/`（本地 socket 单传输）+ 统一契约层（`RuntimeHostConnection`/`ClientSurface`/transcript 分页/连续性），移动端已移除，无 WS 面。
 - `LocalDaemonHost`（`src/daemon/runtime-host.ts`，生产装配 `src/daemon/production-host.ts:90`，入口 `src/daemon/main.ts`）保留为 **RuntimeHostKernel 等价物**——外壳/传输层的对端，不随网关升级而消失；daemon IPC 作为网关的服务端后端之一，`connectWithTimeout` 的 socket 事件式语义由网关收口。
-- 即 maka 的 `RuntimeHostKernel` ↔ pico 的 `LocalDaemonHost`；maka 的 `RuntimeHostConnection` ↔ pico 新建的网关契约。外壳只与契约层对话，daemon 不感知外壳差异；Desktop 直连 daemon 的旧路径降级保留（`ConnectionState` 由网关客户端接管后仅作降级回退）。
+- 外壳只与契约层对话，daemon 不感知外壳差异；Desktop 直连 daemon 的旧路径降级保留（`ConnectionState` 由网关客户端接管后仅作降级回退）。
 
 ## 6. 架构债清单（本轮新增，对接 09）
 
@@ -164,12 +164,11 @@ pico 的 4 条设计原则在**叙事态**（账本核心）执行扎实（4/5�
 
 ## 8. Hook 威胁模型对齐 Claude Code（2026-08-17）
 
-command hook 执行模型从"静态信任钉死"彻底转向"shell 化 + 配置字节审批"，一次三方对比驱动的哲学重构：
+command hook 执行模型从"静态信任钉死"彻底转向"shell 化 + 配置字节审批"，一次执行与信任边界的调整：
 
 |             | 命令形态          | 解析时机        | 威胁假设                                             | 脏 PATH 容忍                    |
 | ----------- | ----------------- | --------------- | ---------------------------------------------------- | ------------------------------- |
 | Claude Code | 任意 shell 字符串 | 运行时 shell 内 | 命令可信，防"hook 干坏事"（网络沙箱）                | 完全容忍                        |
-| maka-agent  | 无 hooks 功能     | —               | —                                                    | —                               |
 | pico 旧     | exec-form 单命令  | 绑定时钉死      | 环境不可信，防"hook 变成别的文件"                    | 零容忍（脏 PATH 静默杀死 hook） |
 | pico 新     | 任意 shell 字符串 | 运行时 shell 内 | 命令=用户意图，信任锚=配置字节指纹 + workspace trust | 完全容忍                        |
 

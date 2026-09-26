@@ -2,16 +2,16 @@
 
 状态:已批准(2026-08-19 用户拍板)。取代 ADR 24 §2 决策 5 中 evidence CAS 体系的宪法地位(存储载体决策不变)。
 
-> 2026-09-21 用户要求移植 Maka 上下文压缩：保留本决策的 inline 原文与 1 MiB 入口门；新增基于该原文的会话归档投影和 `read_file` URI 分页回读。第 3、4 项中的“只裁剪、不回读”由[当前压缩契约](../features/context-compaction.md)取代，旧 Evidence CAS 协议仍不恢复。
+> 2026-09-21 上下文压缩实现更新：保留本决策的 inline 原文与 1 MiB 入口门；新增基于该原文的会话归档投影和 `read_file` URI 分页回读。第 3、4 项中的“只裁剪、不回读”由[当前压缩契约](../features/context-compaction.md)取代，旧 Evidence CAS 协议仍不恢复。
 
 ## 1. 背景
 
-Evidence 协议(ADR 11,2026-08-10)的四项初衷:上下文瘦身与保全分家、工具结果形态收敛、叙事完整(账本内事实不缺席)、按需回读。2026-08-19 三子代理对照梳理(pico vs maka 全流转)+用户真机体验(read_evidence 协议踩坑:模型自造偏移、UTF-8 边界、回读引导缺失)后重估:maka 用不同位置的闸门解决了同样的问题——**写入不瘦身、读取时裁、门口定形、不制造需要回读的状态**。用户裁定:pico 放弃原文保全,转向该哲学。
+Evidence 协议(ADR 11,2026-08-10)的四项初衷:上下文瘦身与保全分家、工具结果形态收敛、叙事完整(账本内事实不缺席)、按需回读。2026-08-19 写入与读取链路梳理及真机体验发现，read_evidence 存在模型自造偏移、UTF-8 边界和回读引导缺失问题。当时决定改为写入保留完整结果、读取时裁剪、入口限制体积；后续会话归档回读以本页顶部的当前契约为准。
 
 ## 2. 决策
 
 1. **写入侧不再分家**:工具结果全文 inline 入库(`tool.result.recorded` body 只有 `storage:"inline"` 形态);evidence CAS 归档分叉(`shouldArchive`/blob 先行/引用事件)退役。
-2. **入口上限门**:`MAX_TOOL_RESULT_BYTES = 1MB`(对齐 maka `maxToolOutputBytes`);超限拒绝该结果,写合成错误结果指引模型用管道重取(grep/head/tail)或读文件。
+2. **入口上限门**:`MAX_TOOL_RESULT_BYTES = 1MB`;超限拒绝该结果,写合成错误结果指引模型用管道重取(grep/head/tail)或读文件。
 3. **上下文瘦身全部移到读取侧**:上下文组装按预算裁剪 + 降级轨道(重放超预算时降级到裁剪视图);transcript 深读改两段式(SQL 先测长,按预算取数)。
 4. **回读协议退役**:`read_evidence` 工具与披露移除;EvidenceArchive/EvidenceBlobStore 写路径退役;memory worker/子代理报告/桌面端消费面改读 inline body。
 5. **存量处置**:SQLite 纪元内已存在的 `storage:"evidence"` 事件,decode 只读容忍(不再可回读,预览仍在);不建新纪元、不做数据迁移。`body.sha256/sizeBytes` 完整性元数据保留(inline 全文自带校验,审计弱化但不归零)。

@@ -23,8 +23,7 @@
 
 **摘要没有任何持久化形态。** title/messageCount/firstMessage/lastMessage/
 updatedAt 每次读取都从事件流全量重算——用三态框架说：叙事态（JSONL ledger）
-健全，机械态完全缺位。对照系（maka 的 `session_catalog_projection` 表 +
-recency 索引 + 追加时同事务增量维护）验证了"预计算目录"是该问题的标准形状。
+健全，机械态完全缺位。预计算会话目录并建立 recency 索引，可以避免列表查询每次扫描全部事件。
 
 ## 决策
 
@@ -61,7 +60,7 @@ recency 索引 + 追加时同事务增量维护）验证了"预计算目录"是�
 - **发布标志整体入 catalog**：需跨 store（StorageOperationJournal）锁协调，
   且状态可无事件转移，读时补查更便宜也更正确。
 - **SQLite**：同等读成本模型的收益不抵放弃 JSONL 直读性与既有单 canonical
-  结论（见决策记录 12/17 系列与 maka 对照分析）。
+  结论（见决策记录 12/17 系列）。
 
 ## 代价与已知局限
 
