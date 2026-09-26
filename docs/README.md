@@ -91,20 +91,20 @@
 
 ## 架构决策与研究
 
-| 文档                                                                                          | 状态                                          |
-| --------------------------------------------------------------------------------------------- | --------------------------------------------- |
-| [17 Failure Journal](history/architecture/17-failure-journal.md)                              | 失败日记六层框架与设计约束；非实施计划        |
-| [20 架构审计与治理](history/architecture/20-architecture-audit-and-governance.md)             | 阶段性治理记录                                |
-| [21 Windows PowerShell Host](decisions/21-decision-windows-powershell-host.md)                | 已实施 ADR                                    |
-| [23 Tool Disclosure Surface](decisions/23-decision-tool-disclosure-surface.md)                | 已被 ADR 30 取代                              |
-| [24 SQLite Storage](decisions/24-decision-sqlite-storage-migration.md)                        | 已实施 ADR                                    |
-| [24a Session Catalog](decisions/24a-decision-session-catalog.md)                              | 原 JSONL 形态已退役，当前为 SQLite projection |
-| [25 Write Path Slimming](decisions/25-decision-write-path-slimming.md)                        | 已被 SQLite 硬切取代                          |
-| [26 ToolResult Entry Shaping](decisions/26-decision-tool-result-entry-shaping.md)             | 已实施 ADR                                    |
-| [27 Write Failure Recovery](decisions/27-decision-write-path-failure-recovery.md)             | 已实施 ADR                                    |
-| [28 Conversation State SQLite](decisions/28-decision-conversation-state-sqlite.md)            | 已实施 ADR                                    |
-| [29 Continuation Claim](decisions/29-decision-continuation-claim.md)                          | 已实施 ADR                                    |
-| [30 工具运行时](decisions/30-decision-tool-runtime.md)                            | 已实施 ADR；取代 ADR 23                       |
+| 文档                                                                               | 状态                                          |
+| ---------------------------------------------------------------------------------- | --------------------------------------------- |
+| [17 Failure Journal](history/architecture/17-failure-journal.md)                   | 失败日记六层框架与设计约束；非实施计划        |
+| [20 架构审计与治理](history/architecture/20-architecture-audit-and-governance.md)  | 阶段性治理记录                                |
+| [21 Windows PowerShell Host](decisions/21-decision-windows-powershell-host.md)     | 已实施 ADR                                    |
+| [23 Tool Disclosure Surface](decisions/23-decision-tool-disclosure-surface.md)     | 已被 ADR 30 取代                              |
+| [24 SQLite Storage](decisions/24-decision-sqlite-storage-migration.md)             | 已实施 ADR                                    |
+| [24a Session Catalog](decisions/24a-decision-session-catalog.md)                   | 原 JSONL 形态已退役，当前为 SQLite projection |
+| [25 Write Path Slimming](decisions/25-decision-write-path-slimming.md)             | 已被 SQLite 硬切取代                          |
+| [26 ToolResult Entry Shaping](decisions/26-decision-tool-result-entry-shaping.md)  | 已实施 ADR                                    |
+| [27 Write Failure Recovery](decisions/27-decision-write-path-failure-recovery.md)  | 已实施 ADR                                    |
+| [28 Conversation State SQLite](decisions/28-decision-conversation-state-sqlite.md) | 已实施 ADR                                    |
+| [29 Continuation Claim](decisions/29-decision-continuation-claim.md)               | 已实施 ADR                                    |
+| [30 工具运行时](decisions/30-decision-tool-runtime.md)                             | 已实施 ADR；取代 ADR 23                       |
 
 ## 专题实现说明
 
