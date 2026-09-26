@@ -1,6 +1,6 @@
 import type { RuntimeSessionContextSnapshot } from "@pico/protocol";
 
-/** Expected display facts for Maka 5846521372d2dd0d3d2d33dc7784dd046dc3f7c8. */
+/** Expected display facts for the context snapshot v3 contract. */
 export function contextSnapshot(
   overrides: Partial<RuntimeSessionContextSnapshot> = {},
 ): RuntimeSessionContextSnapshot {
@@ -37,7 +37,7 @@ export function contextSnapshot(
       throughSequence: 10,
       messageCount: 5,
       estimatedTokens: 300,
-      estimationAlgorithm: "maka_chars_v1",
+      estimationAlgorithm: "chars_v1",
       projection: "effective_model_history",
       compactedCount: 1,
       latestCompaction: {

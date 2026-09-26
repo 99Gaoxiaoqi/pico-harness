@@ -21,7 +21,7 @@ import { ToolDisclosure } from "@pico/runtime/tool-disclosure";
 import { configuredUserDefaultRealModel } from "./real-llm-user-model.js";
 
 const realModelTest = process.env.RUN_LLM_E2E === "1" ? test : test.skip;
-const FIXTURE_TOOL = "maka_fixture_read";
+const FIXTURE_TOOL = "fixture_read_record";
 
 realModelTest(
   "真实默认模型先发现 deferred 工具，再用 exec 并行读取并仅回传聚合结果",
@@ -29,12 +29,12 @@ realModelTest(
   async (context) => {
     const { createCodeModeTool } = await import("@pico/pico-host/code-mode-tool");
     const model = await configuredUserDefaultRealModel();
-    const root = await mkdtemp(join(tmpdir(), "pico-maka-tools-real-llm-"));
+    const root = await mkdtemp(join(tmpdir(), "pico-tool-runtime-real-llm-"));
     const workDir = join(root, "workspace");
     const picoHome = join(root, "pico-home");
     await mkdir(workDir, { recursive: true });
     const runtimePort = createEngineRuntimePort();
-    const session = new Session(`maka-tools-${randomUUID()}`, workDir, {
+    const session = new Session(`tool-runtime-${randomUUID()}`, workDir, {
       persistence: true,
       picoHome,
       runtimePort,

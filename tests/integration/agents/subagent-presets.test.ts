@@ -118,7 +118,7 @@ test("subagent settings persist normalized presets, preserve Provider secrets, a
   await assert.rejects(catalog.resolve("Review"), /Unknown subagent_id/);
 });
 
-test("subagent file normalization matches Maka limits and exact ID deduplication", async (t) => {
+test("subagent file normalization enforces file limits and exact ID deduplication", async (t) => {
   const picoHome = await mkdtemp(join(tmpdir(), "pico-subagent-normalize-"));
   t.after(() => rm(picoHome, { recursive: true, force: true }));
   const store = new UserConfigStore({ picoHome });

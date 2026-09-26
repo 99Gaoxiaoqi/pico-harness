@@ -131,7 +131,7 @@ test("checkpoint model history reaches read-only context RPC and Inspector uncha
       assert.deepEqual(report.modelHistory.latestCompaction, expected.latestCompaction);
       assert.equal(report.version, 3);
       assert.equal(report.modelHistory.projection, "effective_model_history");
-      assert.equal(report.modelHistory.estimationAlgorithm, "maka_chars_v1");
+      assert.equal(report.modelHistory.estimationAlgorithm, "chars_v1");
       assert.equal(report.estimatedInputTokens, undefined);
       assert.equal(report.remainingTokens, undefined);
       assert.equal(report.usedPercent, undefined);

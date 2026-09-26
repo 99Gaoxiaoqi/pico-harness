@@ -119,7 +119,7 @@ test("Provider溢出后仅重试一次；摘要失败保留完整历史且不硬
   }
 });
 
-test("Maka 584652137：成功工具步骤不重置一次 send 的溢出恢复机会", async () => {
+test("溢出恢复：成功工具步骤不重置一次 send 的溢出恢复机会", async () => {
   const session = await seed();
   const registry = new ToolRegistry();
   registry.register({
@@ -219,8 +219,8 @@ test("当前用户图片和后续工具交换保持原文，不能被纯文本�
   );
 });
 
-// Decisions below are pinned to Maka 584652137 ai-sdk-turn / ai-sdk-compaction.
-test("Maka send guard rejects recovery after observable output or a proactive attempt", async () => {
+// Recovery decisions share the send-level guard across turn and compaction paths.
+test("Send guard rejects recovery after observable output or a proactive attempt", async () => {
   for (const scenario of [
     "text",
     "reasoning",
@@ -276,7 +276,7 @@ test("Maka send guard rejects recovery after observable output or a proactive at
   }
 });
 
-test("Maka historical image recovery preserves current user media and spends the send recovery latch", async () => {
+test("Historical image recovery preserves current user media and spends the send recovery latch", async () => {
   const session = new Session(randomUUID(), process.cwd(), { persistence: false });
   const image: NonNullable<Message["images"]> = [
     { type: "image_base64", mimeType: "image/png", data: "aW1hZ2U=" },
@@ -332,7 +332,7 @@ test("Maka historical image recovery preserves current user media and spends the
   );
 });
 
-test("Maka overflow before any completed step may retry the final available step", async () => {
+test("Context overflow before any completed step may retry the final available step", async () => {
   const session = await seed();
   let requests = 0;
   const engine = new AgentEngine({
@@ -357,7 +357,7 @@ test("Maka overflow before any completed step may retry the final available step
   assert.equal(requests, 2);
 });
 
-test("Maka failed summary can retreat to the same-route accepted prefix recovered from prior send", async () => {
+test("Failed summary can retreat to the same-route accepted prefix recovered from prior send", async () => {
   const session = new Session(randomUUID(), process.cwd(), { persistence: false });
   await session.commitMessages(
     { role: "user", content: "previous task" },

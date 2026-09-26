@@ -1,4 +1,4 @@
-/** Real-provider validation of Maka's declared-window/usage trigger and task continuation. */
+/** Real-provider validation of declared-window/usage trigger and task continuation. */
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { test } from "node:test";
@@ -36,7 +36,7 @@ realTest(
       ...receipt.providerData,
       picoContextUsageAnchor: { route, input, output },
     };
-    const session = new Session(`maka-compaction-${randomUUID()}`, process.cwd(), {
+    const session = new Session(`compaction-${randomUUID()}`, process.cwd(), {
       persistence: false,
     });
     for (const message of [

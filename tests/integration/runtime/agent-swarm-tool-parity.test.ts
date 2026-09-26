@@ -125,7 +125,7 @@ function fixture() {
   };
 }
 
-test("Swarm selects approved catalog presets and compiles Maka target/replacement semantics", async () => {
+test("Swarm selects approved catalog presets and compiles target/replacement semantics", async () => {
   const f = fixture();
   assert.equal(f.tools.has("agent_graph_results"), false);
   const list = JSON.parse(await f.tools.get("agent_list")!.execute("{}"));
@@ -261,7 +261,7 @@ test("Swarm selects approved catalog presets and compiles Maka target/replacemen
   assertValidAgentGraphOperatorProfileSnapshot(snapshot);
 });
 
-test("Root agent_output reads only selected formal results by work or Maka execution locator", async () => {
+test("Root agent_output reads only selected formal results by work or execution locator", async () => {
   const f = fixture();
   await f.tools.get("update_agent_graph")!.execute(
     JSON.stringify({

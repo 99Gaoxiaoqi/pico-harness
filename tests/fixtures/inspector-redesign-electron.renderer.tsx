@@ -140,7 +140,7 @@ const context: RuntimeSessionContextSnapshot = {
     throughSequence: 100,
     messageCount: 12,
     estimatedTokens: 1000,
-    estimationAlgorithm: "maka_chars_v1",
+    estimationAlgorithm: "chars_v1",
     projection: "effective_model_history",
     compactedCount: 1,
     latestCompaction: { checkpointId: "checkpoint", throughEventId: "event", coveredEventCount: 8 },

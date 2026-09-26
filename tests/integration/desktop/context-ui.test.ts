@@ -14,7 +14,7 @@ import {
   type ContextUsageReading,
   type ContextUsageTarget,
 } from "../../../apps/desktop/src/renderer/conversation/live-context-usage.js";
-import { contextSnapshot } from "./context-maka-fixture.js";
+import { contextSnapshot } from "./context-fixture.js";
 Object.assign(globalThis, { React });
 const target: ContextUsageTarget = {
   workspacePath: "/work",
@@ -39,7 +39,7 @@ function render(snapshot: RuntimeSessionContextSnapshot) {
   );
 }
 
-test("Maka v3 RPC to Inspector and composer: frozen input, independent history and byte estimates", () => {
+test("Context v3 RPC to Inspector and composer: frozen input, independent history and byte estimates", () => {
   const snapshot = contextSnapshot();
   const complete = contextSnapshot({
     latestRequest: {
@@ -96,7 +96,7 @@ test("Maka v3 RPC to Inspector and composer: frozen input, independent history a
   assert.match(render(changedHistory), /估算 Token<\/dt><dd>≈55/);
 });
 
-test("Maka v3 missing fields and selected-route guards never borrow other request usage", () => {
+test("Context v3 missing fields and selected-route guards never borrow other request usage", () => {
   const base = contextSnapshot();
   const noComposition = render(base);
   assert.match(noComposition, /实际输入 Token<\/dt><dd>2,500/);
@@ -132,7 +132,7 @@ test("Maka v3 missing fields and selected-route guards never borrow other reques
     )?.contextWindow,
     30000,
   );
-  // Maka fallback uses declared/catalog window, not an unmetered request's frozen window.
+  // Context fallback uses declared/catalog window, not an unmetered request's frozen window.
   assert.equal(
     composerContextUsage(
       { ...missingUsage, lastRequestAnchor: { ...anchor, connectionId: "different" } },

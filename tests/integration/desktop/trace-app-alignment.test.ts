@@ -1,4 +1,4 @@
-import { contextSnapshot } from "./context-maka-fixture.js";
+import { contextSnapshot } from "./context-fixture.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import * as React from "react";
