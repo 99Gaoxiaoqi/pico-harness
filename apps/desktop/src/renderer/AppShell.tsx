@@ -1,3 +1,6 @@
+import { AppShell as AstryxAppShell } from "@astryxdesign/core/AppShell";
+import { Button as AstryxButton } from "@astryxdesign/core/Button";
+import { DropdownMenu, DropdownMenuItem } from "@astryxdesign/core/DropdownMenu";
 import {
   Archive,
   ArrowLeft,
@@ -173,8 +176,124 @@ export function AppShell() {
     [actions, location.pathname, location.search, navigate],
   );
   return (
-    <div
-      className={`app-shell ${!settingsRoute && sidebarCollapsed ? "is-sidebar-collapsed" : ""} ${settingsRoute ? "is-settings-route" : ""}`}
+    <AstryxAppShell
+      variant="surface"
+      contentPadding={0}
+      mobileNav={{ breakpoint: "none", hasToggle: false }}
+      sideNav={
+        settingsRoute ? (
+          <SettingsSidebar workspacePath={navigationWorkspacePath} onKeyDown={handleNavKeys} />
+        ) : (
+          <aside
+            className={`sidebar ${sidebarCollapsed ? "sidebar--collapsed" : ""}`}
+            onKeyDown={handleNavKeys}
+          >
+            <div className="sidebar__header">
+              {preview && <span className="preview-dot" title="视觉预览模式" />}
+              <AstryxButton
+                label="搜索任务"
+                variant="ghost"
+                className="sidebar__collapse sidebar__search"
+                aria-label="搜索任务"
+                tooltip="搜索任务 · ⌘K / Ctrl+K"
+                onClick={() => setSearchOpen(true)}
+              >
+                <Search aria-hidden="true" />
+              </AstryxButton>
+              {data.approvals.length + data.prompts.length > 0 ? (
+                <span
+                  className="sidebar-pending-count"
+                  aria-label={`${data.approvals.length + data.prompts.length} 项待处理`}
+                  title="有待处理的审批或提问，请到对应会话查看"
+                >
+                  {data.approvals.length + data.prompts.length}
+                </span>
+              ) : null}
+              <AstryxButton
+                label={sidebarCollapsed ? "展开侧栏" : "收起侧栏"}
+                variant="ghost"
+                className="sidebar__collapse"
+                aria-label={sidebarCollapsed ? "展开侧栏" : "收起侧栏"}
+                tooltip={sidebarCollapsed ? "展开侧栏" : "收起侧栏"}
+                onClick={() => setSidebarCollapsed((collapsed) => !collapsed)}
+              >
+                {sidebarCollapsed ? (
+                  <PanelLeftOpen aria-hidden="true" />
+                ) : (
+                  <PanelLeftClose aria-hidden="true" />
+                )}
+              </AstryxButton>
+            </div>
+            <Link
+              className="sidebar-new-task"
+              to={newSessionHref()}
+              data-nav-link
+              aria-label="新任务"
+            >
+              <Plus aria-hidden="true" />
+              <span>新任务</span>
+              <kbd className="sidebar-shortcut">
+                {navigator.platform.startsWith("Mac") ? "⌘ N" : "Ctrl+N"}
+              </kbd>
+            </Link>
+            <div className="sidebar__body">
+              <Link
+                className="nav-link"
+                to="/extensions/skills"
+                aria-label="扩展"
+                data-nav-link
+                onClick={() =>
+                  window.sessionStorage.setItem(
+                    "pico.settings-return-to",
+                    `${location.pathname}${location.search}`,
+                  )
+                }
+              >
+                <Box aria-hidden="true" />
+                <span className="sidebar__label">扩展</span>
+              </Link>
+              <SidebarNav
+                items={primaryNav}
+                label="主要导航"
+                workspacePath={navigationWorkspacePath}
+              />
+              <SidebarTasks
+                sessions={data.sessions}
+                workspaces={data.workspaces}
+                runs={data.runs}
+                approvals={data.approvals}
+                prompts={data.prompts}
+                activeWorkspacePath={data.workspacePath}
+                busy={busy === "session-state" || busy === "choose-workspace"}
+                onArchiveSession={handleArchiveSession}
+                onDeleteSession={handleDeleteSession}
+                onPinSession={handlePinSession}
+              />
+            </div>
+            <div className="sidebar__footer">
+              <NavLink
+                to="/settings"
+                data-nav-link
+                aria-label="设置"
+                className={({ isActive }) => `nav-link ${isActive ? "is-active" : ""}`}
+                onClick={() =>
+                  window.sessionStorage.setItem(
+                    "pico.settings-return-to",
+                    `${location.pathname}${location.search}`,
+                  )
+                }
+              >
+                <Settings aria-hidden="true" />
+                <span className="sidebar__label">设置</span>
+              </NavLink>
+              <div className="runtime-health">
+                <span /> Runtime 已连接
+              </div>
+            </div>
+          </aside>
+        )
+      }
+      className={`app-shell pico-astryx-shell ${!settingsRoute && sidebarCollapsed ? "is-sidebar-collapsed" : ""} ${settingsRoute ? "is-settings-route" : ""}`}
     >
       <TaskSearchDialog
         open={searchOpen}
@@ -186,118 +305,6 @@ export function AppShell() {
           navigate(sessionHref({ workspacePath: session.workspacePath, sessionId: session.id }));
         }}
       />
-      <a className="skip-link" href="#main-content">
-        跳到主要内容
-      </a>
-      {settingsRoute ? (
-        <SettingsSidebar workspacePath={navigationWorkspacePath} onKeyDown={handleNavKeys} />
-      ) : (
-        <aside
-          className={`sidebar ${sidebarCollapsed ? "sidebar--collapsed" : ""}`}
-          onKeyDown={handleNavKeys}
-        >
-          <div className="sidebar__header">
-            {preview && <span className="preview-dot" title="视觉预览模式" />}
-            <button
-              type="button"
-              className="sidebar__collapse sidebar__search"
-              aria-label="搜索任务"
-              title="搜索任务 · ⌘K / Ctrl+K"
-              onClick={() => setSearchOpen(true)}
-            >
-              <Search aria-hidden="true" />
-            </button>
-            {data.approvals.length + data.prompts.length > 0 ? (
-              <span
-                className="sidebar-pending-count"
-                aria-label={`${data.approvals.length + data.prompts.length} 项待处理`}
-                title="有待处理的审批或提问，请到对应会话查看"
-              >
-                {data.approvals.length + data.prompts.length}
-              </span>
-            ) : null}
-            <button
-              type="button"
-              className="sidebar__collapse"
-              aria-label={sidebarCollapsed ? "展开侧栏" : "收起侧栏"}
-              title={sidebarCollapsed ? "展开侧栏" : "收起侧栏"}
-              onClick={() => setSidebarCollapsed((collapsed) => !collapsed)}
-            >
-              {sidebarCollapsed ? (
-                <PanelLeftOpen aria-hidden="true" />
-              ) : (
-                <PanelLeftClose aria-hidden="true" />
-              )}
-            </button>
-          </div>
-          <Link
-            className="sidebar-new-task"
-            to={newSessionHref()}
-            data-nav-link
-            aria-label="新任务"
-          >
-            <Plus aria-hidden="true" />
-            <span>新任务</span>
-            <kbd className="sidebar-shortcut">
-              {navigator.platform.startsWith("Mac") ? "⌘ N" : "Ctrl+N"}
-            </kbd>
-          </Link>
-          <div className="sidebar__body">
-            <Link
-              className="nav-link"
-              to="/extensions/skills"
-              aria-label="扩展"
-              data-nav-link
-              onClick={() =>
-                window.sessionStorage.setItem(
-                  "pico.settings-return-to",
-                  `${location.pathname}${location.search}`,
-                )
-              }
-            >
-              <Box aria-hidden="true" />
-              <span className="sidebar__label">扩展</span>
-            </Link>
-            <SidebarNav
-              items={primaryNav}
-              label="主要导航"
-              workspacePath={navigationWorkspacePath}
-            />
-            <SidebarTasks
-              sessions={data.sessions}
-              workspaces={data.workspaces}
-              runs={data.runs}
-              approvals={data.approvals}
-              prompts={data.prompts}
-              activeWorkspacePath={data.workspacePath}
-              busy={busy === "session-state" || busy === "choose-workspace"}
-              onArchiveSession={handleArchiveSession}
-              onDeleteSession={handleDeleteSession}
-              onPinSession={handlePinSession}
-            />
-          </div>
-          <div className="sidebar__footer">
-            <NavLink
-              to="/settings"
-              data-nav-link
-              aria-label="设置"
-              className={({ isActive }) => `nav-link ${isActive ? "is-active" : ""}`}
-              onClick={() =>
-                window.sessionStorage.setItem(
-                  "pico.settings-return-to",
-                  `${location.pathname}${location.search}`,
-                )
-              }
-            >
-              <Settings aria-hidden="true" />
-              <span className="sidebar__label">设置</span>
-            </NavLink>
-            <div className="runtime-health">
-              <span /> Runtime 已连接
-            </div>
-          </div>
-        </aside>
-      )}
       <div
         className={`workspace-frame ${immersiveRoute ? "workspace-frame--immersive" : ""} ${conversationRoute ? "workspace-frame--conversation" : ""} ${message ? "has-toast" : ""}`}
       >
@@ -323,25 +330,26 @@ export function AppShell() {
           !message.startsWith("Legacy session-centric (JSONL) workspace storage exists:") && (
             <div className="toast" role="status">
               <span>{message}</span>
-              <button
-                type="button"
+              <AstryxButton
+                label="关闭提示"
+                variant="ghost"
                 className="toast__dismiss"
                 aria-label="关闭提示"
                 onClick={actions.dismissMessage}
               >
                 <X aria-hidden="true" size={14} />
-              </button>
+              </AstryxButton>
             </div>
           )}
-        <main
+        <div
           className={`page ${conversationRoute ? "page--conversation" : ""}`}
           id="main-content"
           tabIndex={-1}
         >
           <Outlet />
-        </main>
+        </div>
       </div>
-    </div>
+    </AstryxAppShell>
   );
 }
 
@@ -490,22 +498,24 @@ function SidebarTasks({
       <div className="sidebar-section-heading">
         <span id="sidebar-tasks-title">任务</span>
         <div className="sidebar-task-grouping" role="group" aria-label="任务分组方式">
-          <button
-            type="button"
+          <AstryxButton
+            label="按时间分组"
+            variant="ghost"
             className={grouping === "time" ? "is-active" : ""}
             aria-pressed={grouping === "time"}
             onClick={() => setGrouping("time")}
           >
             时间
-          </button>
-          <button
-            type="button"
+          </AstryxButton>
+          <AstryxButton
+            label="按项目分组"
+            variant="ghost"
             className={grouping === "project" ? "is-active" : ""}
             aria-pressed={grouping === "project"}
             onClick={() => setGrouping("project")}
           >
             项目
-          </button>
+          </AstryxButton>
         </div>
       </div>
       {visibleSessions.length === 0 ? (
@@ -517,8 +527,13 @@ function SidebarTasks({
       ) : (
         groups.map(({ workspace, workspacePath, sessions: workspaceSessions }) => (
           <div className="sidebar-project" key={workspacePath}>
-            <button
-              type="button"
+            <AstryxButton
+              label={
+                workspace?.temporary
+                  ? TEMPORARY_WORKSPACE_GROUP_LABEL
+                  : (workspace?.name ?? workspaceName(workspacePath))
+              }
+              variant="ghost"
               className="sidebar-project__header"
               aria-expanded={!collapsedProjects.has(workspacePath)}
               onClick={() =>
@@ -542,7 +557,7 @@ function SidebarTasks({
               </span>
               <small>{workspaceSessions.length}</small>
               <ChevronDown aria-hidden="true" />
-            </button>
+            </AstryxButton>
             {!collapsedProjects.has(workspacePath) && (
               <div className="sidebar-project__sessions">
                 {workspaceSessions.map((session) => renderSession(session, true))}
@@ -611,62 +626,41 @@ function SidebarSessionRow({
           {formatRelative(session.updatedAt)}
         </time>
       </NavLink>
-      <details
-        className="sidebar-task-menu"
-        onBlur={(event) => {
-          if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.open = false;
+      <DropdownMenu
+        className="pico-sidebar-menu"
+        button={{
+          label: `更多操作 ${session.title}`,
+          icon: <MoreHorizontal aria-hidden="true" />,
+          isIconOnly: true,
+          variant: "ghost",
+          className: "pico-sidebar-menu-trigger",
         }}
-        onKeyDown={(event) => {
-          if (event.key === "Escape") {
-            event.currentTarget.open = false;
-            event.currentTarget.querySelector("summary")?.focus();
-          }
-        }}
+        hasChevron={false}
+        menuWidth={208}
+        alignment="end"
+        presentation="popover"
       >
-        <summary aria-label={`更多操作 ${session.title}`} title="更多操作">
-          <MoreHorizontal aria-hidden="true" />
-        </summary>
-        <div
-          className="sidebar-task-actions"
-          aria-label="会话操作"
-          onClick={(event) => {
-            const details = event.currentTarget.closest("details");
-            if (details && (event.target as HTMLElement).closest("button")) {
-              details.open = false;
-              details.querySelector("summary")?.focus();
-            }
-          }}
-        >
-          <button
-            type="button"
-            aria-label={`归档 ${session.title}`}
-            title="归档"
-            disabled={busy}
-            onClick={archiveSession}
-          >
-            <Archive aria-hidden="true" /> 归档
-          </button>
-          <button
-            type="button"
-            aria-label={`删除 ${session.title}`}
-            title={running ? "运行中的会话不能删除" : "删除"}
-            disabled={busy || running}
-            onClick={deleteSession}
-          >
-            <Trash2 aria-hidden="true" /> 删除
-          </button>
-          <button
-            type="button"
-            className={session.pinned ? "is-active" : ""}
-            aria-label={`${session.pinned ? "取消置顶" : "置顶"} ${session.title}`}
-            title={session.pinned ? "取消置顶" : "置顶"}
-            disabled={busy}
-            onClick={pinSession}
-          >
-            <Pin aria-hidden="true" /> {session.pinned ? "取消置顶" : "置顶"}
-          </button>
-        </div>
-      </details>
+        <DropdownMenuItem
+          icon={<Archive aria-hidden="true" />}
+          label="归档"
+          isDisabled={busy}
+          onClick={archiveSession}
+        />
+        <DropdownMenuItem
+          icon={<Trash2 aria-hidden="true" />}
+          label="删除"
+          description={running ? "运行中的会话不能删除" : undefined}
+          variant="destructive"
+          isDisabled={busy || running}
+          onClick={deleteSession}
+        />
+        <DropdownMenuItem
+          icon={<Pin aria-hidden="true" />}
+          label={session.pinned ? "取消置顶" : "置顶"}
+          isDisabled={busy}
+          onClick={pinSession}
+        />
+      </DropdownMenu>
     </div>
   );
 }
