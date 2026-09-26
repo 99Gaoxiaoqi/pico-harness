@@ -41,5 +41,5 @@
 
 - 干净分支 `lint`（含架构）、`typecheck`、`desktop:typecheck`、`build`、全量格式检查通过；原工作区根类型与 Desktop 类型检查也通过。
 - Terminal-Bench 专用锁及摘要检查通过，最终构建器实际生成分发包；锁摘要为 `581e5e05ab4f454374919b83bc99cc8f83cb5482c2bb346ff7e33ebdaaf12d33`。
-- 依赖用户未提交 UI 的 `desktop-capability-scope-ui.test.ts`、`desktop-maka-navigation-contract.test.ts`、`desktop-memory-ui.test.ts` 只留在本地，不混入干净提交。
+- 依赖用户未提交 UI 的 `desktop-capability-scope-ui.test.ts`、`desktop-navigation-contract.test.ts`、`desktop-memory-ui.test.ts` 只留在本地，不混入干净提交。
 - 日志目录：`/tmp/pico-full-repair-hdPWJH/`。主要证据为 `final-integration.log`、`original-final-integration.log`、`windows.log`、`final-e2e.log`、`tracer-live-diagnostic.json`、`integrated-tracer-final.log`。修复前 Graph 断言失败及修复后通过分别在 `graph-transcript-before.log`、`graph-transcript-after.log`。

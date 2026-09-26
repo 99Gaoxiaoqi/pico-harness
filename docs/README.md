@@ -93,10 +93,8 @@
 
 | 文档                                                                                          | 状态                                          |
 | --------------------------------------------------------------------------------------------- | --------------------------------------------- |
-| [16 Pico 与 Maka 状态对比](history/architecture/16-pico-vs-maka-state-architecture.md)        | 迁移前研究快照                                |
-| [17 Failure Journal](history/architecture/17-failure-journal.md)                              | 原子记忆迁移前研究；旧分类与链路已过期        |
+| [17 Failure Journal](history/architecture/17-failure-journal.md)                              | 失败日记六层框架与设计约束；非实施计划        |
 | [20 架构审计与治理](history/architecture/20-architecture-audit-and-governance.md)             | 阶段性治理记录                                |
-| [Pico / Maka 写入与故障流程调研](history/architecture/pico-vs-maka-flow-gap-investigation.md) | ADR 27–29 实施前调查，已收口                  |
 | [21 Windows PowerShell Host](decisions/21-decision-windows-powershell-host.md)                | 已实施 ADR                                    |
 | [23 Tool Disclosure Surface](decisions/23-decision-tool-disclosure-surface.md)                | 已被 ADR 30 取代                              |
 | [24 SQLite Storage](decisions/24-decision-sqlite-storage-migration.md)                        | 已实施 ADR                                    |
@@ -106,7 +104,7 @@
 | [27 Write Failure Recovery](decisions/27-decision-write-path-failure-recovery.md)             | 已实施 ADR                                    |
 | [28 Conversation State SQLite](decisions/28-decision-conversation-state-sqlite.md)            | 已实施 ADR                                    |
 | [29 Continuation Claim](decisions/29-decision-continuation-claim.md)                          | 已实施 ADR                                    |
-| [30 Maka Tool Runtime](decisions/30-decision-maka-tool-runtime.md)                            | 已实施 ADR；取代 ADR 23                       |
+| [30 工具运行时](decisions/30-decision-tool-runtime.md)                            | 已实施 ADR；取代 ADR 23                       |
 
 ## 专题实现说明
 
@@ -139,7 +137,7 @@
 
 ## 实施计划与历史档案
 
-`plans/` 只放正在执行的计划；当前没有活动计划。已结束计划移入 `history/plans/`，历史未勾选项不自动成为当前待办。最近归档包括[项目结构收敛](history/plans/2026-09-12-project-structure-convergence.md)、[提交与全方位验证](history/plans/2026-09-10-submit-full-validation.md)、[全量回归问题修复](history/plans/full-regression-repair.md)与 [Maka 运行时对齐](history/plans/maka-runtime-alignment.md)。
+`plans/` 只放正在执行的计划；当前没有活动计划。已结束计划移入 `history/plans/`，历史未勾选项不自动成为当前待办。最近归档包括[项目结构收敛](history/plans/2026-09-12-project-structure-convergence.md)、[提交与全方位验证](history/plans/2026-09-10-submit-full-validation.md)、[全量回归问题修复](history/plans/full-regression-repair.md)。
 
 ## 仓库资产与工作流记录
 

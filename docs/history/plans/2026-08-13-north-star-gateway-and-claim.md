@@ -90,7 +90,7 @@ orphan 恢复（进程重启后）:
          └── 双传输：本地 socket（Desktop/TUI）+ 安全 WS（Mobile）
 ```
 
-**契约抽象**（借鉴 maka 的 runtime-host，仅契约与分层，不照搬传输）：
+**契约抽象**（RuntimeHost 连接契约与职责分层）：
 
 - `ClientSurface` 枚举（`"desktop" | "tui" | "mobile"`）+ `RuntimeHostConnection` 接口：握手、pending 请求队列、存活检测、订阅复用——**全仓唯一的连接状态机实现**
 - `ClientSessionSubscription.loadTranscript`：统一 transcript 分页（吸收 Desktop `conversationLoadGenerationsRef` 与 Mobile `loadGenerationRef` 双实现）+ `snapshot_expired` 语义

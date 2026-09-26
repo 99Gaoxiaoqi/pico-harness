@@ -1,6 +1,6 @@
 # 深度研究与交付预览
 
-对齐 Maka `777a2363c141d2ca4cc212eb5c8a4b6b4bb3e63f` 的研究工作流，使用 Pico 的 Session、SQLite、权限边界和 Artifact 工作栏。研究领域代码归属见 `resources/licenses/THIRD_PARTY_NOTICES.md`。
+研究工作流使用 Pico 的 Session、SQLite、权限边界和 Artifact 工作栏。研究领域代码归属见 `resources/licenses/THIRD_PARTY_NOTICES.md`。
 
 ## 使用入口
 

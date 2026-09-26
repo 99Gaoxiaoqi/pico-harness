@@ -2,13 +2,13 @@
 
 > 归档说明：本文保留历史设计与实施记录，不定义当前产品行为或待办。当前入口见 [技术文档索引](../../README.md)。
 
-状态：历史实施快照。本文记录的 P0 步骤 1–4 已完成；原步骤 5–10 已在后续 Workbar v2 和 Session Continuity 集成中以调整后的边界交付。下方未勾选项仅保留当时的规划语境，不再代表当前待办；现状、验收证据和真实剩余项以 [EventLog Maka 语义对齐计划](2026-08-22-eventlog-maka-semantic-convergence.md) 为准。本计划补充 [Pico Desktop UI 重写](2026-08-23-maka-inspired-desktop-ui.md)。
+状态：历史实施快照。本文记录的 P0 步骤 1–4 已完成；原步骤 5–10 已在后续 Workbar v2 和 Session Continuity 集成中以调整后的边界交付。下方未勾选项仅保留当时的规划语境，不再代表当前待办；当前工作栏行为见[产品说明](../../../PRODUCT.md)。
 
 ## Approach
 
 先把当前固定的 `概览 / 变更 / 上下文` 与 Tool Inspector 收编为一个右侧单 Dock、多标签、可缩放的 Session Workbar，并只接入 Pico 已有的真实 authority。这个阶段不做 Schema 迁移，可以独立发布。随后按 Tasks、Interaction、Artifacts、Trace、Terminal 的顺序补齐后端资源 authority；Browser、Side Chat 和 Bottom Dock 延后，避免首版同时引入窗口管理、原生进程和子会话生命周期。
 
-交付分界：完成步骤 1–4 只能称为“Workbar 交互骨架”；完成步骤 5–8 后才具备 Maka 式核心任务工作栏的数据闭环；Terminal 在步骤 9 单独验收。
+交付分界：完成步骤 1–4 只能称为“Workbar 交互骨架”；完成步骤 5–8 后才具备 核心任务工作栏的数据闭环；Terminal 在步骤 9 单独验收。
 
 ## Scope
 

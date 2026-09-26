@@ -8,7 +8,7 @@
 
 ## 一句话现状
 
-**阶段 3 全部完成（2026-08-16）：3-A 骨架 + 3-B 全部 + 3-C Desktop + 3-D Phase 1-4 + Phase 5 退役进程内交互路径（删 repl.tsx 3,592 行 + 7 孤儿模块 + --local；D14 扩展到整个 src/tui）→ 北极星阶段 3 收口。遗留高优先"daemon 间歇死锁"已闭环（2026-08-16）：根因= e2e 打真 home 累积 118 条工作区注册（54 个 %TEMP% 目录存活）→ cron 忙循环 + workspace.list 超 deadline，叠加 registration 发布 rename EPERM 崩候选与选举名额烧光；修复= e2e 隔离 daemon root + renameWithRetry + 选举名额折扣 + launcher stderr 落盘（candidate-logs 常驻取证）；真 home 已清理并验证健康；全矩阵 e2e 隔离版 4/4（127s）。**（2026-08-17 注：A6 候选封顶与选举名额折扣已整体退役，对齐 maka ���上限形态，仅保留 250ms 最小间隔 + 45s 窗口 + flock 淘汰。）
+**阶段 3 全部完成（2026-08-16）：3-A 骨架 + 3-B 全部 + 3-C Desktop + 3-D Phase 1-4 + Phase 5 退役进程内交互路径（删 repl.tsx 3,592 行 + 7 孤儿模块 + --local；D14 扩展到整个 src/tui）→ 北极星阶段 3 收口。遗留高优先"daemon 间歇死锁"已闭环（2026-08-16）：根因= e2e 打真 home 累积 118 条工作区注册（54 个 %TEMP% 目录存活）→ cron 忙循环 + workspace.list 超 deadline，叠加 registration 发布 rename EPERM 崩候选与选举名额烧光；修复= e2e 隔离 daemon root + renameWithRetry + 选举名额折扣 + launcher stderr 落盘（candidate-logs 常驻取证）；真 home 已清理并验证健康；全矩阵 e2e 隔离版 4/4（127s）。**（2026-08-17 注：A6 候选封顶与选举名额折扣已整体退役，不设候选总数上限，仅保留 250ms 最小间隔 + 45s 窗口 + flock 淘汰。）
 
 ## 本 session 完成的事（2026-08-16：死锁闭环 + Phase 5 退役）
 
@@ -25,7 +25,7 @@
 
 | commit     | 内容                                                                                                                                                                                                                                                                                       |
 | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `a6617200` | **阶段 3-A 骨架移植**：从 maka runtime-host 模式移植机制骨架到 `packages/runtime-host/`（transport NDJSON / control endpoint+registration+flock 选主 / protocol 核心帧 / server RuntimeHostKernel / client RuntimeHostConnection+connectOrSpawn）。零业务消费，compositionFactory 注入点。 |
+| `a6617200` | **阶段 3-A 骨架移植**：引入机制骨架到 `packages/runtime-host/`（transport NDJSON / control endpoint+registration+flock 选主 / protocol 核心帧 / server RuntimeHostKernel / client RuntimeHostConnection+connectOrSpawn）。零业务消费，compositionFactory 注入点。来源归属见[第三方声明](../../../resources/licenses/THIRD_PARTY_NOTICES.md)。 |
 | `a3255e79` | 首轮对抗审查修复：endpoint 前缀 m-→pico-、artifact-writer-bootstrap-lock 重写（waitForLock+TOCTOU）、握手帧 requireShapedRecord 严格化、删死代码                                                                                                                                           |
 | `8b78cae1` | 二轮修复（3-B 阻塞项）：launcher spawn entrypoint tsx 支持、retired 槽位 TTL、recover 启动 deadline、idleGraceMs 透传                                                                                                                                                                      |
 | `253f36bd` | 三轮修复：recover timer 成功后 clearTimeout（防 60s 自我 drain）、idle 认握手、retired 条目 TTL、launcher fileURL                                                                                                                                                                          |
@@ -70,9 +70,9 @@
 
 **验证**：`workspace.status` / `usage.get` 已走完整链路（帧解码 → decodeInput → handler → service.handle → decodeOutput → 应答）；错误映射（daemon INVALID_PARAMS → invalid_request）与 malformed input 拒绝均有实盘断言；host.status 无 activeOperations 泄漏。全部 21 个 runtime-host 测试 + 3 个 desktop-runtime-close 回归 + typecheck 0 + 架构门禁 0。
 
-**关键决策（对齐 maka 后反转）**：领域 operation spec **不进 runtime-host 静态面**，改由 pico 侧经 `registerHostOperationSpecs`（由 3-A 的 test-only 注册函数泛化而来，保留 ForTesting 别名）在进程启动时动态注册。原因：
+**关键决策**：领域 operation spec **不进 runtime-host 静态面**，改由 pico 侧经 `registerHostOperationSpecs`（由 3-A 的 test-only 注册函数泛化而来，保留 ForTesting 别名）在进程启动时动态注册。原因：
 
-- maka 的 spec 静态注册成立，是因为 maka 的 runtime-host 就是产品宿主层（composition 全量覆盖 91+ 操作）；pico 的 3-A 明确把 runtime-host 做成零业务机制层，静态并入会迫使 3 个机制层测试（skeleton/composition-lifecycle/operation-deadline）为 pico 业务操作补 handler，机制测试与业务耦合。
+- Pico 的 3-A 明确把 runtime-host 做成零业务机制层，静态并入会迫使 3 个机制层测试（skeleton/composition-lifecycle/operation-deadline）为 pico 业务操作补 handler，机制测试与业务耦合。
 - 动态注册后静态 `OperationKey` 仍只有 bootstrap，composition 的 handlers 需 `as unknown as` 转型（与既有测试同款）；client 侧用 `requestRegistered` 调动态操作。
 - 测试必须与 composition 走**同一模块实例**：runtime-host 符号从构建产物 `@pico/runtime-host`（dist）导入而非 `packages/runtime-host/src`，否则 src/dist 两份动态注册表互不可见（模块身份问题，测试文件头部注释已记录）。
 
@@ -110,9 +110,9 @@
 
 **关键决策**：
 
-1. **只加一种帧**（`{kind:"event", event}`，形状对齐 daemon 现有 event 帧）：订阅确认走 events.subscribe 普通 response；无订阅管理帧。不采用 maka 的 activate-after-enqueue（daemon 客户端容忍 event-before-response，靠 eventId 去重）与 sequence/gap 检测（eventId cursor 更强，支持续传）。
+1. **只加一种帧**（`{kind:"event", event}`，形状对齐 daemon 现有 event 帧）：订阅确认走 events.subscribe 普通 response；无订阅管理帧。不采用 activate-after-enqueue（daemon 客户端容忍 event-before-response，靠 eventId 去重）与 sequence/gap 检测（eventId cursor 更强，支持续传）。
 2. **帧载荷不透明**（kernel 只校验 plain object）：延续"机制层业务零感知"决策，RuntimeNotification 形状由桥接层 @pico/protocol 校验。
-3. **96KB vs 1MiB 偏差处理**（maka 对齐）：live 推送按 92KB 预算分级裁剪（`transportSafeRuntimeNotificationWithin` 复用 daemon 同款 tiers，只裁 payload 不动 eventId/topic/scope）；replay 页贪心装箱重打包（hasMore 重算，截断页下次 replay 续传）。**已知限制**：单 durable 事件序列化超 ~92KB 无法承载，replay 显式报错（绝不静默跳过——那会让 cursor 越过丢失事实）；将来有真实消费方再立 maka 式分页 query。
+3. **96KB vs 1MiB 偏差处理**：live 推送按 92KB 预算分级裁剪（`transportSafeRuntimeNotificationWithin` 复用 daemon 同款 tiers，只裁 payload 不动 eventId/topic/scope）；replay 页贪心装箱重打包（hasMore 重算，截断页下次 replay 续传）。**已知限制**：单 durable 事件序列化超 ~92KB 无法承载，replay 显式报错（绝不静默跳过——那会让 cursor 越过丢失事实）；将来有真实消费方再立 分页 query。
 4. **events spec 独立 map + 两步注册**：`composeOperationHandlers` 要求注册表内每个 key 有 handler，故 events.\* 注册必须与 composition 提供 eventSource 成对（无 eventSource 的 composition 不注册 events spec）。
 5. **`mapRuntimeErrorCode` 上移 operations.ts**：query 桥与事件桥共用错误映射（避免 composition↔events 循环依赖）；composition.ts 保留 re-export。
 
@@ -159,7 +159,7 @@
 | ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **P1-2 重试双执行**                        | ✅ `src/daemon/client.ts`：`KERNEL_RETRY_SAFE_METHODS` 幂等白名单（41 个读方法 + events.\*，覆盖语义重订等价）。传输级失败（连接 terminal）后仅白名单方法走"丢弃死连接 → 重生 → 重发"循环；非幂等写方法立即上抛 `RUNTIME_DISCONNECTED`（retryable=true，调用方决策）。有意排除 `diagnostics.run`（doctor 副作用未证伪）。                                                                                                                                        |
 | **P1-3 960KB–1MiB 死区**                   | ✅ 根因：transcript 分页预算从 `MAX_RUNTIME_FRAME_BYTES`（旧 socket 1MiB）派生，超出 kernel 桥闸门（`RUNTIME_REQUEST_RESULT_MAX_BYTES` = 帧上限 - 64KB 信封预留）。修复：`runtime-host-operations.ts` 导出该常量，`desktop-runtime-service.ts` transcript 预算与终检改用它——daemon 侧结果永远装得进 kernel 帧，死区消失。events.replay 预留本就是 64KB，无需改。                                                                                                 |
-| **A6 候选池 spawn 风暴**                   | ~~✅~~（2026-08-17 已回滚）`connect-or-spawn.ts`：单次选举窗口候选 launch 总数封顶（`DEFAULT_MAX_CANDIDATE_LAUNCHES=3`，输入可覆盖 1-16）。封顶不牺牲活性——选举循环仍轮询到 deadline，无论哪个候选先就绪都能连上；真正的候选失败由下一次调用的全新窗口兜底。慢环境（候选 19-31s）不再每 250ms 堆一个在途候选，关停后锁被晚到候选接走的不确定性大幅收窄。**回滚后仅保留 250ms 最小间隔节流（有专项间隔回归测试）+ 45s 窗口 + flock 淘汰，对齐 maka 无上限形态。** |
+| **A6 候选池 spawn 风暴**                   | ~~✅~~（2026-08-17 已回滚）`connect-or-spawn.ts`：单次选举窗口候选 launch 总数封顶（`DEFAULT_MAX_CANDIDATE_LAUNCHES=3`，输入可覆盖 1-16）。封顶不牺牲活性——选举循环仍轮询到 deadline，无论哪个候选先就绪都能连上；真正的候选失败由下一次调用的全新窗口兜底。慢环境（候选 19-31s）不再每 250ms 堆一个在途候选，关停后锁被晚到候选接走的不确定性大幅收窄。**回滚后仅保留 250ms 最小间隔节流（有专项间隔回归测试）+ 45s 窗口 + flock 淘汰，不设候选总数上限。** |
 | **host.diagnostics.query.logs 恒空**（M4） | ✅ kernel 最小环形日志（256 条 × 10KB/条，进程内）：`state=ready`、drain requested、`state=draining`、recover 超时、shutdown deadline 超时、owner 丢失、idle 退出。只记 kernel 自身生命周期事实，不含领域事件（那是桥接层的事）。                                                                                                                                                                                                                                |
 | 91 方法 spec 化                            | ⏸ 维持渐进退役：每个方法 ~10 行样板，无阻塞消费方；随 3-C Desktop 接入按需补。                                                                                                                                                                                                                                                                                                                                                                                   |
 | 旧 socket server 清理                      | ⏸ 维持：LocalRuntimeDaemon 仅剩注入测试面（client 双模式的显式 endpoint 注入路径），等测试面迁移后一并删。                                                                                                                                                                                                                                                                                                                                                       |

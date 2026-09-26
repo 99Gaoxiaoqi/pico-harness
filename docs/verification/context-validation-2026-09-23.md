@@ -1,8 +1,8 @@
-# Pico / Maka 上下文对齐验收（2026-09-23）
+# Pico 上下文验收（2026-09-23）
 
 ## 基线与范围
 
-固定 Maka 提交 `5846521372d2dd0d3d2d33dc7784dd046dc3f7c8`，Pico 起点 `caad78e4`。读取 Maka 的 `ai-sdk-turn.ts`、`ai-sdk-compaction.ts`、`tool-result-archive-transition.ts` 及输入框／Inspector 实现；不采用其工作区未提交修改，不把 Maka 加入生产依赖。
+Pico 起点 `caad78e4`。本记录覆盖上下文估算、压缩、工具结果归档及输入框／Inspector 行为；实现来源见[第三方声明](../../resources/licenses/THIRD_PARTY_NOTICES.md)。
 
 覆盖现有 OpenAI、Responses、Claude 协议，历史投影、归档、摘要状态机、冻结请求事实、SQLite 派生快照、App/TUI。未新增 Codex 登录或原生压缩。`session.context.get` 仅接受 v3；旧 runSub、字符裁剪 Compactor 及 Host 包装已删除，旧 Evidence 正文和旧摘要格式不再兼容读取。
 
@@ -12,17 +12,17 @@
 
 | 验收行为                                                                                        | 对应集成测试                                                                              | 结果       |
 | ----------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- | ---------- |
-| 用户声明窗口、真实 I/O 阈值、路由锚、一次 send 多步、主动失败阻断恢复、图片优先和步骤耗尽       | `engine/maka-compaction-trigger.test.ts`                                                  | 通过       |
-| 安全连续前缀、任务锚、滚动摘要、截断／格式修复、已接受边界回退、checkpoint 写失败               | `engine/maka-compaction-summary.test.ts`、`compaction-rolling-digest.test.ts`             | 通过       |
+| 用户声明窗口、真实 I/O 阈值、路由锚、一次 send 多步、主动失败阻断恢复、图片优先和步骤耗尽       | `engine/compaction-trigger.test.ts`                                                  | 通过       |
+| 安全连续前缀、任务锚、滚动摘要、截断／格式修复、已接受边界回退、checkpoint 写失败               | `engine/compaction-summary.test.ts`、`compaction-rolling-digest.test.ts`             | 通过       |
 | 2,048／256 阈值、最近两个用户 turn、投影先提交、完整原文、重启、分叉和来源 digest               | `engine/durable-tool-projections.test.ts`、`tools/tool-result-runtime-projection.test.ts` | 通过       |
 | 冻结身份／窗口／组成／边界、迟到结算、失败与 Hook／摘要不覆盖、缺失字段不拼接、损坏投影修复     | `runtime/session-context-composition.test.ts`                                             | 通过       |
 | OpenAI / Responses / Claude 本地 HTTP → CostTracker → SQLite；usage 缺失、显式零、缓存、失败    | `provider/context-facts-protocols.test.ts`                                                | 三协议通过 |
 | 配置 agent_spawn 子会话自动压缩、归档、续接，Hook verifier 独立状态和只读工具                   | `runtime/context-production-subagent.test.ts`、`hook-verifier-compaction.test.ts`         | 通过       |
-| 实时 I / 回退 I+O、缓存为输入子集、切换／乱序／错误保留、组成明细和压缩后快照不变               | `desktop/context-maka-ui.test.ts`、`runtime/session-context-checkpoint.test.ts`           | 通过       |
+| 实时 I / 回退 I+O、缓存为输入子集、切换／乱序／错误保留、组成明细和压缩后快照不变               | `desktop/context-ui.test.ts`、`runtime/session-context-checkpoint.test.ts`           | 通过       |
 | 一万 canonical 请求下，一千次正常快照读取小于一秒；修复查询走专用索引，无临时排序；查询不添事件 | `runtime/session-context-composition.test.ts`                                             | 通过       |
 | 维护 dry-run、v7/v8、事务失败回滚、配置／cron／memory 保留、维护后升级、拒绝未知表              | `storage/context-reset-maintenance.test.ts`                                               | 通过       |
 
-固定基线的事件序列和预期决策固化在 `maka-compaction-trigger`、`maka-compaction-summary`、`durable-tool-projections` 和 `desktop/context-maka-fixture.ts`，而非仅测试阈值公式。旧 schema 兼容升级用例被新版本拒绝／维护后升级用例替代。
+固定基线的事件序列和预期决策固化在 `compaction-trigger`、`compaction-summary`、`durable-tool-projections` 和 `desktop/context-fixture.ts`，而非仅测试阈值公式。旧 schema 兼容升级用例被新版本拒绝／维护后升级用例替代。
 
 此外，子代理验证了 25 条既有 Provider／续接回归、11 条 UI 和 TUI `/context`、2 条真实 daemon TUI 测试。根 TypeScript、Desktop main/preload/renderer TypeScript、全部包构建、根构建、架构检查、存储能力检查、变更文件 ESLint、桌面 arm64 打包均通过。桌面首次下载校验文件遇到网络失败，缓存校验成功后重新打包通过。
 
@@ -48,7 +48,7 @@ Hook 与归档首轮 HTTP 连接被重置；仅重跑这两个失败项后通过
 
 ## Computer Use 与三端核对
 
-使用真实桌面包新建会话 `cli-mucwvlhd-dc48df42`，标记 `PICO_MAKA_0923`；测试文件仅包含合成行和 `PICO_ARCHIVE_END_0923`。
+使用真实桌面包新建会话 `cli-mucwvlhd-dc48df42`；测试文件仅包含合成行和 `PICO_ARCHIVE_END_0923`。
 
 1. 普通请求：实际输入 6,213、输出 117、缓存 50、冻结窗口 128,000；输入框、Inspector、RPC 与 SQLite 一致。
 2. 工具多步：大 read_file 正文完整保存，追加 1 条归档投影；archive_read 回读成功。初始 `/tmp` 安装路径触发沙箱边界拒绝，移至正常应用目录后使用目录参数的 grep 成功；没有放宽安全设置。

@@ -1,8 +1,8 @@
-# 决策记录 30：对齐 Maka 工具运行时边界
+# 决策记录 30：工具运行时边界
 
 ## 范围
 
-对齐 Maka `beyond-function-calling.zh-CN.md` 涉及的已落地工具语义，不复制产品 UI，不实现文章末尾的 S3 / Serverless 愿景。
+本决策定义工具披露、执行提交、资源仲裁和 Code Mode 边界。实现来源见[第三方声明](../../resources/licenses/THIRD_PARTY_NOTICES.md)。
 
 本记录取代决策 23 的跨 Turn 持久激活与未披露工具软路由策略；保留现有工具实现、权限、中间件、SQLite 账本和安全恢复基础。
 
@@ -34,9 +34,9 @@ T1 保存最终参数的完整脱敏 JSON、原始参数 hash、脱敏标志以�
 
 子调用有独立 ID、父调用与 Step 关联，逐项提交 T1/T2。内部明细持久化，但不作为顶层模型历史；宿主敏感值清理在子结果落账及返回沙箱之前生效。模型主要消费 exec 聚合结果。Cell 超时/取消后先等待已经发起的真实操作收口，不自动重跑 Cell。
 
-`exec` 声明 `exclusive_step`，按 Maka 的到达顺序准入：同一 Step 已有普通调用时拒绝后到的 exec；exec 先获准时拒绝后到的其他顶层调用。拒绝项不写 T1、不执行副作用，必须下一 Step 单独发送；exec 内部的已授权子调用不占用外层 Step 次数。
+`exec` 声明 `exclusive_step`，按到达顺序准入：同一 Step 已有普通调用时拒绝后到的 exec；exec 先获准时拒绝后到的其他顶层调用。拒绝项不写 T1、不执行副作用，必须下一 Step 单独发送；exec 内部的已授权子调用不占用外层 Step 次数。
 
-生产宿主以活跃 Session 对象持有 Cell 容量闸，与 Maka 单个 Backend 的范围对应：一个活跃 Cell、一个可取消等待者，队满立即拒绝；Registry 重建不重置容量，不同 Session 互不占用。取消活跃 Cell 必须等待宿主物理操作收口后才释放。独立嵌入适配器可显式传入闸；未传入时使用进程共享的保守兜底。
+生产宿主以活跃 Session 对象持有 Cell 容量闸：一个活跃 Cell、一个可取消等待者，队满立即拒绝；Registry 重建不重置容量，不同 Session 互不占用。取消活跃 Cell 必须等待宿主物理操作收口后才释放。独立嵌入适配器可显式传入闸；未传入时使用进程共享的保守兜底。
 
 初始 nestable 集合为文件读写、编辑、glob、grep、网页读取和搜索。Shell、交互、Agent 启动及控制协议工具默认 direct-only。Plan 不暴露 exec；命令、后台和子代理白名单不因新增 exec 自动扩大。
 

@@ -148,7 +148,7 @@ Markdown 依赖图已按 manifest 校正；冻结的 architecture JSON/HTML/visu
 逐步收敛的长程工作；本轮不将它们误标为完成。后续修改必须继续保护未知工作区改动，且架构图
 JSON/HTML/visual-check 产物保持冻结。
 
-目标：让仓库顶层目录能直接表达 Pico 的产品模块，同时逐步建立类似 Maka 的
+目标：让仓库顶层目录能直接表达 Pico 的产品模块，同时逐步建立
 `core → storage → runtime → host → entrypoints` 依赖方向。此计划只调整代码组织和
 构建边界；不改变 Runtime 事件、SQLite schema、IPC 契约或前台行为。
 

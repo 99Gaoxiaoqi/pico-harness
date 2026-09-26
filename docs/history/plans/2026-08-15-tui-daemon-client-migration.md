@@ -88,7 +88,7 @@
 - **会话旗标三式补齐**（默认切换后体验不降级）：`--continue` 采纳 resolveCliSession 解析出的具体 sessionId（等价 resume——mode "continue" 本就带 latest id）；`--fork <id>` 经 ClientReplOptions.forkFrom——runtime.start() 连接后 `session.fork` RPC 切新会话（原会话不动）；`-S/--resume` 照旧。
 - **--graph**：ClientSessionRuntimeOptions.orchestrationModeOverride 并入 BYOK 启动覆盖桥（与 model/thinking 共用单次闩 + 重试触发点，session.settings.update 一次应用）。
 - **缺口旗标显式提示**：--mcp-config/--add-dir（MCP 归 daemon 侧装配）与裸 --provider 提示用 --model——不静默丢弃。
-- **冷启动预算复核**：render 先于 runtime.start()（UI 立即出现）+ 连接前系统消息"正在连接本地 Runtime（冷启动拉起 daemon 可能需要数十秒）…"——慢环境 connectOrSpawn 选举��连可达 24s 不再黑屏。选举预算本身维持既有（45s 窗口 + 3-B-4 候选封顶）。（2026-08-17 注：候选封顶已退役，对齐 maka 无上限形态，仅保留 250ms 节流。）
+- **冷启动预算复核**：render 先于 runtime.start()（UI 立即出现）+ 连接前系统消息"正在连接本地 Runtime（冷启动拉起 daemon 可能需要数十秒）…"——慢环境 connectOrSpawn 选举��连可达 24s 不再黑屏。选举预算本身维持既有（45s 窗口 + 3-B-4 候选封顶）。（2026-08-17 注：候选封顶已退役，不设候选总数上限，仅保留 250ms 节流。）
 - **验证**：cli-entry-dispatch 5 条（fake CliRuntime 断言分派/旗标传递/快速路径）+ 相关回归 41/41 + typecheck 0 + 门禁 0 + e2e 真实模型 1/1 + 真机 `pico --help`。真机交互冒烟（默认 pico 跑完整回合）待用户实跑。
 
 ### Phase 4 全矩阵真机实测闭环（2026-08-15，aa617504）

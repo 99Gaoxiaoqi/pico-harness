@@ -1,15 +1,10 @@
 # 决策记录 29：continuation claim 最小协议——中断 run 的确定性续跑锚（2026-08-19）
 
-> 分支：`scratch/maka-gap-analysis`（调研依据：[历史调研记录](../history/architecture/pico-vs-maka-flow-gap-investigation.md) §2 P3；
-> 对照系 maka：`runtime_continuation_claims` + prefix_digest/high_water + source seal，
-> 设计文档 runtime-resume-phase3-phase4-workspace-checkpoint-design）。
-
 ## 背景与实证
 
 pico run 中断只补 `run.terminal(interrupted)`（reconcileIncompleteRuns），上层重发即重来：
 无"从安全边界续跑"的存储协议，无防双续跑约束，无前缀完整性校验。长 goal/cron 任务中断
-语义粒度粗。maka 有完整 claim 协议（claim 事务内重读 boundary + digest + high_water，
-claim 成功 seal source）。
+语义粒度粗，需要持久化的 claim 协议校验边界、前缀摘要与水位，并在成功后封闭源运行的追加路径。
 
 ## 决策
 
@@ -70,8 +65,7 @@ claim 成功 seal source）。
 
 ## 弃案
 
-- **digest 覆盖投影（复算消息投影）**：投影逻辑随版本演进，只 digest 原始事件
-  （与 maka 同一理由）。**附注（对抗审查 Finding 9）**：`canonicalJson` 本身也是代码、
+- **digest 覆盖投影（复算消息投影）**：投影逻辑随版本演进，只 digest 原始事件。**附注（对抗审查 Finding 9）**：`canonicalJson` 本身也是代码、
   可随版本演进——未来任何 digest 验证者必须对**库内已存 payload_json 字节**计算/比对，
   禁止对事件重新 canonical 化后再摘要，否则跨版本会误判旧库。
 - **continuation 物化全部祖先事件**：链长增长 O(n²) 存储 + 身份重复。弃。

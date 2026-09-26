@@ -45,7 +45,7 @@
 
 ```sh
 node scripts/run-integration-tests.mjs \
-  maka-compaction-trigger maka-compaction-summary hook-verifier-compaction archive-read-tool \
+  compaction-trigger compaction-summary hook-verifier-compaction archive-read-tool \
   configured-subagent-execution configured-subagent-continuation configured-subagent-output \
   desktop-configured-child-sessions atomic-memory-budget atomic-memory-recall \
   atomic-memory-recovery user-memory-settings atomic-memory-runtime

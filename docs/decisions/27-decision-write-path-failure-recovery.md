@@ -1,8 +1,5 @@
 # 决策记录 27：写路径故障恢复协议——工具半执行 indeterminate 判定 + 写失败读回仲裁（2026-08-19）
 
-> 分支：`scratch/maka-gap-analysis`（调研依据：[历史调研记录](../history/architecture/pico-vs-maka-flow-gap-investigation.md) §2 P0/P1；
-> 对照系 maka：`docs/architecture/runtime-resume-architecture.md` Ch.8、`runtime-recovery-resolver-adr.zh-CN.md`）。
-
 ## 背景与实证
 
 两处故障路径的不诚实/过保守（调研实录）：
@@ -10,11 +7,9 @@
 1. **P0**：`RuntimeRun.reconcileIncompleteRuns`（src/runtime/runtime-run.ts:362）对悬空 tool call
    无条件合成 tool.result——把"不知道执行了没有"定形为普通失败。副作用可能实际已发生
    （文件已写/请求已发），合成结果从账本上抹掉这一事实。graph 多轮实测"子代理失败被自报
-   完成掩盖"为同类变体。maka 对应为 T1/T2 台账 + 决策表（completed / indeterminate /
-   definitely_not_dispatched / corruption）。
+   完成掩盖"为同类变体。
 2. **P1**：任何 durable 写失败 → `markWriteUncertain`（src/engine/session.ts:1614）→
-   write_uncertain 封会话停写。保守正确但一次瞬时失败废掉整个会话。maka 对应为写失败后
-   `eventLandedInLedger(id)` 读回去歧义（agent-run.ts:988-1007）。
+   write_uncertain 封会话停写。保守正确但一次瞬时失败废掉整个会话，需要通过写失败后的账本读回来判定提交是否成功。
 
 pico 前提：事件即事实（无第二状态机）；event_id 库级主键 + canonical payload 幂等
 （同 id 同载荷返回原 seq，异载荷 fail-closed）——读回仲裁有现成基础。
@@ -81,8 +76,7 @@ pico 前提：事件即事实（无第二状态机）；event_id 库级主键 + 
 
 ## 弃案
 
-- **maka 式 tool_journal_events/tool_operations 两张表**：第二状态机，pico"事件即事实"
-  下引入解释漂移（maka ADR 自述："事务一致不能消除两套状态机的解释漂移"）。弃。
+- **额外的 journal/operations 两张表**：在事件事实之外维护第二套状态机，会增加状态解释漂移的风险。弃。
 - **新事件 kind `tool.result.indeterminate`**：kind 面与断言耦合扩大，data 字段足够。弃。
 - **P1 失败后直接重试 append**：可能撞高水位断言/序号重排；读回仲裁才幂等安全。弃。
 

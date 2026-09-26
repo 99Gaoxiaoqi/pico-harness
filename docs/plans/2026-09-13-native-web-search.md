@@ -2,9 +2,9 @@
 
 ## 目的与依据
 
-采用 Maka 的分层方式：先解析模型与协议，再判断该连接的搜索能力，最后按用户选择给这次运行装配搜索工具。联网开关只允许模型按需搜索，不保证每次回答都搜索。
+按职责分层：先解析模型与协议，再判断该连接的搜索能力，最后按用户选择给这次运行装配搜索工具。联网开关只允许模型按需搜索，不保证每次回答都搜索。
 
-本地 Maka 参考为 `packages/core/src/model-web-search.ts`、`packages/runtime/src/native-web-search-tool.ts` 和 `packages/runtime/src/model-adapter.ts`。不能仅按模型名称或 Responses 协议宣称已经支持联网：DeepSeek 官方 Responses 的现有 SDK 会过滤原生工具，此前真实请求也只返回普通 message，没有搜索事件，因此这条连接明确标为不可用。
+实现来源见[第三方声明](../../resources/licenses/THIRD_PARTY_NOTICES.md)。不能仅按模型名称或 Responses 协议宣称已经支持联网：DeepSeek 官方 Responses 的现有 SDK 会过滤原生工具，此前真实请求也只返回普通 message，没有搜索事件，因此这条连接明确标为不可用。
 
 ## 配置与流程
 
