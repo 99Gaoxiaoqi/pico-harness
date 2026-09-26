@@ -8,10 +8,10 @@ import { pathToFileURL } from "node:url";
 export const PRESERVED_TABLES = Object.freeze([
   "operational_schema_migrations",
   "workspace_storage_binding",
-  "event_log_epoch",
   "cron_jobs",
 ]);
 export const CLEARED_TABLES = Object.freeze([
+  "event_log_epoch",
   "sessions",
   "runtime_events",
   "session_catalog_projection",
