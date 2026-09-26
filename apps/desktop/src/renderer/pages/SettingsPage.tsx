@@ -1,3 +1,4 @@
+import { SelectField, SwitchField } from "../ui-controls.js";
 import { AlertTriangle, CheckCircle2, Folder, FolderGit2, Plus } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
@@ -46,21 +47,22 @@ export function SettingsPage() {
                 : "使用当前运行所选模型提供的原生搜索能力。"
             }
           >
-            <select
+            <SelectField
+              label="搜索来源"
               className="select-control"
-              aria-label="搜索来源"
               value={webSearch.source}
               disabled={searchDisabled}
-              onChange={(event) =>
+              onValueChange={(value) =>
                 void actions.setWebSearch({
                   ...webSearch,
-                  source: event.target.value === "external" ? "external" : "model",
+                  source: value === "external" ? "external" : "model",
                 })
               }
-            >
-              <option value="model">当前模型原生搜索</option>
-              <option value="external">外部搜索服务</option>
-            </select>
+              options={[
+                { value: "model", label: "当前模型原生搜索" },
+                { value: "external", label: "外部搜索服务" },
+              ]}
+            />
           </SettingRow>
           {webSearch.source === "model" && (
             <SettingRow title="用户默认模型的原生搜索" detail={searchCapability.detail}>
@@ -115,19 +117,18 @@ export function SettingsPage() {
             {data.backgroundMode === undefined ? (
               <StatusPill status="attention" />
             ) : (
-              <select
+              <SelectField
+                label="关闭后行为"
                 name="background-mode"
                 className="select-control"
                 value={data.backgroundMode ? "enabled" : "disabled"}
                 disabled={Boolean(busy)}
-                aria-label="关闭后行为"
-                onChange={(event) =>
-                  void actions.setBackgroundMode(event.target.value === "enabled")
-                }
-              >
-                <option value="enabled">继续后台运行</option>
-                <option value="disabled">退出 Pico</option>
-              </select>
+                onValueChange={(value) => void actions.setBackgroundMode(value === "enabled")}
+                options={[
+                  { value: "enabled", label: "继续后台运行" },
+                  { value: "disabled", label: "退出 Pico" },
+                ]}
+              />
             )}
           </SettingRow>
         </div>
@@ -405,24 +406,24 @@ export function SystemSettingsPage() {
         </p>
         <div className="settings-list">
           <SettingRow title="诊断项目" detail="只决定本次检查范围，不会切换当前会话">
-            <select
+            <SelectField
+              label="选择诊断项目"
               className="select-control"
               value={diagnosticWorkspacePath}
-              aria-label="选择诊断项目"
-              onChange={(event) => {
-                setDiagnosticWorkspacePath(event.target.value);
+              onValueChange={(value) => {
+                setDiagnosticWorkspacePath(value);
                 setDiagnosticReport(undefined);
               }}
-            >
-              <option value="">选择项目</option>
-              {diagnosticWorkspaces.map((workspace) => (
-                <option key={workspace.path} value={workspace.path}>
-                  {workspace.temporary
+              options={[
+                { value: "", label: "选择项目" },
+                ...diagnosticWorkspaces.map((workspace) => ({
+                  value: workspace.path,
+                  label: workspace.temporary
                     ? "当前无项目任务"
-                    : workspaceDisplayName(workspace.path, workspace)}
-                </option>
-              ))}
-            </select>
+                    : workspaceDisplayName(workspace.path, workspace),
+                })),
+              ]}
+            />
           </SettingRow>
           <SettingRow title="检查项目环境" detail="检查模型、凭证、Node、任务运行与本地存储">
             <div className="button-row">
@@ -569,16 +570,7 @@ function Toggle({
   readonly disabled?: boolean;
 }) {
   return (
-    <label className="switch">
-      <span className="sr-only">{label}</span>
-      <input
-        type="checkbox"
-        checked={checked}
-        disabled={disabled}
-        onChange={(event) => onChange(event.target.checked)}
-      />
-      <span />
-    </label>
+    <SwitchField label={label} checked={checked} disabled={disabled} onCheckedChange={onChange} />
   );
 }
 

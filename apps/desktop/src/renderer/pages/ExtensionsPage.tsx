@@ -1,6 +1,8 @@
+import { TextField, SelectField, TextAreaField, CheckboxField } from "../ui-controls.js";
+import { TabList, Tab } from "@astryxdesign/core/TabList";
 import { Network, Plus, WandSparkles } from "lucide-react";
-import { useEffect, useState, type FormEvent } from "react";
-import { NavLink, Navigate, useParams } from "react-router-dom";
+import { useEffect, useState, type FormEvent, type ComponentProps } from "react";
+import { Link, Navigate, useParams, useNavigate } from "react-router-dom";
 import { Button, CapabilityList, InlineNotice } from "../components.js";
 import type { CapabilityView, McpServerDraft } from "../model.js";
 import { useRuntime } from "../runtime-context.js";
@@ -11,6 +13,7 @@ export function ExtensionsIndex() {
 }
 
 export function ExtensionsPage() {
+  const navigate = useNavigate();
   const { kind } = useParams<{ kind: string }>();
   const activeKind = kind === "mcp" ? "mcp" : kind === "skills" ? "skills" : undefined;
   useEffect(() => {
@@ -25,17 +28,27 @@ export function ExtensionsPage() {
           <h2>扩展</h2>
           <p>Skills 定义工作方式，MCP 连接外部工具和数据源。</p>
         </div>
-        <nav className="surface-tabs" aria-label="扩展类型">
-          <NavLink
-            to="/extensions/skills"
-            className={({ isActive }) => (isActive ? "is-active" : "")}
-          >
-            技能
-          </NavLink>
-          <NavLink to="/extensions/mcp" className={({ isActive }) => (isActive ? "is-active" : "")}>
-            MCP
-          </NavLink>
-        </nav>
+        <TabList
+          className="surface-tabs"
+          aria-label="扩展类型"
+          value={activeKind}
+          onChange={(value) => navigate(`/extensions/${value}`)}
+        >
+          <Tab
+            as={ExtensionLink}
+            href="/extensions/skills"
+            value="skills"
+            label="技能"
+            className={activeKind === "skills" ? "is-active" : ""}
+          />
+          <Tab
+            as={ExtensionLink}
+            href="/extensions/mcp"
+            value="mcp"
+            label="MCP"
+            className={activeKind === "mcp" ? "is-active" : ""}
+          />
+        </TabList>
       </header>
       <CapabilityPage kind={activeKind} embedded />
     </div>
@@ -202,57 +215,71 @@ function McpAddForm({
           <p>只新增配置，不会连接或启动服务。如需密钥，请在安全配置源中管理。</p>
         </div>
       </header>
-      <label>
+      <div className="settings-field">
         <span>名称</span>
-        <input required value={name} onChange={(event) => setName(event.target.value)} />
-      </label>
-      <label>
+        <TextField
+          label="名称"
+          required
+          value={name}
+          onChange={(event) => setName(event.target.value)}
+        />
+      </div>
+      <div className="settings-field">
         <span>传输方式</span>
-        <select
+        <SelectField
+          label="传输方式"
           value={transport}
-          onChange={(event) => setTransport(event.target.value as typeof transport)}
-        >
-          <option value="stdio">stdio</option>
-          <option value="http">HTTP</option>
-          <option value="sse">SSE</option>
-        </select>
-      </label>
+          onValueChange={(value) => setTransport(value as typeof transport)}
+          options={[
+            { value: "stdio", label: "stdio" },
+            { value: "http", label: "HTTP" },
+            { value: "sse", label: "SSE" },
+          ]}
+        />
+      </div>
       {transport === "stdio" ? (
         <>
-          <label>
+          <div className="settings-field">
             <span>命令</span>
-            <input
+            <TextField
+              label="命令"
               required
               value={command}
               onChange={(event) => setCommand(event.target.value)}
               placeholder="npx"
             />
-          </label>
-          <label className="capability-add-form__wide">
+          </div>
+          <div className="settings-field capability-add-form__wide">
             <span>参数（每行一个）</span>
-            <textarea value={args} onChange={(event) => setArgs(event.target.value)} rows={3} />
-          </label>
+            <TextAreaField
+              label="参数（每行一个）"
+              value={args}
+              onChange={(event) => setArgs(event.target.value)}
+              rows={3}
+            />
+          </div>
         </>
       ) : (
-        <label className="capability-add-form__wide">
+        <div className="settings-field capability-add-form__wide">
           <span>URL</span>
-          <input
+          <TextField
+            label="URL"
             required
             type="url"
             value={url}
             onChange={(event) => setUrl(event.target.value)}
             placeholder="https://example.com/mcp"
           />
-        </label>
+        </div>
       )}
-      <label className="capability-add-form__wide">
-        <input
-          type="checkbox"
+      <div className="settings-field capability-add-form__wide">
+        <CheckboxField
+          label="允许通过 Desktop 客户端执行（每次连接和工具调用仍需任务授权）"
+          labelHidden={false}
           checked={desktopExecution}
-          onChange={(event) => setDesktopExecution(event.target.checked)}
+          onCheckedChange={(checked) => setDesktopExecution(checked)}
         />
-        <span>允许通过 Desktop 客户端执行（每次连接和工具调用仍需任务授权）</span>
-      </label>
+      </div>
       <div className="button-row capability-add-form__wide">
         <Button disabled={busy} onClick={onCancel}>
           取消
@@ -263,4 +290,8 @@ function McpAddForm({
       </div>
     </form>
   );
+}
+
+function ExtensionLink({ href, ...props }: ComponentProps<"a">) {
+  return <Link to={href ?? "/extensions/skills"} {...props} />;
 }

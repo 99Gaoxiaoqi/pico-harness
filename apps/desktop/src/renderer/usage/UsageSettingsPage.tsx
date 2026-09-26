@@ -1,3 +1,6 @@
+import { Button } from "../components.js";
+import { TabList, Tab as AstryxTab } from "@astryxdesign/core/TabList";
+import { SelectField, TextField, CheckboxField } from "../ui-controls.js";
 import { useMemo, useState, type ReactNode } from "react";
 import type {
   UsageActivity,
@@ -134,12 +137,12 @@ function Table({
           <span>
             共 {number(rows.length)} 条 · 第 {current + 1} / {pages} 页
           </span>
-          <button type="button" disabled={current === 0} onClick={() => onPage(current - 1)}>
+          <Button type="button" disabled={current === 0} onClick={() => onPage(current - 1)}>
             上一页
-          </button>
-          <button type="button" disabled={current + 1 >= pages} onClick={() => onPage(current + 1)}>
+          </Button>
+          <Button type="button" disabled={current + 1 >= pages} onClick={() => onPage(current + 1)}>
             下一页
-          </button>
+          </Button>
         </div>
       )}
     </>
@@ -243,14 +246,14 @@ export function UsageSettingsPage({
           <h2>用量</h2>
           <p>查看模型调用、工具活动与本地费用估算。</p>
         </div>
-        <button type="button" disabled={busy} onClick={() => void query()} aria-label="刷新用量">
+        <Button type="button" disabled={busy} onClick={() => void query()} aria-label="刷新用量">
           {busy ? "刷新中…" : "刷新"}
-        </button>
+        </Button>
       </header>
       <div className="usage-toolbar">
         <div className="usage-ranges" role="group" aria-label="统计时间范围">
           {ranges.map((item) => (
-            <button
+            <Button
               key={item.id}
               type="button"
               aria-pressed={range === item.id}
@@ -259,34 +262,34 @@ export function UsageSettingsPage({
               }}
             >
               {item.label}
-            </button>
+            </Button>
           ))}
         </div>
-        <label className="usage-project">
+        <div className="settings-field usage-project">
           项目
-          <select
-            aria-label="统计项目"
+          <SelectField
+            label="统计项目"
             value={workspacePath}
-            onChange={(event) => {
-              const value = event.target.value;
+            onValueChange={(value) => {
               void query({ ...selection, workspacePath: value });
             }}
-          >
-            <option value="">全部项目</option>
-            {workspaces.map((workspace) => (
-              <option key={workspace.path} value={workspace.path} title={workspace.path}>
-                {workspace.name && workspace.name !== "无项目" ? workspace.name : workspace.path}
-              </option>
-            ))}
-          </select>
-        </label>
+            options={[
+              { value: "", label: "全部项目" },
+              ...workspaces.map((workspace) => ({
+                value: workspace.path,
+                label:
+                  workspace.name && workspace.name !== "无项目" ? workspace.name : workspace.path,
+              })),
+            ]}
+          />
+        </div>
       </div>
       {error && (
         <div className="usage-error" role="alert">
           {error}
-          <button type="button" disabled={busy} onClick={() => void query()}>
+          <Button type="button" disabled={busy} onClick={() => void query()}>
             重试
-          </button>
+          </Button>
         </div>
       )}
       <div className="usage-summary" role="group" aria-label="用量汇总">
@@ -363,46 +366,31 @@ export function UsageSettingsPage({
           )}
         </details>
       )}
-      <div className="usage-tabs" role="tablist" aria-label="用量分类">
+      <TabList
+        className="usage-tabs"
+        role="tablist"
+        aria-label="用量分类"
+        value={tab}
+        onChange={(value) => {
+          setTab(value as Tab);
+          setPage(0);
+        }}
+      >
         {tabs.map((item) => (
-          <button
+          <AstryxTab
             key={item.id}
-            id={`usage-tab-${item.id}`}
-            type="button"
-            role="tab"
-            aria-selected={tab === item.id}
-            aria-controls="usage-tab-panel"
-            tabIndex={tab === item.id ? 0 : -1}
-            onKeyDown={(event) => {
-              const index = tabs.findIndex((entry) => entry.id === item.id);
-              const next =
-                event.key === "ArrowRight"
-                  ? (index + 1) % tabs.length
-                  : event.key === "ArrowLeft"
-                    ? (index - 1 + tabs.length) % tabs.length
-                    : event.key === "Home"
-                      ? 0
-                      : event.key === "End"
-                        ? tabs.length - 1
-                        : undefined;
-              if (next === undefined) return;
-              event.preventDefault();
-              const target = tabs[next];
-              if (!target) return;
-              setTab(target.id);
-              setPage(0);
-              document.getElementById(`usage-tab-${target.id}`)?.focus();
-            }}
-            onClick={() => {
+            value={item.id}
+            onFocus={() => {
               setTab(item.id);
               setPage(0);
             }}
-          >
-            {item.label}
-            <span>{number(counts[item.id])}</span>
-          </button>
+            id={`usage-tab-${item.id}`}
+            panelId="usage-tab-panel"
+            label={item.label}
+            endContent={<span>{number(counts[item.id])}</span>}
+          />
         ))}
-      </div>
+      </TabList>
       <div id="usage-tab-panel" role="tabpanel" aria-labelledby={`usage-tab-${tab}`}>
         {busy ? (
           <div className="usage-empty" role="status">
@@ -413,9 +401,9 @@ export function UsageSettingsPage({
             {tab === "requests" && (
               <>
                 <div className="usage-filters">
-                  <input
+                  <TextField
+                    label="搜索请求"
                     type="search"
-                    aria-label="搜索请求"
                     placeholder="搜索模型、厂商、工具或任务"
                     value={search}
                     onChange={(event) => {
@@ -423,31 +411,31 @@ export function UsageSettingsPage({
                       setPage(0);
                     }}
                   />
-                  <select
-                    aria-label="请求状态"
+                  <SelectField
+                    label="请求状态"
                     value={status}
-                    onChange={(event) => {
-                      setStatus(event.target.value);
+                    onValueChange={(value) => {
+                      setStatus(value);
                       setPage(0);
                     }}
-                  >
-                    <option value="all">全部状态</option>
-                    {Object.entries(statuses).map(([value, label]) => (
-                      <option key={value} value={value}>
-                        {label}
-                      </option>
-                    ))}
-                  </select>
-                  <label className="usage-detail-toggle">
-                    <input
-                      type="checkbox"
+                    options={[
+                      { value: "all", label: "全部状态" },
+                      ...Object.entries(statuses).map(([value, label]) => ({
+                        value: value,
+                        label: label,
+                      })),
+                    ]}
+                  />
+                  <div className="settings-field usage-detail-toggle">
+                    <CheckboxField
+                      label="显示明细"
+                      labelHidden={false}
                       checked={showDetails}
-                      onChange={(event) => setShowDetails(event.target.checked)}
+                      onCheckedChange={(checked) => setShowDetails(checked)}
                     />
-                    显示明细
-                  </label>
+                  </div>
                   {(search || status !== "all") && (
-                    <button
+                    <Button
                       type="button"
                       onClick={() => {
                         setSearch("");
@@ -456,7 +444,7 @@ export function UsageSettingsPage({
                       }}
                     >
                       清除筛选
-                    </button>
+                    </Button>
                   )}
                 </div>
                 {showDetails ? (
@@ -484,7 +472,7 @@ export function UsageSettingsPage({
                           <small className="usage-cell-secondary">{row.provider}</small>
                         </span>,
                         row.sessionId ? (
-                          <button
+                          <Button
                             type="button"
                             className="usage-session-link"
                             title={`打开任务：${row.sessionTitle || row.sessionId}`}
@@ -493,7 +481,7 @@ export function UsageSettingsPage({
                             }}
                           >
                             {row.sessionTitle || `任务 ${row.sessionId.slice(0, 8)}`}
-                          </button>
+                          </Button>
                         ) : (
                           "未知"
                         ),
@@ -521,9 +509,9 @@ export function UsageSettingsPage({
                 ) : (
                   <div className="usage-empty">
                     仅显示汇总 ·{" "}
-                    <button type="button" onClick={() => setShowDetails(true)}>
+                    <Button type="button" onClick={() => setShowDetails(true)}>
                       显示请求明细
-                    </button>
+                    </Button>
                   </div>
                 )}
               </>

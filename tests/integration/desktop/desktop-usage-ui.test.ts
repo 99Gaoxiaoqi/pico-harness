@@ -79,13 +79,13 @@ test("usage page presents canonical totals, provenance, request navigation and b
   assert.match(html, /EACCES: permission denied/);
   assert.match(html, /部分用量未上报/);
   assert.match(html, /role="tab" aria-selected="true"/);
-  assert.match(html, /aria-label="请求状态"/);
+  assert.match(html, /<label[^>]*>请求状态<\/label>/);
   assert.match(html, /title="打开任务：会话 0"/);
   assert.match(html, /scope="col"/);
   assert.match(html, /共 26 条 · 第 1 \/ 2 页/);
   assert.match(html, /model-24/);
   assert.doesNotMatch(html, /model-25/);
-  for (const label of ["请求日志", "厂商", "模型", "工具", "定价", "全部项目", "示例项目"])
+  for (const label of ["请求日志", "厂商", "模型", "工具", "定价", "全部项目"])
     assert.ok(html.includes(label), label);
 });
 
@@ -129,7 +129,7 @@ test("缓存输入计入累计，未上报写入与真实零区分，复用率�
   assert.match(html, /读取 18,489 · 写入 未知（未上报）/);
   assert.match(html, /输入 Token 缓存复用率 65.8%/);
   assert.match(html, /请求缓存命中率 100.0%/);
-  assert.match(html, /<option value="" selected="">全部项目/);
+  assert.match(html, /role="combobox"[^>]*><span[^>]*>全部项目/);
   const knownZero = render({
     usage: { ...usage, details: { ...usage.details, cacheWriteReportedCallCount: 5 } },
   });

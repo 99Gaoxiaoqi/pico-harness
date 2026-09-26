@@ -1,0 +1,201 @@
+/* Product layout remains in the existing settings sheets; these are Astryx DOM seams. */
+.settings-field {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+.settings-field > span:first-child {
+  font-size: 12px;
+}
+.settings-field > .astryx-field,
+.settings-field .pico-text-field,
+.settings-field .pico-select-field,
+.settings-field .pico-textarea-field {
+  min-width: 0;
+  width: 100%;
+}
+.settings-field .pico-text-field input {
+  min-height: 0;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+}
+.settings-field .pico-textarea-field textarea,
+.memory-editor .pico-textarea-field textarea {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.settings-field .pico-checkbox-field input,
+.settings-field .pico-switch-field input {
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  margin: 0;
+}
+.provider-form .settings-field > span,
+.capability-add-form .settings-field > span {
+  font-size: 11px;
+  font-weight: 660;
+}
+.provider-form .pico-text-field,
+.provider-form .pico-select-field,
+.provider-default-select .pico-select-field,
+.capability-add-form .pico-text-field,
+.capability-add-form .pico-select-field {
+  height: 39px;
+  border-radius: 8px;
+}
+.provider-catalog-search.settings-field {
+  display: flex;
+}
+.provider-catalog-search .pico-text-field {
+  height: 30px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  outline: none;
+}
+.provider-catalog-filters > .astryx-field {
+  flex: 0 0 150px;
+}
+.provider-catalog-filters .pico-select-field {
+  height: 30px;
+  background: var(--surface);
+  font-size: 12px;
+}
+.provider-catalog-row > span,
+.provider-card__entry > span,
+.provider-advanced-toggle > span {
+  display: contents;
+}
+.provider-catalog-row > span > span:nth-child(2) {
+  flex: 1;
+  min-width: 0;
+}
+.provider-catalog-row > span > svg {
+  flex-shrink: 0;
+  color: var(--ink-secondary);
+}
+.provider-model-choices .settings-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+.provider-discovery-toggle .pico-checkbox-field,
+.provider-model-choices .pico-checkbox-field {
+  flex: 0 0 auto;
+}
+.subagent-settings__astryx-switch {
+  flex: 0 0 34px;
+}
+.subagent-settings__enabled.settings-field,
+.capability-add-form__wide.settings-field:has(> .pico-checkbox-field),
+.usage-detail-toggle.settings-field {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.subagent-settings__group .settings-field {
+  gap: 7px;
+}
+.subagent-settings__group .settings-field > span {
+  font-size: inherit;
+  font-weight: 500;
+}
+.memory-settings fieldset > .settings-field {
+  display: block;
+  padding: 10px;
+  border-radius: var(--radius-sm);
+}
+.memory-settings fieldset > .settings-field:hover {
+  background: var(--surface);
+}
+.memory-settings .settings-field > span,
+.memory-settings .settings-field small {
+  display: grid;
+  gap: 2px;
+}
+.memory-settings .settings-field small {
+  color: var(--ink-secondary);
+  font-size: 11px;
+}
+.memory-tablist.astryx-tab-list {
+  display: block;
+}
+.memory-tablist .astryx-tab {
+  flex: 1;
+}
+.usage-project.settings-field {
+  display: flex;
+  align-items: center;
+}
+.usage-project > .astryx-field {
+  min-width: 180px;
+  max-width: 280px;
+}
+.usage-filters > .astryx-field:has(.pico-text-field) {
+  flex: 1;
+  min-width: 180px;
+}
+.usage-settings .pico-select-field > button {
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  padding: 0;
+}
+.usage-settings .pico-text-field input {
+  min-width: 0;
+  border: 0;
+  padding: 0;
+  background: transparent;
+}
+.usage-tabs .astryx-tab-indicator,
+.memory-tablist .astryx-tab-indicator {
+  display: none;
+}
+.pico-settings-dialog.dialog {
+  inset: 0;
+  margin: auto;
+  transform: none;
+  animation: none;
+}
+.pico-settings-dialog::backdrop {
+  background: rgb(24 24 21 / 0.45);
+  backdrop-filter: blur(2px);
+}
+@media (max-width: 680px) {
+  .usage-project > .astryx-field {
+    max-width: 100%;
+  }
+}
+
+.provider-model-choices .settings-field label {
+  padding: 0;
+  border: 0;
+}
+.memory-settings .settings-field .astryx-field-label {
+  font-weight: 600;
+}
+.memory-settings .settings-field > span {
+  margin-left: 26px;
+}
+.surface-tabs .astryx-tab-indicator {
+  display: none;
+}
+.subagent-settings__group .pico-text-field,
+.subagent-settings__group .pico-select-field {
+  height: 41px;
+  border-color: var(--line-strong);
+}
+.subagent-settings__group .pico-text-field {
+  padding-inline: 11px;
+}
+.memory-editor .pico-textarea-field {
+  border-color: var(--line-strong);
+}

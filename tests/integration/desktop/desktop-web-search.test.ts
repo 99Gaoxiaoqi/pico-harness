@@ -63,7 +63,7 @@ test("全局联网设置投影真实模型能力，默认关闭且仅保存搜�
   };
   const initial = render(defaults);
   assert.equal(initial.config.userDefaults.webSearch, undefined);
-  assert.match(initial.html, /<option value="model" selected="">当前模型原生搜索/);
+  assert.match(initial.html, /role="combobox"[^>]*><span[^>]*>当前模型原生搜索/);
   assert.doesNotMatch(initial.html, /checked=""/);
   assert.match(initial.html, /DeepSeek 官方 Responses API 未提供原生联网搜索/);
   assert.match(initial.html, /不可用/);
@@ -73,7 +73,7 @@ test("全局联网设置投影真实模型能力，默认关闭且仅保存搜�
   assert.deepEqual(enabled.config.userDefaults.webSearch, { enabled: true, source: "external" });
   assert.match(enabled.html, /checked=""/);
   assert.match(enabled.html, /SEARCH_API_BASE 和 SEARCH_API_KEY/);
-  assert.match(enabled.html, /<option value="external" selected="">外部搜索服务/);
+  assert.match(enabled.html, /role="combobox"[^>]*><span[^>]*>外部搜索服务/);
   const unavailable = render(defaults, {
     ...registry,
     providers: [{ ...registry.providers[0], resolvedModelCapabilities: {} }],

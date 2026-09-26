@@ -82,28 +82,52 @@ function button(name: string): HTMLButtonElement {
   check(result, `Missing button: ${name}`);
   return result;
 }
-function field(name: string): HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement {
+function field(name: string): HTMLInputElement | HTMLTextAreaElement | HTMLButtonElement {
   const label = [...target.querySelectorAll("label")].find(
-    (item) => item.querySelector("span")?.textContent === name,
+    (item) => item.textContent?.trim() === name,
   );
-  const result = label?.querySelector<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>(
-    "input,textarea,select",
+  const result = label?.htmlFor ? document.getElementById(label.htmlFor) : undefined;
+  check(
+    result instanceof HTMLInputElement ||
+      result instanceof HTMLTextAreaElement ||
+      result instanceof HTMLButtonElement,
+    `Missing field: ${name}`,
   );
-  check(result, `Missing field: ${name}`);
   return result;
+}
+function fieldValue(name: string): string {
+  const input = field(name);
+  return input instanceof HTMLButtonElement
+    ? (input.closest(".astryx-field")?.querySelector<HTMLInputElement>('input[type="hidden"]')
+        ?.value ?? "")
+    : input.value;
 }
 async function click(name: string) {
   await act(async () => button(name).click());
 }
 async function enter(name: string, value: string) {
+  const input = field(name);
+  if (input instanceof HTMLButtonElement) {
+    const labels: Record<string, string> = {
+      high: "高",
+      first: "首选连接",
+      second: "第二连接",
+      implementation: "实现代码",
+    };
+    await act(async () => input.click());
+    const list = document.getElementById(input.getAttribute("aria-controls") ?? "");
+    const option = [...(list?.querySelectorAll<HTMLElement>('[role="option"]') ?? [])].find(
+      (item) => item.textContent?.trim() === (labels[value] ?? value),
+    );
+    check(option, `Missing option ${name}: ${value}`);
+    await act(async () => option.click());
+    return;
+  }
   await act(async () => {
-    const input = field(name);
     const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), "value")?.set;
     check(setter, `Missing setter: ${name}`);
     setter.call(input, value);
-    input.dispatchEvent(
-      new Event(input instanceof HTMLSelectElement ? "change" : "input", { bubbles: true }),
-    );
+    input.dispatchEvent(new Event("input", { bubbles: true }));
   });
 }
 function latest() {
@@ -128,40 +152,40 @@ async function main() {
     document.activeElement?.getAttribute("aria-labelledby"),
     "Editor region must receive focus",
   );
-  check(field("ID").value === "", "ID must start empty");
-  check(field("能力").value === "local_read", "Default profile must be local_read");
+  check(fieldValue("ID") === "", "ID must start empty");
+  check(fieldValue("能力") === "local_read", "Default profile must be local_read");
   check(
-    field("连接").value === "first" && field("模型").value === "reasoner",
+    fieldValue("连接") === "first" && fieldValue("模型") === "reasoner",
     "Default must be first selectable connection and offerable model",
   );
-  check(field("思考级别").value === "", "Thinking must default to model default");
+  check(fieldValue("思考级别") === "", "Thinking must default to model default");
   await click("创建");
   check(
     writes.length === 0 && target.querySelector('[aria-invalid="true"]'),
     "Invalid form must show errors without writing",
   );
   await enter("名称", "Code Review");
-  check(field("ID").value === "code-review", "Name must derive ID");
+  check(fieldValue("ID") === "code-review", "Name must derive ID");
   await enter("ID", "stable.review");
   await enter("名称", "Changed Name");
-  check(field("ID").value === "stable.review", "Manual ID must stop derivation");
+  check(fieldValue("ID") === "stable.review", "Manual ID must stop derivation");
   await enter("名称", "  " + "N".repeat(140));
-  check(field("名称").value.trim().length === 128, "Name must respect trimmed limit");
+  check(fieldValue("名称").trim().length === 128, "Name must respect trimmed limit");
   await enter("名称", "Code Review");
   await enter("使用说明（可选）", " " + "D".repeat(1100));
   check(
-    field("使用说明（可选）").value.trim().length === 1000,
+    fieldValue("使用说明（可选）").trim().length === 1000,
     "Description must respect trimmed limit",
   );
   await enter("思考级别", "high");
   await enter("模型", "fast");
   check(!target.textContent?.includes("跟随模型默认"), "Non-thinking model must hide thinking row");
   await enter("模型", "reasoner");
-  check(field("思考级别").value === "", "Model change must reset thinking");
+  check(fieldValue("思考级别") === "", "Model change must reset thinking");
   await enter("思考级别", "high");
   await enter("连接", "second");
   check(
-    field("模型").value === "other" && field("思考级别").value === "",
+    fieldValue("模型") === "other" && fieldValue("思考级别") === "",
     "Connection change must choose first model and clear thinking",
   );
   await enter("能力", "implementation");
@@ -194,9 +218,7 @@ async function main() {
   await click("取消");
   await click("配置 Code Review");
   check(
-    ![...target.querySelectorAll("label")].some(
-      (item) => item.querySelector("span")?.textContent === "ID",
-    ),
+    ![...target.querySelectorAll("label")].some((item) => item.textContent?.trim() === "ID"),
     "Existing ID must be readonly",
   );
   await enter("名称", "Renamed");
@@ -246,13 +268,13 @@ async function main() {
   pendingWrite = false;
   rejectWrite = false;
   check(
-    field("名称").value === "Preserved" && target.textContent?.includes("配置已变更"),
+    fieldValue("名称") === "Preserved" && target.textContent?.includes("配置已变更"),
     "Failed save must retain draft and show error",
   );
   dropWrite = true;
   await click("创建");
   check(
-    field("名称").value === "Preserved" && target.textContent?.includes("保存结果中未找到"),
+    fieldValue("名称") === "Preserved" && target.textContent?.includes("保存结果中未找到"),
     "Normalized-away creation must not claim success",
   );
   dropWrite = false;
@@ -282,7 +304,7 @@ async function main() {
   });
   await click("配置 Missing");
   check(
-    field("思考级别").value === "",
+    fieldValue("思考级别") === "",
     "Unsupported saved thinking level must display model default",
   );
   await click("保存");
@@ -294,7 +316,7 @@ async function main() {
   check(target.textContent?.includes("连接已删除"), "Unavailable preset must show problem badge");
   await click("配置 Missing");
   check(
-    field("连接").value === "deleted" && field("模型").value === "old",
+    fieldValue("连接") === "deleted" && fieldValue("模型") === "old",
     "Invalid saved route must remain visible",
   );
   const beforeInvalid = writes.length;
