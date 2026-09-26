@@ -1,3 +1,4 @@
+import { Button, IconButton } from "../components.js";
 import { useEffect, useId, useState } from "react";
 import { Check, ChevronDown, ChevronRight, Copy } from "lucide-react";
 import type {
@@ -79,7 +80,8 @@ export function ExecutionTraceTimeline({
               data-run-id={run.runId}
               data-status={run.status}
             >
-              <button
+              <Button
+                variant="quiet"
                 className="inspector-timeline__run-toggle"
                 data-run-toggle={run.runId}
                 type="button"
@@ -108,7 +110,7 @@ export function ExecutionTraceTimeline({
                   </span>
                 )}
                 <span className="inspector-timeline__run-counts">{runCounts(run)}</span>
-              </button>
+              </Button>
               {expanded && (
                 <RunSteps
                   run={run}
@@ -123,7 +125,8 @@ export function ExecutionTraceTimeline({
       })}
       {empty.length > 0 && (
         <section className="inspector-timeline__empty-group">
-          <button
+          <Button
+            variant="quiet"
             className="inspector-timeline__empty-toggle"
             type="button"
             aria-expanded={emptyExpanded}
@@ -136,7 +139,7 @@ export function ExecutionTraceTimeline({
               <ChevronRight aria-hidden="true" />
             )}
             无步骤记录 · {empty.length} 条
-          </button>
+          </Button>
           {emptyExpanded && (
             <ul id={`${id}-empty`} className="inspector-timeline__empty-runs">
               {empty.map((run) => (
@@ -199,7 +202,8 @@ function RunSteps({
                 const detailId = `${contentId}-turn-${index}-step-${stepIndex}`;
                 return (
                   <li className="inspector-timeline__step" key={step.id} data-status={step.status}>
-                    <button
+                    <Button
+                      variant="quiet"
                       type="button"
                       className="inspector-timeline__step-toggle"
                       data-step-id={step.id}
@@ -230,7 +234,7 @@ function RunSteps({
                           {step.error ? ` · ${displayExecutionError(step.error)}` : ""}
                         </span>
                       )}
-                    </button>
+                    </Button>
                     {expanded && <StepDetail step={step} detailId={detailId} turnSteps={steps} />}
                   </li>
                 );
@@ -464,7 +468,8 @@ function CopyButton({ label, value }: { label: string; value: string }) {
   const [message, setMessage] = useState("");
   return (
     <span className="inspector-timeline__copy">
-      <button
+      <IconButton
+        label={label}
         type="button"
         aria-label={label}
         title={label}
@@ -476,7 +481,7 @@ function CopyButton({ label, value }: { label: string; value: string }) {
         }}
       >
         {message === "已复制" ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
-      </button>
+      </IconButton>
       <span role="status">{message}</span>
     </span>
   );

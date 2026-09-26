@@ -1,3 +1,4 @@
+import { Button } from "../components.js";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { MarkdownText } from "../conversation/MarkdownText.js";
 import type { WorkbarArtifact, WorkbarArtifactContent } from "./FilesWorkbarPanel.js";
@@ -42,12 +43,22 @@ export function ArtifactPreview({
     <div className="artifact-preview">
       {(kind === "markdown" || kind === "html") && (
         <div className="artifact-preview__toolbar" role="group" aria-label="预览模式">
-          <button type="button" aria-pressed={!source} onClick={() => setSource(false)}>
+          <Button
+            variant="quiet"
+            type="button"
+            aria-pressed={!source}
+            onClick={() => setSource(false)}
+          >
             预览
-          </button>
-          <button type="button" aria-pressed={source} onClick={() => setSource(true)}>
+          </Button>
+          <Button
+            variant="quiet"
+            type="button"
+            aria-pressed={source}
+            onClick={() => setSource(true)}
+          >
             源码
-          </button>
+          </Button>
         </div>
       )}
       {kind === "html" && !source ? (

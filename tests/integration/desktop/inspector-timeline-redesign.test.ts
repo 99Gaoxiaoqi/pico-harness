@@ -235,7 +235,7 @@ test("inspector timeline keeps projected run/turn ownership, honest unknowns and
     };
     const recoveredMarkup = render({ ...execution, runs: [recovered] });
     const recoveredRunHeader = recoveredMarkup.match(
-      /<button[^>]*class="inspector-timeline__run-toggle"[^>]*>[\s\S]*?<\/button>/u,
+      /<button[^>]*class="[^"\n]*\binspector-timeline__run-toggle\b[^"\n]*"[^>]*>[\s\S]*?<\/button>/u,
     )?.[0];
     assert.ok(recoveredRunHeader);
     assert.match(recoveredRunHeader, /已完成/u);

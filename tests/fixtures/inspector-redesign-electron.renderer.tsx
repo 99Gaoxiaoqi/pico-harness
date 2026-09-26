@@ -1,3 +1,7 @@
+import "@astryxdesign/core/reset.css";
+import "@astryxdesign/core/astryx.css";
+import "@astryxdesign/theme-neutral/theme.css";
+import "../../apps/desktop/src/renderer/workbar/workbar-astryx.css";
 import { createRoot } from "react-dom/client";
 import type { RuntimeExecutionPage, RuntimeSessionContextSnapshot } from "@pico/protocol";
 import { InspectorPanelController } from "../../apps/desktop/src/renderer/workbar-panels/InspectorPanelController.js";

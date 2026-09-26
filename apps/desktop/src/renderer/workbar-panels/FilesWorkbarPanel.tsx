@@ -1,3 +1,5 @@
+import { DropdownMenu, DropdownMenuItem } from "@astryxdesign/core/DropdownMenu";
+import { IconButton, Button } from "../components.js";
 import { useEffect, useRef } from "react";
 import {
   ArrowLeft,
@@ -118,7 +120,8 @@ export function FilesWorkbarPanel({
           <span className="tool-panel__eyebrow">Session Artifacts</span>
           <strong>生成文件</strong>
         </div>
-        <button
+        <IconButton
+          label="刷新生成文件"
           ref={refreshRef}
           type="button"
           className="tool-panel__icon-button"
@@ -127,7 +130,7 @@ export function FilesWorkbarPanel({
           onClick={onRefresh}
         >
           <RefreshCw aria-hidden="true" size={15} />
-        </button>
+        </IconButton>
       </header>
 
       {error && (
@@ -150,7 +153,8 @@ export function FilesWorkbarPanel({
         >
           <section className="tool-panel__artifact" aria-label={`${selected.name} 内容`}>
             <header>
-              <button
+              <Button
+                variant="quiet"
                 ref={backRef}
                 type="button"
                 className="tool-panel__back"
@@ -159,7 +163,7 @@ export function FilesWorkbarPanel({
               >
                 <ArrowLeft aria-hidden="true" size={16} />
                 返回
-              </button>
+              </Button>
               <div className="tool-panel__artifact-title">
                 <strong title={selected.name}>{selected.name}</strong>
                 <span>
@@ -169,30 +173,41 @@ export function FilesWorkbarPanel({
               {(onOpenArtifact ||
                 onSaveArtifactAs ||
                 (artifactPreviewKind(selected) === "html" && onOpenDefaultApp)) && (
-                <details className="tool-panel__artifact-actions">
-                  <summary aria-label="生成文件操作" title="生成文件操作">
-                    <MoreHorizontal aria-hidden="true" size={16} />
-                  </summary>
-                  <div role="group" aria-label="生成文件操作">
+                <div className="pico-artifact-menu">
+                  <DropdownMenu
+                    className="pico-artifact-actions-menu"
+                    button={{
+                      label: "生成文件操作",
+                      isIconOnly: true,
+                      icon: <MoreHorizontal aria-hidden="true" size={16} />,
+                      variant: "ghost",
+                      size: "sm",
+                    }}
+                    hasChevron={false}
+                    alignment="end"
+                  >
                     {artifactPreviewKind(selected) === "html" && onOpenDefaultApp && (
-                      <button type="button" onClick={() => onOpenDefaultApp(selected.id)}>
-                        用默认应用打开
-                      </button>
+                      <DropdownMenuItem
+                        label="用默认应用打开"
+                        onClick={() => onOpenDefaultApp(selected.id)}
+                      />
                     )}
                     {onOpenArtifact && (
-                      <button type="button" onClick={() => onOpenArtifact(selected.id)}>
-                        <ExternalLink aria-hidden="true" size={14} />
-                        在访达中显示
-                      </button>
+                      <DropdownMenuItem
+                        label="在访达中显示"
+                        icon={<ExternalLink aria-hidden="true" size={14} />}
+                        onClick={() => onOpenArtifact(selected.id)}
+                      />
                     )}
                     {onSaveArtifactAs && (
-                      <button type="button" onClick={() => onSaveArtifactAs(selected.id)}>
-                        <Download aria-hidden="true" size={14} />
-                        另存生成文件
-                      </button>
+                      <DropdownMenuItem
+                        label="另存生成文件"
+                        icon={<Download aria-hidden="true" size={14} />}
+                        onClick={() => onSaveArtifactAs(selected.id)}
+                      />
                     )}
-                  </div>
-                </details>
+                  </DropdownMenu>
+                </div>
               )}
             </header>
             {contentError ? (
@@ -227,13 +242,14 @@ export function FilesWorkbarPanel({
                       >
                         <span style={{ width: `${progress.percent}%` }} />
                       </div>
-                      <button
+                      <Button
+                        variant="quiet"
                         type="button"
                         disabled={contentLoading}
                         onClick={() => onLoadChunk(selected.id, progress.nextOffset)}
                       >
                         继续读取
-                      </button>
+                      </Button>
                     </div>
                   )}
                 {(selectedContent.truncated || (progress && !progress.complete)) && (
@@ -273,7 +289,8 @@ export function FilesWorkbarPanel({
             <ul className="tool-panel__artifact-list">
               {artifacts.map((artifact) => (
                 <li key={artifact.id}>
-                  <button
+                  <Button
+                    variant="quiet"
                     type="button"
                     data-artifact-id={artifact.id}
                     onClick={() => onSelectArtifact(artifact.id)}
@@ -288,7 +305,7 @@ export function FilesWorkbarPanel({
                         <small className="tool-panel__artifact-hint">在 Pico 中查看</small>
                       )}
                     </span>
-                  </button>
+                  </Button>
                 </li>
               ))}
             </ul>

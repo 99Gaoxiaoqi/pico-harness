@@ -1,3 +1,4 @@
+import { IconButton, Button } from "../components.js";
 import { useId, useState, type KeyboardEvent } from "react";
 import type {
   RuntimeExecutionPage,
@@ -156,14 +157,15 @@ export function InspectorWorkbarPanel({
         <div>
           <strong>执行追踪</strong>
         </div>
-        <button
+        <IconButton
+          label="刷新追踪"
           type="button"
           className="tool-panel__icon-button"
           aria-label="刷新追踪"
           onClick={onRefresh}
         >
           <RefreshCw aria-hidden="true" size={15} />
-        </button>
+        </IconButton>
       </header>
 
       {error && (
@@ -180,7 +182,8 @@ export function InspectorWorkbarPanel({
             ["overview", "总览"],
           ] as const
         ).map(([value, label]) => (
-          <button
+          <Button
+            variant="quiet"
             key={value}
             type="button"
             role="tab"
@@ -192,7 +195,7 @@ export function InspectorWorkbarPanel({
             onClick={() => setTab(value)}
           >
             {label}
-          </button>
+          </Button>
         ))}
       </div>
       <div
@@ -281,7 +284,8 @@ export function InspectorWorkbarPanel({
                       <ol className="tool-panel__timeline">
                         {group.items.map((item) => (
                           <li key={item.id} data-status={item.status ?? "completed"}>
-                            <button
+                            <Button
+                              variant="quiet"
                               type="button"
                               aria-pressed={selectedTraceId === item.id}
                               onClick={() => onSelectTrace(item.id)}
@@ -299,7 +303,7 @@ export function InspectorWorkbarPanel({
                                 </small>
                               </span>
                               {item.toolCallId && <Wrench aria-label="工具调用" size={13} />}
-                            </button>
+                            </Button>
                           </li>
                         ))}
                       </ol>
@@ -311,7 +315,8 @@ export function InspectorWorkbarPanel({
           </section>
         )}
         {hasMore && onLoadMore && (
-          <button
+          <Button
+            variant="quiet"
             type="button"
             className="tool-panel__load-more"
             disabled={loading}
@@ -319,18 +324,19 @@ export function InspectorWorkbarPanel({
           >
             <ChevronDown aria-hidden="true" size={14} />
             {loadingEarlier ? "正在加载较早记录…" : "加载较早记录"}
-          </button>
+          </Button>
         )}
 
         {canHideEarlier && onHideEarlier && (
-          <button
+          <Button
+            variant="quiet"
             type="button"
             className="tool-panel__load-more"
             disabled={loading}
             onClick={onHideEarlier}
           >
             隐藏较早记录
-          </button>
+          </Button>
         )}
 
         {preview && (

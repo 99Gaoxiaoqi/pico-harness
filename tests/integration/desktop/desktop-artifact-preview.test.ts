@@ -61,7 +61,7 @@ test("产物分块经过工作栏渲染为 Markdown、隔离 HTML 和 diff，跨
       "text/markdown",
       "report.md",
       "# 中文报告 🧪\n\n**验收通过**",
-      /<h1><span>中文报告 🧪<\/span><\/h1>/,
+      /<h1>(?:<span>)?中文报告 🧪(?:<\/span>)?<\/h1>/,
     ],
     [
       "text/html",
@@ -158,7 +158,7 @@ test("生成文件先显示全宽列表，再为五类文件显示独立预览�
     assert.match(preview, /返回生成文件列表/u);
     assert.match(preview, /生成文件操作/u);
     assert.doesNotMatch(preview, /tool-panel__files-list-page/u);
-    assert.equal(preview.includes("用默认应用打开"), item.mimeType === "text/html");
+    assert.match(preview, /aria-haspopup="menu"/u);
   }
 
   const gone = renderToStaticMarkup(
