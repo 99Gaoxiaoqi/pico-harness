@@ -1,3 +1,4 @@
+import { Button as AstryxButton } from "@astryxdesign/core/Button";
 import { AlertCircle, ArrowUpRight, RefreshCw } from "lucide-react";
 import * as React from "react";
 import { providerFailureDescription, type ProviderRetryNotice } from "../provider-retry.js";
@@ -72,13 +73,25 @@ export function ProviderFailureCard({
         <p>{detail}</p>
         <div className="conversation-provider-failure__actions">
           {canRetry && (
-            <button type="button" onClick={onRetry}>
+            <AstryxButton
+              className="pico-page-control"
+              label="编辑后重试"
+              variant="ghost"
+              type="button"
+              onClick={onRetry}
+            >
               <RefreshCw aria-hidden="true" /> 编辑后重试
-            </button>
+            </AstryxButton>
           )}
-          <button type="button" className="is-quiet" onClick={onDiagnostics}>
+          <AstryxButton
+            label="查看诊断"
+            variant="ghost"
+            type="button"
+            className="pico-page-control is-quiet"
+            onClick={onDiagnostics}
+          >
             查看诊断 <ArrowUpRight aria-hidden="true" />
-          </button>
+          </AstryxButton>
         </div>
       </div>
     </section>

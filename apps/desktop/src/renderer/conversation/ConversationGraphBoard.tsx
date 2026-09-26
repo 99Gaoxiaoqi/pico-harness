@@ -1,3 +1,5 @@
+import { Button as AstryxButton } from "@astryxdesign/core/Button";
+import { SelectField } from "../ui-controls.js";
 import { useEffect, useId, useRef, useState } from "react";
 import { ChevronDown, ChevronUp, X } from "lucide-react";
 import {
@@ -85,9 +87,11 @@ export function GraphBoardView(props: BoardProps) {
   return (
     <section className="conversation-graph-board" aria-label="Agent Graph">
       <header className="conversation-graph-board__header">
-        <button
+        <AstryxButton
+          label="Agent Graph"
+          variant="ghost"
           type="button"
-          className="conversation-graph-board__heading"
+          className="pico-page-control conversation-graph-board__heading"
           aria-expanded={!collapsed}
           aria-controls={contentId}
           onClick={() => setCollapsed(!collapsed)}
@@ -98,54 +102,69 @@ export function GraphBoardView(props: BoardProps) {
               ? "正在读取…"
               : `${status} · ${settled}/${cards.length} 已结束`}
           </span>
-        </button>
+        </AstryxButton>
         <div className="conversation-graph-board__actions">
           {props.graphs.length > 1 && (
-            <select
-              aria-label="Graph 周期"
+            <SelectField
+              label="Graph 周期"
               value={detail?.summary.graphId ?? ""}
-              onChange={(event) => props.onSelect(event.target.value)}
-            >
-              {props.graphs.map((graph, index) => (
-                <option key={graph.graphId} value={graph.graphId}>
-                  #{graph.epoch} · {index === props.graphs.length - 1 ? "当前" : "历史"}
-                </option>
-              ))}
-            </select>
+              onValueChange={props.onSelect}
+              options={props.graphs.map((graph, index) => ({
+                value: graph.graphId,
+                label: `#${graph.epoch} · ${index === props.graphs.length - 1 ? "当前" : "历史"}`,
+              }))}
+            />
           )}
           {current && detail && !finished && (
-            <button type="button" disabled={props.stopping || props.loading} onClick={props.onStop}>
+            <AstryxButton
+              className="pico-page-control"
+              label={props.stopping ? "正在停止…" : "停止 Graph"}
+              variant="ghost"
+              type="button"
+              isDisabled={props.stopping || props.loading}
+              onClick={props.onStop}
+            >
               {props.stopping ? "正在停止…" : "停止 Graph"}
-            </button>
+            </AstryxButton>
           )}
-          <button
+          <AstryxButton
+            label={collapsed ? "展开 Agent Graph" : "收起 Agent Graph"}
+            variant="ghost"
             type="button"
-            className="conversation-graph-board__icon"
+            className="pico-page-control conversation-graph-board__icon"
             aria-label={collapsed ? "展开 Agent Graph" : "收起 Agent Graph"}
             aria-expanded={!collapsed}
             aria-controls={contentId}
             onClick={() => setCollapsed(!collapsed)}
           >
             {collapsed ? <ChevronDown size={15} /> : <ChevronUp size={15} />}
-          </button>
+          </AstryxButton>
           {finished && current && (
-            <button
+            <AstryxButton
+              label="关闭 Agent Graph 看板"
+              variant="ghost"
               type="button"
-              className="conversation-graph-board__icon"
+              className="pico-page-control conversation-graph-board__icon"
               aria-label="关闭 Agent Graph 看板"
               onClick={() => setDismissed(true)}
             >
               <X size={14} />
-            </button>
+            </AstryxButton>
           )}
         </div>
       </header>
       {props.error && (
         <div className="conversation-graph-board__error" role="alert">
           {props.error}
-          <button type="button" onClick={props.onRefresh}>
+          <AstryxButton
+            className="pico-page-control"
+            label="重试"
+            variant="ghost"
+            type="button"
+            onClick={props.onRefresh}
+          >
             重试
-          </button>
+          </AstryxButton>
         </div>
       )}
       {!collapsed && (
@@ -154,9 +173,15 @@ export function GraphBoardView(props: BoardProps) {
             <>
               <div className="conversation-graph-board__caption">
                 <span>子任务</span>
-                <button type="button" onClick={props.onDetails}>
+                <AstryxButton
+                  className="pico-page-control"
+                  label="查看详情"
+                  variant="ghost"
+                  type="button"
+                  onClick={props.onDetails}
+                >
                   查看详情
-                </button>
+                </AstryxButton>
               </div>
               <ul>
                 {cards.map((card) => (
@@ -167,13 +192,16 @@ export function GraphBoardView(props: BoardProps) {
                       <p title={card.instruction}>{card.instruction}</p>
                     </div>
                     <span className="conversation-graph-board__state">{card.label}</span>
-                    <button
+                    <AstryxButton
+                      className="pico-page-control"
+                      label="打开子任务"
+                      variant="ghost"
                       type="button"
-                      disabled={!card.sessionId}
+                      isDisabled={!card.sessionId}
                       onClick={() => card.sessionId && props.onOpenSession(card.sessionId)}
                     >
                       打开子任务
-                    </button>
+                    </AstryxButton>
                   </li>
                 ))}
               </ul>
@@ -188,9 +216,15 @@ export function GraphBoardView(props: BoardProps) {
           {needsAttention && (
             <p className="conversation-graph-board__error">
               调度需要处理。
-              <button type="button" onClick={props.onDetails}>
+              <AstryxButton
+                className="pico-page-control"
+                label="查看详情"
+                variant="ghost"
+                type="button"
+                onClick={props.onDetails}
+              >
                 查看详情
-              </button>
+              </AstryxButton>
             </p>
           )}
         </div>

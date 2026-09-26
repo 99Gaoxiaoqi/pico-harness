@@ -1,3 +1,4 @@
+import { Button as AstryxButton } from "@astryxdesign/core/Button";
 import type { DeepResearchProgress } from "@pico/core/deep-research";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invokeWorkbarRuntime, workbarErrorMessage } from "../workbar-panels/workbar-runtime.js";
@@ -90,9 +91,16 @@ export function DeepResearchPanel(props: {
       <div className="deep-research-heading">
         <strong>深度研究 · 只读</strong>
         {props.sessionId && (
-          <button type="button" disabled={loading} onClick={() => void refresh()}>
+          <AstryxButton
+            className="pico-page-control"
+            label="刷新"
+            variant="ghost"
+            type="button"
+            isDisabled={loading}
+            onClick={() => void refresh()}
+          >
             刷新
-          </button>
+          </AstryxButton>
         )}
       </div>
       {error && <p role="alert">{error}</p>}
@@ -109,10 +117,13 @@ export function DeepResearchPanel(props: {
                 ["深挖", "跨模块追踪实现、数据流与边界条件"],
               ] as const
             ).map(([scopeLabel, task]) => (
-              <button
+              <AstryxButton
+                className="pico-page-control"
+                label={`${scopeLabel}研究`}
+                variant="ghost"
                 key={scopeLabel}
                 type="button"
-                disabled={props.busy}
+                isDisabled={props.busy}
                 onClick={() =>
                   props.onStarter(
                     `请按${scopeLabel}范围只读研究这个项目：${task}。保存证据与检查点，完成研究报告和可实施的交接清单。`,
@@ -120,24 +131,33 @@ export function DeepResearchPanel(props: {
                 }
               >
                 {scopeLabel}研究
-              </button>
+              </AstryxButton>
             ))}
           </div>
         </>
       )}
       {current && (
         <div className="deep-research-actions">
-          <button type="button" onClick={props.onOpenArtifacts}>
+          <AstryxButton
+            className="pico-page-control"
+            label={`查看证据与报告（${current.artifactsCount}）`}
+            variant="ghost"
+            type="button"
+            onClick={props.onOpenArtifacts}
+          >
             查看证据与报告（{current.artifactsCount}）
-          </button>
+          </AstryxButton>
           {current.status === "completed" && current.implementationPrompt && (
-            <button
+            <AstryxButton
+              className="pico-page-control"
+              label={implementing ? "正在创建…" : "新建实施任务"}
+              variant="ghost"
               type="button"
-              disabled={props.busy || implementing}
+              isDisabled={props.busy || implementing}
               onClick={() => void implement()}
             >
               {implementing ? "正在创建…" : "新建实施任务"}
-            </button>
+            </AstryxButton>
           )}
         </div>
       )}
