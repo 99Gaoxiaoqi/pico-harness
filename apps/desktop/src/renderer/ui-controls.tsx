@@ -147,12 +147,14 @@ export function SelectField({
 }
 
 interface BooleanFieldProps extends FieldBase {
+  readonly labelHidden?: boolean;
   readonly checked: boolean;
   readonly onCheckedChange: (checked: boolean) => void;
 }
 
 export function SwitchField({
   label,
+  labelHidden = true,
   checked,
   disabled,
   required,
@@ -170,7 +172,7 @@ export function SwitchField({
           : undefined
       }
       label={label}
-      isLabelHidden
+      isLabelHidden={labelHidden}
       value={checked}
       htmlName={name}
       isDisabled={disabled ?? false}
@@ -183,6 +185,7 @@ export function SwitchField({
 
 export function CheckboxField({
   label,
+  labelHidden = true,
   checked,
   disabled,
   required,
@@ -200,7 +203,7 @@ export function CheckboxField({
           : undefined
       }
       label={label}
-      isLabelHidden
+      isLabelHidden={labelHidden}
       value={checked}
       htmlName={name}
       isDisabled={disabled ?? false}
