@@ -1,16 +1,15 @@
+import { ChatLayout } from "@astryxdesign/core/Chat";
 import { createRoot } from "react-dom/client";
 import { useRef, useState } from "react";
-import { Theme } from "@astryxdesign/core/theme";
-import { neutralTheme } from "@astryxdesign/theme-neutral/built";
+import { PicoTheme } from "../../apps/desktop/src/renderer/astryx-provider.js";
 import {
   ConversationComposer,
   type ConversationComposerHandle,
 } from "../../apps/desktop/src/renderer/conversation/ConversationComposer.js";
 import { ConversationSurface } from "../../apps/desktop/src/renderer/conversation/ConversationSurface.js";
 import { SideChatWorkbarPanel } from "../../apps/desktop/src/renderer/workbar-panels/SideChatWorkbarPanel.js";
-import "@astryxdesign/core/reset.css";
-import "@astryxdesign/core/astryx.css";
-import "@astryxdesign/theme-neutral/theme.css";
+import "../../apps/desktop/src/renderer/styles.css";
+import "../../apps/desktop/src/renderer/astryx-controls.css";
 import "../../apps/desktop/src/renderer/conversation/conversation.css";
 import "../../apps/desktop/src/renderer/workbar-panels/ToolPanels.css";
 import "../../apps/desktop/src/renderer/conversation/astryx-chat.css";
@@ -24,7 +23,17 @@ const host = window as unknown as {
   setDraft: (text: string) => void;
   append: () => void;
   focusEditor: () => void;
+  disabledScrollWrites: number[];
 };
+host.disabledScrollWrites = [];
+const scrollTop = Object.getOwnPropertyDescriptor(Element.prototype, "scrollTop")!;
+Object.defineProperty(Element.prototype, "scrollTop", {
+  ...scrollTop,
+  set(value: number) {
+    if (this.classList.contains("disabled-scroll-probe")) host.disabledScrollWrites.push(value);
+    scrollTop.set!.call(this, value);
+  },
+});
 host.sent = [];
 host.sideSent = [];
 host.clearOnSend = false;
@@ -40,7 +49,19 @@ function Fixture() {
   host.append = () => setCount((value) => value + 1);
   host.focusEditor = () => inputRef.current?.focus();
   return (
-    <Theme theme={neutralTheme} mode="light">
+    <PicoTheme>
+      <ChatLayout
+        className="disabled-scroll-probe"
+        scrollButton={null}
+        autoScroll={false}
+        style={{ position: "fixed", left: -1000, width: 120, height: "25vh" }}
+      >
+        {Array.from({ length: count }, (_, index) => (
+          <p key={index} style={{ height: 32 }}>
+            消息 {index}
+          </p>
+        ))}
+      </ChatLayout>
       <main
         style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) 300px", height: "100vh" }}
       >
@@ -89,7 +110,7 @@ function Fixture() {
           onClose={() => {}}
         />
       </main>
-    </Theme>
+    </PicoTheme>
   );
 }
 createRoot(document.getElementById("root")!).render(<Fixture />);

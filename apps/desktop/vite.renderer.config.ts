@@ -19,6 +19,9 @@ export default defineConfig({
     force: true,
   },
   build: {
+    // Electron 43 embeds Chromium 150; preserve native light-dark() and @scope.
+    target: "chrome150",
+    cssTarget: "chrome150",
     outDir: resolve(import.meta.dirname, ".vite/renderer/main_window"),
     sourcemap: false,
   },
