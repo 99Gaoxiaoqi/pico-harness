@@ -1,193 +1,153 @@
-import { lexer, type Token, type Tokens } from "marked";
+import {
+  Markdown,
+  type MarkdownComponents,
+  type MarkdownInlinePlugin,
+} from "@astryxdesign/core/Markdown";
 import { isSafeMarkdownHref, sanitizeMarkdownText } from "@pico/protocol";
-import React, { Fragment, useMemo, type ElementType, type ReactNode } from "react";
+import { lexer, type Token, type Tokens } from "marked";
+import React, { useMemo, type ElementType } from "react";
 
-// The desktop Vite build uses the automatic JSX runtime; this keeps the module executable in
-// the repository's Node-based integration harness, which still lowers JSX through React.createElement.
+// Node integration tests use the classic JSX transform.
 void React;
-
-const MARKED_OPTIONS = { gfm: true, breaks: false } as const;
 
 export interface MarkdownTextProps {
   readonly text: string;
   readonly dim?: boolean | undefined;
 }
 
-/**
- * Small React projection of the shared marked token tree.
- *
- * Keeping the projection token based avoids injecting marked HTML into the renderer. Raw HTML,
- * images and unsafe links are deliberately rendered as inert text so a model response cannot
- * turn the Electron renderer into a navigation or script surface.
- */
+const components: MarkdownComponents = {
+  code: ({ code }) => (
+    <pre className="desktop-markdown__code">
+      <code>{code}</code>
+    </pre>
+  ),
+  inlineCode: ({ children }) => <code>{children}</code>,
+  link: ({ href, children }) =>
+    isSafeMarkdownHref(href) ? (
+      <a href={href} rel="noopener noreferrer" target="_blank">
+        {children}
+      </a>
+    ) : (
+      <span className="desktop-markdown__blocked-link" title="链接已拦截">
+        {children}
+      </span>
+    ),
+  image: ({ alt }) => <span className="desktop-markdown__image-placeholder">[图片：{alt}]</span>,
+  heading: ({ level, children }) => {
+    const Tag = `h${level}` as ElementType;
+    return <Tag>{children}</Tag>;
+  },
+  paragraph: ({ children }) => <p>{children}</p>,
+  blockquote: ({ children }) => <blockquote>{children}</blockquote>,
+  hr: () => <hr />,
+};
+
+/** Astryx renders the document; Pico retains its text, URL and inert-image policy. */
 export function MarkdownText({ text, dim = false }: MarkdownTextProps) {
-  const tokens = useMemo(() => lexer(stripControls(text), MARKED_OPTIONS), [text]);
+  const markdown = useMemo(() => {
+    const sanitized = sanitizeMarkdownText(text);
+    // Astryx 0.6.2 drops checkboxes in mixed ordinary/task lists. Preserve the existing
+    // inert checkboxes through its inline renderer, using a marker absent from the input.
+    let prefix = "\uE000pico-task-";
+    while (sanitized.includes(prefix)) prefix += "x";
+    const inlinePlugins: MarkdownInlinePlugin[] = [
+      {
+        pattern: new RegExp(`${prefix}(checked|unchecked)\uE001`, "g"),
+        render: (match, key) => (
+          <input
+            key={key}
+            type="checkbox"
+            checked={match[1] === "checked"}
+            disabled
+            readOnly
+            aria-label={match[1] === "checked" ? "已完成" : "未完成"}
+          />
+        ),
+      },
+    ];
+    return {
+      text: filterHtml(sanitized, lexer(sanitized, { gfm: true, breaks: false }), prefix),
+      inlinePlugins,
+    };
+  }, [text]);
   return (
-    <div className={`desktop-markdown${dim ? " desktop-markdown--dim" : ""}`}>
-      {renderBlocks(tokens, "root")}
-    </div>
+    <Markdown
+      className={`desktop-markdown${dim ? " desktop-markdown--dim" : ""}`}
+      components={components}
+      inlinePlugins={markdown.inlinePlugins}
+      isStreaming={false}
+      autolink="gfm"
+    >
+      {markdown.text}
+    </Markdown>
   );
 }
 
-function renderBlocks(tokens: readonly Token[], keyPrefix: string): ReactNode[] {
-  return tokens.flatMap((token, index) => {
-    const key = `${keyPrefix}-${index}`;
-    const rendered = renderBlock(token, key);
-    return rendered === null || rendered === undefined ? [] : [rendered];
-  });
-}
-
-function renderBlock(token: Token, key: string): ReactNode {
-  switch (token.type) {
-    case "space":
-      return null;
-    case "heading": {
-      const Tag = `h${Math.min(6, Math.max(1, token.depth))}` as ElementType;
-      return <Tag key={key}>{renderInline(token.tokens ?? [], key)}</Tag>;
-    }
-    case "paragraph":
-      return <p key={key}>{renderInline(token.tokens ?? [], key)}</p>;
-    case "text":
-      return token.tokens ? (
-        <Fragment key={key}>{renderInline(token.tokens, key)}</Fragment>
-      ) : (
-        <span key={key}>{token.text}</span>
-      );
-    case "code":
-      return (
-        <pre key={key} className="desktop-markdown__code">
-          <code>{token.text}</code>
-        </pre>
-      );
-    case "blockquote":
-      return <blockquote key={key}>{renderBlocks(token.tokens ?? [], key)}</blockquote>;
-    case "list": {
-      const List = token.ordered ? "ol" : "ul";
-      return (
-        <List key={key} start={token.ordered && token.start !== 1 ? token.start : undefined}>
-          {token.items.map((item: Tokens.ListItem, index: number) => (
-            <li key={`${key}-item-${index}`}>
-              {item.task && (
-                <input
-                  type="checkbox"
-                  checked={item.checked === true}
-                  disabled
-                  readOnly
-                  aria-label={item.checked ? "已完成" : "未完成"}
-                />
-              )}
-              {renderBlocks(item.tokens, `${key}-item-${index}`)}
-            </li>
-          ))}
-        </List>
-      );
-    }
-    case "table":
-      return (
-        <div key={key} className="desktop-markdown__table-wrap">
-          <table>
-            <thead>
-              <tr>
-                {token.header.map((cell: Tokens.TableCell, index: number) =>
-                  renderTableCell(cell, `${key}-head-${index}`),
-                )}
-              </tr>
-            </thead>
-            <tbody>
-              {token.rows.map((row: Tokens.TableCell[], rowIndex: number) => (
-                <tr key={`${key}-row-${rowIndex}`}>
-                  {row.map((cell: Tokens.TableCell, cellIndex: number) =>
-                    renderTableCell(cell, `${key}-row-${rowIndex}-${cellIndex}`),
-                  )}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      );
-    case "hr":
-      return <hr key={key} />;
-    case "br":
-      return <br key={key} />;
-    case "html":
-      return null;
-    default:
-      return renderInlineToken(token, key);
+/**
+ * Remove only HTML tokens identified by marked, never strings that look like tags in code.
+ * Preserve source gaps (including reference definitions) and untouched token spelling.
+ */
+function filterHtml(source: string, tokens: readonly Token[], taskPrefix: string): string {
+  let cursor = 0;
+  let result = "";
+  for (const token of tokens) {
+    const offset = source.indexOf(token.raw, cursor);
+    if (offset < 0) continue;
+    result += source.slice(cursor, offset) + filterToken(token, taskPrefix);
+    cursor = offset + token.raw.length;
   }
+  return result + source.slice(cursor);
 }
 
-function renderTableCell(cell: Tokens.TableCell, key: string): ReactNode {
-  const Tag = cell.header ? "th" : "td";
-  return (
-    <Tag key={key} style={cell.align ? { textAlign: cell.align } : undefined}>
-      {renderInline(cell.tokens, key)}
-    </Tag>
-  );
-}
-
-function renderInline(tokens: readonly Token[], keyPrefix: string): ReactNode[] {
-  return tokens.flatMap((token, index) => {
-    const key = `${keyPrefix}-inline-${index}`;
-    const rendered = renderInlineToken(token, key);
-    return rendered === null || rendered === undefined ? [] : [rendered];
-  });
-}
-
-function renderInlineToken(token: Token, key: string): ReactNode {
-  switch (token.type) {
-    case "text":
-      return token.tokens ? (
-        <Fragment key={key}>{renderInline(token.tokens, key)}</Fragment>
-      ) : (
-        <span key={key}>{token.text}</span>
-      );
-    case "escape":
-      return <span key={key}>{token.text}</span>;
-    case "strong":
-      return <strong key={key}>{renderInline(token.tokens ?? [], key)}</strong>;
-    case "em":
-      return <em key={key}>{renderInline(token.tokens ?? [], key)}</em>;
-    case "del":
-      return <del key={key}>{renderInline(token.tokens ?? [], key)}</del>;
-    case "codespan":
-      return <code key={key}>{token.text}</code>;
-    case "br":
-      return <br key={key} />;
-    case "link": {
-      const children = renderInline(token.tokens ?? [], key);
-      return isSafeHref(token.href) ? (
-        <a key={key} href={token.href} rel="noopener noreferrer" target="_blank">
-          {children}
-        </a>
-      ) : (
-        <span key={key} className="desktop-markdown__blocked-link" title="链接已拦截">
-          {children}
-        </span>
-      );
-    }
-    case "image":
-      return (
-        <span key={key} className="desktop-markdown__image-placeholder">
-          [图片：{token.text}]
-        </span>
-      );
-    case "html":
-      return null;
-    default: {
-      const generic = token as Token & {
-        readonly tokens?: readonly Token[];
-        readonly text?: string;
-      };
-      if (generic.tokens) return <Fragment key={key}>{renderInline(generic.tokens, key)}</Fragment>;
-      return generic.text ? <span key={key}>{generic.text}</span> : null;
-    }
+function filterToken(token: Token, taskPrefix: string): string {
+  if (token.type === "html") return "";
+  if (token.type === "code" || token.type === "codespan") return token.raw;
+  if (token.type === "blockquote") {
+    const filtered = filterHtml(token.text, token.tokens ?? [], taskPrefix);
+    return filtered === token.text
+      ? token.raw
+      : filtered
+          .split("\n")
+          .map((line) => `> ${line}`)
+          .join("\n") + "\n";
   }
-}
-
-function stripControls(value: string): string {
-  return sanitizeMarkdownText(value);
-}
-
-function isSafeHref(value: string): boolean {
-  return isSafeMarkdownHref(value);
+  if (token.type === "list") {
+    const filtered: string[] = token.items.map((item: Tokens.ListItem) =>
+      filterHtml(item.text, item.tokens, taskPrefix),
+    );
+    if (
+      !token.items.some((item: Tokens.ListItem) => item.task) &&
+      filtered.every((text, index) => text === token.items[index]?.text)
+    )
+      return token.raw;
+    return (
+      token.items
+        .map((item: Tokens.ListItem, index: number) => {
+          const marker = token.ordered ? `${Number(token.start) + index}. ` : "- ";
+          const task = item.task
+            ? `${taskPrefix}${item.checked ? "checked" : "unchecked"}\uE001 `
+            : "";
+          const lines = (task + filtered[index]).split("\n");
+          return marker + lines.join(`\n${" ".repeat(marker.length)}`);
+        })
+        .join(token.loose ? "\n\n" : "\n") + "\n"
+    );
+  }
+  if (token.type === "table") {
+    const cells = [token.header, ...token.rows];
+    const filtered = cells.map((row: Tokens.TableCell[]) =>
+      row.map((cell) => filterHtml(cell.text, cell.tokens, taskPrefix)),
+    );
+    if (filtered.every((row, i) => row.every((text, j) => text === cells[i]?.[j]?.text)))
+      return token.raw;
+    const row = (values: string[]) => `| ${values.join(" | ")} |`;
+    const alignment = token.align.map((align: string | null) =>
+      align === "center" ? ":---:" : align === "right" ? "---:" : align === "left" ? ":---" : "---",
+    );
+    return (
+      [row(filtered[0] ?? []), row(alignment), ...filtered.slice(1).map(row)].join("\n") + "\n"
+    );
+  }
+  const nested = (token as Token & { tokens?: Token[] }).tokens;
+  return nested ? filterHtml(token.raw, nested, taskPrefix) : token.raw;
 }
