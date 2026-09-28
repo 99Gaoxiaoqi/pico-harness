@@ -683,16 +683,8 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((entry) => typeof entry === "string");
 }
 
-function isNonEmptyStringArray(value: unknown): value is string[] {
-  return isStringArray(value) && value.length > 0 && value.every((entry) => entry.trim().length > 0);
-}
-
 function isOptionalString(value: unknown): boolean {
   return value === undefined || typeof value === "string";
-}
-
-function isOptionalNonNegativeInteger(value: unknown): boolean {
-  return value === undefined || isNonNegativeInteger(value);
 }
 
 function isOptionalNonNegativeFiniteNumber(value: unknown): boolean {
