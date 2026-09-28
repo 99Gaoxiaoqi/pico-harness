@@ -149,6 +149,7 @@ export class GoalContinuationCoordinator {
       const goal = current.currentGoal;
       if (
         !goal ||
+        goal.armedAt !== undefined ||
         !execution ||
         execution.daemonRunId !== completion.runId ||
         current.coordinator.lastSettledRunId === completion.runId ||
