@@ -22,6 +22,7 @@ import {
 } from "@pico/protocol";
 import { SqliteRuntimeControlStore } from "@pico/storage/sqlite/sqlite-runtime-control-store";
 import { SqliteRuntimeEventStore } from "@pico/storage/sqlite/sqlite-runtime-event-store";
+import { readRuntimeModelHistorySnapshot } from "@pico/runtime/session-runtime-read-model";
 import { loadUserDefaultRealModel } from "../real-llm-user-model.js";
 
 export const GOAL_E2E_TIMEOUT_MS = 5 * 60_000;
@@ -36,6 +37,13 @@ interface GoalView {
   readonly tokensAtStart: number;
   readonly tokensNow: number;
   readonly lastReason?: string;
+  readonly lastEvaluation?: {
+    readonly at: number;
+    readonly reason: string;
+    readonly met?: boolean;
+    readonly waiting?: boolean;
+    readonly evaluatorFailed?: boolean;
+  };
 }
 
 /** Uses the production executor, AgentEngine and real Provider; only the external fixture changes. */
@@ -123,6 +131,7 @@ export async function createRealGoalHost(
   const continuationRunIds = new Set<string>();
   let sessionId = "";
   let markerReleased = false;
+  let verified = false;
   let observerError: unknown;
   const unsubscribe = services.desktopService.subscribe((event) => {
     if (event.scope.sessionId !== sessionId || !event.scope.runId) return;
@@ -156,7 +165,8 @@ export async function createRealGoalHost(
     } finally {
       if (sessionId)
         await globalSessionManager.delete(sessionId, workspacePath, { picoHome })?.close();
-      await rm(root, { recursive: true, force: true });
+      if (verified) await rm(root, { recursive: true, force: true });
+      else context.diagnostic(`Goal E2E diagnostic artifacts retained at ${root}`);
     }
   });
   await services.trustStore.trust(workspacePath);
@@ -168,9 +178,13 @@ export async function createRealGoalHost(
     await request("session.settings.update", { ...sessionScope, thinkingEffort: "off" });
   }
   const condition = `本轮必须重新用工具读取外部构建结果文件 ${markerPath}，读取结果包含 READY，且助手明确报告该读取结果时才完成。文件由外部系统更新，PENDING 表示尚未完成，需要等待后再次读取；不得自行修改、创建或删除此文件。`;
+  const evaluationHistory = new Map<number, GoalView["lastEvaluation"]>();
   const goal = async (): Promise<GoalView | undefined> => {
     const response = await request("goal.get", sessionScope);
-    return response.goal?.currentGoal ?? undefined;
+    const current = response.goal?.currentGoal ?? undefined;
+    if (current?.lastEvaluation)
+      evaluationHistory.set(current.lastEvaluation.at, current.lastEvaluation);
+    return current;
   };
   const assertRealExecutionAndReport = async (settled: GoalView) => {
     const storageRoot = resolvePicoPaths(workspacePath, { picoHome }).workspace.root;
@@ -178,10 +192,16 @@ export async function createRealGoalHost(
     const ledger = new SqliteRuntimeControlStore({ storageRoot });
     try {
       const events = await eventsStore.readSession(sessionId);
-      const runStarts = events.filter((event) => event.kind === "run.started");
+      const history = await readRuntimeModelHistorySnapshot(eventsStore, sessionId);
+      const allRunStarts = events.filter((event) => event.kind === "run.started");
       const terminalRuns = events.filter((event) => event.kind === "run.terminal");
       const attempts = ledger.listPhysicalAttempts({ sessionId });
       const succeeded = attempts.filter((attempt) => attempt.status === "succeeded");
+      const modelRunIds = new Set(
+        attempts.filter((attempt) => attempt.purpose === "main").map((attempt) => attempt.runId),
+      );
+      // Host input persistence also uses a short RuntimeRun with no model or tool calls.
+      const runStarts = allRunStarts.filter((event) => modelRunIds.has(event.runId));
       const knownCostAttempts = attempts.filter(
         (attempt) => attempt.costStatus !== "unknown" && attempt.costCNY !== undefined,
       );
@@ -198,8 +218,11 @@ export async function createRealGoalHost(
           modelRoute: model.route.id,
           status: settled.status,
           lastReason: settled.lastReason,
+          lastEvaluation: settled.lastEvaluation,
           hostRuns: startedRuns.size,
           hostContinuations: continuationRunIds.size,
+          canonicalModelRuns: runStarts.length,
+          canonicalMessageRuns: allRunStarts.length - runStarts.length,
           iterations: settled.iterations,
           physicalAttempts: attempts.length,
           succeededEvaluations: succeeded.filter((attempt) => attempt.purpose === "goal_evaluation")
@@ -219,13 +242,53 @@ export async function createRealGoalHost(
           ).length,
         }),
       );
+      context.diagnostic(
+        JSON.stringify({
+          evaluationHistory: [...evaluationHistory.values()],
+          recentConversation: history.messages
+            .filter(
+              (message) =>
+                (message.role === "user" || message.role === "assistant") &&
+                !message.toolCallId &&
+                !message.toolCalls?.length,
+            )
+            .slice(-6)
+            .map((message) => ({ role: message.role, content: message.content.slice(0, 500) })),
+          runs: allRunStarts.map((start) => ({
+            runId: start.runId,
+            data: start.data,
+            purposes: attempts
+              .filter((attempt) => attempt.runId === start.runId)
+              .map((attempt) => attempt.purpose),
+            markerEvidence: events
+              .filter(
+                (event) => event.runId === start.runId && event.kind === "tool.result.recorded",
+              )
+              .map((event) =>
+                event.kind === "tool.result.recorded" ? event.data.projection.text : "",
+              ),
+          })),
+        }),
+      );
       assert.ok(
         [...finishedRuns.values()].every((status) => status === "succeeded"),
         `Host Runs must succeed: ${JSON.stringify([...finishedRuns])}; ${settled.lastReason ?? ""}`,
       );
       assert.equal(runStarts.length, startedRuns.size);
-      assert.equal(terminalRuns.length, runStarts.length);
-      assert.equal(new Set(runStarts.map((event) => event.runId)).size, runStarts.length);
+      assert.ok(
+        [...continuationRunIds].every((runId) => modelRunIds.has(runId)),
+        "every Host Goal continuation must own exactly one canonical model Run",
+      );
+      assert.equal(terminalRuns.length, allRunStarts.length);
+      assert.equal(new Set(allRunStarts.map((event) => event.runId)).size, allRunStarts.length);
+      assert.ok(
+        events.every(
+          (event) =>
+            modelRunIds.has(event.runId) ||
+            !["model.call.started", "tool.started"].includes(event.kind),
+        ),
+        "message-only Runs must not dispatch model calls or tools",
+      );
       for (const run of runStarts) {
         assert.ok(
           events.some(
@@ -247,6 +310,11 @@ export async function createRealGoalHost(
       }
       assert.ok(tokens("main") > 0);
       assert.ok(tokens("goal_evaluation") > 0);
+      assert.equal(
+        settled.lastEvaluation?.evaluatorFailed,
+        false,
+        "the final evaluator must return a valid Goal decision",
+      );
       const lastRunId = runStarts.at(-1)?.runId;
       assert.ok(
         events.some(
@@ -279,6 +347,7 @@ export async function createRealGoalHost(
         await delay(100, undefined, { signal: context.signal });
         assert.equal(startedRuns.size, expectedRuns, "terminal Goal must not admit another Run");
       }
+      verified = true;
     },
     async arm(maxIterations: number) {
       await request("goal.control", {
@@ -296,7 +365,7 @@ export async function createRealGoalHost(
         idempotencyKey: "goal-real-e2e-initial-input",
         input: {
           kind: "text",
-          text: `开始执行当前 Goal。每个 Run 只调用一次 read_file 读取 ${markerPath}，据实引用文件中的状态后结束本轮回复。若状态为 PENDING，明确说明等待外部构建完成；不要循环轮询、sleep、请求用户输入或操作 Goal 控制。Host 会自动续跑。若为 READY，报告实际读取到的构建成功证据。只读此文件，不执行其他任务。`,
+          text: `开始执行当前 Goal。每个 Run 只调用一次 read_file 读取 ${markerPath}，最终回复少于100字，第一行原样引用刚读取到的 PENDING 或 READY 状态行，然后结束本轮回复。若状态为 PENDING，明确说明等待外部构建完成；不要循环轮询、sleep、请求用户输入或操作 Goal 控制。Host 会自动续跑。若为 READY，报告实际读取到的构建成功证据。只读此文件，不执行其他任务。`,
         },
       });
     },
