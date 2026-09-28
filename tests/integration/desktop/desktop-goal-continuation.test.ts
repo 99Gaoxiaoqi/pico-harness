@@ -91,6 +91,7 @@ async function fixture(
         );
         const engine = new AgentEngine({
           workDir: workspacePath,
+          runtimePort: createEngineRuntimePort(),
           provider,
           registry,
           goalManager: manager,
@@ -178,6 +179,7 @@ async function fixture(
       createRuntimeRequest("session.send", {
         workspacePath,
         sessionId,
+        behavior: "queue",
         input: { kind: "text", text },
         idempotencyKey: `input-${sessionId}-${text}`,
       }),
@@ -186,6 +188,8 @@ async function fixture(
     for (let n = 0; n < 2000; n++) {
       const value = await state(sessionId);
       if (value.currentGoal?.status === status) return value;
+      if (value.currentGoal && !["active", "waiting"].includes(value.currentGoal.status))
+        assert.fail(`Goal提前结束，期望${status}: ${JSON.stringify(value)}`);
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     assert.fail(`Goal未进入${status}: ${JSON.stringify(await state(sessionId))}`);
