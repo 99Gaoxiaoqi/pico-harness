@@ -40,6 +40,7 @@ export interface RuntimeRunExecutorSession extends RuntimeProjectionSession {
   };
 
   serialize<Result>(execute: () => Promise<Result>): Promise<Result>;
+  flushPersistence(): Promise<void>;
   beginRewindPoint(input: {
     readonly userPrompt: string;
     readonly messageId: string;
