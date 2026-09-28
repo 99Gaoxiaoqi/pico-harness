@@ -308,12 +308,14 @@ export class CostTracker implements LLMProvider {
           ...(context.goalId ? { goalId: context.goalId } : {}),
           ...(context.jobId ? { jobId: context.jobId } : {}),
           ...(context.attemptId ? { jobAttemptId: context.attemptId } : {}),
-          ...(runtimeRun
-            ? {
-                runId: runtimeRun.runId,
-                turnId: runtimeRun.currentTurnId,
-                workspacePath: runtimeRun.workDir,
-              }
+          ...((context.runId ?? runtimeRun?.runId)
+            ? { runId: context.runId ?? runtimeRun?.runId }
+            : {}),
+          ...((context.turnId ?? runtimeRun?.currentTurnId)
+            ? { turnId: context.turnId ?? runtimeRun?.currentTurnId }
+            : {}),
+          ...((context.workspacePath ?? runtimeRun?.workDir)
+            ? { workspacePath: context.workspacePath ?? runtimeRun?.workDir }
             : {}),
           ...(route.baseUrl ? { route: safeRouteBaseUrl(route.baseUrl) } : {}),
           ...(requestDiagnostic
@@ -486,9 +488,26 @@ export class CostTracker implements LLMProvider {
   private resolveContext(purpose?: LLMProviderRequestOptions["purpose"]): ProviderCallContext {
     const configured =
       typeof this.options.context === "function" ? this.options.context() : this.options.context;
-    const scoped = getProviderCallContext();
+    const scoped =
+      this.options.recordRuntimeEvents === false ? undefined : getProviderCallContext();
     const context = { purpose: "main", ...configured, ...scoped } satisfies ProviderCallContext;
-    return purpose ? { ...context, purpose } : context;
+    const resolved = { ...context };
+    // Explicit tracker identity wins over async-local state so a detached evaluator call
+    // remains attributed to its frozen Goal Run after the foreground Run has exited.
+    for (const key of [
+      "sessionId",
+      "conversationId",
+      "goalId",
+      "runId",
+      "turnId",
+      "workspacePath",
+      "jobId",
+      "attemptId",
+    ] as const) {
+      const value = configured?.[key];
+      if (value !== undefined) Object.assign(resolved, { [key]: value });
+    }
+    return purpose ? { ...resolved, purpose } : resolved;
   }
 
   private recordSessionUsage(response: Message, latencyMs: number, streaming: boolean): void {

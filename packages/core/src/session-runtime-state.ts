@@ -69,6 +69,7 @@ export interface PersistedGoalContinuationIntent {
 export interface PersistedGoalExecutionRef extends PersistedGoalContinuationIntent {
   origin: "user" | "goal";
   started?: boolean;
+  stopReason?: string;
 }
 
 export interface PersistedGoalCoordinator {
@@ -297,7 +298,8 @@ export function normalizeGoalManagerSnapshot(
     return undefined;
   }
   const currentGoal = value["currentGoal"] === null ? null : structuredClone(value["currentGoal"]);
-  const controlLease = value["controlLease"] === null ? null : structuredClone(value["controlLease"]);
+  const controlLease =
+    value["controlLease"] === null ? null : structuredClone(value["controlLease"]);
   const coordinator = structuredClone(value["coordinator"]);
   if (
     (controlLease !== null && controlLease.goalId !== currentGoal?.id) ||
@@ -527,11 +529,16 @@ function isGoal(value: unknown): value is PersistedGoalState {
     isPositiveInteger(value["revision"]) &&
     typeof value["condition"] === "string" &&
     value["condition"].trim().length > 0 &&
+    value["condition"].length <= 500 &&
+    Buffer.byteLength(value["condition"], "utf8") <= 1_500 &&
     isGoalStatus(value["status"]) &&
     isNonNegativeFiniteNumber(value["createdAt"]) &&
     isPositiveInteger(value["maxIterations"]) &&
+    value["maxIterations"] <= 200 &&
     isPositiveInteger(value["blockCap"]) &&
-    isOptionalPositiveInteger(value["tokenBudget"]) &&
+    value["blockCap"] <= 50 &&
+    (value["tokenBudget"] === undefined ||
+      (isPositiveInteger(value["tokenBudget"]) && value["tokenBudget"] >= 1_000)) &&
     isNonNegativeInteger(value["iterations"]) &&
     isNonNegativeInteger(value["tokensAtStart"]) &&
     isNonNegativeInteger(value["tokensNow"]) &&
@@ -548,15 +555,20 @@ function isGoal(value: unknown): value is PersistedGoalState {
 function isGoalEvaluation(value: unknown): value is PersistedGoalEvaluation {
   return (
     isRecord(value) &&
-    hasOnlyKeys(value, ["met", "impossible", "progress", "waiting", "evaluatorFailed", "reason", "at"]) &&
+    hasOnlyKeys(value, [
+      "met",
+      "impossible",
+      "progress",
+      "waiting",
+      "evaluatorFailed",
+      "reason",
+      "at",
+    ]) &&
     isOptionalBoolean(value["met"]) &&
     isOptionalBoolean(value["impossible"]) &&
     isOptionalBoolean(value["progress"]) &&
     isOptionalBoolean(value["waiting"]) &&
     isOptionalBoolean(value["evaluatorFailed"]) &&
-    ["met", "impossible", "progress", "waiting", "evaluatorFailed"].some(
-      (key) => value[key] === true,
-    ) &&
     typeof value["reason"] === "string" &&
     isNonNegativeFiniteNumber(value["at"])
   );
@@ -572,7 +584,8 @@ function isGoalCoordinator(value: unknown): value is PersistedGoalCoordinator {
       "workTokens",
       "accountedRunIds",
     ]) &&
-    (value["pendingContinuation"] === null || isGoalContinuationIntent(value["pendingContinuation"])) &&
+    (value["pendingContinuation"] === null ||
+      isGoalContinuationIntent(value["pendingContinuation"])) &&
     (value["currentExecution"] === null || isGoalExecutionRef(value["currentExecution"])) &&
     isOptionalString(value["lastSettledRunId"]) &&
     isNonNegativeInteger(value["workTokens"]) &&
@@ -630,6 +643,7 @@ function isGoalExecutionRef(value: unknown): value is PersistedGoalExecutionRef 
       "runStartedAt",
       "origin",
       "started",
+      "stopReason",
     ]) &&
     typeof value["goalId"] === "string" &&
     isPositiveInteger(value["revision"]) &&
@@ -644,7 +658,8 @@ function isGoalExecutionRef(value: unknown): value is PersistedGoalExecutionRef 
     typeof value["runStartedEventId"] === "string" &&
     isNonNegativeFiniteNumber(value["runStartedAt"]) &&
     (value["origin"] === "user" || value["origin"] === "goal") &&
-    isOptionalBoolean(value["started"])
+    isOptionalBoolean(value["started"]) &&
+    isOptionalString(value["stopReason"])
   );
 }
 
@@ -669,10 +684,6 @@ function isGoalStatus(value: unknown): value is PersistedGoalStatus {
     value === "max_iterations" ||
     value === "cleared"
   );
-}
-
-function isOptionalPositiveInteger(value: unknown): boolean {
-  return value === undefined || isPositiveInteger(value);
 }
 
 function isOptionalBoolean(value: unknown): boolean {

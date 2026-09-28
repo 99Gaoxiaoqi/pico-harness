@@ -1,97 +1,93 @@
-import { normalizeGoalManagerSnapshot, toCanonicalUsage, type Usage } from "@pico/core";
-import type { BudgetConfig, BudgetDecision } from "./budget.js";
+import { normalizeGoalManagerSnapshot } from "@pico/core";
+import { randomUUID } from "node:crypto";
+import type {
+  PersistedGoalContinuationIntent,
+  PersistedGoalCoordinator,
+  PersistedGoalControlLease,
+  PersistedGoalEvaluation,
+  PersistedGoalExecutionRef,
+  PersistedGoalManagerSnapshot,
+  PersistedGoalState,
+  PersistedGoalStatus,
+} from "@pico/core";
 
-export type GoalStatus =
-  | "active"
-  | "waiting"
-  | "paused"
-  | "achieved"
-  | "impossible"
-  | "stalled"
-  | "budget_limited"
-  | "max_iterations"
-  | "cleared";
+export type GoalStatus = PersistedGoalStatus;
+export type Goal = PersistedGoalState;
+export type GoalManagerSnapshot = PersistedGoalManagerSnapshot;
+export type GoalEvaluationRecord = PersistedGoalEvaluation;
+export type GoalCoordinator = PersistedGoalCoordinator;
+export type GoalContinuationIntent = PersistedGoalContinuationIntent;
+export type GoalExecutionRef = PersistedGoalExecutionRef;
+export type GoalControlLease = PersistedGoalControlLease;
 
 export type GoalEvaluationOutcome = "met" | "impossible" | "progress" | "waiting" | "unknown";
 
-export interface GoalEvaluationRecord {
-  outcome: GoalEvaluationOutcome;
-  reason: string;
-  evidence: string[];
-  at: number;
+export interface GoalEvaluation {
+  readonly met?: boolean;
+  readonly impossible?: boolean;
+  readonly progress?: boolean;
+  readonly waiting?: boolean;
+  readonly evaluatorFailed?: boolean;
+  readonly reason: string;
 }
-
-export interface GoalBudgetUsage {
-  turns: number;
-  tokens: number;
-  costCNY: number;
-  startedAt: number;
-}
-
-export interface Goal {
-  id: string;
-  title: string;
-  description: string;
-  completionCriteria: string[];
-  constraints?: string[];
-  status: GoalStatus;
-  createdAt: number;
-  maxIterations: number;
-  blockCap: number;
-  controlRevision: number;
-  budgetConfig?: BudgetConfig;
-  budgetUsage: GoalBudgetUsage;
-  progress?: string;
-  blockedReason?: string;
-  consecutiveNoProgress: number;
-  lastEvaluation?: GoalEvaluationRecord;
-  evidence: string[];
-  completionRequested: boolean;
-  pendingContinuation: boolean;
-  awaitingUserTurn: boolean;
-  waitingReason?: string;
-  nextCheckAt?: number;
-  waitCount: number;
-  admissionKey?: string;
-  targetRunId?: string;
-}
-
-export interface GoalManagerSnapshot {
-  stateVersion: 2;
-  sequence: number;
-  activeGoalId: string | null;
-  goals: Goal[];
-}
-
-export type GoalManagerListener = (snapshot: GoalManagerSnapshot) => void;
 
 export interface GoalCreateOptions {
-  readonly title: string;
-  readonly description: string;
-  readonly completionCriteria: readonly string[];
-  readonly constraints?: readonly string[];
-  readonly budgetConfig?: BudgetConfig;
+  readonly condition: string;
+  readonly tokenBudget?: number;
   readonly maxIterations?: number;
   readonly blockCap?: number;
-  /** Host-created Goals wait for a user turn; tool-created Goals belong to this in-flight Run. */
+  /** Host-created Goals wait for the next ordinary user Run. */
   readonly awaitingUserTurn?: boolean;
 }
 
-export interface GoalEvaluation {
-  readonly outcome: GoalEvaluationOutcome;
-  readonly reason: string;
-  readonly evidence: readonly string[];
-  readonly progress?: boolean;
-  readonly evaluatorFailed?: boolean;
-  readonly usage?: Usage;
-  readonly costCNY?: number;
+export interface GoalRunCheckpoint {
+  readonly goalId: string;
+  readonly revision: number;
 }
 
-const MAX_WAIT_MS = 5 * 60_000;
-const INITIAL_WAIT_MS = 5_000;
+export interface GoalSettleInput {
+  readonly checkpoint: GoalRunCheckpoint;
+  readonly evaluation: GoalEvaluation;
+  /** Cumulative primary-execution tokens at this Run's terminal boundary. */
+  readonly tokensNow: number;
+}
 
-function isCurrent(status: GoalStatus): boolean {
-  return status === "active" || status === "waiting";
+export type GoalManagerListener = (snapshot: GoalManagerSnapshot) => void;
+export type GoalRunOrigin = "user" | "goal";
+
+interface UnboundRun {
+  readonly runId: string;
+  readonly daemonRunId: string;
+  readonly turnId: string;
+  readonly origin: GoalRunOrigin;
+  readonly prompt?: string;
+  readonly createdAt?: number;
+  readonly triggeringRunId?: string;
+  readonly invocationId?: string;
+  readonly runStartedEventId?: string;
+  readonly runStartedAt?: number;
+}
+
+export type GoalRunIdentity = Omit<UnboundRun, "runId" | "daemonRunId" | "turnId" | "origin">;
+
+const DEFAULT_MAX_ITERATIONS = 50;
+const DEFAULT_BLOCK_CAP = 8;
+const MAX_ITERATIONS = 200;
+const MAX_BLOCK_CAP = 50;
+const MIN_TOKEN_BUDGET = 1_000;
+const EMPTY_COORDINATOR: GoalCoordinator = {
+  pendingContinuation: null,
+  currentExecution: null,
+  workTokens: 0,
+  accountedRunIds: [],
+};
+
+function isIncomplete(status: GoalStatus): boolean {
+  return status === "active" || status === "waiting" || status === "paused";
+}
+
+function isTerminal(status: GoalStatus): boolean {
+  return !isIncomplete(status);
 }
 
 function statusMark(status: GoalStatus): string {
@@ -117,419 +113,396 @@ function statusMark(status: GoalStatus): string {
   }
 }
 
-function formatBudget(config?: BudgetConfig): string {
-  if (!config) return "";
-  const parts: string[] = [];
-  if (config.maxTurns !== undefined) parts.push(`${config.maxTurns} 轮`);
-  if (config.maxTokens !== undefined) parts.push(`${config.maxTokens} tokens`);
-  if (config.maxCostCNY !== undefined) parts.push(`¥${config.maxCostCNY}`);
-  if (config.maxWallClockMs !== undefined) parts.push(`${config.maxWallClockMs}ms`);
-  return parts.join(" + ");
+function evaluationOutcome(evaluation: GoalEvaluation): GoalEvaluationOutcome {
+  if (evaluation.met === true) return "met";
+  if (evaluation.impossible === true) return "impossible";
+  if (evaluation.evaluatorFailed === true) return "unknown";
+  if (evaluation.waiting === true) return "waiting";
+  return "progress";
 }
 
-/** Session-owned long-running Goal state machine. All mutations publish a full durable snapshot. */
+function evaluationRecord(evaluation: GoalEvaluation, at: number): GoalEvaluationRecord {
+  return {
+    ...(evaluation.met !== undefined ? { met: evaluation.met } : {}),
+    ...(evaluation.impossible !== undefined ? { impossible: evaluation.impossible } : {}),
+    ...(evaluation.progress !== undefined ? { progress: evaluation.progress } : {}),
+    ...(evaluation.waiting !== undefined ? { waiting: evaluation.waiting } : {}),
+    ...(evaluation.evaluatorFailed !== undefined
+      ? { evaluatorFailed: evaluation.evaluatorFailed }
+      : {}),
+    reason: evaluation.reason.slice(0, 1_000),
+    at,
+  };
+}
+
+function emptySnapshot(): GoalManagerSnapshot {
+  return {
+    stateVersion: 3,
+    currentGoal: null,
+    controlLease: null,
+    coordinator: structuredClone(EMPTY_COORDINATOR),
+  };
+}
+
+/** Session-owned synchronous Goal state machine. Host owns admission and evaluator I/O. */
 export class GoalManager {
-  private readonly goals = new Map<string, Goal>();
-  private activeGoalId: string | null = null;
-  private seq = 0;
+  private state = emptySnapshot();
   private readonly now: () => number;
   private readonly listeners = new Set<GoalManagerListener>();
-  private runInProgress = false;
-  private currentRunId: string | undefined;
+  private unboundRun?: UnboundRun;
 
   constructor(options: { now?: () => number } = {}) {
     this.now = options.now ?? Date.now;
   }
 
-  create(options: GoalCreateOptions): Goal {
-    const completionCriteria = options.completionCriteria.map((item) => item.trim()).filter(Boolean);
-    if (completionCriteria.length === 0)
-      throw new Error("Goal 至少需要一条可独立验收的完成标准");
-    if (completionCriteria.length > 30)
-      throw new Error("Goal 完成标准最多 30 条，以便逐项保存验收证据");
-    const createdAt = this.now();
+  create(options: GoalCreateOptions, expectedRevision?: number): Goal {
+    const condition = options.condition.trim();
+    if (!condition) throw new Error("Goal condition 不能为空");
+    if (condition.length > 500 || Buffer.byteLength(condition, "utf8") > 1_500)
+      throw new Error("Goal condition 最多 500 字符（1500 UTF-8 字节）");
+    const previous = this.state.currentGoal;
+    if (previous && isIncomplete(previous.status))
+      throw new Error(`Goal ${previous.id} 尚未完成（${previous.status}），不能替换`);
+    if (previous && expectedRevision === undefined)
+      throw new Error(`替换终态 Goal ${previous.id} 时必须提供 expectedRevision`);
+    if (previous && expectedRevision !== undefined && previous.revision !== expectedRevision)
+      throw new Error(
+        `Goal revision 冲突：expected ${expectedRevision}, actual ${previous.revision}`,
+      );
+    if (!previous && expectedRevision !== undefined && expectedRevision !== 0)
+      throw new Error(`Goal revision 冲突：expected ${expectedRevision}, actual 0`);
+
+    const maxIterations = options.maxIterations ?? DEFAULT_MAX_ITERATIONS;
+    const blockCap = options.blockCap ?? DEFAULT_BLOCK_CAP;
+    if (
+      !Number.isSafeInteger(maxIterations) ||
+      maxIterations <= 0 ||
+      maxIterations > MAX_ITERATIONS
+    )
+      throw new Error(`maxIterations 必须是 1 到 ${MAX_ITERATIONS} 的安全整数`);
+    if (!Number.isSafeInteger(blockCap) || blockCap <= 0 || blockCap > MAX_BLOCK_CAP)
+      throw new Error(`blockCap 必须是 1 到 ${MAX_BLOCK_CAP} 的安全整数`);
+    if (
+      options.tokenBudget !== undefined &&
+      (!Number.isSafeInteger(options.tokenBudget) || options.tokenBudget < MIN_TOKEN_BUDGET)
+    )
+      throw new Error(`tokenBudget 必须是不小于 ${MIN_TOKEN_BUDGET} 的安全整数`);
+
+    const now = this.now();
+    const unboundRun = this.unboundRun;
+    const generation = (this.state.controlLease?.generation ?? 0) + 1;
     const goal: Goal = {
-      id: `goal-${++this.seq}`,
-      title: options.title,
-      description: options.description,
-      completionCriteria,
-      ...(options.constraints ? { constraints: [...options.constraints] } : {}),
+      id: `goal-${randomUUID()}`,
+      revision: 1,
+      condition,
       status: "active",
-      createdAt,
-      maxIterations: options.maxIterations ?? 50,
-      blockCap: options.blockCap ?? 8,
-      controlRevision: 1,
-      budgetUsage: {
-        turns: this.runInProgress ? 1 : 0,
-        tokens: 0,
-        costCNY: 0,
-        startedAt: createdAt,
-      },
+      createdAt: now,
+      maxIterations,
+      blockCap,
+      ...(options.tokenBudget !== undefined ? { tokenBudget: options.tokenBudget } : {}),
+      iterations: 0,
+      tokensAtStart: 0,
+      tokensNow: 0,
+      tokensBaselinePending: true,
       consecutiveNoProgress: 0,
-      evidence: [],
-      completionRequested: false,
-      pendingContinuation: false,
-      awaitingUserTurn: options.awaitingUserTurn ?? !this.runInProgress,
-      waitCount: 0,
-      ...(this.runInProgress && this.currentRunId ? { targetRunId: this.currentRunId } : {}),
-      ...(options.budgetConfig !== undefined ? { budgetConfig: options.budgetConfig } : {}),
+      ...(options.awaitingUserTurn ? { armedAt: now } : {}),
     };
-    const previous = this.getActive();
-    if (previous) {
-      previous.status = "paused";
-      previous.pendingContinuation = false;
-      previous.awaitingUserTurn = false;
-      delete previous.waitingReason;
-      delete previous.nextCheckAt;
-      delete previous.admissionKey;
-      delete previous.targetRunId;
+    const coordinator: GoalCoordinator = {
+      ...structuredClone(this.state.coordinator),
+      pendingContinuation: null,
+      currentExecution: null,
+    };
+    if (unboundRun && !options.awaitingUserTurn) {
+      coordinator.currentExecution = this.makeExecution(goal, unboundRun, true, generation);
     }
-    this.goals.set(goal.id, goal);
-    this.activeGoalId = goal.id;
+    this.state = {
+      stateVersion: 3,
+      currentGoal: goal,
+      controlLease: {
+        goalId: goal.id,
+        generation,
+      },
+      coordinator,
+    };
     this.emitChange();
     return goal;
   }
 
   get(id: string): Goal | undefined {
-    return this.goals.get(id);
+    return this.state.currentGoal?.id === id ? this.state.currentGoal : undefined;
   }
+
+  getCurrent(): Goal | undefined {
+    return this.state.currentGoal ?? undefined;
+  }
+
   getActive(): Goal | undefined {
-    return this.activeGoalId === null ? undefined : this.goals.get(this.activeGoalId);
+    const goal = this.state.currentGoal;
+    return goal && (goal.status === "active" || goal.status === "waiting") ? goal : undefined;
   }
+
   list(): Goal[] {
-    return [...this.goals.values()];
+    return this.state.currentGoal ? [this.state.currentGoal] : [];
   }
 
-  /** Called exactly once per RuntimeRun, before the model/tool loop starts. */
-  beginRun(origin: "user" | "goal" = "user", runId?: string): BudgetDecision {
-    this.runInProgress = true;
-    this.currentRunId = runId;
-    const goal = this.getActive();
-    if (!goal || goal.status === "paused" || !isCurrent(goal.status)) return { allowed: true };
-    if (origin === "user" && (goal.awaitingUserTurn || goal.status === "waiting")) {
+  /** Host binds an admitted user or Goal Run before Engine execution. */
+  beginRun(
+    runId: string,
+    turnId = runId,
+    origin: GoalRunOrigin = "user",
+    daemonRunId = runId,
+    identity: GoalRunIdentity = {},
+  ): GoalExecutionRef | undefined {
+    const unbound: UnboundRun = {
+      runId,
+      daemonRunId,
+      turnId,
+      origin,
+      ...identity,
+    };
+    // Keep the active Run identity available so a model-created Goal (or a model
+    // resume after pausing) is bound before observers see its active snapshot.
+    this.unboundRun = unbound;
+    const goal = this.state.currentGoal;
+    if (!goal) {
+      return undefined;
+    }
+    if (isTerminal(goal.status) || goal.status === "paused") {
+      this.setCoordinator({ currentExecution: null });
+      return undefined;
+    }
+    if (goal.status === "waiting" && origin === "user") {
       goal.status = "active";
-      goal.awaitingUserTurn = false;
-      goal.pendingContinuation = false;
-      delete goal.waitingReason;
-      delete goal.nextCheckAt;
-      delete goal.admissionKey;
-      delete goal.targetRunId;
+      delete goal.lastReason;
+      goal.revision++;
     }
-    if (goal.status !== "active") {
-      this.emitChange();
-      return { allowed: true };
+    if (goal.status === "waiting" && origin === "goal") {
+      this.setCoordinator({ pendingContinuation: null, currentExecution: null });
+      return undefined;
     }
-    if (goal.awaitingUserTurn) return { allowed: true };
-    const decision = this.checkBudget(goal);
-    if (!decision.allowed) {
-      this.terminate(goal, "budget_limited", decision.reason ?? "Goal 预算已耗尽");
-      return decision;
-    }
-    if (goal.budgetUsage.turns >= goal.maxIterations) {
-      this.terminate(goal, "max_iterations", `Goal 已达到最大迭代数 ${goal.maxIterations}`);
-      return { allowed: false, reason: `Goal 已达到最大迭代数 ${goal.maxIterations}` };
-    }
-    if (
-      goal.budgetConfig?.maxTurns !== undefined &&
-      goal.budgetUsage.turns >= goal.budgetConfig.maxTurns
-    ) {
-      this.terminate(goal, "budget_limited", `Goal 已达到最大轮次 ${goal.budgetConfig.maxTurns}`);
-      return { allowed: false, reason: `Goal 已达到最大轮次 ${goal.budgetConfig.maxTurns}` };
-    }
-    goal.budgetUsage.turns++;
-    if (this.currentRunId) goal.targetRunId = this.currentRunId;
-    goal.controlRevision++;
+    delete goal.armedAt;
+    const existing = this.state.coordinator.currentExecution;
+    const execution =
+      existing && existing.runId === runId && existing.daemonRunId === daemonRunId
+        ? {
+            ...existing,
+            goalId: goal.id,
+            revision: goal.revision,
+            generation: this.state.controlLease?.generation ?? goal.revision,
+            origin,
+            started: true,
+          }
+        : this.makeExecution(goal, unbound, true);
+    this.state.coordinator = {
+      ...this.state.coordinator,
+      pendingContinuation: null,
+      currentExecution: execution,
+    };
     this.emitChange();
-    return { allowed: true };
+    return execution;
   }
 
-  endRun(): void {
-    this.runInProgress = false;
-    this.currentRunId = undefined;
+  endRun(runId?: string): void {
+    if (!runId || this.unboundRun?.runId === runId || this.unboundRun?.daemonRunId === runId)
+      delete this.unboundRun;
+    // The Host owns terminal settlement and must retain currentExecution until
+    // it has accounted usage and evaluated this Run.
   }
 
-  /** Evaluator settles the completed Run and produces a durable continuation intent. */
-  settle(evaluation: GoalEvaluation): Goal | undefined {
-    const goal = this.getActive();
-    if (!goal || goal.status !== "active") return goal;
+  /** Applies one evaluator result only if it still owns the exact Goal revision checkpoint. */
+  settle(input: GoalSettleInput): Goal | undefined {
+    const goal = this.state.currentGoal;
+    if (
+      !goal ||
+      goal.id !== input.checkpoint.goalId ||
+      goal.revision !== input.checkpoint.revision ||
+      isTerminal(goal.status) ||
+      goal.status === "paused"
+    ) {
+      return undefined;
+    }
+    const outcome = evaluationOutcome(input.evaluation);
     const at = this.now();
-    if (evaluation.usage) {
-      const canonical = toCanonicalUsage(evaluation.usage);
-      goal.budgetUsage.tokens += canonical.totalPromptTokens + canonical.totalCompletionTokens;
-    }
-    if (
-      evaluation.costCNY !== undefined &&
-      Number.isFinite(evaluation.costCNY) &&
-      evaluation.costCNY > 0
-    ) {
-      goal.budgetUsage.costCNY += evaluation.costCNY;
-    }
-    if (evaluation.evaluatorFailed === true) {
-      goal.lastEvaluation = { outcome: "unknown", reason: "评估器暂不可用", evidence: [], at };
-      const budget = this.checkBudget(goal, at);
-      if (!budget.allowed) {
-        this.terminate(goal, "budget_limited", budget.reason ?? "Goal 预算已耗尽");
-        return goal;
-      }
-      if (goal.budgetUsage.turns >= goal.maxIterations) {
-        this.terminate(goal, "max_iterations", `Goal 已达到最大迭代数 ${goal.maxIterations}`);
-        return goal;
-      }
-      goal.pendingContinuation = true;
-      delete goal.admissionKey;
-      delete goal.targetRunId;
-      goal.controlRevision++;
-      this.emitChange();
-      return goal;
-    }
-    const evidence = [...evaluation.evidence]
-      .map((item) => item.trim().slice(0, 500))
-      .filter(Boolean)
-      .slice(0, 30);
-    const metHasEvidenceForEveryCriterion =
-      evidence.length >= goal.completionCriteria.length &&
-      evidence.every((item) => item.trim().length > 0);
-    const outcome =
-      evaluation.outcome === "met" && !metHasEvidenceForEveryCriterion
-        ? "progress"
-        : evaluation.outcome;
-    const reason =
-      evaluation.outcome === "met" && !metHasEvidenceForEveryCriterion
-        ? "验收结果没有为每条完成标准提供对应证据"
-        : evaluation.reason;
-    const progress = evaluation.outcome === "met" && !metHasEvidenceForEveryCriterion
-      ? false
-      : evaluation.progress;
-    goal.lastEvaluation = { outcome, reason, evidence, at };
-    goal.evidence = [...new Set([...goal.evidence, ...evidence])].slice(-30);
-    if (reason) goal.progress = reason;
-    delete goal.blockedReason;
-    delete goal.waitingReason;
-    delete goal.nextCheckAt;
-    const budget = this.checkBudget(goal, at);
-    if (!budget.allowed && outcome !== "met" && outcome !== "impossible") {
-      this.terminate(goal, "budget_limited", budget.reason ?? "Goal 预算已耗尽");
-      return goal;
-    }
-    if (outcome === "met") {
-      this.terminate(goal, "achieved", reason || "完成标准已满足");
-    } else if (outcome === "impossible") {
-      this.terminate(goal, "impossible", reason || "评估器判断目标不可达");
-    } else if (goal.budgetUsage.turns >= goal.maxIterations) {
-      this.terminate(goal, "max_iterations", `Goal 已达到最大迭代数 ${goal.maxIterations}`);
-    } else if (outcome === "waiting") {
-      goal.status = "waiting";
-      goal.pendingContinuation = false;
-      goal.waitCount++;
-      goal.waitingReason = evaluation.reason || "等待外部事件";
-      goal.nextCheckAt =
-        at + Math.min(INITIAL_WAIT_MS * 2 ** Math.min(goal.waitCount - 1, 16), MAX_WAIT_MS);
-      delete goal.admissionKey;
-      delete goal.targetRunId;
-      goal.controlRevision++;
-      this.emitChange();
-    } else if (outcome === "unknown") {
-      goal.pendingContinuation = true;
-      delete goal.admissionKey;
-      delete goal.targetRunId;
-      goal.controlRevision++;
-      this.emitChange();
-    } else {
-      goal.consecutiveNoProgress =
-        progress === true ? 0 : goal.consecutiveNoProgress + 1;
-      goal.waitCount = 0;
-      if (goal.consecutiveNoProgress >= goal.blockCap) {
-        this.terminate(goal, "stalled", `连续 ${goal.consecutiveNoProgress} 轮无进展`);
-      } else {
-        goal.status = "active";
-        goal.pendingContinuation = true;
-        delete goal.admissionKey;
-        delete goal.targetRunId;
-        goal.controlRevision++;
-        this.emitChange();
-      }
-    }
-    return goal;
-  }
+    const record = evaluationRecord(input.evaluation, at);
+    goal.lastEvaluation = record;
+    goal.lastReason = record.reason;
 
-  pause(id: string, reason = "用户暂停"): Goal | undefined {
-    const goal = this.goals.get(id);
-    if (!goal) return undefined;
-    if (goal.status === "active" || goal.status === "waiting") {
-      goal.status = "paused";
-      goal.blockedReason = reason;
-      goal.pendingContinuation = false;
-      goal.awaitingUserTurn = false;
-      delete goal.nextCheckAt;
-      delete goal.admissionKey;
-      delete goal.targetRunId;
-      goal.controlRevision++;
-      if (this.activeGoalId === id) this.activeGoalId = null;
+    // A terminal evaluator verdict wins before counters and token baselines change.
+    if (outcome === "met" || outcome === "impossible") {
+      goal.status = outcome === "met" ? "achieved" : "impossible";
+      if (outcome === "met") goal.achievedAt = at;
+      goal.revision++;
+      this.finishCurrentExecution(goal);
+      this.state.controlLease = null;
       this.emitChange();
+      return goal;
     }
-    return goal;
-  }
 
-  resume(id: string): Goal | undefined {
-    const goal = this.goals.get(id);
-    if (!goal || goal.status !== "paused") return undefined;
-    const budget = this.checkBudget(goal);
-    if (!budget.allowed) {
-      this.terminate(goal, "budget_limited", budget.reason ?? "Goal 预算已耗尽");
+    if (!Number.isSafeInteger(input.tokensNow) || input.tokensNow < 0)
+      throw new Error("tokensNow 必须是非负安全整数");
+    const tokensNow = Math.max(goal.tokensNow, input.tokensNow);
+    if (goal.tokensBaselinePending) {
+      goal.tokensAtStart = tokensNow;
+      goal.tokensBaselinePending = false;
+    }
+    goal.tokensNow = tokensNow;
+    if (goal.tokenBudget !== undefined && tokensNow - goal.tokensAtStart >= goal.tokenBudget) {
+      goal.status = "budget_limited";
+      goal.lastReason = `Goal token budget (${goal.tokenBudget}) exhausted`;
+      goal.revision++;
+      this.finishCurrentExecution(goal);
+      this.state.controlLease = null;
+      this.emitChange();
       return goal;
     }
-    if (goal.budgetUsage.turns >= goal.maxIterations) {
-      this.terminate(goal, "max_iterations", `Goal 已达到最大迭代数 ${goal.maxIterations}`);
+
+    goal.iterations++;
+    if (goal.iterations >= goal.maxIterations) {
+      goal.status = "max_iterations";
+      goal.lastReason = `Goal reached maxIterations (${goal.maxIterations})`;
+      goal.revision++;
+      this.finishCurrentExecution(goal);
+      this.state.controlLease = null;
+      this.emitChange();
       return goal;
     }
-    const previous = this.getActive();
-    if (previous && previous.id !== id) this.pause(previous.id, "被另一个 Goal 替代");
-    goal.status = "active";
-    delete goal.blockedReason;
-    delete goal.waitingReason;
-    delete goal.nextCheckAt;
-    goal.awaitingUserTurn = false;
-    goal.pendingContinuation = true;
-    delete goal.admissionKey;
-    delete goal.targetRunId;
-    goal.controlRevision++;
-    this.activeGoalId = id;
+
+    if (input.evaluation.evaluatorFailed !== true && input.evaluation.waiting !== true) {
+      if (input.evaluation.progress === true) goal.consecutiveNoProgress = 0;
+      else if (input.evaluation.progress === false) goal.consecutiveNoProgress++;
+    }
+    if (goal.consecutiveNoProgress >= goal.blockCap) {
+      goal.status = "stalled";
+      goal.lastReason = `Goal stalled after ${goal.consecutiveNoProgress} consecutive turns without progress`;
+      goal.revision++;
+      this.finishCurrentExecution(goal);
+      this.state.controlLease = null;
+      this.emitChange();
+      return goal;
+    }
+
+    goal.status = outcome === "waiting" ? "waiting" : "active";
+    goal.revision++;
+    this.finishCurrentExecution(goal);
     this.emitChange();
     return goal;
   }
 
-  clear(id: string): boolean {
-    const goal = this.goals.get(id);
+  pause(id: string, reason = "用户暂停", expectedRevision?: number): Goal | undefined {
+    const goal = this.get(id);
+    if (!goal) return undefined;
+    this.assertRevision(goal, expectedRevision);
+    if (!isIncomplete(goal.status)) return goal;
+    goal.status = "paused";
+    goal.pausedAt = this.now();
+    goal.lastReason = reason;
+    goal.revision++;
+    this.state.coordinator = {
+      ...this.state.coordinator,
+      pendingContinuation: null,
+    };
+    this.renewLease(goal);
+    const currentExecution = this.state.coordinator.currentExecution;
+    if (this.unboundRun && currentExecution) {
+      this.state.coordinator = {
+        ...this.state.coordinator,
+        currentExecution: {
+          ...currentExecution,
+          revision: goal.revision,
+          generation: this.state.controlLease!.generation,
+        },
+      };
+    } else if (this.unboundRun) {
+      this.state.coordinator = {
+        ...this.state.coordinator,
+        currentExecution: this.makeExecution(goal, this.unboundRun, true),
+      };
+    }
+    this.emitChange();
+    return goal;
+  }
+
+  resume(id: string, expectedRevision?: number): Goal | undefined {
+    const goal = this.get(id);
+    if (!goal) return undefined;
+    this.assertRevision(goal, expectedRevision);
+    if (goal.status !== "paused") return undefined;
+    goal.status = "active";
+    delete goal.pausedAt;
+    delete goal.armedAt;
+    goal.revision++;
+    const priorExecution = this.state.coordinator.currentExecution;
+    this.state.coordinator = {
+      ...this.state.coordinator,
+      pendingContinuation: null,
+      currentExecution: this.unboundRun ? priorExecution : null,
+    };
+    this.renewLease(goal);
+    const currentExecution = this.state.coordinator.currentExecution;
+    if (this.unboundRun && currentExecution) {
+      this.state.coordinator = {
+        ...this.state.coordinator,
+        currentExecution: {
+          ...currentExecution,
+          revision: goal.revision,
+          generation: this.state.controlLease!.generation,
+        },
+      };
+    } else if (this.unboundRun) {
+      this.state.coordinator = {
+        ...this.state.coordinator,
+        currentExecution: this.makeExecution(goal, this.unboundRun, true),
+      };
+    }
+    this.emitChange();
+    return goal;
+  }
+
+  clear(id: string, expectedRevision?: number): boolean {
+    const goal = this.get(id);
     if (!goal) return false;
+    this.assertRevision(goal, expectedRevision);
+    const coordinator = structuredClone(this.state.coordinator);
     goal.status = "cleared";
-    goal.pendingContinuation = false;
-    goal.awaitingUserTurn = false;
-    delete goal.waitingReason;
-    delete goal.nextCheckAt;
-    delete goal.admissionKey;
-    delete goal.targetRunId;
-    goal.controlRevision++;
-    if (this.activeGoalId === id) this.activeGoalId = null;
+    goal.revision++;
+    goal.lastReason = "Goal 已清除";
+    goal.lastEvaluation = {
+      reason: "Goal 已清除",
+      at: this.now(),
+    };
+    coordinator.pendingContinuation = null;
+    coordinator.currentExecution = null;
+    this.state = { stateVersion: 3, currentGoal: goal, controlLease: null, coordinator };
     this.emitChange();
     return true;
   }
 
-  claimContinuation(id: string, admissionKey: string): Goal | undefined {
-    const goal = this.goals.get(id);
-    if (!goal || goal.status !== "active" || !goal.pendingContinuation) return undefined;
-    const budget = this.checkBudget(goal);
-    if (!budget.allowed) {
-      this.terminate(goal, "budget_limited", budget.reason ?? "Goal 预算已耗尽");
-      return undefined;
-    }
-    if (goal.budgetUsage.turns >= goal.maxIterations) {
-      this.terminate(goal, "max_iterations", `Goal 已达到最大迭代数 ${goal.maxIterations}`);
-      return undefined;
-    }
-    goal.pendingContinuation = false;
-    goal.admissionKey = admissionKey;
-    delete goal.targetRunId;
-    goal.controlRevision++;
-    this.emitChange();
-    return goal;
-  }
-
-  recordAdmittedRun(id: string, admissionKey: string, targetRunId: string): void {
-    const goal = this.goals.get(id);
-    if (!goal || goal.admissionKey !== admissionKey) return;
-    goal.targetRunId = targetRunId;
-    goal.controlRevision++;
+  /** Host-owned durable continuation/admission facts. Does not change the Goal CAS revision. */
+  setCoordinator(patch: Partial<GoalCoordinator>): void {
+    this.state.coordinator = { ...this.state.coordinator, ...structuredClone(patch) };
     this.emitChange();
   }
 
-  /** Reconciles a persisted in-flight Goal Run after Host restart. */
-  recoverAdmittedRun(
-    id: string,
-    targetRunId: string,
-    status: "succeeded" | "failed" | "cancelled" | "missing",
-  ): "continued" | "paused" | "unchanged" {
-    const goal = this.goals.get(id);
-    if (!goal || goal.targetRunId !== targetRunId || goal.status !== "active") return "unchanged";
-    if (status === "succeeded") {
-      goal.pendingContinuation = true;
-      delete goal.admissionKey;
-      delete goal.targetRunId;
-      goal.controlRevision++;
-      this.emitChange();
-      return "continued";
-    }
-    const reason =
-      status === "missing"
-        ? `Goal Run ${targetRunId} 在 Runtime ledger 中不存在，已暂停以避免重复执行`
-        : status === "cancelled"
-          ? `Goal Run ${targetRunId} 已中断`
-          : `Goal Run ${targetRunId} 失败，已暂停`;
-    this.pause(id, reason);
-    return "paused";
-  }
-
-  releaseContinuation(id: string, admissionKey: string, reason?: string): void {
-    const goal = this.goals.get(id);
-    if (!goal || (goal.admissionKey !== admissionKey && goal.targetRunId !== admissionKey)) return;
-    delete goal.admissionKey;
-    delete goal.targetRunId;
-    if (reason) {
-      goal.status = "paused";
-      goal.blockedReason = reason;
-      if (this.activeGoalId === id) this.activeGoalId = null;
-    } else {
-      goal.pendingContinuation = true;
-    }
-    goal.controlRevision++;
-    this.emitChange();
-  }
-
-  wakeWaiting(id: string, now = this.now()): boolean {
-    const goal = this.goals.get(id);
-    if (!goal || goal.status !== "waiting" || (goal.nextCheckAt ?? Infinity) > now) return false;
+  /** Host wakes an external wait using its retry scheduler; wait deadlines remain ephemeral. */
+  wakeWaiting(id: string): boolean {
+    const goal = this.get(id);
+    if (!goal || goal.status !== "waiting") return false;
     goal.status = "active";
-    delete goal.waitingReason;
-    delete goal.nextCheckAt;
-    goal.pendingContinuation = true;
-    delete goal.admissionKey;
-    delete goal.targetRunId;
-    goal.controlRevision++;
+    goal.revision++;
     this.emitChange();
     return true;
-  }
-
-  update(
-    id: string,
-    patch: Partial<
-      Pick<Goal, "title" | "description" | "progress" | "budgetConfig" | "completionRequested">
-    >,
-  ): Goal | undefined {
-    const goal = this.goals.get(id);
-    if (!goal) return undefined;
-    Object.assign(goal, patch);
-    goal.controlRevision++;
-    this.emitChange();
-    return goal;
   }
 
   snapshot(): GoalManagerSnapshot {
-    return {
-      stateVersion: 2,
-      sequence: this.seq,
-      activeGoalId: this.activeGoalId,
-      goals: structuredClone([...this.goals.values()]),
-    };
+    return structuredClone(this.state);
   }
 
   restore(snapshot: GoalManagerSnapshot): void {
     const normalized = normalizeGoalManagerSnapshot(snapshot);
     if (!normalized)
-      throw new Error("Goal 快照无效；当前只支持 Goal schema v2，请清理旧 Session 数据后重试");
-    this.goals.clear();
-    for (const goal of normalized.goals) this.goals.set(goal.id, structuredClone(goal) as Goal);
-    this.seq = normalized.sequence;
-    this.activeGoalId = normalized.activeGoalId;
-    this.runInProgress = false;
+      throw new Error("Goal 快照无效；当前只支持 Goal schema v3，请清理旧 Session 数据后重试");
+    this.state = structuredClone(normalized);
+    delete this.unboundRun;
   }
 
   subscribe(listener: GoalManagerListener): () => void {
@@ -537,112 +510,77 @@ export class GoalManager {
     return () => this.listeners.delete(listener);
   }
 
-  canStartTurn(now = this.now()): BudgetDecision {
-    const goal = this.getActive();
-    return goal ? this.checkBudget(goal, now) : { allowed: true };
-  }
-
-  consumeUsage(usage: Usage): BudgetDecision {
-    const goal = this.getActive();
-    if (!goal) return { allowed: true };
-    const canonical = toCanonicalUsage(usage);
-    goal.budgetUsage.tokens += canonical.totalPromptTokens + canonical.totalCompletionTokens;
-    const decision = this.checkBudget(goal);
-    if (!decision.allowed)
-      this.terminate(goal, "budget_limited", decision.reason ?? "Goal Token 预算已耗尽");
-    this.emitChange();
-    return decision;
-  }
-
-  consumeCost(costCNY: number): BudgetDecision {
-    const goal = this.getActive();
-    if (!goal) return { allowed: true };
-    if (Number.isFinite(costCNY) && costCNY > 0) goal.budgetUsage.costCNY += costCNY;
-    const decision = this.checkBudget(goal);
-    if (!decision.allowed)
-      this.terminate(goal, "budget_limited", decision.reason ?? "Goal 成本预算已耗尽");
-    this.emitChange();
-    return decision;
-  }
-
-  currentBudgetDecision(now = this.now()): BudgetDecision {
-    const goal = this.getActive();
-    return goal ? this.checkBudget(goal, now) : { allowed: true };
-  }
-
   getStallWarning(): string | null {
     const goal = this.getActive();
-    if (!goal || goal.consecutiveNoProgress < Math.max(1, goal.blockCap - 3)) return null;
-    return `目标 ${goal.id} 已连续 ${goal.consecutiveNoProgress} 轮无进展，接近停滞上限 ${goal.blockCap}。`;
-  }
-
-  formatRemainingBudget(goal: Goal): string | null {
-    if (!goal.budgetConfig) return null;
-    const { budgetConfig: config, budgetUsage: usage } = goal;
-    const parts: string[] = [];
-    if (config.maxTurns !== undefined) parts.push(`剩余 ${config.maxTurns - usage.turns} 轮`);
-    if (config.maxTokens !== undefined)
-      parts.push(`剩余 ${config.maxTokens - usage.tokens} tokens`);
-    if (config.maxCostCNY !== undefined)
-      parts.push(`剩余 ¥${(config.maxCostCNY - usage.costCNY).toFixed(4)}`);
-    if (config.maxWallClockMs !== undefined)
-      parts.push(`剩余 ${Math.max(0, config.maxWallClockMs - (this.now() - usage.startedAt))}ms`);
-    return parts.length > 0 ? parts.join(" + ") : null;
+    return goal && goal.consecutiveNoProgress >= Math.max(1, goal.blockCap - 3)
+      ? `目标 ${goal.id} 已连续 ${goal.consecutiveNoProgress} 轮无进展，接近停滞上限 ${goal.blockCap}。`
+      : null;
   }
 
   buildGoalContext(): string {
     const goal = this.getActive();
     if (!goal) return "";
-    const lines = [
-      "## 🎯 当前 Goal(长程目标)",
-      `- ${statusMark(goal.status)} **${goal.title}** (id: ${goal.id})`,
-      `  - 描述: ${goal.description}`,
-    ];
-    lines.push("  - 完成标准:", ...goal.completionCriteria.map((item) => `    - ${item}`));
-    if (goal.constraints?.length)
-      lines.push("  - 约束:", ...goal.constraints.map((item) => `    - ${item}`));
-    if (goal.progress) lines.push(`  - 最近进展: ${goal.progress}`);
-    if (goal.blockedReason) lines.push(`  - 状态原因: ${goal.blockedReason}`);
-    if (goal.waitingReason) lines.push(`  - 等待原因: ${goal.waitingReason}`);
-    lines.push(`  - 迭代: ${goal.budgetUsage.turns}/${goal.maxIterations}`);
-    const budget = formatBudget(goal.budgetConfig);
-    if (budget)
-      lines.push(
-        `  - 预算约束: ${budget}`,
-        `  - 已消耗: ${goal.budgetUsage.tokens} tokens + ¥${goal.budgetUsage.costCNY.toFixed(4)}`,
-      );
-    lines.push(
-      "  - 完成标准满足前不要声称 Goal 已完成；可用 update_goal complete 请求一次独立验收。",
-    );
-    return lines.join("\n");
+    const usedTokens = Math.max(0, goal.tokensNow - goal.tokensAtStart);
+    return [
+      "## 当前 Goal",
+      `- ${statusMark(goal.status)} ${goal.condition}`,
+      `- 迭代：${goal.iterations}/${goal.maxIterations}`,
+      `- Token：${usedTokens}${goal.tokenBudget !== undefined ? `/${goal.tokenBudget}（剩余 ${Math.max(0, goal.tokenBudget - usedTokens)}）` : ""}`,
+      `- 连续无进展：${goal.consecutiveNoProgress}/${goal.blockCap}`,
+      ...(goal.lastReason ? [`- 最近状态：${goal.lastReason}`] : []),
+      "完成或不可达时停止工作；等待外部事件时说明等待原因。",
+    ].join("\n");
   }
 
-  private checkBudget(goal: Goal, now = this.now()): BudgetDecision {
-    const config = goal.budgetConfig;
-    if (!config) return { allowed: true };
-    const usage = goal.budgetUsage;
-    if (config.maxTurns !== undefined && usage.turns >= config.maxTurns)
-      return { allowed: false, reason: `Goal 已达到最大轮次 ${config.maxTurns}` };
-    if (config.maxWallClockMs !== undefined && now - usage.startedAt >= config.maxWallClockMs)
-      return { allowed: false, reason: `Goal 已达墙钟时间上限 ${config.maxWallClockMs}ms` };
-    if (config.maxTokens !== undefined && usage.tokens >= config.maxTokens)
-      return { allowed: false, reason: `Goal 已达到 Token 预算 ${config.maxTokens}` };
-    if (config.maxCostCNY !== undefined && usage.costCNY >= config.maxCostCNY)
-      return { allowed: false, reason: `Goal 已达到成本预算 ¥${config.maxCostCNY}` };
-    return { allowed: true };
+  private makeExecution(
+    goal: Goal,
+    run: UnboundRun,
+    started: boolean,
+    generation = this.state.controlLease?.generation ?? goal.revision,
+  ): GoalExecutionRef {
+    const now = this.now();
+    return {
+      goalId: goal.id,
+      revision: goal.revision,
+      generation,
+      prompt: run.prompt ?? "",
+      createdAt: run.createdAt ?? now,
+      ...(run.triggeringRunId ? { triggeringRunId: run.triggeringRunId } : {}),
+      runId: run.runId,
+      daemonRunId: run.daemonRunId,
+      turnId: run.turnId,
+      invocationId: run.invocationId ?? run.runId,
+      runStartedEventId: run.runStartedEventId ?? `run.started:${run.runId}`,
+      runStartedAt: run.runStartedAt ?? now,
+      origin: run.origin,
+      started,
+    };
   }
 
-  private terminate(goal: Goal, status: GoalStatus, reason: string): void {
-    goal.status = status;
-    goal.blockedReason = reason;
-    goal.pendingContinuation = false;
-    goal.awaitingUserTurn = false;
-    delete goal.nextCheckAt;
-    delete goal.admissionKey;
-    delete goal.targetRunId;
-    goal.controlRevision++;
-    if (this.activeGoalId === goal.id) this.activeGoalId = null;
-    this.emitChange();
+  private finishCurrentExecution(goal: Goal): void {
+    const execution = this.state.coordinator.currentExecution;
+    if (execution?.goalId !== goal.id) return;
+    this.state.coordinator = {
+      ...this.state.coordinator,
+      currentExecution: null,
+      pendingContinuation: null,
+      lastSettledRunId: execution.daemonRunId,
+      accountedRunIds: this.state.coordinator.accountedRunIds.includes(execution.daemonRunId)
+        ? this.state.coordinator.accountedRunIds
+        : [...this.state.coordinator.accountedRunIds, execution.daemonRunId],
+    };
+  }
+
+  private renewLease(goal: Goal): void {
+    this.state.controlLease = {
+      goalId: goal.id,
+      generation: Math.max((this.state.controlLease?.generation ?? 0) + 1, goal.revision),
+    };
+  }
+
+  private assertRevision(goal: Goal, expectedRevision?: number): void {
+    if (expectedRevision !== undefined && goal.revision !== expectedRevision)
+      throw new Error(`Goal revision 冲突：expected ${expectedRevision}, actual ${goal.revision}`);
   }
 
   private emitChange(): void {
@@ -650,9 +588,9 @@ export class GoalManager {
     const snapshot = this.snapshot();
     for (const listener of this.listeners) {
       try {
-        listener(structuredClone(snapshot));
+        listener(snapshot);
       } catch {
-        /* persistence listeners fail independently */
+        // Runtime-state subscribers persist independently; one failure must not block transitions.
       }
     }
   }

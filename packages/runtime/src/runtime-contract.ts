@@ -9,6 +9,7 @@ import type {
   PermissionMode,
   ProviderKind,
   RuntimeSessionSelection,
+  Usage,
 } from "@pico/core";
 import type { PlanHandoff } from "./plan-handoff.js";
 
@@ -89,6 +90,19 @@ export interface RunAgentUsage {
   costCNY: number;
 }
 
+export type AgentRunStopReason =
+  | "completed"
+  | "step_limit"
+  | "plan_handoff"
+  | "failed"
+  | "interrupted";
+
+export interface AgentRunOutcome {
+  readonly stopReason: AgentRunStopReason;
+  /** Main execution usage, excluding independent Goal evaluation calls. */
+  readonly primaryUsage: Usage;
+}
+
 export interface RunAgentCliResult {
   sessionId: string;
   sessionSelection: RuntimeSessionSelection;
@@ -96,6 +110,7 @@ export interface RunAgentCliResult {
   finalMessage: string;
   usage: RunAgentUsage;
   messages: readonly Message[];
+  outcome?: AgentRunOutcome;
   tracePath?: string;
   /** Pending plan review emitted by a normally completed planning run. */
   handoff?: PlanHandoff;

@@ -7,6 +7,10 @@ export interface ProviderCallContext {
   readonly sessionId?: string;
   readonly conversationId?: string;
   readonly goalId?: string;
+  /** Canonical identities are explicit for background calls without an inherited RuntimeRun. */
+  readonly runId?: string;
+  readonly turnId?: string;
+  readonly workspacePath?: string;
   readonly jobId?: string;
   readonly attemptId?: string;
 }
