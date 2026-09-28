@@ -1,5 +1,6 @@
 import type { LLMProvider, Message } from "@pico/core";
 import type { GoalEvaluation } from "./goal-manager.js";
+import { scheduleDeadline } from "./deadline.js";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_OUTPUT_TOKENS = 1_024;
@@ -50,7 +51,7 @@ export async function evaluateGoal(
     rejectAborted(controller.signal.reason ?? new DOMException("Aborted", "AbortError"));
   controller.signal.addEventListener("abort", rejectOnAbort, { once: true });
   if (controller.signal.aborted) rejectOnAbort();
-  const timeout = setTimeout(() => {
+  const timeout = scheduleDeadline(() => {
     timedOut = true;
     controller.abort(new DOMException("Goal evaluator timed out", "TimeoutError"));
   }, timeoutMs);
@@ -93,7 +94,7 @@ export async function evaluateGoal(
       throw options.signal.reason ?? new DOMException("Aborted", "AbortError");
     return failedEvaluation(timedOut ? "评估器超时" : summarizeError(error));
   } finally {
-    clearTimeout(timeout);
+    timeout.cancel();
     controller.signal.removeEventListener("abort", rejectOnAbort);
     options.signal?.removeEventListener("abort", abortFromCaller);
   }

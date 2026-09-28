@@ -275,7 +275,8 @@ const PACKAGE_DEPENDENCY_LAYERS = {
   core: [],
   storage: ["core"],
   runtime: ["core", "storage"],
-  protocol: [],
+  // Wire validation reuses pure Core Goal contracts; no Runtime/Storage dependency.
+  protocol: ["core"],
   "transcript-replica": ["protocol"],
   "runtime-host": ["core", "runtime"],
   "pico-host": ["core", "storage", "runtime", "protocol", "runtime-host"],
