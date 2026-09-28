@@ -27,7 +27,6 @@ import {
   resultShape,
   resultString,
   resultStringArray,
-  stringArrayParam,
   stringParam,
   workspaceSessionParams,
 } from "./validation.js";
