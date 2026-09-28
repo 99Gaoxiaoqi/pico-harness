@@ -177,7 +177,8 @@ export async function createRealGoalHost(
   if (settings.settings.reasoningLevels.includes("off")) {
     await request("session.settings.update", { ...sessionScope, thinkingEffort: "off" });
   }
-  const condition = `本轮必须重新用工具读取外部构建结果文件 ${markerPath}，读取结果包含 READY，且助手明确报告该读取结果时才完成。文件由外部系统更新，PENDING 表示尚未完成，需要等待后再次读取；不得自行修改、创建或删除此文件。`;
+  const condition =
+    "助手报告外部构建状态为 READY，且最终回复第一行逐字引用状态行 READY: external build verified successfully.。若报告 PENDING，则构建尚未完成，需要等待外部系统。";
   const evaluationHistory = new Map<number, GoalView["lastEvaluation"]>();
   const goal = async (): Promise<GoalView | undefined> => {
     const response = await request("goal.get", sessionScope);
