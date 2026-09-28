@@ -87,4 +87,3 @@ export type TranscriptEntryData =
     }
   | ({ kind: "subagent-activity" } & Omit<TranscriptSubagentActivity, "activityId">)
   | { kind: "thinking"; content?: string };
-import type { PersistedGoalStatus } from "./session-runtime-state.js";
