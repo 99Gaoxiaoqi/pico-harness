@@ -23,7 +23,7 @@
 - 纯文本粘贴进入 Chromium 原生编辑历史，支持撤销/重做。
 - 排除浏览器末尾占位换行，识别多行粘贴的块边界；恢复末尾换行草稿时补回占位，保留纯空白草稿。
 
-这些输入补丁均先在真实 Electron 复现后提取，没有复制 upstream 的整份修改。源码与发布包补丁已对 npm 原始 0.6.2 包重放并逐文件校验一致。
+这些输入补丁均先在真实 Electron 复现后提取。源码与发布包补丁已对 npm 原始 0.6.2 包重放并逐文件校验一致。
 
 主题由 `npm run astryx:theme` 生成，`npm run astryx:theme -- --check` 验证无漂移。生成结果排除全局 typography reset。main.tsx 必须先导入 layers.css，以在任何组件样式注册前确立层顺序：reset → tokens → base → astryx-components → astryx-tokens → components → pages → utilities。
 

@@ -254,7 +254,7 @@ test("Goal arm → actual Engine → Host evaluator → two continuations, with 
   assert.equal(
     state.currentGoal!.iterations,
     2,
-    "terminal verdict does not increase upstream iterations",
+    "terminal verdict does not increase goal iterations",
   );
   assert.equal(state.currentGoal!.tokensAtStart, 600);
   assert.equal(state.currentGoal!.tokensNow, 1200);

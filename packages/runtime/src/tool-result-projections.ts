@@ -57,7 +57,6 @@ export interface ToolResultProjectionPlan {
   readonly supersededByToolCallId?: string;
 }
 
-/** upstream 5846521 thresholds and working-set decisions, adapted to Pico tool inputs. */
 export function planToolResultProjections(
   events: readonly RuntimeEvent[],
   entries: readonly RuntimeHistoryProjectionEntry[],

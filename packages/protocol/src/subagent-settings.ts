@@ -17,7 +17,6 @@
  * under the License.
  */
 
-// Adapted from Apache upstream core/subagent-settings.ts; Pico uses its shared protocol types.
 import {
   MAX_SUBAGENT_PRESETS,
   SUBAGENT_PRESET_NAME_MAX_CHARS,

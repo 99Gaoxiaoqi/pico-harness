@@ -17,7 +17,6 @@
  * under the License.
  */
 
-// Adapted from upstream's archive resource protocol; Pico keeps the original body in its ledger.
 import { createHash } from "node:crypto";
 import { type RuntimeToolResultRecordedEvent } from "@pico/core";
 import type { SqliteRuntimeEventStore } from "@pico/storage/sqlite/sqlite-runtime-event-store";

@@ -82,7 +82,7 @@ test("Goal evaluator aborts the provider when its deadline expires", async () =>
   assert.match(result.reason, /超时/u);
 });
 
-test("Goal evaluator normalizes omitted fields and selects the judgment object like upstream", async () => {
+test("Goal evaluator normalizes omitted fields and selects the judgment object", async () => {
   const result = await evaluateGoal(
     {
       generate: async () => ({

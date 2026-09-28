@@ -17,7 +17,6 @@
  * under the License.
  */
 
-// Adapted from upstream 584652137 for Pico's provider and checkpoint contracts.
 import { COMPACTION_SUMMARY_OPEN_TAG, COMPACTION_SUMMARY_CLOSE_TAG } from "@pico/core";
 
 type MalformedHistoryCompactSummaryReason =

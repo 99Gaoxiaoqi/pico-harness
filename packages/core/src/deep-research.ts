@@ -17,12 +17,6 @@
  * under the License.
  */
 
-/**
- * Adapted from Apache upstream deep-research-run.ts and deep-research.ts,
- * revision 777a2363c141d2ca4cc212eb5c8a4b6b4bb3e63f (Apache-2.0).
- * Pico uses its canonical SQLite workspace and existing artifact preview authority.
- */
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }

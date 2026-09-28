@@ -33,7 +33,6 @@ import { sanitizeToolPairs } from "./tool-message-pairs.js";
 import { findSafeCompactionCut } from "./safe-compaction-boundary.js";
 import { withProviderCallContext } from "./provider-call-context.js";
 
-// Prompt and validation adapted from upstream 584652137 (Apache-2.0).
 import {
   findCheckpointSummaryDefect,
   SUMMARY_FORMAT_TEMPLATE,
