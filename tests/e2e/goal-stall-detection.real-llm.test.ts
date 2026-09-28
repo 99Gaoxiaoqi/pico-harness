@@ -19,5 +19,6 @@ test(
     assert.equal(host.startedRuns.size, 2);
     assert.equal(host.continuationRunIds.size, 1);
     assert.match(await readFile(host.markerPath, "utf8"), /PENDING/);
+    await host.assertNoFurtherRuns();
   },
 );

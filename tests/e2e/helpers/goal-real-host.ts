@@ -150,7 +150,7 @@ export async function createRealGoalHost(
   if (settings.settings.reasoningLevels.includes("off")) {
     await request("session.settings.update", { ...sessionScope, thinkingEffort: "off" });
   }
-  const condition = `外部构建结果文件 ${markerPath} 的最新工具读取结果必须包含 READY，且助手明确报告该读取结果。文件由外部系统更新，PENDING 表示尚未完成，需要等待后再次读取；不得自行修改、创建或删除此文件。`;
+  const condition = `本轮必须重新用工具读取外部构建结果文件 ${markerPath}，读取结果包含 READY，且助手明确报告该读取结果时才完成。文件由外部系统更新，PENDING 表示尚未完成，需要等待后再次读取；不得自行修改、创建或删除此文件。`;
   const goal = async (): Promise<GoalView | undefined> => {
     const response = await request("goal.get", sessionScope);
     return response.goal?.currentGoal ?? undefined;
@@ -215,6 +215,20 @@ export async function createRealGoalHost(
       }
       assert.ok(tokens("main") > 0);
       assert.ok(tokens("goal_evaluation") > 0);
+      const lastRunId = runStarts.at(-1)?.runId;
+      assert.ok(
+        events.some(
+          (event) =>
+            event.runId === lastRunId &&
+            event.kind === "tool.result.recorded" &&
+            event.data.toolName === "read_file" &&
+            event.data.status === "succeeded" &&
+            event.data.projection.text.includes(
+              settled.status === "achieved" ? "READY" : "PENDING",
+            ),
+        ),
+        "the terminal decision must agree with the last Run's real file evidence",
+      );
     } finally {
       ledger.close();
       eventsStore.close();
@@ -226,6 +240,14 @@ export async function createRealGoalHost(
     continuationRunIds,
     goal,
     assertRealExecutionAndReport,
+    async assertNoFurtherRuns() {
+      const expectedRuns = startedRuns.size;
+      const quietUntil = Date.now() + 5_500;
+      while (Date.now() < quietUntil) {
+        await delay(100, undefined, { signal: context.signal });
+        assert.equal(startedRuns.size, expectedRuns, "terminal Goal must not admit another Run");
+      }
+    },
     async arm(maxIterations: number) {
       await request("goal.control", {
         ...sessionScope,
