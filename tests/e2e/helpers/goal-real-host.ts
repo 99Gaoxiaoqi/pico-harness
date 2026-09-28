@@ -186,6 +186,7 @@ export async function createRealGoalHost(
         JSON.stringify({
           modelRoute: model.route.id,
           status: settled.status,
+          lastReason: settled.lastReason,
           hostRuns: startedRuns.size,
           hostContinuations: continuationRunIds.size,
           iterations: settled.iterations,
@@ -199,6 +200,10 @@ export async function createRealGoalHost(
           knownCostCNY: attempts.reduce((sum, attempt) => sum + (attempt.costCNY ?? 0), 0),
           unknownCostCalls: attempts.filter((attempt) => attempt.costStatus === "unknown").length,
         }),
+      );
+      assert.ok(
+        [...finishedRuns.values()].every((status) => status === "succeeded"),
+        `Host Runs must succeed: ${JSON.stringify([...finishedRuns])}; ${settled.lastReason ?? ""}`,
       );
       assert.equal(runStarts.length, startedRuns.size);
       assert.equal(terminalRuns.length, runStarts.length);
@@ -288,10 +293,6 @@ export async function createRealGoalHost(
           finishedRuns.size === startedRuns.size &&
           startedRuns.size > 0
         ) {
-          assert.ok(
-            [...finishedRuns.values()].every((status) => status === "succeeded"),
-            `Host Runs must succeed: ${JSON.stringify([...finishedRuns])}`,
-          );
           return current;
         }
         assert.ok(
