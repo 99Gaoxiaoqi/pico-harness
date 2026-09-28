@@ -15,6 +15,7 @@
 //   - thinking  : 浅色显示 Provider 返回的可展示思考过程
 
 import React, { memo } from "react";
+import { goalEntryText } from "./goal-entry.js";
 import { Box, Text } from "ink";
 import type { TuiEntry } from "./tui-reporter.js";
 import { CompletedText, StreamingText } from "./streaming-text.js";
@@ -74,6 +75,13 @@ function MessageRowImpl({
       return (
         <MessageFrame marker="❯" markerColor="green" boldMarker>
           <Text wrap="wrap">{entry.content}</Text>
+        </MessageFrame>
+      );
+
+    case "goal":
+      return (
+        <MessageFrame marker="◎" markerColor={entry.state === "achieved" ? "green" : "yellow"}>
+          <Text wrap="wrap">{goalEntryText(entry)}</Text>
         </MessageFrame>
       );
 
@@ -366,6 +374,8 @@ function arePropsEqual(prev: MessageRowProps, next: MessageRowProps): boolean {
       return (
         a.kind === "skill" && a.name === b.name && a.args === b.args && a.trigger === b.trigger
       );
+    case "goal":
+      return a.kind === "goal" && goalEntryText(a) === goalEntryText(b);
     case "error":
       return (
         a.kind === "error" &&

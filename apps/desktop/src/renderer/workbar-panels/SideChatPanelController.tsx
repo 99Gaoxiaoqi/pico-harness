@@ -1,3 +1,4 @@
+import { useConversationGoal } from "../conversation/ConversationGoalControls.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { ConversationInteractionSlot } from "../conversation/ConversationInteractionSlot.js";
@@ -151,8 +152,12 @@ export function SideChatPanelController({
     const live = activeRun
       ? data.timeline.filter((item) => item.runId === activeRun.id).map(sideChatTimelineItem)
       : [];
-    return mergeConversationItemGroups(conversation?.items ?? [], live);
-  }, [activeRun, conversation?.items, data.timeline]);
+    return mergeConversationItemGroups(
+      conversation?.items ?? [],
+      conversation?.goalItem ? [conversation.goalItem] : [],
+      live,
+    );
+  }, [activeRun, conversation?.items, conversation?.goalItem, data.timeline]);
 
   const close = useCallback(async () => {
     createGenerationRef.current += 1;
@@ -206,9 +211,44 @@ export function SideChatPanelController({
     [actions, pendingApproval, targetSessionId],
   );
 
+  const goalControls = useConversationGoal({
+    snapshot: conversation?.goal,
+    disabled: child.state !== "live" || conversation?.goal === undefined,
+    busy:
+      busy ===
+      `goal-control:${targetSessionId ? workspaceSessionKey({ workspacePath, sessionId: targetSessionId }) : ""}`,
+    costCNY: conversation?.usage?.costCNY,
+    onArm: async (draft) =>
+      targetSessionId
+        ? actions.controlGoal(
+            { workspacePath, sessionId: targetSessionId },
+            {
+              action: "arm",
+              expectedRevision: conversation?.goal?.currentGoal?.revision ?? 0,
+              ...draft,
+            },
+          )
+        : false,
+    onAction: async (action, goal) =>
+      targetSessionId
+        ? actions.controlGoal(
+            { workspacePath, sessionId: targetSessionId },
+            {
+              action,
+              goalId: goal.id,
+              expectedRevision: goal.revision,
+            },
+          )
+        : false,
+  });
+
   return (
     <SideChatWorkbarPanel
       activeRun={activeRun}
+      goalStatus={goalControls.statusBar}
+      goalDialog={goalControls.dialog}
+      onSetGoal={goalControls.openDialog}
+      goalDisabled={!goalControls.canSetGoal}
       child={child}
       items={items}
       draft={draft}

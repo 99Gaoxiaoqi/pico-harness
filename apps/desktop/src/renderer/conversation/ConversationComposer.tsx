@@ -46,6 +46,8 @@ export interface ConversationComposerProps {
   readonly onOptionChange?: ((value: string) => void) | undefined;
   readonly onAttach?: (() => void) | undefined;
   readonly modes?: ConversationComposerModes | undefined;
+  readonly onSetGoal?: (() => void) | undefined;
+  readonly goalDisabled?: boolean | undefined;
   readonly onPause?: (() => void) | undefined;
   readonly onResume?: (() => void) | undefined;
   readonly onStop?: (() => void) | undefined;
@@ -81,6 +83,8 @@ export function ConversationComposer({
   onOptionChange,
   onAttach,
   modes,
+  onSetGoal,
+  goalDisabled,
   onPause,
   onResume,
   onStop,
@@ -164,7 +168,13 @@ export function ConversationComposer({
         }
         footerActions={
           <div className="conversation-composer__controls">
-            <ConversationComposerMenu onAttach={onAttach} modes={modes} disabled={disabled || busy}>
+            <ConversationComposerMenu
+              onAttach={onAttach}
+              modes={modes}
+              onSetGoal={onSetGoal}
+              goalDisabled={goalDisabled}
+              disabled={disabled || busy}
+            >
               {leadingAccessory}
             </ConversationComposerMenu>
             {options.length > 0 && (
