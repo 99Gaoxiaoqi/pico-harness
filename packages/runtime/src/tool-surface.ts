@@ -71,8 +71,8 @@ export const PICO_TOOL_GROUPS: readonly ToolGroupDef[] = [
   {
     id: "goal",
     label: "Goal",
-    description: "长程目标管理：创建、查询、更新",
-    toolNames: ["create_goal", "get_goal", "update_goal"],
+    description: "长程目标管理：创建、查询、暂停、恢复、清除",
+    toolNames: ["create_goal", "get_goal", "pause_goal", "resume_goal", "clear_goal"],
     economy: "deferred",
   },
   {

@@ -205,6 +205,7 @@ export type RuntimeGoalContinuationIntent = {
 export type RuntimeGoalExecutionRef = RuntimeGoalContinuationIntent & {
   readonly origin: "user" | "goal";
   readonly started?: boolean;
+  readonly stopReason?: string;
 };
 
 export type RuntimeGoalControlLease = {
@@ -251,6 +252,10 @@ const runtimeGoalResult = exactResultShape(
     tokensNow: resultFiniteNumber,
     tokensBaselinePending: resultBoolean,
     consecutiveNoProgress: resultFiniteNumber,
+  },
+  {
+    tokenBudget: resultFiniteNumber,
+    lastReason: resultString,
     lastEvaluation: exactResultShape(
       { reason: resultString, at: resultFiniteNumber },
       {
@@ -261,10 +266,6 @@ const runtimeGoalResult = exactResultShape(
         evaluatorFailed: resultBoolean,
       },
     ),
-  },
-  {
-    tokenBudget: resultFiniteNumber,
-    lastReason: resultString,
     armedAt: resultFiniteNumber,
     pausedAt: resultFiniteNumber,
     achievedAt: resultFiniteNumber,
@@ -307,7 +308,7 @@ const runtimeGoalCoordinatorResult = exactResultShape(
           runStartedAt: resultFiniteNumber,
           origin: resultOneOf(["user", "goal"]),
         },
-        { triggeringRunId: resultString, started: resultBoolean },
+        { triggeringRunId: resultString, started: resultBoolean, stopReason: resultString },
       ),
     ),
     workTokens: resultFiniteNumber,
