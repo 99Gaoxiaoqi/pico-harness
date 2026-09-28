@@ -495,7 +495,19 @@ function internalStateEvent(eventId: string, sessionId: string): RuntimeEvent {
     kind: "session.state.committed",
     data: {
       stateVersion: SESSION_RUNTIME_STATE_VERSION,
-      patch: { goal: { stateVersion: 2, sequence: 0, activeGoalId: null, goals: [] } },
+      patch: {
+        goal: {
+          stateVersion: 3,
+          currentGoal: null,
+          controlLease: null,
+          coordinator: {
+            pendingContinuation: null,
+            currentExecution: null,
+            workTokens: 0,
+            accountedRunIds: [],
+          },
+        },
+      },
     },
   };
 }

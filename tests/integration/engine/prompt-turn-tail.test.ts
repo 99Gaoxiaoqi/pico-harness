@@ -37,9 +37,7 @@ test("dynamic prompt state stays in the current user request copy across runs an
   const todo = await todoStore.add("structured-todo-alpha", "high");
   const goalManager = new GoalManager();
   const goal = goalManager.create({
-    title: "goal-alpha",
-    description: "finish alpha",
-    completionCriteria: ["alpha is finished"],
+    condition: "goal-alpha",
   });
   const composer = new PromptComposer(workDir, false, { todoStore, goalManager });
 
@@ -91,7 +89,8 @@ test("dynamic prompt state stays in the current user request copy across runs an
   await engine.run(session);
 
   await todoStore.update(todo.id, { content: "structured-todo-beta", status: "completed" });
-  goalManager.update(goal.id, { progress: "goal-beta" });
+  goalManager.clear(goal.id, goal.revision);
+  goalManager.create({ condition: "goal-beta" }, goalManager.get(goal.id)?.revision);
   await session.commitMessages({ role: "user", content: "user-beta" });
   await engine.run(session);
 

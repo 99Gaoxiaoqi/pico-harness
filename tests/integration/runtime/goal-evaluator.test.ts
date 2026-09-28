@@ -1,84 +1,83 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { evaluateGoalCompletion } from "@pico/runtime/goal-evaluator";
 import type { LLMProvider, Message } from "@pico/core";
+import { evaluateGoal } from "@pico/runtime/goal-evaluator";
 
-const goal = {
-  title: "迁移包边界",
-  description: "完成当前 Runtime 模块迁移",
-  completionCriteria: ["Goal schema v2 已落盘", "相关集成测试通过"],
-  progress: "投影已迁移",
-};
-
-test("Goal 评估器只向 Provider 发送有界上下文并解析结构化验收结果", async () => {
+test("Goal evaluator sends only six bounded user/assistant messages and uses no tools", async () => {
   let received: Message[] | undefined;
   const provider: LLMProvider = {
     generate: async (messages, tools, options) => {
       received = messages;
       assert.deepEqual(tools, []);
-      assert.equal(options?.purpose, "hook");
+      assert.equal(options?.purpose, "goal_evaluation");
+      assert.equal(options?.maxOutputTokens, 1_024);
       return {
         role: "assistant",
         content:
-          '```json\n{"outcome":"met","progress":true,"reason":"验证完成","evidence":["schema v2 snapshot 已落盘","旧 schema 被拒绝"]}\n```',
+          '{"met":false,"impossible":false,"progress":true,"waiting":false,"reason":"已完成一项"}',
       };
     },
   };
 
-  const result = await evaluateGoalCompletion(
-    provider,
-    { ...goal, evidence: ["schema v2 snapshot 已落盘", "旧 schema 被拒绝"] },
-    Array.from({ length: 10 }, (_, index) => ({
-      role: index % 2 === 0 ? "user" : "assistant",
-      content: `${index}: ${"x".repeat(900)}`,
-    })) as Message[],
-  );
+  const history = Array.from({ length: 9 }, (_, index) => ({
+    role: index % 2 === 0 ? "user" : "assistant",
+    content: `${index}: ${"x".repeat(900)}`,
+  })) as Message[];
+  const result = await evaluateGoal(provider, "做完全部工作", history);
 
   assert.deepEqual(result, {
-    outcome: "met",
+    met: false,
+    impossible: false,
     progress: true,
-    reason: "验证完成",
-    evidence: ["schema v2 snapshot 已落盘", "旧 schema 被拒绝"],
+    waiting: false,
     evaluatorFailed: false,
+    reason: "已完成一项",
   });
   assert.equal(received?.length, 2);
-  assert.match(received?.[1]?.content ?? "", /assistant: 9: x{797}/u);
-  assert.doesNotMatch(received?.[1]?.content ?? "", /user: 0: x/u);
-  assert.match(received?.[1]?.content ?? "", /之前各轮记录的证据/u);
-  assert.match(received?.[1]?.content ?? "", /schema v2 snapshot 已落盘/u);
+  assert.doesNotMatch(received?.[1]?.content ?? "", /0: x/u);
+  assert.match(received?.[1]?.content ?? "", /8: x{497}/u);
+  assert.doesNotMatch(received?.[1]?.content ?? "", /x{501}/u);
 });
 
-test("Goal 评估器在 Provider 失败时返回可续跑的中性结果", async () => {
-  const provider: LLMProvider = {
-    generate: async () => {
-      throw new Error("provider unavailable");
+test("Goal evaluator converts provider failures and malformed output to neutral failures", async () => {
+  const failures: LLMProvider[] = [
+    {
+      generate: async () => {
+        throw new Error("provider unavailable");
+      },
     },
-  };
-
-  const result = await evaluateGoalCompletion(provider, goal, []);
-  assert.deepEqual(result, {
-    outcome: "progress",
-    progress: false,
-    reason: "",
-    evidence: [],
-    evaluatorFailed: true,
-  });
+    {
+      generate: async () => ({
+        role: "assistant",
+        content: '{"met":true,"reason":"missing flags"}',
+      }),
+    },
+  ];
+  for (const provider of failures) {
+    const result = await evaluateGoal(provider, "完成要求", []);
+    assert.equal(result.evaluatorFailed, true);
+    assert.equal(result.met, undefined);
+    assert.ok(result.reason.length > 0);
+  }
 });
 
-test("Goal 评估器不会接受缺少逐项证据的 met 结果", async () => {
+test("Goal evaluator aborts the provider when its deadline expires", async () => {
+  let sawAbort = false;
   const provider: LLMProvider = {
-    generate: async () => ({
-      role: "assistant",
-      content: '{"outcome":"met","progress":true,"reason":"已完成","evidence":[]}',
-    }),
+    generate: async (_messages, _tools, options) =>
+      new Promise((_resolve, reject) => {
+        options?.signal?.addEventListener(
+          "abort",
+          () => {
+            sawAbort = true;
+            reject(new Error("aborted"));
+          },
+          { once: true },
+        );
+      }),
   };
-
-  const result = await evaluateGoalCompletion(
-    provider,
-    { ...goal, completionCriteria: ["第一项", "第二项"] },
-    [],
-  );
-  assert.equal(result.outcome, "progress");
+  const result = await evaluateGoal(provider, "等待或完成", [], { timeoutMs: 5 });
+  assert.equal(sawAbort, true);
   assert.equal(result.evaluatorFailed, true);
-  assert.deepEqual(result.evidence, []);
+  assert.match(result.reason, /超时/u);
 });
