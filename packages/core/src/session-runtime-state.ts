@@ -9,13 +9,6 @@ export type PersistedPermissionMode = "ask" | "auto" | "full-access";
 export type PersistedProviderKind = "openai" | "claude" | "responses";
 export type PersistedCostStatus = "estimated" | "included" | "unknown";
 
-export interface PersistedGoalBudgetConfig {
-  maxTurns?: number;
-  maxTokens?: number;
-  maxCostCNY?: number;
-  maxWallClockMs?: number;
-}
-
 export type PersistedGoalStatus =
   | "active"
   | "waiting"
@@ -28,50 +21,74 @@ export type PersistedGoalStatus =
   | "cleared";
 
 export interface PersistedGoalEvaluation {
-  outcome: "met" | "impossible" | "progress" | "waiting" | "unknown";
+  met?: boolean;
+  impossible?: boolean;
+  progress?: boolean;
+  waiting?: boolean;
+  evaluatorFailed?: boolean;
   reason: string;
-  evidence: string[];
   at: number;
 }
 
-export interface PersistedGoal {
+export interface PersistedGoalState {
   id: string;
-  title: string;
-  description: string;
-  completionCriteria: string[];
-  constraints?: string[];
+  revision: number;
+  condition: string;
   status: PersistedGoalStatus;
   createdAt: number;
   maxIterations: number;
   blockCap: number;
-  controlRevision: number;
-  budgetConfig?: PersistedGoalBudgetConfig;
-  budgetUsage: {
-    turns: number;
-    tokens: number;
-    costCNY: number;
-    startedAt: number;
-  };
-  progress?: string;
-  blockedReason?: string;
+  tokenBudget?: number;
+  iterations: number;
+  tokensAtStart: number;
+  tokensNow: number;
+  tokensBaselinePending: boolean;
   consecutiveNoProgress: number;
+  lastReason?: string;
   lastEvaluation?: PersistedGoalEvaluation;
-  evidence: string[];
-  completionRequested: boolean;
-  pendingContinuation: boolean;
-  awaitingUserTurn: boolean;
-  waitingReason?: string;
-  nextCheckAt?: number;
-  waitCount: number;
-  admissionKey?: string;
-  targetRunId?: string;
+  armedAt?: number;
+  pausedAt?: number;
+  achievedAt?: number;
+}
+
+export interface PersistedGoalContinuationIntent {
+  goalId: string;
+  revision: number;
+  generation: number;
+  triggeringRunId?: string;
+  prompt: string;
+  createdAt: number;
+  runId: string;
+  daemonRunId: string;
+  turnId: string;
+  invocationId: string;
+  runStartedEventId: string;
+  runStartedAt: number;
+}
+
+export interface PersistedGoalExecutionRef extends PersistedGoalContinuationIntent {
+  origin: "user" | "goal";
+  started?: boolean;
+}
+
+export interface PersistedGoalCoordinator {
+  pendingContinuation: PersistedGoalContinuationIntent | null;
+  currentExecution: PersistedGoalExecutionRef | null;
+  lastSettledRunId?: string;
+  workTokens: number;
+  accountedRunIds: string[];
+}
+
+export interface PersistedGoalControlLease {
+  goalId: string;
+  generation: number;
 }
 
 export interface PersistedGoalManagerSnapshot {
-  stateVersion: 2;
-  sequence: number;
-  activeGoalId: string | null;
-  goals: PersistedGoal[];
+  stateVersion: 3;
+  currentGoal: PersistedGoalState | null;
+  controlLease: PersistedGoalControlLease | null;
+  coordinator: PersistedGoalCoordinator;
 }
 
 /** 会话恢复时需要覆盖启动默认值的设置。密钥、endpoint 和 tools 不落盘。 */
@@ -270,28 +287,28 @@ function normalizeExecutionBoundary(value: unknown): ExecutionBoundary | undefin
 export function normalizeGoalManagerSnapshot(
   value: unknown,
 ): PersistedGoalManagerSnapshot | undefined {
-  if (!isRecord(value) || value["stateVersion"] !== 2) return undefined;
-  const sequence = value["sequence"];
-  const activeGoalId = value["activeGoalId"];
-  const candidates = value["goals"];
-  if (!isNonNegativeInteger(sequence) || !Array.isArray(candidates)) return undefined;
-  if (activeGoalId !== null && typeof activeGoalId !== "string") return undefined;
-
-  const goals: PersistedGoal[] = [];
-  const ids = new Set<string>();
-  for (const candidate of candidates) {
-    if (!isGoal(candidate) || ids.has(candidate.id)) return undefined;
-    const generatedSequence = parseGeneratedGoalSequence(candidate.id);
-    if (generatedSequence !== undefined && generatedSequence > sequence) return undefined;
-    ids.add(candidate.id);
-    goals.push(structuredClone(candidate));
-  }
-  const activeGoals = goals.filter((goal) => goal.status === "active" || goal.status === "waiting");
-  if (activeGoals.length > 1) return undefined;
-  if (activeGoalId === null ? activeGoals.length !== 0 : activeGoals[0]?.id !== activeGoalId) {
+  if (
+    !isRecord(value) ||
+    value["stateVersion"] !== 3 ||
+    !(value["currentGoal"] === null || isGoal(value["currentGoal"])) ||
+    !(value["controlLease"] === null || isGoalControlLease(value["controlLease"])) ||
+    !isGoalCoordinator(value["coordinator"])
+  ) {
     return undefined;
   }
-  return { stateVersion: 2, sequence, activeGoalId, goals };
+  const currentGoal = value["currentGoal"] === null ? null : structuredClone(value["currentGoal"]);
+  const controlLease = value["controlLease"] === null ? null : structuredClone(value["controlLease"]);
+  const coordinator = structuredClone(value["coordinator"]);
+  if (
+    (controlLease !== null && controlLease.goalId !== currentGoal?.id) ||
+    (coordinator.currentExecution !== null &&
+      coordinator.currentExecution.goalId !== currentGoal?.id) ||
+    (coordinator.pendingContinuation !== null &&
+      coordinator.pendingContinuation.goalId !== currentGoal?.id)
+  ) {
+    return undefined;
+  }
+  return { stateVersion: 3, currentGoal, controlLease, coordinator };
 }
 
 function normalizePersistedSessionSettings(value: unknown): PersistedSessionSettings | undefined {
@@ -480,109 +497,163 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isGoal(value: unknown): value is PersistedGoal {
+function isGoal(value: unknown): value is PersistedGoalState {
   if (
     !isRecord(value) ||
     !hasOnlyKeys(value, [
       "id",
-      "title",
-      "description",
-      "completionCriteria",
-      "constraints",
+      "revision",
+      "condition",
       "status",
       "createdAt",
       "maxIterations",
       "blockCap",
-      "controlRevision",
-      "budgetConfig",
-      "budgetUsage",
-      "progress",
-      "blockedReason",
+      "tokenBudget",
+      "iterations",
+      "tokensAtStart",
+      "tokensNow",
+      "tokensBaselinePending",
       "consecutiveNoProgress",
+      "lastReason",
       "lastEvaluation",
-      "evidence",
-      "completionRequested",
-      "pendingContinuation",
-      "awaitingUserTurn",
-      "waitingReason",
-      "nextCheckAt",
-      "waitCount",
-      "admissionKey",
-      "targetRunId",
-    ]) ||
-    !isRecord(value["budgetUsage"])
+      "armedAt",
+      "pausedAt",
+      "achievedAt",
+    ])
   )
     return false;
-  const usage = value["budgetUsage"];
   return (
     typeof value["id"] === "string" &&
-    typeof value["title"] === "string" &&
-    typeof value["description"] === "string" &&
-    isNonEmptyStringArray(value["completionCriteria"]) &&
-    value["completionCriteria"].length <= 30 &&
-    (value["constraints"] === undefined || isStringArray(value["constraints"])) &&
+    isPositiveInteger(value["revision"]) &&
+    typeof value["condition"] === "string" &&
+    value["condition"].trim().length > 0 &&
     isGoalStatus(value["status"]) &&
     isNonNegativeFiniteNumber(value["createdAt"]) &&
     isPositiveInteger(value["maxIterations"]) &&
     isPositiveInteger(value["blockCap"]) &&
-    isNonNegativeInteger(value["controlRevision"]) &&
-    isNonNegativeInteger(usage["turns"]) &&
-    isNonNegativeInteger(usage["tokens"]) &&
-    isNonNegativeFiniteNumber(usage["costCNY"]) &&
-    isNonNegativeFiniteNumber(usage["startedAt"]) &&
-    isOptionalString(value["progress"]) &&
-    isOptionalString(value["blockedReason"]) &&
-    isOptionalBudgetConfig(value["budgetConfig"]) &&
+    isOptionalPositiveInteger(value["tokenBudget"]) &&
+    isNonNegativeInteger(value["iterations"]) &&
+    isNonNegativeInteger(value["tokensAtStart"]) &&
+    isNonNegativeInteger(value["tokensNow"]) &&
+    typeof value["tokensBaselinePending"] === "boolean" &&
     isNonNegativeInteger(value["consecutiveNoProgress"]) &&
     (value["lastEvaluation"] === undefined || isGoalEvaluation(value["lastEvaluation"])) &&
-    isStringArray(value["evidence"]) &&
-    typeof value["completionRequested"] === "boolean" &&
-    typeof value["pendingContinuation"] === "boolean" &&
-    typeof value["awaitingUserTurn"] === "boolean" &&
-    isOptionalString(value["waitingReason"]) &&
-    isOptionalNonNegativeFiniteNumber(value["nextCheckAt"]) &&
-    isNonNegativeInteger(value["waitCount"]) &&
-    isOptionalString(value["admissionKey"]) &&
-    isOptionalString(value["targetRunId"]) &&
-    (value["status"] !== "waiting" ||
-      (typeof value["nextCheckAt"] === "number" &&
-        typeof value["waitingReason"] === "string" &&
-        value["pendingContinuation"] === false &&
-        value["awaitingUserTurn"] === false)) &&
-    (value["status"] === "active" ||
-      (value["pendingContinuation"] === false &&
-        value["awaitingUserTurn"] === false &&
-        value["admissionKey"] === undefined &&
-        value["targetRunId"] === undefined)) &&
-    (value["pendingContinuation"] === false ||
-      (value["awaitingUserTurn"] === false && value["admissionKey"] === undefined)) &&
-    (value["admissionKey"] === undefined || value["pendingContinuation"] === false)
+    isOptionalString(value["lastReason"]) &&
+    isOptionalNonNegativeFiniteNumber(value["armedAt"]) &&
+    isOptionalNonNegativeFiniteNumber(value["pausedAt"]) &&
+    isOptionalNonNegativeFiniteNumber(value["achievedAt"])
   );
 }
 
 function isGoalEvaluation(value: unknown): value is PersistedGoalEvaluation {
   return (
     isRecord(value) &&
-    hasOnlyKeys(value, ["outcome", "reason", "evidence", "at"]) &&
-    (value["outcome"] === "met" ||
-      value["outcome"] === "impossible" ||
-      value["outcome"] === "progress" ||
-      value["outcome"] === "waiting" ||
-      value["outcome"] === "unknown") &&
+    hasOnlyKeys(value, ["met", "impossible", "progress", "waiting", "evaluatorFailed", "reason", "at"]) &&
+    isOptionalBoolean(value["met"]) &&
+    isOptionalBoolean(value["impossible"]) &&
+    isOptionalBoolean(value["progress"]) &&
+    isOptionalBoolean(value["waiting"]) &&
+    isOptionalBoolean(value["evaluatorFailed"]) &&
+    ["met", "impossible", "progress", "waiting", "evaluatorFailed"].some(
+      (key) => value[key] === true,
+    ) &&
     typeof value["reason"] === "string" &&
-    isStringArray(value["evidence"]) &&
     isNonNegativeFiniteNumber(value["at"])
   );
 }
 
-function isOptionalBudgetConfig(value: unknown): boolean {
-  if (value === undefined) return true;
-  if (!isRecord(value)) return false;
+function isGoalCoordinator(value: unknown): value is PersistedGoalCoordinator {
   return (
-    isOptionalNonNegativeInteger(value["maxTurns"]) &&
-    isOptionalNonNegativeInteger(value["maxTokens"]) &&
-    isOptionalNonNegativeFiniteNumber(value["maxCostCNY"]) &&
-    isOptionalNonNegativeInteger(value["maxWallClockMs"])
+    isRecord(value) &&
+    hasOnlyKeys(value, [
+      "pendingContinuation",
+      "currentExecution",
+      "lastSettledRunId",
+      "workTokens",
+      "accountedRunIds",
+    ]) &&
+    (value["pendingContinuation"] === null || isGoalContinuationIntent(value["pendingContinuation"])) &&
+    (value["currentExecution"] === null || isGoalExecutionRef(value["currentExecution"])) &&
+    isOptionalString(value["lastSettledRunId"]) &&
+    isNonNegativeInteger(value["workTokens"]) &&
+    isStringArray(value["accountedRunIds"])
+  );
+}
+
+function isGoalContinuationIntent(value: unknown): value is PersistedGoalContinuationIntent {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, [
+      "goalId",
+      "revision",
+      "generation",
+      "triggeringRunId",
+      "prompt",
+      "createdAt",
+      "runId",
+      "daemonRunId",
+      "turnId",
+      "invocationId",
+      "runStartedEventId",
+      "runStartedAt",
+    ]) &&
+    typeof value["goalId"] === "string" &&
+    isPositiveInteger(value["revision"]) &&
+    isPositiveInteger(value["generation"]) &&
+    isOptionalString(value["triggeringRunId"]) &&
+    typeof value["prompt"] === "string" &&
+    isNonNegativeFiniteNumber(value["createdAt"]) &&
+    typeof value["runId"] === "string" &&
+    typeof value["daemonRunId"] === "string" &&
+    typeof value["turnId"] === "string" &&
+    typeof value["invocationId"] === "string" &&
+    typeof value["runStartedEventId"] === "string" &&
+    isNonNegativeFiniteNumber(value["runStartedAt"])
+  );
+}
+
+function isGoalExecutionRef(value: unknown): value is PersistedGoalExecutionRef {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, [
+      "goalId",
+      "revision",
+      "generation",
+      "triggeringRunId",
+      "prompt",
+      "createdAt",
+      "runId",
+      "daemonRunId",
+      "turnId",
+      "invocationId",
+      "runStartedEventId",
+      "runStartedAt",
+      "origin",
+      "started",
+    ]) &&
+    typeof value["goalId"] === "string" &&
+    isPositiveInteger(value["revision"]) &&
+    isPositiveInteger(value["generation"]) &&
+    isOptionalString(value["triggeringRunId"]) &&
+    typeof value["prompt"] === "string" &&
+    isNonNegativeFiniteNumber(value["createdAt"]) &&
+    typeof value["runId"] === "string" &&
+    typeof value["daemonRunId"] === "string" &&
+    typeof value["turnId"] === "string" &&
+    typeof value["invocationId"] === "string" &&
+    typeof value["runStartedEventId"] === "string" &&
+    isNonNegativeFiniteNumber(value["runStartedAt"]) &&
+    (value["origin"] === "user" || value["origin"] === "goal") &&
+    isOptionalBoolean(value["started"])
+  );
+}
+
+function isGoalControlLease(value: unknown): value is PersistedGoalControlLease {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ["goalId", "generation"]) &&
+    typeof value["goalId"] === "string" &&
+    isPositiveInteger(value["generation"])
   );
 }
 
@@ -598,6 +669,14 @@ function isGoalStatus(value: unknown): value is PersistedGoalStatus {
     value === "max_iterations" ||
     value === "cleared"
   );
+}
+
+function isOptionalPositiveInteger(value: unknown): boolean {
+  return value === undefined || isPositiveInteger(value);
+}
+
+function isOptionalBoolean(value: unknown): boolean {
+  return value === undefined || typeof value === "boolean";
 }
 
 function isStringArray(value: unknown): value is string[] {
@@ -618,13 +697,6 @@ function isOptionalNonNegativeInteger(value: unknown): boolean {
 
 function isOptionalNonNegativeFiniteNumber(value: unknown): boolean {
   return value === undefined || isNonNegativeFiniteNumber(value);
-}
-
-function parseGeneratedGoalSequence(id: string): number | undefined {
-  const match = /^goal-(\d+)$/u.exec(id);
-  if (!match?.[1]) return undefined;
-  const sequence = Number(match[1]);
-  return Number.isSafeInteger(sequence) ? sequence : undefined;
 }
 
 function isProviderKind(value: unknown): value is PersistedProviderKind {

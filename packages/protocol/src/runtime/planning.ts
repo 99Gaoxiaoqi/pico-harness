@@ -157,72 +157,82 @@ export type RuntimeGoalStatus =
   | "max_iterations"
   | "cleared";
 
+export type RuntimeGoalEvaluation = {
+  readonly met?: boolean;
+  readonly impossible?: boolean;
+  readonly progress?: boolean;
+  readonly waiting?: boolean;
+  readonly evaluatorFailed?: boolean;
+  readonly reason: string;
+  readonly at: number;
+};
+
 export type RuntimeGoal = {
   readonly id: string;
-  readonly title: string;
-  readonly description: string;
-  readonly completionCriteria: readonly string[];
-  readonly constraints?: readonly string[];
+  readonly revision: number;
+  readonly condition: string;
   readonly status: RuntimeGoalStatus;
   readonly createdAt: number;
   readonly maxIterations: number;
   readonly blockCap: number;
-  readonly controlRevision: number;
-  readonly budgetConfig?: {
-    readonly maxTurns?: number;
-    readonly maxTokens?: number;
-    readonly maxCostCNY?: number;
-    readonly maxWallClockMs?: number;
-  };
-  readonly budgetUsage: {
-    readonly turns: number;
-    readonly tokens: number;
-    readonly costCNY: number;
-    readonly startedAt: number;
-  };
-  readonly progress?: string;
-  readonly blockedReason?: string;
+  readonly tokenBudget?: number;
+  readonly iterations: number;
+  readonly tokensAtStart: number;
+  readonly tokensNow: number;
+  readonly tokensBaselinePending: boolean;
   readonly consecutiveNoProgress: number;
-  readonly lastEvaluation?: {
-    readonly outcome: "met" | "impossible" | "progress" | "waiting" | "unknown";
-    readonly reason: string;
-    readonly evidence: readonly string[];
-    readonly at: number;
-  };
-  readonly evidence: readonly string[];
-  readonly completionRequested: boolean;
-  readonly pendingContinuation: boolean;
-  readonly awaitingUserTurn: boolean;
-  readonly waitingReason?: string;
-  readonly nextCheckAt?: number;
-  readonly waitCount: number;
-  readonly admissionKey?: string;
-  readonly targetRunId?: string;
+  readonly lastReason?: string;
+  readonly lastEvaluation?: RuntimeGoalEvaluation;
+  readonly armedAt?: number;
+  readonly pausedAt?: number;
+  readonly achievedAt?: number;
+};
+
+export type RuntimeGoalContinuationIntent = {
+  readonly goalId: string;
+  readonly revision: number;
+  readonly generation: number;
+  readonly triggeringRunId?: string;
+  readonly prompt: string;
+  readonly createdAt: number;
+  readonly runId: string;
+  readonly daemonRunId: string;
+  readonly turnId: string;
+  readonly invocationId: string;
+  readonly runStartedEventId: string;
+  readonly runStartedAt: number;
+};
+
+export type RuntimeGoalExecutionRef = RuntimeGoalContinuationIntent & {
+  readonly origin: "user" | "goal";
+  readonly started?: boolean;
+};
+
+export type RuntimeGoalControlLease = {
+  readonly goalId: string;
+  readonly generation: number;
+};
+
+export type RuntimeGoalCoordinator = {
+  readonly pendingContinuation: RuntimeGoalContinuationIntent | null;
+  readonly currentExecution: RuntimeGoalExecutionRef | null;
+  readonly lastSettledRunId?: string;
+  readonly workTokens: number;
+  readonly accountedRunIds: readonly string[];
 };
 
 export type RuntimeGoalSnapshot = {
-  readonly stateVersion: 2;
-  readonly sequence: number;
-  readonly activeGoalId: string | null;
-  readonly goals: readonly RuntimeGoal[];
+  readonly stateVersion: 3;
+  readonly currentGoal: RuntimeGoal | null;
+  readonly controlLease: RuntimeGoalControlLease | null;
+  readonly coordinator: RuntimeGoalCoordinator;
 };
-
-const runtimeGoalBudgetConfigResult = exactResultShape(
-  {},
-  {
-    maxTurns: resultFiniteNumber,
-    maxTokens: resultFiniteNumber,
-    maxCostCNY: resultFiniteNumber,
-    maxWallClockMs: resultFiniteNumber,
-  },
-);
 
 const runtimeGoalResult = exactResultShape(
   {
     id: resultString,
-    title: resultString,
-    description: resultString,
-    completionCriteria: resultStringArray,
+    revision: resultFiniteNumber,
+    condition: resultString,
     status: resultOneOf([
       "active",
       "waiting",
@@ -237,43 +247,83 @@ const runtimeGoalResult = exactResultShape(
     createdAt: resultFiniteNumber,
     maxIterations: resultFiniteNumber,
     blockCap: resultFiniteNumber,
-    controlRevision: resultFiniteNumber,
+    iterations: resultFiniteNumber,
+    tokensAtStart: resultFiniteNumber,
+    tokensNow: resultFiniteNumber,
+    tokensBaselinePending: resultBoolean,
     consecutiveNoProgress: resultFiniteNumber,
-    evidence: resultStringArray,
-    completionRequested: resultBoolean,
-    pendingContinuation: resultBoolean,
-    awaitingUserTurn: resultBoolean,
-    waitCount: resultFiniteNumber,
-    budgetUsage: exactResultShape({
-      turns: resultFiniteNumber,
-      tokens: resultFiniteNumber,
-      costCNY: resultFiniteNumber,
-      startedAt: resultFiniteNumber,
-    }),
+    lastEvaluation: exactResultShape(
+      { reason: resultString, at: resultFiniteNumber },
+      {
+        met: resultBoolean,
+        impossible: resultBoolean,
+        progress: resultBoolean,
+        waiting: resultBoolean,
+        evaluatorFailed: resultBoolean,
+      },
+    ),
   },
   {
-    constraints: resultStringArray,
-    budgetConfig: runtimeGoalBudgetConfigResult,
-    progress: resultString,
-    blockedReason: resultString,
-    waitingReason: resultString,
-    nextCheckAt: resultFiniteNumber,
-    admissionKey: resultString,
-    targetRunId: resultString,
-    lastEvaluation: exactResultShape({
-      outcome: resultOneOf(["met", "impossible", "progress", "waiting", "unknown"]),
-      reason: resultString,
-      evidence: resultStringArray,
-      at: resultFiniteNumber,
-    }),
+    tokenBudget: resultFiniteNumber,
+    lastReason: resultString,
+    armedAt: resultFiniteNumber,
+    pausedAt: resultFiniteNumber,
+    achievedAt: resultFiniteNumber,
   },
 );
 
+const runtimeGoalContinuationIntentResult = exactResultShape(
+  {
+    goalId: resultString,
+    revision: resultFiniteNumber,
+    generation: resultFiniteNumber,
+    prompt: resultString,
+    createdAt: resultFiniteNumber,
+    runId: resultString,
+    daemonRunId: resultString,
+    turnId: resultString,
+    invocationId: resultString,
+    runStartedEventId: resultString,
+    runStartedAt: resultFiniteNumber,
+  },
+  { triggeringRunId: resultString },
+);
+
+const runtimeGoalCoordinatorResult = exactResultShape(
+  {
+    pendingContinuation: resultNullable(runtimeGoalContinuationIntentResult),
+    currentExecution: resultNullable(
+      exactResultShape(
+        {
+          goalId: resultString,
+          revision: resultFiniteNumber,
+          generation: resultFiniteNumber,
+          prompt: resultString,
+          createdAt: resultFiniteNumber,
+          runId: resultString,
+          daemonRunId: resultString,
+          turnId: resultString,
+          invocationId: resultString,
+          runStartedEventId: resultString,
+          runStartedAt: resultFiniteNumber,
+          origin: resultOneOf(["user", "goal"]),
+        },
+        { triggeringRunId: resultString, started: resultBoolean },
+      ),
+    ),
+    workTokens: resultFiniteNumber,
+    accountedRunIds: resultStringArray,
+  },
+  { lastSettledRunId: resultString },
+);
+
 const runtimeGoalSnapshotResult = exactResultShape({
-  stateVersion: resultOneOf([2]),
-  sequence: resultFiniteNumber,
-  activeGoalId: resultNullable(resultString),
-  goals: resultArray(runtimeGoalResult),
+  stateVersion: resultOneOf([3]),
+  currentGoal: resultNullable(runtimeGoalResult),
+  controlLease: resultNullable(
+    exactResultShape({ goalId: resultString, generation: resultFiniteNumber }),
+  ),
+  coordinator: runtimeGoalCoordinatorResult,
 });
 
 const runtimePlanStepResult = resultShape(
@@ -377,14 +427,12 @@ export type PlanningMethodMap = {
     readonly params: WorkspaceParams & {
       readonly sessionId: SessionId;
       readonly action: "arm" | "pause" | "resume" | "clear";
+      readonly expectedRevision: number;
       readonly goalId?: string;
-      readonly title?: string;
-      readonly description?: string;
-      readonly completionCriteria?: readonly string[];
-      readonly constraints?: readonly string[];
+      readonly condition?: string;
+      readonly tokenBudget?: number;
       readonly maxIterations?: number;
       readonly blockCap?: number;
-      readonly budget?: JsonObject;
     };
     readonly result: { readonly goal: RuntimeGoalSnapshot };
   };
@@ -449,16 +497,14 @@ export const planningParamValidators = {
       workspacePath: stringParam,
       sessionId: stringParam,
       action: oneOfParam(["arm", "pause", "resume", "clear"]),
+      expectedRevision: finiteNumberParam,
     },
     {
       goalId: stringParam,
-      title: stringParam,
-      description: stringParam,
-      completionCriteria: stringArrayParam,
-      constraints: stringArrayParam,
+      condition: stringParam,
+      tokenBudget: finiteNumberParam,
       maxIterations: finiteNumberParam,
       blockCap: finiteNumberParam,
-      budget: jsonValueParam,
     },
   ),
   "approval.respond": exactParamShape(
