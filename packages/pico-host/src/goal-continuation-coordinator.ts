@@ -132,6 +132,15 @@ export class GoalContinuationCoordinator {
   private async settle(lane: Lane, completion: GoalRunCompletion): Promise<void> {
     await this.deps.withSession(lane.workspace, lane.sessionId, async (session, manager) => {
       const before = manager.snapshot();
+      if (
+        completion.error === INTERRUPTED_DAEMON_RUN_ERROR &&
+        before.coordinator.currentExecution?.daemonRunId === completion.runId &&
+        before.coordinator.currentExecution.started === false
+      ) {
+        // Materializing the daemon ledger emits a synthetic failure on restart.
+        // A prepared admission has not executed yet and retains its reserved identity.
+        return;
+      }
       let workTokens = before.coordinator.workTokens;
       if (!before.coordinator.accountedRunIds.includes(completion.runId)) {
         const usage = completion.primaryUsage;
