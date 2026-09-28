@@ -161,6 +161,7 @@ export function UsageSettingsPage({
   const [tab, setTab] = useState<Tab>("requests");
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("all");
+  const [purpose, setPurpose] = useState("all");
   const [showDetails, setShowDetails] = useState(true);
   const [page, setPage] = useState(0);
   const details = usage.details;
@@ -174,12 +175,19 @@ export function UsageSettingsPage({
     return (details?.activities ?? []).filter(
       (row) =>
         (status === "all" || status === row.status) &&
+        (purpose === "all" || purpose === row.purpose) &&
         (!needle ||
-          [row.name, row.provider, row.model, row.sessionTitle, row.sessionId].some((value) =>
-            value?.toLocaleLowerCase().includes(needle),
-          )),
+          [
+            row.name,
+            row.provider,
+            row.model,
+            row.sessionTitle,
+            row.sessionId,
+            row.goalId,
+            row.purpose,
+          ].some((value) => value?.toLocaleLowerCase().includes(needle))),
     );
-  }, [details, search, status]);
+  }, [details, search, status, purpose]);
   const counts: Record<Tab, number> = {
     requests: details?.activityCount ?? 0,
     providers: details?.providers.length ?? 0,
@@ -426,6 +434,19 @@ export function UsageSettingsPage({
                       })),
                     ]}
                   />
+                  <SelectField
+                    label="调用用途"
+                    value={purpose}
+                    onValueChange={(value) => {
+                      setPurpose(value);
+                      setPage(0);
+                    }}
+                    options={[
+                      { value: "all", label: "全部用途" },
+                      { value: "main", label: "主执行" },
+                      { value: "goal_evaluation", label: "Goal 验收" },
+                    ]}
+                  />
                   <div className="settings-field usage-detail-toggle">
                     <CheckboxField
                       label="显示明细"
@@ -434,12 +455,13 @@ export function UsageSettingsPage({
                       onCheckedChange={(checked) => setShowDetails(checked)}
                     />
                   </div>
-                  {(search || status !== "all") && (
+                  {(search || status !== "all" || purpose !== "all") && (
                     <Button
                       type="button"
                       onClick={() => {
                         setSearch("");
                         setStatus("all");
+                        setPurpose("all");
                         setPage(0);
                       }}
                     >
@@ -466,7 +488,11 @@ export function UsageSettingsPage({
                       id: row.id,
                       cells: [
                         new Date(row.at).toLocaleString("zh-CN", { hour12: false }),
-                        row.kind === "model" ? "模型" : "工具",
+                        row.purpose === "goal_evaluation"
+                          ? "Goal 验收"
+                          : row.kind === "model"
+                            ? "模型"
+                            : "工具",
                         <span title={row.name}>
                           {row.name}
                           <small className="usage-cell-secondary">{row.provider}</small>

@@ -14,6 +14,7 @@ const details: UsageDashboardDetails = {
     id: `activity-${index}`,
     kind: "model",
     name: `model-${index}`,
+    purpose: index === 0 ? "goal_evaluation" : "main",
     provider: "provider",
     workspacePath: "/project",
     sessionId: `session-${index}`,
@@ -69,6 +70,8 @@ function render(overrides: Partial<UsageSettingsPageProps> = {}) {
 test("usage page presents canonical totals, provenance, request navigation and bounded pagination", () => {
   const html = render();
   assert.match(html, /输入 330 · 输出 50/);
+  assert.match(html, /Goal 验收/);
+  assert.match(html, /调用用途/);
   assert.match(html, /读取 已知 200（覆盖 1 \/ 2 次） · 写入 已知 30（覆盖 1 \/ 2 次）/);
   assert.match(html, /未缓存输入 100/);
   assert.match(html, /缓存读取 未知（未上报） · 写入 未知（未上报）/);

@@ -10,6 +10,8 @@ import { RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX } from "@pico/core";
 export interface UsageProviderCallRecord {
   readonly callId: string;
   readonly model: string;
+  readonly purpose?: string;
+  readonly goalId?: string | undefined;
   readonly provider: string;
   readonly route?: string | undefined;
   readonly sessionId?: string | undefined;
@@ -168,6 +170,8 @@ export async function buildUsageDashboard(
         kind: "model",
         name: call.model,
         model: call.model,
+        ...(call.purpose ? { purpose: call.purpose } : {}),
+        ...(call.goalId ? { goalId: call.goalId } : {}),
         provider,
         workspacePath: source.workspacePath,
         ...(call.sessionId ? { sessionId: call.sessionId } : {}),

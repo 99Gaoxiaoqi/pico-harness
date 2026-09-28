@@ -7,6 +7,8 @@ export interface UsageActivity {
   readonly name: string;
   readonly provider?: string;
   readonly model?: string;
+  readonly purpose?: string;
+  readonly goalId?: string;
   readonly workspacePath: string;
   readonly sessionId?: string;
   readonly sessionTitle?: string;
@@ -94,6 +96,8 @@ export function parseUsageDashboard(value: unknown): UsageDashboardDetails {
         workspacePath: text(row.workspacePath),
         ...optionalText(row, "provider"),
         ...optionalText(row, "model"),
+        ...optionalText(row, "purpose"),
+        ...optionalText(row, "goalId"),
         ...optionalText(row, "sessionId"),
         ...optionalText(row, "sessionTitle"),
         at: number(row.at),

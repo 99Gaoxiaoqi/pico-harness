@@ -259,6 +259,17 @@ test("Goal arm → actual Engine → Host evaluator → two continuations, with 
   assert.equal(state.currentGoal!.tokensAtStart, 600);
   assert.equal(state.currentGoal!.tokensNow, 1200);
   assert.equal(state.coordinator.workTokens, 1800);
+  const usage = (await f.desktop.handle(
+    createRuntimeRequest("usage.get", {
+      workspacePath: f.workspacePath,
+      sessionId: id,
+    }),
+  )) as unknown as { usage: { details: { activities: { purpose?: string; goalId?: string }[] } } };
+  const evaluationRows = usage.usage.details.activities.filter(
+    (row) => row.purpose === "goal_evaluation",
+  );
+  assert.equal(evaluationRows.length, 3);
+  assert.ok(evaluationRows.every((row) => row.goalId === state.currentGoal!.id));
   const ledger = new SqliteRuntimeControlStore({
     storageRoot: resolvePicoPaths(f.workspacePath, { picoHome: f.picoHome }).workspace.root,
   });
