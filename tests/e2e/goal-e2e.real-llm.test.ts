@@ -21,5 +21,6 @@ test(
     assert.ok(host.continuationRunIds.size >= 2, "Host must admit at least two Goal continuations");
     assert.ok(goal.iterations >= 2 && goal.iterations < 5);
     assert.match(await readFile(host.markerPath, "utf8"), /READY/);
+    await host.assertNoFurtherRuns();
   },
 );
