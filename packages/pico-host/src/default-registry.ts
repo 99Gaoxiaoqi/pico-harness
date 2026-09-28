@@ -22,7 +22,13 @@ import {
   type PlanCoordinatorFactory,
 } from "@pico/pico-host/plan-tools";
 import { TodoTool } from "@pico/runtime/todo-tool";
-import { CreateGoalTool, GetGoalTool, UpdateGoalTool } from "@pico/pico-host/goal-tools";
+import {
+  CreateGoalTool,
+  GetGoalTool,
+  PauseGoalTool,
+  ResumeGoalTool,
+  ClearGoalTool,
+} from "@pico/pico-host/goal-tools";
 import { FetchURLTool, WebSearchTool } from "@pico/pico-host/web-tools";
 import { ToolDisclosure } from "@pico/runtime/tool-disclosure";
 import { LoadToolsTool, SearchToolsTool } from "@pico/runtime/tool-discovery-tools";
@@ -346,7 +352,9 @@ export function buildDefaultToolRegistry(
   if (goalManager) {
     registry.register(new CreateGoalTool(goalManager));
     registry.register(new GetGoalTool(goalManager));
-    registry.register(new UpdateGoalTool(goalManager));
+    registry.register(new PauseGoalTool(goalManager));
+    registry.register(new ResumeGoalTool(goalManager));
+    registry.register(new ClearGoalTool(goalManager));
   }
   if (askUserHandler) registerAskUserTool(registry, askUserHandler);
   if (requestSandboxBoundaryHandler) {

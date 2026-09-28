@@ -155,7 +155,7 @@ async function createPinnedSessionRuntime<Command>(
   const picoHome = resolvePicoHome({ picoHome: session.picoHome });
 
   const taskRegistry = options.taskHostRuntime?.taskRegistry ?? new TaskRegistry();
-  const goalManager = new GoalManager();
+  const goalManager = session.getGoalManager();
   const unbindGoalManager = session.bindGoalManager(goalManager);
   const persistedPlanMode =
     (session.getRuntimeStateSnapshot().settings?.collaborationMode ?? "agent") !== "agent";

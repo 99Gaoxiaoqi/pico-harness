@@ -22,7 +22,7 @@ import { logger } from "./logger.js";
 import { assertDurableTranscriptEvent, type DurableTranscriptEvent } from "@pico/core";
 import type { CommitReceipt, SessionCursor } from "@pico/core";
 import { createSessionIdentity, type SessionIdentity } from "@pico/core/session-identity";
-import type { GoalManager } from "@pico/runtime/goal-manager";
+import { GoalManager } from "@pico/runtime/goal-manager";
 import {
   normalizeSessionRuntimeStateWritePatch,
   normalizeSessionUsageSnapshot,
@@ -276,7 +276,8 @@ export class Session
   private persistedGoal: ReturnType<GoalManager["snapshot"]> | undefined;
   private persistedPromptCache: PersistedPromptCacheState | undefined;
   private persistedBoundary: ExecutionBoundary | undefined;
-  private goalBinding: { unsubscribe: () => void } | undefined;
+  private goalBinding: { manager: GoalManager; unsubscribe: () => void } | undefined;
+  private ownedGoalManager: GoalManager | undefined;
 
   /**
    * 并发安全:per-session 串行执行队列。
@@ -734,8 +735,18 @@ export class Session
    * 把会话 GoalManager 绑定到 RuntimeEvent 状态流。
    * 有持久快照时先恢复；无快照时保存当前初始状态。
    */
+  /** Host controls and model tools share one authority, even while a Run holds the execution lock. */
+  getGoalManager(): GoalManager {
+    if (this.ownedGoalManager) return this.ownedGoalManager;
+    const manager = new GoalManager();
+    this.ownedGoalManager = manager;
+    this.bindGoalManager(manager);
+    return manager;
+  }
+
   bindGoalManager(manager: GoalManager): () => void {
     this.assertWritable();
+    if (this.goalBinding?.manager === manager) return () => undefined;
     this.goalBinding?.unsubscribe();
     if (this.persistedGoal) {
       manager.restore(this.persistedGoal);
@@ -745,10 +756,10 @@ export class Session
     const unsubscribe = manager.subscribe((goal) => {
       this.updateRuntimeState({ goal });
     });
-    const binding = { unsubscribe };
+    const binding = { manager, unsubscribe };
     this.goalBinding = binding;
     return () => {
-      if (this.goalBinding !== binding) return;
+      if (this.goalBinding !== binding || manager === this.ownedGoalManager) return;
       unsubscribe();
       this.goalBinding = undefined;
     };

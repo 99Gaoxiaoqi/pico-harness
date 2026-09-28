@@ -1231,6 +1231,9 @@ export function createProductionRuntimeServices(
             approvalManager: broker.approvalManager,
             askUserHandler: broker.askUserHandler,
             ...(execution?.resumeExistingSession ? { resumeExistingSession: true } : {}),
+            hostRunId: context.run.runId,
+            goalRunOrigin: execution?.origin ?? ("user" as const),
+            ...(execution?.goalPreparedRun ? { prestartedRun: execution.goalPreparedRun } : {}),
             waitAtSafeBoundary: context.waitAtSafeBoundary,
             rewindPointSink: context.bindCheckpoint,
             pluginSnapshot,
@@ -1385,6 +1388,7 @@ export function createProductionRuntimeServices(
             sessionId: result.sessionId,
             finalMessage: result.finalMessage,
             usage: result.usage,
+            ...(result.outcome ? { outcome: result.outcome } : {}),
           };
         } finally {
           unsubscribeSteer();

@@ -10,6 +10,8 @@ import type {
   RuntimeRunContinuationOf,
   RuntimeSessionSelection,
 } from "@pico/core";
+import type { GoalManager } from "@pico/runtime/goal-manager";
+import type { AgentRunOutcome } from "@pico/runtime/agent-engine";
 import { RuntimeRun } from "@pico/runtime/runtime-run";
 import type { RuntimeProjectionSession } from "@pico/runtime/runtime-projection-session";
 import type { PlanHandoffController } from "@pico/runtime/plan-handoff";
@@ -85,6 +87,10 @@ export const DEFAULT_CONTINUATION_TERMINAL_MIN_AGE_MS = 10 * 60_000;
  * creates or closes SessionRuntime, MCP, plugin snapshots, stores, or providers.
  */
 export interface RuntimeRunExecutorInput {
+  readonly goalManager?: GoalManager;
+  readonly hostRunId?: string;
+  readonly goalRunOrigin?: "user" | "goal";
+  readonly readModelOutcome?: () => AgentRunOutcome;
   readonly atomicMemoryCompleted?: (runId: string) => Promise<void>;
   readonly session: RuntimeRunExecutorSession;
   readonly promptHooks: RuntimePromptHookPort;
@@ -267,87 +273,108 @@ export class RuntimeRunExecutor {
         this.input.diagnostics,
       );
       const runResult = await runtimeRun.run(async () => {
-        signal?.throwIfAborted();
-        await this.input.onRunAdmission?.(runtimeRun);
-        if (
-          this.input.expectedAgentSwarmAuthorization !== undefined &&
-          runtimeRun.agentSwarmAuthorization !== this.input.expectedAgentSwarmAuthorization
-        ) {
-          throw new Error(
-            "Run authorization changed during assembly; resume with the committed Run identity",
+        try {
+          signal?.throwIfAborted();
+          const started = this.input.goalManager
+            ? (await session.runtimeEventStore?.readRun(session.id, runtimeRun.runId))?.find(
+                (event) => event.kind === "run.started",
+              )
+            : undefined;
+          this.input.goalManager?.beginRun(
+            runtimeRun.runId,
+            runtimeRun.currentTurnId,
+            this.input.goalRunOrigin ?? "user",
+            this.input.hostRunId ?? runtimeRun.runId,
+            {
+              prompt,
+              invocationId: runtimeRun.invocationId,
+              ...(started
+                ? { runStartedEventId: started.eventId, runStartedAt: Date.parse(started.at) }
+                : {}),
+            },
           );
-        }
-        if (!resumeExistingSession) {
-          const submittedPrompt = prompt;
-          const submitDecision = await this.input.promptHooks.submit(submittedPrompt, signal);
-          if (submitDecision.decision === "deny") {
+          await session.flushPersistence();
+          await this.input.onRunAdmission?.(runtimeRun);
+          if (
+            this.input.expectedAgentSwarmAuthorization !== undefined &&
+            runtimeRun.agentSwarmAuthorization !== this.input.expectedAgentSwarmAuthorization
+          ) {
             throw new Error(
-              `UserPromptSubmit hook 阻断了输入: ${submitDecision.reason ?? "(无原因)"}`,
+              "Run authorization changed during assembly; resume with the committed Run identity",
             );
           }
-          prompt = normalizePrompt(applyPromptHookDecision(submittedPrompt, submitDecision));
-          const expansionDecision = await this.input.promptHooks.expand(
-            options.rewindPrompt ?? submittedPrompt,
-            prompt,
-            signal,
-          );
-          if (expansionDecision.decision === "deny") {
-            throw new Error(
-              `UserPromptExpansion hook 阻断了输入: ${expansionDecision.reason ?? "(无原因)"}`,
+          if (!resumeExistingSession) {
+            const submittedPrompt = prompt;
+            const submitDecision = await this.input.promptHooks.submit(submittedPrompt, signal);
+            if (submitDecision.decision === "deny") {
+              throw new Error(
+                `UserPromptSubmit hook 阻断了输入: ${submitDecision.reason ?? "(无原因)"}`,
+              );
+            }
+            prompt = normalizePrompt(applyPromptHookDecision(submittedPrompt, submitDecision));
+            const expansionDecision = await this.input.promptHooks.expand(
+              options.rewindPrompt ?? submittedPrompt,
+              prompt,
+              signal,
             );
+            if (expansionDecision.decision === "deny") {
+              throw new Error(
+                `UserPromptExpansion hook 阻断了输入: ${expansionDecision.reason ?? "(无原因)"}`,
+              );
+            }
+            prompt = normalizePrompt(applyPromptHookDecision(prompt, expansionDecision));
+            const images: ImagePart[] | undefined =
+              options.images ??
+              (options.imagePath
+                ? [this.requireImageLoader()(options.imagePath, workDir)]
+                : undefined);
+            const rewindPointId = prestartedUserInput?.messageId ?? randomUUID();
+            if (
+              !session.fileHistory.snapshots.some(({ messageId }) => messageId === rewindPointId)
+            ) {
+              await session.beginRewindPoint({
+                userPrompt: options.rewindPrompt ?? prompt,
+                messageId: rewindPointId,
+                ...(options.rewindTranscriptIndex !== undefined
+                  ? { transcriptIndex: options.rewindTranscriptIndex }
+                  : {}),
+                ...(options.rewindCollaborationMode !== undefined
+                  ? { collaborationMode: options.rewindCollaborationMode }
+                  : {}),
+                ...(options.rewindPermissionMode !== undefined
+                  ? { permissionMode: options.rewindPermissionMode }
+                  : {}),
+              });
+            }
+            rewindPointSink?.(rewindPointId);
+            const userReceipt = await session.commitMessageOnce(`user-message:${rewindPointId}`, {
+              role: "user",
+              content: prompt,
+              ...(prestartedUserInput?.presentation === "internal"
+                ? {
+                    providerData: {
+                      picoKind: "agent_graph_control_input",
+                      picoPresentationAudience: "internal",
+                      picoHiddenFromTranscript: true,
+                    },
+                  }
+                : {}),
+              ...(images ? { images } : {}),
+            });
+            await session.bindRewindPointSource(rewindPointId, userReceipt);
           }
-          prompt = normalizePrompt(applyPromptHookDecision(prompt, expansionDecision));
-          const images: ImagePart[] | undefined =
-            options.images ??
-            (options.imagePath
-              ? [this.requireImageLoader()(options.imagePath, workDir)]
-              : undefined);
-          const rewindPointId = prestartedUserInput?.messageId ?? randomUUID();
-          if (!session.fileHistory.snapshots.some(({ messageId }) => messageId === rewindPointId)) {
-            await session.beginRewindPoint({
-              userPrompt: options.rewindPrompt ?? prompt,
-              messageId: rewindPointId,
-              ...(options.rewindTranscriptIndex !== undefined
-                ? { transcriptIndex: options.rewindTranscriptIndex }
-                : {}),
-              ...(options.rewindCollaborationMode !== undefined
-                ? { collaborationMode: options.rewindCollaborationMode }
-                : {}),
-              ...(options.rewindPermissionMode !== undefined
-                ? { permissionMode: options.rewindPermissionMode }
-                : {}),
+
+          if (this.input.planExecutionPrompt) {
+            await session.commitMessageOnce(this.input.planExecutionPrompt.messageId, {
+              role: "user",
+              content: this.input.planExecutionPrompt.content,
+              providerData: {
+                picoKind: "plan_execution_control_input",
+                picoPresentationAudience: "internal",
+                picoHiddenFromTranscript: true,
+              },
             });
           }
-          rewindPointSink?.(rewindPointId);
-          const userReceipt = await session.commitMessageOnce(`user-message:${rewindPointId}`, {
-            role: "user",
-            content: prompt,
-            ...(prestartedUserInput?.presentation === "internal"
-              ? {
-                  providerData: {
-                    picoKind: "agent_graph_control_input",
-                    picoPresentationAudience: "internal",
-                    picoHiddenFromTranscript: true,
-                  },
-                }
-              : {}),
-            ...(images ? { images } : {}),
-          });
-          await session.bindRewindPointSource(rewindPointId, userReceipt);
-        }
-
-        if (this.input.planExecutionPrompt) {
-          await session.commitMessageOnce(this.input.planExecutionPrompt.messageId, {
-            role: "user",
-            content: this.input.planExecutionPrompt.content,
-            providerData: {
-              picoKind: "plan_execution_control_input",
-              picoPresentationAudience: "internal",
-              picoHiddenFromTranscript: true,
-            },
-          });
-        }
-        try {
           const messages = await this.input.executeModel(signal);
           await this.input.completionGuard?.();
           const tracePath = this.input.traceEnabled
@@ -360,6 +387,7 @@ export class RuntimeRunExecutor {
             finalMessage: findFinalMessage(messages),
             usage: snapshotUsage(session),
             messages,
+            ...(this.input.readModelOutcome ? { outcome: this.input.readModelOutcome() } : {}),
             ...(tracePath ? { tracePath } : {}),
           } satisfies RunAgentCliResult;
         } catch (error) {
@@ -370,6 +398,32 @@ export class RuntimeRunExecutor {
             error,
           });
           throw error;
+        } finally {
+          const manager = this.input.goalManager;
+          const outcome = this.input.readModelOutcome?.();
+          if (manager && outcome) {
+            const snapshot = manager.snapshot();
+            const id = this.input.hostRunId ?? runtimeRun.runId;
+            if (snapshot.coordinator.currentExecution?.daemonRunId === id) {
+              manager.setCoordinator({
+                currentExecution: {
+                  ...snapshot.coordinator.currentExecution,
+                  stopReason: outcome.stopReason,
+                },
+              });
+            }
+            if (!snapshot.coordinator.accountedRunIds.includes(id)) {
+              manager.setCoordinator({
+                workTokens:
+                  snapshot.coordinator.workTokens +
+                  outcome.primaryUsage.promptTokens +
+                  outcome.primaryUsage.completionTokens,
+                accountedRunIds: [...snapshot.coordinator.accountedRunIds, id],
+              });
+            }
+          }
+          manager?.endRun();
+          await session.flushPersistence();
         }
       }, signal);
       await this.input.atomicMemoryCompleted?.(runtimeRun.runId);

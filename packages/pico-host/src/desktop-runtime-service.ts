@@ -86,7 +86,20 @@ import {
 import { type CredentialVault } from "./provider/credential-vault.js";
 import { resolveProviderProfile } from "@pico/runtime";
 import { GoalManager } from "@pico/runtime/goal-manager";
-import type { BudgetConfig } from "@pico/runtime";
+import { evaluateGoal } from "@pico/runtime/goal-evaluator";
+import type {
+  PersistedGoalState as GoalState,
+  PersistedGoalContinuationIntent as GoalContinuationIntent,
+  PersistedGoalExecutionRef as GoalExecutionRef,
+  Message,
+  LLMProvider,
+} from "@pico/core";
+import {
+  GoalContinuationCoordinator,
+  type GoalRunCompletion,
+  type GoalAdmissionResult,
+} from "./goal-continuation-coordinator.js";
+import { WorkspaceRunBusyError } from "./workspace-task-runtime.js";
 import type { ProviderOperationJournal } from "./provider/provider-operation-journal.js";
 import { resolvePicoHome, resolvePicoPaths } from "./pico-paths.js";
 import {
@@ -346,7 +359,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   >();
   private readonly agentGraphStores = new Map<string, SqliteAgentGraphControlStore>();
   private readonly inFlightHandles = new Set<Promise<JsonValue>>();
-  private readonly goalWakeTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly goalCoordinator: GoalContinuationCoordinator;
+  private readonly goalEvaluationCalls = new Set<Promise<unknown>>();
   private transcriptPersistenceTail: Promise<void> = Promise.resolve();
   private lifecycleState: "open" | "closing" | "closed" = "open";
   private closePromise?: Promise<void>;
@@ -477,12 +491,25 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       getConnections: getSubagentConnections,
       onUpdated: (revision) => this.publishCapabilityConfigUpdated("subagents", revision),
     });
+    this.goalCoordinator = new GoalContinuationCoordinator({
+      withSession: (workspace, sessionId, work) => this.withGoalSession(workspace, sessionId, work),
+      evaluate: (workspace, session, goal, execution, messages, signal) =>
+        this.evaluateGoalForSession(workspace, session, goal, execution, messages, signal),
+      admit: (workspace, sessionId, intent) =>
+        this.admitGoalContinuation(workspace, sessionId, intent),
+      dispatchUser: (workspace) => this.consumeWorkspaceQueued(workspace),
+      getRun: async (workspace, runId) => {
+        const run = await this.options.runtimeService.getWorkspaceRun(workspace, runId);
+        return run ? goalRunCompletion(run as unknown as JsonObject) : undefined;
+      },
+      changed: (workspace, sessionId, goal) => this.publishGoalChanged(workspace, sessionId, goal),
+      report: (workspace, error) => this.publishConversationFailure(workspace, error),
+      now: this.now,
+    });
     this.unsubscribeRuntimeEvents = options.runtimeService.subscribe((event) => {
       const sessionId = event.scope.sessionId;
       if (!sessionId) return;
-      if (event.topic === "run.started") {
-        this.clearGoalWake(event.scope.workspacePath, sessionId);
-      }
+
       if (isDesktopTranscriptNotification(event.topic)) {
         this.transcriptPersistenceTail = this.transcriptPersistenceTail.then(
           () => this.persistRuntimeNotification(event),
@@ -494,38 +521,15 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       }
       if (event.topic !== "run.finished") return;
       if (this.lifecycleState !== "open") return;
-      const transcriptReady = this.transcriptPersistenceTail;
-      const dispatch = async () => {
-        await transcriptReady.catch(() => undefined);
-        if (this.lifecycleState !== "open") return;
-        const runPayloadValue =
-          isJsonRecord(event.payload) && isJsonRecord(event.payload["run"])
-            ? event.payload["run"]
-            : undefined;
-        const runStatus =
-          typeof runPayloadValue?.["status"] === "string" ? runPayloadValue["status"] : "unknown";
-        if (runStatus === "failed" || runStatus === "cancelled") {
-          await this.pauseGoalAfterRun(
-            event.scope.workspacePath,
-            sessionId,
-            runStatus === "cancelled"
-              ? "Goal Run 已中断"
-              : typeof runPayloadValue?.["error"] === "string"
-                ? runPayloadValue["error"]
-                : "Goal Run 失败",
-          );
-        }
-        const queuedUserInput = await this.consumeNextQueued(event.scope.workspacePath, sessionId);
-        if (!queuedUserInput && runStatus === "succeeded") {
-          await this.tryStartGoalContinuation(event.scope.workspacePath, sessionId);
-        }
-      };
-      void this.withSessionAdmission(event.scope.workspacePath, sessionId, dispatch).catch(
-        (error: unknown) => {
-        if (this.lifecycleState === "open") {
-          this.publishConversationFailure(event.scope.workspacePath, error);
-        }
-        },
+      const run =
+        isJsonRecord(event.payload) && isJsonRecord(event.payload["run"])
+          ? event.payload["run"]
+          : undefined;
+      if (!run || typeof run["runId"] !== "string") return;
+      void this.goalCoordinator.finish(
+        event.scope.workspacePath,
+        sessionId,
+        goalRunCompletion(run),
       );
     });
     this.requestRouter = new DesktopRequestRouter({
@@ -645,14 +649,16 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       "hooks.manage": (request) => this.manageHooks(request.params),
       "operations.manage": (request) => this.manageOperations(request.params),
       "plugin.manage": (request) => this.managePlugins(request.params),
-      "approval.respond": (request) => {
+      "approval.respond": async (request) => {
         if (!this.options.interactions) {
           throw new RuntimeProtocolError(
             RUNTIME_ERROR_CODES.METHOD_NOT_FOUND,
             `${request.method} 尚未连接可验证的 Runtime 能力，本次请求未执行`,
           );
         }
-        return this.options.interactions.respondApproval(request.params);
+        const result = await this.options.interactions.respondApproval(request.params);
+        this.goalCoordinator.wakeWorkspace(request.params.workspacePath);
+        return result;
       },
       "plan.respond": async (request) => {
         if (!this.options.planControl) {
@@ -662,6 +668,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           );
         }
         const result = await this.options.planControl.respond(request.params);
+        this.goalCoordinator.wakeWorkspace(request.params.workspacePath);
         return {
           accepted: result.accepted,
           projection: toJsonValue(result.projection),
@@ -918,8 +925,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     };
     await this.providerConfig.close();
     await this.goalRecoveryPromise;
-    for (const timer of this.goalWakeTimers.values()) clearTimeout(timer);
-    this.goalWakeTimers.clear();
+    await attempt(() => this.goalCoordinator.close());
+    await Promise.allSettled([...this.goalEvaluationCalls]);
     await Promise.allSettled([...this.pendingSends.values()].map(({ promise }) => promise));
     await Promise.allSettled([...this.sessionAdmissionTails.values()]);
     await Promise.allSettled([...this.inFlightHandles]);
@@ -1427,7 +1434,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     sessionId: string,
   ): Promise<JsonValue> {
     const canonical = await this.requireTrustedSession(workspacePath, sessionId);
-    return this.withSession(canonical, sessionId, async (session) => {
+    return this.withPinnedSession(canonical, sessionId, async (session) => {
       const settings = await this.getSessionSettings(canonical, session);
       const router = await this.getSessionModelRouter(canonical, settings.modelRouteId);
       return { settings: runtimeSessionSettings(settings, router) };
@@ -2070,86 +2077,199 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     return toJsonValue({ retried: await application.retryRootWake(params.wakeId) });
   }
 
+  private async withGoalSession<T>(
+    workspacePath: string,
+    sessionId: string,
+    operation: (session: Session, manager: GoalManager) => Promise<T>,
+  ): Promise<T> {
+    return this.withPinnedSession(workspacePath, sessionId, async (session) => {
+      const manager = session.getGoalManager();
+      this.goalCoordinator.observe(workspacePath, sessionId, manager);
+      return operation(session, manager);
+    });
+  }
+
   private async getGoal(workspacePath: string, sessionId: string): Promise<JsonValue> {
     const canonical = await this.requireTrustedSession(workspacePath, sessionId);
-    return this.withSession(canonical, sessionId, async (session) => {
-      const hydration = await session.readHydrationSnapshot();
-      return { goal: hydration.runtime.goal ? toJsonValue(hydration.runtime.goal) : null };
+    return this.withGoalSession(canonical, sessionId, async (session, manager) => {
+      await session.flushPersistence();
+      return { goal: toJsonValue(manager.snapshot()) };
     });
   }
 
   private async controlGoal(params: RuntimeRequest<"goal.control">["params"]): Promise<JsonValue> {
     const canonical = await this.requireTrustedSession(params.workspacePath, params.sessionId);
     const snapshot = await this.withSessionAdmission(canonical, params.sessionId, () =>
-      this.withSession(canonical, params.sessionId, async (session) => {
-        const hydration = await session.readHydrationSnapshot();
-        const manager = new GoalManager({ now: this.now });
-        if (hydration.runtime.goal) manager.restore(hydration.runtime.goal);
-        if (params.action === "arm") {
-          const title = params.title?.trim();
-          const description = params.description?.trim();
-          const criteria =
-            params.completionCriteria?.map((entry) => entry.trim()).filter(Boolean) ?? [];
-          if (!title || !description || criteria.length === 0) {
-            throw new RuntimeProtocolError(
-              RUNTIME_ERROR_CODES.INVALID_PARAMS,
-              "goal.control arm 需要 title、description 和至少一条 completionCriteria",
-            );
-          }
-          if (
-            (params.maxIterations !== undefined &&
-              (!Number.isSafeInteger(params.maxIterations) || params.maxIterations <= 0)) ||
-            (params.blockCap !== undefined &&
-              (!Number.isSafeInteger(params.blockCap) || params.blockCap <= 0))
-          ) {
-            throw new RuntimeProtocolError(
-              RUNTIME_ERROR_CODES.INVALID_PARAMS,
-              "maxIterations 和 blockCap 必须是正整数",
-            );
-          }
-          const budget = params.budget === undefined ? undefined : parseGoalBudget(params.budget);
-          manager.create({
-            title,
-            description,
-            completionCriteria: criteria,
-            ...(params.constraints?.length ? { constraints: params.constraints } : {}),
-            ...(budget ? { budgetConfig: budget } : {}),
-            ...(params.maxIterations ? { maxIterations: params.maxIterations } : {}),
-            ...(params.blockCap ? { blockCap: params.blockCap } : {}),
-            awaitingUserTurn: true,
-          });
-        } else {
-          const goalId = params.goalId ?? manager.getActive()?.id;
-          if (!goalId) {
-            throw new RuntimeProtocolError(
-              RUNTIME_ERROR_CODES.INVALID_PARAMS,
-              "当前没有可操作的 Goal",
-            );
-          }
-          const goal = manager.get(goalId);
-          if (!goal)
-            throw new RuntimeProtocolError(
-              RUNTIME_ERROR_CODES.INVALID_PARAMS,
-              `未找到 Goal ${goalId}`,
-            );
-          if (params.action === "pause") manager.pause(goalId);
-          else if (params.action === "resume") {
-            if (!manager.resume(goalId)) {
+      this.withGoalSession(canonical, params.sessionId, async (session, manager) => {
+        const current = manager.getCurrent();
+        if (
+          (current?.revision ?? 0) !== params.expectedRevision ||
+          (params.action !== "arm" && params.goalId !== current?.id)
+        )
+          throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.CONFLICT, "Goal 已变化，请刷新后重试");
+        try {
+          if (params.action === "arm") {
+            manager.create({
+              condition: params.condition!,
+              awaitingUserTurn: true,
+              ...(params.maxIterations === undefined
+                ? {}
+                : { maxIterations: params.maxIterations }),
+              ...(params.blockCap === undefined ? {} : { blockCap: params.blockCap }),
+              ...(params.tokenBudget === undefined ? {} : { tokenBudget: params.tokenBudget }),
+            });
+          } else {
+            const accepted =
+              params.action === "pause"
+                ? manager.pause(current!.id, "用户暂停了 Goal", params.expectedRevision)
+                : params.action === "resume"
+                  ? manager.resume(current!.id, params.expectedRevision)
+                  : manager.clear(current!.id, params.expectedRevision);
+            if (!accepted)
               throw new RuntimeProtocolError(
                 RUNTIME_ERROR_CODES.CONFLICT,
-                `Goal ${goalId} 不能恢复（当前状态：${goal.status}）`,
+                "当前 Goal 状态不支持该操作",
               );
-            }
-          } else manager.clear(goalId);
+          }
+        } catch (error) {
+          if (error instanceof RuntimeProtocolError) throw error;
+          throw new RuntimeProtocolError(
+            current &&
+              ![
+                "achieved",
+                "impossible",
+                "stalled",
+                "budget_limited",
+                "max_iterations",
+                "cleared",
+              ].includes(current.status)
+              ? RUNTIME_ERROR_CODES.CONFLICT
+              : RUNTIME_ERROR_CODES.INVALID_PARAMS,
+            errorMessage(error),
+          );
         }
-        session.updateRuntimeState({ goal: manager.snapshot() });
         await session.flushPersistence();
         return manager.snapshot();
       }),
     );
-    if (params.action === "resume") this.queueGoalDispatch(canonical, params.sessionId);
-    else this.clearGoalWake(canonical, params.sessionId);
+    if (params.action === "resume") this.goalCoordinator.wakeWorkspace(canonical);
     return { goal: toJsonValue(snapshot) };
+  }
+
+  private publishGoalChanged(
+    workspacePath: string,
+    sessionId: string,
+    goal: GoalState | null,
+  ): void {
+    this.publishWorkbarResource(workspacePath, sessionId, "goal", {
+      revision: goal?.revision ?? 0,
+    });
+    if (!goal || ["active", "waiting", "paused"].includes(goal.status)) return;
+    const terminal = structuredClone(goal);
+    this.transcriptPersistenceTail = this.transcriptPersistenceTail
+      .then(async () => {
+        await this.withPinnedSession(workspacePath, sessionId, async (session) => {
+          const eventId = `goal-terminal:${terminal.id}`;
+          await session.recordTranscriptEvent(
+            {
+              eventId,
+              entryId: eventId,
+              sequence: 1,
+              createdAt: terminal.achievedAt ?? terminal.lastEvaluation?.at ?? terminal.createdAt,
+              type: "entry.appended",
+              entry: {
+                kind: "goal",
+                title: terminal.condition,
+                state: terminal.status,
+                ...(terminal.lastReason ? { detail: terminal.lastReason } : {}),
+                data: {
+                  goalId: terminal.id,
+                  iterations: terminal.iterations,
+                  maxIterations: terminal.maxIterations,
+                  tokensUsed: Math.max(0, terminal.tokensNow - terminal.tokensAtStart),
+                  ...(terminal.tokenBudget === undefined
+                    ? {}
+                    : { tokenBudget: terminal.tokenBudget }),
+                },
+              },
+            },
+            { eventId },
+          );
+        });
+        this.publishTranscriptUpdate(workspacePath, sessionId, "reload");
+      })
+      .catch((error: unknown) => this.publishConversationFailure(workspacePath, error));
+  }
+
+  private async evaluateGoalForSession(
+    workspacePath: string,
+    session: Session,
+    goal: GoalState,
+    execution: GoalExecutionRef,
+    messages: readonly Message[],
+    signal: AbortSignal,
+  ) {
+    const settings = await this.getSessionSettings(workspacePath, session);
+    const effective = await this.loadSessionModelRuntime(workspacePath, settings.modelRouteId);
+    const active = effective.router.providerConfig(settings.modelRouteId);
+    active.config.sessionId = session.id;
+    const pluginSnapshot = await this.pluginRuntimeSnapshotRegistry.get(workspacePath);
+    const activation = new PluginCapabilityActivationScope();
+    const ledger = new SqliteRuntimeControlStore({
+      storageRoot: resolvePicoPaths(workspacePath, { picoHome: this.picoHome }).workspace.root,
+      now: this.now,
+    });
+    let dispatched = false;
+    const cleanup = async () => {
+      ledger.close();
+      await activation.dispose();
+    };
+    try {
+      signal.throwIfAborted();
+      const raw = activatePluginProviderCapabilities(
+        pluginSnapshot,
+        this.pluginRuntimeSnapshotRegistry.capabilityRegistry,
+        this.providerFactory(active.provider, active.config),
+        activation,
+      );
+      const tracker = new CostTracker(
+        raw,
+        { provider: active.provider, model: active.config.model, baseUrl: active.config.baseURL },
+        undefined,
+        {
+          ledger,
+          recordRuntimeEvents: false,
+          contextFacts: requestContextForProvider(active.provider, active.config),
+          context: {
+            purpose: "goal_evaluation",
+            sessionId: session.id,
+            conversationId: session.conversationId,
+            goalId: goal.id,
+            runId: execution.runId,
+            turnId: execution.turnId,
+            workspacePath,
+          },
+          onAccountingChanged: (_record, revision) =>
+            this.publishWorkbarResource(workspacePath, session.id, "trace", { revision }),
+        },
+      );
+      const provider: LLMProvider = {
+        generate: (input, tools, options) => {
+          dispatched = true;
+          const physical = tracker.generate(input, tools, options);
+          const tracked = physical.finally(cleanup);
+          this.goalEvaluationCalls.add(tracked);
+          void tracked.then(
+            () => this.goalEvaluationCalls.delete(tracked),
+            () => this.goalEvaluationCalls.delete(tracked),
+          );
+          return tracked;
+        },
+      };
+      return await evaluateGoal(provider, goal.condition, messages, { signal });
+    } finally {
+      if (!dispatched) await cleanup();
+    }
   }
 
   private async compactSession(workspacePath: string, sessionId: string): Promise<JsonValue> {
@@ -2310,7 +2430,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       }
       return pending.promise;
     }
-    const operation = this.sendSessionOnce({ ...params, workspacePath: canonical, input })
+    const operation = this.withWorkspaceAdmission(canonical, () =>
+      this.sendSessionOnce({ ...params, workspacePath: canonical, input }),
+    )
       .then(async (result) => {
         await this.conversationStateStore.rememberIdempotent(
           canonical,
@@ -2439,97 +2561,111 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const sessionRecord = requireJsonRecord(session, "session");
     const sessionId = requireText(sessionRecord["sessionId"], "session.sessionId");
     return this.withSessionAdmission(params.workspacePath, sessionId, async () => {
-    const activeRun = await this.findActiveSessionRun(params.workspacePath, sessionId);
+      const activeRun = await this.findActiveSessionRun(params.workspacePath, sessionId);
 
-    if (!params.sessionId && params.initialSettings && !activeRun) {
-      await this.updateRuntimeSessionSettings({
-        workspacePath: params.workspacePath,
+      if (!params.sessionId && params.initialSettings && !activeRun) {
+        await this.updateRuntimeSessionSettings({
+          workspacePath: params.workspacePath,
+          sessionId,
+          ...params.initialSettings,
+        });
+      }
+
+      const admittedSettings = await this.getRuntimeSessionSettings(
+        params.workspacePath,
         sessionId,
-        ...params.initialSettings,
-      });
-    }
-
-    const admittedSettings = await this.getRuntimeSessionSettings(params.workspacePath, sessionId);
-    const collaboration = (admittedSettings as { settings?: { collaborationMode?: string } })
-      .settings?.collaborationMode;
-    if (
-      collaboration === "research" &&
-      (params.input.kind !== "text" || params.input.orchestrationMode)
-    ) {
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.CONFLICT,
-        "研究模式不能激活 Skill、子代理或 Graph/Swarm；请使用普通研究消息。",
       );
-    }
-    if (params.expectedRunId !== undefined && activeRun?.["runId"] !== params.expectedRunId) {
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.CONFLICT,
-        `当前活动 Run 已变化，期望 ${params.expectedRunId}，实际 ${String(activeRun?.["runId"] ?? "none")}`,
-      );
-    }
-
-    if (activeRun) {
-      const runId = requireText(activeRun["runId"], "run.runId");
-      const activation = params.input.kind === "agent" || params.input.kind === "skill";
-      if (activation && behavior === "steer") {
+      const collaboration = (admittedSettings as { settings?: { collaborationMode?: string } })
+        .settings?.collaborationMode;
+      if (
+        collaboration === "research" &&
+        (params.input.kind !== "text" || params.input.orchestrationMode)
+      ) {
         throw new RuntimeProtocolError(
           RUNTIME_ERROR_CODES.CONFLICT,
-          "Agent/Skill 激活必须在新 Run 中应用；请选择 Queue 或 Replace",
+          "研究模式不能激活 Skill、子代理或 Graph/Swarm；请使用普通研究消息。",
         );
       }
-      if (activation) await this.resolveRuntimeUserInput(params.workspacePath, params.input);
-      if (behavior === "queue" || behavior === "replace" || activation) {
-        await this.conversationStateStore.enqueue(params.workspacePath, sessionId, params.input);
-        const run =
-          behavior === "replace"
-            ? await this.options.runtimeService.handle(
-                createRuntimeRequest("run.cancel", {
-                  workspacePath: params.workspacePath,
-                  runId,
-                  reason: "replaced by a newer user message",
-                }),
-              )
-            : activeRun;
+      if (params.expectedRunId !== undefined && activeRun?.["runId"] !== params.expectedRunId) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.CONFLICT,
+          `当前活动 Run 已变化，期望 ${params.expectedRunId}，实际 ${String(activeRun?.["runId"] ?? "none")}`,
+        );
+      }
+
+      if (activeRun) {
+        const runId = requireText(activeRun["runId"], "run.runId");
+        const activation = params.input.kind === "agent" || params.input.kind === "skill";
+        if (activation && behavior === "steer") {
+          throw new RuntimeProtocolError(
+            RUNTIME_ERROR_CODES.CONFLICT,
+            "Agent/Skill 激活必须在新 Run 中应用；请选择 Queue 或 Replace",
+          );
+        }
+        if (activation) await this.resolveRuntimeUserInput(params.workspacePath, params.input);
+        if (behavior === "queue" || behavior === "replace" || activation) {
+          await this.conversationStateStore.enqueue(params.workspacePath, sessionId, params.input);
+          const run =
+            behavior === "replace"
+              ? await this.options.runtimeService.handle(
+                  createRuntimeRequest("run.cancel", {
+                    workspacePath: params.workspacePath,
+                    runId,
+                    reason: "replaced by a newer user message",
+                  }),
+                )
+              : activeRun;
+          return {
+            session: sessionRecord,
+            run: requireJsonRecord(run, "run"),
+            disposition: behavior === "replace" ? "replaced" : "queued",
+          };
+        }
+        if (params.input.kind !== "text") {
+          throw new RuntimeProtocolError(
+            RUNTIME_ERROR_CODES.INVALID_PARAMS,
+            "无法 Steer 非文本输入",
+          );
+        }
+        const run = await this.options.runtimeService.handle(
+          createRuntimeRequest("run.steer", {
+            workspacePath: params.workspacePath,
+            runId,
+            message: params.input.text,
+          }),
+        );
         return {
           session: sessionRecord,
           run: requireJsonRecord(run, "run"),
-          disposition: behavior === "replace" ? "replaced" : "queued",
+          disposition: "steered",
         };
       }
-      if (params.input.kind !== "text") {
-        throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, "无法 Steer 非文本输入");
-      }
-      const run = await this.options.runtimeService.handle(
-        createRuntimeRequest("run.steer", {
-          workspacePath: params.workspacePath,
-          runId,
-          message: params.input.text,
-        }),
-      );
-      return {
-        session: sessionRecord,
-        run: requireJsonRecord(run, "run"),
-        disposition: "steered",
-      };
-    }
 
-    if (behavior === "steer" && params.expectedRunId !== undefined) {
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.CONFLICT,
-        "目标 Run 已结束，无法继续 Steer；请作为下一轮发送",
+      if (
+        this.goalCoordinator.isSettling(params.workspacePath, sessionId) ||
+        (await this.findActiveWorkspaceRun(params.workspacePath))
+      ) {
+        await this.conversationStateStore.enqueue(params.workspacePath, sessionId, params.input);
+        return { session: sessionRecord, disposition: "queued" };
+      }
+
+      if (behavior === "steer" && params.expectedRunId !== undefined) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.CONFLICT,
+          "目标 Run 已结束，无法继续 Steer；请作为下一轮发送",
+        );
+      }
+      const run = await this.startSessionRun(
+        params.workspacePath,
+        sessionId,
+        params.input,
+        initialResolution,
+        {
+          inputKey: params.idempotencyKey,
+          runStartKey: desktopRunStartIdempotencyKey("send", params.idempotencyKey),
+        },
       );
-    }
-    const run = await this.startSessionRun(
-      params.workspacePath,
-      sessionId,
-      params.input,
-      initialResolution,
-      {
-        inputKey: params.idempotencyKey,
-        runStartKey: desktopRunStartIdempotencyKey("send", params.idempotencyKey),
-      },
-    );
-    return { session: sessionRecord, run, disposition: "started" };
+      return { session: sessionRecord, run, disposition: "started" };
     });
   }
 
@@ -2722,35 +2858,12 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     return true;
   }
 
-  private goalTimerKey(workspacePath: string, sessionId: string): string {
-    return `${workspacePath}\0${sessionId}`;
-  }
-
-  private clearGoalWake(workspacePath: string, sessionId: string): void {
-    const key = this.goalTimerKey(workspacePath, sessionId);
-    const timer = this.goalWakeTimers.get(key);
-    if (timer) clearTimeout(timer);
-    this.goalWakeTimers.delete(key);
-  }
-
-  private queueGoalDispatch(workspacePath: string, sessionId: string): void {
-    if (this.lifecycleState !== "open") return;
-    const dispatch = async () => {
-      if (this.lifecycleState !== "open") return;
-      const queuedUserInput = await this.consumeNextQueued(workspacePath, sessionId);
-      if (!queuedUserInput) await this.tryStartGoalContinuation(workspacePath, sessionId);
-    };
-    void this.withSessionAdmission(workspacePath, sessionId, dispatch).catch((error: unknown) => {
-      if (this.lifecycleState === "open") this.publishConversationFailure(workspacePath, error);
-    });
-  }
-
   private async withSessionAdmission<Result>(
     workspacePath: string,
     sessionId: string,
     operation: () => Promise<Result>,
   ): Promise<Result> {
-    const key = this.goalTimerKey(workspacePath, sessionId);
+    const key = `${workspacePath}\0${sessionId}`;
     const previous = this.sessionAdmissionTails.get(key) ?? Promise.resolve();
     const admitted = previous.then(operation, operation);
     const tail = admitted.then(
@@ -2765,253 +2878,185 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     }
   }
 
-  private scheduleGoalWake(workspacePath: string, sessionId: string, at: number): void {
-    this.clearGoalWake(workspacePath, sessionId);
-    const timer = setTimeout(
-      () => {
-        this.goalWakeTimers.delete(this.goalTimerKey(workspacePath, sessionId));
-        this.queueGoalDispatch(workspacePath, sessionId);
-      },
-      Math.max(0, Math.min(at - this.now(), 5 * 60_000)),
+  private async consumeWorkspaceQueued(workspacePath: string): Promise<boolean> {
+    return this.withWorkspaceAdmission(workspacePath, () =>
+      this.consumeWorkspaceQueuedOnce(workspacePath),
     );
-    timer.unref?.();
-    this.goalWakeTimers.set(this.goalTimerKey(workspacePath, sessionId), timer);
+  }
+
+  private withWorkspaceAdmission<Result>(
+    workspacePath: string,
+    operation: () => Promise<Result>,
+  ): Promise<Result> {
+    return this.withSessionAdmission(workspacePath, "\0workspace-admission", operation);
+  }
+
+  private async consumeWorkspaceQueuedOnce(workspacePath: string): Promise<boolean> {
+    if (this.lifecycleState !== "open" || (await this.findActiveWorkspaceRun(workspacePath)))
+      return true;
+    let queued;
+    if (this.conversationStateStore.listWorkspaceQueued)
+      queued = await this.conversationStateStore.listWorkspaceQueued(workspacePath);
+    else {
+      const listed = requireJsonRecord(await this.listSessions(workspacePath), "session.list");
+      const sessions = Array.isArray(listed["sessions"])
+        ? listed["sessions"].filter(isJsonRecord)
+        : [];
+      queued = (
+        await Promise.all(
+          sessions.map((session) =>
+            this.conversationStateStore.listQueued(workspacePath, String(session["sessionId"])),
+          ),
+        )
+      )
+        .flat()
+        .sort((a, b) => a.createdAt - b.createdAt);
+    }
+    const next = queued[0];
+    if (!next) return false;
+    if (this.goalCoordinator.isSettling(workspacePath, next.sessionId)) return true;
+    return this.withSessionAdmission(workspacePath, next.sessionId, () =>
+      this.consumeNextQueued(workspacePath, next.sessionId),
+    );
   }
 
   private async reconcileGoalContinuations(): Promise<void> {
-    if (this.lifecycleState !== "open") return;
     for (const workspacePath of await this.registrationStore.list()) {
-      const listed = requireJsonRecord(
-        await this.listSessions(workspacePath),
-        "session.list result",
-      );
-      const sessions = Array.isArray(listed["sessions"]) ? listed["sessions"] : [];
-      for (const rawSession of sessions) {
-        if (!isJsonRecord(rawSession) || typeof rawSession["sessionId"] !== "string") continue;
-        const sessionId = rawSession["sessionId"];
+      if (this.lifecycleState !== "open") return;
+      const listed = requireJsonRecord(await this.listSessions(workspacePath), "session.list");
+      const sessions = Array.isArray(listed["sessions"])
+        ? listed["sessions"].filter(isJsonRecord)
+        : [];
+      for (const session of sessions) {
+        if (typeof session["sessionId"] !== "string") continue;
         try {
-          const result = requireJsonRecord(
-            await this.getGoal(workspacePath, sessionId),
-            "goal.get result",
-          );
-          const snapshot = result["goal"];
-          if (!isJsonRecord(snapshot) || !Array.isArray(snapshot["goals"])) continue;
-          const goal = snapshot["goals"]
-            .filter(isJsonRecord)
-            .find((candidate) => candidate["id"] === snapshot["activeGoalId"]);
-          if (!goal) continue;
-          const targetRunId = goal["targetRunId"];
-          if (typeof targetRunId === "string") {
-            const runsResult = requireJsonRecord(
-              await this.options.runtimeService.handle(
-                createRuntimeRequest("runs.list", { workspacePath, sessionId }),
-              ),
-              "runs.list result",
-            );
-            const targetRun = (Array.isArray(runsResult["runs"]) ? runsResult["runs"] : [])
-              .filter(isJsonRecord)
-              .find((run) => run["runId"] === targetRunId);
-            if (!targetRun) {
-              await this.reconcileGoalRun(
-                workspacePath,
-                sessionId,
-                String(goal["id"]),
-                targetRunId,
-                "missing",
-              );
-              continue;
-            }
-            const targetStatus = String(targetRun["status"] ?? "unknown");
-            if (!isTerminalRunStatus(targetStatus)) continue;
-            const recoveryStatus =
-              targetStatus === "succeeded"
-                ? "succeeded"
-                : targetStatus === "cancelled"
-                  ? "cancelled"
-                  : "failed";
-            await this.reconcileGoalRun(
-              workspacePath,
-              sessionId,
-              String(goal["id"]),
-              targetRunId,
-              recoveryStatus,
-            );
-            if (recoveryStatus === "succeeded") this.queueGoalDispatch(workspacePath, sessionId);
-            continue;
-          }
-          if (goal["status"] === "waiting" && typeof goal["nextCheckAt"] === "number") {
-            this.scheduleGoalWake(workspacePath, sessionId, goal["nextCheckAt"]);
-          } else if (
-            goal["pendingContinuation"] === true ||
-            typeof goal["admissionKey"] === "string"
-          ) {
-            this.queueGoalDispatch(workspacePath, sessionId);
-          }
+          await this.goalCoordinator.recover(workspacePath, session["sessionId"]);
         } catch (error) {
-          logger.debug(
-            { workspacePath, sessionId, error: String(error) },
-            "[Goal] 忽略无法恢复的 Session",
+          logger.warn(
+            { workspacePath, sessionId: session["sessionId"], error: String(error) },
+            "[Goal] 恢复失败",
           );
         }
       }
     }
   }
 
-  private async tryStartGoalContinuation(workspacePath: string, sessionId: string): Promise<void> {
-    if (this.lifecycleState !== "open") return;
-    const canonical = await this.options.runtimeService.canonicalizeWorkspacePath(workspacePath);
-    if (!(await this.trustStore.isTrusted(canonical))) return;
-    if (await this.findActiveSessionRun(canonical, sessionId)) return;
-    const [queued] = await this.conversationStateStore.listQueued(canonical, sessionId);
-    if (queued) {
-      await this.consumeNextQueued(canonical, sessionId);
-      return;
-    }
+  private async admitGoalContinuation(
+    workspacePath: string,
+    sessionId: string,
+    intent: GoalContinuationIntent,
+  ): Promise<GoalAdmissionResult> {
+    return this.withWorkspaceAdmission(workspacePath, () =>
+      this.admitGoalContinuationOnce(workspacePath, sessionId, intent),
+    );
+  }
 
-    let intent:
-      | { readonly goalId: string; readonly goalTitle: string; readonly admissionKey: string }
-      | undefined;
-    try {
-      await this.withSession(canonical, sessionId, async (session) => {
-        const hydration = await session.readHydrationSnapshot();
-        if (!hydration.runtime.goal) return;
-        const manager = new GoalManager({ now: this.now });
-        manager.restore(hydration.runtime.goal);
-        let goal = manager.getActive();
-        if (goal?.status === "waiting") {
-          if (!manager.wakeWaiting(goal.id, this.now())) {
-            if (goal.nextCheckAt !== undefined)
-              this.scheduleGoalWake(canonical, sessionId, goal.nextCheckAt);
-            return;
-          }
-          goal = manager.getActive();
-        }
-        if (!goal || goal.status !== "active") return;
-        const admissionKey =
-          goal.admissionKey ??
-          `goal:${goal.id}:revision:${goal.controlRevision}:iteration:${goal.budgetUsage.turns + 1}`;
-        if (!goal.admissionKey && !goal.pendingContinuation) return;
-        if (!goal.admissionKey && !manager.claimContinuation(goal.id, admissionKey)) {
-          session.updateRuntimeState({ goal: manager.snapshot() });
-          await session.flushPersistence();
-          return;
-        }
-        const claimed = manager.get(goal.id)!;
-        session.updateRuntimeState({ goal: manager.snapshot() });
-        await session.flushPersistence();
-        await session.commitMessageOnce(`goal-continuation-input:${admissionKey}`, {
-          role: "user",
-          content: `[Goal continuation] 继续推进目标“${claimed.title}”。先检查现有证据和进度，再按完成标准工作；若已完成、不可达或必须等待外部事件，请说明事实。`,
-          providerData: {
-            picoKind: "goal_continuation",
-            picoHiddenFromTranscript: true,
-            picoGoalId: claimed.id,
-            picoGoalContinuationId: admissionKey,
-          },
-        });
-        await session.flushPersistence();
-        await this.getSessionSettings(canonical, session);
-        await session.flushPersistence();
-        intent = { goalId: claimed.id, goalTitle: claimed.title, admissionKey };
-        if (
-          this.lifecycleState !== "open" ||
-          (await this.findActiveSessionRun(canonical, sessionId))
-        )
-          return;
-        if ((await this.conversationStateStore.listQueued(canonical, sessionId)).length > 0) {
-          manager.releaseContinuation(claimed.id, admissionKey);
-          session.updateRuntimeState({ goal: manager.snapshot() });
-          await session.flushPersistence();
-          intent = undefined;
-          return;
-        }
-        const admitted = requireJsonRecord(
-          await this.options.runtimeService.startForegroundRun({
-            workspacePath: canonical,
+  private async admitGoalContinuationOnce(
+    workspacePath: string,
+    sessionId: string,
+    intent: GoalContinuationIntent,
+  ): Promise<GoalAdmissionResult> {
+    return this.withSessionAdmission(workspacePath, sessionId, async () => {
+      if (this.lifecycleState !== "open") return { kind: "busy" };
+      if (!(await this.trustStore.isTrusted(workspacePath)))
+        return { kind: "unavailable", reason: "工作区信任已撤销" };
+      if (await this.findActiveWorkspaceRun(workspacePath)) return { kind: "busy" };
+      if (
+        this.conversationStateStore.listWorkspaceQueued &&
+        (await this.conversationStateStore.listWorkspaceQueued(workspacePath)).length
+      )
+        return { kind: "busy" };
+      try {
+        return await this.withGoalSession(workspacePath, sessionId, async (session, manager) => {
+          const stillCurrent = () => {
+            const state = manager.snapshot();
+            return (
+              state.currentGoal?.id === intent.goalId &&
+              state.currentGoal.status === "active" &&
+              state.controlLease?.generation === intent.generation &&
+              (state.coordinator.pendingContinuation?.runId === intent.runId ||
+                state.coordinator.currentExecution?.runId === intent.runId)
+            );
+          };
+          if (!stillCurrent()) return { kind: "busy" };
+          const capability = session.runtimeEventCapability;
+          if (!capability || !session.runtimeEventStore)
+            return { kind: "unavailable", reason: "会话缺少持久化运行能力" };
+          const plan = await new PlanCoordinator(session.runtimeEventStore, {
             sessionId,
-            prompt: `[Goal continuation] ${claimed.title}`,
-            execution: { resumeExistingSession: true, origin: "goal", goalTitle: claimed.title },
-            idempotencyKey: desktopRunStartIdempotencyKey("goal", admissionKey),
-          }),
-          "goal continuation run.start result",
-        );
-        if (typeof admitted["runId"] === "string") {
-          manager.recordAdmittedRun(claimed.id, admissionKey, admitted["runId"]);
-          session.updateRuntimeState({ goal: manager.snapshot() });
+            invocationId: `goal-gate:${intent.runId}`,
+            runId: intent.runId,
+            turnId: intent.turnId,
+            writeGuard: session,
+          }).project();
+          if (
+            plan.pendingProposal ||
+            plan.reviewClaim ||
+            plan.execution?.status === "active" ||
+            plan.execution?.status === "interrupted"
+          )
+            return { kind: "busy" };
+          const pendingApprovals = new Set<string>();
+          for (const event of await session.runtimeEventStore.readSession(sessionId)) {
+            if (event.kind === "approval.requested") pendingApprovals.add(event.data.approvalId);
+            if (event.kind === "approval.settled") pendingApprovals.delete(event.data.approvalId);
+          }
+          if (pendingApprovals.size > 0) return { kind: "busy" };
+          const settings = await this.getSessionSettings(workspacePath, session);
+          if (!stillCurrent()) return { kind: "busy" };
+          manager.setCoordinator({
+            pendingContinuation: null,
+            currentExecution: { ...intent, origin: "goal", started: false },
+          });
           await session.flushPersistence();
-        }
-      });
-    } catch (error) {
-      const conflict =
-        error instanceof RuntimeProtocolError && error.code === RUNTIME_ERROR_CODES.CONFLICT;
-      if (intent) {
-        await this.releaseGoalAdmission(
-          canonical,
-          sessionId,
-          intent,
-          conflict ? undefined : error instanceof Error ? error.message : String(error),
-        );
+          if (!stillCurrent()) return { kind: "busy" };
+          const authorization =
+            settings.orchestrationMode === "swarm" ? ("session_mode" as const) : ("none" as const);
+          await RuntimeRun.start({
+            capability,
+            runId: intent.runId,
+            turnId: intent.turnId,
+            invocationId: intent.invocationId,
+            runStartedEventId: intent.runStartedEventId,
+            agentSwarmAuthorization: authorization,
+            now: () => new Date(intent.runStartedAt),
+          });
+          await session.commitMessageOnce(`goal-continuation-input:${intent.runId}`, {
+            role: "user",
+            content: intent.prompt,
+            providerData: {
+              picoKind: "goal_continuation",
+              picoHiddenFromTranscript: true,
+              picoGoalId: intent.goalId,
+            },
+          });
+          await session.flushPersistence();
+          if (!stillCurrent()) return { kind: "busy" };
+          await this.options.runtimeService.startForegroundRun({
+            workspacePath,
+            sessionId,
+            prompt: intent.prompt,
+            execution: {
+              resumeExistingSession: true,
+              origin: "goal",
+              goalTitle: manager.getCurrent()!.condition,
+              goalPreparedRun: {
+                runId: intent.runId,
+                turnId: intent.turnId,
+                invocationId: intent.invocationId,
+                runStartedEventId: intent.runStartedEventId,
+                runStartedAt: new Date(intent.runStartedAt).toISOString(),
+                agentSwarmAuthorization: authorization,
+              },
+            },
+            idempotencyKey: `goal:${intent.runId}`,
+          });
+          return { kind: "started" };
+        });
+      } catch (error) {
+        if (error instanceof WorkspaceRunBusyError) return { kind: "busy" };
+        return { kind: "unavailable", reason: errorMessage(error) };
       }
-      if (!conflict) this.publishConversationFailure(canonical, error);
-    }
-    if (
-      !intent &&
-      (await this.conversationStateStore.listQueued(canonical, sessionId)).length > 0
-    ) {
-      await this.consumeNextQueued(canonical, sessionId);
-    }
-  }
-
-  private async releaseGoalAdmission(
-    workspacePath: string,
-    sessionId: string,
-    intent: { readonly goalId: string; readonly goalTitle: string; readonly admissionKey: string },
-    reason?: string,
-  ): Promise<void> {
-    await this.withSession(workspacePath, sessionId, async (session) => {
-      const snapshot = (await session.readHydrationSnapshot()).runtime.goal;
-      if (!snapshot) return;
-      const manager = new GoalManager({ now: this.now });
-      manager.restore(snapshot);
-      manager.releaseContinuation(intent.goalId, intent.admissionKey, reason);
-      session.updateRuntimeState({ goal: manager.snapshot() });
-      await session.flushPersistence();
-    });
-  }
-
-  private async reconcileGoalRun(
-    workspacePath: string,
-    sessionId: string,
-    goalId: string,
-    targetRunId: string,
-    status: "succeeded" | "failed" | "cancelled" | "missing",
-  ): Promise<void> {
-    await this.withSession(workspacePath, sessionId, async (session) => {
-      const snapshot = (await session.readHydrationSnapshot()).runtime.goal;
-      if (!snapshot) return;
-      const manager = new GoalManager({ now: this.now });
-      manager.restore(snapshot);
-      manager.recoverAdmittedRun(goalId, targetRunId, status);
-      session.updateRuntimeState({ goal: manager.snapshot() });
-      await session.flushPersistence();
-    });
-  }
-
-  private async pauseGoalAfterRun(
-    workspacePath: string,
-    sessionId: string,
-    reason: string,
-  ): Promise<void> {
-    await this.withSession(workspacePath, sessionId, async (session) => {
-      const snapshot = (await session.readHydrationSnapshot()).runtime.goal;
-      if (!snapshot) return;
-      const manager = new GoalManager({ now: this.now });
-      manager.restore(snapshot);
-      const active = manager.getActive();
-      if (!active || (active.status !== "active" && active.status !== "waiting")) return;
-      manager.pause(active.id, reason);
-      session.updateRuntimeState({ goal: manager.snapshot() });
-      await session.flushPersistence();
     });
   }
 
@@ -4294,7 +4339,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private publishWorkbarResource(
     workspacePath: string,
     sessionId: string,
-    resource: "tasks" | "artifacts" | "trace" | "context",
+    resource: "tasks" | "artifacts" | "trace" | "context" | "goal",
     value: { readonly revision?: number; readonly watermark?: number },
   ): void {
     this.publish(
@@ -4347,30 +4392,6 @@ function firstSendRequestFingerprint(params: {
 function desktopRunStartIdempotencyKey(source: "send" | "queue" | "goal", key: string): string {
   const digest = createHash("sha256").update(key).digest("hex");
   return `desktop-${source}-run:${digest}`;
-}
-
-function parseGoalBudget(value: JsonObject): BudgetConfig {
-  const allowed = new Set(["maxTurns", "maxTokens", "maxCostCNY", "maxWallClockMs"]);
-  const budget: BudgetConfig = {};
-  for (const [key, raw] of Object.entries(value)) {
-    if (!allowed.has(key) || typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0) {
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.INVALID_PARAMS,
-        `Goal 预算字段 ${key} 无效；只接受正数 maxTurns/maxTokens/maxCostCNY/maxWallClockMs`,
-      );
-    }
-    if (key === "maxTurns") budget.maxTurns = raw;
-    else if (key === "maxTokens") budget.maxTokens = raw;
-    else if (key === "maxCostCNY") budget.maxCostCNY = raw;
-    else if (key === "maxWallClockMs") budget.maxWallClockMs = raw;
-  }
-  if (Object.keys(budget).length === 0) {
-    throw new RuntimeProtocolError(
-      RUNTIME_ERROR_CODES.INVALID_PARAMS,
-      "Goal budget 至少包含一个预算字段",
-    );
-  }
-  return budget;
 }
 
 function sessionPayload(entry: SqliteSessionCatalogEntry): JsonObject {
@@ -4811,4 +4832,24 @@ function runtimeInputDisplay(input: RuntimeUserInput): string {
 
 function isTerminalRunStatus(status: string): boolean {
   return status === "cancelled" || status === "failed" || status === "succeeded";
+}
+
+function goalRunCompletion(run: JsonObject): GoalRunCompletion {
+  const result = isJsonRecord(run["result"]) ? run["result"] : undefined;
+  const outcome = isJsonRecord(result?.["outcome"]) ? result["outcome"] : undefined;
+  const usage = isJsonRecord(outcome?.["primaryUsage"]) ? outcome["primaryUsage"] : undefined;
+  return {
+    runId: String(run["runId"]),
+    status: String(run["status"]),
+    ...(typeof run["error"] === "string" ? { error: run["error"] } : {}),
+    ...(typeof outcome?.["stopReason"] === "string" ? { stopReason: outcome["stopReason"] } : {}),
+    ...(typeof usage?.["promptTokens"] === "number" && typeof usage["completionTokens"] === "number"
+      ? {
+          primaryUsage: {
+            promptTokens: usage["promptTokens"],
+            completionTokens: usage["completionTokens"],
+          },
+        }
+      : {}),
+  };
 }

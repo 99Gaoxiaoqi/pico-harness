@@ -43,6 +43,21 @@ export class SqliteDesktopConversationStateStore implements DesktopConversationS
     this.generateId = options.generateId ?? (() => `queued_${randomUUID()}`);
   }
 
+  async listWorkspaceQueued(workspacePath: string): Promise<DesktopQueuedInput[]> {
+    const canonical = normalizeWorkspacePath(workspacePath);
+    return this.withWorkspace(canonical, (lease) =>
+      lease.transaction("read", () => {
+        const rows = lease.database
+          .prepare(
+            `SELECT queue_id, workspace_path, session_id, input_json, created_at FROM desktop_input_queue
+         WHERE workspace_path = ? ORDER BY created_at ASC, queue_id ASC`,
+          )
+          .all(canonical) as unknown[];
+        return rows.map((row) => queueRowToQueuedInput(row as Record<string, unknown>));
+      }),
+    );
+  }
+
   async listQueued(workspacePath: string, sessionId: string): Promise<DesktopQueuedInput[]> {
     const canonical = normalizeWorkspacePath(workspacePath);
     const normalizedSessionId = requireNonEmpty(sessionId, "sessionId");
