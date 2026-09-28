@@ -8,13 +8,14 @@ const MAX_MESSAGE_CODE_UNITS = 500;
 const MAX_MESSAGE_BYTES = 1_500;
 
 const EVALUATOR_SYSTEM_PROMPT = `你是独立、只读的 Goal 验收器。你不能调用工具、执行操作或修改任务。
-根据 Goal condition 和最近对话判断目标当前状态。只能使用明确可观察到的事实，不要仅因执行模型声称完成就判为 met。
-只输出 JSON，字段为 met、impossible、progress、waiting、reason；前四项均为布尔值：
-- met：condition 已满足
-- impossible：存在明确且不可恢复的原因使 condition 无法满足
-- progress：condition 未满足，但本轮有实质进展
-- waiting：下一步必须等待用户、外部系统或未来时点
-- reason：简短说明判断依据或等待原因`;
+根据 Goal condition 和最近对话判断目标当前状态。只输出以下格式的 JSON：
+{"met": boolean, "impossible": boolean, "progress": boolean, "waiting": boolean, "reason": "一句话"}
+- met：仅在有清晰、具体证据表明 condition 全部满足时为 true。核验范围须覆盖要求，不接受缩小范围的替代结果。
+- impossible：仅在目标确实不可实现时为 true，困难本身不构成不可实现。
+- progress：本轮有可衡量的进展时为 true；重复操作、原地打转或没有有效工作时为 false。
+- waiting：正在合理等待无法自行加速的外部事件（CI、部署、远程队列、人工审查）时为 true。
+- reason：简短、具体、可指导下一轮的一句话，少于 120 字。
+对 met 和 impossible 保守判断。不确定时，四个布尔字段均为 false。`;
 
 export interface GoalEvaluationOptions {
   readonly signal?: AbortSignal;
@@ -25,7 +26,7 @@ export interface GoalEvaluationResult extends GoalEvaluation {
   readonly evaluatorFailed: boolean;
 }
 
-/** Independent no-tool Goal evaluation. Provider cancellation is awaited before returning. */
+/** Independent no-tool evaluation; aborts the physical request on cancellation or deadline. */
 export async function evaluateGoal(
   provider: LLMProvider,
   condition: string,
@@ -100,20 +101,22 @@ export async function evaluateGoal(
 
 function parseEvaluationResult(content: string): GoalEvaluationResult {
   try {
-    const match = content.match(/\{[\s\S]*\}/u);
+    const match = content.match(/\{[^{}]*"met"[^{}]*\}/su) ?? content.match(/\{[\s\S]*?\}/u);
     if (!match) return failedEvaluation("评估器未返回 JSON");
     const parsed = JSON.parse(match[0]) as Record<string, unknown>;
     const flags = ["met", "impossible", "progress", "waiting"] as const;
-    if (flags.some((flag) => typeof parsed[flag] !== "boolean"))
-      return failedEvaluation("评估器结果缺少布尔判定字段");
-    if (typeof parsed["reason"] !== "string") return failedEvaluation("评估器结果缺少 reason");
+    if (flags.some((flag) => parsed[flag] !== undefined && typeof parsed[flag] !== "boolean"))
+      return failedEvaluation("评估器结果包含非布尔判定字段");
     return {
-      met: parsed["met"] as boolean,
-      impossible: parsed["impossible"] as boolean,
-      progress: parsed["progress"] as boolean,
-      waiting: parsed["waiting"] as boolean,
+      met: parsed["met"] === true,
+      impossible: parsed["impossible"] === true,
+      progress: parsed["progress"] === true,
+      waiting: parsed["waiting"] === true,
       evaluatorFailed: false,
-      reason: truncateContextMessage(parsed["reason"] as string),
+      reason:
+        typeof parsed["reason"] === "string" && parsed["reason"].trim()
+          ? truncateContextMessage(parsed["reason"], 200, 600)
+          : "未提供原因",
     };
   } catch {
     return failedEvaluation("评估器结果无法解析");
@@ -124,9 +127,13 @@ function failedEvaluation(reason: string): GoalEvaluationResult {
   return { evaluatorFailed: true, reason };
 }
 
-function truncateContextMessage(value: string): string {
-  let text = value.slice(0, MAX_MESSAGE_CODE_UNITS);
-  while (Buffer.byteLength(text, "utf8") > MAX_MESSAGE_BYTES) text = text.slice(0, -1);
+function truncateContextMessage(
+  value: string,
+  maxCodeUnits = MAX_MESSAGE_CODE_UNITS,
+  maxBytes = MAX_MESSAGE_BYTES,
+): string {
+  let text = value.slice(0, maxCodeUnits);
+  while (Buffer.byteLength(text, "utf8") > maxBytes) text = text.slice(0, -1);
   if (text.length > 0) {
     const last = text.charCodeAt(text.length - 1);
     if (last >= 0xd800 && last <= 0xdbff) text = text.slice(0, -1);

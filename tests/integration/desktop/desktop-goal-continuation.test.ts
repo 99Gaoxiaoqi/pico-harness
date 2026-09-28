@@ -9,6 +9,10 @@ import { AgentEngine } from "@pico/pico-host/agent-engine";
 import { CostTracker } from "@pico/pico-host/cost-tracker";
 import { ToolRegistry } from "@pico/pico-host/product-tool-registry";
 import { CreateGoalTool } from "@pico/pico-host/goal-tools";
+import { SubmitPlanTool } from "@pico/pico-host/plan-tools";
+import { PlanHandoffController } from "@pico/runtime/plan-handoff";
+import { PlanCoordinator } from "@pico/runtime/plan-coordinator";
+import { currentRuntimeRun } from "@pico/runtime/runtime-run";
 import { DesktopRuntimeService } from "@pico/pico-host/desktop-runtime-service";
 import { WorkspaceRuntimeService } from "@pico/pico-host/workspace-runtime-service";
 import { RuntimeRunExecutor } from "@pico/pico-host/runtime-run-executor";
@@ -37,6 +41,7 @@ async function fixture(
     evaluator?: LLMProvider["generate"];
     work?: (call: number, sessionId: string, messages: Message[]) => Promise<Message>;
     maxTurns?: number;
+    plan?: boolean;
   } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), "pico-goal-host-engine-"));
@@ -73,6 +78,21 @@ async function fixture(
       try {
         const registry = new ToolRegistry();
         registry.register(new CreateGoalTool(manager));
+        const handoff = new PlanHandoffController();
+        const coordinator = () => {
+          const run = currentRuntimeRun()!;
+          return new PlanCoordinator(session.runtimeEventStore!, {
+            sessionId: session.id,
+            runId: run.runId,
+            turnId: run.currentTurnId,
+            invocationId: run.invocationId,
+            writeGuard: session,
+          });
+        };
+        if (options.plan)
+          registry.register(
+            new SubmitPlanTool(coordinator, handoff, session.id, () => currentRuntimeRun()!.runId),
+          );
         const provider = new CostTracker(
           {
             generate: async (messages, _tools, request) => {
@@ -95,6 +115,9 @@ async function fixture(
           provider,
           registry,
           goalManager: manager,
+          ...(options.plan
+            ? { planHandoff: handoff, stopAfterSuccessfulToolNames: ["submit_plan"] }
+            : {}),
           ...(options.maxTurns ? { maxTurns: options.maxTurns } : {}),
         });
         const result = await new RuntimeRunExecutor({
@@ -184,8 +207,9 @@ async function fixture(
         idempotencyKey: `input-${sessionId}-${text}`,
       }),
     );
-  const wait = async (sessionId: string, status: string) => {
-    for (let n = 0; n < 2000; n++) {
+  const wait = async (sessionId: string, status: string, timeoutMs = 20_000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
       const value = await state(sessionId);
       if (value.currentGoal?.status === status) return value;
       if (value.currentGoal && !["active", "waiting"].includes(value.currentGoal.status))
@@ -299,7 +323,13 @@ test("Goal control remains responsive during evaluator and rejects stale control
         { once: true },
       );
       await held;
-      return { role: "assistant", content: verdictContent({ met: true, reason: "过期结果" }) };
+      const usage = { promptTokens: 17, completionTokens: 5 };
+      await reportFixtureAttempt(options, "openai", "coder", usage);
+      return {
+        role: "assistant",
+        content: verdictContent({ met: true, reason: "过期结果" }),
+        usage,
+      };
     },
   });
   t.after(release);
@@ -321,6 +351,23 @@ test("Goal control remains responsive during evaluator and rejects stale control
   assert.equal(aborted, true);
   assert.equal(state.currentGoal!.status, "paused");
   assert.equal(f.runs.length, 1);
+  await f.desktop.close();
+  const ledger = new SqliteRuntimeControlStore({
+    storageRoot: resolvePicoPaths(f.workspacePath, { picoHome: f.picoHome }).workspace.root,
+  });
+  try {
+    const attempts = ledger
+      .listPhysicalAttempts({ sessionId: id })
+      .filter((call) => call.purpose === "goal_evaluation");
+    assert.equal(attempts.length, 1);
+    assert.equal(
+      attempts[0]!.usage?.promptTokens,
+      17,
+      "late cancelled calls retain actual metering",
+    );
+  } finally {
+    ledger.close();
+  }
 });
 
 test("workspace busy and queued user input take priority without pausing a Goal", async (t) => {
@@ -487,3 +534,109 @@ test("Engine step limit pauses the Goal without invoking evaluator", async (t) =
   assert.equal(f.evaluationCalls(), 0);
   assert.equal(f.runs.length, 1);
 });
+
+test("external waiting wakes after the initial backoff and finishes through a new Host Run", async (t) => {
+  const f = await fixture(t, {
+    evaluations: [
+      { waiting: true, reason: "外部状态稍后就绪" },
+      { met: true, reason: "外部状态已就绪" },
+    ],
+  });
+  const id = await f.create();
+  await f.arm(id);
+  await f.send(id);
+  const waiting = await f.wait(id, "waiting");
+  const final = await f.wait(id, "achieved");
+  assert.ok(
+    final.currentGoal!.lastEvaluation!.at - waiting.currentGoal!.lastEvaluation!.at >= 4900,
+  );
+  assert.equal(f.runs.length, 2);
+  assert.equal(f.runs[1]!.origin, "goal");
+  assert.equal(final.currentGoal!.iterations, 1);
+});
+
+test("real submit_plan handoff is evaluated while pending approval blocks Goal admission", async (t) => {
+  const f = await fixture(t, {
+    plan: true,
+    evaluations: [{ progress: true, reason: "计划已提交，等待审批" }],
+    work: async () => ({
+      role: "assistant",
+      content: "已准备计划",
+      toolCalls: [
+        {
+          id: "plan-submit",
+          name: "submit_plan",
+          arguments: JSON.stringify({
+            title: "测试计划",
+            steps: [{ title: "实施", description: "审批后实施" }],
+          }),
+        },
+      ],
+    }),
+  });
+  const id = await f.create();
+  await f.arm(id);
+  await f.send(id);
+  let state = await f.state(id);
+  for (let n = 0; n < 200 && !state.coordinator.pendingContinuation; n++) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    state = await f.state(id);
+  }
+  assert.equal(state.currentGoal!.status, "active");
+  assert.equal(state.currentGoal!.iterations, 1);
+  assert.ok(state.coordinator.pendingContinuation);
+  assert.equal(f.evaluationCalls(), 1);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(f.runs.length, 1, "pending plan must not be automatically approved or continued");
+});
+
+test(
+  "Host evaluator deadline cancels the request and ignores a late met verdict",
+  { timeout: 45_000 },
+  async (t) => {
+    let aborted = false;
+    const f = await fixture(t, {
+      evaluator: async (_messages, _tools, options) => {
+        await new Promise<void>((resolve) =>
+          options!.signal!.addEventListener(
+            "abort",
+            () => {
+              aborted = true;
+              resolve();
+            },
+            { once: true },
+          ),
+        );
+        const usage = { promptTokens: 19, completionTokens: 7 };
+        await reportFixtureAttempt(options, "openai", "coder", usage);
+        return {
+          role: "assistant",
+          content: verdictContent({ met: true, reason: "超时后的迟到结果" }),
+          usage,
+        };
+      },
+    });
+    const id = await f.create();
+    await f.arm(id, { maxIterations: 1 });
+    await f.send(id);
+    const final = await f.wait(id, "max_iterations", 40_000);
+    assert.equal(aborted, true);
+    assert.equal(final.currentGoal!.lastEvaluation!.evaluatorFailed, true);
+    assert.match(final.currentGoal!.lastEvaluation!.reason, /超时/);
+    assert.equal(final.currentGoal!.consecutiveNoProgress, 0);
+    assert.equal(f.runs.length, 1);
+    await f.desktop.close();
+    const ledger = new SqliteRuntimeControlStore({
+      storageRoot: resolvePicoPaths(f.workspacePath, { picoHome: f.picoHome }).workspace.root,
+    });
+    try {
+      const evaluation = ledger
+        .listPhysicalAttempts({ sessionId: id })
+        .filter((call) => call.purpose === "goal_evaluation");
+      assert.equal(evaluation.length, 1);
+      assert.equal(evaluation[0]!.usage!.promptTokens, 19);
+    } finally {
+      ledger.close();
+    }
+  },
+);

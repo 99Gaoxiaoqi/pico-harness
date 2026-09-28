@@ -49,7 +49,7 @@ test("Goal evaluator converts provider failures and malformed output to neutral 
     {
       generate: async () => ({
         role: "assistant",
-        content: '{"met":true,"reason":"missing flags"}',
+        content: '{"met":"true","reason":"invalid flag"}',
       }),
     },
   ];
@@ -80,4 +80,25 @@ test("Goal evaluator aborts the provider when its deadline expires", async () =>
   assert.equal(sawAbort, true);
   assert.equal(result.evaluatorFailed, true);
   assert.match(result.reason, /超时/u);
+});
+
+test("Goal evaluator normalizes omitted fields and selects the judgment object like upstream", async () => {
+  const result = await evaluateGoal(
+    {
+      generate: async () => ({
+        role: "assistant",
+        content: 'example: {"unrelated":true} judgment: {"met":true}',
+      }),
+    },
+    "完成要求",
+    [],
+  );
+  assert.deepEqual(result, {
+    met: true,
+    impossible: false,
+    progress: false,
+    waiting: false,
+    evaluatorFailed: false,
+    reason: "未提供原因",
+  });
 });
