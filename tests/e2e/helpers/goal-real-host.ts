@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -15,6 +15,7 @@ import {
 } from "@pico/pico-host/input/user-config-store";
 import {
   createRuntimeRequest,
+  isJsonObject,
   parseRuntimeResult,
   type RuntimeMethod,
   type RuntimeParams,
@@ -29,6 +30,7 @@ const SECRET_ENV = "PICO_GOAL_REAL_E2E_KEY";
 
 interface GoalView {
   readonly id: string;
+  readonly revision: number;
   readonly status: string;
   readonly iterations: number;
   readonly tokensAtStart: number;
@@ -89,6 +91,13 @@ export async function createRealGoalHost(
     { expectedRevision: EMPTY_USER_CONFIG_REVISION },
   );
   // Credentials stay in process memory; the temporary config contains only the environment name.
+  if (model.config.apiKey) {
+    assert.equal(
+      (await readFile(userConfigStore.filePath, "utf8")).includes(model.config.apiKey),
+      false,
+      "the temporary config must not persist the real model credential",
+    );
+  }
   const services = createProductionRuntimeServices({
     env: { ...process.env, PICO_HOME: picoHome, [SECRET_ENV]: model.config.apiKey },
     userConfigStore,
@@ -109,8 +118,8 @@ export async function createRealGoalHost(
   let observerError: unknown;
   const unsubscribe = services.desktopService.subscribe((event) => {
     if (event.scope.sessionId !== sessionId || !event.scope.runId) return;
-    const run = event.payload?.["run"];
-    if (typeof run !== "object" || !run || Array.isArray(run)) return;
+    const run = isJsonObject(event.payload) ? event.payload["run"] : undefined;
+    if (!isJsonObject(run)) return;
     if (event.topic === "run.started") {
       const description = String(run["description"] ?? "");
       startedRuns.set(event.scope.runId, description);
@@ -252,6 +261,7 @@ export async function createRealGoalHost(
       await request("goal.control", {
         ...sessionScope,
         action: "arm",
+        expectedRevision: (await goal())?.revision ?? 0,
         condition,
         maxIterations,
         tokenBudget: TOKEN_BUDGET,
