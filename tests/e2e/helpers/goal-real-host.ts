@@ -50,14 +50,22 @@ export async function createRealGoalHost(
     context.skip("No user default real-model route is configured");
     return undefined;
   }
-  const model = await loadUserDefaultRealModel({ picoHome: sourceHome }).catch((error: unknown) => {
-    if (error instanceof Error && /缺少凭证环境变量/u.test(error.message)) return undefined;
-    throw error;
-  });
-  if (!model) {
+  const defaultModel = await loadUserDefaultRealModel({ picoHome: sourceHome }).catch(
+    (error: unknown) => {
+      if (error instanceof Error && /缺少凭证环境变量/u.test(error.message)) return undefined;
+      throw error;
+    },
+  );
+  if (!defaultModel) {
     context.skip("No credential is available for the user default real-model route");
     return undefined;
   }
+  // A configured alternate route can be used when the user's default account is unavailable.
+  // Selection stays local to this temporary Host and never changes the user's config.
+  const alternateRoute = process.env["PICO_GOAL_E2E_MODEL_ROUTE"]?.trim();
+  const model = alternateRoute
+    ? { ...defaultModel, ...defaultModel.runtime.router.providerConfig(alternateRoute) }
+    : defaultModel;
 
   const root = await mkdtemp(join(tmpdir(), "pico-goal-real-host-"));
   const picoHome = join(root, "home");
@@ -174,6 +182,9 @@ export async function createRealGoalHost(
       const terminalRuns = events.filter((event) => event.kind === "run.terminal");
       const attempts = ledger.listPhysicalAttempts({ sessionId });
       const succeeded = attempts.filter((attempt) => attempt.status === "succeeded");
+      const knownCostAttempts = attempts.filter(
+        (attempt) => attempt.costStatus !== "unknown" && attempt.costCNY !== undefined,
+      );
       const tokens = (purpose?: string) =>
         attempts
           .filter((attempt) => purpose === undefined || attempt.purpose === purpose)
@@ -197,8 +208,15 @@ export async function createRealGoalHost(
           evaluatorTokens: tokens("goal_evaluation"),
           goalTokens: settled.tokensNow - settled.tokensAtStart,
           totalTokens: tokens(),
-          knownCostCNY: attempts.reduce((sum, attempt) => sum + (attempt.costCNY ?? 0), 0),
-          unknownCostCalls: attempts.filter((attempt) => attempt.costStatus === "unknown").length,
+          missingUsageCalls: attempts.filter((attempt) => !attempt.usage).length,
+          knownCostCNY:
+            knownCostAttempts.length > 0
+              ? knownCostAttempts.reduce((sum, attempt) => sum + (attempt.costCNY ?? 0), 0)
+              : null,
+          includedCostCalls: attempts.filter((attempt) => attempt.costStatus === "included").length,
+          unknownCostCalls: attempts.filter(
+            (attempt) => attempt.costStatus === "unknown" || attempt.costStatus === undefined,
+          ).length,
         }),
       );
       assert.ok(
