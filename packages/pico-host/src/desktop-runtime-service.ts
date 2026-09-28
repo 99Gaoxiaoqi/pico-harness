@@ -2169,13 +2169,13 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     this.transcriptPersistenceTail = this.transcriptPersistenceTail
       .then(async () => {
         await this.withPinnedSession(workspacePath, sessionId, async (session) => {
-          const eventId = `goal-terminal:${terminal.id}`;
+          const eventId = `goal-terminal:${terminal.id}:${terminal.revision}`;
           await session.recordTranscriptEvent(
             {
               eventId,
               entryId: eventId,
               sequence: 1,
-              createdAt: terminal.achievedAt ?? terminal.lastEvaluation?.at ?? terminal.createdAt,
+              createdAt: terminal.lastEvaluation?.at ?? terminal.achievedAt ?? terminal.createdAt,
               type: "entry.appended",
               entry: {
                 kind: "goal",
@@ -2184,6 +2184,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
                 ...(terminal.lastReason ? { detail: terminal.lastReason } : {}),
                 data: {
                   goalId: terminal.id,
+                  goalRevision: terminal.revision,
                   iterations: terminal.iterations,
                   maxIterations: terminal.maxIterations,
                   tokensUsed: Math.max(0, terminal.tokensNow - terminal.tokensAtStart),

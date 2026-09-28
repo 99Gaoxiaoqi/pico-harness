@@ -3675,8 +3675,12 @@ function transcriptMutationsForEvent(
 
 function stableStructuredTranscriptItemId(entry: TranscriptEntryData): string | undefined {
   if (entry.kind === "goal") {
-    const id = asJsonRecord(entry.data)?.["goalId"];
-    return typeof id === "string" ? `goal-terminal:${id}` : undefined;
+    const data = asJsonRecord(entry.data);
+    const id = data?.["goalId"];
+    const revision = data?.["goalRevision"];
+    return typeof id === "string" && typeof revision === "number"
+      ? `goal-terminal:${id}:${revision}`
+      : undefined;
   }
   if (entry.kind !== "approval" && entry.kind !== "prompt" && entry.kind !== "changes") {
     return undefined;

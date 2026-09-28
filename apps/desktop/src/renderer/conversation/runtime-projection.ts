@@ -843,7 +843,7 @@ export function parseGoalItem(value: unknown): ConversationItemView | undefined 
   const evaluation = isRecord(goal.lastEvaluation) ? goal.lastEvaluation : undefined;
   const reason = stringValue(goal.lastReason ?? evaluation?.reason);
   return {
-    id: `goal-terminal:${stringValue(goal.id)}`,
+    id: `goal-terminal:${stringValue(goal.id)}:${numberValue(goal.revision)}`,
     kind: "goal",
     title: stringValue(goal.condition, "Goal"),
     detail: [
