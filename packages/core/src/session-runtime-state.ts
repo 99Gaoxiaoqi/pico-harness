@@ -16,14 +16,35 @@ export interface PersistedGoalBudgetConfig {
   maxWallClockMs?: number;
 }
 
-export type PersistedGoalStatus = "active" | "paused" | "blocked" | "complete";
+export type PersistedGoalStatus =
+  | "active"
+  | "waiting"
+  | "paused"
+  | "achieved"
+  | "impossible"
+  | "stalled"
+  | "budget_limited"
+  | "max_iterations"
+  | "cleared";
+
+export interface PersistedGoalEvaluation {
+  outcome: "met" | "impossible" | "progress" | "waiting" | "unknown";
+  reason: string;
+  evidence: string[];
+  at: number;
+}
 
 export interface PersistedGoal {
   id: string;
   title: string;
   description: string;
+  completionCriteria: string[];
+  constraints?: string[];
   status: PersistedGoalStatus;
   createdAt: number;
+  maxIterations: number;
+  blockCap: number;
+  controlRevision: number;
   budgetConfig?: PersistedGoalBudgetConfig;
   budgetUsage: {
     turns: number;
@@ -33,12 +54,21 @@ export interface PersistedGoal {
   };
   progress?: string;
   blockedReason?: string;
-  consecutiveNoProgress?: number;
-  lastToolCallHash?: string;
+  consecutiveNoProgress: number;
+  lastEvaluation?: PersistedGoalEvaluation;
+  evidence: string[];
+  completionRequested: boolean;
+  pendingContinuation: boolean;
+  awaitingUserTurn: boolean;
+  waitingReason?: string;
+  nextCheckAt?: number;
+  waitCount: number;
+  admissionKey?: string;
+  targetRunId?: string;
 }
 
 export interface PersistedGoalManagerSnapshot {
-  stateVersion: 1;
+  stateVersion: 2;
   sequence: number;
   activeGoalId: string | null;
   goals: PersistedGoal[];
@@ -240,7 +270,7 @@ function normalizeExecutionBoundary(value: unknown): ExecutionBoundary | undefin
 export function normalizeGoalManagerSnapshot(
   value: unknown,
 ): PersistedGoalManagerSnapshot | undefined {
-  if (!isRecord(value) || value["stateVersion"] !== 1) return undefined;
+  if (!isRecord(value) || value["stateVersion"] !== 2) return undefined;
   const sequence = value["sequence"];
   const activeGoalId = value["activeGoalId"];
   const candidates = value["goals"];
@@ -256,12 +286,12 @@ export function normalizeGoalManagerSnapshot(
     ids.add(candidate.id);
     goals.push(structuredClone(candidate));
   }
-  const activeGoals = goals.filter((goal) => goal.status === "active");
+  const activeGoals = goals.filter((goal) => goal.status === "active" || goal.status === "waiting");
   if (activeGoals.length > 1) return undefined;
   if (activeGoalId === null ? activeGoals.length !== 0 : activeGoals[0]?.id !== activeGoalId) {
     return undefined;
   }
-  return { stateVersion: 1, sequence, activeGoalId, goals };
+  return { stateVersion: 2, sequence, activeGoalId, goals };
 }
 
 function normalizePersistedSessionSettings(value: unknown): PersistedSessionSettings | undefined {
@@ -451,14 +481,51 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isGoal(value: unknown): value is PersistedGoal {
-  if (!isRecord(value) || !isRecord(value["budgetUsage"])) return false;
+  if (
+    !isRecord(value) ||
+    !hasOnlyKeys(value, [
+      "id",
+      "title",
+      "description",
+      "completionCriteria",
+      "constraints",
+      "status",
+      "createdAt",
+      "maxIterations",
+      "blockCap",
+      "controlRevision",
+      "budgetConfig",
+      "budgetUsage",
+      "progress",
+      "blockedReason",
+      "consecutiveNoProgress",
+      "lastEvaluation",
+      "evidence",
+      "completionRequested",
+      "pendingContinuation",
+      "awaitingUserTurn",
+      "waitingReason",
+      "nextCheckAt",
+      "waitCount",
+      "admissionKey",
+      "targetRunId",
+    ]) ||
+    !isRecord(value["budgetUsage"])
+  )
+    return false;
   const usage = value["budgetUsage"];
   return (
     typeof value["id"] === "string" &&
     typeof value["title"] === "string" &&
     typeof value["description"] === "string" &&
+    isNonEmptyStringArray(value["completionCriteria"]) &&
+    value["completionCriteria"].length <= 30 &&
+    (value["constraints"] === undefined || isStringArray(value["constraints"])) &&
     isGoalStatus(value["status"]) &&
     isNonNegativeFiniteNumber(value["createdAt"]) &&
+    isPositiveInteger(value["maxIterations"]) &&
+    isPositiveInteger(value["blockCap"]) &&
+    isNonNegativeInteger(value["controlRevision"]) &&
     isNonNegativeInteger(usage["turns"]) &&
     isNonNegativeInteger(usage["tokens"]) &&
     isNonNegativeFiniteNumber(usage["costCNY"]) &&
@@ -466,8 +533,45 @@ function isGoal(value: unknown): value is PersistedGoal {
     isOptionalString(value["progress"]) &&
     isOptionalString(value["blockedReason"]) &&
     isOptionalBudgetConfig(value["budgetConfig"]) &&
-    isOptionalNonNegativeInteger(value["consecutiveNoProgress"]) &&
-    isOptionalString(value["lastToolCallHash"])
+    isNonNegativeInteger(value["consecutiveNoProgress"]) &&
+    (value["lastEvaluation"] === undefined || isGoalEvaluation(value["lastEvaluation"])) &&
+    isStringArray(value["evidence"]) &&
+    typeof value["completionRequested"] === "boolean" &&
+    typeof value["pendingContinuation"] === "boolean" &&
+    typeof value["awaitingUserTurn"] === "boolean" &&
+    isOptionalString(value["waitingReason"]) &&
+    isOptionalNonNegativeFiniteNumber(value["nextCheckAt"]) &&
+    isNonNegativeInteger(value["waitCount"]) &&
+    isOptionalString(value["admissionKey"]) &&
+    isOptionalString(value["targetRunId"]) &&
+    (value["status"] !== "waiting" ||
+      (typeof value["nextCheckAt"] === "number" &&
+        typeof value["waitingReason"] === "string" &&
+        value["pendingContinuation"] === false &&
+        value["awaitingUserTurn"] === false)) &&
+    (value["status"] === "active" ||
+      (value["pendingContinuation"] === false &&
+        value["awaitingUserTurn"] === false &&
+        value["admissionKey"] === undefined &&
+        value["targetRunId"] === undefined)) &&
+    (value["pendingContinuation"] === false ||
+      (value["awaitingUserTurn"] === false && value["admissionKey"] === undefined)) &&
+    (value["admissionKey"] === undefined || value["pendingContinuation"] === false)
+  );
+}
+
+function isGoalEvaluation(value: unknown): value is PersistedGoalEvaluation {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ["outcome", "reason", "evidence", "at"]) &&
+    (value["outcome"] === "met" ||
+      value["outcome"] === "impossible" ||
+      value["outcome"] === "progress" ||
+      value["outcome"] === "waiting" ||
+      value["outcome"] === "unknown") &&
+    typeof value["reason"] === "string" &&
+    isStringArray(value["evidence"]) &&
+    isNonNegativeFiniteNumber(value["at"])
   );
 }
 
@@ -483,7 +587,25 @@ function isOptionalBudgetConfig(value: unknown): boolean {
 }
 
 function isGoalStatus(value: unknown): value is PersistedGoalStatus {
-  return value === "active" || value === "paused" || value === "blocked" || value === "complete";
+  return (
+    value === "active" ||
+    value === "waiting" ||
+    value === "paused" ||
+    value === "achieved" ||
+    value === "impossible" ||
+    value === "stalled" ||
+    value === "budget_limited" ||
+    value === "max_iterations" ||
+    value === "cleared"
+  );
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+}
+
+function isNonEmptyStringArray(value: unknown): value is string[] {
+  return isStringArray(value) && value.length > 0 && value.every((entry) => entry.trim().length > 0);
 }
 
 function isOptionalString(value: unknown): boolean {
@@ -523,6 +645,10 @@ function isCostStatus(value: unknown): value is PersistedCostStatus {
 
 function isNonNegativeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isPositiveInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 }
 
 function isNonNegativeFiniteNumber(value: unknown): value is number {

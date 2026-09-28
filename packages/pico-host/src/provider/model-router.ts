@@ -1,9 +1,14 @@
+import { createHash } from "node:crypto";
 import type { ProviderConfig } from "@pico/runtime/provider-config";
 import type { ProviderKind } from "@pico/core";
 import { resolveModelRouteCapabilities } from "@pico/runtime";
 import type { ReasoningLevel } from "@pico/core";
 
 const DEFAULT_DISCOVERY_TIMEOUT_MS = 3_000;
+// Keep the last successful catalog across transient discovery failures. Scope it
+// to the connection and credential; never persist credentials or a stale catalog.
+const discoveredCatalogs = new Map<string, readonly string[]>();
+const MAX_DISCOVERED_CATALOGS = 64;
 
 import {
   resolveModelProtocol,
@@ -252,17 +257,35 @@ async function discoverProviderModels(
     return { provider, models: configured };
   }
 
+  const catalogKey = createHash("sha256")
+    .update(
+      JSON.stringify([
+        provider.id,
+        provider.config.protocol,
+        provider.config.baseURL.replace(/\/+$/u, ""),
+        provider.config.auth ?? "api-key",
+        apiKey ?? "",
+      ]),
+    )
+    .digest("hex");
   const discovered = await fetchModelIds(
     provider.config.baseURL,
     apiKey,
     options.fetch ?? fetch,
     options.discoveryTimeoutMs ?? DEFAULT_DISCOVERY_TIMEOUT_MS,
   );
-  if (discovered === undefined) {
-    return { provider, models: configured };
+  if (discovered !== undefined) {
+    // Successful empty responses invalidate the previous catalog too.
+    discoveredCatalogs.delete(catalogKey);
+    discoveredCatalogs.set(catalogKey, discovered);
+    if (discoveredCatalogs.size > MAX_DISCOVERED_CATALOGS) {
+      discoveredCatalogs.delete(discoveredCatalogs.keys().next().value!);
+    }
   }
-
-  const models = unique([...configured, ...discovered]);
+  const models = unique([
+    ...configured,
+    ...(discovered ?? discoveredCatalogs.get(catalogKey) ?? []),
+  ]);
   return { provider, models };
 }
 

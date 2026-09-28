@@ -733,6 +733,7 @@ export class DesktopProviderConfigService {
                   capabilities.reasoningProfile.source === "config"
                     ? capabilities.reasoning
                     : (catalog?.reasoning ?? capabilities.reasoning),
+                reasoningLevels: [...capabilities.reasoningProfile.levels],
                 reasoningSource:
                   capabilities.reasoningProfile.source === "config"
                     ? "config"

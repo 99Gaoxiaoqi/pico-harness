@@ -49,6 +49,9 @@ export interface LoadEffectiveModelRuntimeOptions {
   readonly credentialVault?: CredentialVault;
   readonly fetch?: typeof fetch;
   readonly discoveryTimeoutMs?: number;
+  /** Single-route readers may skip discovery when this exact configured route is valid.
+   * Do not use for runtime assembly that needs the complete discovered catalog. */
+  readonly preferredModelRouteId?: string;
 }
 
 /**
@@ -67,7 +70,7 @@ export async function loadEffectiveModelRuntime(
   );
   const vault = options.credentialVault ?? createPlatformCredentialVault();
   const resolved = await resolveSecrets(config, userConfig.providers, env, vault);
-  const router = await loadModelRouter({
+  const routerOptions = {
     config: {
       ...(config.defaultModelRouteId ? { model: config.defaultModelRouteId } : {}),
       providers: config.providers,
@@ -78,7 +81,26 @@ export async function loadEffectiveModelRuntime(
       ? { discoveryTimeoutMs: options.discoveryTimeoutMs }
       : {}),
     resolvedSecrets: resolved.secrets,
-  });
+  };
+  const preferred = options.preferredModelRouteId?.trim();
+  let router: ModelRouter | undefined;
+  if (preferred) {
+    const configured = await loadModelRouter({
+      ...routerOptions,
+      config: {
+        ...routerOptions.config,
+        providers: Object.fromEntries(
+          Object.entries(config.providers).map(([id, provider]) => [
+            id,
+            { ...provider, discoverModels: false },
+          ]),
+        ),
+      },
+    });
+    const validation = configured.validate(preferred);
+    if (validation.ok && validation.route.id === preferred) router = configured;
+  }
+  router ??= await loadModelRouter(routerOptions);
 
   return Object.freeze({
     config,

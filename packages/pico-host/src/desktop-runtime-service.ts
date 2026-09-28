@@ -85,6 +85,8 @@ import {
 } from "./provider/effective-model-runtime.js";
 import { type CredentialVault } from "./provider/credential-vault.js";
 import { resolveProviderProfile } from "@pico/runtime";
+import { GoalManager } from "@pico/runtime/goal-manager";
+import type { BudgetConfig } from "@pico/runtime";
 import type { ProviderOperationJournal } from "./provider/provider-operation-journal.js";
 import { resolvePicoHome, resolvePicoPaths } from "./pico-paths.js";
 import {
@@ -344,10 +346,12 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   >();
   private readonly agentGraphStores = new Map<string, SqliteAgentGraphControlStore>();
   private readonly inFlightHandles = new Set<Promise<JsonValue>>();
+  private readonly goalWakeTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private transcriptPersistenceTail: Promise<void> = Promise.resolve();
   private lifecycleState: "open" | "closing" | "closed" = "open";
   private closePromise?: Promise<void>;
-  private queuedInputDispatchTail: Promise<void> = Promise.resolve();
+  private readonly sessionAdmissionTails = new Map<string, Promise<void>>();
+  private goalRecoveryPromise: Promise<void> = Promise.resolve();
   private resourceVersion = 0;
   private readonly browserAgentBroker: BrowserAgentCommandBroker;
   private readonly clientCapabilityBroker: ClientCapabilityCommandBroker;
@@ -476,6 +480,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     this.unsubscribeRuntimeEvents = options.runtimeService.subscribe((event) => {
       const sessionId = event.scope.sessionId;
       if (!sessionId) return;
+      if (event.topic === "run.started") {
+        this.clearGoalWake(event.scope.workspacePath, sessionId);
+      }
       if (isDesktopTranscriptNotification(event.topic)) {
         this.transcriptPersistenceTail = this.transcriptPersistenceTail.then(
           () => this.persistRuntimeNotification(event),
@@ -491,18 +498,35 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       const dispatch = async () => {
         await transcriptReady.catch(() => undefined);
         if (this.lifecycleState !== "open") return;
-        await this.consumeNextQueued(event.scope.workspacePath, sessionId);
+        const runPayloadValue =
+          isJsonRecord(event.payload) && isJsonRecord(event.payload["run"])
+            ? event.payload["run"]
+            : undefined;
+        const runStatus =
+          typeof runPayloadValue?.["status"] === "string" ? runPayloadValue["status"] : "unknown";
+        if (runStatus === "failed" || runStatus === "cancelled") {
+          await this.pauseGoalAfterRun(
+            event.scope.workspacePath,
+            sessionId,
+            runStatus === "cancelled"
+              ? "Goal Run 已中断"
+              : typeof runPayloadValue?.["error"] === "string"
+                ? runPayloadValue["error"]
+                : "Goal Run 失败",
+          );
+        }
+        const queuedUserInput = await this.consumeNextQueued(event.scope.workspacePath, sessionId);
+        if (!queuedUserInput && runStatus === "succeeded") {
+          await this.tryStartGoalContinuation(event.scope.workspacePath, sessionId);
+        }
       };
-      const queued = this.queuedInputDispatchTail.then(dispatch, dispatch);
-      this.queuedInputDispatchTail = queued.then(
-        () => undefined,
-        () => undefined,
-      );
-      void queued.catch((error: unknown) => {
+      void this.withSessionAdmission(event.scope.workspacePath, sessionId, dispatch).catch(
+        (error: unknown) => {
         if (this.lifecycleState === "open") {
           this.publishConversationFailure(event.scope.workspacePath, error);
         }
-      });
+        },
+      );
     });
     this.requestRouter = new DesktopRequestRouter({
       handlers: this.createRequestHandlers(),
@@ -514,6 +538,11 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           `${method} 尚未连接可验证的 Runtime 能力，本次请求未执行`,
         ),
     });
+    this.goalRecoveryPromise = this.providerConfig.ready
+      .then(() => this.reconcileGoalContinuations())
+      .catch((error: unknown) =>
+        logger.warn({ error: String(error) }, "[Goal] 启动时恢复续跑意图失败"),
+      );
   }
 
   handle(request: RuntimeRequest): Promise<JsonValue> {
@@ -726,6 +755,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         addSessionDirectory: this.addSessionDirectory.bind(this),
         updateRuntimeSessionSettings: this.updateRuntimeSessionSettings.bind(this),
         getGoal: this.getGoal.bind(this),
+        controlGoal: this.controlGoal.bind(this),
         sendSession: this.sendSession.bind(this),
         cancelRun: this.cancelRun.bind(this),
         withProviderDependencyLock: (operation) =>
@@ -887,8 +917,11 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       }
     };
     await this.providerConfig.close();
+    await this.goalRecoveryPromise;
+    for (const timer of this.goalWakeTimers.values()) clearTimeout(timer);
+    this.goalWakeTimers.clear();
     await Promise.allSettled([...this.pendingSends.values()].map(({ promise }) => promise));
-    await this.queuedInputDispatchTail.catch(() => undefined);
+    await Promise.allSettled([...this.sessionAdmissionTails.values()]);
     await Promise.allSettled([...this.inFlightHandles]);
     // Workspace shutdown emits the terminal boundary for every active foreground Run.
     // Keep the projection subscriber and RuntimeStore alive until those events are projected.
@@ -1396,7 +1429,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const canonical = await this.requireTrustedSession(workspacePath, sessionId);
     return this.withSession(canonical, sessionId, async (session) => {
       const settings = await this.getSessionSettings(canonical, session);
-      const router = await this.getSessionModelRouter(canonical);
+      const router = await this.getSessionModelRouter(canonical, settings.modelRouteId);
       return { settings: runtimeSessionSettings(settings, router) };
     });
   }
@@ -1504,7 +1537,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           );
         }
       }
-      const router = await this.getSessionModelRouter(canonical);
+      const router = await this.getSessionModelRouter(
+        canonical,
+        params.modelRouteId ?? current.modelRouteId,
+      );
       const selectedRoute = resolveRequestedModelRoute(router, params.modelRouteId);
       if (params.thinkingEffort !== undefined) {
         validateRequestedThinkingEffort(
@@ -1608,7 +1644,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           RUNTIME_ERROR_CODES.RESET_REQUIRED,
           `Session ${sessionId} 缺少当前版本 settings，请新建 Session`,
         );
-      const runtime = await this.loadSessionModelRuntime(canonical);
+      const runtime = await this.loadSessionModelRuntime(canonical, settings.modelRouteId);
       const route = runtime.router.require(settings.modelRouteId);
       const store = session.runtimeEventStore;
       if (!store) throw new Error("上下文历史缺少持久化事件源");
@@ -2042,11 +2078,85 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     });
   }
 
+  private async controlGoal(params: RuntimeRequest<"goal.control">["params"]): Promise<JsonValue> {
+    const canonical = await this.requireTrustedSession(params.workspacePath, params.sessionId);
+    const snapshot = await this.withSessionAdmission(canonical, params.sessionId, () =>
+      this.withSession(canonical, params.sessionId, async (session) => {
+        const hydration = await session.readHydrationSnapshot();
+        const manager = new GoalManager({ now: this.now });
+        if (hydration.runtime.goal) manager.restore(hydration.runtime.goal);
+        if (params.action === "arm") {
+          const title = params.title?.trim();
+          const description = params.description?.trim();
+          const criteria =
+            params.completionCriteria?.map((entry) => entry.trim()).filter(Boolean) ?? [];
+          if (!title || !description || criteria.length === 0) {
+            throw new RuntimeProtocolError(
+              RUNTIME_ERROR_CODES.INVALID_PARAMS,
+              "goal.control arm 需要 title、description 和至少一条 completionCriteria",
+            );
+          }
+          if (
+            (params.maxIterations !== undefined &&
+              (!Number.isSafeInteger(params.maxIterations) || params.maxIterations <= 0)) ||
+            (params.blockCap !== undefined &&
+              (!Number.isSafeInteger(params.blockCap) || params.blockCap <= 0))
+          ) {
+            throw new RuntimeProtocolError(
+              RUNTIME_ERROR_CODES.INVALID_PARAMS,
+              "maxIterations 和 blockCap 必须是正整数",
+            );
+          }
+          const budget = params.budget === undefined ? undefined : parseGoalBudget(params.budget);
+          manager.create({
+            title,
+            description,
+            completionCriteria: criteria,
+            ...(params.constraints?.length ? { constraints: params.constraints } : {}),
+            ...(budget ? { budgetConfig: budget } : {}),
+            ...(params.maxIterations ? { maxIterations: params.maxIterations } : {}),
+            ...(params.blockCap ? { blockCap: params.blockCap } : {}),
+            awaitingUserTurn: true,
+          });
+        } else {
+          const goalId = params.goalId ?? manager.getActive()?.id;
+          if (!goalId) {
+            throw new RuntimeProtocolError(
+              RUNTIME_ERROR_CODES.INVALID_PARAMS,
+              "当前没有可操作的 Goal",
+            );
+          }
+          const goal = manager.get(goalId);
+          if (!goal)
+            throw new RuntimeProtocolError(
+              RUNTIME_ERROR_CODES.INVALID_PARAMS,
+              `未找到 Goal ${goalId}`,
+            );
+          if (params.action === "pause") manager.pause(goalId);
+          else if (params.action === "resume") {
+            if (!manager.resume(goalId)) {
+              throw new RuntimeProtocolError(
+                RUNTIME_ERROR_CODES.CONFLICT,
+                `Goal ${goalId} 不能恢复（当前状态：${goal.status}）`,
+              );
+            }
+          } else manager.clear(goalId);
+        }
+        session.updateRuntimeState({ goal: manager.snapshot() });
+        await session.flushPersistence();
+        return manager.snapshot();
+      }),
+    );
+    if (params.action === "resume") this.queueGoalDispatch(canonical, params.sessionId);
+    else this.clearGoalWake(canonical, params.sessionId);
+    return { goal: toJsonValue(snapshot) };
+  }
+
   private async compactSession(workspacePath: string, sessionId: string): Promise<JsonValue> {
     const canonical = await this.requireIdleTrustedSession(workspacePath, sessionId, "压缩");
     const result = await this.withSession(canonical, sessionId, async (session) => {
       const settings = await this.getSessionSettings(canonical, session);
-      const effective = await this.loadSessionModelRuntime(canonical);
+      const effective = await this.loadSessionModelRuntime(canonical, settings.modelRouteId);
       const active = effective.router.providerConfig(settings.modelRouteId);
       active.config.sessionId = session.id;
       const pluginSnapshot = await this.pluginRuntimeSnapshotRegistry.get(canonical);
@@ -2284,7 +2394,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         // session. Explicit values remain strict; inherited defaults are reconciled below.
         if (params.initialSettings) {
           validateRequestedSessionSettings(params.initialSettings);
-          const runtime = await this.loadSessionModelRuntime(params.workspacePath);
+          const runtime = await this.loadSessionModelRuntime(
+            params.workspacePath,
+            params.initialSettings.modelRouteId,
+          );
           const route =
             resolveRequestedModelRoute(runtime.router, params.initialSettings.modelRouteId) ??
             runtime.router.require(runtime.config.defaultModelRouteId);
@@ -2325,6 +2438,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     }
     const sessionRecord = requireJsonRecord(session, "session");
     const sessionId = requireText(sessionRecord["sessionId"], "session.sessionId");
+    return this.withSessionAdmission(params.workspacePath, sessionId, async () => {
     const activeRun = await this.findActiveSessionRun(params.workspacePath, sessionId);
 
     if (!params.sessionId && params.initialSettings && !activeRun) {
@@ -2416,6 +2530,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       },
     );
     return { session: sessionRecord, run, disposition: "started" };
+    });
   }
 
   private async cancelRun(
@@ -2592,18 +2707,312 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     return messageId;
   }
 
-  private async consumeNextQueued(workspacePath: string, sessionId: string): Promise<void> {
-    if (this.lifecycleState !== "open") return;
+  private async consumeNextQueued(workspacePath: string, sessionId: string): Promise<boolean> {
+    if (this.lifecycleState !== "open") return false;
     const [next] = await this.conversationStateStore.listQueued(workspacePath, sessionId);
-    if (!next) return;
-    if (await this.findActiveSessionRun(workspacePath, sessionId)) return;
-    // 队列准入线性化点：通过后 close() 会等待 queuedInputDispatchTail，允许本项完整启动并出队。
-    if (this.lifecycleState !== "open") return;
+    if (!next) return false;
+    if (await this.findActiveSessionRun(workspacePath, sessionId)) return true;
+    // Session admission lane prevents a Goal continuation racing a queued user Run.
+    if (this.lifecycleState !== "open") return true;
     await this.startSessionRun(workspacePath, sessionId, next.input, undefined, {
       inputKey: next.queueId,
       runStartKey: desktopRunStartIdempotencyKey("queue", next.queueId),
     });
     await this.conversationStateStore.removeQueued(workspacePath, next.queueId);
+    return true;
+  }
+
+  private goalTimerKey(workspacePath: string, sessionId: string): string {
+    return `${workspacePath}\0${sessionId}`;
+  }
+
+  private clearGoalWake(workspacePath: string, sessionId: string): void {
+    const key = this.goalTimerKey(workspacePath, sessionId);
+    const timer = this.goalWakeTimers.get(key);
+    if (timer) clearTimeout(timer);
+    this.goalWakeTimers.delete(key);
+  }
+
+  private queueGoalDispatch(workspacePath: string, sessionId: string): void {
+    if (this.lifecycleState !== "open") return;
+    const dispatch = async () => {
+      if (this.lifecycleState !== "open") return;
+      const queuedUserInput = await this.consumeNextQueued(workspacePath, sessionId);
+      if (!queuedUserInput) await this.tryStartGoalContinuation(workspacePath, sessionId);
+    };
+    void this.withSessionAdmission(workspacePath, sessionId, dispatch).catch((error: unknown) => {
+      if (this.lifecycleState === "open") this.publishConversationFailure(workspacePath, error);
+    });
+  }
+
+  private async withSessionAdmission<Result>(
+    workspacePath: string,
+    sessionId: string,
+    operation: () => Promise<Result>,
+  ): Promise<Result> {
+    const key = this.goalTimerKey(workspacePath, sessionId);
+    const previous = this.sessionAdmissionTails.get(key) ?? Promise.resolve();
+    const admitted = previous.then(operation, operation);
+    const tail = admitted.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.sessionAdmissionTails.set(key, tail);
+    try {
+      return await admitted;
+    } finally {
+      if (this.sessionAdmissionTails.get(key) === tail) this.sessionAdmissionTails.delete(key);
+    }
+  }
+
+  private scheduleGoalWake(workspacePath: string, sessionId: string, at: number): void {
+    this.clearGoalWake(workspacePath, sessionId);
+    const timer = setTimeout(
+      () => {
+        this.goalWakeTimers.delete(this.goalTimerKey(workspacePath, sessionId));
+        this.queueGoalDispatch(workspacePath, sessionId);
+      },
+      Math.max(0, Math.min(at - this.now(), 5 * 60_000)),
+    );
+    timer.unref?.();
+    this.goalWakeTimers.set(this.goalTimerKey(workspacePath, sessionId), timer);
+  }
+
+  private async reconcileGoalContinuations(): Promise<void> {
+    if (this.lifecycleState !== "open") return;
+    for (const workspacePath of await this.registrationStore.list()) {
+      const listed = requireJsonRecord(
+        await this.listSessions(workspacePath),
+        "session.list result",
+      );
+      const sessions = Array.isArray(listed["sessions"]) ? listed["sessions"] : [];
+      for (const rawSession of sessions) {
+        if (!isJsonRecord(rawSession) || typeof rawSession["sessionId"] !== "string") continue;
+        const sessionId = rawSession["sessionId"];
+        try {
+          const result = requireJsonRecord(
+            await this.getGoal(workspacePath, sessionId),
+            "goal.get result",
+          );
+          const snapshot = result["goal"];
+          if (!isJsonRecord(snapshot) || !Array.isArray(snapshot["goals"])) continue;
+          const goal = snapshot["goals"]
+            .filter(isJsonRecord)
+            .find((candidate) => candidate["id"] === snapshot["activeGoalId"]);
+          if (!goal) continue;
+          const targetRunId = goal["targetRunId"];
+          if (typeof targetRunId === "string") {
+            const runsResult = requireJsonRecord(
+              await this.options.runtimeService.handle(
+                createRuntimeRequest("runs.list", { workspacePath, sessionId }),
+              ),
+              "runs.list result",
+            );
+            const targetRun = (Array.isArray(runsResult["runs"]) ? runsResult["runs"] : [])
+              .filter(isJsonRecord)
+              .find((run) => run["runId"] === targetRunId);
+            if (!targetRun) {
+              await this.reconcileGoalRun(
+                workspacePath,
+                sessionId,
+                String(goal["id"]),
+                targetRunId,
+                "missing",
+              );
+              continue;
+            }
+            const targetStatus = String(targetRun["status"] ?? "unknown");
+            if (!isTerminalRunStatus(targetStatus)) continue;
+            const recoveryStatus =
+              targetStatus === "succeeded"
+                ? "succeeded"
+                : targetStatus === "cancelled"
+                  ? "cancelled"
+                  : "failed";
+            await this.reconcileGoalRun(
+              workspacePath,
+              sessionId,
+              String(goal["id"]),
+              targetRunId,
+              recoveryStatus,
+            );
+            if (recoveryStatus === "succeeded") this.queueGoalDispatch(workspacePath, sessionId);
+            continue;
+          }
+          if (goal["status"] === "waiting" && typeof goal["nextCheckAt"] === "number") {
+            this.scheduleGoalWake(workspacePath, sessionId, goal["nextCheckAt"]);
+          } else if (
+            goal["pendingContinuation"] === true ||
+            typeof goal["admissionKey"] === "string"
+          ) {
+            this.queueGoalDispatch(workspacePath, sessionId);
+          }
+        } catch (error) {
+          logger.debug(
+            { workspacePath, sessionId, error: String(error) },
+            "[Goal] 忽略无法恢复的 Session",
+          );
+        }
+      }
+    }
+  }
+
+  private async tryStartGoalContinuation(workspacePath: string, sessionId: string): Promise<void> {
+    if (this.lifecycleState !== "open") return;
+    const canonical = await this.options.runtimeService.canonicalizeWorkspacePath(workspacePath);
+    if (!(await this.trustStore.isTrusted(canonical))) return;
+    if (await this.findActiveSessionRun(canonical, sessionId)) return;
+    const [queued] = await this.conversationStateStore.listQueued(canonical, sessionId);
+    if (queued) {
+      await this.consumeNextQueued(canonical, sessionId);
+      return;
+    }
+
+    let intent:
+      | { readonly goalId: string; readonly goalTitle: string; readonly admissionKey: string }
+      | undefined;
+    try {
+      await this.withSession(canonical, sessionId, async (session) => {
+        const hydration = await session.readHydrationSnapshot();
+        if (!hydration.runtime.goal) return;
+        const manager = new GoalManager({ now: this.now });
+        manager.restore(hydration.runtime.goal);
+        let goal = manager.getActive();
+        if (goal?.status === "waiting") {
+          if (!manager.wakeWaiting(goal.id, this.now())) {
+            if (goal.nextCheckAt !== undefined)
+              this.scheduleGoalWake(canonical, sessionId, goal.nextCheckAt);
+            return;
+          }
+          goal = manager.getActive();
+        }
+        if (!goal || goal.status !== "active") return;
+        const admissionKey =
+          goal.admissionKey ??
+          `goal:${goal.id}:revision:${goal.controlRevision}:iteration:${goal.budgetUsage.turns + 1}`;
+        if (!goal.admissionKey && !goal.pendingContinuation) return;
+        if (!goal.admissionKey && !manager.claimContinuation(goal.id, admissionKey)) {
+          session.updateRuntimeState({ goal: manager.snapshot() });
+          await session.flushPersistence();
+          return;
+        }
+        const claimed = manager.get(goal.id)!;
+        session.updateRuntimeState({ goal: manager.snapshot() });
+        await session.flushPersistence();
+        await session.commitMessageOnce(`goal-continuation-input:${admissionKey}`, {
+          role: "user",
+          content: `[Goal continuation] 继续推进目标“${claimed.title}”。先检查现有证据和进度，再按完成标准工作；若已完成、不可达或必须等待外部事件，请说明事实。`,
+          providerData: {
+            picoKind: "goal_continuation",
+            picoHiddenFromTranscript: true,
+            picoGoalId: claimed.id,
+            picoGoalContinuationId: admissionKey,
+          },
+        });
+        await session.flushPersistence();
+        await this.getSessionSettings(canonical, session);
+        await session.flushPersistence();
+        intent = { goalId: claimed.id, goalTitle: claimed.title, admissionKey };
+        if (
+          this.lifecycleState !== "open" ||
+          (await this.findActiveSessionRun(canonical, sessionId))
+        )
+          return;
+        if ((await this.conversationStateStore.listQueued(canonical, sessionId)).length > 0) {
+          manager.releaseContinuation(claimed.id, admissionKey);
+          session.updateRuntimeState({ goal: manager.snapshot() });
+          await session.flushPersistence();
+          intent = undefined;
+          return;
+        }
+        const admitted = requireJsonRecord(
+          await this.options.runtimeService.startForegroundRun({
+            workspacePath: canonical,
+            sessionId,
+            prompt: `[Goal continuation] ${claimed.title}`,
+            execution: { resumeExistingSession: true, origin: "goal", goalTitle: claimed.title },
+            idempotencyKey: desktopRunStartIdempotencyKey("goal", admissionKey),
+          }),
+          "goal continuation run.start result",
+        );
+        if (typeof admitted["runId"] === "string") {
+          manager.recordAdmittedRun(claimed.id, admissionKey, admitted["runId"]);
+          session.updateRuntimeState({ goal: manager.snapshot() });
+          await session.flushPersistence();
+        }
+      });
+    } catch (error) {
+      const conflict =
+        error instanceof RuntimeProtocolError && error.code === RUNTIME_ERROR_CODES.CONFLICT;
+      if (intent) {
+        await this.releaseGoalAdmission(
+          canonical,
+          sessionId,
+          intent,
+          conflict ? undefined : error instanceof Error ? error.message : String(error),
+        );
+      }
+      if (!conflict) this.publishConversationFailure(canonical, error);
+    }
+    if (
+      !intent &&
+      (await this.conversationStateStore.listQueued(canonical, sessionId)).length > 0
+    ) {
+      await this.consumeNextQueued(canonical, sessionId);
+    }
+  }
+
+  private async releaseGoalAdmission(
+    workspacePath: string,
+    sessionId: string,
+    intent: { readonly goalId: string; readonly goalTitle: string; readonly admissionKey: string },
+    reason?: string,
+  ): Promise<void> {
+    await this.withSession(workspacePath, sessionId, async (session) => {
+      const snapshot = (await session.readHydrationSnapshot()).runtime.goal;
+      if (!snapshot) return;
+      const manager = new GoalManager({ now: this.now });
+      manager.restore(snapshot);
+      manager.releaseContinuation(intent.goalId, intent.admissionKey, reason);
+      session.updateRuntimeState({ goal: manager.snapshot() });
+      await session.flushPersistence();
+    });
+  }
+
+  private async reconcileGoalRun(
+    workspacePath: string,
+    sessionId: string,
+    goalId: string,
+    targetRunId: string,
+    status: "succeeded" | "failed" | "cancelled" | "missing",
+  ): Promise<void> {
+    await this.withSession(workspacePath, sessionId, async (session) => {
+      const snapshot = (await session.readHydrationSnapshot()).runtime.goal;
+      if (!snapshot) return;
+      const manager = new GoalManager({ now: this.now });
+      manager.restore(snapshot);
+      manager.recoverAdmittedRun(goalId, targetRunId, status);
+      session.updateRuntimeState({ goal: manager.snapshot() });
+      await session.flushPersistence();
+    });
+  }
+
+  private async pauseGoalAfterRun(
+    workspacePath: string,
+    sessionId: string,
+    reason: string,
+  ): Promise<void> {
+    await this.withSession(workspacePath, sessionId, async (session) => {
+      const snapshot = (await session.readHydrationSnapshot()).runtime.goal;
+      if (!snapshot) return;
+      const manager = new GoalManager({ now: this.now });
+      manager.restore(snapshot);
+      const active = manager.getActive();
+      if (!active || (active.status !== "active" && active.status !== "waiting")) return;
+      manager.pause(active.id, reason);
+      session.updateRuntimeState({ goal: manager.snapshot() });
+      await session.flushPersistence();
+    });
   }
 
   private async persistRuntimeNotification(event: RuntimeNotification): Promise<void> {
@@ -3350,7 +3759,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const persisted = session.getRuntimeStateSnapshot().settings;
     if (persisted) return this.getSessionSettings(workspacePath, session);
     const defaults = effectiveSessionSettingDefaults(
-      await this.loadSessionModelRuntime(workspacePath),
+      await this.loadSessionModelRuntime(workspacePath, modelRouteId),
       modelRouteId,
     );
     return getOrCreateSessionSettings(
@@ -3375,11 +3784,17 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     return this.getSessionSettings(workspacePath, session);
   }
 
-  private async getSessionModelRouter(workspacePath: string): Promise<ModelRouter> {
-    return (await this.loadSessionModelRuntime(workspacePath)).router;
+  private async getSessionModelRouter(
+    workspacePath: string,
+    preferredModelRouteId?: string,
+  ): Promise<ModelRouter> {
+    return (await this.loadSessionModelRuntime(workspacePath, preferredModelRouteId)).router;
   }
 
-  private loadSessionModelRuntime(workspacePath: string): Promise<EffectiveModelRuntime> {
+  private loadSessionModelRuntime(
+    workspacePath: string,
+    preferredModelRouteId?: string,
+  ): Promise<EffectiveModelRuntime> {
     return loadEffectiveModelRuntime({
       workDir: workspacePath,
       projectTrusted: true,
@@ -3387,6 +3802,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       credentialVault: this.providerConfig.credentialVault,
       userConfigStore: this.providerConfig.userConfigStore,
       configResolver: this.providerConfig.effectiveConfigResolver,
+      ...(preferredModelRouteId ? { preferredModelRouteId } : {}),
     });
   }
 
@@ -3928,9 +4344,33 @@ function firstSendRequestFingerprint(params: {
     .digest("hex");
 }
 
-function desktopRunStartIdempotencyKey(source: "send" | "queue", key: string): string {
+function desktopRunStartIdempotencyKey(source: "send" | "queue" | "goal", key: string): string {
   const digest = createHash("sha256").update(key).digest("hex");
   return `desktop-${source}-run:${digest}`;
+}
+
+function parseGoalBudget(value: JsonObject): BudgetConfig {
+  const allowed = new Set(["maxTurns", "maxTokens", "maxCostCNY", "maxWallClockMs"]);
+  const budget: BudgetConfig = {};
+  for (const [key, raw] of Object.entries(value)) {
+    if (!allowed.has(key) || typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.INVALID_PARAMS,
+        `Goal 预算字段 ${key} 无效；只接受正数 maxTurns/maxTokens/maxCostCNY/maxWallClockMs`,
+      );
+    }
+    if (key === "maxTurns") budget.maxTurns = raw;
+    else if (key === "maxTokens") budget.maxTokens = raw;
+    else if (key === "maxCostCNY") budget.maxCostCNY = raw;
+    else if (key === "maxWallClockMs") budget.maxWallClockMs = raw;
+  }
+  if (Object.keys(budget).length === 0) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+      "Goal budget 至少包含一个预算字段",
+    );
+  }
+  return budget;
 }
 
 function sessionPayload(entry: SqliteSessionCatalogEntry): JsonObject {

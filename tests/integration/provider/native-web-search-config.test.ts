@@ -213,6 +213,23 @@ test("provider detail uses exact endpoint catalog metadata and keeps user overri
   assert.equal(capabilities?.["glm-5.2"]?.contextWindowTokens, 32_768);
   assert.equal(capabilities?.["glm-5.2"]?.contextSource, "config");
   assert.equal(capabilities?.["glm-5.2"]?.vision, true);
+  const router = await loadModelRouter({
+    config: {
+      providers: {
+        "opencode-go": {
+          protocol: "openai",
+          baseURL: "https://opencode.ai/zen/go/v1",
+          apiKeyEnv: "OPENAI_API_KEY",
+          models: ["glm-5.2"],
+          discoverModels: false,
+        },
+      },
+    },
+  });
+  assert.deepEqual(
+    capabilities?.["glm-5.2"]?.reasoningLevels,
+    router.require("opencode-go/glm-5.2").capabilities.reasoningProfile.levels,
+  );
 });
 
 test("search defaults survive strict RPC, private persistence and provider updates with resolved capabilities", async (context) => {

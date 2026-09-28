@@ -176,6 +176,73 @@ async function run() {
     [],
     "disabled Astryx scrolling never writes on mount, append or resize",
   );
+  await js("window.setStatus('running')");
+  for (const width of [960, 800]) {
+    window.setContentSize(width, 720);
+    await pause(100);
+    const geometry = await js(`(()=>{
+      const form=document.querySelector('.conversation-composer');
+      const controls=form.querySelector('.conversation-composer__controls');
+      const behavior=form.querySelector('.conversation-behavior');
+      const pause=form.querySelector('[aria-label="暂停运行"]');
+      const send=form.querySelector('.conversation-send-button');
+      const rect=e=>e.getBoundingClientRect().toJSON();
+      return {form:rect(form),controls:rect(controls),behavior:rect(behavior),pause:rect(pause),send:rect(send),fontSize:parseFloat(getComputedStyle(behavior).fontSize),overflow:form.scrollWidth>form.clientWidth};
+    })()`);
+    assert.ok(geometry.behavior.top >= geometry.controls.bottom, JSON.stringify(geometry));
+    assert.ok(
+      Math.abs(
+        geometry.behavior.top +
+          geometry.behavior.height / 2 -
+          geometry.send.top -
+          geometry.send.height / 2,
+      ) < 2,
+      JSON.stringify(geometry),
+    );
+    assert.ok(
+      Math.abs(
+        geometry.pause.top +
+          geometry.pause.height / 2 -
+          geometry.send.top -
+          geometry.send.height / 2,
+      ) < 2,
+      JSON.stringify(geometry),
+    );
+    assert.ok(geometry.fontSize <= 12 && !geometry.overflow, JSON.stringify(geometry));
+  }
+  await js("window.mountRuntimeComposer()");
+  await pause();
+  await js(`document.querySelector('${editor}').focus()`);
+  await window.webContents.insertText("已确认发送");
+  await key("Enter");
+  assert.equal(await js("window.draft"), "已确认发送", "unacknowledged send keeps draft");
+  await wait("typeof window.finishSend==='function'");
+  assert.notEqual(
+    await js("window.refreshStarted"),
+    true,
+    "first send must precede workspace hydration",
+  );
+  await js("window.finishSend(true)");
+  await wait("window.refreshStarted===true");
+  await pause();
+  assert.equal(
+    await js(
+      "Boolean(document.querySelector('.workspace-picker,.workspace-route-loading,.trust-screen'))",
+    ),
+    false,
+    "admitted first send must stay in the conversation while workspace hydration is pending",
+  );
+  await wait(`window.draft==='' && document.querySelector('${editor}').textContent===''`);
+  await js("window.failRefresh()");
+  await wait("window.runtimeMessage?.includes('刷新暂不可用')");
+  assert.equal(await js("window.draft"), "", "refresh failure cannot restore an accepted message");
+  await js(`document.querySelector('${editor}').focus()`);
+  await window.webContents.insertText("失败保留");
+  await key("Enter");
+  await js("window.finishSend(false)");
+  await wait("window.runtimeMessage?.includes('发送被拒绝')");
+  assert.equal(await js("window.draft"), "失败保留");
+  assert.equal(await js(`document.querySelector('${editor}').textContent`), "失败保留");
   console.log("ASTRYX_CHAT_ELECTRON_OK");
 }
 run()

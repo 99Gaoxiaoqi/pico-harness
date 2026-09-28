@@ -8,6 +8,7 @@ import type {
 } from "@pico/protocol";
 import { partitionTimelineRuns } from "./inspector-timeline-state.js";
 import { displayExecutionError } from "../provider-retry.js";
+import { copyDiagnostic } from "../diagnostic-copy.js";
 
 export function ExecutionTraceTimeline({
   execution,
@@ -180,7 +181,27 @@ function RunSteps({
   return (
     <div id={contentId} className="inspector-timeline__run-content">
       {runReason(run, true) && (
-        <p className="inspector-timeline__full-reason">{runReason(run, true)}</p>
+        <>
+          <p className="inspector-timeline__full-reason">{runReason(run, true)}</p>
+          <CopyButton
+            label="复制诊断"
+            diagnostic
+            value={JSON.stringify({
+              runId: run.runId,
+              status: run.status,
+              at: run.at,
+              reason: run.reason,
+              steps: run.steps.map((step) => ({
+                id: step.id,
+                providerId: step.providerId,
+                modelId: step.modelId,
+                status: step.status,
+                error: step.error,
+                attempts: step.attempts,
+              })),
+            })}
+          />
+        </>
       )}
       {turns.size === 0 && <p className="inspector-timeline__empty">没有可展示的执行步骤。</p>}
       <div className="inspector-timeline__turns">
@@ -281,7 +302,9 @@ function StepDetail({
       {step.truncated && <p className="inspector-timeline__warning">内容已截断</p>}
       {step.input !== undefined && <Detail label="输入" value={step.input} />}
       {step.output !== undefined && <Detail label="输出" value={step.output} />}
-      {step.error && <Detail label="错误" value={displayExecutionError(step.error, true)} />}
+      {step.error && (
+        <Detail label="错误" diagnostic value={displayExecutionError(step.error, true)} />
+      )}
       <details className="inspector-timeline__metadata">
         <summary>请求与执行明细</summary>
         <dl>
@@ -447,7 +470,15 @@ function StepDetail({
   );
 }
 
-function Detail({ label, value }: { label: string; value: string }) {
+function Detail({
+  label,
+  value,
+  diagnostic,
+}: {
+  label: string;
+  value: string;
+  diagnostic?: boolean;
+}) {
   let formatted = value;
   try {
     formatted = JSON.stringify(JSON.parse(value), null, 2);
@@ -458,13 +489,21 @@ function Detail({ label, value }: { label: string; value: string }) {
     <div className="inspector-timeline__code-block">
       <div className="inspector-timeline__code-heading">
         <strong>{label}</strong>
-        <CopyButton label={`复制${label}`} value={value} />
+        <CopyButton label={`复制${label}`} value={value} diagnostic={diagnostic} />
       </div>
       <pre>{formatted}</pre>
     </div>
   );
 }
-function CopyButton({ label, value }: { label: string; value: string }) {
+function CopyButton({
+  label,
+  value,
+  diagnostic,
+}: {
+  label: string;
+  value: string;
+  diagnostic?: boolean;
+}) {
   const [message, setMessage] = useState("");
   return (
     <span className="inspector-timeline__copy">
@@ -474,7 +513,7 @@ function CopyButton({ label, value }: { label: string; value: string }) {
         aria-label={label}
         title={label}
         onClick={() => {
-          void copyText(value).then(
+          void (diagnostic ? copyDiagnostic(value) : copyText(value)).then(
             () => setMessage("已复制"),
             () => setMessage("复制失败，请手动选择"),
           );

@@ -58,24 +58,74 @@ export function createSessionCommands(deps: SessionCommandRegistryDeps) {
     }),
     goal: rpcCommand({
       name: "goal",
-      description: "查看当前目标",
-      usage: "/goal",
+      description: "查看或控制当前长程目标",
+      usage: "/goal [pause|resume|clear [id]|arm 标题 | 描述 | 完成标准; 完成标准]",
       category: "session",
       availability: "always",
-      execute: async () => {
+      execute: async (input) => {
         const sid = needSession();
         if (typeof sid === "object") return sid;
+        const args = input.args.trim();
+        const [action, ...rest] = args.split(/\s+/u);
+        if (action === "arm") {
+          const fields = args
+            .slice("arm".length)
+            .trim()
+            .split("|")
+            .map((field) => field.trim());
+          if (fields.length < 3 || fields.slice(0, 2).some((field) => !field)) {
+            return {
+              type: "local",
+              action: "message",
+              message: "Usage: /goal arm <标题> | <描述> | <完成标准; 完成标准>",
+            };
+          }
+          const completionCriteria = fields[2]!
+            .split(";")
+            .map((item) => item.trim())
+            .filter(Boolean);
+          const result = await runtime.request("goal.control", {
+            workspacePath,
+            sessionId: sid,
+            action: "arm",
+            title: fields[0]!,
+            description: fields[1]!,
+            completionCriteria,
+          });
+          return {
+            type: "local",
+            action: "message",
+            message: `Goal 已设为 active，将在下一次普通用户消息开始执行：\n${formatGoalSnapshot(result.goal)}`,
+          };
+        }
+        if (action === "pause" || action === "resume" || action === "clear") {
+          const goalId = rest[0];
+          const result = await runtime.request("goal.control", {
+            workspacePath,
+            sessionId: sid,
+            action,
+            ...(goalId ? { goalId } : {}),
+          });
+          return {
+            type: "local",
+            action: "message",
+            message: `Goal ${action} 已处理：\n${formatGoalSnapshot(result.goal)}`,
+          };
+        }
+        if (args)
+          return {
+            type: "local",
+            action: "message",
+            message: "Usage: /goal [pause|resume|clear [id]|arm 标题 | 描述 | 完成标准; 完成标准]",
+          };
         const result = await runtime.request("goal.get", { workspacePath, sessionId: sid });
-        if (!result.goal || result.goal.activeGoalId === null) {
+        if (!result.goal || result.goal.goals.length === 0) {
           return { type: "local", action: "message", message: "当前没有活跃目标。" };
         }
-        const goals = result.goal.goals
-          .map((goal) => `· [${goal.status}] ${goal.title ?? goal.description ?? goal.id}`)
-          .join("\n");
         return {
           type: "local",
           action: "message",
-          message: `活跃目标 ${result.goal.activeGoalId}：\n${goals || "(无明细)"}`,
+          message: `当前目标：\n${formatGoalSnapshot(result.goal)}`,
         };
       },
     }),
@@ -263,6 +313,42 @@ export function createSessionCommands(deps: SessionCommandRegistryDeps) {
     }),
     running: createRunningInputCommands(deps),
   };
+}
+
+function formatGoalSnapshot(snapshot: {
+  readonly activeGoalId: string | null;
+  readonly goals: readonly {
+    readonly id: string;
+    readonly title: string;
+    readonly status: string;
+    readonly completionCriteria: readonly string[];
+    readonly budgetUsage: {
+      readonly turns: number;
+      readonly tokens: number;
+      readonly costCNY: number;
+    };
+    readonly maxIterations: number;
+    readonly lastEvaluation?: { readonly outcome: string; readonly reason: string };
+    readonly evidence: readonly string[];
+    readonly waitingReason?: string;
+    readonly blockedReason?: string;
+  }[];
+}): string {
+  return snapshot.goals
+    .map((goal) =>
+      [
+        `· [${goal.status}] ${goal.title} (${goal.id})${snapshot.activeGoalId === goal.id ? " · 当前" : ""}`,
+        `  迭代 ${goal.budgetUsage.turns}/${goal.maxIterations} · ${goal.budgetUsage.tokens} tokens · ¥${goal.budgetUsage.costCNY.toFixed(4)}`,
+        `  标准：${goal.completionCriteria.join("；")}`,
+        ...(goal.lastEvaluation
+          ? [`  最近评估：${goal.lastEvaluation.outcome} · ${goal.lastEvaluation.reason}`]
+          : []),
+        ...(goal.waitingReason ? [`  等待：${goal.waitingReason}`] : []),
+        ...(goal.blockedReason ? [`  终止原因：${goal.blockedReason}`] : []),
+        ...(goal.evidence.length ? [`  证据：${goal.evidence.slice(-3).join("；")}`] : []),
+      ].join("\n"),
+    )
+    .join("\n");
 }
 
 function formatUsage(usage: unknown): string {

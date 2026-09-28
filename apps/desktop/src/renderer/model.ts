@@ -331,6 +331,8 @@ export const folderWorkspaceCapabilities: WorkspaceCapabilities = {
 };
 
 export interface AppData {
+  /** Actual daemon data root, independent of the selected task's working directory. */
+  readonly picoHome?: string;
   readonly subagentSettings?: RuntimeSubagentSettingsSnapshot;
   readonly workspaces: readonly WorkspaceView[];
   readonly workspacePath?: string | undefined;

@@ -10,9 +10,11 @@ import {
   ModelCommunicationError,
   type ModelCommunicationCategory,
   type ModelResponseDiagnostic,
+  type ProviderErrorDetail,
 } from "@pico/core";
+import { providerErrorDetail } from "./provider-error-detail.js";
 
-/** Classify SDK errors without retaining their untrusted names, messages, data or causes. */
+/** Keep bounded provider failure details locally; never retain complete SDK bodies or causes. */
 export function modelCommunicationError(
   error: unknown,
   diagnostic: ModelResponseDiagnostic,
@@ -22,6 +24,7 @@ export function modelCommunicationError(
   let sdkError: ModelResponseDiagnostic["sdkError"];
   let transportCode: ModelResponseDiagnostic["transportCode"];
   let sdkRetryable = false;
+  let providerDetail: ProviderErrorDetail | undefined;
   // The SDK unwraps fetch TypeError into APICallError with the socket error as its cause.
   // Classify the safe cause code instead of the wrapper type; never return a raw TypeError.
   for (let cause: unknown = error, depth = 0; cause && depth < 8; depth++) {
@@ -44,20 +47,26 @@ export function modelCommunicationError(
           : "invalid_response";
       sdkError = "InvalidResponseDataError";
     } else if (StreamProviderError.isInstance(cause)) {
+      providerDetail ??= providerErrorDetail(cause);
       category = "stream_error";
       sdkError = "StreamProviderError";
     } else if (APICallError.isInstance(cause)) {
+      if (cause.statusCode !== undefined) providerDetail ??= providerErrorDetail(cause);
       sdkError ??= "APICallError";
       sdkRetryable ||= cause.isRetryable === true;
     }
     cause = cause instanceof Error ? cause.cause : undefined;
   }
-  return new ModelCommunicationError(category, {
-    ...diagnostic,
-    ...(sdkError ? { sdkError } : {}),
-    ...(sdkRetryable ? { sdkRetryable } : {}),
-    ...(transportCode ? { transportCode } : {}),
-  });
+  return new ModelCommunicationError(
+    category,
+    {
+      ...diagnostic,
+      ...(sdkError ? { sdkError } : {}),
+      ...(sdkRetryable ? { sdkRetryable } : {}),
+      ...(transportCode ? { transportCode } : {}),
+    },
+    providerDetail,
+  );
 }
 
 /** Whitelist only protocol identifiers; never persist an untrusted code verbatim. */

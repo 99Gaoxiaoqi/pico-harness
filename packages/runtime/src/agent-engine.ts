@@ -56,7 +56,6 @@ import {
 } from "@pico/runtime/reminder";
 import type { GoalManager } from "@pico/runtime/goal-manager";
 import { evaluateGoalCompletion } from "@pico/runtime/goal-evaluator";
-import { STALL_EVALUATOR_THRESHOLD, STALL_BLOCK_THRESHOLD } from "@pico/runtime/goal-manager";
 import { Tracer, truncate, type Span } from "./trace.js";
 import { createToolResultEnvelope, type ToolResultEnvelope } from "@pico/core";
 import type { CanonicalTranscriptToolStart } from "@pico/core/transcript-tool-start";
@@ -1172,14 +1171,19 @@ export class AgentEngine {
           );
           break;
         }
-        const goalTurnBudget = this.goalManager?.startTurn() ?? { allowed: true };
-        if (!goalTurnBudget.allowed) {
-          exhaustedReason = goalTurnBudget.reason ?? "Goal 预算已耗尽";
-          this.diagnostics.warn(
-            { turnCount, goalId: this.goalManager?.getActive()?.id },
-            `[Engine] ${exhaustedReason},准备触发 Grace Call 收尾`,
-          );
-          break;
+        if (turnCount === 1) {
+          const goalTurnBudget =
+            this.goalManager?.beginRun("user", this.runtimePort?.currentRun()?.runId) ?? {
+              allowed: true,
+            };
+          if (!goalTurnBudget.allowed) {
+            exhaustedReason = goalTurnBudget.reason ?? "Goal 预算已耗尽";
+            this.diagnostics.warn(
+              { turnCount, goalId: this.goalManager?.getActive()?.id },
+              `[Engine] ${exhaustedReason},准备触发 Grace Call 收尾`,
+            );
+            break;
+          }
         }
         await this.runtimePort?.currentRun()?.recordTurnStarted(turnCount);
         await this.runtimePort?.currentRun()?.assertNoUnresolvedToolEffects();
@@ -1455,56 +1459,41 @@ export class AgentEngine {
                 continue; // 不 break,回 for(;;) 顶部继续下一轮
               }
 
-              // Goal 延续协调器：goal 还 active 时，按停滞计数决定续行 / 评估 / 终止
+              // 每个 Goal RuntimeRun 在安全结束边界独立验收；后续轮次由 Host 准入。
               if (this.goalManager) {
                 const active = this.goalManager.getActive();
-                if (active && active.status === "active") {
-                  const noProgress = active.consecutiveNoProgress ?? 0;
-
-                  if (noProgress >= STALL_BLOCK_THRESHOLD) {
-                    // 硬终止 → 走 Grace Call
-                    exhaustedReason = `Goal 疑似停滞（连续 ${noProgress} 轮无进展）`;
-                    break;
-                  }
-
-                  if (noProgress >= STALL_EVALUATOR_THRESHOLD && this.provider) {
-                    // 触发 LLM 评估器判断是否真的完成
-                    const evaluation = await evaluateGoalCompletion(
-                      this.provider,
-                      active,
-                      await this.readModelHistory(session),
-                      signal,
+                if (active?.status === "active" && !active.awaitingUserTurn) {
+                  if (this.isPlanning()) {
+                    this.goalManager.pause(
+                      active.id,
+                      "当前 Run 处于 Plan 模式，Goal 等待用户确认后续执行",
                     );
-                    if (evaluation.met || evaluation.impossible) {
-                      // 评估器说完成了/不可能 → 允许退出
-                      break;
-                    }
-                    if (!evaluation.evaluatorFailed) {
-                      // 评估器说没完成 → 续行并注入评估理由
-                      await session.commitMessages({
-                        role: "user",
-                        content: `[Goal continuation] 目标尚未完成。评估器判断：${evaluation.reason}\n请继续推进。`,
-                        providerData: {
-                          picoKind: "goal_continuation",
-                          picoHiddenFromTranscript: true,
-                        },
-                      });
-                      continue;
-                    }
-                    // 评估器失败 → fail-open，允许退出
-                    break;
+                  } else {
+                    const evaluatorCostBefore = session.totalCostCNY;
+                    const evaluation = this.provider
+                      ? await evaluateGoalCompletion(
+                          this.provider,
+                          { ...active, evidence: active.evidence },
+                          await this.readModelHistory(session),
+                          signal,
+                        )
+                      : {
+                          outcome: "unknown" as const,
+                          reason: "",
+                          evidence: [],
+                          evaluatorFailed: true,
+                        };
+                    const evaluatorCostAfter = session.totalCostCNY;
+                    const evaluatorCostCNY = Math.max(0, evaluatorCostAfter - evaluatorCostBefore);
+                    this.accountedSessionCostCNY.set(
+                      session,
+                      Math.max(
+                        this.accountedSessionCostCNY.get(session) ?? evaluatorCostBefore,
+                        evaluatorCostAfter,
+                      ),
+                    );
+                    this.goalManager.settle({ ...evaluation, costCNY: evaluatorCostCNY });
                   }
-
-                  // noProgress < 3 → 直接续行（给模型思考空间）
-                  await session.commitMessages({
-                    role: "user",
-                    content: "[Goal continuation] 目标尚未完成，请继续推进。",
-                    providerData: {
-                      picoKind: "goal_continuation",
-                      picoHiddenFromTranscript: true,
-                    },
-                  });
-                  continue;
                 }
               }
 
@@ -1651,19 +1640,6 @@ export class AgentEngine {
             await session.commitMessages(...reminderMessages);
           }
 
-          // Goal 停滞检测：每轮结束后更新停滞计数 + 软提醒（≥5 轮）
-          if (this.goalManager && responseMsg) {
-            this.goalManager.recordToolCallProgress(responseMsg.toolCalls ?? []);
-            const stallWarning = this.goalManager.getStallWarning();
-            if (stallWarning) {
-              await session.commitMessages({
-                role: "user",
-                content: `[SYSTEM REMINDER 警告]\n${stallWarning}`,
-                providerData: { picoKind: "system_reminder", picoHiddenFromTranscript: true },
-              });
-            }
-          }
-
           // ====================================================================
           // 【Steer C 点】(ROADMAP 3.2):工具结果落地后,drain 整个 steer 队列,
           // 把每条引导文本落成一条 user 消息写进 session。
@@ -1705,6 +1681,15 @@ export class AgentEngine {
       }
     } catch (error) {
       if (signal?.aborted || isAbortError(error)) reporter.onInterrupted?.();
+      const activeGoal = this.goalManager?.getActive();
+      if (activeGoal?.status === "active") {
+        this.goalManager?.pause(
+          activeGoal.id,
+          signal?.aborted || isAbortError(error)
+            ? "Goal Run 已中断"
+            : `Goal Run 失败: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
       await this.onRunInterrupted?.(
         signal?.aborted || isAbortError(error)
           ? "Run was cancelled."
@@ -1714,6 +1699,7 @@ export class AgentEngine {
       );
       throw error;
     } finally {
+      this.goalManager?.endRun();
       const changedPaths = await fileHistory.commit();
       if (changedPaths.length > 0) {
         await this.hookService?.dispatch("FileChanged", {

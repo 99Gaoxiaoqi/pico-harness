@@ -35,25 +35,52 @@ const MODEL_ERROR_TITLES: Readonly<Record<string, string>> = {
   unknown: "模型通信失败",
 };
 
+function providerDetail(raw: string): string | undefined {
+  const marker = "\nProvider detail: ";
+  const index = raw.indexOf(marker);
+  if (index < 0) return undefined;
+  try {
+    const detail = record(JSON.parse(raw.slice(index + marker.length)));
+    if (typeof detail.message !== "string") return undefined;
+    return [
+      detail.message,
+      ...["code", "type", "requestId"].flatMap((key) =>
+        typeof detail[key] === "string" ? [`${key}: ${detail[key]}`] : [],
+      ),
+    ].join("\n");
+  } catch {
+    return undefined;
+  }
+}
+
 /** Parse only Pico's locally generated safe error summary; never infer from remote text. */
 export function modelCommunicationDiagnostic(
   raw: string,
-): { readonly title: string; readonly diagnosticId: string } | undefined {
+):
+  | { readonly title: string; readonly diagnosticId: string; readonly providerDetail?: string }
+  | undefined {
   const match =
     /^ModelCommunicationError category=([a-z_]+) diagnosticId=([A-Za-z0-9_-]+); detail omitted$/.exec(
-      raw,
+      raw.split("\n", 1)[0]!,
     );
   const title = match && MODEL_ERROR_TITLES[match[1]!];
-  return title && match ? { title, diagnosticId: match[2]! } : undefined;
+  const detail = providerDetail(raw);
+  return title && match
+    ? { title, diagnosticId: match[2]!, ...(detail ? { providerDetail: detail } : {}) }
+    : undefined;
 }
 
 /** Recognize only Pico's fixed, locally produced HTTP error text. */
 export function providerStatusDiagnostic(
   raw: string,
-): { readonly title: string; readonly httpStatus: number } | undefined {
+):
+  | { readonly title: string; readonly httpStatus: number; readonly providerDetail?: string }
+  | undefined {
+  const summary = raw.split("\n", 1)[0]!;
   const match =
-    /^(?:LLMStatusError: )?Model API request failed \[([1-5]\d\d)\]; response omitted$/.exec(raw) ??
-    /^LLMStatusError status=([1-5]\d\d); detail omitted$/.exec(raw);
+    /^(?:LLMStatusError: )?Model API request failed \[([1-5]\d\d)\]; response omitted$/.exec(
+      summary,
+    ) ?? /^LLMStatusError status=([1-5]\d\d); detail omitted$/.exec(summary);
   if (!match) return undefined;
   const httpStatus = Number(match[1]);
   const title =
@@ -64,15 +91,18 @@ export function providerStatusDiagnostic(
         : httpStatus >= 500
           ? "模型服务暂时不可用"
           : "模型请求未能完成";
-  return { title, httpStatus };
+  const detail = providerDetail(raw);
+  return { title, httpStatus, ...(detail ? { providerDetail: detail } : {}) };
 }
 
 export function displayExecutionError(raw: string, includeDiagnostic = false): string {
   const diagnostic = modelCommunicationDiagnostic(raw);
   if (diagnostic)
-    return `${diagnostic.title}${includeDiagnostic ? ` · 诊断 ID：${diagnostic.diagnosticId}` : ""}`;
+    return `${diagnostic.title}${includeDiagnostic ? ` · 诊断 ID：${diagnostic.diagnosticId}${diagnostic.providerDetail ? `\n${diagnostic.providerDetail}` : ""}` : ""}`;
   const status = providerStatusDiagnostic(raw);
-  return status ? `${status.title} · HTTP ${status.httpStatus}` : raw;
+  return status
+    ? `${status.title} · HTTP ${status.httpStatus}${includeDiagnostic && status.providerDetail ? `\n${status.providerDetail}` : ""}`
+    : raw;
 }
 
 export function providerRetryKey(workspacePath: string, runId: string): string {

@@ -49,7 +49,11 @@ test("global new task stays unbound until first send without inheriting a projec
   );
   assert.match(ensureAction, /invoke\(bridge, "workspace\.temporary\.ensure", \{\}\)/u);
   assert.match(ensureAction, /temporaryWorkspaceRequest\.current\.run/u);
-  assert.match(ensureAction, /await loadWorkspace\(bridge, status\.workspacePath\)/u);
+  assert.doesNotMatch(
+    ensureAction,
+    /await loadWorkspace/u,
+    "first send must not wait for page hydration",
+  );
   assert.doesNotMatch(
     ensureAction,
     /loadWorkspaceIndex/u,

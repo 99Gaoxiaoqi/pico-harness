@@ -1,6 +1,7 @@
 import { Button as AstryxButton } from "@astryxdesign/core/Button";
 import { AlertCircle, ArrowUpRight, RefreshCw } from "lucide-react";
 import * as React from "react";
+import { copyDiagnostic } from "../diagnostic-copy.js";
 import { providerFailureDescription, type ProviderRetryNotice } from "../provider-retry.js";
 
 export function ProviderRetryBanner({ notice }: { readonly notice: ProviderRetryNotice }) {
@@ -56,6 +57,8 @@ export function ProviderFailureCard({
   canRetry,
   onRetry,
   onDiagnostics,
+  providerDetail,
+  diagnosticText,
 }: {
   readonly notice?: ProviderRetryNotice;
   readonly httpStatus?: number;
@@ -63,7 +66,10 @@ export function ProviderFailureCard({
   readonly canRetry: boolean;
   readonly onRetry: () => void;
   readonly onDiagnostics: () => void;
+  readonly providerDetail?: string;
+  readonly diagnosticText?: string;
 }) {
+  const [copyStatus, setCopyStatus] = React.useState("");
   const detail = providerFailureDescription(notice, httpStatus);
   return (
     <section className="conversation-provider-failure" role="alert">
@@ -71,6 +77,9 @@ export function ProviderFailureCard({
       <div className="conversation-provider-failure__body">
         <strong>{title}</strong>
         <p>{detail}</p>
+        {providerDetail && (
+          <pre className="conversation-provider-failure__detail">{providerDetail}</pre>
+        )}
         <div className="conversation-provider-failure__actions">
           {canRetry && (
             <AstryxButton
@@ -92,7 +101,24 @@ export function ProviderFailureCard({
           >
             查看诊断 <ArrowUpRight aria-hidden="true" />
           </AstryxButton>
+          {diagnosticText && (
+            <AstryxButton
+              label="复制诊断"
+              variant="ghost"
+              type="button"
+              className="pico-page-control is-quiet"
+              onClick={() => {
+                void copyDiagnostic(diagnosticText).then(
+                  () => setCopyStatus("已复制，敏感信息已脱敏"),
+                  () => setCopyStatus("复制失败"),
+                );
+              }}
+            >
+              复制诊断
+            </AstryxButton>
+          )}
         </div>
+        {copyStatus && <span role="status">{copyStatus}</span>}
       </div>
     </section>
   );

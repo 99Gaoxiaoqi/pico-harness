@@ -27,6 +27,7 @@ import {
   resultShape,
   resultString,
   resultStringArray,
+  stringArrayParam,
   stringParam,
   workspaceSessionParams,
 } from "./validation.js";
@@ -145,14 +146,28 @@ export type RuntimeDiscoveryProjection = JsonObject & {
   readonly active?: RuntimeDiscoveryRun;
 };
 
-export type RuntimeGoalStatus = "active" | "paused" | "blocked" | "complete";
+export type RuntimeGoalStatus =
+  | "active"
+  | "waiting"
+  | "paused"
+  | "achieved"
+  | "impossible"
+  | "stalled"
+  | "budget_limited"
+  | "max_iterations"
+  | "cleared";
 
 export type RuntimeGoal = {
   readonly id: string;
   readonly title: string;
   readonly description: string;
+  readonly completionCriteria: readonly string[];
+  readonly constraints?: readonly string[];
   readonly status: RuntimeGoalStatus;
   readonly createdAt: number;
+  readonly maxIterations: number;
+  readonly blockCap: number;
+  readonly controlRevision: number;
   readonly budgetConfig?: {
     readonly maxTurns?: number;
     readonly maxTokens?: number;
@@ -167,10 +182,26 @@ export type RuntimeGoal = {
   };
   readonly progress?: string;
   readonly blockedReason?: string;
+  readonly consecutiveNoProgress: number;
+  readonly lastEvaluation?: {
+    readonly outcome: "met" | "impossible" | "progress" | "waiting" | "unknown";
+    readonly reason: string;
+    readonly evidence: readonly string[];
+    readonly at: number;
+  };
+  readonly evidence: readonly string[];
+  readonly completionRequested: boolean;
+  readonly pendingContinuation: boolean;
+  readonly awaitingUserTurn: boolean;
+  readonly waitingReason?: string;
+  readonly nextCheckAt?: number;
+  readonly waitCount: number;
+  readonly admissionKey?: string;
+  readonly targetRunId?: string;
 };
 
 export type RuntimeGoalSnapshot = {
-  readonly stateVersion: 1;
+  readonly stateVersion: 2;
   readonly sequence: number;
   readonly activeGoalId: string | null;
   readonly goals: readonly RuntimeGoal[];
@@ -191,8 +222,28 @@ const runtimeGoalResult = exactResultShape(
     id: resultString,
     title: resultString,
     description: resultString,
-    status: resultOneOf(["active", "paused", "blocked", "complete"]),
+    completionCriteria: resultStringArray,
+    status: resultOneOf([
+      "active",
+      "waiting",
+      "paused",
+      "achieved",
+      "impossible",
+      "stalled",
+      "budget_limited",
+      "max_iterations",
+      "cleared",
+    ]),
     createdAt: resultFiniteNumber,
+    maxIterations: resultFiniteNumber,
+    blockCap: resultFiniteNumber,
+    controlRevision: resultFiniteNumber,
+    consecutiveNoProgress: resultFiniteNumber,
+    evidence: resultStringArray,
+    completionRequested: resultBoolean,
+    pendingContinuation: resultBoolean,
+    awaitingUserTurn: resultBoolean,
+    waitCount: resultFiniteNumber,
     budgetUsage: exactResultShape({
       turns: resultFiniteNumber,
       tokens: resultFiniteNumber,
@@ -201,14 +252,25 @@ const runtimeGoalResult = exactResultShape(
     }),
   },
   {
+    constraints: resultStringArray,
     budgetConfig: runtimeGoalBudgetConfigResult,
     progress: resultString,
     blockedReason: resultString,
+    waitingReason: resultString,
+    nextCheckAt: resultFiniteNumber,
+    admissionKey: resultString,
+    targetRunId: resultString,
+    lastEvaluation: exactResultShape({
+      outcome: resultOneOf(["met", "impossible", "progress", "waiting", "unknown"]),
+      reason: resultString,
+      evidence: resultStringArray,
+      at: resultFiniteNumber,
+    }),
   },
 );
 
 const runtimeGoalSnapshotResult = exactResultShape({
-  stateVersion: resultOneOf([1]),
+  stateVersion: resultOneOf([2]),
   sequence: resultFiniteNumber,
   activeGoalId: resultNullable(resultString),
   goals: resultArray(runtimeGoalResult),
@@ -311,6 +373,21 @@ export type PlanningMethodMap = {
     readonly params: WorkspaceParams & { readonly sessionId: SessionId };
     readonly result: { readonly goal: RuntimeGoalSnapshot | null };
   };
+  readonly "goal.control": {
+    readonly params: WorkspaceParams & {
+      readonly sessionId: SessionId;
+      readonly action: "arm" | "pause" | "resume" | "clear";
+      readonly goalId?: string;
+      readonly title?: string;
+      readonly description?: string;
+      readonly completionCriteria?: readonly string[];
+      readonly constraints?: readonly string[];
+      readonly maxIterations?: number;
+      readonly blockCap?: number;
+      readonly budget?: JsonObject;
+    };
+    readonly result: { readonly goal: RuntimeGoalSnapshot };
+  };
   readonly "approval.respond": {
     readonly params: WorkspaceParams & {
       readonly approvalId: ApprovalId;
@@ -367,6 +444,23 @@ export type PlanningMethodMap = {
 
 export const planningParamValidators = {
   "goal.get": workspaceSessionParams,
+  "goal.control": exactParamShape(
+    {
+      workspacePath: stringParam,
+      sessionId: stringParam,
+      action: oneOfParam(["arm", "pause", "resume", "clear"]),
+    },
+    {
+      goalId: stringParam,
+      title: stringParam,
+      description: stringParam,
+      completionCriteria: stringArrayParam,
+      constraints: stringArrayParam,
+      maxIterations: finiteNumberParam,
+      blockCap: finiteNumberParam,
+      budget: jsonValueParam,
+    },
+  ),
   "approval.respond": exactParamShape(
     {
       workspacePath: stringParam,
@@ -421,6 +515,7 @@ export const planningParamValidators = {
 
 export const planningResultValidators = {
   "goal.get": exactResultShape({ goal: resultNullable(runtimeGoalSnapshotResult) }),
+  "goal.control": exactResultShape({ goal: runtimeGoalSnapshotResult }),
   "approval.respond": exactResultShape({
     accepted: resultBoolean,
     alreadyResolved: resultBoolean,

@@ -31,7 +31,7 @@ import {
 } from "./validation.js";
 import type { RuntimeParamRule, RuntimeParamValidator, RuntimeResultRule } from "./validation.js";
 
-export const TRANSCRIPT_PROJECTOR_VERSION = 6 as const;
+export const TRANSCRIPT_PROJECTOR_VERSION = 8 as const;
 
 export type RuntimeTranscriptWatermark = JsonObject & {
   readonly historyEpoch: string;
@@ -231,6 +231,9 @@ export type RuntimeConversationItem = (
       readonly name: string;
       readonly args: string;
       readonly status: "running";
+      /** Runtime turn identity used to group sibling tool executions in the UI. */
+      readonly runId?: RunId;
+      readonly turnId?: string;
       readonly summary?: string;
       /** Stable projector metadata used to reconcile the current tool start. */
       readonly data: JsonObject & {
@@ -247,6 +250,9 @@ export type RuntimeConversationItem = (
       readonly name: string;
       readonly args: string;
       readonly status: "success" | "error";
+      /** Runtime turn identity used to group sibling tool executions in the UI. */
+      readonly runId?: RunId;
+      readonly turnId?: string;
       readonly summary?: string;
       /** Stable projector metadata retained from the matching tool start when available. */
       readonly data: JsonObject & {
@@ -517,6 +523,8 @@ const runtimeConversationItemResult: RuntimeResultRule = (value, path) => {
       },
       {
         summary: resultString,
+        runId: resultString,
+        turnId: resultString,
         data: resultJsonObject,
         result: runtimeToolResultEnvelopeResult,
       },

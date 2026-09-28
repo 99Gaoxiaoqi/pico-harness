@@ -36,7 +36,11 @@ test("dynamic prompt state stays in the current user request copy across runs an
   const todoStore = new TodoStore(workDir, { picoHome });
   const todo = await todoStore.add("structured-todo-alpha", "high");
   const goalManager = new GoalManager();
-  const goal = goalManager.create("goal-alpha", "finish alpha");
+  const goal = goalManager.create({
+    title: "goal-alpha",
+    description: "finish alpha",
+    completionCriteria: ["alpha is finished"],
+  });
   const composer = new PromptComposer(workDir, false, { todoStore, goalManager });
 
   const requests: Message[][] = [];

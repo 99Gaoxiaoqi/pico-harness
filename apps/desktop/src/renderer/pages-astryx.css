@@ -76,8 +76,10 @@
   --conversation-ink-faint: var(--ink-tertiary, #77746e);
   --conversation-line: var(--line, #dedcd5);
   position: static;
-  width: 100%;
-  max-height: 328px;
+  width: 292px;
+  max-width: 100%;
+  /* Stay within Astryx 0.6.2's 300px layer viewport to avoid a second scroller. */
+  max-height: min(300px, calc(100dvh - 32px));
   -webkit-app-region: no-drag;
 }
 .pico-composer-model-menu .astryx-dropdown-menu-radio {
@@ -87,6 +89,21 @@
   padding: 7px;
   gap: 9px;
   font-size: 12px;
+}
+/* Item wraps the icon and checkmark in spans too; only its text column grows. */
+.pico-composer-model-menu .composer-model-item > span:has(.composer-model-mark),
+.pico-composer-model-menu .composer-model-item > span:has(.composer-model-check) {
+  display: flex;
+  flex: 0 0 14px;
+}
+.pico-composer-model-menu .composer-model-item > span > span {
+  min-width: 0;
+  color: inherit;
+  font: inherit;
+}
+.pico-composer-model-menu .composer-model-item strong,
+.pico-composer-model-menu .composer-model-item small {
+  display: block;
 }
 .pico-composer-model-menu .composer-model-item[aria-disabled="true"] {
   opacity: 0.45;

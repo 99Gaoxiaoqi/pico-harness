@@ -3490,6 +3490,10 @@ function transcriptMutationsForEvent(
           ...(priorPayload ?? {}),
           id: itemId,
           kind: "tool",
+          // Nested exec calls can have a result without a transcript tool.started row.
+          // Their canonical result event still owns the Run and model-turn identity.
+          runId: event.runId,
+          turnId: event.turnId,
           name:
             typeof priorPayload?.["name"] === "string" ? priorPayload["name"] : event.data.toolName,
           args: typeof priorPayload?.["args"] === "string" ? priorPayload["args"] : "",
@@ -3606,6 +3610,7 @@ function transcriptMutationsForEvent(
     case "tool.started": {
       if (agentGraphPresentation.internal) return [];
       const itemId = `tool:${transcript.toolCallId}`;
+      const runId = presentationRunIdForEvent(event);
       return [
         {
           op: "upsert",
@@ -3618,6 +3623,7 @@ function transcriptMutationsForEvent(
             name: transcript.name,
             args: transcript.args,
             status: "running",
+            ...(runId ? { runId, turnId: event.turnId } : {}),
             at: transcript.createdAt,
             data: {
               toolCallId: transcript.toolCallId,

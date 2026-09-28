@@ -316,6 +316,8 @@ function conversationItem(item: JsonRecord, index: number): ConversationItemView
     return {
       id,
       kind: "tool",
+      runId: stringValue(item.runId) || undefined,
+      turnId: stringValue(item.turnId) || undefined,
       toolName: stringValue(item.name, "tool"),
       toolCallId: status === "running" ? stringValue(runningData?.toolCallId) : result?.toolCallId,
       title: stringValue(item.name, "工具调用"),

@@ -4,7 +4,10 @@ import { CircleAlert, GitFork, LoaderCircle, Send, Square, X } from "lucide-reac
 import type { FormEvent, KeyboardEvent, ReactNode } from "react";
 
 import { omitApprovalAuditItems } from "../conversation/items.js";
-import { ConversationTranscript } from "../conversation/ConversationTranscript.js";
+import {
+  ConversationTranscript,
+  type ConversationTranscriptProps,
+} from "../conversation/ConversationTranscript.js";
 import type { ConversationItemView } from "../conversation/types.js";
 
 export type SideChatChildState = "idle" | "creating" | "live" | "cleanup" | "failed";
@@ -29,6 +32,7 @@ export interface SideChatPanelError {
 }
 
 export interface SideChatWorkbarPanelProps {
+  readonly activeRun?: ConversationTranscriptProps["activeRun"];
   readonly child: SideChatChildSession;
   readonly items: readonly ConversationItemView[];
   readonly draft: string;
@@ -62,6 +66,7 @@ export function sideChatCanSend(
 
 export function SideChatWorkbarPanel({
   child,
+  activeRun,
   items,
   draft,
   active,
@@ -160,6 +165,7 @@ export function SideChatWorkbarPanel({
           </div>
         ) : child.state === "live" ? (
           <ConversationTranscript
+            activeRun={activeRun}
             items={omitApprovalAuditItems(items, pendingApprovalCallId)}
             label="临时分支会话记录"
             onOpenItem={onOpenItem}

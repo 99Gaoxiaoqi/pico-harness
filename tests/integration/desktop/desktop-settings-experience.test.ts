@@ -29,6 +29,7 @@ test("settings routes stay globally accessible and project management never sele
 
   for (const route of [
     "settings/workspaces",
+    "settings/data",
     "settings/usage",
     "settings/system",
     "settings/memory",

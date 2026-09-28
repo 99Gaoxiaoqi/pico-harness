@@ -1,3 +1,4 @@
+import { providerFailureSummary } from "@pico/core";
 import { isValidStoredCompactionSummary } from "./history-compact-summary-validation.js";
 import { buildToolResultArchiveRef, rebindToolResultArchive } from "./tool-result-archive.js";
 import {
@@ -8,11 +9,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import {
-  isAbortError,
-  ModelCommunicationError,
-  RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX,
-} from "@pico/core";
+import { isAbortError, RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX } from "@pico/core";
 import { LeaseConflictError } from "@pico/storage";
 import { canonicalizeWorkspacePath } from "@pico/storage/workspace-path";
 import type { CommitReceipt } from "@pico/core";
@@ -3441,8 +3438,8 @@ function requireExactRunStartedEvent(
 
 function runtimeFailureReason(error: unknown): string {
   if (isAbortError(error)) return "aborted";
-  if (error instanceof ModelCommunicationError)
-    return `ModelCommunicationError category=${error.category} diagnosticId=${error.diagnostic.diagnosticId}; detail omitted`;
+  const providerFailure = providerFailureSummary(error);
+  if (providerFailure !== undefined) return providerFailure;
   const detail = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
   return detail.slice(0, 1_000);
 }

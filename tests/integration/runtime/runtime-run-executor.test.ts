@@ -413,7 +413,7 @@ test("commitMessageOnce remains idempotent inside an active RuntimeRun", async (
   }
 });
 
-test("RuntimeRun terminal preserves only safe model diagnostics", async () => {
+test("RuntimeRun terminal preserves local provider detail alongside diagnostic identity", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-runtime-model-failure-"));
   const session = new Session("runtime-model-failure", join(root, "workspace"), {
     persistence: true,
@@ -428,11 +428,18 @@ test("RuntimeRun terminal preserves only safe model diagnostics", async () => {
     });
     await assert.rejects(
       run.run(async () => {
-        throw new ModelCommunicationError("request_failed", {
-          diagnosticId: "safe-terminal",
-          durationMs: 10,
-          transportCode: "ECONNRESET",
-        });
+        throw new ModelCommunicationError(
+          "stream_error",
+          {
+            diagnosticId: "safe-terminal",
+            durationMs: 10,
+            transportCode: "ECONNRESET",
+          },
+          {
+            message: "Model not supported; api_key=sk-local-example123",
+            code: "model_not_supported",
+          },
+        );
       }),
       ModelCommunicationError,
     );
@@ -441,7 +448,7 @@ test("RuntimeRun terminal preserves only safe model diagnostics", async () => {
     );
     assert.equal(
       terminal?.kind === "run.terminal" ? terminal.data.reason : undefined,
-      "ModelCommunicationError category=request_failed diagnosticId=safe-terminal; detail omitted",
+      'ModelCommunicationError category=stream_error diagnosticId=safe-terminal; detail omitted\nProvider detail: {"message":"Model not supported; api_key=sk-local-example123","code":"model_not_supported"}',
     );
   } finally {
     await session.close();

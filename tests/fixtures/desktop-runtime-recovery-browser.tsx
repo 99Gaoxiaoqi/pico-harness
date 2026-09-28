@@ -2,7 +2,12 @@
 import * as React from "react";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import { TRANSCRIPT_PROJECTOR_VERSION, type RuntimeNotification } from "@pico/protocol";
+import {
+  TRANSCRIPT_PROJECTOR_VERSION,
+  type RuntimeNotification,
+  type RuntimeSessionSubscriptionFrame,
+  type RuntimeRun,
+} from "@pico/protocol";
 import type { DesktopBridge } from "../../apps/desktop/src/preload/contract.js";
 import { useRuntimeStore, type RuntimeStore } from "../../apps/desktop/src/renderer/runtime.js";
 
@@ -15,6 +20,10 @@ let runsFailure = false;
 let jobsFailure = false;
 let holdTrust: Promise<void> | undefined;
 let holdWorkspace: Promise<void> | undefined;
+let holdSessionGet: Promise<void> | undefined;
+let sessionGetStarted = false;
+let subscriptionRun: RuntimeRun | undefined;
+let frameListener: ((frame: RuntimeSessionSubscriptionFrame) => void) | undefined;
 let listener: ((event: RuntimeNotification) => void) | undefined;
 let subscribedWorkspace: string | undefined;
 let eventSequence = 0;
@@ -41,7 +50,7 @@ const bridge = {
         const workspacePath = params.workspacePath ?? workspaceA;
         switch (method) {
           case "runtime.ping":
-            return ok({ capabilities: ["session-conversation-v1"] });
+            return ok({ capabilities: ["session-conversation-v1"], picoHome: "/custom/pico-data" });
           case "workspace.list":
             return ok({
               workspaces: [workspaceA, workspaceB].map((path) => ({
@@ -92,6 +101,7 @@ const bridge = {
               },
               durableTail: [],
               activeOverlay: [],
+              ...(subscriptionRun ? { activeRun: subscriptionRun } : {}),
               queuedInputs: [],
               planControl: {
                 version: 1,
@@ -117,6 +127,8 @@ const bridge = {
           case "session.subscription.close":
             return ok({ closed: true });
           case "session.get":
+            sessionGetStarted = true;
+            await holdSessionGet;
             return ok({ session });
           default:
             return ok({});
@@ -137,7 +149,16 @@ const bridge = {
       };
     },
   },
-  sessionFrames: { subscribe: () => ({ dispose() {} }) },
+  sessionFrames: {
+    subscribe: (callback: (frame: RuntimeSessionSubscriptionFrame) => void) => {
+      frameListener = callback;
+      return {
+        dispose() {
+          frameListener = undefined;
+        },
+      };
+    },
+  },
   onUnavailable: () => () => {},
   onRecovered: () => () => {},
   platform: { getLaunchAtLogin: async () => ok(false) },
@@ -218,6 +239,7 @@ async function refresh() {
 async function main() {
   await act(async () => root.render(<Harness />));
   await waitFor(() => store.connection.kind === "ready", "Bootstrap failed");
+  check(store.data.picoHome === "/custom/pico-data", "Bootstrap must preserve the daemon data root after workspace index reset");
   runs = ["cancelled", "failed", "succeeded", "active", "unknown", "foreign"].map((runId) => ({
     runId,
     status: "running",
@@ -303,6 +325,67 @@ async function main() {
   await refresh();
   await request("failed");
   check(hasPending("failed"), "Newer active snapshot must allow the same run to recover");
+
+  // Hold metadata after opening a running session, deliver completion, then let
+  // the old hydration and a stale workspace snapshot finish.
+  subscriptionRun = {
+    runId: "hydration-race",
+    workspacePath: workspaceA,
+    sessionId: session.sessionId,
+    description: "Hydration race",
+    status: "running",
+    version: 1,
+    startedAt: 10,
+    updatedAt: 10,
+  };
+  let releaseSessionGet!: () => void;
+  holdSessionGet = new Promise<void>((resolve) => {
+    releaseSessionGet = resolve;
+  });
+  sessionGetStarted = false;
+  let sessionLoad!: Promise<void>;
+  await act(async () => {
+    sessionLoad = store.actions.loadSession({
+      workspacePath: workspaceA,
+      sessionId: session.sessionId,
+    });
+  });
+  await waitFor(() => sessionGetStarted, "Session metadata must be held");
+  check(frameListener, "Session frame subscription missing");
+  await act(async () => {
+    frameListener!({
+      type: "subscription.run_state",
+      hostEpoch: "host",
+      subscriptionId: "subscription",
+      sequence: 1,
+      sessionId: session.sessionId,
+      run: { ...subscriptionRun!, status: "succeeded", version: 2, updatedAt: 20, finishedAt: 20 },
+    });
+  });
+  await waitFor(
+    () => store.data.runs.some((run) => run.id === "hydration-race" && run.status === "succeeded"),
+    "Terminal frame must settle run immediately",
+  );
+  await act(async () => {
+    releaseSessionGet();
+    await sessionLoad;
+  });
+  holdSessionGet = undefined;
+  check(
+    store.data.runs.find((run) => run.id === "hydration-race")?.status === "succeeded",
+    "Delayed session metadata must not roll completion back to running",
+  );
+  check(
+    !Object.values(store.data.conversations).find((item) => item.sessionId === session.sessionId)
+      ?.runId,
+    "Terminal hydration must clear conversation runId",
+  );
+  runs = [{ runId: "hydration-race", status: "running", version: 1, updatedAt: 100 }];
+  await refresh();
+  check(
+    store.data.runs.find((run) => run.id === "hydration-race")?.status === "succeeded",
+    "Stale runs.list must not overwrite the newer terminal revision",
+  );
 
   trusted.delete(workspaceA);
   await refresh();

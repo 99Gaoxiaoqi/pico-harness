@@ -11,24 +11,32 @@ import {
   LoaderCircle,
   ShieldQuestion,
   Sparkles,
-  TerminalSquare,
   WandSparkles,
   SearchCode,
   GitBranch,
 } from "lucide-react";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
+import { sanitizeMarkdownText } from "@pico/protocol";
 import type {
   ConversationItemView,
   ConversationProgressState,
   RunBoundaryItemView,
   SubagentItemView,
+  ToolItemView,
+  ThinkingItemView,
 } from "./types.js";
 import { conversationItemKey, mergeConversationItemGroups } from "./items.js";
 import { MarkdownText } from "./MarkdownText.js";
 import { loadedAgentTools } from "./agent-capability.js";
 import { WebSearchRecord } from "./WebSearchRecord.js";
+import {
+  foldConversationProcess,
+  type ConversationProcessView,
+  type TranscriptActiveRun,
+} from "./process-fold.js";
 
 export interface ConversationTranscriptProps {
+  readonly activeRun?: TranscriptActiveRun | undefined;
   readonly assistantLabel?: string | undefined;
   readonly items: readonly ConversationItemView[];
   readonly label?: string | undefined;
@@ -42,7 +50,7 @@ export interface ConversationTranscriptProps {
 
 interface ConversationTurnView {
   readonly key: string;
-  readonly items: readonly ConversationItemView[];
+  readonly items: readonly (ConversationItemView | ConversationProcessView)[];
 }
 
 /**
@@ -51,16 +59,16 @@ interface ConversationTurnView {
  * the next user message in the same visual turn without inventing event identities.
  */
 export function groupConversationItemsIntoTurns(
-  items: readonly ConversationItemView[],
+  items: readonly (ConversationItemView | ConversationProcessView)[],
 ): readonly ConversationTurnView[] {
-  const turns: { key: string; items: ConversationItemView[] }[] = [];
+  const turns: { key: string; items: (ConversationItemView | ConversationProcessView)[] }[] = [];
   for (const item of items) {
     if (item.kind === "userMessage" || turns.length === 0) {
       turns.push({
         key:
           item.kind === "userMessage"
             ? `turn:${conversationItemKey(item)}`
-            : `context:${conversationItemKey(item)}`,
+            : `context:${item.kind === "process" ? item.key : conversationItemKey(item)}`,
         items: [item],
       });
       continue;
@@ -196,6 +204,257 @@ function visibleTurnItems(items: readonly ConversationItemView[]): readonly Conv
   });
 }
 
+interface ToolGroupView {
+  readonly kind: "toolGroup";
+  readonly key: string;
+  readonly items: readonly ToolItemView[];
+}
+
+type TranscriptDisplayItem = ConversationItemView | ToolGroupView;
+
+// A Run owns the assistant's response to a user input. Runtime turnId changes on
+// each model iteration, so it must not split otherwise adjacent tool activity.
+function groupConsecutiveRunTools(
+  items: readonly ConversationItemView[],
+): readonly TranscriptDisplayItem[] {
+  const visibleItems = visibleTurnItems(items);
+  const grouped: TranscriptDisplayItem[] = [];
+  for (let index = 0; index < visibleItems.length; ) {
+    const item = visibleItems[index]!;
+    if (item.kind !== "tool" || !item.runId) {
+      grouped.push(item);
+      index++;
+      continue;
+    }
+
+    const siblings: ToolItemView[] = [item];
+    let nextIndex = index + 1;
+    while (nextIndex < visibleItems.length) {
+      const candidate = visibleItems[nextIndex]!;
+      if (candidate.kind !== "tool" || candidate.runId !== item.runId) {
+        break;
+      }
+      siblings.push(candidate);
+      nextIndex++;
+    }
+
+    if (siblings.length > 1) {
+      grouped.push({
+        kind: "toolGroup",
+        key: `tool-group:${siblings[0]!.id}`,
+        items: siblings,
+      });
+    } else {
+      grouped.push(item);
+    }
+    index = nextIndex;
+  }
+  return grouped;
+}
+
+function toolGroupSummary(items: readonly ToolItemView[]) {
+  const completed = items.filter((item) => item.state === "done").length;
+  const active = items.filter((item) => item.state === "active").length;
+  const waiting = items.filter((item) => item.state === "waiting").length;
+  const failed = items.filter((item) => item.state === "failed").length;
+  const state: ConversationProgressState =
+    failed > 0 ? "failed" : active > 0 ? "active" : waiting > 0 ? "waiting" : "done";
+  const statuses = [
+    completed > 0 ? `${completed} 完成` : undefined,
+    active > 0 ? `${active} 运行中` : undefined,
+    waiting > 0 ? `${waiting} 等待中` : undefined,
+    failed > 0 ? `${failed} 失败` : undefined,
+  ].filter((value): value is string => value !== undefined);
+  const firstFailure = items.find((item) => item.state === "failed");
+  const failureOutput = firstFailure?.output
+    ?.split(/\r?\n/u)
+    .find((line) => line.trim())
+    ?.trim();
+  const failurePreview = failureOutput
+    ? failureOutput.length > 96
+      ? `${failureOutput.slice(0, 95)}…`
+      : failureOutput
+    : firstFailure
+      ? "工具执行失败"
+      : undefined;
+
+  return {
+    state,
+    active,
+    waiting,
+    failed,
+    statuses: statuses.join(" · "),
+    failure: firstFailure
+      ? { toolName: firstFailure.toolName, preview: failurePreview ?? "工具执行失败" }
+      : undefined,
+  };
+}
+
+// Keep the full invocation in the disclosure. The row only needs a readable
+// destination, command, or query, including while wire arguments are streaming.
+function toolTargetPreview(item: ToolItemView): string | undefined {
+  let target = item.title !== item.toolName ? item.title : undefined;
+  if (!target && item.detail) {
+    try {
+      const args: unknown = JSON.parse(item.detail);
+      if (args && typeof args === "object" && !Array.isArray(args)) {
+        const values = args as Record<string, unknown>;
+        for (const key of [
+          "command",
+          "cmd",
+          "pattern",
+          "query",
+          "path",
+          "file_path",
+          "filePath",
+          "objective",
+          "code",
+        ]) {
+          if (typeof values[key] === "string" && values[key].trim()) {
+            target = values[key];
+            break;
+          }
+        }
+      }
+    } catch {
+      if (!item.detail.trimStart().startsWith("{")) target ??= item.detail;
+    }
+  }
+  const line = target
+    ?.split(/\r?\n/u)
+    .find((part) => part.trim())
+    ?.trim();
+  return line && line.length > 120 ? `${line.slice(0, 119)}…` : line;
+}
+
+function ToolSignal({ state }: { readonly state: ConversationProgressState }) {
+  return (
+    <span className="conversation-tool-signal" data-state={state} title={stateLabels[state]}>
+      <StateIcon state={state} />
+      <span className="conversation-sr-only">{stateLabels[state]}</span>
+    </span>
+  );
+}
+
+function ThinkingDisclosure({
+  item,
+  renderText,
+}: {
+  readonly item: ThinkingItemView;
+  readonly renderText: NonNullable<ConversationTranscriptProps["renderText"]>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [hasOpened, setHasOpened] = useState(false);
+  const preview = sanitizeMarkdownText(item.text)
+    .split("\n")
+    .find((line) => line.trim())
+    ?.trim()
+    .replace(/^#{1,6}\s+/u, "")
+    .replace(/[*_~`]+/gu, "");
+  return (
+    <details className="conversation-thinking" aria-label="模型思考" open={open}>
+      <summary
+        className="conversation-thinking__label"
+        aria-expanded={open}
+        onClick={(event) => {
+          event.preventDefault();
+          setHasOpened(true);
+          setOpen(!open);
+        }}
+      >
+        <Sparkles aria-hidden="true" />
+        <span className="conversation-thinking__title" data-streaming={item.streaming || undefined}>
+          模型思考{item.truncated ? " · 已截断" : ""}
+        </span>
+        {!open && !item.streaming && preview && (
+          <span className="conversation-thinking__preview">{preview}</span>
+        )}
+        <ChevronRight className="conversation-disclosure-chevron" aria-hidden="true" />
+      </summary>
+      <div className="conversation-thinking__body">
+        {hasOpened ? renderText(item.text, item) : null}
+      </div>
+    </details>
+  );
+}
+
+function ProcessDisclosure({
+  item,
+  children,
+}: {
+  readonly item: ConversationProcessView;
+  readonly children: ReactNode;
+}) {
+  const [manualOpen, setManualOpen] = useState(false);
+  const active = item.activeStatus !== undefined;
+  const open = active || manualOpen;
+  const tools = item.items.filter((entry): entry is ToolItemView => entry.kind === "tool");
+  const summary = toolGroupSummary(tools);
+  const activeLabels: Readonly<Record<string, string>> = {
+    queued: "等待执行",
+    running: "进行中",
+    pause_requested: "等待暂停",
+    paused: "已暂停",
+    cancelling: "正在停止",
+  };
+  const label = active
+    ? `执行过程 · ${activeLabels[item.activeStatus!] ?? "进行中"}`
+    : item.boundary?.status === "completed"
+      ? "已完成"
+      : "执行过程";
+  const pending = active && item.activeStatus !== "running";
+  return (
+    <details
+      className="conversation-process"
+      data-run-id={item.runId}
+      data-active={active || undefined}
+      open={open}
+    >
+      <summary
+        className="conversation-process__summary"
+        aria-expanded={open}
+        aria-disabled={active || undefined}
+        tabIndex={active ? -1 : 0}
+        onClick={(event) => {
+          event.preventDefault();
+          if (!active) setManualOpen(!open);
+        }}
+      >
+        <span className="conversation-process__heading">
+          {active ? (
+            pending ? (
+              <Clock3 aria-hidden="true" />
+            ) : (
+              <LoaderCircle aria-hidden="true" className="conversation-process__spinner" />
+            )
+          ) : item.boundary?.status === "completed" ? (
+            <Check aria-hidden="true" />
+          ) : (
+            <ListChecks aria-hidden="true" />
+          )}
+          <span>{label}</span>
+          {item.boundary?.duration && <span>· {item.boundary.duration}</span>}
+          {tools.length > 0 && (
+            <span className="conversation-process__count">· {tools.length} 次工具调用</span>
+          )}
+          {summary.failed > 0 && (
+            <span className="conversation-process__failure-count">{summary.failed} 次工具失败</span>
+          )}
+          {!active && (
+            <ChevronRight className="conversation-disclosure-chevron" aria-hidden="true" />
+          )}
+        </span>
+        {summary.failure && (
+          <span className="conversation-process__failure">
+            {summary.failure.toolName}：{summary.failure.preview}
+          </span>
+        )}
+      </summary>
+      <ol className="conversation-process__items">{children}</ol>
+    </details>
+  );
+}
+
 function renderDefaultItem(
   item: ConversationItemView,
   renderText: NonNullable<ConversationTranscriptProps["renderText"]>,
@@ -229,14 +488,7 @@ function renderDefaultItem(
         </article>
       );
     case "thinking":
-      return (
-        <section className="conversation-thinking" aria-label="推理摘要">
-          <div className="conversation-thinking__label">
-            <Sparkles aria-hidden="true" /> 推理摘要
-          </div>
-          {renderText(item.text, item)}
-        </section>
-      );
+      return <ThinkingDisclosure item={item} renderText={renderText} />;
     case "skill":
       return (
         <section className="conversation-inline-card conversation-inline-card--skill conversation-execution-record">
@@ -348,22 +600,26 @@ function renderDefaultItem(
           </details>
         );
       }
+      const failure = item.state === "failed" ? toolGroupSummary([item]).failure : undefined;
+      const target = toolTargetPreview(item);
       return (
-        <details
-          className="conversation-inline-card conversation-execution-record conversation-tool-record"
-          data-state={item.state}
-          open={item.state === "failed"}
-        >
-          <summary className="conversation-inline-card__header">
-            <TerminalSquare aria-hidden="true" />
-            <div>
-              <span className="conversation-kicker">{item.toolName}</span>
-              <strong>{item.title}</strong>
-            </div>
-            <span className="conversation-item-state">
-              <StateIcon state={item.state} /> {stateLabels[item.state]}
+        <details className="conversation-tool-record" data-state={item.state}>
+          <summary className="conversation-tool-row">
+            <ToolSignal state={item.state} />
+            <span className="conversation-tool-row__name" title={item.toolName}>
+              {item.toolName}
             </span>
+            {target && (
+              <span className="conversation-tool-row__target" title={target}>
+                {target}
+              </span>
+            )}
             <ChevronRight className="conversation-tool-record__chevron" aria-hidden="true" />
+            {failure && (
+              <span className="conversation-tool-row__failure" title={failure.preview}>
+                {failure.preview}
+              </span>
+            )}
           </summary>
           <div className="conversation-tool-record__body">
             {item.result && (
@@ -476,6 +732,7 @@ function renderDefaultItem(
 
 export function ConversationTranscript({
   items,
+  activeRun,
   assistantLabel,
   label = "会话记录",
   emptyState,
@@ -485,12 +742,112 @@ export function ConversationTranscript({
 }: ConversationTranscriptProps) {
   const visibleItems = mergeConversationItemGroups(items).filter(
     (item) =>
-      (item.kind !== "runBoundary" || item.status !== "started") &&
-      ((item.kind !== "thinking" && item.kind !== "assistantMessage") || item.cleared !== true),
+      (item.kind !== "thinking" && item.kind !== "assistantMessage") || item.cleared !== true,
   );
-  const turns = groupConversationItemsIntoTurns(visibleItems);
+  const turns = groupConversationItemsIntoTurns(
+    foldConversationProcess(visibleTurnItems(visibleItems), activeRun),
+  );
+  const renderItemContent = (item: ConversationItemView): ReactNode => {
+    const fallback = renderDefaultItem(item, renderText, onOpenItem, assistantLabel);
+    return (
+      <>
+        {renderItem ? renderItem(item, fallback) : fallback}
+        {item.truncated && (
+          <p className="conversation-truncated-notice" role="note">
+            这条记录超过桌面传输上限，已安全截断
+            {item.originalBytes ? `（原始 ${item.originalBytes.toLocaleString()} 字节）` : ""}。
+          </p>
+        )}
+      </>
+    );
+  };
 
-  if (visibleItems.length === 0) {
+  const renderDisplayItems = (entries: readonly ConversationItemView[]) =>
+    groupConsecutiveRunTools(entries).map((item) => {
+      if (item.kind === "toolGroup") {
+        const summary = toolGroupSummary(item.items);
+        const latest = item.items.at(-1)!;
+        const target = toolTargetPreview(latest);
+        return (
+          <li className="conversation-transcript__item" data-kind="toolGroup" key={item.key}>
+            <details
+              className="conversation-tool-group"
+              data-state={summary.state}
+              data-tool-group="true"
+            >
+              <summary className="conversation-tool-row" title={summary.statuses}>
+                <ToolSignal state={summary.active > 0 ? "active" : summary.state} />
+                <span
+                  className="conversation-tool-row__name conversation-tool-group__latest"
+                  title={latest.toolName}
+                >
+                  {latest.toolName}
+                </span>
+                {target && (
+                  <span
+                    className="conversation-tool-row__target conversation-tool-group__latest"
+                    title={target}
+                  >
+                    {target}
+                  </span>
+                )}
+                <span className="conversation-tool-group__expanded-title">
+                  工具调用 · {item.items.length} 项
+                </span>
+                <span
+                  className="conversation-tool-group__count"
+                  aria-label={`${item.items.length} 次工具调用`}
+                >
+                  {item.items.length}
+                </span>
+                <span className="conversation-sr-only">{summary.statuses}</span>
+                {(summary.active > 0 || summary.waiting > 0) && (
+                  <span className="conversation-tool-group__progress">
+                    {summary.active > 0 ? `${summary.active} 运行中` : `${summary.waiting} 等待中`}
+                  </span>
+                )}
+                {summary.failed > 0 && (
+                  <span className="conversation-tool-group__failed-count">
+                    {summary.failed} 失败
+                  </span>
+                )}
+                <ChevronRight className="conversation-tool-record__chevron" aria-hidden="true" />
+                {summary.failure && (
+                  <span
+                    className="conversation-tool-row__failure"
+                    title={`${summary.failure.toolName}：${summary.failure.preview}`}
+                  >
+                    {summary.failure.toolName}：{summary.failure.preview}
+                  </span>
+                )}
+              </summary>
+              <ol className="conversation-tool-group__items">
+                {item.items.map((tool) => (
+                  <li
+                    className="conversation-tool-group__item"
+                    data-kind="tool"
+                    key={conversationItemKey(tool)}
+                  >
+                    {renderItemContent(tool)}
+                  </li>
+                ))}
+              </ol>
+            </details>
+          </li>
+        );
+      }
+      return (
+        <li
+          className="conversation-transcript__item"
+          data-kind={item.kind}
+          key={conversationItemKey(item)}
+        >
+          {renderItemContent(item)}
+        </li>
+      );
+    });
+
+  if (turns.length === 0) {
     return (
       <section
         className="conversation-transcript conversation-transcript--empty"
@@ -518,27 +875,17 @@ export function ConversationTranscript({
       {turns.map((turn) => (
         <li className="conversation-turn" key={turn.key}>
           <ol className="conversation-turn__items">
-            {visibleTurnItems(turn.items).map((item) => {
-              const fallback = renderDefaultItem(item, renderText, onOpenItem, assistantLabel);
-              return (
-                <li
-                  className="conversation-transcript__item"
-                  data-kind={item.kind}
-                  key={conversationItemKey(item)}
-                >
-                  {renderItem ? renderItem(item, fallback) : fallback}
-                  {item.truncated && (
-                    <p className="conversation-truncated-notice" role="note">
-                      这条记录超过桌面传输上限，已安全截断
-                      {item.originalBytes
-                        ? `（原始 ${item.originalBytes.toLocaleString()} 字节）`
-                        : ""}
-                      。
-                    </p>
-                  )}
+            {turn.items.map((item) =>
+              item.kind === "process" ? (
+                <li className="conversation-transcript__item" data-kind="process" key={item.key}>
+                  <ProcessDisclosure item={item}>
+                    {renderDisplayItems(item.items)}
+                  </ProcessDisclosure>
                 </li>
-              );
-            })}
+              ) : (
+                renderDisplayItems([item])
+              ),
+            )}
           </ol>
         </li>
       ))}

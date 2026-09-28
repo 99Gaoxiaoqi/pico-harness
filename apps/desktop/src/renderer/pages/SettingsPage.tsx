@@ -7,6 +7,87 @@ import { useRuntime } from "../runtime-context.js";
 import type { DesktopDiagnosticReport } from "../runtime.js";
 import { workspaceDisplayName } from "../workspace-session.js";
 import { defaultModelWebSearch } from "../web-search.js";
+import { copyText } from "../clipboard.js";
+
+export function DataSettingsPage() {
+  const { data, actions, busy } = useRuntime();
+  const [copyStatus, setCopyStatus] = useState("");
+  const root = data.picoHome;
+  const separator = root?.includes("\\") ? "\\" : "/";
+  const childPath = (name: string) =>
+    root ? `${root.replace(/[\\/]+$/u, "")}${separator}${name}` : "正在加载…";
+  const taskDirectory = data.workspaces.find(
+    (workspace) => workspace.path === data.workspacePath && workspace.temporary,
+  )?.path;
+  const pathActions = (path: string | undefined, label: string) => (
+    <div className="settings-data-actions">
+      <Button
+        disabled={Boolean(busy) || !path}
+        onClick={() => {
+          if (path) void actions.openWorkspace(path);
+        }}
+      >
+        打开{label}
+      </Button>
+      <Button
+        disabled={!path}
+        onClick={() => {
+          if (path)
+            void copyText(path).then(
+              () => setCopyStatus(`已复制${label}路径`),
+              () => setCopyStatus("复制失败，请手动选择路径"),
+            );
+        }}
+      >
+        复制{label}路径
+      </Button>
+    </div>
+  );
+  return (
+    <div className="page-stack settings-page">
+      <section className="page-intro">
+        <div>
+          <span className="eyebrow">系统</span>
+          <h2>数据</h2>
+          <p>查看 Pico 的本地数据位置。任务工作目录与会话记录分别保存。</p>
+        </div>
+      </section>
+      <section className="settings-section" aria-labelledby="data-location-heading">
+        <h3 id="data-location-heading">存储位置</h3>
+        <div className="settings-list">
+          <SettingRow title="应用数据目录" detail={root ?? "正在加载…"}>
+            {pathActions(root, "数据文件夹")}
+          </SettingRow>
+          <SettingRow title="无项目任务文件" detail={childPath("temporary-workspace-<任务 ID>")}>
+            <span>每个任务独立保存</span>
+          </SettingRow>
+          {taskDirectory && (
+            <SettingRow title="当前无项目任务目录" detail={taskDirectory}>
+              {pathActions(taskDirectory, "任务文件夹")}
+            </SettingRow>
+          )}
+          <SettingRow
+            title="会话与执行记录"
+            detail={childPath(`workspaces${separator}<工作区标识>${separator}pico.sqlite`)}
+          >
+            <span>包含消息、执行历史和用量</span>
+          </SettingRow>
+        </div>
+        <p className="settings-section__note">
+          选择“无项目”后，首次发送消息时会自动创建任务目录。文件和会话跨重启保留，不会写入当前项目，也不会在退出时自动删除。
+        </p>
+        {copyStatus && <p role="status">{copyStatus}</p>}
+      </section>
+      <section className="settings-section">
+        <h3>备份与恢复</h3>
+        <p className="settings-section__note">
+          先完全退出
+          Pico，再备份整个应用数据目录。恢复时放回原位置后启动。此目录包含模型连接配置及凭证，请妥善保管。手动添加的项目文件位于各自目录，需要另外备份。
+        </p>
+      </section>
+    </div>
+  );
+}
 
 export function SettingsPage() {
   const { data, actions, busy } = useRuntime();

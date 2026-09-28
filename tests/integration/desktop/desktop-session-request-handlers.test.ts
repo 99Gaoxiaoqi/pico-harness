@@ -35,6 +35,7 @@ test("desktop session handlers keep protocol mapping separate from the service o
     addSessionDirectory: async () => ({ directories: [], added: true }),
     updateRuntimeSessionSettings: async () => ({ settings: {} }),
     getGoal: async () => ({ goal: null }),
+    controlGoal: async () => ({ goal: null }),
     sendSession: async (params) => {
       calls.push(`send:${params.input.text}`);
       return { disposition: "started" };

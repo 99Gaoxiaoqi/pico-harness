@@ -58,6 +58,44 @@
   flex: 1;
 }
 
+/* Running controls get their own aligned row below the model/context settings. */
+.conversation-composer:not([data-status="idle"]) .pico-astryx-composer > div > div:last-child {
+  flex-wrap: wrap;
+}
+.conversation-composer:not([data-status="idle"])
+  .pico-astryx-composer
+  > div
+  > div:last-child
+  > div:first-child {
+  flex: 1 0 100%;
+}
+.conversation-composer:not([data-status="idle"])
+  .pico-astryx-composer
+  > div
+  > div:last-child
+  > div:last-child {
+  width: 100%;
+  min-width: 0;
+}
+.conversation-composer:not([data-status="idle"]) .conversation-composer__actions {
+  flex: 1;
+  align-self: center;
+}
+.conversation-composer__actions > .astryx-field:has(.conversation-behavior) {
+  min-width: 0;
+  margin-inline-end: auto;
+}
+.conversation-composer .conversation-behavior {
+  min-width: 0;
+  height: 28px;
+  padding: 3px;
+  color: var(--conversation-ink-muted);
+  font: 500 11px var(--font-ui);
+}
+.conversation-composer .conversation-behavior span {
+  font: inherit;
+}
+
 .pico-astryx-composer > div:hover,
 .pico-astryx-composer > div:focus-within {
   box-shadow: none;

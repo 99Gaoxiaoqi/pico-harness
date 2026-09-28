@@ -192,7 +192,16 @@ test("inspector timeline keeps projected run/turn ownership, honest unknowns and
             {
               status:
                 runId === "failed" ? "failed" : runId === "cancelled" ? "cancelled" : "completed",
-              ...(runId === "failed" ? { reason: "请求失败 · HTTP 402" } : {}),
+              ...(runId === "failed"
+                ? {
+                    reason:
+                      "LLMStatusError status=402; detail omitted\nProvider detail: " +
+                      JSON.stringify({
+                        message: "账户额度不足 " + "详情".repeat(600),
+                        requestId: "req-long-detail",
+                      }),
+                  }
+                : {}),
             },
             { at: at.replace(".000Z", ".100Z") },
           ),
@@ -213,7 +222,7 @@ test("inspector timeline keeps projected run/turn ownership, honest unknowns and
     assert.match(initial, /data-run-toggle="normal"[^>]*aria-expanded="true"/u);
     assert.match(initial, /data-run-toggle="running"[^>]*aria-expanded="true"/u);
     assert.match(initial, /data-run-toggle="failed"[^>]*aria-expanded="false"/u);
-    assert.match(initial, /请求失败 · HTTP 402/u);
+    assert.match(initial, /模型请求未能完成 · HTTP 402/u);
     assert.match(initial, /追踪覆盖不足/u);
     assert.match(initial, /已取消/u);
     assert.match(initial, /轮次 1/u);
@@ -254,6 +263,9 @@ test("inspector timeline keeps projected run/turn ownership, honest unknowns and
     assert.match(selected, /步骤累计/u);
     const failed = execution.runs.find((run) => run.runId === "failed")!.steps[0]!;
     const failedSelected = render(execution, failed.id);
+    assert.match(failedSelected, /账户额度不足/u);
+    assert.match(failedSelected, /req-long-detail/u);
+    assert.match(failedSelected, /复制诊断/u);
     assert.match(failedSelected, /data-run-toggle="failed"[^>]*aria-expanded="true"/u);
     assert.match(failedSelected, /输入 未知 \/ 输出 未知 Token/u);
     assert.match(failedSelected, /费用未知/u);

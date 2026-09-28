@@ -155,6 +155,25 @@ export function parseRuns(value: unknown, workspacePath: string): readonly RunVi
     .sort((left, right) => right.updatedAt - left.updatedAt);
 }
 
+/** Merge delayed snapshots without rolling a newer run revision back. */
+export function mergeRunViews(
+  current: readonly RunView[],
+  incoming: readonly RunView[],
+): readonly RunView[] {
+  const runs = new Map(current.map((run) => [JSON.stringify([run.workspacePath, run.id]), run]));
+  for (const run of incoming) {
+    const key = JSON.stringify([run.workspacePath, run.id]);
+    const previous = runs.get(key);
+    const newer =
+      !previous ||
+      (run.version !== undefined && previous.version !== undefined
+        ? run.version > previous.version
+        : run.updatedAt > previous.updatedAt);
+    if (newer) runs.set(key, run);
+  }
+  return [...runs.values()].sort((left, right) => right.updatedAt - left.updatedAt);
+}
+
 export function parseWorkspaceMode(
   value: unknown,
   fallback?: WorkspaceMode,

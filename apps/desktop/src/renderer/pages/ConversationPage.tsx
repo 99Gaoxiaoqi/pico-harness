@@ -19,7 +19,6 @@ import {
   PanelRightClose,
   PanelRightOpen,
   Pencil,
-  ShieldCheck,
   Sparkles,
   TerminalSquare,
 } from "lucide-react";
@@ -33,6 +32,8 @@ import {
   type ReactNode,
 } from "react";
 import { Link, Navigate, useLocation, useNavigate, useParams } from "react-router-dom";
+import { parseModelRoutes } from "../runtime-projections/configuration.js";
+import { isRecord } from "../runtime-projections/values.js";
 import { SelectField, TextField } from "../ui-controls.js";
 import { ComposerModelPicker } from "../ComposerModelPicker.js";
 import { Button, InlineNotice, PreviewBadge, StatusPill } from "../components.js";
@@ -253,14 +254,9 @@ export function ConversationPage() {
   >({});
   const newTaskModelRoutes = useMemo(() => {
     if (workspacePath && data.modelRoutes.length) return data.modelRoutes;
-    const globalRoutes = data.providerConfig.providers
-      .filter((provider) => provider.origin === "user")
-      .flatMap((provider) =>
-        provider.models.map((model) => ({
-          id: `${provider.id}/${model}`,
-          label: `${model} · ${provider.id}`,
-        })),
-      );
+    const globalRoutes = parseModelRoutes({
+      providers: data.providerConfig.providers.filter((provider) => provider.origin === "user"),
+    });
     return globalRoutes.length ? globalRoutes : data.modelRoutes;
   }, [workspacePath, data.modelRoutes, data.providerConfig.providers]);
   const newTaskSettings = useMemo<RuntimeUserDefaults>(() => {
@@ -285,10 +281,15 @@ export function ConversationPage() {
   ]);
   const updateNewTaskSettings = useCallback(
     (patch: RuntimeUserDefaults) => {
-      setNewTaskSettingOverrides((current) => ({
-        ...current,
-        [workspacePath || "unbound"]: { ...current[workspacePath || "unbound"], ...patch },
-      }));
+      setNewTaskSettingOverrides((current) => {
+        const key = workspacePath || "unbound";
+        const next = { ...current[key], ...patch };
+        // A model change returns reasoning to the Host's model-specific default.
+        if (patch.modelRouteId !== undefined || patch.thinkingEffort === "") {
+          delete next.thinkingEffort;
+        }
+        return { ...current, [key]: next };
+      });
     },
     [workspacePath],
   );
@@ -299,6 +300,17 @@ export function ConversationPage() {
   const composerProvider = data.providerConfig.providers.find((provider) =>
     composerModelRouteId?.startsWith(`${provider.id}/`),
   );
+  const composerModel =
+    composerProvider && composerModelRouteId
+      ? composerModelRouteId.slice(composerProvider.id.length + 1)
+      : "";
+  const composerCapabilities = composerProvider?.resolvedModelCapabilities?.[composerModel];
+  const newTaskReasoningLevels =
+    isRecord(composerCapabilities) && Array.isArray(composerCapabilities.reasoningLevels)
+      ? composerCapabilities.reasoningLevels.filter(
+          (level): level is string => typeof level === "string",
+        )
+      : [];
   const usingOpenCodeFree =
     composerProvider?.auth === "none" &&
     composerProvider.baseURL.replace(/\/+$/u, "") === "https://opencode.ai/zen/v1";
@@ -1280,11 +1292,7 @@ export function ConversationPage() {
                                 onConfigure={() => navigate("/settings/models")}
                               />
 
-                              <div
-                                className={`conversation-context-option conversation-icon-select ${newTaskSettings.permissionMode === "full-access" ? "is-danger" : ""}`}
-                                title={`权限：${PERMISSION_MODE_LABELS[newTaskSettings.permissionMode ?? "ask"]}`}
-                              >
-                                <ShieldCheck aria-hidden="true" />
+                              <div className="conversation-context-option">
                                 <span className="conversation-sr-only">权限模式</span>
                                 <SelectField
                                   name="initial-permission-mode"
@@ -1303,6 +1311,26 @@ export function ConversationPage() {
                                   ]}
                                 />
                               </div>
+                              {newTaskReasoningLevels.length > 0 && (
+                                <div className="conversation-context-option">
+                                  <SelectField
+                                    name="initial-thinking-effort"
+                                    label="思考强度"
+                                    value={newTaskSettings.thinkingEffort ?? ""}
+                                    disabled={Boolean(busy) || preparingSend}
+                                    onValueChange={(thinkingEffort) =>
+                                      updateNewTaskSettings({ thinkingEffort })
+                                    }
+                                    options={[
+                                      { value: "", label: "思考：默认" },
+                                      ...newTaskReasoningLevels.map((level) => ({
+                                        value: level,
+                                        label: level,
+                                      })),
+                                    ]}
+                                  />
+                                </div>
+                              )}
                             </>
                           )}
                         </>
@@ -1323,7 +1351,14 @@ export function ConversationPage() {
                             providers={data.providerConfig.providers}
                             value={conversation.settings.modelRouteId}
                             currentLabel={conversation.settings.model}
-                            disabled={Boolean(activeRun) || Boolean(busy)}
+                            disabled={
+                              Boolean(activeRun) ||
+                              busy === "send-message" ||
+                              busy === "session-settings"
+                            }
+                            disabledReason={
+                              activeRun ? "任务执行中，结束后可切换模型" : "正在更新会话…"
+                            }
                             hasHistory={conversation.items.length > 0}
                             onChange={(modelRouteId) =>
                               actions.updateSessionSettings(sessionRef, { modelRouteId })
@@ -1424,6 +1459,7 @@ export function ConversationPage() {
               </div>
             )}
             <ConversationTranscript
+              activeRun={activeRun}
               items={
                 retryNotice
                   ? [
@@ -1440,7 +1476,7 @@ export function ConversationPage() {
               assistantLabel={
                 parentRef
                   ? `子智能体 · ${childParent?.name ?? session?.title ?? "执行记录"}`
-                  : "主智能体 · Pico"
+                  : undefined
               }
               onOpenItem={openItem}
               renderItem={(item, fallback) => {
@@ -1474,6 +1510,8 @@ export function ConversationPage() {
                   Boolean(originalRequest.text.trim());
                 return (
                   <ProviderFailureCard
+                    providerDetail={diagnostic?.providerDetail ?? status?.providerDetail}
+                    diagnosticText={item.detail}
                     notice={failureNotice}
                     httpStatus={status?.httpStatus}
                     title={diagnostic?.title ?? status?.title ?? "暂时无法连接模型"}

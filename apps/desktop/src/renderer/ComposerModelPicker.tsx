@@ -47,6 +47,7 @@ export function ComposerModelPicker({
   value,
   currentLabel,
   disabled = false,
+  disabledReason = "暂时不可切换模型",
   hasHistory = false,
   onChange,
   onConfigure,
@@ -56,6 +57,7 @@ export function ComposerModelPicker({
   value?: string | undefined;
   currentLabel?: string | undefined;
   disabled?: boolean | undefined;
+  disabledReason?: string | undefined;
   hasHistory?: boolean | undefined;
   onChange: (id: string) => void | Promise<void>;
   onConfigure: () => void;
@@ -166,11 +168,7 @@ export function ComposerModelPicker({
         className: "composer-model-trigger pico-page-control",
         variant: "ghost",
         isDisabled: locked,
-        tooltip: disabled
-          ? "任务执行中，结束后可切换模型"
-          : pending
-            ? "正在切换模型…"
-            : `切换模型 · ${label}`,
+        tooltip: disabled ? disabledReason : pending ? "正在切换模型…" : `切换模型 · ${label}`,
       }}
     >
       {hasHistory && (

@@ -26,7 +26,10 @@ export const settingsNavigationGroups = [
   },
   {
     label: "系统",
-    items: [{ to: "/settings/system", label: "健康", kind: "system" }],
+    items: [
+      { to: "/settings/data", label: "数据", kind: "data" },
+      { to: "/settings/system", label: "健康", kind: "system" },
+    ],
   },
 ] as const;
 

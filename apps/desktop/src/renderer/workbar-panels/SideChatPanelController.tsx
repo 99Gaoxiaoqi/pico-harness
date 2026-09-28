@@ -208,6 +208,7 @@ export function SideChatPanelController({
 
   return (
     <SideChatWorkbarPanel
+      activeRun={activeRun}
       child={child}
       items={items}
       draft={draft}

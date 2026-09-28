@@ -1,4 +1,5 @@
 import { PhysicalAttemptTracker } from "./physical-attempt-tracker.js";
+import { providerErrorDetail } from "./provider-error-detail.js";
 import { randomUUID } from "node:crypto";
 import { anthropic, createAnthropic } from "@ai-sdk/anthropic";
 import { openai, createOpenAI } from "@ai-sdk/openai";
@@ -232,6 +233,7 @@ export class AiSdkProvider implements LLMProvider {
           response.status,
           `Model API request failed [${response.status}]; response omitted`,
           retryAfterDelayMs(response.headers),
+          providerErrorDetail(errorText, response.headers.get("x-request-id") ?? undefined),
         );
       }
       const rate = this.config.onRateLimitInfo && parseRateLimitHeaders(response.headers);

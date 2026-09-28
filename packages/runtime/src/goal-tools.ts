@@ -4,18 +4,28 @@ import { GoalManager, type Goal, type GoalStatus } from "./goal-manager.js";
 import { ToolAccesses, type ToolAccesses as ToolAccessSet } from "./tool-access.js";
 
 /** 合法状态白名单（校验 update_goal 的 status 输入）。 */
-const VALID_STATUSES: ReadonlySet<string> = new Set(["active", "paused", "blocked", "complete"]);
+const VALID_STATUSES: ReadonlySet<string> = new Set(["active", "paused", "complete"]);
 
 /** 状态对应的展示标记，与 GoalManager.buildGoalContext 保持一致。 */
 function statusMark(status: GoalStatus): string {
   switch (status) {
     case "active":
       return "🟢";
+    case "waiting":
+      return "⏳";
     case "paused":
       return "⏸️";
-    case "blocked":
+    case "impossible":
       return "🚫";
-    case "complete":
+    case "stalled":
+      return "⚠️";
+    case "budget_limited":
+      return "💸";
+    case "max_iterations":
+      return "🔢";
+    case "cleared":
+      return "🚫";
+    case "achieved":
       return "✅";
   }
 }
@@ -23,8 +33,18 @@ function statusMark(status: GoalStatus): string {
 function formatGoal(goal: Goal): string {
   const lines = [`- ${statusMark(goal.status)} **${goal.title}** (id: ${goal.id})`];
   lines.push(`  - 描述: ${goal.description}`);
+  lines.push("  - 完成标准:", ...goal.completionCriteria.map((item) => `    - ${item}`));
+  if (goal.constraints?.length)
+    lines.push("  - 约束:", ...goal.constraints.map((item) => `    - ${item}`));
   if (goal.progress) lines.push(`  - 进度: ${goal.progress}`);
   if (goal.blockedReason) lines.push(`  - 阻塞原因: ${goal.blockedReason}`);
+  if (goal.waitingReason) lines.push(`  - 等待原因: ${goal.waitingReason}`);
+  lines.push(`  - 迭代: ${goal.budgetUsage.turns}/${goal.maxIterations}`);
+  if (goal.lastEvaluation)
+    lines.push(
+      `  - 最近评估: ${goal.lastEvaluation.outcome} · ${goal.lastEvaluation.reason || "无原因"}`,
+    );
+  if (goal.evidence.length) lines.push(`  - 证据: ${goal.evidence.slice(-3).join("；")}`);
   if (goal.budgetConfig) {
     const parts: string[] = [];
     const budget = goal.budgetConfig;
@@ -37,7 +57,7 @@ function formatGoal(goal: Goal): string {
       `  - 已消耗: ${goal.budgetUsage.turns} 轮 + ${goal.budgetUsage.tokens} tokens + ¥${goal.budgetUsage.costCNY.toFixed(4)}`,
     );
   }
-  if (goal.consecutiveNoProgress && goal.consecutiveNoProgress >= 3) {
+  if (goal.consecutiveNoProgress > 0) {
     lines.push(`  - ⚠ 连续无进展: ${goal.consecutiveNoProgress} 轮`);
   }
   return lines.join("\n");
@@ -104,6 +124,18 @@ function parseBudgetConfig(parsed: Record<string, unknown>): BudgetConfig | unde
   return config;
 }
 
+function parseTextList(value: unknown, field: string, required: boolean): string[] | undefined {
+  if (value === undefined && !required) return undefined;
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.some((item) => typeof item !== "string" || item.trim() === "")
+  ) {
+    throw new Error(`${field} 必须是非空字符串数组`);
+  }
+  return value.map((item) => (item as string).trim());
+}
+
 /** 创建目标并将其自动激活。 */
 export class CreateGoalTool {
   readonly readOnly = false;
@@ -124,12 +156,22 @@ export class CreateGoalTool {
     return {
       name: "create_goal",
       description:
-        "创建一个长程目标并自动设为当前激活目标。用于锚定宏观目标与 budget 约束(轮次/Token/墙钟)。同一时刻仅一个 active goal。",
+        "创建一个长程目标并自动设为当前 Goal。每个 Goal 必须明确给出可独立验收的 completionCriteria；AgentEngine 不会在本次 Run 内隐藏续跑，Host 会在本 Run 结束验收后决定是否续跑。",
       inputSchema: {
         type: "object",
         properties: {
           title: { type: "string", description: "目标标题(简短一行)" },
           description: { type: "string", description: "目标详细描述" },
+          completionCriteria: {
+            type: "array",
+            minItems: 1,
+            maxItems: 30,
+            items: { type: "string" },
+            description: "全部必须满足的可验证完成标准",
+          },
+          constraints: { type: "array", items: { type: "string" }, description: "执行约束" },
+          maxIterations: { type: "number", description: "最多 Goal Run 数，默认 50" },
+          blockCap: { type: "number", description: "连续无进展上限，默认 8" },
           budget: {
             type: "object",
             description: "可选预算约束,含 maxTurns/maxTokens/maxCostCNY/maxWallClockMs(至少一个)",
@@ -141,7 +183,7 @@ export class CreateGoalTool {
             },
           },
         },
-        required: ["title", "description"],
+        required: ["title", "description", "completionCriteria"],
       },
     };
   }
@@ -163,8 +205,31 @@ export class CreateGoalTool {
       throw new Error("create_goal 缺少必填参数 description(非空字符串)");
     }
 
+    const completionCriteria = parseTextList(
+      parsed["completionCriteria"],
+      "completionCriteria",
+      true,
+    )!;
+    if (completionCriteria.length > 30)
+      throw new Error("completionCriteria 最多 30 条，以便逐项保存验收证据");
+    const constraints = parseTextList(parsed["constraints"], "constraints", false);
+    const maxIterations = parsed["maxIterations"] ?? 50;
+    const blockCap = parsed["blockCap"] ?? 8;
+    if (!Number.isSafeInteger(maxIterations) || (maxIterations as number) <= 0)
+      throw new Error("maxIterations 必须是正整数");
+    if (!Number.isSafeInteger(blockCap) || (blockCap as number) <= 0)
+      throw new Error("blockCap 必须是正整数");
+
     const budgetConfig = parseBudgetConfig(parsed);
-    const goal = this.manager.create(title, description, budgetConfig);
+    const goal = this.manager.create({
+      title,
+      description,
+      completionCriteria,
+      ...(constraints ? { constraints } : {}),
+      ...(budgetConfig !== undefined ? { budgetConfig } : {}),
+      maxIterations: maxIterations as number,
+      blockCap: blockCap as number,
+    });
     return `🎯 已创建并激活目标 ${goal.id}: ${goal.title}\n${formatGoal(goal)}`;
   }
 }
@@ -242,7 +307,7 @@ export class UpdateGoalTool {
     return {
       name: "update_goal",
       description:
-        "更新目标字段:title/description/status/progress/blockedReason/budget。status 合法值:active/paused/blocked/complete。把某目标置为 active 会自动把原 active 降级为 paused。",
+        "更新目标字段。status=complete 仅请求独立验收，不能直接完成 Goal；status=paused 暂停；status=active 恢复暂停的 Goal。",
       inputSchema: {
         type: "object",
         properties: {
@@ -251,11 +316,10 @@ export class UpdateGoalTool {
           description: { type: "string", description: "新描述" },
           status: {
             type: "string",
-            description: "新状态",
-            enum: ["active", "paused", "blocked", "complete"],
+            description: "complete 表示请求独立验收，不直接更改为 achieved",
+            enum: ["active", "paused", "complete"],
           },
           progress: { type: "string", description: "进度说明(自由文本)" },
-          blockedReason: { type: "string", description: "阻塞原因(置 blocked 时建议提供)" },
           budget: {
             type: "object",
             description: "预算配置(覆盖原值)",
@@ -286,19 +350,16 @@ export class UpdateGoalTool {
     }
     if (parsed["status"] !== undefined) {
       if (typeof parsed["status"] !== "string" || !VALID_STATUSES.has(parsed["status"])) {
-        throw new Error(
-          `非法 status: ${String(parsed["status"])}。合法值:active/paused/blocked/complete`,
-        );
+        throw new Error(`非法 status: ${String(parsed["status"])}。合法值:active/paused/complete`);
       }
     }
 
     const patch: {
       title?: string;
       description?: string;
-      status?: GoalStatus;
       progress?: string;
-      blockedReason?: string;
       budgetConfig?: BudgetConfig;
+      completionRequested?: boolean;
     } = {};
     if (parsed["title"] !== undefined) {
       if (typeof parsed["title"] !== "string" || parsed["title"].trim() === "") {
@@ -312,19 +373,14 @@ export class UpdateGoalTool {
       }
       patch.description = parsed["description"];
     }
-    if (parsed["status"] !== undefined) patch.status = parsed["status"] as GoalStatus;
+    const requestedStatus = parsed["status"] as string | undefined;
     if (parsed["progress"] !== undefined) {
       if (typeof parsed["progress"] !== "string") {
         throw new Error("update_goal 的 progress 必须是字符串");
       }
       patch.progress = parsed["progress"];
     }
-    if (parsed["blockedReason"] !== undefined) {
-      if (typeof parsed["blockedReason"] !== "string") {
-        throw new Error("update_goal 的 blockedReason 必须是字符串");
-      }
-      patch.blockedReason = parsed["blockedReason"];
-    }
+    if (requestedStatus === "complete") patch.completionRequested = true;
     if (parsed["budget"] !== undefined) {
       const budgetConfig = parseBudgetConfig(parsed);
       if (!budgetConfig) throw new Error("update_goal 的 budget 无效");
@@ -334,18 +390,33 @@ export class UpdateGoalTool {
     if (
       patch.title === undefined &&
       patch.description === undefined &&
-      patch.status === undefined &&
+      requestedStatus === undefined &&
       patch.progress === undefined &&
-      patch.blockedReason === undefined &&
       patch.budgetConfig === undefined
     ) {
       throw new Error(
-        "update_goal 至少需提供一个可更新字段(title/description/status/progress/blockedReason/budget)",
+        "update_goal 至少需提供一个可更新字段(title/description/status/progress/budget)",
       );
     }
 
-    const updated = this.manager.update(id, patch);
+    const target = this.manager.get(id);
+    if (!target) throw new Error(`未找到目标 ${id}`);
+    const hasPatch = Object.keys(patch).length > 0;
+    let updated: Goal | undefined;
+    if (requestedStatus === "paused") {
+      if (hasPatch) this.manager.update(id, patch);
+      updated = this.manager.pause(id, "模型请求暂停");
+    }
+    else if (requestedStatus === "active") {
+      if (target.status !== "active" && target.status !== "waiting" && target.status !== "paused") {
+        throw new Error(`Goal ${id} 的状态 ${target.status} 不能恢复`);
+      }
+      if (hasPatch) this.manager.update(id, patch);
+      updated = target.status === "paused" ? this.manager.resume(id) : this.manager.get(id);
+    } else updated = this.manager.update(id, patch);
     if (!updated) throw new Error(`未找到目标 ${id}`);
-    return `✅ 已更新目标 ${updated.id}:\n${formatGoal(updated)}`;
+    return requestedStatus === "complete"
+      ? `🧾 已请求 Goal ${updated.id} 验收；是否完成将由独立评估器根据完成标准和证据决定。\n${formatGoal(updated)}`
+      : `✅ 已更新目标 ${updated.id}:\n${formatGoal(updated)}`;
   }
 }

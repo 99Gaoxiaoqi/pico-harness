@@ -1661,6 +1661,10 @@ export async function executeAgentRuntime(
       readonly signal?: AbortSignal;
       readonly sessionScope?: Parameters<ApprovalManager["waitForApproval"]>[6]["sessionScope"];
     }): Promise<{ readonly approvalId: string; readonly result: ApprovalResult }> => {
+      const activeGoal = runtimeState.goalManager.getActive();
+      if (activeGoal?.status === "active") {
+        runtimeState.goalManager.pause(activeGoal.id, `等待工具 ${input.toolName} 的权限审批`);
+      }
       const approvalId = `approval_${randomUUID()}`;
       const run = currentRuntimeRun();
       const record = run?.claimsSession(session) === true;

@@ -443,7 +443,7 @@ function projectRun(
         if (i === undefined) break;
         update(i, {
           status: event.data.status === "succeeded" ? "completed" : event.data.status,
-          ...(event.data.error ? { error: preview(event.data.error) } : {}),
+          ...(event.data.error ? { error: errorPreview(event.data.error) } : {}),
         });
         break;
       }
@@ -521,7 +521,7 @@ function projectRun(
       case "run.terminal":
         if (event.data.status === "failed") {
           const i = add(event, "error", "执行失败", "failed");
-          if (event.data.reason) update(i, { error: preview(event.data.reason) });
+          if (event.data.reason) update(i, { error: errorPreview(event.data.reason) });
         }
         break;
     }
@@ -544,7 +544,7 @@ function projectRun(
         : {}),
       ...(record.httpStatus !== undefined ? { httpStatus: record.httpStatus } : {}),
       ...(record.finishReason !== undefined ? { finishReason: preview(record.finishReason) } : {}),
-      ...(record.error !== undefined ? { error: preview(record.error) } : {}),
+      ...(record.error !== undefined ? { error: errorPreview(record.error) } : {}),
       ...(record.errorClass !== undefined ? { errorClass: record.errorClass } : {}),
       ...(record.errorCategory !== undefined ? { errorCategory: record.errorCategory } : {}),
       ...(record.transportCode !== undefined ? { transportCode: record.transportCode } : {}),
@@ -584,7 +584,7 @@ function projectRun(
     status: terminal?.kind === "run.terminal" ? terminal.data.status : "running",
     ...(terminal ? { durationMs: elapsed(opening.at, terminal.at) } : {}),
     ...(terminal?.kind === "run.terminal" && terminal.data.reason
-      ? { reason: preview(terminal.data.reason) }
+      ? { reason: errorPreview(terminal.data.reason) }
       : {}),
     ...(opening.refs?.parentRunId ? { parentRunId: opening.refs.parentRunId } : {}),
     steps: steps.sort((a, b) => Date.parse(a.at) - Date.parse(b.at)),
@@ -619,4 +619,16 @@ function accountingVersion(db: DatabaseSync, sessionId: string): number {
     db.prepare("SELECT revision FROM usage_accounting_versions WHERE session_id=?").get(sessionId)
       ?.revision ?? 0,
   );
+}
+
+/** Provider summaries are already bounded; clipping their JSON envelope loses the entire detail. */
+function errorPreview(value: string): string {
+  if (
+    value.length <= 20_000 &&
+    /^(?:ModelCommunicationError category=[a-z_]+ diagnosticId=[A-Za-z0-9_-]+|LLMStatusError status=[1-5]\d\d); detail omitted\nProvider detail: /.test(
+      value,
+    )
+  )
+    return value;
+  return preview(value);
 }

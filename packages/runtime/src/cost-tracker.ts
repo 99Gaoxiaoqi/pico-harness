@@ -1,3 +1,4 @@
+import { providerFailureSummary } from "@pico/core";
 // 成本与耗时追踪:Harness 层无侵入式拦截大模型 Token 消耗与执行耗时。
 //
 // 解决痛点:Agent 部署到生产,月底老板拿着几万元账单质问"哪个任务消耗最多 Token"。
@@ -585,8 +586,8 @@ function preparedRequestRoute(route: string | BillingRoute): string | undefined 
 
 function runtimeErrorSummary(error: unknown): string {
   const metadata = safeErrorMetadata(error);
-  if (error instanceof ModelCommunicationError)
-    return `${metadata.errorName} category=${error.category} diagnosticId=${error.diagnostic.diagnosticId}; detail omitted`;
+  const providerFailure = providerFailureSummary(error);
+  if (providerFailure !== undefined) return providerFailure;
   return `${metadata.errorName}${metadata.statusCode === undefined ? "" : ` status=${metadata.statusCode}`}; detail omitted`;
 }
 

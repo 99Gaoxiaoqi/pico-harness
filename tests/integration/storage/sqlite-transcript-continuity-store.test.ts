@@ -79,11 +79,12 @@ function toolResult(
   toolCallId: string,
   toolName = "read",
   runId = "run-1",
+  turnId = "turn-1",
 ): RuntimeEvent {
   const content = "tool result";
   const sha256 = createHash("sha256").update(content).digest("hex");
   return {
-    ...eventBase(eventId, sessionId, runId),
+    ...eventBase(eventId, sessionId, runId, turnId),
     refs: { toolCallId },
     kind: "tool.result.recorded",
     data: {
@@ -403,6 +404,8 @@ test("tool projection updates one source-stable item revision", async () => {
         id: "tool:call-1",
         kind: "tool",
         name: "read",
+        runId: "run-1",
+        turnId: "turn-1",
         result: {
           deliveryTruncated: false,
           projection: {
@@ -422,6 +425,112 @@ test("tool projection updates one source-stable item revision", async () => {
         status: "success",
       });
     }
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("canonical tool projection preserves run identity for nested results and rebuilds cached history", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pico-transcript-tool-turn-"));
+  const workspace = join(root, "workspace");
+  mkdirSync(workspace, { recursive: true });
+  const storageRoot = join(root, "storage");
+  let store = new SqliteRuntimeEventStore({ storageRoot });
+  try {
+    const sessionId = "tool-turn-session";
+    const { ownerFence } = await initializeRuntimeEventOwner(store, {
+      sessionId,
+      workDir: workspace,
+    });
+    const started = await store.append(
+      transcriptToolStarted(
+        "runtime-tool-turn-started",
+        sessionId,
+        "run-tool-turn",
+        "turn-tool-turn",
+        "call-tool-turn",
+        "provider-tool-turn",
+        "read",
+        1,
+      ),
+      { ownerFence },
+    );
+    const startPage = await store.readTranscriptProjectionPage({
+      sessionId,
+      through: started.transcriptWatermark!,
+      maxBytes: 16_384,
+    });
+    assert.equal(startPage.items[0]?.payload["runId"], "run-tool-turn");
+    assert.equal(startPage.items[0]?.payload["turnId"], "turn-tool-turn");
+
+    const settled = await store.append(
+      toolResult(
+        "runtime-tool-turn-result",
+        sessionId,
+        "provider-tool-turn",
+        "read",
+        "run-tool-turn",
+        "turn-tool-turn",
+      ),
+      { ownerFence },
+    );
+    const settledPage = await store.readTranscriptProjectionPage({
+      sessionId,
+      through: settled.transcriptWatermark!,
+      maxBytes: 16_384,
+    });
+    assert.equal(settledPage.items[0]?.payload["runId"], "run-tool-turn");
+    assert.equal(settledPage.items[0]?.payload["turnId"], "turn-tool-turn");
+    assert.equal(settledPage.items[0]?.payload["status"], "success");
+
+    // exec's nested tools have canonical result events but no transcript tool.started row.
+    for (const name of ["grep", "read_file"]) {
+      const toolCallId = `code-mode:${name}`;
+      await store.append(
+        {
+          ...toolResult(
+            `nested-${name}-result`,
+            sessionId,
+            toolCallId,
+            name,
+            "run-tool-turn",
+            "turn-tool-turn-2",
+          ),
+          refs: { toolCallId, parentToolCallId: "provider-tool-turn" },
+        },
+        { ownerFence },
+      );
+    }
+    const page = await store.readTranscriptProjectionPage({ sessionId, maxBytes: 16_384 });
+    assert.deepEqual(
+      page.items.map(({ payload }) => [payload["name"], payload["runId"], payload["turnId"]]),
+      [
+        ["read", "run-tool-turn", "turn-tool-turn"],
+        ["grep", "run-tool-turn", "turn-tool-turn-2"],
+        ["read_file", "run-tool-turn", "turn-tool-turn-2"],
+      ],
+    );
+
+    store.close();
+    const database = new DatabaseSync(operationalDatabasePath(storageRoot));
+    try {
+      database.prepare(
+        "UPDATE runtime_transcript_projection_state SET projector_version = 7 WHERE session_id = ?",
+      ).run(sessionId);
+      database.prepare(
+        `UPDATE runtime_transcript_item_versions
+         SET payload_json = json_remove(payload_json, '$.runId', '$.turnId')
+         WHERE session_id = ? AND item_id LIKE 'tool:code-mode:%'`,
+      ).run(sessionId);
+    } finally {
+      database.close();
+    }
+    store = new SqliteRuntimeEventStore({ storageRoot });
+    const rebuilt = await store.readTranscriptProjectionPage({ sessionId, maxBytes: 16_384 });
+    assert.notEqual(rebuilt.watermark.historyEpoch, page.watermark.historyEpoch);
+    assert.equal(rebuilt.watermark.projectorVersion, RUNTIME_TRANSCRIPT_PROJECTOR_VERSION);
+    assert.deepEqual(rebuilt.items, page.items);
   } finally {
     store.close();
     rmSync(root, { recursive: true, force: true });
@@ -489,13 +598,23 @@ test("structured interactions and goals update stable projection items in place"
       id: "goal-1",
       title: "Ship continuity",
       description: "Finish the projection path",
+      completionCriteria: ["Projection path is complete"],
       status: "active" as const,
       createdAt: 1,
+      maxIterations: 50,
+      blockCap: 8,
+      controlRevision: 1,
       budgetUsage: { turns: 0, tokens: 0, costCNY: 0, startedAt: 1 },
+      consecutiveNoProgress: 0,
+      evidence: [],
+      completionRequested: false,
+      pendingContinuation: false,
+      awaitingUserTurn: true,
+      waitCount: 0,
     };
     const active = await store.appendSessionState(
       sessionId,
-      { goal: { stateVersion: 1, sequence: 1, activeGoalId: goal.id, goals: [goal] } },
+      { goal: { stateVersion: 2, sequence: 1, activeGoalId: goal.id, goals: [goal] } },
       { ownerFence },
     );
     const activePage = await store.readTranscriptProjectionPage({
@@ -517,10 +636,10 @@ test("structured interactions and goals update stable projection items in place"
       sessionId,
       {
         goal: {
-          stateVersion: 1,
+          stateVersion: 2,
           sequence: 2,
           activeGoalId: null,
-          goals: [{ ...goal, status: "complete" }],
+          goals: [{ ...goal, status: "achieved", awaitingUserTurn: false }],
         },
       },
       { ownerFence },

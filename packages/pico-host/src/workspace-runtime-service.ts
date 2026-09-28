@@ -74,6 +74,9 @@ export interface DaemonRunExecutor {
 }
 
 export interface DaemonRunExecution {
+  /** Trusted origin annotation for Host-admitted Goal continuation Runs. */
+  readonly origin?: "goal";
+  readonly goalTitle?: string;
   readonly orchestrationMode?: "graph" | "swarm";
   readonly requestedModel?: string;
   readonly allowedTools?: readonly string[];
@@ -484,7 +487,13 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
     const runtime = await this.getRuntime(input.workspacePath);
     const start = () => {
       const run = runtime.startRun(
-        { description: input.prompt, ...(input.sessionId ? { sessionId: input.sessionId } : {}) },
+        {
+          description:
+            input.execution?.origin === "goal"
+              ? `🎯 Goal continuation · ${input.execution.goalTitle ?? "Goal"}`
+              : input.prompt,
+          ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+        },
         (context) => {
           if (input.execution?.checkpointId) context.bindCheckpoint(input.execution.checkpointId);
           return this.options.execute({

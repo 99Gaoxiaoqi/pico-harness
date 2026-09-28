@@ -56,6 +56,7 @@ export interface DesktopSessionRequestContext {
     params: RuntimeRequest<"session.settings.update">["params"],
   ) => Awaitable<JsonValue>;
   readonly getGoal: (workspacePath: string, sessionId: string) => Awaitable<JsonValue>;
+  readonly controlGoal: (params: RuntimeRequest<"goal.control">["params"]) => Awaitable<JsonValue>;
   readonly sendSession: (params: RuntimeRequest<"session.send">["params"]) => Promise<JsonValue>;
   readonly cancelRun: (
     workspacePath: string,
@@ -94,6 +95,7 @@ export function createDesktopSessionRequestHandlers(
   | "session.settings.update"
   | "session.directories.add"
   | "goal.get"
+  | "goal.control"
   | "session.send"
   | "run.cancel"
   | "run.start"
@@ -149,6 +151,7 @@ export function createDesktopSessionRequestHandlers(
     "session.settings.update": (request) => context.updateRuntimeSessionSettings(request.params),
     "goal.get": (request) =>
       context.getGoal(request.params.workspacePath, request.params.sessionId),
+    "goal.control": (request) => context.controlGoal(request.params),
     "session.send": (request) =>
       context.withProviderDependencyLock(() => context.sendSession(request.params)),
     "run.cancel": (request) =>

@@ -392,6 +392,7 @@ export const previewData: AppData = {
     period: "本月",
   },
   configVersion: 3,
+  picoHome: "/Users/pico/.pico",
   launchAtLogin: true,
   backgroundMode: true,
   notices: {},

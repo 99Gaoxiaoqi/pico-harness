@@ -167,19 +167,6 @@ export function ConversationComposer({
             <ConversationComposerMenu onAttach={onAttach} modes={modes} disabled={disabled || busy}>
               {leadingAccessory}
             </ConversationComposerMenu>
-            {status !== "idle" && (
-              <Selector
-                className="conversation-behavior"
-                label="运行中消息行为"
-                isLabelHidden
-                variant="ghost"
-                size="sm"
-                value={effectiveBehavior}
-                isDisabled={disabled || !onBehaviorChange}
-                onChange={(next) => onBehaviorChange?.(next as ComposerBehavior)}
-                options={Object.entries(behaviorLabels).map(([value, label]) => ({ value, label }))}
-              />
-            )}
             {options.length > 0 && (
               <Selector
                 className="conversation-context-option"
@@ -197,6 +184,19 @@ export function ConversationComposer({
         }
         sendActions={
           <div className="conversation-composer__actions">
+            {status !== "idle" && (
+              <Selector
+                className="conversation-behavior"
+                label="运行中消息行为"
+                isLabelHidden
+                variant="ghost"
+                size="sm"
+                value={effectiveBehavior}
+                isDisabled={disabled || !onBehaviorChange}
+                onChange={(next) => onBehaviorChange?.(next as ComposerBehavior)}
+                options={Object.entries(behaviorLabels).map(([value, label]) => ({ value, label }))}
+              />
+            )}
             {resolvedStatusText && (
               <span id={statusId} className="conversation-composer__status" role="status">
                 {resolvedStatusText}

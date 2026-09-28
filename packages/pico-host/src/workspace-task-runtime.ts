@@ -1,3 +1,4 @@
+import { providerFailureSummary } from "@pico/core";
 import { randomUUID } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -10,7 +11,6 @@ import type {
   WorktreeTaskSnapshot,
 } from "./worktree-supervisor.js";
 import { raceWithDeadline } from "@pico/runtime/deadline";
-import { ModelCommunicationError } from "@pico/core";
 
 export const WORKSPACE_RUN_STATUSES = [
   "running",
@@ -767,8 +767,8 @@ function taskVersion(task: TaskSnapshot): number {
 }
 
 function errorMessage(error: unknown): string {
-  if (error instanceof ModelCommunicationError)
-    return `ModelCommunicationError category=${error.category} diagnosticId=${error.diagnostic.diagnosticId}; detail omitted`;
+  const providerFailure = providerFailureSummary(error);
+  if (providerFailure !== undefined) return providerFailure;
   return error instanceof Error ? error.message : String(error);
 }
 

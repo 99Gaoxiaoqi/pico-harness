@@ -1,9 +1,21 @@
 /** HTTP 状态码错误，带 statusCode 供调用侧进行精确判定。 */
+export interface ProviderErrorDetail {
+  readonly message: string;
+  readonly code?: string;
+  readonly type?: string;
+  readonly requestId?: string;
+}
+
 export class LLMStatusError extends Error {
   readonly statusCode: number;
   readonly retryAfterMs?: number;
 
-  constructor(statusCode: number, message: string, retryAfterMs?: number) {
+  constructor(
+    statusCode: number,
+    message: string,
+    retryAfterMs?: number,
+    readonly providerDetail?: ProviderErrorDetail,
+  ) {
     super(message);
     this.name = "LLMStatusError";
     this.statusCode = statusCode;
@@ -85,6 +97,7 @@ export class ModelCommunicationError extends Error {
   constructor(
     readonly category: ModelCommunicationCategory,
     diagnostic: ModelResponseDiagnostic,
+    readonly providerDetail?: ProviderErrorDetail,
   ) {
     super(
       `${COMMUNICATION_MESSAGES[category]}；诊断编号 ${diagnostic.diagnosticId}（请求及响应内容已省略）`,
@@ -92,6 +105,19 @@ export class ModelCommunicationError extends Error {
     this.name = "ModelCommunicationError";
     this.diagnostic = Object.freeze({ ...diagnostic });
   }
+}
+
+/** Local failure records retain bounded provider details. Export/copy redacts them separately. */
+export function providerFailureSummary(error: unknown): string | undefined {
+  const prefix =
+    error instanceof ModelCommunicationError
+      ? `ModelCommunicationError category=${error.category} diagnosticId=${error.diagnostic.diagnosticId}; detail omitted`
+      : error instanceof LLMStatusError
+        ? `LLMStatusError status=${error.statusCode}; detail omitted`
+        : undefined;
+  if (prefix === undefined) return undefined;
+  const detail = (error as ModelCommunicationError | LLMStatusError).providerDetail;
+  return detail ? `${prefix}\nProvider detail: ${JSON.stringify(detail)}` : prefix;
 }
 
 export type ModelCapabilityErrorCode = "context_window" | "vision" | "reasoning" | "tool_call";

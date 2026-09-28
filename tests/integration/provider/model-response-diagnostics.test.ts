@@ -2,23 +2,29 @@ import { capturePhysicalAttempts } from "../../fixtures/native-accounting.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createServer } from "node:http";
-import { ModelCommunicationError, type ModelCommunicationCategory } from "@pico/core";
+import {
+  LLMStatusError,
+  ModelCommunicationError,
+  providerFailureSummary,
+  type ModelCommunicationCategory,
+} from "@pico/core";
 import { AiSdkProvider } from "@pico/pico-host/provider/ai-sdk-provider";
 import { CostTracker } from "@pico/pico-host/cost-tracker";
 import { defaultIsRetryableError, generateWithRetry } from "@pico/runtime/provider-retry";
 import type { PhysicalAttemptRecord } from "@pico/storage/runtime-control-types";
 
-test("HTTP stream diagnostics distinguish failures through SDK and ledger without exposing remote data", async (context) => {
+test("HTTP stream diagnostics retain provider error summaries without retaining unrelated payloads", async (context) => {
   const secret = "PRIVATE_RESPONSE_KEY_PROMPT_MUST_NOT_LEAK";
   let payload = "";
   let contentType = "text/event-stream";
   let calls = 0;
+  let status = 200;
   const server = createServer(async (req, res) => {
     for await (const _chunk of req) {
       /* consume request */
     }
     calls++;
-    res.writeHead(200, { "content-type": contentType, "x-request-id": secret });
+    res.writeHead(status, { "content-type": contentType, "x-request-id": "req-fixture" });
     res.end(payload);
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -62,7 +68,14 @@ test("HTTP stream diagnostics distinguish failures through SDK and ledger withou
     { category: "invalid_json", payload: `{${secret}`, streaming: false, sdkError: "SyntaxError" },
     {
       category: "stream_error",
-      payload: sse({ error: { message: secret, type: secret, code: secret } }),
+      payload: sse({
+        error: {
+          message: "This account cannot use spark; api_key=sk-local-example123",
+          type: "invalid_request_error",
+          code: "model_not_supported",
+          prompt: secret,
+        },
+      }),
       sdkError: "StreamProviderError",
     },
     {
@@ -100,6 +113,13 @@ test("HTTP stream diagnostics distinguish failures through SDK and ledger withou
         assert.ok(error.message.includes(error.diagnostic.diagnosticId));
         assert.equal(error.cause, undefined);
         assert.equal(defaultIsRetryableError(error), false);
+        if (entry.category === "stream_error") {
+          assert.equal(
+            error.providerDetail?.message,
+            "This account cannot use spark; api_key=sk-local-example123",
+          );
+          assert.equal(error.providerDetail?.code, "model_not_supported");
+        } else assert.equal(error.providerDetail, undefined);
         assert.equal(ids.has(error.diagnostic.diagnosticId), false);
         ids.add(error.diagnostic.diagnosticId);
         const record = records.at(-1)!;
@@ -115,6 +135,25 @@ test("HTTP stream diagnostics distinguish failures through SDK and ledger withou
     );
   }
   assert.equal(calls, cases.length + 1);
+  status = 400;
+  contentType = "application/json";
+  payload = JSON.stringify({
+    error: { message: "模型不可用".repeat(800), code: "model_not_supported" },
+    prompt: secret,
+  });
+  await assert.rejects(
+    tracked.generateStream(messages, [], () => {}),
+    (error: unknown) => {
+      assert.ok(error instanceof LLMStatusError);
+      assert.equal(error.statusCode, 400);
+      assert.equal(error.providerDetail?.code, "model_not_supported");
+      assert.equal(error.providerDetail?.requestId, "req-fixture");
+      assert.ok(Buffer.byteLength(error.providerDetail!.message) <= 2048);
+      assert.match(error.providerDetail!.message, /已截断/);
+      assert.doesNotMatch(providerFailureSummary(error)!, new RegExp(secret));
+      return true;
+    },
+  );
 });
 
 test("SDK unwraps fetch failures without losing safe transport retry classification", async (context) => {

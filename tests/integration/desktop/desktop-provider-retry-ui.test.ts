@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { redactDiagnostic } from "../../../apps/desktop/src/renderer/diagnostic-copy.js";
+import { ModelCommunicationError, providerFailureSummary } from "@pico/core";
 import type { JsonObject, RuntimeNotification } from "@pico/protocol";
 import {
   applyProviderRetryNotification,
@@ -156,5 +158,60 @@ test("retry and failure presentation keeps transport details out of conversation
   assert.equal(
     displayExecutionError("PermissionDenied: access required"),
     "PermissionDenied: access required",
+  );
+});
+
+test("provider detail is visible locally while diagnostic export redacts credentials", () => {
+  const message =
+    "Model spark is not supported. api_key=sk-local-example123\nAuthorization: Bearer private-token\n/Users/test-user/project <script>alert(1)</script>";
+  const raw = providerFailureSummary(
+    new ModelCommunicationError(
+      "stream_error",
+      {
+        diagnosticId: "local-detail",
+        durationMs: 10,
+        httpStatus: 200,
+      },
+      { message, code: "model_not_supported", requestId: "req-123" },
+    ),
+  )!;
+  const diagnostic = modelCommunicationDiagnostic(raw)!;
+  assert.match(diagnostic.providerDetail!, /sk-local-example123/);
+  assert.equal(displayExecutionError(raw), "模型响应流错误");
+  assert.match(displayExecutionError(raw, true), /Model spark is not supported/);
+  const markup = renderToStaticMarkup(
+    createElement(ProviderFailureCard, {
+      title: diagnostic.title,
+      providerDetail: diagnostic.providerDetail,
+      diagnosticText: raw,
+      canRetry: false,
+      onRetry() {},
+      onDiagnostics() {},
+    }),
+  );
+  assert.match(markup, /Model spark is not supported/);
+  assert.match(markup, /sk-local-example123/);
+  assert.match(markup, /复制诊断/);
+  assert.doesNotMatch(markup, /<script>/);
+  const copied = redactDiagnostic(
+    JSON.stringify({
+      reason: raw,
+      authorization: "Bearer hidden",
+      cookie: "session=hidden",
+      endpoint: "https://user:pass@example.com/api?access_token=hidden",
+      details: "password='two words' refresh_token=hidden",
+    }),
+  );
+  assert.doesNotMatch(
+    copied,
+    /sk-local-example123|private-token|test-user|user:pass|hidden|two words/,
+  );
+  assert.match(copied, /Model spark is not supported/);
+  assert.match(copied, /req-123/);
+  assert.match(copied, /已脱敏/);
+  assert.match(raw, /sk-local-example123/);
+  assert.deepEqual(
+    modelCommunicationDiagnostic(raw.split("\n")[0]! + "\nProvider detail: {broken"),
+    { title: "模型响应流错误", diagnosticId: "local-detail" },
   );
 });

@@ -374,6 +374,7 @@ function SettingsSidebar({
     skills: WandSparkles,
     mcp: Network,
     usage: Gauge,
+    data: Box,
     system: ShieldCheck,
   } as const;
   return (

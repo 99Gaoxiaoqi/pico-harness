@@ -290,11 +290,58 @@ function createHarness(options?: {
         case "goal.get":
           return {
             goal: {
-              stateVersion: 1,
+              stateVersion: 2,
               sequence: 1,
               activeGoalId: "g1",
               goals: [
-                { id: "g1", title: "目标一", description: "d", status: "active", createdAt: 1 },
+                {
+                  id: "g1",
+                  title: "目标一",
+                  description: "d",
+                  completionCriteria: ["完成测试"],
+                  status: "active",
+                  createdAt: 1,
+                  maxIterations: 50,
+                  blockCap: 8,
+                  controlRevision: 1,
+                  budgetUsage: { turns: 0, tokens: 0, costCNY: 0, startedAt: 1 },
+                  consecutiveNoProgress: 0,
+                  evidence: [],
+                  completionRequested: false,
+                  pendingContinuation: false,
+                  awaitingUserTurn: true,
+                  waitCount: 0,
+                },
+              ],
+            },
+          };
+        case "goal.control":
+          return {
+            goal: {
+              stateVersion: 2,
+              sequence: 2,
+              activeGoalId: params.action === "clear" ? null : "g1",
+              goals: [
+                {
+                  id: "g1",
+                  title: String(params.title ?? "目标一"),
+                  description: String(params.description ?? "d"),
+                  completionCriteria: Array.isArray(params.completionCriteria)
+                    ? params.completionCriteria
+                    : ["完成测试"],
+                  status: params.action === "pause" ? "paused" : params.action === "clear" ? "cleared" : "active",
+                  createdAt: 1,
+                  maxIterations: 50,
+                  blockCap: 8,
+                  controlRevision: 2,
+                  budgetUsage: { turns: 0, tokens: 0, costCNY: 0, startedAt: 1 },
+                  consecutiveNoProgress: 0,
+                  evidence: [],
+                  completionRequested: false,
+                  pendingContinuation: params.action === "resume",
+                  awaitingUserTurn: params.action === "arm",
+                  waitCount: 0,
+                },
               ],
             },
           };
@@ -923,6 +970,21 @@ test("client commands: query-class commands issue the right RPCs", async () => {
   const goal = await run(harness, "/goal");
   assert.match(String(goal.result?.message), /目标一/);
   assert.ok(harness.requests.some((entry) => entry.method === "goal.get"));
+
+  harness.requests.length = 0;
+  await run(harness, "/goal arm 发布版本 | 做好发布检查 | CI 全绿; 发布说明已生成");
+  assert.deepEqual(harness.requests[0]?.params, {
+    workspacePath: "C:\\ws",
+    sessionId: "s1",
+    action: "arm",
+    title: "发布版本",
+    description: "做好发布检查",
+    completionCriteria: ["CI 全绿", "发布说明已生成"],
+  });
+  await run(harness, "/goal pause g1");
+  await run(harness, "/goal resume g1");
+  await run(harness, "/goal clear g1");
+  assert.deepEqual(harness.requests.slice(1).map((entry) => entry.params.action), ["pause", "resume", "clear"]);
 
   const usage = await run(harness, "/usage");
   assert.match(String(usage.result?.message), /inputTokens=100/);
@@ -1874,8 +1936,8 @@ test("client commands preserve public metadata and registration order", () => {
     {
       name: "goal",
       aliases: [],
-      description: "查看当前目标",
-      usage: "/goal",
+      description: "查看或控制当前长程目标",
+      usage: "/goal [pause|resume|clear [id]|arm 标题 | 描述 | 完成标准; 完成标准]",
       category: "session",
       availability: "always",
     },

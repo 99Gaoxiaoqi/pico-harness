@@ -216,3 +216,10 @@
   background: white;
   box-shadow: 0 1px 3px #0002;
 }
+
+.settings-data-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}

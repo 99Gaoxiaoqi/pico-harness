@@ -73,6 +73,7 @@ import {
 } from "./runtime-projections/values.js";
 import {
   compareSessions,
+  mergeRunViews,
   parseChanges,
   parseRuns,
   parseSessionContext,
@@ -248,9 +249,7 @@ function mergeLoadedData(
         parseSessions(results.sessions, workspacePath),
       ),
     ].sort(compareSessions),
-    runs: [
-      ...replaceWorkspaceItems(base.runs, workspacePath, parseRuns(results.runs, workspacePath)),
-    ].sort((left, right) => right.updatedAt - left.updatedAt),
+    runs: mergeRunViews(base.runs, parseRuns(results.runs, workspacePath)),
     jobs: recordArray(jobResult.jobs).map((item) => ({
       id: stringValue(item.jobId),
       name: stringValue(item.name, "未命名自动化"),
@@ -596,6 +595,7 @@ export function useRuntimeStore(): RuntimeStore {
                   sessionId,
                   description: view.activeRun.description,
                   status: view.activeRun.status,
+                  version: view.activeRun.version,
                   startedAt: view.activeRun.startedAt,
                   updatedAt: view.activeRun.updatedAt,
                 },
@@ -1197,6 +1197,9 @@ export function useRuntimeStore(): RuntimeStore {
       }
       if (!isCurrentLoad()) return;
       const latestReplicaView = continuity?.view(workspacePath, sessionId);
+      // Metadata may finish after a terminal frame. Use the same live revision for
+      // the transcript and run controls, including an explicitly absent active run.
+      const latestRun = latestReplicaView ? latestReplicaView.activeRun : activeRun;
       setData((current) => ({
         ...current,
         approvals: [
@@ -1222,6 +1225,10 @@ export function useRuntimeStore(): RuntimeStore {
                   ),
                   hasEarlier: latestReplicaView.olderCursor !== undefined,
                   queuedCount: latestReplicaView.queuedInputs.length,
+                  runId:
+                    latestRun && !isTerminalRunStatus(stringValue(latestRun.status))
+                      ? stringValue(latestRun.runId)
+                      : undefined,
                 }
               : {
                   items: mergeHydratedConversationItems(
@@ -1232,22 +1239,8 @@ export function useRuntimeStore(): RuntimeStore {
                 }),
           },
         },
-        runs: activeRun
-          ? [
-              {
-                id: stringValue(activeRun.runId),
-                workspacePath,
-                sessionId: stringValue(activeRun.sessionId, sessionId),
-                description: stringValue(activeRun.description, "会话运行"),
-                status: stringValue(activeRun.status, "running"),
-                startedAt: numberValue(activeRun.startedAt, Date.now()),
-                updatedAt: numberValue(activeRun.updatedAt, Date.now()),
-              },
-              ...current.runs.filter(
-                (run) =>
-                  run.workspacePath !== workspacePath || run.id !== stringValue(activeRun.runId),
-              ),
-            ]
+        runs: latestRun
+          ? mergeRunViews(current.runs, parseRuns({ runs: [latestRun] }, workspacePath))
           : current.runs.filter(
               (run) =>
                 run.workspacePath !== workspacePath ||
@@ -1280,6 +1273,7 @@ export function useRuntimeStore(): RuntimeStore {
         throw new Error("当前 Runtime 缺少会话能力。请完全退出并重新启动 Pico。");
       }
       await loadWorkspaceIndex(bridge, true);
+      setData((current) => ({ ...current, picoHome: pingValue.picoHome }));
       await Promise.all([
         loadUserCapabilities(bridge),
         loadGlobalProviderConfig(bridge),
@@ -1805,7 +1799,39 @@ export function useRuntimeStore(): RuntimeStore {
             }
             const status = await invoke(bridge, "workspace.temporary.ensure", {});
             temporaryWorkspacePath = status.workspacePath;
-            await loadWorkspace(bridge, status.workspacePath);
+            // The Host has registered and trusted this temporary workspace. Publish
+            // that fact before admission/navigation, without waiting for page metadata.
+            workspaceIndexLoadGenerationRef.current += 1;
+            workspaceLoadGenerationRef.current += 1;
+            workspaceLoadIntentRef.current = status.workspacePath;
+            setData((current) => ({
+              ...current,
+              workspacePath: status.workspacePath,
+              workspaceMode: status.mode,
+              workspaceBranch: status.branch || undefined,
+              workspaceCapabilities: status.capabilities,
+              trusted: true,
+              workspaces: [
+                {
+                  path: status.workspacePath,
+                  name: TEMPORARY_WORKSPACE_LABEL,
+                  mode: status.mode,
+                  registered: true,
+                  trusted: true,
+                  temporary: true,
+                },
+                ...current.workspaces.filter(
+                  (workspace) => workspace.path !== status.workspacePath,
+                ),
+              ],
+              timeline: [],
+              approvals: [],
+              prompts: [],
+              changes: [],
+              changeFingerprint: undefined,
+              modelRoutes: parseModelRoutes({ providers: current.providerConfig.providers }),
+              memory: { workspacePath: status.workspacePath, items: [], status: "idle" },
+            }));
           });
           return temporaryWorkspacePath;
         });
@@ -1961,10 +1987,15 @@ export function useRuntimeStore(): RuntimeStore {
           });
           const session = value.session;
           resolvedSessionId = stringValue(session.sessionId, input.sessionId);
-          await loadWorkspace(bridge, workspacePath);
-          if (resolvedSessionId) {
-            await loadConversation(bridge, workspacePath, resolvedSessionId);
-          }
+          // Admission succeeded. Inspection may wait behind the active run; it must
+          // neither delay clearing the sent draft nor turn a refresh error into a
+          // failed send that the user might submit again.
+          void (async () => {
+            await loadWorkspace(bridge, workspacePath);
+            if (resolvedSessionId) {
+              await loadConversation(bridge, workspacePath, resolvedSessionId);
+            }
+          })().catch(reportFailure);
         });
         if (succeeded && pendingSendRef.current?.identity === sendIdentity) {
           pendingSendRef.current = undefined;

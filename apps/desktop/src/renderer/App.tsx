@@ -20,7 +20,12 @@ import { ExtensionsIndex, ExtensionsPage } from "./pages/ExtensionsPage.js";
 import { HomePage } from "./pages/HomePage.js";
 import { ReviewPage } from "./pages/ReviewPage.js";
 import { SessionsPage } from "./pages/SessionsPage.js";
-import { SettingsPage, SystemSettingsPage, WorkspaceSettingsPage } from "./pages/SettingsPage.js";
+import {
+  DataSettingsPage,
+  SettingsPage,
+  SystemSettingsPage,
+  WorkspaceSettingsPage,
+} from "./pages/SettingsPage.js";
 import "./pages/subagent-settings.css";
 import { SubagentSettingsPage } from "./pages/SubagentSettingsPage.js";
 import { RuntimeContext, useRuntime } from "./runtime-context.js";
@@ -109,6 +114,7 @@ function AppStateRouter() {
         <Route path="extensions/:kind" element={<ExtensionsPage />} />
         <Route path="settings" element={<SettingsPage />} />
         <Route path="settings/workspaces" element={<WorkspaceSettingsPage />} />
+        <Route path="settings/data" element={<DataSettingsPage />} />
         <Route path="settings/models" element={<ProviderPageRoute />} />
         <Route path="settings/models/:providerId" element={<ProviderPageRoute />} />
         <Route path="settings/subagents" element={<SubagentSettingsRoute />} />

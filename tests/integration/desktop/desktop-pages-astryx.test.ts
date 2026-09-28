@@ -141,11 +141,15 @@ import {createRoot} from "react-dom/client";
 import {MemoryRouter} from "react-router-dom";
 import {AutomationsPage} from "./apps/desktop/src/renderer/pages/AutomationsPage.tsx";
 import {SessionsPage} from "./apps/desktop/src/renderer/pages/SessionsPage.tsx";
+import {ConversationPage} from "./apps/desktop/src/renderer/pages/ConversationPage.tsx";
+import {DataSettingsPage} from "./apps/desktop/src/renderer/pages/SettingsPage.tsx";
 import {ComposerModelPicker} from "./apps/desktop/src/renderer/ComposerModelPicker.tsx";
 import {ConversationInteractionSlot} from "./apps/desktop/src/renderer/conversation/ConversationInteractionSlot.tsx";
+import {ConversationTranscript} from "./apps/desktop/src/renderer/conversation/ConversationTranscript.tsx";
+import {SideChatWorkbarPanel} from "./apps/desktop/src/renderer/workbar-panels/SideChatWorkbarPanel.tsx";
 import {RuntimeContext} from "./apps/desktop/src/renderer/runtime-context.tsx";
 import {previewData} from "./apps/desktop/src/renderer/fixture.ts";
-import "@astryxdesign/core/astryx.css";
+import {PicoTheme} from "./apps/desktop/src/renderer/astryx-provider.tsx";
 import "./apps/desktop/src/renderer/styles.css";
 import "./apps/desktop/src/renderer/astryx-controls.css";
 import "./apps/desktop/src/renderer/conversation/conversation.css";
@@ -181,6 +185,16 @@ function ModelHarness(){
   }}/>;
 }
 async function scenario(){
+  const opened=[];let copied="";
+  const storageRuntime={...runtime,data:{...previewData,picoHome:"/custom/Pico data",workspacePath:undefined,workspaces:[]},actions:{openWorkspace:async path=>opened.push(path)}};
+  await act(async()=>root.render(<RuntimeContext value={storageRuntime}><DataSettingsPage/></RuntimeContext>));
+  check(document.body.textContent.includes("/custom/Pico data/temporary-workspace-<任务 ID>"),"Data settings use the actual root without creating a project");
+  check(document.body.textContent.includes("/custom/Pico data/workspaces/<工作区标识>/pico.sqlite"),"Data settings distinguish files from conversation storage");
+  await click("打开数据文件夹");check(opened[0]==="/custom/Pico data","Open passes the exact data path");
+  const originalExec=document.execCommand;
+  document.execCommand=command=>{check(command==="copy","Only copy is requested");copied=document.activeElement.value;return true;};
+  await click("复制数据文件夹路径");document.execCommand=originalExec;
+  check(copied==="/custom/Pico data"&&document.body.textContent.includes("已复制数据文件夹路径"),"Copy preserves the real usable path and reports success");
   await act(async()=>root.render(<RuntimeContext value={runtime}><AutomationsPage/></RuntimeContext>));
   await click("新建定时任务");
   await enter('[name="name"]',"每周检查");
@@ -218,12 +232,144 @@ async function scenario(){
   check(button("选择模型：Beta"),"Successful switch updates visible label");
   await act(async()=>setLocked(true));
   check(button("选择模型：Beta").getAttribute("aria-disabled") === "true","Running task prevents switching");
+  const longLabel="a-very-long-model-name-with-a-version-and-provider-suffix";
+  const manyRoutes=Array.from({length:50},(_,index)=>({id:"test/"+index,label:index===16?longLabel:"model-"+index}));
+  await act(async()=>root.render(<PicoTheme><div style={{position:"fixed",bottom:20,left:300}}><ComposerModelPicker routes={manyRoutes} providers={[]} value="test/16" onConfigure={()=>{}} onChange={()=>{}}/></div></PicoTheme>));
+  await click("选择模型："+longLabel);await frame();
+  await Promise.all(document.getAnimations().map(animation=>animation.finished));await frame();
+  const menu=document.querySelector(".composer-model-menu");
+  const selected=menu.querySelector('[aria-checked="true"]');
+  const rect=element=>element.getBoundingClientRect();
+  const icon=selected.querySelector(".composer-model-mark");
+  const name=selected.querySelector("strong");
+  const mark=selected.querySelector(".composer-model-check");
+  check(rect(name).left-rect(icon).right<=12,"Model icon must sit next to its label");
+  check(rect(name).right<=rect(mark).left-5,"Long model label must not overlap the selected checkmark");
+  check(name.scrollWidth>name.clientWidth&&getComputedStyle(name).textOverflow==="ellipsis","Long model label is ellipsized");
+  const bounds=JSON.stringify({menu:rect(menu),selected:rect(selected),trigger:rect(button("选择模型："+longLabel)),scrollTop:menu.scrollTop});
+  check(rect(selected).top>=rect(menu).top-1&&rect(selected).bottom<=rect(menu).bottom+1,"Current model remains visible in a long menu: "+bounds);
+  check(rect(menu).bottom<=rect(button("选择模型："+longLabel)).top,"Model menu opens above the composer trigger: "+bounds);
+  check(rect(menu).height<=328&&menu.scrollHeight>menu.clientHeight,"Long menu stays bounded and scrollable");
   const decisions=[];
   await act(async()=>root.render(<ConversationInteractionSlot approval={{id:"approval",kind:"plan",title:"计划",detail:"说明",planSteps:["步骤"]}} busy={false} onApprovalDecision={(...args)=>decisions.push(args)} onPromptAnswer={()=>{}}/>));
   check(button("继续修改").disabled,"Empty feedback stays disabled");
   await enter("textarea","保留接口");
   await click("继续修改");
   check(decisions[0][0]==="continue_editing"&&decisions[0][1]==="保留接口","Feedback action keeps decision and text");
+  const sends=[];
+  const taskRuntime={...runtime,preview:true,data:{...previewData,providerConfig:{...previewData.providerConfig,
+    defaultModelRouteId:"test/a",userDefaults:{modelRouteId:"test/a",thinkingEffort:"unsupported"},
+    providers:[{id:"test",origin:"user",protocol:"openai",baseURL:"https://fixture.invalid",models:["a"],availableModels:["a","b","disabled"],disabledModels:["disabled"],resolvedModelCapabilities:{a:{reasoningLevels:["low","high"]},b:{reasoningLevels:["medium"]}}}]},
+  },actions:{...runtime.actions,ensureTemporaryWorkspace:async()=>"/fixture",sendMessage:async request=>{sends.push(request);return {succeeded:false};}}};
+  await act(async()=>root.render(<PicoTheme><RuntimeContext value={taskRuntime}><MemoryRouter initialEntries={["/task/new"]}><ConversationPage/></MemoryRouter></RuntimeContext></PicoTheme>));
+  const thinking=()=>document.querySelector('[role="combobox"][name="initial-thinking-effort"]') ?? document.querySelector('[name="initial-thinking-effort"]')?.closest('.astryx-field')?.querySelector('[role="combobox"]');
+  check(thinking(),"New task must expose thinking before the first message");
+  await act(async()=>thinking().click());await frame();
+  const option=text=>[...document.querySelectorAll('[role="option"]')].find(el=>el.textContent.trim()===text);
+  check(option("low")&&option("high")&&!option("unsupported"),"Only supported thinking levels are offered");
+  await act(async()=>option("high").click());
+  const editor=document.querySelector('[contenteditable="true"]');
+  await act(async()=>{editor.focus();document.execCommand("insertText",false,"test first send");});
+  await click("发送消息");
+  check(sends.length===1&&sends[0].initialSettings.thinkingEffort==="high","First send carries the explicit reasoning selection");
+  await click("选择模型：a");await frame();
+  check(radio("b")&&!document.querySelector('.composer-model-menu')?.textContent.includes("disabled"),"New task includes discovered models and excludes disabled ones");
+  await act(async()=>radio("b").click());
+  await act(async()=>thinking().click());await frame();
+  check(option("medium")&&!option("high"),"Changing model refreshes supported reasoning levels");
+  await act(async()=>option("思考：默认").click());
+  await click("发送消息");
+  check(sends.length===2&&!Object.hasOwn(sends[1].initialSettings,"thinkingEffort"),"Model change/default selection leaves reconciliation to the Host");
+
+  // Exercise the production transcript's disclosures across live updates and settlement.
+  // Host run IDs and canonical execution IDs intentionally differ, as in real sessions.
+  const activeRun={id:"host-1",status:"running"};
+  const tool=(id,state="done",runId="execution-1")=>({id,kind:"tool",runId,turnId:id,toolName:"grep",title:"grep",detail:JSON.stringify({pattern:"GoalEvaluator".repeat(40),path:"/workspace/"+"long-path/".repeat(30)+"source.ts"}),state,output:state==="failed"?"匹配表达式错误":"完整工具结果"});
+  const reasoning={id:"thinking-1",kind:"thinking",runId:"execution-1",text:"检查配置\\n完整推理正文",streaming:true};
+  const liveItems=[
+    {id:"user-1",kind:"userMessage",text:"检查项目"},
+    {id:"start-1",kind:"runBoundary",runId:"host-1",status:"started",label:"运行中"},
+    reasoning,tool("tool-1"),tool("tool-2","failed"),
+    {id:"commentary",kind:"assistantMessage",runId:"execution-1",text:"正在继续检查"},
+    tool("tool-3"),
+  ];
+  const mountTranscript=async(items,run,width=800)=>act(async()=>root.render(<PicoTheme><div className="conversation-surface" style={{width,display:"block",height:"auto"}}><ConversationTranscript items={items} activeRun={run} onOpenItem={item=>decisions.push(item.id)} renderItem={(item,fallback)=>item.kind==="runBoundary"&&item.status==="failed"?<aside data-recovery="true">重试运行</aside>:fallback}/></div></PicoTheme>));
+  await mountTranscript(liveItems,activeRun);
+  const process=()=>document.querySelector('.conversation-process');
+  const thinkingRow=()=>document.querySelector('.conversation-thinking');
+  check(process().open,"Live execution process is expanded even with different canonical IDs");
+  check(!thinkingRow().open&&!thinkingRow().querySelector('.conversation-thinking__body').textContent,"Thinking starts collapsed and does not mount its body");
+  check(!thinkingRow().querySelector('.conversation-thinking__preview'),"Streaming thinking does not show a changing preview");
+  check(document.querySelectorAll('[data-tool-group]').length===1,"Adjacent tools remain grouped inside the process");
+  const toolGroup=()=>document.querySelector('[data-tool-group]');
+  check(!toolGroup().open&&toolGroup().querySelector('.conversation-tool-group__latest').textContent==="grep","Collapsed group shows its latest action");
+  check(toolGroup().querySelector('.conversation-tool-row__target').textContent.length<=120,"Invocation preview is bounded even for long arguments");
+  check(getComputedStyle(toolGroup().querySelector('.conversation-tool-group__expanded-title')).display==="none","Generic group heading is hidden while collapsed");
+  check(document.querySelector('.conversation-tool-record[data-state="failed"]').open===false,"Errors do not force tool details open");
+  check(thinkingRow().querySelector('summary').getBoundingClientRect().height<=28,"Thinking uses the compact tool-row geometry");
+  check(getComputedStyle(process().querySelector('.conversation-process__items')).paddingLeft==="0px","Process does not add a nested tree indent");
+  check(process().contains([...document.querySelectorAll('.conversation-message--assistant')][0]),"Intermediate commentary stays in the process");
+  await act(async()=>process().querySelector('summary').click());
+  check(process().open,"Live work cannot be collapsed");
+  await act(async()=>thinkingRow().querySelector('summary').click());
+  const originalThinking=thinkingRow();
+  check(thinkingRow().open&&thinkingRow().textContent.includes("完整推理正文"),"Opening thinking renders the full content");
+  const settled=[...liveItems.map(item=>item.id===reasoning.id?{...item,streaming:false,text:item.text+"追加说明"}:item),
+    {id:"answer-1",kind:"assistantMessage",runId:"execution-1",text:"最终结论一"},
+    {id:"end-1",kind:"runBoundary",runId:"host-1",status:"completed",label:"运行完成",duration:"2 分 15 秒"},
+  ];
+  await mountTranscript(settled);
+  check(!process().open,"Settling collapses the outer process automatically");
+  check(thinkingRow()===originalThinking&&thinkingRow().open,"Nested expansion survives settlement");
+  check(process().querySelector('summary').textContent.includes("2 分 15 秒"),"Settled header carries Run duration");
+  check(process().querySelector('summary').textContent.includes("1 次工具失败"),"Failure summary remains visible when collapsed");
+  const answer=[...document.querySelectorAll('.conversation-message--assistant')].find(el=>el.textContent.includes("最终结论一"));
+  check(answer&&!answer.closest('.conversation-process'),"Final answer stays outside the process");
+  await act(async()=>process().querySelector('summary').click());
+  await act(async()=>thinkingRow().querySelector('summary').click());
+  check(!thinkingRow().open&&thinkingRow().querySelector('.conversation-thinking__body').textContent.includes("追加说明"),"Closed thinking retains mounted content after first expansion");
+  check(thinkingRow().querySelector('.conversation-thinking__preview').textContent==="检查配置","Settled preview uses the first nonempty line");
+  await act(async()=>document.querySelector('[data-tool-group] > summary').click());
+  check(getComputedStyle(toolGroup().querySelector('.conversation-tool-group__latest')).display==="none","Expanded group switches to the count heading");
+  const failedTool=()=>document.querySelector('.conversation-tool-record[data-state="failed"]');
+  check(failedTool().querySelector('summary').textContent.includes("匹配表达式错误"),"Collapsed failed call retains its error preview");
+  await act(async()=>failedTool().querySelector('summary').click());
+  await act(async()=>document.querySelector('.conversation-tool-record[data-state="failed"] button').click());
+  check(decisions.includes("tool-2"),"Full failed tool detail is reachable inside nested disclosures");
+  const secondRun=[{id:"start-2",kind:"runBoundary",runId:"host-2",status:"started",label:"运行中"},tool("tool-new","done","execution-2"),{id:"answer-2",kind:"assistantMessage",runId:"execution-2",text:"续跑结论"},{id:"end-2",kind:"runBoundary",runId:"host-2",status:"completed",label:"运行完成"}];
+  await mountTranscript([...settled,...secondRun]);
+  check(document.querySelectorAll('.conversation-process').length===2,"Goal continuation Runs stay separate");
+  check(process().open,"Reader expansion survives appended events");
+  await act(async()=>process().querySelector('summary').click());
+  await mountTranscript([...settled,...secondRun,{id:"info",kind:"status",title:"新通知"}]);
+  check(!process().open,"Reader collapse survives appended events");
+  await mountTranscript(settled,undefined,360);
+  await act(async()=>process().querySelector('summary').click());
+  check(toolGroup().getBoundingClientRect().width<=312,"Tool groups fit a narrow side conversation");
+  check(toolGroup().querySelector('summary').scrollWidth<=toolGroup().querySelector('summary').clientWidth+1,"Long arguments do not overflow the compact row");
+  await act(async()=>toolGroup().querySelector('summary').click());
+  const firstTool=toolGroup().querySelector('.conversation-tool-record');
+  check(firstTool.querySelector('summary').getBoundingClientRect().height<=28,"Successful tool is a single compact line");
+  check(Math.abs(firstTool.getBoundingClientRect().left-toolGroup().getBoundingClientRect().left)<1,"Expanded calls stay on the group reading column");
+  await act(async()=>process().querySelector('summary').click());
+
+  const interrupted=[...liveItems,
+    {id:"steer",kind:"userMessage",text:"换一个检查方向"},tool("after-steer"),
+    {id:"approval",kind:"approval",title:"执行许可",detail:"需要批准",state:"pending"},tool("after-approval"),
+    {id:"question",kind:"prompt",question:"选择目录",state:"pending"},
+    {id:"failure",kind:"runBoundary",runId:"host-1",status:"failed",label:"运行失败"},
+  ];
+  await mountTranscript(interrupted,activeRun);
+  for(const kind of ["userMessage","approval","prompt","runBoundary"]){
+    check([...document.querySelectorAll('[data-kind="'+kind+'"]')].every(el=>!el.closest('.conversation-process')),"Interaction/recovery records must remain outside: "+kind);
+  }
+  check(document.querySelector('[data-recovery]')&&!document.querySelector('[data-recovery]').closest('.conversation-process'),"Custom failure recovery remains visible");
+  check([...document.querySelectorAll('.conversation-process')].every(el=>!el.open),"Terminal events override a stale active Run prop");
+  const steeringLive=interrupted.filter(item=>item.id!=="failure");
+  await mountTranscript(steeringLive,activeRun);
+  check([...document.querySelectorAll('.conversation-process')].every(el=>el.open),"Steering splits the process while preserving live Run ownership");
+  await act(async()=>root.render(<SideChatWorkbarPanel child={{panelId:"side",sourceSessionId:"parent",targetSessionId:"child",state:"live"}} items={liveItems} activeRun={activeRun} draft="" active running loading={false} onSend={()=>{}} onStop={()=>{}} onDraftChange={()=>{}} onRetryCreate={()=>{}} onClose={()=>{}}/>));
+  check(process().open&&!thinkingRow().open,"Side chat uses the same live process and thinking disclosures");
   await act(async()=>root.unmount());
 }
 scenario().then(()=>fetch("/result",{method:"POST",body:"PASS: pages forms model picker and approval"})).catch(error=>fetch("/result",{method:"POST",body:String(error.stack||error)}));

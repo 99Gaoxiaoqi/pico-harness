@@ -61,6 +61,7 @@ export type RuntimeModelRouteCapabilities = {
   readonly metadataSource?: "models_dev_snapshot";
   readonly vision?: boolean | "unknown";
   readonly reasoning?: boolean | "unknown";
+  readonly reasoningLevels?: readonly string[];
   readonly reasoningSource?:
     | "config"
     | "provider_metadata"
@@ -201,6 +202,7 @@ const resolvedModelCapabilitiesResult: RuntimeResultRule = (value, path) => {
       metadataSource: resultOneOf(["models_dev_snapshot"]),
       vision: resultOneOf([true, false, "unknown"]),
       reasoning: resultOneOf([true, false, "unknown"]),
+      reasoningLevels: resultArray(resultString),
       reasoningSource: resultOneOf([
         "config",
         "provider_metadata",

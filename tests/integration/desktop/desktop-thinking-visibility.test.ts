@@ -241,15 +241,20 @@ test("Desktop host replaces an active tool timeline item when the tool completes
   );
 });
 
-test("Desktop labels provider-visible reasoning as a summary", () => {
+test("Desktop collapses provider-visible reasoning with a first-line summary preview", () => {
   Object.assign(globalThis, { React });
   const html = renderToStaticMarkup(
     React.createElement(ConversationTranscript, {
-      items: [{ id: "thinking-1", kind: "thinking", text: "检查配置。" }],
+      items: [
+        { id: "thinking-1", kind: "thinking", text: "\n## 检查**配置**。\n详细内容按需展开。" },
+      ],
     }),
   );
 
-  assert.match(html, /aria-label="推理摘要"/u);
-  assert.match(html, /推理摘要<\/div>/u);
-  assert.doesNotMatch(html, /思考过程/u);
+  assert.match(html, /aria-label="模型思考"/u);
+  assert.match(html, /模型思考<\/span>/u);
+  assert.match(html, /conversation-thinking__preview">检查配置。<\/span>/u);
+  assert.doesNotMatch(html, /<details[^>]*\bopen=/u);
+  assert.doesNotMatch(html, /详细内容按需展开/u);
+  assert.doesNotMatch(html, /推理摘要/u);
 });
