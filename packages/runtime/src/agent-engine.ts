@@ -11,7 +11,12 @@ import { estimateTraceLength } from "@pico/runtime";
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
-import type { LLMProvider, LLMProviderRequestOptions, RuntimeToolResultStatus } from "@pico/core";
+import type {
+  LLMProvider,
+  LLMProviderRequestOptions,
+  RuntimeToolResultStatus,
+  Usage,
+} from "@pico/core";
 import { ContextOverflowError, isAbortError, ModelCommunicationError } from "@pico/core";
 import {
   generateWithRetry,
@@ -55,7 +60,8 @@ import {
   type GuardrailOptions,
 } from "@pico/runtime/reminder";
 import type { GoalManager } from "@pico/runtime/goal-manager";
-import { evaluateGoalCompletion } from "@pico/runtime/goal-evaluator";
+import type { AgentRunOutcome, AgentRunStopReason } from "./runtime-contract.js";
+export type { AgentRunOutcome, AgentRunStopReason } from "./runtime-contract.js";
 import { Tracer, truncate, type Span } from "./trace.js";
 import { createToolResultEnvelope, type ToolResultEnvelope } from "@pico/core";
 import type { CanonicalTranscriptToolStart } from "@pico/core/transcript-tool-start";
@@ -77,6 +83,10 @@ import { raceWithDeadline } from "@pico/runtime/deadline";
  * finally 块两处复用同一常量。
  */
 const TOOL_SETTLE_TIMEOUT_MS = 10_000;
+function emptyUsage(): Usage {
+  return { promptTokens: 0, completionTokens: 0 };
+}
+
 interface EngineSessionExecutionContext {
   readonly capability: string;
   active: boolean;
@@ -454,8 +464,10 @@ export class AgentEngine {
    * 避免每个请求都用自己的 costBefore 导致重复计费。
    */
   private readonly accountedSessionCostCNY = new WeakMap<Session, number>();
-  /** Goal Manager 单例(可选);Plan 协作模式下注入本轮 turn tail 并执行预算控制 */
+  /** Goal Manager 单例(可选);只用于把当前 Goal 注入本轮 turn tail */
   private readonly goalManager?: GoalManager | undefined;
+  private primaryUsage = emptyUsage();
+  private lastOutcome: AgentRunOutcome = { stopReason: "completed", primaryUsage: emptyUsage() };
   /** 工具渐进披露(可选);注入后每轮只把核心+已披露工具喂给 LLM */
   private readonly toolDisclosure?: ToolDisclosure | undefined;
   private readonly onTurn?: ((info: { turn: number; message: Message }) => void) | undefined;
@@ -993,6 +1005,8 @@ export class AgentEngine {
     if (ambientContext?.active && ambientContext.capability === capability) {
       throw new Error(`AgentEngine does not support re-entrant runs for Session ${session.id}`);
     }
+    this.primaryUsage = emptyUsage();
+    this.lastOutcome = { stopReason: "completed", primaryUsage: emptyUsage() };
     const run = () => {
       const context: EngineSessionExecutionContext = { capability, active: true };
       const boundTools = snapshotToolDefinitions(this.registry.getAvailableTools());
@@ -1024,7 +1038,12 @@ export class AgentEngine {
         ? this.toolDisclosure.runInTurn(disclosureTurn, executeTurn)
         : executeTurn();
     };
-    const execute = run;
+    const execute = (): Promise<Message[]> => {
+      return run().catch((error: unknown) => {
+        this.publishOutcome(signal?.aborted || isAbortError(error) ? "interrupted" : "failed");
+        throw error;
+      });
+    };
     const ambientRun = this.runtimePort?.currentRun();
     // Tests and explicit in-memory sessions intentionally skip durable runtime facts.
     if (!session.runtimeEventStore) {
@@ -1043,7 +1062,21 @@ export class AgentEngine {
       }
       return execute();
     }
-    return session.serialize(() => this.runWithRuntimeEvents(session, execute, signal));
+    return session
+      .serialize(() => this.runWithRuntimeEvents(session, execute, signal))
+      .catch((error: unknown) => {
+        this.publishOutcome(signal?.aborted || isAbortError(error) ? "interrupted" : "failed");
+        throw error;
+      });
+  }
+
+  /** Structured terminal facts are available even after `run()` rejects. */
+  getLastOutcome(): AgentRunOutcome {
+    return structuredClone(this.lastOutcome);
+  }
+
+  private publishOutcome(stopReason: AgentRunStopReason): void {
+    this.lastOutcome = { stopReason, primaryUsage: structuredClone(this.primaryUsage) };
   }
 
   private async runWithRuntimeEvents(
@@ -1120,6 +1153,7 @@ export class AgentEngine {
     let beforeLen = session.length;
     let turnCount = 0;
     let exhaustedReason: string | undefined;
+    let stopReason: AgentRunStopReason = "completed";
     this.currentStepNumber = 0;
     this.compactionAttemptedThisRun = false;
     this.compactionFailedThisRun = false;
@@ -1165,25 +1199,12 @@ export class AgentEngine {
         const turnBudget = this.budget.canStartTurn(turnCount);
         if (!turnBudget.allowed) {
           exhaustedReason = turnBudget.reason ?? `已达到最大轮次 ${this.maxTurns}`;
+          stopReason = "step_limit";
           this.diagnostics.warn(
             { turnCount, maxTurns: this.maxTurns },
             `[Engine] ${exhaustedReason},准备触发 Grace Call 收尾`,
           );
           break;
-        }
-        if (turnCount === 1) {
-          const goalTurnBudget =
-            this.goalManager?.beginRun("user", this.runtimePort?.currentRun()?.runId) ?? {
-              allowed: true,
-            };
-          if (!goalTurnBudget.allowed) {
-            exhaustedReason = goalTurnBudget.reason ?? "Goal 预算已耗尽";
-            this.diagnostics.warn(
-              { turnCount, goalId: this.goalManager?.getActive()?.id },
-              `[Engine] ${exhaustedReason},准备触发 Grace Call 收尾`,
-            );
-            break;
-          }
         }
         await this.runtimePort?.currentRun()?.recordTurnStarted(turnCount);
         await this.runtimePort?.currentRun()?.assertNoUnresolvedToolEffects();
@@ -1381,6 +1402,7 @@ export class AgentEngine {
             this.publishAcceptedToolCalls(reporter, toolCalls, durableStarts);
             this.onTurn?.({ turn: turnCount, message: responseMsg });
             if (exhaustedReason) {
+              stopReason = "step_limit";
               await closeToolProtocol({
                 status: "cancelled",
                 reason: `执行预算已耗尽: ${exhaustedReason}`,
@@ -1457,44 +1479,6 @@ export class AgentEngine {
               }
               if (stopSteers.length > 0 || decision?.continue) {
                 continue; // 不 break,回 for(;;) 顶部继续下一轮
-              }
-
-              // 每个 Goal RuntimeRun 在安全结束边界独立验收；后续轮次由 Host 准入。
-              if (this.goalManager) {
-                const active = this.goalManager.getActive();
-                if (active?.status === "active" && !active.awaitingUserTurn) {
-                  if (this.isPlanning()) {
-                    this.goalManager.pause(
-                      active.id,
-                      "当前 Run 处于 Plan 模式，Goal 等待用户确认后续执行",
-                    );
-                  } else {
-                    const evaluatorCostBefore = session.totalCostCNY;
-                    const evaluation = this.provider
-                      ? await evaluateGoalCompletion(
-                          this.provider,
-                          { ...active, evidence: active.evidence },
-                          await this.readModelHistory(session),
-                          signal,
-                        )
-                      : {
-                          outcome: "unknown" as const,
-                          reason: "",
-                          evidence: [],
-                          evaluatorFailed: true,
-                        };
-                    const evaluatorCostAfter = session.totalCostCNY;
-                    const evaluatorCostCNY = Math.max(0, evaluatorCostAfter - evaluatorCostBefore);
-                    this.accountedSessionCostCNY.set(
-                      session,
-                      Math.max(
-                        this.accountedSessionCostCNY.get(session) ?? evaluatorCostBefore,
-                        evaluatorCostAfter,
-                      ),
-                    );
-                    this.goalManager.settle({ ...evaluation, costCNY: evaluatorCostCNY });
-                  }
-                }
               }
 
               reporter.onFinish();
@@ -1628,11 +1612,20 @@ export class AgentEngine {
               results[index]?.report.status === "succeeded",
           );
           if (successfulTerminalTool) {
+            if (
+              toolCalls.some(
+                (call, index) =>
+                  call.name === "submit_plan" && results[index]?.report.status === "succeeded",
+              )
+            ) {
+              stopReason = "plan_handoff";
+            }
             reporter.onFinish();
             break;
           }
           if (this.planHandoff?.hasPending()) {
             this.planHandoff.consume();
+            stopReason = "plan_handoff";
             reporter.onFinish();
             break;
           }
@@ -1667,6 +1660,7 @@ export class AgentEngine {
         }
       }
       if (exhaustedReason) {
+        stopReason = "step_limit";
         signal?.throwIfAborted();
         await this.runGraceCall(
           session,
@@ -1681,15 +1675,6 @@ export class AgentEngine {
       }
     } catch (error) {
       if (signal?.aborted || isAbortError(error)) reporter.onInterrupted?.();
-      const activeGoal = this.goalManager?.getActive();
-      if (activeGoal?.status === "active") {
-        this.goalManager?.pause(
-          activeGoal.id,
-          signal?.aborted || isAbortError(error)
-            ? "Goal Run 已中断"
-            : `Goal Run 失败: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
       await this.onRunInterrupted?.(
         signal?.aborted || isAbortError(error)
           ? "Run was cancelled."
@@ -1699,7 +1684,6 @@ export class AgentEngine {
       );
       throw error;
     } finally {
-      this.goalManager?.endRun();
       const changedPaths = await fileHistory.commit();
       if (changedPaths.length > 0) {
         await this.hookService?.dispatch("FileChanged", {
@@ -1716,6 +1700,7 @@ export class AgentEngine {
     }
 
     await this.onRunComplete?.();
+    this.publishOutcome(stopReason);
 
     // 返回本轮新增的消息序列(从用户输入起到最终答案止)
     const runMessages = session.getHistory().slice(beforeLen);
@@ -2123,8 +2108,8 @@ export class AgentEngine {
         response.content = "已达执行预算，但模型未返回可用的纯文本总结。";
       }
       recordLlmResponse(graceSpan, response);
-      // Grace Call is the one permitted over-budget summary. It does not consume another
-      // goal turn, but its measurable token/cost usage remains part of the goal totals.
+      // Grace Call is the one permitted over-budget summary; its usage remains part of
+      // the primary execution total reported to the Host.
       this.consumeResponseBudget(session, response, costBefore);
       await session.commitMessages(response);
       if (response.content) {
@@ -2146,6 +2131,49 @@ export class AgentEngine {
   ): BudgetDecision {
     const decisions: BudgetDecision[] = [];
     if (response.usage) {
+      this.primaryUsage = {
+        ...this.primaryUsage,
+        promptTokens: this.primaryUsage.promptTokens + Math.max(0, response.usage.promptTokens),
+        completionTokens:
+          this.primaryUsage.completionTokens + Math.max(0, response.usage.completionTokens),
+        ...(response.usage.inputTokens !== undefined
+          ? {
+              inputTokens:
+                (this.primaryUsage.inputTokens ?? 0) + Math.max(0, response.usage.inputTokens),
+            }
+          : {}),
+        ...(response.usage.cacheReadTokens !== undefined
+          ? {
+              cacheReadTokens:
+                (this.primaryUsage.cacheReadTokens ?? 0) +
+                Math.max(0, response.usage.cacheReadTokens),
+            }
+          : {}),
+        ...(response.usage.cacheWriteTokens !== undefined
+          ? {
+              cacheWriteTokens:
+                (this.primaryUsage.cacheWriteTokens ?? 0) +
+                Math.max(0, response.usage.cacheWriteTokens),
+            }
+          : {}),
+        ...(response.usage.reasoningTokens !== undefined
+          ? {
+              reasoningTokens:
+                (this.primaryUsage.reasoningTokens ?? 0) +
+                Math.max(0, response.usage.reasoningTokens),
+            }
+          : {}),
+        ...(response.usage.reportedFields !== undefined
+          ? {
+              reportedFields: [
+                ...new Set([
+                  ...(this.primaryUsage.reportedFields ?? []),
+                  ...response.usage.reportedFields,
+                ]),
+              ],
+            }
+          : {}),
+      };
       // Each independent Session owns its usage anchor; children never mutate the parent anchor.
       {
         const input = response.usage.promptTokens;
@@ -2161,7 +2189,6 @@ export class AgentEngine {
         }
       }
       decisions.push(this.budget.consumeUsage(response.usage));
-      decisions.push(this.goalManager?.consumeUsage(response.usage) ?? { allowed: true });
     }
 
     const accountedCost = this.accountedSessionCostCNY.get(session) ?? costBefore;
@@ -2170,7 +2197,6 @@ export class AgentEngine {
     this.accountedSessionCostCNY.set(session, Math.max(accountedCost, observedCost));
     if (costDelta > 0) {
       decisions.push(this.budget.consumeCost(costDelta));
-      decisions.push(this.goalManager?.consumeCost(costDelta) ?? { allowed: true });
     }
     return decisions.find((decision) => !decision.allowed) ?? { allowed: true };
   }
