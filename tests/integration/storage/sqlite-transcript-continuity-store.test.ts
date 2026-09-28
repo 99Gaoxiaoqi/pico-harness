@@ -637,17 +637,17 @@ test("structured interactions and goals update stable projection items in place"
     const terminal = await store.appendTranscriptEvent(
       sessionId,
       {
-        eventId: "goal-terminal:goal-1",
+        eventId: "goal-terminal:goal-1:1",
         sequence: 20,
         createdAt: 2,
         type: "entry.appended",
-        entryId: "goal-terminal:goal-1",
+        entryId: "goal-terminal:goal-1:1",
         entry: {
           kind: "goal",
           title: goal.condition,
           detail: "Done",
           state: "achieved",
-          data: { goalId: goal.id },
+          data: { goalId: goal.id, goalRevision: 1 },
         },
       },
       { ownerFence },
@@ -657,7 +657,7 @@ test("structured interactions and goals update stable projection items in place"
       through: terminal.transcriptWatermark!,
       maxBytes: 16_384,
     });
-    assert.equal(terminalPage.items.at(-1)?.itemId, "goal-terminal:goal-1");
+    assert.equal(terminalPage.items.at(-1)?.itemId, "goal-terminal:goal-1:1");
     const replacement = await store.appendSessionState(
       sessionId,
       {
