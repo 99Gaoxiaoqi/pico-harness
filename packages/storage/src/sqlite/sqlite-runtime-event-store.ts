@@ -3518,32 +3518,8 @@ function transcriptMutationsForEvent(
     ];
   }
 
-  if (event.kind === "session.state.committed") {
-    const goalSnapshot = event.data.patch.goal;
-    if (!goalSnapshot) return [];
-    const activeGoal = goalSnapshot.goals.find((goal) => goal.status === "active");
-    const itemId = activeGoal ? `goal:${activeGoal.id}` : undefined;
-    const mutations: TranscriptItemMutation[] = currentByKind("goal")
-      .filter((record) => record.itemId !== itemId)
-      .map((record) => ({ op: "remove", itemId: record.itemId }));
-    if (activeGoal && itemId) {
-      mutations.push({
-        op: "upsert",
-        itemId,
-        positionSequence: sequence,
-        positionOrdinal: 0,
-        payload: {
-          id: itemId,
-          kind: "goal",
-          title: activeGoal.title,
-          detail: activeGoal.progress ?? activeGoal.description,
-          state: activeGoal.status,
-          data: { goalId: activeGoal.id },
-        },
-      });
-    }
-    return mutations;
-  }
+  // Current Goal is a control-plane projection; terminal facts are immutable transcript entries.
+  if (event.kind === "session.state.committed") return [];
 
   if (event.kind !== "transcript.event.recorded") return [];
   const transcript = event.data.event;
@@ -3698,6 +3674,10 @@ function transcriptMutationsForEvent(
 }
 
 function stableStructuredTranscriptItemId(entry: TranscriptEntryData): string | undefined {
+  if (entry.kind === "goal") {
+    const id = asJsonRecord(entry.data)?.["goalId"];
+    return typeof id === "string" ? `goal-terminal:${id}` : undefined;
+  }
   if (entry.kind !== "approval" && entry.kind !== "prompt" && entry.kind !== "changes") {
     return undefined;
   }
@@ -3750,6 +3730,7 @@ function conversationPayloadForTranscriptEntry(
         ...(entry.state ? { state: entry.state } : {}),
         at,
       };
+    case "goal":
     case "approval":
     case "prompt":
     case "changes":

@@ -30,6 +30,7 @@ export function transcriptToolStatusFromEnvelope(
 
 /** Transcript 事件与 reducer 共同持有的语义正文，不包含渲染身份。 */
 export type TranscriptEntryData =
+  | Extract<import("@pico/core").TranscriptEntryData, { kind: "goal" }>
   | {
       kind: "logo";
       model?: string;
@@ -689,6 +690,7 @@ function transcriptEntry(value: Record<string, unknown>): void {
       transcriptOptionalString(value, "detail");
       transcriptOptionalEnum(value, "state", ["waiting", "active", "done", "failed"]);
       return;
+    case "goal":
     case "approval":
     case "prompt":
     case "changes":
