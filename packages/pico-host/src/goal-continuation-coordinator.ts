@@ -53,11 +53,11 @@ interface Lane {
   queued: number;
   unsubscribe?: () => void;
   manager?: GoalManager;
-  abort?: AbortController;
-  evaluationRevision?: number;
-  timer?: ReturnType<typeof setTimeout>;
+  abort?: AbortController | undefined;
+  evaluationRevision?: number | undefined;
+  timer?: ReturnType<typeof setTimeout> | undefined;
   waitCount: number;
-  generation?: number;
+  generation?: number | undefined;
 }
 
 /** Host-owned per-Session FIFO settlement. Network waits never hold the Session execution lock. */
@@ -95,7 +95,7 @@ export class GoalContinuationCoordinator {
         this.clearWait(lane);
         lane.waitCount = 0;
       }
-      if (lane.abort && (goal?.revision !== lane.evaluationRevision || goal.status !== "active")) {
+      if (lane.abort && (goal?.revision !== lane.evaluationRevision || goal?.status !== "active")) {
         lane.abort.abort(new DOMException("Goal control changed", "AbortError"));
       }
       this.deps.changed(workspace, sessionId, goal);
