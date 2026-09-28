@@ -2109,15 +2109,18 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.CONFLICT, "Goal 已变化，请刷新后重试");
         try {
           if (params.action === "arm") {
-            manager.create({
-              condition: params.condition!,
-              awaitingUserTurn: true,
-              ...(params.maxIterations === undefined
-                ? {}
-                : { maxIterations: params.maxIterations }),
-              ...(params.blockCap === undefined ? {} : { blockCap: params.blockCap }),
-              ...(params.tokenBudget === undefined ? {} : { tokenBudget: params.tokenBudget }),
-            });
+            manager.create(
+              {
+                condition: params.condition!,
+                awaitingUserTurn: true,
+                ...(params.maxIterations === undefined
+                  ? {}
+                  : { maxIterations: params.maxIterations }),
+                ...(params.blockCap === undefined ? {} : { blockCap: params.blockCap }),
+                ...(params.tokenBudget === undefined ? {} : { tokenBudget: params.tokenBudget }),
+              },
+              params.expectedRevision,
+            );
           } else {
             const accepted =
               params.action === "pause"
