@@ -1,3 +1,14 @@
+import {
+  parseGoalConfig,
+  type PersistedGoalState,
+  type PersistedGoalStatus,
+  type PersistedGoalEvaluation,
+  type PersistedGoalContinuationIntent,
+  type PersistedGoalExecutionRef,
+  type PersistedGoalControlLease,
+  type PersistedGoalCoordinator,
+  type PersistedGoalManagerSnapshot,
+} from "@pico/core/session-runtime-state";
 // Plan, goal, discovery, approval, and prompt contracts with their boundary rules.
 import type {
   ApprovalId,
@@ -145,86 +156,16 @@ export type RuntimeDiscoveryProjection = JsonObject & {
   readonly active?: RuntimeDiscoveryRun;
 };
 
-export type RuntimeGoalStatus =
-  | "active"
-  | "waiting"
-  | "paused"
-  | "achieved"
-  | "impossible"
-  | "stalled"
-  | "budget_limited"
-  | "max_iterations"
-  | "cleared";
-
-export type RuntimeGoalEvaluation = {
-  readonly met?: boolean;
-  readonly impossible?: boolean;
-  readonly progress?: boolean;
-  readonly waiting?: boolean;
-  readonly evaluatorFailed?: boolean;
-  readonly reason: string;
-  readonly at: number;
-};
-
-export type RuntimeGoal = {
-  readonly id: string;
-  readonly revision: number;
-  readonly condition: string;
-  readonly status: RuntimeGoalStatus;
-  readonly createdAt: number;
-  readonly maxIterations: number;
-  readonly blockCap: number;
-  readonly tokenBudget?: number;
-  readonly iterations: number;
-  readonly tokensAtStart: number;
-  readonly tokensNow: number;
-  readonly tokensBaselinePending: boolean;
-  readonly consecutiveNoProgress: number;
-  readonly lastReason?: string;
-  readonly lastEvaluation?: RuntimeGoalEvaluation;
-  readonly armedAt?: number;
-  readonly pausedAt?: number;
-  readonly achievedAt?: number;
-};
-
-export type RuntimeGoalContinuationIntent = {
-  readonly goalId: string;
-  readonly revision: number;
-  readonly generation: number;
-  readonly triggeringRunId?: string;
-  readonly prompt: string;
-  readonly createdAt: number;
-  readonly runId: string;
-  readonly daemonRunId: string;
-  readonly turnId: string;
-  readonly invocationId: string;
-  readonly runStartedEventId: string;
-  readonly runStartedAt: number;
-};
-
-export type RuntimeGoalExecutionRef = RuntimeGoalContinuationIntent & {
-  readonly origin: "user" | "goal";
-  readonly started?: boolean;
-  readonly stopReason?: string;
-};
-
-export type RuntimeGoalControlLease = {
-  readonly goalId: string;
-  readonly generation: number;
-};
-
-export type RuntimeGoalCoordinator = {
-  readonly pendingContinuation: RuntimeGoalContinuationIntent | null;
-  readonly currentExecution: RuntimeGoalExecutionRef | null;
-  readonly lastSettledRunId?: string;
-  readonly workTokens: number;
+export type RuntimeGoalStatus = PersistedGoalStatus;
+export type RuntimeGoalEvaluation = Readonly<PersistedGoalEvaluation>;
+export type RuntimeGoal = Readonly<PersistedGoalState>;
+export type RuntimeGoalContinuationIntent = Readonly<PersistedGoalContinuationIntent>;
+export type RuntimeGoalExecutionRef = Readonly<PersistedGoalExecutionRef>;
+export type RuntimeGoalControlLease = Readonly<PersistedGoalControlLease>;
+export type RuntimeGoalCoordinator = Readonly<Omit<PersistedGoalCoordinator, "accountedRunIds">> & {
   readonly accountedRunIds: readonly string[];
 };
-
-export type RuntimeGoalSnapshot = {
-  readonly stateVersion: 3;
-  readonly currentGoal: RuntimeGoal | null;
-  readonly controlLease: RuntimeGoalControlLease | null;
+export type RuntimeGoalSnapshot = Readonly<Omit<PersistedGoalManagerSnapshot, "coordinator">> & {
   readonly coordinator: RuntimeGoalCoordinator;
 };
 
@@ -492,21 +433,37 @@ export type PlanningMethodMap = {
 
 export const planningParamValidators = {
   "goal.get": workspaceSessionParams,
-  "goal.control": exactParamShape(
-    {
-      workspacePath: stringParam,
-      sessionId: stringParam,
-      action: oneOfParam(["arm", "pause", "resume", "clear"]),
-      expectedRevision: finiteNumberParam,
-    },
-    {
-      goalId: stringParam,
-      condition: stringParam,
-      tokenBudget: finiteNumberParam,
-      maxIterations: finiteNumberParam,
-      blockCap: finiteNumberParam,
-    },
-  ),
+  "goal.control": (value: Record<string, unknown>) => {
+    exactParamShape(
+      {
+        workspacePath: stringParam,
+        sessionId: stringParam,
+        action: oneOfParam(["arm", "pause", "resume", "clear"]),
+        expectedRevision: finiteNumberParam,
+      },
+      {
+        goalId: stringParam,
+        condition: stringParam,
+        tokenBudget: finiteNumberParam,
+        maxIterations: finiteNumberParam,
+        blockCap: finiteNumberParam,
+      },
+    )(value);
+    if (
+      !Number.isSafeInteger(value["expectedRevision"]) ||
+      (value["expectedRevision"] as number) < 0
+    )
+      throw invalidParams("expectedRevision 必须是非负安全整数");
+    if (value["action"] === "arm") {
+      try {
+        parseGoalConfig(value);
+      } catch (error) {
+        throw invalidParams(String(error));
+      }
+    } else if (typeof value["goalId"] !== "string" || !value["goalId"].trim()) {
+      throw invalidParams("goalId 不能为空");
+    }
+  },
   "approval.respond": exactParamShape(
     {
       workspacePath: stringParam,

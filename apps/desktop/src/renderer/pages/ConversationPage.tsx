@@ -881,6 +881,7 @@ export function ConversationPage() {
       Boolean(sessionRef && conversation?.goal === undefined),
     busy: busy === `goal-control:${conversationKey}` || busy === "create-goal-session",
     costCNY: conversation?.usage?.costCNY,
+    costStatus: conversation?.usage?.costStatus,
     onArm: async (goalDraft) => {
       let target = sessionRef;
       if (!target) {

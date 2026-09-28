@@ -1,4 +1,4 @@
-import { normalizeGoalManagerSnapshot } from "@pico/core";
+import { normalizeGoalManagerSnapshot, parseGoalConfig } from "@pico/core";
 import { randomUUID } from "node:crypto";
 import type {
   PersistedGoalContinuationIntent,
@@ -70,11 +70,6 @@ interface UnboundRun {
 
 export type GoalRunIdentity = Omit<UnboundRun, "runId" | "daemonRunId" | "turnId" | "origin">;
 
-const DEFAULT_MAX_ITERATIONS = 50;
-const DEFAULT_BLOCK_CAP = 8;
-const MAX_ITERATIONS = 200;
-const MAX_BLOCK_CAP = 50;
-const MIN_TOKEN_BUDGET = 1_000;
 const EMPTY_COORDINATOR: GoalCoordinator = {
   pendingContinuation: null,
   currentExecution: null,
@@ -156,10 +151,7 @@ export class GoalManager {
   }
 
   create(options: GoalCreateOptions, expectedRevision?: number): Goal {
-    const condition = options.condition.trim();
-    if (!condition) throw new Error("Goal condition 不能为空");
-    if (condition.length > 500 || Buffer.byteLength(condition, "utf8") > 1_500)
-      throw new Error("Goal condition 最多 500 字符（1500 UTF-8 字节）");
+    const { condition, maxIterations, blockCap, tokenBudget } = parseGoalConfig(options);
     const previous = this.state.currentGoal;
     if (previous && isIncomplete(previous.status))
       throw new Error(`Goal ${previous.id} 尚未完成（${previous.status}），不能替换`);
@@ -172,22 +164,6 @@ export class GoalManager {
     if (!previous && expectedRevision !== undefined && expectedRevision !== 0)
       throw new Error(`Goal revision 冲突：expected ${expectedRevision}, actual 0`);
 
-    const maxIterations = options.maxIterations ?? DEFAULT_MAX_ITERATIONS;
-    const blockCap = options.blockCap ?? DEFAULT_BLOCK_CAP;
-    if (
-      !Number.isSafeInteger(maxIterations) ||
-      maxIterations <= 0 ||
-      maxIterations > MAX_ITERATIONS
-    )
-      throw new Error(`maxIterations 必须是 1 到 ${MAX_ITERATIONS} 的安全整数`);
-    if (!Number.isSafeInteger(blockCap) || blockCap <= 0 || blockCap > MAX_BLOCK_CAP)
-      throw new Error(`blockCap 必须是 1 到 ${MAX_BLOCK_CAP} 的安全整数`);
-    if (
-      options.tokenBudget !== undefined &&
-      (!Number.isSafeInteger(options.tokenBudget) || options.tokenBudget < MIN_TOKEN_BUDGET)
-    )
-      throw new Error(`tokenBudget 必须是不小于 ${MIN_TOKEN_BUDGET} 的安全整数`);
-
     const now = this.now();
     const unboundRun = this.unboundRun;
     const generation = (this.state.controlLease?.generation ?? 0) + 1;
@@ -199,7 +175,7 @@ export class GoalManager {
       createdAt: now,
       maxIterations,
       blockCap,
-      ...(options.tokenBudget !== undefined ? { tokenBudget: options.tokenBudget } : {}),
+      ...(tokenBudget !== undefined ? { tokenBudget } : {}),
       iterations: 0,
       tokensAtStart: 0,
       tokensNow: 0,

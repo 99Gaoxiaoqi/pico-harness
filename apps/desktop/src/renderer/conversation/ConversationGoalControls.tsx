@@ -1,3 +1,5 @@
+import { parseGoalConfig } from "@pico/core/session-runtime-state";
+import type { UsageView } from "../model.js";
 import { Button } from "@astryxdesign/core/Button";
 import { Dialog } from "@astryxdesign/core/Dialog";
 import { Pause, Play, Target, X } from "lucide-react";
@@ -23,6 +25,7 @@ export function GoalStatusBar({
   pending = false,
   disabled = false,
   costCNY,
+  costStatus,
   awaitingMessage = false,
   onAction,
 }: {
@@ -31,6 +34,7 @@ export function GoalStatusBar({
   readonly pending?: boolean;
   readonly disabled?: boolean;
   readonly costCNY?: number | undefined;
+  readonly costStatus?: UsageView["costStatus"];
   readonly onAction: (action: GoalAction) => void;
 }) {
   const reason = goal.lastReason ?? goal.lastEvaluation?.reason;
@@ -82,7 +86,20 @@ export function GoalStatusBar({
         迭代 {goal.iterations}/{goal.maxIterations} · Goal token{" "}
         {Math.max(0, goal.tokensNow - goal.tokensAtStart).toLocaleString()}
         {goal.tokenBudget === undefined ? "（不限额）" : `/${goal.tokenBudget.toLocaleString()}`}
-        {costCNY !== undefined && <> · 会话账单 ¥{costCNY.toFixed(4)}（含评估）</>}
+        {(costCNY !== undefined || costStatus) && (
+          <>
+            {" "}
+            · 会话账单{" "}
+            {costStatus === "unknown"
+              ? "费用未知"
+              : costStatus === "included"
+                ? "订阅内含"
+                : costStatus === "partial"
+                  ? `已知 ¥${(costCNY ?? 0).toFixed(4)}，部分未知`
+                  : `¥${(costCNY ?? 0).toFixed(4)}`}
+            （含评估）
+          </>
+        )}
       </p>
       <p className="conversation-goal__note">Goal token 从首次基线后计入主执行，不含评估。</p>
       {awaitingMessage && goal.status === "active" && (
@@ -111,11 +128,13 @@ export function GoalDialog({
   const [budget, setBudget] = useState("");
   const maxIterations = Number(iterations);
   const tokenBudget = budget.trim() ? Number(budget) : undefined;
-  const valid =
-    condition.trim().length > 0 &&
-    Number.isSafeInteger(maxIterations) &&
-    maxIterations > 0 &&
-    (tokenBudget === undefined || (Number.isSafeInteger(tokenBudget) && tokenBudget >= 1000));
+  let validationError: string | undefined;
+  try {
+    parseGoalConfig({ condition, maxIterations, tokenBudget });
+  } catch (error) {
+    validationError = error instanceof Error ? error.message : String(error);
+  }
+  const valid = validationError === undefined;
   return (
     <Dialog
       isOpen={open}
@@ -160,6 +179,7 @@ export function GoalDialog({
               label="最大迭代次数"
               type="number"
               min={1}
+              max={200}
               step={1}
               required
               value={iterations}
@@ -182,6 +202,7 @@ export function GoalDialog({
           </div>
         </div>
         <p>Token 限额至少 1,000，只计首次基线后的主执行；评估另计入会话账单。</p>
+        {condition.trim() && validationError && <p role="alert">{validationError}</p>}
         {blocked && (
           <p role="alert">当前 Goal 尚未结束，请先清除后再设置。暂停或等待中的 Goal 也不能覆盖。</p>
         )}
@@ -209,6 +230,7 @@ export function useConversationGoal({
   disabled = false,
   busy = false,
   costCNY,
+  costStatus,
   onArm,
   onAction,
 }: {
@@ -216,6 +238,7 @@ export function useConversationGoal({
   readonly disabled?: boolean;
   readonly busy?: boolean;
   readonly costCNY?: number | undefined;
+  readonly costStatus?: UsageView["costStatus"];
   readonly onArm: (draft: GoalDraft) => Promise<boolean>;
   readonly onAction: (action: GoalAction, goal: RuntimeGoal) => Promise<boolean>;
 }) {
@@ -245,6 +268,7 @@ export function useConversationGoal({
         pending={pending || busy}
         disabled={disabled}
         costCNY={costCNY}
+        costStatus={costStatus}
         onAction={(action) => {
           void run(() => onAction(action, goal));
         }}

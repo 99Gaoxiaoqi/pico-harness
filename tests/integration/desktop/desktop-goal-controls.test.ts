@@ -196,6 +196,12 @@ async function fill(label,value) { const input=field(label);check(input,"missing
   await click("添加上下文与模式");await click("设置 Goal");
   await fill("Goal 完成条件","所有登录集成测试通过");
   check(field("最大迭代次数").value === "50","iteration default");
+  await fill("最大迭代次数","201");
+  check(document.querySelector('.conversation-goal-dialog button[type="submit"]').disabled,"iteration upper bound");
+  await fill("最大迭代次数","50");
+  await fill("Goal 完成条件","x".repeat(501));
+  check(document.querySelector('.conversation-goal-dialog button[type="submit"]').disabled,"condition upper bound");
+  await fill("Goal 完成条件","所有登录集成测试通过");
   await fill("Goal token 限额","999");
   check(document.querySelector('.conversation-goal-dialog button[type="submit"]').disabled,"budget lower bound");
   await fill("Goal token 限额","2000");

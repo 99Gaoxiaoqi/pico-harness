@@ -218,6 +218,7 @@ export function SideChatPanelController({
       busy ===
       `goal-control:${targetSessionId ? workspaceSessionKey({ workspacePath, sessionId: targetSessionId }) : ""}`,
     costCNY: conversation?.usage?.costCNY,
+    costStatus: conversation?.usage?.costStatus,
     onArm: async (draft) =>
       targetSessionId
         ? actions.controlGoal(

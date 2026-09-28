@@ -30,15 +30,74 @@ export interface PersistedGoalEvaluation {
   at: number;
 }
 
-export interface PersistedGoalState {
-  id: string;
-  revision: number;
+/** Shared Goal creation rules, usable in Node and the desktop renderer. */
+export interface GoalConfig {
   condition: string;
-  status: PersistedGoalStatus;
-  createdAt: number;
   maxIterations: number;
   blockCap: number;
   tokenBudget?: number;
+}
+
+export function parseGoalConfig(input: {
+  condition?: unknown;
+  maxIterations?: unknown;
+  blockCap?: unknown;
+  tokenBudget?: unknown;
+}): GoalConfig {
+  if (typeof input.condition !== "string" || !input.condition.trim())
+    throw new Error("Goal condition 不能为空");
+  const condition = input.condition.trim();
+  if (condition.length > 500 || new TextEncoder().encode(condition).byteLength > 1_500)
+    throw new Error("Goal condition 最多 500 字符（1500 UTF-8 字节）");
+  const maxIterations = input.maxIterations ?? 50;
+  const blockCap = input.blockCap ?? 8;
+  if (
+    typeof maxIterations !== "number" ||
+    !Number.isSafeInteger(maxIterations) ||
+    maxIterations < 1 ||
+    maxIterations > 200
+  )
+    throw new Error("maxIterations 必须是 1 到 200 的安全整数");
+  if (
+    typeof blockCap !== "number" ||
+    !Number.isSafeInteger(blockCap) ||
+    blockCap < 1 ||
+    blockCap > 50
+  )
+    throw new Error("blockCap 必须是 1 到 50 的安全整数");
+  if (
+    input.tokenBudget !== undefined &&
+    (typeof input.tokenBudget !== "number" ||
+      !Number.isSafeInteger(input.tokenBudget) ||
+      input.tokenBudget < 1_000)
+  )
+    throw new Error("tokenBudget 必须是不小于 1000 的安全整数");
+  return {
+    condition,
+    maxIterations,
+    blockCap,
+    ...(input.tokenBudget === undefined ? {} : { tokenBudget: input.tokenBudget }),
+  };
+}
+
+function isGoalConfig(value: Record<string, unknown>): boolean {
+  try {
+    const config = parseGoalConfig(value);
+    return (
+      config.condition === value["condition"] &&
+      config.maxIterations === value["maxIterations"] &&
+      config.blockCap === value["blockCap"]
+    );
+  } catch {
+    return false;
+  }
+}
+
+export interface PersistedGoalState extends GoalConfig {
+  id: string;
+  revision: number;
+  status: PersistedGoalStatus;
+  createdAt: number;
   iterations: number;
   tokensAtStart: number;
   tokensNow: number;
@@ -527,18 +586,9 @@ function isGoal(value: unknown): value is PersistedGoalState {
   return (
     typeof value["id"] === "string" &&
     isPositiveInteger(value["revision"]) &&
-    typeof value["condition"] === "string" &&
-    value["condition"].trim().length > 0 &&
-    value["condition"].length <= 500 &&
-    Buffer.byteLength(value["condition"], "utf8") <= 1_500 &&
+    isGoalConfig(value) &&
     isGoalStatus(value["status"]) &&
     isNonNegativeFiniteNumber(value["createdAt"]) &&
-    isPositiveInteger(value["maxIterations"]) &&
-    value["maxIterations"] <= 200 &&
-    isPositiveInteger(value["blockCap"]) &&
-    value["blockCap"] <= 50 &&
-    (value["tokenBudget"] === undefined ||
-      (isPositiveInteger(value["tokenBudget"]) && value["tokenBudget"] >= 1_000)) &&
     isNonNegativeInteger(value["iterations"]) &&
     isNonNegativeInteger(value["tokensAtStart"]) &&
     isNonNegativeInteger(value["tokensNow"]) &&
