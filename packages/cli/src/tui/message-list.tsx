@@ -214,6 +214,7 @@ export function shouldRenderStatically(
     case "system":
     case "logo":
     case "error":
+    case "goal":
       return true;
     case "tool":
       // done/error 已 resolve → 固定;running → 动态

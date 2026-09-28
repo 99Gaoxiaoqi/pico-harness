@@ -1,3 +1,4 @@
+import { ConversationComposerMenu } from "../conversation/ConversationComposerMenu.js";
 import { Button } from "@astryxdesign/core/Button";
 import { ChatComposer, ChatComposerInput } from "@astryxdesign/core/Chat";
 import { CircleAlert, GitFork, LoaderCircle, Send, Square, X } from "lucide-react";
@@ -40,6 +41,10 @@ export interface SideChatWorkbarPanelProps {
   readonly running: boolean;
   readonly loading: boolean;
   readonly error?: SideChatPanelError | null;
+  readonly goalStatus?: ReactNode;
+  readonly goalDialog?: ReactNode;
+  readonly onSetGoal?: (() => void) | undefined;
+  readonly goalDisabled?: boolean | undefined;
   readonly pendingPrompt?: ReactNode;
   readonly pendingApproval?: ReactNode;
   readonly pendingApprovalCallId?: string | undefined;
@@ -73,6 +78,10 @@ export function SideChatWorkbarPanel({
   running,
   loading,
   error,
+  goalStatus,
+  goalDialog,
+  onSetGoal,
+  goalDisabled,
   pendingPrompt,
   pendingApproval,
   pendingApprovalCallId,
@@ -194,6 +203,8 @@ export function SideChatWorkbarPanel({
         </div>
       )}
 
+      {goalStatus}
+      {goalDialog}
       <form className="side-chat__composer" onSubmit={submit}>
         <ChatComposer
           className="pico-astryx-composer"
@@ -218,7 +229,13 @@ export function SideChatWorkbarPanel({
             />
           }
           footerActions={
-            <span>{running ? "Agent 正在运行" : "Enter 发送 · Shift+Enter 换行"}</span>
+            <ConversationComposerMenu
+              onSetGoal={onSetGoal}
+              goalDisabled={goalDisabled}
+              disabled={unavailable}
+            >
+              <span>{running ? "Agent 正在运行" : "Enter 发送 · Shift+Enter 换行"}</span>
+            </ConversationComposerMenu>
           }
           sendButton={
             running ? (

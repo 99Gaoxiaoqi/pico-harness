@@ -290,6 +290,17 @@ function toolGroupSummary(items: readonly ToolItemView[]) {
   };
 }
 
+const goalToolLabels: Readonly<Record<string, string>> = {
+  create_goal: "设置 Goal",
+  get_goal: "查看 Goal",
+  pause_goal: "暂停 Goal",
+  resume_goal: "继续 Goal",
+  clear_goal: "清除 Goal",
+};
+function toolLabel(name: string): string {
+  return goalToolLabels[name] ?? name;
+}
+
 // Keep the full invocation in the disclosure. The row only needs a readable
 // destination, command, or query, including while wire arguments are streaming.
 function toolTargetPreview(item: ToolItemView): string | undefined {
@@ -308,6 +319,7 @@ function toolTargetPreview(item: ToolItemView): string | undefined {
           "file_path",
           "filePath",
           "objective",
+          "condition",
           "code",
         ]) {
           if (typeof values[key] === "string" && values[key].trim()) {
@@ -607,7 +619,7 @@ function renderDefaultItem(
           <summary className="conversation-tool-row">
             <ToolSignal state={item.state} />
             <span className="conversation-tool-row__name" title={item.toolName}>
-              {item.toolName}
+              {toolLabel(item.toolName)}
             </span>
             {target && (
               <span className="conversation-tool-row__target" title={target}>
@@ -721,7 +733,9 @@ function renderDefaultItem(
           <header className="conversation-inline-card__header">
             <Sparkles aria-hidden="true" />
             <strong>{item.title}</strong>
-            <span className="conversation-item-state">{stateLabels[item.state]}</span>
+            <span className="conversation-item-state">
+              {item.statusLabel ?? stateLabels[item.state]}
+            </span>
           </header>
           {item.detail && <p className="conversation-execution-detail">{item.detail}</p>}
           {onOpenItem && <DetailButton label="查看目标" onClick={() => onOpenItem(item)} />}
@@ -781,7 +795,7 @@ export function ConversationTranscript({
                   className="conversation-tool-row__name conversation-tool-group__latest"
                   title={latest.toolName}
                 >
-                  {latest.toolName}
+                  {toolLabel(latest.toolName)}
                 </span>
                 {target && (
                   <span

@@ -121,6 +121,14 @@ function entryDataFromRuntimeItem(item: RuntimeConversationItem): TranscriptEntr
         ...(item.detail ? { detail: item.detail } : {}),
         ...(item.state ? { state: item.state } : {}),
       };
+    case "goal":
+      return {
+        kind: "goal",
+        title: item.title,
+        ...(item.detail ? { detail: item.detail } : {}),
+        ...(item.state ? { state: item.state } : {}),
+        ...(item.data ? { data: item.data } : {}),
+      };
     case "approval":
     case "prompt":
     case "changes":
@@ -141,7 +149,7 @@ function entryDataFromRuntimeItem(item: RuntimeConversationItem): TranscriptEntr
         ...(item.error ? { error: item.error } : {}),
       };
     default:
-      // goal 等暂无 TranscriptEntry 对应的 kind：静默跳过（前向兼容）。
+      // 未知显示类型不合成 transcript。
       return undefined;
   }
 }

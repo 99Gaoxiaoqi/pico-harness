@@ -145,6 +145,7 @@ export interface ChangesItemView extends ConversationItemBase {
 }
 
 export interface GoalItemView extends ConversationItemBase {
+  readonly statusLabel?: string | undefined;
   readonly kind: "goal";
   readonly title: string;
   readonly detail?: string | undefined;

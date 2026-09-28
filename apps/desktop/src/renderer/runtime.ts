@@ -1,3 +1,4 @@
+import { controlGoalRequest } from "./conversation/goal-control.js";
 import { parseDesktopToolApproval } from "./runtime-projections/approval.js";
 import { TerminalInteractions } from "./runtime-projections/terminal-interactions.js";
 import {
@@ -8,6 +9,7 @@ import {
   type RuntimeDiagnosticCheck,
   type RuntimeMcpServerInput,
   type RuntimeMemoryItem,
+  type RuntimeGoalSnapshot,
   type RuntimeMemorySettings,
   type RuntimeNotification,
   type RuntimeParams,
@@ -301,6 +303,14 @@ export interface RuntimeActions {
   trustWorkspace(workspacePath: string, trusted: boolean): Promise<void>;
   unregisterWorkspace(workspacePath: string): Promise<void>;
   reload(): Promise<void>;
+  createGoalSession(
+    workspacePath: string,
+    initialSettings?: RuntimeUserDefaults,
+  ): Promise<WorkspaceSessionRef | undefined>;
+  controlGoal(
+    ref: WorkspaceSessionRef,
+    input: Omit<RuntimeParams<"goal.control">, "workspacePath" | "sessionId">,
+  ): Promise<boolean>;
   loadSession(ref: WorkspaceSessionRef): Promise<void>;
   loadEarlierSession(ref: WorkspaceSessionRef): Promise<void>;
   sendMessage(input: {
@@ -508,6 +518,7 @@ export function useRuntimeStore(): RuntimeStore {
   const usageLoadTracker = useRef(new ConversationLoadTracker());
   const resolvedInteractions = useRef(new ResolvedInteractionCache());
   const terminalInteractions = useRef(new TerminalInteractions());
+  const pendingGoalControls = useRef(new Set<string>());
   const pendingSendRef = useRef<
     | {
         readonly identity: string;
@@ -1178,7 +1189,9 @@ export function useRuntimeStore(): RuntimeStore {
         ...(!sessionUsage.error ? { usage: parseUsage(sessionUsage.value) } : {}),
         ...(!contextResult.error ? { context: parseSessionContext(contextResult.value) } : {}),
         ...(!settingsResult.error ? { settings: parseSessionSettings(settingsResult.value) } : {}),
-        ...(!goalResult.error ? { goalItem: parseGoalItem(goalResult.value) } : {}),
+        ...(goalResult.value
+          ? { goal: goalResult.value.goal, goalItem: parseGoalItem(goalResult.value) }
+          : {}),
       };
       if (changeRunId) {
         const changeList = await optionalInvoke(bridge, "changes.list", {
@@ -1887,6 +1900,76 @@ export function useRuntimeStore(): RuntimeStore {
         });
       },
       reload: bootstrap,
+      async createGoalSession(workspacePath, initialSettings) {
+        let ref: WorkspaceSessionRef | undefined;
+        const succeeded = await perform("create-goal-session", async (bridge) => {
+          const created = await invoke(bridge, "session.create", { workspacePath });
+          ref = { workspacePath, sessionId: created.session.sessionId };
+          if (initialSettings && Object.keys(initialSettings).length > 0) {
+            await invoke(bridge, "session.settings.update", {
+              ...ref,
+              ...(initialSettings.modelRouteId
+                ? { modelRouteId: initialSettings.modelRouteId }
+                : {}),
+              ...(initialSettings.collaborationMode
+                ? { collaborationMode: initialSettings.collaborationMode }
+                : {}),
+              ...(initialSettings.orchestrationMode
+                ? { orchestrationMode: initialSettings.orchestrationMode }
+                : {}),
+              ...(initialSettings.permissionMode
+                ? { permissionMode: initialSettings.permissionMode }
+                : {}),
+              ...(initialSettings.thinkingEffort !== undefined
+                ? { thinkingEffort: initialSettings.thinkingEffort }
+                : {}),
+            });
+          }
+          await loadWorkspace(bridge, workspacePath);
+          await loadConversation(bridge, workspacePath, ref.sessionId);
+        });
+        return succeeded ? ref : undefined;
+      },
+      async controlGoal(ref, input) {
+        const key = workspaceSessionKey(ref);
+        if (pendingGoalControls.current.has(key)) return false;
+        pendingGoalControls.current.add(key);
+        const applyGoal = (goal: RuntimeGoalSnapshot | null) =>
+          setData((current) => ({
+            ...current,
+            conversations: {
+              ...current.conversations,
+              [key]: {
+                ...(current.conversations[key] ?? { ...ref, items: [], queuedCount: 0 }),
+                goal,
+                goalItem: parseGoalItem({ goal }),
+              },
+            },
+          }));
+        try {
+          return await perform(`goal-control:${key}`, async (bridge) => {
+            const succeeded = await controlGoalRequest(
+              (method, params) => invoke(bridge, method, params),
+              ref,
+              input,
+              applyGoal,
+            );
+            if (!succeeded)
+              throw new Error("Goal 已在另一处更新，已刷新最新状态；请检查后重新操作。");
+            setMessage(
+              input.action === "arm"
+                ? "Goal 已设置，发送下一条消息后开始执行。"
+                : input.action === "pause"
+                  ? "Goal 已暂停。"
+                  : input.action === "resume"
+                    ? "Goal 已恢复。"
+                    : "Goal 已清除，历史记录会保留。",
+            );
+          });
+        } finally {
+          pendingGoalControls.current.delete(key);
+        }
+      },
       async loadSession(ref) {
         if (!ref.workspacePath || !ref.sessionId) return;
         await perform("load-session", async (bridge) => {

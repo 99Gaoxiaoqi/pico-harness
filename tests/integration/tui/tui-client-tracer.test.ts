@@ -181,15 +181,34 @@ test("transcript item hydration: RPC items convert into a projectable transcript
         finishedAt: 2,
       },
       { id: "i5", kind: "subagent", title: "扫描模块", state: "done" },
-      { id: "i6", kind: "goal", title: "目标", state: "active", data: {} },
+      {
+        id: "goal-terminal:g1",
+        kind: "goal",
+        title: "登录测试通过",
+        state: "achieved",
+        detail: "集成验证通过",
+        data: {
+          goalId: "g1",
+          iterations: 2,
+          maxIterations: 50,
+          tokensUsed: 1200,
+          tokenBudget: 3000,
+        },
+      },
     ],
     "s1",
   );
-  assert.equal(events.length, 6, "goal 应跳过，终态工具应水化为起止两个事件");
+  assert.equal(events.length, 7, "终态 Goal 保留，终态工具水化为起止两个事件");
   const store = new TranscriptEventStore({ initialEvents: events });
+  const goal = store.getProjection().entries.find(({ entry }) => entry.kind === "goal")?.entry;
+  assert.ok(goal && goal.kind === "goal");
+  assert.equal(goal.title, "登录测试通过");
+  assert.equal(goal.state, "achieved");
+  assert.equal(goal.data?.tokensUsed, 1200);
   const kinds = store.getProjection().entries.map(({ entry }) => entry.kind);
   assert.deepEqual([...new Set(kinds)].sort(), [
     "assistant",
+    "goal",
     "run-boundary",
     "subagent-activity",
     "tool",
