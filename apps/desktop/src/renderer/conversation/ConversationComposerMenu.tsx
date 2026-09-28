@@ -1,4 +1,4 @@
-import { ListTodo, Plus, Sparkles, Workflow, Network, Search } from "lucide-react";
+import { ListTodo, Plus, Sparkles, Workflow, Network, Search, Target } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Button } from "@astryxdesign/core/Button";
 import {
@@ -28,11 +28,15 @@ export function ConversationComposerMenu({
   modes,
   disabled = false,
   onAttach,
+  onSetGoal,
+  goalDisabled,
 }: {
   children?: ReactNode;
   modes?: ConversationComposerModes | undefined;
   disabled?: boolean | undefined;
   onAttach?: (() => void) | undefined;
+  onSetGoal?: (() => void) | undefined;
+  goalDisabled?: boolean | undefined;
 }) {
   const inFlight = useRef(false);
   const [open, setOpen] = useState(false);
@@ -97,7 +101,7 @@ export function ConversationComposerMenu({
           variant: "ghost",
           size: "sm",
           className: "conversation-icon-button conversation-plus-trigger",
-          isDisabled: disabled || (!onAttach && !modes),
+          isDisabled: disabled || (!onAttach && !modes && !onSetGoal),
         }}
         hasChevron={false}
         placement="above"
@@ -112,6 +116,14 @@ export function ConversationComposerMenu({
           isDisabled={!onAttach || disabled}
           onClick={() => onAttach?.()}
         />
+        {onSetGoal && (
+          <DropdownMenuItem
+            label="设置 Goal"
+            icon={<Target aria-hidden="true" />}
+            isDisabled={disabled || goalDisabled}
+            onClick={onSetGoal}
+          />
+        )}
         {modes && (
           <>
             <DropdownMenuDivider />

@@ -2676,3 +2676,82 @@
   color: var(--conversation-muted);
   white-space: nowrap;
 }
+
+.conversation-goal {
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--conversation-line, var(--line));
+  border-radius: 10px;
+  color: var(--conversation-ink-muted, var(--ink-secondary));
+  font-size: 12px;
+  line-height: 1.5;
+}
+.conversation-goal__heading {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+.conversation-goal__heading > svg {
+  flex: none;
+}
+.conversation-goal__heading > strong {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--conversation-ink, var(--ink));
+  font-weight: 500;
+}
+.conversation-goal__heading > span {
+  flex: none;
+  font-size: 11px;
+}
+.conversation-goal__actions {
+  display: flex;
+  flex: none;
+}
+.conversation-goal p {
+  margin: 3px 0 0;
+}
+.conversation-goal__note {
+  font-size: 11px;
+  color: var(--conversation-ink-faint, var(--ink-tertiary));
+}
+.conversation-goal__reason {
+  overflow-wrap: anywhere;
+}
+.conversation-goal-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.conversation-goal-dialog h2 {
+  margin: 0;
+  font-size: 18px;
+}
+.conversation-goal-dialog p {
+  margin: 0;
+  color: var(--ink-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.conversation-goal-dialog__field {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+}
+.conversation-goal-dialog__limits {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.conversation-goal-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.tool-panel--side-chat > .conversation-goal {
+  margin: 8px 12px;
+}

@@ -7,6 +7,7 @@ import {
   LOCAL_RUNTIME_PROTOCOL_VERSION,
   TRANSCRIPT_PROJECTOR_VERSION,
   type RuntimeNotification,
+  type RuntimeGoalSnapshot,
 } from "@pico/protocol";
 import { AUTOMATION_TOOL_ALLOWLIST } from "@pico/runtime/automation-tool-policy";
 import { AutomationCredentialImportProposalStore } from "@pico/cli/tui/automation-credential-proposal";
@@ -35,6 +36,7 @@ interface Harness {
 
 function createHarness(options?: {
   readonly duplicateModelProvider?: boolean;
+  readonly goalConflict?: boolean;
   readonly staleMemoryUndo?: boolean;
   readonly sessionId?: string;
   readonly permissionMode?: "ask" | "auto" | "full-access";
@@ -49,6 +51,32 @@ function createHarness(options?: {
   let transcriptItems: unknown[] = [];
   let sessions: unknown[] = [];
   let providerApiKeyEnv = "K";
+  let goalSnapshot: RuntimeGoalSnapshot = {
+    stateVersion: 3,
+    currentGoal: {
+      id: "g1",
+      revision: 1,
+      condition: "目标一",
+      status: "active",
+      createdAt: 1,
+      maxIterations: 50,
+      blockCap: 8,
+      iterations: 0,
+      tokensAtStart: 0,
+      tokensNow: 0,
+      tokensBaselinePending: true,
+      consecutiveNoProgress: 0,
+      armedAt: 1,
+    },
+    controlLease: null,
+    coordinator: {
+      pendingContinuation: null,
+      currentExecution: null,
+      workTokens: 0,
+      accountedRunIds: [],
+    },
+  };
+
   const sessionRecord = (sessionId: string) => ({
     sessionId,
     workspacePath: "C:\\ws",
@@ -288,63 +316,44 @@ function createHarness(options?: {
         case "session.create":
           return { session: sessionRecord("s_created") };
         case "goal.get":
-          return {
-            goal: {
-              stateVersion: 2,
-              sequence: 1,
-              activeGoalId: "g1",
-              goals: [
-                {
-                  id: "g1",
-                  title: "目标一",
-                  description: "d",
-                  completionCriteria: ["完成测试"],
-                  status: "active",
-                  createdAt: 1,
-                  maxIterations: 50,
-                  blockCap: 8,
-                  controlRevision: 1,
-                  budgetUsage: { turns: 0, tokens: 0, costCNY: 0, startedAt: 1 },
-                  consecutiveNoProgress: 0,
-                  evidence: [],
-                  completionRequested: false,
-                  pendingContinuation: false,
-                  awaitingUserTurn: true,
-                  waitCount: 0,
-                },
-              ],
+          return { goal: goalSnapshot };
+        case "goal.control": {
+          if (options?.goalConflict) {
+            goalSnapshot = {
+              ...goalSnapshot,
+              currentGoal: {
+                ...goalSnapshot.currentGoal!,
+                revision: 9,
+                status: "paused",
+                lastReason: "另一处已暂停",
+              },
+            };
+            throw Object.assign(new Error("Goal revision changed"), { code: "CONFLICT" });
+          }
+          const previous = goalSnapshot.currentGoal!;
+          goalSnapshot = {
+            ...goalSnapshot,
+            currentGoal: {
+              ...previous,
+              revision: previous.revision + 1,
+              condition: String(params.condition ?? previous.condition),
+              maxIterations:
+                typeof params.maxIterations === "number"
+                  ? params.maxIterations
+                  : previous.maxIterations,
+              ...(typeof params.tokenBudget === "number"
+                ? { tokenBudget: params.tokenBudget }
+                : {}),
+              status:
+                params.action === "pause"
+                  ? "paused"
+                  : params.action === "clear"
+                    ? "cleared"
+                    : "active",
             },
           };
-        case "goal.control":
-          return {
-            goal: {
-              stateVersion: 2,
-              sequence: 2,
-              activeGoalId: params.action === "clear" ? null : "g1",
-              goals: [
-                {
-                  id: "g1",
-                  title: String(params.title ?? "目标一"),
-                  description: String(params.description ?? "d"),
-                  completionCriteria: Array.isArray(params.completionCriteria)
-                    ? params.completionCriteria
-                    : ["完成测试"],
-                  status: params.action === "pause" ? "paused" : params.action === "clear" ? "cleared" : "active",
-                  createdAt: 1,
-                  maxIterations: 50,
-                  blockCap: 8,
-                  controlRevision: 2,
-                  budgetUsage: { turns: 0, tokens: 0, costCNY: 0, startedAt: 1 },
-                  consecutiveNoProgress: 0,
-                  evidence: [],
-                  completionRequested: false,
-                  pendingContinuation: params.action === "resume",
-                  awaitingUserTurn: params.action === "arm",
-                  waitCount: 0,
-                },
-              ],
-            },
-          };
+          return { goal: goalSnapshot };
+        }
         case "usage.get":
           return {
             usage: {
@@ -959,6 +968,23 @@ test("client commands: settings-class commands map to session.settings.update", 
   assert.equal(harness.requests.length, 0, "非法值不应发 RPC");
 });
 
+test("client Goal commands refresh a CAS conflict without retrying the mutation", async () => {
+  const harness = createHarness({ sessionId: "s1", goalConflict: true });
+  const result = await run(harness, "/goal pause");
+  assert.match(String(result.result?.message), /已刷新最新状态/);
+  assert.match(String(result.result?.message), /另一处已暂停/);
+  assert.deepEqual(
+    harness.requests
+      .filter((entry) => entry.method.startsWith("goal."))
+      .map((entry) => entry.method),
+    ["goal.get", "goal.control", "goal.get"],
+  );
+  assert.equal(
+    harness.requests.find((entry) => entry.method === "goal.control")?.params.expectedRevision,
+    1,
+  );
+});
+
 test("client commands: query-class commands issue the right RPCs", async () => {
   const harness = createHarness({ sessionId: "s1" });
 
@@ -971,20 +997,38 @@ test("client commands: query-class commands issue the right RPCs", async () => {
   assert.match(String(goal.result?.message), /目标一/);
   assert.ok(harness.requests.some((entry) => entry.method === "goal.get"));
 
+  await run(harness, "/goal clear");
   harness.requests.length = 0;
-  await run(harness, "/goal arm 发布版本 | 做好发布检查 | CI 全绿; 发布说明已生成");
-  assert.deepEqual(harness.requests[0]?.params, {
+  await run(harness, "/goal arm CI 全绿且发布说明已生成 --max-iterations 12 --token-budget 3000");
+  assert.deepEqual(harness.requests.find((entry) => entry.method === "goal.control")?.params, {
     workspacePath: "C:\\ws",
     sessionId: "s1",
     action: "arm",
-    title: "发布版本",
-    description: "做好发布检查",
-    completionCriteria: ["CI 全绿", "发布说明已生成"],
+    condition: "CI 全绿且发布说明已生成",
+    maxIterations: 12,
+    tokenBudget: 3000,
+    expectedRevision: 2,
   });
-  await run(harness, "/goal pause g1");
-  await run(harness, "/goal resume g1");
-  await run(harness, "/goal clear g1");
-  assert.deepEqual(harness.requests.slice(1).map((entry) => entry.params.action), ["pause", "resume", "clear"]);
+  await run(harness, "/goal pause");
+  const pausedArm = await run(harness, "/goal arm 不能覆盖暂停中的目标");
+  assert.match(String(pausedArm.result?.message), /尚未结束/);
+  await run(harness, "/goal resume");
+  await run(harness, "/goal clear");
+  const controls = harness.requests.filter((entry) => entry.method === "goal.control");
+  assert.deepEqual(
+    controls.map((entry) => entry.params.action),
+    ["arm", "pause", "resume", "clear"],
+  );
+  assert.deepEqual(
+    controls.slice(1).map((entry) => [entry.params.goalId, entry.params.expectedRevision]),
+    [
+      ["g1", 3],
+      ["g1", 4],
+      ["g1", 5],
+    ],
+  );
+  const invalidBudget = await run(harness, "/goal arm 发布成功 --token-budget 999");
+  assert.match(String(invalidBudget.result?.message), /至少 1000/);
 
   const usage = await run(harness, "/usage");
   assert.match(String(usage.result?.message), /inputTokens=100/);
@@ -1937,7 +1981,7 @@ test("client commands preserve public metadata and registration order", () => {
       name: "goal",
       aliases: [],
       description: "查看或控制当前长程目标",
-      usage: "/goal [pause|resume|clear [id]|arm 标题 | 描述 | 完成标准; 完成标准]",
+      usage: "/goal [pause|resume|clear [id]|arm 完成条件 [--max-iterations N] [--token-budget N]]",
       category: "session",
       availability: "always",
     },

@@ -1,3 +1,4 @@
+import { useConversationGoal } from "../conversation/ConversationGoalControls.js";
 import { ComposerContextGauge } from "../conversation/ComposerContextGauge.js";
 import { DeepResearchPanel } from "../conversation/DeepResearchPanel.js";
 import {
@@ -419,7 +420,7 @@ export function ConversationPage() {
         ),
     ];
     const goal =
-      conversation?.goalItem && !persisted.some((item) => item.kind === "goal")
+      conversation?.goalItem && !persisted.some((item) => item.id === conversation.goalItem?.id)
         ? [conversation.goalItem]
         : [];
     const discovery = conversation?.discoveryItem ? [conversation.discoveryItem] : [];
@@ -872,6 +873,45 @@ export function ConversationPage() {
     [openWorkbarTab, workbar.docks],
   );
 
+  const goalControls = useConversationGoal({
+    snapshot: conversation?.goal,
+    disabled:
+      Boolean(conversation?.loadError) ||
+      session?.status === "archived" ||
+      Boolean(sessionRef && conversation?.goal === undefined),
+    busy: busy === `goal-control:${conversationKey}` || busy === "create-goal-session",
+    costCNY: conversation?.usage?.costCNY,
+    onArm: async (goalDraft) => {
+      let target = sessionRef;
+      if (!target) {
+        const path =
+          workspacePath || temporaryPathRef.current || (await actions.ensureTemporaryWorkspace());
+        if (!path) return false;
+        target = await actions.createGoalSession(path, newTaskSettings);
+        if (!target) return false;
+      }
+      const succeeded = await actions.controlGoal(target, {
+        action: "arm",
+        expectedRevision: sessionRef ? (conversation?.goal?.currentGoal?.revision ?? 0) : 0,
+        ...goalDraft,
+      });
+      if (!sessionRef) {
+        writePersistentDraft(workspaceSessionKey(target), draft);
+        clearDraft();
+        navigate(sessionHref(target), { replace: true });
+      }
+      return succeeded;
+    },
+    onAction: async (action, goal) =>
+      sessionRef
+        ? actions.controlGoal(sessionRef, {
+            action,
+            goalId: goal.id,
+            expectedRevision: goal.revision,
+          })
+        : false,
+  });
+
   return (
     <SessionWorkbarLayout
       state={workbar}
@@ -1113,6 +1153,11 @@ export function ConversationPage() {
                 }
               />
             )}
+            {goalControls.statusBar && (
+              <div className="conversation-composer-region conversation-goal-region">
+                {goalControls.statusBar}
+              </div>
+            )}
             {pendingPrompt || pendingApproval ? (
               <ConversationInteractionSlot
                 prompt={pendingPrompt}
@@ -1190,6 +1235,8 @@ export function ConversationPage() {
                   onPause={activeRun ? () => void actions.pauseRun(activeRun.id) : undefined}
                   onResume={activeRun ? () => void actions.resumeRun(activeRun.id) : undefined}
                   onStop={activeRun ? () => void actions.stopRun(activeRun.id) : undefined}
+                  onSetGoal={goalControls.openDialog}
+                  goalDisabled={!goalControls.canSetGoal}
                   onAttach={
                     !researchActive && composerStatus === "idle" && workspaceReady
                       ? openCatalog
@@ -1555,6 +1602,7 @@ export function ConversationPage() {
           </>
         )}
       </ConversationSurface>
+      {goalControls.dialog}
     </SessionWorkbarLayout>
   );
 }

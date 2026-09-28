@@ -1,3 +1,4 @@
+import { goalStatusLabel } from "./goal-control.js";
 import { parseDesktopToolApproval } from "../runtime-projections/approval.js";
 import { subagentMetadata } from "./subagent-navigation.js";
 import { parseWebSearchRecord } from "./WebSearchRecord.js";
@@ -384,12 +385,18 @@ function conversationItem(item: JsonRecord, index: number): ConversationItemView
     };
   }
   if (item.kind === "goal") {
+    const data = isRecord(item.data) ? item.data : undefined;
+    const usage =
+      data && typeof data.iterations === "number"
+        ? `迭代 ${data.iterations}/${numberValue(data.maxIterations)} · Goal token ${numberValue(data.tokensUsed)}${typeof data.tokenBudget === "number" ? `/${data.tokenBudget}` : ""}`
+        : undefined;
     return {
       id,
       kind: "goal",
-      title: stringValue(item.title, "当前目标"),
-      detail: stringValue(item.detail) || undefined,
-      state: progressState(item.state),
+      title: stringValue(item.title, "Goal"),
+      detail: [stringValue(item.detail), usage].filter(Boolean).join(" · ") || undefined,
+      state: goalProgressState(item.state),
+      statusLabel: goalStatusLabel(item.state),
       ...meta,
     };
   }
@@ -820,28 +827,32 @@ export function resolvePromptState(
   };
 }
 
+function goalProgressState(status: unknown): ConversationProgressState {
+  if (status === "achieved" || status === "done") return "done";
+  if (status === "cleared" || status === "paused" || status === "waiting") return "waiting";
+  return status === "active" ? "active" : "failed";
+}
+
 export function parseGoalItem(value: unknown): ConversationItemView | undefined {
   const result = isRecord(value) ? value : {};
   const snapshot = isRecord(result.goal) ? result.goal : undefined;
-  if (!snapshot) return undefined;
-  const activeGoalId = stringValue(snapshot.activeGoalId);
-  const goal = recordArray(snapshot.goals).find(
-    (candidate) => stringValue(candidate.id) === activeGoalId,
-  );
-  if (!goal) return undefined;
+  if (snapshot?.stateVersion !== 3 || !isRecord(snapshot.currentGoal)) return undefined;
+  const goal = snapshot.currentGoal;
   const status = stringValue(goal.status);
+  if (["active", "waiting", "paused"].includes(status)) return undefined;
+  const evaluation = isRecord(goal.lastEvaluation) ? goal.lastEvaluation : undefined;
+  const reason = stringValue(goal.lastReason ?? evaluation?.reason);
   return {
-    id: `goal:${activeGoalId}`,
+    id: `goal-terminal:${stringValue(goal.id)}`,
     kind: "goal",
-    title: stringValue(goal.title, "当前目标"),
-    detail: stringValue(goal.progress ?? goal.description) || undefined,
-    state:
-      status === "complete"
-        ? "done"
-        : status === "blocked"
-          ? "failed"
-          : status === "paused"
-            ? "waiting"
-            : "active",
+    title: stringValue(goal.condition, "Goal"),
+    detail: [
+      reason,
+      `迭代 ${numberValue(goal.iterations)}/${numberValue(goal.maxIterations)} · Goal token ${Math.max(0, numberValue(goal.tokensNow) - numberValue(goal.tokensAtStart))}`,
+    ]
+      .filter(Boolean)
+      .join(" · "),
+    state: goalProgressState(status),
+    statusLabel: goalStatusLabel(status),
   };
 }

@@ -1,3 +1,4 @@
+import { goalEntryText } from "./goal-entry.js";
 import type { TuiEntry } from "./tui-reporter.js";
 import { groupToolEntries } from "./tool-grouping.js";
 import { buildToolCardVisualRows } from "./tool-card.js";
@@ -111,6 +112,7 @@ function entryRows(
   if (entry.kind === "subagent-activity") {
     return buildSubagentActivityCardRows(entry, wrapWidth).length + 1;
   }
+  if (entry.kind === "goal") return visualRows(goalEntryText(entry), wrapWidth).length + 1;
   if (entry.kind === "skill") {
     const label = `Skill activated: ${entry.name}${entry.args ? ` ${entry.args}` : ""}`;
     return visualRows(label, wrapWidth).length + 1;
