@@ -166,7 +166,12 @@ export type {
   RuntimeDiscoveryRun,
   RuntimeDiscoveryProjection,
   RuntimeGoalStatus,
+  RuntimeGoalEvaluation,
   RuntimeGoal,
+  RuntimeGoalContinuationIntent,
+  RuntimeGoalExecutionRef,
+  RuntimeGoalControlLease,
+  RuntimeGoalCoordinator,
   RuntimeGoalSnapshot,
 } from "./runtime/planning.js";
 

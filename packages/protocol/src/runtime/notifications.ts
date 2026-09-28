@@ -49,7 +49,7 @@ export type RuntimeNotificationMap = {
   readonly "workspace.initialized": RuntimeWorkspaceInitResult;
   readonly "session.updated": { readonly session: RuntimeSession };
   readonly "session.resourceChanged": {
-    readonly resource: "tasks" | "artifacts" | "trace" | "context";
+    readonly resource: "tasks" | "artifacts" | "trace" | "context" | "goal";
     readonly revision?: number;
     readonly watermark?: number;
   };
@@ -471,7 +471,7 @@ function isSessionUpdatedPayload(payload: unknown, scope: Record<string, unknown
 function isSessionResourceChangedPayload(payload: unknown): boolean {
   return (
     isExactObject(payload, ["resource"], ["revision", "watermark"]) &&
-    ["tasks", "artifacts", "trace", "context"].includes(String(payload.resource)) &&
+    ["tasks", "artifacts", "trace", "context", "goal"].includes(String(payload.resource)) &&
     (payload.revision === undefined || nonNegativeSafeInteger(payload.revision)) &&
     (payload.watermark === undefined || nonNegativeSafeInteger(payload.watermark))
   );

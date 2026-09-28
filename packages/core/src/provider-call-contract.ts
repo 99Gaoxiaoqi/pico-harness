@@ -8,6 +8,7 @@ export const PROVIDER_CALL_PURPOSES = [
   "hook",
   "memory_review",
   "prewarm",
+  "goal_evaluation",
 ] as const;
 
 export type ProviderCallPurpose = (typeof PROVIDER_CALL_PURPOSES)[number];
