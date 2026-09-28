@@ -3,7 +3,7 @@ import { MAX_TOOL_RESULT_ENVELOPE_TEXT_BYTES, isJsonObject } from "./base.js";
 import type { JsonObject, RunId, RuntimeRunStatus, SessionId, WorkspaceParams } from "./base.js";
 import { invalidParams, invalidResult } from "./errors.js";
 import { runtimePlanControlSnapshotResult } from "./planning.js";
-import type { RuntimePlanControlSnapshot } from "./planning.js";
+import type { RuntimeGoalStatus, RuntimePlanControlSnapshot } from "./planning.js";
 import {
   runtimeQueuedInputResult,
   runtimeRunResult,
@@ -141,7 +141,7 @@ export type RuntimeSessionSubscriptionFrame = RuntimeSessionSubscriptionEnvelope
       })
     | (JsonObject & {
         readonly type: "subscription.resource_changed";
-        readonly resource: "tasks" | "artifacts" | "trace" | "context";
+        readonly resource: "tasks" | "artifacts" | "trace" | "context" | "goal";
         readonly revision?: number;
         readonly watermark?: number;
       })
@@ -306,9 +306,9 @@ export type RuntimeConversationItem = (
       readonly kind: "goal";
       readonly title: string;
       readonly detail?: string;
-      readonly state: "active";
+      readonly state?: RuntimeGoalStatus;
       readonly at?: number;
-      readonly data: JsonObject;
+      readonly data?: JsonObject;
     })
   | (JsonObject & {
       readonly id: string;
@@ -510,6 +510,27 @@ const runtimeConversationItemResult: RuntimeResultRule = (value, path) => {
     exactItem(
       { title: resultString },
       { detail: resultString, state: resultOneOf(["waiting", "active", "done", "failed"]) },
+    );
+    return;
+  }
+  if (kind === "goal") {
+    exactItem(
+      { title: resultString },
+      {
+        detail: resultString,
+        state: resultOneOf([
+          "active",
+          "waiting",
+          "paused",
+          "achieved",
+          "impossible",
+          "stalled",
+          "budget_limited",
+          "max_iterations",
+          "cleared",
+        ]),
+        data: resultJsonObject,
+      },
     );
     return;
   }

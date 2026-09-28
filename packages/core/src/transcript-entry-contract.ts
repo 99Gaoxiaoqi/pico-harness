@@ -1,3 +1,5 @@
+import type { PersistedGoalStatus } from "./session-runtime-state.js";
+
 /** Shared semantic body for durable Transcript entries, without UI identity. */
 export type TranscriptToolCallStatus =
   | "queued"
@@ -15,6 +17,8 @@ export type TranscriptSubagentActivityStatus =
   | "failed"
   | "timed_out"
   | "cancelled";
+
+export type TranscriptGoalStatus = PersistedGoalStatus;
 
 export interface TranscriptSubagentActivity {
   activityId: string;
@@ -57,6 +61,7 @@ export type TranscriptEntryData =
       detail?: string;
       state?: "waiting" | "active" | "done" | "failed";
     }
+  | { kind: "goal"; title: string; detail?: string; state?: TranscriptGoalStatus; data?: Readonly<Record<string, unknown>> }
   | {
       kind: "approval" | "prompt" | "changes";
       title: string;
@@ -82,3 +87,4 @@ export type TranscriptEntryData =
     }
   | ({ kind: "subagent-activity" } & Omit<TranscriptSubagentActivity, "activityId">)
   | { kind: "thinking"; content?: string };
+import type { PersistedGoalStatus } from "./session-runtime-state.js";
