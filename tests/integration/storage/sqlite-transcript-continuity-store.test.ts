@@ -515,14 +515,18 @@ test("canonical tool projection preserves run identity for nested results and re
     store.close();
     const database = new DatabaseSync(operationalDatabasePath(storageRoot));
     try {
-      database.prepare(
-        "UPDATE runtime_transcript_projection_state SET projector_version = 7 WHERE session_id = ?",
-      ).run(sessionId);
-      database.prepare(
-        `UPDATE runtime_transcript_item_versions
+      database
+        .prepare(
+          "UPDATE runtime_transcript_projection_state SET projector_version = 7 WHERE session_id = ?",
+        )
+        .run(sessionId);
+      database
+        .prepare(
+          `UPDATE runtime_transcript_item_versions
          SET payload_json = json_remove(payload_json, '$.runId', '$.turnId')
          WHERE session_id = ? AND item_id LIKE 'tool:code-mode:%'`,
-      ).run(sessionId);
+        )
+        .run(sessionId);
     } finally {
       database.close();
     }
@@ -596,61 +600,82 @@ test("structured interactions and goals update stable projection items in place"
 
     const goal = {
       id: "goal-1",
-      title: "Ship continuity",
-      description: "Finish the projection path",
-      completionCriteria: ["Projection path is complete"],
+      revision: 1,
+      condition: "Ship continuity",
       status: "active" as const,
       createdAt: 1,
       maxIterations: 50,
       blockCap: 8,
-      controlRevision: 1,
-      budgetUsage: { turns: 0, tokens: 0, costCNY: 0, startedAt: 1 },
+      iterations: 0,
+      tokensAtStart: 0,
+      tokensNow: 0,
+      tokensBaselinePending: true,
       consecutiveNoProgress: 0,
-      evidence: [],
-      completionRequested: false,
-      pendingContinuation: false,
-      awaitingUserTurn: true,
-      waitCount: 0,
+      armedAt: 1,
     };
-    const active = await store.appendSessionState(
-      sessionId,
-      { goal: { stateVersion: 2, sequence: 1, activeGoalId: goal.id, goals: [goal] } },
-      { ownerFence },
-    );
+    const snapshot = {
+      stateVersion: 3 as const,
+      currentGoal: goal,
+      controlLease: { goalId: goal.id, generation: 1 },
+      coordinator: {
+        pendingContinuation: null,
+        currentExecution: null,
+        workTokens: 0,
+        accountedRunIds: [],
+      },
+    };
+    const active = await store.appendSessionState(sessionId, { goal: snapshot }, { ownerFence });
     const activePage = await store.readTranscriptProjectionPage({
       sessionId,
       through: active.transcriptWatermark!,
       maxBytes: 16_384,
     });
-    assert.equal(activePage.items.at(-1)?.itemId, "goal:goal-1");
-    assert.deepEqual(activePage.items.at(-1)?.payload, {
-      id: "goal:goal-1",
-      kind: "goal",
-      title: goal.title,
-      detail: goal.description,
-      state: "active",
-      data: { goalId: goal.id },
+    assert.ok(
+      activePage.items.every((item) => (item.payload as { kind?: string }).kind !== "goal"),
+      "active Goal is displayed by the control plane",
+    );
+    const terminal = await store.appendTranscriptEvent(
+      sessionId,
+      {
+        eventId: "goal-terminal:goal-1",
+        sequence: 20,
+        createdAt: 2,
+        type: "entry.appended",
+        entryId: "goal-terminal:goal-1",
+        entry: {
+          kind: "goal",
+          title: goal.condition,
+          detail: "Done",
+          state: "achieved",
+          data: { goalId: goal.id },
+        },
+      },
+      { ownerFence },
+    );
+    const terminalPage = await store.readTranscriptProjectionPage({
+      sessionId,
+      through: terminal.transcriptWatermark!,
+      maxBytes: 16_384,
     });
-
-    const completed = await store.appendSessionState(
+    assert.equal(terminalPage.items.at(-1)?.itemId, "goal-terminal:goal-1");
+    const replacement = await store.appendSessionState(
       sessionId,
       {
         goal: {
-          stateVersion: 2,
-          sequence: 2,
-          activeGoalId: null,
-          goals: [{ ...goal, status: "achieved", awaitingUserTurn: false }],
+          ...snapshot,
+          currentGoal: { ...goal, id: "goal-2" },
+          controlLease: { goalId: "goal-2", generation: 1 },
         },
       },
       { ownerFence },
     );
     const advance = await store.readTranscriptAdvancePage({
       sessionId,
-      after: active.transcriptWatermark!,
-      through: completed.transcriptWatermark!,
+      after: terminal.transcriptWatermark!,
+      through: replacement.transcriptWatermark!,
       maxBytes: 16_384,
     });
-    assert.deepEqual(advance.changes, [{ op: "remove", itemId: "goal:goal-1", itemRevision: 1 }]);
+    assert.deepEqual(advance.changes, [], "replacing the current Goal preserves terminal history");
   } finally {
     store.close();
     rmSync(root, { recursive: true, force: true });

@@ -58,6 +58,10 @@ export class RuntimeRunExecutor {
             signal ? { signal } : undefined,
           ),
       },
+      goalManager: runtimeState.goalManager,
+      ...(typeof engine.getLastOutcome === "function"
+        ? { readModelOutcome: () => engine.getLastOutcome() }
+        : {}),
       executeModel: (signal) => engine.run(session, undefined, undefined, signal),
       loadImage,
       diagnostics: {

@@ -2,218 +2,479 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
+import type { LLMProvider, Message, PersistedGoalManagerSnapshot } from "@pico/core";
 import { createRuntimeRequest } from "@pico/protocol";
-import { GoalManager } from "@pico/runtime/goal-manager";
+import { AgentEngine } from "@pico/pico-host/agent-engine";
+import { CostTracker } from "@pico/pico-host/cost-tracker";
+import { ToolRegistry } from "@pico/pico-host/product-tool-registry";
+import { CreateGoalTool } from "@pico/pico-host/goal-tools";
 import { DesktopRuntimeService } from "@pico/pico-host/desktop-runtime-service";
 import { WorkspaceRuntimeService } from "@pico/pico-host/workspace-runtime-service";
+import { RuntimeRunExecutor } from "@pico/pico-host/runtime-run-executor";
 import { globalSessionManager } from "@pico/pico-host/session";
 import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
 import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
+import { SqliteRuntimeControlStore } from "@pico/storage/sqlite/sqlite-runtime-control-store";
+import { resolvePicoPaths } from "@pico/pico-host/pico-paths";
 import { writeDesktopModelRouting } from "../../fixtures/desktop-model-routing.js";
+import { reportFixtureAttempt } from "../../fixtures/native-accounting.js";
 
-test("Desktop arms a Goal for the next user Run and admits its continuation after settlement", async (context) => {
-  const root = await mkdtemp(join(tmpdir(), "pico-desktop-goal-continuation-"));
+type Evaluation = {
+  met?: boolean;
+  impossible?: boolean;
+  progress?: boolean;
+  waiting?: boolean;
+  reason: string;
+};
+async function fixture(
+  context: TestContext,
+  options: {
+    evaluations?: Evaluation[];
+    evaluator?: LLMProvider["generate"];
+    work?: (call: number, sessionId: string, messages: Message[]) => Promise<Message>;
+    maxTurns?: number;
+  } = {},
+) {
+  const root = await mkdtemp(join(tmpdir(), "pico-goal-host-engine-"));
   const workspace = join(root, "workspace");
   const picoHome = join(root, "home");
   await mkdir(workspace, { recursive: true });
   await mkdir(picoHome, { recursive: true });
   await writeDesktopModelRouting(picoHome);
   const workspacePath = await realpath(workspace);
-  const env = { PICO_HOME: picoHome, PICO_TEST_TOKEN: "test-token" };
+  const env = { PICO_HOME: picoHome, PICO_TEST_TOKEN: "fixture-token" };
   const trustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });
   await trustStore.trust(workspacePath);
-  const origins: Array<string | undefined> = [];
-  let firstRunHeld = false;
-  let notifyFirstRunStarted!: () => void;
-  let releaseFirstRun!: () => void;
-  const firstRunStarted = new Promise<void>((resolve) => {
-    notifyFirstRunStarted = resolve;
-  });
-  const firstRunGate = new Promise<void>((resolve) => {
-    releaseFirstRun = resolve;
-  });
+  const runs: { runId: string; sessionId: string; origin?: string }[] = [];
+  const evaluations = [...(options.evaluations ?? [{ met: true, reason: "已完成" }])];
+  const sessions: string[] = [];
+  let workCalls = 0;
+  let evaluationCalls = 0;
   const runtime = new WorkspaceRuntimeService({
     env,
-    execute: async ({ sessionId, workspacePath: runWorkspace, execution }) => {
-      origins.push(execution?.origin);
-      if (!execution?.origin && !firstRunHeld) {
-        firstRunHeld = true;
-        notifyFirstRunStarted();
-        await firstRunGate;
-      }
-      const lease = await globalSessionManager.getOrCreatePinned(sessionId!, runWorkspace, {
+    execute: async ({ sessionId, execution, context: runContext }) => {
+      runs.push({
+        runId: runContext.run.runId,
+        sessionId: sessionId!,
+        ...(execution?.origin ? { origin: execution.origin } : {}),
+      });
+      const lease = await globalSessionManager.getOrCreatePinned(sessionId!, workspacePath, {
         persistence: true,
         picoHome,
         runtimePort: createEngineRuntimePort(),
       });
+      const session = lease.session;
+      const manager = session.getGoalManager();
+      const ledger = new SqliteRuntimeControlStore({ storageRoot: session.runtimeStorageRoot });
       try {
-        await lease.session.withSerializedExecution(async () => {
-          const manager = new GoalManager();
-          const unbind = lease.session.bindGoalManager(manager);
-          try {
-            manager.beginRun(execution?.origin === "goal" ? "goal" : "user");
-            manager.settle(
-              execution?.origin === "goal"
-                ? {
-                    outcome: "met",
-                    progress: true,
-                    reason: "CI 全绿",
-                    evidence: ["CI run #42 passed"],
-                  }
-                : {
-                    outcome: "progress",
-                    progress: true,
-                    reason: "已生成待验证构建",
-                    evidence: ["构建产物已生成"],
-                  },
-            );
-            manager.endRun();
-            await lease.session.flushPersistence();
-          } finally {
-            unbind();
-          }
+        const registry = new ToolRegistry();
+        registry.register(new CreateGoalTool(manager));
+        const provider = new CostTracker(
+          {
+            generate: async (messages, _tools, request) => {
+              const call = ++workCalls;
+              const response = options.work
+                ? await options.work(call, session.id, messages)
+                : { role: "assistant" as const, content: `工作轮 ${call}，已完成本轮工作。` };
+              const usage = { promptTokens: 500, completionTokens: 100 };
+              await reportFixtureAttempt(request, "openai", "coder", usage);
+              return { ...response, usage };
+            },
+          },
+          { provider: "openai", model: "coder" },
+          session,
+          { ledger, context: { purpose: "main", sessionId: session.id } },
+        );
+        const engine = new AgentEngine({
+          workDir: workspacePath,
+          provider,
+          registry,
+          goalManager: manager,
+          ...(options.maxTurns ? { maxTurns: options.maxTurns } : {}),
         });
+        const result = await new RuntimeRunExecutor({
+          session,
+          goalManager: manager,
+          hostRunId: runContext.run.runId,
+          goalRunOrigin: execution?.origin ?? "user",
+          readModelOutcome: () => engine.getLastOutcome(),
+          executeModel: (signal) => engine.run(session, undefined, undefined, signal),
+          promptHooks: {
+            submit: async () => ({ decision: "allow" }),
+            expand: async () => ({ decision: "allow" }),
+          },
+          sessionSelection: { mode: "resume", sessionId: session.id },
+          workDir: workspacePath,
+          picoHome,
+          prompt: "测试输入",
+          resumeExistingSession: true,
+          agentSwarmAuthorization: "none",
+          traceEnabled: false,
+          options: {},
+          signal: runContext.signal,
+          ...(execution?.goalPreparedRun ? { prestartedRun: execution.goalPreparedRun } : {}),
+        }).execute();
+        return { sessionId, outcome: result.outcome, finalMessage: result.finalMessage };
       } finally {
+        ledger.close();
         lease.release();
       }
-      return { ok: true };
     },
   });
-  const desktop = new DesktopRuntimeService({ runtimeService: runtime, trustStore, env });
-  const created = (await desktop.handle(
-    createRuntimeRequest("session.create", { workspacePath }),
-  )) as { session: { sessionId: string } };
-  const sessionId = created.session.sessionId;
+  const desktop = new DesktopRuntimeService({
+    runtimeService: runtime,
+    trustStore,
+    env,
+    providerFactory: () => ({
+      generate: async (messages, tools, request) => {
+        evaluationCalls++;
+        assert.equal(tools.length, 0);
+        assert.equal(request?.maxOutputTokens, 1024);
+        if (options.evaluator) return options.evaluator(messages, tools, request);
+        const verdict = evaluations.shift() ?? { met: true, reason: "已完成" };
+        const usage = { promptTokens: 30, completionTokens: 10 };
+        await reportFixtureAttempt(request, "openai", "coder", usage);
+        return { role: "assistant", content: JSON.stringify(verdict), usage };
+      },
+    }),
+  });
   await desktop.handle(createRuntimeRequest("workspace.register", { workspacePath }));
   context.after(async () => {
-    releaseFirstRun();
     await desktop.close();
-    await globalSessionManager.delete(sessionId, workspacePath, { picoHome })?.close();
+    for (const sessionId of sessions)
+      await globalSessionManager.delete(sessionId, workspacePath, { picoHome })?.close();
     await rm(root, { recursive: true, force: true });
   });
+  const create = async () => {
+    const result = (await desktop.handle(
+      createRuntimeRequest("session.create", { workspacePath }),
+    )) as { session: { sessionId: string } };
+    sessions.push(result.session.sessionId);
+    return result.session.sessionId;
+  };
+  const state = async (sessionId: string) =>
+    (
+      (await desktop.handle(
+        createRuntimeRequest("goal.get", { workspacePath, sessionId }),
+      )) as unknown as { goal: PersistedGoalManagerSnapshot }
+    ).goal;
+  const arm = async (sessionId: string, extra = {}) =>
+    desktop.handle(
+      createRuntimeRequest("goal.control", {
+        workspacePath,
+        sessionId,
+        action: "arm",
+        condition: "工作完成",
+        expectedRevision: (await state(sessionId)).currentGoal?.revision ?? 0,
+        ...extra,
+      }),
+    );
+  const send = (sessionId: string, text = "开始工作") =>
+    desktop.handle(
+      createRuntimeRequest("session.send", {
+        workspacePath,
+        sessionId,
+        input: { kind: "text", text },
+        idempotencyKey: `input-${sessionId}-${text}`,
+      }),
+    );
+  const wait = async (sessionId: string, status: string) => {
+    for (let n = 0; n < 400; n++) {
+      const value = await state(sessionId);
+      if (value.currentGoal?.status === status) return value;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.fail(`Goal未进入${status}: ${JSON.stringify(await state(sessionId))}`);
+  };
+  return {
+    desktop,
+    runtime,
+    workspacePath,
+    picoHome,
+    create,
+    state,
+    arm,
+    send,
+    wait,
+    runs,
+    evaluationCalls: () => evaluationCalls,
+  };
+}
 
-  await desktop.handle(
-    createRuntimeRequest("goal.control", {
-      workspacePath,
-      sessionId,
-      action: "arm",
-      title: "验证发布构建",
-      description: "等待下一条普通用户消息后运行构建并验证 CI",
-      completionCriteria: ["CI run is green"],
-    }),
+test("Goal arm → actual Engine → Host evaluator → two continuations, with separate metering", async (t) => {
+  const f = await fixture(t, {
+    evaluations: [
+      { progress: true, reason: "步骤一完成" },
+      { progress: true, reason: "步骤二完成" },
+      { met: true, reason: "全部完成" },
+    ],
+  });
+  const id = await f.create();
+  await f.arm(id, { tokenBudget: 1000 });
+  assert.ok((await f.state(id)).currentGoal?.armedAt);
+  assert.equal(f.runs.length, 0, "arm must not start a Run");
+  await f.send(id);
+  const state = await f.wait(id, "achieved");
+  assert.deepEqual(
+    f.runs.map((run) => run.origin),
+    [undefined, "goal", "goal"],
   );
-  let goal = (await desktop.handle(
-    createRuntimeRequest("goal.get", { workspacePath, sessionId }),
-  )) as {
-    goal: {
-      readonly goals: readonly { readonly status: string; readonly awaitingUserTurn: boolean }[];
-    };
-  };
-  assert.equal(goal.goal.goals[0]?.status, "active");
-  assert.equal(goal.goal.goals[0]?.awaitingUserTurn, true);
-  assert.deepEqual(origins, []);
-
-  const firstRun = (await desktop.handle(
-    createRuntimeRequest("session.send", {
-      workspacePath,
-      sessionId,
-      input: { kind: "text", text: "现在开始验证" },
-      idempotencyKey: "goal-e2e-user-input",
-    }),
-  )) as { readonly run: { readonly runId: string } };
-  await firstRunStarted;
-  const queued = (await desktop.handle(
-    createRuntimeRequest("session.send", {
-      workspacePath,
-      sessionId,
-      input: { kind: "text", text: "先检查这条用户补充" },
-      behavior: "queue",
-      expectedRunId: firstRun.run.runId,
-      idempotencyKey: "goal-e2e-queued-user-input",
-    }),
-  )) as { readonly disposition: string };
-  assert.equal(queued.disposition, "queued");
-  releaseFirstRun();
-
-  for (let attempt = 0; attempt < 250; attempt++) {
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    goal = (await desktop.handle(
-      createRuntimeRequest("goal.get", { workspacePath, sessionId }),
-    )) as typeof goal;
-    if (goal.goal.goals[0]?.status === "achieved") break;
+  assert.equal(
+    state.currentGoal!.iterations,
+    2,
+    "terminal verdict does not increase upstream iterations",
+  );
+  assert.equal(state.currentGoal!.tokensAtStart, 600);
+  assert.equal(state.currentGoal!.tokensNow, 1200);
+  assert.equal(state.coordinator.workTokens, 1800);
+  const ledger = new SqliteRuntimeControlStore({
+    storageRoot: resolvePicoPaths(f.workspacePath, { picoHome: f.picoHome }).workspace.root,
+  });
+  try {
+    const calls = ledger.listPhysicalAttempts({ sessionId: id });
+    const evaluator = calls.filter((call) => call.purpose === "goal_evaluation");
+    assert.equal(evaluator.length, 3);
+    assert.ok(
+      evaluator.every((call) => call.goalId === state.currentGoal!.id && call.runId && call.turnId),
+    );
+    assert.equal(calls.filter((call) => call.purpose === "main").length, 3);
+    assert.ok(evaluator.every((call) => call.usage?.promptTokens === 30));
+  } finally {
+    ledger.close();
   }
-  assert.deepEqual(origins, [undefined, undefined, "goal"]);
-  assert.equal(goal.goal.goals[0]?.status, "achieved");
-  const runs = (await runtime.handle(
-    createRuntimeRequest("runs.list", { workspacePath, sessionId }),
-  )) as {
-    readonly runs: readonly { readonly description: string }[];
-  };
-  assert.ok(runs.runs.some((run) => run.description.includes("Goal continuation · 验证发布构建")));
 });
 
-test("Desktop restart reconciles a terminal Goal Run by identity and pauses when it is missing", async (context) => {
-  const root = await mkdtemp(join(tmpdir(), "pico-desktop-goal-recovery-"));
-  const workspace = join(root, "workspace");
-  const picoHome = join(root, "home");
-  await mkdir(workspace, { recursive: true });
-  await mkdir(picoHome, { recursive: true });
-  await writeDesktopModelRouting(picoHome);
-  const workspacePath = await realpath(workspace);
-  const env = { PICO_HOME: picoHome, PICO_TEST_TOKEN: "test-token" };
-  const trustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });
-  await trustStore.trust(workspacePath);
-  const makeRuntime = () =>
-    new WorkspaceRuntimeService({
-      env,
-      execute: async () => ({ ok: true }),
-    });
-  let runtime = makeRuntime();
-  let desktop = new DesktopRuntimeService({ runtimeService: runtime, trustStore, env });
-  const created = (await desktop.handle(
-    createRuntimeRequest("session.create", { workspacePath }),
-  )) as { session: { sessionId: string } };
-  const sessionId = created.session.sessionId;
-  await desktop.handle(createRuntimeRequest("workspace.register", { workspacePath }));
-  context.after(async () => {
-    await desktop.close();
-    await globalSessionManager.delete(sessionId, workspacePath, { picoHome })?.close();
-    await rm(root, { recursive: true, force: true });
+test("model-created Goal is settled from its creating Run", async (t) => {
+  const f = await fixture(t, {
+    work: async (call) =>
+      call === 1
+        ? {
+            role: "assistant",
+            content: "设置目标",
+            toolCalls: [
+              {
+                id: "create-goal",
+                name: "create_goal",
+                arguments: JSON.stringify({ condition: "工作完成" }),
+              },
+            ],
+          }
+        : { role: "assistant", content: "工作完成。" },
+  });
+  const id = await f.create();
+  await f.send(id);
+  const state = await f.wait(id, "achieved");
+  assert.equal(f.runs.length, 1);
+  assert.equal(f.evaluationCalls(), 1);
+  assert.equal(state.currentGoal!.iterations, 0);
+});
+
+test("Goal control remains responsive during evaluator and rejects stale control/results", async (t) => {
+  let entered!: () => void;
+  const evaluating = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let aborted = false;
+  const f = await fixture(t, {
+    evaluator: async (_messages, _tools, options) => {
+      entered();
+      options?.signal?.addEventListener(
+        "abort",
+        () => {
+          aborted = true;
+          release();
+        },
+        { once: true },
+      );
+      await held;
+      return { role: "assistant", content: JSON.stringify({ met: true, reason: "过期结果" }) };
+    },
+  });
+  t.after(release);
+  const id = await f.create();
+  await f.arm(id);
+  await f.send(id);
+  await evaluating;
+  const goal = (await f.state(id)).currentGoal!;
+  const pause = createRuntimeRequest("goal.control", {
+    workspacePath: f.workspacePath,
+    sessionId: id,
+    action: "pause",
+    goalId: goal.id,
+    expectedRevision: goal.revision,
+  });
+  await f.desktop.handle(pause);
+  await assert.rejects(f.desktop.handle(pause), /Goal 已变化/);
+  const state = await f.wait(id, "paused");
+  assert.equal(aborted, true);
+  assert.equal(state.currentGoal!.status, "paused");
+  assert.equal(f.runs.length, 1);
+});
+
+test("workspace busy and queued user input take priority without pausing a Goal", async (t) => {
+  let started!: () => void;
+  let release!: () => void;
+  const busy = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  const hold = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const f = await fixture(t, {
+    work: async (call) => {
+      if (call === 1) {
+        started();
+        await hold;
+      }
+      return { role: "assistant", content: `工作${call}` };
+    },
+  });
+  t.after(release);
+  const first = await f.create();
+  const second = await f.create();
+  await f.arm(second);
+  let goal = (await f.state(second)).currentGoal!;
+  await f.desktop.handle(
+    createRuntimeRequest("goal.control", {
+      workspacePath: f.workspacePath,
+      sessionId: second,
+      action: "pause",
+      goalId: goal.id,
+      expectedRevision: goal.revision,
+    }),
+  );
+  await f.send(first);
+  await busy;
+  goal = (await f.state(second)).currentGoal!;
+  await f.desktop.handle(
+    createRuntimeRequest("goal.control", {
+      workspacePath: f.workspacePath,
+      sessionId: second,
+      action: "resume",
+      goalId: goal.id,
+      expectedRevision: goal.revision,
+    }),
+  );
+  await f.send(first, "排队用户输入");
+  assert.equal((await f.state(second)).currentGoal!.status, "active");
+  release();
+  await f.wait(second, "achieved");
+  assert.deepEqual(
+    f.runs.map((run) => run.sessionId),
+    [first, first, second],
+  );
+  assert.equal(f.runs[2]!.origin, "goal");
+});
+
+for (const [name, verdict, limits, terminal, count] of [
+  [
+    "iteration limit",
+    { progress: true, reason: "继续" },
+    { maxIterations: 2 },
+    "max_iterations",
+    2,
+  ],
+  ["stall", { progress: false, reason: "没有进展" }, { blockCap: 2 }, "stalled", 2],
+  ["tokens", { progress: true, reason: "继续" }, { tokenBudget: 1000 }, "budget_limited", 3],
+  ["impossible", { impossible: true, reason: "不可达" }, {}, "impossible", 1],
+] as const)
+  test(`Host Goal settles ${name} without hidden Engine continuation`, async (t) => {
+    const f = await fixture(t, { evaluations: Array.from({ length: 5 }, () => verdict) });
+    const id = await f.create();
+    await f.arm(id, limits);
+    await f.send(id);
+    const state = await f.wait(id, terminal);
+    assert.equal(f.runs.length, count);
+    assert.equal(state.coordinator.currentExecution, null);
+    assert.equal(state.coordinator.pendingContinuation, null);
   });
 
-  const lease = await globalSessionManager.getOrCreatePinned(sessionId, workspacePath, {
-    persistence: true,
-    picoHome,
-    runtimePort: createEngineRuntimePort(),
+test("waiting consumes one iteration, preserves stall count and yields immediately to user input", async (t) => {
+  const f = await fixture(t, {
+    evaluations: [
+      { progress: false, reason: "尚无进展" },
+      { waiting: true, progress: true, reason: "等待外部任务" },
+      { met: true, reason: "用户带来完成结果" },
+    ],
   });
-  const manager = new GoalManager();
-  manager.create({
-    title: "对账丢失的 Run",
-    description: "恢复时不可重复执行未知身份的 Goal Run",
-    completionCriteria: ["运行结果已核验"],
-    awaitingUserTurn: true,
+  const id = await f.create();
+  await f.arm(id);
+  await f.send(id);
+  const waiting = await f.wait(id, "waiting");
+  assert.equal(waiting.currentGoal!.iterations, 2);
+  assert.equal(waiting.currentGoal!.consecutiveNoProgress, 1);
+  await f.send(id, "外部任务已完成");
+  const final = await f.wait(id, "achieved");
+  assert.equal(final.currentGoal!.iterations, 2);
+  assert.deepEqual(
+    f.runs.map((run) => run.origin),
+    [undefined, "goal", undefined],
+  );
+});
+
+test("invalid evaluator JSON neither resets nor increases the no-progress streak", async (t) => {
+  let call = 0;
+  const f = await fixture(t, {
+    evaluator: async () => ({
+      role: "assistant",
+      content: ++call === 2 ? "not-json" : JSON.stringify({ progress: false, reason: "无进展" }),
+    }),
   });
-  manager.beginRun("user", "missing-runtime-run");
-  lease.session.updateRuntimeState({ goal: manager.snapshot() });
-  await lease.session.flushPersistence();
-  lease.release();
+  const id = await f.create();
+  await f.arm(id, { blockCap: 2 });
+  await f.send(id);
+  const final = await f.wait(id, "stalled");
+  assert.equal(f.runs.length, 3);
+  assert.equal(final.currentGoal!.iterations, 3);
+  assert.equal(final.currentGoal!.consecutiveNoProgress, 2);
+});
 
-  await desktop.close();
-  await globalSessionManager.delete(sessionId, workspacePath, { picoHome })?.close();
-  runtime = makeRuntime();
-  desktop = new DesktopRuntimeService({ runtimeService: runtime, trustStore, env });
-  await (desktop as unknown as { goalRecoveryPromise: Promise<void> }).goalRecoveryPromise;
+test("unfinished Goal cannot be replaced; clear is a durable terminal and permits a new Goal", async (t) => {
+  const f = await fixture(t);
+  const id = await f.create();
+  await f.arm(id);
+  await assert.rejects(f.arm(id), /尚未|清除|未结束/);
+  const goal = (await f.state(id)).currentGoal!;
+  await f.desktop.handle(
+    createRuntimeRequest("goal.control", {
+      workspacePath: f.workspacePath,
+      sessionId: id,
+      action: "clear",
+      goalId: goal.id,
+      expectedRevision: goal.revision,
+    }),
+  );
+  assert.equal((await f.state(id)).currentGoal!.status, "cleared");
+  await f.arm(id);
+  assert.notEqual((await f.state(id)).currentGoal!.id, goal.id);
+  assert.equal(f.runs.length, 0);
+});
 
-  let goal = (await desktop.handle(
-    createRuntimeRequest("goal.get", { workspacePath, sessionId }),
-  )) as { goal: { goals: readonly { status: string; blockedReason?: string }[] } };
-  for (let attempt = 0; attempt < 100 && goal.goal.goals[0]?.status !== "paused"; attempt++) {
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    goal = (await desktop.handle(
-      createRuntimeRequest("goal.get", { workspacePath, sessionId }),
-    )) as typeof goal;
-  }
-  assert.equal(goal.goal.goals[0]?.status, "paused");
-  assert.match(goal.goal.goals[0]?.blockedReason ?? "", /Runtime ledger 中不存在/u);
+test("Engine step limit pauses the Goal without invoking evaluator", async (t) => {
+  const f = await fixture(t, {
+    maxTurns: 1,
+    work: async () => ({
+      role: "assistant",
+      content: "继续调用工具",
+      toolCalls: [
+        {
+          id: "duplicate-create",
+          name: "create_goal",
+          arguments: JSON.stringify({ condition: "重复目标" }),
+        },
+      ],
+    }),
+  });
+  const id = await f.create();
+  await f.arm(id);
+  await f.send(id);
+  const final = await f.wait(id, "paused");
+  assert.match(final.currentGoal!.lastReason!, /step_limit/);
+  assert.equal(f.evaluationCalls(), 0);
+  assert.equal(f.runs.length, 1);
 });

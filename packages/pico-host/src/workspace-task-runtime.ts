@@ -24,6 +24,13 @@ export const WORKSPACE_RUN_STATUSES = [
 
 export type WorkspaceRunStatus = (typeof WORKSPACE_RUN_STATUSES)[number];
 
+export class WorkspaceRunBusyError extends Error {
+  constructor(workspace: string) {
+    super(`工作区 ${workspace} 已有活跃 Run，等待空闲后重试`);
+    this.name = "WorkspaceRunBusyError";
+  }
+}
+
 export interface WorkspaceRunSnapshot {
   runId: string;
   workspace: string;
@@ -205,6 +212,25 @@ export class WorkspaceTaskRuntime {
     return this.startRunWithId(this.generateRunId(), request, executor);
   }
 
+  /** Goal admission keeps foreground exclusivity while reusing a durable identity. */
+  startPreparedForegroundRun(
+    runId: string,
+    request: WorkspaceRunRequest,
+    executor: WorkspaceRunExecutor,
+    initialVersion = 1,
+  ): WorkspaceRunSnapshot {
+    const existing = this.runs.get(runId);
+    if (existing) {
+      if (
+        existing.snapshot.sessionId !== request.sessionId ||
+        existing.snapshot.description !== request.description.trim()
+      )
+        throw new Error(`Run identity belongs to another admission: ${runId}`);
+      return cloneRun(existing.snapshot);
+    }
+    return this.startRunWithId(runId, request, executor, { initialVersion });
+  }
+
   /** Trusted scheduler entry: binds the workspace launch to a preallocated RuntimeRun id. */
   startExactRun(
     runId: string,
@@ -303,7 +329,7 @@ export class WorkspaceTaskRuntime {
     runId: string,
     request: WorkspaceRunRequest,
     executor: WorkspaceRunExecutor,
-    options: { allowConcurrent?: boolean } = {},
+    options: { allowConcurrent?: boolean; initialVersion?: number } = {},
   ): WorkspaceRunSnapshot {
     this.assertOpen();
     const description = request.description.trim();
@@ -312,7 +338,7 @@ export class WorkspaceTaskRuntime {
       !options.allowConcurrent &&
       this.listRuns().some((run) => !isTerminalRunStatus(run.status))
     ) {
-      throw new Error(`工作区 ${this.workspace} 已有活跃 Run，拒绝并发执行`);
+      throw new WorkspaceRunBusyError(this.workspace);
     }
 
     if (this.runs.has(runId)) throw new Error(`Run ID 已存在: ${runId}`);
@@ -326,7 +352,7 @@ export class WorkspaceTaskRuntime {
         status: "running",
         startedAt,
         updatedAt: startedAt,
-        version: 1,
+        version: options.initialVersion ?? 1,
       },
       executionEpoch: 1,
       controller: new AbortController(),

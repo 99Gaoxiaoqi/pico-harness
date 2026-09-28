@@ -48,6 +48,7 @@ export interface DesktopRewindClaim {
  * workspacePath，因为 SQLite 按 workspace 分片，queueId 只在该上下文内定位。
  */
 export interface DesktopConversationStateStoreLike {
+  listWorkspaceQueued?(workspacePath: string): Promise<DesktopQueuedInput[]>;
   listQueued(workspacePath: string, sessionId: string): Promise<DesktopQueuedInput[]>;
   enqueue(
     workspacePath: string,

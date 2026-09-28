@@ -8,6 +8,8 @@ import { readEventLogStorageStatus } from "@pico/storage/sqlite/event-log-retent
 import {
   WorkspaceTaskRuntime,
   type WorkspaceRunContext,
+  type WorkspaceRunRequest,
+  type WorkspaceRunExecutor,
   type WorkspaceRunSnapshot,
 } from "./workspace-task-runtime.js";
 import {
@@ -77,6 +79,7 @@ export interface DaemonRunExecution {
   /** Trusted origin annotation for Host-admitted Goal continuation Runs. */
   readonly origin?: "goal";
   readonly goalTitle?: string;
+  readonly goalPreparedRun?: import("./runtime-run-executor.js").PrestartedRuntimeRun;
   readonly orchestrationMode?: "graph" | "swarm";
   readonly requestedModel?: string;
   readonly allowedTools?: readonly string[];
@@ -485,8 +488,31 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
    */
   async startForegroundRun(input: StartDaemonRunInput): Promise<JsonValue> {
     const runtime = await this.getRuntime(input.workspacePath);
+    const preparedId = input.execution?.goalPreparedRun?.runId;
+    const durablePrepared = preparedId
+      ? this.eventStore(runtime.workspace).getDaemonRun(runtime.workspace, preparedId)
+      : undefined;
+    if (
+      preparedId &&
+      durablePrepared &&
+      !runtime.getRun(preparedId) &&
+      !(
+        durablePrepared.status === "failed" &&
+        durablePrepared.error === INTERRUPTED_DAEMON_RUN_ERROR
+      )
+    )
+      return runPayload(workspaceRunSnapshot(durablePrepared));
     const start = () => {
-      const run = runtime.startRun(
+      const startForeground = preparedId
+        ? (request: WorkspaceRunRequest, executor: WorkspaceRunExecutor) =>
+            runtime.startPreparedForegroundRun(
+              preparedId,
+              request,
+              executor,
+              (durablePrepared?.version ?? 0) + 1,
+            )
+        : runtime.startRun.bind(runtime);
+      const run = startForeground(
         {
           description:
             input.execution?.origin === "goal"
@@ -508,7 +534,9 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
       );
       return { result: runPayload(run), resourceId: run.runId };
     };
-    if (!input.idempotencyKey) return start().result;
+    // Goal's durable intent already owns a stable Run identity. Replaying a
+    // registered-but-unexecuted admission must not return an old command result.
+    if (preparedId || !input.idempotencyKey) return start().result;
 
     let startedRunId: string | undefined;
     let outcome: DaemonIdempotentCommandResult<Record<string, JsonValue>>;
