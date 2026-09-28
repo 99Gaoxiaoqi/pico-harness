@@ -243,6 +243,23 @@ function assertEntry(value: Record<string, unknown>): void {
       optionalString(value, "detail");
       optionalEnum(value, "state", ["waiting", "active", "done", "failed"]);
       return;
+    case "goal":
+      exactKeys(value, ["kind", "title", "detail", "state", "data"]);
+      requiredString(value, "title");
+      optionalString(value, "detail");
+      optionalEnum(value, "state", [
+        "active",
+        "waiting",
+        "paused",
+        "achieved",
+        "impossible",
+        "stalled",
+        "budget_limited",
+        "max_iterations",
+        "cleared",
+      ]);
+      optionalRecord(value, "data");
+      return;
     case "approval":
     case "prompt":
     case "changes":
