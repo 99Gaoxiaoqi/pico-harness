@@ -1109,13 +1109,37 @@ function resetForkGoalUsage(
   source: NonNullable<SessionRuntimeStatePatch["goal"]>,
   forkCreatedAt: string,
 ): NonNullable<SessionRuntimeStatePatch["goal"]> {
-  const startedAt = parseForkCreatedAt(forkCreatedAt);
+  const createdAt = parseForkCreatedAt(forkCreatedAt);
+  const prior = source.currentGoal;
+  const unfinished = prior && ["active", "waiting", "paused"].includes(prior.status);
+  const currentGoal = unfinished
+    ? {
+        id: `goal-${randomUUID()}`,
+        revision: 1,
+        condition: prior.condition,
+        status: "active" as const,
+        createdAt,
+        armedAt: createdAt,
+        maxIterations: prior.maxIterations,
+        blockCap: prior.blockCap,
+        ...(prior.tokenBudget === undefined ? {} : { tokenBudget: prior.tokenBudget }),
+        iterations: 0,
+        tokensAtStart: 0,
+        tokensNow: 0,
+        tokensBaselinePending: true,
+        consecutiveNoProgress: 0,
+      }
+    : null;
   return {
-    ...structuredClone(source),
-    goals: source.goals.map((goal) => ({
-      ...structuredClone(goal),
-      budgetUsage: { turns: 0, tokens: 0, costCNY: 0, startedAt },
-    })),
+    stateVersion: 3,
+    currentGoal,
+    controlLease: currentGoal ? { goalId: currentGoal.id, generation: 0 } : null,
+    coordinator: {
+      pendingContinuation: null,
+      currentExecution: null,
+      workTokens: 0,
+      accountedRunIds: [],
+    },
   };
 }
 
