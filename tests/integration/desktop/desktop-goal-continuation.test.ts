@@ -27,6 +27,9 @@ type Evaluation = {
   waiting?: boolean;
   reason: string;
 };
+const verdictContent = (value: Evaluation) =>
+  JSON.stringify({ met: false, impossible: false, progress: false, waiting: false, ...value });
+
 async function fixture(
   context: TestContext,
   options: {
@@ -135,7 +138,7 @@ async function fixture(
         const verdict = evaluations.shift() ?? { met: true, reason: "已完成" };
         const usage = { promptTokens: 30, completionTokens: 10 };
         await reportFixtureAttempt(request, "openai", "coder", usage);
-        return { role: "assistant", content: JSON.stringify(verdict), usage };
+        return { role: "assistant", content: verdictContent(verdict), usage };
       },
     }),
   });
@@ -180,7 +183,7 @@ async function fixture(
       }),
     );
   const wait = async (sessionId: string, status: string) => {
-    for (let n = 0; n < 400; n++) {
+    for (let n = 0; n < 2000; n++) {
       const value = await state(sessionId);
       if (value.currentGoal?.status === status) return value;
       await new Promise((resolve) => setTimeout(resolve, 10));
@@ -292,7 +295,7 @@ test("Goal control remains responsive during evaluator and rejects stale control
         { once: true },
       );
       await held;
-      return { role: "assistant", content: JSON.stringify({ met: true, reason: "过期结果" }) };
+      return { role: "assistant", content: verdictContent({ met: true, reason: "过期结果" }) };
     },
   });
   t.after(release);
@@ -382,9 +385,11 @@ for (const [name, verdict, limits, terminal, count] of [
   ["stall", { progress: false, reason: "没有进展" }, { blockCap: 2 }, "stalled", 2],
   ["tokens", { progress: true, reason: "继续" }, { tokenBudget: 1000 }, "budget_limited", 3],
   ["impossible", { impossible: true, reason: "不可达" }, {}, "impossible", 1],
+  ["default eight stalled turns", { progress: false, reason: "没有进展" }, {}, "stalled", 8],
+  ["default fifty iterations", { progress: true, reason: "继续" }, {}, "max_iterations", 50],
 ] as const)
   test(`Host Goal settles ${name} without hidden Engine continuation`, async (t) => {
-    const f = await fixture(t, { evaluations: Array.from({ length: 5 }, () => verdict) });
+    const f = await fixture(t, { evaluations: Array.from({ length: count + 1 }, () => verdict) });
     const id = await f.create();
     await f.arm(id, limits);
     await f.send(id);
@@ -422,7 +427,7 @@ test("invalid evaluator JSON neither resets nor increases the no-progress streak
   const f = await fixture(t, {
     evaluator: async () => ({
       role: "assistant",
-      content: ++call === 2 ? "not-json" : JSON.stringify({ progress: false, reason: "无进展" }),
+      content: ++call === 2 ? "not-json" : verdictContent({ progress: false, reason: "无进展" }),
     }),
   });
   const id = await f.create();
