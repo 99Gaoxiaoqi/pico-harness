@@ -492,11 +492,6 @@ function renderDefaultItem(
           </h3>
           <div className="conversation-message__body">{renderText(item.text, item)}</div>
           {item.webSearch && <WebSearchRecord record={item.webSearch} />}
-          {item.streaming && (
-            <span className="conversation-streaming-label" role="status">
-              <LoaderCircle aria-hidden="true" /> 正在回复
-            </span>
-          )}
         </article>
       );
     case "thinking":

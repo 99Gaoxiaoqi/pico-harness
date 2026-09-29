@@ -1155,12 +1155,25 @@
 }
 
 .conversation-thinking__title[data-streaming="true"] {
-  animation: conversation-thinking-pulse 1.5s ease-in-out infinite;
+  color: transparent;
+  background-image: linear-gradient(
+    90deg,
+    var(--conversation-ink-muted) 0%,
+    var(--conversation-ink-faint) 50%,
+    var(--conversation-ink-muted) 100%
+  );
+  background-size: 200% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  animation: conversation-thinking-shimmer 4s steps(60) infinite;
 }
 
-@keyframes conversation-thinking-pulse {
-  50% {
-    opacity: 0.45;
+@keyframes conversation-thinking-shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
   }
 }
 
@@ -1168,6 +1181,10 @@
   .conversation-thinking__title[data-streaming="true"],
   .conversation-process__spinner {
     animation: none;
+  }
+  .conversation-thinking__title[data-streaming="true"] {
+    color: var(--conversation-ink-muted);
+    background: none;
   }
   .conversation-disclosure-chevron {
     transition: none;
@@ -1203,21 +1220,6 @@
   content: "";
   vertical-align: -2px;
   animation: conversation-caret 1s steps(2, jump-none) infinite;
-}
-
-.conversation-streaming-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 5px;
-  color: var(--conversation-ink-faint);
-  font-size: 11px;
-}
-
-.conversation-streaming-label svg {
-  width: 13px;
-  height: 13px;
-  animation: conversation-spin 1s linear infinite;
 }
 
 .conversation-run-boundary {
@@ -2320,12 +2322,37 @@
 }
 
 .conversation-composer__status {
-  max-width: 180px;
+  max-width: 220px;
   overflow: hidden;
-  color: var(--conversation-ink-faint);
-  font-size: 10px;
+  color: var(--conversation-ink-muted);
+  font-size: 11px;
+  font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.conversation-composer__status-live {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  vertical-align: middle;
+}
+
+.conversation-composer__status-activity {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.conversation-composer__status-separator,
+.conversation-composer__status-time {
+  flex: none;
+  color: var(--conversation-ink-faint);
+  font-weight: 400;
+}
+
+.conversation-composer__status-time {
+  font-variant-numeric: tabular-nums;
 }
 
 .conversation-context-label {
@@ -2490,7 +2517,6 @@
   }
 
   .conversation-message--assistant[data-streaming="true"] .conversation-message__body::after,
-  .conversation-streaming-label svg,
   [data-state="active"] > .conversation-inline-card__header .conversation-item-state svg,
   .conversation-plan li[data-state="active"] > svg,
   .conversation-subagent-row[data-state="active"] .conversation-subagent-row__dot {

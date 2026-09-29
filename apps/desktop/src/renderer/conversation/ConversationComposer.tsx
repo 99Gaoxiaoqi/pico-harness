@@ -7,9 +7,11 @@ import {
 import { Selector } from "@astryxdesign/core/Selector";
 import { ArrowUp, Pause, Play, Square } from "lucide-react";
 import {
+  useEffect,
   useId,
   useRef,
   useImperativeHandle,
+  useState,
   type FormEvent,
   type KeyboardEvent,
   type ReactNode,
@@ -34,6 +36,7 @@ export interface ConversationComposerProps {
   readonly onValueChange: (value: string) => void;
   readonly onSubmit: (value: ComposerSubmitValue) => void;
   readonly status: ComposerStatus;
+  readonly startedAt?: number | undefined;
   readonly behavior?: ComposerBehavior | undefined;
   readonly onBehaviorChange?: ((behavior: ComposerBehavior) => void) | undefined;
   readonly placeholder?: string | undefined;
@@ -61,6 +64,53 @@ const behaviorLabels: Readonly<Record<Exclude<ComposerBehavior, "auto">, string>
   replace: "停止并替换",
 };
 
+const runningPhrases = ["正在琢磨…", "正在梳理…", "正在推敲…", "正在打磨…", "正在权衡…"];
+
+function formatElapsed(seconds: number): string {
+  if (seconds < 60) return `${seconds} 秒`;
+  return `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`;
+}
+
+function RunningStatus({ startedAt }: { readonly startedAt: number }) {
+  const [now, setNow] = useState<number | undefined>(undefined);
+  const [reducedMotion, setReducedMotion] = useState(false);
+
+  useEffect(() => {
+    const query = window.matchMedia?.("(prefers-reduced-motion: reduce)");
+    if (!query) return;
+    const update = () => setReducedMotion(query.matches);
+    update();
+    query.addEventListener?.("change", update);
+    return () => query.removeEventListener?.("change", update);
+  }, []);
+
+  useEffect(() => {
+    const update = () => setNow(Date.now());
+    update();
+    const timer = window.setInterval(update, 1_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const elapsedSeconds =
+    now === undefined ? undefined : Math.max(0, Math.floor((now - startedAt) / 1_000));
+  const phraseIndex =
+    elapsedSeconds === undefined || reducedMotion
+      ? 0
+      : Math.floor(elapsedSeconds / 20) % runningPhrases.length;
+
+  return (
+    <span className="conversation-composer__status-live" aria-hidden="true">
+      <span className="conversation-composer__status-activity">{runningPhrases[phraseIndex]}</span>
+      {elapsedSeconds !== undefined && (
+        <>
+          <span className="conversation-composer__status-separator">·</span>
+          <time className="conversation-composer__status-time">{formatElapsed(elapsedSeconds)}</time>
+        </>
+      )}
+    </span>
+  );
+}
+
 function defaultBehavior(status: ComposerStatus): ComposerBehavior {
   return status === "idle" ? "auto" : "steer";
 }
@@ -71,6 +121,7 @@ export function ConversationComposer({
   onValueChange,
   onSubmit,
   status,
+  startedAt,
   behavior = defaultBehavior(status),
   onBehaviorChange,
   placeholder = "给 Pico 发消息",
@@ -101,7 +152,7 @@ export function ConversationComposer({
     (busy
       ? "正在发送…"
       : status === "running"
-        ? "Pico 正在工作"
+        ? "正在处理…"
         : status === "paused"
           ? "已暂停"
           : undefined);
@@ -109,6 +160,8 @@ export function ConversationComposer({
     status === "pause_requested"
       ? ["等待暂停，将在安全边界暂停", statusText].filter(Boolean).join(" · ")
       : defaultStatusText;
+  const showLiveRunStatus =
+    status === "running" && !busy && !statusText && startedAt !== undefined;
 
   const submit = () => {
     if (!canSubmit) return;
@@ -208,8 +261,13 @@ export function ConversationComposer({
               />
             )}
             {resolvedStatusText && (
-              <span id={statusId} className="conversation-composer__status" role="status">
-                {resolvedStatusText}
+              <span
+                id={statusId}
+                className="conversation-composer__status"
+                role="status"
+                aria-label={showLiveRunStatus ? "Pico 正在处理" : undefined}
+              >
+                {showLiveRunStatus ? <RunningStatus startedAt={startedAt} /> : resolvedStatusText}
               </span>
             )}
             {trailingAccessory}

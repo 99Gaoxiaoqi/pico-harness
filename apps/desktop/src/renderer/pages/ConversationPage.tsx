@@ -1208,6 +1208,7 @@ export function ConversationPage() {
                   onValueChange={handleDraftChange}
                   onSubmit={(value) => void submit(value.text, value.behavior)}
                   status={composerStatus}
+                  startedAt={activeRun?.startedAt}
                   behavior={behavior}
                   onBehaviorChange={setBehavior}
                   busy={preparingSend || busy === "send-message"}
