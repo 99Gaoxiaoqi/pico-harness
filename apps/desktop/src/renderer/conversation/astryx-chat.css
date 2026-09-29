@@ -58,7 +58,8 @@
   flex: 1;
 }
 
-/* Running controls get their own aligned row below the model/context settings. */
+/* Keep running controls beside model/context settings while they fit; let the
+   footer wrap naturally on narrow composer widths. */
 .conversation-composer:not([data-status="idle"]) .pico-astryx-composer > div > div:last-child {
   flex-wrap: wrap;
 }
@@ -66,15 +67,9 @@
   .pico-astryx-composer
   > div
   > div:last-child
-  > div:first-child {
-  flex: 1 0 100%;
-}
-.conversation-composer:not([data-status="idle"])
-  .pico-astryx-composer
-  > div
-  > div:last-child
   > div:last-child {
-  width: 100%;
+  width: auto;
+  flex: 0 1 auto;
   min-width: 0;
 }
 .conversation-composer:not([data-status="idle"]) .conversation-composer__actions {
