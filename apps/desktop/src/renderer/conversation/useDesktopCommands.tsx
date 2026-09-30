@@ -73,6 +73,10 @@ export function useDesktopCommands({
   const [catalog, setCatalog] = useState<readonly DesktopCommandSuggestion[]>([]);
   const [pendingScope, setPendingScope] = useState<typeof scope>();
   const pending = pendingScope === scope;
+  const [controlRequest, setControlRequest] = useState<{
+    scope: typeof scope;
+    target: "mode" | "permissions" | "interrupt" | "thinking";
+  }>();
   const inFlight = useRef<typeof scope | undefined>(undefined);
   const unconfirmed = useRef(new Map<string, string>());
   const temporaryWorkspaces = useRef(new Map<string, string>());
@@ -103,19 +107,32 @@ export function useDesktopCommands({
   const ref = sessionId ? { workspacePath, sessionId } : undefined;
   const applySettings = (patch: RuntimeUserDefaults) =>
     applyConversationSettings(runtime, ref, initialSettings ?? {}, patch, onInitialSettings);
+  useEffect(() => {
+    if (pending || !controlRequest) return;
+    setControlRequest(undefined);
+    if (currentScope.current !== controlRequest.scope) return;
+    // Open after command completion has released the composer's busy controls.
+    const control = controlRequest.target;
+    if (onOpenControl?.(control)) return;
+    const text =
+      running && (control === "permissions" || control === "thinking")
+        ? "任务运行中，可在输入框查看当前设置；结束后才能修改。"
+        : control === "interrupt"
+          ? "当前没有可用的停止按钮；不会执行停止操作。"
+          : control === "thinking"
+            ? "当前模型没有可用的思考强度选项，或任务正在执行中。"
+            : "当前输入区没有可修改的对应控件，请在主聊天的模式或权限入口查看。";
+    setNotice({ key: controlRequest.scope.key, text });
+  }, [controlRequest, pending, onOpenControl, running]);
   function openNative(
     target: Extract<DesktopCommandAction, { kind: "open" }>["target"],
   ): string | undefined {
     if (["mode", "permissions", "interrupt", "thinking"].includes(target)) {
-      const control = target as "mode" | "permissions" | "interrupt" | "thinking";
-      if (onOpenControl?.(control)) return undefined;
-      if (running && (control === "permissions" || control === "thinking"))
-        return "任务运行中，可在输入框查看当前设置；结束后才能修改。";
-      return control === "interrupt"
-        ? "当前没有可用的停止按钮；不会执行停止操作。"
-        : control === "thinking"
-          ? "当前模型没有可用的思考强度选项，或任务正在执行中。"
-          : "当前输入区没有可修改的对应控件，请在主聊天的模式或权限入口查看。";
+      setControlRequest({
+        scope,
+        target: target as "mode" | "permissions" | "interrupt" | "thinking",
+      });
+      return undefined;
     }
     if (target === "sessions") navigate("/sessions");
     else if (target === "goal") onOpenGoal();
