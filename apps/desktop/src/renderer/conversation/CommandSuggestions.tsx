@@ -1,5 +1,8 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type RefObject } from "react";
-import type { DesktopCommandSuggestion } from "../../shared/command-policy.js";
+import {
+  desktopCommandPolicy,
+  type DesktopCommandSuggestion,
+} from "../../shared/command-policy.js";
 import type { SlashArgumentCandidate } from "@pico/cli/command-contracts";
 import type { CatalogSkillView, CatalogAgentView } from "../model.js";
 import {
@@ -272,14 +275,15 @@ export function useCommandSuggestions(
         setIndex((selected + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length);
         return true;
       }
-      const exact =
-        primary &&
-        commands?.catalog.some((item) =>
-          [item.name, ...item.aliases].includes(query.toLowerCase()),
-        );
+      const exactCommand = primary
+        ? commands?.catalog.find((item) =>
+            [item.name, ...item.aliases].includes(query.toLowerCase()),
+          )
+        : undefined;
+      const exact = Boolean(exactCommand || (primary && desktopCommandPolicy(query.toLowerCase())));
       if (
         event.key === "Tab" ||
-        (event.key === "Enter" && !event.shiftKey && (!exact || items[selected]?.disabled))
+        (event.key === "Enter" && !event.shiftKey && (!exact || exactCommand?.disabled))
       ) {
         event.preventDefault();
         if (!replacement) accept(selected);

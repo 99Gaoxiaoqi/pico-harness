@@ -94,6 +94,12 @@ window.pico = {
       }
       if (window.testCommandBridge)
         return window.testCommandBridge.execute(context, text, requestId);
+      const policy = DESKTOP_COMMAND_POLICY[text.slice(1)];
+      if (policy?.tier === "control")
+        return {
+          ok: true,
+          value: { outcome: { kind: "local" }, action: { kind: "open", target: policy.target } },
+        };
       if (text === "/new")
         return { ok: true, value: { outcome: { kind: "local" }, switchSession: null } };
       if (["/usage", "/sessions"].includes(text))
@@ -493,6 +499,29 @@ async function command(text) {
       editor().textContent.trim().startsWith("/") && editor().textContent.trim() !== "/",
       "方向键/Tab 补全失败",
     );
+    await act(async () => {
+      navigateTest("/task/new");
+      await wait();
+    });
+    await type("/mode");
+    const modeSettingsBefore = calls.filter((item) => item.method === "settings").length;
+    await key("Enter");
+    check(
+      calls.findLast((item) => item.method === "command")?.text === "/mode",
+      "完整 /mode 被当作 /model 前缀补全",
+    );
+    check(
+      document
+        .querySelector('.pico-composer-menu [role="menuitemcheckbox"]')
+        ?.closest("[popover]")
+        ?.matches(":popover-open"),
+      "新任务 /mode Enter 没有打开加号菜单",
+    );
+    check(
+      calls.filter((item) => item.method === "settings").length === modeSettingsBefore,
+      "/mode 修改了会话设置",
+    );
+    await mount();
     await type("/agent rev");
     await key("Enter");
     check(
