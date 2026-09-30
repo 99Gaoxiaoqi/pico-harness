@@ -1,4 +1,4 @@
-// Pico Host Skill Catalog：统一扫描 Pico 原生资源与 Claude 兼容输入。
+// Pico Host Skill Catalog：统一扫描 Pico 原生资源、Agents Skills 与 Claude 兼容输入。
 // 对应课程第 10 讲 internal/context/skill.go。
 //
 // 遵循 Agent Skills 规范 (agentskills.io):
@@ -93,7 +93,7 @@ export interface SkillLoaderOptions<TrustAuthority = unknown> {
   readonly picoHome?: string;
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly externalSources?: readonly ExternalResourceCatalogSource<TrustAuthority>[];
-  /** 显式开启用户 Pico/Claude Skills；传入 homeDir/picoHome 时也自动开启。 */
+  /** 显式开启用户 Pico/Agents/Claude Skills；传入 homeDir/picoHome 时也自动开启。 */
   readonly includeUserResources?: boolean;
   readonly includeClaudeProjectResources?: boolean;
   readonly includeClaudeUserResources?: boolean;
@@ -131,7 +131,7 @@ export class SkillLoader<TrustAuthority = unknown> {
   private readonly logger: SkillCatalogLogger;
 
   /**
-   * 扫描 Claude/Pico 两个 Skill 目录,解析所有 SKILL.md,格式化为字符串准备注入 Context。
+   * 扫描 Pico/Agents/Claude Skill 目录,解析所有 SKILL.md,格式化为字符串准备注入 Context。
    * 目录不存在则静默返回空 (当前工作区未配置技能)。
    */
   async loadAll(): Promise<string> {
@@ -344,6 +344,13 @@ export class SkillLoader<TrustAuthority = unknown> {
               paths.project.skills,
               50,
             ),
+            source<TrustAuthority>(
+              "project-agents",
+              "project",
+              "agents-compat",
+              join(this.workDir, ".agents", "skills"),
+              45,
+            ),
             ...(this.options.includeClaudeProjectResources === false
               ? []
               : [
@@ -359,6 +366,13 @@ export class SkillLoader<TrustAuthority = unknown> {
       ...(includeUserResources
         ? [
             source<TrustAuthority>("user-pico", "user", "pico-native", paths.home.skills, 30),
+            source<TrustAuthority>(
+              "user-agents",
+              "user",
+              "agents-compat",
+              join(homeDir, ".agents", "skills"),
+              25,
+            ),
             ...(this.options.includeClaudeUserResources === false
               ? []
               : [
@@ -400,12 +414,14 @@ function normalizeAllowedTools(
   sourcePath: string,
   logger: SkillCatalogLogger,
 ): string[] | undefined {
-  if (tools === undefined || format !== "claude-compat") return tools;
+  if (tools === undefined || (format !== "claude-compat" && format !== "agents-compat")) {
+    return tools;
+  }
   const mapped = mapClaudeToolNames(tools);
   if (mapped.unknown.length > 0) {
     logger.warn(
-      { resource, sourcePath, tools: mapped.unknown },
-      "[skill-catalog] Claude 资源声明了未知工具，已按 fail-closed 处理",
+      { resource, sourcePath, format, tools: mapped.unknown },
+      "[skill-catalog] 兼容资源声明了未知工具，已按 fail-closed 处理",
     );
   }
   // 保留未知名，让运行时 allowlist 在 Provider 调用前明确拒绝整条命令。

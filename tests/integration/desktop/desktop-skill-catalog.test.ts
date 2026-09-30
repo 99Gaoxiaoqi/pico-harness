@@ -31,8 +31,10 @@ test("Pico Host 桌面目录通过窄配置端口枚举技能、Agent 与只读 
   const pluginRoot = join(root, "plugin-skills");
   for (const [path, name] of [
     [join(workspace, ".pico", "skills"), "native"],
+    [join(workspace, ".agents", "skills"), "agents-project"],
     [join(workspace, ".claude", "skills"), "claude"],
     [join(picoHome, "skills"), "user"],
+    [join(homeDir, ".agents", "skills"), "agents-user"],
     [pluginRoot, "plugin"],
   ] as const) {
     await writeSkill(path, name, { description: name, body: name });
@@ -122,19 +124,42 @@ test("Pico Host 桌面目录通过窄配置端口枚举技能、Agent 与只读 
 
   assert.deepEqual(
     (await listHostDesktopUserSkills(options)).skills.map(({ name }) => name),
-    ["user"],
+    ["agents-user", "user"],
   );
   assert.deepEqual(configReads, []);
   const effective = await listHostDesktopEffectiveSkills(workspace, options);
-  assert.deepEqual(effective.skills.map(({ name }) => name).sort(), ["native", "plugin", "user"]);
+  assert.deepEqual(effective.skills.map(({ name }) => name).sort(), [
+    "agents-project",
+    "agents-user",
+    "native",
+    "plugin",
+    "user",
+  ]);
+  assert.equal(
+    effective.skills.find(({ name }) => name === "agents-project")?.source.sourceLabel,
+    "Agents 项目级",
+  );
   assert.equal(effective.skills.find(({ name }) => name === "plugin")?.source.readOnly, true);
+  const catalogSkills = await listHostDesktopSkills(workspace, true, options);
+  assert.deepEqual(catalogSkills.map(({ name }) => name).sort(), [
+    "agents-project",
+    "agents-user",
+    "native",
+    "plugin",
+    "user",
+  ]);
   assert.deepEqual(
-    (await listHostDesktopSkills(workspace, true, options)).map(({ name }) => name).sort(),
-    ["native", "plugin", "user"],
+    catalogSkills.find(({ name }) => name === "agents-project"),
+    {
+      name: "agents-project",
+      description: "agents-project",
+      sourceId: "project-agents",
+      sourcePath: join(workspace, ".agents", "skills", "agents-project", "SKILL.md"),
+    },
   );
   assert.deepEqual(
     (await listHostDesktopSkills(workspace, false, options)).map(({ name }) => name).sort(),
-    ["claude", "native", "plugin"],
+    ["agents-project", "claude", "native", "plugin"],
   );
   const agents = await listHostDesktopAgents(workspace, options);
   assert.ok(agents.some(({ name }) => name === "plugin-agent"));
@@ -181,6 +206,10 @@ test("用户级 Skill 枚举只读取用户来源并返回稳定修订", async (
     description: "Claude user skill",
     body: "Use the Claude user instructions.",
   });
+  const userAgentsFile = await writeSkill(join(homeDir, ".agents", "skills"), "shared", {
+    description: "Agents user skill",
+    body: "Use the Agents user instructions.",
+  });
   // 若 user 模式意外构造项目来源，此目录会被当成 `${workDir}/.pico/skills` 扫描。
   await writeSkill(join(picoHome, ".pico", "skills"), "project-sentinel", {
     description: "Must stay invisible",
@@ -202,7 +231,7 @@ test("用户级 Skill 枚举只读取用户来源并返回稳定修订", async (
   const first = await listDesktopUserSkills(options);
   assert.deepEqual(
     first.skills.map(({ name }) => name),
-    ["shared", "shared"],
+    ["shared", "shared", "shared"],
   );
   assert.deepEqual(
     first.skills.map(({ source }) => source),
@@ -213,6 +242,14 @@ test("用户级 Skill 枚举只读取用户来源并返回稳定修订", async (
         sourceLabel: "Pico 用户级",
         readOnly: false,
         effective: true,
+      },
+      {
+        scope: "user",
+        sourceId: "user-agents",
+        sourceLabel: "Agents 用户级",
+        readOnly: false,
+        effective: false,
+        shadowedBy: "user-pico",
       },
       {
         scope: "user",
@@ -238,6 +275,100 @@ test("用户级 Skill 枚举只读取用户来源并返回稳定修订", async (
   );
   const changed = await listDesktopUserSkills(options);
   assert.notEqual(changed.revision, first.revision);
+  await writeFile(
+    userAgentsFile,
+    await skillDocument("shared", {
+      description: "Agents user skill changed",
+      body: "Updated Agents instructions.",
+    }),
+  );
+  assert.notEqual((await listDesktopUserSkills(options)).revision, changed.revision);
+});
+
+test("共用 SkillLoader 按六级来源覆盖且 Agents 不受 Claude 开关影响", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-agents-skill-catalog-"));
+  const workspace = join(root, "workspace");
+  const homeDir = join(root, "home");
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const sources = [
+    [join(workspace, ".pico", "skills"), "project-pico", 50],
+    [join(workspace, ".agents", "skills"), "project-agents", 45],
+    [join(workspace, ".claude", "skills"), "project-claude", 40],
+    [join(homeDir, ".pico", "skills"), "user-pico", 30],
+    [join(homeDir, ".agents", "skills"), "user-agents", 25],
+    [join(homeDir, ".claude", "skills"), "user-claude", 20],
+  ] as const;
+  const files: string[] = [];
+  for (const [path, sourceId] of sources) {
+    files.push(await writeSkill(path, "shared", { description: sourceId, body: sourceId }));
+  }
+  await writeSkill(join(workspace, ".codex", "skills"), "codex-sentinel", {
+    description: "Must stay invisible",
+    body: "Codex sentinel.",
+  });
+  const agentsFile = await writeSkill(join(workspace, ".agents", "skills"), "agents-only", {
+    description: "Agents metadata",
+    body: "Use $ARGUMENTS.",
+    allowedTools: "Read, Bash, read_file, unsupported_tool",
+    model: "provider/agents-model",
+  });
+  await writeFile(
+    agentsFile,
+    [
+      "---",
+      "name: agents-only",
+      "description: Agents metadata",
+      "allowed-tools: Read, Bash, read_file, unsupported_tool",
+      "model: provider/agents-model",
+      "argument-hint: <path>",
+      "hooks:",
+      "  PreToolUse: []",
+      "---",
+      "Use $ARGUMENTS.",
+    ].join("\n"),
+  );
+  const options = { homeDir, includeUserResources: true };
+  const disabledClaude = new SkillLoader(workspace, {
+    ...options,
+    includeClaudeProjectResources: false,
+    includeClaudeUserResources: false,
+  });
+  const disabledSnapshot = await disabledClaude.snapshot();
+  assert.deepEqual(
+    disabledSnapshot.candidates
+      .filter(({ name }) => name === "shared")
+      .map(({ source }) => source.id)
+      .sort(),
+    ["project-agents", "project-pico", "user-agents", "user-pico"],
+  );
+  const agents = await disabledClaude.view("agents-only");
+  assert.equal(agents?.source?.format, "agents-compat");
+  assert.equal(agents?.sourcePath, agentsFile);
+  assert.equal(agents?.argumentHint, "<path>");
+  assert.equal(agents?.model, "provider/agents-model");
+  assert.deepEqual(agents?.hooks, { PreToolUse: [] });
+  assert.deepEqual(agents?.allowedTools, ["read_file", "bash", "unsupported_tool"]);
+  assert.ok(!(await disabledClaude.list()).some(({ name }) => name === "codex-sentinel"));
+  assert.deepEqual(
+    (await new SkillLoader(workspace, { ...options, catalogScope: "user" }).list()).map(
+      ({ source }) => source?.id,
+    ),
+    ["user-pico"],
+  );
+  assert.deepEqual(
+    await new SkillLoader(workspace, { ...options, catalogScope: "none" }).list(),
+    [],
+  );
+
+  const loader = new SkillLoader(workspace, options);
+  for (const [index, [, sourceId, priority]] of sources.entries()) {
+    const selected = await loader.view("SHARED");
+    assert.equal(selected?.source?.id, sourceId);
+    assert.equal(selected?.source?.priority, priority);
+    assert.equal(selected?.body, sourceId);
+    await rm(files[index]!);
+  }
+  assert.equal(await loader.view("shared"), undefined);
 });
 
 test("可信工作区有效 Skill 枚举复用优先级并标出项目遮蔽", async (context) => {
