@@ -33,7 +33,19 @@ export interface DesktopCommandExecution {
 }
 
 export type DesktopCommandAction =
-  | { kind: "open"; target: "goal" | "model" | "skill" | "agent" | "sessions" }
+  | {
+      kind: "open";
+      target:
+        | "goal"
+        | "model"
+        | "skill"
+        | "agent"
+        | "sessions"
+        | "mode"
+        | "permissions"
+        | "interrupt"
+        | "thinking";
+    }
   | {
       kind: "settings";
       patch: Omit<RuntimeParams<"session.settings.update">, "workspacePath" | "sessionId">;

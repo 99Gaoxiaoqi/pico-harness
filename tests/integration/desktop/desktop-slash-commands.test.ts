@@ -129,18 +129,33 @@ test("桌面命令按显式范围分派，禁止管理别名绕过，保留类�
       .map((item) => item.name)
       .sort(),
   );
-  assert.equal(catalog.value.length, 27);
-  assert.equal(catalog.value.filter((item) => item.tier === "primary").length, 12);
-  assert.equal(catalog.value.filter((item) => item.tier === "advanced").length, 15);
+  assert.equal(catalog.value.length, 22);
+  assert.deepEqual(
+    catalog.value
+      .filter((item) => item.tier === "primary")
+      .map((item) => item.name)
+      .sort(),
+    ["help", "goal", "resume", "compact", "rewind", "changes"].sort(),
+  );
+  assert.equal(catalog.value.filter((item) => item.tier === "advanced").length, 16);
+  assert.equal(
+    catalog.value.some((item) =>
+      ["skill", "agent", "mode", "permissions", "interrupt"].includes(item.name),
+    ),
+    false,
+  );
   const countBeforeUnsupported = calls.length;
   for (const command of tui.list()) {
     const policy = desktopCommandPolicy(command.name)!;
-    if (policy.tier === "primary" || policy.tier === "advanced") continue;
+    if (policy.tier === "primary" || policy.tier === "advanced" || policy.tier === "resource")
+      continue;
     for (const name of [command.name, ...(command.aliases ?? [])]) {
       const rejected = await bridge.execute(context, `/${name} delete --confirm`, randomUUID());
       assert.ok(rejected.ok);
-      assert.equal(rejected.value.outcome.kind, "rejected");
+      assert.equal(rejected.value.outcome.kind, policy.tier === "control" ? "local" : "rejected");
       assert.equal(Boolean(rejected.value.redirect), policy.tier === "page");
+      if (policy.tier === "control")
+        assert.deepEqual(rejected.value.action, { kind: "open", target: policy.target });
       const completion = await bridge.complete(context, `/${name} `);
       assert.ok(completion.ok);
       assert.deepEqual(completion.value, []);
@@ -175,7 +190,7 @@ test("桌面命令按显式范围分派，禁止管理别名绕过，保留类�
     false,
     "确认和执行由已有桌面动作负责",
   );
-  assert.equal((await execute("/resume")).outcome.result?.ui?.kind, "open-selector");
+  assert.deepEqual((await execute("/resume")).action, { kind: "open", target: "sessions" });
   assert.equal((await execute("/new")).switchSession, null);
   const complete = await bridge.complete(context, "/resume s2");
   assert.ok(complete.ok);
@@ -197,6 +212,18 @@ test("桌面命令按显式范围分派，禁止管理别名绕过，保留类�
   const changes = await execute("/changes cp1");
   assert.equal((changes.outcome.result?.data as { checkpointId: string }).checkpointId, "cp1");
   active = true;
+  const runningCatalog = await bridge.catalog({ ...context, running: true });
+  assert.ok(runningCatalog.ok);
+  assert.equal(runningCatalog.value.find((item) => item.name === "model")?.disabled, false);
+  assert.equal(runningCatalog.value.find((item) => item.name === "compact")?.disabled, true);
+  assert.deepEqual((await execute("/model")).action, { kind: "open", target: "model" });
+  assert.equal((await execute("/model p/m")).outcome.kind, "rejected");
+  assert.deepEqual((await execute("/resume")).action, { kind: "open", target: "sessions" });
+  assert.equal((await execute("/resume s2")).switchSession, "s2");
+  assert.equal((await execute("/new")).switchSession, null);
+  assert.equal((await execute("/rewind cp1")).outcome.result?.ui?.kind, "open-selector");
+  assert.equal((await execute("/changes cp1")).outcome.result?.ui?.kind, "open-selector");
+  assert.equal((await execute("/compact")).outcome.kind, "rejected");
   assert.equal((await execute("/rename blocked")).outcome.kind, "rejected");
   assert.equal(
     calls.some((call) => call.method === "session.rename"),
@@ -209,14 +236,33 @@ test("桌面命令按显式范围分派，禁止管理别名绕过，保留类�
   assert.equal(sent.params.behavior, "steer");
   assert.equal(sent.params.expectedRunId, "run-1");
   await execute("/interrupt");
-  assert.equal(calls.at(-1)?.method, "run.cancel");
+  assert.equal(
+    calls.some((call) => call.method === "run.cancel"),
+    false,
+  );
   const preSession = await bridge.execute(
     { workspacePath: "/fixture", initialSettings: { modelRouteId: "p/m" } },
     "/mode plan",
     randomUUID(),
   );
   assert.ok(preSession.ok);
-  assert.equal(preSession.value.initialSettings?.collaborationMode, "plan");
+  assert.deepEqual(preSession.value.action, { kind: "open", target: "mode" });
+  assert.equal(preSession.value.initialSettings, undefined);
+  const noSessionCatalog = await bridge.catalog({ workspacePath: "" });
+  assert.ok(noSessionCatalog.ok);
+  for (const name of ["compact", "rewind", "changes"]) {
+    assert.equal(noSessionCatalog.value.find((item) => item.name === name)?.disabled, true);
+    assert.match(
+      noSessionCatalog.value.find((item) => item.name === name)?.disabledReason ?? "",
+      /历史会话/,
+    );
+  }
+  assert.deepEqual(
+    (await execute("/thinking", { workspacePath: "", sessionId: undefined } as never)).action,
+    { kind: "open", target: "thinking" },
+  );
+  assert.deepEqual((await execute("/skill")).action, { kind: "open", target: "skill" });
+  assert.deepEqual((await execute("/agent")).action, { kind: "open", target: "agent" });
 
   active = false;
   loseSendResponse = true;
