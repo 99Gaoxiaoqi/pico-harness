@@ -33,58 +33,43 @@ let goalPending;
 let deferGoal = false;
 let navigateTest;
 const primaryNames = ["help", "goal", "resume", "compact", "rewind", "changes"];
-const advancedNames = [
-  "model",
-  "thinking",
-  "plan",
-  "swarm",
-  "graph",
-  "new",
-  "rename",
-  "fork",
-  "status",
-  "context",
-  "steer",
-  "queue",
-  "replace",
-  "operations",
-  "hooks",
-  "add-dir",
-];
 const catalog = Object.entries(DESKTOP_COMMAND_POLICY)
-  .filter(([name]) => [...primaryNames, ...advancedNames].includes(name))
-  .map(([name]) => ({
+  .filter(([, policy]) => policy.tier === "primary" || policy.tier === "advanced")
+  .map(([name, policy]) => ({
     name,
     insertText: name,
     description: "测试 " + name,
     aliases: [],
     source: "builtin",
     kind: "local",
-    tier: primaryNames.includes(name) ? "primary" : "advanced",
+    tier: policy.tier,
   }));
-function fixtureCatalog(items, context) {
-  return items
-    .filter((item) => [...primaryNames, ...advancedNames].includes(item.name))
-    .map((item) => ({
-      ...item,
-      tier: primaryNames.includes(item.name) ? "primary" : "advanced",
-      ...(!context.sessionId && ["compact", "rewind", "changes"].includes(item.name)
-        ? { disabled: true, disabledReason: "请先创建或打开一个会话" }
-        : {}),
-    }));
-}
 const local = (result) => ({
   ok: true,
   value: { outcome: { kind: "local", result: { type: "local", ...result } } },
 });
 window.pico = {
   commands: {
-    catalog: async (context) => {
-      const result = window.testCommandBridge
-        ? await window.testCommandBridge.catalog(context)
-        : { ok: true, value: catalog };
-      return result.ok ? { ...result, value: fixtureCatalog(result.value, context) } : result;
-    },
+    catalog: async (context) =>
+      window.testCommandBridge
+        ? window.testCommandBridge.catalog(context)
+        : {
+            ok: true,
+            value: catalog.map((item) => {
+              const policy = DESKTOP_COMMAND_POLICY[item.name];
+              const missingSession = policy.session && !context.sessionId;
+              const runningCompact = context.running && item.name === "compact";
+              return {
+                ...item,
+                disabled: Boolean(missingSession || runningCompact),
+                disabledReason: missingSession
+                  ? "请先发送消息或打开历史会话。"
+                  : runningCompact
+                    ? "任务执行中，结束后可执行此操作。"
+                    : undefined,
+              };
+            }),
+          },
     complete: async (context, text) =>
       window.testCommandBridge
         ? window.testCommandBridge.complete(context, text)
@@ -144,17 +129,11 @@ window.pico = {
           message: "全部命令",
           ui: { kind: "open-panel", panel: "help" },
         });
-      if (text === "/resume" && !context.workspacePath)
+      if (text === "/resume")
         return {
           ok: true,
           value: { outcome: { kind: "local" }, action: { kind: "open", target: "sessions" } },
         };
-      if (text === "/resume")
-        return local({
-          action: "resume",
-          ui: { kind: "open-selector", selector: "session" },
-          data: [{ id: "s2", title: "第二个会话" }],
-        });
       if (text === "/resume s2")
         return { ok: true, value: { outcome: { kind: "local" }, switchSession: "s2" } };
       if (["/clear", "/exit"].includes(text))
@@ -463,7 +442,7 @@ async function key(name, options = {}) {
   });
 }
 async function click(label) {
-  const button = [...document.querySelectorAll('button, [role="menuitem"]')].find(
+  const button = [...document.querySelectorAll('button, a, [role="menuitem"]')].find(
     (item) =>
       item.getAttribute("aria-label") === label ||
       item.textContent.trim() === label ||
@@ -556,6 +535,64 @@ async function command(text) {
       calls.some((item) => item.method === "settings" && item.patch.modelRouteId === "p/n"),
       "模型选择没有走原桌面设置动作",
     );
+    runtime.data.runs.push({
+      id: "running-1",
+      workspacePath: "/fixture",
+      sessionId: "s1",
+      description: "执行中的任务",
+      status: "running",
+      startedAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    await mount();
+    await type("/");
+    check(
+      commandLabels().join() ===
+        primaryNames
+          .filter((name) => name !== "compact")
+          .map((name) => "/" + name)
+          .sort()
+          .join(),
+      "运行中默认候选没有保留检查点查看或隐藏压缩",
+    );
+    await command("/model");
+    const runningModel = [
+      ...document.querySelectorAll('.pico-composer-model-menu [role="menuitemradio"]'),
+    ].find((item) => item.textContent.includes("模型 N"));
+    check(
+      runningModel?.closest("[popover]")?.matches(":popover-open") &&
+        runningModel.getAttribute("aria-disabled") === "true",
+      "实际会话运行中没有打开只读模型菜单",
+    );
+    const settingsBefore = calls.filter((item) => item.method === "settings").length;
+    await act(async () => {
+      runningModel.click();
+      await wait();
+    });
+    check(
+      calls.filter((item) => item.method === "settings").length === settingsBefore,
+      "运行中模型发生修改",
+    );
+    await click("选择模型：模型 M");
+    for (const [text, label, method] of [
+      ["/changes cp1", "恢复此文件", "rewind.restoreFile"],
+      ["/rewind cp1", "确认回退", "rewind.apply"],
+    ]) {
+      await command(text);
+      const action = [...document.querySelectorAll("button")].find(
+        (button) =>
+          button.textContent.trim() === label || button.getAttribute("aria-label") === label,
+      );
+      check(
+        action?.disabled || action?.getAttribute("aria-disabled") === "true",
+        "运行中的检查点查看允许写入：" + text,
+      );
+      await click(label);
+      check(!calls.some((item) => item.method === method), "运行中的检查点查看触发写入：" + text);
+      await click("关闭");
+    }
+    runtime.data.runs = [];
+    await mount();
     await command("/compact");
     check(!calls.some((item) => item.method === "compact"), "压缩命令绕过确认");
     await click("取消");
@@ -842,7 +879,7 @@ async function command(text) {
     const disabledCandidate = document.querySelector('.command-suggestions [role="option"]');
     check(
       disabledCandidate?.getAttribute("aria-disabled") === "true" &&
-        disabledCandidate.textContent.includes("请先创建或打开一个会话"),
+        disabledCandidate.textContent.includes("请先发送消息或打开历史会话。"),
       "搜索没有展示不可用命令及原因",
     );
     const commandCount = calls.filter((item) => item.method === "command").length;
