@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { PassThrough } from "node:stream";
 import test from "node:test";
+import { createElement } from "react";
+import { render, Text } from "ink";
 import {
   MAX_PERSISTED_DRAFT_CHARS,
   readPersistentDraft,
   removePersistentDraft,
   writePersistentDraft,
+  usePersistentDraft,
 } from "../../../apps/desktop/src/renderer/conversation/usePersistentDraft.js";
 
 interface DraftStorage {
@@ -25,23 +28,26 @@ function memoryStorage(): DraftStorage {
   };
 }
 
-function withLocalStorage(storage: Omit<DraftStorage, "values">, run: () => void): void {
+async function withLocalStorage(
+  storage: Omit<DraftStorage, "values">,
+  run: () => void | Promise<void>,
+): Promise<void> {
   const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
   Object.defineProperty(globalThis, "window", {
     configurable: true,
     value: { localStorage: storage },
   });
   try {
-    run();
+    await run();
   } finally {
     if (originalWindow) Object.defineProperty(globalThis, "window", originalWindow);
     else Reflect.deleteProperty(globalThis, "window");
   }
 }
 
-test("persistent draft writes and removes a session-scoped value", () => {
+test("persistent draft writes and removes a session-scoped value", async () => {
   const storage = memoryStorage();
-  withLocalStorage(storage, () => {
+  await withLocalStorage(storage, () => {
     writePersistentDraft("workspace:session", "continue from here");
     assert.equal(readPersistentDraft("workspace:session"), "continue from here");
 
@@ -50,16 +56,16 @@ test("persistent draft writes and removes a session-scoped value", () => {
   });
 });
 
-test("persistent draft keeps the most recent characters when it exceeds the limit", () => {
+test("persistent draft keeps the most recent characters when it exceeds the limit", async () => {
   const storage = memoryStorage();
   const oversized = `discarded-${"x".repeat(MAX_PERSISTED_DRAFT_CHARS)}-recent`;
-  withLocalStorage(storage, () => {
+  await withLocalStorage(storage, () => {
     writePersistentDraft("oversized", oversized);
     assert.equal(readPersistentDraft("oversized"), oversized.slice(-MAX_PERSISTED_DRAFT_CHARS));
   });
 });
 
-test("persistent draft storage failures are fail-safe", () => {
+test("persistent draft storage failures are fail-safe", async () => {
   const unavailable = {
     getItem: () => {
       throw new Error("storage unavailable");
@@ -71,24 +77,76 @@ test("persistent draft storage failures are fail-safe", () => {
       throw new Error("storage unavailable");
     },
   };
-  withLocalStorage(unavailable, () => {
+  await withLocalStorage(unavailable, () => {
     assert.doesNotThrow(() => writePersistentDraft("draft", "kept by hook state"));
     assert.doesNotThrow(() => removePersistentDraft("draft"));
     assert.equal(readPersistentDraft("draft"), "");
   });
 });
 
-test("the draft hook resolves a new key before the post-render effect", async () => {
-  const source = await readFile(
-    new URL(
-      "../../../apps/desktop/src/renderer/conversation/usePersistentDraft.ts",
-      import.meta.url,
-    ),
-    "utf8",
-  );
-  assert.match(
-    source,
-    /draft\.key === key \? draft : \{ key, value: readPersistentDraft\(key\) \}/u,
-  );
-  assert.match(source, /return \{ value: current\.value, update, clear \}/u);
+test("mounted draft survives blocked storage, key switches and delayed send completion", async () => {
+  const unavailable = {
+    getItem() {
+      throw new Error("storage unavailable");
+    },
+    setItem() {
+      throw new Error("storage unavailable");
+    },
+    removeItem() {
+      throw new Error("storage unavailable");
+    },
+  };
+  await withLocalStorage(unavailable, async () => {
+    let draft: ReturnType<typeof usePersistentDraft> | undefined;
+    const renders: Array<{ key: string; value: string }> = [];
+    function Composer({ draftKey }: { draftKey: string }) {
+      draft = usePersistentDraft(draftKey);
+      renders.push({ key: draftKey, value: draft.value });
+      return createElement(Text, null, `${draftKey}: ${draft.value}`);
+    }
+    const stdout = new PassThrough();
+    stdout.resume();
+    const mounted = render(createElement(Composer, { draftKey: "blocked:a" }), {
+      stdout: stdout as unknown as NodeJS.WriteStream,
+      interactive: false,
+      patchConsole: false,
+    });
+    try {
+      await mounted.waitUntilRenderFlush();
+      const sent = "summarize /[skill:review:local:%2Fskills%2Freview.md]";
+      draft!.update(sent);
+      await mounted.waitUntilRenderFlush();
+      const completeFirstSend = draft!.clearIfUnchanged;
+      mounted.rerender(createElement(Composer, { draftKey: "blocked:b" }));
+      await mounted.waitUntilRenderFlush();
+      assert.equal(renders.find((item) => item.key === "blocked:b")?.value, "");
+      draft!.update("new session draft");
+      await mounted.waitUntilRenderFlush();
+      completeFirstSend(sent);
+      await mounted.waitUntilRenderFlush();
+      assert.equal(draft!.value, "new session draft");
+      assert.equal(readPersistentDraft("blocked:a"), "");
+
+      const completeSecondSend = draft!.clearIfUnchanged;
+      draft!.update("edited while sending");
+      // Even completion before React's next render must see the latest edit.
+      completeSecondSend("new session draft");
+      await mounted.waitUntilRenderFlush();
+      assert.equal(draft!.value, "edited while sending");
+      mounted.rerender(createElement(Composer, { draftKey: "blocked:a" }));
+      await mounted.waitUntilRenderFlush();
+      mounted.rerender(createElement(Composer, { draftKey: "blocked:b" }));
+      await mounted.waitUntilRenderFlush();
+      assert.equal(draft!.value, "edited while sending");
+      draft!.clearIfUnchanged("edited while sending");
+      assert.equal(readPersistentDraft("blocked:b"), "");
+      mounted.rerender(createElement(Composer, { draftKey: "blocked:b" }));
+      await mounted.waitUntilRenderFlush();
+      assert.equal(draft!.value, "");
+      assert.equal(readPersistentDraft("blocked:b"), "");
+    } finally {
+      mounted.unmount();
+      await mounted.waitUntilExit();
+    }
+  });
 });
