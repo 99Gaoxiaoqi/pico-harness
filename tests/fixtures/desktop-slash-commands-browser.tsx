@@ -301,10 +301,40 @@ const runtime = {
       },
     },
     catalogSkills: [
-      { name: "archify", description: "架构图流程图", allowedTools: [], sourceId: "user-agents", sourcePath: "/skills/archify/SKILL.md" },
-      { name: "aihot", description: "中文 AI 新闻热点", allowedTools: [], sourceId: "user-agents", sourcePath: "/skills/aihot/SKILL.md" },
+      {
+        name: "archify",
+        description: "架构图流程图",
+        allowedTools: [],
+        sourceId: "user-agents",
+        sourcePath: "/skills/archify/SKILL.md",
+      },
+      {
+        name: "aihot",
+        description: "中文 AI 新闻热点",
+        allowedTools: [],
+        sourceId: "user-agents",
+        sourcePath: "/skills/aihot/SKILL.md",
+      },
     ],
     catalogAgents: [{ name: "reviewer", description: "检查代码", source: "user", tools: [] }],
+    skillScope: {
+      userItems: [
+        {
+          id: "aihot",
+          name: "aihot",
+          description: "中文 AI 新闻热点",
+          state: "ready",
+          source: {
+            scope: "user",
+            sourceId: "user-agents",
+            sourceLabel: "Agents 用户级",
+            readOnly: true,
+            effective: true,
+          },
+        },
+      ],
+      userRevision: "fixture",
+    },
     runs: [],
     approvals: [],
     prompts: [],
@@ -395,7 +425,7 @@ async function key(name, options = {}) {
   });
 }
 async function click(label) {
-  const button = [...document.querySelectorAll("button")].find(
+  const button = [...document.querySelectorAll('button, [role="menuitem"]')].find(
     (item) =>
       item.getAttribute("aria-label") === label ||
       item.textContent.trim() === label ||
@@ -425,7 +455,9 @@ async function command(text) {
       });
     } else await type("/");
     check(
-      [...document.querySelectorAll('.command-suggestions [role="option"]')].filter((item) => item.querySelector("small")?.textContent === "命令").length === 12,
+      [...document.querySelectorAll('.command-suggestions [role="option"]')].filter(
+        (item) => item.querySelector("small")?.textContent === "命令",
+      ).length === 12,
       "默认菜单不是 12 条",
     );
     const count = calls.length;
@@ -657,28 +689,68 @@ async function command(text) {
     );
     await mount();
     const selectCandidate = async (label) => {
-      const candidate = [...document.querySelectorAll('.command-suggestions [role="option"]')].find((item) => item.querySelector("strong")?.textContent === label);
+      const candidate = [...document.querySelectorAll('.command-suggestions [role="option"]')].find(
+        (item) => item.querySelector("strong")?.textContent === label,
+      );
       check(candidate, "没有候选 " + label);
-      await act(async () => { candidate.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true })); await wait(); });
+      await act(async () => {
+        candidate.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+        await wait();
+      });
     };
     await type("/架构图");
     await key("Enter", { isComposing: true });
-    check(!editor().querySelector('[data-astryx-token]'), "IME 插入了技能");
+    check(!editor().querySelector("[data-astryx-token]"), "IME 插入了技能");
     await key("Enter");
-    check(editor().querySelector('[data-astryx-token]')?.textContent.includes("archify"), "Skill 未插入行内标签");
-    const inputValue = () => parseComposerDraft([...editor().childNodes].map((node) => node instanceof HTMLElement && node.hasAttribute("data-astryx-token") ? node.getAttribute("data-astryx-token-value") : node.textContent).join(""));
-    const saved = [...editor().childNodes].map((node) => node instanceof HTMLElement && node.hasAttribute("data-astryx-token") ? node.getAttribute("data-astryx-token-value") : node.textContent).join("");
+    check(
+      editor().querySelector("[data-astryx-token]")?.textContent.includes("archify"),
+      "Skill 未插入行内标签",
+    );
+    const inputValue = () =>
+      parseComposerDraft(
+        [...editor().childNodes]
+          .map((node) =>
+            node instanceof HTMLElement && node.hasAttribute("data-astryx-token")
+              ? node.getAttribute("data-astryx-token-value")
+              : node.textContent,
+          )
+          .join(""),
+      );
+    const saved = [...editor().childNodes]
+      .map((node) =>
+        node instanceof HTMLElement && node.hasAttribute("data-astryx-token")
+          ? node.getAttribute("data-astryx-token-value")
+          : node.textContent,
+      )
+      .join("");
     await type(saved + "请整理 /中文 新闻");
-    check(document.querySelector('.command-suggestions')?.textContent.includes("aihot"), "中文多词描述搜索失败");
+    check(
+      document.querySelector(".command-suggestions")?.textContent.includes("aihot"),
+      "中文多词描述搜索失败",
+    );
     await key("Enter");
-    check(editor().querySelectorAll('[data-astryx-token]').length === 2, "未支持两个技能");
+    check(editor().querySelectorAll("[data-astryx-token]").length === 2, "未支持两个技能");
     const expected = inputValue();
     check(expected.references.map((ref) => ref.name).join() === "archify,aihot", "技能顺序错误");
-    await act(async () => { navigateTest("/session/s2?workspace=%2Ffixture"); await wait(); navigateTest("/session/s1?workspace=%2Ffixture"); await wait(); });
-    check(editor().querySelectorAll('[data-astryx-token]').length === 2, "切换任务丢失技能");
-    const tokenDraft = [...editor().childNodes].map((node) => node instanceof HTMLElement && node.hasAttribute("data-astryx-token") ? node.getAttribute("data-astryx-token-value") : node.textContent).join("");
+    await act(async () => {
+      navigateTest("/session/s2?workspace=%2Ffixture");
+      await wait();
+      navigateTest("/session/s1?workspace=%2Ffixture");
+      await wait();
+    });
+    check(editor().querySelectorAll("[data-astryx-token]").length === 2, "切换任务丢失技能");
+    const tokenDraft = [...editor().childNodes]
+      .map((node) =>
+        node instanceof HTMLElement && node.hasAttribute("data-astryx-token")
+          ? node.getAttribute("data-astryx-token-value")
+          : node.textContent,
+      )
+      .join("");
     await type(tokenDraft + " /arch");
-    check(!document.querySelector('.command-suggestions')?.textContent.includes("archify"), "已选技能未排除");
+    check(
+      !document.querySelector(".command-suggestions")?.textContent.includes("archify"),
+      "已选技能未排除",
+    );
     await type(tokenDraft + " /agent reviewer");
     await selectCandidate("reviewer");
     check(document.body.textContent.includes("替换已选上下文"), "混用没有明确替换提示");
@@ -686,16 +758,58 @@ async function command(text) {
     await type(tokenDraft);
     const skill = runtime.data.catalogSkills[0];
     skill.sourceId = "changed";
-    await key("Escape"); await key("Enter");
+    await key("Escape");
+    await key("Enter");
     check(document.body.textContent.includes("来源已变化"), "来源变更未阻止提交");
     skill.sourceId = "user-agents";
     await key("Enter");
-    check(calls.findLast((item) => item.method === "send")?.input.skills?.map((ref) => ref.name).join() === "archify,aihot", "多技能未结构化发送");
+    check(
+      calls
+        .findLast((item) => item.method === "send")
+        ?.input.skills?.map((ref) => ref.name)
+        .join() === "archify,aihot",
+      "多技能未结构化发送",
+    );
+    await act(async () => {
+      navigateTest("/task/new");
+      await wait();
+    });
+    await type("/");
+    check(
+      document.querySelector(".command-suggestions")?.textContent.includes("aihot"),
+      "无项目新任务缺少用户技能",
+    );
+    check(
+      !document.querySelector(".command-suggestions")?.textContent.includes("archify"),
+      "无项目泄露上一个项目的技能",
+    );
+    await type("");
+    await click("添加上下文与模式");
+    await click("选择 Skill");
+    check(
+      document.querySelector(".command-suggestions")?.textContent.includes("aihot"),
+      "加号插入未同步候选和草稿",
+    );
+    await type("/中文");
+    await key("Enter");
+    check(
+      editor().querySelector("[data-astryx-token]")?.textContent.includes("aihot"),
+      "无项目不能选择用户技能",
+    );
+    const sentBefore = calls.filter((item) => item.method === "send").length;
+    await key("Enter");
+    check(
+      calls.filter((item) => item.method === "send").length === sentBefore + 1 &&
+        calls.findLast((item) => item.method === "send").input.text === "",
+      "无参数 Skill 未提交",
+    );
+    await type("");
     await mount(true);
-    await type("/arch"); await key("Enter");
-    check(editor().querySelector('[data-astryx-token]'), "侧边对话未复用技能菜单");
+    await type("/arch");
+    await key("Enter");
+    check(editor().querySelector("[data-astryx-token]"), "侧边对话未复用技能菜单");
     await type("https://example.com/arch");
-    check(!document.querySelector('.command-suggestions'), "URL 错误触发候选");
+    check(!document.querySelector(".command-suggestions"), "URL 错误触发候选");
     await fetch("/result", { method: "POST", body: "PASS: desktop commands" });
   } catch (error) {
     await fetch("/result", { method: "POST", body: String(error.stack ?? error) });

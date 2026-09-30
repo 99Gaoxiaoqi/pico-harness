@@ -1,4 +1,5 @@
 import {
+  getComposerResources,
   parseComposerDraft,
   validateComposerReferences,
 } from "../conversation/composer-references.js";
@@ -184,6 +185,7 @@ export function ConversationPage() {
   const [modelOpenRequest, setModelOpenRequest] = useState(0);
   const [referenceError, setReferenceError] = useState<string>();
   const draftReferences = parseComposerDraft(draft);
+  const composerResources = getComposerResources(data, workspacePath);
   const sendingRef = useRef(false);
   const temporaryPathRef = useRef<string | undefined>(undefined);
   const [preparingSend, setPreparingSend] = useState(false);
@@ -461,8 +463,8 @@ export function ConversationPage() {
     const parsedDraft = parseComposerDraft(text);
     const referenceFailure = validateComposerReferences(
       parsedDraft.references,
-      data.catalogSkills,
-      data.catalogAgents,
+      composerResources.skills,
+      composerResources.agents,
     );
     if (referenceFailure) {
       setReferenceError(referenceFailure);
@@ -472,7 +474,13 @@ export function ConversationPage() {
       await commands.execute(text);
       return;
     }
-    if (!composerReady || !composerModelRouteId || usingOpenCodeFree || !parsedDraft.text) return;
+    if (
+      !composerReady ||
+      !composerModelRouteId ||
+      usingOpenCodeFree ||
+      (!parsedDraft.text && !parsedDraft.references.some((ref) => ref.kind === "skill"))
+    )
+      return;
     setReferenceError(undefined);
     sendingRef.current = true;
     setPreparingSend(true);
@@ -1196,7 +1204,7 @@ export function ConversationPage() {
                 )}
                 <ConversationComposer
                   commands={commands.suggestions}
-                  resources={{ skills: data.catalogSkills, agents: data.catalogAgents }}
+                  resources={composerResources}
                   inputRef={composerInputRef}
                   value={draft}
                   onValueChange={handleDraftChange}

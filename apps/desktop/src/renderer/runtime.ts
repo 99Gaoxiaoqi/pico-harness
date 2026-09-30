@@ -1996,7 +1996,8 @@ export function useRuntimeStore(): RuntimeStore {
       },
       async sendMessage(input) {
         const workspacePath = input.workspacePath;
-        if (!workspacePath || !input.text.trim()) return { succeeded: false };
+        if (!workspacePath || (!input.text.trim() && !input.skills?.length))
+          return { succeeded: false };
         const swarmCommand =
           !input.activation && !input.skills?.length ? parseSwarmCommand(input.text) : undefined;
         let resolvedSessionId = input.sessionId;

@@ -268,6 +268,17 @@ function conversationItem(item: JsonRecord, index: number): ConversationItemView
       kind: item.kind,
       text,
       ...(webSearch ? { webSearch } : {}),
+      ...(item.kind === "userMessage" && Array.isArray(item.skills)
+        ? {
+            skills: recordArray(item.skills)
+              .filter((skill) => typeof skill.name === "string")
+              .map((skill) => ({
+                name: stringValue(skill.name),
+                ...(typeof skill.sourceId === "string" ? { sourceId: skill.sourceId } : {}),
+                ...(typeof skill.sourcePath === "string" ? { sourcePath: skill.sourcePath } : {}),
+              })),
+          }
+        : {}),
       ...(item.kind === "assistantMessage" && stringValue(item.runId)
         ? { runId: stringValue(item.runId) }
         : {}),

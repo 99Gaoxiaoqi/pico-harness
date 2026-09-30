@@ -1,4 +1,4 @@
-import type { CatalogSkillView, CatalogAgentView } from "../model.js";
+import type { AppData, CatalogSkillView, CatalogAgentView } from "../model.js";
 
 export interface ComposerReference {
   readonly kind: "skill" | "agent";
@@ -125,4 +125,70 @@ export function serializeComposerNode(node: Node): string {
     }
   }
   return text;
+}
+
+/** Place the caret after an inserted reference while preserving the following text. */
+export function placeComposerCaret(editable: HTMLElement, offset: number) {
+  const range = document.createRange();
+  let remaining = offset;
+  let found = false;
+  const walk = (node: Node): void => {
+    for (const child of node.childNodes) {
+      if (found) return;
+      if (child instanceof HTMLElement && child.hasAttribute("data-astryx-token")) {
+        const size = (child.getAttribute("data-astryx-token-value") ?? "").length;
+        if (remaining <= size) {
+          range.setStartAfter(child);
+          found = true;
+          return;
+        }
+        remaining -= size;
+      } else if (child.nodeType === Node.TEXT_NODE) {
+        const size = child.textContent?.length ?? 0;
+        if (remaining <= size) {
+          range.setStart(child, remaining);
+          found = true;
+          return;
+        }
+        remaining -= size;
+      } else if (child instanceof HTMLElement && child.tagName === "BR") {
+        remaining -= 1;
+      } else walk(child);
+    }
+  };
+  walk(editable);
+  if (!found) {
+    range.selectNodeContents(editable);
+  }
+  range.collapse(!found ? false : true);
+  const selection = window.getSelection();
+  selection?.removeAllRanges();
+  selection?.addRange(range);
+}
+
+/** New tasks use the user catalog; bound drafts only see their loaded workspace catalog. */
+export function getComposerResources(data: AppData, workspacePath: string) {
+  if (workspacePath)
+    return data.workspacePath === workspacePath
+      ? { skills: data.catalogSkills, agents: data.catalogAgents }
+      : { skills: [], agents: [] };
+  return {
+    skills: data.skillScope.userItems
+      .filter((item) => item.source?.effective && item.state !== "disabled")
+      .map((item) => ({
+        name: item.name,
+        description: item.description,
+        allowedTools: [],
+        sourceId: item.source!.sourceId,
+      })),
+    agents: (data.subagentSettings?.presets ?? [])
+      .filter((preset) => preset.enabled && preset.availability.status === "available")
+      .map((preset) => ({
+        name: preset.name,
+        subagentId: preset.id,
+        description: preset.description,
+        source: "user",
+        tools: [],
+      })),
+  };
 }

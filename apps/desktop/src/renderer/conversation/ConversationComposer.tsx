@@ -164,9 +164,10 @@ export function ConversationComposer({
       openResources: (kind = "skill") => {
         editorRef.current?.focus();
         editorRef.current?.insertText(` /${kind} `);
+        onValueChange(editorRef.current?.getValue() ?? value);
       },
     }),
-    [],
+    [onValueChange, value],
   );
   const commandMenu = useCommandSuggestions(value, onValueChange, commands, resources, editableRef);
   const statusId = useId();
@@ -250,6 +251,15 @@ export function ConversationComposer({
           <div className="conversation-composer__controls">
             <ConversationComposerMenu
               onAttach={onAttach}
+              onAttachAgent={
+                resources
+                  ? () => {
+                      editorRef.current?.focus();
+                      editorRef.current?.insertText(" /agent ");
+                      onValueChange(editorRef.current?.getValue() ?? value);
+                    }
+                  : undefined
+              }
               modes={modes}
               onSetGoal={onSetGoal}
               goalDisabled={goalDisabled}

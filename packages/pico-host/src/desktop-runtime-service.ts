@@ -4794,7 +4794,10 @@ function normalizeRuntimeUserInput(value: RuntimeUserInput): RuntimeUserInput {
       );
     return {
       kind,
-      text: requireText(value["text"], "input.text"),
+      text:
+        value.skills && typeof value["text"] === "string"
+          ? value["text"].trim()
+          : requireText(value["text"], "input.text"),
       ...(attachments ? { attachments } : {}),
       ...(value.skills ? { skills: value.skills as readonly RuntimeSkillReference[] } : {}),
       ...(mode ? { orchestrationMode: mode } : {}),
@@ -4897,7 +4900,7 @@ function runtimeInputTitle(input: RuntimeUserInput): string {
   if (input.kind === "skill") {
     return [`/${input.name}`, input.args?.trim()].filter(Boolean).join(" ");
   }
-  return input.text;
+  return input.text || input.skills?.map((skill) => `/${skill.name}`).join(" ") || "";
 }
 
 function runtimeInputDisplay(input: RuntimeUserInput): string {
@@ -4905,7 +4908,7 @@ function runtimeInputDisplay(input: RuntimeUserInput): string {
   if (input.kind === "skill") {
     return [`/${input.name}`, input.args?.trim()].filter(Boolean).join(" ");
   }
-  return input.text.trim();
+  return input.text.trim() || input.skills?.map((skill) => `/${skill.name}`).join(" ") || "";
 }
 
 function isTerminalRunStatus(status: string): boolean {

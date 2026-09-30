@@ -4,6 +4,7 @@ import type { SlashArgumentCandidate } from "@pico/cli/command-contracts";
 import type { CatalogSkillView, CatalogAgentView } from "../model.js";
 import {
   parseComposerDraft,
+  placeComposerCaret,
   referenceValue,
   restoreReferenceTokens,
   serializeComposerNode,
@@ -58,13 +59,21 @@ export function useCommandSuggestions(
   }>();
   const [replacement, setReplacement] = useState<Candidate>();
   const listRef = useRef<HTMLDivElement>(null);
+  const pendingCaret = useRef<number | undefined>(undefined);
   useEffect(() => {
     if (!editableRef?.current) return;
-    restoreReferenceTokens(editableRef.current, onChange);
+    const editable = editableRef.current.querySelector<HTMLElement>('[contenteditable="true"]');
+    if (editable) {
+      restoreReferenceTokens(editable, onChange);
+      if (pendingCaret.current !== undefined) {
+        placeComposerCaret(editable, pendingCaret.current);
+        pendingCaret.current = undefined;
+      }
+    }
   }, [value, editableRef, onChange]);
   useEffect(() => {
     const update = () => {
-      const editable = editableRef?.current,
+      const editable = editableRef?.current?.querySelector<HTMLElement>('[contenteditable="true"]'),
         selection = window.getSelection();
       if (!editable || !selection?.rangeCount || !editable.contains(selection.anchorNode)) return;
       const range = selection.getRangeAt(0).cloneRange();
@@ -78,12 +87,13 @@ export function useCommandSuggestions(
   }, [value, editableRef]);
   const before = value.slice(0, editableRef ? cursor : value.length);
   const resourceMatch = /(?:^|\s)\/(skill|agent)\s+([^\n/]*)$/u.exec(before);
-  const simpleMatch = /(?:^|\s)\/([^\s/\[\]]*)$/u.exec(before);
+  const simpleMatch = /(?:^|\s)\/([^\s/[\]]*)$/u.exec(before);
   const commandMatch = /^\/([\w?:-]*)(\s+[^\n]*)?$/u.exec(value);
   const name = commandMatch?.[1]?.toLowerCase() ?? "";
   const hasArguments = commandMatch?.[2] !== undefined;
-  const knownArguments = hasArguments && commands?.catalog.some((item) => [item.name, ...item.aliases].includes(name));
-  const match = simpleMatch ?? (!knownArguments ? /(?:^|\s)\/([^\n/\[\]]*)$/u.exec(before) : null);
+  const knownArguments =
+    hasArguments && commands?.catalog.some((item) => [item.name, ...item.aliases].includes(name));
+  const match = simpleMatch ?? (!knownArguments ? /(?:^|\s)\/([^\n/[\]]*)$/u.exec(before) : null);
   const query = resourceMatch?.[2] ?? match?.[1] ?? "";
   const mode = resourceMatch?.[1];
   const start = resourceMatch
@@ -120,7 +130,9 @@ export function useCommandSuggestions(
         )
         .map((item) => ({
           label: `/${item.name}`,
-          description: item.disabledReason ?? `${item.tier === "advanced" ? "高级 · " : ""}${item.description}`,
+          description:
+            item.disabledReason ??
+            `${item.tier === "advanced" ? "高级 · " : ""}${item.description}`,
           text: `/${item.insertText} `,
           disabled: item.disabled ?? false,
           group: "命令",
@@ -191,7 +203,7 @@ export function useCommandSuggestions(
       );
   }
   const menuKey = `${value}:${cursor}`;
-  const open = items.length > 0 && dismissed !== menuKey;
+  const open = (items.length > 0 || Boolean(resources && mode)) && dismissed !== menuKey;
   const selected = Math.min(index, Math.max(items.length - 1, 0));
   useEffect(() => {
     if (open)
@@ -199,6 +211,19 @@ export function useCommandSuggestions(
         ?.querySelector('[aria-selected="true"]')
         ?.scrollIntoView({ block: "nearest" });
   }, [selected, open]);
+  useEffect(() => {
+    const editable = editableRef?.current?.querySelector<HTMLElement>('[contenteditable="true"]');
+    if (!editable) return;
+    editable.setAttribute("role", open ? "combobox" : "textbox");
+    editable.setAttribute("aria-expanded", String(open));
+    if (open) {
+      editable.setAttribute("aria-controls", id);
+      editable.setAttribute("aria-activedescendant", `${id}-${selected}`);
+    } else {
+      editable.removeAttribute("aria-controls");
+      editable.removeAttribute("aria-activedescendant");
+    }
+  }, [open, selected, id, editableRef]);
   function accept(position: number, replace = false) {
     const item = items[position];
     if (!item || item.disabled) return;
@@ -217,11 +242,12 @@ export function useCommandSuggestions(
       next = next.replace(/\/\[(skill|agent):[^\]\n]+\]/gu, (marker) =>
         marker === item.text ? marker : "",
       );
+    pendingCaret.current = replace || !item.reference ? next.length : start + item.text.length + 1;
     onChange(next);
-    setCursor(next.length);
-    setDismissed(`${next}:${next.length}`);
+    setCursor(pendingCaret.current);
+    setDismissed(`${next}:${pendingCaret.current}`);
     setReplacement(undefined);
-    editableRef?.current?.focus();
+    editableRef?.current?.querySelector<HTMLElement>('[contenteditable="true"]')?.focus();
   }
   return {
     inputProps: {
@@ -242,6 +268,7 @@ export function useCommandSuggestions(
       }
       if (event.key === "ArrowDown" || event.key === "ArrowUp") {
         event.preventDefault();
+        if (!items.length) return true;
         setIndex((selected + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length);
         return true;
       }
@@ -265,6 +292,9 @@ export function useCommandSuggestions(
         id={id}
         ref={listRef}
       >
+        {!items.length && (
+          <p>没有可用的{mode === "agent" ? "子代理" : "技能"}，请先添加或调整搜索。</p>
+        )}
         {replacement ? (
           <div className="composer-replacement" role="status">
             <span>

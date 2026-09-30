@@ -274,3 +274,25 @@ test(
     );
   },
 );
+
+test("structured skill without arguments keeps activation and visible identity", async (context) => {
+  const f = await fixture(context);
+  await f.skill("alpha", "allowed-tools: []\n");
+  const sent = await f.send(
+    { kind: "text", text: "", skills: [{ name: "alpha" }] },
+    "no-arguments",
+  );
+  for (let count = 0; count < 100 && !f.executions.length; count++) await delay(10);
+  assert.equal(f.executions.length, 1);
+  assert.ok(f.executions[0]?.prompt.includes("instruction-alpha"));
+  const subscription = parseRuntimeResult(
+    "session.subscription.open",
+    await f.openSubscription(sent.session.sessionId),
+  );
+  const user = subscription.durableTail.find((record) => record.item.kind === "userMessage")?.item;
+  assert.equal(user?.content, "/alpha");
+  assert.deepEqual(
+    (user?.skills as { name: string }[]).map((skill) => skill.name),
+    ["alpha"],
+  );
+});

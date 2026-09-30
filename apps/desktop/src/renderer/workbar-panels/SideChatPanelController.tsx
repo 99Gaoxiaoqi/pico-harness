@@ -1,4 +1,5 @@
 import {
+  getComposerResources,
   parseComposerDraft,
   validateComposerReferences,
 } from "../conversation/composer-references.js";
@@ -39,6 +40,7 @@ export function SideChatPanelController({
   readonly onRequestClose: () => void;
 }) {
   const { data, actions, busy } = runtime;
+  const composerResources = getComposerResources(data, workspacePath);
   const [child, setChild] = useState<SideChatChildSession>({
     panelId,
     sourceSessionId,
@@ -273,7 +275,7 @@ export function SideChatPanelController({
   return (
     <SideChatWorkbarPanel
       commands={commands.suggestions}
-      resources={{ skills: data.catalogSkills, agents: data.catalogAgents }}
+      resources={composerResources}
       resourceRequest={resourceRequest}
       commandFeedback={commands.feedback}
       commandPending={commands.pending}
@@ -319,8 +321,8 @@ export function SideChatPanelController({
           const parsed = parseComposerDraft(message);
           const failure = validateComposerReferences(
             parsed.references,
-            data.catalogSkills,
-            data.catalogAgents,
+            composerResources.skills,
+            composerResources.agents,
           );
           if (failure) {
             setError({ code: "unknown", message: failure });

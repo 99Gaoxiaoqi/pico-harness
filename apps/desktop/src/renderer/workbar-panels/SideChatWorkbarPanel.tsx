@@ -117,6 +117,7 @@ export function SideChatWorkbarPanel({
   const openResources = (kind: "skill" | "agent" = "skill") => {
     editorRef.current?.focus();
     editorRef.current?.insertText(` /${kind} `);
+    onDraftChange(editorRef.current?.getValue() ?? draft);
   };
   useEffect(() => {
     if (resourceRequest) openResources(resourceRequest.kind);
@@ -274,6 +275,7 @@ export function SideChatWorkbarPanel({
           footerActions={
             <ConversationComposerMenu
               onAttach={resources ? () => openResources() : undefined}
+              onAttachAgent={resources ? () => openResources("agent") : undefined}
               onSetGoal={onSetGoal}
               goalDisabled={goalDisabled}
               disabled={unavailable}
