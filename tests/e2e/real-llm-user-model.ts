@@ -18,6 +18,8 @@ export interface RealModel {
 }
 
 export interface LoadUserDefaultRealModelOptions {
+  /** Explicit user-configured route for an authorized test run; does not change defaults. */
+  readonly modelRouteId?: string;
   readonly picoHome?: string;
   readonly workDir?: string;
   readonly env?: Readonly<Record<string, string | undefined>>;
@@ -37,7 +39,7 @@ export async function loadUserDefaultRealModel(
   const env = options.env ?? process.env;
   const userConfigStore = new UserConfigStore({ picoHome });
   const userSnapshot = await userConfigStore.read();
-  const routeId = userSnapshot.config.defaults?.modelRouteId;
+  const routeId = options.modelRouteId ?? userSnapshot.config.defaults?.modelRouteId;
   if (!routeId) {
     throw new Error("真实模型 E2E 要求用户配置提供 defaults.modelRouteId");
   }
@@ -55,7 +57,8 @@ export async function loadUserDefaultRealModel(
   const configResolver = new EffectiveConfigResolver({ userConfigStore });
   const runtime = await loadEffectiveModelRuntime({
     workDir: options.workDir ?? picoHome,
-    // Real-model tests intentionally select the user default. projectTrusted:false
+    // Real-model tests use the user default unless a configured route is explicitly selected.
+    // projectTrusted:false
     // keeps the run hermetic——本仓库项目配置（permissions/sandbox/MCP 等）一律
     // 不参与。项目侧 model 默认路由已退役（2026-08-17），此处不再是绕开手段，
     // 只是纯粹的测试隔离。
@@ -65,7 +68,7 @@ export async function loadUserDefaultRealModel(
     configResolver,
   });
   if (
-    runtime.config.defaultModelRouteId !== routeId ||
+    (!options.modelRouteId && runtime.config.defaultModelRouteId !== routeId) ||
     runtime.config.sources["defaults.modelRouteId"] !== "user" ||
     runtime.config.sources[`providers.${providerId}`] !== "user"
   ) {

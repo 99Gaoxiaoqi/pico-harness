@@ -19,7 +19,9 @@ test(
   "real model: two controlled Desktop skills compose into one task answer",
   { timeout: 180_000 },
   async (context) => {
-    const model = await loadUserDefaultRealModel().catch((error: unknown) => {
+    const model = await loadUserDefaultRealModel({
+      modelRouteId: process.env["PICO_MULTI_SKILLS_E2E_MODEL_ROUTE"],
+    }).catch((error: unknown) => {
       if (error instanceof Error && /缺少凭证环境变量|defaults.modelRouteId/u.test(error.message))
         return undefined;
       throw error;
@@ -130,5 +132,12 @@ test(
       createRuntimeRequest("runs.list", { workspacePath, sessionId }),
     )) as RuntimeResult<"runs.list">;
     assert.equal(runs.runs.length, 1);
+    const sessions = (await services.desktopService.handle(
+      createRuntimeRequest("session.list", { workspacePath }),
+    )) as RuntimeResult<"session.list">;
+    assert.equal(
+      sessions.sessions.find((session) => session.sessionId === sessionId)?.title,
+      "Compute 7 plus 5. Include both skill tokens and the numeric result only.",
+    );
   },
 );

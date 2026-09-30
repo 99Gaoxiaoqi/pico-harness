@@ -109,7 +109,12 @@ export function foldSessionSummaryEvent<TTranscriptEvent>(
       !isMessageHiddenFromTranscript(message) &&
       message.content.trim().length > 0
     ) {
-      const compacted = compactSessionText(message.content);
+      const displayText =
+        message.providerData?.["picoKind"] === "desktop_user_input" &&
+        typeof message.providerData["displayText"] === "string"
+          ? message.providerData["displayText"]
+          : message.content;
+      const compacted = compactSessionText(displayText);
       if (compacted) {
         if (next.firstMessage === undefined) next.firstMessage = compacted;
         next.lastMessage = compacted;

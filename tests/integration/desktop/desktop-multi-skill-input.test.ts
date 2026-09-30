@@ -155,6 +155,13 @@ test(
       (record) => record.item.kind === "userMessage",
     )!.item;
     assert.equal(user.content, "complete task");
+    const sessions = (await f.desktop.handle(
+      createRuntimeRequest("session.list", { workspacePath: f.workspacePath }),
+    )) as RuntimeResult<"session.list">;
+    assert.equal(
+      sessions.sessions.find((session) => session.sessionId === first.session.sessionId)?.title,
+      "complete task",
+    );
     assert.deepEqual(
       (user.skills as { name: string }[]).map((item) => item.name),
       ["alpha", "beta"],
