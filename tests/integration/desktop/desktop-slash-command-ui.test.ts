@@ -10,7 +10,7 @@ import { build } from "esbuild";
 
 for (const engine of ["Chrome", "Electron"] as const) {
   test(
-    `${engine} 桌面命令输入、补全、会话选择和回退对话框完整交互`,
+    `${engine} 桌面六个主命令、禁用搜索、资源标签与运行中模型只读交互`,
     { timeout: 45_000 },
     async (t) => {
       const candidates =
