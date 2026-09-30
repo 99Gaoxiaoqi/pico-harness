@@ -3673,7 +3673,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
 
   private async listRewindPoints(workspacePath: string, sessionId: string): Promise<JsonValue> {
     const canonical = await this.requireTrustedSession(workspacePath, sessionId);
-    return this.withSession(canonical, sessionId, async (session) => ({
+    // Read-only previews must not wait for the active run's execution lease.
+    return this.withPinnedSession(canonical, sessionId, async (session) => ({
       checkpoints: (await listRewindPointSummaries(session)).map((checkpoint) => ({
         checkpointId: checkpoint.messageId,
         label: checkpoint.userPrompt,
@@ -3708,7 +3709,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     checkpointId: string,
   ): Promise<JsonValue> {
     const canonical = await this.requireTrustedSession(workspacePath, sessionId);
-    return this.withSession(canonical, sessionId, async (session) => {
+    return this.withPinnedSession(canonical, sessionId, async (session) => {
       const changes = await fileHistoryChanges(
         session.fileHistory,
         checkpointId,
@@ -3810,7 +3811,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     checkpointId: string,
   ): Promise<DesktopChangesProjection> {
     const canonical = await this.requireTrustedSession(workspacePath, sessionId);
-    return this.withSession(canonical, sessionId, async (session) => ({
+    return this.withPinnedSession(canonical, sessionId, async (session) => ({
       workspacePath: canonical,
       ...(await projectDesktopCheckpoint(session, checkpointId, fileHistoryChanges)),
     }));

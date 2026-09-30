@@ -16,7 +16,7 @@ import { globalSessionManager } from "@pico/pico-host/session";
 import { writeDesktopModelRouting } from "../../fixtures/desktop-model-routing.js";
 
 test(
-  "production Desktop first send binds its committed checkpoint through restart and input replay",
+  "production Desktop checkpoints survive replay and remain readable during a running task",
   { timeout: 30_000 },
   async (context) => {
     const root = await mkdtemp(join(tmpdir(), "pico-desktop-checkpoint-link-"));
@@ -28,6 +28,8 @@ test(
     await git("git", ["init", "-b", "main", workspacePath]);
     await writeDesktopModelRouting(picoHome);
     let executions = 0;
+    const secondEntered = Promise.withResolvers<void>();
+    const releaseSecond = Promise.withResolvers<void>();
     const agentRuntime = new (class extends AgentRuntime {
       override execute(options: RunAgentCliOptions, dependencies: RunAgentCliDependencies) {
         executions++;
@@ -38,6 +40,10 @@ test(
           provider: {
             modelName: "test/checkpoint-link",
             generate: async () => {
+              if (executions === 2 && step === 0) {
+                secondEntered.resolve();
+                await releaseSecond.promise;
+              }
               if (step++ === 0)
                 return {
                   role: "assistant" as const,
@@ -67,6 +73,7 @@ test(
     let services = makeServices();
     const sessionIds: string[] = [];
     context.after(async () => {
+      releaseSecond.resolve();
       await services.desktopService.close();
       for (const sessionId of sessionIds)
         await globalSessionManager.delete(sessionId, workspacePath, { picoHome })?.close();
@@ -132,6 +139,64 @@ test(
       }),
     )) as unknown as RuntimeResult<"session.send">;
     assert.ok(next.run);
+    await secondEntered.promise;
+    const ref = { workspacePath, sessionId };
+    async function readWhileRunning<T>(request: Promise<T>): Promise<T> {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        return await Promise.race([
+          request,
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error("preview waited for the active Run")), 5000);
+          }),
+        ]);
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    try {
+      const points = (await readWhileRunning(
+        services.desktopService.handle(createRuntimeRequest("rewind.list", ref)),
+      )) as unknown as RuntimeResult<"rewind.list">;
+      assert.ok(points.checkpoints.some((point) => point.checkpointId === finished.checkpointId));
+      const checkpointRef = { ...ref, checkpointId: finished.checkpointId! };
+      const preview = (await readWhileRunning(
+        services.desktopService.handle(createRuntimeRequest("rewind.preview", checkpointRef)),
+      )) as unknown as RuntimeResult<"rewind.preview">;
+      assert.equal(preview.changes[0]?.path, "delivery.txt");
+      const changes = (await readWhileRunning(
+        services.desktopService.handle(createRuntimeRequest("rewind.changes", checkpointRef)),
+      )) as unknown as RuntimeResult<"rewind.changes">;
+      assert.equal(changes.files[0]?.path, "delivery.txt");
+      await assert.rejects(
+        services.desktopService.handle(
+          createRuntimeRequest("rewind.apply", {
+            ...checkpointRef,
+            mode: "code",
+            expectedFingerprint: preview.fingerprint,
+            idempotencyKey: "blocked-active-rewind",
+          }),
+        ),
+        /活动 Run/u,
+      );
+      await assert.rejects(
+        services.desktopService.handle(
+          createRuntimeRequest("rewind.restoreFile", {
+            ...checkpointRef,
+            path: "delivery.txt",
+            expectedFingerprint: changes.files[0]!.fingerprint,
+          }),
+        ),
+        /活动 Run/u,
+      );
+      assert.equal(await readFile(join(workspacePath, "delivery.txt"), "utf8"), "first delivery\n");
+      assert.equal(
+        (await services.service.getWorkspaceRun(workspacePath, next.run.runId))?.status,
+        "running",
+      );
+    } finally {
+      releaseSecond.resolve();
+    }
     const nextRuntime = await services.service.getWorkspaceRuntime(workspacePath);
     const nextFinished = await nextRuntime.waitForRun(next.run.runId);
     assert.equal(nextFinished.status, "succeeded", nextFinished.error);
