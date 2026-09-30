@@ -177,6 +177,8 @@ export interface CatalogAgentView {
 }
 
 export interface CatalogSkillView {
+  readonly sourceId?: string;
+  readonly sourcePath?: string;
   readonly name: string;
   readonly description: string;
   readonly allowedTools: readonly string[];

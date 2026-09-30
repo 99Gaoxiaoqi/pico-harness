@@ -174,6 +174,8 @@ export function parseCatalogAgents(value: unknown): readonly CatalogAgentView[] 
 export function parseCatalogSkills(value: unknown): readonly CatalogSkillView[] {
   const result = isRecord(value) ? value : {};
   return recordArray(result.skills).map((skill) => ({
+    ...(typeof skill.sourceId === "string" ? { sourceId: skill.sourceId } : {}),
+    ...(typeof skill.sourcePath === "string" ? { sourcePath: skill.sourcePath } : {}),
     name: stringValue(skill.name, "未命名 Skill"),
     description: stringValue(skill.description, "由当前 Runtime 提供。"),
     allowedTools: Array.isArray(skill.allowedTools)

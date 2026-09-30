@@ -1,16 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { useRuntime } from "../runtime-context.js";
-import { sessionHref } from "../workspace-session.js";
+import { sessionHref, workspacePathFromSearch } from "../workspace-session.js";
 import { UsageSettingsPage, type UsageQuerySelection } from "./UsageSettingsPage.js";
 
 export function UsagePage() {
   const { data, actions } = useRuntime();
   const navigate = useNavigate();
+  const location = useLocation();
+  const requestedWorkspace = workspacePathFromSearch(location.search) ?? "";
   const [usage, setUsage] = useState<typeof data.usage>({});
   const [selection, setSelection] = useState<UsageQuerySelection>({
     range: "all",
-    workspacePath: "",
+    workspacePath: requestedWorkspace,
   });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
@@ -43,11 +45,11 @@ export function UsagePage() {
     [actions],
   );
   useEffect(() => {
-    void query({ range: "all", workspacePath: "" });
+    void query({ range: "all", workspacePath: requestedWorkspace });
     return () => {
       sequence.current += 1;
     };
-  }, [query]);
+  }, [query, requestedWorkspace]);
   return (
     <UsageSettingsPage
       usage={usage}

@@ -18,6 +18,7 @@ const DESKTOP_BUILD_WORKSPACES = [
   "@pico/transcript-replica",
   "@pico/runtime-host",
   "@pico/pico-host",
+  "@pico/cli",
 ];
 const DESKTOP_FORGE_RUNNER = "../../scripts/run-desktop-forge.mjs";
 
@@ -29,6 +30,7 @@ test("Desktop cold workflows build the complete dependency chain before invoking
   const manifest = JSON.parse(manifestSource) as DesktopPackageManifest;
 
   assert.equal(manifest.dependencies?.["@pico/runtime-host"], "*");
+  assert.equal(manifest.dependencies?.["@pico/cli"], "*");
   for (const lifecycle of ["start", "package", "make"] as const) {
     assert.ok(
       manifest.scripts?.[lifecycle]?.includes(`${DESKTOP_FORGE_RUNNER} ${lifecycle}`),

@@ -1,5 +1,5 @@
 import { AlertTriangle, Check, Cpu, LoaderCircle, Settings } from "lucide-react";
-import { useEffect, useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { Button } from "@astryxdesign/core/Button";
 import {
   DropdownMenu,
@@ -51,6 +51,7 @@ export function ComposerModelPicker({
   hasHistory = false,
   onChange,
   onConfigure,
+  openRequest,
 }: {
   routes: readonly ModelRouteView[];
   providers: readonly ProviderView[];
@@ -59,13 +60,21 @@ export function ComposerModelPicker({
   disabled?: boolean | undefined;
   disabledReason?: string | undefined;
   hasHistory?: boolean | undefined;
-  onChange: (id: string) => void | Promise<void>;
+  onChange: (id: string) => void | Promise<void | boolean>;
   onConfigure: () => void;
+  openRequest?: number | undefined;
 }) {
   const id = useId();
   const [open, setOpen] = useState(false);
   const [pending, setPending] = useState(false);
   const locked = disabled || pending;
+  const consumedOpenRequest = useRef(0);
+  useEffect(() => {
+    if (openRequest && openRequest !== consumedOpenRequest.current && !disabled) {
+      consumedOpenRequest.current = openRequest;
+      setOpen(true);
+    }
+  }, [openRequest, disabled]);
   const groups = useMemo(() => {
     const result = new Map<
       string,

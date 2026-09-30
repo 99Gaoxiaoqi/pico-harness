@@ -1,0 +1,137 @@
+@layer pages {
+  .command-suggestions,
+  .command-result {
+    margin: 0 0 8px;
+    padding: 8px;
+    border: 1px solid var(--border, #8884);
+    border-radius: 12px;
+    background: var(--panel, light-dark(#fff, #252525));
+    font-size: 13px;
+  }
+  .conversation-composer,
+  .side-chat__composer {
+    position: relative;
+  }
+  .composer-reference {
+    display: inline-flex;
+    gap: 6px;
+    align-items: center;
+    padding: 2px 7px;
+    border: 1px solid #8885;
+    border-radius: 7px;
+    background: light-dark(#eef0f4, #ffffff16);
+    font-size: 12px;
+  }
+  .composer-reference button {
+    border: 0;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+  }
+  .composer-replacement {
+    display: grid;
+    gap: 8px;
+    padding: 8px;
+  }
+  .composer-replacement span {
+    white-space: normal !important;
+  }
+  .command-suggestions {
+    position: absolute;
+    bottom: 100%;
+    left: 0;
+    right: 0;
+    z-index: 40;
+    box-shadow: 0 8px 24px #0002;
+    max-height: 250px;
+    overflow-y: auto;
+  }
+  .command-suggestions [role="option"] {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    padding: 8px;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .command-suggestions [aria-selected="true"] {
+    background: light-dark(#eef0f4, #ffffff16);
+  }
+  .command-suggestions [aria-disabled="true"] {
+    opacity: 0.5;
+    cursor: default;
+  }
+  .command-suggestions span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .command-suggestions small {
+    display: block;
+    padding: 6px 8px;
+    opacity: 0.65;
+  }
+  .command-result {
+    max-height: 240px;
+    overflow: auto;
+  }
+  .command-result header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .command-result pre,
+  .command-dialog pre {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font: inherit;
+  }
+  .command-dialog {
+    display: grid;
+    gap: 12px;
+    padding: 24px;
+    max-height: min(75vh, 740px);
+    overflow: auto;
+  }
+  .command-dialog h2 {
+    margin: 0;
+    font-size: 18px;
+  }
+  .command-dialog__list {
+    display: grid;
+    gap: 6px;
+    overflow: auto;
+    max-height: 360px;
+  }
+  .command-dialog__choice {
+    display: flex;
+    flex-direction: column;
+    align-items: start;
+    text-align: left;
+    border: 1px solid #8883;
+    border-radius: 8px;
+    padding: 10px;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+  }
+  .command-dialog__choice:hover {
+    background: #8881;
+  }
+  .command-dialog__choice span,
+  .command-dialog__choice small {
+    opacity: 0.7;
+  }
+  .command-dialog__actions {
+    display: flex;
+    justify-content: end;
+    gap: 8px;
+  }
+  .command-dialog__diff {
+    max-height: 280px;
+    overflow: auto;
+    background: #8881;
+    padding: 12px;
+    border-radius: 8px;
+  }
+}

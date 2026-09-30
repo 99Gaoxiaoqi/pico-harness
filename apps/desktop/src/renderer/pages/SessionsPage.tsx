@@ -2,7 +2,7 @@ import { CheckboxInput } from "@astryxdesign/core/CheckboxInput";
 import { TextField } from "../ui-controls.js";
 import { Archive, Code2, Folder, Plus, Search } from "lucide-react";
 import { useState, type ReactNode } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { Button, EmptyState, StatusPill } from "../components.js";
 import type { SessionView } from "../model.js";
 import { useRuntime } from "../runtime-context.js";
@@ -13,14 +13,17 @@ import {
   workspaceDisplayName,
   workspaceName,
   workspaceSessionKey,
+  workspacePathFromSearch,
 } from "../workspace-session.js";
 
 export function SessionsPage() {
   const { data, actions, busy } = useRuntime();
+  const workspacePath = workspacePathFromSearch(useLocation().search);
   const [query, setQuery] = useState("");
   const [showArchived, setShowArchived] = useState(false);
   const sessions = data.sessions.filter(
     (item) =>
+      (!workspacePath || item.workspacePath === workspacePath) &&
       (showArchived || item.status !== "archived") &&
       `${item.title} ${workspaceName(item.workspacePath)} ${item.workspacePath}`
         .toLowerCase()
@@ -39,6 +42,11 @@ export function SessionsPage() {
           新任务
         </Link>
       </section>
+      {workspacePath && (
+        <p>
+          当前项目：{workspaceName(workspacePath)} · <Link to="/sessions">查看全部项目</Link>
+        </p>
+      )}
       <div className="toolbar">
         <div className="search-field">
           <Search aria-hidden="true" />

@@ -1,3 +1,9 @@
+import {
+  parseComposerDraft,
+  validateComposerReferences,
+} from "../conversation/composer-references.js";
+import { useDesktopCommands, isDesktopCommandInput } from "../conversation/useDesktopCommands.js";
+import { applyConversationSettings } from "../conversation/conversation-settings.js";
 import { useConversationGoal } from "../conversation/ConversationGoalControls.js";
 import { ComposerContextGauge } from "../conversation/ComposerContextGauge.js";
 import { DeepResearchPanel } from "../conversation/DeepResearchPanel.js";
@@ -41,13 +47,11 @@ import { Button, InlineNotice, PreviewBadge, StatusPill } from "../components.js
 import { ConversationGraphBoard } from "../conversation/ConversationGraphBoard.js";
 import {
   ConversationComposer,
-  ConversationContextMenu,
   ConversationInteractionSlot,
   ConversationSurface,
   ConversationTranscript,
   mergeConversationItemGroups,
   omitApprovalAuditItems,
-  removePersistentDraft,
   removeSupersededActiveTools,
   usePersistentDraft,
   writePersistentDraft,
@@ -63,9 +67,8 @@ import {
   providerRetryKey,
   providerStatusDiagnostic,
 } from "../provider-retry.js";
-import type { ApprovalView, PlanApprovalView, TimelineItem, ToolApprovalView } from "../model.js";
+import type { ApprovalView, TimelineItem, ToolApprovalView } from "../model.js";
 import { useRuntime } from "../runtime-context.js";
-import { parseSwarmCommand } from "../swarm-command.js";
 import { formatCompact, isTerminalRun } from "../view-format.js";
 import { BrowserWorkbarPanel } from "../workbar-panels/BrowserWorkbarPanel.js";
 import { SideChatPanelController } from "../workbar-panels/SideChatPanelController.js";
@@ -164,11 +167,12 @@ export function ConversationPage() {
     value: draft,
     update: handleDraftChange,
     clear: clearDraft,
+    clearIfUnchanged,
   } = usePersistentDraft(draftKey);
   const composerInputRef = useRef<ConversationComposerHandle>(null);
   const [behavior, setBehavior] = useState<ComposerBehavior>("steer");
   const [inspector, setInspector] = useState<ConversationInspectorView>();
-  const [catalogOpen, setCatalogOpen] = useState(false);
+
   const [workbar, dispatchWorkbar] = useReducer(reduceWorkbarState, undefined, () => {
     const fallback = createWorkbarState();
     return typeof window === "undefined"
@@ -177,11 +181,9 @@ export function ConversationPage() {
   });
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
-  const [confirmCompact, setConfirmCompact] = useState(false);
-  const [activation, setActivation] = useState<
-    | { readonly kind: "skill"; readonly name: string }
-    | { readonly kind: "agent"; readonly name: string; readonly subagentId?: string }
-  >();
+  const [modelOpenRequest, setModelOpenRequest] = useState(0);
+  const [referenceError, setReferenceError] = useState<string>();
+  const draftReferences = parseComposerDraft(draft);
   const sendingRef = useRef(false);
   const temporaryPathRef = useRef<string | undefined>(undefined);
   const [preparingSend, setPreparingSend] = useState(false);
@@ -206,10 +208,8 @@ export function ConversationPage() {
 
   useEffect(() => {
     setInspector(undefined);
-    setCatalogOpen(false);
     setEditingTitle(false);
-    setConfirmCompact(false);
-    setActivation(undefined);
+    setReferenceError(undefined);
   }, [sessionId, workspacePath]);
 
   useEffect(() => {
@@ -439,31 +439,41 @@ export function ConversationPage() {
     sessionRuns,
   ]);
 
+  const commands = useDesktopCommands({
+    runtime,
+    workspacePath,
+    sessionId,
+    running: Boolean(activeRun),
+    initialSettings: newTaskSettings,
+    draft,
+    onConsumeDraft: clearDraft,
+    onInitialSettings: updateNewTaskSettings,
+    onOpenGoal: () => goalControls.openDialog(),
+    onGoalControl: (input) => goalControls.control(input),
+    onOpenModel: () => setModelOpenRequest((value) => value + 1),
+    onOpenResource: (kind) => composerInputRef.current?.openResources(kind),
+    onDraftChange: handleDraftChange,
+    blocked: Boolean(pendingPrompt || pendingApproval),
+  });
+
   const submit = async (text: string, nextBehavior: ComposerBehavior) => {
-    if (sendingRef.current || !composerReady || !composerModelRouteId || usingOpenCodeFree) return;
-    const swarmCommand = !activation ? parseSwarmCommand(text) : undefined;
-    if (swarmCommand) {
-      if (swarmCommand.kind !== "status" && activeRun) {
-        actions.showMessage?.("任务运行中不能切换或启动 Swarm；可以使用 /swarm status 查看状态。");
-        return;
-      }
-      const currentMode = sessionRef
-        ? conversation?.settings?.orchestrationMode
-        : newTaskSettings.orchestrationMode;
-      if (swarmCommand.kind === "status") {
-        actions.showMessage?.(
-          `Swarm：${currentMode === "swarm" ? "开启" : "关闭"}；当前编排：${currentMode ?? "default"}`,
-        );
-        clearDraft();
-        return;
-      }
-      if (swarmCommand.kind === "set_mode") {
-        if (swarmCommand.mode === "swarm" || currentMode === "swarm")
-          await changeGraphMode(swarmCommand.mode === "swarm", "swarm");
-        clearDraft();
-        return;
-      }
+    if (sendingRef.current || commands.pending) return;
+    const parsedDraft = parseComposerDraft(text);
+    const referenceFailure = validateComposerReferences(
+      parsedDraft.references,
+      data.catalogSkills,
+      data.catalogAgents,
+    );
+    if (referenceFailure) {
+      setReferenceError(referenceFailure);
+      return;
     }
+    if (!parsedDraft.references.length && isDesktopCommandInput(text)) {
+      await commands.execute(text);
+      return;
+    }
+    if (!composerReady || !composerModelRouteId || usingOpenCodeFree || !parsedDraft.text) return;
+    setReferenceError(undefined);
     sendingRef.current = true;
     setPreparingSend(true);
     const sourceDraftKey = draftKey;
@@ -488,21 +498,31 @@ export function ConversationPage() {
         workspacePath: targetWorkspacePath,
         ...(sessionId ? { sessionId } : {}),
         ...(!sessionId ? { initialSettings: newTaskSettings } : {}),
-        text,
+        text: parsedDraft.text,
         behavior: nextBehavior,
         ...(activeRun ? { expectedRunId: activeRun.id } : {}),
-        ...(activation ? { activation } : {}),
+        ...(parsedDraft.references.some((ref) => ref.kind === "skill")
+          ? {
+              skills: parsedDraft.references
+                .filter((ref) => ref.kind === "skill")
+                .map(({ name, sourceId, sourcePath }) => ({
+                  name,
+                  ...(sourceId ? { sourceId } : {}),
+                  ...(sourcePath ? { sourcePath } : {}),
+                })),
+            }
+          : {}),
+        ...(parsedDraft.references[0]?.kind === "agent"
+          ? { activation: parsedDraft.references[0] }
+          : {}),
       });
       if (!result.succeeded) {
         setAwaitingFirstSession(false);
         return;
       }
-      if (sendRouteRef.current !== sourceDraftKey) {
-        removePersistentDraft(sourceDraftKey);
-        return;
-      }
-      clearDraft();
-      setActivation(undefined);
+      clearIfUnchanged(draft);
+      if (sendRouteRef.current !== sourceDraftKey) return;
+      setReferenceError(undefined);
       if (!sessionId && result.sessionId) {
         setAwaitingFirstSession(false);
         navigate(
@@ -521,32 +541,16 @@ export function ConversationPage() {
     }
   };
 
-  const openCatalog = () => setCatalogOpen((open) => !open);
+  const openCatalog = () => composerInputRef.current?.openResources("skill");
 
   const changePlanMode = async (active: boolean) => {
-    const collaborationMode = active ? "plan" : "agent";
-    if (!sessionRef) {
-      updateNewTaskSettings({ collaborationMode });
-      return;
-    }
-    const pendingPlan = data.approvals.find(
-      (approval): approval is PlanApprovalView =>
-        approval.kind === "plan" && approval.sessionId === sessionRef.sessionId,
+    await applyConversationSettings(
+      runtime,
+      sessionRef,
+      newTaskSettings,
+      { collaborationMode: active ? "plan" : "agent" },
+      updateNewTaskSettings,
     );
-    if (!active && conversation?.settings?.collaborationMode === "plan" && pendingPlan) {
-      if (!window.confirm("当前计划仍待审批。退出 Plan 将拒绝并放弃这份计划，是否继续？")) return;
-      await actions.respondPlan({
-        sessionId: sessionRef.sessionId,
-        planId: pendingPlan.planId,
-        action: "reject_exit",
-        expectedRevision: pendingPlan.expectedRevision,
-        expectedSessionSequence: pendingPlan.expectedSessionSequence,
-        controlEpoch: pendingPlan.controlEpoch,
-        feedback: "用户从协作模式开关退出 Plan。",
-      });
-      return;
-    }
-    await actions.updateSessionSettings(sessionRef, { collaborationMode });
   };
 
   const changeResearchMode = async (active: boolean) => {
@@ -554,12 +558,14 @@ export function ConversationPage() {
       collaborationMode: active ? ("research" as const) : ("agent" as const),
       orchestrationMode: "default" as const,
     };
-    setActivation(undefined);
-    if (!sessionRef) {
-      updateNewTaskSettings(patch);
-      return;
-    }
-    await actions.updateSessionSettings(sessionRef, patch);
+    setReferenceError(undefined);
+    await applyConversationSettings(
+      runtime,
+      sessionRef,
+      newTaskSettings,
+      patch,
+      updateNewTaskSettings,
+    );
   };
 
   const implementResearch = async (prompt: string) => {
@@ -1060,17 +1066,9 @@ export function ConversationPage() {
                       variant="quiet"
                       type="button"
                       disabled={Boolean(activeRun) || Boolean(busy)}
-                      onClick={() => {
-                        if (!confirmCompact) {
-                          setConfirmCompact(true);
-                          return;
-                        }
-                        void actions
-                          .compactSession(sessionRef)
-                          .then(() => setConfirmCompact(false));
-                      }}
+                      onClick={commands.requestCompact}
                     >
-                      <Minimize2 aria-hidden="true" /> {confirmCompact ? "确认压缩" : "压缩"}
+                      <Minimize2 aria-hidden="true" /> 压缩
                     </Button>
                   </div>
                 )}
@@ -1190,19 +1188,15 @@ export function ConversationPage() {
                     <Link to="/settings/models">先添加连接，再返回会话切换模型</Link>
                   </p>
                 )}
-                {catalogOpen && (
-                  <ConversationContextMenu
-                    skills={data.catalogSkills}
-                    agents={data.catalogAgents}
-                    onClose={() => setCatalogOpen(false)}
-                    onSelect={(nextActivation) => {
-                      setActivation(nextActivation);
-                      setCatalogOpen(false);
-                      window.requestAnimationFrame(() => composerInputRef.current?.focus());
-                    }}
-                  />
+                {commands.feedback}
+                {referenceError && (
+                  <p role="alert" className="conversation-model-notice">
+                    {referenceError}
+                  </p>
                 )}
                 <ConversationComposer
+                  commands={commands.suggestions}
+                  resources={{ skills: data.catalogSkills, agents: data.catalogAgents }}
                   inputRef={composerInputRef}
                   value={draft}
                   onValueChange={handleDraftChange}
@@ -1211,23 +1205,23 @@ export function ConversationPage() {
                   startedAt={activeRun?.startedAt}
                   behavior={behavior}
                   onBehaviorChange={setBehavior}
-                  busy={preparingSend || busy === "send-message"}
+                  busy={preparingSend || commands.pending || busy === "send-message"}
                   disabled={Boolean(conversation?.loadError)}
-                  submitDisabled={!composerReady || !composerModelRouteId || usingOpenCodeFree}
+                  submitDisabled={
+                    !draftReferences.references.length && isDesktopCommandInput(draft)
+                      ? false
+                      : !composerReady || !composerModelRouteId || usingOpenCodeFree
+                  }
                   placeholder={
-                    activation?.kind === "skill"
-                      ? `输入 ${activation.name} 的参数或补充要求…`
-                      : activation?.kind === "agent"
-                        ? `描述要委派给 ${activation.name} 的任务…`
-                        : sessionId
-                          ? "继续对话，或在运行中调整方向…"
-                          : !workspacePath
-                            ? "向 Pico 发送消息…"
-                            : legacyStorageBlocked
-                              ? "这个项目需要先迁移旧版会话数据…"
-                              : !workspaceReady
-                                ? "正在准备项目…"
-                                : "向 Pico 发送消息…"
+                    sessionId
+                      ? "继续对话，或在运行中调整方向…"
+                      : !workspacePath
+                        ? "向 Pico 发送消息…"
+                        : legacyStorageBlocked
+                          ? "这个项目需要先迁移旧版会话数据…"
+                          : !workspaceReady
+                            ? "正在准备项目…"
+                            : "向 Pico 发送消息…"
                   }
                   statusText={
                     conversation?.queuedCount
@@ -1239,11 +1233,7 @@ export function ConversationPage() {
                   onStop={activeRun ? () => void actions.stopRun(activeRun.id) : undefined}
                   onSetGoal={goalControls.openDialog}
                   goalDisabled={!goalControls.canSetGoal}
-                  onAttach={
-                    !researchActive && composerStatus === "idle" && workspaceReady
-                      ? openCatalog
-                      : undefined
-                  }
+                  onAttach={!researchActive && composerStatus === "idle" ? openCatalog : undefined}
                   modes={
                     composerReady && (!sessionRef || conversation?.settings)
                       ? {
@@ -1267,19 +1257,6 @@ export function ConversationPage() {
                           onSwarmChange: (active) => changeGraphMode(active, "swarm"),
                         }
                       : undefined
-                  }
-                  trailingAccessory={
-                    activation ? (
-                      <Button
-                        variant="quiet"
-                        type="button"
-                        className="conversation-activation-chip"
-                        onClick={() => setActivation(undefined)}
-                        aria-label={`移除 ${activation.kind === "skill" ? "Skill" : "子代理"} ${activation.name}`}
-                      >
-                        {activation.kind === "skill" ? "Skill" : "Agent"}: {activation.name} ×
-                      </Button>
-                    ) : undefined
                   }
                   leadingAccessory={
                     <>
@@ -1334,6 +1311,7 @@ export function ConversationPage() {
                           {composerReady && (
                             <>
                               <ComposerModelPicker
+                                openRequest={modelOpenRequest}
                                 routes={newTaskModelRoutes}
                                 providers={data.providerConfig.providers}
                                 value={newTaskSettings.modelRouteId}
@@ -1396,6 +1374,7 @@ export function ConversationPage() {
                       {sessionRef && conversation?.settings && (
                         <>
                           <ComposerModelPicker
+                            openRequest={modelOpenRequest}
                             routes={data.modelRoutes}
                             providers={data.providerConfig.providers}
                             value={conversation.settings.modelRouteId}
