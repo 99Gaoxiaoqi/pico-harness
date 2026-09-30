@@ -64,11 +64,18 @@ export type RuntimeInputAttachment = JsonObject & {
   readonly data: string;
 };
 
+export type RuntimeSkillReference = JsonObject & {
+  readonly name: string;
+  readonly sourceId?: string;
+  readonly sourcePath?: string;
+};
+
 export type RuntimeTextUserInput = JsonObject & {
   /** Explicit per-turn override; retained with queued input without changing Session defaults. */
   readonly orchestrationMode?: "graph" | "swarm";
   readonly kind: "text";
   readonly text: string;
+  readonly skills?: readonly RuntimeSkillReference[];
   /** 图片附件（3-D 漏账补齐；无附件时省略字段，空数组非法）。 */
   readonly attachments?: readonly RuntimeInputAttachment[];
 };
@@ -159,10 +166,36 @@ const runtimeUserInputParam: RuntimeParamRule = (value, path) => {
       text: stringParam,
     },
     {
+      skills: runtimeSkillReferencesParam,
       attachments: runtimeInputAttachmentsParam,
       orchestrationMode: oneOfParam(["graph", "swarm"]),
     },
   );
+};
+
+const runtimeSkillReferencesParam: RuntimeParamRule = (value, path) => {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 16) {
+    throw invalidParams(`${path} 必须是 1 至 16 项技能引用数组`);
+  }
+  for (const [index, item] of value.entries()) {
+    assertNestedShape(
+      item,
+      `${path}[${index}]`,
+      { name: boundedNonEmptyStringParam(256) },
+      {
+        sourceId: boundedNonEmptyStringParam(4096),
+        sourcePath: boundedNonEmptyStringParam(4096),
+      },
+    );
+  }
+};
+
+export const runtimeSkillReferencesResult: RuntimeResultRule = (value, path) => {
+  try {
+    runtimeSkillReferencesParam(value, path);
+  } catch {
+    throw invalidResult(`${path} 必须是有效技能引用数组`);
+  }
 };
 
 /** 图片附件上限对齐 headless-one-shot-runner（4 张 / 总 256KB 解码后字节）。 */
@@ -255,10 +288,20 @@ export const runtimeQueuedInputResult = exactResultShape({
   input: (value, path) => {
     if (!isJsonObject(value)) throw invalidResult(`${path} 必须是用户输入对象`);
     if (value["kind"] === "text") {
-      exactResultShape({
-        kind: resultOneOf(["text"]),
-        text: resultString,
-      })(value, path);
+      exactResultShape(
+        { kind: resultOneOf(["text"]), text: resultString },
+        {
+          skills: runtimeSkillReferencesResult,
+          orchestrationMode: resultOneOf(["graph", "swarm"]),
+          attachments: (attachments, attachmentPath) => {
+            try {
+              runtimeInputAttachmentsParam(attachments, attachmentPath);
+            } catch {
+              throw invalidResult(`${attachmentPath} 必须是有效附件数组`);
+            }
+          },
+        },
+      )(value, path);
       return;
     }
     if (value["kind"] === "skill") {

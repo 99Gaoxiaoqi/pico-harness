@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import type { JsonObject, RuntimeUserInput } from "@pico/protocol";
-import { isSafeSubagentPresetId } from "@pico/protocol";
+import { parseStrictRuntimeParams, isSafeSubagentPresetId } from "@pico/protocol";
 
 // Desktop conversation state is a Pico Host contract, independent of its persistence backend.
 
@@ -90,6 +90,11 @@ function parseStoredInput(value: Record<string, unknown>, filePath: string): Run
     throw new Error(`Desktop conversation queue is missing canonical input: ${filePath}`);
   }
   const candidate = value["input"];
+  parseStrictRuntimeParams("session.send", {
+    workspacePath: "/",
+    input: candidate as RuntimeUserInput,
+    idempotencyKey: "validate",
+  });
   const kind = candidate["kind"];
   if (kind === "text" && typeof candidate["text"] === "string") {
     const mode = candidate["orchestrationMode"];
@@ -98,6 +103,20 @@ function parseStoredInput(value: Record<string, unknown>, filePath: string): Run
     return {
       kind,
       text: requireNonEmpty(candidate["text"], "input.text"),
+      ...(candidate["skills"]
+        ? {
+            skills: candidate["skills"] as NonNullable<
+              Extract<RuntimeUserInput, { kind: "text" }>["skills"]
+            >,
+          }
+        : {}),
+      ...(candidate["attachments"]
+        ? {
+            attachments: candidate["attachments"] as NonNullable<
+              Extract<RuntimeUserInput, { kind: "text" }>["attachments"]
+            >,
+          }
+        : {}),
       ...(mode ? { orchestrationMode: mode } : {}),
     };
   }

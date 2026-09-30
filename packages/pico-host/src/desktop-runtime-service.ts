@@ -54,7 +54,7 @@ import { StorageDoctor } from "./storage-doctor.js";
 import { SessionForkService } from "./session-fork-service.js";
 import { projectRuntimeSessionState } from "@pico/runtime/session-runtime-projection";
 import { globalSessionManager, Session } from "./session.js";
-import type { PersistedSessionSettings } from "@pico/core";
+import { canonicalResourceName, type PersistedSessionSettings } from "@pico/core";
 import {
   getOrCreateSessionSettings,
   migrateSessionModelRoute,
@@ -138,6 +138,8 @@ import {
   type RuntimeNotificationMap,
   type RuntimeNotificationPage,
   type RuntimeNotificationTopic,
+  parseStrictRuntimeParams,
+  type RuntimeSkillReference,
   type RuntimeInputAttachment,
   type RuntimeRequest,
   type RuntimeQueuedInput,
@@ -242,6 +244,7 @@ const UNSUPPORTED_DESKTOP_METHODS: ReadonlySet<string> = new Set([
 ] as const);
 
 interface ResolvedRuntimeUserInput {
+  readonly input?: RuntimeUserInput;
   readonly prompt: string;
   readonly execution?: DaemonRunExecution;
   /** text 输入的图片附件（3-D 漏账补齐）：daemon 走 resumeExistingSession，
@@ -2583,7 +2586,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         .settings?.collaborationMode;
       if (
         collaboration === "research" &&
-        (params.input.kind !== "text" || params.input.orchestrationMode)
+        (isRuntimeActivation(params.input) ||
+          (params.input.kind === "text" && params.input.orchestrationMode))
       ) {
         throw new RuntimeProtocolError(
           RUNTIME_ERROR_CODES.CONFLICT,
@@ -2597,18 +2601,23 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         );
       }
 
+      const activation = isRuntimeActivation(params.input);
+      const resolution =
+        initialResolution ??
+        (activation
+          ? await this.resolveRuntimeUserInput(params.workspacePath, params.input)
+          : undefined);
+      const admittedInput = resolution?.input ?? params.input;
       if (activeRun) {
         const runId = requireText(activeRun["runId"], "run.runId");
-        const activation = params.input.kind === "agent" || params.input.kind === "skill";
         if (activation && behavior === "steer") {
           throw new RuntimeProtocolError(
             RUNTIME_ERROR_CODES.CONFLICT,
             "Agent/Skill 激活必须在新 Run 中应用；请选择 Queue 或 Replace",
           );
         }
-        if (activation) await this.resolveRuntimeUserInput(params.workspacePath, params.input);
         if (behavior === "queue" || behavior === "replace" || activation) {
-          await this.conversationStateStore.enqueue(params.workspacePath, sessionId, params.input);
+          await this.conversationStateStore.enqueue(params.workspacePath, sessionId, admittedInput);
           const run =
             behavior === "replace"
               ? await this.options.runtimeService.handle(
@@ -2649,7 +2658,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         this.goalCoordinator.isSettling(params.workspacePath, sessionId) ||
         (await this.findActiveWorkspaceRun(params.workspacePath))
       ) {
-        await this.conversationStateStore.enqueue(params.workspacePath, sessionId, params.input);
+        await this.conversationStateStore.enqueue(params.workspacePath, sessionId, admittedInput);
         return { session: sessionRecord, disposition: "queued" };
       }
 
@@ -2662,8 +2671,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       const run = await this.startSessionRun(
         params.workspacePath,
         sessionId,
-        params.input,
-        initialResolution,
+        admittedInput,
+        resolution,
         {
           inputKey: params.idempotencyKey,
           runStartKey: desktopRunStartIdempotencyKey("send", params.idempotencyKey),
@@ -2768,12 +2777,13 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         await this.getSessionSettings(workspacePath, session);
         await session.flushPersistence();
       });
+      const canonicalInput = resolved.input ?? input;
       const checkpointId = await this.commitSessionInputOnce(
         workspacePath,
         sessionId,
         resolved.prompt,
-        runtimeInputDisplay(input),
-        input,
+        runtimeInputDisplay(canonicalInput),
+        canonicalInput,
         identity.inputKey,
         resolved.images,
       );
@@ -2833,6 +2843,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
             picoKind: "desktop_user_input",
             picoDesktopInputId: messageId,
             displayText,
+            ...(input.kind === "text" && input.skills ? { skills: input.skills } : {}),
           },
           ...(images && images.length > 0 ? { images } : {}),
         });
@@ -3112,7 +3123,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     workspacePath: string,
     input: RuntimeUserInput,
   ): Promise<ResolvedRuntimeUserInput> {
-    if (input.kind === "text") {
+    if (input.kind === "text" && !input.skills) {
       const images = inputAttachmentsToImages(input.attachments);
       return {
         prompt: input.text,
@@ -3162,8 +3173,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         },
       };
     }
-    const skillName = requireText(input["name"], "input.name");
-    const skillArgs = typeof input["args"] === "string" ? input["args"] : "";
+    const references: readonly RuntimeSkillReference[] =
+      input.kind === "text" ? input.skills! : [{ name: input.name }];
     const loader = new SkillLoader<HookTrustAuthority>(canonical, {
       logger,
       includeUserResources: true,
@@ -3173,37 +3184,89 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       env: this.env,
       picoHome: this.picoHome,
     });
-    const skill = await loader.view(skillName);
-    if (!skill) {
-      const available = (await loader.listSummaries()).map((item) => item.name).join(", ");
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.NOT_FOUND,
-        `未找到 Skill: ${skillName}。可用 Skills: ${available || "none"}`,
+    // Resolve the entire effective catalog before producing any durable input or Run.
+    const catalog = await loader.list();
+    const skills: typeof catalog = [];
+    const canonicalReferences: RuntimeSkillReference[] = [];
+    const seen = new Set<string>();
+    for (const reference of references) {
+      const skill = catalog.find(
+        (candidate) =>
+          canonicalResourceName(candidate.name) === canonicalResourceName(reference.name),
       );
+      if (!skill)
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.NOT_FOUND,
+          `未找到 Skill: ${reference.name}`,
+        );
+      if (
+        (reference.sourceId !== undefined && reference.sourceId !== skill.source?.id) ||
+        (reference.sourcePath !== undefined &&
+          resolve(reference.sourcePath).normalize("NFC") !== skill.sourcePath?.normalize("NFC"))
+      ) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.CONFLICT,
+          `Skill ${reference.name} 来源已变化，请重新选择`,
+        );
+      }
+      const identity = `${canonicalResourceName(skill.name)}\0${skill.source?.id ?? ""}\0${skill.sourcePath ?? ""}`;
+      if (seen.has(identity)) continue;
+      seen.add(identity);
+      skills.push(skill);
+      canonicalReferences.push({
+        name: skill.name,
+        ...(skill.source?.id ? { sourceId: skill.source.id } : {}),
+        ...(skill.sourcePath ? { sourcePath: skill.sourcePath } : {}),
+      });
     }
-    const activation = renderSkillActivation({
-      name: skill.name,
-      args: skillArgs,
-      body: skill.body,
-      ...(skill.sourcePath === undefined ? {} : { sourcePath: skill.sourcePath }),
-      trigger: "user-slash",
-    });
+    const models = [...new Set(skills.flatMap((skill) => (skill.model ? [skill.model] : [])))];
+    if (models.length > 1)
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        `技能声明的模型冲突: ${models.join(", ")}`,
+      );
+    const toolDeclarations = skills.flatMap((skill) =>
+      skill.allowedTools ? [skill.allowedTools] : [],
+    );
+    const allowedTools =
+      toolDeclarations.length === 0
+        ? undefined
+        : toolDeclarations[0]!.filter((tool) =>
+            toolDeclarations.every((tools) => tools.includes(tool)),
+          );
+    const activations = skills
+      .filter((skill) => skill.sourcePath && skill.hooks !== undefined)
+      .map((skill) => ({
+        name: skill.name,
+        sourcePath: skill.sourcePath!,
+        hooks: skill.hooks,
+        ...(skill.source?.id ? { sourceId: skill.source.id } : {}),
+      }));
     const execution: DaemonRunExecution = {
-      ...(skill.model ? { requestedModel: skill.model } : {}),
-      ...(skill.allowedTools ? { allowedTools: skill.allowedTools } : {}),
-      ...(skill.sourcePath && skill.hooks !== undefined
-        ? {
-            skillActivation: {
-              name: skill.name,
-              sourcePath: skill.sourcePath,
-              hooks: skill.hooks,
-              ...(skill.source?.id ? { sourceId: skill.source.id } : {}),
-            },
-          }
+      ...(input.kind === "text" && input.orchestrationMode
+        ? { orchestrationMode: input.orchestrationMode }
         : {}),
+      ...(models[0] ? { requestedModel: models[0] } : {}),
+      ...(allowedTools ? { allowedTools } : {}),
+      ...(input.kind === "text" && activations.length ? { skillActivations: activations } : {}),
+      ...(input.kind === "skill" && activations[0] ? { skillActivation: activations[0] } : {}),
     };
+    const prompts = skills.map(
+      (skill) =>
+        renderSkillActivation({
+          name: skill.name,
+          args: input.kind === "skill" ? (input.args ?? "") : input.text,
+          body: skill.body,
+          ...(skill.sourcePath ? { sourcePath: skill.sourcePath } : {}),
+          trigger: "user-slash",
+        }).prompt,
+    );
+    if (input.kind === "text") prompts.push(`用户任务：\n${input.text}`);
+    const images = input.kind === "text" ? inputAttachmentsToImages(input.attachments) : undefined;
     return {
-      prompt: activation.prompt,
+      prompt: prompts.join("\n\n"),
+      ...(input.kind === "text" ? { input: { ...input, skills: canonicalReferences } } : {}),
+      ...(images ? { images } : {}),
       ...(Object.keys(execution).length > 0 ? { execution } : {}),
     };
   }
@@ -4714,6 +4777,12 @@ function normalizeRuntimeUserInput(value: RuntimeUserInput): RuntimeUserInput {
   if (!isJsonRecord(value)) {
     throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, "input 必须是对象");
   }
+  // Reuse the exact protocol shape gate for internal callers as well.
+  parseStrictRuntimeParams("session.send", {
+    workspacePath: "/",
+    input: value,
+    idempotencyKey: "validate",
+  });
   const kind = value["kind"];
   if (kind === "text") {
     const attachments = normalizeInputAttachments(value["attachments"]);
@@ -4727,6 +4796,7 @@ function normalizeRuntimeUserInput(value: RuntimeUserInput): RuntimeUserInput {
       kind,
       text: requireText(value["text"], "input.text"),
       ...(attachments ? { attachments } : {}),
+      ...(value.skills ? { skills: value.skills as readonly RuntimeSkillReference[] } : {}),
       ...(mode ? { orchestrationMode: mode } : {}),
     };
   }
@@ -4816,6 +4886,10 @@ function inputAttachmentsToImages(
     mimeType: attachment.mimeType,
     data: attachment.data,
   }));
+}
+
+function isRuntimeActivation(input: RuntimeUserInput): boolean {
+  return input.kind !== "text" || (input.skills?.length ?? 0) > 0;
 }
 
 function runtimeInputTitle(input: RuntimeUserInput): string {
