@@ -38,3 +38,20 @@ final result: passed
 - [x] 类型检查、相关集成测试与桌面打包，详见[验证记录](docs/features/inspector-panel-validation.md)。
 
 当前桌面产品仍为浅色；深色是显式宿主主题下的组件验收，不代表新增全应用深色开关。本次没有进行完整屏幕阅读器或系统字体放大审计，也没有改变模型执行链路。
+
+
+# 命令菜单视觉验收（2026-10-01）
+
+final result: passed
+
+设计基准为用户提供的 Maka 菜单截图，932 × 790 像素。实现为重新安装的 Pico macOS 应用，浅色主题，输入 `/` 并选中 `aihot`。实际截图为 3024 × 1766 像素，对应约 1512 × 883 CSS 像素窗口。两者菜单裁图保留相同的 836 像素宽度，未缩放；参考截图的显示密度未独立测量。
+
+- [同屏对比](output/desktop-command-layout-20260930/menu-comparison.png)
+- [修改前](output/desktop-command-layout-20260930/pico-before.png)、[修改后](output/desktop-command-layout-20260930/pico-after.png)
+- [安装与构建记录](output/desktop-command-layout-20260930/install-manifest.json)
+
+原排版中长说明挤压名称，导致名称换成多行，且每行重复显示 Skills 分类。已改为左侧独立图标列，右侧两行文字：首行显示名称与灰色等宽命令，下行显示单行省略说明；分类标题只显示一次。复查同屏裁图，名称、图标、说明保持对齐，选中项使用浅灰圆角背景，列表采用统一宽度与滚动区域。
+
+Pico 保留自己的六个常用命令与底部键盘提示，因此菜单高度和命令文案不同于参考图。图标复用 Lucide，字体与色彩复用桌面主题。此次没有单独进行深色和窄窗口的像素对比，也不声称完整像素复刻。
+
+最终状态通过既有 Chrome／Electron 命令菜单集成验证（2/2）、相关 ESLint、renderer TypeScript 检查和桌面打包。安装后通过 computer use 打开菜单并检查键盘选择与 Skills 显示，未发送模型请求。此次不修改命令执行或资源标签协议。
