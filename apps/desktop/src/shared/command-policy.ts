@@ -14,26 +14,37 @@ export type DesktopCommandDestination =
   | "mcp";
 type Policy =
   | { tier: "primary" | "advanced"; session?: true }
+  | { tier: "resource"; target: "skill" | "agent" }
+  | { tier: "control"; target: "mode" | "permissions" | "interrupt"; message: string }
   | { tier: "page"; destination: DesktopCommandDestination; label: string; message: string }
   | { tier: "unsupported"; message: string };
 
 /** Desktop exposure is opt-in. New TUI commands never become desktop actions implicitly. */
 export const DESKTOP_COMMAND_POLICY = {
   help: { tier: "primary" },
-  model: { tier: "primary" },
-  plan: { tier: "primary" },
-  swarm: { tier: "primary" },
+  model: { tier: "advanced" },
+  plan: { tier: "advanced" },
+  swarm: { tier: "advanced" },
   goal: { tier: "primary" },
   compact: { tier: "primary", session: true },
   rewind: { tier: "primary", session: true },
   changes: { tier: "primary", session: true },
   resume: { tier: "primary" },
-  new: { tier: "primary" },
-  skill: { tier: "primary" },
-  agent: { tier: "primary" },
-  thinking: { tier: "advanced", session: true },
-  mode: { tier: "advanced" },
-  permissions: { tier: "advanced" },
+  new: { tier: "advanced" },
+  skill: { tier: "resource", target: "skill" },
+  agent: { tier: "resource", target: "agent" },
+  thinking: { tier: "advanced" },
+  mode: {
+    tier: "control",
+    target: "mode",
+    message:
+      "请在输入框加号菜单选择工作模式。此入口不会执行命令参数；运行中只能查看，结束后可修改。",
+  },
+  permissions: {
+    tier: "control",
+    target: "permissions",
+    message: "请使用输入框的权限选择器。此入口不会执行命令参数；任务结束后才能修改。",
+  },
   graph: { tier: "advanced" },
   status: { tier: "advanced", session: true },
   rename: { tier: "advanced", session: true },
@@ -45,7 +56,11 @@ export const DESKTOP_COMMAND_POLICY = {
   steer: { tier: "advanced", session: true },
   queue: { tier: "advanced", session: true },
   replace: { tier: "advanced", session: true },
-  interrupt: { tier: "advanced", session: true },
+  interrupt: {
+    tier: "control",
+    target: "interrupt",
+    message: "请使用输入框的停止按钮；打开此入口不会立即停止任务。",
+  },
   snapshots: {
     tier: "page",
     destination: "snapshots",
@@ -61,8 +76,8 @@ export const DESKTOP_COMMAND_POLICY = {
   skills: {
     tier: "page",
     destination: "skills",
-    label: "管理 Skills",
-    message: "Skills 页面管理用户级资源；本项目的有效技能请通过 /skill 选择。",
+    label: "选择 Skill",
+    message: "当前有效技能请在输入框选择；用户级资源管理位于扩展页面。",
   },
   agents: {
     tier: "page",
@@ -92,7 +107,8 @@ export const DESKTOP_COMMAND_POLICY = {
     tier: "page",
     destination: "memory",
     label: "打开项目记忆",
-    message: "请在项目记忆页面查看或管理内容；高级 undo 操作仍在 TUI 中使用。",
+    message:
+      "请在项目记忆页面管理条目；项目级开关、状态及 undo 仍在 TUI 中使用，用户级策略开关不等于项目级开关。",
   },
   provider: {
     tier: "page",
@@ -112,7 +128,7 @@ export const DESKTOP_COMMAND_POLICY = {
     destination: "mcp",
     label: "打开 MCP 配置",
     message:
-      "请在 MCP 页面管理用户级配置；配置状态不代表实时连接状态，项目有效覆盖及探测可在 TUI 查看。",
+      "MCP 页面提供用户级新增、删除和配置查看；启停、实时探测及项目有效覆盖仍在 TUI 中使用。",
   },
   clear: {
     tier: "unsupported",

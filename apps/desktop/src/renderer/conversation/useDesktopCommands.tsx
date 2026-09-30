@@ -38,6 +38,7 @@ export function useDesktopCommands({
   onOpenGoal,
   onGoalControl,
   onOpenModel,
+  onOpenControl,
   onActivate,
   onOpenResource,
   onDraftChange,
@@ -56,6 +57,7 @@ export function useDesktopCommands({
     input: Extract<DesktopCommandAction, { kind: "goal" }>["input"],
   ) => Promise<boolean>;
   onOpenModel?: () => void;
+  onOpenControl?: (target: "mode" | "permissions" | "interrupt" | "thinking") => boolean;
   onOpenResource?: (kind: "skill" | "agent") => void;
   onActivate?: (activation: { kind: "skill" | "agent"; name: string; subagentId?: string }) => void;
   onDraftChange: (text: string) => void;
@@ -101,13 +103,27 @@ export function useDesktopCommands({
   const ref = sessionId ? { workspacePath, sessionId } : undefined;
   const applySettings = (patch: RuntimeUserDefaults) =>
     applyConversationSettings(runtime, ref, initialSettings ?? {}, patch, onInitialSettings);
-  function openNative(target: "goal" | "model" | "skill" | "agent" | "sessions") {
+  function openNative(
+    target: Extract<DesktopCommandAction, { kind: "open" }>["target"],
+  ): string | undefined {
+    if (["mode", "permissions", "interrupt", "thinking"].includes(target)) {
+      const control = target as "mode" | "permissions" | "interrupt" | "thinking";
+      if (onOpenControl?.(control)) return undefined;
+      if (running && (control === "permissions" || control === "thinking"))
+        return "任务运行中，可在输入框查看当前设置；结束后才能修改。";
+      return control === "interrupt"
+        ? "当前没有可用的停止按钮；不会执行停止操作。"
+        : control === "thinking"
+          ? "当前模型没有可用的思考强度选项，或任务正在执行中。"
+          : "当前输入区没有可修改的对应控件，请在主聊天的模式或权限入口查看。";
+    }
     if (target === "sessions") navigate("/sessions");
     else if (target === "goal") onOpenGoal();
     else if (target === "model" && onOpenModel) onOpenModel();
     else if ((target === "skill" || target === "agent") && onOpenResource) {
       window.requestAnimationFrame(() => onOpenResource(target));
-    } else setNative({ key: scopeKey, kind: target });
+    } else setNative({ key: scopeKey, kind: target as "model" | "skill" | "agent" });
+    return undefined;
   }
   function requestCompact() {
     setNative({ key: scopeKey, kind: "compact" });
@@ -118,8 +134,8 @@ export function useDesktopCommands({
       await execute("/rewind", false);
       return;
     }
-    if (destination === "agents") {
-      openNative("agent");
+    if (destination === "agents" || destination === "skills") {
+      openNative(destination === "agents" ? "agent" : "skill");
       return;
     }
     if ((destination === "memory" || destination === "automations") && !workspacePath) {
@@ -250,7 +266,7 @@ export function useDesktopCommands({
           kind: "compact",
           commandDraft: consumeDraft ? sourceDraft : undefined,
         });
-      if (action?.kind === "open") openNative(action.target);
+      const viewNotice = action?.kind === "open" ? openNative(action.target) : undefined;
       if (
         action?.kind === "rename" &&
         ref &&
@@ -277,8 +293,8 @@ export function useDesktopCommands({
           : undefined,
       );
       setNotice(
-        result?.message && (!result.ui || modelSelector)
-          ? { key: scopeKey, text: result.message }
+        viewNotice || (result?.message && (!result.ui || modelSelector))
+          ? { key: scopeKey, text: viewNotice ?? result!.message! }
           : undefined,
       );
       if (destinationSession !== undefined) {
@@ -397,7 +413,7 @@ export function useDesktopCommands({
                   : initialSettings?.modelRouteId
               }
               openRequest={1}
-              disabled={running}
+              readOnly={running}
               onConfigure={() => navigate("/settings/models")}
               onChange={async (modelRouteId) => {
                 if ((await applySettings({ modelRouteId })) && currentScope.current === scope)
@@ -422,7 +438,7 @@ export function useDesktopCommands({
         {dialog?.key === scopeKey && (
           <CommandDialog
             key={dialog.id}
-            context={dialog.context}
+            context={{ ...dialog.context, running }}
             result={dialog.result}
             catalog={catalog}
             onClose={() => setDialog(undefined)}

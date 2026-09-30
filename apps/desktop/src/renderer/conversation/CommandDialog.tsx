@@ -24,6 +24,7 @@ export function CommandDialog({
   onRewind: (sessionId: string, prompt?: string) => void;
 }) {
   const kind = result.ui?.kind === "open-selector" ? result.ui.selector : "help";
+  const readOnly = Boolean(context.running);
   const [query, setQuery] = useState("");
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
@@ -83,6 +84,7 @@ export function CommandDialog({
   }, [checkpointId, kind, context.workspacePath, context.sessionId, refresh]);
 
   async function apply() {
+    if (readOnly) return;
     if (inFlight.current || pending) return;
     const file = changes?.files.find((item) => item.path === path);
     if (!preview && !file) return;
@@ -172,6 +174,9 @@ export function CommandDialog({
     >
       <section className="command-dialog" aria-busy={pending}>
         <h2>{title}</h2>
+        {readOnly && (kind === "rewind" || kind === "changes") && (
+          <p role="status">任务运行中，可以查看检查点；结束后才能回退或恢复文件。</p>
+        )}
         {(kind === "help" || kind === "session") && (
           <>
             <TextField
@@ -290,7 +295,7 @@ export function CommandDialog({
           {(preview || file) && (
             <Button
               label={preview ? "确认回退" : confirmFile ? "确认恢复此文件" : "恢复此文件"}
-              isDisabled={pending}
+              isDisabled={pending || readOnly}
               onClick={() => void apply()}
             />
           )}

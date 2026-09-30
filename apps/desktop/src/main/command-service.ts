@@ -6,6 +6,7 @@ import {
 } from "@pico/cli/client-commands";
 import { parseSlashInput } from "@pico/core/slash-parser";
 import { getCommandAvailability } from "@pico/cli/command-availability";
+import { CommandRegistry } from "@pico/cli/command-registry";
 import { desktopCommandPolicy } from "../shared/command-policy.js";
 import type { DesktopCommandSuggestion } from "../shared/command-policy.js";
 import {
@@ -150,20 +151,40 @@ export function createDesktopCommandService(client: Pick<RuntimeClientAdapter, "
       return true;
     }
     const registry = createClientCommandRegistry({ runtime, workspacePath });
+    const viewCommands = new Set([
+      "model",
+      "goal",
+      "thinking",
+      "graph",
+      "swarm",
+      "rewind",
+      "changes",
+    ]);
+    const navigationCommands = new Set(["new", "resume"]);
     function catalog(isRunning: boolean): DesktopCommandSuggestion[] {
       return registry
         .commandSuggestions("", { availabilityState: isRunning ? "running" : "idle" })
         .flatMap((command) => {
           const policy = desktopCommandPolicy(command.name);
           if (!policy || (policy.tier !== "primary" && policy.tier !== "advanced")) return [];
+          const entryAvailable =
+            viewCommands.has(command.name) || navigationCommands.has(command.name);
+          const missingSession = policy.session && !context.sessionId;
+          const disabled = Boolean(missingSession || (!entryAvailable && command.disabled));
+          const disabledReason = missingSession
+            ? "请先发送消息或打开历史会话。"
+            : disabled
+              ? command.disabledReason?.includes("running")
+                ? "仅在任务运行中可用。"
+                : "任务执行中，结束后可执行此操作。"
+              : undefined;
           return [
             {
               ...command,
               tier: policy.tier,
-              ...(policy.session && !context.sessionId
-                ? { disabled: true, disabledReason: "请先打开一个会话。" }
-                : {}),
-              ...(command.name === "swarm" ? { disabled: false, disabledReason: undefined } : {}),
+              ...(command.name === "resume" ? { description: "打开历史会话" } : {}),
+              disabled,
+              disabledReason,
             },
           ];
         });
@@ -213,6 +234,31 @@ export function createDesktopCommandService(client: Pick<RuntimeClientAdapter, "
             };
           if (targetPolicy?.tier === "unsupported")
             return { outcome: { kind: "rejected", message: targetPolicy.message } };
+          if (targetPolicy?.tier === "control") {
+            return {
+              outcome:
+                command.name === "help"
+                  ? { kind: "rejected", message: targetPolicy.message }
+                  : {
+                      kind: "local",
+                      result: { type: "local", action: "message", message: targetPolicy.message },
+                    },
+              ...(command.name === "help"
+                ? {}
+                : { action: { kind: "open", target: targetPolicy.target } as const }),
+            };
+          }
+          if (command.name === "help" && targetPolicy?.tier === "resource")
+            return {
+              outcome: {
+                kind: "local",
+                result: {
+                  type: "local",
+                  action: "message",
+                  message: `/${explanation!.name} 在输入框选择${targetPolicy.target === "skill" ? "技能" : "子代理"}，也可使用加号入口；选择后编辑正文并发送。`,
+                },
+              },
+            };
           if (command.name === "help") {
             const commands = catalog(input.running ?? false).filter(
               (item) => !parsed.argv[0] || item.name === explanation?.name,
@@ -230,14 +276,17 @@ export function createDesktopCommandService(client: Pick<RuntimeClientAdapter, "
                         (item) =>
                           `${item.usage ?? `/${item.name}`}\n${item.tier === "advanced" ? "高级 · " : ""}${item.description}${item.disabledReason ? `\n${item.disabledReason}` : ""}`,
                       )
-                      .join("\n\n") || "没有找到该桌面命令。",
+                      .join("\n\n") +
+                      (!parsed.argv[0]
+                        ? "\n\nSkill / Agent：使用加号或 /skill、/agent 选择任务上下文。"
+                        : "") || "没有找到该桌面命令。",
                 },
               },
             };
           }
-          if (policy.tier !== "primary" && policy.tier !== "advanced")
+          if (policy.tier !== "primary" && policy.tier !== "advanced" && policy.tier !== "resource")
             return { outcome: { kind: "rejected", message: "此命令不适用于桌面。" } };
-          if (policy.session && !sessionId)
+          if ("session" in policy && policy.session && !sessionId)
             return { outcome: { kind: "rejected", message: "请先打开一个会话。" } };
           if (retrySend) {
             // Replay admission with its original key and expected run, even if run
@@ -250,30 +299,50 @@ export function createDesktopCommandService(client: Pick<RuntimeClientAdapter, "
             : { runs: [] };
           runId = runs.runs.find((run) => !isTerminalRunStatus(run.status))?.runId;
           running = Boolean(runId);
-          const statusOnly =
-            command.name === "swarm" && (!parsed.args.trim() || parsed.args.trim() === "status");
+          const opensView =
+            (viewCommands.has(command.name) && !parsed.args.trim()) ||
+            ["rewind", "changes"].includes(command.name) ||
+            (command.name === "swarm" && parsed.args.trim() === "status");
+          const entryOnly = opensView || navigationCommands.has(command.name);
           const availability = getCommandAvailability(
-            statusOnly ? { ...command, availability: "always" } : command,
+            entryOnly ? { ...command, availability: "always" } : command,
             running ? "running" : "idle",
           );
           if (!availability.available)
             return {
               outcome: {
                 kind: "rejected",
-                message: availability.disabledReason ?? "当前状态不可用。",
+                message:
+                  command.availability === "running"
+                    ? "仅在任务运行中可用。"
+                    : "任务执行中，结束后可执行此操作。",
               },
             };
-          if (!parsed.args.trim() && ["goal", "model", "skill", "agent"].includes(command.name))
+          if (
+            !parsed.args.trim() &&
+            ["goal", "model", "skill", "agent", "thinking"].includes(command.name)
+          )
             return {
               outcome: { kind: "local" },
               action: {
                 kind: "open",
-                target: command.name as "goal" | "model" | "skill" | "agent",
+                target: command.name as "goal" | "model" | "skill" | "agent" | "thinking",
               },
             };
           // Unbound tasks must be able to recover projectless history without creating a workspace.
-          if (!workspacePath && command.name === "resume" && !parsed.args.trim())
+          if (command.name === "resume" && !parsed.args.trim())
             return { outcome: { kind: "local" }, action: { kind: "open", target: "sessions" } };
+          if (!sessionId && command.name === "graph" && !parsed.args.trim())
+            return {
+              outcome: {
+                kind: "local",
+                result: {
+                  type: "local",
+                  action: "message",
+                  message: `Graph 模式：${initialSettings.orchestrationMode === "graph" ? "开启" : "关闭"}`,
+                },
+              },
+            };
           if (
             !workspacePath &&
             !["new", "mode", "plan", "permissions", "graph", "swarm"].includes(command.name)
@@ -286,9 +355,11 @@ export function createDesktopCommandService(client: Pick<RuntimeClientAdapter, "
                 orchestrationMode: parsed.args.trim() === "on" ? "graph" : "default",
               },
             };
-          // Desktop uses the same /sessions result for the no-argument history picker.
-          const text = parsed?.name === "resume" && !parsed.args ? "/sessions" : input.text;
-          const outcome = await processClientInput(text, registry, runtime);
+          // Desktop view/navigation exceptions do not relax the shared TUI execution gate.
+          const executionRegistry = entryOnly
+            ? new CommandRegistry([{ ...command, availability: "always" }])
+            : registry;
+          const outcome = await processClientInput(input.text, executionRegistry, runtime);
           if (effects.action) return { outcome: { kind: "local" }, ...effects };
           return { outcome, ...effects };
         } finally {

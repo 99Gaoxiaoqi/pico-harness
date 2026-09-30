@@ -65,6 +65,7 @@ export interface SideChatWorkbarPanelProps {
   readonly pendingApprovalCallId?: string | undefined;
   readonly onSend: (message: string) => void;
   readonly onStop: () => void;
+  readonly stopFocusRequest?: number | undefined;
   readonly onDraftChange: (draft: string) => void;
   readonly onRetryCreate: () => void;
   readonly onClose: () => void;
@@ -107,6 +108,7 @@ export function SideChatWorkbarPanel({
   pendingApprovalCallId,
   onSend,
   onStop,
+  stopFocusRequest,
   onDraftChange,
   onRetryCreate,
   onClose,
@@ -114,6 +116,10 @@ export function SideChatWorkbarPanel({
 }: SideChatWorkbarPanelProps) {
   const editableRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<ChatComposerInputHandle>(null);
+  const stopSlot = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    if (stopFocusRequest) stopSlot.current?.querySelector<HTMLButtonElement>("button")?.focus();
+  }, [stopFocusRequest]);
   const openResources = (kind: "skill" | "agent" = "skill") => {
     editorRef.current?.focus();
     editorRef.current?.insertText(` /${kind} `);
@@ -284,25 +290,30 @@ export function SideChatWorkbarPanel({
             </ConversationComposerMenu>
           }
           sendButton={
-            running && !commandInput ? (
-              <Button
-                label="停止"
-                className="side-chat__stop"
-                onClick={onStop}
-                icon={<Square aria-hidden="true" size={12} />}
-                size="sm"
-              />
-            ) : (
-              <Button
-                type="submit"
-                className="side-chat__send"
-                label="发送消息"
-                isIconOnly
-                icon={<Send aria-hidden="true" size={14} />}
-                isDisabled={!canSend}
-                size="sm"
-              />
-            )
+            <>
+              {running && (
+                <span ref={stopSlot}>
+                  <Button
+                    label="停止"
+                    className="side-chat__stop"
+                    onClick={onStop}
+                    icon={<Square aria-hidden="true" size={12} />}
+                    size="sm"
+                  />
+                </span>
+              )}
+              {(!running || commandInput) && (
+                <Button
+                  type="submit"
+                  className="side-chat__send"
+                  label="发送消息"
+                  isIconOnly
+                  icon={<Send aria-hidden="true" size={14} />}
+                  isDisabled={!canSend}
+                  size="sm"
+                />
+              )}
+            </>
           }
         />
       </form>

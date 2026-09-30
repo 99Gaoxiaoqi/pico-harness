@@ -47,6 +47,7 @@ export function SideChatPanelController({
     state: "idle",
   });
   const [resourceRequest, setResourceRequest] = useState<{ kind: "skill" | "agent"; id: number }>();
+  const [stopFocusRequest, setStopFocusRequest] = useState(0);
   const [error, setError] = useState<SideChatPanelError | null>(null);
   const targetSessionIdRef = useRef<string | undefined>(undefined);
   const createGenerationRef = useRef(0);
@@ -234,6 +235,11 @@ export function SideChatPanelController({
     draft,
     onConsumeDraft: clear,
     onOpenResource: (kind) => setResourceRequest({ kind, id: Date.now() }),
+    onOpenControl: (target) => {
+      if (target !== "interrupt" || !activeRun) return false;
+      setStopFocusRequest((value) => value + 1);
+      return true;
+    },
     onOpenGoal: () => goalControls.openDialog(),
     onGoalControl: (input) => goalControls.control(input),
     onDraftChange: setDraft,
@@ -277,6 +283,7 @@ export function SideChatPanelController({
       commands={commands.suggestions}
       resources={composerResources}
       resourceRequest={resourceRequest}
+      stopFocusRequest={stopFocusRequest}
       commandFeedback={commands.feedback}
       commandPending={commands.pending}
       activeRun={activeRun}

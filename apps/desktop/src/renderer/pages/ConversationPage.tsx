@@ -453,6 +453,7 @@ export function ConversationPage() {
     onOpenGoal: () => goalControls.openDialog(),
     onGoalControl: (input) => goalControls.control(input),
     onOpenModel: () => setModelOpenRequest((value) => value + 1),
+    onOpenControl: (target) => composerInputRef.current?.openControl(target) ?? false,
     onOpenResource: (kind) => composerInputRef.current?.openResources(kind),
     onDraftChange: handleDraftChange,
     blocked: Boolean(pendingPrompt || pendingApproval),
@@ -1387,11 +1388,8 @@ export function ConversationPage() {
                             providers={data.providerConfig.providers}
                             value={conversation.settings.modelRouteId}
                             currentLabel={conversation.settings.model}
-                            disabled={
-                              Boolean(activeRun) ||
-                              busy === "send-message" ||
-                              busy === "session-settings"
-                            }
+                            disabled={busy === "send-message" || busy === "session-settings"}
+                            readOnly={Boolean(activeRun)}
                             disabledReason={
                               activeRun ? "任务执行中，结束后可切换模型" : "正在更新会话…"
                             }
