@@ -1,5 +1,19 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type RefObject } from "react";
 import {
+  Bot,
+  CircleHelp,
+  CornerDownRight,
+  History,
+  Minimize2,
+  RotateCcw,
+  Sparkles,
+  Target,
+  Terminal,
+  Files,
+  GitBranch,
+  Network,
+} from "lucide-react";
+import {
   desktopCommandPolicy,
   type DesktopCommandSuggestion,
 } from "../../shared/command-policy.js";
@@ -29,7 +43,56 @@ interface Candidate {
   text: string;
   disabled: boolean;
   group: string;
+  commandName?: string;
   reference?: ComposerReference;
+}
+const commandTitles: Readonly<Record<string, string>> = {
+  help: "查看帮助",
+  goal: "管理 Goal",
+  resume: "打开历史会话",
+  compact: "压缩上下文",
+  rewind: "回退到检查点",
+  changes: "查看检查点更改",
+  model: "选择模型",
+  thinking: "调整思考强度",
+  plan: "切换计划模式",
+  swarm: "使用 Swarm",
+  graph: "使用 Graph",
+  new: "新建任务",
+  rename: "重命名会话",
+  fork: "分叉会话",
+  status: "查看会话状态",
+  context: "查看上下文",
+  steer: "调整当前执行",
+  queue: "发送到下一轮",
+  replace: "停止并替换",
+  operations: "查看存储操作",
+  hooks: "管理 Hooks",
+  "add-dir": "添加工作目录",
+};
+const commandDescriptions: Readonly<Record<string, string>> = {
+  help: "查看可用命令与使用方式",
+  goal: "查看目标，暂停或继续执行",
+  resume: "搜索并切换到已有会话",
+  compact: "精简历史消息，保留任务关键信息",
+  rewind: "预览并回退代码或对话",
+  changes: "查看文件差异，按文件恢复",
+};
+const commandIcons = {
+  help: CircleHelp,
+  goal: Target,
+  resume: History,
+  compact: Minimize2,
+  rewind: RotateCcw,
+  changes: Files,
+  graph: GitBranch,
+  swarm: Network,
+};
+function candidateIcon(item: Candidate) {
+  if (item.group === "Skills") return Sparkles;
+  if (item.group === "Agents") return Bot;
+  if (item.group === "参数") return CornerDownRight;
+  return commandIcons[item.commandName as keyof typeof commandIcons] ?? Terminal;
 }
 const normalized = (value: string) => value.normalize("NFKC").toLowerCase();
 function score(name: string, description: string, query: string) {
@@ -129,16 +192,23 @@ export function useCommandSuggestions(
       ...commands.catalog
         .filter((item) => query || (item.tier === "primary" && !item.disabled))
         .filter((item) =>
-          [item.name, ...item.aliases].some((token) => score(token, item.description, query)),
+          [item.name, ...item.aliases].some((token) =>
+            score(
+              token,
+              `${commandTitles[item.name] ?? ""} ${commandDescriptions[item.name] ?? ""} ${item.description}`,
+              query,
+            ),
+          ),
         )
         .map((item) => ({
           label: `/${item.name}`,
           description:
             item.disabledReason ??
-            `${item.tier === "advanced" ? "高级 · " : ""}${item.description}`,
+            `${item.tier === "advanced" ? "高级 · " : ""}${commandDescriptions[item.name] ?? item.description}`,
           text: `/${item.insertText} `,
           disabled: item.disabled ?? false,
           group: "命令",
+          commandName: item.name,
         })),
     );
   } else if (commands && commandMatch && hasArguments && !mode) {
@@ -292,57 +362,86 @@ export function useCommandSuggestions(
       return false;
     },
     menu: open ? (
-      <div
-        className="command-suggestions"
-        role="listbox"
-        aria-label="命令与技能"
-        id={id}
-        ref={listRef}
-      >
-        {!items.length && (
-          <p>没有可用的{mode === "agent" ? "子代理" : "技能"}，请先添加或调整搜索。</p>
-        )}
-        {replacement ? (
-          <div className="composer-replacement" role="status">
-            <span>
-              替换已选上下文为 {replacement.reference?.kind === "agent" ? "Agent" : "Skill"}{" "}
-              {replacement.label}？正文会保留。
-            </span>
-            <button
-              type="button"
-              onClick={() =>
-                accept(
-                  items.findIndex((item) => item.text === replacement.text),
-                  true,
-                )
-              }
-            >
-              替换上下文
-            </button>
-            <button type="button" onClick={() => setReplacement(undefined)}>
-              取消
-            </button>
-          </div>
-        ) : (
-          items.map((item, position) => (
-            <div
-              key={`${item.group}:${item.label}`}
-              id={`${id}-${position}`}
-              role="option"
-              aria-selected={position === selected}
-              aria-disabled={item.disabled}
-              onMouseDown={(event) => {
-                event.preventDefault();
-                accept(position);
-              }}
-            >
-              <small>{item.group}</small>
-              <strong>{item.label}</strong>
-              <span>{item.description}</span>
+      <div className="command-suggestions">
+        <div
+          className="command-suggestions__list"
+          role="listbox"
+          aria-label="命令与技能"
+          id={id}
+          ref={listRef}
+        >
+          {!items.length && (
+            <p>没有可用的{mode === "agent" ? "子代理" : "技能"}，请先添加或调整搜索。</p>
+          )}
+          {replacement ? (
+            <div className="composer-replacement" role="status">
+              <span>
+                替换已选上下文为 {replacement.reference?.kind === "agent" ? "Agent" : "Skill"}{" "}
+                {replacement.label}？正文会保留。
+              </span>
+              <button
+                type="button"
+                onClick={() =>
+                  accept(
+                    items.findIndex((item) => item.text === replacement.text),
+                    true,
+                  )
+                }
+              >
+                替换上下文
+              </button>
+              <button type="button" onClick={() => setReplacement(undefined)}>
+                取消
+              </button>
             </div>
-          ))
-        )}
-        <small>↑ ↓ 选择 · Tab / Enter 插入 · 完整命令 Enter 执行 · Esc 关闭</small>
+          ) : (
+            [...new Set(items.map((item) => item.group))].map((group) => (
+              <div key={group} role="group" aria-label={group}>
+                <div className="command-suggestions__group-label" aria-hidden="true">
+                  {group}
+                </div>
+                {items.map((item, position) => {
+                  if (item.group !== group) return null;
+                  const Icon = candidateIcon(item);
+                  return (
+                    <div
+                      key={`${item.group}:${item.label}`}
+                      id={`${id}-${position}`}
+                      role="option"
+                      aria-selected={position === selected}
+                      aria-disabled={item.disabled}
+                      data-command={item.commandName}
+                      data-group={item.group}
+                      onMouseMove={() => setIndex(position)}
+                      onMouseDown={(event) => {
+                        event.preventDefault();
+                        accept(position);
+                      }}
+                    >
+                      <Icon className="command-suggestions__icon" size={18} aria-hidden="true" />
+                      <div className="command-suggestions__text">
+                        <div className="command-suggestions__name">
+                          <strong>
+                            {item.commandName
+                              ? (commandTitles[item.commandName] ?? item.label)
+                              : item.label}
+                          </strong>
+                          {item.commandName && (
+                            <span className="command-suggestions__token">{item.label}</span>
+                          )}
+                        </div>
+                        <span className="command-suggestions__description">{item.description}</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ))
+          )}
+        </div>
+        <div className="command-suggestions__hint" aria-hidden="true">
+          ↑ ↓ 选择 · Tab / Enter 确认 · Esc 收起
+        </div>
       </div>
     ) : null,
   };

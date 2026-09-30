@@ -479,8 +479,8 @@ async function command(text) {
     } else await type("/");
     const commandLabels = () =>
       [...document.querySelectorAll('.command-suggestions [role="option"]')]
-        .filter((item) => item.querySelector("small")?.textContent === "命令")
-        .map((item) => item.querySelector("strong")?.textContent)
+        .filter((item) => item.dataset.group === "命令")
+        .map((item) => "/" + item.dataset.command)
         .sort();
     check(
       commandLabels().join() ===

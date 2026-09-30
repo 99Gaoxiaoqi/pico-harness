@@ -40,36 +40,91 @@
     position: absolute;
     bottom: 100%;
     left: 0;
-    right: 0;
+    width: min(420px, 100%);
+    box-sizing: border-box;
     z-index: 40;
-    box-shadow: 0 8px 24px #0002;
-    max-height: 250px;
+    padding: 4px;
+    border-color: light-dark(#e6e6e6, #454545);
+    border-radius: 16px;
+    color: var(--ink, light-dark(#171717, #ededed));
+    box-shadow:
+      0 4px 6px #00000008,
+      0 10px 24px #00000014;
+  }
+  .command-suggestions__list {
+    max-height: min(360px, 50vh);
     overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+  }
+  .command-suggestions__group-label {
+    padding: 8px 8px 4px;
+    color: var(--ink-secondary, light-dark(#666, #aaa));
+    font-size: 12px;
+    line-height: 18px;
   }
   .command-suggestions [role="option"] {
     display: flex;
-    align-items: baseline;
-    gap: 12px;
+    align-items: center;
+    gap: 10px;
+    min-height: 56px;
     padding: 8px;
-    border-radius: 6px;
+    box-sizing: border-box;
+    border-radius: 12px;
     cursor: pointer;
   }
   .command-suggestions [aria-selected="true"] {
-    background: light-dark(#eef0f4, #ffffff16);
+    background: light-dark(#f5f5f5, #ffffff12);
   }
   .command-suggestions [aria-disabled="true"] {
     opacity: 0.5;
     cursor: default;
   }
-  .command-suggestions span {
+  .command-suggestions__icon {
+    flex: 0 0 auto;
+    color: var(--ink-secondary, light-dark(#666, #aaa));
+  }
+  .command-suggestions__text {
+    display: flex;
+    min-width: 0;
+    flex: 1;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .command-suggestions__name,
+  .command-suggestions__description {
+    display: block;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .command-suggestions small {
-    display: block;
-    padding: 6px 8px;
-    opacity: 0.65;
+  .command-suggestions__name {
+    font-size: 15px;
+    line-height: 21px;
+  }
+  .command-suggestions__name strong {
+    font-weight: 500;
+  }
+  .command-suggestions__token {
+    margin-inline-start: 8px;
+    color: var(--ink-secondary, light-dark(#666, #aaa));
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 14px;
+  }
+  .command-suggestions__description {
+    color: var(--ink-secondary, light-dark(#666, #aaa));
+    font-size: 13px;
+    line-height: 19px;
+  }
+  .command-suggestions__description:empty {
+    display: none;
+  }
+  .command-suggestions__hint {
+    padding: 6px 8px 4px;
+    border-top: 1px solid light-dark(#ededed, #3d3d3d);
+    color: var(--ink-tertiary, light-dark(#888, #999));
+    font-size: 11px;
+    line-height: 16px;
   }
   .command-result {
     max-height: 240px;
