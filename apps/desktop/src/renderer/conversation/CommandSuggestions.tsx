@@ -124,7 +124,7 @@ export function useCommandSuggestions(
   if (primary && commands && !mode) {
     items.push(
       ...commands.catalog
-        .filter((item) => query || item.tier === "primary")
+        .filter((item) => query || (item.tier === "primary" && !item.disabled))
         .filter((item) =>
           [item.name, ...item.aliases].some((token) => score(token, item.description, query)),
         )
@@ -277,7 +277,10 @@ export function useCommandSuggestions(
         commands?.catalog.some((item) =>
           [item.name, ...item.aliases].includes(query.toLowerCase()),
         );
-      if (event.key === "Tab" || (event.key === "Enter" && !event.shiftKey && !exact)) {
+      if (
+        event.key === "Tab" ||
+        (event.key === "Enter" && !event.shiftKey && (!exact || items[selected]?.disabled))
+      ) {
         event.preventDefault();
         if (!replacement) accept(selected);
         return true;

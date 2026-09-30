@@ -35,6 +35,7 @@ import {
 
 export type ConversationComposerHandle = Pick<ChatComposerInputHandle, "focus"> & {
   openResources: (kind?: "skill" | "agent") => void;
+  openControl: (target: "mode" | "permissions" | "thinking" | "interrupt") => boolean;
 };
 
 export interface ConversationComposerProps {
@@ -157,6 +158,7 @@ export function ConversationComposer({
 }: ConversationComposerProps) {
   const editorRef = useRef<ChatComposerInputHandle>(null);
   const editableRef = useRef<HTMLDivElement>(null);
+  const formRef = useRef<HTMLFormElement>(null);
   useImperativeHandle(
     inputRef,
     () => ({
@@ -165,6 +167,29 @@ export function ConversationComposer({
         editorRef.current?.focus();
         editorRef.current?.insertText(` /${kind} `);
         onValueChange(editorRef.current?.getValue() ?? value);
+      },
+      openControl: (target) => {
+        const selector =
+          target === "mode"
+            ? "button.conversation-plus-trigger"
+            : target === "interrupt"
+              ? 'button[aria-label="停止运行"]'
+              : target === "thinking"
+                ? '[name="thinking-effort"], [name="initial-thinking-effort"]'
+                : '[name="permission-mode"], [name="initial-permission-mode"]';
+        const field = formRef.current?.querySelector<
+          HTMLButtonElement | HTMLSelectElement | HTMLInputElement
+        >(selector);
+        const control =
+          field instanceof HTMLInputElement
+            ? field.parentElement?.querySelector<HTMLButtonElement>('button[role="combobox"]')
+            : field;
+        if (!control || control.disabled || control.getAttribute("aria-disabled") === "true")
+          return false;
+        control.focus();
+        if (target !== "interrupt" && control.getAttribute("aria-expanded") !== "true")
+          control.click();
+        return true;
       },
     }),
     [onValueChange, value],
@@ -213,6 +238,7 @@ export function ConversationComposer({
 
   return (
     <form
+      ref={formRef}
       className="conversation-composer"
       data-status={status}
       data-behavior={effectiveBehavior}

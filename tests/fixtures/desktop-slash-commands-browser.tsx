@@ -14,6 +14,12 @@ import { previewData } from "../../apps/desktop/src/renderer/fixture.ts";
 import { workspaceSessionKey } from "../../apps/desktop/src/renderer/workspace-session.ts";
 import { DESKTOP_COMMAND_POLICY } from "../../apps/desktop/src/shared/command-policy.ts";
 import { applyConversationSettings } from "../../apps/desktop/src/renderer/conversation/conversation-settings.ts";
+import { ComposerModelPicker } from "../../apps/desktop/src/renderer/ComposerModelPicker.tsx";
+import { SelectField } from "../../apps/desktop/src/renderer/ui-controls.tsx";
+import {
+  ConversationComposer,
+  type ConversationComposerHandle,
+} from "../../apps/desktop/src/renderer/conversation/ConversationComposer.tsx";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const calls = [];
@@ -26,27 +32,59 @@ let failPlan = false;
 let goalPending;
 let deferGoal = false;
 let navigateTest;
+const primaryNames = ["help", "goal", "resume", "compact", "rewind", "changes"];
+const advancedNames = [
+  "model",
+  "thinking",
+  "plan",
+  "swarm",
+  "graph",
+  "new",
+  "rename",
+  "fork",
+  "status",
+  "context",
+  "steer",
+  "queue",
+  "replace",
+  "operations",
+  "hooks",
+  "add-dir",
+];
 const catalog = Object.entries(DESKTOP_COMMAND_POLICY)
-  .filter(([, policy]) => policy.tier === "primary" || policy.tier === "advanced")
-  .map(([name, policy]) => ({
+  .filter(([name]) => [...primaryNames, ...advancedNames].includes(name))
+  .map(([name]) => ({
     name,
     insertText: name,
     description: "测试 " + name,
     aliases: [],
     source: "builtin",
     kind: "local",
-    tier: policy.tier,
+    tier: primaryNames.includes(name) ? "primary" : "advanced",
   }));
+function fixtureCatalog(items, context) {
+  return items
+    .filter((item) => [...primaryNames, ...advancedNames].includes(item.name))
+    .map((item) => ({
+      ...item,
+      tier: primaryNames.includes(item.name) ? "primary" : "advanced",
+      ...(!context.sessionId && ["compact", "rewind", "changes"].includes(item.name)
+        ? { disabled: true, disabledReason: "请先创建或打开一个会话" }
+        : {}),
+    }));
+}
 const local = (result) => ({
   ok: true,
   value: { outcome: { kind: "local", result: { type: "local", ...result } } },
 });
 window.pico = {
   commands: {
-    catalog: async (context) =>
-      window.testCommandBridge
-        ? window.testCommandBridge.catalog(context)
-        : { ok: true, value: catalog },
+    catalog: async (context) => {
+      const result = window.testCommandBridge
+        ? await window.testCommandBridge.catalog(context)
+        : { ok: true, value: catalog };
+      return result.ok ? { ...result, value: fixtureCatalog(result.value, context) } : result;
+    },
     complete: async (context, text) =>
       window.testCommandBridge
         ? window.testCommandBridge.complete(context, text)
@@ -454,11 +492,18 @@ async function command(text) {
         await wait();
       });
     } else await type("/");
+    const commandLabels = () =>
+      [...document.querySelectorAll('.command-suggestions [role="option"]')]
+        .filter((item) => item.querySelector("small")?.textContent === "命令")
+        .map((item) => item.querySelector("strong")?.textContent)
+        .sort();
     check(
-      [...document.querySelectorAll('.command-suggestions [role="option"]')].filter(
-        (item) => item.querySelector("small")?.textContent === "命令",
-      ).length === 12,
-      "默认菜单不是 12 条",
+      commandLabels().join() ===
+        primaryNames
+          .map((name) => "/" + name)
+          .sort()
+          .join(),
+      "默认菜单未仅露出六个主命令",
     );
     const count = calls.length;
     await key("Enter", { isComposing: true });
@@ -468,6 +513,12 @@ async function command(text) {
     check(
       editor().textContent.trim().startsWith("/") && editor().textContent.trim() !== "/",
       "方向键/Tab 补全失败",
+    );
+    await type("/agent rev");
+    await key("Enter");
+    check(
+      editor().querySelector("[data-astryx-token]")?.textContent.includes("reviewer"),
+      "Agent 资源候选未插入原子标签",
     );
     await command("/goal");
     check(document.querySelector('[aria-label="设置 Goal"]'), "没有打开已有 Goal 控件");
@@ -776,12 +827,31 @@ async function command(text) {
     });
     await type("/");
     check(
+      commandLabels().join() === ["/help", "/goal", "/resume"].sort().join(),
+      "无会话默认菜单没有隐藏需要会话的命令",
+    );
+    check(
       document.querySelector(".command-suggestions")?.textContent.includes("aihot"),
       "无项目新任务缺少用户技能",
     );
     check(
       !document.querySelector(".command-suggestions")?.textContent.includes("archify"),
       "无项目泄露上一个项目的技能",
+    );
+    await type("/compact");
+    const disabledCandidate = document.querySelector('.command-suggestions [role="option"]');
+    check(
+      disabledCandidate?.getAttribute("aria-disabled") === "true" &&
+        disabledCandidate.textContent.includes("请先创建或打开一个会话"),
+      "搜索没有展示不可用命令及原因",
+    );
+    const commandCount = calls.filter((item) => item.method === "command").length;
+    await key("Tab");
+    await key("Enter");
+    check(
+      editor().textContent === "/compact" &&
+        calls.filter((item) => item.method === "command").length === commandCount,
+      "不可用候选被键盘选择或执行",
     );
     await type("");
     await click("添加上下文与模式");
@@ -810,6 +880,128 @@ async function command(text) {
     check(editor().querySelector("[data-astryx-token]"), "侧边对话未复用技能菜单");
     await type("https://example.com/arch");
     check(!document.querySelector(".command-suggestions"), "URL 错误触发候选");
+    const controlRef = React.createRef<ConversationComposerHandle>();
+    let stopped = false;
+    const renderControls = async (readOnly, disabled = false) => {
+      await act(async () => {
+        root.render(
+          <PicoTheme>
+            <SelectField
+              name="permission-mode"
+              label="外部权限模式"
+              value="ask"
+              options={[{ value: "ask", label: "请求批准" }]}
+              onValueChange={() => {}}
+            />
+            <ConversationComposer
+              inputRef={controlRef}
+              value=""
+              onValueChange={() => {}}
+              onSubmit={() => {}}
+              status="running"
+              onStop={() => {
+                stopped = true;
+              }}
+              modes={{
+                planActive: false,
+                graphActive: false,
+                onPlanChange: () => {},
+                onGraphChange: () => {},
+              }}
+              leadingAccessory={
+                <>
+                  <SelectField
+                    name="permission-mode"
+                    disabled
+                    label="权限模式"
+                    value="ask"
+                    options={[{ value: "ask", label: "请求批准" }]}
+                    onValueChange={() => {}}
+                  />
+                  <SelectField
+                    name="thinking-effort"
+                    label="Thinking"
+                    value="default"
+                    options={[{ value: "default", label: "默认" }]}
+                    onValueChange={() => {}}
+                  />
+                  <ComposerModelPicker
+                    routes={runtime.data.modelRoutes}
+                    providers={[]}
+                    value="p/m"
+                    readOnly={readOnly}
+                    disabled={disabled}
+                    onChange={(id) => {
+                      calls.push({ method: "readonly-model-change", id });
+                    }}
+                    onConfigure={() => {}}
+                  />
+                </>
+              }
+            />
+          </PicoTheme>,
+        );
+        await wait();
+      });
+    };
+    await renderControls(true);
+    check(controlRef.current.openControl("interrupt"), "没有定位停止按钮");
+    check(
+      document.activeElement?.getAttribute("aria-label") === "停止运行" && !stopped,
+      "定位停止执行了中断",
+    );
+    check(!controlRef.current.openControl("permissions"), "打开了禁用权限控件");
+    await act(async () => {
+      check(controlRef.current.openControl("thinking"), "没有定位思考控件");
+      await wait();
+    });
+    check(
+      [...document.querySelectorAll('[role="listbox"]')].some((list) =>
+        list.closest("[popover]")?.matches(":popover-open"),
+      ),
+      "没有打开现有思考控件",
+    );
+    await act(async () => {
+      check(controlRef.current.openControl("mode"), "没有打开模式菜单");
+      await wait();
+    });
+    check(
+      document
+        .querySelector('.pico-composer-menu [role="menuitemcheckbox"]')
+        ?.closest("[popover]")
+        ?.matches(":popover-open"),
+      "没有复用现有加号模式菜单",
+    );
+    await click("添加上下文与模式");
+    await click("选择模型：模型 M");
+    const readonlyChoice = [...document.querySelectorAll('[role="menuitemradio"]')].find((item) =>
+      item.textContent.includes("模型 N"),
+    );
+    check(
+      readonlyChoice?.closest("[popover]")?.matches(":popover-open"),
+      "运行中模型菜单不能打开查看",
+    );
+    check(readonlyChoice?.getAttribute("aria-disabled") === "true", "运行中模型选项未禁用");
+    check(
+      document.body.textContent.includes("任务执行中，可查看模型，结束后可切换"),
+      "只读模型菜单缺少说明",
+    );
+    await act(async () => {
+      readonlyChoice.click();
+      await wait();
+    });
+    check(!calls.some((item) => item.method === "readonly-model-change"), "只读模型菜单触发了切换");
+    await renderControls(true, true);
+    await click("选择模型：模型 M");
+    const disabledModelTrigger = document.querySelector(".composer-model-trigger");
+    const modelLayer = document.querySelector(".pico-composer-model-menu")?.closest("[popover]");
+    check(
+      (disabledModelTrigger.disabled ||
+        disabledModelTrigger.getAttribute("aria-disabled") === "true") &&
+        disabledModelTrigger.getAttribute("aria-expanded") === "false" &&
+        !modelLayer?.matches(":popover-open"),
+      "disabled 模型选择器仍可展开",
+    );
     await fetch("/result", { method: "POST", body: "PASS: desktop commands" });
   } catch (error) {
     await fetch("/result", { method: "POST", body: String(error.stack ?? error) });
