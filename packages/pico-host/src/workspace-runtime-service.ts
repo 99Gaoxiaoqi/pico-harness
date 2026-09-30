@@ -97,12 +97,15 @@ export interface DaemonRunExecution {
     readonly controlEpoch: string;
     readonly feedback?: string;
   };
-  readonly skillActivation?: {
-    readonly name: string;
-    readonly sourcePath?: string;
-    readonly hooks?: unknown;
-    readonly sourceId?: string;
-  };
+  readonly skillActivations?: readonly DaemonSkillActivation[];
+  readonly skillActivation?: DaemonSkillActivation;
+}
+
+export interface DaemonSkillActivation {
+  readonly name: string;
+  readonly sourcePath?: string;
+  readonly hooks?: unknown;
+  readonly sourceId?: string;
 }
 
 export interface StartDaemonRunInput {
@@ -342,6 +345,7 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
           "session-settings-v1",
           "session-goal-v1",
           "catalog-activation-v1",
+          "structured-skills-v1",
           "workspace-diagnostics-v1",
           "runtime-events-v1",
           "desktop-live-reasoning-v1",

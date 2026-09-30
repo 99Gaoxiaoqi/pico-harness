@@ -5,12 +5,18 @@ import { invalidParams, invalidResult } from "./errors.js";
 import { runtimePlanControlSnapshotResult } from "./planning.js";
 import type { RuntimeGoalStatus, RuntimePlanControlSnapshot } from "./planning.js";
 import {
+  runtimeSkillReferencesResult,
   runtimeQueuedInputResult,
   runtimeRunResult,
   runtimeRunStatusResult,
   runtimeSessionResult,
 } from "./session.js";
-import type { RuntimeQueuedInput, RuntimeRun, RuntimeSession } from "./session.js";
+import type {
+  RuntimeSkillReference,
+  RuntimeQueuedInput,
+  RuntimeRun,
+  RuntimeSession,
+} from "./session.js";
 import {
   assertNestedShape,
   boundedNonEmptyStringParam,
@@ -31,7 +37,7 @@ import {
 } from "./validation.js";
 import type { RuntimeParamRule, RuntimeParamValidator, RuntimeResultRule } from "./validation.js";
 
-export const TRANSCRIPT_PROJECTOR_VERSION = 8 as const;
+export const TRANSCRIPT_PROJECTOR_VERSION = 9 as const;
 
 export type RuntimeTranscriptWatermark = JsonObject & {
   readonly historyEpoch: string;
@@ -185,6 +191,7 @@ export type RuntimeConversationItem = (
   | (JsonObject & {
       readonly id: string;
       readonly kind: "userMessage" | "systemNotice" | "error";
+      readonly skills?: readonly RuntimeSkillReference[];
       readonly content: string;
       readonly at?: number;
     })
@@ -484,7 +491,10 @@ const runtimeConversationItemResult: RuntimeResultRule = (value, path) => {
   };
 
   if (kind === "userMessage" || kind === "systemNotice" || kind === "error") {
-    exactItem({ content: resultString });
+    exactItem(
+      { content: resultString },
+      kind === "userMessage" ? { skills: runtimeSkillReferencesResult } : {},
+    );
     return;
   }
   if (kind === "assistantMessage" || kind === "thinking") {
