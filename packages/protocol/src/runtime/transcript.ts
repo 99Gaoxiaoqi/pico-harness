@@ -489,6 +489,18 @@ const runtimeMediaReferencesResult: RuntimeResultRule = (value, path) => {
     )(item, itemPath);
     if (!isJsonObject(item) || !/^[a-f0-9]{64}$/u.test(String(item["digest"])))
       throw invalidResult(`${itemPath}.digest 必须为 SHA-256`);
+    const allowedMime =
+      item["kind"] === "image"
+        ? ["image/png", "image/jpeg", "image/gif", "image/webp", "image/avif"]
+        : ["video/mp4", "video/webm"];
+    if (!allowedMime.includes(String(item["mimeType"])))
+      throw invalidResult(`${itemPath}.mimeType 与媒体类型不符`);
+    if (
+      String(item["artifactId"]).length > 256 ||
+      String(item["alt"]).length > 2048 ||
+      (item["source"] !== undefined && String(item["source"]).length > 4096)
+    )
+      throw invalidResult(`${itemPath} 媒体引用文字过长`);
   }
 };
 
