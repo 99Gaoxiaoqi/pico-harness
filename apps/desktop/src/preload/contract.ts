@@ -1,3 +1,4 @@
+import type { DesktopCommandsApi } from "./command-contract.js";
 import {
   DESKTOP_RUNTIME_METHODS,
   type DesktopRuntimeMethod,
@@ -93,6 +94,7 @@ export interface RuntimeNotificationSubscription {
 }
 
 export interface DesktopBridge {
+  readonly commands: DesktopCommandsApi;
   readonly artifacts: DesktopArtifactsApi;
   readonly runtime: DesktopRuntimeApi;
   readonly events: {

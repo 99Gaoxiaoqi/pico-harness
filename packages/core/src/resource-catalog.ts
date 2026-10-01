@@ -1,6 +1,11 @@
 export type ResourceCatalogScope = "project" | "user" | "builtin" | "external";
 
-export type ResourceCatalogFormat = "pico-native" | "claude-compat" | "builtin" | "external";
+export type ResourceCatalogFormat =
+  | "pico-native"
+  | "agents-compat"
+  | "claude-compat"
+  | "builtin"
+  | "external";
 
 export interface ResourceCatalogSource<TrustAuthority = unknown> {
   readonly id: string;

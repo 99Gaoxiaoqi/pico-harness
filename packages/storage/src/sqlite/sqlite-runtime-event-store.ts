@@ -3418,7 +3418,15 @@ function transcriptMutationsForEvent(
         itemId,
         positionSequence: sequence,
         positionOrdinal: 0,
-        payload: { id: itemId, kind: "userMessage", content },
+        payload: {
+          id: itemId,
+          kind: "userMessage",
+          content,
+          ...(message.providerData?.["picoKind"] === "desktop_user_input" &&
+          Array.isArray(message.providerData["skills"])
+            ? { skills: message.providerData["skills"] }
+            : {}),
+        },
       });
       return mutations;
     }

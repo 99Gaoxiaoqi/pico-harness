@@ -157,6 +157,7 @@ export async function listDesktopSkills(
     name: skill.name,
     description: skill.description,
     ...(skill.sourcePath ? { sourcePath: skill.sourcePath } : {}),
+    ...(skill.source?.id ? { sourceId: skill.source.id } : {}),
     ...(skill.allowedTools ? { allowedTools: skill.allowedTools } : {}),
     ...(skill.model ? { model: skill.model } : {}),
   }));
@@ -236,10 +237,14 @@ function skillSourceLabel(sourceId: string): string {
   switch (sourceId) {
     case "user-pico":
       return "Pico 用户级";
+    case "user-agents":
+      return "Agents 用户级";
     case "user-claude":
       return "Claude 用户级";
     case "project-pico":
       return "Pico 项目级";
+    case "project-agents":
+      return "Agents 项目级";
     case "project-claude":
       return "Claude 项目级";
     default: {

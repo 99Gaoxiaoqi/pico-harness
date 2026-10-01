@@ -1,5 +1,5 @@
 import { AlertTriangle, Check, Cpu, LoaderCircle, Settings } from "lucide-react";
-import { useEffect, useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { Button } from "@astryxdesign/core/Button";
 import {
   DropdownMenu,
@@ -47,25 +47,36 @@ export function ComposerModelPicker({
   value,
   currentLabel,
   disabled = false,
+  readOnly = false,
   disabledReason = "暂时不可切换模型",
   hasHistory = false,
   onChange,
   onConfigure,
+  openRequest,
 }: {
   routes: readonly ModelRouteView[];
   providers: readonly ProviderView[];
   value?: string | undefined;
   currentLabel?: string | undefined;
   disabled?: boolean | undefined;
+  readOnly?: boolean | undefined;
   disabledReason?: string | undefined;
   hasHistory?: boolean | undefined;
-  onChange: (id: string) => void | Promise<void>;
+  onChange: (id: string) => void | Promise<void | boolean>;
   onConfigure: () => void;
+  openRequest?: number | undefined;
 }) {
   const id = useId();
   const [open, setOpen] = useState(false);
   const [pending, setPending] = useState(false);
   const locked = disabled || pending;
+  const consumedOpenRequest = useRef(0);
+  useEffect(() => {
+    if (openRequest && openRequest !== consumedOpenRequest.current && !disabled) {
+      consumedOpenRequest.current = openRequest;
+      setOpen(true);
+    }
+  }, [openRequest, disabled]);
   const groups = useMemo(() => {
     const result = new Map<
       string,
@@ -115,7 +126,7 @@ export function ComposerModelPicker({
     return () => cancelAnimationFrame(frame);
   }, [id, open]);
   async function pick(next: string) {
-    if (locked) return;
+    if (locked || readOnly) return;
     setOpen(false);
     if (next === value) return;
     setPending(true);
@@ -135,7 +146,7 @@ export function ComposerModelPicker({
         variant="ghost"
         className="composer-model-trigger pico-page-control"
         onClick={onConfigure}
-        isDisabled={locked}
+        isDisabled={locked || readOnly}
         tooltip="添加模型厂商"
       >
         <Settings aria-hidden="true" />
@@ -168,9 +179,21 @@ export function ComposerModelPicker({
         className: "composer-model-trigger pico-page-control",
         variant: "ghost",
         isDisabled: locked,
-        tooltip: disabled ? disabledReason : pending ? "正在切换模型…" : `切换模型 · ${label}`,
+        tooltip: disabled
+          ? disabledReason
+          : pending
+            ? "正在切换模型…"
+            : readOnly
+              ? "任务执行中，可查看模型，结束后可切换"
+              : `切换模型 · ${label}`,
       }}
     >
+      {readOnly && (
+        <p className="composer-model-notice">
+          <AlertTriangle aria-hidden="true" />
+          <span>任务执行中，可查看模型，结束后可切换。</span>
+        </p>
+      )}
       {hasHistory && (
         <p className="composer-model-notice">
           <AlertTriangle aria-hidden="true" />
@@ -186,7 +209,7 @@ export function ComposerModelPicker({
             description="当前模型 · 暂不在可选列表中"
             icon={<Mark />}
             endContent={<Check className="composer-model-check" aria-hidden="true" />}
-            isDisabled={locked}
+            isDisabled={locked || readOnly}
           />
         )}
         {groups.map(([key, group]) => (
@@ -209,7 +232,7 @@ export function ComposerModelPicker({
                     <Check className="composer-model-check" aria-hidden="true" />
                   ) : undefined
                 }
-                isDisabled={locked}
+                isDisabled={locked || readOnly}
               />
             ))}
           </div>

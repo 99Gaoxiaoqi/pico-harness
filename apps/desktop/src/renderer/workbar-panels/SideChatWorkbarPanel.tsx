@@ -1,8 +1,18 @@
+import {
+  useCommandSuggestions,
+  type ComposerCommands,
+  type ComposerResources,
+} from "../conversation/CommandSuggestions.js";
 import { ConversationComposerMenu } from "../conversation/ConversationComposerMenu.js";
 import { Button } from "@astryxdesign/core/Button";
-import { ChatComposer, ChatComposerInput } from "@astryxdesign/core/Chat";
+import {
+  ChatComposer,
+  ChatComposerInput,
+  type ChatComposerInputHandle,
+} from "@astryxdesign/core/Chat";
 import { CircleAlert, GitFork, LoaderCircle, Send, Square, X } from "lucide-react";
-import type { FormEvent, KeyboardEvent, ReactNode } from "react";
+import { useRef, useEffect, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
+import { parseComposerDraft } from "../conversation/composer-references.js";
 
 import { omitApprovalAuditItems } from "../conversation/items.js";
 import {
@@ -33,6 +43,11 @@ export interface SideChatPanelError {
 }
 
 export interface SideChatWorkbarPanelProps {
+  readonly commands?: ComposerCommands | undefined;
+  readonly resources?: ComposerResources | undefined;
+  readonly resourceRequest?: { kind: "skill" | "agent"; id: number } | undefined;
+  readonly commandFeedback?: ReactNode;
+  readonly commandPending?: boolean;
   readonly activeRun?: ConversationTranscriptProps["activeRun"];
   readonly child: SideChatChildSession;
   readonly items: readonly ConversationItemView[];
@@ -50,6 +65,7 @@ export interface SideChatWorkbarPanelProps {
   readonly pendingApprovalCallId?: string | undefined;
   readonly onSend: (message: string) => void;
   readonly onStop: () => void;
+  readonly stopFocusRequest?: number | undefined;
   readonly onDraftChange: (draft: string) => void;
   readonly onRetryCreate: () => void;
   readonly onClose: () => void;
@@ -70,6 +86,11 @@ export function sideChatCanSend(
 }
 
 export function SideChatWorkbarPanel({
+  commands,
+  resources,
+  resourceRequest,
+  commandFeedback,
+  commandPending = false,
   child,
   activeRun,
   items,
@@ -87,14 +108,38 @@ export function SideChatWorkbarPanel({
   pendingApprovalCallId,
   onSend,
   onStop,
+  stopFocusRequest,
   onDraftChange,
   onRetryCreate,
   onClose,
   onOpenItem,
 }: SideChatWorkbarPanelProps) {
+  const editableRef = useRef<HTMLDivElement>(null);
+  const editorRef = useRef<ChatComposerInputHandle>(null);
+  const stopSlot = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    if (stopFocusRequest) stopSlot.current?.querySelector<HTMLButtonElement>("button")?.focus();
+  }, [stopFocusRequest]);
+  const openResources = (kind: "skill" | "agent" = "skill") => {
+    editorRef.current?.focus();
+    editorRef.current?.insertText(` /${kind} `);
+    onDraftChange(editorRef.current?.getValue() ?? draft);
+  };
+  useEffect(() => {
+    if (resourceRequest) openResources(resourceRequest.kind);
+  }, [resourceRequest]);
+  const commandMenu = useCommandSuggestions(draft, onDraftChange, commands, resources, editableRef);
+  const commandInput =
+    Boolean(commands) &&
+    !parseComposerDraft(draft).references.length &&
+    draft.trimStart().startsWith("/");
+  const canSend =
+    child.state === "live" &&
+    !commandPending &&
+    (commandInput || sideChatCanSend(child.state, running, draft));
   const send = () => {
     const message = draft.trim();
-    if (!sideChatCanSend(child.state, running, message)) return;
+    if (!canSend) return;
     onSend(message);
   };
   const submit = (event: FormEvent<HTMLFormElement>) => {
@@ -102,6 +147,7 @@ export function SideChatWorkbarPanel({
     send();
   };
   const handleDraftKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (commandMenu.onKeyDown(event)) return;
     if (
       event.key !== "Enter" ||
       event.shiftKey ||
@@ -203,9 +249,11 @@ export function SideChatWorkbarPanel({
         </div>
       )}
 
+      {commandFeedback}
       {goalStatus}
       {goalDialog}
       <form className="side-chat__composer" onSubmit={submit}>
+        {commandMenu.menu}
         <ChatComposer
           className="pico-astryx-composer"
           value={draft}
@@ -215,6 +263,8 @@ export function SideChatWorkbarPanel({
           elevation="none"
           input={
             <ChatComposerInput
+              {...commandMenu.inputProps}
+              handleRef={editorRef}
               className="pico-chat-input"
               label="发送给临时分支"
               value={draft}
@@ -230,6 +280,8 @@ export function SideChatWorkbarPanel({
           }
           footerActions={
             <ConversationComposerMenu
+              onAttach={resources ? () => openResources() : undefined}
+              onAttachAgent={resources ? () => openResources("agent") : undefined}
               onSetGoal={onSetGoal}
               goalDisabled={goalDisabled}
               disabled={unavailable}
@@ -238,25 +290,30 @@ export function SideChatWorkbarPanel({
             </ConversationComposerMenu>
           }
           sendButton={
-            running ? (
-              <Button
-                label="停止"
-                className="side-chat__stop"
-                onClick={onStop}
-                icon={<Square aria-hidden="true" size={12} />}
-                size="sm"
-              />
-            ) : (
-              <Button
-                type="submit"
-                className="side-chat__send"
-                label="发送消息"
-                isIconOnly
-                icon={<Send aria-hidden="true" size={14} />}
-                isDisabled={!sideChatCanSend(child.state, running, draft)}
-                size="sm"
-              />
-            )
+            <>
+              {running && (
+                <span ref={stopSlot}>
+                  <Button
+                    label="停止"
+                    className="side-chat__stop"
+                    onClick={onStop}
+                    icon={<Square aria-hidden="true" size={12} />}
+                    size="sm"
+                  />
+                </span>
+              )}
+              {(!running || commandInput) && (
+                <Button
+                  type="submit"
+                  className="side-chat__send"
+                  label="发送消息"
+                  isIconOnly
+                  icon={<Send aria-hidden="true" size={14} />}
+                  isDisabled={!canSend}
+                  size="sm"
+                />
+              )}
+            </>
           }
         />
       </form>

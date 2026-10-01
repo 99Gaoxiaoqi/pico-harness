@@ -320,6 +320,11 @@ export interface RuntimeActions {
     readonly initialSettings?: RuntimeUserDefaults;
     readonly behavior?: ComposerBehavior;
     readonly expectedRunId?: string;
+    readonly skills?: readonly {
+      readonly name: string;
+      readonly sourceId?: string;
+      readonly sourcePath?: string;
+    }[];
     readonly activation?:
       | { readonly kind: "skill"; readonly name: string }
       | { readonly kind: "agent"; readonly name: string; readonly subagentId?: string };
@@ -328,9 +333,9 @@ export interface RuntimeActions {
     readonly workspacePath?: string | undefined;
     readonly sessionId?: string | undefined;
   }>;
-  renameSession(ref: WorkspaceSessionRef, title: string): Promise<void>;
+  renameSession(ref: WorkspaceSessionRef, title: string): Promise<boolean>;
   forkSession(ref: WorkspaceSessionRef): Promise<WorkspaceSessionRef | undefined>;
-  compactSession(ref: WorkspaceSessionRef): Promise<void>;
+  compactSession(ref: WorkspaceSessionRef): Promise<boolean>;
   updateSessionSettings(
     ref: WorkspaceSessionRef,
     patch: Readonly<{
@@ -340,7 +345,7 @@ export interface RuntimeActions {
       permissionMode?: "ask" | "auto" | "full-access";
       thinkingEffort?: string;
     }>,
-  ): Promise<void>;
+  ): Promise<boolean>;
   setSessionArchived(ref: WorkspaceSessionRef, archived: boolean): Promise<void>;
   setSessionPinned(ref: WorkspaceSessionRef, pinned: boolean): Promise<void>;
   deleteSession(ref: WorkspaceSessionRef): Promise<boolean>;
@@ -350,6 +355,7 @@ export interface RuntimeActions {
   steerRun(runId: string, message: string): Promise<void>;
   respondApproval(id: string, decision: "allow_once" | "allow_session" | "deny"): Promise<void>;
   respondPlan(input: {
+    readonly workspacePath?: string;
     readonly planId: string;
     readonly sessionId: string;
     readonly action:
@@ -363,7 +369,7 @@ export interface RuntimeActions {
     readonly expectedSessionSequence: number;
     readonly controlEpoch: string;
     readonly feedback?: string;
-  }): Promise<void>;
+  }): Promise<boolean>;
   respondPrompt(id: string, answer: string): Promise<void>;
   queryReview(
     workspacePath: string,
@@ -1990,8 +1996,10 @@ export function useRuntimeStore(): RuntimeStore {
       },
       async sendMessage(input) {
         const workspacePath = input.workspacePath;
-        if (!workspacePath || !input.text.trim()) return { succeeded: false };
-        const swarmCommand = !input.activation ? parseSwarmCommand(input.text) : undefined;
+        if (!workspacePath || (!input.text.trim() && !input.skills?.length))
+          return { succeeded: false };
+        const swarmCommand =
+          !input.activation && !input.skills?.length ? parseSwarmCommand(input.text) : undefined;
         let resolvedSessionId = input.sessionId;
         const sendIdentity = JSON.stringify({
           workspacePath,
@@ -2001,6 +2009,7 @@ export function useRuntimeStore(): RuntimeStore {
           behavior: input.behavior ?? "auto",
           expectedRunId: input.expectedRunId,
           activation: input.activation,
+          skills: input.skills,
         });
         const idempotencyKey =
           pendingSendRef.current?.identity === sendIdentity
@@ -2008,6 +2017,19 @@ export function useRuntimeStore(): RuntimeStore {
             : crypto.randomUUID();
         pendingSendRef.current = { identity: sendIdentity, idempotencyKey };
         const succeeded = await perform("send-message", async (bridge) => {
+          if (
+            input.skills?.length &&
+            !preview &&
+            !runtimeCapabilitiesRef.current.has("structured-skills-v1")
+          ) {
+            throw new Error(
+              "当前 Runtime 尚不支持多个技能。请完全退出 Pico 并更新 Runtime 后重试；草稿已保留。",
+            );
+          }
+          if (input.skills?.length && input.activation)
+            throw new Error("技能与 Agent 不能在同一条消息中使用。");
+          if (input.skills?.length && input.behavior === "steer")
+            throw new Error("技能需要新回合，请选择排队或停止并替换。");
           if (preview) {
             resolvedSessionId ??= "session-atlas";
             const sessionId = resolvedSessionId;
@@ -2062,7 +2084,11 @@ export function useRuntimeStore(): RuntimeStore {
                         text: swarmCommand.task,
                         orchestrationMode: "swarm",
                       }
-                    : { kind: "text", text: input.text.trim() },
+                    : {
+                        kind: "text",
+                        text: input.text.trim(),
+                        ...(input.skills?.length ? { skills: input.skills } : {}),
+                      },
             ...(input.initialSettings ? { initialSettings: input.initialSettings } : {}),
             behavior: input.behavior ?? "auto",
             ...(input.expectedRunId ? { expectedRunId: input.expectedRunId } : {}),
@@ -2091,8 +2117,8 @@ export function useRuntimeStore(): RuntimeStore {
       },
       async renameSession(ref, title) {
         const { workspacePath, sessionId } = ref;
-        if (!workspacePath || !title.trim()) return;
-        await perform("rename-session", async (bridge) => {
+        if (!workspacePath || !title.trim()) return false;
+        return perform("rename-session", async (bridge) => {
           if (!preview) {
             await invoke(bridge, "session.rename", {
               workspacePath,
@@ -2132,8 +2158,8 @@ export function useRuntimeStore(): RuntimeStore {
       },
       async compactSession(ref) {
         const { workspacePath, sessionId } = ref;
-        if (!workspacePath) return;
-        await perform("compact-session", async (bridge) => {
+        if (!workspacePath) return false;
+        return perform("compact-session", async (bridge) => {
           if (!preview) {
             await invoke(bridge, "session.compact", { workspacePath, sessionId });
             await loadConversation(bridge, workspacePath, sessionId);
@@ -2143,8 +2169,8 @@ export function useRuntimeStore(): RuntimeStore {
       },
       async updateSessionSettings(ref, patch) {
         const { workspacePath, sessionId } = ref;
-        if (!workspacePath) return;
-        await perform("session-settings", async (bridge) => {
+        if (!workspacePath) return false;
+        return perform("session-settings", async (bridge) => {
           if (!preview) {
             await invoke(bridge, "session.settings.update", {
               workspacePath,
@@ -2312,12 +2338,12 @@ export function useRuntimeStore(): RuntimeStore {
         });
       },
       async respondPlan(input) {
-        const workspacePath = dataRef.current.workspacePath;
-        if (!workspacePath) return;
+        const workspacePath = input.workspacePath ?? dataRef.current.workspacePath;
+        if (!workspacePath) return false;
         if (input.action === "continue_editing" && !input.feedback?.trim()) {
           throw new Error("继续修改计划时必须填写反馈。");
         }
-        await perform("plan-response", async (bridge) => {
+        return perform("plan-response", async (bridge) => {
           if (!preview) {
             try {
               await invoke(bridge, "plan.respond", {
@@ -3373,6 +3399,14 @@ export function useRuntimeStore(): RuntimeStore {
 function createPreviewBridge(): DesktopBridge {
   const success = <T>(value: T): Promise<DesktopResult<T>> => Promise.resolve({ ok: true, value });
   return {
+    commands: {
+      catalog: async () => ({ ok: true, value: [] }),
+      complete: async () => ({ ok: true, value: [] }),
+      execute: async () => ({
+        ok: false,
+        error: { code: "PREVIEW_ONLY", message: "请在 Pico 桌面端执行命令。", retryable: false },
+      }),
+    },
     artifacts: {
       open: () => success(undefined),
       openInDefaultApp: () => success(undefined),

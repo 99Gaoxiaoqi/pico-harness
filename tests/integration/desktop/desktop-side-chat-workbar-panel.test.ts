@@ -1,13 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { registerHooks } from "node:module";
 import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import {
-  SideChatWorkbarPanel,
-  shouldActivateSideChatData,
-  sideChatCanSend,
-} from "../../../apps/desktop/src/renderer/workbar-panels/SideChatWorkbarPanel.js";
+const stylesheetHook = registerHooks({
+  load(url, context, nextLoad) {
+    return url.endsWith(".css")
+      ? { format: "module", source: "export {};", shortCircuit: true }
+      : nextLoad(url, context);
+  },
+});
+const { SideChatWorkbarPanel, shouldActivateSideChatData, sideChatCanSend } =
+  await import("../../../apps/desktop/src/renderer/workbar-panels/SideChatWorkbarPanel.js");
+stylesheetHook.deregister();
 import { resolveSideChatCreationTarget } from "../../../apps/desktop/src/renderer/workbar-panels/side-chat-creation.js";
 
 Object.assign(globalThis, { React });
@@ -118,7 +124,7 @@ test("Side Chat explains a rejected fork when the parent has no completed turn",
   assert.match(markup, /临时分支就绪后可发送消息/u);
 });
 
-test("Side Chat exposes pending interactions and running controls", () => {
+test("Side Chat preserves stop and command sending controls together during a Run", () => {
   const markup = renderToStaticMarkup(
     React.createElement(SideChatWorkbarPanel, {
       child: {
@@ -128,7 +134,8 @@ test("Side Chat exposes pending interactions and running controls", () => {
         state: "live",
       },
       items: [],
-      draft: "下一步",
+      draft: "/queue 下一步",
+      commands: { catalog: [], complete: async () => [] },
       active: true,
       running: true,
       loading: false,
@@ -146,6 +153,7 @@ test("Side Chat exposes pending interactions and running controls", () => {
   assert.match(markup, /允许修改文件/u);
   assert.match(markup, /Agent 正在运行/u);
   assert.match(markup, />停止</u);
+  assert.match(markup, /aria-label="发送消息"/u);
   assert.match(markup, /aria-label="发送给临时分支" contentEditable="true" role="textbox"/u);
 });
 

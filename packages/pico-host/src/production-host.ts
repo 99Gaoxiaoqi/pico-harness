@@ -1142,8 +1142,11 @@ export function createProductionRuntimeServices(
           | Extract<AgentGraphRunToolBinding, { readonly kind: "root" }>
           | undefined;
         try {
-          const skillActivation = execution?.skillActivation;
-          if (skillActivation?.sourcePath && skillActivation.hooks !== undefined) {
+          const skillActivations =
+            execution?.skillActivations ??
+            (execution?.skillActivation ? [execution.skillActivation] : []);
+          for (const skillActivation of skillActivations) {
+            if (!skillActivation.sourcePath || skillActivation.hooks === undefined) continue;
             const trustAuthority = skillActivation.sourceId
               ? pluginSnapshot.skillSources.find((source) => source.id === skillActivation.sourceId)
                   ?.hookTrustAuthority

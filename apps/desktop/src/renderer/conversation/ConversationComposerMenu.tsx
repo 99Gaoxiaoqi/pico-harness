@@ -28,6 +28,7 @@ export function ConversationComposerMenu({
   modes,
   disabled = false,
   onAttach,
+  onAttachAgent,
   onSetGoal,
   goalDisabled,
 }: {
@@ -35,6 +36,7 @@ export function ConversationComposerMenu({
   modes?: ConversationComposerModes | undefined;
   disabled?: boolean | undefined;
   onAttach?: (() => void) | undefined;
+  onAttachAgent?: (() => void) | undefined;
   onSetGoal?: (() => void) | undefined;
   goalDisabled?: boolean | undefined;
 }) {
@@ -111,11 +113,19 @@ export function ConversationComposerMenu({
         onOpenChange={setOpen}
       >
         <DropdownMenuItem
-          label="选择 Skill 或子代理"
+          label={onAttachAgent ? "选择 Skill" : "选择 Skill 或子代理"}
           icon={<Sparkles aria-hidden="true" />}
           isDisabled={!onAttach || disabled}
           onClick={() => onAttach?.()}
         />
+        {onAttachAgent && (
+          <DropdownMenuItem
+            label="选择子代理"
+            icon={<Sparkles aria-hidden="true" />}
+            isDisabled={disabled}
+            onClick={onAttachAgent}
+          />
+        )}
         {onSetGoal && (
           <DropdownMenuItem
             label="设置 Goal"

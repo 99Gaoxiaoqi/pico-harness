@@ -1,3 +1,8 @@
+import {
+  useCommandSuggestions,
+  type ComposerCommands,
+  type ComposerResources,
+} from "./CommandSuggestions.js";
 import { Button } from "@astryxdesign/core/Button";
 import {
   ChatComposer,
@@ -28,9 +33,14 @@ import {
   type ConversationComposerModes,
 } from "./ConversationComposerMenu.js";
 
-export type ConversationComposerHandle = Pick<ChatComposerInputHandle, "focus">;
+export type ConversationComposerHandle = Pick<ChatComposerInputHandle, "focus"> & {
+  openResources: (kind?: "skill" | "agent") => void;
+  openControl: (target: "mode" | "permissions" | "thinking" | "interrupt") => boolean;
+};
 
 export interface ConversationComposerProps {
+  readonly commands?: ComposerCommands | undefined;
+  readonly resources?: ComposerResources | undefined;
   readonly inputRef?: Ref<ConversationComposerHandle> | undefined;
   readonly value: string;
   readonly onValueChange: (value: string) => void;
@@ -104,7 +114,9 @@ function RunningStatus({ startedAt }: { readonly startedAt: number }) {
       {elapsedSeconds !== undefined && (
         <>
           <span className="conversation-composer__status-separator">·</span>
-          <time className="conversation-composer__status-time">{formatElapsed(elapsedSeconds)}</time>
+          <time className="conversation-composer__status-time">
+            {formatElapsed(elapsedSeconds)}
+          </time>
         </>
       )}
     </span>
@@ -116,6 +128,8 @@ function defaultBehavior(status: ComposerStatus): ComposerBehavior {
 }
 
 export function ConversationComposer({
+  commands,
+  resources,
   inputRef,
   value,
   onValueChange,
@@ -143,7 +157,44 @@ export function ConversationComposer({
   trailingAccessory,
 }: ConversationComposerProps) {
   const editorRef = useRef<ChatComposerInputHandle>(null);
-  useImperativeHandle(inputRef, () => ({ focus: () => editorRef.current?.focus() }), []);
+  const editableRef = useRef<HTMLDivElement>(null);
+  const formRef = useRef<HTMLFormElement>(null);
+  useImperativeHandle(
+    inputRef,
+    () => ({
+      focus: () => editorRef.current?.focus(),
+      openResources: (kind = "skill") => {
+        editorRef.current?.focus();
+        editorRef.current?.insertText(` /${kind} `);
+        onValueChange(editorRef.current?.getValue() ?? value);
+      },
+      openControl: (target) => {
+        const selector =
+          target === "mode"
+            ? "button.conversation-plus-trigger"
+            : target === "interrupt"
+              ? 'button[aria-label="停止运行"]'
+              : target === "thinking"
+                ? '[name="thinking-effort"], [name="initial-thinking-effort"]'
+                : '[name="permission-mode"], [name="initial-permission-mode"]';
+        const field = formRef.current?.querySelector<
+          HTMLButtonElement | HTMLSelectElement | HTMLInputElement
+        >(selector);
+        const control =
+          field instanceof HTMLInputElement
+            ? field.parentElement?.querySelector<HTMLButtonElement>('button[role="combobox"]')
+            : field;
+        if (!control || control.disabled || control.getAttribute("aria-disabled") === "true")
+          return false;
+        control.focus();
+        if (target !== "interrupt" && control.getAttribute("aria-expanded") !== "true")
+          control.click();
+        return true;
+      },
+    }),
+    [onValueChange, value],
+  );
+  const commandMenu = useCommandSuggestions(value, onValueChange, commands, resources, editableRef);
   const statusId = useId();
   const canSubmit = value.trim().length > 0 && !disabled && !submitDisabled && !busy;
   const effectiveBehavior = status === "idle" ? "auto" : behavior === "auto" ? "steer" : behavior;
@@ -160,8 +211,7 @@ export function ConversationComposer({
     status === "pause_requested"
       ? ["等待暂停，将在安全边界暂停", statusText].filter(Boolean).join(" · ")
       : defaultStatusText;
-  const showLiveRunStatus =
-    status === "running" && !busy && !statusText && startedAt !== undefined;
+  const showLiveRunStatus = status === "running" && !busy && !statusText && startedAt !== undefined;
 
   const submit = () => {
     if (!canSubmit) return;
@@ -174,6 +224,7 @@ export function ConversationComposer({
   };
 
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (commandMenu.onKeyDown(event)) return;
     if (
       event.key !== "Enter" ||
       event.shiftKey ||
@@ -187,6 +238,7 @@ export function ConversationComposer({
 
   return (
     <form
+      ref={formRef}
       className="conversation-composer"
       data-status={status}
       data-behavior={effectiveBehavior}
@@ -195,6 +247,7 @@ export function ConversationComposer({
       aria-busy={busy}
       onSubmit={handleSubmit}
     >
+      {commandMenu.menu}
       <ChatComposer
         className="pico-astryx-composer"
         value={value}
@@ -204,6 +257,7 @@ export function ConversationComposer({
         elevation="none"
         input={
           <ChatComposerInput
+            {...commandMenu.inputProps}
             handleRef={editorRef}
             className="pico-chat-input"
             value={value}
@@ -223,6 +277,15 @@ export function ConversationComposer({
           <div className="conversation-composer__controls">
             <ConversationComposerMenu
               onAttach={onAttach}
+              onAttachAgent={
+                resources
+                  ? () => {
+                      editorRef.current?.focus();
+                      editorRef.current?.insertText(" /agent ");
+                      onValueChange(editorRef.current?.getValue() ?? value);
+                    }
+                  : undefined
+              }
               modes={modes}
               onSetGoal={onSetGoal}
               goalDisabled={goalDisabled}

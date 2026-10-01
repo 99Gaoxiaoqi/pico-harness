@@ -1,3 +1,4 @@
+import { createCommandBridge } from "./command-bridge.js";
 import type { IpcRenderer } from "electron";
 import { createArtifactBridge } from "./artifact-bridge.js";
 import {
@@ -48,6 +49,7 @@ export function createDesktopBridge(ipcRenderer: IpcRenderer): DesktopBridge {
   const runtime = Object.fromEntries(runtimeEntries) as DesktopRuntimeApi;
 
   return Object.freeze({
+    commands: createCommandBridge(ipcRenderer),
     artifacts: createArtifactBridge(ipcRenderer),
     runtime: Object.freeze(runtime),
     events: Object.freeze({

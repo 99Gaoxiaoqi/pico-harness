@@ -47,6 +47,7 @@ async function run(forgeCommand, forgeArgs) {
       "@pico/transcript-replica",
       "@pico/runtime-host",
       "@pico/pico-host",
+      "@pico/cli",
     ]) {
       await runChild(
         npm.executable,

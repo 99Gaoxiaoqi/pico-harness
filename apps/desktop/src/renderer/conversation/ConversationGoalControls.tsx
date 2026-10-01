@@ -259,6 +259,30 @@ export function useConversationGoal({
     }
   };
   return {
+    control: (input: {
+      action: "arm" | GoalAction;
+      expectedRevision: number;
+      goalId?: string;
+      condition?: string;
+      maxIterations?: number;
+      tokenBudget?: number;
+    }) => {
+      if (input.expectedRevision !== (goal?.revision ?? 0)) return Promise.resolve(false);
+      if (input.action === "arm") {
+        if (!input.condition || blocked) return Promise.resolve(false);
+        return run(() =>
+          onArm({
+            condition: input.condition!,
+            maxIterations: input.maxIterations ?? 50,
+            ...(input.tokenBudget !== undefined ? { tokenBudget: input.tokenBudget } : {}),
+          }),
+        );
+      }
+      const action = input.action;
+      return goal && input.goalId === goal.id
+        ? run(() => onAction(action, goal))
+        : Promise.resolve(false);
+    },
     openDialog: () => setOpen(true),
     canSetGoal: !disabled && !blocked && !pending && !busy,
     statusBar: goal ? (

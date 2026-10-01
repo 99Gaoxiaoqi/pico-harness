@@ -478,7 +478,22 @@ function renderDefaultItem(
       return (
         <article className="conversation-message conversation-message--user">
           <h3 className="conversation-sr-only">你</h3>
-          <div className="conversation-message__bubble">{renderText(item.text, item)}</div>
+          <div className="conversation-message__bubble">
+            {item.skills?.length ? (
+              <div aria-label="使用的技能">
+                {item.skills.map((skill) => (
+                  <span
+                    key={`${skill.sourceId}:${skill.name}`}
+                    className="composer-reference"
+                    title={skill.sourcePath}
+                  >
+                    Skill: {skill.name}
+                  </span>
+                ))}
+              </div>
+            ) : null}
+            {renderText(item.text, item)}
+          </div>
         </article>
       );
     case "assistantMessage":

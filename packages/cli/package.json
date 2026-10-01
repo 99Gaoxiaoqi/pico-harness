@@ -350,6 +350,10 @@
     "./main": {
       "types": "./dist/main.d.ts",
       "import": "./dist/main.js"
+    },
+    "./client-commands": {
+      "types": "./dist/client-commands.d.ts",
+      "import": "./dist/client-commands.js"
     }
   },
   "dependencies": {

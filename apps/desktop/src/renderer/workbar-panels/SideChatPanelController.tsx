@@ -1,3 +1,10 @@
+import {
+  getComposerResources,
+  parseComposerDraft,
+  validateComposerReferences,
+} from "../conversation/composer-references.js";
+import { usePersistentDraft } from "../conversation/usePersistentDraft.js";
+import { useDesktopCommands } from "../conversation/useDesktopCommands.js";
 import { useConversationGoal } from "../conversation/ConversationGoalControls.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -33,12 +40,14 @@ export function SideChatPanelController({
   readonly onRequestClose: () => void;
 }) {
   const { data, actions, busy } = runtime;
+  const composerResources = getComposerResources(data, workspacePath);
   const [child, setChild] = useState<SideChatChildSession>({
     panelId,
     sourceSessionId,
     state: "idle",
   });
-  const [draft, setDraft] = useState("");
+  const [resourceRequest, setResourceRequest] = useState<{ kind: "skill" | "agent"; id: number }>();
+  const [stopFocusRequest, setStopFocusRequest] = useState(0);
   const [error, setError] = useState<SideChatPanelError | null>(null);
   const targetSessionIdRef = useRef<string | undefined>(undefined);
   const createGenerationRef = useRef(0);
@@ -46,6 +55,13 @@ export function SideChatPanelController({
     () => JSON.stringify([workspacePath, sourceSessionId, panelId]),
     [panelId, sourceSessionId, workspacePath],
   );
+
+  const {
+    value: draft,
+    update: setDraft,
+    clear,
+    clearIfUnchanged,
+  } = usePersistentDraft(`side:${cleanupKey}`);
 
   const create = useCallback(async () => {
     const generation = ++createGenerationRef.current;
@@ -211,6 +227,25 @@ export function SideChatPanelController({
     [actions, pendingApproval, targetSessionId],
   );
 
+  const commands = useDesktopCommands({
+    runtime,
+    workspacePath,
+    sessionId: targetSessionId,
+    running: Boolean(activeRun),
+    draft,
+    onConsumeDraft: clear,
+    onOpenResource: (kind) => setResourceRequest({ kind, id: Date.now() }),
+    onOpenControl: (target) => {
+      if (target !== "interrupt" || !activeRun) return false;
+      setStopFocusRequest((value) => value + 1);
+      return true;
+    },
+    onOpenGoal: () => goalControls.openDialog(),
+    onGoalControl: (input) => goalControls.control(input),
+    onDraftChange: setDraft,
+    blocked: Boolean(pendingApproval || pendingPrompt) || child.state !== "live",
+  });
+
   const goalControls = useConversationGoal({
     snapshot: conversation?.goal,
     disabled: child.state !== "live" || conversation?.goal === undefined,
@@ -245,6 +280,12 @@ export function SideChatPanelController({
 
   return (
     <SideChatWorkbarPanel
+      commands={commands.suggestions}
+      resources={composerResources}
+      resourceRequest={resourceRequest}
+      stopFocusRequest={stopFocusRequest}
+      commandFeedback={commands.feedback}
+      commandPending={commands.pending}
       activeRun={activeRun}
       goalStatus={goalControls.statusBar}
       goalDialog={goalControls.dialog}
@@ -283,11 +324,42 @@ export function SideChatPanelController({
       onDraftChange={setDraft}
       onSend={(message) => {
         if (!targetSessionId) return;
-        void actions
-          .sendMessage({ workspacePath, sessionId: targetSessionId, text: message })
-          .then((result) => {
-            if (result.succeeded) setDraft("");
-          });
+        void (async () => {
+          const parsed = parseComposerDraft(message);
+          const failure = validateComposerReferences(
+            parsed.references,
+            composerResources.skills,
+            composerResources.agents,
+          );
+          if (failure) {
+            setError({ code: "unknown", message: failure });
+            return;
+          }
+          if (!parsed.references.length && (await commands.execute(message))) return;
+          await actions
+            .sendMessage({
+              workspacePath,
+              sessionId: targetSessionId,
+              text: parsed.text,
+              ...(parsed.references[0]?.kind === "agent"
+                ? { activation: parsed.references[0] }
+                : {}),
+              ...(parsed.references.some((ref) => ref.kind === "skill")
+                ? {
+                    skills: parsed.references
+                      .filter((ref) => ref.kind === "skill")
+                      .map(({ name, sourceId, sourcePath }) => ({
+                        name,
+                        ...(sourceId ? { sourceId } : {}),
+                        ...(sourcePath ? { sourcePath } : {}),
+                      })),
+                  }
+                : {}),
+            })
+            .then((result) => {
+              if (result.succeeded) clearIfUnchanged(draft);
+            });
+        })();
       }}
       onStop={() => activeRun && void actions.stopRun(activeRun.id)}
       onRetryCreate={() => void create()}

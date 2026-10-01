@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 
 const DRAFT_PREFIX = "pico.composer-draft:";
 export const MAX_PERSISTED_DRAFT_CHARS = 100_000;
+// Retain drafts across composer remounts and session switches when storage is blocked.
+const memoryDrafts = new Map<string, string>();
 
 function storageKey(key: string): string {
   return `${DRAFT_PREFIX}${key}`;
@@ -14,14 +16,19 @@ function boundedDraft(value: string): string {
 }
 
 export function readPersistentDraft(key: string): string {
+  const cached = memoryDrafts.get(key);
+  if (cached !== undefined) return boundedDraft(cached);
   try {
-    return boundedDraft(window.localStorage.getItem(storageKey(key)) ?? "");
+    const value = boundedDraft(window.localStorage.getItem(storageKey(key)) ?? "");
+    memoryDrafts.set(key, value);
+    return value;
   } catch {
     return "";
   }
 }
 
 export function removePersistentDraft(key: string): void {
+  memoryDrafts.set(key, "");
   try {
     window.localStorage.removeItem(storageKey(key));
   } catch {
@@ -34,6 +41,7 @@ export function writePersistentDraft(key: string, value: string): void {
     removePersistentDraft(key);
     return;
   }
+  memoryDrafts.set(key, value);
   try {
     // Keep the most recent input because it is closest to what the user is actively editing.
     window.localStorage.setItem(storageKey(key), boundedDraft(value));
@@ -45,23 +53,39 @@ export function writePersistentDraft(key: string, value: string): void {
 export function usePersistentDraft(key: string) {
   const [draft, setDraft] = useState(() => ({ key, value: readPersistentDraft(key) }));
   const current = draft.key === key ? draft : { key, value: readPersistentDraft(key) };
-
-  useEffect(() => {
-    if (draft.key !== key) setDraft(current);
-  }, [current, draft.key, key]);
+  // Synchronize during this render so a delayed callback cannot restore the previous key.
+  if (draft.key !== key) setDraft(current);
+  const currentRef = useRef(current);
+  currentRef.current = current;
 
   const update = useCallback(
     (next: string) => {
-      setDraft({ key, value: next });
       writePersistentDraft(key, next);
+      if (currentRef.current.key === key) {
+        currentRef.current = { key, value: next };
+        setDraft({ key, value: next });
+      }
     },
     [key],
   );
 
   const clear = useCallback(() => {
-    setDraft({ key, value: "" });
     removePersistentDraft(key);
+    if (currentRef.current.key === key) {
+      currentRef.current = { key, value: "" };
+      setDraft({ key, value: "" });
+    }
   }, [key]);
 
-  return { value: current.value, update, clear } as const;
+  const clearIfUnchanged = useCallback(
+    (expectedValue: string) => {
+      const latest =
+        currentRef.current.key === key ? currentRef.current.value : memoryDrafts.get(key);
+      if (latest !== expectedValue) return;
+      clear();
+    },
+    [clear, key],
+  );
+
+  return { value: current.value, update, clear, clearIfUnchanged } as const;
 }

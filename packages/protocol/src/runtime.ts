@@ -145,6 +145,7 @@ export type {
 export type {
   RuntimeSessionSettings,
   RuntimeInputAttachment,
+  RuntimeSkillReference,
   RuntimeTextUserInput,
   RuntimeSkillUserInput,
   RuntimeAgentUserInput,

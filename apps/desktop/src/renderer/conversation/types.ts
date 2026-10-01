@@ -14,6 +14,11 @@ interface ConversationItemBase {
 
 export interface UserMessageItemView extends ConversationItemBase {
   readonly kind: "userMessage";
+  readonly skills?: readonly {
+    readonly name: string;
+    readonly sourceId?: string;
+    readonly sourcePath?: string;
+  }[];
   readonly text: string;
 }
 
