@@ -1,5 +1,6 @@
 // Transcript projection, continuity cursors, and subscription parameter/result contracts.
 import { MAX_TOOL_RESULT_ENVELOPE_TEXT_BYTES, isJsonObject } from "./base.js";
+import { MEDIA_MAX_REFERENCES, type RuntimeMediaReference } from "../media.js";
 import type { JsonObject, RunId, RuntimeRunStatus, SessionId, WorkspaceParams } from "./base.js";
 import { invalidParams, invalidResult } from "./errors.js";
 import { runtimePlanControlSnapshotResult } from "./planning.js";
@@ -37,7 +38,7 @@ import {
 } from "./validation.js";
 import type { RuntimeParamRule, RuntimeParamValidator, RuntimeResultRule } from "./validation.js";
 
-export const TRANSCRIPT_PROJECTOR_VERSION = 9 as const;
+export const TRANSCRIPT_PROJECTOR_VERSION = 10 as const;
 
 export type RuntimeTranscriptWatermark = JsonObject & {
   readonly historyEpoch: string;
@@ -192,6 +193,7 @@ export type RuntimeConversationItem = (
       readonly id: string;
       readonly kind: "userMessage" | "systemNotice" | "error";
       readonly skills?: readonly RuntimeSkillReference[];
+      readonly media?: readonly RuntimeMediaReference[];
       readonly content: string;
       readonly at?: number;
     })
@@ -199,6 +201,7 @@ export type RuntimeConversationItem = (
       readonly id: string;
       readonly kind: "assistantMessage";
       readonly content: string;
+      readonly media?: readonly RuntimeMediaReference[];
       /** Actual provider-executed search records and returned sources, never inferred from prose. */
       readonly webSearch?: JsonObject;
       /** Present when the durable answer can be tied to one Runtime model turn. */
@@ -468,6 +471,27 @@ const runtimeToolResultEnvelopeResult: RuntimeResultRule = (value, path) => {
   }
 };
 
+const runtimeMediaReferencesResult: RuntimeResultRule = (value, path) => {
+  if (!Array.isArray(value) || value.length > MEDIA_MAX_REFERENCES)
+    throw invalidResult(`${path} 必须为最多 ${MEDIA_MAX_REFERENCES} 个媒体引用`);
+  for (const [index, item] of value.entries()) {
+    const itemPath = `${path}[${index}]`;
+    exactResultShape(
+      {
+        artifactId: resultNonEmptyString,
+        kind: resultOneOf(["image", "video"]),
+        alt: resultString,
+        mimeType: resultNonEmptyString,
+        sizeBytes: resultNonNegativeInteger,
+        digest: resultNonEmptyString,
+      },
+      { source: resultString },
+    )(item, itemPath);
+    if (!isJsonObject(item) || !/^[a-f0-9]{64}$/u.test(String(item["digest"])))
+      throw invalidResult(`${itemPath}.digest 必须为 SHA-256`);
+  }
+};
+
 const runtimeConversationItemResult: RuntimeResultRule = (value, path) => {
   if (!isJsonObject(value)) throw invalidResult(`${path} 必须是对象`);
   const kind = value["kind"];
@@ -493,7 +517,9 @@ const runtimeConversationItemResult: RuntimeResultRule = (value, path) => {
   if (kind === "userMessage" || kind === "systemNotice" || kind === "error") {
     exactItem(
       { content: resultString },
-      kind === "userMessage" ? { skills: runtimeSkillReferencesResult } : {},
+      kind === "userMessage"
+        ? { skills: runtimeSkillReferencesResult, media: runtimeMediaReferencesResult }
+        : {},
     );
     return;
   }
@@ -503,7 +529,9 @@ const runtimeConversationItemResult: RuntimeResultRule = (value, path) => {
       {
         runId: resultString,
         turnId: resultString,
-        ...(kind === "assistantMessage" ? { webSearch: resultJsonObject } : {}),
+        ...(kind === "assistantMessage"
+          ? { webSearch: resultJsonObject, media: runtimeMediaReferencesResult }
+          : {}),
       },
     );
     return;

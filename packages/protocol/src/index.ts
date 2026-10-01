@@ -5,3 +5,4 @@ export * from "./markdown.js";
 export * from "./usage.js";
 export * from "./subagent-settings.js";
 export * from "./execution-trace.js";
+export * from "./media.js";
