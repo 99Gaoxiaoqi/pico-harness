@@ -227,6 +227,7 @@ export function FilesWorkbarPanel({
                   artifact={selected}
                   content={selectedContent}
                   onEscape={onBack}
+                  onSave={onSaveArtifactAs ? () => onSaveArtifactAs(selected.id) : undefined}
                 />
                 {progress &&
                   !progress.complete &&

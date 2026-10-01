@@ -1,3 +1,4 @@
+import { inspectMediaBytes, mediaPreviewLimit } from "@pico/protocol";
 import type { WorkbarArtifact } from "./FilesWorkbarPanel.js";
 
 export const ARTIFACT_TEXT_PREVIEW_BYTES = 256 * 1024;
@@ -6,6 +7,7 @@ export const ARTIFACT_BINARY_PREVIEW_BYTES = 16 * 1024 * 1024;
 export type ArtifactPreviewKind =
   | "markdown"
   | "html"
+  | "video"
   | "image"
   | "pdf"
   | "diff"
@@ -17,6 +19,7 @@ export function artifactPreviewKind(
 ): ArtifactPreviewKind {
   const mime = artifact.mimeType.toLowerCase().split(";", 1)[0]!.trim();
   if (mime === "text/html" || mime === "application/xhtml+xml") return "html";
+  if (mime === "video/mp4" || mime === "video/webm") return "video";
   if (mime === "application/pdf") return "pdf";
   if (["image/png", "image/jpeg", "image/gif", "image/webp", "image/avif"].includes(mime))
     return "image";
@@ -40,8 +43,8 @@ export function artifactPreviewKind(
 
 export function artifactPreviewLimit(artifact: Pick<WorkbarArtifact, "name" | "mimeType">): number {
   const kind = artifactPreviewKind(artifact);
-  return kind === "image"
-    ? ARTIFACT_IMAGE_PREVIEW_BYTES
+  return kind === "image" || kind === "video"
+    ? mediaPreviewLimit(kind)
     : kind === "pdf"
       ? ARTIFACT_BINARY_PREVIEW_BYTES
       : ARTIFACT_TEXT_PREVIEW_BYTES;
@@ -50,29 +53,12 @@ export function artifactPreviewLimit(artifact: Pick<WorkbarArtifact, "name" | "m
 /** Only signed raster formats reach the renderer's image decoder; SVG stays inert. */
 export function validateArtifactBinary(bytes: Uint8Array, mimeType: string): string | undefined {
   const mime = mimeType.toLowerCase().split(";", 1)[0]!.trim();
-  const ascii = (start: number, text: string) =>
-    [...text].every((c, i) => bytes[start + i] === c.charCodeAt(0));
-  const valid =
-    mime === "application/pdf"
-      ? ascii(0, "%PDF-")
-      : mime === "image/png"
-        ? [137, 80, 78, 71, 13, 10, 26, 10].every((b, i) => bytes[i] === b)
-        : mime === "image/jpeg"
-          ? bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255
-          : mime === "image/gif"
-            ? ascii(0, "GIF87a") || ascii(0, "GIF89a")
-            : mime === "image/webp"
-              ? ascii(0, "RIFF") && ascii(8, "WEBP")
-              : mime === "image/avif"
-                ? ascii(4, "ftyp") &&
-                  (ascii(8, "avif") ||
-                    ascii(8, "avis") ||
-                    Array.from(
-                      { length: Math.max(0, Math.floor(Math.min(bytes.length, 64) / 4) - 4) },
-                      (_, i) => 16 + i * 4,
-                    ).some((offset) => ascii(offset, "avif") || ascii(offset, "avis")))
-                : false;
-  return valid ? mime : undefined;
+  if (mime === "application/pdf")
+    return [..."%PDF-"].every((character, i) => bytes[i] === character.charCodeAt(0))
+      ? mime
+      : undefined;
+  const actual = inspectMediaBytes(bytes);
+  return actual?.mimeType === mime ? mime : undefined;
 }
 
 export function decodeArtifactBinary(base64: string): Uint8Array {

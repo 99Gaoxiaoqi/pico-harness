@@ -83,7 +83,7 @@ export function FilesPanelController({ workspacePath, sessionId, active }: Workb
         const kind = artifactPreviewKind(artifact);
         if (kind === "unsupported")
           throw new Error("此文件格式不支持内嵌预览，请打开或另存后查看。");
-        if ((kind === "image" || kind === "pdf") && artifact.size > limit)
+        if ((kind === "image" || kind === "video" || kind === "pdf") && artifact.size > limit)
           throw new Error(`文件超过 ${limit / (1024 * 1024)} MiB 预览上限，请另存后查看。`);
         if (offset >= limit) throw new Error("已达到内嵌预览上限，请另存后查看。");
         let nextOffset = offset;
@@ -104,11 +104,15 @@ export function FilesPanelController({ workspacePath, sessionId, active }: Workb
           streamRef.current = next;
           // Avoid repeatedly encoding the entire accumulated binary for every
           // 32 KiB chunk. Binary decoders only receive a complete bounded file.
-          if (next.complete || (kind !== "image" && kind !== "pdf")) {
+          if (next.complete || (kind !== "image" && kind !== "video" && kind !== "pdf")) {
             setContent(artifactContentView(next));
           }
           nextOffset = next.nextOffset;
-          if (next.complete || nextOffset >= limit || !["html", "image", "pdf"].includes(kind))
+          if (
+            next.complete ||
+            nextOffset >= limit ||
+            !["html", "image", "video", "pdf"].includes(kind)
+          )
             break;
         } while (request === contentRequestRef.current);
       } catch (cause) {
@@ -252,7 +256,7 @@ export function appendArtifactStreamChunk(
   if (chunk.endOffsetBytes > artifactPreviewLimit(artifact))
     throw new Error("生成文件内容超过内嵌预览上限。");
   if (
-    ["image", "pdf"].includes(artifactPreviewKind(artifact)) &&
+    ["image", "video", "pdf"].includes(artifactPreviewKind(artifact)) &&
     chunk.totalBytes > artifactPreviewLimit(artifact)
   )
     throw new Error("生成文件内容超过内嵌预览上限。");

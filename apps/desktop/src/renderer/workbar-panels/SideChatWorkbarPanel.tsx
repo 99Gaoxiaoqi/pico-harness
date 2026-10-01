@@ -43,6 +43,7 @@ export interface SideChatPanelError {
 }
 
 export interface SideChatWorkbarPanelProps {
+  readonly workspacePath?: string | undefined;
   readonly commands?: ComposerCommands | undefined;
   readonly resources?: ComposerResources | undefined;
   readonly resourceRequest?: { kind: "skill" | "agent"; id: number } | undefined;
@@ -86,6 +87,7 @@ export function sideChatCanSend(
 }
 
 export function SideChatWorkbarPanel({
+  workspacePath,
   commands,
   resources,
   resourceRequest,
@@ -220,6 +222,11 @@ export function SideChatWorkbarPanel({
           </div>
         ) : child.state === "live" ? (
           <ConversationTranscript
+            mediaScope={
+              active && workspacePath && child.targetSessionId
+                ? { workspacePath, sessionId: child.targetSessionId }
+                : undefined
+            }
             activeRun={activeRun}
             items={omitApprovalAuditItems(items, pendingApprovalCallId)}
             label="临时分支会话记录"
