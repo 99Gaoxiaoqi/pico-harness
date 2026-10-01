@@ -1,3 +1,4 @@
+import { projectInlineMessageMedia } from "./markdown-inline-media.js";
 import { projectSessionMedia } from "./sqlite-session-workbar-repository.js";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -2104,20 +2105,30 @@ export class SqliteRuntimeEventStore {
     const agentGraphPresentation = presentationRunId
       ? this.isInternalAgentGraphRunLocked(event.sessionId, presentationRunId, event)
       : { internal: false, hidesUserInput: false };
+    let projectedEvent = event;
+    let media: readonly Record<string, unknown>[] = [];
+    if (event.kind === "message.committed") {
+      const recovered = projectInlineMessageMedia(
+        this.lease.database,
+        event.sessionId,
+        event.data.message,
+        projectSessionMedia(
+          this.lease.database,
+          event.sessionId,
+          event.data.message.providerData?.["picoMedia"],
+          event.runId.startsWith(RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX),
+        ),
+      );
+      projectedEvent = { ...event, data: { ...event.data, message: recovered.message } };
+      media = recovered.media;
+    }
     const mutations = transcriptMutationsForEvent(
-      event,
+      projectedEvent,
       sequence,
       agentGraphPresentation,
       (itemId) => this.readCurrentTranscriptItemLocked(event.sessionId, itemId),
       (kind) => this.readCurrentTranscriptItemsByKindLocked(event.sessionId, kind),
-      event.kind === "message.committed"
-        ? projectSessionMedia(
-            this.lease.database,
-            event.sessionId,
-            event.data.message.providerData?.["picoMedia"],
-            event.runId.startsWith(RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX),
-          )
-        : [],
+      media,
     );
     mutations.forEach((mutation, ordinal) => {
       if (mutation.op === "remove") {

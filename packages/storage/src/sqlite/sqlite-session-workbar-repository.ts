@@ -345,51 +345,7 @@ export class SqliteSessionWorkbarRepository {
     return withWorkspaceSqliteLease(this.#storageRoot, ({ database }) =>
       transaction(database, () => {
         assertMutableSession(database, input.sessionId);
-        const existing = database
-          .prepare("SELECT * FROM session_artifacts WHERE artifact_id = ?")
-          .get(input.artifactId) as ArtifactRow | undefined;
-        if (existing) {
-          if (
-            existing.session_id !== input.sessionId ||
-            existing.digest !== digest ||
-            existing.mime_type !== input.mimeType ||
-            existing.size_bytes !== input.content.byteLength
-          ) {
-            throw new WorkbarConflictError("媒体快照身份冲突");
-          }
-          return artifactFromRow(existing);
-        }
-        const now = this.#now();
-        database
-          .prepare(
-            "INSERT OR IGNORE INTO artifact_blobs (digest, size_bytes, content, created_at) VALUES (?, ?, ?, ?)",
-          )
-          .run(digest, input.content.byteLength, input.content, now);
-        database
-          .prepare(
-            `INSERT INTO session_artifacts
-           (artifact_id, session_id, title, mime_type, digest, size_bytes, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          )
-          .run(
-            input.artifactId,
-            input.sessionId,
-            input.title,
-            input.mimeType,
-            digest,
-            input.content.byteLength,
-            now,
-            now,
-          );
-        const revision = ledgerRevision(database, "session_artifact_ledgers", input.sessionId);
-        writeLedgerRevision(
-          database,
-          "session_artifact_ledgers",
-          input.sessionId,
-          revision + 1,
-          now,
-        );
-        return this.#requireArtifact(database, input.sessionId, input.artifactId);
+        return publishArtifactSnapshotLocked(database, input, digest, this.#now());
       }),
     );
   }
@@ -1077,4 +1033,60 @@ function decodeCursor(cursor: string | undefined, revision: number): number {
   } catch {
     throw new WorkbarConflictError("分页 cursor 已过期或无效");
   }
+}
+
+/** Caller owns the workspace transaction, including projection recovery. */
+export function publishArtifactSnapshotLocked(
+  database: DatabaseSync,
+  input: {
+    sessionId: string;
+    artifactId: string;
+    title: string;
+    mimeType: string;
+    content: Uint8Array;
+  },
+  digest: string,
+  now: number,
+): SessionArtifactRecord {
+  const existing = database
+    .prepare("SELECT * FROM session_artifacts WHERE artifact_id = ?")
+    .get(input.artifactId) as ArtifactRow | undefined;
+  if (existing) {
+    if (
+      existing.session_id !== input.sessionId ||
+      existing.digest !== digest ||
+      existing.mime_type !== input.mimeType ||
+      existing.size_bytes !== input.content.byteLength
+    ) {
+      throw new WorkbarConflictError("媒体快照身份冲突");
+    }
+    return artifactFromRow(existing);
+  }
+  database
+    .prepare(
+      "INSERT OR IGNORE INTO artifact_blobs (digest, size_bytes, content, created_at) VALUES (?, ?, ?, ?)",
+    )
+    .run(digest, input.content.byteLength, input.content, now);
+  database
+    .prepare(
+      `INSERT INTO session_artifacts
+           (artifact_id, session_id, title, mime_type, digest, size_bytes, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      input.artifactId,
+      input.sessionId,
+      input.title,
+      input.mimeType,
+      digest,
+      input.content.byteLength,
+      now,
+      now,
+    );
+  const revision = ledgerRevision(database, "session_artifact_ledgers", input.sessionId);
+  writeLedgerRevision(database, "session_artifact_ledgers", input.sessionId, revision + 1, now);
+  const row = database
+    .prepare("SELECT * FROM session_artifacts WHERE artifact_id = ?")
+    .get(input.artifactId) as ArtifactRow | undefined;
+  return artifactFromRow(row!);
 }

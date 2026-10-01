@@ -22,7 +22,8 @@ import {
   createManagedExecutionBoundary,
   createWorkspaceWritePermissionProfile,
 } from "@pico/core/permission-profile";
-import { SqliteSessionWorkbarRepository } from "@pico/storage";
+import { DatabaseSync } from "node:sqlite";
+import { SqliteSessionWorkbarRepository, operationalDatabasePath } from "@pico/storage";
 import { SessionSubscriptionRegistry } from "@pico/pico-host/session-subscription-owner";
 import { SqliteSessionContinuitySource } from "@pico/pico-host/sqlite-session-continuity-source";
 import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
@@ -424,4 +425,85 @@ test("媒体定稿拒绝越界/超限/假引用，保留文字；pure media 与 
     session.commitMessageOnce("stable-media", { ...original, content: "different" }),
     /another payload/u,
   );
+});
+
+test("Markdown 内嵌图片登记短引用，历史重建幂等且保留原始 Provider 消息", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-inline-media-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new SqliteRuntimeEventStore({ storageRoot: root });
+  t.after(() => store.close());
+  const sessionId = "inline-media";
+  const { ownerFence } = await initializeRuntimeEventOwner(store, { sessionId, workDir: root });
+  const uri = `data:image/png;base64,${png.toString("base64")}`;
+  const content = `\`![代码](${uri})\`\n\n> 说明\n> ![generated image 1](${uri})\n\n- 列表说明\n  ![列表图片](${uri})\n\n[普通链接](${uri})\n\n\`\`\`md\n![代码](${uri})\n\`\`\``;
+  const message = {
+    role: "assistant" as const,
+    content,
+    providerData: { signedReplay: "untouched" },
+  };
+  const event = {
+    schemaVersion: 2 as const,
+    eventId: "inline",
+    sessionId,
+    invocationId: "inline",
+    runId: "inline-run",
+    turnId: "inline-turn",
+    at: new Date().toISOString(),
+    partial: false,
+    visibility: "model" as const,
+    kind: "message.committed" as const,
+    data: { message },
+  };
+  await store.append(event, { ownerFence });
+  const repository = new SqliteSessionWorkbarRepository({ storageRoot: root });
+  const first = await store.readTranscriptProjectionPage({ sessionId, maxBytes: 1024 * 1024 });
+  const item = first.items[0]!.payload as { content: string; media: RuntimeMediaReference[] };
+  assert.equal(item.media.length, 1);
+  assert.equal(item.media[0]!.alt, "generated image 1");
+  assert.ok(item.content.includes(`> ![generated image 1](${item.media[0]!.source})`));
+  assert.ok(item.content.includes(`\`![代码](${uri})\``));
+  assert.ok(item.content.includes(`  ![列表图片](${item.media[0]!.source})`));
+  assert.ok(item.content.includes(`[普通链接](${uri})`));
+  assert.ok(item.content.includes(`\`\`\`md\n![代码](${uri})`));
+  const chunk = repository.readArtifactChunk({ sessionId, artifactId: item.media[0]!.artifactId });
+  assert.deepEqual(Buffer.from(chunk.contentBase64, "base64"), png);
+  const revision = repository.queryArtifacts({ sessionId }).revision;
+  const database = new DatabaseSync(operationalDatabasePath(root));
+  try {
+    database
+      .prepare(
+        "UPDATE runtime_transcript_projection_state SET projector_version = 10 WHERE session_id = ?",
+      )
+      .run(sessionId);
+  } finally {
+    database.close();
+  }
+  const recovered = await store.readTranscriptProjectionPage({ sessionId, maxBytes: 1024 * 1024 });
+  assert.deepEqual(recovered.items[0]!.payload, item);
+  assert.equal(repository.queryArtifacts({ sessionId }).revision, revision);
+  const canonical = (await store.readSession(sessionId)).find(
+    (entry) => entry.eventId === event.eventId,
+  )!;
+  assert.equal(canonical.kind, "message.committed");
+  if (canonical.kind === "message.committed") assert.deepEqual(canonical.data.message, message);
+
+  await store.append(
+    {
+      ...event,
+      eventId: "invalid",
+      turnId: "invalid",
+      data: {
+        message: {
+          role: "assistant",
+          content: `![错误格式](data:image/jpeg;base64,${png.toString("base64")})\n![SVG](data:image/svg+xml;base64,PHN2Zy8+)\n![超限](data:image/png;base64,${Buffer.alloc(2 * 1024 * 1024 + 1).toString("base64")})`,
+        },
+      },
+    },
+    { ownerFence },
+  );
+  const invalid = await store.readTranscriptProjectionPage({ sessionId, maxBytes: 1024 * 1024 });
+  const failed = invalid.items.at(-1)!.payload as { content: string; media?: unknown[] };
+  assert.ok(!failed.media?.length);
+  assert.ok(failed.content.length < 200);
+  assert.equal(repository.queryArtifacts({ sessionId }).revision, revision);
 });

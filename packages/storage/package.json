@@ -5,7 +5,8 @@
   "type": "module",
   "description": "Pico 的持久化策略、Store 契约与 SQLite 实现。",
   "dependencies": {
-    "@pico/core": "*"
+    "@pico/core": "*",
+    "marked": "^18.0.6"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
