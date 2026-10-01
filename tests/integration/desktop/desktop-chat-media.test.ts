@@ -64,6 +64,14 @@ test(
     t.after(() => rm(root, { recursive: true, force: true }));
     const repo = fileURLToPath(new URL("../../../", import.meta.url));
     await build({
+      entryPoints: [join(repo, "apps/desktop/src/main/main-frame-media-permissions.ts")],
+      bundle: true,
+      platform: "node",
+      format: "cjs",
+      external: ["electron"],
+      outfile: join(root, "permissions.cjs"),
+    });
+    await build({
       entryPoints: [join(repo, "tests/fixtures/desktop-media-electron.renderer.tsx")],
       bundle: true,
       platform: "browser",

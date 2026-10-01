@@ -1,7 +1,8 @@
 import { join } from "node:path";
-import { BrowserWindow, session } from "electron";
+import { BrowserWindow } from "electron";
 import { createWindowState, WindowStateStore } from "./window-state.js";
 import { installArtifactPreviewSecurity } from "./artifact-preview-security.js";
+import { installMainFrameMediaPermissions } from "./main-frame-media-permissions.js";
 
 export interface DesktopWindowOptions {
   readonly iconPath: string;
@@ -86,8 +87,5 @@ function configureWebContentsSecurity(
     onRendererGone?.();
     if (!window.isDestroyed()) window.hide();
   });
-  session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => {
-    callback(false);
-  });
-  session.defaultSession.setPermissionCheckHandler(() => false);
+  installMainFrameMediaPermissions(window.webContents);
 }

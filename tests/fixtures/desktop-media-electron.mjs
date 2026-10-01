@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createServer } from "node:http";
+import { createRequire } from "node:module";
 const root = process.argv[2];
 const assets = JSON.parse(readFileSync(join(root, "assets.json"), "utf8"));
 const server = createServer((req, res) => {
@@ -27,6 +28,10 @@ app.whenReady().then(async () => {
       height: 780,
       webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false },
     });
+    const { installMainFrameMediaPermissions } = createRequire(import.meta.url)(
+      join(root, "permissions.cjs"),
+    );
+    installMainFrameMediaPermissions(window.webContents);
     const run = (script) =>
       Promise.race([
         window.webContents.executeJavaScript(script, true),
@@ -154,6 +159,14 @@ app.whenReady().then(async () => {
       `mediaFixture.preview(${JSON.stringify(assets[1].reference)},${JSON.stringify(assets[1].base64)})`,
     );
     await waitFor("document.querySelector('video')?.readyState>=1");
+    await run("document.querySelector('video').requestFullscreen()");
+    await waitFor("document.fullscreenElement?.tagName==='VIDEO'");
+    await run("document.exitFullscreen()");
+    // Same-origin child frames and unrelated permissions remain denied.
+    const childPermissions = await run(
+      `(async()=>{const frame=document.createElement('iframe');frame.src='/';document.body.append(frame);await new Promise(resolve=>frame.onload=resolve);let denied=false;try{await frame.contentDocument.documentElement.requestFullscreen()}catch{denied=true}frame.remove();return denied})()`,
+    );
+    assert.equal(childPermissions, true);
     await run("mediaFixture.clear()");
     await waitFor("created.every(url=>revoked.includes(url))");
     console.log("DESKTOP_CHAT_MEDIA_OK");
