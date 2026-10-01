@@ -1,3 +1,4 @@
+import { projectSessionMedia } from "./sqlite-session-workbar-repository.js";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
@@ -2109,6 +2110,14 @@ export class SqliteRuntimeEventStore {
       agentGraphPresentation,
       (itemId) => this.readCurrentTranscriptItemLocked(event.sessionId, itemId),
       (kind) => this.readCurrentTranscriptItemsByKindLocked(event.sessionId, kind),
+      event.kind === "message.committed"
+        ? projectSessionMedia(
+            this.lease.database,
+            event.sessionId,
+            event.data.message.providerData?.["picoMedia"],
+            event.runId.startsWith(RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX),
+          )
+        : [],
     );
     mutations.forEach((mutation, ordinal) => {
       if (mutation.op === "remove") {
@@ -2689,6 +2698,19 @@ export class SqliteRuntimeEventStore {
     for (const [sessionId, parentSessionId] of batchForkParent) {
       if (contexts.get(sessionId)!.row.fork_parent_session_id === null) {
         setForkParent.run(parentSessionId, sessionId);
+        // Imported messages precede the publication marker. Once lineage is durable,
+        // rebuild in this same transaction to bind only frozen bootstrap media.
+        const hasMedia = this.lease.database
+          .prepare(
+            `SELECT 1 FROM runtime_events WHERE session_id = ? AND kind = 'message.committed'
+           AND json_array_length(json_extract(payload_json, '$.data.message.providerData.picoMedia')) > 0 LIMIT 1`,
+          )
+          .get(sessionId);
+        if (hasMedia)
+          this.rebuildTranscriptProjectionLocked(
+            sessionId,
+            contexts.get(sessionId)!.nextSequence - 1,
+          );
       }
     }
     return results.map((result) => ({
@@ -3370,6 +3392,7 @@ function transcriptMutationsForEvent(
   agentGraphPresentation: AgentGraphRunPresentation,
   current: (itemId: string) => RuntimeTranscriptProjectedItem | undefined,
   currentByKind: (kind: string) => readonly RuntimeTranscriptProjectedItem[],
+  media: readonly Record<string, unknown>[],
 ): readonly TranscriptItemMutation[] {
   if (event.kind === "agent.output" && agentGraphPresentation.operator) {
     const itemId = `agent-output:${event.eventId}`;
@@ -3409,9 +3432,10 @@ function transcriptMutationsForEvent(
     const content =
       typeof displayText === "string" && displayText.trim()
         ? displayText.trim()
-        : message.content.trim();
+        : message.content.trim() ||
+          ((message.images?.length ?? 0) > 0 && media.length === 0 ? "媒体无法预览" : "");
     const mutations: TranscriptItemMutation[] = [];
-    if (message.role === "user" && content) {
+    if (message.role === "user" && (content || media.length > 0)) {
       const itemId = `message:${event.eventId}:user`;
       mutations.push({
         op: "upsert",
@@ -3422,6 +3446,7 @@ function transcriptMutationsForEvent(
           id: itemId,
           kind: "userMessage",
           content,
+          ...(media.length > 0 ? { media } : {}),
           ...(message.providerData?.["picoKind"] === "desktop_user_input" &&
           Array.isArray(message.providerData["skills"])
             ? { skills: message.providerData["skills"] }
@@ -3456,8 +3481,23 @@ function transcriptMutationsForEvent(
       message.role === "assistant"
         ? asJsonRecord(message.providerData?.["picoWebSearch"])
         : undefined;
-    if (message.role === "assistant" && (content || webSearch)) {
+    if (message.role === "assistant" && (content || webSearch || media.length > 0)) {
       const itemId = `message:${messageIdentity}:assistant`;
+      const previous = asJsonRecord(current(itemId)?.payload)?.["media"];
+      const accumulatedMedia = [...(Array.isArray(previous) ? previous : []), ...media]
+        .filter((item, index, all) => {
+          const ref = asJsonRecord(item);
+          return (
+            ref &&
+            all.findIndex((candidate) => {
+              const other = asJsonRecord(candidate);
+              return (
+                other?.["artifactId"] === ref["artifactId"] && other?.["source"] === ref["source"]
+              );
+            }) === index
+          );
+        })
+        .slice(0, 16);
       mutations.push({
         op: "upsert",
         itemId,
@@ -3467,6 +3507,7 @@ function transcriptMutationsForEvent(
           id: itemId,
           kind: "assistantMessage",
           content,
+          ...(accumulatedMedia.length > 0 ? { media: accumulatedMedia } : {}),
           ...(webSearch ? { webSearch } : {}),
           runId: event.runId,
           turnId: event.turnId,
