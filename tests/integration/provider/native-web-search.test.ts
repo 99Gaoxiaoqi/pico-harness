@@ -309,3 +309,44 @@ test("native search descriptor fails clearly before dispatch on wrong protocol a
   }
   assert.equal(requests, 0);
 });
+
+test("Responses 媒体文本投影保留 hosted search 原始重放及工具顺序", async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  const requests: Record<string, unknown>[] = [];
+  globalThis.fetch = async (_url, init) => {
+    requests.push(JSON.parse(String(init?.body)));
+    const body = payload("responses", requests.length === 1);
+    if (requests.length === 1 && body.output) {
+      const item = body.output.find((value) => value.type === "message")!;
+      if ("content" in item)
+        item.content![0]!.text =
+          "News ![图](data:image/png;base64,aGVsbG8=) [视频](data:video/webm;base64,aGVsbG8=)";
+    }
+    return Response.json(body);
+  };
+  const provider = new AiSdkProvider("responses", {
+    baseURL: "https://fixture.invalid",
+    apiKey: "test",
+    model: "gpt-5",
+  });
+  const tools = [local, search("responses")];
+  const answer = await provider.generate(messages, tools);
+  const original = structuredClone(answer);
+  await provider.generate(
+    [...messages, answer, { role: "user", toolCallId: "local_1", content: "inspected" }],
+    tools,
+  );
+  const input = requests[1]!.input as Record<string, unknown>[];
+  const index = input.findIndex((item) => item.type === "web_search_call");
+  assert.deepEqual(input[index], searchItem);
+  assert.equal(input[index + 1]?.type, "function_call");
+  assert.equal(requests[1]!.store, false);
+  const wire = JSON.stringify(input);
+  assert.ok(!wire.includes("data:image/") && !wire.includes("data:video/"));
+  assert.match(wire, /image data omitted/u);
+  assert.match(wire, /video data omitted/u);
+  assert.deepEqual(answer, original);
+});

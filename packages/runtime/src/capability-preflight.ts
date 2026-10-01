@@ -1,3 +1,4 @@
+import { projectMediaTextForModel } from "@pico/core/media";
 import {
   ModelCapabilityError,
   type LLMProvider,
@@ -152,7 +153,7 @@ export function estimateRequestTokens(
 ): number {
   let total = 0;
   for (const message of messages) {
-    total += countTokens(message.content);
+    total += countTokens(projectMediaTextForModel(message.content));
     for (const toolCall of message.toolCalls ?? []) {
       total += countTokens(toolCall.name) + countTokens(toolCall.arguments);
     }

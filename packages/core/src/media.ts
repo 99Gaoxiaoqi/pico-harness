@@ -62,3 +62,16 @@ export function inspectMediaBytes(
 export function mediaPreviewLimit(kind: "image" | "video"): number {
   return kind === "image" ? MEDIA_IMAGE_MAX_BYTES : MEDIA_VIDEO_MAX_BYTES;
 }
+
+/**
+ * Binary media embedded in prose is an output resource, not a text prompt.
+ * Apply only to request text: canonical messages, signed reasoning, tool inputs,
+ * and explicit multimodal attachment bytes must remain unchanged.
+ */
+export function projectMediaTextForModel(text: string): string {
+  return text.replace(
+    /data:((?:image|video)\/[a-z0-9.+-]+)(?:;[^,\s"'<>()[\]`]+)?,[a-z0-9+/=%_-]+/giu,
+    (_uri, mime: string) =>
+      `[${mime.toLowerCase().startsWith("image/") ? "image" : "video"} data omitted: ${mime.toLowerCase()}]`,
+  );
+}

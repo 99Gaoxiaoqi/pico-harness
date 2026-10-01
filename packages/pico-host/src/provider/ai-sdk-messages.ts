@@ -1,3 +1,4 @@
+import { projectMediaTextForModel } from "@pico/core/media";
 import type { AssistantModelMessage, ModelMessage, ToolResultPart } from "ai";
 import type { ImagePart, Message } from "@pico/core";
 
@@ -60,7 +61,7 @@ export function toAiSdkMessages(
   const toolNames = new Map<string, string>();
   for (const message of messages) {
     if (message.role === "system") {
-      result.push({ role: "system", content: message.content });
+      result.push({ role: "system", content: projectMediaTextForModel(message.content) });
     } else if (message.role === "user" && message.toolCallId !== undefined) {
       const toolName = toolNames.get(message.toolCallId);
       if (toolName === undefined) {
@@ -73,7 +74,7 @@ export function toAiSdkMessages(
             type: "tool-result",
             toolCallId: message.toolCallId,
             toolName,
-            output: { type: "text", value: message.content },
+            output: { type: "text", value: projectMediaTextForModel(message.content) },
           },
         ],
       });
@@ -88,9 +89,9 @@ export function toAiSdkMessages(
                 data: image.type === "image_base64" ? image.data : new URL(image.url),
                 mediaType: image.type === "image_base64" ? image.mimeType : "image",
               })),
-              { type: "text", text: message.content },
+              { type: "text", text: projectMediaTextForModel(message.content) },
             ]
-          : message.content,
+          : projectMediaTextForModel(message.content),
       });
     } else {
       const saved = savedContent(message, wire);
@@ -100,7 +101,8 @@ export function toAiSdkMessages(
         if (message.reasoning && wire !== "claude") {
           content.push({ type: "reasoning", text: message.reasoning });
         }
-        if (message.content) content.push({ type: "text", text: message.content });
+        if (message.content)
+          content.push({ type: "text", text: projectMediaTextForModel(message.content) });
         for (const call of message.toolCalls ?? []) {
           content.push({
             type: "tool-call",
@@ -119,6 +121,11 @@ export function toAiSdkMessages(
       }
       for (let index = 0; index < content.length; index++) {
         const part = content[index]!;
+        // Validate replay against the original message before projecting request text.
+        // Keep signatures, hosted tool records and explicit file parts untouched.
+        if (part.type === "text") {
+          content[index] = { ...part, text: projectMediaTextForModel(part.text) };
+        }
         if (part.type === "tool-call") {
           toolNames.set(part.toolCallId, part.toolName);
           // SDK skips hosted search with store:false. This text item carries only an
@@ -151,7 +158,17 @@ export function toAiSdkMessages(
           : content,
       });
       if (saved?.toolResults.length) {
-        result.push({ role: "tool", content: structuredClone(saved.toolResults) });
+        result.push({
+          role: "tool",
+          content: structuredClone(saved.toolResults).map((part) =>
+            part.output.type === "text"
+              ? {
+                  ...part,
+                  output: { ...part.output, value: projectMediaTextForModel(part.output.value) },
+                }
+              : part,
+          ),
+        });
         for (const part of saved.toolResults) toolNames.delete(part.toolCallId);
       }
     }

@@ -18,6 +18,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { projectMediaTextForModel } from "@pico/core/media";
 import {
   isAbortError,
   ContextOverflowError,
@@ -539,7 +540,7 @@ function serializeMessages(msgs: Message[]): string {
   const lines: string[] = [];
   for (const msg of msgs) {
     if (msg.role === "user" && msg.toolCallId !== undefined) {
-      lines.push(`[工具结果] ${msg.content}`);
+      lines.push(`[工具结果] ${projectMediaTextForModel(msg.content)}`);
       continue;
     }
     if (msg.role === "assistant" && msg.toolCalls && msg.toolCalls.length > 0) {
@@ -547,12 +548,12 @@ function serializeMessages(msgs: Message[]): string {
         lines.push(`[助手→工具: ${tc.name}] ${tc.arguments}`);
       }
       if (msg.content && msg.content.trim().length > 0) {
-        lines.push(`[助手] ${msg.content}`);
+        lines.push(`[助手] ${projectMediaTextForModel(msg.content)}`);
       }
       continue;
     }
     const tag = msg.role === "user" ? "用户" : msg.role === "assistant" ? "助手" : "系统";
-    lines.push(`[${tag}] ${msg.content}`);
+    lines.push(`[${tag}] ${projectMediaTextForModel(msg.content)}`);
   }
   return lines.join("\n");
 }

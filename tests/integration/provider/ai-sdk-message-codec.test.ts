@@ -7,6 +7,10 @@ import { fromAiSdkContent, toAiSdkMessages } from "@pico/pico-host/provider/ai-s
 import type { Message } from "@pico/core";
 
 test("AI SDK clients round-trip signed thinking, Responses metadata, images and Pico tool chronology", async () => {
+  const mediaReply =
+    "Checking. ![图](data:image/png;base64,aGVsbG8=) [视频](data:video/mp4;base64,aGVsbG8=)";
+  const projectedReply =
+    "Checking. ![图]([image data omitted: image/png]) [视频]([video data omitted: video/mp4])";
   const requests: Record<string, unknown>[] = [];
   const anthropic = createAnthropic({
     apiKey: "test-key",
@@ -22,7 +26,7 @@ test("AI SDK clients round-trip signed thinking, Responses metadata, images and 
             ? [
                 { type: "thinking", thinking: "inspect first", signature: "authentic-signature" },
                 { type: "redacted_thinking", data: "opaque-redacted" },
-                { type: "text", text: "Checking." },
+                { type: "text", text: mediaReply },
                 { type: "tool_use", id: "call_one", name: "inspect", input: { path: "a.ts" } },
               ]
             : [{ type: "text", text: "Done." }],
@@ -55,7 +59,8 @@ test("AI SDK clients round-trip signed thinking, Responses metadata, images and 
     maxRetries: 0,
   });
   const answer = fromAiSdkContent(first.content, "claude");
-  assert.equal(answer.content, "Checking.");
+  assert.equal(answer.content, mediaReply);
+  const originalAnswer = structuredClone(answer);
   assert.equal(answer.reasoning, "inspect first");
   assert.deepEqual(answer.toolCalls, [
     { id: "call_one", name: "inspect", arguments: '{"path":"a.ts"}' },
@@ -80,13 +85,14 @@ test("AI SDK clients round-trip signed thinking, Responses metadata, images and 
   assert.deepEqual(wireMessages[1]!.content, [
     { type: "thinking", thinking: "inspect first", signature: "authentic-signature" },
     { type: "redacted_thinking", data: "opaque-redacted" },
-    { type: "text", text: "Checking." },
+    { type: "text", text: projectedReply },
     { type: "tool_use", id: "call_one", name: "inspect", input: { path: "a.ts" } },
   ]);
   assert.deepEqual(wireMessages[2]!.content, [
     { type: "tool_result", tool_use_id: "call_one", content: "file contents" },
   ]);
   assert.equal((wireMessages[0]!.content[0] as { type: string }).type, "image");
+  assert.deepEqual(answer, originalAnswer, "signed replay is preserved in the source message");
   const edited = toAiSdkMessages(
     [{ ...answer, content: "compressed", toolCalls: undefined, reasoning: undefined }],
     "claude",

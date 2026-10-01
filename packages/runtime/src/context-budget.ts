@@ -1,3 +1,4 @@
+import { projectMediaTextForModel } from "@pico/core/media";
 import type { Message, ProviderProfile, ToolDefinition } from "@pico/core";
 
 export const DEFAULT_SAFETY_MARGIN_TOKENS = 1024;
@@ -16,7 +17,7 @@ export interface ContextBudget {
 }
 
 function messageChars(message: Message): number {
-  let chars = message.content.length + (message.reasoning?.length ?? 0);
+  let chars = projectMediaTextForModel(message.content).length + (message.reasoning?.length ?? 0);
   for (const call of message.toolCalls ?? []) chars += call.name.length + call.arguments.length;
   return chars;
 }
