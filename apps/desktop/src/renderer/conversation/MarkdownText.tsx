@@ -3,9 +3,15 @@ import {
   type MarkdownComponents,
   type MarkdownInlinePlugin,
 } from "@astryxdesign/core/Markdown";
-import { isSafeMarkdownHref, sanitizeMarkdownText } from "@pico/protocol";
+import {
+  isSafeMarkdownHref,
+  sanitizeMarkdownText,
+  type RuntimeMediaReference,
+} from "@pico/protocol";
 import { lexer, type Token, type Tokens } from "marked";
 import React, { useMemo, type ElementType } from "react";
+
+import { MediaPreview } from "./MediaPreview.js";
 
 // Node integration tests use the classic JSX transform.
 void React;
@@ -13,6 +19,7 @@ void React;
 export interface MarkdownTextProps {
   readonly text: string;
   readonly dim?: boolean | undefined;
+  readonly media?: readonly RuntimeMediaReference[] | undefined;
 }
 
 const components: MarkdownComponents = {
@@ -43,7 +50,35 @@ const components: MarkdownComponents = {
 };
 
 /** Astryx renders the document; Pico retains its text, URL and inert-image policy. */
-export function MarkdownText({ text, dim = false }: MarkdownTextProps) {
+export function MarkdownText({ text, dim = false, media = [] }: MarkdownTextProps) {
+  const mediaComponents = useMemo<MarkdownComponents>(
+    () => ({
+      ...components,
+      image: ({ src, alt }) => {
+        const reference = registeredMedia(src, media);
+        return reference ? (
+          <MediaPreview reference={reference} />
+        ) : (
+          <span className="desktop-markdown__image-placeholder">[图片：{alt}]</span>
+        );
+      },
+      link: ({ href, children }) => {
+        const reference = registeredMedia(href, media);
+        return reference?.kind === "video" ? (
+          <MediaPreview reference={reference} />
+        ) : isSafeMarkdownHref(href) ? (
+          <a href={href} rel="noopener noreferrer" target="_blank">
+            {children}
+          </a>
+        ) : (
+          <span className="desktop-markdown__blocked-link" title="链接已拦截">
+            {children}
+          </span>
+        );
+      },
+    }),
+    [media],
+  );
   const markdown = useMemo(() => {
     const sanitized = sanitizeMarkdownText(text);
     // Astryx 0.6.2 drops checkboxes in mixed ordinary/task lists. Preserve the existing
@@ -73,7 +108,7 @@ export function MarkdownText({ text, dim = false }: MarkdownTextProps) {
   return (
     <Markdown
       className={`desktop-markdown${dim ? " desktop-markdown--dim" : ""}`}
-      components={components}
+      components={mediaComponents}
       inlinePlugins={markdown.inlinePlugins}
       isStreaming={false}
       autolink="gfm"
@@ -150,4 +185,49 @@ function filterToken(token: Token, taskPrefix: string): string {
   }
   const nested = (token as Token & { tokens?: Token[] }).tokens;
   return nested ? filterHtml(token.raw, nested, taskPrefix) : token.raw;
+}
+
+/** Exact registered destinations only; schemes supplied by model text never grant access. */
+export function registeredMedia(
+  destination: string,
+  media: readonly RuntimeMediaReference[],
+): RuntimeMediaReference | undefined {
+  if (destination.startsWith("pico://artifact/"))
+    return media.find(
+      (reference) => destination === `pico://artifact/${encodeURIComponent(reference.artifactId)}`,
+    );
+  if (
+    !destination ||
+    (/^[a-z][a-z0-9+.-]*:/i.test(destination) && !destination.startsWith("file://")) ||
+    destination.startsWith("//")
+  )
+    return undefined;
+  return media.find((reference) => reference.source === destination);
+}
+
+/** Traverse parsed Markdown, preserving code/HTML as inert text when finding inline media. */
+export function referencedMediaIds(
+  text: string,
+  media: readonly RuntimeMediaReference[],
+): Set<string> {
+  const ids = new Set<string>();
+  const visit = (tokens: readonly Token[]) => {
+    for (const token of tokens) {
+      if (token.type === "code" || token.type === "codespan" || token.type === "html") continue;
+      if (token.type === "image" || token.type === "link") {
+        const reference = registeredMedia(token.href, media);
+        if (reference && (token.type === "image" || reference.kind === "video"))
+          ids.add(reference.artifactId);
+      }
+      if (token.type === "list") for (const item of token.items) visit(item.tokens);
+      else if (token.type === "table")
+        for (const row of [token.header, ...token.rows]) for (const cell of row) visit(cell.tokens);
+      else {
+        const nested = (token as Token & { tokens?: Token[] }).tokens;
+        if (nested) visit(nested);
+      }
+    }
+  };
+  visit(lexer(sanitizeMarkdownText(text), { gfm: true }));
+  return ids;
 }

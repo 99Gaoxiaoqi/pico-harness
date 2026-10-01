@@ -1493,6 +1493,11 @@ export function ConversationPage() {
               </div>
             )}
             <ConversationTranscript
+              mediaScope={
+                sessionRef
+                  ? { workspacePath: sessionRef.workspacePath, sessionId: sessionRef.sessionId }
+                  : undefined
+              }
               activeRun={activeRun}
               items={
                 retryNotice

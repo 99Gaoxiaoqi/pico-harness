@@ -26,7 +26,8 @@ import type {
   ThinkingItemView,
 } from "./types.js";
 import { conversationItemKey, mergeConversationItemGroups } from "./items.js";
-import { MarkdownText } from "./MarkdownText.js";
+import { MarkdownText, referencedMediaIds } from "./MarkdownText.js";
+import { MediaProvider, MediaPreview, type MediaScope } from "./MediaPreview.js";
 import { loadedAgentTools } from "./agent-capability.js";
 import { WebSearchRecord } from "./WebSearchRecord.js";
 import {
@@ -36,6 +37,7 @@ import {
 } from "./process-fold.js";
 
 export interface ConversationTranscriptProps {
+  readonly mediaScope?: MediaScope | undefined;
   readonly activeRun?: TranscriptActiveRun | undefined;
   readonly assistantLabel?: string | undefined;
   readonly items: readonly ConversationItemView[];
@@ -493,6 +495,7 @@ function renderDefaultItem(
               </div>
             ) : null}
             {renderText(item.text, item)}
+            <StandaloneMedia item={item} />
           </div>
         </article>
       );
@@ -505,7 +508,10 @@ function renderDefaultItem(
           <h3 className={assistantLabel ? "conversation-message__author" : "conversation-sr-only"}>
             {assistantLabel ?? "Pico"}
           </h3>
-          <div className="conversation-message__body">{renderText(item.text, item)}</div>
+          <div className="conversation-message__body">
+            {renderText(item.text, item)}
+            <StandaloneMedia item={item} />
+          </div>
           {item.webSearch && <WebSearchRecord record={item.webSearch} />}
         </article>
       );
@@ -756,12 +762,21 @@ function renderDefaultItem(
 
 export function ConversationTranscript({
   items,
+  mediaScope,
   activeRun,
   assistantLabel,
   label = "会话记录",
   emptyState,
   onOpenItem,
-  renderText = (text, item) => <MarkdownText text={text} dim={item.kind === "thinking"} />,
+  renderText = (text, item) => (
+    <MarkdownText
+      text={text}
+      dim={item.kind === "thinking"}
+      media={
+        item.kind === "userMessage" || item.kind === "assistantMessage" ? item.media : undefined
+      }
+    />
+  ),
   renderItem,
 }: ConversationTranscriptProps) {
   const visibleItems = mergeConversationItemGroups(items).filter(
@@ -890,29 +905,53 @@ export function ConversationTranscript({
   }
 
   return (
-    <ol
-      className="conversation-transcript"
-      aria-label={label}
-      aria-live="polite"
-      aria-relevant="additions text"
-    >
-      {turns.map((turn) => (
-        <li className="conversation-turn" key={turn.key}>
-          <ol className="conversation-turn__items">
-            {turn.items.map((item) =>
-              item.kind === "process" ? (
-                <li className="conversation-transcript__item" data-kind="process" key={item.key}>
-                  <ProcessDisclosure item={item}>
-                    {renderDisplayItems(item.items)}
-                  </ProcessDisclosure>
-                </li>
-              ) : (
-                renderDisplayItems([item])
-              ),
-            )}
-          </ol>
-        </li>
-      ))}
-    </ol>
+    <MediaProvider key={JSON.stringify(mediaScope)} scope={mediaScope}>
+      <ol
+        className="conversation-transcript"
+        aria-label={label}
+        aria-live="polite"
+        aria-relevant="additions text"
+      >
+        {turns.map((turn) => (
+          <li className="conversation-turn" key={turn.key}>
+            <ol className="conversation-turn__items">
+              {turn.items.map((item) =>
+                item.kind === "process" ? (
+                  <li className="conversation-transcript__item" data-kind="process" key={item.key}>
+                    <ProcessDisclosure item={item}>
+                      {renderDisplayItems(item.items)}
+                    </ProcessDisclosure>
+                  </li>
+                ) : (
+                  renderDisplayItems([item])
+                ),
+              )}
+            </ol>
+          </li>
+        ))}
+      </ol>
+    </MediaProvider>
+  );
+}
+
+function StandaloneMedia({
+  item,
+}: {
+  item: Extract<ConversationItemView, { kind: "userMessage" | "assistantMessage" }>;
+}) {
+  const referenced = referencedMediaIds(item.text, item.media ?? []);
+  const seen = new Set<string>();
+  return (
+    <>
+      {item.media
+        ?.filter((reference) => {
+          if (referenced.has(reference.artifactId) || seen.has(reference.artifactId)) return false;
+          seen.add(reference.artifactId);
+          return true;
+        })
+        .map((reference) => (
+          <MediaPreview key={reference.artifactId} reference={reference} />
+        ))}
+    </>
   );
 }

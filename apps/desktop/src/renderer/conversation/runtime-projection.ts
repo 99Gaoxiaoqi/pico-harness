@@ -4,6 +4,9 @@ import { subagentMetadata } from "./subagent-navigation.js";
 import { parseWebSearchRecord } from "./WebSearchRecord.js";
 import {
   TRANSCRIPT_PROJECTOR_VERSION,
+  MEDIA_MAX_REFERENCES,
+  mediaPreviewLimit,
+  type RuntimeMediaReference,
   type RuntimeActiveOverlayEntry,
   type RuntimeConversationItem,
   type RuntimePlanControlSnapshot,
@@ -260,14 +263,16 @@ function conversationItem(item: JsonRecord, index: number): ConversationItemView
   };
   if (item.kind === "userMessage" || item.kind === "assistantMessage") {
     const text = stringValue(item.content);
+    const media = projectMedia(item.media);
     const webSearch =
       item.kind === "assistantMessage" ? parseWebSearchRecord(item.webSearch) : undefined;
-    if (!text && !webSearch) return undefined;
+    if (!text && !webSearch && !media?.length) return undefined;
     return {
       id,
       kind: item.kind,
       text,
       ...(webSearch ? { webSearch } : {}),
+      ...(media?.length ? { media } : {}),
       ...(item.kind === "userMessage" && Array.isArray(item.skills)
         ? {
             skills: recordArray(item.skills)
@@ -866,4 +871,26 @@ export function parseGoalItem(value: unknown): ConversationItemView | undefined 
     state: goalProgressState(status),
     statusLabel: goalStatusLabel(status),
   };
+}
+
+function projectMedia(value: unknown): readonly RuntimeMediaReference[] | undefined {
+  if (!Array.isArray(value) || value.length > MEDIA_MAX_REFERENCES) return undefined;
+  const valid = value.every(
+    (entry) =>
+      isRecord(entry) &&
+      typeof entry.artifactId === "string" &&
+      entry.artifactId.length > 0 &&
+      entry.artifactId.length <= 512 &&
+      (entry.kind === "image" || entry.kind === "video") &&
+      typeof entry.alt === "string" &&
+      entry.alt.length <= 4096 &&
+      typeof entry.mimeType === "string" &&
+      typeof entry.digest === "string" &&
+      /^[a-f0-9]{64}$/.test(entry.digest) &&
+      Number.isSafeInteger(entry.sizeBytes) &&
+      Number(entry.sizeBytes) > 0 &&
+      Number(entry.sizeBytes) <= mediaPreviewLimit(entry.kind) &&
+      (entry.source === undefined || typeof entry.source === "string"),
+  );
+  return valid ? (value as RuntimeMediaReference[]) : undefined;
 }

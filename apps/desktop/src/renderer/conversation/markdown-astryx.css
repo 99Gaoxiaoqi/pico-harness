@@ -79,3 +79,71 @@
 .desktop-markdown .astryx-table :is(th, td) {
   text-align: revert-layer;
 }
+
+.conversation-media {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  max-width: 100%;
+  margin-block: 8px;
+  vertical-align: top;
+}
+.conversation-media video,
+.conversation-media__image-button img {
+  display: block;
+  max-width: 100%;
+  max-height: 420px;
+  object-fit: contain;
+  border-radius: 8px;
+}
+.conversation-media video {
+  width: min(560px, 100%);
+  background: #111;
+}
+.conversation-media__image-button {
+  display: block;
+  max-width: 100%;
+  border: 0;
+  padding: 0;
+  background: none;
+  cursor: zoom-in;
+}
+.conversation-media__image-button:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 3px;
+}
+.conversation-media__error {
+  color: var(--color-danger, #b54b4b);
+}
+.conversation-media__save {
+  border: 0;
+  background: none;
+  padding: 2px 0;
+  text-decoration: underline;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+.conversation-media__dialog {
+  max-width: 94vw;
+  max-height: 94vh;
+  padding: 12px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--color-surface, #fff);
+}
+.conversation-media__dialog::backdrop {
+  background: rgb(0 0 0 / 65%);
+}
+.conversation-media__dialog img {
+  display: block;
+  max-width: 88vw;
+  max-height: 82vh;
+  object-fit: contain;
+}
+.conversation-media__dialog button {
+  float: right;
+  margin-bottom: 8px;
+}

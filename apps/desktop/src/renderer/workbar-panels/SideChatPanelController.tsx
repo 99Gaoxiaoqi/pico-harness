@@ -280,6 +280,7 @@ export function SideChatPanelController({
 
   return (
     <SideChatWorkbarPanel
+      workspacePath={workspacePath}
       commands={commands.suggestions}
       resources={composerResources}
       resourceRequest={resourceRequest}

@@ -1,3 +1,4 @@
+import { MediaPreview } from "../conversation/MediaPreview.js";
 import { Button } from "../components.js";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { MarkdownText } from "../conversation/MarkdownText.js";
@@ -14,10 +15,12 @@ export function ArtifactPreview({
   artifact,
   content,
   onEscape,
+  onSave,
 }: {
   artifact: WorkbarArtifact;
   content: WorkbarArtifactContent;
   onEscape?: () => void;
+  onSave?: (() => void) | undefined;
 }) {
   const kind = artifactPreviewKind(artifact);
   const [source, setSource] = useState(false);
@@ -37,8 +40,9 @@ export function ArtifactPreview({
   }, [kind, onEscape]);
   if (kind === "unsupported")
     return <p className="tool-panel__state">此文件格式不支持内嵌预览，请打开或另存后查看。</p>;
-  if (kind === "image" || kind === "pdf")
-    return <BinaryPreview artifact={artifact} content={content} />;
+  if (kind === "image" || kind === "video")
+    return <ArtifactMediaPreview artifact={artifact} content={content} onSave={onSave} />;
+  if (kind === "pdf") return <PdfPreview artifact={artifact} content={content} />;
   return (
     <div className="artifact-preview">
       {(kind === "markdown" || kind === "html") && (
@@ -110,7 +114,7 @@ export function ArtifactPreview({
   );
 }
 
-function BinaryPreview({
+function PdfPreview({
   artifact,
   content,
 }: {
@@ -147,7 +151,7 @@ function BinaryPreview({
     );
   if (!content.complete) return <p className="tool-panel__notice">正在读取预览内容…</p>;
   if (!url) return <p className="tool-panel__state">正在准备预览…</p>;
-  return artifactPreviewKind(artifact) === "pdf" ? (
+  return (
     <>
       <embed
         className="artifact-preview__frame"
@@ -157,12 +161,49 @@ function BinaryPreview({
       />
       <p className="tool-panel__notice">若 PDF 预览不可用，请另存后查看。</p>
     </>
-  ) : (
-    <img
-      className="artifact-preview__image"
-      src={url}
-      alt={artifact.name}
-      onError={() => setError("图片解码失败，请另存后查看。")}
+  );
+}
+
+function ArtifactMediaPreview({
+  artifact,
+  content,
+  onSave,
+}: {
+  artifact: WorkbarArtifact;
+  content: WorkbarArtifactContent;
+  onSave?: (() => void) | undefined;
+}) {
+  const payload = useMemo(() => {
+    if (!content.complete) return {};
+    try {
+      if (content.artifactId !== artifact.id || content.encoding !== "base64")
+        throw new Error("媒体内容与生成文件不符。");
+      return { bytes: decodeArtifactBinary(content.content) };
+    } catch (cause) {
+      return { error: cause instanceof Error ? cause.message : "媒体读取失败。" };
+    }
+  }, [artifact.id, content]);
+  if (payload.error)
+    return (
+      <p role="alert" className="tool-panel__error">
+        {payload.error}
+      </p>
+    );
+  if (!payload.bytes) return <p className="tool-panel__notice">正在读取预览内容…</p>;
+  const kind = artifactPreviewKind(artifact);
+  if (kind !== "image" && kind !== "video") return null;
+  return (
+    <MediaPreview
+      reference={{
+        artifactId: artifact.id,
+        alt: artifact.name,
+        kind,
+        mimeType: artifact.mimeType,
+        sizeBytes: artifact.size,
+        digest: artifact.digest ?? "",
+      }}
+      bytes={payload.bytes}
+      onSave={onSave}
     />
   );
 }

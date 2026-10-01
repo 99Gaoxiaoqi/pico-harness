@@ -1,5 +1,9 @@
 import type { ReactNode } from "react";
-import type { ApprovalSessionScopeView, RuntimeToolResultEnvelope } from "@pico/protocol";
+import type {
+  ApprovalSessionScopeView,
+  RuntimeToolResultEnvelope,
+  RuntimeMediaReference,
+} from "@pico/protocol";
 
 export type ConversationRunStatus = "started" | "completed" | "interrupted" | "failed";
 
@@ -14,6 +18,7 @@ interface ConversationItemBase {
 
 export interface UserMessageItemView extends ConversationItemBase {
   readonly kind: "userMessage";
+  readonly media?: readonly RuntimeMediaReference[] | undefined;
   readonly skills?: readonly {
     readonly name: string;
     readonly sourceId?: string;
@@ -24,6 +29,7 @@ export interface UserMessageItemView extends ConversationItemBase {
 
 export interface AssistantMessageItemView extends ConversationItemBase {
   readonly kind: "assistantMessage";
+  readonly media?: readonly RuntimeMediaReference[] | undefined;
   readonly text: string;
   readonly streaming?: boolean | undefined;
   readonly runId?: string | undefined;
