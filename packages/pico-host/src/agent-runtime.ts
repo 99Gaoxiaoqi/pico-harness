@@ -928,6 +928,17 @@ export async function executeAgentRuntime(
         resumeExistingSession,
       });
   const session = sessionLease.session;
+  session.setMediaArtifactsChangedSink(
+    dependencies.sessionResourceChangedSink
+      ? (revision) =>
+          dependencies.sessionResourceChangedSink?.({
+            workspacePath: workDir,
+            sessionId: session.id,
+            resource: "artifacts",
+            revision,
+          })
+      : undefined,
+  );
   const sessionStorageRoot = session.runtimeStorageRoot;
   let executionCoordinator: PlanCoordinator | undefined;
   let activeExecutionPlanId: string | undefined;

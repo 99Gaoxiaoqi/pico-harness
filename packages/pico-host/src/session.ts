@@ -1,3 +1,4 @@
+import { prepareSessionMedia, withoutMessageMedia } from "./session-media.js";
 import { SqliteRuntimeControlStore } from "@pico/storage/sqlite/sqlite-runtime-control-store";
 // 会话管理:Session 物理隔离与完整模型历史的底层实现。
 //
@@ -242,6 +243,8 @@ export class Session
     { readonly message: Message; readonly receipt: CommitReceipt }
   >();
   private inMemoryCommitSeq = 0;
+  private mediaArtifactsChangedSink: ((revision: number) => void) | undefined;
+  private readonly preparedMedia = new WeakMap<Message, { source: Message; prepared: Message }>();
 
   readonly fileHistory: FileHistoryState = createFileHistoryState();
 
@@ -970,12 +973,13 @@ export class Session
     }
     await this.enqueuePersistence("messages", async () => {
       await this.ensureRuntimeSession();
+      const prepared = await Promise.all(msgs.map((message) => this.prepareMessageMedia(message)));
       const runtimeRun = runtimePort.currentRun();
       if (runtimeRun?.claimsSession(this)) {
-        await runtimeRun.commitMessages(this, msgs);
+        await runtimeRun.commitMessages(this, prepared);
         return;
       }
-      if (!(await runtimePort.commitExternalMessages(this, msgs))) {
+      if (!(await runtimePort.commitExternalMessages(this, prepared))) {
         throw new Error(`Runtime session ${this.id} is not initialized`);
       }
     });
@@ -995,14 +999,53 @@ export class Session
     }
     return this.enqueuePersistence("message", async () => {
       await this.ensureRuntimeSession();
+      const existing = await this.store!.readSessionEvent(this.id, eventId);
+      let prepared: Message;
+      if (existing?.event.kind === "message.committed") {
+        if (
+          !isDeepStrictEqual(
+            withoutMessageMedia(message),
+            withoutMessageMedia(existing.event.data.message),
+          )
+        ) {
+          throw new Error(`Runtime event ID ${eventId} is already bound to another payload`);
+        }
+        prepared = existing.event.data.message;
+      } else {
+        prepared = await this.prepareMessageMedia(message);
+      }
       const runtimeRun = runtimePort.currentRun();
       if (runtimeRun?.claimsSession(this)) {
-        return runtimeRun.commitMessageOnce(this, eventId, message);
+        return runtimeRun.commitMessageOnce(this, eventId, prepared);
       }
-      const receipt = await runtimePort.commitExternalMessageOnce(this, eventId, message);
+      const receipt = await runtimePort.commitExternalMessageOnce(this, eventId, prepared);
       if (!receipt) throw new Error(`Runtime session ${this.id} is not initialized`);
       return receipt;
     });
+  }
+
+  /** Bind the active host's existing resource notification lane. */
+  setMediaArtifactsChangedSink(sink: ((revision: number) => void) | undefined): void {
+    this.mediaArtifactsChangedSink = sink;
+  }
+
+  private async prepareMessageMedia(message: Message): Promise<Message> {
+    const source = withoutMessageMedia(message);
+    const cached = this.preparedMedia.get(message);
+    if (cached && isDeepStrictEqual(cached.source, source)) return cached.prepared;
+    const prepared = await prepareSessionMedia({
+      message: source,
+      sessionId: this.id,
+      workDir: this.workDir,
+      storageRoot: this.runtimeStorageRoot,
+      additionalDirectories: this.persistedSettings?.additionalDirectories ?? [],
+      ...(this.persistedBoundary ? { boundary: this.persistedBoundary } : {}),
+      ...(this.mediaArtifactsChangedSink
+        ? { onArtifactsChanged: this.mediaArtifactsChangedSink }
+        : {}),
+    });
+    this.preparedMedia.set(message, { source, prepared });
+    return prepared;
   }
 
   /** Advances the disposable in-memory Session projection once for one durable append batch. */

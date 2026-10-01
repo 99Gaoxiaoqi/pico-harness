@@ -330,6 +330,70 @@ export class SqliteSessionWorkbarRepository {
     });
   }
 
+  /** Host-owned, bounded immutable binary snapshot. Avoid repeated ingest rewrites. */
+  publishArtifactSnapshot(input: {
+    readonly sessionId: string;
+    readonly artifactId: string;
+    readonly title: string;
+    readonly mimeType: string;
+    readonly content: Uint8Array;
+  }): SessionArtifactRecord {
+    if (input.content.byteLength > 16 * 1024 * 1024) {
+      throw new WorkbarConflictError("媒体快照超过 16 MiB 上限");
+    }
+    const digest = createHash("sha256").update(input.content).digest("hex");
+    return withWorkspaceSqliteLease(this.#storageRoot, ({ database }) =>
+      transaction(database, () => {
+        assertMutableSession(database, input.sessionId);
+        const existing = database
+          .prepare("SELECT * FROM session_artifacts WHERE artifact_id = ?")
+          .get(input.artifactId) as ArtifactRow | undefined;
+        if (existing) {
+          if (
+            existing.session_id !== input.sessionId ||
+            existing.digest !== digest ||
+            existing.mime_type !== input.mimeType ||
+            existing.size_bytes !== input.content.byteLength
+          ) {
+            throw new WorkbarConflictError("媒体快照身份冲突");
+          }
+          return artifactFromRow(existing);
+        }
+        const now = this.#now();
+        database
+          .prepare(
+            "INSERT OR IGNORE INTO artifact_blobs (digest, size_bytes, content, created_at) VALUES (?, ?, ?, ?)",
+          )
+          .run(digest, input.content.byteLength, input.content, now);
+        database
+          .prepare(
+            `INSERT INTO session_artifacts
+           (artifact_id, session_id, title, mime_type, digest, size_bytes, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            input.artifactId,
+            input.sessionId,
+            input.title,
+            input.mimeType,
+            digest,
+            input.content.byteLength,
+            now,
+            now,
+          );
+        const revision = ledgerRevision(database, "session_artifact_ledgers", input.sessionId);
+        writeLedgerRevision(
+          database,
+          "session_artifact_ledgers",
+          input.sessionId,
+          revision + 1,
+          now,
+        );
+        return this.#requireArtifact(database, input.sessionId, input.artifactId);
+      }),
+    );
+  }
+
   abortArtifact(input: { readonly sessionId: string; readonly ingestId: string }): {
     readonly aborted: true;
   } {
@@ -425,27 +489,27 @@ export class SqliteSessionWorkbarRepository {
     return withWorkspaceSqliteLease(this.#storageRoot, ({ database }) => {
       requireSession(database, input.sessionId);
       const artifact = this.#requireArtifact(database, input.sessionId, input.artifactId);
-      const row = database
-        .prepare("SELECT content FROM artifact_blobs WHERE digest = ?")
-        .get(artifact.digest) as { content: Uint8Array } | undefined;
-      if (!row) throw new WorkbarNotFoundError(`Artifact blob 不存在: ${artifact.digest}`);
-      const content = Buffer.from(row.content);
-      const offsetBytes = Math.min(input.offsetBytes ?? 0, content.byteLength);
+      const offsetBytes = Math.min(input.offsetBytes ?? 0, artifact.sizeBytes);
       const limitBytes = boundedLimit(
         input.limitBytes,
         MAX_ARTIFACT_CHUNK_BYTES,
         MAX_ARTIFACT_CHUNK_BYTES,
       );
-      const chunk = content.subarray(offsetBytes, offsetBytes + limitBytes);
+      // SQLite substr is one-based; only the requested range crosses into JS memory.
+      const row = database
+        .prepare("SELECT substr(content, ?, ?) AS content FROM artifact_blobs WHERE digest = ?")
+        .get(offsetBytes + 1, limitBytes, artifact.digest) as { content: Uint8Array } | undefined;
+      if (!row) throw new WorkbarNotFoundError(`Artifact blob 不存在: ${artifact.digest}`);
+      const chunk = Buffer.from(row.content);
       const endOffsetBytes = offsetBytes + chunk.byteLength;
       return {
         artifact,
         contentBase64: chunk.toString("base64"),
         offsetBytes,
         endOffsetBytes,
-        totalBytes: content.byteLength,
-        truncated: endOffsetBytes < content.byteLength,
-        ...(endOffsetBytes < content.byteLength ? { nextOffsetBytes: endOffsetBytes } : {}),
+        totalBytes: artifact.sizeBytes,
+        truncated: endOffsetBytes < artifact.sizeBytes,
+        ...(endOffsetBytes < artifact.sizeBytes ? { nextOffsetBytes: endOffsetBytes } : {}),
       };
     });
   }
@@ -543,13 +607,20 @@ export class SqliteSessionWorkbarRepository {
         if (sourceArtifactRevision > 0) {
           database
             .prepare(
-              "INSERT INTO session_artifact_ledgers (session_id, revision, updated_at) VALUES (?, ?, ?)",
+              "INSERT OR IGNORE INTO session_artifact_ledgers (session_id, revision, updated_at) VALUES (?, ?, ?)",
             )
             .run(targetSessionId, sourceArtifactRevision, now);
           const artifacts = database
             .prepare("SELECT * FROM session_artifacts WHERE session_id = ? ORDER BY created_at ASC")
             .all(sourceSessionId) as unknown as ArtifactRow[];
           for (const row of artifacts) {
+            // The transcript projector already binds inherited media to the fork.
+            if (
+              database
+                .prepare("SELECT 1 FROM session_artifacts WHERE session_id = ? AND artifact_id = ?")
+                .get(targetSessionId, inheritedMediaArtifactId(targetSessionId, row.artifact_id))
+            )
+              continue;
             database
               .prepare(
                 `INSERT INTO session_artifacts
@@ -698,6 +769,7 @@ interface TaskRow {
   readonly updated_at: number;
 }
 interface ArtifactRow {
+  readonly session_id: string;
   readonly artifact_id: string;
   readonly title: string;
   readonly mime_type: string;
@@ -811,6 +883,128 @@ function writeCommand(
       `INSERT INTO ${table} (session_id, idempotency_key, request_hash, result_json, created_at) VALUES (?, ?, ?, ?, ?)`,
     )
     .run(sessionId, key, fingerprint, JSON.stringify(result), now);
+}
+
+export function inheritedMediaArtifactId(sessionId: string, artifactId: string): string {
+  return `media:fork:${createHash("sha256").update(`${sessionId}\0${artifactId}`).digest("hex")}`;
+}
+
+/** Pure database projection: only frozen fork bootstrap facts may inherit an ancestor blob. */
+export function projectSessionMedia(
+  database: DatabaseSync,
+  sessionId: string,
+  value: unknown,
+  forkBootstrap: boolean,
+): readonly Record<string, unknown>[] {
+  if (!Array.isArray(value)) return [];
+  const result: Record<string, unknown>[] = [];
+  for (const raw of value.slice(0, 16)) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const ref = raw as Record<string, unknown>;
+    if (
+      typeof ref.artifactId !== "string" ||
+      ref.artifactId.length > 256 ||
+      typeof ref.alt !== "string" ||
+      ref.alt.length > 2048 ||
+      typeof ref.mimeType !== "string" ||
+      (ref.source !== undefined && (typeof ref.source !== "string" || ref.source.length > 4096)) ||
+      typeof ref.digest !== "string" ||
+      !/^[a-f0-9]{64}$/u.test(ref.digest) ||
+      typeof ref.sizeBytes !== "number" ||
+      !Number.isSafeInteger(ref.sizeBytes) ||
+      ref.sizeBytes <= 0 ||
+      !(ref.kind === "image"
+        ? ["image/png", "image/jpeg", "image/gif", "image/webp", "image/avif"].includes(
+            String(ref.mimeType),
+          ) && ref.sizeBytes <= 2 * 1024 * 1024
+        : ref.kind === "video" &&
+          ["video/mp4", "video/webm"].includes(String(ref.mimeType)) &&
+          ref.sizeBytes <= 16 * 1024 * 1024)
+    )
+      continue;
+    const matches = (row: ArtifactRow | undefined) =>
+      row &&
+      row.digest === ref.digest &&
+      row.mime_type === ref.mimeType &&
+      row.size_bytes === ref.sizeBytes;
+    let row = database
+      .prepare("SELECT * FROM session_artifacts WHERE session_id = ? AND artifact_id = ?")
+      .get(sessionId, ref.artifactId) as ArtifactRow | undefined;
+    if (!matches(row) && forkBootstrap) {
+      const inheritedId = inheritedMediaArtifactId(sessionId, ref.artifactId);
+      row = database
+        .prepare("SELECT * FROM session_artifacts WHERE session_id = ? AND artifact_id = ?")
+        .get(sessionId, inheritedId) as ArtifactRow | undefined;
+      if (!matches(row)) {
+        // Existing session-owned clones remain valid when an ancestor is later deleted.
+        row = database
+          .prepare(
+            "SELECT * FROM session_artifacts WHERE session_id = ? AND digest = ? AND mime_type = ? LIMIT 1",
+          )
+          .get(sessionId, ref.digest, ref.mimeType) as ArtifactRow | undefined;
+      }
+      if (!matches(row)) {
+        const source = database
+          .prepare("SELECT * FROM session_artifacts WHERE artifact_id = ?")
+          .get(ref.artifactId) as ArtifactRow | undefined;
+        if (!matches(source)) continue;
+        const visited = new Set<string>([sessionId]);
+        let parent: string | null = sessionId;
+        let inherited = false;
+        while (parent && !inherited) {
+          const ancestor = database
+            .prepare("SELECT fork_parent_session_id FROM sessions WHERE session_id = ?")
+            .get(parent) as { fork_parent_session_id: string | null } | undefined;
+          parent = ancestor?.fork_parent_session_id ?? null;
+          if (parent && visited.has(parent)) break;
+          if (parent) visited.add(parent);
+          inherited = parent === source!.session_id;
+        }
+        if (!inherited) continue;
+        // Reuse a previous workbar clone if one already owns these exact bytes.
+        row = database
+          .prepare(
+            "SELECT * FROM session_artifacts WHERE session_id = ? AND digest = ? AND mime_type = ? LIMIT 1",
+          )
+          .get(sessionId, ref.digest, ref.mimeType) as ArtifactRow | undefined;
+        if (!matches(row)) {
+          const now = Date.now();
+          database
+            .prepare(
+              `INSERT OR IGNORE INTO session_artifacts
+            (artifact_id, session_id, title, mime_type, digest, size_bytes, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            )
+            .run(
+              inheritedId,
+              sessionId,
+              source!.title,
+              ref.mimeType as string,
+              ref.digest,
+              ref.sizeBytes,
+              now,
+              now,
+            );
+          const revision = ledgerRevision(database, "session_artifact_ledgers", sessionId);
+          writeLedgerRevision(database, "session_artifact_ledgers", sessionId, revision + 1, now);
+          row = database
+            .prepare("SELECT * FROM session_artifacts WHERE session_id = ? AND artifact_id = ?")
+            .get(sessionId, inheritedId) as ArtifactRow | undefined;
+        }
+      }
+    }
+    if (!matches(row)) continue;
+    result.push({
+      artifactId: row!.artifact_id,
+      kind: ref.kind,
+      alt: ref.alt,
+      mimeType: ref.mimeType,
+      sizeBytes: ref.sizeBytes,
+      digest: ref.digest,
+      ...(ref.source !== undefined ? { source: ref.source } : {}),
+    });
+  }
+  return result;
 }
 
 function purgeOrphanArtifactBlobs(database: DatabaseSync): number {
