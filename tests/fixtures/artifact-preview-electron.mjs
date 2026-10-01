@@ -38,7 +38,9 @@ app
     window.webContents.on("will-frame-navigate", (event) => {
       if (!event.isMainFrame && event.defaultPrevented) navigationsBlocked++;
     });
-    await window.loadURL('data:text/html,<h1 id="parent">Host shell</h1>');
+    // Match the packaged app's trustworthy file origin for Web Crypto digest checks.
+    writeFileSync(join(root, "host-shell.html"), '<h1 id="parent">Host shell</h1>');
+    await window.loadFile(join(root, "host-shell.html"));
     await window.webContents.executeJavaScript(
       `window.result=null;window.addEventListener('message',event=>{window.result=event.data});const frame=document.createElement('iframe');frame.sandbox='allow-scripts';frame.style='width:95%;height:450px';frame.srcdoc=${JSON.stringify(html)};document.body.append(frame);`,
     );
@@ -109,9 +111,9 @@ app
     };
     await mountBinary("image/png", png);
     const image = await window.webContents.executeJavaScript(
-      `({src:document.querySelector('img').src,width:document.querySelector('img').naturalWidth})`,
+      `({src:document.querySelector('img')?.src,width:document.querySelector('img')?.naturalWidth,error:document.querySelector('[role=alert]')?.textContent})`,
     );
-    assert.equal(image.width, 1);
+    assert.equal(image.width, 1, JSON.stringify(image));
     assert.ok(image.src.startsWith("blob:"));
     await window.webContents.executeJavaScript("unmountPreview()");
     assert.deepEqual(await window.webContents.executeJavaScript("window.revoked"), [image.src]);
