@@ -1,5 +1,6 @@
 import { app, BrowserWindow } from "electron";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -89,6 +90,7 @@ app
         name: "preview",
         mimeType,
         size: Buffer.from(base64, "base64").length,
+        digest: createHash("sha256").update(Buffer.from(base64, "base64")).digest("hex"),
         createdAt: "2026-09-21",
       };
       const content = {
