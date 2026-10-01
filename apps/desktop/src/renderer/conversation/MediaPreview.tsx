@@ -12,6 +12,18 @@ import type { DesktopRuntimeApi } from "../../preload/contract.js";
 import { invokeWorkbarRuntime } from "../workbar-panels/workbar-runtime.js";
 
 import { createPortal } from "react-dom";
+import {
+  Download,
+  Expand,
+  Image as ImageIcon,
+  Maximize,
+  Pause,
+  Play,
+  Video,
+  Volume2,
+  VolumeX,
+  X,
+} from "lucide-react";
 
 void React;
 export interface MediaScope {
@@ -205,9 +217,9 @@ export function MediaPreview({
   const scope = context?.scope;
   const previewRef = useRef<HTMLSpanElement>(null);
   const [visibleKey, setVisibleKey] = useState<string>();
-  const videoRef = useRef<HTMLVideoElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const dialogRef = useRef<HTMLDialogElement>(null);
+  const wasExpanded = useRef(false);
   const [state, setState] = useState<{ key: string; url?: string; error?: string }>();
   const [expanded, setExpanded] = useState(false);
   const [saveError, setSaveError] = useState<string>();
@@ -264,19 +276,12 @@ export function MediaPreview({
     };
   }, [key, suppliedBytes, visible]);
   useEffect(() => {
-    const video = videoRef.current;
-    return () => {
-      video?.pause();
-      video?.removeAttribute("src");
-      video?.load();
-    };
-  }, [current?.url]);
-  useEffect(() => {
     if (expanded) dialogRef.current?.showModal();
-    else if (dialogRef.current?.open) {
-      dialogRef.current.close();
+    else if (wasExpanded.current) {
+      dialogRef.current?.close();
       buttonRef.current?.focus();
     }
+    wasExpanded.current = expanded;
   }, [expanded]);
   const save =
     onSave ??
@@ -297,7 +302,11 @@ export function MediaPreview({
       </span>
     );
   return (
-    <span ref={previewRef} className="conversation-media" data-media-id={reference.artifactId}>
+    <span
+      ref={previewRef}
+      className={`conversation-media conversation-media--${reference.kind}`}
+      data-media-id={reference.artifactId}
+    >
       {current?.error ? (
         <span role="alert" className="conversation-media__error">
           {current.error}
@@ -309,12 +318,10 @@ export function MediaPreview({
           {visible ? "…" : ""}
         </span>
       ) : reference.kind === "video" ? (
-        <video
-          ref={videoRef}
-          src={current.url}
-          controls
-          preload="metadata"
-          aria-label={reference.alt || "视频预览"}
+        <MediaVideo
+          key={current.url}
+          url={current.url}
+          title={reference.alt || "视频预览"}
           onError={() => setState({ key, error: "视频格式或编码不受支持，请另存后查看。" })}
         />
       ) : (
@@ -343,21 +350,215 @@ export function MediaPreview({
                   if (event.target === event.currentTarget) setExpanded(false);
                 }}
               >
-                <button type="button" aria-label="关闭图片预览" onClick={() => setExpanded(false)}>
-                  关闭
-                </button>
+                <span className="conversation-media__dialog-toolbar">
+                  <span>{reference.alt || "图片预览"}</span>
+                  <span className="conversation-media__actions">
+                    {save && (
+                      <button
+                        className="conversation-media__action"
+                        type="button"
+                        aria-label="另存为"
+                        title="另存为"
+                        onClick={save}
+                      >
+                        <Download aria-hidden="true" />
+                      </button>
+                    )}
+                    <button
+                      className="conversation-media__action"
+                      type="button"
+                      aria-label="关闭图片预览"
+                      autoFocus
+                      title="关闭（Esc）"
+                      onClick={() => setExpanded(false)}
+                    >
+                      <X aria-hidden="true" />
+                    </button>
+                  </span>
+                </span>
                 <img src={current.url} alt={reference.alt} />
+                {saveError && <span role="alert">{saveError}</span>}
               </dialog>,
               document.body,
             )}
         </>
       )}
-      {save && (
-        <button className="conversation-media__save" type="button" onClick={save}>
-          另存为
-        </button>
-      )}
+      <span className="conversation-media__footer">
+        {reference.kind === "image" ? (
+          <ImageIcon aria-hidden="true" />
+        ) : (
+          <Video aria-hidden="true" />
+        )}
+        <span className="conversation-media__caption">
+          <span className="conversation-media__title" title={reference.alt}>
+            {reference.alt || (reference.kind === "image" ? "图片" : "视频")}
+          </span>
+          <span className="conversation-media__meta">
+            {reference.mimeType.split("/")[1]?.toUpperCase()} ·{" "}
+            {reference.sizeBytes < 1024 * 1024
+              ? `${Math.max(1, Math.round(reference.sizeBytes / 1024))} KB`
+              : `${(reference.sizeBytes / (1024 * 1024)).toFixed(1)} MB`}
+          </span>
+        </span>
+        <span className="conversation-media__actions">
+          {reference.kind === "image" && current?.url && (
+            <button
+              className="conversation-media__action"
+              type="button"
+              aria-label="查看大图"
+              title="查看大图"
+              onClick={() => setExpanded(true)}
+            >
+              <Expand aria-hidden="true" />
+            </button>
+          )}
+          {save && (
+            <button
+              className="conversation-media__action conversation-media__save"
+              type="button"
+              aria-label="另存为"
+              title="另存为"
+              onClick={save}
+            >
+              <Download aria-hidden="true" />
+            </button>
+          )}
+        </span>
+      </span>
       {saveError && <span role="alert">{saveError}</span>}
+    </span>
+  );
+}
+
+function mediaTime(seconds: number) {
+  const value = Number.isFinite(seconds) ? Math.max(0, Math.floor(seconds)) : 0;
+  return `${Math.floor(value / 60)}:${String(value % 60).padStart(2, "0")}`;
+}
+
+function MediaVideo({ url, title, onError }: { url: string; title: string; onError: () => void }) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const [playing, setPlaying] = useState(false);
+  const [muted, setMuted] = useState(false);
+  const [duration, setDuration] = useState(0);
+  const [position, setPosition] = useState(0);
+  const [fullscreen, setFullscreen] = useState(false);
+  const [playError, setPlayError] = useState<string>();
+  useEffect(() => {
+    const video = videoRef.current;
+    const changed = () => setFullscreen(document.fullscreenElement === video);
+    document.addEventListener("fullscreenchange", changed);
+    return () => {
+      document.removeEventListener("fullscreenchange", changed);
+      video?.pause();
+      video?.removeAttribute("src");
+      video?.load();
+    };
+  }, [url]);
+  const toggle = () => {
+    const video = videoRef.current;
+    if (!video) return;
+    setPlayError(undefined);
+    if (video.paused)
+      void video.play().catch(() => setPlayError("播放失败，请再试一次或另存后查看。"));
+    else video.pause();
+  };
+  return (
+    <span className="conversation-media__player">
+      <span className="conversation-media__video-stage">
+        <video
+          ref={videoRef}
+          src={url}
+          controls={fullscreen}
+          preload="metadata"
+          playsInline
+          aria-label={title}
+          onError={onError}
+          onLoadedMetadata={(event) =>
+            setDuration(
+              Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : 0,
+            )
+          }
+          onTimeUpdate={(event) => setPosition(event.currentTarget.currentTime)}
+          onPlay={() => setPlaying(true)}
+          onPause={() => setPlaying(false)}
+          onEnded={() => setPlaying(false)}
+        />
+        {!playing && (
+          <button
+            className="conversation-media__play-overlay"
+            type="button"
+            aria-label={`播放：${title}`}
+            onClick={toggle}
+          >
+            <Play aria-hidden="true" />
+          </button>
+        )}
+      </span>
+      <span className="conversation-media__transport">
+        <button
+          className="conversation-media__action conversation-media__play-toggle"
+          type="button"
+          aria-label={playing ? "暂停" : "播放"}
+          title={playing ? "暂停" : "播放"}
+          onClick={toggle}
+        >
+          {playing ? <Pause aria-hidden="true" /> : <Play aria-hidden="true" />}
+        </button>
+        <span className="conversation-media__time">
+          {mediaTime(position)} / {mediaTime(duration)}
+        </span>
+        <input
+          className="conversation-media__seek"
+          type="range"
+          min="0"
+          max={duration || 1}
+          step="0.01"
+          value={position}
+          disabled={!duration}
+          aria-label="视频时间进度条"
+          aria-valuetext={`${mediaTime(position)}，共 ${mediaTime(duration)}`}
+          onChange={(event) => {
+            const video = videoRef.current;
+            if (video) {
+              video.currentTime = Number(event.currentTarget.value);
+              setPosition(video.currentTime);
+            }
+          }}
+        />
+        <button
+          className="conversation-media__action"
+          type="button"
+          aria-label={muted ? "取消静音" : "静音"}
+          title={muted ? "取消静音" : "静音"}
+          onClick={() => {
+            const video = videoRef.current;
+            if (video) {
+              video.muted = !video.muted;
+              setMuted(video.muted);
+            }
+          }}
+        >
+          {muted ? <VolumeX aria-hidden="true" /> : <Volume2 aria-hidden="true" />}
+        </button>
+        <button
+          className="conversation-media__action conversation-media__fullscreen"
+          type="button"
+          aria-label="全屏播放"
+          title="全屏播放"
+          onClick={() => {
+            void videoRef.current
+              ?.requestFullscreen()
+              .catch(() => setPlayError("暂时无法进入全屏。"));
+          }}
+        >
+          <Maximize aria-hidden="true" />
+        </button>
+      </span>
+      {playError && (
+        <span className="conversation-media__error" role="alert">
+          {playError}
+        </span>
+      )}
     </span>
   );
 }

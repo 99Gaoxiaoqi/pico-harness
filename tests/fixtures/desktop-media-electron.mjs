@@ -63,11 +63,21 @@ app.whenReady().then(async () => {
     await mount({ ...png, source: "/fixture/pixel.png" }, "![图](/fixture/pixel.png)");
     await waitFor("document.querySelector('img')?.naturalWidth===1");
     assert.equal(await run("document.querySelectorAll('.conversation-media').length"), 1);
+    const cardWidth = await run(
+      "document.querySelector('.conversation-media').getBoundingClientRect().width",
+    );
+    assert.ok(cardWidth >= 320 && cardWidth <= 360);
     await run("document.querySelector('.conversation-media__image-button').click()");
     await waitFor("document.querySelector('dialog')?.open===true");
     await window.webContents.sendInputEvent({ type: "keyDown", keyCode: "Escape" });
     await window.webContents.sendInputEvent({ type: "keyUp", keyCode: "Escape" });
     await waitFor("!document.querySelector('dialog')");
+    assert.equal(
+      await run(
+        "document.activeElement===document.querySelector('.conversation-media__image-button')",
+      ),
+      true,
+    );
     await run("document.querySelector('.conversation-media__save').click()");
     assert.deepEqual(await run("saves[0]"), {
       workspacePath: "/fixture",
@@ -92,8 +102,25 @@ app.whenReady().then(async () => {
       assert.ok(metadata.duration >= 1);
       assert.equal(metadata.autoplay, false);
       assert.equal(metadata.preload, "metadata");
-      await run("document.querySelector('video').play().then(()=>true)");
+      assert.equal(await run("document.querySelector('video').controls"), false);
+      assert.ok(await run("document.querySelector('video').getBoundingClientRect().width>=300"));
+      await run("document.querySelector('.conversation-media__play-overlay').click()");
       await waitFor("document.querySelector('video').currentTime>0.05");
+      await run("document.querySelector('.conversation-media__play-toggle').click()");
+      await waitFor("document.querySelector('video').paused");
+      await run("document.querySelector('button[aria-label=\"静音\"]').click()");
+      await waitFor("document.querySelector('video').muted");
+      await run(
+        "(()=>{const seek=document.querySelector('.conversation-media__seek'); const setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;setter.call(seek,'0.4');seek.dispatchEvent(new Event('input',{bubbles:true}));})()",
+      );
+      await waitFor("Math.abs(document.querySelector('video').currentTime-0.4)<0.1");
+      await run("document.querySelector('#root').style.width='240px'");
+      assert.ok(
+        await run(
+          "document.querySelector('.conversation-media').getBoundingClientRect().width<=240 && document.querySelector('.conversation-media').scrollWidth<=240",
+        ),
+      );
+      await run("document.querySelector('#root').style.width=''");
       const seek = await run(
         "new Promise((resolve,reject)=>{const v=document.querySelector('video');v.pause();v.addEventListener('seeked',()=>resolve(v.currentTime),{once:true});v.addEventListener('error',()=>reject(new Error('video error')),{once:true});v.currentTime=0.7})",
       );
@@ -159,7 +186,7 @@ app.whenReady().then(async () => {
       `mediaFixture.preview(${JSON.stringify(assets[1].reference)},${JSON.stringify(assets[1].base64)})`,
     );
     await waitFor("document.querySelector('video')?.readyState>=1");
-    await run("document.querySelector('video').requestFullscreen()");
+    await run("document.querySelector('.conversation-media__fullscreen').click()");
     await waitFor("document.fullscreenElement?.tagName==='VIDEO'");
     await run("document.exitFullscreen()");
     // Same-origin child frames and unrelated permissions remain denied.

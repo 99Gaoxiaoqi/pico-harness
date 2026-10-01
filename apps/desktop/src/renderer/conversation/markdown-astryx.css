@@ -83,67 +83,218 @@
 .conversation-media {
   display: inline-flex;
   flex-direction: column;
-  align-items: flex-start;
-  gap: 6px;
+  width: 360px;
   max-width: 100%;
+  box-sizing: border-box;
   margin-block: 8px;
   vertical-align: top;
+  overflow: hidden;
+  border: 1px solid var(--conversation-line, var(--line, #e5e5e5));
+  border-radius: 12px;
+  background: var(--conversation-bg, var(--surface-raised, #fff));
+  color: var(--conversation-ink, var(--ink, #252522));
+  line-height: 1.4;
 }
-.conversation-media video,
-.conversation-media__image-button img {
-  display: block;
-  max-width: 100%;
-  max-height: 420px;
-  object-fit: contain;
-  border-radius: 8px;
-}
-.conversation-media video {
-  width: min(560px, 100%);
-  background: #111;
-}
-.conversation-media__image-button {
-  display: block;
-  max-width: 100%;
+.conversation-media .conversation-media__image-button {
+  display: flex;
+  width: 100%;
+  min-height: 96px;
+  align-items: center;
+  justify-content: center;
   border: 0;
   padding: 0;
-  background: none;
+  background: var(--conversation-bg-subtle, var(--surface-muted, #f5f5f5));
   cursor: zoom-in;
 }
-.conversation-media__image-button:focus-visible {
-  outline: 2px solid currentColor;
-  outline-offset: 3px;
+.conversation-media .conversation-media__image-button img {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 220px;
+  object-fit: contain;
+  margin: 0;
+  border-radius: 0;
 }
-.conversation-media__error {
-  color: var(--color-danger, #b54b4b);
+.conversation-media__footer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  min-width: 0;
 }
-.conversation-media__save {
+.conversation-media__footer > svg {
+  width: 17px;
+  height: 17px;
+  flex: none;
+  color: var(--conversation-ink-faint, var(--ink-tertiary, #777));
+}
+.conversation-media__caption {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+.conversation-media__title {
+  font-size: 12px;
+  font-weight: 550;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
+}
+.conversation-media__meta {
+  font-size: 10px;
+  color: var(--conversation-ink-faint, var(--ink-tertiary, #777));
+}
+.conversation-media__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.conversation-media__action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 6px;
   border: 0;
-  background: none;
-  padding: 2px 0;
-  text-decoration: underline;
+  border-radius: 6px;
+  background: transparent;
   color: inherit;
   cursor: pointer;
-  font: inherit;
+  flex: none;
+}
+.conversation-media__action svg {
+  width: 16px;
+  height: 16px;
+}
+.conversation-media__action:hover {
+  background: var(--conversation-bg-strong, var(--surface-strong, #eaeae7));
+}
+.conversation-media__action:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.conversation-media :is(button, input):focus-visible,
+.conversation-media__dialog button:focus-visible {
+  outline: 2px solid var(--conversation-focus, var(--focus, #7560cb));
+  outline-offset: -2px;
+}
+.conversation-media__player {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-width: 0;
+}
+.conversation-media__video-stage {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  background: #151a1d;
+}
+.conversation-media .conversation-media__video-stage video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  max-height: 240px;
+  object-fit: contain;
+}
+.conversation-media__video-stage video:fullscreen {
+  max-height: none;
+}
+.conversation-media__play-overlay {
+  position: absolute;
+  inset: 50% auto auto 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  padding: 13px;
+  border: 1px solid rgb(255 255 255 / 35%);
+  border-radius: 50%;
+  background: rgb(16 20 23 / 70%);
+  color: #fff;
+  cursor: pointer;
+}
+.conversation-media__play-overlay svg {
+  width: 22px;
+  height: 22px;
+}
+.conversation-media__play-overlay:hover {
+  background: rgb(16 20 23 / 90%);
+}
+.conversation-media__transport {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--conversation-line, var(--line, #e5e5e5));
+}
+.conversation-media__time {
+  flex: none;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.conversation-media__seek {
+  flex: 1;
+  min-width: 20px;
+  width: 100%;
+  height: 24px;
+  margin: 0 3px;
+  accent-color: var(--conversation-accent, var(--accent, #7560cb));
+  cursor: pointer;
+}
+.conversation-media__error,
+.conversation-media > [role="status"],
+.conversation-media > [role="alert"] {
+  display: block;
+  padding: 16px 12px;
   font-size: 12px;
+}
+.conversation-media__error {
+  color: var(--conversation-danger, var(--danger, #b54b4b));
 }
 .conversation-media__dialog {
   max-width: 94vw;
   max-height: 94vh;
-  padding: 12px;
-  border: 0;
-  border-radius: 12px;
-  background: var(--color-surface, #fff);
+  padding: 0;
+  border: 1px solid rgb(255 255 255 / 15%);
+  border-radius: 14px;
+  background: #151a1d;
+  color: #fff;
+  overflow: auto;
 }
 .conversation-media__dialog::backdrop {
-  background: rgb(0 0 0 / 65%);
+  background: rgb(10 12 15 / 80%);
+}
+.conversation-media__dialog-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 10px 12px 10px 16px;
+  font: 13px / 1.4 var(--font-sans, system-ui);
+}
+.conversation-media__dialog-toolbar > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.conversation-media__dialog .conversation-media__action:hover {
+  background: rgb(255 255 255 / 15%);
 }
 .conversation-media__dialog img {
   display: block;
-  max-width: 88vw;
-  max-height: 82vh;
+  max-width: 90vw;
+  max-height: 80vh;
   object-fit: contain;
-}
-.conversation-media__dialog button {
-  float: right;
-  margin-bottom: 8px;
+  margin: 0 auto;
 }
