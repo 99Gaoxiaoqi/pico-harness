@@ -55,3 +55,12 @@ final result: passed
 Pico 保留自己的六个常用命令与底部键盘提示，因此菜单高度和命令文案不同于参考图。图标复用 Lucide，字体与色彩复用桌面主题。此次没有单独进行深色和窄窗口的像素对比，也不声称完整像素复刻。
 
 最终状态通过既有 Chrome／Electron 命令菜单集成验证（2/2）、相关 ESLint、renderer TypeScript 检查和桌面打包。安装后通过 computer use 打开菜单并检查键盘选择与 Skills 显示，未发送模型请求。此次不修改命令执行或资源标签协议。
+
+
+## 自有图标修订（2026-10-01）
+
+final result: passed
+
+按用户最新要求，菜单图标改为 Pico 自绘 SVG：22 个命令及 Skill、Agent、参数、通用命令共 26 个字形。统一 24px 坐标、1.6px 圆角线条和 18px 显示尺寸，使用 currentColor 继承主题；该菜单不再使用上文记录的 Lucide 图标。保留已有的两行排版和命令行为。
+
+重新打包并安装后，通过 computer use 查看命令与 Skill 列表、使用方向键选中 aihot，确认图标、文字和选中背景正常显示。[桌面效果](output/desktop-command-icons-20261001/pico-menu-crop.png)。Chrome／Electron 既有集成测试 2/2、相关 ESLint、renderer 类型检查及桌面打包通过。只核查了浅色主题的实际 18px 显示，没有额外进行全主题图标审计。

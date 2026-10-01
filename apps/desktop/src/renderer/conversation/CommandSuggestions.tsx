@@ -1,18 +1,5 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type RefObject } from "react";
-import {
-  Bot,
-  CircleHelp,
-  CornerDownRight,
-  History,
-  Minimize2,
-  RotateCcw,
-  Sparkles,
-  Target,
-  Terminal,
-  Files,
-  GitBranch,
-  Network,
-} from "lucide-react";
+import { CommandIcon } from "./CommandIcon.js";
 import {
   desktopCommandPolicy,
   type DesktopCommandSuggestion,
@@ -78,21 +65,11 @@ const commandDescriptions: Readonly<Record<string, string>> = {
   rewind: "预览并回退代码或对话",
   changes: "查看文件差异，按文件恢复",
 };
-const commandIcons = {
-  help: CircleHelp,
-  goal: Target,
-  resume: History,
-  compact: Minimize2,
-  rewind: RotateCcw,
-  changes: Files,
-  graph: GitBranch,
-  swarm: Network,
-};
 function candidateIcon(item: Candidate) {
-  if (item.group === "Skills") return Sparkles;
-  if (item.group === "Agents") return Bot;
-  if (item.group === "参数") return CornerDownRight;
-  return commandIcons[item.commandName as keyof typeof commandIcons] ?? Terminal;
+  if (item.group === "Skills") return "skill";
+  if (item.group === "Agents") return "agent";
+  if (item.group === "参数") return "argument";
+  return item.commandName ?? "command";
 }
 const normalized = (value: string) => value.normalize("NFKC").toLowerCase();
 function score(name: string, description: string, query: string) {
@@ -402,7 +379,6 @@ export function useCommandSuggestions(
                 </div>
                 {items.map((item, position) => {
                   if (item.group !== group) return null;
-                  const Icon = candidateIcon(item);
                   return (
                     <div
                       key={`${item.group}:${item.label}`}
@@ -418,7 +394,10 @@ export function useCommandSuggestions(
                         accept(position);
                       }}
                     >
-                      <Icon className="command-suggestions__icon" size={18} aria-hidden="true" />
+                      <CommandIcon
+                        className="command-suggestions__icon"
+                        name={candidateIcon(item)}
+                      />
                       <div className="command-suggestions__text">
                         <div className="command-suggestions__name">
                           <strong>
