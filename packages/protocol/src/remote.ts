@@ -6,7 +6,6 @@ import {
   type RuntimeResult,
   type RuntimeNotification,
   type RuntimeSessionSubscriptionFrame,
-  type RuntimeMcpServerInput,
 } from "./mobile.js";
 import { utf8ByteLength } from "./utf8.js";
 
@@ -130,7 +129,6 @@ const ADMIN_METHODS = [
   "mcp.user.setEnabled",
   "mcp.user.delete",
   "hooks.manage",
-  "operations.manage",
   "plugin.manage",
   "jobs.list",
   "jobs.create",
@@ -157,9 +155,18 @@ export const REMOTE_METHODS = [
 ] as const;
 export type RemoteMethod = (typeof REMOTE_METHODS)[number];
 /** Omitted sensitive fields retain the existing server definition; gateway merges before Host validation. */
-export type RemoteMcpServerInput =
-  | (Omit<Extract<RuntimeMcpServerInput, { transport: "stdio" }>, "command"> & { command?: string })
-  | (Omit<Extract<RuntimeMcpServerInput, { transport: "http" | "sse" }>, "url"> & { url?: string });
+export type RemoteMcpServerInput = {
+  readonly name: string;
+  readonly startupTimeoutMs?: number;
+  readonly toolTimeoutMs?: number;
+  readonly enabled?: boolean;
+  readonly desktopExecution?: boolean;
+} & (
+  | { readonly transport: "stdio"; readonly command?: string; readonly args?: readonly string[];
+      readonly env?: Readonly<Record<string,string>> }
+  | { readonly transport: "http" | "sse"; readonly url?: string;
+      readonly headers?: Readonly<Record<string,string>> }
+);
 export type RemoteParams<M extends RemoteMethod> = M extends "mcp.user.upsert"
   ? Omit<RuntimeParams<M>, "workspacePath" | "server"> & { server: RemoteMcpServerInput }
   : Omit<RuntimeParams<M>, "workspacePath">;
