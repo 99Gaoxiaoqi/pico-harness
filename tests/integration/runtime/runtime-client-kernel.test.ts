@@ -347,17 +347,23 @@ test("kernel client: trusted terminal owners isolate control, cleanup and reconn
   );
   assert.equal(attached.terminal.controlAllowed, true);
   if (process.platform !== "win32") {
-    await reconnected.request("terminal.input", {
-      ...target,
-      data: "printf 'mobile-owner-ready\\n'\n",
-    });
+    // Mobile xterm sends individual keystrokes, including whitespace and Enter.
+    for (const data of ["\t", "\x15", ..."printf 'mobile-owner-ready\\n'\r"]) {
+      await reconnected.request("terminal.input", { ...target, data });
+    }
+    for (const data of ["", "x".repeat(64 * 1024 + 1)]) {
+      await assert.rejects(
+        reconnected.request("terminal.input", { ...target, data }),
+        (error: unknown) => error instanceof RuntimeClientError && error.code === "INVALID_PARAMS",
+      );
+    }
     assert.equal(
       await waitForCondition(async () => {
         const output = await reconnected.request("terminal.attach", {
           ...scope,
           terminalId: target.terminalId,
         });
-        return output.snapshot.includes("mobile-owner-ready");
+        return /(?:^|[\r\n])mobile-owner-ready[\r\n]/.test(output.snapshot);
       }, 5_000),
       true,
     );

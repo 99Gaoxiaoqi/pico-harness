@@ -9,6 +9,7 @@ import type {
   SessionId,
   WorkspaceParams,
 } from "./base.js";
+import { invalidParams } from "./errors.js";
 import {
   booleanParam,
   boundedNonEmptyStringParam,
@@ -969,7 +970,12 @@ export const workbarParamValidators = {
     sessionId: stringParam,
     terminalId: boundedNonEmptyStringParam(512),
     resourceEpoch: boundedNonEmptyStringParam(512),
-    data: boundedNonEmptyStringParam(64 * 1024),
+    data: (value, path) => {
+      // PTY input is raw data: whitespace and Enter are valid keystrokes.
+      if (typeof value !== "string" || value.length === 0 || value.length > 64 * 1024) {
+        throw invalidParams(`${path} 必须是长度 1-65536 的字符串`);
+      }
+    },
   }),
   "terminal.resize": exactParamShape({
     workspacePath: stringParam,
