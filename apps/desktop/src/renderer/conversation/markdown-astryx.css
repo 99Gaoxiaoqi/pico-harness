@@ -81,7 +81,7 @@
 }
 
 .conversation-media {
-  display: inline-flex;
+  display: flex;
   flex-direction: column;
   width: 360px;
   max-width: 100%;
