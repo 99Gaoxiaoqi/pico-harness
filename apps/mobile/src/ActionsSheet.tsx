@@ -1,6 +1,10 @@
 import React from "react";
 import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import {
+  SafeAreaProvider,
+  SafeAreaView,
+  initialWindowMetrics,
+} from "react-native-safe-area-context";
 import { Button, color, s } from "./ui";
 
 export function ActionsSheet({
@@ -16,7 +20,7 @@ export function ActionsSheet({
 }) {
   return (
     <Modal transparent animationType="fade" visible={open} onRequestClose={onClose}>
-      <View style={styles.container}>
+      <SafeAreaProvider initialMetrics={initialWindowMetrics} style={styles.container}>
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="关闭面板"
@@ -34,7 +38,7 @@ export function ActionsSheet({
             {children}
           </ScrollView>
         </SafeAreaView>
-      </View>
+      </SafeAreaProvider>
     </Modal>
   );
 }

@@ -9,7 +9,12 @@ import {
   Text,
   View,
 } from "react-native";
-import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
+import {
+  SafeAreaProvider,
+  SafeAreaView,
+  initialWindowMetrics,
+  useSafeAreaInsets,
+} from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
 import * as Crypto from "expo-crypto";
 import { usePico } from "./store";
@@ -236,7 +241,7 @@ export default function App() {
         animationType="slide"
         onRequestClose={() => setDrawer(false)}
       >
-        <View style={styles.drawerBackdrop}>
+        <SafeAreaProvider initialMetrics={initialWindowMetrics} style={styles.drawerBackdrop}>
           <Pressable
             accessibilityLabel="关闭会话列表"
             accessibilityRole="button"
@@ -268,7 +273,7 @@ export default function App() {
               />
             </View>
           </SafeAreaView>
-        </View>
+        </SafeAreaProvider>
       </Modal>
       <ActionsSheet title="工具" open={toolSheet} onClose={() => setToolSheet(false)}>
         {tools.map((tool) => (
