@@ -1,0 +1,41 @@
+{
+  "expo": {
+    "name": "Pico",
+    "slug": "pico-mobile",
+    "version": "0.1.0",
+    "scheme": "pico",
+    "orientation": "default",
+    "userInterfaceStyle": "dark",
+    "ios": {
+      "bundleIdentifier": "dev.pico.mobile",
+      "supportsTablet": true,
+      "useAppleScene": true
+    },
+    "android": {
+      "package": "dev.pico.mobile",
+      "permissions": ["CAMERA"],
+      "usesCleartextTraffic": false
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "扫码配对你的 Pico 电脑"
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "选择图片发送给 Pico",
+          "cameraPermission": "拍摄图片发送给 Pico"
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": false
+    },
+    "platforms": ["ios", "android"]
+  }
+}
