@@ -69,6 +69,8 @@ interface Subscription {
   seen: Set<string>;
   pending: RuntimeNotification[];
   replayed: boolean;
+  replayCycle: number;
+  pendingBytes: number;
   resolve?: (replay: RuntimeResult<"events.subscribe">) => void;
   reject?: (error: Error) => void;
   timer?: ReturnType<typeof setTimeout>;
@@ -216,6 +218,8 @@ export class RemoteRuntimeClient {
       !value.methods.every(isRemoteMethod) ||
       !isJsonObject(value.features) ||
       typeof value.maxFrameBytes !== "number" ||
+      !Number.isSafeInteger(value.maxFrameBytes) ||
+      value.maxFrameBytes <= 0 ||
       value.maxFrameBytes > REMOTE_MAX_FRAME_BYTES
     )
       throw new RemoteProtocolError("VERSION_MISMATCH", "电脑返回的远程协议不兼容");
@@ -402,7 +406,7 @@ export class RemoteRuntimeClient {
         error instanceof RemoteProtocolError
           ? error
           : new RemoteProtocolError("CONNECTION_FAILED", "无法连接电脑", true);
-      if (["UNAUTHORIZED", "INVALID_AUTH", "FORBIDDEN"].includes(failure.code)) {
+      if (["UNAUTHORIZED", "INVALID_AUTH", "FORBIDDEN", "DEVICE_REVOKED"].includes(failure.code)) {
         this.#foreground = false;
         this.#state("unauthorized", failure);
       } else if (["VERSION_MISMATCH", "GATEWAY_MISMATCH"].includes(failure.code)) {
@@ -426,7 +430,9 @@ export class RemoteRuntimeClient {
   }
   #sendSubscribe(subscription: Subscription): void {
     subscription.pending = [];
+    subscription.pendingBytes = 0;
     subscription.replayed = false;
+    subscription.replayCycle++;
     this.#socket?.send(
       JSON.stringify({
         type: "subscribe",
@@ -450,30 +456,29 @@ export class RemoteRuntimeClient {
       if (!subscription || message.workspaceId !== subscription.workspaceId) return;
       const event = parseRuntimeNotification(message.event);
       if (!subscription.replayed) {
-        if (subscription.pending.length >= 512)
+        const bytes = utf8ByteLength(JSON.stringify(event));
+        if (
+          subscription.pending.length >= 512 ||
+          subscription.pendingBytes + bytes > 4 * REMOTE_MAX_FRAME_BYTES
+        )
           throw new RemoteProtocolError("FRAME_TOO_LARGE", "事件重放缓冲已满");
         subscription.pending.push(event);
+        subscription.pendingBytes += bytes;
       } else this.#deliver(subscription, event);
     } else if (message.type === "subscribed") {
       const subscription = this.#subscriptions.get(message.subscriptionId);
       if (!subscription || message.workspaceId !== subscription.workspaceId) return;
       const replay = parseRuntimeResult("events.subscribe", message.replay);
-      if (subscription.resolve) {
-        subscription.resolve(replay);
-        subscription.resolve = undefined;
-        subscription.reject = undefined;
-        clearTimeout(subscription.timer);
-        for (const event of replay.events) {
-          subscription.seen.add(event.eventId);
-          subscription.lastEventId = event.eventId;
-        }
-      } else for (const event of replay.events) this.#deliver(subscription, event);
-      subscription.replayed = true;
-      const buffered = subscription.pending;
-      subscription.pending = [];
-      void Promise.resolve().then(() => {
-        if (this.#subscriptions.has(subscription.id))
-          for (const event of buffered) this.#deliver(subscription, event);
+      const cycle = subscription.replayCycle;
+      void this.#completeReplay(subscription, replay, cycle).catch((error: unknown) => {
+        if (subscription.replayCycle !== cycle || !this.#subscriptions.has(subscription.id)) return;
+        const failure =
+          error instanceof RemoteProtocolError
+            ? error
+            : new RemoteProtocolError("INVALID_RESPONSE", "事件回放无法完成");
+        subscription.reject?.(failure);
+        this.#state("error", failure);
+        this.#socket?.close(1011);
       });
     } else if (message.type === "session_frame") {
       if (
@@ -501,6 +506,53 @@ export class RemoteRuntimeClient {
       this.#state("error", error);
     } else throw new RemoteProtocolError("INVALID_RESPONSE", "未知事件消息");
   }
+  async #completeReplay(
+    subscription: Subscription,
+    first: RuntimeResult<"events.subscribe">,
+    cycle: number,
+  ): Promise<void> {
+    const active = () =>
+      this.#subscriptions.get(subscription.id) === subscription &&
+      subscription.replayCycle === cycle &&
+      !this.#closed;
+    // Match the local client: the initial page is returned, subsequent pages are delivered
+    // to the listener. Never accumulate an entire workspace history in one array.
+    if (subscription.resolve) {
+      subscription.resolve({ ...first, hasMore: false });
+      subscription.resolve = undefined;
+      subscription.reject = undefined;
+      clearTimeout(subscription.timer);
+      for (const event of first.events) {
+        subscription.seen.add(event.eventId);
+        subscription.lastEventId = event.eventId;
+      }
+      await Promise.resolve();
+    } else for (const event of first.events) this.#deliver(subscription, event);
+    let page: RuntimeResult<"events.replay"> = first;
+    const highWatermarkEventId = first.highWatermarkEventId;
+    const cursors = new Set<string>();
+    while (page.hasMore && active()) {
+      const cursor = page.nextAfterEventId;
+      if (!cursor || !highWatermarkEventId || cursors.has(cursor))
+        throw new RemoteProtocolError("INVALID_RESPONSE", "回放游标无效，请重新同步");
+      cursors.add(cursor);
+      page = await this.request(
+        "events.replay",
+        { afterEventId: cursor, highWatermarkEventId },
+        { workspaceId: subscription.workspaceId },
+      );
+      if (!active()) return;
+      if (page.highWatermarkEventId !== highWatermarkEventId)
+        throw new RemoteProtocolError("INVALID_RESPONSE", "回放水位发生变化，请重新同步");
+      for (const event of page.events) this.#deliver(subscription, event);
+    }
+    if (!active()) return;
+    subscription.replayed = true;
+    const pending = subscription.pending;
+    subscription.pending = [];
+    subscription.pendingBytes = 0;
+    for (const event of pending) this.#deliver(subscription, event);
+  }
   async subscribe(
     params: { workspaceId: string; afterEventId?: string },
     listener: (event: RuntimeNotification) => void,
@@ -514,6 +566,8 @@ export class RemoteRuntimeClient {
       seen: new Set(),
       pending: [],
       replayed: false,
+      replayCycle: 0,
+      pendingBytes: 0,
     };
     this.#subscriptions.set(subscription.id, subscription);
     const replay = await new Promise<RuntimeResult<"events.subscribe">>((resolve, reject) => {
@@ -521,6 +575,10 @@ export class RemoteRuntimeClient {
       subscription.reject = reject;
       subscription.timer = setTimeout(() => {
         this.#subscriptions.delete(subscription.id);
+        if (this.#socket?.readyState === 1)
+          this.#socket.send(
+            JSON.stringify({ type: "unsubscribe", subscriptionId: subscription.id }),
+          );
         reject(new RemoteProtocolError("REQUEST_TIMEOUT", "事件订阅超时", true));
       }, 15_000);
       this.#sendSubscribe(subscription);
