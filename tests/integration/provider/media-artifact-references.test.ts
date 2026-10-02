@@ -75,6 +75,25 @@ test("媒体消息仅持久引用，重开后真实请求按视觉能力/预算�
     images: [{ type: "image_base64", mimeType: "image/png", data: png.toString("base64") }],
   });
   assert.equal(once.inserted, false);
+  const largePng = Buffer.alloc(2 * 1024 * 1024 + 1);
+  png.copy(largePng);
+  await session.commitMessageOnce("large-explicit-image", {
+    role: "user",
+    content: "查看超过预览上限的显式图片",
+    images: [{ type: "image_base64", mimeType: "image/png", data: largePng.toString("base64") }],
+  });
+  const largeImage = session.getModelContext().at(-1)!.images![0] as typeof artifact;
+  assert.equal(largeImage.type, "image_artifact");
+  assert.equal(largeImage.sizeBytes, largePng.length);
+  assert.equal(session.readMediaArtifact(largeImage), largePng.toString("base64"));
+  const largeEvent = await session.runtimeEventStore!.readSessionEvent(
+    session.id,
+    "large-explicit-image",
+  );
+  assert.ok(
+    JSON.stringify(largeEvent).length < 4096,
+    "2–10MiB attachment remains a compact durable reference",
+  );
   await session.close();
   session = new Session("media-source", root, options);
   await session.recover();
@@ -104,7 +123,7 @@ test("媒体消息仅持久引用，重开后真实请求按视觉能力/预算�
       usage: { prompt_tokens: 20, completion_tokens: 5, total_tokens: 25 },
     });
   };
-  for (const vision of [false, true]) {
+  for (const vision of [false, true, "unknown"] as const) {
     const provider = createProvider(
       "openai",
       {
@@ -113,7 +132,7 @@ test("媒体消息仅持久引用，重开后真实请求按视觉能力/预算�
         baseURL: "https://fixture.invalid",
         thinkingEffort: "off",
         capabilities: resolveModelRouteCapabilities("openai", "fixture", {
-          vision,
+          ...(typeof vision === "boolean" ? { vision } : {}),
           context: 128_000,
           output: 1024,
         }),
@@ -128,6 +147,10 @@ test("媒体消息仅持久引用，重开后真实请求按视觉能力/预算�
     } else {
       assert.ok(reads > 0);
       assert.ok(bodies.at(-1)!.includes(png.toString("base64")));
+      assert.ok(
+        bodies.at(-1)!.includes(largePng.toString("base64")),
+        "explicit image above UI preview limit is materialized on wire",
+      );
     }
   }
   let budgetReads = 0;
