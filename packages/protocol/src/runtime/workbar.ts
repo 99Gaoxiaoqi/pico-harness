@@ -650,7 +650,10 @@ export type WorkbarMethodMap = {
   /** Local gateway compatibility probe; never exposed over remote RPC. */
   readonly "terminal.ownershipCapabilities": {
     readonly params: EmptyParams;
-    readonly result: { readonly ownerIsolation: true };
+    readonly result: {
+      readonly ownerIsolation: true;
+      readonly sessionCleanupIsolation?: boolean;
+    };
   };
   readonly "terminal.stopOwned": {
     readonly params: EmptyParams;
@@ -1237,7 +1240,10 @@ export const workbarResultValidators = {
   }),
   "terminal.stop": exactResultShape({ terminal: runtimeTerminalSessionResult }),
   "terminal.detach": exactResultShape({ detached: resultOneOf([true]) }),
-  "terminal.ownershipCapabilities": exactResultShape({ ownerIsolation: resultOneOf([true]) }),
+  "terminal.ownershipCapabilities": exactResultShape({
+    ownerIsolation: resultOneOf([true]),
+    sessionCleanupIsolation: resultOptional(resultBoolean),
+  }),
   "terminal.stopOwned": exactResultShape({ stopped: resultNonNegativeInteger }),
   "terminal.stopAll": exactResultShape({ stopped: resultNonNegativeInteger }),
   "terminal.resume": exactResultShape({ accepting: resultOneOf([true]) }),
