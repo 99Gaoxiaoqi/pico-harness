@@ -162,10 +162,17 @@ export type RemoteMcpServerInput = {
   readonly enabled?: boolean;
   readonly desktopExecution?: boolean;
 } & (
-  | { readonly transport: "stdio"; readonly command?: string; readonly args?: readonly string[];
-      readonly env?: Readonly<Record<string,string>> }
-  | { readonly transport: "http" | "sse"; readonly url?: string;
-      readonly headers?: Readonly<Record<string,string>> }
+  | {
+      readonly transport: "stdio";
+      readonly command?: string;
+      readonly args?: readonly string[];
+      readonly env?: Readonly<Record<string, string>>;
+    }
+  | {
+      readonly transport: "http" | "sse";
+      readonly url?: string;
+      readonly headers?: Readonly<Record<string, string>>;
+    }
 );
 export type RemoteParams<M extends RemoteMethod> = M extends "mcp.user.upsert"
   ? Omit<RuntimeParams<M>, "workspacePath" | "server"> & { server: RemoteMcpServerInput }

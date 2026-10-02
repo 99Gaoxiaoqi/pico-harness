@@ -106,6 +106,40 @@ function protocolError(value: unknown, fallback = "请求失败"): RemoteProtoco
     );
   return new RemoteProtocolError("INVALID_RESPONSE", fallback);
 }
+function transportFailure(error: unknown, timedOut: boolean): RemoteProtocolError {
+  if (timedOut)
+    return new RemoteProtocolError("REQUEST_TIMEOUT", "请求超时，请确认电脑端状态", true);
+  const record =
+    error && typeof error === "object"
+      ? (error as { code?: unknown; message?: unknown; cause?: unknown })
+      : undefined;
+  const cause =
+    record?.cause && typeof record.cause === "object"
+      ? (record.cause as { code?: unknown; message?: unknown })
+      : undefined;
+  const hint = [record?.code, record?.message, cause?.code, cause?.message]
+    .filter((x) => typeof x === "string")
+    .join(" ");
+  if (/CERT_|ERR_TLS|certificate|self[- ]signed|SSL|NSURLErrorServerCertificate/i.test(hint))
+    return new RemoteProtocolError(
+      "CERTIFICATE_ERROR",
+      "HTTPS 证书验证失败，请检查域名、证书链和有效期",
+      false,
+      "not_executed",
+    );
+  if (/ENOTFOUND|EAI_AGAIN|UnknownHostException|DNS|NSURLErrorCannotFindHost/i.test(hint))
+    return new RemoteProtocolError(
+      "DNS_ERROR",
+      "公网域名解析失败，请检查电脑网关地址和 DNS",
+      true,
+      "not_executed",
+    );
+  return new RemoteProtocolError(
+    "CONNECTION_FAILED",
+    "公网连接失败，请检查入口、防火墙、DNS 和证书",
+    true,
+  );
+}
 async function jsonRequest(
   fetcher: typeof fetch,
   publicUrl: string,
@@ -154,11 +188,7 @@ async function jsonRequest(
     return value;
   } catch (error) {
     if (error instanceof RemoteProtocolError) throw error;
-    throw new RemoteProtocolError(
-      controller.signal.aborted ? "REQUEST_TIMEOUT" : "CONNECTION_FAILED",
-      controller.signal.aborted ? "请求超时，请确认电脑端状态" : "连接失败，请检查网络、DNS 和证书",
-      true,
-    );
+    throw transportFailure(error, controller.signal.aborted);
   } finally {
     clearTimeout(timer);
   }
@@ -280,6 +310,7 @@ export class RemoteRuntimeClient {
       if (
         error instanceof RemoteProtocolError &&
         error.retryable &&
+        error.outcome !== "not_executed" &&
         REMOTE_METHOD_SPECS[method].mode === "command"
       )
         throw new RemoteProtocolError(
@@ -409,7 +440,9 @@ export class RemoteRuntimeClient {
       if (["UNAUTHORIZED", "INVALID_AUTH", "FORBIDDEN", "DEVICE_REVOKED"].includes(failure.code)) {
         this.#foreground = false;
         this.#state("unauthorized", failure);
-      } else if (["VERSION_MISMATCH", "GATEWAY_MISMATCH"].includes(failure.code)) {
+      } else if (
+        ["VERSION_MISMATCH", "GATEWAY_MISMATCH", "CERTIFICATE_ERROR"].includes(failure.code)
+      ) {
         this.#foreground = false;
         this.#state("incompatible", failure);
       } else {
