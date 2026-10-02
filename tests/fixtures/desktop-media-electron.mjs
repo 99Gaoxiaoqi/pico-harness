@@ -59,10 +59,43 @@ app.whenReady().then(async () => {
         `mediaFixture.mount([{id:'answer',kind:'assistantMessage',text:${JSON.stringify(text)},media:[${JSON.stringify(reference)}]}],{workspacePath:'/fixture',sessionId:${JSON.stringify(sessionId)}},${side})`,
       );
     };
+    const streamedText =
+      "准备生成图片。\n" +
+      ["A", "B", "C"]
+        .map(
+          (fill, index) =>
+            `![图片${index + 1}](data:image/png;base64,${fill.repeat(20000)}${index < 2 ? ")" : ""}`,
+        )
+        .join("\n");
+    await run(`mediaFixture.stream(${JSON.stringify(streamedText)})`);
+    await waitFor("document.body.textContent.includes('图片正在生成')");
+    assert.ok(await run("document.body.textContent.length < 200"));
+    assert.equal(await run("document.body.textContent.split('图片正在生成').length - 1"), 3);
+    assert.equal(await run("document.body.textContent.includes('准备生成图片。')"), true);
+    assert.equal(await run("document.body.textContent.includes('base64')"), false);
+    assert.equal(await run("document.querySelectorAll('img').length"), 0);
+    assert.equal(await run("queries.length"), 0, "未定稿的图片不触发文件读取");
     const png = assets[0].reference;
-    await mount({ ...png, source: "/fixture/pixel.png" }, "![图](/fixture/pixel.png)");
+    await mount(
+      { ...png, source: "/fixture/pixel.png" },
+      "![图](/fixture/pixel.png)已重新生成一张图片。",
+    );
     await waitFor("document.querySelector('img')?.naturalWidth===1");
     assert.equal(await run("document.querySelectorAll('.conversation-media').length"), 1);
+    assert.equal(
+      await run(`(() => {
+        const card = document.querySelector('.conversation-media');
+        const text = [...card.parentNode.childNodes].find(node =>
+          node.nodeType === Node.TEXT_NODE && node.textContent.includes('已重新生成'),
+        );
+        if (!text) return false;
+        const range = document.createRange();
+        range.selectNodeContents(text);
+        return range.getBoundingClientRect().top >= card.getBoundingClientRect().bottom + 4;
+      })()`),
+      true,
+      "图片后的同段说明必须排在卡片下方并保留间距",
+    );
     const cardWidth = await run(
       "document.querySelector('.conversation-media').getBoundingClientRect().width",
     );

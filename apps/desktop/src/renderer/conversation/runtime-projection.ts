@@ -538,7 +538,12 @@ export function overlayRuntimeItem(overlay: RuntimeActiveOverlayEntry): RuntimeC
     return {
       id: overlay.itemId,
       kind: "assistantMessage",
-      content: overlay.text,
+      // Binary output is not prose; wait for the committed Artifact reference.
+      content: overlay.text.replace(
+        /(?:!\[[^\]\n]*\]\(\s*)?data:(image|video)\/[a-z0-9.+-]+;base64(?:,[a-z0-9+/=%_-]*)?\)?/giu,
+        (_match, kind: string) =>
+          kind.toLowerCase() === "image" ? "[图片正在生成…]" : "[视频正在生成…]",
+      ),
       runId: overlay.runId,
       turnId: overlay.turnId,
     };

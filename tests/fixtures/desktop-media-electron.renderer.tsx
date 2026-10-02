@@ -1,6 +1,10 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
 import type { RuntimeMediaReference } from "@pico/protocol";
+import {
+  overlayRuntimeItem,
+  parseConversation,
+} from "../../apps/desktop/src/renderer/conversation/runtime-projection.js";
 import { ConversationTranscript } from "../../apps/desktop/src/renderer/conversation/ConversationTranscript.js";
 import { SideChatWorkbarPanel } from "../../apps/desktop/src/renderer/workbar-panels/SideChatWorkbarPanel.js";
 import { ArtifactPreview } from "../../apps/desktop/src/renderer/workbar-panels/ArtifactPreview.js";
@@ -38,6 +42,24 @@ Object.assign(globalThis, {
         ) : (
           <ConversationTranscript items={items} mediaScope={scope} />
         ),
+      );
+    },
+    stream(text: string) {
+      const item = overlayRuntimeItem({
+        runId: "stream-run",
+        turnId: "stream-turn",
+        itemId: "stream-answer",
+        streamId: "stream-id",
+        kind: "text",
+        startOffsetBytes: 0,
+        endOffsetBytes: new TextEncoder().encode(text).length,
+        text,
+        anchorSequence: 1,
+      });
+      root.render(
+        <ConversationTranscript
+          items={parseConversation({ items: [item] }, "/fixture", "main").items}
+        />,
       );
     },
     preview(reference: RuntimeMediaReference, base64: string) {
