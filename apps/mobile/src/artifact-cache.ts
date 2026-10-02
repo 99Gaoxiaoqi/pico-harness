@@ -58,7 +58,19 @@ export async function downloadArtifact(options: {
     cache.create({ idempotent: true, intermediates: true });
     const resourceCache = new Directory(cache, identity);
     resourceCache.create({ idempotent: true });
-    const name = artifact.title.replace(/[^\p{L}\p{N}._-]/gu, "_").slice(-100) || "media";
+    const title = artifact.title.replace(/[^\p{L}\p{N}._-]/gu, "_").slice(-100) || "media";
+    const extension = {
+      "image/png": ".png",
+      "image/jpeg": ".jpg",
+      "image/gif": ".gif",
+      "image/webp": ".webp",
+      "image/avif": ".avif",
+      "video/mp4": ".mp4",
+      "video/webm": ".webm",
+    }[artifact.mimeType];
+    // iOS sharing infers the content type from the filename; artifact titles may
+    // have no suffix even when the verified payload is a valid image or video.
+    const name = extension && !title.toLowerCase().endsWith(extension) ? title + extension : title;
     const target = new File(resourceCache, name);
     const validate = async (file: File) => {
       check();
