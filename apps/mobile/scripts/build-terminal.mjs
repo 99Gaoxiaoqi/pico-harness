@@ -1,6 +1,8 @@
 import { build } from "esbuild";
 import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { createRequire } from "node:module";
+const require = createRequire(import.meta.url);
 const root = resolve(import.meta.dirname, "..");
 const result = await build({
   stdin: {
@@ -13,7 +15,7 @@ const result = await build({
   minify: true,
   platform: "browser",
 });
-const css = await readFile(resolve(root, "node_modules/@xterm/xterm/css/xterm.css"), "utf8");
+const css = await readFile(require.resolve("@xterm/xterm/css/xterm.css"), "utf8");
 const js = result.outputFiles[0].text.replace(/<\/script/gi, "<\\/script");
 const html = `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'none'; img-src data:"><style>${css}html,body,#terminal{margin:0;width:100%;height:100%;background:#10141c;overflow:hidden}</style></head><body><div id="terminal"></div><script>${js}</script></body></html>`;
 await writeFile(

@@ -113,6 +113,7 @@ export function FilesPanel({ sessionId }: { sessionId: string }) {
       assertCurrent();
       if (share) {
         if (!(await Sharing.isAvailableAsync())) throw new Error("系统分享不可用");
+        assertCurrent();
         await Sharing.shareAsync(target.uri, { mimeType: artifact.mimeType });
       } else {
         const text =
@@ -120,6 +121,7 @@ export function FilesPanel({ sessionId }: { sessionId: string }) {
           artifact.sizeBytes <= 1024 * 1024
             ? await target.text()
             : undefined;
+        assertCurrent();
         setPreview({ file: artifact, uri: target.uri, ...(text !== undefined ? { text } : {}) });
       }
     } catch (error) {

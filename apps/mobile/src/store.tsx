@@ -13,7 +13,7 @@ import {
   type RemoteCapabilities,
   type RemoteSecretEdits,
 } from "@pico/protocol/remote";
-import type { RuntimeSessionSubscriptionFrame } from "@pico/protocol/mobile";
+import type { RuntimeSessionSubscriptionFrame, RuntimeNotification } from "@pico/protocol/mobile";
 import {
   GenerationFence,
   canUse,
@@ -43,6 +43,7 @@ type Store = RuntimePort & {
   report: (error: unknown) => void;
   perform: (task: () => Promise<unknown>) => Promise<void>;
   onFrame: (listener: (frame: RuntimeSessionSubscriptionFrame) => void) => () => void;
+  onNotification: (listener: (event: RuntimeNotification) => void) => () => void;
   client?: RemoteRuntimeClient;
   requestWithSecrets: <M extends RemoteMethod>(
     method: M,
@@ -68,6 +69,7 @@ export function PicoProvider({ children }: { children: React.ReactNode }) {
   const workspaceRef = useRef<Workspace | undefined>(undefined);
   const phaseRef = useRef<ConnectionPhase>("offline");
   const frameListeners = useRef(new Set<(frame: RuntimeSessionSubscriptionFrame) => void>());
+  const notificationListeners = useRef(new Set<(event: RuntimeNotification) => void>());
   const eventsRef = useRef<{ dispose: () => void } | undefined>(undefined);
   const foreground = useRef(AppState.currentState === "active");
   const eventGeneration = useRef(0);
@@ -131,7 +133,14 @@ export function PicoProvider({ children }: { children: React.ReactNode }) {
     const subscriptionGeneration = ++eventGeneration.current;
     eventsRef.current?.dispose();
     eventsRef.current = undefined;
-    const subscription = await client.subscribe({ workspaceId: w.id }, () => {});
+    const subscription = await client.subscribe({ workspaceId: w.id }, (event) => {
+      if (
+        id === fence.current.current &&
+        subscriptionGeneration === eventGeneration.current &&
+        foreground.current
+      )
+        for (const listener of notificationListeners.current) listener(event);
+    });
     if (id !== fence.current.current || subscriptionGeneration !== eventGeneration.current) {
       subscription.dispose();
       return;
@@ -352,6 +361,12 @@ export function PicoProvider({ children }: { children: React.ReactNode }) {
       frameListeners.current.add(listener);
       return () => {
         frameListeners.current.delete(listener);
+      };
+    },
+    onNotification: (listener) => {
+      notificationListeners.current.add(listener);
+      return () => {
+        notificationListeners.current.delete(listener);
       };
     },
     client: clientRef.current,

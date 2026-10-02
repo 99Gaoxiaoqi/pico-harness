@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Alert, FlatList, Pressable, ScrollView, Text, View } from "react-native";
+import { Alert, BackHandler, FlatList, Pressable, ScrollView, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
 import { CameraView, useCameraPermissions } from "expo-camera";
@@ -15,11 +15,29 @@ export default function App() {
     "computers" | "sessions" | "conversation" | "workbar" | "settings"
   >("computers");
   const [sessionId, setSessionId] = useState<string>();
+  const [sideParent, setSideParent] = useState<string>();
   useEffect(() => {
     setSessionId(undefined);
+    setSideParent(undefined);
     if (pico.workspace) setScreen("sessions");
   }, [pico.host?.id, pico.workspace?.id]);
-  const goSession = (id: string) => {
+  useEffect(() => {
+    const back = BackHandler.addEventListener("hardwareBackPress", () => {
+      if (screen === "computers") return false;
+      setScreen(
+        screen === "workbar" && sessionId
+          ? "conversation"
+          : screen === "conversation"
+            ? "sessions"
+            : "computers",
+      );
+      return true;
+    });
+    return () => back.remove();
+  }, [screen, sessionId]);
+  const goSession = (id: string, parentSessionId?: string) => {
+    if (parentSessionId) setSideParent(parentSessionId);
+    else if (id !== sessionId) setSideParent(undefined);
     setSessionId(id);
     setScreen("conversation");
   };
@@ -74,15 +92,20 @@ export default function App() {
         <Sessions onSession={goSession} />
       ) : screen === "conversation" && sessionId ? (
         <Conversation
+          key={`${pico.host?.id}/${pico.workspace?.id}/${sessionId}`}
           sessionId={sessionId}
+          sideParentSessionId={sideParent}
           onSession={goSession}
           onPanel={() => setScreen("workbar")}
         />
       ) : screen === "workbar" && sessionId ? (
-        <Workbar sessionId={sessionId} />
+        <Workbar
+          key={`${pico.host?.id}/${pico.workspace?.id}/${sessionId}`}
+          sessionId={sessionId}
+        />
       ) : screen === "settings" ? (
         <ScrollView contentContainerStyle={s.body}>
-          <SettingsPanel />
+          <SettingsPanel key={`${pico.host?.id}/${pico.workspace?.id}`} />
         </ScrollView>
       ) : (
         <View style={s.body}>
@@ -219,7 +242,11 @@ function Sessions({ onSession }: { onSession: (id: string) => void }) {
     void pico.perform(refresh);
   }, [pico.generation, pico.connected, archived]);
   const list = sessions
-    .filter((x) => x.title.toLowerCase().includes(query.toLowerCase()))
+    .filter(
+      (x) =>
+        (archived === "全部" || x.status !== "archived") &&
+        x.title.toLowerCase().includes(query.toLowerCase()),
+    )
     .sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.updatedAt - a.updatedAt);
   return (
     <FlatList

@@ -42,7 +42,7 @@ export function Workbar({ sessionId }: { sessionId: string }) {
           ) : tab === "设置" ? (
             <SessionSettings sessionId={sessionId} />
           ) : (
-            <ResourcePanel sessionId={sessionId} tab={tab} />
+            <ResourcePanel key={tab} sessionId={sessionId} tab={tab} />
           )}
         </ScrollView>
       )}
@@ -144,6 +144,7 @@ function ResourcePanel({
   const pico = usePico();
   const [value, setValue] = useState<unknown>();
   const [graphId, setGraphId] = useState("");
+  const [graphView, setGraphView] = useState<"概览" | "时间线">("概览");
   const [cursor, setCursor] = useState<string>();
   const [through, setThrough] = useState<number>();
   const [after, setAfter] = useState<number>();
@@ -151,7 +152,7 @@ function ResourcePanel({
     if (tab === "Graph") {
       const x = await pico.request("session.graph.query", {
         sessionId,
-        action: graphId ? "get" : "list",
+        action: graphId ? (graphView === "时间线" ? "timeline" : "get") : "list",
         ...(graphId ? { graphId } : {}),
         limit: 20,
         ...(more && cursor ? { cursor } : {}),
@@ -186,7 +187,7 @@ function ResourcePanel({
     setCursor(undefined);
     setAfter(undefined);
     void pico.perform(() => refresh());
-  }, [sessionId, pico.generation, tab, graphId]);
+  }, [sessionId, pico.generation, tab, graphId, graphView]);
   const graphs =
     typeof value === "object" && value && "graphs" in value && Array.isArray(value.graphs)
       ? (value.graphs as Record<string, unknown>[])
@@ -214,11 +215,56 @@ function ResourcePanel({
             />
           </Card>
         ))}
+      {tab === "Graph" && graphId && (
+        <>
+          <Chips values={["概览", "时间线"] as const} value={graphView} onChange={setGraphView} />
+          <GraphWakes value={value} sessionId={sessionId} graphId={graphId} />
+        </>
+      )}
       <Structured value={value} />
       {(cursor || after !== undefined) && (
         <Button title="加载更多" secondary onPress={() => void pico.perform(() => refresh(true))} />
       )}
       <Detail value={value} />
+    </>
+  );
+}
+function GraphWakes({
+  value,
+  sessionId,
+  graphId,
+}: {
+  value: unknown;
+  sessionId: string;
+  graphId: string;
+}) {
+  const pico = usePico();
+  const wakes =
+    typeof value === "object" && value && "wakes" in value && Array.isArray(value.wakes)
+      ? (value.wakes as Record<string, unknown>[])
+      : [];
+  return (
+    <>
+      {wakes.map((wake) => (
+        <Card key={String(wake.wakeId)}>
+          <Label>
+            唤醒 {String(wake.wakeId)} · {String(wake.status ?? "")}
+          </Label>
+          <Button
+            title="重试唤醒"
+            reason={pico.reason("session.graph.retryWake")}
+            onPress={() =>
+              void pico.perform(() =>
+                pico.request("session.graph.retryWake", {
+                  sessionId,
+                  graphId,
+                  wakeId: String(wake.wakeId),
+                }),
+              )
+            }
+          />
+        </Card>
+      ))}
     </>
   );
 }

@@ -18,6 +18,7 @@ import type {
   RuntimePlanControlSnapshot,
   RuntimeSessionSettings,
 } from "@pico/protocol/mobile";
+import type { RemoteParams } from "@pico/protocol/remote";
 import type { TranscriptReplicaView } from "@pico/transcript-replica";
 import { MobileTranscript } from "./transcript";
 import { usePico } from "./store";
@@ -28,15 +29,20 @@ export function Conversation({
   sessionId,
   onSession,
   onPanel,
+  sideParentSessionId,
 }: {
   sessionId: string;
-  onSession: (id: string) => void;
+  onSession: (id: string, parentSessionId?: string) => void;
+  sideParentSessionId?: string;
   onPanel: () => void;
 }) {
   const pico = usePico();
   const [view, setView] = useState<TranscriptReplicaView>();
+  const [sessionReady, setSessionReady] = useState(false);
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
+  const picking = useRef(false);
+  const [pickingImage, setPickingImage] = useState(false);
   const [images, setImages] = useState<RuntimeInputAttachment[]>([]);
   const [settings, setSettings] = useState<RuntimeSessionSettings>();
   const [mode, setMode] = useState<"auto" | "steer" | "queue" | "replace">("auto");
@@ -45,21 +51,49 @@ export function Conversation({
   const [frozen, setFrozen] = useState(false);
   const [plan, setPlan] = useState<RuntimePlanControlSnapshot>();
   const controller = useRef<MobileTranscript | undefined>(undefined);
+  const pendingSend = useRef<RemoteParams<"session.send"> | undefined>(undefined);
+  const selection = useRef("");
+  selection.current = `${pico.host?.id}/${pico.workspace?.id}/${sessionId}`;
+  const mounted = useRef(true);
   useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  useEffect(() => {
+    setSessionReady(false);
     if (!pico.workspace || !pico.connected) return;
+    let subscribed = true;
     const subscription = new MobileTranscript(pico, pico.workspace.id, sessionId, (v) => {
       setView(v);
       setPlan(subscription.planControl);
     });
     controller.current = subscription;
     const off = pico.onFrame((frame) => void subscription.receive(frame).catch(pico.report));
-    void subscription.open().catch(pico.report);
+    const offNotifications = pico.onNotification((event) => {
+      if (event.scope.sessionId !== sessionId) return;
+      if (event.topic === "plan.updated") void subscription.open().catch(pico.report);
+      if (event.topic === "session.settingsUpdated")
+        void pico
+          .request("session.settings.get", { sessionId })
+          .then((x) => setSettings(x.settings))
+          .catch(pico.report);
+    });
+    void subscription
+      .open()
+      .then(() => {
+        if (subscribed) setSessionReady(true);
+      })
+      .catch(pico.report);
     void pico
       .request("session.settings.get", { sessionId })
       .then((x) => setSettings(x.settings))
       .catch(pico.report);
     return () => {
+      subscribed = false;
       off();
+      offNotifications();
       subscription.dispose();
       controller.current = undefined;
     };
@@ -71,8 +105,14 @@ export function Conversation({
     setFrozen(false);
     setKey(Crypto.randomUUID());
     setView(undefined);
-  }, [sessionId]);
+    setSending(false);
+    pendingSend.current = undefined;
+  }, [sessionId, pico.host?.id, pico.workspace?.id]);
   async function addImage(camera = false) {
+    const selectedContext = selection.current;
+    if (picking.current || sending || frozen) return;
+    picking.current = true;
+    setPickingImage(true);
     try {
       if (images.length >= 4) throw new Error("最多选择 4 张图片");
       if (camera) {
@@ -82,7 +122,7 @@ export function Conversation({
       const selected = camera
         ? await ImagePicker.launchCameraAsync({ mediaTypes: ["images"] })
         : await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"] });
-      if (selected.canceled) return;
+      if (selected.canceled || !mounted.current || selection.current !== selectedContext) return;
       let image: RuntimeInputAttachment | undefined;
       for (const width of [1024, 768, 512, 320, 192]) {
         const result = await manipulateAsync(selected.assets[0]!.uri, [{ resize: { width } }], {
@@ -105,22 +145,33 @@ export function Conversation({
         }
       }
       if (!image) throw new Error("图片无法压缩至剩余附件预算");
-      setImages([...images, image]);
+      if (mounted.current && selection.current === selectedContext) setImages([...images, image]);
     } catch (error) {
-      pico.report(error);
+      if (mounted.current && selection.current === selectedContext) pico.report(error);
+    } finally {
+      picking.current = false;
+      if (mounted.current) setPickingImage(false);
     }
   }
   async function send() {
+    if (sending || !sessionReady || !pico.connected) return;
+    const selectedContext = selection.current;
+    const current = () => mounted.current && selection.current === selectedContext;
     setSending(true);
     try {
-      validateAttachments(images);
-      const result = await pico.request("session.send", {
-        sessionId,
-        input: { kind: "text", text, ...(images.length ? { attachments: images } : {}) },
-        behavior: mode,
-        idempotencyKey: key,
-        ...(view?.activeRun ? { expectedRunId: view.activeRun.runId } : {}),
-      });
+      if (!pendingSend.current) {
+        validateAttachments(images);
+        pendingSend.current = {
+          sessionId,
+          input: { kind: "text", text, ...(images.length ? { attachments: [...images] } : {}) },
+          behavior: mode,
+          idempotencyKey: key,
+          ...(view?.activeRun ? { expectedRunId: view.activeRun.runId } : {}),
+        };
+      }
+      const result = await pico.request("session.send", pendingSend.current);
+      if (!current()) return;
+      pendingSend.current = undefined;
       setText("");
       setImages([]);
       setKey(Crypto.randomUUID());
@@ -128,14 +179,25 @@ export function Conversation({
       setFrozen(false);
       onSession(result.session.sessionId);
     } catch (error) {
-      setUncertain(true);
-      setFrozen(true);
+      if (!current()) return;
+      const notExecuted =
+        error instanceof Error && "outcome" in error && error.outcome === "not_executed";
+      if (notExecuted) {
+        pendingSend.current = undefined;
+        setUncertain(false);
+        setFrozen(false);
+        setKey(Crypto.randomUUID());
+      } else {
+        setUncertain(true);
+        setFrozen(true);
+      }
       pico.report(error);
       await controller.current?.open().catch(pico.report);
     } finally {
-      setSending(false);
+      if (current()) setSending(false);
     }
   }
+  const syncReason = sessionReady ? undefined : "正在补齐会话";
   const run = view?.activeRun;
   return (
     <KeyboardAvoidingView
@@ -149,18 +211,35 @@ export function Conversation({
           <Button
             title="侧聊"
             secondary
-            reason={pico.reason("sideChat.create")}
+            reason={syncReason ?? pico.reason("sideChat.create")}
             onPress={() =>
               void pico.perform(async () => {
+                const selectedContext = selection.current;
                 const x = await pico.request("sideChat.create", {
                   sourceSessionId: sessionId,
                   panelId: Crypto.randomUUID(),
                   idempotencyKey: Crypto.randomUUID(),
                 });
-                onSession(x.session.sessionId);
+                if (mounted.current && selectedContext === selection.current)
+                  onSession(x.session.sessionId, sessionId);
               })
             }
           />
+          {sideParentSessionId && (
+            <Button
+              title="关闭侧聊"
+              secondary
+              reason={syncReason ?? pico.reason("sideChat.close")}
+              onPress={() =>
+                void pico.perform(async () => {
+                  const selectedContext = selection.current;
+                  await pico.request("sideChat.close", { sessionId });
+                  if (mounted.current && selectedContext === selection.current)
+                    onSession(sideParentSessionId);
+                })
+              }
+            />
+          )}
           {run && <Label>{run.status}</Label>}
         </View>
         {run && (
@@ -168,7 +247,7 @@ export function Conversation({
             <Button
               title="暂停"
               secondary
-              reason={pico.reason("run.pause")}
+              reason={syncReason ?? pico.reason("run.pause")}
               onPress={() =>
                 void pico.perform(() => pico.request("run.pause", { runId: run.runId }))
               }
@@ -176,7 +255,7 @@ export function Conversation({
             <Button
               title="继续"
               secondary
-              reason={pico.reason("run.resume")}
+              reason={syncReason ?? pico.reason("run.resume")}
               onPress={() =>
                 void pico.perform(() => pico.request("run.resume", { runId: run.runId }))
               }
@@ -184,7 +263,7 @@ export function Conversation({
             <Button
               title="停止"
               secondary
-              reason={pico.reason("run.cancel")}
+              reason={syncReason ?? pico.reason("run.cancel")}
               onPress={() =>
                 Alert.alert("停止当前任务？", run.description, [
                   { text: "返回" },
@@ -221,7 +300,9 @@ export function Conversation({
             />
           ) : null
         }
-        renderItem={({ item }) => <TranscriptItem item={item.item} sessionId={sessionId} />}
+        renderItem={({ item }) => (
+          <TranscriptItem item={item.item} sessionId={sessionId} syncReason={syncReason} />
+        )}
         ListEmptyComponent={
           <Label>{pico.connected ? "正在读取历史…" : "连接恢复后会补齐记录"}</Label>
         }
@@ -241,7 +322,7 @@ export function Conversation({
                 </Text>
               </Card>
             ))}
-            {plan && <PlanCard plan={plan} sessionId={sessionId} />}{" "}
+            {plan && <PlanCard plan={plan} sessionId={sessionId} syncReason={syncReason} />}{" "}
             {!!view?.queuedInputs.length && <Label>队列中 {view.queuedInputs.length} 条输入</Label>}
           </View>
         }
@@ -253,13 +334,14 @@ export function Conversation({
             <Button
               title="使用原幂等键重试"
               secondary
-              reason={!pico.connected ? "正在恢复连接" : undefined}
+              reason={syncReason ?? pico.reason("session.send")}
               onPress={() => void send()}
             />
             <Button
               title="已确认，清除草稿"
               secondary
               onPress={() => {
+                pendingSend.current = undefined;
                 setText("");
                 setImages([]);
                 setUncertain(false);
@@ -309,13 +391,13 @@ export function Conversation({
           <Button
             title="相册"
             secondary
-            reason={frozen ? "先确认待处理请求" : undefined}
+            reason={frozen ? "先确认待处理请求" : pickingImage ? "正在处理图片" : undefined}
             onPress={() => void addImage()}
           />
           <Button
             title="拍照"
             secondary
-            reason={frozen ? "先确认待处理请求" : undefined}
+            reason={frozen ? "先确认待处理请求" : pickingImage ? "正在处理图片" : undefined}
             onPress={() => void addImage(true)}
           />
           <Button
@@ -325,7 +407,7 @@ export function Conversation({
                 ? "正在发送"
                 : !text.trim() && !images.length
                   ? "请输入消息"
-                  : view?.phase !== "ready"
+                  : !sessionReady || view?.phase !== "ready"
                     ? "正在补齐会话"
                     : pico.reason("session.send")
             }
@@ -336,7 +418,15 @@ export function Conversation({
     </KeyboardAvoidingView>
   );
 }
-function TranscriptItem({ item, sessionId }: { item: RuntimeConversationItem; sessionId: string }) {
+function TranscriptItem({
+  item,
+  sessionId,
+  syncReason,
+}: {
+  item: RuntimeConversationItem;
+  sessionId: string;
+  syncReason?: string;
+}) {
   const pico = usePico();
   const [expanded, setExpanded] = useState(false);
   const [answer, setAnswer] = useState("");
@@ -393,13 +483,13 @@ function TranscriptItem({ item, sessionId }: { item: RuntimeConversationItem; se
         </>
       )}
       {item.truncated && <Label>此记录因传输预算截断</Label>}
-      {waiting && item.kind === "approval" && (
+      {waiting && item.kind === "approval" && item.data.kind !== "plan" && (
         <View style={s.row}>
           {(["allow_once", "allow_session", "deny"] as const).map((decision, i) => (
             <Button
               key={decision}
               title={["允许一次", "本会话允许", "拒绝"][i]!}
-              reason={pico.reason("approval.respond")}
+              reason={syncReason ?? pico.reason("approval.respond")}
               onPress={() =>
                 void pico.perform(() =>
                   pico.request("approval.respond", {
@@ -421,7 +511,7 @@ function TranscriptItem({ item, sessionId }: { item: RuntimeConversationItem; se
           <View style={s.row}>
             <Button
               title="提交回答"
-              reason={pico.reason("prompt.respond")}
+              reason={syncReason ?? pico.reason("prompt.respond")}
               onPress={() =>
                 void pico.perform(() =>
                   pico.request("prompt.respond", {
@@ -436,7 +526,7 @@ function TranscriptItem({ item, sessionId }: { item: RuntimeConversationItem; se
             <Button
               title="取消"
               secondary
-              reason={pico.reason("prompt.cancel")}
+              reason={syncReason ?? pico.reason("prompt.cancel")}
               onPress={() =>
                 void pico.perform(() =>
                   pico.request("prompt.cancel", {
@@ -484,7 +574,15 @@ function PromptOptions({
     </View>
   );
 }
-function PlanCard({ plan, sessionId }: { plan: RuntimePlanControlSnapshot; sessionId: string }) {
+function PlanCard({
+  plan,
+  sessionId,
+  syncReason,
+}: {
+  plan: RuntimePlanControlSnapshot;
+  sessionId: string;
+  syncReason?: string;
+}) {
   const pico = usePico();
   const [feedback, setFeedback] = useState("");
   const proposal = plan.projection.pendingProposal ?? plan.projection.latestProposal;
@@ -527,7 +625,8 @@ function PlanCard({ plan, sessionId }: { plan: RuntimePlanControlSnapshot; sessi
                   }[action]
                 }
                 reason={
-                  plan.availability !== "ready" ? "计划控制暂不可用" : pico.reason("plan.respond")
+                  syncReason ??
+                  (plan.availability !== "ready" ? "计划控制暂不可用" : pico.reason("plan.respond"))
                 }
                 onPress={() =>
                   void pico.perform(() =>

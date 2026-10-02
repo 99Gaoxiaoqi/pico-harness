@@ -19,6 +19,10 @@ export function TerminalPanel({ sessionId }: { sessionId: string }) {
   const active = useRef(true);
   const pendingOutput = useRef<{ data: string; reset: boolean }[]>([]);
   const control = useRef<RuntimeTerminalSession | undefined>(undefined);
+  const inputQueue = useRef(Promise.resolve());
+  const inputGeneration = useRef(0);
+  const inputBlocked = useRef(false);
+  const [blocked, setBlocked] = useState(false);
   async function list() {
     const result = await pico.request("terminal.list", { sessionId });
     if (active.current) setTerminals(result.terminals);
@@ -39,6 +43,7 @@ export function TerminalPanel({ sessionId }: { sessionId: string }) {
     const app = AppState.addEventListener("change", (state) => setForeground(state === "active"));
     return () => {
       active.current = false;
+      inputGeneration.current++;
       app.remove();
       poller.current.stop();
       const t = control.current;
@@ -54,6 +59,9 @@ export function TerminalPanel({ sessionId }: { sessionId: string }) {
   }, [sessionId, pico.generation]);
   useEffect(() => {
     control.current = terminal;
+    inputGeneration.current++;
+    inputBlocked.current = false;
+    setBlocked(false);
     position.current = undefined;
     pendingOutput.current = [];
     if (ready) ref.current?.postMessage(JSON.stringify({ type: "output", data: "", reset: true }));
@@ -90,34 +98,45 @@ export function TerminalPanel({ sessionId }: { sessionId: string }) {
           .catch(() => undefined);
     };
   }, [terminal?.terminalId, foreground, pico.connected, pico.generation, ready]);
+  useEffect(() => {
+    if (!foreground || !pico.connected) inputGeneration.current++;
+  }, [foreground, pico.connected]);
   async function create() {
     const x = await pico.request("terminal.create", { sessionId, cols: 80, rows: 24 });
     if (!active.current) return;
     setTerminal(x.terminal);
     await list();
   }
-  async function input(data: string) {
+  function input(data: string) {
     const t = control.current;
-    if (!t || !position.current) return;
+    const cursor = position.current;
+    if (!t || !cursor || !foreground || !pico.connected || inputBlocked.current) return;
     if (t.controlAllowed !== true) {
       pico.report(new Error("此终端由其他客户端创建，手机仅可查看"));
       return;
     }
-    try {
-      await pico.request("terminal.input", {
-        sessionId,
-        terminalId: t.terminalId,
-        resourceEpoch: position.current.epoch,
-        data,
-      });
-    } catch (error) {
-      poller.current.stop();
-      pico.report(
-        new Error(
-          `终端输入结果未确认，不会自动重发。${error instanceof Error ? error.message : ""}`,
-        ),
-      );
-    }
+    const generation = inputGeneration.current;
+    // Keep keystrokes in order; a lost response discards queued input, never resends it.
+    inputQueue.current = inputQueue.current.then(async () => {
+      if (!active.current || generation !== inputGeneration.current || inputBlocked.current) return;
+      try {
+        await pico.request("terminal.input", {
+          sessionId,
+          terminalId: t.terminalId,
+          resourceEpoch: cursor.epoch,
+          data,
+        });
+      } catch (error) {
+        if (!active.current || generation !== inputGeneration.current) return;
+        inputBlocked.current = true;
+        setBlocked(true);
+        pico.report(
+          new Error(
+            `终端输入结果未确认，不会自动重发。请检查输出后恢复输入。${error instanceof Error ? error.message : ""}`,
+          ),
+        );
+      }
+    });
   }
   return (
     <View style={{ flex: 1, gap: 12 }}>
@@ -150,6 +169,18 @@ export function TerminalPanel({ sessionId }: { sessionId: string }) {
           </Label>
         )}
       </Card>
+      {blocked && (
+        <Card>
+          <Text style={s.text}>部分输入结果未确认。后续输入已暂停，请检查终端输出。</Text>
+          <Button
+            title="已检查输出，恢复输入"
+            onPress={() => {
+              inputBlocked.current = false;
+              setBlocked(false);
+            }}
+          />
+        </Card>
+      )}
       {terminal ? (
         <>
           <WebView
@@ -210,7 +241,13 @@ export function TerminalPanel({ sessionId }: { sessionId: string }) {
                 key={name}
                 title={name!}
                 secondary
-                reason={terminal.controlAllowed === true ? undefined : "其他客户端的终端仅可读"}
+                reason={
+                  terminal.controlAllowed !== true
+                    ? "其他客户端的终端仅可读"
+                    : blocked
+                      ? "请先检查输出并恢复输入"
+                      : pico.reason("terminal.input")
+                }
                 onPress={() => void input(data!)}
               />
             ))}

@@ -5,10 +5,9 @@ import type {
   RuntimeResult,
   RuntimeSessionSettings,
   RuntimeUserDefaults,
-  RuntimeMcpServerInput,
   RuntimeProviderInput,
 } from "@pico/protocol/mobile";
-import type { RemoteSecretEdits } from "@pico/protocol/remote";
+import type { RemoteSecretEdits, RemoteMcpServerInput } from "@pico/protocol/remote";
 import { usePico } from "./store";
 import { Button, Card, Chips, Detail, Field, Label, s } from "./ui";
 const sections = [
@@ -37,7 +36,7 @@ export function SettingsPanel() {
       ) : section === "默认设置" ? (
         <Defaults />
       ) : (
-        <Capabilities section={section} />
+        <Capabilities key={section} section={section} />
       )}
     </View>
   );
@@ -530,10 +529,13 @@ function Providers() {
 function Mcp() {
   const pico = usePico();
   const [data, setData] = useState<RuntimeResult<"mcp.user.list">>();
+  const [editing, setEditing] = useState(false);
   const [name, setName] = useState("");
   const [transport, setTransport] = useState<"stdio" | "http" | "sse">("http");
   const [endpoint, setEndpoint] = useState("");
+  const [connectionAction, setConnectionAction] = useState<"keep" | "set" | "remove">("set");
   const [args, setArgs] = useState("");
+  const [replaceArgs, setReplaceArgs] = useState(false);
   const [secretKey, setSecretKey] = useState("");
   const [secret, setSecret] = useState("");
   const [secretAction, setSecretAction] = useState<"keep" | "set" | "remove">("keep");
@@ -543,47 +545,118 @@ function Mcp() {
   useEffect(() => {
     void pico.perform(refresh);
   }, [pico.generation]);
+  function reset() {
+    setEditing(false);
+    setName("");
+    setEndpoint("");
+    setArgs("");
+    setReplaceArgs(false);
+    setConnectionAction("set");
+    setSecret("");
+    setSecretKey("");
+    setSecretAction("keep");
+  }
   async function save() {
-    if (!data || !pico.client) throw new Error("先读取配置");
-    const server: RuntimeMcpServerInput =
+    if (!data) throw new Error("先读取配置");
+    if (!name.trim()) throw new Error("请输入服务器名称");
+    if (!editing && !endpoint.trim()) throw new Error("新服务器需要完整连接地址或命令");
+    if (connectionAction === "set" && !endpoint.trim())
+      throw new Error("替换连接信息需要输入完整值");
+    const server: RemoteMcpServerInput =
       transport === "stdio"
         ? {
             name,
             transport,
-            command: endpoint,
-            ...(args ? { args: args.split("\n").filter(Boolean) } : {}),
+            ...(connectionAction === "set" ? { command: endpoint } : {}),
+            ...(!editing || replaceArgs ? { args: args.split("\n").filter(Boolean) } : {}),
           }
-        : { name, transport, url: endpoint };
+        : { name, transport, ...(!editing ? { url: endpoint } : {}) };
     const edit =
       secretAction === "set" ? { action: "set" as const, value: secret } : { action: secretAction };
-    const edits: RemoteSecretEdits = secretKey
-      ? { [transport === "stdio" ? "env" : "headers"]: { [secretKey]: edit } }
-      : {};
+    const edits: RemoteSecretEdits = {
+      ...(secretKey ? { [transport === "stdio" ? "env" : "headers"]: { [secretKey]: edit } } : {}),
+      ...(editing && transport !== "stdio"
+        ? {
+            url:
+              connectionAction === "set"
+                ? { action: "set" as const, value: endpoint }
+                : { action: connectionAction },
+          }
+        : {}),
+    };
     setSecret("");
-    await pico.requestWithSecrets(
-      "mcp.user.upsert",
-      { server, expectedRevision: data.revision, idempotencyKey: Crypto.randomUUID() },
-      edits,
-    );
-    await refresh();
+    try {
+      await pico.requestWithSecrets(
+        "mcp.user.upsert",
+        { server, expectedRevision: data.revision, idempotencyKey: Crypto.randomUUID() },
+        edits,
+      );
+      reset();
+      await refresh();
+    } finally {
+      setSecret("");
+    }
   }
   return (
     <>
       <Card>
-        <Text style={s.text}>MCP 服务器</Text>
-        <Field label="名称" value={name} onChange={setName} />
-        <Chips
-          values={["stdio", "http", "sse"] as const}
-          value={transport}
-          onChange={setTransport}
-        />
-        <Field
-          label={transport === "stdio" ? "可执行命令" : "服务器 URL"}
-          value={endpoint}
-          onChange={setEndpoint}
-        />
+        <Text style={s.text}>{editing ? "编辑现有 MCP（未修改字段保留）" : "新建 MCP"}</Text>
+        {editing ? (
+          <Label>
+            服务器：{name} · {transport}
+          </Label>
+        ) : (
+          <>
+            <Field label="名称" value={name} onChange={setName} />
+            <Chips
+              values={["stdio", "http", "sse"] as const}
+              value={transport}
+              onChange={setTransport}
+            />
+          </>
+        )}
+        {editing && (
+          <>
+            <Label>连接信息：保留 / 替换 / 删除 URL 中的凭据</Label>
+            <Chips
+              values={
+                transport === "stdio"
+                  ? (["keep", "set"] as const)
+                  : (["keep", "set", "remove"] as const)
+              }
+              value={connectionAction}
+              onChange={setConnectionAction}
+            />
+          </>
+        )}
+        {connectionAction === "set" && (
+          <Field
+            label={transport === "stdio" ? "完整可执行命令" : "完整服务器 URL（仅写入）"}
+            value={endpoint}
+            onChange={setEndpoint}
+            secret={transport !== "stdio"}
+          />
+        )}
+        {editing && connectionAction === "keep" && (
+          <Label>完整命令、参数和 URL 保留在电脑，不用脱敏显示值覆盖。</Label>
+        )}
         {transport === "stdio" && (
-          <Field label="参数（每行一个）" value={args} onChange={setArgs} multiline />
+          <>
+            {editing && (
+              <View style={s.row}>
+                <Label>替换参数列表</Label>
+                <Switch value={replaceArgs} onValueChange={setReplaceArgs} />
+              </View>
+            )}
+            {(!editing || replaceArgs) && (
+              <Field
+                label="参数（每行一个，留空清空参数）"
+                value={args}
+                onChange={setArgs}
+                multiline
+              />
+            )}
+          </>
         )}
         <Field
           label={transport === "stdio" ? "环境变量名称（可选）" : "Header 名称（可选）"}
@@ -595,7 +668,7 @@ function Mcp() {
           value={secretAction}
           onChange={setSecretAction}
         />
-        <Label>keep：保留；set：替换；remove：删除。已有值不会返回手机。</Label>
+        <Label>keep 保留；set 替换；remove 删除。已有秘密不返回手机。</Label>
         {secretAction === "set" && (
           <Field label="新秘密值" secret value={secret} onChange={setSecret} />
         )}
@@ -604,6 +677,7 @@ function Mcp() {
           reason={pico.reason("mcp.user.upsert")}
           onPress={() => void pico.perform(save)}
         />
+        <Button title="取消 / 新建" secondary onPress={reset} />
       </Card>
       {data?.servers.map((server) => (
         <Card key={server.name}>
@@ -615,6 +689,23 @@ function Mcp() {
           </Label>
           <Detail value={server} />
           <View style={s.row}>
+            <Button
+              title="编辑"
+              secondary
+              reason={pico.reason("mcp.user.upsert")}
+              onPress={() => {
+                setEditing(true);
+                setName(server.name);
+                setTransport(server.transport);
+                setConnectionAction("keep");
+                setEndpoint("");
+                setArgs("");
+                setReplaceArgs(false);
+                setSecretKey("");
+                setSecret("");
+                setSecretAction("keep");
+              }}
+            />
             <Button
               title={server.enabled === false ? "启用" : "停用"}
               secondary
@@ -696,9 +787,21 @@ function Capabilities({ section }: { section: "Skills" | "Hooks" | "插件" }) {
   const [data, setData] = useState<Record<string, unknown>[]>([]);
   const [detail, setDetail] = useState<unknown>();
   const [id, setId] = useState("");
+  const [scope, setScope] = useState<"user" | "project" | "local">("user");
+  const [skillsScope, setSkillsScope] = useState<"生效列表" | "用户列表">("生效列表");
+  const [proposal, setProposal] = useState<{
+    confirmId: string;
+    fingerprint: string;
+    pluginId: string;
+    scope: "user" | "project" | "local";
+  }>();
   async function refresh() {
     if (section === "Skills") {
-      setData([...(await pico.request("skills.effective.list", {})).skills]);
+      setData([
+        ...(skillsScope === "用户列表"
+          ? (await pico.request("skills.user.list", {})).skills
+          : (await pico.request("skills.effective.list", {})).skills),
+      ]);
       return;
     }
     const x =
@@ -711,45 +814,90 @@ function Capabilities({ section }: { section: "Skills" | "Hooks" | "插件" }) {
   }
   useEffect(() => {
     setData([]);
+    setProposal(undefined);
     void pico.perform(refresh);
-  }, [section, pico.generation]);
+  }, [section, pico.generation, skillsScope]);
+  function select(item: Record<string, unknown>) {
+    const installed =
+      typeof item.installed === "object" && item.installed
+        ? (item.installed as Record<string, unknown>)
+        : item;
+    setId(String(installed.id ?? item.handlerId ?? ""));
+    if (["user", "project", "local"].includes(String(installed.scope)))
+      setScope(installed.scope as "user" | "project" | "local");
+    setProposal(undefined);
+  }
   return (
     <>
       <Button title="刷新" secondary onPress={() => void pico.perform(refresh)} />
-      {data.map((x, i) => (
-        <Card key={i}>
-          <Text style={s.text}>{String(x.name ?? x.id ?? x.handlerId ?? `项目 ${i + 1}`)}</Text>
-          <Label>{String(x.description ?? x.status ?? "")}</Label>
-          <Detail value={x} />
-          {section !== "Skills" && (
-            <Button
-              title="选择管理"
-              secondary
-              onPress={() => setId(String(x.id ?? x.handlerId ?? ""))}
-            />
-          )}
-        </Card>
-      ))}
+      {section === "Skills" && (
+        <Chips
+          values={["生效列表", "用户列表"] as const}
+          value={skillsScope}
+          onChange={setSkillsScope}
+        />
+      )}
+      {data.map((item, i) => {
+        const installed =
+          typeof item.installed === "object" && item.installed
+            ? (item.installed as Record<string, unknown>)
+            : item;
+        return (
+          <Card key={i}>
+            <Text style={s.text}>
+              {String(item.name ?? installed.id ?? item.handlerId ?? `项目 ${i + 1}`)}
+            </Text>
+            <Label>
+              {String(item.description ?? item.status ?? item.trust ?? "")} ·{" "}
+              {String(installed.scope ?? "")}
+            </Label>
+            <Detail value={item} />
+            {section !== "Skills" && (
+              <Button title="选择管理" secondary onPress={() => select(item)} />
+            )}
+          </Card>
+        );
+      })}
       {section !== "Skills" && (
         <Card>
           <Field
             label={section === "Hooks" ? "Handler ID" : "插件 ID"}
             value={id}
-            onChange={setId}
+            onChange={(value) => {
+              setId(value);
+              setProposal(undefined);
+            }}
           />
+          {section === "插件" && (
+            <>
+              <Label>插件范围</Label>
+              <Chips
+                values={["user", "project", "local"] as const}
+                value={scope}
+                onChange={(value) => {
+                  setScope(value);
+                  setProposal(undefined);
+                }}
+              />
+            </>
+          )}
           <View style={s.row}>
             {(["enable", "disable"] as const).map((action) => (
               <Button
                 key={action}
                 title={action === "enable" ? "启用" : "停用"}
-                reason={pico.reason(section === "Hooks" ? "hooks.manage" : "plugin.manage")}
+                reason={
+                  !id
+                    ? "先选择条目"
+                    : pico.reason(section === "Hooks" ? "hooks.manage" : "plugin.manage")
+                }
                 onPress={() =>
                   void pico.perform(async () => {
-                    if (section === "Hooks")
-                      setDetail(
-                        (await pico.request("hooks.manage", { action, handlerId: id })).result,
-                      );
-                    else setDetail((await pico.request("plugin.manage", { action, id })).result);
+                    setDetail(
+                      section === "Hooks"
+                        ? (await pico.request("hooks.manage", { action, handlerId: id })).result
+                        : (await pico.request("plugin.manage", { action, id, scope })).result,
+                    );
                     await refresh();
                   })
                 }
@@ -758,18 +906,119 @@ function Capabilities({ section }: { section: "Skills" | "Hooks" | "插件" }) {
             <Button
               title="检查"
               secondary
+              reason={!id ? "先选择条目" : undefined}
               onPress={() =>
                 void pico.perform(async () => {
                   setDetail(
                     section === "Hooks"
                       ? (await pico.request("hooks.manage", { action: "review", handlerId: id }))
                           .result
-                      : (await pico.request("plugin.manage", { action: "inspect", id })).result,
+                      : (await pico.request("plugin.manage", { action: "inspect", id, scope }))
+                          .result,
                   );
                 })
               }
             />
+            {section === "Hooks" ? (
+              <>
+                <Button
+                  title="信任此 Hook"
+                  reason={!id ? "先选择条目" : pico.reason("hooks.manage")}
+                  onPress={() =>
+                    Alert.alert("信任这个 Hook？", `电脑将信任 ${id} 的当前内容。请先检查配置。`, [
+                      { text: "返回" },
+                      {
+                        text: "确认信任",
+                        onPress: () =>
+                          void pico.perform(async () => {
+                            setDetail(
+                              (
+                                await pico.request("hooks.manage", {
+                                  action: "trust",
+                                  handlerId: id,
+                                })
+                              ).result,
+                            );
+                            await refresh();
+                          }),
+                      },
+                    ])
+                  }
+                />
+                <Button
+                  title="重新加载"
+                  secondary
+                  reason={pico.reason("hooks.manage")}
+                  onPress={() =>
+                    void pico.perform(async () =>
+                      setDetail((await pico.request("hooks.manage", { action: "reload" })).result),
+                    )
+                  }
+                />
+              </>
+            ) : (
+              <Button
+                title="准备信任"
+                reason={!id ? "先选择插件" : pico.reason("plugin.manage")}
+                onPress={() =>
+                  void pico.perform(async () => {
+                    const result = (
+                      await pico.request("plugin.manage", { action: "trust.prepare", id, scope })
+                    ).result;
+                    setDetail(result);
+                    const value = result.proposal;
+                    if (!value || typeof value !== "object" || Array.isArray(value))
+                      throw new Error("信任提案无效");
+                    const proposal = value as Record<string, unknown>;
+                    if (
+                      typeof proposal.id !== "string" ||
+                      typeof proposal.resourceDigest !== "string"
+                    )
+                      throw new Error("信任指纹缺失");
+                    setProposal({
+                      confirmId: proposal.id,
+                      fingerprint: proposal.resourceDigest,
+                      pluginId: id,
+                      scope,
+                    });
+                  })
+                }
+              />
+            )}
           </View>
+          {proposal && section === "插件" && (
+            <>
+              <Label>当前内容指纹：{proposal.fingerprint}</Label>
+              <Button
+                title="确认信任当前插件内容"
+                reason={pico.reason("plugin.manage")}
+                onPress={() =>
+                  Alert.alert(
+                    "确认插件信任？",
+                    `${proposal.pluginId} · ${proposal.scope}\n${proposal.fingerprint}`,
+                    [
+                      { text: "返回" },
+                      {
+                        text: "信任",
+                        onPress: () =>
+                          void pico.perform(async () => {
+                            await pico.request("plugin.manage", {
+                              action: "trust.confirm",
+                              id: proposal.pluginId,
+                              scope: proposal.scope,
+                              confirmId: proposal.confirmId,
+                              fingerprint: proposal.fingerprint,
+                            });
+                            setProposal(undefined);
+                            await refresh();
+                          }),
+                      },
+                    ],
+                  )
+                }
+              />
+            </>
+          )}
         </Card>
       )}
       <Detail value={detail} />
