@@ -1,5 +1,6 @@
 import {
   TRANSCRIPT_PROJECTOR_VERSION,
+  utf8ByteLength,
   isTerminalRunStatus,
   type RuntimeActiveOverlayEntry,
   type RuntimeQueuedInput,
@@ -12,7 +13,7 @@ import {
   type RuntimeTranscriptItemRecord,
   type RuntimeTranscriptPageCursor,
   type RuntimeTranscriptWatermark,
-} from "@pico/protocol";
+} from "@pico/protocol/mobile";
 
 const DEFAULT_MAX_EARLY_FRAMES = 512;
 const DEFAULT_MAX_EARLY_FRAME_BYTES = 1024 * 1024;
@@ -1003,7 +1004,7 @@ function overlayKey(runId: string, streamId: string): string {
 }
 
 function utf8Bytes(value: string): number {
-  return new TextEncoder().encode(value).byteLength;
+  return utf8ByteLength(value);
 }
 
 function positiveLimit(value: number | undefined, fallback: number, name: string): number {

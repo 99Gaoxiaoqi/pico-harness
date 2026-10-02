@@ -13,6 +13,14 @@
     "./subagent-settings": {
       "types": "./dist/subagent-settings.d.ts",
       "import": "./dist/subagent-settings.js"
+    },
+    "./mobile": {
+      "types": "./dist/mobile.d.ts",
+      "import": "./dist/mobile.js"
+    },
+    "./remote": {
+      "types": "./dist/remote.d.ts",
+      "import": "./dist/remote.js"
     }
   },
   "files": [

@@ -1,3 +1,4 @@
+import { utf8ByteLength } from "./utf8.js";
 import type { RuntimeNotification } from "./runtime.js";
 
 export const DEFAULT_PENDING_RUNTIME_EVENT_LIMIT = 512;
@@ -43,6 +44,6 @@ export class RuntimeNotificationBuffer {
   }
 
   private byteLength(): number {
-    return Buffer.byteLength(JSON.stringify(this.events), "utf8");
+    return utf8ByteLength(JSON.stringify(this.events));
   }
 }

@@ -1,3 +1,4 @@
+import { utf8ByteLength } from "../utf8.js";
 // Transcript projection, continuity cursors, and subscription parameter/result contracts.
 import { MAX_TOOL_RESULT_ENVELOPE_TEXT_BYTES, isJsonObject } from "./base.js";
 import { MEDIA_MAX_REFERENCES, type RuntimeMediaReference } from "../media.js";
@@ -435,7 +436,7 @@ const runtimeToolResultEnvelopeResult: RuntimeResultRule = (value, path) => {
   if (
     isJsonObject(projection) &&
     typeof projection["text"] === "string" &&
-    Buffer.byteLength(projection["text"], "utf8") > MAX_TOOL_RESULT_ENVELOPE_TEXT_BYTES
+    utf8ByteLength(projection["text"]) > MAX_TOOL_RESULT_ENVELOPE_TEXT_BYTES
   ) {
     throw invalidResult(
       `${path}.projection.text 超过 ${MAX_TOOL_RESULT_ENVELOPE_TEXT_BYTES} 字节上限`,
