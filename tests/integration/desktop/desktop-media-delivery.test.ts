@@ -277,7 +277,7 @@ test("媒体定稿拒绝越界/超限/假引用，保留文字；pure media 与 
   await writeFile(join(workspace, "image.png"), png);
   await writeFile(join(root, "secret.png"), png);
   await symlink(join(root, "secret.png"), join(workspace, "escape.png"));
-  const oversized = Buffer.alloc(2 * 1024 * 1024 + 1);
+  const oversized = Buffer.alloc(10 * 1024 * 1024 + 1);
   png.copy(oversized);
   await writeFile(join(workspace, "large.png"), oversized);
   const original = { role: "assistant" as const, content: "![图](image.png)" };

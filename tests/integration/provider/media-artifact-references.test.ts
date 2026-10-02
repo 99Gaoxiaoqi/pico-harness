@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { ImagePart } from "@pico/core";
+import { parseConversation } from "../../../apps/desktop/src/renderer/conversation/runtime-projection.js";
 import { Session } from "@pico/pico-host/session";
 import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
 import { createProvider } from "@pico/pico-host/provider/factory";
@@ -77,6 +78,31 @@ test("媒体消息仅持久引用，重开后真实请求按视觉能力/预算�
   assert.equal(once.inserted, false);
   const largePng = Buffer.alloc(2 * 1024 * 1024 + 1);
   png.copy(largePng);
+  const generated = fromAiSdkContent(
+    [
+      {
+        type: "text",
+        text: `![generated image 1](data:image/png;base64,${largePng.toString("base64")})`,
+      },
+    ],
+    "openai",
+  );
+  await session.commitMessageOnce("large-generated-image", generated);
+  const generatedEvent = await session.runtimeEventStore!.readSessionEvent(
+    session.id,
+    "large-generated-image",
+  );
+  assert.equal(generatedEvent?.event.kind, "message.committed");
+  if (generatedEvent?.event.kind === "message.committed") {
+    const saved = generatedEvent.event.data.message;
+    assert.match(saved.content, /pico:\/\/artifact\//u, "生成图片超过2MiB仍保存为可预览引用");
+    assert.equal(saved.images, undefined, "展示用图片不自动成为模型视觉输入");
+    assert.ok(JSON.stringify(saved).length < 4096, "生成图片没有在正文或SDK副本保存编码");
+    const refs = saved.providerData?.["picoMedia"] as { artifactId: string; sizeBytes: number }[];
+    assert.equal(refs[0]!.sizeBytes, largePng.length);
+    const ref = refs[0]!;
+    assert.ok(ref.artifactId);
+  }
   await session.commitMessageOnce("large-explicit-image", {
     role: "user",
     content: "查看超过预览上限的显式图片",
@@ -97,6 +123,18 @@ test("媒体消息仅持久引用，重开后真实请求按视觉能力/预算�
   await session.close();
   session = new Session("media-source", root, options);
   await session.recover();
+  const page = await session.runtimeEventStore!.readTranscriptProjectionPage({
+    sessionId: session.id,
+    maxBytes: 1024 * 1024,
+  });
+  const projectedGenerated = page.items.find((item) =>
+    JSON.stringify(item.payload).includes("generated image 1"),
+  )!.payload;
+  const conversation = parseConversation({ items: [projectedGenerated] }, root, session.id);
+  assert.equal(conversation.items.length, 1, "重开后大图仍投影到桌面消息");
+  const item = conversation.items[0]!;
+  assert.ok(item.kind === "assistantMessage");
+  assert.equal(item.media?.[0]?.sizeBytes, largePng.length, "桌面未过滤2–10MiB生成图片");
   const history = session.getModelContext();
   assert.equal(
     session.readMediaArtifact(history[0]!.images![0] as typeof artifact),
