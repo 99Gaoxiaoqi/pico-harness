@@ -35,6 +35,7 @@ export function Capabilities({ section }: { section: "Skills" | "Hooks" | "插�
   }
   useEffect(() => {
     setData([]);
+    setId("");
     setProposal(undefined);
     void pico.perform(refresh);
   }, [section, pico.generation, skillsScope]);
@@ -53,34 +54,47 @@ export function Capabilities({ section }: { section: "Skills" | "Hooks" | "插�
       <Button title="刷新" secondary onPress={() => void pico.perform(refresh)} />
       {section === "Skills" && (
         <Chips
-          values={["生效列表", "用户列表"] as const}
+          values={
+            pico.reason("skills.user.list")
+              ? (["生效列表"] as const)
+              : (["生效列表", "用户列表"] as const)
+          }
           value={skillsScope}
           onChange={setSkillsScope}
         />
       )}
-      {data.map((item, i) => {
-        const installed =
-          typeof item.installed === "object" && item.installed
-            ? (item.installed as Record<string, unknown>)
-            : item;
-        return (
-          <Card key={i}>
-            <Text style={s.text}>
-              {String(item.name ?? installed.id ?? item.handlerId ?? `项目 ${i + 1}`)}
-            </Text>
-            <Label>
-              {String(item.description ?? item.status ?? item.trust ?? "")} ·{" "}
-              {String(installed.scope ?? "")}
-            </Label>
-            <Detail value={item} />
-            {section !== "Skills" && (
-              <Button title="选择管理" secondary onPress={() => select(item)} />
-            )}
-          </Card>
-        );
-      })}
-      {section !== "Skills" && (
+      {(!id || section === "Skills") &&
+        data.map((item, i) => {
+          const installed =
+            typeof item.installed === "object" && item.installed
+              ? (item.installed as Record<string, unknown>)
+              : item;
+          return (
+            <Card key={i}>
+              <Text style={s.text}>
+                {String(item.name ?? installed.id ?? item.handlerId ?? `项目 ${i + 1}`)}
+              </Text>
+              <Label>
+                {String(item.description ?? item.status ?? item.trust ?? "")} ·{" "}
+                {String(installed.scope ?? "")}
+              </Label>
+              <Detail value={item} />
+              {section !== "Skills" && (
+                <Button title="选择管理" secondary onPress={() => select(item)} />
+              )}
+            </Card>
+          );
+        })}
+      {section !== "Skills" && id && (
         <Card>
+          <Button
+            title="返回扩展列表"
+            secondary
+            onPress={() => {
+              setId("");
+              setProposal(undefined);
+            }}
+          />
           <Field
             label={section === "Hooks" ? "Handler ID" : "插件 ID"}
             value={id}
@@ -95,6 +109,7 @@ export function Capabilities({ section }: { section: "Skills" | "Hooks" | "插�
               <Chips
                 values={["user", "project", "local"] as const}
                 value={scope}
+                labels={{ user: "全局用户", project: "项目共享", local: "项目本机" }}
                 onChange={(value) => {
                   setScope(value);
                   setProposal(undefined);
@@ -242,7 +257,7 @@ export function Capabilities({ section }: { section: "Skills" | "Hooks" | "插�
           )}
         </Card>
       )}
-      <Detail value={detail} />
+      <Detail title="原始管理结果" value={detail} />
     </>
   );
 }

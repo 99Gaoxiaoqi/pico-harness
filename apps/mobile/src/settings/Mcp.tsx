@@ -11,6 +11,7 @@ export function Mcp() {
   const pico = usePico();
   const [data, setData] = useState<RuntimeResult<"mcp.user.list">>();
   const [editing, setEditing] = useState(false);
+  const [formOpen, setFormOpen] = useState(false);
   const [name, setName] = useState("");
   const [transport, setTransport] = useState<"stdio" | "http" | "sse">("http");
   const [endpoint, setEndpoint] = useState("");
@@ -24,9 +25,12 @@ export function Mcp() {
     setData(await pico.request("mcp.user.list", {}));
   }
   useEffect(() => {
-    void pico.perform(refresh);
+    reset();
+    setData(undefined);
+    if (!pico.reason("mcp.user.list")) void pico.perform(refresh);
   }, [pico.generation]);
   function reset() {
+    setFormOpen(false);
     setEditing(false);
     setName("");
     setEndpoint("");
@@ -80,151 +84,185 @@ export function Mcp() {
   }
   return (
     <>
-      <Card>
-        <Text style={s.text}>{editing ? "编辑现有 MCP（未修改字段保留）" : "新建 MCP"}</Text>
-        {editing ? (
-          <Label>
-            服务器：{name} · {transport}
-          </Label>
-        ) : (
-          <>
-            <Field label="名称" value={name} onChange={setName} />
-            <Chips
-              values={["stdio", "http", "sse"] as const}
-              value={transport}
-              onChange={setTransport}
-            />
-          </>
-        )}
-        {editing && (
-          <>
-            <Label>连接信息：保留 / 替换 / 删除 URL 中的凭据</Label>
-            <Chips
-              values={
-                transport === "stdio"
-                  ? (["keep", "set"] as const)
-                  : (["keep", "set", "remove"] as const)
-              }
-              value={connectionAction}
-              onChange={setConnectionAction}
-            />
-          </>
-        )}
-        {connectionAction === "set" && (
-          <Field
-            label={transport === "stdio" ? "完整可执行命令" : "完整服务器 URL（仅写入）"}
-            value={endpoint}
-            onChange={setEndpoint}
-            secret={transport !== "stdio"}
-          />
-        )}
-        {editing && connectionAction === "keep" && (
-          <Label>完整命令、参数和 URL 保留在电脑，不用脱敏显示值覆盖。</Label>
-        )}
-        {transport === "stdio" && (
-          <>
-            {editing && (
-              <View style={s.row}>
-                <Label>替换参数列表</Label>
-                <Switch value={replaceArgs} onValueChange={setReplaceArgs} />
-              </View>
-            )}
-            {(!editing || replaceArgs) && (
-              <Field
-                label="参数（每行一个，留空清空参数）"
-                value={args}
-                onChange={setArgs}
-                multiline
-              />
-            )}
-          </>
-        )}
-        <Field
-          label={transport === "stdio" ? "环境变量名称（可选）" : "Header 名称（可选）"}
-          value={secretKey}
-          onChange={setSecretKey}
-        />
-        <Chips
-          values={["keep", "set", "remove"] as const}
-          value={secretAction}
-          onChange={setSecretAction}
-        />
-        <Label>keep 保留；set 替换；remove 删除。已有秘密不返回手机。</Label>
-        {secretAction === "set" && (
-          <Field label="新秘密值" secret value={secret} onChange={setSecret} />
-        )}
-        <Button
-          title="保存 MCP"
-          reason={pico.reason("mcp.user.upsert")}
-          onPress={() => void pico.perform(save)}
-        />
-        <Button title="取消 / 新建" secondary onPress={reset} />
-      </Card>
-      {data?.servers.map((server) => (
-        <Card key={server.name}>
-          <Text style={s.text}>
-            {server.name} · {server.transport}
-          </Text>
-          <Label>
-            {String("endpointLabel" in server ? server.endpointLabel : server.commandLabel)}
-          </Label>
-          <Detail value={server} />
+      {!formOpen && (
+        <Card>
+          <Text style={s.text}>MCP 服务</Text>
+          <Label>用户服务保存在电脑，完整秘密不返回手机。</Label>
           <View style={s.row}>
             <Button
-              title="编辑"
-              secondary
-              reason={pico.reason("mcp.user.upsert")}
+              title="新增 MCP 服务"
+              reason={!data ? "等待读取配置" : pico.reason("mcp.user.upsert")}
               onPress={() => {
-                setEditing(true);
-                setName(server.name);
-                setTransport(server.transport);
-                setConnectionAction("keep");
-                setEndpoint("");
-                setArgs("");
-                setReplaceArgs(false);
-                setSecretKey("");
-                setSecret("");
-                setSecretAction("keep");
+                reset();
+                setFormOpen(true);
               }}
             />
             <Button
-              title={server.enabled === false ? "启用" : "停用"}
+              title="刷新"
               secondary
-              reason={pico.reason("mcp.user.setEnabled")}
-              onPress={() =>
-                void pico.perform(async () => {
-                  await pico.request("mcp.user.setEnabled", {
-                    serverName: server.name,
-                    enabled: server.enabled === false,
-                    expectedRevision: data.revision,
-                    idempotencyKey: Crypto.randomUUID(),
-                  });
-                  await refresh();
-                })
-              }
-            />
-            <Button
-              title="删除"
-              secondary
-              reason={pico.reason("mcp.user.delete")}
-              onPress={() =>
-                confirmDelete(
-                  server.name,
-                  () =>
-                    void pico.perform(async () => {
-                      await pico.request("mcp.user.delete", {
-                        serverName: server.name,
-                        expectedRevision: data.revision,
-                        idempotencyKey: Crypto.randomUUID(),
-                      });
-                      await refresh();
-                    }),
-                )
-              }
+              reason={pico.reason("mcp.user.list")}
+              onPress={() => void pico.perform(refresh)}
             />
           </View>
         </Card>
-      ))}
+      )}
+      {formOpen && (
+        <Card>
+          <Text style={s.text}>{editing ? "编辑现有 MCP（未修改字段保留）" : "新建 MCP"}</Text>
+          {editing ? (
+            <Label>
+              服务器：{name} · {transport}
+            </Label>
+          ) : (
+            <>
+              <Field label="名称" value={name} onChange={setName} />
+              <Chips
+                values={["stdio", "http", "sse"] as const}
+                value={transport}
+                onChange={setTransport}
+              />
+            </>
+          )}
+          {editing && (
+            <>
+              <Label>连接信息：保留 / 替换 / 删除 URL 中的凭据</Label>
+              <Chips
+                values={
+                  transport === "stdio"
+                    ? (["keep", "set"] as const)
+                    : (["keep", "set", "remove"] as const)
+                }
+                value={connectionAction}
+                onChange={setConnectionAction}
+              />
+            </>
+          )}
+          {connectionAction === "set" && (
+            <Field
+              label={transport === "stdio" ? "完整可执行命令" : "完整服务器 URL（仅写入）"}
+              value={endpoint}
+              onChange={setEndpoint}
+              secret={transport !== "stdio"}
+            />
+          )}
+          {editing && connectionAction === "keep" && (
+            <Label>完整命令、参数和 URL 保留在电脑，不用脱敏显示值覆盖。</Label>
+          )}
+          {transport === "stdio" && (
+            <>
+              {editing && (
+                <View style={[s.row, { minHeight: 44 }]}>
+                  <Label>替换参数列表</Label>
+                  <Switch
+                    hitSlop={8}
+                    accessibilityLabel="替换参数列表"
+                    value={replaceArgs}
+                    onValueChange={setReplaceArgs}
+                  />
+                </View>
+              )}
+              {(!editing || replaceArgs) && (
+                <Field
+                  label="参数（每行一个，留空清空参数）"
+                  value={args}
+                  onChange={setArgs}
+                  multiline
+                />
+              )}
+            </>
+          )}
+          <Field
+            label={transport === "stdio" ? "环境变量名称（可选）" : "Header 名称（可选）"}
+            value={secretKey}
+            onChange={setSecretKey}
+          />
+          <Chips
+            values={["keep", "set", "remove"] as const}
+            value={secretAction}
+            labels={{ keep: "保留", set: "替换", remove: "删除" }}
+            onChange={setSecretAction}
+          />
+          <Label>
+            未修改的秘密保留在电脑；替换仅写入新值，删除移除对应项。已有秘密不返回手机。
+          </Label>
+          {secretAction === "set" && (
+            <Field label="新秘密值" secret value={secret} onChange={setSecret} />
+          )}
+          <Button
+            title="保存 MCP"
+            reason={pico.reason("mcp.user.upsert")}
+            onPress={() => void pico.perform(save)}
+          />
+          <Button title="返回 MCP 列表" secondary onPress={reset} />
+        </Card>
+      )}
+      {!formOpen &&
+        data?.servers.map((server) => (
+          <Card key={server.name}>
+            <Text style={s.text}>
+              {server.name} · {server.transport}
+            </Text>
+            <Label>
+              {String("endpointLabel" in server ? server.endpointLabel : server.commandLabel)}
+            </Label>
+            <Detail value={server} />
+            <View style={s.row}>
+              <Button
+                title="编辑"
+                secondary
+                reason={pico.reason("mcp.user.upsert")}
+                onPress={() => {
+                  setFormOpen(true);
+                  setEditing(true);
+                  setName(server.name);
+                  setTransport(server.transport);
+                  setConnectionAction("keep");
+                  setEndpoint("");
+                  setArgs("");
+                  setReplaceArgs(false);
+                  setSecretKey("");
+                  setSecret("");
+                  setSecretAction("keep");
+                }}
+              />
+              <Button
+                title={server.enabled === false ? "启用" : "停用"}
+                secondary
+                reason={pico.reason("mcp.user.setEnabled")}
+                onPress={() =>
+                  void pico.perform(async () => {
+                    await pico.request("mcp.user.setEnabled", {
+                      serverName: server.name,
+                      enabled: server.enabled === false,
+                      expectedRevision: data.revision,
+                      idempotencyKey: Crypto.randomUUID(),
+                    });
+                    await refresh();
+                  })
+                }
+              />
+              <Button
+                title="删除"
+                secondary
+                reason={pico.reason("mcp.user.delete")}
+                onPress={() =>
+                  confirmDelete(
+                    server.name,
+                    () =>
+                      void pico.perform(async () => {
+                        await pico.request("mcp.user.delete", {
+                          serverName: server.name,
+                          expectedRevision: data.revision,
+                          idempotencyKey: Crypto.randomUUID(),
+                        });
+                        await refresh();
+                      }),
+                  )
+                }
+              />
+            </View>
+          </Card>
+        ))}
     </>
   );
 }
