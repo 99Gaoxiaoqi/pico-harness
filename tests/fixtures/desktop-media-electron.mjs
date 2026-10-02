@@ -59,6 +59,22 @@ app.whenReady().then(async () => {
         `mediaFixture.mount([{id:'answer',kind:'assistantMessage',text:${JSON.stringify(text)},media:[${JSON.stringify(reference)}]}],{workspacePath:'/fixture',sessionId:${JSON.stringify(sessionId)}},${side})`,
       );
     };
+    const streamedText =
+      "准备生成图片。\n" +
+      ["A", "B", "C"]
+        .map(
+          (fill, index) =>
+            `![图片${index + 1}](data:image/png;base64,${fill.repeat(20000)}${index < 2 ? ")" : ""}`,
+        )
+        .join("\n");
+    await run(`mediaFixture.stream(${JSON.stringify(streamedText)})`);
+    await waitFor("document.body.textContent.includes('图片正在生成')");
+    assert.ok(await run("document.body.textContent.length < 200"));
+    assert.equal(await run("document.body.textContent.split('图片正在生成').length - 1"), 3);
+    assert.equal(await run("document.body.textContent.includes('准备生成图片。')"), true);
+    assert.equal(await run("document.body.textContent.includes('base64')"), false);
+    assert.equal(await run("document.querySelectorAll('img').length"), 0);
+    assert.equal(await run("queries.length"), 0, "未定稿的图片不触发文件读取");
     const png = assets[0].reference;
     await mount(
       { ...png, source: "/fixture/pixel.png" },
