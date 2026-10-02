@@ -21,7 +21,11 @@ realModelTest(
         ? { modelRouteId: process.env.PICO_MEDIA_E2E_MODEL_ROUTE }
         : {}),
     });
-    assert.equal(model.config.capabilities?.vision, true, "此验收要求用户配置已声明vision的路线");
+    assert.notEqual(
+      model.config.capabilities?.vision,
+      false,
+      "此验收通过真实看图核对已声明或未知的视觉能力",
+    );
     const root = await mkdtemp(join(tmpdir(), "pico-artifact-vision-e2e-"));
     const options = {
       persistence: true,

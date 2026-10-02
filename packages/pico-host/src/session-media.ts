@@ -8,7 +8,7 @@ import {
   rewriteSavedAiSdkMedia,
   isSavedAiSdkProjectionCurrent,
 } from "./provider/ai-sdk-messages.js";
-import { projectMediaTextForModel } from "@pico/core/media";
+import { projectMediaTextForModel, MODEL_IMAGE_MAX_BYTES } from "@pico/core/media";
 import type { ExecutionBoundary } from "@pico/core/permission-profile";
 import {
   inspectMediaBytes,
@@ -55,12 +55,21 @@ export async function prepareSessionMedia(options: {
     ? repository.queryArtifacts({ sessionId: options.sessionId }).revision
     : undefined;
   const media: RuntimeMediaReference[] = [];
-  const publish = (bytes: Uint8Array, alt: string, source?: string, declaredMime?: string) => {
+  const publish = (
+    bytes: Uint8Array,
+    alt: string,
+    source?: string,
+    declaredMime?: string,
+    explicitImage = false,
+  ) => {
     const inspected = inspectMediaBytes(bytes);
     if (
       !inspected ||
       bytes.length === 0 ||
-      bytes.length > mediaPreviewLimit(inspected.kind) ||
+      bytes.length >
+        (explicitImage && inspected.kind === "image"
+          ? MODEL_IMAGE_MAX_BYTES
+          : mediaPreviewLimit(inspected.kind)) ||
       (declaredMime !== undefined && inspected.mimeType !== declaredMime)
     )
       return undefined;
@@ -87,16 +96,25 @@ export async function prepareSessionMedia(options: {
     sizeBytes: ref.sizeBytes,
     digest: ref.digest,
   });
-  const persistInline = (data: string, mimeType: string, source?: string) => {
+  const persistInline = (
+    data: string,
+    mimeType: string,
+    source?: string,
+    explicitImage = false,
+  ) => {
     const kind = mimeType.startsWith("video/") ? "video" : "image";
     if (
-      data.length > Math.ceil(mediaPreviewLimit(kind) / 3) * 4 ||
+      data.length >
+        Math.ceil(
+          (explicitImage && kind === "image" ? MODEL_IMAGE_MAX_BYTES : mediaPreviewLimit(kind)) / 3,
+        ) *
+          4 ||
       media.length >= MEDIA_MAX_REFERENCES
     )
       return undefined;
     const bytes = Buffer.from(data, "base64");
     if (bytes.toString("base64") !== data) return undefined;
-    return publish(bytes, kind === "image" ? "图片" : "视频", source, mimeType);
+    return publish(bytes, kind === "image" ? "图片" : "视频", source, mimeType, explicitImage);
   };
   const rewriteText = (text: string): string =>
     text.replace(
@@ -127,11 +145,13 @@ export async function prepareSessionMedia(options: {
         media.push(reference(artifact, "image", "图片"));
         images.push(image);
       } else if (image.type === "image_base64") {
-        const ref = persistInline(image.data, image.mimeType);
+        const ref = persistInline(image.data, image.mimeType, undefined, true);
         if (ref?.kind === "image") images.push(toImage(ref));
       } else if (image.url.startsWith("data:")) {
         const match = /^data:(image\/[a-z0-9.+-]+);base64,([a-z0-9+/=]+)$/iu.exec(image.url);
-        const ref = match ? persistInline(match[2]!, match[1]!.toLowerCase()) : undefined;
+        const ref = match
+          ? persistInline(match[2]!, match[1]!.toLowerCase(), undefined, true)
+          : undefined;
         if (ref?.kind === "image") images.push(toImage(ref));
       } else images.push(image);
     } catch {
@@ -150,7 +170,7 @@ export async function prepareSessionMedia(options: {
     (data, mimeType) => {
       if (typeof data !== "string") return undefined;
       if (data.startsWith("pico://artifact/")) return data;
-      const ref = persistInline(data, mimeType);
+      const ref = persistInline(data, mimeType, undefined, true);
       return ref ? artifactUri(ref.artifactId) : undefined;
     },
     replayWasValid,
@@ -344,7 +364,7 @@ export function readSessionImageArtifact(
   if (
     !Number.isSafeInteger(image.sizeBytes) ||
     image.sizeBytes <= 0 ||
-    image.sizeBytes > mediaPreviewLimit("image")
+    image.sizeBytes > MODEL_IMAGE_MAX_BYTES
   )
     return undefined;
   const repository = new SqliteSessionWorkbarRepository({ storageRoot });

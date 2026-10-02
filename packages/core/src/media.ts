@@ -10,6 +10,8 @@ export type RuntimeMediaReference = {
   readonly source?: string;
 };
 
+/** Explicit model attachments retain the existing CLI input limit; UI previews stay smaller. */
+export const MODEL_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
 export const MEDIA_IMAGE_MAX_BYTES = 2 * 1024 * 1024;
 export const MEDIA_VIDEO_MAX_BYTES = 16 * 1024 * 1024;
 export const MEDIA_MAX_REFERENCES = 16;

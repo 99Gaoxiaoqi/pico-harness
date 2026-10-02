@@ -289,7 +289,7 @@ export class AiSdkProvider implements LLMProvider {
       model,
       messages: toAiSdkMessages(messages, this.wire, {
         responsesWebSearchAnchors: true,
-        vision: this.config.capabilities?.vision === true,
+        vision: this.config.capabilities?.vision !== false,
         ...(this.dependencies.readImageArtifact
           ? { readImageArtifact: this.dependencies.readImageArtifact }
           : {}),
