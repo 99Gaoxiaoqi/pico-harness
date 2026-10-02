@@ -61,6 +61,12 @@ jobs:
       - name: Typecheck desktop packages
         run: npm run desktop:typecheck
 
+      - name: Typecheck mobile app
+        run: npm run mobile:typecheck
+
+      - name: Verify mobile dependency boundaries
+        run: npm run check:mobile-boundaries
+
       - name: Lint
         run: npm run lint
 
