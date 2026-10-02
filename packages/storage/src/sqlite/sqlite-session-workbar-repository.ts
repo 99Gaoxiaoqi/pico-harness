@@ -910,7 +910,7 @@ export function projectSessionMedia(
       !(ref.kind === "image"
         ? ["image/png", "image/jpeg", "image/gif", "image/webp", "image/avif"].includes(
             String(ref.mimeType),
-          ) && ref.sizeBytes <= 2 * 1024 * 1024
+          ) && ref.sizeBytes <= 10 * 1024 * 1024
         : ref.kind === "video" &&
           ["video/mp4", "video/webm"].includes(String(ref.mimeType)) &&
           ref.sizeBytes <= 16 * 1024 * 1024)

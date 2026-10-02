@@ -54,6 +54,13 @@ function managedPath(database: DatabaseSync, relativePath: string, create: boole
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       }
+      // Durability includes newly created ancestor directory entries, not only the leaf file.
+      const parent = openSync(dirname(directory), constants.O_RDONLY | constants.O_NOFOLLOW);
+      try {
+        fsyncSync(parent);
+      } finally {
+        closeSync(parent);
+      }
     }
     const info = lstatSync(directory);
     if (!info.isDirectory() || info.isSymbolicLink())

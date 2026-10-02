@@ -57,6 +57,7 @@ realModelTest(
         (init.body.includes('"messages"') || init.body.includes('"input"'))
       ) {
         imageOnWire ||= init.body.includes(redPng);
+        assert.ok(imageOnWire, "发送网络请求前确认图片字节已物化");
         assert.ok(!init.body.includes("pico://artifact/"), "内部引用应在发送前完全物化");
       }
       return originalFetch(input, init);
