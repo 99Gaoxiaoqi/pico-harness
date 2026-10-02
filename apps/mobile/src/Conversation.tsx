@@ -4,6 +4,7 @@ import {
   FlatList,
   Image,
   KeyboardAvoidingView,
+  Keyboard,
   Platform,
   Pressable,
   StyleSheet,
@@ -25,7 +26,16 @@ import type { TranscriptReplicaView } from "@pico/transcript-replica";
 import { MobileTranscript } from "./transcript";
 import { usePico } from "./store";
 import { decodedBase64Size, validateAttachments } from "./core";
-import { Button, Card, Chips, Detail, Field, Label, s, color } from "./ui";
+import { Button, Card, Detail, Field, Label, s, color } from "./ui";
+import { ActionsSheet } from "./ActionsSheet";
+import type { WorkbarTab } from "./Workbar";
+
+const sendModes = [
+  { value: "auto", label: "自动", detail: "空闲时开始新任务；运行中补充引导。" },
+  { value: "steer", label: "引导", detail: "为运行中的任务补充要求；空闲时开始新任务。" },
+  { value: "queue", label: "排队", detail: "有任务运行时，等当前任务结束后处理。" },
+  { value: "replace", label: "替换", detail: "有任务运行时，停止当前任务并排队处理这条消息。" },
+] as const;
 
 export function Conversation({
   sessionId,
@@ -36,13 +46,23 @@ export function Conversation({
   sessionId: string;
   onSession: (id: string, parentSessionId?: string) => void;
   sideParentSessionId?: string;
-  onPanel: () => void;
+  onPanel: (tab?: WorkbarTab) => void;
 }) {
   const pico = usePico();
   const [view, setView] = useState<TranscriptReplicaView>();
   const [sessionReady, setSessionReady] = useState(false);
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
+  const [sheet, setSheet] = useState<"more" | "images" | "mode" | "run">();
+  function openSheet(value: NonNullable<typeof sheet>) {
+    Keyboard.dismiss();
+    setSheet(value);
+  }
+  function openPanel(tab?: WorkbarTab) {
+    Keyboard.dismiss();
+    setSheet(undefined);
+    onPanel(tab);
+  }
   const picking = useRef(false);
   const [pickingImage, setPickingImage] = useState(false);
   const [images, setImages] = useState<RuntimeInputAttachment[]>([]);
@@ -156,7 +176,7 @@ export function Conversation({
     }
   }
   async function send() {
-    if (sending || !sessionReady || !pico.connected) return;
+    if (sending || picking.current || !sessionReady || !pico.connected) return;
     const selectedContext = selection.current;
     const current = () => mounted.current && selection.current === selectedContext;
     setSending(true);
@@ -207,87 +227,33 @@ export function Conversation({
       behavior={Platform.OS === "ios" ? "padding" : undefined}
       keyboardVerticalOffset={90}
     >
-      <View style={[s.body, styles.toolbar]}>
-        <View style={s.row}>
-          <Button title="工作栏" quiet onPress={onPanel} />
-          <Button
-            title="侧聊"
-            quiet
-            reason={syncReason ?? pico.reason("sideChat.create")}
-            onPress={() =>
-              void pico.perform(async () => {
-                const selectedContext = selection.current;
-                const x = await pico.request("sideChat.create", {
-                  sourceSessionId: sessionId,
-                  panelId: Crypto.randomUUID(),
-                  idempotencyKey: Crypto.randomUUID(),
-                });
-                if (mounted.current && selectedContext === selection.current)
-                  onSession(x.session.sessionId, sessionId);
-              })
-            }
-          />
-          {sideParentSessionId && (
-            <Button
-              title="关闭侧聊"
-              quiet
-              reason={syncReason ?? pico.reason("sideChat.close")}
-              onPress={() =>
-                void pico.perform(async () => {
-                  const selectedContext = selection.current;
-                  await pico.request("sideChat.close", { sessionId });
-                  if (mounted.current && selectedContext === selection.current)
-                    onSession(sideParentSessionId);
-                })
-              }
-            />
-          )}
-          {run && <Label>{run.status}</Label>}
-        </View>
+      <View style={styles.toolbar}>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="会话设置"
+          onPress={() => openPanel("设置")}
+          style={styles.modelTarget}
+        >
+          <Text numberOfLines={1} style={s.muted}>
+            {settings?.model ?? "会话设置"}
+          </Text>
+        </Pressable>
         {run && (
-          <View style={s.row}>
-            <Button
-              title="暂停"
-              quiet
-              reason={syncReason ?? pico.reason("run.pause")}
-              onPress={() =>
-                void pico.perform(() => pico.request("run.pause", { runId: run.runId }))
-              }
-            />
-            <Button
-              title="继续"
-              quiet
-              reason={syncReason ?? pico.reason("run.resume")}
-              onPress={() =>
-                void pico.perform(() => pico.request("run.resume", { runId: run.runId }))
-              }
-            />
-            <Button
-              title="停止"
-              quiet
-              reason={syncReason ?? pico.reason("run.cancel")}
-              onPress={() =>
-                Alert.alert("停止当前任务？", run.description, [
-                  { text: "返回" },
-                  {
-                    text: "停止",
-                    style: "destructive",
-                    onPress: () =>
-                      void pico.perform(() => pico.request("run.cancel", { runId: run.runId })),
-                  },
-                ])
-              }
-            />
-          </View>
+          <Button
+            title={
+              run.status === "paused"
+                ? "任务已暂停"
+                : run.status === "pause_requested"
+                  ? "正在暂停"
+                  : run.status === "cancelling"
+                    ? "正在停止"
+                    : "任务运行中"
+            }
+            quiet
+            onPress={() => openSheet("run")}
+          />
         )}
-        {settings && (
-          <View style={[s.row, { flexWrap: "nowrap" }]}>
-            <Text numberOfLines={1} style={[s.muted, { flex: 1 }]}>
-              {settings.model} · {settings.collaborationMode} · {settings.permissionMode}
-            </Text>
-            <Button title="会话设置" quiet onPress={onPanel} />
-          </View>
-        )}
+        <Button title="更多" quiet onPress={() => openSheet("more")} />
       </View>
       <FlatList
         data={view?.records ?? []}
@@ -348,7 +314,8 @@ export function Conversation({
               <Pressable
                 key={i}
                 onPress={() => {
-                  if (!frozen) setImages(images.filter((_, j) => i !== j));
+                  if (!frozen && !sending && !picking.current)
+                    setImages(images.filter((_, j) => i !== j));
                 }}
               >
                 <Image
@@ -365,6 +332,7 @@ export function Conversation({
         ) : (
           <TextInput
             accessibilityLabel="消息"
+            editable={!sending}
             value={text}
             onChangeText={setText}
             multiline
@@ -375,27 +343,29 @@ export function Conversation({
             style={styles.messageInput}
           />
         )}
-        <Chips
-          values={["auto", "steer", "queue", "replace"] as const}
-          value={mode}
-          labels={{ auto: "自动", steer: "引导", queue: "排队", replace: "替换" }}
-          onChange={(x) => {
-            if (!frozen) setMode(x);
-          }}
-        />
         <View style={[s.row, { justifyContent: "space-between", alignItems: "flex-start" }]}>
           <View style={s.row}>
             <Button
-              title="相册"
+              title={pickingImage ? "处理中…" : "添加图片"}
               quiet
-              reason={frozen ? "先确认待处理请求" : pickingImage ? "正在处理图片" : undefined}
-              onPress={() => void addImage()}
+              reasonDetail={false}
+              reason={
+                frozen
+                  ? "先确认待处理请求"
+                  : pickingImage
+                    ? "正在处理图片"
+                    : sending
+                      ? "正在发送"
+                      : undefined
+              }
+              onPress={() => openSheet("images")}
             />
             <Button
-              title="拍照"
+              title={sendModes.find((x) => x.value === mode)!.label}
               quiet
-              reason={frozen ? "先确认待处理请求" : pickingImage ? "正在处理图片" : undefined}
-              onPress={() => void addImage(true)}
+              reasonDetail={false}
+              reason={frozen ? "先确认待处理请求" : sending ? "正在发送" : undefined}
+              onPress={() => openSheet("mode")}
             />
           </View>
           <Button
@@ -403,16 +373,155 @@ export function Conversation({
             reason={
               sending
                 ? "正在发送"
-                : !text.trim() && !images.length
-                  ? "请输入消息"
-                  : !sessionReady || view?.phase !== "ready"
-                    ? "正在补齐会话"
-                    : pico.reason("session.send")
+                : pickingImage
+                  ? "正在处理图片"
+                  : !text.trim() && !images.length
+                    ? "请输入消息"
+                    : !sessionReady || view?.phase !== "ready"
+                      ? "正在补齐会话"
+                      : pico.reason("session.send")
             }
             onPress={() => void send()}
           />
         </View>
       </View>
+      <ActionsSheet title="会话操作" open={sheet === "more"} onClose={() => setSheet(undefined)}>
+        <View style={{ gap: 10 }}>
+          <View style={s.row}>
+            <Button title="工作栏" quiet onPress={() => openPanel()} />
+            <Button
+              title="侧聊"
+              quiet
+              reason={syncReason ?? pico.reason("sideChat.create")}
+              onPress={() =>
+                void pico.perform(async () => {
+                  const selectedContext = selection.current;
+                  const x = await pico.request("sideChat.create", {
+                    sourceSessionId: sessionId,
+                    panelId: Crypto.randomUUID(),
+                    idempotencyKey: Crypto.randomUUID(),
+                  });
+                  if (mounted.current && selectedContext === selection.current)
+                    onSession(x.session.sessionId, sessionId);
+                })
+              }
+            />
+            {sideParentSessionId && (
+              <Button
+                title="关闭侧聊"
+                quiet
+                reason={syncReason ?? pico.reason("sideChat.close")}
+                onPress={() =>
+                  void pico.perform(async () => {
+                    const selectedContext = selection.current;
+                    await pico.request("sideChat.close", { sessionId });
+                    if (mounted.current && selectedContext === selection.current)
+                      onSession(sideParentSessionId);
+                  })
+                }
+              />
+            )}
+            {run && <Label>{run.status}</Label>}
+          </View>
+          {settings && (
+            <View style={[s.row, { flexWrap: "nowrap" }]}>
+              <Text numberOfLines={1} style={[s.muted, { flex: 1 }]}>
+                {settings.model} · {settings.collaborationMode} · {settings.permissionMode}
+              </Text>
+              <Button title="会话设置" quiet onPress={() => openPanel("设置")} />
+            </View>
+          )}
+        </View>
+      </ActionsSheet>
+      <ActionsSheet title="当前任务" open={sheet === "run"} onClose={() => setSheet(undefined)}>
+        {run ? (
+          <>
+            <Text style={s.text}>{run.description}</Text>
+            <Label>任务由电脑执行。关闭面板或离开手机不会停止任务。</Label>
+            {run && (
+              <View style={s.row}>
+                <Button
+                  title="暂停"
+                  quiet
+                  reason={
+                    syncReason ??
+                    (run.status !== "running" ? "当前任务不能暂停" : pico.reason("run.pause"))
+                  }
+                  onPress={() =>
+                    void pico.perform(() => pico.request("run.pause", { runId: run.runId }))
+                  }
+                />
+                <Button
+                  title="继续"
+                  quiet
+                  reason={
+                    syncReason ??
+                    (run.status !== "paused" ? "当前任务没有暂停" : pico.reason("run.resume"))
+                  }
+                  onPress={() =>
+                    void pico.perform(() => pico.request("run.resume", { runId: run.runId }))
+                  }
+                />
+                <Button
+                  title="停止"
+                  quiet
+                  reason={syncReason ?? pico.reason("run.cancel")}
+                  onPress={() =>
+                    Alert.alert("停止当前任务？", run.description, [
+                      { text: "返回" },
+                      {
+                        text: "停止",
+                        style: "destructive",
+                        onPress: () =>
+                          void pico.perform(() => pico.request("run.cancel", { runId: run.runId })),
+                      },
+                    ])
+                  }
+                />
+              </View>
+            )}
+          </>
+        ) : (
+          <Label>当前任务已结束。</Label>
+        )}
+      </ActionsSheet>
+      <ActionsSheet title="添加图片" open={sheet === "images"} onClose={() => setSheet(undefined)}>
+        <Label>已选 {images.length}/4 张；图片会压缩到本次附件预算内。</Label>
+        <Button
+          title="从相册选择"
+          secondary
+          reason={pickingImage ? "正在处理图片" : undefined}
+          onPress={() => void addImage().finally(() => setSheet(undefined))}
+        />
+        <Button
+          title="拍照"
+          secondary
+          reason={pickingImage ? "正在处理图片" : undefined}
+          onPress={() => void addImage(true).finally(() => setSheet(undefined))}
+        />
+      </ActionsSheet>
+      <ActionsSheet title="发送方式" open={sheet === "mode"} onClose={() => setSheet(undefined)}>
+        <Label>电脑有任务运行时，选择这条消息如何参与执行。</Label>
+        {sendModes.map((option) => (
+          <Pressable
+            key={option.value}
+            accessibilityRole="radio"
+            accessibilityState={{ checked: mode === option.value, disabled: frozen || sending }}
+            disabled={frozen || sending}
+            onPress={() => {
+              setMode(option.value);
+              setSheet(undefined);
+            }}
+            style={[styles.modeOption, mode === option.value && styles.modeSelected]}
+          >
+            <Text style={[s.text, mode === option.value && { color: color.accent }]}>
+              {option.label}
+              {mode === option.value ? " · 已选择" : ""}
+            </Text>
+            <Label>{option.detail}</Label>
+          </Pressable>
+        ))}
+      </ActionsSheet>
     </KeyboardAvoidingView>
   );
 }
@@ -717,7 +826,24 @@ function PlanCard({
 }
 
 const styles = StyleSheet.create({
-  toolbar: { paddingVertical: 4, gap: 2, borderBottomWidth: 1, borderBottomColor: color.line },
+  toolbar: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingHorizontal: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: color.line,
+  },
+  modelTarget: { minHeight: 44, flex: 1, justifyContent: "center" },
+  modeOption: {
+    minHeight: 64,
+    padding: 12,
+    gap: 4,
+    borderRadius: 11,
+    borderWidth: 1,
+    borderColor: color.line,
+  },
+  modeSelected: { backgroundColor: color.accentSoft, borderColor: color.accent },
   composer: {
     padding: 12,
     marginHorizontal: 12,

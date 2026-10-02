@@ -16,7 +16,7 @@ import type { RuntimeSession } from "@pico/protocol/mobile";
 import { usePico } from "./store";
 import { Button, Card, Chips, Field, Label, s, color } from "./ui";
 import { Conversation } from "./Conversation";
-import { Workbar } from "./Workbar";
+import { Workbar, type WorkbarTab } from "./Workbar";
 import { SettingsPanel } from "./Settings";
 export default function App() {
   const pico = usePico();
@@ -25,6 +25,7 @@ export default function App() {
   >("computers");
   const [sessionId, setSessionId] = useState<string>();
   const [sideParent, setSideParent] = useState<string>();
+  const [workbarTab, setWorkbarTab] = useState<WorkbarTab>("任务");
   useEffect(() => {
     setSessionId(undefined);
     setSideParent(undefined);
@@ -50,43 +51,72 @@ export default function App() {
     setSessionId(id);
     setScreen("conversation");
   };
+  const inSession = !!sessionId && (screen === "conversation" || screen === "workbar");
   return (
     <SafeAreaView style={s.page}>
       <StatusBar style="dark" />
-      <View style={[s.body, styles.header]}>
-        <View style={[s.row, { justifyContent: "space-between" }]}>
-          <Pressable
-            accessibilityRole="button"
-            onPress={() => setScreen("computers")}
-            style={styles.brandTarget}
-          >
-            <Text style={styles.brand}>pico</Text>
-          </Pressable>
-          <View style={[s.row, { gap: 6 }]}>
-            <View
-              style={[
-                styles.connectionDot,
-                { backgroundColor: pico.phase === "connected" ? color.accent : color.muted },
-              ]}
+      <View style={[s.body, styles.header, inSession && styles.compactHeader]}>
+        {inSession ? (
+          <View style={styles.chatHeader}>
+            <Button
+              title={screen === "workbar" ? "返回对话" : "会话"}
+              quiet
+              onPress={() => setScreen(screen === "workbar" ? "conversation" : "sessions")}
             />
-            <Label>
-              {
-                {
-                  offline: "未连接",
-                  connecting: "连接中",
-                  syncing: "同步中",
-                  connected: "已连接",
-                  background: "后台暂停",
-                  blocked: "需要处理",
-                }[pico.phase]
-              }
-            </Label>
+            <View style={styles.chatHeading}>
+              <Text style={styles.brand}>pico</Text>
+              <Text numberOfLines={1} style={s.muted}>
+                {pico.phase === "connected"
+                  ? pico.workspace?.label
+                  : {
+                      offline: "未连接",
+                      connecting: "连接中",
+                      syncing: "同步中",
+                      connected: "已连接",
+                      background: "后台暂停",
+                      blocked: "需要处理",
+                    }[pico.phase]}
+              </Text>
+            </View>
+            <Button title="电脑" quiet onPress={() => setScreen("computers")} />
           </View>
-        </View>
-        <Text numberOfLines={1} style={s.muted}>
-          {pico.host?.name ?? "连接你的电脑，继续你的工作"}
-        </Text>
-        {pico.workspace && screen !== "computers" && (
+        ) : (
+          <View style={[s.row, { justifyContent: "space-between" }]}>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => setScreen("computers")}
+              style={styles.brandTarget}
+            >
+              <Text style={styles.brand}>pico</Text>
+            </Pressable>
+            <View style={[s.row, { gap: 6 }]}>
+              <View
+                style={[
+                  styles.connectionDot,
+                  { backgroundColor: pico.phase === "connected" ? color.accent : color.muted },
+                ]}
+              />
+              <Label>
+                {
+                  {
+                    offline: "未连接",
+                    connecting: "连接中",
+                    syncing: "同步中",
+                    connected: "已连接",
+                    background: "后台暂停",
+                    blocked: "需要处理",
+                  }[pico.phase]
+                }
+              </Label>
+            </View>
+          </View>
+        )}
+        {!inSession && (
+          <Text numberOfLines={1} style={s.muted}>
+            {pico.host?.name ?? "连接你的电脑，继续你的工作"}
+          </Text>
+        )}
+        {pico.workspace && screen !== "computers" && !inSession && (
           <View style={styles.navigation}>
             {(
               [
@@ -132,19 +162,28 @@ export default function App() {
         </ScrollView>
       ) : screen === "sessions" ? (
         <Sessions onSession={goSession} />
-      ) : screen === "conversation" && sessionId ? (
-        <Conversation
-          key={`${pico.host?.id}/${pico.workspace?.id}/${sessionId}`}
-          sessionId={sessionId}
-          sideParentSessionId={sideParent}
-          onSession={goSession}
-          onPanel={() => setScreen("workbar")}
-        />
-      ) : screen === "workbar" && sessionId ? (
-        <Workbar
-          key={`${pico.host?.id}/${pico.workspace?.id}/${sessionId}`}
-          sessionId={sessionId}
-        />
+      ) : inSession && sessionId ? (
+        <View style={{ flex: 1 }}>
+          <View style={{ flex: 1, display: screen === "conversation" ? "flex" : "none" }}>
+            <Conversation
+              key={`${pico.host?.id}/${pico.workspace?.id}/${sessionId}`}
+              sessionId={sessionId}
+              sideParentSessionId={sideParent}
+              onSession={goSession}
+              onPanel={(tab = "任务") => {
+                setWorkbarTab(tab);
+                setScreen("workbar");
+              }}
+            />
+          </View>
+          {screen === "workbar" && (
+            <Workbar
+              key={`${pico.host?.id}/${pico.workspace?.id}/${sessionId}/${workbarTab}`}
+              sessionId={sessionId}
+              initialTab={workbarTab}
+            />
+          )}
+        </View>
       ) : screen === "settings" ? (
         <ScrollView contentContainerStyle={s.body}>
           <SettingsPanel key={`${pico.host?.id}/${pico.workspace?.id}`} />
@@ -444,6 +483,14 @@ function Sessions({ onSession }: { onSession: (id: string) => void }) {
 
 const styles = StyleSheet.create({
   header: { paddingVertical: 10, gap: 6, borderBottomWidth: 1, borderBottomColor: color.line },
+  compactHeader: { paddingHorizontal: 12, paddingVertical: 4 },
+  chatHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+  },
+  chatHeading: { flex: 1, alignItems: "center", gap: 0 },
   brand: { color: color.text, fontSize: 21, fontWeight: "700", letterSpacing: -0.7 },
   brandTarget: { minHeight: 44, minWidth: 44, justifyContent: "center" },
   connectionDot: { width: 6, height: 6, borderRadius: 3 },

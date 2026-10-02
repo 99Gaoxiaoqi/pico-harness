@@ -20,8 +20,15 @@ const tabs = [
   "审查",
   "设置",
 ] as const;
-export function Workbar({ sessionId }: { sessionId: string }) {
-  const [tab, setTab] = useState<(typeof tabs)[number]>("任务");
+export type WorkbarTab = (typeof tabs)[number];
+export function Workbar({
+  sessionId,
+  initialTab = "任务",
+}: {
+  sessionId: string;
+  initialTab?: WorkbarTab;
+}) {
+  const [tab, setTab] = useState<WorkbarTab>(initialTab);
   return (
     <View style={{ flex: 1 }}>
       <View style={s.body}>
