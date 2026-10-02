@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -155,6 +155,12 @@ test(
       }
     }
     try {
+      await assert.rejects(
+        services.desktopService.handle(
+          createRuntimeRequest("changes.list", { workspacePath, runId: next.run.runId }),
+        ),
+        /尚未结束/u,
+      );
       const points = (await readWhileRunning(
         services.desktopService.handle(createRuntimeRequest("rewind.list", ref)),
       )) as unknown as RuntimeResult<"rewind.list">;
@@ -216,7 +222,47 @@ test(
     )) as unknown as RuntimeResult<"changes.diff">;
     assert.match(nextDiff.patch, /-first delivery/u);
     assert.match(nextDiff.patch, /\+second delivery/u);
-    await writeFile(join(workspacePath, "delivery.txt"), "external edit\n");
+    const deliveryPath = join(workspacePath, "delivery.txt");
+    const fileBefore = await stat(deliveryPath, { bigint: true });
+    const stagedBefore = await git("git", ["-C", workspacePath, "diff", "--cached", "--binary"]);
+    const approved = (await services.desktopService.handle(
+      createRuntimeRequest("changes.review", {
+        workspacePath,
+        runId: nextFinished.runId,
+        decision: "approve",
+        expectedFingerprint: nextChanges.fingerprint,
+      }),
+    )) as unknown as RuntimeResult<"changes.review">;
+    const applied = (await services.desktopService.handle(
+      createRuntimeRequest("changes.apply", {
+        workspacePath,
+        runId: nextFinished.runId,
+        expectedFingerprint: nextChanges.fingerprint,
+      }),
+    )) as unknown as RuntimeResult<"changes.apply">;
+    assert.equal(approved.accepted, true);
+    assert.equal(applied.applied, true);
+    assert.equal(await readFile(deliveryPath, "utf8"), "second delivery\n");
+    assert.equal((await stat(deliveryPath, { bigint: true })).mtimeNs, fileBefore.mtimeNs);
+    assert.equal(
+      (await git("git", ["-C", workspacePath, "diff", "--cached", "--binary"])).stdout,
+      stagedBefore.stdout,
+      "approve and apply record confirmation without staging or rewriting files",
+    );
+    await assert.rejects(
+      services.desktopService.handle(
+        createRuntimeRequest("changes.review", {
+          workspacePath,
+          runId: nextFinished.runId,
+          decision: "request_changes",
+          message: "  ",
+          expectedFingerprint: nextChanges.fingerprint,
+        }),
+      ),
+      /必须说明原因/u,
+    );
+    assert.equal(executions, 2, "blank revision prompts must not dispatch another Run");
+    await writeFile(deliveryPath, "external edit\n");
     await assert.rejects(
       services.desktopService.handle(
         createRuntimeRequest("changes.review", {
@@ -228,5 +274,42 @@ test(
       ),
       /指纹已变化/u,
     );
+    await assert.rejects(
+      services.desktopService.handle(
+        createRuntimeRequest("changes.review", {
+          workspacePath,
+          runId: nextFinished.runId,
+          decision: "request_changes",
+          message: "revision delivery",
+          expectedFingerprint: nextChanges.fingerprint,
+        }),
+      ),
+      /指纹已变化/u,
+    );
+    assert.equal(executions, 2, "stale revision prompts must not dispatch another Run");
+    const currentChanges = (await services.desktopService.handle(
+      createRuntimeRequest("changes.list", { workspacePath, runId: nextFinished.runId }),
+    )) as unknown as RuntimeResult<"changes.list">;
+    const revision = (await services.desktopService.handle(
+      createRuntimeRequest("changes.review", {
+        workspacePath,
+        runId: nextFinished.runId,
+        decision: "request_changes",
+        message: "  revision delivery  ",
+        expectedFingerprint: currentChanges.fingerprint,
+      }),
+    )) as unknown as RuntimeResult<"changes.review">;
+    assert.equal(revision.accepted, true);
+    const list = (await services.service.handle(
+      createRuntimeRequest("runs.list", { workspacePath, sessionId }),
+    )) as unknown as RuntimeResult<"runs.list">;
+    const revisionRun = list.runs.find(
+      (run) => run.runId !== finished.runId && run.runId !== nextFinished.runId,
+    );
+    assert.ok(revisionRun, "accepted revision starts a new Run in the original Session");
+    assert.equal(revisionRun.sessionId, sessionId);
+    assert.equal((await nextRuntime.waitForRun(revisionRun.runId)).status, "succeeded");
+    assert.equal(executions, 3);
+    assert.equal(await readFile(deliveryPath, "utf8"), "revision delivery\n");
   },
 );

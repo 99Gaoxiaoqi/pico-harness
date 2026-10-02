@@ -11,7 +11,8 @@ import {
 import { createRuntimeNotification, type RuntimeNotification } from "@pico/protocol/mobile";
 import { REMOTE_MAX_FRAME_BYTES, REMOTE_METHODS, type RemoteRequest } from "@pico/protocol/remote";
 import { createTestTlsFixture, trustedFetch } from "./tls-fixture.js";
-import { parseMobilePairing } from "../../../apps/mobile/src/core.js";
+import { parseMobilePairing, type RuntimePort } from "../../../apps/mobile/src/core.js";
+import { MobileReview } from "../../../apps/mobile/src/review-controller.js";
 
 // Trust is injected into this test's transport only. Production client options never
 // disable TLS verification; the fixture certificate must match the HTTPS hostname.
@@ -469,69 +470,69 @@ test("remote client ignores old HTTP failures after backgrounding or a new conne
   assert.deepEqual(states, finalStates, "old connect failures must not change background state");
 });
 
-test("remote client never replays terminal input when command reply is lost", async (t) => {
-  const harness = await fixture(t);
-  const states: RemoteConnectionState[] = [];
-  const client = harness.client((state) => states.push(state));
-  await client.connect();
-  let executed = 0;
-  harness.setRpc((_body, _response, request) => {
-    executed++;
-    request.socket.destroy();
-  });
-  await assert.rejects(
-    client.request(
-      "terminal.input",
-      {
-        sessionId: "session-a",
-        terminalId: "terminal-a",
-        resourceEpoch: "epoch-a",
-        data: "echo 中文\n",
-      },
-      { workspaceId: "workspace-a" },
-    ),
-    remoteError("CONNECTION_FAILED", "unknown"),
-  );
-  assert.equal(
-    states.at(-1),
-    "reconnecting",
-    "health must change before unknown outcome is returned",
-  );
-  await new Promise((resolve) => setTimeout(resolve, 1_250));
-  assert.equal(states.at(-1), "connected");
-  assert.equal(executed, 1);
-  assert.equal(harness.rpc.length, 1);
-  harness.setRpc((body, response) =>
-    json(
-      response,
-      {
-        requestId: body.requestId,
-        ok: false,
-        error: {
-          code: "RATE_LIMITED",
-          message: "并发请求过多",
-          retryable: true,
-          outcome: "not_executed",
+for (const method of ["terminal.input", "changes.review"] as const) {
+  test(`remote client never replays ${method} when command reply is lost`, async (t) => {
+    const harness = await fixture(t);
+    const states: RemoteConnectionState[] = [];
+    const client = harness.client((state) => states.push(state));
+    await client.connect();
+    const command = (text: string) =>
+      method === "terminal.input"
+        ? client.request(
+            "terminal.input",
+            {
+              sessionId: "session-a",
+              terminalId: "terminal-a",
+              resourceEpoch: "epoch-a",
+              data: text,
+            },
+            { workspaceId: "workspace-a" },
+          )
+        : client.request(
+            "changes.review",
+            {
+              runId: "run-a",
+              decision: "request_changes",
+              message: text,
+              expectedFingerprint: "review-a",
+            },
+            { workspaceId: "workspace-a" },
+          );
+    let executed = 0;
+    harness.setRpc((_body, _response, request) => {
+      executed++;
+      request.socket.destroy();
+    });
+    await assert.rejects(command("echo 中文\n"), remoteError("CONNECTION_FAILED", "unknown"));
+    assert.equal(
+      states.at(-1),
+      "reconnecting",
+      "health must change before unknown outcome is returned",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 1_250));
+    assert.equal(states.at(-1), "connected");
+    assert.equal(executed, 1);
+    assert.equal(harness.rpc.length, 1);
+    harness.setRpc((body, response) =>
+      json(
+        response,
+        {
+          requestId: body.requestId,
+          ok: false,
+          error: {
+            code: "RATE_LIMITED",
+            message: "并发请求过多",
+            retryable: true,
+            outcome: "not_executed",
+          },
         },
-      },
-      429,
-    ),
-  );
-  await assert.rejects(
-    client.request(
-      "terminal.input",
-      {
-        sessionId: "session-a",
-        terminalId: "terminal-a",
-        resourceEpoch: "epoch-a",
-        data: "echo 确定未执行\n",
-      },
-      { workspaceId: "workspace-a" },
-    ),
-    remoteError("RATE_LIMITED", "not_executed"),
-  );
-  assert.equal(executed, 1, "确定未执行的错误不得改写为unknown或触发自动重发");
-});
+        429,
+      ),
+    );
+    await assert.rejects(command("echo 确定未执行\n"), remoteError("RATE_LIMITED", "not_executed"));
+    assert.equal(executed, 1, "确定未执行的错误不得改写为unknown或触发自动重发");
+  });
+}
 
 test("remote client pairing waits for local approval and acknowledges saved credentials", async (t) => {
   const harness = await fixture(t);
@@ -782,4 +783,217 @@ test("remote client fences an in-flight replay response when the app goes to bac
   await until(() => received.length === 1);
   assert.deepEqual(received, ["event-2"]);
   subscribed.dispose();
+});
+
+function reviewFixtureRun(
+  runId: string,
+  status: "running" | "cancelled" | "failed" | "succeeded",
+  startedAt: number,
+  sessionId = "session-a",
+) {
+  return {
+    runId,
+    sessionId,
+    workspacePath: "/computer/workspace",
+    description: runId,
+    status,
+    startedAt,
+    updatedAt: startedAt,
+    version: 1,
+  };
+}
+
+test("mobile review binds finished Runs and returns only after one accepted revision submission", async (t) => {
+  const harness = await fixture(t);
+  const client = harness.client();
+  await client.connect();
+  const port: RuntimePort = {
+    request: (method, params, workspaceId) => client.request(method, params, { workspaceId }),
+  };
+  let returned = 0;
+  const review = new MobileReview(port, "workspace-a", "session-a", () => returned++);
+  let holdReview = false;
+  let held: { body: RemoteRequest; response: ServerResponse } | undefined;
+  harness.setRpc((body, response) => {
+    assert.equal(body.workspaceId, "workspace-a");
+    const value =
+      body.method === "runs.list"
+        ? {
+            runs: [
+              reviewFixtureRun("success", "succeeded", 1),
+              reviewFixtureRun("cancelled", "cancelled", 2),
+              reviewFixtureRun("failed", "failed", 3),
+              reviewFixtureRun("active", "running", 4),
+              reviewFixtureRun("foreign", "failed", 5, "another-session"),
+            ],
+          }
+        : body.method === "changes.list"
+          ? {
+              changes: [{ path: "delivery.txt", status: "added", additions: 1, deletions: 0 }],
+              fingerprint: "review-a",
+            }
+          : body.method === "changes.diff"
+            ? {
+                path: "delivery.txt",
+                patch: "+delivery",
+                truncated: true,
+                fingerprint: "review-a",
+              }
+            : { accepted: false, fingerprint: "review-a" };
+    if (body.method === "changes.review" && holdReview) {
+      held = { body, response };
+      return;
+    }
+    json(response, { requestId: body.requestId, ok: true, value });
+  });
+  await review.refresh();
+  assert.equal(review.state.runId, "failed", "failed Runs remain reviewable candidates");
+  assert.equal(
+    review.state.runs.some((run) => run.runId === "foreign"),
+    false,
+  );
+  assert.equal(review.state.diff?.truncated, true);
+  await review.selectRun("cancelled");
+  assert.equal(review.state.runId, "cancelled");
+  const beforeBlank = harness.rpc.length;
+  assert.equal(await review.submit("request_changes", "  "), false);
+  assert.equal(harness.rpc.length, beforeBlank);
+  assert.equal(await review.submit("request_changes", "  keep retries  "), false);
+  assert.equal(returned, 0, "accepted=false does not navigate or clear the opinion");
+  assert.deepEqual(harness.rpc.at(-1)?.params, {
+    runId: "cancelled",
+    decision: "request_changes",
+    message: "keep retries",
+    expectedFingerprint: "review-a",
+  });
+  await review.refresh(true);
+  holdReview = true;
+  const submitted = review.submit("request_changes", "  keep retries  ");
+  await until(() => !!held);
+  assert.equal(await review.submit("request_changes", "duplicate"), false);
+  assert.ok(held);
+  json(held.response, {
+    requestId: held.body.requestId,
+    ok: true,
+    value: { accepted: true, fingerprint: "review-a" },
+  });
+  assert.equal(await submitted, true);
+  assert.equal(returned, 1);
+  assert.equal(harness.rpc.filter((request) => request.method === "changes.review").length, 2);
+  assert.equal(await review.submit("request_changes", "duplicate after success"), false);
+});
+
+test("mobile review fences late source diffs, stale fingerprints and unknown revision outcomes", async (t) => {
+  const harness = await fixture(t);
+  const states: RemoteConnectionState[] = [];
+  const client = harness.client((state) => states.push(state));
+  await client.connect();
+  const port: RuntimePort = {
+    request: (method, params, workspaceId) => client.request(method, params, { workspaceId }),
+  };
+  let returned = 0;
+  const review = new MobileReview(port, "workspace-a", "session-a", () => returned++);
+  let delayed: { body: RemoteRequest; response: ServerResponse } | undefined;
+  let delayDiff = true;
+  let diffFingerprint = "review-a";
+  let loseCommandReply = false;
+  harness.setRpc((body, response, request) => {
+    const params = body.params as Record<string, unknown>;
+    if (body.method === "changes.diff" && delayDiff) {
+      delayed = { body, response };
+      return;
+    }
+    if (body.method === "changes.review" && loseCommandReply) {
+      request.socket.destroy();
+      return;
+    }
+    const value =
+      body.method === "runs.list"
+        ? { runs: [reviewFixtureRun("run-a", "succeeded", 1)] }
+        : body.method === "changes.list"
+          ? {
+              changes: [{ path: "delivery.txt", status: "added", additions: 1, deletions: 0 }],
+              fingerprint: "review-a",
+            }
+          : body.method === "changes.diff"
+            ? {
+                path: "delivery.txt",
+                patch: "Run patch",
+                truncated: false,
+                fingerprint: diffFingerprint,
+              }
+            : body.method === "git.review.snapshot"
+              ? {
+                  revision: "git-a",
+                  branch: "main",
+                  source: params.source,
+                  files: [{ path: "delivery.txt", status: "added", additions: 1, deletions: 0 }],
+                  truncated: false,
+                }
+              : body.method === "git.review.diff"
+                ? {
+                    revision: "git-a",
+                    source: params.source,
+                    path: "delivery.txt",
+                    patch: "Git patch",
+                    truncated: false,
+                  }
+                : { accepted: true, fingerprint: "review-a" };
+    json(response, { requestId: body.requestId, ok: true, value });
+  });
+  const initial = review.refresh();
+  await until(() => !!delayed);
+  await review.selectSource("git");
+  assert.equal(review.state.diff?.patch, "Git patch");
+  assert.ok(delayed);
+  json(delayed.response, {
+    requestId: delayed.body.requestId,
+    ok: true,
+    value: {
+      path: "delivery.txt",
+      patch: "late Run patch",
+      truncated: false,
+      fingerprint: "review-a",
+    },
+  });
+  await initial;
+  assert.equal(
+    review.state.diff?.patch,
+    "Git patch",
+    "late Run response cannot replace current Git diff",
+  );
+  const gitDiffCount = harness.rpc.filter((request) => request.method === "git.review.diff").length;
+  await review.selectGitSource("branch");
+  assert.equal(
+    harness.rpc.filter((request) => request.method === "git.review.diff").length,
+    gitDiffCount,
+  );
+  assert.equal(await review.submit("approve"), false, "Git overview never binds Run approval");
+  delayDiff = false;
+  diffFingerprint = "changed";
+  await review.selectSource("run");
+  assert.equal(review.state.stale, true);
+  assert.equal(review.state.diff, undefined);
+  assert.equal(await review.submit("approve"), false);
+  diffFingerprint = "review-a";
+  await review.refresh(true);
+  loseCommandReply = true;
+  assert.equal(await review.submit("request_changes", "continue in original chat"), false);
+  assert.equal(review.state.unknown, true);
+  assert.equal(returned, 0);
+  await until(() => states.at(-1) === "connected");
+  await review.refresh();
+  assert.equal(
+    review.state.unknown,
+    true,
+    "automatic reconnect refresh never releases an unknown command",
+  );
+  assert.equal(await review.submit("request_changes", "do not replay"), false);
+  assert.equal(harness.rpc.filter((request) => request.method === "changes.review").length, 1);
+  await review.refresh(true);
+  assert.equal(
+    review.state.unknown,
+    false,
+    "explicit refresh allows the user to decide after checking the original conversation",
+  );
 });

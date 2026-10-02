@@ -28,6 +28,21 @@ test("Git Review 用内容 revision 绑定 staged/unstaged/untracked 快照", as
     { path: "new.txt", stage: "unstaged", status: "untracked", additions: 1, deletions: 0 },
   ]);
 
+  const service = new DesktopWorkbarGitReviewService();
+  const overview = await service.snapshot({ workspacePath: repository, source: "branch" });
+  assert.equal(overview.source, "branch");
+  assert.equal(overview.files.length, initial.staged.length + initial.unstaged.length);
+  await assert.rejects(
+    service.diff({
+      workspacePath: repository,
+      source: "branch",
+      path: "tracked.txt",
+      expectedRevision: overview.revision,
+    }),
+    (error: unknown) =>
+      error instanceof Error && "code" in error && error.code === "invalid_request",
+  );
+
   const untrackedDiff = await authority.diff({
     path: "new.txt",
     stage: "unstaged",
@@ -143,7 +158,8 @@ test("Git Review 固定 Git 参数禁用 external diff，并限制路径与容�
       stage: "unstaged",
       expectedRevision: snapshot.revision,
     }),
-    (error: unknown) => error instanceof WorkbarGitReviewError && error.code === "invalid_request",
+    (error: unknown) =>
+      error instanceof Error && "code" in error && error.code === "invalid_request",
   );
 
   const bounded = await WorkbarGitReviewAuthority.open(repository, {
