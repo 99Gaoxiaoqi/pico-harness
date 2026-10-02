@@ -17,7 +17,9 @@ import {
   CAPABILITY_SCOPE_RUNTIME_CAPABILITY,
   TEMPORARY_WORKSPACE_RUNTIME_CAPABILITY,
   TRANSCRIPT_PROJECTOR_VERSION,
+  parseRuntimeResult,
 } from "@pico/protocol";
+import type { RuntimeMediaReference } from "@pico/protocol/mobile";
 import { UserConfigStore } from "@pico/pico-host/input/user-config-store";
 import type {
   RuntimeMethod,
@@ -30,7 +32,12 @@ import type {
   RemotePairingOffer,
   RemotePairingSubmitted,
   RemotePairingStatus,
+  RemoteMethod,
+  RemoteParams,
+  RemoteResponse,
 } from "@pico/protocol/remote";
+import type { RuntimePort } from "../../../apps/mobile/src/core.js";
+import { resolveMediaArtifact, verifyMediaIntegrity } from "../../../apps/mobile/src/media.js";
 import {
   createRemoteGateway,
   requestGatewayControl,
@@ -624,6 +631,167 @@ test("HTTPS 配对、本机批准与 ACK、RPC 授权、摘要下载和撤销构
       assert.equal((await stat(f.home)).mode & 0o777, 0o700);
       assert.equal((await stat(join(f.home, "devices.json"))).mode & 0o777, 0o600);
     }
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("手机聊天媒体通过 HTTPS 登记和校验后交付，失效引用、伪造内容和撤销设备被拒绝", async () => {
+  const f = await fixture();
+  try {
+    const { submitted, granted } = await f.pair();
+    assert.equal(
+      (await f.http("POST", `/v1/pairings/${submitted.pairingId}/ack`, submitted.pairingToken))
+        .status,
+      200,
+    );
+    const port: RuntimePort = {
+      request: async <M extends RemoteMethod>(method: M, params: RemoteParams<M>) => {
+        const response = await f.http("POST", "/v1/rpc", granted.deviceToken, {
+          version: 1,
+          requestId: "mobile-media",
+          workspaceId: "workspace-1",
+          method,
+          params,
+        });
+        const body = response.json as RemoteResponse;
+        if (!body.ok) throw Object.assign(new Error(body.error.message), { code: body.error.code });
+        assert.equal(response.status, 200);
+        return parseRuntimeResult(method, body.value);
+      },
+    };
+    await port.request("session.list", {});
+    const runtime = f.runtimes.get(granted.deviceId)!;
+    const originalRequest = runtime.request.bind(runtime);
+    const png = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6sVQAAAAASUVORK5CYII=",
+      "base64",
+    );
+    const fakePng = Buffer.from("<svg xmlns='http://www.w3.org/2000/svg'></svg>");
+    const resources = new Map(
+      [png, fakePng].map((bytes, index) => {
+        const metadata = {
+          ...artifact,
+          artifactId: `media-${index}`,
+          title: `image-${index}.png`,
+          mimeType: "image/png",
+          sizeBytes: bytes.length,
+          digest: createHash("sha256").update(bytes).digest("hex"),
+        };
+        return [metadata.artifactId, { metadata, bytes }] as const;
+      }),
+    );
+    const metadata = resources.get("media-0")!.metadata;
+    const media: RuntimeMediaReference = {
+      artifactId: metadata.artifactId,
+      mimeType: metadata.mimeType,
+      sizeBytes: metadata.sizeBytes,
+      digest: metadata.digest,
+      kind: "image",
+      alt: "生成图片",
+    };
+    let corrupt = false;
+    runtime.request = async <M extends RuntimeMethod>(method: M, params: RuntimeParams<M>) => {
+      if (method === "session.subscription.open") {
+        const snapshot = (await originalRequest(
+          method,
+          params,
+        )) as RuntimeResult<"session.subscription.open">;
+        return {
+          ...snapshot,
+          watermark: { ...snapshot.watermark, throughSequence: 1 },
+          durableTail: [
+            {
+              itemId: "answer-media",
+              itemRevision: 1,
+              positionSequence: 1,
+              positionOrdinal: 0,
+              item: {
+                id: "answer-media",
+                kind: "assistantMessage",
+                content: "生成图片",
+                media: [media],
+              },
+            },
+          ],
+        } as RuntimeResult<M>;
+      }
+      if (method !== "session.artifacts.query") return originalRequest(method, params);
+      runtime.calls.push({ method, params });
+      const query = params as RuntimeParams<"session.artifacts.query">;
+      const resource = resources.get(query.artifactId ?? "");
+      if (query.sessionId !== session.sessionId || !resource)
+        throw Object.assign(new Error("wrong media owner"), { code: "NOT_FOUND" });
+      if (query.action === "get")
+        return { revision: 1, artifacts: [resource.metadata] } as RuntimeResult<M>;
+      const offset = query.offsetBytes!;
+      const end = Math.min(resource.bytes.length, offset + query.limitBytes!);
+      const bytes = Buffer.from(resource.bytes.subarray(offset, end));
+      if (corrupt && bytes.length) bytes[bytes.length - 1] = bytes[bytes.length - 1]! ^ 1;
+      return {
+        artifact: resource.metadata,
+        contentBase64: bytes.toString("base64"),
+        offsetBytes: offset,
+        endOffsetBytes: end,
+        totalBytes: resource.bytes.length,
+        truncated: end < resource.bytes.length,
+      } as RuntimeResult<M>;
+    };
+    const snapshot = await port.request("session.subscription.open", {
+      sessionId: session.sessionId,
+    });
+    const received = snapshot.durableTail[0]!.item;
+    assert.equal(received.kind, "assistantMessage");
+    assert.deepEqual(received.media, [media]);
+    const registered = await resolveMediaArtifact(port, session.sessionId, media);
+    assert.equal(registered.artifactId, media.artifactId);
+    const download = (id = media.artifactId, sessionId = session.sessionId) =>
+      f.http(
+        "GET",
+        `/v1/workspaces/workspace-1/sessions/${sessionId}/artifacts/${id}/content`,
+        granted.deviceToken,
+      );
+    const result = await download();
+    assert.equal(result.status, 200);
+    assert.deepEqual(result.bytes, png);
+    assert.equal(result.headers["x-pico-sha256"], media.digest);
+    verifyMediaIntegrity(
+      media,
+      result.bytes.length,
+      createHash("sha256").update(result.bytes).digest("hex"),
+      result.bytes,
+    );
+    for (const [id, sessionId] of [
+      ["unknown-media", session.sessionId],
+      [media.artifactId, "foreign-session"],
+    ]) {
+      await assert.rejects(resolveMediaArtifact(port, sessionId!, { ...media, artifactId: id! }), {
+        code: "NOT_FOUND",
+      });
+      assert.equal((await download(id, sessionId)).status, 404);
+    }
+    await assert.rejects(
+      resolveMediaArtifact(port, session.sessionId, { ...media, digest: "0".repeat(64) }),
+      /登记信息已改变/,
+    );
+    const fake = resources.get("media-1")!.metadata;
+    const fakeMedia = {
+      ...media,
+      artifactId: fake.artifactId,
+      sizeBytes: fake.sizeBytes,
+      digest: fake.digest,
+    };
+    await resolveMediaArtifact(port, session.sessionId, fakeMedia);
+    const forged = await download(fakeMedia.artifactId);
+    assert.equal(forged.status, 200, "摘要正确的伪造格式由手机内容校验拒绝");
+    assert.throws(
+      () => verifyMediaIntegrity(fakeMedia, forged.bytes.length, fakeMedia.digest, forged.bytes),
+      /内容与声明格式不符/,
+    );
+    corrupt = true;
+    assert.equal((await download()).status, 502, "摘要损坏的媒体不能完成下载");
+    await requestGatewayControl(f.home, "devices.revoke", { deviceId: granted.deviceId });
+    assert.equal((await download()).status, 401);
   } finally {
     await f.cleanup();
   }
