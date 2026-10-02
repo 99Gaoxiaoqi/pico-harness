@@ -10,7 +10,12 @@ import {
 } from "../../../apps/mobile/src/core.js";
 import { MobileTranscript } from "../../../apps/mobile/src/transcript.js";
 
-test("手机会话通过订阅帧补齐 durable 历史、分页，并忽略切换后的响应", async () => {
+test("手机会话在缺少 toSorted 的引擎中补齐历史、分页并忽略切换后的响应", async (t) => {
+  const sorting = Object.getOwnPropertyDescriptor(Array.prototype, "toSorted");
+  Object.defineProperty(Array.prototype, "toSorted", { value: undefined, configurable: true });
+  t.after(() => {
+    if (sorting) Object.defineProperty(Array.prototype, "toSorted", sorting);
+  });
   const watermark = { historyEpoch: "history", projectorVersion: 11 as const, throughSequence: 1 };
   const session = {
     sessionId: "s",

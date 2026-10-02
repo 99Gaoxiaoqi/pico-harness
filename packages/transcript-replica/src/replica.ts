@@ -166,7 +166,7 @@ export class TranscriptReplica {
       ...(this.#watermark ? { watermark: this.#watermark } : {}),
       ...(this.#pendingWatermark ? { pendingWatermark: this.#pendingWatermark } : {}),
       records: orderedRecords(this.#records.values()),
-      activeOverlay: [...this.#overlays.values()].toSorted(compareOverlay),
+      activeOverlay: [...this.#overlays.values()].sort(compareOverlay),
       queuedInputs: this.#queuedInputs,
       ...(this.#activeRun ? { activeRun: this.#activeRun } : {}),
       ...(this.#olderCursor ? { olderCursor: this.#olderCursor } : {}),
@@ -865,7 +865,7 @@ function applyChanges(
 function orderedRecords(
   records: Iterable<RuntimeTranscriptItemRecord>,
 ): RuntimeTranscriptItemRecord[] {
-  return [...records].toSorted(
+  return [...records].sort(
     (left, right) =>
       left.positionSequence - right.positionSequence ||
       left.positionOrdinal - right.positionOrdinal ||
