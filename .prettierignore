@@ -1,5 +1,6 @@
 dist/
 node_modules/
+apps/mobile/src/terminal.generated.ts
 docs/superpowers/
 aihot_summary.md
 
