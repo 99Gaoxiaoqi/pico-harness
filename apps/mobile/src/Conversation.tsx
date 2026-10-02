@@ -1,4 +1,4 @@
-import React, { useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   Alert,
   FlatList,
@@ -21,6 +21,7 @@ import { ActionsSheet } from "./ActionsSheet";
 import type { WorkbarTab } from "./Workbar";
 import { useSessionTranscript } from "./conversation/useSessionTranscript";
 import { useMessageComposer } from "./conversation/useMessageComposer";
+import { useTranscriptViewport } from "./conversation/useTranscriptViewport";
 import { TranscriptItem, StreamingItem, PlanCard } from "./conversation/TranscriptItem";
 
 const sendModes = [
@@ -31,12 +32,14 @@ const sendModes = [
 ] as const;
 
 export function Conversation({
+  active,
   sessionId,
   keyboardOffset,
   onSession,
   onPanel,
   sideParentSessionId,
 }: {
+  active: boolean;
   sessionId: string;
   keyboardOffset: number;
   onSession: (id: string, parentSessionId?: string) => void;
@@ -44,7 +47,7 @@ export function Conversation({
   onPanel: (tab?: WorkbarTab) => void;
 }) {
   const pico = usePico();
-  const { view, sessionReady, settings, plan, loadOlder, refreshTranscript } =
+  const { view, sessionReady, restoreVersion, settings, plan, loadOlder, refreshTranscript } =
     useSessionTranscript(sessionId);
   const {
     text,
@@ -69,15 +72,25 @@ export function Conversation({
     onSession,
   });
   const [visibleItems, setVisibleItems] = useState(new Set<string>());
+  const viewport = useTranscriptViewport(view, sessionReady, active, restoreVersion);
   const onViewableItemsChanged = useRef(({ viewableItems }: { viewableItems: ViewToken[] }) => {
+    viewport.onViewableItemsChanged(viewableItems);
     setVisibleItems(new Set(viewableItems.map((token) => token.key)));
   }).current;
   const [sheet, setSheet] = useState<"more" | "images" | "mode" | "run">();
+  useEffect(() => {
+    if (!active) {
+      setSheet(undefined);
+      Keyboard.dismiss();
+    }
+  }, [active]);
   function openSheet(value: NonNullable<typeof sheet>) {
+    if (!active) return;
     Keyboard.dismiss();
     setSheet(value);
   }
   function openPanel(tab?: WorkbarTab) {
+    if (!active) return;
     Keyboard.dismiss();
     setSheet(undefined);
     onPanel(tab);
@@ -119,6 +132,13 @@ export function Conversation({
         <Button title="更多" quiet onPress={() => openSheet("more")} />
       </View>
       <FlatList
+        ref={viewport.listRef}
+        CellRendererComponent={viewport.Cell}
+        onScroll={viewport.onScroll}
+        onScrollBeginDrag={viewport.onScrollBeginDrag}
+        onScrollToIndexFailed={viewport.onScrollToIndexFailed}
+        onContentSizeChange={viewport.onContentSizeChange}
+        scrollEventThrottle={32}
         data={view?.records ?? []}
         keyExtractor={(x) => x.itemId}
         extraData={visibleItems}
@@ -139,7 +159,15 @@ export function Conversation({
           />
         )}
         ListEmptyComponent={
-          <Label>{pico.connected ? "正在读取历史…" : "连接恢复后会补齐记录"}</Label>
+          <Label>
+            {!pico.connected
+              ? "连接恢复后会补齐记录"
+              : sessionReady && view?.phase === "ready"
+                ? "开始一段对话，让 Pico 帮你处理电脑上的任务。"
+                : view?.phase === "recovering" || view?.phase === "idle"
+                  ? "历史尚未同步，请重新连接后重试"
+                  : "正在读取历史…"}
+          </Label>
         }
         ListFooterComponent={
           <View style={{ gap: 10 }}>
@@ -235,7 +263,11 @@ export function Conversation({
           />
         </View>
       </View>
-      <ActionsSheet title="会话操作" open={sheet === "more"} onClose={() => setSheet(undefined)}>
+      <ActionsSheet
+        title="会话操作"
+        open={active && sheet === "more"}
+        onClose={() => setSheet(undefined)}
+      >
         <View style={{ gap: 10 }}>
           <View style={s.row}>
             <Button title="工作栏" quiet onPress={() => openPanel()} />
@@ -281,7 +313,11 @@ export function Conversation({
           )}
         </View>
       </ActionsSheet>
-      <ActionsSheet title="当前任务" open={sheet === "run"} onClose={() => setSheet(undefined)}>
+      <ActionsSheet
+        title="当前任务"
+        open={active && sheet === "run"}
+        onClose={() => setSheet(undefined)}
+      >
         {run ? (
           <>
             <Text style={s.text}>{run.description}</Text>
@@ -333,7 +369,11 @@ export function Conversation({
           <Label>当前任务已结束。</Label>
         )}
       </ActionsSheet>
-      <ActionsSheet title="添加图片" open={sheet === "images"} onClose={() => setSheet(undefined)}>
+      <ActionsSheet
+        title="添加图片"
+        open={active && sheet === "images"}
+        onClose={() => setSheet(undefined)}
+      >
         <Label>已选 {images.length}/4 张；图片会压缩到本次附件预算内。</Label>
         <Button
           title="从相册选择"
@@ -348,7 +388,11 @@ export function Conversation({
           onPress={() => void addImage(true).finally(() => setSheet(undefined))}
         />
       </ActionsSheet>
-      <ActionsSheet title="发送方式" open={sheet === "mode"} onClose={() => setSheet(undefined)}>
+      <ActionsSheet
+        title="发送方式"
+        open={active && sheet === "mode"}
+        onClose={() => setSheet(undefined)}
+      >
         <Label>电脑有任务运行时，选择这条消息如何参与执行。</Label>
         {sendModes.map((option) => (
           <Pressable

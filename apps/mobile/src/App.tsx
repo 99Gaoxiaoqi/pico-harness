@@ -162,7 +162,10 @@ export default function App() {
       ) : inSession && sessionId ? (
         <View style={{ flex: 1 }}>
           <View
-            style={[styles.conversationPage, { opacity: screen === "conversation" ? 1 : 0 }]}
+            style={[
+              styles.conversationPage,
+              { display: screen === "conversation" ? "flex" : "none" },
+            ]}
             pointerEvents={screen === "conversation" ? "auto" : "none"}
             accessibilityElementsHidden={screen !== "conversation"}
             importantForAccessibility={screen === "conversation" ? "auto" : "no-hide-descendants"}
@@ -170,6 +173,7 @@ export default function App() {
             <MessageMediaProvider sessionId={sessionId} active={screen === "conversation"}>
               <Conversation
                 key={`${pico.host?.id}/${pico.workspace?.id}/${sessionId}`}
+                active={screen === "conversation"}
                 sessionId={sessionId}
                 keyboardOffset={insets.top + headerHeight}
                 sideParentSessionId={sideParent}

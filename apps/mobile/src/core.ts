@@ -4,6 +4,23 @@ import type {
   RemoteParams as RuntimeParams,
   RemoteResult as RuntimeResult,
 } from "@pico/protocol/remote";
+import { parsePairingOffer, type RemotePairingOffer } from "@pico/protocol/remote";
+
+export function parseMobilePairing(raw: string): RemotePairingOffer {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw new Error("配对内容格式不正确，请重新扫码或完整粘贴配对内容");
+  }
+  try {
+    return parsePairingOffer(value);
+  } catch (error) {
+    if (error instanceof TypeError)
+      throw new Error("配对地址无效，请在电脑重新生成配对二维码", { cause: error });
+    throw error;
+  }
+}
 
 export type MobileParams<M extends RuntimeMethod> = Omit<RuntimeParams<M>, "workspacePath">;
 export type SavedHost = {

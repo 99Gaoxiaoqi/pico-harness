@@ -11,6 +11,7 @@ import {
 import { createRuntimeNotification, type RuntimeNotification } from "@pico/protocol/mobile";
 import { REMOTE_MAX_FRAME_BYTES, REMOTE_METHODS, type RemoteRequest } from "@pico/protocol/remote";
 import { createTestTlsFixture, trustedFetch } from "./tls-fixture.js";
+import { parseMobilePairing } from "../../../apps/mobile/src/core.js";
 
 // Trust is injected into this test's transport only. Production client options never
 // disable TLS verification; the fixture certificate must match the HTTPS hostname.
@@ -541,8 +542,14 @@ test("remote client pairing waits for local approval and acknowledges saved cred
     secret: "a".repeat(48),
     expiresAt: Date.now() + 60_000,
   };
+  assert.throws(() => parseMobilePairing("{bad"), /配对内容格式不正确/);
+  assert.throws(
+    () => parseMobilePairing(JSON.stringify({ ...offer, publicUrl: "invalid" })),
+    /配对地址无效/,
+  );
+  assert.equal(harness.requests.length, 0, "无效配对内容不得发送到网络");
   const pairing = await RemoteRuntimeClient.submitPairing(
-    offer,
+    parseMobilePairing(JSON.stringify(offer)),
     { deviceName: "手机", platform: "ios" },
     harness.fetcher,
   );

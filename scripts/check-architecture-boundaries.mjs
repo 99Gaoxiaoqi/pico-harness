@@ -73,6 +73,7 @@ const HANDWRITTEN_TIMEOUT_WHITELIST = new Map([
   ],
   ["packages/runtime-host/src/transport/framed-transport.ts", "骨架：帧读超时"],
   ["apps/mobile/src/store.tsx", "移动端短时配对轮询，不依赖 Node Runtime"],
+  ["apps/mobile/src/transcript.ts", "移动端历史恢复的总等待预算；不可依赖 Node Runtime deadline"],
   [
     "apps/mobile/src/terminal.generated.ts",
     "本地打包第三方 xterm HTML 字符串；不作为手写 Runtime 超时原语",

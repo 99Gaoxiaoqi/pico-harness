@@ -5,8 +5,6 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { RemoteRuntimeClient } from "@pico/remote-client";
 import {
   getRemoteMethodSpec,
-  parsePairingOffer,
-  type RemotePairingOffer,
   type RemoteMethod,
   type RemoteParams,
   type RemoteResult,
@@ -18,6 +16,7 @@ import {
   GenerationFence,
   canUse,
   errorText,
+  parseMobilePairing,
   type SavedHost,
   type Workspace,
   type ConnectionPhase,
@@ -73,7 +72,25 @@ export function PicoProvider({ children }: { children: React.ReactNode }) {
   const eventsRef = useRef<{ dispose: () => void } | undefined>(undefined);
   const foreground = useRef(AppState.currentState === "active");
   const eventGeneration = useRef(0);
-  const syncPromise = useRef<{ id: number; promise: Promise<void> } | undefined>(undefined);
+  const syncEpoch = useRef(0);
+  const syncPromise = useRef<{ id: number; epoch: number; promise: Promise<void> } | undefined>(
+    undefined,
+  );
+  function invalidateSync() {
+    syncEpoch.current++;
+    eventGeneration.current++;
+    syncPromise.current = undefined;
+    eventsRef.current?.dispose();
+    eventsRef.current = undefined;
+  }
+  function isCurrent(client: RemoteRuntimeClient, id: number, epoch = syncEpoch.current) {
+    return (
+      clientRef.current === client &&
+      id === fence.current.current &&
+      epoch === syncEpoch.current &&
+      foreground.current
+    );
+  }
   function updatePhase(value: ConnectionPhase) {
     phaseRef.current = value;
     setPhase(value);
@@ -82,46 +99,67 @@ export function PicoProvider({ children }: { children: React.ReactNode }) {
     setError(errorText(e));
   }
   async function perform(task: () => Promise<unknown>) {
+    const id = fence.current.current;
     try {
       await task();
-      setError(undefined);
+      if (id === fence.current.current) setError(undefined);
     } catch (e) {
-      report(e);
+      if (id === fence.current.current) report(e);
     }
   }
-  function disconnect() {
-    fence.current.next();
-    eventGeneration.current++;
+  function resetConnection(keepSelection: boolean) {
+    const id = fence.current.next();
+    invalidateSync();
     eventsRef.current?.dispose();
     eventsRef.current = undefined;
-    clientRef.current?.close();
+    const previous = clientRef.current;
     clientRef.current = undefined;
-    workspaceRef.current = undefined;
-    hostRef.current = undefined;
-    setHost(undefined);
-    setWorkspace(undefined);
-    setWorkspaces([]);
-    setCapabilities(undefined);
+    previous?.close();
+    if (!keepSelection) {
+      workspaceRef.current = undefined;
+      hostRef.current = undefined;
+      setHost(undefined);
+      setWorkspace(undefined);
+      setWorkspaces([]);
+      setCapabilities(undefined);
+    }
     updatePhase("offline");
-    setGeneration(fence.current.current);
+    setGeneration(id);
+    return id;
+  }
+  function disconnect() {
+    resetConnection(false);
   }
   function sync(client: RemoteRuntimeClient, id: number): Promise<void> {
-    if (syncPromise.current?.id === id) return syncPromise.current.promise;
+    const epoch = syncEpoch.current;
+    if (!isCurrent(client, id, epoch)) return Promise.resolve();
+    if (syncPromise.current?.id === id && syncPromise.current.epoch === epoch)
+      return syncPromise.current.promise;
     const promise = (async () => {
       updatePhase("syncing");
       const [caps, list] = await Promise.all([client.capabilities(), client.workspaces()]);
-      fence.current.assert(id);
+      if (!isCurrent(client, id, epoch)) return;
       setCapabilities(caps);
       setWorkspaces(list);
       const chosen = list.find((x) => x.id === workspaceRef.current?.id) ?? list[0];
       workspaceRef.current = chosen;
       setWorkspace(chosen);
       if (chosen) await subscribe(client, chosen, id);
-      fence.current.assert(id);
+      else {
+        eventsRef.current?.dispose();
+        eventsRef.current = undefined;
+      }
+      if (!isCurrent(client, id, epoch)) return;
       updatePhase("connected");
+      setError(undefined);
       setGeneration(id);
-    })();
-    syncPromise.current = { id, promise };
+    })().catch((error) => {
+      if (isCurrent(client, id, epoch)) {
+        report(error);
+        updatePhase("blocked");
+      }
+    });
+    syncPromise.current = { id, epoch, promise };
     void promise
       .finally(() => {
         if (syncPromise.current?.promise === promise) syncPromise.current = undefined;
@@ -141,16 +179,14 @@ export function PicoProvider({ children }: { children: React.ReactNode }) {
       )
         for (const listener of notificationListeners.current) listener(event);
     });
-    if (id !== fence.current.current || subscriptionGeneration !== eventGeneration.current) {
+    if (!isCurrent(client, id) || subscriptionGeneration !== eventGeneration.current) {
       subscription.dispose();
       return;
     }
     eventsRef.current = subscription;
   }
   async function connect(selected: SavedHost) {
-    disconnect();
-    const id = fence.current.next();
-    setGeneration(id);
+    const id = resetConnection(hostRef.current?.id === selected.id);
     setHost(selected);
     hostRef.current = selected;
     setError(undefined);
@@ -171,13 +207,24 @@ export function PicoProvider({ children }: { children: React.ReactNode }) {
             phaseRef.current !== "syncing" &&
             phaseRef.current !== "connected"
           )
-            void sync(client, fence.current.current).catch(report);
+            void sync(client, fence.current.current);
           else if (state === "unauthorized" || state === "incompatible" || state === "error") {
+            invalidateSync();
             updatePhase("blocked");
+            if (state === "unauthorized") {
+              workspaceRef.current = undefined;
+              setWorkspace(undefined);
+              setWorkspaces([]);
+              setCapabilities(undefined);
+            }
             if (stateError) report(stateError);
-          } else if (state === "connecting" || state === "reconnecting") updatePhase("connecting");
-          else if (state === "disconnected")
+          } else if (state === "connecting" || state === "reconnecting") {
+            invalidateSync();
             updatePhase(foreground.current ? "connecting" : "background");
+          } else if (state === "disconnected") {
+            invalidateSync();
+            updatePhase(foreground.current ? "connecting" : "background");
+          }
         },
       });
       clientRef.current = client;
@@ -187,8 +234,10 @@ export function PicoProvider({ children }: { children: React.ReactNode }) {
             for (const listener of frameListeners.current) listener(frame);
         },
         () => {
-          if (clientRef.current === client)
+          if (clientRef.current === client) {
+            invalidateSync();
             updatePhase(foreground.current ? "connecting" : "background");
+          }
         },
       );
       if (!foreground.current) {
@@ -198,21 +247,27 @@ export function PicoProvider({ children }: { children: React.ReactNode }) {
       }
       await client.connect();
       fence.current.assert(id);
-      if (phaseRef.current !== "connected") await sync(client, id);
+      if (isCurrent(client, id) && phaseRef.current !== "connected") await sync(client, id);
     } catch (e) {
       if (id === fence.current.current) {
         report(e);
-        updatePhase("blocked");
+        if (!clientRef.current) updatePhase("blocked");
       }
     }
   }
   function chooseWorkspace(w: Workspace) {
+    if (phaseRef.current !== "connected") return;
+    invalidateSync();
     workspaceRef.current = w;
     setWorkspace(w);
     setGeneration(fence.current.next());
     const id = fence.current.current;
     // Client connection belongs to host generation; switching workspace uses its own event fence.
-    if (clientRef.current) void subscribe(clientRef.current, w, id).catch(report);
+    const client = clientRef.current;
+    if (client)
+      void subscribe(client, w, id).catch((error) => {
+        if (isCurrent(client, id)) report(error);
+      });
   }
   async function request<M extends RemoteMethod>(
     method: M,
@@ -233,7 +288,7 @@ export function PicoProvider({ children }: { children: React.ReactNode }) {
     return result;
   }
   async function pair(raw: string, name: string) {
-    const offer = parsePairingOffer(JSON.parse(raw)) as RemotePairingOffer;
+    const offer = parseMobilePairing(raw);
     const submitted = await RemoteRuntimeClient.submitPairing(offer, {
       deviceName: name.trim() || "我的手机",
       platform: Platform.OS === "ios" ? "ios" : "android",
@@ -302,7 +357,10 @@ export function PicoProvider({ children }: { children: React.ReactNode }) {
       })
       .catch(report);
     const listener = AppState.addEventListener("change", (state) => {
-      foreground.current = state === "active";
+      const active = state === "active";
+      if (foreground.current === active) return;
+      foreground.current = active;
+      invalidateSync();
       const client = clientRef.current;
       if (!client) return;
       if (!foreground.current) {
@@ -315,9 +373,13 @@ export function PicoProvider({ children }: { children: React.ReactNode }) {
       void client
         .connect()
         .then(() =>
-          phaseRef.current === "connected" ? undefined : sync(client, fence.current.current),
+          !isCurrent(client, fence.current.current) || phaseRef.current === "connected"
+            ? undefined
+            : sync(client, fence.current.current),
         )
-        .catch(report);
+        .catch((error) => {
+          if (isCurrent(client, fence.current.current)) report(error);
+        });
     });
     return () => {
       listener.remove();
@@ -343,7 +405,8 @@ export function PicoProvider({ children }: { children: React.ReactNode }) {
     requestWithSecrets: async (method, params, secretEdits) => {
       const id = fence.current.current;
       const client = clientRef.current;
-      if (!client || phaseRef.current !== "connected") throw new Error("尚未连接");
+      if (!client || !foreground.current || phaseRef.current !== "connected")
+        throw new Error("尚未连接");
       const result = await client.request(method, params, {
         workspaceId: getRemoteMethodSpec(method).workspaceRequired
           ? workspaceRef.current?.id
