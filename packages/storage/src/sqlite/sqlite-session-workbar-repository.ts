@@ -1,6 +1,16 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { withWorkspaceSqliteLease } from "./workspace-scopes.js";
+import {
+  artifactBlobRelativePath,
+  artifactIngestRelativePath,
+  appendArtifactIngestFile,
+  createArtifactIngestFile,
+  readArtifactBlobFile,
+  readArtifactIngestFile,
+  removeArtifactFile,
+  writeArtifactBlobFile,
+} from "./artifact-file-storage.js";
 
 // Durable Task and Artifact authority is a concrete Storage repository.
 
@@ -200,11 +210,12 @@ export class SqliteSessionWorkbarRepository {
       const now = this.#now();
       const artifactId = input.artifactId ?? this.#createId();
       const ingestId = this.#createId();
+      const relativePath = createArtifactIngestFile(database, ingestId);
       database
         .prepare(
           `INSERT INTO session_artifact_ingests
-           (ingest_id, artifact_id, session_id, title, mime_type, content, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+           (ingest_id, artifact_id, session_id, title, mime_type, relative_path, size_bytes, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`,
         )
         .run(
           ingestId,
@@ -212,7 +223,7 @@ export class SqliteSessionWorkbarRepository {
           input.sessionId,
           input.title,
           input.mimeType,
-          Buffer.alloc(0),
+          relativePath,
           now,
           now,
         );
@@ -234,33 +245,40 @@ export class SqliteSessionWorkbarRepository {
         assertMutableSession(database, input.sessionId);
         const row = database
           .prepare(
-            "SELECT content FROM session_artifact_ingests WHERE session_id = ? AND ingest_id = ?",
+            "SELECT size_bytes, relative_path FROM session_artifact_ingests WHERE session_id = ? AND ingest_id = ?",
           )
-          .get(input.sessionId, input.ingestId) as { content: Uint8Array } | undefined;
+          .get(input.sessionId, input.ingestId) as
+          | { size_bytes: number; relative_path: string }
+          | undefined;
         if (!row) throw new WorkbarNotFoundError(`Artifact ingest 不存在: ${input.ingestId}`);
-        const current = Buffer.from(row.content);
-        if (input.offsetBytes < current.byteLength) {
-          const replayed = current.subarray(
-            input.offsetBytes,
-            input.offsetBytes + input.content.byteLength,
-          );
-          if (replayed.byteLength === input.content.byteLength && replayed.equals(input.content)) {
-            return {
-              acceptedBytes: input.content.byteLength,
-              nextOffsetBytes: input.offsetBytes + input.content.byteLength,
-            };
-          }
-        }
-        if (current.byteLength !== input.offsetBytes) {
+        if (
+          !Number.isSafeInteger(input.offsetBytes) ||
+          input.offsetBytes < 0 ||
+          input.offsetBytes > row.size_bytes
+        )
           throw new WorkbarConflictError(
-            `Artifact ingest offset 冲突: expected ${current.byteLength}, received ${input.offsetBytes}`,
+            `Artifact ingest offset 冲突: expected ${row.size_bytes}, received ${input.offsetBytes}`,
           );
+        let sizeBytes: number;
+        try {
+          sizeBytes = appendArtifactIngestFile(
+            database,
+            input.ingestId,
+            row.relative_path,
+            row.size_bytes,
+            input.offsetBytes,
+            input.content,
+          );
+        } catch (error) {
+          if (error instanceof Error && error.message.includes("offset conflict"))
+            throw new WorkbarConflictError(error.message);
+          throw error;
         }
         database
           .prepare(
-            "UPDATE session_artifact_ingests SET content = ?, updated_at = ? WHERE ingest_id = ?",
+            "UPDATE session_artifact_ingests SET size_bytes = ?, updated_at = ? WHERE ingest_id = ?",
           )
-          .run(Buffer.concat([current, input.content]), this.#now(), input.ingestId);
+          .run(sizeBytes, this.#now(), input.ingestId);
         return {
           acceptedBytes: input.content.byteLength,
           nextOffsetBytes: input.offsetBytes + input.content.byteLength,
@@ -277,12 +295,17 @@ export class SqliteSessionWorkbarRepository {
     readonly expectedDigest?: string;
     readonly expectedSizeBytes?: number;
   }): { readonly revision: number; readonly artifact: SessionArtifactRecord } {
-    return this.#artifactCommand("commit", input, (database, revision) => {
+    const result = this.#artifactCommand("commit", input, (database, revision) => {
       const row = database
         .prepare("SELECT * FROM session_artifact_ingests WHERE session_id = ? AND ingest_id = ?")
         .get(input.sessionId, input.ingestId) as ArtifactIngestRow | undefined;
       if (!row) throw new WorkbarNotFoundError(`Artifact ingest 不存在: ${input.ingestId}`);
-      const content = Buffer.from(row.content);
+      const content = readArtifactIngestFile(
+        database,
+        input.ingestId,
+        row.relative_path,
+        row.size_bytes,
+      );
       const digest = createHash("sha256").update(content).digest("hex");
       if (input.expectedDigest !== undefined && input.expectedDigest !== digest) {
         throw new WorkbarConflictError("Artifact digest 校验失败");
@@ -291,11 +314,12 @@ export class SqliteSessionWorkbarRepository {
         throw new WorkbarConflictError("Artifact size 校验失败");
       }
       const now = this.#now();
+      const relativePath = writeArtifactBlobFile(database, digest, content);
       database
         .prepare(
-          "INSERT OR IGNORE INTO artifact_blobs (digest, size_bytes, content, created_at) VALUES (?, ?, ?, ?)",
+          "INSERT OR IGNORE INTO artifact_blobs (digest, size_bytes, relative_path, created_at) VALUES (?, ?, ?, ?)",
         )
-        .run(digest, content.byteLength, content, now);
+        .run(digest, content.byteLength, relativePath, now);
       const existingBlob = database
         .prepare("SELECT size_bytes FROM artifact_blobs WHERE digest = ?")
         .get(digest) as { size_bytes: number };
@@ -328,6 +352,10 @@ export class SqliteSessionWorkbarRepository {
         artifact: this.#requireArtifact(database, input.sessionId, row.artifact_id),
       };
     });
+    withWorkspaceSqliteLease(this.#storageRoot, ({ database }) =>
+      removeArtifactFile(database, artifactIngestRelativePath(input.ingestId)),
+    );
+    return result;
   }
 
   /** Host-owned, bounded immutable binary snapshot. Avoid repeated ingest rewrites. */
@@ -353,15 +381,17 @@ export class SqliteSessionWorkbarRepository {
   abortArtifact(input: { readonly sessionId: string; readonly ingestId: string }): {
     readonly aborted: true;
   } {
-    return withWorkspaceSqliteLease(this.#storageRoot, ({ database }) =>
-      transaction(database, () => {
+    return withWorkspaceSqliteLease(this.#storageRoot, ({ database }) => {
+      const removed = transaction(database, () => {
         assertMutableSession(database, input.sessionId);
-        database
+        const result = database
           .prepare("DELETE FROM session_artifact_ingests WHERE session_id = ? AND ingest_id = ?")
           .run(input.sessionId, input.ingestId);
-        return { aborted: true as const };
-      }),
-    );
+        return Number(result.changes) > 0;
+      });
+      if (removed) removeArtifactFile(database, artifactIngestRelativePath(input.ingestId));
+      return { aborted: true as const };
+    });
   }
 
   deleteArtifact(input: {
@@ -370,12 +400,11 @@ export class SqliteSessionWorkbarRepository {
     readonly expectedRevision: number;
     readonly idempotencyKey: string;
   }): { readonly revision: number; readonly artifactId: string; readonly deleted: true } {
-    return this.#artifactCommand("delete", input, (database, revision) => {
+    const result = this.#artifactCommand("delete", input, (database, revision) => {
       this.#requireArtifact(database, input.sessionId, input.artifactId);
       database
         .prepare("DELETE FROM session_artifacts WHERE session_id = ? AND artifact_id = ?")
         .run(input.sessionId, input.artifactId);
-      purgeOrphanArtifactBlobs(database);
       const nextRevision = revision + 1;
       writeLedgerRevision(
         database,
@@ -386,6 +415,8 @@ export class SqliteSessionWorkbarRepository {
       );
       return { revision: nextRevision, artifactId: input.artifactId, deleted: true as const };
     });
+    this.purgeOrphanArtifactBlobs();
+    return result;
   }
 
   queryArtifacts(input: {
@@ -451,12 +482,18 @@ export class SqliteSessionWorkbarRepository {
         MAX_ARTIFACT_CHUNK_BYTES,
         MAX_ARTIFACT_CHUNK_BYTES,
       );
-      // SQLite substr is one-based; only the requested range crosses into JS memory.
       const row = database
-        .prepare("SELECT substr(content, ?, ?) AS content FROM artifact_blobs WHERE digest = ?")
-        .get(offsetBytes + 1, limitBytes, artifact.digest) as { content: Uint8Array } | undefined;
-      if (!row) throw new WorkbarNotFoundError(`Artifact blob 不存在: ${artifact.digest}`);
-      const chunk = Buffer.from(row.content);
+        .prepare("SELECT relative_path FROM artifact_blobs WHERE digest = ?")
+        .get(artifact.digest) as { relative_path: string } | undefined;
+      if (!row) throw new WorkbarNotFoundError(`Artifact file 不存在: ${artifact.digest}`);
+      const chunk = readArtifactBlobFile(
+        database,
+        artifact.digest,
+        row.relative_path,
+        artifact.sizeBytes,
+        offsetBytes,
+        limitBytes,
+      );
       const endOffsetBytes = offsetBytes + chunk.byteLength;
       return {
         artifact,
@@ -739,7 +776,8 @@ interface ArtifactIngestRow {
   readonly artifact_id: string;
   readonly title: string;
   readonly mime_type: string;
-  readonly content: Uint8Array;
+  readonly relative_path: string;
+  readonly size_bytes: number;
   readonly created_at: number;
 }
 interface TraceRow {
@@ -964,18 +1002,20 @@ export function projectSessionMedia(
 }
 
 function purgeOrphanArtifactBlobs(database: DatabaseSync): number {
-  const result = database
+  const rows = database
     .prepare(
-      `DELETE FROM artifact_blobs
-       WHERE NOT EXISTS (
-         SELECT 1 FROM session_artifacts WHERE session_artifacts.digest = artifact_blobs.digest
-       ) AND NOT EXISTS (
-         SELECT 1 FROM agent_graph_resource_refs
-         WHERE kind = 'artifact' AND content_digest = artifact_blobs.digest
-       )`,
+      `SELECT digest, relative_path FROM artifact_blobs
+    WHERE NOT EXISTS (SELECT 1 FROM session_artifacts WHERE session_artifacts.digest = artifact_blobs.digest)
+    AND NOT EXISTS (SELECT 1 FROM agent_graph_resource_refs WHERE kind = 'artifact' AND content_digest = artifact_blobs.digest)`,
     )
-    .run();
-  return Number(result.changes);
+    .all() as { digest: string; relative_path: string }[];
+  for (const row of rows) {
+    if (row.relative_path !== artifactBlobRelativePath(row.digest))
+      throw new WorkbarConflictError("Artifact content path mismatch");
+    removeArtifactFile(database, row.relative_path);
+    database.prepare("DELETE FROM artifact_blobs WHERE digest = ?").run(row.digest);
+  }
+  return rows.length;
 }
 
 function taskFromRow(row: TaskRow): SessionTaskRecord {
@@ -1062,11 +1102,12 @@ export function publishArtifactSnapshotLocked(
     }
     return artifactFromRow(existing);
   }
+  const relativePath = writeArtifactBlobFile(database, digest, input.content);
   database
     .prepare(
-      "INSERT OR IGNORE INTO artifact_blobs (digest, size_bytes, content, created_at) VALUES (?, ?, ?, ?)",
+      "INSERT OR IGNORE INTO artifact_blobs (digest, size_bytes, relative_path, created_at) VALUES (?, ?, ?, ?)",
     )
-    .run(digest, input.content.byteLength, input.content, now);
+    .run(digest, input.content.byteLength, relativePath, now);
   database
     .prepare(
       `INSERT INTO session_artifacts

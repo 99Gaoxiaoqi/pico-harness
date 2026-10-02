@@ -13,6 +13,7 @@ import {
   type DeepResearchHandoff,
 } from "@pico/core/deep-research";
 import { withWorkspaceSqliteLease } from "./workspace-scopes.js";
+import { readArtifactBlobFile, writeArtifactBlobFile } from "./artifact-file-storage.js";
 
 export interface DeepResearchCommandContext {
   toolCallId?: string;
@@ -170,11 +171,17 @@ export class SqliteDeepResearchStore {
         throw new Error("Research artifact does not belong to this session");
       const row = database
         .prepare(
-          "SELECT b.content FROM session_artifacts a JOIN artifact_blobs b ON a.digest = b.digest WHERE a.session_id = ? AND a.artifact_id = ?",
+          "SELECT b.digest, b.size_bytes, b.relative_path FROM session_artifacts a JOIN artifact_blobs b ON a.digest = b.digest WHERE a.session_id = ? AND a.artifact_id = ?",
         )
-        .get(sessionId, artifactId) as { content: Uint8Array } | undefined;
+        .get(sessionId, artifactId) as
+        | { digest: string; size_bytes: number; relative_path: string }
+        | undefined;
       if (!row) throw new Error("Research artifact content is missing");
-      const characters = Array.from(Buffer.from(row.content).toString("utf8"));
+      const characters = Array.from(
+        readArtifactBlobFile(database, row.digest, row.relative_path, row.size_bytes).toString(
+          "utf8",
+        ),
+      );
       const end = Math.min(characters.length, offset + limit);
       return {
         content: characters.slice(offset, end).join(""),
@@ -250,11 +257,12 @@ export class SqliteDeepResearchStore {
           const bytes = Buffer.from(content);
           const digest = hash(bytes);
           const artifact = event.artifact;
+          const relativePath = writeArtifactBlobFile(database, digest, bytes);
           database
             .prepare(
-              "INSERT OR IGNORE INTO artifact_blobs (digest,size_bytes,content,created_at) VALUES (?,?,?,?)",
+              "INSERT OR IGNORE INTO artifact_blobs (digest,size_bytes,relative_path,created_at) VALUES (?,?,?,?)",
             )
-            .run(digest, bytes.length, bytes, event.ts);
+            .run(digest, bytes.length, relativePath, event.ts);
           database
             .prepare(
               "INSERT INTO session_artifacts (artifact_id,session_id,title,mime_type,digest,size_bytes,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",

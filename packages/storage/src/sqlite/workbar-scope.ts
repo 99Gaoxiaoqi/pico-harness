@@ -83,5 +83,17 @@ export const WORKBAR_SCOPE: SqliteSchemaScope = {
       );
       `,
     ],
+    [
+      2,
+      `
+      ALTER TABLE artifact_blobs ADD COLUMN relative_path TEXT NOT NULL DEFAULT '';
+      UPDATE artifact_blobs SET relative_path = 'artifacts/blobs/' || substr(digest, 1, 2) || '/' || digest;
+      ALTER TABLE artifact_blobs DROP COLUMN content;
+      ALTER TABLE session_artifact_ingests ADD COLUMN relative_path TEXT NOT NULL DEFAULT '';
+      ALTER TABLE session_artifact_ingests ADD COLUMN size_bytes INTEGER NOT NULL DEFAULT 0 CHECK (size_bytes >= 0);
+      UPDATE session_artifact_ingests SET relative_path = 'artifacts/ingests/' || lower(hex(ingest_id)), size_bytes = length(content);
+      ALTER TABLE session_artifact_ingests DROP COLUMN content;
+      `,
+    ],
   ]),
 };

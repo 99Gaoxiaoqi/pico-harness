@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
+import { migrateLegacyArtifactFiles } from "./artifact-file-storage.js";
 import { FileStorageIntegrityError, mkdirPrivateSync } from "../local-file-storage.js";
 import {
   acquireOperationalDatabase,
@@ -117,9 +118,27 @@ export function prepareWorkspaceSqliteStorageSync(
   const lease = acquireOperationalDatabase(root, {
     migrate: (database) => {
       backupBeforeSessionsMigration(database, root, allScopes);
+      const artifactVersion = readOperationalSchemaVersionsSync(database).get("workbar");
+      if (
+        artifactVersion === 1 &&
+        allScopes.some((scope) => scope.name === "workbar" && scopeCurrentVersion(scope) >= 2)
+      ) {
+        // Verify ownership before creating files; an adopted/copied root must be explicit.
+        ensureBindingSync(database, root);
+        const backup = join(root, "pico.sqlite.artifacts-v1.bak");
+        if (!existsSync(backup)) {
+          database.exec(`VACUUM INTO '${backup.replaceAll("'", "''")}'`);
+          chmodSync(backup, 0o600);
+        }
+      }
       // 形状断言只在版本推进(建库/升级)时跑:每次连接重开都重放全套 DDL
       // 要 ~25ms,高频操作级 lease 不可承受;常规漂移检测由 doctor 承担。
-      if (migrateOperationalDatabaseSync(database, allScopes)) {
+      if (
+        migrateOperationalDatabaseSync(database, allScopes, (scope, fromVersion, toVersion) => {
+          if (scope === "workbar" && fromVersion === 1 && toVersion === 2)
+            migrateLegacyArtifactFiles(database);
+        })
+      ) {
         assertCurrentOperationalTargetSchemaSync(database, allScopes);
       }
     },

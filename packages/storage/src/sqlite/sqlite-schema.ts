@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS operational_schema_migrations (
 export function migrateOperationalDatabaseSync(
   database: DatabaseSync,
   scopes: readonly SqliteSchemaScope[],
+  beforeMigration?: (scope: string, fromVersion: number, toVersion: number) => void,
 ): boolean {
   if (isCurrent(database, scopes)) return false;
   let migrated = false;
@@ -72,6 +73,7 @@ export function migrateOperationalDatabaseSync(
               `SQLite schema scope ${scope.name} is missing migration to version ${version + 1}`,
             );
           }
+          beforeMigration?.(scope.name, version, version + 1);
           database.exec(sql);
           version += 1;
           database
