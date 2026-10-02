@@ -30,7 +30,7 @@ import { loadUserDefaultRealModel } from "./real-llm-user-model.js";
 const realModelTest = process.env.RUN_LLM_E2E === "1" ? test : test.skip;
 
 realModelTest(
-  "remote HTTPS/WSS completes an isolated real-model Chinese turn without duplicate execution",
+  "remote HTTPS/WSS selects an authorized real-model route and completes one streamed Chinese turn",
   { timeout: 240_000 },
   async (t) => {
     // Load the actual user route before creating a hermetic daemon. Never persist or print its credential.
@@ -167,6 +167,22 @@ realModelTest(
     cleanup.remote = remote;
     await remote.connect();
     const workspace = { workspaceId: "workspace-a" };
+    const capabilities = await remote.capabilities();
+    assert.ok(
+      capabilities.methods.includes("catalog.models"),
+      "普通设备应能查询授权工作区模型目录",
+    );
+    assert.equal(capabilities.permissions.includes("host.admin"), false, "验收不依赖管理权限");
+    const catalog = await remote.request("catalog.models", {}, workspace);
+    const selectedRoute = catalog.routes.find((route) => route.id === model.route.id);
+    assert.ok(selectedRoute, "目录必须包含隔离电脑配置中的真实用户模型路由");
+    assert.equal(selectedRoute.providerId, model.route.providerId);
+    assert.equal(selectedRoute.model, model.route.model);
+    assert.equal(
+      JSON.stringify(catalog).includes(model.config.apiKey),
+      false,
+      "模型目录不返回凭据",
+    );
     const notifications: RuntimeNotification[] = [];
     const eventSubscription = await remote.subscribe(workspace, (event) =>
       notifications.push(event),
@@ -174,6 +190,36 @@ realModelTest(
     const sessionId = (
       await remote.request("session.create", { title: "远程真实模型验收" }, workspace)
     ).session.sessionId;
+    assert.equal(
+      (await remote.request("runs.list", {}, workspace)).runs.filter(
+        (run) => run.sessionId === sessionId,
+      ).length,
+      0,
+      "在首次发送前空闲选择目录路由",
+    );
+    const thinkingEffort = selectedRoute.reasoningLevels.includes("off")
+      ? "off"
+      : selectedRoute.reasoningLevels[0];
+    const selected = await remote.request(
+      "session.settings.update",
+      {
+        sessionId,
+        modelRouteId: selectedRoute.id,
+        ...(thinkingEffort === undefined ? {} : { thinkingEffort }),
+      },
+      workspace,
+    );
+    assert.equal(selected.settings.modelRouteId, selectedRoute.id);
+    assert.deepEqual(
+      selected.settings.reasoningLevels,
+      selectedRoute.reasoningLevels,
+      "会话等级必须来自 Host 的所选路由能力",
+    );
+    if (thinkingEffort !== undefined)
+      assert.equal(selected.settings.thinkingEffort, thinkingEffort);
+    const confirmed = await remote.request("session.settings.get", { sessionId }, workspace);
+    assert.equal(confirmed.settings.modelRouteId, selectedRoute.id, "空闲选择在 Host 上持久化");
+    assert.deepEqual(confirmed.settings.reasoningLevels, selected.settings.reasoningLevels);
     const frames: RuntimeSessionSubscriptionFrame[] = [];
     const frameSubscription = remote.subscribeSessionFrames((frame) => frames.push(frame));
     await remote.request("session.subscription.open", { sessionId, tailLimit: 1 }, workspace);
