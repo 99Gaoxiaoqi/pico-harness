@@ -48,11 +48,15 @@ export function TranscriptItem({
   sessionId,
   syncReason,
   visible,
+  onReview,
+  onOpenChild,
 }: {
   item: RuntimeConversationItem;
   sessionId: string;
   syncReason?: string;
   visible: boolean;
+  onReview?: () => void;
+  onOpenChild?: (sessionId: string, workspacePath: string) => void;
 }) {
   const pico = usePico();
   const [expanded, setExpanded] = useState(false);
@@ -115,7 +119,7 @@ export function TranscriptItem({
           accessibilityLabel={`查看${label}的消息详情`}
           accessibilityState={{ expanded }}
           onPress={() => setExpanded(!expanded)}
-          style={{ alignSelf: "flex-start", minHeight: 32, justifyContent: "center" }}
+          style={{ alignSelf: "flex-start", minHeight: 44, justifyContent: "center" }}
         >
           <Text style={[s.muted, { fontSize: 11 }]}>{expanded ? "收起详情" : "消息详情"}</Text>
         </Pressable>
@@ -218,6 +222,27 @@ export function TranscriptItem({
           </View>
         </>
       )}
+      {item.kind === "changes" && onReview && (
+        <Button title="查看改动 →" quiet onPress={onReview} />
+      )}
+      {item.kind === "subagent" &&
+        (typeof item.data?.childSessionId === "string" &&
+        typeof item.data?.childWorkspacePath === "string" &&
+        onOpenChild ? (
+          <Button
+            title="打开子会话 →"
+            quiet
+            reason={pico.reason("session.get")}
+            onPress={() =>
+              onOpenChild(
+                item.data!.childSessionId as string,
+                item.data!.childWorkspacePath as string,
+              )
+            }
+          />
+        ) : (
+          <Label>子会话身份未明确，请在电脑查看。</Label>
+        ))}
       {expanded && <Detail value={item} />}
     </View>
   );

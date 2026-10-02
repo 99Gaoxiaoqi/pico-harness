@@ -5,7 +5,7 @@ import type {
   RuntimeSubagentSettingsSnapshot,
   RuntimeUserDefaults,
 } from "@pico/protocol/mobile";
-import type { RuntimePort } from "../core";
+import type { RuntimePort } from "../core.js";
 
 export type ScheduleKind = "daily" | "weekdays" | "weekly" | "advanced";
 export function scheduleCron(kind: ScheduleKind, time: string, weekday: string, advanced: string) {

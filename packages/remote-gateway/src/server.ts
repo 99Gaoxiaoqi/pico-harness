@@ -458,7 +458,11 @@ export class RemoteGateway {
             rpc,
           );
           if (rpc.method === "catalog.models" && !(await this.supportsModelCatalog(device)))
-            throw new GatewayError("METHOD_NOT_FOUND", "电脑尚未支持模型目录，请更新并重启 Pico", 404);
+            throw new GatewayError(
+              "METHOD_NOT_FOUND",
+              "电脑尚未支持模型目录，请更新并重启 Pico",
+              404,
+            );
           const params = authorized.params as Record<string, unknown>;
           if (
             rpc.method === "session.subscription.open" &&

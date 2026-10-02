@@ -284,7 +284,12 @@ const runtimeCatalogSkillResult = resultShape(
 );
 
 const runtimeCatalogModelResult = exactResultShape(
-  { id: resultString, providerId: resultString, model: resultString, reasoningLevels: resultStringArray },
+  {
+    id: resultString,
+    providerId: resultString,
+    model: resultString,
+    reasoningLevels: resultStringArray,
+  },
   { displayName: resultString },
 );
 

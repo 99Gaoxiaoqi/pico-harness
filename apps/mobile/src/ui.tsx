@@ -188,7 +188,12 @@ export function Detail({ value, title = "详细信息" }: { value: unknown; titl
   const [open, setOpen] = useState(false);
   return (
     <View>
-      <Pressable onPress={() => setOpen(!open)}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityState={{ expanded: open }}
+        onPress={() => setOpen(!open)}
+        style={{ minHeight: 44, justifyContent: "center" }}
+      >
         <Text style={{ color: color.accent, paddingVertical: 7 }}>
           {open ? "▾" : "▸"} {title}
         </Text>
@@ -214,11 +219,13 @@ export function Chips<T extends string>({
   value,
   onChange,
   labels,
+  disabled = false,
 }: {
   values: readonly T[];
   value: T;
   onChange: (v: T) => void;
   labels?: Partial<Record<T, string>>;
+  disabled?: boolean;
 }) {
   return (
     <ScrollView horizontal showsHorizontalScrollIndicator={false}>
@@ -227,7 +234,8 @@ export function Chips<T extends string>({
           <Pressable
             key={x}
             accessibilityRole="tab"
-            accessibilityState={{ selected: x === value }}
+            accessibilityState={{ selected: x === value, disabled }}
+            disabled={disabled}
             onPress={() => onChange(x)}
             style={({ pressed }) => [
               s.button,

@@ -22,6 +22,8 @@ import type { WorkbarTab } from "./Workbar";
 import { useSessionTranscript } from "./conversation/useSessionTranscript";
 import { useMessageComposer } from "./conversation/useMessageComposer";
 import { useTranscriptViewport } from "./conversation/useTranscriptViewport";
+import { ComposerOptions } from "./conversation/ComposerOptions";
+import { SessionActions } from "./conversation/SessionActions";
 import { TranscriptItem, StreamingItem, PlanCard } from "./conversation/TranscriptItem";
 
 const sendModes = [
@@ -38,46 +40,47 @@ export function Conversation({
   onSession,
   onPanel,
   sideParentSessionId,
+  parentIsSideChat = true,
 }: {
   active: boolean;
   sessionId: string;
   keyboardOffset: number;
-  onSession: (id: string, parentSessionId?: string) => void;
+  onSession: (id: string, parentSessionId?: string, kind?: "sideChat" | "child") => void;
   sideParentSessionId?: string;
+  parentIsSideChat?: boolean;
   onPanel: (tab?: WorkbarTab) => void;
 }) {
   const pico = usePico();
   const { view, sessionReady, restoreVersion, settings, plan, loadOlder, refreshTranscript } =
     useSessionTranscript(sessionId);
-  const {
-    text,
-    setText,
-    sending,
-    pickingImage,
-    images,
-    mode,
-    setMode,
-    uncertain,
-    frozen,
-    addImage,
-    send,
-    clearDraft,
-    removeImage,
-    captureSelection,
-  } = useMessageComposer({
+  const composer = useMessageComposer({
     sessionId,
     sessionReady,
     activeRun: view?.activeRun,
     refreshTranscript,
     onSession,
   });
+  const {
+    text,
+    setText,
+    sending,
+    images,
+    mode,
+    setMode,
+    uncertain,
+    frozen,
+    send,
+    clearDraft,
+    removeImage,
+    captureSelection,
+  } = composer;
   const [visibleItems, setVisibleItems] = useState(new Set<string>());
   const viewport = useTranscriptViewport(view, sessionReady, active, restoreVersion);
   const onViewableItemsChanged = useRef(({ viewableItems }: { viewableItems: ViewToken[] }) => {
     viewport.onViewableItemsChanged(viewableItems);
     setVisibleItems(new Set(viewableItems.map((token) => token.key)));
   }).current;
-  const [sheet, setSheet] = useState<"more" | "images" | "mode" | "run">();
+  const [sheet, setSheet] = useState<"more" | "mode" | "run">();
   useEffect(() => {
     if (!active) {
       setSheet(undefined);
@@ -105,39 +108,20 @@ export function Conversation({
       behavior={Platform.OS === "ios" ? "padding" : undefined}
       keyboardVerticalOffset={keyboardOffset}
     >
-      <View style={styles.toolbar}>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="会话设置"
-          onPress={() => openPanel("设置")}
-          style={styles.modelTarget}
-        >
-          <Text numberOfLines={1} style={s.muted}>
-            {settings?.model ?? "会话设置"}
-          </Text>
-        </Pressable>
-        {run && (
-          <Button
-            title={
-              run.status === "paused"
-                ? "任务已暂停"
-                : run.status === "pause_requested"
-                  ? "正在暂停"
-                  : run.status === "cancelling"
-                    ? "正在停止"
-                    : "任务运行中"
-            }
-            quiet
-            onPress={() => openSheet("run")}
-          />
-        )}
-        <Button title="更多" quiet onPress={() => openSheet("more")} />
-      </View>
+      {sideParentSessionId && (
+        <View style={{ paddingHorizontal: 16 }}>
+          <Button title="返回父会话" quiet onPress={() => onSession(sideParentSessionId)} />
+        </View>
+      )}
       <FlatList
         ref={viewport.listRef}
         CellRendererComponent={viewport.Cell}
+        onLayout={viewport.onLayout}
         onScroll={viewport.onScroll}
         onScrollBeginDrag={viewport.onScrollBeginDrag}
+        onScrollEndDrag={viewport.onScrollEndDrag}
+        onMomentumScrollBegin={viewport.onMomentumScrollBegin}
+        onMomentumScrollEnd={viewport.onMomentumScrollEnd}
         onScrollToIndexFailed={viewport.onScrollToIndexFailed}
         onContentSizeChange={viewport.onContentSizeChange}
         scrollEventThrottle={32}
@@ -149,7 +133,11 @@ export function Conversation({
         contentContainerStyle={[s.body, { gap: 0, paddingTop: 10, paddingBottom: 24 }]}
         ListHeaderComponent={
           view?.olderCursor ? (
-            <Button title="加载更早记录" quiet onPress={() => void pico.perform(loadOlder)} />
+            <Button
+              title="加载更早记录"
+              quiet
+              onPress={() => void pico.perform(() => viewport.loadOlder(loadOlder))}
+            />
           ) : null
         }
         renderItem={({ item }) => (
@@ -158,6 +146,27 @@ export function Conversation({
             sessionId={sessionId}
             syncReason={syncReason}
             visible={visibleItems.has(item.itemId)}
+            onReview={() => openPanel("审查")}
+            onOpenChild={(childId, childWorkspace) =>
+              void pico.perform(async () => {
+                const current = captureSelection();
+                const [parent, child] = await Promise.all([
+                  pico.request("session.get", { sessionId }),
+                  pico.request("session.get", { sessionId: childId }),
+                ]);
+                if (!current()) return;
+                if (
+                  parent.session.workspacePath !== child.session.workspacePath ||
+                  childWorkspace !== child.session.workspacePath ||
+                  child.session.parentSession?.sessionId !== sessionId ||
+                  child.session.parentSession.workspacePath !== parent.session.workspacePath
+                ) {
+                  Alert.alert("请在电脑查看", "当前记录不是同一授权项目内的明确子会话。");
+                  return;
+                }
+                onSession(childId, sessionId, "child");
+              })
+            }
           />
         )}
         ListEmptyComponent={
@@ -181,6 +190,51 @@ export function Conversation({
           </View>
         }
       />
+      {viewport.showLatest && (
+        <View style={{ alignItems: "center" }}>
+          <Button title="回到最新 ↓" quiet onPress={viewport.jumpToLatest} />
+        </View>
+      )}
+      {run && (
+        <View style={styles.runStrip}>
+          <Pressable
+            accessibilityRole="button"
+            style={{ flex: 1, minHeight: 44, justifyContent: "center" }}
+            onPress={() => openSheet("run")}
+          >
+            <Text style={s.muted}>
+              {run.status === "paused"
+                ? "任务已暂停"
+                : run.status === "pause_requested"
+                  ? "正在暂停"
+                  : run.status === "cancelling"
+                    ? "正在停止"
+                    : "Pico 正在执行"}{" "}
+              · 查看进度
+            </Text>
+          </Pressable>
+          <Button
+            title={run.status === "paused" ? "继续" : "停止"}
+            quiet
+            reason={
+              syncReason ?? pico.reason(run.status === "paused" ? "run.resume" : "run.cancel")
+            }
+            onPress={() =>
+              run.status === "paused"
+                ? void pico.perform(() => pico.request("run.resume", { runId: run.runId }))
+                : Alert.alert("停止当前任务？", run.description, [
+                    { text: "返回" },
+                    {
+                      text: "停止",
+                      style: "destructive",
+                      onPress: () =>
+                        void pico.perform(() => pico.request("run.cancel", { runId: run.runId })),
+                    },
+                  ])
+            }
+          />
+        </View>
+      )}
       <View style={[s.body, styles.composer]}>
         {uncertain && (
           <Card>
@@ -197,7 +251,15 @@ export function Conversation({
         {!!images.length && (
           <View style={s.row}>
             {images.map((x, i) => (
-              <Pressable key={i} onPress={() => removeImage(i)}>
+              <Pressable
+                key={i}
+                accessibilityRole="button"
+                accessibilityLabel={`移除图片 ${i + 1}`}
+                accessibilityState={{ disabled: frozen || sending }}
+                disabled={frozen || sending}
+                style={{ minHeight: 44 }}
+                onPress={() => removeImage(i)}
+              >
                 <Image
                   source={{ uri: `data:${x.mimeType};base64,${x.data}` }}
                   style={{ width: 58, height: 58, borderRadius: 9 }}
@@ -212,7 +274,7 @@ export function Conversation({
         ) : (
           <TextInput
             accessibilityLabel="消息"
-            editable={!sending}
+            editable={composer.draftReady && !sending}
             value={text}
             onChangeText={setText}
             multiline
@@ -223,47 +285,41 @@ export function Conversation({
             style={styles.messageInput}
           />
         )}
-        <View style={[s.row, { justifyContent: "space-between", alignItems: "flex-start" }]}>
+        <View style={[s.row, { justifyContent: "space-between" }]}>
           <View style={s.row}>
-            <Button
-              title={pickingImage ? "处理中…" : "添加图片"}
-              quiet
-              reasonDetail={false}
-              reason={
-                frozen
-                  ? "先确认待处理请求"
-                  : pickingImage
-                    ? "正在处理图片"
-                    : sending
-                      ? "正在发送"
-                      : undefined
-              }
-              onPress={() => openSheet("images")}
-            />
+            <ComposerOptions composer={composer} active={active} />
             <Button
               title={sendModes.find((x) => x.value === mode)!.label}
               quiet
               reasonDetail={false}
-              reason={frozen ? "先确认待处理请求" : sending ? "正在发送" : undefined}
+              reason={composer.optionsReason}
               onPress={() => openSheet("mode")}
             />
           </View>
           <Button
-            title={sending ? "发送中…" : "发送"}
-            reason={
-              sending
-                ? "正在发送"
-                : pickingImage
-                  ? "正在处理图片"
-                  : !text.trim() && !images.length
-                    ? "请输入消息"
-                    : !sessionReady || view?.phase !== "ready"
-                      ? "正在补齐会话"
-                      : pico.reason("session.send")
-            }
+            title={sending ? "发送中…" : "发送 ↑"}
+            reason={composer.sendReason ?? syncReason ?? pico.reason("session.send")}
+            reasonDetail={false}
             onPress={() => void send()}
           />
         </View>
+        <View style={[s.row, { justifyContent: "space-between" }]}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="修改模型与会话设置"
+            style={styles.modelTarget}
+            onPress={() => openPanel("设置")}
+          >
+            <Text numberOfLines={1} style={s.muted}>
+              {settings
+                ? `${settings.model} · ${settings.collaborationMode === "agent" ? "普通" : settings.collaborationMode === "plan" ? "计划" : "研究"} · ${settings.thinkingEffort}`
+                : "读取会话设置…"}{" "}
+              ▾
+            </Text>
+          </Pressable>
+          <Button title="更多" quiet onPress={() => openSheet("more")} />
+        </View>
+        {composer.sendReason && !uncertain && <Label>{composer.sendReason}</Label>}
       </View>
       <ActionsSheet
         title="会话操作"
@@ -271,6 +327,20 @@ export function Conversation({
         onClose={() => setSheet(undefined)}
       >
         <View style={{ gap: 10 }}>
+          {sheet === "more" && (
+            <SessionActions
+              sessionId={sessionId}
+              idle={sessionReady && !run}
+              onSession={onSession}
+              onClose={() => setSheet(undefined)}
+            />
+          )}
+          <Button
+            title="研究报告"
+            quiet
+            reason={pico.reason("session.research.query")}
+            onPress={() => openPanel("研究")}
+          />
           <View style={s.row}>
             <Button title="工作栏" quiet onPress={() => openPanel()} />
             <Button
@@ -289,7 +359,7 @@ export function Conversation({
                 })
               }
             />
-            {sideParentSessionId && (
+            {sideParentSessionId && parentIsSideChat && (
               <Button
                 title="关闭侧聊"
                 quiet
@@ -372,25 +442,6 @@ export function Conversation({
         )}
       </ActionsSheet>
       <ActionsSheet
-        title="添加图片"
-        open={active && sheet === "images"}
-        onClose={() => setSheet(undefined)}
-      >
-        <Label>已选 {images.length}/4 张；图片会压缩到本次附件预算内。</Label>
-        <Button
-          title="从相册选择"
-          secondary
-          reason={pickingImage ? "正在处理图片" : undefined}
-          onPress={() => void addImage().finally(() => setSheet(undefined))}
-        />
-        <Button
-          title="拍照"
-          secondary
-          reason={pickingImage ? "正在处理图片" : undefined}
-          onPress={() => void addImage(true).finally(() => setSheet(undefined))}
-        />
-      </ActionsSheet>
-      <ActionsSheet
         title="发送方式"
         open={active && sheet === "mode"}
         onClose={() => setSheet(undefined)}
@@ -420,13 +471,13 @@ export function Conversation({
   );
 }
 const styles = StyleSheet.create({
-  toolbar: {
+  runStrip: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 4,
     paddingHorizontal: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: color.line,
+    backgroundColor: color.panel,
+    borderTopWidth: 1,
+    borderTopColor: color.line,
   },
   modelTarget: { minHeight: 44, flex: 1, justifyContent: "center" },
   modeOption: {

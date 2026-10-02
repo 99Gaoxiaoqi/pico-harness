@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { ScrollView, Text, View } from "react-native";
 import * as Crypto from "expo-crypto";
 import type { RuntimeSessionTask } from "@pico/protocol/mobile";
@@ -8,7 +8,7 @@ import { FilesPanel } from "./Files";
 import { TerminalPanel } from "./Terminal";
 import { ReviewPanel } from "./Review";
 import { SessionSettings } from "./Settings";
-const tabs = [
+export const WORKBAR_TABS = [
   "任务",
   "Graph",
   "执行",
@@ -19,21 +19,30 @@ const tabs = [
   "终端",
   "审查",
   "设置",
+  "研究",
 ] as const;
-export type WorkbarTab = (typeof tabs)[number];
+export type WorkbarTab = (typeof WORKBAR_TABS)[number];
 export function Workbar({
   sessionId,
   initialTab = "任务",
+  onReturnToConversation,
 }: {
   sessionId: string;
   initialTab?: WorkbarTab;
+  onReturnToConversation?: () => void;
 }) {
   const [tab, setTab] = useState<WorkbarTab>(initialTab);
   return (
     <View style={{ flex: 1 }}>
-      <View style={s.body}>
-        <Chips values={tabs} value={tab} onChange={setTab} />
-      </View>
+      {(tab === "执行" || tab === "追踪" || tab === "上下文" || tab === "用量") && (
+        <View style={s.body}>
+          <Chips
+            values={tab === "执行" || tab === "追踪" ? ["执行", "追踪"] : ["上下文", "用量"]}
+            value={tab}
+            onChange={setTab}
+          />
+        </View>
+      )}
       {tab === "终端" ? (
         <View style={[s.body, { flex: 1 }]}>
           <TerminalPanel sessionId={sessionId} />
@@ -45,9 +54,11 @@ export function Workbar({
           ) : tab === "文件" ? (
             <FilesPanel sessionId={sessionId} />
           ) : tab === "审查" ? (
-            <ReviewPanel sessionId={sessionId} />
+            <ReviewPanel sessionId={sessionId} onReturnToConversation={onReturnToConversation} />
           ) : tab === "设置" ? (
             <SessionSettings sessionId={sessionId} />
+          ) : tab === "研究" ? (
+            <ResearchPanel sessionId={sessionId} onFiles={() => setTab("文件")} />
           ) : (
             <ResourcePanel key={tab} sessionId={sessionId} tab={tab} />
           )}
@@ -149,6 +160,7 @@ function ResourcePanel({
   tab: "Graph" | "执行" | "追踪" | "上下文" | "用量";
 }) {
   const pico = usePico();
+  const epoch = useRef(0);
   const [value, setValue] = useState<unknown>();
   const [graphId, setGraphId] = useState("");
   const [graphView, setGraphView] = useState<"概览" | "时间线">("概览");
@@ -156,6 +168,7 @@ function ResourcePanel({
   const [through, setThrough] = useState<number>();
   const [after, setAfter] = useState<number>();
   async function refresh(more = false) {
+    const token = epoch.current;
     if (tab === "Graph") {
       const x = await pico.request("session.graph.query", {
         sessionId,
@@ -164,6 +177,7 @@ function ResourcePanel({
         limit: 20,
         ...(more && cursor ? { cursor } : {}),
       });
+      if (token !== epoch.current) return;
       setValue((old: unknown) => (more ? mergeCollection(old, x) : x));
       setCursor(typeof x.nextCursor === "string" ? x.nextCursor : undefined);
     }
@@ -172,6 +186,7 @@ function ResourcePanel({
         sessionId,
         ...(more && cursor ? { cursor } : {}),
       });
+      if (token !== epoch.current) return;
       setValue((old: unknown) => (more ? mergeCollection(old, x) : x));
       setCursor(typeof x.nextCursor === "string" ? x.nextCursor : undefined);
     }
@@ -181,19 +196,29 @@ function ResourcePanel({
         limit: 30,
         ...(more && after !== undefined ? { afterSequence: after, throughSequence: through } : {}),
       });
+      if (token !== epoch.current) return;
       setValue((old: unknown) => (more ? mergeCollection(old, x) : x));
       setThrough(x.throughSequence);
       setAfter(x.nextAfterSequence);
     }
-    if (tab === "上下文")
-      setValue((await pico.request("session.context.get", { sessionId })).context);
-    if (tab === "用量") setValue(await pico.request("usage.get", { sessionId }));
+    if (tab === "上下文") {
+      const x = await pico.request("session.context.get", { sessionId });
+      if (token === epoch.current) setValue(x.context);
+    }
+    if (tab === "用量") {
+      const x = await pico.request("usage.get", { sessionId });
+      if (token === epoch.current) setValue(x);
+    }
   }
   useEffect(() => {
+    epoch.current++;
     setValue(undefined);
     setCursor(undefined);
     setAfter(undefined);
     void pico.perform(() => refresh());
+    return () => {
+      epoch.current++;
+    };
   }, [sessionId, pico.generation, tab, graphId, graphView]);
   const graphs =
     typeof value === "object" && value && "graphs" in value && Array.isArray(value.graphs)
@@ -228,12 +253,144 @@ function ResourcePanel({
           <GraphWakes value={value} sessionId={sessionId} graphId={graphId} />
         </>
       )}
-      <Structured value={value} />
+      <ResourceSummary value={value} tab={tab} />
+      {tab === "上下文" || tab === "用量" ? (
+        <ResourceDetails value={value} />
+      ) : (
+        <Structured value={value} />
+      )}
       {(cursor || after !== undefined) && (
         <Button title="加载更多" secondary onPress={() => void pico.perform(() => refresh(true))} />
       )}
       <Detail value={value} />
     </>
+  );
+}
+function object(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+function number(value: unknown): string {
+  return typeof value === "number" && Number.isFinite(value) ? value.toLocaleString() : "未知";
+}
+function ResourceSummary({ value, tab }: { value: unknown; tab: string }) {
+  if (value === undefined) return null;
+  const data = object(value);
+  if (tab === "上下文") {
+    const route = object(data.selectedRoute),
+      history = object(data.modelHistory),
+      latest = object(data.latestRequest);
+    return (
+      <View style={{ gap: 8 }}>
+        <Text style={s.text}>{String(route.modelId ?? "当前模型")}</Text>
+        <Label>上下文窗口：{number(route.contextWindow)} Tokens</Label>
+        <Label>
+          有效历史：{number(history.messageCount)} 条 · 估算 {number(history.estimatedTokens)}{" "}
+          Tokens
+        </Label>
+        <Label>
+          最近请求：输入 {number(latest.inputTokens)} · 输出 {number(latest.outputTokens)} Tokens
+        </Label>
+        <Label>估算值仅说明当前历史大小；未上报的模型指标保持未知。</Label>
+      </View>
+    );
+  }
+  if (tab === "用量") {
+    const usage = object(data.usage),
+      total = object(usage.total);
+    return (
+      <View style={{ gap: 8 }}>
+        <Text style={s.text}>当前会话用量</Text>
+        <Label>
+          模型调用：{number(usage.providerCallCount)} 次 · Tokens {number(total.totalTokens)}
+        </Label>
+        <Label>
+          输入 {number(total.inputTokens)} · 输出 {number(total.outputTokens)}
+        </Label>
+        <Label>
+          费用：
+          {usage.costStatus === "unknown" || usage.costStatus === "none"
+            ? "未知"
+            : `${number(total.costCNY)} 元${usage.costStatus === "partial" ? "（仅已知部分）" : usage.costStatus === "estimated" ? "（估算）" : "（已包含）"}`}
+        </Label>
+      </View>
+    );
+  }
+  return null;
+}
+function ResourceDetails({ value }: { value: unknown }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <Button title={open ? "收起指标详情" : "查看指标详情"} quiet onPress={() => setOpen(!open)} />
+      {open && <Structured value={value} />}
+    </>
+  );
+}
+function ResearchPanel({ sessionId, onFiles }: { sessionId: string; onFiles: () => void }) {
+  const pico = usePico();
+  const [run, setRun] = useState<Record<string, unknown> | null>();
+  const epoch = useRef(0);
+  async function refresh() {
+    const token = epoch.current;
+    const x = await pico.request("session.research.query", { sessionId });
+    if (token === epoch.current) setRun(x.run ? object(x.run) : null);
+  }
+  useEffect(() => {
+    ++epoch.current;
+    void pico.perform(refresh);
+    const off = pico.onNotification((event) => {
+      if (event.scope.sessionId === sessionId && event.topic === "discovery.updated")
+        void pico.perform(refresh);
+    });
+    return () => {
+      ++epoch.current;
+      off();
+    };
+  }, [sessionId, pico.generation]);
+  return (
+    <View style={{ gap: 12 }}>
+      <Button
+        title="刷新研究"
+        secondary
+        reason={pico.reason("session.research.query")}
+        onPress={() => void pico.perform(refresh)}
+      />
+      {run === undefined ? (
+        <Label>正在读取研究…</Label>
+      ) : !run ? (
+        <Label>当前会话没有研究报告。</Label>
+      ) : (
+        <>
+          <Text style={s.text}>{String(run.objective ?? "研究")}</Text>
+          <Label>
+            {String(run.status ?? "未知")} · {String(run.stage ?? "")} · 第 {number(run.round)} 轮
+          </Label>
+          <Label>研究会话记录调研和报告。需要实施时，在新的普通会话中使用报告的实施建议。</Label>
+          {Array.isArray(run.checklist) &&
+            run.checklist.map((x, i) => {
+              const item = object(x);
+              return (
+                <Text key={i} style={s.text}>
+                  {item.status === "completed" ? "✓" : "○"} {String(item.title ?? "")}
+                  {item.blockedReason ? ` · ${item.blockedReason}` : ""}
+                </Text>
+              );
+            })}
+          <Button title="查看报告与生成文件" secondary onPress={onFiles} />
+          {typeof run.implementationPrompt === "string" && (
+            <>
+              <Text style={s.text}>可带入实施会话的要求</Text>
+              <Text selectable style={s.text}>
+                {run.implementationPrompt}
+              </Text>
+            </>
+          )}
+          <Detail title="研究高级详情" value={run} />
+        </>
+      )}
+    </View>
   );
 }
 function GraphWakes({
