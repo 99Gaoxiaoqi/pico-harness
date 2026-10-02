@@ -680,6 +680,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         toJsonValue(await this.subagentSettings.get(request.params)),
       "subagents.update": async (request) =>
         toJsonValue(await this.subagentSettings.update(request.params)),
+      "catalog.models": (request) => this.providerConfig.listModels(request.params.workspacePath),
       "config.get": (request) => this.providerConfig.getConfig(request.params.workspacePath),
       "config.effective.get": (request) => this.providerConfig.getEffectiveConfig(request.params),
       "usage.get": (request) => this.getUsage(request.params),

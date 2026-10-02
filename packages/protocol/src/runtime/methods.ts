@@ -139,6 +139,7 @@ export const RUNTIME_METHODS = [
   "provider.credential.delete",
   "subagents.get",
   "subagents.update",
+  "catalog.models",
   "catalog.agents",
   "catalog.skills",
   "config.skills",

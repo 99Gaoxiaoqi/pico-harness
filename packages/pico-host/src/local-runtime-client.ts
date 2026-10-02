@@ -82,6 +82,7 @@ const KERNEL_RETRY_SAFE_METHODS: ReadonlySet<RuntimeMethod> = new Set<RuntimeMet
   "provider.list",
   "provider.test",
   "provider.credential.status",
+  "catalog.models",
   "catalog.agents",
   "catalog.skills",
   "config.skills",

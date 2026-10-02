@@ -13,6 +13,8 @@ export const CAPABILITY_SCOPE_RUNTIME_CAPABILITY = "capability-scopes-v1";
 
 export const TEMPORARY_WORKSPACE_RUNTIME_CAPABILITY = "temporary-workspace-v1";
 
+export const MODEL_CATALOG_RUNTIME_CAPABILITY = "model-catalog-v1";
+
 export const MAX_RUNTIME_FRAME_BYTES = 1024 * 1024;
 
 /** Maximum UTF-8 payload exposed through a host-facing ToolResult projection. */

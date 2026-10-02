@@ -185,6 +185,28 @@ export class DesktopProviderConfigService {
     };
   }
 
+  async listModels(workspacePath: string): Promise<JsonValue> {
+    const canonical = await this.options.requireTrustedWorkspace(workspacePath);
+    const runtime = await loadEffectiveModelRuntime({
+      workDir: canonical,
+      projectTrusted: true,
+      env: this.env,
+      userConfigStore: this.userConfigStore,
+      configResolver: this.effectiveConfigResolver,
+      credentialVault: this.credentialVault,
+    });
+    const defaultRoute = runtime.router.resolve(undefined);
+    return {
+      routes: runtime.router.routes.map((route) => ({
+        id: route.id,
+        providerId: route.providerId,
+        model: route.model,
+        reasoningLevels: [...route.capabilities.reasoningLevels],
+      })),
+      ...(defaultRoute ? { defaultModelRouteId: defaultRoute.id } : {}),
+    };
+  }
+
   async getEffectiveConfig(params: unknown): Promise<JsonValue> {
     const record = assertExactObjectKeys(params, ["workspacePath"], "config.effective.get params");
     const workspacePath = await this.options.requireTrustedWorkspace(

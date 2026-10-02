@@ -51,6 +51,7 @@ const READ_METHODS = [
   "rewind.preview",
   "rewind.changes",
   "usage.get",
+  "catalog.models",
   "catalog.agents",
   "catalog.skills",
   "skills.effective.list",

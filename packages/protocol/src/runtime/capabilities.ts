@@ -37,6 +37,15 @@ export type RuntimeCatalogAgent = JsonObject & {
   readonly subagentId?: string;
 };
 
+/** Narrow, credential-free projection of enabled workspace model routes. */
+export type RuntimeCatalogModel = JsonObject & {
+  readonly id: string;
+  readonly providerId: string;
+  readonly model: string;
+  readonly displayName?: string;
+  readonly reasoningLevels: readonly string[];
+};
+
 export type RuntimeCatalogSkill = JsonObject & {
   readonly name: string;
   readonly description: string;
@@ -274,7 +283,19 @@ const runtimeCatalogSkillResult = resultShape(
   { sourcePath: resultString, allowedTools: resultStringArray, model: resultString },
 );
 
+const runtimeCatalogModelResult = exactResultShape(
+  { id: resultString, providerId: resultString, model: resultString, reasoningLevels: resultStringArray },
+  { displayName: resultString },
+);
+
 export type CapabilitiesMethodMap = {
+  readonly "catalog.models": {
+    readonly params: WorkspaceParams;
+    readonly result: {
+      readonly routes: readonly RuntimeCatalogModel[];
+      readonly defaultModelRouteId?: string;
+    };
+  };
   readonly "catalog.agents": {
     readonly params: WorkspaceParams;
     readonly result: { readonly agents: readonly RuntimeCatalogAgent[] };
@@ -428,6 +449,7 @@ export const capabilitiesParamValidators = {
       fingerprint: boundedNonEmptyStringParam(512),
     },
   ),
+  "catalog.models": workspaceParams,
   "catalog.agents": workspaceParams,
   "catalog.skills": workspaceParams,
   "config.skills": workspaceParams,
@@ -458,6 +480,10 @@ export const capabilitiesResultValidators = {
   "hooks.manage": exactResultShape({ result: resultJsonObject }),
   "operations.manage": exactResultShape({ result: resultJsonObject }),
   "plugin.manage": exactResultShape({ result: resultJsonObject }),
+  "catalog.models": exactResultShape(
+    { routes: resultArray(runtimeCatalogModelResult) },
+    { defaultModelRouteId: resultString },
+  ),
   "catalog.agents": exactResultShape({ agents: resultArray(runtimeCatalogAgentResult) }),
   "catalog.skills": exactResultShape({ skills: resultArray(runtimeCatalogSkillResult) }),
   "config.skills": exactResultShape({ skills: resultArray(resultJsonObject) }),

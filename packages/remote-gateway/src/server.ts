@@ -11,6 +11,7 @@ import { LocalRuntimeClient } from "@pico/pico-host/local-runtime-client";
 import { WorkspaceRegistrationStore } from "@pico/pico-host/workspace-registration";
 import {
   parseRuntimeResult,
+  MODEL_CATALOG_RUNTIME_CAPABILITY,
   type RuntimeParams,
   type RuntimeSessionSubscriptionFrame,
 } from "@pico/protocol";
@@ -456,6 +457,8 @@ export class RemoteGateway {
             connection.client,
             rpc,
           );
+          if (rpc.method === "catalog.models" && !(await this.supportsModelCatalog(device)))
+            throw new GatewayError("METHOD_NOT_FOUND", "电脑尚未支持模型目录，请更新并重启 Pico", 404);
           const params = authorized.params as Record<string, unknown>;
           if (
             rpc.method === "session.subscription.open" &&
@@ -608,7 +611,20 @@ export class RemoteGateway {
       /* logging must not break dispatch */
     }
   }
+  private async supportsModelCatalog(device: GatewayDevice): Promise<boolean> {
+    try {
+      const ping = parseRuntimeResult(
+        "runtime.ping",
+        await this.connection(device).client.request("runtime.ping", {}),
+      );
+      return ping.capabilities.includes(MODEL_CATALOG_RUNTIME_CAPABILITY);
+    } catch {
+      return false;
+    }
+  }
+
   private async capabilities(device: GatewayDevice): Promise<RemoteCapabilities> {
+    const modelCatalog = await this.supportsModelCatalog(device);
     let ownerIsolation = false;
     let cleanupIsolation = false;
     try {
@@ -635,11 +651,20 @@ export class RemoteGateway {
       methods: REMOTE_METHODS.filter(
         (method) =>
           device.permissions.includes(REMOTE_METHOD_SPECS[method].permission) &&
+          (method !== "catalog.models" || modelCatalog) &&
           (!SESSION_CLEANUP_METHODS.has(method) || cleanupIsolation) &&
           (!method.startsWith("terminal.") || terminalAvailable),
       ),
       maxFrameBytes: REMOTE_MAX_FRAME_BYTES,
       features: {
+        modelCatalog: {
+          available: modelCatalog && device.permissions.includes("workspace.read"),
+          ...(!modelCatalog
+            ? { reason: "电脑尚未支持模型目录，请更新并重启 Pico" }
+            : !device.permissions.includes("workspace.read")
+              ? { reason: "请在电脑授予项目读取权限" }
+              : {}),
+        },
         terminal: {
           available: terminalAvailable,
           ...(terminalReason ? { reason: terminalReason } : {}),

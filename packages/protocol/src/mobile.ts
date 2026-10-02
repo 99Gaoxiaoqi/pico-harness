@@ -83,6 +83,7 @@ export {
   DESKTOP_RUNTIME_SCHEMA_CAPABILITY,
   CAPABILITY_SCOPE_RUNTIME_CAPABILITY,
   TEMPORARY_WORKSPACE_RUNTIME_CAPABILITY,
+  MODEL_CATALOG_RUNTIME_CAPABILITY,
   MAX_RUNTIME_FRAME_BYTES,
   MAX_TOOL_RESULT_ENVELOPE_TEXT_BYTES,
   EPHEMERAL_RUNTIME_NOTIFICATION_TOPICS,
@@ -177,6 +178,7 @@ export type {
 } from "./runtime/planning.js";
 
 export type {
+  RuntimeCatalogModel,
   RuntimeCatalogAgent,
   RuntimeCatalogSkill,
   RuntimeCapabilityScope,
