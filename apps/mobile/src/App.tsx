@@ -1,5 +1,14 @@
 import React, { useEffect, useState } from "react";
-import { Alert, BackHandler, FlatList, Pressable, ScrollView, Text, View } from "react-native";
+import {
+  Alert,
+  BackHandler,
+  FlatList,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
 import { CameraView, useCameraPermissions } from "expo-camera";
@@ -43,35 +52,68 @@ export default function App() {
   };
   return (
     <SafeAreaView style={s.page}>
-      <StatusBar style="light" />
-      <View style={[s.body, { paddingBottom: 10 }]}>
+      <StatusBar style="dark" />
+      <View style={[s.body, styles.header]}>
         <View style={[s.row, { justifyContent: "space-between" }]}>
-          <Pressable onPress={() => setScreen("computers")}>
-            <Text style={s.title}>
-              pico<Text style={{ color: color.accent }}> · </Text>
-            </Text>
+          <Pressable
+            accessibilityRole="button"
+            onPress={() => setScreen("computers")}
+            style={styles.brandTarget}
+          >
+            <Text style={styles.brand}>pico</Text>
           </Pressable>
-          <Text style={{ color: color.accent, fontSize: 12 }}>
-            {
+          <View style={[s.row, { gap: 6 }]}>
+            <View
+              style={[
+                styles.connectionDot,
+                { backgroundColor: pico.phase === "connected" ? color.accent : color.muted },
+              ]}
+            />
+            <Label>
               {
-                offline: "未连接",
-                connecting: "连接中",
-                syncing: "同步中",
-                connected: "已连接",
-                background: "后台暂停",
-                blocked: "需要处理",
-              }[pico.phase]
-            }
-          </Text>
+                {
+                  offline: "未连接",
+                  connecting: "连接中",
+                  syncing: "同步中",
+                  connected: "已连接",
+                  background: "后台暂停",
+                  blocked: "需要处理",
+                }[pico.phase]
+              }
+            </Label>
+          </View>
         </View>
-        <Label>{pico.host?.name ?? "连接你的电脑，继续你的工作"}</Label>
+        <Text numberOfLines={1} style={s.muted}>
+          {pico.host?.name ?? "连接你的电脑，继续你的工作"}
+        </Text>
         {pico.workspace && screen !== "computers" && (
-          <View style={s.row}>
-            <Button title="会话" secondary onPress={() => setScreen("sessions")} />
-            <Button title="工作区" secondary onPress={() => setScreen("computers")} />
-            <Button title="电脑设置" secondary onPress={() => setScreen("settings")} />
+          <View style={styles.navigation}>
+            {(
+              [
+                ["sessions", "会话"],
+                ["computers", "工作区"],
+                ["settings", "电脑设置"],
+              ] as const
+            ).map(([target, label]) => {
+              const selected =
+                screen === target ||
+                (target === "sessions" && (screen === "conversation" || screen === "workbar"));
+              return (
+                <Pressable
+                  key={target}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected }}
+                  onPress={() => setScreen(target)}
+                  style={[styles.navigationItem, selected && styles.navigationItemSelected]}
+                >
+                  <Text style={[styles.navigationText, selected && { color: color.text }]}>
+                    {label}
+                  </Text>
+                </Pressable>
+              );
+            })}
             {sessionId && screen === "workbar" && (
-              <Button title="返回对话" secondary onPress={() => setScreen("conversation")} />
+              <Button title="返回对话" quiet onPress={() => setScreen("conversation")} />
             )}
           </View>
         )}
@@ -79,7 +121,7 @@ export default function App() {
           <Card>
             <Text style={{ color: color.danger }}>{pico.error}</Text>
             {pico.host && (
-              <Button title="重新连接" secondary onPress={() => void pico.connect(pico.host!)} />
+              <Button title="重新连接" quiet onPress={() => void pico.connect(pico.host!)} />
             )}
           </Card>
         )}
@@ -139,7 +181,7 @@ function Computers() {
   }
   return (
     <>
-      <Text style={s.title}>我的电脑</Text>
+      <Text style={styles.sectionTitle}>我的电脑</Text>
       {pico.hosts.map((host) => (
         <Card key={host.id}>
           <Text style={s.text}>{host.name}</Text>
@@ -151,7 +193,7 @@ function Computers() {
             />
             <Button
               title="解除配对"
-              secondary
+              quiet
               onPress={() =>
                 Alert.alert(
                   "解除这台电脑的配对？",
@@ -217,7 +259,7 @@ function Computers() {
             <Button key={w.id} title={w.label} secondary onPress={() => pico.chooseWorkspace(w)} />
           ))}
           {!pico.workspaces.length && <Label>电脑尚未授权工作区，请在电脑调整设备授权。</Label>}
-          <Button title="断开电脑" secondary onPress={pico.disconnect} />
+          <Button title="断开电脑" quiet onPress={pico.disconnect} />
         </Card>
       )}
     </>
@@ -230,6 +272,7 @@ function Sessions({ onSession }: { onSession: (id: string) => void }) {
   const [archived, setArchived] = useState<"活跃" | "全部">("活跃");
   const [title, setTitle] = useState("");
   const [renameId, setRenameId] = useState<string>();
+  const [actionSessionId, setActionSessionId] = useState<string>();
   const [visible, setVisible] = useState(30);
   async function refresh() {
     if (!pico.connected) return;
@@ -256,15 +299,23 @@ function Sessions({ onSession }: { onSession: (id: string) => void }) {
       onRefresh={() => void pico.perform(refresh)}
       refreshing={false}
       ListHeaderComponent={
-        <View style={{ gap: 12 }}>
-          <Text style={s.title}>{pico.workspace?.label}</Text>
-          <Field label="搜索会话" value={query} onChange={setQuery} />
+        <View style={{ gap: 10, paddingBottom: 14 }}>
+          <Text style={styles.sectionTitle}>{pico.workspace?.label}</Text>
+          <Field
+            label="搜索会话"
+            placeholder="搜索会话"
+            value={query}
+            onChange={setQuery}
+            compact
+          />
           <Chips values={["活跃", "全部"] as const} value={archived} onChange={setArchived} />
-          <Card>
+          <View style={styles.sessionComposer}>
             <Field
               label={renameId ? "会话新名称" : "新会话名称（可选）"}
+              placeholder={renameId ? "会话新名称" : "新会话名称（可选）"}
               value={title}
               onChange={setTitle}
+              compact
             />
             <Button
               title={renameId ? "保存名称" : "新建会话"}
@@ -284,26 +335,46 @@ function Sessions({ onSession }: { onSession: (id: string) => void }) {
                 })
               }
             />
-          </Card>
+          </View>
         </View>
       }
       renderItem={({ item }) => (
-        <View style={{ marginTop: 14 }}>
-          <Card>
-            <Pressable onPress={() => onSession(item.sessionId)}>
-              <Text style={s.text}>
+        <View style={styles.sessionItem}>
+          <View style={[s.row, { flexWrap: "nowrap", alignItems: "flex-start" }]}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`打开会话：${item.title || "未命名会话"}`}
+              onPress={() => onSession(item.sessionId)}
+              style={{ flex: 1, gap: 3, paddingVertical: 5 }}
+            >
+              <Text numberOfLines={2} style={[s.text, { fontWeight: "600" }]}>
                 {item.pinned ? "★ " : ""}
                 {item.title || "未命名会话"}
               </Text>
               <Label>
-                {item.status} · {new Date(item.updatedAt).toLocaleString()}
+                {item.status === "archived" ? "已归档" : item.status} ·{" "}
+                {new Date(item.updatedAt).toLocaleString()}
               </Label>
             </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`管理会话：${item.title || "未命名会话"}`}
+              accessibilityState={{ expanded: actionSessionId === item.sessionId }}
+              onPress={() =>
+                setActionSessionId(actionSessionId === item.sessionId ? undefined : item.sessionId)
+              }
+              style={styles.sessionManage}
+            >
+              <Text style={styles.navigationText}>
+                {actionSessionId === item.sessionId ? "收起" : "管理"}
+              </Text>
+            </Pressable>
+          </View>
+          {actionSessionId === item.sessionId && (
             <View style={s.row}>
-              <Button title="打开" onPress={() => onSession(item.sessionId)} />
               <Button
                 title="改名"
-                secondary
+                quiet
                 onPress={() => {
                   setRenameId(item.sessionId);
                   setTitle(item.title);
@@ -311,7 +382,7 @@ function Sessions({ onSession }: { onSession: (id: string) => void }) {
               />
               <Button
                 title={item.pinned ? "取消固定" : "固定"}
-                secondary
+                quiet
                 reason={pico.reason(item.pinned ? "session.unpin" : "session.pin")}
                 onPress={() =>
                   void pico.perform(async () => {
@@ -324,7 +395,7 @@ function Sessions({ onSession }: { onSession: (id: string) => void }) {
               />
               <Button
                 title={item.status === "archived" ? "恢复" : "归档"}
-                secondary
+                quiet
                 reason={pico.reason(
                   item.status === "archived" ? "session.restore" : "session.archive",
                 )}
@@ -340,7 +411,7 @@ function Sessions({ onSession }: { onSession: (id: string) => void }) {
               />
               <Button
                 title="删除"
-                secondary
+                quiet
                 reason={pico.reason("session.delete")}
                 onPress={() =>
                   Alert.alert("删除会话？", item.title, [
@@ -358,15 +429,50 @@ function Sessions({ onSession }: { onSession: (id: string) => void }) {
                 }
               />
             </View>
-          </Card>
+          )}
         </View>
       )}
       ListFooterComponent={
         visible < list.length ? (
-          <Button title="更多会话" secondary onPress={() => setVisible((x) => x + 30)} />
+          <Button title="更多会话" quiet onPress={() => setVisible((x) => x + 30)} />
         ) : null
       }
       ListEmptyComponent={<Label>没有匹配的会话。</Label>}
     />
   );
 }
+
+const styles = StyleSheet.create({
+  header: { paddingVertical: 10, gap: 6, borderBottomWidth: 1, borderBottomColor: color.line },
+  brand: { color: color.text, fontSize: 21, fontWeight: "700", letterSpacing: -0.7 },
+  brandTarget: { minHeight: 44, minWidth: 44, justifyContent: "center" },
+  connectionDot: { width: 6, height: 6, borderRadius: 3 },
+  navigation: {
+    flexDirection: "row",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: 3,
+    padding: 3,
+    marginTop: 4,
+    backgroundColor: color.sidebar,
+    borderRadius: 10,
+  },
+  navigationItem: {
+    minHeight: 44,
+    justifyContent: "center",
+    paddingVertical: 9,
+    paddingHorizontal: 12,
+    borderRadius: 7,
+  },
+  navigationItemSelected: { backgroundColor: color.bg },
+  navigationText: { color: color.muted, fontSize: 13, fontWeight: "500" },
+  sectionTitle: { color: color.text, fontSize: 20, fontWeight: "600", letterSpacing: -0.3 },
+  sessionComposer: { padding: 12, gap: 10, borderRadius: 12, backgroundColor: color.surface },
+  sessionItem: { paddingVertical: 12, gap: 6, borderTopWidth: 1, borderTopColor: color.line },
+  sessionManage: {
+    minHeight: 44,
+    justifyContent: "center",
+    paddingVertical: 10,
+    paddingHorizontal: 6,
+  },
+});

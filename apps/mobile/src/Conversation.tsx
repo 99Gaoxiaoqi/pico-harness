@@ -6,7 +6,9 @@ import {
   KeyboardAvoidingView,
   Platform,
   Pressable,
+  StyleSheet,
   Text,
+  TextInput,
   View,
 } from "react-native";
 import * as ImagePicker from "expo-image-picker";
@@ -205,12 +207,12 @@ export function Conversation({
       behavior={Platform.OS === "ios" ? "padding" : undefined}
       keyboardVerticalOffset={90}
     >
-      <View style={[s.body, { paddingVertical: 10 }]}>
+      <View style={[s.body, styles.toolbar]}>
         <View style={s.row}>
-          <Button title="工作栏" secondary onPress={onPanel} />
+          <Button title="工作栏" quiet onPress={onPanel} />
           <Button
             title="侧聊"
-            secondary
+            quiet
             reason={syncReason ?? pico.reason("sideChat.create")}
             onPress={() =>
               void pico.perform(async () => {
@@ -228,7 +230,7 @@ export function Conversation({
           {sideParentSessionId && (
             <Button
               title="关闭侧聊"
-              secondary
+              quiet
               reason={syncReason ?? pico.reason("sideChat.close")}
               onPress={() =>
                 void pico.perform(async () => {
@@ -246,7 +248,7 @@ export function Conversation({
           <View style={s.row}>
             <Button
               title="暂停"
-              secondary
+              quiet
               reason={syncReason ?? pico.reason("run.pause")}
               onPress={() =>
                 void pico.perform(() => pico.request("run.pause", { runId: run.runId }))
@@ -254,7 +256,7 @@ export function Conversation({
             />
             <Button
               title="继续"
-              secondary
+              quiet
               reason={syncReason ?? pico.reason("run.resume")}
               onPress={() =>
                 void pico.perform(() => pico.request("run.resume", { runId: run.runId }))
@@ -262,7 +264,7 @@ export function Conversation({
             />
             <Button
               title="停止"
-              secondary
+              quiet
               reason={syncReason ?? pico.reason("run.cancel")}
               onPress={() =>
                 Alert.alert("停止当前任务？", run.description, [
@@ -279,23 +281,23 @@ export function Conversation({
           </View>
         )}
         {settings && (
-          <View style={s.row}>
-            <Label>
+          <View style={[s.row, { flexWrap: "nowrap" }]}>
+            <Text numberOfLines={1} style={[s.muted, { flex: 1 }]}>
               {settings.model} · {settings.collaborationMode} · {settings.permissionMode}
-            </Label>
-            <Button title="会话设置" secondary onPress={onPanel} />
+            </Text>
+            <Button title="会话设置" quiet onPress={onPanel} />
           </View>
         )}
       </View>
       <FlatList
         data={view?.records ?? []}
         keyExtractor={(x) => x.itemId}
-        contentContainerStyle={s.body}
+        contentContainerStyle={[s.body, { gap: 0, paddingTop: 10, paddingBottom: 24 }]}
         ListHeaderComponent={
           view?.olderCursor ? (
             <Button
               title="加载更早记录"
-              secondary
+              quiet
               onPress={() => void pico.perform(() => controller.current!.older())}
             />
           ) : null
@@ -307,27 +309,16 @@ export function Conversation({
           <Label>{pico.connected ? "正在读取历史…" : "连接恢复后会补齐记录"}</Label>
         }
         ListFooterComponent={
-          <View style={{ gap: 12 }}>
+          <View style={{ gap: 10 }}>
             {view?.activeOverlay.map((x) => (
-              <Card key={x.streamId}>
-                <Label>
-                  {x.kind === "thinking"
-                    ? "思考中"
-                    : x.kind === "toolOutput"
-                      ? "工具输出"
-                      : "Pico 正在回复"}
-                </Label>
-                <Text selectable style={s.text}>
-                  {x.text}
-                </Text>
-              </Card>
+              <StreamingItem key={x.streamId} kind={x.kind} text={x.text} />
             ))}
-            {plan && <PlanCard plan={plan} sessionId={sessionId} syncReason={syncReason} />}{" "}
+            {plan && <PlanCard plan={plan} sessionId={sessionId} syncReason={syncReason} />}
             {!!view?.queuedInputs.length && <Label>队列中 {view.queuedInputs.length} 条输入</Label>}
           </View>
         }
       />
-      <View style={[s.body, { borderTopWidth: 1, borderTopColor: color.line }]}>
+      <View style={[s.body, styles.composer]}>
         {uncertain && (
           <Card>
             <Text style={s.text}>结果未确认，已重新同步会话。确认消息是否已出现。</Text>
@@ -372,34 +363,41 @@ export function Conversation({
         {frozen ? (
           <Label>待确认请求的输入已锁定，重试将使用相同内容。</Label>
         ) : (
-          <Field
-            label="消息"
+          <TextInput
+            accessibilityLabel="消息"
             value={text}
-            onChange={setText}
+            onChangeText={setText}
             multiline
+            autoCorrect={false}
+            autoCapitalize="none"
             placeholder="让 Pico 帮你处理电脑上的任务"
+            placeholderTextColor={color.muted}
+            style={styles.messageInput}
           />
         )}
         <Chips
           values={["auto", "steer", "queue", "replace"] as const}
           value={mode}
+          labels={{ auto: "自动", steer: "引导", queue: "排队", replace: "替换" }}
           onChange={(x) => {
             if (!frozen) setMode(x);
           }}
         />
-        <View style={s.row}>
-          <Button
-            title="相册"
-            secondary
-            reason={frozen ? "先确认待处理请求" : pickingImage ? "正在处理图片" : undefined}
-            onPress={() => void addImage()}
-          />
-          <Button
-            title="拍照"
-            secondary
-            reason={frozen ? "先确认待处理请求" : pickingImage ? "正在处理图片" : undefined}
-            onPress={() => void addImage(true)}
-          />
+        <View style={[s.row, { justifyContent: "space-between", alignItems: "flex-start" }]}>
+          <View style={s.row}>
+            <Button
+              title="相册"
+              quiet
+              reason={frozen ? "先确认待处理请求" : pickingImage ? "正在处理图片" : undefined}
+              onPress={() => void addImage()}
+            />
+            <Button
+              title="拍照"
+              quiet
+              reason={frozen ? "先确认待处理请求" : pickingImage ? "正在处理图片" : undefined}
+              onPress={() => void addImage(true)}
+            />
+          </View>
           <Button
             title={sending ? "发送中…" : "发送"}
             reason={
@@ -416,6 +414,33 @@ export function Conversation({
         </View>
       </View>
     </KeyboardAvoidingView>
+  );
+}
+function StreamingItem({ kind, text }: { kind: string; text: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const process = kind === "thinking" || kind === "toolOutput";
+  return (
+    <View style={process ? styles.process : styles.assistantMessage}>
+      {process ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityState={{ expanded }}
+          onPress={() => setExpanded(!expanded)}
+          style={styles.disclosure}
+        >
+          <Text style={s.muted}>
+            {expanded ? "▾" : "▸"} {kind === "thinking" ? "思考中" : "工具输出"}
+          </Text>
+        </Pressable>
+      ) : (
+        <Label>Pico 正在回复</Label>
+      )}
+      {(!process || expanded) && (
+        <Text selectable style={process ? s.muted : s.text}>
+          {text}
+        </Text>
+      )}
+    </View>
   );
 }
 function TranscriptItem({
@@ -437,7 +462,19 @@ function TranscriptItem({
         ? "Pico"
         : item.kind === "tool"
           ? item.name
-          : item.kind;
+          : ({
+              thinking: "思考过程",
+              skill: "技能",
+              plan: "计划",
+              runBoundary: "任务",
+              approval: "需要批准",
+              prompt: "需要回答",
+              changes: "更改",
+              goal: "目标",
+              subagent: "子代理",
+              systemNotice: "提示",
+              error: "错误",
+            }[item.kind] ?? item.kind);
   const content =
     "content" in item
       ? String(item.content)
@@ -447,29 +484,52 @@ function TranscriptItem({
           ? String(item.summary ?? "")
           : "";
   const waiting = (item.kind === "approval" || item.kind === "prompt") && item.state === "waiting";
-  return (
-    <Card>
-      <Pressable onPress={() => setExpanded(!expanded)}>
-        <View style={s.row}>
-          <Text
-            style={{
-              color: item.kind === "userMessage" ? color.accent : color.muted,
-              fontWeight: "700",
-            }}
-          >
-            {label}
+  const message = item.kind === "userMessage" || item.kind === "assistantMessage";
+  const process = item.kind === "thinking" || item.kind === "tool" || item.kind === "skill";
+  if (message) {
+    return (
+      <View style={item.kind === "userMessage" ? styles.userMessage : styles.assistantMessage}>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={`查看${label}的消息详情`}
+          accessibilityState={{ expanded }}
+          onPress={() => setExpanded(!expanded)}
+          style={item.kind === "userMessage" ? styles.userBubble : undefined}
+        >
+          <Text selectable style={s.text}>
+            {content}
           </Text>
+        </Pressable>
+        {item.truncated && <Label>此记录因传输预算截断</Label>}
+        {expanded && <Detail value={item} />}
+      </View>
+    );
+  }
+  return (
+    <View style={[styles.process, waiting && styles.interaction]}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityState={{ expanded }}
+        onPress={() => setExpanded(!expanded)}
+        style={styles.disclosure}
+      >
+        <View style={[s.row, { gap: 6 }, process && { flexWrap: "nowrap" }]}>
+          <Text style={s.muted}>{expanded ? "▾" : "▸"}</Text>
+          <Text style={[s.muted, { fontWeight: "500" }]}>{label}</Text>
           {"title" in item && <Text style={s.text}>{String(item.title)}</Text>}
           {"status" in item && <Label>{String(item.status)}</Label>}
+          {!!content && process && !expanded && (
+            <Text numberOfLines={1} style={[s.muted, { flex: 1 }]}>
+              {content}
+            </Text>
+          )}
         </View>
       </Pressable>
-      <Text
-        selectable
-        numberOfLines={["thinking", "tool"].includes(item.kind) && !expanded ? 4 : undefined}
-        style={s.text}
-      >
-        {content}
-      </Text>
+      {!!content && (!process || expanded) && (
+        <Text selectable style={process ? s.muted : s.text}>
+          {content}
+        </Text>
+      )}
       {item.kind === "tool" && expanded && (
         <>
           <Text selectable style={s.mono}>
@@ -507,7 +567,7 @@ function TranscriptItem({
       {waiting && item.kind === "prompt" && (
         <>
           <PromptOptions data={item.data} onChoose={setAnswer} />
-          <Field label="回答" value={answer} onChange={setAnswer} />
+          <Field label="回答" placeholder="输入回答" value={answer} onChange={setAnswer} compact />
           <View style={s.row}>
             <Button
               title="提交回答"
@@ -540,7 +600,7 @@ function TranscriptItem({
         </>
       )}
       {expanded && <Detail value={item} />}
-    </Card>
+    </View>
   );
 }
 function PromptOptions({
@@ -597,7 +657,7 @@ function PlanCard({
         ? (["execute", "continue_editing", "reject_exit"] as const)
         : [];
   return (
-    <Card>
+    <Card style={{ marginTop: 10 }}>
       <Text style={s.text}>
         {proposal?.title ?? "执行计划"} · {plan.state}
       </Text>
@@ -609,7 +669,13 @@ function PlanCard({
       {proposal?.overview && <Text style={s.text}>{proposal.overview}</Text>}
       {!!actions.length && (
         <>
-          <Field label="反馈（可选）" value={feedback} onChange={setFeedback} />
+          <Field
+            label="反馈（可选）"
+            placeholder="补充反馈（可选）"
+            value={feedback}
+            onChange={setFeedback}
+            compact
+          />
           <View style={s.row}>
             {actions.map((action) => (
               <Button
@@ -649,3 +715,49 @@ function PlanCard({
     </Card>
   );
 }
+
+const styles = StyleSheet.create({
+  toolbar: { paddingVertical: 4, gap: 2, borderBottomWidth: 1, borderBottomColor: color.line },
+  composer: {
+    padding: 12,
+    marginHorizontal: 12,
+    marginBottom: 10,
+    gap: 7,
+    backgroundColor: color.bg,
+    borderWidth: 1,
+    borderColor: color.line,
+    borderRadius: 22,
+    shadowColor: "#000000",
+    shadowOpacity: 0.05,
+    shadowOffset: { width: 0, height: 2 },
+    shadowRadius: 10,
+    elevation: 2,
+  },
+  messageInput: {
+    color: color.text,
+    fontSize: 15,
+    lineHeight: 23,
+    minHeight: 54,
+    paddingHorizontal: 4,
+    paddingVertical: 6,
+    textAlignVertical: "top",
+  },
+  userMessage: { alignSelf: "flex-end", maxWidth: "92%", gap: 6, marginTop: 10, marginBottom: 16 },
+  userBubble: {
+    backgroundColor: color.surface,
+    paddingHorizontal: 18,
+    paddingVertical: 12,
+    borderRadius: 28,
+  },
+  assistantMessage: { gap: 6, marginTop: 10, marginBottom: 16 },
+  process: { gap: 4, paddingVertical: 3 },
+  disclosure: { minHeight: 44, justifyContent: "center" },
+  interaction: {
+    backgroundColor: color.panel,
+    padding: 12,
+    marginVertical: 10,
+    borderWidth: 1,
+    borderColor: color.line,
+    borderRadius: 12,
+  },
+});
