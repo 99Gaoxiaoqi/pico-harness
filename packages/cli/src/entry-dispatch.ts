@@ -21,6 +21,7 @@ const RETIRED_OPTIONS = new Set([
 ]);
 
 const HELP_TEXT = `Usage: pico [options]
+       pico remote <configure|start|status|doctor|pair|devices>
 
 Start the interactive Pico TUI in the current directory.
 
@@ -64,6 +65,8 @@ export interface CliRuntime {
   startClientRepl(options: CliClientReplOptions): Promise<void>;
   /** 具体 daemon client 归属 Host/进程装配，CLI 仅分派该命令。 */
   stopLocalDaemon?(): Promise<void>;
+  /** 公网网关仅经进程装配注入，不与 TUI 共用网络执行路径。 */
+  runRemote?(args: readonly string[]): Promise<number>;
 }
 
 interface ParsedCliOptions {
@@ -101,6 +104,10 @@ class CliUsageError extends Error {}
  */
 export async function runCli(args: readonly string[], runtime: CliRuntime): Promise<number> {
   try {
+    if (args[0] === "remote") {
+      if (!runtime.runRemote) throw new Error("当前 CLI 宿主未配置远程网关能力");
+      return await runtime.runRemote(args.slice(1));
+    }
     const options = parseCliOptions(args);
     if (options.help) {
       runtime.writeStdout(HELP_TEXT);

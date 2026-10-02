@@ -26,6 +26,13 @@ export interface GatewayRuntimeClient {
   subscribeSessionFrames: import("@pico/pico-host/local-runtime-client").RuntimeClient["subscribeSessionFrames"];
   close(): void;
 }
+// These legacy methods can run terminal cleanup indirectly, even without terminal permission.
+export const SESSION_CLEANUP_METHODS: ReadonlySet<string> = new Set([
+  "session.list",
+  "session.delete",
+  "sideChat.create",
+  "sideChat.close",
+]);
 export function requirePermission(device: GatewayDevice, permission: RemotePermission): void {
   if (device.revokedAt || !device.permissions.includes(permission))
     throw new GatewayError("FORBIDDEN", "此设备没有所需权限", 403);
@@ -53,6 +60,21 @@ export async function authorizeRuntimeRequest(
     : undefined;
   if (spec.workspaceRequired && !workspace)
     throw new GatewayError("INVALID_PARAMS", "缺少授权工作区");
+  if (SESSION_CLEANUP_METHODS.has(request.method)) {
+    try {
+      const capability = parseRuntimeResult(
+        "terminal.ownershipCapabilities",
+        await client.request("terminal.ownershipCapabilities", {}),
+      );
+      if (capability.sessionCleanupIsolation !== true) throw new Error("unsupported");
+    } catch {
+      throw new GatewayError(
+        "UNSUPPORTED_CAPABILITY",
+        "电脑 Runtime 不支持远程会话清理隔离，请更新并在本机重启 Pico daemon",
+        409,
+      );
+    }
+  }
   if (request.method.startsWith("terminal.")) {
     try {
       const capability = await client.request("terminal.ownershipCapabilities", {});

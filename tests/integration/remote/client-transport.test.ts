@@ -261,7 +261,7 @@ test("remote client HTTPS correlates RPC, decodes typed results and enforces UTF
     fetch: trustedFetch(untrusted),
   });
   t.after(() => unsafeClient.close());
-  await assert.rejects(unsafeClient.workspaces(), remoteError("CONNECTION_FAILED"));
+  await assert.rejects(unsafeClient.workspaces(), remoteError("CERTIFICATE_ERROR", "not_executed"));
 });
 
 test("remote client never replays terminal input when command reply is lost", async (t) => {
@@ -288,6 +288,36 @@ test("remote client never replays terminal input when command reply is lost", as
   await new Promise((resolve) => setTimeout(resolve, 1_250));
   assert.equal(executed, 1);
   assert.equal(harness.rpc.length, 1);
+  harness.setRpc((body, response) =>
+    json(
+      response,
+      {
+        requestId: body.requestId,
+        ok: false,
+        error: {
+          code: "RATE_LIMITED",
+          message: "并发请求过多",
+          retryable: true,
+          outcome: "not_executed",
+        },
+      },
+      429,
+    ),
+  );
+  await assert.rejects(
+    client.request(
+      "terminal.input",
+      {
+        sessionId: "session-a",
+        terminalId: "terminal-a",
+        resourceEpoch: "epoch-a",
+        data: "echo 确定未执行\n",
+      },
+      { workspaceId: "workspace-a" },
+    ),
+    remoteError("RATE_LIMITED", "not_executed"),
+  );
+  assert.equal(executed, 1, "确定未执行的错误不得改写为unknown或触发自动重发");
 });
 
 test("remote client pairing waits for local approval and acknowledges saved credentials", async (t) => {

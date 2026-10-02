@@ -98,6 +98,7 @@ class FixtureRuntime implements GatewayRuntimeClient {
   disposed = 0;
   corruptArtifact = false;
   supportsOwnership = true;
+  supportsCleanupIsolation = true;
   async request<M extends RuntimeMethod>(
     method: M,
     params: RuntimeParams<M>,
@@ -129,7 +130,10 @@ class FixtureRuntime implements GatewayRuntimeClient {
     else if (method === "terminal.ownershipCapabilities") {
       if (!this.supportsOwnership)
         throw Object.assign(new Error("old daemon"), { code: "METHOD_NOT_FOUND" });
-      value = { ownerIsolation: true };
+      value = {
+        ownerIsolation: true,
+        ...(this.supportsCleanupIsolation ? { sessionCleanupIsolation: true } : {}),
+      };
     } else if (method === "terminal.list") value = { terminals: [] };
     else if (method === "terminal.create") throw new Error("fixture terminal unsupported");
     else if (method === "session.artifacts.query") {
@@ -212,7 +216,15 @@ class FixtureRuntime implements GatewayRuntimeClient {
       };
     } else if (method === "config.get")
       value = {
-        config: { lspServers: [{ command: "lsp", env: { KEY: "lsp-secret" } }] },
+        config: {
+          lspServers: [
+            {
+              command: "lsp-command-secret",
+              args: ["--token", "lsp-argument-secret"],
+              env: { KEY: "lsp-secret" },
+            },
+          ],
+        },
         version: 1,
       };
     else if (method === "plugin.manage")
@@ -411,7 +423,7 @@ async function fixture(options: { now?: () => number } = {}) {
       const req = request(
         {
           hostname: "127.0.0.1",
-            port,
+          port,
           method,
           path,
           ...(trust ? { ca } : {}),
@@ -773,6 +785,24 @@ test("MCP 秘密默认保留、显式编辑、并发 revision 拒绝与旧终端
       headers: Record<string, string>;
     };
     assert.equal(concurrent.headers["Authorization"], "new-concurrent-secret");
+    runtime.supportsCleanupIsolation = false;
+    const legacyCapabilities = await f.http("GET", "/v1/capabilities", granted.deviceToken);
+    assert.equal(
+      (legacyCapabilities.json as { methods: string[] }).methods.includes("session.list"),
+      false,
+    );
+    for (const method of ["session.list", "session.delete", "sideChat.create", "sideChat.close"]) {
+      const before = runtime.calls.filter((call) => call.method === method).length;
+      const cleanup = await f.http("POST", "/v1/rpc", granted.deviceToken, {
+        version: 1,
+        requestId: `legacy-${method}`,
+        method,
+        workspaceId: "workspace-1",
+        params: { sessionId: session.sessionId },
+      });
+      assert.equal(cleanup.status, 409);
+      assert.equal(runtime.calls.filter((call) => call.method === method).length, before);
+    }
     runtime.supportsOwnership = false;
     const terminal = await f.http("POST", "/v1/rpc", granted.deviceToken, {
       version: 1,
@@ -798,8 +828,10 @@ test("MCP 秘密默认保留、显式编辑、并发 revision 拒绝与旧终端
 });
 
 test("五分钟配对有效期和持久化 ACK 后的授权重启恢复", async () => {
-  let now = Date.now();
-  const f = await fixture({ now: () => now });
+  // Certificate generation may cross a second boundary; freeze only after TLS startup.
+  let now: number | undefined;
+  const f = await fixture({ now: () => now ?? Date.now() });
+  now = Date.now();
   try {
     const expired = (await requestGatewayControl(f.home, "pair.offer")) as RemotePairingOffer;
     now += 5 * 60_000 + 1;
@@ -820,7 +852,7 @@ test("五分钟配对有效期和持久化 ACK 后的授权重启恢复", async 
     await f.gateway.close();
     const replacement = await createRemoteGateway(f.config, {
       home: f.home,
-      now: () => now,
+      now: () => now ?? Date.now(),
       createRuntimeClient: () => new FixtureRuntime(),
     });
     await replacement.start();

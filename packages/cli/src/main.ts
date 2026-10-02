@@ -1,5 +1,4 @@
-// pico 的唯一外壳入口:TUI。
-// 网络服务、机器人、ACP 和 one-shot CLI 都已移除,避免多入口共享 session 造成状态串扰。
+// 交互入口使用 TUI；显式 pico remote 子命令启动独立公网网关进程。
 
 // 发布后的 pico 直接执行 dist/cli/main.js,不会经过 npm dev 的 --import。
 // 必须在其他依赖图执行前预加载,避免 Pino 先以 stderr transport 初始化。
@@ -114,6 +113,10 @@ async function executeEntrypoint(packagePath: URL): Promise<void> {
     },
     resolveCliStartupSession,
     startClientRepl,
+    runRemote: async (args) => {
+      const { runRemoteCli } = await import("@pico/remote-gateway");
+      return await runRemoteCli([...args]);
+    },
     stopLocalDaemon: async () => {
       await stopLocalDaemon(runtime);
     },

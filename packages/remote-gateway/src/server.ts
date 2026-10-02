@@ -33,6 +33,7 @@ import {
   publicEndpoint,
   requirePermission,
   resolveDeviceWorkspace,
+  SESSION_CLEANUP_METHODS,
   type GatewayRuntimeClient,
 } from "./policy.js";
 import {
@@ -608,16 +609,22 @@ export class RemoteGateway {
     }
   }
   private async capabilities(device: GatewayDevice): Promise<RemoteCapabilities> {
+    let ownerIsolation = false;
+    let cleanupIsolation = false;
+    try {
+      const capability = parseRuntimeResult(
+        "terminal.ownershipCapabilities",
+        await this.connection(device).client.request("terminal.ownershipCapabilities", {}),
+      );
+      ownerIsolation = capability.ownerIsolation === true;
+      cleanupIsolation = capability.sessionCleanupIsolation === true;
+    } catch {
+      /* Older daemons must not expose methods with implicit terminal cleanup. */
+    }
     let terminalAvailable = device.permissions.includes("terminal.control");
     let terminalReason = terminalAvailable ? undefined : "请在电脑授予终端权限";
     if (terminalAvailable) {
-      try {
-        terminalAvailable =
-          (await this.connection(device).client.request("terminal.ownershipCapabilities", {}))
-            .ownerIsolation === true;
-      } catch {
-        terminalAvailable = false;
-      }
+      terminalAvailable = ownerIsolation;
       if (!terminalAvailable) terminalReason = "电脑 Runtime 不支持终端设备隔离，请重启或更新 Pico";
     }
     return {
@@ -625,8 +632,11 @@ export class RemoteGateway {
       gatewayId: this.state.gatewayId,
       platform: process.platform,
       permissions: device.permissions,
-      methods: REMOTE_METHODS.filter((method) =>
-        device.permissions.includes(REMOTE_METHOD_SPECS[method].permission),
+      methods: REMOTE_METHODS.filter(
+        (method) =>
+          device.permissions.includes(REMOTE_METHOD_SPECS[method].permission) &&
+          (!SESSION_CLEANUP_METHODS.has(method) || cleanupIsolation) &&
+          (!method.startsWith("terminal.") || terminalAvailable),
       ),
       maxFrameBytes: REMOTE_MAX_FRAME_BYTES,
       features: {
@@ -641,6 +651,12 @@ export class RemoteGateway {
             : {}),
         },
         directConnection: { available: true },
+        sessionCleanup: {
+          available: cleanupIsolation,
+          ...(!cleanupIsolation
+            ? { reason: "电脑 Runtime 不支持远程会话清理隔离，请更新并在本机重启 Pico daemon" }
+            : {}),
+        },
         push: { available: false, reason: "首版仅在手机前台同步" },
       },
     };
@@ -1100,7 +1116,7 @@ export async function startConfiguredRemoteGateway(
 }
 export { requestGatewayControl };
 
-/** Existing host projections contain no credentials; diagnostic free text is additionally withheld. */
+/** Remote projections additionally remove executable configuration and credential-bearing endpoints. */
 function projectRemoteResult(method: string, result: unknown): unknown {
   if (method === "provider.test" && result && typeof result === "object") {
     const value = result as Record<string, unknown>;
@@ -1116,7 +1132,10 @@ function projectRemoteResult(method: string, result: unknown): unknown {
     method === "hooks.manage" ||
     method === "plugin.manage"
   )
-    return publicConfiguration(result, method === "hooks.manage" || method === "plugin.manage");
+    return publicConfiguration(
+      result,
+      method.startsWith("config.") || method === "hooks.manage" || method === "plugin.manage",
+    );
   return result;
 }
 function publicConfiguration(value: unknown, hideExecutableText: boolean): unknown {

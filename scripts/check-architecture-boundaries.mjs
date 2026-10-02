@@ -72,6 +72,15 @@ const HANDWRITTEN_TIMEOUT_WHITELIST = new Map([
     "骨架：operation server-side deadline（挂死 handler 防泄漏）",
   ],
   ["packages/runtime-host/src/transport/framed-transport.ts", "骨架：帧读超时"],
+  ["apps/mobile/src/store.tsx", "移动端短时配对轮询，不依赖 Node Runtime"],
+  [
+    "apps/mobile/src/terminal.generated.ts",
+    "本地打包第三方 xterm HTML 字符串；不作为手写 Runtime 超时原语",
+  ],
+  [
+    "packages/remote-client/src/index.ts",
+    "移动端纯传输：WSS 握手与订阅超时；不可依赖 Node Runtime",
+  ],
 ]);
 
 function normalizeRelativePath(path, repositoryRoot = REPOSITORY_ROOT) {
@@ -278,6 +287,8 @@ const PACKAGE_DEPENDENCY_LAYERS = {
   // Wire validation reuses pure Core Goal contracts; no Runtime/Storage dependency.
   protocol: ["core"],
   "transcript-replica": ["protocol"],
+  "remote-client": ["protocol"],
+  "remote-gateway": ["core", "storage", "protocol", "runtime", "runtime-host", "pico-host"],
   "runtime-host": ["core", "runtime"],
   "pico-host": ["core", "storage", "runtime", "protocol", "runtime-host"],
   cli: [
@@ -288,6 +299,7 @@ const PACKAGE_DEPENDENCY_LAYERS = {
     "runtime-host",
     "pico-host",
     "transcript-replica",
+    "remote-gateway",
   ],
 };
 

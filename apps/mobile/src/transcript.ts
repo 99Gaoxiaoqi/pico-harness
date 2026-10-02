@@ -1,6 +1,6 @@
 import { TranscriptReplica, type TranscriptReplicaView } from "@pico/transcript-replica";
 import type { RuntimeSessionSubscriptionFrame, RuntimeResult } from "@pico/protocol/mobile";
-import type { RuntimePort } from "./core";
+import type { RuntimePort } from "./core.js";
 
 /** Owns one subscription, including pages and advance cursors; stale results never cross sessions. */
 export class MobileTranscript {

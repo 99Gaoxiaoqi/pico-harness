@@ -26,7 +26,9 @@
     "@pico/runtime",
     "@pico/runtime-host",
     "@pico/storage",
-    "@pico/transcript-replica"
+    "@pico/transcript-replica",
+    "@pico/remote-gateway",
+    "@pico/remote-client"
   ],
   "scripts": {
     "predev": "npm run check:storage && npm run build:packages",
@@ -45,7 +47,7 @@
     "build:core": "npm run build --workspace @pico/core",
     "build:cli": "npm run build --workspace @pico/cli",
     "build:pico-host": "npm run build --workspace @pico/pico-host",
-    "build:packages": "npm run build:core && npm run build:storage && npm run build:runtime && npm run build:protocol && npm run build:transcript-replica && npm run build:runtime-host && npm run build:pico-host && npm run build:cli && npm run build:file-worker && npm run build:code-intelligence-worker",
+    "build:packages": "npm run build:core && npm run build:storage && npm run build:runtime && npm run build:protocol && npm run build:transcript-replica && npm run build:runtime-host && npm run build:pico-host && npm run build:remote-client && npm run build:remote-gateway && npm run build:cli && npm run build:file-worker && npm run build:code-intelligence-worker",
     "build:storage": "npm run build --workspace @pico/storage",
     "build:runtime": "npm run build:core && npm run build --workspace @pico/runtime",
     "build:protocol": "npm run build:core && npm run build --workspace @pico/protocol",
@@ -81,7 +83,13 @@
     "lint": "eslint src scripts tests \"apps/**/*.{ts,tsx}\" \"packages/**/*.{ts,tsx}\" eslint.config.js --no-error-on-unmatched-pattern && npm run check:architecture",
     "format": "prettier --check src scripts tests apps packages .github/workflows docs README.md AGENTS.md package.json package-lock.json tsconfig.json tsconfig.build.json",
     "astryx:theme": "node scripts/build-astryx-theme.mjs",
-    "postinstall": "patch-package --error-on-fail"
+    "postinstall": "patch-package --error-on-fail",
+    "build:remote-gateway": "npm run build --workspace @pico/remote-gateway",
+    "build:remote-client": "npm run build --workspace @pico/remote-client",
+    "mobile:dev": "npm run start --workspace @pico/mobile",
+    "mobile:typecheck": "npm run typecheck --workspace @pico/mobile",
+    "mobile:export": "npm run bundle --workspace @pico/mobile",
+    "check:mobile-boundaries": "node scripts/check-mobile-boundaries.mjs"
   },
   "engines": {
     "node": ">=22.19 <23 || >=24.3 <25 || >=26 <27"
@@ -114,7 +122,9 @@
     "react-dom": "19.2.3",
     "string-width": "^8.2.1",
     "wrap-ansi": "^10.0.0",
-    "ws": "^8.21.1"
+    "ws": "^8.21.1",
+    "@pico/remote-gateway": "*",
+    "@pico/remote-client": "*"
   },
   "devDependencies": {
     "@astryxdesign/cli": "0.6.2",

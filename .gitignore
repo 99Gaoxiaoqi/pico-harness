@@ -32,6 +32,7 @@ playwright-report/
 .playwright-cli/
 output/playwright/
 output/benchmarks/
+output/mobile/
 __pycache__/
 
 # Environment variables(含密钥,绝不提交)
