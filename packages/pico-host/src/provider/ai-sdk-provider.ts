@@ -1,3 +1,4 @@
+import type { ProviderRuntimeDependencies } from "./factory.js";
 import { PhysicalAttemptTracker } from "./physical-attempt-tracker.js";
 import { providerErrorDetail } from "./provider-error-detail.js";
 import { randomUUID } from "node:crypto";
@@ -49,6 +50,7 @@ export class AiSdkProvider implements LLMProvider {
     private readonly wire: ProviderProtocol,
     private readonly config: ProviderConfig,
     profile?: ProviderProfile,
+    private readonly dependencies: ProviderRuntimeDependencies = {},
   ) {
     this.profile = profile ?? resolveProviderProfile(wire, config.model);
     this.chatPolicy = new OpenAIRequestPolicy(
@@ -285,7 +287,13 @@ export class AiSdkProvider implements LLMProvider {
     const sdkController = new AbortController();
     const request = {
       model,
-      messages: toAiSdkMessages(messages, this.wire, { responsesWebSearchAnchors: true }),
+      messages: toAiSdkMessages(messages, this.wire, {
+        responsesWebSearchAnchors: true,
+        vision: this.config.capabilities?.vision === true,
+        ...(this.dependencies.readImageArtifact
+          ? { readImageArtifact: this.dependencies.readImageArtifact }
+          : {}),
+      }),
       allowSystemInMessages: true,
       tools,
       ...(this.wire === "claude" ? { maxOutputTokens: this.profile.maxOutputTokens } : {}),

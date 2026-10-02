@@ -34,12 +34,8 @@ export function estimateMessagesTokens(messages: readonly Message[]): number {
     for (const call of message.toolCalls ?? []) names.set(call.id, call.name);
     if (message.toolCallId) chars += names.get(message.toolCallId)?.length ?? 0;
   }
-  // User attachments are accounted by request composition. This diagnostic
-  // counts materialized tool images only.
-  const images = messages.reduce(
-    (total, message) => total + (message.toolCallId ? (message.images?.length ?? 0) : 0),
-    0,
-  );
+  // Durable image references still materialize pixels and consume model context.
+  const images = messages.reduce((total, message) => total + (message.images?.length ?? 0), 0);
   return Math.ceil(chars / CHARS_PER_TOKEN) + images * MATERIALIZED_IMAGE_TOKENS;
 }
 

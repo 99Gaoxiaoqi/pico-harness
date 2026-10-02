@@ -85,7 +85,14 @@ export function isMessageHiddenFromTranscript(message: Message): boolean {
 
 export type ImagePart =
   | { type: "image_base64"; mimeType: string; data: string }
-  | { type: "image_url"; url: string };
+  | { type: "image_url"; url: string }
+  | {
+      type: "image_artifact";
+      artifactId: string;
+      mimeType: string;
+      sizeBytes: number;
+      digest: string;
+    };
 
 export interface ToolResult {
   toolCallId: string;

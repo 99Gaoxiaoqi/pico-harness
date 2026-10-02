@@ -2,7 +2,7 @@
 
 import type { ProviderConfig } from "@pico/runtime/provider-config";
 import { AiSdkProvider } from "./ai-sdk-provider.js";
-import type { LLMProvider, ProviderKind } from "@pico/core";
+import type { ImagePart, LLMProvider, ProviderKind } from "@pico/core";
 import { coordinateReasoningLevel } from "@pico/runtime";
 import type { ReasoningLevel } from "@pico/core";
 import { CapabilityPreflightProvider } from "@pico/runtime";
@@ -15,6 +15,9 @@ export type { ProviderKind } from "@pico/core";
 
 /** Runtime-owned dependencies that are deliberately kept outside credential-bearing ProviderConfig. */
 export interface ProviderRuntimeDependencies {
+  readonly readImageArtifact?: (
+    image: Extract<ImagePart, { type: "image_artifact" }>,
+  ) => string | undefined;
   readonly promptCachePrewarm?: PromptCachePrewarmCoordinator;
 }
 
@@ -47,7 +50,7 @@ export function createRawProvider(
   kind: ProviderKind,
   config: ProviderConfig,
   thinkingEffort?: ReasoningLevel,
-  _dependencies: ProviderRuntimeDependencies = {},
+  dependencies: ProviderRuntimeDependencies = {},
 ): LLMProvider {
   const cfg = resolveConfig(config, thinkingEffort);
   const profile = cfg.capabilities
@@ -57,10 +60,10 @@ export function createRawProvider(
   switch (kind) {
     case "openai":
     case "responses":
-      provider = new AiSdkProvider(kind, cfg, profile);
+      provider = new AiSdkProvider(kind, cfg, profile, dependencies);
       break;
     case "claude":
-      provider = new AiSdkProvider(kind, cfg, profile);
+      provider = new AiSdkProvider(kind, cfg, profile, dependencies);
       break;
   }
   provider = withProviderErrorRedaction(provider, [cfg.apiKey]);

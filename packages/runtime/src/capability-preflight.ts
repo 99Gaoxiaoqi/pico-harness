@@ -1,3 +1,4 @@
+import { MATERIALIZED_IMAGE_TOKENS } from "./context-budget.js";
 import { projectMediaTextForModel } from "@pico/core/media";
 import {
   ModelCapabilityError,
@@ -34,7 +35,9 @@ export function preflightModelRequest(
 ): CapabilityPreflightResult {
   if (
     capabilities.vision === false &&
-    request.messages.some((message) => (message.images?.length ?? 0) > 0)
+    request.messages.some((message) =>
+      message.images?.some((image) => image.type !== "image_artifact"),
+    )
   ) {
     throw new ModelCapabilityError(
       routeId,
@@ -154,6 +157,7 @@ export function estimateRequestTokens(
   let total = 0;
   for (const message of messages) {
     total += countTokens(projectMediaTextForModel(message.content));
+    total += (message.images?.length ?? 0) * MATERIALIZED_IMAGE_TOKENS;
     for (const toolCall of message.toolCalls ?? []) {
       total += countTokens(toolCall.name) + countTokens(toolCall.arguments);
     }
