@@ -171,7 +171,7 @@ export function Field({
         autoCorrect={false}
         autoCapitalize="none"
         multiline={multiline}
-        placeholder={placeholder}
+        placeholder={placeholder ?? (compact ? label : undefined)}
         placeholderTextColor={color.muted}
         onFocus={() => setFocused(true)}
         onBlur={() => setFocused(false)}
