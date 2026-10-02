@@ -26,14 +26,32 @@ export function scheduleDraft(cron: string): {
   advanced: string;
 } {
   const match = /^(\d{1,2})\s+(\d{1,2})\s+\*\s+\*\s+(\*|1-5|[0-6])$/.exec(cron.trim());
-  if (!match || Number(match[1]) > 59 || Number(match[2]) > 23)
+  const minute = match?.[1],
+    hour = match?.[2],
+    day = match?.[3];
+  if (!minute || !hour || !day || Number(minute) > 59 || Number(hour) > 23)
     return { kind: "advanced", time: "09:00", weekday: "1", advanced: cron };
   return {
-    kind: match[3] === "*" ? "daily" : match[3] === "1-5" ? "weekdays" : "weekly",
-    time: `${match[2].padStart(2, "0")}:${match[1].padStart(2, "0")}`,
-    weekday: /^[0-6]$/.test(match[3]) ? match[3] : "1",
+    kind: day === "*" ? "daily" : day === "1-5" ? "weekdays" : "weekly",
+    time: `${hour.padStart(2, "0")}:${minute.padStart(2, "0")}`,
+    weekday: /^[0-6]$/.test(day) ? day : "1",
     advanced: cron,
   };
+}
+
+/** Host totals may contain zero placeholders for model calls that never reported usage. */
+export function usageMetricLabel(usage: Record<string, unknown>, value: unknown): string {
+  const calls = usage.providerCallCount,
+    reports = usage.usageReportCount;
+  if (
+    typeof calls !== "number" ||
+    typeof reports !== "number" ||
+    typeof value !== "number" ||
+    !Number.isFinite(value)
+  )
+    return "未知";
+  if (reports < calls) return reports > 0 ? `${value.toLocaleString()}（已知部分）` : "未知";
+  return value.toLocaleString();
 }
 
 export async function saveAutomation(

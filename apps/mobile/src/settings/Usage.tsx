@@ -3,7 +3,7 @@ import { Text, View } from "react-native";
 import type { JsonObject } from "@pico/protocol/mobile";
 import { usePico } from "../store";
 import { Button, Card, Chips, Detail, Field, Label, s } from "../ui";
-import { queryWorkspaceUsage } from "./management";
+import { queryWorkspaceUsage, usageMetricLabel } from "./management";
 
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -67,6 +67,7 @@ export function Usage() {
     details = record(usage?.["details"]);
   const costStatus = String(usage?.["costStatus"] ?? "unknown"),
     cost = numeric(total["costCNY"]);
+  const metric = (value: unknown) => usageMetricLabel(usage ?? {}, value);
   const models = Array.isArray(details["models"]) ? details["models"].map(record) : [];
   return (
     <>
@@ -111,10 +112,13 @@ export function Usage() {
         <>
           <Card>
             <Text style={s.text}>{loadedLabel}</Text>
-            <Text style={s.title}>{count(total["totalTokens"])} tokens</Text>
+            <Text style={s.title}>{metric(total["totalTokens"])} tokens</Text>
             <Label>
-              输入 {count(total["inputTokens"])} · 输出 {count(total["outputTokens"])} · 模型调用{" "}
+              输入 {metric(total["inputTokens"])} · 输出 {metric(total["outputTokens"])} · 模型调用{" "}
               {count(usage["providerCallCount"])}
+            </Label>
+            <Label>
+              完整上报 {count(usage["usageReportCount"])} / 调用 {count(usage["providerCallCount"])}
             </Label>
             <Text style={s.text}>
               {costs[costStatus] ?? "费用未知"}
@@ -124,8 +128,8 @@ export function Usage() {
             </Text>
             <Label>费用为本地人民币估算，不是 Provider 账单；未知记录不按零费用处理。</Label>
             <Label>
-              缓存读取 {count(total["cacheReadTokens"])} · 缓存写入{" "}
-              {count(total["cacheWriteTokens"])}
+              缓存读取 {metric(total["cacheReadTokens"])} · 缓存写入{" "}
+              {metric(total["cacheWriteTokens"])}
             </Label>
             {numeric(usage["unknownCostRecordCount"]) !== undefined && (
               <Label>费用未知记录 {count(usage["unknownCostRecordCount"])}</Label>
@@ -135,7 +139,7 @@ export function Usage() {
             <Card key={String(model["id"] ?? index)}>
               <Text style={s.text}>{String(model["name"] ?? "模型")}</Text>
               <Label>
-                {count(model["totalTokens"])} tokens · {count(model["count"])} 次 ·{" "}
+                {metric(model["totalTokens"])} tokens · {count(model["count"])} 次 ·{" "}
                 {costs[String(model["costStatus"])] ?? "费用未知"}
               </Label>
             </Card>

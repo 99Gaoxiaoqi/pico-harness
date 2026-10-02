@@ -77,7 +77,11 @@ export default function App() {
         setDrawer(false);
         return true;
       }
-      if (screen === "computers") return false;
+      if (screen === "computers") {
+        if (!sessionId) return false;
+        returnToChat();
+        return true;
+      }
       if (screen === "workbar" || screen === "settings") returnToChat();
       else if (screen === "conversation") {
         Keyboard.dismiss();

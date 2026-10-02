@@ -22,7 +22,7 @@ export function parseMobilePairing(raw: string): RemotePairingOffer {
   }
 }
 
-export type MobileParams<M extends RuntimeMethod> = Omit<RuntimeParams<M>, "workspacePath">;
+export type MobileParams<M extends RuntimeMethod> = RuntimeParams<M>;
 export type SavedHost = {
   id: string;
   name: string;

@@ -8,6 +8,7 @@ import { FilesPanel } from "./Files";
 import { TerminalPanel } from "./Terminal";
 import { ReviewPanel } from "./Review";
 import { SessionSettings } from "./Settings";
+import { usageMetricLabel } from "./settings/management";
 export const WORKBAR_TABS = [
   "任务",
   "Graph",
@@ -299,14 +300,18 @@ function ResourceSummary({ value, tab }: { value: unknown; tab: string }) {
   if (tab === "用量") {
     const usage = object(data.usage),
       total = object(usage.total);
+    const metric = (value: unknown) => usageMetricLabel(usage, value);
     return (
       <View style={{ gap: 8 }}>
         <Text style={s.text}>当前会话用量</Text>
         <Label>
-          模型调用：{number(usage.providerCallCount)} 次 · Tokens {number(total.totalTokens)}
+          模型调用：{number(usage.providerCallCount)} 次 · Tokens {metric(total.totalTokens)}
         </Label>
         <Label>
-          输入 {number(total.inputTokens)} · 输出 {number(total.outputTokens)}
+          输入 {metric(total.inputTokens)} · 输出 {metric(total.outputTokens)}
+        </Label>
+        <Label>
+          完整上报 {number(usage.usageReportCount)} / 调用 {number(usage.providerCallCount)}
         </Label>
         <Label>
           费用：

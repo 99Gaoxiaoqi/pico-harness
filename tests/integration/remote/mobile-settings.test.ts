@@ -24,6 +24,7 @@ import {
   saveUserDefaults,
   scheduleCron,
   scheduleDraft,
+  usageMetricLabel,
 } from "../../../apps/mobile/src/settings/management.js";
 
 function settingsHost() {
@@ -183,12 +184,20 @@ test("手机设置通过既有严格协议保存默认、预设和关闭的 Cron
     schedule: scheduleCron(draft.kind, draft.time, draft.weekday, draft.advanced),
   });
   assert.equal(edited.job.schedule, advanced);
-  await queryWorkspaceUsage(
+  const usageResult = await queryWorkspaceUsage(
     host.port,
     ["allowed-a", "allowed-b"],
     "allowed-b",
     "2026-10-01",
     "2026-10-03",
+  );
+  assert.equal(
+    usageMetricLabel(
+      usageResult.usage,
+      (usageResult.usage.total as Record<string, unknown>).totalTokens,
+    ),
+    "未知",
+    "缺少完整上报信息不能把汇总数字当成精确总量",
   );
   const usage = host.requests.find((call) => call.method === "usage.get")!;
   assert.equal(usage.workspaceId, "allowed-b");
