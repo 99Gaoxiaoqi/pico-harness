@@ -1,0 +1,37 @@
+{
+  "name": "@pico/remote-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Pico 公网直连 HTTPS/WSS 网关与本机管理。",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./cli": {
+      "types": "./dist/cli.d.ts",
+      "import": "./dist/cli.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@pico/protocol": "*",
+    "@pico/pico-host": "*",
+    "@pico/storage": "*",
+    "ws": "^8.21.1",
+    "qrcode-terminal": "^0.12.0",
+    "@pico/runtime": "*"
+  },
+  "devDependencies": {
+    "@types/qrcode-terminal": "^0.12.2"
+  }
+}
