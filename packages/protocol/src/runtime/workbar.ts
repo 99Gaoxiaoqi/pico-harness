@@ -1240,10 +1240,10 @@ export const workbarResultValidators = {
   }),
   "terminal.stop": exactResultShape({ terminal: runtimeTerminalSessionResult }),
   "terminal.detach": exactResultShape({ detached: resultOneOf([true]) }),
-  "terminal.ownershipCapabilities": exactResultShape({
-    ownerIsolation: resultOneOf([true]),
-    sessionCleanupIsolation: resultOptional(resultBoolean),
-  }),
+  "terminal.ownershipCapabilities": exactResultShape(
+    { ownerIsolation: resultOneOf([true]) },
+    { sessionCleanupIsolation: resultBoolean },
+  ),
   "terminal.stopOwned": exactResultShape({ stopped: resultNonNegativeInteger }),
   "terminal.stopAll": exactResultShape({ stopped: resultNonNegativeInteger }),
   "terminal.resume": exactResultShape({ accepting: resultOneOf([true]) }),
