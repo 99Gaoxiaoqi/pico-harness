@@ -8,7 +8,7 @@
     "android": "expo run:android",
     "ios": "expo run:ios",
     "typecheck": "tsc --noEmit",
-    "bundle": "node scripts/build-terminal.mjs && expo export --platform all",
+    "bundle": "node scripts/build-terminal.mjs && expo export --platform all --clear",
     "prestart": "node scripts/build-terminal.mjs",
     "preandroid": "node scripts/build-terminal.mjs",
     "preios": "node scripts/build-terminal.mjs",
