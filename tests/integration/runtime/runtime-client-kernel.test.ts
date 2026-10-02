@@ -261,6 +261,7 @@ test("kernel client: trusted terminal owners isolate control, cleanup and reconn
   const mobile = harness.createClient({ surface: "inspect", terminalOwnerId: "remote:device-a" });
   assert.deepEqual(await mobile.request("terminal.ownershipCapabilities", {}), {
     ownerIsolation: true,
+    sessionCleanupIsolation: true,
   });
   t.after(() => desktop.close());
   t.after(() => mobile.close());

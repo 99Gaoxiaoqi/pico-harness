@@ -726,7 +726,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         this.withHostWorkbarErrors(() => this.terminalService.stop(request.params)),
       "terminal.detach": (request) =>
         this.withHostWorkbarErrors(() => this.terminalService.detach(request.params)),
-      "terminal.ownershipCapabilities": async () => ({ ownerIsolation: true as const }),
+      "terminal.ownershipCapabilities": async () => ({
+        ownerIsolation: true as const,
+        sessionCleanupIsolation: true as const,
+      }),
       "terminal.stopOwned": () =>
         this.withHostWorkbarErrors(() => this.terminalService.stopOwned()),
       "terminal.stopAll": () => this.withHostWorkbarErrors(() => this.terminalService.stopAll()),
