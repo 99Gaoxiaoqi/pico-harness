@@ -385,6 +385,8 @@ type InferBridgeError<S extends BridgeSpec> =
 export interface BridgeOperationContext {
   hostEpoch: string;
   connectionId: string;
+  clientInstanceId?: string;
+  surface?: "desktop" | "tui" | "run" | "activation" | "bot" | "inspect";
   pushEvent?(event: Record<string, unknown>): Promise<void>;
   afterResponseFlushed?(callback: () => void): void;
 }

@@ -601,3 +601,50 @@ function terminateTestProcessGroup(pid: number | undefined): void {
     if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
   }
 }
+
+test("Host owner cleanup drains slow creates while other owners remain available", async (context) => {
+  const workspacePath = await createWorkspace(context, "owner-create-fence");
+  const store = new MemoryStateStore();
+  const factory = new ControlledProcessFactory();
+  const authority = new WorkbarTerminalAuthority({
+    store,
+    processFactory: factory,
+    stopGraceMs: 5,
+  });
+  context.after(() => authority.close());
+  const creating = authority.create({
+    workspacePath,
+    sessionId: "session-1",
+    terminalOwnerId: "desktop:one",
+  });
+  await waitFor(async () => factory.spawnCount === 1);
+  const cleanup = authority.stopOwned("desktop:one");
+  await assert.rejects(
+    authority.create({ workspacePath, sessionId: "session-1", terminalOwnerId: "desktop:one" }),
+    (error: unknown) => error instanceof WorkbarTerminalError && error.code === "admission_closed",
+  );
+  assert.throws(
+    () => authority.resumeOwner("desktop:one"),
+    (error: unknown) => error instanceof WorkbarTerminalError && error.code === "admission_closed",
+  );
+  const otherCreating = authority.create({
+    workspacePath,
+    sessionId: "session-1",
+    terminalOwnerId: "remote:two",
+  });
+  await waitFor(async () => factory.spawnCount === 2);
+  const desktopProcess = factory.resolveNext(true);
+  const created = await creating;
+  assert.equal(await cleanup, 1, "owner cleanup does not wait for other client's pending spawn");
+  assert.deepEqual(desktopProcess.signals, ["SIGTERM"]);
+  const mobileProcess = factory.resolveNext(true);
+  const mobile = await otherCreating;
+  assert.equal(mobile.status, "running");
+  assert.deepEqual(mobileProcess.signals, []);
+  assert.equal(
+    store.records.find((record) => record.resourceId === created.resourceId)?.status,
+    "stopped",
+  );
+  authority.resumeOwner("desktop:one");
+  assert.equal(await authority.stopOwned("remote:two"), 1);
+});

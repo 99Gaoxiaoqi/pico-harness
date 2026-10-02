@@ -15,6 +15,7 @@ export interface WorkbarTerminalOwner {
 }
 
 export interface WorkbarTerminalRecord extends WorkbarTerminalOwner {
+  readonly terminalOwnerId?: string;
   readonly resourceId: string;
   readonly resourceEpoch: string;
   readonly status: WorkbarTerminalStatus;
@@ -117,6 +118,7 @@ export interface WorkbarTerminalAuthorityOptions {
 }
 
 export type WorkbarTerminalErrorCode =
+  | "forbidden"
   | "invalid_request"
   | "not_found"
   | "resource_epoch_mismatch"
@@ -178,6 +180,9 @@ export class WorkbarTerminalAuthority {
   > &
     WorkbarTerminalAuthorityOptions;
   readonly #pendingCreates = new Set<Promise<WorkbarTerminalAttachment>>();
+  readonly #pendingOwnerCreates = new Map<Promise<WorkbarTerminalAttachment>, string>();
+  readonly #closedOwners = new Set<string>();
+  readonly #ownerCleanup = new Map<string, Promise<number>>();
   #persistQueue: Promise<void> = Promise.resolve();
   #stopAllPromise: Promise<number> | undefined;
   #acceptingCreates = true;
@@ -264,11 +269,13 @@ export class WorkbarTerminalAuthority {
   create(input: {
     readonly workspacePath: string;
     readonly sessionId: string;
+    readonly terminalOwnerId?: string;
     readonly cwd?: string | undefined;
     readonly cols?: number | undefined;
     readonly rows?: number | undefined;
   }): Promise<WorkbarTerminalAttachment> {
-    if (!this.#acceptingCreates) {
+    const ownerId = input.terminalOwnerId ?? "desktop:legacy";
+    if (!this.#acceptingCreates || this.#closedOwners.has(ownerId)) {
       return Promise.reject(
         new WorkbarTerminalError(
           "admission_closed",
@@ -278,6 +285,8 @@ export class WorkbarTerminalAuthority {
     }
     const creation = this.#create(input);
     this.#pendingCreates.add(creation);
+    this.#pendingOwnerCreates.set(creation, ownerId);
+    void creation.finally(() => this.#pendingOwnerCreates.delete(creation)).catch(() => undefined);
     void creation.then(
       () => this.#pendingCreates.delete(creation),
       () => this.#pendingCreates.delete(creation),
@@ -288,6 +297,7 @@ export class WorkbarTerminalAuthority {
   async #create(input: {
     readonly workspacePath: string;
     readonly sessionId: string;
+    readonly terminalOwnerId?: string;
     readonly cwd?: string | undefined;
     readonly cols?: number | undefined;
     readonly rows?: number | undefined;
@@ -340,6 +350,7 @@ export class WorkbarTerminalAuthority {
     });
     const record: WorkbarTerminalRecord = {
       ...owner,
+      terminalOwnerId: input.terminalOwnerId ?? "desktop:legacy",
       resourceId,
       resourceEpoch,
       status: "running",
@@ -477,6 +488,51 @@ export class WorkbarTerminalAuthority {
     });
     this.#stopAllPromise = lifecycle;
     return lifecycle;
+  }
+
+  /** Fences and drains one UI owner without blocking other clients. */
+  stopOwned(ownerId: string, includeLegacy = false): Promise<number> {
+    nonEmpty(ownerId, "terminalOwnerId");
+    this.#closedOwners.add(ownerId);
+    if (includeLegacy) this.#closedOwners.add("desktop:legacy");
+    const existing = this.#ownerCleanup.get(ownerId);
+    if (existing) return existing;
+    const belongs = (id: string) => id === ownerId || (includeLegacy && id === "desktop:legacy");
+    const operation = (async () => {
+      await Promise.allSettled(
+        [...this.#pendingOwnerCreates].filter(([, id]) => belongs(id)).map(([pending]) => pending),
+      );
+      const running = [...this.#resources.values()].filter(
+        (resource) =>
+          belongs(resource.record.terminalOwnerId ?? "desktop:legacy") &&
+          resource.record.status === "running",
+      );
+      const outcomes = await Promise.allSettled(
+        running.map((resource) =>
+          this.stop({
+            resourceId: resource.record.resourceId,
+            resourceEpoch: resource.record.resourceEpoch,
+          }),
+        ),
+      );
+      const failures = outcomes.filter((outcome) => outcome.status === "rejected");
+      if (failures.length)
+        throw new AggregateError(
+          failures.map((outcome) => outcome.reason),
+          "Owner terminal cleanup failed",
+        );
+      return running.length;
+    })();
+    this.#ownerCleanup.set(ownerId, operation);
+    void operation.finally(() => this.#ownerCleanup.delete(ownerId)).catch(() => undefined);
+    return operation;
+  }
+
+  resumeOwner(ownerId: string, includeLegacy = false): void {
+    if (this.#ownerCleanup.has(ownerId))
+      throw new WorkbarTerminalError("admission_closed", "Owner cleanup is still in progress");
+    this.#closedOwners.delete(ownerId);
+    if (includeLegacy) this.#closedOwners.delete("desktop:legacy");
   }
 
   resumeCreates(): void {

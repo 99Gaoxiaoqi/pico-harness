@@ -15,6 +15,7 @@ import {
   type RuntimeHostEventSource,
 } from "./runtime-host-events.js";
 import { createRuntimeHostSessionContinuityBridge } from "./runtime-host-session-continuity.js";
+import type { TerminalClientContext } from "./desktop-workbar-terminal-service.js";
 import type { SessionSubscriptionRegistry } from "./session-subscription-owner.js";
 import {
   mapRuntimeErrorCode,
@@ -22,6 +23,7 @@ import {
   RUNTIME_HOST_BRIDGE_USAGE_GET,
   RUNTIME_HOST_BRIDGE_WORKSPACE_STATUS,
   type BridgeErrorCode,
+  type BridgeOperationContext,
   type PicoBridgeHandlerMap,
   type RuntimeRequestBridgeInput,
   type RuntimeRequestBridgeOutput,
@@ -51,7 +53,8 @@ export type { BridgeErrorCode } from "./runtime-host-operations.js";
  * 3-B-3 will inject the service assembled by createProductionLocalDaemonHost.
  */
 export interface RuntimeHostBridgeService {
-  handle(request: RuntimeRequest): Promise<JsonValue>;
+  handle(request: RuntimeRequest, context?: TerminalClientContext): Promise<JsonValue>;
+  releaseTerminalAttachment?(attachmentId: string): void;
   close(): Promise<void> | void;
 }
 
@@ -128,13 +131,28 @@ export function createRuntimeHostComposition(
 
   const runtimeRequestHandler = async (
     input: RuntimeRequestBridgeInput,
+    context?: BridgeOperationContext,
   ): Promise<BridgeHandlerOutcome<RuntimeRequestBridgeOutput>> => {
     try {
       // 单源校验：未知方法 / 未知参数键在进 service 前被 parseStrictRuntimeParams
       // 拒绝（invalid_request）。
       const method = input.method as RuntimeMethod;
       const params = parseStrictRuntimeParams(method, input.params ?? {}) as JsonValue;
-      const rawResult = await service.handle(createRuntimeRequest(method, params));
+      const rawResult = await service.handle(
+        createRuntimeRequest(method, params),
+        context?.clientInstanceId
+          ? {
+              terminalOwnerId: context.clientInstanceId.startsWith("pico-client-")
+                ? "desktop:legacy"
+                : context.clientInstanceId,
+              terminalAttachmentId: context.connectionId,
+              surface: context.clientInstanceId.startsWith("pico-client-")
+                ? "desktop"
+                : (context.surface ?? "tui"),
+              legacyWire: context.clientInstanceId.startsWith("pico-client-"),
+            }
+          : undefined,
+      );
       let result: RuntimeRequestBridgeOutput["result"];
       try {
         result = parseRuntimeResult(method, rawResult);
@@ -173,6 +191,7 @@ export function createRuntimeHostComposition(
   return {
     handlers: mergedHandlers as unknown as RuntimeHostComposition["handlers"],
     releaseConnection(connectionId: string): void {
+      service.releaseTerminalAttachment?.(connectionId);
       eventBridge?.releaseConnection(connectionId);
       sessionBridge?.releaseConnection(connectionId);
     },

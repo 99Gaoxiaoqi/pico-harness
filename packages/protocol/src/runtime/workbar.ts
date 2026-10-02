@@ -163,6 +163,8 @@ export type RuntimeTerminalSession = JsonObject & {
   readonly createdAt: number;
   readonly updatedAt: number;
   readonly exitCode?: number;
+  readonly terminalOwnerId?: string;
+  readonly controlAllowed?: boolean;
 };
 
 export type RuntimeBrowserAgentAction =
@@ -236,7 +238,11 @@ const runtimeTerminalSessionResult = exactResultShape(
     createdAt: resultFiniteNumber,
     updatedAt: resultFiniteNumber,
   },
-  { exitCode: resultFiniteNumber },
+  {
+    exitCode: resultFiniteNumber,
+    terminalOwnerId: resultNonEmptyString,
+    controlAllowed: resultBoolean,
+  },
 );
 
 const runtimeBrowserAgentCommandResult = exactResultShape(
@@ -641,6 +647,15 @@ export type WorkbarMethodMap = {
     readonly result: { readonly detached: true };
   };
   /** Host-only lifecycle fence; intentionally omitted from DESKTOP_RUNTIME_METHODS. */
+  /** Local gateway compatibility probe; never exposed over remote RPC. */
+  readonly "terminal.ownershipCapabilities": {
+    readonly params: EmptyParams;
+    readonly result: { readonly ownerIsolation: true };
+  };
+  readonly "terminal.stopOwned": {
+    readonly params: EmptyParams;
+    readonly result: { readonly stopped: number };
+  };
   readonly "terminal.stopAll": {
     readonly params: EmptyParams;
     readonly result: { readonly stopped: number };
@@ -973,6 +988,8 @@ export const workbarParamValidators = {
     terminalId: boundedNonEmptyStringParam(512),
     resourceEpoch: boundedNonEmptyStringParam(512),
   }),
+  "terminal.ownershipCapabilities": noParams,
+  "terminal.stopOwned": noParams,
   "terminal.stopAll": noParams,
   "terminal.resume": noParams,
   "changes.list": workspaceRunParams,
@@ -1220,6 +1237,8 @@ export const workbarResultValidators = {
   }),
   "terminal.stop": exactResultShape({ terminal: runtimeTerminalSessionResult }),
   "terminal.detach": exactResultShape({ detached: resultOneOf([true]) }),
+  "terminal.ownershipCapabilities": exactResultShape({ ownerIsolation: resultOneOf([true]) }),
+  "terminal.stopOwned": exactResultShape({ stopped: resultNonNegativeInteger }),
   "terminal.stopAll": exactResultShape({ stopped: resultNonNegativeInteger }),
   "terminal.resume": exactResultShape({ accepting: resultOneOf([true]) }),
   "changes.list": resultShape({

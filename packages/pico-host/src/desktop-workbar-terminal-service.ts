@@ -8,6 +8,21 @@ import { FileWorkbarTerminalStateStore } from "./workbar-terminal-state-store.js
 
 // Host assembly: Runtime Host owns terminal primitives; Pico Host owns Session scoping.
 
+export interface TerminalClientContext {
+  readonly terminalOwnerId: string;
+  /** Legacy local hello uses exact old terminal response shapes. */
+  readonly legacyWire?: boolean;
+  readonly terminalAttachmentId: string;
+  readonly surface: "desktop" | "tui" | "run" | "activation" | "bot" | "inspect";
+}
+
+const LEGACY_CONTEXT: TerminalClientContext = {
+  terminalOwnerId: "desktop:legacy",
+  terminalAttachmentId: "desktop:legacy",
+  surface: "desktop",
+  legacyWire: true,
+};
+
 const DEFAULT_SNAPSHOT_BYTES = 256 * 1024;
 
 export class DesktopWorkbarTerminalService {
@@ -21,61 +36,81 @@ export class DesktopWorkbarTerminalService {
     this.ready = this.authority.recover();
   }
 
-  async create(input: {
-    readonly workspacePath: string;
-    readonly sessionId: string;
-    readonly cols?: number;
-    readonly rows?: number;
-  }) {
+  async create(
+    input: {
+      readonly workspacePath: string;
+      readonly sessionId: string;
+      readonly cols?: number;
+      readonly rows?: number;
+    },
+    context: TerminalClientContext = LEGACY_CONTEXT,
+  ) {
     await this.ready;
-    const attachment = await this.authority.create(input);
+    const attachment = await this.authority.create({
+      ...input,
+      terminalOwnerId: context.terminalOwnerId,
+    });
     return this.attachmentResult(
       this.authority.attach({
         resourceId: attachment.resourceId,
         resourceEpoch: attachment.resourceEpoch,
-        attachmentId: attachmentId(input.sessionId, attachment.resourceId),
+        attachmentId: context.terminalAttachmentId,
       }),
       DEFAULT_SNAPSHOT_BYTES,
+      context,
     );
   }
 
-  async list(owner: { readonly workspacePath: string; readonly sessionId: string }) {
+  async list(
+    owner: { readonly workspacePath: string; readonly sessionId: string },
+    context: TerminalClientContext = LEGACY_CONTEXT,
+  ) {
     await this.ready;
     return {
-      terminals: (await this.authority.list(owner)).map(runtimeTerminal),
+      terminals: (await this.authority.list(owner)).map((record) =>
+        runtimeTerminal(record, context),
+      ),
     };
   }
 
-  async attach(input: {
-    readonly workspacePath: string;
-    readonly sessionId: string;
-    readonly terminalId: string;
-    readonly afterSequence?: number;
-    readonly maxBytes?: number;
-  }) {
+  async attach(
+    input: {
+      readonly workspacePath: string;
+      readonly sessionId: string;
+      readonly terminalId: string;
+      readonly afterSequence?: number;
+      readonly maxBytes?: number;
+    },
+    context: TerminalClientContext = LEGACY_CONTEXT,
+  ) {
     await this.ready;
     const record = await this.ownedRecord(input);
     const attachment = this.authority.attach({
       resourceId: record.resourceId,
       resourceEpoch: record.resourceEpoch,
-      attachmentId: attachmentId(input.sessionId, record.resourceId),
+      attachmentId: context.terminalAttachmentId,
       ...(input.afterSequence === undefined ? {} : { afterSequence: input.afterSequence }),
     });
     return this.attachmentResult(
       attachment,
       Math.min(input.maxBytes ?? DEFAULT_SNAPSHOT_BYTES, DEFAULT_SNAPSHOT_BYTES),
+      context,
     );
   }
 
-  async input(input: {
-    readonly workspacePath: string;
-    readonly sessionId: string;
-    readonly terminalId: string;
-    readonly resourceEpoch: string;
-    readonly data: string;
-  }) {
+  async input(
+    input: {
+      readonly workspacePath: string;
+      readonly sessionId: string;
+      readonly terminalId: string;
+      readonly resourceEpoch: string;
+      readonly data: string;
+    },
+    context: TerminalClientContext = LEGACY_CONTEXT,
+  ) {
     await this.ready;
     const record = await this.ownedRecord(input);
+    assertControl(record, context);
     assertEpoch(record, input.resourceEpoch);
     this.authority.input({
       resourceId: record.resourceId,
@@ -85,16 +120,20 @@ export class DesktopWorkbarTerminalService {
     return { accepted: true as const, sequence: record.sequence };
   }
 
-  async resize(input: {
-    readonly workspacePath: string;
-    readonly sessionId: string;
-    readonly terminalId: string;
-    readonly resourceEpoch: string;
-    readonly cols: number;
-    readonly rows: number;
-  }) {
+  async resize(
+    input: {
+      readonly workspacePath: string;
+      readonly sessionId: string;
+      readonly terminalId: string;
+      readonly resourceEpoch: string;
+      readonly cols: number;
+      readonly rows: number;
+    },
+    context: TerminalClientContext = LEGACY_CONTEXT,
+  ) {
     await this.ready;
     const record = await this.ownedRecord(input);
+    assertControl(record, context);
     assertEpoch(record, input.resourceEpoch);
     const resized = await this.authority.resize({
       resourceId: record.resourceId,
@@ -105,14 +144,18 @@ export class DesktopWorkbarTerminalService {
     return { resized: true as const, sequence: resized.sequence };
   }
 
-  async stop(input: {
-    readonly workspacePath: string;
-    readonly sessionId: string;
-    readonly terminalId: string;
-    readonly resourceEpoch: string;
-  }) {
+  async stop(
+    input: {
+      readonly workspacePath: string;
+      readonly sessionId: string;
+      readonly terminalId: string;
+      readonly resourceEpoch: string;
+    },
+    context: TerminalClientContext = LEGACY_CONTEXT,
+  ) {
     await this.ready;
     const record = await this.ownedRecord(input);
+    assertControl(record, context);
     assertEpoch(record, input.resourceEpoch);
     return {
       terminal: runtimeTerminal(
@@ -120,22 +163,26 @@ export class DesktopWorkbarTerminalService {
           resourceId: record.resourceId,
           resourceEpoch: record.resourceEpoch,
         }),
+        context,
       ),
     };
   }
 
-  async detach(input: {
-    readonly workspacePath: string;
-    readonly sessionId: string;
-    readonly terminalId: string;
-    readonly resourceEpoch: string;
-  }) {
+  async detach(
+    input: {
+      readonly workspacePath: string;
+      readonly sessionId: string;
+      readonly terminalId: string;
+      readonly resourceEpoch: string;
+    },
+    context: TerminalClientContext = LEGACY_CONTEXT,
+  ) {
     await this.ready;
     const record = await this.ownedRecord(input);
     assertEpoch(record, input.resourceEpoch);
     this.authority.detach({
       resourceId: record.resourceId,
-      attachmentId: attachmentId(input.sessionId, record.resourceId),
+      attachmentId: context.terminalAttachmentId,
     });
     return { detached: true as const };
   }
@@ -160,9 +207,24 @@ export class DesktopWorkbarTerminalService {
     return { stopped: await this.authority.stopAll() };
   }
 
-  async resume() {
+  async stopOwned(context: TerminalClientContext = LEGACY_CONTEXT) {
     await this.ready;
-    this.authority.resumeCreates();
+    return {
+      stopped: await this.authority.stopOwned(
+        context.terminalOwnerId,
+        context.surface === "desktop",
+      ),
+    };
+  }
+
+  releaseAttachment(attachmentId: string): void {
+    this.authority.detachAttachment(attachmentId);
+  }
+
+  async resume(context?: TerminalClientContext) {
+    await this.ready;
+    if (context) this.authority.resumeOwner(context.terminalOwnerId, context.surface === "desktop");
+    else this.authority.resumeCreates();
     return { accepting: true as const };
   }
 
@@ -183,14 +245,18 @@ export class DesktopWorkbarTerminalService {
     return record;
   }
 
-  private attachmentResult(attachment: WorkbarTerminalAttachment, maxBytes: number) {
+  private attachmentResult(
+    attachment: WorkbarTerminalAttachment,
+    maxBytes: number,
+    context: TerminalClientContext,
+  ) {
     const output = attachment.events
       .filter((event) => event.kind === "output")
       .map((event) => event.data)
       .join("");
     const snapshot = tailUtf8(output, maxBytes);
     return {
-      terminal: runtimeTerminal(attachment),
+      terminal: runtimeTerminal(attachment, context),
       resourceEpoch: attachment.resourceEpoch,
       sequence: attachment.sequence,
       snapshot: snapshot.value,
@@ -199,9 +265,18 @@ export class DesktopWorkbarTerminalService {
   }
 }
 
-function runtimeTerminal(record: WorkbarTerminalRecord) {
+function runtimeTerminal(
+  record: WorkbarTerminalRecord,
+  context: TerminalClientContext = LEGACY_CONTEXT,
+) {
   return {
     terminalId: record.resourceId,
+    ...(context.legacyWire
+      ? {}
+      : {
+          terminalOwnerId: record.terminalOwnerId ?? "desktop:legacy",
+          controlAllowed: canControl(record, context),
+        }),
     workspacePath: record.workspacePath,
     sessionId: record.sessionId,
     resourceEpoch: record.resourceEpoch,
@@ -220,8 +295,17 @@ function runtimeTerminal(record: WorkbarTerminalRecord) {
   };
 }
 
-function attachmentId(sessionId: string, resourceId: string): string {
-  return `desktop:${sessionId}:${resourceId}`;
+function canControl(record: WorkbarTerminalRecord, context: TerminalClientContext): boolean {
+  const owner = record.terminalOwnerId ?? "desktop:legacy";
+  return (
+    owner === context.terminalOwnerId ||
+    (owner === "desktop:legacy" && context.surface === "desktop")
+  );
+}
+
+function assertControl(record: WorkbarTerminalRecord, context: TerminalClientContext): void {
+  if (!canControl(record, context))
+    throw new WorkbarTerminalError("forbidden", "Terminal belongs to another client");
 }
 
 function assertEpoch(record: WorkbarTerminalRecord, expected: string): void {

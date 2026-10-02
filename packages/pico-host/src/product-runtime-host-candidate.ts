@@ -46,7 +46,9 @@ async function createPicoDaemonCompositionServices(
   const daemonHost = assembleProductionDaemonHost(services, options);
   return {
     service: {
-      handle: (request) => services.desktopService.handle(request),
+      handle: (request, context) => services.desktopService.handle(request, context),
+      releaseTerminalAttachment: (attachmentId) =>
+        services.desktopService.releaseTerminalAttachment(attachmentId),
       beginDrain: () => services.desktopService.beginDrain(),
     },
     eventSource: services.desktopService,

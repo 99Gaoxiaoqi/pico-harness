@@ -10,6 +10,7 @@ import {
   resolveStorageRoot,
   RUNTIME_HOST_PROTOCOL_VERSION,
   type HostRegistration,
+  type ClientSurface,
   type ConnectOrSpawnRuntimeHostInput,
   type RuntimeHostConnection,
   RuntimeHostOperationError,
@@ -115,6 +116,9 @@ function positiveDelay(value: number | undefined, fallback: number): number {
 }
 
 export interface LocalRuntimeClientOptions {
+  /** Trusted local caller identity; gateways supply the authenticated device owner. */
+  readonly terminalOwnerId?: string;
+  readonly surface?: ClientSurface;
   readonly reconnectDelayMs?: number;
   readonly maxReconnectDelayMs?: number;
   /** Bounded replay overlap queue; injectable for constrained hosts and integration tests. */
@@ -182,6 +186,8 @@ interface RuntimeTransportConnection {
 export class LocalRuntimeClient implements RuntimeClient {
   private readonly requestConnection: RuntimeTransportConnection;
   private readonly subscriptions = new Set<RuntimeSubscription>();
+  private readonly terminalOwnerId: string;
+  private readonly surface: ClientSurface;
   private readonly reconnectDelayMs: number;
   private readonly maxReconnectDelayMs: number;
   private readonly replayBufferOptions: RuntimeNotificationBufferOptions | undefined;
@@ -197,6 +203,8 @@ export class LocalRuntimeClient implements RuntimeClient {
   private closed = false;
 
   constructor(options: LocalRuntimeClientOptions = {}) {
+    this.surface = options.surface ?? "tui";
+    this.terminalOwnerId = options.terminalOwnerId ?? `${this.surface}:${randomUUID()}`;
     this.reconnectDelayMs = positiveDelay(options.reconnectDelayMs, DEFAULT_RECONNECT_DELAY_MS);
     this.maxReconnectDelayMs = Math.max(
       this.reconnectDelayMs,
@@ -300,6 +308,8 @@ export class LocalRuntimeClient implements RuntimeClient {
       this.runtimeHostRootPath ?? resolveCanonicalPicoHome(),
       this.candidateEntrypoint,
       this.candidateLauncher,
+      this.terminalOwnerId,
+      this.surface,
     );
   }
 
@@ -580,6 +590,8 @@ class KernelRuntimeConnection implements RuntimeTransportConnection {
     private readonly rootPath: string,
     private readonly candidateEntrypoint?: string | URL,
     private readonly candidateLauncher?: ConnectOrSpawnRuntimeHostInput["candidateLauncher"],
+    private readonly terminalOwnerId: string = `tui:${randomUUID()}`,
+    private readonly surface: ClientSurface = "tui",
   ) {}
 
   setEventListener(listener: (event: Record<string, unknown>) => void): void {
@@ -710,9 +722,9 @@ class KernelRuntimeConnection implements RuntimeTransportConnection {
     ensurePicoRuntimeHostShutdownOperationRegistered();
     const result = await connectOrSpawnRuntimeHost({
       rootPath: this.rootPath,
-      surface: "tui",
+      surface: this.surface,
       protocol: { min: RUNTIME_HOST_PROTOCOL_VERSION, max: RUNTIME_HOST_PROTOCOL_VERSION },
-      clientInstanceId: `pico-client-${randomUUID()}`,
+      clientInstanceId: this.terminalOwnerId,
       connectTimeoutMs: CONNECT_TIMEOUT_MS,
       handshakeTimeoutMs: HANDSHAKE_TIMEOUT_MS,
       candidateEntrypoint: this.candidateEntrypoint ?? resolveDaemonCandidateEntrypoint(),

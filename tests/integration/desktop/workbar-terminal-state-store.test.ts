@@ -184,3 +184,31 @@ function isMissing(error: unknown): boolean {
     error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT"
   );
 }
+
+test("terminal store preserves remote device owner and assigns legacy records to desktop", async (context) => {
+  const fixture = await createFixture(context, "owner-migration");
+  const store = new FileWorkbarTerminalStateStore({ picoHome: fixture.picoHome });
+  const legacy = terminalRecord(fixture.workspace, "legacy");
+  const mobile = terminalRecord(fixture.workspace, "mobile", {
+    terminalOwnerId: "remote:device-a",
+  });
+  await store.save([legacy, mobile]);
+  const stored = await store.load();
+  assert.equal(
+    stored.find((record) => record.resourceId === "legacy")?.terminalOwnerId,
+    "desktop:legacy",
+  );
+  assert.equal(
+    stored.find((record) => record.resourceId === "mobile")?.terminalOwnerId,
+    "remote:device-a",
+  );
+  const recovered = new WorkbarTerminalAuthority({ store });
+  await recovered.recover();
+  assert.equal(
+    (await recovered.list({ workspacePath: fixture.workspace, sessionId: mobile.sessionId })).find(
+      (record) => record.resourceId === "mobile",
+    )?.terminalOwnerId,
+    "remote:device-a",
+  );
+  await recovered.close();
+});

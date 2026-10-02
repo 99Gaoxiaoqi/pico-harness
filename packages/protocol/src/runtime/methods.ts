@@ -70,6 +70,8 @@ export const RUNTIME_METHODS = [
   "terminal.resize",
   "terminal.stop",
   "terminal.detach",
+  "terminal.ownershipCapabilities",
+  "terminal.stopOwned",
   "terminal.stopAll",
   "terminal.resume",
   "sideChat.create",

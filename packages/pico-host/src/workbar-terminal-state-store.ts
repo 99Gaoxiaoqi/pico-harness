@@ -178,6 +178,10 @@ function decodeRecord(value: unknown, index: number): WorkbarTerminalRecord {
   return {
     resourceId: boundedString(record["resourceId"], `${label}.resourceId`, 256),
     resourceEpoch: boundedString(record["resourceEpoch"], `${label}.resourceEpoch`, 256),
+    terminalOwnerId:
+      record["terminalOwnerId"] === undefined
+        ? "desktop:legacy"
+        : boundedString(record["terminalOwnerId"], `${label}.terminalOwnerId`, 256),
     workspacePath,
     sessionId: boundedString(record["sessionId"], `${label}.sessionId`, 512),
     status,

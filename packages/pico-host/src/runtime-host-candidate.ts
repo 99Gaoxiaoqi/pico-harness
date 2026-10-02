@@ -26,7 +26,10 @@ export type PicoDaemonCandidateResult =
   | { kind: "loser" }
   | { kind: "winner"; host: RuntimeHostKernel };
 
-export interface PicoDaemonCompositionService extends Pick<RuntimeHostBridgeService, "handle"> {
+export interface PicoDaemonCompositionService extends Pick<
+  RuntimeHostBridgeService,
+  "handle" | "releaseTerminalAttachment"
+> {
   beginDrain(): void;
 }
 
@@ -105,7 +108,12 @@ export function createPicoDaemonRuntimeHostComposition(
   );
   const bridge = createRuntimeHostComposition({
     // daemonHost.stop() owns service close exactly once; the bridge only owns protocol wiring.
-    service: { handle: (request) => services.service.handle(request), close: () => undefined },
+    service: {
+      handle: (request, context) => services.service.handle(request, context),
+      releaseTerminalAttachment: (attachmentId) =>
+        services.service.releaseTerminalAttachment?.(attachmentId),
+      close: () => undefined,
+    },
     eventSource: services.eventSource,
     sessionContinuity,
   });

@@ -132,6 +132,7 @@ import {
   isSafeSubagentPresetId,
   RUNTIME_ERROR_CODES,
   RuntimeProtocolError,
+  parseRuntimeParams,
   type JsonValue,
   type JsonObject,
   type RuntimeNotification,
@@ -219,7 +220,10 @@ import {
 } from "./index.js";
 import { TemporaryWorkspaceAuthority } from "./temporary-workspace-authority.js";
 import { DesktopWorkbarGitReviewService } from "./desktop-workbar-git-review-service.js";
-import { DesktopWorkbarTerminalService } from "./desktop-workbar-terminal-service.js";
+import {
+  DesktopWorkbarTerminalService,
+  type TerminalClientContext,
+} from "./desktop-workbar-terminal-service.js";
 import { WorkbarGitReviewError } from "./workbar-git-review.js";
 import { SideChatAuthority, SideChatNoSettledTurnError } from "./side-chat-authority.js";
 import { DesktopAtomicMemoryService } from "./desktop-atomic-memory-service.js";
@@ -552,13 +556,17 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       );
   }
 
-  handle(request: RuntimeRequest): Promise<JsonValue> {
+  handle(request: RuntimeRequest, context?: TerminalClientContext): Promise<JsonValue> {
     try {
       this.assertAcceptingRequests();
     } catch (error) {
       return Promise.reject(error);
     }
-    const operation = this.providerConfig.ready.then(() => this.dispatchRequest(request));
+    const operation = this.providerConfig.ready.then(() =>
+      context && request.method.startsWith("terminal.")
+        ? this.handleClientTerminalRequest(request, context)
+        : this.dispatchRequest(request),
+    );
     this.inFlightHandles.add(operation);
     void operation.then(
       () => {
@@ -569,6 +577,62 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       },
     );
     return operation;
+  }
+
+  releaseTerminalAttachment(attachmentId: string): void {
+    this.terminalService.releaseAttachment(attachmentId);
+  }
+
+  private handleClientTerminalRequest(
+    request: RuntimeRequest,
+    context: TerminalClientContext,
+  ): Promise<JsonValue> {
+    // Terminal context is supplied by the trusted local IPC bridge, never by JSON params.
+    return this.withHostWorkbarErrors(async () => {
+      switch (request.method) {
+        case "terminal.create":
+          return this.terminalService.create(
+            parseRuntimeParams("terminal.create", request.params),
+            context,
+          );
+        case "terminal.list":
+          return this.terminalService.list(
+            parseRuntimeParams("terminal.list", request.params),
+            context,
+          );
+        case "terminal.attach":
+          return this.terminalService.attach(
+            parseRuntimeParams("terminal.attach", request.params),
+            context,
+          );
+        case "terminal.input":
+          return this.terminalService.input(
+            parseRuntimeParams("terminal.input", request.params),
+            context,
+          );
+        case "terminal.resize":
+          return this.terminalService.resize(
+            parseRuntimeParams("terminal.resize", request.params),
+            context,
+          );
+        case "terminal.stop":
+          return this.terminalService.stop(
+            parseRuntimeParams("terminal.stop", request.params),
+            context,
+          );
+        case "terminal.detach":
+          return this.terminalService.detach(
+            parseRuntimeParams("terminal.detach", request.params),
+            context,
+          );
+        case "terminal.stopOwned":
+          return this.terminalService.stopOwned(context);
+        case "terminal.resume":
+          return this.terminalService.resume(context);
+        default:
+          return this.dispatchRequest(request);
+      }
+    });
   }
 
   private createRequestHandlers(): DesktopRequestHandlers {
@@ -629,6 +693,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         this.withHostWorkbarErrors(() => this.terminalService.stop(request.params)),
       "terminal.detach": (request) =>
         this.withHostWorkbarErrors(() => this.terminalService.detach(request.params)),
+      "terminal.ownershipCapabilities": async () => ({ ownerIsolation: true as const }),
+      "terminal.stopOwned": () =>
+        this.withHostWorkbarErrors(() => this.terminalService.stopOwned()),
       "terminal.stopAll": () => this.withHostWorkbarErrors(() => this.terminalService.stopAll()),
       "terminal.resume": () => this.withHostWorkbarErrors(() => this.terminalService.resume()),
       "sideChat.create": (request) => this.createSideChat(request.params),
@@ -4375,11 +4442,13 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         const code =
           error.code === "not_found"
             ? RUNTIME_ERROR_CODES.NOT_FOUND
-            : error.code === "resource_epoch_mismatch" ||
-                error.code === "capacity_exceeded" ||
-                error.code === "admission_closed"
-              ? RUNTIME_ERROR_CODES.CONFLICT
-              : RUNTIME_ERROR_CODES.INVALID_PARAMS;
+            : error.code === "forbidden"
+              ? RUNTIME_ERROR_CODES.FORBIDDEN
+              : error.code === "resource_epoch_mismatch" ||
+                  error.code === "capacity_exceeded" ||
+                  error.code === "admission_closed"
+                ? RUNTIME_ERROR_CODES.CONFLICT
+                : RUNTIME_ERROR_CODES.INVALID_PARAMS;
         throw new RuntimeProtocolError(code, error.message);
       }
       throw error;

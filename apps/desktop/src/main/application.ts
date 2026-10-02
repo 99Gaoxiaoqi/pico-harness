@@ -40,6 +40,7 @@ const terminalGeneration = new DesktopTerminalGenerationController();
 // connectOrSpawn 自动拉起 detached 常驻 daemon candidate（自持 residency，
 // 不随本 app 退出；cron 调度依赖其常驻）。Electron 主进程只做瘦客户端。
 const runtime = new LocalDaemonRuntimeClientAdapter({
+  surface: "desktop",
   // The daemon is a separate Vite target beside main.cjs. Supplying its concrete
   // artifact keeps both development and packaged startup independent from
   // import.meta.url rewriting inside the shared client bundle.
@@ -66,12 +67,12 @@ const requestDesktopShutdown = (exitCode?: number): void => {
   lifecycle.markQuitting();
   app.quit();
 };
-const stopAllDesktopTerminals = async (): Promise<void> => {
-  await runtime.request("terminal.stopAll", {});
+const stopOwnedDesktopTerminals = async (): Promise<void> => {
+  await runtime.request("terminal.stopOwned", {});
 };
 const cleanupDesktopTerminalGeneration = async (): Promise<void> => {
   await cleanupDesktopWorkbarResources({
-    cleanupTerminals: () => terminalGeneration.cleanup(stopAllDesktopTerminals),
+    cleanupTerminals: () => terminalGeneration.cleanup(stopOwnedDesktopTerminals),
     disposeBrowser: () => browser.dispose(),
     onBrowserError: (error) => console.error("Pico desktop browser cleanup failed", error),
   });

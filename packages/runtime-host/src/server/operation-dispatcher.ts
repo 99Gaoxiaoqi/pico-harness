@@ -17,6 +17,8 @@ import { HOST_BOOTSTRAP_OPERATION_SPECS } from "../protocol/host-status.js";
 export interface ConnectionContext {
   hostEpoch: string;
   connectionId: string;
+  /** Authenticated local IPC hello identity; never sourced from operation params. */
+  clientInstanceId?: string;
   surface: ClientSurface;
   principal: "local_os_user";
   acquireResidency(): OperationResidency;

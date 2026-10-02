@@ -253,3 +253,115 @@ async function processAlive(pid: number): Promise<boolean> {
     return false;
   }
 }
+
+test("kernel client: trusted terminal owners isolate control, cleanup and reconnect", async (t) => {
+  const harness = await startKernelClientHarness(t);
+  await writeDesktopModelRouting(harness.picoHome);
+  const desktop = harness.createClient({ surface: "desktop", terminalOwnerId: "desktop:window-a" });
+  const mobile = harness.createClient({ surface: "inspect", terminalOwnerId: "remote:device-a" });
+  assert.deepEqual(await mobile.request("terminal.ownershipCapabilities", {}), {
+    ownerIsolation: true,
+  });
+  t.after(() => desktop.close());
+  t.after(() => mobile.close());
+  const workspacePath = harness.workspacePath;
+  const sessionId = (await desktop.request("session.create", { workspacePath })).session.sessionId;
+  const scope = { workspacePath, sessionId };
+  const legacy = harness.createClient({
+    terminalOwnerId: "pico-client-old-desktop",
+    surface: "tui",
+  });
+  t.after(() => legacy.close());
+  const legacyTerminal = await legacy.request("terminal.create", scope);
+  assert.equal(
+    legacyTerminal.terminal.terminalOwnerId,
+    undefined,
+    "old hello receives old exact result shape",
+  );
+  const legacyTarget = {
+    ...scope,
+    terminalId: legacyTerminal.terminal.terminalId,
+    resourceEpoch: legacyTerminal.resourceEpoch,
+  };
+  await assert.rejects(
+    mobile.request("terminal.stop", legacyTarget),
+    (error: unknown) => error instanceof RuntimeClientError && error.code === "FORBIDDEN",
+  );
+  await desktop.request("terminal.stop", legacyTarget);
+  const desktopTerminal = await desktop.request("terminal.create", scope);
+  const mobileTerminal = await mobile.request("terminal.create", scope);
+  assert.equal(mobileTerminal.terminal.terminalOwnerId, "remote:device-a");
+  assert.equal(mobileTerminal.terminal.controlAllowed, true);
+  assert.equal(desktopTerminal.terminal.capability, process.platform === "win32" ? "pipe" : "pty");
+  const target = {
+    ...scope,
+    terminalId: mobileTerminal.terminal.terminalId,
+    resourceEpoch: mobileTerminal.resourceEpoch,
+  };
+  const foreignRead = await desktop.request("terminal.attach", {
+    ...scope,
+    terminalId: target.terminalId,
+  });
+  assert.equal(foreignRead.terminal.controlAllowed, false);
+  await assert.rejects(
+    desktop.request("terminal.input", { ...target, data: "exit\n" }),
+    (error: unknown) => error instanceof RuntimeClientError && error.code === "FORBIDDEN",
+  );
+  await assert.rejects(
+    desktop.request("terminal.stop", target),
+    (error: unknown) => error instanceof RuntimeClientError && error.code === "FORBIDDEN",
+  );
+  // Spoofing ownership through JSON params is rejected before service dispatch.
+  await assert.rejects(
+    desktop.request("terminal.create", { ...scope, terminalOwnerId: "remote:device-a" } as never),
+    (error: unknown) => error instanceof RuntimeClientError && error.code === "INVALID_PARAMS",
+  );
+  assert.equal((await desktop.request("terminal.stopOwned", {})).stopped, 1);
+  const remaining = await mobile.request("terminal.list", scope);
+  assert.equal(
+    remaining.terminals.find((terminal) => terminal.terminalId === target.terminalId)?.status,
+    "running",
+  );
+  await assert.rejects(
+    desktop.request("terminal.create", scope),
+    (error: unknown) => error instanceof RuntimeClientError && error.code === "CONFLICT",
+  );
+  await desktop.request("terminal.resume", {});
+  const next = await desktop.request("terminal.create", scope);
+  assert.equal(next.terminal.status, "running");
+  mobile.close();
+  const reconnected = harness.createClient({
+    surface: "inspect",
+    terminalOwnerId: "remote:device-a",
+  });
+  t.after(() => reconnected.close());
+  const attached = await reconnected.request("terminal.attach", {
+    ...scope,
+    terminalId: target.terminalId,
+  });
+  assert.equal(
+    attached.terminal.status,
+    "running",
+    "disconnect only detaches; it must not terminate PTY",
+  );
+  assert.equal(attached.terminal.controlAllowed, true);
+  if (process.platform !== "win32") {
+    await reconnected.request("terminal.input", {
+      ...target,
+      data: "printf 'mobile-owner-ready\\n'\n",
+    });
+    assert.equal(
+      await waitForCondition(async () => {
+        const output = await reconnected.request("terminal.attach", {
+          ...scope,
+          terminalId: target.terminalId,
+        });
+        return output.snapshot.includes("mobile-owner-ready");
+      }, 5_000),
+      true,
+    );
+    await reconnected.request("terminal.resize", { ...target, cols: 100, rows: 30 });
+  }
+  await reconnected.request("terminal.stop", target);
+  await desktop.request("terminal.stopOwned", {});
+});

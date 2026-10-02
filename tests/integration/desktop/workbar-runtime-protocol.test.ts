@@ -112,6 +112,14 @@ test("review, terminal and side chat contracts are renderer allowlisted and stri
     assert.ok(DESKTOP_RUNTIME_METHODS.includes(method));
   }
   assert.equal(
+    (DESKTOP_RUNTIME_METHODS as readonly string[]).includes("terminal.ownershipCapabilities"),
+    false,
+  );
+  assert.equal(
+    (DESKTOP_RUNTIME_METHODS as readonly string[]).includes("terminal.stopOwned"),
+    false,
+  );
+  assert.equal(
     (DESKTOP_RUNTIME_METHODS as readonly string[]).includes("terminal.stopAll"),
     false,
     "全量释放仅允许 Electron 主进程调用",
