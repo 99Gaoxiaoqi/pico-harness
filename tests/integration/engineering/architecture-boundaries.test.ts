@@ -97,6 +97,28 @@ test("architecture cycle gate finds no TypeScript value import cycle in this rep
   assert.deepEqual(scanTypeScriptValueImportCycles({ repositoryRoot }), []);
 });
 
+test("architecture boundary gate resolves source files before matching directories and follows directory barrels", async (context) => {
+  const fixtureRoot = await createArchitectureFixture(context, "pico-directory-boundary-", {
+    "src/engine/consumer.ts": 'import { value } from "../contracts"; export { value };\n',
+    "src/contracts.tsx": 'export { value } from "./runtime/private.js";\n',
+    "src/contracts/index.ts": "export const value = 0;\n",
+    "src/engine/directory.ts": 'import { value } from "../directory"; export { value };\n',
+    "src/directory/index.ts": 'export { value } from "../runtime/private.js";\n',
+    "src/runtime/private.ts": "export const value = 1;\n",
+  });
+
+  assert.deepEqual(
+    scanArchitectureBoundaries({ repositoryRoot: fixtureRoot }).map(({ rule, target }) => ({
+      rule,
+      target,
+    })),
+    [
+      { rule: "engine-to-runtime-implementation", target: "src/contracts.tsx" },
+      { rule: "engine-to-runtime-implementation", target: "src/directory/index.ts" },
+    ],
+  );
+});
+
 test("architecture boundary gate rejects Engine type-only imports from Runtime", async (context) => {
   const fixtureRoot = await mkdtemp(join(tmpdir(), "pico-architecture-type-edge-"));
   context.after(() => rm(fixtureRoot, { recursive: true, force: true }));

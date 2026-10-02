@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, extname, relative, resolve, sep } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -120,7 +120,7 @@ function resolveImportPath(importer, specifier) {
     candidates.push(`${requested}.ts`, `${requested}.tsx`);
   }
   candidates.push(resolve(requested, "index.ts"), resolve(requested, "index.tsx"));
-  return candidates.find((candidate) => existsSync(candidate));
+  return candidates.find((candidate) => statSync(candidate, { throwIfNoEntry: false })?.isFile());
 }
 
 function sourceArea(path, repositoryRoot) {
