@@ -514,6 +514,8 @@ export class RemoteRuntimeClient {
     const active = () =>
       this.#subscriptions.get(subscription.id) === subscription &&
       subscription.replayCycle === cycle &&
+      this.#foreground &&
+      this.#socket?.readyState === 1 &&
       !this.#closed;
     // Match the local client: the initial page is returned, subsequent pages are delivered
     // to the listener. Never accumulate an entire workspace history in one array.
