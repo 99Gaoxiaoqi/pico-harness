@@ -223,6 +223,7 @@ import { DesktopWorkbarGitReviewService } from "./desktop-workbar-git-review-ser
 import {
   DesktopWorkbarTerminalService,
   type TerminalClientContext,
+  isRemoteTerminalContext,
 } from "./desktop-workbar-terminal-service.js";
 import { WorkbarGitReviewError } from "./workbar-git-review.js";
 import { SideChatAuthority, SideChatNoSettledTurnError } from "./side-chat-authority.js";
@@ -565,7 +566,12 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const operation = this.providerConfig.ready.then(() =>
       context && request.method.startsWith("terminal.")
         ? this.handleClientTerminalRequest(request, context)
-        : this.dispatchRequest(request),
+        : context &&
+            ["session.delete", "session.list", "sideChat.close", "sideChat.create"].includes(
+              request.method,
+            )
+          ? this.handleClientSessionCleanupRequest(request, context)
+          : this.dispatchRequest(request),
     );
     this.inFlightHandles.add(operation);
     void operation.then(
@@ -629,6 +635,33 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           return this.terminalService.stopOwned(context);
         case "terminal.resume":
           return this.terminalService.resume(context);
+        default:
+          return this.dispatchRequest(request);
+      }
+    });
+  }
+
+  private handleClientSessionCleanupRequest(
+    request: RuntimeRequest,
+    context: TerminalClientContext,
+  ): Promise<JsonValue> {
+    return this.withHostWorkbarErrors(async () => {
+      switch (request.method) {
+        case "session.delete": {
+          const params = parseRuntimeParams("session.delete", request.params);
+          return this.deleteSession(params.workspacePath, params.sessionId, context);
+        }
+        case "session.list": {
+          const params = parseRuntimeParams("session.list", request.params);
+          return this.listSessions(params.workspacePath, params.includeArchived, context);
+        }
+        case "sideChat.close":
+          return this.closeSideChat(parseRuntimeParams("sideChat.close", request.params), context);
+        case "sideChat.create":
+          return this.createSideChat(
+            parseRuntimeParams("sideChat.create", request.params),
+            context,
+          );
         default:
           return this.dispatchRequest(request);
       }
@@ -1201,10 +1234,14 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     return { workspacePath: canonical, trusted };
   }
 
-  private async listSessions(workspacePath: string, includeArchived = false): Promise<JsonValue> {
+  private async listSessions(
+    workspacePath: string,
+    includeArchived = false,
+    context?: TerminalClientContext,
+  ): Promise<JsonValue> {
     const canonical = await this.options.runtimeService.canonicalizeWorkspacePath(workspacePath);
-    const sideChats = this.sideChatAuthority(canonical);
-    await sideChats.recover();
+    const sideChats = this.sideChatAuthority(canonical, context);
+    if (!isRemoteTerminalContext(context)) await sideChats.recover();
     const hiddenSessionIds = new Set(sideChats.list().map((lease) => lease.targetSessionId));
     for (const childSessionId of this.agentGraphStore(canonical).listOperatorSessionIds()) {
       hiddenSessionIds.add(childSessionId);
@@ -1328,55 +1365,75 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     managedProcessLauncher.unblockWindowsNetworkTask(controlRoot);
   }
 
-  private async deleteSession(workspacePath: string, sessionId: string): Promise<JsonValue> {
+  private async deleteSession(
+    workspacePath: string,
+    sessionId: string,
+    context?: TerminalClientContext,
+  ): Promise<JsonValue> {
     const canonical = await this.requireIdleTrustedSession(workspacePath, sessionId, "删除");
-    await this.revokeWindowsTaskNetwork(sessionId);
-    await this.options.retireAgentGraphRootSession?.(canonical, sessionId, "Root Session deleted");
-    const sideChats = this.sideChatAuthority(canonical);
-    await sideChats.recover();
+    const sideChats = this.sideChatAuthority(canonical, context);
+    // Recovery can remove unrelated stale side conversations. Remote requests cannot trigger it.
+    if (!isRemoteTerminalContext(context)) await sideChats.recover();
     const leases = sideChats.list();
-    if (leases.some((lease) => lease.targetSessionId === sessionId)) {
+    const targets = new Set([sessionId]);
+    for (const target of targets) {
+      for (const lease of leases) {
+        if (lease.sourceSessionId === target) targets.add(lease.targetSessionId);
+      }
+    }
+    return this.terminalService.withSessionCleanup(canonical, [...targets], context, async () => {
+      await this.revokeWindowsTaskNetwork(sessionId);
+      await this.options.retireAgentGraphRootSession?.(
+        canonical,
+        sessionId,
+        "Root Session deleted",
+      );
+      const childLeases = [...targets]
+        .filter((target) => target !== sessionId)
+        .reverse()
+        .flatMap((target) => leases.filter((lease) => lease.targetSessionId === target));
+      for (const lease of childLeases) {
+        this.browserAgentBroker.invalidateSession(lease.targetSessionId);
+        this.clientCapabilityBroker.invalidateSession(lease.targetSessionId);
+        await sideChats.cleanup(lease.targetSessionId);
+      }
+      if (leases.some((lease) => lease.targetSessionId === sessionId)) {
+        this.browserAgentBroker.invalidateSession(sessionId);
+        this.clientCapabilityBroker.invalidateSession(sessionId);
+        await sideChats.cleanup(sessionId);
+        return { sessionId, deleted: true };
+      }
       this.browserAgentBroker.invalidateSession(sessionId);
       this.clientCapabilityBroker.invalidateSession(sessionId);
-      await sideChats.cleanup(sessionId);
-      return { sessionId, deleted: true };
-    }
-    const childLeases = leases.filter((candidate) => candidate.sourceSessionId === sessionId);
-    for (const lease of childLeases) {
-      this.browserAgentBroker.invalidateSession(lease.targetSessionId);
-      this.clientCapabilityBroker.invalidateSession(lease.targetSessionId);
-      await sideChats.cleanup(lease.targetSessionId);
-    }
-    this.browserAgentBroker.invalidateSession(sessionId);
-    this.clientCapabilityBroker.invalidateSession(sessionId);
-    globalSessionPermissionGrants.clear(sessionId, canonical, this.picoHome);
-    await globalClientCapabilityGrants.revokeSession(
-      sessionId,
-      resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.root,
-    );
-    await this.terminalService.stopSession({ workspacePath: canonical, sessionId });
-    await sessionMemoryLane.run(
-      this.memoryLaneKey(canonical, sessionId),
-      "foreground",
-      async () => {
-        const managed = globalSessionManager.delete(sessionId, canonical, {
-          picoHome: this.picoHome,
-        });
-        await managed?.close();
-        await Promise.all([
-          removeCliSessionFile(canonical, sessionId, { picoHome: this.picoHome }),
-          this.conversationStateStore.clearQueued(canonical, sessionId),
-        ]);
-        this.workbarRepository(canonical).purgeOrphanArtifactBlobs();
-      },
-    );
-    return {
-      sessionId,
-      deleted: true,
-      ...(childLeases.length > 0
-        ? { closedSessionIds: childLeases.map((lease) => lease.targetSessionId) }
-        : {}),
-    };
+      globalSessionPermissionGrants.clear(sessionId, canonical, this.picoHome);
+      await globalClientCapabilityGrants.revokeSession(
+        sessionId,
+        resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.root,
+      );
+      await this.terminalService.stopSession({ workspacePath: canonical, sessionId }, context);
+      await sessionMemoryLane.run(
+        this.memoryLaneKey(canonical, sessionId),
+        "foreground",
+        async () => {
+          const managed = globalSessionManager.delete(sessionId, canonical, {
+            picoHome: this.picoHome,
+          });
+          await managed?.close();
+          await Promise.all([
+            removeCliSessionFile(canonical, sessionId, { picoHome: this.picoHome }),
+            this.conversationStateStore.clearQueued(canonical, sessionId),
+          ]);
+          this.workbarRepository(canonical).purgeOrphanArtifactBlobs();
+        },
+      );
+      return {
+        sessionId,
+        deleted: true,
+        ...(childLeases.length > 0
+          ? { closedSessionIds: childLeases.map((lease) => lease.targetSessionId) }
+          : {}),
+      };
+    });
   }
 
   private async renameSession(
@@ -1441,6 +1498,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
 
   private async createSideChat(
     params: RuntimeRequest<"sideChat.create">["params"],
+    context?: TerminalClientContext,
   ): Promise<JsonValue> {
     const canonical = await this.requireTrustedSession(
       params.workspacePath,
@@ -1459,8 +1517,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     } finally {
       store.close();
     }
-    const authority = this.sideChatAuthority(canonical);
-    await authority.recover();
+    const authority = this.sideChatAuthority(canonical, context);
+    if (!isRemoteTerminalContext(context)) await authority.recover();
     let lease;
     try {
       lease = await authority.create({
@@ -1489,14 +1547,27 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
 
   private async closeSideChat(
     params: RuntimeRequest<"sideChat.close">["params"],
+    context?: TerminalClientContext,
   ): Promise<JsonValue> {
     const canonical = await this.options.runtimeService.canonicalizeWorkspacePath(
       params.workspacePath,
     );
-    this.browserAgentBroker.invalidateSession(params.sessionId);
-    this.clientCapabilityBroker.invalidateSession(params.sessionId);
-    await this.sideChatAuthority(canonical).cleanup(params.sessionId);
-    return { cleanupScheduled: true };
+    const authority = this.sideChatAuthority(canonical, context);
+    const leases = authority.list();
+    const targets = new Set([params.sessionId]);
+    for (const target of targets) {
+      for (const lease of leases) {
+        if (lease.sourceSessionId === target) targets.add(lease.targetSessionId);
+      }
+    }
+    return this.terminalService.withSessionCleanup(canonical, [...targets], context, async () => {
+      for (const target of [...targets].reverse()) {
+        this.browserAgentBroker.invalidateSession(target);
+        this.clientCapabilityBroker.invalidateSession(target);
+        await authority.cleanup(target);
+      }
+      return { cleanupScheduled: true };
+    });
   }
 
   private async getRuntimeSessionSettings(
@@ -4332,7 +4403,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     store.close();
   }
 
-  private sideChatAuthority(workspacePath: string): SideChatAuthority {
+  private sideChatAuthority(
+    workspacePath: string,
+    context?: TerminalClientContext,
+  ): SideChatAuthority {
     const storageRoot = resolvePicoPaths(workspacePath, {
       picoHome: this.picoHome,
     }).workspace.root;
@@ -4373,14 +4447,18 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         });
       },
       removeSession: async (targetSessionId) => {
-        await this.removeEphemeralSideChat(workspacePath, targetSessionId);
+        await this.removeEphemeralSideChat(workspacePath, targetSessionId, context);
       },
     });
   }
 
-  private async removeEphemeralSideChat(workspacePath: string, sessionId: string): Promise<void> {
+  private async removeEphemeralSideChat(
+    workspacePath: string,
+    sessionId: string,
+    context?: TerminalClientContext,
+  ): Promise<void> {
+    await this.terminalService.stopSession({ workspacePath, sessionId }, context);
     await this.revokeWindowsTaskNetwork(sessionId);
-    await this.terminalService.stopSession({ workspacePath, sessionId });
     globalSessionPermissionGrants.clear(sessionId, workspacePath, this.picoHome);
     await globalClientCapabilityGrants.revokeSession(
       sessionId,

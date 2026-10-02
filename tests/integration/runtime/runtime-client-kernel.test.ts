@@ -17,7 +17,7 @@ import {
   type LocalRuntimeClientOptions,
 } from "@pico/pico-host/local-runtime-client";
 import { resolvePicoPaths } from "@pico/pico-host";
-import { sessionOwnerLeaseDirectory } from "@pico/storage";
+import { sessionOwnerLeaseDirectory, withWorkspaceSqliteLease } from "@pico/storage";
 import { TestRuntimeHostCandidateTracker } from "../helpers/test-runtime-daemon.js";
 import { writeDesktopModelRouting } from "../../fixtures/desktop-model-routing.js";
 
@@ -364,4 +364,152 @@ test("kernel client: trusted terminal owners isolate control, cleanup and reconn
   }
   await reconnected.request("terminal.stop", target);
   await desktop.request("terminal.stopOwned", {});
+});
+
+test("kernel client: remote session cleanup cannot terminate any owner's terminal or hidden child", async (t) => {
+  const harness = await startKernelClientHarness(t);
+  await writeDesktopModelRouting(harness.picoHome);
+  const desktop = harness.createClient({ surface: "desktop", terminalOwnerId: "desktop:cleanup" });
+  const remote = harness.createClient({ surface: "inspect", terminalOwnerId: "remote:cleanup" });
+  t.after(() => desktop.close());
+  t.after(() => remote.close());
+  const workspacePath = harness.workspacePath;
+  await desktop.request("workspace.register", { workspacePath });
+  await desktop.request("workspace.trust", { workspacePath, trusted: true });
+  const parent = (await desktop.request("session.create", { workspacePath })).session.sessionId;
+  const child = (await desktop.request("session.create", { workspacePath })).session.sessionId;
+  const grandchild = (await desktop.request("session.create", { workspacePath })).session.sessionId;
+  const own = (await remote.request("session.create", { workspacePath })).session.sessionId;
+  const grandchildScope = { workspacePath, sessionId: grandchild };
+  const grandchildTerminal = await desktop.request("terminal.create", grandchildScope);
+  const childScope = { workspacePath, sessionId: child };
+  const childTerminal = await desktop.request("terminal.create", childScope);
+  const ownTerminal = await remote.request("terminal.create", { workspacePath, sessionId: own });
+  // Persist a valid expired lease for two real daemon-created sessions. Production list/recovery
+  // and cleanup read this exact workspace lease; no fake runtime or cleanup implementation is used.
+  const storageRoot = resolvePicoPaths(workspacePath, { picoHome: harness.picoHome }).workspace
+    .root;
+  const expired = new Date(Date.now() - 600_000).toISOString();
+  withWorkspaceSqliteLease(storageRoot, ({ database }) => {
+    database.prepare("INSERT OR REPLACE INTO workspace_kv (key, value_json) VALUES (?, ?)").run(
+      "desktop.side-chat.leases.v1",
+      JSON.stringify([
+        {
+          panelId: "cleanup-panel",
+          sourceSessionId: parent,
+          targetSessionId: child,
+          throughEventId: "event_cleanup_fixture",
+          state: "live",
+          createdAt: expired,
+          updatedAt: expired,
+        },
+        {
+          panelId: "nested-cleanup-panel",
+          sourceSessionId: child,
+          targetSessionId: grandchild,
+          throughEventId: "event_nested_cleanup_fixture",
+          state: "live",
+          createdAt: expired,
+          updatedAt: expired,
+        },
+      ]),
+    );
+  });
+  const runsBefore = await remote.request("runs.list", { workspacePath });
+  const listed = await remote.request("session.list", { workspacePath });
+  assert.ok(listed.sessions.some((session) => session.sessionId === parent));
+  assert.ok(
+    !listed.sessions.some((session) => session.sessionId === child),
+    "child stays hidden without remote-triggered expiry cleanup",
+  );
+  const denied = (error: unknown) =>
+    error instanceof RuntimeClientError &&
+    error.code === "FORBIDDEN" &&
+    /terminal.stop/u.test(error.message);
+  await assert.rejects(
+    remote.request("session.delete", { workspacePath, sessionId: parent }),
+    denied,
+  );
+  await assert.rejects(remote.request("sideChat.close", childScope), denied);
+  await assert.rejects(remote.request("session.delete", { workspacePath, sessionId: own }), denied);
+  assert.equal(
+    (await remote.request("session.get", { workspacePath, sessionId: parent })).session.sessionId,
+    parent,
+  );
+  assert.equal((await remote.request("session.get", childScope)).session.sessionId, child);
+  assert.equal(
+    (await remote.request("session.get", { workspacePath, sessionId: own })).session.sessionId,
+    own,
+  );
+  assert.deepEqual(
+    await remote.request("runs.list", { workspacePath }),
+    runsBefore,
+    "rejected cleanup does not cancel tasks",
+  );
+  assert.equal(
+    (await desktop.request("terminal.list", childScope)).terminals[0]?.status,
+    "running",
+  );
+  assert.equal(
+    (await remote.request("terminal.list", { workspacePath, sessionId: own })).terminals[0]?.status,
+    "running",
+  );
+  // Remote sideChat.create must not run global stale-lease recovery either.
+  const reused = await remote.request("sideChat.create", {
+    workspacePath,
+    sourceSessionId: parent,
+    panelId: "cleanup-panel",
+    idempotencyKey: "reuse-cleanup-panel",
+  });
+  assert.equal(reused.session.sessionId, child);
+  assert.equal(
+    (await desktop.request("terminal.list", childScope)).terminals[0]?.status,
+    "running",
+  );
+  await desktop.request("terminal.stop", {
+    ...childScope,
+    terminalId: childTerminal.terminal.terminalId,
+    resourceEpoch: childTerminal.resourceEpoch,
+  });
+  // The direct child's Shell is stopped; the hidden grandchild must still block both paths.
+  await assert.rejects(
+    remote.request("session.delete", { workspacePath, sessionId: parent }),
+    denied,
+  );
+  await assert.rejects(remote.request("sideChat.close", childScope), denied);
+  assert.equal(
+    (await remote.request("session.get", { workspacePath, sessionId: parent })).session.sessionId,
+    parent,
+  );
+  assert.equal(
+    (await desktop.request("terminal.list", grandchildScope)).terminals[0]?.status,
+    "running",
+  );
+  await desktop.request("terminal.stop", {
+    ...grandchildScope,
+    terminalId: grandchildTerminal.terminal.terminalId,
+    resourceEpoch: grandchildTerminal.resourceEpoch,
+  });
+  const deleted = await remote.request("session.delete", { workspacePath, sessionId: parent });
+  assert.equal(deleted.deleted, true);
+  assert.deepEqual(deleted.closedSessionIds, [grandchild, child]);
+  await remote.request("terminal.stop", {
+    workspacePath,
+    sessionId: own,
+    terminalId: ownTerminal.terminal.terminalId,
+    resourceEpoch: ownTerminal.resourceEpoch,
+  });
+  assert.equal(
+    (await remote.request("session.delete", { workspacePath, sessionId: own })).deleted,
+    true,
+  );
+  // Preserve the existing explicit Desktop deletion behavior.
+  const desktopSession = (await desktop.request("session.create", { workspacePath })).session
+    .sessionId;
+  await remote.request("terminal.create", { workspacePath, sessionId: desktopSession });
+  assert.equal(
+    (await desktop.request("session.delete", { workspacePath, sessionId: desktopSession })).deleted,
+    true,
+  );
+  await desktop.shutdownDaemon();
 });

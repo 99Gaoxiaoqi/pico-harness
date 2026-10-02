@@ -1,3 +1,4 @@
+import { realpath } from "node:fs/promises";
 import {
   WorkbarTerminalAuthority,
   WorkbarTerminalError,
@@ -28,6 +29,9 @@ const DEFAULT_SNAPSHOT_BYTES = 256 * 1024;
 export class DesktopWorkbarTerminalService {
   private readonly authority: WorkbarTerminalAuthority;
   private readonly ready: Promise<void>;
+  private readonly pendingSessionCreates = new Map<string, number>();
+  private readonly resolvingSessionCreates = new Map<string, number>();
+  private readonly cleaningSessions = new Set<string>();
 
   constructor(options: { readonly picoHome: string }) {
     this.authority = new WorkbarTerminalAuthority({
@@ -46,10 +50,35 @@ export class DesktopWorkbarTerminalService {
     context: TerminalClientContext = LEGACY_CONTEXT,
   ) {
     await this.ready;
-    const attachment = await this.authority.create({
-      ...input,
-      terminalOwnerId: context.terminalOwnerId,
-    });
+    // Mark starting creates before their path-resolution await; cleanup must also see this gap.
+    this.resolvingSessionCreates.set(
+      input.sessionId,
+      (this.resolvingSessionCreates.get(input.sessionId) ?? 0) + 1,
+    );
+    let normalizedInput: typeof input;
+    try {
+      normalizedInput = { ...input, workspacePath: await realpath(input.workspacePath) };
+    } finally {
+      const pending = (this.resolvingSessionCreates.get(input.sessionId) ?? 1) - 1;
+      if (pending) this.resolvingSessionCreates.set(input.sessionId, pending);
+      else this.resolvingSessionCreates.delete(input.sessionId);
+    }
+    const key = sessionKey(normalizedInput);
+    if (this.cleaningSessions.has(key)) {
+      throw new WorkbarTerminalError("forbidden", "Session cleanup is in progress");
+    }
+    this.pendingSessionCreates.set(key, (this.pendingSessionCreates.get(key) ?? 0) + 1);
+    let attachment: WorkbarTerminalAttachment;
+    try {
+      attachment = await this.authority.create({
+        ...normalizedInput,
+        terminalOwnerId: context.terminalOwnerId,
+      });
+    } finally {
+      const pending = (this.pendingSessionCreates.get(key) ?? 1) - 1;
+      if (pending) this.pendingSessionCreates.set(key, pending);
+      else this.pendingSessionCreates.delete(key);
+    }
     return this.attachmentResult(
       this.authority.attach({
         resourceId: attachment.resourceId,
@@ -187,8 +216,57 @@ export class DesktopWorkbarTerminalService {
     return { detached: true as const };
   }
 
-  async stopSession(owner: { readonly workspacePath: string; readonly sessionId: string }) {
+  /** Remote Session permissions never imply permission to stop a Shell, including one's own. */
+  async withSessionCleanup<Result>(
+    workspacePath: string,
+    sessionIds: readonly string[],
+    context: TerminalClientContext | undefined,
+    operation: () => Promise<Result>,
+  ): Promise<Result> {
+    if (!isRemoteTerminalContext(context)) return operation();
     await this.ready;
+    const owners = sessionIds.map((sessionId) => ({ workspacePath, sessionId }));
+    const keys = owners.map(sessionKey);
+    if (keys.some((key) => this.cleaningSessions.has(key))) {
+      throw new WorkbarTerminalError("forbidden", "Session cleanup is already in progress");
+    }
+    for (const key of keys) this.cleaningSessions.add(key);
+    try {
+      // Lock all target admissions before checking any target, avoiding partial child cleanup.
+      for (const owner of owners) await this.assertSessionCleanupAllowed(owner, context);
+      return await operation();
+    } finally {
+      for (const key of keys) this.cleaningSessions.delete(key);
+    }
+  }
+
+  async assertSessionCleanupAllowed(
+    owner: { readonly workspacePath: string; readonly sessionId: string },
+    context?: TerminalClientContext,
+  ): Promise<void> {
+    if (!isRemoteTerminalContext(context)) return;
+    await this.ready;
+    const terminals = await this.authority.list(owner);
+    if (
+      this.resolvingSessionCreates.has(owner.sessionId) ||
+      this.pendingSessionCreates.has(sessionKey(owner)) ||
+      terminals.some((terminal) => terminal.status === "running")
+    ) {
+      throw new WorkbarTerminalError(
+        "forbidden",
+        "Session has an active or starting terminal; explicitly stop it with terminal.stop first",
+      );
+    }
+  }
+
+  async stopSession(
+    owner: { readonly workspacePath: string; readonly sessionId: string },
+    context?: TerminalClientContext,
+  ) {
+    await this.ready;
+    await this.assertSessionCleanupAllowed(owner, context);
+    // Even after admission changes, a remote cleanup must never call the Shell stop primitive.
+    if (isRemoteTerminalContext(context)) return;
     const terminals = await this.authority.list(owner);
     await Promise.all(
       terminals
@@ -323,4 +401,12 @@ function tailUtf8(value: string, maxBytes: number): { value: string; truncated: 
   let start = bytes.byteLength - maxBytes;
   while (start < bytes.byteLength && (bytes[start]! & 0xc0) === 0x80) start += 1;
   return { value: bytes.subarray(start).toString("utf8"), truncated: true };
+}
+
+export function isRemoteTerminalContext(context?: TerminalClientContext): boolean {
+  return context?.surface === "inspect" && context.terminalOwnerId.startsWith("remote:");
+}
+
+function sessionKey(owner: { readonly workspacePath: string; readonly sessionId: string }): string {
+  return JSON.stringify([owner.workspacePath, owner.sessionId]);
 }
