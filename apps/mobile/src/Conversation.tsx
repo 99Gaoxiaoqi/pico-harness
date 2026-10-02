@@ -97,6 +97,8 @@ export function Conversation({
   }
   const syncReason = sessionReady ? undefined : "正在补齐会话";
   const run = view?.activeRun;
+  // Keep hooks/drafts alive, but remove native focus targets and stale cell hit regions.
+  if (!active) return null;
   return (
     <KeyboardAvoidingView
       style={{ flex: 1 }}
