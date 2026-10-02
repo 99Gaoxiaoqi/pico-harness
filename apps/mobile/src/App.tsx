@@ -9,7 +9,7 @@ import {
   Text,
   View,
 } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import type { RuntimeSession } from "@pico/protocol/mobile";
@@ -20,6 +20,8 @@ import { Workbar, type WorkbarTab } from "./Workbar";
 import { SettingsPanel } from "./Settings";
 export default function App() {
   const pico = usePico();
+  const insets = useSafeAreaInsets();
+  const [headerHeight, setHeaderHeight] = useState(0);
   const [screen, setScreen] = useState<
     "computers" | "sessions" | "conversation" | "workbar" | "settings"
   >("computers");
@@ -55,7 +57,10 @@ export default function App() {
   return (
     <SafeAreaView style={s.page}>
       <StatusBar style="dark" />
-      <View style={[s.body, styles.header, inSession && styles.compactHeader]}>
+      <View
+        style={[s.body, styles.header, inSession && styles.compactHeader]}
+        onLayout={(event) => setHeaderHeight(event.nativeEvent.layout.height)}
+      >
         {inSession ? (
           <View style={styles.chatHeader}>
             <Button
@@ -164,10 +169,16 @@ export default function App() {
         <Sessions onSession={goSession} />
       ) : inSession && sessionId ? (
         <View style={{ flex: 1 }}>
-          <View style={{ flex: 1, display: screen === "conversation" ? "flex" : "none" }}>
+          <View
+            style={[styles.conversationPage, { opacity: screen === "conversation" ? 1 : 0 }]}
+            pointerEvents={screen === "conversation" ? "auto" : "none"}
+            accessibilityElementsHidden={screen !== "conversation"}
+            importantForAccessibility={screen === "conversation" ? "auto" : "no-hide-descendants"}
+          >
             <Conversation
               key={`${pico.host?.id}/${pico.workspace?.id}/${sessionId}`}
               sessionId={sessionId}
+              keyboardOffset={insets.top + headerHeight}
               sideParentSessionId={sideParent}
               onSession={goSession}
               onPanel={(tab = "任务") => {
@@ -177,11 +188,13 @@ export default function App() {
             />
           </View>
           {screen === "workbar" && (
-            <Workbar
-              key={`${pico.host?.id}/${pico.workspace?.id}/${sessionId}/${workbarTab}`}
-              sessionId={sessionId}
-              initialTab={workbarTab}
-            />
+            <View style={{ flex: 1, backgroundColor: color.bg }}>
+              <Workbar
+                key={`${pico.host?.id}/${pico.workspace?.id}/${sessionId}/${workbarTab}`}
+                sessionId={sessionId}
+                initialTab={workbarTab}
+              />
+            </View>
           )}
         </View>
       ) : screen === "settings" ? (
@@ -491,6 +504,7 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   chatHeading: { flex: 1, alignItems: "center", gap: 0 },
+  conversationPage: { position: "absolute", top: 0, bottom: 0, left: 0, right: 0 },
   brand: { color: color.text, fontSize: 21, fontWeight: "700", letterSpacing: -0.7 },
   brandTarget: { minHeight: 44, minWidth: 44, justifyContent: "center" },
   connectionDot: { width: 6, height: 6, borderRadius: 3 },

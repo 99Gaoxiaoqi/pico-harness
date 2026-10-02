@@ -39,11 +39,13 @@ const sendModes = [
 
 export function Conversation({
   sessionId,
+  keyboardOffset,
   onSession,
   onPanel,
   sideParentSessionId,
 }: {
   sessionId: string;
+  keyboardOffset: number;
   onSession: (id: string, parentSessionId?: string) => void;
   sideParentSessionId?: string;
   onPanel: (tab?: WorkbarTab) => void;
@@ -225,7 +227,7 @@ export function Conversation({
     <KeyboardAvoidingView
       style={{ flex: 1 }}
       behavior={Platform.OS === "ios" ? "padding" : undefined}
-      keyboardVerticalOffset={90}
+      keyboardVerticalOffset={keyboardOffset}
     >
       <View style={styles.toolbar}>
         <Pressable
