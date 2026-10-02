@@ -37,6 +37,24 @@ async function fixture(t: TestContext) {
   let pairingApproved = false;
   let pairingAcked = false;
   let revoked = false;
+  const capabilities = {
+    version: 1,
+    gatewayId: "gateway-a",
+    platform: process.platform,
+    permissions: ["workspace.read", "session.control", "terminal.control"],
+    methods: REMOTE_METHODS,
+    features: {},
+    maxFrameBytes: REMOTE_MAX_FRAME_BYTES,
+  };
+  let httpHandler: (request: IncomingMessage, response: ServerResponse) => boolean = () => false;
+  const defaultReady = (socket: WebSocket) =>
+    send(socket, {
+      type: "ready",
+      version: 1,
+      gatewayId: "gateway-a",
+      connectionId: `connection-${connectionCount}`,
+    });
+  let readyHandler = defaultReady;
   const server = createServer({ cert, key }, async (request, response) => {
     const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(Buffer.from(chunk));
@@ -84,16 +102,8 @@ async function fixture(t: TestContext) {
         401,
       );
     }
-    if (request.url === "/v1/capabilities")
-      return json(response, {
-        version: 1,
-        gatewayId: "gateway-a",
-        platform: process.platform,
-        permissions: ["workspace.read", "session.control", "terminal.control"],
-        methods: REMOTE_METHODS,
-        features: {},
-        maxFrameBytes: REMOTE_MAX_FRAME_BYTES,
-      });
+    if (httpHandler(request, response)) return;
+    if (request.url === "/v1/capabilities") return json(response, capabilities);
     if (request.url === "/v1/workspaces")
       return json(response, { workspaces: [{ id: "workspace-a", label: "我的电脑" }] });
     if (request.url === "/v1/device" && request.method === "DELETE") {
@@ -116,12 +126,7 @@ async function fixture(t: TestContext) {
     socket.on("message", (data) =>
       socketHandler(socket, JSON.parse(data.toString()) as Record<string, unknown>),
     );
-    send(socket, {
-      type: "ready",
-      version: 1,
-      gatewayId: "gateway-a",
-      connectionId: `connection-${connectionCount}`,
-    });
+    readyHandler(socket);
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
@@ -149,6 +154,7 @@ async function fixture(t: TestContext) {
   return {
     publicUrl,
     fetcher,
+    capabilities,
     client,
     requests,
     rpc,
@@ -161,6 +167,12 @@ async function fixture(t: TestContext) {
     },
     setSocket(handler: typeof socketHandler) {
       socketHandler = handler;
+    },
+    setHttp(handler: typeof httpHandler) {
+      httpHandler = handler;
+    },
+    setReady(handler = defaultReady) {
+      readyHandler = handler;
     },
     approve() {
       pairingApproved = true;
@@ -255,18 +267,212 @@ test("remote client HTTPS correlates RPC, decodes typed results and enforces UTF
   // No CA in this separate transport: a valid hostname alone does not grant trust.
   const untrusted = new Agent();
   t.after(() => untrusted.destroy());
+  const unsafeStates: RemoteConnectionState[] = [];
   const unsafeClient = new RemoteRuntimeClient({
     publicUrl: harness.publicUrl,
     deviceToken: "device-token",
     fetch: trustedFetch(untrusted),
+    onState: (state) => unsafeStates.push(state),
   });
   t.after(() => unsafeClient.close());
   await assert.rejects(unsafeClient.workspaces(), remoteError("CERTIFICATE_ERROR", "not_executed"));
+  assert.deepEqual(unsafeStates, ["incompatible"]);
+});
+
+test("remote client recovers HTTP health independently of live WSS and preserves business rejections", async (t) => {
+  const harness = await fixture(t);
+  const states: RemoteConnectionState[] = [];
+  const client = harness.client((state) => states.push(state));
+  await client.connect();
+  const connectedStates = [...states];
+  for (const [code, status] of [
+    ["FORBIDDEN", 403],
+    ["INVALID_PARAMS", 400],
+    ["RATE_LIMITED", 429],
+  ] as const) {
+    for (const httpStatus of [200, status]) {
+      harness.setRpc((body, response) =>
+        json(
+          response,
+          {
+            requestId: body.requestId,
+            ok: false,
+            error: { code, message: "业务请求未执行", retryable: true, outcome: "not_executed" },
+          },
+          httpStatus,
+        ),
+      );
+      await assert.rejects(
+        client.request(
+          "terminal.input",
+          {
+            sessionId: "session-a",
+            terminalId: "terminal-a",
+            resourceEpoch: "epoch-a",
+            data: "x",
+          },
+          { workspaceId: "workspace-a" },
+        ),
+        remoteError(code, "not_executed"),
+      );
+      assert.deepEqual(states, connectedStates);
+      assert.equal(harness.connectionCount, 1);
+    }
+  }
+  for (const path of ["/v1/rpc", "/v1/capabilities", "/v1/workspaces"]) {
+    const before = harness.connectionCount;
+    harness.setHttp((request) => {
+      if (request.url !== path) return false;
+      request.socket.destroy();
+      return true;
+    });
+    const failed =
+      path === "/v1/rpc"
+        ? client.request("session.list", {}, { workspaceId: "workspace-a" })
+        : path === "/v1/capabilities"
+          ? client.capabilities()
+          : client.workspaces();
+    await assert.rejects(failed, remoteError("CONNECTION_FAILED"));
+    assert.equal(states.at(-1), "reconnecting", "a live WSS must not mask an HTTP failure");
+    let resumeCapabilities: (() => void) | undefined;
+    let resumeReady: (() => void) | undefined;
+    let probes = 0;
+    harness.setHttp((request, response) => {
+      if (request.url !== "/v1/capabilities") return false;
+      probes++;
+      if (path === "/v1/rpc" && probes === 1) {
+        request.socket.destroy();
+        return true;
+      }
+      resumeCapabilities = () => json(response, harness.capabilities);
+      return true;
+    });
+    harness.setReady((socket) => {
+      resumeReady = () =>
+        send(socket, {
+          type: "ready",
+          version: 1,
+          gatewayId: "gateway-a",
+          connectionId: "recovered",
+        });
+    });
+    await until(() => resumeCapabilities !== undefined);
+    assert.equal(
+      probes,
+      path === "/v1/rpc" ? 2 : 1,
+      "a failed recovery probe must use one retry chain",
+    );
+    assert.equal(
+      harness.connectionCount,
+      before,
+      "HTTP identity must be verified before opening WSS",
+    );
+    assert.equal(states.at(-1), "reconnecting");
+    resumeCapabilities!();
+    await until(() => resumeReady !== undefined && states.at(-1) === "syncing");
+    assert.equal(harness.connectionCount, before + 1);
+    resumeReady!();
+    await until(() => states.at(-1) === "connected");
+    harness.setHttp(() => false);
+    harness.setReady();
+  }
+  // HTTP revocation must block even while the last WSS connection is still alive.
+  harness.setRpc((_body, response) =>
+    json(
+      response,
+      {
+        error: { code: "UNAUTHORIZED", message: "设备已撤销", retryable: false },
+      },
+      401,
+    ),
+  );
+  await assert.rejects(
+    client.request("session.list", {}, { workspaceId: "workspace-a" }),
+    remoteError("UNAUTHORIZED"),
+  );
+  assert.equal(states.at(-1), "unauthorized");
+  const before = harness.requests.length;
+  await new Promise((resolve) => setTimeout(resolve, 1_250));
+  assert.equal(harness.requests.length, before);
+});
+
+test("remote client ignores old HTTP failures after backgrounding or a new connection", async (t) => {
+  const harness = await fixture(t);
+  const states: RemoteConnectionState[] = [];
+  const client = harness.client((state) => states.push(state));
+  await client.connect();
+  let pendingBackground: IncomingMessage | undefined;
+  harness.setHttp((request) => {
+    pendingBackground = request;
+    return true;
+  });
+  const background = assert.rejects(client.capabilities(), remoteError("CONNECTION_FAILED"));
+  await until(() => pendingBackground !== undefined);
+  client.setForeground(false);
+  const pausedStates = [...states];
+  pendingBackground!.socket.destroy();
+  await background;
+  assert.deepEqual(states, pausedStates);
+  harness.setHttp(() => false);
+  client.setForeground(true);
+  await until(() => states.at(-1) === "connected");
+
+  const pending = new Map<string, { request: IncomingMessage; response: ServerResponse }>();
+  harness.setHttp((request, response) => {
+    pending.set(request.url!, { request, response });
+    return true;
+  });
+  const old = Promise.all([
+    assert.rejects(client.capabilities(), remoteError("GATEWAY_MISMATCH")),
+    assert.rejects(client.workspaces(), remoteError("UNAUTHORIZED")),
+    assert.rejects(
+      client.request("session.list", {}, { workspaceId: "workspace-a" }),
+      remoteError("CONNECTION_FAILED"),
+    ),
+  ]);
+  await until(() => pending.size === 3);
+  client.setForeground(false);
+  harness.setHttp(() => false);
+  client.setForeground(true);
+  await until(() => states.at(-1) === "connected");
+  const resumedStates = [...states];
+  const connections = harness.connectionCount;
+  json(pending.get("/v1/capabilities")!.response, {
+    ...harness.capabilities,
+    gatewayId: "different",
+  });
+  json(
+    pending.get("/v1/workspaces")!.response,
+    { error: { code: "UNAUTHORIZED", message: "旧请求" } },
+    401,
+  );
+  pending.get("/v1/rpc")!.request.socket.destroy();
+  await old;
+  assert.deepEqual(states, resumedStates);
+  assert.equal(harness.connectionCount, connections);
+
+  // Also fence the internal capabilities probe of an unfinished connect attempt.
+  let pendingConnect: IncomingMessage | undefined;
+  client.setForeground(false);
+  harness.setHttp((request) => {
+    pendingConnect = request;
+    return true;
+  });
+  client.setForeground(true);
+  const connecting = assert.rejects(client.connect(), remoteError("CONNECTION_FAILED"));
+  await until(() => pendingConnect !== undefined);
+  client.setForeground(false);
+  const finalStates = [...states];
+  pendingConnect!.socket.destroy();
+  await connecting;
+  assert.deepEqual(states, finalStates, "old connect failures must not change background state");
 });
 
 test("remote client never replays terminal input when command reply is lost", async (t) => {
   const harness = await fixture(t);
-  const client = harness.client();
+  const states: RemoteConnectionState[] = [];
+  const client = harness.client((state) => states.push(state));
+  await client.connect();
   let executed = 0;
   harness.setRpc((_body, _response, request) => {
     executed++;
@@ -285,7 +491,13 @@ test("remote client never replays terminal input when command reply is lost", as
     ),
     remoteError("CONNECTION_FAILED", "unknown"),
   );
+  assert.equal(
+    states.at(-1),
+    "reconnecting",
+    "health must change before unknown outcome is returned",
+  );
   await new Promise((resolve) => setTimeout(resolve, 1_250));
+  assert.equal(states.at(-1), "connected");
   assert.equal(executed, 1);
   assert.equal(harness.rpc.length, 1);
   harness.setRpc((body, response) =>

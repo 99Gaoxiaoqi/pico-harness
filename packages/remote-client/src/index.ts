@@ -106,9 +106,19 @@ function protocolError(value: unknown, fallback = "请求失败"): RemoteProtoco
     );
   return new RemoteProtocolError("INVALID_RESPONSE", fallback);
 }
+// Keep transport provenance private: a server's retryable business error does not
+// mean that either connection has stopped working.
+class HttpTransportError extends RemoteProtocolError {}
+function blockedState(error: RemoteProtocolError): "unauthorized" | "incompatible" | undefined {
+  if (["UNAUTHORIZED", "INVALID_AUTH", "DEVICE_REVOKED"].includes(error.code))
+    return "unauthorized";
+  if (["VERSION_MISMATCH", "GATEWAY_MISMATCH", "CERTIFICATE_ERROR"].includes(error.code))
+    return "incompatible";
+  return undefined;
+}
 function transportFailure(error: unknown, timedOut: boolean): RemoteProtocolError {
   if (timedOut)
-    return new RemoteProtocolError("REQUEST_TIMEOUT", "请求超时，请确认电脑端状态", true);
+    return new HttpTransportError("REQUEST_TIMEOUT", "请求超时，请确认电脑端状态", true);
   const record =
     error && typeof error === "object"
       ? (error as { code?: unknown; message?: unknown; cause?: unknown })
@@ -121,20 +131,20 @@ function transportFailure(error: unknown, timedOut: boolean): RemoteProtocolErro
     .filter((x) => typeof x === "string")
     .join(" ");
   if (/CERT_|ERR_TLS|certificate|self[- ]signed|SSL|NSURLErrorServerCertificate/i.test(hint))
-    return new RemoteProtocolError(
+    return new HttpTransportError(
       "CERTIFICATE_ERROR",
       "HTTPS 证书验证失败，请检查域名、证书链和有效期",
       false,
       "not_executed",
     );
   if (/ENOTFOUND|EAI_AGAIN|UnknownHostException|DNS|NSURLErrorCannotFindHost/i.test(hint))
-    return new RemoteProtocolError(
+    return new HttpTransportError(
       "DNS_ERROR",
       "公网域名解析失败，请检查电脑网关地址和 DNS",
       true,
       "not_executed",
     );
-  return new RemoteProtocolError(
+  return new HttpTransportError(
     "CONNECTION_FAILED",
     "公网连接失败，请检查入口、防火墙、DNS 和证书",
     true,
@@ -228,7 +238,52 @@ export class RemoteRuntimeClient {
   #state(state: RemoteConnectionState, error?: RemoteProtocolError): void {
     this.#options.onState?.(state, error);
   }
+  #retireConnection(): void {
+    this.#generation++;
+    this.#cancelConnect?.();
+    this.#cancelConnect = undefined;
+    this.#connecting = undefined;
+    clearTimeout(this.#reconnectTimer);
+    this.#reconnectTimer = undefined;
+    const socket = this.#socket;
+    this.#socket = undefined;
+    socket?.close();
+    for (const subscription of this.#subscriptions.values()) subscription.replayCycle++;
+    for (const callback of this.#disconnects) callback();
+  }
+  #block(state: "unauthorized" | "incompatible" | "error", error: RemoteProtocolError): void {
+    this.#foreground = false;
+    this.#retireConnection();
+    this.#state(state, error);
+  }
+  async #observeHttp<T>(operation: () => Promise<T>): Promise<T> {
+    const generation = this.#generation;
+    try {
+      return await operation();
+    } catch (error) {
+      if (
+        !this.#closed &&
+        this.#foreground &&
+        generation === this.#generation &&
+        error instanceof RemoteProtocolError
+      ) {
+        const blocked = blockedState(error);
+        if (blocked) this.#block(blocked, error);
+        else if (error instanceof HttpTransportError) {
+          // A live WSS cannot prove HTTP health. Retire it and verify both paths
+          // on one new connection, without replaying the failed operation.
+          this.#retireConnection();
+          this.#state("reconnecting", error);
+          this.#scheduleReconnect();
+        }
+      }
+      throw error;
+    }
+  }
   async capabilities(): Promise<RemoteCapabilities> {
+    return this.#observeHttp(() => this.#capabilities());
+  }
+  async #capabilities(): Promise<RemoteCapabilities> {
     const value = await jsonRequest(
       this.#fetch,
       this.publicUrl,
@@ -258,26 +313,28 @@ export class RemoteRuntimeClient {
     return value as unknown as RemoteCapabilities;
   }
   async workspaces(): Promise<RemoteWorkspace[]> {
-    const value = await jsonRequest(
-      this.#fetch,
-      this.publicUrl,
-      "/v1/workspaces",
-      this.#options.deviceToken,
-    );
-    const list = Array.isArray(value)
-      ? value
-      : isJsonObject(value) && Array.isArray(value.workspaces)
-        ? value.workspaces
-        : undefined;
-    if (
-      !list ||
-      !list.every(
-        (item) =>
-          isJsonObject(item) && typeof item.id === "string" && typeof item.label === "string",
+    return this.#observeHttp(async () => {
+      const value = await jsonRequest(
+        this.#fetch,
+        this.publicUrl,
+        "/v1/workspaces",
+        this.#options.deviceToken,
+      );
+      const list = Array.isArray(value)
+        ? value
+        : isJsonObject(value) && Array.isArray(value.workspaces)
+          ? value.workspaces
+          : undefined;
+      if (
+        !list ||
+        !list.every(
+          (item) =>
+            isJsonObject(item) && typeof item.id === "string" && typeof item.label === "string",
+        )
       )
-    )
-      throw new RemoteProtocolError("INVALID_RESPONSE", "授权工作区列表无效");
-    return list as RemoteWorkspace[];
+        throw new RemoteProtocolError("INVALID_RESPONSE", "授权工作区列表无效");
+      return list as RemoteWorkspace[];
+    });
   }
   async request<M extends RemoteMethod>(
     method: M,
@@ -297,18 +354,23 @@ export class RemoteRuntimeClient {
       ...(options.workspaceId ? { workspaceId: options.workspaceId } : {}),
       ...(options.secretEdits ? { secretEdits: options.secretEdits } : {}),
     });
-    let value: unknown;
     try {
-      value = await jsonRequest(
-        this.#fetch,
-        this.publicUrl,
-        "/v1/rpc",
-        this.#options.deviceToken,
-        input,
-      );
+      return await this.#observeHttp(async () => {
+        const value = await jsonRequest(
+          this.#fetch,
+          this.publicUrl,
+          "/v1/rpc",
+          this.#options.deviceToken,
+          input,
+        );
+        if (!isJsonObject(value) || value.requestId !== id || typeof value.ok !== "boolean")
+          throw new RemoteProtocolError("INVALID_RESPONSE", "请求响应不匹配");
+        if (!value.ok) throw protocolError(value.error);
+        return parseRuntimeResult(method, value.value);
+      });
     } catch (error) {
       if (
-        error instanceof RemoteProtocolError &&
+        error instanceof HttpTransportError &&
         error.retryable &&
         error.outcome !== "not_executed" &&
         REMOTE_METHOD_SPECS[method].mode === "command"
@@ -321,10 +383,6 @@ export class RemoteRuntimeClient {
         );
       throw error;
     }
-    if (!isJsonObject(value) || value.requestId !== id || typeof value.ok !== "boolean")
-      throw new RemoteProtocolError("INVALID_RESPONSE", "请求响应不匹配");
-    if (!value.ok) throw protocolError(value.error);
-    return parseRuntimeResult(method, value.value);
   }
   connect(): Promise<void> {
     if (this.#closed) return Promise.reject(new RemoteProtocolError("CLIENT_CLOSED", "连接已关闭"));
@@ -332,6 +390,8 @@ export class RemoteRuntimeClient {
       return Promise.reject(new RemoteProtocolError("CLIENT_BACKGROUND", "应用当前不在前台"));
     if (this.#connecting) return this.#connecting;
     if (this.#socket?.readyState === 1) return Promise.resolve();
+    clearTimeout(this.#reconnectTimer);
+    this.#reconnectTimer = undefined;
     const generation = ++this.#generation;
     this.#state(this.#attempt ? "reconnecting" : "connecting");
     this.#connecting = this.#open(generation).finally(() => {
@@ -341,7 +401,9 @@ export class RemoteRuntimeClient {
   }
   async #open(generation: number): Promise<void> {
     try {
-      await this.capabilities();
+      // Recovery failures belong to this attempt; do not recursively retire it
+      // through the public HTTP health observer.
+      await this.#capabilities();
       if (this.#closed || !this.#foreground || generation !== this.#generation)
         throw new RemoteProtocolError("CLIENT_CLOSED", "旧连接已失效");
       await new Promise<void>((resolve, reject) => {
@@ -359,7 +421,9 @@ export class RemoteRuntimeClient {
           clearTimeout(timer);
           reject(new RemoteProtocolError("CLIENT_BACKGROUND", "连接已暂停"));
         };
-        socket.onopen = () => this.#state("syncing");
+        socket.onopen = () => {
+          if (generation === this.#generation && this.#foreground) this.#state("syncing");
+        };
         socket.onmessage = (event) => {
           if (generation !== this.#generation) return;
           try {
@@ -396,12 +460,12 @@ export class RemoteRuntimeClient {
                 ? error
                 : new RemoteProtocolError("INVALID_RESPONSE", "事件协议无效");
             reject(failure);
-            this.#foreground = false;
-            this.#state("error", failure);
+            this.#block(blockedState(failure) ?? "error", failure);
             socket.close(1002);
           }
         };
         socket.onerror = () => {
+          if (generation !== this.#generation) return;
           if (!ready) {
             clearTimeout(timer);
             reject(new RemoteProtocolError("CONNECTION_FAILED", "事件连接失败", true));
@@ -414,7 +478,6 @@ export class RemoteRuntimeClient {
             return;
           }
           this.#socket = undefined;
-          for (const callback of this.#disconnects) callback();
           if (!ready)
             reject(
               new RemoteProtocolError(
@@ -424,10 +487,10 @@ export class RemoteRuntimeClient {
               ),
             );
           if (event.code === 4001) {
-            this.#foreground = false;
-            this.#state("unauthorized");
+            this.#block("unauthorized", new RemoteProtocolError("UNAUTHORIZED", "设备授权已失效"));
             return;
           }
+          for (const callback of this.#disconnects) callback();
           this.#state("disconnected");
           this.#scheduleReconnect();
         };
@@ -437,16 +500,12 @@ export class RemoteRuntimeClient {
         error instanceof RemoteProtocolError
           ? error
           : new RemoteProtocolError("CONNECTION_FAILED", "无法连接电脑", true);
-      if (["UNAUTHORIZED", "INVALID_AUTH", "FORBIDDEN", "DEVICE_REVOKED"].includes(failure.code)) {
-        this.#foreground = false;
-        this.#state("unauthorized", failure);
-      } else if (
-        ["VERSION_MISMATCH", "GATEWAY_MISMATCH", "CERTIFICATE_ERROR"].includes(failure.code)
-      ) {
-        this.#foreground = false;
-        this.#state("incompatible", failure);
+      if (this.#closed || !this.#foreground || generation !== this.#generation) throw failure;
+      const blocked = blockedState(failure);
+      if (blocked) {
+        this.#block(blocked, failure);
       } else {
-        this.#state("error", failure);
+        this.#state(failure.retryable ? "reconnecting" : "error", failure);
         if (failure.retryable) this.#scheduleReconnect();
       }
       throw failure;
@@ -647,16 +706,8 @@ export class RemoteRuntimeClient {
     if (this.#closed) return;
     this.#foreground = value;
     if (!value) {
-      this.#cancelConnect?.();
-      this.#cancelConnect = undefined;
-      this.#generation++;
-      this.#connecting = undefined;
-      clearTimeout(this.#reconnectTimer);
-      this.#reconnectTimer = undefined;
-      this.#socket?.close();
-      this.#socket = undefined;
+      this.#retireConnection();
       this.#state("disconnected");
-      for (const callback of this.#disconnects) callback();
     } else void this.connect().catch(() => undefined);
   }
   close(): void {
