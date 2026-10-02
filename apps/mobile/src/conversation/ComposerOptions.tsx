@@ -21,7 +21,9 @@ export function ComposerOptions({
   const [error, setError] = useState<string>();
   const generation = useRef(0);
   useEffect(() => {
-    if (!active) close();
+    close();
+    setSkills([]);
+    setAgents([]);
     return () => {
       generation.current++;
     };

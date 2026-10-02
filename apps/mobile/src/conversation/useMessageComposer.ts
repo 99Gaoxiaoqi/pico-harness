@@ -230,7 +230,7 @@ export function useMessageComposer({
         : [];
       for (const reference of draft.skills) {
         const skill = effective.skills.find(
-          (x) => canonicalName(x.name) === canonicalName(reference.name),
+          (x) => x.source.effective && canonicalName(x.name) === canonicalName(reference.name),
         );
         const path = paths.find((x) => canonicalName(x.name) === canonicalName(reference.name));
         if (
