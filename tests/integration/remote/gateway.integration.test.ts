@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { execFileSync } from "node:child_process";
 import { createServer as createNetServer } from "node:net";
 import { request } from "node:https";
-import { readFile, mkdtemp, rm, stat, symlink } from "node:fs/promises";
+import { readFile, mkdtemp, mkdir, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -16,6 +16,7 @@ import {
   DESKTOP_RUNTIME_SCHEMA_CAPABILITY,
   CAPABILITY_SCOPE_RUNTIME_CAPABILITY,
   TEMPORARY_WORKSPACE_RUNTIME_CAPABILITY,
+  MODEL_CATALOG_RUNTIME_CAPABILITY,
   TRANSCRIPT_PROJECTOR_VERSION,
   parseRuntimeResult,
 } from "@pico/protocol";
@@ -95,6 +96,7 @@ class FixtureRuntime implements GatewayRuntimeClient {
   constructor(
     readonly mcpStore?: UserMcpConfigStore,
     readonly userStore?: UserConfigStore,
+    readonly workspacePath = session.workspacePath,
   ) {}
   mutateBetweenMcpReads = false;
   mcpReads = 0;
@@ -104,6 +106,7 @@ class FixtureRuntime implements GatewayRuntimeClient {
   closed = false;
   disposed = 0;
   corruptArtifact = false;
+  supportsModelCatalog = false;
   supportsOwnership = true;
   supportsCleanupIsolation = true;
   async request<M extends RuntimeMethod>(
@@ -122,10 +125,25 @@ class FixtureRuntime implements GatewayRuntimeClient {
           DESKTOP_RUNTIME_SCHEMA_CAPABILITY,
           CAPABILITY_SCOPE_RUNTIME_CAPABILITY,
           TEMPORARY_WORKSPACE_RUNTIME_CAPABILITY,
+          ...(this.supportsModelCatalog ? [MODEL_CATALOG_RUNTIME_CAPABILITY] : []),
         ],
         picoHome: "/pico",
       };
-    else if (method === "session.get") {
+    else if (method === "catalog.models") {
+      assert.equal(record["workspacePath"], this.workspacePath);
+      value = {
+        routes: [
+          {
+            id: "fixture/catalog-model",
+            providerId: "fixture",
+            model: "catalog-model",
+            displayName: "Catalog model",
+            reasoningLevels: ["low", "high"],
+          },
+        ],
+        defaultModelRouteId: "fixture/catalog-model",
+      };
+    } else if (method === "session.get") {
       if (record["sessionId"] !== session.sessionId)
         throw Object.assign(new Error("private details never cross transport"), {
           code: "NOT_FOUND",
@@ -317,7 +335,7 @@ class FixtureRuntime implements GatewayRuntimeClient {
     this.closed = true;
   }
 }
-async function fixture(options: { now?: () => number } = {}) {
+async function fixture(options: { now?: () => number; ordinaryWorkspace?: boolean } = {}) {
   const root = await mkdtemp(join(tmpdir(), "pico-gateway-"));
   const key = join(root, "server.key");
   const cert = join(root, "server.pem");
@@ -389,6 +407,10 @@ async function fixture(options: { now?: () => number } = {}) {
   const port = (net.address() as { port: number }).port;
   await new Promise<void>((resolve) => net.close(() => resolve()));
   const home = join(root, "private");
+  const workspacePath = options.ordinaryWorkspace
+    ? join(root, "ordinary-folder")
+    : session.workspacePath;
+  if (options.ordinaryWorkspace) await mkdir(workspacePath);
   const config: GatewayConfig = {
     version: 1,
     publicUrl: `https://localhost:${port}`,
@@ -396,7 +418,7 @@ async function fixture(options: { now?: () => number } = {}) {
     certificatePath: cert,
     privateKeyPath: key,
     listenHosts: ["127.0.0.1"],
-    workspaces: [{ id: "workspace-1", name: "project", path: session.workspacePath }],
+    workspaces: [{ id: "workspace-1", name: "project", path: workspacePath }],
     runtimeHostRootPath: join(root, "pico-home"),
   };
   const mcpStore = new UserMcpConfigStore({ picoHome: config.runtimeHostRootPath });
@@ -406,7 +428,7 @@ async function fixture(options: { now?: () => number } = {}) {
     home,
     ...options,
     createRuntimeClient: (id) => {
-      const runtime = new FixtureRuntime(mcpStore, userStore);
+      const runtime = new FixtureRuntime(mcpStore, userStore, workspacePath);
       runtimes.set(id, runtime);
       return runtime;
     },
@@ -1095,6 +1117,153 @@ test("配置、Provider URL、插件与 Hooks 不返回秘密，非敏感 Provid
       assert.equal(result.status, 200);
       assert.equal(result.bytes.toString("utf8").includes("-secret"), false);
     }
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("模型目录能力兼容旧 Host，项目读取不扩大普通目录的配置管理权限", async () => {
+  const f = await fixture({ ordinaryWorkspace: true });
+  try {
+    const { submitted, granted } = await f.pair();
+    await f.http("POST", `/v1/pairings/${submitted.pairingId}/ack`, submitted.pairingToken);
+    await requestGatewayControl(f.home, "devices.grant", {
+      deviceId: granted.deviceId,
+      permissions: ["workspace.read"],
+      workspaceIds: ["workspace-1"],
+    });
+    const rpc = (method: RemoteMethod, params: unknown = {}, workspaceId = "workspace-1") =>
+      f.http("POST", "/v1/rpc", granted.deviceToken, {
+        version: 1,
+        requestId: `catalog-${method}`,
+        method,
+        workspaceId,
+        params,
+      });
+    const capabilities = () => f.http("GET", "/v1/capabilities", granted.deviceToken);
+    const old = await capabilities();
+    const runtime = f.runtimes.get(granted.deviceId)!;
+    const oldValue = old.json as {
+      methods: string[];
+      features: { modelCatalog: { available: boolean; reason?: string } };
+    };
+    assert.equal(oldValue.methods.includes("catalog.models"), false);
+    assert.equal(oldValue.features.modelCatalog.available, false);
+    assert.match(oldValue.features.modelCatalog.reason ?? "", /更新/u);
+    const unsupported = await rpc("catalog.models");
+    assert.equal(unsupported.status, 404);
+    assert.equal((unsupported.json as RemoteResponse).ok, false);
+    assert.equal(
+      runtime.calls.some((call) => call.method === "catalog.models"),
+      false,
+      "old Host methods are never dispatched even if the client calls them directly",
+    );
+
+    runtime.supportsModelCatalog = true;
+    const modern = await capabilities();
+    const modernValue = modern.json as {
+      methods: string[];
+      features: { modelCatalog: { available: boolean } };
+    };
+    assert.equal(modernValue.methods.includes("catalog.models"), true);
+    assert.equal(modernValue.features.modelCatalog.available, true);
+    const catalog = await rpc("catalog.models");
+    assert.equal(catalog.status, 200);
+    assert.deepEqual((catalog.json as { value: unknown }).value, {
+      routes: [
+        {
+          id: "fixture/catalog-model",
+          providerId: "fixture",
+          model: "catalog-model",
+          displayName: "Catalog model",
+          reasoningLevels: ["low", "high"],
+        },
+      ],
+      defaultModelRouteId: "fixture/catalog-model",
+    });
+    const workspacePath = f.config.workspaces[0]!.path;
+    assert.deepEqual(runtime.calls.find((call) => call.method === "catalog.models")?.params, {
+      workspacePath,
+    });
+    assert.equal(catalog.bytes.includes(Buffer.from(workspacePath)), false);
+    await assert.rejects(
+      stat(join(workspacePath, ".git")),
+      (error: unknown) => error instanceof Error && "code" in error && error.code === "ENOENT",
+    );
+    const catalogCalls = runtime.calls.filter((call) => call.method === "catalog.models").length;
+    assert.equal((await rpc("catalog.models", {}, "unapproved-workspace")).status, 403);
+    assert.equal((await rpc("catalog.models", { workspacePath: "/escape" })).status, 403);
+    assert.equal(
+      runtime.calls.filter((call) => call.method === "catalog.models").length,
+      catalogCalls,
+    );
+    for (const method of [
+      "provider.list",
+      "config.get",
+      "config.user.get",
+      "provider.credential.status",
+    ] as const) {
+      assert.equal(modernValue.methods.includes(method), false);
+      const before = runtime.calls.filter((call) => call.method === method).length;
+      assert.equal(
+        (
+          await rpc(
+            method,
+            method === "provider.credential.status" ? { providerId: "fixture" } : {},
+          )
+        ).status,
+        403,
+      );
+      assert.equal(runtime.calls.filter((call) => call.method === method).length, before);
+    }
+    const beforeAdmin = runtime.calls.length;
+    assert.equal(
+      (
+        await rpc("config.user.update", {
+          defaults: { permissionMode: "full-access" },
+          expectedRevision: "opaque",
+        })
+      ).status,
+      403,
+    );
+    assert.equal(
+      (
+        await rpc("provider.upsert", {
+          provider: {
+            id: "fixture",
+            protocol: "openai",
+            baseURL: "https://fixture.invalid/v1",
+            apiKeyEnv: "FIXTURE_KEY",
+            models: ["catalog-model"],
+            discoverModels: false,
+          },
+          expectedRevision: "opaque",
+        })
+      ).status,
+      403,
+    );
+    assert.equal(
+      runtime.calls.length,
+      beforeAdmin,
+      "selection access never dispatches admin configuration commands",
+    );
+
+    await requestGatewayControl(f.home, "devices.grant", {
+      deviceId: granted.deviceId,
+      permissions: ["session.control"],
+      workspaceIds: ["workspace-1"],
+    });
+    await capabilities();
+    f.runtimes.get(granted.deviceId)!.supportsModelCatalog = true;
+    const noRead = await capabilities();
+    const noReadValue = noRead.json as {
+      methods: string[];
+      features: { modelCatalog: { available: boolean; reason?: string } };
+    };
+    assert.equal(noReadValue.methods.includes("catalog.models"), false);
+    assert.equal(noReadValue.features.modelCatalog.available, false);
+    assert.match(noReadValue.features.modelCatalog.reason ?? "", /读取权限/u);
+    assert.equal((await rpc("catalog.models")).status, 403);
   } finally {
     await f.cleanup();
   }
