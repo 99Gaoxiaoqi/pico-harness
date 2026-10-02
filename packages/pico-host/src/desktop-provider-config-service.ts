@@ -201,7 +201,7 @@ export class DesktopProviderConfigService {
         id: route.id,
         providerId: route.providerId,
         model: route.model,
-        reasoningLevels: [...route.capabilities.reasoningLevels],
+        reasoningLevels: [...route.capabilities.reasoningProfile.levels],
       })),
       ...(defaultRoute ? { defaultModelRouteId: defaultRoute.id } : {}),
     };
