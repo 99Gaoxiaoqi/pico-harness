@@ -1,35 +1,50 @@
 import React, { useState } from "react";
 import {
   ActivityIndicator,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
   TextInput,
   View,
+  type StyleProp,
+  type ViewStyle,
 } from "react-native";
+// Native equivalents of the desktop Pico tokens in renderer/styles.css.
 export const color = {
-  bg: "#10141c",
-  panel: "#1a2130",
-  line: "#2b3547",
-  text: "#edf2fa",
-  muted: "#96a4bc",
-  accent: "#91dfbd",
-  danger: "#ffa6a6",
+  bg: "#ffffff",
+  panel: "#fafafa",
+  surface: "#f5f5f5",
+  sidebar: "#f6f6f6",
+  line: "#eaeaea",
+  lineStrong: "#ceced5",
+  text: "#262626",
+  muted: "#606068",
+  faint: "#7c7c85",
+  accent: "#467bbd",
+  accentStrong: "#3265a4",
+  accentSoft: "#eaf2fc",
+  warning: "#9b661d",
+  warningSoft: "#f5ead6",
+  danger: "#a34235",
+  dangerSoft: "#f5e4e0",
+  terminalBg: "#0b1020",
+  terminalText: "#dbeafe",
 };
 export const s = StyleSheet.create({
   page: { flex: 1, backgroundColor: color.bg },
-  body: { padding: 18, gap: 14 },
-  row: { flexDirection: "row", gap: 10, alignItems: "center", flexWrap: "wrap" },
+  body: { padding: 16, gap: 12 },
+  row: { flexDirection: "row", gap: 8, alignItems: "center", flexWrap: "wrap" },
   card: {
     backgroundColor: color.panel,
-    borderRadius: 16,
-    padding: 16,
+    borderRadius: 11,
+    padding: 14,
     gap: 10,
     borderWidth: 1,
     borderColor: color.line,
   },
-  title: { color: color.text, fontSize: 24, fontWeight: "700" },
+  title: { color: color.text, fontSize: 20, fontWeight: "600" },
   text: { color: color.text, fontSize: 15, lineHeight: 23 },
   muted: { color: color.muted, fontSize: 13, lineHeight: 20 },
   input: {
@@ -37,52 +52,93 @@ export const s = StyleSheet.create({
     color: color.text,
     borderColor: color.line,
     borderWidth: 1,
-    borderRadius: 10,
-    padding: 12,
+    borderRadius: 7,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
     minHeight: 46,
   },
   button: {
     backgroundColor: color.accent,
-    paddingVertical: 11,
-    paddingHorizontal: 15,
-    borderRadius: 10,
+    minHeight: 44,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderWidth: 1,
+    borderColor: color.accent,
+    borderRadius: 7,
   },
-  buttonText: { color: color.bg, fontWeight: "700" },
-  mono: { fontFamily: "monospace", color: color.muted, fontSize: 12, lineHeight: 18 },
+  buttonText: { color: color.bg, fontSize: 14, fontWeight: "600" },
+  mono: {
+    fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace",
+    color: color.muted,
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  chips: {
+    flexDirection: "row",
+    gap: 4,
+    padding: 3,
+    borderRadius: 9,
+    backgroundColor: color.surface,
+  },
 });
 export function Label({ children }: { children: React.ReactNode }) {
   return <Text style={s.muted}>{children}</Text>;
 }
-export function Card({ children }: { children: React.ReactNode }) {
-  return <View style={s.card}>{children}</View>;
+export function Card({
+  children,
+  style,
+}: {
+  children: React.ReactNode;
+  style?: StyleProp<ViewStyle>;
+}) {
+  return <View style={[s.card, style]}>{children}</View>;
 }
 export function Button({
   title,
   onPress,
   reason,
   secondary = false,
+  quiet = false,
+  reasonDetail = true,
 }: {
   title: string;
   onPress: () => void;
   reason?: string;
   secondary?: boolean;
+  quiet?: boolean;
+  reasonDetail?: boolean;
 }) {
   return (
     <View>
       <Pressable
         accessibilityRole="button"
         accessibilityState={{ disabled: !!reason }}
+        accessibilityHint={reason}
         disabled={!!reason}
         onPress={onPress}
-        style={[
+        style={({ pressed }) => [
           s.button,
-          secondary && { backgroundColor: color.line },
-          reason && { opacity: 0.45 },
+          secondary && { backgroundColor: color.bg, borderColor: color.line },
+          quiet && { backgroundColor: "transparent", borderColor: "transparent" },
+          pressed && {
+            backgroundColor: secondary || quiet ? color.surface : color.accentStrong,
+          },
+          reason && { opacity: 0.5 },
         ]}
       >
-        <Text style={[s.buttonText, secondary && { color: color.text }]}>{title}</Text>
+        <Text
+          style={[
+            s.buttonText,
+            secondary && { color: color.text },
+            quiet && { color: color.muted },
+          ]}
+        >
+          {title}
+        </Text>
       </Pressable>
-      {reason && <Label>{reason}</Label>}
+      {reason && reasonDetail && <Label>{reason}</Label>}
     </View>
   );
 }
@@ -93,6 +149,7 @@ export function Field({
   secret = false,
   multiline = false,
   placeholder,
+  compact = false,
 }: {
   label: string;
   value: string;
@@ -100,10 +157,12 @@ export function Field({
   secret?: boolean;
   multiline?: boolean;
   placeholder?: string;
+  compact?: boolean;
 }) {
+  const [focused, setFocused] = useState(false);
   return (
     <View style={{ gap: 6 }}>
-      <Label>{label}</Label>
+      {!compact && <Label>{label}</Label>}
       <TextInput
         accessibilityLabel={label}
         value={value}
@@ -114,7 +173,13 @@ export function Field({
         multiline={multiline}
         placeholder={placeholder}
         placeholderTextColor={color.muted}
-        style={[s.input, multiline && { minHeight: 90, textAlignVertical: "top" }]}
+        onFocus={() => setFocused(true)}
+        onBlur={() => setFocused(false)}
+        style={[
+          s.input,
+          multiline && { minHeight: compact ? 54 : 90, textAlignVertical: "top" },
+          focused && { borderColor: color.accent },
+        ]}
       />
     </View>
   );
@@ -148,21 +213,39 @@ export function Chips<T extends string>({
   values,
   value,
   onChange,
+  labels,
 }: {
   values: readonly T[];
   value: T;
   onChange: (v: T) => void;
+  labels?: Partial<Record<T, string>>;
 }) {
   return (
     <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-      <View style={s.row}>
+      <View style={s.chips}>
         {values.map((x) => (
           <Pressable
             key={x}
+            accessibilityRole="tab"
+            accessibilityState={{ selected: x === value }}
             onPress={() => onChange(x)}
-            style={[s.button, { backgroundColor: x === value ? color.accent : color.panel }]}
+            style={({ pressed }) => [
+              s.button,
+              {
+                backgroundColor: x === value ? color.bg : pressed ? color.line : "transparent",
+                borderColor: x === value ? color.line : "transparent",
+              },
+            ]}
           >
-            <Text style={{ color: x === value ? color.bg : color.muted }}>{x}</Text>
+            <Text
+              style={{
+                color: x === value ? color.text : color.muted,
+                fontSize: 13,
+                fontWeight: x === value ? "600" : "400",
+              }}
+            >
+              {labels?.[x] ?? x}
+            </Text>
           </Pressable>
         ))}
       </View>

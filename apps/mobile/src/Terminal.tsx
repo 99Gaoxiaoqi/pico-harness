@@ -194,7 +194,7 @@ export function TerminalPanel({ sessionId }: { sessionId: string }) {
         <>
           <WebView
             ref={ref}
-            style={{ flex: 1, minHeight: 350, backgroundColor: color.bg }}
+            style={{ flex: 1, minHeight: 350, backgroundColor: color.terminalBg }}
             source={{ html }}
             originWhitelist={["about:blank"]}
             javaScriptEnabled
