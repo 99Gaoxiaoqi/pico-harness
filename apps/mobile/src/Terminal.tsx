@@ -101,6 +101,15 @@ export function TerminalPanel({ sessionId }: { sessionId: string }) {
   useEffect(() => {
     if (!foreground || !pico.connected) inputGeneration.current++;
   }, [foreground, pico.connected]);
+  useEffect(() => {
+    if (ready)
+      ref.current?.postMessage(
+        JSON.stringify({
+          type: "readonly",
+          value: terminal?.controlAllowed !== true || blocked || !foreground || !pico.connected,
+        }),
+      );
+  }, [ready, terminal?.controlAllowed, blocked, foreground, pico.connected]);
   async function create() {
     const x = await pico.request("terminal.create", { sessionId, cols: 80, rows: 24 });
     if (!active.current) return;
@@ -254,6 +263,13 @@ export function TerminalPanel({ sessionId }: { sessionId: string }) {
             <Button
               title="键盘"
               secondary
+              reason={
+                terminal.controlAllowed !== true
+                  ? "其他客户端的终端仅可读"
+                  : blocked
+                    ? "请先检查输出并恢复输入"
+                    : pico.reason("terminal.input")
+              }
               onPress={() => ref.current?.postMessage(JSON.stringify({ type: "focus" }))}
             />
             <Button
