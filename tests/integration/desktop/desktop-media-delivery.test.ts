@@ -76,6 +76,13 @@ test(
               return {
                 role: "assistant" as const,
                 content: "![图片](image.png)\n\n![视频](movie.mp4)\n\n`![不解析](ignored.png)`",
+                images: [
+                  {
+                    type: "image_base64" as const,
+                    mimeType: "image/png",
+                    data: png.toString("base64"),
+                  },
+                ],
               };
             },
           },
@@ -185,6 +192,30 @@ test(
     assert.equal(forkRefs.length, 2);
     assert.notEqual(forkRefs[0]!.artifactId, references[0]!.artifactId);
     assert.equal(forkRefs[0]!.digest, references[0]!.digest);
+    const forkSession = new Session(forkId, workspacePath, {
+      persistence: true,
+      picoHome,
+      runtimePort: createEngineRuntimePort(),
+    });
+    try {
+      await forkSession.recover();
+      const inheritedImage = forkSession
+        .getModelContext()
+        .flatMap((message) => message.images ?? [])
+        .find((image) => image.type === "image_artifact");
+      assert.equal(
+        inheritedImage?.type,
+        "image_artifact",
+        "fork model history retains image attachment identity",
+      );
+      if (inheritedImage?.type === "image_artifact") {
+        assert.equal(inheritedImage.artifactId, forkRefs[0]!.artifactId);
+        assert.equal(forkSession.readMediaArtifact(inheritedImage), png.toString("base64"));
+      }
+    } finally {
+      await forkSession.close();
+    }
+
     const query = (params: RuntimeParams<"session.artifacts.query">) =>
       services.desktopService.handle(createRuntimeRequest("session.artifacts.query", params));
     for (const [index, ref] of forkRefs.entries()) {

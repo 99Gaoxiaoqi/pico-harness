@@ -79,13 +79,17 @@ export function assembleRuntimeProvider(
 ): RuntimeProviderAssembly {
   const providerFactory = context.providerFactory ?? createRawProvider;
   const decorate = context.providerDecorator ?? ((provider: LLMProvider) => provider);
+  const providerDependencies: ProviderRuntimeDependencies = {
+    ...context.providerDependencies,
+    readImageArtifact: (image) => context.session.readMediaArtifact(image),
+  };
   const promptCachePrewarm =
     context.providerDependencies?.promptCachePrewarm ?? new PromptCachePrewarmCoordinator();
   const buildTrackedProvider = (config: ProviderConfig): LLMProvider =>
     withPromptCachePrewarm(
       context.kind,
       new CostTracker(
-        decorate(providerFactory(context.kind, config, undefined, context.providerDependencies)),
+        decorate(providerFactory(context.kind, config, undefined, providerDependencies)),
         billingRouteForProvider(context.kind, config),
         context.session,
         {
@@ -131,7 +135,9 @@ export function assembleRuntimeModels(context: RuntimeModelAssemblyContext): Run
   const providerFactory = context.providerFactory ?? createRawProvider;
   const providerDecorator = context.providerDecorator ?? ((provider: LLMProvider) => provider);
   const providerDependencies: ProviderRuntimeDependencies = {
+    ...context.providerDependencies,
     promptCachePrewarm: PromptCachePrewarmCoordinator.shared(context.sessionStorageRoot),
+    readImageArtifact: (image) => context.session.readMediaArtifact(image),
   };
   const routeCredentials =
     context.provider === undefined && context.modelRouter && context.config.routeId

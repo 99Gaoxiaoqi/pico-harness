@@ -3,7 +3,12 @@ import { constants } from "node:fs";
 import { open, realpath, stat } from "node:fs/promises";
 import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 import { lexer, walkTokens } from "marked";
-import type { Message } from "@pico/core";
+import type { ImagePart, Message } from "@pico/core";
+import {
+  rewriteSavedAiSdkMedia,
+  isSavedAiSdkProjectionCurrent,
+} from "./provider/ai-sdk-messages.js";
+import { projectMediaTextForModel } from "@pico/core/media";
 import type { ExecutionBoundary } from "@pico/core/permission-profile";
 import {
   inspectMediaBytes,
@@ -19,9 +24,16 @@ export function withoutMessageMedia(message: Message): Message {
   const clean = JSON.parse(JSON.stringify(message)) as Message;
   if (clean.providerData) {
     delete clean.providerData["picoMedia"];
+    delete clean.providerData["picoMediaInputHash"];
     if (Object.keys(clean.providerData).length === 0) delete clean.providerData;
   }
   return clean;
+}
+
+export function messageMediaInputHash(message: Message): string {
+  return createHash("sha256")
+    .update(JSON.stringify(withoutMessageMedia(message)))
+    .digest("hex");
 }
 
 export async function prepareSessionMedia(options: {
@@ -34,6 +46,8 @@ export async function prepareSessionMedia(options: {
   onArtifactsChanged?: (revision: number) => void;
 }): Promise<Message> {
   const message = withoutMessageMedia(options.message);
+  const inputHash = messageMediaInputHash(message);
+  const replayWasValid = isSavedAiSdkProjectionCurrent(message);
   if (message.toolCallId !== undefined || !["assistant", "user"].includes(message.role))
     return message;
   const repository = new SqliteSessionWorkbarRepository({ storageRoot: options.storageRoot });
@@ -49,7 +63,7 @@ export async function prepareSessionMedia(options: {
       bytes.length > mediaPreviewLimit(inspected.kind) ||
       (declaredMime !== undefined && inspected.mimeType !== declaredMime)
     )
-      return;
+      return undefined;
     const digest = createHash("sha256").update(bytes).digest("hex");
     const id = `media:${createHash("sha256").update(`${options.sessionId}\0${inspected.kind}\0${digest}`).digest("hex")}`;
     const artifact = repository.publishArtifactSnapshot({
@@ -59,26 +73,88 @@ export async function prepareSessionMedia(options: {
       mimeType: inspected.mimeType,
       content: bytes,
     });
-    if (!media.some((item) => item.artifactId === artifact.artifactId && item.source === source))
-      media.push(reference(artifact, inspected.kind, alt, source));
+    const existing = media.findIndex((item) => item.artifactId === artifact.artifactId);
+    if (existing < 0) media.push(reference(artifact, inspected.kind, alt, source));
+    else if (source && !media[existing]!.source)
+      media[existing] = reference(artifact, inspected.kind, alt, source);
+    return reference(artifact, inspected.kind, alt, source);
   };
-  for (const image of message.images ?? []) {
-    if (media.length >= MEDIA_MAX_REFERENCES) break;
+  const artifactUri = (id: string) => `pico://artifact/${encodeURIComponent(id)}`;
+  const toImage = (ref: RuntimeMediaReference): Extract<ImagePart, { type: "image_artifact" }> => ({
+    type: "image_artifact",
+    artifactId: ref.artifactId,
+    mimeType: ref.mimeType,
+    sizeBytes: ref.sizeBytes,
+    digest: ref.digest,
+  });
+  const persistInline = (data: string, mimeType: string, source?: string) => {
+    const kind = mimeType.startsWith("video/") ? "video" : "image";
     if (
-      image.type !== "image_base64" ||
-      image.data.length > Math.ceil(mediaPreviewLimit("image") / 3) * 4
+      data.length > Math.ceil(mediaPreviewLimit(kind) / 3) * 4 ||
+      media.length >= MEDIA_MAX_REFERENCES
     )
-      continue;
+      return undefined;
+    const bytes = Buffer.from(data, "base64");
+    if (bytes.toString("base64") !== data) return undefined;
+    return publish(bytes, kind === "image" ? "图片" : "视频", source, mimeType);
+  };
+  const rewriteText = (text: string): string =>
+    text.replace(
+      /data:((?:image|video)\/[a-z0-9.+-]+);base64,([a-z0-9+/=]+)/giu,
+      (uri, mime: string, data: string) => {
+        try {
+          const ref = persistInline(data, mime.toLowerCase());
+          return ref ? artifactUri(ref.artifactId) : projectMediaTextForModel(uri);
+        } catch {
+          return projectMediaTextForModel(uri);
+        }
+      },
+    );
+  const images: ImagePart[] = [];
+  for (const image of message.images ?? []) {
     try {
-      const bytes = Buffer.from(image.data, "base64");
-      if (bytes.toString("base64") !== image.data) continue;
-      const inspected = inspectMediaBytes(bytes);
-      if (inspected?.kind === "image" && inspected.mimeType === image.mimeType)
-        publish(bytes, "回复图片", undefined, image.mimeType);
+      if (image.type === "image_artifact") {
+        const artifact = repository.queryArtifacts({
+          sessionId: options.sessionId,
+          artifactId: image.artifactId,
+        }).artifacts[0]!;
+        if (
+          artifact.mimeType !== image.mimeType ||
+          artifact.sizeBytes !== image.sizeBytes ||
+          artifact.digest !== image.digest
+        )
+          continue;
+        media.push(reference(artifact, "image", "图片"));
+        images.push(image);
+      } else if (image.type === "image_base64") {
+        const ref = persistInline(image.data, image.mimeType);
+        if (ref?.kind === "image") images.push(toImage(ref));
+      } else if (image.url.startsWith("data:")) {
+        const match = /^data:(image\/[a-z0-9.+-]+);base64,([a-z0-9+/=]+)$/iu.exec(image.url);
+        const ref = match ? persistInline(match[2]!, match[1]!.toLowerCase()) : undefined;
+        if (ref?.kind === "image") images.push(toImage(ref));
+      } else images.push(image);
     } catch {
-      /* A failed media item must not discard the text reply. */
+      /* Invalid or unauthorized attachments stay out of durable media. */
     }
   }
+  if (options.message.images?.length && !images.length && !message.content)
+    message.content = "媒体无法预览";
+  const originalContent = message.content;
+  message.content = rewriteText(message.content);
+  message.images = images;
+  if (!images.length) delete message.images;
+  rewriteSavedAiSdkMedia(
+    message,
+    rewriteText,
+    (data, mimeType) => {
+      if (typeof data !== "string") return undefined;
+      if (data.startsWith("pico://artifact/")) return data;
+      const ref = persistInline(data, mimeType);
+      return ref ? artifactUri(ref.artifactId) : undefined;
+    },
+    replayWasValid,
+  );
   const targets: { source: string; alt: string }[] = [];
   walkTokens(lexer(message.content), (token) => {
     if (
@@ -94,7 +170,12 @@ export async function prepareSessionMedia(options: {
   let roots: WorkspaceRoots | undefined;
   for (const target of targets) {
     if (media.length >= MEDIA_MAX_REFERENCES) break;
-    if (media.some((item) => item.source === target.source)) continue;
+    if (
+      media.some(
+        (item) => item.source === target.source || artifactUri(item.artifactId) === target.source,
+      )
+    )
+      continue;
     try {
       const uri = /^pico:\/\/artifact\/([^/?#]+)$/u.exec(target.source);
       if (uri) {
@@ -169,6 +250,19 @@ export async function prepareSessionMedia(options: {
       /* Preserve an inert Markdown placeholder for missing/unauthorized media. */
     }
   }
+  if (images.length) message.images = images;
+  rewriteSavedAiSdkMedia(
+    message,
+    (text) => text,
+    (data) => (typeof data === "string" ? data : undefined),
+    replayWasValid,
+  );
+  if (originalContent !== message.content) {
+    for (let index = 0; index < media.length; index++) {
+      const item = media[index]!;
+      if (!item.source) media[index] = { ...item, source: artifactUri(item.artifactId) };
+    }
+  }
   if (initialRevision !== undefined) {
     const revision = repository.queryArtifacts({ sessionId: options.sessionId }).revision;
     if (revision !== initialRevision) {
@@ -180,7 +274,10 @@ export async function prepareSessionMedia(options: {
     }
   }
   return media.length > 0
-    ? { ...message, providerData: { ...message.providerData, picoMedia: media } }
+    ? {
+        ...message,
+        providerData: { ...message.providerData, picoMedia: media, picoMediaInputHash: inputHash },
+      }
     : message;
 }
 
@@ -203,4 +300,120 @@ function reference(
     digest: artifact.digest,
     ...(source !== undefined ? { source } : {}),
   };
+}
+
+type ArtifactImage = Extract<ImagePart, { type: "image_artifact" }>;
+
+/** Resolve only records owned by the requesting Session, including its validated fork clones. */
+function ownedImage(
+  repository: SqliteSessionWorkbarRepository,
+  sessionId: string,
+  image: ArtifactImage,
+): SessionArtifactRecord | undefined {
+  const matches = (artifact: SessionArtifactRecord) =>
+    artifact.mimeType === image.mimeType &&
+    artifact.sizeBytes === image.sizeBytes &&
+    artifact.digest === image.digest;
+  try {
+    const exact = repository.queryArtifacts({ sessionId, artifactId: image.artifactId })
+      .artifacts[0];
+    if (exact && matches(exact)) return exact;
+  } catch {
+    /* A fork has its own ID for inherited bytes. */
+  }
+  let cursor: string | undefined;
+  do {
+    const page = repository.queryArtifacts({
+      sessionId,
+      limit: 200,
+      ...(cursor ? { cursor } : {}),
+    });
+    const match = page.artifacts.find(matches);
+    if (match) return match;
+    cursor = page.nextCursor;
+  } while (cursor);
+  return undefined;
+}
+
+/** Request-time hydration validates the complete immutable bytes, never untrusted provider metadata. */
+export function readSessionImageArtifact(
+  storageRoot: string,
+  sessionId: string,
+  image: ArtifactImage,
+): string | undefined {
+  if (
+    !Number.isSafeInteger(image.sizeBytes) ||
+    image.sizeBytes <= 0 ||
+    image.sizeBytes > mediaPreviewLimit("image")
+  )
+    return undefined;
+  const repository = new SqliteSessionWorkbarRepository({ storageRoot });
+  const artifact = ownedImage(repository, sessionId, image);
+  if (!artifact) return undefined;
+  const chunks: Buffer[] = [];
+  let offset = 0;
+  while (offset < image.sizeBytes) {
+    const chunk = repository.readArtifactChunk({
+      sessionId,
+      artifactId: artifact.artifactId,
+      offsetBytes: offset,
+      limitBytes: Math.min(32 * 1024, image.sizeBytes - offset),
+    });
+    const bytes = Buffer.from(chunk.contentBase64, "base64");
+    if (
+      chunk.totalBytes !== image.sizeBytes ||
+      chunk.artifact.digest !== image.digest ||
+      chunk.offsetBytes !== offset ||
+      chunk.endOffsetBytes !== offset + bytes.length ||
+      bytes.length === 0 ||
+      chunk.endOffsetBytes > image.sizeBytes
+    )
+      return undefined;
+    chunks.push(bytes);
+    offset = chunk.endOffsetBytes;
+  }
+  const bytes = Buffer.concat(chunks);
+  const inspected = inspectMediaBytes(bytes);
+  if (
+    bytes.length !== image.sizeBytes ||
+    inspected?.kind !== "image" ||
+    inspected.mimeType !== image.mimeType ||
+    createHash("sha256").update(bytes).digest("hex") !== image.digest
+  )
+    return undefined;
+  return bytes.toString("base64");
+}
+
+/** Disposable model history follows current-session fork clones without rewriting canonical events. */
+export function resolveSessionMediaReferences(
+  storageRoot: string,
+  sessionId: string,
+  message: Message,
+): Message {
+  if (!message.images?.some((image) => image.type === "image_artifact")) return message;
+  const repository = new SqliteSessionWorkbarRepository({ storageRoot });
+  const replacements = new Map<string, string>();
+  const images = message.images.map((image) => {
+    if (image.type !== "image_artifact") return image;
+    const artifact = ownedImage(repository, sessionId, image);
+    if (!artifact || artifact.artifactId === image.artifactId) return image;
+    replacements.set(image.artifactId, artifact.artifactId);
+    return { ...image, artifactId: artifact.artifactId };
+  });
+  if (!replacements.size) return message;
+  const replayWasValid = isSavedAiSdkProjectionCurrent(message);
+  const projected = structuredClone({ ...message, images });
+  const replace = (text: string) =>
+    text.replace(/pico:\/\/artifact\/([^/?#\s)]+)/gu, (uri, id: string) => {
+      const replacement = replacements.get(decodeURIComponent(id));
+      return replacement ? `pico://artifact/${encodeURIComponent(replacement)}` : uri;
+    });
+  projected.content = replace(projected.content);
+  rewriteSavedAiSdkMedia(
+    projected,
+    replace,
+    (data) => (typeof data === "string" ? replace(data) : undefined),
+    replayWasValid,
+  );
+  return projected;
 }

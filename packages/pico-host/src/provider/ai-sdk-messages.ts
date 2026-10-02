@@ -19,7 +19,7 @@ function record(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
-function projection(message: Message): string {
+export function aiSdkMessageProjection(message: Message): string {
   return JSON.stringify([
     message.content,
     message.reasoning ?? "",
@@ -37,11 +37,15 @@ function parseInput(argumentsText: string): unknown {
   }
 }
 
+export function isSavedAiSdkProjectionCurrent(message: Message): boolean {
+  return record(message.providerData?.picoAiSdk)?.projection === aiSdkMessageProjection(message);
+}
+
 function savedContent(message: Message, wire: AiSdkWire): SavedContent | undefined {
   const saved = record(message.providerData?.picoAiSdk);
   if (
     saved?.wire === wire &&
-    saved.projection === projection(message) &&
+    saved.projection === aiSdkMessageProjection(message) &&
     Array.isArray(saved.content) &&
     Array.isArray(saved.toolResults)
   ) {
@@ -54,9 +58,47 @@ function savedContent(message: Message, wire: AiSdkWire): SavedContent | undefin
 export function toAiSdkMessages(
   messages: readonly Message[],
   wire: AiSdkWire,
-  options?: { responsesWebSearchAnchors?: boolean },
+  options?: {
+    responsesWebSearchAnchors?: boolean;
+    vision?: boolean;
+    readImageArtifact?: (
+      image: Extract<ImagePart, { type: "image_artifact" }>,
+    ) => string | undefined;
+  },
 ): ModelMessage[] {
   const result: ModelMessage[] = [];
+  let usedImageBytes = 0;
+  const materialize = (
+    image: ImagePart,
+  ): { type: "file"; data: string | URL; mediaType: string } | { type: "text"; text: string } => {
+    const omitted = {
+      type: "text" as const,
+      text: "[Image attachment omitted: unavailable, unsupported vision, or request image budget exceeded.]",
+    };
+    if (image.type === "image_artifact") {
+      if (
+        options?.vision !== true ||
+        !Number.isSafeInteger(image.sizeBytes) ||
+        image.sizeBytes <= 0 ||
+        usedImageBytes + image.sizeBytes > 12 * 1024 * 1024
+      )
+        return omitted;
+      try {
+        const data = options.readImageArtifact?.(image);
+        if (data === undefined) return omitted;
+        usedImageBytes += image.sizeBytes;
+        return { type: "file", data, mediaType: image.mimeType };
+      } catch {
+        return omitted;
+      }
+    }
+    if (options?.vision === false) return omitted;
+    return {
+      type: "file",
+      data: image.type === "image_base64" ? image.data : new URL(image.url),
+      mediaType: image.type === "image_base64" ? image.mimeType : "image",
+    };
+  };
   const searchAnchors = wire === "responses" && options?.responsesWebSearchAnchors === true;
   const toolNames = new Map<string, string>();
   for (const message of messages) {
@@ -84,11 +126,7 @@ export function toAiSdkMessages(
         role: "user",
         content: message.images?.length
           ? [
-              ...message.images.map((image) => ({
-                type: "file" as const,
-                data: image.type === "image_base64" ? image.data : new URL(image.url),
-                mediaType: image.type === "image_base64" ? image.mimeType : "image",
-              })),
+              ...message.images.map(materialize),
               { type: "text", text: projectMediaTextForModel(message.content) },
             ]
           : projectMediaTextForModel(message.content),
@@ -111,12 +149,19 @@ export function toAiSdkMessages(
             input: parseInput(call.arguments),
           });
         }
+        for (const image of message.images ?? []) content.push(materialize(image));
+      }
+      if (saved) {
         for (const image of message.images ?? []) {
-          content.push({
-            type: "file",
-            mediaType: image.type === "image_base64" ? image.mimeType : "image",
-            data: image.type === "image_base64" ? image.data : new URL(image.url),
-          });
+          if (
+            image.type === "image_artifact" &&
+            !content.some(
+              (part) =>
+                part.type === "file" &&
+                part.data === `pico://artifact/${encodeURIComponent(image.artifactId)}`,
+            )
+          )
+            content.push(materialize(image));
         }
       }
       for (let index = 0; index < content.length; index++) {
@@ -125,6 +170,19 @@ export function toAiSdkMessages(
         // Keep signatures, hosted tool records and explicit file parts untouched.
         if (part.type === "text") {
           content[index] = { ...part, text: projectMediaTextForModel(part.text) };
+        }
+        if (
+          part.type === "file" &&
+          typeof part.data === "string" &&
+          part.data.startsWith("pico://artifact/")
+        ) {
+          const id = decodeURIComponent(part.data.slice("pico://artifact/".length));
+          const image = message.images?.find(
+            (image) => image.type === "image_artifact" && image.artifactId === id,
+          );
+          content[index] = image
+            ? materialize(image)
+            : { type: "text", text: "[Media artifact retained in this conversation.]" };
         }
         if (part.type === "tool-call") {
           toolNames.set(part.toolCallId, part.toolName);
@@ -346,7 +404,7 @@ export function fromAiSdkContent(
       wire,
       content: parts,
       toolResults,
-      projection: projection(message),
+      projection: aiSdkMessageProjection(message),
     } satisfies SavedContent,
   };
   return message;
@@ -381,4 +439,32 @@ export function restoreResponsesWebSearch(
         : value;
     }),
   };
+}
+
+/** Rewrite only ordinary text/file replay parts; reasoning signatures and hosted metadata stay opaque. */
+export function rewriteSavedAiSdkMedia(
+  message: Message,
+  rewriteText: (text: string) => string,
+  rewriteFile: (data: unknown, mimeType: string) => string | undefined,
+  refreshProjection = true,
+): void {
+  const saved = record(message.providerData?.picoAiSdk);
+  if (!saved || !Array.isArray(saved.content)) return;
+  saved.content = saved.content.map((value: unknown) => {
+    const part = record(value);
+    if (part?.type === "text" && typeof part.text === "string")
+      return { ...part, text: rewriteText(part.text) };
+    if (
+      part?.type === "file" &&
+      typeof part.mediaType === "string" &&
+      /^(image|video)\//u.test(part.mediaType)
+    ) {
+      const data = rewriteFile(part.data, part.mediaType);
+      return data ? { ...part, data } : { type: "text", text: "[Media artifact unavailable.]" };
+    }
+    return value;
+  });
+  saved.projection = refreshProjection
+    ? aiSdkMessageProjection(message)
+    : "invalidated-media-replay";
 }

@@ -1,4 +1,10 @@
-import { prepareSessionMedia, withoutMessageMedia } from "./session-media.js";
+import {
+  prepareSessionMedia,
+  withoutMessageMedia,
+  messageMediaInputHash,
+  readSessionImageArtifact,
+  resolveSessionMediaReferences,
+} from "./session-media.js";
 import { SqliteRuntimeControlStore } from "@pico/storage/sqlite/sqlite-runtime-control-store";
 // 会话管理:Session 物理隔离与完整模型历史的底层实现。
 //
@@ -17,7 +23,12 @@ import { createHash, randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { ExecutionBoundary } from "@pico/core/permission-profile";
-import { type CanonicalUsage, type Message, type UsageReportedField } from "@pico/core";
+import {
+  type CanonicalUsage,
+  type ImagePart,
+  type Message,
+  type UsageReportedField,
+} from "@pico/core";
 import type { CostStatus } from "@pico/runtime/pricing";
 import { logger } from "./logger.js";
 import { assertDurableTranscriptEvent, type DurableTranscriptEvent } from "@pico/core";
@@ -451,7 +462,9 @@ export class Session
 
   private applyRuntimeHistoryProjection(projection: RuntimeSessionProjectionSnapshot): void {
     this.messageLedger.replace(
-      projectRuntimeSessionMessages(projection.entries.map(({ event }) => event)),
+      projectRuntimeSessionMessages(projection.entries.map(({ event }) => event)).map((message) =>
+        resolveSessionMediaReferences(this.runtimeStorageRoot, this.id, message),
+      ),
     );
     const cursor = projection.cursor;
     this.runtimeProjectionCursor = cursor ? { ...cursor } : undefined;
@@ -486,7 +499,11 @@ export class Session
     cursor: SessionCursor,
     updatedAt: string,
   ): void {
-    this.messageLedger.appendProjected(messages);
+    this.messageLedger.appendProjected(
+      messages.map((message) =>
+        resolveSessionMediaReferences(this.runtimeStorageRoot, this.id, message),
+      ),
+    );
     this.runtimeProjectionCursor = { ...cursor };
     this.conversationId = `${cursor.logId}:${cursor.epoch}`;
     this.updatedAt = new Date(updatedAt);
@@ -1003,6 +1020,8 @@ export class Session
       let prepared: Message;
       if (existing?.event.kind === "message.committed") {
         if (
+          existing.event.data.message.providerData?.["picoMediaInputHash"] !==
+            messageMediaInputHash(message) &&
           !isDeepStrictEqual(
             withoutMessageMedia(message),
             withoutMessageMedia(existing.event.data.message),
@@ -1022,6 +1041,10 @@ export class Session
       if (!receipt) throw new Error(`Runtime session ${this.id} is not initialized`);
       return receipt;
     });
+  }
+
+  readMediaArtifact(image: Extract<ImagePart, { type: "image_artifact" }>): string | undefined {
+    return readSessionImageArtifact(this.runtimeStorageRoot, this.id, image);
   }
 
   /** Bind the active host's existing resource notification lane. */
@@ -1488,7 +1511,9 @@ export class Session
    * belongs to the projection/compaction layer.
    */
   getModelContext(): Message[] {
-    return this.messageLedger.getModelContext();
+    return this.messageLedger
+      .getModelContext()
+      .map((message) => resolveSessionMediaReferences(this.runtimeStorageRoot, this.id, message));
   }
 
   /** True only while the tail tool exchange is still waiting for results. */
