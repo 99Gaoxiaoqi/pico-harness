@@ -16,6 +16,7 @@ import type { RuntimeSession } from "@pico/protocol/mobile";
 import { usePico } from "./store";
 import { Button, Card, Chips, Field, Label, s, color } from "./ui";
 import { Conversation } from "./Conversation";
+import { MessageMediaProvider } from "./MessageMedia";
 import { Workbar, type WorkbarTab } from "./Workbar";
 import { SettingsPanel } from "./Settings";
 export default function App() {
@@ -175,17 +176,19 @@ export default function App() {
             accessibilityElementsHidden={screen !== "conversation"}
             importantForAccessibility={screen === "conversation" ? "auto" : "no-hide-descendants"}
           >
-            <Conversation
-              key={`${pico.host?.id}/${pico.workspace?.id}/${sessionId}`}
-              sessionId={sessionId}
-              keyboardOffset={insets.top + headerHeight}
-              sideParentSessionId={sideParent}
-              onSession={goSession}
-              onPanel={(tab = "任务") => {
-                setWorkbarTab(tab);
-                setScreen("workbar");
-              }}
-            />
+            <MessageMediaProvider sessionId={sessionId} active={screen === "conversation"}>
+              <Conversation
+                key={`${pico.host?.id}/${pico.workspace?.id}/${sessionId}`}
+                sessionId={sessionId}
+                keyboardOffset={insets.top + headerHeight}
+                sideParentSessionId={sideParent}
+                onSession={goSession}
+                onPanel={(tab = "任务") => {
+                  setWorkbarTab(tab);
+                  setScreen("workbar");
+                }}
+              />
+            </MessageMediaProvider>
           </View>
           {screen === "workbar" && (
             <View style={{ flex: 1, backgroundColor: color.bg }}>

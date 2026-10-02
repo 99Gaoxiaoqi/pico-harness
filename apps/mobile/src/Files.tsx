@@ -1,17 +1,12 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Image, Text, View } from "react-native";
-import { File, Directory, Paths } from "expo-file-system";
 import * as Sharing from "expo-sharing";
-import * as Crypto from "expo-crypto";
-import { sha256 } from "@noble/hashes/sha2.js";
-import { bytesToHex } from "@noble/hashes/utils.js";
 import { WebView } from "react-native-webview";
 import { VideoView, useVideoPlayer } from "expo-video";
 import type { RuntimeSessionArtifact } from "@pico/protocol/mobile";
 import { usePico } from "./store";
-import { assertArtifactIntegrity } from "./core";
+import { clearArtifactCache, downloadArtifact } from "./artifact-cache";
 import { Button, Card, Detail, Label, s } from "./ui";
-const cache = new Directory(Paths.cache, "pico-artifacts");
 
 export function FilesPanel({ sessionId }: { sessionId: string }) {
   const pico = usePico();
@@ -63,70 +58,31 @@ export function FilesPanel({ sessionId }: { sessionId: string }) {
     const client = pico.client;
     const workspace = pico.workspace;
     if (!client || !workspace) throw new Error("尚未连接");
-    await cache.create({ idempotent: true, intermediates: true });
-    const file = new File(cache, `${Crypto.randomUUID()}.partial`);
-    const target = new File(
-      cache,
-      `${artifact.digest}-${artifact.title.replace(/[^\p{L}\p{N}._-]/gu, "_").slice(0, 100)}`,
-    );
-    try {
-      setProgress((old) => ({ ...old, [artifact.artifactId]: "下载中…" }));
-      await File.downloadFileAsync(
-        client.artifactUrl(workspace.id, sessionId, artifact.artifactId),
-        file,
-        {
-          headers: client.authorizationHeaders(),
-          onProgress: ({ bytesWritten, totalBytes }) => {
-            if (
-              capturedGeneration !== generation.current ||
-              capturedLifecycle !== lifecycle.current
-            )
-              return;
-            setProgress((old) => ({
-              ...old,
-              [artifact.artifactId]: `${Math.round(bytesWritten / 1024)} KiB${totalBytes > 0 ? ` / ${Math.round(totalBytes / 1024)} KiB` : ""}`,
-            }));
-          },
-        },
-      );
+    const target = await downloadArtifact({
+      client,
+      scopeId: pico.host!.id,
+      workspaceId: workspace.id,
+      sessionId,
+      artifact,
+      assertCurrent,
+      onProgress: (text) => {
+        if (capturedGeneration === generation.current && capturedLifecycle === lifecycle.current)
+          setProgress((old) => ({ ...old, [artifact.artifactId]: text }));
+      },
+    });
+    assertCurrent();
+    if (share) {
+      if (!(await Sharing.isAvailableAsync())) throw new Error("系统分享不可用");
       assertCurrent();
-      setProgress((old) => ({ ...old, [artifact.artifactId]: "校验 SHA-256…" }));
-      const hash = sha256.create();
-      const handle = file.open();
-      let size = 0;
-      try {
-        while (size < file.size) {
-          const chunk = handle.readBytes(Math.min(64 * 1024, file.size - size));
-          if (chunk.length === 0) throw new Error("文件读取提前结束");
-          hash.update(chunk);
-          size += chunk.length;
-          if (size % (1024 * 1024) === 0) await Promise.resolve();
-        }
-      } finally {
-        handle.close();
-      }
+      await Sharing.shareAsync(target.uri, { mimeType: artifact.mimeType });
+    } else {
+      const text =
+        (artifact.mimeType.startsWith("text/") || artifact.mimeType.includes("json")) &&
+        artifact.sizeBytes <= 1024 * 1024
+          ? await target.text()
+          : undefined;
       assertCurrent();
-      assertArtifactIntegrity(artifact, size, bytesToHex(hash.digest()));
-      if (target.exists) await target.delete();
-      await file.move(target);
-      setProgress((old) => ({ ...old, [artifact.artifactId]: "下载完成 · 校验通过" }));
-      assertCurrent();
-      if (share) {
-        if (!(await Sharing.isAvailableAsync())) throw new Error("系统分享不可用");
-        assertCurrent();
-        await Sharing.shareAsync(target.uri, { mimeType: artifact.mimeType });
-      } else {
-        const text =
-          (artifact.mimeType.startsWith("text/") || artifact.mimeType.includes("json")) &&
-          artifact.sizeBytes <= 1024 * 1024
-            ? await target.text()
-            : undefined;
-        assertCurrent();
-        setPreview({ file: artifact, uri: target.uri, ...(text !== undefined ? { text } : {}) });
-      }
-    } catch (error) {
-      if (file.exists) await file.delete();
-      throw error;
+      setPreview({ file: artifact, uri: target.uri, ...(text !== undefined ? { text } : {}) });
     }
   }
   return (
@@ -139,7 +95,7 @@ export function FilesPanel({ sessionId }: { sessionId: string }) {
           onPress={() =>
             void pico.perform(async () => {
               setPreview(undefined);
-              if (cache.exists) await cache.delete();
+              clearArtifactCache();
               setProgress({});
             })
           }

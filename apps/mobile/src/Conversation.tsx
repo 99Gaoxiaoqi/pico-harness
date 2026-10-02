@@ -3,6 +3,7 @@ import {
   Alert,
   FlatList,
   Image,
+  Linking,
   KeyboardAvoidingView,
   Keyboard,
   Platform,
@@ -11,6 +12,7 @@ import {
   Text,
   TextInput,
   View,
+  type ViewToken,
 } from "react-native";
 import * as ImagePicker from "expo-image-picker";
 import { manipulateAsync, SaveFormat } from "expo-image-manipulator";
@@ -29,6 +31,10 @@ import { decodedBase64Size, validateAttachments } from "./core";
 import { Button, Card, Detail, Field, Label, s, color } from "./ui";
 import { ActionsSheet } from "./ActionsSheet";
 import type { WorkbarTab } from "./Workbar";
+import { MessageMarkdown } from "./MessageMarkdown";
+import { referencedMediaIds } from "./markdown";
+import { MessageMedia } from "./MessageMedia";
+import { streamingMediaText } from "./media";
 
 const sendModes = [
   { value: "auto", label: "自动", detail: "空闲时开始新任务；运行中补充引导。" },
@@ -52,6 +58,10 @@ export function Conversation({
 }) {
   const pico = usePico();
   const [view, setView] = useState<TranscriptReplicaView>();
+  const [visibleItems, setVisibleItems] = useState(new Set<string>());
+  const onViewableItemsChanged = useRef(({ viewableItems }: { viewableItems: ViewToken[] }) => {
+    setVisibleItems(new Set(viewableItems.map((token) => token.key)));
+  }).current;
   const [sessionReady, setSessionReady] = useState(false);
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
@@ -260,6 +270,9 @@ export function Conversation({
       <FlatList
         data={view?.records ?? []}
         keyExtractor={(x) => x.itemId}
+        extraData={visibleItems}
+        onViewableItemsChanged={onViewableItemsChanged}
+        viewabilityConfig={{ itemVisiblePercentThreshold: 1 }}
         contentContainerStyle={[s.body, { gap: 0, paddingTop: 10, paddingBottom: 24 }]}
         ListHeaderComponent={
           view?.olderCursor ? (
@@ -271,7 +284,12 @@ export function Conversation({
           ) : null
         }
         renderItem={({ item }) => (
-          <TranscriptItem item={item.item} sessionId={sessionId} syncReason={syncReason} />
+          <TranscriptItem
+            item={item.item}
+            sessionId={sessionId}
+            syncReason={syncReason}
+            visible={visibleItems.has(item.itemId)}
+          />
         )}
         ListEmptyComponent={
           <Label>{pico.connected ? "正在读取历史…" : "连接恢复后会补齐记录"}</Label>
@@ -528,6 +546,7 @@ export function Conversation({
   );
 }
 function StreamingItem({ kind, text }: { kind: string; text: string }) {
+  const pico = usePico();
   const [expanded, setExpanded] = useState(false);
   const process = kind === "thinking" || kind === "toolOutput";
   return (
@@ -546,11 +565,18 @@ function StreamingItem({ kind, text }: { kind: string; text: string }) {
       ) : (
         <Label>Pico 正在回复</Label>
       )}
-      {(!process || expanded) && (
-        <Text selectable style={process ? s.muted : s.text}>
-          {text}
-        </Text>
-      )}
+      {(!process || expanded) &&
+        (process ? (
+          <Text selectable style={s.muted}>
+            {streamingMediaText(text)}
+          </Text>
+        ) : (
+          <MessageMarkdown
+            text={streamingMediaText(text)}
+            renderMedia={() => null}
+            onLink={(href) => void pico.perform(() => Linking.openURL(href))}
+          />
+        ))}
     </View>
   );
 }
@@ -558,10 +584,12 @@ function TranscriptItem({
   item,
   sessionId,
   syncReason,
+  visible,
 }: {
   item: RuntimeConversationItem;
   sessionId: string;
   syncReason?: string;
+  visible: boolean;
 }) {
   const pico = usePico();
   const [expanded, setExpanded] = useState(false);
@@ -598,18 +626,35 @@ function TranscriptItem({
   const message = item.kind === "userMessage" || item.kind === "assistantMessage";
   const process = item.kind === "thinking" || item.kind === "tool" || item.kind === "skill";
   if (message) {
+    const media = item.media ?? [];
+    const referenced = referencedMediaIds(content, media);
+    const seen = new Set<string>();
+    const standalone = media.filter((reference) => {
+      if (referenced.has(reference.artifactId) || seen.has(reference.artifactId)) return false;
+      seen.add(reference.artifactId);
+      return true;
+    });
     return (
       <View style={item.kind === "userMessage" ? styles.userMessage : styles.assistantMessage}>
+        <View style={item.kind === "userMessage" ? styles.userBubble : undefined}>
+          <MessageMarkdown
+            text={content}
+            media={media}
+            renderMedia={(reference) => <MessageMedia reference={reference} visible={visible} />}
+            onLink={(href) => void pico.perform(() => Linking.openURL(href))}
+          />
+          {standalone.map((reference) => (
+            <MessageMedia key={reference.artifactId} reference={reference} visible={visible} />
+          ))}
+        </View>
         <Pressable
           accessibilityRole="button"
           accessibilityLabel={`查看${label}的消息详情`}
           accessibilityState={{ expanded }}
           onPress={() => setExpanded(!expanded)}
-          style={item.kind === "userMessage" ? styles.userBubble : undefined}
+          style={{ alignSelf: "flex-start", minHeight: 32, justifyContent: "center" }}
         >
-          <Text selectable style={s.text}>
-            {content}
-          </Text>
+          <Text style={[s.muted, { fontSize: 11 }]}>{expanded ? "收起详情" : "消息详情"}</Text>
         </Pressable>
         {item.truncated && <Label>此记录因传输预算截断</Label>}
         {expanded && <Detail value={item} />}

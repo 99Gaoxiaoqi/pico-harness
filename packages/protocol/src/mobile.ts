@@ -277,6 +277,7 @@ export { RUNTIME_ERROR_CODES, RuntimeProtocolError, isRuntimeErrorCode } from ".
 export type { RuntimeErrorCode } from "./runtime/errors.js";
 
 export * from "./media.js";
+export * from "./markdown.js";
 export * from "./utf8.js";
 export * from "./runtime-buffer.js";
 export * from "./runtime-normalize.js";
