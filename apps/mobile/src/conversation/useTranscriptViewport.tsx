@@ -1,4 +1,4 @@
-import React, { useCallback, useLayoutEffect, useRef } from "react";
+import React, { useCallback, useLayoutEffect, useRef, useState } from "react";
 import { FlatList, View, type FlatListProps, type ViewToken } from "react-native";
 import type { RuntimeTranscriptItemRecord } from "@pico/protocol/mobile";
 import type { TranscriptReplicaView } from "@pico/transcript-replica";
@@ -15,8 +15,9 @@ type Anchor = {
   epoch: string;
   projector: number;
 };
+const NEAR_BOTTOM = 96;
 
-/** Keeps a reading anchor while the same conversation is hidden or resynchronized. */
+/** One owner coordinates reading restoration, older pages and following the streaming footer. */
 export function useTranscriptViewport(
   view: TranscriptReplicaView | undefined,
   ready: boolean,
@@ -24,20 +25,42 @@ export function useTranscriptViewport(
   restoreVersion: number,
 ) {
   const listRef = useRef<FlatList<RecordItem>>(null);
+  const alive = useRef(true);
   const state = useRef({ view, ready, active, restoreVersion });
   state.current = { view, ready, active, restoreVersion };
+  const [showLatest, setShowLatest] = useState(false);
+  const following = useRef(true);
+  const dragging = useRef(false);
+  const latestPending = useRef(false);
+  const paging = useRef(false);
   const frames = useRef(new Map<string, number>());
   const firstVisible = useRef<string | undefined>(undefined);
+  const firstRecord = useRef<string | undefined>(undefined);
   const scrollY = useRef(0);
+  const layoutHeight = useRef(0);
+  const contentHeight = useRef(0);
   const anchor = useRef<Anchor | undefined>(undefined);
   const appliedVersion = useRef(restoreVersion);
   const pending = useRef<
     { itemId: string; index: number; offset: number; attempts: number } | undefined
   >(undefined);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const latestTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const stopRestore = useCallback(() => {
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = undefined;
+    pending.current = undefined;
+  }, []);
   const capture = useCallback(() => {
     const s = state.current;
-    if (!s.active || !s.ready || pending.current || appliedVersion.current !== s.restoreVersion)
+    if (
+      !s.active ||
+      !s.ready ||
+      following.current ||
+      paging.current ||
+      pending.current ||
+      appliedVersion.current !== s.restoreVersion
+    )
       return;
     const record = s.view?.records.find((item) => item.itemId === firstVisible.current);
     const y = record && frames.current.get(record.itemId);
@@ -52,9 +75,35 @@ export function useTranscriptViewport(
       projector: watermark.projectorVersion,
     };
   }, []);
+  const latest = useCallback((animated = false) => {
+    if (
+      state.current.active &&
+      state.current.ready &&
+      following.current &&
+      !pending.current &&
+      !paging.current
+    )
+      latestPending.current = true;
+    if (latestTimer.current) clearTimeout(latestTimer.current);
+    latestTimer.current = setTimeout(() => {
+      latestTimer.current = undefined;
+      const s = state.current;
+      if (
+        !alive.current ||
+        !s.active ||
+        !s.ready ||
+        !following.current ||
+        pending.current ||
+        paging.current
+      )
+        return;
+      // scrollToEnd includes overlays/Plan/queue in ListFooterComponent.
+      listRef.current?.scrollToEnd({ animated });
+    }, 0);
+  }, []);
   const restore = useCallback(() => {
     const target = pending.current;
-    if (!target || !state.current.ready || !state.current.active) return;
+    if (!target || !state.current.ready || !state.current.active || following.current) return;
     const index =
       state.current.view?.records.findIndex((item) => item.itemId === target.itemId) ?? -1;
     if (index < 0) {
@@ -64,18 +113,13 @@ export function useTranscriptViewport(
     }
     target.index = index;
     if (timer.current) clearTimeout(timer.current);
-    // Virtualized rows need another layout pass after an approximate scroll.
     if (++target.attempts > 8) {
       pending.current = undefined;
       appliedVersion.current = state.current.restoreVersion;
       capture();
       return;
     }
-    listRef.current?.scrollToIndex({
-      index: target.index,
-      viewOffset: target.offset,
-      animated: false,
-    });
+    listRef.current?.scrollToIndex({ index, viewOffset: target.offset, animated: false });
     timer.current = setTimeout(() => {
       timer.current = undefined;
       if (pending.current !== target) return;
@@ -88,46 +132,76 @@ export function useTranscriptViewport(
       } else restore();
     }, 80);
   }, [capture]);
+  const restoreAnchor = useCallback(() => {
+    const s = state.current;
+    const saved = anchor.current;
+    if (!saved || !s.ready || !s.active || following.current) return;
+    const current = s.view;
+    const sameHistory =
+      saved.epoch === current?.watermark?.historyEpoch &&
+      saved.projector === current.watermark.projectorVersion;
+    if (!sameHistory) {
+      anchor.current = undefined;
+      stopRestore();
+      following.current = true;
+      latestPending.current = true;
+      setShowLatest(false);
+      appliedVersion.current = s.restoreVersion;
+      latest();
+      return;
+    }
+    let index = current.records.findIndex((item) => item.itemId === saved.itemId);
+    if (index < 0) {
+      index = current.records.findIndex(
+        (item) =>
+          item.positionSequence > saved.sequence ||
+          (item.positionSequence === saved.sequence && item.positionOrdinal >= saved.ordinal),
+      );
+      if (index < 0) index = current.records.length - 1;
+    }
+    if (index < 0) return;
+    pending.current = {
+      itemId: current.records[index]!.itemId,
+      index,
+      offset: saved.offset,
+      attempts: 0,
+    };
+    restore();
+  }, [latest, restore, stopRestore]);
+  useLayoutEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
   useLayoutEffect(() => {
     if (active && ready) {
-      const saved = anchor.current;
-      const current = state.current.view;
-      let index = saved
-        ? (current?.records.findIndex((item) => item.itemId === saved.itemId) ?? -1)
-        : -1;
-      if (saved && current?.records.length) {
-        const sameHistory =
-          saved.epoch === current.watermark?.historyEpoch &&
-          saved.projector === current.watermark.projectorVersion;
-        if (index < 0 && sameHistory) {
-          index = current.records.findIndex(
-            (item) =>
-              item.positionSequence > saved.sequence ||
-              (item.positionSequence === saved.sequence && item.positionOrdinal >= saved.ordinal),
-          );
-          if (index < 0) index = current.records.length - 1;
-        }
-        if (index >= 0) {
-          pending.current = {
-            itemId: current.records[index]!.itemId,
-            index,
-            offset: saved.offset,
-            attempts: 0,
-          };
-          restore();
-        } else {
-          anchor.current = undefined;
-          listRef.current?.scrollToOffset({ offset: 0, animated: false });
-          appliedVersion.current = restoreVersion;
-        }
-      } else appliedVersion.current = restoreVersion;
+      if (following.current || !anchor.current) {
+        following.current = true;
+        latestPending.current = true;
+        setShowLatest(false);
+        appliedVersion.current = restoreVersion;
+        latest();
+      } else restoreAnchor();
     }
     return () => {
-      if (timer.current) clearTimeout(timer.current);
-      timer.current = undefined;
-      pending.current = undefined;
+      stopRestore();
+      if (latestTimer.current) clearTimeout(latestTimer.current);
+      latestTimer.current = undefined;
     };
-  }, [active, ready, restoreVersion, restore]);
+  }, [active, ready, restoreVersion, latest, restoreAnchor, stopRestore]);
+  const firstId = view?.records[0]?.itemId;
+  useLayoutEffect(() => {
+    const previous = firstRecord.current;
+    firstRecord.current = firstId;
+    if (
+      previous &&
+      previous !== firstId &&
+      view?.records.some((item) => item.itemId === previous) &&
+      !following.current
+    )
+      restoreAnchor();
+  }, [firstId, view, restoreAnchor]);
   const Cell = useCallback(
     ({ item, children, style, onLayout, onFocusCapture }: CellProps) => (
       <View
@@ -144,31 +218,116 @@ export function useTranscriptViewport(
     ),
     [capture],
   );
+  function jumpToLatest() {
+    if (!state.current.active || !state.current.ready) return;
+    stopRestore();
+    anchor.current = undefined;
+    following.current = true;
+    dragging.current = false;
+    latestPending.current = true;
+    appliedVersion.current = state.current.restoreVersion;
+    setShowLatest(false);
+    latest(true);
+  }
+  async function loadOlder(load: () => Promise<void>) {
+    if (paging.current || !state.current.ready || !state.current.active) return;
+    following.current = false;
+    latestPending.current = false;
+    stopRestore();
+    capture();
+    paging.current = true;
+    setShowLatest(true);
+    try {
+      await load();
+    } finally {
+      paging.current = false;
+      if (alive.current && state.current.active && state.current.ready) {
+        if (following.current) latest();
+        else restoreAnchor();
+      }
+    }
+  }
   return {
     listRef,
     Cell,
+    showLatest: active && ready && showLatest,
+    jumpToLatest,
+    loadOlder,
     onViewableItemsChanged: (items: ViewToken[]) => {
       firstVisible.current = items.find((item) => item.isViewable)?.key;
       capture();
     },
+    onLayout: ((event) => {
+      layoutHeight.current = event.nativeEvent.layout.height;
+      if (following.current) latest();
+    }) satisfies NonNullable<FlatListProps<RecordItem>["onLayout"]>,
     onScroll: ((event) => {
-      scrollY.current = event.nativeEvent.contentOffset.y;
-      capture();
+      const native = event.nativeEvent;
+      scrollY.current = native.contentOffset.y;
+      layoutHeight.current = native.layoutMeasurement.height;
+      contentHeight.current = native.contentSize.height;
+      if (!state.current.ready || pending.current || paging.current) return;
+      const near = contentHeight.current - scrollY.current - layoutHeight.current <= NEAR_BOTTOM;
+      if (latestPending.current && !near) return;
+      latestPending.current = false;
+      following.current = near && !dragging.current;
+      setShowLatest(!near);
+      if (following.current) anchor.current = undefined;
+      else capture();
     }) satisfies NonNullable<FlatListProps<RecordItem>["onScroll"]>,
     onScrollBeginDrag: () => {
-      if (timer.current) clearTimeout(timer.current);
-      pending.current = undefined;
+      dragging.current = true;
+      stopRestore();
+      if (latestTimer.current) clearTimeout(latestTimer.current);
+      latestTimer.current = undefined;
+      latestPending.current = false;
+      following.current = false;
       appliedVersion.current = state.current.restoreVersion;
       capture();
     },
-    onScrollToIndexFailed: ((info) => {
-      listRef.current?.scrollToOffset({
-        offset: info.averageItemLength * info.index,
-        animated: false,
-      });
-    }) satisfies NonNullable<FlatListProps<RecordItem>["onScrollToIndexFailed"]>,
-    onContentSizeChange: () => {
-      if (pending.current && !timer.current) restore();
+    onScrollEndDrag: ((event) => {
+      dragging.current = false;
+      // Momentum still owns the viewport until its end event.
+      if (event.nativeEvent.velocity?.y) return;
+      const native = event.nativeEvent;
+      const near =
+        native.contentSize.height - native.contentOffset.y - native.layoutMeasurement.height <=
+        NEAR_BOTTOM;
+      following.current = near;
+      setShowLatest(!near);
+      if (near) {
+        anchor.current = undefined;
+        latest();
+      } else capture();
+    }) satisfies NonNullable<FlatListProps<RecordItem>["onScrollEndDrag"]>,
+    onMomentumScrollBegin: () => {
+      dragging.current = true;
+      following.current = false;
     },
+    onMomentumScrollEnd: ((event) => {
+      dragging.current = false;
+      const native = event.nativeEvent;
+      const near =
+        native.contentSize.height - native.contentOffset.y - native.layoutMeasurement.height <=
+        NEAR_BOTTOM;
+      following.current = near;
+      setShowLatest(!near);
+      if (near) {
+        anchor.current = undefined;
+        latest();
+      } else capture();
+    }) satisfies NonNullable<FlatListProps<RecordItem>["onMomentumScrollEnd"]>,
+    onScrollToIndexFailed: ((info) => {
+      if (pending.current)
+        listRef.current?.scrollToOffset({
+          offset: info.averageItemLength * info.index,
+          animated: false,
+        });
+    }) satisfies NonNullable<FlatListProps<RecordItem>["onScrollToIndexFailed"]>,
+    onContentSizeChange: ((_width, height) => {
+      contentHeight.current = height;
+      if (pending.current && !timer.current) restore();
+      else if (following.current) latest();
+    }) satisfies NonNullable<FlatListProps<RecordItem>["onContentSizeChange"]>,
   };
 }
