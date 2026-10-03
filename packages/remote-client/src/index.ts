@@ -806,12 +806,14 @@ export class RemoteRuntimeClient {
     pairing: RemotePairingSubmitted,
     fetcher: typeof fetch = globalThis.fetch.bind(globalThis),
   ): Promise<void> {
-    await jsonRequest(
+    const value = await jsonRequest(
       fetcher,
       publicUrl,
       `/v1/pairings/${encodeURIComponent(pairing.pairingId)}/ack`,
       pairing.pairingToken,
       {},
     );
+    if (!isJsonObject(value) || value.acknowledged !== true)
+      throw new ResponseValidationError("INVALID_RESPONSE", "配对确认响应无效");
   }
 }
