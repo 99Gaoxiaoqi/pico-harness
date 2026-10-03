@@ -25,13 +25,15 @@ interface PairingEntry {
   deviceName?: string;
   device?: GatewayDevice;
   token?: string;
+  confirmation?: Promise<{ acknowledged: true }>;
 }
+export type PairingConfirmation = { deviceId: string; pairedAt: number };
 export class GatewayPairings {
   private readonly entries = new Map<string, PairingEntry>();
   constructor(
     private readonly config: GatewayConfig,
     private readonly state: GatewayState,
-    private readonly persist: () => Promise<void>,
+    private readonly persist: (confirmation?: PairingConfirmation) => Promise<void>,
     private readonly now = Date.now,
   ) {}
   offer(): RemotePairingOffer & { pairingId: string } {
@@ -145,13 +147,25 @@ export class GatewayPairings {
   }
   async acknowledge(pairingId: string, claimToken: string): Promise<{ acknowledged: true }> {
     const entry = this.authenticated(pairingId, claimToken);
-    if (entry.state !== "approved" && entry.state !== "completed")
-      throw new GatewayError("CONFLICT", "配对尚未批准", 409);
-    if (entry.device) entry.device.pairedAt = this.now();
-    await this.persist();
-    entry.token = undefined;
-    entry.state = "completed";
-    return { acknowledged: true };
+    if (entry.confirmation) return entry.confirmation;
+    if (entry.state === "completed") return { acknowledged: true };
+    if (entry.state !== "approved") throw new GatewayError("CONFLICT", "配对尚未批准", 409);
+    const device = entry.device;
+    if (!device) throw new GatewayError("CONFLICT", "配对设备不存在", 409);
+    const pairedAt = this.now();
+    const confirmation = (async () => {
+      await this.persist({ deviceId: device.id, pairedAt });
+      device.pairedAt = pairedAt;
+      entry.token = undefined;
+      entry.state = "completed";
+      return { acknowledged: true as const };
+    })();
+    entry.confirmation = confirmation;
+    try {
+      return await confirmation;
+    } finally {
+      entry.confirmation = undefined;
+    }
   }
   clear(): void {
     this.entries.clear();

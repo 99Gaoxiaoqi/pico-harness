@@ -3,7 +3,12 @@ import { Alert, BackHandler, Text, View } from "react-native";
 import { getRemoteMethodSpec, type RemoteMethod } from "@pico/protocol/remote";
 import { Button, Card, Detail, Label, s } from "./ui";
 import { usePico } from "./store";
-import { clearArtifactCache } from "./artifact-cache";
+import {
+  clearArtifactCache,
+  clearLegacyArtifactCache,
+  hasLegacyArtifactCache,
+} from "./artifact-cache";
+import { PrivacySupport } from "./PrivacySupport";
 import { Jobs } from "./settings/Jobs";
 import { Memory } from "./settings/Memory";
 import { Providers } from "./settings/Providers";
@@ -29,7 +34,8 @@ type Page =
   | "memoryPolicy"
   | "jobs"
   | "usage"
-  | "cache";
+  | "cache"
+  | "privacy";
 const groups: readonly {
   title: string;
   items: readonly { id: Page; title: string; description: string; method?: RemoteMethod }[];
@@ -123,6 +129,7 @@ const groups: readonly {
         method: "usage.get",
       },
       { id: "cache", title: "本机缓存与数据", description: "清理手机成果缓存与存储说明" },
+      { id: "privacy", title: "隐私与支持", description: "离线数据说明、版本与安全诊断" },
     ],
   },
 ];
@@ -210,6 +217,8 @@ export function SettingsPanel({ onOpenComputers }: SettingsPanelProps = {}) {
         <Jobs />
       ) : page === "usage" ? (
         <Usage />
+      ) : page === "privacy" ? (
+        <PrivacySupport />
       ) : page === "cache" ? (
         <Card>
           <Text style={s.text}>手机成果缓存</Text>
@@ -226,7 +235,7 @@ export function SettingsPanel({ onOpenComputers }: SettingsPanelProps = {}) {
                   text: "清空缓存",
                   onPress: () =>
                     void pico.perform(async () => {
-                      clearArtifactCache();
+                      await clearArtifactCache();
                       setCacheCleared(true);
                     }),
                 },
@@ -234,6 +243,33 @@ export function SettingsPanel({ onOpenComputers }: SettingsPanelProps = {}) {
             }
           />
           {cacheCleared && <Label>手机文件缓存已清空。</Label>}
+          <Label>
+            草稿、图片、发送与审阅恢复记录请到“电脑与设备授权”，按电脑清理；当前按钮只清成果缓存。
+          </Label>
+          {hasLegacyArtifactCache() && (
+            <Button
+              title="仅清空全部旧版成果缓存"
+              secondary
+              onPress={() =>
+                Alert.alert(
+                  "清空全部旧版成果缓存？",
+                  "旧版缓存无法辨认电脑归属，此操作会清空所有电脑的旧版下载。电脑原文件仍保留。",
+                  [
+                    { text: "返回", style: "cancel" },
+                    {
+                      text: "清空旧缓存",
+                      style: "destructive",
+                      onPress: () =>
+                        void pico.perform(async () => {
+                          clearLegacyArtifactCache();
+                          setCacheCleared(false);
+                        }),
+                    },
+                  ],
+                )
+              }
+            />
+          )}
           <Label>
             电脑的数据目录、手动备份说明和启动行为请在电脑设置查看。当前没有云同步或自动备份。
           </Label>

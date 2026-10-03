@@ -15,13 +15,15 @@ import type { RuntimeSessionSubscriptionFrame, RuntimeNotification } from "@pico
 import {
   GenerationFence,
   canUse,
-  errorText,
   parseMobilePairing,
   type SavedHost,
   type Workspace,
   type ConnectionPhase,
   type RuntimePort,
 } from "./core";
+import { RecoverablePairing, type PairingProgress } from "./pairing";
+import { connectionIssue, type ConnectionIssue } from "./connection-errors";
+import { clearHostLocalData } from "./local-data";
 
 type Store = RuntimePort & {
   hosts: SavedHost[];
@@ -34,11 +36,19 @@ type Store = RuntimePort & {
   syncRevision: number;
   capabilities?: RemoteCapabilities;
   error?: string;
+  errorInfo?: ConnectionIssue;
+  pairing?: PairingProgress;
   connect: (host: SavedHost) => Promise<void>;
   disconnect: () => void;
   chooseWorkspace: (workspace: Workspace) => void;
   pair: (raw: string, name: string) => Promise<void>;
-  remove: (host: SavedHost) => Promise<void>;
+  resumePairing: () => Promise<void>;
+  cancelPairing: () => Promise<void>;
+  clearLocalData: (
+    host: SavedHost,
+    discardUnconfirmed?: boolean,
+  ) => Promise<{ legacyCacheRemaining: boolean }>;
+  remove: (host: SavedHost, discardUnconfirmed?: boolean) => Promise<void>;
   reason: (method: RemoteMethod) => string | undefined;
   report: (error: unknown) => void;
   perform: (task: () => Promise<unknown>) => Promise<void>;
@@ -64,6 +74,12 @@ export function PicoProvider({ children }: { children: React.ReactNode }) {
   const [syncRevision, setSyncRevision] = useState(0);
   const [capabilities, setCapabilities] = useState<RemoteCapabilities>();
   const [error, setError] = useState<string>();
+  const [errorInfo, setErrorInfo] = useState<ConnectionIssue>();
+  const [pairing, setPairing] = useState<PairingProgress>();
+  const pairingRef = useRef<RecoverablePairing | undefined>(undefined);
+  const hostsRef = useRef<SavedHost[]>([]);
+  const hostWrites = useRef<Promise<unknown>>(Promise.resolve());
+  const cleaning = useRef(new Set<string>());
   const fence = useRef(new GenerationFence());
   const clientRef = useRef<RemoteRuntimeClient | undefined>(undefined);
   const hostRef = useRef<SavedHost | undefined>(undefined);
@@ -75,6 +91,9 @@ export function PicoProvider({ children }: { children: React.ReactNode }) {
   const foreground = useRef(AppState.currentState === "active");
   const eventGeneration = useRef(0);
   const syncEpoch = useRef(0);
+  const replayBuffer = useRef<
+    { id: number; epoch: number; events: Map<string, RuntimeNotification> } | undefined
+  >(undefined);
   const syncPromise = useRef<{ id: number; epoch: number; promise: Promise<void> } | undefined>(
     undefined,
   );
@@ -84,6 +103,7 @@ export function PicoProvider({ children }: { children: React.ReactNode }) {
     syncPromise.current = undefined;
     eventsRef.current?.dispose();
     eventsRef.current = undefined;
+    replayBuffer.current = undefined;
   }
   function isCurrent(client: RemoteRuntimeClient, id: number, epoch = syncEpoch.current) {
     return (
@@ -98,13 +118,19 @@ export function PicoProvider({ children }: { children: React.ReactNode }) {
     setPhase(value);
   }
   function report(e: unknown) {
-    setError(errorText(e));
+    const issue = connectionIssue(e);
+    setError(issue.message);
+    setErrorInfo(issue);
+  }
+  function clearError() {
+    setError(undefined);
+    setErrorInfo(undefined);
   }
   async function perform(task: () => Promise<unknown>) {
     const id = fence.current.current;
     try {
       await task();
-      if (id === fence.current.current) setError(undefined);
+      if (id === fence.current.current) clearError();
     } catch (e) {
       if (id === fence.current.current) report(e);
     }
@@ -139,6 +165,7 @@ export function PicoProvider({ children }: { children: React.ReactNode }) {
       return syncPromise.current.promise;
     const promise = (async () => {
       updatePhase("syncing");
+      replayBuffer.current = { id, epoch, events: new Map() };
       const [caps, list] = await Promise.all([client.capabilities(), client.workspaces()]);
       if (!isCurrent(client, id, epoch)) return;
       setCapabilities(caps);
@@ -153,10 +180,12 @@ export function PicoProvider({ children }: { children: React.ReactNode }) {
       }
       if (!isCurrent(client, id, epoch)) return;
       updatePhase("connected");
-      setError(undefined);
+      clearError();
       setGeneration(id);
+      setSyncRevision((revision) => revision + 1);
     })().catch((error) => {
       if (isCurrent(client, id, epoch)) {
+        replayBuffer.current = undefined;
         report(error);
         updatePhase("blocked");
       }
@@ -170,33 +199,69 @@ export function PicoProvider({ children }: { children: React.ReactNode }) {
     return promise;
   }
   async function subscribe(client: RemoteRuntimeClient, w: Workspace, id: number) {
+    const epoch = syncEpoch.current;
     const subscriptionGeneration = ++eventGeneration.current;
     eventsRef.current?.dispose();
     eventsRef.current = undefined;
-    const subscription = await client.subscribe({ workspaceId: w.id }, (event) => {
+    function receive(event: RuntimeNotification) {
       if (
         id === fence.current.current &&
         subscriptionGeneration === eventGeneration.current &&
         foreground.current
-      )
-        for (const listener of notificationListeners.current) listener(event);
-    });
-    if (!isCurrent(client, id) || subscriptionGeneration !== eventGeneration.current) {
+      ) {
+        const buffer = replayBuffer.current;
+        if (buffer?.id === id && buffer.epoch === epoch) {
+          // These notifications trigger fresh reads; coalesce history by affected resource.
+          const key = `${event.topic}/${event.scope.sessionId ?? ""}/${event.scope.jobId ?? ""}`;
+          const previous = buffer.events.get(key);
+          if (!previous || event.at >= previous.at) buffer.events.set(key, event);
+        } else if (phaseRef.current === "connected") {
+          for (const listener of notificationListeners.current) listener(event);
+        }
+      }
+    }
+    const subscription = await client.subscribe({ workspaceId: w.id }, receive);
+    if (!isCurrent(client, id, epoch) || subscriptionGeneration !== eventGeneration.current) {
       subscription.dispose();
       return;
     }
     eventsRef.current = subscription;
+    for (const event of subscription.replay.events) receive(event);
   }
+  // Flush only after connected consumers have committed their new read scope.
+  useEffect(() => {
+    const buffer = replayBuffer.current;
+    if (phase !== "connected" || !buffer) return;
+    const timer = setTimeout(() => {
+      if (
+        replayBuffer.current !== buffer ||
+        phaseRef.current !== "connected" ||
+        buffer.id !== fence.current.current ||
+        buffer.epoch !== syncEpoch.current ||
+        !foreground.current
+      )
+        return;
+      replayBuffer.current = undefined;
+      for (const event of buffer.events.values())
+        for (const listener of notificationListeners.current) listener(event);
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [phase, generation, syncRevision]);
   async function connect(selected: SavedHost) {
+    if (cleaning.current.has(selected.id))
+      throw new Error("正在清理这台电脑的本机数据，请稍后连接");
     const id = resetConnection(hostRef.current?.id === selected.id);
     setHost(selected);
     hostRef.current = selected;
-    setError(undefined);
+    clearError();
     updatePhase("connecting");
     try {
       const token = await SecureStore.getItemAsync(tokenKey(selected.id));
       fence.current.assert(id);
-      if (!token) throw new Error("设备凭据已丢失，请重新配对");
+      if (!token)
+        throw Object.assign(new Error("设备凭据已丢失，请重新配对"), {
+          code: "MISSING_CREDENTIAL",
+        });
       const client: RemoteRuntimeClient = new RemoteRuntimeClient({
         publicUrl: selected.baseUrl,
         deviceToken: token,
@@ -266,10 +331,7 @@ export function PicoProvider({ children }: { children: React.ReactNode }) {
     const id = fence.current.current;
     // Client connection belongs to host generation; switching workspace uses its own event fence.
     const client = clientRef.current;
-    if (client)
-      void subscribe(client, w, id).catch((error) => {
-        if (isCurrent(client, id)) report(error);
-      });
+    if (client) void sync(client, id);
   }
   async function request<M extends RemoteMethod>(
     method: M,
@@ -289,80 +351,162 @@ export function PicoProvider({ children }: { children: React.ReactNode }) {
     fence.current.assert(id);
     return result;
   }
-  async function pair(raw: string, name: string) {
-    const offer = parseMobilePairing(raw);
-    const submitted = await RemoteRuntimeClient.submitPairing(offer, {
-      deviceName: name.trim() || "我的手机",
-      platform: Platform.OS === "ios" ? "ios" : "android",
-    });
-    setError("等待电脑本机批准，请查看 pico remote pair");
-    while (Date.now() < submitted.expiresAt) {
-      const status = await RemoteRuntimeClient.pairingStatus(offer.publicUrl, submitted);
-      if (status.status === "approved") {
-        if (
-          status.gatewayId !== offer.gatewayId ||
-          new URL(status.publicUrl).origin !== new URL(offer.publicUrl).origin
-        )
-          throw new Error("配对结果的电脑身份或地址不匹配");
-        const saved: SavedHost = {
-          id: `${status.gatewayId}.${status.deviceId}`,
-          name: offer.publicUrl,
-          baseUrl: status.publicUrl,
-          deviceId: status.deviceId,
-          gatewayId: status.gatewayId,
-        };
-        await SecureStore.setItemAsync(tokenKey(saved.id), status.deviceToken, {
-          keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
-        });
-        const updated = [...hosts.filter((x) => x.id !== saved.id), saved];
+  function mutateHosts(update: (current: SavedHost[]) => SavedHost[]) {
+    const operation = hostWrites.current
+      .catch(() => undefined)
+      .then(async () => {
+        const updated = update(hostsRef.current);
         await AsyncStorage.setItem(HOSTS, JSON.stringify(updated));
+        hostsRef.current = updated;
         setHosts(updated);
-        await RemoteRuntimeClient.acknowledgePairing(offer.publicUrl, submitted);
-        await connect(saved);
-        return;
-      }
-      if (status.status !== "pending")
-        throw new Error(status.status === "rejected" ? "电脑拒绝了配对" : "配对已过期");
-      await new Promise((resolve) => setTimeout(resolve, 1500));
-    }
-    throw new Error("配对已过期，请在电脑重新生成二维码");
-  }
-  async function remove(saved: SavedHost) {
-    const token = await SecureStore.getItemAsync(tokenKey(saved.id));
-    if (token) {
-      const c = new RemoteRuntimeClient({
-        publicUrl: saved.baseUrl,
-        deviceToken: token,
-        gatewayId: saved.gatewayId,
       });
-      try {
-        await c.revoke();
-      } catch {
-        Alert.alert(
-          "本地凭据已移除",
-          "电脑可能尚未撤销授权，请在电脑执行 pico remote devices revoke。",
-        );
-      } finally {
-        c.close();
-      }
-    }
-    await SecureStore.deleteItemAsync(tokenKey(saved.id));
-    const updated = hosts.filter((x) => x.id !== saved.id);
-    await AsyncStorage.setItem(HOSTS, JSON.stringify(updated));
-    setHosts(updated);
+    hostWrites.current = operation;
+    return operation;
+  }
+  async function forget(saved: SavedHost) {
     if (hostRef.current?.id === saved.id) disconnect();
+    await SecureStore.deleteItemAsync(tokenKey(saved.id));
+    await mutateHosts((current) => current.filter((x) => x.id !== saved.id));
+  }
+  async function withCredential(saved: SavedHost, token: string, action: "verify" | "revoke") {
+    const client = new RemoteRuntimeClient({
+      publicUrl: saved.baseUrl,
+      deviceToken: token,
+      gatewayId: saved.gatewayId,
+    });
+    try {
+      if (action === "verify") await client.capabilities();
+      else await client.revoke();
+    } finally {
+      client.close();
+    }
+  }
+  if (!pairingRef.current) {
+    pairingRef.current = new RecoverablePairing(
+      {
+        getItemAsync: SecureStore.getItemAsync,
+        setItemAsync: (key, value) =>
+          SecureStore.setItemAsync(key, value, {
+            keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
+          }),
+        deleteItemAsync: SecureStore.deleteItemAsync,
+      },
+      {
+        submit: (offer, deviceName) =>
+          RemoteRuntimeClient.submitPairing(offer, {
+            deviceName,
+            platform: Platform.OS === "ios" ? "ios" : "android",
+          }),
+        status: RemoteRuntimeClient.pairingStatus,
+        acknowledge: RemoteRuntimeClient.acknowledgePairing,
+        verify: (saved, token) => withCredential(saved, token, "verify"),
+        revoke: (saved, token) => withCredential(saved, token, "revoke"),
+        install: async (saved, token) => {
+          await SecureStore.setItemAsync(tokenKey(saved.id), token, {
+            keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
+          });
+          await mutateHosts((current) => [...current.filter((x) => x.id !== saved.id), saved]);
+        },
+        forget,
+        changed: setPairing,
+      },
+    );
+    pairingRef.current.setForeground(foreground.current);
+  }
+  async function pair(raw: string, name: string) {
+    clearError();
+    const saved = await pairingRef.current!.start(
+      parseMobilePairing(raw),
+      name.trim() || "我的手机",
+    );
+    if (saved && foreground.current && hostRef.current?.id !== saved.id) await connect(saved);
+  }
+  async function resumePairing() {
+    const saved = await pairingRef.current!.resume();
+    if (
+      saved &&
+      foreground.current &&
+      !cleaning.current.has(saved.id) &&
+      hostRef.current?.id !== saved.id
+    )
+      await connect(saved);
+  }
+  async function cancelPairing() {
+    const result = await pairingRef.current!.cancel();
+    clearError();
+    if (result.remoteRevocationUnconfirmed)
+      Alert.alert(
+        "本机配对申请已清除",
+        "电脑撤销结果未确认，请在电脑检查设备授权并执行 pico remote devices revoke。未确认授予会按原期限失效。",
+      );
+  }
+  async function withCleanup<T>(saved: SavedHost, action: () => Promise<T>): Promise<T> {
+    if (cleaning.current.has(saved.id)) throw new Error("这台电脑的本机数据正在清理");
+    cleaning.current.add(saved.id);
+    try {
+      if (hostRef.current?.id === saved.id) disconnect();
+      if ((await pairingRef.current!.inspectGatewayId()) === saved.gatewayId) await cancelPairing();
+      const result = await action();
+      clearError();
+      return result;
+    } catch (error) {
+      report(error);
+      throw error;
+    } finally {
+      cleaning.current.delete(saved.id);
+    }
+  }
+  async function clearLocalData(saved: SavedHost, discardUnconfirmed = false) {
+    return withCleanup(saved, () => clearHostLocalData(saved.id, { discardUnconfirmed }));
+  }
+  async function remove(saved: SavedHost, discardUnconfirmed = false) {
+    return withCleanup(saved, async () => {
+      const result = await clearHostLocalData(saved.id, { discardUnconfirmed });
+      const token = await SecureStore.getItemAsync(tokenKey(saved.id));
+      let revoked = false;
+      if (token) {
+        try {
+          await withCredential(saved, token, "revoke");
+          revoked = true;
+        } catch {
+          /* Local unlink still works offline; do not claim remote revocation. */
+        }
+      }
+      await forget(saved);
+      Alert.alert(
+        "本机配对与数据已移除",
+        [
+          revoked
+            ? "电脑已撤销此设备授权。"
+            : "电脑撤销结果未确认，请在电脑检查设备并执行 pico remote devices revoke。",
+          result.legacyCacheRemaining
+            ? "无法辨认电脑归属的旧版成果缓存仍保留，可在设置中单独清空。"
+            : "",
+          "电脑会话、任务和终端仍保留。",
+        ]
+          .filter(Boolean)
+          .join("\n"),
+      );
+    });
   }
   useEffect(() => {
-    void AsyncStorage.getItem(HOSTS)
+    hostWrites.current = AsyncStorage.getItem(HOSTS)
       .then((raw) => {
-        if (raw) setHosts(JSON.parse(raw) as SavedHost[]);
+        if (!raw) return;
+        const saved = JSON.parse(raw) as SavedHost[];
+        if (!Array.isArray(saved)) throw new Error("本机电脑列表无效");
+        hostsRef.current = saved;
+        setHosts(saved);
       })
       .catch(report);
+    void hostWrites.current.then(() => resumePairing()).catch(report);
     const listener = AppState.addEventListener("change", (state) => {
       const active = state === "active";
       if (foreground.current === active) return;
       foreground.current = active;
+      pairingRef.current!.setForeground(active);
       invalidateSync();
+      if (active) void resumePairing().catch(report);
       const client = clientRef.current;
       if (!client) return;
       if (!foreground.current) {
@@ -385,6 +529,7 @@ export function PicoProvider({ children }: { children: React.ReactNode }) {
     });
     return () => {
       listener.remove();
+      pairingRef.current!.setForeground(false);
       disconnect();
     };
   }, []);
@@ -399,10 +544,15 @@ export function PicoProvider({ children }: { children: React.ReactNode }) {
     syncRevision,
     capabilities,
     error,
+    errorInfo,
+    pairing,
     connect,
     disconnect,
     chooseWorkspace,
     pair,
+    resumePairing,
+    cancelPairing,
+    clearLocalData,
     remove,
     request,
     requestWithSecrets: async (method, params, secretEdits) => {
