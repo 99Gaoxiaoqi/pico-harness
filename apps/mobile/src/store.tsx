@@ -31,6 +31,7 @@ type Store = RuntimePort & {
   phase: ConnectionPhase;
   connected: boolean;
   generation: number;
+  syncRevision: number;
   capabilities?: RemoteCapabilities;
   error?: string;
   connect: (host: SavedHost) => Promise<void>;
@@ -60,6 +61,7 @@ export function PicoProvider({ children }: { children: React.ReactNode }) {
   const [workspace, setWorkspace] = useState<Workspace>();
   const [phase, setPhase] = useState<ConnectionPhase>("offline");
   const [generation, setGeneration] = useState(0);
+  const [syncRevision, setSyncRevision] = useState(0);
   const [capabilities, setCapabilities] = useState<RemoteCapabilities>();
   const [error, setError] = useState<string>();
   const fence = useRef(new GenerationFence());
@@ -394,6 +396,7 @@ export function PicoProvider({ children }: { children: React.ReactNode }) {
     phase,
     connected: phase === "connected",
     generation,
+    syncRevision,
     capabilities,
     error,
     connect,
