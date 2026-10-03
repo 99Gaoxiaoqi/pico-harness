@@ -94,6 +94,7 @@ export class RecoverablePairing {
   private epoch = 0;
   private cancellation = 0;
   private starting = false;
+  private startingGatewayId?: string;
   private foreground = true;
   private tail: Promise<unknown> = Promise.resolve();
   private operation?: { epoch: number; promise: Promise<SavedHost | undefined> };
@@ -130,7 +131,7 @@ export class RecoverablePairing {
     return pending?.approved ? hostFor(pending).id : undefined;
   }
   async inspectGatewayId(): Promise<string | undefined> {
-    return (await this.serial(() => this.read()))?.gatewayId;
+    return (await this.serial(() => this.read()))?.gatewayId ?? this.startingGatewayId;
   }
   setForeground(active: boolean) {
     if (this.foreground === active) return;
@@ -141,6 +142,7 @@ export class RecoverablePairing {
     if (!this.foreground) throw new Error("请回到前台后配对");
     if (this.starting) throw new Error("正在提交配对申请");
     this.starting = true;
+    this.startingGatewayId = offer.gatewayId;
     const cancellation = this.cancellation;
     try {
       if (this.operation || (await this.serial(() => this.read())))
@@ -168,6 +170,7 @@ export class RecoverablePairing {
       throw error;
     } finally {
       this.starting = false;
+      this.startingGatewayId = undefined;
     }
   }
   resume(): Promise<SavedHost | undefined> {

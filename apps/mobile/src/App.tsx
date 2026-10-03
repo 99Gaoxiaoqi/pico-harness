@@ -191,15 +191,18 @@ export default function App() {
                 pico.errorInfo?.action === "reconnect"
                   ? "重新连接"
                   : pico.errorInfo?.action === "verify"
-                    ? "查看会话状态"
+                    ? "核对当前状态"
                     : "电脑与连接"
               }
               quiet
               onPress={() => {
                 if (pico.errorInfo?.action === "reconnect" && pico.host)
                   void pico.connect(pico.host);
-                else if (pico.errorInfo?.action === "verify") returnToChat();
-                else setScreen("computers");
+                else if (pico.errorInfo?.action === "verify") {
+                  setDrawer(false);
+                  setToolSheet(false);
+                  if (screen === "computers" && pico.workspace) setScreen("sessions");
+                } else setScreen("computers");
               }}
             />
           )}

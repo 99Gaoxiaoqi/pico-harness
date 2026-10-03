@@ -5,6 +5,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { RemoteRuntimeClient } from "@pico/remote-client";
 import {
   getRemoteMethodSpec,
+  RemoteProtocolError,
   type RemoteMethod,
   type RemoteParams,
   type RemoteResult,
@@ -341,7 +342,12 @@ export function PicoProvider({ children }: { children: React.ReactNode }) {
     const client = clientRef.current;
     const id = fence.current.current;
     if (!client || !foreground.current || phaseRef.current !== "connected")
-      throw new Error("电脑尚未连接或正在同步");
+      throw new RemoteProtocolError(
+        "CLIENT_NOT_READY",
+        "电脑尚未连接或正在同步",
+        false,
+        "not_executed",
+      );
     const workspaceId =
       explicitWorkspaceId ??
       (getRemoteMethodSpec(method).workspaceRequired ? workspaceRef.current?.id : undefined);
@@ -559,7 +565,12 @@ export function PicoProvider({ children }: { children: React.ReactNode }) {
       const id = fence.current.current;
       const client = clientRef.current;
       if (!client || !foreground.current || phaseRef.current !== "connected")
-        throw new Error("尚未连接");
+        throw new RemoteProtocolError(
+          "CLIENT_NOT_READY",
+          "电脑尚未连接或正在同步",
+          false,
+          "not_executed",
+        );
       const result = await client.request(method, params, {
         workspaceId: getRemoteMethodSpec(method).workspaceRequired
           ? workspaceRef.current?.id
