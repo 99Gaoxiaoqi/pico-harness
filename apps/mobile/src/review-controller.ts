@@ -47,6 +47,7 @@ export class MobileReview {
   #listeners = new Set<(state: ReviewState) => void>();
   #restored?: Promise<void>;
   readonly recoveryStorage: ReviewRequestStorage;
+  #disposeClear?: () => void;
   constructor(
     readonly port: RuntimePort,
     readonly workspaceId: string,
@@ -65,21 +66,39 @@ export class MobileReview {
     this.#restored ??= this.recoveryStorage
       .load()
       .then((recovery) => {
-        if (recovery) this.#update({ recovery, unknown: true, runId: recovery.runId });
+        if (recovery && this.recoveryStorage.current)
+          this.#update({ recovery, unknown: true, runId: recovery.runId });
       })
       .catch((error: unknown) => {
-        this.#update({ unknown: true, error: errorText(error) });
+        if (this.recoveryStorage.current) this.#update({ unknown: true, error: errorText(error) });
       });
     await this.#restored;
   }
   get active() {
-    return this.#active;
+    return this.#active && this.recoveryStorage.current;
   }
   subscribe(listener: (state: ReviewState) => void) {
+    if (!this.#disposeClear)
+      this.#disposeClear = this.recoveryStorage.onClear(() => {
+        this.suspend();
+        this.#update({
+          recovery: undefined,
+          unknown: false,
+          runs: [],
+          runId: undefined,
+          path: undefined,
+          error: undefined,
+          notice: "这台电脑的本机审阅记录已清除。",
+        });
+      });
     this.#listeners.add(listener);
     listener(this.state);
     return () => {
       this.#listeners.delete(listener);
+      if (!this.#listeners.size) {
+        this.#disposeClear?.();
+        this.#disposeClear = undefined;
+      }
     };
   }
   #update(patch: Partial<ReviewState>) {
@@ -104,22 +123,22 @@ export class MobileReview {
     this.#active = true;
   }
   #current(version: number) {
-    return this.#active && version === this.#readVersion;
+    return this.active && version === this.#readVersion;
   }
   async selectSource(source: ReviewSource) {
-    if (!this.#active || this.state.pending) return;
+    if (!this.active || this.state.pending) return;
     this.#update({ source, error: undefined, notice: undefined });
     await this.refresh();
   }
   async selectGitSource(gitSource: RuntimeGitReviewSource) {
-    if (!this.#active || this.state.pending) return;
+    if (!this.active || this.state.pending) return;
     this.#update({ gitSource });
     await this.refresh();
   }
   async refresh(manual = false) {
-    if (!this.#active || this.state.pending) return;
+    if (!this.active || this.state.pending) return;
     await this.restore();
-    if (!this.#active || this.state.pending) return;
+    if (!this.active || this.state.pending) return;
     const version = ++this.#readVersion;
     this.#update({
       loading: true,
@@ -172,7 +191,7 @@ export class MobileReview {
     }
   }
   async selectRun(runId: string) {
-    if (!this.#active || this.state.pending || this.state.source !== "run") return;
+    if (!this.active || this.state.pending || this.state.source !== "run") return;
     const run = this.state.runs.find((candidate) => candidate.runId === runId);
     if (!run || run.sessionId !== this.sessionId || !isTerminalRunStatus(run.status)) return;
     const version = ++this.#readVersion;
@@ -198,7 +217,7 @@ export class MobileReview {
     }
   }
   async readFile(path: string) {
-    if (!this.#active || this.state.pending || this.state.loading || this.state.stale) return;
+    if (!this.active || this.state.pending || this.state.loading || this.state.stale) return;
     const { source, runId, changes, snapshot, gitSource } = this.state;
     if (source === "run" && (!runId || !changes)) return;
     if (source === "git" && (!snapshot || gitSource === "branch")) return;
@@ -235,7 +254,7 @@ export class MobileReview {
     const { runId, changes, source, loading, diffLoading, pending, unknown, stale, error } =
       this.state;
     if (
-      !this.#active ||
+      !this.active ||
       source !== "run" ||
       !runId ||
       !changes ||
@@ -261,7 +280,7 @@ export class MobileReview {
   }
   async retryUnknown() {
     await this.restore();
-    if (!this.#active || this.state.pending || !this.state.recovery) return false;
+    if (!this.active || this.state.pending || !this.state.recovery) return false;
     if (!this.options.canRetry?.()) {
       this.#update({ error: "电脑未声明审阅幂等能力，请先升级电脑宿主并核对原对话。" });
       return false;
@@ -275,14 +294,14 @@ export class MobileReview {
     try {
       // Save the exact payload before the transport can hand it to Host.
       await this.recoveryStorage.save(request);
+      if (!this.active || version !== this.#commandVersion) return false;
       this.#update({ recovery: request });
-      if (!this.#active || version !== this.#commandVersion) return false;
       dispatched = true;
       const result = await this.port.request("changes.review", request, this.workspaceId);
       if (!result.accepted) throw new Error("电脑未确认此审阅操作，请使用原操作重试。");
-      if (!this.#active || version !== this.#commandVersion) return false;
+      if (!this.active || version !== this.#commandVersion) return false;
       await this.recoveryStorage.clear(request.idempotencyKey);
-      if (!this.#active || version !== this.#commandVersion) return false;
+      if (!this.active || version !== this.#commandVersion) return false;
       this.#update({
         pending: undefined,
         unknown: false,
@@ -296,7 +315,7 @@ export class MobileReview {
       if (request.decision === "request_changes") this.onReturnToConversation?.();
       return true;
     } catch (error) {
-      if (!this.#active || version !== this.#commandVersion) return false;
+      if (!this.active || version !== this.#commandVersion) return false;
       const notExecuted =
         error instanceof Error && "outcome" in error && error.outcome === "not_executed";
       let unknown = recovering || (dispatched && !notExecuted);
@@ -307,7 +326,7 @@ export class MobileReview {
           unknown = true;
         }
       }
-      if (this.#active && version === this.#commandVersion)
+      if (this.active && version === this.#commandVersion)
         this.#update({
           pending: undefined,
           unknown,
@@ -327,12 +346,12 @@ export class MobileReview {
         { runId, expectedFingerprint },
         this.workspaceId,
       );
-      if (!this.#active || version !== this.#commandVersion) return false;
+      if (!this.active || version !== this.#commandVersion) return false;
       if (!result.applied) throw new Error("电脑未确认此核验操作，请刷新状态。");
       this.#update({ pending: undefined, notice: "已核验当前更改。工作区文件不会再次写入。" });
       return true;
     } catch (error) {
-      if (this.#active && version === this.#commandVersion)
+      if (this.active && version === this.#commandVersion)
         this.#update({
           pending: undefined,
           stale: true,

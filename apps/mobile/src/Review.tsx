@@ -48,7 +48,7 @@ export function ReviewPanel({
           canRetry: () => !!latest.current.capabilities?.features.reviewIdempotency?.available,
         },
       ),
-    [pico.host?.id, pico.workspace?.id, sessionId],
+    [pico.host?.id, pico.workspace?.id, sessionId, pico.generation],
   );
   const [projection, setProjection] = useState({ controller, state: controller.state });
   const view = projection.controller === controller ? projection.state : controller.state;
