@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Local simulator namespace only. Never use for a signed device or store build. -->
+  <key>application-identifier</key>
+  <string>pico-local-simulator.dev.pico.mobile</string>
+  <key>keychain-access-groups</key>
+  <array><string>pico-local-simulator.dev.pico.mobile</string></array>
+</dict>
+</plist>

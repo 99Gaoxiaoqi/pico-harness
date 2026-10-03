@@ -15,7 +15,6 @@
     "android": {
       "package": "dev.pico.mobile",
       "permissions": ["CAMERA"],
-      "usesCleartextTraffic": false,
       "versionCode": 2,
       "blockedPermissions": ["android.permission.RECORD_AUDIO"]
     },
@@ -37,7 +36,8 @@
           "cameraPermission": "拍摄图片发送给 Pico",
           "microphonePermission": false
         }
-      ]
+      ],
+      "./plugins/with-secure-android.cjs"
     ],
     "experiments": {
       "typedRoutes": false
