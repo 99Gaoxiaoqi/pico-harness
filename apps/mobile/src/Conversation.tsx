@@ -14,6 +14,7 @@ import {
   type ViewToken,
 } from "react-native";
 import * as Crypto from "expo-crypto";
+import { isTerminalRunStatus } from "@pico/protocol/mobile";
 import { usePico } from "./store";
 import { decodedBase64Size } from "./core";
 import { Button, Card, Label, s, color } from "./ui";
@@ -53,10 +54,13 @@ export function Conversation({
   const pico = usePico();
   const { view, sessionReady, restoreVersion, settings, plan, loadOlder, refreshTranscript } =
     useSessionTranscript(sessionId);
+  // The shared replica retains the last Run, including its terminal state.
+  const run =
+    view?.activeRun && !isTerminalRunStatus(view.activeRun.status) ? view.activeRun : undefined;
   const composer = useMessageComposer({
     sessionId,
     sessionReady,
-    activeRun: view?.activeRun,
+    activeRun: run,
     refreshTranscript,
     onSession,
   });
@@ -99,7 +103,6 @@ export function Conversation({
     onPanel(tab);
   }
   const syncReason = sessionReady ? undefined : "正在补齐会话";
-  const run = view?.activeRun;
   // Keep hooks/drafts alive, but remove native focus targets and stale cell hit regions.
   if (!active) return null;
   return (

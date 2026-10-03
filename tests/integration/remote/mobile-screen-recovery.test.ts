@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { isTerminalRunStatus } from "@pico/protocol/mobile";
 import {
   mobileComponent,
   mobileTags,
@@ -12,6 +13,72 @@ const ui = {
   s: {},
   color: {},
 };
+test("手机任务结束后解除执行入口与空闲操作限制，发送不携带已结束的 Run", (t) => {
+  const terminalRun = { runId: "finished-run", status: "succeeded" };
+  let composerRun: unknown;
+  const screen = mobileComponent(
+    new URL("../../../apps/mobile/src/Conversation.tsx", import.meta.url),
+    {
+      "react-native": {
+        ...mobileTags([
+          "FlatList",
+          "Image",
+          "KeyboardAvoidingView",
+          "Pressable",
+          "Text",
+          "TextInput",
+          "View",
+        ]),
+        StyleSheet: { create: (value: unknown) => value },
+        Platform: { OS: "ios" },
+        Keyboard: { dismiss() {} },
+        Alert: { alert() {} },
+      },
+      "expo-crypto": {},
+      "@pico/protocol/mobile": { isTerminalRunStatus },
+      "./store": { usePico: () => ({ reason: () => undefined }) },
+      "./core": {},
+      "./ui": ui,
+      "./ActionsSheet": { ActionsSheet: "ActionsSheet" },
+      "./conversation/useSessionTranscript": {
+        useSessionTranscript: () => ({
+          view: { records: [], queuedInputs: [], activeOverlay: [], activeRun: terminalRun },
+          sessionReady: true,
+        }),
+      },
+      "./conversation/useMessageComposer": {
+        useMessageComposer: (input: { activeRun?: unknown }) => {
+          composerRun = input.activeRun;
+          return { text: "", images: [], mode: "auto", draftReady: true };
+        },
+      },
+      "./conversation/useTranscriptViewport": { useTranscriptViewport: () => ({}) },
+      "./conversation/ComposerOptions": { ComposerOptions: "ComposerOptions" },
+      "./conversation/SessionActions": { SessionActions: "SessionActions" },
+      "./conversation/TranscriptItem": mobileTags(["TranscriptItem", "StreamingItem", "PlanCard"]),
+    },
+  );
+  t.after(() => screen.dispose());
+  const render = () => screen.render("Conversation", { active: true, sessionId: "A" });
+  render();
+  assert.equal(composerRun, undefined);
+  assert.equal(
+    screen.nodes("Button").some((node) => node.props.title === "停止"),
+    false,
+  );
+  const more = screen.nodes("Button").find((node) => node.props.title === "更多")!;
+  (more.props.onPress as () => void)();
+  render();
+  assert.equal(screen.nodes("SessionActions")[0]!.props.idle, true);
+  terminalRun.status = "running";
+  render();
+  assert.equal(composerRun, terminalRun);
+  assert.equal(
+    screen.nodes("Button").some((node) => node.props.title === "停止"),
+    true,
+  );
+  assert.equal(screen.nodes("SessionActions")[0]!.props.idle, false);
+});
 test("手机 Goal 的通知乱序不倒退，自动默认等级保留并可保存", async (t) => {
   let listener: (event: unknown) => void = () => {};
   const reads: Array<(value: unknown) => void> = [];
