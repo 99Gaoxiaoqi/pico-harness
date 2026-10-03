@@ -84,6 +84,8 @@ export {
   CAPABILITY_SCOPE_RUNTIME_CAPABILITY,
   TEMPORARY_WORKSPACE_RUNTIME_CAPABILITY,
   MODEL_CATALOG_RUNTIME_CAPABILITY,
+  REVIEW_IDEMPOTENCY_RUNTIME_CAPABILITY,
+  MEMORY_PAGINATION_RUNTIME_CAPABILITY,
   MAX_RUNTIME_FRAME_BYTES,
   MAX_TOOL_RESULT_ENVELOPE_TEXT_BYTES,
   EPHEMERAL_RUNTIME_NOTIFICATION_TOPICS,
@@ -130,6 +132,8 @@ export type {
   RuntimeMemoryItemOrigin,
   RuntimeMemoryItemSource,
   RuntimeMemoryItem,
+  RuntimeMemoryListItem,
+  RuntimeMemoryPageInfo,
   RuntimeMemorySettings,
   RuntimeMemoryContextBudget,
 } from "./runtime/memory.js";

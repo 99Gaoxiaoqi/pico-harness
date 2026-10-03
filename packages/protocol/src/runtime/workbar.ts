@@ -688,6 +688,7 @@ export type WorkbarMethodMap = {
       readonly decision: "approve" | "request_changes";
       readonly message?: string;
       readonly expectedFingerprint: string;
+      readonly idempotencyKey?: string;
     };
     readonly result: { readonly accepted: boolean; readonly fingerprint: string };
   };
@@ -1014,7 +1015,7 @@ export const workbarParamValidators = {
       decision: oneOfParam(["approve", "request_changes"]),
       expectedFingerprint: stringParam,
     },
-    { message: stringParam },
+    { message: stringParam, idempotencyKey: boundedNonEmptyStringParam(512) },
   ),
   "changes.apply": exactParamShape({
     workspacePath: stringParam,

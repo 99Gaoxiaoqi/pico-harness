@@ -45,7 +45,7 @@ export type RuntimeMemoryItemSource = JsonObject & {
 };
 
 /** Direct projection of the authoritative atomic Item and its current provenance. */
-export type RuntimeMemoryItem = JsonObject & {
+type RuntimeMemoryItemFields = JsonObject & {
   readonly itemId: string;
   readonly version: number;
   readonly content: string;
@@ -62,7 +62,22 @@ export type RuntimeMemoryItem = JsonObject & {
   readonly contentHash: string;
   readonly createdAt: number;
   readonly updatedAt: number;
+};
+
+export type RuntimeMemoryItem = RuntimeMemoryItemFields & {
   readonly sources: readonly RuntimeMemoryItemSource[];
+};
+
+/** Bounded management-list projection; complete provenance remains in memory.get. */
+export type RuntimeMemoryListItem = RuntimeMemoryItemFields & {
+  readonly sourceCount: number;
+  readonly firstSource?: RuntimeMemoryItemSource;
+};
+
+export type RuntimeMemoryPageInfo = {
+  readonly revision: number;
+  readonly nextCursor?: string;
+  readonly counts: { readonly active: number; readonly archived: number; readonly total: number };
 };
 
 export type RuntimeMemorySettings = JsonObject & {
@@ -135,7 +150,7 @@ const memorySourceResult = exactResultShape({
   eventId: resultString,
 });
 
-const memoryItemResult = exactResultShape({
+const memoryItemFieldsResult = {
   itemId: resultString,
   version: resultNonNegativeInteger,
   content: resultString,
@@ -152,7 +167,44 @@ const memoryItemResult = exactResultShape({
   contentHash: resultString,
   createdAt: resultNonNegativeInteger,
   updatedAt: resultNonNegativeInteger,
+};
+const memoryItemResult = exactResultShape({
+  ...memoryItemFieldsResult,
   sources: resultArray(memorySourceResult),
+});
+const memoryListItemResult = exactResultShape(
+  { ...memoryItemFieldsResult, sourceCount: resultNonNegativeInteger },
+  { firstSource: memorySourceResult },
+);
+const memoryPageInfoResult = exactResultShape(
+  {
+    revision: resultNonNegativeInteger,
+    counts: exactResultShape({
+      active: resultNonNegativeInteger,
+      archived: resultNonNegativeInteger,
+      total: resultNonNegativeInteger,
+    }),
+  },
+  { nextCursor: resultString },
+);
+function memoryListParams(value: Record<string, unknown>): void {
+  exactParamShape(
+    { workspacePath: stringParam },
+    {
+      lifecycleStates: enumArrayParam(["active", "archived"]),
+      kinds: enumArrayParam(["preference", "identity", "context", "knowledge", "failure", "note"]),
+      limit: positiveIntegerParam,
+      paged: booleanParam,
+      cursor: boundedNonEmptyStringParam(4_096),
+    },
+  )(value);
+  if (("paged" in value && value.paged !== true) || ("cursor" in value && value.paged !== true))
+    throw invalidParams("memory.list 游标要求 paged=true");
+}
+const legacyMemoryListResult = exactResultShape({ items: resultArray(memoryItemResult) });
+const pagedMemoryListResult = exactResultShape({
+  items: resultArray(memoryListItemResult),
+  pageInfo: memoryPageInfoResult,
 });
 
 const memorySettingsResult = exactResultShape({
@@ -168,8 +220,12 @@ export type MemoryMethodMap = {
       readonly lifecycleStates?: readonly RuntimeMemoryLifecycleState[];
       readonly kinds?: readonly RuntimeMemoryItemKind[];
       readonly limit?: number;
+      readonly paged?: true;
+      readonly cursor?: string;
     };
-    readonly result: { readonly items: readonly RuntimeMemoryItem[] };
+    readonly result:
+      | { readonly items: readonly RuntimeMemoryItem[]; readonly pageInfo?: never }
+      | { readonly items: readonly RuntimeMemoryListItem[]; readonly pageInfo: RuntimeMemoryPageInfo };
   };
   readonly "memory.get": {
     readonly params: WorkspaceParams & { readonly itemId: string };
@@ -227,14 +283,7 @@ export type MemoryMethodMap = {
 };
 
 export const memoryParamValidators = {
-  "memory.list": exactParamShape(
-    { workspacePath: stringParam },
-    {
-      lifecycleStates: enumArrayParam(["active", "archived"]),
-      kinds: enumArrayParam(["preference", "identity", "context", "knowledge", "failure", "note"]),
-      limit: positiveIntegerParam,
-    },
-  ),
+  "memory.list": memoryListParams,
   "memory.get": exactParamShape({
     workspacePath: stringParam,
     itemId: boundedNonEmptyStringParam(512),
@@ -259,7 +308,11 @@ export const memoryParamValidators = {
 } satisfies Readonly<Record<keyof MemoryMethodMap, RuntimeParamValidator>>;
 
 export const memoryResultValidators = {
-  "memory.list": exactResultShape({ items: resultArray(memoryItemResult) }),
+  "memory.list": (value, path) => {
+    if (value && typeof value === "object" && Object.hasOwn(value, "pageInfo"))
+      pagedMemoryListResult(value, path);
+    else legacyMemoryListResult(value, path);
+  },
   "memory.get": exactResultShape({ item: memoryItemResult }),
   "memory.create": exactResultShape({ item: memoryItemResult }),
   "memory.update": exactResultShape({ item: memoryItemResult }),
