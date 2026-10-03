@@ -2584,9 +2584,18 @@ export function useRuntimeStore(): RuntimeStore {
           }
           restored = { workspacePath, sessionId: targetSessionId };
           setMessage("已回到检查点。Runtime 已使用预览指纹重新验证。");
-          if (!preview)
+          if (
+            !preview &&
+            dataRef.current.workspacePath === workspacePath &&
+            workspaceLoadIntentRef.current === workspacePath
+          )
             void (async () => {
               await loadWorkspace(bridge, workspacePath);
+              if (
+                dataRef.current.workspacePath !== workspacePath ||
+                workspaceLoadIntentRef.current !== workspacePath
+              )
+                return;
               await loadConversation(bridge, workspacePath, targetSessionId);
             })().catch(reportFailure);
         });

@@ -352,7 +352,7 @@ export function createWorkspaceCommands(deps: WorkspaceCommandRegistryDeps) {
                     : [
                         `Loaded active items: ${items.items.filter((item) => item.lifecycleState === "active").length}`,
                         `Loaded archived items: ${items.items.filter((item) => item.lifecycleState === "archived").length}`,
-                        "Total items: unknown (Host does not support memory pagination).",
+                        "Total items: unknown (update the Host to load more memories).",
                       ]),
                 ].join("\n"),
               );

@@ -693,11 +693,13 @@ export class RemoteGateway {
               : {}),
         },
         memoryPagination: {
-          available: memoryPagination && device.permissions.includes("workspace.read"),
+          available:
+            memoryPagination &&
+            device.permissions.includes(REMOTE_METHOD_SPECS["memory.list"].permission),
           ...(!memoryPagination
             ? { reason: "电脑尚未支持记忆分页，请更新并重启 Pico" }
-            : !device.permissions.includes("workspace.read")
-              ? { reason: "请在电脑授予项目读取权限" }
+            : !device.permissions.includes(REMOTE_METHOD_SPECS["memory.list"].permission)
+              ? { reason: "请在电脑授予配置管理权限" }
               : {}),
         },
         modelCatalog: {

@@ -203,7 +203,12 @@ function assertAuthResult(value: Record<string, unknown>): RuntimeAuthResult {
 }
 
 function assertRequest(value: Record<string, unknown>): RuntimeRequest {
-  if (typeof value.requestId !== "string" || value.requestId.length === 0) {
+  // Bound the echoed identifier so paged results can reserve a fixed response envelope.
+  if (
+    typeof value.requestId !== "string" ||
+    value.requestId.length === 0 ||
+    value.requestId.length > 512
+  ) {
     throw protocolError("INVALID_REQUEST", "IPC requestId 无效");
   }
   if (typeof value.method !== "string" || !isRuntimeMethod(value.method)) {

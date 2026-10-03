@@ -11,8 +11,12 @@ import { createWorkspaceCommands } from "@pico/cli/workspace-commands";
 import type { RpcCommandRuntime } from "@pico/cli/rpc-command-runtime";
 import {
   MEMORY_PAGINATION_RUNTIME_CAPABILITY,
+  LOCAL_RUNTIME_PROTOCOL_VERSION,
+  encodeRuntimeFrame,
+  parseRuntimeMessage,
   parseRuntimeResult,
   RuntimeProtocolError,
+  type JsonValue,
   type RuntimeMethod,
   type RuntimeParams,
   type RuntimeResult,
@@ -89,11 +93,45 @@ test("memory pagination survives long content and provenance, filters before lim
     assert.ok(firstPage.items[0]?.firstSource);
     assert.equal(Object.hasOwn(firstPage.items[0]!, "sources"), false);
     const ids = firstPage.items.map((item) => item.itemId);
+    const requestId = "\u0000".repeat(512);
+    assert.doesNotThrow(() =>
+      parseRuntimeMessage(
+        JSON.stringify({
+          kind: "request",
+          protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
+          requestId,
+          method: "memory.list",
+          params: { workspacePath, paged: true },
+        }),
+      ),
+    );
+    assert.throws(
+      () =>
+        parseRuntimeMessage(
+          JSON.stringify({
+            kind: "request",
+            protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
+            requestId: `${requestId}x`,
+            method: "memory.list",
+            params: { workspacePath, paged: true },
+          }),
+        ),
+      (error: unknown) => error instanceof RuntimeProtocolError && error.code === "INVALID_REQUEST",
+    );
     let page: RuntimeResult<"memory.list"> = firstPage;
     for (;;) {
+      assert.doesNotThrow(() =>
+        encodeRuntimeFrame({
+          kind: "response",
+          protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
+          requestId,
+          ok: true,
+          result: page as unknown as JsonValue,
+        }),
+      );
       assert.ok(
         Buffer.byteLength(
-          JSON.stringify({ type: "response", id: "x".repeat(512), result: page }),
+          JSON.stringify({ requestId: "\u0000".repeat(128), ok: true, value: page }),
         ) <= 983_040,
       );
       if (!page.pageInfo?.nextCursor) break;

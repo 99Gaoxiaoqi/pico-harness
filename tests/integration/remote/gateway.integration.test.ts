@@ -17,6 +17,8 @@ import {
   CAPABILITY_SCOPE_RUNTIME_CAPABILITY,
   TEMPORARY_WORKSPACE_RUNTIME_CAPABILITY,
   MODEL_CATALOG_RUNTIME_CAPABILITY,
+  REVIEW_IDEMPOTENCY_RUNTIME_CAPABILITY,
+  MEMORY_PAGINATION_RUNTIME_CAPABILITY,
   TRANSCRIPT_PROJECTOR_VERSION,
   parseRuntimeResult,
 } from "@pico/protocol";
@@ -107,6 +109,9 @@ class FixtureRuntime implements GatewayRuntimeClient {
   disposed = 0;
   corruptArtifact = false;
   supportsModelCatalog = false;
+  supportsReviewIdempotency = false;
+  supportsMemoryPagination = false;
+  recoveryRun = false;
   supportsOwnership = true;
   supportsCleanupIsolation = true;
   async request<M extends RuntimeMethod>(
@@ -126,9 +131,17 @@ class FixtureRuntime implements GatewayRuntimeClient {
           CAPABILITY_SCOPE_RUNTIME_CAPABILITY,
           TEMPORARY_WORKSPACE_RUNTIME_CAPABILITY,
           ...(this.supportsModelCatalog ? [MODEL_CATALOG_RUNTIME_CAPABILITY] : []),
+          ...(this.supportsReviewIdempotency ? [REVIEW_IDEMPOTENCY_RUNTIME_CAPABILITY] : []),
+          ...(this.supportsMemoryPagination ? [MEMORY_PAGINATION_RUNTIME_CAPABILITY] : []),
         ],
         picoHome: "/pico",
       };
+    else if (method === "memory.list")
+      value = record["paged"]
+        ? { items: [], pageInfo: { revision: 1, counts: { active: 0, archived: 0, total: 0 } } }
+        : { items: [] };
+    else if (method === "changes.review")
+      value = { accepted: true, fingerprint: record["expectedFingerprint"] };
     else if (method === "catalog.models") {
       assert.equal(record["workspacePath"], this.workspacePath);
       value = {
@@ -151,7 +164,23 @@ class FixtureRuntime implements GatewayRuntimeClient {
       value = { session };
     } else if (method === "session.list") value = { sessions: [session] };
     else if (method === "session.send") value = { session, disposition: "started" };
-    else if (method === "runs.list") value = { runs: [] };
+    else if (method === "runs.list")
+      value = {
+        runs: this.recoveryRun
+          ? [
+              {
+                runId: "run-1",
+                workspacePath: this.workspacePath,
+                sessionId: session.sessionId,
+                description: "fixture",
+                status: "succeeded",
+                startedAt: 1,
+                updatedAt: 1,
+                version: 1,
+              },
+            ]
+          : [],
+      };
     else if (method === "terminal.ownershipCapabilities") {
       if (!this.supportsOwnership)
         throw Object.assign(new Error("old daemon"), { code: "METHOD_NOT_FOUND" });
@@ -1264,6 +1293,82 @@ test("模型目录能力兼容旧 Host，项目读取不扩大普通目录的配
     assert.equal(noReadValue.features.modelCatalog.available, false);
     assert.match(noReadValue.features.modelCatalog.reason ?? "", /读取权限/u);
     assert.equal((await rpc("catalog.models")).status, 403);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("审阅幂等和记忆分页仅向支持的 Host 转发，沿用原权限与旧响应", async () => {
+  const f = await fixture({ ordinaryWorkspace: true });
+  try {
+    const { submitted, granted } = await f.pair();
+    await f.http("POST", `/v1/pairings/${submitted.pairingId}/ack`, submitted.pairingToken);
+    await requestGatewayControl(f.home, "devices.grant", {
+      deviceId: granted.deviceId,
+      permissions: ["workspace.read", "session.control", "host.admin"],
+      workspaceIds: ["workspace-1"],
+    });
+    const rpc = (method: RemoteMethod, params: unknown) =>
+      f.http("POST", "/v1/rpc", granted.deviceToken, {
+        version: 1,
+        requestId: `recovery-${method}`,
+        method,
+        workspaceId: "workspace-1",
+        params,
+      });
+    await f.http("GET", "/v1/capabilities", granted.deviceToken);
+    const runtime = f.runtimes.get(granted.deviceId)!;
+    runtime.recoveryRun = true;
+    const review = {
+      runId: "run-1",
+      decision: "request_changes",
+      message: "请修正",
+      expectedFingerprint: "fp",
+      idempotencyKey: "operation-1",
+    };
+    assert.equal((await rpc("changes.review", review)).status, 404);
+    assert.equal((await rpc("memory.list", { paged: true, limit: 50 })).status, 404);
+    assert.equal(
+      runtime.calls.some(
+        (call) => call.method === "changes.review" || call.method === "memory.list",
+      ),
+      false,
+    );
+    assert.deepEqual((await rpc("memory.list", { limit: 50 })).json, {
+      requestId: "recovery-memory.list",
+      ok: true,
+      value: { items: [] },
+    });
+    runtime.supportsReviewIdempotency = true;
+    runtime.supportsMemoryPagination = true;
+    const caps = (await f.http("GET", "/v1/capabilities", granted.deviceToken)).json as {
+      features: Record<string, { available: boolean }>;
+    };
+    assert.equal(caps.features.reviewIdempotency!.available, true);
+    assert.equal(caps.features.memoryPagination!.available, true);
+    assert.equal((await rpc("changes.review", review)).status, 200);
+    assert.deepEqual(runtime.calls.find((call) => call.method === "changes.review")!.params, {
+      ...review,
+      workspacePath: runtime.workspacePath,
+    });
+    const page = await rpc("memory.list", { paged: true, limit: 50 });
+    assert.equal(page.status, 200);
+    assert.equal(
+      (page.json as { value: { pageInfo: { revision: number } } }).value.pageInfo.revision,
+      1,
+    );
+    await requestGatewayControl(f.home, "devices.grant", {
+      deviceId: granted.deviceId,
+      permissions: ["workspace.read"],
+      workspaceIds: ["workspace-1"],
+    });
+    const ordinary = (await f.http("GET", "/v1/capabilities", granted.deviceToken)).json as {
+      features: Record<string, { available: boolean }>;
+    };
+    assert.equal(ordinary.features.reviewIdempotency!.available, false);
+    assert.equal(ordinary.features.memoryPagination!.available, false);
+    assert.equal((await rpc("memory.list", { paged: true, limit: 50 })).status, 403);
+    assert.equal((await rpc("changes.review", review)).status, 403);
   } finally {
     await f.cleanup();
   }

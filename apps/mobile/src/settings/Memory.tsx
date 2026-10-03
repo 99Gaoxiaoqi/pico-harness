@@ -233,7 +233,7 @@ export function Memory({ section = "content" }: { section?: "content" | "policy"
         <Label>
           {pageInfo
             ? `已加载 ${items.length} / ${pageInfo.counts.total} 条`
-            : `已加载 ${items.length} 条，总数未知（电脑暂不支持分页）`}
+            : `已加载 ${items.length} 条，总数未知；更新电脑端可加载更多`}
           {scope !== "all" ? `；当前范围已加载 ${visible.length} 条` : ""}
         </Label>
         {notice ? <Label>{notice}</Label> : null}

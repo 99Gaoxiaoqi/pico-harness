@@ -270,7 +270,7 @@ export function MemoryPage({
           <p>
             {memory.pageInfo
               ? `已加载 ${memory.items.length} / ${memory.pageInfo.counts.total} 条`
-              : `已加载 ${memory.items.length} 条，总数未知`}
+              : `已加载 ${memory.items.length} 条，总数未知；更新电脑端可加载更多`}
           </p>
         </div>
         <div className="memory-page__actions">
