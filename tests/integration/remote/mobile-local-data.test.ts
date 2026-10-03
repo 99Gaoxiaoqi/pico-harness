@@ -372,3 +372,56 @@ test("按电脑清理失败不报告成功，损坏恢复记录须明确放弃�
   assert.equal(f.values.has(f.draftKey(scopeA)), false);
   assert.equal((await f.drafts.load(scopeB))?.text, "keep B");
 });
+
+test("全量成果缓存清理等待慢原生下载收尾，期间拒绝新下载并移除新版与旧版缓存", async () => {
+  const f = await fixture();
+  const artifact = {
+    artifactId: "artifact",
+    title: "result.txt",
+    mimeType: "text/plain",
+    sizeBytes: 17,
+    digest: createHash("sha256").update("verified artifact").digest("hex"),
+  };
+  const download = (hostId: string) =>
+    f.downloadArtifact({
+      scopeId: hostId,
+      workspaceId: "workspace",
+      sessionId: "session",
+      artifact: artifact as Parameters<typeof f.downloadArtifact>[0]["artifact"],
+      client: { artifactUrl: () => hostId, authorizationHeaders: () => ({}) } as Parameters<
+        typeof f.downloadArtifact
+      >[0]["client"],
+      assertCurrent() {},
+    });
+  const fileB = await download("B");
+  const legacy = new f.native.fs.Directory("file:///cache", "pico-artifacts");
+  legacy.create();
+  f.files.set(legacy.uri + "/unknown-flat-file", new Uint8Array([1]));
+  f.gateDownload();
+  const lateDownload = download("A").then(
+    () => "unexpected",
+    (error: Error) => error.message,
+  );
+  await f.downloadEntered.promise;
+  let cleared = false;
+  const clearing = f.clearArtifactCache().then(() => {
+    cleared = true;
+  });
+  const sameCleanup = f.clearArtifactCache();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(cleared, false, "原生下载尚未收尾时不能提示清理成功");
+  assert.equal(f.files.has(fileB.uri), true, "排空前不提前删除缓存目录");
+  await assert.rejects(download("B"), /正在清理/);
+  f.downloadGate.resolve();
+  assert.match(await lateDownload, /取消/);
+  await clearing;
+  await sameCleanup;
+  assert.equal(f.hasLegacyArtifactCache(), false);
+  assert.equal(f.files.size, 0, "原生迟到写入不能留下文件");
+  assert.equal(
+    [...f.directories].some((path) => path.includes("pico-artifacts")),
+    false,
+  );
+  const fresh = await download("B");
+  assert.equal(f.files.has(fresh.uri), true, "清理完成后恢复新下载");
+});
