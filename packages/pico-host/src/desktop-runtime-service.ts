@@ -365,6 +365,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     string,
     { readonly requestFingerprint: string; readonly promise: Promise<JsonObject> }
   >();
+  private readonly pendingReviews = new Map<
+    string,
+    { readonly payload: string; readonly promise: Promise<JsonValue> }
+  >();
   private readonly agentGraphStores = new Map<string, SqliteAgentGraphControlStore>();
   private readonly inFlightHandles = new Set<Promise<JsonValue>>();
   private readonly goalCoordinator: GoalContinuationCoordinator;
@@ -3752,38 +3756,96 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     readonly decision: "approve" | "request_changes";
     readonly message?: string;
     readonly expectedFingerprint: string;
+    readonly idempotencyKey?: string;
   }): Promise<JsonValue> {
-    const revisionPrompt =
-      params.decision === "request_changes" ? requireRevisionPrompt(params.message) : undefined;
-    const projection = await this.projectRunChanges(params.workspacePath, params.runId);
-    assertDesktopChangesComplete(projection.changes, "Changes 审阅");
-    assertDesktopChangesFingerprint(params.expectedFingerprint, projection.fingerprint, "Changes");
-    if (revisionPrompt) {
-      await this.options.runtimeService.handle(
-        createRuntimeRequest("run.start", {
-          workspacePath: projection.workspacePath,
-          sessionId: projection.sessionId,
-          prompt: revisionPrompt,
-        }),
+    const canonical = await this.requireTrustedWorkspace(params.workspacePath);
+    const message = params.message?.trim();
+    const request = {
+      workspacePath: canonical,
+      runId: params.runId,
+      decision: params.decision,
+      ...(message !== undefined ? { message } : {}),
+      expectedFingerprint: params.expectedFingerprint,
+    };
+    const idempotencyKey = params.idempotencyKey?.trim();
+    if (params.idempotencyKey !== undefined && !idempotencyKey)
+      throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, "idempotencyKey 不能为空");
+    const command = idempotencyKey
+      ? { commandType: "changes.review", idempotencyKey, request }
+      : undefined;
+    if (command) {
+      const replay = await this.options.runtimeService.replayIdempotentDaemonCommand(
+        canonical,
+        command,
       );
+      if (replay) return toJsonValue(replay.result);
     }
-    this.publish(
-      createRuntimeNotification({
-        topic: "changes.updated",
-        scope: {
-          workspacePath: projection.workspacePath,
-          sessionId: projection.sessionId,
-          runId: params.runId,
+    const pendingKey = command ? `${canonical}\0${idempotencyKey}` : undefined;
+    const payload = JSON.stringify(request);
+    const pending = pendingKey ? this.pendingReviews.get(pendingKey) : undefined;
+    if (pending) {
+      if (pending.payload !== payload)
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.CONFLICT,
+          "审阅幂等键正在处理不同的参数",
+        );
+      return pending.promise;
+    }
+    // Own the operation before the first asynchronous projection; concurrent retransmissions join it.
+    const operation = this.withWorkspaceAdmission(canonical, async () => {
+      const revisionPrompt =
+        params.decision === "request_changes" ? requireRevisionPrompt(message) : undefined;
+      const projection = await this.projectRunChanges(canonical, params.runId);
+      assertDesktopChangesComplete(projection.changes, "Changes 审阅");
+      assertDesktopChangesFingerprint(
+        params.expectedFingerprint,
+        projection.fingerprint,
+        "Changes",
+      );
+      const prepared = revisionPrompt
+        ? await this.options.runtimeService.prepareForegroundRun({
+            workspacePath: canonical,
+            sessionId: projection.sessionId,
+            prompt: revisionPrompt,
+          })
+        : undefined;
+      let startedRunId: string | undefined;
+      const accept = () => {
+        if (prepared) startedRunId = prepared.start().resourceId;
+        this.publish(
+          createRuntimeNotification({
+            topic: "changes.updated",
+            scope: {
+              workspacePath: canonical,
+              sessionId: projection.sessionId,
+              runId: params.runId,
+            },
+            resourceVersion: this.nextResourceVersion(),
+            at: this.now(),
+            payload: { runId: params.runId, fingerprint: projection.fingerprint },
+          }),
+        );
+        return {
+          result: { accepted: true, fingerprint: projection.fingerprint },
+          ...(startedRunId ? { resourceId: startedRunId } : {}),
+        };
+      };
+      if (!command) return accept().result;
+      // run.started, its daemon_runs projection, review receipt and changes.updated commit together.
+      const outcome = await this.options.runtimeService.executeIdempotentDaemonCommand(
+        canonical,
+        command,
+        accept,
+        () => {
+          if (startedRunId) prepared?.abort(startedRunId);
         },
-        resourceVersion: this.nextResourceVersion(),
-        at: this.now(),
-        payload: {
-          runId: params.runId,
-          fingerprint: projection.fingerprint,
-        },
-      }),
-    );
-    return { accepted: true, fingerprint: projection.fingerprint };
+      );
+      return outcome.result;
+    }).finally(() => {
+      if (pendingKey) this.pendingReviews.delete(pendingKey);
+    });
+    if (pendingKey) this.pendingReviews.set(pendingKey, { payload, promise: operation });
+    return operation;
   }
 
   private async applyChanges(

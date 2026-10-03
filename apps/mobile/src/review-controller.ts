@@ -4,6 +4,11 @@ import {
   type RuntimeResult,
 } from "@pico/protocol/mobile";
 import { errorText, type RuntimePort } from "./core.js";
+import {
+  memoryReviewStorage,
+  ReviewRequestStorage,
+  type PendingReviewRequest,
+} from "./review-request-storage.js";
 
 export type ReviewSource = "run" | "git";
 export type ReviewState = {
@@ -20,6 +25,7 @@ export type ReviewState = {
   pending?: "approve" | "request_changes" | "apply";
   stale: boolean;
   unknown: boolean;
+  recovery?: PendingReviewRequest;
   error?: string;
   notice?: string;
 };
@@ -39,12 +45,33 @@ export class MobileReview {
   #commandVersion = 0;
   #active = true;
   #listeners = new Set<(state: ReviewState) => void>();
+  #restored?: Promise<void>;
+  readonly recoveryStorage: ReviewRequestStorage;
   constructor(
     readonly port: RuntimePort,
     readonly workspaceId: string,
     readonly sessionId: string,
     readonly onReturnToConversation?: () => void,
-  ) {}
+    readonly options: {
+      recoveryStorage?: ReviewRequestStorage;
+      canRetry?: () => boolean;
+    } = {},
+  ) {
+    this.recoveryStorage =
+      options.recoveryStorage ??
+      new ReviewRequestStorage(memoryReviewStorage, JSON.stringify([workspaceId, sessionId]));
+  }
+  async restore() {
+    this.#restored ??= this.recoveryStorage
+      .load()
+      .then((recovery) => {
+        if (recovery) this.#update({ recovery, unknown: true, runId: recovery.runId });
+      })
+      .catch((error: unknown) => {
+        this.#update({ unknown: true, error: errorText(error) });
+      });
+    await this.#restored;
+  }
   get active() {
     return this.#active;
   }
@@ -91,8 +118,9 @@ export class MobileReview {
   }
   async refresh(manual = false) {
     if (!this.#active || this.state.pending) return;
+    await this.restore();
+    if (!this.#active || this.state.pending) return;
     const version = ++this.#readVersion;
-    const previousUnknown = this.state.unknown;
     this.#update({
       loading: true,
       diffLoading: false,
@@ -132,10 +160,9 @@ export class MobileReview {
           runs: owned,
           runId,
           loading: false,
-          ...(manual ? { unknown: false } : {}),
           notice:
-            manual && previousUnknown
-              ? "状态已刷新。请核对原对话是否已经续跑，再决定是否重新提交。"
+            manual && this.state.unknown
+              ? "状态已刷新，原审阅结果仍未确认。请使用原操作重试以获取持久回执。"
               : undefined,
         });
         if (runId) await this.selectRun(runId);
@@ -204,6 +231,7 @@ export class MobileReview {
     }
   }
   async submit(decision: "approve" | "request_changes" | "apply", message?: string) {
+    await this.restore();
     const { runId, changes, source, loading, diffLoading, pending, unknown, stale, error } =
       this.state;
     if (
@@ -221,48 +249,95 @@ export class MobileReview {
       return false;
     const normalized = message?.trim();
     if (decision === "request_changes" && !normalized) return false;
+    if (decision === "apply") return this.#apply(runId, changes.fingerprint);
+    const request: PendingReviewRequest = {
+      runId,
+      expectedFingerprint: changes.fingerprint,
+      decision,
+      idempotencyKey: this.recoveryStorage.createId(),
+      ...(decision === "request_changes" ? { message: normalized! } : {}),
+    };
+    return this.#sendReview(request);
+  }
+  async retryUnknown() {
+    await this.restore();
+    if (!this.#active || this.state.pending || !this.state.recovery) return false;
+    if (!this.options.canRetry?.()) {
+      this.#update({ error: "电脑未声明审阅幂等能力，请先升级电脑宿主并核对原对话。" });
+      return false;
+    }
+    return this.#sendReview(this.state.recovery);
+  }
+  async #sendReview(request: PendingReviewRequest) {
     const version = ++this.#commandVersion;
-    this.#update({ pending: decision, notice: undefined });
+    this.#update({ pending: request.decision, error: undefined, notice: undefined });
+    let dispatched = false;
     try {
-      const target = { runId, expectedFingerprint: changes.fingerprint };
-      const result =
-        decision === "apply"
-          ? await this.port.request("changes.apply", target, this.workspaceId)
-          : await this.port.request(
-              "changes.review",
-              {
-                ...target,
-                decision,
-                ...(decision === "request_changes" && normalized ? { message: normalized } : {}),
-              },
-              this.workspaceId,
-            );
+      // Save the exact payload before the transport can hand it to Host.
+      await this.recoveryStorage.save(request);
+      this.#update({ recovery: request });
       if (!this.#active || version !== this.#commandVersion) return false;
-      const accepted = "accepted" in result ? result.accepted : result.applied;
-      if (!accepted) throw new Error("电脑未确认此审阅操作，请刷新状态。");
+      dispatched = true;
+      const result = await this.port.request("changes.review", request, this.workspaceId);
+      if (!result.accepted) throw new Error("电脑未确认此审阅操作，请使用原操作重试。");
+      if (!this.#active || version !== this.#commandVersion) return false;
+      await this.recoveryStorage.clear(request.idempotencyKey);
+      if (!this.#active || version !== this.#commandVersion) return false;
       this.#update({
         pending: undefined,
-        ...(decision === "request_changes" ? { changes: undefined, diff: undefined } : {}),
+        unknown: false,
+        recovery: undefined,
+        ...(request.decision === "request_changes" ? { changes: undefined, diff: undefined } : {}),
         notice:
-          decision === "request_changes"
+          request.decision === "request_changes"
             ? "修改意见已提交，正在返回原对话。"
-            : decision === "approve"
-              ? "审阅已批准。工作区文件不会再次写入。"
-              : "已核验当前更改。工作区文件不会再次写入。",
+            : "审阅已批准。工作区文件不会再次写入。",
       });
-      if (decision === "request_changes") this.onReturnToConversation?.();
+      if (request.decision === "request_changes") this.onReturnToConversation?.();
       return true;
     } catch (error) {
-      if (this.#active && version === this.#commandVersion) {
-        const outcomeUnknown =
-          error instanceof Error && "outcome" in error && error.outcome === "unknown";
+      if (!this.#active || version !== this.#commandVersion) return false;
+      const notExecuted =
+        error instanceof Error && "outcome" in error && error.outcome === "not_executed";
+      let unknown = dispatched && !notExecuted;
+      if (dispatched && notExecuted) {
+        try {
+          await this.recoveryStorage.clear(request.idempotencyKey);
+        } catch {
+          unknown = true;
+        }
+      }
+      if (this.#active && version === this.#commandVersion)
         this.#update({
           pending: undefined,
-          unknown: outcomeUnknown,
-          stale: !outcomeUnknown,
+          unknown,
+          recovery: unknown ? request : undefined,
+          stale: !unknown,
           error: errorText(error),
         });
-      }
+      return false;
+    }
+  }
+  async #apply(runId: string, expectedFingerprint: string) {
+    const version = ++this.#commandVersion;
+    this.#update({ pending: "apply", notice: undefined });
+    try {
+      const result = await this.port.request(
+        "changes.apply",
+        { runId, expectedFingerprint },
+        this.workspaceId,
+      );
+      if (!this.#active || version !== this.#commandVersion) return false;
+      if (!result.applied) throw new Error("电脑未确认此核验操作，请刷新状态。");
+      this.#update({ pending: undefined, notice: "已核验当前更改。工作区文件不会再次写入。" });
+      return true;
+    } catch (error) {
+      if (this.#active && version === this.#commandVersion)
+        this.#update({
+          pending: undefined,
+          stale: true,
+          error: errorText(error),
+        });
       return false;
     }
   }

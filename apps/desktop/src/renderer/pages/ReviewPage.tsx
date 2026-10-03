@@ -2,12 +2,18 @@ import { Button as AstryxButton } from "@astryxdesign/core/Button";
 import { TextField, SelectField } from "../ui-controls.js";
 import { isTerminalRunStatus } from "@pico/protocol";
 import { FileCode2, FileDiff, History, RefreshCw, RotateCcw } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  DesktopReviewOperationStorage,
+  reviewOutcomeUnknown,
+  type PersistedReviewOperation,
+} from "../review-operation-storage.js";
 import { useLocation, useNavigate } from "react-router-dom";
 import { Button, EmptyState, InlineNotice } from "../components.js";
 import type { ChangeView } from "../model.js";
 import { useRuntime } from "../runtime-context.js";
 import {
+  sessionHref,
   workspacePathFromSearch,
   workspaceSessionKey,
   type WorkspaceSessionRef,
@@ -37,6 +43,36 @@ export function ReviewPage() {
     .sort((left, right) => right.startedAt - left.startedAt);
   const requestedRunId = searchParams.get("runId");
   const runId = runs.find((run) => run.id === requestedRunId)?.id ?? runs[0]?.id;
+  const scopeKey = JSON.stringify([workspacePath, sessionId]);
+  const operationStore = useMemo(() => new DesktopReviewOperationStorage(scopeKey), [scopeKey]);
+  const restored = useMemo(() => {
+    try {
+      return { operation: operationStore.load(), error: undefined };
+    } catch (cause) {
+      return {
+        operation: undefined,
+        error: cause instanceof Error ? cause.message : String(cause),
+      };
+    }
+  }, [operationStore]);
+  const [operationState, setOperationState] = useState({ scope: scopeKey, ...restored });
+  const recovery = operationState.scope === scopeKey ? operationState : restored;
+  const [submitting, setSubmitting] = useState(false);
+  const reviewInFlight = useRef(false);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  const currentScope = useRef(scopeKey);
+  currentScope.current = scopeKey;
+  useEffect(() => {
+    setOperationState({ scope: scopeKey, ...restored });
+    setSubmitting(false);
+    reviewInFlight.current = false;
+  }, [scopeKey, restored]);
   const [refresh, setRefresh] = useState(0);
   const reviewKey = JSON.stringify([workspacePath, sessionId, runId, refresh]);
   const [review, setReview] = useState<{
@@ -75,7 +111,7 @@ export function ReviewPage() {
   useEffect(() => {
     setRewindOpen(false);
     setRewindPreview(undefined);
-    setComment("");
+    setComment(recovery.operation?.message ?? "");
     setDiff(undefined);
     setError(undefined);
     if (preview || !runId || !sessionId) {
@@ -125,6 +161,61 @@ export function ReviewPage() {
       disposed = true;
     };
   }, [actions, fingerprint, refresh, reviewKey, runId, selected, workspacePath]);
+  async function submitReview(decision: "approve" | "request_changes", retry = false) {
+    if (reviewInFlight.current || recovery.error || (!retry && recovery.operation)) return;
+    if (retry && !actions.supportsReviewIdempotency()) return;
+    const operation: PersistedReviewOperation | undefined = retry
+      ? recovery.operation
+      : target
+        ? {
+            decision,
+            ...(decision === "request_changes" ? { message: comment.trim() } : {}),
+            target: { ...target, idempotencyKey: globalThis.crypto.randomUUID() },
+          }
+        : undefined;
+    if (!operation || (operation.decision === "request_changes" && !operation.message)) return;
+    const scope = scopeKey;
+    let dispatched = false;
+    reviewInFlight.current = true;
+    setSubmitting(true);
+    try {
+      operationStore.save(operation);
+      setOperationState({ scope, operation, error: undefined });
+      dispatched = true;
+      const accepted = await actions.reviewChanges(
+        operation.decision,
+        operation.message,
+        operation.target,
+      );
+      if (!accepted) throw new Error("电脑未确认此审阅操作，请使用原操作重试。");
+      if (!mounted.current || currentScope.current !== scope) return;
+      operationStore.clear(operation.target.idempotencyKey);
+      setOperationState({ scope, operation: undefined, error: undefined });
+      setComment("");
+      setError(undefined);
+      if (operation.decision === "request_changes" && sessionId)
+        navigate(sessionHref({ workspacePath, sessionId }));
+    } catch (cause) {
+      if (!mounted.current || currentScope.current !== scope) return;
+      let unknown = dispatched && reviewOutcomeUnknown(cause);
+      if (dispatched && !unknown) {
+        try {
+          operationStore.clear(operation.target.idempotencyKey);
+        } catch {
+          unknown = true;
+        }
+      }
+      if (!mounted.current || currentScope.current !== scope) return;
+      setOperationState({ scope, operation: unknown ? operation : undefined, error: undefined });
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      if (currentScope.current === scope) {
+        reviewInFlight.current = false;
+        if (mounted.current) setSubmitting(false);
+      }
+    }
+  }
+  const reviewBlocked = submitting || Boolean(recovery.operation) || Boolean(recovery.error);
   const selectScope = (nextSession: string, nextRun?: string) => {
     const params = new URLSearchParams({ workspace: workspacePath, sessionId: nextSession });
     if (nextRun) params.set("runId", nextRun);
@@ -171,6 +262,19 @@ export function ReviewPage() {
         </Button>
       </section>
       <p>文件已由工具写入工作区；这里核验本次运行的更改并记录审阅结果，不会重复写入文件。</p>
+      {recovery.error && <InlineNotice tone="error">{recovery.error}</InlineNotice>}
+      {recovery.operation && !submitting && (
+        <InlineNotice tone="warning">
+          原审阅结果未确认。原运行、评论和操作键已保留；刷新或重开页面不会创建新操作。
+          <Button
+            disabled={Boolean(busy) || !actions.supportsReviewIdempotency()}
+            onClick={() => void submitReview(recovery.operation!.decision, true)}
+          >
+            使用原操作重试确认
+          </Button>
+          {!actions.supportsReviewIdempotency() && <span>请先升级电脑宿主并核对原对话。</span>}
+        </InlineNotice>
+      )}
       {error && <InlineNotice tone="error">{error}</InlineNotice>}
       {loading ? (
         <p role="status">正在读取运行更改…</p>
@@ -240,7 +344,7 @@ export function ReviewPage() {
                 {rewindPreview ? (
                   <Button
                     variant="danger"
-                    disabled={Boolean(busy)}
+                    disabled={Boolean(busy) || reviewBlocked}
                     onClick={() => {
                       if (sessionRef && rewindPreview.key === reviewKey)
                         void actions
@@ -249,7 +353,9 @@ export function ReviewPage() {
                             rewindPreview.checkpointId,
                             rewindPreview.fingerprint,
                           )
-                          .then(() => setRefresh((value) => value + 1));
+                          .then((targetSession) => {
+                            if (targetSession) navigate(sessionHref(targetSession));
+                          });
                     }}
                   >
                     确认 Rewind
@@ -292,12 +398,10 @@ export function ReviewPage() {
                   placeholder="例如：保留现有错误类型，不要改变公开接口…"
                 />
                 <Button
-                  disabled={!comment.trim() || Boolean(busy)}
-                  onClick={() =>
-                    void actions
-                      .reviewChanges("request_changes", comment, target)
-                      .then(() => setComment(""))
+                  disabled={
+                    !comment.trim() || Boolean(busy) || reviewBlocked || !target || Boolean(error)
                   }
+                  onClick={() => void submitReview("request_changes")}
                 >
                   发送意见
                 </Button>
@@ -309,14 +413,14 @@ export function ReviewPage() {
               </span>
               <div className="button-row">
                 <Button
-                  disabled={Boolean(busy) || !target || Boolean(error)}
-                  onClick={() => void actions.reviewChanges("approve", undefined, target)}
+                  disabled={Boolean(busy) || !target || Boolean(error) || reviewBlocked}
+                  onClick={() => void submitReview("approve")}
                 >
                   批准更改
                 </Button>
                 <Button
                   variant="primary"
-                  disabled={Boolean(busy) || !target || Boolean(error)}
+                  disabled={Boolean(busy) || !target || Boolean(error) || reviewBlocked}
                   onClick={() => void actions.applyChanges(target)}
                 >
                   核验并确认

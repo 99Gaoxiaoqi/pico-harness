@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Alert, ScrollView, StyleSheet, Text, View } from "react-native";
 import * as Crypto from "expo-crypto";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { ReviewRequestStorage } from "./review-request-storage";
 import { isTerminalRunStatus, type RuntimeResult } from "@pico/protocol/mobile";
 import { errorText } from "./core";
 import { MobileReview } from "./review-controller";
@@ -10,15 +12,19 @@ import { Button, Card, Chips, Detail, Field, Label, color, s } from "./ui";
 export function ReviewPanel({
   sessionId,
   onReturnToConversation,
+  onSession,
 }: {
   sessionId: string;
   onReturnToConversation?: () => void;
+  onSession?: (sessionId: string) => void;
 }) {
   const pico = usePico();
   const latest = useRef(pico);
   latest.current = pico;
   const returnToConversation = useRef(onReturnToConversation);
   returnToConversation.current = onReturnToConversation;
+  const switchSession = useRef(onSession);
+  switchSession.current = onSession;
   const [comment, setComment] = useState("");
   const controller = useMemo(
     () =>
@@ -32,6 +38,14 @@ export function ReviewPanel({
         () => {
           setComment("");
           returnToConversation.current?.();
+        },
+        {
+          recoveryStorage: new ReviewRequestStorage(
+            AsyncStorage,
+            JSON.stringify([pico.host?.id, pico.workspace?.id, sessionId]),
+            () => Crypto.randomUUID(),
+          ),
+          canRetry: () => !!latest.current.capabilities?.features.reviewIdempotency?.available,
         },
       ),
     [pico.host?.id, pico.workspace?.id, sessionId],
@@ -64,10 +78,10 @@ export function ReviewPanel({
     return () => controller.suspend();
   }, [controller, pico.generation, pico.connected]);
   useEffect(() => {
-    setComment("");
+    setComment(view.recovery?.message ?? "");
     setRunPicker(false);
     setFilePicker(false);
-  }, [controller, view.runId]);
+  }, [controller, view.runId, view.recovery]);
   useEffect(() => {
     rewindVersion.current++;
     rewindMutation.current = false;
@@ -156,7 +170,7 @@ export function ReviewPanel({
     setRewindBusy(true);
     setRewindError(undefined);
     try {
-      await latest.current.request(
+      const result = await latest.current.request(
         "rewind.apply",
         {
           sessionId,
@@ -169,7 +183,8 @@ export function ReviewPanel({
       );
       if (version !== rewindVersion.current || !controller.active) return;
       setPreview(undefined);
-      await Promise.all([controller.refresh(), refreshRewind()]);
+      if (switchSession.current) switchSession.current(result.sessionId);
+      else await Promise.all([controller.refresh(), refreshRewind()]);
     } catch (error) {
       if (version === rewindVersion.current && controller.active) {
         setPreview(undefined);
@@ -198,7 +213,7 @@ export function ReviewPanel({
     rewindBusy || view.pending
       ? "正在提交，请等待电脑确认"
       : view.unknown
-        ? "结果未确认，请先刷新并核对原对话"
+        ? "原审阅结果未确认，请使用原操作重试"
         : view.loading || view.diffLoading
           ? "正在读取审阅内容"
           : view.stale || view.error
@@ -234,7 +249,23 @@ export function ReviewPanel({
         }}
       />
       {view.unknown && (
-        <Notice warning>操作结果未确认。不会自动重发，请先同步并核对原对话中的运行状态。</Notice>
+        <View style={{ gap: 8 }}>
+          <Notice warning>原审阅结果未确认。刷新、重连或重开页面会保留原操作和评论。</Notice>
+          {view.recovery && (
+            <Button
+              title="使用原操作重试确认"
+              reason={
+                readReason ??
+                (!pico.capabilities?.features.reviewIdempotency?.available
+                  ? "电脑未声明审阅幂等能力，请先升级电脑宿主并核对原对话"
+                  : pico.reason("changes.review"))
+              }
+              onPress={() => {
+                if (!rewindMutation.current) void controller.retryUnknown();
+              }}
+            />
+          )}
+        </View>
       )}
       {view.error && <Notice warning>{view.error}</Notice>}
       {view.notice && <Notice>{view.notice}</Notice>}

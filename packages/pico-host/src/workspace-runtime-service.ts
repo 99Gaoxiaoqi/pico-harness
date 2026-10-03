@@ -25,6 +25,8 @@ import {
   MAX_RUNTIME_FRAME_BYTES,
   TEMPORARY_WORKSPACE_RUNTIME_CAPABILITY,
   MODEL_CATALOG_RUNTIME_CAPABILITY,
+  REVIEW_IDEMPOTENCY_RUNTIME_CAPABILITY,
+  MEMORY_PAGINATION_RUNTIME_CAPABILITY,
   RUNTIME_ERROR_CODES,
   RuntimeProtocolError,
   serializeRuntimeNotification,
@@ -341,6 +343,8 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
           CAPABILITY_SCOPE_RUNTIME_CAPABILITY,
           TEMPORARY_WORKSPACE_RUNTIME_CAPABILITY,
           MODEL_CATALOG_RUNTIME_CAPABILITY,
+          REVIEW_IDEMPOTENCY_RUNTIME_CAPABILITY,
+          MEMORY_PAGINATION_RUNTIME_CAPABILITY,
           "shared-config-v1",
           "session-conversation-v1",
           "session-management-v1",
@@ -508,38 +512,7 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
       )
     )
       return runPayload(workspaceRunSnapshot(durablePrepared));
-    const start = () => {
-      const startForeground = preparedId
-        ? (request: WorkspaceRunRequest, executor: WorkspaceRunExecutor) =>
-            runtime.startPreparedForegroundRun(
-              preparedId,
-              request,
-              executor,
-              (durablePrepared?.version ?? 0) + 1,
-            )
-        : runtime.startRun.bind(runtime);
-      const run = startForeground(
-        {
-          description:
-            input.execution?.origin === "goal"
-              ? `🎯 Goal continuation · ${input.execution.goalTitle ?? "Goal"}`
-              : input.prompt,
-          ...(input.sessionId ? { sessionId: input.sessionId } : {}),
-        },
-        (context) => {
-          if (input.execution?.checkpointId) context.bindCheckpoint(input.execution.checkpointId);
-          return this.options.execute({
-            workspacePath: runtime.workspace,
-            workspaceRuntime: runtime,
-            prompt: input.prompt,
-            ...(input.sessionId ? { sessionId: input.sessionId } : {}),
-            ...(input.execution ? { execution: input.execution } : {}),
-            context,
-          });
-        },
-      );
-      return { result: runPayload(run), resourceId: run.runId };
-    };
+    const start = this.foregroundRunStarter(runtime, input, durablePrepared);
     // Goal's durable intent already owns a stable Run identity. Replaying a
     // registered-but-unexecuted admission must not return an old command result.
     if (preparedId || !input.idempotencyKey) return start().result;
@@ -579,6 +552,75 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
       if (durable) return runPayload(workspaceRunSnapshot(durable));
     }
     return outcome.result;
+  }
+
+  /** Server-side adapters prepare asynchronously, then admit inside their own ledger transaction. */
+  async prepareForegroundRun(input: StartDaemonRunInput) {
+    const runtime = await this.getRuntime(input.workspacePath);
+    return {
+      start: this.foregroundRunStarter(runtime, input),
+      abort: (runId: string) => runtime.failBeforeExecution(runId, "审阅操作持久化失败"),
+    };
+  }
+
+  private foregroundRunStarter(
+    runtime: WorkspaceTaskRuntime,
+    input: StartDaemonRunInput,
+    durablePrepared?: DaemonRunRecord,
+  ) {
+    const preparedId = input.execution?.goalPreparedRun?.runId;
+    return () => {
+      const startForeground = preparedId
+        ? (request: WorkspaceRunRequest, executor: WorkspaceRunExecutor) =>
+            runtime.startPreparedForegroundRun(
+              preparedId,
+              request,
+              executor,
+              (durablePrepared?.version ?? 0) + 1,
+            )
+        : runtime.startRun.bind(runtime);
+      const run = startForeground(
+        {
+          description:
+            input.execution?.origin === "goal"
+              ? `🎯 Goal continuation · ${input.execution.goalTitle ?? "Goal"}`
+              : input.prompt,
+          ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+        },
+        (context) => {
+          if (input.execution?.checkpointId) context.bindCheckpoint(input.execution.checkpointId);
+          return this.options.execute({
+            workspacePath: runtime.workspace,
+            workspaceRuntime: runtime,
+            prompt: input.prompt,
+            ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+            ...(input.execution ? { execution: input.execution } : {}),
+            context,
+          });
+        },
+      );
+      return { result: runPayload(run), resourceId: run.runId };
+    };
+  }
+
+  /** Replay a bound operation before adapters read mutable projections. The store checks its payload. */
+  async replayIdempotentDaemonCommand<Result extends Record<string, unknown>>(
+    workspacePath: string,
+    input: { commandType: string; idempotencyKey: string; request: Record<string, unknown> },
+  ): Promise<DaemonIdempotentCommandResult<Result> | undefined> {
+    const canonical = await this.canonicalizeWorkspacePath(workspacePath);
+    const idempotencyKey = normalizeIdempotencyKey(input.idempotencyKey);
+    const exists = this.eventStore(canonical)
+      .listDaemonCommands(input.commandType)
+      .some((command) => command.idempotencyKey === `${input.commandType}\0${idempotencyKey}`);
+    if (!exists) return undefined;
+    return this.executeIdempotentDaemonCommand<Result>(
+      canonical,
+      { ...input, idempotencyKey },
+      () => {
+        throw new Error("已持久化的操作不能再次执行");
+      },
+    );
   }
 
   async reservePlanReviewRun(
@@ -775,6 +817,7 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
       request: Record<string, unknown>;
     },
     execute: () => { result: Result; resourceId?: string },
+    rollback?: () => void,
   ): Promise<DaemonIdempotentCommandResult<Result>> {
     const canonical = await this.canonicalizeWorkspacePath(workspacePath);
     const idempotencyKey = normalizeIdempotencyKey(input.idempotencyKey);
@@ -784,6 +827,7 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
         store.executeIdempotentDaemonCommand({ ...input, idempotencyKey }, execute),
       );
     } catch (error) {
+      rollback?.();
       if (error instanceof RuntimeConflictError) {
         throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.CONFLICT, error.message);
       }

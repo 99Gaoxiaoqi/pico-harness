@@ -13,6 +13,15 @@ import {
 } from "@pico/pico-host/agent-runtime";
 import { createProductionRuntimeServices } from "@pico/pico-host/production-host";
 import { globalSessionManager } from "@pico/pico-host/session";
+import { MobileReview } from "../../../apps/mobile/src/review-controller.js";
+import {
+  ReviewRequestStorage,
+  type ReviewStoragePort,
+} from "../../../apps/mobile/src/review-request-storage.js";
+import type { RuntimePort } from "../../../apps/mobile/src/core.js";
+import { RemoteProtocolError } from "@pico/protocol/remote";
+import { SqliteRuntimeControlStore } from "@pico/storage/sqlite/sqlite-runtime-control-store";
+import { resolvePicoPaths } from "@pico/pico-host/pico-paths";
 import { writeDesktopModelRouting } from "../../fixtures/desktop-model-routing.js";
 
 test(
@@ -84,7 +93,8 @@ test(
     const firstRequest = createRuntimeRequest("session.send", {
       workspacePath,
       input: { kind: "text", text: "first delivery" },
-      initialSettings: { permissionMode: "auto", orchestrationMode: "default" },
+      // The deterministic fixture runs without a managed /tmp write grant, so temporary checkouts stay trusted.
+      initialSettings: { permissionMode: "full-access", orchestrationMode: "default" },
       idempotencyKey: "first-input",
     });
     const first = (await services.desktopService.handle(
@@ -290,15 +300,41 @@ test(
     const currentChanges = (await services.desktopService.handle(
       createRuntimeRequest("changes.list", { workspacePath, runId: nextFinished.runId }),
     )) as unknown as RuntimeResult<"changes.list">;
-    const revision = (await services.desktopService.handle(
-      createRuntimeRequest("changes.review", {
-        workspacePath,
-        runId: nextFinished.runId,
-        decision: "request_changes",
-        message: "  revision delivery  ",
-        expectedFingerprint: currentChanges.fingerprint,
-      }),
-    )) as unknown as RuntimeResult<"changes.review">;
+    const revisionRequest = createRuntimeRequest("changes.review", {
+      workspacePath,
+      runId: nextFinished.runId,
+      decision: "request_changes",
+      message: "  revision delivery  ",
+      expectedFingerprint: currentChanges.fingerprint,
+      idempotencyKey: "review-revision",
+    });
+    let receiptVisibleAtRunNotification = false;
+    const unlisten = services.service.subscribe((event) => {
+      if (event.topic !== "run.started") return;
+      const observer = new SqliteRuntimeControlStore({
+        storageRoot: resolvePicoPaths(workspacePath, { picoHome }).workspace.root,
+      });
+      try {
+        receiptVisibleAtRunNotification = observer
+          .listDaemonCommands("changes.review")
+          .some(
+            (command) => command.status === "completed" && command.resourceId === event.scope.runId,
+          );
+      } finally {
+        observer.close();
+      }
+    });
+    const [revision, concurrentRevision] = (await Promise.all([
+      services.desktopService.handle(revisionRequest),
+      services.desktopService.handle(revisionRequest),
+    ])) as unknown as [RuntimeResult<"changes.review">, RuntimeResult<"changes.review">];
+    unlisten();
+    assert.deepEqual(concurrentRevision, revision);
+    assert.equal(
+      receiptVisibleAtRunNotification,
+      true,
+      "Run notification follows the durable receipt commit",
+    );
     assert.equal(revision.accepted, true);
     const list = (await services.service.handle(
       createRuntimeRequest("runs.list", { workspacePath, sessionId }),
@@ -311,5 +347,134 @@ test(
     assert.equal((await nextRuntime.waitForRun(revisionRun.runId)).status, "succeeded");
     assert.equal(executions, 3);
     assert.equal(await readFile(deliveryPath, "utf8"), "revision delivery\n");
+    await assert.rejects(
+      services.desktopService.handle(
+        createRuntimeRequest("changes.review", {
+          ...revisionRequest.params,
+          message: "different intent",
+        }),
+      ),
+      /幂等键.*其他参数/u,
+    );
+    await services.desktopService.close();
+    await globalSessionManager.delete(sessionId, workspacePath, { picoHome })?.close();
+    services = makeServices();
+    assert.deepEqual(
+      await services.desktopService.handle(revisionRequest),
+      revision,
+      "Host restart replays before reading the changed diff",
+    );
+    assert.equal(executions, 3);
+
+    const reviewValues = new Map<string, string>();
+    const storage: ReviewStoragePort = {
+      getItem: async (key) => reviewValues.get(key) ?? null,
+      setItem: async (key, value) => {
+        reviewValues.set(key, value);
+      },
+      removeItem: async (key) => {
+        reviewValues.delete(key);
+      },
+    };
+    const reviewRequests: Record<string, unknown>[] = [];
+    let loseReceipt = true;
+    const port = {
+      request: async (method: string, params: Record<string, unknown>) => {
+        const result = await services.desktopService.handle(
+          createRuntimeRequest(method as never, { workspacePath, ...params } as never),
+        );
+        if (method === "changes.review") {
+          reviewRequests.push(params);
+          if (loseReceipt) {
+            loseReceipt = false;
+            throw new RemoteProtocolError("DISCONNECTED", "response lost", true, "unknown");
+          }
+        }
+        return result;
+      },
+    } as unknown as RuntimePort;
+    const recovery = () =>
+      new ReviewRequestStorage(storage, "host/workspace/session", () => "mobile-review-key");
+    const mount = () =>
+      new MobileReview(port, "workspace-id", sessionId, undefined, {
+        recoveryStorage: recovery(),
+        canRetry: () => true,
+      });
+    const firstMount = mount();
+    await firstMount.refresh();
+    assert.equal(await firstMount.submit("request_changes", "  unknown revision  "), false);
+    assert.equal(firstMount.state.unknown, true);
+    firstMount.suspend();
+    const revisionRuntime = await services.service.getWorkspaceRuntime(workspacePath);
+    for (const run of revisionRuntime.listRuns()) await revisionRuntime.waitForRun(run.runId);
+    const runCount = (await port.request("runs.list", { sessionId }, "workspace-id")).runs.length;
+    const reopened = mount();
+    await reopened.refresh(true);
+    assert.equal(
+      reopened.state.unknown,
+      true,
+      "remount and manual refresh retain the unknown result",
+    );
+    assert.equal(reopened.state.recovery?.message, "unknown revision");
+    assert.equal(await reopened.submit("request_changes", "new attempt"), false);
+    assert.equal(await reopened.retryUnknown(), true);
+    assert.deepEqual(
+      reviewRequests[1],
+      reviewRequests[0],
+      "retries preserve every original request field",
+    );
+    assert.equal(
+      (await port.request("runs.list", { sessionId }, "workspace-id")).runs.length,
+      runCount,
+    );
+    assert.equal(
+      executions,
+      4,
+      "lost response + remount + replay dispatch exactly one continuation",
+    );
+    assert.equal(await recovery().load(), undefined);
+
+    const beforeRollback = executions;
+    const originalCommand = SqliteRuntimeControlStore.prototype.executeIdempotentDaemonCommand;
+    context.mock.method(
+      SqliteRuntimeControlStore.prototype,
+      "executeIdempotentDaemonCommand",
+      function (
+        this: SqliteRuntimeControlStore,
+        input: Parameters<SqliteRuntimeControlStore["executeIdempotentDaemonCommand"]>[0],
+        execute: Parameters<SqliteRuntimeControlStore["executeIdempotentDaemonCommand"]>[1],
+      ) {
+        if (input.commandType !== "changes.review")
+          return originalCommand.call(this, input, execute);
+        return originalCommand.call(this, input, () => {
+          execute();
+          throw new Error("injected receipt rollback");
+        });
+      },
+    );
+    const latestChanges = await port.request(
+      "changes.list",
+      { runId: firstMount.state.runId! },
+      "workspace-id",
+    );
+    await assert.rejects(
+      services.desktopService.handle(
+        createRuntimeRequest("changes.review", {
+          workspacePath,
+          runId: firstMount.state.runId!,
+          decision: "request_changes",
+          message: "must never execute",
+          expectedFingerprint: latestChanges.fingerprint,
+          idempotencyKey: "rolled-back-review",
+        }),
+      ),
+      /injected receipt rollback/,
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(
+      executions,
+      beforeRollback,
+      "rolled-back receipt cannot execute its scheduled continuation",
+    );
   },
 );
