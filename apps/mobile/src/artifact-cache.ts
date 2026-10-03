@@ -10,6 +10,8 @@ import { verifyMediaIntegrity } from "./media";
 const legacyCache = new Directory(Paths.cache, "pico-artifacts");
 const cache = new Directory(Paths.cache, "pico-artifacts-v2");
 let cacheEpoch = 0;
+let clearingAll = false;
+let clearAllPromise: Promise<void> | undefined;
 const hostEpochs = new Map<string, number>();
 const clearingHosts = new Set<string>();
 const downloads = new Map<AbortController, { hostId: string; done: Promise<void> }>();
@@ -41,11 +43,23 @@ export async function clearHostArtifactCache(hostId: string) {
   }
 }
 
-export function clearArtifactCache() {
+export async function clearArtifactCache() {
+  if (clearAllPromise) return clearAllPromise;
+  clearingAll = true;
   cacheEpoch++;
-  for (const controller of downloads.keys()) controller.abort();
-  if (cache.exists) cache.delete();
-  clearLegacyArtifactCache();
+  clearAllPromise = (async () => {
+    try {
+      const pending = [...downloads];
+      for (const [controller] of pending) controller.abort();
+      await Promise.all(pending.map(([, download]) => download.done));
+      if (cache.exists) cache.delete();
+      clearLegacyArtifactCache();
+    } finally {
+      clearingAll = false;
+      clearAllPromise = undefined;
+    }
+  })();
+  return clearAllPromise;
 }
 
 export async function downloadArtifact(options: {
@@ -62,6 +76,7 @@ export async function downloadArtifact(options: {
   const { artifact, signal, media, assertCurrent, onProgress } = options;
   const epoch = cacheEpoch;
   const hostEpoch = hostEpochs.get(options.scopeId) ?? 0;
+  if (clearingAll) throw new Error("手机成果缓存正在清理");
   if (clearingHosts.has(options.scopeId)) throw new Error("这台电脑的成果缓存正在清理");
   let finishDownload!: () => void;
   const done = new Promise<void>((resolve) => {
