@@ -370,12 +370,20 @@ test("取消后的迟到 submit 不复活，后台迟到 claim 仅保存待下�
   const cancelledPhone = f.phone();
   const cancelled = cancelledPhone.controller();
   const cancelledGate = f.holdSubmit();
-  const first = cancelled.start(await f.offer(), "取消手机");
+  const cancelledOffer = await f.offer();
+  const first = cancelled.start(cancelledOffer, "取消手机");
   await until(() => f.requests.some((request) => request.path === "/v1/pairings"));
+  assert.equal(cancelledPhone.pending(), undefined);
+  assert.equal(
+    await cancelled.inspectGatewayId(),
+    cancelledOffer.gatewayId,
+    "本机清理必须能识别尚未收到 claim 的同网关申请",
+  );
   await cancelled.cancel();
   cancelledGate.resolve();
   assert.equal(await first, undefined);
   assert.equal(cancelledPhone.pending(), undefined);
+  assert.equal(await cancelled.inspectGatewayId(), undefined);
   assert.equal(f.hosts.size, 0);
   f.releaseSubmit();
 
