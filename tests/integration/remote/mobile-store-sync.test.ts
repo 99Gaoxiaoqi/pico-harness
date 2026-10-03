@@ -16,6 +16,11 @@ type StoreView = {
   host?: SavedHost;
   connect(host: SavedHost): Promise<void>;
   request(method: string, params: Record<string, unknown>): Promise<unknown>;
+  requestWithSecrets(
+    method: string,
+    params: Record<string, unknown>,
+    secrets: Record<string, unknown>,
+  ): Promise<unknown>;
   onNotification(listener: (event: RuntimeNotification) => void): () => void;
 };
 type Cell = {
@@ -356,6 +361,11 @@ test("切换电脑及真实后台回调后，旧 subscribe 与待交付 replay �
   assert.equal(screen.read().phase, "background");
   assert.equal(pendingB.disposed, 1);
   assert.equal(delivered.length, 0);
+  const notExecuted = (error: unknown) =>
+    error instanceof protocol.RemoteProtocolError && error.outcome === "not_executed";
+  await assert.rejects(screen.read().request("session.list", {}), notExecuted);
+  await assert.rejects(screen.read().requestWithSecrets("mcp.user.upsert", {}, {}), notExecuted);
+  assert.equal(clientB.requests.length, 0);
 
   screen.app("active");
   await screen.settle();
