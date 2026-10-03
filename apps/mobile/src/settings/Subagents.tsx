@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Switch, Text, View } from "react-native";
 import * as Crypto from "expo-crypto";
 import {
@@ -17,6 +17,10 @@ import { confirmDelete } from "./confirmDelete";
 const profiles = { local_read: "代码阅读", web_research: "网络研究", implementation: "实现代码" };
 export function Subagents() {
   const pico = usePico();
+  const readVersion = useRef(0);
+  const readScope = `${pico.generation}:${pico.connected}:${pico.syncRevision}`;
+  const currentScope = useRef(readScope);
+  currentScope.current = readScope;
   const [snapshot, setSnapshot] = useState<RuntimeSubagentSettingsSnapshot>();
   const [editor, setEditor] = useState<{
     preset: RuntimeSubagentPreset;
@@ -25,13 +29,22 @@ export function Subagents() {
   }>();
   const [saving, setSaving] = useState(false);
   async function refresh() {
-    setSnapshot(await pico.request("subagents.get", {}));
+    if (pico.connected === false) return;
+    const version = ++readVersion.current;
+    const result = await pico.request("subagents.get", {});
+    if (version !== readVersion.current || readScope !== currentScope.current) return;
+    setSnapshot(result);
   }
   useEffect(() => {
     setSnapshot(undefined);
     setEditor(undefined);
-    if (!pico.reason("subagents.get")) void pico.perform(refresh);
   }, [pico.generation]);
+  useEffect(() => {
+    if (pico.connected !== false && !pico.reason("subagents.get")) void pico.perform(refresh);
+    return () => {
+      ++readVersion.current;
+    };
+  }, [pico.generation, pico.connected, pico.syncRevision]);
   function open(preset?: RuntimeSubagentPreset) {
     if (!snapshot) return;
     const connection = snapshot.connections.find(

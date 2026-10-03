@@ -21,26 +21,46 @@ export function SessionSettings({ sessionId }: { sessionId: string }) {
   const epoch = useRef(0);
   const lock = useRef(false);
   const loadVersion = useRef(0);
+  const readScope = `${pico.generation}:${pico.connected}:${pico.syncRevision}:${sessionId}`;
+  const currentScope = useRef(readScope);
+  currentScope.current = readScope;
   async function load(token = epoch.current) {
+    if (pico.connected === false) return;
     const version = ++loadVersion.current;
     const [x, runs] = await Promise.all([
       pico.request("session.settings.get", { sessionId }),
       pico.request("runs.list", { sessionId }),
     ]);
-    if (epoch.current !== token || version !== loadVersion.current) return;
+    if (
+      epoch.current !== token ||
+      version !== loadVersion.current ||
+      readScope !== currentScope.current
+    )
+      return;
     setSettings(x.settings);
     setActive(runs.runs.some((run) => !["succeeded", "failed", "cancelled"].includes(run.status)));
   }
   useEffect(() => {
-    const token = ++epoch.current;
+    ++epoch.current;
     setSettings(undefined);
     setActive(undefined);
     setModels([]);
     setModelError(undefined);
     setSelector(false);
+    return () => {
+      ++epoch.current;
+      ++loadVersion.current;
+    };
+  }, [sessionId, pico.generation]);
+  useEffect(() => {
+    const token = epoch.current;
+    let current = true;
+    if (pico.connected === false) return;
+    setActive(undefined);
     void pico.perform(() => load(token));
     const off = pico.onNotification((event) => {
       if (
+        pico.connected !== false &&
         event.scope.sessionId === sessionId &&
         ["run.started", "run.updated", "run.finished", "session.settingsUpdated"].includes(
           event.topic,
@@ -49,6 +69,7 @@ export function SessionSettings({ sessionId }: { sessionId: string }) {
         void pico.perform(() => load(token));
     });
     const unavailable = pico.reason("catalog.models");
+    setModelError(undefined);
     if (unavailable)
       setModelError(
         unavailable.includes("权限") ? unavailable : "电脑尚未提供模型目录，请更新电脑端。",
@@ -57,17 +78,19 @@ export function SessionSettings({ sessionId }: { sessionId: string }) {
       void pico
         .request("catalog.models", {})
         .then((x) => {
-          if (epoch.current === token) setModels(x.routes);
+          if (current && epoch.current === token && readScope === currentScope.current)
+            setModels(x.routes);
         })
         .catch((e) => {
-          if (epoch.current === token)
+          if (current && epoch.current === token && readScope === currentScope.current)
             setModelError(e instanceof Error ? e.message : "模型目录读取失败");
         });
     return () => {
-      ++epoch.current;
+      current = false;
+      ++loadVersion.current;
       off();
     };
-  }, [sessionId, pico.generation]);
+  }, [sessionId, pico.generation, pico.connected, pico.syncRevision]);
   const reason = busy
     ? "正在保存"
     : active === undefined

@@ -1,10 +1,14 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Alert, Text, View } from "react-native";
 import { usePico } from "../store";
 import { Button, Card, Chips, Detail, Field, Label, s } from "../ui";
 
 export function Capabilities({ section }: { section: "Skills" | "Hooks" | "插件" }) {
   const pico = usePico();
+  const readVersion = useRef(0);
+  const readScope = `${pico.generation}:${pico.connected}:${pico.syncRevision}:${section}`;
+  const currentScope = useRef(readScope);
+  currentScope.current = readScope;
   const [data, setData] = useState<Record<string, unknown>[]>([]);
   const [detail, setDetail] = useState<unknown>();
   const [id, setId] = useState("");
@@ -17,12 +21,16 @@ export function Capabilities({ section }: { section: "Skills" | "Hooks" | "插�
     scope: "user" | "project" | "local";
   }>();
   async function refresh() {
+    if (pico.connected === false) return;
+    const version = ++readVersion.current;
+    const isCurrent = () => version === readVersion.current && readScope === currentScope.current;
     if (section === "Skills") {
-      setData([
+      const skills = [
         ...(skillsScope === "用户列表"
           ? (await pico.request("skills.user.list", {})).skills
           : (await pico.request("skills.effective.list", {})).skills),
-      ]);
+      ];
+      if (isCurrent()) setData(skills);
       return;
     }
     const x =
@@ -30,15 +38,22 @@ export function Capabilities({ section }: { section: "Skills" | "Hooks" | "插�
         ? (await pico.request("hooks.manage", { action: "list" })).result
         : (await pico.request("plugin.manage", { action: "list" })).result;
     const list = Object.values(x).find(Array.isArray);
+    if (!isCurrent()) return;
     setData(Array.isArray(list) ? (list as Record<string, unknown>[]) : []);
     setDetail(x);
   }
   useEffect(() => {
     setData([]);
     setId("");
+    setDetail(undefined);
     setProposal(undefined);
-    void pico.perform(refresh);
   }, [section, pico.generation, skillsScope]);
+  useEffect(() => {
+    if (pico.connected !== false) void pico.perform(refresh);
+    return () => {
+      ++readVersion.current;
+    };
+  }, [section, skillsScope, pico.generation, pico.connected, pico.syncRevision]);
   function select(item: Record<string, unknown>) {
     const installed =
       typeof item.installed === "object" && item.installed
