@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Alert, Switch, Text, View } from "react-native";
 import type { RuntimeResult, RuntimeProviderInput } from "@pico/protocol/mobile";
 import { usePico } from "../store";
@@ -9,6 +9,10 @@ import { availableProviderModels, providerInput } from "./management";
 type Provider = RuntimeResult<"provider.list">["providers"][number];
 export function Providers() {
   const pico = usePico();
+  const readVersion = useRef(0);
+  const readScope = `${pico.generation}:${pico.connected}:${pico.syncRevision}`;
+  const currentScope = useRef(readScope);
+  currentScope.current = readScope;
   const [data, setData] = useState<RuntimeResult<"provider.list">>();
   const [editor, setEditor] = useState<{
     value: RuntimeProviderInput;
@@ -21,15 +25,24 @@ export function Providers() {
   const [selected, setSelected] = useState<{ id: string; revision: string }>();
   const [saving, setSaving] = useState(false);
   async function refresh() {
-    setData(await pico.request("provider.list", {}));
+    if (pico.connected === false) return;
+    const version = ++readVersion.current;
+    const result = await pico.request("provider.list", {});
+    if (version !== readVersion.current || readScope !== currentScope.current) return;
+    setData(result);
   }
   useEffect(() => {
     setData(undefined);
     setEditor(undefined);
     setSelected(undefined);
     setSecret("");
-    if (!pico.reason("provider.list")) void pico.perform(refresh);
   }, [pico.generation]);
+  useEffect(() => {
+    if (pico.connected !== false && !pico.reason("provider.list")) void pico.perform(refresh);
+    return () => {
+      ++readVersion.current;
+    };
+  }, [pico.generation, pico.connected, pico.syncRevision]);
   function open(provider?: Provider) {
     if (!data) return;
     setSelected(undefined);

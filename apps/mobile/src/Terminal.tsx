@@ -23,9 +23,24 @@ export function TerminalPanel({ sessionId }: { sessionId: string }) {
   const inputGeneration = useRef(0);
   const inputBlocked = useRef(false);
   const [blocked, setBlocked] = useState(false);
+  const listVersion = useRef(0);
+  const readScope = `${pico.generation}:${pico.connected}:${pico.syncRevision}:${sessionId}`;
+  const currentScope = useRef(readScope);
+  currentScope.current = readScope;
+  const identity = `${pico.generation}:${sessionId}`;
+  const currentIdentity = useRef(identity);
+  currentIdentity.current = identity;
   async function list() {
+    if (pico.connected === false) return;
+    const version = ++listVersion.current;
     const result = await pico.request("terminal.list", { sessionId });
-    if (active.current) setTerminals(result.terminals);
+    if (active.current && version === listVersion.current && readScope === currentScope.current) {
+      setTerminals(result.terminals);
+      setTerminal(
+        (current) =>
+          current && result.terminals.find((item) => item.terminalId === current.terminalId),
+      );
+    }
   }
   function output(data: string, reset = false) {
     if (!ready) {
@@ -39,7 +54,6 @@ export function TerminalPanel({ sessionId }: { sessionId: string }) {
     setTerminal(undefined);
     setTerminals([]);
     position.current = undefined;
-    void pico.perform(list);
     const app = AppState.addEventListener("change", (state) => setForeground(state === "active"));
     return () => {
       active.current = false;
@@ -57,6 +71,12 @@ export function TerminalPanel({ sessionId }: { sessionId: string }) {
           .catch(() => undefined);
     };
   }, [sessionId, pico.generation]);
+  useEffect(() => {
+    if (pico.connected !== false) void pico.perform(list);
+    return () => {
+      ++listVersion.current;
+    };
+  }, [sessionId, pico.generation, pico.connected, pico.syncRevision]);
   useEffect(() => {
     control.current = terminal;
     inputGeneration.current++;
@@ -76,7 +96,7 @@ export function TerminalPanel({ sessionId }: { sessionId: string }) {
         ...(position.current ? { afterSequence: position.current.sequence } : {}),
         maxBytes: 32 * 1024,
       });
-      if (!current) return;
+      if (!current || readScope !== currentScope.current) return;
       const reset = !position.current || position.current.epoch !== result.resourceEpoch;
       position.current = { epoch: result.resourceEpoch, sequence: result.sequence };
       control.current = result.terminal;
@@ -97,7 +117,7 @@ export function TerminalPanel({ sessionId }: { sessionId: string }) {
           })
           .catch(() => undefined);
     };
-  }, [terminal?.terminalId, foreground, pico.connected, pico.generation, ready]);
+  }, [terminal?.terminalId, foreground, pico.connected, pico.syncRevision, pico.generation, ready]);
   useEffect(() => {
     if (!foreground || !pico.connected) inputGeneration.current++;
   }, [foreground, pico.connected]);
@@ -136,7 +156,12 @@ export function TerminalPanel({ sessionId }: { sessionId: string }) {
           data,
         });
       } catch (error) {
-        if (!active.current || generation !== inputGeneration.current) return;
+        if (
+          !active.current ||
+          identity !== currentIdentity.current ||
+          t.terminalId !== control.current?.terminalId
+        )
+          return;
         inputBlocked.current = true;
         setBlocked(true);
         pico.report(

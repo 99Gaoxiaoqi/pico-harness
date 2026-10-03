@@ -20,12 +20,12 @@ export function Memory({ section = "content" }: { section?: "content" | "policy"
   const [notice, setNotice] = useState("");
   const requestEpoch = useRef(0);
   const loadingRef = useRef(false);
-  const context = `${pico.generation}:${section}:${state}`;
+  const context = `${pico.generation}:${pico.connected}:${pico.syncRevision}:${section}:${state}`;
   const contextRef = useRef(context);
   contextRef.current = context;
   const method = section === "policy" ? "memory.settings.get" : "memory.list";
   async function refresh() {
-    if (context !== contextRef.current) return;
+    if (pico.connected === false || context !== contextRef.current) return;
     const epoch = ++requestEpoch.current;
     const requestedContext = context;
     const isCurrent = () =>
@@ -63,7 +63,7 @@ export function Memory({ section = "content" }: { section?: "content" | "policy"
     }
   }
   async function loadMore() {
-    if (!pageInfo?.nextCursor || loadingRef.current) return;
+    if (pico.connected === false || !pageInfo?.nextCursor || loadingRef.current) return;
     const epoch = requestEpoch.current;
     const requestedContext = context;
     const revision = pageInfo.revision;
@@ -111,11 +111,15 @@ export function Memory({ section = "content" }: { section?: "content" | "policy"
     setNotice("");
     loadingRef.current = false;
     setLoading(false);
-    if (!pico.reason(method)) void pico.perform(refresh);
+  }, [pico.generation, section, state]);
+  useEffect(() => {
+    loadingRef.current = false;
+    setLoading(false);
+    if (pico.connected !== false && !pico.reason(method)) void pico.perform(refresh);
     return () => {
       requestEpoch.current++;
     };
-  }, [pico.generation, section, state]);
+  }, [pico.generation, pico.connected, pico.syncRevision, section, state]);
   async function mutate(task: () => Promise<unknown>) {
     if (saving) return;
     setSaving(true);

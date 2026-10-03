@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Switch, Text, View } from "react-native";
 import type { RuntimeResult } from "@pico/protocol/mobile";
 import { usePico } from "../store";
@@ -11,6 +11,10 @@ const jobStatus = { idle: "待运行", running: "运行中", failed: "失败", s
 type Job = RuntimeResult<"jobs.list">["jobs"][number];
 export function Jobs() {
   const pico = usePico();
+  const readVersion = useRef(0);
+  const readScope = `${pico.generation}:${pico.connected}:${pico.syncRevision}`;
+  const currentScope = useRef(readScope);
+  currentScope.current = readScope;
   const [jobs, setJobs] = useState<readonly Job[]>([]);
   const [editing, setEditing] = useState<{ job?: Job; name: string; prompt: string }>();
   const [kind, setKind] = useState<ScheduleKind>("daily");
@@ -18,19 +22,39 @@ export function Jobs() {
     [weekday, setWeekday] = useState("1"),
     [advanced, setAdvanced] = useState("0 9 * * *");
   const [history, setHistory] = useState<{
+    jobId: string;
     name: string;
     runs: RuntimeResult<"jobs.history">["runs"];
   }>();
   const [saving, setSaving] = useState(false);
   async function refresh() {
-    setJobs((await pico.request("jobs.list", {})).jobs);
+    if (pico.connected === false) return;
+    const version = ++readVersion.current;
+    const [result, runs] = await Promise.all([
+      pico.request("jobs.list", {}),
+      history ? pico.request("jobs.history", { jobId: history.jobId, limit: 20 }) : undefined,
+    ]);
+    if (version !== readVersion.current || readScope !== currentScope.current) return;
+    setJobs(result.jobs);
+    if (history && runs) setHistory({ ...history, runs: runs.runs });
+  }
+  async function openHistory(job: Job) {
+    const version = ++readVersion.current;
+    const result = await pico.request("jobs.history", { jobId: job.jobId, limit: 20 });
+    if (version !== readVersion.current || readScope !== currentScope.current) return;
+    setHistory({ jobId: job.jobId, name: job.name, runs: result.runs });
   }
   useEffect(() => {
     setEditing(undefined);
     setHistory(undefined);
     setJobs([]);
-    if (!pico.reason("jobs.list")) void pico.perform(refresh);
   }, [pico.generation]);
+  useEffect(() => {
+    if (pico.connected !== false && !pico.reason("jobs.list")) void pico.perform(refresh);
+    return () => {
+      ++readVersion.current;
+    };
+  }, [pico.generation, pico.connected, pico.syncRevision]);
   function open(job?: Job) {
     const draft = scheduleDraft(job?.schedule ?? "0 9 * * *");
     setKind(draft.kind);
@@ -225,15 +249,7 @@ export function Jobs() {
               title="历史"
               secondary
               reason={pico.reason("jobs.history")}
-              onPress={() =>
-                void pico.perform(async () =>
-                  setHistory({
-                    name: job.name,
-                    runs: (await pico.request("jobs.history", { jobId: job.jobId, limit: 20 }))
-                      .runs,
-                  }),
-                )
-              }
+              onPress={() => void pico.perform(() => openHistory(job))}
             />
             <Button
               title="删除"
