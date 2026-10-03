@@ -627,6 +627,30 @@ test("remote pairing only accepts an explicit acknowledged receipt", async (t) =
   await RemoteRuntimeClient.acknowledgePairing(harness.publicUrl, pairing, harness.fetcher);
 });
 
+test("remote revocation only accepts an explicit revoked receipt", async (t) => {
+  const harness = await fixture(t);
+  const client = harness.client();
+  let receipt: unknown;
+  harness.setHttp((request, response) => {
+    if (request.url !== "/v1/device" || request.method !== "DELETE") return false;
+    json(response, receipt);
+    return true;
+  });
+  for (const response of [{}, { revoked: false }, { revoked: "true" }, [{ revoked: true }], null]) {
+    receipt = response;
+    await assert.rejects(client.revoke(), remoteError("INVALID_RESPONSE"));
+  }
+  assert.deepEqual(await client.request("session.list", {}, { workspaceId: "workspace-a" }), {
+    sessions: [],
+  });
+  harness.setHttp(() => false);
+  await client.revoke();
+  await assert.rejects(
+    client.request("session.list", {}, { workspaceId: "workspace-a" }),
+    remoteError("CLIENT_CLOSED"),
+  );
+});
+
 test("remote client WSS replays, deduplicates and pauses background reconnects", async (t) => {
   const harness = await fixture(t);
   const states: RemoteConnectionState[] = [];
