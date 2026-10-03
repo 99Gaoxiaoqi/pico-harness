@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import type { RuntimeMemoryItem } from "@pico/protocol";
+import type { RuntimeMemoryItem, RuntimeMemoryListItem } from "@pico/protocol";
 import { Button, EmptyState, IconButton, InlineNotice } from "./components.js";
 import type { RuntimeStore } from "./runtime.js";
 
@@ -33,6 +33,7 @@ const temporalLabels = {
   interval: "时间区间",
   open_ended: "持续有效",
 };
+type MemoryListItem = RuntimeMemoryItem | RuntimeMemoryListItem;
 
 export function nextMemoryTabIndex(current: number, key: string, count = panels.length): number {
   if (key === "Home") return 0;
@@ -132,12 +133,12 @@ export function MemoryPage({
       void actions.refreshMemory();
   }, [actions, data.trusted, data.workspacePath, memory.status, memory.workspacePath]);
 
-  const changeState = async (item: RuntimeMemoryItem) => {
+  const changeState = async (item: MemoryListItem) => {
     const lifecycleState = item.lifecycleState === "active" ? "archived" : "active";
     if (await actions.updateMemoryItem(item.itemId, item.version, { lifecycleState }))
       setAnnouncement(lifecycleState === "active" ? "记忆已恢复。" : "记忆已归档，不再参与召回。");
   };
-  const save = async (item: RuntimeMemoryItem) => {
+  const save = async (item: MemoryListItem) => {
     if (!editor || editor.id !== item.itemId || !editor.content.trim()) return;
     if (
       await actions.updateMemoryItem(item.itemId, item.version, { content: editor.content.trim() })
@@ -146,7 +147,7 @@ export function MemoryPage({
       setAnnouncement("记忆已保存。");
     }
   };
-  const deleteItem = async (item: RuntimeMemoryItem) => {
+  const deleteItem = async (item: MemoryListItem) => {
     if (
       typeof window === "undefined" ||
       !window.confirm(
@@ -242,11 +243,19 @@ export function MemoryPage({
     ) : (
       <EmptyState
         icon={<BrainCircuit aria-hidden="true" />}
-        title={panel === "saved" ? "还没有已保存的记忆" : "没有已归档的记忆"}
+        title={
+          memory.pageInfo?.nextCursor
+            ? `已加载的条目中没有${panelLabels[panel]}记忆`
+            : panel === "saved"
+              ? "还没有已保存的记忆"
+              : "没有已归档的记忆"
+        }
         detail={
-          panel === "saved"
-            ? "可以手动添加项目约定或偏好，也可以在对话中请 Pico 记住一条信息。"
-            : "归档条目不会参与会话召回，可以随时恢复。"
+          memory.pageInfo?.nextCursor
+            ? "继续加载可查看后续记忆。"
+            : panel === "saved"
+              ? "可以手动添加项目约定或偏好，也可以在对话中请 Pico 记住一条信息。"
+              : "归档条目不会参与会话召回，可以随时恢复。"
         }
       />
     );
@@ -258,6 +267,11 @@ export function MemoryPage({
           <span className="eyebrow">Memory</span>
           <h2 id="memory-page-title">工作区记忆</h2>
           <p>管理已保存的信息。全局记忆可跨工作区使用，归档后不再参与召回。</p>
+          <p>
+            {memory.pageInfo
+              ? `已加载 ${memory.items.length} / ${memory.pageInfo.counts.total} 条`
+              : `已加载 ${memory.items.length} 条，总数未知`}
+          </p>
         </div>
         <div className="memory-page__actions">
           <Button
@@ -372,7 +386,12 @@ export function MemoryPage({
                     id={`memory-tab-${panel}`}
                     panelId={`memory-panel-${panel}`}
                     label={panelLabels[panel]}
-                    endContent={<span>{groups[panel].length}</span>}
+                    endContent={
+                      <span>
+                        {memory.pageInfo?.counts[panel === "saved" ? "active" : "archived"] ??
+                          groups[panel].length}
+                      </span>
+                    }
                   />
                 ))}
               </TabList>
@@ -399,12 +418,26 @@ export function MemoryPage({
                 >
                   <header>
                     <h3 id={`memory-column-${panel}`}>{panelLabels[panel]}</h3>
-                    <span aria-label={`${groups[panel].length} 项`}>{groups[panel].length}</span>
+                    <span
+                      aria-label={`${memory.pageInfo?.counts[panel === "saved" ? "active" : "archived"] ?? groups[panel].length} 项`}
+                    >
+                      {memory.pageInfo?.counts[panel === "saved" ? "active" : "archived"] ??
+                        groups[panel].length}
+                    </span>
                   </header>
                   {renderList(panel)}
                 </section>
               ))}
             </div>
+          )}
+          {memory.pageInfo?.nextCursor && (
+            <Button
+              variant="quiet"
+              disabled={Boolean(busy) || memory.status === "loading"}
+              onClick={() => void actions.loadMoreMemory()}
+            >
+              {memory.status === "loading" ? "正在加载…" : "加载更多记忆"}
+            </Button>
           )}
         </>
       )}
@@ -415,8 +448,9 @@ export function MemoryPage({
   );
 }
 
-function SourceDetails({ item }: { readonly item: RuntimeMemoryItem }) {
-  const source = item.sources[0];
+function SourceDetails({ item }: { readonly item: MemoryListItem }) {
+  const source = Array.isArray(item.sources) ? item.sources[0] : item.firstSource;
+  const sourceCount = Array.isArray(item.sources) ? item.sources.length : item.sourceCount;
   return (
     <details className="memory-source">
       <summary>
@@ -429,6 +463,12 @@ function SourceDetails({ item }: { readonly item: RuntimeMemoryItem }) {
             : "来源信息"}
       </summary>
       <dl>
+        {typeof sourceCount === "number" && sourceCount > 0 && (
+          <div>
+            <dt>来源数量</dt>
+            <dd>{sourceCount}</dd>
+          </div>
+        )}
         {source ? (
           <>
             <div>
@@ -476,7 +516,7 @@ function SourceDetails({ item }: { readonly item: RuntimeMemoryItem }) {
     </details>
   );
 }
-function memoryItemLabel(item: RuntimeMemoryItem): string {
+function memoryItemLabel(item: MemoryListItem): string {
   return [...item.content].slice(0, 60).join("") || "记忆";
 }
 function formatTime(value: number): string {

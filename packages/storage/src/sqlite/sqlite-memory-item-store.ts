@@ -99,6 +99,31 @@ export interface SqliteMemoryItemStoreOptions {
   readonly failpoint?: (point: SqliteMemoryItemStoreFailpoint) => void;
 }
 
+export class MemoryItemListCursorError extends Error {}
+
+export interface MemoryItemListPage {
+  readonly items: readonly {
+    readonly item: MemoryItem;
+    readonly sourceCount: number;
+    readonly firstSource?: MemoryItemSource;
+  }[];
+  readonly pageInfo: {
+    readonly revision: number;
+    readonly nextCursor?: string;
+    readonly counts: { readonly active: number; readonly archived: number; readonly total: number };
+  };
+  /** Per-row continuation tokens allow the transport to trim a page by serialized bytes. */
+  readonly cursors: readonly string[];
+}
+
+interface MemoryListCursor {
+  readonly version: 1;
+  readonly binding: string;
+  readonly revision: number;
+  readonly updatedAt: number;
+  readonly itemId: string;
+}
+
 interface NormalizedMemoryWrite {
   readonly content: string;
   readonly kind: MemoryItem["kind"];
@@ -925,6 +950,107 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
     });
   }
 
+  async listItemsPage(input: {
+    workspaceKey: string;
+    lifecycleStates?: readonly MemoryItem["lifecycleState"][];
+    kinds?: readonly MemoryItem["kind"][];
+    cursor?: string;
+    limit?: number;
+  }): Promise<MemoryItemListPage> {
+    this.#assertOpen();
+    const workspaceKey = normalizeIdentifier(input.workspaceKey, "workspaceKey");
+    const limit = input.limit ?? 100;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000)
+      throw new MemoryItemListCursorError("Memory list limit must be between 1 and 1000");
+    const states = normalizeListFilter(input.lifecycleStates, isMemoryLifecycleState);
+    const kinds = normalizeListFilter(input.kinds, isMemoryItemKind);
+    const binding = hashText(JSON.stringify([workspaceKey, states, kinds]));
+    const cursor = input.cursor === undefined ? undefined : decodeListCursor(input.cursor);
+    if (cursor && cursor.binding !== binding)
+      throw new MemoryItemListCursorError("Memory cursor does not match this workspace or filter");
+    const conditions = ["(scope_type = 'global' OR (scope_type = 'workspace' AND scope_key = ?))"];
+    const parameters: Array<string | number> = [workspaceKey];
+    if (states !== undefined) {
+      conditions.push(states.length ? `lifecycle_state IN (${placeholders(states.length)})` : "0");
+      parameters.push(...states);
+    }
+    if (kinds !== undefined) {
+      conditions.push(kinds.length ? `kind IN (${placeholders(kinds.length)})` : "0");
+      parameters.push(...kinds);
+    }
+    return this.#readSnapshot(() => {
+      const revision = (
+        this.#database
+          .prepare("SELECT count(*) AS revision FROM memory_write_operations")
+          .get() as {
+          revision: number;
+        }
+      ).revision;
+      if (cursor && cursor.revision !== revision)
+        throw new MemoryItemStoreConflictError("version_conflict", "Memory list changed; refresh");
+      const counts = this.#database
+        .prepare(
+          `SELECT count(*) AS total,
+            coalesce(sum(lifecycle_state = 'active'), 0) AS active,
+            coalesce(sum(lifecycle_state = 'archived'), 0) AS archived
+           FROM memory_items WHERE ${conditions.join(" AND ")}`,
+        )
+        .get(...parameters) as MemoryItemListPage["pageInfo"]["counts"];
+      const pageConditions = [...conditions];
+      const pageParameters = [...parameters];
+      if (cursor) {
+        pageConditions.push("(updated_at < ? OR (updated_at = ? AND item_id > ?))");
+        pageParameters.push(cursor.updatedAt, cursor.updatedAt, cursor.itemId);
+      }
+      const rows = this.#database
+        .prepare(
+          `SELECT * FROM memory_items WHERE ${pageConditions.join(" AND ")}
+           ORDER BY updated_at DESC, item_id ASC LIMIT ?`,
+        )
+        .all(...pageParameters, limit + 1) as unknown as MemoryItemRow[];
+      const hasMore = rows.length > limit;
+      const items = rows.slice(0, limit).map((row) => {
+        const item = decodeItem(row);
+        const sourceCount = (
+          this.#database
+            .prepare("SELECT count(*) AS count FROM memory_item_sources WHERE item_id = ?")
+            .get(item.itemId) as { count: number }
+        ).count;
+        const firstSource = this.#database
+          .prepare(
+            `SELECT session_id, run_id, turn_id, event_id FROM memory_item_sources
+             WHERE item_id = ? ORDER BY event_id ASC LIMIT 1`,
+          )
+          .get(item.itemId) as MemorySourceRow | undefined;
+        return {
+          item,
+          sourceCount,
+          ...(firstSource ? { firstSource: decodeSource(firstSource) } : {}),
+        };
+      });
+      const cursors = items.map(({ item }) =>
+        Buffer.from(
+          JSON.stringify({
+            version: 1,
+            binding,
+            revision,
+            updatedAt: item.updatedAt,
+            itemId: item.itemId,
+          }),
+        ).toString("base64url"),
+      );
+      return {
+        items,
+        pageInfo: {
+          revision,
+          counts: { ...counts },
+          ...(hasMore ? { nextCursor: cursors.at(-1)! } : {}),
+        },
+        cursors,
+      };
+    });
+  }
+
   async readSettings(workspaceKey: string): Promise<AtomicMemorySettings> {
     this.#assertOpen();
     return this.#readSnapshot(() =>
@@ -1413,6 +1539,41 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
 
 function loadDatabaseSync(): typeof import("node:sqlite").DatabaseSync {
   return (require("node:sqlite") as typeof import("node:sqlite")).DatabaseSync;
+}
+
+function normalizeListFilter<T extends string>(
+  input: readonly T[] | undefined,
+  accepts: (value: string) => boolean,
+): readonly T[] | undefined {
+  if (input === undefined) return undefined;
+  if (!Array.isArray(input) || input.some((value) => typeof value !== "string" || !accepts(value)))
+    throw new MemoryItemListCursorError("Invalid Memory list filter");
+  return [...new Set(input)].sort();
+}
+
+function decodeListCursor(value: string): MemoryListCursor {
+  try {
+    if (typeof value !== "string" || value.length > 4096 || !/^[A-Za-z0-9_-]+$/u.test(value))
+      throw new Error("Invalid cursor encoding");
+    const cursor = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as MemoryListCursor;
+    if (
+      !cursor ||
+      Object.keys(cursor).sort().join(",") !== "binding,itemId,revision,updatedAt,version" ||
+      cursor.version !== 1 ||
+      typeof cursor.binding !== "string" ||
+      !/^[a-f0-9]{64}$/u.test(cursor.binding) ||
+      !Number.isSafeInteger(cursor.revision) ||
+      cursor.revision < 0 ||
+      !Number.isSafeInteger(cursor.updatedAt) ||
+      cursor.updatedAt < 0 ||
+      typeof cursor.itemId !== "string"
+    )
+      throw new Error("Invalid cursor fields");
+    normalizeIdentifier(cursor.itemId, "itemId");
+    return cursor;
+  } catch {
+    throw new MemoryItemListCursorError("Invalid Memory list cursor");
+  }
 }
 
 export function buildSqliteMemoryKeySearchQuery(input: {

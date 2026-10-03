@@ -92,6 +92,39 @@ test("atomic memory narrow layout has two keyboard-operated tabs and handles emp
   );
 });
 
+test("memory page renders summary provenance and shows loaded range separately from complete counts", () => {
+  const runtime = previewRuntime();
+  const item = runtime.data.memory.items[0]!;
+  const { sources: _sources, ...fields } = item;
+  const firstSource = Array.isArray(item.sources) ? item.sources[0] : undefined;
+  const summary = {
+    ...fields,
+    sourceCount: 256,
+    ...(firstSource ? { firstSource } : {}),
+  };
+  const paged: RuntimeStore = {
+    ...runtime,
+    data: {
+      ...runtime.data,
+      memory: {
+        ...runtime.data.memory,
+        items: [summary],
+        pageInfo: {
+          revision: 35,
+          nextCursor: "next-page",
+          counts: { active: 1101, archived: 1, total: 1102 },
+        },
+      },
+    },
+  };
+  const html = renderMemoryPage({ runtime: paged, forceNarrow: false });
+  assert.match(html, /已加载 1 \/ 1102 条/u);
+  assert.match(html, /来源数量/u);
+  assert.match(html, />256</u);
+  assert.match(html, /aria-label="1101 项"/u);
+  assert.match(html, /加载更多记忆/u);
+});
+
 test("memory route, notifications, conflict refetch and Item provenance remain usable", async () => {
   const app = await readFile(
     new URL("../../../apps/desktop/src/renderer/App.tsx", import.meta.url),

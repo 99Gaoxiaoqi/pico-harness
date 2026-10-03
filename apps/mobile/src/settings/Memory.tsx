@@ -1,7 +1,7 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Switch, Text, View } from "react-native";
 import * as Crypto from "expo-crypto";
-import type { RuntimeResult } from "@pico/protocol/mobile";
+import type { RuntimeMemoryPageInfo, RuntimeResult } from "@pico/protocol/mobile";
 import { usePico } from "../store";
 import { Button, Card, Chips, Field, Label, s } from "../ui";
 import { confirmDelete } from "./confirmDelete";
@@ -15,25 +15,107 @@ export function Memory({ section = "content" }: { section?: "content" | "policy"
   const [state, setState] = useState<"active" | "archived">("active");
   const [editor, setEditor] = useState<{ item?: Item; text: string }>();
   const [saving, setSaving] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [pageInfo, setPageInfo] = useState<RuntimeMemoryPageInfo>();
+  const [notice, setNotice] = useState("");
+  const requestEpoch = useRef(0);
+  const loadingRef = useRef(false);
+  const context = `${pico.generation}:${section}:${state}`;
+  const contextRef = useRef(context);
+  contextRef.current = context;
   const method = section === "policy" ? "memory.settings.get" : "memory.list";
   async function refresh() {
-    if (section === "policy") setSettings((await pico.request("memory.settings.get", {})).settings);
-    else
-      setItems(
-        (
-          await pico.request("memory.list", {
-            limit: 1000,
-            lifecycleStates: ["active", "archived"],
-          })
-        ).items,
-      );
+    if (context !== contextRef.current) return;
+    const epoch = ++requestEpoch.current;
+    const requestedContext = context;
+    const isCurrent = () =>
+      epoch === requestEpoch.current && requestedContext === contextRef.current;
+    loadingRef.current = true;
+    setLoading(true);
+    setNotice("");
+    if (section === "content") {
+      setItems([]);
+      setPageInfo(undefined);
+    }
+    try {
+      if (section === "policy") {
+        const result = await pico.request("memory.settings.get", {});
+        if (isCurrent()) setSettings(result.settings);
+      } else {
+        const paged = pico.capabilities?.features["memoryPagination"]?.available === true;
+        const result = await pico.request("memory.list", {
+          ...(paged ? { paged: true as const } : {}),
+          limit: 50,
+          lifecycleStates: [state],
+        });
+        if (isCurrent()) {
+          setItems(result.items);
+          setPageInfo(result.pageInfo);
+        }
+      }
+    } catch (error) {
+      if (isCurrent()) throw error;
+    } finally {
+      if (isCurrent()) {
+        loadingRef.current = false;
+        setLoading(false);
+      }
+    }
+  }
+  async function loadMore() {
+    if (!pageInfo?.nextCursor || loadingRef.current) return;
+    const epoch = requestEpoch.current;
+    const requestedContext = context;
+    const revision = pageInfo.revision;
+    const isCurrent = () =>
+      epoch === requestEpoch.current && requestedContext === contextRef.current;
+    loadingRef.current = true;
+    setLoading(true);
+    try {
+      const result = await pico.request("memory.list", {
+        paged: true,
+        cursor: pageInfo.nextCursor,
+        lifecycleStates: [state],
+        limit: 50,
+      });
+      if (!isCurrent()) return;
+      if (!result.pageInfo || result.pageInfo.revision !== revision) {
+        await refresh();
+        return;
+      }
+      setItems((current) => [...current, ...result.items]);
+      setPageInfo(result.pageInfo);
+    } catch (error) {
+      if (
+        isCurrent() &&
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        error.code === "CONFLICT"
+      ) {
+        await refresh();
+        if (requestedContext === contextRef.current) setNotice("记忆已改变，已重新加载当前列表。");
+      } else if (isCurrent()) throw error;
+    } finally {
+      if (isCurrent()) {
+        loadingRef.current = false;
+        setLoading(false);
+      }
+    }
   }
   useEffect(() => {
     setEditor(undefined);
     setItems([]);
     setSettings(undefined);
+    setPageInfo(undefined);
+    setNotice("");
+    loadingRef.current = false;
+    setLoading(false);
     if (!pico.reason(method)) void pico.perform(refresh);
-  }, [pico.generation, section]);
+    return () => {
+      requestEpoch.current++;
+    };
+  }, [pico.generation, section, state]);
   async function mutate(task: () => Promise<unknown>) {
     if (saving) return;
     setSaving(true);
@@ -148,6 +230,13 @@ export function Memory({ section = "content" }: { section?: "content" | "policy"
       <Card>
         <Text style={s.text}>全局 + 当前项目</Text>
         <Label>仅包含全局和当前项目的记忆，不包含其他项目。新建内容保存到当前项目。</Label>
+        <Label>
+          {pageInfo
+            ? `已加载 ${items.length} / ${pageInfo.counts.total} 条`
+            : `已加载 ${items.length} 条，总数未知（电脑暂不支持分页）`}
+          {scope !== "all" ? `；当前范围已加载 ${visible.length} 条` : ""}
+        </Label>
+        {notice ? <Label>{notice}</Label> : null}
         <Chips
           values={["all", "global", "workspace"] as const}
           value={scope}
@@ -169,12 +258,20 @@ export function Memory({ section = "content" }: { section?: "content" | "policy"
           <Button
             title="刷新"
             secondary
-            reason={saving ? "正在保存" : pico.reason(method)}
+            reason={saving ? "正在保存" : loading ? "正在加载" : pico.reason(method)}
             onPress={() => void pico.perform(refresh)}
           />
         </View>
       </Card>
-      {visible.length === 0 && <Label>当前筛选下没有记忆。</Label>}
+      {visible.length === 0 && (
+        <Label>
+          {loading
+            ? "正在加载记忆…"
+            : pageInfo?.nextCursor
+              ? "已加载的记忆中没有当前范围的条目，可继续加载。"
+              : "当前筛选下没有记忆。"}
+        </Label>
+      )}
       {visible.map((item) => (
         <Card key={item.itemId}>
           <Text style={s.text}>{item.content}</Text>
@@ -229,6 +326,14 @@ export function Memory({ section = "content" }: { section?: "content" | "policy"
           </View>
         </Card>
       ))}
+      {pageInfo?.nextCursor && (
+        <Button
+          title={loading ? "正在加载…" : "加载更多记忆"}
+          secondary
+          reason={loading ? "正在加载" : saving ? "正在保存" : pico.reason(method)}
+          onPress={() => void pico.perform(loadMore)}
+        />
+      )}
     </>
   );
 }

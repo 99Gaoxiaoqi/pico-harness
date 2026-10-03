@@ -9,9 +9,13 @@ import {
 } from "@pico/core/atomic-memory-contracts";
 import type { AtomicMemorySettings } from "@pico/core/atomic-memory-runtime-contracts";
 import { resolvePicoPaths } from "./pico-paths.js";
-import { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-store";
+import {
+  MemoryItemListCursorError,
+  SqliteMemoryItemStore,
+} from "@pico/storage/sqlite/sqlite-memory-item-store";
 import type {
   RuntimeMemoryItem,
+  RuntimeMemoryListItem,
   RuntimeMemorySettings,
   RuntimeNotificationMap,
   RuntimeParams,
@@ -39,6 +43,42 @@ export class DesktopAtomicMemoryService {
     params: RuntimeParams<"memory.list">,
   ): Promise<RuntimeResult<"memory.list">> {
     return this.withStore(workspacePath, async (store, workspaceKey) => {
+      if (params.paged) {
+        const page = await store.listItemsPage({
+          workspaceKey,
+          ...(params.lifecycleStates ? { lifecycleStates: params.lifecycleStates } : {}),
+          ...(params.kinds ? { kinds: params.kinds } : {}),
+          ...(params.cursor ? { cursor: params.cursor } : {}),
+          ...(params.limit ? { limit: params.limit } : {}),
+        });
+        const items: RuntimeMemoryListItem[] = [];
+        // Reserve 8 KiB for the RPC response envelope (including its bounded request ID).
+        const resultBudget = 983_040 - 8_192;
+        let nextCursor = page.pageInfo.nextCursor;
+        let itemsBytes = 0;
+        for (const record of page.items) {
+          const candidate: RuntimeMemoryListItem = {
+            ...record.item,
+            sourceCount: record.sourceCount,
+            ...(record.firstSource ? { firstSource: { ...record.firstSource } } : {}),
+          };
+          const pageInfo = {
+            ...page.pageInfo,
+            nextCursor: page.cursors[items.length],
+          };
+          const candidateBytes =
+            Buffer.byteLength(JSON.stringify(candidate), "utf8") + (items.length ? 1 : 0);
+          const envelopeBytes = Buffer.byteLength(JSON.stringify({ items: [], pageInfo }), "utf8");
+          if (itemsBytes + candidateBytes + envelopeBytes > resultBudget) {
+            nextCursor = page.cursors[items.length - 1];
+            break;
+          }
+          items.push(candidate);
+          itemsBytes += candidateBytes;
+        }
+        const { nextCursor: _originalCursor, ...pageInfo } = page.pageInfo;
+        return { items, pageInfo: { ...pageInfo, ...(nextCursor ? { nextCursor } : {}) } };
+      }
       const records = await store.listItems({ workspaceKey, includeArchived: true, limit: 1000 });
       return {
         items: records
@@ -262,6 +302,7 @@ export class DesktopAtomicMemoryService {
       }
     } catch (error) {
       if (error instanceof RuntimeProtocolError) throw error;
+      if (error instanceof MemoryItemListCursorError) throw invalid(error.message);
       if (error instanceof MemoryItemStoreConflictError)
         throw new RuntimeProtocolError(
           error.reason === "item_not_found"

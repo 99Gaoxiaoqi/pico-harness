@@ -3,6 +3,7 @@ import { snapshotSummariesFromRewindList } from "./rewind-snapshots.js";
 import { formatRewindSelector } from "./rewind-presentation.js";
 import type { RpcCommandRuntime } from "./rpc-command-runtime.js";
 import { rpcCommand, sessionAccess } from "./command-helpers.js";
+import { MEMORY_PAGINATION_RUNTIME_CAPABILITY } from "@pico/protocol";
 
 export interface WorkspaceCommandRegistryDeps {
   readonly runtime: RpcCommandRuntime;
@@ -326,9 +327,15 @@ export function createWorkspaceCommands(deps: WorkspaceCommandRegistryDeps) {
               );
             }
             case "status": {
+              const ping = await runtime.request("runtime.ping", {});
+              const paged = ping.capabilities.includes(MEMORY_PAGINATION_RUNTIME_CAPABILITY);
               const [settingsResult, items] = await Promise.all([
                 runtime.request("memory.settings.get", { workspacePath }),
-                runtime.request("memory.list", { workspacePath, limit: 1000 }),
+                runtime.request("memory.list", {
+                  workspacePath,
+                  ...(paged ? { paged: true as const } : {}),
+                  limit: paged ? 1 : 50,
+                }),
               ]);
               return msg(
                 [
@@ -336,8 +343,17 @@ export function createWorkspaceCommands(deps: WorkspaceCommandRegistryDeps) {
                   `Injection: ${settingsResult.settings.recallEnabled ? "on" : "off"}`,
                   `Automatic extraction: ${settingsResult.settings.autoExtract ? "on" : "off"}`,
                   "Validated memories are saved directly.",
-                  `Active items: ${items.items.filter((item) => item.lifecycleState === "active").length}`,
-                  `Archived items: ${items.items.filter((item) => item.lifecycleState === "archived").length}`,
+                  ...(items.pageInfo
+                    ? [
+                        `Active items: ${items.pageInfo.counts.active}`,
+                        `Archived items: ${items.pageInfo.counts.archived}`,
+                        `Total items: ${items.pageInfo.counts.total}`,
+                      ]
+                    : [
+                        `Loaded active items: ${items.items.filter((item) => item.lifecycleState === "active").length}`,
+                        `Loaded archived items: ${items.items.filter((item) => item.lifecycleState === "archived").length}`,
+                        "Total items: unknown (Host does not support memory pagination).",
+                      ]),
                 ].join("\n"),
               );
             }

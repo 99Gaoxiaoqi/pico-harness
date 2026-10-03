@@ -8,6 +8,8 @@ import { ClientSessionRuntime } from "@pico/cli/tui/client-session-runtime";
 import { createClientCommandRegistry, processClientInput } from "@pico/cli/tui/client-commands";
 import { TuiReporter } from "@pico/cli/tui/tui-reporter";
 import { TestRuntimeHostCandidateTracker } from "../helpers/test-runtime-daemon.js";
+import { resolvePicoPaths } from "@pico/pico-host";
+import { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-store";
 
 test("TUI memory commands persist and archive atomic memories through the real daemon", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-client-memory-"));
@@ -68,6 +70,36 @@ test("TUI memory commands persist and archive atomic memories through the real d
   });
   assert.equal(archived.item.lifecycleState, "archived");
   assert.match(await command("/memory status"), /Archived items: 1/);
+  const store = new SqliteMemoryItemStore(join(picoHome, "memory.sqlite"));
+  try {
+    const scopeKey = resolvePicoPaths(workspacePath, { picoHome }).workspace.id;
+    for (let first = 0; first < 1100; first += 32) {
+      await store.applyMutations({
+        operationId: `tui-count-seed-${first}`,
+        mutations: Array.from({ length: Math.min(32, 1100 - first) }, (_, offset) => ({
+          type: "create" as const,
+          item: {
+            content: `项目状态统计记忆 ${first + offset}`,
+            kind: "note" as const,
+            statementType: "fact" as const,
+            temporalType: "undated" as const,
+            scopeType: "workspace" as const,
+            scopeKey,
+            observedAt: Date.now(),
+            origin: "user_requested" as const,
+            keys: [{ key: "统计", keyType: "concept" as const, keyOrigin: "user" as const }],
+            sources: [],
+          },
+        })),
+      });
+    }
+  } finally {
+    store.close();
+  }
+  const largeStatus = await command("/memory status");
+  assert.match(largeStatus, /Active items: 1100/u);
+  assert.match(largeStatus, /Archived items: 1/u);
+  assert.match(largeStatus, /Total items: 1101/u);
   await command("/memory off");
   assert.equal(
     (await client.request("memory.settings.get", { workspacePath })).settings.enabled,
