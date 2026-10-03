@@ -3,8 +3,46 @@ import { createHash, randomUUID } from "node:crypto";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
-import type { DraftScope } from "../../../apps/mobile/src/conversation/draft.js";
+import type { RuntimeSessionArtifact } from "@pico/protocol/mobile";
+import type { RemoteRuntimeClient } from "@pico/remote-client";
+import type {
+  DraftRepository,
+  DraftScope,
+  draftInput,
+  draftKey,
+  emptyDraft,
+  submitDraft,
+} from "../../../apps/mobile/src/conversation/draft.js";
 import type { RuntimePort } from "../../../apps/mobile/src/core.js";
+import type { MobileReview } from "../../../apps/mobile/src/review-controller.js";
+import type { ReviewRequestStorage } from "../../../apps/mobile/src/review-request-storage.js";
+
+// Keep native modules behind the runtime bundle so their ambient types cannot enter Node tests.
+type LocalDataTestBoundary = {
+  drafts: DraftRepository;
+  MobileReview: typeof MobileReview;
+  ReviewRequestStorage: typeof ReviewRequestStorage;
+  emptyDraft: typeof emptyDraft;
+  draftInput: typeof draftInput;
+  draftKey: typeof draftKey;
+  submitDraft: typeof submitDraft;
+  inspectHostLocalData(hostId: string): Promise<{ hasUnconfirmed: boolean; legacyCache: boolean }>;
+  clearHostLocalData(
+    hostId: string,
+    options?: { discardUnconfirmed?: boolean },
+  ): Promise<{ legacyCacheRemaining: boolean }>;
+  clearArtifactCache(): Promise<void>;
+  clearLegacyArtifactCache(): void;
+  hasLegacyArtifactCache(): boolean;
+  downloadArtifact(options: {
+    client: RemoteRuntimeClient;
+    scopeId: string;
+    workspaceId: string;
+    sessionId: string;
+    artifact: RuntimeSessionArtifact;
+    assertCurrent(): void;
+  }): Promise<{ uri: string }>;
+};
 
 function deferred<T>() {
   return Promise.withResolvers<T>();
@@ -160,12 +198,7 @@ async function fixture() {
       },
     ],
   });
-  let modules: typeof import("../../../apps/mobile/src/local-data.js") &
-    typeof import("../../../apps/mobile/src/draft-store.js") &
-    typeof import("../../../apps/mobile/src/conversation/draft.js") &
-    typeof import("../../../apps/mobile/src/review-request-storage.js") &
-    typeof import("../../../apps/mobile/src/review-controller.js") &
-    typeof import("../../../apps/mobile/src/artifact-cache.js");
+  let modules: LocalDataTestBoundary;
   try {
     modules = await import(
       `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0]!.text).toString("base64")}`
@@ -280,9 +313,11 @@ test("按电脑清理保留另一台电脑，未确认操作须明确放弃，�
       workspaceId: "workspace",
       sessionId: "session",
       artifact: artifact as Parameters<typeof f.downloadArtifact>[0]["artifact"],
-      client: { artifactUrl: () => hostId, authorizationHeaders: () => ({}) } as Parameters<
-        typeof f.downloadArtifact
-      >[0]["client"],
+      // Only these transport methods are exercised by the native download stub.
+      client: {
+        artifactUrl: () => hostId,
+        authorizationHeaders: () => ({}),
+      } as unknown as RemoteRuntimeClient,
       assertCurrent() {},
     });
   const fileB = await download("B");
@@ -388,9 +423,11 @@ test("全量成果缓存清理等待慢原生下载收尾，期间拒绝新下�
       workspaceId: "workspace",
       sessionId: "session",
       artifact: artifact as Parameters<typeof f.downloadArtifact>[0]["artifact"],
-      client: { artifactUrl: () => hostId, authorizationHeaders: () => ({}) } as Parameters<
-        typeof f.downloadArtifact
-      >[0]["client"],
+      // Only these transport methods are exercised by the native download stub.
+      client: {
+        artifactUrl: () => hostId,
+        authorizationHeaders: () => ({}),
+      } as unknown as RemoteRuntimeClient,
       assertCurrent() {},
     });
   const fileB = await download("B");
