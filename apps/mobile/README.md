@@ -59,3 +59,28 @@ node --import tsx --test tests/integration/remote/mobile-session.test.ts
 ```
 
 集成覆盖 transcript 分页、增量补齐、序列间隙恢复、切换防迟到响应、终端串行轮询，以及附件预算 / 下载摘要校验。真机软键盘、系统分享、IPv4 / IPv6 跨网、签名和三种电脑系统的安装仍需实际环境验收。
+
+## 发布校验与本轮候选
+
+当前内部候选为 `0.1.1`，iOS buildNumber `2`、Android versionCode `2`。正式发布前需核对目标渠道已有最高编号；本仓库不能证明渠道编号递增。主体、隐私政策和支持渠道集中配置在 `app.json` 的 `expo.extra.release`，当前为空，只可用于内部验证。
+
+```sh
+npm run verify:release --workspace @pico/mobile -- --internal
+node apps/mobile/scripts/verify-release.mjs --internal --android-manifest /absolute/merged/AndroidManifest.xml --ios-plist /absolute/Pico.app/Info.plist --artifact /absolute/pico.apk
+node apps/mobile/scripts/verify-release.mjs --store --signing-verified --android-manifest /absolute/merged/AndroidManifest.xml --ios-plist /absolute/Pico.app/Info.plist --artifact /absolute/release.apk
+```
+
+校验器拒绝麦克风声明、可调试 Android 包、缺失构建号和空产物；商店模式还要求完整发布资料和外部验签声明。`--signing-verified` 仅记录调用方声明，本脚本不验证正式签名、链接可达性或真机行为。正式资料尚缺时商店模式应失败，不能把内部模式通过视为可公开发布。
+
+Android 通过本地 Expo config plugin 显式写入 `usesCleartextTraffic=false`；`android.blockedPermissions` 阻止依赖重新引入麦克风。不要仅修改 app.json 后复用旧原生包。
+
+未配置 Apple Team 时，模拟器验收使用本地 ad hoc 签名，并在 Xcode 链接阶段嵌入仅供模拟器的 entitlement：
+
+```sh
+cd apps/mobile/ios
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild -workspace Pico.xcworkspace -scheme Pico -configuration Release -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath /absolute/simulator-build ARCHS=arm64 ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- CODE_SIGN_ENTITLEMENTS=/absolute/repo/apps/mobile/scripts/ios-simulator.entitlements.plist
+```
+
+`ios-simulator.entitlements.plist` 的 namespace 仅用于隔离模拟器 Keychain，不能用于真机、Archive、IPA 或商店签名。仅事后 codesign 无法替代模拟器链接阶段的 entitlement；完全禁用签名会使部分环境中的 SecureStore 不可用。真机使用真实 Apple Team 和对应签名配置。
+
+本轮代码验证与候选证据见 [整改交付记录](../../docs/plans/2026-10-04-mobile-release-delivery.md)。当前 Android 为 debug 证书签名的 Release 内部包；iOS 为 Simulator Release ZIP。正式签名、真机权限/键盘/分享与可信公网蜂窝验收仍未运行。

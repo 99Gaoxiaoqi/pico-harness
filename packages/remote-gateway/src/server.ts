@@ -30,7 +30,7 @@ import {
 } from "@pico/protocol/remote";
 import { acquireGatewayLock, requestGatewayControl, startControlServer } from "./control.js";
 import { GatewayError, safeGatewayError } from "./errors.js";
-import { GatewayPairings } from "./pairing.js";
+import { GatewayPairings, type PairingConfirmation } from "./pairing.js";
 import {
   authorizeRuntimeRequest,
   publicEndpoint,
@@ -117,7 +117,12 @@ export class RemoteGateway {
     this.home = home;
     this.state = state;
     this.now = options.now ?? Date.now;
-    this.pairings = new GatewayPairings(config, state, () => this.persist(), this.now);
+    this.pairings = new GatewayPairings(
+      config,
+      state,
+      (confirmation) => this.persist(confirmation),
+      this.now,
+    );
   }
   static async create(
     config: GatewayConfig,
@@ -378,10 +383,24 @@ export class RemoteGateway {
     this.closeDevice(device.id);
     await this.persist();
   }
-  private persist(): Promise<void> {
-    const next = this.persistenceTail.then(() =>
-      writePrivateJson(join(this.home, "devices.json"), this.state),
-    );
+  private persist(confirmation?: PairingConfirmation): Promise<void> {
+    const next = this.persistenceTail.then(async () => {
+      const snapshot = confirmation
+        ? {
+            ...this.state,
+            devices: this.state.devices.map((device) =>
+              device.id === confirmation.deviceId
+                ? { ...device, pairedAt: confirmation.pairedAt }
+                : device,
+            ),
+          }
+        : this.state;
+      await writePrivateJson(join(this.home, "devices.json"), snapshot);
+      if (confirmation) {
+        const device = this.state.devices.find((item) => item.id === confirmation.deviceId);
+        if (device) device.pairedAt = confirmation.pairedAt;
+      }
+    });
     this.persistenceTail = next.catch(() => undefined);
     return next;
   }

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Switch, Text, View } from "react-native";
 import * as Crypto from "expo-crypto";
 import type { RuntimeResult } from "@pico/protocol/mobile";
@@ -9,6 +9,10 @@ import { confirmDelete } from "./confirmDelete";
 
 export function Mcp() {
   const pico = usePico();
+  const readVersion = useRef(0);
+  const readScope = `${pico.generation}:${pico.connected}:${pico.syncRevision}`;
+  const currentScope = useRef(readScope);
+  currentScope.current = readScope;
   const [data, setData] = useState<RuntimeResult<"mcp.user.list">>();
   const [editing, setEditing] = useState(false);
   const [formOpen, setFormOpen] = useState(false);
@@ -21,14 +25,24 @@ export function Mcp() {
   const [secretKey, setSecretKey] = useState("");
   const [secret, setSecret] = useState("");
   const [secretAction, setSecretAction] = useState<"keep" | "set" | "remove">("keep");
+  const [editRevision, setEditRevision] = useState<string>();
   async function refresh() {
-    setData(await pico.request("mcp.user.list", {}));
+    if (pico.connected === false) return;
+    const version = ++readVersion.current;
+    const result = await pico.request("mcp.user.list", {});
+    if (version !== readVersion.current || readScope !== currentScope.current) return;
+    setData(result);
   }
   useEffect(() => {
     reset();
     setData(undefined);
-    if (!pico.reason("mcp.user.list")) void pico.perform(refresh);
   }, [pico.generation]);
+  useEffect(() => {
+    if (pico.connected !== false && !pico.reason("mcp.user.list")) void pico.perform(refresh);
+    return () => {
+      ++readVersion.current;
+    };
+  }, [pico.generation, pico.connected, pico.syncRevision]);
   function reset() {
     setFormOpen(false);
     setEditing(false);
@@ -40,6 +54,7 @@ export function Mcp() {
     setSecret("");
     setSecretKey("");
     setSecretAction("keep");
+    setEditRevision(undefined);
   }
   async function save() {
     if (!data) throw new Error("先读取配置");
@@ -73,7 +88,11 @@ export function Mcp() {
     try {
       await pico.requestWithSecrets(
         "mcp.user.upsert",
-        { server, expectedRevision: data.revision, idempotencyKey: Crypto.randomUUID() },
+        {
+          server,
+          expectedRevision: editRevision ?? data.revision,
+          idempotencyKey: Crypto.randomUUID(),
+        },
         edits,
       );
       reset();
@@ -94,6 +113,7 @@ export function Mcp() {
               reason={!data ? "等待读取配置" : pico.reason("mcp.user.upsert")}
               onPress={() => {
                 reset();
+                setEditRevision(data?.revision);
                 setFormOpen(true);
               }}
             />
@@ -213,6 +233,7 @@ export function Mcp() {
                 reason={pico.reason("mcp.user.upsert")}
                 onPress={() => {
                   setFormOpen(true);
+                  setEditRevision(data.revision);
                   setEditing(true);
                   setName(server.name);
                   setTransport(server.transport);

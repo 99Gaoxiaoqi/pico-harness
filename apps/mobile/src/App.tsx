@@ -184,13 +184,28 @@ export default function App() {
           <Text accessibilityRole="alert" style={{ color: color.danger }}>
             {pico.error}
           </Text>
-          <Button
-            title="重新连接"
-            quiet
-            onPress={() => {
-              if (pico.host) void pico.connect(pico.host);
-            }}
-          />
+          <Label>{pico.errorInfo?.guidance}</Label>
+          {pico.errorInfo?.action !== "none" && (
+            <Button
+              title={
+                pico.errorInfo?.action === "reconnect"
+                  ? "重新连接"
+                  : pico.errorInfo?.action === "verify"
+                    ? "核对当前状态"
+                    : "电脑与连接"
+              }
+              quiet
+              onPress={() => {
+                if (pico.errorInfo?.action === "reconnect" && pico.host)
+                  void pico.connect(pico.host);
+                else if (pico.errorInfo?.action === "verify") {
+                  setDrawer(false);
+                  setToolSheet(false);
+                  if (screen === "computers" && pico.workspace) setScreen("sessions");
+                } else setScreen("computers");
+              }}
+            />
+          )}
         </View>
       )}
       <View style={{ flex: 1 }}>

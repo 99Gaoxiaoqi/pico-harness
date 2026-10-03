@@ -1,6 +1,6 @@
 {
   "name": "@pico/mobile",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "main": "expo-router/entry",
   "scripts": {
@@ -12,7 +12,8 @@
     "prestart": "node scripts/build-terminal.mjs",
     "preandroid": "node scripts/build-terminal.mjs",
     "preios": "node scripts/build-terminal.mjs",
-    "pretypecheck": "node scripts/build-terminal.mjs"
+    "pretypecheck": "node scripts/build-terminal.mjs",
+    "verify:release": "node scripts/verify-release.mjs"
   },
   "dependencies": {
     "@pico/protocol": "*",

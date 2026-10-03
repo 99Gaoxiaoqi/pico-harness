@@ -21,14 +21,21 @@ export function FilesPanel({ sessionId }: { sessionId: string }) {
   const lifecycle = useRef(0);
   const generation = useRef(pico.generation);
   generation.current = pico.generation;
+  const readVersion = useRef(0);
+  const readScope = `${pico.generation}:${pico.connected}:${pico.syncRevision}:${sessionId}`;
+  const currentScope = useRef(readScope);
+  currentScope.current = readScope;
   const [progress, setProgress] = useState<Record<string, string>>({});
   async function load(more = false) {
+    if (pico.connected === false) return;
+    const version = ++readVersion.current;
     const result = await pico.request("session.artifacts.query", {
       sessionId,
       action: "list",
       limit: 30,
       ...(more && cursor ? { cursor, revision } : {}),
     });
+    if (version !== readVersion.current || readScope !== currentScope.current) return;
     setFiles((old) =>
       more
         ? [...old, ...(result.artifacts as RuntimeSessionArtifact[])]
@@ -43,11 +50,17 @@ export function FilesPanel({ sessionId }: { sessionId: string }) {
     setFiles([]);
     setProgress({});
     setCursor(undefined);
-    void pico.perform(() => load());
+    setRevision(undefined);
     return () => {
       lifecycle.current++;
     };
   }, [sessionId, pico.generation]);
+  useEffect(() => {
+    if (pico.connected !== false) void pico.perform(() => load());
+    return () => {
+      ++readVersion.current;
+    };
+  }, [sessionId, pico.generation, pico.connected, pico.syncRevision]);
   async function download(artifact: RuntimeSessionArtifact, share = false) {
     const capturedGeneration = pico.generation;
     const capturedLifecycle = lifecycle.current;
