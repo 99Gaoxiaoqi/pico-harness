@@ -23,9 +23,11 @@ export function SessionActions({
   const [notice, setNotice] = useState("");
   const lock = useRef(false);
   const fence = useRef(0);
+  const readVersion = useRef(0);
   async function load(token = fence.current) {
+    const read = ++readVersion.current;
     const x = await pico.request("goal.get", { sessionId });
-    if (token === fence.current) setSnapshot(x.goal);
+    if (token === fence.current && read === readVersion.current) setSnapshot(x.goal);
   }
   useEffect(() => {
     const token = ++fence.current;
@@ -47,12 +49,14 @@ export function SessionActions({
     });
     return () => {
       ++fence.current;
+      ++readVersion.current;
       off();
     };
   }, [sessionId, pico.generation]);
   async function perform(task: () => Promise<void>) {
     if (lock.current) return;
     lock.current = true;
+    ++readVersion.current;
     setBusy(true);
     try {
       await task();
@@ -97,6 +101,7 @@ export function SessionActions({
           : { goalId: current?.id }),
       });
       if (token !== fence.current) return;
+      ++readVersion.current;
       setSnapshot(x.goal);
       setNotice(
         action === "arm" || action === "resume"

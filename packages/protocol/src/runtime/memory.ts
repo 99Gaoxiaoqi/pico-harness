@@ -225,7 +225,10 @@ export type MemoryMethodMap = {
     };
     readonly result:
       | { readonly items: readonly RuntimeMemoryItem[]; readonly pageInfo?: never }
-      | { readonly items: readonly RuntimeMemoryListItem[]; readonly pageInfo: RuntimeMemoryPageInfo };
+      | {
+          readonly items: readonly RuntimeMemoryListItem[];
+          readonly pageInfo: RuntimeMemoryPageInfo;
+        };
   };
   readonly "memory.get": {
     readonly params: WorkspaceParams & { readonly itemId: string };

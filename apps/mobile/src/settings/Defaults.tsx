@@ -36,6 +36,7 @@ export function Defaults() {
   const choices = modelChoices(providers),
     levels = choices.find((item) => item.id === model)?.reasoningLevels ?? [];
   const unavailable = model && !choices.some((item) => item.id === model);
+  const invalidEffort = !!model && !!effort && !levels.includes(effort);
   return (
     <Card>
       <Text style={s.text}>新对话默认行为</Text>
@@ -61,14 +62,12 @@ export function Defaults() {
       />
       {unavailable && <Label>原默认路由 {model} 当前不可选，请重新选择或在电脑检查配置。</Label>}
       <Chips
-        values={["", ...levels]}
+        values={["", ...(!model && effort ? [effort] : levels)]}
         value={effort}
         labels={{ "": "模型默认等级" }}
         onChange={setEffort}
       />
-      {effort && !levels.includes(effort) && (
-        <Label>原思考等级 {effort} 当前不可用，请重新选择。</Label>
-      )}
+      {invalidEffort && <Label>原思考等级 {effort} 当前不可用，请重新选择。</Label>}
       <View style={[s.row, { minHeight: 44 }]}>
         <Text style={s.text}>联网搜索</Text>
         <Switch
@@ -97,7 +96,7 @@ export function Defaults() {
               ? "等待读取电脑配置"
               : unavailable
                 ? "请选择当前可用的模型"
-                : effort && !levels.includes(effort)
+                : invalidEffort
                   ? "请选择有效思考等级"
                   : pico.reason("config.user.update")
         }

@@ -274,7 +274,7 @@ export function Conversation({
         ) : (
           <TextInput
             accessibilityLabel="消息"
-            editable={composer.draftReady && !sending}
+            editable={composer.draftReady && !sending && !composer.pickingImage}
             value={text}
             onChangeText={setText}
             multiline

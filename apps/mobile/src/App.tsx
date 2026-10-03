@@ -55,6 +55,9 @@ export default function App() {
   const [sessionId, setSessionId] = useState<string>();
   const [parentIsSideChat, setParentIsSideChat] = useState(true);
   const [sideParent, setSideParent] = useState<string>();
+  const parentLinks = useRef(
+    new Map<string, { parentSessionId: string; kind: "sideChat" | "child" }>(),
+  );
   const [workbarTab, setWorkbarTab] = useState<WorkbarTab>("任务");
   const [drawer, setDrawer] = useState(false);
   const [toolSheet, setToolSheet] = useState(false);
@@ -65,6 +68,7 @@ export default function App() {
   useEffect(() => {
     setSessionId(undefined);
     setSideParent(undefined);
+    parentLinks.current.clear();
     setDrawer(false);
     setToolSheet(false);
     setScreen(pico.workspace ? "sessions" : "computers");
@@ -102,11 +106,13 @@ export default function App() {
     kind: "sideChat" | "child" = "sideChat",
   ) => {
     if (parentSessionId) {
+      parentLinks.current.set(id, { parentSessionId, kind });
       setSideParent(parentSessionId);
       setParentIsSideChat(kind === "sideChat");
     } else if (id !== sessionId) {
-      setSideParent(undefined);
-      setParentIsSideChat(true);
+      const parent = parentLinks.current.get(id);
+      setSideParent(parent?.parentSessionId);
+      setParentIsSideChat(parent?.kind !== "child");
     }
     setSessionId(id);
     setDrawer(false);
@@ -224,6 +230,7 @@ export default function App() {
             sessionId={sessionId}
             initialTab={workbarTab}
             onReturnToConversation={returnToChat}
+            onSession={goSession}
           />
         )}
         {screen === "settings" && (

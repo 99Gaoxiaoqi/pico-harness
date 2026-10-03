@@ -7,6 +7,8 @@ import type {
   RuntimeCollaborationMode,
   RuntimeMcpServerInput,
   RuntimeMemoryItem,
+  RuntimeMemoryListItem,
+  RuntimeMemoryPageInfo,
   RuntimeMemorySettings,
   RuntimeOrchestrationMode,
   RuntimePermissionMode,
@@ -372,7 +374,8 @@ export interface AppData {
 
 export interface MemoryView {
   readonly workspacePath?: string | undefined;
-  readonly items: readonly RuntimeMemoryItem[];
+  readonly items: readonly (RuntimeMemoryItem | RuntimeMemoryListItem)[];
+  readonly pageInfo?: RuntimeMemoryPageInfo | undefined;
   readonly settings?: RuntimeMemorySettings | undefined;
   readonly status: "idle" | "loading" | "ready" | "degraded" | "error";
   readonly error?: string | undefined;

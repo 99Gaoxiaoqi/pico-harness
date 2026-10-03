@@ -12,6 +12,8 @@ import { WorkspaceRegistrationStore } from "@pico/pico-host/workspace-registrati
 import {
   parseRuntimeResult,
   MODEL_CATALOG_RUNTIME_CAPABILITY,
+  REVIEW_IDEMPOTENCY_RUNTIME_CAPABILITY,
+  MEMORY_PAGINATION_RUNTIME_CAPABILITY,
   type RuntimeParams,
   type RuntimeSessionSubscriptionFrame,
 } from "@pico/protocol";
@@ -465,6 +467,21 @@ export class RemoteGateway {
             );
           const params = authorized.params as Record<string, unknown>;
           if (
+            (rpc.method === "changes.review" && params.idempotencyKey) ||
+            (rpc.method === "memory.list" && params.paged)
+          ) {
+            const required =
+              rpc.method === "changes.review"
+                ? REVIEW_IDEMPOTENCY_RUNTIME_CAPABILITY
+                : MEMORY_PAGINATION_RUNTIME_CAPABILITY;
+            if (!(await this.runtimeCapabilities(device)).has(required))
+              throw new GatewayError(
+                "METHOD_NOT_FOUND",
+                "电脑尚未支持此操作的可靠恢复，请更新并重启 Pico",
+                404,
+              );
+          }
+          if (
             rpc.method === "session.subscription.open" &&
             connection.sessionSubscriptions.size >= 16
           )
@@ -615,20 +632,26 @@ export class RemoteGateway {
       /* logging must not break dispatch */
     }
   }
-  private async supportsModelCatalog(device: GatewayDevice): Promise<boolean> {
+  private async runtimeCapabilities(device: GatewayDevice): Promise<ReadonlySet<string>> {
     try {
       const ping = parseRuntimeResult(
         "runtime.ping",
         await this.connection(device).client.request("runtime.ping", {}),
       );
-      return ping.capabilities.includes(MODEL_CATALOG_RUNTIME_CAPABILITY);
+      return new Set(ping.capabilities);
     } catch {
-      return false;
+      return new Set();
     }
+  }
+  private async supportsModelCatalog(device: GatewayDevice): Promise<boolean> {
+    return (await this.runtimeCapabilities(device)).has(MODEL_CATALOG_RUNTIME_CAPABILITY);
   }
 
   private async capabilities(device: GatewayDevice): Promise<RemoteCapabilities> {
-    const modelCatalog = await this.supportsModelCatalog(device);
+    const supported = await this.runtimeCapabilities(device);
+    const modelCatalog = supported.has(MODEL_CATALOG_RUNTIME_CAPABILITY);
+    const reviewIdempotency = supported.has(REVIEW_IDEMPOTENCY_RUNTIME_CAPABILITY);
+    const memoryPagination = supported.has(MEMORY_PAGINATION_RUNTIME_CAPABILITY);
     let ownerIsolation = false;
     let cleanupIsolation = false;
     try {
@@ -661,6 +684,22 @@ export class RemoteGateway {
       ),
       maxFrameBytes: REMOTE_MAX_FRAME_BYTES,
       features: {
+        reviewIdempotency: {
+          available: reviewIdempotency && device.permissions.includes("session.control"),
+          ...(!reviewIdempotency
+            ? { reason: "电脑尚未支持审阅请求恢复，请更新并重启 Pico" }
+            : !device.permissions.includes("session.control")
+              ? { reason: "请在电脑授予会话控制权限" }
+              : {}),
+        },
+        memoryPagination: {
+          available: memoryPagination && device.permissions.includes("workspace.read"),
+          ...(!memoryPagination
+            ? { reason: "电脑尚未支持记忆分页，请更新并重启 Pico" }
+            : !device.permissions.includes("workspace.read")
+              ? { reason: "请在电脑授予项目读取权限" }
+              : {}),
+        },
         modelCatalog: {
           available: modelCatalog && device.permissions.includes("workspace.read"),
           ...(!modelCatalog

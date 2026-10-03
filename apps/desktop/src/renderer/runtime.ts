@@ -3,6 +3,8 @@ import { parseDesktopToolApproval } from "./runtime-projections/approval.js";
 import { TerminalInteractions } from "./runtime-projections/terminal-interactions.js";
 import {
   CAPABILITY_SCOPE_RUNTIME_CAPABILITY,
+  REVIEW_IDEMPOTENCY_RUNTIME_CAPABILITY,
+  MEMORY_PAGINATION_RUNTIME_CAPABILITY,
   isJsonValue,
   isTerminalRunStatus,
   type DesktopRuntimeMethod,
@@ -392,6 +394,7 @@ export interface RuntimeActions {
     readonly runId: string;
     readonly path: string;
   }): Promise<void>;
+  supportsReviewIdempotency(): boolean;
   reviewChanges(
     decision: "approve" | "request_changes",
     message?: string,
@@ -399,8 +402,9 @@ export interface RuntimeActions {
       readonly workspacePath?: string;
       readonly runId: string;
       readonly fingerprint: string;
+      readonly idempotencyKey?: string;
     },
-  ): Promise<void>;
+  ): Promise<boolean>;
   applyChanges(target?: {
     readonly workspacePath?: string;
     readonly runId: string;
@@ -414,7 +418,11 @@ export interface RuntimeActions {
       }
     | undefined
   >;
-  applyRewind(ref: WorkspaceSessionRef, checkpointId: string, fingerprint: string): Promise<void>;
+  applyRewind(
+    ref: WorkspaceSessionRef,
+    checkpointId: string,
+    fingerprint: string,
+  ): Promise<WorkspaceSessionRef | undefined>;
   toggleJob(id: string, enabled: boolean): Promise<void>;
   createJob(input: {
     readonly name: string;
@@ -451,6 +459,7 @@ export interface RuntimeActions {
   ): Promise<boolean>;
   deleteProviderCredential(providerId: string, expectedRevision: string): Promise<boolean>;
   refreshMemory(): Promise<void>;
+  loadMoreMemory(): Promise<void>;
   createMemoryItem(text: string): Promise<RuntimeMemoryItem | undefined>;
   updateMemoryItem(
     itemId: string,
@@ -997,7 +1006,10 @@ export function useRuntimeStore(): RuntimeStore {
           invoke(bridge, "memory.list", {
             workspacePath,
             lifecycleStates: ["active", "archived"],
-            limit: 500,
+            limit: 50,
+            ...(runtimeCapabilitiesRef.current.has(MEMORY_PAGINATION_RUNTIME_CAPABILITY)
+              ? { paged: true as const }
+              : {}),
           }),
           invoke(bridge, "memory.settings.get", { workspacePath }),
         ]);
@@ -1007,6 +1019,7 @@ export function useRuntimeStore(): RuntimeStore {
           memory: {
             workspacePath,
             items: itemsResult.items,
+            pageInfo: itemsResult.pageInfo,
             settings: settingsResult.settings,
             status: "ready",
           },
@@ -2448,28 +2461,55 @@ export function useRuntimeStore(): RuntimeStore {
           });
         });
       },
+      supportsReviewIdempotency: () =>
+        preview || runtimeCapabilitiesRef.current.has(REVIEW_IDEMPOTENCY_RUNTIME_CAPABILITY),
       async reviewChanges(decision, reviewMessage, target) {
         const workspacePath = target?.workspacePath ?? dataRef.current.workspacePath;
         const runId =
           target?.runId ??
           dataRef.current.runs.find((run) => run.workspacePath === workspacePath)?.id;
         const expectedFingerprint = target?.fingerprint ?? dataRef.current.changeFingerprint;
-        if (!workspacePath || !runId || !expectedFingerprint) return;
-        await perform("review", async (bridge) => {
-          if (!preview)
-            await invoke(bridge, "changes.review", {
-              workspacePath,
-              runId,
-              decision,
-              expectedFingerprint,
-              ...(reviewMessage ? { message: reviewMessage } : {}),
-            });
-          setMessage(
-            decision === "approve"
-              ? "更改审阅已批准；工作区文件不会再次写入。"
-              : "修改意见已记录。",
-          );
+        if (!workspacePath || !runId || !expectedFingerprint) return false;
+        let failure: unknown;
+        const succeeded = await perform("review", async (bridge) => {
+          try {
+            if (!preview) {
+              if (
+                target?.idempotencyKey &&
+                !runtimeCapabilitiesRef.current.has(REVIEW_IDEMPOTENCY_RUNTIME_CAPABILITY)
+              )
+                throw new RuntimeInvocationError(
+                  "METHOD_NOT_FOUND",
+                  "电脑尚未支持审阅请求恢复，请更新并重启 Pico",
+                  false,
+                );
+              const result = await invoke(bridge, "changes.review", {
+                workspacePath,
+                runId,
+                decision,
+                expectedFingerprint,
+                ...(reviewMessage ? { message: reviewMessage } : {}),
+                ...(target?.idempotencyKey ? { idempotencyKey: target.idempotencyKey } : {}),
+              });
+              if (!result.accepted)
+                throw new RuntimeInvocationError(
+                  "CONFLICT",
+                  "电脑未接受本次审阅，请刷新后检查。",
+                  false,
+                );
+            }
+            setMessage(
+              decision === "approve"
+                ? "更改审阅已批准；工作区文件不会再次写入。"
+                : "修改意见已记录。",
+            );
+          } catch (error) {
+            failure = error;
+            throw error;
+          }
         });
+        if (failure) throw failure;
+        return succeeded;
       },
       async applyChanges(target) {
         const workspacePath = target?.workspacePath ?? dataRef.current.workspacePath;
@@ -2525,7 +2565,8 @@ export function useRuntimeStore(): RuntimeStore {
       },
       async applyRewind(ref, checkpointId, fingerprint) {
         const { workspacePath, sessionId } = ref;
-        if (!workspacePath || !fingerprint) return;
+        if (!workspacePath || !fingerprint) return undefined;
+        let restored: WorkspaceSessionRef | undefined;
         await perform("rewind-apply", async (bridge) => {
           let targetSessionId = sessionId;
           if (!preview) {
@@ -2537,14 +2578,19 @@ export function useRuntimeStore(): RuntimeStore {
               mode: "both",
               idempotencyKey: globalThis.crypto.randomUUID(),
             });
-            targetSessionId = stringValue(result.sessionId) || sessionId;
+            if (!result.applied || result.sourceSessionId !== sessionId)
+              throw new Error("回退结果与原会话不一致，请核对电脑状态。");
+            targetSessionId = result.sessionId;
           }
+          restored = { workspacePath, sessionId: targetSessionId };
           setMessage("已回到检查点。Runtime 已使用预览指纹重新验证。");
-          if (!preview) {
-            await loadWorkspace(bridge, workspacePath);
-            await loadConversation(bridge, workspacePath, targetSessionId);
-          }
+          if (!preview)
+            void (async () => {
+              await loadWorkspace(bridge, workspacePath);
+              await loadConversation(bridge, workspacePath, targetSessionId);
+            })().catch(reportFailure);
         });
+        return restored;
       },
       async toggleJob(id, enabled) {
         const workspacePath = dataRef.current.workspacePath;
@@ -3078,6 +3124,71 @@ export function useRuntimeStore(): RuntimeStore {
           await loadMemory(bridge, workspacePath);
         });
       },
+      async loadMoreMemory() {
+        const current = dataRef.current;
+        const workspacePath = current.workspacePath;
+        const page = current.memory.pageInfo;
+        if (
+          !workspacePath ||
+          !current.trusted ||
+          current.memory.status !== "ready" ||
+          !page?.nextCursor
+        )
+          return;
+        const read = ++memoryLoadGenerationRef.current;
+        setData((data) => ({
+          ...data,
+          memory: { ...data.memory, status: "loading", error: undefined },
+        }));
+        await perform("memory-more", async (bridge) => {
+          try {
+            const result = await invoke(bridge, "memory.list", {
+              workspacePath,
+              paged: true,
+              limit: 50,
+              cursor: page.nextCursor,
+              lifecycleStates: ["active", "archived"],
+            });
+            if (
+              read !== memoryLoadGenerationRef.current ||
+              dataRef.current.workspacePath !== workspacePath
+            )
+              return;
+            if (!result.pageInfo || result.pageInfo.revision !== page.revision)
+              throw new RuntimeInvocationError("CONFLICT", "记忆列表已变化，请刷新后继续。", false);
+            setData((data) => ({
+              ...data,
+              memory: {
+                ...data.memory,
+                items: [
+                  ...data.memory.items,
+                  ...result.items.filter(
+                    (item) => !data.memory.items.some((old) => old.itemId === item.itemId),
+                  ),
+                ],
+                pageInfo: result.pageInfo,
+                status: "ready",
+                error: undefined,
+              },
+            }));
+          } catch (error) {
+            if (
+              read !== memoryLoadGenerationRef.current ||
+              dataRef.current.workspacePath !== workspacePath
+            )
+              return;
+            if (isMemoryConflict(error)) {
+              await loadMemory(bridge, workspacePath);
+              return;
+            }
+            setData((data) => ({
+              ...data,
+              memory: { ...data.memory, status: "ready", error: errorMessage(error) },
+            }));
+            throw error;
+          }
+        });
+      },
       async createMemoryItem(text) {
         const workspacePath = dataRef.current.workspacePath;
         const content = text.trim();
@@ -3168,6 +3279,7 @@ export function useRuntimeStore(): RuntimeStore {
             if (!item || item.version !== expectedVersion) return;
             updated = {
               ...item,
+              sources: ("sources" in item ? item.sources : []) as RuntimeMemoryItem["sources"],
               ...patch,
               version: item.version + 1,
               updatedAt: Date.now(),

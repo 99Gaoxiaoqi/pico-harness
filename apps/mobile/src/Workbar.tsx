@@ -27,10 +27,12 @@ export function Workbar({
   sessionId,
   initialTab = "任务",
   onReturnToConversation,
+  onSession,
 }: {
   sessionId: string;
   initialTab?: WorkbarTab;
   onReturnToConversation?: () => void;
+  onSession?: (id: string) => void;
 }) {
   const [tab, setTab] = useState<WorkbarTab>(initialTab);
   return (
@@ -55,7 +57,11 @@ export function Workbar({
           ) : tab === "文件" ? (
             <FilesPanel sessionId={sessionId} />
           ) : tab === "审查" ? (
-            <ReviewPanel sessionId={sessionId} onReturnToConversation={onReturnToConversation} />
+            <ReviewPanel
+              sessionId={sessionId}
+              onReturnToConversation={onReturnToConversation}
+              onSession={onSession}
+            />
           ) : tab === "设置" ? (
             <SessionSettings sessionId={sessionId} />
           ) : tab === "研究" ? (
