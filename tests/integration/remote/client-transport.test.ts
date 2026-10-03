@@ -39,6 +39,7 @@ async function fixture(t: TestContext) {
     json(response, { requestId: body.requestId, ok: true, value: { sessions: [] } });
   let pairingApproved = false;
   let pairingAcked = false;
+  let pairingAckResponse: unknown = { acknowledged: true };
   let revoked = false;
   const capabilities = {
     version: 1,
@@ -80,7 +81,7 @@ async function fixture(t: TestContext) {
       assert.equal(request.headers.authorization, "Bearer pairing-token");
       if (request.url.endsWith("/ack")) {
         pairingAcked = true;
-        return json(response, { acknowledged: true });
+        return json(response, pairingAckResponse);
       }
       if (pairingAcked) return json(response, { status: "expired" });
       return json(
@@ -182,6 +183,9 @@ async function fixture(t: TestContext) {
     },
     get pairingAcked() {
       return pairingAcked;
+    },
+    setPairingAckResponse(value: unknown) {
+      pairingAckResponse = value;
     },
     revokeFromComputer() {
       revoked = true;
@@ -597,6 +601,30 @@ test("remote client pairing waits for local approval and acknowledges saved cred
     (await RemoteRuntimeClient.pairingStatus(harness.publicUrl, pairing, harness.fetcher)).status,
     "expired",
   );
+});
+
+test("remote pairing only accepts an explicit acknowledged receipt", async (t) => {
+  const harness = await fixture(t);
+  const pairing = {
+    pairingId: "pairing-a",
+    pairingToken: "pairing-token",
+    expiresAt: Date.now() + 30_000,
+  };
+  for (const response of [
+    {},
+    { acknowledged: false },
+    { acknowledged: "true" },
+    [{ acknowledged: true }],
+    null,
+  ]) {
+    harness.setPairingAckResponse(response);
+    await assert.rejects(
+      RemoteRuntimeClient.acknowledgePairing(harness.publicUrl, pairing, harness.fetcher),
+      remoteError("INVALID_RESPONSE"),
+    );
+  }
+  harness.setPairingAckResponse({ acknowledged: true });
+  await RemoteRuntimeClient.acknowledgePairing(harness.publicUrl, pairing, harness.fetcher);
 });
 
 test("remote client WSS replays, deduplicates and pauses background reconnects", async (t) => {
