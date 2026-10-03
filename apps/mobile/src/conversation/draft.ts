@@ -22,9 +22,21 @@ export interface DraftStorage {
   getItem(key: string): Promise<string | null>;
   setItem(key: string, value: string): Promise<void>;
   removeItem(key: string): Promise<void>;
+  getAllKeys?(): Promise<readonly string[]>;
 }
 export const draftKey = (scope: DraftScope) =>
   `pico.mobile.draft.v1:${JSON.stringify([scope.hostId, scope.workspaceId, scope.sessionId])}`;
+export function draftHostId(key: string): string | undefined {
+  if (!key.startsWith("pico.mobile.draft.v1:")) return undefined;
+  try {
+    const scope: unknown = JSON.parse(key.slice("pico.mobile.draft.v1:".length));
+    return Array.isArray(scope) && scope.length === 3 && typeof scope[0] === "string"
+      ? scope[0]
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
 export const emptyDraft = (idempotencyKey: string): ComposerDraft => ({
   text: "",
   images: [],
@@ -99,7 +111,11 @@ function checkedDraft(scope: DraftScope, value: unknown): ComposerDraft {
 }
 
 export type DraftState = { ready: boolean; draft?: ComposerDraft; sending: boolean };
-export type DraftAttempt = { readonly generation: number; readonly token: symbol };
+export type DraftAttempt = {
+  readonly generation: number;
+  readonly hostGeneration: number;
+  readonly token: symbol;
+};
 type ScopeState = DraftState & {
   generation: number;
   revision: number;
@@ -111,7 +127,61 @@ type ScopeState = DraftState & {
 export class DraftRepository {
   readonly #queues = new Map<string, Promise<unknown>>();
   readonly #states = new Map<string, ScopeState>();
+  readonly #hostGenerations = new Map<string, number>();
+  readonly #blockedHosts = new Set<string>();
   constructor(readonly storage: DraftStorage) {}
+  hostGeneration(hostId: string) {
+    return this.#hostGenerations.get(hostId) ?? 0;
+  }
+  hostBlocked(hostId: string) {
+    return this.#blockedHosts.has(hostId);
+  }
+  blockHost(hostId: string) {
+    this.#blockedHosts.add(hostId);
+    return () => this.#blockedHosts.delete(hostId);
+  }
+  async #hostKeys(hostId: string) {
+    const keys = new Set([...this.#states.keys(), ...((await this.storage.getAllKeys?.()) ?? [])]);
+    return [...keys].filter((key) => draftHostId(key) === hostId);
+  }
+  async drainHost(hostId: string) {
+    await Promise.all(
+      [...this.#queues]
+        .filter(([key]) => draftHostId(key) === hostId)
+        .map(([, queue]) => queue.catch(() => {})),
+    );
+  }
+  async hasUnconfirmedHost(hostId: string) {
+    await this.drainHost(hostId);
+    for (const key of await this.#hostKeys(hostId)) {
+      if (this.#states.get(key)?.sending) return true;
+      const raw = await this.storage.getItem(key);
+      if (!raw) continue;
+      // Unreadable records must not silently discard a possibly admitted request.
+      try {
+        const record = JSON.parse(raw) as { version?: unknown; draft?: { pending?: unknown } };
+        if (record.version !== 1 || !record.draft || record.draft.pending) return true;
+      } catch {
+        return true;
+      }
+    }
+    return false;
+  }
+  async clearHost(hostId: string) {
+    this.#hostGenerations.set(hostId, this.hostGeneration(hostId) + 1);
+    for (const [key, state] of this.#states) {
+      if (draftHostId(key) !== hostId) continue;
+      ++state.generation;
+      ++state.revision;
+      state.attempt = undefined;
+      state.sending = false;
+      state.ready = true;
+      state.draft = undefined;
+      this.#publish(state);
+    }
+    await this.drainHost(hostId);
+    for (const key of await this.#hostKeys(hostId)) await this.storage.removeItem(key);
+  }
   #state(scope: DraftScope): ScopeState {
     const key = draftKey(scope);
     let state = this.#states.get(key);
@@ -138,8 +208,12 @@ export class DraftRepository {
   }
   acquire(scope: DraftScope): DraftAttempt | undefined {
     const state = this.#state(scope);
-    if (state.sending) return undefined;
-    const attempt = { generation: state.generation, token: Symbol("draft-send") };
+    if (state.sending || this.hostBlocked(scope.hostId)) return undefined;
+    const attempt = {
+      generation: state.generation,
+      hostGeneration: this.hostGeneration(scope.hostId),
+      token: Symbol("draft-send"),
+    };
     state.attempt = attempt;
     state.sending = true;
     this.#publish(state);
@@ -147,11 +221,21 @@ export class DraftRepository {
   }
   owns(scope: DraftScope, attempt: DraftAttempt) {
     const state = this.#state(scope);
-    return state.generation === attempt.generation && state.attempt?.token === attempt.token;
+    return (
+      !this.hostBlocked(scope.hostId) &&
+      this.hostGeneration(scope.hostId) === attempt.hostGeneration &&
+      state.generation === attempt.generation &&
+      state.attempt?.token === attempt.token
+    );
   }
   unlock(scope: DraftScope, attempt: DraftAttempt) {
-    if (!this.owns(scope, attempt)) return;
     const state = this.#state(scope);
+    if (
+      this.hostGeneration(scope.hostId) !== attempt.hostGeneration ||
+      state.generation !== attempt.generation ||
+      state.attempt?.token !== attempt.token
+    )
+      return;
     state.attempt = undefined;
     state.sending = false;
     this.#publish(state);
@@ -175,10 +259,15 @@ export class DraftRepository {
     return checkedDraft(scope, record.draft);
   }
   load(scope: DraftScope) {
+    if (this.hostBlocked(scope.hostId))
+      return Promise.reject(new Error("这台电脑的本机数据正在清理"));
+    const hostGeneration = this.hostGeneration(scope.hostId);
     const state = this.#state(scope);
     const revision = state.revision;
     return this.#serial(scope, async () => {
       const draft = await this.#read(scope);
+      if (this.hostBlocked(scope.hostId) || hostGeneration !== this.hostGeneration(scope.hostId))
+        return undefined;
       if (state.revision === revision) {
         state.ready = true;
         state.draft = draft;
@@ -187,7 +276,13 @@ export class DraftRepository {
       return draft;
     });
   }
-  async save(scope: DraftScope, draft: ComposerDraft): Promise<void> {
+  async save(
+    scope: DraftScope,
+    draft: ComposerDraft,
+    hostGeneration = this.hostGeneration(scope.hostId),
+  ): Promise<void> {
+    if (this.hostBlocked(scope.hostId) || hostGeneration !== this.hostGeneration(scope.hostId))
+      throw new Error("这台电脑的本机数据正在清理或已清除");
     // Snapshot immediately; later edits cannot mutate a queued write or admitted request.
     const raw = JSON.stringify({ version: 1, draft: checkedDraft(scope, draft) });
     const snapshot = (JSON.parse(raw) as { draft: ComposerDraft }).draft;
@@ -198,7 +293,10 @@ export class DraftRepository {
     state.draft = snapshot;
     this.#publish(state);
     try {
-      await this.#serial(scope, () => this.storage.setItem(draftKey(scope), raw));
+      await this.#serial(scope, async () => {
+        if (hostGeneration !== this.hostGeneration(scope.hostId)) return;
+        await this.storage.setItem(draftKey(scope), raw);
+      });
     } catch (error) {
       if (snapshot.pending && state.revision === revision) {
         Object.assign(state, previous);
@@ -273,11 +371,15 @@ export async function submitDraft<T>(
   const attempt = lease ?? repository.acquire(scope);
   if (!attempt || !repository.owns(scope, attempt)) throw new Error("正在发送此会话的消息");
   try {
-    await repository.save(scope, {
-      ...draft,
-      idempotencyKey: original.idempotencyKey,
-      pending: original,
-    });
+    await repository.save(
+      scope,
+      {
+        ...draft,
+        idempotencyKey: original.idempotencyKey,
+        pending: original,
+      },
+      attempt.hostGeneration,
+    );
     if (!repository.owns(scope, attempt)) throw new Error("草稿已变更，消息尚未发送");
     try {
       const result = await send(original);

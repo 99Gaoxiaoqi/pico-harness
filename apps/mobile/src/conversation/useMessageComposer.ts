@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState, type SetStateAction } from "react";
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as ImagePicker from "expo-image-picker";
 import { manipulateAsync, SaveFormat } from "expo-image-manipulator";
 import * as Crypto from "expo-crypto";
@@ -7,8 +6,8 @@ import type { RuntimeInputAttachment, RuntimeSkillReference } from "@pico/protoc
 import type { TranscriptReplicaView } from "@pico/transcript-replica";
 import { validateAttachments } from "../core";
 import { usePico } from "../store";
+import { drafts } from "../draft-store.js";
 import {
-  DraftRepository,
   draftKey,
   emptyDraft,
   draftInput,
@@ -20,7 +19,6 @@ import {
   type DraftScope,
 } from "./draft";
 
-const drafts = new DraftRepository(AsyncStorage);
 const canonicalName = (name: string) => name.normalize("NFKC").toLowerCase();
 type LoadedDraft = { scope: string; ready: boolean; value: ComposerDraft; error?: string };
 
@@ -43,6 +41,7 @@ export function useMessageComposer({
     workspaceId: pico.workspace?.id ?? "",
     sessionId,
   };
+  const hostGeneration = drafts.hostGeneration(scope.hostId);
   const selection = useRef("");
   const renderSelection = draftKey(scope);
   selection.current = renderSelection;
@@ -100,7 +99,11 @@ export function useMessageComposer({
   const frozen = !!value.pending;
   const uncertain = frozen && !sending;
   const draftError = loaded.scope === renderSelection ? loaded.error : undefined;
-  const current = (selected: string) => mounted.current && selection.current === selected;
+  const current = (selected: string) =>
+    mounted.current &&
+    selection.current === selected &&
+    hostGeneration === drafts.hostGeneration(scope.hostId) &&
+    !drafts.hostBlocked(scope.hostId);
   const busy = () => drafts.isSending(scope) || picking.current === selection.current;
   function apply(value: ComposerDraft) {
     const next = { scope: renderSelection, ready: true, value };
@@ -121,7 +124,7 @@ export function useMessageComposer({
     try {
       draftInput(updated);
       // Enqueue immediately; navigation/unmount never cancels the last keystroke.
-      const operation = drafts.save(scope, updated);
+      const operation = drafts.save(scope, updated, hostGeneration);
       apply(updated);
       const selected = renderSelection;
       void operation.catch((error) => {
@@ -209,7 +212,7 @@ export function useMessageComposer({
       if (!image) throw new Error("图片无法压缩至剩余附件预算");
       if (current(selected)) {
         const updated = { ...currentDraft.current.value, images: [...before.images, image] };
-        await drafts.save(scope, updated);
+        await drafts.save(scope, updated, hostGeneration);
         if (current(selected)) apply(updated);
       }
     } catch (error) {
