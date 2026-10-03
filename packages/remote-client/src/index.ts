@@ -741,7 +741,7 @@ export class RemoteRuntimeClient {
     return `${this.publicUrl}/v1/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(artifactId)}/content`;
   }
   async revoke(): Promise<void> {
-    await jsonRequest(
+    const value = await jsonRequest(
       this.#fetch,
       this.publicUrl,
       "/v1/device",
@@ -749,6 +749,8 @@ export class RemoteRuntimeClient {
       undefined,
       "DELETE",
     );
+    if (!isJsonObject(value) || value.revoked !== true)
+      throw new ResponseValidationError("INVALID_RESPONSE", "设备撤销响应无效");
     this.close();
   }
   static async submitPairing(
