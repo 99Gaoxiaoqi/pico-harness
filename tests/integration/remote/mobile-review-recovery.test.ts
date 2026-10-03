@@ -122,3 +122,66 @@ test("手机旧页面迟到的审阅确认不删除重开页面持有的恢复�
   assert.equal(await reopened.retryUnknown(), true);
   assert.equal(await repository().load(), undefined);
 });
+
+test("手机同一面板重开先等待旧请求落盘，不创建新键也不被旧写入覆盖", async () => {
+  const values = new Map<string, string>();
+  const saveEntered = Promise.withResolvers<void>();
+  const releaseSave = Promise.withResolvers<void>();
+  let saves = 0;
+  const storage: ReviewStoragePort = {
+    getItem: async (key) => values.get(key) ?? null,
+    setItem: async (key, value) => {
+      if (++saves === 1) {
+        saveEntered.resolve();
+        await releaseSave.promise;
+      }
+      values.set(key, value);
+    },
+    removeItem: async (key) => {
+      values.delete(key);
+    },
+  };
+  const requests: Record<string, unknown>[] = [];
+  const port = {
+    request: async (method: string, params: Record<string, unknown>) => {
+      if (method === "runs.list")
+        return {
+          runs: [{ runId: "run", sessionId: "session", status: "succeeded", startedAt: 1 }],
+        };
+      if (method === "changes.list") return { changes: [], fingerprint: "fingerprint" };
+      requests.push(params);
+      return { accepted: true, fingerprint: "fingerprint" };
+    },
+  } as unknown as RuntimePort;
+  let ids = 0;
+  const repository = () => new ReviewRequestStorage(storage, "pending-save", () => `key-${++ids}`);
+  const mount = () =>
+    new MobileReview(port, "workspace", "session", undefined, {
+      recoveryStorage: repository(),
+      canRetry: () => true,
+    });
+  const old = mount();
+  await old.refresh();
+  const sending = old.submit("request_changes", "原评论");
+  await saveEntered.promise;
+  old.suspend();
+  const reopened = mount();
+  let restored = false;
+  const refreshing = reopened.refresh(true).then(() => {
+    restored = true;
+  });
+  const newIntent = reopened.submit("request_changes", "不能覆盖原评论");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(restored, false, "restoration waits for the previous panel's native storage write");
+  releaseSave.resolve();
+  assert.equal(await sending, false);
+  await refreshing;
+  assert.equal(await newIntent, false);
+  assert.equal(reopened.state.unknown, true);
+  assert.equal(reopened.state.recovery?.message, "原评论");
+  assert.equal(reopened.state.recovery?.idempotencyKey, "key-1");
+  assert.equal(ids, 1);
+  assert.equal(requests.length, 0, "suspended panel cannot dispatch after its late storage write");
+  assert.equal(await reopened.retryUnknown(), true);
+  assert.equal(requests[0]?.idempotencyKey, "key-1");
+});

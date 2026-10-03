@@ -380,11 +380,20 @@ test(
     let loseReceipt = true;
     const port = {
       request: async (method: string, params: Record<string, unknown>) => {
+        if (method === "changes.review") {
+          reviewRequests.push(params);
+          if (reviewRequests.length === 2)
+            throw new RemoteProtocolError(
+              "DISCONNECTED",
+              "retry not dispatched",
+              true,
+              "not_executed",
+            );
+        }
         const result = await services.desktopService.handle(
           createRuntimeRequest(method as never, { workspacePath, ...params } as never),
         );
         if (method === "changes.review") {
-          reviewRequests.push(params);
           if (loseReceipt) {
             loseReceipt = false;
             throw new RemoteProtocolError("DISCONNECTED", "response lost", true, "unknown");
@@ -417,9 +426,18 @@ test(
     );
     assert.equal(reopened.state.recovery?.message, "unknown revision");
     assert.equal(await reopened.submit("request_changes", "new attempt"), false);
+    assert.equal(await reopened.retryUnknown(), false);
+    assert.equal(
+      reopened.state.unknown,
+      true,
+      "a non-dispatched retry cannot invalidate the earlier unknown receipt",
+    );
+    assert.deepEqual(await recovery().load(), reviewRequests[0]);
+    assert.equal(await reopened.submit("request_changes", "new key must stay blocked"), false);
     assert.equal(await reopened.retryUnknown(), true);
+    assert.deepEqual(reviewRequests[1], reviewRequests[0]);
     assert.deepEqual(
-      reviewRequests[1],
+      reviewRequests[2],
       reviewRequests[0],
       "retries preserve every original request field",
     );

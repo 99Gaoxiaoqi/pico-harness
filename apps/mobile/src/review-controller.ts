@@ -257,7 +257,7 @@ export class MobileReview {
       idempotencyKey: this.recoveryStorage.createId(),
       ...(decision === "request_changes" ? { message: normalized! } : {}),
     };
-    return this.#sendReview(request);
+    return this.#sendReview(request, false);
   }
   async retryUnknown() {
     await this.restore();
@@ -266,9 +266,9 @@ export class MobileReview {
       this.#update({ error: "电脑未声明审阅幂等能力，请先升级电脑宿主并核对原对话。" });
       return false;
     }
-    return this.#sendReview(this.state.recovery);
+    return this.#sendReview(this.state.recovery, true);
   }
-  async #sendReview(request: PendingReviewRequest) {
+  async #sendReview(request: PendingReviewRequest, recovering: boolean) {
     const version = ++this.#commandVersion;
     this.#update({ pending: request.decision, error: undefined, notice: undefined });
     let dispatched = false;
@@ -299,8 +299,8 @@ export class MobileReview {
       if (!this.#active || version !== this.#commandVersion) return false;
       const notExecuted =
         error instanceof Error && "outcome" in error && error.outcome === "not_executed";
-      let unknown = dispatched && !notExecuted;
-      if (dispatched && notExecuted) {
+      let unknown = recovering || (dispatched && !notExecuted);
+      if (dispatched && notExecuted && !recovering) {
         try {
           await this.recoveryStorage.clear(request.idempotencyKey);
         } catch {

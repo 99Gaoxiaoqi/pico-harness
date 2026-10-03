@@ -150,6 +150,7 @@ const runtime={preview:false,busy:undefined,data:{...previewData,runs:previewDat
  reviewChanges:async(decision,message,target)=>{
    writes.push({decision,message,target});
    if(writes.length===1)throw new Error("Host accepted; reply lost");
+   if(writes.length===2)throw Object.assign(new Error("Retry not dispatched"),{outcome:"not_executed"});
    return true;
  },
  applyChanges:async()=>{},
@@ -183,11 +184,16 @@ async function run(){
  await mount();
  await click("使用原操作重试确认");
  check(writes.length===2,"One explicit retry");
- check(JSON.stringify(writes[0])===JSON.stringify(writes[1]),"Retry preserves complete original payload and key");
+ check(button("使用原操作重试确认"),"A non-dispatched retry keeps the previous unknown operation frozen");
+ check(button("发送意见").disabled,"Retry rejection cannot admit a new key");
+ await mount();
+ await click("使用原操作重试确认");
+ check(writes.length===3,"A later explicit retry resolves the original receipt");
+ check(JSON.stringify(writes[0])===JSON.stringify(writes[1])&&JSON.stringify(writes[0])===JSON.stringify(writes[2]),"Retries preserve complete original payload and key");
  check(document.getElementById("location").textContent.startsWith("/session/session-atlas?"),"Accepted revision returns to source conversation");
  await mount();
  await click("批准更改");
- check(writes[2].target.idempotencyKey!==writes[1].target.idempotencyKey,"A new intent gets a new UUID");
+ check(writes[3].target.idempotencyKey!==writes[2].target.idempotencyKey,"A new intent gets a new UUID");
  await click("Rewind");
  await click("预览 Rewind");
  await click("确认 Rewind");

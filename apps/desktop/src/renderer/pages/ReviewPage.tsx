@@ -197,7 +197,7 @@ export function ReviewPage() {
         navigate(sessionHref({ workspacePath, sessionId }));
     } catch (cause) {
       if (!mounted.current || currentScope.current !== scope) return;
-      let unknown = dispatched && reviewOutcomeUnknown(cause);
+      let unknown = retry || (dispatched && reviewOutcomeUnknown(cause));
       if (dispatched && !unknown) {
         try {
           operationStore.clear(operation.target.idempotencyKey);

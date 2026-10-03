@@ -11,6 +11,9 @@ export interface ReviewStoragePort {
   removeItem(key: string): Promise<void>;
 }
 
+// New panels must observe pending saves before deciding whether a new intent is allowed.
+const storageTails = new WeakMap<ReviewStoragePort, Map<string, Promise<unknown>>>();
+
 /** A persisted send is uncertain until its original receipt has been received. */
 export class ReviewRequestStorage {
   readonly key: string;
@@ -21,7 +24,25 @@ export class ReviewRequestStorage {
   ) {
     this.key = `pico.mobile.review.v1:${scope}`;
   }
-  async load(): Promise<PendingReviewRequest | undefined> {
+  private serialize<T>(operation: () => Promise<T>): Promise<T> {
+    let tails = storageTails.get(this.storage);
+    if (!tails) {
+      tails = new Map();
+      storageTails.set(this.storage, tails);
+    }
+    const previous = tails.get(this.key) ?? Promise.resolve();
+    const result = previous.catch(() => {}).then(operation);
+    tails.set(this.key, result);
+    const release = () => {
+      if (tails.get(this.key) === result) tails.delete(this.key);
+    };
+    void result.then(release, release);
+    return result;
+  }
+  load(): Promise<PendingReviewRequest | undefined> {
+    return this.serialize(() => this.read());
+  }
+  private async read(): Promise<PendingReviewRequest | undefined> {
     const raw = await this.storage.getItem(this.key);
     if (!raw) return undefined;
     const value: unknown = JSON.parse(raw);
@@ -40,12 +61,14 @@ export class ReviewRequestStorage {
       throw new Error("保存的审阅操作无效");
     return request as PendingReviewRequest;
   }
-  async save(request: PendingReviewRequest) {
-    await this.storage.setItem(this.key, JSON.stringify(request));
+  save(request: PendingReviewRequest) {
+    return this.serialize(() => this.storage.setItem(this.key, JSON.stringify(request)));
   }
-  async clear(idempotencyKey: string) {
-    if ((await this.load())?.idempotencyKey === idempotencyKey)
-      await this.storage.removeItem(this.key);
+  clear(idempotencyKey: string) {
+    return this.serialize(async () => {
+      if ((await this.read())?.idempotencyKey === idempotencyKey)
+        await this.storage.removeItem(this.key);
+    });
   }
 }
 
