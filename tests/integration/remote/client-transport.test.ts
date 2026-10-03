@@ -13,6 +13,7 @@ import { REMOTE_MAX_FRAME_BYTES, REMOTE_METHODS, type RemoteRequest } from "@pic
 import { createTestTlsFixture, trustedFetch } from "./tls-fixture.js";
 import { parseMobilePairing, type RuntimePort } from "../../../apps/mobile/src/core.js";
 import { MobileReview } from "../../../apps/mobile/src/review-controller.js";
+import { ReviewRequestStorage } from "../../../apps/mobile/src/review-request-storage.js";
 
 // Trust is injected into this test's transport only. Production client options never
 // disable TLS verification; the fixture certificate must match the HTTPS hostname.
@@ -217,6 +218,24 @@ function remoteError(code: string, outcome?: string) {
     error instanceof RemoteProtocolError &&
     error.code === code &&
     (outcome === undefined || error.outcome === outcome);
+}
+
+function isolatedReviewStorage() {
+  const values = new Map<string, string>();
+  let counter = 0;
+  return new ReviewRequestStorage(
+    {
+      getItem: async (key) => values.get(key) ?? null,
+      setItem: async (key, value) => {
+        values.set(key, value);
+      },
+      removeItem: async (key) => {
+        values.delete(key);
+      },
+    },
+    "transport-review",
+    () => `review-intent-${++counter}`,
+  );
 }
 
 test("remote client HTTPS correlates RPC, decodes typed results and enforces UTF-8 budgets", async (t) => {
@@ -811,7 +830,10 @@ test("mobile review binds finished Runs and returns only after one accepted revi
     request: (method, params, workspaceId) => client.request(method, params, { workspaceId }),
   };
   let returned = 0;
-  const review = new MobileReview(port, "workspace-a", "session-a", () => returned++);
+  const review = new MobileReview(port, "workspace-a", "session-a", () => returned++, {
+    recoveryStorage: isolatedReviewStorage(),
+    canRetry: () => true,
+  });
   let holdReview = false;
   let held: { body: RemoteRequest; response: ServerResponse } | undefined;
   harness.setRpc((body, response) => {
@@ -865,13 +887,19 @@ test("mobile review binds finished Runs and returns only after one accepted revi
     decision: "request_changes",
     message: "keep retries",
     expectedFingerprint: "review-a",
+    idempotencyKey: "review-intent-1",
   });
   await review.refresh(true);
+  assert.equal(review.state.unknown, true, "refresh cannot confirm an unacknowledged review");
   holdReview = true;
-  const submitted = review.submit("request_changes", "  keep retries  ");
+  const submitted = review.retryUnknown();
   await until(() => !!held);
   assert.equal(await review.submit("request_changes", "duplicate"), false);
   assert.ok(held);
+  assert.deepEqual(
+    held.body.params,
+    harness.rpc.find((request) => request.method === "changes.review")?.params,
+  );
   json(held.response, {
     requestId: held.body.requestId,
     ok: true,
@@ -892,7 +920,10 @@ test("mobile review fences late source diffs, stale fingerprints and unknown rev
     request: (method, params, workspaceId) => client.request(method, params, { workspaceId }),
   };
   let returned = 0;
-  const review = new MobileReview(port, "workspace-a", "session-a", () => returned++);
+  const review = new MobileReview(port, "workspace-a", "session-a", () => returned++, {
+    recoveryStorage: isolatedReviewStorage(),
+    canRetry: () => true,
+  });
   let delayed: { body: RemoteRequest; response: ServerResponse } | undefined;
   let delayDiff = true;
   let diffFingerprint = "review-a";
@@ -993,7 +1024,14 @@ test("mobile review fences late source diffs, stale fingerprints and unknown rev
   await review.refresh(true);
   assert.equal(
     review.state.unknown,
-    false,
-    "explicit refresh allows the user to decide after checking the original conversation",
+    true,
+    "explicit refresh keeps the original request uncertain until its receipt arrives",
   );
+  loseCommandReply = false;
+  assert.equal(await review.retryUnknown(), true);
+  const commands = harness.rpc.filter((request) => request.method === "changes.review");
+  assert.equal(commands.length, 2);
+  assert.deepEqual(commands[1]?.params, commands[0]?.params);
+  assert.equal(review.state.unknown, false);
+  assert.equal(returned, 1);
 });
