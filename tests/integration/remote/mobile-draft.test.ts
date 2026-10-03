@@ -178,3 +178,101 @@ test("手机落盘失败阻止RPC，确定未执行解冻，迟到成功不删�
   await repository.clear(scope);
   assert.equal(await repository.load(scope), undefined);
 });
+
+test("同会话共享发送锁，unknown 的拒绝重试保留原逻辑请求和权威状态", async () => {
+  const storage = new Storage();
+  const repository = new DraftRepository(storage);
+  const draft: ComposerDraft = {
+    ...emptyDraft("unknown-input"),
+    text: "原输入",
+    mode: "replace",
+    skills: [{ name: "summarize", sourceId: "project-resource" }],
+    images: [{ type: "image_base64", mimeType: "image/jpeg", data: "YQ==" }],
+  };
+  const original = request(draft);
+  await repository.save(scope, draft);
+  const started = deferred();
+  const response = deferred();
+  const first = submitDraft(repository, scope, draft, original, async () => {
+    started.resolve();
+    await response.promise;
+    throw new RemoteProtocolError("DISCONNECTED", "原请求响应未知", true, "unknown");
+  });
+  await started.promise;
+  let duplicateCalls = 0;
+  await assert.rejects(
+    submitDraft(repository, scope, draft, original, async () => {
+      duplicateCalls++;
+    }),
+    /正在发送/,
+  );
+  assert.equal(duplicateCalls, 0, "重挂载也不能并行发出第二个同scope请求");
+  assert.equal(repository.isSending(scope), true);
+  response.resolve();
+  await assert.rejects(first, /原请求响应未知/);
+  const frozen = (await repository.load(scope))!;
+  await assert.rejects(
+    submitDraft(
+      repository,
+      scope,
+      frozen,
+      {
+        ...original,
+        input: { kind: "text", text: "当前界面生成的新输入" },
+        behavior: "auto",
+        expectedRunId: "new-running",
+        idempotencyKey: "new-key",
+      },
+      async (retry) => {
+        assert.deepEqual(retry, original, "重试沿用输入、行为、Run和幂等键");
+        throw new RemoteProtocolError("UNAUTHORIZED", "仅该重试未执行", false, "not_executed");
+      },
+    ),
+    /仅该重试未执行/,
+  );
+  assert.deepEqual(
+    (await repository.load(scope))?.pending,
+    original,
+    "拒绝重试不能证明原unknown请求未执行",
+  );
+  let notified = false;
+  const unsubscribe = repository.subscribe(scope, (state) => {
+    if (state.ready && !state.draft) notified = true;
+  });
+  await submitDraft(repository, scope, frozen, frozen.pending!, async () => "accepted");
+  assert.equal(notified, true, "明确成功向后来挂载的订阅者发布清除状态");
+  assert.equal(repository.isSending(scope), false);
+  unsubscribe();
+});
+
+test("清除产生新草稿代次，旧attempt迟到失败不剥离新pending也不释放新锁", async () => {
+  const repository = new DraftRepository(new Storage());
+  const oldDraft = { ...emptyDraft("old-key"), text: "旧消息" };
+  const oldStarted = deferred();
+  const oldResponse = deferred();
+  const oldAttempt = submitDraft(repository, scope, oldDraft, request(oldDraft), async () => {
+    oldStarted.resolve();
+    await oldResponse.promise;
+    throw new RemoteProtocolError("DISCONNECTED", "旧尝试未执行", true, "not_executed");
+  });
+  await oldStarted.promise;
+  await repository.clear(scope);
+  const fresh = { ...emptyDraft("new-key"), text: "新消息" };
+  await repository.save(scope, fresh);
+  const newStarted = deferred();
+  const newResponse = deferred();
+  const newAttempt = submitDraft(repository, scope, fresh, request(fresh), async () => {
+    newStarted.resolve();
+    await newResponse.promise;
+    return "accepted";
+  });
+  await newStarted.promise;
+  oldResponse.resolve();
+  await assert.rejects(oldAttempt, /旧尝试未执行/);
+  assert.deepEqual((await repository.load(scope))?.pending, request(fresh));
+  assert.equal(repository.isSending(scope), true);
+  newResponse.resolve();
+  await newAttempt;
+  assert.equal(await repository.load(scope), undefined);
+  assert.equal(repository.isSending(scope), false);
+});

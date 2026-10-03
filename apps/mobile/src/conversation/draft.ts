@@ -98,10 +98,64 @@ function checkedDraft(scope: DraftScope, value: unknown): ComposerDraft {
   return draft;
 }
 
-/** Each key drains independently; queued snapshots survive component unmounts. */
+export type DraftState = { ready: boolean; draft?: ComposerDraft; sending: boolean };
+export type DraftAttempt = { readonly generation: number; readonly token: symbol };
+type ScopeState = DraftState & {
+  generation: number;
+  revision: number;
+  attempt?: DraftAttempt;
+  listeners: Set<(state: DraftState) => void>;
+};
+
+/** Each scope owns its durable draft, send lease and live subscribers across mounts. */
 export class DraftRepository {
   readonly #queues = new Map<string, Promise<unknown>>();
+  readonly #states = new Map<string, ScopeState>();
   constructor(readonly storage: DraftStorage) {}
+  #state(scope: DraftScope): ScopeState {
+    const key = draftKey(scope);
+    let state = this.#states.get(key);
+    if (!state) {
+      state = { ready: false, sending: false, generation: 0, revision: 0, listeners: new Set() };
+      this.#states.set(key, state);
+    }
+    return state;
+  }
+  #publish(state: ScopeState) {
+    const snapshot = { ready: state.ready, draft: state.draft, sending: state.sending };
+    for (const listener of state.listeners) listener(snapshot);
+  }
+  subscribe(scope: DraftScope, listener: (state: DraftState) => void) {
+    const state = this.#state(scope);
+    state.listeners.add(listener);
+    listener({ ready: state.ready, draft: state.draft, sending: state.sending });
+    return () => {
+      state.listeners.delete(listener);
+    };
+  }
+  isSending(scope: DraftScope) {
+    return this.#state(scope).sending;
+  }
+  acquire(scope: DraftScope): DraftAttempt | undefined {
+    const state = this.#state(scope);
+    if (state.sending) return undefined;
+    const attempt = { generation: state.generation, token: Symbol("draft-send") };
+    state.attempt = attempt;
+    state.sending = true;
+    this.#publish(state);
+    return attempt;
+  }
+  owns(scope: DraftScope, attempt: DraftAttempt) {
+    const state = this.#state(scope);
+    return state.generation === attempt.generation && state.attempt?.token === attempt.token;
+  }
+  unlock(scope: DraftScope, attempt: DraftAttempt) {
+    if (!this.owns(scope, attempt)) return;
+    const state = this.#state(scope);
+    state.attempt = undefined;
+    state.sending = false;
+    this.#publish(state);
+  }
   #serial<T>(scope: DraftScope, action: () => Promise<T>): Promise<T> {
     const key = draftKey(scope);
     const previous = this.#queues.get(key) ?? Promise.resolve();
@@ -121,30 +175,85 @@ export class DraftRepository {
     return checkedDraft(scope, record.draft);
   }
   load(scope: DraftScope) {
-    return this.#serial(scope, () => this.#read(scope));
-  }
-  async save(scope: DraftScope, draft: ComposerDraft): Promise<void> {
-    // Serialize now, so later edits cannot mutate a queued write or admitted request.
-    const raw = JSON.stringify({ version: 1, draft: checkedDraft(scope, draft) });
-    return this.#serial(scope, () => this.storage.setItem(draftKey(scope), raw));
-  }
-  clear(scope: DraftScope) {
-    return this.#serial(scope, () => this.storage.removeItem(draftKey(scope)));
-  }
-  finish(scope: DraftScope, idempotencyKey: string) {
+    const state = this.#state(scope);
+    const revision = state.revision;
     return this.#serial(scope, async () => {
-      const current = await this.#read(scope);
-      // A late response must not remove a newer draft created after explicit clearing.
-      if (current?.pending?.idempotencyKey === idempotencyKey)
-        await this.storage.removeItem(draftKey(scope));
+      const draft = await this.#read(scope);
+      if (state.revision === revision) {
+        state.ready = true;
+        state.draft = draft;
+        this.#publish(state);
+      }
+      return draft;
     });
   }
-  release(scope: DraftScope, idempotencyKey: string) {
+  async save(scope: DraftScope, draft: ComposerDraft): Promise<void> {
+    // Snapshot immediately; later edits cannot mutate a queued write or admitted request.
+    const raw = JSON.stringify({ version: 1, draft: checkedDraft(scope, draft) });
+    const snapshot = (JSON.parse(raw) as { draft: ComposerDraft }).draft;
+    const state = this.#state(scope);
+    const previous = { ready: state.ready, draft: state.draft };
+    const revision = ++state.revision;
+    state.ready = true;
+    state.draft = snapshot;
+    this.#publish(state);
+    try {
+      await this.#serial(scope, () => this.storage.setItem(draftKey(scope), raw));
+    } catch (error) {
+      if (snapshot.pending && state.revision === revision) {
+        Object.assign(state, previous);
+        this.#publish(state);
+      }
+      throw error;
+    }
+  }
+  clear(scope: DraftScope) {
+    const state = this.#state(scope);
+    // Explicit clearing creates a new logical draft; old callbacks lose their lease.
+    ++state.generation;
+    const revision = ++state.revision;
+    state.attempt = undefined;
+    state.sending = true;
+    this.#publish(state);
     return this.#serial(scope, async () => {
+      try {
+        await this.storage.removeItem(draftKey(scope));
+        if (state.revision === revision) {
+          state.ready = true;
+          state.draft = undefined;
+        }
+      } finally {
+        state.sending = false;
+        this.#publish(state);
+      }
+    });
+  }
+  finish(scope: DraftScope, attempt: DraftAttempt, idempotencyKey: string) {
+    return this.#serial(scope, async () => {
+      if (!this.owns(scope, attempt)) return;
       const current = await this.#read(scope);
-      if (current?.pending?.idempotencyKey !== idempotencyKey) return;
+      if (!this.owns(scope, attempt) || current?.pending?.idempotencyKey !== idempotencyKey) return;
+      await this.storage.removeItem(draftKey(scope));
+      if (!this.owns(scope, attempt)) return;
+      const state = this.#state(scope);
+      ++state.revision;
+      state.ready = true;
+      state.draft = undefined;
+      this.#publish(state);
+    });
+  }
+  release(scope: DraftScope, attempt: DraftAttempt, idempotencyKey: string) {
+    return this.#serial(scope, async () => {
+      if (!this.owns(scope, attempt)) return;
+      const current = await this.#read(scope);
+      if (!this.owns(scope, attempt) || current?.pending?.idempotencyKey !== idempotencyKey) return;
       const { pending: _pending, ...editable } = current;
       await this.storage.setItem(draftKey(scope), JSON.stringify({ version: 1, draft: editable }));
+      if (!this.owns(scope, attempt)) return;
+      const state = this.#state(scope);
+      ++state.revision;
+      state.draft = editable;
+      this.#publish(state);
     });
   }
 }
@@ -156,22 +265,37 @@ export async function submitDraft<T>(
   draft: ComposerDraft,
   request: RemoteParams<"session.send">,
   send: (request: RemoteParams<"session.send">) => Promise<T>,
+  lease?: DraftAttempt,
 ): Promise<T> {
-  const original = checkedRequest(scope, JSON.parse(JSON.stringify(request)));
+  const original = checkedRequest(scope, JSON.parse(JSON.stringify(draft.pending ?? request)));
   const reason = draftSendReason(draft, !!original.expectedRunId);
   if (reason) throw new Error(reason);
-  await repository.save(scope, {
-    ...draft,
-    idempotencyKey: original.idempotencyKey,
-    pending: original,
-  });
+  const attempt = lease ?? repository.acquire(scope);
+  if (!attempt || !repository.owns(scope, attempt)) throw new Error("正在发送此会话的消息");
   try {
-    const result = await send(original);
-    await repository.finish(scope, original.idempotencyKey);
-    return result;
-  } catch (error) {
-    if (error instanceof Error && "outcome" in error && error.outcome === "not_executed")
-      await repository.release(scope, original.idempotencyKey);
-    throw error;
+    await repository.save(scope, {
+      ...draft,
+      idempotencyKey: original.idempotencyKey,
+      pending: original,
+    });
+    if (!repository.owns(scope, attempt)) throw new Error("草稿已变更，消息尚未发送");
+    try {
+      const result = await send(original);
+      await repository.finish(scope, attempt, original.idempotencyKey);
+      return result;
+    } catch (error) {
+      // A rejected retry proves only that attempt did not execute. The original
+      // unknown logical request may already have reached the host.
+      if (
+        !draft.pending &&
+        error instanceof Error &&
+        "outcome" in error &&
+        error.outcome === "not_executed"
+      )
+        await repository.release(scope, attempt, original.idempotencyKey);
+      throw error;
+    }
+  } finally {
+    if (!lease) repository.unlock(scope, attempt);
   }
 }
