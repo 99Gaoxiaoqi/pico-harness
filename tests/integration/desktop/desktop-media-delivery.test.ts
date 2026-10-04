@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import fs from "node:fs";
 import { mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import test from "node:test";
 import {
   createRuntimeRequest,
@@ -43,6 +45,132 @@ const png = Buffer.from(
 );
 const mp4 = Buffer.from("000000186674797069736f6d0000000069736f6d6d703432000000086d646174", "hex");
 
+function observeMediaCaptureFiles(workspacePath: string) {
+  const events: Record<string, unknown>[] = [];
+  const original = {
+    open: fs.promises.open,
+    stat: fs.promises.stat,
+    realpath: fs.promises.realpath,
+  };
+  const started = performance.now();
+  const fileName = (path: unknown) => {
+    if (typeof path !== "string") return undefined;
+    const canonical = (value: string) =>
+      process.platform === "win32" ? resolve(value).toLowerCase() : resolve(value);
+    return ["image.png", "movie.mp4"].find(
+      (name) => canonical(path) === canonical(join(workspacePath, name)),
+    );
+  };
+  const record = (details: Record<string, unknown>) => {
+    if (events.length < 64)
+      events.push({ atMs: Date.now(), elapsedMs: performance.now() - started, ...details });
+  };
+  const prototype = SqliteSessionWorkbarRepository.prototype;
+  const originalPublish = prototype.publishArtifactSnapshot;
+  prototype.publishArtifactSnapshot = function (input) {
+    if (
+      !input.artifactId.startsWith("media:") ||
+      !(
+        (input.mimeType === "image/png" && png.equals(input.content)) ||
+        (input.mimeType === "video/mp4" && mp4.equals(input.content))
+      )
+    )
+      return originalPublish.call(this, input);
+    const details = {
+      phase: "publishArtifactSnapshot",
+      mimeType: input.mimeType,
+      size: input.content.byteLength,
+    };
+    try {
+      const artifact = originalPublish.call(this, input);
+      record({ ...details, outcome: "fulfilled", artifactId: artifact.artifactId });
+      return artifact;
+    } catch (error) {
+      record({
+        ...details,
+        outcome: "rejected",
+        error: String(error).slice(0, 512),
+        ...(error instanceof Error && "code" in error ? { code: error.code } : {}),
+      });
+      throw error;
+    }
+  };
+  const metadata = (value: unknown) => {
+    if (!value || typeof value !== "object") return {};
+    const fields = value as Record<string, unknown>;
+    return {
+      ...Object.fromEntries(
+        ["dev", "ino", "size", "mtimeMs", "ctimeMs", "mtimeNs", "ctimeNs", "bytesRead"]
+          .filter((key) => key in fields)
+          .map((key) => [key, typeof fields[key] === "bigint" ? String(fields[key]) : fields[key]]),
+      ),
+      ...(Buffer.isBuffer(fields.buffer) && typeof fields.bytesRead === "number"
+        ? { prefixHex: fields.buffer.subarray(0, Math.min(fields.bytesRead, 32)).toString("hex") }
+        : {}),
+    };
+  };
+  const observe = <F extends (...args: never[]) => Promise<unknown>>(
+    method: F,
+    phase: string,
+    name?: string,
+    inspect?: (value: Awaited<ReturnType<F>>, args: readonly unknown[]) => Record<string, unknown>,
+  ): F =>
+    new Proxy(method, {
+      apply(target, receiver: unknown, args: unknown[]) {
+        const promise = Reflect.apply(target, receiver, args) as ReturnType<F>;
+        const file = name ?? fileName(args[0]);
+        if (file) {
+          const calledAtMs = Date.now();
+          // Observe only these two fixture files; return the exact native promise.
+          void promise
+            .then(
+              (value: unknown) =>
+                record({
+                  phase,
+                  file,
+                  calledAtMs,
+                  outcome: "fulfilled",
+                  ...(phase === "realpath" ? { canonical: value } : metadata(value)),
+                  ...inspect?.(value as Awaited<ReturnType<F>>, args),
+                }),
+              (error: unknown) =>
+                record({
+                  phase,
+                  file,
+                  calledAtMs,
+                  outcome: "rejected",
+                  error: String(error).slice(0, 512),
+                  ...(error instanceof Error && "code" in error ? { code: error.code } : {}),
+                }),
+            )
+            .catch(() => undefined);
+        }
+        return promise;
+      },
+    });
+  fs.promises.open = observe(original.open, "open", undefined, (handle, args) => {
+    const name = fileName(args[0]);
+    if (name) {
+      handle.stat = observe(handle.stat, "handle.stat", name);
+      handle.read = observe(handle.read, "handle.read", name);
+    }
+    return {};
+  });
+  fs.promises.stat = observe(original.stat, "stat");
+  fs.promises.realpath = observe(original.realpath, "realpath");
+  syncBuiltinESMExports();
+  return {
+    events,
+    record,
+    metadata,
+    restore() {
+      prototype.publishArtifactSnapshot = originalPublish;
+      Object.assign(fs.promises, original);
+      syncBuiltinESMExports();
+    },
+  };
+}
+
 test(
   "生产回复捕获 bash 生成本地图片/视频，重开及 fork 后按会话读取并另存不可变快照",
   { timeout: 30_000 },
@@ -52,6 +180,8 @@ test(
     await mkdir(picoHome);
     await mkdir(join(root, "workspace"));
     const workspacePath = await realpath(join(root, "workspace"));
+    const capture = observeMediaCaptureFiles(workspacePath);
+    t.after(() => capture.restore());
     await writeDesktopModelRouting(picoHome);
     const scriptPath = join(root, "generate-media.cjs");
     await writeFile(
@@ -73,8 +203,20 @@ test(
           isolatedHeadless: true,
           provider: {
             modelName: "test/media-delivery",
-            generate: async () => {
+            generate: async (messages) => {
               generations++;
+              capture.record({
+                phase: "provider.generate",
+                generation: generations,
+                toolResults: messages
+                  .filter((message) => message.toolCallId === "generate-media")
+                  .slice(-1)
+                  .map((message) => ({
+                    role: message.role,
+                    toolCallId: message.toolCallId,
+                    content: message.content.slice(0, 2048),
+                  })),
+              });
               if (step++ === 0)
                 return {
                   role: "assistant" as const,
@@ -169,12 +311,31 @@ test(
       artifactRevisions.length !== 1 ||
       artifactRevisions[0] !== 2
     ) {
+      let committedMedia: unknown;
+      try {
+        const projection = (await registry.open(
+          { workspacePath, sessionId },
+          { connectionId: "media-diagnostic", push: async () => undefined },
+        )) as RuntimeResult<"session.subscription.open">;
+        committedMedia = projection.durableTail.flatMap((record) =>
+          record.item.kind === "assistantMessage"
+            ? (record.item.media ?? []).map(({ kind, source, artifactId }) => ({
+                kind,
+                source,
+                artifactId,
+              }))
+            : [],
+        );
+      } catch (error) {
+        committedMedia = { error: String(error).slice(0, 512) };
+      }
       const files = await Promise.all(
         ["image.png", "movie.mp4"].map(async (name) => {
           const path = join(workspacePath, name);
           try {
             const canonical = await realpath(path);
             const info = await stat(path);
+            const native = await stat(path, { bigint: true });
             return {
               name,
               canonical,
@@ -183,13 +344,23 @@ test(
               size: info.size,
               mtimeMs: info.mtimeMs,
               ctimeMs: info.ctimeMs,
+              native: capture.metadata(native),
             };
           } catch (error) {
             return { name, error: String(error) };
           }
         }),
       );
-      t.diagnostic(JSON.stringify({ workspacePath, artifactRevisions, artifactSnapshot, files }));
+      t.diagnostic(
+        JSON.stringify({
+          workspacePath,
+          artifactRevisions,
+          artifactSnapshot,
+          files,
+          committedMedia,
+          capturePhases: capture.events,
+        }),
+      );
     }
     assert.equal(artifactSnapshot.revision, 2);
     assert.ok(Array.isArray(artifactSnapshot.artifacts));
