@@ -1,9 +1,9 @@
 import React, { useCallback, useLayoutEffect, useRef, useState } from "react";
 import { FlatList, View, type FlatListProps, type ViewToken } from "react-native";
-import type { RuntimeTranscriptItemRecord } from "@pico/protocol/mobile";
 import type { TranscriptReplicaView } from "@pico/transcript-replica";
+import { rowIndexForItem, type TranscriptRow } from "./transcriptRows";
 
-type RecordItem = RuntimeTranscriptItemRecord;
+type RecordItem = TranscriptRow;
 type CellProps = React.ComponentProps<
   NonNullable<FlatListProps<RecordItem>["CellRendererComponent"]>
 >;
@@ -23,11 +23,15 @@ export function useTranscriptViewport(
   ready: boolean,
   active: boolean,
   restoreVersion: number,
+  rows: readonly TranscriptRow[] = view?.records.map((record) => ({
+    key: record.itemId,
+    records: [record],
+  })) ?? [],
 ) {
   const listRef = useRef<FlatList<RecordItem>>(null);
   const alive = useRef(true);
-  const state = useRef({ view, ready, active, restoreVersion });
-  state.current = { view, ready, active, restoreVersion };
+  const state = useRef({ view, rows, ready, active, restoreVersion });
+  state.current = { view, rows, ready, active, restoreVersion };
   const [showLatest, setShowLatest] = useState(false);
   const following = useRef(true);
   const dragging = useRef(false);
@@ -35,7 +39,10 @@ export function useTranscriptViewport(
   const paging = useRef(false);
   const frames = useRef(new Map<string, number>());
   const firstVisible = useRef<string | undefined>(undefined);
-  const firstRecord = useRef<string | undefined>(undefined);
+  const rowResizePending = useRef(false);
+  const rowSignature = JSON.stringify(rows.map((row) => [row.key, row.records.length]));
+  const previousRows = useRef(rowSignature);
+  if (previousRows.current !== rowSignature && !following.current) rowResizePending.current = true;
   const scrollY = useRef(0);
   const layoutHeight = useRef(0);
   const contentHeight = useRef(0);
@@ -59,11 +66,13 @@ export function useTranscriptViewport(
       following.current ||
       paging.current ||
       pending.current ||
+      rowResizePending.current ||
       appliedVersion.current !== s.restoreVersion
     )
       return;
-    const record = s.view?.records.find((item) => item.itemId === firstVisible.current);
-    const y = record && frames.current.get(record.itemId);
+    const row = s.rows.find((item) => item.key === firstVisible.current);
+    const record = row?.records[0];
+    const y = row && frames.current.get(row.key);
     const watermark = s.view?.watermark;
     if (!record || y === undefined || !watermark) return;
     anchor.current = {
@@ -104,8 +113,7 @@ export function useTranscriptViewport(
   const restore = useCallback(() => {
     const target = pending.current;
     if (!target || !state.current.ready || !state.current.active || following.current) return;
-    const index =
-      state.current.view?.records.findIndex((item) => item.itemId === target.itemId) ?? -1;
+    const index = rowIndexForItem(state.current.rows, target.itemId);
     if (index < 0) {
       pending.current = undefined;
       appliedVersion.current = state.current.restoreVersion;
@@ -123,8 +131,8 @@ export function useTranscriptViewport(
     timer.current = setTimeout(() => {
       timer.current = undefined;
       if (pending.current !== target) return;
-      const record = state.current.view?.records[target.index];
-      const y = record && frames.current.get(record.itemId);
+      const row = state.current.rows[target.index];
+      const y = row && frames.current.get(row.key);
       if (y !== undefined && Math.abs(y - scrollY.current - target.offset) <= 2) {
         pending.current = undefined;
         appliedVersion.current = state.current.restoreVersion;
@@ -150,18 +158,23 @@ export function useTranscriptViewport(
       latest();
       return;
     }
-    let index = current.records.findIndex((item) => item.itemId === saved.itemId);
+    let index = rowIndexForItem(s.rows, saved.itemId);
+    let itemId = saved.itemId;
     if (index < 0) {
-      index = current.records.findIndex(
+      let recordIndex = current.records.findIndex(
         (item) =>
           item.positionSequence > saved.sequence ||
           (item.positionSequence === saved.sequence && item.positionOrdinal >= saved.ordinal),
       );
-      if (index < 0) index = current.records.length - 1;
+      if (recordIndex < 0) recordIndex = current.records.length - 1;
+      const record = current.records[recordIndex];
+      if (!record) return;
+      itemId = record.itemId;
+      index = rowIndexForItem(s.rows, itemId);
     }
     if (index < 0) return;
     pending.current = {
-      itemId: current.records[index]!.itemId,
+      itemId,
       index,
       offset: saved.offset,
       attempts: 0,
@@ -190,25 +203,21 @@ export function useTranscriptViewport(
       latestTimer.current = undefined;
     };
   }, [active, ready, restoreVersion, latest, restoreAnchor, stopRestore]);
-  const firstId = view?.records[0]?.itemId;
   useLayoutEffect(() => {
-    const previous = firstRecord.current;
-    firstRecord.current = firstId;
-    if (
-      previous &&
-      previous !== firstId &&
-      view?.records.some((item) => item.itemId === previous) &&
-      !following.current
-    )
-      restoreAnchor();
-  }, [firstId, view, restoreAnchor]);
+    const changed = previousRows.current !== rowSignature;
+    previousRows.current = rowSignature;
+    if (changed) {
+      rowResizePending.current = false;
+      if (!following.current && !paging.current) restoreAnchor();
+    }
+  }, [rowSignature, restoreAnchor]);
   const Cell = useCallback(
     ({ item, children, style, onLayout, onFocusCapture }: CellProps) => (
       <View
         style={style}
         {...{ onFocusCapture }}
         onLayout={(event) => {
-          frames.current.set(item.itemId, event.nativeEvent.layout.y);
+          frames.current.set(item.key, event.nativeEvent.layout.y);
           onLayout?.(event);
           capture();
         }}
@@ -221,6 +230,7 @@ export function useTranscriptViewport(
   function jumpToLatest() {
     if (!state.current.active || !state.current.ready) return;
     stopRestore();
+    rowResizePending.current = false;
     anchor.current = undefined;
     following.current = true;
     dragging.current = false;
@@ -228,6 +238,34 @@ export function useTranscriptViewport(
     appliedVersion.current = state.current.restoreVersion;
     setShowLatest(false);
     latest(true);
+  }
+  function beforeRowResize() {
+    if (!state.current.active || !state.current.ready) return;
+    stopRestore();
+    if (latestTimer.current) clearTimeout(latestTimer.current);
+    latestTimer.current = undefined;
+    latestPending.current = false;
+    following.current = false;
+    dragging.current = false;
+    capture();
+    rowResizePending.current = true;
+    setShowLatest(true);
+  }
+  function jumpToItem(itemId: string) {
+    if (!state.current.active || !state.current.ready) return;
+    const index = rowIndexForItem(state.current.rows, itemId);
+    if (index < 0) return;
+    stopRestore();
+    if (latestTimer.current) clearTimeout(latestTimer.current);
+    latestTimer.current = undefined;
+    rowResizePending.current = false;
+    latestPending.current = false;
+    following.current = false;
+    dragging.current = false;
+    anchor.current = undefined;
+    pending.current = { itemId, index, offset: 0, attempts: 0 };
+    setShowLatest(true);
+    restore();
   }
   async function loadOlder(load: () => Promise<void>) {
     if (paging.current || !state.current.ready || !state.current.active) return;
@@ -252,6 +290,8 @@ export function useTranscriptViewport(
     Cell,
     showLatest: active && ready && showLatest,
     jumpToLatest,
+    jumpToItem,
+    beforeRowResize,
     loadOlder,
     onViewableItemsChanged: (items: ViewToken[]) => {
       firstVisible.current = items.find((item) => item.isViewable)?.key;
@@ -266,7 +306,8 @@ export function useTranscriptViewport(
       scrollY.current = native.contentOffset.y;
       layoutHeight.current = native.layoutMeasurement.height;
       contentHeight.current = native.contentSize.height;
-      if (!state.current.ready || pending.current || paging.current) return;
+      if (!state.current.ready || pending.current || paging.current || rowResizePending.current)
+        return;
       const near = contentHeight.current - scrollY.current - layoutHeight.current <= NEAR_BOTTOM;
       if (latestPending.current && !near) return;
       latestPending.current = false;
@@ -278,6 +319,7 @@ export function useTranscriptViewport(
     onScrollBeginDrag: () => {
       dragging.current = true;
       stopRestore();
+      rowResizePending.current = false;
       if (latestTimer.current) clearTimeout(latestTimer.current);
       latestTimer.current = undefined;
       latestPending.current = false;
@@ -326,7 +368,10 @@ export function useTranscriptViewport(
     }) satisfies NonNullable<FlatListProps<RecordItem>["onScrollToIndexFailed"]>,
     onContentSizeChange: ((_width, height) => {
       contentHeight.current = height;
-      if (pending.current && !timer.current) restore();
+      if (rowResizePending.current && !paging.current) {
+        rowResizePending.current = false;
+        restoreAnchor();
+      } else if (pending.current && !timer.current) restore();
       else if (following.current) latest();
     }) satisfies NonNullable<FlatListProps<RecordItem>["onContentSizeChange"]>,
   };

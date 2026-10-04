@@ -7,6 +7,7 @@ import {
   settleScreen,
 } from "../../fixtures/mobile-component-harness.js";
 import { modelChoices, saveUserDefaults } from "../../../apps/mobile/src/settings/management.js";
+import { transcriptRows } from "../../../apps/mobile/src/conversation/transcriptRows.js";
 
 const ui = {
   ...mobileTags(["Button", "Card", "Chips", "Detail", "Field", "Label"]),
@@ -16,6 +17,8 @@ const ui = {
 test("手机任务结束后解除执行入口与空闲操作限制，发送不携带已结束的 Run", (t) => {
   const terminalRun = { runId: "finished-run", status: "succeeded" };
   let composerRun: unknown;
+  const records: Array<{ itemId: string; item: unknown }> = [];
+  const jumps: string[] = [];
   const screen = mobileComponent(
     new URL("../../../apps/mobile/src/Conversation.tsx", import.meta.url),
     {
@@ -42,20 +45,28 @@ test("手机任务结束后解除执行入口与空闲操作限制，发送不�
       "./ActionsSheet": { ActionsSheet: "ActionsSheet" },
       "./conversation/useSessionTranscript": {
         useSessionTranscript: () => ({
-          view: { records: [], queuedInputs: [], activeOverlay: [], activeRun: terminalRun },
+          view: { records, queuedInputs: [], activeOverlay: [], activeRun: terminalRun },
           sessionReady: true,
         }),
       },
       "./conversation/useMessageComposer": {
         useMessageComposer: (input: { activeRun?: unknown }) => {
           composerRun = input.activeRun;
-          return { text: "", images: [], mode: "auto", draftReady: true };
+          return { text: "", images: [], selectedSkills: [], mode: "auto", draftReady: true };
         },
       },
-      "./conversation/useTranscriptViewport": { useTranscriptViewport: () => ({}) },
-      "./conversation/ComposerOptions": { ComposerOptions: "ComposerOptions" },
+      "./conversation/useTranscriptViewport": {
+        useTranscriptViewport: () => ({ jumpToItem: (itemId: string) => jumps.push(itemId) }),
+      },
+      "./conversation/transcriptRows": { transcriptRows },
+      "./conversation/ComposerOptions": mobileTags(["ComposerOptions", "ComposerReferences"]),
       "./conversation/SessionActions": { SessionActions: "SessionActions" },
-      "./conversation/TranscriptItem": mobileTags(["TranscriptItem", "StreamingItem", "PlanCard"]),
+      "./conversation/TranscriptItem": mobileTags([
+        "TranscriptItem",
+        "ProcessGroup",
+        "StreamingItem",
+        "PlanCard",
+      ]),
     },
   );
   t.after(() => screen.dispose());
@@ -66,10 +77,15 @@ test("手机任务结束后解除执行入口与空闲操作限制，发送不�
     screen.nodes("Button").some((node) => node.props.title === "停止"),
     false,
   );
-  const more = screen.nodes("Button").find((node) => node.props.title === "更多")!;
-  (more.props.onPress as () => void)();
-  render();
-  assert.equal(screen.nodes("SessionActions")[0]!.props.idle, true);
+  const sessionActions = () => {
+    const menu = (
+      screen.nodes("ComposerOptions")[0]!.props.sessionMenu as (close: () => void) => {
+        props: { children: Array<{ type: unknown; props: Record<string, unknown> }> };
+      }
+    )(() => {});
+    return menu.props.children.find((node) => node.type === "SessionActions")!;
+  };
+  assert.equal(sessionActions().props.idle, true);
   terminalRun.status = "running";
   render();
   assert.equal(composerRun, terminalRun);
@@ -77,7 +93,89 @@ test("手机任务结束后解除执行入口与空闲操作限制，发送不�
     screen.nodes("Button").some((node) => node.props.title === "停止"),
     true,
   );
-  assert.equal(screen.nodes("SessionActions")[0]!.props.idle, false);
+  assert.equal(sessionActions().props.idle, false);
+  records.push({
+    itemId: "pending-approval",
+    item: { kind: "approval", state: "waiting", data: { kind: "tool" } },
+  });
+  render();
+  const jump = screen
+    .nodes("Pressable")
+    .find((node) => node.props.accessibilityLabel === "查看待批准请求");
+  assert.ok(jump);
+  (jump.props.onPress as () => void)();
+  assert.deepEqual(jumps, ["pending-approval"]);
+  assert.equal(screen.nodes("ActionsSheet")[0]!.props.open, false);
+  records[0]!.item = { kind: "prompt", state: "waiting" };
+  render();
+  assert.ok(
+    screen.nodes("Pressable").find((node) => node.props.accessibilityLabel === "查看待回答问题"),
+  );
+});
+test("极简输入选项可打开会话操作和发送方式，返回不丢草稿", (t) => {
+  const composer = {
+    text: "继续优化当前页面",
+    mode: "auto",
+    selectedSkills: [],
+    images: [],
+    setMode: (value: string) => {
+      composer.mode = value;
+    },
+  };
+  let settingsOpened = 0;
+  const screen = mobileComponent(
+    new URL("../../../apps/mobile/src/conversation/ComposerOptions.tsx", import.meta.url),
+    {
+      "react-native": {
+        ...mobileTags(["Pressable", "Text", "View"]),
+        StyleSheet: { create: (value: unknown) => value },
+        Keyboard: { dismiss() {} },
+      },
+      "../store": { usePico: () => ({ reason: () => undefined }) },
+      "../ui": ui,
+      "../ActionsSheet": { ActionsSheet: "ActionsSheet" },
+    },
+  );
+  t.after(() => screen.dispose());
+  const render = () =>
+    screen.render("ComposerOptions", {
+      composer,
+      active: true,
+      modelSummary: "模型 · 普通 · off",
+      onSettings: () => {
+        settingsOpened++;
+      },
+      sessionMenu: (onClose: () => void) => ({ type: "SessionMenu", props: { onClose } }),
+      transcriptDetails: { type: "TranscriptDetails", props: {} },
+    });
+  const press = (title: string) => {
+    const button = screen.nodes("Button").find((node) => node.props.title === title)!;
+    assert.ok(button, title);
+    (button.props.onPress as () => void)();
+    render();
+  };
+  render();
+  (screen.nodes("Pressable")[0]!.props.onPress as () => void)();
+  render();
+  press("会话操作");
+  assert.equal(screen.nodes("ActionsSheet")[0]!.props.open, true);
+  assert.equal(screen.nodes("SessionMenu").length, 1);
+  press("高级记录详情");
+  assert.equal(screen.nodes("TranscriptDetails").length, 1);
+  press("返回会话操作");
+  press("返回选项");
+  press("发送方式 · 自动");
+  const queue = screen.nodes("Pressable").find((node) => node.props.key === "queue")!;
+  (queue.props.onPress as () => void)();
+  render();
+  assert.equal(composer.mode, "queue");
+  assert.equal(screen.nodes("ActionsSheet")[0]!.props.open, false);
+  (screen.nodes("Pressable")[0]!.props.onPress as () => void)();
+  render();
+  press("模型与会话设置");
+  assert.equal(settingsOpened, 1);
+  assert.equal(screen.nodes("ActionsSheet")[0]!.props.open, false);
+  assert.equal(composer.text, "继续优化当前页面");
 });
 test("手机 Goal 的通知乱序不倒退，自动默认等级保留并可保存", async (t) => {
   let listener: (event: unknown) => void = () => {};
@@ -188,13 +286,25 @@ test("手机 Goal 的通知乱序不倒退，自动默认等级保留并可保�
   assert.equal((saved?.webSearch as { enabled: boolean }).enabled, true);
 });
 
-test("手机多层会话返回保留祖先，切换电脑清除父关系", (t) => {
+test("手机会话标题同步改名、隔离迟到响应，多层返回保留祖先", async (t) => {
+  const reads: Array<{ sessionId: string; resolve: (value: unknown) => void }> = [];
+  let listener: (event: { topic: string; scope: { sessionId: string } }) => void = () => {};
   const pico = {
     host: { id: "host-a" },
     workspace: { id: "workspace-a", label: "项目" },
     generation: 1,
     phase: "connected",
+    connected: true,
     reason: () => undefined,
+    request: (_method: string, params: { sessionId: string }) =>
+      new Promise((resolve) => reads.push({ sessionId: params.sessionId, resolve })),
+    onNotification: (fn: typeof listener) => {
+      listener = fn;
+      return () => {};
+    },
+    report: (error: unknown) => {
+      throw error;
+    },
   };
   const screen = mobileComponent(new URL("../../../apps/mobile/src/App.tsx", import.meta.url), {
     "react-native": {
@@ -232,12 +342,33 @@ test("手机多层会话返回保留祖先，切换电脑清除父关系", (t) =
   render();
   (screen.nodes("Sessions")[0]!.props.onSession as (...ids: string[]) => void)("A");
   render();
+  reads.at(-1)!.resolve({ session: { sessionId: "A", title: "排查连接问题" } });
+  await settleScreen();
+  render();
+  const hasTitle = (title: string) =>
+    screen.nodes("Text").some((node) => (node.props.children as unknown[]).includes(title));
+  assert.ok(hasTitle("排查连接问题"));
+  listener({ topic: "session.updated", scope: { sessionId: "A" } });
+  const lateA = reads.at(-1)!;
   (screen.nodes("Conversation")[0]!.props.onSession as (...ids: string[]) => void)(
     "B",
     "A",
     "sideChat",
   );
   render();
+  const oldB = reads.at(-1)!;
+  listener({ topic: "session.updated", scope: { sessionId: "B" } });
+  reads.at(-1)!.resolve({ session: { sessionId: "B", title: "确认修复结果" } });
+  await settleScreen();
+  render();
+  assert.ok(hasTitle("确认修复结果"));
+  oldB.resolve({ session: { sessionId: "B", title: "旧标题" } });
+  lateA.resolve({ session: { sessionId: "A", title: "迟到的其他会话" } });
+  await settleScreen();
+  render();
+  assert.ok(hasTitle("确认修复结果"));
+  assert.equal(hasTitle("旧标题"), false);
+  assert.equal(hasTitle("迟到的其他会话"), false);
   (screen.nodes("Conversation")[0]!.props.onSession as (...ids: string[]) => void)(
     "C",
     "B",
