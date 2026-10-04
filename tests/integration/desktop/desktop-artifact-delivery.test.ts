@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import { mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -27,6 +29,7 @@ test("正式 write_file 交付物经过会话查询、分块预览及另存/文�
   const { workspace, sessionId, query, registry } = fixture;
   const content = "# 交付报告\n中文与 emoji 🧪\n".repeat(3000);
   const revisions: number[] = fixture.revisions;
+  const syncs = injectSyncFailure(t, "directory", "EPERM");
   const tool = registry.getTool("write_file");
   assert.ok(tool);
   await tool.execute(JSON.stringify({ path: "src/index.ts", content: "export const value = 1;" }));
@@ -94,6 +97,45 @@ test("正式 write_file 交付物经过会话查询、分块预览及另存/文�
   });
   assert.equal((await bridge.saveAs(reference)).ok, true);
   assert.deepEqual(bridgeCalls, [["pico:artifact:save-as", reference]]);
+  assert.ok(syncs.directory > 0, "unsupported directory syncs are attempted before degrading");
+  assert.ok(syncs.file > 0, "artifact bytes still receive a successful file fsync");
+});
+
+test("交付登记仅降级不支持的目录同步，文件同步失败与目录 I/O 错误仍拒绝登记", async (t) => {
+  for (const [target, code] of [
+    ["file", "EPERM"],
+    ["directory", "EIO"],
+  ] as const) {
+    await t.test(`${target} ${code}`, async (child) => {
+      const fixture = await createFixture(child);
+      injectSyncFailure(child, target, code);
+      const result = await fixture.registry.execute({
+        id: `reject-${target}-${code}`,
+        name: "write_file",
+        arguments: JSON.stringify({
+          path: "reports/failure.txt",
+          content: "必须同步",
+          artifact: true,
+        }),
+      });
+      assert.equal(result.isError, true);
+      assert.match(result.output, /生成文件登记失败/u);
+      assert.match(result.output, new RegExp(code, "u"));
+      assert.equal(
+        await readFile(join(fixture.workspace, "reports/failure.txt"), "utf8"),
+        "必须同步",
+      );
+      assert.deepEqual(
+        fixture.repository.queryArtifacts({ sessionId: fixture.sessionId }).artifacts,
+        [],
+      );
+      assert.deepEqual(
+        fixture.revisions,
+        [],
+        "failed persistence must not publish an artifact revision",
+      );
+    });
+  }
 });
 
 test("write_file 自动登记 HTML 和 HTM，显式标记不重复登记，普通源码仍需显式标记", async (t) => {
@@ -215,4 +257,26 @@ async function createFixture(t: test.TestContext) {
 function record(value: unknown): Record<string, unknown> {
   assert.ok(value && typeof value === "object" && !Array.isArray(value));
   return value as Record<string, unknown>;
+}
+
+function injectSyncFailure(
+  t: test.TestContext,
+  target: "directory" | "file",
+  code: "EPERM" | "EIO",
+) {
+  const originalSync = fs.fsyncSync;
+  const calls = { directory: 0, file: 0 };
+  const sync = t.mock.method(fs, "fsyncSync", (fd: number) => {
+    const kind = fs.fstatSync(fd).isDirectory() ? "directory" : "file";
+    calls[kind]++;
+    if (kind === target)
+      throw Object.assign(new Error(`${code}: injected ${kind} fsync failure`), { code });
+    originalSync(fd);
+  });
+  syncBuiltinESMExports();
+  t.after(() => {
+    sync.mock.restore();
+    syncBuiltinESMExports();
+  });
+  return calls;
 }

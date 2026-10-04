@@ -16,6 +16,7 @@ import {
   type RunAgentCliOptions,
 } from "@pico/pico-host/agent-runtime";
 import { createProductionRuntimeServices } from "@pico/pico-host/production-host";
+import { hostShellDialect } from "@pico/runtime/host-shell";
 import { globalSessionManager, Session } from "@pico/pico-host/session";
 import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
 import {
@@ -47,11 +48,21 @@ test(
     await mkdir(join(root, "workspace"));
     const workspacePath = await realpath(join(root, "workspace"));
     await writeDesktopModelRouting(picoHome);
+    const scriptPath = join(root, "generate-media.cjs");
+    await writeFile(
+      scriptPath,
+      `const f=require("node:fs");f.writeFileSync("image.png",Buffer.from("${png.toString("base64")}","base64"));f.writeFileSync("movie.mp4",Buffer.from("${mp4.toString("base64")}","base64"));`,
+    );
+    const dialect = hostShellDialect();
+    const quoteWord = (word: string) =>
+      dialect === "powershell"
+        ? `'${word.replaceAll("'", "''")}'`
+        : `'${word.replaceAll("'", "'\\''")}'`;
+    const command = `${dialect === "powershell" ? "& " : ""}${quoteWord(process.execPath)} ${quoteWord(scriptPath)}`;
     let generations = 0;
     const agentRuntime = new (class extends AgentRuntime {
       override execute(options: RunAgentCliOptions, dependencies: RunAgentCliDependencies) {
         let step = 0;
-        const script = `const f=require("node:fs");f.writeFileSync("image.png",Buffer.from("${png.toString("base64")}","base64"));f.writeFileSync("movie.mp4",Buffer.from("${mp4.toString("base64")}","base64"));`;
         return super.execute(options, {
           ...dependencies,
           isolatedHeadless: true,
@@ -67,9 +78,7 @@ test(
                     {
                       id: "generate-media",
                       name: "bash",
-                      arguments: JSON.stringify({
-                        command: `'${process.execPath}' -e '${script}'`,
-                      }),
+                      arguments: JSON.stringify({ command }),
                     },
                   ],
                 };
