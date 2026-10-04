@@ -56,15 +56,21 @@ test("native file-worker process reads only its target and cannot connect to loo
   context.after(() => server.close());
   const address = server.address();
   assert.ok(address && typeof address !== "string");
+  const probeId = randomUUID();
+  const startedMarker = `file-worker-started:${probeId}\n`;
+  const completedMarker = `file-worker-completed:${probeId}\n`;
   const script = [
     'const fs = require("node:fs");',
     'const net = require("node:net");',
+    `process.stdout.write(${JSON.stringify(startedMarker)}, () => {`,
     `if (fs.readFileSync(${JSON.stringify(allowed)}, "utf8") !== "allowed-secret") process.exit(10);`,
     `try { fs.readFileSync(${JSON.stringify(sibling)}, "utf8"); process.exit(11); } catch {}`,
     `const socket = net.connect(${address.port}, "127.0.0.1");`,
-    "socket.setTimeout(1500, () => { socket.destroy(); process.exit(0); });",
+    `const complete = () => { socket.destroy(); process.stdout.write(${JSON.stringify(completedMarker)}, () => process.exit(0)); };`,
+    "socket.setTimeout(1500, complete);",
     "socket.on('data', () => process.exit(12));",
-    "socket.on('error', () => process.exit(0));",
+    "socket.on('error', complete);",
+    "});",
   ].join("\n");
   const policy = createSandboxPolicy({
     profile: "read-only",
@@ -85,21 +91,43 @@ test("native file-worker process reads only its target and cannot connect to loo
   );
   let stderr = "";
   child.stderr?.on("data", (chunk: Buffer) => (stderr += chunk.toString("utf8")));
+  let stdout = "";
+  // Windows broker grants/revokes the system Node directory before/after running the probe.
+  const preparationTimeoutMs = process.platform === "win32" ? 60_000 : 10_000;
   let timer: NodeJS.Timeout | undefined;
   try {
-    const exitCode = await Promise.race([
-      new Promise<number | null>((resolve, reject) => {
-        child.once("error", reject);
-        child.once("close", resolve);
-      }),
-      new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(
-          () => reject(new Error(`File Worker 原生隔离探针超时: ${stderr}`)),
-          10_000,
-        );
-      }),
-    ]);
+    const exitCode = await new Promise<number | null>((resolve, reject) => {
+      let waiting = true;
+      let phase: "启动" | "执行" | "清理" = "启动";
+      const armTimer = (nextPhase: typeof phase, timeoutMs: number) => {
+        clearTimeout(timer);
+        phase = nextPhase;
+        timer = setTimeout(() => {
+          waiting = false;
+          reject(new Error(`File Worker 原生隔离探针${phase}超时: ${stderr}`));
+        }, timeoutMs);
+      };
+      child.stdout?.on("data", (chunk: Buffer) => {
+        if (!waiting) return;
+        stdout += chunk.toString("utf8");
+        if (phase === "启动" && stdout.includes(startedMarker)) armTimer("执行", 10_000);
+        if (phase === "执行" && stdout.includes(completedMarker)) {
+          armTimer("清理", preparationTimeoutMs);
+        }
+      });
+      child.once("error", (error) => {
+        waiting = false;
+        reject(error);
+      });
+      child.once("close", (code) => {
+        waiting = false;
+        resolve(code);
+      });
+      armTimer("启动", preparationTimeoutMs);
+    });
     assert.equal(exitCode, 0, stderr);
+    assert.ok(stdout.includes(startedMarker), "File Worker 未开始能力探针");
+    assert.ok(stdout.includes(completedMarker), "File Worker 未完成能力探针");
   } finally {
     clearTimeout(timer);
     await lease.terminate().catch(() => undefined);
