@@ -89,7 +89,9 @@ test("Astryx 页面控件保留任务表单、模型切换和审批交互", { ti
         ? script
         : request.url === "/bundle.css"
           ? css
-          : '<!doctype html><html><head><link rel="stylesheet" href="/bundle.css"></head><body><div id="app"></div><pre id="result">RUNNING</pre><script src="/bundle.js"></script></body></html>',
+          : request.url === "/scenario"
+            ? '<!doctype html><html><head><link rel="stylesheet" href="/bundle.css"></head><body><div id="app"></div><pre id="result">RUNNING</pre><script src="/bundle.js"></script></body></html>'
+            : '<!doctype html><html><body><iframe title="Desktop renderer scenario" src="/scenario" width="1280" height="900" style="border:0"></iframe></body></html>',
     );
   });
   const profile = await mkdtemp(join(tmpdir(), "pico-pages-ui-"));
@@ -185,6 +187,8 @@ function ModelHarness(){
   }}/>;
 }
 async function scenario(){
+  // Keep the desktop media-query contract independent of the runner's physical display.
+  check(innerWidth===1280&&innerHeight===900,"Desktop scenario viewport: "+JSON.stringify({width:innerWidth,height:innerHeight}));
   const opened=[];let copied="";
   const storageRuntime={...runtime,data:{...previewData,picoHome:"/custom/Pico data",workspacePath:undefined,workspaces:[]},actions:{openWorkspace:async path=>opened.push(path)}};
   await act(async()=>root.render(<RuntimeContext value={storageRuntime}><DataSettingsPage/></RuntimeContext>));
@@ -345,7 +349,7 @@ async function scenario(){
   check(!process().open,"Reader collapse survives appended events");
   await mountTranscript(settled,undefined,360);
   await act(async()=>process().querySelector('summary').click());
-  check(toolGroup().getBoundingClientRect().width<=312,"Tool groups fit a narrow side conversation");
+  check(toolGroup().getBoundingClientRect().width<=312,"Tool groups fit a narrow side conversation: "+JSON.stringify({viewport:innerWidth,surface:document.querySelector('.conversation-surface').getBoundingClientRect().width,transcript:document.querySelector('.conversation-transcript').getBoundingClientRect().width,group:toolGroup().getBoundingClientRect().width}));
   check(toolGroup().querySelector('summary').scrollWidth<=toolGroup().querySelector('summary').clientWidth+1,"Long arguments do not overflow the compact row");
   await act(async()=>toolGroup().querySelector('summary').click());
   const firstTool=toolGroup().querySelector('.conversation-tool-record');
