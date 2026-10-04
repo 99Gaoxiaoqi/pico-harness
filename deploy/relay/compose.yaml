@@ -1,0 +1,39 @@
+services:
+  relay:
+    build:
+      context: ../..
+      dockerfile: deploy/relay/Dockerfile
+    restart: unless-stopped
+    read_only: true
+    init: true
+    volumes:
+      - relay_state:/data
+    tmpfs:
+      - /tmp
+    networks:
+      - private
+    # No host port: only Caddy can reach the cleartext upstream.
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      RELAY_DOMAIN: ${RELAY_DOMAIN:?Set RELAY_DOMAIN to your relay DNS name}
+    ports:
+      - "443:443"
+      - "443:443/udp"
+      - "80:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - public
+      - private
+networks:
+  public:
+  private:
+    internal: true
+volumes:
+  relay_state:
+  caddy_data:
+  caddy_config:
