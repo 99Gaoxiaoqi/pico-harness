@@ -20,6 +20,7 @@ import {
 } from "@pico/pico-host/hooks/config/command-shell";
 import {
   DefaultHookExecutor,
+  HookProcessTreeTerminationError,
   type HookHandlerExecutorOptions,
 } from "@pico/pico-host/hooks/executors/executor";
 import { HookTrustStore } from "@pico/pico-host/hooks/trust/store";
@@ -28,6 +29,296 @@ import {
   createSandboxPolicy,
   WINDOWS_RESTRICTED_NODE_OPTIONS,
 } from "@pico/pico-host/process-sandbox";
+import { ToolRegistry } from "@pico/pico-host/product-tool-registry";
+import { createCodeModeTool } from "@pico/pico-host/code-mode-tool";
+import type { BaseTool } from "@pico/pico-host/tool-registry-contract";
+import { ToolAccesses } from "@pico/runtime/tool-access";
+import { HookService, emptyHookSnapshot } from "@pico/pico-host/hooks/service";
+import { createTerminationFixture } from "./hook-termination-fixture.js";
+
+for (const scenario of [
+  { mode: "nonzero_exit", cancelled: false, beforeStart: false },
+  { mode: "nonzero_exit", cancelled: true, beforeStart: false },
+  { mode: "nonzero_exit", cancelled: true, beforeStart: true },
+  { mode: "timeout", cancelled: false, beforeStart: false },
+] as const) {
+  test(
+    `HookService preserves failed Windows tree proof (${scenario.mode}, parent cancel=${scenario.cancelled}, before start=${scenario.beforeStart})`,
+    { timeout: 15_000 },
+    async (context) => {
+      const controller = new AbortController();
+      const cancelled = new Error("parent cancelled owned Hook");
+      const fixture = await createTerminationFixture(
+        context,
+        scenario.mode,
+        "Stop",
+        30_000,
+        scenario.beforeStart ? () => controller.abort(cancelled) : undefined,
+      );
+      const unhandled: unknown[] = [];
+      const observeUnhandled = (error: unknown) => unhandled.push(error);
+      process.on("unhandledRejection", observeUnhandled);
+      context.after(() => process.removeListener("unhandledRejection", observeUnhandled));
+      const execution = fixture.service.dispatch(
+        "Stop",
+        { reason: "proof failure" },
+        { signal: controller.signal },
+      );
+      void execution.catch(() => undefined);
+      const root = await fixture.ready();
+      if (scenario.cancelled && !scenario.beforeStart) controller.abort(cancelled);
+      if (!scenario.cancelled) fixture.overflow(root);
+      const killer = await fixture.terminationAttempt();
+      assert.equal(root.exitCode, null, "failed taskkill must leave the real owned root alive");
+      assert.equal(root.signalCode, null);
+      assert.deepEqual(unhandled, [], "the rejected barrier must be observed before child close");
+      fixture.release(root);
+      await assert.rejects(execution, (error: unknown) => {
+        assert.ok(error instanceof HookProcessTreeTerminationError);
+        const [reason, proof]: unknown[] = error.errors;
+        assert.ok(reason instanceof Error);
+        if (scenario.cancelled) assert.equal(reason, cancelled);
+        else assert.match(reason.message, /输出超过/u);
+        assert.ok(proof instanceof Error);
+        const diagnostic: unknown = JSON.parse(
+          proof.message.slice(proof.message.indexOf(": ") + 2),
+        );
+        assert.ok(diagnostic && typeof diagnostic === "object");
+        assert.ok("reason" in diagnostic && "rootPid" in diagnostic && "taskkillPid" in diagnostic);
+        assert.equal(diagnostic.reason, scenario.mode);
+        assert.equal(diagnostic.rootPid, root.pid);
+        assert.equal(diagnostic.taskkillPid, killer.pid);
+        assert.ok("rootExitCode" in diagnostic && "rootSignalCode" in diagnostic);
+        assert.equal(diagnostic.rootExitCode, null);
+        assert.equal(diagnostic.rootSignalCode, null);
+        assert.ok("stderr" in diagnostic && typeof diagnostic.stderr === "string");
+        assert.match(diagnostic.stderr, /^taskkill-denied:/u);
+        assert.equal(diagnostic.stderr.length, 4_096);
+        assert.ok("stderrTruncated" in diagnostic);
+        assert.equal(diagnostic.stderrTruncated, true);
+        if (scenario.mode === "nonzero_exit") {
+          assert.ok("exitCode" in diagnostic);
+          assert.equal(diagnostic.exitCode, 7);
+        } else {
+          assert.ok("elapsedMs" in diagnostic && typeof diagnostic.elapsedMs === "number");
+          assert.ok(diagnostic.elapsedMs >= 900 && diagnostic.elapsedMs < 5_000);
+        }
+        return true;
+      });
+      assert.deepEqual(unhandled, []);
+    },
+  );
+}
+
+for (const cancelled of [true, false]) {
+  test(
+    `HookService drains started parallel Hooks without dequeuing after proof failure (parent cancel=${cancelled})`,
+    { timeout: 15_000 },
+    async (context) => {
+      const normal = await createTerminationFixture(context, "success", "Stop", 30_000);
+      const failed = await createTerminationFixture(context, "nonzero_exit", "Stop", 30_000);
+      let queuedStarts = 0;
+      const entries = [
+        {
+          ...normal.entry,
+          id: "normal",
+          handler: { type: "command" as const, command: "normal", timeoutMs: 30_000 },
+        },
+        {
+          ...failed.entry,
+          id: "failed",
+          handler: {
+            type: "command" as const,
+            command: "failed",
+            timeoutMs: 30_000,
+          },
+        },
+        {
+          ...normal.entry,
+          id: "queued",
+          handler: { type: "command" as const, command: "queued", timeoutMs: 30_000 },
+        },
+      ];
+      const empty = emptyHookSnapshot();
+      const service = new HookService({
+        workDir: normal.workDir,
+        sessionId: "parallel-proof",
+        concurrency: 2,
+        executor: {
+          execute: async (entry, input, context) => {
+            if (entry.id === "queued") queuedStarts++;
+            return await (entry.id === "failed" ? failed.executor : normal.executor).execute(
+              entry,
+              input,
+              context,
+            );
+          },
+        },
+        snapshot: {
+          ...empty,
+          handlers: new Proxy(empty.handlers, {
+            get: (target, key) => (key === "Stop" ? entries : Reflect.get(target, key)),
+          }),
+        },
+      });
+      const controller = new AbortController();
+      const reason = new Error("parallel parent cancellation");
+      const execution = service.dispatch(
+        "Stop",
+        { reason: "parallel proof" },
+        { signal: controller.signal },
+      );
+      let settled = false;
+      void execution.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        },
+      );
+      const [normalRoot, failedRoot] = await Promise.all([normal.ready(), failed.ready()]);
+      if (cancelled) {
+        const normalClosed = new Promise<void>((resolve) =>
+          normalRoot.once("close", () => resolve()),
+        );
+        controller.abort(reason);
+        await normalClosed;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        assert.equal(
+          settled,
+          false,
+          "a normal abort must wait for the other started Hook to settle",
+        );
+        assert.equal(failedRoot.exitCode, null);
+        await failed.terminationAttempt();
+        failed.release(failedRoot);
+      } else {
+        failed.overflow(failedRoot);
+        await failed.terminationAttempt();
+        const failedClosed = new Promise<void>((resolve) =>
+          failedRoot.once("close", () => resolve()),
+        );
+        failed.release(failedRoot);
+        await failedClosed;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        assert.equal(settled, false, "a proof failure must drain the other already started Hook");
+        normal.release(normalRoot);
+      }
+      await assert.rejects(execution, (error: unknown) => {
+        assert.ok(error instanceof HookProcessTreeTerminationError);
+        if (cancelled) assert.equal(error.errors[0], reason);
+        return true;
+      });
+      assert.equal(queuedStarts, 0, "a proof failure must stop new queued command launches");
+    },
+  );
+}
+
+for (const cancelled of [false, true]) {
+  test(
+    `HookService keeps normal Windows timeout/cancellation semantics (parent cancel=${cancelled})`,
+    { timeout: 15_000 },
+    async (context) => {
+      const fixture = await createTerminationFixture(
+        context,
+        "success",
+        "Stop",
+        cancelled ? 30_000 : 8_000,
+      );
+      const controller = new AbortController();
+      const reason = new Error("parent cancellation is preserved");
+      const execution = fixture.service.dispatch(
+        "Stop",
+        { reason: "normal proof" },
+        { signal: controller.signal },
+      );
+      void execution.catch(() => undefined);
+      const root = await fixture.ready();
+      if (cancelled) controller.abort(reason);
+      if (cancelled) await assert.rejects(execution, (error) => error === reason);
+      else {
+        const output = await execution;
+        assert.equal(output.decision, "allow");
+        assert.ok(
+          output.diagnostics?.some((diagnostic) => /timeout|timed out/iu.test(diagnostic.message)),
+        );
+      }
+      assert.ok(root.exitCode !== null || root.signalCode !== null);
+    },
+  );
+}
+
+test(
+  "HookService tree-proof failure escapes Registry and a CodeMode cell catch without later side effects",
+  { timeout: 20_000 },
+  async (context) => {
+    const fixture = await createTerminationFixture(context, "nonzero_exit", "PreToolUse");
+    const registry = new ToolRegistry();
+    const executions: string[] = [];
+    const readableTool = (name: string): BaseTool => ({
+      name: () => name,
+      nesting: "nestable",
+      readOnly: true,
+      accesses: () => ToolAccesses.none(),
+      definition: () => ({
+        name,
+        description: "Observe physical dispatch",
+        inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      }),
+      execute: async () => {
+        executions.push(name);
+        return name;
+      },
+    });
+    registry.register(readableTool("lookup"));
+    registry.register(readableTool("probe"));
+    registry.register(createCodeModeTool({ registry }));
+    registry.setHookService(fixture.service);
+    for (const { codeMode, cancelled } of [
+      { codeMode: false, cancelled: false },
+      { codeMode: true, cancelled: false },
+      { codeMode: true, cancelled: true },
+    ]) {
+      fixture.reset();
+      const controller = new AbortController();
+      const reason = new Error("parent cancelled CodeMode");
+      const step = registry.captureStep(`proof:${codeMode}:${cancelled}`, [
+        "lookup",
+        "probe",
+        "exec",
+      ]);
+      const execution = registry.execute(
+        {
+          id: `proof:${codeMode}`,
+          name: codeMode ? "exec" : "lookup",
+          arguments: codeMode
+            ? JSON.stringify({
+                code: 'try { await tools.lookup({}); } catch {} await tools.probe({}); return "ignored";',
+              })
+            : "{}",
+        },
+        { step, signal: controller.signal },
+      );
+      void execution.catch(() => undefined);
+      const root = await fixture.ready();
+      if (cancelled) controller.abort(reason);
+      else fixture.overflow(root);
+      await fixture.terminationAttempt();
+      fixture.release(root);
+      await assert.rejects(execution, (error: unknown) => {
+        assert.ok(error instanceof HookProcessTreeTerminationError);
+        if (cancelled) assert.equal(error.errors[0], reason);
+        return true;
+      });
+      assert.deepEqual(
+        executions,
+        [],
+        "unproven termination cannot dispatch lookup or later probe",
+      );
+    }
+  },
+);
 
 const WINDOWS_ONLY =
   process.platform === "win32" ? false : "requires Windows executable and process-tree semantics";
@@ -276,7 +567,7 @@ test(
       processFixture.heartbeatPath,
       execution,
     );
-    const output = await execution;
+    const output = await diagnoseNativeTreeExecution(context, execution, tree);
 
     assert.equal(output.decision, "allow");
     assert.ok(
@@ -358,7 +649,10 @@ test(
 
     const abortStarted = Date.now();
     controller.abort(new Error("windows-hook-cancelled"));
-    await assert.rejects(execution, /windows-hook-cancelled/u);
+    await assert.rejects(
+      diagnoseNativeTreeExecution(context, execution, tree),
+      /windows-hook-cancelled/u,
+    );
 
     assert.ok(Date.now() - abortStarted < 5_000, "executor did not honor the taskkill barrier");
     assert.equal(isProcessRunning(tree.parent), false);
@@ -374,6 +668,29 @@ interface Fixture {
     readonly path: string;
     readonly version: number;
   };
+}
+
+async function diagnoseNativeTreeExecution(
+  context: TestContext,
+  execution: Promise<HookOutput>,
+  tree: ProcessTree,
+): Promise<HookOutput> {
+  try {
+    return await execution;
+  } catch (error) {
+    const errors: readonly unknown[] = error instanceof AggregateError ? error.errors : [error];
+    context.diagnostic(
+      JSON.stringify({
+        ownedTree: tree,
+        parentAlive: isProcessRunning(tree.parent),
+        childAlive: isProcessRunning(tree.child),
+        errors: errors.map((entry) =>
+          entry instanceof Error ? { name: entry.name, message: entry.message } : String(entry),
+        ),
+      }),
+    );
+    throw error;
+  }
 }
 
 interface ProcessTree {

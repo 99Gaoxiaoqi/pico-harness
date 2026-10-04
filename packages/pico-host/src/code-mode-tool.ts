@@ -6,6 +6,7 @@ import {
   type RuntimeToolResultLogger,
 } from "@pico/runtime/tool-result-builder";
 import type { HookService } from "./hooks/service.js";
+import { HookProcessTreeTerminationError } from "./hooks/termination-error.js";
 import type { ToolDefinition } from "@pico/core";
 import { sharedCodeCellAdmission, type CodeCellAdmission } from "@pico/runtime/code-cell-admission";
 import { executeCodeCell } from "./code-mode.js";
@@ -128,7 +129,9 @@ class CodeModeTool implements BaseTool {
         code: input.code,
         tools,
         ...(context?.signal ? { signal: context.signal } : {}),
-        isFatalToolError: (error) => error instanceof ToolCommitBoundaryError,
+        isFatalToolError: (error) =>
+          error instanceof ToolCommitBoundaryError ||
+          error instanceof HookProcessTreeTerminationError,
         callTool: async (name, childInput, signal) => {
           const call = {
             id: `code-mode:${randomUUID()}`,
