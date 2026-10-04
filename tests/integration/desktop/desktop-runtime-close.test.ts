@@ -121,6 +121,37 @@ test(
   "shutdown run.finished does not consume another queued input",
   { timeout: 15_000 },
   async (context) => {
+    const startedAt = performance.now();
+    const phases: Record<string, unknown>[] = [];
+    let awaiting = "setup";
+    let assertionsPassed = false;
+    let teardownFinished = false;
+    let diagnostics = 0;
+    let snapshot = (): Record<string, unknown> => ({});
+    const phase = (name: string, details: Record<string, unknown> = {}) => {
+      if (phases.length < 80)
+        phases.push({ phase: name, elapsedMs: performance.now() - startedAt, ...details });
+    };
+    const diagnostic = (reason: string) => {
+      if (diagnostics++ < 2)
+        context.diagnostic(
+          JSON.stringify({
+            fixture: "desktop-shutdown-queue",
+            reason,
+            awaiting,
+            phases,
+            ...snapshot(),
+          }),
+        );
+    };
+    context.signal.addEventListener(
+      "abort",
+      () => {
+        if (!teardownFinished) diagnostic("test-aborted");
+      },
+      { once: true },
+    );
+    phase("setup.started");
     const root = await mkdtemp(join(tmpdir(), "pico-desktop-close-queue-"));
     const workspace = join(root, "workspace");
     const picoHome = join(root, "pico-home");
@@ -131,6 +162,7 @@ test(
     const env = { PICO_HOME: picoHome, PICO_TEST_TOKEN: "test-token" };
     const trustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });
     await trustStore.trust(canonicalWorkspace);
+    phase("setup.ready");
     let queueSequence = 0;
     const conversationState = new SqliteDesktopConversationStateStore({
       picoHome,
@@ -148,31 +180,61 @@ test(
       env,
       execute: async ({ context: runContext }) => {
         executions++;
+        phase("executor.started", { execution: executions, aborted: runContext.signal.aborted });
+        runContext.signal.addEventListener(
+          "abort",
+          () => phase("executor.aborted", { runId: runContext.run.runId }),
+          { once: true },
+        );
         if (executions === 1) {
           firstStarted.resolve();
+          phase("firstExecutor.wait-release");
           await releaseFirst.promise;
+          phase("firstExecutor.released");
           return { turn: 1 };
         }
         if (executions === 2) {
           secondStarted.resolve();
-          await rejectWhenAborted(runContext.signal);
+          try {
+            await rejectWhenAborted(runContext.signal);
+          } finally {
+            phase("secondExecutor.drained", { aborted: runContext.signal.aborted });
+          }
         }
         throw new Error("third queued input must not start during shutdown");
       },
     });
+    const unsubscribePhases = runtime.subscribe((event) => {
+      if (event.topic !== "run.started" && event.topic !== "run.finished") return;
+      const payload: unknown = event.payload;
+      if (!payload || typeof payload !== "object" || Array.isArray(payload)) return;
+      const run = (payload as Record<string, unknown>)["run"];
+      if (!run || typeof run !== "object" || Array.isArray(run)) return;
+      const record = run as Record<string, unknown>;
+      phase(event.topic, { runId: record["runId"], status: record["status"] });
+    });
     const originalStartForegroundRun = runtime.startForegroundRun.bind(runtime);
     let interceptNextStart = false;
     runtime.startForegroundRun = async (input) => {
+      phase("startForegroundRun.entered", { key: input.idempotencyKey });
       if (input.idempotencyKey) observedRunStartKeys.push(input.idempotencyKey);
       if (interceptNextStart) {
         interceptNextStart = false;
         order.push("queue-admitted");
+        phase("queue.admitted");
         queueAdmitted.resolve();
         await releaseAdmission.promise;
+        phase("admission.released");
       }
-      const result = await originalStartForegroundRun(input);
-      order.push("queue-started");
-      return result;
+      try {
+        const result = await originalStartForegroundRun(input);
+        order.push("queue-started");
+        phase("startForegroundRun.resolved", { key: input.idempotencyKey });
+        return result;
+      } catch (error) {
+        phase("startForegroundRun.rejected", { error: String(error).slice(0, 512) });
+        throw error;
+      }
     };
     const managedSessionId = "session-close-queue";
     const desktop = new DesktopRuntimeService({
@@ -185,21 +247,47 @@ test(
     const originalListQueued = conversationState.listQueued.bind(conversationState);
     let trackClosingQueueReads = false;
     let closingQueueReads = 0;
+    snapshot = () => ({
+      executions,
+      order,
+      observedRunStartKeys,
+      closingQueueReads,
+      ownershipPending: desktop.shutdownOwnershipFence().pending,
+    });
     conversationState.listQueued = async (...args) => {
       if (trackClosingQueueReads) closingQueueReads++;
       return originalListQueued(...args);
     };
     context.after(async () => {
-      releaseFirst.resolve();
-      releaseAdmission.resolve();
-      await desktop.close();
-      const session = globalSessionManager.delete(managedSessionId, canonicalWorkspace, {
-        picoHome,
-      });
-      await session?.close();
-      await rm(root, { recursive: true, force: true });
+      phase("teardown.started");
+      try {
+        releaseFirst.resolve();
+        releaseAdmission.resolve();
+        awaiting = "teardown.desktop.close";
+        await desktop.close();
+        phase("teardown.desktop.closed");
+        const session = globalSessionManager.delete(managedSessionId, canonicalWorkspace, {
+          picoHome,
+        });
+        awaiting = "teardown.session.close";
+        await session?.close();
+        phase("teardown.session.closed");
+        awaiting = "teardown.rm";
+        await rm(root, { recursive: true, force: true });
+        phase("teardown.finished");
+        teardownFinished = true;
+      } catch (error) {
+        phase("teardown.rejected", { error: String(error).slice(0, 512) });
+        throw error;
+      } finally {
+        unsubscribePhases();
+        if (!assertionsPassed || !teardownFinished || context.signal.aborted)
+          diagnostic("teardown");
+      }
     });
 
+    awaiting = "send.first";
+    phase("send.first.started");
     const first = asRecord(
       await desktop.handle(
         createRuntimeRequest("session.send", {
@@ -209,17 +297,22 @@ test(
         }),
       ),
     );
+    phase("send.first.resolved");
     const session = asRecord(first["session"]);
     const firstRun = asRecord(first["run"]);
     const sessionId = requiredString(session["sessionId"], "sessionId");
     assert.equal(sessionId, managedSessionId);
     const firstRunId = requiredString(firstRun["runId"], "runId");
+    awaiting = "firstStarted";
     await firstStarted.promise;
+    phase("firstStarted.resolved");
 
     for (const [text, key] of [
       ["second", "close-queue-second"],
       ["third", "close-queue-third"],
     ] as const) {
+      awaiting = `send.${text}`;
+      phase("send.queued.started", { key });
       await desktop.handle(
         createRuntimeRequest("session.send", {
           workspacePath: workspace,
@@ -230,25 +323,44 @@ test(
           idempotencyKey: key,
         }),
       );
+      phase("send.queued.resolved", { key });
     }
 
     interceptNextStart = true;
     const originalCloseRuntimes = runtime.closeRuntimes.bind(runtime);
     runtime.closeRuntimes = async () => {
       order.push("close-runtimes");
-      await originalCloseRuntimes();
+      phase("closeRuntimes.entered");
+      try {
+        await originalCloseRuntimes();
+        phase("closeRuntimes.resolved");
+      } catch (error) {
+        phase("closeRuntimes.rejected", { error: String(error).slice(0, 512) });
+        throw error;
+      }
     };
 
     releaseFirst.resolve();
+    phase("first.release");
+    awaiting = "queueAdmitted";
     await queueAdmitted.promise;
+    phase("queueAdmitted.resolved");
     trackClosingQueueReads = true;
     const closing = desktop.close();
+    phase("closing.started");
+    awaiting = "close-fence.assertion";
     await waitForImmediate();
     assert.equal(order.includes("close-runtimes"), false);
 
     releaseAdmission.resolve();
+    phase("admission.release");
+    awaiting = "closing";
     await closing;
+    phase("closing.resolved");
+    awaiting = "secondStarted";
     await secondStarted.promise;
+    phase("secondStarted.resolved");
+    awaiting = "assertions";
     trackClosingQueueReads = false;
     assert.equal(executions, 2);
     assert.equal(closingQueueReads, 0);
@@ -256,12 +368,17 @@ test(
       `desktop-send-run:${sha256("close-queue-first")}`,
       `desktop-queue-run:${sha256("queue-1")}`,
     ]);
+    awaiting = "listQueued.final";
     const queued = await originalListQueued(canonicalWorkspace, sessionId);
+    phase("listQueued.final.resolved");
     assert.deepEqual(
       queued.map((entry) => entry.input),
       [{ kind: "text", text: "third" }],
     );
     assert.ok(order.indexOf("queue-started") < order.indexOf("close-runtimes"));
+    assertionsPassed = true;
+    awaiting = "teardown";
+    phase("assertions.passed");
   },
 );
 
