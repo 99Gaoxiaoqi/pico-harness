@@ -1,12 +1,16 @@
 import type { ChildProcess } from "node:child_process";
+import { open } from "node:fs/promises";
 import {
   launchDetachedRuntimeHostCandidate,
   type CandidateLauncher,
   type DetachedCandidateProcess,
+  type DetachedCandidateProcessExit,
 } from "../../../packages/runtime-host/src/client/launcher.js";
 
 const GRACEFUL_EXIT_TIMEOUT_MS = 12_000;
 const FORCED_EXIT_TIMEOUT_MS = 5_000;
+const DIAGNOSTIC_LOG_TAIL_BYTES = 8_192;
+const DIAGNOSTIC_LOG_COUNT = 8;
 
 export interface TestRuntimeHostCandidateTrackerOptions {
   readonly launchCandidate?: CandidateLauncher;
@@ -27,6 +31,8 @@ export class TestRuntimeHostCandidateTracker {
   private readonly forcedExitTimeoutMs: number;
   private readonly pendingLaunches = new Set<Promise<void>>();
   private readonly processes = new Map<number, DetachedCandidateProcess>();
+  private readonly candidateLogs = new Map<number, string>();
+  private readonly candidateExits = new Map<number, DetachedCandidateProcessExit>();
   private sealed = false;
 
   constructor(options: TestRuntimeHostCandidateTrackerOptions = {}) {
@@ -44,7 +50,13 @@ export class TestRuntimeHostCandidateTracker {
       if (!attempt.process) {
         throw new Error(`Candidate ${attempt.pid} did not expose a stable process capability`);
       }
-      this.processes.set(attempt.process.pid, attempt.process);
+      const candidate = attempt.process;
+      this.processes.set(candidate.pid, candidate);
+      if (attempt.logFile) this.candidateLogs.set(candidate.pid, attempt.logFile);
+      void candidate.closed.then(
+        (exit) => this.candidateExits.set(candidate.pid, exit),
+        () => undefined,
+      );
       return attempt;
     });
     const settlement = spawned.then(
@@ -73,6 +85,49 @@ export class TestRuntimeHostCandidateTracker {
 
   ownedExited(pid: number): boolean {
     return this.requireOwned(pid).exited;
+  }
+
+  /** Reports this fixture's exact children before teardown without probing or signalling them. */
+  async diagnoseFailure(
+    t: { diagnostic(message: string): void },
+    label: string,
+    error: unknown,
+  ): Promise<void> {
+    try {
+      const logs = [...this.candidateLogs];
+      const selectedLogs = new Map([...logs.slice(0, 1), ...logs.slice(1 - DIAGNOSTIC_LOG_COUNT)]);
+      t.diagnostic(
+        JSON.stringify({
+          kind: "runtime-host-fixture-failure",
+          label,
+          error: describeFailure(error),
+          candidates: [...this.processes.values()].map((candidate) => ({
+            pid: candidate.pid,
+            exited: candidate.exited,
+            exit: this.candidateExits.get(candidate.pid),
+          })),
+          omittedCandidateLogs: this.candidateLogs.size - selectedLogs.size,
+        }),
+      );
+      // Only paths returned by this fixture's owned launches are read. Keep the
+      // first candidate and recent logs, since production prunes older paths.
+      for (const [pid, logFile] of selectedLogs) {
+        const log = await readCandidateLogTail(logFile);
+        t.diagnostic(
+          JSON.stringify({
+            kind: "runtime-host-candidate-log",
+            label,
+            pid,
+            exited: this.requireOwned(pid).exited,
+            exit: this.candidateExits.get(pid),
+            logFile,
+            ...log,
+          }),
+        );
+      }
+    } catch {
+      // Diagnostics must never replace the original fixture failure.
+    }
   }
 
   /** Seals future launches and waits until every launched candidate is terminal. */
@@ -104,6 +159,39 @@ export class TestRuntimeHostCandidateTracker {
       throw new Error(`PID ${pid} is not owned by this test candidate tracker`);
     }
     return processCapability;
+  }
+}
+
+function describeFailure(error: unknown, depth = 0): unknown {
+  if (!(error instanceof Error)) return String(error).slice(0, 4_096);
+  return {
+    name: error.name,
+    code: "code" in error ? String(error.code).slice(0, 256) : undefined,
+    message: error.message.slice(0, 4_096),
+    stack: error.stack?.slice(0, 8_192),
+    cause:
+      depth < 4 && error.cause !== undefined ? describeFailure(error.cause, depth + 1) : undefined,
+  };
+}
+
+async function readCandidateLogTail(logFile: string): Promise<object> {
+  try {
+    const handle = await open(logFile, "r");
+    try {
+      const { size } = await handle.stat();
+      const bytes = Buffer.alloc(Math.min(size, DIAGNOSTIC_LOG_TAIL_BYTES));
+      const { bytesRead } = await handle.read(
+        bytes,
+        0,
+        bytes.length,
+        Math.max(0, size - bytes.length),
+      );
+      return { size, tail: bytes.subarray(0, bytesRead).toString("utf8") };
+    } finally {
+      await handle.close();
+    }
+  } catch (error) {
+    return { readError: describeFailure(error) };
   }
 }
 
