@@ -1,7 +1,7 @@
 import { setTimeout } from "node:timers/promises";
 
-// Exercise cold startup beyond the previous test's 1.5-second sleep without
-// changing the production entrypoint or its signal handlers.
+// This observer preload delays cold startup beyond the previous test's sleep;
+// Node starts the original CLI entrypoint after the preload completes.
 if (process.env["HEADLESS_SIGNAL_SLOW_BOOTSTRAP"] === "1") await setTimeout(2_200);
 
 let readySent = false;
@@ -21,4 +21,3 @@ const onNewListener = (event: string | symbol) => {
   });
 };
 process.on("newListener", onNewListener);
-await import("../../src/internal/headless-one-shot-main.js");
