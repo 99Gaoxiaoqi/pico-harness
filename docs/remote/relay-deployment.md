@@ -2,7 +2,7 @@
 
 `@pico/remote-relay` 是独立 Node + `ws` 服务。电脑和手机主动连接同一个 WSS 入口；服务按 `gatewayId/channelId` 转发不透明字符串，不解析手机与电脑间的 E2EE 内容，也不访问本机 Runtime。
 
-服务接入 token 用于证明电脑可占用对应 `gatewayId`，与手机配对的 `deviceToken` 不同。长期接入 token 由电脑生成并先保存；登记只上传 SHA-256。不要把 token、配对秘密、E2EE 私钥或邀请写入 URL、部署文件和日志。
+个人部署在初始化时预先绑定电脑，普通远程设置不需要一次性邀请。服务接入 token 用于证明电脑可占用对应 `gatewayId`，与手机配对的 `deviceToken` 不同。长期接入 token 由电脑生成并先保存；预绑定只提交 SHA-256。不要把 token、配对秘密、E2EE 私钥或旧版邀请写入 URL、部署文件和日志。
 
 ## 构建与本机运行
 
@@ -30,16 +30,35 @@ docker compose -f deploy/relay/compose.yaml up -d --build
 
 容器以非 root 用户运行，状态写入 `relay_state` 私有卷；该卷含管理员认证材料，应只向运维账号开放。应用根文件系统只读。当前镜像使用 Node 26 与 Caddy 2 大版本标签；生产环境应在完成验证后固定镜像摘要，升级时重新验证。
 
-## 本地管理员创建邀请与撤销
+## 个人部署初始化与撤销
 
-服务必须正在运行。管理员在服务器本地运行 CLI，通过状态目录里的私有 `admin.sock`（Windows 为命名管道）操作；没有公开管理员 HTTP 接口。
+先在准备远程访问的电脑上运行：
 
 ```sh
-docker compose -f deploy/relay/compose.yaml exec relay node dist/cli.js invite --home /data --ttl 600
+pico remote relay prepare --url https://relay.example.com
+```
+
+命令只在电脑本机生成并持久化接入凭据与加密密钥，输出 `{version:1,relayUrl,gatewayId,tokenHash}`；不发起公网登记，也不输出 token 明文或私钥。普通重复运行会保留原 token，便于重跑部署。
+
+然后在 Relay 服务器上绑定输出中的 `gatewayId` 和 `tokenHash`。服务必须正在运行。CLI 通过状态目录里的私有 `admin.sock`（Windows 为命名管道）操作；没有公开 HTTP 绑定或管理员接口。
+
+```sh
+docker compose -f deploy/relay/compose.yaml exec relay node dist/cli.js bind --home /data --gateway YOUR_GATEWAY_ID --token-hash YOUR_TOKEN_HASH
+```
+
+直接运行 Node 服务时，对应命令是 `pico-relay bind --gateway ID --token-hash HASH [--home PATH]`（仓库内也可使用 `node packages/remote-relay/dist/cli.js bind ...`）。成功返回 `{version:1,bound:true}`。相同有效 ID/hash 可以幂等重跑；已有效的 ID 不能被另一个 hash 覆盖。
+
+绑定成功后，在电脑远程设置中保存同一个 Relay URL，授权项目并开启远程访问。手机扫码时仍需电脑本机审批；Relay 绑定不会代替手机配对审批，也不会开放无认证公网注册。
+
+需要撤销电脑接入时，在服务器运行：
+
+```sh
 docker compose -f deploy/relay/compose.yaml exec relay node dist/cli.js revoke --home /data --gateway YOUR_GATEWAY_ID
 ```
 
-`invite` 输出一次性邀请与到期时间。通过受信任渠道交给电脑端的 enrollment 流程；输出属于秘密，不要贴入工单、公开终端记录或仓库。默认十分钟，允许一秒至二十四小时。`revoke` 先持久化撤销，再立即关闭该电脑及其全部手机连接；旧邀请重试不会撤销这个操作。重新接入需要新邀请和新 token。
+`revoke` 先持久化撤销，再立即关闭该电脑及其全部手机连接。使用旧 hash 再次 `bind` 会返回 `HOST_REVOKED`，重跑旧部署不能撤销这个操作。需要恢复时，先在电脑关闭远程访问，显式运行 `pico remote relay prepare --url https://relay.example.com --rotate` 生成新 token，再把新的 `tokenHash` 在服务器本地 `bind`，最后重新开启电脑远程访问。
+
+旧版 `pico-relay invite [--home PATH] [--ttl SECONDS]` 与邀请登记流程保留兼容：邀请默认十分钟有效，允许一秒至二十四小时；邀请属于秘密。个人部署使用上面的预绑定流程即可。
 
 ## 协议与恢复边界
 
@@ -51,9 +70,11 @@ docker compose -f deploy/relay/compose.yaml exec relay node dist/cli.js revoke -
 - `close` 可带大写字符串 `code`，例如 `HOST_DISCONNECTED`；错误帧为 `{version:1,type:"error",code}`。服务不透出令牌或内部异常详情。
 - 不抢占在线电脑。电脑掉线即关闭其全部手机通道；不存在离线命令队列。重连后端点重新建立通道和加密会话，业务层负责安全同步，不能依赖 Relay 自动重放命令。
 
-登记接口仅为 `POST /v1/enroll`，请求 `{version:1,invitation,gatewayId,tokenHash}`，成功返回 `{version:1,enrolled:true}`。同一邀请绑定后，仅相同三元组可幂等重试，解决响应丢失；改变 gateway 或 token hash 会被拒绝。已成功绑定的重试不受邀请过期影响，但仍必须对应未撤销的电脑记录。
+个人预绑定只接受私有管理方法 `bind`，参数精确为 `{gatewayId,tokenHash}`，不接受 token 明文或多余字段。已撤销的记录只能以新 hash 重新绑定。
 
-状态 `state.json` 仅保存 invitation hash、到期/绑定与 host token hash，写入经单一串行队列、私有临时文件和原子 rename。CLI 不绕开这个队列写文件，避免邀请、登记和撤销并发丢更新。POSIX 状态目录为 `0700`、JSON 为 `0600`，拒绝符号链接与非当前用户所有的状态；部署与权限验收以 Linux/POSIX 为目标，Windows ACL 未在本轮验收。
+兼容旧客户端的登记接口为 `POST /v1/enroll`，请求 `{version:1,invitation,gatewayId,tokenHash}`，成功返回 `{version:1,enrolled:true}`，仍要求有效邀请。同一邀请绑定后，仅相同三元组可幂等重试，解决响应丢失；改变 gateway 或 token hash 会被拒绝。已成功绑定的重试不受邀请过期影响，但仍必须对应未撤销的电脑记录。
+
+状态 `state.json` 仅保存 invitation hash、到期/绑定与 host token hash，写入经单一串行队列、私有临时文件和原子 rename。CLI 不绕开这个队列写文件，避免预绑定、邀请、登记和撤销并发丢更新。POSIX 状态目录为 `0700`、JSON 为 `0600`，拒绝符号链接与非当前用户所有的状态；部署与权限验收以 Linux/POSIX 为目标，Windows ACL 未在本轮验收。
 
 ## 默认限额
 
@@ -82,6 +103,6 @@ npm run typecheck --workspace @pico/remote-relay
 node --import tsx --test tests/integration/remote/relay-service.integration.test.ts
 ```
 
-测试通过真实 HTTPS/WSS 验证邀请重试和重启恢复、双向不透明转发、多租户隔离、错误 token、版本限制、通道限额、在线撤销与电脑掉线无缓存；同出口多通道超 300 帧转发以及双向帧、UTF-8 字节和电脑聚合预算也有回归覆盖。服务本身没有 E2EE 密码学实现；密码学与业务权限需由手机/电脑端的集成测试另行验收。
+测试通过私有 CLI 和真实 HTTPS/WSS 验证预绑定、精确字段校验、幂等重跑、拒绝覆盖有效凭据、撤销后旧凭据拒绝恢复与新 token 重绑定；也覆盖旧版邀请重试和重启恢复、双向不透明转发、多租户隔离、错误 token、版本限制、通道限额、在线撤销与电脑掉线无缓存。同出口多通道超 300 帧转发以及双向帧、UTF-8 字节和电脑聚合预算也有回归覆盖。服务本身没有 E2EE 密码学实现；密码学与业务权限需由手机/电脑端的集成测试另行验收。
 
 升级前停止 Relay 服务并备份 `relay_state`，记录当前镜像摘要；保留 Caddy 证书卷。回退恢复旧镜像及与其状态版本相容的备份，重新启动。停服会断开远程通道，但 Relay 不向电脑发送取消任务命令。不要在运行中复制状态后声称它是已确认的一致备份。
