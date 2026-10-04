@@ -8,7 +8,11 @@ import {
   DesktopInteractionBroker,
   DesktopInteractionVersionConflictError,
 } from "@pico/pico-host/desktop-interaction-broker";
-import { FileDesktopInteractionStore, type DesktopInteractionStore } from "@pico/pico-host";
+import {
+  FileDesktopInteractionStore,
+  DesktopInteractionStoreError,
+  type DesktopInteractionStore,
+} from "@pico/pico-host";
 import {
   AskUserHandler,
   createAskUserRequestId,
@@ -147,7 +151,13 @@ test("恢复把旧 pending 单调转为 interrupted，不重建可处理请求",
   assert.equal(recovered.resolveApproval({ taskId: "approval-old", decision: "approve" }), false);
   assert.equal(recovered.answerPrompt(promptId, "a"), false);
 
-  oldBroker.close();
+  await assert.rejects(
+    oldBroker.closeAsync(),
+    (error: unknown) =>
+      error instanceof DesktopInteractionStoreError &&
+      error.code === "version_conflict" &&
+      error.currentVersion === 3,
+  );
   assert.equal((await approvalWaiting).allowed, false);
   assert.equal((await promptWaiting).kind, "cancelled");
   await recovered.closeAsync();
