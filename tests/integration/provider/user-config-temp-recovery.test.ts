@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import fs from "node:fs/promises";
 import {
   access,
   mkdir,
@@ -14,6 +15,7 @@ import {
   utimes,
   writeFile,
 } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -155,6 +157,45 @@ test("concurrent writers serialize normally and leave no plaintext temporaries",
     (await readdir(root)).filter((name) => /^\.config\.json\..+\.tmp$/u.test(name)),
     [],
   );
+});
+
+test("recovery reacquires a lock released between metadata inspection and opening", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-user-config-lock-release-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const store = new UserConfigStore({ picoHome: root });
+  await writeFile(
+    store.lockPath,
+    `${JSON.stringify({
+      version: 1,
+      token: "releasing-writer",
+      pid: process.pid,
+      acquiredAt: Date.now(),
+    })}\n`,
+    { mode: 0o600 },
+  );
+  let released = false;
+  const originalOpen = fs.open;
+  const openMock = context.mock.method(fs, "open", async (...args: Parameters<typeof fs.open>) => {
+    if (args[0] === store.lockPath && args[1] === "r" && !released) {
+      released = true;
+      await unlink(store.lockPath);
+    }
+    return originalOpen(...args);
+  });
+  syncBuiltinESMExports();
+  try {
+    const initial = await store.read();
+    assert.equal(released, true);
+    assert.equal(initial.revision, EMPTY_USER_CONFIG_REVISION);
+    const written = await store.write(config("reacquired"), {
+      expectedRevision: initial.revision,
+    });
+    assert.equal(written.config.providers.reacquired?.models[0], "reacquired-model");
+    await assert.rejects(access(store.lockPath), isMissing);
+  } finally {
+    openMock.mock.restore();
+    syncBuiltinESMExports();
+  }
 });
 
 function temporaryName(uuid: string): string {

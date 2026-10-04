@@ -414,7 +414,13 @@ export class UserConfigStore {
 
     let handle: FileHandle | undefined;
     try {
-      handle = await open(path, "r");
+      try {
+        handle = await open(path, "r");
+      } catch (error) {
+        // A cooperating writer can release its lock after the metadata check.
+        if (isErrnoCode(error, "ENOENT")) return undefined;
+        throw error;
+      }
       const opened = await handle.stat();
       if (!sameFile(before, opened)) return undefined;
       const raw = await handle.readFile("utf8");
