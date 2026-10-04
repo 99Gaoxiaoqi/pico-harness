@@ -10,6 +10,7 @@ import { WorkspaceRuntimeService } from "@pico/pico-host/workspace-runtime-servi
 import { WorkspaceRegistrationStore } from "@pico/pico-host/workspace-registration";
 import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
 import { resolvePicoPaths } from "@pico/pico-host";
+import { globalSessionManager } from "@pico/pico-host/session";
 import { SqliteRuntimeControlStore } from "@pico/storage/sqlite/sqlite-runtime-control-store";
 import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
 import { parseUsage } from "../../../apps/desktop/src/renderer/usage/runtime-projection.js";
@@ -156,6 +157,12 @@ test("usage dashboard joins real model and tool ledgers across workspaces, prese
   });
   t.after(async () => {
     await desktop.close();
+    // Goal 恢复会缓存预置 Session；只关闭本 fixture 的连接后才能删除 Windows SQLite 文件。
+    for (const [index, workspacePath] of paths.slice(0, 2).entries()) {
+      await globalSessionManager
+        .delete(index === 0 ? "parent" : "child", workspacePath, { picoHome })
+        ?.close();
+    }
     await rm(root, { recursive: true, force: true });
   });
   const raw = await desktop.handle(createRuntimeRequest("usage.get", {}));
