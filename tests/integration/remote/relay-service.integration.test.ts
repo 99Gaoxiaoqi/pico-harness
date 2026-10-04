@@ -246,3 +246,94 @@ test("错误令牌、缺版本、channel 限额和首帧超时被拒绝；host �
     false,
   );
 });
+
+test("同出口的多个通道可转发超过旧 IP 帧预算的流式输出", async (t) => {
+  const f = await fixture(t),
+    gatewayId = "streaming-desktop",
+    hostToken = token();
+  await f.enroll((await f.invite()).invitation, gatewayId, hostToken);
+  const desktop = await f.host(gatewayId, hostToken);
+  const one = await f.mobile(gatewayId),
+    two = await f.mobile(gatewayId);
+  await desktop.next("open");
+  await desktop.next("open");
+  // More than 300 frames on the same loopback IP: no time-dependent 40s test is needed.
+  for (let i = 0; i < 400; i++) {
+    const payload = `encrypted delta ${i}`;
+    for (const mobile of [one, two]) {
+      desktop.send({ version: 1, type: "data", channelId: mobile.channelId, payload });
+      assert.equal((await mobile.client.next("data")).payload, payload);
+    }
+  }
+  one.client.send({ version: 1, type: "data", payload: "encrypted RPC request" });
+  assert.equal((await desktop.next("data")).payload, "encrypted RPC request");
+  assert.equal(desktop.socket.readyState, WebSocket.OPEN);
+  assert.equal(two.client.socket.readyState, WebSocket.OPEN);
+});
+
+test("双向 channel 帧和字节配额隔离，host 聚合字节配额仍有界", async (t) => {
+  await t.test("单通道帧超限不关闭 host 或其他通道", async (t) => {
+    const f = await fixture(t, { framesPerMinute: 3 }),
+      gatewayId = "frame-desktop",
+      hostToken = token();
+    await f.enroll((await f.invite()).invitation, gatewayId, hostToken);
+    const desktop = await f.host(gatewayId, hostToken);
+    const one = await f.mobile(gatewayId),
+      two = await f.mobile(gatewayId);
+    await desktop.next("open");
+    await desktop.next("open");
+    one.client.send({ version: 1, type: "data", payload: "uplink-1" });
+    await desktop.next("data");
+    desktop.send({ version: 1, type: "data", channelId: one.channelId, payload: "downlink-2" });
+    await one.client.next("data");
+    one.client.send({ version: 1, type: "data", payload: "uplink-3" });
+    await desktop.next("data");
+    desktop.send({ version: 1, type: "data", channelId: one.channelId, payload: "downlink-4" });
+    assert.equal((await one.client.next("error")).code, "RATE_LIMITED");
+    await one.client.closed;
+    assert.equal((await desktop.next("close")).channelId, one.channelId);
+    desktop.send({ version: 1, type: "data", channelId: two.channelId, payload: "other-channel" });
+    assert.equal((await two.client.next("data")).payload, "other-channel");
+    assert.equal(desktop.socket.readyState, WebSocket.OPEN);
+  });
+  await t.test("UTF-8 物理字节超限仅关闭该通道", async (t) => {
+    const f = await fixture(t, { bytesPerMinute: 512 }),
+      gatewayId = "byte-desktop",
+      hostToken = token();
+    await f.enroll((await f.invite()).invitation, gatewayId, hostToken);
+    const desktop = await f.host(gatewayId, hostToken);
+    const one = await f.mobile(gatewayId),
+      two = await f.mobile(gatewayId);
+    await desktop.next("open");
+    await desktop.next("open");
+    // String length is 160, but UTF-8 bytes plus its physical envelope exceed 512.
+    desktop.send({ version: 1, type: "data", channelId: one.channelId, payload: "密".repeat(160) });
+    assert.equal((await one.client.next("error")).code, "BYTE_RATE_LIMITED");
+    await one.client.closed;
+    await desktop.next("close");
+    two.client.send({ version: 1, type: "data", payload: "other-uplink" });
+    assert.equal((await desktop.next("data")).payload, "other-uplink");
+    assert.equal(desktop.socket.readyState, WebSocket.OPEN);
+  });
+  await t.test("手机上行和 host 下行共同计入 host 字节预算", async (t) => {
+    const f = await fixture(t, { hostBytesPerMinute: 256 }),
+      gatewayId = "aggregate-desktop",
+      hostToken = token();
+    await f.enroll((await f.invite()).invitation, gatewayId, hostToken);
+    const desktop = await f.host(gatewayId, hostToken);
+    const one = await f.mobile(gatewayId),
+      two = await f.mobile(gatewayId);
+    await desktop.next("open");
+    await desktop.next("open");
+    const payload = "a".repeat(100);
+    one.client.send({ version: 1, type: "data", payload });
+    assert.equal((await desktop.next("data")).payload, payload);
+    desktop.send({ version: 1, type: "data", channelId: two.channelId, payload });
+    assert.equal((await desktop.next("error")).code, "BYTE_RATE_LIMITED");
+    await Promise.all([desktop.closed, one.client.closed, two.client.closed]);
+    assert.equal(
+      two.client.messages.some((frame) => frame.type === "data"),
+      false,
+    );
+  });
+});

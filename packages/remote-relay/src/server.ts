@@ -25,7 +25,13 @@ export interface RelayLimits {
   heartbeatIntervalMs: number;
   upgradeRatePerMinute: number;
   enrollRatePerMinute: number;
+  /** One mobile channel, counting both directions. */
   framesPerMinute: number;
+  bytesPerMinute: number;
+  /** All channels of one authenticated host, counting both directions. */
+  hostFramesPerMinute: number;
+  hostBytesPerMinute: number;
+  pendingBytesPerMinute: number;
 }
 const DEFAULT_LIMITS: RelayLimits = {
   maxConnections: 1024,
@@ -38,7 +44,11 @@ const DEFAULT_LIMITS: RelayLimits = {
   heartbeatIntervalMs: 30_000,
   upgradeRatePerMinute: 60,
   enrollRatePerMinute: 10,
-  framesPerMinute: 300,
+  framesPerMinute: 6000,
+  bytesPerMinute: 32 * 1024 * 1024,
+  hostFramesPerMinute: 60_000,
+  hostBytesPerMinute: 1024 * 1024 * 1024,
+  pendingBytesPerMinute: 64 * 1024,
 };
 export interface RelayServerOptions {
   home: string;
@@ -60,6 +70,7 @@ interface Peer {
   lastActivity: number;
   alive: boolean;
   handshake?: NodeJS.Timeout;
+  traffic?: { frames: Bucket; bytes: Bucket };
 }
 interface Host {
   peer: Peer;
@@ -68,6 +79,12 @@ interface Host {
 interface Bucket {
   tokens: number;
   at: number;
+}
+function consume(bucket: Bucket, capacity: number, cost: number, now: number, code: string): void {
+  bucket.tokens = Math.min(capacity, bucket.tokens + ((now - bucket.at) * capacity) / 60_000);
+  bucket.at = now;
+  if (bucket.tokens < cost) throw new RelayError(code);
+  bucket.tokens -= cost;
 }
 function object(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -239,15 +256,24 @@ export class RelayServer {
       return forwarded.trim();
     return request.socket.remoteAddress ?? "unknown";
   }
-  private rate(key: string, capacity: number): void {
+  private rate(key: string, capacity: number, cost = 1, code = "RATE_LIMITED"): void {
     const now = Date.now(),
       bucket = this.buckets.get(key) ?? { tokens: capacity, at: now };
-    bucket.tokens = Math.min(capacity, bucket.tokens + ((now - bucket.at) * capacity) / 60_000);
-    bucket.at = now;
-    if (bucket.tokens < 1 || (this.buckets.size >= 10_000 && !this.buckets.has(key)))
-      throw new RelayError("RATE_LIMITED");
-    bucket.tokens--;
+    if (this.buckets.size >= 10_000 && !this.buckets.has(key)) throw new RelayError("RATE_LIMITED");
+    consume(bucket, capacity, cost, now, code);
     this.buckets.set(key, bucket);
+  }
+  private traffic(peer: Peer, bytes: number): void {
+    const now = Date.now();
+    const host = peer.role.type === "host";
+    const framesCapacity = host ? this.limits.hostFramesPerMinute : this.limits.framesPerMinute;
+    const bytesCapacity = host ? this.limits.hostBytesPerMinute : this.limits.bytesPerMinute;
+    peer.traffic ??= {
+      frames: { tokens: framesCapacity, at: now },
+      bytes: { tokens: bytesCapacity, at: now },
+    };
+    consume(peer.traffic.frames, framesCapacity, 1, now, "RATE_LIMITED");
+    consume(peer.traffic.bytes, bytesCapacity, bytes, now, "BYTE_RATE_LIMITED");
   }
   private async http(request: IncomingMessage, response: ServerResponse): Promise<void> {
     try {
@@ -316,18 +342,28 @@ export class RelayServer {
     socket.on("message", (data: RawData, binary: boolean) => {
       try {
         if (!this.peers.has(peer) || binary) throw new RelayError("INVALID_FRAME");
-        this.rate(`frame:${peer.ip}`, this.limits.framesPerMinute);
-        const frame: unknown = JSON.parse(data.toString());
+        const text = data.toString();
+        const bytes = Buffer.byteLength(text);
+        if (peer.role.type === "pending") {
+          this.rate(`register:${peer.ip}`, this.limits.upgradeRatePerMinute);
+          this.rate(
+            `register-bytes:${peer.ip}`,
+            this.limits.pendingBytesPerMinute,
+            bytes,
+            "BYTE_RATE_LIMITED",
+          );
+        } else this.traffic(peer, bytes);
+        const frame: unknown = JSON.parse(text);
         if (!object(frame) || frame.version !== 1) throw new RelayError("INVALID_FRAME");
         peer.lastActivity = Date.now();
-        this.message(peer, frame);
+        this.message(peer, frame, bytes);
       } catch (error) {
         this.disconnect(peer, error instanceof RelayError ? error.code : "INVALID_FRAME", true);
       }
     });
     socket.once("close", () => this.cleanup(peer));
   }
-  private message(peer: Peer, frame: Record<string, unknown>): void {
+  private message(peer: Peer, frame: Record<string, unknown>, bytes: number): void {
     if (peer.role.type === "pending") {
       if (
         frame.type === "host" &&
@@ -400,11 +436,20 @@ export class RelayServer {
       };
       if (Buffer.byteLength(JSON.stringify({ version: 1, ...outgoing })) > RELAY_MAX_FRAME_BYTES)
         throw new RelayError("FRAME_TOO_LARGE");
+      // Account for uplink traffic in the host's aggregate without sharing an IP bucket.
+      this.traffic(host.peer, bytes);
       this.send(host.peer, outgoing);
     } else {
       if (typeof frame.channelId !== "string") throw new RelayError("INVALID_FRAME");
       const mobile = host.channels.get(frame.channelId);
       if (!mobile) throw new RelayError("CHANNEL_NOT_FOUND");
+      try {
+        this.traffic(mobile, bytes);
+      } catch (error) {
+        // A noisy channel must not evict the host or the host's other channels.
+        this.disconnect(mobile, error instanceof RelayError ? error.code : "RATE_LIMITED", true);
+        return;
+      }
       this.send(mobile, { type: "data", payload: frame.payload });
     }
   }
