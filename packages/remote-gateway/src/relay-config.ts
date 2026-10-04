@@ -39,7 +39,15 @@ interface RelayIdentityFile {
   readonly gatewayId: string;
   readonly publicKey: string;
   readonly secretKey: string;
-  readonly registrations: Record<string, { readonly token: string; readonly enrolled: boolean }>;
+  readonly registrations: Record<
+    string,
+    {
+      readonly token: string;
+      readonly enrolled: boolean;
+      readonly invitationHash?: string;
+      readonly pending?: { readonly token: string; readonly invitationHash: string };
+    }
+  >;
 }
 type RelayGatewayConfig = GatewayConfig & { readonly relay: RemoteRelayEndpoint };
 const identityPath = (home: string): string => join(home, "relay-identity.json");
@@ -90,9 +98,20 @@ function validateIdentity(value: unknown): RelayIdentityFile {
       !object(registration) ||
       typeof registration.token !== "string" ||
       !TOKEN.test(registration.token) ||
-      typeof registration.enrolled !== "boolean"
+      typeof registration.enrolled !== "boolean" ||
+      (registration.invitationHash !== undefined &&
+        (typeof registration.invitationHash !== "string" || !KEY.test(registration.invitationHash)))
     )
       throw new Error("Relay 本机注册信息无效");
+    if (
+      registration.pending !== undefined &&
+      (!object(registration.pending) ||
+        typeof registration.pending.token !== "string" ||
+        !TOKEN.test(registration.pending.token) ||
+        typeof registration.pending.invitationHash !== "string" ||
+        !KEY.test(registration.pending.invitationHash))
+    )
+      throw new Error("Relay 待确认注册信息无效");
   }
   return value as unknown as RelayIdentityFile;
 }
@@ -185,13 +204,24 @@ export async function configureRelayGateway(
         };
     if (identity.gatewayId !== state.gatewayId) throw new Error("Relay 身份与设备授权目录不匹配");
     let registration = identity.registrations[origin];
-    if (!registration) {
-      registration = { token: newSecret(), enrolled: false };
-      identity.registrations[origin] = registration;
-    }
-    if (!registration.enrolled) {
-      if (!input.invitation) throw new Error("此 Relay 首次注册需要一次性内测邀请");
-      // Persist before enrollment: a lost HTTP response must not rotate the already accepted token.
+    const invitationHash = input.invitation ? hashSecret(input.invitation) : undefined;
+    if (!registration) registration = { token: newSecret(), enrolled: false };
+    const changing = Boolean(
+      registration.enrolled && invitationHash && registration.invitationHash !== invitationHash,
+    );
+    if (!registration.enrolled || changing) {
+      if (!input.invitation || !invitationHash)
+        throw new Error("此 Relay 首次注册需要一次性内测邀请");
+      const candidate = changing
+        ? registration.pending?.invitationHash === invitationHash
+          ? registration.pending
+          : { token: newSecret(), invitationHash }
+        : { token: registration.token, invitationHash };
+      // Keep an active registration until the server acknowledges the replacement. A pending
+      // candidate survives a lost response so retrying never invents a second host token.
+      identity.registrations[origin] = changing
+        ? { ...registration, pending: candidate }
+        : { ...registration, invitationHash };
       await writePrivateJson(identityPath(directory), identity);
       let response: Response;
       try {
@@ -204,19 +234,18 @@ export async function configureRelayGateway(
             version: 1,
             invitation: input.invitation,
             gatewayId: state.gatewayId,
-            tokenHash: hashSecret(registration.token),
+            tokenHash: hashSecret(candidate.token),
           }),
         });
       } catch {
         throw new Error("Relay 注册连接失败，请核对地址与网络后使用原邀请重试");
       }
-      // Never reflect response bodies or URLs that might contain an invitation into UI or logs.
       if (!response.ok) {
         await response.body?.cancel();
         throw new Error("Relay 拒绝注册，请核对内测邀请后重试");
       }
       await requireEnrollmentAcknowledgement(response);
-      identity.registrations[origin] = { ...registration, enrolled: true };
+      identity.registrations[origin] = { token: candidate.token, invitationHash, enrolled: true };
       await writePrivateJson(identityPath(directory), identity);
     }
     const relay = parseRelayEndpoint({

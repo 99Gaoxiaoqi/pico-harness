@@ -183,7 +183,8 @@ export function validateGatewayConfig(value: GatewayConfig): GatewayConfig {
   if (value.relay) {
     const relay = parseRelayEndpoint(value.relay);
     if (relay.relayUrl !== url.origin) throw new Error("中继地址与公开地址不一致");
-  } else if (!value.certificatePath || !value.privateKeyPath) throw new Error("需要可信 TLS 证书与私钥");
+  } else if (!value.certificatePath || !value.privateKeyPath)
+    throw new Error("需要可信 TLS 证书与私钥");
   return value;
 }
 export async function loadGatewayState(home: string): Promise<GatewayState> {

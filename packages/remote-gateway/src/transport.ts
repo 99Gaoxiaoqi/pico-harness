@@ -25,32 +25,60 @@ export interface GatewaySocket extends EventEmitter {
   close(code?: number, reason?: string): void;
   terminate(): void;
 }
-export function relayRequest(channel: RelayChannel, method: string, path: string, token?: string, body?: unknown): GatewayRequest {
+export function relayRequest(
+  channel: RelayChannel,
+  method: string,
+  path: string,
+  token?: string,
+  body?: unknown,
+): GatewayRequest {
   const encoded = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
   if (encoded && encoded.length > REMOTE_MAX_FRAME_BYTES) throw new Error("REQUEST_TOO_LARGE");
   return {
-    method, url: path,
-    headers: { "content-type":"application/json", ...(token ? {authorization:`Bearer ${token}`} : {}) },
+    method,
+    url: path,
+    headers: {
+      "content-type": "application/json",
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+    },
     // Anonymous channels share a bounded global rate bucket, authenticated devices have their own bucket.
     socket: { remoteAddress: channel.deviceId ? `relay:${channel.deviceId}` : "relay:anonymous" },
     bindDevice(deviceId) {
-      if (!channel.active || (channel.deviceId && channel.deviceId !== deviceId)) throw new Error("CHANNEL_IDENTITY_CHANGED");
+      if (!channel.active || (channel.deviceId && channel.deviceId !== deviceId))
+        throw new Error("CHANNEL_IDENTITY_CHANGED");
       channel.deviceId = deviceId;
     },
-    async *[Symbol.asyncIterator]() { if (encoded) yield encoded; },
+    async *[Symbol.asyncIterator]() {
+      if (encoded) yield encoded;
+    },
   };
 }
 export class RelayResponse extends EventEmitter implements GatewayResponse {
   statusCode = 200;
   headersSent = false;
   destroyed = false;
-  constructor(private readonly channel: RelayChannel, private readonly id: string) { super(); }
+  constructor(
+    private readonly channel: RelayChannel,
+    private readonly id: string,
+  ) {
+    super();
+  }
   setHeader(): void {}
-  write(): boolean { throw new Error("RELAY_BINARY_ROUTE_UNSUPPORTED"); }
+  write(): boolean {
+    throw new Error("RELAY_BINARY_ROUTE_UNSUPPORTED");
+  }
   end(value?: string): void {
     if (this.destroyed || this.headersSent) return;
     this.headersSent = true;
-    this.channel.send({kind:"response",id:this.id,status:this.statusCode,body:value ? JSON.parse(value) : null});
+    this.channel.send({
+      kind: "response",
+      id: this.id,
+      status: this.statusCode,
+      body: value ? JSON.parse(value) : null,
+    });
   }
-  destroy(): void { this.destroyed = true; this.emit("close"); }
+  destroy(): void {
+    this.destroyed = true;
+    this.emit("close");
+  }
 }
