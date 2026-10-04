@@ -1475,14 +1475,16 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     try {
       await this.getForkSourceSettings(canonical, sourceLease.session);
       await sourceLease.session.flushPersistence();
-      await new SessionForkService({
+      const forkService = new SessionForkService({
         workDir: canonical,
         picoHome: this.picoHome,
         runtimePort: createSessionForkRuntimePort(),
-      }).fork({
-        sourceSessionId: sessionId,
-        targetSessionId,
       });
+      try {
+        await forkService.fork({ sourceSessionId: sessionId, targetSessionId });
+      } finally {
+        forkService.close();
+      }
     } finally {
       sourceLease.release();
     }
@@ -4222,50 +4224,54 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       picoHome: this.picoHome,
       runtimePort: createSessionForkRuntimePort(),
     });
-    switch (params.action) {
-      case "list":
-        if (params.operationId !== undefined) {
-          throw new RuntimeProtocolError(
-            RUNTIME_ERROR_CODES.INVALID_PARAMS,
-            "operations.manage list 不接受 operationId",
-          );
+    try {
+      switch (params.action) {
+        case "list":
+          if (params.operationId !== undefined) {
+            throw new RuntimeProtocolError(
+              RUNTIME_ERROR_CODES.INVALID_PARAMS,
+              "operations.manage list 不接受 operationId",
+            );
+          }
+          return toJsonValue({ result: { operations: await service.listNeedsAttention() } });
+        case "show": {
+          if (!params.operationId) {
+            throw new RuntimeProtocolError(
+              RUNTIME_ERROR_CODES.INVALID_PARAMS,
+              "operations.manage show 需要 operationId",
+            );
+          }
+          const operation = await service.getOperation(params.operationId);
+          if (!operation) {
+            throw new RuntimeProtocolError(
+              RUNTIME_ERROR_CODES.NOT_FOUND,
+              `Storage operation not found: ${params.operationId}`,
+            );
+          }
+          return toJsonValue({ result: { operation } });
         }
-        return toJsonValue({ result: { operations: await service.listNeedsAttention() } });
-      case "show": {
-        if (!params.operationId) {
-          throw new RuntimeProtocolError(
-            RUNTIME_ERROR_CODES.INVALID_PARAMS,
-            "operations.manage show 需要 operationId",
-          );
+        case "retry":
+        case "abort": {
+          if (!params.operationId || params.expectedVersion === undefined) {
+            throw new RuntimeProtocolError(
+              RUNTIME_ERROR_CODES.INVALID_PARAMS,
+              `operations.manage ${params.action} 需要 operationId 与 expectedVersion`,
+            );
+          }
+          const input = {
+            operationId: params.operationId,
+            expectedVersion: params.expectedVersion,
+            reason: params.reason?.trim() || `requested via /operations ${params.action}`,
+          };
+          const operation =
+            params.action === "retry"
+              ? await service.retryNeedsAttention(input)
+              : await service.abortNeedsAttention(input);
+          return toJsonValue({ result: { operation } });
         }
-        const operation = await service.getOperation(params.operationId);
-        if (!operation) {
-          throw new RuntimeProtocolError(
-            RUNTIME_ERROR_CODES.NOT_FOUND,
-            `Storage operation not found: ${params.operationId}`,
-          );
-        }
-        return toJsonValue({ result: { operation } });
       }
-      case "retry":
-      case "abort": {
-        if (!params.operationId || params.expectedVersion === undefined) {
-          throw new RuntimeProtocolError(
-            RUNTIME_ERROR_CODES.INVALID_PARAMS,
-            `operations.manage ${params.action} 需要 operationId 与 expectedVersion`,
-          );
-        }
-        const input = {
-          operationId: params.operationId,
-          expectedVersion: params.expectedVersion,
-          reason: params.reason?.trim() || `requested via /operations ${params.action}`,
-        };
-        const operation =
-          params.action === "retry"
-            ? await service.retryNeedsAttention(input)
-            : await service.abortNeedsAttention(input);
-        return toJsonValue({ result: { operation } });
-      }
+    } finally {
+      service.close();
     }
   }
 
@@ -4492,15 +4498,16 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         try {
           await this.getForkSourceSettings(workspacePath, sourceLease.session);
           await sourceLease.session.flushPersistence();
-          await new SessionForkService({
+          const forkService = new SessionForkService({
             workDir: workspacePath,
             picoHome: this.picoHome,
             runtimePort: createSessionForkRuntimePort(),
-          }).fork({
-            sourceSessionId,
-            targetSessionId,
-            throughEventId,
           });
+          try {
+            await forkService.fork({ sourceSessionId, targetSessionId, throughEventId });
+          } finally {
+            forkService.close();
+          }
         } finally {
           sourceLease.release();
         }
