@@ -155,8 +155,9 @@ async function fixture(t: TestContext) {
   };
   const hosts = new Map<string, SavedHost>();
   const installedTokens = new Map<string, string>();
-  function phone() {
+  function phone({ approveImmediately = true } = {}) {
     const secure = new Map<string, string>();
+    const pauses: Array<ReturnType<typeof deferred<void>>> = [];
     const storage = {
       getItemAsync: async (key: string) => secure.get(key) ?? null,
       setItemAsync: async (key: string, value: string) => {
@@ -173,7 +174,8 @@ async function fixture(t: TestContext) {
           { deviceName: name, platform: "ios" },
           fetcher,
         );
-        await gateway.manage("pair.approve", { pairingId: submitted.pairingId });
+        if (approveImmediately)
+          await gateway.manage("pair.approve", { pairingId: submitted.pairingId });
         return submitted;
       },
       status: (url, claim) => RemoteRuntimeClient.pairingStatus(url, claim, fetcher),
@@ -214,9 +216,15 @@ async function fixture(t: TestContext) {
       },
       changed() {},
       now: () => now,
+      pause() {
+        const gate = deferred<void>();
+        pauses.push(gate);
+        return gate.promise;
+      },
     };
     return {
       controller: () => new RecoverablePairing(storage, port),
+      pauses,
       pending: () => {
         const raw = secure.get(PENDING_PAIRING_KEY);
         return raw ? (JSON.parse(raw) as PendingPairing) : undefined;
@@ -288,6 +296,110 @@ async function fixture(t: TestContext) {
     ack: (claim: RemotePairingSubmitted) =>
       RemoteRuntimeClient.acknowledgePairing(config.publicUrl, claim, fetcher),
   };
+}
+
+test(
+  "配对 pending 等待宿主 pause，批准后用原 claim 完成确认和安装",
+  { timeout: 10_000 },
+  async (t) => {
+    const f = await fixture(t);
+    const phone = f.phone({ approveImmediately: false });
+    const started = phone.controller().start(await f.offer(), "等待批准的手机");
+    await until(() => phone.pauses.length === 1);
+    const pending = phone.pending();
+    assert.ok(pending);
+    assert.equal(pending.approved, undefined);
+    const statusPath = `/v1/pairings/${encodeURIComponent(pending.submitted.pairingId)}`;
+    assert.equal(f.requests.filter((request) => request.path === statusPath).length, 1);
+    assert.equal(f.acknowledgementAttempts, 0);
+    assert.equal(f.hosts.size, 0);
+    assert.equal(f.installedTokens.size, 0);
+
+    await f.gateway.manage("pair.approve", { pairingId: pending.submitted.pairingId });
+    assert.equal(f.requests.filter((request) => request.path === statusPath).length, 1);
+    assert.equal(f.acknowledgementAttempts, 0, "批准不能越过尚未释放的宿主 pause");
+    phone.pauses[0]!.resolve();
+    const installed = await started;
+    assert.ok(installed);
+    assert.equal(phone.pending(), undefined);
+    assert.equal(phone.pauses.length, 1);
+    assert.equal(f.hosts.size, 1);
+    assert.equal(f.installedTokens.size, 1);
+    assert.ok(f.device(installed.deviceId).pairedAt);
+    assert.equal(f.requests.filter((request) => request.path === "/v1/pairings").length, 1);
+    assert.deepEqual(
+      f.requests
+        .filter((request) => request.path === statusPath)
+        .map((request) => request.authorization),
+      [`Bearer ${pending.submitted.pairingToken}`, `Bearer ${pending.submitted.pairingToken}`],
+    );
+    assert.equal(f.acknowledgementAttempts, 1);
+    assert.deepEqual(
+      f.requests
+        .filter((request) => request.path.endsWith("/ack"))
+        .map((request) => request.authorization),
+      [`Bearer ${pending.submitted.pairingToken}`],
+    );
+  },
+);
+
+for (const interruption of ["后台", "取消", "过期"] as const) {
+  test(
+    `配对等待期间${interruption}后释放旧 pause 不继续请求或安装`,
+    { timeout: 10_000 },
+    async (t) => {
+      const f = await fixture(t);
+      const phone = f.phone({ approveImmediately: false });
+      const controller = phone.controller();
+      const started = controller.start(await f.offer(), "暂停中的手机");
+      const stopped =
+        interruption === "过期" ? assert.rejects(started, { code: "PAIRING_EXPIRED" }) : started;
+      await until(() => phone.pauses.length === 1);
+      const pending = phone.pending();
+      assert.ok(pending);
+      assert.equal(pending.approved, undefined);
+      const statusPath = `/v1/pairings/${encodeURIComponent(pending.submitted.pairingId)}`;
+      assert.equal(f.requests.filter((request) => request.path === statusPath).length, 1);
+      const requestCount = f.requests.length;
+
+      if (interruption === "过期") {
+        f.advance(5 * 60_000 + 1);
+      } else {
+        if (interruption === "后台") controller.setForeground(false);
+        else await controller.cancel();
+        await f.gateway.manage("pair.approve", { pairingId: pending.submitted.pairingId });
+      }
+      phone.pauses[0]!.resolve();
+      assert.equal(await stopped, undefined);
+      assert.equal(f.requests.length, requestCount, "旧 pause 释放后不能继续 status 或认证请求");
+      assert.equal(f.acknowledgementAttempts, 0);
+      assert.equal(f.hosts.size, 0);
+      assert.equal(f.installedTokens.size, 0);
+      assert.equal(phone.pauses.length, 1);
+
+      if (interruption === "后台") {
+        assert.deepEqual(phone.pending()?.submitted, pending.submitted);
+        assert.equal(await controller.resume(), undefined);
+        assert.equal(f.requests.length, requestCount);
+        controller.setForeground(true);
+        assert.ok(await controller.resume());
+        assert.equal(phone.pending(), undefined);
+        assert.equal(f.hosts.size, 1);
+        assert.equal(f.acknowledgementAttempts, 1);
+        assert.deepEqual(
+          f.requests
+            .filter((request) => request.path === statusPath)
+            .map((request) => request.authorization),
+          [`Bearer ${pending.submitted.pairingToken}`, `Bearer ${pending.submitted.pairingToken}`],
+        );
+      } else {
+        assert.equal(phone.pending(), undefined);
+        assert.equal(await controller.resume(), undefined);
+        assert.equal(f.requests.length, requestCount);
+      }
+      assert.equal(f.requests.filter((request) => request.path === "/v1/pairings").length, 1);
+    },
+  );
 }
 
 test("手机保留丢失确认回执的安全 pending，重启后用原设备认证恢复正式配对", async (t) => {
