@@ -1,4 +1,4 @@
-import { app, BrowserWindow } from "electron";
+import { app, BrowserWindow, type KeyboardInputEvent } from "electron";
 import assert from "node:assert/strict";
 import { join } from "node:path";
 const root = process.argv[2]!;
@@ -15,7 +15,7 @@ async function wait(code: string) {
 }
 const editor = ".conversation-composer [contenteditable]";
 const scroller = ".pico-chat-layout";
-async function key(keyCode: string, modifiers: string[] = []) {
+async function key(keyCode: string, modifiers: NonNullable<KeyboardInputEvent["modifiers"]> = []) {
   window.webContents.sendInputEvent({ type: "keyDown", keyCode, modifiers });
   window.webContents.sendInputEvent({ type: "keyUp", keyCode, modifiers });
   await pause();
@@ -189,7 +189,12 @@ async function run() {
       const rect=e=>e.getBoundingClientRect().toJSON();
       return {form:rect(form),controls:rect(controls),behavior:rect(behavior),pause:rect(pause),send:rect(send),fontSize:parseFloat(getComputedStyle(behavior).fontSize),overflow:form.scrollWidth>form.clientWidth};
     })()`);
-    assert.ok(geometry.behavior.top >= geometry.controls.bottom, JSON.stringify(geometry));
+    // Running controls share the footer row while they fit, then wrap below it.
+    assert.ok(
+      geometry.behavior.left >= geometry.controls.right ||
+        geometry.behavior.top >= geometry.controls.bottom,
+      JSON.stringify(geometry),
+    );
     assert.ok(
       Math.abs(
         geometry.behavior.top +

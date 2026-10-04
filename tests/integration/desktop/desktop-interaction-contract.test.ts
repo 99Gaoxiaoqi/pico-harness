@@ -212,7 +212,11 @@ test("desktop transcript groups execution records under the preceding user turn"
   ]);
 
   assert.deepEqual(
-    turns.map((turn) => turn.items.map((item) => item.id)),
+    turns.map((turn) =>
+      turn.items.flatMap((item) =>
+        item.kind === "process" ? item.items.map((record) => record.id) : [item.id],
+      ),
+    ),
     [
       ["user-1", "thinking-1", "tool-1", "assistant-1"],
       ["user-2", "assistant-2"],

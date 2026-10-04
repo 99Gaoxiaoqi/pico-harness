@@ -3,7 +3,14 @@ import "../../apps/desktop/src/renderer/layers.css";
 import * as React from "react";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import { MemoryRouter, Routes, Route, useParams, useNavigate } from "react-router-dom";
+import {
+  MemoryRouter,
+  Routes,
+  Route,
+  useParams,
+  useNavigate,
+  type NavigateFunction,
+} from "react-router-dom";
 import { SessionsPage } from "../../apps/desktop/src/renderer/pages/SessionsPage.tsx";
 import { UsagePage } from "../../apps/desktop/src/renderer/usage/UsagePage.tsx";
 import { ConversationPage } from "../../apps/desktop/src/renderer/pages/ConversationPage.tsx";
@@ -12,7 +19,10 @@ import { PicoTheme } from "../../apps/desktop/src/renderer/astryx-provider.tsx";
 import { RuntimeContext } from "../../apps/desktop/src/renderer/runtime-context.tsx";
 import { previewData } from "../../apps/desktop/src/renderer/fixture.ts";
 import { workspaceSessionKey } from "../../apps/desktop/src/renderer/workspace-session.ts";
-import { DESKTOP_COMMAND_POLICY } from "../../apps/desktop/src/shared/command-policy.ts";
+import {
+  desktopCommandPolicy,
+  DESKTOP_COMMAND_POLICY,
+} from "../../apps/desktop/src/shared/command-policy.ts";
 import { applyConversationSettings } from "../../apps/desktop/src/renderer/conversation/conversation-settings.ts";
 import { ComposerModelPicker } from "../../apps/desktop/src/renderer/ComposerModelPicker.tsx";
 import { SelectField } from "../../apps/desktop/src/renderer/ui-controls.tsx";
@@ -21,255 +31,395 @@ import {
   type ConversationComposerHandle,
 } from "../../apps/desktop/src/renderer/conversation/ConversationComposer.tsx";
 
-globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-const calls = [];
+import type { LocalCommandResult } from "@pico/cli/command-contracts";
+import type { RuntimeParams } from "@pico/protocol";
+import type {
+  DesktopCommandContext,
+  DesktopCommandExecution,
+  DesktopCommandsApi,
+} from "../../apps/desktop/src/preload/command-contract.js";
+import type { DesktopResult, DesktopRuntimeApi } from "../../apps/desktop/src/preload/contract.js";
+import type {
+  ApprovalView,
+  ConversationView,
+  RunView,
+  SessionSettingsView,
+} from "../../apps/desktop/src/renderer/model.js";
+import type { RuntimeActions, RuntimeStore } from "../../apps/desktop/src/renderer/runtime.js";
+
+declare global {
+  interface Window {
+    testCommandBridge?: DesktopCommandsApi;
+    testNativeSlash?: () => Promise<void>;
+  }
+}
+Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+type ActionInput<Name extends keyof RuntimeActions> = Parameters<
+  NonNullable<RuntimeActions[Name]>
+>[0];
+type FixtureRuntimeMethod =
+  | "rewind.preview"
+  | "rewind.apply"
+  | "rewind.changes"
+  | "rewind.restoreFile"
+  | "sideChat.create"
+  | "sideChat.close";
+type RuntimeCall = {
+  [Method in FixtureRuntimeMethod]: { method: Method; params: RuntimeParams<Method> };
+}[FixtureRuntimeMethod];
+type FixtureCall =
+  | RuntimeCall
+  | { method: "command"; context: DesktopCommandContext; text: string; requestId: string }
+  | { method: "query-usage"; input: ActionInput<"queryUsage"> }
+  | { method: "load-session" | "compact"; ref: ActionInput<"loadSession"> }
+  | {
+      method: "settings";
+      ref: ActionInput<"updateSessionSettings">;
+      patch: Parameters<RuntimeActions["updateSessionSettings"]>[1];
+    }
+  | {
+      method: "goal-control";
+      ref: ActionInput<"controlGoal">;
+      input: Parameters<RuntimeActions["controlGoal"]>[1];
+    }
+  | { method: "plan-response"; input: ActionInput<"respondPlan"> }
+  | { method: "send"; input: ActionInput<"sendMessage"> }
+  | { method: "readonly-model-change"; id: string }
+  | { method: "quit" | "reload" };
+const calls: FixtureCall[] = [];
 const ref = { workspacePath: "/fixture", sessionId: "s1" };
-const records = [{ id: "history-1", kind: "userMessage", text: "原始历史消息" }];
-let commandsPending;
+const records: ConversationView["items"] = [
+  { id: "history-1", kind: "userMessage", text: "原始历史消息" },
+];
+let commandsPending: ((result: DesktopResult<DesktopCommandExecution>) => void) | undefined;
 let delayNext = false;
-let failNext;
+let failNext: "ipc" | "rpc" | undefined;
 let failPlan = false;
-let goalPending;
+let goalPending: ((succeeded: boolean) => void) | undefined;
 let deferGoal = false;
-let navigateTest;
+let navigateTest: NavigateFunction = () => {
+  throw new Error("测试路由尚未挂载");
+};
 const primaryNames = ["help", "goal", "resume", "compact", "rewind", "changes"];
-const catalog = Object.entries(DESKTOP_COMMAND_POLICY)
-  .filter(([, policy]) => policy.tier === "primary" || policy.tier === "advanced")
-  .map(([name, policy]) => ({
-    name,
-    insertText: name,
-    description: "测试 " + name,
-    aliases: [],
-    source: "builtin",
-    kind: "local",
-    tier: policy.tier,
-  }));
-const local = (result) => ({
+const catalog = Object.entries(DESKTOP_COMMAND_POLICY).flatMap(([name, policy]) =>
+  policy.tier === "primary" || policy.tier === "advanced"
+    ? [
+        {
+          name,
+          insertText: name,
+          description: "测试 " + name,
+          aliases: [],
+          source: "builtin" as const,
+          kind: "local" as const,
+          tier: policy.tier,
+        },
+      ]
+    : [],
+);
+const local = (
+  result: Omit<LocalCommandResult, "type">,
+): DesktopResult<DesktopCommandExecution> => ({
   ok: true,
   value: { outcome: { kind: "local", result: { type: "local", ...result } } },
 });
-window.pico = {
-  commands: {
-    catalog: async (context) =>
-      window.testCommandBridge
-        ? window.testCommandBridge.catalog(context)
-        : {
-            ok: true,
-            value: catalog.map((item) => {
-              const policy = DESKTOP_COMMAND_POLICY[item.name];
-              const missingSession = policy.session && !context.sessionId;
-              const runningCompact = context.running && item.name === "compact";
-              return {
-                ...item,
-                disabled: Boolean(missingSession || runningCompact),
-                disabledReason: missingSession
-                  ? "请先发送消息或打开历史会话。"
-                  : runningCompact
-                    ? "任务执行中，结束后可执行此操作。"
-                    : undefined,
-              };
-            }),
+const commands: DesktopCommandsApi = {
+  catalog: async (context) =>
+    window.testCommandBridge
+      ? window.testCommandBridge.catalog(context)
+      : {
+          ok: true,
+          value: catalog.map((item) => {
+            const policy = desktopCommandPolicy(item.name);
+            const missingSession =
+              policy && "session" in policy && policy.session && !context.sessionId;
+            const runningCompact = context.running && item.name === "compact";
+            return {
+              ...item,
+              disabled: Boolean(missingSession || runningCompact),
+              disabledReason: missingSession
+                ? "请先发送消息或打开历史会话。"
+                : runningCompact
+                  ? "任务执行中，结束后可执行此操作。"
+                  : undefined,
+            };
+          }),
+        },
+  complete: async (context, text) =>
+    window.testCommandBridge
+      ? window.testCommandBridge.complete(context, text)
+      : {
+          ok: true,
+          value: text.startsWith("/resume ") ? [{ label: "第二个会话", value: "s2" }] : [],
+        },
+  execute: async (context, text, requestId) => {
+    calls.push({ method: "command", context, text, requestId });
+    if (failNext) {
+      const failure = failNext;
+      failNext = undefined;
+      return failure === "ipc"
+        ? {
+            ok: false,
+            error: { code: "RUNTIME_DISCONNECTED", message: "响应丢失", retryable: true },
+          }
+        : local({ action: "message", message: "命令执行失败：响应丢失" });
+    }
+    if (delayNext) {
+      delayNext = false;
+      return new Promise<DesktopResult<DesktopCommandExecution>>((resolve) => {
+        commandsPending = resolve;
+      });
+    }
+    if (window.testCommandBridge) return window.testCommandBridge.execute(context, text, requestId);
+    const policy = desktopCommandPolicy(text.slice(1));
+    if (policy?.tier === "control")
+      return {
+        ok: true,
+        value: { outcome: { kind: "local" }, action: { kind: "open", target: policy.target } },
+      };
+    if (text === "/new")
+      return { ok: true, value: { outcome: { kind: "local" }, switchSession: null } };
+    if (["/usage", "/sessions"].includes(text))
+      return {
+        ok: true,
+        value: {
+          outcome: { kind: "rejected", message: "请使用页面" },
+          redirect: {
+            destination: text === "/usage" ? "usage" : "sessions",
+            label: text === "/usage" ? "打开用量统计" : "打开会话工作库",
           },
-    complete: async (context, text) =>
-      window.testCommandBridge
-        ? window.testCommandBridge.complete(context, text)
-        : {
-            ok: true,
-            value: text.startsWith("/resume ") ? [{ label: "第二个会话", value: "s2" }] : [],
+        },
+      };
+    if (["/goal", "/model", "/skill", "/agent"].includes(text))
+      return {
+        ok: true,
+        value: {
+          outcome: { kind: "local" },
+          action: {
+            kind: "open",
+            target:
+              text === "/goal"
+                ? "goal"
+                : text === "/model"
+                  ? "model"
+                  : text === "/skill"
+                    ? "skill"
+                    : "agent",
           },
-    execute: async (context, text, requestId) => {
-      calls.push({ method: "command", context, text, requestId });
-      if (failNext) {
-        const failure = failNext;
-        failNext = undefined;
-        return failure === "ipc"
-          ? { ok: false, error: { message: "响应丢失" } }
-          : local({ action: "message", message: "命令执行失败：响应丢失" });
-      }
-      if (delayNext) {
-        delayNext = false;
-        return new Promise((resolve) => {
-          commandsPending = resolve;
-        });
-      }
-      if (window.testCommandBridge)
-        return window.testCommandBridge.execute(context, text, requestId);
-      const policy = DESKTOP_COMMAND_POLICY[text.slice(1)];
-      if (policy?.tier === "control")
-        return {
-          ok: true,
-          value: { outcome: { kind: "local" }, action: { kind: "open", target: policy.target } },
-        };
-      if (text === "/new")
-        return { ok: true, value: { outcome: { kind: "local" }, switchSession: null } };
-      if (["/usage", "/sessions"].includes(text))
-        return {
-          ok: true,
-          value: {
-            outcome: { kind: "rejected", message: "请使用页面" },
-            redirect: {
-              destination: text.slice(1),
-              label: text === "/usage" ? "打开用量统计" : "打开会话工作库",
-            },
-          },
-        };
-      if (["/goal", "/model", "/skill", "/agent"].includes(text))
-        return {
-          ok: true,
-          value: { outcome: { kind: "local" }, action: { kind: "open", target: text.slice(1) } },
-        };
-      if (text === "/compact")
-        return { ok: true, value: { outcome: { kind: "local" }, action: { kind: "compact" } } };
-      if (text === "/goal pause")
-        return {
-          ok: true,
-          value: {
-            outcome: { kind: "local" },
-            action: { kind: "goal", input: { action: "pause", goalId: "g1", expectedRevision: 1 } },
-          },
-        };
-      if (text.startsWith("/agent ")) return local({ action: "message", message: "任务已提交" });
-      if (text === "/help")
-        return local({
-          action: "help",
-          message: "全部命令",
-          ui: { kind: "open-panel", panel: "help" },
-        });
-      if (text === "/resume")
-        return {
-          ok: true,
-          value: { outcome: { kind: "local" }, action: { kind: "open", target: "sessions" } },
-        };
-      if (text === "/resume s2")
-        return { ok: true, value: { outcome: { kind: "local" }, switchSession: "s2" } };
-      if (["/clear", "/exit"].includes(text))
-        return {
-          ok: true,
-          value: { outcome: { kind: "rejected", message: "此命令不适用于桌面" } },
-        };
-      if (text.startsWith("/provider "))
-        return {
-          ok: true,
-          value: {
-            outcome: { kind: "rejected", message: "请使用模型设置" },
-            redirect: { destination: "providers", label: "打开模型设置" },
-          },
-        };
-      if (text === "/rewind cp1")
-        return local({
-          action: "message",
-          ui: { kind: "open-selector", selector: "rewind" },
-          data: {
-            sessionId: context.sessionId,
-            selectedMessageId: "cp1",
-            snapshots: [{ messageId: "cp1", userPrompt: "原始提示", changedFileCount: 1 }],
-          },
-        });
-      if (text === "/changes cp1")
-        return local({
-          action: "message",
-          ui: { kind: "open-selector", selector: "changes" },
-          data: { sessionId: context.sessionId, checkpointId: "cp1" },
-        });
-      return { ok: true, value: { outcome: { kind: "unknown", message: "未知命令" } } };
-    },
-  },
-  runtime: new Proxy(
-    {},
-    {
-      get: (_, method) => async (params) => {
-        calls.push({ method, params });
-        if (method === "rewind.preview")
-          return {
-            ok: true,
-            value: {
-              checkpointId: "cp1",
-              fingerprint: "preview-fingerprint",
-              changes: [{ path: "a.ts", patch: "-old\n+new" }],
-            },
-          };
-        if (method === "rewind.apply")
-          return {
-            ok: true,
-            value: { applied: true, sourceSessionId: "s1", sessionId: "rewound" },
-          };
-        if (method === "rewind.changes")
-          return {
-            ok: true,
-            value: {
-              checkpointId: "cp1",
-              files: [
-                {
-                  path: "a.ts",
-                  fingerprint: "file-fingerprint",
-                  patch: "-old\n+new",
-                  additions: 1,
-                  deletions: 1,
-                },
-              ],
-            },
-          };
-        if (method === "rewind.restoreFile") return { ok: true, value: { restored: true } };
-        if (method === "sideChat.create")
-          return { ok: true, value: { session: { sessionId: "side-1" }, throughEventId: "e1" } };
-        return { ok: true, value: {} };
-      },
-    },
-  ),
-  lifecycle: {
-    quit: async () => {
-      calls.push({ method: "quit" });
-      return { ok: true };
-    },
+        },
+      };
+    if (text === "/compact")
+      return { ok: true, value: { outcome: { kind: "local" }, action: { kind: "compact" } } };
+    if (text === "/goal pause")
+      return {
+        ok: true,
+        value: {
+          outcome: { kind: "local" },
+          action: { kind: "goal", input: { action: "pause", goalId: "g1", expectedRevision: 1 } },
+        },
+      };
+    if (text.startsWith("/agent ")) return local({ action: "message", message: "任务已提交" });
+    if (text === "/help")
+      return local({
+        action: "help",
+        message: "全部命令",
+        ui: { kind: "open-panel", panel: "help" },
+      });
+    if (text === "/resume")
+      return {
+        ok: true,
+        value: { outcome: { kind: "local" }, action: { kind: "open", target: "sessions" } },
+      };
+    if (text === "/resume s2")
+      return { ok: true, value: { outcome: { kind: "local" }, switchSession: "s2" } };
+    if (["/clear", "/exit"].includes(text))
+      return {
+        ok: true,
+        value: { outcome: { kind: "rejected", message: "此命令不适用于桌面" } },
+      };
+    if (text.startsWith("/provider "))
+      return {
+        ok: true,
+        value: {
+          outcome: { kind: "rejected", message: "请使用模型设置" },
+          redirect: { destination: "providers", label: "打开模型设置" },
+        },
+      };
+    if (text === "/rewind cp1")
+      return local({
+        action: "message",
+        ui: { kind: "open-selector", selector: "rewind" },
+        data: {
+          sessionId: context.sessionId,
+          selectedMessageId: "cp1",
+          snapshots: [{ messageId: "cp1", userPrompt: "原始提示", changedFileCount: 1 }],
+        },
+      });
+    if (text === "/changes cp1")
+      return local({
+        action: "message",
+        ui: { kind: "open-selector", selector: "changes" },
+        data: { sessionId: context.sessionId, checkpointId: "cp1" },
+      });
+    return { ok: true, value: { outcome: { kind: "unknown", message: "未知命令" } } };
   },
 };
-const actions = new Proxy(
-  {
-    queryUsage: async (input) => {
-      calls.push({ method: "query-usage", input });
-      return {};
-    },
-    loadSession: async (ref) => {
-      calls.push({ method: "load-session", ref });
-    },
-    reload: async () => {
-      calls.push({ method: "reload" });
-    },
-    updateSessionSettings: async (ref, patch) => {
-      calls.push({ method: "settings", ref, patch });
-      return true;
-    },
-    compactSession: async (ref) => {
-      calls.push({ method: "compact", ref });
-      return true;
-    },
-    controlGoal: async (ref, input) => {
-      calls.push({ method: "goal-control", ref, input });
-      if (deferGoal) {
-        deferGoal = false;
-        return new Promise((resolve) => {
-          goalPending = resolve;
-        });
-      }
-      return true;
-    },
-    respondPlan: async (input) => {
-      calls.push({ method: "plan-response", input });
-      return !failPlan;
-    },
-    ensureTemporaryWorkspace: async () => "/fixture",
-    sendMessage: async (input) => {
-      calls.push({ method: "send", input });
-      return { succeeded: true };
+const runtimeBridge: Pick<DesktopRuntimeApi, FixtureRuntimeMethod> = {
+  "rewind.preview": async (params) => {
+    calls.push({ method: "rewind.preview", params });
+    return {
+      ok: true,
+      value: {
+        checkpointId: "cp1",
+        fingerprint: "preview-fingerprint",
+        changes: [
+          { path: "a.ts", status: "modified", additions: 1, deletions: 1, patch: "-old\n+new" },
+        ],
+      },
+    };
+  },
+  "rewind.apply": async (params) => {
+    calls.push({ method: "rewind.apply", params });
+    return { ok: true, value: { applied: true, sourceSessionId: "s1", sessionId: "rewound" } };
+  },
+  "rewind.changes": async (params) => {
+    calls.push({ method: "rewind.changes", params });
+    return {
+      ok: true,
+      value: {
+        checkpointId: "cp1",
+        addedLines: 1,
+        removedLines: 1,
+        files: [
+          {
+            path: "a.ts",
+            status: "modified",
+            fingerprint: "file-fingerprint",
+            patch: "-old\n+new",
+            additions: 1,
+            deletions: 1,
+            truncated: false,
+          },
+        ],
+      },
+    };
+  },
+  "rewind.restoreFile": async (params) => {
+    calls.push({ method: "rewind.restoreFile", params });
+    return { ok: true, value: { restored: true, path: "a.ts", status: "modified" } };
+  },
+  "sideChat.create": async (params) => {
+    calls.push({ method: "sideChat.create", params });
+    return {
+      ok: true,
+      value: {
+        session: {
+          sessionId: "side-1",
+          workspacePath: "/fixture",
+          title: "侧边会话",
+          status: "active",
+          pinned: false,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+        sourceSessionId: "s1",
+        throughEventId: "e1",
+      },
+    };
+  },
+  "sideChat.close": async (params) => {
+    calls.push({ method: "sideChat.close", params });
+    return { ok: true, value: { cleanupScheduled: true } };
+  },
+};
+Object.defineProperty(window, "pico", {
+  configurable: true,
+  value: {
+    commands,
+    runtime: runtimeBridge,
+    lifecycle: {
+      quit: async () => {
+        calls.push({ method: "quit" });
+        return { ok: true, value: undefined };
+      },
     },
   },
-  { get: (target, name) => target[name] ?? (async () => {}) },
-);
+});
+const actionOverrides: Pick<
+  RuntimeActions,
+  | "queryUsage"
+  | "loadSession"
+  | "reload"
+  | "updateSessionSettings"
+  | "compactSession"
+  | "controlGoal"
+  | "respondPlan"
+  | "ensureTemporaryWorkspace"
+  | "sendMessage"
+> = {
+  queryUsage: async (input) => {
+    calls.push({ method: "query-usage", input });
+    return {};
+  },
+  loadSession: async (ref) => {
+    calls.push({ method: "load-session", ref });
+  },
+  reload: async () => {
+    calls.push({ method: "reload" });
+  },
+  updateSessionSettings: async (ref, patch) => {
+    calls.push({ method: "settings", ref, patch });
+    return true;
+  },
+  compactSession: async (ref) => {
+    calls.push({ method: "compact", ref });
+    return true;
+  },
+  controlGoal: async (ref, input) => {
+    calls.push({ method: "goal-control", ref, input });
+    if (deferGoal) {
+      deferGoal = false;
+      return new Promise<boolean>((resolve) => {
+        goalPending = resolve;
+      });
+    }
+    return true;
+  },
+  respondPlan: async (input) => {
+    calls.push({ method: "plan-response", input });
+    return !failPlan;
+  },
+  ensureTemporaryWorkspace: async () => "/fixture",
+  sendMessage: async (input) => {
+    calls.push({ method: "send", input });
+    return { succeeded: true };
+  },
+};
+// This fixture supplies only the actions exercised below; unrelated effect actions are no-ops.
+const actions = new Proxy(actionOverrides, {
+  get: (target, name) => target[name as keyof typeof target] ?? (async () => {}),
+}) as RuntimeActions;
+const settings: { -readonly [Key in keyof SessionSettingsView]: SessionSettingsView[Key] } = {
+  modelRouteId: "p/m",
+  model: "m",
+  collaborationMode: "agent",
+  orchestrationMode: "default",
+  permissionMode: "ask",
+  thinkingEffort: "",
+  reasoningLevels: [],
+};
 const conversation = {
   ...ref,
   items: records,
   queuedCount: 0,
   goal: {
+    stateVersion: 3,
+    controlLease: null,
+    coordinator: {
+      pendingContinuation: null,
+      currentExecution: null,
+      workTokens: 0,
+      accountedRunIds: [],
+    },
     currentGoal: {
       id: "g1",
       revision: 1,
@@ -279,20 +429,18 @@ const conversation = {
       iterations: 0,
       tokensAtStart: 0,
       tokensNow: 0,
+      createdAt: 1,
+      tokensBaselinePending: false,
+      consecutiveNoProgress: 0,
+      blockCap: 5,
     },
   },
-  settings: {
-    modelRouteId: "p/m",
-    model: "m",
-    collaborationMode: "agent",
-    orchestrationMode: "default",
-    permissionMode: "ask",
-    thinkingEffort: "",
-    reasoningLevels: [],
-  },
-};
+  settings,
+} satisfies ConversationView;
 const runtime = {
   preview: true,
+  busy: undefined,
+  message: undefined,
   connection: { kind: "ready" },
   actions,
   data: {
@@ -303,7 +451,9 @@ const runtime = {
       { id: "p/m", label: "模型 M" },
       { id: "p/n", label: "模型 N" },
     ],
-    workspaces: [{ path: "/fixture", name: "fixture", trusted: true }],
+    workspaces: [
+      { path: "/fixture", name: "fixture", mode: "folder", registered: true, trusted: true },
+    ],
     sessions: [
       {
         id: "s1",
@@ -358,19 +508,21 @@ const runtime = {
       ],
       userRevision: "fixture",
     },
-    runs: [],
-    approvals: [],
+    runs: [] as RunView[],
+    approvals: [] as ApprovalView[],
     prompts: [],
   },
-};
-const root = createRoot(document.getElementById("app"));
-const check = (value, message) => {
+} satisfies RuntimeStore;
+function check(value: unknown, message: string): asserts value {
   if (!value) throw new Error(message);
-};
+}
+const app = document.getElementById("app");
+check(app, "没有测试挂载容器");
+const root = createRoot(app);
 async function wait() {
   await new Promise((resolve) => setTimeout(resolve, 35));
 }
-function TestRoute({ side }) {
+function TestRoute({ side }: { side: boolean }) {
   const { sessionId } = useParams();
   navigateTest = useNavigate();
   return (
@@ -419,18 +571,20 @@ async function mount(side = false, key = crypto.randomUUID()) {
   });
 }
 function editor() {
-  return document.querySelector('[contenteditable="true"]');
+  const input = document.querySelector<HTMLElement>('[contenteditable="true"]');
+  check(input, "没有输入框");
+  return input;
 }
-async function type(text) {
+async function type(text: string) {
   await act(async () => {
     const input = editor();
-    check(input, "没有输入框");
     input.focus();
     input.textContent = text;
     const range = document.createRange();
     range.selectNodeContents(input);
     range.collapse(false);
     const selection = window.getSelection();
+    check(selection, "无法设置输入选区");
     selection.removeAllRanges();
     selection.addRange(range);
     input.dispatchEvent(
@@ -439,7 +593,7 @@ async function type(text) {
     await wait();
   });
 }
-async function key(name, options = {}) {
+async function key(name: string, options: KeyboardEventInit = {}) {
   await act(async () => {
     editor().dispatchEvent(
       new KeyboardEvent("keydown", { key: name, bubbles: true, cancelable: true, ...options }),
@@ -447,8 +601,8 @@ async function key(name, options = {}) {
     await wait();
   });
 }
-async function click(label) {
-  const button = [...document.querySelectorAll('button, a, [role="menuitem"]')].find(
+async function click(label: string) {
+  const button = [...document.querySelectorAll<HTMLElement>('button, a, [role="menuitem"]')].find(
     (item) =>
       item.getAttribute("aria-label") === label ||
       item.textContent.trim() === label ||
@@ -460,7 +614,7 @@ async function click(label) {
     await wait();
   });
 }
-async function command(text) {
+async function command(text: string) {
   await type(text);
   await key("Escape");
   await key("Enter");
@@ -469,16 +623,17 @@ async function command(text) {
 (async () => {
   try {
     await mount();
-    if (window.testNativeSlash) {
+    const nativeSlash = window.testNativeSlash;
+    if (nativeSlash) {
       await type("");
       await act(async () => {
         editor().focus();
-        await window.testNativeSlash();
+        await nativeSlash();
         await wait();
       });
     } else await type("/");
     const commandLabels = () =>
-      [...document.querySelectorAll('.command-suggestions [role="option"]')]
+      [...document.querySelectorAll<HTMLElement>('.command-suggestions [role="option"]')]
         .filter((item) => item.dataset.group === "命令")
         .map((item) => "/" + item.dataset.command)
         .sort();
@@ -552,8 +707,8 @@ async function command(text) {
     await key("Tab");
     check(editor().textContent.trim() === "/resume s2", "会话补全没使用 ID");
     await command("/model");
-    const choice = [...document.querySelectorAll('[role="menuitemradio"]')].find((item) =>
-      item.textContent.includes("模型 N"),
+    const choice = [...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]')].find(
+      (item) => item.textContent.includes("模型 N"),
     );
     check(choice, "未复用模型选择器");
     await act(async () => {
@@ -586,10 +741,11 @@ async function command(text) {
     );
     await command("/model");
     const runningModel = [
-      ...document.querySelectorAll('.pico-composer-model-menu [role="menuitemradio"]'),
+      ...document.querySelectorAll<HTMLElement>('.pico-composer-model-menu [role="menuitemradio"]'),
     ].find((item) => item.textContent.includes("模型 N"));
+    check(runningModel, "没有运行中模型选项");
     check(
-      runningModel?.closest("[popover]")?.matches(":popover-open") &&
+      runningModel.closest("[popover]")?.matches(":popover-open") &&
         runningModel.getAttribute("aria-disabled") === "true",
       "实际会话运行中没有打开只读模型菜单",
     );
@@ -606,9 +762,9 @@ async function command(text) {
     for (const [text, label, method] of [
       ["/changes cp1", "恢复此文件", "rewind.restoreFile"],
       ["/rewind cp1", "确认回退", "rewind.apply"],
-    ]) {
+    ] as const) {
       await command(text);
-      const action = [...document.querySelectorAll("button")].find(
+      const action = [...document.querySelectorAll<HTMLButtonElement>("button")].find(
         (button) =>
           button.textContent.trim() === label || button.getAttribute("aria-label") === label,
       );
@@ -634,6 +790,13 @@ async function command(text) {
     const originalConfirm = window.confirm;
     conversation.settings.collaborationMode = "plan";
     runtime.data.approvals.push({
+      id: "approval-p1",
+      runId: "run-p1",
+      title: "测试计划",
+      detail: "",
+      risk: "low",
+      planControlMode: "review",
+      planOperationId: "operation-p1",
       kind: "plan",
       sessionId: "s1",
       planId: "p1",
@@ -674,6 +837,7 @@ async function command(text) {
     check(!calls.some((item) => item.method === "rewind.restoreFile"), "未确认就恢复文件");
     await click("确认恢复此文件");
     const restored = calls.find((item) => item.method === "rewind.restoreFile");
+    check(restored, "未调用文件恢复");
     check(
       restored.params.checkpointId === "cp1" &&
         restored.params.expectedFingerprint === "file-fingerprint",
@@ -684,6 +848,7 @@ async function command(text) {
     check(!calls.some((item) => item.method === "rewind.apply"), "预览触发回退");
     await click("确认回退");
     const applied = calls.find((item) => item.method === "rewind.apply");
+    check(applied, "未调用回退");
     check(
       applied.params.checkpointId === "cp1" &&
         applied.params.expectedFingerprint === "preview-fingerprint" &&
@@ -728,7 +893,7 @@ async function command(text) {
     await command("/usage");
     await click("打开用量统计");
     check(
-      calls.findLast((item) => item.method === "query-usage")?.input.workspacePath === "/fixture",
+      calls.findLast((item) => item.method === "query-usage")?.input?.workspacePath === "/fixture",
       "用量入口没有按来源项目查询",
     );
     await mount(true);
@@ -741,7 +906,11 @@ async function command(text) {
     failNext = "ipc";
     await command("/agent reviewer 检查任务");
     check(editor().textContent === "/agent reviewer 检查任务", "失败丢失输入草稿");
-    const lastCommand = () => calls.findLast((item) => item.method === "command");
+    const lastCommand = () => {
+      const call = calls.findLast((item) => item.method === "command");
+      check(call, "未执行命令");
+      return call;
+    };
     const retryId = lastCommand().requestId;
     failNext = "rpc";
     await command("/agent reviewer 检查任务");
@@ -752,24 +921,31 @@ async function command(text) {
     check(lastCommand().requestId !== retryId, "已成功命令的新提交仍复用旧键");
     delayNext = true;
     await command("/goal pause");
-    const pendingCount = calls.filter((item) => item.text === "/goal pause").length;
+    const pendingCount = calls.filter(
+      (item) => item.method === "command" && item.text === "/goal pause",
+    ).length;
     await key("Enter");
     check(
-      calls.filter((item) => item.text === "/goal pause").length === pendingCount,
+      calls.filter((item) => item.method === "command" && item.text === "/goal pause").length ===
+        pendingCount,
       "重复执行命令",
     );
     const oldPending = commandsPending;
+    check(oldPending, "旧会话命令未等待响应");
     await act(async () => {
       navigateTest("/session/s2?workspace=%2Ffixture");
       await wait();
     });
     delayNext = true;
     await command("/goal");
+    const currentCall = calls.at(-1);
+    check(currentCall?.method === "command", "新会话最后一个调用不是命令");
     check(
-      calls.at(-1).context?.sessionId === "s2" && calls.at(-1).text === "/goal",
+      currentCall.context.sessionId === "s2" && currentCall.text === "/goal",
       "旧会话慢命令阻塞新会话输入",
     );
     const newPending = commandsPending;
+    check(newPending, "新会话命令未等待响应");
     await act(async () => {
       oldPending(local({ action: "message", message: "迟到的旧会话结果" }));
       await wait();
@@ -786,14 +962,15 @@ async function command(text) {
     await mount();
     deferGoal = true;
     await command("/goal pause");
-    check(goalPending, "Goal 动作未启动");
+    const finishGoal = goalPending;
+    check(finishGoal, "Goal 动作未启动");
     await act(async () => {
       navigateTest("/session/s2?workspace=%2Fother");
       await wait();
     });
     const refreshCount = calls.filter((item) => item.method === "load-session").length;
     await act(async () => {
-      goalPending(false);
+      finishGoal(false);
       await wait();
     });
     check(
@@ -805,10 +982,10 @@ async function command(text) {
       "命令触发了全局 bootstrap，会卸载命令弹窗",
     );
     await mount();
-    const selectCandidate = async (label) => {
-      const candidate = [...document.querySelectorAll('.command-suggestions [role="option"]')].find(
-        (item) => item.querySelector("strong")?.textContent === label,
-      );
+    const selectCandidate = async (label: string) => {
+      const candidate = [
+        ...document.querySelectorAll<HTMLElement>('.command-suggestions [role="option"]'),
+      ].find((item) => item.querySelector("strong")?.textContent === label);
       check(candidate, "没有候选 " + label);
       await act(async () => {
         candidate.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
@@ -874,6 +1051,7 @@ async function command(text) {
     await click("取消");
     await type(tokenDraft);
     const skill = runtime.data.catalogSkills[0];
+    check(skill, "没有测试技能");
     skill.sourceId = "changed";
     await key("Escape");
     await key("Enter");
@@ -936,7 +1114,7 @@ async function command(text) {
     await key("Enter");
     check(
       calls.filter((item) => item.method === "send").length === sentBefore + 1 &&
-        calls.findLast((item) => item.method === "send").input.text === "",
+        calls.findLast((item) => item.method === "send")?.input.text === "",
       "无参数 Skill 未提交",
     );
     await type("");
@@ -948,7 +1126,7 @@ async function command(text) {
     check(!document.querySelector(".command-suggestions"), "URL 错误触发候选");
     const controlRef = React.createRef<ConversationComposerHandle>();
     let stopped = false;
-    const renderControls = async (readOnly, disabled = false) => {
+    const renderControls = async (readOnly: boolean, disabled = false) => {
       await act(async () => {
         root.render(
           <PicoTheme>
@@ -1011,6 +1189,7 @@ async function command(text) {
       });
     };
     await renderControls(true);
+    check(controlRef.current, "控件未挂载");
     check(controlRef.current.openControl("interrupt"), "没有定位停止按钮");
     check(
       document.activeElement?.getAttribute("aria-label") === "停止运行" && !stopped,
@@ -1018,16 +1197,18 @@ async function command(text) {
     );
     check(!controlRef.current.openControl("permissions"), "打开了禁用权限控件");
     await act(async () => {
+      check(controlRef.current, "控件未挂载");
       check(controlRef.current.openControl("thinking"), "没有定位思考控件");
       await wait();
     });
     check(
-      [...document.querySelectorAll('[role="listbox"]')].some((list) =>
+      [...document.querySelectorAll<HTMLElement>('[role="listbox"]')].some((list) =>
         list.closest("[popover]")?.matches(":popover-open"),
       ),
       "没有打开现有思考控件",
     );
     await act(async () => {
+      check(controlRef.current, "控件未挂载");
       check(controlRef.current.openControl("mode"), "没有打开模式菜单");
       await wait();
     });
@@ -1040,9 +1221,9 @@ async function command(text) {
     );
     await click("添加上下文与模式");
     await click("选择模型：模型 M");
-    const readonlyChoice = [...document.querySelectorAll('[role="menuitemradio"]')].find((item) =>
-      item.textContent.includes("模型 N"),
-    );
+    const readonlyChoice = [
+      ...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
+    ].find((item) => item.textContent.includes("模型 N"));
     check(
       readonlyChoice?.closest("[popover]")?.matches(":popover-open"),
       "运行中模型菜单不能打开查看",
@@ -1059,7 +1240,9 @@ async function command(text) {
     check(!calls.some((item) => item.method === "readonly-model-change"), "只读模型菜单触发了切换");
     await renderControls(true, true);
     await click("选择模型：模型 M");
-    const disabledModelTrigger = document.querySelector(".composer-model-trigger");
+    const disabledModelTrigger =
+      document.querySelector<HTMLButtonElement>(".composer-model-trigger");
+    check(disabledModelTrigger, "没有模型触发器");
     const modelLayer = document.querySelector(".pico-composer-model-menu")?.closest("[popover]");
     check(
       (disabledModelTrigger.disabled ||
@@ -1070,6 +1253,9 @@ async function command(text) {
     );
     await fetch("/result", { method: "POST", body: "PASS: desktop commands" });
   } catch (error) {
-    await fetch("/result", { method: "POST", body: String(error.stack ?? error) });
+    await fetch("/result", {
+      method: "POST",
+      body: error instanceof Error ? (error.stack ?? error.message) : String(error),
+    });
   }
 })();

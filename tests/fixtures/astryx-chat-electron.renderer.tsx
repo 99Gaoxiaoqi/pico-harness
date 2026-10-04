@@ -71,6 +71,7 @@ function Fixture() {
       <ChatLayout
         className="disabled-scroll-probe"
         scrollButton={null}
+        composer={null}
         autoScroll={false}
         style={{ position: "fixed", left: -1000, width: 120, height: "25vh" }}
       >
@@ -218,7 +219,7 @@ function RuntimeSendComposer({ runtime }: { runtime: RuntimeStore }) {
 const root = createRoot(document.getElementById("root")!);
 host.mountRuntimeComposer = () => {
   // Keep post-send hydration pending, as session inspection can wait behind a run.
-  window.pico = {
+  const bridge = {
     runtime: {
       "runtime.ping": async () => {
         throw new Error("isolated send fixture");
@@ -259,7 +260,8 @@ host.mountRuntimeComposer = () => {
     },
     onUnavailable: () => () => {},
     onRecovered: () => () => {},
-  } as unknown as NonNullable<typeof window.pico>;
+  };
+  Object.defineProperty(window, "pico", { configurable: true, value: bridge });
   root.render(<RuntimeSendFixture />);
 };
 root.render(<Fixture />);
