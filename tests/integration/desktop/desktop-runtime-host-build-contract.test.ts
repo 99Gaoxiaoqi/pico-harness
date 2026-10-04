@@ -18,6 +18,8 @@ const DESKTOP_BUILD_WORKSPACES = [
   "@pico/transcript-replica",
   "@pico/runtime-host",
   "@pico/pico-host",
+  "@pico/remote-client",
+  "@pico/remote-gateway",
   "@pico/cli",
 ];
 const DESKTOP_FORGE_RUNNER = "../../scripts/run-desktop-forge.mjs";
