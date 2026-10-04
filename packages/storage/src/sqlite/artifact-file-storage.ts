@@ -16,7 +16,7 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
-import { FileStorageIntegrityError } from "../local-file-storage.js";
+import { FileStorageIntegrityError, isUnsupportedDirectorySync } from "../local-file-storage.js";
 
 /** Managed immutable files. SQLite owns identities and references, never file bytes. */
 export function artifactBlobRelativePath(digest: string): string {
@@ -58,6 +58,8 @@ function managedPath(database: DatabaseSync, relativePath: string, create: boole
       const parent = openSync(dirname(directory), constants.O_RDONLY | constants.O_NOFOLLOW);
       try {
         fsyncSync(parent);
+      } catch (error) {
+        if (!isUnsupportedDirectorySync(error)) throw error;
       } finally {
         closeSync(parent);
       }
@@ -125,6 +127,8 @@ function publishFile(database: DatabaseSync, relativePath: string, bytes: Uint8A
     const directory = openSync(dirname(destination), constants.O_RDONLY);
     try {
       fsyncSync(directory);
+    } catch (error) {
+      if (!isUnsupportedDirectorySync(error)) throw error;
     } finally {
       closeSync(directory);
     }
