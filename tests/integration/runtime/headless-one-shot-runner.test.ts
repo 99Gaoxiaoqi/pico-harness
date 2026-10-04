@@ -2211,13 +2211,21 @@ test(
   "SIGINT and SIGTERM cancel while stdin remains open",
   { skip: process.platform === "win32" },
   async () => {
-    for (const signal of ["SIGINT", "SIGTERM"] as const) {
-      const result = await runProcessWithOpenStdin(signal);
-      assert.equal(result.code, signal === "SIGTERM" ? 143 : 130);
-      assert.equal(result.stdout.trim().split("\n").length, 1);
-      const payload = JSON.parse(result.stdout) as { status: string; error: { code: string } };
-      assert.equal(payload.status, "canceled");
-      assert.equal(payload.error.code, signal);
+    for (const slowBootstrap of [false, true]) {
+      for (const signal of ["SIGINT", "SIGTERM"] as const) {
+        const result = await runProcessWithOpenStdin(signal, slowBootstrap);
+        assert.equal(result.code, signal === "SIGTERM" ? 143 : 130);
+        assert.equal(result.signal, null);
+        assert.equal(result.stdout.trim().split("\n").length, 1);
+        const payload = JSON.parse(result.stdout) as {
+          status: string;
+          error: { code: string };
+          terminationConfirmed: boolean;
+        };
+        assert.equal(payload.status, "canceled");
+        assert.equal(payload.error.code, signal);
+        assert.equal(payload.terminationConfirmed, true);
+      }
     }
   },
 );
@@ -2560,21 +2568,59 @@ async function collectChild(
 
 async function runProcessWithOpenStdin(
   signal: "SIGINT" | "SIGTERM",
-): Promise<{ code: number | null; stdout: string; stderr: string }> {
-  const child = spawnHeadlessProcess();
+  slowBootstrap: boolean,
+): Promise<{ code: number | null; signal: NodeJS.Signals | null; stdout: string; stderr: string }> {
+  const child = spawn(
+    process.execPath,
+    ["--import", "tsx", "tests/fixtures/headless-one-shot-signal-child.ts"],
+    {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        NODE_ENV: "test",
+        LOG_LEVEL: "trace",
+        HEADLESS_SIGNAL_SLOW_BOOTSTRAP: slowBootstrap ? "1" : "0",
+      },
+      stdio: ["pipe", "pipe", "pipe", "ipc"],
+    },
+  );
+  assert.ok(child.stdin && child.stdout && child.stderr);
   const stdout: Buffer[] = [];
   const stderr: Buffer[] = [];
   child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
   child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
   child.stdin.write("{");
-  await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 1_500));
-  child.kill(signal);
-  const [code] = (await once(child, "exit")) as [number | null, NodeJS.Signals | null];
-  return {
-    code,
-    stdout: Buffer.concat(stdout).toString("utf8"),
-    stderr: Buffer.concat(stderr).toString("utf8"),
-  };
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10_000);
+  const closed = once(child, "close", { signal: controller.signal });
+  try {
+    const [ready] = await Promise.race([
+      once(child, "message", { signal: controller.signal }),
+      closed.then(([code, exitSignal]) => {
+        throw new Error(
+          `Headless child exited before signal readiness (${code}/${exitSignal}): ${Buffer.concat(stderr).toString("utf8")}`,
+        );
+      }),
+    ]);
+    assert.deepEqual(ready, { kind: "signal-handlers-ready", stdinOpen: true });
+    assert.equal(child.stdin.writableEnded, false);
+    assert.equal(child.stdin.destroyed, false);
+    assert.equal(child.kill(signal), true);
+    const [code, exitSignal] = (await closed) as [number | null, NodeJS.Signals | null];
+    assert.equal(child.stdin.destroyed, true);
+    assert.equal(child.stdout.readableEnded, true);
+    assert.equal(child.stderr.readableEnded, true);
+    return {
+      code,
+      signal: exitSignal,
+      stdout: Buffer.concat(stdout).toString("utf8"),
+      stderr: Buffer.concat(stderr).toString("utf8"),
+    };
+  } finally {
+    clearTimeout(timeout);
+    controller.abort();
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+  }
 }
 
 async function waitForStreamText(stream: NodeJS.ReadableStream, expected: string): Promise<void> {
