@@ -55,11 +55,12 @@ export function isErrno(error: unknown, code: string): boolean {
 
 /** Windows ACL is explicit, protected and verified. chmod alone does not establish privacy. */
 async function protectWindowsPath(path: string, directory: boolean): Promise<void> {
+  // A Node child of PowerShell 7 inherits its module search path. Use .NET directly so
+  // Windows PowerShell cannot autoload incompatible ACL or filesystem modules.
   const script = `param([string]$Target,[string]$Kind)
 $ErrorActionPreference='Stop'
 $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User
-$item=Get-Item -LiteralPath $Target -Force
-if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'REMOTE_REPARSE_POINT' }
+if (([IO.File]::GetAttributes($Target) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'REMOTE_REPARSE_POINT' }
 if ($Kind -eq 'directory') { $acl=[Security.AccessControl.DirectorySecurity]::new() } else { $acl=[Security.AccessControl.FileSecurity]::new() }
 $acl.SetOwner($sid)
 $acl.SetAccessRuleProtection($true,$false)
@@ -67,8 +68,13 @@ $inherit=[Security.AccessControl.InheritanceFlags]::None
 if ($Kind -eq 'directory') { $inherit=[Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit' }
 $rule=[Security.AccessControl.FileSystemAccessRule]::new($sid,[Security.AccessControl.FileSystemRights]::FullControl,$inherit,[Security.AccessControl.PropagationFlags]::None,[Security.AccessControl.AccessControlType]::Allow)
 $acl.AddAccessRule($rule)
-Set-Acl -LiteralPath $Target -AclObject $acl
-$actual=Get-Acl -LiteralPath $Target
+if ($Kind -eq 'directory') {
+  [IO.Directory]::SetAccessControl($Target,$acl)
+  $actual=[IO.Directory]::GetAccessControl($Target)
+} else {
+  [IO.File]::SetAccessControl($Target,$acl)
+  $actual=[IO.File]::GetAccessControl($Target)
+}
 $rules=$actual.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])
 if (-not $actual.AreAccessRulesProtected -or $actual.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $sid.Value -or $rules.Count -ne 1 -or $rules[0].IdentityReference.Value -ne $sid.Value -or $rules[0].AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or ($rules[0].FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl) -ne [Security.AccessControl.FileSystemRights]::FullControl) { throw 'REMOTE_DACL_NOT_PRIVATE' }`;
   // No shell interpolation of paths: PowerShell receives named arguments via a temporary script.
