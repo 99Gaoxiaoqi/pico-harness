@@ -20,6 +20,8 @@ test("Terminal-Bench approved bundle lock matches runtime dependencies", async (
   const lock = JSON.parse(lockRaw);
   assert.equal(lock.lockfileVersion, 3);
   const { packageJson, localPackages } = await createBundlePackagePlan();
+  const rootPackage = JSON.parse(await readFile("package.json", "utf8"));
+  assert.deepEqual(packageJson.overrides, rootPackage.overrides);
   assert.deepEqual(lock.packages[""].dependencies, packageJson.dependencies);
   assert.ok(localPackages.length >= 8, "all eight runtime workspace packages must be bundled");
   for (const local of localPackages) {

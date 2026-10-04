@@ -120,6 +120,7 @@ export async function createBundlePackagePlan() {
     private: true,
     type: "module",
     dependencies: localize(rootPackage.dependencies),
+    overrides: rootPackage.overrides,
   };
   // Root file dependencies ensure npm resolves transitive workspaces without consulting a registry.
   for (const [name, local] of selected) packageJson.dependencies[name] = `file:${local.path}`;

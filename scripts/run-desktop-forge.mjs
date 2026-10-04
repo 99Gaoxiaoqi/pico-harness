@@ -47,6 +47,8 @@ async function run(forgeCommand, forgeArgs) {
       "@pico/transcript-replica",
       "@pico/runtime-host",
       "@pico/pico-host",
+      "@pico/remote-client",
+      "@pico/remote-gateway",
       "@pico/cli",
     ]) {
       await runChild(

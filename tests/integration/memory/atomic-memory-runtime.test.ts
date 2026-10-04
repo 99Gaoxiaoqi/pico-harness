@@ -394,7 +394,11 @@ test("background memory billing can settle after the parent run terminal without
       ),
       "test-model",
       undefined,
-      { ledger, recordRuntimeEvents: false, context: { purpose: "main", sessionId: session.id } },
+      {
+        ledger,
+        recordRuntimeEvents: false,
+        context: { purpose: "memory_review", sessionId: session.id },
+      },
     ),
   );
   const run = await RuntimeRun.start({
@@ -412,4 +416,6 @@ test("background memory billing can settle after the parent run terminal without
   const records = ledger.listPhysicalAttempts({ sessionId: session.id });
   assert.equal(records.length, 1);
   assert.equal(records[0]!.purpose, "memory_review");
+  assert.equal(records[0]!.runId, undefined);
+  assert.equal(records[0]!.turnId, undefined);
 });

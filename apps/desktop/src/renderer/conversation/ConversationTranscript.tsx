@@ -193,16 +193,25 @@ function SubagentRow({
 }
 
 function visibleTurnItems(items: readonly ConversationItemView[]): readonly ConversationItemView[] {
-  const representedCalls = new Set(
-    items.flatMap((item) => (item.kind === "subagent" && item.toolCallId ? [item.toolCallId] : [])),
-  );
-  return items.filter((item) => {
-    if (item.kind !== "tool" || item.toolName !== "agent_spawn") return true;
-    const toolCallId =
-      item.result?.toolCallId ??
-      item.toolCallId ??
-      (item.id.startsWith("tool:") ? item.id.slice(5) : undefined);
-    return !toolCallId || !representedCalls.has(toolCallId);
+  const turns: ConversationItemView[][] = [];
+  for (const item of items) {
+    if (item.kind === "userMessage" || turns.length === 0) turns.push([]);
+    turns.at(-1)!.push(item);
+  }
+  return turns.flatMap((turn) => {
+    const representedCalls = new Set(
+      turn.flatMap((item) =>
+        item.kind === "subagent" && item.toolCallId ? [item.toolCallId] : [],
+      ),
+    );
+    return turn.filter((item) => {
+      if (item.kind !== "tool" || item.toolName !== "agent_spawn") return true;
+      const toolCallId =
+        item.result?.toolCallId ??
+        item.toolCallId ??
+        (item.id.startsWith("tool:") ? item.id.slice(5) : undefined);
+      return !toolCallId || !representedCalls.has(toolCallId);
+    });
   });
 }
 
