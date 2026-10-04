@@ -9,8 +9,16 @@ import { build } from "esbuild";
 
 /** Run the same isolated Chrome/Chromium renderer used by the Astryx interaction tests. */
 export async function runRendererBrowserScenario(contents: string): Promise<string> {
+  const windowsChromeRoots = [
+    process.env.ProgramFiles,
+    process.env["ProgramFiles(x86)"],
+    process.env.LOCALAPPDATA,
+  ].filter((value): value is string => Boolean(value));
   const candidates = [
     process.env.PICO_TEST_CHROME,
+    ...windowsChromeRoots.map((root) =>
+      join(root, "Google", "Chrome", "Application", "chrome.exe"),
+    ),
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     "/usr/bin/google-chrome",
     "/usr/bin/chromium",
@@ -103,10 +111,20 @@ export async function runRendererBrowserScenario(contents: string): Promise<stri
     return await outcome.promise;
   } finally {
     clearTimeout(timer);
-    if (browser && browser.exitCode === null && browser.signalCode === null) {
-      const closed = new Promise<void>((resolve) => browser!.once("exit", () => resolve()));
-      browser.kill("SIGTERM");
-      await closed;
+    if (browser?.pid && browser.exitCode === null && browser.signalCode === null) {
+      const closed = Promise.withResolvers<void>();
+      const onExit = () => closed.resolve();
+      browser.once("exit", onExit);
+      const forceKill = setTimeout(() => browser?.kill("SIGKILL"), 2_000);
+      const cleanupDeadline = setTimeout(() => closed.resolve(), 4_000);
+      try {
+        browser.kill("SIGTERM");
+        await closed.promise;
+      } finally {
+        clearTimeout(forceKill);
+        clearTimeout(cleanupDeadline);
+        browser.removeListener("exit", onExit);
+      }
     }
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
