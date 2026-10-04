@@ -376,6 +376,7 @@ function SettingsSidebar({
     usage: Gauge,
     data: Box,
     system: ShieldCheck,
+    mobile: Network,
   } as const;
   return (
     <aside className="sidebar settings-sidebar" onKeyDown={onKeyDown}>

@@ -1,3 +1,4 @@
+import type { DesktopRemoteManagementApi } from "./remote-management-contract.js";
 import type { DesktopCommandsApi } from "./command-contract.js";
 import {
   DESKTOP_RUNTIME_METHODS,
@@ -94,6 +95,7 @@ export interface RuntimeNotificationSubscription {
 }
 
 export interface DesktopBridge {
+  readonly remoteManagement: DesktopRemoteManagementApi;
   readonly commands: DesktopCommandsApi;
   readonly artifacts: DesktopArtifactsApi;
   readonly runtime: DesktopRuntimeApi;

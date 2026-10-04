@@ -95,6 +95,11 @@ const config = {
           config: "vite.daemon.config.ts",
           target: "main",
         },
+        {
+          entry: "src/main/gateway-entry.ts",
+          config: "vite.gateway.config.ts",
+          target: "main",
+        },
       ],
       renderer: [
         {

@@ -1,0 +1,133 @@
+.mobile-connection-settings {
+  max-width: 920px;
+}
+.mobile-section-heading,
+.mobile-actions,
+.mobile-connection-status {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.mobile-section-heading {
+  justify-content: space-between;
+}
+.mobile-section-heading h3 {
+  margin-bottom: 0;
+}
+.mobile-connection-status {
+  margin: 20px 0 12px;
+}
+.mobile-connection-status > span:last-child {
+  color: var(--text-muted, #92929c);
+  font-size: 13px;
+}
+.mobile-status-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #8c8795;
+}
+.mobile-status-dot.is-online {
+  background: #5db28b;
+}
+.mobile-config-form {
+  display: grid;
+  gap: 16px;
+  margin-top: 16px;
+}
+.mobile-field {
+  display: grid;
+  gap: 8px;
+}
+.mobile-field > span {
+  font-size: 13px;
+  font-weight: 600;
+}
+.mobile-connection-settings fieldset {
+  border: 1px solid var(--border-subtle, #35323f);
+  border-radius: 10px;
+  padding: 14px 16px;
+  min-width: 0;
+}
+.mobile-connection-settings legend {
+  padding: 0 5px;
+  font-weight: 600;
+  font-size: 13px;
+}
+.mobile-connection-settings fieldset label {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 8px 0;
+  font-size: 13px;
+}
+.mobile-connection-settings input[type="checkbox"] {
+  margin-top: 3px;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  accent-color: #9e87ef;
+}
+.mobile-workspace-picker small {
+  display: block;
+  overflow-wrap: anywhere;
+  margin-top: 4px;
+  color: var(--text-muted, #92929c);
+}
+.mobile-pairing-qr {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  margin: 20px 0;
+}
+.mobile-pairing-qr img {
+  background: white;
+  border-radius: 12px;
+  width: 256px;
+  height: 256px;
+  flex-shrink: 0;
+}
+.mobile-pairing-qr p,
+.mobile-device p {
+  color: var(--text-muted, #92929c);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.mobile-pairing-qr small,
+.mobile-device small {
+  overflow-wrap: anywhere;
+  color: var(--text-muted, #92929c);
+}
+.mobile-pending-device {
+  display: grid;
+  gap: 12px;
+  margin-top: 20px;
+  padding: 20px;
+  border: 1px solid #76618f;
+  border-radius: 12px;
+}
+.mobile-pending-device h4,
+.mobile-pending-device p {
+  margin: 0;
+}
+.mobile-device {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  padding: 20px 0;
+  border-bottom: 1px solid var(--border-subtle, #35323f);
+}
+.mobile-device > div {
+  flex: 1;
+  min-width: 0;
+}
+.mobile-device p {
+  margin: 6px 0;
+}
+@media (max-width: 1100px) {
+  .mobile-pairing-qr {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}

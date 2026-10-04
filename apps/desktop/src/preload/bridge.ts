@@ -1,3 +1,4 @@
+import { createRemoteManagementBridge } from "./remote-management-bridge.js";
 import { createCommandBridge } from "./command-bridge.js";
 import type { IpcRenderer } from "electron";
 import { createArtifactBridge } from "./artifact-bridge.js";
@@ -50,6 +51,7 @@ export function createDesktopBridge(ipcRenderer: IpcRenderer): DesktopBridge {
 
   return Object.freeze({
     commands: createCommandBridge(ipcRenderer),
+    remoteManagement: createRemoteManagementBridge(ipcRenderer),
     artifacts: createArtifactBridge(ipcRenderer),
     runtime: Object.freeze(runtime),
     events: Object.freeze({
