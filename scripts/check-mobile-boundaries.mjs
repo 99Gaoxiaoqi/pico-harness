@@ -52,6 +52,8 @@ const output = await build({
   logLevel: "silent",
 });
 for (const path of Object.keys(output.metafile.inputs)) {
+  // esbuild emits disabled browser-field modules as virtual inputs with no filesystem path.
+  if (path.startsWith("(disabled):")) continue;
   if (/node_modules\/(?!@pico\/)/.test(path)) continue;
   const source = readFileSync(resolve(root, path), "utf8");
   const ast = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true);
