@@ -61,7 +61,6 @@ export interface RemotePairingQr {
 }
 export interface RemoteConfigureInput {
   readonly relayUrl: string;
-  readonly invitation?: string;
   readonly workspaces: readonly { readonly path: string; readonly name?: string }[];
 }
 export interface RemoteApproveInput {
@@ -122,12 +121,7 @@ export function isRemoteManagementRequest(
     return false;
   if (["snapshot", "start", "stop", "offer"].includes(action)) return keys(params, []);
   if (action === "configure") {
-    if (
-      !keys(params, ["relayUrl", "invitation", "workspaces"]) ||
-      !text(params.relayUrl, 2048) ||
-      (params.invitation !== undefined && !text(params.invitation, 4096))
-    )
-      return false;
+    if (!keys(params, ["relayUrl", "workspaces"]) || !text(params.relayUrl, 2048)) return false;
     try {
       const url = new URL(params.relayUrl);
       if (
