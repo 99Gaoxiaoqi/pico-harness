@@ -140,7 +140,7 @@ export async function startControl(
 }
 export async function requestRelayControl(
   home: string,
-  method: "invite" | "revoke",
+  method: "bind" | "invite" | "revoke",
   params: Record<string, unknown> = {},
 ): Promise<unknown> {
   const registration = await readPrivate<Registration>(join(home, "admin.json"));

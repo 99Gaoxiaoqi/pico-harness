@@ -44,6 +44,7 @@ interface RelayIdentityFile {
     {
       readonly token: string;
       readonly enrolled: boolean;
+      readonly prepared?: true;
       readonly invitationHash?: string;
       readonly pending?: { readonly token: string; readonly invitationHash: string };
     }
@@ -99,6 +100,7 @@ function validateIdentity(value: unknown): RelayIdentityFile {
       typeof registration.token !== "string" ||
       !TOKEN.test(registration.token) ||
       typeof registration.enrolled !== "boolean" ||
+      (registration.prepared !== undefined && registration.prepared !== true) ||
       (registration.invitationHash !== undefined &&
         (typeof registration.invitationHash !== "string" || !KEY.test(registration.invitationHash)))
     )
@@ -118,6 +120,50 @@ function validateIdentity(value: unknown): RelayIdentityFile {
 function configRelay(config: GatewayConfig): RemoteRelayEndpoint | undefined {
   const value = (config as GatewayConfig & { relay?: unknown }).relay;
   return value === undefined ? undefined : parseRelayEndpoint(value);
+}
+
+async function loadOrCreateIdentity(directory: string): Promise<RelayIdentityFile> {
+  const state = await loadGatewayState(directory);
+  if (!ID.test(state.gatewayId)) throw new Error("网关身份无效");
+  const saved = await readPrivateJson<unknown>(identityPath(directory));
+  const identity: RelayIdentityFile = saved
+    ? validateIdentity(saved)
+    : {
+        version: 1,
+        gatewayId: state.gatewayId,
+        ...createRelayIdentity(randomBytes),
+        registrations: {},
+      };
+  if (identity.gatewayId !== state.gatewayId) throw new Error("Relay 身份与设备授权目录不匹配");
+  return identity;
+}
+
+/** Deployment-only preparation. The relay administrator receives a hash, never the host token. */
+export async function prepareRelayBinding(
+  input: { readonly relayUrl: string; readonly rotateToken?: boolean },
+  home = defaultGatewayHome(),
+): Promise<{ version: 1; relayUrl: string; gatewayId: string; tokenHash: string }> {
+  const origin = relayOrigin(input.relayUrl);
+  const directory = await ensureGatewayHome(home);
+  const release = await acquireGatewayLock(directory);
+  try {
+    const identity = await loadOrCreateIdentity(directory);
+    const existing = identity.registrations[origin];
+    const registration =
+      existing && !input.rotateToken
+        ? { ...existing, prepared: true as const }
+        : { token: newSecret(), enrolled: false, prepared: true as const };
+    identity.registrations[origin] = registration;
+    await writePrivateJson(identityPath(directory), identity);
+    return {
+      version: 1,
+      relayUrl: origin,
+      gatewayId: identity.gatewayId,
+      tokenHash: hashSecret(registration.token),
+    };
+  } finally {
+    await release();
+  }
 }
 
 /** Local-only read: project only public configuration fields; never return enrollment credentials. */
@@ -191,27 +237,18 @@ export async function configureRelayGateway(
         path,
       });
     }
-    const state = await loadGatewayState(directory);
-    if (!ID.test(state.gatewayId)) throw new Error("网关身份无效");
-    const savedIdentity = await readPrivateJson<unknown>(identityPath(directory));
-    const identity: RelayIdentityFile = savedIdentity
-      ? validateIdentity(savedIdentity)
-      : {
-          version: 1,
-          gatewayId: state.gatewayId,
-          ...createRelayIdentity(randomBytes),
-          registrations: {},
-        };
-    if (identity.gatewayId !== state.gatewayId) throw new Error("Relay 身份与设备授权目录不匹配");
+    const identity = await loadOrCreateIdentity(directory);
     let registration = identity.registrations[origin];
     const invitationHash = input.invitation ? hashSecret(input.invitation) : undefined;
     if (!registration) registration = { token: newSecret(), enrolled: false };
     const changing = Boolean(
       registration.enrolled && invitationHash && registration.invitationHash !== invitationHash,
     );
-    if (!registration.enrolled || changing) {
-      if (!input.invitation || !invitationHash)
-        throw new Error("此 Relay 首次注册需要一次性内测邀请");
+    if (!input.invitation) {
+      // Preparing credentials is not proof of server authorization; connector status supplies that.
+      identity.registrations[origin] = { ...registration, prepared: true };
+      await writePrivateJson(identityPath(directory), identity);
+    } else if ((!registration.enrolled || changing) && invitationHash) {
       const candidate = changing
         ? registration.pending?.invitationHash === invitationHash
           ? registration.pending
@@ -233,7 +270,7 @@ export async function configureRelayGateway(
           body: JSON.stringify({
             version: 1,
             invitation: input.invitation,
-            gatewayId: state.gatewayId,
+            gatewayId: identity.gatewayId,
             tokenHash: hashSecret(candidate.token),
           }),
         });
@@ -251,7 +288,7 @@ export async function configureRelayGateway(
     const relay = parseRelayEndpoint({
       mode: "relay",
       relayUrl: origin,
-      gatewayId: state.gatewayId,
+      gatewayId: identity.gatewayId,
       hostPublicKey: identity.publicKey,
     });
     const config: RelayGatewayConfig = {
@@ -283,9 +320,9 @@ export async function loadRelayIdentity(
   if (
     identity.gatewayId !== relay.gatewayId ||
     identity.publicKey !== relay.hostPublicKey ||
-    !registration?.enrolled
+    !(registration?.enrolled || registration?.prepared)
   )
-    throw new Error("Relay 本机身份未注册或与端点不匹配");
+    throw new Error("Relay 本机连接身份未准备或与端点不匹配");
   return { secretKey: identity.secretKey, token: registration.token };
 }
 

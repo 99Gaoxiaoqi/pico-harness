@@ -5,6 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { once } from "node:events";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 import { WebSocket } from "ws";
 import {
   startRelayServer,
@@ -119,6 +122,81 @@ async function fixture(t: TestContext, limits: Partial<RelayLimits> = {}) {
     },
   };
 }
+
+test("私有 CLI 预绑定经真实 TLS 认证，幂等部署不能覆盖有效凭据或恢复已撤销凭据", async (t) => {
+  const f = await fixture(t),
+    gatewayId = "personal-desktop",
+    hostToken = token(),
+    tokenHash = hash(hostToken);
+  const { stdout } = await promisify(execFile)(process.execPath, [
+    "--import",
+    "tsx",
+    fileURLToPath(new URL("../../../packages/remote-relay/src/cli.ts", import.meta.url)),
+    "bind",
+    "--home",
+    f.home,
+    "--gateway",
+    gatewayId,
+    "--token-hash",
+    tokenHash,
+  ]);
+  assert.deepEqual(JSON.parse(stdout), { version: 1, bound: true });
+  assert.deepEqual(await requestRelayControl(f.home, "bind", { gatewayId, tokenHash }), {
+    version: 1,
+    bound: true,
+  });
+  await assert.rejects(
+    requestRelayControl(f.home, "bind", { gatewayId, tokenHash: hash(token()) }),
+    { message: "HOST_ALREADY_BOUND" },
+  );
+  for (const params of [
+    { gatewayId, tokenHash, token: hostToken },
+    { gatewayId, tokenHash: hostToken },
+    { gatewayId: "invalid/id", tokenHash },
+    { gatewayId },
+  ]) {
+    await assert.rejects(requestRelayControl(f.home, "bind", params), {
+      message: "INVALID_PARAMS",
+    });
+  }
+  for (const path of ["/v1/bind", "/v1/admin/bind"])
+    assert.equal((await f.http(path, { version: 1, gatewayId, tokenHash })).status, 404);
+  const stateText = await readFile(join(f.home, "state.json"), "utf8");
+  assert.equal(stateText.includes(hostToken), false);
+  assert.equal(stateText.includes(tokenHash), true);
+  await f.restart();
+  const wrong = await f.connect({ version: 1, type: "host", gatewayId, token: token() });
+  assert.equal((await wrong.next("error")).code, "HOST_AUTH_FAILED");
+  await wrong.closed;
+  const desktop = await f.host(gatewayId, hostToken);
+  const mobile = await f.mobile(gatewayId);
+  await desktop.next("open");
+  mobile.client.send({ version: 1, type: "data", payload: "encrypted-personal-request" });
+  assert.equal((await desktop.next("data")).payload, "encrypted-personal-request");
+  assert.deepEqual(await requestRelayControl(f.home, "revoke", { gatewayId }), {
+    version: 1,
+    revoked: true,
+  });
+  await Promise.all([desktop.closed, mobile.client.closed]);
+  await f.restart();
+  await assert.rejects(requestRelayControl(f.home, "bind", { gatewayId, tokenHash }), {
+    message: "HOST_REVOKED",
+  });
+  const revoked = await f.connect({ version: 1, type: "host", gatewayId, token: hostToken });
+  assert.equal((await revoked.next("error")).code, "HOST_AUTH_FAILED");
+  await revoked.closed;
+  const rotatedToken = token();
+  assert.deepEqual(
+    await requestRelayControl(f.home, "bind", { gatewayId, tokenHash: hash(rotatedToken) }),
+    { version: 1, bound: true },
+  );
+  await f.restart();
+  const stale = await f.connect({ version: 1, type: "host", gatewayId, token: hostToken });
+  assert.equal((await stale.next("error")).code, "HOST_AUTH_FAILED");
+  await stale.closed;
+  const recovered = await f.host(gatewayId, rotatedToken);
+  assert.equal(recovered.socket.readyState, WebSocket.OPEN);
+});
 
 test("真实 HTTPS/WSS 邀请重试、私有持久化、多租户不透明双向转发与在线撤销", async (t) => {
   const f = await fixture(t),

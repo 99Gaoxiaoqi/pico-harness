@@ -30,7 +30,7 @@ const relayNames = {
   connecting: "正在连接",
   online: "Relay 在线",
   reconnecting: "网络断开，正在重连",
-  unauthorized: "Relay 认证失效",
+  unauthorized: "电脑未绑定服务",
   error: "连接错误",
 };
 function checked<T>(items: readonly T[], value: T, enabled: boolean): T[] {
@@ -46,7 +46,6 @@ export function MobileConnectionSettingsPage() {
   const api = window.pico?.remoteManagement;
   const [snapshot, setSnapshot] = useState<RemoteManagementSnapshot>();
   const [relayUrl, setRelayUrl] = useState("");
-  const [invitation, setInvitation] = useState("");
   const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
   const [qr, setQr] = useState<RemotePairingQr>();
   const [busy, setBusy] = useState(false);
@@ -195,14 +194,11 @@ export function MobileConnectionSettingsPage() {
               )
             )
               return;
-            const oneTimeInvitation = invitation.trim();
-            setInvitation("");
             void run(async () => {
               setSnapshot(
                 unwrap(
                   await api.configure({
                     relayUrl: relayUrl.trim(),
-                    ...(oneTimeInvitation ? { invitation: oneTimeInvitation } : {}),
                     workspaces: selectedPaths.map((path) => ({ path })),
                   }),
                 ),
@@ -224,20 +220,8 @@ export function MobileConnectionSettingsPage() {
               autoComplete="off"
             />
           </div>
-          <div className="mobile-field">
-            <span>一次性内测邀请</span>
-            <TextField
-              label="一次性内测邀请"
-              type="password"
-              placeholder="首次注册电脑时填写"
-              value={invitation}
-              disabled={busy || active || !api}
-              onValueChange={setInvitation}
-              autoComplete="off"
-            />
-          </div>
           <p className="settings-section__note">
-            邀请仅用于注册本机，提交后清空。已注册电脑更新项目范围时可留空。
+            电脑与 Relay 的绑定由部署初始化完成。保存地址和项目后，开启连接并等待 Relay 在线。
           </p>
           <fieldset className="mobile-workspace-picker" disabled={busy || active || !api}>
             <legend>允许手机访问的项目</legend>
@@ -315,7 +299,9 @@ export function MobileConnectionSettingsPage() {
           <p className="settings-section__note">
             {qr
               ? "二维码已过期，请重新生成。"
-              : "开启连接后生成 5 分钟有效的二维码。手机扫码后仍需在此电脑批准。"}
+              : config?.connectionMode === "relay" && snapshot?.relayState !== "online"
+                ? "Relay 在线后才能生成二维码。首次使用请先完成部署初始化，再开启手机连接。"
+                : "开启连接后生成 5 分钟有效的二维码。手机扫码后仍需在此电脑批准。"}
           </p>
         )}
         {snapshot?.pending.map((pending) => (

@@ -13,6 +13,7 @@ async function main(): Promise<void> {
       host: { type: "string" },
       port: { type: "string" },
       gateway: { type: "string" },
+      "token-hash": { type: "string" },
       ttl: { type: "string" },
       "allow-private-bind": { type: "boolean" },
       "trust-proxy": { type: "boolean" },
@@ -21,7 +22,7 @@ async function main(): Promise<void> {
   });
   if (values.help || !positionals[0]) {
     console.log(
-      "pico-relay serve [--home PATH] [--host 127.0.0.1] [--port 8787]\npico-relay invite [--home PATH] [--ttl SECONDS]\npico-relay revoke --gateway ID [--home PATH]",
+      "pico-relay serve [--home PATH] [--host 127.0.0.1] [--port 8787]\npico-relay bind --gateway ID --token-hash HASH [--home PATH]\npico-relay invite [--home PATH] [--ttl SECONDS]\npico-relay revoke --gateway ID [--home PATH]",
     );
     return;
   }
@@ -47,6 +48,17 @@ async function main(): Promise<void> {
     };
     process.once("SIGINT", close);
     process.once("SIGTERM", close);
+    return;
+  }
+  if (positionals[0] === "bind" && values.gateway && values["token-hash"]) {
+    console.log(
+      JSON.stringify(
+        await requestRelayControl(home, "bind", {
+          gatewayId: values.gateway,
+          tokenHash: values["token-hash"],
+        }),
+      ),
+    );
     return;
   }
   if (positionals[0] === "invite") {

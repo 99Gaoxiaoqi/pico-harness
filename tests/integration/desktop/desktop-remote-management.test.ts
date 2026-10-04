@@ -8,6 +8,7 @@ import { createRemoteManagementBridge } from "../../../apps/desktop/src/preload/
 import {
   REMOTE_MANAGEMENT_CHANNEL,
   type RemoteConfiguration,
+  type RemoteConfigureInput,
 } from "../../../apps/desktop/src/preload/remote-management-contract.js";
 import { registerRemoteManagementIpc } from "../../../apps/desktop/src/main/remote-management-ipc.js";
 import { RemoteManagementService } from "../../../apps/desktop/src/main/remote-management-service.js";
@@ -34,7 +35,7 @@ function ipcHarness(service: RemoteManagementService) {
   const bridge = createRemoteManagementBridge({
     invoke: async (channel, request) => handlers.get(channel)!(trusted, request),
   });
-  return { bridge, dispose, handlers };
+  return { bridge, dispose, handlers, trusted };
 }
 
 test("桌面手机连接通过可信桥接完成配置、唯一后台启动、二维码、本机批准和撤销，并持久化关闭状态", async (t) => {
@@ -43,6 +44,7 @@ test("桌面手机连接通过可信桥接完成配置、唯一后台启动、�
   const workspace = { id: "project-one", name: "Project", path: "/trusted/project" };
   let config: RemoteConfiguration = { configured: false, workspaces: [] };
   let running = false;
+  let relayState = "online";
   let spawns = 0;
   let devices: Record<string, unknown>[] = [];
   const expiresAt = Date.now() + 300_000;
@@ -51,7 +53,11 @@ test("桌面手机连接通过可信桥接完成配置、唯一后台启动、�
   const dependencies = {
     preferencesDirectory: root,
     readConfiguration: async () => config,
-    configure: async (input: { relayUrl: string }) => {
+    configure: async (input: RemoteConfigureInput) => {
+      assert.deepEqual(input, {
+        relayUrl: "https://relay.example.com",
+        workspaces: [{ path: workspace.path }],
+      });
       config = {
         configured: true,
         connectionMode: "relay",
@@ -73,7 +79,11 @@ test("桌面手机连接通过可信桥接完成配置、唯一后台启动、�
       if (!running) throw new Error("not running");
       if (method === "status")
         return {
-          relay: { state: "online", hostToken: "must-not-leak" },
+          relay: {
+            state: relayState,
+            hostToken: "must-not-leak",
+            ...(relayState !== "online" ? { lastError: "hostToken=must-not-leak" } : {}),
+          },
           runtime: { lastReachableAt: 12 },
         };
       if (method === "devices.list") return { devices };
@@ -110,13 +120,28 @@ test("桌面手机连接通过可信桥接完成配置、唯一后台启动、�
   t.after(dispose);
   const configured = await bridge.configure({
     relayUrl: "https://relay.example.com",
-    invitation: "one-time",
     workspaces: [{ path: workspace.path }],
   });
   assert.equal(configured.ok, true);
   const starts = await Promise.all([bridge.start({}), bridge.start({})]);
   assert.ok(starts.every((result) => result.ok));
   assert.equal(spawns, 1);
+  relayState = "unauthorized";
+  const unbound = await bridge.snapshot({});
+  assert.equal(unbound.ok && unbound.value.relayState, "unauthorized");
+  assert.equal(
+    unbound.ok && unbound.value.issue,
+    "电脑尚未完成服务绑定或已解除，请完成部署初始化。",
+  );
+  assert.doesNotMatch(JSON.stringify(unbound), /must-not-leak|hostToken|邀请|账号/u);
+  relayState = "error";
+  const networkFailure = await bridge.snapshot({});
+  assert.equal(
+    networkFailure.ok && networkFailure.value.issue,
+    "连接出现错误，请检查服务地址、网络或部署绑定后重试。",
+  );
+  assert.doesNotMatch(JSON.stringify(networkFailure), /must-not-leak|hostToken|邀请|账号/u);
+  relayState = "online";
   const qr = await bridge.offer({});
   assert.equal(qr.ok, true);
   if (!qr.ok) return;
@@ -149,7 +174,7 @@ test("桌面手机连接通过可信桥接完成配置、唯一后台启动、�
   assert.ok(!calls.some((method) => method.includes("shutdown")));
 });
 
-test("手机管理拒绝非可信页面、未知方法及多余字段，且不会把邀请或网关秘密放进错误响应", async (t) => {
+test("手机管理拒绝非可信页面、旧邀请及多余字段，且不会把网关秘密放进错误响应", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-remote-desktop-guard-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   let controlCalls = 0;
@@ -166,7 +191,7 @@ test("手机管理拒绝非可信页面、未知方法及多余字段，且不�
     spawn: async () => undefined,
     makeQr: pairingQrDataUrl,
   });
-  const { bridge, handlers, dispose } = ipcHarness(service);
+  const { bridge, handlers, dispose, trusted } = ipcHarness(service);
   t.after(dispose);
   assert.equal(
     (
@@ -181,6 +206,23 @@ test("手机管理拒绝非可信页面、未知方法及多余字段，且不�
     (await bridge.start({ unexpected: "value" } as unknown as Record<string, never>)).ok,
     false,
   );
+  const legacyInput = {
+    relayUrl: "https://relay.example.com",
+    invitation: "SECRET-INVITATION",
+    workspaces: [{ path: "/project" }],
+  };
+  const invalidArgument = {
+    ok: false,
+    error: { code: "INVALID_ARGUMENT", message: "手机连接请求参数无效", retryable: false },
+  };
+  assert.deepEqual(await bridge.configure(legacyInput), invalidArgument);
+  assert.deepEqual(
+    await handlers.get(REMOTE_MANAGEMENT_CHANNEL)!(trusted, {
+      action: "configure",
+      params: legacyInput,
+    }),
+    invalidArgument,
+  );
   const unauthorized = await handlers.get(REMOTE_MANAGEMENT_CHANNEL)!({} as IpcMainInvokeEvent, {
     action: "start",
     params: {},
@@ -192,9 +234,9 @@ test("手机管理拒绝非可信页面、未知方法及多余字段，且不�
   assert.equal(controlCalls, 0);
   const failed = await bridge.configure({
     relayUrl: "https://relay.example.com",
-    invitation: "SECRET-INVITATION",
     workspaces: [{ path: "/project" }],
   });
   assert.equal(failed.ok, false);
-  assert.doesNotMatch(JSON.stringify(failed), /SECRET|invitation=|hostToken=/u);
+  assert.equal(!failed.ok && failed.error.code, "REMOTE_MANAGEMENT_FAILED");
+  assert.doesNotMatch(JSON.stringify(failed), /SECRET|invitation=|hostToken=|邀请|账号/u);
 });

@@ -200,6 +200,15 @@ export class RelayServer {
         });
       });
       this.controlClose = await startControl(this.store.home, async (method, params) => {
+        if (method === "bind") {
+          if (
+            !validGatewayId(params.gatewayId) ||
+            !validTokenHash(params.tokenHash) ||
+            Object.keys(params).some((key) => !["gatewayId", "tokenHash"].includes(key))
+          )
+            throw new RelayError("INVALID_PARAMS");
+          return this.store.bind(params.gatewayId, params.tokenHash);
+        }
         if (method === "invite" && Object.keys(params).every((key) => key === "ttlMs"))
           return this.store.invite(params.ttlMs === undefined ? undefined : Number(params.ttlMs));
         if (

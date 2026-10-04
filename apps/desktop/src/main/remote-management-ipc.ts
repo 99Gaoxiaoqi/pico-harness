@@ -64,12 +64,12 @@ export function registerRemoteManagementIpc(options: {
         }
         return { ok: true, value: result };
       } catch {
-        // Gateway enrollment/network exceptions may contain an invitation or credential-bearing URL.
+        // Gateway/network exceptions may contain credentials or credential-bearing URLs.
         return {
           ok: false,
           error: {
             code: "REMOTE_MANAGEMENT_FAILED",
-            message: "手机连接操作失败。请检查服务地址、邀请、项目授权或连接状态后重试。",
+            message: "手机连接操作失败。请检查服务地址、网络、部署绑定、项目授权或连接状态后重试。",
             retryable: true,
           },
         };

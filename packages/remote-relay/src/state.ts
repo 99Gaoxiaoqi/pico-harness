@@ -204,6 +204,26 @@ export class RelayStore {
     );
     return result;
   }
+  bind(gatewayId: string, tokenHash: string): Promise<{ version: 1; bound: true }> {
+    if (!validGatewayId(gatewayId) || !validTokenHash(tokenHash))
+      return Promise.reject(new RelayError("INVALID_PARAMS"));
+    return this.mutate((state) => {
+      const prior = state.hosts.find((host) => host.gatewayId === gatewayId);
+      if (prior) {
+        if (prior.revokedAt === undefined) {
+          if (prior.tokenHash !== tokenHash) throw new RelayError("HOST_ALREADY_BOUND");
+          return { version: 1, bound: true };
+        }
+        if (prior.tokenHash === tokenHash) throw new RelayError("HOST_REVOKED");
+        prior.tokenHash = tokenHash;
+        delete prior.revokedAt;
+      } else {
+        if (state.hosts.length >= 10_000) throw new RelayError("HOST_LIMIT");
+        state.hosts.push({ gatewayId, tokenHash });
+      }
+      return { version: 1, bound: true };
+    });
+  }
   invite(ttlMs = 10 * 60_000): Promise<{ version: 1; invitation: string; expiresAt: number }> {
     if (!Number.isSafeInteger(ttlMs) || ttlMs < 1000 || ttlMs > 24 * 60 * 60_000)
       return Promise.reject(new RelayError("INVALID_PARAMS"));

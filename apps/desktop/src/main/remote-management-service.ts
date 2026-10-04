@@ -103,9 +103,11 @@ export class RemoteManagementService {
       ...(number(record(status.runtime).lastReachableAt) !== undefined
         ? { runtimeLastReachableAt: number(record(status.runtime).lastReachableAt) }
         : {}),
-      ...(relay.lastError || status.lastError
-        ? { issue: "连接出现错误，请检查服务地址、网络或内测邀请后重试。" }
-        : {}),
+      ...(relayState === "unauthorized"
+        ? { issue: "电脑尚未完成服务绑定或已解除，请完成部署初始化。" }
+        : relay.lastError || status.lastError
+          ? { issue: "连接出现错误，请检查服务地址、网络或部署绑定后重试。" }
+          : {}),
       devices: list(record(deviceResult).devices).map((value): RemoteDevice => {
         const device = record(value);
         return {
