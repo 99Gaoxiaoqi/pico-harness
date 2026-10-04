@@ -159,10 +159,11 @@ let conflict = false;
 let side = false;
 let renderApp;
 let reportConflict = false;
+let controlOperation = Promise.resolve();
 function check(value, message) { if (!value) throw Error(message); }
 const request = async (method, params) => {
   requests.push({method, params});
-  await new Promise(resolve => setTimeout(resolve, 10));
+  await new Promise(resolve => setTimeout(resolve, method === "goal.get" ? 90 : 10));
   if (method === "goal.get") return {goal:latest};
   if (conflict) { conflict = false; latest = {...latest,currentGoal:{...latest.currentGoal,revision:8,status:"waiting",lastReason:"等待外部构建"}}; throw Object.assign(new Error("stale"),{code:"CONFLICT"}); }
   if (params.action === "arm") latest = {...latest,currentGoal:{id:"g1",revision:1,condition:params.condition,status:"active",createdAt:1,maxIterations:params.maxIterations,blockCap:8,tokenBudget:params.tokenBudget,iterations:0,tokensAtStart:0,tokensNow:0,tokensBaselinePending:true,consecutiveNoProgress:0,armedAt:1}};
@@ -173,19 +174,19 @@ function App() {
  const [snapshot,setSnapshot] = useState(latest);
  const [history,setHistory] = useState([]);
  const controls = useConversationGoal({snapshot,costCNY:0.1234,
-   onArm: draft => controlGoalRequest(request,{workspacePath:"/project",sessionId:"s1"},{action:"arm",expectedRevision:snapshot.currentGoal?.revision ?? 0,...draft},next=>setSnapshot(next)),
-   onAction: async (action,goal) => {
+   onArm: draft => controlOperation = controlGoalRequest(request,{workspacePath:"/project",sessionId:"s1"},{action:"arm",expectedRevision:snapshot.currentGoal?.revision ?? 0,...draft},next=>setSnapshot(next)),
+   onAction: (action,goal) => controlOperation = (async () => {
      const ok = await controlGoalRequest(request,{workspacePath:"/project",sessionId:"s1"},{action,goalId:goal.id,expectedRevision:goal.revision},next=>{setSnapshot(next); const item=parseGoalItem({goal:next});if(item){ const goal=next.currentGoal; const canonical=parseConversation({items:[{id:item.id,kind:"goal",title:goal.condition,detail:goal.lastReason,state:goal.status,data:{goalId:goal.id,iterations:goal.iterations,maxIterations:goal.maxIterations,tokensUsed:goal.tokensNow-goal.tokensAtStart,tokenBudget:goal.tokenBudget}}]},"/project","s1").items[0];setHistory(current=>[...current,canonical]); }});
      reportConflict = !ok;
      return ok;
-   }
+   })()
  });
  renderApp = () => setSnapshot({...latest});
  if(side) return <SideChatWorkbarPanel child={{panelId:"p",sourceSessionId:"parent",targetSessionId:"s1",state:"live"}} items={history} draft="" active running={false} loading={false} onSend={()=>{}} onStop={()=>{}} onDraftChange={()=>{}} onRetryCreate={()=>{}} onClose={()=>{}} onSetGoal={controls.openDialog} goalDisabled={!controls.canSetGoal} goalStatus={controls.statusBar} goalDialog={controls.dialog}/>;
  return <><ConversationComposerMenu onSetGoal={controls.openDialog} goalDisabled={!controls.canSetGoal}/>{controls.statusBar}{controls.dialog}<ConversationTranscript items={history}/></>;
 }
 function find(label) { return [...document.querySelectorAll('button,[role="menuitem"]')].find(el => el.getAttribute("aria-label") === label || el.textContent.trim() === label); }
-async function click(label) { const target=find(label);check(target,"missing control: "+label);await act(async()=>{target.click();await new Promise(resolve=>setTimeout(resolve,35));}); }
+async function click(label) { const target=find(label);check(target,"missing control: "+label);await act(async()=>{target.click();await controlOperation;}); }
 function field(label) { const target = [...document.querySelectorAll('label[for]')].find(el=>el.textContent.startsWith(label)); return target ? document.getElementById(target.htmlFor) : null; }
 async function fill(label,value) { const input=field(label);check(input,"missing field: "+label);await act(async()=>{Object.getOwnPropertyDescriptor(input.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype,"value").set.call(input,value);input.dispatchEvent(new Event("input",{bubbles:true}));}); }
 
@@ -205,11 +206,11 @@ async function fill(label,value) { const input=field(label);check(input,"missing
   await fill("Goal token 限额","999");
   check(document.querySelector('.conversation-goal-dialog button[type="submit"]').disabled,"budget lower bound");
   await fill("Goal token 限额","2000");
-  await act(async()=>{const form=document.querySelector('.conversation-goal-dialog');form.dispatchEvent(new Event("submit",{bubbles:true,cancelable:true}));form.dispatchEvent(new Event("submit",{bubbles:true,cancelable:true}));await new Promise(resolve=>setTimeout(resolve,50));});
+  await act(async()=>{const form=document.querySelector('.conversation-goal-dialog');form.dispatchEvent(new Event("submit",{bubbles:true,cancelable:true}));form.dispatchEvent(new Event("submit",{bubbles:true,cancelable:true}));await controlOperation;});
   check(requests.filter(x=>x.method === "goal.control").length === 1,"duplicate arm sent");
   check(requests[0].params.expectedRevision === 0 && requests[0].params.maxIterations === 50 && requests[0].params.tokenBudget === 2000,"arm contract");
   check(document.body.textContent.includes("等待下一条消息") && document.body.textContent.includes("会话账单 ¥0.1234（含评估）"),"armed status and separate billing");
-  await act(async()=>{const pause=find("暂停 Goal");pause.click();pause.click();await new Promise(resolve=>setTimeout(resolve,50));});
+  await act(async()=>{const pause=find("暂停 Goal");pause.click();pause.click();await controlOperation;});
   check(requests.filter(x=>x.method === "goal.control").length === 2,"duplicate pause sent");
   check(find("继续 Goal"),"paused goal cannot resume");
   await click("添加上下文与模式");
