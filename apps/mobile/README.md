@@ -1,6 +1,6 @@
 # Pico Mobile
 
-React Native / Expo 原生 iOS、Android 客户端，直连电脑 HTTPS/WSS 网关。模型、工具和会话历史留在电脑。没有公网入口时明确报错，不使用中转服务。
+React Native / Expo 原生 iOS、Android 客户端，支持电脑 HTTPS/WSS 直连及内置 Relay。使用 Relay 时电脑和手机都主动出站，业务数据在两端之间加密；模型、工具和会话历史仍由电脑处理和保存。
 
 ## 构建
 
@@ -40,7 +40,9 @@ iOS 使用 `ios/Pico.xcworkspace` 的 Release 配置。真机安装必须由本�
 
 ## 配对与使用
 
-电脑配置可从手机网络访问的 HTTPS 网关，启动后执行 `pico remote pair`。手机扫码，输入设备名称，在电脑确认权限。令牌保存在 SecureStore；电脑列表仅保存地址与设备标识。
+推荐在电脑「设置 → 手机连接」配置已部署的 HTTPS Relay，选择授权项目，开启连接后生成二维码。手机扫码、填写设备名称，然后回电脑核对权限并批准。Relay 的部署和邀请步骤见[部署说明](../../docs/remote/relay-deployment.md)，电脑后台行为见[桌面连接说明](../../docs/remote/desktop-relay.md)。
+
+既有直连仍可使用 `pico remote pair`。令牌保存在 SecureStore；电脑列表保存端点、设备标识及二维码固定的电脑公钥。旧直连记录不会静默改为中继；新增配对保留独立设备身份，避免混用草稿和缓存。
 
 选择授权工作区、进入会话。会话页面提供图片输入、运行控制、审批、计划和问答；工作栏包含任务、Graph、执行、追踪、上下文、用量、文件、终端、审查及会话设置。
 
@@ -62,7 +64,7 @@ node --import tsx --test tests/integration/remote/mobile-session.test.ts
 
 ## 发布校验与本轮候选
 
-当前内部候选为 `0.1.1`，iOS buildNumber `2`、Android versionCode `2`。正式发布前需核对目标渠道已有最高编号；本仓库不能证明渠道编号递增。主体、隐私政策和支持渠道集中配置在 `app.json` 的 `expo.extra.release`，当前为空，只可用于内部验证。
+当前 Relay 内部候选为 `0.1.2`，iOS buildNumber `3`、Android versionCode `3`。正式发布前需核对目标渠道已有最高编号；本仓库不能证明渠道编号递增。主体、隐私政策和支持渠道集中配置在 `app.json` 的 `expo.extra.release`，当前为空，只可用于内部验证。
 
 ```sh
 npm run verify:release --workspace @pico/mobile -- --internal
@@ -83,4 +85,4 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild -workspace P
 
 `ios-simulator.entitlements.plist` 的 namespace 仅用于隔离模拟器 Keychain，不能用于真机、Archive、IPA 或商店签名。仅事后 codesign 无法替代模拟器链接阶段的 entitlement；完全禁用签名会使部分环境中的 SecureStore 不可用。真机使用真实 Apple Team 和对应签名配置。
 
-本轮代码验证与候选证据见 [整改交付记录](../../docs/plans/2026-10-04-mobile-release-delivery.md)。当前 Android 为 debug 证书签名的 Release 内部包；iOS 为 Simulator Release ZIP。正式签名、真机权限/键盘/分享与可信公网蜂窝验收仍未运行。
+Relay 本轮验证与交付状态见 [中继实施记录](../../docs/plans/2026-10-04-mobile-relay-implementation.md)。此前 UI 整改候选证据见 [历史交付记录](../../docs/plans/2026-10-04-mobile-release-delivery.md)，其原生验证不能代替本次 Relay 候选。正式签名和公网蜂窝验收须有相应资源后单独执行。
