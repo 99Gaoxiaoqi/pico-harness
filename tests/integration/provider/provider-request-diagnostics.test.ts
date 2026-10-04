@@ -20,6 +20,8 @@ import type { PhysicalAttemptRecord } from "@pico/storage/runtime-control-types"
 
 class PreparedClaudeProvider implements LLMProvider {
   readonly modelName = "claude-cache-test";
+  // New Provider/Tracker instances still belong to one ordered, instantaneous fixture timeline.
+  private static attemptTime = Date.parse("2026-01-01T00:00:00.000Z");
 
   constructor(private readonly maxTokens: number) {}
 
@@ -51,7 +53,21 @@ class PreparedClaudeProvider implements LLMProvider {
       model: this.modelName,
       body,
     });
-    await reportFixtureAttempt(options, "claude", this.modelName, {
+    const startedAt = new Date(PreparedClaudeProvider.attemptTime++).toISOString();
+    const attemptOptions: LLMProviderRequestOptions = {
+      ...options,
+      onProviderAttemptStart: async (snapshot) => {
+        await options?.onProviderAttemptStart?.({ ...snapshot, startedAt });
+      },
+      onProviderAttemptUpdate: async (snapshot) => {
+        await options?.onProviderAttemptUpdate?.({
+          ...snapshot,
+          startedAt,
+          completedAt: startedAt,
+        });
+      },
+    };
+    await reportFixtureAttempt(attemptOptions, "claude", this.modelName, {
       promptTokens: 10,
       completionTokens: 1,
     });
