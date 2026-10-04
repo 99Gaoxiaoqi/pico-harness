@@ -551,7 +551,7 @@ export class ToolRegistry implements Registry {
     }
 
     // 5. 执行工具逻辑:所有安全门 + Hook + 权限链都放行了
-    let fatalFailure: ToolCommitBoundaryError | undefined;
+    let fatalFailure: ToolCommitBoundaryError | HookProcessTreeTerminationError | undefined;
     let auditRefusal: Error | undefined;
     try {
       const executionContext: ToolExecutionContext = {
@@ -610,7 +610,11 @@ export class ToolRegistry implements Registry {
             throw new ToolCommitBoundaryError("T1", new Error("Tool binding changed after T1"));
           return tool.execute(currentCall.arguments, executionContext);
         })().catch((error: unknown) => {
-          if (error instanceof ToolCommitBoundaryError) fatalFailure = error;
+          if (
+            error instanceof ToolCommitBoundaryError ||
+            error instanceof HookProcessTreeTerminationError
+          )
+            fatalFailure = error;
           throw error;
         });
         void dispatchPromise.catch(() => {});

@@ -275,12 +275,30 @@ test(
     registry.register(readableTool("probe"));
     registry.register(createCodeModeTool({ registry }));
     registry.setHookService(fixture.service);
-    for (const { codeMode, cancelled } of [
-      { codeMode: false, cancelled: false },
-      { codeMode: true, cancelled: false },
-      { codeMode: true, cancelled: true },
+    let failCleanup = false;
+    let cleanupAttempts = 0;
+    const cleanupError = new Error("execution middleware cleanup failed");
+    const cleanup = async () => {
+      cleanupAttempts++;
+      throw cleanupError;
+    };
+    registry.useExecution(async (call, next) => {
+      try {
+        return await next(call);
+      } finally {
+        if (call.name === "exec" && failCleanup) await cleanup();
+      }
+    });
+    for (const { codeMode, cancelled, cleanupFailure } of [
+      { codeMode: false, cancelled: false, cleanupFailure: false },
+      { codeMode: true, cancelled: false, cleanupFailure: false },
+      { codeMode: true, cancelled: true, cleanupFailure: false },
+      { codeMode: true, cancelled: false, cleanupFailure: true },
+      { codeMode: true, cancelled: true, cleanupFailure: true },
     ]) {
       fixture.reset();
+      failCleanup = cleanupFailure;
+      const previousCleanupAttempts = cleanupAttempts;
       const controller = new AbortController();
       const reason = new Error("parent cancelled CodeMode");
       const step = registry.captureStep(`proof:${codeMode}:${cancelled}`, [
@@ -316,7 +334,19 @@ test(
         [],
         "unproven termination cannot dispatch lookup or later probe",
       );
+      assert.equal(cleanupAttempts - previousCleanupAttempts, cleanupFailure ? 1 : 0);
     }
+    const ordinary = await registry.execute(
+      {
+        id: "ordinary-cleanup",
+        name: "exec",
+        arguments: JSON.stringify({ code: "return await tools.probe({});" }),
+      },
+      { step: registry.captureStep("ordinary-cleanup", ["probe", "exec"]) },
+    );
+    assert.equal(ordinary.isError, true, "ordinary middleware cleanup remains a ToolResult error");
+    assert.match(ordinary.output, /execution middleware cleanup failed/u);
+    assert.deepEqual(executions, ["probe"]);
   },
 );
 
