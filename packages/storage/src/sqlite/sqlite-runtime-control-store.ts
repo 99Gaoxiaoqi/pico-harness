@@ -1399,7 +1399,7 @@ export class SqliteRuntimeControlStore {
     return this.write(() => {
       const key = daemonCommandKey(commandType, idempotencyKey);
       const existingRow = this.getRow(
-        `SELECT * FROM daemon_commands WHERE idempotency_key = ?`,
+        `SELECT *, hex(idempotency_key) AS idempotency_key_hex FROM daemon_commands WHERE idempotency_key = ?`,
         key,
       );
       if (existingRow) {
@@ -1454,7 +1454,7 @@ export class SqliteRuntimeControlStore {
     if (!normalized) throw new Error("daemon commandType 必须是非空字符串");
     return this.read(() =>
       this.allRows(
-        `SELECT * FROM daemon_commands WHERE command_type = ? ORDER BY created_at, idempotency_key`,
+        `SELECT *, hex(idempotency_key) AS idempotency_key_hex FROM daemon_commands WHERE command_type = ? ORDER BY created_at, idempotency_key`,
         normalized,
       ).map(rowToDaemonCommand),
     );
@@ -2551,7 +2551,8 @@ function rowToCronRun(row: Row): CronRunRecord {
 function rowToDaemonCommand(row: Row): DaemonCommandState {
   return compact({
     commandType: textField(row, "command_type"),
-    idempotencyKey: textField(row, "idempotency_key"),
+    // Node 22 truncates SQLite TEXT at NUL; the existing composite key must retain every byte.
+    idempotencyKey: Buffer.from(textField(row, "idempotency_key_hex"), "hex").toString("utf8"),
     requestHash: textField(row, "request_hash"),
     requestJson: textField(row, "request_json"),
     status: textField(row, "status") as DaemonCommandState["status"],

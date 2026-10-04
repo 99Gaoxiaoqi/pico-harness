@@ -344,21 +344,19 @@ test("headless sends image bytes only through Runtime and keeps result and trace
     ...requestFor(fixture, "images-runtime-wire"),
     imagePaths: ["runtime.png"],
   };
-  let receivedImages: Message["images"];
+  let receivedBody = "";
+  const server = await createFakeOpenAiServer(context, false, (body) => {
+    receivedBody = body;
+  });
   const outcome = await runHeadlessOneShotJson(JSON.stringify(request), {
     env: {},
-    providerFactory: () => ({
-      async generate(messages) {
-        receivedImages = messages.find((message) => message.role === "user")?.images;
-        return assistant("runtime image received", { promptTokens: 3, completionTokens: 2 });
-      },
-    }),
+    providerFactory: (_kind, config, _thinkingEffort, dependencies) =>
+      new AiSdkProvider("openai", { ...config, baseURL: server.baseURL }, undefined, dependencies),
   });
 
   assert.equal(outcome.exitCode, 0, JSON.stringify(outcome.result));
-  assert.deepEqual(receivedImages, [
-    { type: "image_base64", mimeType: "image/png", data: encoded },
-  ]);
+  assert.ok(receivedBody.includes(`data:image/png;base64,${encoded}`));
+  assert.equal(receivedBody.includes("image_artifact"), false);
   assert.equal(JSON.stringify(request).includes(encoded), false);
   assert.equal(JSON.stringify(outcome.result).includes(encoded), false);
   assert.ok(outcome.result.tracePath);
@@ -2424,15 +2422,19 @@ async function createFakeOpenAiServer(
     after(callback: () => void | Promise<void>): void;
   },
   hang = false,
+  onRequest?: (body: string) => void,
 ): Promise<{ server: Server; baseURL: string; called: Promise<void> }> {
   let markCalled!: () => void;
   const called = new Promise<void>((resolveCalled) => {
     markCalled = resolveCalled;
   });
   const server = createServer(async (request, response) => {
-    for await (const _chunk of request) {
+    let body = "";
+    for await (const chunk of request) {
+      body += chunk;
       // Drain the request before replying so fetch observes a normal response.
     }
+    onRequest?.(body);
     markCalled();
     if (hang) return;
     response.writeHead(200, { "content-type": "text/event-stream" });

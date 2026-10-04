@@ -5,6 +5,11 @@ import { setTimeout as delay } from "node:timers/promises";
 import { render } from "ink";
 import {
   LOCAL_RUNTIME_PROTOCOL_VERSION,
+  MEMORY_PAGINATION_RUNTIME_CAPABILITY,
+  DESKTOP_RUNTIME_SCHEMA_REVISION,
+  DESKTOP_RUNTIME_SCHEMA_CAPABILITY,
+  CAPABILITY_SCOPE_RUNTIME_CAPABILITY,
+  TEMPORARY_WORKSPACE_RUNTIME_CAPABILITY,
   TRANSCRIPT_PROJECTOR_VERSION,
   type RuntimeNotification,
   type RuntimeGoalSnapshot,
@@ -100,6 +105,19 @@ function createHarness(options?: {
     request: async (method: string, params: Record<string, unknown>) => {
       requests.push({ method, params });
       switch (method) {
+        case "runtime.ping":
+          return {
+            pong: true,
+            protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
+            desktopSchemaRevision: DESKTOP_RUNTIME_SCHEMA_REVISION,
+            picoHome: "C:\\pico-home",
+            capabilities: [
+              DESKTOP_RUNTIME_SCHEMA_CAPABILITY,
+              CAPABILITY_SCOPE_RUNTIME_CAPABILITY,
+              TEMPORARY_WORKSPACE_RUNTIME_CAPABILITY,
+              MEMORY_PAGINATION_RUNTIME_CAPABILITY,
+            ],
+          };
         case "session.send":
           return {
             session: sessionRecord("s1"),
@@ -610,6 +628,7 @@ function createHarness(options?: {
               { itemId: "manual-item:abc", lifecycleState: "active" },
               { itemId: "archived-item", lifecycleState: "archived" },
             ],
+            pageInfo: { revision: 3, counts: { active: 1, archived: 1, total: 2 } },
           };
         case "memory.settings.get":
           return {

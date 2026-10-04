@@ -306,6 +306,10 @@ test("sqlite control store: 单 BEGIN IMMEDIATE 事务原子性 + revision CAS +
     assert.equal(first.replayed, false);
     assert.equal(first.resourceId, "nested-job");
     assert.equal(store.getJob("nested-job")?.status, "queued");
+    assert.equal(
+      store.listDaemonCommands("job.create")[0]?.idempotencyKey,
+      "job.create\0request-1",
+    );
 
     const replay = store.executeIdempotentDaemonCommand(
       { commandType: "job.create", idempotencyKey: "request-1", request: { description: "one" } },

@@ -27,7 +27,15 @@ test("physical attempts persist cache downgrade and streaming retry separately w
       res.end(JSON.stringify({ error: { message: "unknown parameter prompt_cache_key" } }));
     } else if (requests === 2) {
       res.writeHead(503, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: { message: "private upstream response" } }));
+      res.end(
+        JSON.stringify({
+          error: {
+            message: "temporary upstream unavailable",
+            privateDetail: "private upstream response",
+          },
+          rawResponse: "private upstream response",
+        }),
+      );
     } else {
       res.writeHead(200, { "content-type": "text/event-stream" });
       const send = (data: unknown) => res.write(`data: ${JSON.stringify(data)}\n\n`);
@@ -125,6 +133,10 @@ test("physical attempts persist cache downgrade and streaming retry separately w
     assert.equal(attempts[2]!.usage!.promptTokens, 10);
     assert.equal(attempts[2]!.costStatus, "included");
     assert.equal(attempts[2]!.costCNY, 0);
+    assert.equal(
+      calls[0]!.data.error,
+      'LLMStatusError status=503; detail omitted\nProvider detail: {"message":"temporary upstream unavailable"}',
+    );
     assert.doesNotMatch(JSON.stringify(events), /never-persist-this-key|private upstream response/);
   } finally {
     await session.close();
