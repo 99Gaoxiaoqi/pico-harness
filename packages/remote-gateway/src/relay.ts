@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import { randomBytes } from "node:crypto";
 import { WebSocket } from "ws";
-import { createRelayHostSession } from "@pico/remote-client/relay-crypto";
+import { createRelayHostSession } from "@pico/protocol/relay-crypto";
 import { RELAY_MAX_FRAME_BYTES, type RemoteRelayEndpoint } from "@pico/protocol/relay";
 
 export interface RelayStatus {

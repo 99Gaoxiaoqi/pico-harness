@@ -6,7 +6,7 @@ import ts from "typescript";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const forbidden =
-  /^(?:node:|electron(?:\/|$)|@pico\/(?:pico-host|runtime-host|runtime|storage|cli|remote-gateway)(?:\/|$))/;
+  /^(?:node:|electron(?:\/|$)|@pico\/(?:pico-host|runtime-host|runtime|storage|cli|remote-gateway|remote-relay)(?:\/|$))/;
 const errors = [];
 function files(dir) {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {

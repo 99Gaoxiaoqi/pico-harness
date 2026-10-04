@@ -25,6 +25,10 @@
     "./relay": {
       "types": "./dist/relay.d.ts",
       "import": "./dist/relay.js"
+    },
+    "./relay-crypto": {
+      "types": "./dist/relay-crypto.d.ts",
+      "import": "./dist/relay-crypto.js"
     }
   },
   "files": [
@@ -35,6 +39,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@pico/core": "*"
+    "@pico/core": "*",
+    "tweetnacl": "1.0.3"
   }
 }

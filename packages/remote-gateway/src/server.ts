@@ -278,7 +278,7 @@ export class RemoteGateway {
         : {};
     switch (method) {
       case "stop":
-        setTimeout(() => {
+        scheduleUnrefDeadline(() => {
           void this.close();
         }, 25);
         return { stopped: true };

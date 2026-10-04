@@ -23,7 +23,6 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@pico/protocol": "*",
-    "tweetnacl": "1.0.3"
+    "@pico/protocol": "*"
   }
 }

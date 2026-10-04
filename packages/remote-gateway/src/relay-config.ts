@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { basename, join } from "node:path";
-import { createRelayIdentity } from "@pico/remote-client/relay-crypto";
+import { createRelayIdentity } from "@pico/protocol/relay-crypto";
 import { parseRelayEndpoint, type RemoteRelayEndpoint } from "@pico/protocol/relay";
 import { WorkspaceRegistrationStore } from "@pico/pico-host/workspace-registration";
 import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";

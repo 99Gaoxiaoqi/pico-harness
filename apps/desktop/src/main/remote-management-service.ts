@@ -1,3 +1,4 @@
+import { waitForDelay } from "@pico/runtime/deadline";
 import { readFile, writeFile, rename } from "node:fs/promises";
 import { join } from "node:path";
 import type { RemotePermission } from "@pico/protocol/remote";
@@ -157,9 +158,7 @@ export class RemoteManagementService {
         await this.dependencies.control("status");
       } catch {
         await this.dependencies.spawn();
-        const delay =
-          this.dependencies.delay ??
-          ((ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+        const delay = this.dependencies.delay ?? waitForDelay;
         let ready = false;
         for (let attempt = 0; attempt < (this.dependencies.startupAttempts ?? 60); attempt++) {
           await delay(500);
@@ -190,9 +189,7 @@ export class RemoteManagementService {
       }
       if (running) {
         await this.dependencies.control("stop");
-        const delay =
-          this.dependencies.delay ??
-          ((ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+        const delay = this.dependencies.delay ?? waitForDelay;
         for (let attempt = 0; attempt < 40; attempt++) {
           await delay(100);
           try {

@@ -1,3 +1,5 @@
+import { RemoteProtocolError } from "./remote-error.js";
+export { RemoteProtocolError } from "./remote-error.js";
 import { parseRelayEndpoint, type RemoteRelayEndpoint } from "./relay.js";
 export type { RemoteRelayEndpoint } from "./relay.js";
 import {
@@ -288,17 +290,6 @@ export interface RemoteError {
 export type RemoteResponse<T = unknown> =
   | { requestId: string; ok: true; value: T }
   | { requestId: string; ok: false; error: RemoteError };
-export class RemoteProtocolError extends Error {
-  constructor(
-    readonly code: string,
-    message: string,
-    readonly retryable = false,
-    readonly outcome?: "not_executed" | "unknown",
-  ) {
-    super(message);
-    this.name = "RemoteProtocolError";
-  }
-}
 export function parseRemoteRequest(value: unknown): RemoteRequest {
   if (
     !isJsonObject(value) ||

@@ -72,6 +72,16 @@ const HANDWRITTEN_TIMEOUT_WHITELIST = new Map([
     "骨架：operation server-side deadline（挂死 handler 防泄漏）",
   ],
   ["packages/runtime-host/src/transport/framed-transport.ts", "骨架：帧读超时"],
+  ["apps/mobile/src/pairing.ts", "移动端配对轮询；沿用移动端独立定时器，不依赖 Node Runtime"],
+  [
+    "packages/remote-client/src/relay-transport.ts",
+    "移动端纯传输：Relay WSS握手/请求超时与事件回调共存，不依赖 Node Runtime",
+  ],
+  ["packages/remote-relay/src/server.ts", "独立Relay传输：首帧期限和关闭宽限；不依赖业务Runtime"],
+  [
+    "packages/remote-relay/src/control.ts",
+    "独立Relay私有控制通道：连接/读取期限；不依赖业务Runtime",
+  ],
   ["apps/mobile/src/store.tsx", "移动端短时配对轮询，不依赖 Node Runtime"],
   ["apps/mobile/src/transcript.ts", "移动端历史恢复的总等待预算；不可依赖 Node Runtime deadline"],
   [

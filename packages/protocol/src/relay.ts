@@ -1,4 +1,4 @@
-import { RemoteProtocolError } from "./remote.js";
+import { RemoteProtocolError } from "./remote-error.js";
 
 export const RELAY_PROTOCOL_VERSION = 1 as const;
 export const RELAY_MAX_FRAME_BYTES = 2 * 1024 * 1024 + 64 * 1024;
