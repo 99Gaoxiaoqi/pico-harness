@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
+import { HookProcessTreeTerminationError } from "./termination-error.js";
 import type {
   HookCondition,
   HookDiagnostic,
@@ -155,6 +156,7 @@ export class HookService {
           try {
             return await this.options.executor.execute(entry, input, context);
           } catch (error) {
+            if (error instanceof HookProcessTreeTerminationError) throw error;
             if (context.signal?.aborted) throw abortReason(context.signal);
             return {
               decision: "allow",
@@ -341,9 +343,11 @@ async function runLimited<T extends ResolvedHookHandler>(
 ): Promise<HookOutput[]> {
   const results: HookOutput[] = new Array(entries.length);
   let next = 0;
+  let terminationFailure: HookProcessTreeTerminationError | undefined;
   const agentSlots = new Semaphore(agentConcurrency);
   const workers = Array.from({ length: Math.min(concurrency, entries.length) }, async () => {
     while (next < entries.length) {
+      if (terminationFailure) return;
       if (signal?.aborted) throw abortReason(signal);
       const index = next++;
       const entry = entries[index];
@@ -351,13 +355,27 @@ async function runLimited<T extends ResolvedHookHandler>(
       const releaseAgent =
         entry.handler.type === "agent" ? await agentSlots.acquire(signal) : undefined;
       try {
+        if (terminationFailure) return;
         results[index] = await execute(entry);
+      } catch (error) {
+        if (error instanceof HookProcessTreeTerminationError) terminationFailure ??= error;
+        throw error;
       } finally {
         releaseAgent?.();
       }
     }
   });
-  await Promise.all(workers);
+  let firstFailure: { error: unknown } | undefined;
+  await Promise.allSettled(
+    workers.map((worker) =>
+      worker.catch((error: unknown) => {
+        firstFailure ??= { error };
+        throw error;
+      }),
+    ),
+  );
+  if (terminationFailure) throw terminationFailure;
+  if (firstFailure) throw firstFailure.error;
   return results;
 }
 

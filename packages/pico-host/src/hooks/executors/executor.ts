@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { ChildProcess } from "node:child_process";
-import { signalProcessTree } from "@pico/runtime/process-tree";
+import { signalProcessTree, type WindowsProcessTreeFailure } from "@pico/runtime/process-tree";
 import { waitForDelay } from "@pico/runtime/deadline";
 import type { LLMProvider, Message } from "@pico/core";
 import { mcpResultToText, type McpToolResult } from "@pico/runtime-host/mcp-protocol";
@@ -17,6 +17,7 @@ import type {
   ResolvedHookHandler,
 } from "../types.js";
 import type { HookExecutor } from "../service.js";
+import { HookProcessTreeTerminationError } from "../termination-error.js";
 import {
   resolveCommandHookExecution,
   resolveHookShell,
@@ -36,6 +37,9 @@ const DEFAULT_TIMEOUT_MS = 60_000;
 const MAX_OUTPUT_BYTES = 1024 * 1024;
 const DEFAULT_REDIRECTS = 3;
 const ABORT_KILL_GRACE_MS = 250;
+
+/** An unconfirmed process tree must never become an ordinary fail-open Hook error. */
+export { HookProcessTreeTerminationError } from "../termination-error.js";
 
 export interface HookExecutorLogger {
   warn(context: Readonly<Record<string, unknown>>, message: string): void;
@@ -180,6 +184,7 @@ export class DefaultHookExecutor implements HookExecutor {
           return await this.executeAgent(resolved, resolved.handler, input, signal);
       }
     } catch (err) {
+      if (err instanceof HookProcessTreeTerminationError) throw err;
       if (effectiveContext.signal.aborted) throw abortReason(effectiveContext.signal);
       return failOpen(resolved, errorMessage(err));
     }
@@ -264,7 +269,9 @@ export class DefaultHookExecutor implements HookExecutor {
     try {
       await running.started;
     } catch (err) {
-      await running.completion.catch(() => undefined);
+      await running.completion.catch((error: unknown) => {
+        if (error instanceof HookProcessTreeTerminationError) throw error;
+      });
       throw err;
     }
     if (runsInBackground) {
@@ -506,6 +513,8 @@ function startCommand(
       terminationRequested = true;
       terminationReason = reason;
       terminationBarrier = terminateProcessTree(child);
+      // Keep the original rejected barrier for close-time propagation, but observe it immediately.
+      void terminationBarrier.catch(() => undefined);
     };
     const onAbort = () => {
       startReject?.(abortReason(signal));
@@ -556,7 +565,7 @@ function startCommand(
               "[Hook] 进程树终止无法确认",
             );
             fail(
-              new AggregateError(
+              new HookProcessTreeTerminationError(
                 [terminationReason, terminationError],
                 `Hook command 失败且进程树终止无法确认: ${errorDiagnostic(terminationReason)}`,
               ),
@@ -733,11 +742,19 @@ function terminateProcessTree(child: ChildProcess): Promise<void> {
     // Windows 没有可供 Node 直接持有的可移植 Job Object handle；在根进程尚活着时
     // 立即启动 taskkill /T /F，并等待 taskkill close/error。不再延迟 250ms，
     // 避免根进程先退出后丢失子树归属，也避免对可能复用的旧 PID 操作。
-    return signalProcessTree(child, "SIGKILL", { requireWindowsTreeProof: true }).then(
-      (terminated) => {
-        if (!terminated) throw new Error(`无法确认 Windows Hook 进程树 ${pid} 已终止`);
+    let diagnostic: WindowsProcessTreeFailure | undefined;
+    return signalProcessTree(child, "SIGKILL", {
+      requireWindowsTreeProof: true,
+      onWindowsTreeProofFailure: (failure) => {
+        diagnostic = failure;
       },
-    );
+    }).then((terminated) => {
+      if (!terminated) {
+        throw new Error(
+          `无法确认 Windows Hook 进程树 ${pid} 已终止: ${JSON.stringify(diagnostic)}`,
+        );
+      }
+    });
   }
   const signalProcess = (signal: NodeJS.Signals) => {
     try {
