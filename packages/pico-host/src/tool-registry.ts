@@ -29,6 +29,7 @@ import type { ToolCall, ToolDefinition, ToolResult } from "@pico/core";
 import { ToolAccesses } from "@pico/runtime/tool-access";
 import { isToolArgumentAuditRefusal } from "@pico/core/tool-argument-audit";
 import type { HookService } from "./hooks/service.js";
+import { HookProcessTreeTerminationError } from "./hooks/termination-error.js";
 
 export interface ToolRegistryDiagnostics {
   info(contextOrMessage: Readonly<Record<string, unknown>> | string, message?: string): void;
@@ -653,7 +654,8 @@ export class ToolRegistry implements Registry {
       };
     } catch (err) {
       if (fatalFailure) throw fatalFailure;
-      if (err instanceof ToolCommitBoundaryError) throw err;
+      if (err instanceof ToolCommitBoundaryError || err instanceof HookProcessTreeTerminationError)
+        throw err;
       // 6. 封装:底层物理错误也封成 isError 的 ToolResult
       if (context?.signal?.aborted) {
         throw context.signal.reason instanceof Error
