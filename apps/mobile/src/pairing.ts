@@ -4,6 +4,7 @@ import type {
   RemotePairingStatus,
 } from "@pico/protocol/remote";
 import type { SavedHost } from "./core.js";
+import { parseRelayEndpoint, type RemoteRelayEndpoint } from "@pico/protocol/relay";
 
 export const PENDING_PAIRING_KEY = "pico.mobile.pairing.v1";
 type Approved = Extract<RemotePairingStatus, { status: "approved" }>;
@@ -14,12 +15,14 @@ export type PendingPairing = {
   deviceName: string;
   submitted: RemotePairingSubmitted;
   approved?: Approved;
+  relay?: RemoteRelayEndpoint;
 };
 export type PairingProgress = {
   publicUrl: string;
   deviceName: string;
   expiresAt: number;
   phase: "approval" | "confirmation";
+  relay?: RemoteRelayEndpoint;
 };
 type SecurePort = {
   getItemAsync(key: string): Promise<string | null>;
@@ -28,8 +31,16 @@ type SecurePort = {
 };
 export type PairingPort = {
   submit(offer: RemotePairingOffer, name: string): Promise<RemotePairingSubmitted>;
-  status(url: string, claim: RemotePairingSubmitted): Promise<RemotePairingStatus>;
-  acknowledge(url: string, claim: RemotePairingSubmitted): Promise<void>;
+  status(
+    url: string,
+    claim: RemotePairingSubmitted,
+    relay?: RemoteRelayEndpoint,
+  ): Promise<RemotePairingStatus>;
+  acknowledge(
+    url: string,
+    claim: RemotePairingSubmitted,
+    relay?: RemoteRelayEndpoint,
+  ): Promise<void>;
   verify(host: SavedHost, token: string): Promise<void>;
   install(host: SavedHost, token: string): Promise<void>;
   revoke(host: SavedHost, token: string): Promise<void>;
@@ -47,6 +58,7 @@ function hostFor(pending: PendingPairing): SavedHost {
     baseUrl: pending.publicUrl,
     gatewayId: pending.gatewayId,
     deviceId: approved.deviceId,
+    ...(pending.relay ? { relay: pending.relay } : {}),
   };
 }
 function endpoint(value: string) {
@@ -75,6 +87,14 @@ function readPending(raw: string): PendingPairing {
   )
     throw new Error("保存的配对记录无效，请取消后重新配对");
   endpoint(value.publicUrl);
+  if (value.relay) {
+    value.relay = parseRelayEndpoint(value.relay);
+    if (
+      value.relay.gatewayId !== value.gatewayId ||
+      value.relay.relayUrl !== endpoint(value.publicUrl)
+    )
+      throw new Error("保存的中继配对身份无效，请取消后重新配对");
+  }
   if (
     value.approved &&
     (value.approved.status !== "approved" ||
@@ -122,6 +142,7 @@ export class RecoverablePairing {
             deviceName: pending.deviceName,
             expiresAt: pending.submitted.expiresAt,
             phase: pending.approved ? "confirmation" : "approval",
+            ...(pending.relay ? { relay: pending.relay } : {}),
           }
         : undefined,
     );
@@ -155,6 +176,7 @@ export class RecoverablePairing {
         gatewayId: offer.gatewayId,
         deviceName: name,
         submitted,
+        ...(offer.relay ? { relay: parseRelayEndpoint(offer.relay) } : {}),
       };
       await this.serial(async () => {
         if (cancellation !== this.cancellation) throw new PairingInterrupted();
@@ -198,7 +220,7 @@ export class RecoverablePairing {
     while (!pending.approved && now() < pending.submitted.expiresAt) {
       let status: RemotePairingStatus;
       try {
-        status = await this.port.status(pending.publicUrl, pending.submitted);
+        status = await this.port.status(pending.publicUrl, pending.submitted, pending.relay);
       } catch (error) {
         this.assertCurrent(epoch);
         if (code(error) === "PAIRING_EXPIRED") return this.expired(epoch);
@@ -233,7 +255,7 @@ export class RecoverablePairing {
     let verified = false;
     if (now() < pending.submitted.expiresAt) {
       try {
-        await this.port.acknowledge(pending.publicUrl, pending.submitted);
+        await this.port.acknowledge(pending.publicUrl, pending.submitted, pending.relay);
       } catch (error) {
         this.assertCurrent(epoch);
         // Authentication also proves the gateway durably accepted the original ack.

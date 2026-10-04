@@ -28,6 +28,9 @@ import {
   type RemoteServerMessage,
   type RemoteSecretEdits,
 } from "@pico/protocol/remote";
+import type { RemoteRelayEndpoint } from "@pico/protocol/relay";
+import type { RelayRandomBytes } from "./relay-crypto.js";
+import { RelayTransport, RelayTransportError } from "./relay-transport.js";
 export { RemoteProtocolError } from "@pico/protocol/remote";
 export type RemoteConnectionState =
   | "disconnected"
@@ -51,6 +54,8 @@ export interface RemoteClientOptions {
   publicUrl: string;
   deviceToken: string;
   gatewayId?: string;
+  relay?: RemoteRelayEndpoint;
+  randomBytes?: RelayRandomBytes;
   fetch?: typeof fetch;
   createWebSocket?: (url: string, headers: Readonly<Record<string, string>>) => RemoteSocket;
   onState?: (state: RemoteConnectionState, error?: RemoteProtocolError) => void;
@@ -61,6 +66,10 @@ export interface RemoteRequestOptions {
   idempotencyKey?: string;
   secretEdits?: RemoteSecretEdits;
 }
+export type RemotePairingTransportOptions = Pick<
+  RemoteClientOptions,
+  "relay" | "randomBytes" | "createWebSocket"
+>;
 interface Subscription {
   id: string;
   workspaceId: string;
@@ -115,7 +124,11 @@ class ResponseValidationError extends RemoteProtocolError {}
 function blockedState(error: RemoteProtocolError): "unauthorized" | "incompatible" | undefined {
   if (["UNAUTHORIZED", "INVALID_AUTH", "DEVICE_REVOKED"].includes(error.code))
     return "unauthorized";
-  if (["VERSION_MISMATCH", "GATEWAY_MISMATCH", "CERTIFICATE_ERROR"].includes(error.code))
+  if (
+    ["VERSION_MISMATCH", "GATEWAY_MISMATCH", "CERTIFICATE_ERROR", "RELAY_IDENTITY_ERROR"].includes(
+      error.code,
+    )
+  )
     return "incompatible";
   return undefined;
 }
@@ -214,10 +227,31 @@ function defaultSocket(url: string, headers: Readonly<Record<string, string>>): 
   ) => RemoteSocket;
   return new Constructor(url, undefined, { headers });
 }
+async function pairingRequest<T>(
+  publicUrl: string,
+  fetcher: typeof fetch,
+  options: RemotePairingTransportOptions,
+  request: (fetcher: typeof fetch) => Promise<T>,
+): Promise<T> {
+  if (!options.relay) return request(fetcher);
+  const transport = new RelayTransport({
+    ...options,
+    relay: options.relay,
+    createWebSocket: options.createWebSocket ?? defaultSocket,
+  });
+  try {
+    if (transport.endpoint.relayUrl !== origin(publicUrl))
+      throw new RemoteProtocolError("INVALID_ENDPOINT", "配对中继地址不匹配");
+    return await request(transport.fetch);
+  } finally {
+    transport.close();
+  }
+}
 export class RemoteRuntimeClient {
   readonly publicUrl: string;
   readonly #options: RemoteClientOptions;
   readonly #fetch: typeof fetch;
+  readonly #relay?: RelayTransport;
   #socket: RemoteSocket | undefined;
   #connecting: Promise<void> | undefined;
   #cancelConnect: (() => void) | undefined;
@@ -232,8 +266,26 @@ export class RemoteRuntimeClient {
   constructor(options: RemoteClientOptions) {
     this.publicUrl = origin(options.publicUrl);
     if (!options.deviceToken) throw new RemoteProtocolError("UNAUTHORIZED", "缺少设备凭据");
-    this.#options = options;
-    this.#fetch = options.fetch ?? globalThis.fetch.bind(globalThis);
+    this.#options = options.relay
+      ? { ...options, gatewayId: options.gatewayId ?? options.relay.gatewayId }
+      : options;
+    if (options.relay) {
+      this.#relay = new RelayTransport({
+        relay: options.relay,
+        randomBytes: options.randomBytes,
+        createWebSocket: options.createWebSocket ?? defaultSocket,
+        onFatal: (error) => this.#block("incompatible", error),
+      });
+      if (
+        this.#relay.endpoint.relayUrl !== this.publicUrl ||
+        (options.gatewayId && this.#relay.endpoint.gatewayId !== options.gatewayId)
+      )
+        throw new RemoteProtocolError("GATEWAY_MISMATCH", "中继连接与配对电脑身份不一致");
+    }
+    this.#fetch = this.#relay?.fetch ?? options.fetch ?? globalThis.fetch.bind(globalThis);
+  }
+  get isRelay(): boolean {
+    return !!this.#relay;
   }
   authorizationHeaders(): Readonly<Record<string, string>> {
     return { Authorization: `Bearer ${this.#options.deviceToken}` };
@@ -272,7 +324,7 @@ export class RemoteRuntimeClient {
       ) {
         const blocked = blockedState(error);
         if (blocked) this.#block(blocked, error);
-        else if (error instanceof HttpTransportError) {
+        else if (error instanceof HttpTransportError || error instanceof RelayTransportError) {
           // A live WSS cannot prove HTTP health. Retire it and verify both paths
           // on one new connection, without replaying the failed operation.
           this.#retireConnection();
@@ -386,7 +438,8 @@ export class RemoteRuntimeClient {
     } catch (error) {
       if (
         (error instanceof ResponseValidationError ||
-          (error instanceof HttpTransportError && error.retryable)) &&
+          (error instanceof HttpTransportError && error.retryable) ||
+          error instanceof RelayTransportError) &&
         error.outcome !== "not_executed" &&
         REMOTE_METHOD_SPECS[method].mode === "command"
       )
@@ -422,10 +475,11 @@ export class RemoteRuntimeClient {
       if (this.#closed || !this.#foreground || generation !== this.#generation)
         throw new RemoteProtocolError("CLIENT_CLOSED", "旧连接已失效");
       await new Promise<void>((resolve, reject) => {
-        const socket = (this.#options.createWebSocket ?? defaultSocket)(
-          this.publicUrl.replace(/^https:/, "wss:") + "/v1/events",
-          this.authorizationHeaders(),
-        );
+        const socket = (
+          this.#relay?.createWebSocket ??
+          this.#options.createWebSocket ??
+          defaultSocket
+        )(this.publicUrl.replace(/^https:/, "wss:") + "/v1/events", this.authorizationHeaders());
         this.#socket = socket;
         let ready = false;
         const timer = setTimeout(() => {
@@ -729,6 +783,7 @@ export class RemoteRuntimeClient {
     if (this.#closed) return;
     this.setForeground(false);
     this.#closed = true;
+    this.#relay?.close();
     for (const subscription of this.#subscriptions.values()) {
       clearTimeout(subscription.timer);
       subscription.reject?.(new RemoteProtocolError("CLIENT_CLOSED", "连接已关闭"));
@@ -738,6 +793,8 @@ export class RemoteRuntimeClient {
     this.#disconnects.clear();
   }
   artifactUrl(workspaceId: string, sessionId: string, artifactId: string): string {
+    if (this.#relay)
+      throw new RemoteProtocolError("INVALID_ENDPOINT", "中继成果必须通过加密分块读取");
     return `${this.publicUrl}/v1/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(artifactId)}/content`;
   }
   async revoke(): Promise<void> {
@@ -757,14 +814,21 @@ export class RemoteRuntimeClient {
     offer: RemotePairingOffer,
     device: Pick<RemotePairingSubmission, "deviceName" | "platform">,
     fetcher: typeof fetch = globalThis.fetch.bind(globalThis),
+    transport: RemotePairingTransportOptions = {},
   ): Promise<RemotePairingSubmitted> {
     const checked = parsePairingOffer(offer);
-    const value = await jsonRequest(fetcher, checked.publicUrl, "/v1/pairings", undefined, {
-      version: 1,
-      gatewayId: checked.gatewayId,
-      secret: checked.secret,
-      ...device,
-    });
+    const value = await pairingRequest(
+      checked.publicUrl,
+      fetcher,
+      { ...transport, relay: checked.relay },
+      (fetcher) =>
+        jsonRequest(fetcher, checked.publicUrl, "/v1/pairings", undefined, {
+          version: 1,
+          gatewayId: checked.gatewayId,
+          secret: checked.secret,
+          ...device,
+        }),
+    );
     if (
       !isJsonObject(value) ||
       typeof value.pairingId !== "string" ||
@@ -778,12 +842,15 @@ export class RemoteRuntimeClient {
     publicUrl: string,
     pairing: RemotePairingSubmitted,
     fetcher: typeof fetch = globalThis.fetch.bind(globalThis),
+    transport: RemotePairingTransportOptions = {},
   ): Promise<RemotePairingStatus> {
-    const value = await jsonRequest(
-      fetcher,
-      publicUrl,
-      `/v1/pairings/${encodeURIComponent(pairing.pairingId)}`,
-      pairing.pairingToken,
+    const value = await pairingRequest(publicUrl, fetcher, transport, (fetcher) =>
+      jsonRequest(
+        fetcher,
+        publicUrl,
+        `/v1/pairings/${encodeURIComponent(pairing.pairingId)}`,
+        pairing.pairingToken,
+      ),
     );
     if (
       !isJsonObject(value) ||
@@ -807,13 +874,16 @@ export class RemoteRuntimeClient {
     publicUrl: string,
     pairing: RemotePairingSubmitted,
     fetcher: typeof fetch = globalThis.fetch.bind(globalThis),
+    transport: RemotePairingTransportOptions = {},
   ): Promise<void> {
-    const value = await jsonRequest(
-      fetcher,
-      publicUrl,
-      `/v1/pairings/${encodeURIComponent(pairing.pairingId)}/ack`,
-      pairing.pairingToken,
-      {},
+    const value = await pairingRequest(publicUrl, fetcher, transport, (fetcher) =>
+      jsonRequest(
+        fetcher,
+        publicUrl,
+        `/v1/pairings/${encodeURIComponent(pairing.pairingId)}/ack`,
+        pairing.pairingToken,
+        {},
+      ),
     );
     if (!isJsonObject(value) || value.acknowledged !== true)
       throw new ResponseValidationError("INVALID_RESPONSE", "配对确认响应无效");

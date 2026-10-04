@@ -43,9 +43,21 @@ export function connectionIssue(error: unknown): ConnectionIssue {
     return issue("pair", "在电脑重新生成配对内容并批准。撤销或过期的凭据无法通过重连恢复。 ");
   if (["FORBIDDEN", "PERMISSION_DENIED", "WORKSPACE_FORBIDDEN"].includes(code))
     return issue("authorize", "在电脑调整此设备的项目与操作权限，再连接。 ");
-  if (["VERSION_MISMATCH", "GATEWAY_MISMATCH", "INCOMPATIBLE_PROTOCOL"].includes(code))
+  if (
+    [
+      "VERSION_MISMATCH",
+      "GATEWAY_MISMATCH",
+      "INCOMPATIBLE_PROTOCOL",
+      "RELAY_IDENTITY_ERROR",
+    ].includes(code)
+  )
     return issue("update", "核对所连接电脑，更新手机与电脑到兼容版本；身份不符时重新配对。 ");
   const causeCode = String(value.cause?.code ?? "");
+  if (code === "RELAY_UNAVAILABLE")
+    return issue(
+      "reconnect",
+      "中继或电脑暂不可达。确认电脑在线后重新连接；恢复时只同步状态，不自动重发命令。",
+    );
   if (/CERT|TLS|SSL/.test(code + causeCode) || /certificate|证书|SSL/i.test(message))
     return issue("prepare", "检查电脑 HTTPS 证书有效期、域名和完整信任链。手机不会跳过证书校验。 ");
   if (

@@ -84,7 +84,9 @@ export function Computers() {
       {pico.hosts.map((host) => (
         <Card key={host.id}>
           <Text style={s.text}>{host.name}</Text>
-          <Label>{host.baseUrl}</Label>
+          <Label>
+            {host.relay ? "中继连接" : "HTTPS 直连"} · {host.baseUrl}
+          </Label>
           <View style={s.row}>
             <Button
               title={pico.host?.id === host.id ? "重新连接" : "连接"}
@@ -101,6 +103,22 @@ export function Computers() {
               onPress={() => void pico.perform(() => confirmClear(host, true))}
             />
           </View>
+          {!host.relay && (
+            <Button
+              title="通过中继重新配对"
+              quiet
+              onPress={() =>
+                Alert.alert(
+                  "为这台电脑添加中继连接",
+                  "在电脑启用中继后重新生成配对二维码。重新扫码会建立新的设备授权；当前直连记录、草稿和未确认操作会保留，请先核对旧记录中的未确认结果。",
+                  [
+                    { text: "返回", style: "cancel" },
+                    { text: "扫描新配对", onPress: () => setPairing(true) },
+                  ],
+                )
+              }
+            />
+          )}
         </Card>
       ))}
       {(!pico.hosts.length || help) && (
@@ -108,14 +126,13 @@ export function Computers() {
           <Text style={s.text}>配对准备</Text>
           <Label>1. 在电脑启动 Pico，确认项目已注册并信任。</Label>
           <Label>
-            2. 准备手机网络可达的公网 HTTPS 地址与系统信任的证书，配置网关后运行 pico remote
-            start，保持电脑唤醒。
+            2. 在电脑启用中继远程连接并保持唤醒；也可配置手机网络可达的 HTTPS 直连地址。
           </Label>
           <Label>3. 在电脑另开终端运行 pico remote pair，扫描或粘贴完整配对内容。</Label>
           <Label>4. 在电脑核对手机名称与权限并批准；手机完成确认后，电脑才会出现在列表中。</Label>
           <Label>
             pico remote doctor
-            仅检查电脑本机，不能证明蜂窝网络已连通。域名、端口、路由器和地址族也须可达。
+            仅检查电脑本机，不能证明手机网络已连通。中继需电脑在线；直连还需域名、证书与端口可达。
           </Label>
         </Card>
       )}
@@ -130,7 +147,8 @@ export function Computers() {
             {pico.pairing.phase === "approval" ? "等待电脑批准" : "等待配对确认"}
           </Text>
           <Label>
-            {pico.pairing.publicUrl} · {pico.pairing.deviceName}
+            {pico.pairing.relay ? "中继连接" : "HTTPS 直连"} · {pico.pairing.publicUrl} ·{" "}
+            {pico.pairing.deviceName}
           </Label>
           <Label>
             原申请有效至 {new Date(pico.pairing.expiresAt).toLocaleTimeString()}
@@ -221,7 +239,9 @@ export function Computers() {
             }
             onPress={() => void pair(raw)}
           />
-          <Label>使用系统信任的 HTTPS 证书。配对有效期 5 分钟。</Label>
+          <Label>
+            中继连接会核验电脑身份并加密传输。直连使用系统信任的 HTTPS 证书。配对有效期 5 分钟。
+          </Label>
         </Card>
       )}
       {pico.host && (

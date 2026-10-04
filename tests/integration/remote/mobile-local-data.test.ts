@@ -103,10 +103,14 @@ async function fixture() {
     get size() {
       return files.get(this.uri)?.length ?? 0;
     }
+    create() {
+      files.set(this.uri, new Uint8Array());
+    }
     delete() {
       files.delete(this.uri);
     }
-    open() {
+    open(_mode?: string) {
+      const thisFile = this;
       const bytes = files.get(this.uri)!;
       let offset = 0;
       return {
@@ -114,6 +118,13 @@ async function fixture() {
           const next = bytes.slice(offset, offset + length);
           offset += next.length;
           return next;
+        },
+        writeBytes(next: Uint8Array) {
+          const previous = files.get(thisFile.uri) ?? new Uint8Array();
+          const joined = new Uint8Array(previous.length + next.length);
+          joined.set(previous);
+          joined.set(next, previous.length);
+          files.set(thisFile.uri, joined);
         },
         close() {},
       };
@@ -166,7 +177,10 @@ async function fixture() {
   const prefix = `const native = globalThis[${JSON.stringify(port)}];`;
   const stubs = new Map([
     ["@react-native-async-storage/async-storage", `${prefix} export default native.storage;`],
-    ["expo-file-system", `${prefix} export const {Directory,File,Paths}=native.fs;`],
+    [
+      "expo-file-system",
+      `${prefix} export const {Directory,File,Paths}=native.fs; export const FileMode = {WriteOnly: 'w'};`,
+    ],
     [
       "expo-crypto",
       `${prefix} export const {randomUUID,CryptoDigestAlgorithm,digestStringAsync}=native.crypto;`,
@@ -231,6 +245,86 @@ async function fixture() {
 
 const scopeA: DraftScope = { hostId: "A", workspaceId: "workspace", sessionId: "session" };
 const scopeB = { ...scopeA, hostId: "B" };
+
+test("中继成果通过有界RPC分块交付，校验偏移与摘要，清理排空迟到读取", async () => {
+  const f = await fixture();
+  const content = new Uint8Array(70_123).map((_, i) => i % 251);
+  const artifact = {
+    artifactId: "relay-artifact",
+    title: "result.bin",
+    mimeType: "application/octet-stream",
+    sizeBytes: content.length,
+    digest: createHash("sha256").update(content).digest("hex"),
+  } as RuntimeSessionArtifact;
+  const offsets: number[] = [];
+  let invalid = false;
+  let gate: ReturnType<typeof deferred<void>> | undefined;
+  const entered = deferred<void>();
+  const client = {
+    isRelay: true,
+    artifactUrl() {
+      throw new Error("中继不得走URL下载");
+    },
+    authorizationHeaders() {
+      throw new Error("中继不得向下载服务外送bearer");
+    },
+    async request(
+      method: string,
+      params: { action: string; offsetBytes: number; limitBytes: number },
+      options: { workspaceId: string },
+    ) {
+      assert.equal(method, "session.artifacts.query");
+      assert.equal(params.action, "read_chunk");
+      assert.equal(params.limitBytes, 32 * 1024);
+      assert.equal(options.workspaceId, "workspace");
+      offsets.push(params.offsetBytes);
+      if (gate) {
+        entered.resolve();
+        await gate.promise;
+      }
+      const bytes = content.slice(params.offsetBytes, params.offsetBytes + params.limitBytes);
+      const end = params.offsetBytes + bytes.length;
+      return {
+        artifact,
+        contentBase64: Buffer.from(bytes).toString("base64"),
+        offsetBytes: params.offsetBytes + (invalid ? 1 : 0),
+        endOffsetBytes: end,
+        totalBytes: content.length,
+        truncated: end < content.length,
+        ...(end < content.length ? { nextOffsetBytes: end } : {}),
+      };
+    },
+  } as unknown as RemoteRuntimeClient;
+  const download = () =>
+    f.downloadArtifact({
+      client,
+      scopeId: "relay",
+      workspaceId: "workspace",
+      sessionId: "session",
+      artifact,
+      assertCurrent() {},
+    });
+  const file = await download();
+  assert.deepEqual(offsets, [0, 32 * 1024, 64 * 1024]);
+  assert.deepEqual(f.files.get(file.uri), content);
+  await f.clearHostLocalData("relay");
+  invalid = true;
+  await assert.rejects(download(), /偏移无效/);
+  assert.equal(
+    [...f.files.keys()].some((path) => path.endsWith(".partial")),
+    false,
+  );
+  invalid = false;
+  gate = deferred<void>();
+  const cancelled = assert.rejects(download(), /媒体读取已取消/);
+  await entered.promise;
+  const clear = f.clearHostLocalData("relay");
+  // Host cleanup drains recovery storage before cancelling active artifact reads.
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  gate.resolve();
+  await Promise.all([cancelled, clear]);
+  assert.equal(f.files.size, 0, "清理后迟到分块不得复活成果缓存");
+});
 
 test("按电脑清理保留另一台电脑，未确认操作须明确放弃，排空慢写和下载后拒绝迟到复活", async () => {
   const f = await fixture();
