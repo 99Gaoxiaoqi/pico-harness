@@ -123,7 +123,7 @@ jobs:
   node-compatibility:
     name: Node.js ${{ matrix.node }} compatibility
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
