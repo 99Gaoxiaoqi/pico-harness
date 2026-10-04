@@ -21,6 +21,15 @@ import {
 import { SqliteAgentGraphControlStore } from "@pico/storage/sqlite/agent-graph-control-store";
 import { initializeRuntimeEventOwner } from "../helpers/runtime-event-owner.js";
 
+function toolIdentity(payload: unknown) {
+  assert.ok(typeof payload === "object" && payload !== null);
+  assert.ok("kind" in payload && payload.kind === "tool");
+  assert.ok("name" in payload && typeof payload.name === "string");
+  assert.ok("runId" in payload && typeof payload.runId === "string");
+  assert.ok("turnId" in payload && typeof payload.turnId === "string");
+  return payload;
+}
+
 function eventBase(eventId: string, sessionId: string, runId = "run-1", turnId = "turn-1") {
   return {
     schemaVersion: 2 as const,
@@ -461,8 +470,9 @@ test("canonical tool projection preserves run identity for nested results and re
       through: started.transcriptWatermark!,
       maxBytes: 16_384,
     });
-    assert.equal(startPage.items[0]?.payload["runId"], "run-tool-turn");
-    assert.equal(startPage.items[0]?.payload["turnId"], "turn-tool-turn");
+    const startTool = toolIdentity(startPage.items[0]?.payload);
+    assert.equal(startTool.runId, "run-tool-turn");
+    assert.equal(startTool.turnId, "turn-tool-turn");
 
     const settled = await store.append(
       toolResult(
@@ -480,9 +490,11 @@ test("canonical tool projection preserves run identity for nested results and re
       through: settled.transcriptWatermark!,
       maxBytes: 16_384,
     });
-    assert.equal(settledPage.items[0]?.payload["runId"], "run-tool-turn");
-    assert.equal(settledPage.items[0]?.payload["turnId"], "turn-tool-turn");
-    assert.equal(settledPage.items[0]?.payload["status"], "success");
+    const settledTool = toolIdentity(settledPage.items[0]?.payload);
+    assert.equal(settledTool.runId, "run-tool-turn");
+    assert.equal(settledTool.turnId, "turn-tool-turn");
+    assert.ok("status" in settledTool && typeof settledTool.status === "string");
+    assert.equal(settledTool.status, "success");
 
     // exec's nested tools have canonical result events but no transcript tool.started row.
     for (const name of ["grep", "read_file"]) {
@@ -504,7 +516,10 @@ test("canonical tool projection preserves run identity for nested results and re
     }
     const page = await store.readTranscriptProjectionPage({ sessionId, maxBytes: 16_384 });
     assert.deepEqual(
-      page.items.map(({ payload }) => [payload["name"], payload["runId"], payload["turnId"]]),
+      page.items.map(({ payload }) => {
+        const tool = toolIdentity(payload);
+        return [tool.name, tool.runId, tool.turnId];
+      }),
       [
         ["read", "run-tool-turn", "turn-tool-turn"],
         ["grep", "run-tool-turn", "turn-tool-turn-2"],
