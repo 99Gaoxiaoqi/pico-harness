@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -18,13 +18,18 @@ import {
 import { createProductionRuntimeServices } from "@pico/pico-host/production-host";
 import { hostShellDialect } from "@pico/runtime/host-shell";
 import { globalSessionManager, Session } from "@pico/pico-host/session";
+import { resolvePicoPaths } from "@pico/pico-host/pico-paths";
 import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
 import {
   createManagedExecutionBoundary,
   createWorkspaceWritePermissionProfile,
 } from "@pico/core/permission-profile";
 import { DatabaseSync } from "node:sqlite";
-import { SqliteSessionWorkbarRepository, operationalDatabasePath } from "@pico/storage";
+import {
+  SqliteSessionWorkbarRepository,
+  hasOperationalDatabaseOwner,
+  operationalDatabasePath,
+} from "@pico/storage";
 import { SessionSubscriptionRegistry } from "@pico/pico-host/session-subscription-owner";
 import { SqliteSessionContinuitySource } from "@pico/pico-host/sqlite-session-continuity-source";
 import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
@@ -114,12 +119,27 @@ test(
       )
         artifactRevisions.push(payload["revision"]);
     });
-    t.after(() => unsubscribe());
+    const registry = new SessionSubscriptionRegistry(
+      "media-host",
+      new SqliteSessionContinuitySource({
+        picoHome,
+        readMetadata: (workspace, id) =>
+          services.desktopService.readSessionContinuityMetadata(workspace, id),
+      }),
+    );
     const ids: string[] = [];
     t.after(async () => {
+      unsubscribe();
+      registry.shutdown();
       await services.desktopService.close();
       for (const id of ids)
         await globalSessionManager.delete(id, workspacePath, { picoHome })?.close();
+      await services.desktopService.shutdownOwnershipFence().released;
+      assert.equal(
+        hasOperationalDatabaseOwner(resolvePicoPaths(workspacePath, { picoHome }).workspace.root),
+        false,
+        "删除媒体夹具前，其工作区的全部 SQLite lease 必须释放",
+      );
       await rm(root, { recursive: true, force: true });
     });
     await services.trustStore.trust(workspacePath);
@@ -139,16 +159,42 @@ test(
     const finished = await runtime.waitForRun(first.run!.runId);
     assert.equal(finished.status, "succeeded", finished.error);
     assert.deepEqual(await readFile(join(workspacePath, "movie.mp4")), mp4);
+    const artifactSnapshot = (await services.desktopService.handle(
+      createRuntimeRequest("session.artifacts.query", { workspacePath, sessionId, action: "list" }),
+    )) as RuntimeResult<"session.artifacts.query">;
+    if (
+      artifactSnapshot.revision !== 2 ||
+      !Array.isArray(artifactSnapshot.artifacts) ||
+      artifactSnapshot.artifacts.length !== 2 ||
+      artifactRevisions.length !== 1 ||
+      artifactRevisions[0] !== 2
+    ) {
+      const files = await Promise.all(
+        ["image.png", "movie.mp4"].map(async (name) => {
+          const path = join(workspacePath, name);
+          try {
+            const canonical = await realpath(path);
+            const info = await stat(path);
+            return {
+              name,
+              canonical,
+              dev: info.dev,
+              ino: info.ino,
+              size: info.size,
+              mtimeMs: info.mtimeMs,
+              ctimeMs: info.ctimeMs,
+            };
+          } catch (error) {
+            return { name, error: String(error) };
+          }
+        }),
+      );
+      t.diagnostic(JSON.stringify({ workspacePath, artifactRevisions, artifactSnapshot, files }));
+    }
+    assert.equal(artifactSnapshot.revision, 2);
+    assert.ok(Array.isArray(artifactSnapshot.artifacts));
+    assert.equal(artifactSnapshot.artifacts.length, 2);
     assert.deepEqual(artifactRevisions, [2], "已订阅的文件面板收到新媒体的artifacts资源事件");
-    const registry = new SessionSubscriptionRegistry(
-      "media-host",
-      new SqliteSessionContinuitySource({
-        picoHome,
-        readMetadata: (workspace, id) =>
-          services.desktopService.readSessionContinuityMetadata(workspace, id),
-      }),
-    );
-    t.after(() => registry.shutdown());
     const view = async (id: string) =>
       (await registry.open(
         { workspacePath, sessionId: id },
@@ -167,9 +213,10 @@ test(
     );
     await rm(join(workspacePath, "image.png"));
     await rm(join(workspacePath, "movie.mp4"));
+    unsubscribe();
     await services.desktopService.close();
     await globalSessionManager.delete(sessionId, workspacePath, { picoHome })?.close();
-    unsubscribe();
+    await services.desktopService.shutdownOwnershipFence().released;
     services = makeServices();
     unsubscribe = services.desktopService.subscribe((notice) => {
       const payload = notice.payload as Record<string, unknown> | null;
