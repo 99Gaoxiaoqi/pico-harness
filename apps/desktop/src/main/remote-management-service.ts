@@ -213,7 +213,7 @@ export class RemoteManagementService {
       throw new Error("配对信息无效。");
     // Preserve the wire offer verbatim (including protocol version), but keep its short-lived secret out of status.
     const serialized = JSON.stringify(payload).replace(
-      /[^\x00-\x7F]/gu,
+      /[\u0080-\uFFFF]/g,
       (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
     );
     return {

@@ -110,7 +110,7 @@ async function fixture() {
       files.delete(this.uri);
     }
     open(_mode?: string) {
-      const thisFile = this;
+      const fileUri = this.uri;
       const bytes = files.get(this.uri)!;
       let offset = 0;
       return {
@@ -120,11 +120,11 @@ async function fixture() {
           return next;
         },
         writeBytes(next: Uint8Array) {
-          const previous = files.get(thisFile.uri) ?? new Uint8Array();
+          const previous = files.get(fileUri) ?? new Uint8Array();
           const joined = new Uint8Array(previous.length + next.length);
           joined.set(previous);
           joined.set(next, previous.length);
-          files.set(thisFile.uri, joined);
+          files.set(fileUri, joined);
         },
         close() {},
       };
@@ -258,7 +258,8 @@ test("中继成果通过有界RPC分块交付，校验偏移与摘要，清理�
   } as RuntimeSessionArtifact;
   const offsets: number[] = [];
   let invalid = false;
-  let gate: ReturnType<typeof deferred<void>> | undefined;
+  const gate = deferred<void>();
+  let gateEnabled = false;
   const entered = deferred<void>();
   const client = {
     isRelay: true,
@@ -278,7 +279,7 @@ test("中继成果通过有界RPC分块交付，校验偏移与摘要，清理�
       assert.equal(params.limitBytes, 32 * 1024);
       assert.equal(options.workspaceId, "workspace");
       offsets.push(params.offsetBytes);
-      if (gate) {
+      if (gateEnabled) {
         entered.resolve();
         await gate.promise;
       }
@@ -315,7 +316,7 @@ test("中继成果通过有界RPC分块交付，校验偏移与摘要，清理�
     false,
   );
   invalid = false;
-  gate = deferred<void>();
+  gateEnabled = true;
   const cancelled = assert.rejects(download(), /媒体读取已取消/);
   await entered.promise;
   const clear = f.clearHostLocalData("relay");

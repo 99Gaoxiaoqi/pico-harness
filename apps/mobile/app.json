@@ -14,13 +14,9 @@
     },
     "android": {
       "package": "dev.pico.mobile",
-      "permissions": [
-        "CAMERA"
-      ],
+      "permissions": ["CAMERA"],
       "versionCode": 3,
-      "blockedPermissions": [
-        "android.permission.RECORD_AUDIO"
-      ]
+      "blockedPermissions": ["android.permission.RECORD_AUDIO"]
     },
     "plugins": [
       "expo-router",
@@ -46,10 +42,7 @@
     "experiments": {
       "typedRoutes": false
     },
-    "platforms": [
-      "ios",
-      "android"
-    ],
+    "platforms": ["ios", "android"],
     "extra": {
       "release": {
         "publisher": "",

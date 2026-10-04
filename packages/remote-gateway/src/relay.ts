@@ -166,16 +166,17 @@ export class GatewayRelay {
             this.options.secretKey,
             randomBytes,
           );
-          const owner = this;
+          const channels = this.channels;
+          const bufferedAmount = () => this.socket?.bufferedAmount ?? 0;
           const channel: Channel = {
             id,
             crypto,
             pending: 0,
             get active() {
-              return owner.channels.get(id) === channel;
+              return channels.get(id) === channel;
             },
             get bufferedAmount() {
-              return owner.socket?.bufferedAmount ?? 0;
+              return bufferedAmount();
             },
             deadline: setTimeout(() => this.drop(id), 180_000),
             send: (message) => {

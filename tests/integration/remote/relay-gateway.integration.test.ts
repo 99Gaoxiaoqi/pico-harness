@@ -187,10 +187,10 @@ test(
       return socket as unknown as RemoteSocket;
     };
     const transport = { relay: config.relay, randomBytes, createWebSocket };
-    let remote: RemoteRuntimeClient | undefined;
+    const cleanup: { remote?: RemoteRuntimeClient } = {};
     let connectionState = "disconnected";
     t.after(async () => {
-      remote?.close();
+      cleanup.remote?.close();
       for (const socket of sockets) socket.terminate();
       await gateway.close();
       await relay.close();
@@ -237,7 +237,7 @@ test(
     assert.equal(approved.status, "approved");
     if (approved.status !== "approved") throw new Error("approval missing");
     await RemoteRuntimeClient.acknowledgePairing(relay.origin, pairing, tls.fetcher, transport);
-    remote = new RemoteRuntimeClient({
+    const remote = new RemoteRuntimeClient({
       publicUrl: relay.origin,
       gatewayId: approved.gatewayId,
       deviceToken: approved.deviceToken,
@@ -246,6 +246,7 @@ test(
         connectionState = state;
       },
     });
+    cleanup.remote = remote;
     await remote.connect();
     assert.equal((await remote.capabilities()).features.relayConnection?.available, true);
     assert.equal(
