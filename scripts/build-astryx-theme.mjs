@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { format, resolveConfig } from "prettier";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const directory = join(root, "apps/desktop/src/renderer/astryx-theme");
@@ -42,6 +43,7 @@ try {
       source = source.slice(0, start) + source.slice(end + 1);
     }
     const target = join(directory, name);
+    source = await format(source, { ...(await resolveConfig(target)), filepath: target });
     if (check) {
       if (readFileSync(target, "utf8") !== source) throw new Error(`Stale theme artifact: ${name}`);
     } else writeFileSync(target, source);

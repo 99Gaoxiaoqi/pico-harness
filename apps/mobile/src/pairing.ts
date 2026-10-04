@@ -36,7 +36,7 @@ export type PairingPort = {
   forget(host: SavedHost): Promise<void>;
   changed(progress?: PairingProgress): void;
   now?: () => number;
-  pause?: () => Promise<void>;
+  pause(): Promise<void>;
 };
 class PairingInterrupted extends Error {}
 function hostFor(pending: PendingPairing): SavedHost {
@@ -222,9 +222,7 @@ export class RecoverablePairing {
       } else if (status.status !== "pending") {
         await this.expired(epoch);
       } else {
-        await (
-          this.port.pause ?? (() => new Promise<void>((resolve) => setTimeout(resolve, 1500)))
-        )();
+        await this.port.pause();
         this.assertCurrent(epoch);
       }
     }

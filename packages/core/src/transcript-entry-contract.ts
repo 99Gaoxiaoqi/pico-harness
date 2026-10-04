@@ -61,7 +61,13 @@ export type TranscriptEntryData =
       detail?: string;
       state?: "waiting" | "active" | "done" | "failed";
     }
-  | { kind: "goal"; title: string; detail?: string; state?: TranscriptGoalStatus; data?: Readonly<Record<string, unknown>> }
+  | {
+      kind: "goal";
+      title: string;
+      detail?: string;
+      state?: TranscriptGoalStatus;
+      data?: Readonly<Record<string, unknown>>;
+    }
   | {
       kind: "approval" | "prompt" | "changes";
       title: string;

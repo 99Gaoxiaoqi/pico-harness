@@ -149,7 +149,6 @@ test("waiting does not count or clear no-progress; eight genuine no-progress tur
   for (let turn = 1; turn <= 9; turn++) {
     if (manager.getCurrent()?.status === "waiting") {
       assert.equal(manager.wakeWaiting(goal.id), true);
-      current = manager.getCurrent()!;
     }
     manager.beginRun(`run-${turn}`, `turn-${turn}`, turn === 1 ? "user" : "goal", `daemon-${turn}`);
     current = manager.getCurrent()!;

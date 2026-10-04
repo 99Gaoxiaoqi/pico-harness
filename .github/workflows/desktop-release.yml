@@ -64,7 +64,16 @@ jobs:
           echo "version=$PACKAGE_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Audit full dependency tree
-        run: npm audit --audit-level=low
+        run: npm run audit:check
+
+      - name: Retain raw dependency audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-audit-${{ github.job }}-${{ runner.os }}-${{ matrix.arch }}
+          path: output/security/dependency-audit.json
+          retention-days: 14
+          if-no-files-found: warn
 
       - name: Verify local file storage capabilities
         run: npm run check:storage

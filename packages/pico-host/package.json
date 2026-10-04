@@ -863,7 +863,7 @@
     "@pico/runtime-host": "*",
     "@pico/storage": "*",
     "ajv": "8.20.0",
-    "js-yaml": "^5.1.0"
+    "js-yaml": "5.4.1"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

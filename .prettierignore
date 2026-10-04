@@ -11,5 +11,6 @@ docs/architecture/pico-package-boundaries.html
 docs/architecture/pico-package-boundaries.visual-check.html
 
 # Generated visual assets preserve their renderer's serialized layout.
+docs/assets/pico-sandbox/architecture.html
 docs/assets/context-compaction/
 docs/readme-assets/current/

@@ -65,7 +65,7 @@
     "postbuild": "node -e \"require('node:fs').chmodSync('dist/cli/main.js',0o755)\"",
     "prepack": "npm run build",
     "pretypecheck": "npm run build:packages",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.tests.json",
     "pretest:integration": "npm run check:storage && npm run build:packages",
     "test:integration": "node scripts/run-integration-tests.mjs",
     "pretest:integration:windows": "npm run check:storage && npm run build:packages",
@@ -81,7 +81,7 @@
     "check:storage": "node --import tsx scripts/check-storage-capability.mjs",
     "check:architecture": "node scripts/check-architecture-boundaries.mjs",
     "lint": "eslint src scripts tests \"apps/**/*.{ts,tsx}\" \"packages/**/*.{ts,tsx}\" eslint.config.js --no-error-on-unmatched-pattern && npm run check:architecture",
-    "format": "prettier --check src scripts tests apps packages .github/workflows docs README.md AGENTS.md package.json package-lock.json tsconfig.json tsconfig.build.json",
+    "format": "prettier --check src scripts tests apps packages .github/workflows docs README.md AGENTS.md package.json package-lock.json tsconfig.json tsconfig.build.json tsconfig.tests.json",
     "astryx:theme": "node scripts/build-astryx-theme.mjs",
     "postinstall": "patch-package --error-on-fail",
     "build:remote-gateway": "npm run build --workspace @pico/remote-gateway",
@@ -89,7 +89,8 @@
     "mobile:dev": "npm run start --workspace @pico/mobile",
     "mobile:typecheck": "npm run typecheck --workspace @pico/mobile",
     "mobile:export": "npm run bundle --workspace @pico/mobile",
-    "check:mobile-boundaries": "node scripts/check-mobile-boundaries.mjs"
+    "check:mobile-boundaries": "node scripts/check-mobile-boundaries.mjs",
+    "audit:check": "node scripts/check-dependency-audit.mjs"
   },
   "engines": {
     "node": ">=22.19 <23 || >=24.3 <25 || >=26 <27"
@@ -112,7 +113,7 @@
     "ajv": "8.20.0",
     "gpt-tokenizer": "^3.4.0",
     "ink": "^7.1.0",
-    "js-yaml": "^5.1.0",
+    "js-yaml": "5.4.1",
     "marked": "^18.0.6",
     "pathe": "^2.0.3",
     "picocolors": "^1.1.1",
@@ -141,7 +142,8 @@
     "prettier": "^3.8.4",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
-    "typescript-eslint": "^8.61.1"
+    "typescript-eslint": "^8.61.1",
+    "electron": "43.5.0"
   },
   "overrides": {
     "@electron/packager": "20.3.0",
@@ -149,7 +151,17 @@
     "external-editor": {
       "tmp": "0.2.7"
     },
-    "uuid": "11.1.1"
+    "uuid": "11.1.1",
+    "undici@^7": "7.29.1",
+    "undici@^6": "6.28.1",
+    "brace-expansion@^1": "1.1.21",
+    "brace-expansion@^5": "5.0.12",
+    "fast-uri": "3.1.8",
+    "braces": "3.0.3",
+    "node-forge": "1.4.0",
+    "query-string@7.1.3": {
+      "decode-uri-component": "0.5.0"
+    }
   },
   "allowScripts": {
     "node-pty@1.1.0": true

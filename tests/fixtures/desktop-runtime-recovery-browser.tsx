@@ -239,7 +239,10 @@ async function refresh() {
 async function main() {
   await act(async () => root.render(<Harness />));
   await waitFor(() => store.connection.kind === "ready", "Bootstrap failed");
-  check(store.data.picoHome === "/custom/pico-data", "Bootstrap must preserve the daemon data root after workspace index reset");
+  check(
+    store.data.picoHome === "/custom/pico-data",
+    "Bootstrap must preserve the daemon data root after workspace index reset",
+  );
   runs = ["cancelled", "failed", "succeeded", "active", "unknown", "foreign"].map((runId) => ({
     runId,
     status: "running",

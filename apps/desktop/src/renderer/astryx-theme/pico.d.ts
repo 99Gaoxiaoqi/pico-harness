@@ -6,7 +6,7 @@
  * Core: @astryxdesign/core@0.1.0
  */
 
-import type { DefinedTheme } from '@astryxdesign/core/theme';
-import type { IconRegistry } from '@astryxdesign/core/Icon';
+import type { DefinedTheme } from "@astryxdesign/core/theme";
+import type { IconRegistry } from "@astryxdesign/core/Icon";
 export declare const neutralIconRegistry: IconRegistry;
 export declare const picoTheme: DefinedTheme;

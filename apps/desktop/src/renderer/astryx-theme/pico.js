@@ -6,7 +6,7 @@
  * Core: @astryxdesign/core@0.1.0
  */
 
-import { neutralIconRegistry } from '@astryxdesign/theme-neutral';
+import { neutralIconRegistry } from "@astryxdesign/theme-neutral";
 /**
  * pico theme — built by `npx astryx theme build`
  * Import the CSS file alongside this module:
@@ -15,7 +15,7 @@ import { neutralIconRegistry } from '@astryxdesign/theme-neutral';
  *   import './pico.css';
  */
 export const picoTheme = {
-  name: 'pico',
+  name: "pico",
   __built: true,
   tokens: {
     "--font-size-4xs": "0.375rem",
@@ -182,12 +182,13 @@ export const picoTheme = {
     "--radius-full": "9999px",
     "--shadow-low": "var(--shadow-sm)",
     "--shadow-med": "var(--shadow-lg)",
-    "--shadow-high": "0 4px 6px light-dark(oklch(0 0 0 / 10%), oklch(0 0 0 / 50%)), 0 12px 24px light-dark(oklch(0 0 0 / 15%), oklch(0 0 0 / 70%)), inset 0 0 0 1px light-dark(transparent, oklch(1 0 0 / 15%))",
+    "--shadow-high":
+      "0 4px 6px light-dark(oklch(0 0 0 / 10%), oklch(0 0 0 / 50%)), 0 12px 24px light-dark(oklch(0 0 0 / 15%), oklch(0 0 0 / 70%)), inset 0 0 0 1px light-dark(transparent, oklch(1 0 0 / 15%))",
     "--shadow-inset-hover": "inset 0px 0px 0px 2px #0074e24D",
     "--shadow-inset-selected": "inset 0px 0px 0px 2px #0074e280",
     "--shadow-inset-success": "inset 0px 0px 0px 2px #2f7d334D",
     "--shadow-inset-warning": "inset 0px 0px 0px 2px #f8d36a4D",
-    "--shadow-inset-error": "inset 0px 0px 0px 2px #de47454D"
+    "--shadow-inset-error": "inset 0px 0px 0px 2px #de47454D",
   },
   localTokens: {
     "--astryx-theme-neutral-color-status-fill-accent": "light-dark(#0074e2, #6d9cfe)",
@@ -199,7 +200,7 @@ export const picoTheme = {
     "--astryx-theme-neutral-color-on-tint-overlay-hover": "light-dark(#fafafa1A, #0a0a0a1A)",
     "--astryx-theme-neutral-color-on-tint-overlay-pressed": "light-dark(#fafafa33, #0a0a0a33)",
     "--astryx-theme-neutral-color-destructive-overlay-hover": "light-dark(#ff7f770D, #ee736c0D)",
-    "--astryx-theme-neutral-color-destructive-overlay-pressed": "light-dark(#ff7f771A, #ee736c1A)"
+    "--astryx-theme-neutral-color-destructive-overlay-pressed": "light-dark(#ff7f771A, #ee736c1A)",
   },
   __localTokenOwners: {
     "--astryx-theme-neutral-color-status-fill-accent": "neutral",
@@ -211,344 +212,344 @@ export const picoTheme = {
     "--astryx-theme-neutral-color-on-tint-overlay-hover": "neutral",
     "--astryx-theme-neutral-color-on-tint-overlay-pressed": "neutral",
     "--astryx-theme-neutral-color-destructive-overlay-hover": "neutral",
-    "--astryx-theme-neutral-color-destructive-overlay-pressed": "neutral"
+    "--astryx-theme-neutral-color-destructive-overlay-pressed": "neutral",
   },
-  __localTokenLineage: ["neutral","pico"],
+  __localTokenLineage: ["neutral", "pico"],
   components: {
-    "heading": {
+    heading: {
       "level:1": {
-        "fontFamily": "var(--font-family-heading)",
-        "fontSize": "var(--text-heading-1-size)",
-        "fontWeight": "var(--text-heading-1-weight)",
-        "lineHeight": "var(--text-heading-1-leading)"
+        fontFamily: "var(--font-family-heading)",
+        fontSize: "var(--text-heading-1-size)",
+        fontWeight: "var(--text-heading-1-weight)",
+        lineHeight: "var(--text-heading-1-leading)",
       },
       "level:2": {
-        "fontFamily": "var(--font-family-heading)",
-        "fontSize": "var(--text-heading-2-size)",
-        "fontWeight": "var(--text-heading-2-weight)",
-        "lineHeight": "var(--text-heading-2-leading)"
+        fontFamily: "var(--font-family-heading)",
+        fontSize: "var(--text-heading-2-size)",
+        fontWeight: "var(--text-heading-2-weight)",
+        lineHeight: "var(--text-heading-2-leading)",
       },
       "level:3": {
-        "fontFamily": "var(--font-family-heading)",
-        "fontSize": "var(--text-heading-3-size)",
-        "fontWeight": "var(--text-heading-3-weight)",
-        "lineHeight": "var(--text-heading-3-leading)"
+        fontFamily: "var(--font-family-heading)",
+        fontSize: "var(--text-heading-3-size)",
+        fontWeight: "var(--text-heading-3-weight)",
+        lineHeight: "var(--text-heading-3-leading)",
       },
       "level:4": {
-        "fontFamily": "var(--font-family-heading)",
-        "fontSize": "var(--text-heading-4-size)",
-        "fontWeight": "var(--text-heading-4-weight)",
-        "lineHeight": "var(--text-heading-4-leading)"
+        fontFamily: "var(--font-family-heading)",
+        fontSize: "var(--text-heading-4-size)",
+        fontWeight: "var(--text-heading-4-weight)",
+        lineHeight: "var(--text-heading-4-leading)",
       },
       "level:5": {
-        "fontFamily": "var(--font-family-heading)",
-        "fontSize": "var(--text-heading-5-size)",
-        "fontWeight": "var(--text-heading-5-weight)",
-        "lineHeight": "var(--text-heading-5-leading)"
+        fontFamily: "var(--font-family-heading)",
+        fontSize: "var(--text-heading-5-size)",
+        fontWeight: "var(--text-heading-5-weight)",
+        lineHeight: "var(--text-heading-5-leading)",
       },
       "level:6": {
-        "fontFamily": "var(--font-family-heading)",
-        "fontSize": "var(--text-heading-6-size)",
-        "fontWeight": "var(--text-heading-6-weight)",
-        "lineHeight": "var(--text-heading-6-leading)"
+        fontFamily: "var(--font-family-heading)",
+        fontSize: "var(--text-heading-6-size)",
+        fontWeight: "var(--text-heading-6-weight)",
+        lineHeight: "var(--text-heading-6-leading)",
       },
       "type:display-1": {
-        "fontFamily": "var(--font-family-heading)",
-        "fontSize": "var(--text-display-1-size)",
-        "lineHeight": "var(--text-display-1-leading)"
+        fontFamily: "var(--font-family-heading)",
+        fontSize: "var(--text-display-1-size)",
+        lineHeight: "var(--text-display-1-leading)",
       },
       "type:display-2": {
-        "fontFamily": "var(--font-family-heading)",
-        "fontSize": "var(--text-display-2-size)",
-        "lineHeight": "var(--text-display-2-leading)"
+        fontFamily: "var(--font-family-heading)",
+        fontSize: "var(--text-display-2-size)",
+        lineHeight: "var(--text-display-2-leading)",
       },
       "type:display-3": {
-        "fontFamily": "var(--font-family-heading)",
-        "fontSize": "var(--text-display-3-size)",
-        "lineHeight": "var(--text-display-3-leading)"
-      }
+        fontFamily: "var(--font-family-heading)",
+        fontSize: "var(--text-display-3-size)",
+        lineHeight: "var(--text-display-3-leading)",
+      },
     },
-    "text": {
+    text: {
       "type:body": {
-        "fontFamily": "var(--font-family-body)",
-        "fontSize": "var(--text-body-size)",
-        "lineHeight": "var(--text-body-leading)"
+        fontFamily: "var(--font-family-body)",
+        fontSize: "var(--text-body-size)",
+        lineHeight: "var(--text-body-leading)",
       },
       "type:large": {
-        "fontFamily": "var(--font-family-body)",
-        "fontSize": "var(--text-large-size)",
-        "lineHeight": "var(--text-large-leading)"
+        fontFamily: "var(--font-family-body)",
+        fontSize: "var(--text-large-size)",
+        lineHeight: "var(--text-large-leading)",
       },
       "type:label": {
-        "fontFamily": "var(--font-family-body)",
-        "fontSize": "var(--text-label-size)",
-        "lineHeight": "var(--text-label-leading)"
+        fontFamily: "var(--font-family-body)",
+        fontSize: "var(--text-label-size)",
+        lineHeight: "var(--text-label-leading)",
       },
       "type:code": {
-        "fontFamily": "var(--font-family-code)",
-        "fontSize": "var(--text-code-size)",
-        "lineHeight": "var(--text-code-leading)"
+        fontFamily: "var(--font-family-code)",
+        fontSize: "var(--text-code-size)",
+        lineHeight: "var(--text-code-leading)",
       },
       "type:supporting": {
-        "fontFamily": "var(--font-family-body)",
-        "fontSize": "var(--text-supporting-size)",
-        "lineHeight": "var(--text-supporting-leading)"
+        fontFamily: "var(--font-family-body)",
+        fontSize: "var(--text-supporting-size)",
+        lineHeight: "var(--text-supporting-leading)",
       },
       "type:display-1": {
-        "fontFamily": "var(--font-family-heading)",
-        "fontSize": "var(--text-display-1-size)",
-        "lineHeight": "var(--text-display-1-leading)"
+        fontFamily: "var(--font-family-heading)",
+        fontSize: "var(--text-display-1-size)",
+        lineHeight: "var(--text-display-1-leading)",
       },
       "type:display-2": {
-        "fontFamily": "var(--font-family-heading)",
-        "fontSize": "var(--text-display-2-size)",
-        "lineHeight": "var(--text-display-2-leading)"
+        fontFamily: "var(--font-family-heading)",
+        fontSize: "var(--text-display-2-size)",
+        lineHeight: "var(--text-display-2-leading)",
       },
       "type:display-3": {
-        "fontFamily": "var(--font-family-heading)",
-        "fontSize": "var(--text-display-3-size)",
-        "lineHeight": "var(--text-display-3-leading)"
-      }
+        fontFamily: "var(--font-family-heading)",
+        fontSize: "var(--text-display-3-size)",
+        lineHeight: "var(--text-display-3-leading)",
+      },
     },
-    "button": {
+    button: {
       "variant:destructive": {
-        "backgroundColor": "var(--color-error-muted)",
-        "color": "var(--color-error)",
+        backgroundColor: "var(--color-error-muted)",
+        color: "var(--color-error)",
         "--color-overlay-hover": "var(--astryx-theme-neutral-color-destructive-overlay-hover)",
-        "--color-overlay-pressed": "var(--astryx-theme-neutral-color-destructive-overlay-pressed)"
-      }
+        "--color-overlay-pressed": "var(--astryx-theme-neutral-color-destructive-overlay-pressed)",
+      },
     },
-    "badge": {
+    badge: {
       "variant:info": {
-        "backgroundColor": "var(--astryx-theme-neutral-color-status-fill-accent)",
-        "color": "var(--color-on-accent)"
+        backgroundColor: "var(--astryx-theme-neutral-color-status-fill-accent)",
+        color: "var(--color-on-accent)",
       },
       "variant:neutral": {
-        "backgroundColor": "var(--color-background-gray)",
-        "color": "var(--color-text-gray)"
+        backgroundColor: "var(--color-background-gray)",
+        color: "var(--color-text-gray)",
       },
       "variant:success": {
-        "backgroundColor": "var(--astryx-theme-neutral-color-status-fill-success)",
-        "color": "var(--color-on-success)"
+        backgroundColor: "var(--astryx-theme-neutral-color-status-fill-success)",
+        color: "var(--color-on-success)",
       },
       "variant:warning": {
-        "backgroundColor": "var(--astryx-theme-neutral-color-status-fill-warning)",
-        "color": "var(--color-on-warning)"
+        backgroundColor: "var(--astryx-theme-neutral-color-status-fill-warning)",
+        color: "var(--color-on-warning)",
       },
       "variant:error": {
-        "backgroundColor": "var(--astryx-theme-neutral-color-status-fill-error)",
-        "color": "var(--color-on-error)"
+        backgroundColor: "var(--astryx-theme-neutral-color-status-fill-error)",
+        color: "var(--color-on-error)",
       },
       "variant:red": {
-        "backgroundColor": "var(--color-background-red)",
-        "color": "var(--color-text-red)"
+        backgroundColor: "var(--color-background-red)",
+        color: "var(--color-text-red)",
       },
       "variant:orange": {
-        "backgroundColor": "var(--color-background-orange)",
-        "color": "var(--color-text-orange)"
+        backgroundColor: "var(--color-background-orange)",
+        color: "var(--color-text-orange)",
       },
       "variant:yellow": {
-        "backgroundColor": "var(--color-background-yellow)",
-        "color": "var(--color-text-yellow)"
+        backgroundColor: "var(--color-background-yellow)",
+        color: "var(--color-text-yellow)",
       },
       "variant:green": {
-        "backgroundColor": "var(--color-background-green)",
-        "color": "var(--color-text-green)"
+        backgroundColor: "var(--color-background-green)",
+        color: "var(--color-text-green)",
       },
       "variant:teal": {
-        "backgroundColor": "var(--color-background-teal)",
-        "color": "var(--color-text-teal)"
+        backgroundColor: "var(--color-background-teal)",
+        color: "var(--color-text-teal)",
       },
       "variant:cyan": {
-        "backgroundColor": "var(--color-background-cyan)",
-        "color": "var(--color-text-cyan)"
+        backgroundColor: "var(--color-background-cyan)",
+        color: "var(--color-text-cyan)",
       },
       "variant:blue": {
-        "backgroundColor": "var(--color-background-blue)",
-        "color": "var(--color-text-blue)"
+        backgroundColor: "var(--color-background-blue)",
+        color: "var(--color-text-blue)",
       },
       "variant:purple": {
-        "backgroundColor": "var(--color-background-purple)",
-        "color": "var(--color-text-purple)"
+        backgroundColor: "var(--color-background-purple)",
+        color: "var(--color-text-purple)",
       },
       "variant:pink": {
-        "backgroundColor": "var(--color-background-pink)",
-        "color": "var(--color-text-pink)"
+        backgroundColor: "var(--color-background-pink)",
+        color: "var(--color-text-pink)",
       },
       "variant:gray": {
-        "backgroundColor": "var(--color-background-gray)",
-        "color": "var(--color-text-gray)"
-      }
+        backgroundColor: "var(--color-background-gray)",
+        color: "var(--color-text-gray)",
+      },
     },
     "status-dot": {
       "variant:success": {
-        "backgroundColor": "var(--astryx-theme-neutral-color-status-fill-success)"
+        backgroundColor: "var(--astryx-theme-neutral-color-status-fill-success)",
       },
       "variant:warning": {
-        "backgroundColor": "var(--astryx-theme-neutral-color-status-fill-warning)"
+        backgroundColor: "var(--astryx-theme-neutral-color-status-fill-warning)",
       },
       "variant:error": {
-        "backgroundColor": "var(--astryx-theme-neutral-color-status-fill-error)"
+        backgroundColor: "var(--astryx-theme-neutral-color-status-fill-error)",
       },
       "variant:accent": {
-        "backgroundColor": "var(--astryx-theme-neutral-color-status-fill-accent)"
-      }
+        backgroundColor: "var(--astryx-theme-neutral-color-status-fill-accent)",
+      },
     },
     "avatar-status-dot": {
       "variant:success": {
-        "backgroundColor": "var(--astryx-theme-neutral-color-status-fill-success)"
+        backgroundColor: "var(--astryx-theme-neutral-color-status-fill-success)",
       },
       "variant:error": {
-        "backgroundColor": "var(--astryx-theme-neutral-color-status-fill-error)"
-      }
+        backgroundColor: "var(--astryx-theme-neutral-color-status-fill-error)",
+      },
     },
     "segmented-control": {
-      "base": {
-        "padding": "var(--spacing-1)"
-      }
+      base: {
+        padding: "var(--spacing-1)",
+      },
     },
     "segmented-control-item": {
       "size:sm": {
-        "height": "calc(var(--size-element-sm) - 8px)"
+        height: "calc(var(--size-element-sm) - 8px)",
       },
       "size:md": {
-        "height": "calc(var(--size-element-md) - 8px)"
+        height: "calc(var(--size-element-md) - 8px)",
       },
       "size:lg": {
-        "height": "calc(var(--size-element-lg) - 8px)"
+        height: "calc(var(--size-element-lg) - 8px)",
       },
-      "selected": {
-        "boxShadow": "none"
-      }
+      selected: {
+        boxShadow: "none",
+      },
     },
-    "banner": {
-      "base": {
+    banner: {
+      base: {
         "--color-neutral": "var(--astryx-theme-neutral-color-on-tint-neutral)",
         "--color-overlay-hover": "var(--astryx-theme-neutral-color-on-tint-overlay-hover)",
-        "--color-overlay-pressed": "var(--astryx-theme-neutral-color-on-tint-overlay-pressed)"
+        "--color-overlay-pressed": "var(--astryx-theme-neutral-color-on-tint-overlay-pressed)",
       },
       "status:info": {
         "--color-accent-muted": "var(--astryx-theme-neutral-color-status-muted-accent)",
         "--color-text-primary": "var(--color-text-blue)",
         "--color-text-secondary": "var(--color-text-blue)",
-        "--color-accent": "var(--color-text-blue)"
+        "--color-accent": "var(--color-text-blue)",
       },
       "status:success": {
         "--color-text-primary": "var(--color-text-green)",
         "--color-text-secondary": "var(--color-text-green)",
-        "--color-success": "var(--color-text-green)"
+        "--color-success": "var(--color-text-green)",
       },
       "status:warning": {
         "--color-text-primary": "var(--color-text-yellow)",
         "--color-text-secondary": "var(--color-text-yellow)",
-        "--color-warning": "var(--color-text-yellow)"
+        "--color-warning": "var(--color-text-yellow)",
       },
       "status:error": {
         "--color-text-primary": "var(--color-text-red)",
         "--color-text-secondary": "var(--color-text-red)",
-        "--color-error": "var(--color-text-red)"
-      }
+        "--color-error": "var(--color-text-red)",
+      },
     },
     "step-indicator": {
       "status:accent": {
-        "--color-accent": "var(--astryx-theme-neutral-color-status-fill-accent)"
+        "--color-accent": "var(--astryx-theme-neutral-color-status-fill-accent)",
       },
       "status:success": {
-        "--color-success": "var(--astryx-theme-neutral-color-status-fill-success)"
+        "--color-success": "var(--astryx-theme-neutral-color-status-fill-success)",
       },
       "status:warning": {
-        "--color-warning": "var(--astryx-theme-neutral-color-status-fill-warning)"
+        "--color-warning": "var(--astryx-theme-neutral-color-status-fill-warning)",
       },
       "status:error": {
-        "--color-error": "var(--astryx-theme-neutral-color-status-fill-error)"
-      }
+        "--color-error": "var(--astryx-theme-neutral-color-status-fill-error)",
+      },
     },
-    "switch": {
-      "base": {
-        "--color-background-gray": "var(--color-border-emphasized)"
-      }
+    switch: {
+      base: {
+        "--color-background-gray": "var(--color-border-emphasized)",
+      },
     },
     "progress-bar": {
-      "base": {
-        "--color-background-muted": "var(--color-border-emphasized)"
+      base: {
+        "--color-background-muted": "var(--color-border-emphasized)",
       },
       "variant:accent": {
-        "--color-accent": "var(--astryx-theme-neutral-color-status-fill-accent)"
+        "--color-accent": "var(--astryx-theme-neutral-color-status-fill-accent)",
       },
       "variant:success": {
-        "--color-success": "var(--astryx-theme-neutral-color-status-fill-success)"
+        "--color-success": "var(--astryx-theme-neutral-color-status-fill-success)",
       },
       "variant:warning": {
-        "--color-warning": "var(--astryx-theme-neutral-color-status-fill-warning)"
+        "--color-warning": "var(--astryx-theme-neutral-color-status-fill-warning)",
       },
       "variant:error": {
-        "--color-error": "var(--astryx-theme-neutral-color-status-fill-error)"
-      }
+        "--color-error": "var(--astryx-theme-neutral-color-status-fill-error)",
+      },
     },
-    "card": {
-      "base": {
-        "padding": "var(--spacing-3)"
-      }
+    card: {
+      base: {
+        padding: "var(--spacing-3)",
+      },
     },
-    "section": {
-      "base": {
-        "padding": "var(--spacing-3)"
-      }
-    }
+    section: {
+      base: {
+        padding: "var(--spacing-3)",
+      },
+    },
   },
   __onDark: {
-    "tokens": {
+    tokens: {
       "color-scheme": "dark",
       "--color-text-primary": "var(--color-on-dark)",
       "--color-icon-primary": "var(--color-on-dark)",
-      "--color-accent": "var(--color-on-dark)"
-    }
+      "--color-accent": "var(--color-on-dark)",
+    },
   },
   __onLight: {
-    "tokens": {
+    tokens: {
       "color-scheme": "light",
       "--color-text-primary": "var(--color-on-light)",
       "--color-icon-primary": "var(--color-on-light)",
-      "--color-accent": "var(--color-on-light)"
-    }
+      "--color-accent": "var(--color-on-light)",
+    },
   },
   __adaptations: {
-    "widthBreakpoints": {
-      "sm": 640,
-      "md": 768,
-      "lg": 1024,
-      "xl": 1280,
-      "2xl": 1536
+    widthBreakpoints: {
+      sm: 640,
+      md: 768,
+      lg: 1024,
+      xl: 1280,
+      "2xl": 1536,
     },
-    "rules": []
+    rules: [],
   },
   __axes: {
-    "typography": {
-      "scale": {
-        "base": 14,
-        "ratio": 1.2
+    typography: {
+      scale: {
+        base: 14,
+        ratio: 1.2,
       },
-      "body": {
-        "family": "-apple-system",
-        "fallbacks": "ui-sans-serif, BlinkMacSystemFont, \"SF Pro Text\", \"Segoe UI\", sans-serif"
+      body: {
+        family: "-apple-system",
+        fallbacks: 'ui-sans-serif, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif',
       },
-      "heading": {
-        "weights": {
-          "3": "bold",
-          "4": "bold"
-        }
+      heading: {
+        weights: {
+          3: "bold",
+          4: "bold",
+        },
       },
-      "code": {
-        "family": "SFMono-Regular",
-        "fallbacks": "Consolas, \"Liberation Mono\", monospace"
-      }
+      code: {
+        family: "SFMono-Regular",
+        fallbacks: 'Consolas, "Liberation Mono", monospace',
+      },
     },
-    "motion": {
-      "fast": 125,
-      "medium": 300,
-      "slow": 700,
-      "ratio": 0.75
-    }
+    motion: {
+      fast: 125,
+      medium: 300,
+      slow: 700,
+      ratio: 0.75,
+    },
   },
   icons: neutralIconRegistry,
 };

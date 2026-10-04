@@ -415,6 +415,7 @@ export function PicoProvider({ children }: { children: React.ReactNode }) {
         },
         forget,
         changed: setPairing,
+        pause: () => new Promise<void>((resolve) => setTimeout(resolve, 1500)),
       },
     );
     pairingRef.current.setForeground(foreground.current);
