@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { WorkspaceRegistrationStore } from "@pico/pico-host/workspace-registration";
 import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
+import { assertPrivateWindowsTemporary } from "@pico/pico-host/windows-atomic-file";
 import {
   configureRelayGateway,
   loadRelayIdentity,
@@ -58,7 +59,13 @@ test("个人中继免邀请保存，部署准备幂等且只输出摘要，显�
   });
   assert.equal(JSON.stringify(prepared).includes(credentials.token), false);
   assert.equal(JSON.stringify(prepared).includes(credentials.secretKey), false);
-  assert.equal((await stat(join(fixture.home, "relay-identity.json"))).mode & 0o777, 0o600);
+  const identityPath = join(fixture.home, "relay-identity.json");
+  if (process.platform === "win32") {
+    const { dev, ino } = await stat(identityPath, { bigint: true });
+    await assertPrivateWindowsTemporary(identityPath, { dev, ino });
+  } else {
+    assert.equal((await stat(identityPath)).mode & 0o777, 0o600);
+  }
   assert.deepEqual(await prepareRelayBinding(input, fixture.home), prepared);
   const release = await acquireGatewayLock(fixture.home);
   try {
