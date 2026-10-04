@@ -259,12 +259,17 @@ test("kernel client: trusted terminal owners isolate control, cleanup and reconn
   await writeDesktopModelRouting(harness.picoHome);
   const desktop = harness.createClient({ surface: "desktop", terminalOwnerId: "desktop:window-a" });
   const mobile = harness.createClient({ surface: "inspect", terminalOwnerId: "remote:device-a" });
-  assert.deepEqual(await mobile.request("terminal.ownershipCapabilities", {}), {
-    ownerIsolation: true,
-    sessionCleanupIsolation: true,
-  });
   t.after(() => desktop.close());
   t.after(() => mobile.close());
+  try {
+    assert.deepEqual(await mobile.request("terminal.ownershipCapabilities", {}), {
+      ownerIsolation: true,
+      sessionCleanupIsolation: true,
+    });
+  } catch (error) {
+    await harness.candidates.diagnoseFailure(t, "first terminal.ownershipCapabilities", error);
+    throw error;
+  }
   const workspacePath = harness.workspacePath;
   const sessionId = (await desktop.request("session.create", { workspacePath })).session.sessionId;
   const scope = { workspacePath, sessionId };

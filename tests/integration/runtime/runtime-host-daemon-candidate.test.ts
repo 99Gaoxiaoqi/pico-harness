@@ -145,38 +145,43 @@ test("daemon candidate: connectOrSpawn spawns the pico daemon entrypoint and rea
   const harness = await startCandidateHarness(t);
   const mainPath = fileURLToPath(new URL("../../../src/daemon/main.ts", import.meta.url));
 
-  const result = await connectOrSpawnRuntimeHost({
-    rootPath: harness.picoHome,
-    surface: "tui",
-    protocol: { min: RUNTIME_HOST_PROTOCOL_VERSION, max: RUNTIME_HOST_PROTOCOL_VERSION },
-    clientInstanceId: "candidate-spawn-test-client",
-    electionDeadlineMs: 45_000,
-    connectTimeoutMs: 5_000,
-    handshakeTimeoutMs: 5_000,
-    candidateEntrypoint: pathToFileURL(mainPath).href,
-    env: harness.env,
-    candidateLauncher: harness.candidates.launcher,
-  });
-  assert.equal(result.kind, "connected", `期望 connected，实际 ${JSON.stringify(result)}`);
-  if (result.kind !== "connected") return;
-  const connection = result.connection;
+  try {
+    const result = await connectOrSpawnRuntimeHost({
+      rootPath: harness.picoHome,
+      surface: "tui",
+      protocol: { min: RUNTIME_HOST_PROTOCOL_VERSION, max: RUNTIME_HOST_PROTOCOL_VERSION },
+      clientInstanceId: "candidate-spawn-test-client",
+      electionDeadlineMs: 45_000,
+      connectTimeoutMs: 5_000,
+      handshakeTimeoutMs: 5_000,
+      candidateEntrypoint: pathToFileURL(mainPath).href,
+      env: harness.env,
+      candidateLauncher: harness.candidates.launcher,
+    });
+    assert.equal(result.kind, "connected", `期望 connected，实际 ${JSON.stringify(result)}`);
+    if (result.kind !== "connected") return;
+    const connection = result.connection;
 
-  const status = await waitForReadyStatus(connection, 15_000);
-  assert.equal(status.state, "ready");
+    const status = await waitForReadyStatus(connection, 15_000);
+    assert.equal(status.state, "ready");
 
-  const ping = await connection.requestRegistered<{ result: unknown }>(
-    "runtime.request",
-    { method: "runtime.ping", params: {} },
-    10_000,
-  );
-  assert.ok(ping.result, "spawn 出的 daemon 应答 runtime.ping");
+    const ping = await connection.requestRegistered<{ result: unknown }>(
+      "runtime.request",
+      { method: "runtime.ping", params: {} },
+      10_000,
+    );
+    assert.ok(ping.result, "spawn 出的 daemon 应答 runtime.ping");
 
-  // 清理必须等待注册到该隔离 root 的精确 PID 退出，再允许 harness 删除 root。
-  const registration = await readHostRegistration(await findControlDirectory(harness.picoHome));
-  assert.ok(registration);
-  await connection.close().catch(() => undefined);
-  await harness.candidates.stopAll();
-  assert.equal(await processAlive(registration.pid), false, "teardown 返回前 daemon 必须退出");
+    // 清理必须等待注册到该隔离 root 的精确 PID 退出，再允许 harness 删除 root。
+    const registration = await readHostRegistration(await findControlDirectory(harness.picoHome));
+    assert.ok(registration);
+    await connection.close().catch(() => undefined);
+    await harness.candidates.stopAll();
+    assert.equal(await processAlive(registration.pid), false, "teardown 返回前 daemon 必须退出");
+  } catch (error) {
+    await harness.candidates.diagnoseFailure(t, "spawned daemon connect and readiness", error);
+    throw error;
+  }
 });
 
 test("daemon candidate: runtime.shutdown gracefully stops the resident daemon", async (t) => {
