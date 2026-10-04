@@ -469,9 +469,11 @@ test("媒体定稿拒绝越界/超限/假引用，保留文字；pure media 与 
 
 test("Markdown 内嵌图片登记短引用，历史重建幂等且保留原始 Provider 消息", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-inline-media-"));
-  t.after(() => rm(root, { recursive: true, force: true }));
   const store = new SqliteRuntimeEventStore({ storageRoot: root });
-  t.after(() => store.close());
+  t.after(async () => {
+    await store.close();
+    await rm(root, { recursive: true, force: true });
+  });
   const sessionId = "inline-media";
   const { ownerFence } = await initializeRuntimeEventOwner(store, { sessionId, workDir: root });
   const uri = `data:image/png;base64,${png.toString("base64")}`;
