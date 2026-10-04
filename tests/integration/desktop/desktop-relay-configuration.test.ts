@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, realpath, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -8,9 +8,12 @@ import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
 import {
   configureRelayGateway,
   loadRelayIdentity,
+  prepareRelayBinding,
   readGatewayConfiguration,
 } from "../../../packages/remote-gateway/src/relay-config.js";
 import { hashSecret } from "../../../packages/remote-gateway/src/state.js";
+import { runRemoteCli } from "../../../packages/remote-gateway/src/cli.js";
+import { acquireGatewayLock } from "../../../packages/remote-gateway/src/control.js";
 
 async function setup() {
   const root = await realpath(await mkdtemp(join(tmpdir(), "pico-relay-config-")));
@@ -24,6 +27,62 @@ async function setup() {
   await new WorkspaceTrustStore({ userStateDirectory: runtimeHome }).trust(workspace);
   return { root, runtimeHome, workspace, home: join(root, "gateway") };
 }
+
+test("个人中继免邀请保存，部署准备幂等且只输出摘要，显式轮换保留电脑身份与手机配对公钥", async (t) => {
+  const fixture = await setup();
+  t.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const network = t.mock.method(globalThis, "fetch", () => {
+    throw new Error("个人部署不使用公开注册接口");
+  });
+  const input = {
+    relayUrl: "https://personal.example.com",
+    workspaces: [{ path: fixture.workspace }],
+    runtimeHostRootPath: fixture.runtimeHome,
+  };
+  const config = await configureRelayGateway(input, fixture.home);
+  assert.ok(config.relay);
+  const credentials = await loadRelayIdentity(fixture.home, config.relay);
+  const output: string[] = [];
+  assert.equal(
+    await runRemoteCli(["relay", "prepare", "--url", input.relayUrl, "--home", fixture.home], {
+      output: (value) => output.push(value),
+    }),
+    0,
+  );
+  const prepared = JSON.parse(output[0]!);
+  assert.deepEqual(prepared, {
+    version: 1,
+    relayUrl: input.relayUrl,
+    gatewayId: config.relay.gatewayId,
+    tokenHash: hashSecret(credentials.token),
+  });
+  assert.equal(JSON.stringify(prepared).includes(credentials.token), false);
+  assert.equal(JSON.stringify(prepared).includes(credentials.secretKey), false);
+  assert.equal((await stat(join(fixture.home, "relay-identity.json"))).mode & 0o777, 0o600);
+  assert.deepEqual(await prepareRelayBinding(input, fixture.home), prepared);
+  const release = await acquireGatewayLock(fixture.home);
+  try {
+    await assert.rejects(
+      prepareRelayBinding({ ...input, rotateToken: true }, fixture.home),
+      /运行|启动|锁/u,
+    );
+  } finally {
+    await release();
+  }
+  assert.deepEqual(await prepareRelayBinding(input, fixture.home), prepared);
+  const rotated = await prepareRelayBinding({ ...input, rotateToken: true }, fixture.home);
+  assert.equal(rotated.gatewayId, prepared.gatewayId);
+  assert.notEqual(rotated.tokenHash, prepared.tokenHash);
+  assert.deepEqual(await prepareRelayBinding(input, fixture.home), rotated);
+  const after = await configureRelayGateway(input, fixture.home);
+  assert.deepEqual(after.relay, config.relay);
+  assert.deepEqual(after.workspaces, config.workspaces);
+  assert.equal(
+    (await loadRelayIdentity(fixture.home, config.relay)).secretKey,
+    credentials.secretKey,
+  );
+  assert.equal(network.mock.calls.length, 0);
+});
 
 test("Relay 配置仅授权本机可信项目，身份和项目ID跨重配保持稳定且公开投影无秘密", async (t) => {
   const fixture = await setup();

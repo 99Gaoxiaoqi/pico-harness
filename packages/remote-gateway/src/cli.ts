@@ -16,12 +16,14 @@ import {
   startConfiguredRemoteGateway,
 } from "./server.js";
 import { defaultGatewayHome, ensureGatewayHome } from "./state.js";
+import { prepareRelayBinding } from "./relay-config.js";
 
 export interface RemoteCliOptions {
   readonly output?: (text: string) => void;
   readonly ask?: (question: string) => Promise<string>;
 }
-const HELP = `Pico 公网直连网关（无中转）
+const HELP = `Pico 手机连接网关（中继或直连）
+  pico remote relay prepare --url https://relay.example.com [--rotate]
   pico remote configure --url https://pico.example.com:8443 --cert /path/fullchain.pem --key /path/privkey.pem --workspace /registered/project [--workspace /another] [--listen 0.0.0.0 --listen ::] [--port 8443] [--runtime-home /path/.pico]
   pico remote start
   pico remote status | doctor
@@ -31,7 +33,9 @@ const HELP = `Pico 公网直连网关（无中转）
   pico remote devices revoke <device-id>
 所有命令可加 --home /path/.pico-remote。configure 仅接受电脑已注册工作区。
 终端权限是当前电脑用户的 Shell 能力；host.admin 允许修改电脑配置。默认均关闭。
-域名、可信证书、防火墙与公网入口由用户配置；doctor 不能证明外网可达。`;
+relay prepare 仅供部署初始化：输出 gatewayId 和 tokenHash，交给中继私有管理命令 bind；不会输出密钥。
+仅在撤销后重新绑定时使用 --rotate，并将新摘要重新绑定；操作前请停止手机连接。
+域名、可信证书与公网入口由部署者配置；doctor 不能证明外网可达。`;
 export async function runRemoteCli(
   argv: readonly string[],
   options: RemoteCliOptions = {},
@@ -40,6 +44,7 @@ export async function runRemoteCli(
   const args = [...argv];
   const flags = new Map<string, string[]>();
   const positional: string[] = [];
+  let rotate = false;
   for (let index = 0; index < args.length; index++) {
     const arg = args[index]!;
     if (!arg.startsWith("--")) {
@@ -49,6 +54,14 @@ export async function runRemoteCli(
     if (arg === "--help") {
       output(HELP);
       return 0;
+    }
+    if (arg === "--rotate") {
+      if (rotate) {
+        output("--rotate 不可重复");
+        return 1;
+      }
+      rotate = true;
+      continue;
     }
     const value = args[++index];
     if (!value || value.startsWith("--")) {
@@ -88,10 +101,27 @@ export async function runRemoteCli(
       return readline.question(question);
     });
   try {
+    if (
+      rotate &&
+      !(positional.length === 2 && positional[0] === "relay" && positional[1] === "prepare")
+    )
+      throw new Error("--rotate 仅用于 relay prepare");
     const home = await ensureGatewayHome(one("--home") ?? defaultGatewayHome());
     const command = positional[0];
     if (!command || command === "help") {
       output(HELP);
+      return 0;
+    }
+    if (command === "relay") {
+      if (positional.length !== 2 || positional[1] !== "prepare")
+        throw new Error("请使用 pico remote relay prepare --url https://relay.example.com");
+      if ([...flags.keys()].some((key) => key !== "--url" && key !== "--home"))
+        throw new Error("relay prepare 仅接受 --url、--home 和 --rotate");
+      const relayUrl = one("--url");
+      if (!relayUrl) throw new Error("relay prepare 需要 --url");
+      output(
+        JSON.stringify(await prepareRelayBinding({ relayUrl, rotateToken: rotate }, home), null, 2),
+      );
       return 0;
     }
     if (command === "configure") {
