@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { Smartphone, QrCode, RefreshCw, ShieldCheck } from "lucide-react";
+import { QrCode, RefreshCw, ShieldCheck } from "lucide-react";
 import {
   REMOTE_DEFAULT_PERMISSIONS,
   REMOTE_PERMISSIONS,
@@ -14,7 +14,7 @@ import type {
   RemoteWorkspace,
 } from "../../preload/remote-management-contract.js";
 import { Button, InlineNotice } from "../components.js";
-import { TextField } from "../ui-controls.js";
+import { SwitchField, TextField } from "../ui-controls.js";
 import { useRuntime } from "../runtime-context.js";
 import "./mobile-connection-settings.css";
 
@@ -28,7 +28,7 @@ const permissionNames: Record<RemotePermission, string> = {
 const relayNames = {
   disabled: "已关闭",
   connecting: "正在连接",
-  online: "Relay 在线",
+  online: "已连接",
   reconnecting: "网络断开，正在重连",
   unauthorized: "电脑未绑定服务",
   error: "连接错误",
@@ -49,6 +49,8 @@ export function MobileConnectionSettingsPage() {
   const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
   const [qr, setQr] = useState<RemotePairingQr>();
   const [busy, setBusy] = useState(false);
+  const [editingConfiguration, setEditingConfiguration] = useState(false);
+  const configHeading = useRef<HTMLHeadingElement>(null);
   const [error, setError] = useState("");
   const initialized = useRef(false);
   const alive = useRef(true);
@@ -104,6 +106,15 @@ export function MobileConnectionSettingsPage() {
     (workspace) => workspace.registered && workspace.trusted && !workspace.temporary,
   );
   const expired = !qr || qr.expiresAt <= Date.now();
+  const showConfigForm = Boolean(snapshot && (!config?.configured || editingConfiguration));
+  const canPair = Boolean(
+    snapshot?.running && (config?.connectionMode !== "relay" || snapshot.relayState === "online"),
+  );
+  const openConfiguration = () => {
+    setEditingConfiguration(true);
+    configHeading.current?.scrollIntoView({ block: "center", behavior: "instant" });
+    configHeading.current?.focus({ preventScroll: true });
+  };
   const stateLabel = !snapshot
     ? "正在读取状态…"
     : !snapshot.running
@@ -115,11 +126,9 @@ export function MobileConnectionSettingsPage() {
     <div className="page-stack settings-page mobile-connection-settings">
       <section className="page-intro">
         <div>
-          <span className="eyebrow">系统</span>
           <h2>手机连接</h2>
-          <p>让手机通过公网中转连接这台电脑，任务与授权保留在本机。</p>
+          <p>从手机继续这台电脑上的任务。</p>
         </div>
-        <Smartphone aria-hidden="true" />
       </section>
       {!api && <InlineNotice tone="warning">手机连接管理需要在 Pico 桌面应用中打开。</InlineNotice>}
       {error && (
@@ -128,151 +137,72 @@ export function MobileConnectionSettingsPage() {
         </div>
       )}
       {snapshot?.issue && <InlineNotice tone="warning">{snapshot.issue}</InlineNotice>}
-      <section className="settings-section" aria-labelledby="mobile-status-heading">
+      <section
+        className="mobile-settings-section mobile-status-section"
+        aria-labelledby="mobile-status-heading"
+      >
         <div className="mobile-section-heading">
-          <h3 id="mobile-status-heading">连接状态</h3>
-          <Button disabled={busy || !api} onClick={() => void run(refresh)}>
-            <RefreshCw size={15} />
-            刷新
-          </Button>
-        </div>
-        <div className="mobile-connection-status" role="status">
-          <span
-            className={`mobile-status-dot ${snapshot?.relayState === "online" ? "is-online" : ""}`}
-          />
-          <strong>{stateLabel}</strong>
-          <span>
-            {config?.connectionMode === "direct"
-              ? "现有 HTTPS/WSS 直连"
-              : config?.configured
-                ? "公网 Relay"
-                : "尚未配置"}
-          </span>
-        </div>
-        {snapshot?.runtimeLastReachableAt && (
-          <p className="settings-section__note">
-            本地 Runtime 最近可达：{new Date(snapshot.runtimeLastReachableAt).toLocaleString()}
-          </p>
-        )}
-        <p className="settings-section__note">
-          关闭窗口或退出桌面后，已开启的手机连接和本机任务继续运行。停止手机连接会断开设备，但不会取消任务。电脑休眠、关机或断网时手机无法连接。
-        </p>
-        <p className="settings-section__note">
-          Runtime
-          可达不代表所有桌面能力可用：电脑操作需要桌面窗口保持可见，退出桌面后相应能力不可用。
-        </p>
-        <Button
-          variant={active ? "danger" : "primary"}
-          disabled={busy || !api || !snapshot || (!active && !config?.configured)}
-          onClick={() =>
-            void run(async () => {
-              if (!api) return;
-              setSnapshot(unwrap(await (active ? api.stop({}) : api.start({}))));
-              if (active) setQr(undefined);
-            })
-          }
-        >
-          {active ? "停止手机连接" : "开启手机连接"}
-        </Button>
-      </section>
-      <section className="settings-section" aria-labelledby="mobile-config-heading">
-        <h3 id="mobile-config-heading">服务与授权项目</h3>
-        {config?.connectionMode === "direct" && (
-          <InlineNotice tone="warning">
-            当前使用已有直连配置。保存下方设置将明确切换到公网 Relay；请先停止手机连接。
-          </InlineNotice>
-        )}
-        <form
-          className="mobile-config-form"
-          onSubmit={(event) => {
-            event.preventDefault();
-            if (!api || active) return;
-            if (
-              config?.connectionMode === "direct" &&
-              !window.confirm(
-                "将此电脑的手机连接从 HTTPS/WSS 直连切换到公网 Relay？现有设备仍需遵守本机授权。",
-              )
-            )
-              return;
-            void run(async () => {
-              setSnapshot(
-                unwrap(
-                  await api.configure({
-                    relayUrl: relayUrl.trim(),
-                    workspaces: selectedPaths.map((path) => ({ path })),
-                  }),
-                ),
-              );
-              setQr(undefined);
-            });
-          }}
-        >
-          <div className="mobile-field">
-            <span>Relay 服务地址</span>
-            <TextField
-              label="Relay 服务地址"
-              type="url"
-              placeholder="https://relay.example.com"
-              value={relayUrl}
-              required
-              disabled={busy || active || !api}
-              onValueChange={setRelayUrl}
-              autoComplete="off"
+          <div>
+            <h3 id="mobile-status-heading">连接状态</h3>
+            <div className="mobile-connection-status" role="status">
+              <span
+                className={`mobile-status-dot ${canPair ? "is-online" : ""}`}
+                aria-hidden="true"
+              />
+              <strong>{stateLabel}</strong>
+              <span>
+                {config?.connectionMode === "direct"
+                  ? "直连"
+                  : config?.configured
+                    ? "通过中继连接"
+                    : "尚未配置"}
+              </span>
+            </div>
+          </div>
+          <div className="mobile-actions">
+            <Button variant="quiet" disabled={busy || !api} onClick={() => void run(refresh)}>
+              <RefreshCw size={15} aria-hidden="true" />
+              刷新
+            </Button>
+            <SwitchField
+              label="允许手机连接"
+              labelHidden={false}
+              checked={active}
+              disabled={busy || !api || !snapshot || (!active && !config?.configured)}
+              onCheckedChange={() =>
+                void run(async () => {
+                  if (!api) return;
+                  setSnapshot(unwrap(await (active ? api.stop({}) : api.start({}))));
+                  if (active) setQr(undefined);
+                })
+              }
             />
           </div>
-          <p className="settings-section__note">
-            电脑与 Relay 的绑定由部署初始化完成。保存地址和项目后，开启连接并等待 Relay 在线。
-          </p>
-          <fieldset className="mobile-workspace-picker" disabled={busy || active || !api}>
-            <legend>允许手机访问的项目</legend>
-            {availableWorkspaces.length === 0 && (
-              <p>
-                还没有已注册且信任的项目。<Link to="/settings/workspaces">管理项目</Link>
-              </p>
+        </div>
+        <p className="mobile-note">保持电脑开机联网，手机才能连接。关闭连接不会停止任务。</p>
+        <details className="mobile-connection-help">
+          <summary>连接说明</summary>
+          <div>
+            <p>
+              关闭窗口或退出 Pico
+              后，已开启的手机连接和本机任务继续运行；电脑休眠、关机或断网时无法连接。
+            </p>
+            <p>手机使用电脑操作功能时，需要保持 Pico 窗口可见。</p>
+            <p>
+              如果提示电脑未绑定服务，请先在中继服务器完成这台电脑的部署绑定，再关闭并重新开启连接。
+            </p>
+            {snapshot?.runtimeLastReachableAt && (
+              <p>本机服务最近可达：{new Date(snapshot.runtimeLastReachableAt).toLocaleString()}</p>
             )}
-            {availableWorkspaces.map((workspace) => (
-              <label key={workspace.path}>
-                <input
-                  type="checkbox"
-                  checked={selectedPaths.includes(workspace.path)}
-                  onChange={(event) =>
-                    setSelectedPaths(checked(selectedPaths, workspace.path, event.target.checked))
-                  }
-                />
-                <span>
-                  <strong>{workspace.name ?? workspace.path.split(/[\\/]/u).pop()}</strong>
-                  <small>{workspace.path}</small>
-                </span>
-              </label>
-            ))}
-          </fieldset>
-          <div className="mobile-actions">
-            <Button
-              type="submit"
-              variant="primary"
-              disabled={busy || active || !api || !relayUrl.trim() || selectedPaths.length === 0}
-            >
-              保存连接设置
-            </Button>
-            <Button disabled={busy || active} onClick={() => void actions.registerWorkspace()}>
-              添加本机项目
-            </Button>
           </div>
-          {active && (
-            <p className="settings-section__note">修改服务地址或授权项目之前，请先停止手机连接。</p>
-          )}
-        </form>
+        </details>
       </section>
-      <section className="settings-section" aria-labelledby="mobile-pair-heading">
+      <section className="mobile-settings-section" aria-labelledby="mobile-pair-heading">
         <div className="mobile-section-heading">
           <h3 id="mobile-pair-heading">配对手机</h3>
           <Button
-            disabled={
-              busy ||
-              !api ||
-              !snapshot?.running ||
-              (config?.connectionMode === "relay" && snapshot.relayState !== "online")
-            }
+            variant={qr && !expired ? "secondary" : "primary"}
+            disabled={busy || !api || !canPair}
             onClick={() =>
               void run(async () => {
                 if (api) setQr(unwrap(await api.offer({})));
@@ -280,7 +210,7 @@ export function MobileConnectionSettingsPage() {
             }
           >
             <QrCode size={16} />
-            生成配对二维码
+            {qr && !expired ? "刷新二维码" : "连接手机"}
           </Button>
         </div>
         {qr && !expired ? (
@@ -296,13 +226,22 @@ export function MobileConnectionSettingsPage() {
             </div>
           </div>
         ) : (
-          <p className="settings-section__note">
+          <p className="mobile-note">
             {qr
               ? "二维码已过期，请重新生成。"
-              : config?.connectionMode === "relay" && snapshot?.relayState !== "online"
-                ? "Relay 在线后才能生成二维码。首次使用请先完成部署初始化，再开启手机连接。"
-                : "开启连接后生成 5 分钟有效的二维码。手机扫码后仍需在此电脑批准。"}
+              : !config?.configured
+                ? "先设置连接地址和授权项目，再开启手机连接。"
+                : snapshot?.relayState === "unauthorized"
+                  ? "这台电脑尚未完成服务绑定，请按连接说明完成部署后重试。"
+                  : !canPair
+                    ? "开启连接并等待服务就绪后，即可用手机扫码配对。"
+                    : "用 Pico 手机端扫码，再在这台电脑确认授权。二维码 5 分钟内有效。"}
           </p>
+        )}
+        {!config?.configured && snapshot && (
+          <Button variant="quiet" onClick={openConfiguration}>
+            设置连接
+          </Button>
         )}
         {snapshot?.pending.map((pending) => (
           <PendingDevice
@@ -334,14 +273,12 @@ export function MobileConnectionSettingsPage() {
           />
         ))}
       </section>
-      <section className="settings-section" aria-labelledby="mobile-devices-heading">
-        <h3 id="mobile-devices-heading">设备授权</h3>
-        {!snapshot?.running && (
-          <p className="settings-section__note">开启手机连接后可管理设备授权。</p>
-        )}
+      <section className="mobile-settings-section" aria-labelledby="mobile-devices-heading">
+        <h3 id="mobile-devices-heading">已授权设备</h3>
+        {!snapshot?.running && <p className="mobile-note">开启手机连接后可管理设备授权。</p>}
         {snapshot?.running &&
           snapshot.devices.filter((device) => !device.revokedAt).length === 0 && (
-            <p className="settings-section__note">尚无已授权设备。</p>
+            <p className="mobile-note">还没有已授权的手机，配对后会显示在这里。</p>
           )}
         {snapshot?.devices
           .filter((device) => !device.revokedAt)
@@ -378,6 +315,145 @@ export function MobileConnectionSettingsPage() {
               </Button>
             </article>
           ))}
+      </section>
+      <section className="mobile-settings-section" aria-labelledby="mobile-config-heading">
+        <div className="mobile-section-heading">
+          <h3 id="mobile-config-heading" ref={configHeading} tabIndex={-1}>
+            连接设置
+          </h3>
+          {config?.configured && (
+            <Button
+              variant="quiet"
+              disabled={busy}
+              aria-expanded={showConfigForm}
+              aria-controls="mobile-config-content"
+              onClick={() => setEditingConfiguration(!editingConfiguration)}
+            >
+              {showConfigForm ? "收起" : "编辑"}
+            </Button>
+          )}
+        </div>
+        <div id="mobile-config-content">
+          {!snapshot ? (
+            <p className="mobile-note">正在读取设置…</p>
+          ) : !showConfigForm ? (
+            <dl className="mobile-config-summary">
+              <div>
+                <dt>连接方式</dt>
+                <dd>{config?.connectionMode === "direct" ? "HTTPS/WSS 直连" : "中继连接"}</dd>
+              </div>
+              {config?.relayUrl && (
+                <div>
+                  <dt>服务地址</dt>
+                  <dd>{config.relayUrl}</dd>
+                </div>
+              )}
+              <div>
+                <dt>授权项目</dt>
+                <dd>
+                  {config?.workspaces.map((workspace) => workspace.name).join("、") || "尚未选择"}
+                </dd>
+              </div>
+            </dl>
+          ) : (
+            <>
+              {active && (
+                <p className="mobile-note">先关闭上方连接开关，再编辑设置。现有任务会继续运行。</p>
+              )}
+              {config?.connectionMode === "direct" && (
+                <InlineNotice tone="warning">
+                  当前使用已有直连配置。保存下方设置将明确切换到公网 Relay；请先停止手机连接。
+                </InlineNotice>
+              )}
+              <form
+                className="mobile-config-form"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  if (!api || active) return;
+                  if (
+                    config?.connectionMode === "direct" &&
+                    !window.confirm(
+                      "将此电脑的手机连接从 HTTPS/WSS 直连切换到公网 Relay？现有设备仍需遵守本机授权。",
+                    )
+                  )
+                    return;
+                  void run(async () => {
+                    setSnapshot(
+                      unwrap(
+                        await api.configure({
+                          relayUrl: relayUrl.trim(),
+                          workspaces: selectedPaths.map((path) => ({ path })),
+                        }),
+                      ),
+                    );
+                    setQr(undefined);
+                    setEditingConfiguration(false);
+                    configHeading.current?.focus({ preventScroll: true });
+                  });
+                }}
+              >
+                <div className="mobile-field">
+                  <span>Relay 服务地址</span>
+                  <TextField
+                    label="Relay 服务地址"
+                    type="url"
+                    placeholder="https://relay.example.com"
+                    value={relayUrl}
+                    required
+                    disabled={busy || active || !api}
+                    onValueChange={setRelayUrl}
+                    autoComplete="off"
+                  />
+                </div>
+                <p className="mobile-note">
+                  填写部署时绑定这台电脑的中继地址。保存后，开启上方连接开关。
+                </p>
+                <fieldset className="mobile-workspace-picker" disabled={busy || active || !api}>
+                  <legend>允许手机访问的项目</legend>
+                  {availableWorkspaces.length === 0 && (
+                    <p>
+                      还没有已注册且信任的项目。<Link to="/settings/workspaces">管理项目</Link>
+                    </p>
+                  )}
+                  {availableWorkspaces.map((workspace) => (
+                    <label key={workspace.path}>
+                      <input
+                        type="checkbox"
+                        checked={selectedPaths.includes(workspace.path)}
+                        onChange={(event) =>
+                          setSelectedPaths(
+                            checked(selectedPaths, workspace.path, event.target.checked),
+                          )
+                        }
+                      />
+                      <span>
+                        <strong>{workspace.name ?? workspace.path.split(/[\\/]/u).pop()}</strong>
+                        <small>{workspace.path}</small>
+                      </span>
+                    </label>
+                  ))}
+                </fieldset>
+                <div className="mobile-actions">
+                  <Button
+                    type="submit"
+                    variant="primary"
+                    disabled={
+                      busy || active || !api || !relayUrl.trim() || selectedPaths.length === 0
+                    }
+                  >
+                    保存连接设置
+                  </Button>
+                  <Button
+                    disabled={busy || active}
+                    onClick={() => void actions.registerWorkspace()}
+                  >
+                    添加本机项目
+                  </Button>
+                </div>
+              </form>
+            </>
+          )}
+        </div>
       </section>
     </div>
   );
