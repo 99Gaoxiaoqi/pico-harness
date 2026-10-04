@@ -29,7 +29,8 @@
     "@pico/storage": "*",
     "ws": "^8.21.1",
     "qrcode-terminal": "^0.12.0",
-    "@pico/runtime": "*"
+    "@pico/runtime": "*",
+    "@pico/remote-client": "*"
   },
   "devDependencies": {
     "@types/qrcode-terminal": "^0.12.2"

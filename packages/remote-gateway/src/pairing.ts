@@ -47,6 +47,7 @@ export class GatewayPairings {
       version: 1,
       gatewayId: this.state.gatewayId,
       publicUrl: this.config.publicUrl,
+      ...(this.config.relay ? {relay:this.config.relay} : {}),
       secret,
       expiresAt,
       pairingId: id,
@@ -140,6 +141,7 @@ export class GatewayPairings {
         permissions: entry.device.permissions,
         workspaceIds: entry.device.workspaceIds,
         publicUrl: this.config.publicUrl,
+      ...(this.config.relay ? {relay:this.config.relay} : {}),
         gatewayId: this.state.gatewayId,
       };
     }
