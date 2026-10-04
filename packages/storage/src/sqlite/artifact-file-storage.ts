@@ -55,13 +55,14 @@ function managedPath(database: DatabaseSync, relativePath: string, create: boole
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       }
       // Durability includes newly created ancestor directory entries, not only the leaf file.
-      const parent = openSync(dirname(directory), constants.O_RDONLY | constants.O_NOFOLLOW);
+      let parent: number | undefined;
       try {
+        parent = openSync(dirname(directory), constants.O_RDONLY | constants.O_NOFOLLOW);
         fsyncSync(parent);
       } catch (error) {
         if (!isUnsupportedDirectorySync(error)) throw error;
       } finally {
-        closeSync(parent);
+        if (parent !== undefined) closeSync(parent);
       }
     }
     const info = lstatSync(directory);
@@ -124,13 +125,14 @@ function publishFile(database: DatabaseSync, relativePath: string, bytes: Uint8A
       closeSync(fd);
     }
     renameSync(temporary, destination);
-    const directory = openSync(dirname(destination), constants.O_RDONLY);
+    let directory: number | undefined;
     try {
+      directory = openSync(dirname(destination), constants.O_RDONLY);
       fsyncSync(directory);
     } catch (error) {
       if (!isUnsupportedDirectorySync(error)) throw error;
     } finally {
-      closeSync(directory);
+      if (directory !== undefined) closeSync(directory);
     }
   } finally {
     if (existsSync(temporary)) unlinkSync(temporary);

@@ -3,13 +3,14 @@ import fs from "node:fs";
 import { mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join, sep } from "node:path";
 import test from "node:test";
 import { createRuntimeRequest, type RuntimeParams } from "@pico/protocol";
 import { SqliteSessionWorkbarRepository } from "@pico/storage";
 import { DesktopRuntimeService } from "@pico/pico-host/desktop-runtime-service";
 import { WorkspaceRuntimeService } from "@pico/pico-host/workspace-runtime-service";
 import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
+import { globalSessionManager } from "@pico/pico-host/session";
 import { resolvePicoPaths } from "@pico/pico-host/pico-paths";
 import { buildDefaultToolRegistry } from "@pico/pico-host/default-registry";
 import { writeDesktopModelRouting } from "../../fixtures/desktop-model-routing.js";
@@ -101,14 +102,51 @@ test("正式 write_file 交付物经过会话查询、分块预览及另存/文�
   assert.ok(syncs.file > 0, "artifact bytes still receive a successful file fsync");
 });
 
+test("目录无法打开时正式交付仍可查询、分块读取与另存不可变快照", async (t) => {
+  const fixture = await createFixture(t);
+  const opens = injectOpenFailure(t, fixture.storageRoot, "directory", "EPERM");
+  const content = "目录句柄不可用仍保留交付字节 🧪\n".repeat(100);
+  const result = await fixture.registry.execute({
+    id: "directory-open-delivery",
+    name: "write_file",
+    arguments: JSON.stringify({ path: "reports/result.md", content, artifact: true }),
+  });
+  assert.equal(result.isError, false);
+  assert.match(result.output, /已登记生成文件/u);
+  assert.deepEqual(fixture.revisions, [1]);
+  const artifact = fixture.repository.queryArtifacts({ sessionId: fixture.sessionId })
+    .artifacts[0]!;
+  const reference = {
+    workspacePath: fixture.workspace,
+    sessionId: fixture.sessionId,
+    artifactId: artifact.artifactId,
+  };
+  const chunk = record(await fixture.query({ ...reference, action: "read_chunk" }));
+  assert.equal(Buffer.from(String(chunk.contentBase64), "base64").toString("utf8"), content);
+  await fs.promises.writeFile(join(fixture.workspace, "reports/result.md"), "源码已变");
+  const saved = join(fixture.root, "snapshot.md");
+  const exporter = createArtifactExporter({
+    query: fixture.query,
+    chooseSavePath: async () => saved,
+    revealFile: () => assert.fail("另存不得打开文件"),
+  });
+  t.after(() => exporter.dispose());
+  await exporter.export(reference, "saveAs");
+  assert.equal(await readFile(saved, "utf8"), content);
+  assert.ok(opens.directory > 0, "真实存储链尝试目录 open 后才降级");
+});
+
 test("交付登记仅降级不支持的目录同步，文件同步失败与目录 I/O 错误仍拒绝登记", async (t) => {
-  for (const [target, code] of [
-    ["file", "EPERM"],
-    ["directory", "EIO"],
+  for (const [operation, target, code] of [
+    ["sync", "file", "EPERM"],
+    ["sync", "directory", "EIO"],
+    ["open", "file", "EPERM"],
+    ["open", "directory", "EIO"],
   ] as const) {
-    await t.test(`${target} ${code}`, async (child) => {
+    await t.test(`${operation} ${target} ${code}`, async (child) => {
       const fixture = await createFixture(child);
-      injectSyncFailure(child, target, code);
+      if (operation === "sync") injectSyncFailure(child, target, code);
+      else injectOpenFailure(child, fixture.storageRoot, target, code);
       const result = await fixture.registry.execute({
         id: `reject-${target}-${code}`,
         name: "write_file",
@@ -182,6 +220,7 @@ test("交付物保留路径授权、跨会话隔离和导出取消语义", async
     ),
   );
   const otherSessionId = String(record(other.session).sessionId);
+  fixture.sessionIds.push(otherSessionId);
   let prompted = 0;
   const exporter = createArtifactExporter({
     query: fixture.query,
@@ -234,24 +273,38 @@ async function createFixture(t: test.TestContext) {
     trustStore,
     env: { PICO_HOME: picoHome },
   });
+  const sessionIds: string[] = [];
   t.after(async () => {
     await desktop.close();
+    for (const id of sessionIds)
+      await globalSessionManager.delete(id, workspace, { picoHome })?.close();
     await rm(root, { recursive: true, force: true });
   });
   const created = record(
     await desktop.handle(createRuntimeRequest("session.create", { workspacePath: workspace })),
   );
   const sessionId = String(record(created.session).sessionId);
-  const repository = new SqliteSessionWorkbarRepository({
-    storageRoot: resolvePicoPaths(workspace, { picoHome }).workspace.root,
-  });
+  sessionIds.push(sessionId);
+  const storageRoot = await realpath(resolvePicoPaths(workspace, { picoHome }).workspace.root);
+  const repository = new SqliteSessionWorkbarRepository({ storageRoot });
   const revisions: number[] = [];
   const registry = buildDefaultToolRegistry(workspace, {
     sessionArtifacts: { repository, sessionId, onChanged: (revision) => revisions.push(revision) },
   });
   const query = (params: RuntimeParams<"session.artifacts.query">) =>
     desktop.handle(createRuntimeRequest("session.artifacts.query", params));
-  return { root, workspace, desktop, sessionId, repository, revisions, registry, query };
+  return {
+    root,
+    workspace,
+    desktop,
+    sessionId,
+    sessionIds,
+    storageRoot,
+    repository,
+    revisions,
+    registry,
+    query,
+  };
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -276,6 +329,45 @@ function injectSyncFailure(
   syncBuiltinESMExports();
   t.after(() => {
     sync.mock.restore();
+    syncBuiltinESMExports();
+  });
+  return calls;
+}
+
+function injectOpenFailure(
+  t: test.TestContext,
+  storageRoot: string,
+  target: "directory" | "file",
+  code: "EPERM" | "EIO",
+) {
+  const originalOpen = fs.openSync;
+  const calls = { directory: 0, file: 0 };
+  const open = t.mock.method(fs, "openSync", (...args: Parameters<typeof fs.openSync>) => {
+    const path = args[0];
+    const canonical =
+      typeof path === "string"
+        ? fs.existsSync(path)
+          ? fs.realpathSync.native(path)
+          : join(fs.realpathSync.native(dirname(path)), basename(path))
+        : undefined;
+    const artifacts = join(storageRoot, "artifacts");
+    if (
+      canonical !== undefined &&
+      (canonical === storageRoot ||
+        canonical === artifacts ||
+        canonical.startsWith(`${artifacts}${sep}`))
+    ) {
+      const kind =
+        fs.existsSync(canonical) && fs.lstatSync(canonical).isDirectory() ? "directory" : "file";
+      calls[kind]++;
+      if (kind === target)
+        throw Object.assign(new Error(`${code}: injected ${kind} open failure`), { code });
+    }
+    return originalOpen(...args);
+  });
+  syncBuiltinESMExports();
+  t.after(() => {
+    open.mock.restore();
     syncBuiltinESMExports();
   });
   return calls;
