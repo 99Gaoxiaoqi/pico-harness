@@ -2572,7 +2572,13 @@ async function runProcessWithOpenStdin(
 ): Promise<{ code: number | null; signal: NodeJS.Signals | null; stdout: string; stderr: string }> {
   const child = spawn(
     process.execPath,
-    ["--import", "tsx", "tests/fixtures/headless-one-shot-signal-child.ts"],
+    [
+      "--import",
+      "tsx",
+      "--import",
+      "./tests/fixtures/headless-one-shot-signal-child.ts",
+      "src/internal/headless-one-shot-main.ts",
+    ],
     {
       cwd: process.cwd(),
       env: {
