@@ -226,10 +226,13 @@ function provider() {
       },
       async setItem() {},
     },
+    "expo-crypto": { getRandomBytes: (length: number) => new Uint8Array(length) },
     "@pico/remote-client": { RemoteRuntimeClient: Client },
     "@pico/protocol/remote": protocol,
     "./core": loadMobile("core.ts", { "@pico/protocol/remote": protocol }),
-    "./pairing": loadMobile("pairing.ts", {}),
+    "./pairing": loadMobile("pairing.ts", {
+      "@pico/protocol/relay": { parseRelayEndpoint: (value: unknown) => value },
+    }),
     "./connection-errors": loadMobile("connection-errors.ts", {}),
     "./local-data": {
       clearHostLocalData() {

@@ -47,7 +47,7 @@
     "build:core": "npm run build --workspace @pico/core",
     "build:cli": "npm run build --workspace @pico/cli",
     "build:pico-host": "npm run build --workspace @pico/pico-host",
-    "build:packages": "npm run build:core && npm run build:storage && npm run build:runtime && npm run build:protocol && npm run build:transcript-replica && npm run build:runtime-host && npm run build:pico-host && npm run build:remote-client && npm run build:remote-gateway && npm run build:cli && npm run build:file-worker && npm run build:code-intelligence-worker",
+    "build:packages": "npm run build:core && npm run build:storage && npm run build:runtime && npm run build:protocol && npm run build:transcript-replica && npm run build:runtime-host && npm run build:pico-host && npm run build:remote-client && npm run build:remote-gateway && npm run build:remote-relay && npm run build:cli && npm run build:file-worker && npm run build:code-intelligence-worker",
     "build:storage": "npm run build --workspace @pico/storage",
     "build:runtime": "npm run build:core && npm run build --workspace @pico/runtime",
     "build:protocol": "npm run build:core && npm run build --workspace @pico/protocol",
@@ -90,7 +90,8 @@
     "mobile:typecheck": "npm run typecheck --workspace @pico/mobile",
     "mobile:export": "npm run bundle --workspace @pico/mobile",
     "check:mobile-boundaries": "node scripts/check-mobile-boundaries.mjs",
-    "audit:check": "node scripts/check-dependency-audit.mjs"
+    "audit:check": "node scripts/check-dependency-audit.mjs",
+    "build:remote-relay": "npm run build --workspace @pico/remote-relay"
   },
   "engines": {
     "node": ">=22.19 <23 || >=24.3 <25 || >=26 <27"

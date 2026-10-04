@@ -1,3 +1,7 @@
+import { RemoteProtocolError } from "./remote-error.js";
+export { RemoteProtocolError } from "./remote-error.js";
+import { parseRelayEndpoint, type RemoteRelayEndpoint } from "./relay.js";
+export type { RemoteRelayEndpoint } from "./relay.js";
 import {
   isJsonObject,
   parseStrictRuntimeParams,
@@ -286,17 +290,6 @@ export interface RemoteError {
 export type RemoteResponse<T = unknown> =
   | { requestId: string; ok: true; value: T }
   | { requestId: string; ok: false; error: RemoteError };
-export class RemoteProtocolError extends Error {
-  constructor(
-    readonly code: string,
-    message: string,
-    readonly retryable = false,
-    readonly outcome?: "not_executed" | "unknown",
-  ) {
-    super(message);
-    this.name = "RemoteProtocolError";
-  }
-}
 export function parseRemoteRequest(value: unknown): RemoteRequest {
   if (
     !isJsonObject(value) ||
@@ -384,6 +377,7 @@ export interface RemoteCapabilities {
   features: Readonly<Record<string, { available: boolean; reason?: string }>>;
 }
 export interface RemotePairingOffer {
+  relay?: RemoteRelayEndpoint;
   version: 1;
   publicUrl: string;
   gatewayId: string;
@@ -403,6 +397,7 @@ export interface RemotePairingSubmitted {
   expiresAt: number;
 }
 export interface RemotePairedDevice {
+  relay?: RemoteRelayEndpoint;
   deviceId: string;
   deviceToken: string;
   publicUrl: string;
@@ -458,5 +453,11 @@ export function parsePairingOffer(value: unknown): RemotePairingOffer {
     throw new RemoteProtocolError("INVALID_PAIRING", "配对地址必须是 HTTPS origin");
   if (value.expiresAt <= Date.now())
     throw new RemoteProtocolError("PAIRING_EXPIRED", "配对二维码已过期");
+  if (value.relay !== undefined) {
+    const relay = parseRelayEndpoint(value.relay);
+    if (relay.gatewayId !== value.gatewayId || relay.relayUrl !== url.origin)
+      throw new RemoteProtocolError("INVALID_PAIRING", "中继与电脑身份不一致");
+    return { ...(value as unknown as RemotePairingOffer), relay };
+  }
   return value as unknown as RemotePairingOffer;
 }

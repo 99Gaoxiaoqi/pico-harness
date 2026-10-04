@@ -1,10 +1,14 @@
-import { Directory, File, Paths } from "expo-file-system";
+import { Directory, File, FileMode, Paths } from "expo-file-system";
 import * as Crypto from "expo-crypto";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import type { RemoteRuntimeClient } from "@pico/remote-client";
-import type { RuntimeMediaReference, RuntimeSessionArtifact } from "@pico/protocol/mobile";
-import { assertArtifactIntegrity } from "./core";
+import {
+  isJsonObject,
+  type RuntimeMediaReference,
+  type RuntimeSessionArtifact,
+} from "@pico/protocol/mobile";
+import { assertArtifactIntegrity, decodedBase64Size } from "./core";
 import { verifyMediaIntegrity } from "./media";
 
 const legacyCache = new Directory(Paths.cache, "pico-artifacts");
@@ -17,6 +21,25 @@ const clearingHosts = new Set<string>();
 const downloads = new Map<AbortController, { hostId: string; done: Promise<void> }>();
 const hostDirectory = (hostId: string) =>
   new Directory(cache, bytesToHex(sha256(new TextEncoder().encode(hostId))));
+
+function decodeChunk(value: string): Uint8Array {
+  const bytes = new Uint8Array(decodedBase64Size(value));
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  let position = 0;
+  for (let i = 0; i < value.length; i += 4) {
+    const a = alphabet.indexOf(value[i]!);
+    const b = alphabet.indexOf(value[i + 1]!);
+    const c = value[i + 2] === "=" ? 0 : alphabet.indexOf(value[i + 2]!);
+    const d = value[i + 3] === "=" ? 0 : alphabet.indexOf(value[i + 3]!);
+    if ((value[i + 2] === "=" && b & 15) || (value[i + 3] === "=" && value[i + 2] !== "=" && c & 3))
+      throw new Error("文件分块编码无效");
+    const bits = (a << 18) | (b << 12) | (c << 6) | d;
+    if (position < bytes.length) bytes[position++] = bits >>> 16;
+    if (position < bytes.length) bytes[position++] = (bits >>> 8) & 255;
+    if (position < bytes.length) bytes[position++] = bits & 255;
+  }
+  return bytes;
+}
 
 export function hasLegacyArtifactCache() {
   return legacyCache.exists && legacyCache.list().length > 0;
@@ -168,29 +191,84 @@ export async function downloadArtifact(options: {
     }
     partial = new File(hostCache, `${Crypto.randomUUID()}.partial`);
     onProgress?.("加载中…");
-    await File.downloadFileAsync(
-      options.client.artifactUrl(options.workspaceId, options.sessionId, artifact.artifactId),
-      partial,
-      {
-        headers: options.client.authorizationHeaders(),
-        signal: controller.signal,
-        onProgress: ({ bytesWritten, totalBytes }) => {
-          if (bytesWritten > artifact.sizeBytes || totalBytes > artifact.sizeBytes) {
-            controller.abort();
-            return;
-          }
+    if (options.client.isRelay) {
+      partial.create();
+      const handle = partial.open(FileMode.WriteOnly);
+      try {
+        let offset = 0;
+        while (offset < artifact.sizeBytes) {
+          check();
+          const chunk = await options.client.request(
+            "session.artifacts.query",
+            {
+              sessionId: options.sessionId,
+              artifactId: artifact.artifactId,
+              action: "read_chunk",
+              offsetBytes: offset,
+              limitBytes: 32 * 1024,
+            },
+            { workspaceId: options.workspaceId },
+          );
+          check();
+          const metadata = chunk.artifact;
           if (
-            epoch === cacheEpoch &&
-            hostEpoch === (hostEpochs.get(options.scopeId) ?? 0) &&
-            !signal?.aborted &&
-            !controller.signal.aborted
+            !isJsonObject(metadata) ||
+            metadata.artifactId !== artifact.artifactId ||
+            metadata.digest !== artifact.digest ||
+            metadata.sizeBytes !== artifact.sizeBytes ||
+            metadata.mimeType !== artifact.mimeType ||
+            chunk.totalBytes !== artifact.sizeBytes ||
+            typeof chunk.contentBase64 !== "string" ||
+            chunk.contentBase64.length > 44 * 1024
           )
-            onProgress?.(
-              `${Math.round(bytesWritten / 1024)} / ${Math.round(artifact.sizeBytes / 1024)} KiB`,
-            );
+            throw new Error("文件分块身份或大小无效");
+          const bytes = decodeChunk(chunk.contentBase64);
+          const end = offset + bytes.length;
+          if (
+            chunk.offsetBytes !== offset ||
+            !bytes.length ||
+            bytes.length > 32 * 1024 ||
+            end > artifact.sizeBytes ||
+            chunk.endOffsetBytes !== end ||
+            chunk.truncated !== end < artifact.sizeBytes ||
+            (end < artifact.sizeBytes
+              ? chunk.nextOffsetBytes !== end
+              : chunk.nextOffsetBytes !== undefined)
+          )
+            throw new Error("文件分块偏移无效");
+          handle.writeBytes(bytes);
+          offset = end;
+          onProgress?.(
+            `${Math.round(offset / 1024)} / ${Math.round(artifact.sizeBytes / 1024)} KiB`,
+          );
+        }
+      } finally {
+        handle.close();
+      }
+    } else
+      await File.downloadFileAsync(
+        options.client.artifactUrl(options.workspaceId, options.sessionId, artifact.artifactId),
+        partial,
+        {
+          headers: options.client.authorizationHeaders(),
+          signal: controller.signal,
+          onProgress: ({ bytesWritten, totalBytes }) => {
+            if (bytesWritten > artifact.sizeBytes || totalBytes > artifact.sizeBytes) {
+              controller.abort();
+              return;
+            }
+            if (
+              epoch === cacheEpoch &&
+              hostEpoch === (hostEpochs.get(options.scopeId) ?? 0) &&
+              !signal?.aborted &&
+              !controller.signal.aborted
+            )
+              onProgress?.(
+                `${Math.round(bytesWritten / 1024)} / ${Math.round(artifact.sizeBytes / 1024)} KiB`,
+              );
+          },
         },
-      },
-    );
+      );
     check();
     onProgress?.("校验中…");
     await validate(partial);

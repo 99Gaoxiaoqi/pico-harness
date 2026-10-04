@@ -2,7 +2,7 @@
   "expo": {
     "name": "Pico",
     "slug": "pico-mobile",
-    "version": "0.1.1",
+    "version": "0.1.2",
     "scheme": "pico",
     "orientation": "default",
     "userInterfaceStyle": "light",
@@ -10,12 +10,12 @@
       "bundleIdentifier": "dev.pico.mobile",
       "supportsTablet": true,
       "useAppleScene": true,
-      "buildNumber": "2"
+      "buildNumber": "3"
     },
     "android": {
       "package": "dev.pico.mobile",
       "permissions": ["CAMERA"],
-      "versionCode": 2,
+      "versionCode": 3,
       "blockedPermissions": ["android.permission.RECORD_AUDIO"]
     },
     "plugins": [

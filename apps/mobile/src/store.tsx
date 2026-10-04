@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useEffect, useRef, useState } from "react";
 import { Alert, AppState, Platform } from "react-native";
 import * as SecureStore from "expo-secure-store";
+import * as Crypto from "expo-crypto";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { RemoteRuntimeClient } from "@pico/remote-client";
 import {
@@ -267,6 +268,8 @@ export function PicoProvider({ children }: { children: React.ReactNode }) {
         publicUrl: selected.baseUrl,
         deviceToken: token,
         gatewayId: selected.gatewayId,
+        relay: selected.relay,
+        randomBytes: Crypto.getRandomBytes,
         onState: (state, stateError) => {
           if (clientRef.current !== client) return;
           if (
@@ -379,6 +382,8 @@ export function PicoProvider({ children }: { children: React.ReactNode }) {
       publicUrl: saved.baseUrl,
       deviceToken: token,
       gatewayId: saved.gatewayId,
+      relay: saved.relay,
+      randomBytes: Crypto.getRandomBytes,
     });
     try {
       if (action === "verify") await client.capabilities();
@@ -399,12 +404,25 @@ export function PicoProvider({ children }: { children: React.ReactNode }) {
       },
       {
         submit: (offer, deviceName) =>
-          RemoteRuntimeClient.submitPairing(offer, {
-            deviceName,
-            platform: Platform.OS === "ios" ? "ios" : "android",
+          RemoteRuntimeClient.submitPairing(
+            offer,
+            {
+              deviceName,
+              platform: Platform.OS === "ios" ? "ios" : "android",
+            },
+            undefined,
+            { randomBytes: Crypto.getRandomBytes },
+          ),
+        status: (url, claim, relay) =>
+          RemoteRuntimeClient.pairingStatus(url, claim, undefined, {
+            relay,
+            randomBytes: Crypto.getRandomBytes,
           }),
-        status: RemoteRuntimeClient.pairingStatus,
-        acknowledge: RemoteRuntimeClient.acknowledgePairing,
+        acknowledge: (url, claim, relay) =>
+          RemoteRuntimeClient.acknowledgePairing(url, claim, undefined, {
+            relay,
+            randomBytes: Crypto.getRandomBytes,
+          }),
         verify: (saved, token) => withCredential(saved, token, "verify"),
         revoke: (saved, token) => withCredential(saved, token, "revoke"),
         install: async (saved, token) => {

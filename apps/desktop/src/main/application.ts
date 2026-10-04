@@ -1,3 +1,5 @@
+import { createDesktopRemoteManagement } from "./remote-management.js";
+import { registerRemoteManagementIpc } from "./remote-management-ipc.js";
 import { app, BrowserWindow, dialog, ipcMain } from "electron";
 import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
@@ -35,6 +37,8 @@ import { resolveCanonicalPicoHome } from "@pico/pico-host/pico-paths";
 let mainWindow: BrowserWindow | undefined;
 let disposeIpc: (() => void) | undefined;
 let disposeUpdater: (() => void) | undefined;
+let disposeRemoteManagement: (() => void) | undefined;
+const remoteManagement = createDesktopRemoteManagement(app.getPath("userData"));
 const terminalGeneration = new DesktopTerminalGenerationController();
 // 3-B-3 硬切后默认构造走 kernel 承载：首次请求（下方 runtime.ping）经
 // connectOrSpawn 自动拉起 detached 常驻 daemon candidate（自持 residency，
@@ -273,6 +277,7 @@ if (!app.requestSingleInstanceLock()) {
       revokeDesktopClientToken(resolveCanonicalPicoHome(), clientCapabilityToken);
     }
     disposeIpc?.();
+    disposeRemoteManagement?.();
     disposeUpdater?.();
     runtime.close();
     void browser
@@ -332,6 +337,17 @@ if (!app.requestSingleInstanceLock()) {
         browser,
         submitTerminalCreate: (send) => terminalGeneration.submitCreate(send),
       });
+      disposeRemoteManagement = registerRemoteManagementIpc({
+        ipcMain,
+        service: remoteManagement,
+        trusted: (event) =>
+          event.sender === mainWindow?.webContents &&
+          !event.sender.isDestroyed() &&
+          event.senderFrame === event.sender.mainFrame,
+      });
+      void remoteManagement
+        .restore()
+        .catch(() => console.error("手机连接自动恢复失败，请在设置中重试"));
       disposeUpdater = configureAutoUpdates(() => lifecycle.markQuitting());
       await openMainWindow();
       stopClientCapabilityPoller = startClientCapabilityPoller(clientCapabilityToken);

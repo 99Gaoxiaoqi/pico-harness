@@ -5,6 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { parseRelayEndpoint } from "@pico/protocol/relay";
 import type { RemotePermission } from "@pico/protocol/remote";
 
 export interface GatewayWorkspace {
@@ -13,6 +14,7 @@ export interface GatewayWorkspace {
   readonly path: string;
 }
 export interface GatewayConfig {
+  readonly relay?: import("@pico/protocol/relay").RemoteRelayEndpoint;
   readonly version: 1;
   readonly publicUrl: string;
   readonly port: number;
@@ -170,7 +172,7 @@ export function validateGatewayConfig(value: GatewayConfig): GatewayConfig {
   )
     throw new Error("公网地址必须是无凭据的 HTTPS origin");
   if (
-    !value.listenHosts.length ||
+    (!value.relay && !value.listenHosts.length) ||
     !value.workspaces.length ||
     new Set(value.workspaces.map((w) => w.id)).size !== value.workspaces.length
   )
@@ -178,7 +180,11 @@ export function validateGatewayConfig(value: GatewayConfig): GatewayConfig {
   for (const workspace of value.workspaces)
     if (!/^[a-zA-Z0-9_-]{1,128}$/.test(workspace.id) || !workspace.name || !workspace.path)
       throw new Error("授权工作区无效");
-  if (!value.certificatePath || !value.privateKeyPath) throw new Error("需要可信 TLS 证书与私钥");
+  if (value.relay) {
+    const relay = parseRelayEndpoint(value.relay);
+    if (relay.relayUrl !== url.origin) throw new Error("中继地址与公开地址不一致");
+  } else if (!value.certificatePath || !value.privateKeyPath)
+    throw new Error("需要可信 TLS 证书与私钥");
   return value;
 }
 export async function loadGatewayState(home: string): Promise<GatewayState> {

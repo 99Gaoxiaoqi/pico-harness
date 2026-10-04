@@ -1,3 +1,4 @@
+import { MobileConnectionSettingsPage } from "./pages/MobileConnectionSettingsPage.js";
 // Preserve the stylesheet cascade independently of page import order.
 import "./conversation/graph-board.css";
 import "./usage/usage.css";
@@ -120,6 +121,7 @@ function AppStateRouter() {
         <Route path="settings/subagents" element={<SubagentSettingsRoute />} />
         <Route path="settings/memory" element={<UserMemorySettingsPage />} />
         <Route path="settings/usage" element={<UsagePage />} />
+        <Route path="settings/mobile" element={<MobileConnectionSettingsPage />} />
         <Route path="settings/system" element={<SystemSettingsPage />} />
         <Route
           path="memory"

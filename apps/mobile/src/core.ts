@@ -5,6 +5,7 @@ import type {
   RemoteResult as RuntimeResult,
 } from "@pico/protocol/remote";
 import { parsePairingOffer, type RemotePairingOffer } from "@pico/protocol/remote";
+import type { RemoteRelayEndpoint } from "@pico/protocol/relay";
 
 export function parseMobilePairing(raw: string): RemotePairingOffer {
   let value: unknown;
@@ -29,6 +30,7 @@ export type SavedHost = {
   baseUrl: string;
   deviceId: string;
   gatewayId: string;
+  relay?: RemoteRelayEndpoint;
 };
 export type Workspace = { id: string; label: string };
 export type ConnectionPhase =

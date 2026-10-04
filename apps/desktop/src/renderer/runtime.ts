@@ -3520,6 +3520,16 @@ export function useRuntimeStore(): RuntimeStore {
 function createPreviewBridge(): DesktopBridge {
   const success = <T>(value: T): Promise<DesktopResult<T>> => Promise.resolve({ ok: true, value });
   return {
+    remoteManagement: {
+      snapshot: remotePreviewUnavailable,
+      configure: remotePreviewUnavailable,
+      start: remotePreviewUnavailable,
+      stop: remotePreviewUnavailable,
+      offer: remotePreviewUnavailable,
+      approve: remotePreviewUnavailable,
+      reject: remotePreviewUnavailable,
+      revoke: remotePreviewUnavailable,
+    },
     commands: {
       catalog: async () => ({ ok: true, value: [] }),
       complete: async () => ({ ok: true, value: [] }),
@@ -3622,4 +3632,11 @@ function emptyPreviewBrowserState(sessionId: string) {
     visible: false,
     generation: 0,
   } as const;
+}
+
+function remotePreviewUnavailable(): Promise<DesktopResult<never>> {
+  return Promise.resolve({
+    ok: false,
+    error: { code: "PREVIEW_ONLY", message: "请在 Pico 桌面端管理手机连接。", retryable: false },
+  });
 }

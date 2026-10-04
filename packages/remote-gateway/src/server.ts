@@ -1,5 +1,13 @@
 import { createServer, type Server } from "node:https";
-import type { ServerResponse, IncomingMessage } from "node:http";
+import { GatewayRelay, RelayEventSocket, type RelayChannel } from "./relay.js";
+import {
+  relayRequest,
+  RelayResponse,
+  type GatewayRequest,
+  type GatewayResponse,
+  type GatewaySocket,
+} from "./transport.js";
+import { loadRelayIdentity } from "./relay-config.js";
 import { createSecureContext } from "node:tls";
 import { X509Certificate, createHash, randomUUID, createPrivateKey } from "node:crypto";
 import { lookup } from "node:dns/promises";
@@ -58,6 +66,7 @@ export interface RemoteGatewayOptions {
   /** Trusted host adapter. Test doubles never alter TLS verification in client code. */
   readonly createRuntimeClient?: (deviceId: string) => GatewayRuntimeClient;
   readonly now?: () => number;
+  readonly createRelayWebSocket?: (url: string) => WebSocket;
   readonly audit?: (entry: GatewayAuditEntry) => void;
 }
 export interface GatewayAuditEntry {
@@ -74,12 +83,12 @@ interface DeviceConnection {
   readonly pendingSessionOpens: Map<string, number>;
   readonly pendingFrames: RuntimeSessionSubscriptionFrame[];
   pendingFrameBytes: number;
-  socket?: WebSocket;
+  socket?: GatewaySocket;
   frameDispose?: () => void;
   readonly eventSubscriptions: Map<string, () => void>;
   requests: number;
   lastSeenPersisted: number;
-  readonly downloads: Set<ServerResponse>;
+  readonly downloads: Set<GatewayResponse>;
 }
 interface RateBucket {
   tokens: number;
@@ -107,6 +116,9 @@ export class RemoteGateway {
   private runtimeLastReachableAt?: number;
   private runtimeLastFailure?: string;
   private sweep?: NodeJS.Timeout;
+  private relay?: GatewayRelay;
+  private readonly relayEvents = new Map<string, RelayEventSocket>();
+  private readonly relayRequests = new Map<string, Set<string>>();
   private constructor(
     config: GatewayConfig,
     home: string,
@@ -140,52 +152,54 @@ export class RemoteGateway {
     if (this.startedAt || this.closing) throw new Error("网关已启动或关闭");
     this.releaseLock = await acquireGatewayLock(this.home);
     try {
-      const [cert, key] = await Promise.all([
-        readTlsFile(this.config.certificatePath),
-        readTlsFile(this.config.privateKeyPath),
-      ]);
-      validateCertificate(this.config, cert, key, this.now());
-      for (const host of this.config.listenHosts) {
-        const server = createServer(
-          {
-            cert,
-            key,
-            minVersion: "TLSv1.2",
-            maxHeaderSize: 16 * 1024,
-            requestTimeout: 30_000,
-            headersTimeout: 10_000,
-          },
-          (request, response) => {
-            void this.handleHttp(request, response);
-          },
-        );
-        server.on("upgrade", (request, socket, head) => {
-          try {
-            if (request.url !== "/v1/events" || this.closing)
-              throw new GatewayError("NOT_FOUND", "接口不存在", 404);
-            const device = this.authenticate(request);
-            this.rate(`ws:${device.id}`, 10, 60_000);
-            this.webSockets.handleUpgrade(request, socket, head, (ws) => {
-              void this.openSocket(device, ws);
-            });
-          } catch (error) {
-            const safe = safeGatewayError(error);
-            socket.end(
-              `HTTP/1.1 ${safe.status} ${safe.status === 401 ? "Unauthorized" : "Forbidden"}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`,
-            );
-          }
-        });
-        this.servers.push(server);
-        await new Promise<void>((resolve, reject) => {
-          server.once("error", reject);
-          server.listen({ host, port: this.config.port, ipv6Only: host.includes(":") }, () => {
-            server.off("error", reject);
-            server.on("error", () => {
-              this.lastError = "HTTPS 监听异常";
-            });
-            resolve();
+      if (!this.config.relay) {
+        const [cert, key] = await Promise.all([
+          readTlsFile(this.config.certificatePath),
+          readTlsFile(this.config.privateKeyPath),
+        ]);
+        validateCertificate(this.config, cert, key, this.now());
+        for (const host of this.config.listenHosts) {
+          const server = createServer(
+            {
+              cert,
+              key,
+              minVersion: "TLSv1.2",
+              maxHeaderSize: 16 * 1024,
+              requestTimeout: 30_000,
+              headersTimeout: 10_000,
+            },
+            (request, response) => {
+              void this.handleHttp(request, response);
+            },
+          );
+          server.on("upgrade", (request, socket, head) => {
+            try {
+              if (request.url !== "/v1/events" || this.closing)
+                throw new GatewayError("NOT_FOUND", "接口不存在", 404);
+              const device = this.authenticate(request);
+              this.rate(`ws:${device.id}`, 10, 60_000);
+              this.webSockets.handleUpgrade(request, socket, head, (ws) => {
+                void this.openSocket(device, ws);
+              });
+            } catch (error) {
+              const safe = safeGatewayError(error);
+              socket.end(
+                `HTTP/1.1 ${safe.status} ${safe.status === 401 ? "Unauthorized" : "Forbidden"}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`,
+              );
+            }
           });
-        });
+          this.servers.push(server);
+          await new Promise<void>((resolve, reject) => {
+            server.once("error", reject);
+            server.listen({ host, port: this.config.port, ipv6Only: host.includes(":") }, () => {
+              server.off("error", reject);
+              server.on("error", () => {
+                this.lastError = "HTTPS 监听异常";
+              });
+              resolve();
+            });
+          });
+        }
       }
       const bootstrap =
         this.options.createRuntimeClient?.("bootstrap") ??
@@ -212,6 +226,24 @@ export class RemoteGateway {
       this.control = await startControlServer(this.home, (method, params) =>
         this.manage(method, params),
       );
+      if (this.config.relay) {
+        if (this.config.relay.gatewayId !== this.state.gatewayId)
+          throw new Error("中继电脑身份不一致");
+        const identity = await loadRelayIdentity(this.home, this.config.relay);
+        this.relay = new GatewayRelay({
+          endpoint: this.config.relay,
+          secretKey: identity.secretKey,
+          token: identity.token,
+          createWebSocket: this.options.createRelayWebSocket,
+          onMessage: (channel, value) => this.handleRelay(channel, value),
+          onClose: (channel) => {
+            this.relayEvents.get(channel.id)?.finish();
+            this.relayEvents.delete(channel.id);
+            this.relayRequests.delete(channel.id);
+          },
+        });
+        this.relay.start();
+      }
       this.startedAt = this.now();
       this.sweep = setInterval(() => {
         this.pairings.pending();
@@ -228,6 +260,7 @@ export class RemoteGateway {
     this.closing = true;
     if (this.sweep) clearInterval(this.sweep);
     this.pairings.clear();
+    this.relay?.close();
     for (const [id] of this.connections) this.closeDevice(id);
     this.webSockets.close();
     for (const server of this.servers) {
@@ -244,6 +277,11 @@ export class RemoteGateway {
         ? (input as Record<string, unknown>)
         : {};
     switch (method) {
+      case "stop":
+        scheduleUnrefDeadline(() => {
+          void this.close();
+        }, 25);
+        return { stopped: true };
       case "status":
         return this.status();
       case "doctor":
@@ -318,7 +356,7 @@ export class RemoteGateway {
       workspaceIds: [...new Set(workspaceIds)] as string[],
     };
   }
-  private authenticate(request: IncomingMessage): GatewayDevice {
+  private authenticate(request: GatewayRequest): GatewayDevice {
     const token = bearer(request);
     const device = this.state.devices.find(
       (candidate) =>
@@ -327,6 +365,7 @@ export class RemoteGateway {
         secretMatches(token, candidate.tokenHash),
     );
     if (!device) throw new GatewayError("DEVICE_REVOKED", "设备未授权或已撤销，请重新配对", 401);
+    request.bindDevice?.(device.id);
     device.lastConnectedAt = this.now();
     return device;
   }
@@ -364,6 +403,7 @@ export class RemoteGateway {
     return connection;
   }
   private closeDevice(deviceId: string): void {
+    this.relay?.closeDevice(deviceId);
     const connection = this.connections.get(deviceId);
     if (!connection) return;
     connection.socket?.close(4001, "设备授权已撤销或更改");
@@ -378,10 +418,15 @@ export class RemoteGateway {
     connection.client.close();
     this.connections.delete(deviceId);
   }
-  private async revoke(device: GatewayDevice): Promise<void> {
+  private async revoke(device: GatewayDevice, acknowledge?: () => void): Promise<void> {
     device.revokedAt = this.now();
-    this.closeDevice(device.id);
-    await this.persist();
+    // Deny every subsequent request immediately. Persist before sending the final self-revoke ACK.
+    try {
+      await this.persist();
+      acknowledge?.();
+    } finally {
+      this.closeDevice(device.id);
+    }
   }
   private persist(confirmation?: PairingConfirmation): Promise<void> {
     const next = this.persistenceTail.then(async () => {
@@ -404,7 +449,77 @@ export class RemoteGateway {
     this.persistenceTail = next.catch(() => undefined);
     return next;
   }
-  private async handleHttp(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  private async handleRelay(channel: RelayChannel, value: unknown): Promise<void> {
+    if (!value || typeof value !== "object" || Array.isArray(value) || !channel.active)
+      throw new Error("INVALID_RELAY_REQUEST");
+    const message = value as Record<string, unknown>;
+    if (message.kind === "request") {
+      if (
+        Object.keys(message).some(
+          (key) => !["kind", "id", "method", "path", "token", "body"].includes(key),
+        ) ||
+        typeof message.id !== "string" ||
+        !/^[a-zA-Z0-9_-]{1,128}$/.test(message.id) ||
+        !["GET", "POST", "DELETE"].includes(String(message.method)) ||
+        typeof message.path !== "string" ||
+        (message.token !== undefined && typeof message.token !== "string")
+      )
+        throw new Error("INVALID_RELAY_REQUEST");
+      // No arbitrary forwarding, local control routes or binary HTTP tunnelling.
+      if (
+        !/^\/v1\/(?:health|capabilities|workspaces|device|rpc|pairings(?:\/[a-zA-Z0-9-]+(?:\/ack)?)?)$/.test(
+          message.path,
+        )
+      )
+        throw new Error("INVALID_RELAY_PATH");
+      const ids = this.relayRequests.get(channel.id) ?? new Set<string>();
+      if (ids.has(message.id)) throw new Error("DUPLICATE_RELAY_REQUEST");
+      // IDs are correlation only. Device command idempotency remains the Runtime contract.
+      if (ids.size >= 4096) ids.delete(ids.values().next().value!);
+      ids.add(message.id);
+      this.relayRequests.set(channel.id, ids);
+      await this.handleHttp(
+        relayRequest(
+          channel,
+          String(message.method),
+          message.path,
+          message.token as string | undefined,
+          message.body,
+        ),
+        new RelayResponse(channel, message.id),
+      );
+      return;
+    }
+    if (message.kind === "events.open") {
+      if (
+        Object.keys(message).some((key) => !["kind", "token"].includes(key)) ||
+        typeof message.token !== "string"
+      )
+        throw new Error("INVALID_RELAY_EVENTS");
+      const device = this.authenticate(relayRequest(channel, "GET", "/v1/events", message.token));
+      this.rate(`ws:${device.id}`, 10, 60_000);
+      this.relayEvents.get(channel.id)?.finish();
+      const socket = new RelayEventSocket(channel);
+      this.relayEvents.set(channel.id, socket);
+      await this.openSocket(device, socket);
+      return;
+    }
+    if (message.kind === "events.send") {
+      if (Object.keys(message).some((key) => !["kind", "value"].includes(key)))
+        throw new Error("INVALID_RELAY_EVENTS");
+      const socket = this.relayEvents.get(channel.id);
+      if (!socket || socket.readyState !== WebSocket.OPEN) throw new Error("RELAY_EVENTS_CLOSED");
+      socket.emit("message", Buffer.from(JSON.stringify(message.value)), false);
+      return;
+    }
+    if (message.kind === "events.close" && Object.keys(message).length === 1) {
+      this.relayEvents.get(channel.id)?.finish();
+      this.relayEvents.delete(channel.id);
+      return;
+    }
+    throw new Error("INVALID_RELAY_REQUEST");
+  }
+  private async handleHttp(request: GatewayRequest, response: GatewayResponse): Promise<void> {
     const started = this.now();
     let device: GatewayDevice | undefined;
     let method = `${request.method ?? "?"} HTTP`;
@@ -458,8 +573,7 @@ export class RemoteGateway {
         return;
       }
       if (request.method === "DELETE" && url.pathname === "/v1/device") {
-        await this.revoke(device);
-        json(response, 200, { revoked: true });
+        await this.revoke(device, () => json(response, 200, { revoked: true }));
         return;
       }
       const connection = this.connection(device);
@@ -739,7 +853,8 @@ export class RemoteGateway {
             ? { reason: "请在电脑授予配置管理权限" }
             : {}),
         },
-        directConnection: { available: true },
+        directConnection: { available: !this.config.relay },
+        relayConnection: { available: Boolean(this.config.relay) },
         sessionCleanup: {
           available: cleanupIsolation,
           ...(!cleanupIsolation
@@ -750,7 +865,7 @@ export class RemoteGateway {
       },
     };
   }
-  private async openSocket(device: GatewayDevice, socket: WebSocket): Promise<void> {
+  private async openSocket(device: GatewayDevice, socket: GatewaySocket): Promise<void> {
     const connection = this.connection(device);
     connection.socket?.terminate();
     connection.frameDispose?.();
@@ -937,7 +1052,7 @@ export class RemoteGateway {
   private async streamArtifact(
     device: GatewayDevice,
     connection: DeviceConnection,
-    response: ServerResponse,
+    response: GatewayResponse,
     workspacePath: string,
     sessionId: string,
     artifactId: string,
@@ -1048,6 +1163,8 @@ export class RemoteGateway {
       gatewayId: this.state.gatewayId,
       startedAt: this.startedAt,
       publicUrl: this.config.publicUrl,
+      connectionMode: this.config.relay ? "relay" : "direct",
+      ...(this.relay ? { relay: { ...this.relay.status } } : {}),
       listening: this.servers.map((server) => server.address()),
       devices: this.connections.size,
       runtime: {
@@ -1060,13 +1177,21 @@ export class RemoteGateway {
   }
   private async doctor(): Promise<unknown> {
     const checks: { name: string; ok: boolean; detail: string }[] = [];
-    try {
-      const cert = await readTlsFile(this.config.certificatePath);
-      const key = await readTlsFile(this.config.privateKeyPath);
-      validateCertificate(this.config, cert, key, this.now());
-      checks.push({ name: "TLS", ok: true, detail: "域名、证书期限与私钥匹配" });
-    } catch {
-      checks.push({ name: "TLS", ok: false, detail: "证书无效、过期或与域名/私钥不匹配" });
+    if (this.config.relay) {
+      checks.push({
+        name: "Relay",
+        ok: this.relay?.status.state === "online",
+        detail: this.relay?.status.lastError ?? "电脑主动连接中继；外网可达性需另用手机验证",
+      });
+    } else {
+      try {
+        const cert = await readTlsFile(this.config.certificatePath);
+        const key = await readTlsFile(this.config.privateKeyPath);
+        validateCertificate(this.config, cert, key, this.now());
+        checks.push({ name: "TLS", ok: true, detail: "域名、证书期限与私钥匹配" });
+      } catch {
+        checks.push({ name: "TLS", ok: false, detail: "证书无效、过期或与域名/私钥不匹配" });
+      }
     }
     try {
       const addresses = await lookup(
@@ -1099,19 +1224,21 @@ export class RemoteGateway {
     }
     checks.push({
       name: "Listener",
-      ok: this.servers.some((server) => server.listening),
+      ok: this.config.relay
+        ? this.relay?.status.state === "online"
+        : this.servers.some((server) => server.listening),
       detail: "本机监听检查；请另用手机蜂窝网络验证外网可达性",
     });
     return { checks, externalReachabilityVerified: false };
   }
 }
-function bearer(request: IncomingMessage): string {
+function bearer(request: GatewayRequest): string {
   const header = request.headers.authorization;
   if (!header || !/^Bearer [a-zA-Z0-9_-]{32,256}$/.test(header))
     throw new GatewayError("UNAUTHORIZED", "需要有效认证凭据", 401);
   return header.slice(7);
 }
-async function body(request: IncomingMessage): Promise<unknown> {
+async function body(request: GatewayRequest): Promise<unknown> {
   if (!request.headers["content-type"]?.startsWith("application/json"))
     throw new GatewayError("INVALID_PARAMS", "请求必须为 application/json", 415);
   const chunks: Buffer[] = [];
@@ -1128,7 +1255,7 @@ async function body(request: IncomingMessage): Promise<unknown> {
     throw new GatewayError("INVALID_PARAMS", "JSON 请求格式无效");
   }
 }
-function json(response: ServerResponse, status: number, value: unknown): void {
+function json(response: GatewayResponse, status: number, value: unknown): void {
   const output = JSON.stringify(value);
   if (Buffer.byteLength(output) > REMOTE_MAX_FRAME_BYTES)
     throw new GatewayError("FRAME_TOO_LARGE", "响应超过预算，请分页读取", 502, false, "unknown");
@@ -1264,7 +1391,7 @@ function publicConfiguration(value: unknown, hideExecutableText: boolean): unkno
   return output;
 }
 
-function waitForDrain(response: ServerResponse): Promise<void> {
+function waitForDrain(response: GatewayResponse): Promise<void> {
   return new Promise((resolve, reject) => {
     const clear = (): void => {
       response.off("drain", drained);
