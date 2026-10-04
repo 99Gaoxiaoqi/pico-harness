@@ -262,7 +262,11 @@ test(
     subscription.dispose();
     await remote.request(
       "session.send",
-      { sessionId: session.sessionId, input: { kind: "text", text: "private relay message" } },
+      {
+        sessionId: session.sessionId,
+        input: { kind: "text", text: "private relay message" },
+        idempotencyKey: "relay-message-1",
+      },
       { workspaceId, idempotencyKey: "relay-message-1" },
     );
     assert.equal(sends, 1);
@@ -282,7 +286,11 @@ test(
     await assert.rejects(
       remote.request(
         "session.send",
-        { sessionId: session.sessionId, input: { kind: "text", text: "lost response message" } },
+        {
+          sessionId: session.sessionId,
+          input: { kind: "text", text: "lost response message" },
+          idempotencyKey: "relay-message-2",
+        },
         { workspaceId, idempotencyKey: "relay-message-2" },
       ),
       { outcome: "unknown" },

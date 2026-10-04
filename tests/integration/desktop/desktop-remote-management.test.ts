@@ -177,7 +177,10 @@ test("手机管理拒绝非可信页面、未知方法及多余字段，且不�
     ).ok,
     false,
   );
-  assert.equal((await bridge.start({ unexpected: "value" } as Record<string, never>)).ok, false);
+  assert.equal(
+    (await bridge.start({ unexpected: "value" } as unknown as Record<string, never>)).ok,
+    false,
+  );
   const unauthorized = await handlers.get(REMOTE_MANAGEMENT_CHANNEL)!({} as IpcMainInvokeEvent, {
     action: "start",
     params: {},

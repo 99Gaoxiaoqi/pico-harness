@@ -276,6 +276,7 @@ test("加密中继完成可恢复手机配对、RPC和事件订阅，外层不�
         revoke: async () => {},
         forget: async () => {},
         changed: () => {},
+        pause: async () => {},
       },
     );
   f.loseAck(true);

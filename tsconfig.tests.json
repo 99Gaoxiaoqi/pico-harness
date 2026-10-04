@@ -11,6 +11,7 @@
   "include": [
     "tests/**/*.ts",
     "tests/**/*.tsx",
+    "apps/desktop/src/main/qrcode-terminal.d.ts",
     "packages/runtime-host/src/fs-native-extensions.d.ts"
   ],
   "exclude": ["dist", "node_modules"]
