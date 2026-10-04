@@ -33,7 +33,7 @@ Keychain 的应用身份与默认访问组必须由签名/构建正确提供，�
 
 候选产品源码冻结在 `3fcaea45729e8a37dab84dc1e4a7517d46b6ddbf`。后续仅提交交付文档；准确产物摘要、签名、工具版本、来源差异与运行记录以 `output/mobile/release-remediation-2026-10-04/package-metadata.json`、`validation-result.json` 为准。
 
-原工作区现有的 App、Conversation、ComposerOptions、mobile-screen-recovery 测试与 design-qa 修改未覆盖、未暂存、未提交。候选从独立干净集成分支构建，不包含这些未提交界面修改；输入框和导航改动需由其所属任务另行提交后再集成与打包。
+首批原生候选构建时，原工作区 App、Conversation、ComposerOptions、mobile-screen-recovery 测试与 design-qa 的未提交修改未覆盖、未暂存、未提交。该批原生候选不包含这些当时未提交的界面修改。后续界面任务已自行提交至 main 的 `c713a241`，本轮合并复验将其纳入整改分支；design-qa 仍保留原工作区未提交状态。
 
 整改方案以独立提交交付，避免自动整理用户现有工作区。最终 Git 交付位置与目标分支处理结果以本轮回复为准。
 
@@ -54,3 +54,16 @@ Keychain 的应用身份与默认访问组必须由签名/构建正确提供，�
 | IPv4/IPv6、三种电脑系统公开支持    | 真实跨网与 Windows/Linux 安装未运行，不声明已覆盖        |
 
 取得资源后，只对同一最终正式候选执行上述矩阵，核对渠道最高构建号并补足审核隔离环境。已删除的本机数据不可通过回滚代码恢复；回滚代码不停止电脑任务或终端。
+
+## 主分支合并复验
+
+用户随后要求合并验证。合并前 main 前移至 `c713a24103045ec0ad02ab6da01f63af655dbd52`（会话布局与过程折叠）；独立整改分支无冲突集成为 `c6858fbb3eec05a042982beefde658f3d0faa500`，保留两边功能，再进行组合复验。
+
+- remote/mobile 集成 65/65 通过，0 skipped，包含新会话布局、过程折叠、恢复与清理。
+- 移动类型检查、依赖边界、包构建、双端 Hermes 导出及自动合并 App 的 lint/format 通过。
+- 与最新 main 的根类型诊断逐项比对：双方均 208 条，新增 0、删除 0；根类型检查仍失败。
+- 原 PR 与当时 main 的 CI 首次失败步骤一致：依赖审计均 30 项（5 moderate、25 high，22 个 advisory 相同）；Node 24/26 根类型诊断各 208 条且逐项相同。CI 失败后的集成/构建步骤未执行，不能声称 CI 全绿。证据：[PR CI](https://github.com/99Gaoxiaoqi/pico-harness/actions/runs/37150696131)、[main CI](https://github.com/99Gaoxiaoqi/pico-harness/actions/runs/37101980855)、[PR Desktop](https://github.com/99Gaoxiaoqi/pico-harness/actions/runs/37150696143)、[main Desktop](https://github.com/99Gaoxiaoqi/pico-harness/actions/runs/37101980889)。
+
+本节仅代表最新组合代码的合并验证。此前 APK、iOS ZIP 的来源仍为 `3fcaea45`，没有重打包含新布局的原生候选，也没有追加真机或公网验收。不得将首批原生包的验收结果移植至新的主分支包。
+
+PR 合并状态、最终 main 提交与本地同步结果见本轮最终回复和产物目录中的 `merge-validation-result.json`。保留所需产物后清理本任务临时 worktree，用户已有 design-qa 和其它未跟踪文件不纳入提交。
