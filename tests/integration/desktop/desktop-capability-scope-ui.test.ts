@@ -82,7 +82,13 @@ test("能力列表展示来源、只读、生效与遮蔽状态", () => {
   assert.match(html, />已生效</u);
   assert.match(html, />未生效</u);
   assert.match(html, /被 user:mcp 覆盖/u);
-  assert.equal(html.match(/>删除<\/button>/gu)?.length, 1);
+  const rows = [...html.matchAll(/<article\b[^>]*>[\s\S]*?<\/article>/gu)];
+  assert.equal(rows.length, items.length);
+  for (const [index, item] of items.entries()) {
+    const buttons = [...rows[index]![0].matchAll(/<button\b[^>]*>[\s\S]*?<\/button>/gu)];
+    assert.equal(buttons.length, item.source?.scope === "user" ? 1 : 0);
+    if (buttons.length) assert.match(buttons[0]![0], />删除</u);
+  }
 });
 
 test("MCP 用户级增删使用 CAS 与幂等键，冲突后只刷新列表", async () => {
