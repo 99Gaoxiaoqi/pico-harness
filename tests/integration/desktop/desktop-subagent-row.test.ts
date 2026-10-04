@@ -152,9 +152,13 @@ test("真实工具组加载结果显示协作卡与折叠技术详情，失败�
 
 test("子代理以单个原生按钮展示摘要、状态、只读与耗时，仅真实会话提供入口", () => {
   const markup = render([child]);
-  assert.match(markup, /<button type="button" class="conversation-subagent-row"/u);
+  assert.match(markup, /<button type="button" class="[^"]*\bconversation-subagent-row\b[^"]*"/u);
   assert.match(markup, /aria-label="查看代码审查的会话"/u);
-  assert.match(markup, /title="正在核对状态流转与边界条件"/u);
+  assert.match(markup, /aria-describedby="[^"]+"/u);
+  assert.match(
+    markup,
+    /class="conversation-subagent-row__summary">正在核对状态流转与边界条件<\/span>/u,
+  );
   assert.match(markup, /data-state="active"/u);
   assert.match(markup, /运行中 · 只读 · 1\.3s/u);
   assert.match(markup, /conversation-subagent-row__dot/u);
@@ -175,12 +179,12 @@ test("子代理以单个原生按钮展示摘要、状态、只读与耗时，�
 
   const { detail: _detail, ...withoutDetail } = child;
   const completed = render([{ ...withoutDetail, state: "done", durationMs: 0 }]);
-  assert.match(completed, /title="检查实现"/u);
+  assert.match(completed, /class="conversation-subagent-row__summary">检查实现<\/span>/u);
   assert.match(completed, /已完成 · 只读 · 0\.0s/u);
 
   const { childSessionId: _childSessionId, ...withoutSession } = child;
   for (const unavailable of [render([withoutSession]), render([child], false)]) {
-    assert.match(unavailable, /disabled=""/u);
+    assert.match(unavailable, /aria-disabled="true"/u);
     assert.doesNotMatch(
       unavailable,
       /aria-label="查看|conversation-subagent-row__chevron|查看运行/u,
@@ -211,7 +215,10 @@ test("仅同轮次且调用标识明确匹配时合并 agent_spawn；历史缺�
   };
   const markup = render([
     { id: "turn-one", kind: "userMessage", text: "先前任务" },
-    spawn("tool:spawn-reader", "保留的先前轮次启动"),
+    {
+      ...spawn("tool:previous-spawn-reader", "保留的先前轮次启动"),
+      toolCallId: "spawn-reader",
+    },
     { id: "turn-two", kind: "userMessage", text: "检查项目" },
     spawn("tool:spawn-reader", "隐藏的稳定标识启动"),
     child,

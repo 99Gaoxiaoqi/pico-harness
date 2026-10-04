@@ -1,22 +1,14 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { registerHooks } from "node:module";
+import test, { after } from "node:test";
 import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-const stylesheetHook = registerHooks({
-  load(url, context, nextLoad) {
-    return url.endsWith(".css")
-      ? { format: "module", source: "export {};", shortCircuit: true }
-      : nextLoad(url, context);
-  },
-});
-const { SideChatWorkbarPanel, shouldActivateSideChatData, sideChatCanSend } =
-  await import("../../../apps/desktop/src/renderer/workbar-panels/SideChatWorkbarPanel.js");
-stylesheetHook.deregister();
+import { installRendererSsr } from "./renderer-ssr-fixture.js";
 import { resolveSideChatCreationTarget } from "../../../apps/desktop/src/renderer/workbar-panels/side-chat-creation.js";
 
-Object.assign(globalThis, { React });
+after(installRendererSsr());
+const { SideChatWorkbarPanel, shouldActivateSideChatData, sideChatCanSend } =
+  await import("../../../apps/desktop/src/renderer/workbar-panels/SideChatWorkbarPanel.js");
 
 const noop = () => undefined;
 

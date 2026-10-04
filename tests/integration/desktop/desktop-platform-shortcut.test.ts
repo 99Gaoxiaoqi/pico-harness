@@ -1,24 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { registerHooks } from "node:module";
-import React, { createElement } from "react";
+import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import { RuntimeContext } from "../../../apps/desktop/src/renderer/runtime-context.js";
 import { emptyData } from "../../../apps/desktop/src/renderer/model.js";
 import type { RuntimeStore } from "../../../apps/desktop/src/renderer/runtime.js";
+import { installRendererSsr } from "./renderer-ssr-fixture.js";
 
 test("desktop sidebar renders the native new-task shortcut on Windows and macOS", async (t) => {
-  const hooks = registerHooks({
-    load(url, context, nextLoad) {
-      return url.endsWith(".css")
-        ? { format: "module", source: "export {};", shortCircuit: true }
-        : nextLoad(url, context);
-    },
-  });
-  t.after(() => hooks.deregister());
+  t.after(installRendererSsr());
   const { AppShell } = await import("../../../apps/desktop/src/renderer/AppShell.js");
-  const globals = ["window", "navigator", "React"] as const;
+  const globals = ["window", "navigator"] as const;
   const previous = globals.map((name) => Object.getOwnPropertyDescriptor(globalThis, name));
   t.after(() =>
     globals.forEach((name, index) => {
@@ -27,7 +20,6 @@ test("desktop sidebar renders the native new-task shortcut on Windows and macOS"
       else Reflect.deleteProperty(globalThis, name);
     }),
   );
-  Object.defineProperty(globalThis, "React", { configurable: true, value: React });
   const storage = { getItem: () => null };
   Object.defineProperty(globalThis, "window", {
     configurable: true,

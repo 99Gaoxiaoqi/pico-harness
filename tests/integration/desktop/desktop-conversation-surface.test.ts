@@ -1,15 +1,19 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import test from "node:test";
+import test, { after } from "node:test";
 import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { ConversationComposer } from "../../../apps/desktop/src/renderer/conversation/ConversationComposer.js";
-import { ConversationSurface } from "../../../apps/desktop/src/renderer/conversation/ConversationSurface.js";
-import { ConversationTranscript } from "../../../apps/desktop/src/renderer/conversation/ConversationTranscript.js";
 import { conversationItemsFromReplica } from "../../../apps/desktop/src/renderer/conversation/runtime-projection.js";
 import type { ComposerStatus } from "../../../apps/desktop/src/renderer/conversation/types.js";
+import { installRendererSsr } from "./renderer-ssr-fixture.js";
 
-Object.assign(globalThis, { React });
+after(installRendererSsr());
+const [{ ConversationComposer }, { ConversationSurface }, { ConversationTranscript }] =
+  await Promise.all([
+    import("../../../apps/desktop/src/renderer/conversation/ConversationComposer.js"),
+    import("../../../apps/desktop/src/renderer/conversation/ConversationSurface.js"),
+    import("../../../apps/desktop/src/renderer/conversation/ConversationTranscript.js"),
+  ]);
 
 test("conversation waits for the safe pause boundary before offering resume and retains queued messages", async () => {
   const page = await readFile(
@@ -54,7 +58,7 @@ test("conversation waits for the safe pause boundary before offering resume and 
   assert.match(paused, /aria-label="停止运行"/u);
   assert.doesNotMatch(paused, /等待暂停|aria-label="暂停运行"/u);
   const resumed = renderComposer("running");
-  assert.match(resumed, /Pico 正在工作/u);
+  assert.match(resumed, /正在处理…/u);
   assert.match(resumed, /aria-label="暂停运行"/u);
   assert.doesNotMatch(resumed, /已暂停|等待暂停|aria-label="继续运行"/u);
 });
