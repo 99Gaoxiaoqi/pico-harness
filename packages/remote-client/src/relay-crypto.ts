@@ -5,7 +5,7 @@ import { RemoteProtocolError } from "@pico/protocol/remote";
 export type RelayRandomBytes = (length: number) => Uint8Array;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true });
-const fail = (): never => { throw new RemoteProtocolError("RELAY_IDENTITY_ERROR", "中继安全通道校验失败，请核对电脑身份"); };
+function fail(): never { throw new RemoteProtocolError("RELAY_IDENTITY_ERROR", "中继安全通道校验失败，请核对电脑身份"); }
 export function relayHex(bytes: Uint8Array): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
