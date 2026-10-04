@@ -359,17 +359,27 @@ test("daemon candidate: current shutdown drains cached Session lease before succ
   await currentConnection.close().catch(() => undefined);
 
   const successorConnectStarted = performance.now();
-  const successor = await connectOrSpawnRuntimeHost({
-    rootPath: harness.picoHome,
+  // 此处验证单个 daemon 的 Session lease 交接，选举池另有实盘回归。
+  // 慢冷启动时 connectOrSpawn 每 250ms 新起候选，会让数十个 TS 进程争用 Windows CI。
+  const successorAttempt = await harness.candidates.launcher({
+    rootPath: capability.canonicalPath,
+    expectedRootId: capability.rootId,
+    entrypoint: pathToFileURL(mainPath),
+    env: harness.env,
+    logDirectory: join(controlDirectory, "successor-logs"),
+  }).spawned;
+  const successorRegistration = await waitForRegistration(controlDirectory, 30_000);
+  assert.ok(successorRegistration, "继任 daemon 应发布 registration");
+  assert.equal(successorRegistration.pid, successorAttempt.pid, "仅本测试启动的继任 PID 可以接管");
+  assert.notEqual(successorRegistration.pid, currentRegistration.pid);
+  const successor = await connectResolvedRuntimeHost({
+    capability,
+    controlDirectory,
     surface: "tui",
     protocol: { min: RUNTIME_HOST_PROTOCOL_VERSION, max: RUNTIME_HOST_PROTOCOL_VERSION },
     clientInstanceId: "candidate-shutdown-successor-client",
-    electionDeadlineMs: 45_000,
     connectTimeoutMs: 5_000,
     handshakeTimeoutMs: 5_000,
-    candidateEntrypoint: pathToFileURL(mainPath).href,
-    env: harness.env,
-    candidateLauncher: harness.candidates.launcher,
   });
   console.log(
     `daemon lease takeover: successor connect completed in ${Math.round(performance.now() - successorConnectStarted)}ms`,
@@ -378,9 +388,6 @@ test("daemon candidate: current shutdown drains cached Session lease before succ
   if (successor.kind !== "connected") return;
   const successorStatus = await waitForReadyStatus(successor.connection, 15_000);
   assert.equal(successorStatus.state, "ready", "successor daemon 必须 ready 后再接管 Session");
-  const successorRegistration = await readHostRegistration(controlDirectory);
-  assert.ok(successorRegistration);
-  assert.notEqual(successorRegistration.pid, currentRegistration.pid);
   await requestLeaseTestRuntime(successor.connection, "successor goal.get", "goal.get", {
     workspacePath,
     sessionId,
@@ -388,6 +395,7 @@ test("daemon candidate: current shutdown drains cached Session lease before succ
   assert.equal(await pathExists(ownerPath), true, "新 daemon 应无需等待 30s 即可接管 Session");
   await successor.connection.requestRegistered("runtime.shutdown", {}, 10_000);
   await waitForProcessExit(successorRegistration.pid, 15_000);
+  assert.equal(await processAlive(successorRegistration.pid), false, "继任 daemon 也应优雅退出");
 });
 
 async function requestLeaseTestRuntime<Output = unknown>(
