@@ -33,12 +33,17 @@ export function Usage() {
   const [loadedLabel, setLoadedLabel] = useState("");
   const [loading, setLoading] = useState(false);
   const requestVersion = useRef(0);
+  const readScope = `${pico.generation}:${pico.connected}:${pico.syncRevision}`;
+  const currentScope = useRef(readScope);
+  currentScope.current = readScope;
+  const selectedGeneration = useRef(pico.generation);
   function invalidate() {
     requestVersion.current++;
     setUsage(undefined);
     setLoading(false);
   }
   async function refresh(id = workspaceId) {
+    if (pico.connected === false) return;
     const version = ++requestVersion.current;
     setLoading(true);
     setUsage(undefined);
@@ -50,19 +55,30 @@ export function Usage() {
         from,
         to,
       );
-      if (version !== requestVersion.current) return;
+      if (version !== requestVersion.current || readScope !== currentScope.current) return;
       setUsage(result.usage);
       setLoadedLabel(pico.workspaces.find((item) => item.id === id)?.label ?? "所选项目");
     } finally {
-      if (version === requestVersion.current) setLoading(false);
+      if (version === requestVersion.current && readScope === currentScope.current)
+        setLoading(false);
     }
   }
   useEffect(() => {
     const id = pico.workspace?.id ?? "";
     setWorkspaceId(id);
     invalidate();
-    if (id && !pico.reason("usage.get")) void pico.perform(() => refresh(id));
   }, [pico.generation]);
+  useEffect(() => {
+    setLoading(false);
+    const id =
+      selectedGeneration.current === pico.generation ? workspaceId : (pico.workspace?.id ?? "");
+    selectedGeneration.current = pico.generation;
+    if (id && pico.connected !== false && !pico.reason("usage.get"))
+      void pico.perform(() => refresh(id));
+    return () => {
+      ++requestVersion.current;
+    };
+  }, [pico.generation, pico.connected, pico.syncRevision]);
   const total = record(usage?.["total"]),
     details = record(usage?.["details"]);
   const costStatus = String(usage?.["costStatus"] ?? "unknown"),

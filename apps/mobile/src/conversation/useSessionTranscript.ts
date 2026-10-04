@@ -47,21 +47,33 @@ export function useSessionTranscript(sessionId: string) {
       return;
     }
     controllerGeneration.current = pico.generation;
+    const generation = pico.generation;
+    const syncRevision = pico.syncRevision;
     let subscribed = true;
-    const current = () => subscribed && controller.current === subscription;
+    const current = () =>
+      subscribed &&
+      controller.current === subscription &&
+      latest.current.connected &&
+      latest.current.generation === generation &&
+      latest.current.syncRevision === syncRevision;
     const report = (error: unknown) => {
       if (current()) pico.report(error);
     };
-    const settingsChanged = () =>
+    let settingsRead = 0;
+    const settingsChanged = () => {
+      const read = ++settingsRead;
       void pico
         .request("session.settings.get", { sessionId })
         .then((x) => {
-          if (current()) setSettings(x.settings);
+          if (current() && read === settingsRead) setSettings(x.settings);
         })
         .catch(report);
-    const off = pico.onFrame((frame) => void subscription.receive(frame).catch(report));
+    };
+    const off = pico.onFrame((frame) => {
+      if (current()) void subscription.receive(frame).catch(report);
+    });
     const offNotifications = pico.onNotification((event) => {
-      if (event.scope.sessionId !== sessionId) return;
+      if (!current() || event.scope.sessionId !== sessionId) return;
       if (event.topic === "plan.updated") void subscription.open(pico).catch(report);
       if (event.topic === "session.settingsUpdated") settingsChanged();
     });
@@ -73,7 +85,14 @@ export function useSessionTranscript(sessionId: string) {
       offNotifications();
       subscription.suspend();
     };
-  }, [pico.generation, pico.connected, pico.host?.id, pico.workspace?.id, sessionId]);
+  }, [
+    pico.generation,
+    pico.connected,
+    pico.syncRevision,
+    pico.host?.id,
+    pico.workspace?.id,
+    sessionId,
+  ]);
 
   function loadOlder() {
     return controller.current?.older() ?? Promise.resolve();

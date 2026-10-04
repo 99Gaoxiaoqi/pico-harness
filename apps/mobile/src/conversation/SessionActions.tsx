@@ -24,14 +24,34 @@ export function SessionActions({
   const lock = useRef(false);
   const fence = useRef(0);
   const readVersion = useRef(0);
+  const readScope = `${pico.generation}:${pico.connected}:${pico.syncRevision}:${sessionId}`;
+  const currentScope = useRef(readScope);
+  currentScope.current = readScope;
   async function load(token = fence.current) {
+    if (pico.connected === false) return;
     const read = ++readVersion.current;
     const x = await pico.request("goal.get", { sessionId });
-    if (token === fence.current && read === readVersion.current) setSnapshot(x.goal);
+    if (
+      token === fence.current &&
+      read === readVersion.current &&
+      readScope === currentScope.current
+    )
+      setSnapshot(x.goal);
   }
   useEffect(() => {
-    const token = ++fence.current;
+    ++fence.current;
     setSnapshot(undefined);
+    setCondition("");
+    setBudget("");
+    setNotice("");
+    return () => {
+      ++fence.current;
+      ++readVersion.current;
+    };
+  }, [sessionId, pico.generation]);
+  useEffect(() => {
+    const token = fence.current;
+    if (pico.connected === false) return;
     if (!pico.reason("goal.get")) void pico.perform(() => load(token));
     const off = pico.onNotification((event) => {
       if (
@@ -48,21 +68,21 @@ export function SessionActions({
         void pico.perform(() => load(token));
     });
     return () => {
-      ++fence.current;
       ++readVersion.current;
       off();
     };
-  }, [sessionId, pico.generation]);
+  }, [sessionId, pico.generation, pico.connected, pico.syncRevision]);
   async function perform(task: () => Promise<void>) {
     if (lock.current) return;
     lock.current = true;
     ++readVersion.current;
     setBusy(true);
+    const token = fence.current;
     try {
       await task();
     } finally {
       lock.current = false;
-      setBusy(false);
+      if (token === fence.current) setBusy(false);
     }
   }
   const goal = snapshot?.currentGoal;
@@ -80,8 +100,14 @@ export function SessionActions({
   async function control(action: "arm" | "pause" | "resume" | "clear") {
     await perform(async () => {
       const token = fence.current;
+      const read = ++readVersion.current;
       const latest = (await pico.request("goal.get", { sessionId })).goal;
-      if (token !== fence.current) return;
+      if (
+        token !== fence.current ||
+        read !== readVersion.current ||
+        readScope !== currentScope.current
+      )
+        return;
       setSnapshot(latest);
       const current = latest?.currentGoal;
       // Never silently adopt a newer revision for an action the user already reviewed.

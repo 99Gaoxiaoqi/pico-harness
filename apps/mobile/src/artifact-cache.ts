@@ -7,14 +7,59 @@ import type { RuntimeMediaReference, RuntimeSessionArtifact } from "@pico/protoc
 import { assertArtifactIntegrity } from "./core";
 import { verifyMediaIntegrity } from "./media";
 
-const cache = new Directory(Paths.cache, "pico-artifacts");
+const legacyCache = new Directory(Paths.cache, "pico-artifacts");
+const cache = new Directory(Paths.cache, "pico-artifacts-v2");
 let cacheEpoch = 0;
-const downloads = new Set<AbortController>();
+let clearingAll = false;
+let clearAllPromise: Promise<void> | undefined;
+const hostEpochs = new Map<string, number>();
+const clearingHosts = new Set<string>();
+const downloads = new Map<AbortController, { hostId: string; done: Promise<void> }>();
+const hostDirectory = (hostId: string) =>
+  new Directory(cache, bytesToHex(sha256(new TextEncoder().encode(hostId))));
 
-export function clearArtifactCache() {
+export function hasLegacyArtifactCache() {
+  return legacyCache.exists && legacyCache.list().length > 0;
+}
+export function clearLegacyArtifactCache() {
+  if (legacyCache.exists) legacyCache.delete();
+}
+export async function clearHostArtifactCache(hostId: string) {
+  clearingHosts.add(hostId);
+  hostEpochs.set(hostId, (hostEpochs.get(hostId) ?? 0) + 1);
+  try {
+    const pending: Promise<void>[] = [];
+    for (const [controller, download] of downloads) {
+      if (download.hostId !== hostId) continue;
+      controller.abort();
+      pending.push(download.done);
+    }
+    // Delete after native downloads drain, so late writes cannot recreate a removed file.
+    await Promise.all(pending);
+    const directory = hostDirectory(hostId);
+    if (directory.exists) directory.delete();
+  } finally {
+    clearingHosts.delete(hostId);
+  }
+}
+
+export async function clearArtifactCache() {
+  if (clearAllPromise) return clearAllPromise;
+  clearingAll = true;
   cacheEpoch++;
-  for (const controller of downloads) controller.abort();
-  if (cache.exists) cache.delete();
+  clearAllPromise = (async () => {
+    try {
+      const pending = [...downloads];
+      for (const [controller] of pending) controller.abort();
+      await Promise.all(pending.map(([, download]) => download.done));
+      if (cache.exists) cache.delete();
+      clearLegacyArtifactCache();
+    } finally {
+      clearingAll = false;
+      clearAllPromise = undefined;
+    }
+  })();
+  return clearAllPromise;
 }
 
 export async function downloadArtifact(options: {
@@ -30,12 +75,24 @@ export async function downloadArtifact(options: {
 }): Promise<File> {
   const { artifact, signal, media, assertCurrent, onProgress } = options;
   const epoch = cacheEpoch;
+  const hostEpoch = hostEpochs.get(options.scopeId) ?? 0;
+  if (clearingAll) throw new Error("手机成果缓存正在清理");
+  if (clearingHosts.has(options.scopeId)) throw new Error("这台电脑的成果缓存正在清理");
+  let finishDownload!: () => void;
+  const done = new Promise<void>((resolve) => {
+    finishDownload = resolve;
+  });
   const controller = new AbortController();
   const abort = () => controller.abort();
   signal?.addEventListener("abort", abort, { once: true });
-  downloads.add(controller);
+  downloads.set(controller, { hostId: options.scopeId, done });
   const check = () => {
-    if (epoch !== cacheEpoch || signal?.aborted || controller.signal.aborted)
+    if (
+      epoch !== cacheEpoch ||
+      hostEpoch !== (hostEpochs.get(options.scopeId) ?? 0) ||
+      signal?.aborted ||
+      controller.signal.aborted
+    )
       throw new Error("媒体读取已取消");
     assertCurrent();
   };
@@ -55,8 +112,9 @@ export async function downloadArtifact(options: {
       ]),
     );
     check();
-    cache.create({ idempotent: true, intermediates: true });
-    const resourceCache = new Directory(cache, identity);
+    const hostCache = hostDirectory(options.scopeId);
+    hostCache.create({ idempotent: true, intermediates: true });
+    const resourceCache = new Directory(hostCache, identity);
     resourceCache.create({ idempotent: true });
     const title = artifact.title.replace(/[^\p{L}\p{N}._-]/gu, "_").slice(-100) || "media";
     const extension = {
@@ -108,7 +166,7 @@ export async function downloadArtifact(options: {
         target.delete();
       }
     }
-    partial = new File(cache, `${Crypto.randomUUID()}.partial`);
+    partial = new File(hostCache, `${Crypto.randomUUID()}.partial`);
     onProgress?.("加载中…");
     await File.downloadFileAsync(
       options.client.artifactUrl(options.workspaceId, options.sessionId, artifact.artifactId),
@@ -121,7 +179,12 @@ export async function downloadArtifact(options: {
             controller.abort();
             return;
           }
-          if (epoch === cacheEpoch && !signal?.aborted)
+          if (
+            epoch === cacheEpoch &&
+            hostEpoch === (hostEpochs.get(options.scopeId) ?? 0) &&
+            !signal?.aborted &&
+            !controller.signal.aborted
+          )
             onProgress?.(
               `${Math.round(bytesWritten / 1024)} / ${Math.round(artifact.sizeBytes / 1024)} KiB`,
             );
@@ -146,8 +209,12 @@ export async function downloadArtifact(options: {
     onProgress?.("校验通过");
     return target;
   } finally {
-    if (partial?.exists) partial.delete();
-    downloads.delete(controller);
-    signal?.removeEventListener("abort", abort);
+    try {
+      if (partial?.exists) partial.delete();
+    } finally {
+      downloads.delete(controller);
+      signal?.removeEventListener("abort", abort);
+      finishDownload();
+    }
   }
 }

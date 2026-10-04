@@ -76,24 +76,41 @@ export function Workbar({
 }
 function Tasks({ sessionId }: { sessionId: string }) {
   const pico = usePico();
+  const readVersion = useRef(0);
+  const readScope = `${pico.generation}:${pico.connected}:${pico.syncRevision}:${sessionId}`;
+  const currentScope = useRef(readScope);
+  currentScope.current = readScope;
   const [tasks, setTasks] = useState<readonly RuntimeSessionTask[]>([]);
   const [revision, setRevision] = useState(0);
   const [cursor, setCursor] = useState<string>();
   const [title, setTitle] = useState("");
   const [detail, setDetail] = useState("");
   async function refresh(more = false) {
+    if (pico.connected === false) return;
+    const version = ++readVersion.current;
     const x = await pico.request("session.tasks.query", {
       sessionId,
       limit: 30,
       ...(more && cursor ? { cursor, revision } : {}),
     });
+    if (version !== readVersion.current || readScope !== currentScope.current) return;
     setTasks((old) => (more ? [...old, ...x.tasks] : x.tasks));
     setRevision(x.revision);
     setCursor(x.nextCursor);
   }
   useEffect(() => {
-    void pico.perform(() => refresh());
+    setTasks([]);
+    setRevision(0);
+    setCursor(undefined);
+    setTitle("");
+    setDetail("");
   }, [sessionId, pico.generation]);
+  useEffect(() => {
+    if (pico.connected !== false) void pico.perform(() => refresh());
+    return () => {
+      ++readVersion.current;
+    };
+  }, [sessionId, pico.generation, pico.connected, pico.syncRevision]);
   return (
     <>
       <Card>
@@ -168,14 +185,24 @@ function ResourcePanel({
 }) {
   const pico = usePico();
   const epoch = useRef(0);
+  const readVersion = useRef(0);
   const [value, setValue] = useState<unknown>();
   const [graphId, setGraphId] = useState("");
   const [graphView, setGraphView] = useState<"概览" | "时间线">("概览");
   const [cursor, setCursor] = useState<string>();
   const [through, setThrough] = useState<number>();
   const [after, setAfter] = useState<number>();
+  const readScope = `${pico.generation}:${pico.connected}:${pico.syncRevision}:${sessionId}:${tab}:${graphId}:${graphView}`;
+  const currentScope = useRef(readScope);
+  currentScope.current = readScope;
   async function refresh(more = false) {
+    if (pico.connected === false) return;
     const token = epoch.current;
+    const version = ++readVersion.current;
+    const isCurrent = () =>
+      token === epoch.current &&
+      version === readVersion.current &&
+      readScope === currentScope.current;
     if (tab === "Graph") {
       const x = await pico.request("session.graph.query", {
         sessionId,
@@ -184,7 +211,7 @@ function ResourcePanel({
         limit: 20,
         ...(more && cursor ? { cursor } : {}),
       });
-      if (token !== epoch.current) return;
+      if (!isCurrent()) return;
       setValue((old: unknown) => (more ? mergeCollection(old, x) : x));
       setCursor(typeof x.nextCursor === "string" ? x.nextCursor : undefined);
     }
@@ -193,7 +220,7 @@ function ResourcePanel({
         sessionId,
         ...(more && cursor ? { cursor } : {}),
       });
-      if (token !== epoch.current) return;
+      if (!isCurrent()) return;
       setValue((old: unknown) => (more ? mergeCollection(old, x) : x));
       setCursor(typeof x.nextCursor === "string" ? x.nextCursor : undefined);
     }
@@ -203,18 +230,18 @@ function ResourcePanel({
         limit: 30,
         ...(more && after !== undefined ? { afterSequence: after, throughSequence: through } : {}),
       });
-      if (token !== epoch.current) return;
+      if (!isCurrent()) return;
       setValue((old: unknown) => (more ? mergeCollection(old, x) : x));
       setThrough(x.throughSequence);
       setAfter(x.nextAfterSequence);
     }
     if (tab === "上下文") {
       const x = await pico.request("session.context.get", { sessionId });
-      if (token === epoch.current) setValue(x.context);
+      if (isCurrent()) setValue(x.context);
     }
     if (tab === "用量") {
       const x = await pico.request("usage.get", { sessionId });
-      if (token === epoch.current) setValue(x);
+      if (isCurrent()) setValue(x);
     }
   }
   useEffect(() => {
@@ -222,11 +249,17 @@ function ResourcePanel({
     setValue(undefined);
     setCursor(undefined);
     setAfter(undefined);
-    void pico.perform(() => refresh());
+    setThrough(undefined);
     return () => {
       epoch.current++;
     };
   }, [sessionId, pico.generation, tab, graphId, graphView]);
+  useEffect(() => {
+    if (pico.connected !== false) void pico.perform(() => refresh());
+    return () => {
+      ++readVersion.current;
+    };
+  }, [sessionId, pico.generation, pico.connected, pico.syncRevision, tab, graphId, graphView]);
   const graphs =
     typeof value === "object" && value && "graphs" in value && Array.isArray(value.graphs)
       ? (value.graphs as Record<string, unknown>[])
@@ -343,23 +376,41 @@ function ResearchPanel({ sessionId, onFiles }: { sessionId: string; onFiles: () 
   const pico = usePico();
   const [run, setRun] = useState<Record<string, unknown> | null>();
   const epoch = useRef(0);
+  const readVersion = useRef(0);
+  const readScope = `${pico.generation}:${pico.connected}:${pico.syncRevision}:${sessionId}`;
+  const currentScope = useRef(readScope);
+  currentScope.current = readScope;
   async function refresh() {
+    if (pico.connected === false) return;
     const token = epoch.current;
+    const version = ++readVersion.current;
     const x = await pico.request("session.research.query", { sessionId });
-    if (token === epoch.current) setRun(x.run ? object(x.run) : null);
+    if (
+      token === epoch.current &&
+      version === readVersion.current &&
+      readScope === currentScope.current
+    )
+      setRun(x.run ? object(x.run) : null);
   }
   useEffect(() => {
     ++epoch.current;
+    setRun(undefined);
+    return () => {
+      ++epoch.current;
+    };
+  }, [sessionId, pico.generation]);
+  useEffect(() => {
+    if (pico.connected === false) return;
     void pico.perform(refresh);
     const off = pico.onNotification((event) => {
       if (event.scope.sessionId === sessionId && event.topic === "discovery.updated")
         void pico.perform(refresh);
     });
     return () => {
-      ++epoch.current;
+      ++readVersion.current;
       off();
     };
-  }, [sessionId, pico.generation]);
+  }, [sessionId, pico.generation, pico.connected, pico.syncRevision]);
   return (
     <View style={{ gap: 12 }}>
       <Button

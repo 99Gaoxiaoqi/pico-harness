@@ -104,11 +104,14 @@ function protocolError(value: unknown, fallback = "请求失败"): RemoteProtoco
           ? "not_executed"
           : undefined,
     );
-  return new RemoteProtocolError("INVALID_RESPONSE", fallback);
+  return new ResponseValidationError("INVALID_RESPONSE", fallback);
 }
 // Keep transport provenance private: a server's retryable business error does not
 // mean that either connection has stopped working.
 class HttpTransportError extends RemoteProtocolError {}
+// A request can execute before its reply becomes unreadable. Keep that failure
+// separate from local validation and a valid server-side business rejection.
+class ResponseValidationError extends RemoteProtocolError {}
 function blockedState(error: RemoteProtocolError): "unauthorized" | "incompatible" | undefined {
   if (["UNAUTHORIZED", "INVALID_AUTH", "DEVICE_REVOKED"].includes(error.code))
     return "unauthorized";
@@ -175,18 +178,18 @@ async function jsonRequest(
       signal: controller.signal,
     });
     if (response.url && new URL(response.url).origin !== origin(publicUrl))
-      throw new RemoteProtocolError("INVALID_RESPONSE", "服务器返回了其他地址");
+      throw new ResponseValidationError("INVALID_RESPONSE", "服务器返回了其他地址");
     const length = response.headers.get("content-length");
     if (length !== null && Number(length) > REMOTE_MAX_FRAME_BYTES)
-      throw new RemoteProtocolError("FRAME_TOO_LARGE", "响应超过远程预算");
+      throw new ResponseValidationError("FRAME_TOO_LARGE", "响应超过远程预算");
     const text = await response.text();
     if (utf8ByteLength(text) > REMOTE_MAX_FRAME_BYTES)
-      throw new RemoteProtocolError("FRAME_TOO_LARGE", "响应超过远程预算");
+      throw new ResponseValidationError("FRAME_TOO_LARGE", "响应超过远程预算");
     let value: unknown;
     try {
       value = JSON.parse(text);
     } catch {
-      throw new RemoteProtocolError("INVALID_RESPONSE", "服务器响应不是有效 JSON");
+      throw new ResponseValidationError("INVALID_RESPONSE", "服务器响应不是有效 JSON");
     }
     if (!response.ok) {
       if (isJsonObject(value) && value.error) throw protocolError(value.error);
@@ -300,7 +303,7 @@ export class RemoteRuntimeClient {
         (p) => typeof p === "string" && (REMOTE_PERMISSIONS as readonly string[]).includes(p),
       ) ||
       !Array.isArray(value.methods) ||
-      !value.methods.every(isRemoteMethod) ||
+      !value.methods.every((method) => typeof method === "string") ||
       !isJsonObject(value.features) ||
       typeof value.maxFrameBytes !== "number" ||
       !Number.isSafeInteger(value.maxFrameBytes) ||
@@ -310,7 +313,12 @@ export class RemoteRuntimeClient {
       throw new RemoteProtocolError("VERSION_MISMATCH", "电脑返回的远程协议不兼容");
     if (this.#options.gatewayId && value.gatewayId !== this.#options.gatewayId)
       throw new RemoteProtocolError("GATEWAY_MISMATCH", "当前电脑与配对身份不一致");
-    return value as unknown as RemoteCapabilities;
+    // An additive method on a newer host must not disable this client's known
+    // surface. Requests still use the client's explicit method allowlist.
+    return {
+      ...value,
+      methods: value.methods.filter(isRemoteMethod),
+    } as unknown as RemoteCapabilities;
   }
   async workspaces(): Promise<RemoteWorkspace[]> {
     return this.#observeHttp(async () => {
@@ -364,14 +372,21 @@ export class RemoteRuntimeClient {
           input,
         );
         if (!isJsonObject(value) || value.requestId !== id || typeof value.ok !== "boolean")
-          throw new RemoteProtocolError("INVALID_RESPONSE", "请求响应不匹配");
+          throw new ResponseValidationError("INVALID_RESPONSE", "请求响应不匹配");
         if (!value.ok) throw protocolError(value.error);
-        return parseRuntimeResult(method, value.value);
+        try {
+          return parseRuntimeResult(method, value.value);
+        } catch (error) {
+          throw new ResponseValidationError(
+            "INVALID_RESPONSE",
+            error instanceof Error ? error.message : "请求结果无效",
+          );
+        }
       });
     } catch (error) {
       if (
-        error instanceof HttpTransportError &&
-        error.retryable &&
+        (error instanceof ResponseValidationError ||
+          (error instanceof HttpTransportError && error.retryable)) &&
         error.outcome !== "not_executed" &&
         REMOTE_METHOD_SPECS[method].mode === "command"
       )
@@ -726,7 +741,7 @@ export class RemoteRuntimeClient {
     return `${this.publicUrl}/v1/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(artifactId)}/content`;
   }
   async revoke(): Promise<void> {
-    await jsonRequest(
+    const value = await jsonRequest(
       this.#fetch,
       this.publicUrl,
       "/v1/device",
@@ -734,6 +749,8 @@ export class RemoteRuntimeClient {
       undefined,
       "DELETE",
     );
+    if (!isJsonObject(value) || value.revoked !== true)
+      throw new ResponseValidationError("INVALID_RESPONSE", "设备撤销响应无效");
     this.close();
   }
   static async submitPairing(
@@ -791,12 +808,14 @@ export class RemoteRuntimeClient {
     pairing: RemotePairingSubmitted,
     fetcher: typeof fetch = globalThis.fetch.bind(globalThis),
   ): Promise<void> {
-    await jsonRequest(
+    const value = await jsonRequest(
       fetcher,
       publicUrl,
       `/v1/pairings/${encodeURIComponent(pairing.pairingId)}/ack`,
       pairing.pairingToken,
       {},
     );
+    if (!isJsonObject(value) || value.acknowledged !== true)
+      throw new ResponseValidationError("INVALID_RESPONSE", "配对确认响应无效");
   }
 }
