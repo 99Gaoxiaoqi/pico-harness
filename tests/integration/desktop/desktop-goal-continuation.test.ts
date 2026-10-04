@@ -455,8 +455,8 @@ for (const [name, verdict, limits, terminal, count] of [
     const id = await f.create();
     await f.arm(id, limits);
     await f.send(id);
-    // 每轮包含真实 SQLite 与文件持久化；Windows CI 的 50 轮不能共用 20s 小场景预算。
-    const state = await f.wait(id, terminal, Math.max(20_000, count * 2_000));
+    // 每轮包含真实持久化；Windows 的 8 轮也可能超过 20s，按轮数分配夹具观察预算。
+    const state = await f.wait(id, terminal, Math.max(20_000, count * 5_000));
     assert.equal(f.runs.length, count);
     assert.equal(state.coordinator.currentExecution, null);
     assert.equal(state.coordinator.pendingContinuation, null);
