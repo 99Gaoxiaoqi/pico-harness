@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import {
+  ActivityIndicator,
   Alert,
   FlatList,
   Image,
@@ -17,22 +18,21 @@ import * as Crypto from "expo-crypto";
 import { isTerminalRunStatus } from "@pico/protocol/mobile";
 import { usePico } from "./store";
 import { decodedBase64Size } from "./core";
-import { Button, Card, Label, s, color } from "./ui";
+import { Button, Card, Detail, Label, s, color } from "./ui";
 import { ActionsSheet } from "./ActionsSheet";
 import type { WorkbarTab } from "./Workbar";
 import { useSessionTranscript } from "./conversation/useSessionTranscript";
 import { useMessageComposer } from "./conversation/useMessageComposer";
 import { useTranscriptViewport } from "./conversation/useTranscriptViewport";
-import { ComposerOptions } from "./conversation/ComposerOptions";
+import { transcriptRows, type TranscriptRow } from "./conversation/transcriptRows";
+import { ComposerOptions, ComposerReferences } from "./conversation/ComposerOptions";
 import { SessionActions } from "./conversation/SessionActions";
-import { TranscriptItem, StreamingItem, PlanCard } from "./conversation/TranscriptItem";
-
-const sendModes = [
-  { value: "auto", label: "自动", detail: "空闲时开始新任务；运行中补充引导。" },
-  { value: "steer", label: "引导", detail: "为运行中的任务补充要求；空闲时开始新任务。" },
-  { value: "queue", label: "排队", detail: "有任务运行时，等当前任务结束后处理。" },
-  { value: "replace", label: "替换", detail: "有任务运行时，停止当前任务并排队处理这条消息。" },
-] as const;
+import {
+  TranscriptItem,
+  ProcessGroup,
+  StreamingItem,
+  PlanCard,
+} from "./conversation/TranscriptItem";
 
 export function Conversation({
   active,
@@ -69,8 +69,6 @@ export function Conversation({
     setText,
     sending,
     images,
-    mode,
-    setMode,
     uncertain,
     frozen,
     send,
@@ -78,13 +76,32 @@ export function Conversation({
     removeImage,
     captureSelection,
   } = composer;
+  const presentation = useRef<{ history: string; rows: TranscriptRow[] }>({
+    history: "",
+    rows: [],
+  });
+  const history = `${view?.watermark?.historyEpoch}/${view?.watermark?.projectorVersion}`;
+  const rows = transcriptRows(
+    view?.records ?? [],
+    presentation.current.history === history ? presentation.current.rows : [],
+  );
+  presentation.current = { history, rows };
   const [visibleItems, setVisibleItems] = useState(new Set<string>());
-  const viewport = useTranscriptViewport(view, sessionReady, active, restoreVersion);
+  const viewport = useTranscriptViewport(view, sessionReady, active, restoreVersion, rows);
   const onViewableItemsChanged = useRef(({ viewableItems }: { viewableItems: ViewToken[] }) => {
     viewport.onViewableItemsChanged(viewableItems);
-    setVisibleItems(new Set(viewableItems.map((token) => token.key)));
+    setVisibleItems(
+      new Set(
+        viewableItems.flatMap(
+          (token) =>
+            presentation.current.rows
+              .find((row) => row.key === token.key)
+              ?.records.map((record) => record.itemId) ?? [],
+        ),
+      ),
+    );
   }).current;
-  const [sheet, setSheet] = useState<"more" | "mode" | "run">();
+  const [sheet, setSheet] = useState<"run">();
   useEffect(() => {
     if (!active) {
       setSheet(undefined);
@@ -103,6 +120,26 @@ export function Conversation({
     onPanel(tab);
   }
   const syncReason = sessionReady ? undefined : "正在补齐会话";
+  const sendReason = composer.sendReason ?? syncReason ?? pico.reason("session.send");
+  const showSendHelp = Boolean(
+    text.trim() ||
+    images.length ||
+    composer.selectedSkills.length ||
+    composer.selectedAgent ||
+    composer.optionsReason ||
+    syncReason ||
+    pico.reason("session.send"),
+  );
+  const modelSummary = settings
+    ? `${settings.model} · ${settings.collaborationMode === "agent" ? "普通" : settings.collaborationMode === "plan" ? "计划" : "研究"} · ${settings.thinkingEffort}`
+    : "读取会话设置…";
+  const pendingItem = view?.records.find(
+    (record) =>
+      ((record.item.kind === "approval" && record.item.data.kind !== "plan") ||
+        record.item.kind === "prompt") &&
+      record.item.state === "waiting",
+  );
+  const pendingPlan = plan?.state === "pending_review";
   // Keep hooks/drafts alive, but remove native focus targets and stale cell hit regions.
   if (!active) return null;
   return (
@@ -128,8 +165,8 @@ export function Conversation({
         onScrollToIndexFailed={viewport.onScrollToIndexFailed}
         onContentSizeChange={viewport.onContentSizeChange}
         scrollEventThrottle={32}
-        data={view?.records ?? []}
-        keyExtractor={(x) => x.itemId}
+        data={rows}
+        keyExtractor={(x) => x.key}
         extraData={visibleItems}
         onViewableItemsChanged={onViewableItemsChanged}
         viewabilityConfig={{ itemVisiblePercentThreshold: 1 }}
@@ -143,41 +180,51 @@ export function Conversation({
             />
           ) : null
         }
-        renderItem={({ item }) => (
-          <TranscriptItem
-            item={item.item}
-            sessionId={sessionId}
-            syncReason={syncReason}
-            visible={visibleItems.has(item.itemId)}
-            onReview={() => openPanel("审查")}
-            onOpenChild={(childId, childWorkspace) =>
-              void pico.perform(async () => {
-                const current = captureSelection();
-                const [parent, child] = await Promise.all([
-                  pico.request("session.get", { sessionId }),
-                  pico.request("session.get", { sessionId: childId }),
-                ]);
-                if (!current()) return;
-                if (
-                  parent.session.workspacePath !== child.session.workspacePath ||
-                  childWorkspace !== child.session.workspacePath ||
-                  child.session.parentSession?.sessionId !== sessionId ||
-                  child.session.parentSession.workspacePath !== parent.session.workspacePath
-                ) {
-                  Alert.alert("请在电脑查看", "当前记录不是同一授权项目内的明确子会话。");
-                  return;
-                }
-                onSession(childId, sessionId, "child");
-              })
-            }
-          />
-        )}
+        renderItem={({ item }) =>
+          item.records.length > 1 ? (
+            <ProcessGroup
+              records={item.records}
+              sessionId={sessionId}
+              syncReason={syncReason}
+              onResize={viewport.beforeRowResize}
+            />
+          ) : (
+            <TranscriptItem
+              item={item.records[0]!.item}
+              sessionId={sessionId}
+              syncReason={syncReason}
+              visible={visibleItems.has(item.records[0]!.itemId)}
+              onReview={() => openPanel("审查")}
+              onResize={viewport.beforeRowResize}
+              onOpenChild={(childId, childWorkspace) =>
+                void pico.perform(async () => {
+                  const current = captureSelection();
+                  const [parent, child] = await Promise.all([
+                    pico.request("session.get", { sessionId }),
+                    pico.request("session.get", { sessionId: childId }),
+                  ]);
+                  if (!current()) return;
+                  if (
+                    parent.session.workspacePath !== child.session.workspacePath ||
+                    childWorkspace !== child.session.workspacePath ||
+                    child.session.parentSession?.sessionId !== sessionId ||
+                    child.session.parentSession.workspacePath !== parent.session.workspacePath
+                  ) {
+                    Alert.alert("请在电脑查看", "当前记录不是同一授权项目内的明确子会话。");
+                    return;
+                  }
+                  onSession(childId, sessionId, "child");
+                })
+              }
+            />
+          )
+        }
         ListEmptyComponent={
           <Label>
             {!pico.connected
               ? "连接恢复后会补齐记录"
               : sessionReady && view?.phase === "ready"
-                ? "开始一段对话，让 Pico 帮你处理电脑上的任务。"
+                ? "有什么需要 Pico 帮你处理？"
                 : view?.phase === "recovering" || view?.phase === "idle"
                   ? "历史尚未同步，请重新连接后重试"
                   : "正在读取历史…"}
@@ -186,7 +233,12 @@ export function Conversation({
         ListFooterComponent={
           <View style={{ gap: 10 }}>
             {view?.activeOverlay.map((x) => (
-              <StreamingItem key={x.streamId} kind={x.kind} text={x.text} />
+              <StreamingItem
+                key={x.streamId}
+                kind={x.kind}
+                text={x.text}
+                onResize={viewport.beforeRowResize}
+              />
             ))}
             {plan && <PlanCard plan={plan} sessionId={sessionId} syncReason={syncReason} />}
             {!!view?.queuedInputs.length && <Label>队列中 {view.queuedInputs.length} 条输入</Label>}
@@ -198,47 +250,81 @@ export function Conversation({
           <Button title="回到最新 ↓" quiet onPress={viewport.jumpToLatest} />
         </View>
       )}
-      {run && (
+      {(run || pendingItem || pendingPlan) && (
         <View style={styles.runStrip}>
           <Pressable
             accessibilityRole="button"
+            accessibilityLabel={
+              pendingItem
+                ? pendingItem.item.kind === "approval"
+                  ? "查看待批准请求"
+                  : "查看待回答问题"
+                : pendingPlan
+                  ? "查看待审计划"
+                  : "查看当前任务进度"
+            }
+            accessibilityState={{ disabled: !!syncReason }}
+            accessibilityHint={syncReason}
+            disabled={!!syncReason}
             style={{ flex: 1, minHeight: 44, justifyContent: "center" }}
-            onPress={() => openSheet("run")}
-          >
-            <Text style={s.muted}>
-              {run.status === "paused"
-                ? "任务已暂停"
-                : run.status === "pause_requested"
-                  ? "正在暂停"
-                  : run.status === "cancelling"
-                    ? "正在停止"
-                    : "Pico 正在执行"}{" "}
-              · 查看进度
-            </Text>
-          </Pressable>
-          <Button
-            title={run.status === "paused" ? "继续" : "停止"}
-            quiet
-            reason={
-              syncReason ?? pico.reason(run.status === "paused" ? "run.resume" : "run.cancel")
-            }
             onPress={() =>
-              run.status === "paused"
-                ? void pico.perform(() => pico.request("run.resume", { runId: run.runId }))
-                : Alert.alert("停止当前任务？", run.description, [
-                    { text: "返回" },
-                    {
-                      text: "停止",
-                      style: "destructive",
-                      onPress: () =>
-                        void pico.perform(() => pico.request("run.cancel", { runId: run.runId })),
-                    },
-                  ])
+              pendingItem
+                ? viewport.jumpToItem(pendingItem.itemId)
+                : pendingPlan
+                  ? viewport.jumpToLatest()
+                  : openSheet("run")
             }
-          />
+          >
+            <Text numberOfLines={1} style={s.muted}>
+              {pendingItem
+                ? pendingItem.item.kind === "approval"
+                  ? "需要批准 · 查看请求"
+                  : "需要回答 · 查看问题"
+                : pendingPlan
+                  ? "计划待审 · 查看计划"
+                  : `${
+                      run?.status === "paused"
+                        ? "任务已暂停"
+                        : run?.status === "pause_requested"
+                          ? "正在暂停"
+                          : run?.status === "cancelling"
+                            ? "正在停止"
+                            : run?.status === "queued"
+                              ? "任务已排队"
+                              : "正在执行"
+                    } · 查看进度`}
+            </Text>
+            {!!run?.description && !pendingItem && !pendingPlan && (
+              <Text numberOfLines={1} style={s.text}>
+                {run.description}
+              </Text>
+            )}
+          </Pressable>
+          {run && (
+            <Button
+              title={run.status === "paused" ? "继续" : "停止"}
+              quiet
+              reason={
+                syncReason ?? pico.reason(run.status === "paused" ? "run.resume" : "run.cancel")
+              }
+              onPress={() =>
+                run.status === "paused"
+                  ? void pico.perform(() => pico.request("run.resume", { runId: run.runId }))
+                  : Alert.alert("停止当前任务？", run.description, [
+                      { text: "返回" },
+                      {
+                        text: "停止",
+                        style: "destructive",
+                        onPress: () =>
+                          void pico.perform(() => pico.request("run.cancel", { runId: run.runId })),
+                      },
+                    ])
+              }
+            />
+          )}
         </View>
       )}
-      <View style={[s.body, styles.composer]}>
+      <View style={styles.composer}>
         {uncertain && (
           <Card>
             <Text style={s.text}>结果未确认，已重新同步会话。确认消息是否已出现。</Text>
@@ -272,122 +358,130 @@ export function Conversation({
             ))}
           </View>
         )}
-        {frozen ? (
-          <Label>待确认请求的输入已锁定，重试将使用相同内容。</Label>
-        ) : (
-          <TextInput
-            accessibilityLabel="消息"
-            editable={composer.draftReady && !sending && !composer.pickingImage}
-            value={text}
-            onChangeText={setText}
-            multiline
-            autoCorrect={false}
-            autoCapitalize="none"
-            placeholder="让 Pico 帮你处理电脑上的任务"
-            placeholderTextColor={color.muted}
-            style={styles.messageInput}
+        <ComposerReferences composer={composer} active={active} />
+        {frozen && <Label>待确认请求的输入已锁定，重试将使用相同内容。</Label>}
+        <View style={styles.inputRow}>
+          <ComposerOptions
+            composer={composer}
+            active={active}
+            modelSummary={modelSummary}
+            onSettings={() => openPanel("设置")}
+            transcriptDetails={
+              <View style={{ gap: 6 }}>
+                <Label>以下为已加载的记录。更早的记录可先在会话中加载。</Label>
+                {view?.records.map((record) => (
+                  <Detail
+                    key={record.itemId}
+                    title={
+                      record.item.kind === "userMessage"
+                        ? "你的消息"
+                        : record.item.kind === "assistantMessage"
+                          ? "Pico 的回复"
+                          : "title" in record.item
+                            ? String(record.item.title)
+                            : record.item.kind
+                    }
+                    value={record.item}
+                  />
+                ))}
+              </View>
+            }
+            sessionMenu={(closeMenu) => (
+              <View style={{ gap: 10 }}>
+                <SessionActions
+                  sessionId={sessionId}
+                  idle={sessionReady && !run}
+                  onSession={onSession}
+                  onClose={closeMenu}
+                />
+                <Button
+                  title="研究报告"
+                  quiet
+                  reason={pico.reason("session.research.query")}
+                  onPress={() => openPanel("研究")}
+                />
+                <View style={s.row}>
+                  <Button title="工作栏" quiet onPress={() => openPanel()} />
+                  <Button
+                    title="侧聊"
+                    quiet
+                    reason={syncReason ?? pico.reason("sideChat.create")}
+                    onPress={() =>
+                      void pico.perform(async () => {
+                        const current = captureSelection();
+                        const x = await pico.request("sideChat.create", {
+                          sourceSessionId: sessionId,
+                          panelId: Crypto.randomUUID(),
+                          idempotencyKey: Crypto.randomUUID(),
+                        });
+                        if (current()) onSession(x.session.sessionId, sessionId);
+                      })
+                    }
+                  />
+                  {sideParentSessionId && parentIsSideChat && (
+                    <Button
+                      title="关闭侧聊"
+                      quiet
+                      reason={syncReason ?? pico.reason("sideChat.close")}
+                      onPress={() =>
+                        void pico.perform(async () => {
+                          const current = captureSelection();
+                          await pico.request("sideChat.close", { sessionId });
+                          if (current()) onSession(sideParentSessionId);
+                        })
+                      }
+                    />
+                  )}
+                  {run && <Label>{run.status}</Label>}
+                </View>
+                {settings && (
+                  <View style={[s.row, { flexWrap: "nowrap" }]}>
+                    <Text numberOfLines={1} style={[s.muted, { flex: 1 }]}>
+                      {settings.model} · {settings.collaborationMode} · {settings.permissionMode}
+                    </Text>
+                    <Button title="会话设置" quiet onPress={() => openPanel("设置")} />
+                  </View>
+                )}
+              </View>
+            )}
           />
-        )}
-        <View style={[s.row, { justifyContent: "space-between" }]}>
-          <View style={s.row}>
-            <ComposerOptions composer={composer} active={active} />
-            <Button
-              title={sendModes.find((x) => x.value === mode)!.label}
-              quiet
-              reasonDetail={false}
-              reason={composer.optionsReason}
-              onPress={() => openSheet("mode")}
+          {frozen ? (
+            <Text style={styles.messageInput}>等待确认…</Text>
+          ) : (
+            <TextInput
+              accessibilityLabel="消息"
+              editable={composer.draftReady && !sending && !composer.pickingImage}
+              value={text}
+              onChangeText={setText}
+              multiline
+              autoCorrect={false}
+              autoCapitalize="none"
+              placeholder="发消息…"
+              placeholderTextColor={color.muted}
+              style={styles.messageInput}
             />
-          </View>
-          <Button
-            title={sending ? "发送中…" : "发送 ↑"}
-            reason={composer.sendReason ?? syncReason ?? pico.reason("session.send")}
-            reasonDetail={false}
-            onPress={() => void send()}
-          />
-        </View>
-        <View style={[s.row, { justifyContent: "space-between" }]}>
+          )}
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="修改模型与会话设置"
-            style={styles.modelTarget}
-            onPress={() => openPanel("设置")}
+            accessibilityLabel={sending ? "发送中" : "发送消息"}
+            accessibilityState={{ disabled: !!sendReason, busy: sending }}
+            accessibilityHint={sendReason}
+            disabled={!!sendReason}
+            style={({ pressed }) => [
+              styles.sendTarget,
+              { opacity: sendReason ? 0.5 : pressed ? 0.75 : 1 },
+            ]}
+            onPress={() => void send()}
           >
-            <Text numberOfLines={1} style={s.muted}>
-              {settings
-                ? `${settings.model} · ${settings.collaborationMode === "agent" ? "普通" : settings.collaborationMode === "plan" ? "计划" : "研究"} · ${settings.thinkingEffort}`
-                : "读取会话设置…"}{" "}
-              ▾
-            </Text>
-          </Pressable>
-          <Button title="更多" quiet onPress={() => openSheet("more")} />
-        </View>
-        {composer.sendReason && !uncertain && <Label>{composer.sendReason}</Label>}
-      </View>
-      <ActionsSheet
-        title="会话操作"
-        open={active && sheet === "more"}
-        onClose={() => setSheet(undefined)}
-      >
-        <View style={{ gap: 10 }}>
-          {sheet === "more" && (
-            <SessionActions
-              sessionId={sessionId}
-              idle={sessionReady && !run}
-              onSession={onSession}
-              onClose={() => setSheet(undefined)}
-            />
-          )}
-          <Button
-            title="研究报告"
-            quiet
-            reason={pico.reason("session.research.query")}
-            onPress={() => openPanel("研究")}
-          />
-          <View style={s.row}>
-            <Button title="工作栏" quiet onPress={() => openPanel()} />
-            <Button
-              title="侧聊"
-              quiet
-              reason={syncReason ?? pico.reason("sideChat.create")}
-              onPress={() =>
-                void pico.perform(async () => {
-                  const current = captureSelection();
-                  const x = await pico.request("sideChat.create", {
-                    sourceSessionId: sessionId,
-                    panelId: Crypto.randomUUID(),
-                    idempotencyKey: Crypto.randomUUID(),
-                  });
-                  if (current()) onSession(x.session.sessionId, sessionId);
-                })
-              }
-            />
-            {sideParentSessionId && parentIsSideChat && (
-              <Button
-                title="关闭侧聊"
-                quiet
-                reason={syncReason ?? pico.reason("sideChat.close")}
-                onPress={() =>
-                  void pico.perform(async () => {
-                    const current = captureSelection();
-                    await pico.request("sideChat.close", { sessionId });
-                    if (current()) onSession(sideParentSessionId);
-                  })
-                }
-              />
+            {sending ? (
+              <ActivityIndicator color={color.bg} />
+            ) : (
+              <Text style={styles.sendIcon}>↑</Text>
             )}
-            {run && <Label>{run.status}</Label>}
-          </View>
-          {settings && (
-            <View style={[s.row, { flexWrap: "nowrap" }]}>
-              <Text numberOfLines={1} style={[s.muted, { flex: 1 }]}>
-                {settings.model} · {settings.collaborationMode} · {settings.permissionMode}
-              </Text>
-              <Button title="会话设置" quiet onPress={() => openPanel("设置")} />
-            </View>
-          )}
+          </Pressable>
         </View>
-      </ActionsSheet>
+        {composer.sendReason && !uncertain && showSendHelp && <Label>{composer.sendReason}</Label>}
+      </View>
       <ActionsSheet
         title="当前任务"
         open={active && sheet === "run"}
@@ -444,32 +538,6 @@ export function Conversation({
           <Label>当前任务已结束。</Label>
         )}
       </ActionsSheet>
-      <ActionsSheet
-        title="发送方式"
-        open={active && sheet === "mode"}
-        onClose={() => setSheet(undefined)}
-      >
-        <Label>电脑有任务运行时，选择这条消息如何参与执行。</Label>
-        {sendModes.map((option) => (
-          <Pressable
-            key={option.value}
-            accessibilityRole="radio"
-            accessibilityState={{ checked: mode === option.value, disabled: frozen || sending }}
-            disabled={frozen || sending}
-            onPress={() => {
-              setMode(option.value);
-              setSheet(undefined);
-            }}
-            style={[styles.modeOption, mode === option.value && styles.modeSelected]}
-          >
-            <Text style={[s.text, mode === option.value && { color: color.accent }]}>
-              {option.label}
-              {mode === option.value ? " · 已选择" : ""}
-            </Text>
-            <Label>{option.detail}</Label>
-          </Pressable>
-        ))}
-      </ActionsSheet>
     </KeyboardAvoidingView>
   );
 }
@@ -482,38 +550,39 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: color.line,
   },
-  modelTarget: { minHeight: 44, flex: 1, justifyContent: "center" },
-  modeOption: {
-    minHeight: 64,
-    padding: 12,
+  inputRow: {
+    flexDirection: "row",
+    alignItems: "flex-end",
     gap: 4,
-    borderRadius: 11,
-    borderWidth: 1,
-    borderColor: color.line,
-  },
-  modeSelected: { backgroundColor: color.accentSoft, borderColor: color.accent },
-  composer: {
-    padding: 12,
-    marginHorizontal: 12,
-    marginBottom: 10,
-    gap: 7,
+    padding: 6,
     backgroundColor: color.bg,
     borderWidth: 1,
     borderColor: color.line,
+    borderRadius: 28,
+  },
+  sendTarget: {
+    minWidth: 44,
+    minHeight: 44,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: color.accent,
     borderRadius: 22,
-    shadowColor: "#000000",
-    shadowOpacity: 0.05,
-    shadowOffset: { width: 0, height: 2 },
-    shadowRadius: 10,
-    elevation: 2,
+  },
+  sendIcon: { color: color.bg, fontSize: 24, lineHeight: 30 },
+  composer: {
+    marginHorizontal: 16,
+    marginBottom: 8,
+    gap: 8,
   },
   messageInput: {
+    flex: 1,
     color: color.text,
-    fontSize: 15,
-    lineHeight: 23,
-    minHeight: 54,
+    fontSize: 16,
+    lineHeight: 24,
+    minHeight: 44,
+    maxHeight: 160,
     paddingHorizontal: 4,
-    paddingVertical: 6,
+    paddingVertical: 10,
     textAlignVertical: "top",
   },
 });

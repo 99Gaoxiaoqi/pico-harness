@@ -1,6 +1,10 @@
 import React, { useState } from "react";
 import { Linking, Pressable, StyleSheet, Text, View } from "react-native";
-import type { RuntimeConversationItem, RuntimePlanControlSnapshot } from "@pico/protocol/mobile";
+import type {
+  RuntimeConversationItem,
+  RuntimePlanControlSnapshot,
+  RuntimeTranscriptItemRecord,
+} from "@pico/protocol/mobile";
 import { usePico } from "../store";
 import { Button, Card, Detail, Field, Label, s, color } from "../ui";
 import { MessageMarkdown } from "../MessageMarkdown";
@@ -8,7 +12,68 @@ import { referencedMediaIds } from "../markdown";
 import { MessageMedia } from "../MessageMedia";
 import { streamingMediaText } from "../media";
 
-export function StreamingItem({ kind, text }: { kind: string; text: string }) {
+export function ProcessGroup({
+  records,
+  sessionId,
+  syncReason,
+  onResize,
+}: {
+  records: readonly RuntimeTranscriptItemRecord[];
+  sessionId: string;
+  syncReason?: string;
+  onResize: () => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const tools = records.filter((record) => record.item.kind === "tool");
+  const running = tools.some(
+    (record) => record.item.kind === "tool" && record.item.status === "running",
+  );
+  const label = tools.length
+    ? `${running ? "执行中" : "执行过程"} · ${tools.length} 项操作`
+    : `思考过程 · ${records.length} 段`;
+  return (
+    <View style={styles.process}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={`${label}，${expanded ? "收起" : "展开"}`}
+        accessibilityState={{ expanded }}
+        onPress={() => {
+          onResize();
+          setExpanded(!expanded);
+        }}
+        style={styles.disclosure}
+      >
+        <Text style={s.muted}>
+          {expanded ? "▾" : "▸"} {label}
+        </Text>
+      </Pressable>
+      {expanded && (
+        <View style={styles.groupContents}>
+          {records.map((record) => (
+            <TranscriptItem
+              key={record.itemId}
+              item={record.item}
+              sessionId={sessionId}
+              syncReason={syncReason}
+              visible={false}
+              onResize={onResize}
+            />
+          ))}
+        </View>
+      )}
+    </View>
+  );
+}
+
+export function StreamingItem({
+  kind,
+  text,
+  onResize,
+}: {
+  kind: string;
+  text: string;
+  onResize?: () => void;
+}) {
   const pico = usePico();
   const [expanded, setExpanded] = useState(false);
   const process = kind === "thinking" || kind === "toolOutput";
@@ -18,7 +83,10 @@ export function StreamingItem({ kind, text }: { kind: string; text: string }) {
         <Pressable
           accessibilityRole="button"
           accessibilityState={{ expanded }}
-          onPress={() => setExpanded(!expanded)}
+          onPress={() => {
+            onResize?.();
+            setExpanded(!expanded);
+          }}
           style={styles.disclosure}
         >
           <Text style={s.muted}>
@@ -50,6 +118,7 @@ export function TranscriptItem({
   visible,
   onReview,
   onOpenChild,
+  onResize,
 }: {
   item: RuntimeConversationItem;
   sessionId: string;
@@ -57,6 +126,7 @@ export function TranscriptItem({
   visible: boolean;
   onReview?: () => void;
   onOpenChild?: (sessionId: string, workspacePath: string) => void;
+  onResize?: () => void;
 }) {
   const pico = usePico();
   const [expanded, setExpanded] = useState(false);
@@ -114,26 +184,34 @@ export function TranscriptItem({
             <MessageMedia key={reference.artifactId} reference={reference} visible={visible} />
           ))}
         </View>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={`查看${label}的消息详情`}
-          accessibilityState={{ expanded }}
-          onPress={() => setExpanded(!expanded)}
-          style={{ alignSelf: "flex-start", minHeight: 44, justifyContent: "center" }}
-        >
-          <Text style={[s.muted, { fontSize: 11 }]}>{expanded ? "收起详情" : "消息详情"}</Text>
-        </Pressable>
         {item.truncated && <Label>此记录因传输预算截断</Label>}
-        {expanded && <Detail value={item} />}
       </View>
     );
   }
+  if (item.kind === "changes" && onReview)
+    return (
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={`查看改动：${item.title}`}
+        onPress={onReview}
+        style={styles.resultRow}
+      >
+        <Text style={s.text}>查看改动</Text>
+        <Text numberOfLines={1} style={[s.muted, { flex: 1 }]}>
+          {content || item.title}
+        </Text>
+        <Text style={s.muted}>›</Text>
+      </Pressable>
+    );
   return (
     <View style={[styles.process, waiting && styles.interaction]}>
       <Pressable
         accessibilityRole="button"
         accessibilityState={{ expanded }}
-        onPress={() => setExpanded(!expanded)}
+        onPress={() => {
+          onResize?.();
+          setExpanded(!expanded);
+        }}
         style={styles.disclosure}
       >
         <View style={[s.row, { gap: 6 }, process && { flexWrap: "nowrap" }]}>
@@ -370,6 +448,14 @@ const styles = StyleSheet.create({
   },
   assistantMessage: { gap: 6, marginTop: 10, marginBottom: 16 },
   process: { gap: 4, paddingVertical: 3 },
+  groupContents: { paddingLeft: 12, borderLeftWidth: 1, borderLeftColor: color.line },
+  resultRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    minHeight: 44,
+    marginVertical: 6,
+  },
   disclosure: { minHeight: 44, justifyContent: "center" },
   interaction: {
     backgroundColor: color.panel,

@@ -18,6 +18,19 @@ export function mobileComponent(source: URL, modules: Record<string, unknown>) {
   let effects: Array<() => void> = [];
   const same = (a: unknown[] | undefined, b: unknown[]) =>
     a?.length === b?.length && a.every((x, i) => Object.is(x, b[i]));
+  const effect = (fn: () => (() => void) | undefined, deps: unknown[]) => {
+    const i = cursor++;
+    if (!cells[i] || !same(cells[i]!.deps, deps))
+      effects.push(() => {
+        cells[i]?.cleanup?.();
+        cells[i] = { deps, cleanup: fn() };
+      });
+  };
+  const memo = (fn: () => unknown, deps: unknown[]) => {
+    const i = cursor++;
+    if (!cells[i] || !same(cells[i]!.deps, deps)) cells[i] = { deps, value: fn() };
+    return cells[i]!.value;
+  };
   const react = {
     createElement: (type: unknown, props: Record<string, unknown>, ...children: unknown[]) => ({
       type,
@@ -37,14 +50,10 @@ export function mobileComponent(source: URL, modules: Record<string, unknown>) {
     useRef(value: unknown) {
       return (cells[cursor++] ??= { current: value });
     },
-    useEffect(fn: () => (() => void) | undefined, deps: unknown[]) {
-      const i = cursor++;
-      if (!cells[i] || !same(cells[i]!.deps, deps))
-        effects.push(() => {
-          cells[i]?.cleanup?.();
-          cells[i] = { deps, cleanup: fn() };
-        });
-    },
+    useEffect: effect,
+    useLayoutEffect: effect,
+    useMemo: memo,
+    useCallback: (fn: unknown, deps: unknown[]) => memo(() => fn, deps),
   };
   const compiled = transformSync(readFileSync(source, "utf8"), {
     loader: "tsx",
@@ -52,26 +61,28 @@ export function mobileComponent(source: URL, modules: Record<string, unknown>) {
     jsx: "transform",
     sourcefile: fileURLToPath(source),
   }).code;
-  const module = { exports: {} as Record<string, (props: unknown) => Node> };
+  const module = { exports: {} as Record<string, (...args: unknown[]) => unknown> };
   vm.runInNewContext(compiled, {
     module,
     exports: module.exports,
+    setTimeout,
+    clearTimeout,
     require: (name: string) => {
       if (name === "react") return react;
       if (!(name in modules)) throw new Error(`Unstubbed screen dependency: ${name}`);
       return modules[name];
     },
   });
-  let tree: Node;
+  let tree: unknown;
   return {
-    render(name = "default", props: unknown = {}) {
+    render<T = Node>(name = "default", props: unknown = {}, ...args: unknown[]): T {
       for (let count = 0; count < 20; count++) {
         dirty = false;
         cursor = 0;
         effects = [];
-        tree = module.exports[name]!(props);
+        tree = module.exports[name]!(props, ...args);
         effects.forEach((effect) => effect());
-        if (!dirty) return tree;
+        if (!dirty) return tree as T;
       }
       throw new Error("Screen failed to settle");
     },

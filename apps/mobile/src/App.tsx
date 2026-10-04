@@ -65,6 +65,36 @@ export default function App() {
   const scope = `${pico.host?.id}/${pico.workspace?.id}/${sessionId}/${pico.generation}`;
   const scopeRef = useRef(scope);
   scopeRef.current = scope;
+  const [sessionHeading, setSessionHeading] = useState<{ scope: string; title: string }>();
+  useEffect(() => {
+    setSessionHeading(undefined);
+    if (!sessionId || !pico.workspace || !pico.connected) return;
+    let current = true;
+    let latestRead = 0;
+    const refresh = async () => {
+      const read = ++latestRead;
+      try {
+        const result = await pico.request("session.get", { sessionId });
+        if (
+          current &&
+          read === latestRead &&
+          scopeRef.current === scope &&
+          result.session.sessionId === sessionId
+        )
+          setSessionHeading({ scope, title: result.session.title || "未命名会话" });
+      } catch (error) {
+        if (current && read === latestRead && scopeRef.current === scope) pico.report(error);
+      }
+    };
+    const off = pico.onNotification((event) => {
+      if (event.topic === "session.updated" && event.scope.sessionId === sessionId) void refresh();
+    });
+    void refresh();
+    return () => {
+      current = false;
+      off();
+    };
+  }, [scope, pico.connected]);
   useEffect(() => {
     setSessionId(undefined);
     setSideParent(undefined);
@@ -127,6 +157,7 @@ export default function App() {
   }
   const inSession = !!sessionId && (screen === "conversation" || screen === "workbar");
   const chatActive = screen === "conversation" && !drawer && !toolSheet;
+  const sessionTitle = sessionHeading?.scope === scope ? sessionHeading.title : "会话";
   return (
     <SafeAreaView style={s.page}>
       <StatusBar style="dark" />
@@ -155,20 +186,38 @@ export default function App() {
             else if (pico.workspace) setScreen("sessions");
           }}
         />
-        <View style={styles.heading}>
-          <Text style={styles.brand}>
+        <Pressable
+          style={styles.heading}
+          accessibilityRole={inSession ? "button" : undefined}
+          accessibilityLabel={
+            inSession
+              ? `会话：${sessionTitle}，当前电脑：${pico.host?.name ?? "已连接电脑"}，项目：${pico.workspace?.label ?? "当前项目"}`
+              : undefined
+          }
+          accessibilityHint={inSession ? "查看或切换电脑与项目" : undefined}
+          disabled={!inSession}
+          onPress={() => {
+            Keyboard.dismiss();
+            setScreen("computers");
+          }}
+        >
+          <Text numberOfLines={1} style={styles.brand}>
             {screen === "workbar"
               ? (tools.find((t) => t.tab === workbarTab)?.title ?? workbarTab)
               : screen === "settings"
                 ? "设置"
-                : "pico"}
+                : screen === "conversation"
+                  ? sessionTitle
+                  : "pico"}
           </Text>
           <Text numberOfLines={1} style={s.muted}>
             {pico.phase === "connected"
-              ? [pico.workspace?.label, pico.host?.name].filter(Boolean).join(" · ")
+              ? inSession
+                ? `${pico.workspace?.label ?? "当前项目"} ▾`
+                : [pico.workspace?.label, pico.host?.name].filter(Boolean).join(" · ")
               : phaseLabels[pico.phase]}
           </Text>
-        </View>
+        </Pressable>
         <Button
           title={inSession ? "工具" : "设置"}
           quiet
@@ -341,7 +390,7 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: color.line,
   },
-  heading: { flex: 1, alignItems: "center" },
+  heading: { flex: 1, minWidth: 0, minHeight: 44, alignItems: "center", justifyContent: "center" },
   brand: { color: color.text, fontSize: 19, fontWeight: "600", letterSpacing: -0.5 },
   conversationPage: { position: "absolute", top: 0, bottom: 0, left: 0, right: 0 },
   error: {
