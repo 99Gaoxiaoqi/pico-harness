@@ -211,7 +211,11 @@ test(
       const run = (payload as Record<string, unknown>)["run"];
       if (!run || typeof run !== "object" || Array.isArray(run)) return;
       const record = run as Record<string, unknown>;
-      phase(event.topic, { runId: record["runId"], status: record["status"] });
+      phase(event.topic, {
+        runId: record["runId"],
+        status: record["status"],
+        ...(typeof record["error"] === "string" ? { error: record["error"].slice(0, 512) } : {}),
+      });
     });
     const originalStartForegroundRun = runtime.startForegroundRun.bind(runtime);
     let interceptNextStart = false;
