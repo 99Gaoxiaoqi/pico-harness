@@ -21,6 +21,10 @@
     "./remote": {
       "types": "./dist/remote.d.ts",
       "import": "./dist/remote.js"
+    },
+    "./relay": {
+      "types": "./dist/relay.d.ts",
+      "import": "./dist/relay.js"
     }
   },
   "files": [

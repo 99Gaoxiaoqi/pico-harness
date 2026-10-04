@@ -9,6 +9,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./relay-crypto": {
+      "types": "./dist/relay-crypto.d.ts",
+      "import": "./dist/relay-crypto.js"
     }
   },
   "files": [
@@ -19,6 +23,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@pico/protocol": "*"
+    "@pico/protocol": "*",
+    "tweetnacl": "1.0.3"
   }
 }
