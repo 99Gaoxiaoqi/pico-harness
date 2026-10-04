@@ -211,7 +211,7 @@ export function MobileConnectionSettingsPage() {
             });
           }}
         >
-          <label className="mobile-field">
+          <div className="mobile-field">
             <span>Relay 服务地址</span>
             <TextField
               label="Relay 服务地址"
@@ -223,8 +223,8 @@ export function MobileConnectionSettingsPage() {
               onValueChange={setRelayUrl}
               autoComplete="off"
             />
-          </label>
-          <label className="mobile-field">
+          </div>
+          <div className="mobile-field">
             <span>一次性内测邀请</span>
             <TextField
               label="一次性内测邀请"
@@ -235,7 +235,7 @@ export function MobileConnectionSettingsPage() {
               onValueChange={setInvitation}
               autoComplete="off"
             />
-          </label>
+          </div>
           <p className="settings-section__note">
             邀请仅用于注册本机，提交后清空。已注册电脑更新项目范围时可留空。
           </p>

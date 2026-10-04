@@ -3,7 +3,7 @@ import {
   defaultGatewayHome,
   readGatewayConfiguration,
   startConfiguredRemoteGateway,
-} from "@pico/remote-gateway";
+} from "@pico/remote-gateway/desktop";
 import { LocalRuntimeClient } from "@pico/pico-host/local-runtime-client";
 
 async function main(): Promise<void> {

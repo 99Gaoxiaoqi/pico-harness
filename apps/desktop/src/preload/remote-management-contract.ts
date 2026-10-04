@@ -130,7 +130,14 @@ export function isRemoteManagementRequest(
       return false;
     try {
       const url = new URL(params.relayUrl);
-      if (url.protocol !== "https:" || url.username || url.password || url.hash || url.search)
+      if (
+        url.protocol !== "https:" ||
+        url.username ||
+        url.password ||
+        url.hash ||
+        url.search ||
+        url.pathname !== "/"
+      )
         return false;
     } catch {
       return false;

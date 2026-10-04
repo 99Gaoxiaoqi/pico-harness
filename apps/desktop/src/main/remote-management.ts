@@ -5,7 +5,7 @@ import {
   defaultGatewayHome,
   readGatewayConfiguration,
   requestGatewayControl,
-} from "@pico/remote-gateway";
+} from "@pico/remote-gateway/desktop";
 import { resolveCanonicalPicoHome } from "@pico/pico-host/pico-paths";
 import { RemoteManagementService } from "./remote-management-service.js";
 import { pairingQrDataUrl } from "./pairing-qr.js";
