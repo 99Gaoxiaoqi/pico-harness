@@ -297,7 +297,20 @@ async function scenario(){
     {id:"commentary",kind:"assistantMessage",runId:"execution-1",text:"正在继续检查"},
     tool("tool-3"),
   ];
-  const mountTranscript=async(items,run,width=800)=>act(async()=>root.render(<PicoTheme><div className="conversation-surface" style={{width,display:"block",height:"auto"}}><ConversationTranscript items={items} activeRun={run} onOpenItem={item=>decisions.push(item.id)} renderItem={(item,fallback)=>item.kind==="runBoundary"&&item.status==="failed"?<aside data-recovery="true">重试运行</aside>:fallback}/></div></PicoTheme>));
+  const mountTranscript=async(items,run,width=800)=>{
+    const committed=Promise.withResolvers();
+    await act(async()=>root.render(<React.Profiler id="transcript" onRender={()=>committed.resolve()}><PicoTheme><div className="conversation-surface" style={{width,display:"block",height:"auto"}}><ConversationTranscript items={items} activeRun={run} onOpenItem={item=>decisions.push(item.id)} renderItem={(item,fallback)=>item.kind==="runBoundary"&&item.status==="failed"?<aside data-recovery="true">重试运行</aside>:fallback}/></div></PicoTheme></React.Profiler>));
+    let timer;
+    try {
+      await Promise.race([committed.promise,new Promise((_,reject)=>{
+        timer=setTimeout(()=>reject(new Error("Transcript render did not commit: "+width)),5000);
+      })]);
+    } finally { clearTimeout(timer); }
+    // React commit and the browser's disclosure/layout update are separate completion points.
+    await frame();
+    const surface=document.querySelector('.conversation-surface');
+    check(surface?.style.width===width+"px"&&Math.abs(surface.getBoundingClientRect().width-width)<1,"Transcript fixture width is applied before interactions: "+JSON.stringify({requested:width,inlineWidth:surface?.style.width,surface:surface?.getBoundingClientRect().width,viewport:innerWidth}));
+  };
   await mountTranscript(liveItems,activeRun);
   const process=()=>document.querySelector('.conversation-process');
   const thinkingRow=()=>document.querySelector('.conversation-thinking');
@@ -349,9 +362,13 @@ async function scenario(){
   check(!process().open,"Reader collapse survives appended events");
   await mountTranscript(settled,undefined,360);
   await act(async()=>process().querySelector('summary').click());
+  await frame();
+  check(process().open,"Narrow process is expanded before measuring its tool group");
   check(toolGroup().getBoundingClientRect().width<=312,"Tool groups fit a narrow side conversation: "+JSON.stringify({viewport:innerWidth,surface:document.querySelector('.conversation-surface').getBoundingClientRect().width,transcript:document.querySelector('.conversation-transcript').getBoundingClientRect().width,group:toolGroup().getBoundingClientRect().width}));
   check(toolGroup().querySelector('summary').scrollWidth<=toolGroup().querySelector('summary').clientWidth+1,"Long arguments do not overflow the compact row");
-  await act(async()=>toolGroup().querySelector('summary').click());
+  if(!toolGroup().open)await act(async()=>toolGroup().querySelector('summary').click());
+  await frame();
+  check(toolGroup().open,"Narrow tool calls are expanded before measuring their rows");
   const firstTool=toolGroup().querySelector('.conversation-tool-record');
   check(firstTool.querySelector('summary').getBoundingClientRect().height<=28,"Successful tool is a single compact line");
   check(Math.abs(firstTool.getBoundingClientRect().left-toolGroup().getBoundingClientRect().left)<1,"Expanded calls stay on the group reading column");
