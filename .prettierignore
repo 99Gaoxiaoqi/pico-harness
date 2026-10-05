@@ -8,7 +8,6 @@ aihot_summary.md
 # layout and source serialization are intentionally preserved after delivery.
 docs/architecture/pico-package-boundaries.architecture.json
 docs/architecture/pico-package-boundaries.html
-docs/architecture/pico-package-boundaries.visual-check.html
 
 # Generated visual assets preserve their renderer's serialized layout.
 docs/assets/pico-sandbox/architecture.html

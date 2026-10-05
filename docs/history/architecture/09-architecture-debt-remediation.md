@@ -285,4 +285,4 @@ Desktop 的 MCP 目录查询与执行现在都复用同一个 `PluginRuntimeSnap
 5. 不引入 DI 容器、Repository 框架、通用 Runtime Context 或跨 Agent 文件锁。
 6. 每个阶段独立提交；前一阶段验证失败时不扩大范围。
 
-具体实施清单见 [`2026-07-18-architecture-debt-remediation.md`](../plans/2026-07-18-architecture-debt-remediation.md)。
+原实施清单 `docs/history/plans/2026-07-18-architecture-debt-remediation.md` 已从当前文件树移除，可通过 Git 历史追溯；本篇保留历史分析，不定义当前待办。

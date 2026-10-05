@@ -13,5 +13,5 @@ echo    上下箭头翻输入历史
 echo    按 e 展开工具结果
 echo    Ctrl+C 退出
 echo.
-npx tsx --import ./src/tui/preload-env.ts --env-file=.env src/cli/main.ts
+npx tsx --import @pico/cli/tui/preload-env --env-file=.env src/cli/main.ts
 pause

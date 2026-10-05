@@ -17,16 +17,22 @@ npm run dev
 npm run desktop:dev
 ```
 
-在其他项目目录体验 Pico 时，建议显式使用本仓库的 `.env`：
+指定工作区与模型时，仍从仓库根目录启动，以复用 workspace 包构建和正式预加载入口：
 
 ```bash
-cd /path/to/your-project
-npx tsx --env-file=/path/to/pico-harness/.env \
-  --import /path/to/pico-harness/src/tui/preload-env.ts \
-  /path/to/pico-harness/src/cli/main.ts
+npm run dev -- --dir /path/to/your-project --model my-provider/my-model
 ```
 
 ## 已安装命令启动
+
+需要在其他目录直接使用 `pico` 时，先在仓库根目录构建并链接：
+
+```bash
+npm run build
+npm link
+```
+
+随后切换到目标项目：
 
 ```bash
 cd /path/to/your-project
@@ -36,6 +42,8 @@ pico
 启动时的当前目录就是 Pico 的项目根目录。工具读写、Bash、`@` 文件引用、`AGENTS.md`、`.pico/commands`、`.claude/commands` 都相对该目录解析。
 
 文件历史也在 TUI 内操作：使用 `/snapshots` 列出快照，使用 `/rewind` 执行 code / conversation / both 回滚。
+
+Windows 默认使用 PowerShell 7，不可用时回退 Windows PowerShell 5.1；内网包启动方式见[内网使用说明](../../内网使用说明.txt)。
 
 ## 共享配置与凭证
 

@@ -5,14 +5,15 @@ pico-harness 内网部署包
 
 【环境要求】
   - Windows x64
-  - Node.js v22+
-  - 依赖已安装，并已配置用户级 %USERPROFILE%\.pico\config.json
+  - Node.js 22.19+、24.3+ 或 26.x
+  - 依赖已安装、workspace 包已构建（npm run build:packages），并已配置用户级 %USERPROFILE%\.pico\config.json
 
-【唯一启动方式】
+【启动方式】
+  在包根目录准备 .env（可以为空），密钥变量仅在 Provider 的 apiKeyEnv 显式引用时生效。
   双击 启动TUI.bat，进入交互式 TUI。
 
   也可在终端运行:
-    npx tsx --import ./src/tui/preload-env.ts --env-file=.env src/cli/main.ts
+    npx tsx --import @pico/cli/tui/preload-env --env-file=.env src/cli/main.ts
 
   安装后可在任意项目目录运行:
     pico

@@ -30,9 +30,10 @@ coverage/
 test-results/
 playwright-report/
 .playwright-cli/
-output/playwright/
-output/benchmarks/
-output/mobile/
+/output/
+# Generated diagram validation reports; published images and sources stay tracked.
+/docs/**/*.visual-check.*
+/docs/**/*.receipt.json
 __pycache__/
 
 # Environment variables(含密钥,绝不提交)

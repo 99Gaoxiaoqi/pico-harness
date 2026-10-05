@@ -2,7 +2,7 @@
 
 > 文档类型：当前架构导航。系统边界与状态所有权见
 > [`ARCHITECTURE.md`](../../ARCHITECTURE.md)；实际依赖以 package manifest、公开 exports
-> 和 `npm run check:architecture` 为准。迁移过程保存在[包边界实施计划](../plans/2026-09-13-package-boundary-alignment.md)，不在本页重复维护。
+> 和 `npm run check:architecture` 为准。已完成的包边界迁移记录通过 Git 历史追溯。
 
 ## 执行路径
 

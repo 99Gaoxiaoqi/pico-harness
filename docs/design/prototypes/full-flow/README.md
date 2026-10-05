@@ -1,6 +1,6 @@
 # Pico Desktop · 全流程原型
 
-> 资产状态：这是用于评审 Desktop 目标交互的静态原型，不定义当前产品行为。当前实现边界见 [Desktop 架构](../../../../docs/guides/desktop-architecture.md)。
+> 资产状态：这是用于评审 Desktop 目标交互的静态原型，不定义当前产品行为。当前实现边界见 [Desktop 架构](../../../guides/desktop-architecture.md)。
 
 视觉命题：石墨色本地 Agent 控制台，以排版和细分隔线建立可信密度；青蓝只表示主导航与主动作，琥珀只表示需要用户介入。
 
@@ -45,12 +45,12 @@
 这是冻结时点的目标交互原型，不代表当前 CLI 或 Desktop 的后端能力。原型制作时尚未覆盖
 暂停/继续、Steer 队列编辑、子代理树形关系、可持久通知、跨重启 daemon 与 Session 归档；
 这些是原型当时的覆盖缺口，不是当前产品缺口清单。当前状态以
-[Desktop 架构](../../../../docs/guides/desktop-architecture.md)和生产代码为准。
+[Desktop 架构](../../../guides/desktop-architecture.md)和生产代码为准。
 
 ## 本地预览
 
 ```bash
-python3 -m http.server 4174 --directory apps/desktop/prototypes/full-flow
+python3 -m http.server 4174 --directory docs/design/prototypes/full-flow
 ```
 
 打开 `http://127.0.0.1:4174/#work/home`。原型使用原生 HTML/CSS/JavaScript，无构建依赖；正式桌面 App 仍建议采用 Electron + React + TypeScript，并复用现有 TypeScript Runtime。
