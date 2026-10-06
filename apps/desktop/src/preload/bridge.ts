@@ -34,14 +34,19 @@ export function createDesktopBridge(ipcRenderer: IpcRenderer): DesktopBridge {
   const runtimeEntries = DESKTOP_RUNTIME_METHODS.map((method) => [
     method,
     async (params: unknown) => {
+      let checkedParams: RuntimeParams<typeof method>;
       try {
-        const checkedParams = parseStrictRuntimeParams(method, params);
+        checkedParams = parseStrictRuntimeParams(method, params);
+      } catch (error) {
+        return validationFailure(error);
+      }
+      try {
         return await ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.runtimeInvoke, {
           method,
           params: checkedParams,
         } satisfies RuntimeInvocationEnvelope);
       } catch (error) {
-        return validationFailure(error);
+        return invocationFailure(error);
       }
     },
   ]);
@@ -136,7 +141,7 @@ export function createDesktopBridge(ipcRenderer: IpcRenderer): DesktopBridge {
             pendingEvents.clear();
             ipcRenderer.removeListener(DESKTOP_IPC_CHANNELS.runtimeEvent, onEvent);
             unsubscribe();
-            return validationFailure(error);
+            return invocationFailure(error);
           })
           .finally(() => {
             // dispose() may race ahead of Main finishing runtimeSubscribe. The first
@@ -463,6 +468,20 @@ function validationFailure(error: unknown): DesktopResult<never> {
       code: error instanceof RuntimeProtocolError ? error.code : RUNTIME_ERROR_CODES.INVALID_PARAMS,
       message: error instanceof Error ? error.message : "Desktop bridge 参数无效",
       retryable: false,
+      outcome: "not_executed",
+    },
+  };
+}
+
+function invocationFailure(error: unknown): DesktopResult<never> {
+  const code = (error as { code?: unknown })?.code;
+  return {
+    ok: false,
+    error: {
+      code: typeof code === "string" ? code : "DESKTOP_IPC_FAILED",
+      message: error instanceof Error ? error.message : "Desktop IPC 调用失败，执行结果未知",
+      retryable: false,
+      outcome: "unknown",
     },
   };
 }

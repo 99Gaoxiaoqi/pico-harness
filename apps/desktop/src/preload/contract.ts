@@ -77,6 +77,7 @@ export interface DesktopError {
   readonly code: string;
   readonly message: string;
   readonly retryable: boolean;
+  readonly outcome?: "not_executed" | "unknown";
 }
 
 export type DesktopResult<T> =

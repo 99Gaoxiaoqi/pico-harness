@@ -112,6 +112,7 @@ export function registerDesktopIpcHandlers(options: {
 
   ipcMain.handle(DESKTOP_IPC_CHANNELS.runtimeInvoke, async (event, value: unknown) => {
     if (!trusted(event)) return unauthorized();
+    let dispatched = false;
     try {
       const envelope = readInvocation(value);
       if (!isDesktopRuntimeInvocationAllowed(envelope.method, lifecycle.isQuitting())) {
@@ -141,11 +142,13 @@ export function registerDesktopIpcHandlers(options: {
           );
         }
       }
+      dispatched = true;
       const request =
         envelope.method === "terminal.create"
           ? options.submitTerminalCreate(() => runtime.request(envelope.method, params))
           : runtime.request(envelope.method, params);
       if (!request) {
+        dispatched = false;
         throw new RuntimeClientError(
           "RUNTIME_CLIENT_CLOSED",
           "Terminal 正在清理或 Desktop 正在退出，已拒绝创建新实例",
@@ -187,7 +190,7 @@ export function registerDesktopIpcHandlers(options: {
       }
       return success(result);
     } catch (error) {
-      return failure(error);
+      return failure(error, dispatched ? "unknown" : "not_executed");
     }
   });
 
@@ -672,18 +675,30 @@ function success<T>(value: T): DesktopResult<T> {
 function unauthorized(): DesktopResult<never> {
   return {
     ok: false,
-    error: { code: "UNAUTHORIZED_RENDERER", message: "已拒绝非受信任页面调用", retryable: false },
+    error: {
+      code: "UNAUTHORIZED_RENDERER",
+      message: "已拒绝非受信任页面调用",
+      retryable: false,
+      outcome: "not_executed",
+    },
   };
 }
 
-function failure(error: unknown): DesktopResult<never> {
-  const desktopError = toDesktopError(error);
+function failure(
+  error: unknown,
+  outcome: DesktopError["outcome"] = "unknown",
+): DesktopResult<never> {
+  const desktopError = { ...toDesktopError(error), outcome };
   return { ok: false, error: desktopError };
 }
 
 function toDesktopError(error: unknown): DesktopError {
   if (error instanceof RuntimeClientError) {
-    return { code: error.code, message: error.message, retryable: error.retryable };
+    return {
+      code: error.code,
+      message: error.message,
+      retryable: error.code === "RUNTIME_REQUEST_TIMEOUT" ? false : error.retryable,
+    };
   }
   if (error instanceof RuntimeProtocolError) {
     return { code: error.code, message: error.message, retryable: false };

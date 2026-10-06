@@ -1,3 +1,4 @@
+import { PendingSendNotice } from "../PendingSendNotice.js";
 import {
   getComposerResources,
   parseComposerDraft,
@@ -164,6 +165,14 @@ export function ConversationPage() {
       )?.title ?? "父任务")
     : undefined;
   const draftKey = conversationKey ?? `new:${workspacePath || "unbound"}`;
+  const pendingSend = runtime.pendingSends?.find(
+    (entry) => entry.scope.picoHome === data.picoHome && entry.scope.sourceKey === draftKey,
+  );
+  const researchSourceKey = `research-implement:${conversationKey ?? workspacePath}`;
+  const pendingResearchSend = runtime.pendingSends?.find(
+    (entry) =>
+      entry.scope.picoHome === data.picoHome && entry.scope.sourceKey === researchSourceKey,
+  );
   const {
     value: draft,
     update: handleDraftChange,
@@ -482,6 +491,10 @@ export function ConversationPage() {
       (!parsedDraft.text && !parsedDraft.references.some((ref) => ref.kind === "skill"))
     )
       return;
+    if (pendingSend) {
+      actions.showMessage?.("请先恢复发送结果或放弃恢复，再发送这份草稿。");
+      return;
+    }
     setReferenceError(undefined);
     sendingRef.current = true;
     setPreparingSend(true);
@@ -505,6 +518,8 @@ export function ConversationPage() {
       if (!workspacePath) temporaryPathRef.current = targetWorkspacePath;
       const result = await actions.sendMessage({
         workspacePath: targetWorkspacePath,
+        sourceKey: sourceDraftKey,
+        draftSnapshot: draft,
         ...(sessionId ? { sessionId } : {}),
         ...(!sessionId ? { initialSettings: newTaskSettings } : {}),
         text: parsedDraft.text,
@@ -578,8 +593,12 @@ export function ConversationPage() {
   };
 
   const implementResearch = async (prompt: string) => {
+    if (pendingResearchSend) throw new Error("实施任务的发送待确认，请先恢复发送结果或放弃恢复。");
+    writePersistentDraft(researchSourceKey, prompt);
     const result = await actions.sendMessage({
       workspacePath,
+      sourceKey: researchSourceKey,
+      draftSnapshot: prompt,
       text: prompt,
       initialSettings: {
         ...newTaskSettings,
@@ -590,7 +609,8 @@ export function ConversationPage() {
           : {}),
       },
     });
-    if (!result?.sessionId) throw new Error("实施任务未创建，请重试。");
+    if (!result.succeeded || !result.sessionId)
+      throw new Error("实施任务发送未确认，请查看待确认发送列表；原请求可能已经执行。");
     navigate(
       sessionHref({
         workspacePath: result.workspacePath ?? workspacePath,
@@ -1137,11 +1157,14 @@ export function ConversationPage() {
                 workspacePath={workspacePath}
                 {...(sessionId ? { sessionId } : {})}
                 refreshKey={`${activeRun?.id ?? "idle"}:${activeRun?.status ?? "idle"}:${conversation?.items.length ?? 0}`}
-                busy={Boolean(activeRun) || Boolean(busy)}
+                busy={Boolean(activeRun) || Boolean(busy) || Boolean(pendingResearchSend)}
                 onOpenArtifacts={() => openWorkbarTab("files", "right")}
                 onImplement={implementResearch}
                 onStarter={handleDraftChange}
               />
+            )}
+            {pendingResearchSend && (
+              <PendingSendNotice runtime={runtime} entry={pendingResearchSend} />
             )}
             {sessionRef && !graphParentId && !preview && (
               <ConversationGraphBoard
@@ -1198,6 +1221,7 @@ export function ConversationPage() {
                   </p>
                 )}
                 {commands.feedback}
+                {pendingSend && <PendingSendNotice runtime={runtime} entry={pendingSend} />}
                 {referenceError && (
                   <p role="alert" className="conversation-model-notice">
                     {referenceError}
@@ -1219,7 +1243,10 @@ export function ConversationPage() {
                   submitDisabled={
                     !draftReferences.references.length && isDesktopCommandInput(draft)
                       ? false
-                      : !composerReady || !composerModelRouteId || usingOpenCodeFree
+                      : Boolean(pendingSend) ||
+                        !composerReady ||
+                        !composerModelRouteId ||
+                        usingOpenCodeFree
                   }
                   placeholder={
                     sessionId
