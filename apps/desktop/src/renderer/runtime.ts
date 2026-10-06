@@ -1,3 +1,9 @@
+import {
+  PendingSendRepository,
+  SESSION_SEND_REPLAY_CAPABILITY,
+  type PendingSendEntry,
+} from "./pending-send.js";
+import { clearPersistentDraftIfUnchanged } from "./conversation/usePersistentDraft.js";
 import { controlGoalRequest } from "./conversation/goal-control.js";
 import { parseDesktopToolApproval } from "./runtime-projections/approval.js";
 import { TerminalInteractions } from "./runtime-projections/terminal-interactions.js";
@@ -154,6 +160,12 @@ function friendlyRuntimeMessage(raw: string, code?: string): string {
   if (code === "RUNTIME_UNAVAILABLE" || code === "RUNTIME_DISCONNECTED") {
     return "无法连接本地 Runtime，连接恢复后会自动重试；若持续失败可重启 Pico 桌面应用。";
   }
+  if (code === "RUNTIME_REQUEST_TIMEOUT") {
+    return "发送响应超时，原请求可能已经执行。请恢复发送结果，或查看原会话；草稿和待确认记录已保留。";
+  }
+  if (code === "SEND_RECOVERY_UNAVAILABLE") {
+    return "Host 已无法提供这次发送的回执（仅保留最近 500 个结果）。原请求可能已经执行，请查看原会话；待确认记录已保留。";
+  }
   if (code === "RUNTIME_AUTH_FAILED") {
     return "本地 Runtime 认证失败，请重启 Pico 桌面应用。";
   }
@@ -171,13 +183,16 @@ function friendlyRuntimeMessage(raw: string, code?: string): string {
 }
 
 export class RuntimeInvocationError extends Error {
+  readonly retryable: boolean;
   constructor(
     readonly code: string,
     message: string,
-    readonly retryable: boolean,
+    retryable: boolean,
+    readonly outcome: "not_executed" | "unknown" = "unknown",
   ) {
     super(`${code}: ${message}`);
     this.name = "RuntimeInvocationError";
+    this.retryable = code === "RUNTIME_REQUEST_TIMEOUT" ? false : retryable;
   }
 }
 
@@ -193,6 +208,7 @@ async function invoke<Method extends DesktopRuntimeMethod>(
       result.error.code,
       result.error.message,
       result.error.retryable,
+      result.error.outcome ?? "unknown",
     );
   }
   return result.value;
@@ -315,8 +331,18 @@ export interface RuntimeActions {
   ): Promise<boolean>;
   loadSession(ref: WorkspaceSessionRef): Promise<void>;
   loadEarlierSession(ref: WorkspaceSessionRef): Promise<void>;
+  recoverPendingSend?(
+    sourceKey: string,
+  ): Promise<{
+    readonly succeeded: boolean;
+    readonly workspacePath?: string;
+    readonly sessionId?: string;
+  }>;
+  abandonPendingSend?(sourceKey: string): void;
   sendMessage(input: {
     readonly workspacePath: string;
+    readonly sourceKey?: string;
+    readonly draftSnapshot?: string;
     readonly sessionId?: string;
     readonly text: string;
     readonly initialSettings?: RuntimeUserDefaults;
@@ -495,6 +521,9 @@ export interface RuntimeStore {
   readonly busy: string | undefined;
   readonly message: string | undefined;
   readonly actions: RuntimeActions;
+  readonly pendingSends?: readonly PendingSendEntry[];
+  readonly pendingSendBusy?: readonly string[];
+  readonly sendRecoverySupported?: boolean;
 }
 
 export function useRuntimeStore(): RuntimeStore {
@@ -505,6 +534,8 @@ export function useRuntimeStore(): RuntimeStore {
   const [data, setData] = useState<AppData>(preview ? previewData : emptyData);
   const [busy, setBusy] = useState<string>();
   const [message, setMessage] = useState<string>();
+  const [pendingSends, setPendingSends] = useState<readonly PendingSendEntry[]>([]);
+  const [pendingSendBusy, setPendingSendBusy] = useState<readonly string[]>([]);
   const dataRef = useRef(data);
   const runtimeCapabilitiesRef = useRef(
     new Set<string>(
@@ -534,13 +565,33 @@ export function useRuntimeStore(): RuntimeStore {
   const resolvedInteractions = useRef(new ResolvedInteractionCache());
   const terminalInteractions = useRef(new TerminalInteractions());
   const pendingGoalControls = useRef(new Set<string>());
-  const pendingSendRef = useRef<
-    | {
-        readonly identity: string;
-        readonly idempotencyKey: string;
-      }
-    | undefined
-  >(undefined);
+  const pendingSendRepositoryRef = useRef<PendingSendRepository | undefined>(undefined);
+  const getPendingSendRepository = useCallback(() => {
+    pendingSendRepositoryRef.current ??= new PendingSendRepository(window.localStorage);
+    return pendingSendRepositoryRef.current;
+  }, []);
+  const syncPendingSends = useCallback(() => {
+    try {
+      const repository = getPendingSendRepository();
+      const entries = dataRef.current.picoHome ? repository.list(dataRef.current.picoHome) : [];
+      setPendingSends(entries);
+      setPendingSendBusy(
+        entries
+          .filter((entry) => repository.isSending(entry.scope))
+          .map((entry) => entry.scope.sourceKey),
+      );
+    } catch {
+      setMessage("无法读取待确认发送记录。请恢复本地存储后重试；草稿已保留。");
+    }
+  }, [getPendingSendRepository]);
+  useEffect(() => {
+    if (!preview && data.picoHome) syncPendingSends();
+    const changed = (event: StorageEvent) => {
+      if (event.key === null || event.key.startsWith("pico.pending-send:")) syncPendingSends();
+    };
+    window.addEventListener("storage", changed);
+    return () => window.removeEventListener("storage", changed);
+  }, [data.picoHome, preview, syncPendingSends]);
   dataRef.current = data;
 
   useEffect(
@@ -2014,21 +2065,12 @@ export function useRuntimeStore(): RuntimeStore {
         const swarmCommand =
           !input.activation && !input.skills?.length ? parseSwarmCommand(input.text) : undefined;
         let resolvedSessionId = input.sessionId;
-        const sendIdentity = JSON.stringify({
-          workspacePath,
-          sessionId: input.sessionId,
-          text: input.text.trim(),
-          initialSettings: input.initialSettings,
-          behavior: input.behavior ?? "auto",
-          expectedRunId: input.expectedRunId,
-          activation: input.activation,
-          skills: input.skills,
-        });
-        const idempotencyKey =
-          pendingSendRef.current?.identity === sendIdentity
-            ? pendingSendRef.current.idempotencyKey
-            : crypto.randomUUID();
-        pendingSendRef.current = { identity: sendIdentity, idempotencyKey };
+        const sourceKey =
+          input.sourceKey ??
+          (input.sessionId
+            ? workspaceSessionKey({ workspacePath, sessionId: input.sessionId })
+            : `new:${workspacePath}`);
+        let confirmedSend = false;
         const succeeded = await perform("send-message", async (bridge) => {
           if (
             input.skills?.length &&
@@ -2044,6 +2086,7 @@ export function useRuntimeStore(): RuntimeStore {
           if (input.skills?.length && input.behavior === "steer")
             throw new Error("技能需要新回合，请选择排队或停止并替换。");
           if (preview) {
+            confirmedSend = true;
             resolvedSessionId ??= "session-atlas";
             const sessionId = resolvedSessionId;
             if (!sessionId) return;
@@ -2076,38 +2119,49 @@ export function useRuntimeStore(): RuntimeStore {
             });
             return;
           }
-          const value = await invoke(bridge, "session.send", {
-            workspacePath,
-            ...(input.sessionId ? { sessionId: input.sessionId } : {}),
-            input:
-              input.activation?.kind === "skill"
-                ? { kind: "skill", name: input.activation.name, args: input.text.trim() }
-                : input.activation?.kind === "agent"
-                  ? {
-                      kind: "agent",
-                      name: input.activation.name,
-                      task: input.text.trim(),
-                      ...(input.activation.subagentId
-                        ? { subagentId: input.activation.subagentId }
-                        : {}),
-                    }
-                  : swarmCommand?.kind === "run_once"
+          const picoHome = dataRef.current.picoHome;
+          if (!picoHome) throw new Error("尚未确认 Pico 存储位置，请等待连接恢复后发送。");
+          const pending = await getPendingSendRepository().send(
+            { picoHome, sourceKey },
+            {
+              workspacePath,
+              ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+              input:
+                input.activation?.kind === "skill"
+                  ? { kind: "skill", name: input.activation.name, args: input.text.trim() }
+                  : input.activation?.kind === "agent"
                     ? {
-                        kind: "text",
-                        text: swarmCommand.task,
-                        orchestrationMode: "swarm",
+                        kind: "agent",
+                        name: input.activation.name,
+                        task: input.text.trim(),
+                        ...(input.activation.subagentId
+                          ? { subagentId: input.activation.subagentId }
+                          : {}),
                       }
-                    : {
-                        kind: "text",
-                        text: input.text.trim(),
-                        ...(input.skills?.length ? { skills: input.skills } : {}),
-                      },
-            ...(input.initialSettings ? { initialSettings: input.initialSettings } : {}),
-            behavior: input.behavior ?? "auto",
-            ...(input.expectedRunId ? { expectedRunId: input.expectedRunId } : {}),
-            idempotencyKey,
-          });
-          const session = value.session;
+                    : swarmCommand?.kind === "run_once"
+                      ? {
+                          kind: "text",
+                          text: swarmCommand.task,
+                          orchestrationMode: "swarm",
+                        }
+                      : {
+                          kind: "text",
+                          text: input.text.trim(),
+                          ...(input.skills?.length ? { skills: input.skills } : {}),
+                        },
+              ...(input.initialSettings ? { initialSettings: input.initialSettings } : {}),
+              behavior: input.behavior ?? "auto",
+              ...(input.expectedRunId ? { expectedRunId: input.expectedRunId } : {}),
+              idempotencyKey: crypto.randomUUID(),
+            },
+            input.draftSnapshot ?? input.text,
+            (params) => invoke(bridge, "session.send", params),
+            syncPendingSends,
+          );
+          if (!pending.confirmed) return;
+          confirmedSend = true;
+          clearPersistentDraftIfUnchanged(sourceKey, pending.record.draftSnapshot);
+          const session = pending.value.session;
           resolvedSessionId = stringValue(session.sessionId, input.sessionId);
           // Admission succeeded. Inspection may wait behind the active run; it must
           // neither delay clearing the sent draft nor turn a refresh error into a
@@ -2117,16 +2171,52 @@ export function useRuntimeStore(): RuntimeStore {
             if (resolvedSessionId) {
               await loadConversation(bridge, workspacePath, resolvedSessionId);
             }
-          })().catch(reportFailure);
+          })().catch((cause) =>
+            setMessage(`发送已确认，但原会话暂时不可用：${errorMessage(cause)}`),
+          );
         });
-        if (succeeded && pendingSendRef.current?.identity === sendIdentity) {
-          pendingSendRef.current = undefined;
-        }
         return {
-          succeeded,
-          ...(succeeded ? { workspacePath } : {}),
+          succeeded: succeeded && confirmedSend,
+          ...(succeeded && confirmedSend ? { workspacePath } : {}),
           ...(resolvedSessionId ? { sessionId: resolvedSessionId } : {}),
         };
+      },
+      async recoverPendingSend(sourceKey) {
+        let recovered: { workspacePath: string; sessionId: string } | undefined;
+        const succeeded = await perform("recover-send", async (bridge) => {
+          const picoHome = dataRef.current.picoHome;
+          if (!picoHome) throw new Error("尚未确认 Pico 存储位置，请等待连接恢复。");
+          const pending = await getPendingSendRepository().recover(
+            { picoHome, sourceKey },
+            runtimeCapabilitiesRef.current.has(SESSION_SEND_REPLAY_CAPABILITY),
+            (params) => invoke(bridge, "session.send", params),
+            syncPendingSends,
+          );
+          if (!pending.confirmed) return;
+          clearPersistentDraftIfUnchanged(sourceKey, pending.record.draftSnapshot);
+          const sessionId = pending.value.session.sessionId;
+          const workspacePath = pending.record.params.workspacePath;
+          recovered = { workspacePath, sessionId };
+          setMessage("发送结果已确认。");
+          void (async () => {
+            await loadWorkspace(bridge, workspacePath);
+            await loadConversation(bridge, workspacePath, sessionId);
+          })().catch((cause) => {
+            setMessage(`发送已确认，但原会话暂时不可用：${errorMessage(cause)}`);
+          });
+        });
+        return { succeeded: succeeded && Boolean(recovered), ...recovered };
+      },
+      abandonPendingSend(sourceKey) {
+        const picoHome = dataRef.current.picoHome;
+        if (!picoHome) return;
+        try {
+          getPendingSendRepository().abandon({ picoHome, sourceKey });
+          syncPendingSends();
+          setMessage("已放弃恢复，文字草稿已保留。原请求可能已经执行，Host 上的执行不会被取消。");
+        } catch (cause) {
+          reportFailure(cause);
+        }
       },
       async renameSession(ref, title) {
         const { workspacePath, sessionId } = ref;
@@ -3511,10 +3601,22 @@ export function useRuntimeStore(): RuntimeStore {
       loadWorkspaceIndex,
       perform,
       preview,
+      getPendingSendRepository,
+      syncPendingSends,
     ],
   );
 
-  return { preview, connection, data, busy, message, actions };
+  return {
+    preview,
+    connection,
+    data,
+    busy,
+    message,
+    actions,
+    pendingSends,
+    pendingSendBusy,
+    sendRecoverySupported: runtimeCapabilitiesRef.current.has(SESSION_SEND_REPLAY_CAPABILITY),
+  };
 }
 
 function createPreviewBridge(): DesktopBridge {

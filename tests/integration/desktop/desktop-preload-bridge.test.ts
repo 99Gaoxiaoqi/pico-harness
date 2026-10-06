@@ -120,3 +120,34 @@ test("Desktop preload forwards durable resource changes to active workbar subscr
   assert.deepEqual(received, [frame]);
   assert.equal(ipc.listenerCount(DESKTOP_IPC_CHANNELS.sessionFrame), 0);
 });
+
+test("Desktop preload separates pre-dispatch validation from unknown IPC failures", async () => {
+  const ipc = new EventEmitter() as EventEmitter & {
+    invoke: (channel: string, ...args: unknown[]) => Promise<unknown>;
+    send: (channel: string, ...args: unknown[]) => void;
+  };
+  let calls = 0;
+  ipc.invoke = async () => {
+    calls++;
+    throw Object.assign(new Error("timed out"), { code: "RUNTIME_REQUEST_TIMEOUT" });
+  };
+  ipc.send = () => undefined;
+  const bridge = createDesktopBridge(ipc as unknown as IpcRenderer);
+  const invalid = await bridge.runtime["session.send"]({
+    workspacePath: "relative",
+    input: { kind: "text", text: "x" },
+  });
+  assert.equal(invalid.ok, false);
+  assert.equal(!invalid.ok && invalid.error.outcome, "not_executed");
+  assert.equal(calls, 0);
+  const unknown = await bridge.runtime["session.send"]({
+    workspacePath: "/project",
+    input: { kind: "text", text: "x" },
+    idempotencyKey: "key",
+  });
+  assert.equal(unknown.ok, false);
+  assert.equal(!unknown.ok && unknown.error.code, "RUNTIME_REQUEST_TIMEOUT");
+  assert.equal(!unknown.ok && unknown.error.outcome, "unknown");
+  assert.equal(!unknown.ok && unknown.error.retryable, false);
+  assert.equal(calls, 1);
+});

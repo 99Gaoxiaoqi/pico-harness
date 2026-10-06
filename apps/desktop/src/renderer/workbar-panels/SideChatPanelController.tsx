@@ -1,3 +1,4 @@
+import { PendingSendNotice } from "../PendingSendNotice.js";
 import {
   getComposerResources,
   parseComposerDraft,
@@ -56,12 +57,11 @@ export function SideChatPanelController({
     [panelId, sourceSessionId, workspacePath],
   );
 
-  const {
-    value: draft,
-    update: setDraft,
-    clear,
-    clearIfUnchanged,
-  } = usePersistentDraft(`side:${cleanupKey}`);
+  const sourceKey = `side:${cleanupKey}`;
+  const pendingSend = runtime.pendingSends?.find(
+    (entry) => entry.scope.picoHome === data.picoHome && entry.scope.sourceKey === sourceKey,
+  );
+  const { value: draft, update: setDraft, clear, clearIfUnchanged } = usePersistentDraft(sourceKey);
 
   const create = useCallback(async () => {
     const generation = ++createGenerationRef.current;
@@ -285,7 +285,13 @@ export function SideChatPanelController({
       resources={composerResources}
       resourceRequest={resourceRequest}
       stopFocusRequest={stopFocusRequest}
-      commandFeedback={commands.feedback}
+      commandFeedback={
+        <>
+          {commands.feedback}
+          {pendingSend && <PendingSendNotice runtime={runtime} entry={pendingSend} />}
+        </>
+      }
+      sendPending={Boolean(pendingSend)}
       commandPending={commands.pending}
       activeRun={activeRun}
       goalStatus={goalControls.statusBar}
@@ -337,9 +343,12 @@ export function SideChatPanelController({
             return;
           }
           if (!parsed.references.length && (await commands.execute(message))) return;
+          if (pendingSend) return;
           await actions
             .sendMessage({
               workspacePath,
+              sourceKey,
+              draftSnapshot: draft,
               sessionId: targetSessionId,
               text: parsed.text,
               ...(parsed.references[0]?.kind === "agent"

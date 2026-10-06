@@ -1,9 +1,10 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 const DRAFT_PREFIX = "pico.composer-draft:";
 export const MAX_PERSISTED_DRAFT_CHARS = 100_000;
 // Retain drafts across composer remounts and session switches when storage is blocked.
 const memoryDrafts = new Map<string, string>();
+const draftListeners = new Map<string, Set<(value: string) => void>>();
 
 function storageKey(key: string): string {
   return `${DRAFT_PREFIX}${key}`;
@@ -27,6 +28,10 @@ export function readPersistentDraft(key: string): string {
   }
 }
 
+export function clearPersistentDraftIfUnchanged(key: string, expectedValue: string): void {
+  if (readPersistentDraft(key) === expectedValue) removePersistentDraft(key);
+}
+
 export function removePersistentDraft(key: string): void {
   memoryDrafts.set(key, "");
   try {
@@ -34,6 +39,7 @@ export function removePersistentDraft(key: string): void {
   } catch {
     // A draft remains usable in memory when storage is unavailable.
   }
+  for (const listener of draftListeners.get(key) ?? []) listener("");
 }
 
 export function writePersistentDraft(key: string, value: string): void {
@@ -57,6 +63,20 @@ export function usePersistentDraft(key: string) {
   if (draft.key !== key) setDraft(current);
   const currentRef = useRef(current);
   currentRef.current = current;
+  useEffect(() => {
+    const changed = (value: string) => {
+      const next = { key, value };
+      currentRef.current = next;
+      setDraft(next);
+    };
+    const listeners = draftListeners.get(key) ?? new Set<(value: string) => void>();
+    listeners.add(changed);
+    draftListeners.set(key, listeners);
+    return () => {
+      listeners.delete(changed);
+      if (!listeners.size) draftListeners.delete(key);
+    };
+  }, [key]);
 
   const update = useCallback(
     (next: string) => {

@@ -1,0 +1,32 @@
+@layer components {
+  .pending-send-list {
+    flex: 0 0 auto;
+    max-height: 180px;
+    overflow: auto;
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--line, #dedcd5);
+  }
+  .pending-send-list summary {
+    cursor: pointer;
+  }
+  .pending-send-notice {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 0;
+    font-size: 13px;
+  }
+  .pending-send-notice button {
+    padding: 4px 8px;
+    border: 1px solid var(--line, #dedcd5);
+    border-radius: 6px;
+    background: var(--surface-raised, #fff);
+    color: var(--ink, #252522);
+    cursor: pointer;
+  }
+  .pending-send-notice button:disabled {
+    cursor: default;
+    opacity: 0.55;
+  }
+}

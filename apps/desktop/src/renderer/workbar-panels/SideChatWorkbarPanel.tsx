@@ -49,6 +49,7 @@ export interface SideChatWorkbarPanelProps {
   readonly resourceRequest?: { kind: "skill" | "agent"; id: number } | undefined;
   readonly commandFeedback?: ReactNode;
   readonly commandPending?: boolean;
+  readonly sendPending?: boolean;
   readonly activeRun?: ConversationTranscriptProps["activeRun"];
   readonly child: SideChatChildSession;
   readonly items: readonly ConversationItemView[];
@@ -93,6 +94,7 @@ export function SideChatWorkbarPanel({
   resourceRequest,
   commandFeedback,
   commandPending = false,
+  sendPending = false,
   child,
   activeRun,
   items,
@@ -138,7 +140,7 @@ export function SideChatWorkbarPanel({
   const canSend =
     child.state === "live" &&
     !commandPending &&
-    (commandInput || sideChatCanSend(child.state, running, draft));
+    (commandInput || (!sendPending && sideChatCanSend(child.state, running, draft)));
   const send = () => {
     const message = draft.trim();
     if (!canSend) return;

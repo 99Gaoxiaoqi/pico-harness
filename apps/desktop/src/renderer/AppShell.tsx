@@ -1,3 +1,4 @@
+import { PendingSendList } from "./PendingSendNotice.js";
 import { AppShell as AstryxAppShell } from "@astryxdesign/core/AppShell";
 import { Button as AstryxButton } from "@astryxdesign/core/Button";
 import { DropdownMenu, DropdownMenuItem } from "@astryxdesign/core/DropdownMenu";
@@ -54,7 +55,8 @@ import {
 const primaryNav = [{ ...appPrimaryNavigation[0], icon: Clock3 }] as const;
 
 export function AppShell() {
-  const { data, preview, message, actions, busy } = useRuntime();
+  const runtime = useRuntime();
+  const { data, preview, message, actions, busy } = runtime;
   const location = useLocation();
   const navigate = useNavigate();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(
@@ -326,6 +328,7 @@ export function AppShell() {
             </div>
           </header>
         )}
+        <PendingSendList runtime={runtime} />
         {message &&
           !message.startsWith("Legacy session-centric (JSONL) workspace storage exists:") && (
             <div className="toast" role="status">
