@@ -7,6 +7,13 @@ import {
   writePrivateFileAtomic,
 } from "@pico/storage/secure-file";
 import { waitForDelay } from "@pico/runtime/deadline";
+import {
+  publicProviderEndpoint,
+  runtimeMcpServerPublicPatchParam,
+  runtimeSecretEditsParam,
+  type RuntimeMcpServerPublicPatch,
+  type RuntimeSecretEdits,
+} from "@pico/protocol";
 import { resolvePicoHome } from "./pico-paths.js";
 import { parseMcpConfig, type McpConfig, type McpServerConfig } from "./mcp-config.js";
 
@@ -63,6 +70,13 @@ export class UserMcpIdempotencyConflictError extends Error {
   }
 }
 
+export class UserMcpPublicPatchError extends Error {
+  constructor() {
+    super("用户 MCP 补丁无效，请检查 transport、必填字段和秘密编辑");
+    this.name = "UserMcpPublicPatchError";
+  }
+}
+
 interface StoredOperation {
   readonly keyHash: string;
   readonly requestHash: string;
@@ -112,6 +126,33 @@ export class UserMcpConfigStore {
       ...config,
       mcpServers: { ...config.mcpServers, [server.name]: normalized },
     }));
+  }
+
+  async upsertPublicPatch(
+    server: RuntimeMcpServerPublicPatch,
+    secretEdits: RuntimeSecretEdits | undefined,
+    options: UserMcpMutationOptions,
+  ): Promise<UserMcpMutationResult> {
+    // Fingerprint the submitted patch, before resolving any current secrets or applying CAS.
+    return this.mutate(
+      { kind: "public-patch", server, ...(secretEdits ? { secretEdits } : {}) },
+      options,
+      (config) => {
+        try {
+          runtimeMcpServerPublicPatchParam(server, "server");
+          if (secretEdits) runtimeSecretEditsParam(secretEdits, "secretEdits");
+          const merged = applyPublicPatch(server, secretEdits, config.mcpServers[server.name]);
+          const normalized = parseMcpConfig(
+            { mcpServers: { [server.name]: merged } },
+            "用户 MCP 补丁",
+          ).mcpServers[server.name]!;
+          return { ...config, mcpServers: { ...config.mcpServers, [server.name]: normalized } };
+        } catch {
+          // Validation errors must never copy submitted secret values into public responses.
+          throw new UserMcpPublicPatchError();
+        }
+      },
+    );
   }
 
   async delete(
@@ -327,4 +368,43 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isErrno(error: unknown, code: string): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === code;
+}
+
+function applyPublicPatch(
+  server: RuntimeMcpServerPublicPatch,
+  edits: RuntimeSecretEdits | undefined,
+  previous: McpServerConfig | undefined,
+): McpServerConfig {
+  const sameTransport = previous?.transport === server.transport;
+  const merged = { ...(sameTransport ? previous : {}), ...server } as McpServerConfig;
+  if (sameTransport && previous?.url && merged.url === publicProviderEndpoint(previous.url))
+    merged.url = previous.url;
+  if (server.transport === "stdio" ? edits?.headers || edits?.url : edits?.env) {
+    throw new Error("MCP 秘密编辑字段不适用于当前 transport");
+  }
+  for (const field of ["env", "headers"] as const) {
+    if (!edits?.[field]) continue;
+    const target = { ...merged[field] };
+    for (const [key, edit] of Object.entries(edits[field])) {
+      if (edit.action === "keep" && !Object.hasOwn(target, key))
+        throw new Error("MCP keep 指定的秘密字段不存在");
+      if (edit.action === "set") target[key] = edit.value;
+      else if (edit.action === "remove") delete target[key];
+    }
+    merged[field] = target;
+  }
+  if (edits?.url?.action === "keep" && !merged.url) throw new Error("MCP keep 指定的 URL 不存在");
+  if (edits?.url?.action === "set") merged.url = edits.url.value;
+  else if (edits?.url?.action === "remove") delete merged.url;
+  if (merged.transport !== "stdio" && merged.url) {
+    let protocol: string;
+    try {
+      protocol = new URL(merged.url).protocol;
+    } catch {
+      throw new Error("MCP URL 必须是有效的 HTTP 地址");
+    }
+    if (protocol !== "http:" && protocol !== "https:")
+      throw new Error("MCP URL 仅支持 HTTP 或 HTTPS");
+  }
+  return merged;
 }

@@ -876,8 +876,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         controlGoal: this.controlGoal.bind(this),
         sendSession: this.sendSession.bind(this),
         cancelRun: this.cancelRun.bind(this),
-        withProviderDependencyLock: (operation) =>
-          this.providerConfig.withProviderDependencyLock(operation),
+        withProviderDependencyLock: (operation, kind) =>
+          this.providerConfig.withProviderDependencyLock(operation, kind),
         runStart: (request) => this.options.runtimeService.handle(request),
       }),
       ...createDesktopWorkbarRequestHandlers({
@@ -1034,6 +1034,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         failures.push(error);
       }
     };
+    // All accepted handles can still enter Provider admission; seal it after they drain.
+    await Promise.allSettled([...this.inFlightHandles]);
     await this.providerConfig.close();
     await this.goalRecoveryPromise;
     await attempt(() => this.goalCoordinator.close());
@@ -2556,6 +2558,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     readonly behavior?: "auto" | "steer" | "queue" | "replace";
     readonly expectedRunId?: string;
     readonly idempotencyKey: string;
+    readonly replayOnly?: true;
   }): Promise<JsonValue> {
     const canonical = await this.options.runtimeService.canonicalizeWorkspacePath(
       params.workspacePath,
@@ -2584,6 +2587,12 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         );
       }
       return pending.promise;
+    }
+    if (params.replayOnly) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.SEND_RECOVERY_UNAVAILABLE,
+        "发送结果已不可恢复，请刷新会话状态后决定是否重新发送",
+      );
     }
     const operation = this.withWorkspaceAdmission(canonical, () =>
       this.sendSessionOnce({ ...params, workspacePath: canonical, input }),

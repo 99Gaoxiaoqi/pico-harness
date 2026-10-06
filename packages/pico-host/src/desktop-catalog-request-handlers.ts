@@ -17,6 +17,7 @@ import {
   RuntimeProtocolError,
   type JsonValue,
   type RuntimeMcpServerInput,
+  type RuntimeRequest,
   type RuntimeScopedMcpServer,
 } from "@pico/protocol";
 import type { PluginRuntimeSnapshotRegistry } from "./plugins/plugin-runtime-snapshot-registry.js";
@@ -30,6 +31,7 @@ import {
 import {
   UserMcpConfigStore,
   UserMcpIdempotencyConflictError,
+  UserMcpPublicPatchError,
   UserMcpRevisionConflictError,
 } from "./user-mcp-config-store.js";
 
@@ -160,21 +162,31 @@ export function createDesktopCatalogRequestHandlers(
     });
   };
 
-  const upsertUserMcpServer = async (params: {
-    readonly server: RuntimeMcpServerInput;
-    readonly expectedRevision: string;
-    readonly idempotencyKey: string;
-  }): Promise<JsonValue> => {
+  const upsertUserMcpServer = async (
+    params: RuntimeRequest<"mcp.user.upsert">["params"],
+  ): Promise<JsonValue> => {
     const current = await context.userMcpConfigStore.read();
     const publicCurrent = context.projectCapabilityRevision("mcp", "user", current.revision);
     const expectedRevision =
       params.expectedRevision === publicCurrent ? current.revision : params.expectedRevision;
     try {
-      const config = toCoreMcpServer(params.server);
-      const result = await context.userMcpConfigStore.upsert(config, {
-        expectedRevision,
-        idempotencyKey: params.idempotencyKey,
-      });
+      const options = { expectedRevision, idempotencyKey: params.idempotencyKey };
+      const fullConfig =
+        params.inputMode === "public-patch"
+          ? undefined
+          : toCoreMcpServer(params.server as RuntimeMcpServerInput);
+      const result = fullConfig
+        ? await context.userMcpConfigStore.upsert(fullConfig, options)
+        : await context.userMcpConfigStore.upsertPublicPatch(
+            params.server,
+            params.secretEdits,
+            options,
+          );
+      const config = fullConfig ??
+        result.snapshot.config.mcpServers[params.server.name] ?? {
+          name: params.server.name,
+          transport: params.server.transport,
+        };
       const definition: EffectiveMcpServerDefinition = {
         name: config.name,
         config,
@@ -428,6 +440,9 @@ function toCoreMcpServer(server: RuntimeMcpServerInput): McpServerConfig {
 }
 
 function publicMcpMutationError(error: unknown): Error {
+  if (error instanceof UserMcpPublicPatchError) {
+    return new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, error.message);
+  }
   if (error instanceof UserMcpRevisionConflictError) {
     return new RuntimeProtocolError(
       RUNTIME_ERROR_CODES.CONFLICT,

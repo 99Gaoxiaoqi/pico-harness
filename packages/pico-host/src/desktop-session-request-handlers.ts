@@ -63,7 +63,10 @@ export interface DesktopSessionRequestContext {
     runId: string,
     reason?: string,
   ) => Awaitable<JsonValue>;
-  readonly withProviderDependencyLock: (operation: () => Promise<JsonValue>) => Promise<JsonValue>;
+  readonly withProviderDependencyLock: (
+    operation: () => Promise<JsonValue>,
+    kind?: "session.send" | "run.start",
+  ) => Promise<JsonValue>;
   readonly runStart: (request: RuntimeRequest<"run.start">) => Promise<JsonValue>;
 }
 
@@ -153,9 +156,15 @@ export function createDesktopSessionRequestHandlers(
       context.getGoal(request.params.workspacePath, request.params.sessionId),
     "goal.control": (request) => context.controlGoal(request.params),
     "session.send": (request) =>
-      context.withProviderDependencyLock(() => context.sendSession(request.params)),
+      request.params.replayOnly
+        ? context.sendSession(request.params)
+        : context.withProviderDependencyLock(
+            () => context.sendSession(request.params),
+            "session.send",
+          ),
     "run.cancel": (request) =>
       context.cancelRun(request.params.workspacePath, request.params.runId, request.params.reason),
-    "run.start": (request) => context.withProviderDependencyLock(() => context.runStart(request)),
+    "run.start": (request) =>
+      context.withProviderDependencyLock(() => context.runStart(request), "run.start"),
   };
 }

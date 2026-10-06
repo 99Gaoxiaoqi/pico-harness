@@ -68,6 +68,7 @@ const BRIDGE_ERRORS = [
   "operation_conflict",
   "capability_unavailable",
   "reset_required",
+  "send_recovery_unavailable",
   "internal_failure",
 ] as const;
 
@@ -87,6 +88,7 @@ export type BridgeErrorCode =
   | "operation_conflict"
   | "capability_unavailable"
   | "reset_required"
+  | "send_recovery_unavailable"
   | "internal_failure";
 
 /**
@@ -105,6 +107,8 @@ export function mapRuntimeErrorCode(code: RuntimeErrorCode): BridgeErrorCode {
       return "not_found";
     case RUNTIME_ERROR_CODES.CONFLICT:
       return "operation_conflict";
+    case RUNTIME_ERROR_CODES.SEND_RECOVERY_UNAVAILABLE:
+      return "send_recovery_unavailable";
     case RUNTIME_ERROR_CODES.FORBIDDEN:
       return "capability_unavailable";
     case RUNTIME_ERROR_CODES.RESET_REQUIRED:

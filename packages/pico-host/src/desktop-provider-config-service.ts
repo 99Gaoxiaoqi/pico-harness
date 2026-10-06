@@ -53,6 +53,7 @@ import {
   toJsonValue,
 } from "./desktop-protocol-values.js";
 import {
+  publicProviderEndpoint,
   RUNTIME_ERROR_CODES,
   RuntimeProtocolError,
   type JsonObject,
@@ -101,6 +102,7 @@ export class DesktopProviderConfigService {
   private userConfigWatchTimer?: ScheduledDeadline;
   private observedUserConfig?: UserConfigSnapshot;
   private userConfigWatchClosed = false;
+  private closePromise?: Promise<void>;
 
   constructor(private readonly options: DesktopProviderConfigServiceOptions) {
     this.env = options.env;
@@ -120,10 +122,17 @@ export class DesktopProviderConfigService {
     this.ready = this.startUserConfigWatch();
   }
 
-  async close(): Promise<void> {
+  close(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
     this.userConfigWatchClosed = true;
+    this.closePromise = this.closeOnce();
+    return this.closePromise;
+  }
+
+  private async closeOnce(): Promise<void> {
     this.userConfigWatchTimer?.cancel();
     unwatchFile(this.userConfigStore.filePath, this.userConfigWatchListener);
+    await this.providerRecoveryReady;
     await this.ready.catch(() => undefined);
     await this.userConfigWatchTail.catch(() => undefined);
     await this.providerDependencyTail.catch(() => undefined);
@@ -324,14 +333,28 @@ export class DesktopProviderConfigService {
   async upsertUserProvider(params: unknown): Promise<JsonValue> {
     const record = assertExactObjectKeys(
       params,
-      ["provider", "expectedRevision"],
+      ["provider", "expectedRevision", "inputMode"],
       "provider.upsert params",
     );
     const expectedRevision = requireSha256(record["expectedRevision"], "expectedRevision");
-    const { id, config } = normalizeRuntimeProvider(record["provider"]);
+    if (record["inputMode"] !== undefined && record["inputMode"] !== "public-patch") {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.INVALID_PARAMS,
+        "provider.inputMode 必须是 public-patch",
+      );
+    }
     const current = await this.userConfigStore.read();
     this.assertUserConfigRevision(expectedRevision, current.revision);
-    const previousProvider = current.config.providers[id];
+    const submitted = requireJsonRecord(record["provider"], "provider");
+    const previousProvider =
+      typeof submitted["id"] === "string" ? current.config.providers[submitted["id"]] : undefined;
+    const restored =
+      record["inputMode"] === "public-patch" &&
+      previousProvider &&
+      submitted["baseURL"] === publicProviderEndpoint(previousProvider.baseURL)
+        ? { ...submitted, baseURL: previousProvider.baseURL }
+        : submitted;
+    const { id, config } = normalizeRuntimeProvider(restored);
     const workspacePaths = await this.options.listWorkspacePaths();
     this.assertProviderCompatibleWithAutomationReferences(
       id,
@@ -1068,7 +1091,16 @@ export class DesktopProviderConfigService {
 
   async withProviderDependencyLock<Result extends JsonValue>(
     operation: () => Promise<Result>,
+    kind: ProviderAdmissionKind = "mutation",
   ): Promise<Result> {
+    if (this.userConfigWatchClosed) {
+      return Promise.reject(
+        new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.CONFLICT,
+          "Provider 配置服务正在关闭，已拒绝新的依赖变更",
+        ),
+      );
+    }
     const guarded = async () => {
       await this.providerRecoveryReady;
       if (this.providerRecoveryError) {
@@ -1658,3 +1690,6 @@ async function configContentVersion(workspacePath: string): Promise<number> {
     throw error;
   }
 }
+
+export type ProviderAdmissionKind = "mutation" | "session.send" | "run.start";
+
