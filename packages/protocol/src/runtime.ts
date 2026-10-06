@@ -1,5 +1,7 @@
 // Public runtime barrel: domain contracts and validators are owned by runtime/*.ts.
 export * from "./runtime/subagents.js";
+export * from "./runtime/config-patch.js";
+export { publicProviderEndpoint } from "./runtime/config.js";
 import { automationParamValidators, automationResultValidators } from "./runtime/automation.js";
 import { isJsonValue } from "./runtime/base.js";
 import {
@@ -86,6 +88,8 @@ export {
   MODEL_CATALOG_RUNTIME_CAPABILITY,
   REVIEW_IDEMPOTENCY_RUNTIME_CAPABILITY,
   MEMORY_PAGINATION_RUNTIME_CAPABILITY,
+  SESSION_SEND_REPLAY_RUNTIME_CAPABILITY,
+  CONFIG_SECRET_PATCH_RUNTIME_CAPABILITY,
   MAX_RUNTIME_FRAME_BYTES,
   MAX_TOOL_RESULT_ENVELOPE_TEXT_BYTES,
   EPHEMERAL_RUNTIME_NOTIFICATION_TOPICS,

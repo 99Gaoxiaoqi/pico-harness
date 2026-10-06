@@ -4,6 +4,10 @@ import { parseRelayEndpoint, type RemoteRelayEndpoint } from "./relay.js";
 export type { RemoteRelayEndpoint } from "./relay.js";
 import {
   isJsonObject,
+  runtimeSecretEditsParam,
+  type RuntimeMcpServerPublicPatch,
+  type RuntimeSecretEdit,
+  type RuntimeSecretEdits,
   parseStrictRuntimeParams,
   type RuntimeMethod,
   type RuntimeParams,
@@ -159,29 +163,11 @@ export const REMOTE_METHODS = [
   ...ADMIN_METHODS,
 ] as const;
 export type RemoteMethod = (typeof REMOTE_METHODS)[number];
-/** Omitted sensitive fields retain the existing server definition; gateway merges before Host validation. */
-export type RemoteMcpServerInput = {
-  readonly name: string;
-  readonly startupTimeoutMs?: number;
-  readonly toolTimeoutMs?: number;
-  readonly enabled?: boolean;
-  readonly desktopExecution?: boolean;
-} & (
-  | {
-      readonly transport: "stdio";
-      readonly command?: string;
-      readonly args?: readonly string[];
-      readonly env?: Readonly<Record<string, string>>;
-    }
-  | {
-      readonly transport: "http" | "sse";
-      readonly url?: string;
-      readonly headers?: Readonly<Record<string, string>>;
-    }
-);
+/** Omitted secret fields are resolved atomically by the Host. */
+export type RemoteMcpServerInput = RuntimeMcpServerPublicPatch;
 export type RemoteParams<M extends RemoteMethod> = M extends "mcp.user.upsert"
-  ? Omit<RuntimeParams<M>, "workspacePath" | "server"> & { server: RemoteMcpServerInput }
-  : Omit<RuntimeParams<M>, "workspacePath">;
+  ? { readonly server: RemoteMcpServerInput; readonly expectedRevision: string; readonly idempotencyKey: string }
+  : Omit<RuntimeParams<M>, "workspacePath" | "inputMode" | "secretEdits" | "replayOnly">;
 export type RemoteResult<M extends RemoteMethod> = RuntimeResult<M>;
 export interface RemoteMethodSpec {
   permission: RemotePermission;
@@ -267,12 +253,8 @@ export function isRemoteMethod(value: unknown): value is RemoteMethod {
 export function getRemoteMethodSpec(method: RemoteMethod): RemoteMethodSpec {
   return REMOTE_METHOD_SPECS[method];
 }
-export type RemoteSecretEdit = { action: "keep" | "remove" } | { action: "set"; value: string };
-export interface RemoteSecretEdits {
-  env?: Readonly<Record<string, RemoteSecretEdit>>;
-  headers?: Readonly<Record<string, RemoteSecretEdit>>;
-  url?: RemoteSecretEdit;
-}
+export type RemoteSecretEdit = RuntimeSecretEdit;
+export type RemoteSecretEdits = RuntimeSecretEdits;
 export type RemoteRequest<M extends RemoteMethod = RemoteMethod> = {
   version: 1;
   requestId: string;
@@ -312,7 +294,10 @@ export function parseRemoteRequest(value: unknown): RemoteRequest {
     "workspacePath" in value.params ||
     "PICO_HOME" in value.params ||
     "terminalOwnerId" in value.params ||
-    "ownerId" in value.params
+    "ownerId" in value.params ||
+    "inputMode" in value.params ||
+    "secretEdits" in value.params ||
+    "replayOnly" in value.params
   )
     throw new RemoteProtocolError("FORBIDDEN", "手机不能指定本机路径或调用主体");
   if (
@@ -333,22 +318,8 @@ export function parseRemoteRequest(value: unknown): RemoteRequest {
       Object.keys(value.secretEdits).some((k) => !["env", "headers", "url"].includes(k))
     )
       throw new RemoteProtocolError("INVALID_REQUEST", "秘密编辑只适用于 MCP 配置");
-    for (const [key, edits] of Object.entries(value.secretEdits)) {
-      const records =
-        key === "url" ? [edits] : isJsonObject(edits) ? Object.values(edits) : undefined;
-      if (!records || records.length > 128)
-        throw new RemoteProtocolError("INVALID_REQUEST", "秘密编辑格式无效");
-      for (const edit of records)
-        if (
-          !isJsonObject(edit) ||
-          !["keep", "remove", "set"].includes(String(edit.action)) ||
-          Object.keys(edit).some((k) => !["action", "value"].includes(k)) ||
-          (edit.action === "set"
-            ? typeof edit.value !== "string" || edit.value.length > 16384
-            : edit.value !== undefined)
-        )
-          throw new RemoteProtocolError("INVALID_REQUEST", "秘密编辑格式无效");
-    }
+    try { runtimeSecretEditsParam(value.secretEdits,"secretEdits"); }
+    catch { throw new RemoteProtocolError("INVALID_REQUEST","秘密编辑格式无效"); }
   }
   return value as unknown as RemoteRequest;
 }
@@ -358,6 +329,10 @@ export function toRuntimeParams<M extends RemoteMethod>(
 ): RuntimeParams<M> {
   const params = {
     ...request.params,
+    ...(["mcp.user.upsert","provider.upsert"].includes(request.method)
+      ? { inputMode: "public-patch" } : {}),
+    ...(request.method === "mcp.user.upsert" && request.secretEdits
+      ? { secretEdits: request.secretEdits } : {}),
     ...(REMOTE_METHOD_SPECS[request.method].workspaceRequired ? { workspacePath } : {}),
   };
   return parseStrictRuntimeParams(request.method, params);

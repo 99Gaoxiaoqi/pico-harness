@@ -1,4 +1,6 @@
 // Agent, skill, MCP, and plugin capability contracts with their parameter/result rules.
+import { runtimeMcpServerPublicPatchParam, runtimeSecretEditsParam } from "./config-patch.js";
+import type { RuntimeMcpServerPublicPatch, RuntimeSecretEdits } from "./config-patch.js";
 import { isJsonObject } from "./base.js";
 import type { EmptyParams, JsonObject, WorkspaceParams } from "./base.js";
 import { subagentPresetIdResult } from "./subagents.js";
@@ -337,9 +339,11 @@ export type CapabilitiesMethodMap = {
   };
   readonly "mcp.user.upsert": {
     readonly params: {
-      readonly server: RuntimeMcpServerInput;
       readonly expectedRevision: string;
       readonly idempotencyKey: string;
+      readonly server: RuntimeMcpServerInput | RuntimeMcpServerPublicPatch;
+      readonly inputMode?: "public-patch";
+      readonly secretEdits?: RuntimeSecretEdits;
     };
     readonly result: { readonly server: RuntimeScopedMcpServer; readonly revision: string };
   };
@@ -462,11 +466,14 @@ export const capabilitiesParamValidators = {
   "skills.user.list": noParams,
   "skills.effective.list": workspaceParams,
   "mcp.user.list": noParams,
-  "mcp.user.upsert": exactParamShape({
-    server: runtimeMcpServerParam,
-    expectedRevision: boundedNonEmptyStringParam(512),
-    idempotencyKey: boundedNonEmptyStringParam(512),
-  }),
+  "mcp.user.upsert": (params) => {
+    const common = { expectedRevision: boundedNonEmptyStringParam(512),
+      idempotencyKey: boundedNonEmptyStringParam(512) };
+    if (params.inputMode === "public-patch")
+      exactParamShape({ ...common, inputMode: oneOfParam(["public-patch"]),
+        server: runtimeMcpServerPublicPatchParam },{ secretEdits: runtimeSecretEditsParam })(params);
+    else exactParamShape({ ...common, server: runtimeMcpServerParam })(params);
+  },
   "mcp.user.delete": exactParamShape({
     serverName: boundedNonEmptyStringParam(256),
     expectedRevision: boundedNonEmptyStringParam(512),
