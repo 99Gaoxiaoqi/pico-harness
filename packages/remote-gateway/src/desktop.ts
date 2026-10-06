@@ -4,3 +4,6 @@ export { defaultGatewayHome } from "./state.js";
 export { configureRelayGateway, readGatewayConfiguration } from "./relay-config.js";
 export type { RemoteGatewayOptions, GatewayAuditEntry } from "./server.js";
 export type { GatewayRuntimeClient } from "./policy.js";
+
+export { readGatewayServiceState, setGatewayDesiredRunning, beginGatewayMaintenance, finishGatewayMaintenance, recordGatewayExit, readActiveGatewayRuntime, writeActiveGatewayRuntime, validateActiveGatewayRuntime } from "./supervision-state.js";
+export type { GatewayServiceState, ActiveGatewayRuntime, GatewayExit } from "./supervision-state.js";
