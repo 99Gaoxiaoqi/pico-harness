@@ -1021,6 +1021,12 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     return this.closePromise;
   }
 
+  providerAdmissionMetrics(
+    reset = false,
+  ): ReturnType<DesktopProviderConfigService["providerAdmissionMetrics"]> {
+    return this.providerConfig.providerAdmissionMetrics(reset);
+  }
+
   shutdownOwnershipFence(): ShutdownOwnershipFence {
     return this.options.runtimeService.shutdownOwnershipFence();
   }
