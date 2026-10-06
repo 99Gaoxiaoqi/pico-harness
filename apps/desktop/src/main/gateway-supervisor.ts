@@ -90,40 +90,91 @@ export function gatewayProcessEnvironment(
 
 /** One task-owned foreground child; OS supervision owns restart and never needs a separate Node install. */
 export async function runGatewaySupervisor(home: string): Promise<number> {
-  let state = await readGatewayServiceState(home);
-  while (state.desiredRunning && state.maintenance) {
-    await delay(Math.min(1_000, Math.max(1, state.maintenance.expiresAt - Date.now())));
+  for (;;) {
+    let state = await readGatewayServiceState(home);
+    while (state.desiredRunning && state.maintenance) {
+      await delay(Math.min(1_000, Math.max(1, state.maintenance.expiresAt - Date.now())));
+      state = await readGatewayServiceState(home);
+    }
+    if (!state.desiredRunning) return 0;
+    const generation = state.generation;
+    const runtime = await readActiveGatewayRuntime(home);
+    if (!runtime) throw new Error("GATEWAY_INSTALLATION_MISSING");
+    await Promise.all([
+      access(runtime.executablePath),
+      access(runtime.gatewayPath),
+      access(join(dirname(runtime.gatewayPath), "daemon.cjs")),
+    ]);
+    const result = await supervisedChild(home, runtime, generation);
+    await recordGatewayExit(home, {
+      at: Date.now(),
+      code: result.code,
+      signal: result.signal,
+      buildId: runtime.buildId,
+    });
     state = await readGatewayServiceState(home);
+    if (!state.desiredRunning) return 0;
+    // An update keeps this task alive until its manifest changes or its bounded maintenance expires.
+    if (!state.maintenance && !result.maintenanceStopped) return 1;
   }
-  if (!state.desiredRunning) return 0;
-  const runtime = await readActiveGatewayRuntime(home);
-  if (!runtime) throw new Error("GATEWAY_INSTALLATION_MISSING");
-  await Promise.all([
-    access(runtime.executablePath),
-    access(runtime.gatewayPath),
-    access(join(dirname(runtime.gatewayPath), "daemon.cjs")),
-  ]);
-  const result = await new Promise<{ code: number | null; signal: string | null }>(
+}
+async function supervisedChild(
+  home: string,
+  runtime: ActiveGatewayRuntime,
+  generation: number,
+): Promise<{ code: number | null; signal: string | null; maintenanceStopped: boolean }> {
+  const observing = new AbortController();
+  let exited = false;
+  let terminationAt: number | undefined;
+  let maintenanceStopped = false;
+  const child = spawn(runtime.executablePath, [runtime.gatewayPath, "--home", home], {
+    stdio: "ignore",
+    windowsHide: true,
+    env: {
+      ...gatewayProcessEnvironment(runtime),
+      PICO_GATEWAY_SUPERVISION_GENERATION: String(generation),
+    },
+  });
+  const terminate = () => {
+    terminationAt ??= Date.now();
+    child.kill(Date.now() - terminationAt >= 2_000 ? "SIGKILL" : "SIGTERM");
+  };
+  process.once("SIGTERM", terminate);
+  process.once("SIGINT", terminate);
+  const completed = new Promise<{ code: number | null; signal: string | null }>(
     (resolve, reject) => {
-      const child = spawn(runtime.executablePath, [runtime.gatewayPath, "--home", home], {
-        stdio: "ignore",
-        windowsHide: true,
-        env: gatewayProcessEnvironment(runtime),
-      });
       child.once("error", reject);
       child.once("exit", (code, signal) => resolve({ code, signal }));
-      const terminate = () => child.kill("SIGTERM");
-      process.once("SIGTERM", terminate);
-      process.once("SIGINT", terminate);
       child.once("close", () => {
+        exited = true;
+        observing.abort();
         process.off("SIGTERM", terminate);
         process.off("SIGINT", terminate);
       });
     },
   );
-  await recordGatewayExit(home, { at: Date.now(), ...result, buildId: runtime.buildId });
-  state = await readGatewayServiceState(home);
-  // During update the existing task waits for the new manifest/maintenance expiry, preserving RunAtLoad recovery.
-  if (state.desiredRunning && state.maintenance) return runGatewaySupervisor(home);
-  return state.desiredRunning ? 1 : 0;
+  const monitor = (async () => {
+    while (!exited) {
+      try {
+        const current = await readGatewayServiceState(home);
+        if (current.maintenance) maintenanceStopped = true;
+        if (!current.desiredRunning || current.maintenance) terminate();
+      } catch {
+        terminate(); /* An unreadable running intent fails closed. */
+      }
+      if (terminationAt !== undefined) terminate();
+      await delay(250, undefined, { signal: observing.signal });
+    }
+  })().catch((error: unknown) => {
+    if (!observing.signal.aborted) {
+      terminate();
+      throw error;
+    }
+  });
+  try {
+    return { ...(await completed), maintenanceStopped };
+  } finally {
+    observing.abort();
+    await monitor.catch(() => undefined);
+  }
 }
