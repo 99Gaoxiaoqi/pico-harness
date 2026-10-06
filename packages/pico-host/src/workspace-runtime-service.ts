@@ -346,6 +346,8 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
           REVIEW_IDEMPOTENCY_RUNTIME_CAPABILITY,
           MEMORY_PAGINATION_RUNTIME_CAPABILITY,
           "shared-config-v1",
+          "session-send-replay-v1",
+          "config-secret-patch-v1",
           "session-conversation-v1",
           "session-management-v1",
           "session-settings-v1",
