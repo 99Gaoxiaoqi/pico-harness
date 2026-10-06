@@ -394,6 +394,8 @@ export type SessionMethodMap = {
       readonly sourceSessionId: SessionId;
       readonly panelId: string;
       readonly idempotencyKey: string;
+      /** Recover an existing authoritative result; never admit a new input. */
+      readonly replayOnly?: true;
     };
     readonly result: {
       readonly session: RuntimeSession;
@@ -522,6 +524,7 @@ export const sessionParamValidators = {
       initialSettings: runtimeUserDefaultsParam,
       behavior: sessionBehaviorParam,
       expectedRunId: stringParam,
+      replayOnly: (value,path) => { if (value !== true) throw invalidParams(`${path} 必须为 true`); },
     },
   ),
   "run.start": exactParamShape(
