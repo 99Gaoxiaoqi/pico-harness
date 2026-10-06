@@ -15,6 +15,9 @@ async function main(): Promise<void> {
   const gateway = await startConfiguredRemoteGateway({
     home,
     ...(process.env.PICO_GATEWAY_BUILD_ID ? { buildId: process.env.PICO_GATEWAY_BUILD_ID } : {}),
+    ...(process.env.PICO_GATEWAY_SUPERVISION_GENERATION !== undefined
+      ? { supervisionGeneration: Number(process.env.PICO_GATEWAY_SUPERVISION_GENERATION) }
+      : {}),
     createRuntimeClient: (deviceId) =>
       new LocalRuntimeClient({
         ...(config.runtimeHostRootPath ? { runtimeHostRootPath: config.runtimeHostRootPath } : {}),

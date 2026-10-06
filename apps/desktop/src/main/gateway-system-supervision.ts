@@ -49,9 +49,9 @@ exec /usr/bin/env -i HOME="$HOME" USER="\${USER-}" LOGNAME="\${LOGNAME-}" TMPDIR
 `;
 }
 export function windowsGatewayLauncher(): string {
-  return String.raw`param([Parameter(Mandatory=$true)][string]$Home)
+  return String.raw`param([Parameter(Mandatory=$true)][string]$GatewayHome)
 $ErrorActionPreference='Stop'
-$manifest=Get-Content -LiteralPath (Join-Path $Home 'active-runtime.json') -Raw | ConvertFrom-Json
+$manifest=Get-Content -LiteralPath (Join-Path $GatewayHome 'active-runtime.json') -Raw | ConvertFrom-Json
 $supervisor=Join-Path ([IO.Path]::GetDirectoryName($manifest.gatewayPath)) 'gateway-supervisor.cjs'
 if (-not [IO.File]::Exists($manifest.executablePath) -or -not [IO.File]::Exists($supervisor)) { exit 1 }
 $start=[Diagnostics.ProcessStartInfo]::new()
@@ -61,7 +61,7 @@ $start.CreateNoWindow=$true
 $start.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden
 # Windows argument quoting doubles trailing backslashes before the closing quote.
 function Quote-Argument([string]$Value) { return '"' + [regex]::Replace([regex]::Replace($Value,'(\\*)"','$1$1\\"'),'(\\+)$','$1$1') + '"' }
-$start.Arguments=(Quote-Argument $supervisor)+' --home '+(Quote-Argument $Home)
+$start.Arguments=(Quote-Argument $supervisor)+' --home '+(Quote-Argument $GatewayHome)
 $start.EnvironmentVariables.Clear()
 foreach ($name in @('SystemRoot','WINDIR','USERPROFILE','APPDATA','LOCALAPPDATA','PROGRAMDATA','TEMP','TMP','COMSPEC','HOME','USER','LANG')) {
   $value=[Environment]::GetEnvironmentVariable($name)
@@ -84,7 +84,7 @@ export function windowsGatewayTask(
   home: string,
 ): string {
   if (!/^S-1-[0-9-]+$/u.test(sid)) throw new Error("GATEWAY_USER_SID_INVALID");
-  const args = `-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "${launcher}" -Home "${home}"`;
+  const args = `-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "${launcher}" -GatewayHome "${home}"`;
   return `<?xml version="1.0" encoding="UTF-16"?><Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><RegistrationInfo><Description>Pico user-session remote gateway</Description></RegistrationInfo><Triggers><LogonTrigger><Enabled>true</Enabled><UserId>${sid}</UserId></LogonTrigger><TimeTrigger><Repetition><Interval>PT1M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition><StartBoundary>2020-01-01T00:00:00</StartBoundary><Enabled>true</Enabled></TimeTrigger></Triggers><Principals><Principal id="User"><UserId>${sid}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals><Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><StartWhenAvailable>true</StartWhenAvailable><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><Enabled>true</Enabled></Settings><Actions Context="User"><Exec><Command>${xml(powershell)}</Command><Arguments>${xml(args)}</Arguments></Exec></Actions></Task>`;
 }
 async function atomicResource(

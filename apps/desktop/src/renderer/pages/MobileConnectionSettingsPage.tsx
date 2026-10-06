@@ -15,6 +15,7 @@ import type {
 } from "../../preload/remote-management-contract.js";
 import { Button, InlineNotice } from "../components.js";
 import { SwitchField, TextField } from "../ui-controls.js";
+import { RemoteSupervisionStatus } from "../RemoteSupervisionStatus.js";
 import { useRuntime } from "../runtime-context.js";
 import "./mobile-connection-settings.css";
 
@@ -197,6 +198,10 @@ export function MobileConnectionSettingsPage() {
           </div>
         </details>
       </section>
+      <RemoteSupervisionStatus
+        supervision={snapshot?.supervision}
+        running={snapshot?.running ?? false}
+      />
       <section className="mobile-settings-section" aria-labelledby="mobile-pair-heading">
         <div className="mobile-section-heading">
           <h3 id="mobile-pair-heading">配对手机</h3>

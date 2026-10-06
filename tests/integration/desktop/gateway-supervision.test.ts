@@ -126,6 +126,10 @@ test("macOS和Windows监督注册使用用户会话任务，开发模式不触�
   ])
     assert.ok(task.includes(expected));
   const ps = await readFile(join(home, "supervision", "gateway-launcher.ps1"), "utf8");
+  assert.match(ps, /param\(\[Parameter\(Mandatory=\$true\)\]\[string\]\$GatewayHome\)/u);
+  assert.doesNotMatch(ps, /\$Home\b/iu);
+  assert.match(task, /-GatewayHome /u);
+  assert.doesNotMatch(task, /-Home /u);
   assert.match(ps, /CreateNoWindow=\$true/u);
   assert.match(ps, /WaitForExit\(\)/u);
   assert.match(ps, /EnvironmentVariables.Clear\(\)/u);
@@ -270,5 +274,73 @@ test("没有Desktop或既有daemon时，从精简系统环境冷启动仍使用�
   assert.equal(observed.path.split(":")[0], registered.pathEntries[0]);
   assert.equal(observed.secret, undefined);
   assert.equal(observed.nodeOptions, undefined);
-  assert.equal((await readGatewayServiceState(home)).lastExit?.code, 0);
+  const lastExit = (await readGatewayServiceState(home)).lastExit;
+  assert.ok(lastExit?.code === 0 || lastExit?.signal === "SIGTERM");
+});
+
+test("启动中的真实Gateway子进程遇到停止或维护会退出，维护结束只启动当前代次", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("此进程验证使用当前 POSIX Node fixture；真实 Windows 后台另行验收");
+    return;
+  }
+  const home = await fixture(t);
+  const registered = runtime(home);
+  const marker = join(home, "starting-child.json");
+  const exitMarker = join(home, "terminated-child.json");
+  const count = join(home, "child-count.json");
+  await writeFile(
+    registered.gatewayPath,
+    `const fs=require('node:fs');const countFile=${JSON.stringify(count)};const n=fs.existsSync(countFile)?Number(fs.readFileSync(countFile,'utf8'))+1:1;fs.writeFileSync(countFile,String(n));fs.writeFileSync(${JSON.stringify(marker)},JSON.stringify({pid:process.pid,n,generation:Number(process.env.PICO_GATEWAY_SUPERVISION_GENERATION)}));process.on('SIGTERM',()=>{fs.writeFileSync(${JSON.stringify(exitMarker)},JSON.stringify({pid:process.pid,n}));process.exit(0);});setInterval(()=>{},1000);`,
+  );
+  await writeActiveGatewayRuntime(home, registered);
+  const firstState = await setGatewayDesiredRunning(home, true);
+  const entry = join(home, "supervisor-race.mts");
+  await writeFile(
+    entry,
+    `import { runGatewaySupervisor } from ${JSON.stringify(resolve("apps/desktop/src/main/gateway-supervisor.ts"))}; process.exitCode = await runGatewaySupervisor(${JSON.stringify(home)});`,
+  );
+  const launch = () =>
+    spawn(process.execPath, ["--import", resolve("node_modules/tsx/dist/loader.mjs"), entry], {
+      env: { HOME: home, PATH: "/usr/bin:/bin", TMPDIR: tmpdir() },
+      stdio: "pipe",
+    });
+  async function waitMarker(path: string, expected: number) {
+    for (let i = 0; i < 200; i++) {
+      try {
+        const value = JSON.parse(await readFile(path, "utf8"));
+        if (value.n === expected) return value as { pid: number; n: number; generation?: number };
+      } catch {
+        /* marker not published */
+      }
+      await delay(20);
+    }
+    throw new Error(`child marker ${expected} did not arrive`);
+  }
+  const first = launch();
+  t.after(() => {
+    first.kill("SIGKILL");
+  });
+  const firstExit = new Promise<number | null>((done) => first.once("exit", done));
+  const started = await waitMarker(marker, 1);
+  assert.equal(started.generation, firstState.generation);
+  await setGatewayDesiredRunning(home, false);
+  await waitMarker(exitMarker, 1);
+  assert.equal(await firstExit, 0);
+  assert.throws(() => process.kill(started.pid, 0), /ESRCH/u);
+  await setGatewayDesiredRunning(home, true);
+  const second = launch();
+  t.after(() => {
+    second.kill("SIGKILL");
+  });
+  const secondExit = new Promise<number | null>((done) => second.once("exit", done));
+  const beforeUpdate = await waitMarker(marker, 2);
+  const maintenance = await beginGatewayMaintenance(home, "1.2.3", 5_000);
+  await waitMarker(exitMarker, 2);
+  assert.throws(() => process.kill(beforeUpdate.pid, 0), /ESRCH/u);
+  assert.equal(await finishGatewayMaintenance(home, maintenance.generation), true);
+  const afterUpdate = await waitMarker(marker, 3);
+  assert.equal(afterUpdate.generation, maintenance.generation + 1);
+  await setGatewayDesiredRunning(home, false);
+  await waitMarker(exitMarker, 3);
+  assert.equal(await secondExit, 0);
 });
