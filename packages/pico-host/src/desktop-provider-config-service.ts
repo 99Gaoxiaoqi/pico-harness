@@ -4,6 +4,7 @@ import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { unwatchFile, watchFile } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { performance } from "node:perf_hooks";
 import { EffectiveConfigResolver, type ConfigSource } from "./input/effective-config.js";
 import {
   loadPicoProjectConfig,
@@ -103,6 +104,7 @@ export class DesktopProviderConfigService {
   private observedUserConfig?: UserConfigSnapshot;
   private userConfigWatchClosed = false;
   private closePromise?: Promise<void>;
+  private readonly admissionMetrics = new ProviderAdmissionMetrics();
 
   constructor(private readonly options: DesktopProviderConfigServiceOptions) {
     this.env = options.env;
@@ -1101,16 +1103,22 @@ export class DesktopProviderConfigService {
         ),
       );
     }
+    const enqueuedAt = performance.now();
     const guarded = async () => {
-      await this.providerRecoveryReady;
-      if (this.providerRecoveryError) {
-        throw new RuntimeProtocolError(
-          RUNTIME_ERROR_CODES.CONFLICT,
-          `Provider 配置恢复尚未完成，已拒绝新的依赖变更: ${errorMessage(this.providerRecoveryError)}`,
-        );
+      const acquiredAt = performance.now();
+      try {
+        await this.providerRecoveryReady;
+        if (this.providerRecoveryError) {
+          throw new RuntimeProtocolError(
+            RUNTIME_ERROR_CODES.CONFLICT,
+            `Provider 配置恢复尚未完成，已拒绝新的依赖变更: ${errorMessage(this.providerRecoveryError)}`,
+          );
+        }
+        await this.recoverProviderOperation();
+        return await operation();
+      } finally {
+        this.admissionMetrics.record(kind, acquiredAt - enqueuedAt, performance.now() - enqueuedAt);
       }
-      await this.recoverProviderOperation();
-      return operation();
     };
     const queued = this.providerDependencyTail.then(guarded, guarded);
     this.providerDependencyTail = queued.then(
@@ -1118,6 +1126,13 @@ export class DesktopProviderConfigService {
       () => undefined,
     );
     return queued;
+  }
+
+  /** Bounded aggregate timings contain no request, workspace, Session or prompt identifiers. */
+  providerAdmissionMetrics(
+    reset = false,
+  ): Readonly<Record<ProviderAdmissionKind, ProviderAdmissionMetric>> {
+    return this.admissionMetrics.snapshot(reset);
   }
 
   private assertUserConfigRevision(expected: string, actual: string): void {
@@ -1693,3 +1708,59 @@ async function configContentVersion(workspacePath: string): Promise<number> {
 
 export type ProviderAdmissionKind = "mutation" | "session.send" | "run.start";
 
+export interface ProviderAdmissionMetric {
+  readonly count: number;
+  readonly queueMs: number;
+  readonly admissionMs: number;
+  readonly queueP95Ms: number;
+}
+
+/** Fixed 1ms histogram, with a final overflow bucket; memory never grows with request count. */
+class ProviderAdmissionMetrics {
+  private readonly aggregates = new Map<
+    ProviderAdmissionKind,
+    { count: number; queueMs: number; admissionMs: number; histogram: Uint32Array }
+  >();
+
+  record(kind: ProviderAdmissionKind, queueMs: number, admissionMs: number): void {
+    let aggregate = this.aggregates.get(kind);
+    if (!aggregate) {
+      aggregate = { count: 0, queueMs: 0, admissionMs: 0, histogram: new Uint32Array(2002) };
+      this.aggregates.set(kind, aggregate);
+    }
+    aggregate.count++;
+    aggregate.queueMs += queueMs;
+    aggregate.admissionMs += admissionMs;
+    const bucket = Math.min(2001, Math.ceil(queueMs));
+    aggregate.histogram[bucket] = aggregate.histogram[bucket]! + 1;
+  }
+
+  snapshot(reset: boolean): Readonly<Record<ProviderAdmissionKind, ProviderAdmissionMetric>> {
+    const result = Object.fromEntries(
+      (["mutation", "session.send", "run.start"] as const).map((kind) => {
+        const aggregate = this.aggregates.get(kind);
+        if (!aggregate) return [kind, { count: 0, queueMs: 0, admissionMs: 0, queueP95Ms: 0 }];
+        let observed = 0;
+        let queueP95Ms = 0;
+        for (const [bucket, count] of aggregate.histogram.entries()) {
+          observed += count;
+          if (observed >= Math.ceil(aggregate.count * 0.95)) {
+            queueP95Ms = bucket;
+            break;
+          }
+        }
+        return [
+          kind,
+          {
+            count: aggregate.count,
+            queueMs: aggregate.queueMs,
+            admissionMs: aggregate.admissionMs,
+            queueP95Ms,
+          },
+        ];
+      }),
+    ) as Record<ProviderAdmissionKind, ProviderAdmissionMetric>;
+    if (reset) this.aggregates.clear();
+    return result;
+  }
+}
