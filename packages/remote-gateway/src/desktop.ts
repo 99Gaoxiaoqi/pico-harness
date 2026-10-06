@@ -5,5 +5,19 @@ export { configureRelayGateway, readGatewayConfiguration } from "./relay-config.
 export type { RemoteGatewayOptions, GatewayAuditEntry } from "./server.js";
 export type { GatewayRuntimeClient } from "./policy.js";
 
-export { readGatewayServiceState, setGatewayDesiredRunning, beginGatewayMaintenance, finishGatewayMaintenance, recordGatewayExit, readActiveGatewayRuntime, writeActiveGatewayRuntime, validateActiveGatewayRuntime } from "./supervision-state.js";
-export type { GatewayServiceState, ActiveGatewayRuntime, GatewayExit } from "./supervision-state.js";
+export {
+  readGatewayServiceState,
+  setGatewayDesiredRunning,
+  beginGatewayMaintenance,
+  finishGatewayMaintenance,
+  recordGatewayExit,
+  readActiveGatewayRuntime,
+  writeActiveGatewayRuntime,
+  validateActiveGatewayRuntime,
+  ensureGatewaySupervisionDirectory,
+} from "./supervision-state.js";
+export type {
+  GatewayServiceState,
+  ActiveGatewayRuntime,
+  GatewayExit,
+} from "./supervision-state.js";

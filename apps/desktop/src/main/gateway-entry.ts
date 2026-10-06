@@ -14,6 +14,7 @@ async function main(): Promise<void> {
   const config = await readGatewayConfiguration(home);
   const gateway = await startConfiguredRemoteGateway({
     home,
+    ...(process.env.PICO_GATEWAY_BUILD_ID ? { buildId: process.env.PICO_GATEWAY_BUILD_ID } : {}),
     createRuntimeClient: (deviceId) =>
       new LocalRuntimeClient({
         ...(config.runtimeHostRootPath ? { runtimeHostRootPath: config.runtimeHostRootPath } : {}),

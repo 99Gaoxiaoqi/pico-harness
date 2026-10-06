@@ -10,6 +10,7 @@ declare const __PICO_UPDATE_FEED_URL__: string | null;
  */
 export function configureAutoUpdates(
   onBeforeQuit: () => void,
+  prepareForUpdate: () => Promise<void>,
   feedUrl = __PICO_UPDATE_FEED_URL__,
 ): () => void {
   if (!app.isPackaged || !isHttpsUrl(feedUrl)) return () => undefined;
@@ -29,10 +30,24 @@ export function configureAutoUpdates(
         cancelId: 1,
         title: "Pico 更新已就绪",
         message: releaseName ? `版本 ${releaseName} 已下载` : "新版本已下载",
-        detail: "重新启动后安装；选择稍后会在下次退出 Pico 时应用。",
+        detail: "确认后先停止手机连接，再重新启动并安装；选择稍后保留当前版本。",
       })
       .then(({ response }) => {
-        if (response === 0) autoUpdater.quitAndInstall();
+        if (response === 0) {
+          return prepareForUpdate().then(() => {
+            onBeforeQuit();
+            autoUpdater.quitAndInstall();
+          });
+        }
+        return undefined;
+      })
+      .catch((error: unknown) => {
+        process.stderr.write(`Pico 更新准备失败: ${safeErrorMessage(error)}\n`);
+        void dialog.showMessageBox({
+          type: "error",
+          title: "暂时无法安装更新",
+          message: "手机连接尚未完成停止，请稍后重试更新。",
+        });
       });
   };
   const onError = (error: Error) => {

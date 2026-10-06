@@ -166,7 +166,7 @@ test("桌面手机连接通过可信桥接完成配置、唯一后台启动、�
   assert.equal((await bridge.stop({})).ok, true);
   assert.equal(running, false);
   assert.equal(
-    JSON.parse(await readFile(join(root, "mobile-connection.json"), "utf8")).enabled,
+    JSON.parse(await readFile(join(root, "service-state.json"), "utf8")).desiredRunning,
     false,
   );
   await new RemoteManagementService(dependencies).restore();
