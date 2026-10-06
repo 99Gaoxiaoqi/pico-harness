@@ -177,7 +177,7 @@ function Harness() {
  const draft = usePersistentDraft("new:unbound");
  draftControls = draft;
  const location = useLocation();
- return <><textarea aria-label="draft" value={draft.value} onChange={event=>draft.update(event.target.value)}/><PendingSendList runtime={store}/><p id="route">{location.pathname+location.search}</p><p id="message">{store.message}</p></>;
+ return <><style>{".workspace-frame {display:grid; height:600px; grid-template-rows:minmax(0,1fr)}"}</style><div className={"workspace-frame workspace-frame--immersive "+(store.pendingSends?.length?"has-pending-send":"")}><PendingSendList runtime={store}/><main id="conversation-area"><textarea aria-label="draft" value={draft.value} onChange={event=>draft.update(event.target.value)}/><p id="route">{location.pathname+location.search}</p><p id="message">{store.message}</p></main></div></>;
 }
 const settle = async () => { await act(async()=>{await new Promise(resolve=>setTimeout(resolve,20));}); };
 const mount = async () => {
@@ -214,6 +214,7 @@ const remount = async () => { await act(async()=>root.unmount()); await mount();
  }
  check(store.pendingSends.length===3,"Three entry scopes coexist");
  check(document.querySelector("summary").textContent.includes("3"),"Global list exposes closed side/research entries");
+ check(document.querySelector("#conversation-area").getBoundingClientRect().height>350,"Pending list must preserve the main conversation grid area");
  currentHome="/state/b";await remount();
  check(store.pendingSends.length===0,"Different picoHome must not expose or replay previous records");
  currentHome="/state/a";await remount();

@@ -57,6 +57,8 @@ const primaryNav = [{ ...appPrimaryNavigation[0], icon: Clock3 }] as const;
 export function AppShell() {
   const runtime = useRuntime();
   const { data, preview, message, actions, busy } = runtime;
+  const hasPendingSends =
+    runtime.pendingSends?.some((entry) => entry.scope.picoHome === data.picoHome) ?? false;
   const location = useLocation();
   const navigate = useNavigate();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(
@@ -308,7 +310,7 @@ export function AppShell() {
         }}
       />
       <div
-        className={`workspace-frame ${immersiveRoute ? "workspace-frame--immersive" : ""} ${conversationRoute ? "workspace-frame--conversation" : ""} ${message ? "has-toast" : ""}`}
+        className={`workspace-frame ${immersiveRoute ? "workspace-frame--immersive" : ""} ${conversationRoute ? "workspace-frame--conversation" : ""} ${message ? "has-toast" : ""} ${hasPendingSends ? "has-pending-send" : ""}`}
       >
         {!immersiveRoute && (
           <header className="titlebar">
