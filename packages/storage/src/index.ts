@@ -22,6 +22,8 @@ export * from "./workspace-path.js";
 export * from "./workspace-blob-gc.js";
 export * from "./workspace-trust-store.js";
 export * from "./fork-operation-coordinator.js";
+export * from "./external-sessions.js";
+export * from "./external-session-adapters.js";
 export * from "./sqlite/sqlite-database.js";
 export * from "./sqlite/sqlite-schema.js";
 export * from "./sqlite/sessions-scope.js";

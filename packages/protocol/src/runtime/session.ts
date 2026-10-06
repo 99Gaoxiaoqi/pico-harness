@@ -131,6 +131,22 @@ export type RuntimeSession = JsonObject & {
   };
 };
 
+export type RuntimeExternalSessionAdapterId = "codex" | "claude-code" | "opencode";
+
+export type RuntimeExternalSessionSource = JsonObject & {
+  readonly id: RuntimeExternalSessionAdapterId;
+  readonly name: string;
+  readonly available: boolean;
+};
+
+export type RuntimeExternalSessionSummary = JsonObject & {
+  readonly id: string;
+  readonly title: string;
+  readonly cwd: string;
+  readonly updatedAt: number;
+  readonly archived?: boolean;
+};
+
 const sessionBehaviorParam = oneOfParam(["auto", "steer", "queue", "replace"] as const);
 
 const runtimeUserInputParam: RuntimeParamRule = (value, path) => {
@@ -332,6 +348,28 @@ export const runtimeQueuedInputResult = exactResultShape({
 });
 
 export type SessionMethodMap = {
+  readonly "externalSessions.sources": {
+    readonly params: Record<string, never>;
+    readonly result: { readonly sources: readonly RuntimeExternalSessionSource[] };
+  };
+  readonly "externalSessions.list": {
+    readonly params: {
+      readonly adapterId: RuntimeExternalSessionAdapterId;
+      readonly text?: string;
+      readonly cursor?: string;
+    };
+    readonly result: {
+      readonly sessions: readonly RuntimeExternalSessionSummary[];
+      readonly nextCursor: string | null;
+    };
+  };
+  readonly "externalSessions.import": {
+    readonly params: {
+      readonly adapterId: RuntimeExternalSessionAdapterId;
+      readonly sourceSessionId: SessionId;
+    };
+    readonly result: { readonly session: RuntimeSession };
+  };
   readonly "session.list": {
     readonly params: WorkspaceParams & { readonly includeArchived?: boolean };
     readonly result: { readonly sessions: readonly RuntimeSession[] };
@@ -482,6 +520,15 @@ export type SessionMethodMap = {
 };
 
 export const sessionParamValidators = {
+  "externalSessions.sources": exactParamShape({}),
+  "externalSessions.list": exactParamShape(
+    { adapterId: oneOfParam(["codex", "claude-code", "opencode"] as const) },
+    { text: boundedNonEmptyStringParam(512), cursor: boundedNonEmptyStringParam(2048) },
+  ),
+  "externalSessions.import": exactParamShape({
+    adapterId: oneOfParam(["codex", "claude-code", "opencode"] as const),
+    sourceSessionId: boundedNonEmptyStringParam(256),
+  }),
   "session.list": exactParamShape(
     { workspacePath: stringParam },
     { includeArchived: booleanParam },
@@ -555,6 +602,25 @@ export const sessionParamValidators = {
 } satisfies Readonly<Record<keyof SessionMethodMap, RuntimeParamValidator>>;
 
 export const sessionResultValidators = {
+  "externalSessions.sources": exactResultShape({
+    sources: resultArray(
+      exactResultShape({
+        id: resultOneOf(["codex", "claude-code", "opencode"]),
+        name: resultString,
+        available: resultBoolean,
+      }),
+    ),
+  }),
+  "externalSessions.list": exactResultShape({
+    sessions: resultArray(
+      exactResultShape(
+        { id: resultString, title: resultString, cwd: resultString, updatedAt: resultFiniteNumber },
+        { archived: resultBoolean },
+      ),
+    ),
+    nextCursor: resultNullable(resultString),
+  }),
+  "externalSessions.import": exactResultShape({ session: runtimeSessionResult }),
   "session.list": resultShape({ sessions: resultArray(runtimeSessionResult) }),
   "session.get": exactResultShape({ session: runtimeSessionResult }),
   "session.create": exactResultShape({ session: runtimeSessionResult }),

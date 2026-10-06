@@ -8,6 +8,7 @@ import {
   Box,
   BrainCircuit,
   ChevronDown,
+  Download,
   Clock3,
   Folder,
   FolderGit2,
@@ -380,6 +381,7 @@ function SettingsSidebar({
     mcp: Network,
     usage: Gauge,
     data: Box,
+    externalTasks: Download,
     system: ShieldCheck,
     mobile: Network,
   } as const;

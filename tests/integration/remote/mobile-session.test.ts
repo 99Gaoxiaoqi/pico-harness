@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { RuntimeSessionSubscriptionFrame, RuntimeResult } from "@pico/protocol/mobile";
+import {
+  TRANSCRIPT_PROJECTOR_VERSION,
+  type RuntimeSessionSubscriptionFrame,
+  type RuntimeResult,
+} from "@pico/protocol/mobile";
 import {
   GenerationFence,
   SerialPoller,
@@ -16,7 +20,11 @@ test("手机会话在缺少 toSorted 的引擎中补齐历史、分页并忽略�
   t.after(() => {
     if (sorting) Object.defineProperty(Array.prototype, "toSorted", sorting);
   });
-  const watermark = { historyEpoch: "history", projectorVersion: 11 as const, throughSequence: 1 };
+  const watermark = {
+    historyEpoch: "history",
+    projectorVersion: TRANSCRIPT_PROJECTOR_VERSION,
+    throughSequence: 1,
+  };
   const session = {
     sessionId: "s",
     workspacePath: "/authorized",
@@ -170,7 +178,11 @@ function recoveryRecord(id: string, sequence: number, revision = 1) {
   };
 }
 function recoveryWatermark(sequence: number, historyEpoch = "history") {
-  return { historyEpoch, projectorVersion: 11 as const, throughSequence: sequence };
+  return {
+    historyEpoch,
+    projectorVersion: TRANSCRIPT_PROJECTOR_VERSION,
+    throughSequence: sequence,
+  };
 }
 function recoveryCursor(sequence: number, through: number, historyEpoch = "history") {
   return {

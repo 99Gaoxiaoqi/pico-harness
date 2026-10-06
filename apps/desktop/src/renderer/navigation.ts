@@ -29,6 +29,7 @@ export const settingsNavigationGroups = [
     items: [
       { to: "/settings/mobile", label: "手机连接", kind: "mobile" },
       { to: "/settings/data", label: "数据", kind: "data" },
+      { to: "/settings/external-tasks", label: "外部任务", kind: "externalTasks" },
       { to: "/settings/system", label: "健康", kind: "system" },
     ],
   },

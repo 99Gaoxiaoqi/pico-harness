@@ -28,6 +28,7 @@ import {
   type ImagePart,
   type Message,
   type UsageReportedField,
+  RUNTIME_EVENT_SCHEMA_VERSION,
 } from "@pico/core";
 import type { CostStatus } from "@pico/runtime/pricing";
 import { logger } from "./logger.js";
@@ -1179,6 +1180,50 @@ export class Session
     }
     await this.replayRuntimeHistoryProjection();
     return commitReceiptFromAppend(persisted);
+  }
+
+  /**
+   * Copies imported conversation history into the Session ledger without creating a Run.
+   * Imported messages are durable model history, not evidence that Pico executed them.
+   */
+  async importHistoryMessages(messages: readonly Message[]): Promise<void> {
+    if (messages.length === 0) return;
+    const canonicalMessages = messages.map((message) => {
+      let canonical: Message;
+      try {
+        const encoded = JSON.stringify(message);
+        if (encoded === undefined) throw new Error("message encoded to undefined");
+        canonical = JSON.parse(encoded) as Message;
+      } catch (error) {
+        throw new Error("Imported Runtime message must be JSON-serializable", { cause: error });
+      }
+      assertRuntimeCommittedMessage(canonical);
+      return canonical;
+    });
+
+    await this.enqueuePersistence("external history import", async (store, ownerFence) => {
+      await this.ensureRuntimeSession();
+      const importId = randomUUID();
+      const createdAt = Date.now();
+      const invocationId = `external-import:${importId}`;
+      const events: RuntimeEvent[] = canonicalMessages.map((message, index) => ({
+        schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
+        eventId: `${invocationId}:message:${index + 1}`,
+        sessionId: this.id,
+        invocationId,
+        runId: invocationId,
+        turnId: `${invocationId}:turn`,
+        at: new Date(createdAt).toISOString(),
+        partial: false,
+        visibility: "model",
+        kind: "message.committed",
+        data: { message },
+      }));
+      const persisted = await appendRuntimeEventBatchWithArbitration(store, events, {
+        ownerFence,
+      });
+      await this.commitRuntimeProjectionBatch(persisted);
+    });
   }
 
   /**

@@ -84,6 +84,8 @@ export interface SessionSettingsPersistenceOptions {
   persistence: SessionRuntimePersistence;
   /** 默认 true：已持久设置覆盖启动默认值。11.4 显式强制新值时可传 false。 */
   restore?: boolean;
+  /** Read paths may hydrate the in-memory view without appending a state event. */
+  persist?: boolean;
 }
 
 const settingsBySession = new Map<string, SessionSettings>();
@@ -167,7 +169,7 @@ export function getOrCreateSessionSettings(
       }
     }
     bindSessionSettingsPersistence(existing, persistenceOptions?.persistence);
-    persistSessionSettings(existing);
+    if (persistenceOptions?.persist !== false) persistSessionSettings(existing);
     return existing;
   }
 
@@ -183,7 +185,7 @@ export function getOrCreateSessionSettings(
   }
   settingsBySession.set(key, created);
   bindSessionSettingsPersistence(created, persistenceOptions?.persistence);
-  persistSessionSettings(created);
+  if (persistenceOptions?.persist !== false) persistSessionSettings(created);
   return created;
 }
 

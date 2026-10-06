@@ -23,6 +23,7 @@ import { ReviewPage } from "./pages/ReviewPage.js";
 import { SessionsPage } from "./pages/SessionsPage.js";
 import {
   DataSettingsPage,
+  ExternalTasksSettingsPage,
   SettingsPage,
   SystemSettingsPage,
   WorkspaceSettingsPage,
@@ -116,6 +117,7 @@ function AppStateRouter() {
         <Route path="settings" element={<SettingsPage />} />
         <Route path="settings/workspaces" element={<WorkspaceSettingsPage />} />
         <Route path="settings/data" element={<DataSettingsPage />} />
+        <Route path="settings/external-tasks" element={<ExternalTasksSettingsPage />} />
         <Route path="settings/models" element={<ProviderPageRoute />} />
         <Route path="settings/models/:providerId" element={<ProviderPageRoute />} />
         <Route path="settings/subagents" element={<SubagentSettingsRoute />} />

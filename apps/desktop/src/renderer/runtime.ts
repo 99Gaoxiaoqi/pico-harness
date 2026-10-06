@@ -314,6 +314,13 @@ export interface RuntimeActions {
   ): Promise<RuntimeSubagentSettingsSnapshot>;
   dismissMessage(): void;
   showMessage?(message: string): void;
+  listExternalSessionSources(): Promise<RuntimeResult<"externalSessions.sources">["sources"]>;
+  listExternalSessions(
+    params: RuntimeParams<"externalSessions.list">,
+  ): Promise<RuntimeResult<"externalSessions.list">>;
+  importExternalSession(
+    params: RuntimeParams<"externalSessions.import">,
+  ): Promise<RuntimeResult<"externalSessions.import">["session"]>;
   chooseWorkspace(): Promise<string | undefined>;
   registerWorkspace(): Promise<string | undefined>;
   ensureTemporaryWorkspace(): Promise<string | undefined>;
@@ -1828,6 +1835,36 @@ export function useRuntimeStore(): RuntimeStore {
       },
       showMessage(text) {
         setMessage(text);
+      },
+      async listExternalSessionSources() {
+        if (preview) {
+          return [
+            { id: "codex", name: "Codex", available: false },
+            { id: "claude-code", name: "Claude Code", available: false },
+            { id: "opencode", name: "OpenCode", available: false },
+          ];
+        }
+        const bridge = getBridge();
+        if (!bridge) throw new Error("本地 Runtime 未连接");
+        return (await invoke(bridge, "externalSessions.sources", {})).sources;
+      },
+      async listExternalSessions(params) {
+        if (preview) return { sessions: [], nextCursor: null };
+        const bridge = getBridge();
+        if (!bridge) throw new Error("本地 Runtime 未连接");
+        return invoke(bridge, "externalSessions.list", params);
+      },
+      async importExternalSession(params) {
+        if (preview) throw new Error("预览模式无法导入外部任务");
+        const bridge = getBridge();
+        if (!bridge) throw new Error("本地 Runtime 未连接");
+        const result = await invoke(bridge, "externalSessions.import", params);
+        try {
+          await loadWorkspace(bridge, result.session.workspacePath);
+        } catch (error) {
+          setMessage(`任务已导入，但工作区刷新失败：${errorMessage(error)}`);
+        }
+        return result.session;
       },
       async chooseWorkspace() {
         let selectedWorkspacePath: string | undefined;

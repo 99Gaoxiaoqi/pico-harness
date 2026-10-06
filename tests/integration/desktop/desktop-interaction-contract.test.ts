@@ -92,6 +92,60 @@ test("new-task send accepts settings that must apply before the first run", asyn
   );
 });
 
+test("reading session settings does not refresh task recency", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-desktop-settings-read-recency-"));
+  const workspace = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  await mkdir(workspace, { recursive: true });
+  await mkdir(picoHome, { recursive: true });
+  await writeDesktopModelRouting(picoHome);
+  const canonicalWorkspace = await realpath(workspace);
+  const env = { PICO_HOME: picoHome, PICO_TEST_TOKEN: "test-token" };
+  const trustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });
+  await trustStore.trust(canonicalWorkspace);
+  const runtime = new WorkspaceRuntimeService({ env, execute: async () => ({ ok: true }) });
+  const desktop = new DesktopRuntimeService({
+    runtimeService: runtime,
+    trustStore,
+    env,
+  });
+  let sessionId: string | undefined;
+  context.after(async () => {
+    await desktop.close();
+    await runtime.close();
+    if (sessionId) {
+      const session = globalSessionManager.delete(sessionId, canonicalWorkspace, { picoHome });
+      await session?.close();
+    }
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const created = asRecord(
+    await desktop.handle(createRuntimeRequest("session.create", { workspacePath: workspace })),
+  );
+  sessionId = String(asRecord(created.session).sessionId);
+  const readSessions = async () => {
+    const result = asRecord(
+      await desktop.handle(createRuntimeRequest("session.list", { workspacePath: workspace })),
+    );
+    const sessions = result.sessions as Array<Record<string, unknown>>;
+    const session = sessions.find((item) => item.sessionId === sessionId);
+    assert.ok(session);
+    return session.updatedAt;
+  };
+  const before = await readSessions();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await desktop.handle(
+    createRuntimeRequest("session.settings.get", {
+      workspacePath: workspace,
+      sessionId: sessionId!,
+    }),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(await readSessions(), before);
+});
+
 for (const scenario of [
   { route: "test/coder", thinking: "off", explicit: false, levels: [] },
   { route: "test/reasoner", thinking: "high", explicit: true, levels: ["low", "high"] },

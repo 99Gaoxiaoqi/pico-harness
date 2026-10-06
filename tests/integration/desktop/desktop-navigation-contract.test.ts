@@ -32,7 +32,7 @@ test("settings replaces the task sidebar while extensions keep their dedicated r
       { label: "偏好", items: ["通用", "项目"] },
       { label: "能力", items: ["模型", "子 Agent", "记忆"] },
       { label: "活动", items: ["用量"] },
-      { label: "系统", items: ["手机连接", "数据", "健康"] },
+      { label: "系统", items: ["手机连接", "数据", "外部任务", "健康"] },
     ],
   );
   const source = (await rendererSource("App.tsx")) + (await rendererSource("AppShell.tsx"));
