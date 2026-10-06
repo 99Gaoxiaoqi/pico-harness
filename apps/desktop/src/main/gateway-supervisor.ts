@@ -114,19 +114,19 @@ export async function runGatewaySupervisor(home: string): Promise<number> {
     });
     state = await readGatewayServiceState(home);
     if (!state.desiredRunning) return 0;
-    // An update keeps this task alive until its manifest changes or its bounded maintenance expires.
-    if (!state.maintenance && !result.maintenanceStopped) return 1;
+    // A newer intent/maintenance generation must read the current manifest before restarting.
+    if (!state.maintenance && state.generation === generation && !result.restartRequested) return 1;
   }
 }
 async function supervisedChild(
   home: string,
   runtime: ActiveGatewayRuntime,
   generation: number,
-): Promise<{ code: number | null; signal: string | null; maintenanceStopped: boolean }> {
+): Promise<{ code: number | null; signal: string | null; restartRequested: boolean }> {
   const observing = new AbortController();
   let exited = false;
   let terminationAt: number | undefined;
-  let maintenanceStopped = false;
+  let restartRequested = false;
   const child = spawn(runtime.executablePath, [runtime.gatewayPath, "--home", home], {
     stdio: "ignore",
     windowsHide: true,
@@ -157,8 +157,9 @@ async function supervisedChild(
     while (!exited) {
       try {
         const current = await readGatewayServiceState(home);
-        if (current.maintenance) maintenanceStopped = true;
-        if (!current.desiredRunning || current.maintenance) terminate();
+        const generationChanged = current.generation !== generation;
+        if (current.maintenance || generationChanged) restartRequested = true;
+        if (!current.desiredRunning || current.maintenance || generationChanged) terminate();
       } catch {
         terminate(); /* An unreadable running intent fails closed. */
       }
@@ -172,7 +173,7 @@ async function supervisedChild(
     }
   });
   try {
-    return { ...(await completed), maintenanceStopped };
+    return { ...(await completed), restartRequested };
   } finally {
     observing.abort();
     await monitor.catch(() => undefined);

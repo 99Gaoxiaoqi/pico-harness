@@ -38,14 +38,14 @@ const shellQuote = (value: string) => `'${value.replaceAll("'", `'"'"'`)}'`;
 export function macGatewayLauncher(home: string): string {
   return `#!/bin/sh
 set -eu
-home=${shellQuote(home)}
-manifest="$home/active-runtime.json"
+gateway_home=${shellQuote(home)}
+manifest="$gateway_home/active-runtime.json"
 executable=$(/usr/bin/plutil -extract executablePath raw -o - "$manifest") || exit 1
 gateway=$(/usr/bin/plutil -extract gatewayPath raw -o - "$manifest") || exit 1
 [ -f "$executable" ] || exit 1
 supervisor="$(/usr/bin/dirname "$gateway")/gateway-supervisor.cjs"
 [ -f "$supervisor" ] || exit 1
-exec /usr/bin/env -i HOME="$HOME" USER="\${USER-}" LOGNAME="\${LOGNAME-}" TMPDIR="\${TMPDIR-/tmp}" PATH="/usr/bin:/bin:/usr/sbin:/sbin" ELECTRON_RUN_AS_NODE=1 "$executable" "$supervisor" --home "$home"
+exec /usr/bin/env -i HOME="$HOME" USER="\${USER-}" LOGNAME="\${LOGNAME-}" TMPDIR="\${TMPDIR-/tmp}" PATH="/usr/bin:/bin:/usr/sbin:/sbin" ELECTRON_RUN_AS_NODE=1 "$executable" "$supervisor" --home "$gateway_home"
 `;
 }
 export function windowsGatewayLauncher(): string {

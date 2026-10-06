@@ -50,13 +50,14 @@ test("共享状态锁跨进程保持代次，旧更新不能覆盖停止，过�
   const childScript = join(home, "state-writer.mjs");
   await writeFile(
     childScript,
-    `import { setGatewayDesiredRunning } from ${JSON.stringify(stateModule)}; for(let i=0;i<8;i++) await setGatewayDesiredRunning(process.argv[2], i%2===0);`,
+    `import { beginGatewayMaintenance } from ${JSON.stringify(stateModule)}; for(let i=0;i<8;i++) await beginGatewayMaintenance(process.argv[2], 'writer-'+process.pid);`,
   );
   await Promise.all(
     Array.from({ length: 4 }, () => promisify(execFile)(process.execPath, [childScript, home])),
   );
   assert.equal((await readGatewayServiceState(home)).generation, 32);
-  await setGatewayDesiredRunning(home, true);
+  const enabled = await setGatewayDesiredRunning(home, true);
+  assert.equal((await setGatewayDesiredRunning(home, true)).generation, enabled.generation);
   const update = await beginGatewayMaintenance(home, "old-build");
   await recordGatewayExit(home, { at: Date.now(), code: 0 });
   assert.equal((await readGatewayServiceState(home)).generation, update.generation);
@@ -107,7 +108,10 @@ test("macOS和Windows监督注册使用用户会话任务，开发模式不触�
   const launcher = join(home, "supervision", "gateway-launcher.sh");
   if (process.platform !== "win32") await promisify(execFile)("/bin/sh", ["-n", launcher]);
   if (process.platform === "darwin") await promisify(execFile)("/usr/bin/plutil", ["-lint", plist]);
-  assert.match(await readFile(launcher, "utf8"), /env -i/u);
+  const macScript = await readFile(launcher, "utf8");
+  assert.match(macScript, /env -i/u);
+  assert.match(macScript, /gateway_home=/u);
+  assert.doesNotMatch(macScript, /(?:^|\n)home=|\$home\b/u);
   present = false;
   const windows = createGatewaySystemSupervisor({ home, packaged: true, platform: "win32", run });
   await windows.register(runtime(home));
@@ -290,7 +294,7 @@ test("启动中的真实Gateway子进程遇到停止或维护会退出，维护�
   const count = join(home, "child-count.json");
   await writeFile(
     registered.gatewayPath,
-    `const fs=require('node:fs');const countFile=${JSON.stringify(count)};const n=fs.existsSync(countFile)?Number(fs.readFileSync(countFile,'utf8'))+1:1;fs.writeFileSync(countFile,String(n));fs.writeFileSync(${JSON.stringify(marker)},JSON.stringify({pid:process.pid,n,generation:Number(process.env.PICO_GATEWAY_SUPERVISION_GENERATION)}));process.on('SIGTERM',()=>{fs.writeFileSync(${JSON.stringify(exitMarker)},JSON.stringify({pid:process.pid,n}));process.exit(0);});setInterval(()=>{},1000);`,
+    `const fs=require('node:fs');const countFile=${JSON.stringify(count)};const n=fs.existsSync(countFile)?Number(fs.readFileSync(countFile,'utf8'))+1:1;fs.writeFileSync(countFile,String(n));fs.writeFileSync(${JSON.stringify(marker)},JSON.stringify({pid:process.pid,n,generation:Number(process.env.PICO_GATEWAY_SUPERVISION_GENERATION),buildId:process.env.PICO_GATEWAY_BUILD_ID}));process.on('SIGTERM',()=>{fs.writeFileSync(${JSON.stringify(exitMarker)},JSON.stringify({pid:process.pid,n}));process.exit(0);});setInterval(()=>{},1000);`,
   );
   await writeActiveGatewayRuntime(home, registered);
   const firstState = await setGatewayDesiredRunning(home, true);
@@ -304,11 +308,24 @@ test("启动中的真实Gateway子进程遇到停止或维护会退出，维护�
       env: { HOME: home, PATH: "/usr/bin:/bin", TMPDIR: tmpdir() },
       stdio: "pipe",
     });
+  const ownedChildren = new Set<number>();
+  t.after(() => {
+    for (const pid of ownedChildren) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        /* already exited */
+      }
+    }
+  });
   async function waitMarker(path: string, expected: number) {
     for (let i = 0; i < 200; i++) {
       try {
         const value = JSON.parse(await readFile(path, "utf8"));
-        if (value.n === expected) return value as { pid: number; n: number; generation?: number };
+        if (value.n === expected) {
+          ownedChildren.add(value.pid);
+          return value as { pid: number; n: number; generation?: number; buildId?: string };
+        }
       } catch {
         /* marker not published */
       }
@@ -340,7 +357,35 @@ test("启动中的真实Gateway子进程遇到停止或维护会退出，维护�
   assert.equal(await finishGatewayMaintenance(home, maintenance.generation), true);
   const afterUpdate = await waitMarker(marker, 3);
   assert.equal(afterUpdate.generation, maintenance.generation + 1);
+  // Pause only the supervisor so false→true occurs entirely between observations.
+  second.kill("SIGSTOP");
   await setGatewayDesiredRunning(home, false);
+  const reopened = await setGatewayDesiredRunning(home, true);
+  second.kill("SIGCONT");
   await waitMarker(exitMarker, 3);
+  const reopenedChild = await waitMarker(marker, 4);
+  assert.throws(() => process.kill(afterUpdate.pid, 0), /ESRCH/u);
+  assert.notEqual(reopenedChild.pid, afterUpdate.pid);
+  assert.equal(reopenedChild.generation, reopened.generation);
+  assert.equal((await setGatewayDesiredRunning(home, true)).generation, reopened.generation);
+  await delay(300);
+  assert.equal(
+    JSON.parse(await readFile(marker, "utf8")).n,
+    4,
+    "Repeated enabled intent must not restart the child",
+  );
+  // A maintenance window may also be created and cleared before the next observation.
+  second.kill("SIGSTOP");
+  const fastMaintenance = await beginGatewayMaintenance(home, "1.2.4", 5_000);
+  await writeActiveGatewayRuntime(home, { ...registered, buildId: "1.2.4" });
+  assert.equal(await finishGatewayMaintenance(home, fastMaintenance.generation), true);
+  second.kill("SIGCONT");
+  await waitMarker(exitMarker, 4);
+  const newestChild = await waitMarker(marker, 5);
+  assert.throws(() => process.kill(reopenedChild.pid, 0), /ESRCH/u);
+  assert.equal(newestChild.generation, fastMaintenance.generation + 1);
+  assert.equal(newestChild.buildId, "1.2.4");
+  await setGatewayDesiredRunning(home, false);
+  await waitMarker(exitMarker, 5);
   assert.equal(await secondExit, 0);
 });

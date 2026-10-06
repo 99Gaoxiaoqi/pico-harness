@@ -96,6 +96,8 @@ export function setGatewayDesiredRunning(
 ): Promise<GatewayServiceState> {
   return locked(home, async (canonical) => {
     const current = await load(canonical);
+    // A generation describes an intent transition, not a repeated API call.
+    if (current.desiredRunning === desiredRunning && !current.maintenance) return current;
     const { maintenance: _maintenance, ...rest } = current;
     const next: GatewayServiceState = {
       ...rest,
