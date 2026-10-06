@@ -5,137 +5,154 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 import { build } from "esbuild";
 
 test(
   "Desktop renderer 重建后通过全局列表恢复原请求并保留变更草稿",
   { timeout: 45_000 },
-  async (t) => {
-    const candidates = [
-      process.env.PICO_TEST_CHROME,
-      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-      "/usr/bin/google-chrome",
-      "/usr/bin/chromium",
-      "/usr/bin/chromium-browser",
-    ].filter((value): value is string => Boolean(value));
-    let chrome: string | undefined;
-    for (const candidate of candidates) {
-      if (
-        await access(candidate).then(
-          () => true,
-          () => false,
-        )
-      ) {
-        chrome = candidate;
-        break;
-      }
+  async (t) => runBrowserScenario(t, recoveryScenario, "send recovery"),
+);
+
+test(
+  "发送与恢复迟到确认不会抢回工作区，研究实施迟到确认不会抢回路由",
+  { timeout: 45_000 },
+  async (t) => runBrowserScenario(t, lateConfirmationScenario, "late confirmation"),
+);
+
+async function runBrowserScenario(t: TestContext, scenario: string, label: string) {
+  const candidates = [
+    process.env.PICO_TEST_CHROME,
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/usr/bin/google-chrome",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+  ].filter((value): value is string => Boolean(value));
+  let chrome: string | undefined;
+  for (const candidate of candidates) {
+    if (
+      await access(candidate).then(
+        () => true,
+        () => false,
+      )
+    ) {
+      chrome = candidate;
+      break;
     }
-    if (!chrome) {
-      t.skip("需要 Chrome/Chromium，可通过 PICO_TEST_CHROME 指定浏览器");
+  }
+  if (!chrome) {
+    t.skip("需要 Chrome/Chromium，可通过 PICO_TEST_CHROME 指定浏览器");
+    return;
+  }
+  const bundle = await build({
+    stdin: {
+      contents: scenario,
+      resolveDir: fileURLToPath(new URL("../../../", import.meta.url)),
+      loader: "tsx",
+    },
+    outdir: "/virtual-pico-pages",
+    plugins: [
+      {
+        name: "vite-brand-assets",
+        setup(bundler) {
+          // Exercise ConversationPage's real implementation callback without a research run.
+          bundler.onLoad({ filter: /DeepResearchPanel\.tsx$/ }, () => ({
+            contents: `export function DeepResearchPanel(props) {
+                return <button id="implement-research" onClick={() => {
+                  window.researchResult = props.onImplement("研究实施任务");
+                }}>实施研究</button>;
+              }`,
+            loader: "tsx",
+          }));
+          bundler.onLoad({ filter: /ComposerModelPicker\.tsx$/ }, async ({ path }) => ({
+            contents: (await readFile(path, "utf8")).replace(
+              /const marks = import\.meta\.glob<string>\([\s\S]*?\n\}\);/u,
+              "const marks: Record<string, string> = {};",
+            ),
+            loader: "tsx",
+          }));
+        },
+      },
+    ],
+    bundle: true,
+    write: false,
+    format: "iife",
+    platform: "browser",
+    jsx: "automatic",
+    define: { "process.env.NODE_ENV": '"development"' },
+  });
+  const script = bundle.outputFiles.find((file) => file.path.endsWith(".js"))?.text;
+  const css = bundle.outputFiles.find((file) => file.path.endsWith(".css"))?.text ?? "";
+  assert.ok(script);
+  const outcome = Promise.withResolvers<string>();
+  const server = createServer((request, response) => {
+    if (request.url === "/result") {
+      let body = "";
+      request.on("data", (chunk: Buffer) => {
+        body += chunk.toString();
+      });
+      request.on("end", () => {
+        response.end("ok");
+        outcome.resolve(body);
+      });
       return;
     }
-    const bundle = await build({
-      stdin: {
-        contents: recoveryScenario,
-        resolveDir: fileURLToPath(new URL("../../../", import.meta.url)),
-        loader: "tsx",
-      },
-      outdir: "/virtual-pico-pages",
-      plugins: [
-        {
-          name: "vite-brand-assets",
-          setup(bundler) {
-            bundler.onLoad({ filter: /ComposerModelPicker\.tsx$/ }, async ({ path }) => ({
-              contents: (await readFile(path, "utf8")).replace(
-                /const marks = import\.meta\.glob<string>\([\s\S]*?\n\}\);/u,
-                "const marks: Record<string, string> = {};",
-              ),
-              loader: "tsx",
-            }));
-          },
-        },
+    response.setHeader(
+      "content-type",
+      request.url === "/bundle.js"
+        ? "text/javascript"
+        : request.url === "/bundle.css"
+          ? "text/css"
+          : "text/html",
+    );
+    response.end(
+      request.url === "/bundle.js"
+        ? script
+        : request.url === "/bundle.css"
+          ? css
+          : '<!doctype html><html><head><link rel="stylesheet" href="/bundle.css"></head><body><div id="app"></div><pre id="result">RUNNING</pre><script src="/bundle.js"></script></body></html>',
+    );
+  });
+  const profile = await mkdtemp(join(tmpdir(), "pico-send-recovery-ui-"));
+  let browser: ChildProcess | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    assert.ok(address && typeof address !== "string");
+    browser = spawn(
+      chrome,
+      [
+        "--headless=new",
+        "--disable-gpu",
+        "--window-size=1280,900",
+        "--disable-background-networking",
+        "--no-first-run",
+        "--no-default-browser-check",
+        `--user-data-dir=${profile}`,
+        `http://127.0.0.1:${address.port}`,
       ],
-      bundle: true,
-      write: false,
-      format: "iife",
-      platform: "browser",
-      jsx: "automatic",
-      define: { "process.env.NODE_ENV": '"development"' },
-    });
-    const script = bundle.outputFiles.find((file) => file.path.endsWith(".js"))?.text;
-    const css = bundle.outputFiles.find((file) => file.path.endsWith(".css"))?.text ?? "";
-    assert.ok(script);
-    const outcome = Promise.withResolvers<string>();
-    const server = createServer((request, response) => {
-      if (request.url === "/result") {
-        let body = "";
-        request.on("data", (chunk: Buffer) => {
-          body += chunk.toString();
-        });
-        request.on("end", () => {
-          response.end("ok");
-          outcome.resolve(body);
-        });
-        return;
-      }
-      response.setHeader(
-        "content-type",
-        request.url === "/bundle.js"
-          ? "text/javascript"
-          : request.url === "/bundle.css"
-            ? "text/css"
-            : "text/html",
-      );
-      response.end(
-        request.url === "/bundle.js"
-          ? script
-          : request.url === "/bundle.css"
-            ? css
-            : '<!doctype html><html><head><link rel="stylesheet" href="/bundle.css"></head><body><div id="app"></div><pre id="result">RUNNING</pre><script src="/bundle.js"></script></body></html>',
-      );
-    });
-    const profile = await mkdtemp(join(tmpdir(), "pico-send-recovery-ui-"));
-    let browser: ChildProcess | undefined;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-      const address = server.address();
-      assert.ok(address && typeof address !== "string");
-      browser = spawn(
-        chrome,
-        [
-          "--headless=new",
-          "--disable-gpu",
-          "--window-size=1280,900",
-          "--disable-background-networking",
-          "--no-first-run",
-          "--no-default-browser-check",
-          `--user-data-dir=${profile}`,
-          `http://127.0.0.1:${address.port}`,
-        ],
-        { stdio: "ignore" },
-      );
-      browser.once("error", outcome.reject);
-      timer = setTimeout(
-        () => outcome.reject(new Error("Browser UI scenario did not finish in 30 seconds")),
-        30_000,
-      );
-      const result = await outcome.promise;
-      assert.match(result, /^PASS: send recovery$/, result);
-    } finally {
-      clearTimeout(timer);
-      if (browser && browser.exitCode === null && browser.signalCode === null) {
-        const closed = new Promise<void>((resolve) => browser!.once("exit", () => resolve()));
-        browser.kill("SIGTERM");
-        await closed;
-      }
-      server.closeAllConnections();
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-      await rm(profile, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+      { stdio: "ignore" },
+    );
+    browser.once("error", outcome.reject);
+    timer = setTimeout(
+      () => outcome.reject(new Error("Browser UI scenario did not finish in 30 seconds")),
+      30_000,
+    );
+    const result = await outcome.promise;
+    assert.equal(result, `PASS: ${label}`, result);
+  } finally {
+    clearTimeout(timer);
+    if (browser && browser.exitCode === null && browser.signalCode === null) {
+      const closed = new Promise<void>((resolve) => browser!.once("exit", () => resolve()));
+      browser.kill("SIGTERM");
+      await closed;
     }
-  },
-);
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(profile, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+  }
+}
 
 const recoveryScenario = `
 import * as React from "react";
@@ -250,5 +267,100 @@ const remount = async () => { await act(async()=>root.unmount()); await mount();
  check(readPersistentDraft(sideKey)==="","Unchanged acknowledged draft clears");
  await act(async()=>root.unmount());
  const result="PASS: send recovery";document.getElementById("result").textContent=result;await fetch("/result",{method:"POST",body:result});
+})().catch(async error=>{const result="FAIL: "+error.stack;document.getElementById("result").textContent=result;await fetch("/result",{method:"POST",body:result});});
+`;
+
+const lateConfirmationScenario = `
+import * as React from "react";
+import { act } from "react";
+import { createRoot } from "react-dom/client";
+import { MemoryRouter, Routes, Route, useNavigate, useLocation } from "react-router-dom";
+import { useRuntimeStore } from "./apps/desktop/src/renderer/runtime.ts";
+import { ConversationPage } from "./apps/desktop/src/renderer/pages/ConversationPage.tsx";
+import { RuntimeContext } from "./apps/desktop/src/renderer/runtime-context.tsx";
+import { previewData } from "./apps/desktop/src/renderer/fixture.ts";
+import { workspaceSessionKey, sessionHref } from "./apps/desktop/src/renderer/workspace-session.ts";
+import { PicoTheme } from "./apps/desktop/src/renderer/astryx-provider.tsx";
+window.IS_REACT_ACT_ENVIRONMENT = true;
+const check=(condition,message)=>{if(!condition)throw Error(message);};
+const inspections=[];
+const calls=[];
+let store;
+let sendMode="deferred";
+let finishSend;
+let finishResearch;
+let navigate;
+let researchCalls=[];
+window.pico={
+ runtime:new Proxy({},{get:(_target,method)=>async params=>{
+   if(method==="runtime.ping")return {ok:true,value:{picoHome:"/state/late",capabilities:["session-conversation-v1","session-send-replay-v1"]}};
+   if(method==="workspace.list")return {ok:true,value:{workspaces:[]}};
+   if(method==="workspace.status") {inspections.push(params.workspacePath);return {ok:true,value:{mode:"folder",temporary:false}};}
+   if(method==="workspace.trustStatus")return {ok:true,value:{trusted:true}};
+   if(method==="session.list")return {ok:true,value:{sessions:[]}};
+   if(method==="session.send") {
+     calls.push(params);
+     if(sendMode==="unknown")return {ok:false,error:{code:"RUNTIME_REQUEST_TIMEOUT",message:"lost",retryable:false,outcome:"unknown"}};
+     return new Promise(resolve=>{finishSend=resolve;});
+   }
+   return {ok:false,error:{code:"NOT_FOUND",message:"unavailable",retryable:false}};
+ }}),
+ platform:{getLaunchAtLogin:async()=>({ok:true,value:false})},
+ lifecycle:{getBackgroundMode:async()=>({ok:true,value:false})},
+ onUnavailable:()=>()=>{},onRecovered:()=>()=>{},
+ events:{subscribe:()=>({ready:Promise.resolve({ok:false,error:{code:"NOT_FOUND",message:"missing",retryable:false}}),dispose(){}})},
+ sessionFrames:{subscribe:()=>({dispose(){}})},
+};
+function Harness(){store=useRuntimeStore();return <div>{store.data.workspacePath}</div>;}
+function RouteObserver(){navigate=useNavigate();const location=useLocation();return <p id="route">{location.pathname+location.search}</p>;}
+const settle=async()=>{await act(async()=>{await new Promise(resolve=>setTimeout(resolve,20));});};
+const root=createRoot(document.getElementById("app"));
+(async()=>{
+ localStorage.clear();
+ await act(async()=>root.render(<Harness/>));
+ for(let i=0;i<30&&store.connection.kind!=="ready";i++)await settle();
+ check(store.connection.kind==="ready","bootstrap did not finish");
+ const a="/project/a",b="/project/b";
+ await act(async()=>{await store.actions.selectWorkspace(a);});
+ let sending;
+ await act(async()=>{sending=store.actions.sendMessage({workspacePath:a,sourceKey:"new:late-send",text:"普通发送"});});
+ check(typeof finishSend==="function","send must be in flight");
+ await act(async()=>{await store.actions.selectWorkspace(b);});
+ check(store.data.workspacePath===b,"workspace switch did not finish");
+ const beforeSendConfirmation=inspections.length;
+ await act(async()=>{finishSend({ok:true,value:{session:{sessionId:"late-send-session"}}});check((await sending).succeeded,"late send is still confirmed");});
+ await settle();
+ check(store.data.workspacePath===b&&inspections.length===beforeSendConfirmation,"Late send must not reload original workspace: "+JSON.stringify(inspections));
+ check(store.pendingSends.length===0,"Late confirmation must still remove its own pending");
+ await act(async()=>{await store.actions.selectWorkspace(a);});
+ sendMode="unknown";
+ await act(async()=>{check(!(await store.actions.sendMessage({workspacePath:a,sourceKey:"new:late-recover",text:"待恢复任务"})).succeeded,"lost send must remain pending");});
+ const originalKey=calls.at(-1).idempotencyKey;
+ sendMode="deferred";finishSend=undefined;
+ let recovering;
+ await act(async()=>{recovering=store.actions.recoverPendingSend("new:late-recover");});
+ check(typeof finishSend==="function"&&calls.at(-1).replayOnly&&calls.at(-1).idempotencyKey===originalKey,"recovery must wait on the frozen request");
+ await act(async()=>{await store.actions.selectWorkspace(b);});
+ const beforeRecoveryConfirmation=inspections.length;
+ await act(async()=>{finishSend({ok:true,value:{session:{sessionId:"late-recovery-session"}}});check((await recovering).succeeded,"late recovery is still confirmed");});
+ await settle();
+ check(store.data.workspacePath===b&&inspections.length===beforeRecoveryConfirmation,"Late recovery must not reload original workspace: "+JSON.stringify(inspections));
+ check(store.pendingSends.length===0,"Confirmed recovery must remove pending after switching");
+ const refs=[{workspacePath:a,sessionId:"research-source"},{workspacePath:a,sessionId:"research-other"}];
+ const conversations=Object.fromEntries(refs.map(ref=>[workspaceSessionKey(ref),{...ref,items:[],queuedCount:0,settings:{...Object.values(previewData.conversations)[0].settings,collaborationMode:"research",orchestrationMode:"default"}}]));
+ const actions=new Proxy({loadSession:async()=>{},sendMessage:input=>{researchCalls.push(input);return new Promise(resolve=>{finishResearch=resolve;});}},{get:(target,key)=>target[key]??(()=>Promise.resolve())});
+ const runtime={...store,preview:false,busy:undefined,message:undefined,data:{...previewData,picoHome:"/state/late",workspacePath:a,trusted:true,conversations,runs:[],approvals:[],prompts:[],sessions:refs.map(ref=>({id:ref.sessionId,workspacePath:a,title:ref.sessionId,status:"active",updatedAt:0}))},actions};
+ await act(async()=>root.render(<PicoTheme><RuntimeContext value={runtime}><MemoryRouter initialEntries={[sessionHref(refs[0])]}><RouteObserver/><Routes><Route path="/session/:sessionId" element={<ConversationPage/>}/><Route path="/elsewhere" element={<p>其他页面</p>}/></Routes></MemoryRouter></RuntimeContext></PicoTheme>));
+ for(const destination of [sessionHref(refs[1]),"/elsewhere"]) {
+   finishResearch=undefined;
+   await act(async()=>document.getElementById("implement-research").click());
+   check(typeof finishResearch==="function","research implementation must be in flight");
+   await act(async()=>navigate(destination));
+   await act(async()=>{finishResearch({succeeded:true,workspacePath:a,sessionId:"late-implementation"});await window.researchResult;});
+   check(document.getElementById("route").textContent===destination,"Late research confirmation must preserve the selected route: "+document.getElementById("route").textContent);
+ }
+ check(researchCalls.length===2&&researchCalls.every(input=>input.sourceKey.startsWith("research-implement:")),"research sends must retain their source");
+ await act(async()=>root.unmount());
+ const result="PASS: late confirmation";document.getElementById("result").textContent=result;await fetch("/result",{method:"POST",body:result});
 })().catch(async error=>{const result="FAIL: "+error.stack;document.getElementById("result").textContent=result;await fetch("/result",{method:"POST",body:result});});
 `;

@@ -593,6 +593,7 @@ export function ConversationPage() {
   };
 
   const implementResearch = async (prompt: string) => {
+    const sourceDraftKey = draftKey;
     if (pendingResearchSend) throw new Error("实施任务的发送待确认，请先恢复发送结果或放弃恢复。");
     writePersistentDraft(researchSourceKey, prompt);
     const result = await actions.sendMessage({
@@ -609,6 +610,7 @@ export function ConversationPage() {
           : {}),
       },
     });
+    if (sendRouteRef.current !== sourceDraftKey) return;
     if (!result.succeeded || !result.sessionId)
       throw new Error("实施任务发送未确认，请查看待确认发送列表；原请求可能已经执行。");
     navigate(

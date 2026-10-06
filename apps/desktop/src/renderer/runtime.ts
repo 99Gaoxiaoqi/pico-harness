@@ -331,9 +331,7 @@ export interface RuntimeActions {
   ): Promise<boolean>;
   loadSession(ref: WorkspaceSessionRef): Promise<void>;
   loadEarlierSession(ref: WorkspaceSessionRef): Promise<void>;
-  recoverPendingSend?(
-    sourceKey: string,
-  ): Promise<{
+  recoverPendingSend?(sourceKey: string): Promise<{
     readonly succeeded: boolean;
     readonly workspacePath?: string;
     readonly sessionId?: string;
@@ -2167,7 +2165,17 @@ export function useRuntimeStore(): RuntimeStore {
           // neither delay clearing the sent draft nor turn a refresh error into a
           // failed send that the user might submit again.
           void (async () => {
+            if (
+              dataRef.current.workspacePath !== workspacePath ||
+              workspaceLoadIntentRef.current !== workspacePath
+            )
+              return;
             await loadWorkspace(bridge, workspacePath);
+            if (
+              dataRef.current.workspacePath !== workspacePath ||
+              workspaceLoadIntentRef.current !== workspacePath
+            )
+              return;
             if (resolvedSessionId) {
               await loadConversation(bridge, workspacePath, resolvedSessionId);
             }
@@ -2199,7 +2207,17 @@ export function useRuntimeStore(): RuntimeStore {
           recovered = { workspacePath, sessionId };
           setMessage("发送结果已确认。");
           void (async () => {
+            if (
+              dataRef.current.workspacePath !== workspacePath ||
+              workspaceLoadIntentRef.current !== workspacePath
+            )
+              return;
             await loadWorkspace(bridge, workspacePath);
+            if (
+              dataRef.current.workspacePath !== workspacePath ||
+              workspaceLoadIntentRef.current !== workspacePath
+            )
+              return;
             await loadConversation(bridge, workspacePath, sessionId);
           })().catch((cause) => {
             setMessage(`发送已确认，但原会话暂时不可用：${errorMessage(cause)}`);
