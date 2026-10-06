@@ -39,6 +39,15 @@ import {
 } from "./validation.js";
 import type { RuntimeParamRule, RuntimeParamValidator, RuntimeResultRule } from "./validation.js";
 
+/** Public endpoint projection shared with Host patch comparison and remote results. */
+export function publicProviderEndpoint(input: string): string {
+  try {
+    const url = new URL(input);
+    url.username = ""; url.password = ""; url.search = ""; url.hash = "";
+    return url.toString();
+  } catch { return "[地址不可展示]"; }
+}
+
 export type RuntimeProviderInput = JsonObject & {
   readonly id: string;
   readonly protocol: RuntimeProviderKind;
@@ -318,6 +327,7 @@ export type ConfigMethodMap = {
     readonly params: {
       readonly provider: RuntimeProviderInput;
       readonly expectedRevision: string;
+      readonly inputMode?: "public-patch";
     };
     readonly result: {
       readonly provider: RuntimeProviderProfile;
@@ -403,7 +413,7 @@ export const configParamValidators = {
   "provider.upsert": exactParamShape({
     provider: runtimeProviderParam,
     expectedRevision: stringParam,
-  }),
+  }, { inputMode: oneOfParam(["public-patch"]) }),
   "provider.importEnvironment": exactParamShape({
     provider: runtimeProviderParam,
     defaultModel: stringParam,
