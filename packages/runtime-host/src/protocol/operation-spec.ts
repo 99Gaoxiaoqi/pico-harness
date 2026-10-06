@@ -12,6 +12,7 @@ export type HostOperationErrorCode =
   | "capability_unavailable"
   | "invalid_request"
   | "reset_required"
+  | "send_recovery_unavailable"
   | "projection_incomplete"
   | "persistence_failed"
   | "commit_outcome_unknown"
