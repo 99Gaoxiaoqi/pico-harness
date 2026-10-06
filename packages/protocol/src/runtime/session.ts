@@ -394,8 +394,6 @@ export type SessionMethodMap = {
       readonly sourceSessionId: SessionId;
       readonly panelId: string;
       readonly idempotencyKey: string;
-      /** Recover an existing authoritative result; never admit a new input. */
-      readonly replayOnly?: true;
     };
     readonly result: {
       readonly session: RuntimeSession;
@@ -427,6 +425,8 @@ export type SessionMethodMap = {
       readonly behavior?: SessionSendBehavior;
       readonly expectedRunId?: RunId;
       readonly idempotencyKey: string;
+      /** Recover an existing authoritative result; never admit a new input. */
+      readonly replayOnly?: true;
     };
     readonly result: {
       readonly session: RuntimeSession;
