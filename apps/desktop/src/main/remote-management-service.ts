@@ -1,5 +1,15 @@
 import { waitForDelay } from "@pico/runtime/deadline";
-import { readFile, writeFile, rename } from "node:fs/promises";
+import { access } from "node:fs/promises";
+import {
+  readGatewayServiceState,
+  setGatewayDesiredRunning,
+  beginGatewayMaintenance,
+  finishGatewayMaintenance,
+  readActiveGatewayRuntime,
+  writeActiveGatewayRuntime,
+  type ActiveGatewayRuntime,
+} from "@pico/remote-gateway/desktop";
+import type { GatewaySystemSupervisor } from "./gateway-system-supervision.js";
 import { join } from "node:path";
 import type { RemotePermission } from "@pico/protocol/remote";
 import type {
@@ -9,10 +19,14 @@ import type {
   RemoteManagementSnapshot,
   RemotePending,
   RemotePairingQr,
+  RemoteSupervisionSnapshot,
 } from "../preload/remote-management-contract.js";
 
 export interface RemoteManagementDependencies {
   readonly preferencesDirectory: string;
+  readonly gatewayHome?: string;
+  readonly supervisor?: GatewaySystemSupervisor;
+  readonly activeRuntime?: (previous?: ActiveGatewayRuntime) => Promise<ActiveGatewayRuntime>;
   readonly readConfiguration: () => Promise<RemoteConfiguration>;
   readonly configure: (input: RemoteConfigureInput) => Promise<unknown>;
   readonly control: (method: string, params?: Record<string, unknown>) => Promise<unknown>;
@@ -33,35 +47,88 @@ const list = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
 /** The service owns persistence/process transitions; Renderer never receives control credentials. */
 export class RemoteManagementService {
   private tail: Promise<unknown> = Promise.resolve();
+  private startupTimedOut = false;
   private readonly preferencePath: string;
   constructor(private readonly dependencies: RemoteManagementDependencies) {
     this.preferencePath = join(dependencies.preferencesDirectory, "mobile-connection.json");
   }
-  private async enabled(): Promise<boolean> {
-    try {
-      return record(JSON.parse(await readFile(this.preferencePath, "utf8"))).enabled === true;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT" || error instanceof SyntaxError)
-        return false;
-      throw error;
-    }
+  private get home(): string {
+    return this.dependencies.gatewayHome ?? this.dependencies.preferencesDirectory;
   }
-  private async persist(enabled: boolean): Promise<void> {
-    const temporary = `${this.preferencePath}.tmp`;
-    await writeFile(temporary, JSON.stringify({ version: 1, enabled }), { mode: 0o600 });
-    await rename(temporary, this.preferencePath);
+  private async serviceState() {
+    return readGatewayServiceState(this.home, this.preferencePath);
+  }
+  private async registerRuntime(): Promise<void> {
+    if (!this.dependencies.activeRuntime) return;
+    const runtime = await this.dependencies.activeRuntime(
+      await readActiveGatewayRuntime(this.home),
+    );
+    await writeActiveGatewayRuntime(this.home, runtime);
+    await this.dependencies.supervisor?.register(runtime);
+  }
+  private async supervision(status?: Record<string, unknown>): Promise<RemoteSupervisionSnapshot> {
+    const state = await this.serviceState();
+    const runtime = await readActiveGatewayRuntime(this.home);
+    const backend = this.dependencies.supervisor?.backend ?? "none";
+    const registered = (await this.dependencies.supervisor?.registered()) ?? false;
+    let missing = false;
+    if (runtime) {
+      try {
+        await Promise.all([access(runtime.executablePath), access(runtime.gatewayPath)]);
+      } catch {
+        missing = true;
+      }
+    } else if (backend !== "none" && state.desiredRunning) missing = true;
+    const issueCode = missing
+      ? "installation_missing"
+      : backend !== "none" && state.desiredRunning && !registered
+        ? "registration_missing"
+        : this.startupTimedOut && state.desiredRunning && !status
+          ? "startup_timeout"
+          : undefined;
+    return {
+      backend,
+      desiredRunning: state.desiredRunning,
+      registration: backend === "none" ? "unsupported" : registered ? "registered" : "missing",
+      phase: issueCode
+        ? "blocked"
+        : state.maintenance
+          ? "updating"
+          : status
+            ? "running"
+            : state.desiredRunning
+              ? "recovering"
+              : "stopped",
+      scope: backend === "none" ? "none" : "user-session",
+      ...(runtime ? { registeredBuildId: runtime.buildId } : {}),
+      ...(typeof status?.buildId === "string" ? { runningBuildId: status.buildId } : {}),
+      ...(state.lastExit ? { lastExit: state.lastExit } : {}),
+      ...(issueCode ? { issueCode } : {}),
+    };
   }
   private serialize<T>(action: () => Promise<T>): Promise<T> {
     const next = this.tail.then(action, action);
     this.tail = next.catch(() => undefined);
     return next;
   }
-  async restore(): Promise<void> {
-    if (await this.enabled()) await this.start();
+  restore(): Promise<void> {
+    return this.serialize(async () => {
+      let state = await this.serviceState();
+      if (!state.desiredRunning && !(await readActiveGatewayRuntime(this.home))) return;
+      await this.registerRuntime();
+      if (state.maintenance)
+        await finishGatewayMaintenance(this.home, state.maintenance.generation);
+      state = await this.serviceState();
+      if (!state.desiredRunning) {
+        await this.dependencies.supervisor?.disable();
+        return;
+      }
+      await this.ensureRunning();
+    });
   }
   async snapshot(): Promise<RemoteManagementSnapshot> {
     const [enabled, configuration] = await Promise.all([
-      this.enabled(),
+      this.serviceState().then((state) => state.desiredRunning),
       this.dependencies.readConfiguration(),
     ]);
     let status: Record<string, unknown>;
@@ -71,6 +138,7 @@ export class RemoteManagementService {
       return {
         enabled,
         running: false,
+        supervision: await this.supervision(),
         configuration: this.publicConfiguration(configuration),
         devices: [],
         pending: [],
@@ -95,6 +163,7 @@ export class RemoteManagementService {
     return {
       enabled,
       running: true,
+      supervision: await this.supervision(status),
       configuration: this.publicConfiguration(configuration),
       ...(relayState ? { relayState } : {}),
       ...(number(relay.lastConnectedAt) !== undefined
@@ -152,36 +221,65 @@ export class RemoteManagementService {
       return this.snapshot();
     });
   }
+  private async ensureRunning(): Promise<void> {
+    this.startupTimedOut = false;
+    try {
+      await this.dependencies.control("status");
+      return;
+    } catch {
+      /* authenticated control absent */
+    }
+    if (this.dependencies.supervisor && this.dependencies.supervisor.backend !== "none") {
+      await this.dependencies.supervisor.enable();
+      await this.dependencies.supervisor.launch();
+    } else await this.dependencies.spawn();
+    const delay = this.dependencies.delay ?? waitForDelay;
+    for (let attempt = 0; attempt < (this.dependencies.startupAttempts ?? 60); attempt++) {
+      await delay(500);
+      try {
+        await this.dependencies.control("status");
+        return;
+      } catch {
+        /* startup handshake */
+      }
+      if (!(await this.serviceState()).desiredRunning) return;
+    }
+    this.startupTimedOut = true;
+    throw new Error("手机连接启动超时，请检查配置和网络后重试。");
+  }
   start(): Promise<RemoteManagementSnapshot> {
     return this.serialize(async () => {
       const config = await this.dependencies.readConfiguration();
       if (!config.configured) throw new Error("请先配置手机连接。");
-      try {
-        await this.dependencies.control("status");
-      } catch {
-        await this.dependencies.spawn();
-        const delay = this.dependencies.delay ?? waitForDelay;
-        let ready = false;
-        for (let attempt = 0; attempt < (this.dependencies.startupAttempts ?? 60); attempt++) {
-          await delay(500);
-          try {
-            await this.dependencies.control("status");
-            ready = true;
-            break;
-          } catch {
-            /* startup handshake */
-          }
-        }
-        if (!ready) throw new Error("手机连接启动超时，请检查配置和网络后重试。");
-      }
-      await this.persist(true);
+      await this.serviceState();
+      await this.registerRuntime();
+      // Registration must succeed before accepting a durable running intent.
+      await setGatewayDesiredRunning(this.home, true);
+      await this.ensureRunning();
       return this.snapshot();
     });
   }
+  private async waitForStopped(): Promise<void> {
+    const delay = this.dependencies.delay ?? waitForDelay;
+    for (let attempt = 0; attempt < 100; attempt++) {
+      try {
+        await this.dependencies.control("status");
+      } catch {
+        return;
+      }
+      await delay(100);
+    }
+    throw new Error("停止手机连接尚未完成，请稍后重试。");
+  }
   stop(): Promise<RemoteManagementSnapshot> {
     return this.serialize(async () => {
-      // Persist first so a concurrent Desktop exit cannot re-enable the gateway on restart.
-      await this.persist(false);
+      await setGatewayDesiredRunning(this.home, false);
+      let disableError: unknown;
+      try {
+        await this.dependencies.supervisor?.disable();
+      } catch (error) {
+        disableError = error;
+      }
       let running = false;
       try {
         await this.dependencies.control("status");
@@ -191,18 +289,36 @@ export class RemoteManagementService {
       }
       if (running) {
         await this.dependencies.control("stop");
-        const delay = this.dependencies.delay ?? waitForDelay;
-        for (let attempt = 0; attempt < 40; attempt++) {
-          await delay(100);
-          try {
-            await this.dependencies.control("status");
-          } catch {
-            return this.snapshot();
-          }
-        }
-        throw new Error("停止手机连接尚未完成，请稍后重试。");
+        await this.waitForStopped();
       }
+      if (disableError) throw disableError;
       return this.snapshot();
+    });
+  }
+  async uninstall(): Promise<void> {
+    try {
+      await this.stop();
+    } finally {
+      await this.dependencies.supervisor?.unregister();
+    }
+  }
+  prepareForUpdate(): Promise<void> {
+    return this.serialize(async () => {
+      let running = false;
+      try {
+        await this.dependencies.control("status");
+        running = true;
+      } catch {
+        /* offline gateway still needs maintenance fence */
+      }
+      if (running) {
+        await this.dependencies.control("stopForUpdate");
+        await this.waitForStopped();
+      } else
+        await beginGatewayMaintenance(
+          this.home,
+          (await readActiveGatewayRuntime(this.home))?.buildId,
+        );
     });
   }
   async offer(): Promise<RemotePairingQr> {

@@ -96,6 +96,11 @@ const config = {
           target: "main",
         },
         {
+          entry: "src/main/gateway-supervisor-entry.ts",
+          config: "vite.gateway-supervisor.config.ts",
+          target: "main",
+        },
+        {
           entry: "src/main/gateway-entry.ts",
           config: "vite.gateway.config.ts",
           target: "main",

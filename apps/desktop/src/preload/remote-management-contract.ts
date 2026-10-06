@@ -37,10 +37,27 @@ export interface RemotePending {
   readonly deviceName: string;
   readonly expiresAt: number;
 }
+export interface RemoteSupervisionSnapshot {
+  readonly backend: "launchd" | "task-scheduler" | "none";
+  readonly desiredRunning: boolean;
+  readonly registration: "registered" | "missing" | "unsupported";
+  readonly phase: "running" | "stopped" | "recovering" | "updating" | "blocked";
+  readonly scope: "user-session" | "none";
+  readonly registeredBuildId?: string;
+  readonly runningBuildId?: string;
+  readonly lastExit?: {
+    readonly at: number;
+    readonly code?: number | null;
+    readonly signal?: string | null;
+    readonly buildId?: string;
+  };
+  readonly issueCode?: "installation_missing" | "registration_missing" | "startup_timeout";
+}
 export interface RemoteManagementSnapshot {
   readonly enabled: boolean;
   readonly running: boolean;
   readonly configuration: RemoteConfiguration;
+  readonly supervision?: RemoteSupervisionSnapshot;
   readonly relayState?:
     | "disabled"
     | "connecting"

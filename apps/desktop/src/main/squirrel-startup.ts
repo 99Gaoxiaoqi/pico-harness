@@ -1,6 +1,7 @@
 import { app } from "electron";
 import { spawn } from "node:child_process";
 import { basename } from "node:path";
+import { createDesktopRemoteManagement } from "./remote-management.js";
 import { resolveSquirrelUpdaterPath } from "./squirrel-paths.js";
 
 export function handleSquirrelStartup(): boolean {
@@ -32,7 +33,20 @@ export function handleSquirrelStartup(): boolean {
   });
   child.once("close", (code) => {
     clearTimeout(timeout);
-    app.exit(code === 0 ? 0 : 1);
+    if (code !== 0) {
+      app.exit(1);
+      return;
+    }
+    // Squirrel executes the callback from the new app-version directory.
+    const remote = createDesktopRemoteManagement(app.getPath("userData"), true);
+    const transition = event === "--squirrel-uninstall" ? remote.uninstall() : remote.restore();
+    void transition.then(
+      () => app.exit(0),
+      (error: unknown) => {
+        console.error("Pico installer gateway transition failed", error);
+        app.exit(1);
+      },
+    );
   });
   return true;
 }
