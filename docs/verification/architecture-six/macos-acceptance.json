@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-06",
+  "platform": "darwin-arm64",
+  "result": "PASS",
+  "electron": "43.5.0",
+  "node": "24.19.0",
+  "coldStartMs": 1649,
+  "recoveryMs": 14618,
+  "recoveryTargetMs": 30000,
+  "desktopStarted": false,
+  "authenticatedControl": true,
+  "tlsVerified": true,
+  "nonDefaultPicoHome": true,
+  "chineseSpacePathToolExecuted": true,
+  "daemonManifestPathInherited": true,
+  "cleanupCompleted": true,
+  "productionLabelUsed": false,
+  "checks": [
+    "packaged-ELECTRON_RUN_AS_NODE",
+    "Chinese-space-PATH-tool",
+    "local-TLS-and-authenticated-control",
+    "launchctl-recovery-without-Desktop-within-30s",
+    "packaged-daemon-cold-start",
+    "unique-label-cleanup"
+  ],
+  "notRun": [
+    "Desktop UI quit",
+    "logout/login",
+    "install/update/uninstall",
+    "Windows native",
+    "release signing/notarization",
+    "public-network phone reconnect"
+  ]
+}

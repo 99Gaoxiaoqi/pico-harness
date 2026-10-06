@@ -23,6 +23,7 @@ import {
   RemoteRuntimeClient,
   type RemoteSocket,
 } from "../../../packages/remote-client/src/index.js";
+import { RelayTransport } from "../../../packages/remote-client/src/relay-transport.js";
 import {
   createRemoteGateway,
   configureRelayGateway,
@@ -255,6 +256,46 @@ for (const setupMode of ["invitation", "prebound"] as const)
       assert.equal(approved.status, "approved");
       if (approved.status !== "approved") throw new Error("approval missing");
       await RemoteRuntimeClient.acknowledgePairing(relay.origin, pairing, tls.fetcher, transport);
+      const eventTransport = new RelayTransport(transport);
+      try {
+        const headers = { Authorization: `Bearer ${approved.deviceToken}` };
+        const openEvents = async () => {
+          const events = eventTransport.createWebSocket(
+            relay.origin.replace(/^https:/, "wss:") + "/v1/events",
+            headers,
+          );
+          await new Promise<void>((resolve, reject) => {
+            events.onmessage = ({ data }) => {
+              if (JSON.parse(String(data)).type === "ready") resolve();
+            };
+            events.onclose = () => reject(new Error("event stream closed before ready"));
+            events.onerror = () => reject(new Error("event stream failed before ready"));
+          });
+          return events;
+        };
+        const firstEvents = await openEvents();
+        const connectionCount = sockets.length;
+        firstEvents.close();
+        const rpc = await eventTransport.fetch(relay.origin + "/v1/rpc", {
+          method: "POST",
+          headers,
+          signal: AbortSignal.timeout(3000),
+          body: JSON.stringify({
+            version: 1,
+            requestId: "after-events-close",
+            method: "session.list",
+            workspaceId,
+            params: {},
+          }),
+        });
+        assert.equal(rpc.status, 200, "closing events preserves the shared Relay RPC channel");
+        assert.equal(JSON.parse(await rpc.text()).ok, true);
+        const reopenedEvents = await openEvents();
+        assert.equal(sockets.length, connectionCount, "events reopen on the same Relay channel");
+        reopenedEvents.close();
+      } finally {
+        eventTransport.close();
+      }
       const remote = new RemoteRuntimeClient({
         publicUrl: relay.origin,
         gatewayId: approved.gatewayId,

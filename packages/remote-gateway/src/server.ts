@@ -20,10 +20,9 @@ import { WorkspaceRegistrationStore } from "@pico/pico-host/workspace-registrati
 import {
   parseRuntimeResult,
   MODEL_CATALOG_RUNTIME_CAPABILITY,
+  CONFIG_SECRET_PATCH_RUNTIME_CAPABILITY,
   REVIEW_IDEMPOTENCY_RUNTIME_CAPABILITY,
   MEMORY_PAGINATION_RUNTIME_CAPABILITY,
-  type RuntimeParams,
-  type RuntimeSessionSubscriptionFrame,
 } from "@pico/protocol";
 import {
   REMOTE_DEFAULT_PERMISSIONS,
@@ -37,11 +36,17 @@ import {
   type RemoteServerMessage,
 } from "@pico/protocol/remote";
 import { acquireGatewayLock, requestGatewayControl, startControlServer } from "./control.js";
+import {
+  setGatewayDesiredRunning,
+  beginGatewayMaintenance,
+  readActiveGatewayRuntime,
+  readGatewayServiceState,
+} from "./supervision-state.js";
+import { gatewayAuthorizationMetrics } from "./access-metrics.js";
 import { GatewayError, safeGatewayError } from "./errors.js";
+import { RuntimeAccessSession } from "./runtime-access.js";
 import { GatewayPairings, type PairingConfirmation } from "./pairing.js";
 import {
-  authorizeRuntimeRequest,
-  publicEndpoint,
   requirePermission,
   resolveDeviceWorkspace,
   SESSION_CLEANUP_METHODS,
@@ -63,6 +68,10 @@ import {
 
 export interface RemoteGatewayOptions {
   readonly home?: string;
+  /** Build identity captured by the trusted packaged launcher. */
+  readonly buildId?: string;
+  /** Intent generation supplied only by the trusted system supervisor. */
+  readonly supervisionGeneration?: number;
   /** Trusted host adapter. Test doubles never alter TLS verification in client code. */
   readonly createRuntimeClient?: (deviceId: string) => GatewayRuntimeClient;
   readonly now?: () => number;
@@ -79,16 +88,10 @@ export interface GatewayAuditEntry {
 }
 interface DeviceConnection {
   readonly client: GatewayRuntimeClient;
-  readonly sessionSubscriptions: Map<string, { workspaceId: string; sessionId: string }>;
-  readonly pendingSessionOpens: Map<string, number>;
-  readonly pendingFrames: RuntimeSessionSubscriptionFrame[];
-  pendingFrameBytes: number;
+  readonly access: RuntimeAccessSession;
   socket?: GatewaySocket;
-  frameDispose?: () => void;
-  readonly eventSubscriptions: Map<string, () => void>;
-  requests: number;
+  ingressRequests: number;
   lastSeenPersisted: number;
-  readonly downloads: Set<GatewayResponse>;
 }
 interface RateBucket {
   tokens: number;
@@ -113,6 +116,7 @@ export class RemoteGateway {
   private lastError?: string;
   private closing = false;
   private startedAt = 0;
+  private runningBuildId?: string;
   private runtimeLastReachableAt?: number;
   private runtimeLastFailure?: string;
   private sweep?: NodeJS.Timeout;
@@ -152,6 +156,19 @@ export class RemoteGateway {
     if (this.startedAt || this.closing) throw new Error("网关已启动或关闭");
     this.releaseLock = await acquireGatewayLock(this.home);
     try {
+      if (this.options.supervisionGeneration !== undefined) {
+        const intent = await readGatewayServiceState(this.home);
+        if (
+          !Number.isSafeInteger(this.options.supervisionGeneration) ||
+          !intent.desiredRunning ||
+          intent.maintenance ||
+          intent.generation !== this.options.supervisionGeneration
+        ) {
+          throw new Error("GATEWAY_SUPERVISION_INTENT_CHANGED");
+        }
+      }
+      this.runningBuildId =
+        this.options.buildId ?? (await readActiveGatewayRuntime(this.home))?.buildId;
       if (!this.config.relay) {
         const [cert, key] = await Promise.all([
           readTlsFile(this.config.certificatePath),
@@ -208,6 +225,7 @@ export class RemoteGateway {
             ? { runtimeHostRootPath: this.config.runtimeHostRootPath }
             : {}),
           surface: "inspect",
+          onResponseMetrics: (metrics) => gatewayAuthorizationMetrics.recordTransport(metrics),
         });
       try {
         parseRuntimeResult("runtime.ping", await bootstrap.request("runtime.ping", {}));
@@ -278,10 +296,18 @@ export class RemoteGateway {
         : {};
     switch (method) {
       case "stop":
+        await setGatewayDesiredRunning(this.home, false);
         scheduleUnrefDeadline(() => {
           void this.close();
         }, 25);
         return { stopped: true };
+      case "stopForUpdate": {
+        const state = await beginGatewayMaintenance(this.home, this.runningBuildId);
+        scheduleUnrefDeadline(() => {
+          void this.close();
+        }, 25);
+        return state.maintenance;
+      }
       case "status":
         return this.status();
       case "doctor":
@@ -380,17 +406,28 @@ export class RemoteGateway {
             : {}),
           terminalOwnerId: `remote:${device.id}`,
           surface: "inspect",
+          onResponseMetrics: (metrics) => gatewayAuthorizationMetrics.recordTransport(metrics),
         });
       connection = {
         client,
-        sessionSubscriptions: new Map(),
-        pendingSessionOpens: new Map(),
-        pendingFrames: [],
-        pendingFrameBytes: 0,
-        eventSubscriptions: new Map(),
-        requests: 0,
+        access: new RuntimeAccessSession({
+          config: this.config,
+          principal: {
+            id: device.id,
+            terminalOwnerId: `remote:${device.id}`,
+            permissions: device.permissions,
+            workspaceIds: device.workspaceIds,
+          },
+          client,
+          isCurrent: () =>
+            this.state.devices.includes(device) && !device.revokedAt && !this.closing,
+          onReachable: () => {
+            this.runtimeLastReachableAt = this.now();
+            this.runtimeLastFailure = undefined;
+          },
+        }),
+        ingressRequests: 0,
         lastSeenPersisted: 0,
-        downloads: new Set(),
       };
       this.connections.set(device.id, connection);
     }
@@ -412,10 +449,7 @@ export class RemoteGateway {
       const timeout = scheduleUnrefDeadline(() => closingSocket.terminate(), 1000);
       closingSocket.once("close", () => timeout.cancel());
     }
-    connection.frameDispose?.();
-    for (const dispose of connection.eventSubscriptions.values()) dispose();
-    for (const response of connection.downloads) response.destroy();
-    connection.client.close();
+    connection.access.close();
     this.connections.delete(deviceId);
   }
   private async revoke(device: GatewayDevice, acknowledge?: () => void): Promise<void> {
@@ -525,7 +559,7 @@ export class RemoteGateway {
     let method = `${request.method ?? "?"} HTTP`;
     let workspaceId: string | undefined;
     let requestId = "";
-    let dispatched = false;
+    let admittedConnection: DeviceConnection | undefined;
     response.setHeader("Cache-Control", "no-store");
     response.setHeader("X-Content-Type-Options", "nosniff");
     response.setHeader("Referrer-Policy", "no-referrer");
@@ -577,125 +611,34 @@ export class RemoteGateway {
         return;
       }
       const connection = this.connection(device);
-      if (connection.requests >= 16)
+      // Include slow request bodies in the transport budget, before Runtime dispatch begins.
+      if (connection.ingressRequests >= 16)
         throw new GatewayError("RATE_LIMITED", "并发请求过多", 429, true);
-      connection.requests++;
-      try {
-        if (request.method === "POST" && url.pathname === "/v1/rpc") {
-          const rpc = parseRemoteRequest(await body(request));
-          requestId = rpc.requestId;
-          method = rpc.method;
-          workspaceId = rpc.workspaceId;
-          const authorized = await authorizeRuntimeRequest(
-            this.config,
-            device,
-            connection.client,
-            rpc,
-          );
-          if (rpc.method === "catalog.models" && !(await this.supportsModelCatalog(device)))
-            throw new GatewayError(
-              "METHOD_NOT_FOUND",
-              "电脑尚未支持模型目录，请更新并重启 Pico",
-              404,
-            );
-          const params = authorized.params as Record<string, unknown>;
-          if (
-            (rpc.method === "changes.review" && params.idempotencyKey) ||
-            (rpc.method === "memory.list" && params.paged)
-          ) {
-            const required =
-              rpc.method === "changes.review"
-                ? REVIEW_IDEMPOTENCY_RUNTIME_CAPABILITY
-                : MEMORY_PAGINATION_RUNTIME_CAPABILITY;
-            if (!(await this.runtimeCapabilities(device)).has(required))
-              throw new GatewayError(
-                "METHOD_NOT_FOUND",
-                "电脑尚未支持此操作的可靠恢复，请更新并重启 Pico",
-                404,
-              );
-          }
-          if (
-            rpc.method === "session.subscription.open" &&
-            connection.sessionSubscriptions.size >= 16
-          )
-            throw new GatewayError("RATE_LIMITED", "会话订阅过多", 429);
-          if (rpc.method === "session.subscription.close") {
-            const owned = connection.sessionSubscriptions.get(String(params["subscriptionId"]));
-            if (
-              !owned ||
-              owned.workspaceId !== rpc.workspaceId ||
-              owned.sessionId !== params["sessionId"]
-            )
-              throw new GatewayError("FORBIDDEN", "会话订阅不属于此设备", 403);
-          }
-          const openingSession =
-            rpc.method === "session.subscription.open" ? String(params["sessionId"]) : undefined;
-          if (openingSession)
-            connection.pendingSessionOpens.set(
-              openingSession,
-              (connection.pendingSessionOpens.get(openingSession) ?? 0) + 1,
-            );
-          dispatched = true;
-          let value: unknown;
-          try {
-            value = projectRemoteResult(
-              rpc.method,
-              parseRuntimeResult(
-                rpc.method,
-                await connection.client.request(rpc.method, authorized.params),
-              ),
-            );
-          } finally {
-            if (openingSession) {
-              const left = (connection.pendingSessionOpens.get(openingSession) ?? 1) - 1;
-              if (left) connection.pendingSessionOpens.set(openingSession, left);
-              else connection.pendingSessionOpens.delete(openingSession);
-            }
-          }
-          this.runtimeLastReachableAt = this.now();
-          this.runtimeLastFailure = undefined;
-          if (device.revokedAt)
-            throw new GatewayError("DEVICE_REVOKED", "设备已撤销", 401, false, "unknown");
-          if (
-            rpc.method === "session.subscription.open" &&
-            rpc.workspaceId &&
-            value &&
-            typeof value === "object" &&
-            "subscriptionId" in value &&
-            typeof value.subscriptionId === "string"
-          )
-            connection.sessionSubscriptions.set(value.subscriptionId, {
-              workspaceId: rpc.workspaceId,
-              sessionId: String(params["sessionId"]),
-            });
-          if (rpc.method === "session.subscription.close")
-            connection.sessionSubscriptions.delete(String(params["subscriptionId"]));
+      connection.ingressRequests++;
+      admittedConnection = connection;
+      if (request.method === "POST" && url.pathname === "/v1/rpc") {
+        const rpc = parseRemoteRequest(await body(request));
+        requestId = rpc.requestId;
+        method = rpc.method;
+        workspaceId = rpc.workspaceId;
+        await connection.access.dispatch(rpc, (value) => {
           json(response, 200, { requestId, ok: true, value });
-          if (rpc.method === "session.subscription.open") {
-            const frames = connection.pendingFrames.splice(0);
-            connection.pendingFrameBytes = 0;
-            for (const frame of frames) {
-              const scope = connection.sessionSubscriptions.get(frame.subscriptionId);
-              if (scope) this.sendSessionFrame(connection, scope.workspaceId, frame);
-              else if (connection.pendingSessionOpens.has(frame.sessionId)) {
-                connection.pendingFrames.push(frame);
-                connection.pendingFrameBytes += Buffer.byteLength(JSON.stringify(frame));
-              }
-            }
-          }
-          this.audit(device, method, workspaceId, started, "OK");
-          return;
-        }
+        });
+        this.audit(device, method, workspaceId, started, "OK");
+        return;
+      }
+      const authenticatedDevice = device;
+      await connection.access.withRequest(async () => {
         const artifact =
           /^\/v1\/workspaces\/([^/]+)\/sessions\/([^/]+)\/artifacts\/([^/]+)\/content$/.exec(
             url.pathname,
           );
         if (request.method === "GET" && artifact?.[1] && artifact[2] && artifact[3]) {
           workspaceId = decodeURIComponent(artifact[1]);
-          requirePermission(device, "workspace.read");
-          const workspace = resolveDeviceWorkspace(this.config, device, workspaceId);
+          requirePermission(authenticatedDevice, "workspace.read");
+          const workspace = resolveDeviceWorkspace(this.config, authenticatedDevice, workspaceId);
           await this.streamArtifact(
-            device,
+            authenticatedDevice,
             connection,
             response,
             workspace.path,
@@ -705,11 +648,9 @@ export class RemoteGateway {
           return;
         }
         throw new GatewayError("NOT_FOUND", "接口不存在", 404);
-      } finally {
-        connection.requests--;
-      }
+      });
     } catch (error) {
-      const safe = safeGatewayError(error, dispatched);
+      const safe = safeGatewayError(error);
       this.audit(device, method, workspaceId, started, safe.code);
       if (safe.status >= 500) this.lastError = safe.code;
       if (["RUNTIME_UNAVAILABLE", "RUNTIME_DISCONNECTED"].includes(safe.code))
@@ -742,6 +683,8 @@ export class RemoteGateway {
               },
             },
       );
+    } finally {
+      if (admittedConnection) admittedConnection.ingressRequests--;
     }
   }
   private audit(
@@ -765,24 +708,10 @@ export class RemoteGateway {
       /* logging must not break dispatch */
     }
   }
-  private async runtimeCapabilities(device: GatewayDevice): Promise<ReadonlySet<string>> {
-    try {
-      const ping = parseRuntimeResult(
-        "runtime.ping",
-        await this.connection(device).client.request("runtime.ping", {}),
-      );
-      return new Set(ping.capabilities);
-    } catch {
-      return new Set();
-    }
-  }
-  private async supportsModelCatalog(device: GatewayDevice): Promise<boolean> {
-    return (await this.runtimeCapabilities(device)).has(MODEL_CATALOG_RUNTIME_CAPABILITY);
-  }
-
   private async capabilities(device: GatewayDevice): Promise<RemoteCapabilities> {
-    const supported = await this.runtimeCapabilities(device);
+    const supported = await this.connection(device).access.runtimeCapabilities();
     const modelCatalog = supported.has(MODEL_CATALOG_RUNTIME_CAPABILITY);
+    const configSecretPatch = supported.has(CONFIG_SECRET_PATCH_RUNTIME_CAPABILITY);
     const reviewIdempotency = supported.has(REVIEW_IDEMPOTENCY_RUNTIME_CAPABILITY);
     const memoryPagination = supported.has(MEMORY_PAGINATION_RUNTIME_CAPABILITY);
     let ownerIsolation = false;
@@ -812,6 +741,7 @@ export class RemoteGateway {
         (method) =>
           device.permissions.includes(REMOTE_METHOD_SPECS[method].permission) &&
           (method !== "catalog.models" || modelCatalog) &&
+          (!["mcp.user.upsert", "provider.upsert"].includes(method) || configSecretPatch) &&
           (!SESSION_CLEANUP_METHODS.has(method) || cleanupIsolation) &&
           (!method.startsWith("terminal.") || terminalAvailable),
       ),
@@ -868,12 +798,10 @@ export class RemoteGateway {
   private async openSocket(device: GatewayDevice, socket: GatewaySocket): Promise<void> {
     const connection = this.connection(device);
     connection.socket?.terminate();
-    connection.frameDispose?.();
-    for (const dispose of connection.eventSubscriptions.values()) dispose();
-    connection.eventSubscriptions.clear();
     connection.socket = socket;
     const send = (message: RemoteServerMessage): void => {
-      if (device.revokedAt || socket.readyState !== WebSocket.OPEN) return;
+      if (device.revokedAt || connection.socket !== socket || socket.readyState !== WebSocket.OPEN)
+        return;
       const data = JSON.stringify(message);
       if (
         Buffer.byteLength(data) > REMOTE_MAX_FRAME_BYTES ||
@@ -890,164 +818,29 @@ export class RemoteGateway {
       gatewayId: this.state.gatewayId,
       connectionId: randomUUID(),
     });
-    const frames = connection.client.subscribeSessionFrames(
-      (frame: RuntimeSessionSubscriptionFrame) => {
-        const owned = connection.sessionSubscriptions.get(frame.subscriptionId);
-        if (!owned && connection.pendingSessionOpens.has(frame.sessionId)) {
-          const size = Buffer.byteLength(JSON.stringify(frame));
-          if (
-            connection.pendingFrames.length >= 64 ||
-            connection.pendingFrameBytes + size > REMOTE_MAX_FRAME_BYTES
-          ) {
-            connection.pendingFrames.length = 0;
-            connection.pendingFrameBytes = 0;
-            send({ type: "disconnected", reason: "会话建立期间事件超过预算，请重新同步" });
-          } else {
-            connection.pendingFrames.push(frame);
-            connection.pendingFrameBytes += size;
-          }
-          return;
-        }
-        if (
-          !owned ||
-          owned.sessionId !== frame.sessionId ||
-          !device.workspaceIds.includes(owned.workspaceId)
-        )
-          return;
-        send({ type: "session_frame", workspaceId: owned.workspaceId, frame });
-        if (frame.type === "subscription.closed")
-          connection.sessionSubscriptions.delete(frame.subscriptionId);
-      },
-      () => send({ type: "disconnected", reason: "电脑 Runtime 连接中断，请重新同步会话" }),
-    );
-    connection.frameDispose = frames.dispose;
-    let chain = Promise.resolve();
-    let pendingMessages = 0;
+    const events = connection.access.attachEvents({
+      publish: send,
+      close: () => socket.close(),
+    });
     socket.on("message", (data: RawData, binary: boolean) => {
-      if (++pendingMessages > 16) {
-        socket.close(1008, "订阅请求过多");
-        return;
+      try {
+        if (binary) throw new GatewayError("INVALID_PARAMS", "事件请求必须为 JSON 文本");
+        this.rate(`ws-message:${device.id}`, 60, 60_000);
+        void events.receive(JSON.parse(data.toString())).catch(() => socket.close());
+      } catch (error) {
+        const safe = safeGatewayError(error);
+        send({
+          type: "error",
+          error: { code: safe.code, message: safe.message, retryable: safe.retryable },
+        });
       }
-      chain = chain.then(async () => {
-        let subscriptionId: string | undefined;
-        try {
-          if (binary) throw new GatewayError("INVALID_PARAMS", "事件请求必须为 JSON 文本");
-          this.rate(`ws-message:${device.id}`, 60, 60_000);
-          const parsed: unknown = JSON.parse(data.toString());
-          if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
-            throw new GatewayError("INVALID_PARAMS", "订阅消息无效");
-          const message = parsed as Record<string, unknown>;
-          if (
-            typeof message["subscriptionId"] !== "string" ||
-            !/^[a-zA-Z0-9_-]{1,128}$/.test(message["subscriptionId"])
-          )
-            throw new GatewayError("INVALID_PARAMS", "订阅标识无效");
-          subscriptionId = message["subscriptionId"];
-          requirePermission(device, "workspace.read");
-          if (
-            message["type"] === "unsubscribe" &&
-            Object.keys(message).every((key) => ["type", "subscriptionId"].includes(key))
-          ) {
-            connection.eventSubscriptions.get(subscriptionId)?.();
-            connection.eventSubscriptions.delete(subscriptionId);
-            return;
-          }
-          if (
-            message["type"] !== "subscribe" ||
-            typeof message["workspaceId"] !== "string" ||
-            (message["afterEventId"] !== undefined &&
-              typeof message["afterEventId"] !== "string") ||
-            Object.keys(message).some(
-              (key) => !["type", "subscriptionId", "workspaceId", "afterEventId"].includes(key),
-            )
-          )
-            throw new GatewayError("INVALID_PARAMS", "订阅消息无效");
-          if (
-            connection.eventSubscriptions.size >= 16 &&
-            !connection.eventSubscriptions.has(subscriptionId)
-          )
-            throw new GatewayError("RATE_LIMITED", "工作区订阅过多", 429);
-          const workspaceId = message["workspaceId"];
-          const workspace = resolveDeviceWorkspace(this.config, device, workspaceId);
-          const params: RuntimeParams<"events.subscribe"> = {
-            workspacePath: workspace.path,
-            ...(typeof message["afterEventId"] === "string"
-              ? { afterEventId: message["afterEventId"] }
-              : {}),
-          };
-          connection.eventSubscriptions.get(subscriptionId)?.();
-          connection.eventSubscriptions.delete(subscriptionId);
-          const subscription = await connection.client.subscribe(params, (event) =>
-            send({ type: "notification", subscriptionId: subscriptionId!, workspaceId, event }),
-          );
-          if (
-            socket.readyState !== WebSocket.OPEN ||
-            device.revokedAt ||
-            connection.socket !== socket
-          ) {
-            subscription.dispose();
-            return;
-          }
-          connection.eventSubscriptions.set(subscriptionId, subscription.dispose);
-          send({ type: "subscribed", subscriptionId, workspaceId, replay: subscription.replay });
-        } catch (error) {
-          const safe = safeGatewayError(error);
-          send({
-            type: "error",
-            ...(subscriptionId ? { subscriptionId } : {}),
-            error: { code: safe.code, message: safe.message, retryable: safe.retryable },
-          });
-        } finally {
-          pendingMessages--;
-        }
-      });
     });
     socket.on("error", () => undefined);
     socket.on("close", () => {
-      if (connection.socket !== socket) return;
-      connection.socket = undefined;
-      connection.frameDispose?.();
-      connection.frameDispose = undefined;
-      for (const dispose of connection.eventSubscriptions.values()) dispose();
-      connection.eventSubscriptions.clear();
-      const owned = [...connection.sessionSubscriptions];
-      connection.sessionSubscriptions.clear();
-      connection.pendingFrames.length = 0;
-      connection.pendingFrameBytes = 0;
-      for (const [subscriptionId, scope] of owned) {
-        const workspace = this.config.workspaces.find((entry) => entry.id === scope.workspaceId);
-        if (workspace)
-          void connection.client
-            .request("session.subscription.close", {
-              workspacePath: workspace.path,
-              sessionId: scope.sessionId,
-              subscriptionId,
-            })
-            .catch(() => undefined);
-      }
-      // RPC client survives transport disconnect; no run or terminal cancellation.
+      if (connection.socket === socket) connection.socket = undefined;
+      events.close();
+      // Event disconnection releases subscriptions, not running tasks or terminals.
     });
-  }
-  private sendSessionFrame(
-    connection: DeviceConnection,
-    workspaceId: string,
-    frame: RuntimeSessionSubscriptionFrame,
-  ): void {
-    const socket = connection.socket;
-    if (!socket || socket.readyState !== WebSocket.OPEN) return;
-    const data = JSON.stringify({
-      type: "session_frame",
-      workspaceId,
-      frame,
-    } satisfies RemoteServerMessage);
-    if (
-      Buffer.byteLength(data) > REMOTE_MAX_FRAME_BYTES ||
-      socket.bufferedAmount > 4 * REMOTE_MAX_FRAME_BYTES
-    ) {
-      socket.close(1009, "事件预算超限，请重新同步");
-      return;
-    }
-    socket.send(data);
   }
   private async streamArtifact(
     device: GatewayDevice,
@@ -1089,11 +882,12 @@ export class RemoteGateway {
       `attachment; filename="artifact-${artifactId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64)}"`,
     );
     response.setHeader("Content-Security-Policy", "sandbox; default-src 'none'");
-    connection.downloads.add(response);
+    const untrack = connection.access.trackResource(() => response.destroy());
     const hash = createHash("sha256");
     try {
       let offset = 0;
       while (offset < size) {
+        connection.access.assertCurrent();
         if (device.revokedAt || response.destroyed)
           throw new GatewayError("DEVICE_REVOKED", "下载连接已失效", 401);
         const chunk = parseRuntimeResult(
@@ -1113,6 +907,7 @@ export class RemoteGateway {
           typeof chunk["artifact"] !== "object"
         )
           throw new GatewayError("INVALID_RESULT", "生成文件分块无效", 502);
+        connection.access.assertCurrent();
         const bytes = Buffer.from(chunk["contentBase64"], "base64");
         if (
           bytes.toString("base64") !== chunk["contentBase64"] ||
@@ -1135,7 +930,7 @@ export class RemoteGateway {
         throw new GatewayError("INVALID_RESULT", "空文件摘要不匹配", 502);
       response.end();
     } finally {
-      connection.downloads.delete(response);
+      untrack();
     }
   }
   private rate(key: string, capacity: number, window: number): void {
@@ -1161,12 +956,14 @@ export class RemoteGateway {
   private status(): unknown {
     return {
       gatewayId: this.state.gatewayId,
+      ...(this.runningBuildId ? { buildId: this.runningBuildId } : {}),
       startedAt: this.startedAt,
       publicUrl: this.config.publicUrl,
       connectionMode: this.config.relay ? "relay" : "direct",
       ...(this.relay ? { relay: { ...this.relay.status } } : {}),
       listening: this.servers.map((server) => server.address()),
       devices: this.connections.size,
+      authorizationMetrics: gatewayAuthorizationMetrics.snapshot(),
       runtime: {
         lastReachableAt: this.runtimeLastReachableAt,
         ...(this.runtimeLastFailure ? { lastFailure: this.runtimeLastFailure } : {}),
@@ -1331,65 +1128,6 @@ export async function startConfiguredRemoteGateway(
   return gateway;
 }
 export { requestGatewayControl };
-
-/** Remote projections additionally remove executable configuration and credential-bearing endpoints. */
-function projectRemoteResult(method: string, result: unknown): unknown {
-  if (method === "provider.test" && result && typeof result === "object") {
-    const value = result as Record<string, unknown>;
-    return {
-      ...value,
-      message: value["ok"] ? "Provider 验证成功" : "Provider 验证失败，请查看电脑本机诊断",
-    };
-  }
-  if (
-    method.startsWith("config.") ||
-    method.startsWith("provider.") ||
-    method.startsWith("mcp.") ||
-    method === "hooks.manage" ||
-    method === "plugin.manage"
-  )
-    return publicConfiguration(
-      result,
-      method.startsWith("config.") || method === "hooks.manage" || method === "plugin.manage",
-    );
-  return result;
-}
-function publicConfiguration(value: unknown, hideExecutableText: boolean): unknown {
-  if (Array.isArray(value))
-    return value.map((entry) => publicConfiguration(entry, hideExecutableText));
-  if (!value || typeof value !== "object") return value;
-  const output: Record<string, unknown> = {};
-  for (const [key, item] of Object.entries(value)) {
-    const normalized = key.replace(/[_-]/g, "").toLowerCase();
-    if (
-      [
-        "env",
-        "headers",
-        "apikey",
-        "secret",
-        "password",
-        "token",
-        "accesstoken",
-        "refreshtoken",
-        "clientsecret",
-        "credential",
-        "raw",
-        "content",
-        "script",
-        "code",
-        "manifest",
-      ].includes(normalized)
-    )
-      continue;
-    if (hideExecutableText && ["command", "args", "commands"].includes(normalized)) continue;
-    if (["baseurl", "url", "endpoint"].includes(normalized) && typeof item === "string")
-      output[key] = publicEndpoint(item);
-    else if (["error", "loaderror", "message"].includes(normalized) && typeof item === "string")
-      output[key] = "请查看电脑本机诊断";
-    else output[key] = publicConfiguration(item, hideExecutableText);
-  }
-  return output;
-}
 
 function waitForDrain(response: GatewayResponse): Promise<void> {
   return new Promise((resolve, reject) => {

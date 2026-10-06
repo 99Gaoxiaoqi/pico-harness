@@ -166,7 +166,11 @@ export type RemoteMethod = (typeof REMOTE_METHODS)[number];
 /** Omitted secret fields are resolved atomically by the Host. */
 export type RemoteMcpServerInput = RuntimeMcpServerPublicPatch;
 export type RemoteParams<M extends RemoteMethod> = M extends "mcp.user.upsert"
-  ? { readonly server: RemoteMcpServerInput; readonly expectedRevision: string; readonly idempotencyKey: string }
+  ? {
+      readonly server: RemoteMcpServerInput;
+      readonly expectedRevision: string;
+      readonly idempotencyKey: string;
+    }
   : Omit<RuntimeParams<M>, "workspacePath" | "inputMode" | "secretEdits" | "replayOnly">;
 export type RemoteResult<M extends RemoteMethod> = RuntimeResult<M>;
 export interface RemoteMethodSpec {
@@ -318,8 +322,11 @@ export function parseRemoteRequest(value: unknown): RemoteRequest {
       Object.keys(value.secretEdits).some((k) => !["env", "headers", "url"].includes(k))
     )
       throw new RemoteProtocolError("INVALID_REQUEST", "秘密编辑只适用于 MCP 配置");
-    try { runtimeSecretEditsParam(value.secretEdits,"secretEdits"); }
-    catch { throw new RemoteProtocolError("INVALID_REQUEST","秘密编辑格式无效"); }
+    try {
+      runtimeSecretEditsParam(value.secretEdits, "secretEdits");
+    } catch {
+      throw new RemoteProtocolError("INVALID_REQUEST", "秘密编辑格式无效");
+    }
   }
   return value as unknown as RemoteRequest;
 }
@@ -329,10 +336,12 @@ export function toRuntimeParams<M extends RemoteMethod>(
 ): RuntimeParams<M> {
   const params = {
     ...request.params,
-    ...(["mcp.user.upsert","provider.upsert"].includes(request.method)
-      ? { inputMode: "public-patch" } : {}),
+    ...(["mcp.user.upsert", "provider.upsert"].includes(request.method)
+      ? { inputMode: "public-patch" }
+      : {}),
     ...(request.method === "mcp.user.upsert" && request.secretEdits
-      ? { secretEdits: request.secretEdits } : {}),
+      ? { secretEdits: request.secretEdits }
+      : {}),
     ...(REMOTE_METHOD_SPECS[request.method].workspaceRequired ? { workspacePath } : {}),
   };
   return parseStrictRuntimeParams(request.method, params);

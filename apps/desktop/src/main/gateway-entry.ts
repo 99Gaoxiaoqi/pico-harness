@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import {
   defaultGatewayHome,
+  gatewayAuthorizationMetrics,
   readGatewayConfiguration,
   startConfiguredRemoteGateway,
 } from "@pico/remote-gateway/desktop";
@@ -22,6 +23,7 @@ async function main(): Promise<void> {
       new LocalRuntimeClient({
         ...(config.runtimeHostRootPath ? { runtimeHostRootPath: config.runtimeHostRootPath } : {}),
         candidateEntrypoint: join(__dirname, "daemon.cjs"),
+        onResponseMetrics: (metric) => gatewayAuthorizationMetrics.recordTransport(metric),
         terminalOwnerId: `remote:${deviceId}`,
         surface: "inspect",
       }),

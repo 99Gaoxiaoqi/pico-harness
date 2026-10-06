@@ -14,6 +14,7 @@ import {
   type ConnectOrSpawnRuntimeHostInput,
   type RuntimeHostConnection,
   RuntimeHostOperationError,
+  RuntimeHostTransportError,
 } from "@pico/runtime-host";
 import {
   isEphemeralRuntimeNotificationTopic,
@@ -29,7 +30,7 @@ import {
   type RuntimeSessionSubscriptionFrame,
 } from "@pico/protocol";
 import { retireSessionOwnerLeasesForTerminatedProcess } from "@pico/storage";
-import { waitForDelay } from "@pico/runtime";
+import { raceWithDeadlineReject, waitForDelay } from "@pico/runtime";
 import { resolveCanonicalPicoHome } from "./pico-paths.js";
 import {
   ensurePicoRuntimeHostEventOperationsRegistered,
@@ -37,6 +38,62 @@ import {
   ensurePicoRuntimeHostSessionContinuityOperationsRegistered,
   ensurePicoRuntimeHostShutdownOperationRegistered,
 } from "@pico/pico-host/runtime-host-operations";
+
+const SHORT_RUNTIME_REQUEST_METHODS: ReadonlySet<RuntimeMethod> = new Set([
+  "diagnostics.resources",
+  "config.get",
+  "config.user.get",
+  "session.settings.get",
+  "goal.get",
+  "subagents.get",
+  "skills.user.list",
+  "mcp.user.list",
+  "workspace.trustStatus",
+  "terminal.list",
+  "terminal.ownershipCapabilities",
+  "events.subscribe",
+  "events.replay",
+  "session.subscription.open",
+  "session.subscription.close",
+  "session.transcript.page",
+  "session.transcript.advance",
+]);
+
+/** A wait budget, not a cancellation or replay permission. */
+export function runtimeRequestTimeoutMsForMethod(method: RuntimeMethod): number {
+  return method === "runtime.ping"
+    ? 5_000
+    : SHORT_RUNTIME_REQUEST_METHODS.has(method)
+      ? 30_000
+      : 125_000;
+}
+
+function requestWaitTimeout(cause?: Error): RuntimeClientError {
+  return new RuntimeClientError(
+    "RUNTIME_REQUEST_TIMEOUT",
+    "请求等待超时；操作可能仍在执行",
+    false,
+    cause ? { cause } : undefined,
+  );
+}
+
+function isRequestWaitTimeout(error: unknown, connection: RuntimeHostConnection): boolean {
+  return (
+    (error instanceof RuntimeHostTransportError &&
+      error.code === "read_timeout" &&
+      connection.terminalError === undefined) ||
+    (error instanceof RuntimeClientError && error.code === "RUNTIME_REQUEST_TIMEOUT")
+  );
+}
+
+async function beforeRequestDeadline<T>(operation: Promise<T>, deadline: number): Promise<T> {
+  const remaining = deadline - performance.now();
+  if (remaining <= 0) {
+    void operation.catch(() => undefined);
+    throw requestWaitTimeout();
+  }
+  return raceWithDeadlineReject(operation, remaining, () => requestWaitTimeout());
+}
 
 const CONNECT_TIMEOUT_MS = 5_000;
 const HANDSHAKE_TIMEOUT_MS = 5_000;
@@ -64,6 +121,7 @@ const KERNEL_RETRY_SAFE_METHODS: ReadonlySet<RuntimeMethod> = new Set<RuntimeMet
   "session.transcript.advance",
   "goal.get",
   "runs.list",
+  "run.get",
   "changes.list",
   "changes.diff",
   "rewind.list",
@@ -130,6 +188,13 @@ export interface LocalRuntimeClientOptions {
   readonly candidateEntrypoint?: string | URL;
   /** @internal Integration-test ownership seam; production callers must omit it. */
   readonly candidateLauncher?: ConnectOrSpawnRuntimeHostInput["candidateLauncher"];
+  /** @internal Integration-test budget seam; production callers must omit it. */
+  readonly requestTimeoutMsForMethod?: (method: RuntimeMethod) => number;
+  readonly onResponseMetrics?: (metrics: {
+    readonly method: RuntimeMethod;
+    readonly encodedBytes: number;
+    readonly decodeMs: number;
+  }) => void;
 }
 
 export interface RuntimeClient {
@@ -185,6 +250,8 @@ interface RuntimeTransportConnection {
  * runtime.request 通用桥接 + events.* 类型化桥接）。
  */
 export class LocalRuntimeClient implements RuntimeClient {
+  private readonly requestTimeoutMsForMethod: (method: RuntimeMethod) => number;
+  private readonly onResponseMetrics: LocalRuntimeClientOptions["onResponseMetrics"];
   private readonly requestConnection: RuntimeTransportConnection;
   private readonly subscriptions = new Set<RuntimeSubscription>();
   private readonly terminalOwnerId: string;
@@ -215,6 +282,9 @@ export class LocalRuntimeClient implements RuntimeClient {
     this.runtimeHostRootPath = options.runtimeHostRootPath;
     this.candidateEntrypoint = options.candidateEntrypoint;
     this.candidateLauncher = options.candidateLauncher;
+    this.requestTimeoutMsForMethod =
+      options.requestTimeoutMsForMethod ?? runtimeRequestTimeoutMsForMethod;
+    this.onResponseMetrics = options.onResponseMetrics;
     this.requestConnection = this.createConnection();
     this.requestConnection.setEventListener((event) => this.deliverSessionFrame(event));
     this.requestConnection.setDisconnectListener(() => {
@@ -311,6 +381,8 @@ export class LocalRuntimeClient implements RuntimeClient {
       this.candidateLauncher,
       this.terminalOwnerId,
       this.surface,
+      this.requestTimeoutMsForMethod,
+      this.onResponseMetrics,
     );
   }
 
@@ -593,6 +665,8 @@ class KernelRuntimeConnection implements RuntimeTransportConnection {
     private readonly candidateLauncher?: ConnectOrSpawnRuntimeHostInput["candidateLauncher"],
     private readonly terminalOwnerId: string = `tui:${randomUUID()}`,
     private readonly surface: ClientSurface = "tui",
+    private readonly requestTimeoutMsForMethod = runtimeRequestTimeoutMsForMethod,
+    private readonly onResponseMetrics?: LocalRuntimeClientOptions["onResponseMetrics"],
   ) {}
 
   setEventListener(listener: (event: Record<string, unknown>) => void): void {
@@ -650,9 +724,27 @@ class KernelRuntimeConnection implements RuntimeTransportConnection {
     if (!connection) {
       throw new RuntimeClientError("RUNTIME_DISCONNECTED", "本机 Runtime daemon 连接已断开", true);
     }
+    const requestDeadline =
+      performance.now() +
+      positiveDelay(
+        this.requestTimeoutMsForMethod(method),
+        runtimeRequestTimeoutMsForMethod(method),
+      );
+    const invoke = (active: RuntimeHostConnection) => {
+      const remaining = requestDeadline - performance.now();
+      if (remaining <= 0) throw requestWaitTimeout();
+      return requestOverKernelConnection(
+        active,
+        method,
+        params,
+        Math.ceil(remaining),
+        this.onResponseMetrics,
+      );
+    };
     try {
-      return await requestOverKernelConnection(connection, method, params);
+      return await invoke(connection);
     } catch (error) {
+      if (isRequestWaitTimeout(error, connection)) throw requestWaitTimeout(error as Error);
       if (
         error instanceof RuntimeHostOperationError ||
         error instanceof RuntimeProtocolError ||
@@ -671,22 +763,29 @@ class KernelRuntimeConnection implements RuntimeTransportConnection {
       if (connection.terminalError === undefined || !KERNEL_RETRY_SAFE_METHODS.has(method)) {
         throw translateKernelRequestError(error);
       }
-      const retryDeadline = performance.now() + KERNEL_RETRY_WINDOW_MS;
+      const retryDeadline = Math.min(requestDeadline, performance.now() + KERNEL_RETRY_WINDOW_MS);
       let lastError: unknown = error;
       while (performance.now() < retryDeadline) {
         if (this.closed) break;
         if (this.hostConnection === connection) this.hostConnection = undefined;
         await connection.close().catch(() => undefined);
         try {
-          await this.open();
-        } catch {
+          await beforeRequestDeadline(this.open(), retryDeadline);
+        } catch (openError) {
+          if (
+            openError instanceof RuntimeClientError &&
+            openError.code === "RUNTIME_REQUEST_TIMEOUT"
+          )
+            throw openError;
           break;
         }
         const revived = this.hostConnection;
         if (!revived) break;
         try {
-          return await requestOverKernelConnection(revived, method, params);
+          return await invoke(revived);
         } catch (retryError) {
+          if (isRequestWaitTimeout(retryError, revived))
+            throw requestWaitTimeout(retryError as Error);
           if (
             retryError instanceof RuntimeHostOperationError ||
             retryError instanceof RuntimeProtocolError ||
@@ -696,9 +795,12 @@ class KernelRuntimeConnection implements RuntimeTransportConnection {
           }
           lastError = retryError;
           // 给断连传播与新 daemon 注册留出稳定窗口，避免在同一竞态上空转。
-          await waitForDelay(Math.min(KERNEL_RETRY_BACKOFF_MS, retryDeadline - performance.now()));
+          await waitForDelay(
+            Math.max(0, Math.min(KERNEL_RETRY_BACKOFF_MS, retryDeadline - performance.now())),
+          );
         }
       }
+      if (performance.now() >= requestDeadline) throw requestWaitTimeout();
       throw translateKernelRequestError(lastError);
     }
   }
@@ -879,6 +981,8 @@ async function requestOverKernelConnection<Method extends RuntimeMethod>(
   connection: RuntimeHostConnection,
   method: Method,
   params: RuntimeParams<Method>,
+  timeoutMs: number,
+  onResponseMetrics?: LocalRuntimeClientOptions["onResponseMetrics"],
 ): Promise<RuntimeResult<Method>> {
   if (
     method === "events.subscribe" ||
@@ -890,17 +994,25 @@ async function requestOverKernelConnection<Method extends RuntimeMethod>(
   ) {
     return parseRuntimeResult(
       method,
-      await connection.requestRegistered<RuntimeResult<Method>>(method, params),
+      await connection.requestRegistered<RuntimeResult<Method>>(
+        method,
+        params,
+        timeoutMs,
+        onResponseMetrics ? (metrics) => onResponseMetrics({ method, ...metrics }) : undefined,
+      ),
     );
   }
   const response = await connection.requestRegistered<{ result: RuntimeResult<Method> }>(
     "runtime.request",
     { method, params: params as Record<string, unknown> },
+    timeoutMs,
+    onResponseMetrics ? (metrics) => onResponseMetrics({ method, ...metrics }) : undefined,
   );
   return parseRuntimeResult(method, response.result);
 }
 
 function translateKernelRequestError(error: unknown): RuntimeClientError {
+  if (error instanceof RuntimeClientError) return error;
   if (error instanceof RuntimeProtocolError) {
     return new RuntimeClientError(error.code, error.message, false, { cause: error });
   }
@@ -932,6 +1044,8 @@ function mapHostOperationErrorCode(code: string): string {
       return "METHOD_NOT_FOUND";
     case "reset_required":
       return "RESET_REQUIRED";
+    case "send_recovery_unavailable":
+      return "SEND_RECOVERY_UNAVAILABLE";
     case "internal_failure":
       return "INTERNAL_ERROR";
     default:

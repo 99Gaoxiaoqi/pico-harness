@@ -348,7 +348,10 @@ if (!app.requestSingleInstanceLock()) {
       void remoteManagement
         .restore()
         .catch(() => console.error("手机连接自动恢复失败，请在设置中重试"));
-      disposeUpdater = configureAutoUpdates(() => lifecycle.markQuitting());
+      disposeUpdater = configureAutoUpdates(
+        () => lifecycle.markQuitting(),
+        () => remoteManagement.prepareForUpdate(),
+      );
       await openMainWindow();
       stopClientCapabilityPoller = startClientCapabilityPoller(clientCapabilityToken);
       stopRuntimeProbe = startRuntimeProbe();

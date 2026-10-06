@@ -33,6 +33,7 @@ import {
   resultFiniteNumber,
   resultNonEmptyString,
   resultOneOf,
+  resultNullable,
   resultShape,
   resultString,
   resultStringArray,
@@ -458,6 +459,11 @@ export type SessionMethodMap = {
     readonly params: WorkspaceParams & { readonly runId: RunId; readonly message: string };
     readonly result: RuntimeRun;
   };
+  /** Local authorization lookup; omitted from Desktop and mobile RPC allowlists. */
+  readonly "run.get": {
+    readonly params: WorkspaceParams & { readonly runId: RunId };
+    readonly result: { readonly run: RuntimeRun | null };
+  };
   readonly "runs.list": {
     readonly params: WorkspaceParams & { readonly sessionId?: SessionId };
     readonly result: { readonly runs: readonly RuntimeRun[] };
@@ -524,7 +530,9 @@ export const sessionParamValidators = {
       initialSettings: runtimeUserDefaultsParam,
       behavior: sessionBehaviorParam,
       expectedRunId: stringParam,
-      replayOnly: (value,path) => { if (value !== true) throw invalidParams(`${path} 必须为 true`); },
+      replayOnly: (value, path) => {
+        if (value !== true) throw invalidParams(`${path} 必须为 true`);
+      },
     },
   ),
   "run.start": exactParamShape(
@@ -542,6 +550,7 @@ export const sessionParamValidators = {
     runId: stringParam,
     message: stringParam,
   }),
+  "run.get": workspaceRunParams,
   "runs.list": exactParamShape({ workspacePath: stringParam }, { sessionId: stringParam }),
 } satisfies Readonly<Record<keyof SessionMethodMap, RuntimeParamValidator>>;
 
@@ -589,5 +598,6 @@ export const sessionResultValidators = {
   "run.pause": runtimeRunResult,
   "run.resume": runtimeRunResult,
   "run.steer": runtimeRunResult,
+  "run.get": exactResultShape({ run: resultNullable(runtimeRunResult) }),
   "runs.list": resultShape({ runs: resultArray(runtimeRunResult) }),
 } satisfies Readonly<Record<keyof SessionMethodMap, RuntimeResultRule>>;

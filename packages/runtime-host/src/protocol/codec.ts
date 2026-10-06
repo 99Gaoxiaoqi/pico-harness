@@ -94,7 +94,12 @@ export function assertAllowedKeys(
   }
 }
 
-export function requireEncodedByteLimit(value: unknown, label: string, maxBytes: number): void {
+export function requireEncodedByteLimit(
+  value: unknown,
+  label: string,
+  maxBytes: number,
+  observeBytes?: (bytes: number) => void,
+): void {
   let encoded: string | undefined;
   try {
     encoded = JSON.stringify(value);
@@ -104,7 +109,13 @@ export function requireEncodedByteLimit(value: unknown, label: string, maxBytes:
   if (encoded === undefined) {
     throw invalidProtocolFrame(`Invalid ${label}`);
   }
-  if (Buffer.byteLength(encoded, "utf8") > maxBytes) {
+  const bytes = Buffer.byteLength(encoded, "utf8");
+  try {
+    observeBytes?.(bytes);
+  } catch {
+    /* Metrics must not change protocol behavior. */
+  }
+  if (bytes > maxBytes) {
     throw invalidProtocolFrame(`${label} exceeds byte limit`);
   }
 }

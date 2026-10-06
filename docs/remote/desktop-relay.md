@@ -25,6 +25,25 @@ Desktop 的「设置 → 手机连接」通过本机管理通道控制独立的 
 - 部署初始化将电脑身份与凭据哈希绑定到 Relay。私有凭据不会传给 Renderer；二维码只包含协议要求的短期配对信息，扫码后仍需在电脑审批项目与权限。
 - 网关保留旧一次性邀请注册入口，兼容既有部署；普通 Desktop 设置不调用该入口。旧注册流程保持 TLS 校验、禁止重定向和 15 秒超时，并使用同一 token 重试响应丢失的请求。
 
+## 统一 Runtime 接入边界
+
+手机的 HTTPS/WSS 和加密 Relay 共用 `RuntimeAccessSession`。该服务在
+`packages/remote-gateway` 中承载请求授权、工作区及资源归属检查、能力检查、结果脱敏、
+会话订阅和事件生命周期；不依赖 HTTP、WebSocket、Electron 或第三方平台 SDK。
+Gateway 继续负责设备配对、令牌验证、网络编码、IP 限流及本机管理。
+
+后续微信、企微等适配器应先验证平台账号、租户及发送者身份，解析由电脑批准的授权，
+再提供 `RuntimeAccessPrincipal` 与相应的 Runtime client。主体只含内部身份、权限、
+工作区及终端 owner，不携带平台凭据；聊天 ID 只用于会话绑定，不能替代用户授权。
+手机沿用 `remote:<deviceId>` 的终端 owner；其他接入方需使用独立、稳定的 owner。
+`isCurrent` 必须核验授权仍有效；授权更新或撤销时调用 `close()` 清理所有订阅与资源。
+
+适配器通过 `dispatch(request, publishResult)` 发起已审核的远程协议请求，通过
+`attachEvents(sink)` 消费结构化事件，再按渠道能力生成回复。订阅答复须先发布，随后
+才交付建链期间的帧。断开事件连接只清理订阅，不取消任务；执行结果未知时不得自动
+重发命令。平台配对、聊天与 Pico 会话的持久绑定、平台消息去重及回复格式仍由适配器
+处理。本次没有新增微信或企微连接器，也没有迁移设备凭据、修改公开 RPC 或合并 daemon。
+
 ## 验证
 
 针对性检查：`tests/integration/desktop/desktop-remote-management.test.ts` 覆盖无邀请配置、唯一后台启动、服务未绑定提示、二维码、审批、撤销、关闭偏好、旧邀请字段及未授权调用拒绝和异常脱敏；配合既有 preload 与冷构建依赖检查。实际公网可用性需以手机蜂窝网络、受信任 TLS 的 Relay、电脑休眠恢复、断网恢复和发行包冷启动验证。

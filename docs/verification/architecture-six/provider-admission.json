@@ -1,0 +1,141 @@
+{
+  "method": "run.start",
+  "fixturePerBatch": "new",
+  "warmupPerBatch": 20,
+  "measuredPerBatch": 200,
+  "batches": 5,
+  "clock": "performance.now",
+  "queueHistogramResolutionMs": 1,
+  "sharedAdmissionThresholdMet": false,
+  "results": [
+    {
+      "workspaces": 1,
+      "batches": [
+        {
+          "admissionP95Ms": 29.01520900000014,
+          "queueP95Ms": 1,
+          "queueFraction": 0.00008872120393354886,
+          "measured": 200,
+          "providerWrites": 10
+        },
+        {
+          "admissionP95Ms": 29.904582999999548,
+          "queueP95Ms": 1,
+          "queueFraction": 0.00008252370435711636,
+          "measured": 200,
+          "providerWrites": 10
+        },
+        {
+          "admissionP95Ms": 30.165333000000828,
+          "queueP95Ms": 1,
+          "queueFraction": 0.00007655684936446863,
+          "measured": 200,
+          "providerWrites": 10
+        },
+        {
+          "admissionP95Ms": 28.667124999999942,
+          "queueP95Ms": 1,
+          "queueFraction": 0.00008663096411292542,
+          "measured": 200,
+          "providerWrites": 10
+        },
+        {
+          "admissionP95Ms": 29.336083000001963,
+          "queueP95Ms": 1,
+          "queueFraction": 0.00008292209814478659,
+          "measured": 200,
+          "providerWrites": 10
+        }
+      ],
+      "medianAdmissionP95Ms": 29.336083000001963,
+      "medianQueueP95Ms": 1,
+      "medianQueueFraction": 0.00008292209814478659
+    },
+    {
+      "workspaces": 2,
+      "batches": [
+        {
+          "admissionP95Ms": 52.743040999994264,
+          "queueP95Ms": 29,
+          "queueFraction": 0.3386534898989997,
+          "measured": 200,
+          "providerWrites": 10
+        },
+        {
+          "admissionP95Ms": 57.042499999995925,
+          "queueP95Ms": 30,
+          "queueFraction": 0.33597629669751794,
+          "measured": 200,
+          "providerWrites": 10
+        },
+        {
+          "admissionP95Ms": 52.96966700000485,
+          "queueP95Ms": 28,
+          "queueFraction": 0.33774162524884743,
+          "measured": 200,
+          "providerWrites": 10
+        },
+        {
+          "admissionP95Ms": 50.736207999994804,
+          "queueP95Ms": 28,
+          "queueFraction": 0.33769825543547444,
+          "measured": 200,
+          "providerWrites": 10
+        },
+        {
+          "admissionP95Ms": 52.58995899999718,
+          "queueP95Ms": 28,
+          "queueFraction": 0.3363945487659568,
+          "measured": 200,
+          "providerWrites": 10
+        }
+      ],
+      "medianAdmissionP95Ms": 52.743040999994264,
+      "medianQueueP95Ms": 28,
+      "medianQueueFraction": 0.33769825543547444
+    },
+    {
+      "workspaces": 4,
+      "batches": [
+        {
+          "admissionP95Ms": 104.24825000000419,
+          "queueP95Ms": 78,
+          "queueFraction": 0.6066566436749755,
+          "measured": 200,
+          "providerWrites": 10
+        },
+        {
+          "admissionP95Ms": 103.28220800000418,
+          "queueP95Ms": 78,
+          "queueFraction": 0.6082870230308235,
+          "measured": 200,
+          "providerWrites": 10
+        },
+        {
+          "admissionP95Ms": 101.73762500000885,
+          "queueP95Ms": 77,
+          "queueFraction": 0.6045464538827958,
+          "measured": 200,
+          "providerWrites": 10
+        },
+        {
+          "admissionP95Ms": 99.11474999999336,
+          "queueP95Ms": 74,
+          "queueFraction": 0.6027233533209289,
+          "measured": 200,
+          "providerWrites": 10
+        },
+        {
+          "admissionP95Ms": 100.21058300000732,
+          "queueP95Ms": 77,
+          "queueFraction": 0.6057945747088405,
+          "measured": 200,
+          "providerWrites": 10
+        }
+      ],
+      "medianAdmissionP95Ms": 101.73762500000885,
+      "medianQueueP95Ms": 77,
+      "medianQueueFraction": 0.6057945747088405
+    }
+  ]
+}

@@ -93,6 +93,7 @@ export const RUNTIME_METHODS = [
   "run.pause",
   "run.resume",
   "run.steer",
+  "run.get",
   "runs.list",
   "approval.respond",
   "plan.respond",

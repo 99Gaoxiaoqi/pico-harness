@@ -467,11 +467,19 @@ export const capabilitiesParamValidators = {
   "skills.effective.list": workspaceParams,
   "mcp.user.list": noParams,
   "mcp.user.upsert": (params) => {
-    const common = { expectedRevision: boundedNonEmptyStringParam(512),
-      idempotencyKey: boundedNonEmptyStringParam(512) };
+    const common = {
+      expectedRevision: boundedNonEmptyStringParam(512),
+      idempotencyKey: boundedNonEmptyStringParam(512),
+    };
     if (params.inputMode === "public-patch")
-      exactParamShape({ ...common, inputMode: oneOfParam(["public-patch"]),
-        server: runtimeMcpServerPublicPatchParam },{ secretEdits: runtimeSecretEditsParam })(params);
+      exactParamShape(
+        {
+          ...common,
+          inputMode: oneOfParam(["public-patch"]),
+          server: runtimeMcpServerPublicPatchParam,
+        },
+        { secretEdits: runtimeSecretEditsParam },
+      )(params);
     else exactParamShape({ ...common, server: runtimeMcpServerParam })(params);
   },
   "mcp.user.delete": exactParamShape({

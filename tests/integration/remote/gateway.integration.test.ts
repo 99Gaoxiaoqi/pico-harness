@@ -17,6 +17,8 @@ import {
   CAPABILITY_SCOPE_RUNTIME_CAPABILITY,
   TEMPORARY_WORKSPACE_RUNTIME_CAPABILITY,
   MODEL_CATALOG_RUNTIME_CAPABILITY,
+  CONFIG_SECRET_PATCH_RUNTIME_CAPABILITY,
+  publicProviderEndpoint,
   REVIEW_IDEMPOTENCY_RUNTIME_CAPABILITY,
   MEMORY_PAGINATION_RUNTIME_CAPABILITY,
   TRANSCRIPT_PROJECTOR_VERSION,
@@ -109,6 +111,7 @@ class FixtureRuntime implements GatewayRuntimeClient {
   disposed = 0;
   corruptArtifact = false;
   supportsModelCatalog = false;
+  supportsSecretPatch = true;
   supportsReviewIdempotency = false;
   supportsMemoryPagination = false;
   recoveryRun = false;
@@ -131,6 +134,7 @@ class FixtureRuntime implements GatewayRuntimeClient {
           CAPABILITY_SCOPE_RUNTIME_CAPABILITY,
           TEMPORARY_WORKSPACE_RUNTIME_CAPABILITY,
           ...(this.supportsModelCatalog ? [MODEL_CATALOG_RUNTIME_CAPABILITY] : []),
+          ...(this.supportsSecretPatch ? [CONFIG_SECRET_PATCH_RUNTIME_CAPABILITY] : []),
           ...(this.supportsReviewIdempotency ? [REVIEW_IDEMPOTENCY_RUNTIME_CAPABILITY] : []),
           ...(this.supportsMemoryPagination ? [MEMORY_PAGINATION_RUNTIME_CAPABILITY] : []),
         ],
@@ -251,6 +255,11 @@ class FixtureRuntime implements GatewayRuntimeClient {
       const { id, ...provider } = record["provider"] as { id: string } & Parameters<
         UserConfigStore["write"]
       >[0]["providers"][string];
+      assert.equal(record["inputMode"], "public-patch");
+      const previous = current.config.providers[id];
+      if (previous?.baseURL && provider.baseURL === publicProviderEndpoint(previous.baseURL)) {
+        provider.baseURL = previous.baseURL;
+      }
       assert.equal(record["expectedRevision"], publicMcpRevision(current.revision));
       const next = await this.userStore.write(
         { ...current.config, providers: { ...current.config.providers, [id]: provider } },
@@ -325,14 +334,22 @@ class FixtureRuntime implements GatewayRuntimeClient {
       };
     } else if (method === "mcp.user.upsert" && this.mcpStore) {
       const snapshot = await this.mcpStore.read();
-      assert.equal(record["expectedRevision"], publicMcpRevision(snapshot.revision));
+      if (record["expectedRevision"] !== publicMcpRevision(snapshot.revision))
+        throw Object.assign(new Error("stale revision"), { code: "MCP_CONFIG_REVISION_CONFLICT" });
       const server = record["server"] as Parameters<UserMcpConfigStore["upsert"]>[0];
-      const result = await this.mcpStore.upsert(server, {
-        expectedRevision: snapshot.revision,
-        idempotencyKey: String(record["idempotencyKey"]),
-      });
+      assert.equal(record["inputMode"], "public-patch");
+      const result = await this.mcpStore.upsertPublicPatch(
+        server,
+        record["secretEdits"] as Parameters<UserMcpConfigStore["upsertPublicPatch"]>[1],
+        {
+          expectedRevision: snapshot.revision,
+          idempotencyKey: String(record["idempotencyKey"]),
+        },
+      );
       value = {
-        server: publicServer(server as unknown as Record<string, unknown>),
+        server: publicServer(
+          result.snapshot.config.mcpServers[server.name] as unknown as Record<string, unknown>,
+        ),
         revision: publicMcpRevision(result.resultRevision),
       };
     } else throw Object.assign(new Error("fixture unsupported"), { code: "METHOD_NOT_FOUND" });
@@ -687,6 +704,51 @@ test("HTTPS 配对、本机批准与 ACK、RPC 授权、摘要下载和撤销构
   }
 });
 
+test("HTTPS 请求体尚未读完时也占用设备的并发预算", async () => {
+  const f = await fixture();
+  const partials: import("node:http").ClientRequest[] = [];
+  try {
+    const { submitted, granted } = await f.pair();
+    await f.http("POST", `/v1/pairings/${submitted.pairingId}/ack`, submitted.pairingToken);
+    for (let index = 0; index < 16; index++) {
+      const req = request({
+        hostname: "127.0.0.1",
+        port: f.port,
+        method: "POST",
+        path: "/v1/rpc",
+        ca: f.ca,
+        headers: {
+          Authorization: `Bearer ${granted.deviceToken}`,
+          "Content-Type": "application/json",
+          "Content-Length": 512,
+          Expect: "100-continue",
+        },
+      });
+      req.on("error", () => {});
+      partials.push(req);
+      const continued = once(req, "continue");
+      req.flushHeaders();
+      await continued;
+      req.write("{");
+    }
+    const overflow = await f.http("POST", "/v1/rpc", granted.deviceToken, {
+      version: 1,
+      requestId: "overflow",
+      workspaceId: "workspace-1",
+      method: "session.list",
+      params: {},
+    });
+    assert.equal(overflow.status, 429);
+    assert.equal(
+      f.runtimes.get(granted.deviceId)!.calls.some((call) => call.method === "session.list"),
+      false,
+    );
+  } finally {
+    for (const req of partials) req.destroy();
+    await f.cleanup();
+  }
+});
+
 test("手机聊天媒体通过 HTTPS 登记和校验后交付，失效引用、伪造内容和撤销设备被拒绝", async () => {
   const f = await fixture();
   try {
@@ -987,7 +1049,15 @@ test("MCP 秘密默认保留、显式编辑、并发 revision 拒绝与旧终端
     assert.equal(update.bytes.includes(Buffer.from("key=hidden")), false);
     const runtime = f.runtimes.get(granted.deviceId)!;
     runtime.mcpReads = 0;
-    runtime.mutateBetweenMcpReads = true;
+    await f.mcpStore.upsert(
+      {
+        name: "service",
+        transport: "http",
+        url: "https://example.com/private",
+        headers: { Authorization: "new-concurrent-secret" },
+      },
+      { expectedRevision: after.revision, idempotencyKey: "concurrent-change" },
+    );
     const conflict = await f.http("POST", "/v1/rpc", granted.deviceToken, {
       version: 1,
       requestId: "mcp-2",
@@ -999,7 +1069,30 @@ test("MCP 秘密默认保留、显式编辑、并发 revision 拒绝与旧终端
       },
     });
     assert.equal(conflict.status, 409);
-    assert.equal(runtime.calls.filter((call) => call.method === "mcp.user.upsert").length, 1);
+    assert.equal(runtime.calls.filter((call) => call.method === "mcp.user.upsert").length, 2);
+    assert.equal(runtime.mcpReads, 0, "Gateway must not read raw configuration before patching");
+    runtime.supportsSecretPatch = false;
+    const oldHost = await f.http("GET", "/v1/capabilities", granted.deviceToken);
+    assert.equal(
+      (oldHost.json as { methods: string[] }).methods.includes("mcp.user.upsert"),
+      false,
+    );
+    assert.equal(
+      (oldHost.json as { methods: string[] }).methods.includes("provider.upsert"),
+      false,
+    );
+    const unavailable = await f.http("POST", "/v1/rpc", granted.deviceToken, {
+      version: 1,
+      requestId: "old-patch",
+      method: "mcp.user.upsert",
+      params: {
+        server: { name: "service", transport: "http" },
+        expectedRevision: publicMcpRevision(after.revision),
+        idempotencyKey: "old-patch",
+      },
+    });
+    assert.equal(unavailable.status, 409);
+    assert.equal(runtime.calls.filter((call) => call.method === "mcp.user.upsert").length, 2);
     const concurrent = (await f.mcpStore.read()).config.mcpServers["service"] as {
       headers: Record<string, string>;
     };
@@ -1369,6 +1462,76 @@ test("审阅幂等和记忆分页仅向支持的 Host 转发，沿用原权限�
     assert.equal(ordinary.features.memoryPagination!.available, false);
     assert.equal((await rpc("memory.list", { paged: true, limit: 50 })).status, 403);
     assert.equal((await rpc("changes.review", review)).status, 403);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("supervised Gateway rejects stale intent before binding and reports its running build across manifest updates", async () => {
+  const f = await fixture();
+  try {
+    await f.gateway.close();
+    const {
+      setGatewayDesiredRunning,
+      beginGatewayMaintenance,
+      readGatewayServiceState,
+      writeActiveGatewayRuntime,
+    } = await import("../../../packages/remote-gateway/src/supervision-state.js");
+    const runtime = {
+      schemaVersion: 1 as const,
+      buildId: "registered-new",
+      executablePath: process.execPath,
+      gatewayPath: f.config.certificatePath,
+      runtimeHome: f.config.runtimeHostRootPath!,
+      pathEntries: [],
+    };
+    await writeActiveGatewayRuntime(f.home, runtime);
+    const enabled = await setGatewayDesiredRunning(f.home, true);
+    let bootstraps = 0;
+    const gateway = await createRemoteGateway(f.config, {
+      home: f.home,
+      buildId: "running-old",
+      supervisionGeneration: enabled.generation,
+      createRuntimeClient: () => {
+        bootstraps++;
+        return new FixtureRuntime();
+      },
+    });
+    await gateway.start();
+    try {
+      await writeActiveGatewayRuntime(f.home, { ...runtime, buildId: "registered-next" });
+      assert.equal(
+        ((await gateway.manage("status", {})) as { buildId: string }).buildId,
+        "running-old",
+      );
+    } finally {
+      await gateway.close();
+    }
+    await beginGatewayMaintenance(f.home, "running-old");
+    const attempts = [enabled.generation, (await readGatewayServiceState(f.home)).generation, NaN];
+    for (const generation of attempts) {
+      const rejected = await createRemoteGateway(f.config, {
+        home: f.home,
+        supervisionGeneration: generation,
+        createRuntimeClient: () => {
+          bootstraps++;
+          return new FixtureRuntime();
+        },
+      });
+      await assert.rejects(rejected.start(), /GATEWAY_SUPERVISION_INTENT_CHANGED/);
+    }
+    await setGatewayDesiredRunning(f.home, false);
+    const stopped = await readGatewayServiceState(f.home);
+    const rejected = await createRemoteGateway(f.config, {
+      home: f.home,
+      supervisionGeneration: stopped.generation,
+      createRuntimeClient: () => {
+        bootstraps++;
+        return new FixtureRuntime();
+      },
+    });
+    await assert.rejects(rejected.start(), /GATEWAY_SUPERVISION_INTENT_CHANGED/);
+    assert.equal(bootstraps, 1, "rejected intents must not connect or start Runtime");
   } finally {
     await f.cleanup();
   }

@@ -144,6 +144,7 @@ export interface RuntimeHostConnection {
     operation: string,
     input: unknown,
     timeoutMs?: number,
+    onResponseMetrics?: (metrics: Readonly<{ encodedBytes: number; decodeMs: number }>) => void,
   ): Promise<Output>;
   /**
    * Sets the listener for Host-initiated event frames (`kind: "event"`). At most
@@ -189,11 +190,14 @@ export class RuntimeHostOperationError extends Error {
   }
 }
 
+type ResponseMetrics = Readonly<{ encodedBytes: number; decodeMs: number }>;
+
 interface PendingRequest {
   operation: KnownOperationKey;
   accept(value: unknown): unknown;
   resolve(value: unknown): void;
   reject(error: Error): void;
+  onResponseMetrics?: (metrics: ResponseMetrics) => void;
   domainState?: "queued" | "in_flight";
   timer?: NodeJS.Timeout;
 }
@@ -298,6 +302,7 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
     operation: string,
     input: unknown,
     timeoutMs?: number,
+    onResponseMetrics?: (metrics: Readonly<{ encodedBytes: number; decodeMs: number }>) => void,
   ): Promise<Output> {
     // 动态注册操作的 input/output 类型不在静态 OperationKey 面内，这里按
     // unknown 穿过；spec.decodeInput/decodeOutput 仍在运行时完整校验。
@@ -307,6 +312,7 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
       timeoutMs,
       (result) => result as Output,
       "request",
+      onResponseMetrics,
     );
   }
 
@@ -316,9 +322,10 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
     timeoutMs: number | undefined,
     accept: (result: OperationOutput<K>) => Result,
     timeoutScope: RequestTimeoutScope,
+    onResponseMetrics?: (metrics: ResponseMetrics) => void,
   ): Promise<Result> {
     const boundedTimeoutMs =
-      timeoutMs === undefined ? undefined : requireTimeout(timeoutMs, "timeoutMs");
+      timeoutMs === undefined ? undefined : requireTimeout(timeoutMs, "timeoutMs", 125_000);
     if (this.#terminalError) return Promise.reject(this.#terminalError);
     // resolveOperationSpec 覆盖 test-only 动态注册的操作；request() 的静态类型
     // 已约束 operation 为已知 key，缺失即内部不变量被破坏。
@@ -357,6 +364,7 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
         },
         resolve: (value) => resolve(value as Result),
         reject,
+        ...(onResponseMetrics ? { onResponseMetrics } : {}),
         ...(isDomainRequest ? { domainState: "queued" as const } : {}),
         timer,
       });
@@ -446,14 +454,14 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
           // the Host violated the frame order.
           throw new Error("Runtime Host returned a handshake frame after acceptance");
         }
-        this.#acceptResponse(frame);
+        this.#acceptResponse(frame, this.#transport.lastReadMetrics);
       }
     } catch (error) {
       this.#fail(asError(error));
     }
   }
 
-  #acceptResponse(frame: ResponseFrame): void {
+  #acceptResponse(frame: ResponseFrame, metrics: ResponseMetrics): void {
     const pending = this.#pendingRequests.get(frame.requestId);
     if (!pending) {
       const retired = this.#retiredRequests.get(frame.requestId);
@@ -474,6 +482,11 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
       return;
     }
     this.#pendingRequests.delete(frame.requestId);
+    try {
+      pending.onResponseMetrics?.(metrics);
+    } catch {
+      /* Diagnostics never affect delivery. */
+    }
     if (pending.timer) clearTimeout(pending.timer);
     this.#scheduleLivenessCheck();
     if (frame.ok) {
@@ -905,9 +918,9 @@ function openTransport(
   });
 }
 
-function requireTimeout(value: number, label: string): number {
-  if (!Number.isSafeInteger(value) || value < 1 || value > 120_000) {
-    throw new RangeError(`${label} must be an integer between 1 and 120000`);
+function requireTimeout(value: number, label: string, maximum = 120_000): number {
+  if (!Number.isSafeInteger(value) || value < 1 || value > maximum) {
+    throw new RangeError(`${label} must be an integer between 1 and ${maximum}`);
   }
   return value;
 }

@@ -15,6 +15,7 @@ const MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
 interface QueuedFrame {
   value: unknown;
   encodedBytes: number;
+  decodeMs: number;
 }
 
 interface ReadWaiter {
@@ -41,6 +42,10 @@ export class RuntimeHostTransportError extends Error {
 
 export class FramedTransport {
   readonly closed: Promise<void>;
+  #lastReadMetrics = { encodedBytes: 0, decodeMs: 0 };
+  get lastReadMetrics(): Readonly<{ encodedBytes: number; decodeMs: number }> {
+    return this.#lastReadMetrics;
+  }
   readonly #decoder = new ProtocolFrameDecoder();
   readonly #queue: QueuedFrame[] = [];
   #queuedBytes = 0;
@@ -77,6 +82,7 @@ export class FramedTransport {
     const queued = this.#queue.shift();
     if (queued) {
       this.#queuedBytes -= queued.encodedBytes;
+      this.#lastReadMetrics = { encodedBytes: queued.encodedBytes, decodeMs: queued.decodeMs };
       this.#drainInbound();
       return queued.value;
     }
@@ -167,11 +173,13 @@ export class FramedTransport {
         }
         const encoded = this.#buffered.subarray(0, encodedBytes);
         this.#buffered = this.#buffered.subarray(encodedBytes);
+        const decodeStarted = performance.now();
         const frames = this.#decoder.push(encoded);
+        const decodeMs = performance.now() - decodeStarted;
         if (frames.length !== 1) {
           throw new Error("Runtime Host decoder did not produce one complete frame");
         }
-        this.#deliver(frames[0], encodedBytes);
+        this.#deliver(frames[0], encodedBytes, decodeMs);
       }
       if (this.#ended && !this.#decoderEnded && this.#buffered.indexOf(0x0a) === -1) {
         if (this.#buffered.byteLength !== 0) {
@@ -190,14 +198,15 @@ export class FramedTransport {
     this.#updateReadFlow();
   }
 
-  #deliver(frame: unknown, encodedBytes: number): void {
+  #deliver(frame: unknown, encodedBytes: number, decodeMs: number): void {
     if (this.#waiter) {
       const waiter = this.#waiter;
       this.#waiter = undefined;
       if (waiter.timer) clearTimeout(waiter.timer);
+      this.#lastReadMetrics = { encodedBytes, decodeMs };
       waiter.resolve(frame);
     } else {
-      this.#queue.push({ value: frame, encodedBytes });
+      this.#queue.push({ value: frame, encodedBytes, decodeMs });
       this.#queuedBytes += encodedBytes;
     }
   }

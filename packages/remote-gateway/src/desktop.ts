@@ -21,3 +21,5 @@ export type {
   ActiveGatewayRuntime,
   GatewayExit,
 } from "./supervision-state.js";
+
+export { gatewayAuthorizationMetrics } from "./access-metrics.js";

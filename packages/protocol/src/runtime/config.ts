@@ -43,9 +43,14 @@ import type { RuntimeParamRule, RuntimeParamValidator, RuntimeResultRule } from 
 export function publicProviderEndpoint(input: string): string {
   try {
     const url = new URL(input);
-    url.username = ""; url.password = ""; url.search = ""; url.hash = "";
+    url.username = "";
+    url.password = "";
+    url.search = "";
+    url.hash = "";
     return url.toString();
-  } catch { return "[地址不可展示]"; }
+  } catch {
+    return "[地址不可展示]";
+  }
 }
 
 export type RuntimeProviderInput = JsonObject & {
@@ -410,10 +415,13 @@ export const configParamValidators = {
   "config.effective.get": workspaceParams,
   "provider.list": noParams,
   "provider.test": exactParamShape({ providerId: stringParam, model: stringParam }),
-  "provider.upsert": exactParamShape({
-    provider: runtimeProviderParam,
-    expectedRevision: stringParam,
-  }, { inputMode: oneOfParam(["public-patch"]) }),
+  "provider.upsert": exactParamShape(
+    {
+      provider: runtimeProviderParam,
+      expectedRevision: stringParam,
+    },
+    { inputMode: oneOfParam(["public-patch"]) },
+  ),
   "provider.importEnvironment": exactParamShape({
     provider: runtimeProviderParam,
     defaultModel: stringParam,

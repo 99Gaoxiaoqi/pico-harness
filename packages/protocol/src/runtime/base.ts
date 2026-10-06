@@ -21,6 +21,7 @@ export const MEMORY_PAGINATION_RUNTIME_CAPABILITY = "memory-list-pagination-v1";
 
 export const SESSION_SEND_REPLAY_RUNTIME_CAPABILITY = "session-send-replay-v1";
 export const CONFIG_SECRET_PATCH_RUNTIME_CAPABILITY = "config-secret-patch-v1";
+export const RUN_POINT_LOOKUP_RUNTIME_CAPABILITY = "run-point-lookup-v1";
 
 export const MAX_RUNTIME_FRAME_BYTES = 1024 * 1024;
 

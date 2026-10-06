@@ -29,6 +29,8 @@ export function safeGatewayError(error: unknown, dispatched = false): GatewayErr
     RUNTIME_UNAVAILABLE: ["电脑 Runtime 暂时不可用", 503, true],
     RUNTIME_DISCONNECTED: ["电脑 Runtime 连接中断", 503, true],
     RUNTIME_CLIENT_CLOSED: ["电脑 Runtime 连接已关闭", 503, true],
+    RUNTIME_REQUEST_TIMEOUT: ["请求等待超时；操作可能仍在执行", 504, false],
+    SEND_RECOVERY_UNAVAILABLE: ["无法确认原发送结果，请查看会话后再决定是否重新发送", 409, false],
     MCP_CONFIG_REVISION_CONFLICT: ["MCP 配置已更新，请刷新", 409, false],
   };
   const detail = allowed[code];

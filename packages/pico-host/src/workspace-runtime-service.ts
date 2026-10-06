@@ -27,6 +27,7 @@ import {
   MODEL_CATALOG_RUNTIME_CAPABILITY,
   REVIEW_IDEMPOTENCY_RUNTIME_CAPABILITY,
   MEMORY_PAGINATION_RUNTIME_CAPABILITY,
+  RUN_POINT_LOOKUP_RUNTIME_CAPABILITY,
   RUNTIME_ERROR_CODES,
   RuntimeProtocolError,
   serializeRuntimeNotification,
@@ -345,6 +346,7 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
           MODEL_CATALOG_RUNTIME_CAPABILITY,
           REVIEW_IDEMPOTENCY_RUNTIME_CAPABILITY,
           MEMORY_PAGINATION_RUNTIME_CAPABILITY,
+          RUN_POINT_LOOKUP_RUNTIME_CAPABILITY,
           "shared-config-v1",
           "session-send-replay-v1",
           "config-secret-patch-v1",
@@ -456,6 +458,13 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
       return runPayload(
         runtime.steer(requiredString(params, "runId"), requiredString(params, "message")),
       );
+    }
+    if (request.method === "run.get") {
+      const run = await this.getWorkspaceRun(
+        requiredString(params, "workspacePath"),
+        requiredString(params, "runId"),
+      );
+      return { run: run ? runPayload(run) : null };
     }
     if (request.method === "runs.list") {
       const runtime = await this.getRuntime(requiredString(params, "workspacePath"));

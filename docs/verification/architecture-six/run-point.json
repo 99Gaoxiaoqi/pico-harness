@@ -1,0 +1,149 @@
+{
+  "schemaVersion": 1,
+  "measuredAt": "2026-10-06T05:52:16.530Z",
+  "path": "point",
+  "warmups": 20,
+  "samples": 200,
+  "batches": 5,
+  "results": [
+    {
+      "count": 100,
+      "scenario": "exists",
+      "batchP95Ms": [
+        8.660250000000133, 8.266999999999825, 7.061333999999988, 8.054167000000234,
+        6.893583000000035
+      ],
+      "p95MedianMs": 8.054167000000234,
+      "failures": 0,
+      "maxFrameBytes": 393,
+      "hostResultBytes": 279
+    },
+    {
+      "count": 100,
+      "scenario": "missing",
+      "batchP95Ms": [
+        8.236665999998877, 7.364166999999725, 8.126291000000492, 7.4117499999993015,
+        7.681499999998778
+      ],
+      "p95MedianMs": 7.681499999998778,
+      "failures": 0,
+      "maxFrameBytes": 126,
+      "hostResultBytes": 279
+    },
+    {
+      "count": 100,
+      "scenario": "cross-workspace",
+      "batchP95Ms": [
+        6.924541000000318, 7.96650000000227, 6.95129199999792, 7.7245419999999285, 7.984874999998283
+      ],
+      "p95MedianMs": 7.7245419999999285,
+      "failures": 0,
+      "maxFrameBytes": 126,
+      "hostResultBytes": 279
+    },
+    {
+      "count": 100,
+      "scenario": "session-mismatch",
+      "batchP95Ms": [
+        7.732167000001937, 7.40112500000032, 7.628292000001238, 7.004875000002357, 8.805124999998952
+      ],
+      "p95MedianMs": 7.628292000001238,
+      "failures": 0,
+      "maxFrameBytes": 393,
+      "hostResultBytes": 279
+    },
+    {
+      "count": 1000,
+      "scenario": "exists",
+      "batchP95Ms": [
+        7.7731669999993755, 7.794165999999677, 7.342750000003434, 7.737082999999984,
+        7.510541999996349
+      ],
+      "p95MedianMs": 7.737082999999984,
+      "failures": 0,
+      "maxFrameBytes": 393,
+      "hostResultBytes": 279
+    },
+    {
+      "count": 1000,
+      "scenario": "missing",
+      "batchP95Ms": [
+        7.921833000000333, 7.121333999995841, 8.284916999997222, 7.172917000003508, 7.82129200000054
+      ],
+      "p95MedianMs": 7.82129200000054,
+      "failures": 0,
+      "maxFrameBytes": 126,
+      "hostResultBytes": 279
+    },
+    {
+      "count": 1000,
+      "scenario": "cross-workspace",
+      "batchP95Ms": [
+        7.215250000001106, 7.716874999998254, 7.375958999997238, 7.819333000006736, 7.54295799999818
+      ],
+      "p95MedianMs": 7.54295799999818,
+      "failures": 0,
+      "maxFrameBytes": 126,
+      "hostResultBytes": 279
+    },
+    {
+      "count": 1000,
+      "scenario": "session-mismatch",
+      "batchP95Ms": [
+        8.471540999998979, 7.190875000000233, 7.988624999998137, 7.382416000000376,
+        7.671166999993147
+      ],
+      "p95MedianMs": 7.671166999993147,
+      "failures": 0,
+      "maxFrameBytes": 393,
+      "hostResultBytes": 279
+    },
+    {
+      "count": 10000,
+      "scenario": "exists",
+      "batchP95Ms": [
+        9.227292000003217, 7.326249999998254, 7.967333999993571, 7.5098330000037095,
+        7.605083999995259
+      ],
+      "p95MedianMs": 7.605083999995259,
+      "failures": 0,
+      "maxFrameBytes": 393,
+      "hostResultBytes": 279
+    },
+    {
+      "count": 10000,
+      "scenario": "missing",
+      "batchP95Ms": [
+        7.63895799999591, 8.707374999998137, 8.481708999999682, 7.660042000003159, 7.38154200000281
+      ],
+      "p95MedianMs": 7.660042000003159,
+      "failures": 0,
+      "maxFrameBytes": 126,
+      "hostResultBytes": 279
+    },
+    {
+      "count": 10000,
+      "scenario": "cross-workspace",
+      "batchP95Ms": [
+        8.373916000011377, 7.45770800000173, 7.506249999991269, 7.903166000003694,
+        7.9692919999943115
+      ],
+      "p95MedianMs": 7.903166000003694,
+      "failures": 0,
+      "maxFrameBytes": 126,
+      "hostResultBytes": 279
+    },
+    {
+      "count": 10000,
+      "scenario": "session-mismatch",
+      "batchP95Ms": [
+        7.332374999998137, 7.954165999995894, 7.331292000002577, 7.897499999991851,
+        8.278750000012224
+      ],
+      "p95MedianMs": 7.897499999991851,
+      "failures": 0,
+      "maxFrameBytes": 393,
+      "hostResultBytes": 279
+    }
+  ]
+}

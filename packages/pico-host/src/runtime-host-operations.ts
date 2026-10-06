@@ -80,6 +80,17 @@ const BRIDGE_ERRORS = [
  */
 export const RUNTIME_REQUEST_RESULT_MAX_BYTES = RUNTIME_HOST_MAX_FRAME_BYTES - 64 * 1024;
 
+// Fixed aggregates only. Reuses the existing byte-budget serialization, including rejected large lists.
+const runResultBytes = { count: 0, totalBytes: 0, maxBytes: 0 };
+export function runtimeRunResultSizeMetrics(): Readonly<typeof runResultBytes> {
+  return { ...runResultBytes };
+}
+function observeRunResultBytes(bytes: number): void {
+  runResultBytes.count++;
+  runResultBytes.totalBytes += bytes;
+  runResultBytes.maxBytes = Math.max(runResultBytes.maxBytes, bytes);
+}
+
 /** Runtime Host 桥接错误码全集（daemon 协议错误码映射的目标空间）。 */
 export type BridgeErrorCode =
   | "operation_unavailable"
@@ -273,6 +284,10 @@ export const PICO_RUNTIME_HOST_OPERATION_SPECS = {
         value["result"],
         "runtime.request result",
         RUNTIME_REQUEST_RESULT_MAX_BYTES,
+        isJsonObject(value["result"]) &&
+          (Array.isArray(value["result"]["runs"]) || "run" in value["result"])
+          ? observeRunResultBytes
+          : undefined,
       );
       return { result: value["result"] };
     },
