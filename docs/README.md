@@ -24,6 +24,7 @@
 | [上下文压缩](pico-context-compaction-technical-guide.md)                  | 真实用量触发、安全切点、摘要与归档   |
 | [长期记忆](pico-memory-technical-guide.md)                                | 用户证据、原子记忆、事务恢复与召回   |
 | [子智能体](pico-subagents-technical-guide.md)                             | 子任务配置、持久会话、权限继承与续用 |
+| [Run Quest：一次任务的可靠旅程](interactive/harness-journey/index.html)     | 交互式追踪 Run 执行、故障与状态边界 |
 | [课程 00–10](#课程式构建记录)                                             | 从基础循环到完整 Harness             |
 
 [执行架构图](readme-assets/current/runtime.png)（[交互版](readme-assets/current/runtime.html) · [图源](readme-assets/current/runtime.json)）

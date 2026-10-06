@@ -70,3 +70,6 @@ Thumbs.db
 **/.understand-anything/
 .test-tmp/
 .zcode/
+
+# 本地撰写的 Harness 文章初稿与配图(不提交)
+/docs/articles/harness-agent/

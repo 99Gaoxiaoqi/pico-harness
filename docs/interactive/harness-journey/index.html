@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="跟着一次代码修复任务，互动了解 Agent Harness 如何执行工具、记录事实并从失败中恢复。"
+    />
+    <meta name="theme-color" content="#101918" />
+    <title>Run Quest · 一次任务的可靠旅程</title>
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Crect width='48' height='48' rx='14' fill='%23101918'/%3E%3Cpath d='M10 30h9l5-14 5 16 4-9h5' fill='none' stroke='%23c5f36a' stroke-linecap='round' stroke-linejoin='round' stroke-width='4'/%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="./style.css" />
+    <script src="./app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#journey">跳到任务旅程</a>
+    <div class="page-shell">
+      <header class="topbar">
+        <a class="brand" href="#top" aria-label="Run Quest 首页">
+          <span class="brand-mark" aria-hidden="true">↗</span>
+          <span>RUN QUEST <span class="brand-divider">/</span> PICO FIELD GUIDE</span>
+        </a>
+        <nav class="top-nav" aria-label="页面导航">
+          <a href="#journey">任务旅程</a>
+          <a href="#fault-lab">故障实验室</a>
+          <a href="#glossary">概念卡</a>
+        </nav>
+        <span class="local-badge"><span></span> 离线可玩</span>
+      </header>
+
+      <main id="top">
+        <section class="intro" aria-labelledby="page-title">
+          <div class="intro-copy">
+            <p class="eyebrow"><span class="eyebrow-line"></span> 一次任务 · 七个站点 · 不需要 API Key</p>
+            <h1 id="page-title">把一句任务，<br /><em>送过整座</em> Harness。</h1>
+            <p class="intro-text">
+              Agent 会读文件、改代码、跑验证。跟着这张任务票往前走，看看模型之外的系统怎样让每一步有边界、留得下证据，也接得住失败。
+            </p>
+          </div>
+          <div class="intro-stamp" aria-label="交互课程说明">
+            <span class="stamp-top">FIELD NOTE 001</span>
+            <span class="stamp-orbit" aria-hidden="true"><span>↗</span></span>
+            <span class="stamp-bottom">FOLLOW THE RUN</span>
+          </div>
+        </section>
+
+        <section class="mission-card" aria-label="模拟任务">
+          <div class="mission-icon" aria-hidden="true">⌘</div>
+          <div class="mission-copy">
+            <span class="micro-label">今天的任务票</span>
+            <p>修复 <code>parseUser</code> 的类型错误，然后运行相关验证。</p>
+          </div>
+          <div class="mission-meta">
+            <span class="status-dot"></span>
+            <span id="journey-status">等待发车</span>
+          </div>
+        </section>
+
+        <section id="journey" class="journey-section" aria-labelledby="journey-title">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">01 — EXECUTION MAP</p>
+              <h2 id="journey-title">沿着一次 Run 往前走</h2>
+            </div>
+            <p class="section-note">点站点，或用“上一步 / 下一步”控制旅程。</p>
+          </div>
+
+          <div class="journey-layout">
+            <aside class="station-board" aria-label="执行步骤">
+              <div class="board-heading">
+                <span>RUN TIMELINE</span>
+                <span id="step-count">01 / 07</span>
+              </div>
+              <div class="progress-track" aria-hidden="true"><span id="progress-fill"></span></div>
+              <ol id="station-list" class="station-list"></ol>
+              <div class="board-footer">
+                <span class="pulse-ring" aria-hidden="true"></span>
+                <span>执行事实按顺序留下</span>
+              </div>
+            </aside>
+
+            <article class="station-detail" aria-live="polite" aria-atomic="true">
+              <div class="detail-topline">
+                <span id="station-kicker" class="detail-kicker">STATION 01</span>
+                <span id="station-owner" class="owner-chip">系统入口</span>
+              </div>
+              <div class="detail-title-row">
+                <div id="station-glyph" class="detail-glyph" aria-hidden="true">↘</div>
+                <div>
+                  <p id="station-tag" class="micro-label">输入</p>
+                  <h3 id="station-title">你的任务进入系统</h3>
+                </div>
+              </div>
+              <p id="station-summary" class="detail-summary"></p>
+              <div class="detail-callout">
+                <span class="callout-mark" aria-hidden="true">?</span>
+                <p id="station-insight"></p>
+              </div>
+              <div class="detail-bottom">
+                <div>
+                  <span class="micro-label">沿代码继续读</span>
+                  <div id="source-links" class="source-links"></div>
+                </div>
+                <div class="step-controls">
+                  <button id="prev-step" class="button button-quiet" type="button">← 上一步</button>
+                  <button id="next-step" class="button button-primary" type="button">下一步 <span aria-hidden="true">→</span></button>
+                </div>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section class="run-rule" aria-label="运行规律">
+          <div class="rule-symbol" aria-hidden="true">✳</div>
+          <p><strong>先记住一条线：</strong>模型提出下一步，Harness 决定能力边界、执行时机和状态怎样落账。</p>
+          <span class="rule-side">PROMPT ≠ RUNTIME</span>
+        </section>
+
+        <section id="fault-lab" class="fault-section" aria-labelledby="fault-title">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">02 — BREAK IT SAFELY</p>
+              <h2 id="fault-title">让旅程遇到一点麻烦</h2>
+            </div>
+            <p class="section-note">选一个故障，看系统能确认什么、接下来怎么办。</p>
+          </div>
+          <div class="fault-layout">
+            <div class="fault-picker" role="group" aria-label="选择故障场景">
+              <button class="fault-choice is-active" type="button" data-fault="approval" aria-pressed="true">
+                <span class="fault-number">A</span><span><strong>审批被拒绝</strong><small>副作用发生了吗？</small></span><span class="choice-arrow">↗</span>
+              </button>
+              <button class="fault-choice" type="button" data-fault="oversized" aria-pressed="false">
+                <span class="fault-number">B</span><span><strong>工具结果太大</strong><small>要把整份文件塞给模型吗？</small></span><span class="choice-arrow">↗</span>
+              </button>
+              <button class="fault-choice" type="button" data-fault="interrupt" aria-pressed="false">
+                <span class="fault-number">C</span><span><strong>工具执行时进程退出</strong><small>系统能无损接着跑吗？</small></span><span class="choice-arrow">↗</span>
+              </button>
+              <button class="fault-choice" type="button" data-fault="context" aria-pressed="false">
+                <span class="fault-number">D</span><span><strong>上下文超出窗口</strong><small>压缩会删掉原始事实吗？</small></span><span class="choice-arrow">↗</span>
+              </button>
+            </div>
+            <article id="fault-result" class="fault-result" aria-live="polite" aria-atomic="true">
+              <div class="result-header"><span class="warning-icon" aria-hidden="true">!</span><span id="fault-label">场景 A · 执行前被拦下</span></div>
+              <h3 id="fault-heading">审批被拒绝</h3>
+              <p id="fault-explanation"></p>
+              <div class="result-facts">
+                <div><span>系统可以确认</span><p id="fault-known"></p></div>
+                <div><span>边界提醒</span><p id="fault-boundary"></p></div>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section class="checkpoint-section" aria-labelledby="checkpoint-title">
+          <div class="checkpoint-card">
+            <div class="checkpoint-copy">
+              <p class="eyebrow">03 — CHECKPOINT</p>
+              <h2 id="checkpoint-title">模型看见工具，<br />就能执行它吗？</h2>
+              <p>先选一个答案，再看工具披露、权限判断和实际执行之间的关系。</p>
+            </div>
+            <div class="quiz-area">
+              <div class="quiz-buttons" role="group" aria-label="选择答案">
+                <button class="quiz-choice" type="button" data-answer="yes">能，Schema 已经发过去了</button>
+                <button class="quiz-choice" type="button" data-answer="no">不能，还要经过运行时检查</button>
+              </div>
+              <div id="quiz-feedback" class="quiz-feedback" aria-live="polite">
+                <span class="feedback-icon" aria-hidden="true">↳</span>
+                <p>选一个答案，检查你对“可见”和“可执行”的理解。</p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="glossary" class="glossary-section" aria-labelledby="glossary-title">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">04 — POCKET GLOSSARY</p>
+              <h2 id="glossary-title">三张口袋概念卡</h2>
+            </div>
+            <p class="section-note">遇到相似名词时，先问它们的生命周期。</p>
+          </div>
+          <div class="glossary-grid">
+            <article class="glossary-card card-session">
+              <span class="glossary-index">01 / CONTINUITY</span>
+              <h3>Session</h3>
+              <p>一段跨多次 Run 的会话身份。它承载连续历史，但不等于单次模型请求。</p>
+              <span class="glossary-mark" aria-hidden="true">∞</span>
+            </article>
+            <article class="glossary-card card-run">
+              <span class="glossary-index">02 / EXECUTION</span>
+              <h3>Run</h3>
+              <p>一次受控执行的边界。成功、失败、取消和中断都有各自的终态。</p>
+              <span class="glossary-mark" aria-hidden="true">↗</span>
+            </article>
+            <article class="glossary-card card-context">
+              <span class="glossary-index">03 / MODEL VIEW</span>
+              <h3>上下文视图</h3>
+              <p>为下一次推理构造的预算内输入。压缩会改变读取视图，不会抹掉事件账本。</p>
+              <span class="glossary-mark" aria-hidden="true">◌</span>
+            </article>
+          </div>
+        </section>
+      </main>
+
+      <footer class="footer">
+        <a class="brand footer-brand" href="#top"><span class="brand-mark" aria-hidden="true">↗</span><span>RUN QUEST</span></a>
+        <p>用一次真实执行，学会追问：谁做决定？事实存在哪里？失败后还能确认什么？</p>
+        <a href="../../README.md">返回项目文档 ↗</a>
+      </footer>
+    </div>
+  </body>
+</html>
