@@ -3467,10 +3467,13 @@ function transcriptMutationsForEvent(
       return mutations;
     }
     // Bootstrap imports preserve each committed message but share one synthetic turn.
-    // Its stable event identity also works for existing fork logs and idempotent retries.
-    const messageIdentity = event.runId.startsWith(RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX)
-      ? event.eventId
-      : event.turnId;
+    // Use each event's stable identity for fork and external-session imports so later
+    // assistant messages do not overwrite earlier replies that share that synthetic turn.
+    const messageIdentity =
+      event.runId.startsWith(RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX) ||
+      event.runId.startsWith("external-import:")
+        ? event.eventId
+        : event.turnId;
     const reasoning = message.role === "assistant" ? message.reasoning?.trim() : undefined;
     if (reasoning) {
       const itemId = `message:${messageIdentity}:thinking`;

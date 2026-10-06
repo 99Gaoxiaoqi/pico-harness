@@ -61,6 +61,12 @@ export function foldConversationProcess(
   };
 
   for (const item of items) {
+    if (item.kind === "assistantMessage" && item.runId?.startsWith("external-import:")) {
+      flush();
+      folded.push(item);
+      anchor = conversationItemKey(item);
+      continue;
+    }
     if (item.kind === "runBoundary") {
       if (item.status === "started") {
         if (item.runId !== hostRunId) {

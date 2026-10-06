@@ -8,6 +8,7 @@ import type { DesktopDiagnosticReport } from "../runtime.js";
 import { workspaceDisplayName } from "../workspace-session.js";
 import { defaultModelWebSearch } from "../web-search.js";
 import { copyText } from "../clipboard.js";
+import { ExternalTaskImportPanel } from "./ExternalTaskImportPanel.js";
 
 export function DataSettingsPage() {
   const { data, actions, busy } = useRuntime();
@@ -85,6 +86,14 @@ export function DataSettingsPage() {
           Pico，再备份整个应用数据目录。恢复时放回原位置后启动。此目录包含模型连接配置及凭证，请妥善保管。手动添加的项目文件位于各自目录，需要另外备份。
         </p>
       </section>
+    </div>
+  );
+}
+
+export function ExternalTasksSettingsPage() {
+  return (
+    <div className="page-stack settings-page">
+      <ExternalTaskImportPanel />
     </div>
   );
 }

@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { RuntimeConversationItem, RuntimeTranscriptItemRecord } from "@pico/protocol/mobile";
+import {
+  TRANSCRIPT_PROJECTOR_VERSION,
+  type RuntimeConversationItem,
+  type RuntimeTranscriptItemRecord,
+} from "@pico/protocol/mobile";
 import type { TranscriptReplicaView } from "@pico/transcript-replica";
 import {
   rowIndexForItem,
@@ -82,7 +86,11 @@ function view(records: readonly RuntimeTranscriptItemRecord[]): TranscriptReplic
     phase: "ready",
     generation: 1,
     sessionId: "session",
-    watermark: { historyEpoch: "history", projectorVersion: 11, throughSequence: 100 },
+    watermark: {
+      historyEpoch: "history",
+      projectorVersion: TRANSCRIPT_PROJECTOR_VERSION,
+      throughSequence: 100,
+    },
     records,
     activeOverlay: [],
     queuedInputs: [],

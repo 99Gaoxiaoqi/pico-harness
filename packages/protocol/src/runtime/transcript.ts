@@ -39,7 +39,7 @@ import {
 } from "./validation.js";
 import type { RuntimeParamRule, RuntimeParamValidator, RuntimeResultRule } from "./validation.js";
 
-export const TRANSCRIPT_PROJECTOR_VERSION = 11 as const;
+export const TRANSCRIPT_PROJECTOR_VERSION = 12 as const;
 
 export type RuntimeTranscriptWatermark = JsonObject & {
   readonly historyEpoch: string;

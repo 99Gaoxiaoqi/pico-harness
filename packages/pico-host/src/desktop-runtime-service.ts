@@ -114,6 +114,9 @@ import {
   WorkbarConflictError,
   WorkbarForbiddenError,
   WorkbarNotFoundError,
+  createExternalSessionAdapterRegistry,
+  ExternalSessionUnreadableError,
+  type ExternalSessionAdapterRegistry,
 } from "@pico/storage";
 import { RuntimeRun } from "./product-runtime-run.js";
 import { createEngineRuntimePort } from "./engine-runtime-port-adapter.js";
@@ -148,6 +151,7 @@ import {
   type RuntimeSession,
   type RuntimeUserDefaults,
   type RuntimeUserInput,
+  type RuntimeParams,
 } from "@pico/protocol";
 import type {
   DisposableLocalRuntimeService,
@@ -382,9 +386,11 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private readonly browserAgentBroker: BrowserAgentCommandBroker;
   private readonly clientCapabilityBroker: ClientCapabilityCommandBroker;
   private readonly storageRepair: WorkspaceStorageRepairService;
+  private readonly externalSessionAdapters: ExternalSessionAdapterRegistry;
 
   constructor(private readonly options: DesktopRuntimeServiceOptions) {
     this.env = options.env ?? process.env;
+    this.externalSessionAdapters = createExternalSessionAdapterRegistry(this.env);
     // Test embedders commonly inject only model credentials. Treat a missing PICO_HOME
     // as an overlay omission, while still freezing an explicitly supplied host state root.
     this.picoHome = resolvePicoHome(
@@ -674,6 +680,17 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
 
   private createRequestHandlers(): DesktopRequestHandlers {
     return {
+      "externalSessions.sources": async () => ({
+        sources: toJsonValue(await this.externalSessionAdapters.listSources()),
+      }),
+      "externalSessions.list": async (request) =>
+        toJsonValue(
+          await this.externalSessionAdapters.listPage(request.params.adapterId, {
+            ...(request.params.text === undefined ? {} : { text: request.params.text }),
+            ...(request.params.cursor === undefined ? {} : { cursor: request.params.cursor }),
+          }),
+        ),
+      "externalSessions.import": (request) => this.importExternalSession(request.params),
       "workspace.storageRepair.prepare": (request) =>
         this.storageRepair.prepare(request.params.workspacePath),
       "workspace.storageRepair.respond": (request) => this.storageRepair.respond(request.params),
@@ -932,6 +949,77 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           ),
       }),
     };
+  }
+
+  private async importExternalSession(
+    params: RuntimeParams<"externalSessions.import">,
+  ): Promise<JsonValue> {
+    const external = await this.externalSessionAdapters.readSession(
+      params.adapterId,
+      params.sourceSessionId,
+    );
+    if (!external.summary.cwd.trim()) {
+      throw new ExternalSessionUnreadableError("外部会话没有记录工作区路径，无法安全导入");
+    }
+    const workspacePath = await this.requireTrustedWorkspace(external.summary.cwd);
+    const messages = external.messages.filter(
+      (message) =>
+        (message.role === "user" || message.role === "assistant") &&
+        typeof message.content === "string" &&
+        message.content.trim().length > 0,
+    );
+    if (messages.length === 0) {
+      throw new ExternalSessionUnreadableError("外部会话中没有可导入的对话文本");
+    }
+
+    const sessionId = `cli-ext-${createHash("sha256")
+      .update(workspacePath)
+      .update("\0")
+      .update(params.adapterId)
+      .update("\0")
+      .update(params.sourceSessionId)
+      .digest("hex")
+      .slice(0, 32)}`;
+    return this.withSessionAdmission(workspacePath, sessionId, async () => {
+      const existing = await findCliSessionCatalogEntry(workspacePath, sessionId, {
+        picoHome: this.picoHome,
+      });
+      if (existing && (existing.summary.messageCount ?? 0) > 0) {
+        await this.options.runtimeService.handle(
+          createRuntimeRequest("workspace.register", { workspacePath }),
+        );
+        const created = await this.requireSession(workspacePath, sessionId);
+        this.publishSession(created);
+        return { session: created };
+      }
+
+      const session = new Session(sessionId, workspacePath, {
+        persistence: true,
+        picoHome: this.picoHome,
+        runtimePort: createEngineRuntimePort(),
+      });
+      try {
+        await session.recover();
+        const settings = await this.initializeSessionSettings(workspacePath, session);
+        const title = setSessionTitle(settings, external.summary.title);
+        if (!title.ok) {
+          throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, title.message);
+        }
+        await session.flushPersistence();
+        await session.importHistoryMessages(messages);
+        await session.flushPersistence();
+      } finally {
+        await session.close();
+      }
+
+      await this.options.runtimeService.handle(
+        createRuntimeRequest("workspace.register", { workspacePath }),
+      );
+
+      const created = await this.requireSession(workspacePath, sessionId);
+      this.publishSession(created);
+      return { session: created };
+    });
   }
 
   private dispatchRequest(request: RuntimeRequest): Promise<JsonValue> {
@@ -1594,7 +1682,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   ): Promise<JsonValue> {
     const canonical = await this.requireTrustedSession(workspacePath, sessionId);
     return this.withPinnedSession(canonical, sessionId, async (session) => {
-      const settings = await this.getSessionSettings(canonical, session);
+      const settings = await this.getSessionSettings(canonical, session, { persist: false });
       const router = await this.getSessionModelRouter(canonical, settings.modelRouteId);
       return { settings: runtimeSessionSettings(settings, router) };
     });
@@ -4060,7 +4148,11 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     return canonical;
   }
 
-  private async getSessionSettings(workspacePath: string, session: Session) {
+  private async getSessionSettings(
+    workspacePath: string,
+    session: Session,
+    options: { readonly persist?: boolean } = {},
+  ) {
     const persisted = session.getRuntimeStateSnapshot().settings;
     if (!persisted) {
       throw new RuntimeProtocolError(
@@ -4081,7 +4173,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         orchestrationMode: persisted.orchestrationMode,
         ...(persisted.thinkingEffort ? { thinkingEffort: persisted.thinkingEffort } : {}),
       },
-      { persistence: session },
+      {
+        persistence: session,
+        ...(options.persist === undefined ? {} : { persist: options.persist }),
+      },
     );
   }
 

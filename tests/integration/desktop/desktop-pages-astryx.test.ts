@@ -389,6 +389,14 @@ async function scenario(){
   const steeringLive=interrupted.filter(item=>item.id!=="failure");
   await mountTranscript(steeringLive,activeRun);
   check([...document.querySelectorAll('.conversation-process')].every(el=>el.open),"Steering splits the process while preserving live Run ownership");
+  await mountTranscript([
+    {id:"external-user",kind:"userMessage",text:"导入问题"},
+    {id:"external-answer-1",kind:"assistantMessage",runId:"external-import:fixture",turnId:"external-import:fixture:turn",text:"导入回复一"},
+    {id:"external-answer-2",kind:"assistantMessage",runId:"external-import:fixture",turnId:"external-import:fixture:turn",text:"导入回复二"},
+  ]);
+  const importedAnswers=[...document.querySelectorAll('.conversation-message--assistant')];
+  check(importedAnswers.length===2&&importedAnswers[0].textContent.includes("导入回复一")&&importedAnswers[1].textContent.includes("导入回复二"),"Imported history keeps every assistant message visible");
+  check(!document.querySelector('.conversation-process'),"Imported history is not folded into an execution process");
   await act(async()=>root.render(<SideChatWorkbarPanel child={{panelId:"side",sourceSessionId:"parent",targetSessionId:"child",state:"live"}} items={liveItems} activeRun={activeRun} draft="" active running loading={false} onSend={()=>{}} onStop={()=>{}} onDraftChange={()=>{}} onRetryCreate={()=>{}} onClose={()=>{}}/>));
   check(process().open&&!thinkingRow().open,"Side chat uses the same live process and thinking disclosures");
   await act(async()=>root.unmount());

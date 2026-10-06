@@ -204,6 +204,90 @@ test("transcript projection keeps fixed watermarks and advances from the change 
   }
 });
 
+test("external import preserves assistant messages that share a synthetic turn", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pico-transcript-external-import-"));
+  const workspace = join(root, "workspace");
+  mkdirSync(workspace, { recursive: true });
+  const storageRoot = join(root, "storage");
+  let store = new SqliteRuntimeEventStore({ storageRoot });
+  try {
+    const sessionId = "external-import-session";
+    const { ownerFence } = await initializeRuntimeEventOwner(store, {
+      sessionId,
+      workDir: workspace,
+    });
+    await store.append(
+      message(
+        "external-answer-1",
+        sessionId,
+        "assistant",
+        "first reply",
+        "external-import:test",
+        "external-import:test:turn",
+      ),
+      { ownerFence },
+    );
+    const latest = await store.append(
+      message(
+        "external-answer-2",
+        sessionId,
+        "assistant",
+        "second reply",
+        "external-import:test",
+        "external-import:test:turn",
+      ),
+      { ownerFence },
+    );
+
+    const page = await store.readTranscriptProjectionPage({
+      sessionId,
+      through: latest.transcriptWatermark!,
+      maxBytes: 16_384,
+    });
+    assert.deepEqual(
+      page.items.map(({ itemId, payload }) => {
+        const item = payload as { readonly kind?: unknown; readonly content?: unknown };
+        return [itemId, item.kind, item.content];
+      }),
+      [
+        ["message:external-answer-1:assistant", "assistantMessage", "first reply"],
+        ["message:external-answer-2:assistant", "assistantMessage", "second reply"],
+      ],
+    );
+
+    store.close();
+    const database = new DatabaseSync(operationalDatabasePath(storageRoot));
+    try {
+      database
+        .prepare(
+          "UPDATE runtime_transcript_projection_state SET projector_version = 11 WHERE session_id = ?",
+        )
+        .run(sessionId);
+      database
+        .prepare("DELETE FROM runtime_transcript_item_versions WHERE session_id = ?")
+        .run(sessionId);
+    } finally {
+      database.close();
+    }
+    store = new SqliteRuntimeEventStore({ storageRoot });
+    const rebuilt = await store.readTranscriptProjectionPage({ sessionId, maxBytes: 16_384 });
+    assert.notEqual(rebuilt.watermark.historyEpoch, page.watermark.historyEpoch);
+    assert.deepEqual(
+      rebuilt.items.map(({ itemId, payload }) => {
+        const item = payload as { readonly kind?: unknown; readonly content?: unknown };
+        return [itemId, item.kind, item.content];
+      }),
+      [
+        ["message:external-answer-1:assistant", "assistantMessage", "first reply"],
+        ["message:external-answer-2:assistant", "assistantMessage", "second reply"],
+      ],
+    );
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("projection page and advance resume one oversized item on UTF-8 boundaries", async () => {
   const root = mkdtempSync(join(tmpdir(), "pico-transcript-fragments-"));
   const workspace = join(root, "workspace");
