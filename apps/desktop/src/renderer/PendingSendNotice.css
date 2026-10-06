@@ -30,3 +30,10 @@
     opacity: 0.55;
   }
 }
+
+.workspace-frame.has-pending-send {
+  grid-template-rows: 62px auto minmax(0, 1fr);
+}
+.workspace-frame--immersive.has-pending-send {
+  grid-template-rows: auto minmax(0, 1fr);
+}
