@@ -310,3 +310,9 @@ export type {
 export { RUNTIME_ERROR_CODES, RuntimeProtocolError, isRuntimeErrorCode } from "./runtime/errors.js";
 
 export type { RuntimeErrorCode } from "./runtime/errors.js";
+
+export {
+  isRuntimeTerminalFrame,
+  TERMINAL_STREAM_RUNTIME_CAPABILITY,
+} from "./runtime/terminal-frame.js";
+export type { RuntimeTerminalFrame } from "./runtime/terminal-frame.js";

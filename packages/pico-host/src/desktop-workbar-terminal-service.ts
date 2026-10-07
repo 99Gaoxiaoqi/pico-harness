@@ -2,9 +2,11 @@ import { realpath } from "node:fs/promises";
 import {
   WorkbarTerminalAuthority,
   WorkbarTerminalError,
+  type WorkbarTerminalEvent,
   type WorkbarTerminalAttachment,
   type WorkbarTerminalRecord,
 } from "@pico/runtime-host";
+import type { RuntimeTerminalFrame } from "@pico/protocol";
 import { FileWorkbarTerminalStateStore } from "./workbar-terminal-state-store.js";
 
 // Host assembly: Runtime Host owns terminal primitives; Pico Host owns Session scoping.
@@ -14,6 +16,7 @@ export interface TerminalClientContext {
   /** Legacy local hello uses exact old terminal response shapes. */
   readonly legacyWire?: boolean;
   readonly terminalAttachmentId: string;
+  readonly pushTerminalFrame?: (frame: RuntimeTerminalFrame) => Promise<void>;
   readonly surface: "desktop" | "tui" | "run" | "activation" | "bot" | "inspect";
 }
 
@@ -28,6 +31,16 @@ const DEFAULT_SNAPSHOT_BYTES = 256 * 1024;
 
 export class DesktopWorkbarTerminalService {
   private readonly authority: WorkbarTerminalAuthority;
+  private readonly streams = new Map<
+    string,
+    Map<
+      string,
+      {
+        readonly sessionId: string;
+        readonly push: (frame: RuntimeTerminalFrame) => Promise<void>;
+      }
+    >
+  >();
   private readonly ready: Promise<void>;
   private readonly pendingSessionCreates = new Map<string, number>();
   private readonly resolvingSessionCreates = new Map<string, number>();
@@ -36,6 +49,7 @@ export class DesktopWorkbarTerminalService {
   constructor(options: { readonly picoHome: string }) {
     this.authority = new WorkbarTerminalAuthority({
       store: new FileWorkbarTerminalStateStore({ picoHome: options.picoHome }),
+      onEvent: (event, attachmentIds) => this.publishFrame(event, attachmentIds),
     });
     this.ready = this.authority.recover();
   }
@@ -79,6 +93,7 @@ export class DesktopWorkbarTerminalService {
       if (pending) this.pendingSessionCreates.set(key, pending);
       else this.pendingSessionCreates.delete(key);
     }
+    this.registerStream(context, attachment.resourceId, attachment.sessionId);
     return this.attachmentResult(
       this.authority.attach({
         resourceId: attachment.resourceId,
@@ -114,6 +129,7 @@ export class DesktopWorkbarTerminalService {
   ) {
     await this.ready;
     const record = await this.ownedRecord(input);
+    this.registerStream(context, record.resourceId, record.sessionId);
     const attachment = this.authority.attach({
       resourceId: record.resourceId,
       resourceEpoch: record.resourceEpoch,
@@ -213,6 +229,9 @@ export class DesktopWorkbarTerminalService {
       resourceId: record.resourceId,
       attachmentId: context.terminalAttachmentId,
     });
+    this.streams.get(context.terminalAttachmentId)?.delete(record.resourceId);
+    if (this.streams.get(context.terminalAttachmentId)?.size === 0)
+      this.streams.delete(context.terminalAttachmentId);
     return { detached: true as const };
   }
 
@@ -296,6 +315,7 @@ export class DesktopWorkbarTerminalService {
   }
 
   releaseAttachment(attachmentId: string): void {
+    this.streams.delete(attachmentId);
     this.authority.detachAttachment(attachmentId);
   }
 
@@ -308,6 +328,7 @@ export class DesktopWorkbarTerminalService {
 
   async close(): Promise<void> {
     await this.ready.catch(() => undefined);
+    this.streams.clear();
     await this.authority.close();
   }
 
@@ -321,6 +342,35 @@ export class DesktopWorkbarTerminalService {
     );
     if (!record) throw new WorkbarTerminalError("not_found", "Terminal does not belong to Session");
     return record;
+  }
+
+  private registerStream(
+    context: TerminalClientContext,
+    terminalId: string,
+    sessionId: string,
+  ): void {
+    if (!context.pushTerminalFrame) return;
+    let streams = this.streams.get(context.terminalAttachmentId);
+    if (!streams) {
+      streams = new Map();
+      this.streams.set(context.terminalAttachmentId, streams);
+    }
+    streams.set(terminalId, { sessionId, push: context.pushTerminalFrame });
+  }
+
+  private publishFrame(event: WorkbarTerminalEvent, attachmentIds: readonly string[]): void {
+    for (const attachmentId of attachmentIds) {
+      const stream = this.streams.get(attachmentId)?.get(event.resourceId);
+      if (!stream) continue;
+      const { resourceId, ...payload } = event;
+      const frame = {
+        type: "terminal.event" as const,
+        terminalId: resourceId,
+        sessionId: stream.sessionId,
+        ...payload,
+      };
+      void stream.push(frame).catch(() => this.releaseAttachment(attachmentId));
+    }
   }
 
   private attachmentResult(

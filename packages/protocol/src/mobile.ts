@@ -292,3 +292,9 @@ export * from "./markdown.js";
 export * from "./utf8.js";
 export * from "./runtime-buffer.js";
 export * from "./runtime-normalize.js";
+
+export {
+  isRuntimeTerminalFrame,
+  TERMINAL_STREAM_RUNTIME_CAPABILITY,
+} from "./runtime/terminal-frame.js";
+export type { RuntimeTerminalFrame } from "./runtime/terminal-frame.js";

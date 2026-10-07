@@ -14,6 +14,7 @@ import {
   type RuntimeResult,
   type RuntimeNotification,
   type RuntimeSessionSubscriptionFrame,
+  type RuntimeTerminalFrame,
 } from "./mobile.js";
 import { utf8ByteLength } from "./utf8.js";
 
@@ -411,6 +412,7 @@ export type RemoteServerMessage =
       workspaceId: string;
       event: RuntimeNotification;
     }
+  | { type: "terminal_frame"; workspaceId: string; frame: RuntimeTerminalFrame }
   | { type: "session_frame"; workspaceId?: string; frame: RuntimeSessionSubscriptionFrame }
   | {
       type: "subscribed";

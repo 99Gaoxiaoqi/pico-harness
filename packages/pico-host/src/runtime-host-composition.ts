@@ -146,6 +146,12 @@ export function createRuntimeHostComposition(
                 ? "desktop:legacy"
                 : context.clientInstanceId,
               terminalAttachmentId: context.connectionId,
+              ...(context.pushEvent
+                ? {
+                    pushTerminalFrame: (frame) =>
+                      context.pushEvent!(frame as unknown as Record<string, unknown>),
+                  }
+                : {}),
               surface: context.clientInstanceId.startsWith("pico-client-")
                 ? "desktop"
                 : (context.surface ?? "tui"),

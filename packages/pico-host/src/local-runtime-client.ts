@@ -17,6 +17,8 @@ import {
   RuntimeHostTransportError,
 } from "@pico/runtime-host";
 import {
+  isRuntimeTerminalFrame,
+  type RuntimeTerminalFrame,
   isEphemeralRuntimeNotificationTopic,
   parseRuntimeNotification,
   parseRuntimeResult,
@@ -213,6 +215,10 @@ export interface RuntimeClient {
     readonly replay: RuntimeResult<"events.subscribe">;
     readonly dispose: () => void;
   }>;
+  subscribeTerminalFrames?(
+    listener: (frame: RuntimeTerminalFrame) => void,
+    onDisconnect?: () => void,
+  ): { readonly dispose: () => void };
   subscribeSessionFrames(
     listener: (frame: RuntimeSessionSubscriptionFrame) => void,
     onDisconnect?: () => void,
@@ -271,6 +277,8 @@ export class LocalRuntimeClient implements RuntimeClient {
   private readonly sessionFrameListeners = new Set<
     (frame: RuntimeSessionSubscriptionFrame) => void
   >();
+  private readonly terminalFrameListeners = new Set<(frame: RuntimeTerminalFrame) => void>();
+  private readonly terminalDisconnectListeners = new Set<() => void>();
   private readonly sessionDisconnectListeners = new Set<() => void>();
   private closed = false;
 
@@ -293,6 +301,7 @@ export class LocalRuntimeClient implements RuntimeClient {
     this.requestConnection.setEventListener((event) => this.deliverSessionFrame(event));
     this.requestConnection.setDisconnectListener(() => {
       for (const listener of this.sessionDisconnectListeners) listener();
+      for (const listener of this.terminalDisconnectListeners) listener();
     });
   }
 
@@ -356,6 +365,21 @@ export class LocalRuntimeClient implements RuntimeClient {
     };
   }
 
+  subscribeTerminalFrames(
+    listener: (frame: RuntimeTerminalFrame) => void,
+    onDisconnect?: () => void,
+  ): { readonly dispose: () => void } {
+    this.assertOpen();
+    this.terminalFrameListeners.add(listener);
+    if (onDisconnect) this.terminalDisconnectListeners.add(onDisconnect);
+    return {
+      dispose: () => {
+        this.terminalFrameListeners.delete(listener);
+        if (onDisconnect) this.terminalDisconnectListeners.delete(onDisconnect);
+      },
+    };
+  }
+
   /** 请求当前 Runtime Host daemon 优雅关停。 */
   async shutdownDaemon(): Promise<void> {
     this.assertOpen();
@@ -369,11 +393,17 @@ export class LocalRuntimeClient implements RuntimeClient {
     this.requestConnection.close();
     for (const subscription of [...this.subscriptions]) subscription.dispose();
     this.subscriptions.clear();
+    this.terminalFrameListeners.clear();
+    this.terminalDisconnectListeners.clear();
     this.sessionFrameListeners.clear();
     this.sessionDisconnectListeners.clear();
   }
 
   private deliverSessionFrame(event: Record<string, unknown>): void {
+    if (isRuntimeTerminalFrame(event)) {
+      for (const listener of this.terminalFrameListeners) listener(event);
+      return;
+    }
     if (!isSessionSubscriptionFrame(event)) return;
     for (const listener of this.sessionFrameListeners) listener(event);
   }

@@ -4,6 +4,8 @@ import {
   MEMORY_PAGINATION_RUNTIME_CAPABILITY,
   parseRuntimeResult,
   type RuntimeSessionSubscriptionFrame,
+  type RuntimeTerminalFrame,
+  TERMINAL_STREAM_RUNTIME_CAPABILITY,
 } from "@pico/protocol";
 import {
   parseRemoteRequest,
@@ -52,6 +54,11 @@ export class RuntimeAccessSession {
   private requests = 0;
   private eventGeneration = 0;
   private events?: EventBinding;
+  private terminalFrameDispose?: () => void;
+  private readonly terminalScopes = new Map<string, SessionScope & { resourceEpoch: string }>();
+  private readonly pendingTerminalOpens = new Map<string, number>();
+  private readonly pendingTerminalFrames: RuntimeTerminalFrame[] = [];
+  private pendingTerminalBytes = 0;
   private frameDispose?: () => void;
   private readonly sessionSubscriptions = new Map<string, SessionScope>();
   private readonly pendingSessionOpens = new Map<string, number>();
@@ -165,6 +172,31 @@ export class RuntimeAccessSession {
         this.assertCurrent();
         if (rpc.method.startsWith("session.subscription.") && generation !== this.eventGeneration)
           throw new GatewayError("RUNTIME_DISCONNECTED", "事件连接已更换，请重新同步", 503, true);
+        const terminalOpening = ["terminal.attach", "terminal.create"].includes(rpc.method)
+          ? String(params["sessionId"])
+          : undefined;
+        if (terminalOpening && (!this.events || generation !== this.eventGeneration))
+          throw new GatewayError(
+            "RUNTIME_DISCONNECTED",
+            "终端事件连接尚未就绪，请重新连接",
+            503,
+            true,
+          );
+        if (
+          terminalOpening &&
+          (!client.subscribeTerminalFrames ||
+            !(await this.runtimeCapabilities()).has(TERMINAL_STREAM_RUNTIME_CAPABILITY))
+        )
+          throw new GatewayError(
+            "UNSUPPORTED_CAPABILITY",
+            "电脑尚未支持终端实时输出，请更新并重启 Pico",
+            409,
+          );
+        if (terminalOpening)
+          this.pendingTerminalOpens.set(
+            terminalOpening,
+            (this.pendingTerminalOpens.get(terminalOpening) ?? 0) + 1,
+          );
         const opening =
           rpc.method === "session.subscription.open" ? String(params["sessionId"]) : undefined;
         if (opening)
@@ -177,6 +209,11 @@ export class RuntimeAccessSession {
             parseRuntimeResult(rpc.method, await client.request(rpc.method, authorized.params)),
           );
         } finally {
+          if (terminalOpening && generation === this.eventGeneration) {
+            const left = (this.pendingTerminalOpens.get(terminalOpening) ?? 1) - 1;
+            if (left) this.pendingTerminalOpens.set(terminalOpening, left);
+            else this.pendingTerminalOpens.delete(terminalOpening);
+          }
           // An older connection must not decrement a new connection's pending opens.
           if (opening && generation === this.eventGeneration) {
             const left = (this.pendingSessionOpens.get(opening) ?? 1) - 1;
@@ -207,11 +244,43 @@ export class RuntimeAccessSession {
           }
           this.sessionSubscriptions.set(value.subscriptionId, scope);
         }
+        if (
+          terminalOpening &&
+          rpc.workspaceId &&
+          value &&
+          typeof value === "object" &&
+          "terminal" in value &&
+          value.terminal &&
+          typeof value.terminal === "object" &&
+          "terminalId" in value.terminal &&
+          typeof value.terminal.terminalId === "string" &&
+          "resourceEpoch" in value &&
+          typeof value.resourceEpoch === "string"
+        ) {
+          if (!this.current || generation !== this.eventGeneration) {
+            this.assertCurrent(true);
+            throw new GatewayError(
+              "RUNTIME_DISCONNECTED",
+              "终端事件连接已更换，请重新同步",
+              503,
+              true,
+              "unknown",
+            );
+          }
+          this.terminalScopes.set(value.terminal.terminalId, {
+            workspaceId: rpc.workspaceId,
+            sessionId: terminalOpening,
+            resourceEpoch: value.resourceEpoch,
+          });
+        }
         this.assertCurrent(true);
+        if (rpc.method === "terminal.detach")
+          this.terminalScopes.delete(String(params["terminalId"]));
         if (rpc.method === "session.subscription.close")
           this.sessionSubscriptions.delete(String(params["subscriptionId"]));
         publishResult(value);
         if (opening) this.flushFrames();
+        if (terminalOpening) this.flushTerminalFrames();
       } catch (error) {
         throw safeGatewayError(error, dispatched);
       }
@@ -226,6 +295,26 @@ export class RuntimeAccessSession {
     const publish = (event: Parameters<RuntimeAccessEventSink["publish"]>[0]): void => {
       if (this.current && this.events === binding) sink.publish(event);
     };
+    const terminalFrames = this.options.client.subscribeTerminalFrames?.(
+      (frame) => {
+        if (!this.current || this.events !== binding) return;
+        if (this.pendingTerminalOpens.has(frame.sessionId)) {
+          const bytes = Buffer.byteLength(JSON.stringify(frame));
+          if (
+            this.pendingTerminalFrames.length >= 128 ||
+            this.pendingTerminalBytes + bytes > REMOTE_MAX_FRAME_BYTES
+          ) {
+            publish({ type: "disconnected", reason: "终端建立期间输出超过预算，请重新同步" });
+            this.detachEvents();
+            return;
+          }
+          this.pendingTerminalFrames.push(frame);
+          this.pendingTerminalBytes += bytes;
+        } else this.publishTerminalFrame(frame);
+      },
+      () => publish({ type: "disconnected", reason: "终端连接中断，请重新同步" }),
+    );
+    this.terminalFrameDispose = terminalFrames?.dispose;
     const frames = this.options.client.subscribeSessionFrames(
       (frame) => {
         if (!this.current || this.events !== binding) return;
@@ -349,6 +438,32 @@ export class RuntimeAccessSession {
     };
   }
 
+  private publishTerminalFrame(frame: RuntimeTerminalFrame): void {
+    const scope = this.terminalScopes.get(frame.terminalId);
+    const principal = this.options.principal;
+    if (
+      !this.current ||
+      !scope ||
+      scope.sessionId !== frame.sessionId ||
+      scope.resourceEpoch !== frame.resourceEpoch ||
+      !principal.permissions.includes("terminal.control") ||
+      !principal.workspaceIds.includes(scope.workspaceId)
+    )
+      return;
+    this.events?.sink.publish({ type: "terminal_frame", workspaceId: scope.workspaceId, frame });
+  }
+
+  private flushTerminalFrames(): void {
+    const frames = this.pendingTerminalFrames.splice(0);
+    this.pendingTerminalBytes = 0;
+    for (const frame of frames) {
+      if (this.pendingTerminalOpens.has(frame.sessionId)) {
+        this.pendingTerminalFrames.push(frame);
+        this.pendingTerminalBytes += Buffer.byteLength(JSON.stringify(frame));
+      } else this.publishTerminalFrame(frame);
+    }
+  }
+
   private publishFrame(scope: SessionScope, frame: RuntimeSessionSubscriptionFrame): void {
     if (
       !this.current ||
@@ -392,6 +507,12 @@ export class RuntimeAccessSession {
     const previous = this.events;
     this.events = undefined;
     this.eventGeneration++;
+    this.terminalFrameDispose?.();
+    this.terminalFrameDispose = undefined;
+    this.terminalScopes.clear();
+    this.pendingTerminalOpens.clear();
+    this.pendingTerminalFrames.length = 0;
+    this.pendingTerminalBytes = 0;
     this.frameDispose?.();
     this.frameDispose = undefined;
     for (const dispose of this.eventSubscriptions.values()) dispose();

@@ -1,4 +1,6 @@
 import {
+  isRuntimeTerminalFrame,
+  type RuntimeTerminalFrame,
   isJsonObject,
   parseRuntimeNotification,
   parseRuntimeResult,
@@ -261,6 +263,7 @@ export class RemoteRuntimeClient {
   #attempt = 0;
   #reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   #subscriptions = new Map<string, Subscription>();
+  #terminalFrames = new Set<(frame: RuntimeTerminalFrame) => void>();
   #frames = new Set<(frame: RuntimeSessionSubscriptionFrame) => void>();
   #disconnects = new Set<() => void>();
   constructor(options: RemoteClientOptions) {
@@ -641,6 +644,10 @@ export class RemoteRuntimeClient {
         this.#state("error", failure);
         this.#socket?.close(1011);
       });
+    } else if (message.type === "terminal_frame") {
+      if (typeof message.workspaceId !== "string" || !isRuntimeTerminalFrame(message.frame))
+        throw new RemoteProtocolError("INVALID_RESPONSE", "终端事件无效");
+      for (const callback of this.#terminalFrames) callback(message.frame);
     } else if (message.type === "session_frame") {
       if (
         !isJsonObject(message.frame) ||
@@ -758,6 +765,19 @@ export class RemoteRuntimeClient {
       },
     };
   }
+  subscribeTerminalFrames(
+    listener: (frame: RuntimeTerminalFrame) => void,
+    onDisconnect?: () => void,
+  ): { dispose: () => void } {
+    this.#terminalFrames.add(listener);
+    if (onDisconnect) this.#disconnects.add(onDisconnect);
+    return {
+      dispose: () => {
+        this.#terminalFrames.delete(listener);
+        if (onDisconnect) this.#disconnects.delete(onDisconnect);
+      },
+    };
+  }
   subscribeSessionFrames(
     listener: (frame: RuntimeSessionSubscriptionFrame) => void,
     onDisconnect?: () => void,
@@ -789,6 +809,7 @@ export class RemoteRuntimeClient {
       subscription.reject?.(new RemoteProtocolError("CLIENT_CLOSED", "连接已关闭"));
     }
     this.#subscriptions.clear();
+    this.#terminalFrames.clear();
     this.#frames.clear();
     this.#disconnects.clear();
   }

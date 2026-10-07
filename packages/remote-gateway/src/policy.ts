@@ -26,6 +26,7 @@ export interface GatewayRuntimeClient {
       import("@pico/pico-host/local-runtime-client").RuntimeClient["subscribe"]
     >[1],
   ): ReturnType<import("@pico/pico-host/local-runtime-client").RuntimeClient["subscribe"]>;
+  subscribeTerminalFrames?: import("@pico/pico-host/local-runtime-client").RuntimeClient["subscribeTerminalFrames"];
   subscribeSessionFrames: import("@pico/pico-host/local-runtime-client").RuntimeClient["subscribeSessionFrames"];
   close(): void;
 }

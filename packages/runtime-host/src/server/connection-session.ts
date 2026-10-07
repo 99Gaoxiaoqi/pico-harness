@@ -52,6 +52,8 @@ export class RuntimeHostConnectionSession {
   #inFlightStatusRequests = 0;
   #closed = false;
   /** Serializes event pushes: at most one enqueue+flush in flight at a time. */
+  #pendingEventBytes = 0;
+  #pendingEvents = 0;
   #eventPushChain: Promise<void> = Promise.resolve();
 
   constructor(options: RuntimeHostConnectionSessionOptions) {
@@ -244,9 +246,29 @@ export class RuntimeHostConnectionSession {
    * reconnect and replay from its durable cursor, never silently skip them.
    */
   pushEvent(event: Record<string, unknown>): Promise<void> {
-    const push = this.#eventPushChain.then(
-      () => this.#writer.enqueue({ kind: "event", event } satisfies HostEventFrame).flushed,
-    );
+    let bytes: number;
+    try {
+      bytes = Buffer.byteLength(JSON.stringify(event));
+    } catch (error) {
+      this.#teardown();
+      return Promise.reject(error);
+    }
+    if (
+      this.#closed ||
+      this.#pendingEvents >= 512 ||
+      this.#pendingEventBytes + bytes > 8 * 1024 * 1024
+    ) {
+      this.#teardown();
+      return Promise.reject(new Error("Runtime Host event queue exceeded its bound or closed"));
+    }
+    this.#pendingEvents++;
+    this.#pendingEventBytes += bytes;
+    const push = this.#eventPushChain
+      .then(() => this.#writer.enqueue({ kind: "event", event } satisfies HostEventFrame).flushed)
+      .finally(() => {
+        this.#pendingEvents--;
+        this.#pendingEventBytes -= bytes;
+      });
     // The chain itself must never reject (a rejected head would poison every
     // later push); failures fence the connection instead. Attaching this catch
     // also keeps a fire-and-forget caller from surfacing an unhandled rejection.
