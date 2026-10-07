@@ -205,7 +205,9 @@ function summary(
   const row = db
     .prepare(
       `WITH physical AS MATERIALIZED (
-    SELECT provider_call_id, run_id, json_remove(record_json,'$.requestDiagnostic') AS record_json
+    SELECT provider_call_id, run_id, json_remove(record_json,'$.requestDiagnostic') AS record_json,
+      CASE WHEN json_extract(record_json,'$.status') IN ('prepared','observed')
+        THEN 'pending' ELSE json_extract(record_json,'$.usageBasis') END AS usage_state
     FROM usage_physical_attempts
     WHERE session_id = ? AND json_extract(record_json,'$.accountingSource')='physical'
   ), events AS (
@@ -213,7 +215,12 @@ function summary(
       coalesce(json_extract(payload_json, '$.refs.toolCallId'), event_id) AS tool_id,
       json_extract(payload_json, '$.at') AS at
     FROM runtime_events WHERE session_id = ? AND event_seq <= ? AND json_valid(payload_json)
-      AND kind IN ('tool.started','tool.result.recorded')
+      AND kind IN ('tool.started','tool.result.recorded','model.call.started','model.call.settled')
+  ), runtime_calls AS (
+    SELECT DISTINCT run_id, json_extract(data,'$.providerCallId') AS call_id FROM events
+    WHERE kind IN ('model.call.started','model.call.settled')
+      AND json_type(data,'$.providerCallId')='text'
+      AND length(trim(json_extract(data,'$.providerCallId')))>0
   ), calls AS MATERIALIZED (
     SELECT coalesce(run_id,'') AS run_id, provider_call_id AS call_id,
       max(json_extract(record_json,'$.retryAttempt')) AS retry_attempt,
@@ -261,6 +268,14 @@ function summary(
     count(cached_tokens) AS cache_known, count(*) AS measurement_count,
     sum(CASE WHEN cached_tokens IS NOT NULL AND input_tokens IS NOT NULL AND cached_tokens<=input_tokens THEN 1 ELSE 0 END) AS cache_comparable,
     (SELECT count(*) FROM calls WHERE attempt_coverage='partial') AS partial_calls,
+    (SELECT count(*) FROM physical WHERE usage_state='reported') AS reported_attempts,
+    (SELECT count(*) FROM physical WHERE usage_state='partial') AS partial_attempts,
+    (SELECT count(*) FROM physical WHERE usage_state='missing') AS missing_attempts,
+    (SELECT count(*) FROM physical WHERE usage_state='pending') AS pending_attempts,
+    (SELECT count(*) FROM runtime_calls r WHERE NOT EXISTS (
+      SELECT 1 FROM physical p WHERE p.provider_call_id=r.call_id
+        AND (p.run_id=r.run_id OR p.run_id IS NULL OR r.run_id IS NULL)
+    )) AS runtime_only_calls,
     (SELECT sum(latency_ms) FROM calls) AS latency,
     (SELECT sum(attempt_count) FROM calls) AS physical_attempts,
     (SELECT sum(CASE WHEN retry_attempt IS NOT NULL OR attempt_count > 0
@@ -286,6 +301,15 @@ function summary(
     failedCalls: Number(row.failed),
     meteredCalls: Number(row.metered ?? 0),
     unpricedCalls: Number(row.unpriced ?? 0),
+    provenance: {
+      source: "physical_attempts",
+      reportedAttempts: Number(row.reported_attempts),
+      partialAttempts: Number(row.partial_attempts),
+      missingAttempts: Number(row.missing_attempts),
+      pendingAttempts: Number(row.pending_attempts),
+      partialCoverageCalls: Number(row.partial_calls),
+      runtimeOnlyCalls: Number(row.runtime_only_calls),
+    },
     ...optional("inputTokens", row.input_tokens),
     ...optional("outputTokens", row.output_tokens),
     ...optional("costCNY", row.cost),

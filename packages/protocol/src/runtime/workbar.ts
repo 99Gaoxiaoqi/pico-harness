@@ -1153,6 +1153,15 @@ const runtimeExecutionSummaryResult = exactResultShape(
     physicalAttempts: resultNonNegativeInteger,
     retries: resultNonNegativeInteger,
     cacheCoverage: resultOneOf(["complete", "partial", "missing"]),
+    provenance: exactResultShape({
+      source: resultOneOf(["physical_attempts"]),
+      reportedAttempts: resultNonNegativeInteger,
+      partialAttempts: resultNonNegativeInteger,
+      missingAttempts: resultNonNegativeInteger,
+      pendingAttempts: resultNonNegativeInteger,
+      partialCoverageCalls: resultNonNegativeInteger,
+      runtimeOnlyCalls: resultNonNegativeInteger,
+    }),
   },
 );
 const runtimeExecutionPageResult = exactResultShape(

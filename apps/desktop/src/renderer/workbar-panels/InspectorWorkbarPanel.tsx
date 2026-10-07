@@ -63,6 +63,9 @@ export interface InspectorWorkbarPanelProps {
   readonly onHideEarlier?: () => void;
   readonly execution?: RuntimeExecutionPage;
   readonly contextError?: string;
+  readonly contextLoading?: boolean;
+  readonly selectedTab?: "timeline" | "overview";
+  readonly onTabChange?: (tab: "timeline" | "overview") => void;
   readonly context?: InspectorContextSnapshot;
   readonly trace: readonly InspectorTraceItem[];
   readonly selectedTraceId?: string;
@@ -121,6 +124,9 @@ export function InspectorWorkbarPanel({
   onHideEarlier,
   execution,
   contextError,
+  contextLoading,
+  selectedTab,
+  onTabChange,
   trace,
   selectedTraceId,
   preview,
@@ -132,7 +138,12 @@ export function InspectorWorkbarPanel({
   onLoadMore,
   onOpenPreview,
 }: InspectorWorkbarPanelProps) {
-  const [tab, setTab] = useState<"timeline" | "overview">("timeline");
+  const [localTab, setLocalTab] = useState<"timeline" | "overview">("timeline");
+  const tab = selectedTab ?? localTab;
+  const setTab = (next: "timeline" | "overview") => {
+    setLocalTab(next);
+    onTabChange?.(next);
+  };
   const tabId = useId();
   function navigateTabs(event: KeyboardEvent<HTMLDivElement>) {
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
@@ -211,7 +222,27 @@ export function InspectorWorkbarPanel({
             上下文读取失败：{contextError}
           </p>
         )}
-        <ContextComposition request={context?.latestRequest} />
+        {contextLoading && (
+          <p className="tool-panel__muted" role="status">
+            {context ? "正在更新上下文，当前显示上次记录…" : "正在加载上下文…"}
+          </p>
+        )}
+        {context && (
+          <p className="tool-panel__muted">
+            读取时间 {new Date(context.generatedAt).toLocaleString("zh-CN")}
+          </p>
+        )}
+        {context ? (
+          <ContextComposition request={context.latestRequest} />
+        ) : !contextLoading && !contextError ? (
+          <ContextComposition />
+        ) : null}
+        <CurrentModelHistory context={context} loading={contextLoading} error={contextError} />
+        {summaryLoading && (summary || execution) && (
+          <p className="tool-panel__muted" role="status">
+            正在更新会话用量，当前显示上次记录…
+          </p>
+        )}
         {summaryLoading && !summary && !execution && (
           <p className="tool-panel__muted" role="status">
             正在加载会话用量…
@@ -228,7 +259,6 @@ export function InspectorWorkbarPanel({
         {!summaryLoading && !summary && !execution && !summaryError && (
           <p className="tool-panel__state">尚无会话用量记录。</p>
         )}
-        <CurrentModelHistory context={context} />
       </div>
       <div
         id={`${tabId}-timeline-panel`}

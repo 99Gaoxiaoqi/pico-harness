@@ -38,7 +38,7 @@ export function ContextComposition({ request }: { request?: RuntimeLatestContext
     .reduce((total, tool) => total + tool.bytes, composition?.remainingTools.bytes ?? 0);
   return (
     <section className="inspector-composition" aria-label="最近成功主请求组成">
-      <h3>最近成功主请求</h3>
+      <h3>最近成功主请求输入 · 实际</h3>
       {request?.status === "available" ? (
         <>
           <p className="inspector-overview__note">
@@ -96,10 +96,12 @@ export function ContextComposition({ request }: { request?: RuntimeLatestContext
               <dd>{tokens(cache)}</dd>
             </div>
             <div>
-              <dt>窗口空余</dt>
-              <dd>
-                {input !== undefined && window ? tokens(Math.max(0, window - input)) : "未知"}
-              </dd>
+              <dt>
+                {input !== undefined && window && input > window
+                  ? "输入超出窗口"
+                  : "该请求输入余量"}
+              </dt>
+              <dd>{input !== undefined && window ? tokens(Math.abs(window - input)) : "未知"}</dd>
             </div>
           </dl>
           <p className="inspector-overview__note">实际输入 · 请求时窗口；缓存已包含在输入中。</p>
@@ -146,80 +148,86 @@ export function ContextComposition({ request }: { request?: RuntimeLatestContext
       ) : (
         <p className="inspector-overview__note">{request?.reason ?? "尚无成功的主请求。"}</p>
       )}
-      <div className="inspector-composition__heading">
-        <h3>请求组成</h3>
-        <span>字节估算</span>
-      </div>
-      {!composition ? (
-        <p className="inspector-overview__note">请求组成未知（未记录）。</p>
-      ) : (
-        <>
-          {composition.totalBytes > 0 && (
-            <div className="inspector-composition__bar" aria-hidden="true">
-              {composition.segments.map((segment) => (
-                <span
-                  key={segment.kind}
-                  style={{
-                    width: `${(segment.bytes / composition.totalBytes) * 100}%`,
-                    backgroundColor: colors[segment.kind],
-                  }}
-                />
-              ))}
-            </div>
-          )}
-          <ul className="inspector-composition__list" aria-label="请求组成估算">
-            {composition.segments.map((segment) => (
-              <li key={segment.kind}>
-                <span>
-                  <i aria-hidden="true" style={{ background: colors[segment.kind] }} />
-                  {names[segment.kind]}
-                </span>
-                <small title={`${tokens(segment.bytes)} B`}>
-                  {estimate(segment.bytes)} ·{" "}
-                  {composition.totalBytes === 0
-                    ? "0.0"
-                    : ((segment.bytes / composition.totalBytes) * 100).toFixed(1)}
-                  %
-                </small>
-              </li>
-            ))}
-          </ul>
-          <details>
-            <summary>
-              {tools.length > 0 || composition.unlabelledToolBytes > 0 || remainingCount > 0
-                ? "工具定义明细 · 按大小排序"
-                : "组成估算口径"}
-            </summary>
+      <details>
+        <summary>请求组成 · 字节估算</summary>
+        <div className="inspector-composition__heading">
+          <h3>请求组成</h3>
+          <span>字节估算</span>
+        </div>
+        {!composition ? (
+          <p className="inspector-overview__note">请求组成未知（未记录）。</p>
+        ) : (
+          <>
             <p className="inspector-overview__note">
-              组成按 UTF-8 字节比例展示，Token 以字节数 ÷ 4
-              向上取整估算；不等于实际输入用量，也不包含完整 HTTP 传输开销。合计{" "}
-              {estimate(composition.totalBytes)}。
+              占比按 UTF-8 字节计算，Token 为估算，不等于实际输入用量。
             </p>
-            <ul className="inspector-composition__list" aria-label="工具定义估算明细">
-              {tools.slice(0, 5).map((tool) => (
-                <li key={tool.label}>
-                  <code>{tool.label}</code>
-                  <small title={`${tokens(tool.bytes)} B`}>{estimate(tool.bytes)}</small>
-                </li>
-              ))}
-              {remainingCount > 0 && (
-                <li>
-                  <span>其余 {remainingCount} 项工具定义</span>
-                  <small title={`${tokens(remainingBytes)} B`}>{estimate(remainingBytes)}</small>
-                </li>
-              )}
-              {composition.unlabelledToolBytes > 0 && (
-                <li>
-                  <span>未命名工具</span>
-                  <small title={`${tokens(composition.unlabelledToolBytes)} B`}>
-                    {estimate(composition.unlabelledToolBytes)}
+            {composition.totalBytes > 0 && (
+              <div className="inspector-composition__bar" aria-hidden="true">
+                {composition.segments.map((segment) => (
+                  <span
+                    key={segment.kind}
+                    style={{
+                      width: `${(segment.bytes / composition.totalBytes) * 100}%`,
+                      backgroundColor: colors[segment.kind],
+                    }}
+                  />
+                ))}
+              </div>
+            )}
+            <ul className="inspector-composition__list" aria-label="请求组成估算">
+              {composition.segments.map((segment) => (
+                <li key={segment.kind}>
+                  <span>
+                    <i aria-hidden="true" style={{ background: colors[segment.kind] }} />
+                    {names[segment.kind]}
+                  </span>
+                  <small title={`${tokens(segment.bytes)} B`}>
+                    {estimate(segment.bytes)} ·{" "}
+                    {composition.totalBytes === 0
+                      ? "0.0"
+                      : ((segment.bytes / composition.totalBytes) * 100).toFixed(1)}
+                    % 字节占比
                   </small>
                 </li>
-              )}
+              ))}
             </ul>
-          </details>
-        </>
-      )}
+            <details>
+              <summary>
+                {tools.length > 0 || composition.unlabelledToolBytes > 0 || remainingCount > 0
+                  ? "工具定义明细 · 按大小排序"
+                  : "组成估算口径"}
+              </summary>
+              <p className="inspector-overview__note">
+                组成按 UTF-8 字节比例展示，Token 以字节数 ÷ 4
+                向上取整估算；不等于实际输入用量，也不包含完整 HTTP 传输开销。合计{" "}
+                {estimate(composition.totalBytes)}。
+              </p>
+              <ul className="inspector-composition__list" aria-label="工具定义估算明细">
+                {tools.slice(0, 5).map((tool) => (
+                  <li key={tool.label}>
+                    <code>{tool.label}</code>
+                    <small title={`${tokens(tool.bytes)} B`}>{estimate(tool.bytes)}</small>
+                  </li>
+                ))}
+                {remainingCount > 0 && (
+                  <li>
+                    <span>其余 {remainingCount} 项工具定义</span>
+                    <small title={`${tokens(remainingBytes)} B`}>{estimate(remainingBytes)}</small>
+                  </li>
+                )}
+                {composition.unlabelledToolBytes > 0 && (
+                  <li>
+                    <span>未命名工具</span>
+                    <small title={`${tokens(composition.unlabelledToolBytes)} B`}>
+                      {estimate(composition.unlabelledToolBytes)}
+                    </small>
+                  </li>
+                )}
+              </ul>
+            </details>
+          </>
+        )}
+      </details>
     </section>
   );
 }

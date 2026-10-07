@@ -64,7 +64,7 @@ test("Context v3 RPC to Inspector and composer: frozen input, independent histor
   const html = render(complete);
   assert.match(html, /实际输入 Token<\/dt><dd>2,500/);
   assert.match(html, /其中缓存 Token<\/dt><dd>1,500/);
-  assert.match(html, /窗口空余<\/dt><dd>7,500/);
+  assert.match(html, /该请求输入余量<\/dt><dd>7,500/);
   assert.match(html, /aria-valuenow="25"/);
   assert.match(html, /估算 Token<\/dt><dd>≈300/);
   assert.match(html, /cp-request/);

@@ -28,16 +28,28 @@ export async function readRuntimeModelHistorySnapshot(
   sessionId: string,
   options: {
     readonly includeEventIds?: boolean;
+    /** Inspect committed history during an active tool batch without accepting invalid provider input. */
+    readonly inspection?: boolean;
   } = {},
 ) {
   const { entries, headSequence } = await store.readSessionEntriesOfKinds(
     sessionId,
-    RUNTIME_HISTORY_EVENT_KINDS,
+    options.inspection
+      ? [...RUNTIME_HISTORY_EVENT_KINDS, "run.started", "run.terminal"]
+      : RUNTIME_HISTORY_EVENT_KINDS,
   );
   const events = entries.map(({ event }) => event);
   // Reads only replay committed projections; availability of an archive reader
   // cannot resurrect a result already hidden from the model.
-  const projected = materializeRuntimeHistoryEntries(events);
+  const activeRuns = new Set<string>();
+  if (options.inspection) {
+    for (const event of events) {
+      if (event.partial) continue;
+      if (event.kind === "run.started") activeRuns.add(event.runId);
+      else if (event.kind === "run.terminal") activeRuns.delete(event.runId);
+    }
+  }
+  const projected = materializeHistoryProjection(events, activeRuns).entries;
   const compactions = events.filter(
     (event): event is RuntimeCheckpointRecordedEvent =>
       event.kind === "context.checkpoint.recorded" &&
@@ -132,6 +144,13 @@ export function materializeRuntimeHistoryEntries(
 export function materializeRuntimeHistoryProjection(
   events: readonly RuntimeEvent[],
 ): RuntimeHistoryProjection {
+  return materializeHistoryProjection(events);
+}
+
+function materializeHistoryProjection(
+  events: readonly RuntimeEvent[],
+  activeRuns: ReadonlySet<string> = new Set(),
+): RuntimeHistoryProjection {
   const diagnostics: RuntimeProjectionDiagnostic[] = [];
   const eventIndexes = new Map<string, number>();
   for (const [eventIndex, event] of events.entries()) {
@@ -145,8 +164,25 @@ export function materializeRuntimeHistoryProjection(
 
   const { projected, prefixDiagnostics } = materializePrefix(events, events.length, eventIndexes);
   diagnostics.push(...prefixDiagnostics);
-  // assertToolCallPairing 检测的都是 hard 违规（配对错位/悬空/重复），仍直接 throw
-  assertToolCallPairing(projected.map(({ message }) => message));
+  // Only inspection may accept the pending tail of a durably active Run.
+  assertToolCallPairing(
+    projected.map(({ message }) => message),
+    (batchIndex) => {
+      const source = events[eventIndexes.get(projected[batchIndex]!.eventId)!]!;
+      return (
+        source.kind === "message.committed" &&
+        activeRuns.has(source.runId) &&
+        projected.slice(batchIndex + 1).every(({ eventId }) => {
+          const result = events[eventIndexes.get(eventId)!]!;
+          return (
+            result.runId === source.runId &&
+            result.turnId === source.turnId &&
+            result.invocationId === source.invocationId
+          );
+        })
+      );
+    },
+  );
   markUnsafeCompactionBoundaries(projected, events, eventIndexes);
   return { entries: projected, diagnostics };
 }
@@ -393,8 +429,12 @@ function findProjectedEventIndex(
   );
 }
 
-function assertToolCallPairing(messages: readonly Message[]): void {
+function assertToolCallPairing(
+  messages: readonly Message[],
+  allowPendingBatch?: (historyIndex: number) => boolean,
+): void {
   let pending: Map<string, ToolCall> | undefined;
+  let batchIndex = -1;
 
   for (const [historyIndex, message] of messages.entries()) {
     assertMessageToolFields(message, historyIndex);
@@ -422,6 +462,7 @@ function assertToolCallPairing(messages: readonly Message[]): void {
     if (!message.toolCalls || message.toolCalls.length === 0) continue;
 
     pending = new Map(message.toolCalls.map((call) => [call.id, call]));
+    batchIndex = historyIndex;
     if (pending.size !== message.toolCalls.length) {
       throw new RuntimeEventReadModelIntegrityError(
         "Assistant tool-call batch contains duplicate call IDs",
@@ -429,7 +470,7 @@ function assertToolCallPairing(messages: readonly Message[]): void {
     }
   }
 
-  if (pending && pending.size > 0) {
+  if (pending && pending.size > 0 && !allowPendingBatch?.(batchIndex)) {
     throw new RuntimeEventReadModelIntegrityError(
       `Assistant tool-call batch is missing results for ${[...pending.keys()].join(", ")}`,
     );

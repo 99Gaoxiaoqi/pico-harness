@@ -18,6 +18,8 @@ export function InspectorPanelController({
   workspacePath,
   sessionId,
   active,
+  inspectorTab,
+  onInspectorTabChange,
 }: WorkbarPanelHostProps) {
   const runtime = window.pico.runtime;
   const scope = useMemo(() => ({ workspacePath, sessionId }), [workspacePath, sessionId]);
@@ -32,6 +34,7 @@ export function InspectorPanelController({
   const summaryRequest = useRef(0);
   const [error, setError] = useState<string>();
   const [contextError, setContextError] = useState<string>();
+  const [contextLoading, setContextLoading] = useState(false);
   const generation = useRef(0);
   const traceRequest = useRef(0);
   const contextRequest = useRef(0);
@@ -72,6 +75,7 @@ export function InspectorPanelController({
       scopeRef.current === scope &&
       epoch === generation.current &&
       request === contextRequest.current;
+    setContextLoading(true);
     try {
       const result = await invokeWorkbarRuntime(runtime, "session.context.get", scope);
       if (!current()) return;
@@ -79,6 +83,8 @@ export function InspectorPanelController({
       setContextError(undefined);
     } catch (cause) {
       if (current()) setContextError(workbarErrorMessage(cause));
+    } finally {
+      if (current()) setContextLoading(false);
     }
   }, [runtime, scope]);
 
@@ -129,6 +135,7 @@ export function InspectorPanelController({
     setSelectedTraceId(undefined);
     setError(undefined);
     setContextError(undefined);
+    setContextLoading(false);
     setLoading(false);
     setSummary(undefined);
     setSummaryError(undefined);
@@ -141,26 +148,37 @@ export function InspectorPanelController({
 
   useEffect(() => {
     if (!active) return;
-    void refreshTrace();
-    void refreshContext();
-    void refreshSummary();
     let disposed = false;
-    let running = false;
-    let dirty = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const schedule = () => {
-      if (disposed || running || timer !== undefined) return;
-      timer = setTimeout(() => {
-        timer = undefined;
+    // Each resource coalesces independently; a slow context read cannot hold up usage or trace.
+    const refreshers = [refreshTrace, refreshContext, refreshSummary].map((refresh) => {
+      let running = false;
+      let dirty = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const run = () => {
         if (disposed) return;
         running = true;
         dirty = false;
-        void Promise.all([refreshTrace(), refreshContext(), refreshSummary()]).finally(() => {
+        void refresh().finally(() => {
           running = false;
           if (dirty) schedule();
         });
-      }, 100);
-    };
+      };
+      const schedule = () => {
+        dirty = true;
+        if (disposed || running || timer !== undefined) return;
+        timer = setTimeout(() => {
+          timer = undefined;
+          run();
+        }, 100);
+      };
+      run();
+      return {
+        schedule,
+        dispose: () => {
+          if (timer !== undefined) clearTimeout(timer);
+        },
+      };
+    });
     const subscription = window.pico.sessionFrames.subscribe((frame) => {
       if (
         frame.type !== "subscription.resource_changed" ||
@@ -168,12 +186,11 @@ export function InspectorPanelController({
         (frame.resource !== "trace" && frame.resource !== "context")
       )
         return;
-      dirty = true;
-      schedule();
+      for (const refresher of refreshers) refresher.schedule();
     });
     return () => {
       disposed = true;
-      if (timer !== undefined) clearTimeout(timer);
+      for (const refresher of refreshers) refresher.dispose();
       subscription.dispose();
     };
   }, [active, sessionId, refreshContext, refreshTrace, refreshSummary]);
@@ -201,6 +218,9 @@ export function InspectorPanelController({
       loading={loading}
       error={error}
       contextError={contextError}
+      contextLoading={contextLoading}
+      selectedTab={inspectorTab}
+      onTabChange={onInspectorTabChange}
       hasMore={Boolean(pages.at(-1)?.nextCursor)}
       onRefresh={() => {
         void refreshTrace();

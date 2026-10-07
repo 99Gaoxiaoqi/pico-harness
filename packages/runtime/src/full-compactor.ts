@@ -25,6 +25,7 @@ import {
   type LLMProvider,
   type Message,
   type ProviderCallPurpose,
+  type ProviderProtocol,
   FULL_COMPACTION_SUMMARY_MARKER,
   COMPACTION_SUMMARY_CLOSE_TAG,
   COMPACTION_SUMMARY_OPEN_TAG,
@@ -104,6 +105,8 @@ export interface FullCompactorOptions {
 }
 
 export interface FullCompactionRequest {
+  /** Main route whose retained history is being measured, including with an auxiliary summarizer. */
+  protocol?: ProviderProtocol | undefined;
   /** Model input budget after reserving output tokens and the safety margin. */
   inputBudgetTokens: number;
   /** Desired size of the complete suffix. Defaults to the maximum safe prefix (one retained message). */
@@ -264,7 +267,7 @@ export class FullCompactor {
       { source: hookSource, messageCount: session.getHistory().length },
       signal ? { signal } : {},
     );
-    const afterTokens = estimateMessagesTokens(session.getHistory());
+    const afterTokens = estimateMessagesTokens(session.getHistory(), request.protocol);
     this.logger.info(
       {
         trigger: request.trigger,
@@ -286,7 +289,7 @@ export class FullCompactor {
     previousSummary?: string,
     maxCoveredCount?: number,
   ): FullCompactionPreviewPlan | undefined {
-    const beforeTokens = estimateMessagesTokens(history);
+    const beforeTokens = estimateMessagesTokens(history, request.protocol);
     const phase = request.phase ?? (request.trigger === "manual" ? "standalone" : "pre_turn");
     const targetRetainedTokens = request.targetRetainedTokens ?? (phase === "standalone" ? 0 : 1);
     const anchorIndex = request.preservedAnchor
@@ -305,7 +308,7 @@ export class FullCompactor {
       phase === "pre_turn"
         ? Math.min(maxCoveredCount ?? history.length, anchorIndex)
         : (maxCoveredCount ?? history.length);
-    const cut = findSafeCompactionCut(history, targetRetainedTokens, maxCut);
+    const cut = findSafeCompactionCut(history, targetRetainedTokens, maxCut, request.protocol);
     if (
       phase === "mid_turn" &&
       cut &&

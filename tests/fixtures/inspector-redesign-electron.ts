@@ -37,17 +37,80 @@ async function main() {
     await js("document.querySelector('[data-run-toggle=earlier]').getAttribute('aria-expanded')"),
     "false",
   );
-  const requestCount = await js("window.requests.length");
+  let requestCount = await js("window.requests.length");
   await click(selected("newest-model"));
   await wait(
     "document.querySelector('[data-step-id=newest-model]').getAttribute('aria-expanded')==='true'",
   );
-  await click('[data-tab="overview"]');
+  await click('[aria-label="查看 Token 用量总览"]');
+  await wait(
+    "document.querySelector('[data-tab=overview]').getAttribute('aria-selected')==='true'",
+  );
+  const ring = '.inspector-overview__chart[aria-label="会话 Token 组成"]';
+  await js(`document.querySelector('${ring} .inspector-overview__legend > div').focus()`);
+  await wait(`document.querySelector('${ring} [data-segment="缓存输入"]').dataset.active==='true'`);
+  assert.equal(
+    await js(
+      `document.querySelector('${ring} .inspector-overview__ring-label strong').textContent`,
+    ),
+    "21,000",
+  );
+  window.webContents.sendInputEvent({ type: "keyDown", keyCode: "Tab" });
+  window.webContents.sendInputEvent({ type: "keyUp", keyCode: "Tab" });
+  await wait(
+    `document.querySelector('${ring} [data-segment="非缓存输入"]').dataset.active==='true'`,
+  );
+  await js(
+    `document.querySelector('${ring} [data-segment="输出（含推理）"]').dispatchEvent(new MouseEvent('mouseover',{bubbles:true}))`,
+  );
+  await wait(
+    `document.querySelector('${ring} .inspector-overview__ring-label strong').textContent==='1,000'`,
+  );
+  assert.equal(
+    await js(
+      `document.querySelector('${ring} .inspector-overview__legend > div:last-child').dataset.active`,
+    ),
+    "true",
+  );
+  await js(
+    `document.querySelector('${ring} [data-segment="输出（含推理）"]').dispatchEvent(new MouseEvent('mouseout',{bubbles:true}))`,
+  );
+  await wait(
+    `document.querySelector('${ring} [data-segment="非缓存输入"]').dataset.active==='true'`,
+  );
+  await js("document.activeElement.blur()");
+  await wait(
+    `document.querySelector('${ring} .inspector-overview__ring-label strong').textContent==='31,000'`,
+  );
+  assert.match(
+    await js(`document.querySelector('${ring} .inspector-overview__legend').textContent`),
+    /67.7%/,
+  );
+  const modelLegend =
+    '.inspector-overview__chart[aria-label="累计记录耗时组成"] [data-slice="model"]';
+  await js(
+    `document.querySelector('${modelLegend}').focus();window.update({...window.page,summary:{...window.page.summary,modelCalls:6,latencyMs:2000}})`,
+  );
+  await wait(`document.querySelector('${modelLegend}').textContent.includes('模型 · 6 次')`);
+  assert.equal(
+    await js("window.requests.length"),
+    requestCount + 3,
+    "live update refreshes the three resources",
+  );
+  requestCount += 3;
+  assert.equal(
+    await js(`document.activeElement===document.querySelector('${modelLegend}')`),
+    true,
+    "live totals retain legend keyboard focus",
+  );
+  await js("document.activeElement.blur()");
+  await click('[data-tab="timeline"]');
+  assert.equal(await js("window.requests.length"), requestCount, "tabs make no RPC");
+  await click('[aria-label="查看 Token 用量总览"]');
   await wait(
     "document.querySelector('[data-tab=overview]').getAttribute('aria-selected')==='true'",
   );
   await click('[data-tab="timeline"]');
-  assert.equal(await js("window.requests.length"), requestCount, "tabs make no RPC");
   assert.equal(
     await js("document.querySelector('[data-step-id=newest-model]').getAttribute('aria-expanded')"),
     "true",
@@ -154,6 +217,36 @@ async function main() {
   );
   await js("window.delayQueries=false;window.pending.splice(0).forEach(resolve=>resolve())");
   await wait("document.querySelector('[data-run-toggle=live]')!==null");
+  // Pending context must not prevent the next trace/summary refresh, or erase the old snapshot.
+  await js("window.delayContext=true;window.refresh()");
+  await wait("window.contextPending.length===1");
+  const summaryRequests = await js(
+    "window.requests.filter(x=>x.startsWith('session.execution.summary:')).length",
+  );
+  await js("window.refresh()");
+  await wait(
+    `window.requests.filter(x=>x.startsWith('session.execution.summary:')).length>${summaryRequests}`,
+  );
+  assert.equal(await js("window.contextPending.length"), 1, "context reads are coalesced");
+  await click('[aria-label="查看 Token 用量总览"]');
+  await wait("document.body.innerText.includes('正在更新')");
+  assert.equal(
+    await js("document.body.innerText.includes('≈1,000')"),
+    true,
+    "old history remains visible",
+  );
+  await js(
+    "window.delayContext=false;window.failContext=true;window.contextPending.splice(0).forEach(resolve=>resolve())",
+  );
+  await wait("document.body.innerText.includes('更新失败，显示上次记录')");
+  assert.equal(
+    await js("document.body.innerText.includes('≈1,000')"),
+    true,
+    "failed refresh retains history",
+  );
+  await pause(150);
+  await js("window.failContext=false;window.refresh()");
+  await wait("!document.body.innerText.includes('上下文读取失败')");
   const checks: unknown[] = [];
   const failures: unknown[] = [];
   for (const width of [320, 480, 640]) {

@@ -84,6 +84,17 @@ export interface RuntimeExecutionSummary {
   readonly physicalAttempts?: number;
   readonly retries?: number;
   readonly cacheCoverage?: "complete" | "partial" | "missing";
+  readonly provenance?: {
+    readonly source: "physical_attempts";
+    /** Input/output coverage of settled attempts; cache and cost coverage remain separate. */
+    readonly reportedAttempts: number;
+    readonly partialAttempts: number;
+    readonly missingAttempts: number;
+    readonly pendingAttempts: number;
+    readonly partialCoverageCalls: number;
+    /** Calls with runtime facts but no matching physical request record; excluded from totals. */
+    readonly runtimeOnlyCalls: number;
+  };
 }
 export interface RuntimeExecutionPage {
   readonly schemaVersion: 1;

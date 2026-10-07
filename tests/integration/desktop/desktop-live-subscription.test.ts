@@ -17,6 +17,8 @@ import { SessionSubscriptionRegistry } from "@pico/pico-host/session-subscriptio
 import { SqliteSessionContinuitySource } from "@pico/pico-host/sqlite-session-continuity-source";
 import { globalSessionManager } from "@pico/pico-host/session";
 import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
+import { RuntimeRun } from "@pico/runtime/runtime-run";
+import { readRuntimeModelHistorySnapshot } from "@pico/runtime/session-runtime-read-model";
 import { writeDesktopModelRouting } from "../../fixtures/desktop-model-routing.js";
 
 test("普通会话运行持锁时，订阅重开、Graph只读查询和工具后推理仍实时到达界面", async () => {
@@ -108,11 +110,29 @@ test("普通会话运行持锁时，订阅重开、Graph只读查询和工具后
     assert.equal(lease.session.getRuntimeStateSnapshot().settings?.orchestrationMode, "default");
     await continuity.open(workspacePath, sessionId);
     running = lease.session.serialize(async () => {
-      enteredRun();
-      await gate;
+      const run = await RuntimeRun.start({
+        capability: lease.session.runtimeEventCapability!,
+        agentSwarmAuthorization: "none",
+      });
+      await run.run(async () => {
+        await run.commitMessages(lease.session, [
+          {
+            role: "assistant",
+            content: "Inspecting",
+            toolCalls: [{ id: "slow-call", name: "read_file", arguments: '{"path":"canary.txt"}' }],
+          },
+        ]);
+        enteredRun();
+        await gate;
+      });
       runFinished = true;
     });
     await entered;
+    await assert.rejects(
+      readRuntimeModelHistorySnapshot(lease.session.runtimeEventStore!, sessionId),
+      /missing results for slow-call/,
+      "provider history remains strict during tool execution",
+    );
 
     // An external notification queues a writer behind the Run. Subscription
     // snapshots must not wait for that writer (even across other subscriptions).
@@ -132,7 +152,7 @@ test("普通会话运行持锁时，订阅重开、Graph只读查询和工具后
         },
       }),
     );
-    const [, graph] = await beforeRunEnds(
+    const [, graph, context] = await beforeRunEnds(
       Promise.all([
         continuity.open(workspacePath, sessionId),
         desktop.handle(
@@ -142,9 +162,24 @@ test("普通会话运行持锁时，订阅重开、Graph只读查询和工具后
             action: "list",
           }),
         ),
+        desktop.handle(createRuntimeRequest("session.context.get", { workspacePath, sessionId })),
       ]),
     );
     assert.deepEqual(graph, { graphs: [] });
+    assert.equal(
+      (context as unknown as RuntimeResult<"session.context.get">).context.sessionId,
+      sessionId,
+    );
+    assert.equal(runFinished, false, "上下文读取不等待运行结束");
+    assert.equal(
+      (context as unknown as RuntimeResult<"session.context.get">).context.modelHistory
+        .messageCount,
+      1,
+    );
+    assert.ok(
+      (context as unknown as RuntimeResult<"session.context.get">).context.modelHistory
+        .estimatedTokens > 0,
+    );
 
     const reporter = new DesktopReporter({
       runId: "live-run",
@@ -159,6 +194,11 @@ test("普通会话运行持锁时，订阅重开、Graph只读查询和工具后
     assert.equal(runFinished, false, "界面收到推理时运行必须尚未结束");
     releaseRun();
     await running;
+    await assert.rejects(
+      desktop.handle(createRuntimeRequest("session.context.get", { workspacePath, sessionId })),
+      /missing results for slow-call/,
+      "inspection still rejects an incomplete batch after its run is sealed",
+    );
     await beforeRunEnds(durableToolArrived);
   } finally {
     releaseRun();

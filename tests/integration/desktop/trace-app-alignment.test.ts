@@ -119,7 +119,7 @@ test("trace inspector integrates physical attempts, independent usage and earlie
     "复制模型标识",
     "费用未知",
     "未匹配该 endpoint 与模型的定价",
-    "当前模型历史",
+    "有效历史 · 估算",
     "估算 Token",
     "不包含完整请求",
     "当时模型窗口",

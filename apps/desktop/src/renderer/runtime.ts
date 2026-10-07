@@ -423,7 +423,11 @@ export interface RuntimeActions {
   removeQueuedInput(ref: WorkspaceSessionRef, queueId: string): Promise<boolean>;
   reorderQueuedInputs(ref: WorkspaceSessionRef, queueIds: readonly string[]): Promise<boolean>;
   moveQueuedInputToNext(ref: WorkspaceSessionRef, queueId: string): Promise<boolean>;
-  steerQueuedInput(ref: WorkspaceSessionRef, queueId: string, expectedRunId: string): Promise<boolean>;
+  steerQueuedInput(
+    ref: WorkspaceSessionRef,
+    queueId: string,
+    expectedRunId: string,
+  ): Promise<boolean>;
   compactSession(ref: WorkspaceSessionRef): Promise<boolean>;
   updateSessionSettings(
     ref: WorkspaceSessionRef,
@@ -1316,16 +1320,45 @@ export function useRuntimeStore(): RuntimeStore {
             isTerminalRunStatus(run.status),
         )?.id;
       const usageLoad = usageLoadTracker.current.begin(conversationKey);
-      const [sessionUsage, contextResult, settingsResult, goalResult, sessionResult] =
-        await Promise.all([
-          optionalInvoke(bridge, "usage.get", { workspacePath, sessionId }),
-          optionalInvoke(bridge, "session.context.get", { workspacePath, sessionId }),
-          optionalInvoke(bridge, "session.settings.get", { workspacePath, sessionId }),
-          optionalInvoke(bridge, "goal.get", { workspacePath, sessionId }),
-          optionalInvoke(bridge, "session.get", { workspacePath, sessionId }),
-        ]);
-      if (!isCurrentLoad()) return;
       const parsedConversation = parseConversation(record, workspacePath, sessionId);
+      // Publish read-only statistics as they arrive, independently of run-locked metadata.
+      void optionalInvoke(bridge, "usage.get", { workspacePath, sessionId }).then((result) => {
+        if (result.error || !isCurrentLoad() || !usageLoadTracker.current.isCurrent(usageLoad))
+          return;
+        const usage = parseUsage(result.value);
+        setData((current) => ({
+          ...current,
+          conversations: {
+            ...current.conversations,
+            [conversationKey]: {
+              ...(current.conversations[conversationKey] ?? parsedConversation),
+              usage,
+            },
+          },
+        }));
+      });
+      void optionalInvoke(bridge, "session.context.get", { workspacePath, sessionId }).then(
+        (result) => {
+          if (result.error || !isCurrentLoad()) return;
+          const context = parseSessionContext(result.value);
+          setData((current) => ({
+            ...current,
+            conversations: {
+              ...current.conversations,
+              [conversationKey]: {
+                ...(current.conversations[conversationKey] ?? parsedConversation),
+                context,
+              },
+            },
+          }));
+        },
+      );
+      const [settingsResult, goalResult, sessionResult] = await Promise.all([
+        optionalInvoke(bridge, "session.settings.get", { workspacePath, sessionId }),
+        optionalInvoke(bridge, "goal.get", { workspacePath, sessionId }),
+        optionalInvoke(bridge, "session.get", { workspacePath, sessionId }),
+      ]);
+      if (!isCurrentLoad()) return;
       let conversation: ConversationView = {
         ...parsedConversation,
         session: !sessionResult.error
@@ -1346,8 +1379,6 @@ export function useRuntimeStore(): RuntimeStore {
             )
           : dataRef.current.conversations[conversationKey]?.session,
         ...(activeRunId ? { runId: activeRunId } : {}),
-        ...(!sessionUsage.error ? { usage: parseUsage(sessionUsage.value) } : {}),
-        ...(!contextResult.error ? { context: parseSessionContext(contextResult.value) } : {}),
         ...(!settingsResult.error ? { settings: parseSessionSettings(settingsResult.value) } : {}),
         ...(goalResult.value
           ? { goal: goalResult.value.goal, goalItem: parseGoalItem(goalResult.value) }
@@ -1385,9 +1416,8 @@ export function useRuntimeStore(): RuntimeStore {
           ...current.conversations,
           [conversationKey]: {
             ...conversation,
-            ...(!usageLoadTracker.current.isCurrent(usageLoad)
-              ? { usage: current.conversations[conversationKey]?.usage }
-              : {}),
+            usage: current.conversations[conversationKey]?.usage,
+            context: current.conversations[conversationKey]?.context,
             ...(latestReplicaView
               ? {
                   items: resolvedInteractions.current.project(
@@ -2613,10 +2643,7 @@ export function useRuntimeStore(): RuntimeStore {
             refreshQueue(bridge, ref);
             setMessage("已引导当前运行，将在下一次模型调用前接收这条指令。");
           } catch (error) {
-            if (
-              error instanceof RuntimeInvocationError &&
-              error.code === "CONFLICT"
-            ) {
+            if (error instanceof RuntimeInvocationError && error.code === "CONFLICT") {
               await loadConversation(bridge, workspacePath, sessionId);
             }
             throw error;

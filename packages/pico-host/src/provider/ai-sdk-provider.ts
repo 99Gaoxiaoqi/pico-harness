@@ -375,21 +375,39 @@ export class AiSdkProvider implements LLMProvider {
               record(record(raw?.message)?.usage) ??
               record(record(raw?.response)?.usage);
             if (value) {
-              rawUsage = { ...rawUsage, ...value };
               // Anthropic message_start already contains output_tokens, but it is only
               // an initial count. Responses can likewise carry snapshots before settlement.
-              if (
+              const terminal =
                 (this.wire === "claude" &&
                   raw?.type === "message_delta" &&
                   typeof record(raw.delta)?.stop_reason === "string" &&
-                  typeof value.output_tokens === "number") ||
+                  translateUsage(value, this.wire)?.reportedFields?.includes("completion")) ||
                 (this.wire === "responses" &&
                   ["response.completed", "response.incomplete", "response.failed"].includes(
                     String(raw?.type),
                   )) ||
-                (this.wire === "openai" && responseDiagnostic.rawFinishReason !== undefined)
-              )
-                terminalUsageObserved = true;
+                (this.wire === "openai" && responseDiagnostic.rawFinishReason !== undefined);
+              // Claude emits input and output in separate events. For other protocols,
+              // only stable input counters can carry into a terminal usage object.
+              if (terminal && this.wire !== "claude") {
+                const prior = translateUsage({}, this.wire, rawUsage);
+                const current = translateUsage(value, this.wire);
+                rawUsage = { ...value };
+                for (const [field, key] of [
+                  ["prompt", "promptTokens"],
+                  ["input", "inputTokens"],
+                  ["cacheRead", "cacheReadTokens"],
+                  ["cacheWrite", "cacheWriteTokens"],
+                ] as const) {
+                  if (
+                    prior?.reportedFields?.includes(field) &&
+                    !current?.reportedFields?.includes(field)
+                  )
+                    // Normalized inputTokens is uncached; the raw SDK alias is inclusive.
+                    rawUsage[field === "input" ? "cacheMissInputTokens" : key] = prior[key];
+                }
+              } else rawUsage = { ...rawUsage, ...value };
+              if (terminal) terminalUsageObserved = true;
             }
           } else if (chunk.type === "text-delta" && !signal.aborted) onDelta(chunk.text);
           else if (chunk.type === "reasoning-delta" && !signal.aborted)
@@ -644,43 +662,157 @@ function record(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
-/** Raw fields preserve missing-vs-zero semantics; SDK totals normalize Anthropic cache buckets. */
+/** Raw usage is authoritative: some SDK adapters fill missing counters with zero. */
 function translateUsage(
-  usage: LanguageModelUsage,
+  usage: LanguageModelUsage | Record<string, unknown>,
   wire: ProviderProtocol,
   rawValue?: unknown,
+  finalOutput = true,
 ): Usage | undefined {
-  const raw = record(rawValue) ?? usage.raw;
-  if (!raw && usage.inputTokens === undefined && usage.outputTokens === undefined) return undefined;
-  const input = wire === "openai" ? raw?.prompt_tokens : raw?.input_tokens;
-  const output = wire === "openai" ? raw?.completion_tokens : raw?.output_tokens;
-  const details = record(
-    wire === "openai" ? raw?.prompt_tokens_details : raw?.input_tokens_details,
+  const raw = record(rawValue) ?? record(usage.raw);
+  const source = raw ? { ...record(raw.raw), ...raw } : record(usage);
+  if (!source) return undefined;
+  const inputBucket = record(source.inputTokens);
+  const outputBucket = record(source.outputTokens);
+  const inputDetails = record(source.inputTokenDetails);
+  const outputDetails = record(source.outputTokenDetails);
+  const promptDetails = record(source.prompt_tokens_details);
+  const snakeInputDetails = record(source.input_tokens_details);
+  const completionDetails = record(source.completion_tokens_details);
+  const snakeOutputDetails = record(source.output_tokens_details);
+  const read = firstToken(
+    source.cacheReadTokens,
+    source.cacheHitInputTokens,
+    source.cachedInputTokens,
+    source.cacheReadInputTokens,
+    source.cache_read_input_tokens,
+    source.prompt_cache_hit_tokens,
+    inputBucket?.cacheRead,
+    inputDetails?.cacheReadTokens,
+    inputDetails?.cachedTokens,
+    promptDetails?.cached_tokens,
+    snakeInputDetails?.cached_tokens,
   );
-  const outputDetails = record(
-    wire === "openai" ? raw?.completion_tokens_details : raw?.output_tokens_details,
+  const write = firstToken(
+    source.cacheWriteTokens,
+    source.cacheWriteInputTokens,
+    source.cacheCreationInputTokens,
+    source.cache_creation_input_tokens,
+    source.cache_write_input_tokens,
+    inputBucket?.cacheWrite,
+    inputDetails?.cacheWriteTokens,
+    promptDetails?.cache_write_tokens,
+    snakeInputDetails?.cache_write_tokens,
   );
-  const read = wire === "claude" ? raw?.cache_read_input_tokens : details?.cached_tokens;
-  const write = wire === "claude" ? raw?.cache_creation_input_tokens : details?.cache_write_tokens;
-  const reasoning = outputDetails?.reasoning_tokens;
+  // Match the installed SDK's Claude executor accounting, including fallback handling.
+  const iterations =
+    wire === "claude" && Array.isArray(source.iterations) ? source.iterations.map(record) : [];
+  const executorIterations = iterations.some((iteration) => iteration?.type === "fallback_message")
+    ? []
+    : iterations.filter(
+        (iteration) => iteration?.type === "compaction" || iteration?.type === "message",
+      );
+  const claudeInput =
+    wire === "claude"
+      ? executorIterations.length
+        ? completeTokenSum(
+            executorIterations.map((iteration) => tokenCount(iteration?.input_tokens)),
+          )
+        : tokenCount(source.input_tokens)
+      : undefined;
+  const claudeOutput = executorIterations.length
+    ? completeTokenSum(executorIterations.map((iteration) => tokenCount(iteration?.output_tokens)))
+    : tokenCount(source.output_tokens);
+  const noCache = firstToken(
+    source.cacheMissInputTokens,
+    source.prompt_cache_miss_tokens,
+    inputBucket?.noCache,
+    inputDetails?.noCacheTokens,
+    inputDetails?.cacheMissTokens,
+    ...(wire === "claude" ? [claudeInput] : []),
+  );
+  const reasoning = finalOutput
+    ? firstToken(
+        source.reasoningTokens,
+        source.reasoning_tokens,
+        outputBucket?.reasoning,
+        outputDetails?.reasoningTokens,
+        completionDetails?.reasoning_tokens,
+        snakeOutputDetails?.reasoning_tokens,
+        snakeOutputDetails?.thinking_tokens,
+        inputDetails?.reasoningTokens,
+      )
+    : undefined;
+  // Anthropic raw input_tokens excludes cache buckets; SDK/camel totals include them.
+  const reportedInput =
+    firstToken(
+      source.inputTokens,
+      inputBucket?.total,
+      source.promptTokens,
+      source.prompt_tokens,
+      ...(wire !== "claude" ? [source.input_tokens] : []),
+    ) ??
+    (claudeInput !== undefined
+      ? completeTokenSum([claudeInput, read ?? 0, write ?? 0])
+      : completeTokenSum([noCache, read, write]));
+  const reportedOutput = finalOutput
+    ? (firstToken(
+        source.outputTokens,
+        outputBucket?.total,
+        source.completionTokens,
+        source.completion_tokens,
+        wire === "claude" ? claudeOutput : source.output_tokens,
+      ) ??
+      completeTokenSum([
+        firstToken(
+          outputBucket?.text,
+          outputDetails?.textTokens,
+          completionDetails?.text_tokens,
+          snakeOutputDetails?.text_tokens,
+        ),
+        reasoning,
+      ]))
+    : undefined;
+  // A snapshot total could reconstruct a stale output after cancellation, so ignore it.
+  const total = finalOutput ? firstToken(source.totalTokens, source.total_tokens) : undefined;
+  const input = reportedInput ?? tokenDifference(total, reportedOutput);
+  const output = reportedOutput ?? tokenDifference(total, reportedInput);
   const reported: UsageReportedField[] = [];
-  if (typeof input === "number") reported.push("prompt");
-  if (typeof output === "number") reported.push("completion");
-  if (typeof read === "number") reported.push("cacheRead");
-  if (typeof write === "number") reported.push("cacheWrite");
-  if (typeof reasoning === "number") reported.push("reasoning");
-  if (wire === "claude" && typeof input === "number") reported.push("input");
+  if (input !== undefined) reported.push("prompt");
+  if (output !== undefined) reported.push("completion");
+  if (read !== undefined) reported.push("cacheRead");
+  if (write !== undefined) reported.push("cacheWrite");
+  if (reasoning !== undefined) reported.push("reasoning");
+  if (noCache !== undefined) reported.push("input");
+  if (reported.length === 0) return undefined;
   return {
-    promptTokens: usage.inputTokens ?? 0,
-    completionTokens: usage.outputTokens ?? 0,
-    ...(wire === "claude" && typeof input === "number" ? { inputTokens: input } : {}),
-    cacheReadTokens: typeof read === "number" ? read : 0,
-    ...(typeof write === "number" ? { cacheWriteTokens: write } : {}),
-    ...(wire !== "claude" || typeof reasoning === "number"
-      ? { reasoningTokens: typeof reasoning === "number" ? reasoning : 0 }
-      : {}),
+    promptTokens: input ?? 0,
+    completionTokens: output ?? 0,
+    ...(noCache !== undefined ? { inputTokens: noCache } : {}),
+    cacheReadTokens: read ?? 0,
+    ...(write !== undefined ? { cacheWriteTokens: write } : {}),
+    ...(wire !== "claude" || reasoning !== undefined ? { reasoningTokens: reasoning ?? 0 } : {}),
     reportedFields: reported,
   };
+}
+
+function tokenCount(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+function firstToken(...values: unknown[]): number | undefined {
+  return values.map(tokenCount).find((value) => value !== undefined);
+}
+
+/** Only complete buckets can establish a total; an omitted bucket is not zero. */
+function completeTokenSum(values: readonly (number | undefined)[]): number | undefined {
+  return values.every((value) => value !== undefined)
+    ? tokenCount(values.reduce<number>((sum, value) => sum + value!, 0))
+    : undefined;
+}
+
+function tokenDifference(total: number | undefined, other: number | undefined): number | undefined {
+  return total !== undefined && other !== undefined ? tokenCount(total - other) : undefined;
 }
 
 /** Preserve provider-reported partial usage even when streaming ends in error or cancellation. */
@@ -690,33 +822,5 @@ function usageFromRaw(
   terminalUsageObserved: boolean,
 ): Usage | undefined {
   if (!raw) return undefined;
-  if (!terminalUsageObserved) {
-    // Never promote an intermediate output counter to a final bill after cancellation.
-    const {
-      completion_tokens: _completion,
-      output_tokens: _output,
-      completion_tokens_details: _completionDetails,
-      output_tokens_details: _outputDetails,
-      ...inputUsage
-    } = raw;
-    raw = inputUsage;
-  }
-  const input = wire === "openai" ? raw.prompt_tokens : raw.input_tokens;
-  const output = wire === "openai" ? raw.completion_tokens : raw.output_tokens;
-  const read =
-    wire === "claude" && typeof raw.cache_read_input_tokens === "number"
-      ? raw.cache_read_input_tokens
-      : 0;
-  const write =
-    wire === "claude" && typeof raw.cache_creation_input_tokens === "number"
-      ? raw.cache_creation_input_tokens
-      : 0;
-  return translateUsage(
-    {
-      inputTokens: typeof input === "number" ? input + read + write : undefined,
-      outputTokens: typeof output === "number" ? output : undefined,
-    } as LanguageModelUsage,
-    wire,
-    raw,
-  );
+  return translateUsage({}, wire, raw, terminalUsageObserved);
 }

@@ -1,4 +1,4 @@
-import { type Message } from "@pico/core";
+import { type Message, type ProviderProtocol } from "@pico/core";
 import { estimateMessageTokens } from "./context-budget.js";
 
 export interface SafeCompactionCut {
@@ -73,6 +73,7 @@ export function findSafeCompactionCut(
   messages: readonly Message[],
   targetRetainedTokens: number,
   maxCoveredCount = messages.length,
+  protocol?: ProviderProtocol,
 ): SafeCompactionCut | undefined {
   if (messages.length === 0) return undefined;
   const target = Math.max(0, targetRetainedTokens);
@@ -91,7 +92,7 @@ export function findSafeCompactionCut(
   );
   let retainedTokens = 0;
   for (let cut = messages.length; cut >= 1; cut--) {
-    if (cut < messages.length) retainedTokens += estimateMessageTokens(messages[cut]!);
+    if (cut < messages.length) retainedTokens += estimateMessageTokens(messages[cut]!, protocol);
     if (cut > maxCoveredCount || retainedTokens < target || (pinnedIndex >= 0 && cut > pinnedIndex))
       continue;
     if (isSafeCompactionCut(messages, cut)) {

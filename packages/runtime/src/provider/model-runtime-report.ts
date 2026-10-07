@@ -165,7 +165,7 @@ export function createModelContextReport(
   tools: readonly ToolDefinition[] = [],
   suppliedBudget?: ContextBudget,
 ): ModelContextReport {
-  const estimatedInputTokens = estimateContextTokens(messages, tools);
+  const estimatedInputTokens = estimateModelInputTokens(messages, tools, route.provider);
   const contextWindowTokens =
     suppliedBudget?.contextWindowTokens ?? route.capabilities.contextWindowTokens;
   const reservedOutputTokens =
@@ -269,11 +269,4 @@ function costReport(route: ModelRoute, usage: SessionUsageSnapshot): ModelUsageR
     status,
     priceSource: route.capabilities.price.source,
   };
-}
-
-function estimateContextTokens(
-  messages: readonly Message[],
-  tools: readonly ToolDefinition[],
-): number {
-  return estimateModelInputTokens(messages, tools);
 }

@@ -65,6 +65,7 @@
 }
 .tool-panel--inspector .inspector-overview__ring-label {
   position: absolute;
+  pointer-events: none;
   inset: 16%;
   display: flex;
   flex-direction: column;
@@ -79,6 +80,21 @@
 }
 .tool-panel--inspector .inspector-overview__ring-label span {
   margin-top: 4px;
+  color: var(--inspector-muted);
+  font-size: 12px;
+}
+.tool-panel--inspector .inspector-overview__chart [data-dimmed="true"] {
+  opacity: 0.35;
+}
+.tool-panel--inspector .inspector-overview__legend [data-active="true"] {
+  font-weight: 600;
+}
+.tool-panel--inspector .inspector-overview__legend > div:focus-visible {
+  outline: 2px solid var(--inspector-accent);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+.tool-panel--inspector .inspector-overview__share {
   color: var(--inspector-muted);
   font-size: 12px;
 }

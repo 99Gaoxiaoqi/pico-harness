@@ -6,6 +6,7 @@ import type { RuntimeExecutionSummary, RuntimeSessionContextSnapshot } from "@pi
 import { ExecutionUsageSummary } from "../../../apps/desktop/src/renderer/workbar-panels/ExecutionUsageSummary.js";
 import { ContextComposition } from "../../../apps/desktop/src/renderer/workbar-panels/ContextComposition.js";
 import { CurrentModelHistory } from "../../../apps/desktop/src/renderer/workbar-panels/CurrentModelHistory.js";
+import { InspectorWorkbarPanel } from "../../../apps/desktop/src/renderer/workbar-panels/InspectorWorkbarPanel.js";
 import { contextSnapshot } from "./context-fixture.js";
 Object.assign(globalThis, { React });
 
@@ -30,6 +31,50 @@ const renderUsage = (overrides: Partial<RuntimeExecutionSummary> = {}) =>
   renderToStaticMarkup(
     React.createElement(ExecutionUsageSummary, { summary: { ...summary, ...overrides } }),
   );
+
+test("overview separates actual input, effective history and cumulative usage with explicit refresh states", () => {
+  const render = (
+    context?: RuntimeSessionContextSnapshot,
+    contextLoading = false,
+    contextError?: string,
+  ) =>
+    renderToStaticMarkup(
+      React.createElement(InspectorWorkbarPanel, {
+        context,
+        contextLoading,
+        contextError,
+        summary,
+        selectedTab: "overview",
+        trace: [],
+        loading: false,
+        onRefresh() {},
+        onSelectTrace() {},
+      }),
+    );
+  const html = render(contextSnapshot(), true);
+  assert.match(html, /data-tab="overview"[^>]*aria-selected="true"/);
+  assert.match(html, /<h3>最近成功主请求输入 · 实际<\/h3>/);
+  assert.ok(html.indexOf("最近成功主请求输入 · 实际") < html.indexOf("有效历史 · 估算"));
+  assert.ok(html.indexOf("有效历史 · 估算") < html.indexOf("会话累计用量"));
+  assert.match(html, /不含系统指令、工具定义/);
+  assert.match(html, /同一段历史多次发送，会多次计入累计输入/);
+  assert.match(html, /正在更新/);
+  const pending = render(undefined, true);
+  assert.match(pending, /正在加载有效历史/);
+  assert.doesNotMatch(pending, /尚无成功的主请求|暂无有效历史记录/);
+  const failed = render(contextSnapshot(), false, "temporary failure");
+  assert.match(failed, /更新失败，显示上次记录/);
+  assert.match(failed, /≈300/);
+  const unavailable = render(undefined, false, "temporary failure");
+  assert.match(unavailable, /有效历史读取失败/);
+  assert.doesNotMatch(unavailable, /暂无有效历史记录/);
+  const overflow = renderToStaticMarkup(
+    React.createElement(ContextComposition, {
+      request: { ...contextSnapshot().latestRequest, inputTokens: 12000 },
+    }),
+  );
+  assert.match(overflow, /输入超出窗口<\/dt><dd>2,000/);
+});
 
 function chart(html: string, label: string) {
   return html.split(`aria-label="${label}"`)[1]!.split("</svg>")[0]!;

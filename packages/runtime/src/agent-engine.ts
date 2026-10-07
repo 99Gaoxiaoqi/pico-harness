@@ -762,6 +762,7 @@ export class AgentEngine {
     }
     this.compactionAttemptedThisRun = true;
     const request: FullCompactionRequest = {
+      protocol: this.contextBudget?.protocol,
       inputBudgetTokens: this.contextBudget!.inputBudgetTokens,
       targetRetainedTokens: 1,
       trigger: "auto",
@@ -924,14 +925,20 @@ export class AgentEngine {
       const inputBudgetTokens =
         this.contextBudget?.inputBudgetTokens ?? this.contextBudget?.contextWindowTokens ?? 1;
       const historyBefore = await this.readModelHistory(session);
-      const historyTokens = estimateMessagesTokens(historyBefore);
+      const historyTokens = estimateMessagesTokens(historyBefore, this.contextBudget?.protocol);
       const targetRetainedTokens = 1;
       this.diagnostics.warn(
         { trigger: "provider-overflow", inputBudgetTokens, targetRetainedTokens, historyTokens },
         "[Engine] Provider 报告上下文溢出，执行一次紧急 FullCompaction",
       );
-      const emergencyCut = findSafeCompactionCut(historyBefore, targetRetainedTokens);
+      const emergencyCut = findSafeCompactionCut(
+        historyBefore,
+        targetRetainedTokens,
+        undefined,
+        this.contextBudget?.protocol,
+      );
       const request = {
+        protocol: this.contextBudget?.protocol,
         inputBudgetTokens,
         targetRetainedTokens,
         trigger: "overflow" as const,
@@ -976,7 +983,10 @@ export class AgentEngine {
           runtimePreview?.retainedCount ??
           (emergencyCut ? historyBefore.length - emergencyCut.compactedCount : undefined),
         fullCompactionTokensBefore: historyTokens,
-        fullCompactionTokensAfter: estimateMessagesTokens(await this.readModelHistory(session)),
+        fullCompactionTokensAfter: estimateMessagesTokens(
+          await this.readModelHistory(session),
+          this.contextBudget?.protocol,
+        ),
       });
       return generate(retryContext);
     }

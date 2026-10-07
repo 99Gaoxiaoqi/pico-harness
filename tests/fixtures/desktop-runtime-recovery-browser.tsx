@@ -10,6 +10,7 @@ import {
 } from "@pico/protocol";
 import type { DesktopBridge } from "../../apps/desktop/src/preload/contract.js";
 import { useRuntimeStore, type RuntimeStore } from "../../apps/desktop/src/renderer/runtime.js";
+import { contextSnapshot } from "../integration/desktop/context-fixture.js";
 
 Object.assign(globalThis, { React, IS_REACT_ACT_ENVIRONMENT: true });
 const workspaceA = "/project-a";
@@ -22,6 +23,7 @@ let holdTrust: Promise<void> | undefined;
 let holdWorkspace: Promise<void> | undefined;
 let holdSessionGet: Promise<void> | undefined;
 let sessionGetStarted = false;
+let usageTokens = 100;
 let subscriptionRun: RuntimeRun | undefined;
 let frameListener: ((frame: RuntimeSessionSubscriptionFrame) => void) | undefined;
 let listener: ((event: RuntimeNotification) => void) | undefined;
@@ -130,6 +132,12 @@ const bridge = {
             sessionGetStarted = true;
             await holdSessionGet;
             return ok({ session });
+          case "usage.get":
+            return ok({ usage: { total: { totalTokens: usageTokens }, scope: "session" } });
+          case "session.context.get":
+            return ok({
+              context: contextSnapshot({ sessionId: session.sessionId, generatedAt: usageTokens }),
+            });
           default:
             return ok({});
         }
@@ -346,6 +354,7 @@ async function main() {
     releaseSessionGet = resolve;
   });
   sessionGetStarted = false;
+  usageTokens = 321;
   let sessionLoad!: Promise<void>;
   await act(async () => {
     sessionLoad = store.actions.loadSession({
@@ -354,6 +363,16 @@ async function main() {
     });
   });
   await waitFor(() => sessionGetStarted, "Session metadata must be held");
+  await waitFor(
+    () =>
+      Object.values(store.data.conversations).some(
+        (item) =>
+          item.sessionId === session.sessionId &&
+          item.usage?.totalTokens === 321 &&
+          item.context?.generatedAt === 321,
+      ),
+    "Usage and context must update while session metadata is held",
+  );
   check(frameListener, "Session frame subscription missing");
   await act(async () => {
     frameListener!({
@@ -374,6 +393,15 @@ async function main() {
     await sessionLoad;
   });
   holdSessionGet = undefined;
+  check(
+    Object.values(store.data.conversations).some(
+      (item) =>
+        item.sessionId === session.sessionId &&
+        item.usage?.totalTokens === 321 &&
+        item.context?.generatedAt === 321,
+    ),
+    "Delayed metadata must retain independently loaded statistics",
+  );
   check(
     store.data.runs.find((run) => run.id === "hydration-race")?.status === "succeeded",
     "Delayed session metadata must not roll completion back to running",

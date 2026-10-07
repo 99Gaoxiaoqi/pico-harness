@@ -14,10 +14,7 @@ import {
   subagentParent,
   subagentSessionHref,
 } from "../conversation/subagent-navigation.js";
-import type {
-  RuntimeResult,
-  RuntimeUserDefaults,
-} from "@pico/protocol";
+import type { RuntimeResult, RuntimeUserDefaults } from "@pico/protocol";
 import {
   AlertTriangle,
   Bot,
@@ -195,6 +192,8 @@ export function ConversationPage() {
   );
   const [behavior, setBehavior] = useState<ComposerBehavior>("steer");
   const [inspector, setInspector] = useState<ConversationInspectorView>();
+  const [inspectorTab, setInspectorTab] = useState<"timeline" | "overview">("timeline");
+  useEffect(() => setInspectorTab("timeline"), [workspacePath, sessionId]);
 
   const [workbar, dispatchWorkbar] = useReducer(reduceWorkbarState, undefined, () => {
     const fallback = createWorkbarState();
@@ -556,11 +555,7 @@ export function ConversationPage() {
         revisionRequestRef.current = { text, key: globalThis.crypto.randomUUID() };
       }
       try {
-        await reviseUserMessage(
-          editingUserMessage.item,
-          text,
-          revisionRequestRef.current.key,
-        );
+        await reviseUserMessage(editingUserMessage.item, text, revisionRequestRef.current.key);
       } catch (error) {
         actions.showMessage?.(
           error instanceof Error ? error.message : "编辑并重发失败，请检查连接后重试。",
@@ -978,6 +973,8 @@ export function ConversationPage() {
             instanceId={tab.id}
             active={active}
             readOnly={session?.status === "archived"}
+            inspectorTab={inspectorTab}
+            onInspectorTabChange={setInspectorTab}
           />
         );
       }
@@ -1013,6 +1010,7 @@ export function ConversationPage() {
     },
     [
       inspector,
+      inspectorTab,
       runtime,
       session?.status,
       sessionId,
@@ -1269,14 +1267,21 @@ export function ConversationPage() {
               <div className="conversation-session-header__meta">
                 {preview && <PreviewBadge />}
                 {conversation?.usage && (
-                  <span
+                  <Button
+                    type="button"
+                    variant="quiet"
+                    aria-label="查看 Token 用量总览"
                     title={`会话累计 Token：${conversation.usage.totalTokens?.toLocaleString("zh-CN") ?? "未知"}`}
+                    onClick={() => {
+                      setInspectorTab("overview");
+                      dispatchWorkbar({ type: "open", tab: createWorkbarToolTab("inspector") });
+                    }}
                   >
                     会话累计 Token{" "}
                     {conversation.usage.totalTokens === undefined
                       ? "未知"
                       : formatCompact(conversation.usage.totalTokens)}
-                  </span>
+                  </Button>
                 )}
                 {activeRun && <StatusPill status={activeRun.status} />}
                 {conversation?.settings?.orchestrationMode === "graph" && (
@@ -1879,9 +1884,7 @@ export function ConversationPage() {
                   : undefined
               }
               onEditUserMessage={
-                !activeRun && session?.status !== "archived"
-                  ? beginEditingUserMessage
-                  : undefined
+                !activeRun && session?.status !== "archived" ? beginEditingUserMessage : undefined
               }
               onQuoteSelection={quoteIntoMainComposer}
               onAskInSideChat={

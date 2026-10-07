@@ -3,6 +3,7 @@ import "@astryxdesign/core/astryx.css";
 import "@astryxdesign/theme-neutral/theme.css";
 import "../../apps/desktop/src/renderer/workbar/workbar-astryx.css";
 import { createRoot } from "react-dom/client";
+import { useEffect, useState } from "react";
 import type { RuntimeExecutionPage, RuntimeSessionContextSnapshot } from "@pico/protocol";
 import { InspectorPanelController } from "../../apps/desktop/src/renderer/workbar-panels/InspectorPanelController.js";
 import "../../apps/desktop/src/renderer/workbar-panels/ToolPanels.css";
@@ -16,6 +17,9 @@ const host = window as unknown as {
   delayQueries: boolean;
   pending: (() => void)[];
   failQueries: boolean;
+  delayContext: boolean;
+  failContext: boolean;
+  contextPending: (() => void)[];
 };
 const summary: RuntimeExecutionPage["summary"] = {
   scope: "session",
@@ -156,12 +160,17 @@ host.requests = [];
 host.pending = [];
 host.delayQueries = false;
 host.failQueries = false;
+host.delayContext = false;
+host.failContext = false;
+host.contextPending = [];
 const request = (method: string) => async (params: { sessionId: string }) => {
   host.requests.push(`${method}:${params.sessionId}`);
   const capturedPage = { ...host.page, sessionId: params.sessionId };
   const capturedContext = { ...context, sessionId: params.sessionId };
   if (host.delayQueries) await new Promise<void>((resolve) => host.pending.push(resolve));
-  if (host.failQueries)
+  if (method === "session.context.get" && host.delayContext)
+    await new Promise<void>((resolve) => host.contextPending.push(resolve));
+  if (host.failQueries || (method === "session.context.get" && host.failContext))
     return {
       ok: false,
       error: { code: "internal", message: "fixture temporary failure", retryable: true },
@@ -172,7 +181,7 @@ const request = (method: string) => async (params: { sessionId: string }) => {
       method === "session.context.get"
         ? { context: capturedContext }
         : method === "session.execution.summary"
-          ? summary
+          ? capturedPage.summary
           : capturedPage,
   };
 };
@@ -190,18 +199,30 @@ host.pico = {
   },
 };
 const root = createRoot(document.getElementById("root")!);
+function Harness({ sessionId }: { sessionId: string }) {
+  const [tab, setTab] = useState<"timeline" | "overview">();
+  useEffect(() => setTab(undefined), [sessionId]);
+  return (
+    <>
+      <button aria-label="查看 Token 用量总览" onClick={() => setTab("overview")}>
+        会话累计 Token
+      </button>
+      <InspectorPanelController
+        workspacePath="/fixture"
+        sessionId={sessionId}
+        active
+        kind="inspector"
+        instanceId="test"
+        readOnly={false}
+        inspectorTab={tab}
+        onInspectorTabChange={setTab}
+      />
+    </>
+  );
+}
 host.mount = (sessionId = "s") => {
   currentSession = sessionId;
-  root.render(
-    <InspectorPanelController
-      workspacePath="/fixture"
-      sessionId={sessionId}
-      active
-      kind="inspector"
-      instanceId="test"
-      readOnly={false}
-    />,
-  );
+  root.render(<Harness sessionId={sessionId} />);
 };
 host.refresh = () => {
   for (const listener of listeners)

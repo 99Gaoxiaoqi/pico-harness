@@ -1651,7 +1651,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       return stored.result;
     }
 
-    const existingClaim = await this.conversationStateStore.getRewindClaim(canonical, idempotencyKey);
+    const existingClaim = await this.conversationStateStore.getRewindClaim(
+      canonical,
+      idempotencyKey,
+    );
     const operationId = `revise-${createHash("sha256").update(`${canonical}\0${idempotencyKey}`).digest("hex")}`;
     const claim = await this.conversationStateStore.claimRewind(
       canonical,
@@ -1671,7 +1674,11 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
 
     const targetSessionId = claim.targetSessionId;
     const trustedPath = await this.withWorkspaceAdmission(canonical, async () => {
-      const idlePath = await this.requireIdleTrustedSession(canonical, sourceSessionId, "编辑旧消息");
+      const idlePath = await this.requireIdleTrustedSession(
+        canonical,
+        sourceSessionId,
+        "编辑旧消息",
+      );
       const sourceLease = await globalSessionManager.getOrCreatePinned(sourceSessionId, idlePath, {
         persistence: true,
         picoHome: this.picoHome,
@@ -1680,21 +1687,33 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       try {
         await this.getForkSourceSettings(idlePath, sourceLease.session);
         await sourceLease.session.flushPersistence();
-        const entries = await sourceLease.session.runtimeEventStore?.readSessionEntries(sourceSessionId);
+        const entries =
+          await sourceLease.session.runtimeEventStore?.readSessionEntries(sourceSessionId);
         if (!entries) {
-          throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.RESET_REQUIRED, "会话历史尚未持久化，无法编辑");
+          throw new RuntimeProtocolError(
+            RUNTIME_ERROR_CODES.RESET_REQUIRED,
+            "会话历史尚未持久化，无法编辑",
+          );
         }
         const targetIndex = entries.findIndex(
-          ({ event }) => event.eventId === targetEventId &&
-            event.kind === "message.committed" && event.data.message.role === "user",
+          ({ event }) =>
+            event.eventId === targetEventId &&
+            event.kind === "message.committed" &&
+            event.data.message.role === "user",
         );
         if (targetIndex < 0) {
-          throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, "目标消息不是当前会话中的用户消息");
+          throw new RuntimeProtocolError(
+            RUNTIME_ERROR_CODES.INVALID_PARAMS,
+            "目标消息不是当前会话中的用户消息",
+          );
         }
         const previousEventId = entries[targetIndex - 1]?.event.eventId;
         const targetEvent = entries[targetIndex]!.event;
         if (targetEvent.kind !== "message.committed" || targetEvent.data.message.role !== "user") {
-          throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, "目标消息不是当前会话中的用户消息");
+          throw new RuntimeProtocolError(
+            RUNTIME_ERROR_CODES.INVALID_PARAMS,
+            "目标消息不是当前会话中的用户消息",
+          );
         }
         const targetMessage = targetEvent.data.message;
         const revisionInput = runtimeInputForRevisedMessage(targetMessage, replacementText);
@@ -1765,7 +1784,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         result,
       );
     } catch (error) {
-      logger.warn({ error, sourceSessionId, targetSessionId }, "会话修订已启动，但幂等结果保存失败");
+      logger.warn(
+        { error, sourceSessionId, targetSessionId },
+        "会话修订已启动，但幂等结果保存失败",
+      );
     }
     this.publishSession(result.session as RuntimeSession);
     this.publishTranscriptUpdate(canonical, targetSessionId, "reload");
@@ -2061,7 +2083,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     sessionId: string,
   ): Promise<JsonValue> {
     const canonical = await this.requireTrustedSession(workspacePath, sessionId);
-    return this.withSession(canonical, sessionId, async (session) => {
+    // Inspection reads committed history and must not wait for the active run's lease.
+    return this.withPinnedSession(canonical, sessionId, async (session) => {
       const settings = session.getRuntimeStateSnapshot().settings;
       if (!settings)
         throw new RuntimeProtocolError(
@@ -2073,7 +2096,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       const store = session.runtimeEventStore;
       if (!store) throw new Error("上下文历史缺少持久化事件源");
       // No run, prompt assembly, tool discovery or provider request is created for inspection.
-      const history = await readRuntimeModelHistorySnapshot(store, sessionId);
+      const history = await readRuntimeModelHistorySnapshot(store, sessionId, {
+        inspection: true,
+      });
       const latestRequest = getLatestContextRequest(
         resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.root,
         sessionId,
@@ -2100,7 +2125,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           modelHistory: {
             throughSequence: history.throughSequence,
             messageCount: history.messages.length,
-            estimatedTokens: estimateMessagesTokens(history.messages),
+            estimatedTokens: estimateMessagesTokens(history.messages, route.provider),
             estimationAlgorithm: "chars_v1",
             projection: "effective_model_history",
             compactedCount: history.compactedCount,
@@ -2762,6 +2787,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
             runtimeRun,
             compactor: new FullCompactor({ provider, logger }),
             request: {
+              protocol: active.provider,
               inputBudgetTokens: budget.inputBudgetTokens,
               phase: "standalone",
               targetRetainedTokens: 0,
@@ -3299,23 +3325,14 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     return messageId;
   }
 
-  private async consumeNextQueued(
-    workspacePath: string,
-    sessionId: string,
-  ): Promise<boolean> {
+  private async consumeNextQueued(workspacePath: string, sessionId: string): Promise<boolean> {
     if (this.lifecycleState !== "open") return false;
-    const [next] = await this.conversationStateStore.listQueued(
-      workspacePath,
-      sessionId,
-    );
+    const [next] = await this.conversationStateStore.listQueued(workspacePath, sessionId);
     if (!next) return false;
     const steerKey = queueSteerKey(sessionId, next.queueId);
     const acceptedKey = `${workspacePath}\0${steerKey}`;
     const accepted = this.acceptedQueueSteers.get(acceptedKey);
-    const steered = await this.conversationStateStore.getIdempotent(
-      workspacePath,
-      steerKey,
-    );
+    const steered = await this.conversationStateStore.getIdempotent(workspacePath, steerKey);
     if (steered || accepted) {
       if (!steered && accepted) {
         await this.conversationStateStore.rememberIdempotent(
@@ -3337,16 +3354,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     if (await this.findActiveSessionRun(workspacePath, sessionId)) return true;
     // Session admission lane prevents a Goal continuation racing a queued user Run.
     if (this.lifecycleState !== "open") return true;
-    await this.startSessionRun(
-      workspacePath,
-      sessionId,
-      next.input,
-      undefined,
-      {
-        inputKey: next.queueId,
-        runStartKey: desktopRunStartIdempotencyKey("queue", next.queueId),
-      },
-    );
+    await this.startSessionRun(workspacePath, sessionId, next.input, undefined, {
+      inputKey: next.queueId,
+      runStartKey: desktopRunStartIdempotencyKey("queue", next.queueId),
+    });
     await this.conversationStateStore.removeQueued(workspacePath, next.queueId);
     return true;
   }
@@ -3354,42 +3365,35 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private async updateQueuedInput(
     params: RuntimeRequest<"session.queue.update">["params"],
   ): Promise<JsonValue> {
-    const canonical = await this.requireTrustedSession(
-      params.workspacePath,
-      params.sessionId,
-    );
+    const canonical = await this.requireTrustedSession(params.workspacePath, params.sessionId);
     const queueId = requireText(params.queueId, "queueId");
     const input = normalizeRuntimeUserInput(params.input);
-    const queuedInput = await this.withSessionAdmission(
-      canonical,
-      params.sessionId,
-      async () => {
-        const steerKey = queueSteerKey(params.sessionId, queueId);
-        if (
-          this.acceptedQueueSteers.has(`${canonical}\0${steerKey}`) ||
-          (await this.conversationStateStore.getIdempotent(canonical, steerKey))
-        ) {
-          throw new RuntimeProtocolError(
-            RUNTIME_ERROR_CODES.CONFLICT,
-            "这条消息已引导当前运行，不能再编辑；请发送新的消息。",
-          );
-        }
-        const updated = await this.conversationStateStore.updateQueued(
-          canonical,
-          params.sessionId,
-          queueId,
-          input,
+    const queuedInput = await this.withSessionAdmission(canonical, params.sessionId, async () => {
+      const steerKey = queueSteerKey(params.sessionId, queueId);
+      if (
+        this.acceptedQueueSteers.has(`${canonical}\0${steerKey}`) ||
+        (await this.conversationStateStore.getIdempotent(canonical, steerKey))
+      ) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.CONFLICT,
+          "这条消息已引导当前运行，不能再编辑；请发送新的消息。",
         );
-        if (!updated) {
-          throw new RuntimeProtocolError(
-            RUNTIME_ERROR_CODES.CONFLICT,
-            "该队列输入已被消费或移除，请刷新队列。",
-          );
-        }
-        this.publishTranscriptUpdate(canonical, params.sessionId, "reload");
-        return updated;
-      },
-    );
+      }
+      const updated = await this.conversationStateStore.updateQueued(
+        canonical,
+        params.sessionId,
+        queueId,
+        input,
+      );
+      if (!updated) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.CONFLICT,
+          "该队列输入已被消费或移除，请刷新队列。",
+        );
+      }
+      this.publishTranscriptUpdate(canonical, params.sessionId, "reload");
+      return updated;
+    });
     return { queuedInput: queuedInputResult(queuedInput) };
   }
 
@@ -3404,7 +3408,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         requireText(params.queueId, "queueId"),
       );
       if (!deleted) {
-        throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.CONFLICT, "该队列输入已被消费或移除，请刷新队列。");
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.CONFLICT,
+          "该队列输入已被消费或移除，请刷新队列。",
+        );
       }
       this.publishTranscriptUpdate(canonical, params.sessionId, "reload");
       return true;
@@ -3423,7 +3430,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         params.queueIds,
       );
       if (!ordered) {
-        throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.CONFLICT, "队列已变化，请刷新后重新排序。");
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.CONFLICT,
+          "队列已变化，请刷新后重新排序。",
+        );
       }
       this.publishTranscriptUpdate(canonical, params.sessionId, "reload");
       return ordered;
@@ -3442,7 +3452,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         requireText(params.queueId, "queueId"),
       );
       if (!ordered) {
-        throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.CONFLICT, "该队列输入已被消费或移除，请刷新队列。");
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.CONFLICT,
+          "该队列输入已被消费或移除，请刷新队列。",
+        );
       }
       this.publishTranscriptUpdate(canonical, params.sessionId, "reload");
       return ordered;
@@ -3453,25 +3466,15 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private async steerQueuedInput(
     params: RuntimeRequest<"session.queue.steer">["params"],
   ): Promise<JsonValue> {
-    const canonical = await this.requireTrustedSession(
-      params.workspacePath,
-      params.sessionId,
-    );
+    const canonical = await this.requireTrustedSession(params.workspacePath, params.sessionId);
     const queueId = requireText(params.queueId, "queueId");
     const expectedRunId = requireText(params.expectedRunId, "expectedRunId");
     // Successful retries reuse the queue entry's receipt.
     const key = queueSteerKey(params.sessionId, queueId);
     const acceptedKey = `${canonical}\0${key}`;
-    const fingerprint = JSON.stringify([
-      params.sessionId,
-      queueId,
-      expectedRunId,
-    ]);
+    const fingerprint = JSON.stringify([params.sessionId, queueId, expectedRunId]);
     return this.withSessionAdmission(canonical, params.sessionId, async () => {
-      const persisted = await this.conversationStateStore.getIdempotent(
-        canonical,
-        key,
-      );
+      const persisted = await this.conversationStateStore.getIdempotent(canonical, key);
       const stored = persisted ?? this.acceptedQueueSteers.get(acceptedKey);
       if (stored) {
         if (stored.requestFingerprint !== fingerprint) {
@@ -3497,12 +3500,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         this.publishTranscriptUpdate(canonical, params.sessionId, "reload");
         return stored.result;
       }
-      const item = (
-        await this.conversationStateStore.listQueued(
-          canonical,
-          params.sessionId,
-        )
-      ).find((candidate) => candidate.queueId === queueId);
+      const item = (await this.conversationStateStore.listQueued(canonical, params.sessionId)).find(
+        (candidate) => candidate.queueId === queueId,
+      );
       if (!item) {
         throw new RuntimeProtocolError(
           RUNTIME_ERROR_CODES.CONFLICT,
@@ -3520,14 +3520,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           "引导仅支持普通文本；包含附件、技能或子任务的消息需继续排队。",
         );
       }
-      const activeRun = await this.findActiveSessionRun(
-        canonical,
-        params.sessionId,
-      );
-      if (
-        activeRun?.["runId"] !== expectedRunId ||
-        activeRun["status"] === "cancelling"
-      ) {
+      const activeRun = await this.findActiveSessionRun(canonical, params.sessionId);
+      if (activeRun?.["runId"] !== expectedRunId || activeRun["status"] === "cancelling") {
         throw new RuntimeProtocolError(
           RUNTIME_ERROR_CODES.CONFLICT,
           "目标运行已结束或变化，消息仍保留在队列中。",
@@ -3543,14 +3537,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           }),
         );
       } catch (error) {
-        const current = await this.findActiveSessionRun(
-          canonical,
-          params.sessionId,
-        );
-        if (
-          current?.["runId"] !== expectedRunId ||
-          current["status"] === "cancelling"
-        ) {
+        const current = await this.findActiveSessionRun(canonical, params.sessionId);
+        if (current?.["runId"] !== expectedRunId || current["status"] === "cancelling") {
           throw new RuntimeProtocolError(
             RUNTIME_ERROR_CODES.CONFLICT,
             "目标运行已结束，消息仍保留在队列中。",
@@ -3567,12 +3555,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       });
       // Persist the receipt before removing the input, so a lost response or a
       // failed deletion can be recovered without re-delivering the steer.
-      await this.conversationStateStore.rememberIdempotent(
-        canonical,
-        key,
-        fingerprint,
-        result,
-      );
+      await this.conversationStateStore.rememberIdempotent(canonical, key, fingerprint, result);
       await this.conversationStateStore.removeQueuedForSession(
         canonical,
         params.sessionId,
@@ -5647,7 +5630,10 @@ function queuedInputResult(value: DesktopQueuedInput): RuntimeQueuedInput {
   };
 }
 
-function runtimeInputForRevisedMessage(message: Message | undefined, text: string): RuntimeUserInput {
+function runtimeInputForRevisedMessage(
+  message: Message | undefined,
+  text: string,
+): RuntimeUserInput {
   if (!message) return normalizeRuntimeUserInput({ kind: "text", text });
   const providerData = message.providerData;
   const skills = Array.isArray(providerData?.["skills"])
@@ -5657,9 +5643,7 @@ function runtimeInputForRevisedMessage(message: Message | undefined, text: strin
           {
             name: value["name"],
             ...(typeof value["sourceId"] === "string" ? { sourceId: value["sourceId"] } : {}),
-            ...(typeof value["sourcePath"] === "string"
-              ? { sourcePath: value["sourcePath"] }
-              : {}),
+            ...(typeof value["sourcePath"] === "string" ? { sourcePath: value["sourcePath"] } : {}),
           },
         ];
       })

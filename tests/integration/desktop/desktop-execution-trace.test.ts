@@ -122,7 +122,7 @@ test("execution window refresh keeps page depth and renders causal steps with se
   assert.match(html, /文件不存在/u);
   assert.match(html, /内容已截断/u);
   assert.match(html, /上下文读取失败：暂时不可用/u);
-  assert.match(html, /尚未生成上下文快照/u);
+  assert.match(html, /有效历史读取失败，请刷新重试/u);
   assert.doesNotMatch(html, /<dt>压缩<\/dt><dd>0 次/u);
 });
 

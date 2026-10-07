@@ -1,12 +1,26 @@
 import type { RuntimeSessionContextSnapshot } from "@pico/protocol";
 
-export function CurrentModelHistory({ context }: { context?: RuntimeSessionContextSnapshot }) {
+export function CurrentModelHistory({
+  context,
+  loading,
+  error,
+}: {
+  context?: RuntimeSessionContextSnapshot;
+  loading?: boolean;
+  error?: string;
+}) {
   const history = context?.modelHistory;
   return (
-    <section className="inspector-history" aria-label="当前模型历史">
-      <h3>当前模型历史</h3>
+    <section className="inspector-history" aria-label="有效历史 · 估算" aria-busy={loading}>
+      <h3>有效历史 · 估算</h3>
       {!history ? (
-        <p className="inspector-overview__note">尚未生成上下文快照。</p>
+        <p className="inspector-overview__note" role="status">
+          {loading
+            ? "正在加载有效历史…"
+            : error
+              ? "有效历史读取失败，请刷新重试。"
+              : "暂无有效历史记录。"}
+        </p>
       ) : (
         <>
           <dl className="inspector-history__metrics">
@@ -23,7 +37,13 @@ export function CurrentModelHistory({ context }: { context?: RuntimeSessionConte
               <dd>{history.compactedCount.toLocaleString("zh-CN")}</dd>
             </div>
           </dl>
-          <p className="inspector-overview__note">当前历史估算，与最近请求快照独立。</p>
+          <p className="inspector-overview__note">
+            仅估算当前保留消息，不含系统指令、工具定义及协议开销；与最近请求快照独立。
+          </p>
+          <p className="inspector-overview__note" role="status">
+            {loading ? "正在更新 · " : error ? "更新失败，显示上次记录 · " : "读取时间 "}
+            {new Date(context!.generatedAt).toLocaleString("zh-CN")}
+          </p>
           <details>
             <summary>历史投影详情</summary>
             <p className="inspector-overview__note">
@@ -33,9 +53,6 @@ export function CurrentModelHistory({ context }: { context?: RuntimeSessionConte
             <p className="inspector-overview__note">
               Context v{context!.version} · 读取水位 {history.throughSequence} · 算法{" "}
               {history.estimationAlgorithm} · 投影 {history.projection}
-            </p>
-            <p className="inspector-overview__note">
-              快照时间 {new Date(context!.generatedAt).toLocaleString("zh-CN")}
             </p>
             {history.latestCompaction ? (
               <>

@@ -5,6 +5,242 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { generateText, jsonSchema, tool } from "ai";
 import { fromAiSdkContent, toAiSdkMessages } from "@pico/pico-host/provider/ai-sdk-messages";
 import type { Message } from "@pico/core";
+import { projectMediaTextForModel } from "@pico/core/media";
+import { estimateMessagesTokens, MATERIALIZED_IMAGE_TOKENS } from "@pico/runtime/context-budget";
+
+test("canonical native replay contributes history tokens once and invalidated replay falls back", () => {
+  const query = { query: "查询内容".repeat(300) };
+  const nativeResult = "搜索结果".repeat(400);
+  const executedResult = { found: "local result".repeat(100) };
+  const text = "Answer";
+  const reasoning = "Thinking";
+  const localInput = { path: "a.ts" };
+  const image: Message = {
+    role: "user",
+    content: "",
+    images: [{ type: "image_base64", mimeType: "image/png", data: "a".repeat(100000) }],
+  };
+  const chars =
+    text.length +
+    reasoning.length +
+    "inspect".length +
+    JSON.stringify(localInput).length +
+    "web_search".length * 2 +
+    JSON.stringify(query).length +
+    nativeResult.length +
+    "execute".length * 2 +
+    2 +
+    JSON.stringify(executedResult).length;
+  const message = fromAiSdkContent(
+    [
+      { type: "text", text, providerMetadata: { signature: "opaque".repeat(10000) } },
+      { type: "reasoning", text: reasoning },
+      { type: "tool-call", toolCallId: "local", toolName: "inspect", input: localInput },
+      {
+        type: "tool-call",
+        toolCallId: "native",
+        toolName: "web_search",
+        input: query,
+        providerExecuted: true,
+      },
+      {
+        type: "tool-result",
+        toolCallId: "native",
+        toolName: "web_search",
+        output: nativeResult,
+        providerExecuted: true,
+      },
+      { type: "tool-call", toolCallId: "executed", toolName: "execute", input: {} },
+      { type: "tool-result", toolCallId: "executed", toolName: "execute", output: executedResult },
+    ],
+    "claude",
+  );
+  const replay = toAiSdkMessages([image, message], "claude");
+  assert.deepEqual(
+    replay.map((item) => item.role),
+    ["user", "assistant", "tool"],
+  );
+  assert.ok(JSON.stringify(replay).includes(nativeResult));
+  assert.equal(
+    estimateMessagesTokens([image, message], "claude"),
+    Math.ceil(chars / 4) + MATERIALIZED_IMAGE_TOKENS,
+  );
+  const nativeOnly = fromAiSdkContent(
+    [
+      { type: "text", text },
+      {
+        type: "tool-call",
+        toolCallId: "search",
+        toolName: "web_search",
+        input: query,
+        providerExecuted: true,
+      },
+      {
+        type: "tool-result",
+        toolCallId: "search",
+        toolName: "web_search",
+        output: nativeResult.repeat(100),
+        providerExecuted: true,
+      },
+    ],
+    "claude",
+  );
+  for (const protocol of ["openai", "responses"] as const) {
+    assert.ok(!JSON.stringify(toAiSdkMessages([nativeOnly], protocol)).includes(nativeResult));
+    assert.equal(estimateMessagesTokens([nativeOnly], protocol), Math.ceil(text.length / 4));
+  }
+  assert.equal(estimateMessagesTokens([nativeOnly]), Math.ceil(text.length / 4));
+  message.content = "Edited";
+  assert.ok(!JSON.stringify(toAiSdkMessages([message], "claude")).includes(nativeResult));
+  assert.equal(
+    estimateMessagesTokens([message], "claude"),
+    Math.ceil((message.content.length + "inspect".length + JSON.stringify(localInput).length) / 4),
+  );
+  const action = { type: "search", query: query.query };
+  const responses = fromAiSdkContent(
+    [
+      {
+        type: "tool-call",
+        toolCallId: "search",
+        toolName: "web_search",
+        input: {},
+        providerExecuted: true,
+      },
+      {
+        type: "tool-result",
+        toolCallId: "search",
+        toolName: "web_search",
+        output: nativeResult,
+        providerExecuted: true,
+      },
+    ],
+    "responses",
+    [{ type: "web_search_call", id: "search", status: "completed", action }],
+  );
+  const anchored = toAiSdkMessages([responses], "responses", { responsesWebSearchAnchors: true });
+  assert.ok(!JSON.stringify(anchored).includes(nativeResult));
+  assert.equal(
+    estimateMessagesTokens([responses], "responses"),
+    Math.ceil(("web_search".length + JSON.stringify(action).length) / 4),
+  );
+});
+
+test("history estimation matches SDK replay for media inside text, reasoning and tool JSON", async () => {
+  const data = `data:image/png;base64,${"A".repeat(40000)}`;
+  const input = { path: "image.html", content: `<img src="${data}">` };
+  const text = `Answer ![image](${data})`;
+  const reasoning = `Remember ${data}`;
+  const output = { html: data };
+  const message = fromAiSdkContent(
+    [
+      { type: "text", text },
+      { type: "tool-call", toolCallId: "write", toolName: "write_file", input },
+      { type: "tool-call", toolCallId: "executed", toolName: "inspect", input: {} },
+      { type: "tool-result", toolCallId: "executed", toolName: "inspect", output },
+    ],
+    "responses",
+  );
+  const chars =
+    projectMediaTextForModel(text).length +
+    "write_file".length +
+    JSON.stringify(input).length +
+    "inspect".length * 2 +
+    JSON.stringify({}).length +
+    JSON.stringify(output).length;
+  assert.equal(estimateMessagesTokens([message], "responses"), Math.ceil(chars / 4));
+  const signed = fromAiSdkContent(
+    [
+      {
+        type: "reasoning",
+        text: reasoning,
+        providerMetadata: { anthropic: { signature: "signed" } },
+      },
+    ],
+    "claude",
+  );
+  assert.equal(estimateMessagesTokens([signed], "claude"), Math.ceil(reasoning.length / 4));
+  assert.ok(JSON.stringify(toAiSdkMessages([signed], "claude")).includes(data));
+  assert.equal(
+    estimateMessagesTokens([{ ...signed, content: "Edited" }], "claude"),
+    2,
+    "Claude drops unsigned fallback reasoning",
+  );
+  let claudeRequest: Record<string, unknown> | undefined;
+  const anthropic = createAnthropic({
+    apiKey: "test-key",
+    fetch: async (_input, init) => {
+      claudeRequest = JSON.parse(String(init?.body));
+      return Response.json({
+        id: "msg_media",
+        type: "message",
+        role: "assistant",
+        model: "claude-sonnet-4-5",
+        content: [{ type: "text", text: "Done." }],
+        stop_reason: "end_turn",
+        stop_sequence: null,
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+    },
+  });
+  await generateText({
+    model: anthropic("claude-sonnet-4-5"),
+    messages: toAiSdkMessages([{ role: "user", content: "Continue" }, signed], "claude"),
+    maxRetries: 0,
+  });
+  const claudeMessages = claudeRequest!.messages as { content: Record<string, unknown>[] }[];
+  assert.equal(
+    claudeMessages[1]!.content[0]!.thinking,
+    reasoning,
+    "SDK sends signed reasoning without media projection",
+  );
+  let request: Record<string, unknown> | undefined;
+  const openai = createOpenAI({
+    apiKey: "test-key",
+    fetch: async (_input, init) => {
+      request = JSON.parse(String(init?.body));
+      return Response.json({
+        id: "resp_media",
+        object: "response",
+        created_at: 1,
+        model: "gpt-5",
+        status: "completed",
+        output: [
+          {
+            type: "message",
+            id: "msg",
+            role: "assistant",
+            status: "completed",
+            content: [{ type: "output_text", text: "Done.", annotations: [] }],
+          },
+        ],
+        usage: {
+          input_tokens: 1,
+          output_tokens: 1,
+          total_tokens: 2,
+          input_tokens_details: { cached_tokens: 0 },
+          output_tokens_details: { reasoning_tokens: 0 },
+        },
+      });
+    },
+  });
+  await generateText({
+    model: openai.responses("gpt-5"),
+    messages: toAiSdkMessages(
+      [message, { role: "user", toolCallId: "write", content: "written" }],
+      "responses",
+    ),
+    providerOptions: { openai: { store: false } },
+    maxRetries: 0,
+  });
+  const wire = request!.input as Record<string, unknown>[];
+  const call = wire.find((part) => part.type === "function_call" && part.name === "write_file")!;
+  assert.equal(
+    call.arguments,
+    JSON.stringify(input),
+    "SDK sends tool JSON without media projection",
+  );
+  assert.ok(JSON.stringify(wire).includes(data));
+});
 
 test("AI SDK clients round-trip signed thinking, Responses metadata, images and Pico tool chronology", async () => {
   const mediaReply =

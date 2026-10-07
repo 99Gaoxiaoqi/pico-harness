@@ -1,6 +1,7 @@
 import type { RuntimeExecutionSummary } from "@pico/protocol";
+import { useState } from "react";
 
-type Slice = { label: string; value?: number; color: string };
+type Slice = { id: string; label: string; value?: number; color: string };
 const valid = (value?: number): value is number =>
   value !== undefined && Number.isFinite(value) && value >= 0;
 const tokens = (value?: number) => (valid(value) ? value.toLocaleString("zh-CN") : "未知");
@@ -22,8 +23,15 @@ function UsageRing({
   unit: string;
   format: (value?: number) => string;
 }) {
+  const [hovered, setHovered] = useState<string | null>(null);
+  const [focused, setFocused] = useState<string | null>(null);
   const known = slices.every((slice) => valid(slice.value));
   const total = known ? slices.reduce((sum, slice) => sum + slice.value!, 0) : undefined;
+  const active = slices.find((slice) => slice.id === (hovered ?? focused));
+  const shareText = (slice: Slice) =>
+    total !== undefined && total > 0 && valid(slice.value)
+      ? `${((slice.value / total) * 100).toFixed(1)}%`
+      : "占比未知";
   let offset = 0;
   return (
     <div className="inspector-overview__chart" aria-label={label}>
@@ -45,8 +53,12 @@ function UsageRing({
               offset += share;
               return share > 0 ? (
                 <circle
-                  key={slice.label}
+                  key={slice.id}
                   data-segment={slice.label}
+                  data-active={active?.id === slice.id}
+                  data-dimmed={active !== undefined && active.id !== slice.id}
+                  onMouseEnter={() => setHovered(slice.id)}
+                  onMouseLeave={() => setHovered(null)}
                   cx="60"
                   cy="60"
                   r="49"
@@ -61,19 +73,34 @@ function UsageRing({
               ) : null;
             })}
         </svg>
-        <div className="inspector-overview__ring-label">
-          <strong>{format(total)}</strong>
-          <span>{unit}</span>
+        <div className="inspector-overview__ring-label" aria-live="polite">
+          <strong>{format(active ? active.value : total)}</strong>
+          <span>{active ? `${active.label} · ${shareText(active)}` : unit}</span>
         </div>
       </div>
       <dl className="inspector-overview__legend">
         {slices.map((slice) => (
-          <div key={slice.label}>
+          <div
+            key={slice.id}
+            data-slice={slice.id}
+            tabIndex={0}
+            role="group"
+            aria-label={`${slice.label}：${format(slice.value)}，${shareText(slice)}`}
+            data-active={active?.id === slice.id}
+            data-dimmed={active !== undefined && active.id !== slice.id}
+            onMouseEnter={() => setHovered(slice.id)}
+            onMouseLeave={() => setHovered(null)}
+            onFocus={() => setFocused(slice.id)}
+            onBlur={() => setFocused(null)}
+          >
             <dt>
               <i aria-hidden="true" style={{ background: `var(${slice.color})` }} />
               {slice.label}
             </dt>
-            <dd>{format(slice.value)}</dd>
+            <dd>
+              {format(slice.value)}
+              <span className="inspector-overview__share"> · {shareText(slice)}</span>
+            </dd>
           </div>
         ))}
       </dl>
@@ -89,17 +116,33 @@ export function ExecutionUsageSummary({ summary }: { summary: RuntimeExecutionSu
     summary.cachedInputTokens <= summary.inputTokens;
   const tokenSlices: Slice[] = cacheComplete
     ? [
-        { label: "缓存输入", value: summary.cachedInputTokens, color: "--inspector-purple" },
         {
+          id: "cache",
+          label: "缓存输入",
+          value: summary.cachedInputTokens,
+          color: "--inspector-purple",
+        },
+        {
+          id: "input",
           label: "非缓存输入",
           value: summary.inputTokens! - summary.cachedInputTokens!,
           color: "--inspector-teal",
         },
-        { label: "输出（含推理）", value: summary.outputTokens, color: "--inspector-blue" },
+        {
+          id: "output",
+          label: "输出（含推理）",
+          value: summary.outputTokens,
+          color: "--inspector-blue",
+        },
       ]
     : [
-        { label: "输入", value: summary.inputTokens, color: "--inspector-teal" },
-        { label: "输出（含推理）", value: summary.outputTokens, color: "--inspector-blue" },
+        { id: "input", label: "输入", value: summary.inputTokens, color: "--inspector-teal" },
+        {
+          id: "output",
+          label: "输出（含推理）",
+          value: summary.outputTokens,
+          color: "--inspector-blue",
+        },
       ];
   const cacheStatus =
     summary.cacheCoverage === "complete"
@@ -109,7 +152,34 @@ export function ExecutionUsageSummary({ summary }: { summary: RuntimeExecutionSu
         : "未记录";
   return (
     <section className="inspector-overview" aria-label="会话用量">
-      <h3>会话累计</h3>
+      <h3>会话累计用量</h3>
+      <p className="inspector-overview__note">
+        历次请求的已记录用量；同一段历史多次发送，会多次计入累计输入。
+      </p>
+      {summary.provenance && (
+        <>
+          <p className="inspector-overview__note">
+            数据来源：本会话实际请求记录，包含重试与失败请求中已上报的用量。
+          </p>
+          <p className="inspector-overview__note">
+            输入/输出完整上报 {summary.provenance.reportedAttempts} 次 · 部分上报{" "}
+            {summary.provenance.partialAttempts} 次 · 结束后未上报{" "}
+            {summary.provenance.missingAttempts} 次 · 记录待结算{" "}
+            {summary.provenance.pendingAttempts} 次。
+          </p>
+          {summary.provenance.partialCoverageCalls > 0 && (
+            <p className="inspector-overview__note">
+              {summary.provenance.partialCoverageCalls}{" "}
+              次调用的请求记录不完整，累计值可能缺少部分请求。
+            </p>
+          )}
+          {summary.provenance.runtimeOnlyCalls > 0 && (
+            <p className="inspector-overview__note">
+              另有 {summary.provenance.runtimeOnlyCalls} 次模型调用仅有执行记录，未纳入累计。
+            </p>
+          )}
+        </>
+      )}
       <UsageRing label="会话 Token 组成" slices={tokenSlices} unit="Token" format={tokens} />
       {!cacheComplete && (
         <p className="inspector-overview__note">
@@ -127,11 +197,13 @@ export function ExecutionUsageSummary({ summary }: { summary: RuntimeExecutionSu
         label="累计记录耗时组成"
         slices={[
           {
+            id: "model",
             label: `模型 · ${summary.modelCalls} 次`,
             value: summary.latencyMs,
             color: "--inspector-blue",
           },
           {
+            id: "tool",
             label: `工具 · ${tokens(summary.toolCalls)} 次`,
             value: summary.toolDurationMs,
             color: "--inspector-teal",
