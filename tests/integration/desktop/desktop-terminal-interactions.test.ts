@@ -215,3 +215,36 @@ test("桌面 preload 校验终端推送并释放原生键盘及事件监听", ()
   assert.equal(ipc.listenerCount(DESKTOP_IPC_CHANNELS.terminalFrame), 0);
   assert.equal(ipc.listenerCount(DESKTOP_IPC_CHANNELS.terminalDisconnected), 0);
 });
+
+test("桌面终端释放视图关闭后迟到的 attach 响应", { timeout: 45_000 }, async () => {
+  const result = await runRendererBrowserScenario(`
+    import React from 'react';
+    import { createRoot } from 'react-dom/client';
+    import { TerminalPanelController } from './apps/desktop/src/renderer/workbar-panels/TerminalPanelController.tsx';
+    import './apps/desktop/src/renderer/workbar-panels/TerminalOutputView.css';
+    let complete, attachParams;
+    const detached=[];
+    const terminal={terminalId:'pending',sessionId:'session',title:'Shell',status:'running',sequence:1,capability:'pty',resizeSupported:true};
+    window.pico={
+      terminalFrames:{subscribe(){return{dispose(){}}},setFocused(){},clipboard(){}},
+      runtime:{
+        'runtime.ping':async()=>({ok:true,value:{capabilities:['terminal-stream-v1']}}),
+        'terminal.list':async()=>({ok:true,value:{terminals:[terminal]}}),
+        'terminal.attach':params=>{attachParams=params;return new Promise(resolve=>{complete=resolve;});},
+        'terminal.detach':async params=>{detached.push(params);return{ok:true,value:{}};},
+      },
+    };
+    const root=createRoot(document.getElementById('app'));
+    root.render(<TerminalPanelController workspacePath='/workspace' sessionId='session' instanceId='pending-attach' active={true} readOnly={true}/>);
+    (async()=>{
+      for(let i=0;i<100&&!complete;i++)await new Promise(resolve=>setTimeout(resolve,10));
+      if(!complete)throw new Error('attach not started');
+      root.unmount();
+      complete({ok:true,value:{terminal,resourceEpoch:'late-epoch',sequence:1,snapshot:'prompt',truncated:false}});
+      for(let i=0;i<100&&!detached.length;i++)await new Promise(resolve=>setTimeout(resolve,10));
+      if(detached.length!==1||detached[0].streamId!==attachParams.streamId||detached[0].resourceEpoch!=='late-epoch')throw new Error('late attach was not released: '+JSON.stringify(detached));
+      await fetch('/result',{method:'POST',body:'PASS'});
+    })().catch(async error=>fetch('/result',{method:'POST',body:'FAIL: '+error.stack}));
+  `);
+  assert.equal(result, "PASS", result);
+});

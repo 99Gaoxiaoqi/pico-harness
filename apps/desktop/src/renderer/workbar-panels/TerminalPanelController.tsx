@@ -279,6 +279,9 @@ export function TerminalPanelController({
       const generation = connectionGenerationRef.current;
       const job = (async () => {
         await ensureTerminalStream();
+        if (disposedRef.current || generation !== connectionGenerationRef.current) {
+          throw new Error("终端连接已变化，请重新连接。");
+        }
         for (let attempt = 0; attempt < 2; attempt++) {
           overflowedRef.current.delete(terminalId);
           const value = await invokeWorkbarRuntime(runtime, "terminal.attach", {
@@ -288,6 +291,12 @@ export function TerminalPanelController({
             maxBytes: TERMINAL_ATTACH_BYTES,
           });
           if (disposedRef.current || generation !== connectionGenerationRef.current) {
+            await invokeWorkbarRuntime(runtime, "terminal.detach", {
+              ...scope,
+              streamId,
+              terminalId,
+              resourceEpoch: value.resourceEpoch,
+            }).catch(() => undefined);
             throw new Error("终端连接已变化，请重新连接。");
           }
           const attachment = applyAttachment(value);
@@ -378,6 +387,7 @@ export function TerminalPanelController({
     );
     return () => {
       disposedRef.current = true;
+      connectionGenerationRef.current += 1;
       subscription.dispose();
       for (const queue of inputQueuesRef.current.values()) queue.dispose();
       inputQueuesRef.current.clear();
