@@ -9,35 +9,100 @@
  * 反引号转义、重定向、注释符一律 requires-approval——宁可多审批,不可错判。
  */
 import { classifyGitCommand } from "./bash-safety.js";
-import type { HardlineBashReasonKind } from "./bash-hardline.js";
+import type { BashHardlineAnalysis, HardlineBashReasonKind } from "./bash-hardline.js";
 
 /** Windows `full-access` 仍保留不可审批绕过的确定性红线；这里只拦截高置信破坏语义。 */
 export function classifyPowerShellHardlineCommand(
   command: string,
 ): HardlineBashReasonKind | undefined {
+  const analysis = analyzePowerShellHardlineCommand(command);
+  return analysis.kind === "deny" ? analysis.reasonKind : undefined;
+}
+
+export function analyzePowerShellHardlineCommand(command: string): BashHardlineAnalysis {
+  const reasonKind = powerShellHardlineReason(command);
+  return reasonKind === undefined
+    ? { kind: "no_match" }
+    : {
+        kind:
+          reasonKind === "opaque_shell" || reasonKind === "unknown_hardline" ? "unknown" : "deny",
+        reasonKind,
+      };
+}
+
+function powerShellHardlineReason(command: string): HardlineBashReasonKind | undefined {
   const normalized = command.trim();
   if (!normalized) return "unknown_hardline";
-  if (/\bgit(?:\.exe)?\s+push\b[^\r\n;|]*(?:--force(?:-with-lease)?|-f)\b/iu.test(normalized)) {
+  const statements = parseConservativeStatements(normalized, true);
+  let unknownReason: HardlineBashReasonKind | undefined =
+    statements.kind === "unsupported" ? "unknown_hardline" : undefined;
+  for (const segment of statements.pipelines) {
+    // PowerShell 的 quoted head 是字符串表达式；调用运算符仍属于 unsupported。
+    if (segment.quotedExecutable) {
+      unknownReason ??= "unknown_hardline";
+      continue;
+    }
+    const reason = powerShellSegmentHardlineReason(segment.tokens);
+    if (reason === "opaque_shell") unknownReason = reason;
+    else if (reason !== undefined) return reason;
+  }
+  return unknownReason;
+}
+
+function powerShellSegmentHardlineReason(
+  tokens: readonly string[],
+): HardlineBashReasonKind | undefined {
+  const executable = tokens[0]
+    ?.split(/[\\/]/u)
+    .at(-1)
+    ?.toLowerCase()
+    .replace(/\.exe$/u, "");
+  const args = tokens.slice(1);
+  if (
+    executable === "git" &&
+    args[0]?.toLowerCase() === "push" &&
+    args.slice(1).some((arg) => /^(?:--force(?:-with-lease(?:=.*)?)?|-f)$/iu.test(arg))
+  ) {
     return "destructive_git";
   }
   if (
-    /\b(?:format-volume|clear-disk|initialize-disk|remove-partition|stop-computer|restart-computer|remove-localuser|disable-localuser|bcdedit|diskpart)(?:\.exe)?\b/iu.test(
-      normalized,
-    ) ||
-    /\bstop-process\b[^\r\n;|]*(?:\bwininit\b|\bcsrss\b|\blsass\b|\bservices\b)/iu.test(normalized)
+    executable !== undefined &&
+    /^(?:format-volume|clear-disk|initialize-disk|remove-partition|stop-computer|restart-computer|remove-localuser|disable-localuser|bcdedit|diskpart)$/u.test(
+      executable,
+    )
   ) {
     return "destructive_system";
   }
   if (
-    /\b(?:remove-item|del|erase|rd|rmdir|rm)\b[^\r\n;|]*(?:(?:[a-z]:)?\\(?:windows|program files|users)(?:\\|\b)|[a-z]:\\(?:\s|$)|\/(?:\s|$))/iu.test(
-      normalized,
-    )
+    executable === "stop-process" &&
+    args.some((arg, index) => {
+      const name =
+        /^-name:(.*)$/iu.exec(arg)?.[1] ??
+        (arg.toLowerCase() === "-name" ? args[index + 1] : undefined);
+      return name !== undefined && /^(?:wininit|csrss|lsass|services)(?:\.exe)?$/iu.test(name);
+    })
+  ) {
+    return "destructive_system";
+  }
+  if (
+    executable !== undefined &&
+    /^(?:remove-item|del|erase|rd|rmdir|rm)$/u.test(executable) &&
+    args.some((arg) => {
+      const target = arg.replace(/^-(?:literalpath|path):/iu, "").replaceAll("/", "\\");
+      return (
+        arg === "/" ||
+        /^(?:[a-z]:)?\\(?:windows|program files|users)(?:\\|$|[?*])|^[a-z]:\\$/iu.test(target)
+      );
+    })
   ) {
     return "protected_destination";
   }
   if (
-    /\b(?:invoke-expression|iex|add-type)\b/iu.test(normalized) ||
-    /\b(?:powershell|pwsh)(?:\.exe)?\b[^\r\n;|]*(?:-encodedcommand|-enc\b)/iu.test(normalized)
+    executable === "invoke-expression" ||
+    executable === "iex" ||
+    executable === "add-type" ||
+    ((executable === "powershell" || executable === "pwsh") &&
+      args.some((arg) => /^-(?:encodedcommand|enc)(?::|$)/iu.test(arg)))
   ) {
     return "opaque_shell";
   }
@@ -56,40 +121,80 @@ export function classifyPowerShellCommand(command: string): PowerShellSafetyClas
     return { kind: "requires-approval", reason: "命令为空或无法确认执行内容" };
   }
   for (const segment of statements.pipelines) {
-    const decision = classifyPipelineSegment(segment);
+    const decision = classifyPipelineSegment(segment.tokens);
     if (decision.kind === "requires-approval") return decision;
   }
   return { kind: "read-only" };
 }
 
+interface ParsedPowerShellSegment {
+  readonly tokens: readonly string[];
+  readonly quotedExecutable: boolean;
+}
+
 type ParsedStatements =
-  | { readonly kind: "parsed"; readonly pipelines: readonly (readonly string[])[] }
-  | { readonly kind: "unsupported"; readonly reason: string };
+  | { readonly kind: "parsed"; readonly pipelines: readonly ParsedPowerShellSegment[] }
+  | {
+      readonly kind: "unsupported";
+      readonly reason: string;
+      readonly pipelines: readonly ParsedPowerShellSegment[];
+    };
 
 /**
  * 语句按 `;`/换行切分,语句内再按 `|` 切分管段(引号感知)。
  * 双引号内含 `$`(变量展开)同样拒绝——静态无法确认展开结果。
+ * Hardline 可保留已确认 argv 并在明确边界恢复；嵌套内容只跳过，不判定执行语义。
  */
-function parseConservativeStatements(command: string): ParsedStatements {
-  const pipelines: string[][] = [];
+function parseConservativeStatements(
+  command: string,
+  recoverUnsupported = false,
+): ParsedStatements {
+  const pipelines: ParsedPowerShellSegment[] = [];
   let tokens: string[] = [];
   let token = "";
   let tokenStarted = false;
+  let tokenQuoted = false;
+  let quotedExecutable = false;
   let quote: "single" | "double" | undefined;
+  let unsupportedReason: string | undefined;
+  let skipSegment = false;
+  let lineComment = false;
+  let blockCommentDepth = 0;
+  const nestedClosers: string[] = [];
+
+  const unsupported = (reason: string, canRecover = true): ParsedStatements | undefined => {
+    unsupportedReason ??= reason;
+    if (!recoverUnsupported || !canRecover) {
+      if (recoverUnsupported && tokens.length > 0) pipelines.push({ tokens, quotedExecutable });
+      return { kind: "unsupported", reason: unsupportedReason, pipelines };
+    }
+    // 未完成的 token 可能仍会展开/转义，不能把其静态前缀当成完整 argv。
+    token = "";
+    tokenStarted = false;
+    tokenQuoted = false;
+    skipSegment = true;
+    return undefined;
+  };
 
   const finishToken = (): void => {
     if (!tokenStarted) return;
+    if (tokens.length === 0) quotedExecutable = tokenQuoted;
     tokens.push(token);
     token = "";
     tokenStarted = false;
+    tokenQuoted = false;
   };
   const finishSegment = (): ParsedStatements | undefined => {
     finishToken();
     if (tokens.length === 0) {
-      return { kind: "unsupported", reason: "包含空命令或无法确认的 shell 运算符" };
+      const rejection = unsupported("包含空命令或无法确认的 shell 运算符");
+      if (rejection) return rejection;
+    } else {
+      pipelines.push({ tokens, quotedExecutable });
     }
-    pipelines.push(tokens);
     tokens = [];
+    quotedExecutable = false;
+    skipSegment = false;
     return undefined;
   };
 
@@ -97,64 +202,103 @@ function parseConservativeStatements(command: string): ParsedStatements {
     const char = command[index]!;
     const next = command[index + 1];
 
+    if (blockCommentDepth > 0) {
+      if (char === "<" && next === "#") {
+        blockCommentDepth++;
+        index++;
+      } else if (char === "#" && next === ">") {
+        blockCommentDepth--;
+        index++;
+      }
+      continue;
+    }
+    if (lineComment && char !== "\n") continue;
+    if (lineComment) lineComment = false;
+
     if (quote === "single") {
       if (char === "'") {
         // '' 是 PowerShell 单引号转义,继续留在引号内
         if (next === "'") {
-          token += "'";
+          if (!skipSegment) token += "'";
           index++;
           continue;
         }
         quote = undefined;
-        tokenStarted = true;
         continue;
       }
-      token += char;
-      tokenStarted = true;
+      if (!skipSegment) token += char;
       continue;
     }
 
     if (quote === "double") {
       if (char === '"') {
         quote = undefined;
-        tokenStarted = true;
         continue;
       }
       // 双引号内 $ 展开变量、反引号转义,均无法静态确认
       if (char === "$" || char === "`") {
-        return { kind: "unsupported", reason: "双引号内包含变量展开或转义" };
+        // 插值子表达式可含嵌套引号，现有分词器无法确认其结束位置。
+        const rejection = unsupported(
+          "双引号内包含变量展开或转义",
+          !(char === "$" && next === "("),
+        );
+        if (rejection) return rejection;
+        if (char === "`") index++;
+        continue;
       }
-      token += char;
-      tokenStarted = true;
+      if (!skipSegment) token += char;
       continue;
     }
 
     if (char === "'") {
       quote = "single";
-      tokenStarted = true;
+      if (!skipSegment) {
+        tokenStarted = true;
+        tokenQuoted = true;
+      }
       continue;
     }
     if (char === '"') {
       quote = "double";
-      tokenStarted = true;
+      if (!skipSegment) {
+        tokenStarted = true;
+        tokenQuoted = true;
+      }
       continue;
     }
     if (isUnsupportedShellCharacter(char)) {
-      return {
-        kind: "unsupported",
-        reason: UNSUPPORTED_CHARACTER_REASONS[char] ?? "包含无法静态确认的 shell 语法",
-      };
+      if ((char === ">" || char === "<") && next !== "#") finishToken();
+      const rejection = unsupported(
+        UNSUPPORTED_CHARACTER_REASONS[char] ?? "包含无法静态确认的 shell 语法",
+        // here-string 的引号不遵循普通字符串规则，不从其内部恢复扫描。
+        !(char === "@" && (next === "'" || next === '"')),
+      );
+      if (rejection) return rejection;
+      if (char === "#") lineComment = true;
+      if (char === "<" && next === "#") {
+        blockCommentDepth++;
+        index++;
+      }
+      if (char === "`") index++;
+      if (char === "(" || char === "{") nestedClosers.push(char === "(" ? ")" : "}");
+      if (char === nestedClosers.at(-1)) nestedClosers.pop();
+      continue;
     }
     if (char === "|" && next === "|") {
       // pwsh 7 管道链 || / &&(条件执行),保守拒绝
-      return { kind: "unsupported", reason: "包含管道链运算符" };
+      const rejection = unsupported("包含管道链运算符");
+      if (rejection) return rejection;
+      index++;
+      continue;
     }
     if (char === ";" || char === "\n") {
+      if (nestedClosers.length > 0) continue;
       const rejection = finishSegment();
       if (rejection) return rejection;
       continue;
     }
     if (char === "|") {
+      if (nestedClosers.length > 0) continue;
       const rejection = finishSegment();
       if (rejection) return rejection;
       continue;
@@ -163,18 +307,20 @@ function parseConservativeStatements(command: string): ParsedStatements {
       finishToken();
       continue;
     }
-    token += char;
-    tokenStarted = true;
+    if (!skipSegment) {
+      token += char;
+      tokenStarted = true;
+    }
   }
 
   if (quote !== undefined) {
-    return { kind: "unsupported", reason: "包含未闭合的引号" };
+    const rejection = unsupported("包含未闭合的引号");
+    if (rejection) return rejection;
   }
   finishToken();
-  if (tokens.length > 0) pipelines.push(tokens);
-  if (pipelines.some((segment) => segment.length === 0)) {
-    return { kind: "unsupported", reason: "包含空命令或无法确认的 shell 运算符" };
-  }
+  if (tokens.length > 0) pipelines.push({ tokens, quotedExecutable });
+  if (unsupportedReason !== undefined)
+    return { kind: "unsupported", reason: unsupportedReason, pipelines };
   return { kind: "parsed", pipelines };
 }
 

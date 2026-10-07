@@ -3,13 +3,22 @@ import { spawnSync } from "node:child_process";
 import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
-import { classifyHardlineBashCommand, isHardlineBashCommand } from "@pico/runtime/bash-hardline";
+import { before, test } from "node:test";
+import {
+  analyzeHardlineBashCommand,
+  classifyHardlineBashCommand,
+  initializeBashParser,
+  isHardlineBashCommand,
+} from "@pico/runtime/bash-hardline";
+import { analyzeHardlineCommand } from "@pico/runtime/approval-policy";
 import {
   classifyHardlineCommand,
   isHardlineCommand,
 } from "@pico/pico-host/global-approval-manager";
-import { buildForegroundSafetyMiddleware } from "@pico/pico-host/agent-runtime";
+import {
+  buildApprovalMiddleware,
+  buildForegroundSafetyMiddleware,
+} from "@pico/pico-host/agent-runtime";
 import { evaluateWorkspaceToolCall } from "@pico/pico-host/workspace-sandbox";
 import { WorkspaceRoots } from "@pico/pico-host/workspace-roots";
 import {
@@ -17,6 +26,10 @@ import {
   sanitizeShellProcessEnvironment,
   shellCommandArgs,
 } from "@pico/runtime/host-shell";
+
+before(async () => {
+  if (process.platform !== "win32") await initializeBashParser();
+});
 
 test("host shell argv 按方言生成且拒绝不支持的 shell", () => {
   const command = "printf safe";
@@ -52,31 +65,140 @@ test("host shell argv 按方言生成且拒绝不支持的 shell", () => {
 // 以下 bash hardline 语义回归依赖宿主为 bash 方言,仅在 POSIX 运行;
 // Windows(PowerShell 宿主)的对应行为由 tests/integration/windows/full-access-shell-hardline.test.ts 覆盖。
 test(
-  "hardline reasonKind 使用固定脱敏分类且不改变拒绝语义",
+  "hardline reasonKind 保留脱敏分类，兼容投影只返回明确 deny",
   { skip: process.platform === "win32" },
   () => {
     const cases = [
-      ["source ./setup.sh", "source_or_dot"],
-      ["powershell -Command Get-ChildItem", "opaque_shell"],
-      ["$PICO_EXECUTABLE --version", "dynamic_executable"],
-      ["cp ./generated.txt /etc/pico", "protected_destination"],
-      ["printf blocked > /etc/pico", "protected_redirect"],
-      ["git push --force origin main", "destructive_git"],
-      ["shutdown now", "destructive_system"],
-      ["python -c 'import os; os.system(\"rm -rf /\")'", "unknown_hardline"],
+      ["source ./setup.sh", "source_or_dot", "unknown"],
+      ["powershell -Command Get-ChildItem", "opaque_shell", "unknown"],
+      ["$PICO_EXECUTABLE --version", "dynamic_executable", "unknown"],
+      ["cp ./generated.txt /etc/pico", "protected_destination", "deny"],
+      ["printf blocked > /etc/pico", "protected_redirect", "deny"],
+      ["git push --force origin main", "destructive_git", "deny"],
+      ["shutdown now", "destructive_system", "deny"],
+      ["python -c 'import os; os.system(\"rm -rf /\")'", "protected_destination", "deny"],
     ] as const;
 
-    for (const [command, reasonKind] of cases) {
-      assert.equal(classifyHardlineBashCommand(command, process.cwd()), reasonKind, command);
-      assert.equal(isHardlineBashCommand(command, process.cwd()), true, command);
+    for (const [command, reasonKind, kind] of cases) {
+      assert.deepEqual(
+        analyzeHardlineBashCommand(command, process.cwd()),
+        { kind, reasonKind },
+        command,
+      );
+      assert.equal(
+        classifyHardlineBashCommand(command, process.cwd()),
+        kind === "deny" ? reasonKind : undefined,
+        command,
+      );
+      assert.equal(isHardlineBashCommand(command, process.cwd()), kind === "deny", command);
       assert.equal(
         classifyHardlineCommand("bash", JSON.stringify({ command }), process.cwd()),
-        reasonKind,
+        kind === "deny" ? reasonKind : undefined,
         command,
       );
     }
     assert.equal(classifyHardlineBashCommand("printf safe", process.cwd()), undefined);
     assert.equal(isHardlineBashCommand("printf safe", process.cwd()), false);
+  },
+);
+
+test(
+  "Hardline 按 find 动作检查目标并允许只读循环和解释器打印普通关键词",
+  { skip: process.platform === "win32" },
+  async () => {
+    const workDir = process.cwd();
+    const roots = WorkspaceRoots.createSync(workDir);
+    const safety = buildForegroundSafetyMiddleware(workDir, { collaborationMode: "agent" }, roots);
+    const commands = [
+      `for p in packages/*/src apps/desktop/src; do echo "=== $p ==="; find "$p" -maxdepth 2 -type f | sort | sed -n '1,120p'; done`,
+      'p=packages/core/src; find "$p" -maxdepth 2 -type f',
+      'find -- "./$p" -type f',
+      'find "./$(echo src)" -type f',
+      'find "./$p" -name "$PATTERN" -print',
+      'sudo find "./$p" -type f -print',
+      "find /etc -name '-delete' -print",
+      "find /etc -exec printf '%s' rm \\;",
+      "find . -exec echo -fprint /etc/pico \\;",
+      'find "./$p" -fprint ./files.txt',
+      "find . -exec printf %s + -fprint /etc/pico \\;",
+      "find /etc -fprintf ./files.txt '%p\\n'",
+      "find /etc -fls ./files.txt",
+      `python -c 'print("shutdown reboot")'`,
+      `node -e 'console.log("shutdown reboot")'`,
+      `perl -e 'print "shutdown reboot"'`,
+      `ruby -e 'puts "shutdown reboot"'`,
+    ];
+    for (const command of commands) {
+      const call = toolCall(command);
+      assert.equal(classifyHardlineBashCommand(command, workDir), undefined, command);
+      assert.equal(isHardlineBashCommand(command, workDir), false, command);
+      assert.equal((await safety(call)).allowed, true, command);
+    }
+  },
+);
+
+test(
+  "Hardline 沿嵌套执行和目录上下文区分明确 deny 与 unknown",
+  { skip: process.platform === "win32" },
+  async () => {
+    const workDir = process.cwd();
+    const roots = WorkspaceRoots.createSync(workDir);
+    const safety = buildForegroundSafetyMiddleware(workDir, { collaborationMode: "agent" }, roots);
+    const cases = [
+      ['p=-fprint; find "$p" /etc/pico', "protected_destination"],
+      ['cd /etc; p=-delete; find "$p"', "protected_destination"],
+      ['p=./safe; p=-fprint; find "$p" /etc/pico', "protected_destination"],
+      ["find . -maxdepth 0 -exec mv ./safe + /etc \\;", "protected_destination"],
+      ["find -- /etc -delete", "protected_destination"],
+      ["find /etc -name '-delete' -delete", "protected_destination"],
+      ["find . -fprint /etc/pico", "protected_destination"],
+      ["find . -fprint0 /etc/pico", "protected_destination"],
+      ["find . -fprintf /etc/pico '%p'", "protected_destination"],
+      ["find . -fls /etc/pico", "protected_destination"],
+      ["find /etc -exec rm -f {} +", "protected_destination"],
+      ["find . -exec git push --force origin main \\;", "destructive_git"],
+      ["find . -exec shutdown now \\;", "destructive_system"],
+      ["cd /etc; printf blocked > ./pico", "protected_redirect"],
+      ["env -C / sh -c 'printf blocked > etc/pico'", "protected_redirect"],
+      [`python -c 'import os; os.system("rm -rf /")'`, "protected_destination"],
+      ["shutdown now", "destructive_system"],
+      ["reboot", "destructive_system"],
+    ] as const;
+    for (const [command, reasonKind] of cases) {
+      const call = toolCall(command);
+      assert.equal(classifyHardlineBashCommand(command, workDir), reasonKind, command);
+      assert.equal(isHardlineBashCommand(command, workDir), true, command);
+      assert.equal(classifyHardlineCommand("bash", call.arguments, workDir), reasonKind, command);
+      assert.equal((await safety(call)).allowed, false, command);
+      assert.equal(evaluateWorkspaceToolCall(call, workDir, roots).allowed, false, command);
+    }
+    assert.equal(classifyHardlineBashCommand("find -delete", "/"), "protected_destination");
+    const unknown = [
+      'find "./$p" -delete',
+      'find "$(echo -fprint)" /etc/pico',
+      'find "`echo -fprint`" /etc/pico',
+      'find "$p" /etc/pico; p=./safe',
+      'if false; then p=./safe; fi; find "$p" /etc/pico',
+      '(p=./safe); find "$p" /etc/pico',
+      'p=./safe; printf -v p %s -fprint; find "$p" /etc/pico',
+      'find /etc -exec echo {} "$END" -delete',
+      "find /etc -exec echo {} $ARGS",
+      "find -D $DEBUG_FLAGS .",
+      'find . -fprint "$OUTPUT"',
+      'find . -type f "$ACTION"',
+      "find $p -type f",
+      'find "$p" -name $PATTERN',
+      "find . -fprintf ./files.txt $FORMAT",
+      "find . -exec source ./setup.sh \\;",
+      "find . -exec env BASH_ENV=./evil bash -c 'printf safe' \\;",
+      "printf target | xargs rm",
+      "BASH_ENV=./evil bash -c 'printf safe'",
+    ];
+    for (const command of unknown) await assertUnknownPermitted(command, workDir);
+    assert.equal(
+      isHardlineBashCommand('for p in packages/*; do p=-delete; find "$p"; done', workDir),
+      false,
+    );
   },
 );
 
@@ -94,13 +216,6 @@ test(
         reasonKind: "protected_redirect",
         reason:
           "Hardline 高危命令不可审批绕过,系统直接拒绝。 请改用 write_file/edit_file 在工作区内写入，且不要通过 Bash 重定向写入受保护目标。",
-      },
-      {
-        command: "$PICO_DYNAMIC_INPUT_CANARY --version",
-        canary: "PICO_DYNAMIC_INPUT_CANARY",
-        reasonKind: "dynamic_executable",
-        reason:
-          "Hardline 高危命令不可审批绕过,系统直接拒绝。 请使用字面量可执行文件及字面量 argv 直接调用，且不要使用变量、eval 或间接 shell 启动。",
       },
       {
         command: "cp ./artifact /etc/PICO_DESTINATION_INPUT_CANARY",
@@ -126,13 +241,14 @@ test(
     const safeCall = toolCall("printf safe > ./pico-safe-output");
     assert.equal(classifyHardlineCommand("bash", safeCall.arguments, workDir), undefined);
     assert.equal((await safety(safeCall)).allowed, true);
+    await assertUnknownPermitted("$PICO_DYNAMIC_INPUT_CANARY --version", workDir);
   },
 );
 
 test(
   "FULL_ACCESS hardline 拒绝受保护目标的 shell 展开与非 -rf 破坏路径",
   { skip: process.platform === "win32" },
-  () => {
+  async () => {
     const workDir = process.cwd();
     const dangerous = [
       "rm -rf /etc{,}",
@@ -148,7 +264,6 @@ test(
       "rm -rf /Users",
       "rm -rf C:/Users",
       "rm -rf /c/Users",
-      'set -- -rf /etc; rm "$@"',
       "opts=-rf; target=/etc; rm $opts $target",
       "rm --recurs --forc /etc",
       "rm -r ~",
@@ -157,28 +272,21 @@ test(
       "rm /etc/passwd",
       "rm /e[t]c/passwd",
       "rm /et{c,}/passwd",
-      "shopt -s extglob; rm /@(etc)/passwd",
       "rm /private/etc/passwd",
       "rm /private/var/db/index",
       "rm -rf /private/tmp",
       "rm -rf /private/tmp/*",
-      "rm /private/e@(tc)/passwd",
       "cp ./generated.txt /private/{etc,var}/pico",
       "rm.exe /etc/passwd",
-      'find "$HOME" -delete',
       "find /etc -delete",
       "find /tmp -delete",
       "find /private/tmp -delete",
       "find ./../etc -delete",
-      'find "$ROOT" -delete',
       "find /et* -delete",
       "sudo find /etc -delete",
-      "find -files0-from targets.txt -delete",
-      "find -files0-from - -delete",
       "find /etc -exec rm -f {} +",
       "find /tmp -exec rm -f {} +",
       "find / -exec rm {} +",
-      'find "$ROOT" -exec unlink {} \\;',
       "find /et* -exec shred {} +",
       "find /etc -execdir truncate -s 0 {} +",
       "find /etc -exec mv {} /tmp/pico-backup +",
@@ -197,8 +305,6 @@ test(
       "find /etc -execdir sed -i 's/root/disabled/' ./relative \\;",
       "find /etc -execdir cp /tmp/pico-source ./relative \\;",
       "find . -exec cp /tmp/pico-source /etc/passwd \\;",
-      'find /etc -okdir "$DELETE_CMD" {} +',
-      "shopt -s extglob; find /@(etc) -delete",
       "mkfs.ext4 -F /dev/sda",
       "mkfs -t ext4 /dev/sda",
       "mkfs.ext4 /d?v/sda",
@@ -221,12 +327,8 @@ test(
       "git -C . push --force origin main",
       "sudo git -C . push origin +HEAD:main",
       "FORCE=--force; git push origin main $FORCE",
-      "git push origin main $(printf -- --force)",
       "git push --force-with-lease origin main",
       'cmd=git; "$cmd" push --force origin main',
-      "$(printf git) push --force origin main",
-      "env -S 'git push --force origin main'",
-      "env --split-string='git push --force origin main'",
       "git push origin --delete main",
       "git push origin -d main",
       "git push origin :main",
@@ -237,7 +339,6 @@ test(
       "git push --pru origin",
       "git.exe push --force origin main",
       'cmd=git-push; "$cmd" --force origin main',
-      "sudo env -S 'git push --force origin main'",
       "shutdown -h now",
       "sudo poweroff",
       "reboot",
@@ -253,7 +354,6 @@ test(
       "chmod 000 /etc/passwd",
       "chown -R root:root /home",
       "chgrp wheel /etc/passwd",
-      "shopt -s extglob; chmod 000 /@(etc)/passwd",
       "truncate -s 0 /etc/passwd",
       "truncate.exe --size=0 C:/Windows/System32/config/system",
       "unlink /etc/passwd",
@@ -269,7 +369,6 @@ test(
       "cp -d /etc/localtime ./pico-link && printf x > ./pico-link",
       "cp --archive /etc/localtime ./pico-link && printf x > ./pico-link",
       "cp --no-dereference /etc/localtime ./pico-link && printf x > ./pico-link",
-      "cp $ARGS",
       "sudo cp ./generated.txt /etc/passwd",
       "mv /etc/hosts ./backup",
       "mv ./generated.txt /etc/generated.txt",
@@ -279,7 +378,6 @@ test(
       "install --director /etc/pico",
       "install -dm755 /etc/pico",
       "install --strip ./generated.txt /etc/generated.txt",
-      "install $ARGS",
       "tee /etc/passwd",
       "sed -i 's/root/disabled/' /etc/passwd",
       "sed --in-plac 's/root/disabled/' /etc/passwd",
@@ -288,6 +386,71 @@ test(
       "ln --target-direct=/etc ./generated.txt",
       "ln -sf /etc/passwd ./pico-link && printf x > ./pico-link",
       "ln /etc/passwd ./pico-link && printf x > ./pico-link",
+      "env -C /etc rm passwd",
+      "env --chdir=/etc truncate -s 0 passwd",
+      "sudo -D /etc rm -f passwd",
+      "sudo --chdir=/etc sed -i 's/root/disabled/' passwd",
+      "sudo -R / rm -f etc/passwd",
+      "chroot / rm -f etc/passwd",
+      "cd /etc && rm -f passwd",
+      "cd /etc && (cd /tmp); rm -f passwd",
+      "cd /etc && cd /tmp | true; rm -f passwd",
+      "cd /etc; cd /tmp & wait; rm -f passwd",
+      "cd /etc && false && cd /tmp; rm -f passwd",
+      "cd /etc; (cd /tmp); (rm -f passwd)",
+      "(cd /etc; rm -f passwd)",
+      "{ cd /etc; rm -f passwd; } | true",
+      "builtin cd /etc && rm -f passwd",
+      "command cd /etc && truncate -s 0 passwd",
+      "cd /etc; cd /definitely-pico-missing; rm -f passwd",
+      "cd /etc; pushd /definitely-pico-missing; rm -f passwd",
+      "cd /tmp; time cd /etc; rm -f passwd",
+      "cd /tmp; time -p cd /etc; rm -f passwd",
+      "time cd /etc; rm -f passwd",
+      "time -p cd /etc; rm -f passwd",
+      "cd /etc; truncate -s 0 passwd",
+      "(cd /etc && unlink passwd)",
+      "cd / && cp /tmp/pico-source etc/passwd",
+      "cd /etc && sh -c 'rm -f passwd'",
+      "cd /etc && echo $(rm -f passwd)",
+      "cd /etc && echo `truncate -s 0 passwd`",
+      "cd /etc && find . -delete",
+      ": > /etc/passwd",
+      "> /dev/sda",
+      "printf x >/etc/passwd",
+      "printf x >> /etc/passwd",
+      "printf x >|/etc/passwd",
+      "printf x &>/etc/passwd",
+      "printf x >/tmp/pico.log>/etc/passwd",
+      "cd /etc && printf x > passwd",
+      "(cd /etc; : > passwd)",
+      "printf '/etc/passwd\\0' | xargs -0 rm -f /etc/passwd",
+    ];
+    // 未绑定的 argv、目标、stdin、启动文件与脚本只返回 unknown。
+    // official grammar 未支持的 extglob 必须返回 unknown，不以手写扫描补 deny。
+    const unknown = [
+      // case 分支状态尚未建模；后续相对路径的 cwd 必须保持 unknown。
+      "cd /etc; case x in y) cd /tmp;; esac; rm -f passwd",
+      "shopt -s extglob; rm /@(etc)/passwd",
+      "rm /private/e@(tc)/passwd",
+      "shopt -s extglob; find /@(etc) -delete",
+      "shopt -s extglob; chmod 000 /@(etc)/passwd",
+      "shopt -s extglob; printf x > /@(etc)/passwd",
+      "printf x > /private/v@(ar)/pico",
+      'set -- -rf /etc; rm "$@"',
+      'find "$HOME" -delete',
+      'find "$ROOT" -delete',
+      "find -files0-from targets.txt -delete",
+      "find -files0-from - -delete",
+      'find "$ROOT" -exec unlink {} \\;',
+      'find /etc -okdir "$DELETE_CMD" {} +',
+      "git push origin main $(printf -- --force)",
+      "$(printf git) push --force origin main",
+      "env -S 'git push --force origin main'",
+      "env --split-string='git push --force origin main'",
+      "sudo env -S 'git push --force origin main'",
+      "cp $ARGS",
+      "install $ARGS",
       "ln $ARGS",
       "printf '/etc/passwd\\0' | xargs -0 rm -f",
       "printf '/etc/passwd\\0' | xargs -0 unlink",
@@ -313,59 +476,21 @@ test(
       "printf '/etc/passwd\\n' | xargs -R 1 rm -f",
       "printf '/etc/passwd\\n' | xargs -S 255 rm -f",
       "printf '/etc/passwd\\n' | xargs --process-slot-var SLOT rm -f",
-      "env -C /etc rm passwd",
-      "env --chdir=/etc truncate -s 0 passwd",
-      "sudo -D /etc rm -f passwd",
-      "sudo --chdir=/etc sed -i 's/root/disabled/' passwd",
-      "sudo -R / rm -f etc/passwd",
-      "chroot / rm -f etc/passwd",
-      "cd /etc && rm -f passwd",
-      "cd /etc && (cd /tmp); rm -f passwd",
-      "cd /etc && cd /tmp | true; rm -f passwd",
-      "cd /etc; cd /tmp & wait; rm -f passwd",
-      "cd /etc && false && cd /tmp; rm -f passwd",
-      "false && cd /tmp; rm -f passwd",
       'cd "$TARGET"; rm -f passwd',
       "if true; then cd /tmp; fi; rm -f passwd",
-      "cd /etc; (cd /tmp); (rm -f passwd)",
-      "(cd /etc; rm -f passwd)",
-      "{ cd /etc; rm -f passwd; } | true",
-      "builtin cd /etc && rm -f passwd",
-      "command cd /etc && truncate -s 0 passwd",
       "eval 'cd /etc'; unlink passwd",
       "eval 'cd /etc && false && cd /tmp'; rm -f passwd",
       "eval 'cd /etc; if false; then cd /tmp; fi'; rm -f passwd",
-      "cd /etc; cd /definitely-pico-missing; rm -f passwd",
-      "cd /etc; pushd /definitely-pico-missing; rm -f passwd",
-      "cd /etc; case x in y) cd /tmp;; esac; rm -f passwd",
-      "cd /tmp; time cd /etc; rm -f passwd",
-      "cd /tmp; time -p cd /etc; rm -f passwd",
-      "time cd /etc; rm -f passwd",
-      "time -p cd /etc; rm -f passwd",
       "cd > ./pico.log; rm -f .bashrc",
       "pushd +1; rm -f passwd",
-      "cd /etc; truncate -s 0 passwd",
-      "(cd /etc && unlink passwd)",
-      "cd / && cp /tmp/pico-source etc/passwd",
-      "cd /etc && sh -c 'rm -f passwd'",
-      "cd /etc && echo $(rm -f passwd)",
-      "cd /etc && echo `truncate -s 0 passwd`",
-      "cd /etc && find . -delete",
-      ": > /etc/passwd",
-      "> /dev/sda",
-      "printf x >/etc/passwd",
-      "printf x >> /etc/passwd",
-      "printf x >|/etc/passwd",
-      "printf x &>/etc/passwd",
-      "printf x >/tmp/pico.log>/etc/passwd",
       'printf x > "$TARGET"',
-      "shopt -s extglob; printf x > /@(etc)/passwd",
-      "printf x > /private/v@(ar)/pico",
-      "cd /etc && printf x > passwd",
-      "(cd /etc; : > passwd)",
     ];
+    for (const command of unknown) await assertUnknownPermitted(command, workDir);
+    for (const command of ["false && cd /tmp; rm -f passwd"])
+      assert.equal(analyzeHardlineBashCommand(command, workDir).kind, "no_match", command);
 
     for (const command of dangerous) {
+      assert.equal(analyzeHardlineBashCommand(command, workDir).kind, "deny", command);
       assert.equal(isHardlineBashCommand(command, workDir), true, command);
     }
 
@@ -471,7 +596,8 @@ test(
 
     assert.equal(isHardlineBashCommand("rm -f etc/passwd", "/"), true);
     assert.equal(isHardlineBashCommand("rm -f Windows/System32/config/system", "C:/"), true);
-    assert.equal(isHardlineBashCommand("rm -f ./generated.txt"), true);
+    assert.equal(analyzeHardlineBashCommand("rm -f ./generated.txt").kind, "unknown");
+    assert.equal(isHardlineBashCommand("rm -f ./generated.txt"), false);
   },
 );
 
@@ -484,7 +610,6 @@ test(
       "rm -rf -- /",
       "rm --force --recursive /",
       "rm --recursive --force -- '/etc/ssh'",
-      'rm "--force" "--recursive" "$HOME"',
       "rm -R -f '~'",
       'printf ok && "rm" "-fr" "/usr"',
       "echo ok; /bin/rm --recursive --force /boot",
@@ -495,61 +620,17 @@ test(
       "exec rm -rf /",
       "busybox rm --force --recursive /etc",
       "sudo bash -lc 'rm --force --recursive /'",
-      "/bin/[b]ash -c 'rm -rf /'",
       "zsh -ocorrect -c 'rm -rf /'",
       "zsh -focorrect -c 'rm -rf /'",
-      "bash --rcfile ./evil -ic 'printf safe'",
-      "bash --init-file ./evil -ic 'printf safe'",
-      "HOME=./home bash --noprofile -ci 'printf safe'",
-      "bash -cl 'printf safe'",
-      "HOME=./home bash --noprofile -c -i 'printf safe'",
-      "bash --noprofile -c -l 'printf safe'",
       "bash -c -o noglob 'rm -rf /'",
       "bash -c -O extglob 'rm -rf /'",
       "bash -c +n 'rm -rf /'",
       "bash -c -n +n 'rm -rf /'",
       "bash -c -- 'rm -rf /'",
       "bash -c - 'rm -rf /'",
-      "bash -c -o",
-      "bash -c -O",
-      "bash -c --",
-      "bash -c -",
       "bash -n +n -c 'rm -rf /'",
       "bash -o noexec +o noexec -c 'rm -rf /'",
-      "BASH_ENV=./evil bash -c 'printf safe'",
-      "env BASH_ENV=./evil bash -c 'printf safe'",
-      "export BASH_ENV=./evil; bash -c 'printf safe'",
-      "eval 'export BASH_ENV=./evil'; bash -c 'printf safe'",
-      "ENV=./evil sh -c 'printf safe'",
-      "ZDOTDIR=./zdot zsh -c 'printf safe'",
-      "HOME=./home bash --noprofile -ic 'printf safe'",
-      "env 'BASH_FUNC_pico%%=() { printf marker; }' bash -c pico",
-      "printf '%s\\n' 'rm -rf /' | sh",
-      "printf '%s\\n' 'rm -rf /' | bash -s",
-      "printf '%s\\n' 'rm -rf /' | ash",
-      "sh ./destructive-script.sh",
-      "ash ./destructive-script.sh",
-      "sh ./destructive-script.sh -c 'printf safe'",
-      "bash -s",
-      "source ./destructive-script.sh",
-      ". ./destructive-script.sh",
-      "env sh ./destructive-script.sh",
-      "busybox sh ./destructive-script.sh",
-      "busybox ash ./destructive-script.sh",
-      "command sh ./destructive-script.sh",
-      "timeout 1 sh ./destructive-script.sh",
-      "stdbuf -oL sh ./destructive-script.sh",
-      "ionice -c2 sh ./destructive-script.sh",
       "env -iC / bash -c 'rm -f etc/passwd'",
-      "printf '%s\\n' 'rm -rf /' | stdbuf -oL sh",
-      "printf '%s\\n' 'rm -rf /' | ionice -c2 sh",
-      "csh ./destructive-script.csh",
-      "tcsh ./destructive-script.csh",
-      "fish ./destructive-script.fish",
-      "pwsh -File ./destructive-script.ps1",
-      "powershell.exe -File ./destructive-script.ps1",
-      "cmd.exe /d /s /c destructive-script.cmd",
-      "env pwsh -Command 'Write-Output safe'",
       `python3 -c "import os; os.system('rm -rf /')"`,
       `python3 -W ignore -c "import os; os.system('rm -rf /')"`,
       `python3 -X dev -c "import os; os.system('rm -rf /')"`,
@@ -583,11 +664,65 @@ test(
       "rm -rf /home/alice/{*,.*}",
       "rm -rf C:/Users/Alice/*",
       "rm -rf /c/Users/Alice/{*,.*}",
+    ];
+    // 未绑定的 argv、目标、stdin、启动文件与脚本只返回 unknown。
+    const unknown = [
+      'rm "--force" "--recursive" "$HOME"',
+      "/bin/[b]ash -c 'rm -rf /'",
+      "bash --rcfile ./evil -ic 'printf safe'",
+      "bash --init-file ./evil -ic 'printf safe'",
+      "HOME=./home bash --noprofile -ci 'printf safe'",
+      "bash -cl 'printf safe'",
+      "HOME=./home bash --noprofile -c -i 'printf safe'",
+      "bash --noprofile -c -l 'printf safe'",
+      "bash -c -o",
+      "bash -c -O",
+      "bash -c --",
+      "bash -c -",
+      "BASH_ENV=./evil bash -c 'printf safe'",
+      "env BASH_ENV=./evil bash -c 'printf safe'",
+      "export BASH_ENV=./evil; bash -c 'printf safe'",
+      "eval 'export BASH_ENV=./evil'; bash -c 'printf safe'",
+      "ENV=./evil sh -c 'printf safe'",
+      "ZDOTDIR=./zdot zsh -c 'printf safe'",
+      "HOME=./home bash --noprofile -ic 'printf safe'",
+      "env 'BASH_FUNC_pico%%=() { printf marker; }' bash -c pico",
+      "printf '%s\\n' 'rm -rf /' | sh",
+      "printf '%s\\n' 'rm -rf /' | bash -s",
+      "printf '%s\\n' 'rm -rf /' | ash",
+      "sh ./destructive-script.sh",
+      "ash ./destructive-script.sh",
+      "sh ./destructive-script.sh -c 'printf safe'",
+      "bash -s",
+      "source ./destructive-script.sh",
+      ". ./destructive-script.sh",
+      "env sh ./destructive-script.sh",
+      "busybox sh ./destructive-script.sh",
+      "busybox ash ./destructive-script.sh",
+      "command sh ./destructive-script.sh",
+      "timeout 1 sh ./destructive-script.sh",
+      "stdbuf -oL sh ./destructive-script.sh",
+      "ionice -c2 sh ./destructive-script.sh",
+      "printf '%s\\n' 'rm -rf /' | stdbuf -oL sh",
+      "printf '%s\\n' 'rm -rf /' | ionice -c2 sh",
+      "csh ./destructive-script.csh",
+      "tcsh ./destructive-script.csh",
+      "fish ./destructive-script.fish",
+      "pwsh -File ./destructive-script.ps1",
+      "powershell.exe -File ./destructive-script.ps1",
+      "cmd.exe /d /s /c destructive-script.cmd",
+      "env pwsh -Command 'Write-Output safe'",
       'rm -rf "$UNKNOWN_TARGET"',
       "rm -rf '/etc",
     ];
+    for (const command of unknown) await assertUnknownPermitted(command, workDir);
 
     for (const command of dangerous) {
+      assert.equal(
+        analyzeHardlineCommand("bash", bashArgs(command), workDir).kind,
+        "deny",
+        command,
+      );
       assert.equal(isHardlineCommand("bash", bashArgs(command), workDir), true, command);
     }
 
@@ -653,7 +788,8 @@ test(
 
     const relativeSystemCall = toolCall("rm -f etc/passwd");
     assert.equal(evaluateWorkspaceToolCall(relativeSystemCall, "/", roots).allowed, false);
-    assert.equal(isHardlineCommand("bash", ordinaryCall.arguments), true);
+    assert.equal(analyzeHardlineCommand("bash", ordinaryCall.arguments).kind, "unknown");
+    assert.equal(isHardlineCommand("bash", ordinaryCall.arguments), false);
 
     const foregroundSafety = buildForegroundSafetyMiddleware(
       workDir,
@@ -699,9 +835,9 @@ test(
 );
 
 test(
-  "FULL_ACCESS hardline 对真实 POSIX Shell stdin 执行入口 fail-closed",
+  "FULL_ACCESS 对无法绑定的 POSIX Shell stdin 执行入口按 unknown 放行",
   { skip: process.platform === "win32" },
-  () => {
+  async () => {
     const script = "printf 'stdin-shell-ran\\n'\n";
     const execution = spawnSync("/bin/sh", [], { encoding: "utf8", input: script });
     assert.equal(execution.error, undefined);
@@ -709,7 +845,7 @@ test(
     assert.equal(execution.stdout, "stdin-shell-ran\n");
 
     const visibleInvocation = `printf '%s' ${JSON.stringify(script)} | sh`;
-    assert.equal(isHardlineBashCommand(visibleInvocation, process.cwd()), true);
+    await assertUnknownPermitted(visibleInvocation, process.cwd());
   },
 );
 
@@ -762,4 +898,28 @@ function bashArgs(command: string): string {
 
 function toolCall(command: string) {
   return { id: command, name: "bash", arguments: bashArgs(command) };
+}
+
+/** 只检查真实权限链；这些不确定或高风险示例绝不派发到 Shell。 */
+async function assertUnknownPermitted(command: string, workDir: string): Promise<void> {
+  const call = toolCall(command);
+  assert.equal(analyzeHardlineBashCommand(command, workDir).kind, "unknown", command);
+  assert.equal(analyzeHardlineCommand("bash", call.arguments, workDir).kind, "unknown", command);
+  assert.equal(classifyHardlineBashCommand(command, workDir), undefined, command);
+  assert.equal(isHardlineBashCommand(command, workDir), false, command);
+  assert.equal(classifyHardlineCommand("bash", call.arguments, workDir), undefined, command);
+  assert.equal(isHardlineCommand("bash", call.arguments, workDir), false, command);
+  const permission = buildApprovalMiddleware(
+    () => assert.fail("FULL_ACCESS unknown 不得发起人工审批"),
+    workDir,
+    undefined,
+    undefined,
+    {
+      sessionId: "full-access-unknown-regression",
+      collaborationMode: "agent",
+      permissionMode: "full-access",
+    },
+    WorkspaceRoots.createSync(workDir),
+  );
+  assert.equal((await permission(call)).allowed, true, command);
 }
