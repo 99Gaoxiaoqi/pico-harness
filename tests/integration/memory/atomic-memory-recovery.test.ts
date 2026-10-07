@@ -207,7 +207,7 @@ for (const scenario of [
           : {}),
       });
       assert.ok(recorded);
-      if ("completedDisposition" in scenario) {
+      if ("completedDisposition" in scenario && scenario.completedDisposition !== undefined) {
         const store = new SqliteMemoryItemStore(join(picoHome, "memory.sqlite"));
         try {
           firstRun.setMemoryExtractionBoundary({

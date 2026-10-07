@@ -87,6 +87,100 @@ test("atomic engine commits canonical user evidence synchronously, honors provid
   assert.equal(model.calls.length, 2);
 });
 
+test("descriptive history terms recover deleted preferences using bounded original user evidence", async (t) => {
+  const fixture = memoryFixture(t);
+  const historical = event(
+    1,
+    "user",
+    "Please remember my long-term preference: across all workspaces I prefer concise answers in Chinese.",
+  );
+  const initial = [historical, event(2, "other", "")];
+  const candidate = item(
+    "The user prefers concise answers in Chinese across all workspaces.",
+    historical,
+    "across all workspaces I prefer concise answers in Chinese.",
+  );
+  const filler = Array.from({ length: 12 }, (_, index) =>
+    event(
+      index + 3,
+      "user",
+      "An earlier temporary discussion unrelated to durable preferences.",
+      `filler-${index}`,
+    ),
+  );
+  const current = event(
+    15,
+    "user",
+    "Please remember my earlier long-term language and brevity preference again.",
+    "again",
+  );
+  const boundary = event(16, "other", "", "again");
+  const outside = event(17, "user", "OUTSIDE_BOUNDARY language and brevity preference.", "future");
+  const model = scriptedModel([
+    proposal([candidate]),
+    canonicalization(candidate),
+    JSON.stringify({
+      status: "search_required",
+      coverageStatus: "processed",
+      requestedStatus: "unresolved",
+      requestedItems: [],
+      incidentalItems: [],
+      search: {
+        terms: ["earlier long-term language preference", "earlier long-term brevity preference"],
+        roles: ["user"],
+      },
+    }),
+    () => {
+      const localized = model.calls.at(-1)!;
+      assert.equal(localized.stage, "localized");
+      assert.match(localized.prompt, /across all workspaces I prefer concise answers in Chinese/);
+      assert.doesNotMatch(localized.prompt, /OUTSIDE_BOUNDARY/);
+      const context = JSON.parse(
+        localized.prompt.match(
+          /<interpretation_context_only>\n([\s\S]*?)\n<\/interpretation_context_only>/u,
+        )![1]!,
+      ) as unknown[];
+      assert.ok(context.length <= 7, "localization retains its existing seven-turn cap");
+      return proposal([candidate]);
+    },
+    canonicalization(candidate),
+  ]);
+  const engine = new AtomicMemoryExtractionEngine({
+    store: fixture.store,
+    model,
+    gate: async () => ({ allowed: true }),
+  });
+  assert.equal((await engine.execute(source(initial))).status, "remembered");
+  await fixture.store.deleteItem({
+    itemId: "item-1",
+    expectedVersion: 1,
+    operationId: "delete-described-preference",
+  });
+  assert.deepEqual(await fixture.store.listItems({ workspaceKey: "/workspace" }), []);
+  const result = await engine.execute(
+    source([...initial, ...filler, current, boundary, outside], {
+      deletionRevision: await fixture.store.readDeletionRevision(),
+      runId: boundary.runId,
+      turnId: boundary.turnId,
+      boundaryOrdinal: boundary.ordinal,
+      boundaryEventId: boundary.eventId,
+      sourceMessages: [{ role: "user", content: current.text }],
+    }),
+  );
+  assert.equal(result.status, "remembered");
+  assert.deepEqual(
+    model.calls.slice(2).map((call) => call.stage),
+    ["proposal", "localized", "canonicalize"],
+  );
+  assert.deepEqual(
+    (await fixture.store.readItem(result.requestedItems[0]!.itemId))?.sources.map(
+      (entry) => entry.eventId,
+    ),
+    [historical.eventId],
+  );
+  assert.equal((await fixture.cursor())?.processedOrdinal, boundary.ordinal);
+});
+
 test("atomic engine retries malformed canonicalization without rerunning the proposal", async (t) => {
   const fixture = memoryFixture(t);
   const user = event(1, "user", "Remember I prefer concise Chinese.");

@@ -264,6 +264,7 @@ export function proposalPrompt(
     "An evidence record with messagePositions points to zero-based messages in the sourceMessages conversation prefix above. Read the user text there; it is intentionally not duplicated in memory_evidence. Without messagePositions, use only the bounded texts in the evidence record.",
     TEMPORAL_RULES,
     'Complete: {"status":"complete","coverageStatus":"processed","requestedStatus":"resolved|not_applicable","requestedItems":[],"incidentalItems":[]}. resolved requires 1-10 requestedItems; not_applicable requires none. At most 10 incidentalItems.',
+    "History search uses literal case-insensitive keywords, not semantic descriptions. Return short distinctive words or contiguous phrases likely present in the original user text. Split separate topics into separate terms; omit referential filler such as earlier, that, and again.",
     interpretationContext === undefined
       ? 'Missing referent: {"status":"search_required","coverageStatus":"processed","requestedStatus":"unresolved","requestedItems":[],"incidentalItems":[],"search":{"terms":["specific terms"],"roles":["user","assistant"]}}'
       : "This is the only localization pass. Do not request another search.",
