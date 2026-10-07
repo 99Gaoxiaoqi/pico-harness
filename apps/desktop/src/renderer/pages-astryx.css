@@ -29,6 +29,17 @@
 .automation-form .pico-text-field input {
   padding: 0;
 }
+.review-page__heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.review-page__heading h1 {
+  margin: 0;
+  font-size: 22px;
+}
 .review-scope-field {
   display: grid;
   min-width: 0;

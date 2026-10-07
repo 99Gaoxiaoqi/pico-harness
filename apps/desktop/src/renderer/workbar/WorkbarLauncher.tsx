@@ -2,7 +2,7 @@ import { Button } from "../components.js";
 import { useEffect, useRef, type KeyboardEvent, type ReactNode } from "react";
 
 import { WORKBAR_TOOL_REGISTRY, type WorkbarToolDefinition } from "./registry.js";
-import type { WorkbarDock, WorkbarToolKind } from "./types.js";
+import type { WorkbarToolKind } from "./types.js";
 
 export interface WorkbarLauncherAvailability {
   readonly available: boolean;
@@ -10,16 +10,14 @@ export interface WorkbarLauncherAvailability {
 }
 
 export interface WorkbarLauncherProps {
-  readonly dock: WorkbarDock;
   readonly tools?: readonly WorkbarToolDefinition[];
   readonly availability?: ((kind: WorkbarToolKind) => WorkbarLauncherAvailability) | undefined;
   readonly renderIcon?: ((kind: WorkbarToolKind) => ReactNode) | undefined;
-  readonly onOpen: (kind: WorkbarToolKind, dock: WorkbarDock) => void;
+  readonly onOpen: (kind: WorkbarToolKind) => void;
   readonly onClose: () => void;
 }
 
 export function WorkbarLauncher({
-  dock,
   tools = WORKBAR_TOOL_REGISTRY,
   availability,
   renderIcon,
@@ -73,12 +71,12 @@ export function WorkbarLauncher({
     <div
       className="session-workbar__launcher-menu session-workbar__launcher-menu--full"
       role="menu"
-      aria-label={`在${dock === "right" ? "右侧" : "底部"}工作栏打开工具`}
+      aria-label="在右侧工作栏打开工具"
       onKeyDown={handleKeyDown}
     >
       <header>
         <strong>打开工具</strong>
-        <span>{dock === "right" ? "右侧" : "底部"}工作栏</span>
+        <span>右侧工作栏</span>
       </header>
       {tools.map((tool) => {
         const status = availability?.(tool.kind) ?? { available: true };
@@ -94,10 +92,8 @@ export function WorkbarLauncher({
             role="menuitem"
             data-kind={tool.kind}
             disabled={!status.available}
-            aria-describedby={
-              status.reason ? `workbar-tool-${dock}-${tool.kind}-reason` : undefined
-            }
-            onClick={() => onOpen(tool.kind, dock)}
+            aria-describedby={status.reason ? `workbar-tool-${tool.kind}-reason` : undefined}
+            onClick={() => onOpen(tool.kind)}
           >
             <span className="session-workbar__launcher-icon" aria-hidden="true">
               {renderIcon?.(tool.kind)}
@@ -110,7 +106,7 @@ export function WorkbarLauncher({
               <span>{tool.description}</span>
               {status.reason && (
                 <span
-                  id={`workbar-tool-${dock}-${tool.kind}-reason`}
+                  id={`workbar-tool-${tool.kind}-reason`}
                   className="session-workbar__launcher-reason"
                 >
                   {status.reason}

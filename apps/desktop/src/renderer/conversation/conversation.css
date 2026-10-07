@@ -79,6 +79,7 @@
 
 .conversation-session-header {
   display: flex;
+  flex-wrap: wrap;
   min-height: 56px;
   align-items: center;
   justify-content: space-between;
@@ -88,6 +89,7 @@
 }
 
 .conversation-session-header h1 {
+  flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -97,6 +99,7 @@
 
 .conversation-session-header__identity {
   display: flex;
+  flex: 1 1 240px;
   min-width: 0;
   align-items: center;
   gap: 8px;
@@ -145,12 +148,14 @@
 
 .conversation-session-project-tools {
   display: inline-flex;
+  flex: 0 1 160px;
   min-width: 0;
   align-items: center;
   gap: 5px;
 }
 
 .conversation-session-worktree {
+  min-width: 0;
   max-width: min(24vw, 260px);
   overflow: hidden;
   color: var(--conversation-ink-faint);
@@ -174,8 +179,12 @@
 
 .conversation-session-header__meta {
   flex-shrink: 0;
+  max-width: 100%;
+  margin-left: auto;
   white-space: nowrap;
   display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   align-items: center;
   gap: 8px;
   color: var(--conversation-ink-faint);
@@ -214,7 +223,7 @@
   border-left: 1px solid var(--conversation-line);
 }
 
-.conversation-session-actions button {
+.conversation-session-actions > button {
   display: inline-flex;
   min-height: 32px;
   align-items: center;
@@ -229,12 +238,12 @@
   cursor: pointer;
 }
 
-.conversation-session-actions button:hover:not(:disabled) {
+.conversation-session-actions > button:hover:not(:disabled) {
   background: var(--conversation-bg-subtle);
   color: var(--conversation-ink);
 }
 
-.conversation-session-actions button:disabled {
+.conversation-session-actions > button:disabled {
   cursor: not-allowed;
   opacity: 0.42;
 }
@@ -242,6 +251,12 @@
 .conversation-session-actions svg {
   width: 16px;
   height: 16px;
+}
+
+.conversation-actions-menu,
+.conversation-action-dialog {
+  white-space: normal;
+  -webkit-app-region: no-drag;
 }
 
 .conversation-panel-toggle {

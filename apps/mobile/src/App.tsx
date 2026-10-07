@@ -28,7 +28,7 @@ import { Computers } from "./screens/Computers";
 import { Sessions } from "./screens/Sessions";
 
 const tools: readonly { tab: WorkbarTab; title: string; detail: string }[] = [
-  { tab: "审查", title: "改动审阅", detail: "查看差异，提出修改意见" },
+  { tab: "审查", title: "查看文件改动", detail: "查看运行或工作区差异，反馈修改意见" },
   { tab: "文件", title: "生成文件", detail: "预览、分享会话成果" },
   { tab: "执行", title: "执行记录", detail: "执行过程与追踪详情" },
   { tab: "Graph", title: "协作进度", detail: "子任务、依赖与唤醒" },

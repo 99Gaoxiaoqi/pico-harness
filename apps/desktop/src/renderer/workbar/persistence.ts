@@ -2,14 +2,12 @@ import { isStaticWorkbarToolTab } from "./registry.js";
 import { createWorkbarState } from "./state.js";
 import {
   isPersistedWorkbarTabKind,
-  isWorkbarDock,
   type PersistedWorkbarTabKind,
-  type WorkbarDock,
   type WorkbarState,
   type WorkbarTab,
 } from "./types.js";
 
-export const WORKBAR_PERSISTENCE_VERSION = 2;
+export const WORKBAR_PERSISTENCE_VERSION = 3;
 export const WORKBAR_STORAGE_KEY = "pico.desktop.workbar";
 
 export interface WorkbarStorage {
@@ -23,42 +21,27 @@ interface PersistedWorkbarTab {
   readonly label: string;
 }
 
-interface PersistedDockState {
+interface PersistedWorkbarState {
+  readonly version: 3;
+  readonly layout: { readonly collapsed: boolean; readonly width: number };
   readonly tabs: readonly PersistedWorkbarTab[];
   readonly activeTabId: string | null;
   readonly mruTabIds: readonly string[];
 }
 
-interface PersistedWorkbarStateV2 {
-  readonly version: 2;
-  readonly layout: {
-    readonly focusedDock: WorkbarDock;
-    readonly right: { readonly collapsed: boolean; readonly width: number };
-    readonly bottom: { readonly collapsed: boolean; readonly height: number };
-  };
-  readonly docks: Readonly<Record<WorkbarDock, PersistedDockState>>;
-}
-
 export function serializeWorkbarState(state: WorkbarState): string {
-  const payload: PersistedWorkbarStateV2 = {
+  const tabs = state.tabs.filter(isPersistableTab);
+  const persistedIds = new Set(tabs.map((tab) => tab.id));
+  const mruTabIds = state.mruTabIds.filter((tabId) => persistedIds.has(tabId));
+  const activeTabId = persistedIds.has(state.activeTabId ?? "")
+    ? state.activeTabId
+    : (mruTabIds[0] ?? tabs[0]?.id ?? null);
+  const payload: PersistedWorkbarState = {
     version: WORKBAR_PERSISTENCE_VERSION,
-    layout: {
-      focusedDock: state.focusedDock,
-      right: { collapsed: state.docks.right.collapsed, width: state.rightWidth },
-      bottom: { collapsed: state.docks.bottom.collapsed, height: state.bottomHeight },
-    },
-    docks: {
-      right: serializeDock(
-        state.docks.right.tabs,
-        state.docks.right.activeTabId,
-        state.docks.right.mruTabIds,
-      ),
-      bottom: serializeDock(
-        state.docks.bottom.tabs,
-        state.docks.bottom.activeTabId,
-        state.docks.bottom.mruTabIds,
-      ),
-    },
+    layout: { collapsed: state.collapsed, width: state.width },
+    tabs,
+    activeTabId,
+    mruTabIds,
   };
   return JSON.stringify(payload);
 }
@@ -69,7 +52,15 @@ export function parseWorkbarState(
 ): WorkbarState {
   try {
     const candidate: unknown = JSON.parse(serialized);
-    if (isPersistedWorkbarStateV2(candidate)) return restoreV2(candidate);
+    if (isPersistedWorkbarState(candidate)) {
+      return createWorkbarState({
+        tabs: candidate.tabs,
+        activeTabId: candidate.activeTabId,
+        mruTabIds: candidate.mruTabIds,
+        collapsed: candidate.layout.collapsed,
+        width: candidate.layout.width,
+      });
+    }
     return fallback;
   } catch {
     return fallback;
@@ -102,62 +93,18 @@ export function saveWorkbarState(
   }
 }
 
-function serializeDock(
-  allTabs: readonly WorkbarTab[],
-  requestedActiveTabId: string | null,
-  requestedMru: readonly string[],
-): PersistedDockState {
-  const tabs = allTabs.filter(isPersistableTab);
-  const persistedIds = new Set(tabs.map((tab) => tab.id));
-  const mruTabIds = requestedMru.filter((tabId) => persistedIds.has(tabId));
-  const activeTabId = persistedIds.has(requestedActiveTabId ?? "")
-    ? requestedActiveTabId
-    : (mruTabIds[0] ?? tabs[0]?.id ?? null);
-  return { tabs, activeTabId, mruTabIds };
-}
-
-function restoreV2(value: PersistedWorkbarStateV2): WorkbarState {
-  return createWorkbarState({
-    docks: {
-      right: {
-        ...value.docks.right,
-        collapsed: value.layout.right.collapsed,
-      },
-      bottom: {
-        ...value.docks.bottom,
-        collapsed: value.layout.bottom.collapsed,
-      },
-    },
-    focusedDock: value.layout.focusedDock,
-    rightWidth: value.layout.right.width,
-    bottomHeight: value.layout.bottom.height,
-  });
-}
-
 function isPersistableTab(tab: WorkbarTab): tab is PersistedWorkbarTab {
   return isStaticWorkbarToolTab(tab) && isPersistedWorkbarTabKind(tab.kind);
 }
 
-function isPersistedWorkbarStateV2(value: unknown): value is PersistedWorkbarStateV2 {
-  if (!isRecord(value) || value.version !== WORKBAR_PERSISTENCE_VERSION) return false;
+function isPersistedWorkbarState(value: unknown): value is PersistedWorkbarState {
   if (
-    !isRecord(value.layout) ||
-    !isWorkbarDock(value.layout.focusedDock) ||
-    !isPersistedRightLayout(value.layout.right) ||
-    !isPersistedBottomLayout(value.layout.bottom) ||
-    !isRecord(value.docks)
+    !isRecord(value) ||
+    value.version !== WORKBAR_PERSISTENCE_VERSION ||
+    !isPersistedLayout(value.layout) ||
+    !Array.isArray(value.tabs) ||
+    !value.tabs.every(isPersistedWorkbarTab)
   ) {
-    return false;
-  }
-  if (!isPersistedDockState(value.docks.right) || !isPersistedDockState(value.docks.bottom)) {
-    return false;
-  }
-  const rightIds = new Set(value.docks.right.tabs.map((tab) => tab.id));
-  return !value.docks.bottom.tabs.some((tab) => rightIds.has(tab.id));
-}
-
-function isPersistedDockState(value: unknown): value is PersistedDockState {
-  if (!isRecord(value) || !Array.isArray(value.tabs) || !value.tabs.every(isPersistedWorkbarTab)) {
     return false;
   }
   const tabIds = new Set(value.tabs.map((tab) => tab.id));
@@ -171,21 +118,12 @@ function isPersistedDockState(value: unknown): value is PersistedDockState {
   );
 }
 
-function isPersistedRightLayout(value: unknown): value is { collapsed: boolean; width: number } {
+function isPersistedLayout(value: unknown): value is { collapsed: boolean; width: number } {
   return (
     isRecord(value) &&
     typeof value.collapsed === "boolean" &&
     typeof value.width === "number" &&
     Number.isFinite(value.width)
-  );
-}
-
-function isPersistedBottomLayout(value: unknown): value is { collapsed: boolean; height: number } {
-  return (
-    isRecord(value) &&
-    typeof value.collapsed === "boolean" &&
-    typeof value.height === "number" &&
-    Number.isFinite(value.height)
   );
 }
 

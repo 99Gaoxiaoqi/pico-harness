@@ -383,7 +383,8 @@ export function useDesktopCommands({
           >
             <section className="command-dialog">
               <h2>压缩上下文</h2>
-              <p>将对当前会话生成上下文摘要，历史记录会保留。</p>
+              <p>通过模型把较早的对话整理为摘要，减少后续请求的上下文占用。</p>
+              <p>历史记录仍可查看；摘要可能省略细节。通常只在对话较长时需要手动压缩。</p>
               <Button label="取消" isDisabled={compactBusy} onClick={() => setNative(undefined)} />
               <Button
                 label="确认压缩"

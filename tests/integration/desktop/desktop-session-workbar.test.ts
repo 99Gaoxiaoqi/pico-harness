@@ -11,21 +11,16 @@ import {
   createWorkbarToolTab,
 } from "../../../apps/desktop/src/renderer/workbar/index.js";
 
-test("desktop Workbar renders accessible right and bottom Docks with persistent tab panels", () => {
+test("desktop Workbar renders one accessible right panel with persistent tab panels", () => {
   Object.assign(globalThis, { React });
   const state = createWorkbarState({
-    rightWidth: 480,
-    bottomHeight: 360,
-    docks: {
-      right: {
-        collapsed: false,
-        tabs: [createWorkbarToolTab("review"), createWorkbarToolTab("tasks")],
-      },
-      bottom: {
-        collapsed: false,
-        tabs: [{ id: "terminal:1", kind: "terminal", label: "Terminal 1" }],
-      },
-    },
+    width: 480,
+    collapsed: false,
+    tabs: [
+      createWorkbarToolTab("review"),
+      createWorkbarToolTab("tasks"),
+      { id: "terminal:1", kind: "terminal", label: "Terminal 1" },
+    ],
   });
   const html = renderToStaticMarkup(
     React.createElement(SessionWorkbarLayout, {
@@ -38,16 +33,13 @@ test("desktop Workbar renders accessible right and bottom Docks with persistent 
   );
 
   assert.match(html, /aria-label="右侧任务工作栏"/u);
-  assert.match(html, /aria-label="底部任务工作栏"/u);
-  assert.equal((html.match(/role="tablist"/gu) ?? []).length, 2);
+  assert.doesNotMatch(html, /底部任务工作栏|session-workbar-height/u);
+  assert.equal((html.match(/role="tablist"/gu) ?? []).length, 1);
   assert.match(html, /role="tab"[^>]+aria-selected="true"/u);
   assert.match(html, /hidden=""[^>]+tabindex="-1"/u);
   assert.match(html, /aria-valuemin="320"/u);
   assert.match(html, /aria-valuemax="600"/u);
-  assert.match(html, /aria-valuemin="180"/u);
-  assert.match(html, /aria-valuemax="520"/u);
   assert.match(html, /--session-workbar-width:480px/u);
-  assert.match(html, /--session-workbar-height:360px/u);
   assert.match(html, /aria-label="关闭“变更”"/u);
 });
 
@@ -67,7 +59,7 @@ test("new tasks render without Workbar chrome until a session exists", () => {
   assert.doesNotMatch(html, /任务工作栏|session-workbar/u);
 });
 
-test("desktop Workbar v2 source exposes full Registry, context menu and keyboard alternatives", async () => {
+test("desktop Workbar source exposes full Registry, context menu and keyboard alternatives", async () => {
   assert.deepEqual(
     WORKBAR_TOOL_REGISTRY.map(({ kind, label }) => ({ kind, label })),
     [
@@ -83,12 +75,12 @@ test("desktop Workbar v2 source exposes full Registry, context menu and keyboard
   );
 
   const source = await rendererSource("workbar/SessionWorkbar.tsx");
-  assert.match(source, /type: "moveDock"/u);
+  assert.doesNotMatch(source, /moveDock|PanelBottom|底部工作栏/u);
   assert.match(source, /type: "pinPreview"/u);
   assert.match(source, /type: "closeOthers"/u);
   assert.match(source, /type: "closeRight"/u);
   assert.match(source, /Shift\+F10/u);
-  assert.match(source, /Alt\+Shift\+ArrowUp/u);
+  assert.match(source, /Alt\+ArrowLeft Alt\+ArrowRight/u);
   assert.match(source, /onContextMenu/u);
   assert.match(source, /onDoubleClick/u);
 });
@@ -114,7 +106,7 @@ test("desktop hydrates the existing session context report for the Inspector aut
   const runtimeSource = await rendererSource("runtime.ts");
 
   assert.match(runtimeSource, /optionalInvoke\(bridge, "session\.context\.get"/u);
-  assert.match(runtimeSource, /context: parseSessionContext\(contextResult\.value\)/u);
+  assert.match(runtimeSource, /const context = parseSessionContext\(result\.value\)/u);
 });
 
 async function rendererSource(fileName: string): Promise<string> {

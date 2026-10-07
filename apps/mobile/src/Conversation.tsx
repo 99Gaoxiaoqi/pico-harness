@@ -401,7 +401,6 @@ export function Conversation({
                   onPress={() => openPanel("研究")}
                 />
                 <View style={s.row}>
-                  <Button title="工作栏" quiet onPress={() => openPanel()} />
                   <Button
                     title="侧聊"
                     quiet

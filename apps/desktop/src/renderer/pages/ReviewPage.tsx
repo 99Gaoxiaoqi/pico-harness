@@ -223,6 +223,15 @@ export function ReviewPage() {
   };
   return (
     <div className="page-stack review-page">
+      <header className="review-page__heading">
+        <h1>查看运行改动</h1>
+        {sessionRef && (
+          <Button variant="quiet" onClick={() => navigate(sessionHref(sessionRef))}>
+            返回会话
+          </Button>
+        )}
+      </header>
+      <p>选择一次已结束的运行，查看它修改的文件，并确认结果或提出修改意见。</p>
       <section className="review-scope" aria-label="审阅范围">
         <div className="review-scope-field">
           任务

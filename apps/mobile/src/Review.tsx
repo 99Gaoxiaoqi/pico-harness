@@ -226,8 +226,9 @@ export function ReviewPanel({
   return (
     <View style={{ gap: 16 }}>
       <View style={{ gap: 7 }}>
-        <Text style={s.title}>审阅改动</Text>
-        <Label>文件已在电脑工作区。批准记录审阅结果，不会再次保存代码。</Label>
+        <Text style={s.title}>查看文件改动</Text>
+        <Label>查看一次运行修改的文件，或电脑工作区的 Git 差异。</Label>
+        <Label>可确认运行结果或提出修改意见。文件已在电脑工作区，批准只记录审阅结果。</Label>
       </View>
       <Chips
         values={["运行变更", "工作区 Git"] as const}

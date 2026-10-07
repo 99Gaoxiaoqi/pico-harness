@@ -39,8 +39,9 @@ Pico daemon ── Agent Runtime / Session / Rewind / Automations
 stop/list/attach 保持在同一个 Terminal 控制器模块，关闭标签仍先等待终端停止。
 公开面板入口保留兼容导出，页面无需重建另一份资源状态。
 
-Workbar 只持久化 v2 双 Dock 结构。Renderer State 只暴露 `docks`、`focusedDock`、
-`rightWidth` 和 `bottomHeight`；v1 单 Dock payload 不再迁移，读取时按损坏状态回退到安全默认值。
+Workbar 统一在右侧打开，窄窗口从右侧覆盖主对话。Renderer State 只持有标签、选中项、
+最近使用顺序、折叠状态、启动器状态和宽度。持久化使用 v3 单栏格式；其他版本回退到
+默认布局，不保留旧布局迁移逻辑。会话与工具资源仍由 Runtime 管理。
 
 ## 数据所有权
 

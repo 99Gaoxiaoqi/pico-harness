@@ -24,6 +24,8 @@ export function SessionActions({
   const lock = useRef(false);
   const fence = useRef(0);
   const readVersion = useRef(0);
+  const idleRef = useRef(idle);
+  idleRef.current = idle;
   const readScope = `${pico.generation}:${pico.connected}:${pico.syncRevision}:${sessionId}`;
   const currentScope = useRef(readScope);
   currentScope.current = readScope;
@@ -139,50 +141,66 @@ export function SessionActions({
     });
   }
   const idleReason = busy ? "正在处理" : !idle ? "等待当前任务结束后操作" : undefined;
-  return (
-    <View style={{ gap: 12 }}>
-      <View style={s.row}>
-        <Button
-          title="分叉会话"
-          secondary
-          reason={idleReason ?? pico.reason("session.fork")}
-          onPress={() =>
+  function confirmSessionAction(kind: "fork" | "compact") {
+    if (idleReason) return;
+    const token = fence.current;
+    const scope = currentScope.current;
+    Alert.alert(
+      kind === "fork" ? "复制为新会话？" : "压缩上下文？",
+      kind === "fork"
+        ? "继承当前对话的上下文和设置，在新会话中尝试另一种方案。两个会话共用同一项目目录，文件修改会相互影响。"
+        : "通过模型把较早的对话整理为摘要，减少后续请求的上下文占用。历史记录仍可查看，摘要可能省略细节。",
+      [
+        { text: "取消", style: "cancel" },
+        {
+          text: kind === "fork" ? "创建新会话" : "确认压缩",
+          onPress: () => {
+            if (token !== fence.current || scope !== currentScope.current || !idleRef.current)
+              return;
             void pico.perform(() =>
               perform(async () => {
-                const token = fence.current;
-                const x = await pico.request("session.fork", { sessionId });
-                if (token === fence.current) {
-                  onClose();
-                  onSession(x.session.sessionId);
+                if (kind === "fork") {
+                  const x = await pico.request("session.fork", { sessionId });
+                  if (token === fence.current && scope === currentScope.current) {
+                    onClose();
+                    onSession(x.session.sessionId);
+                  }
+                } else {
+                  const x = await pico.request("session.compact", { sessionId });
+                  if (token === fence.current && scope === currentScope.current)
+                    setNotice(
+                      `已压缩：${x.beforeMessageCount} → ${x.afterMessageCount} 条上下文消息。`,
+                    );
                 }
               }),
-            )
-          }
+            );
+          },
+        },
+      ],
+    );
+  }
+  return (
+    <View style={{ gap: 12 }}>
+      <View style={{ gap: 6 }}>
+        <Button
+          title="复制为新会话"
+          secondary
+          reason={idleReason ?? pico.reason("session.fork")}
+          onPress={() => confirmSessionAction("fork")}
         />
+        <Label>沿用当前上下文尝试另一种方案，新旧会话共用项目文件。</Label>
+      </View>
+      <View style={{ gap: 6 }}>
+        <Text accessibilityRole="header" style={s.text}>
+          上下文管理
+        </Text>
         <Button
           title="压缩上下文"
           secondary
           reason={idleReason ?? pico.reason("session.compact")}
-          onPress={() =>
-            Alert.alert("压缩当前会话？", "电脑会整理已有上下文，保留会话的后续工作。", [
-              { text: "返回" },
-              {
-                text: "压缩",
-                onPress: () =>
-                  void pico.perform(() =>
-                    perform(async () => {
-                      const token = fence.current;
-                      const x = await pico.request("session.compact", { sessionId });
-                      if (token === fence.current)
-                        setNotice(
-                          `已压缩：${x.beforeMessageCount} → ${x.afterMessageCount} 条上下文消息。`,
-                        );
-                    }),
-                  ),
-              },
-            ])
-          }
+          onPress={() => confirmSessionAction("compact")}
         />
+        <Label>用摘要减少后续请求的上下文占用，保留历史记录；适用于较长对话。</Label>
       </View>
       <Text accessibilityRole="header" style={s.text}>
         持续目标

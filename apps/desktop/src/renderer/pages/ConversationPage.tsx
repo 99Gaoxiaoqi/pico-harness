@@ -9,6 +9,7 @@ import { applyConversationSettings } from "../conversation/conversation-settings
 import { useConversationGoal } from "../conversation/ConversationGoalControls.js";
 import { ComposerContextGauge } from "../conversation/ComposerContextGauge.js";
 import { DeepResearchPanel } from "../conversation/DeepResearchPanel.js";
+import { ConversationActionsMenu } from "../conversation/ConversationActionsMenu.js";
 import {
   subagentMetadata,
   subagentParent,
@@ -23,8 +24,6 @@ import {
   Folder,
   FolderGit2,
   GitFork,
-  Minimize2,
-  PanelBottomOpen,
   PanelRightClose,
   PanelRightOpen,
   Pencil,
@@ -95,7 +94,6 @@ import {
   resolveWorkbarShortcut,
   saveWorkbarState,
   type WorkbarAction,
-  type WorkbarDock,
   type WorkbarTab,
   type WorkbarToolKind,
 } from "../workbar/index.js";
@@ -309,7 +307,6 @@ export function ConversationPage() {
     }
     dispatchWorkbar({
       type: "openPreview",
-      dock: "right",
       tab: { id: "inspector-preview", kind: "inspector", label: inspector.title },
     });
   }, [inspector]);
@@ -843,7 +840,7 @@ export function ConversationPage() {
     const panelId = `side-chat:${globalThis.crypto.randomUUID()}`;
     const tab: WorkbarTab = { id: panelId, kind: "side-chat", label: "侧聊" };
     setSideChatQuoteRequest({ panelId, id: globalThis.crypto.randomUUID(), text });
-    dispatchWorkbar({ type: "open", tab, dock: "right" });
+    dispatchWorkbar({ type: "open", tab });
   };
 
   const reviseUserMessage = async (
@@ -934,8 +931,8 @@ export function ConversationPage() {
 
   const workbarChangeCount = conversation?.changes?.length ?? 0;
   const renderWorkbarPanel = useCallback(
-    (tab: WorkbarTab, dock: WorkbarDock): ReactNode => {
-      const active = isWorkbarPanelActive(workbar, dock, tab.id, {
+    (tab: WorkbarTab): ReactNode => {
+      const active = isWorkbarPanelActive(workbar, tab.id, {
         sessionBound: Boolean(sessionRef),
       });
       if (tab.kind === "inspector") {
@@ -1030,14 +1027,11 @@ export function ConversationPage() {
         dispatchWorkbar(action);
         return;
       }
-      const dock = (Object.keys(workbar.docks) as WorkbarDock[]).find((candidate) =>
-        workbar.docks[candidate].tabs.some((tab) => tab.id === action.tabId),
-      );
-      if (!dock) {
+      const tabs = workbar.tabs;
+      if (!tabs.some((tab) => tab.id === action.tabId)) {
         dispatchWorkbar(action);
         return;
       }
-      const tabs = workbar.docks[dock].tabs;
       const targetIndex = tabs.findIndex((tab) => tab.id === action.tabId);
       const closingTabs =
         action.type === "close"
@@ -1060,10 +1054,10 @@ export function ConversationPage() {
         ),
       ).finally(() => dispatchWorkbar(action));
     },
-    [sessionId, workbar.docks, workspacePath],
+    [sessionId, workbar.tabs, workspacePath],
   );
 
-  const openWorkbarTab = useCallback((kind: WorkbarToolKind, dock?: WorkbarDock) => {
+  const openWorkbarTab = useCallback((kind: WorkbarToolKind) => {
     const tool = getWorkbarTool(kind);
     const tab = tool.multiple
       ? {
@@ -1072,7 +1066,7 @@ export function ConversationPage() {
           label: tool.label,
         }
       : createWorkbarToolTab(kind);
-    dispatchWorkbar({ type: "open", tab, dock: dock ?? tool.defaultDock });
+    dispatchWorkbar({ type: "open", tab });
   }, []);
 
   useEffect(() => {
@@ -1086,30 +1080,25 @@ export function ConversationPage() {
     return () => window.removeEventListener("keydown", handleShortcut);
   }, [openWorkbarTab, sessionRef]);
 
-  const workbarLauncher = useCallback(
-    (dock: WorkbarDock): ReactNode =>
-      workbar.docks[dock].launcherOpen ? (
-        <WorkbarLauncher
-          dock={dock}
-          renderIcon={(kind) =>
-            kind === "review" ? (
-              <FileDiff size={15} />
-            ) : kind === "terminal" ? (
-              <TerminalSquare size={15} />
-            ) : kind === "side-chat" ? (
-              <Bot size={15} />
-            ) : kind === "files" ? (
-              <Folder size={15} />
-            ) : (
-              <Code2 size={15} />
-            )
-          }
-          onOpen={(kind, targetDock) => openWorkbarTab(kind, targetDock)}
-          onClose={() => dispatchWorkbar({ type: "setLauncherOpen", dock, open: false })}
-        />
-      ) : undefined,
-    [openWorkbarTab, workbar.docks],
-  );
+  const workbarLauncher = workbar.launcherOpen ? (
+    <WorkbarLauncher
+      renderIcon={(kind) =>
+        kind === "review" ? (
+          <FileDiff size={15} />
+        ) : kind === "terminal" ? (
+          <TerminalSquare size={15} />
+        ) : kind === "side-chat" ? (
+          <Bot size={15} />
+        ) : kind === "files" ? (
+          <Folder size={15} />
+        ) : (
+          <Code2 size={15} />
+        )
+      }
+      onOpen={openWorkbarTab}
+      onClose={() => dispatchWorkbar({ type: "setLauncherOpen", open: false })}
+    />
+  ) : undefined;
 
   const goalControls = useConversationGoal({
     snapshot: conversation?.goal,
@@ -1166,7 +1155,7 @@ export function ConversationPage() {
         handleWorkbarAction(action);
         if (action.type === "setCollapsed" && action.collapsed) {
           window.requestAnimationFrame(() =>
-            document.getElementById(`workbar-toggle-${action.dock}`)?.focus(),
+            document.getElementById("workbar-toggle-right")?.focus(),
           );
         }
       }}
@@ -1186,28 +1175,6 @@ export function ConversationPage() {
                       {workspacePath}
                       {data.workspaceBranch ? ` · ${data.workspaceBranch}` : ""}
                     </span>
-                    <Button
-                      variant="quiet"
-                      type="button"
-                      title="在文件管理器中打开当前 worktree"
-                      onClick={() => void actions.openWorkspace(workspacePath)}
-                    >
-                      打开文件夹
-                    </Button>
-                    <Button
-                      variant="quiet"
-                      type="button"
-                      title="复制当前会话的 worktree 路径"
-                      onClick={() =>
-                        void copyText(workspacePath)
-                          .then(() => actions.showMessage?.("已复制当前 worktree 路径。"))
-                          .catch(() =>
-                            actions.showMessage?.("复制路径失败，请检查系统剪贴板权限。"),
-                          )
-                      }
-                    >
-                      复制路径
-                    </Button>
                   </div>
                 )}
                 {parentRef && (
@@ -1290,75 +1257,46 @@ export function ConversationPage() {
                     type="button"
                     className="conversation-graph-status"
                     aria-label="打开 Graph 面板"
-                    onClick={() => openWorkbarTab("graph", "right")}
+                    onClick={() => openWorkbarTab("graph")}
                   >
                     <GitFork aria-hidden="true" /> Graph
                   </Button>
                 )}
                 {sessionRef && (
                   <div className="conversation-session-actions" aria-label="会话操作">
-                    <Button
-                      variant="quiet"
-                      type="button"
-                      disabled={Boolean(activeRun) || Boolean(busy)}
-                      onClick={() =>
+                    <ConversationActionsMenu
+                      key={conversationKey}
+                      disabledReason={
+                        activeRun
+                          ? "等待当前运行结束后操作"
+                          : busy
+                            ? "正在处理，请稍后操作"
+                            : undefined
+                      }
+                      onReview={() =>
                         navigate(
                           `/review?${new URLSearchParams({ workspace: workspacePath, sessionId: sessionRef.sessionId })}`,
                         )
                       }
-                    >
-                      <FileDiff aria-hidden="true" /> 审阅更改
-                    </Button>
-                    <Button
-                      variant="quiet"
-                      type="button"
-                      disabled={Boolean(activeRun) || Boolean(busy)}
-                      onClick={() => setEditingTitle(true)}
-                    >
-                      <Pencil aria-hidden="true" /> 重命名
-                    </Button>
-                    <Button
-                      variant="quiet"
-                      type="button"
-                      disabled={Boolean(activeRun) || Boolean(busy)}
-                      onClick={() =>
-                        void actions
-                          .forkSession(sessionRef)
-                          .then((forked) => forked && navigate(sessionHref(forked)))
+                      onRename={() => setEditingTitle(true)}
+                      onFork={async () => {
+                        const source = draftKey;
+                        const forked = await actions.forkSession(sessionRef);
+                        if (!forked || sendRouteRef.current !== source) return false;
+                        navigate(sessionHref(forked));
+                        return true;
+                      }}
+                      onCompact={commands.requestCompact}
+                      onOpenWorkspace={() => void actions.openWorkspace(workspacePath)}
+                      onCopyWorkspacePath={() =>
+                        void copyText(workspacePath)
+                          .then(() => actions.showMessage?.("已复制当前会话的项目路径。"))
+                          .catch(() =>
+                            actions.showMessage?.("复制路径失败，请检查系统剪贴板权限。"),
+                          )
                       }
-                    >
-                      <GitFork aria-hidden="true" /> 分叉
-                    </Button>
-                    <Button
-                      variant="quiet"
-                      type="button"
-                      disabled={Boolean(activeRun) || Boolean(busy)}
-                      onClick={commands.requestCompact}
-                    >
-                      <Minimize2 aria-hidden="true" /> 压缩
-                    </Button>
+                    />
                   </div>
-                )}
-                {sessionRef && (
-                  <Button
-                    variant="quiet"
-                    type="button"
-                    id="workbar-toggle-bottom"
-                    className="conversation-panel-toggle"
-                    aria-label={
-                      workbar.docks.bottom.collapsed ? "打开底部工作栏" : "收起底部工作栏"
-                    }
-                    aria-expanded={!workbar.docks.bottom.collapsed}
-                    onClick={() =>
-                      dispatchWorkbar({
-                        type: "setCollapsed",
-                        dock: "bottom",
-                        collapsed: !workbar.docks.bottom.collapsed,
-                      })
-                    }
-                  >
-                    <PanelBottomOpen aria-hidden="true" />
-                  </Button>
                 )}
                 {sessionRef && (
                   <Button
@@ -1366,17 +1304,16 @@ export function ConversationPage() {
                     type="button"
                     className="conversation-panel-toggle"
                     id="workbar-toggle-right"
-                    aria-label={workbar.docks.right.collapsed ? "打开任务工作栏" : "收起任务工作栏"}
-                    aria-expanded={!workbar.docks.right.collapsed}
+                    aria-label={workbar.collapsed ? "打开任务工作栏" : "收起任务工作栏"}
+                    aria-expanded={!workbar.collapsed}
                     onClick={() =>
                       dispatchWorkbar({
                         type: "setCollapsed",
-                        dock: "right",
-                        collapsed: !workbar.docks.right.collapsed,
+                        collapsed: !workbar.collapsed,
                       })
                     }
                   >
-                    {workbar.docks.right.collapsed ? (
+                    {workbar.collapsed ? (
                       <PanelRightOpen aria-hidden="true" />
                     ) : (
                       <PanelRightClose aria-hidden="true" />
@@ -1396,7 +1333,7 @@ export function ConversationPage() {
                 {...(sessionId ? { sessionId } : {})}
                 refreshKey={`${activeRun?.id ?? "idle"}:${activeRun?.status ?? "idle"}:${conversation?.items.length ?? 0}`}
                 busy={Boolean(activeRun) || Boolean(busy) || Boolean(pendingResearchSend)}
-                onOpenArtifacts={() => openWorkbarTab("files", "right")}
+                onOpenArtifacts={() => openWorkbarTab("files")}
                 onImplement={implementResearch}
                 onStarter={handleDraftChange}
               />
@@ -1414,7 +1351,7 @@ export function ConversationPage() {
                   conversation?.settings?.orchestrationMode === "swarm"
                 }
                 refreshKey={`${activeRun?.id ?? "idle"}:${activeRun?.status ?? "idle"}:${conversation?.items.length ?? 0}`}
-                onDetails={() => openWorkbarTab("graph", "right")}
+                onDetails={() => openWorkbarTab("graph")}
                 onOpenSession={(childSessionId) =>
                   navigate(
                     `${sessionHref({ workspacePath, sessionId: childSessionId })}&graphParent=${encodeURIComponent(sessionRef.sessionId)}`,
@@ -1934,7 +1871,7 @@ export function ConversationPage() {
                       handleDraftChange(originalRequest.text);
                       window.requestAnimationFrame(() => composerInputRef.current?.focus());
                     }}
-                    onDiagnostics={() => openWorkbarTab("inspector", "right")}
+                    onDiagnostics={() => openWorkbarTab("inspector")}
                   />
                 );
               }}
