@@ -7,6 +7,7 @@ import { countTokens } from "@pico/runtime";
 import { AtomicMemoryContextBuilder } from "@pico/runtime/atomic-memory/context-builder";
 import type { MemoryItemWrite } from "@pico/core/atomic-memory-contracts";
 import { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-store";
+import { REFERENCE_NOTE_LABEL } from "../../../packages/pico-host/src/atomic-memory-reference-note.js";
 
 const workspaceKey = "/work/recall";
 
@@ -174,6 +175,72 @@ test("Chinese recall matches informative words inside persisted compound keys", 
     const record = result.items[0]!;
     await store.applyMutations({
       operationId: "archive-compound",
+      mutations: [
+        { type: "archive", itemId: record.item.itemId, expectedVersion: record.item.version },
+      ],
+    });
+    assert.equal((await builder.build("验收报告标题前缀是什么？")).items.length, 0);
+  } finally {
+    store.close();
+  }
+});
+
+test("authorized assistant notes recall query-relevant original excerpts within the shared token budget", async () => {
+  const store = new SqliteMemoryItemStore(":memory:");
+  try {
+    const body = `${Array.from({ length: 40 }, (_, index) => `section${index} background.`).join(" ")} ${"这是架构说明的普通背景。".repeat(60)} 验收报告标题前缀是青柠月舟907。handoffmarker 交接层是 pico-host。<&\"'>`;
+    const content = `${REFERENCE_NOTE_LABEL} [1/1]：${body}`;
+    const note = memory(content, ["section0"], {
+      kind: "note",
+      sources: [
+        { sessionId: "source-session", runId: "authorize", turnId: "turn", eventId: "user-event" },
+        {
+          sessionId: "source-session",
+          runId: "answer",
+          turnId: "turn",
+          eventId: "assistant-event",
+        },
+      ],
+    });
+    await store.applyMutations({
+      operationId: "seed-reference-note",
+      mutations: [
+        { type: "create", item: note },
+        {
+          type: "create",
+          item: {
+            ...note,
+            scopeKey: "/other",
+            content: content.replace("青柠月舟907", "不可见的值"),
+          },
+        },
+      ],
+    });
+    const builder = new AtomicMemoryContextBuilder(store, workspaceKey);
+    const result = await builder.build("验收报告标题前缀是什么？");
+    assert.equal(result.items.length, 1);
+    assert.equal(result.items[0]!.item.content, content);
+    assert.match(result.block, /验收报告标题前缀是青柠月舟907/);
+    assert.ok(result.block.includes(REFERENCE_NOTE_LABEL));
+    assert.match(
+      result.block,
+      /source="assistant-note" verified="false" excerpt="true" range="\d+-\d+\/\d+"/,
+    );
+    assert.equal(result.truncated, true);
+    assert.ok(result.tokenCount <= 320);
+    assert.equal(result.tokenCount, countTokens(result.block));
+    assert.ok(result.block.endsWith("</atomic-memory-reference>"));
+    assert.ok(!result.block.includes("不可见的值"));
+    const handoff = await builder.build("handoffmarker");
+    assert.match(handoff.block, /handoffmarker 交接层是 pico-host/);
+    assert.match(handoff.block, /&lt;&amp;&quot;&apos;&gt;/);
+    assert.ok(!handoff.block.includes("<&"));
+    for (const query of [undefined, "继续", "unrelatedvacation", "项目怎么样？"]) {
+      assert.equal((await builder.build(query)).items.length, 0);
+    }
+    const record = result.items[0]!;
+    await store.applyMutations({
+      operationId: "archive-reference-note",
       mutations: [
         { type: "archive", itemId: record.item.itemId, expectedVersion: record.item.version },
       ],
