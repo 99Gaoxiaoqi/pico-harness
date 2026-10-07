@@ -197,3 +197,108 @@ test("Runtime saves a host-bound preceding reply exactly once, exposes ambiguity
   assert.ok(desktopNotes[0]!.item.content.includes("DesktopNote730"));
   assert.equal(modelAcquisitions, 0);
 });
+
+test("committed human steering supersedes an earlier reference-note authorization", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-reference-steer-"));
+  const workDir = join(root, "workspace"),
+    picoHome = join(root, "home"),
+    sessionId = "reference-steer";
+  await mkdir(workDir);
+  const trust = new WorkspaceTrustStore({ userStateDirectory: picoHome });
+  await trust.trust(await trust.canonicalize(workDir));
+  const lifecycle = new AtomicMemoryLifecycle();
+  const store = new SqliteMemoryItemStore(join(picoHome, "memory.sqlite"));
+  const workspaceKey = resolvePicoPaths(workDir, { picoHome }).workspace.id;
+  await store.updateSettings({ workspaceKey, expectedVersion: 1, autoExtract: false });
+  t.after(async () => {
+    await lifecycle.close();
+    store.close();
+    await globalSessionManager.delete(sessionId, workDir, { picoHome })?.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const request = {
+    dir: workDir,
+    provider: "openai" as const,
+    modelRouteId: "test/test",
+    allowedTools: ["memory_remember"],
+  };
+  const dependencies = {
+    picoHome,
+    memoryTrustStore: trust,
+    atomicMemoryLifecycle: lifecycle,
+    reporter: new SilentReporter(),
+  };
+  await executeAgentRuntime(
+    { ...request, prompt: "说明架构", sessionSelection: { mode: "new", sessionId } },
+    {
+      ...dependencies,
+      provider: {
+        generate: async () => ({ role: "assistant", content: "验收标识为 CancelNote730。" }),
+      },
+    },
+  );
+  const sessionLease = await globalSessionManager.getOrCreatePinned(sessionId, workDir, {
+    picoHome,
+    persistence: true,
+    runtimePort: createEngineRuntimePort(),
+  });
+  const runtimeState = await createSessionRuntime({
+    hookCommandFactory: createHookManagementCommands,
+    session: sessionLease.session,
+    sessionLease,
+    hooks: false,
+    lspServers: [],
+  });
+  let calls = 0;
+  let toolReply = "";
+  try {
+    await executeAgentRuntime(
+      { ...request, prompt: "记一下", sessionSelection: { mode: "resume", sessionId } },
+      {
+        ...dependencies,
+        runtimeState,
+        atomicMemoryModelFactory: async () => ({
+          model: {
+            call: async () =>
+              JSON.stringify({
+                status: "complete",
+                coverageStatus: "processed",
+                requestedStatus: "not_applicable",
+                requestedItems: [],
+                incidentalItems: [],
+              }),
+          },
+        }),
+        provider: {
+          async generate(messages) {
+            if (++calls === 1) {
+              runtimeState.steerQueue.push("不要保存，取消刚才的记忆请求");
+              return { role: "assistant", content: "等待下一条用户输入。" };
+            }
+            if (calls === 2) {
+              assert.ok(
+                messages.some(
+                  (message) => message.role === "user" && message.content.includes("不要保存"),
+                ),
+              );
+              return {
+                role: "assistant",
+                content: "",
+                toolCalls: [
+                  { id: "remember-after-cancel", name: "memory_remember", arguments: "{}" },
+                ],
+              };
+            }
+            toolReply = messages.findLast((message) => message.toolCallId)?.content ?? "";
+            return { role: "assistant", content: "已取消。" };
+          },
+        },
+      },
+    );
+    assert.doesNotMatch(toolReply, /"status":"remembered"/u);
+    assert.match(toolReply, /"status":"not_applicable"/u);
+    assert.equal((await store.listItems({ workspaceKey })).length, 0);
+  } finally {
+    await runtimeState.dispose();
+  }
+});

@@ -462,7 +462,8 @@ export class AtomicMemoryRuntime {
         visible &&
         message.role === "user" &&
         (message.providerData?.["picoKind"] === undefined ||
-          message.providerData?.["picoKind"] === "desktop_user_input");
+          message.providerData?.["picoKind"] === "desktop_user_input" ||
+          message.providerData?.["picoKind"] === "steer");
       return {
         ordinal: sequence,
         eventId: event.eventId,
