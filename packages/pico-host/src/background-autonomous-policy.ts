@@ -1,7 +1,8 @@
 import type { ChildProcess } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { isHardlineCommand } from "@pico/runtime/approval-policy";
+import { analyzeHardlineCommand } from "@pico/runtime/approval-policy";
+import { initializeBashParser } from "@pico/runtime/bash-hardline";
 import { normalizeCanonicalHooksConfig } from "./hooks/config.js";
 import { HookTrustStore } from "@pico/pico-host/hooks/trust/store";
 import type {
@@ -34,7 +35,7 @@ import {
   type ManagedSpawnRequest,
   type SandboxPolicy,
 } from "@pico/pico-host/process-sandbox";
-import { resolveShell, shellCommandArgs } from "@pico/runtime/host-shell";
+import { hostShellDialect, resolveShell, shellCommandArgs } from "@pico/runtime/host-shell";
 import {
   BackgroundAutonomousPolicySnapshotError,
   normalizeExactHostname,
@@ -42,7 +43,7 @@ import {
   type BackgroundAutonomousPolicySnapshotData,
 } from "@pico/core/background-autonomous-policy-schema";
 
-export const BACKGROUND_HARDLINE_VERSION = "builtin-v1" as const;
+export const BACKGROUND_HARDLINE_VERSION = "builtin-v2" as const;
 export const BACKGROUND_HOOK_VERSION = "workspace-v1" as const;
 
 const DEFAULT_HOOK_TIMEOUT_MS = 60_000;
@@ -206,6 +207,9 @@ export function buildBackgroundAutonomousMiddleware(input: {
   sessionId: string;
 }): RequestMiddleware {
   return async (call) => {
+    if (call.name === "bash" && hostShellDialect() === "bash") {
+      await initializeBashParser();
+    }
     const initial = validateBackgroundToolCall(call, input.policy, input.workspaceRoots);
     if (!initial.allowed) return initial;
 
@@ -256,7 +260,7 @@ function validateBackgroundToolCall(
       reason: `[background:tool_denied] 工具 ${call.name} 尚未支持继承后台安全策略。`,
     };
   }
-  if (isHardlineCommand(call.name, call.arguments, policy.workspacePath)) {
+  if (analyzeHardlineCommand(call.name, call.arguments, policy.workspacePath).kind === "deny") {
     return {
       allowed: false,
       reason: "[background:hardline_denied] Hardline 高危命令不可由后台无人值守执行绕过。",

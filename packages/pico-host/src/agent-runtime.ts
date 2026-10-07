@@ -99,12 +99,14 @@ import { logger } from "@pico/pico-host/logger";
 import { RuntimeEventStoreIntegrityError } from "@pico/storage/runtime-event-store-contracts";
 import {
   globalApprovalManager,
-  classifyHardlineCommand,
+  analyzeHardlineCommand,
   type ApprovalManager,
   type ApprovalNotifier,
   type ApprovalResult,
   type HardlineReasonKind,
 } from "@pico/pico-host/global-approval-manager";
+import { initializeBashParser } from "@pico/runtime/bash-hardline";
+import { hostShellDialect } from "@pico/runtime/host-shell";
 import {
   applySessionPermissionScope,
   bypassImmuneSafetyPath,
@@ -3747,8 +3749,12 @@ export function buildForegroundSafetyMiddleware(
         reason: planModeDenial,
       };
     }
-    const hardlineReasonKind = classifyHardlineCommand(call.name, call.arguments, workDir);
-    if (hardlineReasonKind !== undefined) {
+    if (call.name === "bash" && hostShellDialect() === "bash") {
+      await initializeBashParser();
+    }
+    const hardline = analyzeHardlineCommand(call.name, call.arguments, workDir);
+    if (hardline.kind === "deny") {
+      const hardlineReasonKind = hardline.reasonKind ?? "unknown_hardline";
       denialSink?.({
         source: "safety",
         code: "hardline",

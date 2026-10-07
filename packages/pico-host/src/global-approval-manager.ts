@@ -23,6 +23,7 @@ export const globalApprovalManager = new ApprovalManager();
 
 /** @deprecated Runtime approval policy now lives in @pico/runtime. */
 export {
+  analyzeHardlineCommand,
   classifyHardlineCommand,
   isDangerousCommand,
   isHardlineCommand,

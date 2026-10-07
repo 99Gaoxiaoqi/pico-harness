@@ -1,4 +1,5 @@
-import { isDangerousCommand, isHardlineCommand } from "@pico/runtime/approval-policy";
+import { analyzeHardlineCommand, isDangerousCommand } from "@pico/runtime/approval-policy";
+import { initializeBashParser } from "@pico/runtime/bash-hardline";
 import { bashCommandFromArgs } from "@pico/runtime/bash-paths";
 import { classifyBashCommand, type BashSafetyClassification } from "@pico/runtime/bash-safety";
 import {
@@ -206,6 +207,9 @@ export function buildChildAgentSafetyMiddleware(
   },
 ): RequestMiddleware {
   return async (call) => {
+    if (call.name === "bash" && hostShellDialect() === "bash") {
+      await initializeBashParser();
+    }
     if (call.name === "read_file" || call.name === "grep") {
       const path = jsonStringField(call.arguments, "path");
       if (
@@ -248,7 +252,7 @@ export function buildChildAgentSafetyMiddleware(
     }
     if (
       mode === "worker" &&
-      (isHardlineCommand(call.name, call.arguments, config.workDir) ||
+      (analyzeHardlineCommand(call.name, call.arguments, config.workDir).kind === "deny" ||
         isDangerousCommand(call.name, call.arguments))
     ) {
       return {

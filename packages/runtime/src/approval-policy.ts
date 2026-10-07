@@ -1,6 +1,10 @@
-import { classifyHardlineBashCommand, type HardlineBashReasonKind } from "./bash-hardline.js";
-import { hostShellDialect, type HostShellDialect } from "./host-shell.js";
-import { classifyPowerShellHardlineCommand } from "./powershell-safety.js";
+import {
+  analyzeHardlineBashCommand,
+  type BashHardlineAnalysis,
+  type HardlineBashReasonKind,
+} from "./bash-hardline.js";
+import { hostShellDialect } from "./host-shell.js";
+import { analyzePowerShellHardlineCommand } from "./powershell-safety.js";
 
 const DANGEROUS_PATTERNS: readonly RegExp[] = [
   /\brm\b/i,
@@ -30,24 +34,27 @@ export function isDangerousCommand(toolName: string, args: string): boolean {
 
 export type HardlineReasonKind = HardlineBashReasonKind;
 
-/** Fail closed when the host shell cannot safely interpret a bash command. */
 export function classifyHardlineCommand(
   toolName: string,
   args: string,
   workDir?: string,
 ): HardlineReasonKind | undefined {
-  if (toolName !== "bash") return undefined;
-  let dialect: HostShellDialect;
-  try {
-    dialect = hostShellDialect();
-  } catch {
-    return "unknown_hardline";
-  }
+  const analysis = analyzeHardlineCommand(toolName, args, workDir);
+  return analysis.kind === "deny" ? analysis.reasonKind : undefined;
+}
+
+export function analyzeHardlineCommand(
+  toolName: string,
+  args: string,
+  workDir?: string,
+): BashHardlineAnalysis {
+  if (toolName !== "bash") return { kind: "no_match" };
+  const dialect = hostShellDialect();
   const command = parseBashCommand(args);
-  if (command === undefined) return "unknown_hardline";
+  if (command === undefined) return { kind: "unknown", reasonKind: "unknown_hardline" };
   return dialect === "powershell"
-    ? classifyPowerShellHardlineCommand(command)
-    : classifyHardlineBashCommand(command, workDir);
+    ? analyzePowerShellHardlineCommand(command)
+    : analyzeHardlineBashCommand(command, workDir);
 }
 
 export function isHardlineCommand(toolName: string, args: string, workDir?: string): boolean {

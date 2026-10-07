@@ -43,6 +43,7 @@ const config = {
       "../../resources/code-intelligence-worker",
       "../../resources/computer-use",
       "../../resources/licenses",
+      "../../packages/runtime/assets/bash",
     ],
     icon: desktopPackageIcon,
     name: "Pico",

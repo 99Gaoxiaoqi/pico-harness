@@ -13,9 +13,8 @@ export default defineConfig({
   build: {
     sourcemap: false,
     rollupOptions: {
-      // Keep the native addon package boundary intact. Bundling it rewrites the
-      // package-relative `require.addon(".")` lookup to the Vite output folder.
-      external: ["electron", "fs-native-extensions"],
+      // Preserve package-relative native addon and parser WASM lookups.
+      external: ["electron", "fs-native-extensions", "web-tree-sitter"],
       output: {
         codeSplitting: true,
         banner: `globalThis.${bundledModuleUrlGlobal} = require("node:url").pathToFileURL(__filename).href;`,

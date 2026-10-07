@@ -21,8 +21,8 @@ import {
 import { signalProcessTree } from "@pico/runtime/process-tree";
 import { BackgroundManager } from "./background-manager.js";
 import type { WorkspaceRoots } from "./workspace-roots.js";
-import { isHardlineBashCommand } from "@pico/runtime/bash-hardline";
-import { classifyPowerShellHardlineCommand } from "@pico/runtime/powershell-safety";
+import { analyzeHardlineCommand } from "@pico/runtime/approval-policy";
+import { initializeBashParser } from "@pico/runtime/bash-hardline";
 import {
   evaluateSandboxCommand,
   SandboxViolationError,
@@ -187,7 +187,7 @@ export class BashTool implements BaseTool {
     // preflight, static command checks, and the eventual managed spawn request.
     const sandbox = this.options.resolveSandbox?.() ?? this.options.sandbox;
     this.assertSandboxDescriptorSupported(sandbox);
-    this.assertCommandNotHardline(command);
+    await this.assertCommandNotHardline(args);
     const requiredBoundary = await selectedBashBoundaryExpansion(input);
     this.assertDeclaredBoundaryCovered(requiredBoundary, sandbox, command);
 
@@ -377,12 +377,9 @@ export class BashTool implements BaseTool {
     );
   }
 
-  private assertCommandNotHardline(command: string): void {
-    const hardline =
-      hostShellDialect() === "bash"
-        ? isHardlineBashCommand(command, this.workDir)
-        : classifyPowerShellHardlineCommand(command) !== undefined;
-    if (hardline) {
+  private async assertCommandNotHardline(args: string): Promise<void> {
+    if (hostShellDialect() === "bash") await initializeBashParser();
+    if (analyzeHardlineCommand("bash", args, this.workDir).kind === "deny") {
       throw new Error("Hardline 高危命令不可审批绕过，系统直接拒绝。");
     }
   }
