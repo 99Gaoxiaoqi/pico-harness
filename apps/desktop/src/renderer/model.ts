@@ -15,6 +15,7 @@ import type {
   RuntimeSubagentSettingsSnapshot,
   RuntimeSessionContextSnapshot,
   RuntimeGoalSnapshot,
+  RuntimeQueuedInput,
 } from "@pico/protocol";
 
 export type JsonRecord = Readonly<Record<string, unknown>>;
@@ -80,6 +81,7 @@ export interface ConversationView {
   readonly items: readonly ConversationItemView[];
   readonly hasEarlier?: boolean | undefined;
   readonly queuedCount: number;
+  readonly queuedInputs?: readonly RuntimeQueuedInput[] | undefined;
   readonly runId?: string | undefined;
   readonly changes?: readonly ChangeView[] | undefined;
   readonly changeFingerprint?: string | undefined;

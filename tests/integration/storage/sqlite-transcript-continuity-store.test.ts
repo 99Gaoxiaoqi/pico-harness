@@ -204,6 +204,76 @@ test("transcript projection keeps fixed watermarks and advances from the change 
   }
 });
 
+test("transcript prompt anchors, literal search, and around-item pages reach unloaded history", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pico-transcript-search-"));
+  const workspace = join(root, "workspace");
+  mkdirSync(workspace, { recursive: true });
+  const store = new SqliteRuntimeEventStore({ storageRoot: join(root, "storage") });
+  try {
+    const sessionId = "search-session";
+    const { ownerFence } = await initializeRuntimeEventOwner(store, {
+      sessionId,
+      workDir: workspace,
+    });
+    await store.append(message("search-user-event", sessionId, "user", "Find this needle."), {
+      ownerFence,
+    });
+    await store.append(
+      message("search-assistant-event", sessionId, "assistant", "The needle was found."),
+      { ownerFence },
+    );
+    await store.append(
+      message("search-unicode-event", sessionId, "user", "İstanbul ΑΛΦΑ"),
+      { ownerFence },
+    );
+    const anchors = await store.readTranscriptPromptAnchors(sessionId, undefined, 10);
+    assert.deepEqual(
+      anchors.anchors.map(({ eventId, prompt }) => ({ eventId, prompt })),
+      [
+        { eventId: "search-unicode-event", prompt: "İstanbul ΑΛΦΑ" },
+        { eventId: "search-user-event", prompt: "Find this needle." },
+      ],
+    );
+
+    const search = await store.searchTranscriptMessages(sessionId, "NEEDLE", undefined, 10);
+    assert.deepEqual(
+      search.hits.map(({ eventId, role, matchStart, matchLength }) => ({
+        eventId,
+        role,
+        matchStart,
+        matchLength,
+      })),
+      [
+        { eventId: "search-assistant-event", role: "assistant", matchStart: 4, matchLength: 6 },
+        { eventId: "search-user-event", role: "user", matchStart: 10, matchLength: 6 },
+      ],
+    );
+    const unicodeSearch = await store.searchTranscriptMessages(sessionId, "αλφα", undefined, 10);
+    assert.deepEqual(
+      unicodeSearch.hits.map(({ eventId, matchStart, matchLength }) => ({
+        eventId,
+        matchStart,
+        matchLength,
+      })),
+      [{ eventId: "search-unicode-event", matchStart: 9, matchLength: 4 }],
+      "case-insensitive search includes non-ASCII characters and keeps original-text offsets",
+    );
+
+    const watermark = await store.readTranscriptWatermark(sessionId);
+    const page = await store.readTranscriptProjectionPage({
+      sessionId,
+      through: watermark,
+      aroundItemId: search.hits[1]!.itemId,
+      limit: 10,
+      maxBytes: 16_384,
+    });
+    assert.ok(page.items.some((item) => item.itemId === search.hits[1]!.itemId));
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("external import preserves assistant messages that share a synthetic turn", async () => {
   const root = mkdtempSync(join(tmpdir(), "pico-transcript-external-import-"));
   const workspace = join(root, "workspace");

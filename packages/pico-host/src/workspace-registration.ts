@@ -123,7 +123,8 @@ export class WorkspaceRegistrationStore {
         const priorProject = existingWorkspace?.projectId
           ? projects.find((project) => project.projectId === existingWorkspace.projectId)
           : undefined;
-        const project = matchingProject ?? priorProject;
+        const project =
+          matchingProject ?? (identity.gitIdentityPending ? priorProject : undefined);
         if (project) {
           projectId = project.projectId;
           const index = projects.findIndex(

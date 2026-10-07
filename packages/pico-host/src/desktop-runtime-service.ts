@@ -54,6 +54,7 @@ import { StorageDoctor } from "./storage-doctor.js";
 import { SessionForkService } from "./session-fork-service.js";
 import { projectRuntimeSessionState } from "@pico/runtime/session-runtime-projection";
 import { globalSessionManager, Session } from "./session.js";
+import { resolveSessionMediaReferences } from "./session-media.js";
 import { canonicalResourceName, type PersistedSessionSettings } from "@pico/core";
 import {
   getOrCreateSessionSettings,
@@ -1686,31 +1687,59 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, "目标消息不是当前会话中的用户消息");
         }
         const previousEventId = entries[targetIndex - 1]?.event.eventId;
-        if (!previousEventId) {
-          throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.CONFLICT, "目标消息位于会话历史开头，无法安全创建修订分支");
+        const targetEvent = entries[targetIndex]!.event;
+        if (targetEvent.kind !== "message.committed" || targetEvent.data.message.role !== "user") {
+          throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, "目标消息不是当前会话中的用户消息");
         }
+        const targetMessage = targetEvent.data.message;
+        const revisionInput = runtimeInputForRevisedMessage(targetMessage, replacementText);
         const forkService = new SessionForkService({
           workDir: idlePath,
           picoHome: this.picoHome,
           runtimePort: createSessionForkRuntimePort(),
         });
         try {
-          await forkService.fork({ sourceSessionId, targetSessionId, throughEventId: previousEventId, operationId });
+          await forkService.fork({
+            sourceSessionId,
+            targetSessionId,
+            ...(previousEventId
+              ? { throughEventId: previousEventId }
+              : { beforeFirstEventId: targetEventId }),
+            operationId,
+          });
         } finally {
           forkService.close();
         }
+        this.workbarRepository(idlePath).forkSessionData(sourceSessionId, targetSessionId);
+        const copiedMessage = resolveSessionMediaReferences(
+          resolvePicoPaths(idlePath, { picoHome: this.picoHome }).workspace.root,
+          targetSessionId,
+          {
+            role: "user",
+            content: "",
+            ...(targetMessage.images?.length ? { images: targetMessage.images } : {}),
+          },
+        );
+        const resolvedInput = await this.resolveRuntimeUserInput(idlePath, revisionInput);
+        return {
+          workspacePath: idlePath,
+          input: revisionInput,
+          resolvedInput: {
+            ...resolvedInput,
+            ...(copiedMessage.images?.length ? { images: copiedMessage.images } : {}),
+          },
+        };
       } finally {
         sourceLease.release();
       }
-      this.workbarRepository(idlePath).forkSessionData(sourceSessionId, targetSessionId);
-      return idlePath;
     });
     const sent = parseRuntimeResult(
       "session.send",
       await this.sendSession({
-        workspacePath: trustedPath,
+        workspacePath: trustedPath.workspacePath,
         sessionId: targetSessionId,
-        input: { kind: "text", text: replacementText },
+        input: trustedPath.input,
+        resolvedInput: trustedPath.resolvedInput,
         idempotencyKey: `revise-send:${createHash("sha256").update(`${idempotencyKey}\0${requestFingerprint}`).digest("hex")}`,
         behavior: "auto",
       }),
@@ -2789,6 +2818,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     readonly expectedRunId?: string;
     readonly idempotencyKey: string;
     readonly replayOnly?: true;
+    readonly resolvedInput?: ResolvedRuntimeUserInput;
   }): Promise<JsonValue> {
     const canonical = await this.options.runtimeService.canonicalizeWorkspacePath(
       params.workspacePath,
@@ -2849,6 +2879,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     readonly behavior?: "auto" | "steer" | "queue" | "replace";
     readonly expectedRunId?: string;
     readonly idempotencyKey: string;
+    readonly resolvedInput?: ResolvedRuntimeUserInput;
   }): Promise<JsonObject> {
     const behavior = params.behavior ?? "auto";
     if (params.sessionId && params.initialSettings) {
@@ -2859,9 +2890,11 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     }
     // Resolve a first-message activation before creating durable session metadata. Invalid
     // catalog selections must not leave behind an empty session.
-    const initialResolution = params.sessionId
-      ? undefined
-      : await this.resolveRuntimeUserInput(params.workspacePath, params.input);
+    const initialResolution =
+      params.resolvedInput ??
+      (params.sessionId
+        ? undefined
+        : await this.resolveRuntimeUserInput(params.workspacePath, params.input));
     const existingFirstSendClaim = await this.conversationStateStore.getFirstSendClaim(
       params.workspacePath,
       params.idempotencyKey,
@@ -2990,6 +3023,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
 
       const activation = isRuntimeActivation(params.input);
       const resolution =
+        params.resolvedInput ??
         initialResolution ??
         (activation
           ? await this.resolveRuntimeUserInput(params.workspacePath, params.input)
@@ -3004,6 +3038,12 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           );
         }
         if (behavior === "queue" || behavior === "replace" || activation) {
+          if (params.resolvedInput?.images?.length) {
+            throw new RuntimeProtocolError(
+              RUNTIME_ERROR_CODES.CONFLICT,
+              "修订消息包含原会话图片，当前工作区繁忙；请等待运行结束后重试。",
+            );
+          }
           await this.conversationStateStore.enqueue(params.workspacePath, sessionId, admittedInput);
           const run =
             behavior === "replace"
@@ -3045,6 +3085,12 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         this.goalCoordinator.isSettling(params.workspacePath, sessionId) ||
         (await this.findActiveWorkspaceRun(params.workspacePath))
       ) {
+        if (params.resolvedInput?.images?.length) {
+          throw new RuntimeProtocolError(
+            RUNTIME_ERROR_CODES.CONFLICT,
+            "修订消息包含原会话图片，当前工作区繁忙；请等待运行结束后重试。",
+          );
+        }
         await this.conversationStateStore.enqueue(params.workspacePath, sessionId, admittedInput);
         return { session: sessionRecord, disposition: "queued" };
       }
@@ -3231,6 +3277,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
             picoDesktopInputId: messageId,
             displayText,
             ...(input.kind === "text" && input.skills ? { skills: input.skills } : {}),
+            ...(input.kind === "text" && input.orchestrationMode
+              ? { picoDesktopOrchestrationMode: input.orchestrationMode }
+              : {}),
           },
           ...(images && images.length > 0 ? { images } : {}),
         });
@@ -3373,32 +3422,43 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   }
 
   private async consumeWorkspaceQueuedOnce(workspacePath: string): Promise<boolean> {
-    if (this.lifecycleState !== "open" || (await this.findActiveWorkspaceRun(workspacePath)))
-      return true;
-    let queued;
-    if (this.conversationStateStore.listWorkspaceQueued)
-      queued = await this.conversationStateStore.listWorkspaceQueued(workspacePath);
-    else {
-      const listed = requireJsonRecord(await this.listSessions(workspacePath), "session.list");
-      const sessions = Array.isArray(listed["sessions"])
-        ? listed["sessions"].filter(isJsonRecord)
-        : [];
-      queued = (
-        await Promise.all(
-          sessions.map((session) =>
-            this.conversationStateStore.listQueued(workspacePath, String(session["sessionId"])),
-          ),
+    while (this.lifecycleState === "open") {
+      if (await this.findActiveWorkspaceRun(workspacePath)) return true;
+      let queued;
+      if (this.conversationStateStore.listWorkspaceQueued) {
+        queued = await this.conversationStateStore.listWorkspaceQueued(workspacePath);
+      } else {
+        const listed = requireJsonRecord(await this.listSessions(workspacePath), "session.list");
+        const sessions = Array.isArray(listed["sessions"])
+          ? listed["sessions"].filter(isJsonRecord)
+          : [];
+        queued = (
+          await Promise.all(
+            sessions.map(async (session) =>
+              (
+                await this.conversationStateStore.listQueued(
+                  workspacePath,
+                  String(session["sessionId"]),
+                )
+              ).slice(0, 1),
+            ),
+          )
         )
-      )
-        .flat()
-        .sort((a, b) => a.createdAt - b.createdAt);
+          .flat()
+          .sort((a, b) => a.createdAt - b.createdAt || a.queueId.localeCompare(b.queueId));
+      }
+      const next = queued[0];
+      if (!next) return false;
+      if (this.goalCoordinator.isSettling(workspacePath, next.sessionId)) return true;
+      const consumed = await this.withSessionAdmission(workspacePath, next.sessionId, () =>
+        this.consumeNextQueued(workspacePath, next.sessionId),
+      );
+      // A queued item can be removed after workspace selection but before its
+      // session admission. Re-select while holding the workspace drain lane so
+      // another session's pending input is not stranded behind the stale pick.
+      if (consumed) return true;
     }
-    const next = queued[0];
-    if (!next) return false;
-    if (this.goalCoordinator.isSettling(workspacePath, next.sessionId)) return true;
-    return this.withSessionAdmission(workspacePath, next.sessionId, () =>
-      this.consumeNextQueued(workspacePath, next.sessionId),
-    );
+    return true;
   }
 
   private async reconcileGoalContinuations(): Promise<void> {
@@ -5385,6 +5445,34 @@ function queuedInputResult(value: DesktopQueuedInput): RuntimeQueuedInput {
     input: value.input,
     createdAt: value.createdAt,
   };
+}
+
+function runtimeInputForRevisedMessage(message: Message | undefined, text: string): RuntimeUserInput {
+  if (!message) return normalizeRuntimeUserInput({ kind: "text", text });
+  const providerData = message.providerData;
+  const skills = Array.isArray(providerData?.["skills"])
+    ? providerData["skills"].flatMap((value): RuntimeSkillReference[] => {
+        if (!isJsonRecord(value) || typeof value["name"] !== "string") return [];
+        return [
+          {
+            name: value["name"],
+            ...(typeof value["sourceId"] === "string" ? { sourceId: value["sourceId"] } : {}),
+            ...(typeof value["sourcePath"] === "string"
+              ? { sourcePath: value["sourcePath"] }
+              : {}),
+          },
+        ];
+      })
+    : [];
+  const orchestrationMode = providerData?.["picoDesktopOrchestrationMode"];
+  return normalizeRuntimeUserInput({
+    kind: "text",
+    text,
+    ...(skills.length > 0 ? { skills } : {}),
+    ...(orchestrationMode === "graph" || orchestrationMode === "swarm"
+      ? { orchestrationMode }
+      : {}),
+  });
 }
 
 /**

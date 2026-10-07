@@ -46,6 +46,12 @@ class Source implements SessionContinuityDataSource {
   ): Promise<RuntimeResult<"session.transcript.page">> {
     return { watermark: params.through, items: [] };
   }
+  async readTranscriptAnchors(): Promise<RuntimeResult<"session.transcript.anchors">> {
+    return { anchors: [] };
+  }
+  async searchTranscript(): Promise<RuntimeResult<"session.transcript.search">> {
+    return { hits: [] };
+  }
   async readTranscriptAdvance(
     params: RuntimeParams<"session.transcript.advance">,
   ): Promise<RuntimeResult<"session.transcript.advance">> {

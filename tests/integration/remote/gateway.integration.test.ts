@@ -336,7 +336,7 @@ class FixtureRuntime implements GatewayRuntimeClient {
       const snapshot = await this.mcpStore.read();
       if (record["expectedRevision"] !== publicMcpRevision(snapshot.revision))
         throw Object.assign(new Error("stale revision"), { code: "MCP_CONFIG_REVISION_CONFLICT" });
-      const server = record["server"] as Parameters<UserMcpConfigStore["upsert"]>[0];
+      const server = record["server"] as Parameters<UserMcpConfigStore["upsertPublicPatch"]>[0];
       assert.equal(record["inputMode"], "public-patch");
       const result = await this.mcpStore.upsertPublicPatch(
         server,

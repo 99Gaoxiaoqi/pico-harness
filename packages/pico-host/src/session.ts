@@ -886,6 +886,42 @@ export class Session
     };
   }
 
+  /**
+   * Creates a durable fork snapshot immediately before the source session's first event.
+   * The cursor fences the source at that first event while the target seed remains empty.
+   */
+  async readDurableForkSnapshotBeforeFirstEvent(
+    firstEventId: string,
+  ): Promise<DurableSessionForkSnapshot> {
+    await this.flushPersistence();
+    const store = this.store;
+    if (!store) {
+      throw new Error(`Session ${this.id} 还没有可用于 fork 的 durable event`);
+    }
+    const manifest = await this.ensureRuntimeSession();
+    const all = await store.readSessionEntries(this.id);
+    const first = all[0];
+    if (!first || first.event.eventId !== firstEventId) {
+      throw new Error(`Session ${this.id} 的指定事件不是历史首项`);
+    }
+    const entries: readonly RuntimeEventStoreEntry[] = [];
+    const hydration = this.runtimeHydrationSnapshot(manifest, entries);
+    const currentRuntime = this.getRuntimeStateSnapshot();
+    return {
+      hydration: {
+        ...hydration,
+        runtime: {
+          ...hydration.runtime,
+          ...(currentRuntime.settings ? { settings: structuredClone(currentRuntime.settings) } : {}),
+        },
+      },
+      runtimeSeedEntries: projectRuntimeSessionForkSeedEntries(entries),
+      planEntries: [],
+      rootLogId: await resolveRuntimeRootSessionId(store, this.id),
+      cursor: runtimeCursorForEntry(this.id, all, first),
+    };
+  }
+
   private runtimeHydrationSnapshot(
     manifest: RuntimeSessionManifest,
     entries: readonly RuntimeEventStoreEntry[],

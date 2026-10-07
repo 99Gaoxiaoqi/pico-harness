@@ -163,7 +163,10 @@ export function ConversationComposer({
     inputRef,
     () => ({
       focus: () => editorRef.current?.focus(),
-      insertText: (text: string) => editorRef.current?.insertText(text),
+      insertText: (text: string) => {
+        editorRef.current?.insertText(text);
+        onValueChange(editorRef.current?.getValue() ?? value);
+      },
       openResources: (kind = "skill") => {
         editorRef.current?.focus();
         editorRef.current?.insertText(` /${kind} `);

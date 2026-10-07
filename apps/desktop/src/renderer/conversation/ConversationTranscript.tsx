@@ -16,7 +16,6 @@ import {
   GitBranch,
 } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
-import type { MouseEvent as ReactMouseEvent } from "react";
 import { sanitizeMarkdownText } from "@pico/protocol";
 import type {
   ConversationItemView,
@@ -159,7 +158,7 @@ function UserMessageBubble({
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(item.text);
   const [submitting, setSubmitting] = useState(false);
-  const requestKey = useRef<string | undefined>(undefined);
+  const requestKey = useRef<{ readonly text: string; readonly key: string } | undefined>(undefined);
   useEffect(() => {
     if (!editing) setDraft(item.text);
   }, [editing, item.text]);
@@ -167,9 +166,11 @@ function UserMessageBubble({
     event.preventDefault();
     if (!onEdit || !draft.trim() || submitting) return;
     setSubmitting(true);
-    requestKey.current ??= globalThis.crypto.randomUUID();
+    if (requestKey.current?.text !== draft) {
+      requestKey.current = { text: draft, key: globalThis.crypto.randomUUID() };
+    }
     try {
-      if (await onEdit(item, draft, requestKey.current)) setEditing(false);
+      if (await onEdit(item, draft, requestKey.current.key)) setEditing(false);
     } finally {
       setSubmitting(false);
     }
@@ -224,7 +225,7 @@ function UserMessageBubble({
                 className="conversation-message__edit"
                 type="button"
                 onClick={() => {
-                  requestKey.current = globalThis.crypto.randomUUID();
+                  requestKey.current = undefined;
                   setEditing(true);
                 }}
               >
@@ -890,7 +891,7 @@ export function ConversationTranscript({
     target?.scrollIntoView?.({ block: "center", behavior: "smooth" });
   }, [highlightItemId, visibleItems.length]);
 
-  const captureSelection = (_event: ReactMouseEvent<HTMLOListElement>) => {
+  const captureSelection = () => {
     if (!onQuoteSelection && !onAskInSideChat) return;
     const selection = window.getSelection();
     const text = selection?.toString().trim();
@@ -899,18 +900,20 @@ export function ConversationTranscript({
       return;
     }
     const range = selection.getRangeAt(0);
-    const start = range.startContainer instanceof Element
-      ? range.startContainer
-      : range.startContainer.parentElement;
-    const end = range.endContainer instanceof Element
-      ? range.endContainer
-      : range.endContainer.parentElement;
+    const start =
+      range.startContainer instanceof Element
+        ? range.startContainer
+        : range.startContainer.parentElement;
+    const end =
+      range.endContainer instanceof Element ? range.endContainer : range.endContainer.parentElement;
     const article = start?.closest<HTMLElement>("article[data-quoteable='true']");
     if (!article || article !== end?.closest("article[data-quoteable='true']")) {
       setSelectedText(undefined);
       return;
     }
-    const content = article.querySelector(".conversation-message__bubble, .conversation-message__body");
+    const content = article.querySelector(
+      ".conversation-message__bubble, .conversation-message__body",
+    );
     if (!content?.contains(range.startContainer) || !content.contains(range.endContainer)) {
       setSelectedText(undefined);
       return;
@@ -1063,7 +1066,11 @@ export function ConversationTranscript({
               <ol className="conversation-turn__items">
                 {turn.items.map((item) =>
                   item.kind === "process" ? (
-                    <li className="conversation-transcript__item" data-kind="process" key={item.key}>
+                    <li
+                      className="conversation-transcript__item"
+                      data-kind="process"
+                      key={item.key}
+                    >
                       <ProcessDisclosure item={item}>
                         {renderDisplayItems(item.items)}
                       </ProcessDisclosure>

@@ -18,6 +18,7 @@ import { RuntimeRun } from "@pico/pico-host/product-runtime-run";
 import { StorageOperationJournal } from "@pico/storage/operation-journal";
 import {
   getOrCreateSessionSettings,
+  snapshotSessionSettings,
   setSessionCollaborationMode,
   setSessionPermissionMode,
 } from "@pico/pico-host/input/session-settings";
@@ -260,6 +261,79 @@ test("session fork runtime port composes the coordinator for Session callers", a
   } finally {
     await globalSessionManager.delete(sourceSessionId, workDir, { picoHome })?.close();
     await globalSessionManager.delete(targetSessionId, workDir, { picoHome })?.close();
+    await rmRetry(root);
+  }
+});
+
+test("SessionForkService can create an empty prefix before a first user message", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-session-fork-empty-prefix-"));
+  const workDir = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  await mkdir(workDir, { recursive: true });
+  const manager = new SessionManager();
+  const sourceSessionId = "empty-prefix-source";
+  const targetSessionId = "empty-prefix-target";
+  try {
+    const source = await manager.getOrCreate(sourceSessionId, workDir, {
+      persistence: true,
+      picoHome,
+      runtimePort: createEngineRuntimePort(),
+    });
+    await source.recover();
+    await source.importHistoryMessages([{ role: "user", content: "original" }]);
+    const entries = await source.runtimeEventStore!.readSessionEntries(sourceSessionId);
+    const firstEventId = entries[0]?.event.eventId;
+    assert.ok(firstEventId);
+    assert.equal(entries.length, 1, "imported history can begin directly with a user message");
+
+    const settings = getOrCreateSessionSettings(
+      {
+        sessionId: sourceSessionId,
+        cwd: workDir,
+        picoHome,
+        provider: "openai",
+        model: "test",
+        modelRouteId: "openai/test",
+        collaborationMode: "agent",
+        permissionMode: "ask",
+      },
+      { persistence: source },
+    );
+    assert.equal(setSessionCollaborationMode(settings, "agent").ok, true);
+    assert.equal(setSessionPermissionMode(settings, "ask").ok, true);
+    source.updateRuntimeState({ settings: snapshotSessionSettings(settings) });
+    await source.flushPersistence();
+
+    const forkService = new SessionForkService({
+      workDir,
+      picoHome,
+      sessionManager: manager,
+      runtimeStore: source.runtimeEventStore,
+      runtimePort: createSessionForkRuntimePort(),
+      createOperationId: () => "empty-prefix-operation",
+    });
+    try {
+      await forkService.fork({
+        sourceSessionId,
+        targetSessionId,
+        beforeFirstEventId: firstEventId,
+        operationId: "empty-prefix-operation",
+      });
+    } finally {
+      forkService.close();
+    }
+
+    const target = await manager.getOrCreate(targetSessionId, workDir, {
+      persistence: true,
+      picoHome,
+      runtimePort: createEngineRuntimePort(),
+    });
+    await target.recover();
+    assert.deepEqual(target.getHistory().map((message) => message.content), []);
+    assert.deepEqual(source.getHistory().map((message) => message.content), ["original"]);
+  } finally {
+    await manager.delete(sourceSessionId, workDir, { picoHome })?.close();
+    await manager.delete(targetSessionId, workDir, { picoHome })?.close();
     await rmRetry(root);
   }
 });

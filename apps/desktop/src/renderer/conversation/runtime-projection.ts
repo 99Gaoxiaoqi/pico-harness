@@ -11,6 +11,7 @@ import {
   type RuntimeConversationItem,
   type RuntimePlanControlSnapshot,
   type RuntimeToolResultEnvelope,
+  type RuntimeQueuedInput,
 } from "@pico/protocol";
 import type { TranscriptReplicaView } from "@pico/transcript-replica";
 import {
@@ -669,6 +670,27 @@ export function parseConversation(
   sessionId: string,
 ): ConversationView {
   const result = isRecord(value) ? value : {};
+  const queuedInputs = recordArray(result.queuedInputs).flatMap((item) => {
+    if (
+      !isRecord(item) ||
+      typeof item.queueId !== "string" ||
+      typeof item.sessionId !== "string" ||
+      typeof item.createdAt !== "number" ||
+      !Number.isFinite(item.createdAt) ||
+      !isRecord(item.input)
+    ) {
+      return [];
+    }
+    const input = item.input;
+    if (
+      (input.kind === "text" && typeof input.text === "string") ||
+      (input.kind === "skill" && typeof input.name === "string") ||
+      (input.kind === "agent" && typeof input.name === "string" && typeof input.task === "string")
+    ) {
+      return [item as unknown as RuntimeQueuedInput];
+    }
+    return [];
+  });
   return {
     workspacePath,
     sessionId,
@@ -676,7 +698,8 @@ export function parseConversation(
       .map(conversationItem)
       .filter((item): item is ConversationItemView => item !== undefined),
     hasEarlier: isTranscriptPageCursor(result.nextCursor),
-    queuedCount: recordArray(result.queuedInputs).length,
+    queuedCount: queuedInputs.length,
+    queuedInputs,
     discoveryItem: discoveryItemFromProjection(result.discoveryProjection),
   };
 }

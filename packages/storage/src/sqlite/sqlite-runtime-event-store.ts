@@ -132,6 +132,11 @@ export class SqliteRuntimeEventStore {
     this.storageRoot = preparation.lease.storageRoot;
     this.lease = preparation.lease;
     this.warningLogger = options.warningLogger;
+    this.lease.database.function(
+      "pico_unicode_lower",
+      { deterministic: true },
+      (value: SQLInputValue | null) => (typeof value === "string" ? value.toLowerCase() : ""),
+    );
   }
 
   warnAmbiguousAppendRecovered(eventIds: readonly string[]): void {
@@ -647,7 +652,10 @@ export class SqliteRuntimeEventStore {
            WHERE item.session_id = ? AND item.valid_to_sequence IS NULL
              AND json_extract(item.payload_json, '$.kind') IN ('userMessage', 'assistantMessage')
              AND (? IS NULL OR item.position_sequence < ?)
-             AND instr(lower(CAST(json_extract(item.payload_json, '$.content') AS TEXT)), lower(?)) > 0
+             AND instr(
+               pico_unicode_lower(CAST(json_extract(item.payload_json, '$.content') AS TEXT)),
+               pico_unicode_lower(?)
+             ) > 0
            ORDER BY item.position_sequence DESC, item.position_ordinal DESC
            LIMIT ?`,
         )
@@ -660,16 +668,16 @@ export class SqliteRuntimeEventStore {
         const role = payload?.["kind"] === "userMessage" ? "user" : payload?.["kind"] === "assistantMessage" ? "assistant" : undefined;
         const text = typeof payload?.["content"] === "string" ? payload["content"] : "";
         if (!eventId || !role) return [];
-        const matchStart = text.toLocaleLowerCase().indexOf(normalizedQuery.toLocaleLowerCase());
-        if (matchStart < 0) return [];
+        const match = findUnicodeCaseInsensitiveMatch(text, normalizedQuery);
+        if (!match) return [];
         return [{
           eventId,
           itemId,
           sequence: requireSafeInteger(row["position_sequence"], "position_sequence"),
           role,
           text,
-          matchStart,
-          matchLength: normalizedQuery.length,
+          matchStart: match.start,
+          matchLength: match.length,
         }];
       });
       return { hits, hasMore };
@@ -3217,6 +3225,35 @@ export class SqliteRuntimeEventStore {
   private assertNotClosed(): void {
     if (this.closed) throw new Error("SqliteRuntimeEventStore is closed");
   }
+}
+
+function findUnicodeCaseInsensitiveMatch(
+  text: string,
+  query: string,
+): { readonly start: number; readonly length: number } | undefined {
+  const foldedQuery = query.toLowerCase();
+  if (!foldedQuery) return undefined;
+  let foldedText = "";
+  const sourceStarts: number[] = [];
+  const sourceEnds: number[] = [];
+  for (let sourceStart = 0; sourceStart < text.length; ) {
+    const codePoint = text.codePointAt(sourceStart)!;
+    const sourceCharacter = String.fromCodePoint(codePoint);
+    const sourceEnd = sourceStart + sourceCharacter.length;
+    const folded = sourceCharacter.toLowerCase();
+    foldedText += folded;
+    for (let index = 0; index < folded.length; index += 1) {
+      sourceStarts.push(sourceStart);
+      sourceEnds.push(sourceEnd);
+    }
+    sourceStart = sourceEnd;
+  }
+  const offset = foldedText.indexOf(foldedQuery);
+  if (offset < 0) return undefined;
+  const start = sourceStarts[offset];
+  const end = sourceEnds[offset + foldedQuery.length - 1];
+  if (start === undefined || end === undefined) return undefined;
+  return { start, length: end - start };
 }
 
 function partialSnapshotFromRow(row: Record<string, unknown>): RuntimePartialSnapshot {

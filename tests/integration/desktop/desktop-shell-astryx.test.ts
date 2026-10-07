@@ -187,6 +187,7 @@ async function scenario() {
   const searchRect = button("搜索任务").getBoundingClientRect();
   check(searchRect.width === 30 && searchRect.height === 30, "Search button keeps 30px geometry");
   check(button("按时间分组").getBoundingClientRect().height === 26, "Grouping control retains 26px height");
+  check(document.querySelector(".sidebar-project__header"), "Project grouping is the first-run default");
   await click("收起侧栏");
   check(Math.abs(sidebar().width - 62) < 1, "Collapsed sidebar width: " + sidebar().width);
   await click("展开侧栏");

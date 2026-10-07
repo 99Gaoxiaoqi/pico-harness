@@ -14,7 +14,12 @@ import {
   subagentParent,
   subagentSessionHref,
 } from "../conversation/subagent-navigation.js";
-import type { RuntimeResult, RuntimeUserDefaults } from "@pico/protocol";
+import type {
+  RuntimeQueuedInput,
+  RuntimeResult,
+  RuntimeUserDefaults,
+  RuntimeUserInput,
+} from "@pico/protocol";
 import {
   AlertTriangle,
   Bot,
@@ -39,6 +44,7 @@ import {
   useReducer,
   useRef,
   useState,
+  type FormEvent,
   type ReactNode,
 } from "react";
 import { Link, Navigate, useLocation, useNavigate, useParams } from "react-router-dom";
@@ -72,6 +78,7 @@ import {
 } from "../provider-retry.js";
 import type { ApprovalView, TimelineItem, ToolApprovalView } from "../model.js";
 import { useRuntime } from "../runtime-context.js";
+import type { RuntimeActions } from "../runtime.js";
 import { formatCompact, isTerminalRun } from "../view-format.js";
 import { copyText } from "../clipboard.js";
 import { BrowserWorkbarPanel } from "../workbar-panels/BrowserWorkbarPanel.js";
@@ -948,13 +955,23 @@ export function ConversationPage() {
                 ? { id: sideChatQuoteRequest.id, text: sideChatQuoteRequest.text }
                 : undefined
             }
+            onQuoteFallback={quoteIntoMainComposer}
             onRequestClose={() => dispatchWorkbar({ type: "close", tabId: tab.id })}
           />
         );
       }
       return null;
     },
-    [inspector, runtime, session?.status, sessionId, sessionRef, sideChatQuoteRequest, workbar, workspacePath],
+    [
+      inspector,
+      runtime,
+      session?.status,
+      sessionId,
+      sessionRef,
+      sideChatQuoteRequest,
+      workbar,
+      workspacePath,
+    ],
   );
 
   const handleWorkbarAction = useCallback(
@@ -1137,7 +1154,9 @@ export function ConversationPage() {
                       onClick={() =>
                         void copyText(workspacePath)
                           .then(() => actions.showMessage?.("已复制当前 worktree 路径。"))
-                          .catch(() => actions.showMessage?.("复制路径失败，请检查系统剪贴板权限。"))
+                          .catch(() =>
+                            actions.showMessage?.("复制路径失败，请检查系统剪贴板权限。"),
+                          )
                       }
                     >
                       复制路径
@@ -1374,6 +1393,15 @@ export function ConversationPage() {
               </div>
             ) : (
               <div className="conversation-composer-region">
+                {sessionRef && conversation?.queuedInputs?.length ? (
+                  <ConversationQueue
+                    actions={actions}
+                    disabled={Boolean(busy) || session?.status === "archived"}
+                    items={conversation.queuedInputs}
+                    sessionRef={sessionRef}
+                    running={Boolean(activeRun)}
+                  />
+                ) : null}
                 {!composerModelRouteId && (
                   <p className="conversation-model-notice">
                     请先配置模型连接。<Link to="/settings/models">添加连接</Link>
@@ -1701,10 +1729,7 @@ export function ConversationPage() {
                           <span>
                             {hit.summary.slice(0, hit.matchStart)}
                             <mark>
-                              {hit.summary.slice(
-                                hit.matchStart,
-                                hit.matchStart + hit.matchLength,
-                              )}
+                              {hit.summary.slice(hit.matchStart, hit.matchStart + hit.matchLength)}
                             </mark>
                             {hit.summary.slice(hit.matchStart + hit.matchLength)}
                           </span>
@@ -1712,7 +1737,11 @@ export function ConversationPage() {
                       ))
                     )}
                     {searchCursor !== undefined && (
-                      <Button variant="quiet" type="button" onClick={() => void loadMoreSearchResults()}>
+                      <Button
+                        variant="quiet"
+                        type="button"
+                        onClick={() => void loadMoreSearchResults()}
+                      >
                         更多搜索结果
                       </Button>
                     )}
@@ -1734,7 +1763,11 @@ export function ConversationPage() {
                       ))}
                     </div>
                     {promptAnchorCursor !== undefined && (
-                      <Button variant="quiet" type="button" onClick={() => void loadMorePromptAnchors()}>
+                      <Button
+                        variant="quiet"
+                        type="button"
+                        onClick={() => void loadMorePromptAnchors()}
+                      >
                         更早提问
                       </Button>
                     )}
@@ -1782,7 +1815,9 @@ export function ConversationPage() {
                 !activeRun && session?.status !== "archived" ? reviseUserMessage : undefined
               }
               onQuoteSelection={quoteIntoMainComposer}
-              onAskInSideChat={sessionRef && session?.status !== "archived" ? quoteIntoSideChat : undefined}
+              onAskInSideChat={
+                sessionRef && session?.status !== "archived" ? quoteIntoSideChat : undefined
+              }
               highlightItemId={highlightItemId}
               onOpenItem={openItem}
               renderItem={(item, fallback) => {
@@ -1864,6 +1899,147 @@ export function ConversationPage() {
       {goalControls.dialog}
     </SessionWorkbarLayout>
   );
+}
+
+function ConversationQueue({
+  actions,
+  disabled,
+  items,
+  sessionRef,
+  running,
+}: {
+  readonly actions: Pick<
+    RuntimeActions,
+    "updateQueuedInput" | "removeQueuedInput" | "reorderQueuedInputs" | "moveQueuedInputToNext"
+  >;
+  readonly disabled: boolean;
+  readonly items: readonly RuntimeQueuedInput[];
+  readonly sessionRef: WorkspaceSessionRef;
+  readonly running: boolean;
+}) {
+  const [editingQueueId, setEditingQueueId] = useState<string>();
+  const [draft, setDraft] = useState("");
+  const editingItem = items.find((item) => item.queueId === editingQueueId);
+
+  const beginEdit = (item: RuntimeQueuedInput) => {
+    setEditingQueueId(item.queueId);
+    setDraft(queuedInputText(item.input));
+  };
+  const saveEdit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!editingItem) return;
+    const input = replaceQueuedInputText(editingItem.input, draft);
+    if (await actions.updateQueuedInput(sessionRef, editingItem.queueId, input)) {
+      setEditingQueueId(undefined);
+    }
+  };
+  const reorder = (index: number, offset: -1 | 1) => {
+    const target = index + offset;
+    if (target < 0 || target >= items.length) return;
+    const queueIds = items.map((item) => item.queueId);
+    [queueIds[index], queueIds[target]] = [queueIds[target]!, queueIds[index]!];
+    void actions.reorderQueuedInputs(sessionRef, queueIds);
+  };
+
+  return (
+    <section className="conversation-queue" aria-label="待发送队列">
+      <header>
+        <strong>待发送 · {items.length}</strong>
+        {running && <span>当前运行完成后按此顺序执行</span>}
+      </header>
+      <ol>
+        {items.map((item, index) => (
+          <li key={item.queueId}>
+            {editingQueueId === item.queueId ? (
+              <form onSubmit={(event) => void saveEdit(event)}>
+                <label>
+                  <span>{queuedInputLabel(item.input)} 内容</span>
+                  <textarea
+                    autoFocus
+                    value={draft}
+                    onChange={(event) => setDraft(event.currentTarget.value)}
+                    rows={2}
+                  />
+                </label>
+                <div className="conversation-queue__actions">
+                  <button type="submit" disabled={disabled || !draft.trim()}>
+                    保存
+                  </button>
+                  <button
+                    type="button"
+                    disabled={disabled}
+                    onClick={() => setEditingQueueId(undefined)}
+                  >
+                    取消
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <>
+                <div className="conversation-queue__content">
+                  <strong>{queuedInputLabel(item.input)}</strong>
+                  <span>{queuedInputText(item.input) || "（空内容）"}</span>
+                </div>
+                <div className="conversation-queue__actions">
+                  <button type="button" disabled={disabled} onClick={() => beginEdit(item)}>
+                    编辑
+                  </button>
+                  <button
+                    type="button"
+                    aria-label={`将第 ${index + 1} 条上移`}
+                    disabled={disabled || index === 0}
+                    onClick={() => reorder(index, -1)}
+                  >
+                    ↑
+                  </button>
+                  <button
+                    type="button"
+                    aria-label={`将第 ${index + 1} 条下移`}
+                    disabled={disabled || index === items.length - 1}
+                    onClick={() => reorder(index, 1)}
+                  >
+                    ↓
+                  </button>
+                  <button
+                    type="button"
+                    disabled={disabled || index === 0}
+                    onClick={() => void actions.moveQueuedInputToNext(sessionRef, item.queueId)}
+                  >
+                    移至下一项
+                  </button>
+                  <button
+                    type="button"
+                    disabled={disabled}
+                    onClick={() => void actions.removeQueuedInput(sessionRef, item.queueId)}
+                  >
+                    删除
+                  </button>
+                </div>
+              </>
+            )}
+          </li>
+        ))}
+      </ol>
+    </section>
+  );
+}
+
+function queuedInputLabel(input: RuntimeUserInput): string {
+  if (input.kind === "skill") return `技能 · ${input.name}`;
+  if (input.kind === "agent") return `子代理 · ${input.name}`;
+  return "消息";
+}
+
+function queuedInputText(input: RuntimeUserInput): string {
+  if (input.kind === "skill") return input.args ?? "";
+  if (input.kind === "agent") return input.task;
+  return input.text;
+}
+
+function replaceQueuedInputText(input: RuntimeUserInput, text: string): RuntimeUserInput {
+  if (input.kind === "skill") return { ...input, args: text };
+  if (input.kind === "agent") return { ...input, task: text };
+  return { ...input, text };
 }
 
 function timelineItemToConversationItem(item: TimelineItem): ConversationItemView {

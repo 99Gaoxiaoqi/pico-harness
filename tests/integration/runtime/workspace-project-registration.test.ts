@@ -59,13 +59,11 @@ test("project registration groups linked worktrees and migrates legacy paths dur
     "the migrated registry retains each exact worktree and folder path",
   );
   const byPath = new Map(registrations.map((entry) => [entry.workspacePath, entry]));
-  const [
-    canonicalRepository,
-    canonicalLinkedWorktree,
-    canonicalClone,
-    canonicalFolder,
-    canonicalTemporary,
-  ] = paths;
+  const canonicalRepository = paths[0]!;
+  const canonicalLinkedWorktree = paths[1]!;
+  const canonicalClone = paths[2]!;
+  const canonicalFolder = paths[3]!;
+  const canonicalTemporary = paths[4]!;
   const main = byPath.get(canonicalRepository)!;
   const linked = byPath.get(canonicalLinkedWorktree)!;
   const clone = byPath.get(canonicalClone)!;
@@ -104,6 +102,37 @@ test("project registration groups linked worktrees and migrates legacy paths dur
   assert.equal(
     (await restartedStore.projectMetadata(canonicalLinkedWorktree)).projectId,
     main.projectId,
+  );
+
+  runGit(["worktree", "remove", "--force", canonicalLinkedWorktree], canonicalRepository);
+  await mkdir(canonicalLinkedWorktree, { recursive: true });
+  runGit(["init", "--quiet", "--initial-branch=main"], canonicalLinkedWorktree);
+  runGit(
+    [
+      "-c",
+      "user.name=Pico Test",
+      "-c",
+      "user.email=pico@example.invalid",
+      "commit",
+      "--quiet",
+      "--allow-empty",
+      "-m",
+      "replacement repository",
+    ],
+    canonicalLinkedWorktree,
+  );
+  await restartedStore.register(canonicalLinkedWorktree);
+  const replacement = await restartedStore.projectMetadata(canonicalLinkedWorktree);
+  assert.ok(replacement.projectId);
+  assert.notEqual(
+    replacement.projectId,
+    main.projectId,
+    "a different repository created at a previously registered path receives a new project ID",
+  );
+  assert.equal(
+    (await restartedStore.projectMetadata(canonicalRepository)).projectId,
+    main.projectId,
+    "re-registering a replaced path does not rewrite the remaining worktree's project",
   );
 });
 

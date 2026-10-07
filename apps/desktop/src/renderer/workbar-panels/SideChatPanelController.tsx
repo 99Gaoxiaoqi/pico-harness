@@ -32,6 +32,7 @@ export function SideChatPanelController({
   panelId,
   active,
   quoteRequest,
+  onQuoteFallback,
   onRequestClose,
 }: {
   readonly runtime: RuntimeStore;
@@ -40,6 +41,7 @@ export function SideChatPanelController({
   readonly panelId: string;
   readonly active: boolean;
   readonly quoteRequest?: { readonly id: string; readonly text: string } | undefined;
+  readonly onQuoteFallback?: ((text: string) => void) | undefined;
   readonly onRequestClose: () => void;
 }) {
   const { data, actions, busy } = runtime;
@@ -345,6 +347,9 @@ export function SideChatPanelController({
       }
       pendingApprovalCallId={pendingApproval?.providerCallId}
       onDraftChange={setDraft}
+      onQuoteFallback={
+        quoteRequest && onQuoteFallback ? () => onQuoteFallback(quoteRequest.text) : undefined
+      }
       onSend={(message) => {
         if (!targetSessionId) return;
         void (async () => {

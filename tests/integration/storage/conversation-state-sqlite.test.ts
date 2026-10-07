@@ -267,6 +267,31 @@ test("control schema v9 backfills queue order by timestamp and queue id per sess
   }
 });
 
+test("workspace queue arbitration uses each session's reordered head", async () => {
+  const fixture = createFixture("pico-conversation-state-sqlite-head-order-");
+  try {
+    let sequence = 0;
+    let clock = 0;
+    const store = new SqliteDesktopConversationStateStore({
+      picoHome: fixture.picoHome,
+      now: () => (clock += 10),
+      generateId: () => `queue-${++sequence}`,
+    });
+    await store.enqueue(fixture.workspaceA, "session-a", { kind: "text", text: "a1" });
+    await store.enqueue(fixture.workspaceA, "session-b", { kind: "text", text: "b1" });
+    await store.enqueue(fixture.workspaceA, "session-a", { kind: "text", text: "a2" });
+
+    await store.reorderQueued(fixture.workspaceA, "session-a", ["queue-3", "queue-1"]);
+    assert.deepEqual(
+      (await store.listWorkspaceQueued(fixture.workspaceA)).map((item) => item.queueId),
+      ["queue-2", "queue-3"],
+      "global scheduling considers only the current head of each session queue",
+    );
+  } finally {
+    cleanupFixture(fixture.root);
+  }
+});
+
 test("sqlite conversation state rolls back a failed idempotency write", async () => {
   const fixture = createFixture("pico-conversation-state-sqlite-rollback-");
   try {

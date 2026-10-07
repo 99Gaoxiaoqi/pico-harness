@@ -454,7 +454,7 @@ function SidebarTasks({
   readonly onPinSession: (session: SessionView) => void;
 }) {
   const [grouping, setGrouping] = useState<SidebarTaskGrouping>(() =>
-    window.localStorage.getItem("pico.sidebar-task-grouping") === "project" ? "project" : "time",
+    window.localStorage.getItem("pico.sidebar-task-grouping") === "time" ? "time" : "project",
   );
   const [collapsedProjects, setCollapsedProjects] = useState<ReadonlySet<string>>(new Set());
   useEffect(() => {

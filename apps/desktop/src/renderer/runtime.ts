@@ -22,6 +22,8 @@ import {
   type RuntimeNotification,
   type RuntimeParams,
   type RuntimeProviderInput,
+  type RuntimeQueuedInput,
+  type RuntimeUserInput,
   type RuntimeResult,
   type RuntimeSubagentAvailability,
   type RuntimeSubagentPreset,
@@ -309,6 +311,27 @@ function mergeLoadedData(
   };
 }
 
+function withConversationQueue(
+  data: AppData,
+  ref: WorkspaceSessionRef,
+  queuedInputs: readonly RuntimeQueuedInput[],
+): AppData {
+  const key = workspaceSessionKey(ref);
+  const conversation = data.conversations[key];
+  if (!conversation) return data;
+  return {
+    ...data,
+    conversations: {
+      ...data.conversations,
+      [key]: {
+        ...conversation,
+        queuedInputs,
+        queuedCount: queuedInputs.length,
+      },
+    },
+  };
+}
+
 export interface RuntimeActions {
   loadUserMemorySettings(): Promise<RuntimeMemorySettings>;
   updateUserMemorySettings(
@@ -392,6 +415,14 @@ export interface RuntimeActions {
     replacementText: string,
     idempotencyKey: string,
   ): Promise<WorkspaceSessionRef | undefined>;
+  updateQueuedInput(
+    ref: WorkspaceSessionRef,
+    queueId: string,
+    input: RuntimeUserInput,
+  ): Promise<boolean>;
+  removeQueuedInput(ref: WorkspaceSessionRef, queueId: string): Promise<boolean>;
+  reorderQueuedInputs(ref: WorkspaceSessionRef, queueIds: readonly string[]): Promise<boolean>;
+  moveQueuedInputToNext(ref: WorkspaceSessionRef, queueId: string): Promise<boolean>;
   compactSession(ref: WorkspaceSessionRef): Promise<boolean>;
   updateSessionSettings(
     ref: WorkspaceSessionRef,
@@ -690,6 +721,7 @@ export function useRuntimeStore(): RuntimeStore {
               ),
               hasEarlier: view.olderCursor !== undefined,
               queuedCount: view.queuedInputs.length,
+              queuedInputs: view.queuedInputs,
               ...(activeRun ? { runId: activeRun.runId } : {}),
             },
           },
@@ -1364,6 +1396,7 @@ export function useRuntimeStore(): RuntimeStore {
                   ),
                   hasEarlier: latestReplicaView.olderCursor !== undefined,
                   queuedCount: latestReplicaView.queuedInputs.length,
+                  queuedInputs: latestReplicaView.queuedInputs,
                   runId:
                     latestRun && !isTerminalRunStatus(stringValue(latestRun.status))
                       ? stringValue(latestRun.runId)
@@ -1843,6 +1876,20 @@ export function useRuntimeStore(): RuntimeStore {
         }
         if (
           !preview &&
+          error instanceof RuntimeInvocationError &&
+          error.code === "METHOD_NOT_FOUND"
+        ) {
+          if (label.startsWith("queue-")) {
+            setMessage("当前 Runtime 版本不支持队列管理，请更新 Pico 桌面端后重试。");
+            return false;
+          }
+          if (label.startsWith("transcript-") || label === "revise-session-message") {
+            setMessage("当前 Runtime 版本不支持这项会话历史操作，请更新 Pico 桌面端后重试。");
+            return false;
+          }
+        }
+        if (
+          !preview &&
           label.startsWith("provider-") &&
           error instanceof RuntimeInvocationError &&
           (error.code === "CONFIG_REVISION_CONFLICT" || error.code === "CONFLICT")
@@ -2187,7 +2234,11 @@ export function useRuntimeStore(): RuntimeStore {
         let loaded = false;
         const succeeded = await perform("transcript-jump", async (bridge) => {
           if (preview) return;
-          loaded = await ensureDesktopContinuity(bridge).loadAround(workspacePath, sessionId, itemId);
+          loaded = await ensureDesktopContinuity(bridge).loadAround(
+            workspacePath,
+            sessionId,
+            itemId,
+          );
           if (!loaded) throw new Error("无法定位该消息，请刷新会话后重试。");
         });
         return succeeded && loaded;
@@ -2431,6 +2482,95 @@ export function useRuntimeStore(): RuntimeStore {
           if (revisedSessionId) await loadConversation(bridge, workspacePath, revisedSessionId);
         });
         return revisedSessionId ? { workspacePath, sessionId: revisedSessionId } : undefined;
+      },
+      async updateQueuedInput(ref, queueId, input) {
+        const { workspacePath, sessionId } = ref;
+        if (!workspacePath || !sessionId) return false;
+        return perform("queue-update", async (bridge) => {
+          try {
+            const result = await invoke(bridge, "session.queue.update", {
+              workspacePath,
+              sessionId,
+              queueId,
+              input,
+            });
+            const key = workspaceSessionKey(ref);
+            const current = dataRef.current.conversations[key]?.queuedInputs ?? [];
+            setData((value) =>
+              withConversationQueue(
+                value,
+                ref,
+                current.map((item) => (item.queueId === queueId ? result.queuedInput : item)),
+              ),
+            );
+          } catch (error) {
+            if (error instanceof RuntimeInvocationError && error.code === "CONFLICT") {
+              await loadConversation(bridge, workspacePath, sessionId);
+            }
+            throw error;
+          }
+        });
+      },
+      async removeQueuedInput(ref, queueId) {
+        const { workspacePath, sessionId } = ref;
+        if (!workspacePath || !sessionId) return false;
+        return perform("queue-remove", async (bridge) => {
+          try {
+            await invoke(bridge, "session.queue.remove", { workspacePath, sessionId, queueId });
+            const key = workspaceSessionKey(ref);
+            const current = dataRef.current.conversations[key]?.queuedInputs ?? [];
+            setData((value) =>
+              withConversationQueue(
+                value,
+                ref,
+                current.filter((item) => item.queueId !== queueId),
+              ),
+            );
+          } catch (error) {
+            if (error instanceof RuntimeInvocationError && error.code === "CONFLICT") {
+              await loadConversation(bridge, workspacePath, sessionId);
+            }
+            throw error;
+          }
+        });
+      },
+      async reorderQueuedInputs(ref, queueIds) {
+        const { workspacePath, sessionId } = ref;
+        if (!workspacePath || !sessionId) return false;
+        return perform("queue-reorder", async (bridge) => {
+          try {
+            const result = await invoke(bridge, "session.queue.reorder", {
+              workspacePath,
+              sessionId,
+              queueIds: [...queueIds],
+            });
+            setData((value) => withConversationQueue(value, ref, result.queuedInputs));
+          } catch (error) {
+            if (error instanceof RuntimeInvocationError && error.code === "CONFLICT") {
+              await loadConversation(bridge, workspacePath, sessionId);
+            }
+            throw error;
+          }
+        });
+      },
+      async moveQueuedInputToNext(ref, queueId) {
+        const { workspacePath, sessionId } = ref;
+        if (!workspacePath || !sessionId) return false;
+        return perform("queue-move-next", async (bridge) => {
+          try {
+            const result = await invoke(bridge, "session.queue.moveToNext", {
+              workspacePath,
+              sessionId,
+              queueId,
+            });
+            setData((value) => withConversationQueue(value, ref, result.queuedInputs));
+          } catch (error) {
+            if (error instanceof RuntimeInvocationError && error.code === "CONFLICT") {
+              await loadConversation(bridge, workspacePath, sessionId);
+            }
+            throw error;
+          }
+        });
       },
       async compactSession(ref) {
         const { workspacePath, sessionId } = ref;

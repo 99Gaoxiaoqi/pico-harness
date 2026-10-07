@@ -49,8 +49,17 @@ export class SqliteDesktopConversationStateStore implements DesktopConversationS
       lease.transaction("read", () => {
         const rows = lease.database
           .prepare(
-            `SELECT queue_id, workspace_path, session_id, input_json, created_at FROM desktop_input_queue
-         WHERE workspace_path = ? ORDER BY created_at ASC, queue_id ASC`,
+            `SELECT queue_id, workspace_path, session_id, input_json, created_at
+             FROM (
+               SELECT queue_id, workspace_path, session_id, input_json, created_at,
+                      ROW_NUMBER() OVER (
+                        PARTITION BY session_id ORDER BY queue_order ASC, queue_id ASC
+                      ) AS session_position
+               FROM desktop_input_queue
+               WHERE workspace_path = ?
+             )
+             WHERE session_position = 1
+             ORDER BY created_at ASC, queue_id ASC`,
           )
           .all(canonical) as unknown[];
         return rows.map((row) => queueRowToQueuedInput(row as Record<string, unknown>));
