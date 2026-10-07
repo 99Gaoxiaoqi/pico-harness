@@ -580,7 +580,7 @@
 
 .tool-panel__create button,
 .tool-panel__chunk-footer button,
-.tool-panel__terminal-meta button,
+.tool-panel__terminal-notice button,
 .tool-panel__artifact > header button {
   display: inline-flex;
   min-height: 28px;
@@ -1044,65 +1044,8 @@
   color: var(--ink);
 }
 
-.tool-panel__terminal-tabs {
+.tool-panel__terminal-notice {
   display: flex;
-  min-width: 0;
-  align-items: center;
-  border-bottom: 1px solid var(--line);
-}
-
-.tool-panel__terminal-tabs > div {
-  display: flex;
-  min-width: 0;
-  flex: 1;
-  overflow-x: auto;
-}
-
-.tool-panel__terminal-tabs [role="tab"] {
-  display: flex;
-  min-width: 76px;
-  max-width: 170px;
-  height: 34px;
-  align-items: center;
-  gap: 5px;
-  padding: 0 8px;
-  border: 0;
-  border-right: 1px solid var(--line);
-  background: transparent;
-  color: var(--ink-secondary);
-}
-
-.tool-panel__terminal-tabs [role="tab"][aria-selected="true"] {
-  background: var(--surface-muted);
-  color: var(--ink);
-}
-
-.tool-panel__terminal-tabs [role="tab"] span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tool-panel__terminal-tabs [role="tab"] small {
-  width: 6px;
-  height: 6px;
-  margin-left: auto;
-  border-radius: 999px;
-  background: var(--ink-tertiary);
-}
-
-.tool-panel__terminal-tabs [role="tab"][data-status="running"] small {
-  background: var(--color-success, var(--accent));
-}
-
-.tool-panel__terminal-tabs .tool-panel__icon-button {
-  margin: 3px;
-  color: var(--ink-secondary);
-}
-
-.tool-panel__terminal-meta {
-  display: flex;
-  flex-wrap: wrap;
   min-width: 0;
   min-height: 30px;
   align-items: center;
@@ -1111,48 +1054,38 @@
   padding: 4px 8px;
   border-bottom: 1px solid var(--line);
   color: var(--ink-secondary);
-  font-size: 10px;
+  font-size: 11px;
 }
 
-.tool-panel__terminal-meta > .tool-panel__terminal-capability {
-  order: 3;
-  flex: 1 0 100%;
-  color: var(--warning);
-  white-space: normal;
+.tool-panel__terminal-notice > span:empty {
+  display: none;
 }
 
-.tool-panel__terminal-meta > span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tool-panel__terminal-meta > div {
-  display: flex;
+.tool-panel__terminal-notice button {
   flex: 0 0 auto;
-  gap: 4px;
-}
-
-.tool-panel__terminal-meta button {
-  min-height: 23px;
-  padding: 2px 6px;
   border-color: var(--line-strong);
   background: var(--surface-muted);
   color: var(--ink);
-  font-size: 10px;
+}
+
+.tool-panel__terminal-capability {
+  margin: 0;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+  color: var(--warning);
+  font-size: 11px;
 }
 
 .tool-panel__terminal-viewport {
   position: relative;
   min-width: 0;
-  min-height: 80px;
+  min-height: 0;
   flex: 1 1 auto;
   overflow: hidden;
   overscroll-behavior: contain;
   background: var(--surface-raised);
 }
 
-.tool-panel__terminal-placeholder,
 .tool-panel__terminal-truncated {
   position: absolute;
   inset-inline-start: 10px;
@@ -1161,9 +1094,6 @@
   pointer-events: none;
 }
 
-.tool-panel__terminal-placeholder {
-  inset-block-start: 9px;
-}
 .tool-panel__terminal-truncated {
   inset-block-end: 5px;
 }

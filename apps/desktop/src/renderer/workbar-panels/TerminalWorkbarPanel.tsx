@@ -1,6 +1,5 @@
-import { Button, IconButton } from "../components.js";
-import { CircleAlert, Link, Plus, Square, TerminalSquare } from "lucide-react";
-import { useRef, type KeyboardEvent } from "react";
+import { Button } from "../components.js";
+import { CircleAlert, Link, TerminalSquare } from "lucide-react";
 import { TerminalOutputView } from "./TerminalOutputView.js";
 
 export type WorkbarTerminalStatus = "starting" | "running" | "interrupted" | "exited";
@@ -33,97 +32,40 @@ export interface WorkbarTerminalGrid {
 }
 
 export interface TerminalWorkbarPanelProps {
-  readonly terminals: readonly WorkbarTerminalInstance[];
-  readonly activeTerminalId?: string;
+  readonly terminal?: WorkbarTerminalInstance;
   readonly output?: WorkbarTerminalOutput | null;
   readonly active: boolean;
   readonly loading: boolean;
   readonly readOnly?: boolean;
   readonly error?: string | null;
-  readonly onCreate: () => void;
-  readonly onSelect: (terminalId: string) => void;
-  readonly onAttach: (terminalId: string) => void;
+  readonly onReconnect: () => void;
   readonly onInput: (terminalId: string, input: string) => void;
   readonly onFocusChange?: (focused: boolean) => void;
   readonly onClipboard?: (action: "copy" | "paste") => void;
   readonly onResize: (terminalId: string, grid: WorkbarTerminalGrid) => void;
-  readonly onStop: (terminalId: string) => void;
 }
 
 export function TerminalWorkbarPanel({
-  terminals,
-  activeTerminalId,
+  terminal,
   output,
   active,
   loading,
   readOnly = false,
   error,
-  onCreate,
-  onSelect,
-  onAttach,
+  onReconnect,
   onInput,
   onFocusChange,
   onClipboard,
   onResize,
-  onStop,
 }: TerminalWorkbarPanelProps) {
-  const tabRefs = useRef(new Map<string, HTMLButtonElement>());
-  const selected = terminals.find((terminal) => terminal.id === activeTerminalId);
-  const selectedOutput = output?.terminalId === selected?.id ? output : undefined;
-
-  const handleTerminalKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
-    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-    event.preventDefault();
-    const nextIndex =
-      event.key === "ArrowLeft"
-        ? (index - 1 + terminals.length) % terminals.length
-        : (index + 1) % terminals.length;
-    const next = terminals[nextIndex];
-    if (!next) return;
-    onSelect(next.id);
-    tabRefs.current.get(next.id)?.focus();
-  };
+  const terminalOutput = output?.terminalId === terminal?.id ? output : undefined;
+  const disconnected = terminal?.status === "running" && !terminal.attached;
+  const reconnectNeeded = disconnected || terminal?.status === "interrupted" || error;
+  const status = terminalStatusMessage(terminal, loading);
+  const showNotice = terminal && (status || readOnly || reconnectNeeded);
 
   return (
     <section className="tool-panel tool-panel--terminal" aria-label="终端">
-      <header className="tool-panel__terminal-tabs">
-        <div role="tablist" aria-label="终端实例">
-          {terminals.map((terminal, index) => (
-            <Button
-              variant="quiet"
-              key={terminal.id}
-              ref={(node) => {
-                if (node) tabRefs.current.set(terminal.id, node);
-                else tabRefs.current.delete(terminal.id);
-              }}
-              type="button"
-              id={terminalTabId(terminal.id)}
-              role="tab"
-              aria-selected={terminal.id === selected?.id}
-              aria-controls={terminalPanelId(terminal.id)}
-              tabIndex={terminal.id === selected?.id ? 0 : -1}
-              data-status={terminal.status}
-              onClick={() => onSelect(terminal.id)}
-              onKeyDown={(event) => handleTerminalKeyDown(event, index)}
-            >
-              <TerminalSquare aria-hidden="true" size={13} />
-              <span>{terminal.title}</span>
-              <small aria-label={terminalStatusLabel(terminal.status)} />
-            </Button>
-          ))}
-        </div>
-        <IconButton
-          label="新建终端"
-          type="button"
-          className="tool-panel__icon-button"
-          aria-label="新建终端"
-          disabled={readOnly || loading}
-          onClick={onCreate}
-        >
-          <Plus aria-hidden="true" size={15} />
-        </IconButton>
-      </header>
-
       {error && (
         <p className="tool-panel__error" role="alert">
           <CircleAlert aria-hidden="true" size={14} />
@@ -131,72 +73,59 @@ export function TerminalWorkbarPanel({
         </p>
       )}
 
-      {!selected ? (
+      {!terminal ? (
         <div className="tool-panel__state" aria-busy={loading}>
           <TerminalSquare aria-hidden="true" size={22} />
-          <strong>{loading ? "正在加载终端…" : "没有终端"}</strong>
-          <span>新建终端后，进程由 Runtime Host 持续托管。</span>
+          <strong>{loading ? "正在启动终端…" : error ? "终端启动失败" : "终端尚未启动"}</strong>
+          <span>
+            {loading
+              ? "稍等片刻即可输入命令。"
+              : readOnly
+                ? "当前连接为只读，无法启动终端。"
+                : "重试即可启动 Shell。"}
+          </span>
           {!loading && !readOnly && (
-            <Button variant="quiet" type="button" onClick={onCreate}>
-              新建终端
+            <Button variant="quiet" type="button" onClick={onReconnect}>
+              重试
             </Button>
           )}
         </div>
       ) : (
         <>
-          <div className="tool-panel__terminal-meta">
-            <span title={selected.cwd}>{selected.cwd ?? "工作区目录"}</span>
-            <span>
-              {terminalStatusLabel(selected.status)} · seq {selected.sequence}
-              {` · ${selected.capability === "pty" ? "PTY" : "兼容管道"}`}
-              {selected.status === "exited" && selected.exitCode !== undefined
-                ? ` · exit ${selected.exitCode ?? "unknown"}`
-                : ""}
-            </span>
-            {!selected.resizeSupported && (
-              <span className="tool-panel__terminal-capability" role="status">
-                当前环境未启用 PTY；终端仍可输入，但不支持随面板调整尺寸。
-              </span>
-            )}
-            <div>
-              {!selected.attached && selected.status !== "exited" && (
-                <Button variant="quiet" type="button" onClick={() => onAttach(selected.id)}>
+          {showNotice && (
+            <div className="tool-panel__terminal-notice" role="status" aria-busy={loading}>
+              <span>{[status, readOnly && "当前为只读终端"].filter(Boolean).join(" · ")}</span>
+              {reconnectNeeded && !loading && !readOnly && terminal.status !== "exited" && (
+                <Button variant="quiet" type="button" onClick={onReconnect}>
                   <Link aria-hidden="true" size={13} />
-                  连接
-                </Button>
-              )}
-              {selected.status !== "exited" && !readOnly && (
-                <Button variant="quiet" type="button" onClick={() => onStop(selected.id)}>
-                  <Square aria-hidden="true" size={12} />
-                  停止
+                  重新连接
                 </Button>
               )}
             </div>
-          </div>
-          <div
-            id={terminalPanelId(selected.id)}
-            className="tool-panel__terminal-viewport"
-            role="tabpanel"
-            aria-labelledby={terminalTabId(selected.id)}
-          >
+          )}
+          {(!terminal.resizeSupported || terminal.capability === "pipe") && (
+            <p className="tool-panel__terminal-capability" role="status">
+              当前使用兼容管道，不支持随面板调整尺寸。
+            </p>
+          )}
+          <div className="tool-panel__terminal-viewport">
             <TerminalOutputView
-              key={selected.id}
-              title={selected.title}
-              output={selectedOutput ?? undefined}
+              key={terminal.id}
+              title={terminal.title}
+              output={terminalOutput ?? undefined}
               active={active}
-              capability={selected.capability}
+              capability={terminal.capability}
               inputEnabled={
-                active && !readOnly && selected.status === "running" && selected.attached
+                active && !readOnly && terminal.status === "running" && terminal.attached
               }
-              onInput={(data) => onInput(selected.id, data)}
+              onInput={(data) => onInput(terminal.id, data)}
               onFocusChange={onFocusChange}
               onClipboard={onClipboard}
               onResize={
-                selected.resizeSupported ? (grid) => onResize(selected.id, grid) : undefined
+                terminal.resizeSupported ? (grid) => onResize(terminal.id, grid) : undefined
               }
             />
-            {!selectedOutput && <span className="tool-panel__terminal-placeholder">尚无输出</span>}
-            {selectedOutput?.truncated && (
+            {terminalOutput?.truncated && (
               <span className="tool-panel__terminal-truncated">较早输出已截断</span>
             )}
           </div>
@@ -206,20 +135,22 @@ export function TerminalWorkbarPanel({
   );
 }
 
-function terminalStatusLabel(status: WorkbarTerminalStatus): string {
-  const labels: Record<WorkbarTerminalStatus, string> = {
-    starting: "启动中",
-    running: "运行中",
-    interrupted: "连接中断",
-    exited: "已退出",
-  };
-  return labels[status];
-}
-
-function terminalTabId(terminalId: string): string {
-  return `workbar-terminal-tab-${encodeURIComponent(terminalId)}`;
-}
-
-function terminalPanelId(terminalId: string): string {
-  return `workbar-terminal-panel-${encodeURIComponent(terminalId)}`;
+function terminalStatusMessage(
+  terminal: WorkbarTerminalInstance | undefined,
+  loading: boolean,
+): string | undefined {
+  if (!terminal) return;
+  if (terminal.status === "exited") {
+    const exitCode =
+      terminal.exitCode === undefined
+        ? ""
+        : terminal.exitCode === null
+          ? " · 退出码未知"
+          : ` · 退出码 ${terminal.exitCode}`;
+    return `已退出${exitCode}`;
+  }
+  if (terminal.status === "starting") return "正在启动终端…";
+  if (loading) return terminal.attached ? "正在重新连接…" : "正在连接终端…";
+  if (terminal.status === "interrupted" || !terminal.attached) return "终端连接已断开";
+  return;
 }

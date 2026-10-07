@@ -64,26 +64,20 @@ function Fixture() {
           <BrowserWorkbarPanel bridge={bridge} sessionId="s" active={false} />
         ) : mode === "terminal" ? (
           <TerminalWorkbarPanel
-            terminals={[
-              {
-                id: "t",
-                title: "Shell",
-                status: "running",
-                attached: true,
-                sequence: 1,
-                capability: "pipe",
-                resizeSupported: false,
-              },
-            ]}
-            activeTerminalId="t"
+            terminal={{
+              id: "t",
+              title: "Shell",
+              status: "running",
+              attached: true,
+              sequence: 1,
+              capability: "pipe",
+              resizeSupported: false,
+            }}
             active={true}
             loading={false}
-            onCreate={record("terminal-create")}
-            onSelect={record("terminal-select")}
-            onAttach={record("attach")}
+            onReconnect={record("attach")}
             onInput={record("input")}
             onResize={record("resize")}
-            onStop={record("stop")}
           />
         ) : (
           <FilesWorkbarPanel

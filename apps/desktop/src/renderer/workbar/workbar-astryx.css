@@ -29,31 +29,20 @@
   justify-content: start;
 }
 
-.tool-panel .tool-panel__terminal-tabs [role="tab"] {
-  height: 34px;
-}
-
 .tool-panel
-  :is(
-    .tool-panel__create,
-    .tool-panel__terminal-input,
-    .tool-panel__chunk-footer,
-    .tool-panel__terminal-meta
-  )
+  :is(.tool-panel__create, .tool-panel__chunk-footer, .tool-panel__terminal-notice)
   > .button,
 .tool-panel .tool-panel__artifact > header .button {
   min-height: 28px;
 }
 
 .tool-panel__task-title,
-.tool-panel__terminal-command,
 .workbar-browser__address > .astryx-field {
   min-width: 0;
   flex: 1;
 }
 
-:is(.tool-panel__task-title, .tool-panel__terminal-command, .workbar-browser__address)
-  .pico-text-field {
+:is(.tool-panel__task-title, .workbar-browser__address) .pico-text-field {
   height: 29px;
   min-height: 0;
   padding: 0;

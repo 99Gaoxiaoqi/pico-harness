@@ -386,32 +386,30 @@ test("Workbar tool panels render real authority snapshots with accessible detail
 
   const terminal = renderToStaticMarkup(
     React.createElement(TerminalWorkbarPanel, {
-      terminals: [
-        {
-          id: "terminal-1",
-          title: "Shell 1",
-          status: "running",
-          attached: true,
-          sequence: 18,
-          capability: "pty",
-          resizeSupported: true,
-        },
-      ],
-      activeTerminalId: "terminal-1",
+      terminal: {
+        id: "terminal-1",
+        title: "Shell 1",
+        status: "running",
+        attached: true,
+        sequence: 18,
+        capability: "pty",
+        resizeSupported: true,
+      },
       output: { terminalId: "terminal-1", text: "$ npm test\npassed", sequence: 18 },
       active: true,
       loading: false,
-      onCreate: () => undefined,
-      onSelect: () => undefined,
-      onAttach: () => undefined,
+      onReconnect: () => undefined,
       onInput: () => undefined,
       onResize: () => undefined,
-      onStop: () => undefined,
     }),
   );
-  assert.match(terminal, /role="tablist"/u);
-  assert.match(terminal, /role="tabpanel"/u);
+  assert.doesNotMatch(
+    terminal,
+    /role="tablist"|role="tabpanel"|新建终端|停止|seq |PTY|tool-panel__terminal-meta/u,
+    "An outer terminal tab contains only its Shell output during normal operation",
+  );
   assert.match(terminal, /role="log"/u);
+  assert.match(terminal, /aria-label="Shell 1 输出"/u);
   assert.match(terminal, /tool-panel__terminal-screen/u);
   assert.doesNotMatch(terminal, /\$ npm test/u, "PTY bytes must only be rendered by the VT parser");
 
@@ -517,26 +515,20 @@ test("Workbar tool panels render real authority snapshots with accessible detail
 
   const fallbackTerminal = renderToStaticMarkup(
     React.createElement(TerminalWorkbarPanel, {
-      terminals: [
-        {
-          id: "terminal-pipe",
-          title: "Shell fallback",
-          status: "running",
-          attached: true,
-          sequence: 1,
-          capability: "pipe",
-          resizeSupported: false,
-        },
-      ],
-      activeTerminalId: "terminal-pipe",
+      terminal: {
+        id: "terminal-pipe",
+        title: "Shell fallback",
+        status: "running",
+        attached: true,
+        sequence: 1,
+        capability: "pipe",
+        resizeSupported: false,
+      },
       active: true,
       loading: false,
-      onCreate: () => undefined,
-      onSelect: () => undefined,
-      onAttach: () => undefined,
+      onReconnect: () => undefined,
       onInput: () => undefined,
       onResize: () => undefined,
-      onStop: () => undefined,
     }),
   );
   assert.match(fallbackTerminal, /兼容管道/u);
