@@ -515,9 +515,8 @@ function ProcessDisclosure({
   readonly item: ConversationProcessView;
   readonly children: ReactNode;
 }) {
-  const [manualOpen, setManualOpen] = useState(false);
+  const [open, setOpen] = useState(false);
   const active = item.activeStatus !== undefined;
-  const open = active || manualOpen;
   const tools = item.items.filter((entry): entry is ToolItemView => entry.kind === "tool");
   const summary = toolGroupSummary(tools);
   const activeLabels: Readonly<Record<string, string>> = {
@@ -543,11 +542,10 @@ function ProcessDisclosure({
       <summary
         className="conversation-process__summary"
         aria-expanded={open}
-        aria-disabled={active || undefined}
-        tabIndex={active ? -1 : 0}
+        tabIndex={0}
         onClick={(event) => {
           event.preventDefault();
-          if (!active) setManualOpen(!open);
+          setOpen(!open);
         }}
       >
         <span className="conversation-process__heading">
@@ -570,9 +568,7 @@ function ProcessDisclosure({
           {summary.failed > 0 && (
             <span className="conversation-process__failure-count">{summary.failed} 次工具失败</span>
           )}
-          {!active && (
-            <ChevronRight className="conversation-disclosure-chevron" aria-hidden="true" />
-          )}
+          <ChevronRight className="conversation-disclosure-chevron" aria-hidden="true" />
         </span>
         {summary.failure && (
           <span className="conversation-process__failure">

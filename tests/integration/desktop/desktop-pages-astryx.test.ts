@@ -314,7 +314,10 @@ async function scenario(){
   await mountTranscript(liveItems,activeRun);
   const process=()=>document.querySelector('.conversation-process');
   const thinkingRow=()=>document.querySelector('.conversation-thinking');
-  check(process().open,"Live execution process is expanded even with different canonical IDs");
+  check(!process().open&&process().dataset.active==="true","Live execution process starts collapsed even with different canonical IDs");
+  check(process().querySelector('summary').getAttribute('aria-expanded')==="false","Collapsed live process exposes its disclosure state");
+  const toolBody=document.querySelector('.conversation-tool-record__body');
+  check(!toolBody.checkVisibility(),"Tool output is hidden while the live process is collapsed: "+JSON.stringify({visible:toolBody.checkVisibility(),rects:toolBody.getClientRects().length,processOpen:process().open}));
   check(!thinkingRow().open&&!thinkingRow().querySelector('.conversation-thinking__body').textContent,"Thinking starts collapsed and does not mount its body");
   check(!thinkingRow().querySelector('.conversation-thinking__preview'),"Streaming thinking does not show a changing preview");
   check(document.querySelectorAll('[data-tool-group]').length===1,"Adjacent tools remain grouped inside the process");
@@ -323,20 +326,33 @@ async function scenario(){
   check(toolGroup().querySelector('.conversation-tool-row__target').textContent.length<=120,"Invocation preview is bounded even for long arguments");
   check(getComputedStyle(toolGroup().querySelector('.conversation-tool-group__expanded-title')).display==="none","Generic group heading is hidden while collapsed");
   check(document.querySelector('.conversation-tool-record[data-state="failed"]').open===false,"Errors do not force tool details open");
-  check(thinkingRow().querySelector('summary').getBoundingClientRect().height<=28,"Thinking uses the compact tool-row geometry");
   check(getComputedStyle(process().querySelector('.conversation-process__items')).paddingLeft==="0px","Process does not add a nested tree indent");
   check(process().contains([...document.querySelectorAll('.conversation-message--assistant')][0]),"Intermediate commentary stays in the process");
+  const updatedLive=liveItems.map(item=>item.id==="tool-3"?{...item,state:"active",output:"更新后的工具结果"}:item);
+  for(const status of ["queued","running","pause_requested","paused","cancelling"]){
+    await mountTranscript(updatedLive,{...activeRun,status});
+    check(!process().open,"Live status and tool output updates do not expand the process: "+status);
+  }
   await act(async()=>process().querySelector('summary').click());
-  check(process().open,"Live work cannot be collapsed");
+  check(process().open&&process().querySelector('summary').getAttribute('aria-expanded')==="true","Live work can be expanded manually");
+  await mountTranscript(updatedLive,activeRun);
+  check(process().open,"Manual expansion survives live tool updates");
+  await act(async()=>process().querySelector('summary').click());
+  await mountTranscript(liveItems,activeRun);
+  check(!process().open,"Manual collapse survives live tool updates");
+  await act(async()=>process().querySelector('summary').click());
+  check(process().open,"Live work can be reopened manually");
+  check(thinkingRow().querySelector('summary').getBoundingClientRect().height<=28,"Thinking uses the compact tool-row geometry");
   await act(async()=>thinkingRow().querySelector('summary').click());
   const originalThinking=thinkingRow();
   check(thinkingRow().open&&thinkingRow().textContent.includes("完整推理正文"),"Opening thinking renders the full content");
+  await act(async()=>process().querySelector('summary').click());
   const settled=[...liveItems.map(item=>item.id===reasoning.id?{...item,streaming:false,text:item.text+"追加说明"}:item),
     {id:"answer-1",kind:"assistantMessage",runId:"execution-1",text:"最终结论一"},
     {id:"end-1",kind:"runBoundary",runId:"host-1",status:"completed",label:"运行完成",duration:"2 分 15 秒"},
   ];
   await mountTranscript(settled);
-  check(!process().open,"Settling collapses the outer process automatically");
+  check(!process().open,"Reader collapse survives settlement");
   check(thinkingRow()===originalThinking&&thinkingRow().open,"Nested expansion survives settlement");
   check(process().querySelector('summary').textContent.includes("2 分 15 秒"),"Settled header carries Run duration");
   check(process().querySelector('summary').textContent.includes("1 次工具失败"),"Failure summary remains visible when collapsed");
@@ -388,7 +404,32 @@ async function scenario(){
   check([...document.querySelectorAll('.conversation-process')].every(el=>!el.open),"Terminal events override a stale active Run prop");
   const steeringLive=interrupted.filter(item=>item.id!=="failure");
   await mountTranscript(steeringLive,activeRun);
-  check([...document.querySelectorAll('.conversation-process')].every(el=>el.open),"Steering splits the process while preserving live Run ownership");
+  const steeringProcesses=[...document.querySelectorAll('.conversation-process')];
+  check(steeringProcesses.every(el=>!el.open),"Steering keeps every process collapsed");
+  check(steeringProcesses.filter(el=>el.dataset.active==="true").length===1&&steeringProcesses.at(-1).dataset.active==="true","Only the latest process retains the live Run status after steering and interactions");
+
+  const answeredQuestion={id:"answered-question",kind:"prompt",question:"选择调整方向",state:"answered"};
+  const resumedItems=[...liveItems,answeredQuestion,tool("after-answer"),
+    {id:"resumed-thinking",kind:"thinking",runId:"execution-1",text:"继续调整",streaming:true},
+    {id:"resumed-status",kind:"status",title:"Pico 正在推理"},
+  ];
+  await mountTranscript(resumedItems,activeRun);
+  const answerProcesses=()=>[...document.querySelectorAll('.conversation-process')];
+  check(answerProcesses().length===2&&answerProcesses().every(el=>!el.open),"Answering keeps both execution segments collapsed by default");
+  check(!answerProcesses()[0].dataset.active&&!answerProcesses()[0].querySelector('.conversation-process__spinner'),"Work before the answered question no longer looks live");
+  check(answerProcesses()[1].dataset.active==="true"&&answerProcesses()[1].querySelector('summary').textContent.includes("进行中"),"Resumed work owns the current status even with a trailing thinking indicator");
+  await act(async()=>answerProcesses()[0].querySelector('summary').click());
+  await mountTranscript(resumedItems.map(item=>item.id==="after-answer"?{...item,output:"新的执行结果"}:item),{...activeRun,status:"paused"});
+  check(answerProcesses()[0].open&&!answerProcesses()[1].open,"Reader expansion and collapse survive resumed tool and status updates");
+  check(!answerProcesses()[0].querySelector('summary').textContent.includes("已暂停")&&answerProcesses()[1].querySelector('summary').textContent.includes("已暂停"),"Pause status belongs only to the latest execution segment");
+  await act(async()=>answerProcesses()[1].querySelector('summary').click());
+  await mountTranscript(resumedItems,activeRun);
+  check(answerProcesses().every(el=>el.open),"Both historical and live segments remain manually expandable across status updates");
+  await act(async()=>answerProcesses()[1].querySelector('summary').click());
+  // ConversationPage removes transient timeline indicators when the Run settles.
+  await mountTranscript([...resumedItems.filter(item=>item.id!=="resumed-status"),{id:"resumed-end",kind:"runBoundary",runId:"host-1",status:"completed",label:"运行完成"}],activeRun);
+  check(answerProcesses()[0].open&&!answerProcesses()[1].open&&answerProcesses().every(el=>!el.dataset.active),"Settlement removes live status without changing reader disclosures");
+  check(answerProcesses()[1].querySelector('summary').textContent.includes("已完成"),"The final segment carries the completed Run status");
   await mountTranscript([
     {id:"external-user",kind:"userMessage",text:"导入问题"},
     {id:"external-answer-1",kind:"assistantMessage",runId:"external-import:fixture",turnId:"external-import:fixture:turn",text:"导入回复一"},
@@ -398,7 +439,7 @@ async function scenario(){
   check(importedAnswers.length===2&&importedAnswers[0].textContent.includes("导入回复一")&&importedAnswers[1].textContent.includes("导入回复二"),"Imported history keeps every assistant message visible");
   check(!document.querySelector('.conversation-process'),"Imported history is not folded into an execution process");
   await act(async()=>root.render(<SideChatWorkbarPanel child={{panelId:"side",sourceSessionId:"parent",targetSessionId:"child",state:"live"}} items={liveItems} activeRun={activeRun} draft="" active running loading={false} onSend={()=>{}} onStop={()=>{}} onDraftChange={()=>{}} onRetryCreate={()=>{}} onClose={()=>{}}/>));
-  check(process().open&&!thinkingRow().open,"Side chat uses the same live process and thinking disclosures");
+  check(!process().open&&!thinkingRow().open,"Side chat starts with its live process and thinking collapsed");
   await act(async()=>root.unmount());
 }
 scenario().then(()=>fetch("/result",{method:"POST",body:"PASS: pages forms model picker and approval"})).catch(error=>fetch("/result",{method:"POST",body:String(error.stack||error)}));

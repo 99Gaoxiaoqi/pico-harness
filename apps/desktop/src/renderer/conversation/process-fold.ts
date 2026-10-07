@@ -109,5 +109,14 @@ export function foldConversationProcess(
     // splits the disclosure without dropping the still-live execution scope.
   }
   flush();
-  return folded;
+  // Interactions split one Run into several disclosures. Only its latest segment
+  // represents current work; earlier segments must not keep a live status/spinner.
+  const activeProcessIndex = folded.findLastIndex(
+    (item) => item.kind === "process" && item.activeStatus !== undefined,
+  );
+  return folded.map((item, index) =>
+    item.kind === "process" && item.activeStatus !== undefined && index !== activeProcessIndex
+      ? { ...item, activeStatus: undefined }
+      : item,
+  );
 }

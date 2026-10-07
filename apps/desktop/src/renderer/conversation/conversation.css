@@ -1505,7 +1505,7 @@
 }
 
 .conversation-thinking__label:hover,
-.conversation-process__summary:not([aria-disabled="true"]):hover {
+.conversation-process__summary:hover {
   background: color-mix(in srgb, var(--conversation-ink) 4%, transparent);
 }
 
@@ -1530,10 +1530,6 @@
   line-height: 20px;
   cursor: pointer;
   list-style: none;
-}
-
-.conversation-process__summary[aria-disabled="true"] {
-  cursor: default;
 }
 
 .conversation-process__heading {
