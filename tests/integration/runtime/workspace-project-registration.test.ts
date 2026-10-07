@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -140,6 +140,53 @@ test("workspace.list exposes registered project identity and display name", asyn
   );
   assert.ok(workspace?.projectId);
   assert.equal(workspace.projectName, basename(workspacePath));
+});
+
+test("legacy migration keeps the old file on write failure and retries later", async (t) => {
+  if (process.platform === "win32" || process.getuid?.() === 0) {
+    t.skip("directory write permissions are not enforceable in this environment");
+    return;
+  }
+  const root = await mkdtemp(join(tmpdir(), "pico-project-migration-retry-"));
+  const picoHome = join(root, "pico-home");
+  const workspacePath = join(root, "migration-workspace");
+  const registryPath = join(picoHome, "daemon-workspaces.json");
+  await mkdir(picoHome, { recursive: true });
+  await mkdir(workspacePath, { recursive: true });
+  const canonicalWorkspacePath = await realpath(workspacePath);
+  await writeFile(
+    registryPath,
+    `${JSON.stringify({ version: 1, workspaces: [canonicalWorkspacePath] })}\n`,
+  );
+  const store = new WorkspaceRegistrationStore(registryPath);
+  t.after(async () => {
+    await chmod(picoHome, 0o700).catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  });
+
+  await chmod(picoHome, 0o500);
+  let fallbackProjectId: string | null;
+  try {
+    const [workspace] = await store.listRegistrations();
+    fallbackProjectId = workspace?.projectId ?? null;
+    assert.ok(fallbackProjectId, "in-memory fallback still groups registered workspaces");
+    assert.equal(
+      (JSON.parse(await readFile(registryPath, "utf8")) as { version: number }).version,
+      1,
+      "failed migration leaves the original registry file untouched",
+    );
+    assert.ok(store.diagnostics().some((message) => message.includes("迁移写入失败")));
+  } finally {
+    await chmod(picoHome, 0o700);
+  }
+
+  const retried = await store.listRegistrations();
+  assert.equal(retried[0]?.projectId, fallbackProjectId);
+  assert.equal(
+    (JSON.parse(await readFile(registryPath, "utf8")) as { version: number }).version,
+    2,
+    "the next access retries and completes the migration",
+  );
 });
 
 test("Git identity discovery failures are diagnosed and reconciled on a later registration", async (t) => {
