@@ -66,6 +66,8 @@ test("desktop temporary tasks stay isolated when Pico home is inside a Git repos
   );
   assert.equal(listed.workspaces.length, 2);
   assert.ok(listed.workspaces.every((workspace) => workspace.temporary));
+  assert.ok(listed.workspaces.every((workspace) => workspace.projectId === null));
+  assert.ok(listed.workspaces.every((workspace) => workspace.projectName === null));
   const sent = parseRuntimeResult(
     "session.send",
     await desktop.handle(

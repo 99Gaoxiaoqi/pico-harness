@@ -1173,27 +1173,32 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
 
   private async listWorkspaces(): Promise<JsonValue> {
     const workspaces = await Promise.all(
-      (await this.registrationStore.list()).map(async (workspacePath) => {
+      (await this.registrationStore.listRegistrations()).map(async (registration) => {
+        const { workspacePath, projectId, projectName } = registration;
+        const project = { projectId, projectName };
         // 注册项可能指向已删除的目录（崩溃的���试/客户端残留；注册表 list() 会
         // 过滤缺失目录，这里是过滤与物化之间的竞态护栏）。真机事故
         // （2026-08-16）：真 home 累积 54 个存活的 %TEMP% e2e 工作区，单次
         // workspace.list 物化全部 runtime 推过 kernel 操作 deadline，连接被
         // 整条拆断——根治在 e2e 隔离 daemon root，这里保证残留永不致命。
         if (!existsSync(workspacePath)) {
-          return this.decorateWorkspaceStatus({
-            workspacePath,
-            registered: true,
-            schedulerStatus: "unknown",
-            mode: "folder",
-            branch: "",
-            capabilities: {
-              foregroundRuns: false,
-              fileHistory: false,
-              isolatedWorktrees: false,
-              branchMerge: false,
-            },
-            eventLog: null,
-          } satisfies WorkspaceStatusResult);
+          return this.decorateWorkspaceStatus(
+            {
+              workspacePath,
+              registered: true,
+              schedulerStatus: "unknown",
+              mode: "folder",
+              branch: "",
+              capabilities: {
+                foregroundRuns: false,
+                fileHistory: false,
+                isolatedWorktrees: false,
+                branchMerge: false,
+              },
+              eventLog: null,
+            } satisfies WorkspaceStatusResult,
+            project,
+          );
         }
         try {
           const runtime = await this.options.runtimeService.getWorkspaceRuntime(workspacePath);
@@ -1203,13 +1208,14 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
               true,
               runtime.mode === "git" ? await resolveGitBranch(runtime.workspace) : undefined,
             ),
+            project,
           );
         } catch (error) {
           // A registered workspace may still contain storage from an unsupported era.
           // Listing is the Desktop bootstrap boundary: one unavailable workspace must
           // remain discoverable without preventing every other workspace from opening.
           logger.warn({ workspacePath, err: error }, "Workspace status materialization failed");
-          return this.decorateWorkspaceStatus(unavailableWorkspaceStatus(workspacePath));
+          return this.decorateWorkspaceStatus(unavailableWorkspaceStatus(workspacePath), project);
         }
       }),
     );
@@ -1230,10 +1236,19 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     return this.getWorkspaceStatus(await this.temporaryWorkspace.ensure());
   }
 
-  private decorateWorkspaceStatus(status: WorkspaceStatusResult): WorkspaceStatusResult {
-    return this.temporaryWorkspace.matches(status.workspacePath)
-      ? { ...status, temporary: true }
-      : status;
+  private async decorateWorkspaceStatus(
+    status: WorkspaceStatusResult,
+    registeredProject?: { readonly projectId: string | null; readonly projectName: string | null },
+  ): Promise<WorkspaceStatusResult> {
+    const temporary = this.temporaryWorkspace.matches(status.workspacePath);
+    const project = temporary
+      ? { projectId: null, projectName: null }
+      : (registeredProject ?? (await this.registrationStore.projectMetadata(status.workspacePath)));
+    return {
+      ...status,
+      ...project,
+      ...(temporary ? { temporary: true as const } : {}),
+    };
   }
 
   private async initializeWorkspace(workspacePath: string): Promise<JsonValue> {

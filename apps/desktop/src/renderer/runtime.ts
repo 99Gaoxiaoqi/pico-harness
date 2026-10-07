@@ -252,6 +252,14 @@ function mergeLoadedData(
   const changeResult = isRecord(results.changes) ? results.changes : {};
   const agentCatalogResult = isRecord(results.agentCatalog) ? results.agentCatalog : {};
   const skillCatalogResult = isRecord(results.skillCatalog) ? results.skillCatalog : {};
+  const workspace = base.workspaces.find((candidate) => candidate.path === workspacePath);
+  const project =
+    workspace && workspace.projectId !== undefined
+      ? {
+          projectId: workspace.projectId,
+          projectName: workspace.projectName ?? null,
+        }
+      : undefined;
 
   return {
     ...base,
@@ -266,7 +274,7 @@ function mergeLoadedData(
       ...replaceWorkspaceItems(
         base.sessions,
         workspacePath,
-        parseSessions(results.sessions, workspacePath),
+        parseSessions(results.sessions, workspacePath, project),
       ),
     ].sort(compareSessions),
     runs: mergeRunViews(base.runs, parseRuns(results.runs, workspacePath)),
@@ -797,6 +805,16 @@ export function useRuntimeStore(): RuntimeStore {
         parseWorkspaceList(workspaceValue).flatMap((workspace) => {
           const workspacePath = stringValue(workspace.workspacePath);
           if (!workspacePath || !booleanValue(workspace.registered, true)) return [];
+          const projectId =
+            typeof workspace.projectId === "string" || workspace.projectId === null
+              ? workspace.projectId
+              : undefined;
+          const projectName =
+            typeof workspace.projectName === "string" || workspace.projectName === null
+              ? workspace.projectName
+              : undefined;
+          const project =
+            projectId !== undefined ? { projectId, projectName: projectName ?? null } : undefined;
           return [
             (async () => {
               const trust = await optionalInvoke(bridge, "workspace.trustStatus", {
@@ -819,12 +837,15 @@ export function useRuntimeStore(): RuntimeStore {
                     workspace.temporary === true
                       ? TEMPORARY_WORKSPACE_LABEL
                       : workspaceName(workspacePath),
+                  ...(project
+                    ? { projectId: project.projectId, projectName: project.projectName }
+                    : {}),
                   mode: parseWorkspaceMode(workspace.mode, "folder") ?? "folder",
                   registered: true,
                   trusted,
                   ...(workspace.temporary === true ? { temporary: true as const } : {}),
                 } satisfies WorkspaceView,
-                sessions: parseSessions(sessions.value, workspacePath),
+                sessions: parseSessions(sessions.value, workspacePath, project),
                 runs: parseRuns(runs.value, workspacePath),
               };
             })(),
@@ -1274,7 +1295,21 @@ export function useRuntimeStore(): RuntimeStore {
       let conversation: ConversationView = {
         ...parsedConversation,
         session: !sessionResult.error
-          ? parseSessionDetail(sessionResult.value, workspacePath)
+          ? parseSessionDetail(
+              sessionResult.value,
+              workspacePath,
+              (() => {
+                const workspace = dataRef.current.workspaces.find(
+                  (candidate) => candidate.path === workspacePath,
+                );
+                return workspace?.projectId !== undefined
+                  ? {
+                      projectId: workspace.projectId,
+                      projectName: workspace.projectName ?? null,
+                    }
+                  : undefined;
+              })(),
+            )
           : dataRef.current.conversations[conversationKey]?.session,
         ...(activeRunId ? { runId: activeRunId } : {}),
         ...(!sessionUsage.error ? { usage: parseUsage(sessionUsage.value) } : {}),

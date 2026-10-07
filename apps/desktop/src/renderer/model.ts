@@ -33,6 +33,8 @@ export type AppRuntimePhase =
 export interface SessionView {
   readonly id: string;
   readonly workspacePath: string;
+  readonly projectId?: string | null | undefined;
+  readonly projectName?: string | null | undefined;
   readonly title: string;
   readonly status: "active" | "archived";
   readonly pinned?: boolean | undefined;
@@ -316,6 +318,8 @@ export type WorkspaceMode = "folder" | "git";
 export interface WorkspaceView {
   readonly path: string;
   readonly name: string;
+  readonly projectId?: string | null | undefined;
+  readonly projectName?: string | null | undefined;
   readonly mode: WorkspaceMode;
   readonly registered: boolean;
   readonly trusted: boolean;

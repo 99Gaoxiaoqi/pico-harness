@@ -463,14 +463,46 @@ function SidebarTasks({
   const visibleSessions = sortSidebarTasks(
     sessions.filter((session) => session.status !== "archived"),
   );
-  const groups = Array.from(new Set(visibleSessions.map((session) => session.workspacePath)))
-    .map((workspacePath) => ({
-      workspace: workspaces.find((candidate) => candidate.path === workspacePath),
-      workspacePath,
-      sessions: visibleSessions.filter((session) => session.workspacePath === workspacePath),
-    }))
-    .filter((group) => group.sessions.length > 0);
-  const renderSession = (session: SessionView, nested = false) => {
+  const groupedProjects = new Map<
+    string,
+    {
+      readonly key: string;
+      readonly label: string;
+      readonly git: boolean;
+      readonly workspacePaths: Set<string>;
+      readonly sessions: SessionView[];
+    }
+  >();
+  for (const session of visibleSessions) {
+    const workspace = workspaces.find((candidate) => candidate.path === session.workspacePath);
+    const projectId = session.projectId !== undefined ? session.projectId : workspace?.projectId;
+    const unassigned = workspace?.temporary === true || projectId === null;
+    const key = unassigned
+      ? "unassigned"
+      : projectId
+        ? `project:${projectId}`
+        : `workspace:${session.workspacePath}`;
+    let group = groupedProjects.get(key);
+    if (!group) {
+      group = {
+        key,
+        label: unassigned
+          ? TEMPORARY_WORKSPACE_GROUP_LABEL
+          : (session.projectName ??
+            workspace?.projectName ??
+            workspace?.name ??
+            workspaceName(session.workspacePath)),
+        git: workspace?.mode === "git",
+        workspacePaths: new Set(),
+        sessions: [],
+      };
+      groupedProjects.set(key, group);
+    }
+    group.workspacePaths.add(session.workspacePath);
+    group.sessions.push(session);
+  }
+  const groups = [...groupedProjects.values()];
+  const renderSession = (session: SessionView, nested = false, workspaceLabel?: string) => {
     const workspace = workspaces.find((candidate) => candidate.path === session.workspacePath);
     const sessionRuns = runs.filter(
       (run) => run.workspacePath === session.workspacePath && run.sessionId === session.id,
@@ -490,7 +522,8 @@ function SidebarTasks({
         session={session}
         nested={nested}
         workspaceLabel={
-          !nested && workspace?.temporary ? TEMPORARY_WORKSPACE_GROUP_LABEL : undefined
+          workspaceLabel ??
+          (!nested && workspace?.temporary ? TEMPORARY_WORKSPACE_GROUP_LABEL : undefined)
         }
         running={sessionRuns.some((run) => !isTerminalRun(run.status))}
         hasPendingInteraction={hasPendingInteraction}
@@ -534,42 +567,39 @@ function SidebarTasks({
           {visibleSessions.map((session) => renderSession(session))}
         </div>
       ) : (
-        groups.map(({ workspace, workspacePath, sessions: workspaceSessions }) => (
-          <div className="sidebar-project" key={workspacePath}>
+        groups.map((group) => (
+          <div className="sidebar-project" key={group.key}>
             <AstryxButton
-              label={
-                workspace?.temporary
-                  ? TEMPORARY_WORKSPACE_GROUP_LABEL
-                  : (workspace?.name ?? workspaceName(workspacePath))
-              }
+              label={group.label}
               variant="ghost"
               className="sidebar-project__header"
-              aria-expanded={!collapsedProjects.has(workspacePath)}
+              aria-expanded={!collapsedProjects.has(group.key)}
               onClick={() =>
                 setCollapsedProjects((current) => {
                   const next = new Set(current);
-                  if (next.has(workspacePath)) next.delete(workspacePath);
-                  else next.add(workspacePath);
+                  if (next.has(group.key)) next.delete(group.key);
+                  else next.add(group.key);
                   return next;
                 })
               }
             >
-              {workspace?.mode === "git" ? (
-                <FolderGit2 aria-hidden="true" />
-              ) : (
-                <Folder aria-hidden="true" />
-              )}
-              <span>
-                {workspace?.temporary
-                  ? TEMPORARY_WORKSPACE_GROUP_LABEL
-                  : (workspace?.name ?? workspaceName(workspacePath))}
-              </span>
-              <small>{workspaceSessions.length}</small>
+              {group.git ? <FolderGit2 aria-hidden="true" /> : <Folder aria-hidden="true" />}
+              <span>{group.label}</span>
+              <small>{group.sessions.length}</small>
               <ChevronDown aria-hidden="true" />
             </AstryxButton>
-            {!collapsedProjects.has(workspacePath) && (
+            {!collapsedProjects.has(group.key) && (
               <div className="sidebar-project__sessions">
-                {workspaceSessions.map((session) => renderSession(session, true))}
+                {group.sessions.map((session) => {
+                  const workspace = workspaces.find(
+                    (candidate) => candidate.path === session.workspacePath,
+                  );
+                  const workspaceLabel =
+                    group.workspacePaths.size > 1 && workspace?.temporary !== true
+                      ? (workspace?.name ?? workspaceName(session.workspacePath))
+                      : undefined;
+                  return renderSession(session, true, workspaceLabel);
+                })}
               </div>
             )}
           </div>
