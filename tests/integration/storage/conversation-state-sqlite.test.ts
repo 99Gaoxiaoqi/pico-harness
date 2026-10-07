@@ -1,12 +1,18 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import test from "node:test";
 import type { JsonObject } from "@pico/protocol";
-import { FIRST_SEND_CLAIM_RETENTION_MS, normalizeWorkspacePath } from "@pico/pico-host";
+import {
+  FIRST_SEND_CLAIM_RETENTION_MS,
+  normalizeWorkspacePath,
+} from "../../../packages/pico-host/src/desktop-conversation-state.js";
 import { closeAllOperationalDatabasesForTest } from "@pico/storage";
-import { SqliteDesktopConversationStateStore } from "@pico/pico-host";
+import { SqliteDesktopConversationStateStore } from "../../../packages/pico-host/src/sqlite-desktop-conversation-state-store.js";
+import { ALL_WORKSPACE_SQLITE_SCOPES } from "../../../packages/storage/src/sqlite/workspace-scopes.js";
+import { migrateOperationalDatabaseSync } from "../../../packages/storage/src/sqlite/sqlite-schema.js";
 
 interface Fixture {
   readonly root: string;
@@ -89,6 +95,8 @@ test("sqlite conversation state supports queue and first-send claim lifecycle", 
       name: "review",
       args: "focus",
     });
+    await store.enqueue(fixture.workspaceA, "session-1", { kind: "text", text: "third" });
+    await store.enqueue(fixture.workspaceA, "session-2", { kind: "text", text: "other session" });
     assert.deepEqual(await store.listQueued(fixture.workspaceA, "session-1"), [
       {
         queueId: "queue-1",
@@ -104,26 +112,158 @@ test("sqlite conversation state supports queue and first-send claim lifecycle", 
         input: { kind: "skill", name: "review", args: "focus" },
         createdAt: 2_020,
       },
+      {
+        queueId: "queue-3",
+        workspacePath: canonical,
+        sessionId: "session-1",
+        input: { kind: "text", text: "third" },
+        createdAt: 2_030,
+      },
     ]);
     assert.deepEqual(await store.listQueued(fixture.workspaceB, "session-1"), []);
 
-    await store.removeQueued(fixture.workspaceA, "queue-1");
+    assert.deepEqual(
+      await store.updateQueued(fixture.workspaceA, "session-1", "queue-2", {
+        kind: "agent",
+        name: "reviewer",
+        task: "review the diff",
+      }),
+      {
+        queueId: "queue-2",
+        workspacePath: canonical,
+        sessionId: "session-1",
+        input: { kind: "agent", name: "reviewer", task: "review the diff" },
+        createdAt: 2_020,
+      },
+    );
+    assert.equal(
+      await store.updateQueued(fixture.workspaceA, "session-9", "queue-2", {
+        kind: "text",
+        text: "wrong session",
+      }),
+      undefined,
+    );
+    assert.equal(
+      await store.removeQueuedForSession(fixture.workspaceA, "session-2", "queue-2"),
+      false,
+    );
+
+    assert.deepEqual(
+      (
+        await store.reorderQueued(fixture.workspaceA, "session-1", [
+          "queue-3",
+          "queue-1",
+          "queue-2",
+        ])
+      )?.map((item) => item.queueId),
+      ["queue-3", "queue-1", "queue-2"],
+    );
+    assert.deepEqual(
+      (await store.moveQueuedToNext(fixture.workspaceA, "session-1", "queue-2"))?.map(
+        (item) => item.queueId,
+      ),
+      ["queue-2", "queue-3", "queue-1"],
+    );
+    assert.equal(
+      await store.reorderQueued(fixture.workspaceA, "session-1", ["queue-1", "queue-2"]),
+      undefined,
+    );
+    assert.equal(
+      await store.removeQueuedForSession(fixture.workspaceA, "session-1", "queue-3"),
+      true,
+    );
+    assert.equal(
+      await store.removeQueuedForSession(fixture.workspaceA, "session-1", "queue-3"),
+      false,
+    );
+    clock = 500;
+    await store.enqueue(fixture.workspaceA, "session-1", { kind: "text", text: "appended" });
     assert.deepEqual(
       (await store.listQueued(fixture.workspaceA, "session-1")).map((item) => item.queueId),
-      ["queue-2"],
+      ["queue-2", "queue-1", "queue-5"],
     );
-    await store.clearQueued(fixture.workspaceA, "session-1");
-    assert.deepEqual(await store.listQueued(fixture.workspaceA, "session-1"), []);
 
-    const claim = await store.claimFirstSend(fixture.workspaceA, "claim-key", "session-1", "fp-1");
+    closeAllOperationalDatabasesForTest();
+    const reopenedStore = new SqliteDesktopConversationStateStore({ picoHome: fixture.picoHome });
     assert.deepEqual(
-      await store.claimFirstSend(fixture.workspaceA, "claim-key", "session-9", "fp-9"),
+      (await reopenedStore.listQueued(fixture.workspaceA, "session-1")).map((item) => item.queueId),
+      ["queue-2", "queue-1", "queue-5"],
+    );
+
+    await reopenedStore.removeQueued(fixture.workspaceA, "queue-4");
+    assert.deepEqual(await reopenedStore.listQueued(fixture.workspaceA, "session-2"), []);
+    await reopenedStore.clearQueued(fixture.workspaceA, "session-1");
+    assert.deepEqual(await reopenedStore.listQueued(fixture.workspaceA, "session-1"), []);
+
+    const claim = await reopenedStore.claimFirstSend(
+      fixture.workspaceA,
+      "claim-key",
+      "session-1",
+      "fp-1",
+    );
+    assert.deepEqual(
+      await reopenedStore.claimFirstSend(fixture.workspaceA, "claim-key", "session-9", "fp-9"),
       claim,
     );
-    await store.rememberIdempotent(fixture.workspaceA, "claim-key", "fp-1", { ok: true });
-    assert.equal(await store.getFirstSendClaim(fixture.workspaceA, "claim-key"), undefined);
+    await reopenedStore.rememberIdempotent(fixture.workspaceA, "claim-key", "fp-1", { ok: true });
+    assert.equal(await reopenedStore.getFirstSendClaim(fixture.workspaceA, "claim-key"), undefined);
   } finally {
     cleanupFixture(fixture.root);
+  }
+});
+
+test("control schema v9 backfills queue order by timestamp and queue id per session", () => {
+  const database = new DatabaseSync(":memory:");
+  try {
+    migrateOperationalDatabaseSync(database, ALL_WORKSPACE_SQLITE_SCOPES);
+    database.exec(`
+      DROP INDEX desktop_input_queue_by_session;
+      ALTER TABLE desktop_input_queue DROP COLUMN queue_order;
+      CREATE INDEX desktop_input_queue_by_session
+        ON desktop_input_queue(workspace_path, session_id, created_at, queue_id);
+      UPDATE operational_schema_migrations SET version = 8 WHERE scope = 'control';
+      INSERT INTO desktop_input_queue
+        (queue_id, workspace_path, session_id, input_json, created_at)
+        VALUES
+          ('queue-b', '/work', 'one', '{}', 20),
+          ('queue-c', '/work', 'one', '{}', 10),
+          ('queue-a', '/work', 'one', '{}', 10),
+          ('queue-d', '/work', 'two', '{}', 1);
+    `);
+    assert.equal(migrateOperationalDatabaseSync(database, ALL_WORKSPACE_SQLITE_SCOPES), true);
+    assert.deepEqual(
+      database
+        .prepare(
+          `SELECT queue_id, queue_order FROM desktop_input_queue
+           WHERE workspace_path = '/work' AND session_id = 'one'
+           ORDER BY queue_order, queue_id`,
+        )
+        .all()
+        .map((row) => {
+          const result = row as { queue_id: string; queue_order: number };
+          return { queue_id: result.queue_id, queue_order: result.queue_order };
+        }),
+      [
+        { queue_id: "queue-a", queue_order: 0 },
+        { queue_id: "queue-c", queue_order: 1 },
+        { queue_id: "queue-b", queue_order: 2 },
+      ],
+    );
+    assert.deepEqual(
+      database
+        .prepare(
+          `SELECT queue_id, queue_order FROM desktop_input_queue
+           WHERE workspace_path = '/work' AND session_id = 'two'`,
+        )
+        .all()
+        .map((row) => {
+          const result = row as { queue_id: string; queue_order: number };
+          return { queue_id: result.queue_id, queue_order: result.queue_order };
+        }),
+      [{ queue_id: "queue-d", queue_order: 0 }],
+    );
+  } finally {
+    database.close();
   }
 });
 

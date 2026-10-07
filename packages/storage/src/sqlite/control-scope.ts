@@ -7,7 +7,7 @@ export const CONTROL_SCOPE_NAME = "control";
 export const CONTROL_SCOPE: SqliteSchemaScope = {
   name: CONTROL_SCOPE_NAME,
   baseline: {
-    version: 8,
+    version: 9,
     sql: `
       CREATE TABLE control_metadata (key TEXT PRIMARY KEY, value_json TEXT NOT NULL);
       -- rows: revision / lastTransactionId / nextRuntimeEventSequence
@@ -119,10 +119,10 @@ export const CONTROL_SCOPE: SqliteSchemaScope = {
         workspace_path TEXT NOT NULL,
         session_id TEXT NOT NULL,
         input_json TEXT NOT NULL,
-        created_at INTEGER NOT NULL
-      );
+        created_at INTEGER NOT NULL,
+        queue_order INTEGER NOT NULL DEFAULT 0);
       CREATE INDEX desktop_input_queue_by_session
-        ON desktop_input_queue(workspace_path, session_id, created_at, queue_id);
+        ON desktop_input_queue(workspace_path, session_id, queue_order, queue_id);
 
       CREATE TABLE desktop_first_send_claims (
         workspace_path TEXT NOT NULL,
@@ -218,7 +218,33 @@ export const CONTROL_SCOPE: SqliteSchemaScope = {
           record_json = json_remove(record_json, '$.sessionId', '$.conversationId', '$.runId', '$.turnId')
           WHERE session_id = OLD.session_id;
       END;
-    `,
+      `,
+    ],
+    [
+      9,
+      `
+      ALTER TABLE desktop_input_queue
+        ADD COLUMN queue_order INTEGER NOT NULL DEFAULT 0;
+
+      WITH ranked AS (
+        SELECT queue_id,
+               ROW_NUMBER() OVER (
+                 PARTITION BY workspace_path, session_id
+                 ORDER BY created_at ASC, queue_id ASC
+               ) - 1 AS queue_order
+        FROM desktop_input_queue
+      )
+      UPDATE desktop_input_queue
+         SET queue_order = (
+           SELECT ranked.queue_order
+             FROM ranked
+            WHERE ranked.queue_id = desktop_input_queue.queue_id
+         );
+
+      DROP INDEX desktop_input_queue_by_session;
+      CREATE INDEX desktop_input_queue_by_session
+        ON desktop_input_queue(workspace_path, session_id, queue_order, queue_id);
+      `,
     ],
   ]),
 };

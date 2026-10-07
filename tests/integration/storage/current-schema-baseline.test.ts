@@ -36,7 +36,7 @@ test("current baseline has only current context tables and reopens idempotently"
     assert.equal(
       db.prepare("SELECT version FROM operational_schema_migrations WHERE scope='control'").get()!
         .version,
-      8,
+      9,
     );
   } finally {
     db.close();

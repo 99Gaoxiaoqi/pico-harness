@@ -44,8 +44,8 @@ export interface DesktopRewindClaim {
 }
 
 /**
- * DesktopRuntimeService 依赖的会话状态存储契约。`removeQueued` 携带
- * workspacePath，因为 SQLite 按 workspace 分片，queueId 只在该上下文内定位。
+ * DesktopRuntimeService 依赖的会话状态存储契约。SQLite 按 workspace 分片；
+ * 队列管理方法再带 sessionId，避免同一 workspace 中误操作其他会话的条目。
  */
 export interface DesktopConversationStateStoreLike {
   listWorkspaceQueued?(workspacePath: string): Promise<DesktopQueuedInput[]>;
@@ -56,6 +56,27 @@ export interface DesktopConversationStateStoreLike {
     input: RuntimeUserInput,
   ): Promise<DesktopQueuedInput>;
   removeQueued(workspacePath: string, queueId: string): Promise<void>;
+  updateQueued(
+    workspacePath: string,
+    sessionId: string,
+    queueId: string,
+    input: RuntimeUserInput,
+  ): Promise<DesktopQueuedInput | undefined>;
+  removeQueuedForSession(
+    workspacePath: string,
+    sessionId: string,
+    queueId: string,
+  ): Promise<boolean>;
+  reorderQueued(
+    workspacePath: string,
+    sessionId: string,
+    queueIds: readonly string[],
+  ): Promise<DesktopQueuedInput[] | undefined>;
+  moveQueuedToNext(
+    workspacePath: string,
+    sessionId: string,
+    queueId: string,
+  ): Promise<DesktopQueuedInput[] | undefined>;
   clearQueued(workspacePath: string, sessionId: string): Promise<void>;
   getIdempotent(
     workspacePath: string,

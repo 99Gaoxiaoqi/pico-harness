@@ -194,7 +194,9 @@ function insertTerminalWeakReferences(database: DatabaseSync): void {
     .run();
   database
     .prepare(
-      "INSERT INTO desktop_input_queue VALUES ('queue', '/tmp/work', 'session-old', '{}', 1)",
+      `INSERT INTO desktop_input_queue
+       (queue_id, workspace_path, session_id, input_json, created_at)
+       VALUES ('queue', '/tmp/work', 'session-old', '{}', 1)`,
     )
     .run();
   database

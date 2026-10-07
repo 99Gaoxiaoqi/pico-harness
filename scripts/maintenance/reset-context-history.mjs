@@ -120,8 +120,8 @@ export function resetContextHistory(path, { execute = false, runtimeStopped = fa
         .prepare("SELECT scope, version FROM operational_schema_migrations ORDER BY scope")
         .all();
       const controlVersion = schemaVersions.find((row) => row.scope === "control")?.version;
-      if (controlVersion !== 7 && controlVersion !== 8)
-        throw new Error(`Unsupported control schema ${controlVersion}; expected 7 or 8.`);
+      if (controlVersion !== 7 && controlVersion !== 8 && controlVersion !== 9)
+        throw new Error(`Unsupported control schema ${controlVersion}; expected 7, 8, or 9.`);
       assertIntegrity(database);
       const preserved = tables.filter((name) => PRESERVED_TABLES.includes(name));
       const clearing = deleteOrder(
@@ -168,7 +168,7 @@ export function resetContextHistory(path, { execute = false, runtimeStopped = fa
       };
       if (execute) {
         for (const table of clearing) database.exec(`DELETE FROM ${quote(table)}`);
-        // Session deletion deliberately emits tombstones in control v7/v8. They also belong to the reset.
+        // Session deletion deliberately emits tombstones in control v7/v8/v9. They also belong to the reset.
         database.exec("DELETE FROM usage_deleted_sessions");
         database.prepare("DELETE FROM workspace_kv WHERE key=?").run(SIDE_CHAT_KEY);
         const remaining = clearing.filter((table) => count(database, table) !== 0);
