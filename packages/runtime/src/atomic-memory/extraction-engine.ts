@@ -40,6 +40,15 @@ import {
 
 export { memoryEvidenceCoverageHash } from "./extraction-evidence.js";
 
+interface AutomaticBoundary {
+  readonly throughOrdinal: number;
+  readonly trigger: "extract" | "compaction";
+  readonly checkpointId?: string;
+  readonly disposition?: "eligible" | "policy_denied";
+  readonly deletionRevision?: number;
+  readonly settingsVersion?: number;
+}
+
 interface Range {
   readonly snapshot: MemoryExtractionSnapshot;
   readonly operationId: string;
@@ -117,6 +126,70 @@ export class AtomicMemoryExtractionEngine {
     }
     if (checkpoints.some((checkpoint) => !validCheckpoint(snapshot, checkpoint)))
       return unavailable("invalid_checkpoint");
+    const completed = [...(snapshot.completedBoundaries ?? [])].sort(
+      (a, b) => a.ordinal - b.ordinal,
+    );
+    if (
+      completed.some(
+        (boundary) =>
+          !Number.isSafeInteger(boundary.ordinal) ||
+          boundary.ordinal < 1 ||
+          !snapshot.events.some((event) => event.ordinal === boundary.ordinal) ||
+          !["eligible", "policy_denied"].includes(boundary.disposition),
+      )
+    )
+      return unavailable("invalid_completed_boundary");
+    const boundaries: AutomaticBoundary[] = [
+      ...checkpoints
+        .filter((checkpoint) => !checkpoint.bootstrap)
+        .map((checkpoint) => ({
+          throughOrdinal: checkpoint.throughOrdinal,
+          trigger: "compaction" as const,
+          checkpointId: checkpoint.checkpointId,
+          ...(denied.has(checkpoint.checkpointId) ? { disposition: "policy_denied" as const } : {}),
+        })),
+      ...completed.map((boundary) => ({
+        ...boundary,
+        throughOrdinal: boundary.ordinal,
+        trigger: "extract" as const,
+      })),
+    ].sort((a, b) => a.throughOrdinal - b.throughOrdinal);
+    const boundaryDenial = (boundary: AutomaticBoundary): MemoryExtractionReceipt["skipReason"] => {
+      if (
+        boundary.deletionRevision !== undefined &&
+        boundary.deletionRevision !== snapshot.deletionRevision
+      )
+        return "memory_deleted";
+      if (
+        boundary.disposition === "policy_denied" ||
+        (boundary.settingsVersion !== undefined &&
+          snapshot.settingsVersion !== undefined &&
+          boundary.settingsVersion !== snapshot.settingsVersion)
+      )
+        return "policy_denied";
+      return undefined;
+    };
+    const skipReason = (boundary: AutomaticBoundary): MemoryExtractionReceipt["skipReason"] => {
+      // A durable completed admission also seals earlier automatic checkpoints in
+      // that Run. Legacy terminals have no frozen generation and leave the existing
+      // explicitly admitted compaction recovery contract intact.
+      if (boundary.checkpointId) {
+        const terminal = completed.find((entry) => entry.ordinal >= boundary.throughOrdinal);
+        if (
+          terminal &&
+          (terminal.deletionRevision !== undefined || terminal.settingsVersion !== undefined)
+        ) {
+          const reason = boundaryDenial({
+            ...terminal,
+            throughOrdinal: terminal.ordinal,
+            trigger: "extract",
+          });
+          if (reason) return reason;
+        }
+        if (denied.has(boundary.checkpointId)) return "policy_denied";
+      }
+      return boundaryDenial(boundary);
+    };
     if (!cursor && !pending && !checkpoints.some((checkpoint) => !checkpoint.bootstrap)) {
       const bootstrap = checkpoints.filter((checkpoint) => checkpoint.bootstrap).at(-1);
       if (bootstrap) {
@@ -130,10 +203,10 @@ export class AtomicMemoryExtractionEngine {
     let after = cursor?.processedOrdinal ?? 0;
     if (pending?.firstOperationId === operationId) return unavailable("retry_later");
     const historyAfter = (through: number): number =>
-      checkpoints.reduce(
-        (max, checkpoint) =>
-          denied.has(checkpoint.checkpointId) && checkpoint.throughOrdinal <= through
-            ? Math.max(max, checkpoint.throughOrdinal)
+      boundaries.reduce(
+        (max, boundary) =>
+          skipReason(boundary) && boundary.throughOrdinal <= through
+            ? Math.max(max, boundary.throughOrdinal)
             : max,
         0,
       );
@@ -172,11 +245,18 @@ export class AtomicMemoryExtractionEngine {
         return unavailable("pending_coverage_changed");
       // A retry belongs to the generation that originally admitted it. Never replay
       // a pre-deletion explicit request as part of a later automatic task.
+      const deniedPending =
+        pending.firstTrigger === "remember"
+          ? undefined
+          : boundaries.find(
+              (boundary) =>
+                boundary.throughOrdinal === pending.throughOrdinal && skipReason(boundary),
+            );
       const settled =
         pending.deletionRevision !== snapshot.deletionRevision
           ? await this.commit(range, [], [], undefined, "memory_deleted")
-          : pending.compactionCheckpointId && denied.has(pending.compactionCheckpointId)
-            ? await this.commit(range, [], [], undefined, "policy_denied")
+          : deniedPending
+            ? await this.commit(range, [], [], undefined, skipReason(deniedPending))
             : await this.settle(await this.processRange(range));
       if (settled.kind !== "committed")
         return unavailable(settled.kind === "blocked" ? settled.reason : "retry_later");
@@ -185,36 +265,36 @@ export class AtomicMemoryExtractionEngine {
       after = settled.through;
     }
 
-    for (const checkpoint of checkpoints) {
+    for (const covered of boundaries) {
       if (
-        checkpoint.bootstrap ||
-        checkpoint.throughOrdinal <= after ||
-        checkpoint.checkpointId === snapshot.compactionCheckpointId
+        covered.throughOrdinal <= after ||
+        (covered.throughOrdinal === snapshot.boundaryOrdinal &&
+          covered.trigger === snapshot.trigger)
       )
         continue;
-      const boundary = snapshot.events.find(
-        (event) => event.ordinal === checkpoint.throughOrdinal,
-      )!;
-      const checkpointSnapshot = historicalSnapshot(
+      const boundary = snapshot.events.find((event) => event.ordinal === covered.throughOrdinal)!;
+      const boundarySnapshot = historicalSnapshot(
         snapshot,
         boundary,
-        "compaction",
-        checkpoint.checkpointId,
+        covered.trigger,
+        covered.checkpointId,
         after,
       );
       const range = this.range(
-        checkpointSnapshot,
-        extractionOperationId(checkpointSnapshot),
+        boundarySnapshot,
+        extractionOperationId(boundarySnapshot),
         after,
-        checkpoint.throughOrdinal,
-        historyAfter(checkpoint.throughOrdinal),
+        covered.throughOrdinal,
+        historyAfter(covered.throughOrdinal),
       );
-      const result = denied.has(checkpoint.checkpointId)
-        ? await this.commit(range, [], [], undefined, "policy_denied")
+      const reason = skipReason(covered);
+      const result = reason
+        ? await this.commit(range, [], [], undefined, reason)
         : await this.settle(await this.processRange(range));
       if (result.kind !== "committed")
         return unavailable(result.kind === "blocked" ? result.reason : "retry_later");
-      if (result.receipt.skipReason === "policy_denied") denied.add(checkpoint.checkpointId);
+      if (result.receipt.skipReason === "policy_denied" && covered.checkpointId)
+        denied.add(covered.checkpointId);
       after = result.through;
     }
 
@@ -233,10 +313,15 @@ export class AtomicMemoryExtractionEngine {
       snapshot.boundaryOrdinal,
       historyAfter(snapshot.boundaryOrdinal),
     );
-    const outcome =
-      snapshot.compactionCheckpointId && denied.has(snapshot.compactionCheckpointId)
-        ? await this.commit(range, [], [], undefined, "policy_denied")
-        : await this.settle(await this.processRange(range));
+    const current = boundaries.find(
+      (boundary) =>
+        boundary.throughOrdinal === snapshot.boundaryOrdinal &&
+        boundary.trigger === snapshot.trigger,
+    );
+    const reason = current ? skipReason(current) : undefined;
+    const outcome = reason
+      ? await this.commit(range, [], [], undefined, reason)
+      : await this.settle(await this.processRange(range));
     return outcome.kind === "committed"
       ? outcome.receipt
       : unavailable(outcome.kind === "blocked" ? outcome.reason : "retry_later");
@@ -683,12 +768,15 @@ export class AtomicMemoryExtractionEngine {
   }
 
   private async recordDenial(snapshot: MemoryExtractionSnapshot): Promise<void> {
-    if (snapshot.trigger !== "compaction" || !snapshot.compactionCheckpointId) return;
-    await this.options.store.recordCompactionPolicyDenial({
-      sessionId: snapshot.sessionId,
-      compactionCheckpointId: snapshot.compactionCheckpointId,
-      deniedAt: Date.now(),
-    });
+    // A completed Run already persists its own denied admission. A live gate on
+    // a later Run must not swallow earlier eligible completions behind the cursor.
+    if (snapshot.trigger !== "compaction") return;
+    if (snapshot.compactionCheckpointId)
+      await this.options.store.recordCompactionPolicyDenial({
+        sessionId: snapshot.sessionId,
+        compactionCheckpointId: snapshot.compactionCheckpointId,
+        deniedAt: Date.now(),
+      });
     const pending = await this.options.store.readPendingExtractionFailure(snapshot.sessionId);
     if (pending) return;
     const cursor = await this.options.store.readExtractionCursor(snapshot.sessionId);
@@ -866,6 +954,7 @@ function freezeSnapshot(input: MemoryExtractionSnapshot): MemoryExtractionSnapsh
   const {
     sourceTools,
     checkpoints: _checkpoints,
+    completedBoundaries: _completedBoundaries,
     sourceEventMessagePositions: _sourceEventMessagePositions,
     ...baseInput
   } = input;
@@ -882,6 +971,15 @@ function freezeSnapshot(input: MemoryExtractionSnapshot): MemoryExtractionSnapsh
       ? { sourceTools: structuredClone(sourceTools) }
       : {}),
     checkpoints: frozenCheckpoints,
+    ...(input.completedBoundaries
+      ? {
+          completedBoundaries: structuredClone(
+            input.completedBoundaries.filter(
+              (boundary) => boundary.ordinal <= input.boundaryOrdinal,
+            ),
+          ),
+        }
+      : {}),
   };
   if (
     input.trigger === "compaction" &&

@@ -292,6 +292,8 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
         return { ...decodeOperation(existing), replayed: true };
       }
 
+      if (request.expectedDeletionRevision !== undefined)
+        this.#assertDeletionRevision(request.expectedDeletionRevision);
       validateObservedAtForCommit(mutations, committedAt);
 
       const results: MemoryMutationResult[] = [];
@@ -361,11 +363,11 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
     }
     if (
       skipReason &&
-      ((skipReason === "policy_denied" && trigger !== "compaction") ||
+      ((skipReason === "policy_denied" && trigger === "remember") ||
         items.length > 0 ||
         requestedItemIndexes.length > 0)
     ) {
-      throw new Error("A policy-skipped Memory extraction must be an empty Compaction commit");
+      throw new Error("A policy-skipped Memory extraction must be an empty automatic commit");
     }
     validateExtractionObservedAtForCommit(items, committedAt);
     const requestHash = hashCanonical({
@@ -426,7 +428,7 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
       if (pendingFailure) {
         const pending = decodePendingExtractionFailure(pendingFailure);
         const pendingMatchesCommit = skipReason
-          ? (skipReason === "memory_deleted" || pending.firstTrigger === "compaction") &&
+          ? (skipReason === "memory_deleted" || pending.firstTrigger !== "remember") &&
             pending.fromOrdinal === expectedCursorOrdinal + 1 &&
             pending.throughOrdinal <= nextCursorOrdinal
           : pending.firstOperationId !== operationId &&

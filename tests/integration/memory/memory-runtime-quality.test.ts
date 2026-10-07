@@ -21,6 +21,7 @@ import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
 import { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-store";
 import { SqliteRuntimeControlStore } from "@pico/storage/sqlite/sqlite-runtime-control-store";
 import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
+import { BACKGROUND_HARDLINE_VERSION } from "@pico/pico-host/background-autonomous-policy";
 
 const MEMORY_CANARY = "npm run reviewed-memory-canary";
 
@@ -103,7 +104,7 @@ test("Memory admission separates recall from extraction across runtime profiles"
                       trustedWorkspace: true,
                       toolNetworkPolicy: "disabled" as const,
                       allowedTools: toolsAllowed ? triggers : [],
-                      hardlineVersion: "builtin-v1",
+                      hardlineVersion: BACKGROUND_HARDLINE_VERSION,
                       hookVersion: "workspace-v1",
                       createdAt: Date.now(),
                     },
@@ -554,7 +555,12 @@ test("default priced atomic extraction accounts memory_review separately from ma
     return physicalProviderFixture(
       {
         async generate(messages, tools) {
-          const extractionPrompt = messages.at(-1)?.content ?? "";
+          const extractionIndex = messages.findLastIndex(
+            (message) =>
+              message.content.includes("<memory_evidence>") ||
+              message.content.includes("<user_evidence_candidates>"),
+          );
+          const extractionPrompt = messages[extractionIndex]?.content ?? "";
           if (
             extractionPrompt.includes("<memory_evidence>") ||
             extractionPrompt.includes("<user_evidence_candidates>")
@@ -564,7 +570,7 @@ test("default priced atomic extraction accounts memory_review separately from ma
               content: successfulExtraction(
                 extractionPrompt,
                 "npm run priced-review",
-                messages.slice(0, -1),
+                messages.slice(0, extractionIndex),
               ),
               usage: { promptTokens: 40, completionTokens: 20 },
             };

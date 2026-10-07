@@ -406,6 +406,24 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
       if (!isTerminalStatus(value["data"]["status"])) {
         throw new RuntimeEventIntegrityError("Runtime terminal status is invalid");
       }
+      if (value["data"]["memoryExtractionBoundary"] !== undefined) {
+        const boundary = value["data"]["memoryExtractionBoundary"];
+        if (
+          !isRecord(boundary) ||
+          (boundary["disposition"] !== "eligible" && boundary["disposition"] !== "policy_denied") ||
+          (boundary["deletionRevision"] !== undefined &&
+            !isNonNegativeInteger(boundary["deletionRevision"])) ||
+          (boundary["settingsVersion"] !== undefined &&
+            (!isNonNegativeInteger(boundary["settingsVersion"]) ||
+              boundary["settingsVersion"] === 0)) ||
+          (boundary["disposition"] === "eligible" &&
+            (value["data"]["status"] !== "completed" ||
+              value["data"]["recovered"] === true ||
+              boundary["deletionRevision"] === undefined ||
+              boundary["settingsVersion"] === undefined))
+        )
+          throw new RuntimeEventIntegrityError("Runtime terminal memory boundary is invalid");
+      }
       return;
     default:
       if (isPlanEventKind(value["kind"])) {

@@ -1,7 +1,8 @@
 import { AtomicMemoryLifecycle } from "@pico/runtime";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import { withProviderCallContext } from "@pico/runtime";
-import type { Message, ToolDefinition } from "@pico/core";
+import type { Message, ToolDefinition, RuntimeMemoryExtractionBoundary } from "@pico/core";
 import { RUNTIME_MESSAGE_EVENT_ID, isMessageHiddenFromTranscript } from "@pico/core";
 import type { LLMProvider } from "@pico/core";
 import { resolvePicoPaths } from "@pico/pico-host";
@@ -10,6 +11,7 @@ import type { RuntimeEventStoreEntry } from "@pico/storage/runtime-event-store-c
 import { materializeRuntimeHistory } from "@pico/runtime/session-runtime-read-model";
 import { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-store";
 import { AtomicMemoryExtractionEngine } from "@pico/runtime/atomic-memory/extraction-engine";
+import { buildMemoryRequestMessages } from "@pico/runtime/atomic-memory/extraction-budget";
 import { sessionMemoryLane } from "@pico/runtime/atomic-memory/session-lane";
 import {
   memorySessionKey,
@@ -19,23 +21,56 @@ import {
   type MemoryGateResult,
 } from "@pico/core/atomic-memory-runtime-contracts";
 import { logger } from "@pico/pico-host/logger";
+import { MemoryItemStoreConflictError } from "@pico/core/atomic-memory-contracts";
+import { resolveRequestedReferenceNote } from "./atomic-memory-reference-note.js";
 
 export function atomicMemoryDatabasePath(picoHome: string): string {
   return join(picoHome, "memory.sqlite");
+}
+
+/** Admission reads fail closed without turning an ordinary conversation into a memory error. */
+export async function captureAtomicMemoryAdmission(options: {
+  workDir: string;
+  picoHome: string;
+  supported: boolean;
+  gate: () => Promise<MemoryGateResult>;
+}): Promise<RuntimeMemoryExtractionBoundary> {
+  if (!options.supported) return { disposition: "policy_denied" };
+  let store: SqliteMemoryItemStore | undefined;
+  try {
+    store = new SqliteMemoryItemStore(atomicMemoryDatabasePath(options.picoHome));
+    const workspaceKey = resolvePicoPaths(options.workDir, { picoHome: options.picoHome }).workspace
+      .id;
+    const settings = await store.readSettings(workspaceKey);
+    return {
+      disposition:
+        settings.enabled && settings.autoExtract && (await options.gate()).allowed
+          ? "eligible"
+          : "policy_denied",
+      deletionRevision: await store.readDeletionRevision(),
+      settingsVersion: settings.version,
+    };
+  } catch (error) {
+    logger.debug({ error: String(error) }, "[Memory] automatic admission unavailable");
+    return { disposition: "policy_denied" };
+  } finally {
+    try {
+      store?.close();
+    } catch (error) {
+      logger.debug({ error: String(error) }, "[Memory] admission cleanup unavailable");
+    }
+  }
 }
 
 /** No retries outside the engine's per-range call budget. */
 export class ProviderAtomicMemoryModel implements MemoryExtractionModel {
   constructor(private readonly provider: LLMProvider) {}
   async call(request: Parameters<MemoryExtractionModel["call"]>[0]): Promise<string> {
-    const prefix = request.stage === "canonicalize" ? [] : [...(request.sourceMessages ?? [])];
     const tools =
       request.stage !== "canonicalize" && this.provider.requestCapabilities?.toolChoiceNoneWithTools
         ? [...(request.sourceTools ?? [])]
         : [];
-    const messages: Message[] = prefix.length
-      ? [...prefix, { role: "user", content: request.prompt }]
-      : [{ role: "system", content: request.prompt }];
+    const messages = buildMemoryRequestMessages(request, request.prompt, request.stage);
     const response = await withProviderCallContext({ purpose: "memory_review" }, () =>
       this.provider.generate(messages, tools, {
         ...(request.signal ? { signal: request.signal } : {}),
@@ -56,7 +91,7 @@ export interface AtomicMemoryRuntimeOptions {
   readonly workDir: string;
   readonly picoHome: string;
   readonly sessionId: string;
-  readonly gate: () => Promise<MemoryGateResult>;
+  readonly gate: (trigger?: MemoryExtractionSnapshot["trigger"]) => Promise<MemoryGateResult>;
   readonly modelFactory: () => Promise<AtomicMemoryModelLease>;
   readonly supported: boolean;
   readonly preserveSourceTools?: boolean;
@@ -70,6 +105,7 @@ export interface AtomicMemoryRuntimeOptions {
 export class AtomicMemoryRuntime {
   private source: MemoryExtractionSnapshot | undefined;
   private extractRequestedRevision: number | undefined;
+  private readonly completedRuns = new Set<string>();
   private readonly background = new Set<Promise<unknown>>();
   private readonly workspaceKey: string;
   private readonly laneKey: string;
@@ -103,23 +139,121 @@ export class AtomicMemoryRuntime {
     const snapshot = { ...this.source, ...(signal ? { signal } : {}) };
     return this.lifecycle.run(
       "remember",
-      () => sessionMemoryLane.run(this.laneKey, "foreground", () => this.execute(snapshot)),
+      () => sessionMemoryLane.run(this.laneKey, "foreground", () => this.rememberFrozen(snapshot)),
       () => unavailable("draining"),
     );
+  }
+
+  private async rememberFrozen(snapshot: MemoryExtractionSnapshot): Promise<AtomicMemoryResult> {
+    let store: SqliteMemoryItemStore | undefined;
+    try {
+      const entries = await this.readEntries();
+      const completedRunIds = new Set(
+        entries.flatMap(({ event }) =>
+          event.kind === "run.terminal" &&
+          event.data.status === "completed" &&
+          !event.data.recovered
+            ? [event.runId]
+            : [],
+        ),
+      );
+      const lastUser = snapshot.events.findLast((event) => event.role === "user");
+      const started = entries.find(
+        ({ event }) => event.kind === "run.started" && event.runId === snapshot.runId,
+      );
+      const prior =
+        started &&
+        entries.findLast(
+          ({ event, sequence }) => event.kind === "run.terminal" && sequence < started.sequence,
+        );
+      const wrapperInput =
+        lastUser &&
+        prior?.event.runId === lastUser.runId &&
+        prior.event.kind === "run.terminal" &&
+        prior.event.data.status === "completed" &&
+        !prior.event.data.recovered &&
+        isDesktopInputWrapper(entries.filter(({ event }) => event.runId === lastUser.runId));
+      const reference = resolveRequestedReferenceNote(snapshot, {
+        completedRunIds,
+        // Tool discovery/retries can start another Turn within the same Run.
+        // The latest real User input still owns that Run's explicit request.
+        ...(lastUser && (lastUser.runId === snapshot.runId || wrapperInput)
+          ? { authorizationEventId: lastUser.eventId }
+          : {}),
+      });
+      if (reference.status === "not_requested") return this.execute(snapshot);
+      if (reference.status === "unresolved") return unavailable(reference.reason);
+      if (snapshot.signal?.aborted) return unavailable("aborted");
+      const gate = await this.options.gate("remember");
+      if (!gate.allowed) return unavailable(gate.reason);
+      if (this.lifecycle.isDraining) return unavailable("draining");
+      if (!(await this.sessionAvailable())) return unavailable("session_unavailable");
+      store = new SqliteMemoryItemStore(atomicMemoryDatabasePath(this.options.picoHome));
+      if (!(await store.readSettings(this.workspaceKey)).enabled)
+        return unavailable("memory_disabled");
+      if (snapshot.signal?.aborted) return unavailable("aborted");
+      const operationId = `memory_reference_${createHash("sha256")
+        .update(
+          JSON.stringify([
+            snapshot.sessionId,
+            reference.authorizationEventId,
+            reference.targetEventId,
+          ]),
+        )
+        .digest("hex")}`;
+      const result = await store.applyMutations({
+        operationId,
+        expectedDeletionRevision: snapshot.deletionRevision,
+        mutations: reference.items.map((item) => ({ type: "create", item })),
+      });
+      const records = await Promise.all(
+        result.results.map(({ itemId }) => store!.readItem(itemId)),
+      );
+      const requestedItems = records.flatMap((record) =>
+        record?.item.lifecycleState === "active"
+          ? [{ itemId: record.item.itemId, content: record.item.content }]
+          : [],
+      );
+      if (requestedItems.length) this.options.onChanged?.();
+      return {
+        operationId,
+        sessionId: snapshot.sessionId,
+        status: requestedItems.length ? "remembered" : "not_applicable",
+        requestedItems,
+        committedAt: result.committedAt,
+      };
+    } catch (error) {
+      if (error instanceof MemoryItemStoreConflictError && error.reason === "deletion_conflict")
+        return unavailable("memory_deleted");
+      logger.debug({ error: String(error) }, "[Memory] reference note unavailable");
+      return unavailable("unavailable");
+    } finally {
+      store?.close();
+    }
   }
 
   async requestExtract(): Promise<{ status: "accepted" | "unavailable"; reason?: string }> {
     if (!this.options.supported) return { status: "unavailable", reason: "provider_unsupported" };
     const deletionRevision = await this.readDeletionRevision();
-    if (!(await this.options.gate()).allowed || this.lifecycle.isDraining)
-      return { status: "unavailable" };
+    const gate = await this.options.gate("extract");
+    if (!gate.allowed) return { status: "unavailable", reason: gate.reason };
+    if (this.lifecycle.isDraining) return { status: "unavailable", reason: "draining" };
+    const store = new SqliteMemoryItemStore(atomicMemoryDatabasePath(this.options.picoHome));
+    try {
+      const settings = await store.readSettings(this.workspaceKey);
+      if (!settings.enabled || !settings.autoExtract)
+        return { status: "unavailable", reason: "memory_disabled" };
+    } finally {
+      store.close();
+    }
     this.extractRequestedRevision = deletionRevision;
     return { status: "accepted" };
   }
 
   async completed(runId: string): Promise<void> {
-    const deletionRevision = this.extractRequestedRevision;
-    if (deletionRevision === undefined) return;
+    if (!this.options.supported || this.completedRuns.has(runId)) return;
+    this.completedRuns.add(runId);
+    const requestedRevision = this.extractRequestedRevision;
     this.extractRequestedRevision = undefined;
     this.enqueue("extract", async () => {
       const entries = await this.readEntries();
@@ -130,8 +264,12 @@ export class AtomicMemoryRuntime {
           event.data.status === "completed" &&
           !event.data.recovered,
       );
-      if (!terminal) return;
-      return this.snapshot("extract", deletionRevision, terminal.sequence);
+      if (!terminal || terminal.event.kind !== "run.terminal") return;
+      const admission = terminal.event.data.memoryExtractionBoundary;
+      if (!admission && requestedRevision === undefined) return;
+      const revision = requestedRevision ?? admission?.deletionRevision;
+      if (revision === undefined) return;
+      return this.snapshot("extract", revision, terminal.sequence);
     });
   }
 
@@ -141,7 +279,7 @@ export class AtomicMemoryRuntime {
     try {
       const settings = await store.readSettings(this.workspaceKey);
       if (!settings.enabled || !settings.autoExtract) return "policy_denied";
-      const gate = await this.options.gate();
+      const gate = await this.options.gate("compaction");
       if (
         !gate.allowed &&
         !["unavailable", "draining", "configuration", "aborted"].includes(gate.reason)
@@ -217,13 +355,19 @@ export class AtomicMemoryRuntime {
       const gate = async (
         trigger: MemoryExtractionSnapshot["trigger"],
       ): Promise<MemoryGateResult> => {
-        const upper = await this.options.gate();
+        const upper = await this.options.gate(trigger);
         if (!upper.allowed) return upper;
         // Session deletion stops new extraction but does not remove committed memory.
         if (!(await this.sessionAvailable()))
           return { allowed: false, reason: "session_unavailable" };
         const settings = await store.readSettings(this.workspaceKey);
         if (!settings.enabled || (trigger !== "remember" && !settings.autoExtract))
+          return { allowed: false, reason: "memory_disabled" };
+        if (
+          trigger !== "remember" &&
+          snapshot.settingsVersion !== undefined &&
+          snapshot.settingsVersion !== settings.version
+        )
           return { allowed: false, reason: "memory_disabled" };
         return this.lifecycle.isDraining
           ? { allowed: false, reason: "draining" }
@@ -238,6 +382,17 @@ export class AtomicMemoryRuntime {
       const result = await new AtomicMemoryExtractionEngine({ store, model, gate }).execute(
         snapshot,
       );
+      if (result.status === "unavailable" && result.reason === "retry_later") {
+        const pending = await store.readPendingExtractionFailure(snapshot.sessionId);
+        if (pending)
+          return unavailable(
+            pending.firstFailureClass === "provider"
+              ? "provider_review_failed"
+              : pending.firstFailureClass === "evidence"
+                ? "evidence_rejected"
+                : "invalid_memory_response",
+          );
+      }
       if (result.status !== "unavailable") this.options.onChanged?.();
       return result;
     } finally {
@@ -307,7 +462,8 @@ export class AtomicMemoryRuntime {
         visible &&
         message.role === "user" &&
         (message.providerData?.["picoKind"] === undefined ||
-          message.providerData?.["picoKind"] === "desktop_user_input");
+          message.providerData?.["picoKind"] === "desktop_user_input" ||
+          message.providerData?.["picoKind"] === "steer");
       return {
         ordinal: sequence,
         eventId: event.eventId,
@@ -337,6 +493,41 @@ export class AtomicMemoryRuntime {
         },
       ];
     });
+    const completedBoundaries = entries.flatMap(({ event, sequence }) => {
+      if (event.kind !== "run.terminal") return [];
+      const admission = event.data.memoryExtractionBoundary;
+      // Desktop input commits can use a small synthetic Run before the actual
+      // AgentRuntime resumes. Its user message belongs to that following admission,
+      // so this input-only wrapper must not become a legacy policy barrier.
+      if (!admission && event.data.status === "completed" && !event.data.recovered) {
+        if (isDesktopInputWrapper(entries.filter((entry) => entry.event.runId === event.runId)))
+          return [];
+      }
+      return [
+        {
+          ordinal: sequence,
+          disposition:
+            event.data.status === "completed" && !event.data.recovered && admission
+              ? admission.disposition
+              : ("policy_denied" as const),
+          ...(admission?.deletionRevision !== undefined
+            ? { deletionRevision: admission.deletionRevision }
+            : {}),
+          ...(admission?.settingsVersion !== undefined
+            ? { settingsVersion: admission.settingsVersion }
+            : {}),
+        },
+      ];
+    });
+    let settingsVersion: number;
+    const settingsStore = new SqliteMemoryItemStore(
+      atomicMemoryDatabasePath(this.options.picoHome),
+    );
+    try {
+      settingsVersion = (await settingsStore.readSettings(this.workspaceKey)).version;
+    } finally {
+      settingsStore.close();
+    }
     const messages =
       source?.messages ??
       (trigger === "extract" && this.source?.sourceMessages
@@ -369,6 +560,8 @@ export class AtomicMemoryRuntime {
       boundaryEventId: last.event.eventId,
       events,
       checkpoints,
+      completedBoundaries,
+      settingsVersion,
       sourceMessages: messages,
       ...(sourceEventMessagePositions !== undefined ? { sourceEventMessagePositions } : {}),
       ...(this.options.contextWindowTokens !== undefined
@@ -388,6 +581,22 @@ export class AtomicMemoryRuntime {
 
 function unavailable(reason: string): AtomicMemoryResult {
   return { status: "unavailable", reason, requestedItems: [] };
+}
+
+function isDesktopInputWrapper(entries: readonly RuntimeEventStoreEntry[]): boolean {
+  const desktopInput = ({ event }: RuntimeEventStoreEntry): boolean =>
+    event.kind === "message.committed" &&
+    event.data.message.role === "user" &&
+    event.data.message.providerData?.["picoKind"] === "desktop_user_input";
+  return (
+    entries.some(desktopInput) &&
+    entries.every(
+      (entry) =>
+        entry.event.kind === "run.started" ||
+        entry.event.kind === "run.terminal" ||
+        desktopInput(entry),
+    )
+  );
 }
 
 function messageEventPositions(messages: readonly Message[]): Record<string, number[]> {

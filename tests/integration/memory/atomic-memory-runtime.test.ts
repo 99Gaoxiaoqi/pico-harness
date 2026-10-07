@@ -1,5 +1,6 @@
 import { physicalProviderFixture } from "../helpers/physical-provider.js";
 import { AtomicMemoryLifecycle } from "@pico/runtime";
+import { sessionMemoryLane } from "@pico/runtime/atomic-memory/session-lane";
 import { DesktopAtomicMemoryService } from "@pico/pico-host/desktop-atomic-memory-service";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
@@ -159,6 +160,11 @@ test("atomic memory runtime saves before the next model call and rejects sibling
     },
   );
   assert.equal(result.finalMessage, "已经记住。");
+  await sessionMemoryLane.run(
+    `${picoHome}:${memorySessionKey(paths.workspace.id, sessionId)}`,
+    "background",
+    async () => undefined,
+  );
   assert.equal(modelCalls, 2);
   const events = new SqliteRuntimeEventStore({ storageRoot: paths.workspace.root });
   const entries = await events.readSessionEntries(sessionId);
@@ -166,9 +172,10 @@ test("atomic memory runtime saves before the next model call and rejects sibling
   const store = new SqliteMemoryItemStore(join(picoHome, "memory.sqlite"));
   const cursor = await store.readExtractionCursor(memorySessionKey(paths.workspace.id, sessionId));
   store.close();
-  assert.ok(
-    cursor &&
-      cursor.processedOrdinal < entries.find((e) => e.event.kind === "run.terminal")!.sequence,
+  assert.equal(
+    cursor?.processedOrdinal,
+    entries.find((e) => e.event.kind === "run.terminal")!.sequence,
+    "the empty automatic tail advances coverage without another memory model call",
   );
 });
 
@@ -263,14 +270,14 @@ test("atomic memory extraction waits for a successful durable terminal and stops
   await runtime.requestExtract();
   await runtime.completed(terminal.event.runId);
   await runtime.drain();
-  assert.equal(modelCalls, 1);
+  assert.equal(modelCalls, 0, "a denied or deleted completed run cannot be re-admitted");
   // Already committed memory remains independent of Session lifecycle; new work must stop.
   await events.deleteSession(sessionId);
   events.close();
   await runtime.requestExtract();
   await runtime.completed(terminal.event.runId);
   await runtime.drain();
-  assert.equal(modelCalls, 1);
+  assert.equal(modelCalls, 0);
 });
 
 test("atomic compaction persists its covered boundary and records disabled-policy barriers without waiting for terminal", async (t) => {
@@ -339,7 +346,10 @@ test("atomic compaction persists its covered boundary and records disabled-polic
     });
     await runtime.checkpoint(checkpoint.checkpointId);
     await lifecycle.close();
-    assert.deepEqual(await runtime.requestExtract(), { status: "unavailable" });
+    assert.deepEqual(await runtime.requestExtract(), {
+      status: "unavailable",
+      reason: "memory_disabled",
+    });
     assert.equal(calls, 0);
     const entries = await session.runtimeEventStore!.readSessionEntries(sessionId);
     const recorded = entries.find(
