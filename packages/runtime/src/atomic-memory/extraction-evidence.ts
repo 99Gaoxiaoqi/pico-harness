@@ -160,19 +160,48 @@ export function localizeAtomicMemoryHistory(
   const terms = search.terms
     .map((term) => normalizeEvidenceText(term).toLowerCase())
     .filter(Boolean);
-  const hits = turns
-    .map((turn, index) => ({
-      index,
-      score: terms.filter((term) =>
-        turn.some(
-          (event) =>
-            (!search.roles || search.roles.includes(event.role)) &&
-            normalizeEvidenceText(event.text).toLowerCase().includes(term),
-        ),
-      ).length,
-    }))
-    .filter(({ score }) => score > 0)
-    .sort((a, b) => b.score - a.score || b.index - a.index);
+  const findHits = (keywords: readonly string[]) =>
+    turns
+      .map((turn, index) => ({
+        index,
+        score: keywords.filter((keyword) =>
+          turn.some(
+            (event) =>
+              (!search.roles || search.roles.includes(event.role)) &&
+              normalizeEvidenceText(event.text).toLowerCase().includes(keyword),
+          ),
+        ).length,
+      }))
+      .filter(({ score }) => score > 0)
+      .sort((a, b) => b.score - a.score || b.index - a.index);
+  let hits = findHits(terms);
+  if (!hits.length) {
+    // Models sometimes describe a referent instead of returning a literal phrase.
+    // Broaden only lexical retrieval; the engine still validates original quotes.
+    const filler = new Set([
+      "earlier",
+      "previous",
+      "previously",
+      "prior",
+      "again",
+      "that",
+      "this",
+      "these",
+      "those",
+      "the",
+      "and",
+      "please",
+      "remember",
+      "history",
+      "historical",
+    ]);
+    const keywords = [
+      ...new Set(
+        terms.flatMap((term) => term.match(/[\p{L}\p{N}]+(?:[-_][\p{L}\p{N}]+)*/gu) ?? []),
+      ),
+    ].filter((keyword) => keyword.length >= 3 && !filler.has(keyword));
+    hits = findHits(keywords);
+  }
   const selected = new Set<number>();
   for (const hit of hits) {
     for (const index of [hit.index, hit.index - 1, hit.index + 1]) {
