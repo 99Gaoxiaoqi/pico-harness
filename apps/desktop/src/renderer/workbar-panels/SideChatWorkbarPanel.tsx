@@ -68,8 +68,10 @@ export interface SideChatWorkbarPanelProps {
   readonly onSend: (message: string) => void;
   readonly onStop: () => void;
   readonly stopFocusRequest?: number | undefined;
+  readonly focusRequest?: number | undefined;
   readonly onDraftChange: (draft: string) => void;
   readonly onRetryCreate: () => void;
+  readonly onQuoteFallback?: (() => void) | undefined;
   readonly onClose: () => void;
   readonly onOpenItem?: (item: ConversationItemView) => void;
 }
@@ -113,8 +115,10 @@ export function SideChatWorkbarPanel({
   onSend,
   onStop,
   stopFocusRequest,
+  focusRequest,
   onDraftChange,
   onRetryCreate,
+  onQuoteFallback,
   onClose,
   onOpenItem,
 }: SideChatWorkbarPanelProps) {
@@ -124,6 +128,9 @@ export function SideChatWorkbarPanel({
   useEffect(() => {
     if (stopFocusRequest) stopSlot.current?.querySelector<HTMLButtonElement>("button")?.focus();
   }, [stopFocusRequest]);
+  useEffect(() => {
+    if (focusRequest) editorRef.current?.focus();
+  }, [focusRequest]);
   const openResources = (kind: "skill" | "agent" = "skill") => {
     editorRef.current?.focus();
     editorRef.current?.insertText(` /${kind} `);
@@ -201,6 +208,7 @@ export function SideChatWorkbarPanel({
           error={error}
           retrying={child.state === "creating"}
           onRetry={onRetryCreate}
+          onQuoteFallback={onQuoteFallback}
         />
       )}
 
@@ -334,10 +342,12 @@ function SideChatErrorState({
   error,
   retrying,
   onRetry,
+  onQuoteFallback,
 }: {
   readonly error: SideChatPanelError;
   readonly retrying: boolean;
   readonly onRetry: () => void;
+  readonly onQuoteFallback?: (() => void) | undefined;
 }) {
   const noTurn = error.code === "no_settled_turn";
   return (
@@ -353,6 +363,9 @@ function SideChatErrorState({
         onClick={onRetry}
         size="sm"
       />
+      {onQuoteFallback && (
+        <Button label="引用到主输入框" onClick={onQuoteFallback} size="sm" variant="ghost" />
+      )}
     </section>
   );
 }

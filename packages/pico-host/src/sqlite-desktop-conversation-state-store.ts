@@ -49,8 +49,17 @@ export class SqliteDesktopConversationStateStore implements DesktopConversationS
       lease.transaction("read", () => {
         const rows = lease.database
           .prepare(
-            `SELECT queue_id, workspace_path, session_id, input_json, created_at FROM desktop_input_queue
-         WHERE workspace_path = ? ORDER BY created_at ASC, queue_id ASC`,
+            `SELECT queue_id, workspace_path, session_id, input_json, created_at
+             FROM (
+               SELECT queue_id, workspace_path, session_id, input_json, created_at,
+                      ROW_NUMBER() OVER (
+                        PARTITION BY session_id ORDER BY queue_order ASC, queue_id ASC
+                      ) AS session_position
+               FROM desktop_input_queue
+               WHERE workspace_path = ?
+             )
+             WHERE session_position = 1
+             ORDER BY created_at ASC, queue_id ASC`,
           )
           .all(canonical) as unknown[];
         return rows.map((row) => queueRowToQueuedInput(row as Record<string, unknown>));
@@ -68,7 +77,7 @@ export class SqliteDesktopConversationStateStore implements DesktopConversationS
             `SELECT queue_id, workspace_path, session_id, input_json, created_at
              FROM desktop_input_queue
              WHERE workspace_path = ? AND session_id = ?
-             ORDER BY created_at ASC, queue_id ASC`,
+             ORDER BY queue_order ASC, queue_id ASC`,
           )
           .all(canonical, normalizedSessionId) as unknown[];
         return rows.map((row) => queueRowToQueuedInput(row as Record<string, unknown>));
@@ -90,11 +99,19 @@ export class SqliteDesktopConversationStateStore implements DesktopConversationS
     };
     this.withWorkspace(queued.workspacePath, (lease) =>
       lease.transaction("write", () => {
+        const row = lease.database
+          .prepare(
+            `SELECT COALESCE(MAX(queue_order), -1) AS max_order
+             FROM desktop_input_queue
+             WHERE workspace_path = ? AND session_id = ?`,
+          )
+          .get(queued.workspacePath, queued.sessionId) as Record<string, unknown>;
+        const queueOrder = requireRowNumber(row, "max_order") + 1;
         lease.database
           .prepare(
             `INSERT INTO desktop_input_queue
-             (queue_id, workspace_path, session_id, input_json, created_at)
-             VALUES (?, ?, ?, ?, ?)`,
+             (queue_id, workspace_path, session_id, input_json, created_at, queue_order)
+             VALUES (?, ?, ?, ?, ?, ?)`,
           )
           .run(
             queued.queueId,
@@ -102,6 +119,7 @@ export class SqliteDesktopConversationStateStore implements DesktopConversationS
             queued.sessionId,
             JSON.stringify(queued.input),
             queued.createdAt,
+            queueOrder,
           );
       }),
     );
@@ -116,6 +134,130 @@ export class SqliteDesktopConversationStateStore implements DesktopConversationS
         lease.database
           .prepare(`DELETE FROM desktop_input_queue WHERE workspace_path = ? AND queue_id = ?`)
           .run(canonical, normalized);
+      }),
+    );
+  }
+
+  async updateQueued(
+    workspacePath: string,
+    sessionId: string,
+    queueId: string,
+    input: RuntimeUserInput,
+  ): Promise<DesktopQueuedInput | undefined> {
+    const canonical = normalizeWorkspacePath(workspacePath);
+    const normalizedSessionId = requireNonEmpty(sessionId, "sessionId");
+    const normalizedQueueId = requireNonEmpty(queueId, "queueId");
+    const canonicalInput = parseDesktopQueuedInputRecord(input);
+    return this.withWorkspace(canonical, (lease) =>
+      lease.transaction("write", () => {
+        const result = lease.database
+          .prepare(
+            `UPDATE desktop_input_queue SET input_json = ?
+             WHERE workspace_path = ? AND session_id = ? AND queue_id = ?`,
+          )
+          .run(JSON.stringify(canonicalInput), canonical, normalizedSessionId, normalizedQueueId);
+        if (Number(result.changes) === 0) return undefined;
+        const row = lease.database
+          .prepare(
+            `SELECT queue_id, workspace_path, session_id, input_json, created_at
+             FROM desktop_input_queue
+             WHERE workspace_path = ? AND session_id = ? AND queue_id = ?`,
+          )
+          .get(canonical, normalizedSessionId, normalizedQueueId) as
+          | Record<string, unknown>
+          | undefined;
+        return row ? queueRowToQueuedInput(row) : undefined;
+      }),
+    );
+  }
+
+  async removeQueuedForSession(
+    workspacePath: string,
+    sessionId: string,
+    queueId: string,
+  ): Promise<boolean> {
+    const canonical = normalizeWorkspacePath(workspacePath);
+    const normalizedSessionId = requireNonEmpty(sessionId, "sessionId");
+    const normalizedQueueId = requireNonEmpty(queueId, "queueId");
+    return this.withWorkspace(canonical, (lease) =>
+      lease.transaction("write", () => {
+        const result = lease.database
+          .prepare(
+            `DELETE FROM desktop_input_queue
+             WHERE workspace_path = ? AND session_id = ? AND queue_id = ?`,
+          )
+          .run(canonical, normalizedSessionId, normalizedQueueId);
+        return Number(result.changes) > 0;
+      }),
+    );
+  }
+
+  async reorderQueued(
+    workspacePath: string,
+    sessionId: string,
+    queueIds: readonly string[],
+  ): Promise<DesktopQueuedInput[] | undefined> {
+    const canonical = normalizeWorkspacePath(workspacePath);
+    const normalizedSessionId = requireNonEmpty(sessionId, "sessionId");
+    const normalizedQueueIds = queueIds.map((queueId) => requireNonEmpty(queueId, "queueId"));
+    if (new Set(normalizedQueueIds).size !== normalizedQueueIds.length) {
+      throw new Error("queueIds must not contain duplicates");
+    }
+    return this.withWorkspace(canonical, (lease) =>
+      lease.transaction("write", () => {
+        const currentRows = lease.database
+          .prepare(
+            `SELECT queue_id FROM desktop_input_queue
+             WHERE workspace_path = ? AND session_id = ?
+             ORDER BY queue_order ASC, queue_id ASC`,
+          )
+          .all(canonical, normalizedSessionId) as Array<Record<string, unknown>>;
+        const currentIds = currentRows.map((row) => requireRowString(row, "queue_id"));
+        if (
+          currentIds.length !== normalizedQueueIds.length ||
+          currentIds.some((queueId) => !normalizedQueueIds.includes(queueId))
+        ) {
+          return undefined;
+        }
+        const updateOrder = lease.database.prepare(
+          `UPDATE desktop_input_queue SET queue_order = ?
+           WHERE workspace_path = ? AND session_id = ? AND queue_id = ?`,
+        );
+        normalizedQueueIds.forEach((queueId, index) =>
+          updateOrder.run(index, canonical, normalizedSessionId, queueId),
+        );
+        return selectQueuedInputs(lease.database, canonical, normalizedSessionId);
+      }),
+    );
+  }
+
+  async moveQueuedToNext(
+    workspacePath: string,
+    sessionId: string,
+    queueId: string,
+  ): Promise<DesktopQueuedInput[] | undefined> {
+    const canonical = normalizeWorkspacePath(workspacePath);
+    const normalizedSessionId = requireNonEmpty(sessionId, "sessionId");
+    const normalizedQueueId = requireNonEmpty(queueId, "queueId");
+    return this.withWorkspace(canonical, (lease) =>
+      lease.transaction("write", () => {
+        const current = selectQueuedInputs(lease.database, canonical, normalizedSessionId);
+        const index = current.findIndex((queued) => queued.queueId === normalizedQueueId);
+        if (index < 0) return undefined;
+        if (index === 0) return current;
+        const reordered = [
+          current[index]!,
+          ...current.slice(0, index),
+          ...current.slice(index + 1),
+        ];
+        const updateOrder = lease.database.prepare(
+          `UPDATE desktop_input_queue SET queue_order = ?
+           WHERE workspace_path = ? AND session_id = ? AND queue_id = ?`,
+        );
+        reordered.forEach((queued, order) =>
+          updateOrder.run(order, canonical, normalizedSessionId, queued.queueId),
+        );
+        return selectQueuedInputs(lease.database, canonical, normalizedSessionId);
       }),
     );
   }
@@ -394,6 +536,22 @@ function queueRowToQueuedInput(row: Record<string, unknown>): DesktopQueuedInput
     input: parseDesktopQueuedInputRecord(parsed),
     createdAt: requireRowNumber(row, "created_at"),
   };
+}
+
+function selectQueuedInputs(
+  database: DatabaseSync,
+  workspacePath: string,
+  sessionId: string,
+): DesktopQueuedInput[] {
+  const rows = database
+    .prepare(
+      `SELECT queue_id, workspace_path, session_id, input_json, created_at
+       FROM desktop_input_queue
+       WHERE workspace_path = ? AND session_id = ?
+       ORDER BY queue_order ASC, queue_id ASC`,
+    )
+    .all(workspacePath, sessionId) as unknown[];
+  return rows.map((row) => queueRowToQueuedInput(row as Record<string, unknown>));
 }
 
 /** 与 JSON 实现 retainFirstSendClaims 等价:过期清理 + 每 workspace 保留最近 MAX 条。 */

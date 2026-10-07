@@ -207,6 +207,8 @@ export type {
   RuntimeTranscriptItemFragment,
   RuntimeTranscriptPageCursor,
   RuntimeTranscriptAdvanceCursor,
+  RuntimeTranscriptAnchor,
+  RuntimeTranscriptSearchHit,
   RuntimeTranscriptChange,
   RuntimeActiveOverlayEntry,
   RuntimeSessionSubscriptionEnvelope,

@@ -78,6 +78,8 @@ import {
   type RuntimeTranscriptProjectionPage,
   type RuntimeTranscriptProjectionPageOptions,
   type RuntimeTranscriptProjectionWatermark,
+  type RuntimeTranscriptPromptAnchor,
+  type RuntimeTranscriptSearchMatch,
   type SettleRuntimeToolOperationInput,
   type SettleRuntimeToolOperationResult,
   type StartRuntimeContinuationInput,
@@ -130,6 +132,11 @@ export class SqliteRuntimeEventStore {
     this.storageRoot = preparation.lease.storageRoot;
     this.lease = preparation.lease;
     this.warningLogger = options.warningLogger;
+    this.lease.database.function(
+      "pico_unicode_lower",
+      { deterministic: true },
+      (value: SQLInputValue | null) => (typeof value === "string" ? value.toLowerCase() : ""),
+    );
   }
 
   warnAmbiguousAppendRecovered(eventIds: readonly string[]): void {
@@ -476,7 +483,10 @@ export class SqliteRuntimeEventStore {
     sessionId: string,
     runId: string,
   ): Promise<readonly RuntimeToolOperation[]> {
-    return this.read(() => {
+    return this.write(() => {
+      const session = this.readSessionRow(sessionId);
+      if (!session) throw new RuntimeEventStoreIntegrityError(`Runtime session ${sessionId} does not exist`);
+      this.ensureTranscriptProjectionCurrentLocked(sessionId, session.last_event_seq);
       const rows = this.lease.database
         .prepare(
           `SELECT tool_call_id
@@ -578,6 +588,100 @@ export class SqliteRuntimeEventStore {
     options: RuntimeTranscriptProjectionPageOptions,
   ): Promise<RuntimeTranscriptProjectionPage> {
     return this.write(() => this.readTranscriptProjectionPageLocked(options));
+  }
+
+  async readTranscriptPromptAnchors(
+    sessionId: string,
+    beforeSequence: number | undefined,
+    limit = 100,
+  ): Promise<{ readonly anchors: readonly RuntimeTranscriptPromptAnchor[]; readonly hasMore: boolean }> {
+    return this.write(() => {
+      const session = this.readSessionRow(sessionId);
+      if (!session) throw new RuntimeEventStoreIntegrityError(`Runtime session ${sessionId} does not exist`);
+      this.ensureTranscriptProjectionCurrentLocked(sessionId, session.last_event_seq);
+      const rows = this.lease.database
+        .prepare(
+          `SELECT item_id, position_sequence, payload_json
+           FROM runtime_transcript_item_versions
+           WHERE session_id = ? AND valid_to_sequence IS NULL
+             AND json_extract(payload_json, '$.kind') = 'userMessage'
+             AND (? IS NULL OR position_sequence < ?)
+           ORDER BY position_sequence DESC, position_ordinal DESC
+           LIMIT ?`,
+        )
+        .all(sessionId, beforeSequence ?? null, beforeSequence ?? null, boundedTranscriptQueryLimit(limit) + 1) as Array<Record<string, unknown>>;
+      const hasMore = rows.length > boundedTranscriptQueryLimit(limit);
+      const selected = rows.slice(0, boundedTranscriptQueryLimit(limit));
+      const anchors = selected.flatMap((row): RuntimeTranscriptPromptAnchor[] => {
+        const itemId = requireRowString(row["item_id"], "item_id");
+        const payload = asJsonRecord(JSON.parse(requireRowString(row["payload_json"], "payload_json")));
+        const prompt = typeof payload?.["content"] === "string" ? payload["content"] : "";
+        const sequence = requireSafeInteger(row["position_sequence"], "position_sequence");
+        const eventId = transcriptMessageEventId(itemId, "user");
+        if (!eventId) return [];
+        const timeRow = this.lease.database
+          .prepare("SELECT message_ts FROM session_messages WHERE session_id = ? AND sequence = ?")
+          .get(sessionId, sequence) as Record<string, unknown> | undefined;
+        const timestamp = typeof timeRow?.["message_ts"] === "string" ? Date.parse(timeRow["message_ts"]) : NaN;
+        return [{ eventId, itemId, sequence, prompt: prompt.slice(0, 500), at: Number.isFinite(timestamp) ? timestamp : 0 }];
+      });
+      return { anchors, hasMore };
+    });
+  }
+
+  async searchTranscriptMessages(
+    sessionId: string,
+    query: string,
+    beforeSequence: number | undefined,
+    limit = 100,
+  ): Promise<{ readonly hits: readonly RuntimeTranscriptSearchMatch[]; readonly hasMore: boolean }> {
+    const normalizedQuery = query.trim();
+    if (!normalizedQuery) return { hits: [], hasMore: false };
+    return this.write(() => {
+      const session = this.readSessionRow(sessionId);
+      if (!session) throw new RuntimeEventStoreIntegrityError(`Runtime session ${sessionId} does not exist`);
+      this.ensureTranscriptProjectionCurrentLocked(sessionId, session.last_event_seq);
+      const boundedLimit = boundedTranscriptQueryLimit(limit);
+      const rows = this.lease.database
+        .prepare(
+          `SELECT item.item_id, item.position_sequence, item.payload_json,
+                  message.event_id
+           FROM runtime_transcript_item_versions AS item
+           LEFT JOIN session_messages AS message
+             ON message.session_id = item.session_id AND message.sequence = item.position_sequence
+           WHERE item.session_id = ? AND item.valid_to_sequence IS NULL
+             AND json_extract(item.payload_json, '$.kind') IN ('userMessage', 'assistantMessage')
+             AND (? IS NULL OR item.position_sequence < ?)
+             AND instr(
+               pico_unicode_lower(CAST(json_extract(item.payload_json, '$.content') AS TEXT)),
+               pico_unicode_lower(?)
+             ) > 0
+           ORDER BY item.position_sequence DESC, item.position_ordinal DESC
+           LIMIT ?`,
+        )
+        .all(sessionId, beforeSequence ?? null, beforeSequence ?? null, normalizedQuery, boundedLimit + 1) as Array<Record<string, unknown>>;
+      const hasMore = rows.length > boundedLimit;
+      const hits = rows.slice(0, boundedLimit).flatMap((row): RuntimeTranscriptSearchMatch[] => {
+        const itemId = requireRowString(row["item_id"], "item_id");
+        const eventId = typeof row["event_id"] === "string" ? row["event_id"] : undefined;
+        const payload = asJsonRecord(JSON.parse(requireRowString(row["payload_json"], "payload_json")));
+        const role = payload?.["kind"] === "userMessage" ? "user" : payload?.["kind"] === "assistantMessage" ? "assistant" : undefined;
+        const text = typeof payload?.["content"] === "string" ? payload["content"] : "";
+        if (!eventId || !role) return [];
+        const match = findUnicodeCaseInsensitiveMatch(text, normalizedQuery);
+        if (!match) return [];
+        return [{
+          eventId,
+          itemId,
+          sequence: requireSafeInteger(row["position_sequence"], "position_sequence"),
+          role,
+          text,
+          matchStart: match.start,
+          matchLength: match.length,
+        }];
+      });
+      return { hits, hasMore };
+    });
   }
 
   /** Reads only durable item changes in (after, through], never the canonical history. */
@@ -1736,6 +1840,26 @@ export class SqliteRuntimeEventStore {
       watermark.throughSequence,
     ];
     let cursorClause = "";
+    if (options.aroundItemId && cursor) {
+      throw new RuntimeTranscriptResetRequiredError("aroundItemId cannot be combined with a transcript cursor");
+    }
+    if (options.aroundItemId) {
+      const anchor = this.lease.database
+        .prepare(
+          `SELECT position_sequence, position_ordinal
+           FROM runtime_transcript_item_versions
+           WHERE session_id = ? AND item_id = ? AND valid_from_sequence <= ?
+             AND (valid_to_sequence IS NULL OR valid_to_sequence > ?)`,
+        )
+        .get(options.sessionId, options.aroundItemId, watermark.throughSequence, watermark.throughSequence) as Record<string, unknown> | undefined;
+      if (!anchor) throw new RuntimeTranscriptResetRequiredError(`Transcript item ${options.aroundItemId} is unavailable`);
+      cursorClause = " AND (position_sequence < ? OR (position_sequence = ? AND position_ordinal <= ?))";
+      params.push(
+        requireSafeInteger(anchor["position_sequence"], "position_sequence"),
+        requireSafeInteger(anchor["position_sequence"], "position_sequence"),
+        requireSafeInteger(anchor["position_ordinal"], "position_ordinal"),
+      );
+    }
     if (cursor) {
       const ordinalOperator = cursor.byteOffset > 0 ? "<=" : "<";
       cursorClause = ` AND (position_sequence < ? OR (position_sequence = ? AND position_ordinal ${ordinalOperator} ?))`;
@@ -3103,6 +3227,35 @@ export class SqliteRuntimeEventStore {
   }
 }
 
+function findUnicodeCaseInsensitiveMatch(
+  text: string,
+  query: string,
+): { readonly start: number; readonly length: number } | undefined {
+  const foldedQuery = query.toLowerCase();
+  if (!foldedQuery) return undefined;
+  let foldedText = "";
+  const sourceStarts: number[] = [];
+  const sourceEnds: number[] = [];
+  for (let sourceStart = 0; sourceStart < text.length; ) {
+    const codePoint = text.codePointAt(sourceStart)!;
+    const sourceCharacter = String.fromCodePoint(codePoint);
+    const sourceEnd = sourceStart + sourceCharacter.length;
+    const folded = sourceCharacter.toLowerCase();
+    foldedText += folded;
+    for (let index = 0; index < folded.length; index += 1) {
+      sourceStarts.push(sourceStart);
+      sourceEnds.push(sourceEnd);
+    }
+    sourceStart = sourceEnd;
+  }
+  const offset = foldedText.indexOf(foldedQuery);
+  if (offset < 0) return undefined;
+  const start = sourceStarts[offset];
+  const end = sourceEnds[offset + foldedQuery.length - 1];
+  if (start === undefined || end === undefined) return undefined;
+  return { start, length: end - start };
+}
+
 function partialSnapshotFromRow(row: Record<string, unknown>): RuntimePartialSnapshot {
   return {
     sessionId: requireString(row["session_id"], "partial_snapshots.session_id"),
@@ -3850,6 +4003,19 @@ function asJsonRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : undefined;
+}
+
+function boundedTranscriptQueryLimit(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 1) return 100;
+  return Math.min(value, 250);
+}
+
+function transcriptMessageEventId(itemId: string, role: "user" | "assistant"): string | undefined {
+  const prefix = "message:";
+  const suffix = `:${role}`;
+  if (!itemId.startsWith(prefix) || !itemId.endsWith(suffix)) return undefined;
+  const eventId = itemId.slice(prefix.length, -suffix.length);
+  return eventId || undefined;
 }
 
 function transcriptProjectionStateFromRow(

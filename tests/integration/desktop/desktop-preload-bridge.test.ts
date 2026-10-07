@@ -134,8 +134,9 @@ test("Desktop preload separates pre-dispatch validation from unknown IPC failure
   ipc.send = () => undefined;
   const bridge = createDesktopBridge(ipc as unknown as IpcRenderer);
   const invalid = await bridge.runtime["session.send"]({
-    workspacePath: "relative",
-    input: { kind: "text", text: "x" },
+    workspacePath: "",
+    input: { kind: "invalid" } as never,
+    idempotencyKey: "invalid-input-test",
   });
   assert.equal(invalid.ok, false);
   assert.equal(!invalid.ok && invalid.error.outcome, "not_executed");

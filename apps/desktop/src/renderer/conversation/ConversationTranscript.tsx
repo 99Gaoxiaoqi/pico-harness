@@ -15,7 +15,7 @@ import {
   SearchCode,
   GitBranch,
 } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { sanitizeMarkdownText } from "@pico/protocol";
 import type {
   ConversationItemView,
@@ -48,6 +48,14 @@ export interface ConversationTranscriptProps {
   readonly renderItem?:
     | ((item: ConversationItemView, fallback: ReactNode) => ReactNode)
     | undefined;
+  readonly onEditUserMessage?: (
+    item: Extract<ConversationItemView, { kind: "userMessage" }>,
+    replacementText: string,
+    idempotencyKey: string,
+  ) => Promise<boolean>;
+  readonly onQuoteSelection?: (text: string) => void;
+  readonly onAskInSideChat?: (text: string) => void;
+  readonly highlightItemId?: string | undefined;
 }
 
 interface ConversationTurnView {
@@ -135,6 +143,99 @@ function DetailButton({
       <span>{label}</span>
       <ChevronRight aria-hidden="true" size={15} />
     </AstryxButton>
+  );
+}
+
+function UserMessageBubble({
+  item,
+  renderText,
+  onEdit,
+}: {
+  readonly item: Extract<ConversationItemView, { kind: "userMessage" }>;
+  readonly renderText: NonNullable<ConversationTranscriptProps["renderText"]>;
+  readonly onEdit?: ConversationTranscriptProps["onEditUserMessage"];
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(item.text);
+  const [submitting, setSubmitting] = useState(false);
+  const requestKey = useRef<{ readonly text: string; readonly key: string } | undefined>(undefined);
+  useEffect(() => {
+    if (!editing) setDraft(item.text);
+  }, [editing, item.text]);
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!onEdit || !draft.trim() || submitting) return;
+    setSubmitting(true);
+    if (requestKey.current?.text !== draft) {
+      requestKey.current = { text: draft, key: globalThis.crypto.randomUUID() };
+    }
+    try {
+      if (await onEdit(item, draft, requestKey.current.key)) setEditing(false);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+  return (
+    <article
+      className="conversation-message conversation-message--user"
+      data-item-id={item.id}
+      data-quoteable="true"
+    >
+      <h3 className="conversation-sr-only">你</h3>
+      <div className="conversation-message__bubble">
+        {editing ? (
+          <form className="conversation-message-edit" onSubmit={(event) => void submit(event)}>
+            <label className="conversation-sr-only" htmlFor={`edit-${encodeURIComponent(item.id)}`}>
+              编辑用户消息
+            </label>
+            <textarea
+              id={`edit-${encodeURIComponent(item.id)}`}
+              value={draft}
+              autoFocus
+              onChange={(event) => setDraft(event.target.value)}
+            />
+            <div>
+              <button type="submit" disabled={!draft.trim() || submitting}>
+                {submitting ? "正在创建修订…" : "提交为新分支"}
+              </button>
+              <button type="button" disabled={submitting} onClick={() => setEditing(false)}>
+                取消
+              </button>
+            </div>
+          </form>
+        ) : (
+          <>
+            {item.skills?.length ? (
+              <div aria-label="使用的技能">
+                {item.skills.map((skill) => (
+                  <span
+                    key={`${skill.sourceId}:${skill.name}`}
+                    className="composer-reference"
+                    title={skill.sourcePath}
+                  >
+                    Skill: {skill.name}
+                  </span>
+                ))}
+              </div>
+            ) : null}
+            {renderText(item.text, item)}
+            <StandaloneMedia item={item} />
+            {onEdit && (
+              <button
+                className="conversation-message__edit"
+                type="button"
+                onClick={() => {
+                  requestKey.current = undefined;
+                  setEditing(true);
+                }}
+              >
+                编辑
+              </button>
+            )}
+          </>
+        )}
+      </div>
+    </article>
   );
 }
 
@@ -483,36 +584,18 @@ function renderDefaultItem(
   renderText: NonNullable<ConversationTranscriptProps["renderText"]>,
   onOpenItem?: (item: ConversationItemView) => void,
   assistantLabel?: string,
+  onEditUserMessage?: ConversationTranscriptProps["onEditUserMessage"],
 ): ReactNode {
   switch (item.kind) {
     case "userMessage":
-      return (
-        <article className="conversation-message conversation-message--user">
-          <h3 className="conversation-sr-only">你</h3>
-          <div className="conversation-message__bubble">
-            {item.skills?.length ? (
-              <div aria-label="使用的技能">
-                {item.skills.map((skill) => (
-                  <span
-                    key={`${skill.sourceId}:${skill.name}`}
-                    className="composer-reference"
-                    title={skill.sourcePath}
-                  >
-                    Skill: {skill.name}
-                  </span>
-                ))}
-              </div>
-            ) : null}
-            {renderText(item.text, item)}
-            <StandaloneMedia item={item} />
-          </div>
-        </article>
-      );
+      return <UserMessageBubble item={item} renderText={renderText} onEdit={onEditUserMessage} />;
     case "assistantMessage":
       return (
         <article
           className="conversation-message conversation-message--assistant"
           data-streaming={item.streaming || undefined}
+          data-item-id={item.id}
+          data-quoteable="true"
         >
           <h3 className={assistantLabel ? "conversation-message__author" : "conversation-sr-only"}>
             {assistantLabel ?? "Pico"}
@@ -787,7 +870,14 @@ export function ConversationTranscript({
     />
   ),
   renderItem,
+  onEditUserMessage,
+  onQuoteSelection,
+  onAskInSideChat,
+  highlightItemId,
 }: ConversationTranscriptProps) {
+  const [selectedText, setSelectedText] = useState<
+    { readonly text: string; readonly top: number; readonly left: number } | undefined
+  >();
   const visibleItems = mergeConversationItemGroups(items).filter(
     (item) =>
       (item.kind !== "thinking" && item.kind !== "assistantMessage") || item.cleared !== true,
@@ -795,8 +885,54 @@ export function ConversationTranscript({
   const turns = groupConversationItemsIntoTurns(
     foldConversationProcess(visibleTurnItems(visibleItems), activeRun),
   );
+  useEffect(() => {
+    if (!highlightItemId) return;
+    const target = document.getElementById(transcriptItemDomId(highlightItemId));
+    target?.scrollIntoView?.({ block: "center", behavior: "smooth" });
+  }, [highlightItemId, visibleItems.length]);
+
+  const captureSelection = () => {
+    if (!onQuoteSelection && !onAskInSideChat) return;
+    const selection = window.getSelection();
+    const text = selection?.toString().trim();
+    if (!selection || !text || text.length > 8_000 || selection.rangeCount === 0) {
+      setSelectedText(undefined);
+      return;
+    }
+    const range = selection.getRangeAt(0);
+    const start =
+      range.startContainer instanceof Element
+        ? range.startContainer
+        : range.startContainer.parentElement;
+    const end =
+      range.endContainer instanceof Element ? range.endContainer : range.endContainer.parentElement;
+    const article = start?.closest<HTMLElement>("article[data-quoteable='true']");
+    if (!article || article !== end?.closest("article[data-quoteable='true']")) {
+      setSelectedText(undefined);
+      return;
+    }
+    const content = article.querySelector(
+      ".conversation-message__bubble, .conversation-message__body",
+    );
+    if (!content?.contains(range.startContainer) || !content.contains(range.endContainer)) {
+      setSelectedText(undefined);
+      return;
+    }
+    const rect = range.getBoundingClientRect();
+    setSelectedText({
+      text,
+      top: Math.max(8, rect.top - 44),
+      left: Math.max(8, Math.min(rect.left, window.innerWidth - 300)),
+    });
+  };
   const renderItemContent = (item: ConversationItemView): ReactNode => {
-    const fallback = renderDefaultItem(item, renderText, onOpenItem, assistantLabel);
+    const fallback = renderDefaultItem(
+      item,
+      renderText,
+      onOpenItem,
+      assistantLabel,
+      onEditUserMessage,
+    );
     return (
       <>
         {renderItem ? renderItem(item, fallback) : fallback}
@@ -888,6 +1024,8 @@ export function ConversationTranscript({
         <li
           className="conversation-transcript__item"
           data-kind={item.kind}
+          data-highlighted={highlightItemId === item.id || undefined}
+          id={transcriptItemDomId(item.id)}
           key={conversationItemKey(item)}
         >
           {renderItemContent(item)}
@@ -915,32 +1053,75 @@ export function ConversationTranscript({
 
   return (
     <MediaProvider key={JSON.stringify(mediaScope)} scope={mediaScope}>
-      <ol
-        className="conversation-transcript"
-        aria-label={label}
-        aria-live="polite"
-        aria-relevant="additions text"
-      >
-        {turns.map((turn) => (
-          <li className="conversation-turn" key={turn.key}>
-            <ol className="conversation-turn__items">
-              {turn.items.map((item) =>
-                item.kind === "process" ? (
-                  <li className="conversation-transcript__item" data-kind="process" key={item.key}>
-                    <ProcessDisclosure item={item}>
-                      {renderDisplayItems(item.items)}
-                    </ProcessDisclosure>
-                  </li>
-                ) : (
-                  renderDisplayItems([item])
-                ),
-              )}
-            </ol>
-          </li>
-        ))}
-      </ol>
+      <div className="conversation-transcript-shell">
+        <ol
+          className="conversation-transcript"
+          aria-label={label}
+          aria-live="polite"
+          aria-relevant="additions text"
+          onMouseUp={captureSelection}
+        >
+          {turns.map((turn) => (
+            <li className="conversation-turn" key={turn.key}>
+              <ol className="conversation-turn__items">
+                {turn.items.map((item) =>
+                  item.kind === "process" ? (
+                    <li
+                      className="conversation-transcript__item"
+                      data-kind="process"
+                      key={item.key}
+                    >
+                      <ProcessDisclosure item={item}>
+                        {renderDisplayItems(item.items)}
+                      </ProcessDisclosure>
+                    </li>
+                  ) : (
+                    renderDisplayItems([item])
+                  ),
+                )}
+              </ol>
+            </li>
+          ))}
+        </ol>
+        {selectedText && (onQuoteSelection || onAskInSideChat) && (
+          <div
+            className="conversation-selection-toolbar"
+            style={{ top: selectedText.top, left: selectedText.left }}
+            role="toolbar"
+            aria-label="选中文字操作"
+            onMouseDown={(event) => event.preventDefault()}
+          >
+            {onQuoteSelection && (
+              <button
+                type="button"
+                onClick={() => {
+                  onQuoteSelection(selectedText.text);
+                  setSelectedText(undefined);
+                }}
+              >
+                引用到输入框
+              </button>
+            )}
+            {onAskInSideChat && (
+              <button
+                type="button"
+                onClick={() => {
+                  onAskInSideChat(selectedText.text);
+                  setSelectedText(undefined);
+                }}
+              >
+                在侧聊中提问
+              </button>
+            )}
+          </div>
+        )}
+      </div>
     </MediaProvider>
   );
+}
+
+function transcriptItemDomId(itemId: string): string {
+  return `transcript-item-${encodeURIComponent(itemId)}`;
 }
 
 function StandaloneMedia({

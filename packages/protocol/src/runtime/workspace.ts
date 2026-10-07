@@ -98,6 +98,10 @@ export interface EventLogStorageStatusResult extends JsonObject {
 export type WorkspaceStatusResult = JsonObject & {
   workspacePath: string;
   registered: boolean;
+  /** Stable project identity for sidebar grouping; null identifies an unassigned workspace. */
+  readonly projectId?: string | null;
+  /** Display name shared by all worktrees attached to projectId. */
+  readonly projectName?: string | null;
   readonly temporary?: true;
   schedulerStatus: "unknown";
   mode: "folder" | "git";
@@ -178,6 +182,8 @@ const workspaceStatusResultRule = exactResultShape(
   },
   {
     temporary: resultOneOf([true]),
+    projectId: resultNullable(resultString),
+    projectName: resultNullable(resultString),
     eventLog: resultNullable(
       exactResultShape({
         logicalBytes: resultNonNegativeInteger,

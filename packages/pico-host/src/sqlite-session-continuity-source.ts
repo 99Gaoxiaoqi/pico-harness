@@ -8,6 +8,8 @@ import type {
   RuntimeRun,
   RuntimeSession,
   RuntimeTranscriptAdvanceCursor,
+  RuntimeTranscriptAnchor,
+  RuntimeTranscriptSearchHit,
   RuntimeTranscriptChange,
   RuntimeTranscriptItemFragment,
   RuntimeTranscriptItemRecord,
@@ -123,6 +125,7 @@ export class SqliteSessionContinuitySource implements SessionContinuityDataSourc
         sessionId: params.sessionId,
         through: params.through,
         ...(params.cursor ? { cursor: params.cursor } : {}),
+        ...(params.aroundItemId ? { aroundItemId: params.aroundItemId } : {}),
         maxBytes: boundedBytes(params.maxBytes),
         limit: boundedLimit(params.limit, DEFAULT_PAGE_LIMIT),
       });
@@ -131,6 +134,63 @@ export class SqliteSessionContinuitySource implements SessionContinuityDataSourc
         items: page.items.map(itemRecord),
         ...(page.fragments?.length ? { fragments: page.fragments.map(itemFragment) } : {}),
         ...(page.nextCursor ? { nextCursor: pageCursor(page.nextCursor) } : {}),
+      };
+    } finally {
+      store.close();
+    }
+  }
+
+  async readTranscriptAnchors(
+    params: RuntimeParams<"session.transcript.anchors">,
+  ): Promise<RuntimeResult<"session.transcript.anchors">> {
+    const store = this.openStore(canonicalizeWorkspacePath(params.workspacePath));
+    try {
+      const page = await store.readTranscriptPromptAnchors(
+        params.sessionId,
+        params.beforeSequence,
+        boundedLimit(params.limit, DEFAULT_PAGE_LIMIT),
+      );
+      const anchors: RuntimeTranscriptAnchor[] = page.anchors.map((anchor) => ({ ...anchor }));
+      return {
+        anchors,
+        ...(page.hasMore && anchors.length > 0
+          ? { nextBeforeSequence: anchors.at(-1)!.sequence - 1 }
+          : {}),
+      };
+    } finally {
+      store.close();
+    }
+  }
+
+  async searchTranscript(
+    params: RuntimeParams<"session.transcript.search">,
+  ): Promise<RuntimeResult<"session.transcript.search">> {
+    const store = this.openStore(canonicalizeWorkspacePath(params.workspacePath));
+    try {
+      const page = await store.searchTranscriptMessages(
+        params.sessionId,
+        params.query,
+        params.beforeSequence,
+        boundedLimit(params.limit, DEFAULT_PAGE_LIMIT),
+      );
+      const hits: RuntimeTranscriptSearchHit[] = page.hits.map((hit) => {
+        const start = Math.max(0, hit.matchStart - 72);
+        const end = Math.min(hit.text.length, hit.matchStart + hit.matchLength + 120);
+        return {
+          eventId: hit.eventId,
+          itemId: hit.itemId,
+          sequence: hit.sequence,
+          role: hit.role,
+          summary: `${start > 0 ? "…" : ""}${hit.text.slice(start, end)}${end < hit.text.length ? "…" : ""}`,
+          matchStart: hit.matchStart - start + (start > 0 ? 1 : 0),
+          matchLength: hit.matchLength,
+        };
+      });
+      return {
+        hits,
+        ...(page.hasMore && hits.length > 0
+          ? { nextBeforeSequence: hits.at(-1)!.sequence - 1 }
+          : {}),
       };
     } finally {
       store.close();

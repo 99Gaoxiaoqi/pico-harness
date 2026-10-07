@@ -123,6 +123,8 @@ export interface ForkSessionInput {
    * 用于把 rewind checkpoint 表达为对历史切片的 fork。
    */
   readonly throughEventId?: string;
+  /** Fork before a source's first RuntimeEvent, producing an empty history prefix. */
+  readonly beforeFirstEventId?: string;
   /** Combined rewind workspace authority, frozen before the journal's first mutation. */
   readonly rewind?: {
     readonly checkpointId: string;
@@ -300,9 +302,14 @@ export class SessionForkService {
         capability: runtimeCapability,
       });
       this.runtimePort.validateModelHistory(await sourceRuntimeStore.readSession(source.id));
-      const snapshot = input.throughEventId
-        ? await source.readDurableForkSnapshotAt(input.throughEventId)
-        : await source.readDurableForkSnapshot();
+      if (input.throughEventId && input.beforeFirstEventId) {
+        throw new Error("Fork cannot combine throughEventId and beforeFirstEventId");
+      }
+      const snapshot = input.beforeFirstEventId
+        ? await source.readDurableForkSnapshotBeforeFirstEvent(input.beforeFirstEventId)
+        : input.throughEventId
+          ? await source.readDurableForkSnapshotAt(input.throughEventId)
+          : await source.readDurableForkSnapshot();
       // Boundary is Session authority, not historical conversation state. A rewind
       // truncates the model/transcript seed but inherits the source's current,
       // cumulative authorization boundary with its original revision.
@@ -1518,7 +1525,18 @@ async function resolveFrozenSourceThroughEventId(
       "source_cursor_changed",
     );
   }
-  const bounded = entries.filter((entry) => entry.sequence <= frozen.sourceCursor.seq);
+  const firstEventEmptyPrefix =
+    frozen.sourceCursor.seq === 1 &&
+    cursorEntry.event.kind === "message.committed" &&
+    cursorEntry.event.data.message.role === "user" &&
+    frozen.seedEntries.length === 0 &&
+    frozen.planEntries.length === 0 &&
+    frozen.modelCheckpoint === undefined;
+  const bounded = entries.filter((entry) =>
+    firstEventEmptyPrefix
+      ? entry.sequence < frozen.sourceCursor.seq
+      : entry.sequence <= frozen.sourceCursor.seq,
+  );
   const boundedEvents = bounded.map(({ event }) => event);
   const seedEntries = projectRuntimeSessionForkSeedEntries(bounded).map(stripForkSeedUsage);
   if (!isDeepStrictEqual(seedEntries, frozen.seedEntries)) {

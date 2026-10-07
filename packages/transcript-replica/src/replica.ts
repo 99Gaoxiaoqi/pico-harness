@@ -438,6 +438,42 @@ export class TranscriptReplica {
     return "applied";
   }
 
+  applyAroundPage(
+    page: RuntimeResult<"session.transcript.page">,
+  ): "applied" | "ignored" | "recovering" {
+    if (this.#phase !== "ready" || !this.#watermark) return "ignored";
+    if (
+      page.watermark.historyEpoch !== this.#watermark.historyEpoch ||
+      page.watermark.projectorVersion !== this.#watermark.projectorVersion ||
+      page.watermark.throughSequence > this.#watermark.throughSequence
+    ) {
+      this.enterRecovering("advance_gap");
+      return "recovering";
+    }
+    const records = new Map(this.#records);
+    const revisions = new Map(this.#revisions);
+    const fragments = cloneItemFragmentAssemblies(this.#pageFragments);
+    try {
+      mergeRecords(records, revisions, [
+        ...consumeItemFragments(fragments, page.fragments ?? []),
+        ...page.items,
+      ]);
+    } catch {
+      this.enterRecovering("advance_gap");
+      return "recovering";
+    }
+    if (fragments.size > 0 && !page.nextCursor) {
+      this.enterRecovering("advance_gap");
+      return "recovering";
+    }
+    this.#records = records;
+    this.#revisions = revisions;
+    this.#olderCursor = page.nextCursor;
+    this.#pageFragments = fragments;
+    reconcileDurableOverlays({ records, revisions, overlays: this.#overlays });
+    return "applied";
+  }
+
   reset(): void {
     this.#generation += 1;
     this.#phase = "idle";

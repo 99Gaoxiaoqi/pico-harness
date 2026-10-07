@@ -33,7 +33,7 @@ import {
   type ConversationComposerModes,
 } from "./ConversationComposerMenu.js";
 
-export type ConversationComposerHandle = Pick<ChatComposerInputHandle, "focus"> & {
+export type ConversationComposerHandle = Pick<ChatComposerInputHandle, "focus" | "insertText"> & {
   openResources: (kind?: "skill" | "agent") => void;
   openControl: (target: "mode" | "permissions" | "thinking" | "interrupt") => boolean;
 };
@@ -163,6 +163,10 @@ export function ConversationComposer({
     inputRef,
     () => ({
       focus: () => editorRef.current?.focus(),
+      insertText: (text: string) => {
+        editorRef.current?.insertText(text);
+        onValueChange(editorRef.current?.getValue() ?? value);
+      },
       openResources: (kind = "skill") => {
         editorRef.current?.focus();
         editorRef.current?.insertText(` /${kind} `);

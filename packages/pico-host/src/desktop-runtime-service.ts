@@ -54,6 +54,7 @@ import { StorageDoctor } from "./storage-doctor.js";
 import { SessionForkService } from "./session-fork-service.js";
 import { projectRuntimeSessionState } from "@pico/runtime/session-runtime-projection";
 import { globalSessionManager, Session } from "./session.js";
+import { resolveSessionMediaReferences } from "./session-media.js";
 import { canonicalResourceName, type PersistedSessionSettings } from "@pico/core";
 import {
   getOrCreateSessionSettings,
@@ -136,6 +137,7 @@ import {
   RUNTIME_ERROR_CODES,
   RuntimeProtocolError,
   parseRuntimeParams,
+  parseRuntimeResult,
   type JsonValue,
   type JsonObject,
   type RuntimeNotification,
@@ -158,7 +160,10 @@ import type {
   RuntimeNotificationCursor,
   ShutdownOwnershipFence,
 } from "./local-runtime-service.js";
-import type { DesktopConversationStateStoreLike } from "./desktop-conversation-state.js";
+import type {
+  DesktopConversationStateStoreLike,
+  DesktopQueuedInput,
+} from "./desktop-conversation-state.js";
 import { SqliteDesktopConversationStateStore } from "./sqlite-desktop-conversation-state-store.js";
 import type { PlanControlPort } from "./plan-control-port.js";
 import { PlanCoordinator } from "@pico/runtime/plan-coordinator";
@@ -884,6 +889,11 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         deleteSession: this.deleteSession.bind(this),
         renameSession: this.renameSession.bind(this),
         forkSession: this.forkSession.bind(this),
+        reviseSession: this.reviseSession.bind(this),
+        updateQueuedInput: this.updateQueuedInput.bind(this),
+        removeQueuedInput: this.removeQueuedInput.bind(this),
+        reorderQueuedInputs: this.reorderQueuedInputs.bind(this),
+        moveQueuedInputToNext: this.moveQueuedInputToNext.bind(this),
         compactSession: this.compactSession.bind(this),
         getRuntimeSessionSettings: this.getRuntimeSessionSettings.bind(this),
         getSessionContextReport: this.getSessionContextReport.bind(this),
@@ -1164,27 +1174,32 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
 
   private async listWorkspaces(): Promise<JsonValue> {
     const workspaces = await Promise.all(
-      (await this.registrationStore.list()).map(async (workspacePath) => {
+      (await this.registrationStore.listRegistrations()).map(async (registration) => {
+        const { workspacePath, projectId, projectName } = registration;
+        const project = { projectId, projectName };
         // 注册项可能指向已删除的目录（崩溃的���试/客户端残留；注册表 list() 会
         // 过滤缺失目录，这里是过滤与物化之间的竞态护栏）。真机事故
         // （2026-08-16）：真 home 累积 54 个存活的 %TEMP% e2e 工作区，单次
         // workspace.list 物化全部 runtime 推过 kernel 操作 deadline，连接被
         // 整条拆断——根治在 e2e 隔离 daemon root，这里保证残留永不致命。
         if (!existsSync(workspacePath)) {
-          return this.decorateWorkspaceStatus({
-            workspacePath,
-            registered: true,
-            schedulerStatus: "unknown",
-            mode: "folder",
-            branch: "",
-            capabilities: {
-              foregroundRuns: false,
-              fileHistory: false,
-              isolatedWorktrees: false,
-              branchMerge: false,
-            },
-            eventLog: null,
-          } satisfies WorkspaceStatusResult);
+          return this.decorateWorkspaceStatus(
+            {
+              workspacePath,
+              registered: true,
+              schedulerStatus: "unknown",
+              mode: "folder",
+              branch: "",
+              capabilities: {
+                foregroundRuns: false,
+                fileHistory: false,
+                isolatedWorktrees: false,
+                branchMerge: false,
+              },
+              eventLog: null,
+            } satisfies WorkspaceStatusResult,
+            project,
+          );
         }
         try {
           const runtime = await this.options.runtimeService.getWorkspaceRuntime(workspacePath);
@@ -1194,13 +1209,14 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
               true,
               runtime.mode === "git" ? await resolveGitBranch(runtime.workspace) : undefined,
             ),
+            project,
           );
         } catch (error) {
           // A registered workspace may still contain storage from an unsupported era.
           // Listing is the Desktop bootstrap boundary: one unavailable workspace must
           // remain discoverable without preventing every other workspace from opening.
           logger.warn({ workspacePath, err: error }, "Workspace status materialization failed");
-          return this.decorateWorkspaceStatus(unavailableWorkspaceStatus(workspacePath));
+          return this.decorateWorkspaceStatus(unavailableWorkspaceStatus(workspacePath), project);
         }
       }),
     );
@@ -1221,10 +1237,19 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     return this.getWorkspaceStatus(await this.temporaryWorkspace.ensure());
   }
 
-  private decorateWorkspaceStatus(status: WorkspaceStatusResult): WorkspaceStatusResult {
-    return this.temporaryWorkspace.matches(status.workspacePath)
-      ? { ...status, temporary: true }
-      : status;
+  private async decorateWorkspaceStatus(
+    status: WorkspaceStatusResult,
+    registeredProject?: { readonly projectId: string | null; readonly projectName: string | null },
+  ): Promise<WorkspaceStatusResult> {
+    const temporary = this.temporaryWorkspace.matches(status.workspacePath);
+    const project = temporary
+      ? { projectId: null, projectName: null }
+      : (registeredProject ?? (await this.registrationStore.projectMetadata(status.workspacePath)));
+    return {
+      ...status,
+      ...project,
+      ...(temporary ? { temporary: true as const } : {}),
+    };
   }
 
   private async initializeWorkspace(workspacePath: string): Promise<JsonValue> {
@@ -1600,6 +1625,146 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     this.publishSession(session);
     this.publishTranscriptUpdate(canonical, targetSessionId, "reload");
     return { session, sourceSessionId: sessionId };
+  }
+
+  private async reviseSession(
+    params: RuntimeRequest<"session.revise">["params"],
+  ): Promise<JsonValue> {
+    const sourceSessionId = requireText(params.sourceSessionId, "sourceSessionId");
+    const canonical = await this.requireTrustedSession(params.workspacePath, sourceSessionId);
+    const targetEventId = requireText(params.targetEventId, "targetEventId");
+    const replacementText = requireText(params.replacementText, "replacementText");
+    const idempotencyKey = `session.revise:${requireText(params.idempotencyKey, "idempotencyKey")}`;
+    const requestFingerprint = createHash("sha256")
+      .update(JSON.stringify({ canonical, sourceSessionId, targetEventId, replacementText }))
+      .digest("hex");
+    const stored = await this.conversationStateStore.getIdempotent(canonical, idempotencyKey);
+    if (stored) {
+      if (stored.requestFingerprint !== requestFingerprint) {
+        throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.CONFLICT, "修订幂等键已绑定不同的请求");
+      }
+      return stored.result;
+    }
+
+    const existingClaim = await this.conversationStateStore.getRewindClaim(canonical, idempotencyKey);
+    const operationId = `revise-${createHash("sha256").update(`${canonical}\0${idempotencyKey}`).digest("hex")}`;
+    const claim = await this.conversationStateStore.claimRewind(
+      canonical,
+      idempotencyKey,
+      sourceSessionId,
+      existingClaim?.targetSessionId ?? this.createSessionId(),
+      operationId,
+      requestFingerprint,
+    );
+    if (
+      claim.requestFingerprint !== requestFingerprint ||
+      claim.sourceSessionId !== sourceSessionId ||
+      claim.operationId !== operationId
+    ) {
+      throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.CONFLICT, "修订幂等键已绑定不同的请求");
+    }
+
+    const targetSessionId = claim.targetSessionId;
+    const trustedPath = await this.withWorkspaceAdmission(canonical, async () => {
+      const idlePath = await this.requireIdleTrustedSession(canonical, sourceSessionId, "编辑旧消息");
+      const sourceLease = await globalSessionManager.getOrCreatePinned(sourceSessionId, idlePath, {
+        persistence: true,
+        picoHome: this.picoHome,
+        runtimePort: createEngineRuntimePort(),
+      });
+      try {
+        await this.getForkSourceSettings(idlePath, sourceLease.session);
+        await sourceLease.session.flushPersistence();
+        const entries = await sourceLease.session.runtimeEventStore?.readSessionEntries(sourceSessionId);
+        if (!entries) {
+          throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.RESET_REQUIRED, "会话历史尚未持久化，无法编辑");
+        }
+        const targetIndex = entries.findIndex(
+          ({ event }) => event.eventId === targetEventId &&
+            event.kind === "message.committed" && event.data.message.role === "user",
+        );
+        if (targetIndex < 0) {
+          throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, "目标消息不是当前会话中的用户消息");
+        }
+        const previousEventId = entries[targetIndex - 1]?.event.eventId;
+        const targetEvent = entries[targetIndex]!.event;
+        if (targetEvent.kind !== "message.committed" || targetEvent.data.message.role !== "user") {
+          throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, "目标消息不是当前会话中的用户消息");
+        }
+        const targetMessage = targetEvent.data.message;
+        const revisionInput = runtimeInputForRevisedMessage(targetMessage, replacementText);
+        const forkService = new SessionForkService({
+          workDir: idlePath,
+          picoHome: this.picoHome,
+          runtimePort: createSessionForkRuntimePort(),
+        });
+        try {
+          await forkService.fork({
+            sourceSessionId,
+            targetSessionId,
+            ...(previousEventId
+              ? { throughEventId: previousEventId }
+              : { beforeFirstEventId: targetEventId }),
+            operationId,
+          });
+        } finally {
+          forkService.close();
+        }
+        this.workbarRepository(idlePath).forkSessionData(sourceSessionId, targetSessionId);
+        const copiedMessage = resolveSessionMediaReferences(
+          resolvePicoPaths(idlePath, { picoHome: this.picoHome }).workspace.root,
+          targetSessionId,
+          {
+            role: "user",
+            content: "",
+            ...(targetMessage.images?.length ? { images: targetMessage.images } : {}),
+          },
+        );
+        const resolvedInput = await this.resolveRuntimeUserInput(idlePath, revisionInput);
+        return {
+          workspacePath: idlePath,
+          input: revisionInput,
+          resolvedInput: {
+            ...resolvedInput,
+            ...(copiedMessage.images?.length ? { images: copiedMessage.images } : {}),
+          },
+        };
+      } finally {
+        sourceLease.release();
+      }
+    });
+    const sent = parseRuntimeResult(
+      "session.send",
+      await this.sendSession({
+        workspacePath: trustedPath.workspacePath,
+        sessionId: targetSessionId,
+        input: trustedPath.input,
+        resolvedInput: trustedPath.resolvedInput,
+        idempotencyKey: `revise-send:${createHash("sha256").update(`${idempotencyKey}\0${requestFingerprint}`).digest("hex")}`,
+        behavior: "auto",
+      }),
+    );
+    const result = {
+      session: sent.session,
+      sourceSessionId,
+      targetEventId,
+      disposition: sent.disposition,
+      ...(sent.run ? { run: sent.run } : {}),
+    };
+
+    try {
+      await this.conversationStateStore.rememberIdempotent(
+        canonical,
+        idempotencyKey,
+        requestFingerprint,
+        result,
+      );
+    } catch (error) {
+      logger.warn({ error, sourceSessionId, targetSessionId }, "会话修订已启动，但幂等结果保存失败");
+    }
+    this.publishSession(result.session as RuntimeSession);
+    this.publishTranscriptUpdate(canonical, targetSessionId, "reload");
+    return result;
   }
 
   private async createSideChat(
@@ -2653,6 +2818,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     readonly expectedRunId?: string;
     readonly idempotencyKey: string;
     readonly replayOnly?: true;
+    readonly resolvedInput?: ResolvedRuntimeUserInput;
   }): Promise<JsonValue> {
     const canonical = await this.options.runtimeService.canonicalizeWorkspacePath(
       params.workspacePath,
@@ -2713,6 +2879,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     readonly behavior?: "auto" | "steer" | "queue" | "replace";
     readonly expectedRunId?: string;
     readonly idempotencyKey: string;
+    readonly resolvedInput?: ResolvedRuntimeUserInput;
   }): Promise<JsonObject> {
     const behavior = params.behavior ?? "auto";
     if (params.sessionId && params.initialSettings) {
@@ -2723,9 +2890,11 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     }
     // Resolve a first-message activation before creating durable session metadata. Invalid
     // catalog selections must not leave behind an empty session.
-    const initialResolution = params.sessionId
-      ? undefined
-      : await this.resolveRuntimeUserInput(params.workspacePath, params.input);
+    const initialResolution =
+      params.resolvedInput ??
+      (params.sessionId
+        ? undefined
+        : await this.resolveRuntimeUserInput(params.workspacePath, params.input));
     const existingFirstSendClaim = await this.conversationStateStore.getFirstSendClaim(
       params.workspacePath,
       params.idempotencyKey,
@@ -2854,6 +3023,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
 
       const activation = isRuntimeActivation(params.input);
       const resolution =
+        params.resolvedInput ??
         initialResolution ??
         (activation
           ? await this.resolveRuntimeUserInput(params.workspacePath, params.input)
@@ -2868,6 +3038,12 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           );
         }
         if (behavior === "queue" || behavior === "replace" || activation) {
+          if (params.resolvedInput?.images?.length) {
+            throw new RuntimeProtocolError(
+              RUNTIME_ERROR_CODES.CONFLICT,
+              "修订消息包含原会话图片，当前工作区繁忙；请等待运行结束后重试。",
+            );
+          }
           await this.conversationStateStore.enqueue(params.workspacePath, sessionId, admittedInput);
           const run =
             behavior === "replace"
@@ -2909,6 +3085,12 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         this.goalCoordinator.isSettling(params.workspacePath, sessionId) ||
         (await this.findActiveWorkspaceRun(params.workspacePath))
       ) {
+        if (params.resolvedInput?.images?.length) {
+          throw new RuntimeProtocolError(
+            RUNTIME_ERROR_CODES.CONFLICT,
+            "修订消息包含原会话图片，当前工作区繁忙；请等待运行结束后重试。",
+          );
+        }
         await this.conversationStateStore.enqueue(params.workspacePath, sessionId, admittedInput);
         return { session: sessionRecord, disposition: "queued" };
       }
@@ -3095,6 +3277,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
             picoDesktopInputId: messageId,
             displayText,
             ...(input.kind === "text" && input.skills ? { skills: input.skills } : {}),
+            ...(input.kind === "text" && input.orchestrationMode
+              ? { picoDesktopOrchestrationMode: input.orchestrationMode }
+              : {}),
           },
           ...(images && images.length > 0 ? { images } : {}),
         });
@@ -3122,6 +3307,85 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     });
     await this.conversationStateStore.removeQueued(workspacePath, next.queueId);
     return true;
+  }
+
+  private async updateQueuedInput(
+    params: RuntimeRequest<"session.queue.update">["params"],
+  ): Promise<JsonValue> {
+    const canonical = await this.requireTrustedSession(params.workspacePath, params.sessionId);
+    const queueId = requireText(params.queueId, "queueId");
+    const input = normalizeRuntimeUserInput(params.input);
+    const queuedInput = await this.withSessionAdmission(canonical, params.sessionId, async () => {
+      const updated = await this.conversationStateStore.updateQueued(
+        canonical,
+        params.sessionId,
+        queueId,
+        input,
+      );
+      if (!updated) {
+        throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.CONFLICT, "该队列输入已被消费或移除，请刷新队列。");
+      }
+      this.publishTranscriptUpdate(canonical, params.sessionId, "reload");
+      return updated;
+    });
+    return { queuedInput: queuedInputResult(queuedInput) };
+  }
+
+  private async removeQueuedInput(
+    params: RuntimeRequest<"session.queue.remove">["params"],
+  ): Promise<JsonValue> {
+    const canonical = await this.requireTrustedSession(params.workspacePath, params.sessionId);
+    const removed = await this.withSessionAdmission(canonical, params.sessionId, async () => {
+      const deleted = await this.conversationStateStore.removeQueuedForSession(
+        canonical,
+        params.sessionId,
+        requireText(params.queueId, "queueId"),
+      );
+      if (!deleted) {
+        throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.CONFLICT, "该队列输入已被消费或移除，请刷新队列。");
+      }
+      this.publishTranscriptUpdate(canonical, params.sessionId, "reload");
+      return true;
+    });
+    return { removed };
+  }
+
+  private async reorderQueuedInputs(
+    params: RuntimeRequest<"session.queue.reorder">["params"],
+  ): Promise<JsonValue> {
+    const canonical = await this.requireTrustedSession(params.workspacePath, params.sessionId);
+    const queuedInputs = await this.withSessionAdmission(canonical, params.sessionId, async () => {
+      const ordered = await this.conversationStateStore.reorderQueued(
+        canonical,
+        params.sessionId,
+        params.queueIds,
+      );
+      if (!ordered) {
+        throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.CONFLICT, "队列已变化，请刷新后重新排序。");
+      }
+      this.publishTranscriptUpdate(canonical, params.sessionId, "reload");
+      return ordered;
+    });
+    return { queuedInputs: queuedInputs.map(queuedInputResult) };
+  }
+
+  private async moveQueuedInputToNext(
+    params: RuntimeRequest<"session.queue.moveToNext">["params"],
+  ): Promise<JsonValue> {
+    const canonical = await this.requireTrustedSession(params.workspacePath, params.sessionId);
+    const queuedInputs = await this.withSessionAdmission(canonical, params.sessionId, async () => {
+      const ordered = await this.conversationStateStore.moveQueuedToNext(
+        canonical,
+        params.sessionId,
+        requireText(params.queueId, "queueId"),
+      );
+      if (!ordered) {
+        throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.CONFLICT, "该队列输入已被消费或移除，请刷新队列。");
+      }
+      this.publishTranscriptUpdate(canonical, params.sessionId, "reload");
+      return ordered;
+    });
+    return { queuedInputs: queuedInputs.map(queuedInputResult) };
   }
 
   private async withSessionAdmission<Result>(
@@ -3158,32 +3422,43 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   }
 
   private async consumeWorkspaceQueuedOnce(workspacePath: string): Promise<boolean> {
-    if (this.lifecycleState !== "open" || (await this.findActiveWorkspaceRun(workspacePath)))
-      return true;
-    let queued;
-    if (this.conversationStateStore.listWorkspaceQueued)
-      queued = await this.conversationStateStore.listWorkspaceQueued(workspacePath);
-    else {
-      const listed = requireJsonRecord(await this.listSessions(workspacePath), "session.list");
-      const sessions = Array.isArray(listed["sessions"])
-        ? listed["sessions"].filter(isJsonRecord)
-        : [];
-      queued = (
-        await Promise.all(
-          sessions.map((session) =>
-            this.conversationStateStore.listQueued(workspacePath, String(session["sessionId"])),
-          ),
+    while (this.lifecycleState === "open") {
+      if (await this.findActiveWorkspaceRun(workspacePath)) return true;
+      let queued;
+      if (this.conversationStateStore.listWorkspaceQueued) {
+        queued = await this.conversationStateStore.listWorkspaceQueued(workspacePath);
+      } else {
+        const listed = requireJsonRecord(await this.listSessions(workspacePath), "session.list");
+        const sessions = Array.isArray(listed["sessions"])
+          ? listed["sessions"].filter(isJsonRecord)
+          : [];
+        queued = (
+          await Promise.all(
+            sessions.map(async (session) =>
+              (
+                await this.conversationStateStore.listQueued(
+                  workspacePath,
+                  String(session["sessionId"]),
+                )
+              ).slice(0, 1),
+            ),
+          )
         )
-      )
-        .flat()
-        .sort((a, b) => a.createdAt - b.createdAt);
+          .flat()
+          .sort((a, b) => a.createdAt - b.createdAt || a.queueId.localeCompare(b.queueId));
+      }
+      const next = queued[0];
+      if (!next) return false;
+      if (this.goalCoordinator.isSettling(workspacePath, next.sessionId)) return true;
+      const consumed = await this.withSessionAdmission(workspacePath, next.sessionId, () =>
+        this.consumeNextQueued(workspacePath, next.sessionId),
+      );
+      // A queued item can be removed after workspace selection but before its
+      // session admission. Re-select while holding the workspace drain lane so
+      // another session's pending input is not stranded behind the stale pick.
+      if (consumed) return true;
     }
-    const next = queued[0];
-    if (!next) return false;
-    if (this.goalCoordinator.isSettling(workspacePath, next.sessionId)) return true;
-    return this.withSessionAdmission(workspacePath, next.sessionId, () =>
-      this.consumeNextQueued(workspacePath, next.sessionId),
-    );
+    return true;
   }
 
   private async reconcileGoalContinuations(): Promise<void> {
@@ -5161,6 +5436,43 @@ function normalizeRuntimeUserInput(value: RuntimeUserInput): RuntimeUserInput {
     RUNTIME_ERROR_CODES.INVALID_PARAMS,
     `input.kind 不支持: ${String(kind)}`,
   );
+}
+
+function queuedInputResult(value: DesktopQueuedInput): RuntimeQueuedInput {
+  return {
+    queueId: value.queueId,
+    sessionId: value.sessionId,
+    input: value.input,
+    createdAt: value.createdAt,
+  };
+}
+
+function runtimeInputForRevisedMessage(message: Message | undefined, text: string): RuntimeUserInput {
+  if (!message) return normalizeRuntimeUserInput({ kind: "text", text });
+  const providerData = message.providerData;
+  const skills = Array.isArray(providerData?.["skills"])
+    ? providerData["skills"].flatMap((value): RuntimeSkillReference[] => {
+        if (!isJsonRecord(value) || typeof value["name"] !== "string") return [];
+        return [
+          {
+            name: value["name"],
+            ...(typeof value["sourceId"] === "string" ? { sourceId: value["sourceId"] } : {}),
+            ...(typeof value["sourcePath"] === "string"
+              ? { sourcePath: value["sourcePath"] }
+              : {}),
+          },
+        ];
+      })
+    : [];
+  const orchestrationMode = providerData?.["picoDesktopOrchestrationMode"];
+  return normalizeRuntimeUserInput({
+    kind: "text",
+    text,
+    ...(skills.length > 0 ? { skills } : {}),
+    ...(orchestrationMode === "graph" || orchestrationMode === "swarm"
+      ? { orchestrationMode }
+      : {}),
+  });
 }
 
 /**

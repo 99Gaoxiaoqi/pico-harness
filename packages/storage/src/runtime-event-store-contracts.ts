@@ -98,8 +98,27 @@ export interface RuntimeTranscriptProjectionPageOptions {
   readonly sessionId: string;
   readonly through?: RuntimeTranscriptProjectionWatermark;
   readonly cursor?: RuntimeTranscriptProjectionCursor;
+  readonly aroundItemId?: string;
   readonly maxBytes: number;
   readonly limit?: number;
+}
+
+export interface RuntimeTranscriptPromptAnchor {
+  readonly eventId: string;
+  readonly itemId: string;
+  readonly sequence: number;
+  readonly prompt: string;
+  readonly at: number;
+}
+
+export interface RuntimeTranscriptSearchMatch {
+  readonly eventId: string;
+  readonly itemId: string;
+  readonly sequence: number;
+  readonly role: "user" | "assistant";
+  readonly text: string;
+  readonly matchStart: number;
+  readonly matchLength: number;
 }
 
 export interface RuntimeTranscriptProjectionPage {

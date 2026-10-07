@@ -80,6 +80,24 @@ export type RuntimeTranscriptPageCursor = JsonObject & {
   readonly byteOffset: number;
 };
 
+export type RuntimeTranscriptAnchor = JsonObject & {
+  readonly eventId: string;
+  readonly itemId: string;
+  readonly sequence: number;
+  readonly prompt: string;
+  readonly at: number;
+};
+
+export type RuntimeTranscriptSearchHit = JsonObject & {
+  readonly eventId: string;
+  readonly itemId: string;
+  readonly sequence: number;
+  readonly role: "user" | "assistant";
+  readonly summary: string;
+  readonly matchStart: number;
+  readonly matchLength: number;
+};
+
 export type RuntimeTranscriptAdvanceCursor = JsonObject & {
   readonly historyEpoch: string;
   readonly projectorVersion: typeof TRANSCRIPT_PROJECTOR_VERSION;
@@ -821,6 +839,8 @@ export type TranscriptMethodMap = {
       readonly sessionId: SessionId;
       readonly through: RuntimeTranscriptWatermark;
       readonly cursor?: RuntimeTranscriptPageCursor;
+      /** Load an older page ending at this projected transcript item. */
+      readonly aroundItemId?: string;
       readonly limit?: number;
       readonly maxBytes?: number;
     };
@@ -829,6 +849,29 @@ export type TranscriptMethodMap = {
       readonly items: readonly RuntimeTranscriptItemRecord[];
       readonly fragments?: readonly RuntimeTranscriptItemFragment[];
       readonly nextCursor?: RuntimeTranscriptPageCursor;
+    };
+  };
+  readonly "session.transcript.anchors": {
+    readonly params: WorkspaceParams & {
+      readonly sessionId: SessionId;
+      readonly beforeSequence?: number;
+      readonly limit?: number;
+    };
+    readonly result: {
+      readonly anchors: readonly RuntimeTranscriptAnchor[];
+      readonly nextBeforeSequence?: number;
+    };
+  };
+  readonly "session.transcript.search": {
+    readonly params: WorkspaceParams & {
+      readonly sessionId: SessionId;
+      readonly query: string;
+      readonly beforeSequence?: number;
+      readonly limit?: number;
+    };
+    readonly result: {
+      readonly hits: readonly RuntimeTranscriptSearchHit[];
+      readonly nextBeforeSequence?: number;
     };
   };
   readonly "session.transcript.advance": {
@@ -864,9 +907,18 @@ export const transcriptParamValidators = {
     { workspacePath: stringParam, sessionId: stringParam, through: transcriptWatermarkParam },
     {
       cursor: transcriptPageCursorParam,
+      aroundItemId: boundedNonEmptyStringParam(1024),
       limit: positiveIntegerParam,
       maxBytes: positiveIntegerParam,
     },
+  ),
+  "session.transcript.anchors": exactParamShape(
+    { workspacePath: stringParam, sessionId: stringParam },
+    { beforeSequence: nonNegativeIntegerParam, limit: positiveIntegerParam },
+  ),
+  "session.transcript.search": exactParamShape(
+    { workspacePath: stringParam, sessionId: stringParam, query: boundedNonEmptyStringParam(512) },
+    { beforeSequence: nonNegativeIntegerParam, limit: positiveIntegerParam },
   ),
   "session.transcript.advance": exactParamShape(
     {
@@ -913,6 +965,36 @@ export const transcriptResultValidators = {
       fragments: resultArray(transcriptItemFragmentResult),
       nextCursor: transcriptPageCursorResult,
     },
+  ),
+  "session.transcript.anchors": exactResultShape(
+    {
+      anchors: resultArray(
+        exactResultShape({
+          eventId: resultNonEmptyString,
+          itemId: resultNonEmptyString,
+          sequence: resultNonNegativeInteger,
+          prompt: resultString,
+          at: resultFiniteNumber,
+        }),
+      ),
+    },
+    { nextBeforeSequence: resultNonNegativeInteger },
+  ),
+  "session.transcript.search": exactResultShape(
+    {
+      hits: resultArray(
+        exactResultShape({
+          eventId: resultNonEmptyString,
+          itemId: resultNonEmptyString,
+          sequence: resultNonNegativeInteger,
+          role: resultOneOf(["user", "assistant"]),
+          summary: resultString,
+          matchStart: resultNonNegativeInteger,
+          matchLength: resultPositiveInteger,
+        }),
+      ),
+    },
+    { nextBeforeSequence: resultNonNegativeInteger },
   ),
   "session.transcript.advance": exactResultShape(
     {
