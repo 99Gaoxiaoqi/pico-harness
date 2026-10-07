@@ -248,3 +248,107 @@ test("桌面终端释放视图关闭后迟到的 attach 响应", { timeout: 45_0
   `);
   assert.equal(result, "PASS", result);
 });
+
+test("桌面终端串行创建并保留响应前的输出帧", { timeout: 45_000 }, async () => {
+  const result = await runRendererBrowserScenario(`
+    import React from 'react';
+    import { createRoot } from 'react-dom/client';
+    import { TerminalPanelController } from './apps/desktop/src/renderer/workbar-panels/TerminalPanelController.tsx';
+    import './apps/desktop/src/renderer/workbar-panels/TerminalOutputView.css';
+    const style=document.createElement('style');
+    style.textContent=':root{--surface-raised:#fff;--ink:#111;}#app{height:400px;width:700px}.tool-panel{height:100%}.tool-panel__terminal-viewport{height:300px}';
+    document.head.append(style);
+    const wait=async(condition,message)=>{
+      for(let index=0;index<200;index++){
+        if(condition())return;
+        await new Promise(resolve=>setTimeout(resolve,10));
+      }
+      throw new Error(message+': '+document.body.innerText);
+    };
+    let listener;
+    const creates=[], replies=[];
+    const terminal=id=>({terminalId:id,sessionId:'session',title:id,status:'running',sequence:1,capability:'pty',resizeSupported:false});
+    window.pico={
+      terminalFrames:{setFocused(){},clipboard(){},subscribe(next){listener=next;return{dispose(){}}}},
+      runtime:{
+        'runtime.ping':async()=>({ok:true,value:{capabilities:['terminal-stream-v1']}}),
+        'terminal.list':async()=>({ok:true,value:{terminals:[]}}),
+        'terminal.create':params=>{creates.push(params);return new Promise(resolve=>replies.push(resolve));},
+        'terminal.detach':async()=>({ok:true,value:{}}),
+      },
+    };
+    const reply=(index,id)=>replies[index]({ok:true,value:{terminal:terminal(id),resourceEpoch:'epoch-'+id,sequence:1,snapshot:id+' SNAPSHOT',truncated:false}});
+    const createDisabled=()=>{
+      const button=document.querySelector('button[aria-label="新建终端"]');
+      return button.disabled||button.getAttribute('aria-disabled')==='true';
+    };
+    const root=createRoot(document.getElementById('app'));
+    root.render(<React.StrictMode><TerminalPanelController workspacePath='/workspace' sessionId='session' instanceId='serialized-create' active={true} readOnly={false}/></React.StrictMode>);
+    (async()=>{
+      await wait(()=>replies.length===1,'initial create started');
+      await wait(()=>createDisabled(),'create button disabled while loading');
+      reply(0,'first');
+      await wait(()=>!createDisabled(),'initial create ready');
+      const button=document.querySelector('button[aria-label="新建终端"]');
+      button.click();button.click();
+      await wait(()=>replies.length===2,'next create started');
+      await new Promise(resolve=>setTimeout(resolve,30));
+      if(creates.length!==2)throw new Error('duplicate create: '+creates.length);
+      listener({type:'terminal.event',terminalId:'second',sessionId:'session',streamId:creates[1].streamId,resourceEpoch:'epoch-second',sequence:2,at:1,kind:'output',data:' EARLY_OUTPUT'});
+      reply(1,'second');
+      await wait(()=>document.querySelector('.xterm-accessibility-tree')?.textContent.includes('EARLY_OUTPUT'),'early frame displayed');
+      root.unmount();
+      await fetch('/result',{method:'POST',body:'PASS'});
+    })().catch(error=>fetch('/result',{method:'POST',body:'FAIL: '+error.stack}));
+  `);
+  assert.equal(result, "PASS", result);
+});
+
+test("桌面终端关闭视图后释放迟到 create 且不继续迟到 list", { timeout: 45_000 }, async () => {
+  const result = await runRendererBrowserScenario(`
+    import React from 'react';
+    import { createRoot } from 'react-dom/client';
+    import { TerminalPanelController, listWorkbarTerminalBindings } from './apps/desktop/src/renderer/workbar-panels/TerminalPanelController.tsx';
+    const wait=async(condition,message)=>{
+      for(let index=0;index<200;index++){
+        if(condition())return;
+        await new Promise(resolve=>setTimeout(resolve,10));
+      }
+      throw new Error(message);
+    };
+    let createReply,listReply,createParams;
+    let createCount=0,delayList=false;
+    const detached=[];
+    const terminal={terminalId:'late-created',sessionId:'session',title:'Shell',status:'running',sequence:1,capability:'pty',resizeSupported:false};
+    window.pico={
+      terminalFrames:{setFocused(){},clipboard(){},subscribe(){return{dispose(){}}}},
+      runtime:{
+        'runtime.ping':async()=>({ok:true,value:{capabilities:['terminal-stream-v1']}}),
+        'terminal.list':()=>delayList?new Promise(resolve=>{listReply=resolve;}):Promise.resolve({ok:true,value:{terminals:[]}}),
+        'terminal.create':params=>{createCount++;createParams=params;return new Promise(resolve=>{createReply=resolve;});},
+        'terminal.detach':async params=>{detached.push(params);return{ok:true,value:{}};},
+      },
+    };
+    (async()=>{
+      const root=createRoot(document.getElementById('app'));
+      root.render(<TerminalPanelController workspacePath='/workspace' sessionId='session' instanceId='late-create' active={true} readOnly={false}/>);
+      await wait(()=>createReply,'create started');
+      root.unmount();
+      createReply({ok:true,value:{terminal,resourceEpoch:'late-epoch',sequence:1,snapshot:'prompt',truncated:false}});
+      await wait(()=>detached.length===1,'late create released');
+      if(detached[0].streamId!==createParams.streamId||detached[0].terminalId!=='late-created'||detached[0].resourceEpoch!=='late-epoch')throw new Error('wrong stream released');
+      if(listWorkbarTerminalBindings({workspacePath:'/workspace',sessionId:'session',instanceId:'late-create'}).length)throw new Error('closed view gained terminal binding');
+      delayList=true;
+      const element=document.createElement('div');document.body.append(element);
+      const nextRoot=createRoot(element);
+      nextRoot.render(<TerminalPanelController workspacePath='/workspace' sessionId='session' instanceId='late-list' active={true} readOnly={false}/>);
+      await wait(()=>listReply,'list started');
+      nextRoot.unmount();
+      listReply({ok:true,value:{terminals:[]}});
+      await new Promise(resolve=>setTimeout(resolve,50));
+      if(createCount!==1)throw new Error('closed list continued to create');
+      await fetch('/result',{method:'POST',body:'PASS'});
+    })().catch(error=>fetch('/result',{method:'POST',body:'FAIL: '+error.stack}));
+  `);
+  assert.equal(result, "PASS", result);
+});

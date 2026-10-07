@@ -117,7 +117,7 @@ export function TerminalWorkbarPanel({
           type="button"
           className="tool-panel__icon-button"
           aria-label="新建终端"
-          disabled={readOnly}
+          disabled={readOnly || loading}
           onClick={onCreate}
         >
           <Plus aria-hidden="true" size={15} />

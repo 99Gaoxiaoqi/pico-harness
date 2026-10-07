@@ -46,6 +46,61 @@ test("terminal display interprets split zsh controls, redraws and bounded pollin
   assert.deepEqual(lines(terminal).filter(Boolean), ["fresh session"]);
 });
 
+test("终端慢解析器合并推送快照，连续偏移补齐且裁剪缺口重置", async (context) => {
+  const terminal = new Terminal({ cols: 80, rows: 12, allowProposedApi: true });
+  context.after(() => terminal.dispose());
+  const stalledCallbacks: (() => void)[] = [];
+  let blocked = true;
+  const chunks: string[] = [];
+  let resets = 0;
+  const write = createTerminalOutputWriter({
+    reset() {
+      resets++;
+      terminal.reset();
+    },
+    write(data, callback) {
+      chunks.push(data);
+      terminal.write(data, () => {
+        if (blocked) stalledCallbacks.push(callback);
+        else callback();
+      });
+    },
+  });
+  const snapshot = (text: string, startOffset = 0) => ({
+    terminalId: "slow-pty",
+    text,
+    sequence: text.length + startOffset,
+    startOffset,
+    resetVersion: 1,
+  });
+  const first = write(snapshot("first\r\n"));
+  while (!stalledCallbacks.length) await new Promise((resolve) => setTimeout(resolve, 1));
+  let latest = first;
+  for (let index = 1; index <= 128; index++) {
+    latest = write(snapshot(`first\r\nprogress ${index}\r`));
+  }
+  blocked = false;
+  stalledCallbacks.shift()!();
+  await latest;
+  assert.deepEqual(chunks, ["first\r\n", "progress 128\r"]);
+  assert.equal(resets, 0);
+  assert.deepEqual(lines(terminal).filter(Boolean), ["first", "progress 128"]);
+
+  blocked = true;
+  const second = write(snapshot("first\r\nprogress 128\rdone\r\n"));
+  while (!stalledCallbacks.length) await new Promise((resolve) => setTimeout(resolve, 1));
+  for (let index = 1; index <= 128; index++) {
+    latest = write(snapshot(`retained ${index}\r\n`, 1000 + index));
+  }
+  blocked = false;
+  stalledCallbacks.shift()!();
+  await Promise.all([second, latest]);
+  assert.equal(chunks.length, 4);
+  assert.equal(chunks.at(-1), "retained 128\r\n");
+  assert.equal(resets, 1);
+  assert.deepEqual(lines(terminal).filter(Boolean), ["retained 128"]);
+});
+
 test(
   "real zsh PTY command reaches the display once without raw control artifacts",
   { timeout: 15000 },
