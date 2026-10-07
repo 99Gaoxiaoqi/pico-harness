@@ -220,8 +220,10 @@ export class WorkspaceRegistrationStore {
       throw new Error(`daemon workspace registry 格式无效: ${this.filePath}`);
     }
 
-    if (this.legacyFallback?.source === source) return cloneState(this.legacyFallback.state);
-    const state = await this.migrateLegacy(value.workspaces);
+    const state =
+      this.legacyFallback?.source === source
+        ? cloneState(this.legacyFallback.state)
+        : await this.migrateLegacy(value.workspaces);
     try {
       await this.write(state);
       this.legacyFallback = undefined;
