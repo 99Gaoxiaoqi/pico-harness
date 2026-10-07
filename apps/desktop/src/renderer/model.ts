@@ -382,6 +382,7 @@ export interface MemoryView {
   readonly workspacePath?: string | undefined;
   readonly items: readonly (RuntimeMemoryItem | RuntimeMemoryListItem)[];
   readonly pageInfo?: RuntimeMemoryPageInfo | undefined;
+  /** User-wide policy; retained when this view switches or clears workspace Items. */
   readonly settings?: RuntimeMemorySettings | undefined;
   readonly status: "idle" | "loading" | "ready" | "degraded" | "error";
   readonly error?: string | undefined;

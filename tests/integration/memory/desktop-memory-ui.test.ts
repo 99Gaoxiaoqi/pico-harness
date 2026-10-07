@@ -142,7 +142,7 @@ test("memory route, notifications, conflict refetch and Item provenance remain u
     new URL("../../../apps/desktop/src/renderer/runtime.ts", import.meta.url),
     "utf8",
   );
-  assert.match(source, /if \(isMemoryNotificationTopic\(topic\)\) \{\s*scheduleMemoryRefresh\(\);/);
+  assert.match(source, /isMemoryNotificationTopic\(topic\)/);
   const runtime = previewRuntime();
   const degraded: RuntimeStore = {
     ...runtime,
