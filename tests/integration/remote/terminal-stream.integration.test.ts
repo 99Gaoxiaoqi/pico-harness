@@ -113,6 +113,7 @@ const frame: RuntimeTerminalFrame = {
   data: "live-output",
 };
 class RuntimeFixture implements GatewayRuntimeClient {
+  readonly attachedStreams = new Set<string>();
   listener?: (frame: RuntimeTerminalFrame) => void;
   hold?: Promise<void>;
   holdPing?: Promise<void>;
@@ -170,6 +171,7 @@ class RuntimeFixture implements GatewayRuntimeClient {
       case "terminal.create":
         this.terminalOpens++;
         this.streamId = (_params as { streamId?: string }).streamId;
+        this.attachedStreams.add(this.streamId!);
         this.listener?.({ ...frame, ...(this.streamId ? { streamId: this.streamId } : {}) });
         this.entered?.();
         await this.hold;
@@ -185,6 +187,7 @@ class RuntimeFixture implements GatewayRuntimeClient {
         this.enteredDetach?.();
         await this.holdDetach;
         this.detached.push(String((_params as { streamId?: string }).streamId));
+        this.attachedStreams.delete(String((_params as { streamId?: string }).streamId));
         this.detachedTerminalIds.push(String((_params as { terminalId?: string }).terminalId));
         result = { detached: true };
         break;
@@ -386,6 +389,7 @@ test("旧视图 detach 迟到网关也不能结束新视图显示", async () => 
       { ...f.request(), params: { ...f.request().params, streamId: "new-view" } },
       () => {},
     );
+    const newLeaseId = f.runtime.streamId!;
     await f.access.dispatch(
       {
         ...f.request(),
@@ -400,8 +404,11 @@ test("旧视图 detach 迟到网关也不能结束新视图显示", async () => 
       () => {},
     );
     const before = f.messages.length;
-    f.runtime.listener?.({ ...frame, streamId: "new-view", sequence: 3 });
+    f.runtime.listener?.({ ...frame, streamId: newLeaseId, sequence: 3 });
     assert.equal(f.messages.length, before + 1);
+    const delivered = f.messages.at(-1);
+    assert.ok(delivered?.type === "terminal_frame");
+    assert.equal(delivered.frame.streamId, "new-view", "UI 标识在回传时恢复");
     const count = f.runtime.detached.length;
     await f.access.dispatch(
       {
@@ -425,16 +432,161 @@ test("旧视图 detach 迟到网关也不能结束新视图显示", async () => 
 test("事件连接更换释放全部显示 lease 时使用原终端标识", async () => {
   const f = gatewayFixture();
   try {
-    for (const streamId of ["first-view", "second-view"])
+    const leaseIds: string[] = [];
+    for (const streamId of ["first-view", "second-view"]) {
       await f.access.dispatch(
         { ...f.request(), params: { ...f.request().params, streamId } },
         () => {},
       );
+      leaseIds.push(f.runtime.streamId!);
+    }
     f.access.attachEvents({ publish: (message) => f.messages.push(message), close() {} });
     await new Promise<void>((resolve) => setImmediate(resolve));
     assert.deepEqual(f.runtime.detachedTerminalIds, [terminal.terminalId, terminal.terminalId]);
-    assert.deepEqual(f.runtime.detached, ["first-view", "second-view"]);
+    assert.deepEqual(f.runtime.detached, leaseIds);
   } finally {
     f.access.close();
   }
+});
+
+test("网关显示 lease 上限包含 pending，满额重附着仍可用且拒绝新 lease 不关闭正常订阅", async () => {
+  const f = gatewayFixture();
+  try {
+    for (let n = 0; n < 31; n++)
+      await f.access.dispatch(
+        { ...f.request(), params: { ...f.request().params, streamId: `view-${n}` } },
+        () => {},
+      );
+    let release!: () => void, entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    f.runtime.hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    f.runtime.entered = entered;
+    const pending = f.access.dispatch(
+      { ...f.request(), params: { ...f.request().params, streamId: "pending-view" } },
+      () => {},
+    );
+    await started;
+    await assert.rejects(
+      f.access.dispatch(
+        { ...f.request(), params: { ...f.request().params, streamId: "over-limit" } },
+        () => assert.fail("超过显示预算不能成功"),
+      ),
+      (error: unknown) => error instanceof GatewayError && error.code === "RATE_LIMITED",
+    );
+    assert.equal(f.runtime.terminalOpens, 32, "超限请求未发送到 Host");
+    release();
+    await pending;
+    f.runtime.hold = undefined;
+    await f.access.dispatch(
+      { ...f.request(), params: { ...f.request().params, streamId: "view-0" } },
+      () => {},
+    );
+    const before = f.messages.length;
+    f.runtime.listener?.({ ...frame, streamId: f.runtime.streamId!, sequence: 3 });
+    assert.equal(f.messages.length, before + 1);
+    assert.equal(f.runtime.detached.length, 0, "预算拒绝不释放已附着的正常 lease");
+  } finally {
+    f.access.close();
+  }
+});
+
+test("显式 UI streamId 跨事件代际复用时，迟到旧清理只释放原 Host lease", async () => {
+  const f = gatewayFixture();
+  try {
+    const request = { ...f.request(), params: { ...f.request().params, streamId: "stable-view" } };
+    await f.access.dispatch(request, () => {});
+    const oldLeaseId = f.runtime.streamId!;
+    let release!: () => void, entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    f.runtime.holdDetach = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    f.runtime.enteredDetach = entered;
+    f.access.attachEvents({ publish: (message) => f.messages.push(message), close() {} });
+    await started;
+    await f.access.dispatch(request, () => {});
+    const newLeaseId = f.runtime.streamId!;
+    assert.notEqual(newLeaseId, oldLeaseId);
+    release();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(f.runtime.attachedStreams.has(oldLeaseId), false);
+    assert.equal(f.runtime.attachedStreams.has(newLeaseId), true);
+    const before = f.messages.length;
+    f.runtime.listener?.({ ...frame, streamId: newLeaseId, sequence: 3 });
+    assert.equal(f.messages.length, before + 1);
+    const delivered = f.messages.at(-1);
+    assert.ok(delivered?.type === "terminal_frame");
+    assert.equal(delivered.frame.streamId, "stable-view");
+  } finally {
+    f.access.close();
+  }
+});
+
+test("Host 显示 lease 包含并发 pending，超限拒绝且 detach 归还预算", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "pico-terminal-budget-"));
+  const workspacePath = await realpath(directory);
+  const service = new DesktopWorkbarTerminalService({ picoHome: directory });
+  t.after(async () => {
+    await service.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+  const frames: RuntimeTerminalFrame[] = [];
+  const context = (streamId: string) => ({
+    terminalOwnerId: "budget-owner",
+    terminalConnectionId: "budget-connection",
+    terminalAttachmentId: `budget-connection:${streamId}`,
+    terminalStreamId: streamId,
+    surface: "tui" as const,
+    pushTerminalFrame: async (event: RuntimeTerminalFrame) => {
+      frames.push(event);
+    },
+  });
+  const created = await service.create(
+    { workspacePath, sessionId: "budget-session" },
+    context("create"),
+  );
+  const scope = {
+    workspacePath,
+    sessionId: "budget-session",
+    terminalId: created.terminal.terminalId,
+  };
+  const pending = Array.from({ length: 31 }, (_, n) => service.attach(scope, context(`view-${n}`)));
+  await assert.rejects(service.attach(scope, context("over-limit")), /display capacity/);
+  await Promise.all(pending);
+  await service.attach(scope, context("view-0"));
+  await service.detach({ ...scope, resourceEpoch: created.resourceEpoch }, context("view-0"));
+  await service.attach(scope, context("new-view"));
+  await service.input(
+    { ...scope, resourceEpoch: created.resourceEpoch, data: "printf 'BOUNDED_LEASE_OK\\n'\r" },
+    context("create"),
+  );
+  for (
+    let n = 0;
+    n < 100 &&
+    !frames.some((event) => event.kind === "output" && event.data.includes("BOUNDED_LEASE_OK"));
+    n++
+  )
+    await delay(20);
+  assert.ok(
+    frames.some(
+      (event) =>
+        event.streamId === "new-view" &&
+        event.kind === "output" &&
+        event.data.includes("BOUNDED_LEASE_OK"),
+    ),
+  );
+  assert.ok(
+    frames.some(
+      (event) =>
+        event.streamId === "view-1" &&
+        event.kind === "output" &&
+        event.data.includes("BOUNDED_LEASE_OK"),
+    ),
+  );
 });

@@ -39,6 +39,7 @@ export interface RuntimeAccessSessionOptions {
 }
 
 type SessionScope = { workspaceId: string; sessionId: string };
+const MAX_TERMINAL_LEASES = 32;
 interface EventBinding {
   readonly sink: RuntimeAccessEventSink;
   chain: Promise<void>;
@@ -57,10 +58,19 @@ export class RuntimeAccessSession {
   private events?: EventBinding;
   private terminalStreamId: string = randomUUID();
   private terminalFrameDispose?: () => void;
+  // UI view IDs may survive reconnects; Host lease IDs belong to one event generation.
+  private readonly terminalLeaseIds = new Map<string, string>();
+  private readonly terminalClientIds = new Map<string, string>();
   private readonly terminalScopes = new Map<
     string,
-    SessionScope & { terminalId: string; resourceEpoch: string; streamId: string }
+    SessionScope & {
+      terminalId: string;
+      resourceEpoch: string;
+      streamId: string;
+      clientStreamId: string;
+    }
   >();
+  private readonly pendingTerminalLeases = new Map<string, number>();
   private readonly pendingTerminalOpens = new Map<string, number>();
   private readonly pendingTerminalFrames: RuntimeTerminalFrame[] = [];
   private pendingTerminalBytes = 0;
@@ -129,6 +139,8 @@ export class RuntimeAccessSession {
       let rpc: RemoteRequest | undefined;
       const generation = this.eventGeneration;
       let terminalStreamId = this.terminalStreamId;
+      let terminalLeaseId: string | undefined;
+      let terminalAdmission: string | undefined;
       try {
         rpc = parseRemoteRequest(input);
         const { config, principal, client } = this.options;
@@ -137,9 +149,13 @@ export class RuntimeAccessSession {
         const params = authorized.params as Record<string, unknown>;
         if (typeof params["streamId"] === "string") terminalStreamId = params["streamId"];
         const terminalKey = `${terminalStreamId}:${String(params["terminalId"])}`;
-        if (rpc.method === "terminal.detach" && !this.terminalScopes.has(terminalKey)) {
-          publishResult({ detached: true });
-          return;
+        if (rpc.method === "terminal.detach") {
+          const scope = this.terminalScopes.get(terminalKey);
+          if (generation !== this.eventGeneration || !scope) {
+            publishResult({ detached: true });
+            return;
+          }
+          terminalLeaseId = scope.streamId;
         }
         if (
           rpc.method === "catalog.models" &&
@@ -212,11 +228,33 @@ export class RuntimeAccessSession {
             503,
             true,
           );
-        if (terminalOpening)
-          this.pendingTerminalOpens.set(
-            terminalStreamId,
-            (this.pendingTerminalOpens.get(terminalStreamId) ?? 0) + 1,
+        if (terminalOpening) {
+          terminalAdmission =
+            rpc.method === "terminal.attach" ? terminalKey : `create:${randomUUID()}`;
+          const pending = [...this.pendingTerminalLeases.keys()].filter(
+            (key) => !this.terminalScopes.has(key),
+          ).length;
+          if (
+            !this.terminalScopes.has(terminalAdmission) &&
+            !this.pendingTerminalLeases.has(terminalAdmission) &&
+            this.terminalScopes.size + pending >= MAX_TERMINAL_LEASES
+          )
+            throw new GatewayError("RATE_LIMITED", "终端显示订阅过多", 429, true);
+          this.pendingTerminalLeases.set(
+            terminalAdmission,
+            (this.pendingTerminalLeases.get(terminalAdmission) ?? 0) + 1,
           );
+          terminalLeaseId = this.terminalLeaseIds.get(terminalStreamId);
+          if (!terminalLeaseId) {
+            terminalLeaseId = randomUUID();
+            this.terminalLeaseIds.set(terminalStreamId, terminalLeaseId);
+            this.terminalClientIds.set(terminalLeaseId, terminalStreamId);
+          }
+          this.pendingTerminalOpens.set(
+            terminalLeaseId,
+            (this.pendingTerminalOpens.get(terminalLeaseId) ?? 0) + 1,
+          );
+        }
         const opening =
           rpc.method === "session.subscription.open" ? String(params["sessionId"]) : undefined;
         if (opening)
@@ -231,16 +269,19 @@ export class RuntimeAccessSession {
               await client.request(
                 rpc.method,
                 ["terminal.create", "terminal.attach", "terminal.detach"].includes(rpc.method)
-                  ? { ...authorized.params, streamId: terminalStreamId }
+                  ? { ...authorized.params, streamId: terminalLeaseId! }
                   : authorized.params,
               ),
             ),
           );
         } finally {
           if (terminalOpening && generation === this.eventGeneration) {
-            const left = (this.pendingTerminalOpens.get(terminalStreamId) ?? 1) - 1;
-            if (left) this.pendingTerminalOpens.set(terminalStreamId, left);
-            else this.pendingTerminalOpens.delete(terminalStreamId);
+            const left = (this.pendingTerminalOpens.get(terminalLeaseId!) ?? 1) - 1;
+            if (left) this.pendingTerminalOpens.set(terminalLeaseId!, left);
+            else this.pendingTerminalOpens.delete(terminalLeaseId!);
+            const admissions = (this.pendingTerminalLeases.get(terminalAdmission!) ?? 1) - 1;
+            if (admissions) this.pendingTerminalLeases.set(terminalAdmission!, admissions);
+            else this.pendingTerminalLeases.delete(terminalAdmission!);
           }
           // An older connection must not decrement a new connection's pending opens.
           if (opening && generation === this.eventGeneration) {
@@ -290,7 +331,7 @@ export class RuntimeAccessSession {
               workspaceId: rpc.workspaceId,
               sessionId: terminalOpening,
               resourceEpoch: value.resourceEpoch,
-              streamId: terminalStreamId,
+              streamId: terminalLeaseId!,
             });
             this.assertCurrent(true);
             throw new GatewayError(
@@ -306,14 +347,15 @@ export class RuntimeAccessSession {
             workspaceId: rpc.workspaceId,
             sessionId: terminalOpening,
             resourceEpoch: value.resourceEpoch,
-            streamId: terminalStreamId,
+            streamId: terminalLeaseId!,
+            clientStreamId: terminalStreamId,
           });
         }
         this.assertCurrent(true);
         if (
           rpc.method === "terminal.detach" &&
           generation === this.eventGeneration &&
-          this.terminalScopes.get(terminalKey)?.streamId === terminalStreamId
+          this.terminalScopes.get(terminalKey)?.streamId === terminalLeaseId
         )
           this.terminalScopes.delete(terminalKey);
         if (rpc.method === "session.subscription.close")
@@ -321,8 +363,12 @@ export class RuntimeAccessSession {
         publishResult(value);
         if (opening) this.flushFrames();
         if (terminalOpening) this.flushTerminalFrames();
+        if (generation === this.eventGeneration) this.pruneTerminalLeaseIds();
       } catch (error) {
-        if (generation === this.eventGeneration) this.flushTerminalFrames();
+        if (generation === this.eventGeneration) {
+          this.flushTerminalFrames();
+          this.pruneTerminalLeaseIds();
+        }
         throw safeGatewayError(error, dispatched);
       }
     });
@@ -481,7 +527,8 @@ export class RuntimeAccessSession {
   }
 
   private publishTerminalFrame(frame: RuntimeTerminalFrame): void {
-    const scope = this.terminalScopes.get(`${frame.streamId}:${frame.terminalId}`);
+    const clientStreamId = this.terminalClientIds.get(frame.streamId ?? "");
+    const scope = this.terminalScopes.get(`${clientStreamId}:${frame.terminalId}`);
     const principal = this.options.principal;
     if (
       !this.current ||
@@ -493,7 +540,20 @@ export class RuntimeAccessSession {
       !principal.workspaceIds.includes(scope.workspaceId)
     )
       return;
-    this.events?.sink.publish({ type: "terminal_frame", workspaceId: scope.workspaceId, frame });
+    this.events?.sink.publish({
+      type: "terminal_frame",
+      workspaceId: scope.workspaceId,
+      frame: { ...frame, streamId: scope.clientStreamId },
+    });
+  }
+
+  private pruneTerminalLeaseIds(): void {
+    const active = new Set([...this.terminalScopes.values()].map((scope) => scope.streamId));
+    for (const [clientId, leaseId] of this.terminalLeaseIds) {
+      if (active.has(leaseId) || this.pendingTerminalOpens.has(leaseId)) continue;
+      this.terminalLeaseIds.delete(clientId);
+      this.terminalClientIds.delete(leaseId);
+    }
   }
 
   private flushTerminalFrames(): void {
@@ -573,6 +633,9 @@ export class RuntimeAccessSession {
     this.terminalFrameDispose = undefined;
     for (const scope of this.terminalScopes.values()) this.releaseTerminal(scope.terminalId, scope);
     this.terminalScopes.clear();
+    this.terminalLeaseIds.clear();
+    this.terminalClientIds.clear();
+    this.pendingTerminalLeases.clear();
     this.pendingTerminalOpens.clear();
     this.pendingTerminalFrames.length = 0;
     this.pendingTerminalBytes = 0;

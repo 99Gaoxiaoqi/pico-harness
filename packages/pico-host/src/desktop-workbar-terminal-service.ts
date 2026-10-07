@@ -1,4 +1,5 @@
 import { realpath } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import {
   WorkbarTerminalAuthority,
   WorkbarTerminalError,
@@ -16,6 +17,7 @@ export interface TerminalClientContext {
   /** Legacy local hello uses exact old terminal response shapes. */
   readonly legacyWire?: boolean;
   readonly terminalAttachmentId: string;
+  readonly terminalConnectionId?: string;
   readonly terminalStreamId?: string;
   readonly pushTerminalFrame?: (frame: RuntimeTerminalFrame) => Promise<void>;
   readonly surface: "desktop" | "tui" | "run" | "activation" | "bot" | "inspect";
@@ -29,9 +31,21 @@ const LEGACY_CONTEXT: TerminalClientContext = {
 };
 
 const DEFAULT_SNAPSHOT_BYTES = 256 * 1024;
+const MAX_CONNECTION_ATTACHMENTS = 32;
+
+interface AttachmentLease {
+  pending: number;
+  attached: boolean;
+}
+
+interface ConnectionAttachments {
+  readonly connectionId: string;
+  readonly resources: Map<string, AttachmentLease>;
+}
 
 export class DesktopWorkbarTerminalService {
   private readonly authority: WorkbarTerminalAuthority;
+  private readonly attachments = new Map<string, ConnectionAttachments>();
   private readonly streams = new Map<
     string,
     Map<
@@ -65,46 +79,49 @@ export class DesktopWorkbarTerminalService {
     },
     context: TerminalClientContext = LEGACY_CONTEXT,
   ) {
-    await this.ready;
-    // Mark starting creates before their path-resolution await; cleanup must also see this gap.
-    this.resolvingSessionCreates.set(
-      input.sessionId,
-      (this.resolvingSessionCreates.get(input.sessionId) ?? 0) + 1,
-    );
-    let normalizedInput: typeof input;
-    try {
-      normalizedInput = { ...input, workspacePath: await realpath(input.workspacePath) };
-    } finally {
-      const pending = (this.resolvingSessionCreates.get(input.sessionId) ?? 1) - 1;
-      if (pending) this.resolvingSessionCreates.set(input.sessionId, pending);
-      else this.resolvingSessionCreates.delete(input.sessionId);
-    }
-    const key = sessionKey(normalizedInput);
-    if (this.cleaningSessions.has(key)) {
-      throw new WorkbarTerminalError("forbidden", "Session cleanup is in progress");
-    }
-    this.pendingSessionCreates.set(key, (this.pendingSessionCreates.get(key) ?? 0) + 1);
-    let attachment: WorkbarTerminalAttachment;
-    try {
-      attachment = await this.authority.create({
-        ...normalizedInput,
-        terminalOwnerId: context.terminalOwnerId,
-      });
-    } finally {
-      const pending = (this.pendingSessionCreates.get(key) ?? 1) - 1;
-      if (pending) this.pendingSessionCreates.set(key, pending);
-      else this.pendingSessionCreates.delete(key);
-    }
-    this.registerStream(context, attachment.resourceId, attachment.sessionId);
-    return this.attachmentResult(
-      this.authority.attach({
-        resourceId: attachment.resourceId,
-        resourceEpoch: attachment.resourceEpoch,
-        attachmentId: context.terminalAttachmentId,
-      }),
-      DEFAULT_SNAPSHOT_BYTES,
-      context,
-    );
+    return this.withAttachment(context, undefined, async (commit) => {
+      await this.ready;
+      // Mark starting creates before their path-resolution await; cleanup must also see this gap.
+      this.resolvingSessionCreates.set(
+        input.sessionId,
+        (this.resolvingSessionCreates.get(input.sessionId) ?? 0) + 1,
+      );
+      let normalizedInput: typeof input;
+      try {
+        normalizedInput = { ...input, workspacePath: await realpath(input.workspacePath) };
+      } finally {
+        const pending = (this.resolvingSessionCreates.get(input.sessionId) ?? 1) - 1;
+        if (pending) this.resolvingSessionCreates.set(input.sessionId, pending);
+        else this.resolvingSessionCreates.delete(input.sessionId);
+      }
+      const key = sessionKey(normalizedInput);
+      if (this.cleaningSessions.has(key)) {
+        throw new WorkbarTerminalError("forbidden", "Session cleanup is in progress");
+      }
+      this.pendingSessionCreates.set(key, (this.pendingSessionCreates.get(key) ?? 0) + 1);
+      let attachment: WorkbarTerminalAttachment;
+      try {
+        attachment = await this.authority.create({
+          ...normalizedInput,
+          terminalOwnerId: context.terminalOwnerId,
+        });
+      } finally {
+        const pending = (this.pendingSessionCreates.get(key) ?? 1) - 1;
+        if (pending) this.pendingSessionCreates.set(key, pending);
+        else this.pendingSessionCreates.delete(key);
+      }
+      commit(attachment.resourceId);
+      this.registerStream(context, attachment.resourceId, attachment.sessionId);
+      return this.attachmentResult(
+        this.authority.attach({
+          resourceId: attachment.resourceId,
+          resourceEpoch: attachment.resourceEpoch,
+          attachmentId: context.terminalAttachmentId,
+        }),
+        DEFAULT_SNAPSHOT_BYTES,
+        context,
+      );
+    });
   }
 
   async list(
@@ -129,20 +146,23 @@ export class DesktopWorkbarTerminalService {
     },
     context: TerminalClientContext = LEGACY_CONTEXT,
   ) {
-    await this.ready;
-    const record = await this.ownedRecord(input);
-    this.registerStream(context, record.resourceId, record.sessionId);
-    const attachment = this.authority.attach({
-      resourceId: record.resourceId,
-      resourceEpoch: record.resourceEpoch,
-      attachmentId: context.terminalAttachmentId,
-      ...(input.afterSequence === undefined ? {} : { afterSequence: input.afterSequence }),
+    return this.withAttachment(context, input.terminalId, async (commit) => {
+      await this.ready;
+      const record = await this.ownedRecord(input);
+      commit(record.resourceId);
+      this.registerStream(context, record.resourceId, record.sessionId);
+      const attachment = this.authority.attach({
+        resourceId: record.resourceId,
+        resourceEpoch: record.resourceEpoch,
+        attachmentId: context.terminalAttachmentId,
+        ...(input.afterSequence === undefined ? {} : { afterSequence: input.afterSequence }),
+      });
+      return this.attachmentResult(
+        attachment,
+        Math.min(input.maxBytes ?? DEFAULT_SNAPSHOT_BYTES, DEFAULT_SNAPSHOT_BYTES),
+        context,
+      );
     });
-    return this.attachmentResult(
-      attachment,
-      Math.min(input.maxBytes ?? DEFAULT_SNAPSHOT_BYTES, DEFAULT_SNAPSHOT_BYTES),
-      context,
-    );
   }
 
   async input(
@@ -231,6 +251,9 @@ export class DesktopWorkbarTerminalService {
       resourceId: record.resourceId,
       attachmentId: context.terminalAttachmentId,
     });
+    const attachments = this.attachments.get(context.terminalAttachmentId);
+    attachments?.resources.delete(record.resourceId);
+    if (attachments?.resources.size === 0) this.attachments.delete(context.terminalAttachmentId);
     this.streams.get(context.terminalAttachmentId)?.delete(record.resourceId);
     if (this.streams.get(context.terminalAttachmentId)?.size === 0)
       this.streams.delete(context.terminalAttachmentId);
@@ -317,6 +340,11 @@ export class DesktopWorkbarTerminalService {
   }
 
   releaseAttachment(attachmentId: string): void {
+    for (const key of this.attachments.keys()) {
+      if (key !== attachmentId && !key.startsWith(`${attachmentId}:`)) continue;
+      this.attachments.delete(key);
+      this.authority.detachAttachment(key);
+    }
     for (const key of this.streams.keys()) {
       if (key !== attachmentId && !key.startsWith(`${attachmentId}:`)) continue;
       this.streams.delete(key);
@@ -333,9 +361,74 @@ export class DesktopWorkbarTerminalService {
   }
 
   async close(): Promise<void> {
+    this.attachments.clear();
     await this.ready.catch(() => undefined);
     this.streams.clear();
     await this.authority.close();
+  }
+
+  private async withAttachment<Result>(
+    context: TerminalClientContext,
+    terminalId: string | undefined,
+    operation: (commit: (terminalId: string) => void) => Promise<Result>,
+  ): Promise<Result> {
+    const attachmentId = context.terminalAttachmentId;
+    const connectionId = context.terminalConnectionId ?? attachmentId;
+    const key = terminalId ?? `pending:${randomUUID()}`;
+    let attachments = this.attachments.get(attachmentId);
+    let lease = attachments?.resources.get(key);
+    if (!lease) {
+      let count = 0;
+      for (const entry of this.attachments.values())
+        if (entry.connectionId === connectionId) count += entry.resources.size;
+      if (count >= MAX_CONNECTION_ATTACHMENTS)
+        throw new WorkbarTerminalError(
+          "capacity_exceeded",
+          "Terminal display capacity is exhausted",
+        );
+      if (!attachments) {
+        attachments = { connectionId, resources: new Map() };
+        this.attachments.set(attachmentId, attachments);
+      }
+      lease = { pending: 0, attached: false };
+      attachments.resources.set(key, lease);
+    }
+    const admitted = attachments!;
+    const reservation = lease;
+    reservation.pending++;
+    try {
+      return await operation((resourceId) => {
+        // releaseAttachment also invalidates opens abandoned by the Host operation deadline.
+        if (
+          this.attachments.get(attachmentId) !== admitted ||
+          admitted.resources.get(key) !== reservation
+        )
+          throw new WorkbarTerminalError(
+            "admission_closed",
+            "Terminal display connection is closed",
+          );
+        if (resourceId === key) reservation.attached = true;
+        else {
+          const existing = admitted.resources.get(resourceId);
+          if (existing) existing.attached = true;
+          else {
+            reservation.attached = true;
+            admitted.resources.delete(key);
+            admitted.resources.set(resourceId, reservation);
+          }
+        }
+      });
+    } finally {
+      reservation.pending--;
+      if (
+        !reservation.pending &&
+        !reservation.attached &&
+        admitted.resources.get(key) === reservation
+      )
+        admitted.resources.delete(key);
+      if (!admitted.resources.size && this.attachments.get(attachmentId) === admitted)
+        this.attachments.delete(attachmentId);
+    }
   }
 
   private async ownedRecord(input: {

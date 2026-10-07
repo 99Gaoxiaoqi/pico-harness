@@ -153,6 +153,7 @@ export function createRuntimeHostComposition(
               terminalAttachmentId: streamId
                 ? `${context.connectionId}:${streamId}`
                 : context.connectionId,
+              terminalConnectionId: context.connectionId,
               ...(streamId ? { terminalStreamId: streamId } : {}),
               ...(context.pushEvent
                 ? {
