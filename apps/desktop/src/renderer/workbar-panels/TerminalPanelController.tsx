@@ -570,10 +570,9 @@ export function TerminalPanelController({
   useEffect(() => {
     const restoring = active && !wasActiveRef.current;
     wasActiveRef.current = active;
-    if (restoring && terminalRef.current) {
-      void attach(terminalRef.current.id).catch((cause: unknown) =>
-        setError(workbarErrorMessage(cause)),
-      );
+    const terminal = terminalRef.current;
+    if (restoring && terminal && (!terminal.attached || !attachmentsRef.current.has(terminal.id))) {
+      void attach(terminal.id).catch((cause: unknown) => setError(workbarErrorMessage(cause)));
     }
   }, [active, attach]);
 

@@ -116,14 +116,15 @@ test("桌面终端直接输入、长粘贴和推送水位随主题及可见性�
       await new Promise(resolve=>setTimeout(resolve,40));
       assert(inputs.length===stopped,'hidden terminal blocks input');
       active=true;render();
-      await wait(()=>requests.length===1 && document.activeElement===textarea,'restored terminal reattaches and focuses');
+      await wait(()=>document.activeElement===textarea&&text().includes('PUSHED_WHILE_HIDDEN'),'restored terminal retains hidden output and focuses');
+      assert(requests.length===0&&document.querySelector('.xterm-helper-textarea')===textarea,'normal tab switch preserves terminal without replaying snapshot');
       readOnly=true;render();await new Promise(resolve=>setTimeout(resolve,40));key('r');paste('readonly');
       assert(inputs.length===stopped,'readonly blocks input');
       readOnly=false;render();await new Promise(resolve=>setTimeout(resolve,40));
       emit('GAP_RECOVERED\\r\\n',2);
-      await wait(()=>requests.length===2 && text().includes('GAP_RECOVERED'),'sequence gap recovers snapshot');
+      await wait(()=>requests.length===1 && text().includes('GAP_RECOVERED'),'sequence gap recovers snapshot');
       disconnected(); key('d');
-      await wait(()=>requests.length===3,'disconnect reconnects through attach');
+      await wait(()=>requests.length===2,'disconnect reconnects through attach');
       await new Promise(resolve=>setTimeout(resolve,60));
       assert(inputs.length===stopped,'disconnect blocks input before snapshot returns');
       failInput=true; key('u');key('z');
@@ -132,7 +133,7 @@ test("桌面终端直接输入、长粘贴和推送水位随主题及可见性�
       failInput=false;
       const connect=[...document.querySelectorAll('button')].find(button=>button.textContent.includes('连接'));
       assert(connect,'unknown result requires explicit reconnection');connect.click();
-      await wait(()=>requests.length===4 && ![...document.querySelectorAll('button')].some(button=>button.textContent.includes('连接')),'manual reconnect completes');
+      await wait(()=>requests.length===3 && ![...document.querySelectorAll('button')].some(button=>button.textContent.includes('连接')),'manual reconnect completes');
       listener({type:'terminal.event',terminalId:'pty',sessionId:'session',resourceEpoch:'epoch',streamId:ownStream,sequence:++sequence,at:1791331200000,kind:'status',status:'exited',exitCode:0});
       await wait(()=>document.body.innerText.includes('已退出'),'status frame consumes sequence');
       key('x'); assert(inputs.length===stopped+1,'exited terminal blocks input');
