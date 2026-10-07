@@ -8,6 +8,7 @@ export type RuntimeTerminalFrame = {
   readonly terminalId: string;
   readonly sessionId: string;
   readonly resourceEpoch: string;
+  readonly streamId?: string;
   readonly sequence: number;
   readonly at: number;
 } & (
@@ -22,9 +23,20 @@ export type RuntimeTerminalFrame = {
 
 export function isRuntimeTerminalFrame(value: unknown): value is RuntimeTerminalFrame {
   if (!isJsonObject(value)) return false;
-  const keys = ["type", "terminalId", "sessionId", "resourceEpoch", "sequence", "at", "kind"];
+  const keys = [
+    "type",
+    "terminalId",
+    "sessionId",
+    "resourceEpoch",
+    "sequence",
+    "at",
+    "kind",
+    "streamId",
+  ];
   if (
     value.type !== "terminal.event" ||
+    (value.streamId !== undefined &&
+      (typeof value.streamId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(value.streamId))) ||
     ![value.terminalId, value.sessionId, value.resourceEpoch].every(
       (item) => typeof item === "string" && item.length > 0 && item.length <= 512,
     ) ||

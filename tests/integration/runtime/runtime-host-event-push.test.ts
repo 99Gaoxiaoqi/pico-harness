@@ -293,3 +293,25 @@ async function waitForCondition(condition: () => boolean, timeoutMs: number): Pr
   }
   return true;
 }
+
+test("event push: pending event chain is bounded before outbound flush", async (t) => {
+  const hooks: PushCompositionHooks = { capturedSinks: [] };
+  const { capability, owner } = await startPushHarness(t);
+  const kernel = await RuntimeHostKernel.start({
+    owner,
+    compositionFactory: pushCompositionFactory(hooks),
+  });
+  t.after(async () => {
+    await kernel.close().catch(() => undefined);
+    await owner.close().catch(() => undefined);
+  });
+  const connection = await connectPushClient(capability, "event-push-pending-budget");
+  t.after(() => connection.close().catch(() => undefined));
+  await connection.requestRegistered(PUSH_OPERATION, {}, 5000);
+  const sink = hooks.capturedSinks[0]!;
+  const settled = await Promise.allSettled(
+    Array.from({ length: 513 }, (_, sequence) => sink({ sequence })),
+  );
+  assert.ok(settled.some((result) => result.status === "rejected"));
+  assert.ok(await waitForCondition(() => connection.terminalError !== undefined, 2000));
+});

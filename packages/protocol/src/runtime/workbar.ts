@@ -38,7 +38,7 @@ import {
   workspaceRunParams,
   workspaceSessionParams,
 } from "./validation.js";
-import type { RuntimeParamValidator, RuntimeResultRule } from "./validation.js";
+import type { RuntimeParamValidator, RuntimeParamRule, RuntimeResultRule } from "./validation.js";
 
 export type RuntimeSessionTaskStatus =
   | "pending"
@@ -582,6 +582,7 @@ export type WorkbarMethodMap = {
   readonly "terminal.create": {
     readonly params: WorkspaceParams & {
       readonly sessionId: SessionId;
+      readonly streamId?: string;
       readonly cols?: number;
       readonly rows?: number;
     };
@@ -600,6 +601,7 @@ export type WorkbarMethodMap = {
   readonly "terminal.attach": {
     readonly params: WorkspaceParams & {
       readonly sessionId: SessionId;
+      readonly streamId?: string;
       readonly terminalId: string;
       readonly afterSequence?: number;
       readonly maxBytes?: number;
@@ -642,6 +644,7 @@ export type WorkbarMethodMap = {
   readonly "terminal.detach": {
     readonly params: WorkspaceParams & {
       readonly sessionId: SessionId;
+      readonly streamId?: string;
       readonly terminalId: string;
       readonly resourceEpoch: string;
     };
@@ -778,6 +781,11 @@ export type WorkbarMethodMap = {
       readonly status: "created" | "deleted" | "modified";
     };
   };
+};
+
+const terminalStreamIdParam: RuntimeParamRule = (value, path) => {
+  if (typeof value !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(value))
+    throw invalidParams(`${path} 必须是终端显示订阅标识`);
 };
 
 export const workbarParamValidators = {
@@ -955,7 +963,7 @@ export const workbarParamValidators = {
   }),
   "terminal.create": exactParamShape(
     { workspacePath: stringParam, sessionId: stringParam },
-    { cols: positiveIntegerParam, rows: positiveIntegerParam },
+    { cols: positiveIntegerParam, rows: positiveIntegerParam, streamId: terminalStreamIdParam },
   ),
   "terminal.list": workspaceSessionParams,
   "terminal.attach": exactParamShape(
@@ -964,7 +972,11 @@ export const workbarParamValidators = {
       sessionId: stringParam,
       terminalId: boundedNonEmptyStringParam(512),
     },
-    { afterSequence: nonNegativeIntegerParam, maxBytes: positiveIntegerParam },
+    {
+      afterSequence: nonNegativeIntegerParam,
+      maxBytes: positiveIntegerParam,
+      streamId: terminalStreamIdParam,
+    },
   ),
   "terminal.input": exactParamShape({
     workspacePath: stringParam,
@@ -992,12 +1004,15 @@ export const workbarParamValidators = {
     terminalId: boundedNonEmptyStringParam(512),
     resourceEpoch: boundedNonEmptyStringParam(512),
   }),
-  "terminal.detach": exactParamShape({
-    workspacePath: stringParam,
-    sessionId: stringParam,
-    terminalId: boundedNonEmptyStringParam(512),
-    resourceEpoch: boundedNonEmptyStringParam(512),
-  }),
+  "terminal.detach": exactParamShape(
+    {
+      workspacePath: stringParam,
+      sessionId: stringParam,
+      terminalId: boundedNonEmptyStringParam(512),
+      resourceEpoch: boundedNonEmptyStringParam(512),
+    },
+    { streamId: terminalStreamIdParam },
+  ),
   "terminal.ownershipCapabilities": noParams,
   "terminal.stopOwned": noParams,
   "terminal.stopAll": noParams,

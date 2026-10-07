@@ -16,6 +16,7 @@ export interface TerminalClientContext {
   /** Legacy local hello uses exact old terminal response shapes. */
   readonly legacyWire?: boolean;
   readonly terminalAttachmentId: string;
+  readonly terminalStreamId?: string;
   readonly pushTerminalFrame?: (frame: RuntimeTerminalFrame) => Promise<void>;
   readonly surface: "desktop" | "tui" | "run" | "activation" | "bot" | "inspect";
 }
@@ -37,6 +38,7 @@ export class DesktopWorkbarTerminalService {
       string,
       {
         readonly sessionId: string;
+        readonly streamId?: string;
         readonly push: (frame: RuntimeTerminalFrame) => Promise<void>;
       }
     >
@@ -315,7 +317,11 @@ export class DesktopWorkbarTerminalService {
   }
 
   releaseAttachment(attachmentId: string): void {
-    this.streams.delete(attachmentId);
+    for (const key of this.streams.keys()) {
+      if (key !== attachmentId && !key.startsWith(`${attachmentId}:`)) continue;
+      this.streams.delete(key);
+      this.authority.detachAttachment(key);
+    }
     this.authority.detachAttachment(attachmentId);
   }
 
@@ -355,7 +361,11 @@ export class DesktopWorkbarTerminalService {
       streams = new Map();
       this.streams.set(context.terminalAttachmentId, streams);
     }
-    streams.set(terminalId, { sessionId, push: context.pushTerminalFrame });
+    streams.set(terminalId, {
+      sessionId,
+      ...(context.terminalStreamId ? { streamId: context.terminalStreamId } : {}),
+      push: context.pushTerminalFrame,
+    });
   }
 
   private publishFrame(event: WorkbarTerminalEvent, attachmentIds: readonly string[]): void {
@@ -367,6 +377,7 @@ export class DesktopWorkbarTerminalService {
         type: "terminal.event" as const,
         terminalId: resourceId,
         sessionId: stream.sessionId,
+        ...(stream.streamId ? { streamId: stream.streamId } : {}),
         ...payload,
       };
       void stream.push(frame).catch(() => this.releaseAttachment(attachmentId));

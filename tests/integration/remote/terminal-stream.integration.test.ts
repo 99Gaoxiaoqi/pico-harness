@@ -5,7 +5,10 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
 import {
+  CAPABILITY_SCOPE_RUNTIME_CAPABILITY,
+  TEMPORARY_WORKSPACE_RUNTIME_CAPABILITY,
   DESKTOP_RUNTIME_SCHEMA_REVISION,
+  DESKTOP_RUNTIME_SCHEMA_CAPABILITY,
   isRuntimeTerminalFrame,
   parseRuntimeResult,
   TERMINAL_STREAM_RUNTIME_CAPABILITY,
@@ -51,6 +54,13 @@ test("真实 Shell 输出按连接附着推送，旁观者只读，detach 保留
   };
   const attached = await service.attach(scope, b);
   assert.equal(attached.terminal.controlAllowed, false);
+  const framesSame: RuntimeTerminalFrame[] = [];
+  const sameOwnerView = {
+    ...context("owner-a", framesSame),
+    terminalAttachmentId: "owner-a:view2",
+    terminalStreamId: "view2",
+  };
+  await service.attach(scope, sameOwnerView);
   const input = {
     ...scope,
     resourceEpoch: created.resourceEpoch,
@@ -69,9 +79,13 @@ test("真实 Shell 输出按连接附着推送，旁观者只读，detach 保留
   assert.ok(framesA.every((f, n) => !n || f.sequence > framesA[n - 1]!.sequence));
   await service.detach({ ...scope, resourceEpoch: created.resourceEpoch }, b);
   const watermarkB = framesB.length;
+  assert.ok(framesSame.some((f) => f.streamId === "view2"));
+  await service.detach({ ...scope, resourceEpoch: created.resourceEpoch }, sameOwnerView);
+  const watermarkSame = framesSame.length;
   await service.stop({ ...scope, resourceEpoch: created.resourceEpoch }, a);
   assert.ok(framesA.some((f) => f.kind === "status"));
   assert.equal(framesB.length, watermarkB);
+  assert.equal(framesSame.length, watermarkSame, "关闭同连接另一视图不影响首个视图推送");
 });
 
 const terminal = {
@@ -101,6 +115,11 @@ const frame: RuntimeTerminalFrame = {
 class RuntimeFixture implements GatewayRuntimeClient {
   listener?: (frame: RuntimeTerminalFrame) => void;
   hold?: Promise<void>;
+  holdPing?: Promise<void>;
+  enteredPing?: () => void;
+  terminalOpens = 0;
+  streamId?: string;
+  detached: string[] = [];
   entered?: () => void;
   capability = true;
   async request<M extends RuntimeMethod>(
@@ -110,12 +129,19 @@ class RuntimeFixture implements GatewayRuntimeClient {
     let result: unknown;
     switch (method) {
       case "runtime.ping":
+        this.enteredPing?.();
+        await this.holdPing;
         result = {
           pong: true,
           protocolVersion: 2,
           desktopSchemaRevision: DESKTOP_RUNTIME_SCHEMA_REVISION,
           picoHome: "/home",
-          capabilities: this.capability ? [TERMINAL_STREAM_RUNTIME_CAPABILITY] : [],
+          capabilities: [
+            DESKTOP_RUNTIME_SCHEMA_CAPABILITY,
+            CAPABILITY_SCOPE_RUNTIME_CAPABILITY,
+            TEMPORARY_WORKSPACE_RUNTIME_CAPABILITY,
+            ...(this.capability ? [TERMINAL_STREAM_RUNTIME_CAPABILITY] : []),
+          ],
         };
         break;
       case "terminal.ownershipCapabilities":
@@ -139,7 +165,9 @@ class RuntimeFixture implements GatewayRuntimeClient {
         break;
       case "terminal.attach":
       case "terminal.create":
-        this.listener?.(frame);
+        this.terminalOpens++;
+        this.streamId = (_params as { streamId?: string }).streamId;
+        this.listener?.({ ...frame, ...(this.streamId ? { streamId: this.streamId } : {}) });
         this.entered?.();
         await this.hold;
         result = {
@@ -151,6 +179,7 @@ class RuntimeFixture implements GatewayRuntimeClient {
         };
         break;
       case "terminal.detach":
+        this.detached.push(String((_params as { streamId?: string }).streamId));
         result = { detached: true };
         break;
       default:
@@ -223,12 +252,16 @@ test("终端推送在授权 attach 答复后发送，拒绝其他实例、epoch 
       ["reply", "terminal_frame"],
     );
     const count = f.messages.length;
-    f.runtime.listener?.({ ...frame, terminalId: "another-terminal" });
-    f.runtime.listener?.({ ...frame, sessionId: "another-session" });
-    f.runtime.listener?.({ ...frame, resourceEpoch: "old-epoch" });
+    f.runtime.listener?.({
+      ...frame,
+      streamId: f.runtime.streamId!,
+      terminalId: "another-terminal",
+    });
+    f.runtime.listener?.({ ...frame, streamId: f.runtime.streamId!, sessionId: "another-session" });
+    f.runtime.listener?.({ ...frame, streamId: f.runtime.streamId!, resourceEpoch: "old-epoch" });
     assert.equal(f.messages.length, count);
     f.revoke();
-    f.runtime.listener?.({ ...frame, sequence: 3 });
+    f.runtime.listener?.({ ...frame, streamId: f.runtime.streamId!, sequence: 3 });
     assert.equal(f.messages.length, count);
   } finally {
     f.access.close();
@@ -255,11 +288,43 @@ test("事件连接更换时迟到的终端附着不能发布成功，旧 Host �
     release();
     await rejected;
     assert.equal(f.messages.length, 0);
+    assert.equal(f.runtime.detached.length, 1, "迟到的旧附着已释放");
     f.access.attachEvents({ publish() {}, close() {} });
     f.runtime.capability = false;
     await assert.rejects(
       f.access.dispatch(f.request(), () => assert.fail("旧 Host不能假装已支持")),
       (error: unknown) => error instanceof GatewayError && error.code === "UNSUPPORTED_CAPABILITY",
+    );
+  } finally {
+    f.access.close();
+  }
+});
+
+test("能力检查期间更换事件连接，旧终端创建不会执行或污染新代际", async () => {
+  const f = gatewayFixture();
+  try {
+    let release!: () => void, entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    f.runtime.holdPing = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    f.runtime.enteredPing = entered;
+    const rejected = assert.rejects(
+      f.access.dispatch(f.request("terminal.create"), () => assert.fail("旧请求不能成功")),
+      (error: unknown) => error instanceof GatewayError && error.outcome === "not_executed",
+    );
+    await started;
+    f.events.close();
+    f.access.attachEvents({ publish: (message) => f.messages.push(message), close() {} });
+    release();
+    await rejected;
+    assert.equal(f.runtime.terminalOpens, 0);
+    await f.access.dispatch(f.request(), () => f.messages.push({ type: "reply" }));
+    assert.deepEqual(
+      f.messages.map((m) => m.type),
+      ["reply", "terminal_frame"],
     );
   } finally {
     f.access.close();

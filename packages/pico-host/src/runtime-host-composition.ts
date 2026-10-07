@@ -1,6 +1,7 @@
 import type { RuntimeHostComposition, RuntimeHostCompositionFactory } from "@pico/runtime-host";
 import {
   createRuntimeRequest,
+  isJsonObject,
   createTypedRuntimeRequest,
   parseRuntimeResult,
   parseStrictRuntimeParams,
@@ -138,6 +139,10 @@ export function createRuntimeHostComposition(
       // 拒绝（invalid_request）。
       const method = input.method as RuntimeMethod;
       const params = parseStrictRuntimeParams(method, input.params ?? {}) as JsonValue;
+      const streamId =
+        isJsonObject(params) && typeof params["streamId"] === "string"
+          ? params["streamId"]
+          : undefined;
       const rawResult = await service.handle(
         createRuntimeRequest(method, params),
         context?.clientInstanceId
@@ -145,7 +150,10 @@ export function createRuntimeHostComposition(
               terminalOwnerId: context.clientInstanceId.startsWith("pico-client-")
                 ? "desktop:legacy"
                 : context.clientInstanceId,
-              terminalAttachmentId: context.connectionId,
+              terminalAttachmentId: streamId
+                ? `${context.connectionId}:${streamId}`
+                : context.connectionId,
+              ...(streamId ? { terminalStreamId: streamId } : {}),
               ...(context.pushEvent
                 ? {
                     pushTerminalFrame: (frame) =>

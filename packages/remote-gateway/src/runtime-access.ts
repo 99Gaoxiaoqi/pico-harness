@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   MODEL_CATALOG_RUNTIME_CAPABILITY,
   REVIEW_IDEMPOTENCY_RUNTIME_CAPABILITY,
@@ -54,8 +55,12 @@ export class RuntimeAccessSession {
   private requests = 0;
   private eventGeneration = 0;
   private events?: EventBinding;
+  private terminalStreamId = randomUUID();
   private terminalFrameDispose?: () => void;
-  private readonly terminalScopes = new Map<string, SessionScope & { resourceEpoch: string }>();
+  private readonly terminalScopes = new Map<
+    string,
+    SessionScope & { resourceEpoch: string; streamId: string }
+  >();
   private readonly pendingTerminalOpens = new Map<string, number>();
   private readonly pendingTerminalFrames: RuntimeTerminalFrame[] = [];
   private pendingTerminalBytes = 0;
@@ -123,6 +128,7 @@ export class RuntimeAccessSession {
       let dispatched = false;
       let rpc: RemoteRequest | undefined;
       const generation = this.eventGeneration;
+      const terminalStreamId = this.terminalStreamId;
       try {
         rpc = parseRemoteRequest(input);
         const { config, principal, client } = this.options;
@@ -192,6 +198,14 @@ export class RuntimeAccessSession {
             "电脑尚未支持终端实时输出，请更新并重启 Pico",
             409,
           );
+        this.assertCurrent();
+        if (terminalOpening && (!this.events || generation !== this.eventGeneration))
+          throw new GatewayError(
+            "RUNTIME_DISCONNECTED",
+            "终端事件连接已更换，请重新同步",
+            503,
+            true,
+          );
         if (terminalOpening)
           this.pendingTerminalOpens.set(
             terminalOpening,
@@ -206,7 +220,15 @@ export class RuntimeAccessSession {
         try {
           value = projectRemoteResult(
             rpc.method,
-            parseRuntimeResult(rpc.method, await client.request(rpc.method, authorized.params)),
+            parseRuntimeResult(
+              rpc.method,
+              await client.request(
+                rpc.method,
+                ["terminal.create", "terminal.attach", "terminal.detach"].includes(rpc.method)
+                  ? { ...authorized.params, streamId: terminalStreamId }
+                  : authorized.params,
+              ),
+            ),
           );
         } finally {
           if (terminalOpening && generation === this.eventGeneration) {
@@ -258,6 +280,12 @@ export class RuntimeAccessSession {
           typeof value.resourceEpoch === "string"
         ) {
           if (!this.current || generation !== this.eventGeneration) {
+            this.releaseTerminal(value.terminal.terminalId, {
+              workspaceId: rpc.workspaceId,
+              sessionId: terminalOpening,
+              resourceEpoch: value.resourceEpoch,
+              streamId: terminalStreamId,
+            });
             this.assertCurrent(true);
             throw new GatewayError(
               "RUNTIME_DISCONNECTED",
@@ -271,6 +299,7 @@ export class RuntimeAccessSession {
             workspaceId: rpc.workspaceId,
             sessionId: terminalOpening,
             resourceEpoch: value.resourceEpoch,
+            streamId: terminalStreamId,
           });
         }
         this.assertCurrent(true);
@@ -282,6 +311,7 @@ export class RuntimeAccessSession {
         if (opening) this.flushFrames();
         if (terminalOpening) this.flushTerminalFrames();
       } catch (error) {
+        if (generation === this.eventGeneration) this.flushTerminalFrames();
         throw safeGatewayError(error, dispatched);
       }
     });
@@ -290,6 +320,8 @@ export class RuntimeAccessSession {
   attachEvents(sink: RuntimeAccessEventSink): RuntimeAccessEvents {
     this.assertCurrent();
     this.detachEvents();
+    this.terminalStreamId = randomUUID();
+    const streamId = this.terminalStreamId;
     const binding: EventBinding = { sink, chain: Promise.resolve(), pending: 0 };
     this.events = binding;
     const publish = (event: Parameters<RuntimeAccessEventSink["publish"]>[0]): void => {
@@ -297,7 +329,7 @@ export class RuntimeAccessSession {
     };
     const terminalFrames = this.options.client.subscribeTerminalFrames?.(
       (frame) => {
-        if (!this.current || this.events !== binding) return;
+        if (!this.current || this.events !== binding || frame.streamId !== streamId) return;
         if (this.pendingTerminalOpens.has(frame.sessionId)) {
           const bytes = Buffer.byteLength(JSON.stringify(frame));
           if (
@@ -446,6 +478,7 @@ export class RuntimeAccessSession {
       !scope ||
       scope.sessionId !== frame.sessionId ||
       scope.resourceEpoch !== frame.resourceEpoch ||
+      scope.streamId !== frame.streamId ||
       !principal.permissions.includes("terminal.control") ||
       !principal.workspaceIds.includes(scope.workspaceId)
     )
@@ -489,6 +522,25 @@ export class RuntimeAccessSession {
     }
   }
 
+  private releaseTerminal(
+    terminalId: string,
+    scope: SessionScope & { resourceEpoch: string; streamId: string },
+  ): void {
+    const workspace = this.options.config.workspaces.find(
+      (entry) => entry.id === scope.workspaceId,
+    );
+    if (workspace)
+      void this.options.client
+        .request("terminal.detach", {
+          workspacePath: workspace.path,
+          sessionId: scope.sessionId,
+          terminalId,
+          resourceEpoch: scope.resourceEpoch,
+          streamId: scope.streamId,
+        })
+        .catch(() => undefined);
+  }
+
   private releaseSession(subscriptionId: string, scope: SessionScope): void {
     const workspace = this.options.config.workspaces.find(
       (entry) => entry.id === scope.workspaceId,
@@ -509,6 +561,7 @@ export class RuntimeAccessSession {
     this.eventGeneration++;
     this.terminalFrameDispose?.();
     this.terminalFrameDispose = undefined;
+    for (const [terminalId, scope] of this.terminalScopes) this.releaseTerminal(terminalId, scope);
     this.terminalScopes.clear();
     this.pendingTerminalOpens.clear();
     this.pendingTerminalFrames.length = 0;
