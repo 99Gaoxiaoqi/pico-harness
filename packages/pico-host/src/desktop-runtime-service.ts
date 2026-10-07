@@ -386,6 +386,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private lifecycleState: "open" | "closing" | "closed" = "open";
   private closePromise?: Promise<void>;
   private readonly sessionAdmissionTails = new Map<string, Promise<void>>();
+  private readonly acceptedQueueSteers = new Map<
+    string,
+    { requestFingerprint: string; result: JsonObject }
+  >();
   private goalRecoveryPromise: Promise<void> = Promise.resolve();
   private resourceVersion = 0;
   private readonly browserAgentBroker: BrowserAgentCommandBroker;
@@ -894,6 +898,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         removeQueuedInput: this.removeQueuedInput.bind(this),
         reorderQueuedInputs: this.reorderQueuedInputs.bind(this),
         moveQueuedInputToNext: this.moveQueuedInputToNext.bind(this),
+        steerQueuedInput: this.steerQueuedInput.bind(this),
         compactSession: this.compactSession.bind(this),
         getRuntimeSessionSettings: this.getRuntimeSessionSettings.bind(this),
         getSessionContextReport: this.getSessionContextReport.bind(this),
@@ -3294,17 +3299,54 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     return messageId;
   }
 
-  private async consumeNextQueued(workspacePath: string, sessionId: string): Promise<boolean> {
+  private async consumeNextQueued(
+    workspacePath: string,
+    sessionId: string,
+  ): Promise<boolean> {
     if (this.lifecycleState !== "open") return false;
-    const [next] = await this.conversationStateStore.listQueued(workspacePath, sessionId);
+    const [next] = await this.conversationStateStore.listQueued(
+      workspacePath,
+      sessionId,
+    );
     if (!next) return false;
+    const steerKey = queueSteerKey(sessionId, next.queueId);
+    const acceptedKey = `${workspacePath}\0${steerKey}`;
+    const accepted = this.acceptedQueueSteers.get(acceptedKey);
+    const steered = await this.conversationStateStore.getIdempotent(
+      workspacePath,
+      steerKey,
+    );
+    if (steered || accepted) {
+      if (!steered && accepted) {
+        await this.conversationStateStore.rememberIdempotent(
+          workspacePath,
+          steerKey,
+          accepted.requestFingerprint,
+          accepted.result,
+        );
+      }
+      await this.conversationStateStore.removeQueuedForSession(
+        workspacePath,
+        sessionId,
+        next.queueId,
+      );
+      this.acceptedQueueSteers.delete(acceptedKey);
+      this.publishTranscriptUpdate(workspacePath, sessionId, "reload");
+      return this.consumeNextQueued(workspacePath, sessionId);
+    }
     if (await this.findActiveSessionRun(workspacePath, sessionId)) return true;
     // Session admission lane prevents a Goal continuation racing a queued user Run.
     if (this.lifecycleState !== "open") return true;
-    await this.startSessionRun(workspacePath, sessionId, next.input, undefined, {
-      inputKey: next.queueId,
-      runStartKey: desktopRunStartIdempotencyKey("queue", next.queueId),
-    });
+    await this.startSessionRun(
+      workspacePath,
+      sessionId,
+      next.input,
+      undefined,
+      {
+        inputKey: next.queueId,
+        runStartKey: desktopRunStartIdempotencyKey("queue", next.queueId),
+      },
+    );
     await this.conversationStateStore.removeQueued(workspacePath, next.queueId);
     return true;
   }
@@ -3312,22 +3354,42 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private async updateQueuedInput(
     params: RuntimeRequest<"session.queue.update">["params"],
   ): Promise<JsonValue> {
-    const canonical = await this.requireTrustedSession(params.workspacePath, params.sessionId);
+    const canonical = await this.requireTrustedSession(
+      params.workspacePath,
+      params.sessionId,
+    );
     const queueId = requireText(params.queueId, "queueId");
     const input = normalizeRuntimeUserInput(params.input);
-    const queuedInput = await this.withSessionAdmission(canonical, params.sessionId, async () => {
-      const updated = await this.conversationStateStore.updateQueued(
-        canonical,
-        params.sessionId,
-        queueId,
-        input,
-      );
-      if (!updated) {
-        throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.CONFLICT, "该队列输入已被消费或移除，请刷新队列。");
-      }
-      this.publishTranscriptUpdate(canonical, params.sessionId, "reload");
-      return updated;
-    });
+    const queuedInput = await this.withSessionAdmission(
+      canonical,
+      params.sessionId,
+      async () => {
+        const steerKey = queueSteerKey(params.sessionId, queueId);
+        if (
+          this.acceptedQueueSteers.has(`${canonical}\0${steerKey}`) ||
+          (await this.conversationStateStore.getIdempotent(canonical, steerKey))
+        ) {
+          throw new RuntimeProtocolError(
+            RUNTIME_ERROR_CODES.CONFLICT,
+            "这条消息已引导当前运行，不能再编辑；请发送新的消息。",
+          );
+        }
+        const updated = await this.conversationStateStore.updateQueued(
+          canonical,
+          params.sessionId,
+          queueId,
+          input,
+        );
+        if (!updated) {
+          throw new RuntimeProtocolError(
+            RUNTIME_ERROR_CODES.CONFLICT,
+            "该队列输入已被消费或移除，请刷新队列。",
+          );
+        }
+        this.publishTranscriptUpdate(canonical, params.sessionId, "reload");
+        return updated;
+      },
+    );
     return { queuedInput: queuedInputResult(queuedInput) };
   }
 
@@ -3386,6 +3448,140 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       return ordered;
     });
     return { queuedInputs: queuedInputs.map(queuedInputResult) };
+  }
+
+  private async steerQueuedInput(
+    params: RuntimeRequest<"session.queue.steer">["params"],
+  ): Promise<JsonValue> {
+    const canonical = await this.requireTrustedSession(
+      params.workspacePath,
+      params.sessionId,
+    );
+    const queueId = requireText(params.queueId, "queueId");
+    const expectedRunId = requireText(params.expectedRunId, "expectedRunId");
+    // Successful retries reuse the queue entry's receipt.
+    const key = queueSteerKey(params.sessionId, queueId);
+    const acceptedKey = `${canonical}\0${key}`;
+    const fingerprint = JSON.stringify([
+      params.sessionId,
+      queueId,
+      expectedRunId,
+    ]);
+    return this.withSessionAdmission(canonical, params.sessionId, async () => {
+      const persisted = await this.conversationStateStore.getIdempotent(
+        canonical,
+        key,
+      );
+      const stored = persisted ?? this.acceptedQueueSteers.get(acceptedKey);
+      if (stored) {
+        if (stored.requestFingerprint !== fingerprint) {
+          throw new RuntimeProtocolError(
+            RUNTIME_ERROR_CODES.CONFLICT,
+            "这条消息已引导了另一轮运行，请刷新队列。",
+          );
+        }
+        if (!persisted) {
+          await this.conversationStateStore.rememberIdempotent(
+            canonical,
+            key,
+            fingerprint,
+            stored.result,
+          );
+        }
+        await this.conversationStateStore.removeQueuedForSession(
+          canonical,
+          params.sessionId,
+          queueId,
+        );
+        this.acceptedQueueSteers.delete(acceptedKey);
+        this.publishTranscriptUpdate(canonical, params.sessionId, "reload");
+        return stored.result;
+      }
+      const item = (
+        await this.conversationStateStore.listQueued(
+          canonical,
+          params.sessionId,
+        )
+      ).find((candidate) => candidate.queueId === queueId);
+      if (!item) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.CONFLICT,
+          "该队列输入已被消费或移除，请刷新队列。",
+        );
+      }
+      if (
+        item.input.kind !== "text" ||
+        item.input.attachments?.length ||
+        item.input.skills?.length ||
+        item.input.orchestrationMode
+      ) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.CONFLICT,
+          "引导仅支持普通文本；包含附件、技能或子任务的消息需继续排队。",
+        );
+      }
+      const activeRun = await this.findActiveSessionRun(
+        canonical,
+        params.sessionId,
+      );
+      if (
+        activeRun?.["runId"] !== expectedRunId ||
+        activeRun["status"] === "cancelling"
+      ) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.CONFLICT,
+          "目标运行已结束或变化，消息仍保留在队列中。",
+        );
+      }
+      let run: JsonValue;
+      try {
+        run = await this.options.runtimeService.handle(
+          createRuntimeRequest("run.steer", {
+            workspacePath: canonical,
+            runId: expectedRunId,
+            message: item.input.text,
+          }),
+        );
+      } catch (error) {
+        const current = await this.findActiveSessionRun(
+          canonical,
+          params.sessionId,
+        );
+        if (
+          current?.["runId"] !== expectedRunId ||
+          current["status"] === "cancelling"
+        ) {
+          throw new RuntimeProtocolError(
+            RUNTIME_ERROR_CODES.CONFLICT,
+            "目标运行已结束，消息仍保留在队列中。",
+          );
+        }
+        throw error;
+      }
+      const result = { removed: true, run: requireJsonRecord(run, "run") };
+      // Retain acceptance in memory if writing the receipt fails: retrying in
+      // this Runtime must finish persistence without delivering again.
+      this.acceptedQueueSteers.set(acceptedKey, {
+        requestFingerprint: fingerprint,
+        result,
+      });
+      // Persist the receipt before removing the input, so a lost response or a
+      // failed deletion can be recovered without re-delivering the steer.
+      await this.conversationStateStore.rememberIdempotent(
+        canonical,
+        key,
+        fingerprint,
+        result,
+      );
+      await this.conversationStateStore.removeQueuedForSession(
+        canonical,
+        params.sessionId,
+        queueId,
+      );
+      this.acceptedQueueSteers.delete(acceptedKey);
+      this.publishTranscriptUpdate(canonical, params.sessionId, "reload");
+      return result;
+    });
   }
 
   private async withSessionAdmission<Result>(
@@ -5436,6 +5632,10 @@ function normalizeRuntimeUserInput(value: RuntimeUserInput): RuntimeUserInput {
     RUNTIME_ERROR_CODES.INVALID_PARAMS,
     `input.kind 不支持: ${String(kind)}`,
   );
+}
+
+function queueSteerKey(sessionId: string, queueId: string): string {
+  return `queue-steer:${JSON.stringify([sessionId, queueId])}`;
 }
 
 function queuedInputResult(value: DesktopQueuedInput): RuntimeQueuedInput {

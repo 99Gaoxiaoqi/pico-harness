@@ -873,8 +873,16 @@ export class Session
     const cursor = runtimeCursorForEntry(this.id, all, all[boundaryIndex]!);
     const events = entries.map(({ event }) => event);
     const modelCheckpoint = deriveDurableRuntimeForkCheckpoint(events);
+    const hydration = this.runtimeHydrationSnapshot(manifest, entries);
+    const currentSettings = this.getRuntimeStateSnapshot().settings;
     return {
-      hydration: this.runtimeHydrationSnapshot(manifest, entries),
+      hydration:
+        hydration.runtime.settings || !currentSettings
+          ? hydration
+          : {
+              ...hydration,
+              runtime: { ...hydration.runtime, settings: structuredClone(currentSettings) },
+            },
       runtimeSeedEntries: projectRuntimeSessionForkSeedEntries(entries),
       planEntries: projectActivePlanEntries(entries) as readonly {
         readonly sequence: number;

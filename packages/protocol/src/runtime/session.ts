@@ -454,6 +454,14 @@ export type SessionMethodMap = {
     readonly params: WorkspaceParams & { readonly sessionId: SessionId; readonly queueId: string };
     readonly result: { readonly queuedInputs: readonly RuntimeQueuedInput[] };
   };
+  readonly "session.queue.steer": {
+    readonly params: WorkspaceParams & {
+      readonly sessionId: SessionId;
+      readonly queueId: string;
+      readonly expectedRunId: RunId;
+    };
+    readonly result: { readonly removed: true; readonly run: RuntimeRun };
+  };
   readonly "session.compact": {
     readonly params: WorkspaceParams & { readonly sessionId: SessionId };
     readonly result: {
@@ -621,6 +629,12 @@ export const sessionParamValidators = {
     sessionId: boundedNonEmptyStringParam(256),
     queueId: boundedNonEmptyStringParam(512),
   }),
+  "session.queue.steer": exactParamShape({
+    workspacePath: stringParam,
+    sessionId: boundedNonEmptyStringParam(256),
+    queueId: boundedNonEmptyStringParam(512),
+    expectedRunId: boundedNonEmptyStringParam(256),
+  }),
   "session.compact": workspaceSessionParams,
   "session.settings.get": workspaceSessionParams,
   "sideChat.create": exactParamShape({
@@ -738,8 +752,13 @@ export const sessionResultValidators = {
   ),
   "session.queue.update": exactResultShape({ queuedInput: runtimeQueuedInputResult }),
   "session.queue.remove": exactResultShape({ removed: resultOneOf([true]) }),
-  "session.queue.reorder": exactResultShape({ queuedInputs: resultArray(runtimeQueuedInputResult) }),
-  "session.queue.moveToNext": exactResultShape({ queuedInputs: resultArray(runtimeQueuedInputResult) }),
+  "session.queue.reorder": exactResultShape({
+    queuedInputs: resultArray(runtimeQueuedInputResult),
+  }),
+  "session.queue.moveToNext": exactResultShape({
+    queuedInputs: resultArray(runtimeQueuedInputResult),
+  }),
+  "session.queue.steer": exactResultShape({ removed: resultOneOf([true]), run: runtimeRunResult }),
   "session.send": resultShape(
     {
       session: runtimeSessionResult,

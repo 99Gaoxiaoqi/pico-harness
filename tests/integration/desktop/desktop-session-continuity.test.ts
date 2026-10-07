@@ -1,14 +1,126 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import {
   TRANSCRIPT_PROJECTOR_VERSION,
   type RuntimePlanControlSnapshot,
+  type RuntimeQueuedInput,
   type RuntimeSessionSubscriptionFrame,
 } from "@pico/protocol";
 import {
   DesktopSessionContinuity,
   type DesktopSessionContinuityTransport,
 } from "../../../apps/desktop/src/renderer/session-continuity.js";
+
+test("queue mutations reopen continuity before old stream frames can restore removed inputs", async () => {
+  let listener!: (frame: RuntimeSessionSubscriptionFrame) => void;
+  let releaseClose!: () => void;
+  let opens = 0;
+  let waitForClose = true;
+  let storedQueue: readonly RuntimeQueuedInput[] = [
+    { queueId: "queued-1", input: { kind: "text", text: "guide now" }, createdAt: 1 },
+  ];
+  let visibleQueue: readonly RuntimeQueuedInput[] = [];
+  const continuity = new DesktopSessionContinuity({
+    transport: {
+      subscribeFrames(callback) {
+        listener = callback;
+        return { dispose() {} };
+      },
+      async open() {
+        return {
+          session: {
+            sessionId: "session",
+            workspacePath: "/workspace",
+            title: "queue",
+            status: "active",
+            pinned: false,
+            createdAt: 1,
+            updatedAt: 1,
+          },
+          hostEpoch: "host",
+          subscriptionId: `subscription-${++opens}`,
+          nextSequence: 1,
+          watermark: {
+            historyEpoch: "history",
+            projectorVersion: TRANSCRIPT_PROJECTOR_VERSION,
+            throughSequence: 1,
+          },
+          durableTail: [],
+          activeOverlay: [],
+          queuedInputs: storedQueue,
+        };
+      },
+      async close() {
+        if (waitForClose) {
+          waitForClose = false;
+          await new Promise<void>((resolve) => {
+            releaseClose = resolve;
+          });
+        }
+        return { closed: true };
+      },
+      async page() {
+        throw new Error("no older page expected");
+      },
+      async advance() {
+        throw new Error("queue mutation must not need transcript advance");
+      },
+    },
+    onView(_workspacePath, _sessionId, view) {
+      visibleQueue = view.queuedInputs;
+    },
+  });
+  try {
+    await continuity.open("/workspace", "session");
+    assert.equal(visibleQueue.length, 1);
+    storedQueue = [];
+    visibleQueue = [];
+    const refresh = continuity.open("/workspace", "session");
+    const frame = (subscriptionId: string): RuntimeSessionSubscriptionFrame => ({
+      hostEpoch: "host",
+      subscriptionId,
+      sessionId: "session",
+      sequence: 1,
+      type: "subscription.session_delta",
+      runId: "run",
+      turnId: "turn",
+      itemId: "answer",
+      streamId: "stream",
+      kind: "text",
+      startOffsetBytes: 0,
+      text: "live",
+    });
+    listener(frame("subscription-1"));
+    assert.deepEqual(visibleQueue, [], "closing old subscription cannot restore its queue");
+    releaseClose();
+    await refresh;
+    listener(frame("subscription-2"));
+    assert.deepEqual(visibleQueue, [], "new stream frames retain the refreshed empty queue");
+    assert.deepEqual(continuity.view("/workspace", "session")?.queuedInputs, []);
+
+    const renderer = await readFile(
+      new URL("../../../apps/desktop/src/renderer/runtime.ts", import.meta.url),
+      "utf8",
+    );
+    for (const method of [
+      "updateQueuedInput",
+      "removeQueuedInput",
+      "reorderQueuedInputs",
+      "moveQueuedInputToNext",
+      "steerQueuedInput",
+    ]) {
+      const body = renderer.slice(renderer.indexOf(`async ${method}(`));
+      assert.match(
+        body.slice(0, body.indexOf("\n      async ", 1)),
+        /refreshQueue\(bridge, ref\)/u,
+        `${method} must refresh the replica after admission`,
+      );
+    }
+  } finally {
+    continuity.dispose();
+  }
+});
 
 test("desktop session continuity: raw early frame and advance update one replica", async () => {
   let listener: ((frame: RuntimeSessionSubscriptionFrame) => void) | undefined;

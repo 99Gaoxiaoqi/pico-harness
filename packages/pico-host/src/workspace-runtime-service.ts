@@ -349,6 +349,7 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
           RUN_POINT_LOOKUP_RUNTIME_CAPABILITY,
           "shared-config-v1",
           "session-send-replay-v1",
+          "session-queue-steer-v1",
           "config-secret-patch-v1",
           "session-conversation-v1",
           "session-management-v1",

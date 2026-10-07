@@ -34,6 +34,7 @@ test("desktop session handlers keep protocol mapping separate from the service o
     removeQueuedInput: async () => ({ removed: true }),
     reorderQueuedInputs: async () => ({ queuedInputs: [] }),
     moveQueuedInputToNext: async () => ({ queuedInputs: [] }),
+    steerQueuedInput: async () => ({ removed: true, run: {} }),
     compactSession: async () => ({ session: {}, compacted: true }),
     getRuntimeSessionSettings: async () => ({ settings: {} }),
     getSessionContextReport: async () => ({ context: {} }),

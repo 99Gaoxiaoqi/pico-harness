@@ -6,16 +6,18 @@ import {
   ChevronRight,
   Circle,
   Clock3,
+  Copy,
   FileDiff,
   ListChecks,
   LoaderCircle,
+  Pencil,
   ShieldQuestion,
   Sparkles,
   WandSparkles,
   SearchCode,
   GitBranch,
 } from "lucide-react";
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { sanitizeMarkdownText } from "@pico/protocol";
 import type {
   ConversationItemView,
@@ -25,6 +27,7 @@ import type {
   ToolItemView,
   ThinkingItemView,
 } from "./types.js";
+import { copyText } from "../clipboard.js";
 import { conversationItemKey, mergeConversationItemGroups } from "./items.js";
 import { MarkdownText, referencedMediaIds } from "./MarkdownText.js";
 import { MediaProvider, MediaPreview, type MediaScope } from "./MediaPreview.js";
@@ -50,9 +53,7 @@ export interface ConversationTranscriptProps {
     | undefined;
   readonly onEditUserMessage?: (
     item: Extract<ConversationItemView, { kind: "userMessage" }>,
-    replacementText: string,
-    idempotencyKey: string,
-  ) => Promise<boolean>;
+  ) => void;
   readonly onQuoteSelection?: (text: string) => void;
   readonly onAskInSideChat?: (text: string) => void;
   readonly highlightItemId?: string | undefined;
@@ -155,26 +156,33 @@ function UserMessageBubble({
   readonly renderText: NonNullable<ConversationTranscriptProps["renderText"]>;
   readonly onEdit?: ConversationTranscriptProps["onEditUserMessage"];
 }) {
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(item.text);
-  const [submitting, setSubmitting] = useState(false);
-  const requestKey = useRef<{ readonly text: string; readonly key: string } | undefined>(undefined);
-  useEffect(() => {
-    if (!editing) setDraft(item.text);
-  }, [editing, item.text]);
-  const submit = async (event: FormEvent) => {
-    event.preventDefault();
-    if (!onEdit || !draft.trim() || submitting) return;
-    setSubmitting(true);
-    if (requestKey.current?.text !== draft) {
-      requestKey.current = { text: draft, key: globalThis.crypto.randomUUID() };
-    }
+  const [copyStatus, setCopyStatus] = useState("");
+  const copyStatusTimer = useRef<number | undefined>(undefined);
+  useEffect(
+    () => () => {
+      if (copyStatusTimer.current !== undefined) window.clearTimeout(copyStatusTimer.current);
+    },
+    [],
+  );
+  const copyMessage = async () => {
+    if (copyStatusTimer.current !== undefined) window.clearTimeout(copyStatusTimer.current);
     try {
-      if (await onEdit(item, draft, requestKey.current.key)) setEditing(false);
-    } finally {
-      setSubmitting(false);
+      await copyText(item.text);
+      setCopyStatus("已复制");
+    } catch {
+      setCopyStatus("复制失败");
     }
+    copyStatusTimer.current = window.setTimeout(() => setCopyStatus(""), 1800);
   };
+  const timestamp = item.at
+    ? new Intl.DateTimeFormat("zh-CN", {
+        year: "numeric",
+        month: "long",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+      }).format(item.at)
+    : undefined;
   return (
     <article
       className="conversation-message conversation-message--user"
@@ -182,58 +190,56 @@ function UserMessageBubble({
       data-quoteable="true"
     >
       <h3 className="conversation-sr-only">你</h3>
-      <div className="conversation-message__bubble">
-        {editing ? (
-          <form className="conversation-message-edit" onSubmit={(event) => void submit(event)}>
-            <label className="conversation-sr-only" htmlFor={`edit-${encodeURIComponent(item.id)}`}>
-              编辑用户消息
-            </label>
-            <textarea
-              id={`edit-${encodeURIComponent(item.id)}`}
-              value={draft}
-              autoFocus
-              onChange={(event) => setDraft(event.target.value)}
-            />
-            <div>
-              <button type="submit" disabled={!draft.trim() || submitting}>
-                {submitting ? "正在创建修订…" : "提交为新分支"}
-              </button>
-              <button type="button" disabled={submitting} onClick={() => setEditing(false)}>
-                取消
-              </button>
+      <div className="conversation-message__content">
+        <div className="conversation-message__bubble">
+          {item.skills?.length ? (
+            <div aria-label="使用的技能">
+              {item.skills.map((skill) => (
+                <span
+                  key={`${skill.sourceId}:${skill.name}`}
+                  className="composer-reference"
+                  title={skill.sourcePath}
+                >
+                  Skill: {skill.name}
+                </span>
+              ))}
             </div>
-          </form>
-        ) : (
-          <>
-            {item.skills?.length ? (
-              <div aria-label="使用的技能">
-                {item.skills.map((skill) => (
-                  <span
-                    key={`${skill.sourceId}:${skill.name}`}
-                    className="composer-reference"
-                    title={skill.sourcePath}
-                  >
-                    Skill: {skill.name}
-                  </span>
-                ))}
-              </div>
-            ) : null}
-            {renderText(item.text, item)}
-            <StandaloneMedia item={item} />
-            {onEdit && (
-              <button
-                className="conversation-message__edit"
-                type="button"
-                onClick={() => {
-                  requestKey.current = undefined;
-                  setEditing(true);
-                }}
-              >
-                编辑
-              </button>
-            )}
-          </>
-        )}
+          ) : null}
+          {renderText(item.text, item)}
+          <StandaloneMedia item={item} />
+        </div>
+        <div className="conversation-message__actions" role="toolbar" aria-label="消息操作">
+          {timestamp && (
+            <time className="conversation-message__timestamp" dateTime={new Date(item.at!).toISOString()}>
+              {timestamp}
+            </time>
+          )}
+          <button
+            className="conversation-message__action"
+            type="button"
+            title="复制消息"
+            aria-label="复制消息"
+            onClick={() => void copyMessage()}
+          >
+            {copyStatus === "已复制" ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
+          </button>
+          {onEdit && (
+            <button
+              className="conversation-message__action"
+              type="button"
+              title="编辑并重发"
+              aria-label="编辑并重发"
+              onClick={() => onEdit(item)}
+            >
+              <Pencil aria-hidden="true" />
+            </button>
+          )}
+          {copyStatus && (
+            <span className="conversation-message__copy-status" role="status" aria-live="polite">
+              {copyStatus}
+            </span>
+          )}
+        </div>
       </div>
     </article>
   );

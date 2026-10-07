@@ -15,10 +15,8 @@ import {
   subagentSessionHref,
 } from "../conversation/subagent-navigation.js";
 import type {
-  RuntimeQueuedInput,
   RuntimeResult,
   RuntimeUserDefaults,
-  RuntimeUserInput,
 } from "@pico/protocol";
 import {
   AlertTriangle,
@@ -44,7 +42,6 @@ import {
   useReducer,
   useRef,
   useState,
-  type FormEvent,
   type ReactNode,
 } from "react";
 import { Link, Navigate, useLocation, useNavigate, useParams } from "react-router-dom";
@@ -78,7 +75,7 @@ import {
 } from "../provider-retry.js";
 import type { ApprovalView, TimelineItem, ToolApprovalView } from "../model.js";
 import { useRuntime } from "../runtime-context.js";
-import type { RuntimeActions } from "../runtime.js";
+import { ConversationQueue } from "../conversation/ConversationQueue.js";
 import { formatCompact, isTerminalRun } from "../view-format.js";
 import { copyText } from "../clipboard.js";
 import { BrowserWorkbarPanel } from "../workbar-panels/BrowserWorkbarPanel.js";
@@ -189,6 +186,13 @@ export function ConversationPage() {
     clearIfUnchanged,
   } = usePersistentDraft(draftKey);
   const composerInputRef = useRef<ConversationComposerHandle>(null);
+  const [editingUserMessage, setEditingUserMessage] = useState<{
+    readonly item: Extract<ConversationItemView, { kind: "userMessage" }>;
+    readonly previousDraft: string;
+  }>();
+  const revisionRequestRef = useRef<{ readonly text: string; readonly key: string } | undefined>(
+    undefined,
+  );
   const [behavior, setBehavior] = useState<ComposerBehavior>("steer");
   const [inspector, setInspector] = useState<ConversationInspectorView>();
 
@@ -243,6 +247,8 @@ export function ConversationPage() {
   useEffect(() => {
     setInspector(undefined);
     setEditingTitle(false);
+    setEditingUserMessage(undefined);
+    revisionRequestRef.current = undefined;
     setReferenceError(undefined);
     setPromptAnchors([]);
     setPromptAnchorCursor(undefined);
@@ -541,6 +547,30 @@ export function ConversationPage() {
 
   const submit = async (text: string, nextBehavior: ComposerBehavior) => {
     if (sendingRef.current || commands.pending) return;
+    if (editingUserMessage) {
+      if (!sessionRef || !text.trim()) return;
+      setReferenceError(undefined);
+      sendingRef.current = true;
+      setPreparingSend(true);
+      if (revisionRequestRef.current?.text !== text) {
+        revisionRequestRef.current = { text, key: globalThis.crypto.randomUUID() };
+      }
+      try {
+        await reviseUserMessage(
+          editingUserMessage.item,
+          text,
+          revisionRequestRef.current.key,
+        );
+      } catch (error) {
+        actions.showMessage?.(
+          error instanceof Error ? error.message : "编辑并重发失败，请检查连接后重试。",
+        );
+      } finally {
+        sendingRef.current = false;
+        setPreparingSend(false);
+      }
+      return;
+    }
     const parsedDraft = parseComposerDraft(text);
     const referenceFailure = validateComposerReferences(
       parsedDraft.references,
@@ -841,8 +871,27 @@ export function ConversationPage() {
       idempotencyKey,
     );
     if (!target) return false;
+    clearIfUnchanged(draft);
+    revisionRequestRef.current = undefined;
+    setEditingUserMessage(undefined);
     navigate(sessionHref(target), { replace: true });
     return true;
+  };
+
+  const beginEditingUserMessage = (
+    item: Extract<ConversationItemView, { kind: "userMessage" }>,
+  ) => {
+    setEditingUserMessage({ item, previousDraft: draft });
+    revisionRequestRef.current = undefined;
+    handleDraftChange(item.text);
+    window.requestAnimationFrame(() => composerInputRef.current?.focus());
+  };
+
+  const cancelEditingUserMessage = () => {
+    if (!editingUserMessage) return;
+    handleDraftChange(editingUserMessage.previousDraft);
+    revisionRequestRef.current = undefined;
+    setEditingUserMessage(undefined);
   };
 
   const respondToApproval = (
@@ -1399,7 +1448,8 @@ export function ConversationPage() {
                     disabled={Boolean(busy) || session?.status === "archived"}
                     items={conversation.queuedInputs}
                     sessionRef={sessionRef}
-                    running={Boolean(activeRun)}
+                    runId={activeRun?.status === "cancelling" ? undefined : activeRun?.id}
+                    steerSupported={Boolean(runtime.queueSteerSupported)}
                   />
                 ) : null}
                 {!composerModelRouteId && (
@@ -1420,6 +1470,21 @@ export function ConversationPage() {
                     {referenceError}
                   </p>
                 )}
+                {editingUserMessage && (
+                  <div className="conversation-editing-banner" role="status">
+                    <span className="conversation-editing-banner__label">
+                      <Pencil aria-hidden="true" />
+                      正在修改已发送消息 · 发送后创建新版本
+                    </span>
+                    <button
+                      type="button"
+                      disabled={preparingSend}
+                      onClick={cancelEditingUserMessage}
+                    >
+                      取消
+                    </button>
+                  </div>
+                )}
                 <ConversationComposer
                   commands={commands.suggestions}
                   resources={composerResources}
@@ -1434,12 +1499,14 @@ export function ConversationPage() {
                   busy={preparingSend || commands.pending || busy === "send-message"}
                   disabled={Boolean(conversation?.loadError)}
                   submitDisabled={
-                    !draftReferences.references.length && isDesktopCommandInput(draft)
-                      ? false
-                      : Boolean(pendingSend) ||
-                        !composerReady ||
-                        !composerModelRouteId ||
-                        usingOpenCodeFree
+                    editingUserMessage
+                      ? Boolean(pendingSend) || !sessionRef
+                      : !draftReferences.references.length && isDesktopCommandInput(draft)
+                        ? false
+                        : Boolean(pendingSend) ||
+                          !composerReady ||
+                          !composerModelRouteId ||
+                          usingOpenCodeFree
                   }
                   placeholder={
                     sessionId
@@ -1812,7 +1879,9 @@ export function ConversationPage() {
                   : undefined
               }
               onEditUserMessage={
-                !activeRun && session?.status !== "archived" ? reviseUserMessage : undefined
+                !activeRun && session?.status !== "archived"
+                  ? beginEditingUserMessage
+                  : undefined
               }
               onQuoteSelection={quoteIntoMainComposer}
               onAskInSideChat={
@@ -1899,147 +1968,6 @@ export function ConversationPage() {
       {goalControls.dialog}
     </SessionWorkbarLayout>
   );
-}
-
-function ConversationQueue({
-  actions,
-  disabled,
-  items,
-  sessionRef,
-  running,
-}: {
-  readonly actions: Pick<
-    RuntimeActions,
-    "updateQueuedInput" | "removeQueuedInput" | "reorderQueuedInputs" | "moveQueuedInputToNext"
-  >;
-  readonly disabled: boolean;
-  readonly items: readonly RuntimeQueuedInput[];
-  readonly sessionRef: WorkspaceSessionRef;
-  readonly running: boolean;
-}) {
-  const [editingQueueId, setEditingQueueId] = useState<string>();
-  const [draft, setDraft] = useState("");
-  const editingItem = items.find((item) => item.queueId === editingQueueId);
-
-  const beginEdit = (item: RuntimeQueuedInput) => {
-    setEditingQueueId(item.queueId);
-    setDraft(queuedInputText(item.input));
-  };
-  const saveEdit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (!editingItem) return;
-    const input = replaceQueuedInputText(editingItem.input, draft);
-    if (await actions.updateQueuedInput(sessionRef, editingItem.queueId, input)) {
-      setEditingQueueId(undefined);
-    }
-  };
-  const reorder = (index: number, offset: -1 | 1) => {
-    const target = index + offset;
-    if (target < 0 || target >= items.length) return;
-    const queueIds = items.map((item) => item.queueId);
-    [queueIds[index], queueIds[target]] = [queueIds[target]!, queueIds[index]!];
-    void actions.reorderQueuedInputs(sessionRef, queueIds);
-  };
-
-  return (
-    <section className="conversation-queue" aria-label="待发送队列">
-      <header>
-        <strong>待发送 · {items.length}</strong>
-        {running && <span>当前运行完成后按此顺序执行</span>}
-      </header>
-      <ol>
-        {items.map((item, index) => (
-          <li key={item.queueId}>
-            {editingQueueId === item.queueId ? (
-              <form onSubmit={(event) => void saveEdit(event)}>
-                <label>
-                  <span>{queuedInputLabel(item.input)} 内容</span>
-                  <textarea
-                    autoFocus
-                    value={draft}
-                    onChange={(event) => setDraft(event.currentTarget.value)}
-                    rows={2}
-                  />
-                </label>
-                <div className="conversation-queue__actions">
-                  <button type="submit" disabled={disabled || !draft.trim()}>
-                    保存
-                  </button>
-                  <button
-                    type="button"
-                    disabled={disabled}
-                    onClick={() => setEditingQueueId(undefined)}
-                  >
-                    取消
-                  </button>
-                </div>
-              </form>
-            ) : (
-              <>
-                <div className="conversation-queue__content">
-                  <strong>{queuedInputLabel(item.input)}</strong>
-                  <span>{queuedInputText(item.input) || "（空内容）"}</span>
-                </div>
-                <div className="conversation-queue__actions">
-                  <button type="button" disabled={disabled} onClick={() => beginEdit(item)}>
-                    编辑
-                  </button>
-                  <button
-                    type="button"
-                    aria-label={`将第 ${index + 1} 条上移`}
-                    disabled={disabled || index === 0}
-                    onClick={() => reorder(index, -1)}
-                  >
-                    ↑
-                  </button>
-                  <button
-                    type="button"
-                    aria-label={`将第 ${index + 1} 条下移`}
-                    disabled={disabled || index === items.length - 1}
-                    onClick={() => reorder(index, 1)}
-                  >
-                    ↓
-                  </button>
-                  <button
-                    type="button"
-                    disabled={disabled || index === 0}
-                    onClick={() => void actions.moveQueuedInputToNext(sessionRef, item.queueId)}
-                  >
-                    移至下一项
-                  </button>
-                  <button
-                    type="button"
-                    disabled={disabled}
-                    onClick={() => void actions.removeQueuedInput(sessionRef, item.queueId)}
-                  >
-                    删除
-                  </button>
-                </div>
-              </>
-            )}
-          </li>
-        ))}
-      </ol>
-    </section>
-  );
-}
-
-function queuedInputLabel(input: RuntimeUserInput): string {
-  if (input.kind === "skill") return `技能 · ${input.name}`;
-  if (input.kind === "agent") return `子代理 · ${input.name}`;
-  return "消息";
-}
-
-function queuedInputText(input: RuntimeUserInput): string {
-  if (input.kind === "skill") return input.args ?? "";
-  if (input.kind === "agent") return input.task;
-  return input.text;
-}
-
-function replaceQueuedInputText(input: RuntimeUserInput, text: string): RuntimeUserInput {
-  if (input.kind === "skill") return { ...input, args: text };
-  if (input.kind === "agent") return { ...input, task: text };
-  return { ...input, text };
 }
 
 function timelineItemToConversationItem(item: TimelineItem): ConversationItemView {

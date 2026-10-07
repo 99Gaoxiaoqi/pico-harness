@@ -546,6 +546,86 @@ test("historical fork cannot re-expand the source's current managed boundary", a
   }
 });
 
+test("historical fork keeps current settings when the selected prefix predates its settings event", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-session-historical-fork-settings-"));
+  const workDir = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  const manager = new SessionManager();
+  const sourceSessionId = "historical-fork-settings-source";
+  const targetSessionId = "historical-fork-settings-target";
+  const source = await manager.getOrCreate(sourceSessionId, workDir, {
+    persistence: true,
+    picoHome,
+    runtimePort: createEngineRuntimePort(),
+  });
+  try {
+    await source.recover();
+    await source.importHistoryMessages([
+      { role: "user", content: "earlier prompt" },
+      { role: "assistant", content: "earlier answer" },
+      { role: "user", content: "message to revise" },
+    ]);
+    const entries = await source.runtimeEventStore!.readSessionEntries(sourceSessionId);
+    const targetIndex = entries.findIndex(
+      ({ event }) =>
+        event.kind === "message.committed" && event.data.message.content === "message to revise",
+    );
+    assert.ok(targetIndex > 0, "the revised user message must have a prior event boundary");
+    const throughEventId = entries[targetIndex - 1]!.event.eventId;
+
+    getOrCreateSessionSettings(
+      {
+        sessionId: sourceSessionId,
+        cwd: workDir,
+        picoHome,
+        provider: "openai",
+        model: "test",
+        modelRouteId: "openai/test",
+        collaborationMode: "agent",
+        permissionMode: "ask",
+      },
+      { persistence: source },
+    );
+    await source.flushPersistence();
+    assert.equal(source.getRuntimeStateSnapshot().settings?.modelRouteId, "openai/test");
+    const forkSnapshot = await source.readDurableForkSnapshotAt(throughEventId);
+    assert.equal(forkSnapshot.hydration.runtime.settings?.modelRouteId, "openai/test");
+
+    const service = new SessionForkService({
+      workDir,
+      picoHome,
+      sessionManager: manager,
+      runtimeStore: source.runtimeEventStore!,
+      runtimePort: createSessionForkRuntimePort(),
+    });
+    try {
+      await service.fork({ sourceSessionId, targetSessionId, throughEventId });
+    } finally {
+      service.close();
+    }
+
+    const target = await manager.getOrCreate(targetSessionId, workDir, {
+      persistence: true,
+      picoHome,
+      runtimePort: createEngineRuntimePort(),
+    });
+    try {
+      await target.recover();
+      assert.equal(target.getRuntimeStateSnapshot().settings?.modelRouteId, "openai/test");
+      assert.deepEqual(
+        target.getHistory().map((message) => message.content),
+        ["earlier prompt", "earlier answer"],
+      );
+    } finally {
+      await target.close();
+    }
+  } finally {
+    await manager.delete(sourceSessionId, workDir, { picoHome })?.close();
+    await manager.delete(targetSessionId, workDir, { picoHome })?.close();
+    await rmRetry(root);
+  }
+});
+
 test("settings-less fork recovery rejects the obsolete frozen bundle", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-session-fork-legacy-permission-"));
   const workDir = join(root, "workspace");

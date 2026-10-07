@@ -87,6 +87,7 @@ const CONTROL_METHODS = [
   "session.queue.remove",
   "session.queue.reorder",
   "session.queue.moveToNext",
+  "session.queue.steer",
   "session.compact",
   "session.settings.update",
   "session.send",

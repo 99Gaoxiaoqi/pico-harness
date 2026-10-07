@@ -53,6 +53,9 @@ export interface DesktopSessionRequestContext {
   readonly moveQueuedInputToNext: (
     params: RuntimeRequest<"session.queue.moveToNext">["params"],
   ) => Awaitable<JsonValue>;
+  readonly steerQueuedInput: (
+    params: RuntimeRequest<"session.queue.steer">["params"],
+  ) => Awaitable<JsonValue>;
   readonly compactSession: (workspacePath: string, sessionId: string) => Awaitable<JsonValue>;
   readonly getRuntimeSessionSettings: (
     workspacePath: string,
@@ -112,6 +115,7 @@ export function createDesktopSessionRequestHandlers(
   | "session.queue.remove"
   | "session.queue.reorder"
   | "session.queue.moveToNext"
+  | "session.queue.steer"
   | "session.compact"
   | "session.settings.get"
   | "session.context.get"
@@ -164,6 +168,7 @@ export function createDesktopSessionRequestHandlers(
     "session.queue.remove": (request) => context.removeQueuedInput(request.params),
     "session.queue.reorder": (request) => context.reorderQueuedInputs(request.params),
     "session.queue.moveToNext": (request) => context.moveQueuedInputToNext(request.params),
+    "session.queue.steer": (request) => context.steerQueuedInput(request.params),
     "session.compact": (request) =>
       context.compactSession(request.params.workspacePath, request.params.sessionId),
     "session.settings.get": (request) =>

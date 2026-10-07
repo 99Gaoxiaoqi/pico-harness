@@ -8,12 +8,65 @@ import type { ComposerStatus } from "../../../apps/desktop/src/renderer/conversa
 import { installRendererSsr } from "./renderer-ssr-fixture.js";
 
 after(installRendererSsr());
-const [{ ConversationComposer }, { ConversationSurface }, { ConversationTranscript }] =
-  await Promise.all([
-    import("../../../apps/desktop/src/renderer/conversation/ConversationComposer.js"),
-    import("../../../apps/desktop/src/renderer/conversation/ConversationSurface.js"),
-    import("../../../apps/desktop/src/renderer/conversation/ConversationTranscript.js"),
-  ]);
+const [
+  { ConversationComposer },
+  { ConversationSurface },
+  { ConversationTranscript },
+  { ConversationQueue },
+] = await Promise.all([
+  import("../../../apps/desktop/src/renderer/conversation/ConversationComposer.js"),
+  import("../../../apps/desktop/src/renderer/conversation/ConversationSurface.js"),
+  import("../../../apps/desktop/src/renderer/conversation/ConversationTranscript.js"),
+  import("../../../apps/desktop/src/renderer/conversation/ConversationQueue.js"),
+]);
+
+test("queue exposes steer, delete and more; only plain text with a current run can steer", () => {
+  const actions = {
+    updateQueuedInput: async () => true,
+    removeQueuedInput: async () => true,
+    reorderQueuedInputs: async () => true,
+    moveQueuedInputToNext: async () => true,
+    steerQueuedInput: async () => true,
+  };
+  const props = {
+    actions,
+    disabled: false,
+    sessionRef: { workspacePath: "/worktree", sessionId: "session-1" },
+    items: [
+      { queueId: "queued-1", input: { kind: "text" as const, text: "或者是引导？" }, createdAt: 1 },
+    ],
+    steerSupported: true,
+    runId: "run-1",
+  };
+  const markup = renderToStaticMarkup(React.createElement(ConversationQueue, props));
+  assert.match(markup, /或者是引导？/u);
+  assert.match(markup, /aria-label="引导第 1 条消息"(?![^>]*disabled)/u);
+  assert.match(markup, /aria-label="删除第 1 条排队消息"/u);
+  assert.match(markup, /第 1 条排队消息的更多操作/u);
+  assert.doesNotMatch(markup, /当前运行完成后按此顺序执行/u);
+  for (const next of [
+    { ...props, runId: undefined },
+    { ...props, steerSupported: false },
+    {
+      ...props,
+      items: [{ ...props.items[0]!, input: { kind: "skill" as const, name: "review" } }],
+    },
+    {
+      ...props,
+      items: [
+        {
+          ...props.items[0]!,
+          input: { kind: "text" as const, text: "swarm", orchestrationMode: "swarm" as const },
+        },
+      ],
+    },
+  ]) {
+    assert.match(
+      renderToStaticMarkup(React.createElement(ConversationQueue, next)),
+      /aria-label="引导第 1 条消息"[^>]*disabled/u,
+    );
+  }
+});
 
 test("conversation waits for the safe pause boundary before offering resume and retains queued messages", async () => {
   const page = await readFile(
@@ -114,6 +167,33 @@ test("conversation keeps tool output behind a disclosure while retaining failure
   assert.match(markup, /aria-label="会话内容"/u);
   assert.match(markup, /aria-label="消息" contentEditable="true" role="textbox"/u);
   assert.match(markup, /aria-label="发送消息"/u);
+});
+
+test("user messages expose copy and edit-and-resend actions instead of an inline branch form", async () => {
+  const markup = renderToStaticMarkup(
+    React.createElement(ConversationTranscript, {
+      items: [
+        {
+          id: "message:event-1:user",
+          kind: "userMessage",
+          text: "修改这条请求",
+          at: Date.UTC(2026, 8, 9, 1, 48),
+        },
+      ],
+      onEditUserMessage: () => undefined,
+    }),
+  );
+
+  assert.match(markup, /aria-label="消息操作"/u);
+  assert.match(markup, /title="复制消息" aria-label="复制消息"/u);
+  assert.match(markup, /title="编辑并重发" aria-label="编辑并重发"/u);
+  assert.match(markup, /dateTime="2026-09-09T01:48:00\.000Z"/u);
+  assert.doesNotMatch(markup, /提交为新分支|正在创建修订/u);
+  const page = await readFile(
+    new URL("../../../apps/desktop/src/renderer/pages/ConversationPage.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(page, /正在修改已发送消息 · 发送后创建新版本/u);
 });
 
 test("conversation collapses consecutive tools across model turns in one run and summarizes live progress", () => {

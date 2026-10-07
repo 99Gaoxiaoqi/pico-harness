@@ -69,7 +69,7 @@ export interface ConversationComposerProps {
 }
 
 const behaviorLabels: Readonly<Record<Exclude<ComposerBehavior, "auto">, string>> = {
-  steer: "调整当前执行",
+  steer: "引导当前运行",
   queue: "排在下一轮",
   replace: "停止并替换",
 };
@@ -386,7 +386,9 @@ export function ConversationComposer({
                 ? "将消息排到下一轮"
                 : effectiveBehavior === "replace"
                   ? "停止当前执行并发送"
-                  : "发送消息"
+                  : effectiveBehavior === "steer"
+                    ? "引导当前运行"
+                    : "发送消息"
             }
           />
         }

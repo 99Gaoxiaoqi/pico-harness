@@ -464,8 +464,8 @@ export class WorkspaceTaskRuntime {
 
   steer(runId: string, message: string): WorkspaceRunSnapshot {
     const record = this.requireRun(runId);
-    if (isTerminalRunStatus(record.snapshot.status)) {
-      throw new Error(`Run ${runId} 已结束，无法追加引导`);
+    if (isTerminalRunStatus(record.snapshot.status) || record.snapshot.status === "cancelling") {
+      throw new Error(`Run ${runId} 已结束或正在取消，无法追加引导`);
     }
     const normalized = message.trim();
     if (!normalized) throw new Error("追加引导不能为空");

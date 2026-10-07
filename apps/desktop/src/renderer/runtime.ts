@@ -423,6 +423,7 @@ export interface RuntimeActions {
   removeQueuedInput(ref: WorkspaceSessionRef, queueId: string): Promise<boolean>;
   reorderQueuedInputs(ref: WorkspaceSessionRef, queueIds: readonly string[]): Promise<boolean>;
   moveQueuedInputToNext(ref: WorkspaceSessionRef, queueId: string): Promise<boolean>;
+  steerQueuedInput(ref: WorkspaceSessionRef, queueId: string, expectedRunId: string): Promise<boolean>;
   compactSession(ref: WorkspaceSessionRef): Promise<boolean>;
   updateSessionSettings(
     ref: WorkspaceSessionRef,
@@ -584,6 +585,7 @@ export interface RuntimeStore {
   readonly pendingSends?: readonly PendingSendEntry[];
   readonly pendingSendBusy?: readonly string[];
   readonly sendRecoverySupported?: boolean;
+  readonly queueSteerSupported?: boolean;
 }
 
 export function useRuntimeStore(): RuntimeStore {
@@ -1926,6 +1928,17 @@ export function useRuntimeStore(): RuntimeStore {
     ],
   );
 
+  const refreshQueue = useCallback(
+    (bridge: DesktopBridge, ref: WorkspaceSessionRef) => {
+      // Queue mutations do not advance the transcript watermark. Reopen the
+      // replica immediately so later stream frames cannot restore its old queue.
+      void loadConversation(bridge, ref.workspacePath, ref.sessionId).catch((cause) =>
+        setMessage(`队列操作已完成，但刷新失败：${errorMessage(cause)}`),
+      );
+    },
+    [loadConversation],
+  );
+
   const actions = useMemo<RuntimeActions>(
     () => ({
       dismissMessage() {
@@ -2357,15 +2370,12 @@ export function useRuntimeStore(): RuntimeStore {
               workspaceLoadIntentRef.current !== workspacePath
             )
               return;
-            await loadWorkspace(bridge, workspacePath);
-            if (
-              dataRef.current.workspacePath !== workspacePath ||
-              workspaceLoadIntentRef.current !== workspacePath
-            )
-              return;
-            if (resolvedSessionId) {
-              await loadConversation(bridge, workspacePath, resolvedSessionId);
-            }
+            await Promise.all([
+              resolvedSessionId
+                ? loadConversation(bridge, workspacePath, resolvedSessionId)
+                : undefined,
+              loadWorkspace(bridge, workspacePath),
+            ]);
           })().catch((cause) =>
             setMessage(`发送已确认，但原会话暂时不可用：${errorMessage(cause)}`),
           );
@@ -2503,6 +2513,7 @@ export function useRuntimeStore(): RuntimeStore {
                 current.map((item) => (item.queueId === queueId ? result.queuedInput : item)),
               ),
             );
+            refreshQueue(bridge, ref);
           } catch (error) {
             if (error instanceof RuntimeInvocationError && error.code === "CONFLICT") {
               await loadConversation(bridge, workspacePath, sessionId);
@@ -2526,6 +2537,7 @@ export function useRuntimeStore(): RuntimeStore {
                 current.filter((item) => item.queueId !== queueId),
               ),
             );
+            refreshQueue(bridge, ref);
           } catch (error) {
             if (error instanceof RuntimeInvocationError && error.code === "CONFLICT") {
               await loadConversation(bridge, workspacePath, sessionId);
@@ -2545,6 +2557,7 @@ export function useRuntimeStore(): RuntimeStore {
               queueIds: [...queueIds],
             });
             setData((value) => withConversationQueue(value, ref, result.queuedInputs));
+            refreshQueue(bridge, ref);
           } catch (error) {
             if (error instanceof RuntimeInvocationError && error.code === "CONFLICT") {
               await loadConversation(bridge, workspacePath, sessionId);
@@ -2564,8 +2577,46 @@ export function useRuntimeStore(): RuntimeStore {
               queueId,
             });
             setData((value) => withConversationQueue(value, ref, result.queuedInputs));
+            refreshQueue(bridge, ref);
           } catch (error) {
             if (error instanceof RuntimeInvocationError && error.code === "CONFLICT") {
+              await loadConversation(bridge, workspacePath, sessionId);
+            }
+            throw error;
+          }
+        });
+      },
+      async steerQueuedInput(ref, queueId, expectedRunId) {
+        const { workspacePath, sessionId } = ref;
+        if (!workspacePath || !sessionId) return false;
+        return perform("queue-steer", async (bridge) => {
+          if (!runtimeCapabilitiesRef.current.has("session-queue-steer-v1")) {
+            throw new Error("当前 Runtime 不支持队列引导，请更新并重启 Pico。");
+          }
+          try {
+            await invoke(bridge, "session.queue.steer", {
+              workspacePath,
+              sessionId,
+              queueId,
+              expectedRunId,
+            });
+            const key = workspaceSessionKey(ref);
+            setData((value) =>
+              withConversationQueue(
+                value,
+                ref,
+                (value.conversations[key]?.queuedInputs ?? []).filter(
+                  (item) => item.queueId !== queueId,
+                ),
+              ),
+            );
+            refreshQueue(bridge, ref);
+            setMessage("已引导当前运行，将在下一次模型调用前接收这条指令。");
+          } catch (error) {
+            if (
+              error instanceof RuntimeInvocationError &&
+              error.code === "CONFLICT"
+            ) {
               await loadConversation(bridge, workspacePath, sessionId);
             }
             throw error;
@@ -3914,6 +3965,7 @@ export function useRuntimeStore(): RuntimeStore {
       loadWorkspaceIndex,
       perform,
       preview,
+      refreshQueue,
       getPendingSendRepository,
       syncPendingSends,
     ],
@@ -3929,6 +3981,7 @@ export function useRuntimeStore(): RuntimeStore {
     pendingSends,
     pendingSendBusy,
     sendRecoverySupported: runtimeCapabilitiesRef.current.has(SESSION_SEND_REPLAY_CAPABILITY),
+    queueSteerSupported: runtimeCapabilitiesRef.current.has("session-queue-steer-v1"),
   };
 }
 
