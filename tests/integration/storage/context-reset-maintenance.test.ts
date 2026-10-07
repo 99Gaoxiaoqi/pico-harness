@@ -16,9 +16,15 @@ import {
 // @ts-expect-error Offline maintenance is deliberately a Node-only mjs entrypoint.
 import { resetContextHistory } from "../../../scripts/maintenance/reset-context-history.mjs";
 
-function seed(database: DatabaseSync, version: 7 | 8) {
+function seed(database: DatabaseSync, version: 7 | 8 | 9) {
   database.exec("PRAGMA foreign_keys=ON");
   migrateOperationalDatabaseSync(database, ALL_WORKSPACE_SQLITE_SCOPES);
+  if (version < 9) {
+    database.exec(`DROP INDEX desktop_input_queue_by_session;
+      ALTER TABLE desktop_input_queue DROP COLUMN queue_order;
+      CREATE INDEX desktop_input_queue_by_session
+        ON desktop_input_queue(workspace_path, session_id, created_at, queue_id);`);
+  }
   if (version === 7) {
     // Simulate the exact preceding control shape; the maintenance script never migrates it.
     database.exec(`DROP TRIGGER usage_session_deleted; DROP TABLE session_latest_context; DROP INDEX usage_latest_context_repair;
@@ -29,6 +35,8 @@ function seed(database: DatabaseSync, version: 7 | 8) {
           record_json=json_remove(record_json,'$.sessionId','$.conversationId','$.runId','$.turnId') WHERE session_id=OLD.session_id;
       END;
       UPDATE operational_schema_migrations SET version=7 WHERE scope='control';`);
+  } else if (version === 8) {
+    database.exec("UPDATE operational_schema_migrations SET version=8 WHERE scope='control'");
   }
   database.exec(`
     INSERT INTO event_log_epoch VALUES(1,1,'retired-protocol','previous-cut','now');
@@ -42,7 +50,8 @@ function seed(database: DatabaseSync, version: 7 | 8) {
     INSERT INTO usage_physical_attempts VALUES('attempt','call','s',NULL,NULL,'r','owner',0,'succeeded','now','{"sessionId":"s"}');
     INSERT INTO usage_accounting_versions VALUES('s',1);
     INSERT INTO usage_deleted_sessions VALUES('earlier');
-    INSERT INTO desktop_input_queue VALUES('queue','/work','s','{}',1);
+    INSERT INTO desktop_input_queue(queue_id,workspace_path,session_id,input_json,created_at)
+      VALUES('queue','/work','s','{}',1);
     INSERT INTO runtime_storage_assets VALUES('asset','s','r','tool_result','/business/never-delete.txt','digest',7,'{}','now');
     INSERT INTO agent_graphs VALUES('graph','s',1,'open',1,1,NULL);
     INSERT INTO agent_graph_schedule_revisions VALUES('graph',1,'op','hash','add','{}','s','t','r','call',1);
@@ -51,11 +60,11 @@ function seed(database: DatabaseSync, version: 7 | 8) {
     INSERT INTO workspace_kv VALUES('project.config','{"keep":"configuration"}');
     INSERT INTO control_metadata VALUES('nextRuntimeEventSequence','7');
   `);
-  if (version === 8)
+  if (version >= 8)
     database.exec("INSERT INTO session_latest_context VALUES('s','attempt','now','{}')");
 }
 
-test("offline context reset clears v7/v8 execution facts atomically and preserves cron, workspace configuration and user memory", async () => {
+test("offline context reset clears v7/v8/v9 execution facts atomically and preserves cron, workspace configuration and user memory", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-context-reset-"));
   try {
     const memoryPath = join(root, "memory.sqlite");
@@ -71,7 +80,7 @@ test("offline context reset clears v7/v8 execution facts atomically and preserve
     await writeFile(configPath, '{"credentialRef":"retained"}');
     const businessPath = join(root, "business.txt");
     await writeFile(businessPath, "business data");
-    for (const version of [7, 8] as const) {
+    for (const version of [7, 8, 9] as const) {
       const storageRoot = join(root, `v${version}`);
       await mkdir(storageRoot);
       const path = join(storageRoot, "pico.sqlite");
@@ -127,7 +136,7 @@ test("offline context reset clears v7/v8 execution facts atomically and preserve
         verify
           .prepare("SELECT version FROM operational_schema_migrations WHERE scope='control'")
           .get()!.version,
-        8,
+        version === 7 ? 9 : version,
       );
       const initialized = coordinateEventLogHardCut(verify);
       assert.equal(initialized.status, "cut");
@@ -167,7 +176,7 @@ test("offline context reset rolls back deletion failures and refuses unexpected 
   const path = join(root, "pico.sqlite");
   try {
     const setup = new DatabaseSync(path);
-    seed(setup, 8);
+    seed(setup, 9);
     setup.exec(
       "CREATE TRIGGER block_session_reset BEFORE DELETE ON sessions BEGIN SELECT RAISE(ABORT,'fixture block'); END",
     );
