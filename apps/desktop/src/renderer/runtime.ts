@@ -4053,6 +4053,11 @@ function createPreviewBridge(): DesktopBridge {
     sessionFrames: {
       subscribe: () => ({ dispose: () => undefined }),
     },
+    terminalFrames: {
+      setFocused: () => undefined,
+      clipboard: () => undefined,
+      subscribe: () => ({ dispose: () => undefined }),
+    },
     onUnavailable: () => () => undefined,
     onRecovered: () => () => undefined,
     platform: {

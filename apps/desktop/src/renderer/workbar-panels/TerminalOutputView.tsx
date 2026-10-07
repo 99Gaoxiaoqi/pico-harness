@@ -3,12 +3,17 @@ import type { Terminal } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";
 import type { WorkbarTerminalGrid, WorkbarTerminalOutput } from "./TerminalWorkbarPanel.js";
 import { createTerminalOutputWriter } from "./terminal-output-writer.js";
+import { readTerminalTheme } from "./terminal-theme.js";
 
 interface TerminalOutputViewProps {
   readonly title: string;
   readonly output?: WorkbarTerminalOutput;
   readonly active: boolean;
   readonly capability: "pty" | "pipe";
+  readonly inputEnabled: boolean;
+  readonly onInput: (data: string) => void;
+  readonly onFocusChange?: (focused: boolean) => void;
+  readonly onClipboard?: (action: "copy" | "paste") => void;
   readonly onResize?: (grid: WorkbarTerminalGrid) => void;
 }
 
@@ -17,6 +22,10 @@ export function TerminalOutputView({
   output,
   active,
   capability,
+  inputEnabled,
+  onInput,
+  onFocusChange,
+  onClipboard,
   onResize,
 }: TerminalOutputViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -24,28 +33,51 @@ export function TerminalOutputView({
     terminal: Terminal;
     fit: FitAddon;
     write: ReturnType<typeof createTerminalOutputWriter>;
+    sync: (focus?: boolean) => void;
   } | null>(null);
-  const propsRef = useRef({ output, active, onResize });
-  propsRef.current = { output, active, onResize };
+  const propsRef = useRef({
+    output,
+    active,
+    inputEnabled,
+    onInput,
+    onResize,
+    onFocusChange,
+    onClipboard,
+  });
+  propsRef.current = {
+    output,
+    active,
+    inputEnabled,
+    onInput,
+    onResize,
+    onFocusChange,
+    onClipboard,
+  };
   const [error, setError] = useState<string>();
 
   useEffect(() => {
     let disposed = false;
     let observer: ResizeObserver | undefined;
+    let themeObserver: MutationObserver | undefined;
+    let themeFrame = 0;
+    let themeMedia: MediaQueryList | undefined;
+    let updateTheme: (() => void) | undefined;
+    let inputSubscription: { dispose(): void } | undefined;
     let lastGrid = "";
     void Promise.all([import("@xterm/xterm"), import("@xterm/addon-fit")])
       .then(([{ Terminal }, { FitAddon }]) => {
         const container = containerRef.current;
         if (disposed || !container) return;
         const terminal = new Terminal({
-          disableStdin: true,
+          disableStdin: !propsRef.current.inputEnabled,
+          cursorBlink: true,
           screenReaderMode: true,
           convertEol: capability === "pipe",
           fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
           fontSize: 12,
           lineHeight: 1.5,
           scrollback: 10000,
-          theme: { background: "#0b1020", foreground: "#dbeafe" },
+          theme: readTerminalTheme(container),
         });
         const fit = new FitAddon();
         terminal.loadAddon(fit);
@@ -59,18 +91,71 @@ export function TerminalOutputView({
             else terminal.write(data, callback);
           },
         });
-        runtimeRef.current = { terminal, fit, write };
-        const sync = () => {
+        inputSubscription = terminal.onData((data) => {
+          if (propsRef.current.active && propsRef.current.inputEnabled) {
+            propsRef.current.onInput(data);
+          }
+        });
+        terminal.attachCustomKeyEventHandler((event) => {
+          const windowsClipboard =
+            !navigator.platform.startsWith("Mac") &&
+            event.ctrlKey &&
+            event.shiftKey &&
+            !event.altKey &&
+            !event.metaKey;
+          if (!windowsClipboard || !["c", "v"].includes(event.key.toLowerCase())) return true;
+          event.preventDefault();
+          if (event.type !== "keydown") return false;
+          if (event.key.toLowerCase() === "c") {
+            if (terminal.hasSelection()) propsRef.current.onClipboard?.("copy");
+          } else if (propsRef.current.inputEnabled && propsRef.current.active) {
+            propsRef.current.onClipboard?.("paste");
+          }
+          return false;
+        });
+        let needsFocus = true;
+        const sync = (focus = false) => {
           if (!propsRef.current.active || !container.clientWidth || !container.clientHeight) return;
           fit.fit();
+          if ((focus || needsFocus) && document.visibilityState === "visible") {
+            terminal.focus();
+            needsFocus = false;
+          }
           const grid = `${terminal.cols}:${terminal.rows}`;
           if (grid === lastGrid) return;
           lastGrid = grid;
           propsRef.current.onResize?.({ columns: terminal.cols, rows: terminal.rows });
         };
-        observer = new ResizeObserver(sync);
+        runtimeRef.current = { terminal, fit, write, sync };
+        let previousTheme = JSON.stringify(terminal.options.theme);
+        updateTheme = () => {
+          if (themeFrame || disposed) return;
+          themeFrame = requestAnimationFrame(() => {
+            themeFrame = 0;
+            if (disposed) return;
+            const theme = readTerminalTheme(container);
+            const serialized = JSON.stringify(theme);
+            if (serialized === previousTheme) return;
+            previousTheme = serialized;
+            terminal.options.theme = theme;
+          });
+        };
+        themeObserver = new MutationObserver(updateTheme);
+        for (
+          let ancestor: HTMLElement | null = container;
+          ancestor;
+          ancestor = ancestor.parentElement
+        ) {
+          themeObserver.observe(ancestor, {
+            attributes: true,
+            attributeFilter: ["class", "style", "data-theme", "data-mode"],
+          });
+        }
+        themeMedia = matchMedia("(prefers-color-scheme: dark)");
+        themeMedia.addEventListener("change", updateTheme);
+        observer = new ResizeObserver(() => sync());
         observer.observe(container);
-        sync();
+        sync(true);
         if (propsRef.current.output) void write(propsRef.current.output);
       })
       .catch(() => {
@@ -79,8 +164,15 @@ export function TerminalOutputView({
     return () => {
       disposed = true;
       observer?.disconnect();
+      themeObserver?.disconnect();
+      cancelAnimationFrame(themeFrame);
+      if (updateTheme) themeMedia?.removeEventListener("change", updateTheme);
+      inputSubscription?.dispose();
       runtimeRef.current?.terminal.dispose();
       runtimeRef.current = null;
+      propsRef.current.onFocusChange?.(
+        Boolean(document.activeElement?.closest(".tool-panel__terminal-screen")),
+      );
     };
   }, [capability]);
 
@@ -89,11 +181,15 @@ export function TerminalOutputView({
   }, [output]);
 
   useEffect(() => {
-    const runtime = runtimeRef.current;
-    if (!active || !runtime || !containerRef.current?.clientWidth) return;
-    runtime.fit.fit();
-    propsRef.current.onResize?.({ columns: runtime.terminal.cols, rows: runtime.terminal.rows });
+    runtimeRef.current?.sync(active);
   }, [active]);
+
+  useEffect(() => {
+    const runtime = runtimeRef.current;
+    if (!runtime) return;
+    runtime.terminal.options.disableStdin = !inputEnabled;
+    if (active && inputEnabled) runtime.sync(true);
+  }, [active, inputEnabled]);
 
   return (
     <>
@@ -103,6 +199,10 @@ export function TerminalOutputView({
         role="log"
         aria-label={`${title} 输出`}
         aria-live="off"
+        onFocusCapture={() => onFocusChange?.(true)}
+        onBlurCapture={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget)) onFocusChange?.(false);
+        }}
       />
       {error && <span role="alert">{error}</span>}
     </>

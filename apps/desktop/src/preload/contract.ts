@@ -7,6 +7,7 @@ import {
   type RuntimeParams,
   type RuntimeResult,
   type RuntimeSessionSubscriptionFrame,
+  type RuntimeTerminalFrame,
 } from "@pico/protocol";
 import type { DesktopArtifactsApi } from "./artifact-contract.js";
 
@@ -19,6 +20,10 @@ export const DESKTOP_IPC_CHANNELS = {
   runtimeEvent: "pico:runtime:event",
   sessionFrame: "pico:runtime:session-frame",
   sessionDisconnected: "pico:runtime:session-disconnected",
+  terminalFrame: "pico:runtime:terminal-frame",
+  terminalDisconnected: "pico:runtime:terminal-disconnected",
+  terminalKeyboardFocus: "pico:terminal:keyboard-focus",
+  terminalClipboard: "pico:terminal:clipboard",
   runtimeUnavailable: "pico:runtime:unavailable",
   runtimeRecovered: "pico:runtime:recovered",
   chooseWorkspace: "pico:platform:choose-workspace",
@@ -109,6 +114,14 @@ export interface DesktopBridge {
   readonly sessionFrames: {
     subscribe(
       listener: (frame: RuntimeSessionSubscriptionFrame) => void,
+      onDisconnect?: () => void,
+    ): { dispose(): void };
+  };
+  readonly terminalFrames: {
+    setFocused(focused: boolean): void;
+    clipboard(action: "copy" | "paste"): void;
+    subscribe(
+      listener: (frame: RuntimeTerminalFrame) => void,
       onDisconnect?: () => void,
     ): { dispose(): void };
   };

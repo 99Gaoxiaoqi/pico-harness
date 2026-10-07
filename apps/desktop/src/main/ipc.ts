@@ -29,6 +29,7 @@ import { RuntimeClientError, type RuntimeClientAdapter } from "./runtime-client-
 import type { EmbeddedBrowserAuthority } from "./browser-manager.js";
 import { isDesktopRuntimeInvocationAllowed } from "./daemon-controller.js";
 import { createDesktopWorkspaceStorageRecovery } from "./workspace-storage-recovery.js";
+import { installTerminalKeyboardShortcuts } from "./terminal-keyboard.js";
 
 interface LifecycleControls {
   getBackgroundMode(): boolean;
@@ -69,9 +70,38 @@ export function registerDesktopIpcHandlers(options: {
       contents.send(DESKTOP_IPC_CHANNELS.sessionDisconnected);
     },
   );
+  const terminalFrames = runtime.subscribeTerminalFrames?.(
+    (frame) => {
+      const contents = options.getTrustedWebContents();
+      if (!contents || contents.isDestroyed()) return;
+      contents.send(DESKTOP_IPC_CHANNELS.terminalFrame, frame);
+    },
+    () => {
+      const contents = options.getTrustedWebContents();
+      if (!contents || contents.isDestroyed()) return;
+      contents.send(DESKTOP_IPC_CHANNELS.terminalDisconnected);
+    },
+  );
 
   const trusted = (event: IpcMainInvokeEvent | IpcMainEvent): boolean =>
     event.sender === options.getTrustedWebContents() && !event.sender.isDestroyed();
+  const keyboardOwners = new Map<
+    WebContents,
+    ReturnType<typeof installTerminalKeyboardShortcuts>
+  >();
+  ipcMain.on(DESKTOP_IPC_CHANNELS.terminalKeyboardFocus, (event, focused: unknown) => {
+    if (!trusted(event) || typeof focused !== "boolean") return;
+    let owner = keyboardOwners.get(event.sender);
+    if (!owner) {
+      owner = installTerminalKeyboardShortcuts(event.sender);
+      keyboardOwners.set(event.sender, owner);
+    }
+    owner.setFocused(focused);
+  });
+  ipcMain.on(DESKTOP_IPC_CHANNELS.terminalClipboard, (event, action: unknown) => {
+    if (!trusted(event) || (action !== "copy" && action !== "paste")) return;
+    keyboardOwners.get(event.sender)?.clipboard(action);
+  });
   const disposeArtifacts = registerArtifactIpcHandlers({ ipcMain, runtime, trusted });
   const disposeCommands = registerCommandIpc({
     ipcMain,
@@ -115,6 +145,13 @@ export function registerDesktopIpcHandlers(options: {
     let dispatched = false;
     try {
       const envelope = readInvocation(value);
+      if (!terminalFrames && ["terminal.create", "terminal.attach"].includes(envelope.method)) {
+        throw new RuntimeClientError(
+          "TERMINAL_STREAM_UNAVAILABLE",
+          "当前桌面运行时不支持终端推送，请更新 Pico 后重新打开终端。",
+          false,
+        );
+      }
       if (!isDesktopRuntimeInvocationAllowed(envelope.method, lifecycle.isQuitting())) {
         throw new RuntimeClientError(
           "RUNTIME_CLIENT_CLOSED",
@@ -529,12 +566,17 @@ export function registerDesktopIpcHandlers(options: {
     disposeCommands();
     disposeArtifacts();
     sessionFrames.dispose();
+    terminalFrames?.dispose();
+    for (const owner of keyboardOwners.values()) owner.dispose();
+    keyboardOwners.clear();
     for (const subscription of subscriptions.values()) subscription.dispose();
     subscriptions.clear();
     for (const channel of Object.values(DESKTOP_IPC_CHANNELS)) {
       ipcMain.removeHandler(channel);
     }
     ipcMain.removeAllListeners(DESKTOP_IPC_CHANNELS.runtimeUnsubscribe);
+    ipcMain.removeAllListeners(DESKTOP_IPC_CHANNELS.terminalKeyboardFocus);
+    ipcMain.removeAllListeners(DESKTOP_IPC_CHANNELS.terminalClipboard);
   };
 }
 

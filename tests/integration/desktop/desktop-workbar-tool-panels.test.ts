@@ -25,10 +25,7 @@ import {
   createTaskUpdateRequest,
   type WorkbarTaskItem,
 } from "../../../apps/desktop/src/renderer/workbar-panels/TasksWorkbarPanel.js";
-import {
-  TerminalWorkbarPanel,
-  shouldPollTerminalPanel,
-} from "../../../apps/desktop/src/renderer/workbar-panels/TerminalWorkbarPanel.js";
+import { TerminalWorkbarPanel } from "../../../apps/desktop/src/renderer/workbar-panels/TerminalWorkbarPanel.js";
 import {
   WorkbarPanelHost,
   parseGraphDetail,
@@ -229,7 +226,7 @@ test("Inspector trace folds runtime lifecycle facts into user-facing run groups"
   );
 });
 
-test("Workbar tool panel helpers preserve authority versions, chunks and active polling gates", () => {
+test("Workbar tool panel helpers preserve authority versions and chunks", () => {
   assert.equal(contextUsagePercent(contextSnapshot()), 25);
   assert.equal(
     contextUsagePercent(
@@ -270,9 +267,6 @@ test("Workbar tool panel helpers preserve authority versions, chunks and active 
     complete: false,
     nextOffset: 32,
   });
-  assert.equal(shouldPollTerminalPanel(true, "terminal-1"), true);
-  assert.equal(shouldPollTerminalPanel(false, "terminal-1"), false);
-  assert.equal(shouldPollTerminalPanel(true), false);
 });
 
 function traceRecord(
@@ -413,7 +407,6 @@ test("Workbar tool panels render real authority snapshots with accessible detail
       onInput: () => undefined,
       onResize: () => undefined,
       onStop: () => undefined,
-      onSetPollingActive: () => undefined,
     }),
   );
   assert.match(terminal, /role="tablist"/u);
@@ -544,7 +537,6 @@ test("Workbar tool panels render real authority snapshots with accessible detail
       onInput: () => undefined,
       onResize: () => undefined,
       onStop: () => undefined,
-      onSetPollingActive: () => undefined,
     }),
   );
   assert.match(fallbackTerminal, /兼容管道/u);

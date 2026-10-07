@@ -8,4 +8,10 @@
 
 .tool-panel__terminal-screen .xterm {
   height: 100%;
+  color: var(--ink);
+  background: var(--surface-raised);
+}
+
+.tool-panel__terminal-screen .xterm-viewport {
+  background-color: var(--surface-raised);
 }

@@ -7,10 +7,12 @@ import {
   RUNTIME_ERROR_CODES,
   RuntimeNotificationBuffer,
   RuntimeProtocolError,
+  isRuntimeTerminalFrame,
   type RuntimeNotification,
   type RuntimeParams,
   type RuntimeResult,
   type RuntimeSessionSubscriptionFrame,
+  type RuntimeTerminalFrame,
 } from "@pico/protocol";
 import {
   DESKTOP_IPC_CHANNELS,
@@ -177,6 +179,31 @@ export function createDesktopBridge(ipcRenderer: IpcRenderer): DesktopBridge {
           dispose() {
             ipcRenderer.removeListener(DESKTOP_IPC_CHANNELS.sessionFrame, onFrame);
             ipcRenderer.removeListener(DESKTOP_IPC_CHANNELS.sessionDisconnected, onDisconnected);
+          },
+        });
+      },
+    }),
+    terminalFrames: Object.freeze({
+      clipboard(action: "copy" | "paste") {
+        if (action === "copy" || action === "paste")
+          ipcRenderer.send(DESKTOP_IPC_CHANNELS.terminalClipboard, action);
+      },
+      setFocused(focused: boolean) {
+        if (typeof focused === "boolean")
+          ipcRenderer.send(DESKTOP_IPC_CHANNELS.terminalKeyboardFocus, focused);
+      },
+      subscribe(listener: (frame: RuntimeTerminalFrame) => void, onDisconnect?: () => void) {
+        if (typeof listener !== "function") return Object.freeze({ dispose() {} });
+        const onFrame = (_event: unknown, value: unknown) => {
+          if (isRuntimeTerminalFrame(value)) listener(value);
+        };
+        const onDisconnected = () => onDisconnect?.();
+        ipcRenderer.on(DESKTOP_IPC_CHANNELS.terminalFrame, onFrame);
+        ipcRenderer.on(DESKTOP_IPC_CHANNELS.terminalDisconnected, onDisconnected);
+        return Object.freeze({
+          dispose() {
+            ipcRenderer.removeListener(DESKTOP_IPC_CHANNELS.terminalFrame, onFrame);
+            ipcRenderer.removeListener(DESKTOP_IPC_CHANNELS.terminalDisconnected, onDisconnected);
           },
         });
       },

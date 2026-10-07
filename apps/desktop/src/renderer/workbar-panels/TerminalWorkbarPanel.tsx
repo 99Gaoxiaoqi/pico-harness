@@ -1,7 +1,6 @@
-import { TextField } from "../ui-controls.js";
 import { Button, IconButton } from "../components.js";
 import { CircleAlert, Link, Plus, Square, TerminalSquare } from "lucide-react";
-import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { useRef, type KeyboardEvent } from "react";
 import { TerminalOutputView } from "./TerminalOutputView.js";
 
 export type WorkbarTerminalStatus = "starting" | "running" | "interrupted" | "exited";
@@ -39,19 +38,16 @@ export interface TerminalWorkbarPanelProps {
   readonly output?: WorkbarTerminalOutput | null;
   readonly active: boolean;
   readonly loading: boolean;
+  readonly readOnly?: boolean;
   readonly error?: string | null;
   readonly onCreate: () => void;
   readonly onSelect: (terminalId: string) => void;
   readonly onAttach: (terminalId: string) => void;
   readonly onInput: (terminalId: string, input: string) => void;
+  readonly onFocusChange?: (focused: boolean) => void;
+  readonly onClipboard?: (action: "copy" | "paste") => void;
   readonly onResize: (terminalId: string, grid: WorkbarTerminalGrid) => void;
   readonly onStop: (terminalId: string) => void;
-  /** Starts/stops status/output polling only. It must never stop the hosted process. */
-  readonly onSetPollingActive: (active: boolean) => void;
-}
-
-export function shouldPollTerminalPanel(active: boolean, terminalId?: string): boolean {
-  return active && Boolean(terminalId);
 }
 
 export function TerminalWorkbarPanel({
@@ -60,32 +56,20 @@ export function TerminalWorkbarPanel({
   output,
   active,
   loading,
+  readOnly = false,
   error,
   onCreate,
   onSelect,
   onAttach,
   onInput,
+  onFocusChange,
+  onClipboard,
   onResize,
   onStop,
-  onSetPollingActive,
 }: TerminalWorkbarPanelProps) {
   const tabRefs = useRef(new Map<string, HTMLButtonElement>());
-  const [input, setInput] = useState("");
   const selected = terminals.find((terminal) => terminal.id === activeTerminalId);
   const selectedOutput = output?.terminalId === selected?.id ? output : undefined;
-
-  useEffect(() => {
-    const polling = shouldPollTerminalPanel(active, selected?.id);
-    onSetPollingActive(polling);
-    return () => onSetPollingActive(false);
-  }, [active, onSetPollingActive, selected?.id]);
-
-  const submitInput = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (!selected || selected.status !== "running" || !selected.attached || !input) return;
-    onInput(selected.id, input);
-    setInput("");
-  };
 
   const handleTerminalKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
     if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
@@ -133,6 +117,7 @@ export function TerminalWorkbarPanel({
           type="button"
           className="tool-panel__icon-button"
           aria-label="新建终端"
+          disabled={readOnly}
           onClick={onCreate}
         >
           <Plus aria-hidden="true" size={15} />
@@ -151,7 +136,7 @@ export function TerminalWorkbarPanel({
           <TerminalSquare aria-hidden="true" size={22} />
           <strong>{loading ? "正在加载终端…" : "没有终端"}</strong>
           <span>新建终端后，进程由 Runtime Host 持续托管。</span>
-          {!loading && (
+          {!loading && !readOnly && (
             <Button variant="quiet" type="button" onClick={onCreate}>
               新建终端
             </Button>
@@ -180,7 +165,7 @@ export function TerminalWorkbarPanel({
                   连接
                 </Button>
               )}
-              {selected.status !== "exited" && (
+              {selected.status !== "exited" && !readOnly && (
                 <Button variant="quiet" type="button" onClick={() => onStop(selected.id)}>
                   <Square aria-hidden="true" size={12} />
                   停止
@@ -200,6 +185,12 @@ export function TerminalWorkbarPanel({
               output={selectedOutput ?? undefined}
               active={active}
               capability={selected.capability}
+              inputEnabled={
+                active && !readOnly && selected.status === "running" && selected.attached
+              }
+              onInput={(data) => onInput(selected.id, data)}
+              onFocusChange={onFocusChange}
+              onClipboard={onClipboard}
               onResize={
                 selected.resizeSupported ? (grid) => onResize(selected.id, grid) : undefined
               }
@@ -209,27 +200,6 @@ export function TerminalWorkbarPanel({
               <span className="tool-panel__terminal-truncated">较早输出已截断</span>
             )}
           </div>
-          <form className="tool-panel__terminal-input" onSubmit={submitInput}>
-            <div className="tool-panel__terminal-command">
-              <TextField
-                label="终端输入"
-                name="workbar-terminal-command"
-                autoComplete="off"
-                value={input}
-                placeholder={selected.attached ? "输入命令并按 Enter…" : "连接终端后输入…"}
-                disabled={selected.status !== "running" || !selected.attached}
-                spellCheck={false}
-                onChange={(event) => setInput(event.target.value)}
-              />
-            </div>
-            <Button
-              variant="quiet"
-              type="submit"
-              disabled={selected.status !== "running" || !selected.attached || input.length === 0}
-            >
-              发送
-            </Button>
-          </form>
         </>
       )}
     </section>

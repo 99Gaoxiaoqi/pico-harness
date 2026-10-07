@@ -567,8 +567,7 @@
   flex: 1;
 }
 
-.tool-panel__create input,
-.tool-panel__terminal-input input {
+.tool-panel__create input {
   width: 100%;
   height: 29px;
   padding: 0 8px;
@@ -580,7 +579,6 @@
 }
 
 .tool-panel__create button,
-.tool-panel__terminal-input button,
 .tool-panel__chunk-footer button,
 .tool-panel__terminal-meta button,
 .tool-panel__artifact > header button {
@@ -597,7 +595,6 @@
 }
 
 .tool-panel__create button:disabled,
-.tool-panel__terminal-input button:disabled,
 .tool-panel__chunk-footer button:disabled {
   opacity: 0.45;
 }
@@ -1043,15 +1040,15 @@
 }
 
 .tool-panel--terminal {
-  background: var(--terminal-surface, #0b1020);
-  color: var(--terminal-foreground, #dbeafe);
+  background: var(--surface-raised);
+  color: var(--ink);
 }
 
 .tool-panel__terminal-tabs {
   display: flex;
   min-width: 0;
   align-items: center;
-  border-bottom: 1px solid rgb(148 163 184 / 0.22);
+  border-bottom: 1px solid var(--line);
 }
 
 .tool-panel__terminal-tabs > div {
@@ -1070,14 +1067,14 @@
   gap: 5px;
   padding: 0 8px;
   border: 0;
-  border-right: 1px solid rgb(148 163 184 / 0.16);
+  border-right: 1px solid var(--line);
   background: transparent;
-  color: rgb(203 213 225 / 0.76);
+  color: var(--ink-secondary);
 }
 
 .tool-panel__terminal-tabs [role="tab"][aria-selected="true"] {
-  background: rgb(148 163 184 / 0.12);
-  color: #f8fafc;
+  background: var(--surface-muted);
+  color: var(--ink);
 }
 
 .tool-panel__terminal-tabs [role="tab"] span {
@@ -1091,16 +1088,16 @@
   height: 6px;
   margin-left: auto;
   border-radius: 999px;
-  background: #64748b;
+  background: var(--ink-tertiary);
 }
 
 .tool-panel__terminal-tabs [role="tab"][data-status="running"] small {
-  background: #22c55e;
+  background: var(--color-success, var(--accent));
 }
 
 .tool-panel__terminal-tabs .tool-panel__icon-button {
   margin: 3px;
-  color: rgb(203 213 225 / 0.76);
+  color: var(--ink-secondary);
 }
 
 .tool-panel__terminal-meta {
@@ -1112,15 +1109,15 @@
   justify-content: space-between;
   gap: 8px;
   padding: 4px 8px;
-  border-bottom: 1px solid rgb(148 163 184 / 0.16);
-  color: rgb(203 213 225 / 0.68);
+  border-bottom: 1px solid var(--line);
+  color: var(--ink-secondary);
   font-size: 10px;
 }
 
 .tool-panel__terminal-meta > .tool-panel__terminal-capability {
   order: 3;
   flex: 1 0 100%;
-  color: #fbbf24;
+  color: var(--warning);
   white-space: normal;
 }
 
@@ -1139,9 +1136,9 @@
 .tool-panel__terminal-meta button {
   min-height: 23px;
   padding: 2px 6px;
-  border-color: rgb(148 163 184 / 0.26);
-  background: rgb(148 163 184 / 0.08);
-  color: #e2e8f0;
+  border-color: var(--line-strong);
+  background: var(--surface-muted);
+  color: var(--ink);
   font-size: 10px;
 }
 
@@ -1150,63 +1147,25 @@
   min-width: 0;
   min-height: 80px;
   flex: 1 1 auto;
-  overflow: auto;
+  overflow: hidden;
   overscroll-behavior: contain;
-}
-
-.tool-panel__terminal-viewport pre {
-  min-height: 100%;
-  margin: 0;
-  padding: 8px 10px;
-  box-sizing: border-box;
-  color: #dbeafe;
-  font:
-    12px/1.5 ui-monospace,
-    SFMono-Regular,
-    Menlo,
-    monospace;
-  white-space: pre-wrap;
-  word-break: break-word;
+  background: var(--surface-raised);
 }
 
 .tool-panel__terminal-placeholder,
 .tool-panel__terminal-truncated {
   position: absolute;
   inset-inline-start: 10px;
-  color: rgb(203 213 225 / 0.45);
+  color: var(--ink-tertiary);
   font-size: 10px;
+  pointer-events: none;
 }
 
 .tool-panel__terminal-placeholder {
   inset-block-start: 9px;
 }
-
 .tool-panel__terminal-truncated {
   inset-block-end: 5px;
-}
-
-.tool-panel__terminal-input {
-  display: flex;
-  gap: 5px;
-  padding: 6px 8px;
-  border-top: 1px solid rgb(148 163 184 / 0.2);
-}
-
-.tool-panel__terminal-input label {
-  min-width: 0;
-  flex: 1;
-}
-
-.tool-panel__terminal-input input {
-  border-color: rgb(148 163 184 / 0.26);
-  background: rgb(15 23 42 / 0.9);
-  color: #e2e8f0;
-}
-
-.tool-panel__terminal-input button {
-  border-color: rgb(148 163 184 / 0.26);
-  background: rgb(148 163 184 / 0.12);
-  color: #e2e8f0;
 }
 
 .tool-panel--side-chat {
