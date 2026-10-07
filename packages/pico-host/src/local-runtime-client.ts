@@ -56,6 +56,8 @@ const SHORT_RUNTIME_REQUEST_METHODS: ReadonlySet<RuntimeMethod> = new Set([
   "session.subscription.open",
   "session.subscription.close",
   "session.transcript.page",
+  "session.transcript.anchors",
+  "session.transcript.search",
   "session.transcript.advance",
 ]);
 
@@ -118,6 +120,8 @@ const KERNEL_RETRY_SAFE_METHODS: ReadonlySet<RuntimeMethod> = new Set<RuntimeMet
   "session.get",
   "session.settings.get",
   "session.transcript.page",
+  "session.transcript.anchors",
+  "session.transcript.search",
   "session.transcript.advance",
   "goal.get",
   "runs.list",
@@ -990,6 +994,8 @@ async function requestOverKernelConnection<Method extends RuntimeMethod>(
     method === "session.subscription.open" ||
     method === "session.subscription.close" ||
     method === "session.transcript.page" ||
+    method === "session.transcript.anchors" ||
+    method === "session.transcript.search" ||
     method === "session.transcript.advance"
   ) {
     return parseRuntimeResult(

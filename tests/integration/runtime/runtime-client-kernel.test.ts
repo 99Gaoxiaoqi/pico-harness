@@ -90,6 +90,24 @@ test("kernel client: request + subscribe + live push over the spawned daemon", a
   t.after(() => trigger.close());
   await trigger.request("workspace.register", { workspacePath: harness.workspacePath });
 
+  await writeDesktopModelRouting(harness.picoHome);
+  const created = await client.request("session.create", {
+    workspacePath: harness.workspacePath,
+  });
+  const anchors = await client.request("session.transcript.anchors", {
+    workspacePath: harness.workspacePath,
+    sessionId: created.session.sessionId,
+    limit: 80,
+  });
+  assert.deepEqual(anchors.anchors, [], "anchors 应通过 Session continuity bridge 读取");
+  const search = await client.request("session.transcript.search", {
+    workspacePath: harness.workspacePath,
+    sessionId: created.session.sessionId,
+    query: "missing",
+    limit: 80,
+  });
+  assert.deepEqual(search.hits, [], "search 应通过 Session continuity bridge 读取");
+
   const delivered = await waitForCondition(() => received.length >= 1, 10_000);
   assert.ok(delivered, "live durable 事件应推送到订阅监听器");
   assert.equal(received[0]?.topic, "workspace.registered");
