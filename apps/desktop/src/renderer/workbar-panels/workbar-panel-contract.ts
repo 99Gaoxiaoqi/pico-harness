@@ -13,6 +13,7 @@ export interface WorkbarPanelHostProps {
   readonly instanceId: string;
   readonly active: boolean;
   readonly readOnly: boolean;
+  readonly terminalTitle?: string;
   readonly inspectorTab?: "timeline" | "overview";
   readonly onInspectorTabChange?: (tab: "timeline" | "overview") => void;
 }
