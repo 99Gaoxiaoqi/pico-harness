@@ -133,11 +133,27 @@ import "./apps/desktop/src/renderer/styles.css";
 import "./apps/desktop/src/renderer/astryx-controls.css";
 import "./apps/desktop/src/renderer/shell-astryx.css";
 Object.assign(globalThis, {React, IS_REACT_ACT_ENVIRONMENT: true});
+const mainPath = "/workspace/maka-harness";
+const linkedPath = "/workspace/maka-harness-feature";
+const scenarioData = {
+  ...previewData,
+  workspaces: [
+    {...previewData.workspaces[0], path: mainPath, name: "maka-harness", projectId: "shared-project", projectName: "maka-harness"},
+    {...previewData.workspaces[0], path: linkedPath, name: "maka-harness-feature", projectId: "shared-project", projectName: "maka-harness"},
+  ],
+  sessions: previewData.sessions.map((session, index) => ({
+    ...session,
+    workspacePath: index === 1 ? linkedPath : mainPath,
+    projectId: "shared-project",
+    projectName: "maka-harness",
+  })),
+  runs: previewData.runs.map((run) => ({...run, workspacePath: mainPath})),
+};
 const target = document.getElementById("app");
 target.style.height = "100%";
 const writes = [];
 const runtime = {
-  data: previewData, preview: false, busy: false, message: "",
+  data: scenarioData, preview: false, busy: false, message: "",
   actions: {
     setSessionPinned: async (...args) => writes.push(["pin", ...args]),
     setSessionArchived: async (...args) => writes.push(["archive", ...args]),
@@ -175,10 +191,11 @@ async function scenario() {
   check(Math.abs(sidebar().width - 62) < 1, "Collapsed sidebar width: " + sidebar().width);
   await click("展开侧栏");
   await click("按项目分组");
-  check(document.querySelector(".sidebar-project__header"), "Project grouping works");
+  check(document.querySelectorAll(".sidebar-project__header").length === 1, "Linked worktrees share one project group");
+  check(document.querySelectorAll(".sidebar-project__sessions .sidebar-task-link").length === 2, "Both worktree sessions remain visible in the shared group");
   await click("按时间分组");
-  const running = previewData.sessions[0];
-  const idle = previewData.sessions[1];
+  const running = scenarioData.sessions[0];
+  const idle = scenarioData.sessions[1];
   await click("更多操作 " + running.title);
   await frame();
   const deleteItem = [...document.querySelectorAll('[role="menuitem"]')].find(el => el.textContent.includes("删除"));
@@ -191,7 +208,7 @@ async function scenario() {
   const pin = [...idleMenu.querySelectorAll('[role="menuitem"]')].find(el => el.textContent === "置顶");
   check(pin, "Pin menu item");
   await act(async () => pin.click());
-  check(writes.length === 1 && writes[0][0] === "pin" && writes[0][1].sessionId === idle.id, "Menu uses original task identity");
+  check(writes.length === 1 && writes[0][0] === "pin" && writes[0][1].sessionId === idle.id && writes[0][1].workspacePath === linkedPath, "Menu keeps the linked-worktree session identity");
   await click("搜索任务");
   const input = () => document.querySelector('.task-search input');
   check(document.querySelector('dialog[open]') && document.activeElement === input(), "Search autofocuses input");

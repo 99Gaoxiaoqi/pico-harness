@@ -92,13 +92,18 @@ export function parseWorkspaceList(value: unknown): readonly JsonRecord[] {
   return recordArray(value.workspaces);
 }
 
-export function parseSessions(value: unknown, workspacePath: string): readonly SessionView[] {
+export function parseSessions(
+  value: unknown,
+  workspacePath: string,
+  project?: { readonly projectId: string | null; readonly projectName: string | null },
+): readonly SessionView[] {
   const result = isRecord(value) ? value : {};
   return recordArray(result.sessions)
     .filter((item) => stringValue(item.sessionId).length > 0)
     .map((item) => ({
       id: stringValue(item.sessionId),
       workspacePath,
+      ...(project ? { projectId: project.projectId, projectName: project.projectName } : {}),
       title: stringValue(item.title, "未命名任务"),
       status: item.status === "archived" ? ("archived" as const) : ("active" as const),
       pinned: booleanValue(item.pinned),
@@ -109,12 +114,16 @@ export function parseSessions(value: unknown, workspacePath: string): readonly S
 }
 
 /** Direct lookup stays on the conversation; it must never populate the task list. */
-export function parseSessionDetail(value: unknown, workspacePath: string): SessionView | undefined {
+export function parseSessionDetail(
+  value: unknown,
+  workspacePath: string,
+  project?: { readonly projectId: string | null; readonly projectName: string | null },
+): SessionView | undefined {
   const result = isRecord(value) ? value : {};
   if (!isRecord(result.session) || !stringValue(result.session.sessionId)) {
     return undefined;
   }
-  const session = parseSessions({ sessions: [result.session] }, workspacePath)[0]!;
+  const session = parseSessions({ sessions: [result.session] }, workspacePath, project)[0]!;
   const parent = isRecord(result.session.parentSession) ? result.session.parentSession : {};
   const sessionId = stringValue(parent.sessionId);
   const parentWorkspace = stringValue(parent.workspacePath);
