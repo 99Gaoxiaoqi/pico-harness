@@ -17,6 +17,7 @@ import {
 import { resolvePicoPaths } from "@pico/pico-host";
 import type { LLMProvider } from "@pico/core";
 import { executeAgentRuntime } from "@pico/pico-host/agent-runtime";
+import { sessionMemoryLane } from "@pico/runtime/atomic-memory/session-lane";
 import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
 import { createSessionRuntime } from "@pico/pico-host/session-runtime";
 import type { Message } from "@pico/core";
@@ -213,7 +214,7 @@ test("memory_remember persists requested memory before the next model step and b
   assert.equal(result.finalMessage, "done");
 });
 
-test("the second turn in one Session extracts atomic memory only when its model requests the trigger", async (context) => {
+test("the second turn in one Session respects denied tool admission before an eligible extraction", async (context) => {
   const fixture = await createFixture("multi-turn-signal-gate");
   const workspace = await realpath(fixture.workspace);
   const trustStore = await trustFixture(fixture);
@@ -298,6 +299,11 @@ test("the second turn in one Session extracts atomic memory only when its model 
         resumeExistingSession: true,
       },
     );
+    await sessionMemoryLane.run(
+      `${fixture.picoHome}:${memorySessionKey(resolvePicoPaths(workspace, { picoHome: fixture.picoHome }).workspace.id, sessionId)}`,
+      "background",
+      async () => undefined,
+    );
   };
 
   await executeDesktopTurn("What is 2 + 2?", "desktop-user-ordinary");
@@ -330,7 +336,7 @@ test("the second turn in one Session extracts atomic memory only when its model 
   atomic.close();
 });
 
-test("startup does not extract historical completed turns without a memory trigger", async (context) => {
+test("ordinary startup extracts its own completion without replaying unmarked historical Sessions", async (context) => {
   let startupModelCalls = 0;
   const fixture = await createFixture("terminal-job-gap-recovery");
   context.after(async () => {
@@ -434,20 +440,41 @@ test("startup does not extract historical completed turns without a memory trigg
       memoryTrustStore: trustStore,
       atomicMemoryModelFactory: async () => {
         startupModelCalls++;
-        assert.fail("ordinary startup must not acquire a memory model");
+        return {
+          model: {
+            async call() {
+              return JSON.stringify({
+                status: "complete",
+                coverageStatus: "processed",
+                requestedStatus: "not_applicable",
+                requestedItems: [],
+                incidentalItems: [],
+              });
+            },
+          },
+        };
       },
     },
   );
   assert.equal(result.finalMessage, "4");
 
-  for (let attempt = 0; attempt < 5; attempt++) await waitForImmediate();
+  await sessionMemoryLane.run(
+    `${fixture.picoHome}:${memorySessionKey(paths.workspace.id, "memory-gap-restart-trigger")}`,
+    "background",
+    async () => undefined,
+  );
   const atomic = new SqliteMemoryItemStore(join(fixture.picoHome, "memory.sqlite"));
   assert.equal((await atomic.listItems({ workspaceKey: paths.workspace.id })).length, 0);
+  assert.equal(
+    await atomic.readExtractionCursor(memorySessionKey(paths.workspace.id, sessionId)),
+    undefined,
+    "another Session's legacy terminal is not scheduled",
+  );
   atomic.close();
-  assert.equal(startupModelCalls, 0);
+  assert.equal(startupModelCalls, 1);
 });
 
-test("atomic extraction is not repeated on ordinary startup", async (context) => {
+test("ordinary startup processes its new completion without repeating another Session's extracted range", async (context) => {
   let startupModelCalls = 0;
   const fixture = await createFixture("obsolete-debounce");
   context.after(() => rmRetry(fixture.root));
@@ -505,13 +532,29 @@ test("atomic extraction is not repeated on ordinary startup", async (context) =>
       },
       atomicMemoryModelFactory: async () => {
         startupModelCalls++;
-        assert.fail("startup must not replay extraction");
+        return {
+          model: {
+            async call() {
+              return JSON.stringify({
+                status: "complete",
+                coverageStatus: "processed",
+                requestedStatus: "not_applicable",
+                requestedItems: [],
+                incidentalItems: [],
+              });
+            },
+          },
+        };
       },
     },
   );
-  await waitForImmediate();
+  await sessionMemoryLane.run(
+    `${fixture.picoHome}:${memorySessionKey(resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome }).workspace.id, "ordinary-after-extract")}`,
+    "background",
+    async () => undefined,
+  );
   assert.equal(extractionCalls, 1);
-  assert.equal(startupModelCalls, 0);
+  assert.equal(startupModelCalls, 1);
 });
 
 test("manifest pages keep a fixed upper bound and DESC keyset across concurrent mutations", async (context) => {

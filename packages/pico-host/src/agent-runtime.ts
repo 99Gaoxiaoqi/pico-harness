@@ -248,8 +248,10 @@ import {
   AtomicMemoryRuntime,
   ProviderAtomicMemoryModel,
   atomicMemoryDatabasePath,
+  captureAtomicMemoryAdmission,
   type AtomicMemoryModelLease,
 } from "@pico/pico-host/atomic-memory-runtime";
+import type { RuntimeMemoryExtractionBoundary } from "@pico/core";
 export type {
   RunAgentCliOptions,
   RunAgentCliResult,
@@ -955,6 +957,7 @@ export async function executeAgentRuntime(
   let memoryRepository: SqliteMemoryItemStore | undefined;
   let memoryContextBuilder: AtomicMemoryContextBuilder | undefined;
   let atomicMemoryRuntime: AtomicMemoryRuntime | undefined;
+  let memoryRunAdmission: RuntimeMemoryExtractionBoundary | undefined;
   let unsubscribeMcpStatus: (() => void) | undefined;
   const cleanupScope = new RuntimeCleanupScope((resource, error) => {
     logger.warn(
@@ -1220,6 +1223,22 @@ export async function executeAgentRuntime(
       collaborationMode() !== "agent"
         ? { allowed: false as const, reason: "runtime_profile_disabled" }
         : memoryRecallAllowed();
+    const memoryAutomaticAllowed = async () => {
+      if (
+        (effectiveOptions.allowedTools !== undefined &&
+          !effectiveOptions.allowedTools.includes("memory_extract")) ||
+        (backgroundPolicy && !backgroundPolicy.allowedTools.has("memory_extract"))
+      )
+        return { allowed: false as const, reason: "tool_unavailable" };
+      return memoryExtractionAllowed();
+    };
+    const readMemoryAdmission = () =>
+      captureAtomicMemoryAdmission({
+        workDir,
+        picoHome,
+        supported: !!atomicMemoryRuntime && kind !== "responses",
+        gate: memoryAutomaticAllowed,
+      });
     try {
       if ((await memoryRecallAllowed()).allowed) {
         const memoryPaths = resolvePicoPaths(workDir, { picoHome });
@@ -1566,7 +1585,8 @@ export async function executeAgentRuntime(
         workDir,
         picoHome,
         sessionId: session.id,
-        gate: memoryExtractionAllowed,
+        gate: (trigger) =>
+          trigger === "remember" ? memoryExtractionAllowed() : memoryAutomaticAllowed(),
         ...(dependencies.atomicMemoryLifecycle
           ? { lifecycle: dependencies.atomicMemoryLifecycle }
           : {}),
@@ -3137,6 +3157,7 @@ export async function executeAgentRuntime(
       ...(dependencies.hostRunId ? { hostRunId: dependencies.hostRunId } : {}),
       ...(dependencies.goalRunOrigin ? { goalRunOrigin: dependencies.goalRunOrigin } : {}),
       onRunAdmission: async (run) => {
+        memoryRunAdmission = await readMemoryAdmission();
         await dependencies.onRunAdmission?.(run);
         if (collaborationMode() !== "plan" || !session.runtimeEventStore) return;
         const projection = await new PlanCoordinator(
@@ -3167,6 +3188,15 @@ export async function executeAgentRuntime(
       ...(atomicMemoryRuntime
         ? { atomicMemoryCompleted: (runId: string) => atomicMemoryRuntime!.completed(runId) }
         : {}),
+      atomicMemoryBoundary: async () => {
+        const current = await readMemoryAdmission();
+        return memoryRunAdmission?.disposition === "eligible" &&
+          current.disposition === "eligible" &&
+          current.deletionRevision === memoryRunAdmission.deletionRevision &&
+          current.settingsVersion === memoryRunAdmission.settingsVersion
+          ? memoryRunAdmission
+          : { ...memoryRunAdmission, disposition: "policy_denied" };
+      },
       planHandoff,
       planCoordinator: () => {
         const submitted = planHandoff.result();

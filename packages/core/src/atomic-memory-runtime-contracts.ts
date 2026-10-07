@@ -34,6 +34,7 @@ export interface MemoryCheckpointBoundary {
 export interface MemoryExtractionSnapshot {
   /** Captured before queuing, never refreshed for an existing task. */
   readonly deletionRevision: number;
+  readonly settingsVersion?: number;
   readonly trigger: "remember" | "extract" | "compaction";
   /** Composite workspace/session identity used by cursors and provenance. */
   readonly sessionId: string;
@@ -49,8 +50,17 @@ export interface MemoryExtractionSnapshot {
   readonly contextWindowTokens?: number;
   readonly reservedOutputTokens?: number;
   readonly checkpoints?: readonly MemoryCheckpointBoundary[];
+  readonly completedBoundaries?: readonly MemoryCompletedBoundary[];
   readonly compactionCheckpointId?: string;
   readonly signal?: AbortSignal;
+}
+
+/** A terminal policy barrier shares the extraction cursor without pretending to be compaction. */
+export interface MemoryCompletedBoundary {
+  readonly ordinal: number;
+  readonly disposition: "eligible" | "policy_denied";
+  readonly deletionRevision?: number;
+  readonly settingsVersion?: number;
 }
 
 export interface MemoryModelRequest {

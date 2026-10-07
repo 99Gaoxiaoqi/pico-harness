@@ -390,12 +390,20 @@ export type RuntimePlanEvent =
   | RuntimePlanExecutionCompletedEvent
   | RuntimePlanExecutionCancelledEvent;
 
+/** Frozen host admission; absent on legacy runs, which are not automatic extraction requests. */
+export interface RuntimeMemoryExtractionBoundary {
+  readonly disposition: "eligible" | "policy_denied";
+  readonly deletionRevision?: number;
+  readonly settingsVersion?: number;
+}
+
 export interface RuntimeRunTerminalEvent extends RuntimeEventBase {
   readonly kind: "run.terminal";
   readonly data: {
     readonly status: RuntimeTerminalStatus;
     readonly reason?: string;
     readonly recovered?: boolean;
+    readonly memoryExtractionBoundary?: RuntimeMemoryExtractionBoundary;
   };
 }
 
