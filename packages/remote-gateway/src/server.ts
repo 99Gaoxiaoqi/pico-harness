@@ -279,7 +279,7 @@ export class RemoteGateway {
     if (this.sweep) clearInterval(this.sweep);
     this.pairings.clear();
     this.relay?.close();
-    for (const [id] of this.connections) this.closeDevice(id);
+    for (const [id] of this.connections) this.closeDevice(id, false);
     this.webSockets.close();
     for (const server of this.servers) {
       server.closeAllConnections();
@@ -439,11 +439,14 @@ export class RemoteGateway {
     }
     return connection;
   }
-  private closeDevice(deviceId: string): void {
+  private closeDevice(deviceId: string, authorizationChanged = true): void {
     this.relay?.closeDevice(deviceId);
     const connection = this.connections.get(deviceId);
     if (!connection) return;
-    connection.socket?.close(4001, "设备授权已撤销或更改");
+    connection.socket?.close(
+      authorizationChanged ? 4001 : 1001,
+      authorizationChanged ? "设备授权已撤销或更改" : "电脑网关已关闭",
+    );
     const closingSocket = connection.socket;
     if (closingSocket) {
       const timeout = scheduleUnrefDeadline(() => closingSocket.terminate(), 1000);

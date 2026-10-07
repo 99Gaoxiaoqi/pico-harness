@@ -967,6 +967,34 @@ test("WSS 认证、工作区订阅、连接替换和设备撤销不取消电脑�
   }
 });
 
+test("正常关闭网关仅中断连接，保留已确认配对供重连", async () => {
+  const f = await fixture();
+  try {
+    const { submitted, granted } = await f.pair();
+    await f.http("POST", `/v1/pairings/${submitted.pairingId}/ack`, submitted.pairingToken);
+    const socket = new WebSocket(`wss://127.0.0.1:${f.port}/v1/events`, {
+      ca: f.ca,
+      headers: { Authorization: `Bearer ${granted.deviceToken}` },
+    });
+    await once(socket, "open");
+    const closed = once(socket, "close");
+    await f.gateway.close();
+    assert.equal((await closed)[0], 1001, "正常关闭不能使用撤销授权的4001");
+    const replacement = await createRemoteGateway(f.config, {
+      home: f.home,
+      createRuntimeClient: () => new FixtureRuntime(),
+    });
+    await replacement.start();
+    try {
+      assert.equal((await f.http("GET", "/v1/workspaces", granted.deviceToken)).status, 200);
+    } finally {
+      await replacement.close();
+    }
+  } finally {
+    await f.cleanup();
+  }
+});
+
 test("未 ACK 配对在网关重启后失效，状态目录符号链接与重复实例被拒绝", async () => {
   const f = await fixture();
   try {
