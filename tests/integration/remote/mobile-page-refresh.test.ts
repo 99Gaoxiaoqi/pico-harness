@@ -6,6 +6,9 @@ import {
   settleScreen,
 } from "../../fixtures/mobile-component-harness.js";
 import * as management from "../../../apps/mobile/src/settings/management.js";
+import { terminalTheme } from "../../../apps/mobile/src/palette.js";
+import { TerminalOutputQueue } from "../../../apps/mobile/src/terminal-output.js";
+import { terminalInputChunks } from "../../../apps/mobile/src/terminal-input.js";
 
 const ui = {
   ...mobileTags(["Button", "Card", "Chips", "Detail", "Field", "Label"]),
@@ -290,6 +293,7 @@ test("终端恢复仅刷新和挂接显示，未知输入继续暂停且不重�
   const { pico } = store(async (method) => {
     calls.push(method);
     if (method === "terminal.list") return { terminals: [terminal()] };
+    if (method === "runtime.ping") return { capabilities: ["terminal-stream-v1"] };
     if (method === "terminal.attach")
       return {
         terminal: terminal(),
@@ -301,12 +305,7 @@ test("终端恢复仅刷新和挂接显示，未知输入继续暂停且不重�
     if (method === "terminal.input") return input.promise;
     return {};
   });
-  class Poller {
-    start(task: () => Promise<void>, report: (error: unknown) => void) {
-      void task().catch(report);
-    }
-    stop() {}
-  }
+  Object.assign(pico, { client: { subscribeTerminalFrames: () => ({ dispose() {} }) } });
   const screen = mobileComponent(
     new URL("../../../apps/mobile/src/Terminal.tsx", import.meta.url),
     {
@@ -315,9 +314,12 @@ test("终端恢复仅刷新和挂接显示，未知输入继续暂停且不重�
         AppState: { currentState: "active", addEventListener: () => ({ remove() {} }) },
       },
       "react-native-webview": { WebView: "WebView" },
+      "@pico/protocol/mobile": { TERMINAL_STREAM_RUNTIME_CAPABILITY: "terminal-stream-v1" },
       "./store": { usePico: () => pico },
-      "./core": { SerialPoller: Poller },
       "./ui": ui,
+      "./palette": { terminalTheme },
+      "./terminal-output": { TerminalOutputQueue },
+      "./terminal-input": { terminalInputChunks },
       "./terminal.generated": { default: "<html></html>" },
     },
   );

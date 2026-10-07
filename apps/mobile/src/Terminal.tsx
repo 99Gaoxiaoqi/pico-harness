@@ -1,10 +1,16 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Alert, AppState, ScrollView, Text, View } from "react-native";
 import { WebView } from "react-native-webview";
-import type { RuntimeTerminalSession } from "@pico/protocol/mobile";
+import {
+  TERMINAL_STREAM_RUNTIME_CAPABILITY,
+  type RuntimeTerminalFrame,
+  type RuntimeTerminalSession,
+} from "@pico/protocol/mobile";
 import { usePico } from "./store";
-import { SerialPoller } from "./core";
 import { Button, Card, Label, s, color } from "./ui";
+import { terminalTheme } from "./palette";
+import { TerminalOutputQueue } from "./terminal-output";
+import { terminalInputChunks } from "./terminal-input";
 import html from "./terminal.generated";
 
 export function TerminalPanel({ sessionId }: { sessionId: string }) {
@@ -14,14 +20,18 @@ export function TerminalPanel({ sessionId }: { sessionId: string }) {
   const [ready, setReady] = useState(false);
   const [foreground, setForeground] = useState(AppState.currentState === "active");
   const ref = useRef<WebView>(null);
-  const poller = useRef(new SerialPoller());
   const position = useRef<{ epoch: string; sequence: number } | undefined>(undefined);
   const active = useRef(true);
-  const pendingOutput = useRef<{ data: string; reset: boolean }[]>([]);
+  const outputQueue = useRef(
+    new TerminalOutputQueue((message) => ref.current?.postMessage(JSON.stringify(message))),
+  );
+  const recoverOutput = useRef<(() => void) | undefined>(undefined);
   const control = useRef<RuntimeTerminalSession | undefined>(undefined);
   const inputQueue = useRef(Promise.resolve());
   const inputGeneration = useRef(0);
   const inputBlocked = useRef(false);
+  const desiredSize = useRef<{ cols: number; rows: number } | undefined>(undefined);
+  const lastResize = useRef<string | undefined>(undefined);
   const [blocked, setBlocked] = useState(false);
   const listVersion = useRef(0);
   const readScope = `${pico.generation}:${pico.connected}:${pico.syncRevision}:${sessionId}`;
@@ -30,6 +40,8 @@ export function TerminalPanel({ sessionId }: { sessionId: string }) {
   const identity = `${pico.generation}:${sessionId}`;
   const currentIdentity = useRef(identity);
   currentIdentity.current = identity;
+  const live = useRef({ foreground, connected: pico.connected, identity });
+  live.current = { foreground, connected: pico.connected, identity };
   async function list() {
     if (pico.connected === false) return;
     const version = ++listVersion.current;
@@ -43,32 +55,34 @@ export function TerminalPanel({ sessionId }: { sessionId: string }) {
     }
   }
   function output(data: string, reset = false) {
-    if (!ready) {
-      pendingOutput.current.push({ data, reset });
-      return;
+    if (!outputQueue.current.push(data, reset)) {
+      position.current = undefined;
+      pico.report(new Error("终端输出过快，正在重新获取可用尾部"));
+      recoverOutput.current?.();
     }
-    ref.current?.postMessage(JSON.stringify({ type: "output", data, reset }));
+  }
+  async function ensureTerminalStream() {
+    const ping = await pico.request("runtime.ping", {});
+    if (!ping.capabilities.includes(TERMINAL_STREAM_RUNTIME_CAPABILITY)) {
+      throw new Error("电脑端尚不支持终端实时推送，请更新电脑端并重新连接");
+    }
   }
   useEffect(() => {
     active.current = true;
     setTerminal(undefined);
     setTerminals([]);
+    setReady(false);
+    outputQueue.current.ready(false);
+    outputQueue.current.clear();
     position.current = undefined;
-    const app = AppState.addEventListener("change", (state) => setForeground(state === "active"));
+    const app = AppState.addEventListener("change", (state) => {
+      live.current.foreground = state === "active";
+      setForeground(state === "active");
+    });
     return () => {
       active.current = false;
       inputGeneration.current++;
       app.remove();
-      poller.current.stop();
-      const t = control.current;
-      if (t)
-        void pico
-          .request("terminal.detach", {
-            sessionId,
-            terminalId: t.terminalId,
-            resourceEpoch: t.resourceEpoch,
-          })
-          .catch(() => undefined);
     };
   }, [sessionId, pico.generation]);
   useEffect(() => {
@@ -79,35 +93,188 @@ export function TerminalPanel({ sessionId }: { sessionId: string }) {
   }, [sessionId, pico.generation, pico.connected, pico.syncRevision]);
   useEffect(() => {
     control.current = terminal;
+  }, [terminal]);
+  useEffect(() => {
     inputGeneration.current++;
     inputBlocked.current = false;
+    lastResize.current = undefined;
     setBlocked(false);
     position.current = undefined;
-    pendingOutput.current = [];
-    if (ready) ref.current?.postMessage(JSON.stringify({ type: "output", data: "", reset: true }));
+    output("", true);
+    if (!terminal) {
+      setReady(false);
+      outputQueue.current.ready(false);
+      outputQueue.current.clear();
+    }
   }, [terminal?.terminalId]);
   useEffect(() => {
-    if (!terminal || !foreground || !pico.connected) return;
+    if (!terminal || !foreground || !pico.connected || !pico.client) return;
     let current = true;
-    poller.current.start(async () => {
-      const result = await pico.request("terminal.attach", {
-        sessionId,
-        terminalId: terminal.terminalId,
-        ...(position.current ? { afterSequence: position.current.sequence } : {}),
-        maxBytes: 32 * 1024,
-      });
-      if (!current || readScope !== currentScope.current) return;
-      const reset = !position.current || position.current.epoch !== result.resourceEpoch;
-      position.current = { epoch: result.resourceEpoch, sequence: result.sequence };
-      control.current = result.terminal;
-      if (reset) setTerminal(result.terminal);
-      output(result.snapshot, reset);
-      if (result.truncated) pico.report(new Error("终端输出缓冲区已截断，当前显示可用尾部"));
-    }, pico.report);
+    let attaching = false;
+    let requested = false;
+    let events: RuntimeTerminalFrame[] = [];
+    let eventCharacters = 0;
+    let streamAvailable = false;
+    let attachedTerminal = terminal;
+    let confirmedEpoch = position.current?.epoch;
+    const oldEpochs = new Set<string>();
+    const valid = () =>
+      current &&
+      active.current &&
+      readScope === currentScope.current &&
+      live.current.foreground &&
+      live.current.connected;
+    const updateTerminal = (value: RuntimeTerminalSession) => {
+      attachedTerminal = value;
+      control.current = value;
+      setTerminal(value);
+      setTerminals((items) =>
+        items.map((item) => (item.terminalId === value.terminalId ? value : item)),
+      );
+    };
+    function apply(event: RuntimeTerminalFrame) {
+      position.current = { epoch: event.resourceEpoch, sequence: event.sequence };
+      if (event.kind === "output") output(event.data);
+      else if (control.current) {
+        updateTerminal({
+          ...control.current,
+          sequence: event.sequence,
+          status: event.status === "stopped" ? "exited" : event.status,
+          ...(event.exitCode !== undefined ? { exitCode: event.exitCode } : {}),
+        });
+      }
+    }
+    function consume() {
+      const cursor = position.current;
+      if (!cursor) return;
+      if (
+        events.some(
+          (event) => event.resourceEpoch !== cursor.epoch && !oldEpochs.has(event.resourceEpoch),
+        )
+      ) {
+        position.current = undefined;
+        inputGeneration.current++;
+        requested = true;
+        return;
+      }
+      events = events
+        .filter((event) => event.resourceEpoch === cursor.epoch && event.sequence > cursor.sequence)
+        .sort((a, b) => a.sequence - b.sequence);
+      eventCharacters = events.reduce(
+        (size, event) => size + (event.kind === "output" ? event.data.length : 0),
+        0,
+      );
+      while (events.length && valid()) {
+        const event = events[0]!;
+        if (event.sequence <= position.current!.sequence) {
+          events.shift();
+          continue;
+        }
+        if (event.sequence !== position.current!.sequence + 1) {
+          requested = true;
+          break;
+        }
+        events.shift();
+        eventCharacters -= event.kind === "output" ? event.data.length : 0;
+        apply(event);
+        if (!position.current) break;
+      }
+    }
+    async function attach() {
+      requested = true;
+      if (attaching || !valid()) return;
+      attaching = true;
+      try {
+        if (!streamAvailable) {
+          await ensureTerminalStream();
+          if (!valid()) return;
+          streamAvailable = true;
+        }
+        let attempts = 0;
+        while (requested && valid() && ++attempts <= 3) {
+          requested = false;
+          const cursor = position.current;
+          const bufferedAtStart = new Set(events);
+          const result = await pico.request("terminal.attach", {
+            sessionId,
+            terminalId: terminal!.terminalId,
+            ...(cursor ? { afterSequence: cursor.sequence } : {}),
+            maxBytes: 32 * 1024,
+          });
+          if (!valid()) return;
+          if (cursor && cursor.epoch !== result.resourceEpoch) {
+            oldEpochs.add(cursor.epoch);
+            position.current = undefined;
+            inputGeneration.current++;
+            requested = true;
+            continue;
+          }
+          if (confirmedEpoch && confirmedEpoch !== result.resourceEpoch)
+            oldEpochs.add(confirmedEpoch);
+          confirmedEpoch = result.resourceEpoch;
+          events = events.filter((event) => {
+            if (event.resourceEpoch !== result.resourceEpoch && bufferedAtStart.has(event)) {
+              oldEpochs.add(event.resourceEpoch);
+              return false;
+            }
+            return true;
+          });
+          const reset = !cursor || cursor.epoch !== result.resourceEpoch || result.truncated;
+          position.current = { epoch: result.resourceEpoch, sequence: result.sequence };
+          updateTerminal(result.terminal);
+          if (desiredSize.current) resize(desiredSize.current.cols, desiredSize.current.rows);
+          output(result.snapshot, reset);
+          if (result.truncated) pico.report(new Error("终端输出缓冲区已截断，当前显示可用尾部"));
+          consume();
+        }
+        if (requested && valid()) {
+          requested = false;
+          pico.report(new Error("终端输出序号缺口尚未补齐，请刷新终端"));
+        }
+      } catch (error) {
+        if (valid()) pico.report(error);
+      } finally {
+        attaching = false;
+      }
+    }
+    const subscription = pico.client.subscribeTerminalFrames((event) => {
+      if (
+        !valid() ||
+        event.sessionId !== sessionId ||
+        event.terminalId !== terminal.terminalId ||
+        oldEpochs.has(event.resourceEpoch)
+      )
+        return;
+      const cursor = position.current;
+      if (cursor && cursor.epoch === event.resourceEpoch && event.sequence <= cursor.sequence)
+        return;
+      events.push(event);
+      eventCharacters += event.kind === "output" ? event.data.length : 0;
+      if (events.length > 256 || eventCharacters > 128 * 1024) {
+        events = [];
+        eventCharacters = 0;
+        position.current = undefined;
+        pico.report(new Error("终端输出过快，正在重新获取可用尾部"));
+        void attach();
+      } else if (!attaching) {
+        if (!cursor || cursor.epoch !== event.resourceEpoch) {
+          position.current = undefined;
+          inputGeneration.current++;
+          void attach();
+        } else {
+          consume();
+          if (requested) void attach();
+        }
+      }
+    });
+    recoverOutput.current = () => void attach();
+    void attach();
     return () => {
       current = false;
-      poller.current.stop();
-      const t = control.current;
+      subscription.dispose();
+      recoverOutput.current = undefined;
+      inputGeneration.current++;
+      const t = attachedTerminal;
       if (t)
         void pico
           .request("terminal.detach", {
@@ -117,7 +284,17 @@ export function TerminalPanel({ sessionId }: { sessionId: string }) {
           })
           .catch(() => undefined);
     };
-  }, [terminal?.terminalId, foreground, pico.connected, pico.syncRevision, pico.generation, ready]);
+  }, [
+    terminal?.terminalId,
+    foreground,
+    pico.connected,
+    pico.syncRevision,
+    pico.generation,
+    pico.client,
+  ]);
+  useEffect(() => {
+    if (ready) ref.current?.postMessage(JSON.stringify({ type: "theme", theme: terminalTheme }));
+  }, [ready]);
   useEffect(() => {
     if (!foreground || !pico.connected) inputGeneration.current++;
   }, [foreground, pico.connected]);
@@ -131,44 +308,100 @@ export function TerminalPanel({ sessionId }: { sessionId: string }) {
       );
   }, [ready, terminal?.controlAllowed, blocked, foreground, pico.connected]);
   async function create() {
+    await ensureTerminalStream();
+    if (!active.current || identity !== currentIdentity.current) return;
     const x = await pico.request("terminal.create", { sessionId, cols: 80, rows: 24 });
-    if (!active.current) return;
+    if (!active.current || identity !== currentIdentity.current) return;
     setTerminal(x.terminal);
     await list();
   }
   function input(data: string) {
     const t = control.current;
     const cursor = position.current;
-    if (!t || !cursor || !foreground || !pico.connected || inputBlocked.current) return;
+    if (
+      !t ||
+      !cursor ||
+      !live.current.foreground ||
+      !live.current.connected ||
+      inputBlocked.current
+    )
+      return;
     if (t.controlAllowed !== true) {
       pico.report(new Error("此终端由其他客户端创建，手机仅可查看"));
       return;
     }
     const generation = inputGeneration.current;
     // Keep keystrokes in order; a lost response discards queued input, never resends it.
+    for (const chunk of terminalInputChunks(data))
+      inputQueue.current = inputQueue.current.then(async () => {
+        if (!canControl(t, cursor.epoch, generation)) return;
+        try {
+          await pico.request("terminal.input", {
+            sessionId,
+            terminalId: t.terminalId,
+            resourceEpoch: cursor.epoch,
+            data: chunk,
+          });
+        } catch (error) {
+          if (
+            !active.current ||
+            identity !== currentIdentity.current ||
+            t.terminalId !== control.current?.terminalId
+          )
+            return;
+          inputGeneration.current++;
+          inputBlocked.current = true;
+          setBlocked(true);
+          pico.report(
+            new Error(
+              `终端输入结果未确认，不会自动重发。请检查输出后恢复输入。${error instanceof Error ? error.message : ""}`,
+            ),
+          );
+        }
+      });
+  }
+  function canControl(t: RuntimeTerminalSession, epoch: string, generation: number) {
+    return (
+      active.current &&
+      generation === inputGeneration.current &&
+      identity === live.current.identity &&
+      live.current.foreground &&
+      live.current.connected &&
+      !inputBlocked.current &&
+      control.current?.terminalId === t.terminalId &&
+      control.current.controlAllowed === true &&
+      position.current?.epoch === epoch &&
+      control.current.resourceEpoch === epoch
+    );
+  }
+  function resize(cols: number, rows: number) {
+    desiredSize.current = { cols, rows };
+    const t = control.current;
+    const cursor = position.current;
+    const generation = inputGeneration.current;
+    if (
+      !t ||
+      !cursor ||
+      !t.resizeSupported ||
+      t.status !== "running" ||
+      !canControl(t, cursor.epoch, generation)
+    )
+      return;
+    const dimensions = `${t.terminalId}:${cursor.epoch}:${cols}:${rows}`;
     inputQueue.current = inputQueue.current.then(async () => {
-      if (!active.current || generation !== inputGeneration.current || inputBlocked.current) return;
+      if (!canControl(t, cursor.epoch, generation) || lastResize.current === dimensions) return;
+      lastResize.current = dimensions;
       try {
-        await pico.request("terminal.input", {
+        await pico.request("terminal.resize", {
           sessionId,
           terminalId: t.terminalId,
           resourceEpoch: cursor.epoch,
-          data,
+          cols,
+          rows,
         });
       } catch (error) {
-        if (
-          !active.current ||
-          identity !== currentIdentity.current ||
-          t.terminalId !== control.current?.terminalId
-        )
-          return;
-        inputBlocked.current = true;
-        setBlocked(true);
-        pico.report(
-          new Error(
-            `终端输入结果未确认，不会自动重发。请检查输出后恢复输入。${error instanceof Error ? error.message : ""}`,
-          ),
-        );
+        if (lastResize.current === dimensions) lastResize.current = undefined;
+        if (canControl(t, cursor.epoch, generation)) pico.report(error);
       }
     });
   }
@@ -181,7 +414,16 @@ export function TerminalPanel({ sessionId }: { sessionId: string }) {
             reason={pico.reason("terminal.create")}
             onPress={() => void pico.perform(create)}
           />
-          <Button title="刷新" secondary onPress={() => void pico.perform(list)} />
+          <Button
+            title="刷新"
+            secondary
+            onPress={() =>
+              void pico.perform(async () => {
+                await list();
+                recoverOutput.current?.();
+              })
+            }
+          />
         </View>
         <Label>终端运行在电脑用户权限下。关闭页面仅断开显示。</Label>
         <ScrollView horizontal>
@@ -209,8 +451,10 @@ export function TerminalPanel({ sessionId }: { sessionId: string }) {
           <Button
             title="已检查输出，恢复输入"
             onPress={() => {
+              inputGeneration.current++;
               inputBlocked.current = false;
               setBlocked(false);
+              if (desiredSize.current) resize(desiredSize.current.cols, desiredSize.current.rows);
             }}
           />
         </Card>
@@ -219,7 +463,8 @@ export function TerminalPanel({ sessionId }: { sessionId: string }) {
         <>
           <WebView
             ref={ref}
-            style={{ flex: 1, minHeight: 350, backgroundColor: color.terminalBg }}
+            style={{ flex: 1, minHeight: 350, backgroundColor: color.bg }}
+            containerStyle={{ backgroundColor: color.bg }}
             source={{ html }}
             originWhitelist={["about:blank"]}
             javaScriptEnabled
@@ -233,28 +478,23 @@ export function TerminalPanel({ sessionId }: { sessionId: string }) {
                 const message = JSON.parse(event.nativeEvent.data);
                 if (message.type === "ready") {
                   setReady(true);
-                  for (const out of pendingOutput.current)
-                    ref.current?.postMessage(JSON.stringify({ type: "output", ...out }));
-                  pendingOutput.current = [];
+                  outputQueue.current.ready(true);
+                } else if (message.type === "written" && Number.isInteger(message.id)) {
+                  outputQueue.current.written(message.id);
+                } else if (message.type === "overflow") {
+                  position.current = undefined;
+                  pico.report(new Error("终端输出过快，正在重新获取可用尾部"));
+                  recoverOutput.current?.();
                 } else if (message.type === "input" && typeof message.data === "string")
                   void input(message.data);
                 else if (
                   message.type === "resize" &&
-                  terminal.resizeSupported &&
-                  terminal.controlAllowed === true &&
                   Number.isInteger(message.cols) &&
                   Number.isInteger(message.rows) &&
-                  position.current
+                  message.cols > 0 &&
+                  message.rows > 0
                 )
-                  void pico.perform(() =>
-                    pico.request("terminal.resize", {
-                      sessionId,
-                      terminalId: terminal.terminalId,
-                      resourceEpoch: position.current!.epoch,
-                      cols: message.cols,
-                      rows: message.rows,
-                    }),
-                  );
+                  resize(message.cols, message.rows);
               } catch (error) {
                 pico.report(error);
               }

@@ -1,0 +1,47 @@
+import type { ITheme } from "@xterm/xterm";
+
+// Native equivalents of the desktop Pico tokens in renderer/styles.css.
+export const color = {
+  bg: "#ffffff",
+  panel: "#fafafa",
+  surface: "#f5f5f5",
+  sidebar: "#f6f6f6",
+  line: "#eaeaea",
+  lineStrong: "#ceced5",
+  text: "#262626",
+  muted: "#606068",
+  faint: "#7c7c85",
+  accent: "#467bbd",
+  accentStrong: "#3265a4",
+  accentSoft: "#eaf2fc",
+  warning: "#9b661d",
+  warningSoft: "#f5ead6",
+  danger: "#a34235",
+  dangerSoft: "#f5e4e0",
+};
+
+export const terminalTheme = {
+  background: color.bg,
+  foreground: color.text,
+  cursor: color.accent,
+  cursorAccent: color.bg,
+  selectionBackground: color.accentSoft,
+  selectionInactiveBackground: color.surface,
+  selectionForeground: color.text,
+  black: color.text,
+  red: color.danger,
+  green: "#4c7a35",
+  yellow: color.warning,
+  blue: color.accent,
+  magenta: "#8c5b9f",
+  cyan: "#2c7a84",
+  white: color.muted,
+  brightBlack: color.faint,
+  brightRed: "#c95546",
+  brightGreen: "#628e45",
+  brightYellow: "#b9812d",
+  brightBlue: "#6093d2",
+  brightMagenta: "#a570b7",
+  brightCyan: "#48949d",
+  brightWhite: color.text,
+} satisfies ITheme;

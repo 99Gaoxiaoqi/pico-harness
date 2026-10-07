@@ -11,27 +11,8 @@ import {
   type StyleProp,
   type ViewStyle,
 } from "react-native";
-// Native equivalents of the desktop Pico tokens in renderer/styles.css.
-export const color = {
-  bg: "#ffffff",
-  panel: "#fafafa",
-  surface: "#f5f5f5",
-  sidebar: "#f6f6f6",
-  line: "#eaeaea",
-  lineStrong: "#ceced5",
-  text: "#262626",
-  muted: "#606068",
-  faint: "#7c7c85",
-  accent: "#467bbd",
-  accentStrong: "#3265a4",
-  accentSoft: "#eaf2fc",
-  warning: "#9b661d",
-  warningSoft: "#f5ead6",
-  danger: "#a34235",
-  dangerSoft: "#f5e4e0",
-  terminalBg: "#0b1020",
-  terminalText: "#dbeafe",
-};
+import { color } from "./palette";
+export { color } from "./palette";
 export const s = StyleSheet.create({
   page: { flex: 1, backgroundColor: color.bg },
   body: { padding: 16, gap: 12 },
