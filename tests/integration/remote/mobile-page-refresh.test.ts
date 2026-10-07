@@ -306,6 +306,7 @@ test("终端恢复仅刷新和挂接显示，未知输入继续暂停且不重�
     return {};
   });
   Object.assign(pico, { client: { subscribeTerminalFrames: () => ({ dispose() {} }) } });
+  let nextStream = 0;
   const screen = mobileComponent(
     new URL("../../../apps/mobile/src/Terminal.tsx", import.meta.url),
     {
@@ -314,6 +315,7 @@ test("终端恢复仅刷新和挂接显示，未知输入继续暂停且不重�
         AppState: { currentState: "active", addEventListener: () => ({ remove() {} }) },
       },
       "react-native-webview": { WebView: "WebView" },
+      "expo-crypto": { randomUUID: () => `terminal-stream-${++nextStream}` },
       "@pico/protocol/mobile": { TERMINAL_STREAM_RUNTIME_CAPABILITY: "terminal-stream-v1" },
       "./store": { usePico: () => pico },
       "./ui": ui,

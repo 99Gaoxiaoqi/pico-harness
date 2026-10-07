@@ -17,6 +17,10 @@ export class TerminalOutputQueue {
     this.#characters = 0;
     this.#inFlight = undefined;
   }
+  restart() {
+    this.clear();
+    this.ready(true);
+  }
   push(data: string, reset = false): boolean {
     if (reset) {
       this.#pending = [];

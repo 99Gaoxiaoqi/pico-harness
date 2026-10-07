@@ -48,6 +48,9 @@ function fixture(
   const messages: Record<string, unknown>[] = [];
   let foreground!: (state: string) => void;
   let subscriptions = 0;
+  let uuid = 0;
+  let acknowledge = true;
+  const listedTerminals = [terminal()];
   const pico = {
     generation: 1,
     syncRevision: 1,
@@ -66,7 +69,7 @@ function fixture(
     request: async (method: string, params: Record<string, unknown>) => {
       calls.push({ method, params });
       if (method === "terminal.attach") assert.equal(subscriptions, 1, "先监听再挂接");
-      if (method === "terminal.list") return { terminals: [terminal()] };
+      if (method === "terminal.list") return { terminals: listedTerminals };
       if (method === "runtime.ping") return { capabilities };
       return request(method, params);
     },
@@ -95,6 +98,7 @@ function fixture(
         },
       },
       "react-native-webview": { WebView: "WebView" },
+      "expo-crypto": { randomUUID: () => `terminal-stream-${++uuid}` },
       "@pico/protocol/mobile": { TERMINAL_STREAM_RUNTIME_CAPABILITY: "terminal-stream-v1" },
       "./store": { usePico: () => pico },
       "./ui": { ...mobileTags(["Button", "Card", "Label"]), s: {}, color },
@@ -117,6 +121,7 @@ function fixture(
       terminalId: "terminal-a",
       sessionId: "session-a",
       resourceEpoch: "epoch-a",
+      streamId: calls.filter((call) => call.method === "terminal.attach").at(-1)?.params.streamId,
       sequence,
       at: sequence,
       kind: "output",
@@ -137,7 +142,7 @@ function fixture(
       postMessage(data: string) {
         const value = JSON.parse(data);
         messages.push(value);
-        if (value.type === "output")
+        if (value.type === "output" && acknowledge)
           queueMicrotask(() => message({ type: "written", id: value.id }));
       },
     };
@@ -157,6 +162,10 @@ function fixture(
     message,
     emit,
     mount,
+    listedTerminals,
+    acknowledge: (value: boolean) => {
+      acknowledge = value;
+    },
     foreground: (state: string) => foreground(state),
   };
 }
@@ -181,7 +190,7 @@ test("手机终端推送与初始快照连续消费，输出和状态共序号�
   f.render();
   assert.deepEqual(
     f.messages.filter((value) => value.type === "output").map((value) => value.data),
-    ["", "initial\r\n", "\x1b[32mpushed\x1b[0m\r\n"],
+    ["initial\r\n", "\x1b[32mpushed\x1b[0m\r\n"],
   );
   assert.ok(f.screen.nodes("Button").some((node) => node.props.title === "terminal · exited"));
   f.emit(2, { data: "duplicate" });
@@ -197,13 +206,7 @@ test("手机终端推送与初始快照连续消费，输出和状态共序号�
   await settleScreen();
   assert.deepEqual(
     f.messages.filter((value) => value.type === "output").map((value) => value.data),
-    [
-      "",
-      "initial\r\n",
-      "\x1b[32mpushed\x1b[0m\r\n",
-      "gap recovered\r\n",
-      "live after recovery\r\n",
-    ],
+    ["initial\r\n", "\x1b[32mpushed\x1b[0m\r\n", "gap recovered\r\n", "live after recovery\r\n"],
   );
   const paste = `${"中文🙂".repeat(8000)}\x1b[A\n`;
   f.message({ type: "input", data: paste });
@@ -310,6 +313,194 @@ test("旧Host明确提示升级重连，不挂接或退回轮询", async (t) => 
   await f.mount();
   assert.equal(f.calls.filter((call) => call.method === "terminal.attach").length, 0);
   assert.ok(f.errors.some((error) => /更新电脑端并重新连接/.test(String(error))));
+});
+
+test("终端退出后立即只读，丢弃排队按键且不产生错误输入阻断", async (t) => {
+  const inFlight = deferred<unknown>();
+  const f = fixture(async (method) =>
+    method === "terminal.attach" ? snapshot(1, "tail") : inFlight.promise,
+  );
+  t.after(() => f.screen.dispose());
+  await f.mount();
+  f.message({ type: "input", data: "in flight" });
+  f.message({ type: "input", data: "queued before exit" });
+  await settleScreen();
+  f.emit(2, { kind: "status", status: "exited", exitCode: 0 });
+  f.render();
+  f.message({ type: "input", data: "after exit" });
+  (
+    f.screen.nodes("Button").find((node) => node.props.title === "↑")!.props.onPress as () => void
+  )();
+  assert.equal(
+    f.screen.nodes("Button").find((node) => node.props.title === "键盘")!.props.reason,
+    "终端进程未在运行",
+  );
+  assert.equal(f.messages.filter((message) => message.type === "readonly").at(-1)!.value, true);
+  inFlight.reject(new Error("not_running"));
+  await settleScreen();
+  f.render();
+  assert.deepEqual(
+    f.calls.filter((call) => call.method === "terminal.input").map((call) => call.params.data),
+    ["in flight"],
+  );
+  assert.equal(f.errors.length, 0);
+  assert.equal(
+    f.screen.nodes("Button").some((node) => node.props.title === "已检查输出，恢复输入"),
+    false,
+  );
+});
+
+test("手机终端输入以字节和请求数限制排队，保留在途输入且超限内容需手动恢复", async (t) => {
+  for (const mode of ["bytes", "count"] as const) {
+    const inFlight = deferred<unknown>();
+    let inputs = 0;
+    const f = fixture(async (method) =>
+      method === "terminal.attach"
+        ? snapshot(1, "tail")
+        : method === "terminal.input" && ++inputs === 1
+          ? inFlight.promise
+          : {},
+    );
+    t.after(() => f.screen.dispose());
+    await f.mount();
+    const paste = "中🙂".repeat(80000);
+    if (mode === "bytes") f.message({ type: "input", data: paste });
+    else for (let i = 0; i < 200; i++) f.message({ type: "input", data: "x" });
+    await settleScreen();
+    f.render();
+    const restore = () =>
+      f.screen.nodes("Button").find((node) => node.props.title === "已检查输出，恢复输入")!;
+    assert.equal(restore().props.reason, "等待已接纳的输入完成");
+    (restore().props.onPress as () => void)();
+    f.message({ type: "input", data: "while paused" });
+    assert.equal(f.calls.filter((call) => call.method === "terminal.input").length, 1);
+    assert.ok(f.errors.some((error) => /输入队列已满/.test(String(error))));
+    inFlight.resolve({});
+    await settleScreen();
+    f.render();
+    const accepted = f.calls
+      .filter((call) => call.method === "terminal.input")
+      .map((call) => call.params.data as string);
+    if (mode === "bytes") {
+      assert.equal(accepted.length, 4);
+      assert.ok(Buffer.byteLength(accepted.join(""), "utf8") <= 256 * 1024);
+      assert.ok(paste.startsWith(accepted.join("")) && accepted.join("").length < paste.length);
+    } else assert.equal(accepted.length, 128);
+    assert.equal(restore().props.reason, undefined);
+    (restore().props.onPress as () => void)();
+    f.render();
+    f.message({ type: "input", data: "after checked" });
+    await settleScreen();
+    assert.equal(
+      f.calls.filter((call) => call.method === "terminal.input").length,
+      accepted.length + 1,
+    );
+    assert.equal(
+      f.calls.filter((call) => call.method === "terminal.input").at(-1)!.params.data,
+      "after checked",
+    );
+  }
+});
+
+test("WebView再次ready恢复完整尾部，显示订阅使用独立lease且旧lease不能影响新流", async (t) => {
+  let sequence = 1;
+  let tail = "initial";
+  const f = fixture(async (method, params) => {
+    if (method === "terminal.create") {
+      const value = { ...terminal("epoch-b"), terminalId: "terminal-b" };
+      f.listedTerminals.push(value);
+      return { ...snapshot(1, "created", "epoch-b"), terminal: value };
+    }
+    if (method === "terminal.attach")
+      return params.terminalId === "terminal-b"
+        ? {
+            ...snapshot(1, "terminal-b", "epoch-b"),
+            terminal: { ...terminal("epoch-b"), terminalId: "terminal-b" },
+          }
+        : snapshot(sequence, params.afterSequence === undefined ? tail : "");
+    return {};
+  });
+  t.after(() => f.screen.dispose());
+  await f.mount();
+  f.acknowledge(false);
+  f.emit(2, { data: "stalled write" });
+  f.emit(3, { data: "old queued output" });
+  sequence = 3;
+  tail = "reloaded full tail";
+  f.acknowledge(true);
+  f.message({ type: "ready" });
+  await settleScreen();
+  f.render();
+  assert.equal(
+    f.calls.filter((call) => call.method === "terminal.attach").at(-1)!.params.afterSequence,
+    undefined,
+  );
+  assert.ok(
+    f.messages.some(
+      (message) => message.type === "output" && message.data === tail && message.reset === true,
+    ),
+  );
+  assert.equal(
+    f.messages.some((message) => message.type === "output" && message.data === "old queued output"),
+    false,
+  );
+  assert.equal(f.messages.filter((message) => message.type === "theme").length, 2);
+  assert.equal(f.messages.filter((message) => message.type === "readonly").at(-1)!.value, false);
+  f.emit(4, { data: "after reload" });
+  sequence = 4;
+  await settleScreen();
+  assert.ok(
+    f.messages.some((message) => message.type === "output" && message.data === "after reload"),
+  );
+  const oldStream = f.calls.filter((call) => call.method === "terminal.attach").at(-1)!.params
+    .streamId;
+  f.foreground("background");
+  f.render();
+  f.foreground("active");
+  f.render();
+  await settleScreen();
+  f.render();
+  const newStream = f.calls.filter((call) => call.method === "terminal.attach").at(-1)!.params
+    .streamId;
+  assert.notEqual(newStream, oldStream);
+  assert.ok(
+    f.calls.some((call) => call.method === "terminal.detach" && call.params.streamId === oldStream),
+  );
+  f.emit(5, { streamId: oldStream, data: "old lease" });
+  f.emit(5, { data: "new lease" });
+  await settleScreen();
+  assert.equal(
+    f.messages.some((message) => message.type === "output" && message.data === "old lease"),
+    false,
+  );
+  assert.ok(
+    f.messages.some((message) => message.type === "output" && message.data === "new lease"),
+  );
+  (
+    f.screen.nodes("Button").find((node) => node.props.title === "新建终端")!.props
+      .onPress as () => void
+  )();
+  await settleScreen();
+  f.render();
+  await settleScreen();
+  f.render();
+  const creation = f.calls.find((call) => call.method === "terminal.create")!;
+  const selected = f.calls
+    .filter((call) => call.method === "terminal.attach" && call.params.terminalId === "terminal-b")
+    .at(-1)!;
+  assert.notEqual(creation.params.streamId, selected.params.streamId);
+  assert.ok(
+    f.calls.some(
+      (call) =>
+        call.method === "terminal.detach" &&
+        call.params.terminalId === "terminal-b" &&
+        call.params.streamId === creation.params.streamId,
+    ),
+  );
+  assert.equal(
+    f.calls.some((call) => call.method === "terminal.stop"),
+    false,
+  );
 });
 
 test("终端WebView使用应用色板，主题热更新保留会话，写入回调串行且队列有界", () => {
