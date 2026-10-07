@@ -123,6 +123,28 @@ export class DesktopSessionContinuity {
     return this.#bindings.get(bindingKey(workspacePath, sessionId))?.replica.view;
   }
 
+  async loadAround(workspacePath: string, sessionId: string, itemId: string): Promise<boolean> {
+    const binding = this.#bindings.get(bindingKey(workspacePath, sessionId));
+    const through = binding?.replica.view.watermark;
+    if (!binding || binding.disposed || binding.replica.view.phase !== "ready" || !through) return false;
+    const page = await this.options.transport.page({
+      workspacePath,
+      sessionId,
+      through,
+      aroundItemId: itemId,
+      limit: 200,
+    });
+    if (!this.isCurrent(binding)) return false;
+    const outcome = binding.replica.applyAroundPage(page);
+    if (outcome === "recovering") {
+      void this.reopen(binding);
+      return false;
+    }
+    if (outcome === "ignored") return false;
+    this.emit(binding);
+    return true;
+  }
+
   planControl(workspacePath: string, sessionId: string): RuntimePlanControlSnapshot | undefined {
     return this.#bindings.get(bindingKey(workspacePath, sessionId))?.planControl;
   }

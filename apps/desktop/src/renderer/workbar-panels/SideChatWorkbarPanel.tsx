@@ -68,6 +68,7 @@ export interface SideChatWorkbarPanelProps {
   readonly onSend: (message: string) => void;
   readonly onStop: () => void;
   readonly stopFocusRequest?: number | undefined;
+  readonly focusRequest?: number | undefined;
   readonly onDraftChange: (draft: string) => void;
   readonly onRetryCreate: () => void;
   readonly onClose: () => void;
@@ -113,6 +114,7 @@ export function SideChatWorkbarPanel({
   onSend,
   onStop,
   stopFocusRequest,
+  focusRequest,
   onDraftChange,
   onRetryCreate,
   onClose,
@@ -124,6 +126,9 @@ export function SideChatWorkbarPanel({
   useEffect(() => {
     if (stopFocusRequest) stopSlot.current?.querySelector<HTMLButtonElement>("button")?.focus();
   }, [stopFocusRequest]);
+  useEffect(() => {
+    if (focusRequest) editorRef.current?.focus();
+  }, [focusRequest]);
   const openResources = (kind: "skill" | "agent" = "skill") => {
     editorRef.current?.focus();
     editorRef.current?.insertText(` /${kind} `);

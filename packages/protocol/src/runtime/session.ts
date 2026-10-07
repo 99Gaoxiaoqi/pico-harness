@@ -37,6 +37,7 @@ import {
   resultShape,
   resultString,
   resultStringArray,
+  stringArrayParam,
   stringParam,
   workspaceRunParams,
   workspaceSessionParams,
@@ -415,6 +416,44 @@ export type SessionMethodMap = {
     readonly params: WorkspaceParams & { readonly sessionId: SessionId };
     readonly result: { readonly session: RuntimeSession; readonly sourceSessionId: SessionId };
   };
+  readonly "session.revise": {
+    readonly params: WorkspaceParams & {
+      readonly sourceSessionId: SessionId;
+      readonly targetEventId: string;
+      readonly replacementText: string;
+      readonly idempotencyKey: string;
+    };
+    readonly result: {
+      readonly session: RuntimeSession;
+      readonly sourceSessionId: SessionId;
+      readonly targetEventId: string;
+      readonly disposition: SessionSendDisposition;
+      readonly run?: RuntimeRun;
+    };
+  };
+  readonly "session.queue.update": {
+    readonly params: WorkspaceParams & {
+      readonly sessionId: SessionId;
+      readonly queueId: string;
+      readonly input: RuntimeUserInput;
+    };
+    readonly result: { readonly queuedInput: RuntimeQueuedInput };
+  };
+  readonly "session.queue.remove": {
+    readonly params: WorkspaceParams & { readonly sessionId: SessionId; readonly queueId: string };
+    readonly result: { readonly removed: true };
+  };
+  readonly "session.queue.reorder": {
+    readonly params: WorkspaceParams & {
+      readonly sessionId: SessionId;
+      readonly queueIds: readonly string[];
+    };
+    readonly result: { readonly queuedInputs: readonly RuntimeQueuedInput[] };
+  };
+  readonly "session.queue.moveToNext": {
+    readonly params: WorkspaceParams & { readonly sessionId: SessionId; readonly queueId: string };
+    readonly result: { readonly queuedInputs: readonly RuntimeQueuedInput[] };
+  };
   readonly "session.compact": {
     readonly params: WorkspaceParams & { readonly sessionId: SessionId };
     readonly result: {
@@ -546,6 +585,42 @@ export const sessionParamValidators = {
     title: stringParam,
   }),
   "session.fork": workspaceSessionParams,
+  "session.revise": exactParamShape({
+    workspacePath: stringParam,
+    sourceSessionId: boundedNonEmptyStringParam(256),
+    targetEventId: boundedNonEmptyStringParam(512),
+    replacementText: stringParam,
+    idempotencyKey: boundedNonEmptyStringParam(512),
+  }),
+  "session.queue.update": exactParamShape({
+    workspacePath: stringParam,
+    sessionId: boundedNonEmptyStringParam(256),
+    queueId: boundedNonEmptyStringParam(512),
+    input: runtimeUserInputParam,
+  }),
+  "session.queue.remove": exactParamShape({
+    workspacePath: stringParam,
+    sessionId: boundedNonEmptyStringParam(256),
+    queueId: boundedNonEmptyStringParam(512),
+  }),
+  "session.queue.reorder": exactParamShape({
+    workspacePath: stringParam,
+    sessionId: boundedNonEmptyStringParam(256),
+    queueIds: (value, path) => {
+      stringArrayParam(value, path);
+      if (Array.isArray(value) && value.length > 500) {
+        throw invalidParams(`${path} 最多包含 500 条队列输入`);
+      }
+      if (Array.isArray(value)) {
+        value.forEach((item, index) => boundedNonEmptyStringParam(512)(item, `${path}[${index}]`));
+      }
+    },
+  }),
+  "session.queue.moveToNext": exactParamShape({
+    workspacePath: stringParam,
+    sessionId: boundedNonEmptyStringParam(256),
+    queueId: boundedNonEmptyStringParam(512),
+  }),
   "session.compact": workspaceSessionParams,
   "session.settings.get": workspaceSessionParams,
   "sideChat.create": exactParamShape({
@@ -652,6 +727,19 @@ export const sessionResultValidators = {
     added: resultBoolean,
   }),
   "session.fork": resultShape({ session: runtimeSessionResult, sourceSessionId: resultString }),
+  "session.revise": exactResultShape(
+    {
+      session: runtimeSessionResult,
+      sourceSessionId: resultNonEmptyString,
+      targetEventId: resultNonEmptyString,
+      disposition: resultOneOf(["started", "steered", "queued", "replaced"]),
+    },
+    { run: runtimeRunResult },
+  ),
+  "session.queue.update": exactResultShape({ queuedInput: runtimeQueuedInputResult }),
+  "session.queue.remove": exactResultShape({ removed: resultOneOf([true]) }),
+  "session.queue.reorder": exactResultShape({ queuedInputs: resultArray(runtimeQueuedInputResult) }),
+  "session.queue.moveToNext": exactResultShape({ queuedInputs: resultArray(runtimeQueuedInputResult) }),
   "session.send": resultShape(
     {
       session: runtimeSessionResult,

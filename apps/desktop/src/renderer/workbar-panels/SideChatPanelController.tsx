@@ -31,6 +31,7 @@ export function SideChatPanelController({
   sourceSessionId,
   panelId,
   active,
+  quoteRequest,
   onRequestClose,
 }: {
   readonly runtime: RuntimeStore;
@@ -38,6 +39,7 @@ export function SideChatPanelController({
   readonly sourceSessionId: string;
   readonly panelId: string;
   readonly active: boolean;
+  readonly quoteRequest?: { readonly id: string; readonly text: string } | undefined;
   readonly onRequestClose: () => void;
 }) {
   const { data, actions, busy } = runtime;
@@ -49,8 +51,10 @@ export function SideChatPanelController({
   });
   const [resourceRequest, setResourceRequest] = useState<{ kind: "skill" | "agent"; id: number }>();
   const [stopFocusRequest, setStopFocusRequest] = useState(0);
+  const [quoteFocusRequest, setQuoteFocusRequest] = useState(0);
   const [error, setError] = useState<SideChatPanelError | null>(null);
   const targetSessionIdRef = useRef<string | undefined>(undefined);
+  const appliedQuoteIdRef = useRef<string | undefined>(undefined);
   const createGenerationRef = useRef(0);
   const cleanupKey = useMemo(
     () => JSON.stringify([workspacePath, sourceSessionId, panelId]),
@@ -62,6 +66,17 @@ export function SideChatPanelController({
     (entry) => entry.scope.picoHome === data.picoHome && entry.scope.sourceKey === sourceKey,
   );
   const { value: draft, update: setDraft, clear, clearIfUnchanged } = usePersistentDraft(sourceKey);
+
+  useEffect(() => {
+    if (!quoteRequest || appliedQuoteIdRef.current === quoteRequest.id) return;
+    const quote = quoteRequest.text
+      .split("\n")
+      .map((line) => `> ${line}`)
+      .join("\n");
+    setDraft(`${draft.trimEnd()}${draft.trim() ? "\n\n" : ""}${quote}\n\n`);
+    appliedQuoteIdRef.current = quoteRequest.id;
+    setQuoteFocusRequest((current) => current + 1);
+  }, [draft, quoteRequest, setDraft]);
 
   const create = useCallback(async () => {
     const generation = ++createGenerationRef.current;
@@ -285,6 +300,7 @@ export function SideChatPanelController({
       resources={composerResources}
       resourceRequest={resourceRequest}
       stopFocusRequest={stopFocusRequest}
+      focusRequest={quoteFocusRequest}
       commandFeedback={
         <>
           {commands.feedback}

@@ -338,6 +338,16 @@ export interface RuntimeActions {
   ): Promise<boolean>;
   loadSession(ref: WorkspaceSessionRef): Promise<void>;
   loadEarlierSession(ref: WorkspaceSessionRef): Promise<void>;
+  loadTranscriptAnchors(
+    ref: WorkspaceSessionRef,
+    beforeSequence?: number,
+  ): Promise<RuntimeResult<"session.transcript.anchors"> | undefined>;
+  searchTranscript(
+    ref: WorkspaceSessionRef,
+    query: string,
+    beforeSequence?: number,
+  ): Promise<RuntimeResult<"session.transcript.search"> | undefined>;
+  loadTranscriptAround(ref: WorkspaceSessionRef, itemId: string): Promise<boolean>;
   recoverPendingSend?(sourceKey: string): Promise<{
     readonly succeeded: boolean;
     readonly workspacePath?: string;
@@ -368,6 +378,12 @@ export interface RuntimeActions {
   }>;
   renameSession(ref: WorkspaceSessionRef, title: string): Promise<boolean>;
   forkSession(ref: WorkspaceSessionRef): Promise<WorkspaceSessionRef | undefined>;
+  reviseSessionMessage(
+    ref: WorkspaceSessionRef,
+    targetEventId: string,
+    replacementText: string,
+    idempotencyKey: string,
+  ): Promise<WorkspaceSessionRef | undefined>;
   compactSession(ref: WorkspaceSessionRef): Promise<boolean>;
   updateSessionSettings(
     ref: WorkspaceSessionRef,
@@ -2093,6 +2109,54 @@ export function useRuntimeStore(): RuntimeStore {
           await loadConversation(bridge, workspacePath, sessionId);
         });
       },
+      async loadTranscriptAnchors(ref, beforeSequence) {
+        const { workspacePath, sessionId } = ref;
+        if (!workspacePath || !sessionId) return undefined;
+        let result: RuntimeResult<"session.transcript.anchors"> | undefined;
+        await perform("transcript-anchors", async (bridge) => {
+          if (!preview) {
+            result = await invoke(bridge, "session.transcript.anchors", {
+              workspacePath,
+              sessionId,
+              ...(beforeSequence !== undefined ? { beforeSequence } : {}),
+              limit: 80,
+            });
+          } else {
+            result = { anchors: [] };
+          }
+        });
+        return result;
+      },
+      async searchTranscript(ref, query, beforeSequence) {
+        const { workspacePath, sessionId } = ref;
+        if (!workspacePath || !sessionId || !query.trim()) return undefined;
+        let result: RuntimeResult<"session.transcript.search"> | undefined;
+        await perform("transcript-search", async (bridge) => {
+          if (!preview) {
+            result = await invoke(bridge, "session.transcript.search", {
+              workspacePath,
+              sessionId,
+              query: query.trim(),
+              ...(beforeSequence !== undefined ? { beforeSequence } : {}),
+              limit: 80,
+            });
+          } else {
+            result = { hits: [] };
+          }
+        });
+        return result;
+      },
+      async loadTranscriptAround(ref, itemId) {
+        const { workspacePath, sessionId } = ref;
+        if (!workspacePath || !sessionId) return false;
+        let loaded = false;
+        const succeeded = await perform("transcript-jump", async (bridge) => {
+          if (preview) return;
+          loaded = await ensureDesktopContinuity(bridge).loadAround(workspacePath, sessionId, itemId);
+          if (!loaded) throw new Error("无法定位该消息，请刷新会话后重试。");
+        });
+        return succeeded && loaded;
+      },
       async sendMessage(input) {
         const workspacePath = input.workspacePath;
         if (!workspacePath || (!input.text.trim() && !input.skills?.length))
@@ -2313,6 +2377,25 @@ export function useRuntimeStore(): RuntimeStore {
           if (forkedSessionId) await loadConversation(bridge, workspacePath, forkedSessionId);
         });
         return forkedSessionId ? { workspacePath, sessionId: forkedSessionId } : undefined;
+      },
+      async reviseSessionMessage(ref, targetEventId, replacementText, idempotencyKey) {
+        const { workspacePath, sessionId } = ref;
+        if (!workspacePath || !sessionId || !replacementText.trim()) return undefined;
+        let revisedSessionId: string | undefined;
+        await perform("revise-session-message", async (bridge) => {
+          if (preview) throw new Error("预览会话不支持编辑旧消息。");
+          const result = await invoke(bridge, "session.revise", {
+            workspacePath,
+            sourceSessionId: sessionId,
+            targetEventId,
+            replacementText,
+            idempotencyKey,
+          });
+          revisedSessionId = stringValue(result.session.sessionId) || undefined;
+          await loadWorkspace(bridge, workspacePath);
+          if (revisedSessionId) await loadConversation(bridge, workspacePath, revisedSessionId);
+        });
+        return revisedSessionId ? { workspacePath, sessionId: revisedSessionId } : undefined;
       },
       async compactSession(ref) {
         const { workspacePath, sessionId } = ref;

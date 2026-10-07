@@ -4,7 +4,9 @@ import {
   RUNTIME_HOST_BRIDGE_SESSION_SUBSCRIPTION_CLOSE,
   RUNTIME_HOST_BRIDGE_SESSION_SUBSCRIPTION_OPEN,
   RUNTIME_HOST_BRIDGE_SESSION_TRANSCRIPT_ADVANCE,
+  RUNTIME_HOST_BRIDGE_SESSION_TRANSCRIPT_ANCHORS,
   RUNTIME_HOST_BRIDGE_SESSION_TRANSCRIPT_PAGE,
+  RUNTIME_HOST_BRIDGE_SESSION_TRANSCRIPT_SEARCH,
   type BridgeErrorCode,
   type BridgeOperationContext,
   type PicoBridgeSessionContinuityHandlerMap,
@@ -90,11 +92,33 @@ export function createRuntimeHostSessionContinuityBridge(
     }
   };
 
+  const anchors = async (
+    input: RuntimeParams<"session.transcript.anchors">,
+  ): Promise<BridgeOutcome<RuntimeResult<"session.transcript.anchors">>> => {
+    try {
+      return { ok: true, result: await registry.readTranscriptAnchors(input) };
+    } catch (error) {
+      return failure(error);
+    }
+  };
+
+  const search = async (
+    input: RuntimeParams<"session.transcript.search">,
+  ): Promise<BridgeOutcome<RuntimeResult<"session.transcript.search">>> => {
+    try {
+      return { ok: true, result: await registry.searchTranscript(input) };
+    } catch (error) {
+      return failure(error);
+    }
+  };
+
   const handlers = {
     [RUNTIME_HOST_BRIDGE_SESSION_SUBSCRIPTION_OPEN]: open,
     [RUNTIME_HOST_BRIDGE_SESSION_SUBSCRIPTION_CLOSE]: close,
     [RUNTIME_HOST_BRIDGE_SESSION_TRANSCRIPT_PAGE]: page,
     [RUNTIME_HOST_BRIDGE_SESSION_TRANSCRIPT_ADVANCE]: advance,
+    [RUNTIME_HOST_BRIDGE_SESSION_TRANSCRIPT_ANCHORS]: anchors,
+    [RUNTIME_HOST_BRIDGE_SESSION_TRANSCRIPT_SEARCH]: search,
   } satisfies PicoBridgeSessionContinuityHandlerMap;
 
   return {

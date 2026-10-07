@@ -41,6 +41,8 @@ export const RUNTIME_HOST_BRIDGE_SESSION_SUBSCRIPTION_OPEN = "session.subscripti
 export const RUNTIME_HOST_BRIDGE_SESSION_SUBSCRIPTION_CLOSE = "session.subscription.close";
 export const RUNTIME_HOST_BRIDGE_SESSION_TRANSCRIPT_PAGE = "session.transcript.page";
 export const RUNTIME_HOST_BRIDGE_SESSION_TRANSCRIPT_ADVANCE = "session.transcript.advance";
+export const RUNTIME_HOST_BRIDGE_SESSION_TRANSCRIPT_ANCHORS = "session.transcript.anchors";
+export const RUNTIME_HOST_BRIDGE_SESSION_TRANSCRIPT_SEARCH = "session.transcript.search";
 /**
  * Generic transition operation (3-B-3): carries any daemon RUNTIME_METHOD over
  * the Runtime Host wire so clients can migrate transport wholesale before each
@@ -343,6 +345,20 @@ export const PICO_RUNTIME_HOST_SESSION_CONTINUITY_OPERATION_SPECS = {
     errors: BRIDGE_ERRORS,
     decodeInput: (value) => parseStrictRuntimeParams("session.transcript.page", value),
     decodeOutput: (value) => parseRuntimeResult("session.transcript.page", value),
+  }),
+  [RUNTIME_HOST_BRIDGE_SESSION_TRANSCRIPT_ANCHORS]: defineOperation({
+    mode: "query",
+    availability: "ready",
+    errors: BRIDGE_ERRORS,
+    decodeInput: (value) => parseStrictRuntimeParams("session.transcript.anchors", value),
+    decodeOutput: (value) => parseRuntimeResult("session.transcript.anchors", value),
+  }),
+  [RUNTIME_HOST_BRIDGE_SESSION_TRANSCRIPT_SEARCH]: defineOperation({
+    mode: "query",
+    availability: "ready",
+    errors: BRIDGE_ERRORS,
+    decodeInput: (value) => parseStrictRuntimeParams("session.transcript.search", value),
+    decodeOutput: (value) => parseRuntimeResult("session.transcript.search", value),
   }),
   [RUNTIME_HOST_BRIDGE_SESSION_TRANSCRIPT_ADVANCE]: defineOperation({
     mode: "query",

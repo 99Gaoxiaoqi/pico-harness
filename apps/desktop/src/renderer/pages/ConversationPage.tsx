@@ -14,7 +14,7 @@ import {
   subagentParent,
   subagentSessionHref,
 } from "../conversation/subagent-navigation.js";
-import type { RuntimeUserDefaults } from "@pico/protocol";
+import type { RuntimeResult, RuntimeUserDefaults } from "@pico/protocol";
 import {
   AlertTriangle,
   Bot,
@@ -28,6 +28,7 @@ import {
   PanelRightClose,
   PanelRightOpen,
   Pencil,
+  Search,
   Sparkles,
   TerminalSquare,
 } from "lucide-react";
@@ -72,6 +73,7 @@ import {
 import type { ApprovalView, TimelineItem, ToolApprovalView } from "../model.js";
 import { useRuntime } from "../runtime-context.js";
 import { formatCompact, isTerminalRun } from "../view-format.js";
+import { copyText } from "../clipboard.js";
 import { BrowserWorkbarPanel } from "../workbar-panels/BrowserWorkbarPanel.js";
 import { SideChatPanelController } from "../workbar-panels/SideChatPanelController.js";
 import {
@@ -193,6 +195,20 @@ export function ConversationPage() {
   const [titleDraft, setTitleDraft] = useState("");
   const [modelOpenRequest, setModelOpenRequest] = useState(0);
   const [referenceError, setReferenceError] = useState<string>();
+  const [promptAnchors, setPromptAnchors] = useState<
+    RuntimeResult<"session.transcript.anchors">["anchors"]
+  >([]);
+  const [promptAnchorCursor, setPromptAnchorCursor] = useState<number>();
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<
+    RuntimeResult<"session.transcript.search">["hits"]
+  >([]);
+  const [searchCursor, setSearchCursor] = useState<number>();
+  const [searchPending, setSearchPending] = useState(false);
+  const [highlightItemId, setHighlightItemId] = useState<string>();
+  const [sideChatQuoteRequest, setSideChatQuoteRequest] = useState<
+    { readonly panelId: string; readonly id: string; readonly text: string } | undefined
+  >();
   const draftReferences = parseComposerDraft(draft);
   const composerResources = getComposerResources(data, workspacePath);
   const sendingRef = useRef(false);
@@ -221,7 +237,54 @@ export function ConversationPage() {
     setInspector(undefined);
     setEditingTitle(false);
     setReferenceError(undefined);
+    setPromptAnchors([]);
+    setPromptAnchorCursor(undefined);
+    setSearchQuery("");
+    setSearchResults([]);
+    setSearchCursor(undefined);
+    setHighlightItemId(undefined);
+    setSideChatQuoteRequest(undefined);
   }, [sessionId, workspacePath]);
+
+  useEffect(() => {
+    if (!sessionRef) return;
+    let current = true;
+    void actions.loadTranscriptAnchors(sessionRef).then((result) => {
+      if (!current || !result) return;
+      setPromptAnchors(result.anchors);
+      setPromptAnchorCursor(result.nextBeforeSequence);
+    });
+    return () => {
+      current = false;
+    };
+  }, [actions, sessionRef]);
+
+  useEffect(() => {
+    if (!sessionRef || !searchQuery.trim()) {
+      setSearchResults([]);
+      setSearchCursor(undefined);
+      setSearchPending(false);
+      return;
+    }
+    let current = true;
+    const timer = window.setTimeout(() => {
+      setSearchPending(true);
+      void actions
+        .searchTranscript(sessionRef, searchQuery)
+        .then((result) => {
+          if (!current || !result) return;
+          setSearchResults(result.hits);
+          setSearchCursor(result.nextBeforeSequence);
+        })
+        .finally(() => {
+          if (current) setSearchPending(false);
+        });
+    }, 250);
+    return () => {
+      current = false;
+      window.clearTimeout(timer);
+    };
+  }, [actions, searchQuery, sessionRef]);
 
   useEffect(() => {
     if (typeof window !== "undefined") saveWorkbarState(window.localStorage, workbar);
@@ -247,6 +310,7 @@ export function ConversationPage() {
     (candidate) => candidate.temporary !== true,
   );
   const workspaceLabel = workspaceDisplayName(workspacePath, workspace);
+  const projectLabel = workspace?.projectName ?? session?.projectName ?? workspaceLabel;
   const conversation = conversationKey ? data.conversations[conversationKey] : undefined;
   const sessionRuns = data.runs.filter(
     (run) => run.workspacePath === workspacePath && run.sessionId === sessionId,
@@ -706,6 +770,74 @@ export function ConversationPage() {
     }
   };
 
+  const jumpToTranscriptItem = async (itemId: string) => {
+    if (!sessionRef) return;
+    if (!(await actions.loadTranscriptAround(sessionRef, itemId))) return;
+    setHighlightItemId(undefined);
+    window.requestAnimationFrame(() => setHighlightItemId(itemId));
+  };
+
+  const loadMorePromptAnchors = async () => {
+    if (!sessionRef || promptAnchorCursor === undefined) return;
+    const result = await actions.loadTranscriptAnchors(sessionRef, promptAnchorCursor);
+    if (!result) return;
+    setPromptAnchors((current) => [...current, ...result.anchors]);
+    setPromptAnchorCursor(result.nextBeforeSequence);
+  };
+
+  const loadMoreSearchResults = async () => {
+    if (!sessionRef || searchCursor === undefined || !searchQuery.trim()) return;
+    const result = await actions.searchTranscript(sessionRef, searchQuery, searchCursor);
+    if (!result) return;
+    setSearchResults((current) => [...current, ...result.hits]);
+    setSearchCursor(result.nextBeforeSequence);
+  };
+
+  const quoteIntoMainComposer = (text: string) => {
+    const quoted = text
+      .split("\n")
+      .map((line) => `> ${line}`)
+      .join("\n");
+    composerInputRef.current?.insertText(`${draft.trim() ? "\n\n" : ""}${quoted}\n\n`);
+    composerInputRef.current?.focus();
+  };
+
+  const quoteIntoSideChat = (text: string) => {
+    if (!sessionId) {
+      actions.showMessage?.("请先打开一个会话，再使用侧聊引用。");
+      quoteIntoMainComposer(text);
+      return;
+    }
+    const panelId = `side-chat:${globalThis.crypto.randomUUID()}`;
+    const tab: WorkbarTab = { id: panelId, kind: "side-chat", label: "侧聊" };
+    setSideChatQuoteRequest({ panelId, id: globalThis.crypto.randomUUID(), text });
+    dispatchWorkbar({ type: "open", tab, dock: "right" });
+  };
+
+  const reviseUserMessage = async (
+    item: Extract<ConversationItemView, { kind: "userMessage" }>,
+    replacementText: string,
+    idempotencyKey: string,
+  ): Promise<boolean> => {
+    if (!sessionRef) return false;
+    const prefix = "message:";
+    const suffix = ":user";
+    if (!item.id.startsWith(prefix) || !item.id.endsWith(suffix)) {
+      actions.showMessage?.("这条记录没有可用的 Runtime 事件锚点，无法编辑。");
+      return false;
+    }
+    const targetEventId = item.id.slice(prefix.length, -suffix.length);
+    const target = await actions.reviseSessionMessage(
+      sessionRef,
+      targetEventId,
+      replacementText,
+      idempotencyKey,
+    );
+    if (!target) return false;
+    navigate(sessionHref(target), { replace: true });
+    return true;
+  };
+
   const respondToApproval = (
     decision:
       | "allow_once"
@@ -811,13 +943,18 @@ export function ConversationPage() {
             sourceSessionId={sessionId}
             panelId={tab.id}
             active={active}
+            quoteRequest={
+              sideChatQuoteRequest?.panelId === tab.id
+                ? { id: sideChatQuoteRequest.id, text: sideChatQuoteRequest.text }
+                : undefined
+            }
             onRequestClose={() => dispatchWorkbar({ type: "close", tabId: tab.id })}
           />
         );
       }
       return null;
     },
-    [inspector, runtime, session?.status, sessionId, sessionRef, workbar, workspacePath],
+    [inspector, runtime, session?.status, sessionId, sessionRef, sideChatQuoteRequest, workbar, workspacePath],
   );
 
   const handleWorkbarAction = useCallback(
@@ -977,9 +1114,35 @@ export function ConversationPage() {
             <div className="conversation-session-header">
               <div className="conversation-session-header__identity">
                 {workspacePath && (
-                  <span className="conversation-session-project" title={workspacePath}>
-                    <Folder aria-hidden="true" /> {workspaceLabel}
-                  </span>
+                  <div className="conversation-session-project-tools">
+                    <span className="conversation-session-project" title={workspacePath}>
+                      <Folder aria-hidden="true" /> {projectLabel}
+                    </span>
+                    <span className="conversation-session-worktree" title={workspacePath}>
+                      {workspacePath}
+                      {data.workspaceBranch ? ` · ${data.workspaceBranch}` : ""}
+                    </span>
+                    <Button
+                      variant="quiet"
+                      type="button"
+                      title="在文件管理器中打开当前 worktree"
+                      onClick={() => void actions.openWorkspace(workspacePath)}
+                    >
+                      打开文件夹
+                    </Button>
+                    <Button
+                      variant="quiet"
+                      type="button"
+                      title="复制当前会话的 worktree 路径"
+                      onClick={() =>
+                        void copyText(workspacePath)
+                          .then(() => actions.showMessage?.("已复制当前 worktree 路径。"))
+                          .catch(() => actions.showMessage?.("复制路径失败，请检查系统剪贴板权限。"))
+                      }
+                    >
+                      复制路径
+                    </Button>
+                  </div>
                 )}
                 {parentRef && (
                   <Link
@@ -1510,6 +1673,75 @@ export function ConversationPage() {
           </div>
         ) : (
           <>
+            {sessionRef && (
+              <section className="conversation-history-tools" aria-label="会话历史导航">
+                <label className="conversation-history-search">
+                  <Search aria-hidden="true" size={15} />
+                  <span className="conversation-sr-only">搜索当前会话</span>
+                  <input
+                    type="search"
+                    value={searchQuery}
+                    placeholder="搜索当前会话的全部历史…"
+                    onChange={(event) => setSearchQuery(event.target.value)}
+                  />
+                  {searchPending && <span role="status">搜索中…</span>}
+                </label>
+                {searchQuery.trim() && (
+                  <div className="conversation-search-results" aria-live="polite">
+                    {searchResults.length === 0 && !searchPending ? (
+                      <span className="conversation-history-empty">没有找到匹配内容。</span>
+                    ) : (
+                      searchResults.map((hit) => (
+                        <button
+                          type="button"
+                          key={`${hit.eventId}:${hit.itemId}`}
+                          onClick={() => void jumpToTranscriptItem(hit.itemId)}
+                        >
+                          <span>{hit.role === "user" ? "你" : "Pico"}</span>
+                          <span>
+                            {hit.summary.slice(0, hit.matchStart)}
+                            <mark>
+                              {hit.summary.slice(
+                                hit.matchStart,
+                                hit.matchStart + hit.matchLength,
+                              )}
+                            </mark>
+                            {hit.summary.slice(hit.matchStart + hit.matchLength)}
+                          </span>
+                        </button>
+                      ))
+                    )}
+                    {searchCursor !== undefined && (
+                      <Button variant="quiet" type="button" onClick={() => void loadMoreSearchResults()}>
+                        更多搜索结果
+                      </Button>
+                    )}
+                  </div>
+                )}
+                {promptAnchors.length > 0 && (
+                  <nav className="conversation-prompt-rail" aria-label="按用户提问跳转">
+                    <span>提问</span>
+                    <div>
+                      {promptAnchors.map((anchor) => (
+                        <button
+                          type="button"
+                          key={anchor.eventId}
+                          title={anchor.prompt}
+                          onClick={() => void jumpToTranscriptItem(anchor.itemId)}
+                        >
+                          {anchor.prompt}
+                        </button>
+                      ))}
+                    </div>
+                    {promptAnchorCursor !== undefined && (
+                      <Button variant="quiet" type="button" onClick={() => void loadMorePromptAnchors()}>
+                        更早提问
+                      </Button>
+                    )}
+                  </nav>
+                )}
+              </section>
+            )}
             {sessionRef && conversation?.hasEarlier && (
               <div className="conversation-history-pagination">
                 <Button
@@ -1546,6 +1778,12 @@ export function ConversationPage() {
                   ? `子智能体 · ${childParent?.name ?? session?.title ?? "执行记录"}`
                   : undefined
               }
+              onEditUserMessage={
+                !activeRun && session?.status !== "archived" ? reviseUserMessage : undefined
+              }
+              onQuoteSelection={quoteIntoMainComposer}
+              onAskInSideChat={sessionRef && session?.status !== "archived" ? quoteIntoSideChat : undefined}
+              highlightItemId={highlightItemId}
               onOpenItem={openItem}
               renderItem={(item, fallback) => {
                 if (item.id === `provider-retry:${retryNotice?.runId}` && retryNotice) {

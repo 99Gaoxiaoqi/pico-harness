@@ -136,6 +136,7 @@ import {
   RUNTIME_ERROR_CODES,
   RuntimeProtocolError,
   parseRuntimeParams,
+  parseRuntimeResult,
   type JsonValue,
   type JsonObject,
   type RuntimeNotification,
@@ -158,7 +159,10 @@ import type {
   RuntimeNotificationCursor,
   ShutdownOwnershipFence,
 } from "./local-runtime-service.js";
-import type { DesktopConversationStateStoreLike } from "./desktop-conversation-state.js";
+import type {
+  DesktopConversationStateStoreLike,
+  DesktopQueuedInput,
+} from "./desktop-conversation-state.js";
 import { SqliteDesktopConversationStateStore } from "./sqlite-desktop-conversation-state-store.js";
 import type { PlanControlPort } from "./plan-control-port.js";
 import { PlanCoordinator } from "@pico/runtime/plan-coordinator";
@@ -884,6 +888,11 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         deleteSession: this.deleteSession.bind(this),
         renameSession: this.renameSession.bind(this),
         forkSession: this.forkSession.bind(this),
+        reviseSession: this.reviseSession.bind(this),
+        updateQueuedInput: this.updateQueuedInput.bind(this),
+        removeQueuedInput: this.removeQueuedInput.bind(this),
+        reorderQueuedInputs: this.reorderQueuedInputs.bind(this),
+        moveQueuedInputToNext: this.moveQueuedInputToNext.bind(this),
         compactSession: this.compactSession.bind(this),
         getRuntimeSessionSettings: this.getRuntimeSessionSettings.bind(this),
         getSessionContextReport: this.getSessionContextReport.bind(this),
@@ -1600,6 +1609,118 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     this.publishSession(session);
     this.publishTranscriptUpdate(canonical, targetSessionId, "reload");
     return { session, sourceSessionId: sessionId };
+  }
+
+  private async reviseSession(
+    params: RuntimeRequest<"session.revise">["params"],
+  ): Promise<JsonValue> {
+    const sourceSessionId = requireText(params.sourceSessionId, "sourceSessionId");
+    const canonical = await this.requireTrustedSession(params.workspacePath, sourceSessionId);
+    const targetEventId = requireText(params.targetEventId, "targetEventId");
+    const replacementText = requireText(params.replacementText, "replacementText");
+    const idempotencyKey = `session.revise:${requireText(params.idempotencyKey, "idempotencyKey")}`;
+    const requestFingerprint = createHash("sha256")
+      .update(JSON.stringify({ canonical, sourceSessionId, targetEventId, replacementText }))
+      .digest("hex");
+    const stored = await this.conversationStateStore.getIdempotent(canonical, idempotencyKey);
+    if (stored) {
+      if (stored.requestFingerprint !== requestFingerprint) {
+        throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.CONFLICT, "修订幂等键已绑定不同的请求");
+      }
+      return stored.result;
+    }
+
+    const existingClaim = await this.conversationStateStore.getRewindClaim(canonical, idempotencyKey);
+    const operationId = `revise-${createHash("sha256").update(`${canonical}\0${idempotencyKey}`).digest("hex")}`;
+    const claim = await this.conversationStateStore.claimRewind(
+      canonical,
+      idempotencyKey,
+      sourceSessionId,
+      existingClaim?.targetSessionId ?? this.createSessionId(),
+      operationId,
+      requestFingerprint,
+    );
+    if (
+      claim.requestFingerprint !== requestFingerprint ||
+      claim.sourceSessionId !== sourceSessionId ||
+      claim.operationId !== operationId
+    ) {
+      throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.CONFLICT, "修订幂等键已绑定不同的请求");
+    }
+
+    const targetSessionId = claim.targetSessionId;
+    const trustedPath = await this.withWorkspaceAdmission(canonical, async () => {
+      const idlePath = await this.requireIdleTrustedSession(canonical, sourceSessionId, "编辑旧消息");
+      const sourceLease = await globalSessionManager.getOrCreatePinned(sourceSessionId, idlePath, {
+        persistence: true,
+        picoHome: this.picoHome,
+        runtimePort: createEngineRuntimePort(),
+      });
+      try {
+        await this.getForkSourceSettings(idlePath, sourceLease.session);
+        await sourceLease.session.flushPersistence();
+        const entries = await sourceLease.session.runtimeEventStore?.readSessionEntries(sourceSessionId);
+        if (!entries) {
+          throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.RESET_REQUIRED, "会话历史尚未持久化，无法编辑");
+        }
+        const targetIndex = entries.findIndex(
+          ({ event }) => event.eventId === targetEventId &&
+            event.kind === "message.committed" && event.data.message.role === "user",
+        );
+        if (targetIndex < 0) {
+          throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, "目标消息不是当前会话中的用户消息");
+        }
+        const previousEventId = entries[targetIndex - 1]?.event.eventId;
+        if (!previousEventId) {
+          throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.CONFLICT, "目标消息位于会话历史开头，无法安全创建修订分支");
+        }
+        const forkService = new SessionForkService({
+          workDir: idlePath,
+          picoHome: this.picoHome,
+          runtimePort: createSessionForkRuntimePort(),
+        });
+        try {
+          await forkService.fork({ sourceSessionId, targetSessionId, throughEventId: previousEventId, operationId });
+        } finally {
+          forkService.close();
+        }
+      } finally {
+        sourceLease.release();
+      }
+      this.workbarRepository(idlePath).forkSessionData(sourceSessionId, targetSessionId);
+      return idlePath;
+    });
+    const sent = parseRuntimeResult(
+      "session.send",
+      await this.sendSession({
+        workspacePath: trustedPath,
+        sessionId: targetSessionId,
+        input: { kind: "text", text: replacementText },
+        idempotencyKey: `revise-send:${createHash("sha256").update(`${idempotencyKey}\0${requestFingerprint}`).digest("hex")}`,
+        behavior: "auto",
+      }),
+    );
+    const result = {
+      session: sent.session,
+      sourceSessionId,
+      targetEventId,
+      disposition: sent.disposition,
+      ...(sent.run ? { run: sent.run } : {}),
+    };
+
+    try {
+      await this.conversationStateStore.rememberIdempotent(
+        canonical,
+        idempotencyKey,
+        requestFingerprint,
+        result,
+      );
+    } catch (error) {
+      logger.warn({ error, sourceSessionId, targetSessionId }, "会话修订已启动，但幂等结果保存失败");
+    }
+    this.publishSession(result.session as RuntimeSession);
+    this.publishTranscriptUpdate(canonical, targetSessionId, "reload");
+    return result;
   }
 
   private async createSideChat(
@@ -3122,6 +3243,85 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     });
     await this.conversationStateStore.removeQueued(workspacePath, next.queueId);
     return true;
+  }
+
+  private async updateQueuedInput(
+    params: RuntimeRequest<"session.queue.update">["params"],
+  ): Promise<JsonValue> {
+    const canonical = await this.requireTrustedSession(params.workspacePath, params.sessionId);
+    const queueId = requireText(params.queueId, "queueId");
+    const input = normalizeRuntimeUserInput(params.input);
+    const queuedInput = await this.withSessionAdmission(canonical, params.sessionId, async () => {
+      const updated = await this.conversationStateStore.updateQueued(
+        canonical,
+        params.sessionId,
+        queueId,
+        input,
+      );
+      if (!updated) {
+        throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.CONFLICT, "该队列输入已被消费或移除，请刷新队列。");
+      }
+      this.publishTranscriptUpdate(canonical, params.sessionId, "reload");
+      return updated;
+    });
+    return { queuedInput: queuedInputResult(queuedInput) };
+  }
+
+  private async removeQueuedInput(
+    params: RuntimeRequest<"session.queue.remove">["params"],
+  ): Promise<JsonValue> {
+    const canonical = await this.requireTrustedSession(params.workspacePath, params.sessionId);
+    const removed = await this.withSessionAdmission(canonical, params.sessionId, async () => {
+      const deleted = await this.conversationStateStore.removeQueuedForSession(
+        canonical,
+        params.sessionId,
+        requireText(params.queueId, "queueId"),
+      );
+      if (!deleted) {
+        throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.CONFLICT, "该队列输入已被消费或移除，请刷新队列。");
+      }
+      this.publishTranscriptUpdate(canonical, params.sessionId, "reload");
+      return true;
+    });
+    return { removed };
+  }
+
+  private async reorderQueuedInputs(
+    params: RuntimeRequest<"session.queue.reorder">["params"],
+  ): Promise<JsonValue> {
+    const canonical = await this.requireTrustedSession(params.workspacePath, params.sessionId);
+    const queuedInputs = await this.withSessionAdmission(canonical, params.sessionId, async () => {
+      const ordered = await this.conversationStateStore.reorderQueued(
+        canonical,
+        params.sessionId,
+        params.queueIds,
+      );
+      if (!ordered) {
+        throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.CONFLICT, "队列已变化，请刷新后重新排序。");
+      }
+      this.publishTranscriptUpdate(canonical, params.sessionId, "reload");
+      return ordered;
+    });
+    return { queuedInputs: queuedInputs.map(queuedInputResult) };
+  }
+
+  private async moveQueuedInputToNext(
+    params: RuntimeRequest<"session.queue.moveToNext">["params"],
+  ): Promise<JsonValue> {
+    const canonical = await this.requireTrustedSession(params.workspacePath, params.sessionId);
+    const queuedInputs = await this.withSessionAdmission(canonical, params.sessionId, async () => {
+      const ordered = await this.conversationStateStore.moveQueuedToNext(
+        canonical,
+        params.sessionId,
+        requireText(params.queueId, "queueId"),
+      );
+      if (!ordered) {
+        throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.CONFLICT, "该队列输入已被消费或移除，请刷新队列。");
+      }
+      this.publishTranscriptUpdate(canonical, params.sessionId, "reload");
+      return ordered;
+    });
+    return { queuedInputs: queuedInputs.map(queuedInputResult) };
   }
 
   private async withSessionAdmission<Result>(
@@ -5161,6 +5361,15 @@ function normalizeRuntimeUserInput(value: RuntimeUserInput): RuntimeUserInput {
     RUNTIME_ERROR_CODES.INVALID_PARAMS,
     `input.kind 不支持: ${String(kind)}`,
   );
+}
+
+function queuedInputResult(value: DesktopQueuedInput): RuntimeQueuedInput {
+  return {
+    queueId: value.queueId,
+    sessionId: value.sessionId,
+    input: value.input,
+    createdAt: value.createdAt,
+  };
 }
 
 /**

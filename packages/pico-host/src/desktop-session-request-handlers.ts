@@ -38,6 +38,21 @@ export interface DesktopSessionRequestContext {
     title: string,
   ) => Awaitable<JsonValue>;
   readonly forkSession: (workspacePath: string, sessionId: string) => Awaitable<JsonValue>;
+  readonly reviseSession: (
+    params: RuntimeRequest<"session.revise">["params"],
+  ) => Awaitable<JsonValue>;
+  readonly updateQueuedInput: (
+    params: RuntimeRequest<"session.queue.update">["params"],
+  ) => Awaitable<JsonValue>;
+  readonly removeQueuedInput: (
+    params: RuntimeRequest<"session.queue.remove">["params"],
+  ) => Awaitable<JsonValue>;
+  readonly reorderQueuedInputs: (
+    params: RuntimeRequest<"session.queue.reorder">["params"],
+  ) => Awaitable<JsonValue>;
+  readonly moveQueuedInputToNext: (
+    params: RuntimeRequest<"session.queue.moveToNext">["params"],
+  ) => Awaitable<JsonValue>;
   readonly compactSession: (workspacePath: string, sessionId: string) => Awaitable<JsonValue>;
   readonly getRuntimeSessionSettings: (
     workspacePath: string,
@@ -92,6 +107,11 @@ export function createDesktopSessionRequestHandlers(
   | "session.delete"
   | "session.rename"
   | "session.fork"
+  | "session.revise"
+  | "session.queue.update"
+  | "session.queue.remove"
+  | "session.queue.reorder"
+  | "session.queue.moveToNext"
   | "session.compact"
   | "session.settings.get"
   | "session.context.get"
@@ -139,6 +159,11 @@ export function createDesktopSessionRequestHandlers(
       ),
     "session.fork": (request) =>
       context.forkSession(request.params.workspacePath, request.params.sessionId),
+    "session.revise": (request) => context.reviseSession(request.params),
+    "session.queue.update": (request) => context.updateQueuedInput(request.params),
+    "session.queue.remove": (request) => context.removeQueuedInput(request.params),
+    "session.queue.reorder": (request) => context.reorderQueuedInputs(request.params),
+    "session.queue.moveToNext": (request) => context.moveQueuedInputToNext(request.params),
     "session.compact": (request) =>
       context.compactSession(request.params.workspacePath, request.params.sessionId),
     "session.settings.get": (request) =>

@@ -36,6 +36,12 @@ export interface SessionContinuityDataSource {
   readTranscriptPage(
     params: RuntimeParams<"session.transcript.page">,
   ): Promise<TranscriptPageResult>;
+  readTranscriptAnchors(
+    params: RuntimeParams<"session.transcript.anchors">,
+  ): Promise<RuntimeResult<"session.transcript.anchors">>;
+  searchTranscript(
+    params: RuntimeParams<"session.transcript.search">,
+  ): Promise<RuntimeResult<"session.transcript.search">>;
   readTranscriptAdvance(
     params: RuntimeParams<"session.transcript.advance">,
   ): Promise<TranscriptAdvanceResult>;
@@ -715,6 +721,18 @@ export class SessionSubscriptionRegistry {
     params: RuntimeParams<"session.transcript.page">,
   ): Promise<TranscriptPageResult> {
     return this.dataSource.readTranscriptPage(params);
+  }
+
+  readTranscriptAnchors(
+    params: RuntimeParams<"session.transcript.anchors">,
+  ): Promise<RuntimeResult<"session.transcript.anchors">> {
+    return this.dataSource.readTranscriptAnchors(params);
+  }
+
+  searchTranscript(
+    params: RuntimeParams<"session.transcript.search">,
+  ): Promise<RuntimeResult<"session.transcript.search">> {
+    return this.dataSource.searchTranscript(params);
   }
 
   readTranscriptAdvance(

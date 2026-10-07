@@ -143,6 +143,22 @@
   flex: none;
 }
 
+.conversation-session-project-tools {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+}
+
+.conversation-session-worktree {
+  max-width: min(24vw, 260px);
+  overflow: hidden;
+  color: var(--conversation-ink-faint);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .conversation-session-header h1 {
   font-size: 13px;
   font-weight: 640;
@@ -613,6 +629,193 @@
   justify-content: center;
   padding: 14px clamp(22px, 5vw, 58px) 0;
   margin: 0 auto -6px;
+}
+
+.conversation-history-tools {
+  display: flex;
+  width: min(100%, var(--conversation-content-width));
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px clamp(22px, 5vw, 58px) 0;
+  margin: 0 auto;
+}
+
+.conversation-history-search {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  border: 1px solid var(--conversation-line);
+  border-radius: 8px;
+  color: var(--conversation-ink-faint);
+  background: var(--conversation-bg);
+}
+
+.conversation-history-search input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  color: var(--conversation-ink);
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+}
+
+.conversation-search-results {
+  display: flex;
+  max-height: 190px;
+  flex-direction: column;
+  overflow: auto;
+  border: 1px solid var(--conversation-line);
+  border-radius: 8px;
+  background: var(--conversation-bg);
+}
+
+.conversation-search-results > button:not(.pico-page-control) {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  gap: 8px;
+  padding: 8px 10px;
+  border: 0;
+  border-bottom: 1px solid var(--conversation-line);
+  color: var(--conversation-ink);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.conversation-search-results > button:hover,
+.conversation-prompt-rail button:hover {
+  background: var(--conversation-bg-subtle);
+}
+
+.conversation-search-results > button > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversation-search-results mark {
+  border-radius: 2px;
+  color: inherit;
+  background: var(--conversation-warning-soft);
+}
+
+.conversation-history-empty {
+  padding: 9px 10px;
+  color: var(--conversation-ink-faint);
+  font-size: 12px;
+}
+
+.conversation-prompt-rail {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  color: var(--conversation-ink-faint);
+  font-size: 11px;
+}
+
+.conversation-prompt-rail > div {
+  display: flex;
+  min-width: 0;
+  gap: 6px;
+  overflow-x: auto;
+}
+
+.conversation-prompt-rail button {
+  max-width: 180px;
+  flex: 0 0 auto;
+  overflow: hidden;
+  padding: 5px 8px;
+  border: 1px solid var(--conversation-line);
+  border-radius: 999px;
+  color: var(--conversation-ink-muted);
+  background: var(--conversation-bg);
+  font: inherit;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.conversation-prompt-rail > span {
+  flex: 0 0 auto;
+}
+
+.conversation-selection-toolbar {
+  position: fixed;
+  z-index: 30;
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--conversation-line-strong);
+  border-radius: 8px;
+  background: var(--conversation-bg);
+  box-shadow: 0 4px 16px rgb(0 0 0 / 0.16);
+}
+
+.conversation-selection-toolbar button {
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 5px;
+  color: var(--conversation-ink);
+  background: transparent;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.conversation-selection-toolbar button:hover {
+  background: var(--conversation-bg-subtle);
+}
+
+.conversation-transcript__item[data-highlighted="true"] {
+  border-radius: 10px;
+  outline: 2px solid color-mix(in srgb, var(--conversation-accent) 45%, transparent);
+  outline-offset: 4px;
+  background: color-mix(in srgb, var(--conversation-accent-soft) 42%, transparent);
+  transition: background 700ms ease;
+}
+
+.conversation-message-edit {
+  display: grid;
+  min-width: min(70vw, 480px);
+  gap: 8px;
+}
+
+.conversation-message-edit textarea {
+  min-height: 100px;
+  resize: vertical;
+  padding: 8px;
+  border: 1px solid var(--conversation-line-strong);
+  border-radius: 8px;
+  color: var(--conversation-ink);
+  background: var(--conversation-bg);
+  font: inherit;
+}
+
+.conversation-message-edit > div {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.conversation-message-edit button,
+.conversation-message__edit {
+  padding: 4px 8px;
+  border: 1px solid var(--conversation-line);
+  border-radius: 6px;
+  color: var(--conversation-ink-muted);
+  background: var(--conversation-bg);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.conversation-message__edit {
+  display: block;
+  margin: 7px 0 0 auto;
 }
 
 .conversation-transcript--empty {
