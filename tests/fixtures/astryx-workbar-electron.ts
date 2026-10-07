@@ -68,11 +68,14 @@ async function run() {
     ),
   );
   await js('window.mode("terminal")');
-  await wait(`document.querySelector('[name="workbar-terminal-command"]')!==null`);
-  await fill("workbar-terminal-command", "printf hello");
+  await wait(`document.querySelector('.xterm-helper-textarea')!==null`);
+  await js(`document.querySelector('.xterm-helper-textarea').focus()`);
+  await window.webContents.insertText("printf hello");
   await enter();
-  assert.deepEqual(await js("window.calls.at(-1)"), ["input", "t", "printf hello"]);
-  assert.equal(await js(`document.querySelector('[name="workbar-terminal-command"]').value`), "");
+  assert.equal(
+    await js(`window.calls.filter(c=>c[0]==='input').map(c=>c[2]).join('')`),
+    "printf hello\r",
+  );
   await js('window.mode("files")');
   await wait(`document.querySelector('[aria-label="生成文件操作"]')!==null`);
   await js(`document.querySelector('[aria-label="生成文件操作"]').click()`);

@@ -76,7 +76,7 @@ function Fixture() {
               },
             ]}
             activeTerminalId="t"
-            active={false}
+            active={true}
             loading={false}
             onCreate={record("terminal-create")}
             onSelect={record("terminal-select")}
@@ -84,7 +84,6 @@ function Fixture() {
             onInput={record("input")}
             onResize={record("resize")}
             onStop={record("stop")}
-            onSetPollingActive={() => {}}
           />
         ) : (
           <FilesWorkbarPanel

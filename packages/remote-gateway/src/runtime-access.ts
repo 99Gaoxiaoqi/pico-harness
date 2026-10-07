@@ -55,11 +55,11 @@ export class RuntimeAccessSession {
   private requests = 0;
   private eventGeneration = 0;
   private events?: EventBinding;
-  private terminalStreamId = randomUUID();
+  private terminalStreamId: string = randomUUID();
   private terminalFrameDispose?: () => void;
   private readonly terminalScopes = new Map<
     string,
-    SessionScope & { resourceEpoch: string; streamId: string }
+    SessionScope & { terminalId: string; resourceEpoch: string; streamId: string }
   >();
   private readonly pendingTerminalOpens = new Map<string, number>();
   private readonly pendingTerminalFrames: RuntimeTerminalFrame[] = [];
@@ -128,13 +128,19 @@ export class RuntimeAccessSession {
       let dispatched = false;
       let rpc: RemoteRequest | undefined;
       const generation = this.eventGeneration;
-      const terminalStreamId = this.terminalStreamId;
+      let terminalStreamId = this.terminalStreamId;
       try {
         rpc = parseRemoteRequest(input);
         const { config, principal, client } = this.options;
         const authorized = await authorizeRuntimeRequest(config, principal, client, rpc);
         this.assertCurrent();
         const params = authorized.params as Record<string, unknown>;
+        if (typeof params["streamId"] === "string") terminalStreamId = params["streamId"];
+        const terminalKey = `${terminalStreamId}:${String(params["terminalId"])}`;
+        if (rpc.method === "terminal.detach" && !this.terminalScopes.has(terminalKey)) {
+          publishResult({ detached: true });
+          return;
+        }
         if (
           rpc.method === "catalog.models" &&
           !(await this.runtimeCapabilities()).has(MODEL_CATALOG_RUNTIME_CAPABILITY)
@@ -208,8 +214,8 @@ export class RuntimeAccessSession {
           );
         if (terminalOpening)
           this.pendingTerminalOpens.set(
-            terminalOpening,
-            (this.pendingTerminalOpens.get(terminalOpening) ?? 0) + 1,
+            terminalStreamId,
+            (this.pendingTerminalOpens.get(terminalStreamId) ?? 0) + 1,
           );
         const opening =
           rpc.method === "session.subscription.open" ? String(params["sessionId"]) : undefined;
@@ -232,9 +238,9 @@ export class RuntimeAccessSession {
           );
         } finally {
           if (terminalOpening && generation === this.eventGeneration) {
-            const left = (this.pendingTerminalOpens.get(terminalOpening) ?? 1) - 1;
-            if (left) this.pendingTerminalOpens.set(terminalOpening, left);
-            else this.pendingTerminalOpens.delete(terminalOpening);
+            const left = (this.pendingTerminalOpens.get(terminalStreamId) ?? 1) - 1;
+            if (left) this.pendingTerminalOpens.set(terminalStreamId, left);
+            else this.pendingTerminalOpens.delete(terminalStreamId);
           }
           // An older connection must not decrement a new connection's pending opens.
           if (opening && generation === this.eventGeneration) {
@@ -295,7 +301,8 @@ export class RuntimeAccessSession {
               "unknown",
             );
           }
-          this.terminalScopes.set(value.terminal.terminalId, {
+          this.terminalScopes.set(`${terminalStreamId}:${value.terminal.terminalId}`, {
+            terminalId: value.terminal.terminalId,
             workspaceId: rpc.workspaceId,
             sessionId: terminalOpening,
             resourceEpoch: value.resourceEpoch,
@@ -303,8 +310,12 @@ export class RuntimeAccessSession {
           });
         }
         this.assertCurrent(true);
-        if (rpc.method === "terminal.detach")
-          this.terminalScopes.delete(String(params["terminalId"]));
+        if (
+          rpc.method === "terminal.detach" &&
+          generation === this.eventGeneration &&
+          this.terminalScopes.get(terminalKey)?.streamId === terminalStreamId
+        )
+          this.terminalScopes.delete(terminalKey);
         if (rpc.method === "session.subscription.close")
           this.sessionSubscriptions.delete(String(params["subscriptionId"]));
         publishResult(value);
@@ -321,7 +332,6 @@ export class RuntimeAccessSession {
     this.assertCurrent();
     this.detachEvents();
     this.terminalStreamId = randomUUID();
-    const streamId = this.terminalStreamId;
     const binding: EventBinding = { sink, chain: Promise.resolve(), pending: 0 };
     this.events = binding;
     const publish = (event: Parameters<RuntimeAccessEventSink["publish"]>[0]): void => {
@@ -329,8 +339,8 @@ export class RuntimeAccessSession {
     };
     const terminalFrames = this.options.client.subscribeTerminalFrames?.(
       (frame) => {
-        if (!this.current || this.events !== binding || frame.streamId !== streamId) return;
-        if (this.pendingTerminalOpens.has(frame.sessionId)) {
+        if (!this.current || this.events !== binding) return;
+        if (this.pendingTerminalOpens.has(frame.streamId ?? "")) {
           const bytes = Buffer.byteLength(JSON.stringify(frame));
           if (
             this.pendingTerminalFrames.length >= 128 ||
@@ -471,7 +481,7 @@ export class RuntimeAccessSession {
   }
 
   private publishTerminalFrame(frame: RuntimeTerminalFrame): void {
-    const scope = this.terminalScopes.get(frame.terminalId);
+    const scope = this.terminalScopes.get(`${frame.streamId}:${frame.terminalId}`);
     const principal = this.options.principal;
     if (
       !this.current ||
@@ -490,7 +500,7 @@ export class RuntimeAccessSession {
     const frames = this.pendingTerminalFrames.splice(0);
     this.pendingTerminalBytes = 0;
     for (const frame of frames) {
-      if (this.pendingTerminalOpens.has(frame.sessionId)) {
+      if (this.pendingTerminalOpens.has(frame.streamId ?? "")) {
         this.pendingTerminalFrames.push(frame);
         this.pendingTerminalBytes += Buffer.byteLength(JSON.stringify(frame));
       } else this.publishTerminalFrame(frame);
@@ -561,7 +571,7 @@ export class RuntimeAccessSession {
     this.eventGeneration++;
     this.terminalFrameDispose?.();
     this.terminalFrameDispose = undefined;
-    for (const [terminalId, scope] of this.terminalScopes) this.releaseTerminal(terminalId, scope);
+    for (const scope of this.terminalScopes.values()) this.releaseTerminal(scope.terminalId, scope);
     this.terminalScopes.clear();
     this.pendingTerminalOpens.clear();
     this.pendingTerminalFrames.length = 0;

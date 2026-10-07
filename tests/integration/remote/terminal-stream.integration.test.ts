@@ -116,10 +116,13 @@ class RuntimeFixture implements GatewayRuntimeClient {
   listener?: (frame: RuntimeTerminalFrame) => void;
   hold?: Promise<void>;
   holdPing?: Promise<void>;
+  holdDetach?: Promise<void>;
+  enteredDetach?: () => void;
   enteredPing?: () => void;
   terminalOpens = 0;
   streamId?: string;
   detached: string[] = [];
+  detachedTerminalIds: string[] = [];
   entered?: () => void;
   capability = true;
   async request<M extends RuntimeMethod>(
@@ -179,7 +182,10 @@ class RuntimeFixture implements GatewayRuntimeClient {
         };
         break;
       case "terminal.detach":
+        this.enteredDetach?.();
+        await this.holdDetach;
         this.detached.push(String((_params as { streamId?: string }).streamId));
+        this.detachedTerminalIds.push(String((_params as { terminalId?: string }).terminalId));
         result = { detached: true };
         break;
       default:
@@ -326,6 +332,108 @@ test("能力检查期间更换事件连接，旧终端创建不会执行或污�
       f.messages.map((m) => m.type),
       ["reply", "terminal_frame"],
     );
+  } finally {
+    f.access.close();
+  }
+});
+
+test("旧代际迟到 detach 不删除新代际同终端的显示订阅", async () => {
+  const f = gatewayFixture();
+  try {
+    await f.access.dispatch(f.request(), () => {});
+    let release!: () => void, entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    f.runtime.holdDetach = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    f.runtime.enteredDetach = entered;
+    const pending = f.access.dispatch(
+      {
+        ...f.request(),
+        method: "terminal.detach",
+        params: {
+          sessionId: terminal.sessionId,
+          terminalId: terminal.terminalId,
+          resourceEpoch: terminal.resourceEpoch,
+        },
+      },
+      () => {},
+    );
+    await started;
+    f.access.attachEvents({ publish: (message) => f.messages.push(message), close() {} });
+    await f.access.dispatch(f.request(), () => {});
+    const streamId = f.runtime.streamId!;
+    release();
+    await pending;
+    const before = f.messages.length;
+    f.runtime.listener?.({ ...frame, streamId, sequence: 3 });
+    assert.equal(f.messages.length, before + 1);
+  } finally {
+    f.access.close();
+  }
+});
+
+test("旧视图 detach 迟到网关也不能结束新视图显示", async () => {
+  const f = gatewayFixture();
+  try {
+    await f.access.dispatch(
+      { ...f.request(), params: { ...f.request().params, streamId: "old-view" } },
+      () => {},
+    );
+    await f.access.dispatch(
+      { ...f.request(), params: { ...f.request().params, streamId: "new-view" } },
+      () => {},
+    );
+    await f.access.dispatch(
+      {
+        ...f.request(),
+        method: "terminal.detach",
+        params: {
+          sessionId: terminal.sessionId,
+          terminalId: terminal.terminalId,
+          resourceEpoch: terminal.resourceEpoch,
+          streamId: "old-view",
+        },
+      },
+      () => {},
+    );
+    const before = f.messages.length;
+    f.runtime.listener?.({ ...frame, streamId: "new-view", sequence: 3 });
+    assert.equal(f.messages.length, before + 1);
+    const count = f.runtime.detached.length;
+    await f.access.dispatch(
+      {
+        ...f.request(),
+        method: "terminal.detach",
+        params: {
+          sessionId: terminal.sessionId,
+          terminalId: terminal.terminalId,
+          resourceEpoch: terminal.resourceEpoch,
+          streamId: "old-view",
+        },
+      },
+      () => {},
+    );
+    assert.equal(f.runtime.detached.length, count, "已释放的旧lease重复清理为no-op");
+  } finally {
+    f.access.close();
+  }
+});
+
+test("事件连接更换释放全部显示 lease 时使用原终端标识", async () => {
+  const f = gatewayFixture();
+  try {
+    for (const streamId of ["first-view", "second-view"])
+      await f.access.dispatch(
+        { ...f.request(), params: { ...f.request().params, streamId } },
+        () => {},
+      );
+    f.access.attachEvents({ publish: (message) => f.messages.push(message), close() {} });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(f.runtime.detachedTerminalIds, [terminal.terminalId, terminal.terminalId]);
+    assert.deepEqual(f.runtime.detached, ["first-view", "second-view"]);
   } finally {
     f.access.close();
   }
