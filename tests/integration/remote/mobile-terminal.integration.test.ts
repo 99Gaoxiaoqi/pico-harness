@@ -350,6 +350,100 @@ test("终端退出后立即只读，丢弃排队按键且不产生错误输入�
   );
 });
 
+test("重连时迟到列表不能回退已确认的退出状态或epoch", async (t) => {
+  for (const epoch of ["epoch-a", "epoch-b"]) {
+    let reconnecting = false;
+    const f = fixture(async (method) =>
+      method === "terminal.attach"
+        ? {
+            ...snapshot(reconnecting ? 2 : 1, "tail", reconnecting ? epoch : "epoch-a"),
+            terminal: terminal(
+              reconnecting ? epoch : "epoch-a",
+              reconnecting ? 2 : 1,
+              reconnecting ? "exited" : "running",
+            ),
+          }
+        : {},
+    );
+    t.after(() => f.screen.dispose());
+    await f.mount();
+    const lateList = deferred<unknown>();
+    const request = f.pico.request;
+    f.pico.request = async (method, params) => {
+      if (method === "terminal.list") {
+        f.calls.push({ method, params });
+        return lateList.promise;
+      }
+      return request(method, params);
+    };
+    reconnecting = true;
+    f.pico.syncRevision++;
+    f.render();
+    await settleScreen();
+    f.render();
+    assert.equal(f.messages.filter((message) => message.type === "readonly").at(-1)!.value, true);
+    lateList.resolve({ terminals: [terminal("epoch-a", 1, "running")] });
+    await settleScreen();
+    f.render();
+    f.emit(2, { resourceEpoch: epoch, kind: "status", status: "exited", exitCode: 0 });
+    f.message({ type: "input", data: "after stale list" });
+    await settleScreen();
+    f.render();
+    assert.ok(f.screen.nodes("Button").some((node) => node.props.title === "terminal · exited"));
+    assert.equal(
+      f.screen.nodes("Button").find((node) => node.props.title === "键盘")!.props.reason,
+      "终端进程未在运行",
+    );
+    assert.equal(f.messages.filter((message) => message.type === "readonly").at(-1)!.value, true);
+    assert.equal(f.calls.filter((call) => call.method === "terminal.input").length, 0);
+    assert.equal(f.errors.length, 0);
+  }
+});
+
+test("输出溢出、epoch变化和序号缺口恢复期间关闭输入，连续快照恢复后重新开放", async (t) => {
+  for (const recovery of ["overflow", "epoch", "gap"]) {
+    const late = deferred<ReturnType<typeof snapshot>>();
+    let attaches = 0;
+    const f = fixture(async (method) =>
+      method === "terminal.attach"
+        ? ++attaches === 1
+          ? snapshot(1, "initial")
+          : late.promise
+        : {},
+    );
+    t.after(() => f.screen.dispose());
+    await f.mount();
+    f.acknowledge(false);
+    if (recovery === "overflow") {
+      for (let sequence = 2; sequence <= 7; sequence++)
+        f.emit(sequence, { data: "x".repeat(32 * 1024) });
+    } else if (recovery === "epoch") {
+      f.emit(1, { resourceEpoch: "epoch-b", data: "new epoch" });
+    } else f.emit(3, { data: "after missing output" });
+    assert.equal(f.messages.filter((message) => message.type === "readonly").at(-1)!.value, true);
+    f.message({ type: "input", data: "during recovery" });
+    await settleScreen();
+    f.render();
+    assert.equal(f.calls.filter((call) => call.method === "terminal.input").length, 0);
+    const recoverySequence = recovery === "overflow" ? 7 : recovery === "gap" ? 3 : 1;
+    late.resolve(
+      snapshot(recoverySequence, "recovered", recovery === "epoch" ? "epoch-b" : "epoch-a"),
+    );
+    await settleScreen();
+    f.render();
+    assert.equal(f.messages.filter((message) => message.type === "readonly").at(-1)!.value, false);
+    f.acknowledge(true);
+    const stalled = f.messages.filter((message) => message.type === "output").at(-1)!;
+    f.message({ type: "written", id: stalled.id });
+    f.message({ type: "input", data: "after recovery" });
+    await settleScreen();
+    assert.deepEqual(
+      f.calls.filter((call) => call.method === "terminal.input").map((call) => call.params.data),
+      ["after recovery"],
+    );
+  }
+});
+
 test("手机终端输入以字节和请求数限制排队，保留在途输入且超限内容需手动恢复", async (t) => {
   for (const mode of ["bytes", "count"] as const) {
     const inFlight = deferred<unknown>();
