@@ -159,6 +159,8 @@ export type MemoryItemMutation =
 
 export interface ApplyMemoryMutationsRequest {
   readonly operationId: string;
+  /** Optional host-captured generation for asynchronous user-requested writes. */
+  readonly expectedDeletionRevision?: number;
   /** The Store applies the complete list atomically under one idempotency receipt. */
   readonly mutations: readonly MemoryItemMutation[];
 }
@@ -267,7 +269,7 @@ export interface CommitMemoryExtractionRequest {
   readonly requestedItemIndexes: readonly number[];
   /** Explicit deterministic no-op for a user-requested batch rejected by policy. */
   readonly noOpReason?: "sensitive_information";
-  /** Policy-denied Compaction or a pending range invalidated by deletion. */
+  /** Policy-denied automatic extraction or a pending range invalidated by deletion. */
   readonly skipReason?: "policy_denied" | "memory_deleted";
   readonly trigger: "remember" | "extract" | "compaction";
   readonly compactionCheckpointId?: string;

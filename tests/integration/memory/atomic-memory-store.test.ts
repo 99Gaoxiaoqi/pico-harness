@@ -51,6 +51,85 @@ const extraction = (
 const conflict = (reason: MemoryItemStoreConflictError["reason"]) => (error: unknown) =>
   error instanceof MemoryItemStoreConflictError && error.reason === reason;
 
+test("host-bound note writes reject stale deletion generations without resurrecting replayed items", async () => {
+  await fixture(async ({ store }) => {
+    const request = {
+      operationId: "reference-note",
+      expectedDeletionRevision: 0,
+      mutations: [
+        { type: "create" as const, item: write({ kind: "note", origin: "user_requested" }) },
+      ],
+    };
+    const first = await store.applyMutations(request);
+    assert.equal((await store.applyMutations(request)).replayed, true);
+    await store.deleteItem({
+      itemId: first.results[0]!.itemId,
+      expectedVersion: 1,
+      operationId: "delete-note",
+    });
+    assert.equal((await store.applyMutations(request)).replayed, true);
+    assert.equal((await store.listItems({ workspaceKey: "/workspace/a" })).length, 0);
+    await assert.rejects(
+      store.applyMutations({ ...request, operationId: "delayed-reference-note" }),
+      conflict("deletion_conflict"),
+    );
+    assert.equal(await store.readOperation("delayed-reference-note"), undefined);
+  });
+});
+
+test("automatic policy denial settles an extract range without consuming a pending explicit request", async () => {
+  await fixture(async ({ store }) => {
+    const pending = {
+      operationId: "automatic-failure",
+      sessionId: source().sessionId,
+      expectedCursorOrdinal: 0,
+      expectedDeletionRevision: 0,
+      failedThroughOrdinal: 2,
+      coverageHash: "a".repeat(64),
+      failureClass: "provider" as const,
+      trigger: "extract" as const,
+    };
+    await store.settleExtractionFailure(pending);
+    const result = await store.commitExtraction(
+      extraction({
+        operationId: "automatic-denied",
+        trigger: "extract",
+        items: [],
+        requestedItemIndexes: [],
+        skipReason: "policy_denied",
+      }),
+    );
+    assert.equal(result.receipt.status, "skipped");
+    assert.equal(result.cursor.processedOrdinal, 2);
+    assert.equal(await store.readPendingExtractionFailure(pending.sessionId), undefined);
+    const explicitSession = "explicit-pending";
+    await store.settleExtractionFailure({
+      ...pending,
+      operationId: "explicit-failure",
+      sessionId: explicitSession,
+      trigger: "remember",
+    });
+    await assert.rejects(
+      store.commitExtraction(
+        extraction({
+          operationId: "cannot-skip-explicit",
+          sessionId: explicitSession,
+          trigger: "extract",
+          items: [],
+          requestedItemIndexes: [],
+          skipReason: "policy_denied",
+        }),
+      ),
+      conflict("cursor_conflict"),
+    );
+    assert.equal(await store.readExtractionCursor(explicitSession), undefined);
+    assert.equal(
+      (await store.readPendingExtractionFailure(explicitSession))?.firstTrigger,
+      "remember",
+    );
+  });
+});
+
 test("legacy Atomic Memory store entry preserves the Storage package implementation identity", () => {
   assert.equal(LegacySqliteMemoryItemStore, SqliteMemoryItemStore);
 });
