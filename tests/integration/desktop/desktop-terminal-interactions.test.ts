@@ -163,7 +163,9 @@ test("桌面终端对旧 Host 明确提示更新并阻止创建", { timeout: 45_
     (async()=>{
       for(let i=0;i<100&&!document.querySelector('[role="alert"]');i++)await new Promise(resolve=>setTimeout(resolve,10));
       if(!document.body.textContent.includes('请更新 Pico'))throw new Error(document.body.textContent);
-      document.querySelector('button[aria-label="新建终端"]').click();
+      const retry=[...document.querySelectorAll('button')].find(button=>button.textContent.includes('重试'));
+      if(!retry)throw new Error('retry missing');
+      retry.click();
       await new Promise(resolve=>setTimeout(resolve,30));
       if(mutations)throw new Error('old host received create');
       root.unmount();
@@ -220,7 +222,7 @@ test("桌面终端释放视图关闭后迟到的 attach 响应", { timeout: 45_0
   const result = await runRendererBrowserScenario(`
     import React from 'react';
     import { createRoot } from 'react-dom/client';
-    import { TerminalPanelController } from './apps/desktop/src/renderer/workbar-panels/TerminalPanelController.tsx';
+    import { TerminalPanelController, listWorkbarTerminalBindings } from './apps/desktop/src/renderer/workbar-panels/TerminalPanelController.tsx';
     import './apps/desktop/src/renderer/workbar-panels/TerminalOutputView.css';
     let complete, attachParams;
     const detached=[];
@@ -230,16 +232,24 @@ test("桌面终端释放视图关闭后迟到的 attach 响应", { timeout: 45_0
       runtime:{
         'runtime.ping':async()=>({ok:true,value:{capabilities:['terminal-stream-v1']}}),
         'terminal.list':async()=>({ok:true,value:{terminals:[terminal]}}),
+        'terminal.create':async()=>({ok:true,value:{terminal,resourceEpoch:'epoch',sequence:1,snapshot:'prompt',truncated:false}}),
         'terminal.attach':params=>{attachParams=params;return new Promise(resolve=>{complete=resolve;});},
         'terminal.detach':async params=>{detached.push(params);return{ok:true,value:{}};},
       },
     };
+    const scope={workspacePath:'/workspace',sessionId:'session',instanceId:'pending-attach'};
     const root=createRoot(document.getElementById('app'));
-    root.render(<TerminalPanelController workspacePath='/workspace' sessionId='session' instanceId='pending-attach' active={true} readOnly={true}/>);
+    root.render(<TerminalPanelController {...scope} active={true} readOnly={false}/>);
     (async()=>{
+      for(let i=0;i<100&&!listWorkbarTerminalBindings(scope).length;i++)await new Promise(resolve=>setTimeout(resolve,10));
+      if(!listWorkbarTerminalBindings(scope).length)throw new Error('binding not created');
+      root.unmount();
+      detached.length=0;
+      const nextRoot=createRoot(document.getElementById('app'));
+      nextRoot.render(<TerminalPanelController {...scope} active={true} readOnly={true}/>);
       for(let i=0;i<100&&!complete;i++)await new Promise(resolve=>setTimeout(resolve,10));
       if(!complete)throw new Error('attach not started');
-      root.unmount();
+      nextRoot.unmount();
       complete({ok:true,value:{terminal,resourceEpoch:'late-epoch',sequence:1,snapshot:'prompt',truncated:false}});
       for(let i=0;i<100&&!detached.length;i++)await new Promise(resolve=>setTimeout(resolve,10));
       if(detached.length!==1||detached[0].streamId!==attachParams.streamId||detached[0].resourceEpoch!=='late-epoch')throw new Error('late attach was not released: '+JSON.stringify(detached));
@@ -249,7 +259,7 @@ test("桌面终端释放视图关闭后迟到的 attach 响应", { timeout: 45_0
   assert.equal(result, "PASS", result);
 });
 
-test("桌面终端串行创建并保留响应前的输出帧", { timeout: 45_000 }, async () => {
+test("桌面终端在 StrictMode 只创建一个 Shell 并保留响应前输出", { timeout: 45_000 }, async () => {
   const result = await runRendererBrowserScenario(`
     import React from 'react';
     import { createRoot } from 'react-dom/client';
@@ -278,25 +288,16 @@ test("桌面终端串行创建并保留响应前的输出帧", { timeout: 45_000
       },
     };
     const reply=(index,id)=>replies[index]({ok:true,value:{terminal:terminal(id),resourceEpoch:'epoch-'+id,sequence:1,snapshot:id+' SNAPSHOT',truncated:false}});
-    const createDisabled=()=>{
-      const button=document.querySelector('button[aria-label="新建终端"]');
-      return button.disabled||button.getAttribute('aria-disabled')==='true';
-    };
     const root=createRoot(document.getElementById('app'));
     root.render(<React.StrictMode><TerminalPanelController workspacePath='/workspace' sessionId='session' instanceId='serialized-create' active={true} readOnly={false}/></React.StrictMode>);
     (async()=>{
       await wait(()=>replies.length===1,'initial create started');
-      await wait(()=>createDisabled(),'create button disabled while loading');
+      listener({type:'terminal.event',terminalId:'first',sessionId:'session',streamId:creates[0].streamId,resourceEpoch:'epoch-first',sequence:2,at:1,kind:'output',data:' EARLY_OUTPUT'});
       reply(0,'first');
-      await wait(()=>!createDisabled(),'initial create ready');
-      const button=document.querySelector('button[aria-label="新建终端"]');
-      button.click();button.click();
-      await wait(()=>replies.length===2,'next create started');
-      await new Promise(resolve=>setTimeout(resolve,30));
-      if(creates.length!==2)throw new Error('duplicate create: '+creates.length);
-      listener({type:'terminal.event',terminalId:'second',sessionId:'session',streamId:creates[1].streamId,resourceEpoch:'epoch-second',sequence:2,at:1,kind:'output',data:' EARLY_OUTPUT'});
-      reply(1,'second');
       await wait(()=>document.querySelector('.xterm-accessibility-tree')?.textContent.includes('EARLY_OUTPUT'),'early frame displayed');
+      await new Promise(resolve=>setTimeout(resolve,30));
+      if(creates.length!==1)throw new Error('duplicate create: '+creates.length);
+      if(document.querySelector('button[aria-label="新建终端"]'))throw new Error('inner create still exposed');
       root.unmount();
       await fetch('/result',{method:'POST',body:'PASS'});
     })().catch(error=>fetch('/result',{method:'POST',body:'FAIL: '+error.stack}));
@@ -304,11 +305,11 @@ test("桌面终端串行创建并保留响应前的输出帧", { timeout: 45_000
   assert.equal(result, "PASS", result);
 });
 
-test("桌面终端关闭视图后释放迟到 create 且不继续迟到 list", { timeout: 45_000 }, async () => {
+test("桌面终端显式关闭会停止迟到 create 且不继续迟到 list", { timeout: 45_000 }, async () => {
   const result = await runRendererBrowserScenario(`
     import React from 'react';
     import { createRoot } from 'react-dom/client';
-    import { TerminalPanelController, listWorkbarTerminalBindings } from './apps/desktop/src/renderer/workbar-panels/TerminalPanelController.tsx';
+    import { TerminalPanelController, listWorkbarTerminalBindings, stopWorkbarTerminalInstance } from './apps/desktop/src/renderer/workbar-panels/TerminalPanelController.tsx';
     const wait=async(condition,message)=>{
       for(let index=0;index<200;index++){
         if(condition())return;
@@ -318,7 +319,7 @@ test("桌面终端关闭视图后释放迟到 create 且不继续迟到 list", {
     };
     let createReply,listReply,createParams;
     let createCount=0,delayList=false;
-    const detached=[];
+    const detached=[],stopped=[];
     const terminal={terminalId:'late-created',sessionId:'session',title:'Shell',status:'running',sequence:1,capability:'pty',resizeSupported:false};
     window.pico={
       terminalFrames:{setFocused(){},clipboard(){},subscribe(){return{dispose(){}}}},
@@ -327,26 +328,114 @@ test("桌面终端关闭视图后释放迟到 create 且不继续迟到 list", {
         'terminal.list':()=>delayList?new Promise(resolve=>{listReply=resolve;}):Promise.resolve({ok:true,value:{terminals:[]}}),
         'terminal.create':params=>{createCount++;createParams=params;return new Promise(resolve=>{createReply=resolve;});},
         'terminal.detach':async params=>{detached.push(params);return{ok:true,value:{}};},
+        'terminal.stop':async params=>{stopped.push(params);return{ok:true,value:{terminal:{...terminal,status:'exited'}}};},
       },
     };
     (async()=>{
       const root=createRoot(document.getElementById('app'));
       root.render(<TerminalPanelController workspacePath='/workspace' sessionId='session' instanceId='late-create' active={true} readOnly={false}/>);
       await wait(()=>createReply,'create started');
+      let closeFinished=false;
+      const closing=stopWorkbarTerminalInstance(window.pico.runtime,{workspacePath:'/workspace',sessionId:'session',instanceId:'late-create'}).then(count=>{if(count!==1)throw new Error('late shell not stopped');closeFinished=true;});
+      await new Promise(resolve=>setTimeout(resolve,20));
+      if(closeFinished)throw new Error('close did not wait for pending create');
       root.unmount();
       createReply({ok:true,value:{terminal,resourceEpoch:'late-epoch',sequence:1,snapshot:'prompt',truncated:false}});
       await wait(()=>detached.length===1,'late create released');
+      await closing;
       if(detached[0].streamId!==createParams.streamId||detached[0].terminalId!=='late-created'||detached[0].resourceEpoch!=='late-epoch')throw new Error('wrong stream released');
+      if(stopped.length!==1||stopped[0].terminalId!=='late-created'||stopped[0].resourceEpoch!=='late-epoch')throw new Error('orphan shell not stopped');
       if(listWorkbarTerminalBindings({workspacePath:'/workspace',sessionId:'session',instanceId:'late-create'}).length)throw new Error('closed view gained terminal binding');
       delayList=true;
       const element=document.createElement('div');document.body.append(element);
       const nextRoot=createRoot(element);
       nextRoot.render(<TerminalPanelController workspacePath='/workspace' sessionId='session' instanceId='late-list' active={true} readOnly={false}/>);
       await wait(()=>listReply,'list started');
+      await stopWorkbarTerminalInstance(window.pico.runtime,{workspacePath:'/workspace',sessionId:'session',instanceId:'late-list'});
       nextRoot.unmount();
       listReply({ok:true,value:{terminals:[]}});
       await new Promise(resolve=>setTimeout(resolve,50));
       if(createCount!==1)throw new Error('closed list continued to create');
+      await fetch('/result',{method:'POST',body:'PASS'});
+    })().catch(error=>fetch('/result',{method:'POST',body:'FAIL: '+error.stack}));
+  `);
+  assert.equal(result, "PASS", result);
+});
+
+test("桌面终端标签隔离 Shell 并在关闭失败后保留绑定重试", { timeout: 45_000 }, async () => {
+  const result = await runRendererBrowserScenario(`
+    import React from 'react';
+    import { createRoot } from 'react-dom/client';
+    import { TerminalPanelController, listWorkbarTerminalBindings, stopWorkbarTerminalInstance } from './apps/desktop/src/renderer/workbar-panels/TerminalPanelController.tsx';
+    import './apps/desktop/src/renderer/workbar-panels/TerminalOutputView.css';
+    const assert=(value,message)=>{if(!value)throw new Error(message);};
+    const wait=async(condition,message)=>{
+      for(let index=0;index<200;index++){
+        if(condition())return;
+        await new Promise(resolve=>setTimeout(resolve,10));
+      }
+      throw new Error(message+': '+document.body.innerText);
+    };
+    const style=document.createElement('style');
+    style.textContent=':root{--surface-raised:#fff;--ink:#111;}#app{display:flex;height:400px;width:900px}.mount{width:400px;height:100%}.tool-panel{height:100%}';
+    document.head.append(style);
+    const shell=id=>({terminalId:id,sessionId:'session',title:id,status:'running',sequence:1,capability:'pty',resizeSupported:false});
+    const shells=new Map([['foreign',shell('foreign')]]);
+    const attached=[],stopped=[],detached=[];
+    let created=0,failStop=true;
+    window.pico={
+      terminalFrames:{setFocused(){},clipboard(){},subscribe(){return{dispose(){}}}},
+      runtime:{
+        'runtime.ping':async()=>({ok:true,value:{capabilities:['terminal-stream-v1']}}),
+        'terminal.list':async()=>({ok:true,value:{terminals:[...shells.values()]}}),
+        'terminal.create':async()=>{
+          const terminal=shell('own-'+ ++created);shells.set(terminal.terminalId,terminal);
+          return{ok:true,value:{terminal,resourceEpoch:'epoch',sequence:1,snapshot:terminal.terminalId+' prompt',truncated:false}};
+        },
+        'terminal.attach':async params=>{
+          attached.push(params.terminalId);
+          return{ok:true,value:{terminal:shells.get(params.terminalId),resourceEpoch:'epoch',sequence:1,snapshot:params.terminalId+' prompt',truncated:false}};
+        },
+        'terminal.detach':async params=>{detached.push(params);return{ok:true,value:{}};},
+        'terminal.stop':async params=>{
+          stopped.push(params.terminalId);
+          if(failStop)return{ok:false,error:{code:'INTERNAL',message:'stop failed',retryable:true}};
+          const terminal={...shells.get(params.terminalId),status:'exited'};shells.set(params.terminalId,terminal);
+          return{ok:true,value:{terminal}};
+        },
+      },
+    };
+    const scope=id=>({workspacePath:'/workspace',sessionId:'session',instanceId:id});
+    const mount=()=>{const element=document.createElement('div');element.className='mount';document.getElementById('app').append(element);return element;};
+    const firstElement=mount(),secondElement=mount(),emptyElement=mount();
+    const firstRoot=createRoot(firstElement),secondRoot=createRoot(secondElement),emptyRoot=createRoot(emptyElement);
+    firstRoot.render(<TerminalPanelController {...scope('first')} terminalTitle='workspace / 1' active={true} readOnly={false}/>);
+    secondRoot.render(<TerminalPanelController {...scope('second')} terminalTitle='workspace / 2' active={true} readOnly={false}/>);
+    emptyRoot.render(<TerminalPanelController {...scope('unbound-readonly')} active={true} readOnly={true}/>);
+    (async()=>{
+      await wait(()=>firstElement.textContent.includes('own-1 prompt')&&secondElement.textContent.includes('own-2 prompt'),'two shells ready');
+      assert(created===2,'one shell per writable tab');
+      assert(!attached.includes('foreign')&&!emptyElement.querySelector('.xterm'),'unbound readonly tab cannot select another shell');
+      assert(!firstElement.textContent.includes('own-2 prompt')&&!secondElement.textContent.includes('own-1 prompt'),'output isolated');
+      assert(firstElement.querySelector('[aria-label="workspace / 1 输出"]'),'readable tab title reaches terminal');
+      const firstBinding=listWorkbarTerminalBindings(scope('first'))[0];
+      const secondBinding=listWorkbarTerminalBindings(scope('second'))[0];
+      assert(firstBinding.terminalId!==secondBinding.terminalId,'bindings differ');
+      const failed=await stopWorkbarTerminalInstance(window.pico.runtime,scope('first')).then(()=>false,()=>true);
+      assert(failed&&listWorkbarTerminalBindings(scope('first'))[0]?.terminalId===firstBinding.terminalId,'failed close retains binding');
+      assert(listWorkbarTerminalBindings(scope('second'))[0]?.terminalId===secondBinding.terminalId,'failed close does not affect other tab');
+      failStop=false;
+      assert(await stopWorkbarTerminalInstance(window.pico.runtime,scope('first'))===1,'close retries successfully');
+      assert(stopped.every(id=>id===firstBinding.terminalId),'only closing tab shell stopped');
+      firstRoot.unmount();
+      secondRoot.unmount();
+      assert(listWorkbarTerminalBindings(scope('second'))[0]?.terminalId===secondBinding.terminalId,'ordinary unmount retains shell');
+      const restoredRoot=createRoot(secondElement);
+      restoredRoot.render(<TerminalPanelController {...scope('second')} terminalTitle='workspace / 2' active={true} readOnly={true}/>);
+      await wait(()=>attached.includes(secondBinding.terminalId)&&secondElement.textContent.includes(secondBinding.terminalId+' prompt'),'same tab reattaches its own binding');
+      assert(created===2,'remount does not create another shell');
+      restoredRoot.unmount();emptyRoot.unmount();
+      assert(detached.length>0,'view detach still released');
       await fetch('/result',{method:'POST',body:'PASS'});
     })().catch(error=>fetch('/result',{method:'POST',body:'FAIL: '+error.stack}));
   `);

@@ -43,14 +43,23 @@ export interface WorkbarTerminalBinding {
   readonly resourceEpoch: string;
 }
 
-const terminalBindings = new Map<string, Map<string, string>>();
+interface TerminalInstanceLifecycle {
+  binding?: WorkbarTerminalBinding;
+  creation?: {
+    readonly streamId: string;
+    readonly promise: Promise<RuntimeResult<"terminal.create"> | undefined>;
+  };
+  closing?: Promise<number>;
+  closed: boolean;
+}
+
+const terminalInstances = new Map<string, TerminalInstanceLifecycle>();
 
 export function listWorkbarTerminalBindings(
   scope: WorkbarTerminalInstanceScope,
 ): readonly WorkbarTerminalBinding[] {
-  return [...(terminalBindings.get(terminalBindingKey(scope)) ?? new Map())].map(
-    ([terminalId, resourceEpoch]) => ({ terminalId, resourceEpoch }),
-  );
+  const binding = terminalInstances.get(terminalBindingKey(scope))?.binding;
+  return binding ? [binding] : [];
 }
 
 /** Called by the Workbar close action before it removes a Terminal tab. */
@@ -59,9 +68,15 @@ export async function stopWorkbarTerminalInstance(
   scope: WorkbarTerminalInstanceScope,
 ): Promise<number> {
   const key = terminalBindingKey(scope);
-  const bindings = [...(terminalBindings.get(key) ?? new Map())];
-  let stopped = 0;
-  for (const [terminalId, resourceEpoch] of bindings) {
+  const instance = terminalInstanceLifecycle(key);
+  if (instance.closing) return instance.closing;
+  // A late list must not create a shell after the tab has been closed.
+  instance.closed = true;
+  const closing = (async () => {
+    await instance.creation?.promise.catch(() => undefined);
+    const binding = instance.binding;
+    if (!binding) return 0;
+    const { terminalId, resourceEpoch } = binding;
     try {
       await invokeWorkbarRuntime(runtime, "terminal.stop", {
         workspacePath: scope.workspacePath,
@@ -69,8 +84,6 @@ export async function stopWorkbarTerminalInstance(
         terminalId,
         resourceEpoch,
       });
-      stopped += 1;
-      terminalBindings.get(key)?.delete(terminalId);
     } catch (cause) {
       if (!isEpochConflict(cause)) throw cause;
       const streamId = crypto.randomUUID();
@@ -97,26 +110,38 @@ export async function stopWorkbarTerminalInstance(
           streamId,
         }).catch(() => undefined);
       }
-      stopped += 1;
-      terminalBindings.get(key)?.delete(terminalId);
     }
-  }
-  if (terminalBindings.get(key)?.size === 0) terminalBindings.delete(key);
-  return stopped;
+    instance.binding = undefined;
+    return 1;
+  })()
+    .catch((cause: unknown) => {
+      // Keep the binding and allow reconnect/close to be retried by the retained tab.
+      instance.closed = false;
+      throw cause;
+    })
+    .finally(() => {
+      instance.closing = undefined;
+    });
+  instance.closing = closing;
+  return closing;
 }
 
 export function TerminalPanelController({
   workspacePath,
   sessionId,
   instanceId,
+  terminalTitle,
   active,
   readOnly,
 }: WorkbarPanelHostProps) {
   const runtime = window.pico.runtime;
   const [streamId] = useState(() => crypto.randomUUID());
   const scope = useMemo(() => ({ workspacePath, sessionId }), [workspacePath, sessionId]);
-  const [terminals, setTerminals] = useState<readonly WorkbarTerminalInstance[]>([]);
-  const [activeTerminalId, setActiveTerminalId] = useState<string>();
+  const instance = useMemo(
+    () => terminalInstanceLifecycle(terminalBindingKey({ workspacePath, sessionId, instanceId })),
+    [instanceId, sessionId, workspacePath],
+  );
+  const [terminal, setTerminal] = useState<WorkbarTerminalInstance>();
   const [output, setOutput] = useState<WorkbarTerminalOutput>();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string>();
@@ -132,10 +157,9 @@ export function TerminalPanelController({
     }
     streamReadyRef.current = true;
   }, [runtime]);
-  const activeTerminalIdRef = useRef<string | undefined>(undefined);
   const attachmentsRef = useRef(new Map<string, TerminalAttachmentState>());
-  const terminalsRef = useRef(terminals);
-  terminalsRef.current = terminals;
+  const terminalRef = useRef(terminal);
+  terminalRef.current = terminal;
   const accessRef = useRef({ active, readOnly });
   accessRef.current = { active, readOnly };
   const attachedJobsRef = useRef(new Map<string, Promise<TerminalAttachmentState>>());
@@ -157,12 +181,11 @@ export function TerminalPanelController({
       queue.dispose();
       inputQueuesRef.current.delete(id);
     }
-    const detach = (items: readonly WorkbarTerminalInstance[]) =>
-      items.map((terminal) =>
-        !terminalId || terminal.id === terminalId ? { ...terminal, attached: false } : terminal,
-      );
-    terminalsRef.current = detach(terminalsRef.current);
-    setTerminals(detach);
+    const current = terminalRef.current;
+    if (current && (!terminalId || current.id === terminalId)) {
+      terminalRef.current = { ...current, attached: false };
+      setTerminal(terminalRef.current);
+    }
   }, []);
 
   const applyFrame = useCallback((frame: RuntimeTerminalFrame): boolean => {
@@ -188,28 +211,21 @@ export function TerminalPanelController({
         text.length,
     };
     attachmentsRef.current.set(frame.terminalId, attachment);
-    const update = (items: readonly WorkbarTerminalInstance[]) =>
-      items.map((terminal) =>
-        terminal.id === frame.terminalId
+    if (terminalRef.current?.id === frame.terminalId) {
+      terminalRef.current = {
+        ...terminalRef.current,
+        sequence: frame.sequence,
+        ...(frame.kind === "status"
           ? {
-              ...terminal,
-              sequence: frame.sequence,
-              ...(frame.kind === "status"
-                ? {
-                    status:
-                      frame.status === "interrupted"
-                        ? ("interrupted" as const)
-                        : ("exited" as const),
-                    exitCode: frame.exitCode,
-                  }
-                : {}),
+              status:
+                frame.status === "interrupted" ? ("interrupted" as const) : ("exited" as const),
+              exitCode: frame.exitCode,
             }
-          : terminal,
-      );
-    terminalsRef.current = update(terminalsRef.current);
-    setTerminals(update);
-    if (activeTerminalIdRef.current === frame.terminalId)
+          : {}),
+      };
+      setTerminal(terminalRef.current);
       setOutput(terminalOutputView(frame.terminalId, attachment));
+    }
     return true;
   }, []);
 
@@ -253,24 +269,25 @@ export function TerminalPanelController({
         resetVersion: (current?.resetVersion ?? 0) + 1,
       } satisfies TerminalAttachmentState;
       attachmentsRef.current.set(value.terminal.terminalId, attachment);
-      const key = terminalBindingKey({ workspacePath, sessionId, instanceId });
-      const bindings = terminalBindings.get(key);
-      if (bindings?.has(value.terminal.terminalId)) {
-        bindings.set(value.terminal.terminalId, value.resourceEpoch);
+      if (instance.binding?.terminalId === value.terminal.terminalId) {
+        instance.binding = {
+          terminalId: value.terminal.terminalId,
+          resourceEpoch: value.resourceEpoch,
+        };
       }
-      setTerminals((items) => upsertTerminal(items, terminalView(value.terminal, true)));
-      setOutput((currentOutput) =>
-        activeTerminalIdRef.current === value.terminal.terminalId || !currentOutput
-          ? terminalOutputView(value.terminal.terminalId, attachment)
-          : currentOutput,
-      );
+      terminalRef.current = terminalView(value.terminal, true);
+      setTerminal(terminalRef.current);
+      setOutput(terminalOutputView(value.terminal.terminalId, attachment));
       return attachment;
     },
-    [instanceId, sessionId, workspacePath],
+    [instance],
   );
 
   const attach = useCallback(
     (terminalId: string): Promise<TerminalAttachmentState> => {
+      if (instance.closed || instance.binding?.terminalId !== terminalId) {
+        return Promise.reject(new Error("终端标签已关闭或绑定已变化。"));
+      }
       const existing = attachedJobsRef.current.get(terminalId);
       if (existing) return existing;
       syncingRef.current.add(terminalId);
@@ -279,7 +296,11 @@ export function TerminalPanelController({
       const generation = connectionGenerationRef.current;
       const job = (async () => {
         await ensureTerminalStream();
-        if (disposedRef.current || generation !== connectionGenerationRef.current) {
+        if (
+          disposedRef.current ||
+          instance.closed ||
+          generation !== connectionGenerationRef.current
+        ) {
           throw new Error("终端连接已变化，请重新连接。");
         }
         for (let attempt = 0; attempt < 2; attempt++) {
@@ -290,7 +311,11 @@ export function TerminalPanelController({
             terminalId,
             maxBytes: TERMINAL_ATTACH_BYTES,
           });
-          if (disposedRef.current || generation !== connectionGenerationRef.current) {
+          if (
+            disposedRef.current ||
+            instance.closed ||
+            generation !== connectionGenerationRef.current
+          ) {
             await invokeWorkbarRuntime(runtime, "terminal.detach", {
               ...scope,
               streamId,
@@ -325,6 +350,7 @@ export function TerminalPanelController({
       applyAttachment,
       applyFrame,
       ensureTerminalStream,
+      instance,
       markDetached,
       runtime,
       scope,
@@ -338,8 +364,14 @@ export function TerminalPanelController({
     disposedRef.current = false;
     const subscription = window.pico.terminalFrames.subscribe(
       (frame) => {
-        if (frame.sessionId !== sessionId || frame.streamId !== streamId || disposedRef.current)
+        if (
+          frame.sessionId !== sessionId ||
+          frame.streamId !== streamId ||
+          disposedRef.current ||
+          instance.closed
+        )
           return;
+        if (instance.binding && instance.binding.terminalId !== frame.terminalId) return;
         if (
           !attachmentsRef.current.has(frame.terminalId) &&
           !syncingRef.current.has(frame.terminalId) &&
@@ -367,7 +399,7 @@ export function TerminalPanelController({
         markDetached();
         pendingFramesRef.current = [];
         pendingFrameBytesRef.current = 0;
-        const terminalId = activeTerminalIdRef.current;
+        const terminalId = terminalRef.current?.id;
         if (terminalId && accessRef.current.active) {
           // A read reconnects the shared Runtime request socket and restores its watermark.
           const pending = attachedJobsRef.current.get(terminalId) ?? Promise.resolve();
@@ -376,6 +408,7 @@ export function TerminalPanelController({
             .then(() => {
               if (
                 disposedRef.current ||
+                instance.closed ||
                 generation !== connectionGenerationRef.current ||
                 !accessRef.current.active
               )
@@ -393,11 +426,23 @@ export function TerminalPanelController({
       subscription.dispose();
       for (const queue of inputQueuesRef.current.values()) queue.dispose();
       inputQueuesRef.current.clear();
+      if (instance.closed && !instance.binding && !instance.creation) {
+        terminalInstances.delete(terminalBindingKey({ workspacePath, sessionId, instanceId }));
+      }
     };
-  }, [applyFrame, bufferFrame, markDetached, sessionId, streamId]);
+  }, [
+    applyFrame,
+    bufferFrame,
+    instance,
+    instanceId,
+    markDetached,
+    sessionId,
+    streamId,
+    workspacePath,
+  ]);
 
   const create = useCallback(async () => {
-    if (creatingRef.current || disposedRef.current) return;
+    if (creatingRef.current || disposedRef.current || instance.closed) return;
     if (accessRef.current.readOnly) {
       setError("当前任务只读，不能新建终端。");
       return;
@@ -406,11 +451,34 @@ export function TerminalPanelController({
     setError(undefined);
     creatingRef.current = true;
     const generation = connectionGenerationRef.current;
-    const current = () => !disposedRef.current && generation === connectionGenerationRef.current;
+    const current = () =>
+      !disposedRef.current && !instance.closed && generation === connectionGenerationRef.current;
+    let creation: TerminalInstanceLifecycle["creation"];
     try {
-      await ensureTerminalStream();
-      if (!current()) return;
-      const value = await invokeWorkbarRuntime(runtime, "terminal.create", { ...scope, streamId });
+      if (instance.binding) {
+        await attach(instance.binding.terminalId);
+        return;
+      }
+      // The lifecycle owns creation across StrictMode replays and actual remounts.
+      creation = instance.creation ?? {
+        streamId,
+        promise: (async () => {
+          await ensureTerminalStream();
+          if (!current()) return;
+          const value = await invokeWorkbarRuntime(runtime, "terminal.create", {
+            ...scope,
+            streamId,
+          });
+          instance.binding = {
+            terminalId: value.terminal.terminalId,
+            resourceEpoch: value.resourceEpoch,
+          };
+          return value;
+        })(),
+      };
+      instance.creation = creation;
+      const value = await creation.promise;
+      if (!value) return;
       if (!current()) {
         await invokeWorkbarRuntime(runtime, "terminal.detach", {
           ...scope,
@@ -420,13 +488,10 @@ export function TerminalPanelController({
         }).catch(() => undefined);
         return;
       }
-      bindTerminalToInstance(
-        { workspacePath, sessionId, instanceId },
-        value.terminal.terminalId,
-        value.resourceEpoch,
-      );
-      activeTerminalIdRef.current = value.terminal.terminalId;
-      setActiveTerminalId(value.terminal.terminalId);
+      if (creation.streamId !== streamId) {
+        await attach(value.terminal.terminalId);
+        return;
+      }
       applyAttachment(value);
       const frames = takePendingFrames(value.terminal.terminalId);
       let complete = !overflowedRef.current.delete(value.terminal.terminalId);
@@ -439,71 +504,61 @@ export function TerminalPanelController({
     } catch (cause) {
       if (current()) setError(workbarErrorMessage(cause));
     } finally {
+      if (instance.creation === creation) instance.creation = undefined;
       creatingRef.current = false;
       for (const frame of [...pendingFramesRef.current]) {
         if (!attachmentsRef.current.has(frame.terminalId)) takePendingFrames(frame.terminalId);
       }
-      if (current()) setLoading(false);
+      if (!disposedRef.current && generation === connectionGenerationRef.current) setLoading(false);
     }
   }, [
     applyAttachment,
     applyFrame,
     attach,
     ensureTerminalStream,
-    instanceId,
-    readOnly,
+    instance,
     runtime,
     scope,
-    sessionId,
     streamId,
     takePendingFrames,
-    workspacePath,
   ]);
 
   const initialize = useCallback(async () => {
     const generation = connectionGenerationRef.current;
-    const current = () => !disposedRef.current && generation === connectionGenerationRef.current;
+    const current = () =>
+      !disposedRef.current && !instance.closed && generation === connectionGenerationRef.current;
+    if (!current()) return;
     setLoading(true);
     setError(undefined);
     try {
       await ensureTerminalStream();
       if (!current()) return;
+      await instance.creation?.promise;
+      if (!current()) return;
       const listed = await invokeWorkbarRuntime(runtime, "terminal.list", scope);
       if (!current()) return;
-      setTerminals(listed.terminals.map((terminal) => terminalView(terminal, false)));
-      const bindingScope = { workspacePath, sessionId, instanceId };
-      const knownIds = new Set(listed.terminals.map((terminal) => terminal.terminalId));
-      const key = terminalBindingKey(bindingScope);
-      const bindings = terminalBindings.get(key);
-      for (const terminalId of bindings?.keys() ?? []) {
-        if (!knownIds.has(terminalId)) bindings?.delete(terminalId);
-      }
-      if (bindings?.size === 0) terminalBindings.delete(key);
-      const bound = listed.terminals.find((terminal) => bindings?.has(terminal.terminalId));
-      const selected = bound ?? (readOnly ? listed.terminals[0] : undefined);
-      if (selected) {
-        activeTerminalIdRef.current = selected.terminalId;
-        setActiveTerminalId(selected.terminalId);
-        await attach(selected.terminalId);
+      const bound = listed.terminals.find(
+        (terminal) => terminal.terminalId === instance.binding?.terminalId,
+      );
+      if (bound) {
+        terminalRef.current = terminalView(bound, false);
+        setTerminal(terminalRef.current);
+        await attach(bound.terminalId);
       } else if (!readOnly) {
+        instance.binding = undefined;
+        terminalRef.current = undefined;
+        setTerminal(undefined);
+        setOutput(undefined);
         await create();
+      } else {
+        instance.binding = undefined;
       }
     } catch (cause) {
       if (current()) setError(workbarErrorMessage(cause));
     } finally {
       if (current()) setLoading(false);
     }
-  }, [
-    attach,
-    create,
-    ensureTerminalStream,
-    instanceId,
-    readOnly,
-    runtime,
-    scope,
-    sessionId,
-    workspacePath,
-  ]);
+  }, [attach, create, ensureTerminalStream, instance, readOnly, runtime, scope]);
 
   useEffect(() => {
     if (!active || initializedRef.current) return;
@@ -515,8 +570,8 @@ export function TerminalPanelController({
   useEffect(() => {
     const restoring = active && !wasActiveRef.current;
     wasActiveRef.current = active;
-    if (restoring && activeTerminalIdRef.current) {
-      void attach(activeTerminalIdRef.current).catch((cause: unknown) =>
+    if (restoring && terminalRef.current) {
+      void attach(terminalRef.current.id).catch((cause: unknown) =>
         setError(workbarErrorMessage(cause)),
       );
     }
@@ -535,22 +590,6 @@ export function TerminalPanelController({
       attachmentsRef.current.clear();
     },
     [runtime, scope, streamId],
-  );
-
-  const select = useCallback(
-    (terminalId: string) => {
-      activeTerminalIdRef.current = terminalId;
-      setActiveTerminalId(terminalId);
-      const attachment = attachmentsRef.current.get(terminalId);
-      setOutput(attachment ? terminalOutputView(terminalId, attachment) : undefined);
-      const connected = terminalsRef.current.find(
-        (terminal) => terminal.id === terminalId,
-      )?.attached;
-      if ((!attachment || !connected) && active) {
-        void attach(terminalId).catch((cause: unknown) => setError(workbarErrorMessage(cause)));
-      }
-    },
-    [active, attach],
   );
 
   const withAttachment = useCallback(
@@ -575,11 +614,13 @@ export function TerminalPanelController({
     (terminalId: string, data: string) => {
       const epoch = attachmentsRef.current.get(terminalId)?.epoch;
       const canSend = () => {
-        const terminal = terminalsRef.current.find((item) => item.id === terminalId);
+        const terminal = terminalRef.current;
         return (
           accessRef.current.active &&
           !accessRef.current.readOnly &&
-          activeTerminalIdRef.current === terminalId &&
+          !instance.closed &&
+          instance.binding?.terminalId === terminalId &&
+          terminal?.id === terminalId &&
           terminal?.status === "running" &&
           terminal.attached &&
           !syncingRef.current.has(terminalId) &&
@@ -608,12 +649,12 @@ export function TerminalPanelController({
       }
       queue.enqueue(data);
     },
-    [markDetached, runtime, scope],
+    [instance, markDetached, runtime, scope],
   );
 
   const resize = useCallback(
     async (terminalId: string, grid: WorkbarTerminalGrid) => {
-      if (readOnly) return;
+      if (readOnly || instance.closed || terminalRef.current?.id !== terminalId) return;
       try {
         await withAttachment(terminalId, async (attachment) => {
           await invokeWorkbarRuntime(runtime, "terminal.resize", {
@@ -628,54 +669,27 @@ export function TerminalPanelController({
         setError(workbarErrorMessage(cause));
       }
     },
-    [readOnly, runtime, scope, withAttachment],
-  );
-
-  const stop = useCallback(
-    async (terminalId: string) => {
-      if (readOnly) {
-        setError("当前任务只读，不能停止终端。");
-        return;
-      }
-      setError(undefined);
-      try {
-        await withAttachment(terminalId, async (attachment) => {
-          const value = await invokeWorkbarRuntime(runtime, "terminal.stop", {
-            ...scope,
-            terminalId,
-            resourceEpoch: attachment.epoch,
-          });
-          setTerminals((items) => upsertTerminal(items, terminalView(value.terminal, true)));
-          terminalBindings
-            .get(terminalBindingKey({ workspacePath, sessionId, instanceId }))
-            ?.delete(terminalId);
-        });
-      } catch (cause) {
-        setError(workbarErrorMessage(cause));
-      }
-    },
-    [instanceId, readOnly, runtime, scope, sessionId, withAttachment, workspacePath],
+    [instance, readOnly, runtime, scope, withAttachment],
   );
 
   return (
     <TerminalWorkbarPanel
-      terminals={terminals}
-      activeTerminalId={activeTerminalId}
+      terminal={terminal && terminalTitle ? { ...terminal, title: terminalTitle } : terminal}
       output={output}
       active={active}
       loading={loading}
       readOnly={readOnly}
       error={error}
-      onCreate={() => void create()}
-      onSelect={select}
-      onAttach={(terminalId) =>
-        void attach(terminalId).catch((cause: unknown) => setError(workbarErrorMessage(cause)))
-      }
+      onReconnect={() => {
+        const terminalId = terminalRef.current?.id;
+        void (terminalId ? attach(terminalId) : initialize()).catch((cause: unknown) =>
+          setError(workbarErrorMessage(cause)),
+        );
+      }}
       onInput={input}
       onFocusChange={(focused) => window.pico.terminalFrames.setFocused(focused)}
       onClipboard={(action) => window.pico.terminalFrames.clipboard(action)}
       onResize={(terminalId, grid) => void resize(terminalId, grid)}
-      onStop={(terminalId) => void stop(terminalId)}
     />
   );
 }
@@ -705,15 +719,6 @@ function terminalView(
   };
 }
 
-function upsertTerminal(
-  terminals: readonly WorkbarTerminalInstance[],
-  next: WorkbarTerminalInstance,
-): readonly WorkbarTerminalInstance[] {
-  const index = terminals.findIndex((terminal) => terminal.id === next.id);
-  if (index < 0) return [...terminals, next];
-  return terminals.map((terminal, candidate) => (candidate === index ? next : terminal));
-}
-
 function terminalOutputView(
   terminalId: string,
   attachment: TerminalAttachmentState,
@@ -732,15 +737,13 @@ function terminalBindingKey(scope: WorkbarTerminalInstanceScope): string {
   return JSON.stringify([scope.workspacePath, scope.sessionId, scope.instanceId]);
 }
 
-function bindTerminalToInstance(
-  scope: WorkbarTerminalInstanceScope,
-  terminalId: string,
-  resourceEpoch: string,
-): void {
-  const key = terminalBindingKey(scope);
-  const bindings = terminalBindings.get(key) ?? new Map<string, string>();
-  bindings.set(terminalId, resourceEpoch);
-  terminalBindings.set(key, bindings);
+function terminalInstanceLifecycle(key: string): TerminalInstanceLifecycle {
+  let instance = terminalInstances.get(key);
+  if (!instance) {
+    instance = { closed: false };
+    terminalInstances.set(key, instance);
+  }
+  return instance;
 }
 
 function isEpochConflict(cause: unknown): boolean {
