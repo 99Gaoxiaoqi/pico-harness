@@ -346,7 +346,10 @@ test("atomic compaction persists its covered boundary and records disabled-polic
     });
     await runtime.checkpoint(checkpoint.checkpointId);
     await lifecycle.close();
-    assert.deepEqual(await runtime.requestExtract(), { status: "unavailable" });
+    assert.deepEqual(await runtime.requestExtract(), {
+      status: "unavailable",
+      reason: "memory_disabled",
+    });
     assert.equal(calls, 0);
     const entries = await session.runtimeEventStore!.readSessionEntries(sessionId);
     const recorded = entries.find(

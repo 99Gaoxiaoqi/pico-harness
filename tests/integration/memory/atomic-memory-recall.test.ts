@@ -188,7 +188,7 @@ test("Chinese recall matches informative words inside persisted compound keys", 
 test("authorized assistant notes recall query-relevant original excerpts within the shared token budget", async () => {
   const store = new SqliteMemoryItemStore(":memory:");
   try {
-    const body = `${Array.from({ length: 40 }, (_, index) => `section${index} background.`).join(" ")} ${"这是架构说明的普通背景。".repeat(60)} 验收报告标题前缀是青柠月舟907。handoffmarker 交接层是 pico-host。<&\"'>`;
+    const body = `${Array.from({ length: 40 }, (_, index) => `section${index} background.`).join(" ")} ${"这是架构说明的普通背景。".repeat(60)} 验收报告标题前缀是青柠月舟907。handoffmarker 交接层是 pico-host。<&"'>`;
     const content = `${REFERENCE_NOTE_LABEL} [1/1]：${body}`;
     const note = memory(content, ["section0"], {
       kind: "note",

@@ -1,5 +1,6 @@
 import { AtomicMemoryLifecycle } from "@pico/runtime";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import { withProviderCallContext } from "@pico/runtime";
 import type { Message, ToolDefinition, RuntimeMemoryExtractionBoundary } from "@pico/core";
 import { RUNTIME_MESSAGE_EVENT_ID, isMessageHiddenFromTranscript } from "@pico/core";
@@ -20,6 +21,8 @@ import {
   type MemoryGateResult,
 } from "@pico/core/atomic-memory-runtime-contracts";
 import { logger } from "@pico/pico-host/logger";
+import { MemoryItemStoreConflictError } from "@pico/core/atomic-memory-contracts";
+import { resolveRequestedReferenceNote } from "./atomic-memory-reference-note.js";
 
 export function atomicMemoryDatabasePath(picoHome: string): string {
   return join(picoHome, "memory.sqlite");
@@ -136,16 +139,113 @@ export class AtomicMemoryRuntime {
     const snapshot = { ...this.source, ...(signal ? { signal } : {}) };
     return this.lifecycle.run(
       "remember",
-      () => sessionMemoryLane.run(this.laneKey, "foreground", () => this.execute(snapshot)),
+      () => sessionMemoryLane.run(this.laneKey, "foreground", () => this.rememberFrozen(snapshot)),
       () => unavailable("draining"),
     );
+  }
+
+  private async rememberFrozen(snapshot: MemoryExtractionSnapshot): Promise<AtomicMemoryResult> {
+    let store: SqliteMemoryItemStore | undefined;
+    try {
+      const entries = await this.readEntries();
+      const completedRunIds = new Set(
+        entries.flatMap(({ event }) =>
+          event.kind === "run.terminal" &&
+          event.data.status === "completed" &&
+          !event.data.recovered
+            ? [event.runId]
+            : [],
+        ),
+      );
+      const lastUser = snapshot.events.findLast((event) => event.role === "user");
+      const started = entries.find(
+        ({ event }) => event.kind === "run.started" && event.runId === snapshot.runId,
+      );
+      const prior =
+        started &&
+        entries.findLast(
+          ({ event, sequence }) => event.kind === "run.terminal" && sequence < started.sequence,
+        );
+      const wrapperInput =
+        lastUser &&
+        prior?.event.runId === lastUser.runId &&
+        prior.event.kind === "run.terminal" &&
+        prior.event.data.status === "completed" &&
+        !prior.event.data.recovered &&
+        isDesktopInputWrapper(entries.filter(({ event }) => event.runId === lastUser.runId));
+      const reference = resolveRequestedReferenceNote(snapshot, {
+        completedRunIds,
+        // Tool discovery/retries can start another Turn within the same Run.
+        // The latest real User input still owns that Run's explicit request.
+        ...(lastUser && (lastUser.runId === snapshot.runId || wrapperInput)
+          ? { authorizationEventId: lastUser.eventId }
+          : {}),
+      });
+      if (reference.status === "not_requested") return this.execute(snapshot);
+      if (reference.status === "unresolved") return unavailable(reference.reason);
+      if (snapshot.signal?.aborted) return unavailable("aborted");
+      const gate = await this.options.gate("remember");
+      if (!gate.allowed) return unavailable(gate.reason);
+      if (this.lifecycle.isDraining) return unavailable("draining");
+      if (!(await this.sessionAvailable())) return unavailable("session_unavailable");
+      store = new SqliteMemoryItemStore(atomicMemoryDatabasePath(this.options.picoHome));
+      if (!(await store.readSettings(this.workspaceKey)).enabled)
+        return unavailable("memory_disabled");
+      if (snapshot.signal?.aborted) return unavailable("aborted");
+      const operationId = `memory_reference_${createHash("sha256")
+        .update(
+          JSON.stringify([
+            snapshot.sessionId,
+            reference.authorizationEventId,
+            reference.targetEventId,
+          ]),
+        )
+        .digest("hex")}`;
+      const result = await store.applyMutations({
+        operationId,
+        expectedDeletionRevision: snapshot.deletionRevision,
+        mutations: reference.items.map((item) => ({ type: "create", item })),
+      });
+      const records = await Promise.all(
+        result.results.map(({ itemId }) => store!.readItem(itemId)),
+      );
+      const requestedItems = records.flatMap((record) =>
+        record?.item.lifecycleState === "active"
+          ? [{ itemId: record.item.itemId, content: record.item.content }]
+          : [],
+      );
+      if (requestedItems.length) this.options.onChanged?.();
+      return {
+        operationId,
+        sessionId: snapshot.sessionId,
+        status: requestedItems.length ? "remembered" : "not_applicable",
+        requestedItems,
+        committedAt: result.committedAt,
+      };
+    } catch (error) {
+      if (error instanceof MemoryItemStoreConflictError && error.reason === "deletion_conflict")
+        return unavailable("memory_deleted");
+      logger.debug({ error: String(error) }, "[Memory] reference note unavailable");
+      return unavailable("unavailable");
+    } finally {
+      store?.close();
+    }
   }
 
   async requestExtract(): Promise<{ status: "accepted" | "unavailable"; reason?: string }> {
     if (!this.options.supported) return { status: "unavailable", reason: "provider_unsupported" };
     const deletionRevision = await this.readDeletionRevision();
-    if (!(await this.options.gate("extract")).allowed || this.lifecycle.isDraining)
-      return { status: "unavailable" };
+    const gate = await this.options.gate("extract");
+    if (!gate.allowed) return { status: "unavailable", reason: gate.reason };
+    if (this.lifecycle.isDraining) return { status: "unavailable", reason: "draining" };
+    const store = new SqliteMemoryItemStore(atomicMemoryDatabasePath(this.options.picoHome));
+    try {
+      const settings = await store.readSettings(this.workspaceKey);
+      if (!settings.enabled || !settings.autoExtract)
+        return { status: "unavailable", reason: "memory_disabled" };
+    } finally {
+      store.close();
+    }
     this.extractRequestedRevision = deletionRevision;
     return { status: "accepted" };
   }
@@ -282,6 +382,17 @@ export class AtomicMemoryRuntime {
       const result = await new AtomicMemoryExtractionEngine({ store, model, gate }).execute(
         snapshot,
       );
+      if (result.status === "unavailable" && result.reason === "retry_later") {
+        const pending = await store.readPendingExtractionFailure(snapshot.sessionId);
+        if (pending)
+          return unavailable(
+            pending.firstFailureClass === "provider"
+              ? "provider_review_failed"
+              : pending.firstFailureClass === "evidence"
+                ? "evidence_rejected"
+                : "invalid_memory_response",
+          );
+      }
       if (result.status !== "unavailable") this.options.onChanged?.();
       return result;
     } finally {
@@ -388,20 +499,7 @@ export class AtomicMemoryRuntime {
       // AgentRuntime resumes. Its user message belongs to that following admission,
       // so this input-only wrapper must not become a legacy policy barrier.
       if (!admission && event.data.status === "completed" && !event.data.recovered) {
-        const runEvents = entries.filter((entry) => entry.event.runId === event.runId);
-        const desktopInput = (entry: RuntimeEventStoreEntry) =>
-          entry.event.kind === "message.committed" &&
-          entry.event.data.message.role === "user" &&
-          entry.event.data.message.providerData?.["picoKind"] === "desktop_user_input";
-        if (
-          runEvents.some(desktopInput) &&
-          runEvents.every(
-            (entry) =>
-              entry.event.kind === "run.started" ||
-              entry.event.kind === "run.terminal" ||
-              desktopInput(entry),
-          )
-        )
+        if (isDesktopInputWrapper(entries.filter((entry) => entry.event.runId === event.runId)))
           return [];
       }
       return [
@@ -482,6 +580,22 @@ export class AtomicMemoryRuntime {
 
 function unavailable(reason: string): AtomicMemoryResult {
   return { status: "unavailable", reason, requestedItems: [] };
+}
+
+function isDesktopInputWrapper(entries: readonly RuntimeEventStoreEntry[]): boolean {
+  const desktopInput = ({ event }: RuntimeEventStoreEntry): boolean =>
+    event.kind === "message.committed" &&
+    event.data.message.role === "user" &&
+    event.data.message.providerData?.["picoKind"] === "desktop_user_input";
+  return (
+    entries.some(desktopInput) &&
+    entries.every(
+      (entry) =>
+        entry.event.kind === "run.started" ||
+        entry.event.kind === "run.terminal" ||
+        desktopInput(entry),
+    )
+  );
 }
 
 function messageEventPositions(messages: readonly Message[]): Record<string, number[]> {

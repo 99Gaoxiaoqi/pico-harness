@@ -35,16 +35,27 @@ export type RequestedReferenceNoteResult =
  */
 export function resolveRequestedReferenceNote(
   snapshot: MemoryExtractionSnapshot,
-  context: { readonly completedRunIds: ReadonlySet<string> },
+  context: {
+    readonly completedRunIds: ReadonlySet<string>;
+    /** The Host may bind a desktop input wrapper to the executing Run. */
+    readonly authorizationEventId?: string;
+  },
 ): RequestedReferenceNoteResult {
   if (snapshot.trigger !== "remember") return { status: "not_requested" };
   const events = snapshot.events
     .filter((event) => event.ordinal <= snapshot.boundaryOrdinal)
     .toSorted((a, b) => a.ordinal - b.ordinal);
-  const authorization = events.findLast(
-    (event) =>
-      event.role === "user" && event.runId === snapshot.runId && event.turnId === snapshot.turnId,
-  );
+  const lastUser = events.findLast((event) => event.role === "user");
+  const authorization = context.authorizationEventId
+    ? lastUser?.eventId === context.authorizationEventId
+      ? lastUser
+      : undefined
+    : events.findLast(
+        (event) =>
+          event.role === "user" &&
+          event.runId === snapshot.runId &&
+          event.turnId === snapshot.turnId,
+      );
   if (!authorization) return { status: "not_requested" };
   const intent = referenceIntent(authorization.text);
   if (intent === "none") return { status: "not_requested" };
@@ -153,7 +164,6 @@ function splitReferenceText(text: string): string[] {
       continue;
     }
     if (pending) parts.push(pending);
-    pending = "";
     while (points.length > MAX_PART_CODE_POINTS) {
       parts.push(points.splice(0, MAX_PART_CODE_POINTS).join(""));
     }

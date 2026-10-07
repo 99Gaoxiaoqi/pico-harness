@@ -21,6 +21,7 @@ import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
 import { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-store";
 import { SqliteRuntimeControlStore } from "@pico/storage/sqlite/sqlite-runtime-control-store";
 import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
+import { BACKGROUND_HARDLINE_VERSION } from "@pico/pico-host/background-autonomous-policy";
 
 const MEMORY_CANARY = "npm run reviewed-memory-canary";
 
@@ -103,7 +104,7 @@ test("Memory admission separates recall from extraction across runtime profiles"
                       trustedWorkspace: true,
                       toolNetworkPolicy: "disabled" as const,
                       allowedTools: toolsAllowed ? triggers : [],
-                      hardlineVersion: "builtin-v1",
+                      hardlineVersion: BACKGROUND_HARDLINE_VERSION,
                       hookVersion: "workspace-v1",
                       createdAt: Date.now(),
                     },
