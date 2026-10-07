@@ -45,6 +45,22 @@ for (const scenario of [
     recoveredCalls: 1,
   },
   {
+    name: "a denied completed admission seals an older eligible checkpoint",
+    initialAuto: true,
+    laterAuto: true,
+    tagged: true,
+    recoveredCalls: 0,
+    completedDisposition: "policy_denied",
+  },
+  {
+    name: "settings revision prevents completed automatic backfill during explicit remember",
+    initialAuto: true,
+    laterAuto: true,
+    tagged: true,
+    recoveredCalls: 0,
+    completedDisposition: "eligible",
+  },
+  {
     name: "temporary admission failure still records an eligible checkpoint for later recovery",
     initialAuto: true,
     laterAuto: true,
@@ -191,6 +207,18 @@ for (const scenario of [
           : {}),
       });
       assert.ok(recorded);
+      if ("completedDisposition" in scenario) {
+        const store = new SqliteMemoryItemStore(join(picoHome, "memory.sqlite"));
+        try {
+          firstRun.setMemoryExtractionBoundary({
+            disposition: scenario.completedDisposition,
+            deletionRevision: await store.readDeletionRevision(),
+            settingsVersion: (await store.readSettings(paths.workspace.id)).version,
+          });
+        } finally {
+          store.close();
+        }
+      }
       return recorded;
     });
     const beforeRestart = await session.runtimeEventStore!.readSessionEntries(sessionId);

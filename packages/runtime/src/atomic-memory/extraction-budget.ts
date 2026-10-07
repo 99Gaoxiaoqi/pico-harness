@@ -11,6 +11,24 @@ export interface MemoryRequestBudgetInput {
   readonly reservedOutputTokens?: number;
 }
 
+/** Keep source positions stable; even isolated requests need an ordinary user message. */
+export function buildMemoryRequestMessages(
+  input: MemoryRequestBudgetInput,
+  prompt: string,
+  stage: "proposal" | "localized" | "canonicalize",
+): Message[] {
+  const prefix = stage === "canonicalize" ? [] : (input.sourceMessages ?? []);
+  return prefix.length
+    ? [...prefix, { role: "user", content: prompt }]
+    : [
+        { role: "system", content: prompt },
+        {
+          role: "user",
+          content: "Follow the instructions above and return the requested JSON only.",
+        },
+      ];
+}
+
 /** Plan the complete auxiliary request before spending its per-range call budget. */
 export async function memoryRequestFits(
   input: MemoryRequestBudgetInput,
@@ -30,12 +48,8 @@ export async function memoryRequestFits(
     return false;
 
   await primeTokenizer();
-  const prefix = stage === "canonicalize" ? [] : (input.sourceMessages ?? []);
   const tools = stage === "canonicalize" ? [] : (input.sourceTools ?? []);
-  const messages: Message[] = [
-    ...prefix,
-    { role: prefix.length ? "user" : "system", content: prompt },
-  ];
+  const messages = buildMemoryRequestMessages(input, prompt, stage);
   // Match the preflight check for the request that ProviderAtomicMemoryModel sends.
   const inputTokens = estimateRequestTokens(messages, tools);
   return inputTokens + outputReserve + DEFAULT_SAFETY_MARGIN_TOKENS <= contextWindow;

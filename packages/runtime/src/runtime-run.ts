@@ -47,6 +47,7 @@ import { inspectDurableTranscriptEvents } from "./durable-transcript-state.js";
 import { waitForDelay } from "./deadline.js";
 import type {
   Message,
+  RuntimeMemoryExtractionBoundary,
   ToolCall,
   ToolResult,
   ToolDefinition,
@@ -396,6 +397,7 @@ export class RuntimeRun {
   private turnId: string;
   private stepId: string;
   private terminal?: RuntimeRunTerminalEvent;
+  private memoryExtractionBoundary?: RuntimeMemoryExtractionBoundary;
   private finishPromise?: Promise<void>;
   private ownerFence?: RuntimeOwnerFence;
 
@@ -2117,6 +2119,11 @@ export class RuntimeRun {
     await this.append(event);
   }
 
+  setMemoryExtractionBoundary(boundary: RuntimeMemoryExtractionBoundary): void {
+    this.assertOpen();
+    this.memoryExtractionBoundary = structuredClone(boundary);
+  }
+
   async finish(status: RuntimeTerminalStatus, reason?: string): Promise<void> {
     if (this.finishPromise) return this.finishPromise;
     this.finishPromise = (async () => {
@@ -2127,7 +2134,21 @@ export class RuntimeRun {
           "internal",
         ),
         kind: "run.terminal" as const,
-        data: { status, ...(reason ? { reason } : {}) },
+        data: {
+          status,
+          ...(reason ? { reason } : {}),
+          ...(this.memoryExtractionBoundary
+            ? {
+                memoryExtractionBoundary: {
+                  ...this.memoryExtractionBoundary,
+                  disposition:
+                    status === "completed"
+                      ? this.memoryExtractionBoundary.disposition
+                      : ("policy_denied" as const),
+                },
+              }
+            : {}),
+        },
       };
       if (!this.terminal) {
         const pendingOperations = (

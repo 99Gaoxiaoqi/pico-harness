@@ -9,6 +9,7 @@ import type {
   PermissionMode,
   RuntimeRunContinuationOf,
   RuntimeSessionSelection,
+  RuntimeMemoryExtractionBoundary,
 } from "@pico/core";
 import type { GoalManager } from "@pico/runtime/goal-manager";
 import type { AgentRunOutcome } from "@pico/runtime/agent-engine";
@@ -93,6 +94,7 @@ export interface RuntimeRunExecutorInput {
   readonly goalRunOrigin?: "user" | "goal";
   readonly readModelOutcome?: () => AgentRunOutcome;
   readonly atomicMemoryCompleted?: (runId: string) => Promise<void>;
+  readonly atomicMemoryBoundary?: () => Promise<RuntimeMemoryExtractionBoundary>;
   readonly session: RuntimeRunExecutorSession;
   readonly promptHooks: RuntimePromptHookPort;
   readonly executeModel: (signal?: AbortSignal) => Promise<readonly Message[]>;
@@ -425,6 +427,9 @@ export class RuntimeRunExecutor {
           }
           manager?.endRun();
           await session.flushPersistence();
+          if (this.input.atomicMemoryBoundary) {
+            runtimeRun.setMemoryExtractionBoundary(await this.input.atomicMemoryBoundary());
+          }
         }
       }, signal);
       await this.input.atomicMemoryCompleted?.(runtimeRun.runId);

@@ -57,6 +57,12 @@ test("memory budget agrees with actual auxiliary requests for history, Chinese, 
       fits: true,
     },
     { name: "a short proposal fits", stage: "proposal", input: {}, fits: true },
+    {
+      name: "an indexed history prefix keeps its original positions",
+      stage: "localized",
+      input: { sourceMessages: [{ role: "user", content: "I prefer concise answers." }] },
+      fits: true,
+    },
   ];
   const capabilities = resolveModelRouteCapabilities("openai", "memory-test", {
     context: contextWindowTokens,
@@ -78,8 +84,21 @@ test("memory budget agrees with actual auxiliary requests for history, Chinese, 
           requestCapabilities: { toolChoiceNoneWithTools: true },
           async generate(messages, tools) {
             providerCalls++;
+            if (scenario.stage === "canonicalize" || !scenario.input.sourceMessages?.length) {
+              assert.deepEqual(messages, [
+                { role: "system", content: prompt },
+                {
+                  role: "user",
+                  content: "Follow the instructions above and return the requested JSON only.",
+                },
+              ]);
+            } else {
+              assert.deepEqual(messages, [
+                ...scenario.input.sourceMessages,
+                { role: "user", content: prompt },
+              ]);
+            }
             if (scenario.stage === "canonicalize") {
-              assert.deepEqual(messages, [{ role: "system", content: prompt }]);
               assert.deepEqual(tools, []);
             }
             return { role: "assistant", content: "{}" };
