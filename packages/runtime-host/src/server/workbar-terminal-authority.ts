@@ -676,7 +676,8 @@ export class WorkbarTerminalAuthority {
       throw new WorkbarTerminalError("invalid_request", "afterSequence must be an integer >= -1");
     }
     const firstAvailableSequence = resource.events[0]?.sequence ?? resource.record.sequence + 1;
-    const truncated = resource.record.sequence > 0 && afterSequence < firstAvailableSequence - 1;
+    const truncated =
+      resource.record.sequence > 0 && Math.max(0, afterSequence) < firstAvailableSequence - 1;
     return {
       ...resource.record,
       events: resource.events.filter((event) => event.sequence > afterSequence),

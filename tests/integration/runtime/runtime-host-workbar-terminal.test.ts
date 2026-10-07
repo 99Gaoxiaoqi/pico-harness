@@ -194,6 +194,15 @@ test("Host terminal 支持多实例、attach/detach、有界回放和单调 sequ
   const process = factory.processes[0];
   assert.ok(process);
   process.output("abc");
+  assert.equal(
+    authority.attach({
+      resourceId: first.resourceId,
+      resourceEpoch: first.resourceEpoch,
+      attachmentId: "view-1",
+    }).truncated,
+    false,
+    "完整快照不应报告截断",
+  );
   process.output("def");
   process.output("ghi");
   const replay = authority.attach({
@@ -203,6 +212,15 @@ test("Host terminal 支持多实例、attach/detach、有界回放和单调 sequ
     afterSequence: 0,
   });
   assert.equal(replay.truncated, true);
+  assert.equal(
+    authority.attach({
+      resourceId: first.resourceId,
+      resourceEpoch: first.resourceEpoch,
+      attachmentId: "view-1",
+    }).truncated,
+    true,
+    "完整快照仍应报告已发生的环形缓冲裁剪",
+  );
   assert.equal(replay.firstAvailableSequence, 2);
   assert.deepEqual(
     replay.events.map((event) => event.sequence),

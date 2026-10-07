@@ -70,7 +70,11 @@ async function run() {
   await js('window.mode("terminal")');
   await wait(`document.querySelector('.xterm-helper-textarea')!==null`);
   await js(`document.querySelector('.xterm-helper-textarea').focus()`);
-  await window.webContents.insertText("printf hello");
+  for (const char of "printf hello") {
+    window.webContents.sendInputEvent({ type: "keyDown", keyCode: char });
+    window.webContents.sendInputEvent({ type: "char", keyCode: char });
+    window.webContents.sendInputEvent({ type: "keyUp", keyCode: char });
+  }
   await enter();
   assert.equal(
     await js(`window.calls.filter(c=>c[0]==='input').map(c=>c[2]).join('')`),
