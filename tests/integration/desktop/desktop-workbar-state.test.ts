@@ -166,7 +166,7 @@ test("Workbar supports reorder, context-menu close operations and bounded width"
     ["terminal:3", "terminal:1"],
   );
   assert.equal(state.width, WORKBAR_MIN_WIDTH);
-  state = reduceWorkbarState(state, { type: "setWidth", width: 900 });
+  state = reduceWorkbarState(state, { type: "setWidth", width: WORKBAR_MAX_WIDTH + 100 });
   assert.equal(state.width, WORKBAR_MAX_WIDTH);
   state = reduceWorkbarState(state, { type: "closeOthers", tabId: "terminal:1" });
   assert.deepEqual(

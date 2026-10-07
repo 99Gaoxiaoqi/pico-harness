@@ -36,6 +36,11 @@ export interface WorkbarState {
 
 export type WorkbarAction =
   | { readonly type: "open"; readonly tab: WorkbarTab }
+  | {
+      readonly type: "openTerminal";
+      readonly tab: WorkbarTab;
+      readonly mode: "open" | "toggle" | "new";
+    }
   | { readonly type: "openPreview"; readonly tab: WorkbarTab }
   | { readonly type: "pinPreview"; readonly tabId: string }
   | { readonly type: "select"; readonly tabId: string }

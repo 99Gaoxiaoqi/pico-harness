@@ -37,7 +37,7 @@ export const WORKBAR_TOOL_REGISTRY = [
   {
     kind: "terminal",
     label: "终端",
-    description: "打开一个任务终端",
+    description: "在当前任务中新建一个终端",
     shortcut: "Ctrl+`",
     multiple: true,
     persistsAcrossRestart: false,

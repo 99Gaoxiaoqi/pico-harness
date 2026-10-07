@@ -97,6 +97,13 @@ export function TerminalOutputView({
           }
         });
         terminal.attachCustomKeyEventHandler((event) => {
+          if (
+            !event.altKey &&
+            !event.shiftKey &&
+            ((event.ctrlKey && !event.metaKey && event.key === "`") ||
+              ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "t"))
+          )
+            return false;
           const windowsClipboard =
             !navigator.platform.startsWith("Mac") &&
             event.ctrlKey &&

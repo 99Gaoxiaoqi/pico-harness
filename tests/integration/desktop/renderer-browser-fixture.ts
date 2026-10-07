@@ -70,17 +70,17 @@ export async function runRendererBrowserScenario(contents: string): Promise<stri
     response.setHeader(
       "content-type",
       request.url === "/bundle.js"
-        ? "text/javascript"
+        ? "text/javascript; charset=utf-8"
         : request.url === "/bundle.css"
-          ? "text/css"
-          : "text/html",
+          ? "text/css; charset=utf-8"
+          : "text/html; charset=utf-8",
     );
     response.end(
       request.url === "/bundle.js"
         ? script
         : request.url === "/bundle.css"
           ? css
-          : '<!doctype html><html><head><link rel="stylesheet" href="/bundle.css"></head><body><div id="app"></div><script src="/bundle.js"></script></body></html>',
+          : '<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="/bundle.css"></head><body><div id="app"></div><script src="/bundle.js"></script></body></html>',
     );
   });
   const profile = await mkdtemp(join(tmpdir(), "pico-renderer-ui-"));

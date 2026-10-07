@@ -31,15 +31,7 @@ import {
   Sparkles,
   TerminalSquare,
 } from "lucide-react";
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useReducer,
-  useRef,
-  useState,
-  type ReactNode,
-} from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link, Navigate, useLocation, useNavigate, useParams } from "react-router-dom";
 import { parseModelRoutes } from "../runtime-projections/configuration.js";
 import { isRecord } from "../runtime-projections/values.js";
@@ -85,18 +77,16 @@ import { isBrowserPanelActive } from "../workbar-panels/browser-agent-lease-cont
 import {
   SessionWorkbarLayout,
   WorkbarLauncher,
-  createWorkbarState,
   createWorkbarToolTab,
   getWorkbarTool,
   isWorkbarPanelActive,
-  loadWorkbarState,
-  reduceWorkbarState,
   resolveWorkbarShortcut,
   saveWorkbarState,
   type WorkbarAction,
   type WorkbarTab,
   type WorkbarToolKind,
 } from "../workbar/index.js";
+import { useSessionWorkbar } from "../workbar/useSessionWorkbar.js";
 import { TrustWorkspace } from "../workspace-access.js";
 import {
   newSessionHref,
@@ -193,12 +183,19 @@ export function ConversationPage() {
   const [inspectorTab, setInspectorTab] = useState<"timeline" | "overview">("timeline");
   useEffect(() => setInspectorTab("timeline"), [workspacePath, sessionId]);
 
-  const [workbar, dispatchWorkbar] = useReducer(reduceWorkbarState, undefined, () => {
-    const fallback = createWorkbarState();
-    return typeof window === "undefined"
-      ? fallback
-      : loadWorkbarState(window.localStorage, fallback);
-  });
+  const [workbar, dispatchWorkbar] = useSessionWorkbar(draftKey);
+  const [workbarError, setWorkbarError] = useState<string>();
+  const closingTerminalTabsRef = useRef(new Set<string>());
+  const wasWorkbarCollapsedRef = useRef(workbar.collapsed);
+  useEffect(() => {
+    const collapsed = workbar.collapsed && !wasWorkbarCollapsedRef.current;
+    wasWorkbarCollapsedRef.current = workbar.collapsed;
+    if (!collapsed) return;
+    const frame = window.requestAnimationFrame(() =>
+      document.getElementById("workbar-toggle-right")?.focus(),
+    );
+    return () => window.cancelAnimationFrame(frame);
+  }, [workbar.collapsed]);
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const [modelOpenRequest, setModelOpenRequest] = useState(0);
@@ -247,6 +244,7 @@ export function ConversationPage() {
     setEditingUserMessage(undefined);
     revisionRequestRef.current = undefined;
     setReferenceError(undefined);
+    setWorkbarError(undefined);
     setPromptAnchors([]);
     setPromptAnchorCursor(undefined);
     setSearchQuery("");
@@ -299,6 +297,11 @@ export function ConversationPage() {
   useEffect(() => {
     if (typeof window !== "undefined") saveWorkbarState(window.localStorage, workbar);
   }, [workbar]);
+
+  useEffect(
+    () => () => dispatchWorkbar({ type: "close", tabId: "inspector-preview" }),
+    [dispatchWorkbar],
+  );
 
   useEffect(() => {
     if (!inspector) {
@@ -970,6 +973,7 @@ export function ConversationPage() {
             instanceId={tab.id}
             active={active}
             readOnly={session?.status === "archived"}
+            {...(tab.kind === "terminal" ? { terminalTitle: tab.label } : {})}
             inspectorTab={inspectorTab}
             onInspectorTabChange={setInspectorTab}
           />
@@ -1006,6 +1010,7 @@ export function ConversationPage() {
       return null;
     },
     [
+      dispatchWorkbar,
       inspector,
       inspectorTab,
       runtime,
@@ -1039,42 +1044,78 @@ export function ConversationPage() {
           : action.type === "closeOthers"
             ? tabs.filter((tab) => tab.id !== action.tabId)
             : tabs.slice(targetIndex + 1);
-      const terminalTabs = closingTabs.filter((tab) => tab.kind === "terminal");
-      if (terminalTabs.length === 0) {
-        dispatchWorkbar(action);
-        return;
+      const routeKey = draftKey;
+      setWorkbarError(undefined);
+      for (const tab of closingTabs) {
+        if (tab.kind !== "terminal") {
+          dispatchWorkbar({ type: "close", tabId: tab.id });
+          continue;
+        }
+        const closingKey = JSON.stringify([workspacePath, sessionId, tab.id]);
+        if (closingTerminalTabsRef.current.has(closingKey)) continue;
+        closingTerminalTabsRef.current.add(closingKey);
+        void stopWorkbarTerminalInstance(window.pico.runtime, {
+          workspacePath,
+          sessionId,
+          instanceId: tab.id,
+        })
+          .then(() => {
+            dispatchWorkbar({ type: "close", tabId: tab.id });
+          })
+          .catch((cause: unknown) => {
+            if (sendRouteRef.current !== routeKey) return;
+            const reason = cause instanceof Error ? cause.message : "请稍后重试。";
+            setWorkbarError(`未能关闭“${tab.label}”：${reason}`);
+          })
+          .finally(() => closingTerminalTabsRef.current.delete(closingKey));
       }
-      void Promise.allSettled(
-        terminalTabs.map((tab) =>
-          stopWorkbarTerminalInstance(window.pico.runtime, {
-            workspacePath,
-            sessionId,
-            instanceId: tab.id,
-          }),
-        ),
-      ).finally(() => dispatchWorkbar(action));
     },
-    [sessionId, workbar.tabs, workspacePath],
+    [dispatchWorkbar, draftKey, sessionId, workbar.tabs, workspacePath],
   );
 
-  const openWorkbarTab = useCallback((kind: WorkbarToolKind) => {
-    const tool = getWorkbarTool(kind);
-    const tab = tool.multiple
-      ? {
-          id: `${kind}:${globalThis.crypto.randomUUID()}`,
-          kind,
-          label: tool.label,
-        }
-      : createWorkbarToolTab(kind);
-    dispatchWorkbar({ type: "open", tab });
-  }, []);
+  const openWorkbarTab = useCallback(
+    (kind: WorkbarToolKind, terminalMode: "open" | "toggle" | "new" = "open") => {
+      setWorkbarError(undefined);
+      if (kind === "terminal") {
+        dispatchWorkbar({
+          type: "openTerminal",
+          mode: terminalMode,
+          tab: {
+            id: `terminal:${globalThis.crypto.randomUUID()}`,
+            kind,
+            label: workspaceName(workspacePath) || "终端",
+          },
+        });
+        return;
+      }
+      const tool = getWorkbarTool(kind);
+      const tab = tool.multiple
+        ? {
+            id: `${kind}:${globalThis.crypto.randomUUID()}`,
+            kind,
+            label: tool.label,
+          }
+        : createWorkbarToolTab(kind);
+      dispatchWorkbar({ type: "open", tab });
+    },
+    [dispatchWorkbar, workspacePath],
+  );
 
   useEffect(() => {
     const handleShortcut = (event: globalThis.KeyboardEvent) => {
       const kind = resolveWorkbarShortcut(event);
       if (!kind || !sessionRef) return;
       event.preventDefault();
-      openWorkbarTab(kind);
+      if (event.repeat) return;
+      if (
+        kind === "browser" &&
+        event.target instanceof Element &&
+        event.target.closest(".tool-panel__terminal-screen")
+      ) {
+        openWorkbarTab("terminal", "new");
+        return;
+      }
+      openWorkbarTab(kind, kind === "terminal" ? "toggle" : "open");
     };
     window.addEventListener("keydown", handleShortcut);
     return () => window.removeEventListener("keydown", handleShortcut);
@@ -1095,7 +1136,7 @@ export function ConversationPage() {
           <Code2 size={15} />
         )
       }
-      onOpen={openWorkbarTab}
+      onOpen={(kind) => openWorkbarTab(kind, "new")}
       onClose={() => dispatchWorkbar({ type: "setLauncherOpen", open: false })}
     />
   ) : undefined;
@@ -1146,19 +1187,19 @@ export function ConversationPage() {
       enabled={Boolean(sessionRef)}
       showRestoreButton={false}
       launcher={workbarLauncher}
+      notice={
+        workbarError ? (
+          <p className="session-workbar__notice" role="alert">
+            {workbarError}
+          </p>
+        ) : undefined
+      }
       presentTab={(tab) => ({
         closable: true,
         ...(tab.kind === "review" && workbarChangeCount > 0 ? { badge: workbarChangeCount } : {}),
       })}
       renderPanel={renderWorkbarPanel}
-      onAction={(action) => {
-        handleWorkbarAction(action);
-        if (action.type === "setCollapsed" && action.collapsed) {
-          window.requestAnimationFrame(() =>
-            document.getElementById("workbar-toggle-right")?.focus(),
-          );
-        }
-      }}
+      onAction={handleWorkbarAction}
     >
       <ConversationSurface
         className="session-conversation"

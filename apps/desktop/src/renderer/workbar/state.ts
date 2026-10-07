@@ -1,8 +1,8 @@
 import type { WorkbarAction, WorkbarState, WorkbarStateOptions, WorkbarTab } from "./types.js";
 
 export const WORKBAR_MIN_WIDTH = 320;
-export const WORKBAR_MAX_WIDTH = 600;
-export const WORKBAR_DEFAULT_WIDTH = 400;
+export const WORKBAR_MAX_WIDTH = 960;
+export const WORKBAR_DEFAULT_WIDTH = 600;
 
 export function clampWorkbarWidth(width: number): number {
   if (!Number.isFinite(width)) return WORKBAR_DEFAULT_WIDTH;
@@ -48,6 +48,35 @@ export function createWorkbarState(options: WorkbarStateOptions = {}): WorkbarSt
 
 export function reduceWorkbarState(state: WorkbarState, action: WorkbarAction): WorkbarState {
   switch (action.type) {
+    case "openTerminal": {
+      if (action.tab.kind !== "terminal") return state;
+      const existing = state.mruTabIds
+        .map((id) => state.tabs.find((tab) => tab.id === id && tab.kind === "terminal"))
+        .find((tab) => tab !== undefined);
+      if (action.mode !== "new" && existing) {
+        if (
+          action.mode === "toggle" &&
+          state.activeTabId === existing.id &&
+          !state.collapsed &&
+          !state.launcherOpen
+        ) {
+          return reduceWorkbarState(state, { type: "setCollapsed", collapsed: true });
+        }
+        return reduceWorkbarState(state, { type: "select", tabId: existing.id });
+      }
+      const terminals = state.tabs.filter((tab) => tab.kind === "terminal");
+      const ordinal =
+        terminals.reduce((maximum, tab) => {
+          const index = Number(tab.label.match(/ · (\d+)$/u)?.[1] ?? 0);
+          return Math.max(maximum, index);
+        }, 0) + 1;
+      return reduceWorkbarState(
+        terminals.length === 0
+          ? { ...state, width: Math.max(state.width, WORKBAR_DEFAULT_WIDTH) }
+          : state,
+        { type: "open", tab: { ...action.tab, label: `${action.tab.label} · ${ordinal}` } },
+      );
+    }
     case "open": {
       const exists = hasTab(state, action.tab.id);
       return {

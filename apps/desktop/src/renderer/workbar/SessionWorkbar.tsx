@@ -37,6 +37,7 @@ export interface SessionWorkbarProps {
   readonly size: number;
   readonly showRestoreButton?: boolean | undefined;
   readonly launcher?: ReactNode | undefined;
+  readonly notice?: ReactNode | undefined;
   readonly renderPanel: (tab: SessionWorkbarTab) => ReactNode;
   readonly onSelect: (tabId: string) => void;
   readonly onClose: (tabId: string) => void;
@@ -57,6 +58,7 @@ export interface SessionWorkbarLayoutProps {
   /** New tasks stay focused until a real session exists. */
   readonly enabled?: boolean | undefined;
   readonly launcher?: ReactNode | undefined;
+  readonly notice?: ReactNode | undefined;
   readonly presentTab?:
     | ((tab: WorkbarTab) => Partial<Pick<SessionWorkbarTab, "closable" | "badge">> | undefined)
     | undefined;
@@ -85,6 +87,7 @@ export function SessionWorkbar({
   size,
   showRestoreButton = true,
   launcher,
+  notice,
   renderPanel,
   onSelect,
   onClose,
@@ -112,9 +115,34 @@ export function SessionWorkbar({
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
   const [resizing, setResizing] = useState(false);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const shellRef = useRef<HTMLDivElement>(null);
+  const [availableSize, setAvailableSize] = useState(WORKBAR_MAX_WIDTH);
+
+  useLayoutEffect(() => {
+    const parent = shellRef.current?.parentElement;
+    if (!parent) return;
+    const measure = () => {
+      const width = parent.clientWidth;
+      if (!width) return;
+      setAvailableSize(
+        Math.min(
+          WORKBAR_MAX_WIDTH,
+          window.innerWidth <= 990 ? width : Math.max(WORKBAR_MIN_WIDTH, width - 420),
+        ),
+      );
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(parent);
+    window.addEventListener("resize", measure);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+  }, []);
 
   const selectedTabId = tabs.some((tab) => tab.id === activeTabId) ? activeTabId : tabs[0]?.id;
-  const controlledSize = clampWorkbarWidth(size);
+  const controlledSize = Math.min(clampWorkbarWidth(size), availableSize);
 
   useLayoutEffect(() => {
     if (!closeFocusPendingRef.current) return;
@@ -141,7 +169,7 @@ export function SessionWorkbar({
       if (!resize || event.pointerId !== resize.pointerId) return;
       const coordinate = event.clientX;
       const nextSize = resize.startSize + resize.startCoordinate - coordinate;
-      onResize(clampWorkbarWidth(nextSize));
+      onResize(Math.min(availableSize, clampWorkbarWidth(nextSize)));
     };
     const finishResize = (event: globalThis.PointerEvent) => {
       if (resizeRef.current?.pointerId !== event.pointerId) return;
@@ -156,7 +184,7 @@ export function SessionWorkbar({
       window.removeEventListener("pointerup", finishResize);
       window.removeEventListener("pointercancel", finishResize);
     };
-  }, [onResize]);
+  }, [availableSize, onResize]);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -248,7 +276,7 @@ export function SessionWorkbar({
     if (event.key !== decreaseKey && event.key !== increaseKey) return;
     event.preventDefault();
     const nextSize = controlledSize + (event.key === increaseKey ? 1 : -1) * KEYBOARD_RESIZE_STEP;
-    onResize(clampWorkbarWidth(nextSize));
+    onResize(Math.min(availableSize, clampWorkbarWidth(nextSize)));
   };
 
   const handleDragStart = (event: DragEvent<HTMLDivElement>, tabId: string) => {
@@ -275,6 +303,7 @@ export function SessionWorkbar({
 
   return (
     <div
+      ref={shellRef}
       className="session-workbar-shell"
       data-slot="session-workbar-shell"
       data-dock="right"
@@ -310,8 +339,8 @@ export function SessionWorkbar({
           role="separator"
           aria-label={"调整右侧工作栏宽度"}
           aria-orientation="vertical"
-          aria-valuemin={WORKBAR_MIN_WIDTH}
-          aria-valuemax={WORKBAR_MAX_WIDTH}
+          aria-valuemin={Math.min(WORKBAR_MIN_WIDTH, availableSize)}
+          aria-valuemax={availableSize}
           aria-valuenow={controlledSize}
           tabIndex={0}
           onPointerDown={handleResizePointerDown}
@@ -319,123 +348,129 @@ export function SessionWorkbar({
         />
 
         <header className="session-workbar__header">
-          <div className="session-workbar__title-group">
-            <span className="session-workbar__eyebrow">当前任务</span>
-            <strong>右侧工作栏</strong>
-          </div>
-          <div className="session-workbar__actions">
-            <IconButton
-              label={"在右侧打开工具启动器"}
-              ref={launcherButtonRef}
-              type="button"
-              className="session-workbar__icon-button"
-              aria-label={"在右侧打开工具启动器"}
-              onClick={() => onOpenLauncher()}
+          <div className="session-workbar__toolbar">
+            <div
+              className="session-workbar__tab-strip"
+              role="tablist"
+              aria-label={"右侧已打开的任务面板"}
+              onDragOver={(event) => event.preventDefault()}
+              onDrop={(event) => handleDrop(event, tabs.length)}
             >
-              <Plus aria-hidden="true" size={17} />
-            </IconButton>
-            <IconButton
-              label={"折叠右侧任务工作栏"}
-              type="button"
-              className="session-workbar__icon-button"
-              aria-label={"折叠右侧任务工作栏"}
-              aria-controls={rootId}
-              aria-expanded={!collapsed}
-              onClick={handleCollapse}
-            >
-              <PanelRightClose aria-hidden="true" size={17} />
-            </IconButton>
+              {tabs.map((tab, index) => {
+                const selected = tab.id === selectedTabId;
+                return (
+                  <div
+                    key={tab.id}
+                    className="session-workbar__tab-item"
+                    data-slot="session-workbar-tab-item"
+                    data-state={selected ? "active" : "inactive"}
+                    data-preview={tab.preview || undefined}
+                    data-pinned={tab.pinned || undefined}
+                    data-drop-target={dropTargetId === tab.id || undefined}
+                    draggable={tabs.length > 1}
+                    onContextMenu={(event) => {
+                      event.preventDefault();
+                      setContextMenu({ tabId: tab.id, x: event.clientX, y: event.clientY });
+                    }}
+                    onDoubleClick={() => {
+                      if (tab.preview) onPinPreview(tab.id);
+                    }}
+                    onDragStart={(event) => handleDragStart(event, tab.id)}
+                    onDragEnd={resetDrag}
+                    onDragOver={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      event.dataTransfer.dropEffect = "move";
+                      setDropTargetId(tab.id);
+                    }}
+                    onDragLeave={() =>
+                      setDropTargetId((current) => (current === tab.id ? null : current))
+                    }
+                    onDrop={(event) => {
+                      event.stopPropagation();
+                      handleDrop(event, index);
+                    }}
+                  >
+                    <GripVertical
+                      className="session-workbar__drag-mark"
+                      aria-hidden="true"
+                      size={13}
+                    />
+                    <Button
+                      variant="quiet"
+                      ref={(node) => {
+                        if (node) tabRefs.current.set(tab.id, node);
+                        else tabRefs.current.delete(tab.id);
+                      }}
+                      id={tabDomId(rootId, tab.id)}
+                      type="button"
+                      className="session-workbar__tab"
+                      role="tab"
+                      aria-selected={selected}
+                      aria-controls={panelDomId(rootId, tab.id)}
+                      aria-keyshortcuts="Alt+ArrowLeft Alt+ArrowRight Shift+F10"
+                      tabIndex={selected ? 0 : -1}
+                      data-kind={tab.kind}
+                      onClick={() => onSelect(tab.id)}
+                      onKeyDown={(event) => handleTabKeyDown(event, index)}
+                    >
+                      <span className="session-workbar__tab-label">{tab.label}</span>
+                      {tab.preview && (
+                        <span className="session-workbar__preview-dot" aria-label="预览" />
+                      )}
+                      {tab.badge !== undefined && (
+                        <span
+                          className="session-workbar__badge"
+                          aria-label={`${tab.badge} 条待处理`}
+                        >
+                          {tab.badge}
+                        </span>
+                      )}
+                    </Button>
+                    {tab.closable && (
+                      <IconButton
+                        label={`关闭“${tab.label}”`}
+                        type="button"
+                        className="session-workbar__close"
+                        aria-label={`关闭“${tab.label}”`}
+                        onClick={() => handleClose(tab.id)}
+                      >
+                        <X aria-hidden="true" size={13} />
+                      </IconButton>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            <div className="session-workbar__actions">
+              <IconButton
+                label="新建面板"
+                ref={launcherButtonRef}
+                type="button"
+                className="session-workbar__icon-button"
+                aria-label="新建面板"
+                aria-expanded={Boolean(launcher)}
+                onClick={() => onOpenLauncher()}
+              >
+                <Plus aria-hidden="true" size={17} />
+              </IconButton>
+              <IconButton
+                label="收起右侧面板"
+                type="button"
+                className="session-workbar__icon-button"
+                aria-label="收起右侧面板"
+                aria-controls={rootId}
+                aria-expanded={!collapsed}
+                onClick={handleCollapse}
+              >
+                <PanelRightClose aria-hidden="true" size={17} />
+              </IconButton>
+            </div>
           </div>
+          {notice}
         </header>
 
         {launcher}
-
-        <div
-          className="session-workbar__tab-strip"
-          role="tablist"
-          aria-label={"右侧已打开的任务面板"}
-          onDragOver={(event) => event.preventDefault()}
-          onDrop={(event) => handleDrop(event, tabs.length)}
-        >
-          {tabs.map((tab, index) => {
-            const selected = tab.id === selectedTabId;
-            return (
-              <div
-                key={tab.id}
-                className="session-workbar__tab-item"
-                data-slot="session-workbar-tab-item"
-                data-state={selected ? "active" : "inactive"}
-                data-preview={tab.preview || undefined}
-                data-pinned={tab.pinned || undefined}
-                data-drop-target={dropTargetId === tab.id || undefined}
-                draggable={tabs.length > 1}
-                onContextMenu={(event) => {
-                  event.preventDefault();
-                  setContextMenu({ tabId: tab.id, x: event.clientX, y: event.clientY });
-                }}
-                onDoubleClick={() => {
-                  if (tab.preview) onPinPreview(tab.id);
-                }}
-                onDragStart={(event) => handleDragStart(event, tab.id)}
-                onDragEnd={resetDrag}
-                onDragOver={(event) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  event.dataTransfer.dropEffect = "move";
-                  setDropTargetId(tab.id);
-                }}
-                onDragLeave={() =>
-                  setDropTargetId((current) => (current === tab.id ? null : current))
-                }
-                onDrop={(event) => {
-                  event.stopPropagation();
-                  handleDrop(event, index);
-                }}
-              >
-                <GripVertical className="session-workbar__drag-mark" aria-hidden="true" size={13} />
-                <Button
-                  variant="quiet"
-                  ref={(node) => {
-                    if (node) tabRefs.current.set(tab.id, node);
-                    else tabRefs.current.delete(tab.id);
-                  }}
-                  id={tabDomId(rootId, tab.id)}
-                  type="button"
-                  className="session-workbar__tab"
-                  role="tab"
-                  aria-selected={selected}
-                  aria-controls={panelDomId(rootId, tab.id)}
-                  aria-keyshortcuts="Alt+ArrowLeft Alt+ArrowRight Shift+F10"
-                  tabIndex={selected ? 0 : -1}
-                  data-kind={tab.kind}
-                  onClick={() => onSelect(tab.id)}
-                  onKeyDown={(event) => handleTabKeyDown(event, index)}
-                >
-                  <span className="session-workbar__tab-label">{tab.label}</span>
-                  {tab.preview && (
-                    <span className="session-workbar__preview-dot" aria-label="预览" />
-                  )}
-                  {tab.badge !== undefined && (
-                    <span className="session-workbar__badge" aria-label={`${tab.badge} 条待处理`}>
-                      {tab.badge}
-                    </span>
-                  )}
-                </Button>
-                {tab.closable && (
-                  <IconButton
-                    label={`关闭“${tab.label}”`}
-                    type="button"
-                    className="session-workbar__close"
-                    aria-label={`关闭“${tab.label}”`}
-                    onClick={() => handleClose(tab.id)}
-                  >
-                    <X aria-hidden="true" size={13} />
-                  </IconButton>
-                )}
-              </div>
-            );
-          })}
-        </div>
 
         <div className="session-workbar__panels">
           {tabs.map((tab) => {
@@ -547,6 +582,7 @@ export function SessionWorkbarLayout({
   enabled = true,
   showRestoreButton = true,
   launcher,
+  notice,
   presentTab,
   renderPanel,
   onAction,
@@ -573,6 +609,7 @@ export function SessionWorkbarLayout({
           showRestoreButton={showRestoreButton}
           size={state.width}
           launcher={launcher}
+          notice={notice}
           renderPanel={(tab) => {
             const source = state.tabs.find((candidate) => candidate.id === tab.id);
             return source ? renderPanel(source) : null;
