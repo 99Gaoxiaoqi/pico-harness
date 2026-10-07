@@ -503,6 +503,64 @@ test("WebView再次ready恢复完整尾部，显示订阅使用独立lease且旧
   );
 });
 
+test("detach早于挂接响应时释放迟到旧lease，保留新显示订阅", async (t) => {
+  const late = deferred<ReturnType<typeof snapshot>>();
+  const leases = new Set<unknown>();
+  let attaches = 0;
+  const f = fixture(async (method, params) => {
+    if (method === "terminal.attach") {
+      const result = ++attaches === 1 ? await late.promise : snapshot(2, "current display");
+      leases.add(params.streamId);
+      return result;
+    }
+    if (method === "terminal.detach") leases.delete(params.streamId);
+    return {};
+  });
+  t.after(() => f.screen.dispose());
+  await f.mount();
+  const oldStream = f.calls.find((call) => call.method === "terminal.attach")!.params.streamId;
+  f.foreground("background");
+  f.render();
+  assert.equal(
+    f.calls.filter(
+      (call) => call.method === "terminal.detach" && call.params.streamId === oldStream,
+    ).length,
+    1,
+  );
+  assert.equal(leases.has(oldStream), false, "早期detach尚无已登记显示scope");
+  f.foreground("active");
+  f.render();
+  await settleScreen();
+  f.render();
+  const newStream = f.calls.filter((call) => call.method === "terminal.attach").at(-1)!.params
+    .streamId;
+  assert.notEqual(newStream, oldStream);
+  late.resolve(snapshot(1, "late display must not appear", "epoch-late"));
+  await settleScreen();
+  f.render();
+  const detach = f.calls.filter(
+    (call) => call.method === "terminal.detach" && call.params.streamId === oldStream,
+  );
+  assert.equal(detach.length, 2);
+  assert.equal(detach[1]!.params.terminalId, "terminal-a");
+  assert.equal(detach[1]!.params.resourceEpoch, "epoch-late");
+  assert.deepEqual([...leases], [newStream]);
+  assert.equal(
+    f.messages.some(
+      (message) => message.type === "output" && message.data === "late display must not appear",
+    ),
+    false,
+  );
+  f.emit(3, { data: "new display still live" });
+  await settleScreen();
+  assert.ok(
+    f.messages.some(
+      (message) => message.type === "output" && message.data === "new display still live",
+    ),
+  );
+  assert.equal(f.errors.length, 0);
+});
+
 test("终端WebView使用应用色板，主题热更新保留会话，写入回调串行且队列有界", () => {
   const sent: Record<string, unknown>[] = [];
   const writes: { data: string; callback: () => void }[] = [];

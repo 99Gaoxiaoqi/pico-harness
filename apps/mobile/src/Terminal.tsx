@@ -213,7 +213,17 @@ export function TerminalPanel({ sessionId }: { sessionId: string }) {
             ...(cursor ? { afterSequence: cursor.sequence } : {}),
             maxBytes: 32 * 1024,
           });
-          if (!valid()) return;
+          if (!valid()) {
+            await pico
+              .request("terminal.detach", {
+                sessionId,
+                terminalId: result.terminal.terminalId,
+                resourceEpoch: result.resourceEpoch,
+                streamId,
+              })
+              .catch(() => undefined);
+            return;
+          }
           if (display !== displayGeneration.current) {
             position.current = undefined;
             requested = true;
