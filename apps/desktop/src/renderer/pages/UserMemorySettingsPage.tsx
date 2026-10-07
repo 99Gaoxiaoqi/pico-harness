@@ -1,29 +1,22 @@
 import { CheckboxField } from "../ui-controls.js";
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import type { RuntimeMemorySettings } from "@pico/protocol";
 import { Button, InlineNotice } from "../components.js";
 import { useRuntime } from "../runtime-context.js";
 import { workspaceDisplayName, workspaceHref } from "../workspace-session.js";
 
 export function UserMemorySettingsPage() {
   const { data, actions } = useRuntime();
-  const [settings, setSettings] = useState<RuntimeMemorySettings>();
+  const settings = data.memory.settings;
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const [refresh, setRefresh] = useState(0);
   useEffect(() => {
     let cancelled = false;
-    setSettings(undefined);
     setError("");
-    void actions.loadUserMemorySettings().then(
-      (value) => {
-        if (!cancelled) setSettings(value);
-      },
-      () => {
-        if (!cancelled) setError("无法读取用户级记忆设置，请重试。");
-      },
-    );
+    void actions.loadUserMemorySettings().catch(() => {
+      if (!cancelled) setError("无法读取用户级记忆设置，请重试。");
+    });
     return () => {
       cancelled = true;
     };
@@ -65,11 +58,9 @@ export function UserMemorySettingsPage() {
                     setSaving(true);
                     setError("");
                     try {
-                      setSettings(
-                        await actions.updateUserMemorySettings(settings.version, {
-                          [key]: checked,
-                        }),
-                      );
+                      await actions.updateUserMemorySettings(settings.version, {
+                        [key]: checked,
+                      });
                     } catch {
                       setError("保存失败或设置已被其他窗口修改，请刷新后重试。");
                     } finally {

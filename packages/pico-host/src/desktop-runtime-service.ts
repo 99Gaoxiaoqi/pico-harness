@@ -4937,6 +4937,20 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private publishMemoryNotification<
     Topic extends Extract<RuntimeNotificationTopic, `memory.${string}`>,
   >(workspacePath: string, topic: Topic, payload: RuntimeNotificationMap[Topic]): void {
+    if (
+      topic === "memory.changed" &&
+      (payload as RuntimeNotificationMap["memory.changed"]).entityType === "settings"
+    ) {
+      void this.publishUserMemorySettingsUpdated(
+        payload as RuntimeNotificationMap["memory.changed"],
+      ).catch((error) => {
+        logger.warn(
+          { error: errorMessage(error) },
+          "User memory settings notification unavailable",
+        );
+      });
+      return;
+    }
     const base = {
       scope: { workspacePath },
       resourceVersion: this.nextResourceVersion(),
@@ -4959,6 +4973,29 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         payload: payload as RuntimeNotificationMap["memory.deleted"],
       }),
     );
+  }
+
+  private async publishUserMemorySettingsUpdated(
+    payload: RuntimeNotificationMap["memory.changed"],
+  ): Promise<void> {
+    for (const workspacePath of await this.registrationStore.list()) {
+      try {
+        this.publish(
+          createRuntimeNotification({
+            topic: "memory.changed",
+            scope: { workspacePath },
+            resourceVersion: this.nextResourceVersion(),
+            at: this.now(),
+            payload,
+          }),
+        );
+      } catch (error) {
+        logger.warn(
+          { workspacePath, error: errorMessage(error) },
+          "User memory settings notification unavailable",
+        );
+      }
+    }
   }
 
   private async requireTrustedWorkspace(workspacePath: string): Promise<string> {

@@ -122,6 +122,13 @@ export function isMemoryNotificationTopic(topic: string): boolean {
   return topic === "memory.changed" || topic === "memory.deleted";
 }
 
+function latestUserMemorySettings(
+  current: RuntimeMemorySettings | undefined,
+  incoming: RuntimeMemorySettings | undefined,
+): RuntimeMemorySettings | undefined {
+  return current && (!incoming || current.version > incoming.version) ? current : incoming;
+}
+
 export function shouldBatchHydrateRuntimeNotification(topic: string): boolean {
   return (
     topic === "plan.updated" ||
@@ -905,6 +912,7 @@ export function useRuntimeStore(): RuntimeStore {
           workspaces,
           sessions,
           runs,
+          memory: reset ? { ...base.memory, settings: current.memory.settings } : base.memory,
           providerConfig: {
             ...base.providerConfig,
             supported: runtimeCapabilitiesRef.current.has(SHARED_CONFIG_CAPABILITY),
@@ -1105,6 +1113,26 @@ export function useRuntimeStore(): RuntimeStore {
     [loadUserCapabilities],
   );
 
+  const applyUserMemorySettings = useCallback((settings: RuntimeMemorySettings) => {
+    setData((current) => ({
+      ...current,
+      memory: {
+        ...current.memory,
+        settings: latestUserMemorySettings(current.memory.settings, settings),
+      },
+    }));
+  }, []);
+
+  const loadUserMemorySettings = useCallback(
+    async (bridge: DesktopBridge): Promise<RuntimeMemorySettings> => {
+      if (preview && dataRef.current.memory.settings) return dataRef.current.memory.settings;
+      const { settings } = await invoke(bridge, "memory.settings.get", {});
+      applyUserMemorySettings(settings);
+      return settings;
+    },
+    [applyUserMemorySettings, preview],
+  );
+
   const loadMemory = useCallback(
     async (bridge: DesktopBridge, workspacePath: string) => {
       const generation = memoryLoadGenerationRef.current + 1;
@@ -1118,6 +1146,7 @@ export function useRuntimeStore(): RuntimeStore {
           memory: {
             workspacePath,
             items: [],
+            settings: current.memory.settings,
             status: "degraded",
             error: "当前 Runtime 未提供工作区记忆能力。请完整重启 Pico 后重试。",
           },
@@ -1125,7 +1154,16 @@ export function useRuntimeStore(): RuntimeStore {
         return;
       }
       if (preview) {
-        setData((current) => ({ ...current, memory: previewData.memory }));
+        setData((current) => ({
+          ...current,
+          memory: {
+            ...previewData.memory,
+            settings: latestUserMemorySettings(
+              current.memory.settings,
+              previewData.memory.settings,
+            ),
+          },
+        }));
         return;
       }
       setData((current) => ({
@@ -1151,7 +1189,7 @@ export function useRuntimeStore(): RuntimeStore {
             workspacePath,
             items: itemsResult.items,
             pageInfo: itemsResult.pageInfo,
-            settings: settingsResult.settings,
+            settings: latestUserMemorySettings(current.memory.settings, settingsResult.settings),
             status: "ready",
           },
         }));
@@ -1245,7 +1283,7 @@ export function useRuntimeStore(): RuntimeStore {
             memory:
               trusted && !switchingWorkspace
                 ? current.memory
-                : { workspacePath, items: [], status: "idle" },
+                : { workspacePath, items: [], settings: current.memory.settings, status: "idle" },
             ...(switchingWorkspace
               ? {
                   timeline: [],
@@ -1551,6 +1589,9 @@ export function useRuntimeStore(): RuntimeStore {
             loadUserCapabilities(bridge),
             loadGlobalProviderConfig(bridge),
             loadDesktopPreferences(bridge),
+            runtimeCapabilitiesRef.current.has(WORKSPACE_MEMORY_CAPABILITY)
+              ? loadUserMemorySettings(bridge)
+              : undefined,
           ]),
         )
         .then(() =>
@@ -1569,6 +1610,7 @@ export function useRuntimeStore(): RuntimeStore {
     loadDesktopPreferences,
     loadGlobalProviderConfig,
     loadUserCapabilities,
+    loadUserMemorySettings,
     loadWorkspace,
     loadWorkspaceIndex,
     preview,
@@ -1646,7 +1688,11 @@ export function useRuntimeStore(): RuntimeStore {
             : { ...current, providerRetries };
         });
       } else if (isMemoryNotificationTopic(topic)) {
-        scheduleMemoryRefresh();
+        if (topic === "memory.changed" && payload.entityType === "settings") {
+          void loadUserMemorySettings(bridge).catch(reportFailure);
+        } else {
+          scheduleMemoryRefresh();
+        }
       } else if (topic === "approval.requested") {
         // wire 语义读取经 @pico/protocol parseApprovalRequestedPayload（与 TUI
         // 客户端同源；planId 不回退 approvalId 的兜底语义由此回流）。
@@ -1851,6 +1897,7 @@ export function useRuntimeStore(): RuntimeStore {
     loadMemory,
     loadScopedCapabilities,
     loadUserCapabilities,
+    loadUserMemorySettings,
     loadWorkspace,
     preview,
     reportFailure,
@@ -2015,7 +2062,10 @@ export function useRuntimeStore(): RuntimeStore {
           if (!result.value) return;
           if (preview) {
             selectedWorkspacePath = result.value;
-            setData(previewData);
+            setData((current) => ({
+              ...previewData,
+              memory: { ...previewData.memory, settings: current.memory.settings },
+            }));
             return;
           }
           const registeredValue = await invoke(bridge, "workspace.register", {
@@ -2053,7 +2103,10 @@ export function useRuntimeStore(): RuntimeStore {
           await perform("ensure-temporary-workspace", async (bridge) => {
             if (preview) {
               temporaryWorkspacePath = previewData.workspacePath;
-              setData(previewData);
+              setData((current) => ({
+                ...previewData,
+                memory: { ...previewData.memory, settings: current.memory.settings },
+              }));
               return;
             }
             const status = await invoke(bridge, "workspace.temporary.ensure", {});
@@ -2089,7 +2142,12 @@ export function useRuntimeStore(): RuntimeStore {
               changes: [],
               changeFingerprint: undefined,
               modelRoutes: parseModelRoutes({ providers: current.providerConfig.providers }),
-              memory: { workspacePath: status.workspacePath, items: [], status: "idle" },
+              memory: {
+                workspacePath: status.workspacePath,
+                items: [],
+                settings: current.memory.settings,
+                status: "idle",
+              },
             }));
           });
           return temporaryWorkspacePath;
@@ -2098,7 +2156,10 @@ export function useRuntimeStore(): RuntimeStore {
       async selectWorkspace(workspacePath) {
         if (!workspacePath) return;
         if (preview) {
-          setData(previewData);
+          setData((current) => ({
+            ...previewData,
+            memory: { ...previewData.memory, settings: current.memory.settings },
+          }));
           return;
         }
         await perform("select-workspace", async (bridge) => {
@@ -3839,13 +3900,7 @@ export function useRuntimeStore(): RuntimeStore {
               version: settings.version + 1,
             };
             updated = nextSettings;
-            setData((current) => ({
-              ...current,
-              memory: {
-                ...current.memory,
-                settings: nextSettings,
-              },
-            }));
+            applyUserMemorySettings(nextSettings);
           } else {
             const result = await invoke(bridge, "memory.settings.update", {
               workspacePath,
@@ -3854,6 +3909,7 @@ export function useRuntimeStore(): RuntimeStore {
               ...patch,
             });
             updated = result.settings;
+            applyUserMemorySettings(result.settings);
             await loadMemory(bridge, workspacePath);
           }
           setMessage("记忆设置已更新。");
@@ -3861,23 +3917,34 @@ export function useRuntimeStore(): RuntimeStore {
         return updated;
       },
       async loadUserMemorySettings() {
+        if (preview && dataRef.current.memory.settings) return dataRef.current.memory.settings;
         const bridge = getBridge();
         if (!bridge) throw new Error("本地 Runtime 未连接");
-        return (await invoke(bridge, "memory.settings.get", {})).settings;
+        return loadUserMemorySettings(bridge);
       },
       async updateUserMemorySettings(expectedVersion, patch) {
+        if (preview) {
+          const settings = dataRef.current.memory.settings;
+          if (!settings || settings.version !== expectedVersion)
+            throw new RuntimeInvocationError("CONFLICT", "记忆设置已变化，请重试。", false);
+          const next = { ...settings, ...patch, version: settings.version + 1 };
+          applyUserMemorySettings(next);
+          return next;
+        }
         const bridge = getBridge();
         if (!bridge) throw new Error("本地 Runtime 未连接");
-        const result = await invoke(bridge, "memory.settings.update", {
-          expectedVersion,
-          idempotencyKey: crypto.randomUUID(),
-          ...patch,
-        });
-        setData((current) => ({
-          ...current,
-          memory: { ...current.memory, settings: result.settings },
-        }));
-        return result.settings;
+        try {
+          const result = await invoke(bridge, "memory.settings.update", {
+            expectedVersion,
+            idempotencyKey: crypto.randomUUID(),
+            ...patch,
+          });
+          applyUserMemorySettings(result.settings);
+          return result.settings;
+        } catch (error) {
+          if (isMemoryConflict(error)) await loadUserMemorySettings(bridge);
+          throw error;
+        }
       },
       async setLaunchAtLogin(enabled) {
         await perform("launch-at-login", async (bridge) => {
@@ -3983,10 +4050,12 @@ export function useRuntimeStore(): RuntimeStore {
       },
     }),
     [
+      applyUserMemorySettings,
       bootstrap,
       loadConversation,
       loadGlobalProviderConfig,
       loadMemory,
+      loadUserMemorySettings,
       loadScopedCapabilities,
       loadWorkspace,
       loadWorkspaceIndex,
