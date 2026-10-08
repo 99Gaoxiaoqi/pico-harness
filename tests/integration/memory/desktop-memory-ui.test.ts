@@ -57,7 +57,7 @@ test("atomic memory page renders saved and archived items, scope, provenance and
   assert.match(html, /知识/);
   assert.match(html, /时间类型/);
   assert.match(html, /对话提取/);
-  assert.match(html, /aria-label="编辑/);
+  assert.match(html, /aria-label="更正/);
   assert.match(html, /aria-label="归档/);
   assert.match(html, /aria-label="恢复/);
   assert.match(html, /aria-label="删除记忆/);
@@ -65,6 +65,9 @@ test("atomic memory page renders saved and archived items, scope, provenance and
   assert.doesNotMatch(html, /自动提取长期信息/);
   assert.doesNotMatch(html, /永久遗忘|待审核|批准|拒绝|自动审核|当前用量|质量优先|滚动 24 小时/);
   assert.equal((html.match(/type="checkbox"/g) ?? []).length, 0);
+  assert.match(html, /召回预览/);
+  assert.match(html, /最近修改时间/);
+  assert.match(html, /记录和修改时间不代表事实开始生效/);
 });
 
 test("atomic memory narrow layout has two keyboard-operated tabs and handles empty and untrusted states", () => {

@@ -1,5 +1,5 @@
 import { TabList, Tab } from "@astryxdesign/core/TabList";
-import { TextAreaField } from "./ui-controls.js";
+import { SelectField, TextAreaField, TextField } from "./ui-controls.js";
 import {
   Archive,
   ArchiveRestore,
@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import type { RuntimeMemoryItem, RuntimeMemoryListItem } from "@pico/protocol";
+import type { RuntimeMemoryItem, RuntimeMemoryListItem, RuntimeResult } from "@pico/protocol";
 import { Button, EmptyState, IconButton, InlineNotice } from "./components.js";
 import type { RuntimeStore } from "./runtime.js";
 
@@ -31,9 +31,32 @@ const temporalLabels = {
   undated: "未注明时间",
   point: "时间点",
   interval: "时间区间",
-  open_ended: "持续有效",
+  open_ended: "已知起点，未注明结束",
 };
 type MemoryListItem = RuntimeMemoryItem | RuntimeMemoryListItem;
+type TimeChoice = "preserve" | "clear" | "point" | "interval" | "open_ended";
+interface MemoryEditor {
+  readonly id: string;
+  readonly version: number;
+  readonly workspacePath: string;
+  readonly content: string;
+  readonly statementType: RuntimeMemoryItem["statementType"];
+  readonly timeChoice: TimeChoice;
+  readonly start: string;
+  readonly end: string;
+}
+const sourceLabels = {
+  "user-evidence": "用户原始陈述",
+  manual: "手动内容，无会话引用",
+  "assistant-note": "用户保留的助手笔记（未经独立核实）",
+};
+const matchLabels = { key: "关键词匹配", content: "正文匹配", preference: "常驻偏好" };
+const diagnosticLabels = {
+  selected: "已选入",
+  duplicate: "重复展示已省略",
+  budget: "超过 Token 预算",
+  item_limit: "超过条数限制",
+};
 
 export function nextMemoryTabIndex(current: number, key: string, count = panels.length): number {
   if (key === "Home") return 0;
@@ -71,7 +94,27 @@ export function MemoryPage({
   const memory = data.memory;
   const narrow = useNarrowLayout(forceNarrow);
   const [activePanel, setActivePanel] = useState<PanelId>("saved");
-  const [editor, setEditor] = useState<{ id: string; content: string }>();
+  const [editor, setEditor] = useState<MemoryEditor>();
+  const [editorError, setEditorError] = useState("");
+  const [query, setQuery] = useState("");
+  const [preview, setPreview] = useState<{
+    key: string;
+    query: string;
+    result: RuntimeResult<"memory.context.preview">;
+  }>();
+  const [previewError, setPreviewError] = useState("");
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const previewSequence = useRef(0);
+  const contextKey = JSON.stringify([
+    data.workspacePath,
+    data.trusted,
+    memory.settings?.version,
+    memory.settings?.enabled,
+    memory.settings?.recallEnabled,
+    memory.pageInfo?.revision,
+  ]);
+  const contextKeyRef = useRef(contextKey);
+  contextKeyRef.current = contextKey;
   const [announcement, setAnnouncement] = useState("");
   const [draft, setDraft] = useState<{ workspacePath: string; content: string }>();
   const [creationNotice, setCreationNotice] = useState("");
@@ -85,8 +128,47 @@ export function MemoryPage({
   useEffect(() => {
     returnFocusRef.current = false;
     setDraft(undefined);
+    setEditor(undefined);
+    setEditorError("");
+    setQuery("");
     setCreationNotice("");
   }, [data.workspacePath]);
+  useEffect(() => {
+    previewSequence.current += 1;
+    setPreview(undefined);
+    setPreviewError("");
+    setPreviewLoading(false);
+    return () => {
+      previewSequence.current += 1;
+    };
+  }, [contextKey]);
+  const clearPreview = () => {
+    previewSequence.current += 1;
+    setPreview(undefined);
+    setPreviewError("");
+    setPreviewLoading(false);
+  };
+  const queryPreview = async () => {
+    const submitted = query.trim();
+    if (!submitted || !data.workspacePath || !data.trusted) return;
+    const sequence = ++previewSequence.current;
+    const key = contextKey;
+    setPreview(undefined);
+    setPreviewError("");
+    setPreviewLoading(true);
+    try {
+      const result = await actions.queryMemoryContext(submitted);
+      if (sequence !== previewSequence.current || key !== contextKeyRef.current) return;
+      if (result) setPreview({ key, query: submitted, result });
+      else setPreviewError("无法读取召回预览，请重试。");
+    } catch {
+      if (sequence === previewSequence.current && key === contextKeyRef.current)
+        setPreviewError("无法读取召回预览，请重试。");
+    } finally {
+      if (sequence === previewSequence.current && key === contextKeyRef.current)
+        setPreviewLoading(false);
+    }
+  };
   useEffect(() => {
     if (adding) {
       returnFocusRef.current = true;
@@ -116,6 +198,7 @@ export function MemoryPage({
       setActivePanel("saved");
       setCreationNotice("记忆已保存到当前工作区。");
       setAnnouncement("记忆已保存到当前工作区。");
+      clearPreview();
     } finally {
       creatingRef.current = false;
     }
@@ -135,16 +218,58 @@ export function MemoryPage({
 
   const changeState = async (item: MemoryListItem) => {
     const lifecycleState = item.lifecycleState === "active" ? "archived" : "active";
-    if (await actions.updateMemoryItem(item.itemId, item.version, { lifecycleState }))
+    if (await actions.updateMemoryItem(item.itemId, item.version, { lifecycleState })) {
       setAnnouncement(lifecycleState === "active" ? "记忆已恢复。" : "记忆已归档，不再参与召回。");
+      clearPreview();
+    }
   };
   const save = async (item: MemoryListItem) => {
-    if (!editor || editor.id !== item.itemId || !editor.content.trim()) return;
-    if (
-      await actions.updateMemoryItem(item.itemId, item.version, { content: editor.content.trim() })
-    ) {
-      setEditor(undefined);
-      setAnnouncement("记忆已保存。");
+    if (!editor || editor.id !== item.itemId || !editor.content.trim() || busy) return;
+    const submitted = editor;
+    if (submitted.workspacePath !== data.workspacePath) return;
+    setEditorError("");
+    const patch: Parameters<typeof actions.updateMemoryItem>[2] = {
+      content: submitted.content.trim(),
+      statementType: submitted.statementType,
+    };
+    if (submitted.timeChoice === "clear") {
+      Object.assign(patch, { temporalType: "undated", eventStartedAt: null, eventEndedAt: null });
+    } else if (submitted.timeChoice !== "preserve") {
+      const start = parseEventTime(submitted.start);
+      const end =
+        submitted.timeChoice === "open_ended" || !submitted.end.trim()
+          ? null
+          : parseEventTime(submitted.end);
+      if (
+        start === null ||
+        (submitted.timeChoice !== "open_ended" && submitted.end.trim() && end === null) ||
+        (end !== null && end <= start) ||
+        (submitted.timeChoice === "interval" && end === null)
+      ) {
+        setEditorError(
+          "请填写有效的事件开始时间；结束时间必须晚于开始时间，时间区间必须有结束时间。",
+        );
+        return;
+      }
+      Object.assign(patch, {
+        temporalType: submitted.timeChoice,
+        eventStartedAt: start,
+        eventEndedAt: submitted.timeChoice === "open_ended" ? null : end,
+      });
+    }
+    try {
+      const updated = await actions.updateMemoryItem(submitted.id, submitted.version, patch);
+      if (workspaceRef.current !== submitted.workspacePath) return;
+      if (!updated) {
+        setEditorError("更正未保存，请检查内容或刷新后重试。输入已保留。");
+        return;
+      }
+      setEditor((current) => (current === submitted ? undefined : current));
+      setAnnouncement("记忆已更正。");
+      clearPreview();
+    } catch {
+      if (workspaceRef.current === submitted.workspacePath)
+        setEditorError("更正未保存，请检查内容或刷新后重试。输入已保留。");
     }
   };
   const deleteItem = async (item: MemoryListItem) => {
@@ -158,6 +283,7 @@ export function MemoryPage({
     if (await actions.deleteMemoryItem(item.itemId, item.version)) {
       setEditor(undefined);
       setAnnouncement("记忆已删除。");
+      clearPreview();
     }
   };
   const renderList = (panel: PanelId) =>
@@ -172,6 +298,10 @@ export function MemoryPage({
             </header>
             {editor?.id === item.itemId ? (
               <div className="memory-editor">
+                <p>
+                  更正这条记忆。事件时间默认保留，保存后内容由你确认，旧会话引用不再作为更正内容的来源。
+                </p>
+                <p>如果情况已经变化，请添加新记忆，必要时单独归档旧条目。</p>
                 <div className="settings-field">
                   记忆内容
                   <TextAreaField
@@ -179,11 +309,74 @@ export function MemoryPage({
                     rows={5}
                     maxLength={2000}
                     value={editor.content}
-                    onChange={(event) =>
-                      setEditor({ id: item.itemId, content: event.target.value })
+                    onChange={(event) => setEditor({ ...editor, content: event.target.value })}
+                  />
+                </div>
+                <div className="settings-field">
+                  陈述类型
+                  <SelectField
+                    label="更正后的陈述类型"
+                    value={editor.statementType}
+                    disabled={Boolean(busy)}
+                    options={Object.entries(statementLabels).map(([value, label]) => ({
+                      value,
+                      label,
+                    }))}
+                    onValueChange={(value) =>
+                      setEditor({
+                        ...editor,
+                        statementType: value as MemoryEditor["statementType"],
+                      })
                     }
                   />
                 </div>
+                <div className="settings-field">
+                  事件时间
+                  <SelectField
+                    label="更正事件时间"
+                    value={editor.timeChoice}
+                    disabled={Boolean(busy)}
+                    options={[
+                      { value: "preserve", label: "保留原事件时间" },
+                      { value: "clear", label: "清除事件时间（未注明）" },
+                      { value: "point", label: "指定时间点" },
+                      { value: "interval", label: "指定时间区间" },
+                      { value: "open_ended", label: "指定起点，未注明结束" },
+                    ]}
+                    onValueChange={(value) =>
+                      setEditor({ ...editor, timeChoice: value as TimeChoice })
+                    }
+                  />
+                </div>
+                {editor.timeChoice !== "preserve" && editor.timeChoice !== "clear" && (
+                  <>
+                    <div className="settings-field">
+                      事件开始时间（本地时间）
+                      <TextField
+                        label="更正事件开始时间"
+                        type="datetime-local"
+                        step="0.001"
+                        value={editor.start}
+                        disabled={Boolean(busy)}
+                        onValueChange={(start) => setEditor({ ...editor, start })}
+                      />
+                    </div>
+                    {editor.timeChoice !== "open_ended" && (
+                      <div className="settings-field">
+                        事件结束时间（本地时间）{editor.timeChoice === "point" ? "，可留空" : ""}
+                        <TextField
+                          label="更正事件结束时间"
+                          type="datetime-local"
+                          step="0.001"
+                          value={editor.end}
+                          disabled={Boolean(busy)}
+                          onValueChange={(end) => setEditor({ ...editor, end })}
+                        />
+                      </div>
+                    )}
+                  </>
+                )}
+                {editorError && <InlineNotice tone="error">{editorError}</InlineNotice>}
               </div>
             ) : (
               <p>{item.content}</p>
@@ -197,7 +390,7 @@ export function MemoryPage({
                     disabled={Boolean(busy) || !editor.content.trim()}
                     onClick={() => void save(item)}
                   >
-                    保存
+                    保存更正
                   </Button>
                   <Button
                     variant="quiet"
@@ -210,9 +403,22 @@ export function MemoryPage({
               ) : (
                 <>
                   <IconButton
-                    label={`编辑 ${memoryItemLabel(item)}`}
+                    label={`更正 ${memoryItemLabel(item)}`}
                     disabled={Boolean(busy)}
-                    onClick={() => setEditor({ id: item.itemId, content: item.content })}
+                    onClick={() => {
+                      if (!data.workspacePath) return;
+                      setEditorError("");
+                      setEditor({
+                        id: item.itemId,
+                        version: item.version,
+                        workspacePath: data.workspacePath,
+                        content: item.content,
+                        statementType: item.statementType,
+                        timeChoice: "preserve",
+                        start: eventTimeInput(item.eventStartedAt),
+                        end: eventTimeInput(item.eventEndedAt),
+                      });
+                    }}
                   >
                     <Pencil aria-hidden="true" />
                   </IconButton>
@@ -306,6 +512,38 @@ export function MemoryPage({
       ) : (
         <>
           {creationNotice && <InlineNotice tone="success">{creationNotice}</InlineNotice>}
+          <section className="memory-add-form" aria-labelledby="memory-preview-title">
+            <h3 id="memory-preview-title">召回预览</h3>
+            <p>输入一个问题，查看当前策略下会提供给模型的记忆引用。此操作不调用模型。</p>
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                void queryPreview();
+              }}
+            >
+              <div className="settings-field">
+                预览问题
+                <TextField
+                  label="召回预览问题"
+                  type="search"
+                  maxLength={4096}
+                  value={query}
+                  onValueChange={(value) => {
+                    setQuery(value);
+                    clearPreview();
+                  }}
+                />
+              </div>
+              <Button type="submit" disabled={!query.trim() || Boolean(busy)}>
+                {previewLoading ? "正在查询…" : "查询召回"}
+              </Button>
+            </form>
+            {previewError && <InlineNotice tone="error">{previewError}</InlineNotice>}
+            {previewLoading && <p role="status">正在读取召回预览…</p>}
+            {preview?.key === contextKey && (
+              <RecallPreview query={preview.query} result={preview.result} />
+            )}
+          </section>
           {adding && draft && (
             <form
               id="memory-add-form"
@@ -496,8 +734,12 @@ function SourceDetails({ item }: { readonly item: MemoryListItem }) {
             <dd>{temporalLabels[item.temporalType]}</dd>
           </div>
           <div>
-            <dt>记录时间</dt>
+            <dt>{source ? "来源观察时间" : "记录时间"}</dt>
             <dd>{formatTime(item.observedAt)}</dd>
+          </div>
+          <div>
+            <dt>最近修改时间</dt>
+            <dd>{formatTime(item.updatedAt)}</dd>
           </div>
           {item.eventStartedAt !== null && (
             <div>
@@ -513,6 +755,7 @@ function SourceDetails({ item }: { readonly item: MemoryListItem }) {
           )}
         </>
       </dl>
+      <p>记录和修改时间不代表事实开始生效；事件时间仅表示这条信息注明的发生时间。</p>
     </details>
   );
 }
@@ -521,4 +764,69 @@ function memoryItemLabel(item: MemoryListItem): string {
 }
 function formatTime(value: number): string {
   return new Date(value).toLocaleString("zh-CN");
+}
+
+function eventTimeInput(value: number | null): string {
+  if (value === null) return "";
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "";
+  const local = new Date(value - date.getTimezoneOffset() * 60_000);
+  return Number.isFinite(local.getTime()) ? local.toISOString().slice(0, -1) : "";
+}
+
+function parseEventTime(value: string): number | null {
+  if (!value.trim()) return null;
+  const timestamp = new Date(value).getTime();
+  return Number.isSafeInteger(timestamp) && timestamp >= 0 ? timestamp : null;
+}
+
+function RecallPreview({
+  query,
+  result,
+}: {
+  query: string;
+  result: RuntimeResult<"memory.context.preview">;
+}) {
+  return (
+    <div className="memory-preview-result" role="region" aria-label="召回预览结果">
+      <p>问题：{query}</p>
+      <p>
+        选入 {result.budget.usedItems} / {result.budget.maxItems} 条 · {result.budget.usedTokens} /{" "}
+        {result.budget.maxTokens} Token
+        {result.budget.truncated ? " · 部分候选未选入" : ""}
+      </p>
+      {result.references === undefined ? (
+        <p>当前服务未提供实际引用详情，请更新电脑端后重试。</p>
+      ) : result.references.length === 0 ? (
+        <p>当前问题没有选入记忆。相关条目可能未匹配，或记忆/召回已关闭。</p>
+      ) : (
+        <div className="memory-list">
+          {result.references.map((reference) => (
+            <article className="memory-card" key={reference.itemId}>
+              <header className="memory-card__meta">
+                <span>{sourceLabels[reference.source]}</span>
+                <span>{matchLabels[reference.match]}</span>
+              </header>
+              <p>{reference.content}</p>
+              <small>
+                条目：{reference.itemId} · {reference.excerpt ? "原文节选" : "完整引用"} · 字符范围
+                [{reference.range.start}, {reference.range.end}) / {reference.range.total}
+              </small>
+            </article>
+          ))}
+        </div>
+      )}
+      {(result.diagnostics?.length ?? 0) > 0 && (
+        <details className="memory-source">
+          <summary>候选说明</summary>
+          {result.diagnostics?.map((diagnostic) => (
+            <p key={`${diagnostic.itemId}:${diagnostic.reason}`}>
+              {diagnostic.itemId}：{diagnosticLabels[diagnostic.reason]} ·{" "}
+              {matchLabels[diagnostic.match]}
+            </p>
+          ))}
+        </details>
+      )}
+    </div>
+  );
 }
