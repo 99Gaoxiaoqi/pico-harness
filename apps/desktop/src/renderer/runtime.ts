@@ -559,6 +559,8 @@ export interface RuntimeActions {
   refreshMemory(): Promise<void>;
   loadMoreMemory(): Promise<void>;
   createMemoryItem(text: string): Promise<RuntimeMemoryItem | undefined>;
+  queryMemoryContext(query: string): Promise<RuntimeResult<"memory.context.preview"> | undefined>;
+  queryMemoryMetrics(input?: { from?: number; to?: number }): Promise<RuntimeResult<"memory.metrics.get"> | undefined>;
   updateMemoryItem(
     itemId: string,
     expectedVersion: number,
@@ -3818,6 +3820,27 @@ export function useRuntimeStore(): RuntimeStore {
         });
         return created;
       },
+      async queryMemoryContext(query) {
+        const workspacePath = dataRef.current.workspacePath;
+        if (!workspacePath || !dataRef.current.trusted || !query.trim()) return undefined;
+        let result: RuntimeResult<"memory.context.preview"> | undefined;
+        await perform("memory-preview", async (bridge) => {
+          result = preview
+            ? { items: [], budget: { maxItems: 3, maxTokens: 320, usedItems: 0, usedTokens: 0, truncated: false }, block: "", references: [], diagnostics: [] }
+            : await invoke(bridge, "memory.context.preview", { workspacePath, query: query.trim() });
+        });
+        return dataRef.current.workspacePath === workspacePath ? result : undefined;
+      },
+      async queryMemoryMetrics(input = {}) {
+        let result: RuntimeResult<"memory.metrics.get"> | undefined;
+        await perform("memory-metrics", async (bridge) => {
+          const to = input.to ?? Date.now();
+          result = preview
+            ? { metrics: { scope: "user", from: input.from ?? Math.max(0, to - 7 * 86_400_000), to, groups: [], unknownReceiptCount: 0 } }
+            : await invoke(bridge, "memory.metrics.get", input);
+        });
+        return result;
+      },
       async updateMemoryItem(itemId, expectedVersion, patch) {
         const workspacePath = dataRef.current.workspacePath;
         if (!workspacePath || !dataRef.current.trusted) return undefined;
@@ -3834,6 +3857,7 @@ export function useRuntimeStore(): RuntimeStore {
               ...patch,
               version: item.version + 1,
               updatedAt: Date.now(),
+              ...(Object.keys(patch).some((key) => key !== "lifecycleState") ? { origin: "user_requested" as const, sources: [] } : {}),
             };
             const nextItem = updated;
             setData((current) => {

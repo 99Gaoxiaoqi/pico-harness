@@ -7,10 +7,13 @@ import {
   enumArrayParam,
   exactParamShape,
   exactResultShape,
+  nonNegativeIntegerParam,
+  nullableParam,
   oneOfParam,
   positiveIntegerParam,
   resultArray,
   resultBoolean,
+  resultFiniteNumber,
   resultNonNegativeInteger,
   resultNullable,
   resultOneOf,
@@ -95,6 +98,41 @@ export type RuntimeMemoryContextBudget = JsonObject & {
   readonly truncated: boolean;
 };
 
+/** The exact original characters that were shown to the model. Range is zero-based, half-open. */
+export type RuntimeMemoryReference = JsonObject & {
+  readonly itemId: string;
+  readonly content: string;
+  readonly source: "user-evidence" | "manual" | "assistant-note";
+  readonly excerpt: boolean;
+  readonly range: { readonly start: number; readonly end: number; readonly total: number };
+  readonly match: "key" | "content" | "preference";
+};
+
+export type RuntimeMemoryRecallDiagnostic = JsonObject & {
+  readonly itemId: string;
+  readonly reason: "selected" | "duplicate" | "budget" | "item_limit";
+  readonly match: "key" | "content" | "preference";
+};
+
+export type RuntimeMemoryMetricGroup = JsonObject & {
+  readonly trigger: "remember" | "extract" | "compaction";
+  readonly settledCount: number;
+  readonly evaluatedCount: number;
+  readonly createdItemCount: number;
+  readonly modelCallCount: number;
+  readonly emptyCount: number;
+  readonly emptyRate: number | null;
+  readonly durationMs: number;
+};
+
+export type RuntimeMemoryMetrics = JsonObject & {
+  readonly scope: "user";
+  readonly from: number;
+  readonly to: number;
+  readonly groups: readonly RuntimeMemoryMetricGroup[];
+  readonly unknownReceiptCount: number;
+};
+
 const memoryItemKindParam = oneOfParam([
   "preference",
   "identity",
@@ -118,9 +156,13 @@ function memoryUpdateParams(value: Record<string, unknown>): void {
       content: boundedNonEmptyStringParam(32_000),
       kind: memoryItemKindParam,
       lifecycleState: memoryLifecycleStateParam,
+      statementType: oneOfParam(["fact", "plan", "prediction"]),
+      temporalType: oneOfParam(["undated", "point", "interval", "open_ended"]),
+      eventStartedAt: nullableParam(nonNegativeIntegerParam),
+      eventEndedAt: nullableParam(nonNegativeIntegerParam),
     },
   )(value);
-  if (!["content", "kind", "lifecycleState"].some((key) => Object.hasOwn(value, key))) {
+  if (!["content", "kind", "lifecycleState", "statementType", "temporalType", "eventStartedAt", "eventEndedAt"].some((key) => Object.hasOwn(value, key))) {
     throw invalidParams("memory.update 至少需要一个更新字段");
   }
 }
@@ -214,6 +256,36 @@ const memorySettingsResult = exactResultShape({
   version: resultNonNegativeInteger,
 });
 
+const memoryReferenceResult = exactResultShape({
+  itemId: resultString,
+  content: resultString,
+  source: resultOneOf(["user-evidence", "manual", "assistant-note"]),
+  excerpt: resultBoolean,
+  range: exactResultShape({ start: resultNonNegativeInteger, end: resultNonNegativeInteger, total: resultNonNegativeInteger }),
+  match: resultOneOf(["key", "content", "preference"]),
+});
+const memoryDiagnosticResult = exactResultShape({
+  itemId: resultString,
+  reason: resultOneOf(["selected", "duplicate", "budget", "item_limit"]),
+  match: resultOneOf(["key", "content", "preference"]),
+});
+const memoryMetricsResult = exactResultShape({
+  scope: resultOneOf(["user"]),
+  from: resultNonNegativeInteger,
+  to: resultNonNegativeInteger,
+  groups: resultArray(exactResultShape({
+    trigger: resultOneOf(["remember", "extract", "compaction"]),
+    settledCount: resultNonNegativeInteger,
+    evaluatedCount: resultNonNegativeInteger,
+    createdItemCount: resultNonNegativeInteger,
+    modelCallCount: resultNonNegativeInteger,
+    emptyCount: resultNonNegativeInteger,
+    emptyRate: resultNullable(resultFiniteNumber),
+    durationMs: resultFiniteNumber,
+  })),
+  unknownReceiptCount: resultNonNegativeInteger,
+});
+
 export type MemoryMethodMap = {
   readonly "memory.list": {
     readonly params: WorkspaceParams & {
@@ -247,6 +319,10 @@ export type MemoryMethodMap = {
       readonly content?: string;
       readonly kind?: RuntimeMemoryItemKind;
       readonly lifecycleState?: RuntimeMemoryLifecycleState;
+      readonly statementType?: RuntimeMemoryStatementType;
+      readonly temporalType?: RuntimeMemoryTemporalType;
+      readonly eventStartedAt?: number | null;
+      readonly eventEndedAt?: number | null;
     };
     readonly result: { readonly item: RuntimeMemoryItem };
   };
@@ -277,11 +353,19 @@ export type MemoryMethodMap = {
     readonly params: WorkspaceParams & {
       readonly maxItems?: number;
       readonly maxTokens?: number;
+      readonly query?: string;
     };
     readonly result: {
       readonly items: readonly RuntimeMemoryItem[];
       readonly budget: RuntimeMemoryContextBudget;
+      readonly block?: string;
+      readonly references?: readonly RuntimeMemoryReference[];
+      readonly diagnostics?: readonly RuntimeMemoryRecallDiagnostic[];
     };
+  };
+  readonly "memory.metrics.get": {
+    readonly params: { readonly workspacePath?: string; readonly from?: number; readonly to?: number };
+    readonly result: { readonly metrics: RuntimeMemoryMetrics };
   };
 };
 
@@ -306,8 +390,9 @@ export const memoryParamValidators = {
   "memory.settings.update": memorySettingsUpdateParams,
   "memory.context.preview": exactParamShape(
     { workspacePath: stringParam },
-    { maxItems: positiveIntegerParam, maxTokens: positiveIntegerParam },
+    { maxItems: positiveIntegerParam, maxTokens: positiveIntegerParam, query: boundedNonEmptyStringParam(4096) },
   ),
+  "memory.metrics.get": exactParamShape({}, { workspacePath: stringParam, from: nonNegativeIntegerParam, to: nonNegativeIntegerParam }),
 } satisfies Readonly<Record<keyof MemoryMethodMap, RuntimeParamValidator>>;
 
 export const memoryResultValidators = {
@@ -334,5 +419,6 @@ export const memoryResultValidators = {
       usedTokens: resultNonNegativeInteger,
       truncated: resultBoolean,
     }),
-  }),
+  }, { block: resultString, references: resultArray(memoryReferenceResult), diagnostics: resultArray(memoryDiagnosticResult) }),
+  "memory.metrics.get": exactResultShape({ metrics: memoryMetricsResult }),
 } satisfies Readonly<Record<keyof MemoryMethodMap, RuntimeResultRule>>;

@@ -392,6 +392,10 @@ export type MemoryItemPatch = Readonly<{
   kind?: RuntimeMemoryItem["kind"];
   content?: string;
   lifecycleState?: RuntimeMemoryItem["lifecycleState"];
+  statementType?: RuntimeMemoryItem["statementType"];
+  temporalType?: RuntimeMemoryItem["temporalType"];
+  eventStartedAt?: number | null;
+  eventEndedAt?: number | null;
 }>;
 
 export type MemorySettingsPatch = Readonly<{

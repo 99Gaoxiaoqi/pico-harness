@@ -74,6 +74,11 @@ export interface RequestContextFacts {
     readonly phase?: "pre_turn" | "mid_turn";
     readonly estimatedTokens?: number;
   };
+  readonly memory?: {
+    readonly trigger: "remember" | "extract" | "compaction";
+    readonly stage: "proposal" | "localized" | "canonicalize";
+    readonly operationId: string;
+  };
 }
 
 export interface LLMProviderRequestOptions {

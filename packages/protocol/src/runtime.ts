@@ -141,6 +141,10 @@ export type {
   RuntimeMemoryPageInfo,
   RuntimeMemorySettings,
   RuntimeMemoryContextBudget,
+  RuntimeMemoryReference,
+  RuntimeMemoryRecallDiagnostic,
+  RuntimeMemoryMetrics,
+  RuntimeMemoryMetricGroup,
 } from "./runtime/memory.js";
 
 export type {

@@ -28,6 +28,7 @@ import {
   openSync,
 } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { scoreMemoryContent } from "@pico/core/atomic-memory-search";
 import type {
   AtomicMemoryStore,
   AtomicMemorySettings,
@@ -53,6 +54,9 @@ import {
   type MemoryExtractionCursor,
   type MemoryExtractionFailureClass,
   type MemoryExtractionReceipt,
+  type MemoryExtractionSummary,
+  type MemoryExtractionMetrics,
+  type MemoryExtractionMetricGroup,
   type MemoryItem,
   type MemoryItemKey,
   type MemoryItemKeyInput,
@@ -64,6 +68,7 @@ import {
   type MemoryWriteOperationResult,
   type PendingMemoryExtractionFailure,
   type SearchMemoryItemsByKeyRequest,
+  type SearchMemoryItemsByContentRequest,
   type SettleMemoryExtractionFailureRequest,
   type SettleMemoryExtractionFailureResult,
 } from "@pico/core/atomic-memory-contracts";
@@ -464,6 +469,12 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
         ...(noOpReason ? { noOpReason } : {}),
         ...(skipReason ? { skipReason } : {}),
         committedAt,
+        ...(request.summary ? { summary: normalizeExtractionSummary({
+          trigger,
+          createdItemCount: results.length,
+          modelCallCount: request.summary.modelCallCount,
+          durationMs: request.summary.durationMs,
+        }) } : {}),
       };
 
       if (currentCursor) {
@@ -924,6 +935,65 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
         if (!record) throw new Error(`Memory Item ${row.item_id} disappeared during read`);
         return record;
       });
+    });
+  }
+
+  async searchByContent(request: SearchMemoryItemsByContentRequest): Promise<readonly MemoryItemRecord[]> {
+    this.#assertOpen();
+    const workspaceKey = normalizeIdentifier(request.workspaceKey, "workspaceKey");
+    const limit = request.limit ?? MAX_SEARCH_RESULTS;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_SEARCH_RESULTS)
+      throw new Error(`Memory content search limit must be between 1 and ${MAX_SEARCH_RESULTS}`);
+    const signals = {
+      paths: request.paths.map(normalizeSearchTerm),
+      tokens: request.tokens.map(normalizeSearchTerm),
+      cjkBigrams: request.cjkBigrams.map(normalizeSearchTerm),
+    };
+    const count = signals.paths.length + signals.tokens.length + signals.cjkBigrams.length;
+    if (count > MAX_SEARCH_TERMS) throw new Error(`Memory content search accepts at most ${MAX_SEARCH_TERMS} terms`);
+    if (!count) return [];
+    return this.#readSnapshot(() => {
+      const ranked: Array<{ id: string; score: number; updatedAt: number }> = [];
+      const rows = this.#database.prepare(`SELECT item_id, content, updated_at FROM memory_items
+        WHERE lifecycle_state = 'active' AND (scope_type = 'global' OR (scope_type = 'workspace' AND scope_key = ?))`).iterate(workspaceKey);
+      for (const row of rows) {
+        const content = requiredString(row.content, "content").replace(/^用户要求保留的助手笔记（未经独立核实） \[[1-9]\d*\/[1-9]\d*\]：/u, "");
+        const score = scoreMemoryContent(content, signals);
+        if (score > 0) ranked.push({ id: requiredIdentifierString(row.item_id, "item_id"), score, updatedAt: requiredNonNegativeInteger(row.updated_at, "updated_at") });
+      }
+      ranked.sort((a, b) => b.score - a.score || b.updatedAt - a.updatedAt || compareText(a.id, b.id));
+      return ranked.slice(0, limit).map(({ id }) => this.#requireItemRecord(id));
+    });
+  }
+
+  async readExtractionMetrics(input: { from: number; to: number }): Promise<MemoryExtractionMetrics> {
+    this.#assertOpen();
+    const from = normalizeTimestamp(input.from, "from");
+    const to = normalizeTimestamp(input.to, "to");
+    if (from > to) throw new Error("Memory metrics from must not exceed to");
+    return this.#readSnapshot(() => {
+      const groups = new Map<MemoryExtractionSummary["trigger"], {
+        trigger: MemoryExtractionSummary["trigger"]; settledCount: number; evaluatedCount: number;
+        createdItemCount: number; modelCallCount: number; emptyCount: number; durationMs: number;
+      }>();
+      let unknownReceiptCount = 0;
+      for (const row of this.#database.prepare("SELECT * FROM memory_extraction_receipts WHERE committed_at >= ? AND committed_at <= ?").iterate(from, to)) {
+        const receipt = decodeExtractionReceipt(row as unknown as MemoryExtractionReceiptRow);
+        const summary = receipt.summary;
+        if (!summary) { unknownReceiptCount++; continue; }
+        const group = groups.get(summary.trigger) ?? { trigger: summary.trigger, settledCount: 0, evaluatedCount: 0, createdItemCount: 0, modelCallCount: 0, emptyCount: 0, durationMs: 0 };
+        group.settledCount++;
+        group.createdItemCount += summary.createdItemCount;
+        group.modelCallCount += summary.modelCallCount;
+        group.durationMs += summary.durationMs;
+        if (summary.modelCallCount > 0 && receipt.status !== "skipped" && receipt.status !== "discarded") {
+          group.evaluatedCount++;
+          if (summary.createdItemCount === 0) group.emptyCount++;
+        }
+        groups.set(summary.trigger, group);
+      }
+      const projected: MemoryExtractionMetricGroup[] = [...groups.values()].map((group) => ({ ...group, emptyRate: group.evaluatedCount ? group.emptyCount / group.evaluatedCount : null }));
+      return { scope: "user", from, to, groups: projected.sort((a, b) => compareText(a.trigger, b.trigger)), unknownReceiptCount };
     });
   }
 
@@ -2115,6 +2185,20 @@ function decodePendingExtractionFailure(
   };
 }
 
+function normalizeExtractionSummary(value: unknown): MemoryExtractionSummary {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid memory extraction summary");
+  const summary = value as Record<string, unknown>;
+  const durationMs = summary.durationMs;
+  if (typeof durationMs !== "number" || !Number.isFinite(durationMs) || durationMs < 0)
+    throw new Error("Invalid memory extraction duration");
+  return {
+    trigger: normalizeExtractionTrigger(summary.trigger),
+    createdItemCount: requiredNonNegativeInteger(summary.createdItemCount, "createdItemCount"),
+    modelCallCount: requiredNonNegativeInteger(summary.modelCallCount, "modelCallCount"),
+    durationMs,
+  };
+}
+
 function decodeExtractionReceipt(row: MemoryExtractionReceiptRow): MemoryExtractionReceipt {
   const operationId = requiredIdentifierString(row.operation_id, "operation_id");
   const sessionId = requiredIdentifierString(row.session_id, "session_id");
@@ -2201,6 +2285,7 @@ function decodeExtractionReceipt(row: MemoryExtractionReceiptRow): MemoryExtract
     ...(skipReason ? { skipReason } : {}),
     ...(discardedRange ? { discardedRange } : {}),
     committedAt,
+    ...(receipt.summary !== undefined ? { summary: normalizeExtractionSummary(receipt.summary) } : {}),
   };
 }
 

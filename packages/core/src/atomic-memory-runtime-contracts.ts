@@ -3,6 +3,7 @@ import type {
   MemoryItemRecord,
   MemoryItemStore,
   MemoryExtractionReceipt,
+  MemoryExtractionMetrics,
 } from "./atomic-memory-contracts.js";
 
 /** Host identity, never an LLM-selected session identifier. */
@@ -69,6 +70,8 @@ export interface MemoryModelRequest {
   readonly sourceMessages?: readonly Message[];
   readonly sourceTools?: readonly ToolDefinition[];
   readonly signal?: AbortSignal;
+  readonly trigger?: MemoryExtractionSnapshot["trigger"];
+  readonly operationId?: string;
 }
 
 export interface MemoryExtractionModel {
@@ -110,6 +113,7 @@ export interface AtomicMemoryStore extends MemoryItemStore {
     readonly operationId: string;
   }): Promise<void>;
   readDeletionRevision(): Promise<number>;
+  readExtractionMetrics(input: { from: number; to: number }): Promise<MemoryExtractionMetrics>;
 }
 
 export interface AtomicMemoryEngineOptions {
