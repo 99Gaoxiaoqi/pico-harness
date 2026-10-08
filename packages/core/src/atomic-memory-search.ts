@@ -43,10 +43,14 @@ export function collectMemorySearchSignals(value?: string): MemorySearchSignals 
 /** Full-token/path matching and at least two informative CJK bigrams; no semantic inference. */
 export function scoreMemoryContent(content: string, signals: MemorySearchSignals): number {
   const text = normalizeMemorySearchText(content);
-  const tokens = new Set((text.match(/[\p{L}\p{N}_@.-]+/gu) ?? []).map(trimPunctuation));
-  const paths = new Set((text.match(/(?:\.{0,2}\/|\/)[^\s"'<>]+/gu) ?? []).map(trimPunctuation));
-  const pathCount = signals.paths.filter((term) => paths.has(term)).length;
-  const tokenCount = signals.tokens.filter((term) => tokens.has(term)).length;
+  // Most scanned rows cannot match. Only tokenize positive substring candidates;
+  // the final full-token/path checks keep the exact same matching semantics.
+  const tokenTerms = signals.tokens.filter((term) => text.includes(term));
+  const pathTerms = signals.paths.filter((term) => text.includes(term));
+  const tokens = tokenTerms.length ? new Set((text.match(/[\p{L}\p{N}_@.-]+/gu) ?? []).map(trimPunctuation)) : new Set<string>();
+  const paths = pathTerms.length ? new Set((text.match(/(?:\.{0,2}\/|\/)[^\s"'<>]+/gu) ?? []).map(trimPunctuation)) : new Set<string>();
+  const pathCount = pathTerms.filter((term) => paths.has(term)).length;
+  const tokenCount = tokenTerms.filter((term) => tokens.has(term)).length;
   const cjkCount = signals.cjkBigrams.filter((term) => text.includes(term)).length;
   return pathCount * 8 + tokenCount * 4 + (cjkCount >= 2 ? Math.min(cjkCount, 8) : 0);
 }
