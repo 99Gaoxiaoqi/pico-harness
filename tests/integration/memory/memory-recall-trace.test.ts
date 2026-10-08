@@ -601,3 +601,155 @@ test("active search records changed admission and disabled outcomes without retu
       assert.equal(search.selected.length, 0);
     });
 });
+
+test("cross-Run reused tool IDs match actual history text, preserve reuse and refuse ambiguous carriers", async (t) => {
+  const f = await fixture(t);
+  const requests: Message[][] = [];
+  let calls = 0;
+  const dependencies: AgentRuntimeDependencies = {
+    picoHome: f.picoHome,
+    memoryTrustStore: f.trust,
+    atomicMemoryLifecycle: f.lifecycle,
+    reporter: new SilentReporter(),
+    provider: {
+      async generate(messages, _tools, options) {
+        requests.push(structuredClone(messages));
+        options?.onRequestPrepared?.({ provider: "openai", model: "test", body: { messages } });
+        await reportFixtureAttempt(options, "openai", "test", {
+          promptTokens: 1,
+          completionTokens: 1,
+        });
+        if (calls++ % 2 === 0)
+          return {
+            role: "assistant",
+            content: "",
+            toolCalls: [
+              { id: "call_0", name: "memory_search", arguments: '{"query":"TraceAnchor"}' },
+            ],
+          };
+        return { role: "assistant", content: "Done." };
+      },
+    },
+  };
+  const run = (mode: "new" | "resume") =>
+    executeAgentRuntime(
+      {
+        prompt: "TraceAnchor",
+        dir: f.workDir,
+        sessionSelection: { mode, sessionId: f.sessionId },
+        provider: "openai",
+        modelRouteId: "test/test",
+        allowedTools: ["memory_search"],
+      },
+      dependencies,
+    );
+  const history = async () =>
+    (
+      await f.events.readSessionEntriesOfKinds(f.sessionId, ["memory.recall.recorded"])
+    ).entries.flatMap(({ event }) =>
+      event.kind === "memory.recall.recorded" && event.data.mode === "search"
+        ? [{ eventId: event.eventId, trace: event.data }]
+        : [],
+    );
+  await run("new");
+  const oldRequest = requests[1]!;
+  await f.store.applyMutations({
+    operationId: "later-fact",
+    mutations: [
+      {
+        type: "create",
+        item: {
+          content: "TraceAnchor gained NewBody928.",
+          kind: "knowledge",
+          statementType: "fact",
+          temporalType: "undated",
+          scopeType: "workspace",
+          scopeKey: f.paths.workspace.id,
+          observedAt: 2,
+          origin: "user_requested",
+          keys: [{ key: "TraceAnchor", keyType: "concept", keyOrigin: "user" }],
+          sources: [],
+        },
+      },
+    ],
+  });
+  await run("resume");
+  const [oldRecall, newRecall] = await history();
+  assert.ok(oldRecall && newRecall);
+  assert.notEqual(oldRecall.trace.blockHash, newRecall.trace.blockHash);
+  assert.doesNotMatch(JSON.stringify(oldRequest), /NewBody928/);
+  // Both persisted traces are real, differently scoped Runs sharing the provider's tool ID.
+  const tracker = new MemoryRecallRequestTracker({
+    record: async () => undefined,
+    readHistory: history,
+  });
+  const oldFacts = await tracker.context(oldRequest);
+  assert.equal(oldFacts.coverage, "recorded");
+  assert.deepEqual(
+    oldFacts.recalls.map((recall) => recall.recallEventId),
+    [oldRecall.eventId],
+  );
+  assert.deepEqual(
+    await tracker.context(oldRequest),
+    oldFacts,
+    "one historical carrier can be reused in later requests",
+  );
+  const prepared = capturePreparedMemoryRecall(
+    { provider: "openai", model: "test", body: { messages: oldRequest } },
+    oldFacts,
+  );
+  assert.equal(prepared.recalls[0]?.blockPresent, true);
+  assert.ok(prepared.recalls[0]?.references.every((reference) => reference.present));
+  const freshTracker = new MemoryRecallRequestTracker({
+    record: async () => newRecall.eventId,
+    readHistory: async () => [oldRecall],
+  });
+  await freshTracker.context(oldRequest);
+  await freshTracker.record(newRecall.trace);
+  assert.deepEqual(
+    (await freshTracker.context(oldRequest)).recalls.map((recall) => recall.recallEventId),
+    [oldRecall.eventId],
+    "fresh records cannot overwrite older carriers",
+  );
+  const bothFacts = await tracker.context(requests[3]!);
+  assert.deepEqual(
+    new Set(bothFacts.recalls.map((recall) => recall.recallEventId)),
+    new Set([oldRecall.eventId, newRecall.eventId]),
+  );
+  // A third Run retrieved exactly the same bytes as the second; hashes cannot identify which event owns that carrier.
+  await run("resume");
+  const ambiguous = await new MemoryRecallRequestTracker({
+    record: async () => undefined,
+    readHistory: history,
+  }).context(requests[3]!);
+  assert.equal(ambiguous.coverage, "unrecorded");
+  assert.deepEqual(
+    ambiguous.recalls.map((recall) => recall.recallEventId),
+    [oldRecall.eventId],
+  );
+  const empty = await new AtomicMemoryContextBuilder(f.store, f.paths.workspace.id).build(
+    "NoHitAnchor432",
+    { mode: "search", trace: { queryRef: { toolCallId: "empty-call" } } },
+  );
+  assert.equal(empty.trace?.outcome, "no_hits");
+  let emptyId = "empty-a";
+  const emptyTracker = new MemoryRecallRequestTracker({ record: async () => emptyId });
+  await emptyTracker.record(empty.trace!);
+  emptyId = "empty-b";
+  await emptyTracker.record(empty.trace!);
+  const emptyFacts = await emptyTracker.context([
+    {
+      role: "assistant",
+      content: "",
+      toolCalls: [{ id: "empty-call", name: "memory_search", arguments: "{}" }],
+    },
+    {
+      role: "user",
+      toolCallId: "empty-call",
+      content:
+        '<atomic-memory-reference trust="low">No matching active memory.</atomic-memory-reference>',
+    },
+  ]);
+  assert.equal(emptyFacts.coverage, "unrecorded");
+  assert.deepEqual(emptyFacts.recalls, []);
+});

@@ -14,7 +14,7 @@ export interface RecordedMemoryRecall {
 /** Per-Host-run state; never shared mutable state on a Provider or workspace singleton. */
 export class MemoryRecallRequestTracker {
   private automatic: RecordedMemoryRecall | undefined;
-  private readonly searches = new Map<string, RecordedMemoryRecall>();
+  private readonly searches = new Map<string, RecordedMemoryRecall[]>();
   private coverage: MemoryRecallRequestFacts["coverage"] = "recorded";
   private history: Promise<void> | undefined;
 
@@ -36,7 +36,7 @@ export class MemoryRecallRequestTracker {
       }
       const recorded = { eventId, trace: structuredClone(trace) };
       if (trace.mode === "automatic") this.automatic = recorded;
-      else if (trace.queryRef?.toolCallId) this.searches.set(trace.queryRef.toolCallId, recorded);
+      else this.addSearch(recorded);
     } catch {
       this.unavailable();
     }
@@ -67,8 +67,10 @@ export class MemoryRecallRequestTracker {
     // Prefer recent carriers if the metadata budget cannot cover the entire tool history.
     for (const message of [...messages].reverse()) {
       if (!message.toolCallId) continue;
-      const recall = this.searches.get(message.toolCallId);
-      if (!recall && searchCallIds.has(message.toolCallId)) this.unavailable();
+      const possible = this.searches.get(message.toolCallId) ?? [];
+      const recall = matchSearchRecall(possible, message.content);
+      if (!recall && (possible.length > 0 || searchCallIds.has(message.toolCallId)))
+        this.unavailable();
       if (recall && !candidates.some((candidate) => candidate.eventId === recall.eventId))
         candidates.push(recall);
     }
@@ -99,18 +101,58 @@ export class MemoryRecallRequestTracker {
     return facts;
   }
 
+  private addSearch(recall: RecordedMemoryRecall): void {
+    const toolCallId =
+      recall.trace.mode === "search" ? recall.trace.queryRef?.toolCallId : undefined;
+    if (!toolCallId) return;
+    const existing = this.searches.get(toolCallId) ?? [];
+    if (!existing.some((item) => item.eventId === recall.eventId)) existing.push(recall);
+    this.searches.set(toolCallId, existing);
+  }
+
   private async loadHistory(): Promise<void> {
     try {
-      for (const recall of [...((await this.options.readHistory?.()) ?? [])].reverse()) {
-        const toolCallId =
-          recall.trace.mode === "search" ? recall.trace.queryRef?.toolCallId : undefined;
-        // A fresh result recorded during this run always wins over a historical weak pointer.
-        if (toolCallId && !this.searches.has(toolCallId)) this.searches.set(toolCallId, recall);
-      }
+      for (const recall of (await this.options.readHistory?.()) ?? []) this.addSearch(recall);
     } catch {
       this.unavailable();
     }
   }
+}
+
+/** Tool IDs are unique only within a Run. Never pick the latest cross-Run collision. */
+function matchSearchRecall(
+  possible: readonly RecordedMemoryRecall[],
+  content: string,
+): RecordedMemoryRecall | undefined {
+  const hashes = memoryTextHashes(content);
+  const exactBlocks = possible.filter(
+    ({ trace }) => trace.blockHash && hashes.blocks.has(trace.blockHash),
+  );
+  if (exactBlocks.length) return exactBlocks.length === 1 ? exactBlocks[0] : undefined;
+  const references = possible.filter(({ trace }) =>
+    trace.selected.some((item) => hashes.references.has(item.referenceHash)),
+  );
+  if (references.length) return references.length === 1 ? references[0] : undefined;
+  // A single empty/error result can still be identified by its one actual tool carrier.
+  // With collisions it has no distinguishing text hash, so the association is unknown.
+  return possible.length === 1 &&
+    !possible[0]!.trace.blockHash &&
+    !possible[0]!.trace.selected.length
+    ? possible[0]
+    : undefined;
+}
+
+function memoryTextHashes(text: string): { blocks: Set<string>; references: Set<string> } {
+  const blocks = new Set<string>();
+  const references = new Set<string>();
+  for (const match of text.matchAll(
+    /<atomic-memory-reference\b[^>]*>[\s\S]*?<\/atomic-memory-reference>/gu,
+  ))
+    blocks.add(memoryRecallTextHash(match[0]));
+  // Tool projection may remove the outer footer while keeping complete references.
+  for (const reference of text.matchAll(/<memory\b[^>]*>[\s\S]*?<\/memory>/gu))
+    references.add(memoryRecallTextHash(reference[0]));
+  return { blocks, references };
 }
 
 export interface PreparedMemoryRecallDiagnostic {
@@ -173,14 +215,9 @@ export function capturePreparedMemoryRecall(
   const blocks = new Set<string>();
   const references = new Set<string>();
   for (const text of requestTextStrings(request)) {
-    for (const match of text.matchAll(
-      /<atomic-memory-reference\b[^>]*>[\s\S]*?<\/atomic-memory-reference>/gu,
-    )) {
-      blocks.add(memoryRecallTextHash(match[0]));
-    }
-    // Tool projection may remove the outer footer while keeping complete references.
-    for (const reference of text.matchAll(/<memory\b[^>]*>[\s\S]*?<\/memory>/gu))
-      references.add(memoryRecallTextHash(reference[0]));
+    const hashes = memoryTextHashes(text);
+    for (const hash of hashes.blocks) blocks.add(hash);
+    for (const hash of hashes.references) references.add(hash);
   }
   return {
     version: 1,
