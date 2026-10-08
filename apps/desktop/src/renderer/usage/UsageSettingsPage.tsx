@@ -185,6 +185,7 @@ export function UsageSettingsPage({
             row.sessionId,
             row.goalId,
             row.purpose,
+            row.memory?.operationId,
           ].some((value) => value?.toLocaleLowerCase().includes(needle))),
     );
   }, [details, search, status, purpose]);
@@ -445,6 +446,7 @@ export function UsageSettingsPage({
                       { value: "all", label: "全部用途" },
                       { value: "main", label: "主执行" },
                       { value: "goal_evaluation", label: "Goal 验收" },
+                      { value: "memory_review", label: "记忆提取" },
                     ]}
                   />
                   <div className="settings-field usage-detail-toggle">
@@ -488,11 +490,39 @@ export function UsageSettingsPage({
                       id: row.id,
                       cells: [
                         new Date(row.at).toLocaleString("zh-CN", { hour12: false }),
-                        row.purpose === "goal_evaluation"
-                          ? "Goal 验收"
-                          : row.kind === "model"
-                            ? "模型"
-                            : "工具",
+                        row.purpose === "memory_review" ? (
+                          <span>
+                            记忆提取
+                            {row.memory && (
+                              <small
+                                className="usage-cell-secondary"
+                                title={`操作：${row.memory.operationId}`}
+                              >
+                                {
+                                  {
+                                    remember: "显式记住",
+                                    extract: "自动提取",
+                                    compaction: "上下文压缩",
+                                  }[row.memory.trigger]
+                                }{" "}
+                                ·{" "}
+                                {
+                                  {
+                                    proposal: "提出候选",
+                                    localized: "历史定位",
+                                    canonicalize: "证据核实",
+                                  }[row.memory.stage]
+                                }
+                              </small>
+                            )}
+                          </span>
+                        ) : row.purpose === "goal_evaluation" ? (
+                          "Goal 验收"
+                        ) : row.kind === "model" ? (
+                          "模型"
+                        ) : (
+                          "工具"
+                        ),
                         <span title={row.name}>
                           {row.name}
                           <small className="usage-cell-secondary">{row.provider}</small>
