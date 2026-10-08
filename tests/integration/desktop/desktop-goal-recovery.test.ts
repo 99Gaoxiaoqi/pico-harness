@@ -228,8 +228,15 @@ async function createRecoveryFixture(
             .split("\n")
             .find((line) => line.startsWith('{"identity":'))!;
           const evidence = JSON.parse(evidenceLine) as GoalEvidenceContext;
+          const whitelistLine = messages[1]!.content
+            .split("\n")
+            .find((line) => line.startsWith('{"citableEvidenceIds":'))!;
+          const { citableEvidenceIds } = JSON.parse(whitelistLine) as {
+            citableEvidenceIds: string[];
+          };
           if (verdict.met) {
             assert.ok(evidence.finalReplyEventId);
+            assert.ok(citableEvidenceIds.includes(evidence.finalReplyEventId));
             assert.match(evidence.finalReply!.content, /完成/u);
           }
           return {

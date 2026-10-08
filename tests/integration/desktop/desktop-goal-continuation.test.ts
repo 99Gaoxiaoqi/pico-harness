@@ -40,6 +40,13 @@ const verdictContent = (value: Evaluation, messages?: readonly Message[]) => {
     .find((line) => line.startsWith('{"identity":'));
   const context = evidence ? (JSON.parse(evidence) as GoalEvidenceContext) : undefined;
   const tool = context?.tools.findLast((item) => item.toolName === "submit_plan");
+  if (value.met && context) {
+    const whitelistLine = messages![1]!.content
+      .split("\n")
+      .find((line) => line.startsWith('{"citableEvidenceIds":'))!;
+    const { citableEvidenceIds } = JSON.parse(whitelistLine) as { citableEvidenceIds: string[] };
+    assert.ok(citableEvidenceIds.includes(tool?.eventId ?? context.finalReplyEventId!));
+  }
   return JSON.stringify({
     met: false,
     impossible: false,
@@ -359,6 +366,13 @@ test(
         const evidence = JSON.parse(line) as GoalEvidenceContext;
         seen.push(evidence);
         const result = evidence.tools.findLast((item) => item.toolName === "bash")!;
+        const whitelistLine = messages[1]!.content
+          .split("\n")
+          .find((text) => text.startsWith('{"citableEvidenceIds":'))!;
+        const { citableEvidenceIds } = JSON.parse(whitelistLine) as {
+          citableEvidenceIds: string[];
+        };
+        assert.ok(citableEvidenceIds.includes(result.eventId));
         const usage = { promptTokens: 30, completionTokens: 10 };
         await reportFixtureAttempt(request, "openai", "coder", usage);
         return {

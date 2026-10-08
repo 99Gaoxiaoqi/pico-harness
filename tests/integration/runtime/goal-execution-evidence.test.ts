@@ -2,16 +2,43 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
 import { encode } from "gpt-tokenizer";
-import { isGoalEvidenceTrace, normalizeGoalManagerSnapshot, type LLMProvider } from "@pico/core";
+import {
+  isGoalEvidenceTrace,
+  normalizeGoalManagerSnapshot,
+  type LLMProvider,
+  type Message,
+} from "@pico/core";
 import { GoalManager } from "@pico/runtime/goal-manager";
 import {
   buildGoalEvidenceContext,
   evaluateGoal,
+  goalEvidenceTrace,
   GOAL_EVIDENCE_MAX_INPUT_BYTES,
   GOAL_EVIDENCE_MAX_INPUT_TOKENS,
   type GoalEvidenceRunSlice,
+  type GoalEvidenceContext,
 } from "@pico/runtime/goal-evaluator";
 import { estimateMessagesTokens } from "@pico/runtime/context-budget";
+
+function readProvidedEvidence(messages: readonly Message[]) {
+  const lines = messages[1]!.content.split("\n");
+  const evidenceLine = lines.find((line) => line.startsWith('{"identity":'))!;
+  const whitelistLine = lines.find((line) => line.startsWith('{"citableEvidenceIds":'))!;
+  const evidence = JSON.parse(evidenceLine) as GoalEvidenceContext;
+  const { citableEvidenceIds } = JSON.parse(whitelistLine) as { citableEvidenceIds: string[] };
+  assert.deepEqual(
+    citableEvidenceIds,
+    goalEvidenceTrace(evidence).providedEvidence.map((reference) => reference.eventId),
+  );
+  assert.equal(citableEvidenceIds.includes(evidence.identity.runStartedEventId), false);
+  assert.equal(citableEvidenceIds.includes(evidence.identity.terminalEventId), false);
+  for (const tool of evidence.tools) {
+    assert.equal(citableEvidenceIds.includes(tool.toolCallId), false);
+    assert.equal(citableEvidenceIds.includes(tool.start!.eventId), false);
+    assert.equal(citableEvidenceIds.includes(tool.sha256), false);
+  }
+  return { evidence, citableEvidenceIds, evidenceLine, whitelistLine };
+}
 
 function evidenceFixture() {
   const manager = new GoalManager();
@@ -96,7 +123,12 @@ test("Goal evidence pipeline bounds the exact provider input and persists only f
     ...slice,
     tools: Array.from({ length: 20 }, (_, index) => ({
       ...slice.tools[0]!,
-      eventId: `tool-result-${index}`,
+      eventId: `tool-result-${index}-${createHash("sha512").update(`result-${index}`).digest("hex")}`,
+      toolCallId: `tool-call-${createHash("sha512").update(`call-${index}`).digest("hex")}`,
+      start: {
+        ...slice.tools[0]!.start!,
+        eventId: `tool-start-${createHash("sha512").update(`start-${index}`).digest("hex")}`,
+      },
       excerpt: "🙂中文".repeat(1500),
       truncated: true,
     })),
@@ -105,6 +137,7 @@ test("Goal evidence pipeline bounds the exact provider input and persists only f
   const context = buildGoalEvidenceContext(identity, expanded);
   assert.equal(context.tools.length, 12);
   let dispatched = false;
+  let providedIds: string[] = [];
   const provider: LLMProvider = {
     generate: async (messages, tools) => {
       dispatched = true;
@@ -112,15 +145,24 @@ test("Goal evidence pipeline bounds the exact provider input and persists only f
       assert.ok(Buffer.byteLength(JSON.stringify(messages)) <= GOAL_EVIDENCE_MAX_INPUT_BYTES);
       assert.ok(encode(JSON.stringify(messages)).length <= GOAL_EVIDENCE_MAX_INPUT_TOKENS);
       assert.match(messages[0]!.content, /不可信数据/u);
-      const packed = JSON.parse(
-        messages[1]!.content.split("\n").find((line) => line.startsWith('{"identity":'))!,
+      const { evidence: packed, citableEvidenceIds } = readProvidedEvidence(messages);
+      providedIds = citableEvidenceIds;
+      assert.ok(
+        packed.tools.length < context.tools.length,
+        "identity-heavy evidence needs pruning",
       );
+      assert.ok(
+        !citableEvidenceIds.includes(context.tools[0]!.eventId),
+        "pruned result IDs must also leave the whitelist",
+      );
+      assert.match(messages[0]!.content, /不在白名单/u);
+      assert.ok(citableEvidenceIds.includes(packed.tools.at(-1)!.eventId));
       return {
         role: "assistant",
         content: JSON.stringify({
           met: true,
           acceptanceBasis: "process_success",
-          citedEvidenceIds: [packed.tools.at(-1).eventId],
+          citedEvidenceIds: [packed.tools.at(-1)!.eventId],
           reason: "最终检查正常退出",
         }),
       };
@@ -130,6 +172,10 @@ test("Goal evidence pipeline bounds the exact provider input and persists only f
   assert.equal(dispatched, true);
   assert.equal(result.met, true);
   assert.ok(isGoalEvidenceTrace(result.evidenceTrace));
+  assert.deepEqual(
+    result.evidenceTrace.providedEvidence.map((reference) => reference.eventId),
+    providedIds,
+  );
   manager.settle({
     checkpoint: { goalId: goal.id, revision: goal.revision },
     evaluation: result,
@@ -165,13 +211,17 @@ test("Goal trims Chinese-dense evidence against whole-request BPE while preservi
         const serialized = JSON.stringify(messages);
         assert.ok(Buffer.byteLength(serialized) <= GOAL_EVIDENCE_MAX_INPUT_BYTES);
         assert.ok(encode(serialized).length <= GOAL_EVIDENCE_MAX_INPUT_TOKENS);
-        const evidenceLine = messages[1]!.content
-          .split("\n")
-          .find((line) => line.startsWith('{"identity":'))!;
-        const packed = JSON.parse(evidenceLine);
+        const { evidence: packed, evidenceLine, whitelistLine } = readProvidedEvidence(messages);
         const unbudgeted = messages.map((message) => ({
           ...message,
-          content: message.content.replace(evidenceLine, JSON.stringify(dense)),
+          content: message.content.replace(evidenceLine, JSON.stringify(dense)).replace(
+            whitelistLine,
+            JSON.stringify({
+              citableEvidenceIds: goalEvidenceTrace(dense).providedEvidence.map(
+                (reference) => reference.eventId,
+              ),
+            }),
+          ),
         }));
         assert.ok(
           encode(JSON.stringify(unbudgeted)).length > GOAL_EVIDENCE_MAX_INPUT_TOKENS,
@@ -329,6 +379,12 @@ test("Goal evidence refuses failed, missing, stale and foreign process proof des
       evaluatorFailed: true,
       change: (s) => s,
       citation: "previous-run-result",
+    },
+    {
+      name: "mechanical background ID mixed with valid proof",
+      evaluatorFailed: true,
+      change: (s) => s,
+      citations: ["tool-result", "tool-start"],
     },
     { name: "assistant claim", change: (s) => s, citation: "final-reply" },
   ];
