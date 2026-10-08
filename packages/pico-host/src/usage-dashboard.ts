@@ -11,6 +11,7 @@ export interface UsageProviderCallRecord {
   readonly callId: string;
   readonly model: string;
   readonly purpose?: string;
+  readonly memory?: UsageActivity["memory"];
   readonly goalId?: string | undefined;
   readonly provider: string;
   readonly route?: string | undefined;
@@ -171,6 +172,7 @@ export async function buildUsageDashboard(
         name: call.model,
         model: call.model,
         ...(call.purpose ? { purpose: call.purpose } : {}),
+        ...(call.memory ? { memory: call.memory } : {}),
         ...(call.goalId ? { goalId: call.goalId } : {}),
         provider,
         workspacePath: source.workspacePath,

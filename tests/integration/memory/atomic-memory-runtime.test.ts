@@ -417,7 +417,12 @@ test("background memory billing can settle after the parent run terminal without
   });
   let pending!: Promise<string>;
   await run.run(async () => {
-    pending = model.call({ stage: "canonicalize", prompt: "test" });
+    pending = model.call({
+      stage: "canonicalize",
+      prompt: "test",
+      trigger: "extract",
+      operationId: "memory-observation",
+    });
   });
   release();
   assert.equal(await pending, "finished");
@@ -426,6 +431,11 @@ test("background memory billing can settle after the parent run terminal without
   const records = ledger.listPhysicalAttempts({ sessionId: session.id });
   assert.equal(records.length, 1);
   assert.equal(records[0]!.purpose, "memory_review");
+  assert.deepEqual(records[0]!.contextFacts?.memory, {
+    trigger: "extract",
+    stage: "canonicalize",
+    operationId: "memory-observation",
+  });
   assert.equal(records[0]!.runId, undefined);
   assert.equal(records[0]!.turnId, undefined);
 });
