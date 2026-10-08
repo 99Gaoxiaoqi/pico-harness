@@ -85,8 +85,8 @@ export const PICO_TOOL_GROUPS: readonly ToolGroupDef[] = [
   {
     id: "memory",
     label: "Memory",
-    description: "记忆触发器：显式记住（前台同步）与自动提取（turn 后异步）",
-    toolNames: ["memory_remember", "memory_extract"],
+    description: "只读检索已存记忆、显式记住与回合后提取",
+    toolNames: ["memory_search", "memory_remember", "memory_extract"],
     economy: "deferred",
   },
   {
@@ -195,6 +195,7 @@ export const PLAN_MODE_TOOL_NAMES: ReadonlySet<string> = new Set([
   "code_call_hierarchy",
   "ask_user",
   "submit_plan",
+  "memory_search",
 ]);
 
 export function isPlanModeTool(name: string): boolean {

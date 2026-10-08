@@ -75,6 +75,18 @@ export class ProviderAtomicMemoryModel implements MemoryExtractionModel {
       this.provider.generate(messages, tools, {
         ...(request.signal ? { signal: request.signal } : {}),
         timeoutMs: 60_000,
+        ...(request.trigger && request.operationId
+          ? {
+              contextFacts: {
+                version: 1 as const,
+                memory: {
+                  trigger: request.trigger,
+                  stage: request.stage,
+                  operationId: request.operationId,
+                },
+              },
+            }
+          : {}),
         ...(tools.length ? { toolChoice: "none" as const } : {}),
       }),
     );

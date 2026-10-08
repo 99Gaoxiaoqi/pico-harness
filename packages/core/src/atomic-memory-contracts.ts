@@ -235,6 +235,33 @@ export interface MemoryExtractionDiscardedRange {
   readonly finalFailureClass: MemoryExtractionFailureClass;
 }
 
+/** Secret-free statistics for one settled extraction segment, not its previous retries. */
+export interface MemoryExtractionSummary {
+  readonly trigger: "remember" | "extract" | "compaction";
+  readonly createdItemCount: number;
+  readonly modelCallCount: number;
+  readonly durationMs: number;
+}
+
+export interface MemoryExtractionMetricGroup {
+  readonly trigger: MemoryExtractionSummary["trigger"];
+  readonly settledCount: number;
+  readonly evaluatedCount: number;
+  readonly createdItemCount: number;
+  readonly modelCallCount: number;
+  readonly emptyCount: number;
+  readonly emptyRate: number | null;
+  readonly durationMs: number;
+}
+
+export interface MemoryExtractionMetrics {
+  readonly scope: "user";
+  readonly from: number;
+  readonly to: number;
+  readonly groups: readonly MemoryExtractionMetricGroup[];
+  readonly unknownReceiptCount: number;
+}
+
 export interface MemoryExtractionReceipt {
   readonly operationId: string;
   readonly sessionId: string;
@@ -245,6 +272,7 @@ export interface MemoryExtractionReceipt {
   readonly skipReason?: "policy_denied" | "memory_deleted";
   readonly discardedRange?: MemoryExtractionDiscardedRange;
   readonly committedAt: number;
+  readonly summary?: MemoryExtractionSummary;
 }
 
 export interface MemoryExtractionRequestedItemResult {
@@ -273,6 +301,8 @@ export interface CommitMemoryExtractionRequest {
   readonly skipReason?: "policy_denied" | "memory_deleted";
   readonly trigger: "remember" | "extract" | "compaction";
   readonly compactionCheckpointId?: string;
+  /** Observations never participate in business idempotency or cursor authority. */
+  readonly summary?: Pick<MemoryExtractionSummary, "modelCallCount" | "durationMs">;
 }
 
 export type MemoryMutationOutcome = "created" | "updated" | "archived" | "restored" | "noop";
@@ -315,6 +345,17 @@ export interface SearchMemoryItemsByKeyRequest {
   readonly limit?: number;
 }
 
+export interface MemorySearchSignals {
+  readonly paths: readonly string[];
+  readonly tokens: readonly string[];
+  readonly cjkBigrams: readonly string[];
+}
+
+export interface SearchMemoryItemsByContentRequest extends MemorySearchSignals {
+  readonly workspaceKey: string;
+  readonly limit?: number;
+}
+
 export interface MemoryItemStore {
   applyMutations(request: ApplyMemoryMutationsRequest): Promise<MemoryWriteOperationResult>;
   commitExtraction(request: CommitMemoryExtractionRequest): Promise<MemoryExtractionCommitResult>;
@@ -336,6 +377,7 @@ export interface MemoryItemStore {
   readExtractionReceipt(operationId: string): Promise<MemoryExtractionReceipt | undefined>;
   readItem(itemId: string): Promise<MemoryItemRecord | undefined>;
   searchByKeys(request: SearchMemoryItemsByKeyRequest): Promise<readonly MemoryItemRecord[]>;
+  searchByContent(request: SearchMemoryItemsByContentRequest): Promise<readonly MemoryItemRecord[]>;
   readOperation(operationId: string): Promise<MemoryWriteOperationResult | undefined>;
 }
 

@@ -244,7 +244,10 @@ import type {
   RuntimeLifecycleEvent,
 } from "@pico/runtime/runtime-contract";
 import { AtomicMemoryContextBuilder } from "@pico/runtime/atomic-memory/context-builder";
-import { buildMemoryTriggerTools } from "@pico/pico-host/memory-trigger-tools";
+import {
+  buildMemorySearchTool,
+  buildMemoryTriggerTools,
+} from "@pico/pico-host/memory-trigger-tools";
 import { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-store";
 import {
   AtomicMemoryRuntime,
@@ -2502,6 +2505,31 @@ export async function executeAgentRuntime(
       for (const tool of buildMemoryTriggerTools(atomicMemoryRuntime)) {
         registry.register(tool);
       }
+    }
+    if (memoryContextBuilder && memoryRepository) {
+      const builder = memoryContextBuilder;
+      const repository = memoryRepository;
+      const workspaceKey = resolvePicoPaths(workDir, { picoHome }).workspace.id;
+      const checkSearchAdmission = async () => {
+        const gate = await memoryRecallAllowed();
+        if (!gate.allowed) throw new Error(`Memory search unavailable: ${gate.reason}`);
+        const settings = await repository.readSettings(workspaceKey);
+        if (!settings.enabled || !settings.recallEnabled)
+          throw new Error("Memory search unavailable: memory_disabled");
+      };
+      registry.register(
+        buildMemorySearchTool({
+          search: async (query) => {
+            await checkSearchAdmission();
+            const result = await builder.build(query, { mode: "search" });
+            await checkSearchAdmission();
+            return (
+              result.block ||
+              '<atomic-memory-reference trust="low">No matching active memory.</atomic-memory-reference>'
+            );
+          },
+        }),
+      );
     }
     // 前台只使用会话级 HookService；所有项目 source 都由它统一加载并校验信任。
     if (activeHookService) {

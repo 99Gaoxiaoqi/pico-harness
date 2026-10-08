@@ -33,7 +33,12 @@ test("queue exposes steer, delete and more; only plain text with a current run c
     disabled: false,
     sessionRef: { workspacePath: "/worktree", sessionId: "session-1" },
     items: [
-      { queueId: "queued-1", input: { kind: "text" as const, text: "或者是引导？" }, createdAt: 1 },
+      {
+        queueId: "queued-1",
+        sessionId: "session-1",
+        input: { kind: "text" as const, text: "或者是引导？" },
+        createdAt: 1,
+      },
     ],
     steerSupported: true,
     runId: "run-1",

@@ -210,6 +210,10 @@
     "./media": {
       "types": "./dist/media.d.ts",
       "import": "./dist/media.js"
+    },
+    "./atomic-memory-search": {
+      "types": "./dist/atomic-memory-search.d.ts",
+      "import": "./dist/atomic-memory-search.js"
     }
   },
   "files": [

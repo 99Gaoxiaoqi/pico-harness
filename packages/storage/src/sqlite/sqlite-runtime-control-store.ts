@@ -2884,6 +2884,7 @@ function physicalAccountingCall(record: PhysicalAttemptRecord): ProviderCallReco
     jobId: record.jobId,
     attemptId: record.jobAttemptId,
     purpose: record.purpose,
+    ...(record.contextFacts?.memory ? { memory: record.contextFacts.memory } : {}),
     provider: record.provider,
     model: record.model,
     route: record.route,

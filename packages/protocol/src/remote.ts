@@ -163,6 +163,7 @@ const ADMIN_METHODS = [
   "memory.settings.get",
   "memory.settings.update",
   "memory.context.preview",
+  "memory.metrics.get",
 ] as const satisfies readonly RuntimeMethod[];
 export const REMOTE_METHODS = [
   ...READ_METHODS,
@@ -188,6 +189,7 @@ export interface RemoteMethodSpec {
   mode: "query" | "command";
 }
 const GLOBAL_METHODS: ReadonlySet<RemoteMethod> = new Set([
+  "memory.metrics.get",
   "runtime.ping",
   "config.user.get",
   "config.user.update",
@@ -223,6 +225,7 @@ const ADMIN_QUERIES: ReadonlySet<RemoteMethod> = new Set([
   "memory.get",
   "memory.settings.get",
   "memory.context.preview",
+  "memory.metrics.get",
 ]);
 export const REMOTE_METHOD_SPECS: Readonly<Record<RemoteMethod, RemoteMethodSpec>> = Object.freeze(
   Object.fromEntries([

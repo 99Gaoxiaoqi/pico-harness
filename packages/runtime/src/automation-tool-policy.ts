@@ -34,6 +34,7 @@ export const AUTOMATION_TOOL_ALLOWLIST: readonly string[] = Object.freeze([
   "skill_view",
   "memory_remember",
   "memory_extract",
+  "memory_search",
 ]);
 
 const AUTOMATION_TOOL_ALLOWLIST_SET: ReadonlySet<string> = new Set(AUTOMATION_TOOL_ALLOWLIST);

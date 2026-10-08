@@ -138,6 +138,7 @@ const KERNEL_RETRY_SAFE_METHODS: ReadonlySet<RuntimeMethod> = new Set<RuntimeMet
   "memory.get",
   "memory.settings.get",
   "memory.context.preview",
+  "memory.metrics.get",
   "jobs.list",
   "jobs.history",
   "config.get",

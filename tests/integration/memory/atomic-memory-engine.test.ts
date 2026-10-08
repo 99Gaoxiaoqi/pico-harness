@@ -17,6 +17,27 @@ import type {
 
 const SESSION = '["/workspace","session-1"]';
 
+test("automatic empty extraction records one model call and does not recount its replay", async (t) => {
+  const fixture = memoryFixture(t);
+  const model = scriptedModel([proposal([], [])]);
+  const engine = new AtomicMemoryExtractionEngine({
+    store: fixture.store,
+    model,
+    gate: async () => ({ allowed: true }),
+  });
+  const snapshot = source([event(1, "user", "Hello there."), event(2, "other", "")], {
+    trigger: "extract",
+  });
+  assert.equal((await engine.execute(snapshot)).status, "extracted");
+  assert.equal(fixture.commits.length, 1);
+  assert.equal(fixture.commits[0]!.items.length, 0);
+  assert.equal(fixture.commits[0]!.summary?.modelCallCount, 1);
+  assert.equal(model.calls[0]!.trigger, "extract");
+  await engine.execute(snapshot);
+  assert.equal(fixture.commits.length, 1);
+  assert.equal(model.calls.length, 1);
+});
+
 test("atomic engine commits canonical user evidence synchronously, honors provider visibility, scope and forget", async (t) => {
   const fixture = memoryFixture(t);
   const user = event(1, "user", "Remember I prefer concise Chinese. Hidden ledger text.");
@@ -52,6 +73,10 @@ test("atomic engine commits canonical user evidence synchronously, honors provid
   assert.equal(result.status, "remembered");
   assert.deepEqual(result.requestedItems, [{ itemId: "item-1", content: canonical.content }]);
   assert.equal(fixture.commits.length, 1);
+  assert.equal(fixture.commits[0]!.summary?.modelCallCount, 2);
+  assert.ok(fixture.commits[0]!.summary!.durationMs >= 0);
+  assert.equal(model.calls[0]!.operationId, fixture.commits[0]!.operationId);
+  assert.equal(model.calls[0]!.trigger, "remember");
   assert.equal((await fixture.cursor())?.processedOrdinal, 3);
   const stored = (await fixture.store.readItem("item-1"))!;
   assert.equal(stored.item.scopeType, "workspace", "canonicalizer owns final scope");
@@ -71,6 +96,7 @@ test("atomic engine commits canonical user evidence synchronously, honors provid
   assert.doesNotMatch(model.calls[1]!.prompt, /POISON PROPOSAL TEXT|imaginary company/);
   assert.equal((await engine.execute(snapshot)).status, "remembered");
   assert.equal(model.calls.length, 2, "receipt replay never calls the model");
+  assert.equal(fixture.commits.length, 1, "receipt replay never records another observation");
 
   await fixture.store.deleteItem({ itemId: "item-1", expectedVersion: 1, operationId: "forget-1" });
   assert.equal(
@@ -351,6 +377,16 @@ test("atomic engine recovers compaction before tail, bootstraps old checkpoints,
       ["remember", 4],
     ],
   );
+  assert.deepEqual(
+    model.calls.map(({ trigger }) => trigger),
+    ["compaction", "compaction", "remember", "remember"],
+  );
+  assert.deepEqual(
+    fixture.commits.map(({ summary }) => summary?.modelCallCount),
+    [2, 2],
+  );
+  assert.equal(model.calls[0]!.operationId, fixture.commits[0]!.operationId);
+  assert.equal(model.calls[2]!.operationId, fixture.commits[1]!.operationId);
   assert.doesNotMatch(JSON.stringify(model.calls[0]), /detailed answers/);
   assert.equal(model.calls[0]!.sourceTools, undefined);
 

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { DesktopAtomicMemoryService } from "@pico/pico-host/desktop-atomic-memory-service";
-import { parseRuntimeResult, RuntimeProtocolError } from "@pico/protocol";
+import { parseRuntimeResult, parseStrictRuntimeParams, RuntimeProtocolError } from "@pico/protocol";
 import { resolvePicoPaths } from "@pico/pico-host";
 import { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-store";
 
@@ -234,4 +234,108 @@ test("desktop atomic memory blocks cross-workspace item IDs and unsafe writes wh
     service.close();
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("memory correction preserves event dates unless explicitly cleared and query preview matches runtime projection", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-memory-correction-"));
+  const workspacePath = join(root, "workspace"),
+    picoHome = join(root, "home");
+  const service = new DesktopAtomicMemoryService({
+    picoHome,
+    now: () => 10_000,
+    publish: () => {},
+  });
+  const store = new SqliteMemoryItemStore(join(picoHome, "memory.sqlite"), { now: () => 10_000 });
+  t.after(async () => {
+    service.close();
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const workspaceKey = resolvePicoPaths(workspacePath, { picoHome }).workspace.id;
+  const seeded = await store.applyMutations({
+    operationId: "dated",
+    mutations: [
+      {
+        type: "create",
+        item: {
+          content: "Nebula deployment currently uses the old zone.",
+          kind: "knowledge",
+          statementType: "fact",
+          temporalType: "interval",
+          eventStartedAt: 100,
+          eventEndedAt: 200,
+          observedAt: 300,
+          scopeType: "workspace",
+          scopeKey: workspaceKey,
+          origin: "agent_extracted",
+          keys: [{ key: "Nebula", keyType: "concept", keyOrigin: "llm" }],
+          sources: [{ sessionId: "source", runId: "run", turnId: "turn", eventId: "event" }],
+        },
+      },
+    ],
+  });
+  const itemId = seeded.results[0]!.itemId;
+  let current = (await service.get(workspacePath, itemId)).item;
+  current = (
+    await service.update(
+      workspacePath,
+      parseStrictRuntimeParams("memory.update", {
+        workspacePath,
+        itemId,
+        expectedVersion: current.version,
+        idempotencyKey: "correct",
+        content: "Nebula deployment used the corrected zone.",
+        statementType: "plan",
+      }),
+    )
+  ).item;
+  assert.equal(current.temporalType, "interval");
+  assert.equal(current.eventStartedAt, 100);
+  assert.equal(current.eventEndedAt, 200);
+  assert.equal(current.observedAt, 300);
+  assert.equal(current.updatedAt, 10_000);
+  assert.equal(current.origin, "user_requested");
+  assert.deepEqual(current.sources, []);
+  await assert.rejects(
+    service.update(workspacePath, {
+      workspacePath,
+      itemId,
+      expectedVersion: current.version,
+      idempotencyKey: "invalid-date",
+      temporalType: "point",
+      eventStartedAt: 500,
+      eventEndedAt: 100,
+    }),
+    (error: unknown) => error instanceof RuntimeProtocolError && error.code === "INVALID_PARAMS",
+  );
+  const preview = parseRuntimeResult(
+    "memory.context.preview",
+    await service.previewContext(workspacePath, {
+      workspacePath,
+      query: "Nebula deployment",
+      maxTokens: 250,
+    }),
+  );
+  const runtime = await new AtomicMemoryContextBuilder(store, workspaceKey).build(
+    "Nebula deployment",
+    { maxTokens: 250 },
+  );
+  assert.equal(preview.block, runtime.block);
+  assert.deepEqual(preview.references, runtime.references);
+  assert.deepEqual(preview.diagnostics, runtime.diagnostics);
+  assert.equal(preview.budget.usedTokens, runtime.tokenCount);
+  current = (
+    await service.update(workspacePath, {
+      workspacePath,
+      itemId,
+      expectedVersion: current.version,
+      idempotencyKey: "clear-date",
+      temporalType: "undated",
+      eventStartedAt: null,
+      eventEndedAt: null,
+    })
+  ).item;
+  assert.equal(current.temporalType, "undated");
+  assert.equal(current.eventStartedAt, null);
+  assert.equal(current.eventEndedAt, null);
 });

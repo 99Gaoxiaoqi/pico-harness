@@ -158,6 +158,7 @@ export interface ProviderCallRecord {
   jobId?: string | undefined;
   attemptId?: string | undefined;
   purpose: ProviderCallPurpose;
+  memory?: RequestContextFacts["memory"];
   provider: string;
   model: string;
   route?: string | undefined;

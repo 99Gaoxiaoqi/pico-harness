@@ -45,6 +45,14 @@ test("usage dashboard joins real model and tool ledgers across workspaces, prese
       model: "same-model",
       status: "prepared" as const,
       usageBasis: "missing" as const,
+      contextFacts: {
+        version: 1 as const,
+        memory: {
+          trigger: "extract" as const,
+          stage: "proposal" as const,
+          operationId: "memory-observation",
+        },
+      },
       accountingVersion: 1 as const,
       accountingSource: "physical" as const,
       revision: 0,
@@ -186,6 +194,12 @@ test("usage dashboard joins real model and tool ledgers across workspaces, prese
   assert.equal(details.cacheReadReportedCallCount, 2);
   assert.equal(details.activityCount, 4);
   for (const row of details.activities.filter((row) => row.kind === "model")) {
+    assert.deepEqual(row.memory, {
+      trigger: "extract",
+      stage: "proposal",
+      operationId: "memory-observation",
+    });
+    if (row.costStatus === "unknown") assert.equal(row.costCNY, undefined);
     assert.equal(row.cacheReadReported, true);
     assert.equal(row.cacheWriteReported, false);
   }

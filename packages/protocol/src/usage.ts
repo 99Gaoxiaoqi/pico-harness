@@ -8,6 +8,11 @@ export interface UsageActivity {
   readonly provider?: string;
   readonly model?: string;
   readonly purpose?: string;
+  readonly memory?: {
+    readonly trigger: "remember" | "extract" | "compaction";
+    readonly stage: "proposal" | "localized" | "canonicalize";
+    readonly operationId: string;
+  };
   readonly goalId?: string;
   readonly workspacePath: string;
   readonly sessionId?: string;
@@ -97,6 +102,7 @@ export function parseUsageDashboard(value: unknown): UsageDashboardDetails {
         ...optionalText(row, "provider"),
         ...optionalText(row, "model"),
         ...optionalText(row, "purpose"),
+        ...(row.memory === undefined ? {} : { memory: memoryAttribution(row.memory) }),
         ...optionalText(row, "goalId"),
         ...optionalText(row, "sessionId"),
         ...optionalText(row, "sessionTitle"),
@@ -162,6 +168,15 @@ function breakdown(value: unknown): UsageBreakdown {
     costStatus: costStatus(row.costStatus),
     ...optionalNumber(row, "costCNY"),
     ...optionalNumber(row, "averageDurationMs"),
+  };
+}
+
+function memoryAttribution(value: unknown): NonNullable<UsageActivity["memory"]> {
+  const row = object(value);
+  return {
+    trigger: choice(row.trigger, ["remember", "extract", "compaction"] as const),
+    stage: choice(row.stage, ["proposal", "localized", "canonicalize"] as const),
+    operationId: text(row.operationId),
   };
 }
 function tokens(row: Record<string, unknown>) {
