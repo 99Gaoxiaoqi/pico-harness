@@ -1,6 +1,12 @@
 import { countTokens, primeTokenizer } from "../token-counter.js";
 import type { MemoryItemRecord, MemorySearchSignals } from "@pico/core/atomic-memory-contracts";
 import type { AtomicMemoryStore } from "@pico/core/atomic-memory-runtime-contracts";
+import type {
+  MemoryRecallTrace,
+  MemoryRecallSelectedItem,
+  MemoryRecallDiagnostic,
+} from "@pico/core";
+import { createMemoryRecallTrace, memoryRecallSelectedItem } from "../memory-recall-trace.js";
 import {
   collectMemorySearchSignals,
   normalizeMemorySearchText,
@@ -13,6 +19,14 @@ const AUTO_MAX_TOKENS = 320;
 // Ten 480-token references plus the outer low-trust wrapper.
 const SEARCH_MAX_TOKENS = 5_120;
 const SEARCH_ITEM_TOKENS = 480;
+export const ATOMIC_MEMORY_CONTEXT_LIMITS = {
+  automatic: { maxItems: AUTO_MAX_ITEMS, maxTokens: AUTO_MAX_TOKENS },
+  search: {
+    maxItems: SEARCH_MAX_ITEMS,
+    maxTokens: SEARCH_MAX_TOKENS,
+    maxItemTokens: SEARCH_ITEM_TOKENS,
+  },
+} as const;
 const SEARCH_LIMIT = 100;
 const RESIDENT_WINDOW = 500;
 // Persisted by the Host reference-note helper; keep the layers independent.
@@ -44,6 +58,8 @@ export interface AtomicMemoryContextOptions {
   readonly mode?: "automatic" | "search";
   readonly maxItems?: number;
   readonly maxTokens?: number;
+  /** Host-owned provenance. Preview omits this and remains a read-only projection. */
+  readonly trace?: { readonly queryRef?: MemoryRecallTrace["queryRef"] };
 }
 
 export interface AtomicMemoryContextResult {
@@ -53,6 +69,8 @@ export interface AtomicMemoryContextResult {
   readonly diagnostics: readonly AtomicMemoryRecallDiagnostic[];
   readonly tokenCount: number;
   readonly truncated: boolean;
+  readonly trace?: MemoryRecallTrace;
+  readonly traceUnavailable?: true;
 }
 
 interface Candidate {
@@ -78,8 +96,57 @@ export class AtomicMemoryContextBuilder {
     const search = options.mode === "search";
     const maxItems = boundedLimit(options.maxItems, search ? SEARCH_MAX_ITEMS : AUTO_MAX_ITEMS);
     const maxTokens = boundedLimit(options.maxTokens, search ? SEARCH_MAX_TOKENS : AUTO_MAX_TOKENS);
+    const traceStartedAt = options.trace ? performance.now() : 0;
     const settings = await this.store.readSettings(this.workspaceKey);
-    if (!settings.enabled || !settings.recallEnabled) return emptyResult();
+    const traceSelected: MemoryRecallSelectedItem[] = [];
+    const traceDiagnostics: MemoryRecallDiagnostic[] = [];
+    let traceUnavailable = false;
+    const finish = (
+      result: AtomicMemoryContextResult,
+      outcome: MemoryRecallTrace["outcome"],
+      stages: MemoryRecallTrace["stages"] = {
+        exact: 0,
+        prefix: 0,
+        content: 0,
+        compound: 0,
+        candidates: 0,
+      },
+    ): AtomicMemoryContextResult => {
+      if (!options.trace) return result;
+      if (traceUnavailable) return { ...result, traceUnavailable: true };
+      try {
+        const counts = { selected: 0, duplicate: 0, budget: 0, item_limit: 0 };
+        for (const diagnostic of result.diagnostics) counts[diagnostic.reason]++;
+        return {
+          ...result,
+          trace: createMemoryRecallTrace({
+            mode: search ? "search" : "automatic",
+            workspaceKey: this.workspaceKey,
+            settingsVersion: settings.version,
+            ...(query !== undefined ? { query } : {}),
+            ...(options.trace.queryRef ? { queryRef: options.trace.queryRef } : {}),
+            outcome,
+            block: result.block,
+            stages,
+            budget: {
+              maxItems,
+              maxTokens,
+              usedItems: result.items.length,
+              usedTokens: result.tokenCount,
+              ...(search ? { maxItemTokens: SEARCH_ITEM_TOKENS } : {}),
+              truncated: result.truncated,
+            },
+            counts,
+            selected: traceSelected,
+            diagnostics: traceDiagnostics,
+            elapsedMs: Math.max(0, performance.now() - traceStartedAt),
+          }),
+        };
+      } catch {
+        return { ...result, traceUnavailable: true };
+      }
+    };
+    if (!settings.enabled || !settings.recallEnabled) return finish(emptyResult(), "disabled");
 
     const signals = collectMemorySearchSignals(query);
     const terms = [...new Set([...signals.paths, ...signals.tokens, ...signals.cjkBigrams])];
@@ -156,7 +223,14 @@ export class AtomicMemoryContextBuilder {
         .sort(compareRecent)[0];
       if (preference) candidates.push({ record: preference, score: 0, match: "preference" });
     }
-    if (!candidates.length) return emptyResult();
+    const stages = {
+      exact: exact.filter(visible).length,
+      prefix: prefix.filter(visible).length,
+      content: content.filter(visible).length,
+      compound: compoundMatches.filter(visible).length,
+      candidates: candidates.length,
+    };
+    if (!candidates.length) return finish(emptyResult(), "no_hits", stages);
 
     await primeTokenizer();
     const selected: MemoryItemRecord[] = [];
@@ -165,12 +239,21 @@ export class AtomicMemoryContextBuilder {
     const duplicateKeys = new Set<string>();
     const lines: string[] = [];
     let truncated = false;
-    for (const { record, match } of candidates) {
+    for (const [index, { record, match, score }] of candidates.entries()) {
       const note = referenceNote(record);
       const source = note ? "assistant-note" : record.sources.length ? "user-evidence" : "manual";
       const duplicate = duplicateKey(record, source);
       const diagnostic = (reason: AtomicMemoryRecallDiagnostic["reason"]): void => {
         diagnostics.push({ itemId: record.item.itemId, reason, match });
+        if (options.trace && reason !== "selected") {
+          traceDiagnostics.push({
+            itemId: record.item.itemId,
+            reason,
+            match,
+            rank: index + 1,
+            score,
+          });
+        }
       };
       if (duplicate && duplicateKeys.has(duplicate)) {
         diagnostic("duplicate");
@@ -202,18 +285,40 @@ export class AtomicMemoryContextBuilder {
       references.push(rendered.reference);
       lines.push(rendered.line);
       diagnostic("selected");
+      if (options.trace) {
+        try {
+          traceSelected.push(
+            memoryRecallSelectedItem({
+              record,
+              match,
+              source,
+              rank: index + 1,
+              score,
+              reference: rendered.reference,
+              renderedLine: rendered.line,
+            }),
+          );
+        } catch {
+          traceUnavailable = true;
+        }
+      }
       truncated ||= rendered.reference.excerpt;
     }
-    if (!selected.length) return { ...emptyResult(), diagnostics, truncated };
+    if (!selected.length)
+      return finish({ ...emptyResult(), diagnostics, truncated }, "budget_exhausted", stages);
     const block = formatBlock(lines, truncated);
-    return {
-      block,
-      items: selected,
-      references,
-      diagnostics,
-      tokenCount: countTokens(block),
-      truncated,
-    };
+    return finish(
+      {
+        block,
+        items: selected,
+        references,
+        diagnostics,
+        tokenCount: countTokens(block),
+        truncated,
+      },
+      "selected",
+      stages,
+    );
   }
 }
 

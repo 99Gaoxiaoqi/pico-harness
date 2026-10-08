@@ -10,7 +10,7 @@ export interface AtomicMemoryToolPort {
 }
 
 export interface AtomicMemorySearchPort {
-  search(query: string): Promise<string>;
+  search(query: string, context?: ToolExecutionContext): Promise<string>;
 }
 
 export function buildMemorySearchTool(port: AtomicMemorySearchPort): BaseTool {
@@ -41,7 +41,7 @@ class MemorySearchTool implements BaseTool {
   accesses() {
     return ToolAccesses.none();
   }
-  async execute(args: string): Promise<string> {
+  async execute(args: string, context?: ToolExecutionContext): Promise<string> {
     const input: unknown = JSON.parse(args);
     if (
       !input ||
@@ -54,7 +54,7 @@ class MemorySearchTool implements BaseTool {
       input.query.length > 4096
     )
       throw new Error("memory_search accepts a non-empty query only (maximum 4096 characters)");
-    return this.port.search(input.query.trim());
+    return this.port.search(input.query.trim(), context);
   }
 }
 

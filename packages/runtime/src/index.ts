@@ -1,4 +1,6 @@
 export * from "./atomic-memory-lifecycle.js";
+export * from "./memory-recall-trace.js";
+export * from "./memory-recall-request.js";
 export * from "./approval-policy.js";
 export * from "./automation-tool-policy.js";
 export * from "./agent-graph-control-store-adapter.js";

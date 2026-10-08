@@ -243,7 +243,12 @@ import type {
   RuntimeExecution,
   RuntimeLifecycleEvent,
 } from "@pico/runtime/runtime-contract";
-import { AtomicMemoryContextBuilder } from "@pico/runtime/atomic-memory/context-builder";
+import {
+  AtomicMemoryContextBuilder,
+  ATOMIC_MEMORY_CONTEXT_LIMITS,
+} from "@pico/runtime/atomic-memory/context-builder";
+import { createMemoryRecallTrace, MemoryRecallRequestTracker } from "@pico/runtime";
+import type { MemoryRecallTrace } from "@pico/core";
 import {
   buildMemorySearchTool,
   buildMemoryTriggerTools,
@@ -1223,6 +1228,52 @@ export async function executeAgentRuntime(
       return (await memoryTrustStore.isTrusted(canonical))
         ? { allowed: true as const }
         : { allowed: false as const, reason: "workspace_untrusted" };
+    };
+    const memoryWorkspaceKey = resolvePicoPaths(workDir, { picoHome }).workspace.id;
+    const recallTracker = new MemoryRecallRequestTracker({
+      record: async (trace) => {
+        const run = currentRuntimeRun();
+        return run?.claimsSession(session) ? run.recordRecall(trace) : undefined;
+      },
+      readHistory: async () => {
+        const slice = await session.runtimeEventStore?.readSessionEntriesOfKinds(session.id, [
+          "memory.recall.recorded",
+        ]);
+        return (slice?.entries ?? []).flatMap(({ event }) =>
+          event.kind === "memory.recall.recorded" && event.data.workspaceKey === memoryWorkspaceKey
+            ? [{ eventId: event.eventId, trace: event.data }]
+            : [],
+        );
+      },
+      onUnavailable: () => logger.warn("[Memory] recall trace unavailable"),
+    });
+    const recordRecallOutcome = async (
+      mode: MemoryRecallTrace["mode"],
+      query: string,
+      outcome: MemoryRecallTrace["outcome"],
+      queryRef?: MemoryRecallTrace["queryRef"],
+      settingsVersion?: number,
+    ) => {
+      try {
+        await recallTracker.record(
+          createMemoryRecallTrace({
+            mode,
+            workspaceKey: memoryWorkspaceKey,
+            query,
+            outcome,
+            ...(queryRef ? { queryRef } : {}),
+            ...(settingsVersion !== undefined ? { settingsVersion } : {}),
+            budget: {
+              ...ATOMIC_MEMORY_CONTEXT_LIMITS[mode],
+              usedItems: 0,
+              usedTokens: 0,
+              truncated: false,
+            },
+          }),
+        );
+      } catch {
+        recallTracker.unavailable(mode);
+      }
     };
     const memoryExtractionAllowed = async () =>
       collaborationMode() !== "agent"
@@ -2509,24 +2560,42 @@ export async function executeAgentRuntime(
     if (memoryContextBuilder && memoryRepository) {
       const builder = memoryContextBuilder;
       const repository = memoryRepository;
-      const workspaceKey = resolvePicoPaths(workDir, { picoHome }).workspace.id;
-      const checkSearchAdmission = async () => {
-        const gate = await memoryRecallAllowed();
-        if (!gate.allowed) throw new Error(`Memory search unavailable: ${gate.reason}`);
-        const settings = await repository.readSettings(workspaceKey);
-        if (!settings.enabled || !settings.recallEnabled)
-          throw new Error("Memory search unavailable: memory_disabled");
-      };
       registry.register(
         buildMemorySearchTool({
-          search: async (query) => {
-            await checkSearchAdmission();
-            const result = await builder.build(query, { mode: "search" });
-            await checkSearchAdmission();
-            return (
-              result.block ||
-              '<atomic-memory-reference trust="low">No matching active memory.</atomic-memory-reference>'
-            );
+          search: async (query, context) => {
+            const queryRef = context?.toolCallId ? { toolCallId: context.toolCallId } : undefined;
+            let outcome: MemoryRecallTrace["outcome"] = "error";
+            let settingsVersion: number | undefined;
+            const checkSearchAdmission = async () => {
+              const gate = await memoryRecallAllowed();
+              if (!gate.allowed) {
+                outcome = "admission_denied";
+                throw new Error(`Memory search unavailable: ${gate.reason}`);
+              }
+              const settings = await repository.readSettings(memoryWorkspaceKey);
+              settingsVersion = settings.version;
+              if (!settings.enabled || !settings.recallEnabled) {
+                outcome = "disabled";
+                throw new Error("Memory search unavailable: memory_disabled");
+              }
+            };
+            try {
+              await checkSearchAdmission();
+              const result = await builder.build(query, {
+                mode: "search",
+                trace: { ...(queryRef ? { queryRef } : {}) },
+              });
+              await checkSearchAdmission();
+              if (result.trace) await recallTracker.record(result.trace);
+              else recallTracker.unavailable("search");
+              return (
+                result.block ||
+                '<atomic-memory-reference trust="low">No matching active memory.</atomic-memory-reference>'
+              );
+            } catch (error) {
+              await recordRecallOutcome("search", query, outcome, queryRef, settingsVersion);
+              throw error;
+            }
           },
         }),
       );
@@ -2542,8 +2611,10 @@ export async function executeAgentRuntime(
     }
     const promptLayersFactory = async ({
       currentUserPrompt,
+      currentUserEventId,
     }: {
       readonly currentUserPrompt: string;
+      readonly currentUserEventId?: string;
     }) => {
       const composed = await new PromptComposer(workDir, collaborationMode() === "plan", {
         researchMode: collaborationMode() === "research",
@@ -2631,18 +2702,31 @@ export async function executeAgentRuntime(
           "[SessionTasks] prompt injection degraded",
         );
       }
-      if (memoryContextBuilder) {
-        try {
-          if ((await memoryRecallAllowed()).allowed) {
-            const memory = await memoryContextBuilder.build(currentUserPrompt);
-            if (memory.block) turnTailParts.push(memory.block);
-          }
-        } catch (error) {
-          logger.warn(
-            { workDir, error: error instanceof Error ? error.message : String(error) },
-            "[Memory] recall injection degraded",
+      const recallQueryRef = currentUserEventId ? { eventId: currentUserEventId } : undefined;
+      try {
+        if (!(await memoryRecallAllowed()).allowed) {
+          await recordRecallOutcome(
+            "automatic",
+            currentUserPrompt,
+            "admission_denied",
+            recallQueryRef,
           );
+        } else if (!memoryContextBuilder) {
+          await recordRecallOutcome("automatic", currentUserPrompt, "error", recallQueryRef);
+        } else {
+          const memory = await memoryContextBuilder.build(currentUserPrompt, {
+            trace: { ...(recallQueryRef ? { queryRef: recallQueryRef } : {}) },
+          });
+          if (memory.block) turnTailParts.push(memory.block);
+          if (memory.trace) await recallTracker.record(memory.trace);
+          else recallTracker.unavailable("automatic");
         }
+      } catch (error) {
+        await recordRecallOutcome("automatic", currentUserPrompt, "error", recallQueryRef);
+        logger.warn(
+          { workDir, error: error instanceof Error ? error.message : String(error) },
+          "[Memory] recall injection degraded",
+        );
       }
       if (
         !backgroundPolicy &&
@@ -2698,6 +2782,7 @@ export async function executeAgentRuntime(
           : {}),
       ...(maxTurns !== undefined ? { maxTurns } : {}),
       promptLayersFactory,
+      memoryRecallContext: (messages) => recallTracker.context(messages),
       goalManager,
       todoStore,
       toolDisclosure,

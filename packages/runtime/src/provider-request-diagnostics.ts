@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 import { FULL_COMPACTION_SUMMARY_MARKER } from "@pico/core";
 import type { PreparedProviderRequest } from "@pico/core";
+import {
+  isPreparedMemoryRecallDiagnostic,
+  type PreparedMemoryRecallDiagnostic,
+} from "./memory-recall-request.js";
 
 export type PreparedRequestSegmentKind =
   | "tool_schema"
@@ -41,6 +45,8 @@ export interface PreparedRequestCapture {
   cacheBreakpoints?: PreparedRequestCacheBreakpoint[];
   /** Hash only; never persists the compaction summary text. */
   fullCompactionSummaryHash?: string;
+  /** Exact memory reference presence in this prepared body; never a delivery or use claim. */
+  memoryRecall?: PreparedMemoryRecallDiagnostic;
 }
 
 export type PreparedRequestChangeReason =
@@ -164,6 +170,7 @@ export function parsePreparedRequestCapture(value: unknown): PreparedRequestCapt
   const rawSegments = value["segments"];
   const rawCacheBreakpoints = value["cacheBreakpoints"];
   const fullCompactionSummaryHash = value["fullCompactionSummaryHash"];
+  const memoryRecall = value["memoryRecall"];
   if (
     (provider !== "claude" && provider !== "openai" && provider !== "responses") ||
     typeof model !== "string" ||
@@ -174,7 +181,8 @@ export function parsePreparedRequestCapture(value: unknown): PreparedRequestCapt
     (rawCacheBreakpoints !== undefined && !Array.isArray(rawCacheBreakpoints)) ||
     (fullCompactionSummaryHash !== undefined &&
       (typeof fullCompactionSummaryHash !== "string" ||
-        !/^[a-f0-9]{64}$/u.test(fullCompactionSummaryHash)))
+        !/^[a-f0-9]{64}$/u.test(fullCompactionSummaryHash))) ||
+    (memoryRecall !== undefined && !isPreparedMemoryRecallDiagnostic(memoryRecall))
   ) {
     return undefined;
   }
@@ -202,6 +210,7 @@ export function parsePreparedRequestCapture(value: unknown): PreparedRequestCapt
     segments,
     ...(rawCacheBreakpoints ? { cacheBreakpoints } : {}),
     ...(typeof fullCompactionSummaryHash === "string" ? { fullCompactionSummaryHash } : {}),
+    ...(isPreparedMemoryRecallDiagnostic(memoryRecall) ? { memoryRecall } : {}),
   };
 }
 

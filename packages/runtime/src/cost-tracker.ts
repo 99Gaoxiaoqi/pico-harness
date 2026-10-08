@@ -61,6 +61,7 @@ import {
   type PreparedRequestCapture,
   type PreparedRequestDiagnostic,
 } from "@pico/runtime/provider-request-diagnostics";
+import { capturePreparedMemoryRecall } from "./memory-recall-request.js";
 
 export interface ProviderCallLedger {
   beginPhysicalAttemptOwner?(): string;
@@ -236,13 +237,23 @@ export class CostTracker implements LLMProvider {
       provider: route.provider,
       model: route.model,
       purpose: context.purpose,
+      ...(contextFacts.memoryRecall
+        ? {
+            recallEventIds: contextFacts.memoryRecall.recalls.map((recall) => recall.recallEventId),
+          }
+        : {}),
     });
     let requestDiagnostic: PreparedRequestDiagnostic | undefined;
     const requestRoute = preparedRequestRoute(this.modelRoute);
     const logicalCallPriors = new Map<string, PreparedRequestCapture | undefined>();
     const observeRequest = (request: PreparedProviderRequest): void => {
       try {
-        const current = capturePreparedProviderRequest(request);
+        const current = {
+          ...capturePreparedProviderRequest(request),
+          ...(contextFacts.memoryRecall
+            ? { memoryRecall: capturePreparedMemoryRecall(request, contextFacts.memoryRecall) }
+            : {}),
+        };
         const key = preparedRequestKey(context, current, requestRoute);
         let prior: PreparedRequestCapture | undefined;
         if (logicalCallPriors.has(key)) {
