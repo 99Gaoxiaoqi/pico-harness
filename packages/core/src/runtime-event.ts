@@ -212,9 +212,8 @@ export interface RuntimeCheckpointRecordedEventData {
   readonly coveredEventCount: number;
   readonly sourceDigest: string;
   readonly throughEventId: string;
-  readonly memoryExtractionBoundary?: {
+  readonly memoryExtractionBoundary?: RuntimeMemoryExtractionBoundary & {
     readonly runtimeEventId: string;
-    readonly disposition: "eligible" | "policy_denied";
   };
   readonly summary: Message;
   readonly previousCheckpointId?: string;
@@ -390,7 +389,7 @@ export type RuntimePlanEvent =
   | RuntimePlanExecutionCompletedEvent
   | RuntimePlanExecutionCancelledEvent;
 
-/** Frozen host admission; absent on legacy runs, which are not automatic extraction requests. */
+/** Frozen host admission; legacy facts without generations cannot authorize extraction. */
 export interface RuntimeMemoryExtractionBoundary {
   readonly disposition: "eligible" | "policy_denied";
   readonly deletionRevision?: number;

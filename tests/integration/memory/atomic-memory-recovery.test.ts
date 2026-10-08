@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import type { RuntimeMemoryExtractionBoundary } from "@pico/core";
 import { FullCompactor } from "@pico/pico-host/product-full-compactor";
 import { recordRuntimeCompactionCheckpoint } from "@pico/runtime/runtime-compaction-checkpoint";
 import { Session } from "@pico/pico-host/session";
@@ -61,12 +62,28 @@ for (const scenario of [
     completedDisposition: "eligible",
   },
   {
-    name: "temporary admission failure still records an eligible checkpoint for later recovery",
+    name: "temporary admission failure preserves compaction without reauthorizing old coverage",
+    initialAuto: true,
+    laterAuto: true,
+    tagged: true,
+    recoveredCalls: 0,
+    admissionFailure: true,
+  },
+  {
+    name: "a tagged legacy checkpoint without generations cannot authorize automatic recovery",
+    initialAuto: true,
+    laterAuto: true,
+    tagged: true,
+    recoveredCalls: 0,
+    legacyAdmission: true,
+  },
+  {
+    name: "temporary gate denial recovers the original frozen checkpoint admission",
     initialAuto: true,
     laterAuto: true,
     tagged: true,
     recoveredCalls: 1,
-    admissionFailure: true,
+    temporaryGate: true,
   },
   {
     name: "remember cannot bypass disabled automatic extraction for an older checkpoint",
@@ -99,13 +116,14 @@ for (const scenario of [
     await session.recover();
     const requests: MemoryModelRequest[] = [];
     let requestedSourceRef = "";
-    const createRuntime = () =>
+    const createRuntime = (temporaryGate = false) =>
       new AtomicMemoryRuntime({
         workDir,
         picoHome,
         sessionId,
         supported: true,
-        gate: async () => ({ allowed: true }),
+        gate: async () =>
+          temporaryGate ? { allowed: false, reason: "unavailable" } : { allowed: true },
         modelFactory: async () => ({
           model: {
             async call(request) {
@@ -148,10 +166,11 @@ for (const scenario of [
           },
         }),
       });
-    const updateAutoExtract = async (autoExtract: boolean) => {
+    const updateAutoExtract = async (autoExtract: boolean, forceRevision = false) => {
       const store = new SqliteMemoryItemStore(join(picoHome, "memory.sqlite"));
       try {
         const settings = await store.readSettings(paths.workspace.id);
+        if (settings.autoExtract === autoExtract && !forceRevision) return;
         await store.updateSettings({
           workspaceKey: paths.workspace.id,
           expectedVersion: settings.version,
@@ -162,11 +181,27 @@ for (const scenario of [
       }
     };
     await updateAutoExtract(scenario.initialAuto);
-    const firstRuntime = createRuntime();
+    const firstRuntime = createRuntime("temporaryGate" in scenario);
     const firstRun = await RuntimeRun.start({
       capability: session.runtimeEventCapability!,
       agentSwarmAuthorization: "none",
     });
+    if ("legacyAdmission" in scenario) {
+      const recordCheckpoint = firstRun.recordCheckpoint.bind(firstRun);
+      t.mock.method(
+        firstRun,
+        "recordCheckpoint",
+        async (input: Parameters<RuntimeRun["recordCheckpoint"]>[0]) =>
+          recordCheckpoint({
+            ...input,
+            memoryExtractionBoundary: {
+              runtimeEventId: input.throughEventId,
+              disposition: "eligible",
+            },
+          }),
+      );
+    }
+    let checkpointAdmission: RuntimeMemoryExtractionBoundary | undefined;
     const checkpoint = await firstRun.run(async () => {
       await firstRun.commitMessages(session, [
         { role: "user", content: `${oldFact} ${"Old context. ".repeat(80)}` },
@@ -197,11 +232,12 @@ for (const scenario of [
         request: { inputBudgetTokens: 4000, targetRetainedTokens: 1, trigger: "manual" },
         ...(scenario.tagged
           ? {
-              memoryDisposition: async () => {
+              memoryAdmission: async () => {
                 if ("admissionFailure" in scenario) {
                   throw new Error("temporary memory policy reader failure");
                 }
-                return firstRuntime.compactionDisposition();
+                checkpointAdmission = await firstRuntime.compactionAdmission();
+                return checkpointAdmission;
               },
             }
           : {}),
@@ -231,7 +267,11 @@ for (const scenario of [
       scenario.tagged
         ? {
             runtimeEventId: checkpointEvent.data.throughEventId,
-            disposition: scenario.initialAuto ? "eligible" : "policy_denied",
+            ...("legacyAdmission" in scenario
+              ? { disposition: "eligible" }
+              : "admissionFailure" in scenario
+                ? { disposition: "policy_denied" }
+                : checkpointAdmission),
           }
         : undefined,
     );
@@ -253,7 +293,10 @@ for (const scenario of [
     await session.close();
     session = new Session(sessionId, workDir, { persistence: true, picoHome });
     await session.recover();
-    await updateAutoExtract(scenario.laterAuto);
+    await updateAutoExtract(
+      scenario.laterAuto,
+      "completedDisposition" in scenario && scenario.completedDisposition === "eligible",
+    );
     const recovered = createRuntime();
     if (!scenario.tagged) {
       await recovered.checkpoint(checkpoint.checkpointId);

@@ -4,6 +4,7 @@ import type {
   Message,
   ToolDefinition,
   RequestContextFacts,
+  RuntimeMemoryExtractionBoundary,
   ToolCall,
   ToolResult,
   ToolResultEnvelopeInput,
@@ -31,9 +32,8 @@ export interface RuntimeCheckpointInput {
   readonly coveredEventCount: number;
   readonly sourceDigest: string;
   readonly throughEventId: string;
-  readonly memoryExtractionBoundary?: {
+  readonly memoryExtractionBoundary?: RuntimeMemoryExtractionBoundary & {
     readonly runtimeEventId: string;
-    readonly disposition: "eligible" | "policy_denied";
   };
   readonly summary: Message;
   /** 滚动摘要链:上一个 checkpoint 的 id(若存在)。 */

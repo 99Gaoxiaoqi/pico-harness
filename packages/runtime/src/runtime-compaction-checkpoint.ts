@@ -7,6 +7,7 @@ import {
   CONTENT_DIGEST_V1_PREFIX,
   computeCheckpointSourceDigest,
   type CheckpointDigestEntry,
+  type RuntimeMemoryExtractionBoundary,
 } from "@pico/core";
 import type {
   FullCompactionPreview,
@@ -57,6 +58,8 @@ export interface RuntimeCompactionCheckpointOptions<
   readonly compactor: FullCompactor;
   readonly request: FullCompactionRequest;
   readonly hookService?: RuntimeFullCompactionHookService;
+  readonly memoryAdmission?: () => Promise<RuntimeMemoryExtractionBoundary | undefined>;
+  /** @deprecated A disposition without frozen generations cannot authorize extraction. */
   readonly memoryDisposition?: () => Promise<"eligible" | "policy_denied" | undefined>;
   readonly signal?: AbortSignal;
   readonly logger?: RuntimeCompactionCheckpointLogger;
@@ -116,16 +119,26 @@ export async function recordRuntimeCompactionCheckpoint<
   }
 
   const checkpointId = `checkpoint:${randomUUID()}`;
-  let disposition: "eligible" | "policy_denied" | undefined;
+  let admission: RuntimeMemoryExtractionBoundary | undefined;
   try {
-    disposition = await options.memoryDisposition?.();
+    if (options.memoryAdmission) {
+      admission = await options.memoryAdmission();
+    } else {
+      const disposition = await options.memoryDisposition?.();
+      if (disposition) admission = { disposition };
+    }
+    if (
+      admission?.disposition === "eligible" &&
+      (admission.deletionRevision === undefined || admission.settingsVersion === undefined)
+    )
+      admission = { disposition: "policy_denied" };
   } catch (error) {
     // Temporary memory failures must not prevent the ordinary context checkpoint.
-    // Eligibility only permits recovery; extraction still checks live policy.
-    disposition = "eligible";
+    // Unknown generations cannot be refreshed into a later automatic authorization.
+    admission = { disposition: "policy_denied" };
     logger.warn(
       { error: String(error), checkpointId },
-      "[Memory] checkpoint admission unavailable; recovery deferred",
+      "[Memory] checkpoint admission unavailable; automatic coverage denied",
     );
   }
   await runtimeRun.recordCheckpoint({
@@ -133,8 +146,8 @@ export async function recordRuntimeCompactionCheckpoint<
     coveredEventCount: covered.length,
     sourceDigest: computeCheckpointSourceDigest(covered),
     throughEventId: through.eventId,
-    ...(disposition
-      ? { memoryExtractionBoundary: { runtimeEventId: through.eventId, disposition } }
+    ...(admission
+      ? { memoryExtractionBoundary: { runtimeEventId: through.eventId, ...admission } }
       : {}),
     summary: {
       role: "assistant",
