@@ -1,7 +1,18 @@
 import {
-  SECTIONED_SUMMARY_FORMAT,
+  LEGACY_SECTIONED_SUMMARY_FORMAT,
+  type SectionedSummaryFormat,
   findCheckpointSummaryDefect,
 } from "./history-compact-summary-validation.js";
+import {
+  HANDOFF_EVIDENCE_METADATA_KEY,
+  attachCompactionEvidenceSources,
+  compactionSummarySha256,
+  extractCompactionEvidenceReferences,
+  isCompactionEvidenceMetadata,
+  type CompactionEvidenceMetadata,
+  type CompactionEvidenceResolveRequest,
+  type CompactionEvidenceResolver,
+} from "./compaction-handoff-evidence.js";
 import { randomUUID } from "node:crypto";
 import {
   CONTENT_DIGEST_V1_PREFIX,
@@ -39,7 +50,14 @@ const NOOP_LOGGER: RuntimeCompactionCheckpointLogger = {
 export interface RuntimeCompactionCheckpointRun<Session> {
   claimsSession(session: Session): boolean;
   readModelHistoryEntries(): Promise<readonly RuntimeHistoryEntry[]>;
-  findLastCompactionCheckpoint(): Promise<RuntimeLastCompactionCheckpoint | undefined>;
+  findLastCompactionCheckpoint(): Promise<
+    | (RuntimeLastCompactionCheckpoint & {
+        readonly summaryFormat?: SectionedSummaryFormat;
+        readonly evidence?: CompactionEvidenceMetadata;
+      })
+    | undefined
+  >;
+  readonly resolveCompactionEvidenceReferences?: CompactionEvidenceResolver;
   recordCheckpoint(input: RuntimeCheckpointInput): Promise<void>;
 }
 
@@ -94,16 +112,67 @@ export async function recordRuntimeCompactionCheckpoint<
     { source, messageCount: entries.length },
     signal ? { signal } : {},
   );
+  let handoffEvidence: CompactionEvidenceMetadata | undefined;
+  const validateSummary = async (summaryText: string, compactedCount: number) => {
+    const throughEventId = entries[compactedCount - 1]?.eventId;
+    const references = extractCompactionEvidenceReferences(summaryText);
+    if (!throughEventId || !references) return "malformed_summary_invalid_evidence_reference";
+    const input: CompactionEvidenceResolveRequest = {
+      sessionId: session.id,
+      throughEventId,
+      ...(lastCheckpoint ? { previousCheckpointId: lastCheckpoint.checkpointId } : {}),
+      summaryText,
+      references,
+    };
+    const resolved = runtimeRun.resolveCompactionEvidenceReferences
+      ? await runtimeRun.resolveCompactionEvidenceReferences(input)
+      : references.length === 0
+        ? {
+            version: 1 as const,
+            sessionId: input.sessionId,
+            throughEventId: input.throughEventId,
+            ...(input.previousCheckpointId
+              ? { previousCheckpointId: input.previousCheckpointId }
+              : {}),
+            summarySha256: compactionSummarySha256(summaryText),
+            references: [],
+          }
+        : undefined;
+    if (
+      !isCompactionEvidenceMetadata(resolved) ||
+      resolved.sessionId !== input.sessionId ||
+      resolved.throughEventId !== input.throughEventId ||
+      resolved.previousCheckpointId !== input.previousCheckpointId ||
+      resolved.summarySha256 !== compactionSummarySha256(summaryText) ||
+      JSON.stringify(resolved.references.map(({ eventId }) => eventId)) !==
+        JSON.stringify(references)
+    )
+      return "malformed_summary_invalid_evidence_reference";
+    const additionalDefect = await request.validateSummary?.(summaryText, compactedCount);
+    if (additionalDefect) return additionalDefect;
+    handoffEvidence = resolved;
+    return undefined;
+  };
   const preview = await compactor.preview(
     session,
     entries.map(({ message }) => message),
-    request,
+    { ...request, sourceEventIds: entries.map(({ eventId }) => eventId), validateSummary },
     signal,
-    lastCheckpoint?.summaryText && !findCheckpointSummaryDefect(lastCheckpoint.summaryText)
+    lastCheckpoint?.summaryText &&
+      !findCheckpointSummaryDefect(
+        lastCheckpoint.summaryText,
+        undefined,
+        lastCheckpoint.summaryFormat ?? LEGACY_SECTIONED_SUMMARY_FORMAT,
+      )
       ? lastCheckpoint.summaryText
       : undefined,
   );
-  if (!preview || !preview.summary.trim() || findCheckpointSummaryDefect(preview.summary))
+  if (
+    !preview ||
+    !preview.summary.trim() ||
+    findCheckpointSummaryDefect(preview.summary, undefined, preview.summaryFormat) ||
+    !handoffEvidence
+  )
     return undefined;
 
   signal?.throwIfAborted();
@@ -118,6 +187,8 @@ export async function recordRuntimeCompactionCheckpoint<
     return undefined;
   }
 
+  // Re-resolve after preview; the final RuntimeRun commit also owns its own strong validation.
+  if (await validateSummary(preview.summary, preview.compactedCount)) return undefined;
   const checkpointId = `checkpoint:${randomUUID()}`;
   let admission: RuntimeMemoryExtractionBoundary | undefined;
   try {
@@ -151,11 +222,12 @@ export async function recordRuntimeCompactionCheckpoint<
       : {}),
     summary: {
       role: "assistant",
-      content: preview.wrappedSummary,
+      content: attachCompactionEvidenceSources(preview.wrappedSummary, handoffEvidence!),
       providerData: {
         picoKind: "runtime_checkpoint",
         picoCheckpointId: checkpointId,
-        picoSummaryFormat: SECTIONED_SUMMARY_FORMAT,
+        picoSummaryFormat: preview.summaryFormat,
+        [HANDOFF_EVIDENCE_METADATA_KEY]: handoffEvidence,
       },
     },
     ...(lastCheckpoint ? { previousCheckpointId: lastCheckpoint.checkpointId } : {}),
@@ -182,3 +254,5 @@ export async function recordRuntimeCompactionCheckpoint<
     afterMessageCount,
   };
 }
+
+export * from "./compaction-handoff-evidence.js";

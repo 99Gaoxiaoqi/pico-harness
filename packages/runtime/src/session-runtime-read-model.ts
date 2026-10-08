@@ -1,4 +1,8 @@
-import { isValidStoredCompactionSummary } from "./history-compact-summary-validation.js";
+import {
+  SECTIONED_SUMMARY_FORMAT,
+  isValidStoredCompactionSummary,
+} from "./history-compact-summary-validation.js";
+import { validateStoredCompactionEvidence } from "./compaction-handoff-evidence.js";
 import {
   RUNTIME_MESSAGE_EVENT_ID,
   RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX,
@@ -49,7 +53,8 @@ export async function readRuntimeModelHistorySnapshot(
       else if (event.kind === "run.terminal") activeRuns.delete(event.runId);
     }
   }
-  const projected = materializeHistoryProjection(events, activeRuns).entries;
+  const sequenceMap = new Map(entries.map(({ event, sequence }) => [event.eventId, sequence]));
+  const projected = materializeHistoryProjection(events, activeRuns, sequenceMap).entries;
   const compactions = events.filter(
     (event): event is RuntimeCheckpointRecordedEvent =>
       event.kind === "context.checkpoint.recorded" &&
@@ -117,24 +122,32 @@ export class RuntimeEventReadModelIntegrityError extends Error {
 }
 
 /** Pure read model for durable Session facts. */
-export function projectRuntimeEventsToMessages(events: readonly RuntimeEvent[]): Message[] {
-  return materializeRuntimeHistory(events);
+export function projectRuntimeEventsToMessages(
+  events: readonly RuntimeEvent[],
+  sequenceMap?: ReadonlyMap<string, number>,
+): Message[] {
+  return materializeRuntimeHistory(events, sequenceMap);
 }
 
-export function materializeRuntimeHistory(events: readonly RuntimeEvent[]): Message[] {
-  return materializeRuntimeHistoryEntries(events).map(({ message }) => message);
+export function materializeRuntimeHistory(
+  events: readonly RuntimeEvent[],
+  sequenceMap?: ReadonlyMap<string, number>,
+): Message[] {
+  return materializeRuntimeHistoryEntries(events, sequenceMap).map(({ message }) => message);
 }
 
 export function projectRuntimeEventsToMessageEntries(
   events: readonly RuntimeEvent[],
+  sequenceMap?: ReadonlyMap<string, number>,
 ): RuntimeHistoryProjectionEntry[] {
-  return materializeRuntimeHistoryEntries(events);
+  return materializeRuntimeHistoryEntries(events, sequenceMap);
 }
 
 export function materializeRuntimeHistoryEntries(
   events: readonly RuntimeEvent[],
+  sequenceMap?: ReadonlyMap<string, number>,
 ): RuntimeHistoryProjectionEntry[] {
-  return materializeRuntimeHistoryProjection(events).entries;
+  return materializeRuntimeHistoryProjection(events, sequenceMap).entries;
 }
 
 /**
@@ -143,13 +156,15 @@ export function materializeRuntimeHistoryEntries(
  */
 export function materializeRuntimeHistoryProjection(
   events: readonly RuntimeEvent[],
+  sequenceMap?: ReadonlyMap<string, number>,
 ): RuntimeHistoryProjection {
-  return materializeHistoryProjection(events);
+  return materializeHistoryProjection(events, new Set(), sequenceMap);
 }
 
 function materializeHistoryProjection(
   events: readonly RuntimeEvent[],
   activeRuns: ReadonlySet<string> = new Set(),
+  sequenceMap?: ReadonlyMap<string, number>,
 ): RuntimeHistoryProjection {
   const diagnostics: RuntimeProjectionDiagnostic[] = [];
   const eventIndexes = new Map<string, number>();
@@ -162,7 +177,12 @@ function materializeHistoryProjection(
     eventIndexes.set(event.eventId, eventIndex);
   }
 
-  const { projected, prefixDiagnostics } = materializePrefix(events, events.length, eventIndexes);
+  const { projected, prefixDiagnostics } = materializePrefix(
+    events,
+    events.length,
+    eventIndexes,
+    sequenceMap,
+  );
   diagnostics.push(...prefixDiagnostics);
   // Only inspection may accept the pending tail of a durably active Run.
   assertToolCallPairing(
@@ -191,6 +211,7 @@ function materializePrefix(
   events: readonly RuntimeEvent[],
   endExclusive: number,
   eventIndexes: ReadonlyMap<string, number>,
+  sequenceMap?: ReadonlyMap<string, number>,
 ): {
   projected: RuntimeHistoryProjectionEntry[];
   prefixDiagnostics: RuntimeProjectionDiagnostic[];
@@ -222,7 +243,14 @@ function materializePrefix(
     }
     if (event.kind === "context.checkpoint.recorded") {
       restoreInterruptedResults(projected, recoveryFloor, events, eventIndexes);
-      replaceProjectedPrefixWithCheckpoint(projected, event, eventIndexes, eventIndex);
+      replaceProjectedPrefixWithCheckpoint(
+        projected,
+        event,
+        eventIndexes,
+        eventIndex,
+        events,
+        sequenceMap,
+      );
       // Never borrow a result from after a checkpoint to repair its prior history.
       recoveryFloor = projected.length;
       continue;
@@ -376,6 +404,8 @@ function replaceProjectedPrefixWithCheckpoint(
   checkpoint: RuntimeCheckpointRecordedEvent,
   eventIndexes: ReadonlyMap<string, number>,
   checkpointEventIndex: number,
+  events: readonly RuntimeEvent[],
+  sequenceMap?: ReadonlyMap<string, number>,
 ): void {
   if (
     !checkpoint.data.checkpointId.startsWith("hard-reset:") &&
@@ -387,6 +417,25 @@ function replaceProjectedPrefixWithCheckpoint(
   ) {
     throw new RuntimeEventReadModelIntegrityError(
       `Runtime checkpoint ${checkpoint.eventId} contains an invalid sectioned summary`,
+    );
+  }
+  if (
+    checkpoint.data.summary.providerData?.picoSummaryFormat === SECTIONED_SUMMARY_FORMAT &&
+    !validateStoredCompactionEvidence(
+      checkpoint.data.summary,
+      events.slice(0, checkpointEventIndex),
+      {
+        sessionId: checkpoint.sessionId,
+        throughEventId: checkpoint.data.throughEventId,
+        ...(checkpoint.data.previousCheckpointId
+          ? { previousCheckpointId: checkpoint.data.previousCheckpointId }
+          : {}),
+      },
+      sequenceMap,
+    )
+  ) {
+    throw new RuntimeEventReadModelIntegrityError(
+      `Runtime checkpoint ${checkpoint.eventId} contains invalid handoff evidence`,
     );
   }
   const throughProjectedIndex = findProjectedEventIndex(

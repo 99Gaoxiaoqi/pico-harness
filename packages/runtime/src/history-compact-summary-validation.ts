@@ -34,8 +34,11 @@ type MalformedHistoryCompactSummaryReason =
  * text checkpoints so record, load/repair, and copy can hold them to the
  * complete predicate.
  */
-export const SECTIONED_SUMMARY_FORMAT = "sections_v1" as const;
-export type SectionedSummaryFormat = typeof SECTIONED_SUMMARY_FORMAT;
+export const LEGACY_SECTIONED_SUMMARY_FORMAT = "sections_v1" as const;
+export const SECTIONED_SUMMARY_FORMAT = "sections_v2" as const;
+export type SectionedSummaryFormat =
+  | typeof LEGACY_SECTIONED_SUMMARY_FORMAT
+  | typeof SECTIONED_SUMMARY_FORMAT;
 
 export type CheckpointSummaryDefect = MalformedHistoryCompactSummaryReason;
 
@@ -44,7 +47,7 @@ export type CheckpointSummaryDefect = MalformedHistoryCompactSummaryReason;
 // to REPLACE folded history; Critical Context is required because it is
 // exactly what the #3029 incident lost (files, commands, errors), and the
 // template gives it an explicit "(none)" escape hatch.
-export const SUMMARY_FORMAT_TEMPLATE = [
+export const LEGACY_SUMMARY_FORMAT_TEMPLATE = [
   "## Goal",
   "[What the user is trying to accomplish]",
   "",
@@ -64,18 +67,60 @@ export const SUMMARY_FORMAT_TEMPLATE = [
   '- [Files, commands/results, errors, anything needed to continue; or "(none)"]',
 ] as const;
 
-export const REQUIRED_SUMMARY_SECTIONS = [
+export const SUMMARY_FORMAT_TEMPLATE = [
+  "## Goal",
+  "[The user's active objective and concrete acceptance criteria]",
+  "",
+  "## Progress",
+  "### Done",
+  "- [Completed work; distinguish implemented from actually verified]",
+  "### In Progress",
+  "- [Current work and unresolved assumptions]",
+  "",
+  "## Key Decisions",
+  '- [Decision and rationale; or "(none)"]',
+  "",
+  "## Constraints",
+  '- [Active user constraints, prohibited actions, failed approaches and retry conditions; or "(none)"]',
+  "",
+  "## Next Steps",
+  "1. [Remaining actions in order, including necessary verification]",
+  "",
+  "## Critical Context",
+  '- [Exact paths, functions, commands, errors, and unresolved questions; or "(none)"]',
+  "",
+  "## Evidence",
+  '- [event:<source event ID supplied in the input>] [What that source directly shows; distinguish inference and unverified claims]; or "(none)"',
+] as const;
+
+export const LEGACY_REQUIRED_SUMMARY_SECTIONS = [
   "## Goal",
   "## Progress",
   "## Next Steps",
   "## Critical Context",
 ] as const;
 
+export const REQUIRED_SUMMARY_SECTIONS = [
+  "## Goal",
+  "## Progress",
+  "## Key Decisions",
+  "## Constraints",
+  "## Next Steps",
+  "## Critical Context",
+  "## Evidence",
+] as const;
+
+export function isSectionedSummaryFormat(value: unknown): value is SectionedSummaryFormat {
+  return value === LEGACY_SECTIONED_SUMMARY_FORMAT || value === SECTIONED_SUMMARY_FORMAT;
+}
+
 // A verbatim echo of the mandated template carries no information: template
 // lines never count as section content, fenced or not, so a degraded model
 // parroting the format back cannot pass as a checkpoint.
 const TEMPLATE_PLACEHOLDER_LINES: ReadonlySet<string> = new Set(
-  SUMMARY_FORMAT_TEMPLATE.map((line) => line.trim()).filter((line) => line.length > 0),
+  [...LEGACY_SUMMARY_FORMAT_TEMPLATE, ...SUMMARY_FORMAT_TEMPLATE]
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0),
 );
 
 // Floors for the incident's shape: folding a large span into a paragraph
@@ -114,10 +159,16 @@ export interface CheckpointSummaryFoldContext {
 export function findCheckpointSummaryDefect(
   summary: string,
   foldContext?: CheckpointSummaryFoldContext,
+  format: SectionedSummaryFormat = LEGACY_SECTIONED_SUMMARY_FORMAT,
 ): CheckpointSummaryDefect | undefined {
   const trimmed = summary.trim();
   if (trimmed.length === 0) return undefined;
-  const scan = scanSummaryStructure(trimmed);
+  const scan = scanSummaryStructure(
+    trimmed,
+    format === SECTIONED_SUMMARY_FORMAT
+      ? REQUIRED_SUMMARY_SECTIONS
+      : LEGACY_REQUIRED_SUMMARY_SECTIONS,
+  );
   if (!scan.orderedSectionsPresent) {
     return "malformed_summary_missing_section";
   }
@@ -160,7 +211,10 @@ interface SummaryStructureScan {
   endsInsideOpenFence: boolean;
 }
 
-function scanSummaryStructure(text: string): SummaryStructureScan {
+function scanSummaryStructure(
+  text: string,
+  requiredSections: readonly string[],
+): SummaryStructureScan {
   let openFence: { family: string; width: number } | undefined;
   let matchedSections = 0;
   // Content attribution target: content lines satisfy the most recently
@@ -168,7 +222,7 @@ function scanSummaryStructure(text: string): SummaryStructureScan {
   // template's "## Key Decisions") opens its own section — its content must
   // not satisfy the previous required section's non-empty requirement.
   let attributesToRequiredSection = false;
-  const sectionHasContent: boolean[] = REQUIRED_SUMMARY_SECTIONS.map(() => false);
+  const sectionHasContent: boolean[] = requiredSections.map(() => false);
   const countContent = (line: string) => {
     if (matchedSections === 0 || !attributesToRequiredSection) return;
     const trimmedLine = line.trim();
@@ -215,9 +269,9 @@ function scanSummaryStructure(text: string): SummaryStructureScan {
     // more is indented code (which the template-placeholder and bare-marker
     // exclusions still keep information-free).
     if (
-      matchedSections < REQUIRED_SUMMARY_SECTIONS.length &&
+      matchedSections < requiredSections.length &&
       /^ {0,3}#/.test(line) &&
-      line.trim() === REQUIRED_SUMMARY_SECTIONS[matchedSections]
+      line.trim() === requiredSections[matchedSections]
     ) {
       matchedSections += 1;
       attributesToRequiredSection = true;
@@ -241,17 +295,17 @@ function scanSummaryStructure(text: string): SummaryStructureScan {
   }
   return {
     orderedSectionsPresent:
-      matchedSections === REQUIRED_SUMMARY_SECTIONS.length && sectionHasContent.every(Boolean),
+      matchedSections === requiredSections.length && sectionHasContent.every(Boolean),
     endsInsideOpenFence: openFence !== undefined,
   };
 }
 
 /** Every semantic checkpoint must carry the current sectioned contract. */
 export function isValidStoredCompactionSummary(content: string, format: unknown): boolean {
-  if (format !== SECTIONED_SUMMARY_FORMAT) return false;
+  if (!isSectionedSummaryFormat(format)) return false;
   const start = content.indexOf(COMPACTION_SUMMARY_OPEN_TAG);
   const end = content.indexOf(COMPACTION_SUMMARY_CLOSE_TAG);
   if (start < 0 || end <= start) return false;
   const body = content.slice(start + COMPACTION_SUMMARY_OPEN_TAG.length, end).trim();
-  return body.length > 0 && findCheckpointSummaryDefect(body) === undefined;
+  return body.length > 0 && findCheckpointSummaryDefect(body, undefined, format) === undefined;
 }

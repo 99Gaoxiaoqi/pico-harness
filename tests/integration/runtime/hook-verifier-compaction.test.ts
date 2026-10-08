@@ -13,7 +13,7 @@ import { bindRuntimeHookCapabilities } from "../../../packages/pico-host/src/run
 
 type Binding = Parameters<SessionRuntime["bindHookRuntime"]>[0];
 const summary =
-  "## Goal\nVerify TOKEN-42.\n## Progress\n### Done\nRead evidence.\n### In Progress\nCheck result.\n## Key Decisions\nRead only.\n## Next Steps\nReturn JSON.\n## Critical Context\nTOKEN-42 is verified.";
+  "## Goal\nVerify TOKEN-42.\n## Progress\n### Done\nRead evidence.\n### In Progress\nCheck result.\n## Key Decisions\nRead only.\n## Constraints\n保持用户约束。\n## Next Steps\nReturn JSON.\n## Critical Context\nTOKEN-42 is verified.\n## Evidence\n(none)";
 
 for (const mode of ["compact", "limit"] as const) {
   test(`Hook verifier uses isolated durable main loop: ${mode}`, async () => {

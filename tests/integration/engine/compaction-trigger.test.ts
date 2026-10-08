@@ -8,7 +8,7 @@ import { FullCompactor } from "@pico/pico-host/product-full-compactor";
 import { ContextOverflowError, type LLMProvider, type Message } from "@pico/core";
 
 const validSummary =
-  "## Goal\nFinish the task.\n## Progress\n### Done\nRead the source.\n### In Progress\nChecking constraints.\n## Key Decisions\nPreserve exact paths.\n## Next Steps\nRun the test.\n## Critical Context\nsrc/keep.ts and TOKEN-42.";
+  "## Goal\nFinish the task.\n## Progress\n### Done\nRead the source.\n### In Progress\nChecking constraints.\n## Key Decisions\nPreserve exact paths.\n## Constraints\n保持用户约束。\n## Next Steps\nRun the test.\n## Critical Context\nsrc/keep.ts and TOKEN-42.\n## Evidence\n(none)";
 const budget = {
   contextWindowTokens: 10_000,
   reservedOutputTokens: 1000,

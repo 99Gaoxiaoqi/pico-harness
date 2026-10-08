@@ -14,10 +14,14 @@ const summary = `## Goal
 正在运行真实模型测试。
 ## Key Decisions
 保留原始工具错误；失败的方案不可重复。
+## Constraints
+禁止新增依赖；失败方案需有新证据才重试。
 ## Next Steps
 1. 验证后继续当前任务。
 ## Critical Context
-- src/provider.ts；运行 npm test；错误 TS2345。`;
+- src/provider.ts；运行 npm test；错误 TS2345。
+## Evidence
+(none)`;
 const anchor: Message = { role: "user", content: "继续完成迁移，不要丢失任务。" };
 const history: Message[] = [
   anchor,

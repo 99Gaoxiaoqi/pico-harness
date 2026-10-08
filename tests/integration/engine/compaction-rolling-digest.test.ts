@@ -37,7 +37,7 @@ async function mkTestDir(prefix: string): Promise<string> {
 }
 
 function validSummary(content: string): string {
-  return `## Goal\n${content}\n## Progress\n### Done\n已检查文件。\n### In Progress\n继续验证。\n## Key Decisions\n保留事实。\n## Next Steps\n完成验证。\n## Critical Context\n- 文件 src/test.ts、a.ts。`;
+  return `## Goal\n${content}\n## Progress\n### Done\n已检查文件。\n### In Progress\n继续验证。\n## Key Decisions\n保留事实。\n## Constraints\n保持用户约束。\n## Next Steps\n完成验证。\n## Critical Context\n- 文件 src/test.ts、a.ts。\n## Evidence\n(none)`;
 }
 function mockProvider(content: string): LLMProvider {
   return {
