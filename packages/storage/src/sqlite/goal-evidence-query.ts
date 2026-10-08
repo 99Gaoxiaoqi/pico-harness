@@ -74,7 +74,8 @@ export function readGoalEvidenceRunSlice(
         sha256: String(r["sha256"]),
         sizeBytes: Number(r["size_bytes"]),
         excerpt,
-        truncated: Buffer.byteLength(excerpt) !== Number(r["size_bytes"]),
+        truncated:
+          Number(r["chars"]) > 512 || Buffer.byteLength(excerpt) !== Number(r["size_bytes"]),
         projectionMode: r["mode"] as GoalEvidenceTool["projectionMode"],
         ...(isForegroundProcessFacts(facts) ? { executionFacts: facts } : {}),
         ...(r["recovery"] === "indeterminate" || r["recovery"] === "not_dispatched"

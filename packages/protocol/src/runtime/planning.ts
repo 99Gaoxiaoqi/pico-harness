@@ -1,3 +1,5 @@
+import { isGoalEvidenceTrace } from "@pico/core";
+import { invalidResult } from "./errors.js";
 import {
   parseGoalConfig,
   type PersistedGoalState,
@@ -205,6 +207,9 @@ const runtimeGoalResult = exactResultShape(
         progress: resultBoolean,
         waiting: resultBoolean,
         evaluatorFailed: resultBoolean,
+        evidenceTrace: (value, path) => {
+          if (!isGoalEvidenceTrace(value)) throw invalidResult(`${path} 执行证据无效`);
+        },
       },
     ),
     armedAt: resultFiniteNumber,

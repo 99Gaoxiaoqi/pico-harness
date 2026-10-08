@@ -160,10 +160,14 @@ function appendTurnTail(messages: Message[], turnTail: string, taskAnchor?: Mess
     const checkpointIndex = messages.findLastIndex(
       (message) =>
         message.role === "assistant" &&
-        isValidStoredCompactionSummary(
+        (isValidStoredCompactionSummary(
           message.content,
           message.providerData?.["picoSummaryFormat"],
-        ),
+        ) ||
+          (message.providerData?.["picoSummaryFormat"] === undefined &&
+            message.providerData?.["picoKind"] === "compaction_summary" &&
+            (isValidStoredCompactionSummary(message.content, "sections_v2") ||
+              isValidStoredCompactionSummary(message.content, "sections_v1")))),
     );
     if (checkpointIndex < 0 || !taskAnchor) throw new Error("任务上下文载体不可用");
     const checkpoint = messages[checkpointIndex]!;
@@ -171,9 +175,9 @@ function appendTurnTail(messages: Message[], turnTail: string, taskAnchor?: Mess
       checkpoint.content.indexOf(COMPACTION_SUMMARY_CLOSE_TAG) +
       COMPACTION_SUMMARY_CLOSE_TAG.length;
     const suffix = checkpoint.content.slice(end);
-    const content = suffix.trimStart().startsWith("当前用户任务（原文）：")
-      ? checkpoint.content.slice(0, end)
-      : checkpoint.content;
+    const content =
+      checkpoint.content.slice(0, end) +
+      suffix.replace(/\n\n当前用户任务（原文）：\n[\s\S]*$/u, "");
     const requestMessages = [...messages];
     requestMessages[checkpointIndex] = {
       ...checkpoint,
