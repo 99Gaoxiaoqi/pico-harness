@@ -58,6 +58,7 @@ export function buildRuntimeToolResultInput(
     );
   }
   const input: ToolResultEnvelopeInput = {
+    ...(result.executionFacts ? { executionFacts: structuredClone(result.executionFacts) } : {}),
     toolCallId: toolCall.id,
     toolName: toolCall.name,
     status: built.overLimit ? "rejected" : status,

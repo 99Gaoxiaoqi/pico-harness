@@ -42,3 +42,6 @@ export * from "./atomic-memory-contracts.js";
 export * from "./atomic-memory-runtime-contracts.js";
 
 export * from "./deep-research.js";
+
+export * from "./memory-recall-contract.js";
+export * from "./execution-facts.js";

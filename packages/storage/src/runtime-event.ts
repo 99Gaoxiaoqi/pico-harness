@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import {
   assertDurableTranscriptEvent,
+  isMemoryRecallTrace,
+  isForegroundProcessFacts,
   MAX_TOOL_ARGUMENT_AUDIT_BYTES,
   PLAN_EVENT_KINDS,
   RUNTIME_EVENT_SCHEMA_VERSION,
@@ -68,6 +70,7 @@ import { assertPlanEventData, isPlanEventKind } from "@pico/core";
 
 /** 可生产、可读取的 Runtime event kind 注册表（单源）。 */
 export const RUNTIME_EVENT_KINDS = [
+  "memory.recall.recorded",
   "run.started",
   "message.committed",
   "tool.started",
@@ -182,6 +185,10 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
     throw new RuntimeEventIntegrityError("Runtime event refs must be an object");
   }
   switch (value["kind"]) {
+    case "memory.recall.recorded":
+      if (value["visibility"] !== "internal" || !isMemoryRecallTrace(value["data"]))
+        throw new RuntimeEventIntegrityError("Runtime memory recall trace is invalid");
+      return;
     case "run.started":
       assertString(value["data"]["workDir"], "run.started.workDir");
       assertRuntimePresentationProvenance(value["data"]["presentation"]);
@@ -317,6 +324,14 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
       assertModelCallAttemptFacts(value["data"]);
       assertString(value["data"]["providerCallId"], "model.call.started.providerCallId");
       assertString(value["data"]["purpose"], "model.call.started.purpose");
+      if (
+        value["data"]["recallEventIds"] !== undefined &&
+        (!Array.isArray(value["data"]["recallEventIds"]) ||
+          !value["data"]["recallEventIds"].every(
+            (id: unknown) => typeof id === "string" && id.length > 0,
+          ))
+      )
+        throw new RuntimeEventIntegrityError("Runtime recall event identities are invalid");
       return;
     case "model.call.settled":
       assertModelCallAttemptFacts(value["data"]);
@@ -601,7 +616,7 @@ function assertToolResultRecordedEvent(value: Record<string, unknown>): void {
   }
   assertOnlyKeys(
     data,
-    ["toolName", "status", "body", "projection", "recovery", "origin"],
+    ["toolName", "status", "body", "projection", "recovery", "origin", "executionFacts"],
     "tool.result.recorded.data",
   );
   assertString(data["toolName"], "tool.result.recorded.toolName");
@@ -609,6 +624,8 @@ function assertToolResultRecordedEvent(value: Record<string, unknown>): void {
     throw new RuntimeEventIntegrityError("Runtime tool result status is invalid");
   }
   assertRuntimeToolResultRecoveryMarker(data["recovery"]);
+  if (data["executionFacts"] !== undefined && !isForegroundProcessFacts(data["executionFacts"]))
+    throw new RuntimeEventIntegrityError("Runtime tool execution facts are invalid");
 
   const body = data["body"];
   if (!isRecord(body)) {

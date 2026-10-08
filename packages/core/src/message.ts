@@ -1,3 +1,4 @@
+import type { ForegroundProcessFacts } from "./execution-facts.js";
 /**
  * Provider-agnostic message and tool-call contracts shared by the Agent Runtime.
  * This package deliberately contains no storage, provider, host, or product dependencies.
@@ -95,6 +96,7 @@ export type ImagePart =
     };
 
 export interface ToolResult {
+  readonly executionFacts?: ForegroundProcessFacts;
   toolCallId: string;
   output: string;
   isError: boolean;

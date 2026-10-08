@@ -1,3 +1,5 @@
+import type { MemoryRecallTrace } from "./memory-recall-contract.js";
+import type { ForegroundProcessFacts } from "./execution-facts.js";
 import type { ProviderPhysicalAttempt } from "./provider-interface.js";
 import type { Message, Usage } from "./message.js";
 import type {
@@ -109,6 +111,7 @@ export interface RuntimeToolResultRecordedEvent extends RuntimeEventBase {
     readonly evidence?: RuntimeEvidenceReference;
   };
   readonly data: {
+    readonly executionFacts?: ForegroundProcessFacts;
     readonly origin?: "model" | "code_mode";
     readonly toolName: string;
     readonly status: RuntimeToolResultStatus;
@@ -186,6 +189,7 @@ export interface RuntimeModelCallStartedEvent extends RuntimeEventBase {
     readonly provider?: string;
     readonly model?: string;
     readonly purpose: string;
+    readonly recallEventIds?: readonly string[];
   };
 }
 
@@ -406,7 +410,14 @@ export interface RuntimeRunTerminalEvent extends RuntimeEventBase {
   };
 }
 
+export interface RuntimeMemoryRecallRecordedEvent extends RuntimeEventBase {
+  readonly kind: "memory.recall.recorded";
+  readonly visibility: "internal";
+  readonly data: MemoryRecallTrace;
+}
+
 export type RuntimeEvent<TTranscriptEvent = unknown> =
+  | RuntimeMemoryRecallRecordedEvent
   | RuntimeRunStartedEvent
   | RuntimeMessageCommittedEvent
   | RuntimeToolStartedEvent

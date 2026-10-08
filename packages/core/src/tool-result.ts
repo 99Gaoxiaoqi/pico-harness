@@ -1,3 +1,4 @@
+import type { ForegroundProcessFacts } from "./execution-facts.js";
 export type RuntimeToolResultStatus =
   | "succeeded"
   | "failed"
@@ -34,6 +35,7 @@ export interface RuntimeToolResultProjection {
 }
 
 export interface ToolResultEnvelope {
+  readonly executionFacts?: ForegroundProcessFacts;
   readonly version: 1;
   readonly toolCallId: string;
   readonly toolName: string;
@@ -49,6 +51,7 @@ export interface ToolResultEnvelope {
 }
 
 export interface ToolResultEnvelopeInput {
+  readonly executionFacts?: ForegroundProcessFacts;
   readonly toolCallId: string;
   readonly toolName: string;
   readonly status: RuntimeToolResultStatus;
@@ -66,6 +69,7 @@ export function createToolResultEnvelope(input: ToolResultEnvelopeInput): ToolRe
   const projectionText = sliceUtf8Bytes(input.projection.text, MAX_TOOL_RESULT_ENVELOPE_TEXT_BYTES);
   return {
     version: 1,
+    ...(input.executionFacts ? { executionFacts: structuredClone(input.executionFacts) } : {}),
     toolCallId: input.toolCallId,
     toolName: input.toolName,
     status: input.status,

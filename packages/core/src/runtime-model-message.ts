@@ -32,6 +32,7 @@ export function runtimeEventHasModelHistoryEntry<TTranscriptEvent>(
 export type RuntimeEventClaimKind = "message" | "control";
 
 const CLAIM_BY_KIND: Record<RuntimeEvent["kind"], RuntimeEventClaimKind> = {
+  "memory.recall.recorded": "control",
   "run.started": "control",
   "message.committed": "message",
   "tool.started": "control",

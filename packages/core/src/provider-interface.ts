@@ -1,3 +1,4 @@
+import type { MemoryRecallRequestFacts } from "./memory-recall-contract.js";
 // 大模型通信的稳定契约。具体协议翻译与网络实现属于外层 Provider 适配器。
 
 import type { Message, ToolDefinition, Usage } from "./message.js";
@@ -62,6 +63,7 @@ export interface ProviderAttemptLifecycleSnapshot extends ProviderAttemptFailure
 
 /** Harness facts frozen before dispatch; never inferred from later configuration. */
 export interface RequestContextFacts {
+  readonly memoryRecall?: MemoryRecallRequestFacts;
   readonly version: 1;
   readonly routeId?: string;
   readonly connectionId?: string;
