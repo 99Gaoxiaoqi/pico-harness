@@ -173,7 +173,11 @@ interface FullCompactionPreviewPlan {
 
 /** 将原始摘要包装成可存入上下文的 REFERENCE-ONLY 摘要消息正文。 */
 export function wrapFullCompactionSummary(summary: string, preservedAnchor?: Message): string {
-  const anchor = preservedAnchor ? `\n\n当前用户任务（原文）：\n${preservedAnchor.content}` : "";
+  const anchorLabel =
+    preservedAnchor?.providerData?.picoKind === "host_goal_anchor"
+      ? "当前 Host Goal 任务（冻结条件）："
+      : "当前用户任务（原文）：";
+  const anchor = preservedAnchor ? `\n\n${anchorLabel}\n${preservedAnchor.content}` : "";
   return `${SUMMARY_PREFIX}\n\n${COMPACTION_SUMMARY_OPEN_TAG}\n${summary}\n${SUMMARY_END_MARKER}${anchor}`;
 }
 
@@ -319,11 +323,22 @@ export class FullCompactor {
           (message) =>
             message.role === "user" && !message.toolCallId && !message.providerData?.["picoKind"],
         );
-    if (phase !== "standalone" && anchorIndex < 0) return undefined;
+    const hostGoalAnchor =
+      request.preservedAnchor?.role === "assistant" &&
+      request.preservedAnchor.providerData?.picoKind === "host_goal_anchor" &&
+      request.preservedAnchor.content.trim().length > 0;
+    if (
+      phase !== "standalone" &&
+      anchorIndex < 0 &&
+      !(phase === "mid_turn" && hostGoalAnchor && (request.acceptedHistoryPrefixCount ?? 0) >= 2)
+    )
+      return undefined;
     const maxCut =
       phase === "pre_turn"
         ? Math.min(maxCoveredCount ?? history.length, anchorIndex)
-        : (maxCoveredCount ?? history.length);
+        : hostGoalAnchor && anchorIndex < 0
+          ? Math.min(maxCoveredCount ?? history.length, request.acceptedHistoryPrefixCount ?? 0)
+          : (maxCoveredCount ?? history.length);
     const cut = findSafeCompactionCut(history, targetRetainedTokens, maxCut, request.protocol);
     if (
       phase === "mid_turn" &&
@@ -381,7 +396,12 @@ export class FullCompactor {
     signal?: AbortSignal,
     previousSummary?: string,
   ): Promise<FullCompactionPreview | undefined> {
-    const instruction = this.renderInstruction(plan.prefix, previousSummary, session);
+    const instruction = this.renderInstruction(
+      plan.prefix,
+      previousSummary,
+      session,
+      plan.preservedAnchor,
+    );
     const fingerprint = createHash("sha256")
       .update(JSON.stringify([session.id, this.provider.modelName, instruction]))
       .digest("hex");
@@ -501,11 +521,15 @@ export class FullCompactor {
     prefix: Message[],
     previousSummary: string | undefined,
     session: RuntimeFullCompactionSessionIdentity,
+    preservedAnchor?: Message,
   ): string {
     const serialized = serializeMessages(prefix);
     const envPrefix = buildEnvironmentContext(this.workDir, session);
     const fullPrefix = envPrefix ? `${envPrefix}\n\n${serialized}` : serialized;
     return [
+      preservedAnchor?.providerData?.picoKind === "host_goal_anchor"
+        ? `Host-provided frozen Goal condition (task context, not a user message):\n${preservedAnchor.content}`
+        : "",
       previousSummary?.trim()
         ? `Previous continuation summary:\n${previousSummary}\n\nUpdate it using the newer conversation events that follow.`
         : "",

@@ -11,7 +11,7 @@ const image = `data:image/png;base64,${Buffer.alloc(1_366_531).toString("base64"
 const video = `data:video/mp4;base64,${Buffer.alloc(3 * 1024 * 1024).toString("base64")}`;
 const mediaText = `已生成。![图片](${image})\n[视频](${video})\n继续处理。`;
 const summary =
-  "## Goal\nContinue media task.\n## Progress\nImage and video created.\n## Next Steps\nContinue user's instructions.\n## Critical Context\nOriginal media remains in the session.";
+  "## Goal\nContinue media task.\n## Progress\nImage and video created.\n## Key Decisions\nKeep source facts.\n## Constraints\nPreserve user constraints.\n## Next Steps\nContinue user's instructions.\n## Critical Context\nOriginal media remains in the session.\n## Evidence\n(none)";
 
 function response(wire: "openai" | "claude" | "responses", content = "MEDIA_CONTEXT_OK") {
   const usage = { input_tokens: 20, output_tokens: 5, total_tokens: 25 };

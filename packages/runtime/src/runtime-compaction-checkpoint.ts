@@ -1,6 +1,5 @@
 import {
   LEGACY_SECTIONED_SUMMARY_FORMAT,
-  type SectionedSummaryFormat,
   findCheckpointSummaryDefect,
 } from "./history-compact-summary-validation.js";
 import {
@@ -50,13 +49,7 @@ const NOOP_LOGGER: RuntimeCompactionCheckpointLogger = {
 export interface RuntimeCompactionCheckpointRun<Session> {
   claimsSession(session: Session): boolean;
   readModelHistoryEntries(): Promise<readonly RuntimeHistoryEntry[]>;
-  findLastCompactionCheckpoint(): Promise<
-    | (RuntimeLastCompactionCheckpoint & {
-        readonly summaryFormat?: SectionedSummaryFormat;
-        readonly evidence?: CompactionEvidenceMetadata;
-      })
-    | undefined
-  >;
+  findLastCompactionCheckpoint(): Promise<RuntimeLastCompactionCheckpoint | undefined>;
   readonly resolveCompactionEvidenceReferences?: CompactionEvidenceResolver;
   recordCheckpoint(input: RuntimeCheckpointInput): Promise<void>;
 }
@@ -170,8 +163,7 @@ export async function recordRuntimeCompactionCheckpoint<
   if (
     !preview ||
     !preview.summary.trim() ||
-    findCheckpointSummaryDefect(preview.summary, undefined, preview.summaryFormat) ||
-    !handoffEvidence
+    findCheckpointSummaryDefect(preview.summary, undefined, preview.summaryFormat)
   )
     return undefined;
 

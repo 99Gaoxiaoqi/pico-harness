@@ -76,7 +76,7 @@ test("findLastCompactionCheckpoint: 遇 hard-reset checkpoint 返回 undefined",
 // 3. findLastCompactionCheckpoint missing-tag 分支
 // ============================================================
 
-test("findLastCompactionCheckpoint: 标签缺失时返回 undefined", async (t) => {
+test("recordCheckpoint: 拒绝普通持久摘要缺少标签并保持增量基线为空", async (t) => {
   const root = await mkTestDir("pico-missing-tag-");
   const session = new Session("missing-tag", join(root, "workspace"), {
     persistence: true,
@@ -100,16 +100,19 @@ test("findLastCompactionCheckpoint: 标签缺失时返回 undefined", async (t) 
     await seedRun.commitMessages(session, history);
     const entries = await seedRun.readModelHistoryEntries();
     // 写一个不带 XML 标签的 checkpoint（模拟旧格式或损坏数据）
-    await seedRun.recordCheckpoint({
-      checkpointId: "checkpoint:no-tags",
-      coveredEventCount: 1,
-      sourceDigest: computeCheckpointSourceDigest(entries.slice(0, 1)),
-      throughEventId: entries[0]!.eventId,
-      summary: {
-        role: "assistant",
-        content: "[上下文压缩 — 仅供参考] 这段没有 XML 标签 --- 历史摘要结束 ---",
-      },
-    });
+    await assert.rejects(
+      seedRun.recordCheckpoint({
+        checkpointId: "checkpoint:no-tags",
+        coveredEventCount: 1,
+        sourceDigest: computeCheckpointSourceDigest(entries.slice(0, 1)),
+        throughEventId: entries[0]!.eventId,
+        summary: {
+          role: "assistant",
+          content: "[上下文压缩 — 仅供参考] 这段没有 XML 标签 --- 历史摘要结束 ---",
+        },
+      }),
+      /invalid sectioned summary/,
+    );
   });
 
   const run2 = await RuntimeRun.start({

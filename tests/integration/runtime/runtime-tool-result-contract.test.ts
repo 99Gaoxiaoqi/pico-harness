@@ -371,8 +371,10 @@ test("Runtime compaction records a checkpoint and preserves the immutable Sessio
           "## Goal\nContinue the latest request.",
           "## Progress\nReviewed the previous two exchanges.",
           "## Key Decisions\nKeep the original transcript as durable evidence.",
+          "## Constraints\nPreserve user constraints.",
           "## Next Steps\nUse the retained tail to continue.",
           "## Critical Context\ncanonical checkpoint summary",
+          "## Evidence\n(none)",
         ].join("\n\n"),
       };
     },

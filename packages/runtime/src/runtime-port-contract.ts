@@ -1,4 +1,9 @@
 import type {
+  CompactionEvidenceMetadata,
+  CompactionEvidenceResolver,
+} from "./compaction-handoff-evidence.js";
+import type { SectionedSummaryFormat } from "./history-compact-summary-validation.js";
+import type {
   MemoryRecallTrace,
   CanonicalTranscriptToolStart,
   CommitReceipt,
@@ -45,6 +50,8 @@ export interface RuntimeCheckpointInput {
 export interface RuntimeLastCompactionCheckpoint {
   readonly checkpointId: string;
   readonly summaryText: string;
+  readonly summaryFormat?: SectionedSummaryFormat;
+  readonly evidence?: CompactionEvidenceMetadata;
 }
 
 /**
@@ -73,6 +80,7 @@ export interface RuntimeRunPort<Session, Registry, ToolContext, RecoveryProbeRes
   readModelHistoryEntries(): Promise<readonly RuntimeHistoryEntry[]>;
   readSessionProjectionEntries(): Promise<readonly RuntimeHistoryEntry[]>;
   findLastCompactionCheckpoint(): Promise<RuntimeLastCompactionCheckpoint | undefined>;
+  readonly resolveCompactionEvidenceReferences: CompactionEvidenceResolver;
   run<Result>(execute: () => Promise<Result>, signal?: AbortSignal): Promise<Result>;
   recordTurnStarted(turn: number): Promise<void>;
   recordRecall(trace: MemoryRecallTrace): Promise<string>;

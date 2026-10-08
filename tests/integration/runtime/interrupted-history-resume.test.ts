@@ -136,7 +136,7 @@ test("旧错序中断历史只读恢复，多工具分类保留，安全压缩�
   );
 
   const summary =
-    "## Goal\nContinue work.\n## Progress\nRecovered tool exchange.\n## Next Steps\nContinue checking.\n## Critical Context\nTool batch must remain complete.";
+    "## Goal\nContinue work.\n## Progress\nRecovered tool exchange.\n## Key Decisions\nKeep source facts.\n## Constraints\nPreserve user constraints.\n## Next Steps\nContinue checking.\n## Critical Context\nTool batch must remain complete.\n## Evidence\n(none)";
   const wrappedSummary = wrapFullCompactionSummary(summary);
   let cut = 4;
   const compactor = new FullCompactor({
@@ -148,6 +148,7 @@ test("旧错序中断历史只读恢复，多工具分类保留，安全压缩�
   });
   t.mock.method(compactor, "preview", async () => ({
     summary,
+    summaryFormat: "sections_v2" as const,
     wrappedSummary,
     compactedCount: cut,
     beforeTokens: 100,

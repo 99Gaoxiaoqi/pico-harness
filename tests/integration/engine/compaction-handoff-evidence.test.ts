@@ -220,3 +220,252 @@ test("v1 keeps its validation contract; v2 invalid refs receive one repair and n
   assert.equal(calls, 2, "bounded format/evidence repair only once");
   assert.equal(writes, 0);
 });
+
+test("production checkpoint commit rejects forged provenance and fork derives real target identities/sequences with idempotent unavailable-source handling", async (t) => {
+  const fixture = await createHandoffFixture("pico-handoff-fork-", "FORK_REPORT_TOKEN");
+  const targetState: { session?: Session } = {};
+  t.after(async () => {
+    await targetState.session?.close();
+    await fixture.session.close();
+    await rm(fixture.root, { recursive: true, force: true });
+  });
+  const source = fixture.session;
+  const evidence = [fixture.report.eventId, fixture.failed.eventId]
+    .map((id) => `- ${renderCompactionEvidenceReference(id)} 原始执行结果。`)
+    .join("\n");
+  const run = await RuntimeRun.start({
+    capability: source.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
+  await run.run(async () =>
+    assert.ok(
+      await recordRuntimeCompactionCheckpoint({
+        session: source,
+        runtimeRun: run,
+        compactor: new FullCompactor({
+          provider: {
+            async generate() {
+              return { role: "assistant", content: handoffSummary(evidence) };
+            },
+          },
+        }),
+        request,
+      }),
+    ),
+  );
+  const snapshot = await source.readDurableForkSnapshot();
+  assert.ok(snapshot.modelCheckpoint);
+  const { createSessionForkRuntimePort } =
+    await import("@pico/pico-host/session-fork-runtime-port-adapter");
+  const { bindToolResultArchiveReader } = await import("@pico/runtime/tool-result-archive");
+  const {
+    attachCompactionEvidenceSources,
+    compactionSummarySha256,
+    computeCheckpointSourceDigest,
+  } = await import("@pico/runtime/runtime-compaction-checkpoint");
+  const port = createSessionForkRuntimePort();
+  const store = source.runtimeEventStore!;
+  const bootstrap = {
+    sourceSessionId: source.id,
+    targetSessionId: "handoff-target",
+    operationId: "handoff-copy",
+    operationCreatedAt: "2026-10-09T00:00:00.000Z",
+    workDir: fixture.workDir,
+    runtimeAuthority: store,
+    seedEntries: snapshot.runtimeSeedEntries,
+    modelCheckpoint: snapshot.modelCheckpoint,
+    publication: { async assertOwned() {} },
+  };
+  await port.bootstrapFork(bootstrap);
+  const imported = await store.readSessionEntries(bootstrap.targetSessionId);
+  const checkpoint = imported.find(
+    ({ event }) => event.kind === "context.checkpoint.recorded",
+  )!.event;
+  if (checkpoint.kind !== "context.checkpoint.recorded") assert.fail("expected target checkpoint");
+  const metadata = checkpoint.data.summary.providerData?.[HANDOFF_EVIDENCE_METADATA_KEY];
+  assert.ok(isCompactionEvidenceMetadata(metadata));
+  assert.equal(metadata.sessionId, bootstrap.targetSessionId);
+  assert.equal(metadata.previousCheckpointId, undefined);
+  assert.equal(metadata.references.length, 2);
+  for (const reference of metadata.references) {
+    const entry = imported.find(({ event }) => event.eventId === reference.eventId)!;
+    assert.ok(entry && entry.event.sessionId === bootstrap.targetSessionId);
+    assert.equal(
+      reference.sequence,
+      entry.sequence,
+      "copy must use actual stored sequence, never index",
+    );
+
+    assert.ok(![fixture.report.eventId, fixture.failed.eventId].includes(reference.eventId));
+  }
+  const report = metadata.references.find(({ toolName }) => toolName === "read_report")!;
+  assert.equal(
+    await bindToolResultArchiveReader(store, bootstrap.targetSessionId).readRaw(report.archiveRef!),
+    fixture.rawReport,
+  );
+  assert.ok(
+    !checkpoint.data.summary.content.includes(
+      renderCompactionEvidenceReference(fixture.report.eventId),
+    ),
+  );
+  await port.bootstrapFork(bootstrap);
+  assert.deepEqual(
+    await store.readSessionEntries(bootstrap.targetSessionId),
+    imported,
+    "canonical rebinding remains idempotent",
+  );
+
+  const target = new Session(bootstrap.targetSessionId, fixture.workDir, {
+    picoHome: fixture.picoHome,
+    runtimePort: createEngineRuntimePort(),
+  });
+  targetState.session = target;
+  await target.recover();
+  const targetRun = await RuntimeRun.start({
+    capability: target.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
+  await targetRun.run(async () => {
+    const entries = await targetRun.readModelHistoryEntries();
+    const throughEventId = entries[0]!.eventId;
+    const body = handoffSummary(
+      `- ${renderCompactionEvidenceReference(fixture.report.eventId)} observed: verification succeeded.`,
+    );
+    const sourceMetadata =
+      snapshot.modelCheckpoint!.summary.providerData?.[HANDOFF_EVIDENCE_METADATA_KEY];
+    assert.ok(isCompactionEvidenceMetadata(sourceMetadata));
+    const forged = {
+      version: 1 as const,
+      sessionId: target.id,
+      throughEventId,
+      summarySha256: compactionSummarySha256(body),
+      references: sourceMetadata.references.filter(
+        ({ eventId }) => eventId === fixture.report.eventId,
+      ),
+    };
+    const summary: Message = {
+      role: "assistant",
+      content: attachCompactionEvidenceSources(wrapFullCompactionSummary(body), forged),
+      providerData: { picoSummaryFormat: "sections_v2", [HANDOFF_EVIDENCE_METADATA_KEY]: forged },
+    };
+    const input = {
+      checkpointId: "checkpoint:forged",
+      coveredEventCount: 1,
+      sourceDigest: computeCheckpointSourceDigest(entries.slice(0, 1)),
+      throughEventId,
+      summary,
+    };
+    await assert.rejects(targetRun.recordCheckpoint(input), /invalid handoff evidence/);
+    for (const format of [undefined, "unknown"])
+      await assert.rejects(
+        targetRun.recordCheckpoint({
+          ...input,
+          summary: { ...summary, providerData: { picoSummaryFormat: format } },
+        }),
+        /invalid sectioned summary/,
+      );
+    assert.equal(
+      (await store.readSession(target!.id)).filter(
+        (event) => event.kind === "context.checkpoint.recorded",
+      ).length,
+      1,
+    );
+  });
+
+  // The selected fork prefix deliberately excludes the original tool exchange.
+  const selected = snapshot.runtimeSeedEntries.filter(
+    (entry) =>
+      entry.kind !== "model" ||
+      (entry.event.kind === "message.committed" && !entry.event.data.message.toolCalls?.length),
+  );
+  const unavailableInput = {
+    ...bootstrap,
+    targetSessionId: "handoff-unavailable",
+    operationId: "handoff-selected",
+    seedEntries: selected,
+    modelCheckpoint: {
+      ...snapshot.modelCheckpoint,
+      coveredMessageCount: selected.filter((entry) => entry.kind === "model").length - 1,
+    },
+  };
+  await port.bootstrapFork(unavailableInput);
+  const unavailableEvents = await store.readSession(unavailableInput.targetSessionId);
+  const unavailable = unavailableEvents.find(
+    (event) => event.kind === "context.checkpoint.recorded",
+  )!;
+  if (unavailable.kind !== "context.checkpoint.recorded")
+    assert.fail("expected selected checkpoint");
+  const unavailableMetadata =
+    unavailable.data.summary.providerData?.[HANDOFF_EVIDENCE_METADATA_KEY];
+  assert.ok(isCompactionEvidenceMetadata(unavailableMetadata));
+  assert.deepEqual(unavailableMetadata.references, []);
+  assert.match(unavailable.data.summary.content, /来源未复制到当前会话/);
+  assert.match(unavailable.data.summary.content, /## Evidence\n\(none\)/);
+  assert.equal(unavailable.data.summary.content.includes("pico://archive/"), false);
+  assert.equal(
+    unavailable.data.summary.content.includes(
+      renderCompactionEvidenceReference(fixture.report.eventId),
+    ),
+    false,
+  );
+  await port.bootstrapFork(unavailableInput);
+  assert.deepEqual(await store.readSession(unavailableInput.targetSessionId), unavailableEvents);
+});
+
+test("explicit frozen Host Goal anchor permits only an accepted mid-turn safe fold without inventing user history", async () => {
+  const anchor: Message = {
+    role: "assistant",
+    content: "完成报告核验。",
+    providerData: { picoKind: "host_goal_anchor" },
+  };
+  const history: Message[] = [
+    {
+      role: "assistant",
+      content: "",
+      toolCalls: [{ id: "goal-read", name: "read_report", arguments: "{}" }],
+    },
+    { role: "user", toolCallId: "goal-read", content: "report" },
+    { role: "assistant", content: "completed safe batch" },
+    { role: "assistant", content: "retained tail" },
+  ];
+  let calls = 0;
+  const compactor = new FullCompactor({
+    provider: {
+      async generate(messages) {
+        calls++;
+        assert.match(messages[1]!.content, /Host-provided frozen Goal condition/);
+        return { role: "assistant", content: handoffSummary("(none)") };
+      },
+    },
+  });
+  const before = structuredClone(history);
+  const common = {
+    trigger: "manual" as const,
+    inputBudgetTokens: 4000,
+    targetRetainedTokens: 1,
+    preservedAnchor: anchor,
+  };
+  assert.equal(
+    await compactor.preview({ id: "host-anchor" }, history, {
+      ...common,
+      phase: "pre_turn",
+      acceptedHistoryPrefixCount: 3,
+    }),
+    undefined,
+  );
+  assert.equal(
+    await compactor.preview({ id: "host-anchor" }, history, { ...common, phase: "mid_turn" }),
+    undefined,
+  );
+  const preview = await compactor.preview({ id: "host-anchor" }, history, {
+    ...common,
+    phase: "mid_turn",
+    acceptedHistoryPrefixCount: 3,
+  });
+  assert.ok(preview);
+  assert.equal(preview.compactedCount, 3);
+  assert.match(preview.wrappedSummary, /当前 Host Goal 任务（冻结条件）：/);
+  assert.equal(preview.wrappedSummary.includes("当前用户任务（原文）："), false);
+  assert.equal(calls, 1);
+  assert.deepEqual(history, before);
+});

@@ -35,8 +35,10 @@ const summary = [
   "## Goal\n完成代码检查。",
   "## Progress\n### Done\n读取上下文。\n### In Progress\n继续检查。",
   "## Key Decisions\n保持原始约束。",
+  "## Constraints\nPreserve user constraints.",
   "## Next Steps\n返回结果。",
   "## Critical Context\n用户偏好简洁的中文回答。",
+  "## Evidence\n(none)",
 ].join("\n\n");
 
 for (const scenario of ["stable", "delete", "toggle", "admission-failure"] as const) {

@@ -9,10 +9,7 @@ import { Session } from "@pico/pico-host/session";
 import { RuntimeRun } from "@pico/pico-host/product-runtime-run";
 import { ToolRegistry } from "@pico/pico-host/product-tool-registry";
 import { NO_FILE_SIDE_EFFECTS, type BaseTool } from "@pico/pico-host/tool-registry-contract";
-import {
-  resolveCompactionEvidenceReferences,
-  type RuntimeCompactionCheckpointRun,
-} from "@pico/runtime/runtime-compaction-checkpoint";
+import { type RuntimeCompactionCheckpointRun } from "@pico/runtime/runtime-compaction-checkpoint";
 import { SilentReporter } from "@pico/runtime/silent-reporter";
 
 export function handoffSummary(
@@ -105,37 +102,10 @@ export async function createHandoffFixture(prefix: string, marker: string) {
   return { root, workDir, picoHome, session, report, failed, rawReport, task };
 }
 
-/** Exercises the public resolver port against real immutable storage entries. */
+/** Production RuntimeRun owns immutable source lookup and final commit revalidation. */
 export function checkpointRun(
-  session: Session,
+  _session: Session,
   run: RuntimeRun,
 ): RuntimeCompactionCheckpointRun<Session> {
-  return {
-    claimsSession: run.claimsSession.bind(run),
-    readModelHistoryEntries: run.readModelHistoryEntries.bind(run),
-    findLastCompactionCheckpoint: async () => {
-      const last = await run.findLastCompactionCheckpoint();
-      if (!last) return undefined;
-      const events = await session.runtimeEventStore!.readSession(session.id);
-      const event = events.find(
-        (candidate) =>
-          candidate.kind === "context.checkpoint.recorded" &&
-          candidate.data.checkpointId === last.checkpointId,
-      );
-      const format =
-        event?.kind === "context.checkpoint.recorded"
-          ? event.data.summary.providerData?.picoSummaryFormat
-          : undefined;
-      return {
-        ...last,
-        ...(format === "sections_v1" || format === "sections_v2" ? { summaryFormat: format } : {}),
-      };
-    },
-    resolveCompactionEvidenceReferences: async (input) =>
-      resolveCompactionEvidenceReferences(
-        await session.runtimeEventStore!.readSessionEntries(session.id),
-        input,
-      ),
-    recordCheckpoint: run.recordCheckpoint.bind(run),
-  };
+  return run;
 }

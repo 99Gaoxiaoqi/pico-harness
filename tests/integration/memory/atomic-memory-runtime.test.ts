@@ -315,8 +315,10 @@ test("atomic compaction persists its covered boundary and records disabled-polic
                 "## Goal\nContinue the project discussion.",
                 "## Progress\nThe previous project context was reviewed.",
                 "## Key Decisions\nThe old project uses Rust.",
+                "## Constraints\nPreserve user constraints.",
                 "## Next Steps\nContinue with the latest user request.",
                 "## Critical Context\nThe old project uses Rust.",
+                "## Evidence\n(none)",
               ].join("\n\n"),
             };
           },
