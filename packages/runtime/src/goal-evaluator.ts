@@ -1,7 +1,6 @@
 import type { LLMProvider, Message } from "@pico/core";
 import type { GoalEvaluation } from "./goal-manager.js";
 import { scheduleDeadline } from "./deadline.js";
-import { estimateMessagesTokens } from "./context-budget.js";
 import {
   boundedEvidenceText,
   goalEvidenceTrace,
@@ -17,6 +16,30 @@ const MAX_OUTPUT_TOKENS = 1_024;
 const MAX_RECENT_MESSAGES = 6;
 const MAX_MESSAGE_CODE_UNITS = 500;
 const MAX_MESSAGE_BYTES = 1_500;
+type GoalInputBudgetCheck = (messages: readonly Message[]) => boolean;
+let goalEncoderPromise: Promise<(typeof import("gpt-tokenizer"))["encode"] | undefined> | undefined;
+
+/** Local BPE budget for the complete request; no pre-load chars/4 cache is consulted. */
+async function loadGoalInputBudgetCheck(): Promise<GoalInputBudgetCheck> {
+  const encode = await (goalEncoderPromise ??= import("gpt-tokenizer")
+    .then((module) => module.encode)
+    .catch(() => undefined));
+  return (messages) => {
+    const serialized = JSON.stringify(messages);
+    const sizeBytes = Buffer.byteLength(serialized, "utf8");
+    if (sizeBytes > GOAL_EVIDENCE_MAX_INPUT_BYTES) return true;
+    // UTF-8 bytes conservatively bound local tokens if loading or encoding fails.
+    let tokens = sizeBytes;
+    if (encode) {
+      try {
+        tokens = encode(serialized).length;
+      } catch {
+        // Keep the byte upper bound, rather than falling back to a character estimate.
+      }
+    }
+    return tokens > GOAL_EVIDENCE_MAX_INPUT_TOKENS;
+  };
+}
 
 const EVALUATOR_SYSTEM_PROMPT = `你是独立、只读的 Goal 验收器。你不能调用工具、执行操作或修改任务。
 根据 Goal condition 和最近对话判断目标当前状态。只输出以下格式的 JSON：
@@ -107,17 +130,14 @@ export async function evaluateGoal(
       ].join("\n"),
     },
   ];
-  if (evidence) {
-    const fitted = fitEvidenceInput(condition, evidence);
-    evidence = fitted.evidence;
-    messages = fitted.messages;
-  }
-
   try {
-    if (
-      Buffer.byteLength(JSON.stringify(messages), "utf8") > GOAL_EVIDENCE_MAX_INPUT_BYTES ||
-      estimateMessagesTokens(messages) > GOAL_EVIDENCE_MAX_INPUT_TOKENS
-    )
+    const exceedsBudget = await Promise.race([loadGoalInputBudgetCheck(), aborted]);
+    if (evidence) {
+      const fitted = fitEvidenceInput(condition, evidence, exceedsBudget);
+      evidence = fitted.evidence;
+      messages = fitted.messages;
+    }
+    if (exceedsBudget(messages))
       return attachEvidenceFailure(evidence, "验收身份或上下文超出输入预算");
     const generation = Promise.resolve().then(() =>
       provider.generate(messages, [], {
@@ -199,9 +219,20 @@ function gateEvidenceEvaluation(
   const known = new Set(references.map((reference) => reference.eventId));
   const citedTools = evidence.tools.filter((tool) => cited.includes(tool.eventId));
   const processProof = citedTools.filter((tool) => tool.executionFacts || tool.toolName === "bash");
+  const invalidReference = cited.some((id) => !known.has(id));
+  if (invalidReference) {
+    const reason = "验收引用不属于本 Run 的冻结证据包";
+    return {
+      ...failedEvaluation(reason),
+      evidenceTrace: goalEvidenceTrace(
+        evidence,
+        cited.filter((id) => known.has(id)),
+        reason,
+      ),
+    };
+  }
   let gateReason: string | undefined;
   if (parsed.evaluatorFailed) gateReason = parsed.reason;
-  else if (cited.some((id) => !known.has(id))) gateReason = "验收引用不属于本 Run 的冻结证据包";
   else if (parsed.met) {
     if (evidence.coverage === "unavailable")
       gateReason = evidence.unavailableReason ?? "本 Run 执行证据不可用";
@@ -274,6 +305,7 @@ function attachEvidenceFailure(
 function fitEvidenceInput(
   condition: string,
   original: GoalEvidenceContext,
+  exceedsBudget: GoalInputBudgetCheck,
 ): {
   evidence: GoalEvidenceContext;
   messages: Message[];
@@ -287,9 +319,7 @@ function fitEvidenceInput(
     },
   ];
   let messages = render();
-  const overBudget = () =>
-    Buffer.byteLength(JSON.stringify(messages), "utf8") > GOAL_EVIDENCE_MAX_INPUT_BYTES ||
-    estimateMessagesTokens(messages) > GOAL_EVIDENCE_MAX_INPUT_TOKENS;
+  const overBudget = () => exceedsBudget(messages);
   for (const maxBytes of [512, 256, 128]) {
     if (!overBudget()) break;
     evidence = {

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
+import { encode } from "gpt-tokenizer";
 import { isGoalEvidenceTrace, normalizeGoalManagerSnapshot, type LLMProvider } from "@pico/core";
 import { GoalManager } from "@pico/runtime/goal-manager";
 import {
@@ -109,7 +110,7 @@ test("Goal evidence pipeline bounds the exact provider input and persists only f
       dispatched = true;
       assert.deepEqual(tools, []);
       assert.ok(Buffer.byteLength(JSON.stringify(messages)) <= GOAL_EVIDENCE_MAX_INPUT_BYTES);
-      assert.ok(estimateMessagesTokens(messages) <= GOAL_EVIDENCE_MAX_INPUT_TOKENS);
+      assert.ok(encode(JSON.stringify(messages)).length <= GOAL_EVIDENCE_MAX_INPUT_TOKENS);
       assert.match(messages[0]!.content, /不可信数据/u);
       const packed = JSON.parse(
         messages[1]!.content.split("\n").find((line) => line.startsWith('{"identity":'))!,
@@ -141,12 +142,103 @@ test("Goal evidence pipeline bounds the exact provider input and persists only f
   assert.doesNotMatch(JSON.stringify(result.evidenceTrace), /中文|tests passed/u);
 });
 
+test("Goal trims Chinese-dense evidence against whole-request BPE while preserving native identities and facts", async () => {
+  const { goal, identity, slice } = evidenceFixture();
+  const chinese = "龘鬱釁衢麤灩籲鑿".repeat(42);
+  const dense = buildGoalEvidenceContext(identity, {
+    ...slice,
+    tools: Array.from({ length: 8 }, (_, index) => ({
+      ...slice.tools[0]!,
+      eventId: `dense-tool-${index}`,
+      toolCallId: `dense-call-${index}`,
+      excerpt: chinese,
+      sha256: createHash("sha256").update(chinese).digest("hex"),
+      sizeBytes: Buffer.byteLength(chinese),
+    })),
+    toolResultCount: 8,
+  });
+  let dispatched = false;
+  const result = await evaluateGoal(
+    {
+      generate: async (messages) => {
+        dispatched = true;
+        const serialized = JSON.stringify(messages);
+        assert.ok(Buffer.byteLength(serialized) <= GOAL_EVIDENCE_MAX_INPUT_BYTES);
+        assert.ok(encode(serialized).length <= GOAL_EVIDENCE_MAX_INPUT_TOKENS);
+        const evidenceLine = messages[1]!.content
+          .split("\n")
+          .find((line) => line.startsWith('{"identity":'))!;
+        const packed = JSON.parse(evidenceLine);
+        const unbudgeted = messages.map((message) => ({
+          ...message,
+          content: message.content.replace(evidenceLine, JSON.stringify(dense)),
+        }));
+        assert.ok(
+          encode(JSON.stringify(unbudgeted)).length > GOAL_EVIDENCE_MAX_INPUT_TOKENS,
+          "the complete Chinese request needs token-driven trimming",
+        );
+        assert.ok(
+          estimateMessagesTokens(unbudgeted) < GOAL_EVIDENCE_MAX_INPUT_TOKENS,
+          "chars_v1 would undercount this request",
+        );
+        assert.deepEqual(packed.identity, dense.identity);
+        assert.equal(
+          packed.tools.length,
+          dense.tools.length,
+          "trim text before native evidence identities",
+        );
+        assert.equal(packed.coverage, "limited");
+        for (const tool of packed.tools) {
+          const original = dense.tools.find((item) => item.eventId === tool.eventId)!;
+          assert.deepEqual(tool.executionFacts, original.executionFacts);
+          assert.equal(tool.sha256, original.sha256);
+          assert.equal(tool.sizeBytes, original.sizeBytes);
+          assert.equal(tool.truncated, true);
+          assert.ok(tool.excerpt.length < original.excerpt.length);
+        }
+        return {
+          role: "assistant",
+          content: JSON.stringify({
+            met: true,
+            acceptanceBasis: "process_success",
+            citedEvidenceIds: ["dense-tool-7"],
+            reason: "最终原生检查正常退出",
+          }),
+        };
+      },
+    },
+    goal.condition,
+    [],
+    { evidence: dense },
+  );
+  assert.equal(dispatched, true);
+  assert.equal(result.met, true);
+  assert.equal(result.evidenceTrace?.coverage, "limited");
+  assert.deepEqual(result.evidenceTrace?.citedEvidenceIds, ["dense-tool-7"]);
+
+  const fallback = await evaluateGoal(
+    {
+      generate: async () =>
+        assert.fail("byte fallback must refuse an oversized request before dispatch"),
+    },
+    "<|endoftext|>",
+    Array.from({ length: 6 }, () => ({ role: "assistant" as const, content: chinese })),
+  );
+  assert.equal(
+    fallback.evaluatorFailed,
+    true,
+    "an encoder failure falls back to bytes instead of chars/4",
+  );
+  assert.match(fallback.reason, /输入预算/u);
+});
+
 test("Goal evidence refuses failed, missing, stale and foreign process proof despite a success verdict", async () => {
   const fixtures: {
     name: string;
     change: (slice: GoalEvidenceRunSlice) => GoalEvidenceRunSlice;
     citation?: string;
     citations?: string[];
+    evaluatorFailed?: boolean;
   }[] = [
     {
       name: "nonzero exit",
@@ -215,6 +307,7 @@ test("Goal evidence refuses failed, missing, stale and foreign process proof des
     { name: "unsettled tool", change: (s) => ({ ...s, incompleteToolCallCount: 1 }) },
     {
       name: "wrong source identity",
+      evaluatorFailed: true,
       change: (s) => ({
         ...s,
         identity: {
@@ -225,12 +318,18 @@ test("Goal evidence refuses failed, missing, stale and foreign process proof des
     },
     {
       name: "cancelled Run boundary",
+      evaluatorFailed: true,
       change: (s) => ({
         ...s,
         identity: { ...s.identity, terminal: { ...s.identity.terminal!, status: "cancelled" } },
       }),
     },
-    { name: "foreign Run citation", change: (s) => s, citation: "previous-run-result" },
+    {
+      name: "foreign Run citation",
+      evaluatorFailed: true,
+      change: (s) => s,
+      citation: "previous-run-result",
+    },
     { name: "assistant claim", change: (s) => s, citation: "final-reply" },
   ];
   for (const fixture of fixtures) {
@@ -252,8 +351,9 @@ test("Goal evidence refuses failed, missing, stale and foreign process proof des
       [],
       { evidence: buildGoalEvidenceContext(identity, fixture.change(slice)) },
     );
-    assert.equal(result.met, false, fixture.name);
-    assert.equal(result.evaluatorFailed, false, fixture.name);
+    if (fixture.evaluatorFailed) assert.notEqual(result.met, true, fixture.name);
+    else assert.equal(result.met, false, fixture.name);
+    assert.equal(result.evaluatorFailed, fixture.evaluatorFailed ?? false, fixture.name);
     assert.ok(result.evidenceTrace?.gateReason, fixture.name);
   }
   const { identity, slice } = evidenceFixture();

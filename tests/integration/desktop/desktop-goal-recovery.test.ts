@@ -20,6 +20,7 @@ import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
 import { SqliteRuntimeControlStore } from "@pico/storage/sqlite/sqlite-runtime-control-store";
 import { writeDesktopModelRouting } from "../../fixtures/desktop-model-routing.js";
 import { reportFixtureAttempt } from "../../fixtures/native-accounting.js";
+import type { GoalEvidenceContext } from "@pico/runtime/goal-evaluator";
 
 type Evaluation = {
   met: boolean;
@@ -210,7 +211,7 @@ async function createRecoveryFixture(
       trustStore,
       env,
       providerFactory: () => ({
-        generate: async (_messages, tools, request) => {
+        generate: async (messages, tools, request) => {
           evaluationCalls++;
           assert.equal(tools.length, 0);
           assert.equal(request?.maxOutputTokens, 1024);
@@ -223,7 +224,24 @@ async function createRecoveryFixture(
           };
           const usage = { promptTokens: 30, completionTokens: 10 };
           await reportFixtureAttempt(request, "openai", "coder", usage);
-          return { role: "assistant", content: JSON.stringify(verdict), usage };
+          const evidenceLine = messages[1]!.content
+            .split("\n")
+            .find((line) => line.startsWith('{"identity":'))!;
+          const evidence = JSON.parse(evidenceLine) as GoalEvidenceContext;
+          if (verdict.met) {
+            assert.ok(evidence.finalReplyEventId);
+            assert.match(evidence.finalReply!.content, /完成/u);
+          }
+          return {
+            role: "assistant",
+            content: JSON.stringify({
+              ...verdict,
+              ...(verdict.met
+                ? { acceptanceBasis: "delivery", citedEvidenceIds: [evidence.finalReplyEventId] }
+                : {}),
+            }),
+            usage,
+          };
         },
       }),
     });
@@ -279,7 +297,7 @@ async function createRecoveryFixture(
           workspacePath,
           sessionId,
           action: "arm",
-          condition: "工作完成",
+          condition: "最终回复包含“完成”两个字。",
           expectedRevision: snapshot.currentGoal?.revision ?? 0,
         }),
       );
@@ -614,6 +632,7 @@ test("canonical Run completion is evaluated after restart without rerunning the 
   assert.equal(f.engineCalls(), 1, "恢复只验收，不重复执行 Engine");
   assert.equal(f.evaluationCalls(), 1);
   assert.equal(final.coordinator.lastSettledRunId, runId);
+  assert.equal(final.currentGoal!.lastEvaluation!.evidenceTrace!.sourceRunId, canonicalRunId);
 });
 
 test("armed Goal survives restart without automatic admission", async (t) => {
