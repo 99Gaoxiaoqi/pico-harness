@@ -1413,7 +1413,9 @@ export class RuntimeRun {
       checkpointId: data.checkpointId,
       summaryText,
       ...(isSectionedSummaryFormat(format) ? { summaryFormat: format } : {}),
-      ...(isCompactionEvidenceMetadata(evidence) ? { evidence } : {}),
+      ...(format === SECTIONED_SUMMARY_FORMAT && isCompactionEvidenceMetadata(evidence)
+        ? { evidence }
+        : {}),
     };
   }
 

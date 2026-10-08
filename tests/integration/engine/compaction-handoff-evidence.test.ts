@@ -370,6 +370,22 @@ test("production checkpoint commit rejects forged provenance and fork derives re
       ).length,
       1,
     );
+    await targetRun.recordCheckpoint({
+      ...input,
+      checkpointId: "checkpoint:legacy-compatible",
+      summary: {
+        role: "assistant",
+        content: wrapFullCompactionSummary(contextSummaryBody("旧格式兼容。")),
+        providerData: { picoSummaryFormat: "sections_v1", [HANDOFF_EVIDENCE_METADATA_KEY]: forged },
+      },
+    });
+    const legacy = await targetRun.findLastCompactionCheckpoint();
+    assert.equal(legacy?.summaryFormat, "sections_v1");
+    assert.equal(
+      legacy?.evidence,
+      undefined,
+      "legacy provider metadata must never become verified Host evidence",
+    );
   });
 
   // The selected fork prefix deliberately excludes the original tool exchange.
