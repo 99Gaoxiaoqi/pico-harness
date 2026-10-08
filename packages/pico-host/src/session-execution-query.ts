@@ -637,6 +637,7 @@ function projectRun(
           turnId: trace.identity.turnId,
           goalEvaluation: {
             goalId: goal.id,
+            settlement: "settled",
             condition: goal.condition,
             reason: evaluation.reason,
             ...(evaluation.met !== undefined ? { met: evaluation.met } : {}),
@@ -676,6 +677,47 @@ function projectRun(
         }
         break;
     }
+  }
+  const unsettledGoalCalls = new Map<string, PhysicalAttemptRecord>();
+  for (const record of physical) {
+    if (record.purpose !== "goal_evaluation" || !record.goalId) continue;
+    const current = unsettledGoalCalls.get(record.providerCallId);
+    if (
+      !current ||
+      record.attempt > current.attempt ||
+      (record.attempt === current.attempt && record.startedAt > current.startedAt)
+    )
+      unsettledGoalCalls.set(record.providerCallId, record);
+  }
+  for (const record of unsettledGoalCalls.values()) {
+    if (steps.some((s) => s.goalEvaluation?.goalId === record.goalId)) continue;
+    steps.push({
+      id: `goal-evaluation:${record.providerCallId}`,
+      eventId: record.physicalAttemptId,
+      turnId: record.turnId ?? opening.turnId,
+      kind: "goal_evaluation",
+      title: "Goal 验收未结算",
+      at: record.startedAt,
+      status:
+        record.status === "cancelled"
+          ? "cancelled"
+          : record.status === "failed"
+            ? "failed"
+            : record.status === "interrupted"
+              ? "interrupted"
+              : record.status === "prepared" || record.status === "observed"
+                ? "running"
+                : "completed",
+      goalEvaluation: {
+        goalId: record.goalId!,
+        settlement: "unsettled",
+        condition: "目标条件未记录",
+        reason:
+          record.status === "cancelled"
+            ? "验收请求已取消，未保存结算结果"
+            : "未记录目标结算结果；物理响应不等于 Goal 达成",
+      },
+    });
   }
   for (const [callId, index] of models) {
     const records = physical.filter((record) => record.providerCallId === callId);

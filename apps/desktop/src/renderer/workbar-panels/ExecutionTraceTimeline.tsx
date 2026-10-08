@@ -787,11 +787,13 @@ function GoalEvidenceDetail({
     <section aria-label="Goal 执行证据">
       <Detail label="目标" value={evaluation.condition} />
       <p>
-        {evaluation.evaluatorFailed
-          ? "验收输出不合格"
-          : evaluation.met
-            ? "目标达成"
-            : "目标尚未达成"}
+        {evaluation.settlement === "unsettled"
+          ? "验收尚未结算"
+          : evaluation.evaluatorFailed
+            ? "验收输出不合格"
+            : evaluation.met
+              ? "目标达成"
+              : "目标尚未达成"}
         ：{evaluation.reason}
       </p>
       {!trace ? (

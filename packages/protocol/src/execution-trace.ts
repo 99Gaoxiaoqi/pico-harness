@@ -22,6 +22,7 @@ export interface RuntimeMemoryRecallDetail {
   }[];
 }
 export interface RuntimeGoalEvaluationDetail {
+  readonly settlement?: "settled" | "unsettled";
   readonly goalId: string;
   readonly condition: string;
   readonly reason: string;

@@ -1141,6 +1141,7 @@ const goalEvaluationDetailResult = exactResultShape(
   {
     met: resultBoolean,
     evaluatorFailed: resultBoolean,
+    settlement: resultOneOf(["settled", "unsettled"]),
     evidenceTrace: (value, path) => {
       if (!isGoalEvidenceTrace(value)) throw invalidResult(`${path} 验收证据无效`);
     },

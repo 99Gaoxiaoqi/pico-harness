@@ -4,12 +4,18 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import * as React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { SqliteRuntimeEventStore } from "@pico/storage/sqlite/sqlite-runtime-event-store";
 import { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-store";
 import { SqliteRuntimeControlStore, openOperationalDatabaseReadOnly } from "@pico/storage";
 import type { ForegroundProcessFacts, GoalEvidenceTrace, MemoryRecallTrace } from "@pico/core";
+import { parseRuntimeResult } from "@pico/protocol";
 import { GoalManager } from "@pico/runtime/goal-manager";
 import { querySessionExecution } from "../../../packages/pico-host/src/session-execution-query.js";
+import { InspectorWorkbarPanel } from "../../../apps/desktop/src/renderer/workbar-panels/InspectorWorkbarPanel.js";
+
+Object.assign(globalThis, { React });
 
 const sha = (s: string) => createHash("sha256").update(s).digest("hex");
 
@@ -247,6 +253,7 @@ test("reopened execution details retain recall/request levels, native process fa
       { sessionId: "session" },
       { memoryDatabasePath: memoryPath, workspaceKey: "workspace" },
     );
+    parseRuntimeResult("session.execution.query", page);
     const recall = page.runs[0]!.steps.find((s) => s.kind === "memory")!;
     assert.equal(recall.memory!.requests[0]!.evidenceLevel, "prepared");
     assert.equal(recall.memory!.items[0]!.state, "unchanged");
@@ -255,6 +262,24 @@ test("reopened execution details retain recall/request levels, native process fa
     assert.equal(page.runs[0]!.steps.filter((s) => s.kind === "goal_evaluation").length, 1);
     assert.equal(page.summary.modelCalls, 1);
     assert.equal(page.summary.toolCalls, 1);
+    const renderStep = (id: string) =>
+      renderToStaticMarkup(
+        React.createElement(InspectorWorkbarPanel, {
+          trace: [],
+          execution: page,
+          selectedTraceId: id,
+          loading: false,
+          onRefresh() {},
+          onSelectTrace() {},
+        }),
+      );
+    assert.match(renderStep(recall.id), /请求已装配/u);
+    assert.match(renderStep(recall.id), /当前版本一致/u);
+    assert.match(renderStep(page.runs[0]!.steps.find((s) => s.kind === "tool")!.id), /退出码.*1/u);
+    assert.match(
+      renderStep(page.runs[0]!.steps.find((s) => s.kind === "goal_evaluation")!.id),
+      /已引用/u,
+    );
     const slice = await store.readGoalEvidenceRun("session", "run");
     assert.equal(slice.tools[0]!.executionFacts!.exitCode, 1);
     assert.equal(slice.finalReply!.eventId, "final");
@@ -303,6 +328,97 @@ test("reopened execution details retain recall/request levels, native process fa
   } finally {
     await store.close();
     memories.close();
+    ledger.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("cancelled Goal evaluator retries remain unsettled and do not duplicate model accounting", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pico-goal-unsettled-"));
+  const store = new SqliteRuntimeEventStore({ storageRoot: root });
+  const ledger = new SqliteRuntimeControlStore({ storageRoot: root });
+  try {
+    await store.initializeSession({ sessionId: "session", workDir: root });
+    const ownerFence = await store.advanceOwnerFence("session", 0);
+    const base = {
+      schemaVersion: 2 as const,
+      sessionId: "session",
+      runId: "run",
+      turnId: "turn",
+      invocationId: "invocation",
+      at: "2026-10-09T00:00:00Z",
+      partial: false,
+      visibility: "internal" as const,
+    };
+    await store.appendBatch(
+      [
+        {
+          ...base,
+          eventId: "start",
+          kind: "run.started",
+          data: { workDir: root, agentSwarmAuthorization: "none" },
+        },
+        { ...base, eventId: "end", kind: "run.terminal", data: { status: "completed" } },
+      ],
+      { ownerFence },
+    );
+    const ownerId = ledger.beginPhysicalAttemptOwner();
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const record = {
+        accountingVersion: 1 as const,
+        accountingSource: "physical" as const,
+        physicalAttemptId: `goal-attempt-${attempt}`,
+        providerCallId: "goal-call",
+        logicalCallId: "goal-call",
+        ownerId,
+        sessionId: "session",
+        runId: "run",
+        turnId: "turn",
+        goalId: "goal",
+        purpose: "goal_evaluation" as const,
+        provider: "test",
+        model: "test",
+        pricingVersion: "test",
+        retryAttempt: attempt,
+        attempt,
+        revision: 0,
+        startedAt: `2026-10-09T00:00:0${attempt}Z`,
+        status: "prepared" as const,
+        usageBasis: "missing" as const,
+        costStatus: "unknown" as const,
+      };
+      ledger.recordPhysicalAttempt(record);
+      ledger.recordPhysicalAttempt({
+        ...record,
+        revision: 1,
+        status: attempt === 0 ? "failed" : "cancelled",
+      });
+    }
+    const page = querySessionExecution(root, { sessionId: "session" });
+    parseRuntimeResult("session.execution.query", page);
+    const steps = page.runs[0]!.steps;
+    const evaluations = steps.filter((s) => s.kind === "goal_evaluation");
+    assert.equal(evaluations.length, 1);
+    assert.equal(evaluations[0]!.status, "cancelled");
+    assert.equal(evaluations[0]!.goalEvaluation!.settlement, "unsettled");
+    assert.equal(evaluations[0]!.goalEvaluation!.met, undefined);
+    assert.equal(page.summary.modelCalls, 1);
+    assert.equal(steps.filter((s) => s.kind === "model").length, 1);
+    const html = renderToStaticMarkup(
+      React.createElement(InspectorWorkbarPanel, {
+        trace: [],
+        execution: page,
+        selectedTraceId: evaluations[0]!.id,
+        loading: false,
+        onRefresh() {},
+        onSelectTrace() {},
+      }),
+    );
+    assert.match(html, /验收尚未结算/u);
+    assert.match(html, /验收请求已取消/u);
+    assert.doesNotMatch(html, /目标达成/u);
+  } finally {
+    await store.close();
     ledger.close();
     rmSync(root, { recursive: true, force: true });
   }
