@@ -332,7 +332,7 @@ test("search uses bounded original excerpts while automatic recall and smaller p
     assert.match(reference.content, /ＭｉｎｔＨａｎｄｏｆｆ９０８/);
     assert.match(search.block, /truncated="true"/);
     assert.match(search.block, /&lt;&amp;&quot;&apos;&gt;/);
-    assert.ok(search.tokenCount <= 1600);
+    assert.ok(search.tokenCount <= 5120);
     assert.equal(search.tokenCount, countTokens(search.block));
     for (const line of search.block.split("\n").filter((line) => line.startsWith("<memory"))) {
       assert.ok(
@@ -345,6 +345,61 @@ test("search uses bounded original excerpts while automatic recall and smaller p
     assert.ok(preview.tokenCount <= 200);
     assert.equal((await builder.build("MintHandoff908", { maxTokens: 1 })).items.length, 0);
     await assert.rejects(builder.build("concise", { maxTokens: 0 }), /positive integers/);
+  } finally {
+    store.close();
+  }
+});
+
+test("active search returns ten short or long facts while keeping automatic, count and token limits", async () => {
+  const store = new SqliteMemoryItemStore(":memory:");
+  try {
+    await store.applyMutations({
+      operationId: "search-many-facts",
+      mutations: [
+        ...Array.from({ length: 12 }, (_, index) =>
+          memory(`ReleaseContract setting ${index}: Value${index}.`, ["ReleaseContract"]),
+        ),
+        ...Array.from({ length: 10 }, (_, index) =>
+          memory(`DenseContract setting ${index}: ${"detail! ".repeat(235)}`, ["DenseContract"]),
+        ),
+      ].map((item) => ({ type: "create" as const, item })),
+    });
+    const builder = new AtomicMemoryContextBuilder(store, workspaceKey);
+    const automatic = await builder.build("ReleaseContract", { maxItems: 99, maxTokens: 9999 });
+    assert.equal(automatic.items.length, 3);
+    assert.ok(automatic.tokenCount <= 320);
+    const search = await builder.build("ReleaseContract", { mode: "search" });
+    assert.equal(search.items.length, 10);
+    assert.equal(search.references.length, 10);
+    assert.equal(search.diagnostics.filter(({ reason }) => reason === "item_limit").length, 2);
+    assert.equal(search.truncated, true);
+    assert.ok(search.references.every(({ excerpt }) => !excerpt));
+    assert.ok(search.tokenCount <= 5120);
+    assert.equal(search.tokenCount, countTokens(search.block));
+    const oversizedLimits = await builder.build("ReleaseContract", {
+      mode: "search",
+      maxItems: 99,
+      maxTokens: 9999,
+    });
+    assert.deepEqual(oversizedLimits, search);
+    assert.equal(
+      (await builder.build("ReleaseContract", { mode: "search", maxItems: 4 })).items.length,
+      4,
+    );
+    const dense = await builder.build("DenseContract", { mode: "search" });
+    assert.equal(dense.items.length, 10);
+    assert.ok(dense.tokenCount > 4096 && dense.tokenCount <= 5120);
+    assert.equal(dense.tokenCount, countTokens(dense.block));
+    assert.ok(dense.references.every(({ excerpt }) => excerpt));
+    assert.ok(!dense.diagnostics.some(({ reason }) => reason === "budget"));
+    assert.ok(dense.block.endsWith("</atomic-memory-reference>"));
+    for (const line of dense.block.split("\n").filter((line) => line.startsWith("<memory")))
+      assert.ok(countTokens(line) <= 480);
+    const smallerBudget = await builder.build("DenseContract", { mode: "search", maxTokens: 1600 });
+    assert.ok(smallerBudget.items.length > 0 && smallerBudget.items.length < 10);
+    assert.ok(smallerBudget.tokenCount <= 1600);
+    assert.ok(smallerBudget.diagnostics.some(({ reason }) => reason === "budget"));
+    assert.equal((await store.listItems({ workspaceKey })).length, 22, "search remains read-only");
   } finally {
     store.close();
   }

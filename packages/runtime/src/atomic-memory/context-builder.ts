@@ -7,9 +7,11 @@ import {
   scoreMemoryContent,
 } from "@pico/core/atomic-memory-search";
 
-const MAX_ITEMS = 3;
+const AUTO_MAX_ITEMS = 3;
+const SEARCH_MAX_ITEMS = 10;
 const AUTO_MAX_TOKENS = 320;
-const SEARCH_MAX_TOKENS = 1_600;
+// Ten 480-token references plus the outer low-trust wrapper.
+const SEARCH_MAX_TOKENS = 5_120;
 const SEARCH_ITEM_TOKENS = 480;
 const SEARCH_LIMIT = 100;
 const RESIDENT_WINDOW = 500;
@@ -74,7 +76,7 @@ export class AtomicMemoryContextBuilder {
     options: AtomicMemoryContextOptions = {},
   ): Promise<AtomicMemoryContextResult> {
     const search = options.mode === "search";
-    const maxItems = boundedLimit(options.maxItems, MAX_ITEMS);
+    const maxItems = boundedLimit(options.maxItems, search ? SEARCH_MAX_ITEMS : AUTO_MAX_ITEMS);
     const maxTokens = boundedLimit(options.maxTokens, search ? SEARCH_MAX_TOKENS : AUTO_MAX_TOKENS);
     const settings = await this.store.readSettings(this.workspaceKey);
     if (!settings.enabled || !settings.recallEnabled) return emptyResult();

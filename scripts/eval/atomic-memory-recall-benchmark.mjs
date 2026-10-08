@@ -58,7 +58,7 @@ try {
     const result = await builder.build(marker, { mode: "search" });
     assert.equal(result.items.length, 1);
     assert.ok(result.references[0].content.includes(marker));
-    assert.ok(result.tokenCount <= 1_600);
+    assert.ok(result.tokenCount <= 5_120);
   };
   for (let index = 0; index < WARMUP_COUNT; index++) await query(index);
   const timings = [];

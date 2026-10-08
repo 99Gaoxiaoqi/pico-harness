@@ -15,7 +15,7 @@ flowchart LR
   management["用户添加与更正"] --> db
   db --> builder["共享本地 ContextBuilder"]
   builder --> automatic["自动参考：320 tokens"]
-  builder --> search["主动 memory_search：1600 tokens"]
+  builder --> search["主动 memory_search：5120 tokens"]
   builder --> preview["问题预览：实际引用与原因"]
   db --> metrics["提取回执统计"]
   extraction --> ledger["实际模型调用账本"]
@@ -181,18 +181,18 @@ flowchart LR
   recent --> rank
   rank --> builder["统一预算和原文摘录"]
   builder --> auto["自动 / 预览：3项、320 tokens"]
-  builder --> search["主动search：3项、1600 tokens"]
+  builder --> search["主动search：10项、5120 tokens"]
 ```
 
 问题经过 NFKC 和小写规范化，生成完整词、路径和 CJK 双字信号，三类信号**合计最多32个**。keys exact/prefix各取最多100项；正文检索扫描全部授权的active条目，排序后最多返回100条，不受近期500条限制。500条窗口只用于补充中文复合keys和自动模式的一条通用preference，主动模式不补未匹配偏好。
 
 正文匹配核验完整词和路径，`port` 不会因出现在 `report` 中而命中；中文正文至少命中两个不同有效双字信号。substring只是减少分词的预筛。候选仅限global与当前workspace的active项，key命中优先于纯正文命中，组内按相关性、最近修改时间和稳定ID排序。最近修改时间不代表事实仍然有效。
 
-| 读取入口               | 预算                                             | 超长内容                               |
-| ---------------------- | ------------------------------------------------ | -------------------------------------- |
-| 自动注入               | 最多3项、320 tokens                              | 普通长项跳过，授权助手笔记可摘录       |
-| memory_search({query}) | 最多3项、1600 tokens，单项含元数据最多480 tokens | 普通项和助手笔记均可按原文查询锚点摘录 |
-| 查询预览               | automatic模式，最多3项、320 tokens，可缩小       | 和同参数自动注入使用相同builder        |
+| 读取入口               | 预算                                              | 超长内容                               |
+| ---------------------- | ------------------------------------------------- | -------------------------------------- |
+| 自动注入               | 最多3项、320 tokens                               | 普通长项跳过，授权助手笔记可摘录       |
+| memory_search({query}) | 最多10项、5120 tokens，单项含元数据最多480 tokens | 普通项和助手笔记均可按原文查询锚点摘录 |
+| 查询预览               | automatic模式，最多3项、320 tokens，可缩小        | 和同参数自动注入使用相同builder        |
 
 预算包含来源、时间、XML转义和低信任包装。摘录不生成新摘要，references给出原文及code-point半开范围；items仍保留完整记录，diagnostics解释selected、duplicate、budget或item_limit。助手笔记标识未核实，source区分用户证据、无当前来源引用的人工记录和助手原文笔记。
 

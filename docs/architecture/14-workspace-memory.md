@@ -26,7 +26,7 @@ flowchart LR
   manage["Desktop / TUI：添加、更正、归档、删除"] --> db
   db --> builder["ContextBuilder：keys 与正文、排序、预算"]
   builder --> auto["自动召回：3 项 / 320 tokens"]
-  builder --> search["memory_search：3 项 / 1600 tokens"]
+  builder --> search["memory_search：10 项 / 5120 tokens"]
   builder --> preview["记忆页：同参数查询预览"]
   auto --> main["主对话模型：低信任参考"]
   search --> main
@@ -104,7 +104,7 @@ flowchart LR
 | 入口                   | 最大项数 | 整体预算    | 单项与摘录                                                       |
 | ---------------------- | -------- | ----------- | ---------------------------------------------------------------- |
 | 自动上下文             | 3        | 320 tokens  | 普通长Item放不下跳过，助手笔记可按查询锚点摘录                   |
-| memory_search({query}) | 3        | 1600 tokens | 每项连同其memory元数据最多480 tokens；普通Item和助手笔记均可摘录 |
+| memory_search({query}) | 10       | 5120 tokens | 每项连同其memory元数据最多480 tokens；普通Item和助手笔记均可摘录 |
 | memory.context.preview | ≤3       | ≤320 tokens | automatic模式，可进一步缩小预算，不能扩大自动注入容量            |
 
 预算包含低信任说明、来源/时间属性、XML转义与包装。摘录保留原文，以 Unicode code-point 的零起点半开区间 range.start/end/total 标注位置，不调用模型生成摘要。items保留完整记录，references才是实际引用片段；diagnostics只说明候选的 selected/duplicate/budget/item_limit，不覆盖全库未命中项。

@@ -90,6 +90,69 @@ realModelTest(
 );
 
 realModelTest(
+  "real memory_search combines six long independent settings from one bounded tool result",
+  { timeout: 3 * 60_000 },
+  async (t) => {
+    const fixture = await createFixture(t, "memory-real-many-settings");
+    const settings = {
+      region: "CedarRegion731",
+      runtime: "AmberRuntime624",
+      queue: "MintQueue953",
+      database: "CobaltDatabase842",
+      rollback: "IvoryRollback516",
+      receipt: "JadeReceipt307",
+    };
+    await fixture.store.applyMutations({
+      operationId: "seed-many-settings",
+      mutations: [
+        fixture.item(
+          "ConstraintIndex: all six release settings (region, runtime, queue, database, rollback, receipt) are stored under lookup phrase LaunchContract602.",
+          { keys: [{ key: "ConstraintIndex", keyType: "concept", keyOrigin: "user" }] },
+        ),
+        ...Object.entries(settings).map(([field, value]) =>
+          fixture.item(`LaunchContract602 ${field}: ${value}. ${"detail! ".repeat(230)}`, {
+            keys: [{ key: "LaunchContract602", keyType: "concept", keyOrigin: "user" }],
+          }),
+        ),
+      ].map((item) => ({ type: "create", item })),
+    });
+    const prompt =
+      "依照 ConstraintIndex 中的索引词调用 memory_search，读取全部六个发布配置。仅返回以原文字段名为键、标识为值的 JSON 对象，不要代码围栏或解释；缺失的值使用 UNKNOWN，不能猜测。";
+    const automatic = await fixture.builder.build(prompt);
+    assert.ok(automatic.block.includes("LaunchContract602"));
+    for (const value of Object.values(settings)) assert.ok(!automatic.block.includes(value));
+    const smallerBudget = await fixture.builder.build("LaunchContract602", {
+      mode: "search",
+      maxTokens: 1600,
+    });
+    assert.ok(Object.values(settings).some((value) => !smallerBudget.block.includes(value)));
+    const before = await fixture.store.listItems({ workspaceKey: fixture.workspaceKey });
+    const result = await fixture.run(prompt);
+    assert.deepEqual(JSON.parse(result.finalMessage.trim()), settings);
+    assert.ok(fixture.requests[0]);
+    assert.ok(
+      Object.values(settings).every((value) =>
+        fixture.requests[0]!.every(({ content }) => !content.includes(value)),
+      ),
+      "the settings must require active search rather than automatic recall",
+    );
+    assert.ok(
+      fixture.requests.some((messages) =>
+        messages.some(
+          (message) =>
+            message.toolCallId !== undefined &&
+            Object.values(settings).every((value) => message.content.includes(value)),
+        ),
+      ),
+      "a single real tool result must contain all six independent settings",
+    );
+    await fixture.lifecycle.close();
+    assert.equal(fixture.auxiliaryCalls(), 0);
+    assert.deepEqual(await fixture.store.listItems({ workspaceKey: fixture.workspaceKey }), before);
+  },
+);
+
+realModelTest(
   "real recall uses dates to distinguish preserved earlier and later project status",
   { timeout: 3 * 60_000 },
   async (t) => {
