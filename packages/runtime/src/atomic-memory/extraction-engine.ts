@@ -147,6 +147,12 @@ export class AtomicMemoryExtractionEngine {
           throughOrdinal: checkpoint.throughOrdinal,
           trigger: "compaction" as const,
           checkpointId: checkpoint.checkpointId,
+          ...(checkpoint.deletionRevision !== undefined
+            ? { deletionRevision: checkpoint.deletionRevision }
+            : {}),
+          ...(checkpoint.settingsVersion !== undefined
+            ? { settingsVersion: checkpoint.settingsVersion }
+            : {}),
           ...(denied.has(checkpoint.checkpointId) ? { disposition: "policy_denied" as const } : {}),
         })),
       ...completed.map((boundary) => ({
