@@ -6,6 +6,7 @@ import type {
   Message,
 } from "@pico/core";
 import type { GoalManager, GoalEvaluation } from "@pico/runtime/goal-manager";
+import type { GoalEvidenceTrace } from "@pico/runtime/goal-evaluator";
 import type { Session } from "./session.js";
 import { INTERRUPTED_DAEMON_RUN_ERROR } from "./workspace-run-lifecycle.js";
 
@@ -33,7 +34,7 @@ export interface GoalContinuationDeps {
     execution: GoalExecutionRef,
     messages: readonly Message[],
     signal: AbortSignal,
-  ): Promise<GoalEvaluation>;
+  ): Promise<GoalEvaluation & { readonly evidenceTrace?: GoalEvidenceTrace }>;
   admit(
     workspace: string,
     sessionId: string,
@@ -203,7 +204,7 @@ export class GoalContinuationCoordinator {
       const abort = new AbortController();
       lane.abort = abort;
       lane.evaluationRevision = active.revision;
-      let evaluation: GoalEvaluation;
+      let evaluation: GoalEvaluation & { readonly evidenceTrace?: GoalEvidenceTrace };
       try {
         evaluation = await this.deps.evaluate(
           lane.workspace,
@@ -234,6 +235,7 @@ export class GoalContinuationCoordinator {
       manager.settle({
         checkpoint: { goalId: active.id, revision: active.revision },
         evaluation,
+        ...(evaluation.evidenceTrace ? { evidenceTrace: evaluation.evidenceTrace } : {}),
         tokensNow: workTokens,
       });
       const settled = manager.getCurrent()!;

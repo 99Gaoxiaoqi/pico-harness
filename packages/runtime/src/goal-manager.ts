@@ -10,6 +10,7 @@ import type {
   PersistedGoalState,
   PersistedGoalStatus,
 } from "@pico/core";
+import type { GoalEvidenceTrace } from "./goal-evidence.js";
 
 export type GoalStatus = PersistedGoalStatus;
 export type Goal = PersistedGoalState;
@@ -48,6 +49,7 @@ export interface GoalRunCheckpoint {
 export interface GoalSettleInput {
   readonly checkpoint: GoalRunCheckpoint;
   readonly evaluation: GoalEvaluation;
+  readonly evidenceTrace?: GoalEvidenceTrace;
   /** Cumulative primary-execution tokens at this Run's terminal boundary. */
   readonly tokensNow: number;
 }
@@ -116,7 +118,11 @@ function evaluationOutcome(evaluation: GoalEvaluation): GoalEvaluationOutcome {
   return "progress";
 }
 
-function evaluationRecord(evaluation: GoalEvaluation, at: number): GoalEvaluationRecord {
+function evaluationRecord(
+  evaluation: GoalEvaluation,
+  at: number,
+  evidenceTrace?: GoalEvidenceTrace,
+): GoalEvaluationRecord {
   return {
     ...(evaluation.met !== undefined ? { met: evaluation.met } : {}),
     ...(evaluation.impossible !== undefined ? { impossible: evaluation.impossible } : {}),
@@ -127,6 +133,7 @@ function evaluationRecord(evaluation: GoalEvaluation, at: number): GoalEvaluatio
       : {}),
     reason: evaluation.reason.slice(0, 1_000),
     at,
+    ...(evidenceTrace ? { evidenceTrace: structuredClone(evidenceTrace) } : {}),
   };
 }
 
@@ -299,7 +306,7 @@ export class GoalManager {
     }
     const outcome = evaluationOutcome(input.evaluation);
     const at = this.now();
-    const record = evaluationRecord(input.evaluation, at);
+    const record = evaluationRecord(input.evaluation, at, input.evidenceTrace);
     goal.lastEvaluation = record;
     goal.lastReason = record.reason;
 

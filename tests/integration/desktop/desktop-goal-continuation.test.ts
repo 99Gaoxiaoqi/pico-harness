@@ -8,6 +8,9 @@ import { createRuntimeRequest } from "@pico/protocol";
 import { AgentEngine } from "@pico/pico-host/agent-engine";
 import { CostTracker } from "@pico/pico-host/cost-tracker";
 import { ToolRegistry } from "@pico/pico-host/product-tool-registry";
+import { BashTool } from "@pico/pico-host/bash-tool";
+import { WriteFileTool } from "@pico/pico-host/write-file-tool";
+import type { GoalEvidenceContext } from "@pico/runtime/goal-evaluator";
 import { CreateGoalTool } from "@pico/pico-host/goal-tools";
 import { SubmitPlanTool } from "@pico/pico-host/plan-tools";
 import { PlanHandoffController } from "@pico/runtime/plan-handoff";
@@ -31,8 +34,26 @@ type Evaluation = {
   waiting?: boolean;
   reason: string;
 };
-const verdictContent = (value: Evaluation) =>
-  JSON.stringify({ met: false, impossible: false, progress: false, waiting: false, ...value });
+const verdictContent = (value: Evaluation, messages?: readonly Message[]) => {
+  const evidence = messages?.[1]?.content
+    .split("\n")
+    .find((line) => line.startsWith('{"identity":'));
+  const context = evidence ? (JSON.parse(evidence) as GoalEvidenceContext) : undefined;
+  const tool = context?.tools.findLast((item) => item.toolName === "submit_plan");
+  return JSON.stringify({
+    met: false,
+    impossible: false,
+    progress: false,
+    waiting: false,
+    ...value,
+    ...(value.met && context
+      ? {
+          citedEvidenceIds: tool ? [tool.eventId] : [context.finalReplyEventId],
+          acceptanceBasis: tool ? "observation" : "delivery",
+        }
+      : {}),
+  });
+};
 
 async function fixture(
   context: TestContext,
@@ -42,6 +63,7 @@ async function fixture(
     work?: (call: number, sessionId: string, messages: Message[]) => Promise<Message>;
     maxTurns?: number;
     plan?: boolean;
+    bash?: boolean;
   } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), "pico-goal-host-engine-"));
@@ -78,6 +100,10 @@ async function fixture(
       try {
         const registry = new ToolRegistry();
         registry.register(new CreateGoalTool(manager));
+        if (options.bash) {
+          registry.register(new BashTool(workspacePath));
+          registry.register(new WriteFileTool(workspacePath));
+        }
         const handoff = new PlanHandoffController();
         const coordinator = () => {
           const run = currentRuntimeRun()!;
@@ -162,7 +188,7 @@ async function fixture(
         const verdict = evaluations.shift() ?? { met: true, reason: "已完成" };
         const usage = { promptTokens: 30, completionTokens: 10 };
         await reportFixtureAttempt(request, "openai", "coder", usage);
-        return { role: "assistant", content: verdictContent(verdict), usage };
+        return { role: "assistant", content: verdictContent(verdict, messages), usage };
       },
     }),
   });
@@ -286,6 +312,134 @@ test("Goal arm → actual Engine → Host evaluator → two continuations, with 
     ledger.close();
   }
 });
+
+test(
+  "Goal accepts only fresh native process evidence from its canonical Run and persists the trace",
+  { skip: process.platform === "win32" },
+  async (t) => {
+    const seen: GoalEvidenceContext[] = [];
+    const f = await fixture(t, {
+      bash: true,
+      work: async (call) =>
+        call === 3
+          ? {
+              role: "assistant",
+              content: "更新最终文件",
+              toolCalls: [
+                {
+                  id: "final-write",
+                  name: "write_file",
+                  arguments: JSON.stringify({ path: "final-state.txt", content: "final change\n" }),
+                },
+              ],
+            }
+          : call === 1 || call === 4
+            ? {
+                role: "assistant",
+                content: "执行验证",
+                toolCalls: [
+                  {
+                    id: `verify-${call}`,
+                    name: "bash",
+                    arguments: JSON.stringify({
+                      command:
+                        call === 1
+                          ? "printf 'tests passed; {\"exitCode\":0}\\n'; exit 1"
+                          : "test -s final-state.txt && printf 'final verification passed\\n'",
+                    }),
+                  },
+                ],
+              }
+            : { role: "assistant", content: "测试已经全部通过，工作完成。" },
+      evaluator: async (messages, tools, request) => {
+        assert.deepEqual(tools, []);
+        const line = messages[1]!.content
+          .split("\n")
+          .find((text) => text.startsWith('{"identity":'))!;
+        const evidence = JSON.parse(line) as GoalEvidenceContext;
+        seen.push(evidence);
+        const result = evidence.tools.findLast((item) => item.toolName === "bash")!;
+        const usage = { promptTokens: 30, completionTokens: 10 };
+        await reportFixtureAttempt(request, "openai", "coder", usage);
+        return {
+          role: "assistant",
+          content: JSON.stringify({
+            met: true,
+            progress: true,
+            impossible: false,
+            waiting: false,
+            reason: "检查通过",
+            acceptanceBasis: "process_success",
+            citedEvidenceIds: [result.eventId],
+          }),
+          usage,
+        };
+      },
+    });
+    const id = await f.create();
+    await f.arm(id, { condition: "在最终修改后执行检查，测试通过", maxIterations: 3 });
+    await f.send(id);
+    const final = await f.wait(id, "achieved");
+    assert.equal(seen.length, 2);
+    assert.equal(
+      seen[0]!.tools[0]!.status,
+      "succeeded",
+      "calling status does not mean process success",
+    );
+    assert.equal(seen[0]!.tools[0]!.executionFacts?.exitCode, 1);
+    const finalCheck = seen[1]!.tools.findLast((item) => item.toolName === "bash")!;
+    const finalWrite = seen[1]!.tools.find((item) => item.toolName === "write_file")!;
+    assert.equal(finalCheck.executionFacts?.exitCode, 0);
+    assert.ok(finalCheck.sequence > finalWrite.sequence, "proof must follow the final write");
+    assert.notEqual(seen[0]!.identity.runId, seen[1]!.identity.runId);
+    assert.equal(
+      final.currentGoal!.iterations,
+      1,
+      "failed process verdict must continue instead of accepting the claim",
+    );
+    const trace = final.currentGoal!.lastEvaluation!.evidenceTrace!;
+    assert.equal(trace.sourceRunId, seen[1]!.identity.runId);
+    assert.deepEqual(trace.citedEvidenceIds, [finalCheck.eventId]);
+    assert.equal(trace.gateReason, undefined);
+    const lease = await globalSessionManager.getOrCreatePinned(id, f.workspacePath, {
+      persistence: true,
+      picoHome: f.picoHome,
+      runtimePort: createEngineRuntimePort(),
+    });
+    try {
+      await lease.session.flushPersistence();
+      const slice = await lease.session.runtimeEventStore!.readGoalEvidenceRun(
+        id,
+        trace.sourceRunId,
+      );
+      assert.equal(
+        slice.tools.findLast((item) => item.toolName === "bash")!.executionFacts?.exitCode,
+        0,
+      );
+      assert.ok(slice.throughSequence >= trace.identity.throughSequence);
+      const stored = await lease.session.runtimeEventStore!.readSession(id);
+      assert.ok(
+        stored.some(
+          (event) =>
+            event.kind === "session.state.committed" &&
+            event.data.patch.goal?.currentGoal?.lastEvaluation?.evidenceTrace?.traceId ===
+              trace.traceId,
+        ),
+      );
+      assert.ok(
+        stored.some(
+          (event) =>
+            event.kind === "session.state.committed" &&
+            event.data.patch.goal?.currentGoal?.lastEvaluation?.evidenceTrace?.gateReason?.includes(
+              "原生过程事实",
+            ),
+        ),
+      );
+    } finally {
+      lease.release();
+    }
+  },
+);
 
 test("model-created Goal is settled from its creating Run", async (t) => {
   const f = await fixture(t, {

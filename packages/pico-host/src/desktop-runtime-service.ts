@@ -87,7 +87,7 @@ import {
 import { type CredentialVault } from "./provider/credential-vault.js";
 import { resolveProviderProfile } from "@pico/runtime";
 import { GoalManager } from "@pico/runtime/goal-manager";
-import { evaluateGoal } from "@pico/runtime/goal-evaluator";
+import { buildGoalEvidenceContext, evaluateGoal } from "@pico/runtime/goal-evaluator";
 import type {
   PersistedGoalState as GoalState,
   PersistedGoalContinuationIntent as GoalContinuationIntent,
@@ -2381,11 +2381,18 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const storageRoot = resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.root;
     return this.withWorkbarErrors(() =>
       toJsonValue(
-        querySessionExecution(storageRoot, {
-          sessionId: params.sessionId,
-          ...(params.cursor === undefined ? {} : { cursor: params.cursor }),
-          ...(params.runId === undefined ? {} : { runId: params.runId }),
-        }),
+        querySessionExecution(
+          storageRoot,
+          {
+            sessionId: params.sessionId,
+            ...(params.cursor === undefined ? {} : { cursor: params.cursor }),
+            ...(params.runId === undefined ? {} : { runId: params.runId }),
+          },
+          {
+            memoryDatabasePath: join(this.picoHome, "memory.sqlite"),
+            workspaceKey: resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.id,
+          },
+        ),
       ),
     );
   }
@@ -2661,6 +2668,22 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     messages: readonly Message[],
     signal: AbortSignal,
   ) {
+    const slice = await session.runtimeEventStore?.readGoalEvidenceRun(session.id, execution.runId);
+    if (!slice)
+      return { evaluatorFailed: true, reason: "当前 Run 执行证据不可用，请在最终修改后重新检查" };
+    const evidence = buildGoalEvidenceContext(
+      {
+        goalId: goal.id,
+        goalRevision: goal.revision,
+        generation: execution.generation,
+        sessionId: session.id,
+        runId: execution.runId,
+        turnId: execution.turnId,
+        invocationId: execution.invocationId,
+        runStartedEventId: execution.runStartedEventId,
+      },
+      slice,
+    );
     const settings = await this.getSessionSettings(workspacePath, session);
     const effective = await this.loadSessionModelRuntime(workspacePath, settings.modelRouteId);
     const active = effective.router.providerConfig(settings.modelRouteId);
@@ -2718,7 +2741,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           return tracked;
         },
       };
-      return await evaluateGoal(provider, goal.condition, messages, { signal });
+      return await evaluateGoal(provider, goal.condition, messages, { signal, evidence });
     } finally {
       if (!dispatched) await cleanup();
     }

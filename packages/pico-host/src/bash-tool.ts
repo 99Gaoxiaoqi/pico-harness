@@ -47,6 +47,7 @@ import {
 } from "@pico/core/permission-profile";
 import { canonicalizeSandboxBoundaryExpansion } from "@pico/runtime/sandbox-boundary-path";
 import { scheduleUnrefDeadline, type ScheduledDeadline } from "@pico/runtime/deadline";
+import type { NativeProcessExecutionContext } from "./native-process-evidence.js";
 
 /** bash 命令默认执行时间与可信宿主可配置边界。 */
 export const DEFAULT_BASH_TIMEOUT_MS = 30_000;
@@ -179,7 +180,7 @@ export class BashTool implements BaseTool {
     };
   }
 
-  async execute(args: string, context?: ToolExecutionContext): Promise<string> {
+  async execute(args: string, context?: NativeProcessExecutionContext): Promise<string> {
     const input = parseBashInput(args);
     const { command, background } = input;
     // A durable boundary may change after request_sandbox_boundary in the same run.
@@ -231,6 +232,15 @@ export class BashTool implements BaseTool {
       this.options.env,
       this.timeoutMs,
     );
+    context?.reportProcessResult?.({
+      version: 1,
+      kind: "foreground_process",
+      exitCode: execution.exitCode,
+      terminationSignal: execution.terminationSignal,
+      timedOut: execution.timedOut,
+      outputIncomplete: execution.exceededExecutionBuffer,
+      spawnFailed: execution.error !== undefined,
+    });
     let stdout = execution.output;
 
     if (
@@ -525,6 +535,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 interface ForegroundCommandResult {
   output: string;
   exitCode: number | null;
+  terminationSignal: string | null;
   timedOut: boolean;
   exceededExecutionBuffer: boolean;
   sandboxed: boolean;
@@ -570,6 +581,7 @@ function runForegroundCommand(
       resolvePromise({
         output: "",
         exitCode: null,
+        terminationSignal: null,
         timedOut: false,
         exceededExecutionBuffer: false,
         sandboxed: false,
@@ -637,7 +649,7 @@ function runForegroundCommand(
     child.once("error", (error) => {
       childError = asError(error);
     });
-    child.once("close", (exitCode) => {
+    child.once("close", (exitCode, terminationSignal) => {
       if (settled) return;
       settled = true;
       cleanup();
@@ -649,6 +661,7 @@ function runForegroundCommand(
         resolvePromise({
           output: chunks.join(""),
           exitCode,
+          terminationSignal,
           timedOut,
           exceededExecutionBuffer,
           sandboxed,

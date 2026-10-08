@@ -25,11 +25,16 @@ import {
   sharedToolResourceAuthority,
   type ToolResourceAuthority,
 } from "@pico/runtime/tool-resource-authority";
-import type { ToolCall, ToolDefinition, ToolResult } from "@pico/core";
+import type { ForegroundProcessFacts, ToolCall, ToolDefinition, ToolResult } from "@pico/core";
 import { ToolAccesses } from "@pico/runtime/tool-access";
 import { isToolArgumentAuditRefusal } from "@pico/core/tool-argument-audit";
 import type { HookService } from "./hooks/service.js";
 import { HookProcessTreeTerminationError } from "./hooks/termination-error.js";
+import { BashTool } from "./bash-tool.js";
+import {
+  validateNativeProcessFacts,
+  type NativeProcessExecutionContext,
+} from "./native-process-evidence.js";
 
 export interface ToolRegistryDiagnostics {
   info(contextOrMessage: Readonly<Record<string, unknown>> | string, message?: string): void;
@@ -553,6 +558,8 @@ export class ToolRegistry implements Registry {
     // 5. 执行工具逻辑:所有安全门 + Hook + 权限链都放行了
     let fatalFailure: ToolCommitBoundaryError | HookProcessTreeTerminationError | undefined;
     let auditRefusal: Error | undefined;
+    let executionFacts: ForegroundProcessFacts | undefined;
+    let processReportCount = 0;
     try {
       const executionContext: ToolExecutionContext = {
         ...(context ?? {}),
@@ -608,7 +615,22 @@ export class ToolRegistry implements Registry {
           context?.signal?.throwIfAborted();
           if (this.tools.get(currentCall.name) !== tool)
             throw new ToolCommitBoundaryError("T1", new Error("Tool binding changed after T1"));
-          return tool.execute(currentCall.arguments, executionContext);
+          // The collector is created here, after physical admission. Middleware, callers,
+          // arbitrary tools and same-name plugin bindings cannot supply native process facts.
+          const nativeContext: NativeProcessExecutionContext =
+            tool instanceof BashTool
+              ? {
+                  ...executionContext,
+                  reportProcessResult: (facts) => {
+                    processReportCount++;
+                    executionFacts =
+                      processReportCount === 1 && validateNativeProcessFacts(facts)
+                        ? Object.freeze(structuredClone(facts))
+                        : undefined;
+                  },
+                }
+              : executionContext;
+          return tool.execute(currentCall.arguments, nativeContext);
         })().catch((error: unknown) => {
           if (
             error instanceof ToolCommitBoundaryError ||
@@ -655,6 +677,7 @@ export class ToolRegistry implements Registry {
           ? execute()
           : this.resourceAuthority.run(this.getAccesses(currentCall), context?.signal, execute)),
         isError: false,
+        ...(executionFacts ? { executionFacts } : {}),
       };
     } catch (err) {
       if (fatalFailure) throw fatalFailure;
@@ -671,6 +694,7 @@ export class ToolRegistry implements Registry {
         toolCallId: currentCall.id,
         output: `Error executing ${currentCall.name}: ${errMsg}`,
         isError: true,
+        ...(executionFacts ? { executionFacts } : {}),
       };
     }
   }
