@@ -18,7 +18,12 @@ test("queue mutations reopen continuity before old stream frames can restore rem
   let opens = 0;
   let waitForClose = true;
   let storedQueue: readonly RuntimeQueuedInput[] = [
-    { queueId: "queued-1", input: { kind: "text", text: "guide now" }, createdAt: 1 },
+    {
+      queueId: "queued-1",
+      sessionId: "session",
+      input: { kind: "text", text: "guide now" },
+      createdAt: 1,
+    },
   ];
   let visibleQueue: readonly RuntimeQueuedInput[] = [];
   const continuity = new DesktopSessionContinuity({
