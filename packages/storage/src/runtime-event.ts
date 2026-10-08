@@ -358,7 +358,12 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
         (!isRecord(memoryBoundary) ||
           memoryBoundary["runtimeEventId"] !== value["data"]["throughEventId"] ||
           (memoryBoundary["disposition"] !== "eligible" &&
-            memoryBoundary["disposition"] !== "policy_denied"))
+            memoryBoundary["disposition"] !== "policy_denied") ||
+          (memoryBoundary["deletionRevision"] !== undefined &&
+            !isNonNegativeInteger(memoryBoundary["deletionRevision"])) ||
+          (memoryBoundary["settingsVersion"] !== undefined &&
+            (!isNonNegativeInteger(memoryBoundary["settingsVersion"]) ||
+              memoryBoundary["settingsVersion"] === 0)))
       ) {
         throw new RuntimeEventIntegrityError("Runtime memory extraction boundary is invalid");
       }

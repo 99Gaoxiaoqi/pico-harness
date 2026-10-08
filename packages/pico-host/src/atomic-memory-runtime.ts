@@ -285,22 +285,32 @@ export class AtomicMemoryRuntime {
     });
   }
 
-  async compactionDisposition(): Promise<"eligible" | "policy_denied" | undefined> {
+  async compactionAdmission(): Promise<RuntimeMemoryExtractionBoundary | undefined> {
     if (!this.options.supported) return undefined;
     const store = new SqliteMemoryItemStore(atomicMemoryDatabasePath(this.options.picoHome));
     try {
       const settings = await store.readSettings(this.workspaceKey);
-      if (!settings.enabled || !settings.autoExtract) return "policy_denied";
+      const generations = {
+        deletionRevision: await store.readDeletionRevision(),
+        settingsVersion: settings.version,
+      };
+      if (!settings.enabled || !settings.autoExtract)
+        return { disposition: "policy_denied", ...generations };
       const gate = await this.options.gate("compaction");
       if (
         !gate.allowed &&
         !["unavailable", "draining", "configuration", "aborted"].includes(gate.reason)
       )
-        return "policy_denied";
-      return "eligible";
+        return { disposition: "policy_denied", ...generations };
+      return { disposition: "eligible", ...generations };
     } finally {
       store.close();
     }
+  }
+
+  /** @deprecated Use compactionAdmission to preserve the admitting generations. */
+  async compactionDisposition(): Promise<"eligible" | "policy_denied" | undefined> {
+    return (await this.compactionAdmission())?.disposition;
   }
 
   async checkpoint(checkpointId: string): Promise<void> {
@@ -494,13 +504,27 @@ export class AtomicMemoryRuntime {
       if (event.kind !== "context.checkpoint.recorded") return [];
       const through = entries.find((entry) => entry.event.eventId === event.data.throughEventId);
       if (!through) throw new Error("memory_checkpoint_boundary_missing");
+      const admission = event.data.memoryExtractionBoundary;
       return [
         {
           checkpointId: event.data.checkpointId,
           ordinal: sequence,
           throughOrdinal: through.sequence,
-          ...(event.data.memoryExtractionBoundary
-            ? { disposition: event.data.memoryExtractionBoundary.disposition }
+          ...(admission
+            ? {
+                // Legacy tagged checkpoints have coverage but no recoverable authorization.
+                disposition:
+                  admission.deletionRevision !== undefined &&
+                  admission.settingsVersion !== undefined
+                    ? admission.disposition
+                    : ("policy_denied" as const),
+                ...(admission.deletionRevision !== undefined
+                  ? { deletionRevision: admission.deletionRevision }
+                  : {}),
+                ...(admission.settingsVersion !== undefined
+                  ? { settingsVersion: admission.settingsVersion }
+                  : {}),
+              }
             : { bootstrap: true }),
         },
       ];

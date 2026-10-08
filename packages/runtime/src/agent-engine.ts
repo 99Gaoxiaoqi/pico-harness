@@ -15,6 +15,7 @@ import type {
   LLMProvider,
   LLMProviderRequestOptions,
   RuntimeToolResultStatus,
+  RuntimeMemoryExtractionBoundary,
   Usage,
 } from "@pico/core";
 import { ContextOverflowError, isAbortError, ModelCommunicationError } from "@pico/core";
@@ -330,6 +331,8 @@ export interface AgentEngineOptions {
   memoryHooks?: {
     capture(messages: readonly Message[], tools: readonly ToolDefinition[]): Promise<void>;
     checkpoint(checkpointId: string): Promise<void>;
+    compactionAdmission?(): Promise<RuntimeMemoryExtractionBoundary | undefined>;
+    /** @deprecated A disposition without frozen generations cannot authorize extraction. */
     compactionDisposition?(): Promise<"eligible" | "policy_denied" | undefined>;
   };
   /** 主循环最大轮次兜底(默认 50,防止失控烧穿 Token) */
@@ -697,9 +700,11 @@ export class AgentEngine {
       runtimeRun,
       compactor: this.fullCompactor,
       request,
-      ...(this.memoryHooks?.compactionDisposition
-        ? { memoryDisposition: () => this.memoryHooks!.compactionDisposition!() }
-        : {}),
+      ...(this.memoryHooks?.compactionAdmission
+        ? { memoryAdmission: () => this.memoryHooks!.compactionAdmission!() }
+        : this.memoryHooks?.compactionDisposition
+          ? { memoryDisposition: () => this.memoryHooks!.compactionDisposition!() }
+          : {}),
       ...(this.hookService ? { hookService: this.hookService } : {}),
       ...(signal ? { ...(signal === undefined ? {} : { signal }) } : {}),
       logger: this.diagnostics,

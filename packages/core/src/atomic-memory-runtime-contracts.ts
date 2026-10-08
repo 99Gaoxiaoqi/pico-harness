@@ -30,6 +30,9 @@ export interface MemoryCheckpointBoundary {
   /** Old checkpoints without recoverable memory coverage may bootstrap a new cursor. */
   readonly bootstrap?: boolean;
   readonly disposition?: "eligible" | "policy_denied";
+  /** Frozen checkpoint admission; never inferred from the recovering task. */
+  readonly deletionRevision?: number;
+  readonly settingsVersion?: number;
 }
 
 export interface MemoryExtractionSnapshot {
