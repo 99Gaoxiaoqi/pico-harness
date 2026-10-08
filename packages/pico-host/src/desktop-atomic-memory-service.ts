@@ -6,6 +6,7 @@ import type { MemoryItemRecord, MemoryItemWrite } from "@pico/core/atomic-memory
 import {
   MemoryItemStoreConflictError,
   normalizeLongTermMemoryContent,
+  validateMemoryTemporalBounds,
 } from "@pico/core/atomic-memory-contracts";
 import type { AtomicMemorySettings } from "@pico/core/atomic-memory-runtime-contracts";
 import { resolvePicoPaths } from "./pico-paths.js";
@@ -156,7 +157,14 @@ export class DesktopAtomicMemoryService {
   ): Promise<RuntimeResult<"memory.update">> {
     return this.withStore(workspacePath, async (store, key) => {
       const current = await authorizedItem(store, key, params.itemId);
-      const editing = params.content !== undefined || params.kind !== undefined;
+      const editing = [
+        params.content,
+        params.kind,
+        params.statementType,
+        params.temporalType,
+        params.eventStartedAt,
+        params.eventEndedAt,
+      ].some((value) => value !== undefined);
       if (editing && params.lifecycleState !== undefined)
         throw invalid("请分别保存内容和更改归档状态");
       if (!editing && params.lifecycleState === undefined) throw invalid("没有可更新的记忆字段");
@@ -166,17 +174,30 @@ export class DesktopAtomicMemoryService {
         const item: MemoryItemWrite = {
           content,
           kind: params.kind ?? current.item.kind,
-          statementType: current.item.statementType,
-          temporalType: current.item.temporalType,
+          statementType: params.statementType ?? current.item.statementType,
+          temporalType: params.temporalType ?? current.item.temporalType,
           scopeType: current.item.scopeType,
           scopeKey: current.item.scopeKey,
-          eventStartedAt: current.item.eventStartedAt,
-          eventEndedAt: current.item.eventEndedAt,
+          eventStartedAt:
+            params.eventStartedAt === undefined
+              ? current.item.eventStartedAt
+              : params.eventStartedAt,
+          eventEndedAt:
+            params.eventEndedAt === undefined ? current.item.eventEndedAt : params.eventEndedAt,
           observedAt: current.item.observedAt,
           origin: "user_requested",
           keys: manualKeys(content),
           sources: [],
         };
+        try {
+          validateMemoryTemporalBounds({
+            temporalType: item.temporalType,
+            eventStartedAt: item.eventStartedAt ?? null,
+            eventEndedAt: item.eventEndedAt ?? null,
+          });
+        } catch {
+          throw invalid("记忆时间类型与起止时间不一致，请检查后重试");
+        }
         await store.applyMutations({
           operationId,
           mutations: [
@@ -263,21 +284,43 @@ export class DesktopAtomicMemoryService {
     params: RuntimeParams<"memory.context.preview">,
   ): Promise<RuntimeResult<"memory.context.preview">> {
     return this.withStore(workspacePath, async (store, key) => {
-      const result = await new AtomicMemoryContextBuilder(store, key).build();
       const maxItems = Math.min(params.maxItems ?? 3, 3);
       const maxTokens = Math.min(params.maxTokens ?? 320, 320);
-      const fits = result.items.length <= maxItems && result.tokenCount <= maxTokens;
-      const items = fits ? result.items.map(projectItem) : [];
+      const result = await new AtomicMemoryContextBuilder(store, key).build(params.query, {
+        maxItems,
+        maxTokens,
+      });
+      const items = result.items.map(projectItem);
       return {
         items,
+        block: result.block,
+        references: result.references.map((reference) => ({
+          ...reference,
+          range: { ...reference.range },
+        })),
+        diagnostics: result.diagnostics.map((diagnostic) => ({ ...diagnostic })),
         budget: {
           maxItems,
           maxTokens,
           usedItems: items.length,
-          usedTokens: fits ? result.tokenCount : 0,
-          truncated: result.truncated || !fits,
+          usedTokens: result.tokenCount,
+          truncated: result.truncated,
         },
       };
+    });
+  }
+
+  async getMetrics(
+    workspacePath: string,
+    params: RuntimeParams<"memory.metrics.get">,
+  ): Promise<RuntimeResult<"memory.metrics.get">> {
+    const to = params.to ?? this.now();
+    const from = params.from ?? Math.max(0, to - 7 * 86_400_000);
+    if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from < 0 || from > to)
+      throw invalid("统计时间范围无效");
+    return this.withStore(workspacePath, async (store) => {
+      const metrics = await store.readExtractionMetrics({ from, to });
+      return { metrics: { ...metrics, groups: metrics.groups.map((group) => ({ ...group })) } };
     });
   }
 

@@ -220,10 +220,14 @@ async function createFixture(t: TestContext, sessionId: string) {
           reporter: new SilentReporter(),
           memoryTrustStore: trust,
           atomicMemoryLifecycle: lifecycle,
-          atomicMemoryModelFactory: async () => {
-            auxiliaryCalls++;
-            throw new Error("Read-only memory verification must not create an auxiliary model");
-          },
+          atomicMemoryModelFactory: async () => ({
+            model: {
+              call: async () => {
+                auxiliaryCalls++;
+                throw new Error("Read-only memory verification must not call an auxiliary model");
+              },
+            },
+          }),
         },
       ),
   };

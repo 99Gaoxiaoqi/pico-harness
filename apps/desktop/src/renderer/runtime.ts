@@ -560,7 +560,10 @@ export interface RuntimeActions {
   loadMoreMemory(): Promise<void>;
   createMemoryItem(text: string): Promise<RuntimeMemoryItem | undefined>;
   queryMemoryContext(query: string): Promise<RuntimeResult<"memory.context.preview"> | undefined>;
-  queryMemoryMetrics(input?: { from?: number; to?: number }): Promise<RuntimeResult<"memory.metrics.get"> | undefined>;
+  queryMemoryMetrics(input?: {
+    from?: number;
+    to?: number;
+  }): Promise<RuntimeResult<"memory.metrics.get"> | undefined>;
   updateMemoryItem(
     itemId: string,
     expectedVersion: number,
@@ -3826,8 +3829,23 @@ export function useRuntimeStore(): RuntimeStore {
         let result: RuntimeResult<"memory.context.preview"> | undefined;
         await perform("memory-preview", async (bridge) => {
           result = preview
-            ? { items: [], budget: { maxItems: 3, maxTokens: 320, usedItems: 0, usedTokens: 0, truncated: false }, block: "", references: [], diagnostics: [] }
-            : await invoke(bridge, "memory.context.preview", { workspacePath, query: query.trim() });
+            ? {
+                items: [],
+                budget: {
+                  maxItems: 3,
+                  maxTokens: 320,
+                  usedItems: 0,
+                  usedTokens: 0,
+                  truncated: false,
+                },
+                block: "",
+                references: [],
+                diagnostics: [],
+              }
+            : await invoke(bridge, "memory.context.preview", {
+                workspacePath,
+                query: query.trim(),
+              });
         });
         return dataRef.current.workspacePath === workspacePath ? result : undefined;
       },
@@ -3836,7 +3854,15 @@ export function useRuntimeStore(): RuntimeStore {
         await perform("memory-metrics", async (bridge) => {
           const to = input.to ?? Date.now();
           result = preview
-            ? { metrics: { scope: "user", from: input.from ?? Math.max(0, to - 7 * 86_400_000), to, groups: [], unknownReceiptCount: 0 } }
+            ? {
+                metrics: {
+                  scope: "user",
+                  from: input.from ?? Math.max(0, to - 7 * 86_400_000),
+                  to,
+                  groups: [],
+                  unknownReceiptCount: 0,
+                },
+              }
             : await invoke(bridge, "memory.metrics.get", input);
         });
         return result;
@@ -3857,7 +3883,9 @@ export function useRuntimeStore(): RuntimeStore {
               ...patch,
               version: item.version + 1,
               updatedAt: Date.now(),
-              ...(Object.keys(patch).some((key) => key !== "lifecycleState") ? { origin: "user_requested" as const, sources: [] } : {}),
+              ...(Object.keys(patch).some((key) => key !== "lifecycleState")
+                ? { origin: "user_requested" as const, sources: [] }
+                : {}),
             };
             const nextItem = updated;
             setData((current) => {

@@ -162,7 +162,17 @@ function memoryUpdateParams(value: Record<string, unknown>): void {
       eventEndedAt: nullableParam(nonNegativeIntegerParam),
     },
   )(value);
-  if (!["content", "kind", "lifecycleState", "statementType", "temporalType", "eventStartedAt", "eventEndedAt"].some((key) => Object.hasOwn(value, key))) {
+  if (
+    ![
+      "content",
+      "kind",
+      "lifecycleState",
+      "statementType",
+      "temporalType",
+      "eventStartedAt",
+      "eventEndedAt",
+    ].some((key) => Object.hasOwn(value, key))
+  ) {
     throw invalidParams("memory.update 至少需要一个更新字段");
   }
 }
@@ -261,7 +271,11 @@ const memoryReferenceResult = exactResultShape({
   content: resultString,
   source: resultOneOf(["user-evidence", "manual", "assistant-note"]),
   excerpt: resultBoolean,
-  range: exactResultShape({ start: resultNonNegativeInteger, end: resultNonNegativeInteger, total: resultNonNegativeInteger }),
+  range: exactResultShape({
+    start: resultNonNegativeInteger,
+    end: resultNonNegativeInteger,
+    total: resultNonNegativeInteger,
+  }),
   match: resultOneOf(["key", "content", "preference"]),
 });
 const memoryDiagnosticResult = exactResultShape({
@@ -273,16 +287,18 @@ const memoryMetricsResult = exactResultShape({
   scope: resultOneOf(["user"]),
   from: resultNonNegativeInteger,
   to: resultNonNegativeInteger,
-  groups: resultArray(exactResultShape({
-    trigger: resultOneOf(["remember", "extract", "compaction"]),
-    settledCount: resultNonNegativeInteger,
-    evaluatedCount: resultNonNegativeInteger,
-    createdItemCount: resultNonNegativeInteger,
-    modelCallCount: resultNonNegativeInteger,
-    emptyCount: resultNonNegativeInteger,
-    emptyRate: resultNullable(resultFiniteNumber),
-    durationMs: resultFiniteNumber,
-  })),
+  groups: resultArray(
+    exactResultShape({
+      trigger: resultOneOf(["remember", "extract", "compaction"]),
+      settledCount: resultNonNegativeInteger,
+      evaluatedCount: resultNonNegativeInteger,
+      createdItemCount: resultNonNegativeInteger,
+      modelCallCount: resultNonNegativeInteger,
+      emptyCount: resultNonNegativeInteger,
+      emptyRate: resultNullable(resultFiniteNumber),
+      durationMs: resultFiniteNumber,
+    }),
+  ),
   unknownReceiptCount: resultNonNegativeInteger,
 });
 
@@ -364,7 +380,11 @@ export type MemoryMethodMap = {
     };
   };
   readonly "memory.metrics.get": {
-    readonly params: { readonly workspacePath?: string; readonly from?: number; readonly to?: number };
+    readonly params: {
+      readonly workspacePath?: string;
+      readonly from?: number;
+      readonly to?: number;
+    };
     readonly result: { readonly metrics: RuntimeMemoryMetrics };
   };
 };
@@ -390,9 +410,16 @@ export const memoryParamValidators = {
   "memory.settings.update": memorySettingsUpdateParams,
   "memory.context.preview": exactParamShape(
     { workspacePath: stringParam },
-    { maxItems: positiveIntegerParam, maxTokens: positiveIntegerParam, query: boundedNonEmptyStringParam(4096) },
+    {
+      maxItems: positiveIntegerParam,
+      maxTokens: positiveIntegerParam,
+      query: boundedNonEmptyStringParam(4096),
+    },
   ),
-  "memory.metrics.get": exactParamShape({}, { workspacePath: stringParam, from: nonNegativeIntegerParam, to: nonNegativeIntegerParam }),
+  "memory.metrics.get": exactParamShape(
+    {},
+    { workspacePath: stringParam, from: nonNegativeIntegerParam, to: nonNegativeIntegerParam },
+  ),
 } satisfies Readonly<Record<keyof MemoryMethodMap, RuntimeParamValidator>>;
 
 export const memoryResultValidators = {
@@ -410,15 +437,22 @@ export const memoryResultValidators = {
   }),
   "memory.settings.get": exactResultShape({ settings: memorySettingsResult }),
   "memory.settings.update": exactResultShape({ settings: memorySettingsResult }),
-  "memory.context.preview": exactResultShape({
-    items: resultArray(memoryItemResult),
-    budget: exactResultShape({
-      maxItems: resultNonNegativeInteger,
-      maxTokens: resultNonNegativeInteger,
-      usedItems: resultNonNegativeInteger,
-      usedTokens: resultNonNegativeInteger,
-      truncated: resultBoolean,
-    }),
-  }, { block: resultString, references: resultArray(memoryReferenceResult), diagnostics: resultArray(memoryDiagnosticResult) }),
+  "memory.context.preview": exactResultShape(
+    {
+      items: resultArray(memoryItemResult),
+      budget: exactResultShape({
+        maxItems: resultNonNegativeInteger,
+        maxTokens: resultNonNegativeInteger,
+        usedItems: resultNonNegativeInteger,
+        usedTokens: resultNonNegativeInteger,
+        truncated: resultBoolean,
+      }),
+    },
+    {
+      block: resultString,
+      references: resultArray(memoryReferenceResult),
+      diagnostics: resultArray(memoryDiagnosticResult),
+    },
+  ),
   "memory.metrics.get": exactResultShape({ metrics: memoryMetricsResult }),
 } satisfies Readonly<Record<keyof MemoryMethodMap, RuntimeResultRule>>;

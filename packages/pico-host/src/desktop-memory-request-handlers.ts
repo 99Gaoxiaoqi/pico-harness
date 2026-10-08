@@ -18,6 +18,9 @@ export interface DesktopMemoryRequestContext {
   readonly previewContext: (
     params: RuntimeRequest<"memory.context.preview">["params"],
   ) => Awaitable<JsonValue>;
+  readonly getMetrics: (
+    params: RuntimeRequest<"memory.metrics.get">["params"],
+  ) => Awaitable<JsonValue>;
 }
 
 export function createDesktopMemoryRequestHandlers(
@@ -32,6 +35,7 @@ export function createDesktopMemoryRequestHandlers(
   | "memory.settings.get"
   | "memory.settings.update"
   | "memory.context.preview"
+  | "memory.metrics.get"
 > {
   return {
     "memory.list": (request) => context.list(request.params),
@@ -42,5 +46,6 @@ export function createDesktopMemoryRequestHandlers(
     "memory.settings.get": (request) => context.getSettings(request.params),
     "memory.settings.update": (request) => context.updateSettings(request.params),
     "memory.context.preview": (request) => context.previewContext(request.params),
+    "memory.metrics.get": (request) => context.getMetrics(request.params),
   };
 }

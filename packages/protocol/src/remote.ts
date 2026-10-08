@@ -189,6 +189,7 @@ export interface RemoteMethodSpec {
   mode: "query" | "command";
 }
 const GLOBAL_METHODS: ReadonlySet<RemoteMethod> = new Set([
+  "memory.metrics.get",
   "runtime.ping",
   "config.user.get",
   "config.user.update",
