@@ -1,0 +1,781 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>Pico · 图标设计探索</title>
+    <style>
+      :root {
+        --paper: #f7f8fa;
+        --ink: #1b2432;
+        --muted: #697383;
+        --line: #e3e7ed;
+        --blue: #467bbd;
+        --plane: #f1f3f6;
+        --mark: #1b2432;
+        --plane-label: #697383;
+        --tile: #1b2432;
+        --tile-ink: #fff;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color: var(--ink);
+        background: var(--paper);
+        font-synthesis: none;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+      }
+      button,
+      a {
+        -webkit-tap-highlight-color: transparent;
+      }
+      button {
+        font: inherit;
+        cursor: pointer;
+      }
+      button:focus-visible,
+      a:focus-visible {
+        outline: 3px solid #8ab7ee;
+        outline-offset: 4px;
+      }
+      a {
+        color: inherit;
+      }
+      .page {
+        max-width: 1224px;
+        margin: 0 auto;
+        padding: 0 36px 36px;
+      }
+      .masthead {
+        height: 80px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        border-bottom: 1px solid var(--line);
+      }
+      .wordmark {
+        font-size: 26px;
+        font-weight: 760;
+        letter-spacing: -1.4px;
+      }
+      .masthead-note,
+      .eyebrow,
+      .number,
+      .sample-label,
+      .footer-note {
+        font-family: "SFMono-Regular", Consolas, monospace;
+      }
+      .masthead-note {
+        font-size: 11px;
+        letter-spacing: 0.08em;
+        color: var(--muted);
+      }
+      .intro {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 36px;
+        padding: 40px 0 32px;
+      }
+      .eyebrow {
+        margin: 0 0 14px;
+        font-size: 11px;
+        letter-spacing: 0.1em;
+        color: var(--blue);
+      }
+      h1 {
+        margin: 0;
+        font-size: clamp(28px, 3.1vw, 42px);
+        line-height: 1.28;
+        font-weight: 650;
+        letter-spacing: -1.8px;
+      }
+      .intro-copy {
+        margin: 15px 0 0;
+        color: var(--muted);
+        font-size: 14px;
+        line-height: 1.7;
+      }
+      .previous {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        padding: 12px 20px 12px 12px;
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        flex-shrink: 0;
+      }
+      .previous img {
+        width: 64px;
+        height: 64px;
+        display: block;
+      }
+      .previous strong {
+        font-size: 13px;
+        font-weight: 550;
+      }
+      .previous p {
+        margin: 6px 0 0;
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .toolbar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 16px;
+        padding: 0 0 24px;
+      }
+      .toolbar-label {
+        font-size: 13px;
+        color: var(--muted);
+      }
+      .control-groups {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+      .segmented {
+        display: flex;
+        padding: 3px;
+        background: #e9edf2;
+        border-radius: 9px;
+      }
+      .segmented button {
+        padding: 7px 12px;
+        border: 0;
+        border-radius: 6px;
+        background: transparent;
+        color: var(--muted);
+        font-size: 12px;
+        transition:
+          background 120ms,
+          color 120ms;
+      }
+      .segmented button[aria-pressed="true"] {
+        background: #fff;
+        color: var(--ink);
+        box-shadow: 0 1px 3px #15223a0c;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 18px;
+      }
+      .card {
+        min-width: 0;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 15px;
+        background: #fff;
+      }
+      .card.recommended {
+        border-color: #b6cce8;
+      }
+      .card-visual {
+        background: var(--plane);
+        color: var(--mark);
+        padding: 17px 20px 14px;
+        transition:
+          background 150ms,
+          color 150ms;
+      }
+      .card-top {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        min-height: 22px;
+      }
+      .number {
+        font-size: 11px;
+        color: var(--plane-label);
+        letter-spacing: 0.04em;
+      }
+      .recommendation {
+        background: #e0ebfa;
+        color: #3265a4;
+        border-radius: 4px;
+        font-size: 10px;
+        padding: 4px 6px;
+        line-height: 1;
+      }
+      .preview {
+        display: grid;
+        place-items: center;
+        width: 100%;
+        height: 163px;
+        padding: 0;
+        border: 0;
+        background: none;
+        color: inherit;
+      }
+      .preview svg {
+        width: 164px;
+        height: 164px;
+        transition: transform 140ms;
+      }
+      .preview:hover svg {
+        transform: translateY(-3px);
+      }
+      .sample-strip {
+        display: flex;
+        justify-content: center;
+        align-items: flex-end;
+        gap: 27px;
+        height: 88px;
+      }
+      .sample {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 8px;
+      }
+      .sample-label {
+        font-size: 9px;
+        color: var(--plane-label);
+        line-height: 1;
+      }
+      .sample svg {
+        display: block;
+        flex-shrink: 0;
+      }
+      .card-info {
+        padding: 18px 20px 17px;
+      }
+      .card-info h2 {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 8px;
+        margin: 0 0 8px;
+        font-size: 17px;
+        font-weight: 650;
+        letter-spacing: -0.4px;
+      }
+      .english {
+        font-size: 9px;
+        font-weight: 400;
+        color: #8b94a1;
+        letter-spacing: 0.05em;
+        white-space: nowrap;
+      }
+      .card-description {
+        min-height: 42px;
+        margin: 0;
+        font-size: 12px;
+        color: var(--muted);
+        line-height: 1.75;
+      }
+      .card-bottom {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-top: 17px;
+        padding-top: 12px;
+        border-top: 1px solid #edf0f4;
+      }
+      .detail-button {
+        background: none;
+        border: 0;
+        padding: 0;
+        font-size: 11px;
+        color: #4d596a;
+      }
+      .download {
+        text-decoration: none;
+        font-size: 11px;
+        color: var(--blue);
+      }
+      .recommend-note {
+        margin-top: 28px;
+        display: grid;
+        grid-template-columns: 150px 1fr;
+        gap: 20px;
+        padding: 22px 0;
+        border-top: 1px solid var(--line);
+        border-bottom: 1px solid var(--line);
+      }
+      .recommend-note strong {
+        font-size: 13px;
+        font-weight: 600;
+      }
+      .recommend-note p {
+        margin: 0;
+        font-size: 13px;
+        color: var(--muted);
+        line-height: 1.8;
+      }
+      footer {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 12px;
+        padding-top: 23px;
+      }
+      .footer-note {
+        margin: 0;
+        color: #929ba8;
+        font-size: 10px;
+      }
+      footer a {
+        font-size: 10px;
+        color: var(--muted);
+        text-underline-offset: 3px;
+      }
+      dialog {
+        width: min(820px, calc(100% - 32px));
+        padding: 28px;
+        border: 1px solid var(--line);
+        border-radius: 20px;
+        color: var(--ink);
+        background: #fff;
+        box-shadow: 0 25px 100px #101a2d25;
+      }
+      dialog::backdrop {
+        background: #101a2d55;
+        backdrop-filter: blur(5px);
+      }
+      .dialog-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 24px;
+        margin-bottom: 23px;
+      }
+      .dialog-header h2 {
+        margin: 0;
+        font-size: 24px;
+        font-weight: 620;
+        letter-spacing: -0.6px;
+      }
+      .close {
+        border: 1px solid var(--line);
+        width: 32px;
+        height: 32px;
+        border-radius: 50%;
+        background: #fff;
+        font-size: 22px;
+        color: var(--muted);
+        line-height: 1;
+      }
+      .detail-previews {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 14px;
+      }
+      .detail-plane {
+        display: flex;
+        min-height: 258px;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        gap: 12px;
+        background: var(--plane);
+        color: var(--mark);
+        border-radius: 12px;
+      }
+      .detail-plane svg {
+        width: 210px;
+        height: 210px;
+      }
+      .detail-plane p {
+        color: var(--plane-label);
+        margin: 0 0 18px;
+        font-size: 11px;
+      }
+      .detail-notes {
+        margin: 24px 0;
+        display: grid;
+        grid-template-columns: 85px 1fr;
+        column-gap: 20px;
+        row-gap: 13px;
+        font-size: 13px;
+        line-height: 1.8;
+      }
+      .detail-notes dt {
+        color: var(--ink);
+      }
+      .detail-notes dd {
+        margin: 0;
+        color: var(--muted);
+      }
+      .dialog-footer {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 20px;
+      }
+      .dialog-footer p {
+        margin: 0;
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .dialog-footer .download {
+        display: inline-block;
+        background: var(--blue);
+        color: #fff;
+        padding: 10px 16px;
+        border-radius: 8px;
+        font-size: 12px;
+      }
+      [data-background="dark"] {
+        --plane: #18202c;
+        --mark: #f3f6fc;
+        --plane-label: #a1adbf;
+      }
+      [data-palette="brand"] {
+        --mark: #467bbd;
+        --tile: #467bbd;
+      }
+      [data-background="dark"][data-palette="brand"] {
+        --mark: #89b3eb;
+      }
+      @media (max-width: 950px) {
+        .grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .previous {
+          display: none;
+        }
+        .intro {
+          padding-top: 30px;
+        }
+      }
+      @media (max-width: 600px) {
+        .page {
+          padding: 0 18px 28px;
+        }
+        .masthead {
+          height: 62px;
+        }
+        .masthead-note {
+          font-size: 9px;
+        }
+        .grid {
+          grid-template-columns: 1fr;
+        }
+        .toolbar {
+          gap: 12px;
+        }
+        .control-groups {
+          gap: 7px;
+        }
+        .segmented button {
+          padding: 7px 9px;
+          font-size: 11px;
+        }
+        h1 {
+          letter-spacing: -1px;
+        }
+        .recommend-note {
+          grid-template-columns: 1fr;
+          gap: 10px;
+        }
+        .detail-previews {
+          gap: 10px;
+        }
+        .detail-plane {
+          min-height: 180px;
+        }
+        .detail-plane svg {
+          width: 136px;
+          height: 136px;
+        }
+        dialog {
+          padding: 20px;
+        }
+        .detail-notes {
+          grid-template-columns: 1fr;
+          gap: 6px;
+        }
+        .detail-notes dd {
+          margin-bottom: 8px;
+        }
+        .dialog-footer p {
+          max-width: 180px;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          transition: none !important;
+        }
+      }
+    </style>
+  </head>
+  <body data-palette="mono" data-background="light" data-format="mark">
+    <main class="page">
+      <header class="masthead">
+        <span class="wordmark">pico</span>
+        <span class="masthead-note">IDENTITY EXPLORATION / 02</span>
+      </header>
+      <section class="intro" aria-labelledby="page-title">
+        <div>
+          <p class="eyebrow">六个方向 · 一个工作台</p>
+          <h1 id="page-title">一个小符号，<br />承载 Pico 的工作方式。</h1>
+          <p class="intro-copy">先看轮廓与辨识度，再定配色与质感。点击任一方案查看设计细节。</p>
+        </div>
+        <aside class="previous" aria-label="上一版图标对照">
+          <img src="./previous-icon.png" alt="上一版蓝底白色折带 p 图标" />
+          <div>
+            <strong>上一版对照</strong>
+            <p>蓝底 · 白色折带 p</p>
+          </div>
+        </aside>
+      </section>
+      <section class="toolbar" aria-label="比较图标">
+        <span class="toolbar-label"
+          >六套可编辑标志 <span aria-hidden="true">/</span> 实际尺寸对比</span
+        >
+        <div class="control-groups">
+          <div class="segmented" role="group" aria-label="配色">
+            <button type="button" data-group="palette" data-value="mono" aria-pressed="true">
+              单色
+            </button>
+            <button type="button" data-group="palette" data-value="brand" aria-pressed="false">
+              品牌蓝
+            </button>
+          </div>
+          <div class="segmented" role="group" aria-label="背景">
+            <button type="button" data-group="background" data-value="light" aria-pressed="true">
+              浅底
+            </button>
+            <button type="button" data-group="background" data-value="dark" aria-pressed="false">
+              深底
+            </button>
+          </div>
+          <div class="segmented" role="group" aria-label="展示形式">
+            <button type="button" data-group="format" data-value="mark" aria-pressed="true">
+              裸标
+            </button>
+            <button type="button" data-group="format" data-value="app" aria-pressed="false">
+              应用图标
+            </button>
+          </div>
+        </div>
+      </section>
+      <section id="grid" class="grid" aria-label="六个图标候选"></section>
+      <section class="recommend-note" aria-label="设计建议">
+        <strong>优先比较 01 / 03</strong>
+        <p>
+          <strong>01 负空间 P</strong> 延续 Pico
+          的字母识别，轮廓完整、留白明确，适合应用入口。<strong>03 托芯</strong> 更直接表达 Harness
+          承托 Agent 的关系，可作为更抽象的品牌方向。最终选择以小尺寸表现和你的审美偏好为准。
+        </p>
+      </section>
+      <footer>
+        <p class="footer-note">PICO / 2026 · SVG 母版 · 16 / 32 / 64 PX</p>
+        <a href="https://github.com/op7418/logo-generator-skill" target="_blank" rel="noreferrer"
+          >流程参考：Logo Generator ↗</a
+        >
+      </footer>
+    </main>
+    <dialog id="detail" aria-labelledby="detail-title">
+      <div class="dialog-header">
+        <h2 id="detail-title"></h2>
+        <button class="close" type="button" aria-label="关闭设计详情">×</button>
+      </div>
+      <div class="detail-previews" id="detail-previews"></div>
+      <dl class="detail-notes" id="detail-notes"></dl>
+      <div class="dialog-footer">
+        <p>SVG 母版支持修改形状、比例与配色。</p>
+        <a id="detail-download" class="download" download>下载标志 SVG</a>
+      </div>
+    </dialog>
+    <script>
+      // Each SVG below is also delivered in variants/ as an editable master.
+      const concepts = [
+        {
+          id: "01",
+          name: "负空间 P",
+          english: "NEGATIVE P",
+          file: "01-negative-p.svg",
+          recommended: true,
+          description: "实体 P 与圆润留白。保留 Pico 的首字母识别，形成稳定而清晰的入口符号。",
+          concept:
+            "用一个连续实体和一个开放的内孔表达 Pico。结构无需光效即可成立，适合 Dock、窗口图标和产品字标。",
+          risk: "16px 时内孔仍需保持打开；字母方向的含义直观，但品牌独特性要通过比例与留白建立。",
+          svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="currentColor" role="img" aria-label="Pico · 负空间 P"><title>Pico · 负空间 P</title><path fill-rule="evenodd" d="M24 82V35C24 23 32 16 45 16H55C71 16 81 26 81 41S71 66 55 66H40V82H24ZM40 34V50H55C62 50 65 47 65 41S62 32 55 32H45C42 32 40 32 40 34Z"/></svg>',
+        },
+        {
+          id: "02",
+          name: "折带 P",
+          english: "FOLDED P",
+          file: "02-folded-p.svg",
+          description: "用斜向留白分开环与竖带，把上一版的折叠关系转成可编辑的几何结构。",
+          concept:
+            "保留上一版折带 p 的意图，通过轮廓和斜向间隙表达连接与折返，使结构在单色中也可见。",
+          risk: "16px 时斜向间隙更细，竖带也可能被看成独立部件。它在大尺寸下的细节比 01 更丰富。",
+          svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="currentColor" role="img" aria-label="Pico · 折带 P"><title>Pico · 折带 P</title><path fill-rule="evenodd" d="M26 44V35C26 24 34 17 46 17H56C71 17 81 27 81 41S71 65 56 65H46L26 51V44ZM42 35V45L51 51H56C62 51 66 47 66 41S62 31 56 31H46C43 31 42 32 42 35Z"/><path d="M26 58L42 69V79Q42 83 38 83H30Q26 83 26 79V58Z"/></svg>',
+        },
+        {
+          id: "03",
+          name: "托芯",
+          english: "CRADLE CORE",
+          file: "03-cradle-core.svg",
+          recommended: true,
+          description: "开放的支架承托方形核心。把 Harness 与 Agent 的关系浓缩为两个元素。",
+          concept:
+            "方形核心代表 Agent，U 形支架代表运行环境与工具基础。上方开放，底部承托，表达本地工作台的稳定与延展。",
+          risk: "可能被读成 U 或人物轮廓。采用方形核心并让它位于支架内部，减少“头像”的联想。",
+          svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="currentColor" role="img" aria-label="Pico · 托芯"><title>Pico · 托芯</title><path d="M23 25V53C23 70 34 79 50 79S77 70 77 53V25" fill="none" stroke="currentColor" stroke-width="12" stroke-linecap="round"/><rect x="38" y="31" width="24" height="24" rx="6"/></svg>',
+        },
+        {
+          id: "04",
+          name: "边界核心",
+          english: "BOUNDED CORE",
+          file: "04-bounded-core.svg",
+          description: "侧开的框架包裹核心。留出受控的出入口，呼应工具调用与权限边界。",
+          concept:
+            "外框围绕核心建立清晰边界，右侧开口是与外部工具连接的入口。圆角保留亲和感，整体更偏工程组件。",
+          risk: "缩小时容易联想到 C 或 G；核心与框架之间的留白要足够，避免两个部分粘连。",
+          svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="currentColor" role="img" aria-label="Pico · 边界核心"><title>Pico · 边界核心</title><path d="M77 32V31Q77 23 69 23H39Q23 23 23 39V61Q23 77 39 77H69Q77 77 77 69V68" fill="none" stroke="currentColor" stroke-width="12" stroke-linecap="round"/><rect x="41" y="39" width="22" height="22" rx="5"/></svg>',
+        },
+        {
+          id: "05",
+          name: "折返核",
+          english: "RETURN PATH",
+          file: "05-return-path.svg",
+          description: "方形路径向内折返。用一条连续轮廓表达执行、观察与下一步决策。",
+          concept:
+            "外部路径运行一圈后回到内部，表达 Agent 的迭代执行。方形骨架让它更像工作台上的运行结构。",
+          risk: "可能被读成 G。内部短臂和顶部路径之间的空隙需要保留；16px 下不增加额外节点。",
+          svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="currentColor" role="img" aria-label="Pico · 折返核"><title>Pico · 折返核</title><path d="M28 26H68Q76 26 76 34V66Q76 74 68 74H32Q24 74 24 66V54Q24 46 32 46H53" fill="none" stroke="currentColor" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+        },
+        {
+          id: "06",
+          name: "汇合柱",
+          english: "CONFLUENCE",
+          file: "06-confluence.svg",
+          description: "两条独立路径汇成一个结果。平切端头与轻微不对称突出协作和方向感。",
+          concept:
+            "两臂代表独立执行路径，下方主柱代表汇总结果。用单一实体表达子代理协作，保持粗轮廓与清晰的负空间。",
+          risk: "轮廓容易辨认，但可能联想到 Y 或分叉符号。方向明确，品牌独特性相对较弱。",
+          svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="currentColor" role="img" aria-label="Pico · 汇合柱"><title>Pico · 汇合柱</title><path d="M17 31L27 21L50 45L74 17L85 27L57 60V83H43V60L17 31Z"/></svg>',
+        },
+      ];
+      const grid = document.getElementById("grid");
+      const detail = document.getElementById("detail");
+      let activeConcept;
+      function markSvg(concept, size, app = false) {
+        const svg = new DOMParser().parseFromString(concept.svg, "image/svg+xml").documentElement;
+        svg.setAttribute("width", size);
+        svg.setAttribute("height", size);
+        svg.setAttribute("aria-hidden", "true");
+        svg.removeAttribute("role");
+        svg.removeAttribute("aria-label");
+        if (app) {
+          const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
+          group.setAttribute("transform", "translate(6 6) scale(.88)");
+          group.style.color = "var(--tile-ink)";
+          for (const child of [...svg.children])
+            if (child.tagName !== "title") group.appendChild(child);
+          const tile = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+          for (const [key, value] of Object.entries({
+            x: 6,
+            y: 6,
+            width: 88,
+            height: 88,
+            rx: 20,
+            fill: "var(--tile)",
+          }))
+            tile.setAttribute(key, value);
+          svg.append(tile, group);
+        }
+        return svg;
+      }
+      function renderPreviews() {
+        const app = document.body.dataset.format === "app";
+        for (const concept of concepts) {
+          const card = document.getElementById(`concept-${concept.id}`);
+          card.querySelector(".preview").replaceChildren(markSvg(concept, 164, app));
+          const strip = card.querySelector(".sample-strip");
+          strip.replaceChildren();
+          for (const size of [16, 32, 64]) {
+            const sample = document.createElement("div");
+            sample.className = "sample";
+            sample.append(markSvg(concept, size, app));
+            const label = document.createElement("span");
+            label.className = "sample-label";
+            label.textContent = `${size}px`;
+            sample.append(label);
+            strip.append(sample);
+          }
+        }
+      }
+      function openDetail(concept) {
+        activeConcept = concept;
+        document.getElementById("detail-title").textContent = `${concept.id} / ${concept.name}`;
+        const planes = document.getElementById("detail-previews");
+        planes.replaceChildren();
+        for (const [app, text] of [
+          [false, "标志轮廓"],
+          [true, "应用图标预览"],
+        ]) {
+          const plane = document.createElement("div");
+          plane.className = "detail-plane";
+          const label = document.createElement("p");
+          label.textContent = text;
+          plane.append(markSvg(concept, 210, app), label);
+          planes.append(plane);
+        }
+        const notes = document.getElementById("detail-notes");
+        notes.replaceChildren();
+        for (const [label, text] of [
+          ["设计含义", concept.concept],
+          ["小尺寸关注", concept.risk],
+        ]) {
+          const term = document.createElement("dt");
+          const description = document.createElement("dd");
+          term.textContent = label;
+          description.textContent = text;
+          notes.append(term, description);
+        }
+        const download = document.getElementById("detail-download");
+        download.href = `./variants/${concept.file}`;
+        download.download = concept.file;
+        if (!detail.open) detail.showModal();
+      }
+      for (const concept of concepts) {
+        const card = document.createElement("article");
+        card.id = `concept-${concept.id}`;
+        card.className = `card${concept.recommended ? " recommended" : ""}`;
+        card.innerHTML = `<div class="card-visual"><div class="card-top"><span class="number">${concept.id} / ${concept.english}</span>${concept.recommended ? '<span class="recommendation">优先比较</span>' : ""}</div><button class="preview" type="button" aria-label="查看 ${concept.id} ${concept.name}"></button><div class="sample-strip" aria-label="16、32、64像素实际尺寸"></div></div><div class="card-info"><h2>${concept.name}<span class="english">${concept.english}</span></h2><p class="card-description">${concept.description}</p><div class="card-bottom"><button class="detail-button" type="button">查看设计细节 ↗</button><a class="download" href="./variants/${concept.file}" download="${concept.file}" aria-label="下载 ${concept.name} SVG">下载 SVG ↓</a></div></div>`;
+        card.querySelector(".preview").addEventListener("click", () => openDetail(concept));
+        card.querySelector(".detail-button").addEventListener("click", () => openDetail(concept));
+        grid.append(card);
+      }
+      document.querySelectorAll("[data-group]").forEach((button) =>
+        button.addEventListener("click", () => {
+          const { group, value } = button.dataset;
+          document.body.dataset[group] = value;
+          document
+            .querySelectorAll(`[data-group="${group}"]`)
+            .forEach((peer) => peer.setAttribute("aria-pressed", String(peer === button)));
+          if (group === "format") renderPreviews();
+          if (detail.open) openDetail(activeConcept);
+        }),
+      );
+      detail.querySelector(".close").addEventListener("click", () => detail.close());
+      detail.addEventListener("click", (event) => {
+        if (event.target !== detail) return;
+        const bounds = detail.getBoundingClientRect();
+        if (
+          event.clientX < bounds.left ||
+          event.clientX > bounds.right ||
+          event.clientY < bounds.top ||
+          event.clientY > bounds.bottom
+        )
+          detail.close();
+      });
+      renderPreviews();
+    </script>
+  </body>
+</html>

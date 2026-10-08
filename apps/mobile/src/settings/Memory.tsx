@@ -3,7 +3,7 @@ import { Switch, Text, View } from "react-native";
 import * as Crypto from "expo-crypto";
 import type { RuntimeMemoryPageInfo, RuntimeResult } from "@pico/protocol/mobile";
 import { usePico } from "../store";
-import { Button, Card, Chips, Field, Label, s } from "../ui";
+import { Button, Card, Chips, Field, Label, s, switchColors } from "../ui";
 import { confirmDelete } from "./confirmDelete";
 
 type Item = RuntimeResult<"memory.list">["items"][number];
@@ -148,6 +148,7 @@ export function Memory({ section = "content" }: { section?: "content" | "policy"
                 {{ enabled: "启用记忆", autoExtract: "自动提取", recallEnabled: "对话中召回" }[key]}
               </Text>
               <Switch
+                {...switchColors}
                 hitSlop={8}
                 accessibilityLabel={
                   {

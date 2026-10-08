@@ -39,6 +39,7 @@ const host = window as unknown as {
   failRefresh: () => void;
   refreshStarted: boolean;
   runtimeMessage: string | undefined;
+  runtimeReady: boolean;
   setStatus: (status: ComposerStatus) => void;
 };
 host.disabledScrollWrites = [];
@@ -167,6 +168,7 @@ function Fixture() {
 }
 function RuntimeSendFixture() {
   const runtime = useRuntimeStore();
+  host.runtimeReady = runtime.connection.kind === "ready";
   return (
     <PicoTheme>
       <RuntimeContext value={runtime}>
@@ -221,9 +223,14 @@ host.mountRuntimeComposer = () => {
   // Keep post-send hydration pending, as session inspection can wait behind a run.
   const bridge = {
     runtime: {
-      "runtime.ping": async () => {
-        throw new Error("isolated send fixture");
-      },
+      "runtime.ping": async () => ({
+        ok: true,
+        value: { picoHome: "/fixture-pico-home", capabilities: ["session-conversation-v1"] },
+      }),
+      "workspace.list": async () => ({ ok: true, value: { workspaces: [] } }),
+      // Isolate event/transcript hydration so workspace.status controls the refresh probe.
+      "events.replay": () => new Promise(() => {}),
+      "session.subscription.open": () => new Promise(() => {}),
       "workspace.temporary.ensure": async () => ({
         ok: true,
         value: {
@@ -258,6 +265,9 @@ host.mountRuntimeComposer = () => {
           host.failRefresh = () => reject(new Error("刷新暂不可用"));
         }),
     },
+    platform: { getLaunchAtLogin: async () => ({ ok: true, value: false }) },
+    lifecycle: { getBackgroundMode: async () => ({ ok: true, value: false }) },
+    sessionFrames: { subscribe: () => ({ dispose() {} }) },
     onUnavailable: () => () => {},
     onRecovered: () => () => {},
   };

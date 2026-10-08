@@ -1929,9 +1929,7 @@ export function ConversationPage() {
                   </div>
                 ) : (
                   <div className="conversation-empty-state conversation-empty-state--new">
-                    <span className="conversation-wordmark" aria-label="Pico">
-                      pico
-                    </span>
+                    <span className="brand-mark brand-mark--large" role="img" aria-label="Pico" />
                     <h2>{newTaskGreeting()}</h2>
                     {legacyStorageBlocked && (
                       <InlineNotice tone="warning">

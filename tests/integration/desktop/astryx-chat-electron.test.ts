@@ -22,6 +22,7 @@ test(
         platform: "browser",
         format: "iife",
         jsx: "automatic",
+        loader: { ".svg": "dataurl" },
         define: { "process.env.NODE_ENV": '"production"' },
         outfile: join(root, "renderer.js"),
       }),

@@ -55,27 +55,40 @@
       -apple-system, ui-sans-serif, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
     --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
     --canvas: #ffffff;
-    --surface: #fafafa;
+    --surface: #f8f9fb;
     --surface-raised: #ffffff;
-    --surface-muted: #f5f5f5;
-    --surface-strong: #ebebeb;
-    --ink: #262626;
-    --ink-secondary: #606068;
-    --ink-tertiary: #7c7c85;
-    --line: #eaeaea;
-    --line-strong: #ceced5;
-    --sidebar: #f6f6f6;
-    --sidebar-raised: #ebebeb;
-    --sidebar-ink: #25252a;
-    --sidebar-muted: #686870;
-    --accent: #467bbd;
-    --accent-strong: #3265a4;
-    --accent-soft: #eaf2fc;
+    --surface-muted: #f1f3f6;
+    --surface-strong: #e5e9ef;
+    --ink: #1b2432;
+    --ink-secondary: #5f6977;
+    --ink-tertiary: #606d7e;
+    --line: #e3e7ed;
+    --line-strong: #c6cdd7;
+    --sidebar: #f4f6f8;
+    --sidebar-raised: #e5e9ef;
+    --sidebar-ink: var(--ink);
+    --sidebar-muted: var(--ink-secondary);
+    --accent: #1b2432;
+    --accent-strong: #2b3748;
+    --accent-soft: #eef1f5;
+    --success: #287342;
+    --success-soft: #e7f1ea;
     --warning: #9b661d;
     --warning-soft: #f5ead6;
     --danger: #a34235;
     --danger-soft: #f5e4e0;
-    --focus: #467bbd;
+    --focus: #1b2432;
+    --surface-primary: var(--surface-raised);
+    --surface-secondary: var(--surface);
+    --surface-hover: var(--surface-muted);
+    --text-primary: var(--ink);
+    --text-secondary: var(--ink-secondary);
+    --text-tertiary: var(--ink-tertiary);
+    --border-subtle: var(--line);
+    --border-default: var(--line-strong);
+    --focus-ring: var(--focus);
+    --accent-solid: var(--accent);
+    --accent-contrast: var(--canvas);
     --shadow-sm: 0 1px 2px rgb(25 25 35 / 0.05), 0 6px 18px rgb(25 25 35 / 0.04);
     --shadow-lg: 0 24px 80px rgb(20 20 28 / 0.16), 0 4px 16px rgb(20 20 28 / 0.07);
     --radius-sm: 7px;
@@ -132,32 +145,22 @@
     outline-offset: 2px;
   }
   ::selection {
-    background: #dceafb;
+    background: var(--accent-soft);
+    color: var(--ink);
   }
 }
 
 @layer components {
   .brand-mark {
-    display: inline-grid;
+    display: inline-block;
     width: 28px;
     height: 28px;
-    place-items: center;
-    border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
-    border-radius: 9px;
-    background: var(--accent-soft);
-    color: var(--accent-strong);
-    font-size: 14px;
-    font-weight: 760;
-    letter-spacing: -0.04em;
+    flex-shrink: 0;
+    background: url("../../assets/icon.svg") center / contain no-repeat;
   }
   .brand-mark--large {
     width: 46px;
     height: 46px;
-    border-radius: 13px;
-    border-radius: 15px;
-    background: var(--accent);
-    color: #fff;
-    font-size: 21px;
   }
   .eyebrow {
     color: var(--ink-tertiary);
@@ -264,8 +267,8 @@
     content: "";
   }
   .status-pill--success {
-    background: var(--accent-soft);
-    color: var(--accent-strong);
+    background: var(--success-soft);
+    color: var(--success);
   }
   .status-pill--warning {
     background: var(--warning-soft);
@@ -302,8 +305,8 @@
   }
   .inline-notice--success {
     border-color: #bcd5c7;
-    background: var(--accent-soft);
-    color: var(--accent-strong);
+    background: var(--success-soft);
+    color: var(--success);
   }
   .preview-badge {
     display: inline-flex;
@@ -444,7 +447,7 @@
   .search-field:focus-within,
   textarea:focus {
     border-color: var(--focus);
-    box-shadow: 0 0 0 3px rgb(54 116 90 / 0.11);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 11%, transparent);
   }
   .dialog-overlay {
     position: fixed;
@@ -1182,10 +1185,6 @@
     gap: 9px;
     padding: 0 28px;
     font-weight: 720;
-  }
-  .onboarding__header .brand-mark {
-    background: var(--sidebar);
-    color: var(--sidebar-ink);
   }
   .onboarding__content {
     display: grid;
@@ -2577,7 +2576,7 @@
   .provider-form textarea:focus,
   .provider-credential-form input:focus {
     border-color: var(--focus);
-    box-shadow: 0 0 0 3px rgb(54 116 90 / 0.11);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 11%, transparent);
   }
   .provider-effective-route {
     grid-column: 1 / -1;

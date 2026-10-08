@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 100 100" role="img" aria-label="Pico">
+  <title>Pico</title>
+  <rect x="6" y="6" width="88" height="88" rx="20" fill="#1b2432"/>
+  <g transform="translate(6 6) scale(.88)" fill="#ffffff">
+    <path d="M77 32V31Q77 23 69 23H39Q23 23 23 39V61Q23 77 39 77H69Q77 77 77 69V68" fill="none" stroke="#ffffff" stroke-width="12" stroke-linecap="round"/>
+    <rect x="41" y="39" width="22" height="22" rx="5"/>
+  </g>
+</svg>

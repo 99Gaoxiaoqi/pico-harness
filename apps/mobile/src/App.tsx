@@ -18,7 +18,7 @@ import {
 import { StatusBar } from "expo-status-bar";
 import * as Crypto from "expo-crypto";
 import { usePico } from "./store";
-import { Button, Label, s, color } from "./ui";
+import { BrandMark, Button, Label, s, color } from "./ui";
 import { Conversation } from "./Conversation";
 import { MessageMediaProvider } from "./MessageMedia";
 import { Workbar, type WorkbarTab } from "./Workbar";
@@ -201,15 +201,18 @@ export default function App() {
             setScreen("computers");
           }}
         >
-          <Text numberOfLines={1} style={styles.brand}>
-            {screen === "workbar"
-              ? (tools.find((t) => t.tab === workbarTab)?.title ?? workbarTab)
-              : screen === "settings"
-                ? "设置"
-                : screen === "conversation"
-                  ? sessionTitle
-                  : "pico"}
-          </Text>
+          <View style={styles.brandIdentity}>
+            {(screen === "computers" || screen === "sessions") && <BrandMark />}
+            <Text numberOfLines={1} style={styles.brand}>
+              {screen === "workbar"
+                ? (tools.find((t) => t.tab === workbarTab)?.title ?? workbarTab)
+                : screen === "settings"
+                  ? "设置"
+                  : screen === "conversation"
+                    ? sessionTitle
+                    : "pico"}
+            </Text>
+          </View>
           <Text numberOfLines={1} style={s.muted}>
             {pico.phase === "connected"
               ? inSession
@@ -406,7 +409,8 @@ const styles = StyleSheet.create({
     borderBottomColor: color.line,
   },
   heading: { flex: 1, minWidth: 0, minHeight: 44, alignItems: "center", justifyContent: "center" },
-  brand: { color: color.text, fontSize: 19, fontWeight: "600", letterSpacing: -0.5 },
+  brandIdentity: { flexDirection: "row", alignItems: "center", gap: 6, maxWidth: "100%" },
+  brand: { color: color.text, fontSize: 19, fontWeight: "600", letterSpacing: -0.5, flexShrink: 1 },
   conversationPage: { position: "absolute", top: 0, bottom: 0, left: 0, right: 0 },
   error: {
     paddingHorizontal: 16,

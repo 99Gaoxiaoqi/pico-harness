@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { Switch, Text, View } from "react-native";
 import type { RuntimeResult } from "@pico/protocol/mobile";
 import { usePico } from "../store";
-import { Button, Card, Chips, Detail, Label, s } from "../ui";
+import { Button, Card, Chips, Detail, Label, s, switchColors } from "../ui";
 import { Choices } from "./SettingsNavigation";
 import { modelChoices, saveUserDefaults } from "./management";
 
@@ -103,6 +103,7 @@ export function Defaults() {
       <View style={[s.row, { minHeight: 44 }]}>
         <Text style={s.text}>联网搜索</Text>
         <Switch
+          {...switchColors}
           hitSlop={8}
           accessibilityLabel="新对话默认联网搜索"
           value={search}

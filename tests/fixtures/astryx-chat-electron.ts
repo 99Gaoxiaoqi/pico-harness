@@ -216,7 +216,7 @@ async function run() {
     assert.ok(geometry.fontSize <= 12 && !geometry.overflow, JSON.stringify(geometry));
   }
   await js("window.mountRuntimeComposer()");
-  await pause();
+  await wait("window.runtimeReady===true");
   await js(`document.querySelector('${editor}').focus()`);
   await window.webContents.insertText("已确认发送");
   await key("Enter");

@@ -50,9 +50,7 @@ export class AppErrorBoundary extends Component<
     if (this.state.error) {
       return (
         <main className="fatal-state">
-          <span className="brand-mark" aria-hidden="true">
-            P
-          </span>
+          <span className="brand-mark" aria-hidden="true" />
           <h1>Pico 无法显示这个界面</h1>
           <p>{this.state.error.message}</p>
           <Button variant="primary" onClick={() => window.location.reload()}>
@@ -142,9 +140,7 @@ function AppStateRouter() {
 function LoadingScreen() {
   return (
     <main className="loading-screen" aria-busy="true">
-      <span className="brand-mark brand-mark--large" aria-hidden="true">
-        P
-      </span>
+      <span className="brand-mark brand-mark--large" aria-hidden="true" />
       <p>Pico 正在连接本地 Runtime…</p>
     </main>
   );
@@ -156,9 +152,7 @@ function ConnectionScreen() {
   return (
     <main className="connection-screen">
       <div className="connection-card">
-        <span className="brand-mark brand-mark--large" aria-hidden="true">
-          P
-        </span>
+        <span className="brand-mark brand-mark--large" aria-hidden="true" />
         <span className="eyebrow">本地 Runtime 未连接</span>
         <h1>连接已断开，正在自动恢复</h1>
         <p>{detail}</p>
@@ -187,9 +181,7 @@ function Onboarding() {
     <main className="onboarding">
       {preview && <PreviewBadge />}
       <header className="onboarding__header">
-        <span className="brand-mark" aria-hidden="true">
-          P
-        </span>
+        <span className="brand-mark" aria-hidden="true" />
         <span>Pico</span>
       </header>
       <section className="onboarding__content">

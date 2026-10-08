@@ -4,7 +4,7 @@
   --inspector-border: var(--line, #eaeaea);
   --inspector-surface: var(--canvas, #fff);
   --inspector-subtle: var(--surface-muted, #f5f5f5);
-  --inspector-accent: #6045d6;
+  --inspector-accent: var(--accent, #1b2432);
   --inspector-danger: var(--danger, #a34235);
   --inspector-success: #137953;
   --inspector-purple: #8b6cf0;
@@ -139,7 +139,7 @@
   --inspector-border: #393944;
   --inspector-surface: #202027;
   --inspector-subtle: #2c2c35;
-  --inspector-accent: #b29aff;
+  --inspector-accent: #ececf1;
   --inspector-danger: #ff9b93;
   --inspector-success: #77d6b1;
 }

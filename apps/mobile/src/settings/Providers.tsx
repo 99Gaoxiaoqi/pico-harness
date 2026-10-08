@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { Alert, Switch, Text, View } from "react-native";
 import type { RuntimeResult, RuntimeProviderInput } from "@pico/protocol/mobile";
 import { usePico } from "../store";
-import { Button, Card, Chips, Detail, Field, Label, s } from "../ui";
+import { Button, Card, Chips, Detail, Field, Label, s, switchColors } from "../ui";
 import { confirmDelete } from "./confirmDelete";
 import { availableProviderModels, providerInput } from "./management";
 
@@ -169,6 +169,7 @@ export function Providers() {
         <View style={[s.row, { minHeight: 44 }]}>
           <Text style={s.text}>由电脑发现模型目录</Text>
           <Switch
+            {...switchColors}
             hitSlop={8}
             accessibilityLabel="发现模型目录"
             value={value.discoverModels}
@@ -182,6 +183,7 @@ export function Providers() {
           <View key={model} style={[s.row, { minHeight: 44, justifyContent: "space-between" }]}>
             <Text style={[s.text, { flex: 1 }]}>{model}</Text>
             <Switch
+              {...switchColors}
               hitSlop={8}
               accessibilityLabel={`启用模型 ${model}`}
               disabled={saving}

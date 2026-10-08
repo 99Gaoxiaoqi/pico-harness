@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import {
   ActivityIndicator,
+  Image,
   Platform,
   Pressable,
   ScrollView,
@@ -12,7 +13,14 @@ import {
   type ViewStyle,
 } from "react-native";
 import { color } from "./palette";
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- Metro 静态图片资源需要使用字面量 require。
+const brandIcon = require("../assets/brand-icon.png");
 export { color } from "./palette";
+export const switchColors = {
+  trackColor: { false: color.lineStrong, true: color.accent },
+  thumbColor: color.bg,
+  ios_backgroundColor: color.lineStrong,
+};
 export const s = StyleSheet.create({
   page: { flex: 1, backgroundColor: color.bg },
   body: { padding: 16, gap: 12 },
@@ -66,6 +74,17 @@ export const s = StyleSheet.create({
 });
 export function Label({ children }: { children: React.ReactNode }) {
   return <Text style={s.muted}>{children}</Text>;
+}
+export function BrandMark({ size = 28 }: { size?: number }) {
+  return (
+    <Image
+      source={brandIcon}
+      style={{ width: size, height: size }}
+      resizeMode="contain"
+      accessibilityRole="image"
+      accessibilityLabel="Pico"
+    />
+  );
 }
 export function Card({
   children,
@@ -154,12 +173,15 @@ export function Field({
         multiline={multiline}
         placeholder={placeholder ?? (compact ? label : undefined)}
         placeholderTextColor={color.muted}
+        selectionColor={Platform.OS === "android" ? color.accentSoft : color.focus}
+        cursorColor={color.focus}
+        selectionHandleColor={color.focus}
         onFocus={() => setFocused(true)}
         onBlur={() => setFocused(false)}
         style={[
           s.input,
           multiline && { minHeight: compact ? 54 : 90, textAlignVertical: "top" },
-          focused && { borderColor: color.accent },
+          focused && { borderColor: color.focus },
         ]}
       />
     </View>

@@ -7,13 +7,14 @@
   --conversation-ink-faint: var(--ink-tertiary, #77746e);
   --conversation-line: var(--line, #dedcd5);
   --conversation-line-strong: var(--line-strong, #c9c6bc);
-  --conversation-accent: var(--accent, #2f6e54);
-  --conversation-accent-soft: var(--accent-soft, #e2eee7);
+  --conversation-accent: var(--accent, #1b2432);
+  --conversation-accent-soft: var(--accent-soft, #eef1f5);
+  --conversation-success: var(--success, #287342);
   --conversation-warning: var(--warning, #93601b);
   --conversation-warning-soft: var(--warning-soft, #f5ead6);
   --conversation-danger: var(--danger, #a34235);
   --conversation-danger-soft: var(--danger-soft, #f5e4e0);
-  --conversation-focus: var(--focus, #36745a);
+  --conversation-focus: var(--focus, #1b2432);
   --conversation-radius: 10px;
   --conversation-content-width: 800px;
   --conversation-composer-shadow: 0 2px 5px rgb(0 0 0 / 0.07), 0 4px 14px rgb(0 0 0 / 0.035);
@@ -2456,7 +2457,7 @@
 }
 
 .conversation-status[data-tone="success"] > svg {
-  color: var(--conversation-accent);
+  color: var(--conversation-success);
 }
 
 .conversation-status[data-tone="warning"] > svg {

@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { Switch, Text, View } from "react-native";
 import type { RuntimeResult } from "@pico/protocol/mobile";
 import { usePico } from "../store";
-import { Button, Card, Chips, Field, Label, s } from "../ui";
+import { Button, Card, Chips, Field, Label, s, switchColors } from "../ui";
 import { confirmDelete } from "./confirmDelete";
 import { saveAutomation, scheduleCron, scheduleDraft, type ScheduleKind } from "./management";
 
@@ -218,6 +218,7 @@ export function Jobs() {
           <View style={[s.row, { minHeight: 44 }]}>
             <Label>启用</Label>
             <Switch
+              {...switchColors}
               hitSlop={8}
               accessibilityLabel={`启用 ${job.name}`}
               value={job.enabled}

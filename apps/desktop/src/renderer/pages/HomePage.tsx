@@ -16,9 +16,7 @@ export function HomePage() {
   return (
     <div className="launch-page">
       <section className="launch-hero">
-        <span className="brand-mark brand-mark--large" aria-hidden="true">
-          P
-        </span>
+        <span className="brand-mark brand-mark--large" aria-hidden="true" />
         <span className="eyebrow">LOCAL AGENT WORKBENCH</span>
         <h2>把下一件事交给 Pico</h2>
         <p>选择一个项目，描述你想完成的结果。Pico 会把分析、执行和变更留在同一条任务记录里。</p>

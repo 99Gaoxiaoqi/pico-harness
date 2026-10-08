@@ -9,7 +9,7 @@ import {
   type RuntimeSubagentSettingsSnapshot,
 } from "@pico/protocol/mobile";
 import { usePico } from "../store";
-import { Button, Card, Chips, Detail, Field, Label, s } from "../ui";
+import { Button, Card, Chips, Detail, Field, Label, s, switchColors } from "../ui";
 import { Choices } from "./SettingsNavigation";
 import { saveSubagentPresets, subagentForWrite } from "./management";
 import { confirmDelete } from "./confirmDelete";
@@ -163,6 +163,7 @@ export function Subagents() {
         <View style={[s.row, { minHeight: 44 }]}>
           <Text style={s.text}>启用此预设</Text>
           <Switch
+            {...switchColors}
             hitSlop={8}
             accessibilityLabel="启用子 Agent 预设"
             value={preset.enabled}

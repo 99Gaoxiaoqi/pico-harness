@@ -535,11 +535,11 @@ function PatchView({ patch, truncated }: { patch: string; truncated: boolean }) 
                   styles.patchLine,
                   {
                     backgroundColor: added
-                      ? color.accentSoft
+                      ? color.successSoft
                       : removed
                         ? color.dangerSoft
                         : "transparent",
-                    color: added ? color.accentStrong : removed ? color.danger : color.text,
+                    color: added ? color.success : removed ? color.danger : color.text,
                   },
                 ]}
               >

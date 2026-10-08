@@ -210,7 +210,10 @@ function UserMessageBubble({
         </div>
         <div className="conversation-message__actions" role="toolbar" aria-label="消息操作">
           {timestamp && (
-            <time className="conversation-message__timestamp" dateTime={new Date(item.at!).toISOString()}>
+            <time
+              className="conversation-message__timestamp"
+              dateTime={new Date(item.at!).toISOString()}
+            >
               {timestamp}
             </time>
           )}
@@ -1043,9 +1046,7 @@ export function ConversationTranscript({
       >
         {emptyState ?? (
           <div className="conversation-empty-state">
-            <span className="conversation-wordmark" aria-label="Pico">
-              pico
-            </span>
+            <span className="brand-mark brand-mark--large" role="img" aria-label="Pico" />
             <h2>今天想做些什么？</h2>
           </div>
         )}

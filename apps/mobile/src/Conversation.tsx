@@ -18,7 +18,7 @@ import * as Crypto from "expo-crypto";
 import { isTerminalRunStatus } from "@pico/protocol/mobile";
 import { usePico } from "./store";
 import { decodedBase64Size } from "./core";
-import { Button, Card, Detail, Label, s, color } from "./ui";
+import { BrandMark, Button, Card, Detail, Label, s, color } from "./ui";
 import { ActionsSheet } from "./ActionsSheet";
 import type { WorkbarTab } from "./Workbar";
 import { useSessionTranscript } from "./conversation/useSessionTranscript";
@@ -220,15 +220,18 @@ export function Conversation({
           )
         }
         ListEmptyComponent={
-          <Label>
-            {!pico.connected
-              ? "连接恢复后会补齐记录"
-              : sessionReady && view?.phase === "ready"
-                ? "有什么需要 Pico 帮你处理？"
-                : view?.phase === "recovering" || view?.phase === "idle"
-                  ? "历史尚未同步，请重新连接后重试"
-                  : "正在读取历史…"}
-          </Label>
+          <View style={styles.emptyState}>
+            {pico.connected && sessionReady && view?.phase === "ready" && <BrandMark size={48} />}
+            <Label>
+              {!pico.connected
+                ? "连接恢复后会补齐记录"
+                : sessionReady && view?.phase === "ready"
+                  ? "有什么需要 Pico 帮你处理？"
+                  : view?.phase === "recovering" || view?.phase === "idle"
+                    ? "历史尚未同步，请重新连接后重试"
+                    : "正在读取历史…"}
+            </Label>
+          </View>
         }
         ListFooterComponent={
           <View style={{ gap: 10 }}>
@@ -457,6 +460,9 @@ export function Conversation({
               autoCapitalize="none"
               placeholder="发消息…"
               placeholderTextColor={color.muted}
+              selectionColor={Platform.OS === "android" ? color.accentSoft : color.focus}
+              cursorColor={color.focus}
+              selectionHandleColor={color.focus}
               style={styles.messageInput}
             />
           )}
@@ -541,6 +547,7 @@ export function Conversation({
   );
 }
 const styles = StyleSheet.create({
+  emptyState: { alignItems: "center", gap: 12, paddingVertical: 40 },
   runStrip: {
     flexDirection: "row",
     alignItems: "center",

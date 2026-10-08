@@ -3,6 +3,7 @@
     "name": "Pico",
     "slug": "pico-mobile",
     "version": "0.1.2",
+    "icon": "./assets/icon.png",
     "scheme": "pico",
     "orientation": "default",
     "userInterfaceStyle": "light",
@@ -14,6 +15,11 @@
     },
     "android": {
       "package": "dev.pico.mobile",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "monochromeImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#1b2432"
+      },
       "permissions": ["CAMERA"],
       "versionCode": 3,
       "blockedPermissions": ["android.permission.RECORD_AUDIO"]

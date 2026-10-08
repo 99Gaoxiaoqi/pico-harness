@@ -39,6 +39,7 @@ test("Astryx 桌面外壳保留侧栏尺寸、任务菜单和搜索键盘焦点"
       loader: "tsx",
     },
     outdir: "/virtual-pico-shell",
+    loader: { ".svg": "dataurl" },
     bundle: true,
     write: false,
     format: "iife",

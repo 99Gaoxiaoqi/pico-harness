@@ -39,6 +39,7 @@ test("Astryx 页面控件保留任务表单、模型切换和审批交互", { ti
       loader: "tsx",
     },
     outdir: "/virtual-pico-pages",
+    loader: { ".svg": "dataurl" },
     plugins: [
       {
         name: "vite-brand-assets",
