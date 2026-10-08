@@ -223,7 +223,7 @@ test("provider overflow compaction retry preserves one frozen turn tail", async 
       return {
         role: "assistant",
         content:
-          "## Goal\nContinue work.\n## Progress\nReviewed old conversation.\n## Next Steps\nAnswer current user.\n## Critical Context\nfixture compacted history",
+          "## Goal\nContinue work.\n## Progress\nReviewed old conversation.\n## Key Decisions\nPreserve current intent.\n## Constraints\n(none)\n## Next Steps\nAnswer current user.\n## Critical Context\nfixture compacted history\n## Evidence\n(none)",
       };
     },
   };
@@ -515,4 +515,122 @@ test("managed project instructions reject external symlinks while accepting regu
   } else {
     assert.match(regular, /SAFE_PROJECT_INSTRUCTIONS_456/u);
   }
+});
+
+test("actual mid_turn folding keeps the latest Host state and task once on the assistant request copy", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-mid-turn-carrier-"));
+  context.after(async () => {
+    closeAllOperationalDatabasesForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+  const session = new Session("mid-turn", root, {
+    persistence: false,
+    picoHome: join(root, "home"),
+  });
+  context.after(() => session.close());
+  const registry = new ToolRegistry();
+  registry.register({
+    name: () => "read_marker",
+    readOnly: true,
+    definition: () => ({
+      name: "read_marker",
+      description: "read fixture",
+      inputSchema: { type: "object", properties: {} },
+    }),
+    execute: async () => "actual-tool-result",
+  });
+  let calls = 0,
+    layers = 0;
+  const requests: Message[][] = [];
+  const engine = new AgentEngine({
+    workDir: root,
+    registry,
+    reporter: new SilentReporter(),
+    promptLayersFactory: async () => ({
+      systemPrompt: "stable-system",
+      turnTail: `latest-host-state-${++layers}`,
+    }),
+    provider: {
+      async generate(messages) {
+        requests.push(structuredClone(messages));
+        calls++;
+        if (calls < 3)
+          return {
+            role: "assistant",
+            content: "",
+            toolCalls: [{ id: `tool-${calls}`, name: "read_marker", arguments: "{}" }],
+          };
+        if (calls === 3) throw new ContextOverflowError("actual mid_turn overflow");
+        return { role: "assistant", content: "done" };
+      },
+    },
+    fullCompactor: new FullCompactor({
+      maxAttempts: 1,
+      provider: {
+        async generate() {
+          return {
+            role: "assistant",
+            content:
+              "## Goal\nFinish the current task.\n## Progress\nRead two markers; delivery pending.\n## Key Decisions\nKeep the current task.\n## Constraints\nDo not write.\n## Next Steps\nDeliver the final answer.\n## Critical Context\nMarker tool results are available.\n## Evidence\n(none)",
+          };
+        },
+      },
+    }),
+  });
+  await session.commitMessages({ role: "user", content: "original-mid-turn-task" });
+  await engine.run(session);
+  assert.equal(calls, 4);
+  const continued = requests[3]!;
+  assert.equal(
+    visibleUsers(continued).length,
+    0,
+    "the real compaction must have folded the ordinary user",
+  );
+  const carrier = continued.find(
+    (m) => m.role === "assistant" && m.content.includes('source="host_projection"'),
+  )!;
+  assert.ok(carrier);
+  assert.equal(countOccurrences(carrier.content, "original-mid-turn-task"), 1);
+  assert.equal(countOccurrences(carrier.content, "latest-host-state-3"), 1);
+  assert.equal(countOccurrences(carrier.content, 'source="host_projection"'), 1);
+  assert.ok(
+    carrier.content.indexOf("</pico_compaction_summary>") <
+      carrier.content.indexOf('source="host_projection"'),
+  );
+  assert.doesNotMatch(JSON.stringify(session.getHistory()), /latest-host-state|host_projection/);
+});
+
+test("armed Goal-only start uses a frozen Host carrier without creating a user message", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-goal-only-carrier-"));
+  context.after(async () => {
+    closeAllOperationalDatabasesForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+  const session = new Session("goal-only", root, {
+    persistence: false,
+    picoHome: join(root, "home"),
+  });
+  context.after(() => session.close());
+  const goalManager = new GoalManager();
+  const goal = goalManager.create({ condition: "写一段解释测试策略的说明" });
+  let request: Message[] = [];
+  await new AgentEngine({
+    workDir: root,
+    registry: new ToolRegistry(),
+    goalManager,
+    reporter: new SilentReporter(),
+    promptLayersFactory: async () => ({ systemPrompt: "stable", turnTail: "latest-goal-state" }),
+    provider: {
+      async generate(messages) {
+        request = structuredClone(messages);
+        return { role: "assistant", content: "说明已交付" };
+      },
+    },
+  }).run(session);
+  assert.equal(request.filter((m) => m.role === "user").length, 0);
+  assert.match(request.find((m) => m.role === "system")!.content, /anchor_source="goal_authority"/);
+  assert.match(request[0]!.content, new RegExp(goal.condition, "u"));
+  assert.match(request[0]!.content, /latest-goal-state/);
+  assert.equal(session.getHistory().filter((m) => m.role === "user").length, 0);
+  assert.doesNotMatch(JSON.stringify(session.getHistory()), /host_projection|latest-goal-state/);
 });

@@ -147,7 +147,12 @@ function latestVisibleUserInput(messages: readonly Message[]): string {
   );
 }
 
-function appendTurnTail(messages: Message[], turnTail: string, taskAnchor?: Message): Message[] {
+function appendTurnTail(
+  messages: Message[],
+  turnTail: string,
+  taskAnchor?: Message,
+  goalAnchor?: { readonly id: string; readonly revision: number; readonly condition: string },
+): Message[] {
   const normalizedTail = turnTail.trim();
 
   const currentUserIndex = messages.findLastIndex(
@@ -169,6 +174,17 @@ function appendTurnTail(messages: Message[], turnTail: string, taskAnchor?: Mess
             (isValidStoredCompactionSummary(message.content, "sections_v2") ||
               isValidStoredCompactionSummary(message.content, "sections_v1")))),
     );
+    if (checkpointIndex < 0 && goalAnchor) {
+      const systemIndex = messages.findIndex((message) => message.role === "system");
+      if (systemIndex < 0) throw new Error("任务上下文载体不可用");
+      const requestMessages = [...messages];
+      const system = messages[systemIndex]!;
+      requestMessages[systemIndex] = {
+        ...system,
+        content: `${system.content}\n\n<current-turn-context source="host_projection" anchor_source="goal_authority" goal_id="${goalAnchor.id}" goal_revision="${goalAnchor.revision}">\n<current-task-anchor>\n${goalAnchor.condition}\n</current-task-anchor>\n${normalizedTail}\n</current-turn-context>`,
+      };
+      return requestMessages;
+    }
     if (checkpointIndex < 0 || !taskAnchor) throw new Error("任务上下文载体不可用");
     const checkpoint = messages[checkpointIndex]!;
     const end =
@@ -487,6 +503,9 @@ export class AgentEngine {
   private readonly historicalImageKeys = new Set<string>();
   private currentTaskAnchor: Message | undefined;
   private currentUserEventId: string | undefined;
+  private goalOnlyAnchor:
+    | { readonly id: string; readonly revision: number; readonly condition: string }
+    | undefined;
   private readonly memoryRecallContext: AgentEngineOptions["memoryRecallContext"];
   private acceptedHistoryPrefixCount: number | undefined;
   private readonly memoryHooks: AgentEngineOptions["memoryHooks"];
@@ -784,6 +803,7 @@ export class AgentEngine {
       sanitizeToolPairs([{ role: "system", content: systemPrompt }, ...rawHistory]),
       turnTail,
       this.currentTaskAnchor,
+      this.goalOnlyAnchor,
     );
 
     const projected = context.map((message) => {
@@ -1215,6 +1235,11 @@ export class AgentEngine {
     );
     const currentUserPrompt = originalUser?.message.content ?? latestVisibleUserInput(runHistory);
     this.currentUserEventId = originalUser?.eventId;
+    const armedGoal = this.goalManager?.getActive();
+    this.goalOnlyAnchor =
+      !originalUser && !currentUserPrompt && armedGoal
+        ? { id: armedGoal.id, revision: armedGoal.revision, condition: armedGoal.condition }
+        : undefined;
     const taskIndex = runHistory.findLastIndex(
       (message) =>
         message.role === "user" && !message.toolCallId && message.content === currentUserPrompt,
@@ -1224,6 +1249,12 @@ export class AgentEngine {
       : taskIndex >= 0
         ? structuredClone(runHistory[taskIndex]!)
         : undefined;
+    if (!this.currentTaskAnchor && this.goalOnlyAnchor)
+      this.currentTaskAnchor = {
+        role: "assistant",
+        content: this.goalOnlyAnchor.condition,
+        providerData: { picoKind: "host_goal_anchor" },
+      };
     this.historicalImageKeys.clear();
     for (const message of runHistory.slice(0, Math.max(0, taskIndex))) {
       if (message.toolCallId && message.images?.length)
@@ -1344,6 +1375,7 @@ export class AgentEngine {
               ],
               turnTail,
               this.currentTaskAnchor,
+              this.goalOnlyAnchor,
             ),
           );
           const compactedContext = await this.prepareModelContext(
