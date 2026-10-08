@@ -385,6 +385,17 @@ export class AtomicMemoryExtractionEngine {
       snapshot.sourceMessages,
       snapshot.sourceEventMessagePositions,
     );
+    if (
+      snapshot.trigger === "remember" &&
+      evidence.some(
+        (entry) =>
+          entry.event.runId === snapshot.runId &&
+          entry.event.turnId === snapshot.turnId &&
+          entry.rawTexts.some(memoryTextContainsSecret),
+      )
+    ) {
+      return this.commit(range, [], [], "sensitive_information");
+    }
     const fitted = fitAtomicMemoryEvidence(evidence);
     const fits = fitted && (await this.proposalFits(snapshot, fitted));
     if (!fitted || !fits) {
@@ -397,17 +408,6 @@ export class AtomicMemoryExtractionEngine {
         }
       }
       return { kind: "failed", failureClass: fitted ? "provider" : "evidence", range };
-    }
-    if (
-      snapshot.trigger === "remember" &&
-      evidence.some(
-        (entry) =>
-          entry.event.runId === snapshot.runId &&
-          entry.event.turnId === snapshot.turnId &&
-          entry.texts.some(memoryTextContainsSecret),
-      )
-    ) {
-      return this.commit(range, [], [], "sensitive_information");
     }
     if (fitted.length === 0) return this.commit(range, [], []);
     const budget: Budget = { remaining: 3, localized: false };
@@ -537,7 +537,7 @@ export class AtomicMemoryExtractionEngine {
       if (!localized) return { kind: "failed", failureClass: "localization", range };
       if (
         snapshot.trigger === "remember" &&
-        localized.some((entry) => entry.texts.some(memoryTextContainsSecret))
+        localized.some((entry) => entry.rawTexts.some(memoryTextContainsSecret))
       )
         return this.commit(range, [], [], "sensitive_information");
       interpretationContext = memoryInterpretationContext(found);

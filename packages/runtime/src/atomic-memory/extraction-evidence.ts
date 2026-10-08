@@ -8,6 +8,8 @@ export interface AtomicMemoryEvidence {
   readonly sourceRef: string;
   readonly event: MemoryEvidenceEvent;
   readonly texts: readonly string[];
+  /** Original versions of the authorized texts, retained only for sensitive-data checks. */
+  readonly rawTexts: readonly string[];
   /** Zero-based positions in the exact sourceMessages prefix, never a filtered copy. */
   readonly messagePositions?: readonly number[];
 }
@@ -62,7 +64,10 @@ export function projectAtomicMemoryEvidence(
       ? undefined
       : memoryConversationMessages(sourceMessages)
           .filter((message) => message.role === "user")
-          .map((message) => normalizeEvidenceText(message.content));
+          .map((message) => ({
+            text: normalizeEvidenceText(message.content),
+            raw: message.content,
+          }));
   return events.flatMap((event) => {
     if (event.role !== "user") return [];
     const text = normalizeEvidenceText(event.text);
@@ -72,6 +77,7 @@ export function projectAtomicMemoryEvidence(
       if (!sourceMessages || indexed.length === 0) return [];
       const messagePositions = [...new Set(indexed)].sort((a, b) => a - b);
       const texts: string[] = [];
+      const rawTexts: string[] = [];
       for (const position of messagePositions) {
         if (!Number.isSafeInteger(position) || position < 0) return [];
         const message = sourceMessages[position];
@@ -86,26 +92,42 @@ export function projectAtomicMemoryEvidence(
         // An index is identity, not permission to cite text absent from the event.
         if (!visibleText || (!text.includes(visibleText) && !visibleText.includes(text))) return [];
         texts.push(text.includes(visibleText) ? visibleText : text);
+        rawTexts.push(text.includes(visibleText) ? message.content : event.text);
+        if (text === visibleText) rawTexts.push(event.text);
       }
       return [
         {
           sourceRef: `event:${event.eventId}`,
           event,
           texts: [...new Set(texts)],
+          rawTexts: [...new Set(rawTexts)],
           messagePositions,
         },
       ];
     }
     // Without event-to-message indexes, require exact containment in both authorities.
     // Never expose a hidden part of the ledger in a provider-prefix extraction request.
-    const texts =
+    const authorized =
       visible === undefined
-        ? [text]
+        ? [{ text, raw: event.text }]
         : visible.flatMap((message) =>
-            message.includes(text) ? [text] : text.includes(message) && message ? [message] : [],
+            message.text === text
+              ? [{ text, raw: event.text }, message]
+              : message.text.includes(text)
+                ? [{ text, raw: event.text }]
+                : text.includes(message.text) && message.text
+                  ? [message]
+                  : [],
           );
-    return texts.length
-      ? [{ sourceRef: `event:${event.eventId}`, event, texts: [...new Set(texts)] }]
+    return authorized.length
+      ? [
+          {
+            sourceRef: `event:${event.eventId}`,
+            event,
+            texts: [...new Set(authorized.map((entry) => entry.text))],
+            rawTexts: [...new Set(authorized.map((entry) => entry.raw))],
+          },
+        ]
       : [];
   });
 }
@@ -135,6 +157,16 @@ export function renderAtomicMemoryEvidence(evidence: readonly AtomicMemoryEviden
 }
 
 export function memoryTextContainsSecret(text: string): boolean {
+  // Mirror persistence character normalization without imposing the item's length limit.
+  const normalized = text
+    .normalize("NFC")
+    .replaceAll(/\p{Cc}/gu, " ")
+    .replaceAll(/[\u200b-\u200d\ufeff]/gu, "")
+    .trim();
+  return containsSecretPattern(text) || containsSecretPattern(normalized);
+}
+
+function containsSecretPattern(text: string): boolean {
   return (
     redactSensitiveText(text) !== text ||
     /-----BEGIN(?: [A-Z0-9]+)? PRIVATE KEY-----/iu.test(text) ||
