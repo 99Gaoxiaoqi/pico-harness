@@ -19,6 +19,8 @@ test("PowerShell Hardline 区分命令执行与字符串、注释中的危险关
     "Write-Output 'Invoke-Expression'",
     "Write-Output 'Stop-Computer' | Measure-Object",
     "Write-Output 'git push --force'; Get-Date",
+    "Write-Output 'safe && Stop-Computer || Stop-Computer'",
+    "Write-Output '<# data #> Stop-Computer'",
   ];
   for (const command of dataCommands) {
     assert.deepEqual(analyzePowerShellHardlineCommand(command), { kind: "no_match" }, command);
@@ -43,6 +45,16 @@ test("PowerShell Hardline 区分命令执行与字符串、注释中的危险关
     'Write-Output "$(Write-Output "safe; Stop-Computer")"',
     "Remove-Item C:\\Windows$Suffix",
     "Stop-Computer$Suffix",
+    "Write-Output safe && Get-Date",
+    "Write-Output safe || Get-Date",
+    "Write-Output safe && 'Stop-Computer'",
+    "Write-Output safe; <# Stop-Computer; #> Get-Date",
+    "Write-Output <# Stop-Computer; #> Stop-Computer",
+    "Write-Output $x <# data #> Stop-Computer",
+    "Stop-Process -Name safe <# data #> 'lsass' -Force",
+    "Stop-Process -Name safe <# data #>, 'safe,lsass' -Force",
+    "Stop-Process -Name safe <# lsass #>,other -Force",
+    "git push --force, <# data #> origin main",
   ];
   for (const command of unsupportedData) {
     assert.deepEqual(
@@ -68,15 +80,36 @@ test("PowerShell Hardline 保留 quoted target、命令边界和 unknown 后明�
     ["Format-Volume -DriveLetter C", "destructive_system"],
     ["Stop-Process -Name 'lsass' -Force", "destructive_system"],
     ["Stop-Process -Name:wininit -Force", "destructive_system"],
+    ["Stop-Process -Name lsass,csrss -Force", "destructive_system"],
+    ["Stop-Process -Name safe,csrss -Force", "destructive_system"],
+    ["Stop-Process -Name:safe,lsass -Force", "destructive_system"],
+    ["Stop-Process -Name 'safe', 'lsass' -Force", "destructive_system"],
+    ["Stop-Process -Name safe <# data #>,lsass -Force", "destructive_system"],
+    ["Stop-Process -Name safe, <# data #> lsass -Force", "destructive_system"],
+    ["Stop-Process -Name 'safe' <# data #>, 'lsass' -Force", "destructive_system"],
+    ["Microsoft.PowerShell.Management\\Stop-Process -Name safe,lsass -Force", "destructive_system"],
     ["Remove-Item -Recurse -Force 'C:\\Windows'", "protected_destination"],
     ['Remove-Item "C:\\Program Files\\pico"', "protected_destination"],
     ["Remove-Item -Path 'C:\\Users\\*'", "protected_destination"],
     ["Remove-Item -LiteralPath:'C:\\Windows\\pico'", "protected_destination"],
+    ["Remove-Item -Path C:\\safe,C:\\Windows\\pico -Recurse", "protected_destination"],
+    ["Remove-Item -Path 'C:\\safe' , 'C:\\Windows\\pico'", "protected_destination"],
+    ["Remove-Item -LiteralPath:C:\\safe,C:\\Windows\\pico", "protected_destination"],
+    [
+      "Microsoft.PowerShell.Management\\Remove-Item -Path C:\\safe,C:\\Windows\\pico -Recurse",
+      "protected_destination",
+    ],
     ["rm -rf /", "protected_destination"],
     ["git push '--force' origin main", "destructive_git"],
     ["git.exe push -f origin main", "destructive_git"],
     ["git push --force-with-lease=main:abc origin main", "destructive_git"],
     ["Write-Output 'Stop-Computer'; Stop-Computer", "destructive_system"],
+    ["Write-Output safe && Stop-Computer", "destructive_system"],
+    ["Write-Output safe || Stop-Computer", "destructive_system"],
+    ["Write-Output safe; <# data #> Stop-Computer", "destructive_system"],
+    ["Write-Output $x && Stop-Computer", "destructive_system"],
+    ["Write-Output $x || Stop-Computer", "destructive_system"],
+    ["Write-Output $x; <# data #> Stop-Computer", "destructive_system"],
     ["Get-Date | Stop-Computer", "destructive_system"],
     ["Write-Output $x; Remove-Item 'C:\\Windows'", "protected_destination"],
     ['Write-Output "$x; Stop-Computer"; git push --force', "destructive_git"],
@@ -99,6 +132,24 @@ test("PowerShell Hardline 保留 quoted target、命令边界和 unknown 后明�
     );
     assert.equal(classifyPowerShellHardlineCommand(command), reasonKind, command);
     assert.equal(classifyPowerShellCommand(command).kind, "requires-approval", command);
+  }
+});
+
+test("PowerShell Hardline 不把引用逗号数据或 native argv 拆成 cmdlet 数组", () => {
+  for (const command of [
+    "Stop-Process -Name 'lsass,csrss' -Force",
+    'Stop-Process -Name "safe,lsass" -Force',
+    "Stop-Process -Name safe,other -Force",
+    "Remove-Item -Path 'C:\\safe,C:\\Windows\\pico' -Recurse",
+    'Remove-Item -Path "C:\\safe,C:\\Windows\\pico" -Recurse',
+    "Remove-Item -Path C:\\safe,C:\\other -Recurse",
+    "git push --force,origin main",
+    "git push '--force,origin' main",
+    "C:\\tools\\git.exe push --force,origin main",
+  ]) {
+    // 包含危险文字的参数也只做静态分类，不执行进程或文件操作。
+    assert.deepEqual(analyzePowerShellHardlineCommand(command), { kind: "no_match" }, command);
+    assert.equal(classifyPowerShellHardlineCommand(command), undefined, command);
   }
 });
 

@@ -150,6 +150,17 @@ export function parseBashScript(command: string, budget: BashAnalysisBudget): Pa
       progressCallback: () => performance.now() > budget.deadline,
     });
     if (!tree) return empty(true);
+    const normalized = normalizeHeredocContinuations(source, tree.rootNode, budget);
+    if (normalized === undefined) return empty(true);
+    if (normalized !== source) {
+      tree.delete();
+      tree = undefined;
+      source = normalized;
+      tree = parser.parse(source, null, {
+        progressCallback: () => performance.now() > budget.deadline,
+      });
+      if (!tree) return empty(true);
+    }
     if (tree.rootNode.hasError) {
       const recovered = recoverMultipleHeredocs(source, tree.rootNode, budget);
       if (!recovered) return empty(true);
@@ -358,7 +369,7 @@ export function parseBashScript(command: string, budget: BashAnalysisBudget): Pa
       }
       return tokens;
     };
-    const redirects = (nodes: readonly Node[], index: number): void => {
+    const redirects = (nodes: readonly Node[], index: number, headerParsed = false): void => {
       for (const redirect of nodes) {
         account(redirect);
         if (redirect.type === "file_redirect") {
@@ -416,10 +427,11 @@ export function parseBashScript(command: string, budget: BashAnalysisBudget): Pa
                   ...(stdin.opaqueInput !== undefined ? { opaqueInput: stdin.opaqueInput } : {}),
                 };
             }
-            redirects(
-              redirect.namedChildren.filter((child) => child.type === "file_redirect"),
-              index,
-            );
+            if (!headerParsed)
+              redirects(
+                redirect.namedChildren.filter((child) => child.type === "file_redirect"),
+                index,
+              );
             continue;
           }
           if (body) {
@@ -442,16 +454,17 @@ export function parseBashScript(command: string, budget: BashAnalysisBudget): Pa
               continue;
             }
             const arguments_ = redirect.childrenForFieldName("argument");
-            const headerEnd = heredocHeaderEnd(source, delimiter!.endIndex, [
-              ...arguments_,
-              ...redirect.namedChildren.filter((child) => child.type === "file_redirect"),
-            ]);
+            const headerEnd = heredocHeaderEnd(
+              source,
+              delimiter!.endIndex,
+              heredocHeaderNodes(redirect),
+            );
             if (headerEnd === undefined || headerEnd >= endLineStart) {
               invalidHeredoc = true;
               continue;
             }
             for (const argument of arguments_) {
-              if (argument.endIndex <= headerEnd) {
+              if (!headerParsed && argument.endIndex <= headerEnd) {
                 commands[index]!.push(word(argument));
                 substitutions(argument, index);
               }
@@ -460,10 +473,6 @@ export function parseBashScript(command: string, budget: BashAnalysisBudget): Pa
             const rawPayload = source.slice(headerEnd + 1, endLineStart);
             const payload = stripTabs ? rawPayload.replace(/^\t+/gmu, "") : rawPayload;
             let opaqueInput = false;
-            if (!quoted && /\\\n/u.test(payload)) {
-              invalidHeredoc = true;
-              continue;
-            }
             if (!quoted) {
               for (const child of redirect.namedChildren) {
                 if (
@@ -503,16 +512,28 @@ export function parseBashScript(command: string, budget: BashAnalysisBudget): Pa
               stdinPayload: payload,
               opaqueInput,
             };
-            redirects(
-              redirect.namedChildren.filter((child) => child.type === "file_redirect"),
-              index,
-            );
+            if (!headerParsed)
+              redirects(
+                redirect.namedChildren.filter((child) => child.type === "file_redirect"),
+                index,
+              );
           } else {
             commandContexts[index] = { ...commandContexts[index]!, opaqueInput: true };
             substitutions(redirect, index);
           }
         } else ambiguous = true;
       }
+    };
+    const visitStatement = (node: Node): void => {
+      // An asynchronous list executes in a separate shell, including a bare
+      // assignment, a compound command, or a complete AND/OR list.
+      const asynchronous = node.nextSibling?.type === "&";
+      if (asynchronous) event({ kind: "isolate" });
+      visit(node);
+      if (asynchronous) event({ kind: "end_isolate" });
+    };
+    const visitStatements = (node: Node): void => {
+      for (const child of node.namedChildren) visitStatement(child);
     };
     const visit = (node: Node, trailingRedirects: readonly Node[] = []): void => {
       if (!account(node)) return;
@@ -522,7 +543,7 @@ export function parseBashScript(command: string, budget: BashAnalysisBudget): Pa
         case "program":
         case "compound_statement":
         case "do_group":
-          for (const child of node.namedChildren) visit(child);
+          visitStatements(node);
           return;
         case "comment":
           return;
@@ -573,11 +594,79 @@ export function parseBashScript(command: string, budget: BashAnalysisBudget): Pa
           const redirectNodes = node.namedChildren.filter(
             (child) => child !== body && child.type.endsWith("_redirect"),
           );
-          const start = commands.length;
+          const heredoc = redirectNodes.find((child) => child.type === "heredoc_redirect");
+          if (
+            heredoc &&
+            (heredoc.childForFieldName("right") ||
+              heredoc.namedChildren.some((child) => child.type === "pipeline"))
+          ) {
+            // The grammar nests a heredoc header's executable tail inside its
+            // redirect, sometimes reversing pipeline/AND-OR precedence. Reparse
+            // only that AST-bounded header with a synthetic redirect, then remove
+            // the marker and attach the original stdin data to its command.
+            const delimiter = heredoc.namedChildren.find((child) => child.type === "heredoc_start");
+            const headerEnd =
+              delimiter &&
+              heredocHeaderEnd(source, delimiter.endIndex, heredocHeaderNodes(heredoc));
+            if (headerEnd === undefined) {
+              ambiguous = true;
+              return;
+            }
+            let marker = `__PICO_HEREDOC_HEADER_${heredoc.startIndex}__`;
+            while (source.includes(marker)) marker += "_";
+            const header =
+              source.slice(node.startIndex, heredoc.startIndex) +
+              `> ${marker} ` +
+              source.slice(delimiter!.endIndex, headerEnd);
+            const parsed = parseBashScript(header, budget);
+            const stdinReplaced = [...redirectNodes, ...heredoc.namedChildren].some((redirect) => {
+              if (redirect.type !== "file_redirect" || redirect.startIndex < delimiter!.endIndex)
+                return false;
+              const operator = redirect.children
+                .filter((child) => !child.isNamed)
+                .map((child) => child.text)
+                .join("");
+              const descriptor = redirect.childForFieldName("descriptor")?.text;
+              const targetsStdin = descriptor ? /^0+$/u.test(descriptor) : operator.startsWith("<");
+              // Duplicating fd 0 onto itself leaves the heredoc connected.
+              const selfDuplicate =
+                (operator === "<&" || operator === ">&") &&
+                /^0+$/u.test(redirect.childForFieldName("destination")?.text ?? "");
+              return targetsStdin && !selfDuplicate;
+            });
+            const start = commands.length;
+            let attached = false;
+            for (let i = 0; i < parsed.commands.length; i++) {
+              const tokens = [...parsed.commands[i]!];
+              const markerIndex = tokens.findIndex(
+                (token, index) => token.value === marker && tokens[index - 1]?.outputRedirection,
+              );
+              if (markerIndex >= 0) tokens.splice(markerIndex - 1, 2);
+              const index = emit(tokens, parsed.commandContexts[i]);
+              if (markerIndex >= 0) {
+                redirects([heredoc], index, true);
+                // Expansion checks still apply to an unquoted heredoc, but a
+                // later fd-0 redirect replaces the bytes the executable reads.
+                if (stdinReplaced)
+                  commandContexts[index] = { ...commandContexts[index]!, opaqueInput: true };
+                attached = true;
+              }
+            }
+            nestedCommands.push(
+              ...parsed.nestedCommands.map((nested) => ({
+                ...nested,
+                commandIndex: nested.commandIndex + start,
+              })),
+            );
+            ambiguous ||= parsed.ambiguous || !attached;
+            destructiveSystemSyntax ||= parsed.destructiveSystemSyntax;
+            return;
+          }
           if (body && (body.type === "list" || body.type === "pipeline")) {
             visit(body, redirectNodes);
             return;
           }
+          const start = commands.length;
           if (body && body.type !== "command") redirects(redirectNodes, emit([]));
           if (body) {
             // The grammar can omit a trailing '-' before a redirect; reparse that
@@ -610,7 +699,7 @@ export function parseBashScript(command: string, budget: BashAnalysisBudget): Pa
         }
         case "subshell":
           event({ kind: "isolate" });
-          for (const child of node.namedChildren) visit(child);
+          visitStatements(node);
           event({ kind: "end_isolate" });
           return;
         case "pipeline":
@@ -633,14 +722,14 @@ export function parseBashScript(command: string, budget: BashAnalysisBudget): Pa
         }
         case "if_statement": {
           const conditions = node.childrenForFieldName("condition");
-          for (const condition of conditions) visit(condition);
+          for (const condition of conditions) visitStatement(condition);
           event({ kind: "save" });
           for (const child of node.namedChildren) {
             if (conditions.some((condition) => condition.id === child.id)) continue;
             if (child.type === "else_clause" || child.type === "elif_clause") {
               event({ kind: "restore" });
-              for (const branch of child.namedChildren) visit(branch);
-            } else visit(child);
+              for (const branch of child.namedChildren) visitStatement(branch);
+            } else visitStatement(child);
           }
           event({ kind: "join" });
           return;
@@ -666,7 +755,7 @@ export function parseBashScript(command: string, budget: BashAnalysisBudget): Pa
             form: node.type === "for_statement" ? "for" : "while",
           });
           for (const condition of node.childrenForFieldName("condition"))
-            if (condition.isNamed) visit(condition);
+            if (condition.isNamed) visitStatement(condition);
           if (body) visit(body);
           else ambiguous = true;
           const update = node.childForFieldName("update");
@@ -700,7 +789,7 @@ export function parseBashScript(command: string, budget: BashAnalysisBudget): Pa
                 "case_statement",
               ].includes(child.type)
             )
-              visit(child);
+              visitStatement(child);
           }
       }
     };
@@ -717,6 +806,106 @@ export function parseBashScript(command: string, budget: BashAnalysisBudget): Pa
     tree?.delete();
     parser.delete();
   }
+}
+
+function heredocHeaderNodes(redirect: Node): readonly Node[] {
+  return redirect.namedChildren.filter(
+    (child) => !["heredoc_start", "heredoc_body", "heredoc_end"].includes(child.type),
+  );
+}
+
+interface HeredocBodyBoundary {
+  readonly bodyEnd: number;
+  readonly end: number;
+  readonly continuations: readonly { start: number; end: number }[];
+}
+
+/** Data-only reading: Bash removes unquoted backslash-newline before matching the delimiter. */
+function findHeredocBodyBoundary(
+  source: string,
+  start: number,
+  delimiter: string,
+  stripTabs: boolean,
+  quoted: boolean,
+  budget: BashAnalysisBudget,
+): HeredocBodyBoundary | undefined {
+  let cursor = start;
+  let logicalStart = start;
+  let logicalLine = "";
+  const continuations: { start: number; end: number }[] = [];
+  while (cursor <= source.length) {
+    if (performance.now() > budget.deadline) {
+      budget.exceeded = true;
+      return undefined;
+    }
+    const newline = source.indexOf("\n", cursor);
+    const end = newline < 0 ? source.length : newline;
+    const line = source.slice(cursor, end);
+    let backslashes = 0;
+    if (!quoted && newline >= 0)
+      for (let index = line.length - 1; index >= 0 && line[index] === "\\"; index--) backslashes++;
+    if (backslashes % 2 === 1) {
+      continuations.push({ start: end - 1, end: end + 1 });
+      logicalLine += line.slice(0, -1);
+    } else {
+      logicalLine += line;
+      if ((stripTabs ? logicalLine.replace(/^\t+/u, "") : logicalLine) === delimiter)
+        return { bodyEnd: logicalStart, end: newline < 0 ? end : end + 1, continuations };
+      logicalLine = "";
+      logicalStart = newline < 0 ? end : end + 1;
+    }
+    if (newline < 0) break;
+    cursor = end + 1;
+  }
+  return undefined;
+}
+
+/** Normalize only AST-identified heredoc data, then let the official grammar reparse it. */
+function normalizeHeredocContinuations(
+  source: string,
+  root: Node,
+  budget: BashAnalysisBudget,
+): string | undefined {
+  const redirects: Node[] = [];
+  const collect = (node: Node): void => {
+    if (++budget.nodes > MAX_AST_NODES || performance.now() > budget.deadline) {
+      budget.exceeded = true;
+      return;
+    }
+    if (node.type === "heredoc_redirect") {
+      redirects.push(node);
+      return;
+    }
+    for (const child of node.namedChildren) collect(child);
+  };
+  collect(root);
+  if (budget.exceeded) return undefined;
+  const continuations: { start: number; end: number }[] = [];
+  let bodyBoundary = 0;
+  for (const redirect of redirects) {
+    // A continued delimiter can make nodes from the grammar's original tree
+    // belong to earlier heredoc data instead of executable Shell statements.
+    if (redirect.startIndex < bodyBoundary) continue;
+    const start = redirect.namedChildren.find((child) => child.type === "heredoc_start");
+    if (!start || /['"\\]/u.test(start.text)) continue;
+    const delimiter = removeDelimiterQuotes(start.text);
+    const headerEnd = heredocHeaderEnd(source, start.endIndex, heredocHeaderNodes(redirect));
+    if (delimiter === undefined || headerEnd === undefined) return undefined;
+    const boundary = findHeredocBodyBoundary(
+      source,
+      headerEnd + 1,
+      delimiter,
+      source.slice(redirect.startIndex, start.startIndex).includes("<<-"),
+      false,
+      budget,
+    );
+    if (!boundary) return undefined;
+    bodyBoundary = boundary.end;
+    continuations.push(...boundary.continuations);
+  }
+  for (const continuation of continuations.reverse())
+    source = source.slice(0, continuation.start) + source.slice(continuation.end);
+  return source;
 }
 
 function heredocHeaderEnd(
@@ -865,31 +1054,23 @@ function recoverMultipleHeredocs(
       const delimiter = removeDelimiterQuotes(header.raw);
       if (delimiter === undefined || delimiter.includes("\n")) return undefined;
       const bodyStart = cursor;
-      let found = false;
-      while (cursor <= source.length && performance.now() <= budget.deadline) {
-        const newline = source.indexOf("\n", cursor);
-        const end = newline < 0 ? source.length : newline;
-        const line = source.slice(cursor, end);
-        if ((header.operator === "<<-" ? line.replace(/^\t+/u, "") : line) === delimiter) {
-          if (!/['"\\]/u.test(header.raw) && /\\\n/u.test(source.slice(bodyStart, cursor)))
-            return undefined;
-          bodies.push({
-            operator: header.operator,
-            rawDelimiter: header.raw,
-            delimiter,
-            body: source.slice(bodyStart, cursor),
-          });
-          cursor = newline < 0 ? end : end + 1;
-          found = true;
-          break;
-        }
-        if (newline < 0) break;
-        cursor = end + 1;
-      }
-      if (!found) return undefined;
+      const boundary = findHeredocBodyBoundary(
+        source,
+        bodyStart,
+        delimiter,
+        header.operator === "<<-",
+        /['"\\]/u.test(header.raw),
+        budget,
+      );
+      if (!boundary) return undefined;
+      bodies.push({
+        operator: header.operator,
+        rawDelimiter: header.raw,
+        delimiter,
+        body: source.slice(bodyStart, boundary.bodyEnd),
+      });
+      cursor = boundary.end;
     }
-    if (bodies.some((input) => !/['"\\]/u.test(input.rawDelimiter) && /\\\n/u.test(input.body)))
-      return undefined;
     const marker = `__PICO_HEREDOC_ANALYSIS_${inputs.size}__`;
     if (source.includes(marker)) return undefined;
     inputs.set(marker, bodies);

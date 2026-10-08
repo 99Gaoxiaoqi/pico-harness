@@ -42,22 +42,28 @@ function powerShellHardlineReason(command: string): HardlineBashReasonKind | und
       unknownReason ??= "unknown_hardline";
       continue;
     }
-    const reason = powerShellSegmentHardlineReason(segment.tokens);
+    const reason = powerShellSegmentHardlineReason(segment);
     if (reason === "opaque_shell") unknownReason = reason;
     else if (reason !== undefined) return reason;
   }
   return unknownReason;
 }
 
-function powerShellSegmentHardlineReason(
-  tokens: readonly string[],
-): HardlineBashReasonKind | undefined {
-  const executable = tokens[0]
+function normalizePowerShellExecutable(token: string | undefined): string | undefined {
+  return token
     ?.split(/[\\/]/u)
     .at(-1)
     ?.toLowerCase()
     .replace(/\.exe$/u, "");
+}
+
+function powerShellSegmentHardlineReason(
+  segment: ParsedPowerShellSegment,
+): HardlineBashReasonKind | undefined {
+  const { tokens, literalTokens } = segment;
+  const executable = normalizePowerShellExecutable(tokens[0]);
   const args = tokens.slice(1);
+  const literalArgs = literalTokens.slice(1);
   if (
     executable === "git" &&
     args[0]?.toLowerCase() === "push" &&
@@ -75,11 +81,16 @@ function powerShellSegmentHardlineReason(
   }
   if (
     executable === "stop-process" &&
-    args.some((arg, index) => {
-      const name =
-        /^-name:(.*)$/iu.exec(arg)?.[1] ??
-        (arg.toLowerCase() === "-name" ? args[index + 1] : undefined);
-      return name !== undefined && /^(?:wininit|csrss|lsass|services)(?:\.exe)?$/iu.test(name);
+    literalArgs.some((values, index) => {
+      const arg = values[0] ?? "";
+      const inlineName = /^-name:(.*)$/iu.exec(arg)?.[1];
+      const names =
+        inlineName !== undefined
+          ? [inlineName, ...values.slice(1)]
+          : arg.toLowerCase() === "-name"
+            ? literalArgs[index + 1]
+            : undefined;
+      return names?.some((name) => /^(?:wininit|csrss|lsass|services)(?:\.exe)?$/iu.test(name));
     })
   ) {
     return "destructive_system";
@@ -87,7 +98,7 @@ function powerShellSegmentHardlineReason(
   if (
     executable !== undefined &&
     /^(?:remove-item|del|erase|rd|rmdir|rm)$/u.test(executable) &&
-    args.some((arg) => {
+    literalArgs.flat().some((arg) => {
       const target = arg.replace(/^-(?:literalpath|path):/iu, "").replaceAll("/", "\\");
       return (
         arg === "/" ||
@@ -129,6 +140,8 @@ export function classifyPowerShellCommand(command: string): PowerShellSafetyClas
 
 interface ParsedPowerShellSegment {
   readonly tokens: readonly string[];
+  /** 仅引号外的逗号分隔字面量；native argv 仍使用 tokens。 */
+  readonly literalTokens: readonly (readonly string[])[];
   readonly quotedExecutable: boolean;
 }
 
@@ -151,7 +164,10 @@ function parseConservativeStatements(
 ): ParsedStatements {
   const pipelines: ParsedPowerShellSegment[] = [];
   let tokens: string[] = [];
+  let literalTokens: string[][] = [];
   let token = "";
+  let tokenCommaOffsets: number[] = [];
+  let arrayContinues = false;
   let tokenStarted = false;
   let tokenQuoted = false;
   let quotedExecutable = false;
@@ -161,15 +177,45 @@ function parseConservativeStatements(
   let lineComment = false;
   let blockCommentDepth = 0;
   const nestedClosers: string[] = [];
+  const usesLiteralArrays = (): boolean =>
+    /^(?:stop-process|remove-item|del|erase|rd|rmdir|rm)$/u.test(
+      normalizePowerShellExecutable(tokens[0]) ?? "",
+    );
+  const arrayCommaFollows = (start: number): boolean => {
+    let commentDepth = 0;
+    for (let index = start; index < command.length; index++) {
+      const char = command[index]!;
+      const next = command[index + 1];
+      if (char === "<" && next === "#") {
+        commentDepth++;
+        index++;
+        continue;
+      }
+      if (commentDepth > 0) {
+        if (char === "#" && next === ">") {
+          commentDepth--;
+          index++;
+        }
+        continue;
+      }
+      if (char === "\n" || !/\s/u.test(char)) return char === ",";
+    }
+    return false;
+  };
+  const continuesLiteralArray = (index: number): boolean =>
+    tokenStarted && usesLiteralArrays() && (arrayContinues || arrayCommaFollows(index));
 
   const unsupported = (reason: string, canRecover = true): ParsedStatements | undefined => {
     unsupportedReason ??= reason;
     if (!recoverUnsupported || !canRecover) {
-      if (recoverUnsupported && tokens.length > 0) pipelines.push({ tokens, quotedExecutable });
+      if (recoverUnsupported && tokens.length > 0)
+        pipelines.push({ tokens, literalTokens, quotedExecutable });
       return { kind: "unsupported", reason: unsupportedReason, pipelines };
     }
     // 未完成的 token 可能仍会展开/转义，不能把其静态前缀当成完整 argv。
     token = "";
+    tokenCommaOffsets = [];
+    arrayContinues = false;
     tokenStarted = false;
     tokenQuoted = false;
     skipSegment = true;
@@ -180,7 +226,17 @@ function parseConservativeStatements(
     if (!tokenStarted) return;
     if (tokens.length === 0) quotedExecutable = tokenQuoted;
     tokens.push(token);
+    let start = 0;
+    const values = tokenCommaOffsets.map((offset) => {
+      const value = token.slice(start, offset);
+      start = offset + 1;
+      return value;
+    });
+    values.push(token.slice(start));
+    literalTokens.push(values);
     token = "";
+    tokenCommaOffsets = [];
+    arrayContinues = false;
     tokenStarted = false;
     tokenQuoted = false;
   };
@@ -190,9 +246,10 @@ function parseConservativeStatements(
       const rejection = unsupported("包含空命令或无法确认的 shell 运算符");
       if (rejection) return rejection;
     } else {
-      pipelines.push({ tokens, quotedExecutable });
+      pipelines.push({ tokens, literalTokens, quotedExecutable });
     }
     tokens = [];
+    literalTokens = [];
     quotedExecutable = false;
     skipSegment = false;
     return undefined;
@@ -255,6 +312,7 @@ function parseConservativeStatements(
       if (!skipSegment) {
         tokenStarted = true;
         tokenQuoted = true;
+        arrayContinues = false;
       }
       continue;
     }
@@ -263,7 +321,28 @@ function parseConservativeStatements(
       if (!skipSegment) {
         tokenStarted = true;
         tokenQuoted = true;
+        arrayContinues = false;
       }
+      continue;
+    }
+    if (char === "#" || (char === "<" && next === "#")) {
+      if (char === "#" || !continuesLiteralArray(index)) finishToken();
+      unsupportedReason ??= "包含注释符";
+      if (!recoverUnsupported) return { kind: "unsupported", reason: unsupportedReason, pipelines };
+      // 注释是数据/空白，不吞掉同一语句中注释后的命令或参数。
+      if (char === "#") lineComment = true;
+      else {
+        blockCommentDepth++;
+        index++;
+      }
+      continue;
+    }
+    if ((char === "|" || char === "&") && next === char) {
+      if (nestedClosers.length === 0) finishToken();
+      const rejection = unsupported("包含管道链运算符");
+      if (rejection) return rejection;
+      if (nestedClosers.length === 0) finishSegment();
+      index++;
       continue;
     }
     if (isUnsupportedShellCharacter(char)) {
@@ -274,21 +353,9 @@ function parseConservativeStatements(
         !(char === "@" && (next === "'" || next === '"')),
       );
       if (rejection) return rejection;
-      if (char === "#") lineComment = true;
-      if (char === "<" && next === "#") {
-        blockCommentDepth++;
-        index++;
-      }
       if (char === "`") index++;
       if (char === "(" || char === "{") nestedClosers.push(char === "(" ? ")" : "}");
       if (char === nestedClosers.at(-1)) nestedClosers.pop();
-      continue;
-    }
-    if (char === "|" && next === "|") {
-      // pwsh 7 管道链 || / &&(条件执行),保守拒绝
-      const rejection = unsupported("包含管道链运算符");
-      if (rejection) return rejection;
-      index++;
       continue;
     }
     if (char === ";" || char === "\n") {
@@ -304,12 +371,15 @@ function parseConservativeStatements(
       continue;
     }
     if (/\s/u.test(char)) {
+      if (continuesLiteralArray(index)) continue;
       finishToken();
       continue;
     }
     if (!skipSegment) {
+      if (char === "," && usesLiteralArrays()) tokenCommaOffsets.push(token.length);
       token += char;
       tokenStarted = true;
+      arrayContinues = char === ",";
     }
   }
 
@@ -318,7 +388,7 @@ function parseConservativeStatements(
     if (rejection) return rejection;
   }
   finishToken();
-  if (tokens.length > 0) pipelines.push({ tokens, quotedExecutable });
+  if (tokens.length > 0) pipelines.push({ tokens, literalTokens, quotedExecutable });
   if (unsupportedReason !== undefined)
     return { kind: "unsupported", reason: unsupportedReason, pipelines };
   return { kind: "parsed", pipelines };

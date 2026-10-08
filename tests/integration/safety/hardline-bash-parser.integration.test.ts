@@ -161,6 +161,9 @@ test(
       "/usr/bin/time -o /dev/null /usr/bin/printf ok",
       "cd /etc; printf safe >&2",
       'n=2; cd /etc; printf safe >&"$n"',
+      // A continued physical delimiter is data until the next logical delimiter.
+      "cat <<A <<'B'\nx\\\nA\nB\nrm -rf /etc\nA\nsafe\nB",
+      "cat <<A\nx\\\nA\nrm -rf /etc\nA",
     ])
       assert.equal(kind(command), "no_match", command);
     for (const command of [
@@ -170,8 +173,6 @@ test(
       "python -c 'print(1)' 'rm -rf /'",
       "cat <<-EOF\ndata\n EOF",
       "bash /tmp/safe-script.sh <<'EOF'\nrm -rf /etc\nEOF",
-      "cat <<A <<'B'\nx\\\nA\nB\nrm -rf /etc\nA\nsafe\nB",
-      "cat <<A\nx\\\nA\nrm -rf /etc\nA",
       'p=/etc; printf -v p %s ./safe; rm -f "$p"',
       'p=/etc; printf -vp %s ./safe; rm -f "$p"',
       'p=/etc; command printf -v p %s ./safe; rm -f "$p"',
