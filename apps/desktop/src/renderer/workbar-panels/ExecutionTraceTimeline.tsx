@@ -300,6 +300,13 @@ function StepDetail({
         {step.kind === "permission" ? ` · ${permission(step.permissionDecision)}` : ""}
       </p>
       {step.memory && <MemoryRecallDetail memory={step.memory} />}
+      {step.kind === "model" &&
+        step.purpose === "main" &&
+        step.memoryRecallCoverage !== "recorded" && (
+          <p className="inspector-timeline__warning">
+            召回追踪未记录；无法确认本次记忆选择。请求与执行结果仍按已有事实展示。
+          </p>
+        )}
       {step.goalEvaluation && <GoalEvidenceDetail evaluation={step.goalEvaluation} />}
       {step.compaction && (
         <Detail

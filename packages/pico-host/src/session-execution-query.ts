@@ -655,7 +655,9 @@ function projectRun(
           output: preview(event.data.summary.content),
           compaction: {
             format: String(event.data.summary.providerData?.["picoSummaryFormat"] ?? "未记录"),
-            taskAnchor: event.data.summary.content.includes("当前用户任务（原文）："),
+            taskAnchor: /当前(?:用户任务（原文）| Host Goal 任务（冻结条件）)：/u.test(
+              event.data.summary.content,
+            ),
             evidenceStatus:
               event.data.summary.providerData?.["picoSummaryFormat"] === "sections_v2"
                 ? event.data.summary.providerData?.["picoHandoffEvidence"]
@@ -756,6 +758,11 @@ function projectRun(
     const last = records.at(-1)!;
     steps[index] = {
       ...step,
+      ...(records.some((r) => r.contextFacts?.memoryRecall?.coverage === "unrecorded")
+        ? { memoryRecallCoverage: "unrecorded" as const }
+        : records.every((r) => r.contextFacts?.memoryRecall?.coverage === "recorded")
+          ? { memoryRecallCoverage: "recorded" as const }
+          : {}),
       ...(records.some((r) => r.latencyMs !== undefined)
         ? { durationMs: records.reduce((n, r) => n + (r.latencyMs ?? 0), 0) }
         : {}),

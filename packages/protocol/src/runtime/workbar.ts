@@ -1,4 +1,6 @@
-import { isForegroundProcessFacts, isGoalEvidenceTrace, isMemoryRecallTrace } from "@pico/core";
+import { isForegroundProcessFacts } from "@pico/core/execution-facts";
+import { isGoalEvidenceTrace } from "@pico/core/goal-evidence-trace";
+import { isMemoryRecallTrace } from "@pico/core/memory-recall-contract";
 import type { RuntimeExecutionPage, RuntimeExecutionSummary } from "../execution-trace.js";
 // Session workbar, Git, browser, terminal, and rewind contracts with their boundary rules.
 import type {
@@ -1190,6 +1192,7 @@ const runtimeExecutionStepResult = exactResultShape(
     permissionDecision: resultOneOf(["approved", "rejected"]),
     attempts: resultArray(runtimeExecutionAttemptResult),
     detail: resultString,
+    memoryRecallCoverage: resultOneOf(["recorded", "unrecorded"]),
     input: resultString,
     output: resultString,
     error: resultString,

@@ -394,6 +394,34 @@ test("cancelled Goal evaluator retries remain unsettled and do not duplicate mod
         status: attempt === 0 ? "failed" : "cancelled",
       });
     }
+    const missingRecall = {
+      accountingVersion: 1 as const,
+      accountingSource: "physical" as const,
+      physicalAttemptId: "unrecorded-attempt",
+      providerCallId: "unrecorded-call",
+      logicalCallId: "unrecorded-call",
+      ownerId,
+      sessionId: "session",
+      runId: "run",
+      turnId: "turn",
+      purpose: "main" as const,
+      provider: "test",
+      model: "test",
+      pricingVersion: "test",
+      retryAttempt: 0,
+      attempt: 0,
+      revision: 0,
+      startedAt: "2026-10-09T00:00:00Z",
+      status: "prepared" as const,
+      usageBasis: "missing" as const,
+      costStatus: "unknown" as const,
+      contextFacts: {
+        version: 1 as const,
+        memoryRecall: { version: 1 as const, coverage: "unrecorded" as const, recalls: [] },
+      },
+    };
+    ledger.recordPhysicalAttempt(missingRecall);
+    ledger.recordPhysicalAttempt({ ...missingRecall, revision: 1, status: "succeeded" });
     const page = querySessionExecution(root, { sessionId: "session" });
     parseRuntimeResult("session.execution.query", page);
     const steps = page.runs[0]!.steps;
@@ -402,8 +430,22 @@ test("cancelled Goal evaluator retries remain unsettled and do not duplicate mod
     assert.equal(evaluations[0]!.status, "cancelled");
     assert.equal(evaluations[0]!.goalEvaluation!.settlement, "unsettled");
     assert.equal(evaluations[0]!.goalEvaluation!.met, undefined);
-    assert.equal(page.summary.modelCalls, 1);
-    assert.equal(steps.filter((s) => s.kind === "model").length, 1);
+    assert.equal(page.summary.modelCalls, 2);
+    assert.equal(steps.filter((s) => s.kind === "model").length, 2);
+    assert.equal(steps.filter((s) => s.kind === "memory").length, 0);
+    const missing = steps.find((s) => s.purpose === "main")!;
+    assert.equal(missing.memoryRecallCoverage, "unrecorded");
+    const missingHtml = renderToStaticMarkup(
+      React.createElement(InspectorWorkbarPanel, {
+        trace: [],
+        execution: page,
+        selectedTraceId: missing.id,
+        loading: false,
+        onRefresh() {},
+        onSelectTrace() {},
+      }),
+    );
+    assert.match(missingHtml, /召回追踪未记录/u);
     const html = renderToStaticMarkup(
       React.createElement(InspectorWorkbarPanel, {
         trace: [],

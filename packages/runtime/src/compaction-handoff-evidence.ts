@@ -153,8 +153,11 @@ export function attachCompactionEvidenceSources(
   }
   const block = renderCompactionEvidenceSources(metadata);
   if (!block) return result;
-  const anchor = result.indexOf("\n\n当前用户任务（原文）：", close);
-  const insertAt = anchor >= 0 ? anchor : result.length;
+  const anchor = result
+    .slice(close)
+    .search(/\n\n(?:当前用户任务（原文）|当前 Host Goal 任务（冻结条件）)：/u);
+  const absoluteAnchor = anchor < 0 ? -1 : close + anchor;
+  const insertAt = absoluteAnchor >= 0 ? absoluteAnchor : result.length;
   return `${result.slice(0, insertAt).trimEnd()}\n\n${block}${result.slice(insertAt)}`;
 }
 

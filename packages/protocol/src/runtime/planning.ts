@@ -1,4 +1,4 @@
-import { isGoalEvidenceTrace } from "@pico/core";
+import { isGoalEvidenceTrace } from "@pico/core/goal-evidence-trace";
 import { invalidResult } from "./errors.js";
 import {
   parseGoalConfig,

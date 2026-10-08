@@ -79,6 +79,7 @@ export interface RuntimeExecutionStep {
     | "memory"
     | "goal_evaluation";
   readonly memory?: RuntimeMemoryRecallDetail;
+  readonly memoryRecallCoverage?: "recorded" | "unrecorded";
   readonly goalEvaluation?: RuntimeGoalEvaluationDetail;
   readonly compaction?: RuntimeCompactionDetail;
   readonly executionFacts?: ForegroundProcessFacts;

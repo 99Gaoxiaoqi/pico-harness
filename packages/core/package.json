@@ -7,6 +7,18 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
+    "./execution-facts": {
+      "types": "./dist/execution-facts.d.ts",
+      "import": "./dist/execution-facts.js"
+    },
+    "./goal-evidence-trace": {
+      "types": "./dist/goal-evidence-trace.d.ts",
+      "import": "./dist/goal-evidence-trace.js"
+    },
+    "./memory-recall-contract": {
+      "types": "./dist/memory-recall-contract.d.ts",
+      "import": "./dist/memory-recall-contract.js"
+    },
     "./slash-parser": {
       "types": "./dist/slash-parser.d.ts",
       "import": "./dist/slash-parser.js"

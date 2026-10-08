@@ -193,7 +193,10 @@ function appendTurnTail(
     const suffix = checkpoint.content.slice(end);
     const content =
       checkpoint.content.slice(0, end) +
-      suffix.replace(/\n\n当前用户任务（原文）：\n[\s\S]*$/u, "");
+      suffix.replace(
+        /\n\n(?:当前用户任务（原文）|当前 Host Goal 任务（冻结条件）)：\n[\s\S]*$/u,
+        "",
+      );
     const requestMessages = [...messages];
     requestMessages[checkpointIndex] = {
       ...checkpoint,
