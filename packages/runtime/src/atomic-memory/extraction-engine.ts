@@ -56,6 +56,7 @@ interface Range {
   readonly through: number;
   readonly coverageHash: string;
   readonly historyAfter: number;
+  readonly observation?: { startedAt: number; modelCallCount: number };
 }
 
 type Outcome =
@@ -355,6 +356,7 @@ export class AtomicMemoryExtractionEngine {
   }
 
   private async processRange(range: Range, allowSplit = true): Promise<Outcome> {
+    range = { ...range, observation: { startedAt: performance.now(), modelCallCount: 0 } };
     const { snapshot } = range;
     const entries = snapshot.events.filter(
       (event) => event.ordinal > range.after && event.ordinal <= range.through,
@@ -680,6 +682,8 @@ export class AtomicMemoryExtractionEngine {
       });
       const request: MemoryModelRequest = {
         stage,
+        trigger: range.snapshot.trigger,
+        operationId: range.operationId,
         prompt,
         signal,
         ...(stage === "canonicalize"
@@ -691,6 +695,7 @@ export class AtomicMemoryExtractionEngine {
                 : { sourceTools: range.snapshot.sourceTools }),
             }),
       };
+      if (range.observation) range.observation.modelCallCount += 1;
       const result = await Promise.race([this.options.model.call(request), abort]);
       if (!(await this.allowed(range.snapshot)))
         return { kind: "blocked", reason: "policy_changed" };
@@ -725,6 +730,14 @@ export class AtomicMemoryExtractionEngine {
       items: writes,
       requestedItemIndexes: requestedIndexes,
       trigger: range.snapshot.trigger,
+      ...(range.observation
+        ? {
+            summary: {
+              modelCallCount: range.observation.modelCallCount,
+              durationMs: Math.max(0, Math.round(performance.now() - range.observation.startedAt)),
+            },
+          }
+        : {}),
       ...(range.snapshot.compactionCheckpointId
         ? { compactionCheckpointId: range.snapshot.compactionCheckpointId }
         : {}),
