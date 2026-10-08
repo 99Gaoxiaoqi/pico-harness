@@ -45,4 +45,4 @@ node scripts/eval/atomic-memory-recall-benchmark.mjs
 
 ## 结果
 
-最终验收结果见同目录验收记录。实现和测试在独立集成 worktree 完成；原工作区的既有桌面修改不纳入任务提交。
+最终验收结果见[验收记录](./2026-10-08-memory-acceptance.md)。实现和测试在独立集成 worktree 完成；原工作区的既有桌面修改不纳入任务提交。

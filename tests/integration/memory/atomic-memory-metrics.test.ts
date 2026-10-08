@@ -6,7 +6,9 @@ import { test } from "node:test";
 import type { CommitMemoryExtractionRequest } from "@pico/core/atomic-memory-contracts";
 import { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-store";
 import { DesktopAtomicMemoryService } from "@pico/pico-host/desktop-atomic-memory-service";
-import { parseRuntimeResult } from "@pico/protocol";
+import { createRuntimeRequest, parseRuntimeResult } from "@pico/protocol";
+import { DesktopRuntimeService } from "@pico/pico-host/desktop-runtime-service";
+import { WorkspaceRuntimeService } from "@pico/pico-host/workspace-runtime-service";
 
 test("extraction metrics are user-scoped historical receipts: replay, deletion, old unknown and zero-call settlements", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-memory-metrics-"));
@@ -86,6 +88,27 @@ test("extraction metrics are user-scoped historical receipts: replay, deletion, 
   ).metrics;
   assert.equal(metrics.scope, "user");
   assert.equal(metrics.unknownReceiptCount, 1);
+  const runtime = new WorkspaceRuntimeService({
+    env: { PICO_HOME: root },
+    execute: async () => undefined,
+  });
+  const desktop = new DesktopRuntimeService({
+    runtimeService: runtime,
+    memoryService: service,
+    env: { PICO_HOME: root },
+  });
+  t.after(async () => {
+    await desktop.close();
+    await runtime.close();
+  });
+  assert.deepEqual(
+    parseRuntimeResult(
+      "memory.metrics.get",
+      await desktop.handle(createRuntimeRequest("memory.metrics.get", { from: 0, to: 1500 })),
+    ).metrics,
+    metrics,
+    "the user-level desktop RPC must expose the same receipt metrics without a workspace",
+  );
   assert.deepEqual(metrics.groups, [
     {
       trigger: "extract",
