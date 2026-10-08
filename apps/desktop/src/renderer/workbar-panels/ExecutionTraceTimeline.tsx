@@ -299,6 +299,24 @@ function StepDetail({
         {status(step.status)}
         {step.kind === "permission" ? ` · ${permission(step.permissionDecision)}` : ""}
       </p>
+      {step.memory && <MemoryRecallDetail memory={step.memory} />}
+      {step.goalEvaluation && <GoalEvidenceDetail evaluation={step.goalEvaluation} />}
+      {step.compaction && (
+        <Detail
+          label="压缩交接"
+          value={`格式：${step.compaction.format}\n任务锚：${step.compaction.taskAnchor ? "已保存" : "未记录"}\n来源：${step.compaction.evidenceStatus === "verified" ? "提交时已校验引用完整性" : step.compaction.evidenceStatus === "unknown" ? "旧记录未保存来源证明" : "来源不可用"}\n${step.compaction.evidenceIds.join("\n")}\n引用完整性不等于摘要结论正确。`}
+        />
+      )}
+      {step.kind === "tool" && (
+        <Detail
+          label="进程事实"
+          value={
+            step.executionFacts
+              ? `退出码：${step.executionFacts.exitCode ?? "未知"}\n信号：${step.executionFacts.terminationSignal ?? "无"}\n超时：${step.executionFacts.timedOut ? "是" : "否"}\n输出不完整：${step.executionFacts.outputIncomplete ? "是" : "否"}\n启动失败：${step.executionFacts.spawnFailed ? "是" : "否"}`
+              : "未记录；调用完成不代表命令通过。"
+          }
+        />
+      )}
       {step.truncated && <p className="inspector-timeline__warning">内容已截断</p>}
       {step.input !== undefined && <Detail label="输入" value={step.input} />}
       {step.output !== undefined && <Detail label="输出" value={step.output} />}
@@ -612,6 +630,8 @@ function kind(value: RuntimeExecutionStep["kind"]) {
     permission: "批准",
     compaction: "上下文压缩",
     error: "错误",
+    memory: "记忆召回",
+    goal_evaluation: "Goal 证据验收",
   }[value];
 }
 function permission(value: RuntimeExecutionStep["permissionDecision"]) {
@@ -656,4 +676,154 @@ function runReason(run: RuntimeExecutionRun, includeDiagnostic = false) {
   if (run.status === "completed" || run.status === "running") return undefined;
   const raw = run.reason ?? run.steps.find((step) => step.status === "failed" && step.error)?.error;
   return raw ? displayExecutionError(raw, includeDiagnostic) : undefined;
+}
+
+function MemoryRecallDetail({ memory }: { memory: NonNullable<RuntimeExecutionStep["memory"]> }) {
+  const t = memory.trace;
+  const labels = {
+    selected: "已选中",
+    no_hits: "零命中",
+    budget_exhausted: "预算耗尽",
+    disabled: "已禁用",
+    admission_denied: "准入拒绝",
+    error: "构建失败",
+  };
+  const states = {
+    unchanged: "当前版本一致",
+    changed: "当前版本已变化",
+    archived: "已归档",
+    deleted: "已删除",
+    unknown: "状态未知",
+  };
+  return (
+    <section aria-label="记忆召回诊断">
+      <p>
+        {labels[t.outcome]} · {t.budget.usedItems}/{t.budget.maxItems} 条 · {t.budget.usedTokens}/
+        {t.budget.maxTokens} tokens · {Math.round(t.elapsedMs)} ms
+      </p>
+      <p>
+        匹配：精确 {t.stages.exact}、前缀 {t.stages.prefix}、正文 {t.stages.content}、中文补充{" "}
+        {t.stages.compound}；合并候选 {t.stages.candidates}。
+      </p>
+      <p>
+        淘汰：重复 {t.counts.duplicate}、预算 {t.counts.budget}、条数 {t.counts.item_limit}。
+      </p>
+      {t.outcome === "no_hits" && <p>零命中只能说明本次检索未选中，不能确认记忆未保存。</p>}
+      {t.traceTruncated && (
+        <p>
+          诊断已裁剪：省略 {t.omittedDiagnosticCount} 个样本和 {t.omittedSourceCount} 个来源指针。
+        </p>
+      )}
+      <ul>
+        {t.selected.map((item) => {
+          const current = memory.items.find((i) => i.itemId === item.itemId);
+          return (
+            <li key={item.itemId}>
+              {current?.linkAvailable ? (
+                <a href={`/memory#memory-${encodeURIComponent(item.itemId)}`}>{item.itemId}</a>
+              ) : (
+                item.itemId
+              )}{" "}
+              · v{item.itemVersion} · {current ? states[current.state] : "状态未知"}
+              <p>
+                {item.match} · {item.source} · 来源 {item.sourceCount} · 原文区间 {item.range.start}
+                –{item.range.end}/{item.range.total}
+                {item.excerpt ? "（摘录）" : ""}
+              </p>
+              <details>
+                <summary>身份与 hash</summary>
+                <Detail label="正文 hash" value={item.contentHash} />
+                <Detail label="引用 hash" value={item.referenceHash} />
+              </details>
+            </li>
+          );
+        })}
+      </ul>
+      {memory.sources.length > 0 && (
+        <ul>
+          {memory.sources.map((source, index) => (
+            <li key={`${source.eventId}-${index}`}>
+              {source.available ? (
+                <a href={`/session/${encodeURIComponent(source.sessionId)}`}>{source.eventId}</a>
+              ) : (
+                `${source.eventId} · 来源不可用`
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {memory.requests.length ? (
+        <ul>
+          {memory.requests.map((request) => (
+            <li key={request.attemptId}>
+              {request.evidenceLevel === "assembly_unrecorded"
+                ? "装配证据未记录"
+                : request.evidenceLevel === "response_observed"
+                  ? "响应已观测"
+                  : "请求已装配"}{" "}
+              · {request.attemptId}
+              <p>
+                {t.selected.length
+                  ? `原始引用仍存在 ${request.referencePresentCount}/${request.referenceCount}；引用块${request.blockPresent === true ? "存在" : request.blockPresent === false ? "不存在" : "未记录"}。`
+                  : "本次只关联检索，没有记忆引用块。"}
+              </p>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p>本地结果已记录；最终请求装配证据未记录。</p>
+      )}
+      <p>当前正文不能替代召回时正文；响应成功不代表模型正确使用记忆。</p>
+    </section>
+  );
+}
+function GoalEvidenceDetail({
+  evaluation,
+}: {
+  evaluation: NonNullable<RuntimeExecutionStep["goalEvaluation"]>;
+}) {
+  const trace = evaluation.evidenceTrace;
+  return (
+    <section aria-label="Goal 执行证据">
+      <Detail label="目标" value={evaluation.condition} />
+      <p>
+        {evaluation.evaluatorFailed
+          ? "验收输出不合格"
+          : evaluation.met
+            ? "目标达成"
+            : "目标尚未达成"}
+        ：{evaluation.reason}
+      </p>
+      {!trace ? (
+        <p>未记录执行证据。</p>
+      ) : (
+        <>
+          <p>
+            证据覆盖：
+            {trace.coverage === "complete"
+              ? "完整"
+              : trace.coverage === "limited"
+                ? "有遗漏或截断"
+                : "不可用"}{" "}
+            · 来源 Run {trace.sourceRunId} · 水位 {trace.identity.throughSequence}
+          </p>
+          {trace.gateReason && <Detail label="门禁原因" value={trace.gateReason} />}
+          <ul>
+            {trace.providedEvidence.map((evidence) => (
+              <li key={evidence.eventId}>
+                {trace.citedEvidenceIds.includes(evidence.eventId) ? "已引用" : "已提供"} ·{" "}
+                {evidence.eventId} · {evidence.kind}
+                {evidence.status ? ` · ${evidence.status}` : ""}
+                {evidence.truncated ? " · 已截断" : ""}
+                <details>
+                  <summary>来源 hash / 大小</summary>
+                  {evidence.sha256 ?? "未记录"} · {evidence.sizeBytes} bytes
+                </details>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </section>
+  );
 }

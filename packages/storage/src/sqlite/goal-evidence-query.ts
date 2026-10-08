@@ -93,7 +93,7 @@ export function readGoalEvidenceRunSlice(
       };
     });
   const messagePredicate =
-    "kind='message.committed' AND json_extract(payload_json,'$.data.message.role') IN ('user','assistant') AND json_extract(payload_json,'$.data.message.toolCallId') IS NULL AND coalesce(json_extract(payload_json,'$.data.message.providerData.picoHiddenFromTranscript'),0)!=1";
+    "kind='message.committed' AND json_extract(payload_json,'$.data.message.role') IN ('user','assistant') AND json_extract(payload_json,'$.data.message.toolCallId') IS NULL AND coalesce(json_array_length(json_extract(payload_json,'$.data.message.toolCalls')),0)=0 AND coalesce(json_extract(payload_json,'$.data.message.providerData.picoHiddenFromTranscript'),0)!=1";
   const message = (r: Record<string, unknown>): GoalEvidenceMessage => ({
     eventId: String(r["event_id"]),
     sequence: Number(r["event_seq"]),
@@ -121,7 +121,7 @@ export function readGoalEvidenceRunSlice(
     return message(r);
   });
   const mutationPredicate =
-    "kind='tool.started' AND lower(json_extract(payload_json,'$.data.toolName')) NOT IN ('read_file','grep','glob','list_files','memory_search','memory_get','search','read_tool_result','read_tool_result_archive')";
+    "kind IN ('tool.started','tool.result.recorded') AND lower(json_extract(payload_json,'$.data.toolName')) NOT IN ('read_file','grep','glob','list_files','memory_search','memory_get','search','read_tool_result','read_tool_result_archive')";
   const potentialMutations = rows(
     `SELECT event_id,event_seq,json_extract(payload_json,'$.data.toolName') AS tool_name ${base} AND ${mutationPredicate} ORDER BY event_seq DESC LIMIT 12`,
     sessionId,

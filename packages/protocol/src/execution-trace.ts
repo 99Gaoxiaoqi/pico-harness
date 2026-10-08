@@ -1,3 +1,41 @@
+import type { ForegroundProcessFacts, GoalEvidenceTrace, MemoryRecallTrace } from "@pico/core";
+
+export interface RuntimeMemoryRecallDetail {
+  readonly trace: MemoryRecallTrace;
+  readonly items: readonly {
+    readonly itemId: string;
+    readonly state: "unchanged" | "changed" | "archived" | "deleted" | "unknown";
+    readonly linkAvailable: boolean;
+  }[];
+  readonly sources: readonly {
+    readonly eventId: string;
+    readonly sessionId: string;
+    readonly available: boolean;
+  }[];
+  readonly requests: readonly {
+    readonly attemptId: string;
+    readonly providerCallId: string;
+    readonly evidenceLevel: "prepared" | "response_observed" | "assembly_unrecorded";
+    readonly blockPresent?: boolean;
+    readonly referenceCount: number;
+    readonly referencePresentCount: number;
+  }[];
+}
+export interface RuntimeGoalEvaluationDetail {
+  readonly goalId: string;
+  readonly condition: string;
+  readonly reason: string;
+  readonly met?: boolean;
+  readonly evaluatorFailed?: boolean;
+  readonly evidenceTrace?: GoalEvidenceTrace;
+}
+export interface RuntimeCompactionDetail {
+  readonly format: string;
+  readonly taskAnchor: boolean;
+  readonly evidenceStatus: "verified" | "unknown" | "unavailable";
+  readonly evidenceIds: readonly string[];
+}
+
 export interface RuntimeExecutionAttempt {
   readonly attemptId: string;
   readonly attempt: number;
@@ -31,7 +69,18 @@ export interface RuntimeExecutionStep {
   readonly id: string;
   readonly eventId: string;
   readonly turnId: string;
-  readonly kind: "model" | "tool" | "permission" | "compaction" | "error";
+  readonly kind:
+    | "model"
+    | "tool"
+    | "permission"
+    | "compaction"
+    | "error"
+    | "memory"
+    | "goal_evaluation";
+  readonly memory?: RuntimeMemoryRecallDetail;
+  readonly goalEvaluation?: RuntimeGoalEvaluationDetail;
+  readonly compaction?: RuntimeCompactionDetail;
+  readonly executionFacts?: ForegroundProcessFacts;
   readonly title: string;
   readonly at: string;
   readonly status: "running" | "completed" | "failed" | "cancelled" | "interrupted";

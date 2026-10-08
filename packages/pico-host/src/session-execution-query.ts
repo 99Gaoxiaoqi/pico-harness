@@ -1,4 +1,4 @@
-import type { Usage } from "@pico/core";
+import { type MemoryRecallTrace, type Usage } from "@pico/core";
 import { DatabaseSync } from "node:sqlite";
 import { operationalDatabasePath, type PhysicalAttemptRecord } from "@pico/storage";
 import { decodeRuntimeEventJson, type RuntimeEvent } from "@pico/storage/runtime-event";
@@ -25,6 +25,7 @@ type Row = { run_id: string; event_seq: number; payload_json: string };
 export function querySessionExecution(
   storageRoot: string,
   input: { sessionId: string; cursor?: string; runId?: string },
+  options?: { memoryDatabasePath: string; workspaceKey: string },
 ): RuntimeExecutionPage {
   if (!input.sessionId || (input.cursor !== undefined && input.runId !== undefined))
     throw new RuntimeProtocolError("INVALID_PARAMS", "Invalid execution query");
@@ -121,8 +122,17 @@ export function querySessionExecution(
           `SELECT count(*) AS count, coalesce(sum(length(CAST(record_json AS BLOB))),0) AS bytes FROM (${physicalRowsSql()}) WHERE session_id=? AND run_id=?`,
         )
         .get(input.sessionId, opening.run_id)!;
-      const totalCount = Number(size.count) + Number(physicalSize.count);
-      const totalBytes = Number(size.bytes) + Number(physicalSize.bytes);
+      const goalRows = db
+        .prepare(
+          `SELECT payload_json FROM runtime_events WHERE session_id=? AND kind='session.state.committed' AND event_seq<=? AND json_extract(payload_json,'$.data.patch.goal.currentGoal.lastEvaluation.evidenceTrace.sourceRunId')=? AND event_seq IN (SELECT max(event_seq) FROM runtime_events WHERE session_id=? AND kind='session.state.committed' AND event_seq<=? GROUP BY json_extract(payload_json,'$.data.patch.goal.currentGoal.lastEvaluation.evidenceTrace.traceId')) ORDER BY event_seq LIMIT 32`,
+        )
+        .all(input.sessionId, cursor.watermark, opening.run_id, input.sessionId, cursor.watermark);
+      const goalBytes = goalRows.reduce(
+        (n, row) => n + Buffer.byteLength(String(row.payload_json)),
+        0,
+      );
+      const totalCount = Number(size.count) + Number(physicalSize.count) + goalRows.length;
+      const totalBytes = Number(size.bytes) + Number(physicalSize.bytes) + goalBytes;
       if (totalCount > 4096 || totalBytes > 512 * 1024 || Number(physicalSize.count) > 128) {
         oversizedRunIds.push(opening.run_id);
         consumed++;
@@ -137,14 +147,23 @@ export function querySessionExecution(
           "SELECT payload_json FROM runtime_events WHERE session_id = ? AND run_id = ? AND event_seq <= ? ORDER BY event_seq",
         )
         .all(input.sessionId, opening.run_id, cursor.watermark);
-      const events = rows.map((row) => decodeRuntimeEventJson(String(row.payload_json)));
+      const events = [...rows, ...goalRows].map((row) =>
+        decodeRuntimeEventJson(String(row.payload_json)),
+      );
       const physical = readRunPhysicalAttempts(db, input.sessionId, opening.run_id);
       if (physical.length > 128) {
         oversizedRunIds.push(opening.run_id);
         consumed++;
         continue;
       }
-      const run = projectRun(events, decodeRuntimeEventJson(opening.payload_json), physical);
+      let run = projectRun(events, decodeRuntimeEventJson(opening.payload_json), physical);
+      run = {
+        ...run,
+        steps: run.steps.map((step) =>
+          step.memory ? { ...step, memory: resolveRecallState(step.memory, db, options) } : step,
+        ),
+      };
+      run = trimRunDetails(run, MAX_BYTES - Buffer.byteLength(JSON.stringify(page)) - 4096);
       runs.push(run);
       if (Buffer.byteLength(JSON.stringify(page)) > MAX_BYTES - 4096) {
         runs.pop();
@@ -205,7 +224,7 @@ function summary(
   const row = db
     .prepare(
       `WITH physical AS MATERIALIZED (
-    SELECT provider_call_id, run_id, json_remove(record_json,'$.requestDiagnostic') AS record_json,
+    SELECT provider_call_id, run_id, json_set(json_remove(record_json,'$.requestDiagnostic'),'$.requestDiagnostic',json_object('memoryRecall',json_extract(record_json,'$.requestDiagnostic.memoryRecall'))) AS record_json,
       CASE WHEN json_extract(record_json,'$.status') IN ('prepared','observed')
         THEN 'pending' ELSE json_extract(record_json,'$.usageBasis') END AS usage_state
     FROM usage_physical_attempts
@@ -514,6 +533,7 @@ function projectRun(
                 : event.data.status,
           durationMs: elapsed(steps[i]!.at, event.at),
           output: preview(output),
+          ...(event.data.executionFacts ? { executionFacts: event.data.executionFacts } : {}),
           truncated:
             !!steps[i]!.truncated ||
             output.length > 800 ||
@@ -534,10 +554,117 @@ function projectRun(
         });
         break;
       }
+      case "memory.recall.recorded": {
+        const i = add(
+          event,
+          "memory",
+          event.data.mode === "automatic" ? "自动记忆召回" : "主动记忆搜索",
+          "completed",
+        );
+        const requests = physical.flatMap((record) => {
+          const recalls = record.contextFacts?.memoryRecall?.recalls ?? [];
+          if (!recalls.some((r) => r.recallEventId === event.eventId)) return [];
+          const raw = record.requestDiagnostic as
+            | {
+                memoryRecall?: {
+                  recalls?: {
+                    recallEventId: string;
+                    blockPresent?: boolean;
+                    references: { present: boolean }[];
+                  }[];
+                };
+              }
+            | undefined;
+          const assembly = raw?.memoryRecall?.recalls?.find(
+            (r) => r.recallEventId === event.eventId,
+          );
+          const observed =
+            record.httpStatus !== undefined ||
+            record.status === "succeeded" ||
+            record.status === "observed";
+          return [
+            {
+              attemptId: record.physicalAttemptId,
+              providerCallId: record.providerCallId,
+              evidenceLevel: assembly
+                ? observed
+                  ? ("response_observed" as const)
+                  : ("prepared" as const)
+                : ("assembly_unrecorded" as const),
+              ...(assembly?.blockPresent !== undefined
+                ? { blockPresent: assembly.blockPresent }
+                : {}),
+              referenceCount: event.data.selected.length,
+              referencePresentCount: assembly?.references.filter((r) => r.present).length ?? 0,
+            },
+          ];
+        });
+        update(i, {
+          detail: event.data.outcome,
+          memory: {
+            trace: event.data,
+            items: event.data.selected.map((item) => ({
+              itemId: item.itemId,
+              state: "unknown" as const,
+              linkAvailable: false,
+            })),
+            sources: [],
+            requests,
+          },
+        });
+        break;
+      }
+      case "session.state.committed": {
+        const goal = event.data.patch.goal?.currentGoal;
+        const evaluation = goal?.lastEvaluation;
+        const trace = evaluation?.evidenceTrace;
+        if (
+          !goal ||
+          !evaluation ||
+          !trace ||
+          trace.sourceRunId !== opening.runId ||
+          steps.some((s) => s.id === trace.traceId)
+        )
+          break;
+        const i = add(
+          event,
+          "goal_evaluation",
+          "Goal 证据验收",
+          evaluation.evaluatorFailed ? "failed" : "completed",
+        );
+        update(i, {
+          id: trace.traceId,
+          turnId: trace.identity.turnId,
+          goalEvaluation: {
+            goalId: goal.id,
+            condition: goal.condition,
+            reason: evaluation.reason,
+            ...(evaluation.met !== undefined ? { met: evaluation.met } : {}),
+            ...(evaluation.evaluatorFailed !== undefined
+              ? { evaluatorFailed: evaluation.evaluatorFailed }
+              : {}),
+            evidenceTrace: trace,
+          },
+        });
+        break;
+      }
       case "context.checkpoint.recorded": {
         const i = add(event, "compaction", "上下文压缩", "completed");
         update(i, {
           output: preview(event.data.summary.content),
+          compaction: {
+            format: String(event.data.summary.providerData?.["picoSummaryFormat"] ?? "未记录"),
+            taskAnchor: event.data.summary.content.includes("当前用户任务（原文）："),
+            evidenceStatus:
+              event.data.summary.providerData?.["picoSummaryFormat"] === "sections_v2"
+                ? event.data.summary.providerData?.["picoHandoffEvidence"]
+                  ? "verified"
+                  : "unavailable"
+                : "unknown",
+            evidenceIds: handoffEvidenceIds(
+              event.data.summary.providerData?.["picoHandoffEvidence"],
+            ),
+          },
           truncated: event.data.summary.content.length > 800,
         });
         break;
@@ -622,7 +749,7 @@ function elapsed(start: string, end: string): number {
 }
 
 function physicalRowsSql(): string {
-  return "SELECT provider_call_id, session_id, run_id, json_remove(record_json,'$.requestDiagnostic') AS record_json FROM usage_physical_attempts WHERE json_extract(record_json,'$.accountingSource')='physical'";
+  return "SELECT provider_call_id, session_id, run_id, json_set(json_remove(record_json,'$.requestDiagnostic'),'$.requestDiagnostic',json_object('memoryRecall',json_extract(record_json,'$.requestDiagnostic.memoryRecall'))) AS record_json FROM usage_physical_attempts WHERE json_extract(record_json,'$.accountingSource')='physical'";
 }
 function readRunPhysicalAttempts(
   db: DatabaseSync,
@@ -655,4 +782,94 @@ function errorPreview(value: string): string {
   )
     return value;
   return preview(value);
+}
+
+function handoffEvidenceIds(value: unknown): string[] {
+  if (!value || typeof value !== "object") return [];
+  const references = (value as { references?: unknown }).references;
+  return Array.isArray(references)
+    ? references
+        .flatMap((r) =>
+          r && typeof r === "object" && typeof r.eventId === "string" ? [r.eventId] : [],
+        )
+        .slice(0, 64)
+    : [];
+}
+function resolveRecallState(
+  memory: NonNullable<RuntimeExecutionStep["memory"]>,
+  db: DatabaseSync,
+  options?: { memoryDatabasePath: string; workspaceKey: string },
+): NonNullable<RuntimeExecutionStep["memory"]> {
+  let memoryDb: DatabaseSync | undefined;
+  try {
+    if (options) memoryDb = new DatabaseSync(options.memoryDatabasePath, { readOnly: true });
+    const items = memory.trace.selected.map((item) => {
+      let state: NonNullable<RuntimeExecutionStep["memory"]>["items"][number]["state"] = "unknown",
+        linkAvailable = false;
+      if (memoryDb && options) {
+        const row = memoryDb
+          .prepare(
+            "SELECT version,content_hash,lifecycle_state,scope_type,scope_key FROM memory_items WHERE item_id=?",
+          )
+          .get(item.itemId);
+        if (!row) state = "deleted";
+        else if (row.scope_type === "global" || row.scope_key === options.workspaceKey) {
+          state =
+            row.lifecycle_state === "archived"
+              ? "archived"
+              : row.version !== item.itemVersion || row.content_hash !== item.contentHash
+                ? "changed"
+                : "unchanged";
+          linkAvailable = true;
+        }
+      }
+      return { itemId: item.itemId, state, linkAvailable };
+    });
+    const sources = memory.trace.selected.flatMap((item) =>
+      item.sources.map((source) => ({
+        eventId: source.eventId,
+        sessionId: source.sessionId,
+        available: !!db
+          .prepare(
+            "SELECT 1 FROM runtime_events WHERE session_id=? AND event_id=? AND run_id=? AND json_extract(payload_json,'$.turnId')=?",
+          )
+          .get(source.sessionId, source.eventId, source.runId, source.turnId),
+      })),
+    );
+    return { ...memory, items, sources };
+  } catch {
+    return memory;
+  } finally {
+    memoryDb?.close();
+  }
+}
+function trimRunDetails(run: RuntimeExecutionRun, budget: number): RuntimeExecutionRun {
+  if (Buffer.byteLength(JSON.stringify(run)) <= budget) return run;
+  const steps = run.steps.map((step) => {
+    if (!step.memory) return step;
+    const original = step.memory.trace;
+    const trace: MemoryRecallTrace = {
+      ...original,
+      selected: original.selected.map((i) => ({ ...i, sources: [] })),
+      diagnostics: [],
+      omittedDiagnosticCount: original.omittedDiagnosticCount + original.diagnostics.length,
+      omittedSourceCount:
+        original.omittedSourceCount + original.selected.reduce((n, i) => n + i.sources.length, 0),
+      traceTruncated: true,
+    };
+    return {
+      ...step,
+      truncated: true,
+      memory: { ...step.memory, trace, sources: [], requests: step.memory.requests.slice(0, 8) },
+    };
+  });
+  if (Buffer.byteLength(JSON.stringify({ ...run, steps })) <= budget) return { ...run, steps };
+  return {
+    ...run,
+    steps: steps.map((step) => ({
+      ...step,
+      ...(step.output ? { output: step.output.slice(0, 200), truncated: true } : {}),
+      ...(step.input ? { input: step.input.slice(0, 200), truncated: true } : {}),
+    })),
+  };
 }

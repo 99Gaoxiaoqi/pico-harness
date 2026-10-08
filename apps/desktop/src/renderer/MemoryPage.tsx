@@ -290,7 +290,12 @@ export function MemoryPage({
     groups[panel].length ? (
       <div className="memory-list" role="list">
         {groups[panel].map((item) => (
-          <article className="memory-card" role="listitem" key={item.itemId}>
+          <article
+            className="memory-card"
+            role="listitem"
+            key={item.itemId}
+            id={`memory-${encodeURIComponent(item.itemId)}`}
+          >
             <header className="memory-card__meta">
               <span>{kindLabels[item.kind]}</span>
               <span>{item.scopeType === "global" ? "全局 · 跨工作区" : "当前工作区"}</span>

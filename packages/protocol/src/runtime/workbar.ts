@@ -1,3 +1,4 @@
+import { isForegroundProcessFacts, isGoalEvidenceTrace, isMemoryRecallTrace } from "@pico/core";
 import type { RuntimeExecutionPage, RuntimeExecutionSummary } from "../execution-trace.js";
 // Session workbar, Git, browser, terminal, and rewind contracts with their boundary rules.
 import type {
@@ -9,7 +10,7 @@ import type {
   SessionId,
   WorkspaceParams,
 } from "./base.js";
-import { invalidParams } from "./errors.js";
+import { invalidParams, invalidResult } from "./errors.js";
 import {
   booleanParam,
   boundedNonEmptyStringParam,
@@ -1104,17 +1105,78 @@ const runtimeExecutionAttemptResult = exactResultShape(
     costUnknownReason: resultString,
   },
 );
+const memoryRecallDetailResult = exactResultShape({
+  trace: (value, path) => {
+    if (!isMemoryRecallTrace(value)) throw invalidResult(`${path} 召回追踪无效`);
+  },
+  items: resultArray(
+    exactResultShape({
+      itemId: resultNonEmptyString,
+      state: resultOneOf(["unchanged", "changed", "archived", "deleted", "unknown"]),
+      linkAvailable: resultBoolean,
+    }),
+  ),
+  sources: resultArray(
+    exactResultShape({
+      eventId: resultNonEmptyString,
+      sessionId: resultNonEmptyString,
+      available: resultBoolean,
+    }),
+  ),
+  requests: resultArray(
+    exactResultShape(
+      {
+        attemptId: resultNonEmptyString,
+        providerCallId: resultNonEmptyString,
+        evidenceLevel: resultOneOf(["prepared", "response_observed", "assembly_unrecorded"]),
+        referenceCount: resultNonNegativeInteger,
+        referencePresentCount: resultNonNegativeInteger,
+      },
+      { blockPresent: resultBoolean },
+    ),
+  ),
+});
+const goalEvaluationDetailResult = exactResultShape(
+  { goalId: resultNonEmptyString, condition: resultString, reason: resultString },
+  {
+    met: resultBoolean,
+    evaluatorFailed: resultBoolean,
+    evidenceTrace: (value, path) => {
+      if (!isGoalEvidenceTrace(value)) throw invalidResult(`${path} 验收证据无效`);
+    },
+  },
+);
+const compactionDetailResult = exactResultShape({
+  format: resultString,
+  taskAnchor: resultBoolean,
+  evidenceStatus: resultOneOf(["verified", "unknown", "unavailable"]),
+  evidenceIds: resultStringArray,
+});
 const runtimeExecutionStepResult = exactResultShape(
   {
     id: resultNonEmptyString,
     eventId: resultNonEmptyString,
     turnId: resultString,
-    kind: resultOneOf(["model", "tool", "permission", "compaction", "error"]),
+    kind: resultOneOf([
+      "model",
+      "tool",
+      "permission",
+      "compaction",
+      "error",
+      "memory",
+      "goal_evaluation",
+    ]),
     title: resultString,
     at: resultString,
     status: executionStatus,
   },
   {
+    memory: memoryRecallDetailResult,
+    goalEvaluation: goalEvaluationDetailResult,
+    compaction: compactionDetailResult,
+    executionFacts: (value, path) => {
+      if (!isForegroundProcessFacts(value)) throw invalidResult(`${path} 过程事实无效`);
+    },
     durationMs: resultFiniteNumber,
     purpose: resultString,
     providerId: resultString,
