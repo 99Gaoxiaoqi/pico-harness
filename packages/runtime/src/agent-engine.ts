@@ -1,3 +1,5 @@
+import { COMPACTION_SUMMARY_CLOSE_TAG, type RequestContextFacts } from "@pico/core";
+import { isValidStoredCompactionSummary } from "./history-compact-summary-validation.js";
 // 主 Agent 调度：Session/Runtime 生命周期、模型轮次、工具提交与共享预算。
 // 主代理、独立 Session 子代理与 Hook verifier 共享相同的上下文策略。
 
@@ -145,16 +147,41 @@ function latestVisibleUserInput(messages: readonly Message[]): string {
   );
 }
 
-function appendTurnTail(messages: Message[], turnTail: string): Message[] {
+function appendTurnTail(messages: Message[], turnTail: string, taskAnchor?: Message): Message[] {
   const normalizedTail = turnTail.trim();
-  if (!normalizedTail) return messages;
+
   const currentUserIndex = messages.findLastIndex(
     (message) =>
       message.role === "user" &&
       message.toolCallId === undefined &&
       message.providerData?.["picoHiddenFromTranscript"] !== true,
   );
-  if (currentUserIndex < 0) return messages;
+  if (currentUserIndex < 0) {
+    const checkpointIndex = messages.findLastIndex(
+      (message) =>
+        message.role === "assistant" &&
+        isValidStoredCompactionSummary(
+          message.content,
+          message.providerData?.["picoSummaryFormat"],
+        ),
+    );
+    if (checkpointIndex < 0 || !taskAnchor) throw new Error("任务上下文载体不可用");
+    const checkpoint = messages[checkpointIndex]!;
+    const end =
+      checkpoint.content.indexOf(COMPACTION_SUMMARY_CLOSE_TAG) +
+      COMPACTION_SUMMARY_CLOSE_TAG.length;
+    const suffix = checkpoint.content.slice(end);
+    const content = suffix.trimStart().startsWith("当前用户任务（原文）：")
+      ? checkpoint.content.slice(0, end)
+      : checkpoint.content;
+    const requestMessages = [...messages];
+    requestMessages[checkpointIndex] = {
+      ...checkpoint,
+      content: `${content}\n\n<current-turn-context source="host_projection">\n<current-task-anchor>\n${taskAnchor.content}\n</current-task-anchor>\n${normalizedTail}\n</current-turn-context>`,
+    };
+    return requestMessages;
+  }
+  if (!normalizedTail) return messages;
 
   const currentUser = messages[currentUserIndex]!;
   const requestMessages = [...messages];
@@ -305,7 +332,13 @@ export interface AgentEngineOptions {
    * precedence over systemPromptFactory.
    */
   promptLayersFactory?:
-    | ((input: { readonly currentUserPrompt: string }) => Promise<PromptLayers>)
+    | ((input: {
+        readonly currentUserPrompt: string;
+        readonly currentUserEventId?: string;
+      }) => Promise<PromptLayers>)
+    | undefined;
+  memoryRecallContext?:
+    | ((messages: readonly Message[]) => Promise<RequestContextFacts["memoryRecall"]>)
     | undefined;
   /**
    * 当前模型的原生思考档位。
@@ -449,6 +482,8 @@ export class AgentEngine {
   private readonly omittedHistoricalImages = new Set<string>();
   private readonly historicalImageKeys = new Set<string>();
   private currentTaskAnchor: Message | undefined;
+  private currentUserEventId: string | undefined;
+  private readonly memoryRecallContext: AgentEngineOptions["memoryRecallContext"];
   private acceptedHistoryPrefixCount: number | undefined;
   private readonly memoryHooks: AgentEngineOptions["memoryHooks"];
   private readonly maxTurns: number;
@@ -510,6 +545,7 @@ export class AgentEngine {
         "You have tools to read, write, edit files and run bash. Think step by step.";
     this.systemPromptFactory = opts.systemPromptFactory;
     this.promptLayersFactory = opts.promptLayersFactory;
+    this.memoryRecallContext = opts.memoryRecallContext;
     this.thinkingEffort = opts.thinkingEffort ?? "off";
     this.modelRouteId = opts.modelRouteId;
     this.contextBudget = opts.contextBudget;
@@ -572,7 +608,10 @@ export class AgentEngine {
     signal?: AbortSignal,
   ): Promise<PromptLayers> {
     if (this.promptLayersFactory) {
-      return this.promptLayersFactory({ currentUserPrompt });
+      return this.promptLayersFactory({
+        currentUserPrompt,
+        ...(this.currentUserEventId ? { currentUserEventId: this.currentUserEventId } : {}),
+      });
     }
     if (this.systemPromptFactory) {
       return {
@@ -740,6 +779,7 @@ export class AgentEngine {
     const context = appendTurnTail(
       sanitizeToolPairs([{ role: "system", content: systemPrompt }, ...rawHistory]),
       turnTail,
+      this.currentTaskAnchor,
     );
 
     const projected = context.map((message) => {
@@ -862,6 +902,12 @@ export class AgentEngine {
       const compaction = runtimeRun?.claimsSession(session)
         ? await runtimeRun.readContextCompactionBoundary()
         : undefined;
+      let memoryRecall: RequestContextFacts["memoryRecall"];
+      try {
+        memoryRecall = await this.memoryRecallContext?.(context);
+      } catch {
+        memoryRecall = { version: 1, coverage: "unrecorded", recalls: [] };
+      }
       const response = await generateWithRetry(
         providerForReporter(this.provider, streamReporter, signal),
         context,
@@ -881,7 +927,11 @@ export class AgentEngine {
             ? { promptCacheShardActive: promptCacheRequest.active }
             : {}),
           logger: this.diagnostics,
-          contextFacts: { version: 1, ...(compaction ? { compaction } : {}) },
+          contextFacts: {
+            version: 1,
+            ...(compaction ? { compaction } : {}),
+            ...(memoryRecall ? { memoryRecall: structuredClone(memoryRecall) } : {}),
+          },
           ...requestOptions,
         },
       );
@@ -1149,12 +1199,27 @@ export class AgentEngine {
     );
 
     const runHistory = await this.readModelHistory(session);
-    const currentUserPrompt = latestVisibleUserInput(runHistory);
+    const anchorRun = this.runtimePort?.currentRun();
+    const rawHistory = anchorRun?.claimsSession(session)
+      ? await anchorRun.readSessionProjectionEntries()
+      : undefined;
+    const originalUser = rawHistory?.findLast(
+      (entry) =>
+        entry.message.role === "user" &&
+        !entry.message.toolCallId &&
+        entry.message.providerData?.["picoHiddenFromTranscript"] !== true,
+    );
+    const currentUserPrompt = originalUser?.message.content ?? latestVisibleUserInput(runHistory);
+    this.currentUserEventId = originalUser?.eventId;
     const taskIndex = runHistory.findLastIndex(
       (message) =>
         message.role === "user" && !message.toolCallId && message.content === currentUserPrompt,
     );
-    this.currentTaskAnchor = taskIndex >= 0 ? structuredClone(runHistory[taskIndex]!) : undefined;
+    this.currentTaskAnchor = originalUser
+      ? structuredClone(originalUser.message)
+      : taskIndex >= 0
+        ? structuredClone(runHistory[taskIndex]!)
+        : undefined;
     this.historicalImageKeys.clear();
     for (const message of runHistory.slice(0, Math.max(0, taskIndex))) {
       if (message.toolCallId && message.images?.length)
@@ -1274,6 +1339,7 @@ export class AgentEngine {
                 ...(await this.readModelHistory(session)),
               ],
               turnTail,
+              this.currentTaskAnchor,
             ),
           );
           const compactedContext = await this.prepareModelContext(

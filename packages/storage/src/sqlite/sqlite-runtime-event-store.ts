@@ -1,3 +1,5 @@
+import { readGoalEvidenceRunSlice } from "./goal-evidence-query.js";
+import type { GoalEvidenceRunSlice } from "../goal-evidence-contracts.js";
 import { projectInlineMessageMedia } from "./markdown-inline-media.js";
 import { projectSessionMedia } from "./sqlite-session-workbar-repository.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -485,7 +487,8 @@ export class SqliteRuntimeEventStore {
   ): Promise<readonly RuntimeToolOperation[]> {
     return this.write(() => {
       const session = this.readSessionRow(sessionId);
-      if (!session) throw new RuntimeEventStoreIntegrityError(`Runtime session ${sessionId} does not exist`);
+      if (!session)
+        throw new RuntimeEventStoreIntegrityError(`Runtime session ${sessionId} does not exist`);
       this.ensureTranscriptProjectionCurrentLocked(sessionId, session.last_event_seq);
       const rows = this.lease.database
         .prepare(
@@ -594,10 +597,14 @@ export class SqliteRuntimeEventStore {
     sessionId: string,
     beforeSequence: number | undefined,
     limit = 100,
-  ): Promise<{ readonly anchors: readonly RuntimeTranscriptPromptAnchor[]; readonly hasMore: boolean }> {
+  ): Promise<{
+    readonly anchors: readonly RuntimeTranscriptPromptAnchor[];
+    readonly hasMore: boolean;
+  }> {
     return this.write(() => {
       const session = this.readSessionRow(sessionId);
-      if (!session) throw new RuntimeEventStoreIntegrityError(`Runtime session ${sessionId} does not exist`);
+      if (!session)
+        throw new RuntimeEventStoreIntegrityError(`Runtime session ${sessionId} does not exist`);
       this.ensureTranscriptProjectionCurrentLocked(sessionId, session.last_event_seq);
       const rows = this.lease.database
         .prepare(
@@ -609,12 +616,19 @@ export class SqliteRuntimeEventStore {
            ORDER BY position_sequence DESC, position_ordinal DESC
            LIMIT ?`,
         )
-        .all(sessionId, beforeSequence ?? null, beforeSequence ?? null, boundedTranscriptQueryLimit(limit) + 1) as Array<Record<string, unknown>>;
+        .all(
+          sessionId,
+          beforeSequence ?? null,
+          beforeSequence ?? null,
+          boundedTranscriptQueryLimit(limit) + 1,
+        ) as Array<Record<string, unknown>>;
       const hasMore = rows.length > boundedTranscriptQueryLimit(limit);
       const selected = rows.slice(0, boundedTranscriptQueryLimit(limit));
       const anchors = selected.flatMap((row): RuntimeTranscriptPromptAnchor[] => {
         const itemId = requireRowString(row["item_id"], "item_id");
-        const payload = asJsonRecord(JSON.parse(requireRowString(row["payload_json"], "payload_json")));
+        const payload = asJsonRecord(
+          JSON.parse(requireRowString(row["payload_json"], "payload_json")),
+        );
         const prompt = typeof payload?.["content"] === "string" ? payload["content"] : "";
         const sequence = requireSafeInteger(row["position_sequence"], "position_sequence");
         const eventId = transcriptMessageEventId(itemId, "user");
@@ -622,8 +636,17 @@ export class SqliteRuntimeEventStore {
         const timeRow = this.lease.database
           .prepare("SELECT message_ts FROM session_messages WHERE session_id = ? AND sequence = ?")
           .get(sessionId, sequence) as Record<string, unknown> | undefined;
-        const timestamp = typeof timeRow?.["message_ts"] === "string" ? Date.parse(timeRow["message_ts"]) : NaN;
-        return [{ eventId, itemId, sequence, prompt: prompt.slice(0, 500), at: Number.isFinite(timestamp) ? timestamp : 0 }];
+        const timestamp =
+          typeof timeRow?.["message_ts"] === "string" ? Date.parse(timeRow["message_ts"]) : NaN;
+        return [
+          {
+            eventId,
+            itemId,
+            sequence,
+            prompt: prompt.slice(0, 500),
+            at: Number.isFinite(timestamp) ? timestamp : 0,
+          },
+        ];
       });
       return { anchors, hasMore };
     });
@@ -634,12 +657,16 @@ export class SqliteRuntimeEventStore {
     query: string,
     beforeSequence: number | undefined,
     limit = 100,
-  ): Promise<{ readonly hits: readonly RuntimeTranscriptSearchMatch[]; readonly hasMore: boolean }> {
+  ): Promise<{
+    readonly hits: readonly RuntimeTranscriptSearchMatch[];
+    readonly hasMore: boolean;
+  }> {
     const normalizedQuery = query.trim();
     if (!normalizedQuery) return { hits: [], hasMore: false };
     return this.write(() => {
       const session = this.readSessionRow(sessionId);
-      if (!session) throw new RuntimeEventStoreIntegrityError(`Runtime session ${sessionId} does not exist`);
+      if (!session)
+        throw new RuntimeEventStoreIntegrityError(`Runtime session ${sessionId} does not exist`);
       this.ensureTranscriptProjectionCurrentLocked(sessionId, session.last_event_seq);
       const boundedLimit = boundedTranscriptQueryLimit(limit);
       const rows = this.lease.database
@@ -659,26 +686,41 @@ export class SqliteRuntimeEventStore {
            ORDER BY item.position_sequence DESC, item.position_ordinal DESC
            LIMIT ?`,
         )
-        .all(sessionId, beforeSequence ?? null, beforeSequence ?? null, normalizedQuery, boundedLimit + 1) as Array<Record<string, unknown>>;
+        .all(
+          sessionId,
+          beforeSequence ?? null,
+          beforeSequence ?? null,
+          normalizedQuery,
+          boundedLimit + 1,
+        ) as Array<Record<string, unknown>>;
       const hasMore = rows.length > boundedLimit;
       const hits = rows.slice(0, boundedLimit).flatMap((row): RuntimeTranscriptSearchMatch[] => {
         const itemId = requireRowString(row["item_id"], "item_id");
         const eventId = typeof row["event_id"] === "string" ? row["event_id"] : undefined;
-        const payload = asJsonRecord(JSON.parse(requireRowString(row["payload_json"], "payload_json")));
-        const role = payload?.["kind"] === "userMessage" ? "user" : payload?.["kind"] === "assistantMessage" ? "assistant" : undefined;
+        const payload = asJsonRecord(
+          JSON.parse(requireRowString(row["payload_json"], "payload_json")),
+        );
+        const role =
+          payload?.["kind"] === "userMessage"
+            ? "user"
+            : payload?.["kind"] === "assistantMessage"
+              ? "assistant"
+              : undefined;
         const text = typeof payload?.["content"] === "string" ? payload["content"] : "";
         if (!eventId || !role) return [];
         const match = findUnicodeCaseInsensitiveMatch(text, normalizedQuery);
         if (!match) return [];
-        return [{
-          eventId,
-          itemId,
-          sequence: requireSafeInteger(row["position_sequence"], "position_sequence"),
-          role,
-          text,
-          matchStart: match.start,
-          matchLength: match.length,
-        }];
+        return [
+          {
+            eventId,
+            itemId,
+            sequence: requireSafeInteger(row["position_sequence"], "position_sequence"),
+            role,
+            text,
+            matchStart: match.start,
+            matchLength: match.length,
+          },
+        ];
       });
       return { hits, hasMore };
     });
@@ -746,6 +788,10 @@ export class SqliteRuntimeEventStore {
       transcriptRuntimeEventOf(sessionId, event, options),
       { ownerFence: options.ownerFence },
     );
+  }
+
+  async readGoalEvidenceRun(sessionId: string, runId: string): Promise<GoalEvidenceRunSlice> {
+    return this.read(() => readGoalEvidenceRunSlice(this.lease.database, sessionId, runId));
   }
 
   async readRun(sessionId: string, runId: string): Promise<RuntimeEvent[]> {
@@ -1841,7 +1887,9 @@ export class SqliteRuntimeEventStore {
     ];
     let cursorClause = "";
     if (options.aroundItemId && cursor) {
-      throw new RuntimeTranscriptResetRequiredError("aroundItemId cannot be combined with a transcript cursor");
+      throw new RuntimeTranscriptResetRequiredError(
+        "aroundItemId cannot be combined with a transcript cursor",
+      );
     }
     if (options.aroundItemId) {
       const anchor = this.lease.database
@@ -1851,9 +1899,18 @@ export class SqliteRuntimeEventStore {
            WHERE session_id = ? AND item_id = ? AND valid_from_sequence <= ?
              AND (valid_to_sequence IS NULL OR valid_to_sequence > ?)`,
         )
-        .get(options.sessionId, options.aroundItemId, watermark.throughSequence, watermark.throughSequence) as Record<string, unknown> | undefined;
-      if (!anchor) throw new RuntimeTranscriptResetRequiredError(`Transcript item ${options.aroundItemId} is unavailable`);
-      cursorClause = " AND (position_sequence < ? OR (position_sequence = ? AND position_ordinal <= ?))";
+        .get(
+          options.sessionId,
+          options.aroundItemId,
+          watermark.throughSequence,
+          watermark.throughSequence,
+        ) as Record<string, unknown> | undefined;
+      if (!anchor)
+        throw new RuntimeTranscriptResetRequiredError(
+          `Transcript item ${options.aroundItemId} is unavailable`,
+        );
+      cursorClause =
+        " AND (position_sequence < ? OR (position_sequence = ? AND position_ordinal <= ?))";
       params.push(
         requireSafeInteger(anchor["position_sequence"], "position_sequence"),
         requireSafeInteger(anchor["position_sequence"], "position_sequence"),

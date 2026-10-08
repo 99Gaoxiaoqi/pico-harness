@@ -1,3 +1,4 @@
+import type { MemoryRecallTrace } from "@pico/core";
 import { providerFailureSummary } from "@pico/core";
 import { isValidStoredCompactionSummary } from "./history-compact-summary-validation.js";
 import { buildToolResultArchiveRef, rebindToolResultArchive } from "./tool-result-archive.js";
@@ -250,6 +251,7 @@ export interface RuntimeModelCallStartedOptions {
   readonly provider?: string;
   readonly model?: string;
   readonly purpose: string;
+  readonly recallEventIds?: readonly string[];
 }
 
 export interface RuntimeModelCallSettledOptions {
@@ -1861,6 +1863,7 @@ export class RuntimeRun {
         status: built.input.status,
         body: built.input.body,
         projection: built.input.projection,
+        ...(built.input.executionFacts ? { executionFacts: built.input.executionFacts } : {}),
       },
     };
     try {
@@ -1924,6 +1927,7 @@ export class RuntimeRun {
           status: canonical.status,
           body: canonical.body,
           projection: canonical.projection,
+          ...(canonical.executionFacts ? { executionFacts: canonical.executionFacts } : {}),
         },
       };
       assertRuntimeEvent(event);
@@ -1995,6 +1999,7 @@ export class RuntimeRun {
         status: canonical.status,
         body: canonical.body,
         projection: canonical.projection,
+        ...(canonical.executionFacts ? { executionFacts: canonical.executionFacts } : {}),
       },
     };
     const event = original;
@@ -2040,6 +2045,18 @@ export class RuntimeRun {
       data: { approvalId, decision },
     };
     await this.append(event);
+  }
+
+  async recordRecall(trace: MemoryRecallTrace): Promise<string> {
+    this.assertOpen();
+    const eventId = createRuntimeEventId("memory-recall");
+    await this.append({
+      ...this.base(eventId, false, "internal"),
+      kind: "memory.recall.recorded",
+      visibility: "internal",
+      data: structuredClone(trace),
+    });
+    return eventId;
   }
 
   async recordModelCallStarted(options: RuntimeModelCallStartedOptions): Promise<void> {

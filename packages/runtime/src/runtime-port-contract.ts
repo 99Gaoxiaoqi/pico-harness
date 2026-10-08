@@ -1,4 +1,5 @@
 import type {
+  MemoryRecallTrace,
   CanonicalTranscriptToolStart,
   CommitReceipt,
   Message,
@@ -74,6 +75,7 @@ export interface RuntimeRunPort<Session, Registry, ToolContext, RecoveryProbeRes
   findLastCompactionCheckpoint(): Promise<RuntimeLastCompactionCheckpoint | undefined>;
   run<Result>(execute: () => Promise<Result>, signal?: AbortSignal): Promise<Result>;
   recordTurnStarted(turn: number): Promise<void>;
+  recordRecall(trace: MemoryRecallTrace): Promise<string>;
   recordCheckpoint(input: RuntimeCheckpointInput): Promise<void>;
   recordToolStarted(
     toolCallId: string,

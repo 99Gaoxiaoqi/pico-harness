@@ -7,7 +7,7 @@ export const CONTROL_SCOPE_NAME = "control";
 export const CONTROL_SCOPE: SqliteSchemaScope = {
   name: CONTROL_SCOPE_NAME,
   baseline: {
-    version: 9,
+    version: 10,
     sql: `
       CREATE TABLE control_metadata (key TEXT PRIMARY KEY, value_json TEXT NOT NULL);
       -- rows: revision / lastTransactionId / nextRuntimeEventSequence
@@ -179,7 +179,7 @@ export const CONTROL_SCOPE: SqliteSchemaScope = {
         DELETE FROM session_latest_context WHERE session_id = OLD.session_id;
         INSERT OR IGNORE INTO usage_deleted_sessions(session_id) VALUES (OLD.session_id);
         UPDATE usage_physical_attempts SET session_id = NULL, run_id = NULL,
-          record_json = json_remove(record_json, '$.sessionId', '$.conversationId', '$.runId', '$.turnId')
+          record_json = json_remove(record_json, '$.sessionId', '$.conversationId', '$.runId', '$.turnId', '$.contextFacts.memoryRecall', '$.requestDiagnostic.memoryRecall')
           WHERE session_id = OLD.session_id;
       END;
     `,
@@ -215,7 +215,7 @@ export const CONTROL_SCOPE: SqliteSchemaScope = {
         DELETE FROM session_latest_context WHERE session_id = OLD.session_id;
         INSERT OR IGNORE INTO usage_deleted_sessions(session_id) VALUES (OLD.session_id);
         UPDATE usage_physical_attempts SET session_id = NULL, run_id = NULL,
-          record_json = json_remove(record_json, '$.sessionId', '$.conversationId', '$.runId', '$.turnId')
+          record_json = json_remove(record_json, '$.sessionId', '$.conversationId', '$.runId', '$.turnId', '$.contextFacts.memoryRecall', '$.requestDiagnostic.memoryRecall')
           WHERE session_id = OLD.session_id;
       END;
       `,
@@ -245,6 +245,21 @@ export const CONTROL_SCOPE: SqliteSchemaScope = {
       CREATE INDEX desktop_input_queue_by_session
         ON desktop_input_queue(workspace_path, session_id, queue_order, queue_id);
       `,
+    ],
+
+    [
+      10,
+      `
+      DROP TRIGGER usage_session_deleted;
+      CREATE TRIGGER usage_session_deleted AFTER DELETE ON sessions BEGIN
+        DELETE FROM usage_accounting_versions WHERE session_id = OLD.session_id;
+        DELETE FROM session_latest_context WHERE session_id = OLD.session_id;
+        INSERT OR IGNORE INTO usage_deleted_sessions(session_id) VALUES (OLD.session_id);
+        UPDATE usage_physical_attempts SET session_id = NULL, run_id = NULL,
+          record_json = json_remove(record_json, '$.sessionId', '$.conversationId', '$.runId', '$.turnId', '$.contextFacts.memoryRecall', '$.requestDiagnostic.memoryRecall')
+          WHERE session_id = OLD.session_id;
+      END;
+    `,
     ],
   ]),
 };

@@ -45,3 +45,4 @@ export * from "./deep-research.js";
 
 export * from "./memory-recall-contract.js";
 export * from "./execution-facts.js";
+export * from "./goal-evidence-trace.js";

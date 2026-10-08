@@ -1,3 +1,4 @@
+import { isGoalEvidenceTrace, type GoalEvidenceTrace } from "./goal-evidence-trace.js";
 import { decodeExecutionBoundary, type ExecutionBoundary } from "./permission-profile.js";
 
 /** Session runtime-state event schema version. */
@@ -21,6 +22,7 @@ export type PersistedGoalStatus =
   | "cleared";
 
 export interface PersistedGoalEvaluation {
+  evidenceTrace?: GoalEvidenceTrace;
   met?: boolean;
   impossible?: boolean;
   progress?: boolean;
@@ -611,6 +613,7 @@ function isGoalEvaluation(value: unknown): value is PersistedGoalEvaluation {
       "progress",
       "waiting",
       "evaluatorFailed",
+      "evidenceTrace",
       "reason",
       "at",
     ]) &&
@@ -619,6 +622,7 @@ function isGoalEvaluation(value: unknown): value is PersistedGoalEvaluation {
     isOptionalBoolean(value["progress"]) &&
     isOptionalBoolean(value["waiting"]) &&
     isOptionalBoolean(value["evaluatorFailed"]) &&
+    (value["evidenceTrace"] === undefined || isGoalEvidenceTrace(value["evidenceTrace"])) &&
     typeof value["reason"] === "string" &&
     isNonNegativeFiniteNumber(value["at"])
   );

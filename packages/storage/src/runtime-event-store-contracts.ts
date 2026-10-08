@@ -454,3 +454,5 @@ export type RuntimeContinuationStartOutcome<TTranscriptEvent = DurableTranscript
 export function createRuntimeEventId(prefix = "runtime-event"): string {
   return `${prefix}:${randomUUID()}`;
 }
+
+export type * from "./goal-evidence-contracts.js";
