@@ -34,11 +34,8 @@ type MalformedHistoryCompactSummaryReason =
  * text checkpoints so record, load/repair, and copy can hold them to the
  * complete predicate.
  */
-export const LEGACY_SECTIONED_SUMMARY_FORMAT = "sections_v1" as const;
 export const SECTIONED_SUMMARY_FORMAT = "sections_v2" as const;
-export type SectionedSummaryFormat =
-  | typeof LEGACY_SECTIONED_SUMMARY_FORMAT
-  | typeof SECTIONED_SUMMARY_FORMAT;
+export type SectionedSummaryFormat = typeof SECTIONED_SUMMARY_FORMAT;
 
 export type CheckpointSummaryDefect = MalformedHistoryCompactSummaryReason;
 
@@ -47,26 +44,6 @@ export type CheckpointSummaryDefect = MalformedHistoryCompactSummaryReason;
 // to REPLACE folded history; Critical Context is required because it is
 // exactly what the #3029 incident lost (files, commands, errors), and the
 // template gives it an explicit "(none)" escape hatch.
-export const LEGACY_SUMMARY_FORMAT_TEMPLATE = [
-  "## Goal",
-  "[What the user is trying to accomplish]",
-  "",
-  "## Progress",
-  "### Done",
-  "- [Completed work and changes]",
-  "### In Progress",
-  "- [Current work]",
-  "",
-  "## Key Decisions",
-  "- **[Decision]**: [Brief rationale]",
-  "",
-  "## Next Steps",
-  "1. [Ordered list of what should happen next]",
-  "",
-  "## Critical Context",
-  '- [Files, commands/results, errors, anything needed to continue; or "(none)"]',
-] as const;
-
 export const SUMMARY_FORMAT_TEMPLATE = [
   "## Goal",
   "[The user's active objective and concrete acceptance criteria]",
@@ -93,13 +70,6 @@ export const SUMMARY_FORMAT_TEMPLATE = [
   '- [event:<source event ID supplied in the input>] [What that source directly shows; distinguish inference and unverified claims]; or "(none)"',
 ] as const;
 
-export const LEGACY_REQUIRED_SUMMARY_SECTIONS = [
-  "## Goal",
-  "## Progress",
-  "## Next Steps",
-  "## Critical Context",
-] as const;
-
 export const REQUIRED_SUMMARY_SECTIONS = [
   "## Goal",
   "## Progress",
@@ -111,16 +81,14 @@ export const REQUIRED_SUMMARY_SECTIONS = [
 ] as const;
 
 export function isSectionedSummaryFormat(value: unknown): value is SectionedSummaryFormat {
-  return value === LEGACY_SECTIONED_SUMMARY_FORMAT || value === SECTIONED_SUMMARY_FORMAT;
+  return value === SECTIONED_SUMMARY_FORMAT;
 }
 
 // A verbatim echo of the mandated template carries no information: template
 // lines never count as section content, fenced or not, so a degraded model
 // parroting the format back cannot pass as a checkpoint.
 const TEMPLATE_PLACEHOLDER_LINES: ReadonlySet<string> = new Set(
-  [...LEGACY_SUMMARY_FORMAT_TEMPLATE, ...SUMMARY_FORMAT_TEMPLATE]
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0),
+  SUMMARY_FORMAT_TEMPLATE.map((line) => line.trim()).filter((line) => line.length > 0),
 );
 
 // Floors for the incident's shape: folding a large span into a paragraph
@@ -159,16 +127,10 @@ export interface CheckpointSummaryFoldContext {
 export function findCheckpointSummaryDefect(
   summary: string,
   foldContext?: CheckpointSummaryFoldContext,
-  format: SectionedSummaryFormat = LEGACY_SECTIONED_SUMMARY_FORMAT,
 ): CheckpointSummaryDefect | undefined {
   const trimmed = summary.trim();
   if (trimmed.length === 0) return undefined;
-  const scan = scanSummaryStructure(
-    trimmed,
-    format === SECTIONED_SUMMARY_FORMAT
-      ? REQUIRED_SUMMARY_SECTIONS
-      : LEGACY_REQUIRED_SUMMARY_SECTIONS,
-  );
+  const scan = scanSummaryStructure(trimmed, REQUIRED_SUMMARY_SECTIONS);
   if (!scan.orderedSectionsPresent) {
     return "malformed_summary_missing_section";
   }
@@ -307,5 +269,5 @@ export function isValidStoredCompactionSummary(content: string, format: unknown)
   const end = content.indexOf(COMPACTION_SUMMARY_CLOSE_TAG);
   if (start < 0 || end <= start) return false;
   const body = content.slice(start + COMPACTION_SUMMARY_OPEN_TAG.length, end).trim();
-  return body.length > 0 && findCheckpointSummaryDefect(body, undefined, format) === undefined;
+  return body.length > 0 && findCheckpointSummaryDefect(body) === undefined;
 }

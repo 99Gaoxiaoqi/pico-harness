@@ -50,8 +50,8 @@ export interface RuntimeCheckpointInput {
 export interface RuntimeLastCompactionCheckpoint {
   readonly checkpointId: string;
   readonly summaryText: string;
-  readonly summaryFormat?: SectionedSummaryFormat;
-  readonly evidence?: CompactionEvidenceMetadata;
+  readonly summaryFormat: SectionedSummaryFormat;
+  readonly evidence: CompactionEvidenceMetadata;
 }
 
 /**

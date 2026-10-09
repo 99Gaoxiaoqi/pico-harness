@@ -165,14 +165,10 @@ function appendTurnTail(
     const checkpointIndex = messages.findLastIndex(
       (message) =>
         message.role === "assistant" &&
-        (isValidStoredCompactionSummary(
+        isValidStoredCompactionSummary(
           message.content,
           message.providerData?.["picoSummaryFormat"],
-        ) ||
-          (message.providerData?.["picoSummaryFormat"] === undefined &&
-            message.providerData?.["picoKind"] === "compaction_summary" &&
-            (isValidStoredCompactionSummary(message.content, "sections_v2") ||
-              isValidStoredCompactionSummary(message.content, "sections_v1")))),
+        ),
     );
     if (checkpointIndex < 0 && goalAnchor) {
       const systemIndex = messages.findIndex((message) => message.role === "system");

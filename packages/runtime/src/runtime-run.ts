@@ -1,7 +1,6 @@
 import type { MemoryRecallTrace } from "@pico/core";
 import { providerFailureSummary } from "@pico/core";
 import {
-  isSectionedSummaryFormat,
   isValidStoredCompactionSummary,
   SECTIONED_SUMMARY_FORMAT,
 } from "./history-compact-summary-validation.js";
@@ -910,13 +909,14 @@ export class RuntimeRun {
 
     return serializeForkBootstrap(targetSessionKey, options.writeGuard, async (writeGuard) => {
       let projectedModelCheckpoint: RuntimeForkModelCheckpointSeed | undefined;
-      if (modelCheckpoint?.summary.providerData?.picoSummaryFormat === SECTIONED_SUMMARY_FORMAT) {
+      if (modelCheckpoint) {
         const sourceEntries = await store.readSessionEntries(options.sourceSessionId);
-        const sourceMetadata = modelCheckpoint.summary.providerData[HANDOFF_EVIDENCE_METADATA_KEY];
+        const sourceMetadata =
+          modelCheckpoint.summary.providerData?.[HANDOFF_EVIDENCE_METADATA_KEY];
         if (
           !isValidStoredCompactionSummary(
             modelCheckpoint.summary.content,
-            SECTIONED_SUMMARY_FORMAT,
+            modelCheckpoint.summary.providerData?.picoSummaryFormat,
           ) ||
           !isCompactionEvidenceMetadata(sourceMetadata) ||
           sourceMetadata.sessionId !== options.sourceSessionId ||
@@ -1358,8 +1358,7 @@ export class RuntimeRun {
 
   /**
    * 查找最后一个正常的压缩 checkpoint，用于滚动摘要增量更新。
-   * 遇到 hard-reset checkpoint 时立即返回 undefined——硬重置物理上重置了上下文，
-   * 其之前的 checkpoint 都已失效，不能再作为增量更新的基线。
+   * Fork bootstrap 是已复制上下文的载体，不作为下一次滚动摘要的增量基线。
    *
    * 票 04:末条 context.checkpoint.recorded 经 by_kind 索引点查,不再全量读——
    * 原反向扫描在遇到首个 checkpoint 事件时必然返回(值或 undefined),因此末条
@@ -1374,12 +1373,7 @@ export class RuntimeRun {
       return undefined;
     }
     const data = lastCheckpoint.event.data;
-    // 硬重置 checkpoint 之前的所有 checkpoint 都已失效，不再向前查找。
-    if (
-      data.checkpointId.startsWith("hard-reset:") ||
-      lastCheckpoint.event.runId.startsWith(RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX)
-    )
-      return undefined;
+    if (lastCheckpoint.event.runId.startsWith(RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX)) return undefined;
     const content = data.summary.content;
     if (!isValidStoredCompactionSummary(content, data.summary.providerData?.["picoSummaryFormat"]))
       return undefined;
@@ -1389,33 +1383,27 @@ export class RuntimeRun {
     // 标签缺失时返回 undefined，避免把 REFERENCE-ONLY 包装当 previousSummary 喂模型。
     if (startIdx === -1 || endIdx === -1 || startIdx >= endIdx) return undefined;
     const summaryText = content.slice(startIdx + COMPACTION_SUMMARY_OPEN_TAG.length, endIdx).trim();
-    const format = data.summary.providerData?.picoSummaryFormat;
-    if (format === SECTIONED_SUMMARY_FORMAT) {
-      const entries = await this.store.readSessionEntries(this.sessionId);
-      if (
-        !validateStoredCompactionEvidence(
-          data.summary,
-          entries.map(({ event }) => event),
-          {
-            sessionId: this.sessionId,
-            throughEventId: data.throughEventId,
-            ...(data.previousCheckpointId
-              ? { previousCheckpointId: data.previousCheckpointId }
-              : {}),
-          },
-          new Map(entries.map(({ event, sequence }) => [event.eventId, sequence])),
-        )
+    const entries = await this.store.readSessionEntries(this.sessionId);
+    if (
+      !validateStoredCompactionEvidence(
+        data.summary,
+        entries.map(({ event }) => event),
+        {
+          sessionId: this.sessionId,
+          throughEventId: data.throughEventId,
+          ...(data.previousCheckpointId ? { previousCheckpointId: data.previousCheckpointId } : {}),
+        },
+        new Map(entries.map(({ event, sequence }) => [event.eventId, sequence])),
       )
-        return undefined;
-    }
+    )
+      return undefined;
     const evidence = data.summary.providerData?.[HANDOFF_EVIDENCE_METADATA_KEY];
+    if (!isCompactionEvidenceMetadata(evidence)) return undefined;
     return {
       checkpointId: data.checkpointId,
       summaryText,
-      ...(isSectionedSummaryFormat(format) ? { summaryFormat: format } : {}),
-      ...(format === SECTIONED_SUMMARY_FORMAT && isCompactionEvidenceMetadata(evidence)
-        ? { evidence }
-        : {}),
+      summaryFormat: SECTIONED_SUMMARY_FORMAT,
+      evidence,
     };
   }
 
@@ -2212,11 +2200,8 @@ export class RuntimeRun {
     const sequences = new Map(
       sourceEntries.map(({ event: source, sequence }) => [source.eventId, sequence]),
     );
-    const legacyExempt =
-      options.checkpointId.startsWith("hard-reset:") ||
-      this.runId.startsWith(RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX);
+    const forkBootstrap = this.runId.startsWith(RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX);
     if (
-      !legacyExempt &&
       !isValidStoredCompactionSummary(
         options.summary.content,
         options.summary.providerData?.picoSummaryFormat,
@@ -2225,53 +2210,46 @@ export class RuntimeRun {
       throw new RuntimeEventStoreIntegrityError(
         "Runtime checkpoint contains an invalid sectioned summary",
       );
+    const covered = materializeRuntimeHistoryEntries(events, sequences).slice(
+      0,
+      options.coveredEventCount,
+    );
     if (
-      !legacyExempt ||
-      options.summary.providerData?.picoSummaryFormat === SECTIONED_SUMMARY_FORMAT
-    ) {
-      const covered = materializeRuntimeHistoryEntries(events, sequences).slice(
-        0,
-        options.coveredEventCount,
+      !Number.isSafeInteger(options.coveredEventCount) ||
+      options.coveredEventCount <= 0 ||
+      covered.length !== options.coveredEventCount ||
+      covered.at(-1)?.eventId !== options.throughEventId ||
+      covered.at(-1)?.compactionBoundarySafe === false ||
+      computeCheckpointSourceDigest(covered) !== options.sourceDigest
+    )
+      throw new RuntimeEventStoreIntegrityError(
+        "Runtime checkpoint has an invalid source boundary or digest",
       );
-      if (
-        !Number.isSafeInteger(options.coveredEventCount) ||
-        options.coveredEventCount <= 0 ||
-        covered.length !== options.coveredEventCount ||
-        covered.at(-1)?.eventId !== options.throughEventId ||
-        covered.at(-1)?.compactionBoundarySafe === false ||
-        computeCheckpointSourceDigest(covered) !== options.sourceDigest
+    const last = events.findLast((source) => source.kind === "context.checkpoint.recorded");
+    const expectedPrevious =
+      !forkBootstrap &&
+      last?.kind === "context.checkpoint.recorded" &&
+      !last.runId.startsWith(RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX)
+        ? last.data.checkpointId
+        : undefined;
+    if (
+      options.previousCheckpointId !== expectedPrevious ||
+      !validateStoredCompactionEvidence(
+        options.summary,
+        events,
+        {
+          sessionId: this.sessionId,
+          throughEventId: options.throughEventId,
+          ...(options.previousCheckpointId
+            ? { previousCheckpointId: options.previousCheckpointId }
+            : {}),
+        },
+        sequences,
       )
-        throw new RuntimeEventStoreIntegrityError(
-          "Runtime checkpoint has an invalid source boundary or digest",
-        );
-    }
-    if (options.summary.providerData?.picoSummaryFormat === SECTIONED_SUMMARY_FORMAT) {
-      const last = events.findLast((source) => source.kind === "context.checkpoint.recorded");
-      const expectedPrevious =
-        last?.kind === "context.checkpoint.recorded" &&
-        !last.data.checkpointId.startsWith("hard-reset:") &&
-        !last.runId.startsWith(RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX)
-          ? last.data.checkpointId
-          : undefined;
-      if (
-        (!legacyExempt && options.previousCheckpointId !== expectedPrevious) ||
-        !validateStoredCompactionEvidence(
-          options.summary,
-          events,
-          {
-            sessionId: this.sessionId,
-            throughEventId: options.throughEventId,
-            ...(options.previousCheckpointId
-              ? { previousCheckpointId: options.previousCheckpointId }
-              : {}),
-          },
-          sequences,
-        )
-      )
-        throw new RuntimeEventStoreIntegrityError(
-          "Runtime checkpoint contains invalid handoff evidence",
-        );
-    }
+    )
+      throw new RuntimeEventStoreIntegrityError(
+        "Runtime checkpoint contains invalid handoff evidence",
+      );
     await this.append(event);
   }
 
@@ -3096,8 +3074,6 @@ function rebindForkArchiveSummary(
     /pico:\/\/archive\/[^"\s<>]+/gu,
     (ref) => archiveMap.get(ref) ?? "来源不可用（原结果未复制到当前会话）",
   );
-  if (summary.providerData?.picoSummaryFormat !== SECTIONED_SUMMARY_FORMAT)
-    return { ...summary, content };
   const originalBody = unwrapCompactionSummary(summary.content);
   const originalRefs = originalBody && extractCompactionEvidenceReferences(originalBody);
   if (!originalBody || !originalRefs)

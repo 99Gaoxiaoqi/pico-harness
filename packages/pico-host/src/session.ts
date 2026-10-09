@@ -1578,7 +1578,7 @@ export class Session
     const summaryMsg: Message = {
       role: "assistant",
       content: summary,
-      providerData: { picoKind: "compaction_summary" },
+      providerData: { picoKind: "compaction_summary", picoSummaryFormat: "sections_v2" },
     };
     this.messageLedger.compact(summaryMsg, compactedCount);
     this.updatedAt = new Date();

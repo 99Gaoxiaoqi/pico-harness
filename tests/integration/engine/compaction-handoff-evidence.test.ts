@@ -172,17 +172,11 @@ test("v2 durable evidence survives rolling compaction/restart and rejects mutate
   );
 });
 
-test("v1 keeps its validation contract; v2 invalid refs receive one repair and never commit fabricated sources", async () => {
-  const legacy = contextSummaryBody("旧摘要。");
-  assert.equal(
-    isValidStoredCompactionSummary(wrapFullCompactionSummary(legacy), "sections_v1"),
-    true,
-  );
-  assert.equal(
-    isValidStoredCompactionSummary(wrapFullCompactionSummary(legacy), "sections_v2"),
-    false,
-  );
-  assert.equal(isValidStoredCompactionSummary(wrapFullCompactionSummary(legacy), undefined), false);
+test("only v2 summaries are valid; invalid refs receive one repair and never commit fabricated sources", async () => {
+  const summary = wrapFullCompactionSummary(contextSummaryBody("当前摘要。"));
+  assert.equal(isValidStoredCompactionSummary(summary, "sections_v1"), false);
+  assert.equal(isValidStoredCompactionSummary(summary, "sections_v2"), true);
+  assert.equal(isValidStoredCompactionSummary(summary, undefined), false);
   const history: Message[] = [
     { role: "user", content: "original task" },
     { role: "assistant", content: "read result" },
@@ -276,12 +270,48 @@ test("production checkpoint commit rejects forged provenance and fork derives re
     modelCheckpoint: snapshot.modelCheckpoint,
     publication: { async assertOwned() {} },
   };
+  for (const format of [undefined, "sections_v1"]) {
+    await assert.rejects(
+      port.bootstrapFork({
+        ...bootstrap,
+        targetSessionId: `rejected-fork-${format ?? "unmarked"}`,
+        modelCheckpoint: {
+          ...snapshot.modelCheckpoint,
+          summary: {
+            ...snapshot.modelCheckpoint.summary,
+            providerData: {
+              ...snapshot.modelCheckpoint.summary.providerData,
+              picoSummaryFormat: format,
+            },
+          },
+        },
+      }),
+      /invalid handoff evidence/,
+    );
+  }
   await port.bootstrapFork(bootstrap);
   const imported = await store.readSessionEntries(bootstrap.targetSessionId);
   const checkpoint = imported.find(
     ({ event }) => event.kind === "context.checkpoint.recorded",
   )!.event;
   if (checkpoint.kind !== "context.checkpoint.recorded") assert.fail("expected target checkpoint");
+  for (const format of [undefined, "sections_v1"]) {
+    const obsoleteCopy = imported.map(({ event }) =>
+      event.kind === "context.checkpoint.recorded"
+        ? {
+            ...event,
+            data: {
+              ...event.data,
+              summary: {
+                ...event.data.summary,
+                providerData: { ...event.data.summary.providerData, picoSummaryFormat: format },
+              },
+            },
+          }
+        : event,
+    );
+    assert.throws(() => materializeRuntimeHistory(obsoleteCopy), /invalid sectioned summary/);
+  }
   const metadata = checkpoint.data.summary.providerData?.[HANDOFF_EVIDENCE_METADATA_KEY];
   assert.ok(isCompactionEvidenceMetadata(metadata));
   assert.equal(metadata.sessionId, bootstrap.targetSessionId);
@@ -356,7 +386,7 @@ test("production checkpoint commit rejects forged provenance and fork derives re
       summary,
     };
     await assert.rejects(targetRun.recordCheckpoint(input), /invalid handoff evidence/);
-    for (const format of [undefined, "unknown"])
+    for (const format of [undefined, "sections_v1", "unknown"])
       await assert.rejects(
         targetRun.recordCheckpoint({
           ...input,
@@ -370,22 +400,7 @@ test("production checkpoint commit rejects forged provenance and fork derives re
       ).length,
       1,
     );
-    await targetRun.recordCheckpoint({
-      ...input,
-      checkpointId: "checkpoint:legacy-compatible",
-      summary: {
-        role: "assistant",
-        content: wrapFullCompactionSummary(contextSummaryBody("旧格式兼容。")),
-        providerData: { picoSummaryFormat: "sections_v1", [HANDOFF_EVIDENCE_METADATA_KEY]: forged },
-      },
-    });
-    const legacy = await targetRun.findLastCompactionCheckpoint();
-    assert.equal(legacy?.summaryFormat, "sections_v1");
-    assert.equal(
-      legacy?.evidence,
-      undefined,
-      "legacy provider metadata must never become verified Host evidence",
-    );
+    assert.equal(await targetRun.findLastCompactionCheckpoint(), undefined);
   });
 
   // The selected fork prefix deliberately excludes the original tool exchange.

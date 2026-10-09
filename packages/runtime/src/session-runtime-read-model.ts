@@ -1,7 +1,4 @@
-import {
-  SECTIONED_SUMMARY_FORMAT,
-  isValidStoredCompactionSummary,
-} from "./history-compact-summary-validation.js";
+import { isValidStoredCompactionSummary } from "./history-compact-summary-validation.js";
 import { validateStoredCompactionEvidence } from "./compaction-handoff-evidence.js";
 import {
   RUNTIME_MESSAGE_EVENT_ID,
@@ -58,13 +55,11 @@ export async function readRuntimeModelHistorySnapshot(
   const compactions = events.filter(
     (event): event is RuntimeCheckpointRecordedEvent =>
       event.kind === "context.checkpoint.recorded" &&
-      !event.data.checkpointId.startsWith("hard-reset:") &&
       !event.runId.startsWith(RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX),
   );
   const lastCheckpoint = events.findLast((event) => event.kind === "context.checkpoint.recorded");
   const latest =
     lastCheckpoint?.kind === "context.checkpoint.recorded" &&
-    !lastCheckpoint.data.checkpointId.startsWith("hard-reset:") &&
     !lastCheckpoint.runId.startsWith(RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX)
       ? lastCheckpoint
       : undefined;
@@ -408,8 +403,6 @@ function replaceProjectedPrefixWithCheckpoint(
   sequenceMap?: ReadonlyMap<string, number>,
 ): void {
   if (
-    !checkpoint.data.checkpointId.startsWith("hard-reset:") &&
-    !checkpoint.runId.startsWith(RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX) &&
     !isValidStoredCompactionSummary(
       checkpoint.data.summary.content,
       checkpoint.data.summary.providerData?.["picoSummaryFormat"],
@@ -420,7 +413,6 @@ function replaceProjectedPrefixWithCheckpoint(
     );
   }
   if (
-    checkpoint.data.summary.providerData?.picoSummaryFormat === SECTIONED_SUMMARY_FORMAT &&
     !validateStoredCompactionEvidence(
       checkpoint.data.summary,
       events.slice(0, checkpointEventIndex),

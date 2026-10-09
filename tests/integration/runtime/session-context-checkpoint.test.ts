@@ -84,7 +84,10 @@ test("checkpoint model history reaches read-only context RPC and Inspector uncha
         coveredEventCount: covered.length,
         sourceDigest: computeCheckpointSourceDigest(covered),
         throughEventId: covered.at(-1)!.eventId,
-        summary: contextSummaryMessage("Summary of the first two exchanges."),
+        summary: contextSummaryMessage("Summary of the first two exchanges.", {
+          sessionId,
+          throughEventId: covered.at(-1)!.eventId,
+        }),
       });
       const snapshot = await readRuntimeModelHistorySnapshot(session.runtimeEventStore!, sessionId);
       assert.deepEqual(await run.readModelHistory(), snapshot.messages);
@@ -175,34 +178,32 @@ test("checkpoint model history reaches read-only context RPC and Inspector uncha
         originalEvents,
         "refresh and restart do not append runs, checkpoints, messages or provider calls",
       );
-      // Seed/reset checkpoints still affect history, but never count as successful compactions.
-      for (const [checkpointId, runId] of [
-        ["fork-seed", `${RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX}context-fixture`],
-        ["hard-reset:context-fixture", "reset-fixture"],
-      ] as const) {
-        const seedRun = await RuntimeRun.start({
-          capability: recovered.runtimeEventCapability!,
-          runId,
-          agentSwarmAuthorization: "none",
-        });
-        await seedRun.run(async () => {
-          const covered = await seedRun.readModelHistoryEntries();
-          await seedRun.recordCheckpoint({
-            checkpointId,
-            coveredEventCount: covered.length,
-            sourceDigest: computeCheckpointSourceDigest(covered),
+      // A current fork bootstrap preserves history without counting as a new compaction.
+      const seedRun = await RuntimeRun.start({
+        capability: recovered.runtimeEventCapability!,
+        runId: `${RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX}context-fixture`,
+        agentSwarmAuthorization: "none",
+      });
+      await seedRun.run(async () => {
+        const covered = await seedRun.readModelHistoryEntries();
+        await seedRun.recordCheckpoint({
+          checkpointId: "fork-seed",
+          coveredEventCount: covered.length,
+          sourceDigest: computeCheckpointSourceDigest(covered),
+          throughEventId: covered.at(-1)!.eventId,
+          summary: contextSummaryMessage("Restored state.", {
+            sessionId,
             throughEventId: covered.at(-1)!.eventId,
-            summary: { role: "assistant", content: "Restored state." },
-          });
+          }),
         });
-      }
-      const afterReset = await readRuntimeModelHistorySnapshot(
+      });
+      const afterFork = await readRuntimeModelHistorySnapshot(
         recovered.runtimeEventStore!,
         sessionId,
       );
-      assert.equal(afterReset.messages.length, 1);
-      assert.equal(afterReset.compactedCount, 1);
-      assert.equal(afterReset.latestCompaction, undefined);
+      assert.equal(afterFork.messages.length, 1);
+      assert.equal(afterFork.compactedCount, 1);
+      assert.equal(afterFork.latestCompaction, undefined);
     } finally {
       await recovered.close();
     }

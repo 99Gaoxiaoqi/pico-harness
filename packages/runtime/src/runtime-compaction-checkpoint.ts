@@ -1,7 +1,4 @@
-import {
-  LEGACY_SECTIONED_SUMMARY_FORMAT,
-  findCheckpointSummaryDefect,
-} from "./history-compact-summary-validation.js";
+import { findCheckpointSummaryDefect } from "./history-compact-summary-validation.js";
 import {
   HANDOFF_EVIDENCE_METADATA_KEY,
   attachCompactionEvidenceSources,
@@ -151,20 +148,11 @@ export async function recordRuntimeCompactionCheckpoint<
     entries.map(({ message }) => message),
     { ...request, sourceEventIds: entries.map(({ eventId }) => eventId), validateSummary },
     signal,
-    lastCheckpoint?.summaryText &&
-      !findCheckpointSummaryDefect(
-        lastCheckpoint.summaryText,
-        undefined,
-        lastCheckpoint.summaryFormat ?? LEGACY_SECTIONED_SUMMARY_FORMAT,
-      )
+    lastCheckpoint?.summaryText && !findCheckpointSummaryDefect(lastCheckpoint.summaryText)
       ? lastCheckpoint.summaryText
       : undefined,
   );
-  if (
-    !preview ||
-    !preview.summary.trim() ||
-    findCheckpointSummaryDefect(preview.summary, undefined, preview.summaryFormat)
-  )
+  if (!preview || !preview.summary.trim() || findCheckpointSummaryDefect(preview.summary))
     return undefined;
 
   signal?.throwIfAborted();

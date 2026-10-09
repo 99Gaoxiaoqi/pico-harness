@@ -38,6 +38,7 @@ import { withProviderCallContext } from "./provider-call-context.js";
 
 import {
   findCheckpointSummaryDefect,
+  isValidStoredCompactionSummary,
   SUMMARY_FORMAT_TEMPLATE,
   SECTIONED_SUMMARY_FORMAT,
   type SectionedSummaryFormat,
@@ -467,7 +468,6 @@ export class FullCompactor {
               },
             }
           : undefined,
-        SECTIONED_SUMMARY_FORMAT,
       );
       if (structureDefect) return structureDefect;
       if (extractCompactionEvidenceReferences(response.content) === undefined)
@@ -560,7 +560,10 @@ function extractSummary(resp: Message): string | undefined {
  */
 function detectExistingCompactionSummary(history: readonly Message[]): string | undefined {
   for (const msg of history) {
-    if (msg.role === "assistant" && msg.content.startsWith(FULL_COMPACTION_SUMMARY_MARKER)) {
+    if (
+      msg.role === "assistant" &&
+      isValidStoredCompactionSummary(msg.content, msg.providerData?.picoSummaryFormat)
+    ) {
       // 用结构化标签精确定位正文边界,避免 \n\n 切分出错。
       const startIdx = msg.content.indexOf(COMPACTION_SUMMARY_OPEN_TAG);
       const endIdx = msg.content.indexOf(COMPACTION_SUMMARY_CLOSE_TAG);

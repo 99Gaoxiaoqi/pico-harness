@@ -67,6 +67,7 @@ async function result(
 test("Tool projection decisions are durable, read-only on replay, and bound to the checkpoint digest", async (t) => {
   const { session, run } = await fixture(t);
   const raw = "正文".repeat(5_000);
+  let checkpointSummaryContent: string | undefined;
   await run.run(async () => {
     await run.commitMessages(session, [{ role: "user", content: "inspect" }]);
     await result(session, run, "large", raw);
@@ -119,12 +120,17 @@ test("Tool projection decisions are durable, read-only on replay, and bound to t
     await run.prepareToolResultProjections({ stepNumber: 2, tools });
     assert.deepEqual(await session.runtimeEventStore!.readSession(session.id), before);
     const covered = await run.readModelHistoryEntries();
+    const checkpointSummary = contextSummaryMessage("Archived the large result.", {
+      sessionId: session.id,
+      throughEventId: covered.at(-1)!.eventId,
+    });
+    checkpointSummaryContent = checkpointSummary.content;
     await run.recordCheckpoint({
       checkpointId: "checkpoint",
       coveredEventCount: covered.length,
       throughEventId: covered.at(-1)!.eventId,
       sourceDigest: computeCheckpointSourceDigest(covered),
-      summary: contextSummaryMessage("Archived the large result."),
+      summary: checkpointSummary,
     });
     assert.deepEqual(await run.readContextCompactionBoundary(), {
       checkpointId: "checkpoint",
@@ -157,10 +163,7 @@ test("Tool projection decisions are durable, read-only on replay, and bound to t
     );
   });
   await session.recover();
-  assert.equal(
-    (await run.readModelHistory())[0]?.content,
-    contextSummaryMessage("Archived the large result.").content,
-  );
+  assert.equal((await run.readModelHistory())[0]?.content, checkpointSummaryContent);
 });
 
 test("Tool projection active 2048/256 thresholds and stale two-user-turn protection", async (t) => {

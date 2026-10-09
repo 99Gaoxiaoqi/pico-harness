@@ -156,7 +156,10 @@ test("RuntimeProjectionService outputs are deepStrictEqual with the underlying p
       eventId: event.eventId,
       message: projectToMessage(event),
     }));
-  const checkpointSummary = contextSummaryMessage("checkpoint summary");
+  const checkpointSummary = contextSummaryMessage("checkpoint summary", {
+    sessionId: SESSION_ID,
+    throughEventId: coveredEntries.at(-1)!.eventId,
+  });
   await store.append(
     {
       schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,

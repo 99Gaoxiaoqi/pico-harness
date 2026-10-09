@@ -1,3 +1,4 @@
+import { isValidStoredCompactionSummary } from "./history-compact-summary-validation.js";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import {
@@ -286,31 +287,36 @@ function resolveEvidence(
       visiting.has(previous.eventId)
     )
       return undefined;
-    if (previous.data.summary.providerData?.picoSummaryFormat === "sections_v2") {
-      const previousMetadata = previous.data.summary.providerData[HANDOFF_EVIDENCE_METADATA_KEY];
-      const previousBody = unwrapCompactionSummary(previous.data.summary.content);
-      const previousReferences = previousBody && extractCompactionEvidenceReferences(previousBody);
-      if (!previousBody || !previousReferences || !isCompactionEvidenceMetadata(previousMetadata))
-        return undefined;
-      visiting.add(previous.eventId);
-      const expected = resolveEvidence(
-        events.slice(0, previousIndex),
-        {
-          sessionId: input.sessionId,
-          throughEventId: previous.data.throughEventId,
-          ...(previous.data.previousCheckpointId
-            ? { previousCheckpointId: previous.data.previousCheckpointId }
-            : {}),
-          summaryText: previousBody,
-          references: previousReferences,
-        },
-        sequences,
-        visiting,
-        previousMetadata,
-      );
-      visiting.delete(previous.eventId);
-      if (!expected || !isDeepStrictEqual(previousMetadata, expected)) return undefined;
-    }
+    if (
+      !isValidStoredCompactionSummary(
+        previous.data.summary.content,
+        previous.data.summary.providerData?.picoSummaryFormat,
+      )
+    )
+      return undefined;
+    const previousMetadata = previous.data.summary.providerData?.[HANDOFF_EVIDENCE_METADATA_KEY];
+    const previousBody = unwrapCompactionSummary(previous.data.summary.content);
+    const previousReferences = previousBody && extractCompactionEvidenceReferences(previousBody);
+    if (!previousBody || !previousReferences || !isCompactionEvidenceMetadata(previousMetadata))
+      return undefined;
+    visiting.add(previous.eventId);
+    const expected = resolveEvidence(
+      events.slice(0, previousIndex),
+      {
+        sessionId: input.sessionId,
+        throughEventId: previous.data.throughEventId,
+        ...(previous.data.previousCheckpointId
+          ? { previousCheckpointId: previous.data.previousCheckpointId }
+          : {}),
+        summaryText: previousBody,
+        references: previousReferences,
+      },
+      sequences,
+      visiting,
+      previousMetadata,
+    );
+    visiting.delete(previous.eventId);
+    if (!expected || !isDeepStrictEqual(previousMetadata, expected)) return undefined;
   }
   const resolved: CompactionEvidenceReference[] = [];
   for (const eventId of references) {
