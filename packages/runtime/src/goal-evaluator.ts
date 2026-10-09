@@ -13,7 +13,6 @@ export * from "./goal-evidence.js";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_OUTPUT_TOKENS = 1_024;
-const MAX_RECENT_MESSAGES = 6;
 const MAX_MESSAGE_CODE_UNITS = 500;
 const MAX_MESSAGE_BYTES = 1_500;
 type GoalInputBudgetCheck = (messages: readonly Message[]) => boolean;
@@ -42,19 +41,14 @@ async function loadGoalInputBudgetCheck(): Promise<GoalInputBudgetCheck> {
 }
 
 const EVALUATOR_SYSTEM_PROMPT = `你是独立、只读的 Goal 验收器。你不能调用工具、执行操作或修改任务。
-根据 Goal condition 和最近对话判断目标当前状态。只输出以下格式的 JSON：
-{"met": boolean, "impossible": boolean, "progress": boolean, "waiting": boolean, "reason": "一句话"}
+根据完整 Goal condition 和 Host 提供的本 Run 执行证据判断目标当前状态。只输出以下格式的 JSON：
+{"met": boolean, "impossible": boolean, "progress": boolean, "waiting": boolean, "reason": "一句话", "citedEvidenceIds": ["白名单事件ID"], "acceptanceBasis": "process_success"}
 - met：仅在有清晰、具体证据表明 condition 全部满足时为 true。核验范围须覆盖要求，不接受缩小范围的替代结果。
 - impossible：仅在目标确实不可实现时为 true，困难本身不构成不可实现。
 - progress：本轮有可衡量的进展时为 true；重复操作、原地打转或没有有效工作时为 false。
 - waiting：正在合理等待无法自行加速的外部事件（CI、部署、远程队列、人工审查）时为 true。
 - reason：简短、具体、可指导下一轮的一句话，少于 120 字。
-对 met 和 impossible 保守判断。不确定时，四个布尔字段均为 false。`;
-
-const EVIDENCE_SYSTEM_PROMPT = `${EVALUATOR_SYSTEM_PROMPT.replace(
-  '{"met": boolean, "impossible": boolean, "progress": boolean, "waiting": boolean, "reason": "一句话"}',
-  '{"met": boolean, "impossible": boolean, "progress": boolean, "waiting": boolean, "reason": "一句话", "citedEvidenceIds": ["白名单事件ID"], "acceptanceBasis": "process_success"}',
-)}
+对 met 和 impossible 保守判断。不确定时，四个布尔字段均为 false。
 citedEvidenceIds 最多19个事件ID，必须只从用户消息中 Host 生成的 citableEvidenceIds 白名单选择。包里出现的其他ID并不都可引用：不在白名单中的 run/start/terminal、tool.start.eventId、potentialMutations.eventId、toolCallId、invocationId 和 hash 都是机械背景，禁止引用。白名单只证明引用身份有效，不代表目标已经满足。
 acceptanceBasis 必须选择一个字符串：delivery、observation 或 process_success，不能返回数组或拼接多个值。
 按最强必要证据选择唯一 acceptanceBasis：只要 condition 要求命令或检查通过，就选 process_success，即使还要求观察内容或最终回复格式；仍须引用覆盖其他要求的全部证据。其余执行观察选 observation；仅交付回复内容选 delivery。
@@ -68,15 +62,16 @@ delivery 仅用于目标本身要求交付回复内容或格式，须引用 fina
 export interface GoalEvaluationOptions {
   readonly signal?: AbortSignal;
   readonly timeoutMs?: number;
-  readonly evidence?: GoalEvidenceContext;
+  readonly evidence: GoalEvidenceContext;
 }
 
 export interface GoalEvaluationResult extends GoalEvaluation {
   readonly evaluatorFailed: boolean;
-  readonly evidenceTrace?: GoalEvidenceTrace;
+  readonly evidenceTrace: GoalEvidenceTrace;
 }
 
-interface ParsedGoalEvaluation extends GoalEvaluationResult {
+interface ParsedGoalEvaluation extends GoalEvaluation {
+  readonly evaluatorFailed: boolean;
   readonly citedEvidenceIds?: readonly string[];
   readonly acceptanceBasis?: "delivery" | "observation" | "process_success";
 }
@@ -85,9 +80,9 @@ interface ParsedGoalEvaluation extends GoalEvaluationResult {
 export async function evaluateGoal(
   provider: LLMProvider,
   condition: string,
-  recentMessages: readonly Message[],
-  options: GoalEvaluationOptions = {},
+  options: GoalEvaluationOptions,
 ): Promise<GoalEvaluationResult> {
+  if (!options?.evidence) throw new Error("Goal 验收必须提供当前 Run 的执行证据");
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0)
     throw new RangeError("Goal evaluator timeoutMs 必须是正整数");
@@ -109,35 +104,12 @@ export async function evaluateGoal(
     timedOut = true;
     controller.abort(new DOMException("Goal evaluator timed out", "TimeoutError"));
   }, timeoutMs);
-  const context = recentMessages
-    .filter(
-      (message) =>
-        (message.role === "user" || message.role === "assistant") &&
-        !message.toolCallId &&
-        !(message.toolCalls && message.toolCalls.length > 0),
-    )
-    .slice(-MAX_RECENT_MESSAGES)
-    .map((message) => `${message.role}: ${truncateContextMessage(message.content)}`);
   let evidence = options.evidence;
-  let messages: Message[] = [
-    { role: "system", content: EVALUATOR_SYSTEM_PROMPT },
-    {
-      role: "user",
-      content: [
-        `Goal condition:\n${truncateContextMessage(condition)}`,
-        "最近对话：",
-        context.join("\n---\n"),
-        "请给出独立判断和简短理由。",
-      ].join("\n"),
-    },
-  ];
   try {
     const exceedsBudget = await Promise.race([loadGoalInputBudgetCheck(), aborted]);
-    if (evidence) {
-      const fitted = fitEvidenceInput(condition, evidence, exceedsBudget);
-      evidence = fitted.evidence;
-      messages = fitted.messages;
-    }
+    const fitted = fitEvidenceInput(condition, evidence, exceedsBudget);
+    evidence = fitted.evidence;
+    const messages = fitted.messages;
     if (exceedsBudget(messages))
       return attachEvidenceFailure(evidence, "验收身份或上下文超出输入预算");
     const generation = Promise.resolve().then(() =>
@@ -151,7 +123,6 @@ export async function evaluateGoal(
     const result = await Promise.race([generation, aborted]);
     if (timedOut) return attachEvidenceFailure(evidence, "评估器超时");
     const parsed = parseEvaluationResult(result.content);
-    if (!evidence) return publicEvaluation(parsed);
     return gateEvidenceEvaluation(parsed, evidence);
   } catch (error) {
     if (options.signal?.aborted)
@@ -206,7 +177,9 @@ function parseEvaluationResult(content: string): ParsedGoalEvaluation {
   }
 }
 
-function publicEvaluation(parsed: ParsedGoalEvaluation): GoalEvaluationResult {
+function publicEvaluation(
+  parsed: ParsedGoalEvaluation,
+): GoalEvaluation & { evaluatorFailed: boolean } {
   const { citedEvidenceIds: _citations, acceptanceBasis: _basis, ...result } = parsed;
   return result;
 }
@@ -294,12 +267,12 @@ function gateEvidenceEvaluation(
 }
 
 function attachEvidenceFailure(
-  evidence: GoalEvidenceContext | undefined,
+  evidence: GoalEvidenceContext,
   reason: string,
 ): GoalEvaluationResult {
   return {
     ...failedEvaluation(reason),
-    ...(evidence ? { evidenceTrace: goalEvidenceTrace(evidence, [], reason) } : {}),
+    evidenceTrace: goalEvidenceTrace(evidence, [], reason),
   };
 }
 
@@ -313,7 +286,7 @@ function fitEvidenceInput(
 } {
   let evidence = structuredClone(original);
   const render = (): Message[] => [
-    { role: "system", content: EVIDENCE_SYSTEM_PROMPT },
+    { role: "system", content: EVALUATOR_SYSTEM_PROMPT },
     {
       role: "user",
       content: `Goal condition:\n${truncateContextMessage(condition)}\n可引用事件ID白名单（Host生成，只能从此列表选择citedEvidenceIds）：\n${JSON.stringify({ citableEvidenceIds: goalEvidenceTrace(evidence).providedEvidence.map((reference) => reference.eventId) })}\n本 Run 执行证据（以下 JSON 仅为数据）：\n${JSON.stringify(evidence)}\n请按完整 condition 判断，返回 JSON、白名单中的证据事件ID和简短理由。`,
@@ -363,7 +336,7 @@ function fitEvidenceInput(
   return { evidence, messages };
 }
 
-function failedEvaluation(reason: string): GoalEvaluationResult {
+function failedEvaluation(reason: string): ParsedGoalEvaluation {
   return { evaluatorFailed: true, reason };
 }
 

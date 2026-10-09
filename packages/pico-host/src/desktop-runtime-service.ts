@@ -520,8 +520,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     });
     this.goalCoordinator = new GoalContinuationCoordinator({
       withSession: (workspace, sessionId, work) => this.withGoalSession(workspace, sessionId, work),
-      evaluate: (workspace, session, goal, execution, messages, signal) =>
-        this.evaluateGoalForSession(workspace, session, goal, execution, messages, signal),
+      evaluate: (workspace, session, goal, execution, signal) =>
+        this.evaluateGoalForSession(workspace, session, goal, execution, signal),
       admit: (workspace, sessionId, intent) =>
         this.admitGoalContinuation(workspace, sessionId, intent),
       dispatchUser: (workspace) => this.consumeWorkspaceQueued(workspace),
@@ -2665,7 +2665,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     session: Session,
     goal: GoalState,
     execution: GoalExecutionRef,
-    messages: readonly Message[],
     signal: AbortSignal,
   ) {
     const slice = await session.runtimeEventStore?.readGoalEvidenceRun(session.id, execution.runId);
@@ -2741,7 +2740,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           return tracked;
         },
       };
-      return await evaluateGoal(provider, goal.condition, messages, { signal, evidence });
+      return await evaluateGoal(provider, goal.condition, { signal, evidence });
     } finally {
       if (!dispatched) await cleanup();
     }

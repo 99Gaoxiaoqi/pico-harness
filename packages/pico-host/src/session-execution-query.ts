@@ -650,20 +650,19 @@ function projectRun(
         break;
       }
       case "context.checkpoint.recorded": {
+        const format = event.data.summary.providerData?.["picoSummaryFormat"];
+        if (format !== "sections_v2") throw new Error("Unsupported compaction summary format");
         const i = add(event, "compaction", "上下文压缩", "completed");
         update(i, {
           output: preview(event.data.summary.content),
           compaction: {
-            format: String(event.data.summary.providerData?.["picoSummaryFormat"] ?? "未记录"),
+            format,
             taskAnchor: /当前(?:用户任务（原文）| Host Goal 任务（冻结条件）)：/u.test(
               event.data.summary.content,
             ),
-            evidenceStatus:
-              event.data.summary.providerData?.["picoSummaryFormat"] === "sections_v2"
-                ? event.data.summary.providerData?.["picoHandoffEvidence"]
-                  ? "verified"
-                  : "unavailable"
-                : "unknown",
+            evidenceStatus: event.data.summary.providerData?.["picoHandoffEvidence"]
+              ? "verified"
+              : "unavailable",
             evidenceIds: handoffEvidenceIds(
               event.data.summary.providerData?.["picoHandoffEvidence"],
             ),

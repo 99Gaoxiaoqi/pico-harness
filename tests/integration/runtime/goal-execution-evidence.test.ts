@@ -168,7 +168,7 @@ test("Goal evidence pipeline bounds the exact provider input and persists only f
       };
     },
   };
-  const result = await evaluateGoal(provider, goal.condition, [], { evidence: context });
+  const result = await evaluateGoal(provider, goal.condition, { evidence: context });
   assert.equal(dispatched, true);
   assert.equal(result.met, true);
   assert.ok(isGoalEvidenceTrace(result.evidenceTrace));
@@ -258,7 +258,6 @@ test("Goal trims Chinese-dense evidence against whole-request BPE while preservi
       },
     },
     goal.condition,
-    [],
     { evidence: dense },
   );
   assert.equal(dispatched, true);
@@ -272,7 +271,16 @@ test("Goal trims Chinese-dense evidence against whole-request BPE while preservi
         assert.fail("byte fallback must refuse an oversized request before dispatch"),
     },
     "<|endoftext|>",
-    Array.from({ length: 6 }, () => ({ role: "assistant" as const, content: chinese })),
+    {
+      evidence: {
+        ...dense,
+        identity: {
+          ...dense.identity,
+          invocationId: "龘".repeat(1_024),
+          turnId: "鬱".repeat(1_024),
+        },
+      },
+    },
   );
   assert.equal(
     fallback.evaluatorFailed,
@@ -321,7 +329,7 @@ test("Goal evidence refuses failed, missing, stale and foreign process proof des
       }),
     },
     {
-      name: "legacy facts absent",
+      name: "missing native process facts",
       change: (s) => {
         const { executionFacts: _facts, ...tool } = s.tools[0]!;
         return { ...s, tools: [tool] };
@@ -404,7 +412,6 @@ test("Goal evidence refuses failed, missing, stale and foreign process proof des
         }),
       },
       goal.condition,
-      [],
       { evidence: buildGoalEvidenceContext(identity, fixture.change(slice)) },
     );
     if (fixture.evaluatorFailed) assert.notEqual(result.met, true, fixture.name);
@@ -426,7 +433,6 @@ test("Goal evidence refuses failed, missing, stale and foreign process proof des
       }),
     },
     "写一篇介绍文件检查和测试策略的文章",
-    [],
     {
       evidence: buildGoalEvidenceContext(identity, {
         ...slice,
@@ -452,7 +458,6 @@ test("Goal evidence refuses failed, missing, stale and foreign process proof des
       }),
     },
     "检查通过",
-    [],
     { evidence: buildGoalEvidenceContext(identity, slice) },
   );
   assert.equal(

@@ -302,7 +302,7 @@ function StepDetail({
       {step.memory && <MemoryRecallDetail memory={step.memory} />}
       {step.kind === "model" &&
         step.purpose === "main" &&
-        step.memoryRecallCoverage !== "recorded" && (
+        step.memoryRecallCoverage === "unrecorded" && (
           <p className="inspector-timeline__warning">
             召回追踪未记录；无法确认本次记忆选择。请求与执行结果仍按已有事实展示。
           </p>
@@ -311,7 +311,7 @@ function StepDetail({
       {step.compaction && (
         <Detail
           label="压缩交接"
-          value={`格式：${step.compaction.format}\n任务锚：${step.compaction.taskAnchor ? "已保存" : "未记录"}\n来源：${step.compaction.evidenceStatus === "verified" ? "提交时已校验引用完整性" : step.compaction.evidenceStatus === "unknown" ? "旧记录未保存来源证明" : "来源不可用"}\n${step.compaction.evidenceIds.join("\n")}\n引用完整性不等于摘要结论正确。`}
+          value={`格式：${step.compaction.format}\n任务锚：${step.compaction.taskAnchor ? "已保存" : "未记录"}\n来源：${step.compaction.evidenceStatus === "verified" ? "提交时已校验引用完整性" : "来源不可用"}\n${step.compaction.evidenceIds.join("\n")}\n引用完整性不等于摘要结论正确。`}
         />
       )}
       {step.kind === "tool" && (

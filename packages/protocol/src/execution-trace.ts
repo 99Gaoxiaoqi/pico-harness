@@ -31,9 +31,9 @@ export interface RuntimeGoalEvaluationDetail {
   readonly evidenceTrace?: GoalEvidenceTrace;
 }
 export interface RuntimeCompactionDetail {
-  readonly format: string;
+  readonly format: "sections_v2";
   readonly taskAnchor: boolean;
-  readonly evidenceStatus: "verified" | "unknown" | "unavailable";
+  readonly evidenceStatus: "verified" | "unavailable";
   readonly evidenceIds: readonly string[];
 }
 

@@ -183,7 +183,7 @@ trigger  = baseline + reserve >= declaredContextWindowTokens
 - `coveredEventCount` 与 `throughEventId`：覆盖范围。
 - `sourceDigest`：覆盖来源的内容摘要，用于完整性校验。
 - `previousCheckpointId`：滚动更新关联。
-- 包装后的摘要消息，以及 `picoSummaryFormat = sections_v1` 等标记。
+- 包装后的摘要消息，以及 `picoSummaryFormat = sections_v2` 和 Host 校验的证据引用元数据。摘要固定包含 Goal、Progress、Key Decisions、Constraints、Next Steps、Critical Context、Evidence 七个章节；旧格式和无格式检查点不再加载。
 
 只有持久化成功后，后续模型视图才使用该检查点替换覆盖前缀。原始消息和工具结果仍然保留，UI 无须跟随模型视图删除旧聊天内容。
 

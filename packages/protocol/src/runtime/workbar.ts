@@ -1150,9 +1150,9 @@ const goalEvaluationDetailResult = exactResultShape(
   },
 );
 const compactionDetailResult = exactResultShape({
-  format: resultString,
+  format: resultOneOf(["sections_v2"]),
   taskAnchor: resultBoolean,
-  evidenceStatus: resultOneOf(["verified", "unknown", "unavailable"]),
+  evidenceStatus: resultOneOf(["verified", "unavailable"]),
   evidenceIds: resultStringArray,
 });
 const runtimeExecutionStepResult = exactResultShape(

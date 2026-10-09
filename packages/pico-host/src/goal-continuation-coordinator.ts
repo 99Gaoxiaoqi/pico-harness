@@ -3,7 +3,6 @@ import type {
   PersistedGoalState as GoalState,
   PersistedGoalContinuationIntent as GoalContinuationIntent,
   PersistedGoalExecutionRef as GoalExecutionRef,
-  Message,
 } from "@pico/core";
 import type { GoalManager, GoalEvaluation } from "@pico/runtime/goal-manager";
 import type { GoalEvidenceTrace } from "@pico/runtime/goal-evaluator";
@@ -32,7 +31,6 @@ export interface GoalContinuationDeps {
     session: Session,
     goal: GoalState,
     execution: GoalExecutionRef,
-    messages: readonly Message[],
     signal: AbortSignal,
   ): Promise<GoalEvaluation & { readonly evidenceTrace?: GoalEvidenceTrace }>;
   admit(
@@ -189,15 +187,6 @@ export class GoalContinuationCoordinator {
         await session.flushPersistence();
         return;
       }
-      // Read an immutable context at this Run's boundary before releasing control to the evaluator.
-      let messages: readonly Message[];
-      try {
-        messages = (await session.readHydrationSnapshot()).messages;
-      } catch (error) {
-        manager.pause(goal.id, `无法读取验收上下文：${String(error)}`);
-        await session.flushPersistence();
-        return;
-      }
       if (manager.getCurrent()?.status === "waiting") manager.wakeWaiting(goal.id);
       const captured = manager.snapshot();
       const active = captured.currentGoal!;
@@ -211,7 +200,6 @@ export class GoalContinuationCoordinator {
           session,
           active,
           execution,
-          messages,
           abort.signal,
         );
       } catch (error) {
