@@ -920,7 +920,9 @@ export class Session
         ...hydration,
         runtime: {
           ...hydration.runtime,
-          ...(currentRuntime.settings ? { settings: structuredClone(currentRuntime.settings) } : {}),
+          ...(currentRuntime.settings
+            ? { settings: structuredClone(currentRuntime.settings) }
+            : {}),
         },
       },
       runtimeSeedEntries: projectRuntimeSessionForkSeedEntries(entries),
