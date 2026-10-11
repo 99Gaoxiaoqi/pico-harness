@@ -13,6 +13,7 @@ import { createProvider } from "@pico/pico-host/provider/factory";
 import { resolveModelRouteCapabilities } from "@pico/runtime";
 import { AgentEngine } from "@pico/pico-host/agent-engine";
 import { ToolRegistry } from "@pico/pico-host/tool-registry";
+import { RUNTIME_MESSAGE_EVENT_ID } from "@pico/core";
 
 test("PDF页图工具结果重开后进入真实provider请求，完成整批工具后再发送图片并拒绝越权", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-document-page-"));
@@ -164,6 +165,17 @@ test("PDF页图工具结果重开后进入真实provider请求，完成整批工
     capability: session.runtimeEventCapability!,
     agentSwarmAuthorization: "none",
   });
+  const rawPage = (await activeRun.readModelHistory(true)).find(
+    (message) => message.toolCallId === "page",
+  )!;
+  assert.ok(rawPage[RUNTIME_MESSAGE_EVENT_ID]);
+  const resolvedPage = session.resolveModelMessageMedia(rawPage);
+  assert.equal(
+    resolvedPage[RUNTIME_MESSAGE_EVENT_ID],
+    rawPage[RUNTIME_MESSAGE_EVENT_ID],
+    "媒体补全必须保留记忆证据使用的Symbol事件ID",
+  );
+  assert.equal(rawPage.images, undefined, "不能修改权威历史消息");
   await activeRun.run(() => engine.run(session));
   assert.equal(session.getHistory().at(-1)!.content, "PAGE_OK");
   assert.match(body, /image_url/u);

@@ -3,7 +3,7 @@ import { constants } from "node:fs";
 import { open, realpath, stat } from "node:fs/promises";
 import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 import { lexer, walkTokens } from "marked";
-import type { ImagePart, Message } from "@pico/core";
+import { RUNTIME_MESSAGE_EVENT_ID, type ImagePart, type Message } from "@pico/core";
 import {
   rewriteSavedAiSdkMedia,
   isSavedAiSdkProjectionCurrent,
@@ -481,6 +481,10 @@ export function resolveSessionMediaReferences(
   if (!replacements.size && sourceImages.length === (message.images?.length ?? 0)) return message;
   const replayWasValid = isSavedAiSdkProjectionCurrent(message);
   const projected = structuredClone({ ...message, images });
+  // structuredClone intentionally drops symbol keys. This one binds memory
+  // evidence to the canonical event and must survive disposable media hydration.
+  if (message[RUNTIME_MESSAGE_EVENT_ID] !== undefined)
+    projected[RUNTIME_MESSAGE_EVENT_ID] = message[RUNTIME_MESSAGE_EVENT_ID];
   const replace = (text: string) =>
     text.replace(/pico:\/\/artifact\/([^/?#\s)]+)/gu, (uri, id: string) => {
       const replacement = replacements.get(decodeURIComponent(id));
