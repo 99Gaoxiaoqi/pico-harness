@@ -412,6 +412,42 @@ export function resolveSessionMediaReferences(
 ): Message {
   const repository = new SqliteSessionWorkbarRepository({ storageRoot });
   const sourceImages = [...(message.images ?? [])];
+  // Tool observations are canonical text, not message.committed media. Resolve
+  // only explicit image links backed by this session's immutable artifacts.
+  if (message.role === "user" && message.toolCallId !== undefined) {
+    for (const match of message.content.matchAll(
+      /!\[[^\]\n]*\]\(pico:\/\/artifact\/([^/?#\s)]+)\)/gu,
+    )) {
+      if (sourceImages.length >= MEDIA_MAX_REFERENCES) break;
+      try {
+        const artifactId = decodeURIComponent(match[1]!);
+        if (
+          artifactId.length > 256 ||
+          sourceImages.some(
+            (image) => image.type === "image_artifact" && image.artifactId === artifactId,
+          )
+        )
+          continue;
+        const artifact = repository.queryArtifacts({ sessionId, artifactId }).artifacts[0];
+        if (
+          !artifact ||
+          !artifact.mimeType.startsWith("image/") ||
+          artifact.sizeBytes <= 0 ||
+          artifact.sizeBytes > MODEL_IMAGE_MAX_BYTES
+        )
+          continue;
+        sourceImages.push({
+          type: "image_artifact",
+          artifactId,
+          mimeType: artifact.mimeType,
+          sizeBytes: artifact.sizeBytes,
+          digest: artifact.digest,
+        });
+      } catch {
+        /* Missing, foreign or malformed references remain inert text. */
+      }
+    }
+  }
   // Generated Markdown images remain compact output artifacts in the ledger, but
   // become verified visual references in disposable model history for follow-up edits.
   if (message.role === "assistant" && Array.isArray(message.providerData?.picoMedia)) {

@@ -46,7 +46,11 @@ export interface DocumentManifest {
   readonly pages?: number;
   readonly paragraphs?: number;
   readonly lines?: number;
-  readonly sheets?: readonly { readonly name: string; readonly rows: number; readonly columns: number }[];
+  readonly sheets?: readonly {
+    readonly name: string;
+    readonly rows: number;
+    readonly columns: number;
+  }[];
   readonly warnings: readonly string[];
 }
 

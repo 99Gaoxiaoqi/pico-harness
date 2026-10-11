@@ -426,12 +426,38 @@ const goalToolLabels: Readonly<Record<string, string>> = {
   clear_goal: "清除 Goal",
 };
 function toolLabel(name: string): string {
+  if (name === "document") return "文档";
   return goalToolLabels[name] ?? name;
 }
 
 // Keep the full invocation in the disclosure. The row only needs a readable
 // destination, command, or query, including while wire arguments are streaming.
 function toolTargetPreview(item: ToolItemView): string | undefined {
+  if (item.toolName === "document" && item.detail) {
+    try {
+      const args = JSON.parse(item.detail) as Record<string, unknown>;
+      const labels: Record<string, string> = {
+        inspect: "查看概况",
+        read: "读取内容",
+        search: "搜索内容",
+        view: "查看页面",
+        analyze: "计算表格",
+      };
+      if (args && typeof args.action === "string" && labels[args.action]) {
+        return [
+          labels[args.action],
+          typeof args.page === "number" ? `第 ${args.page} 页` : undefined,
+          typeof args.sheet === "string" ? args.sheet : undefined,
+          typeof args.range === "string" ? args.range : undefined,
+          typeof args.query === "string" ? args.query : undefined,
+        ]
+          .filter(Boolean)
+          .join(" · ");
+      }
+    } catch {
+      /* Streaming arguments may be incomplete. */
+    }
+  }
   let target = item.title !== item.toolName ? item.title : undefined;
   if (!target && item.detail) {
     try {

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { crc32, deflateSync } from "node:zlib";
 import test from "node:test";
+import { createCanvas } from "@napi-rs/canvas";
 import {
   createRuntimeRequest,
   type RuntimeArtifactInputAttachment,
@@ -21,7 +22,7 @@ import { documentPdf, documentWord, documentExcel } from "../fixtures/document-a
 import { loadUserDefaultRealModel } from "./real-llm-user-model.js";
 
 test(
-  "real model: artifact上传的文本、PDF、Word、Excel和图片进入同一会话请求",
+  "real model: 上传附件按需检索长文、读取扫描PDF并计算Excel",
   { timeout: 240_000 },
   async (t) => {
     const model = await loadUserDefaultRealModel({
@@ -43,7 +44,7 @@ test(
     await mkdir(skillDir, { recursive: true });
     await writeFile(
       join(skillDir, "SKILL.md"),
-      "---\nname: attachments-only\ndescription: Read the supplied attachments only\nallowed-tools: []\n---\nAnswer from the supplied attachment text and image. Do not call tools.\n",
+      "---\nname: attachments-only\ndescription: Read and analyze the supplied attachments\nallowed-tools: [document]\n---\nUse the document tool to read/search/view/analyze the supplied files. Use only evidence from these attachments. Cite locations in the requested JSON fields.\n",
     );
     const userConfigStore = new UserConfigStore({ picoHome });
     const secretEnv = "PICO_FILE_UPLOAD_REAL_KEY";
@@ -87,11 +88,14 @@ test(
     sessionId = created.session.sessionId;
     const scope = { workspacePath, sessionId };
     const marker = `TXT_${randomUUID().replaceAll("-", "").slice(0, 12)}`;
+    const scanMarker = String(Math.floor(100000 + Math.random() * 900000));
     const files = [
       {
         name: "notes.txt",
         mimeType: "text/plain",
-        bytes: Buffer.from(`这份UTF-8文本中的唯一标记是 ${marker}。`),
+        bytes: Buffer.from(
+          `${"普通记录，待查询的标记在文件末尾。\n".repeat(9000)}VERIFICATION_TOKEN=${marker}\n`,
+        ),
       },
       { name: "sample.pdf", mimeType: "application/pdf", bytes: documentPdf() },
       {
@@ -105,6 +109,7 @@ test(
         bytes: await documentExcel(),
       },
       { name: "color.png", mimeType: "image/png", bytes: redPng() },
+      { name: "scanned.pdf", mimeType: "application/pdf", bytes: scannedPdf(scanMarker) },
     ];
     const attachments: RuntimeArtifactInputAttachment[] = [];
     for (const file of files) {
@@ -156,7 +161,7 @@ test(
         ...scope,
         input: {
           kind: "text",
-          text: "请根据这五个附件回答，只输出JSON对象，不调用工具：txtToken为文本唯一标记；pdfText为PDF正文；wordTitle为Word标题；sheetNames为Excel全部工作表名称数组；emptySecondCell为Excel“空列”那行第二列是否为空（布尔）；thirdCell为该行第三列文本；imageColor为图片主色英文单词。不要猜测无法读取的内容。",
+          text: "请根据附件回答，完成必要工具调用后只输出JSON对象：搜索长文本中的VERIFICATION_TOKEN，txtToken为该标记值，txtSource为行号；pdfText为sample.pdf正文；wordTitle为Word标题；sheetNames为Excel全部工作表名称数组；emptySecondCell为Excel‘空列’那行第二列是否为空（布尔）；thirdCell为该行第三列文本；用document analyze计算预算工作表B2:B3，header=false，operation=sum，column=B，budgetSum为数值；imageColor为color.png主色英文单词；scanned.pdf是纯图片扫描页，用document view查看第1页，scanCode为图中的六位数字字符串。不要猜测未读取的内容。",
           skills: [{ name: "attachments-only" }],
           attachments,
         },
@@ -182,15 +187,22 @@ test(
       assert.ok(json, "真实模型没有返回可验证的JSON答案");
       const result = record(JSON.parse(json));
       assert.equal(result.txtToken, marker);
+      assert.match(String(result.txtSource), /9001/u);
       assert.match(String(result.pdfText), /Pico upload\s*42/u);
       assert.equal(result.wordTitle, "Pico 文档上传");
       assert.deepEqual(result.sheetNames, ["预算", "指标"]);
       assert.equal(result.emptySecondCell, true);
       assert.equal(result.thirdCell, "仍在第三列");
       assert.match(String(result.imageColor), /^red$/iu);
+      assert.equal(result.budgetSum, 42);
+      assert.equal(result.scanCode, scanMarker);
+      const documentCalls = messages
+        .flatMap((message) => message.toolCalls ?? [])
+        .filter((call) => call.name === "document");
+      const actions = documentCalls.map((call) => record(JSON.parse(call.arguments)).action);
       assert.ok(
-        messages.every((message) => !message.toolCalls?.length),
-        "附件读取不应触发工具执行",
+        ["search", "view", "analyze"].every((action) => actions.includes(action)),
+        "真实模型应通过检索、页图与程序统计取得证据",
       );
       const input = messages.find((message) => message.role === "user")!;
       assert.equal(input.images?.length, 1);
@@ -205,7 +217,7 @@ test(
       assert.ok(!JSON.stringify(input).includes(files[4]!.bytes.toString("base64")));
       assert.ok(input.content.length < 20_000);
       t.diagnostic(
-        `真实附件验收通过：${model.route.id}；5类文件；图片使用artifact引用；无工具调用。`,
+        `真实附件验收通过：${model.route.id}；长文末尾定位、扫描页视觉、Excel计算；document调用${documentCalls.length}次。`,
       );
     } finally {
       lease.release();
@@ -243,4 +255,58 @@ function redPng(): Buffer {
     chunk("IDAT", deflateSync(scanlines)),
     chunk("IEND", Buffer.alloc(0)),
   ]);
+}
+
+/** Image-only PDF: the verification code exists only as pixels, never PDF text. */
+function scannedPdf(code: string): Buffer {
+  const canvas = createCanvas(800, 400);
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "white";
+  ctx.fillRect(0, 0, 800, 400);
+  ctx.fillStyle = "black";
+  ctx.font = "bold 80px sans-serif";
+  ctx.fillText(`CODE ${code}`, 70, 220);
+  const jpeg = canvas.toBuffer("image/jpeg");
+  const page = Buffer.from("q 800 0 0 400 0 0 cm /Im1 Do Q");
+  const objects = [
+    Buffer.from("<< /Type /Catalog /Pages 2 0 R >>"),
+    Buffer.from("<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+    Buffer.from(
+      "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 800 400] /Resources << /XObject << /Im1 4 0 R >> >> /Contents 5 0 R >>",
+    ),
+    Buffer.concat([
+      Buffer.from(
+        `<< /Type /XObject /Subtype /Image /Width 800 /Height 400 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpeg.length} >>\nstream\n`,
+      ),
+      jpeg,
+      Buffer.from("\nendstream"),
+    ]),
+    Buffer.concat([
+      Buffer.from(`<< /Length ${page.length} >>\nstream\n`),
+      page,
+      Buffer.from("\nendstream"),
+    ]),
+  ];
+  const chunks = [Buffer.from("%PDF-1.4\n")];
+  const offsets = [0];
+  let length = chunks[0]!.length;
+  objects.forEach((object, index) => {
+    offsets.push(length);
+    const chunk = Buffer.concat([
+      Buffer.from(`${index + 1} 0 obj\n`),
+      object,
+      Buffer.from("\nendobj\n"),
+    ]);
+    chunks.push(chunk);
+    length += chunk.length;
+  });
+  chunks.push(
+    Buffer.from(
+      `xref\n0 6\n0000000000 65535 f \n${offsets
+        .slice(1)
+        .map((offset) => `${String(offset).padStart(10, "0")} 00000 n \n`)
+        .join("")}trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${length}\n%%EOF\n`,
+    ),
+  );
+  return Buffer.concat(chunks);
 }
