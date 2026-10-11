@@ -410,17 +410,39 @@ export function resolveSessionMediaReferences(
   sessionId: string,
   message: Message,
 ): Message {
-  if (!message.images?.some((image) => image.type === "image_artifact")) return message;
   const repository = new SqliteSessionWorkbarRepository({ storageRoot });
+  const sourceImages = [...(message.images ?? [])];
+  // Generated Markdown images remain compact output artifacts in the ledger, but
+  // become verified visual references in disposable model history for follow-up edits.
+  if (message.role === "assistant" && Array.isArray(message.providerData?.picoMedia)) {
+    for (const ref of message.providerData.picoMedia as RuntimeMediaReference[]) {
+      if (
+        ref.kind !== "image" ||
+        sourceImages.some(
+          (image) => image.type === "image_artifact" && image.artifactId === ref.artifactId,
+        )
+      )
+        continue;
+      const image: ArtifactImage = {
+        type: "image_artifact",
+        artifactId: ref.artifactId,
+        mimeType: ref.mimeType,
+        sizeBytes: ref.sizeBytes,
+        digest: ref.digest,
+      };
+      if (ownedImage(repository, sessionId, image)) sourceImages.push(image);
+    }
+  }
+  if (!sourceImages.some((image) => image.type === "image_artifact")) return message;
   const replacements = new Map<string, string>();
-  const images = message.images.map((image) => {
+  const images = sourceImages.map((image) => {
     if (image.type !== "image_artifact") return image;
     const artifact = ownedImage(repository, sessionId, image);
     if (!artifact || artifact.artifactId === image.artifactId) return image;
     replacements.set(image.artifactId, artifact.artifactId);
     return { ...image, artifactId: artifact.artifactId };
   });
-  if (!replacements.size) return message;
+  if (!replacements.size && sourceImages.length === (message.images?.length ?? 0)) return message;
   const replayWasValid = isSavedAiSdkProjectionCurrent(message);
   const projected = structuredClone({ ...message, images });
   const replace = (text: string) =>

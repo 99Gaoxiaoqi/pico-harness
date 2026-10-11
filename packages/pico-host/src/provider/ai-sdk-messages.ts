@@ -101,6 +101,12 @@ export function toAiSdkMessages(
   };
   const searchAnchors = wire === "responses" && options?.responsesWebSearchAnchors === true;
   const toolNames = new Map<string, string>();
+  // Chat Completions and Anthropic do not accept image inputs in assistant
+  // messages. Carry generated outputs into the next user turn as references.
+  const generatedReferences: (
+    | { type: "file"; data: string | URL; mediaType: string }
+    | { type: "text"; text: string }
+  )[] = [];
   for (const message of messages) {
     if (message.role === "system") {
       result.push({ role: "system", content: projectMediaTextForModel(message.content) });
@@ -124,12 +130,14 @@ export function toAiSdkMessages(
     } else if (message.role === "user") {
       result.push({
         role: "user",
-        content: message.images?.length
-          ? [
-              ...message.images.map(materialize),
-              { type: "text", text: projectMediaTextForModel(message.content) },
-            ]
-          : projectMediaTextForModel(message.content),
+        content:
+          message.images?.length || generatedReferences.length
+            ? [
+                ...generatedReferences.splice(0),
+                ...(message.images ?? []).map(materialize),
+                { type: "text", text: projectMediaTextForModel(message.content) },
+              ]
+            : projectMediaTextForModel(message.content),
       });
     } else {
       const saved = savedContent(message, wire);
@@ -207,6 +215,21 @@ export function toAiSdkMessages(
           )
           .map((part) => (part.type === "tool-call" ? part.toolCallId : "")),
       );
+      for (let index = content.length - 1; index >= 0; index--) {
+        const part = content[index]!;
+        if (part.type === "file" && part.mediaType.startsWith("image/")) {
+          generatedReferences.unshift(
+            part as { type: "file"; data: string | URL; mediaType: string },
+          );
+          content.splice(index, 1);
+        }
+      }
+      if (generatedReferences.length && generatedReferences[0]?.type !== "text") {
+        generatedReferences.unshift({
+          type: "text",
+          text: "Reference images from earlier assistant output in this conversation:",
+        });
+      }
       result.push({
         role: "assistant",
         content: searchAnchors
@@ -230,6 +253,9 @@ export function toAiSdkMessages(
         for (const part of saved.toolResults) toolNames.delete(part.toolCallId);
       }
     }
+  }
+  if (generatedReferences.length && toolNames.size === 0) {
+    result.push({ role: "user", content: generatedReferences });
   }
   return result;
 }

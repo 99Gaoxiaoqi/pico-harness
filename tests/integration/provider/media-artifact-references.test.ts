@@ -136,6 +136,29 @@ test("媒体消息仅持久引用，重开后真实请求按视觉能力/预算�
   assert.ok(item.kind === "assistantMessage");
   assert.equal(item.media?.[0]?.sizeBytes, largePng.length, "桌面未过滤2–10MiB生成图片");
   const history = session.getModelContext();
+  const generatedHistory = history.find((message) =>
+    message.content.includes("generated image 1"),
+  )!;
+  assert.equal(
+    generatedHistory.images?.[0]?.type,
+    "image_artifact",
+    "生成图在重开后的模型上下文恢复成参考图",
+  );
+  const generatedRequest = toAiSdkMessages(
+    [generatedHistory, { role: "user", content: "Edit the previous image" }],
+    "openai",
+    { vision: true, readImageArtifact: (image) => session.readMediaArtifact(image) },
+  );
+  const referenceTurn = generatedRequest.find((message) => message.role === "user")!;
+  assert.ok(
+    JSON.stringify(referenceTurn).includes(largePng.toString("base64")),
+    "参考图必须出现在模型支持的user图片输入中",
+  );
+  assert.ok(
+    !JSON.stringify(generatedRequest[0]).includes(largePng.toString("base64")),
+    "不把图片放进会被Chat Completions丢弃的assistant文件字段",
+  );
+
   assert.equal(
     session.readMediaArtifact(history[0]!.images![0] as typeof artifact),
     png.toString("base64"),
