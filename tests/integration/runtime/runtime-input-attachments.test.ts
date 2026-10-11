@@ -112,3 +112,41 @@ test("附件仅限 text 输入：skill 输入带 attachments 被拒（exact shap
     /不允许字段 attachments/,
   );
 });
+
+test("会话文件引用可与旧图片一起发送且拒绝未绑定摘要或伪造元数据", () => {
+  const artifact = { type: "artifact", artifactId: "document:report", digest: "a".repeat(64) };
+  const params = parseStrictRuntimeParams("session.send", {
+    ...sendParams({ kind: "text", text: "", attachments: [artifact, attachment()] }),
+    sessionId: "session-1",
+  });
+  assert.deepEqual(params.input.attachments, [artifact, attachment()]);
+  for (const bad of [
+    { ...artifact, digest: "invalid" },
+    { ...artifact, path: "/private/file" },
+  ]) {
+    assert.throws(
+      () =>
+        parseStrictRuntimeParams(
+          "session.send",
+          sendParams({
+            kind: "text",
+            text: "分析",
+            attachments: [bad],
+          }),
+        ),
+      /digest|path/,
+    );
+  }
+  assert.throws(
+    () =>
+      parseStrictRuntimeParams(
+        "session.send",
+        sendParams({
+          kind: "text",
+          text: "分析",
+          attachments: Array.from({ length: 9 }, () => artifact),
+        }),
+      ),
+    /最多 8/,
+  );
+});

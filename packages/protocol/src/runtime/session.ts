@@ -59,12 +59,21 @@ export type RuntimeSessionSettings = {
   readonly additionalDirectories?: readonly string[];
 };
 
-/** text 输入的内联图片附件（仅 base64；数量/大小上限在参数校验层强制）。 */
-export type RuntimeInputAttachment = JsonObject & {
+/** 兼容旧客户端的小体积内联图片。 */
+export type RuntimeInlineImageAttachment = JsonObject & {
   readonly type: "image_base64";
   readonly mimeType: string;
   readonly data: string;
 };
+
+/** 已提交到同一会话的附件；元数据以 Host 保存的记录为准。 */
+export type RuntimeArtifactInputAttachment = JsonObject & {
+  readonly type: "artifact";
+  readonly artifactId: string;
+  readonly digest: string;
+};
+
+export type RuntimeInputAttachment = RuntimeInlineImageAttachment | RuntimeArtifactInputAttachment;
 
 export type RuntimeSkillReference = JsonObject & {
   readonly name: string;
@@ -78,7 +87,7 @@ export type RuntimeTextUserInput = JsonObject & {
   readonly kind: "text";
   readonly text: string;
   readonly skills?: readonly RuntimeSkillReference[];
-  /** 图片附件（3-D 漏账补齐；无附件时省略字段，空数组非法）。 */
+  /** 会话附件；无附件时省略字段，空数组非法。 */
   readonly attachments?: readonly RuntimeInputAttachment[];
 };
 
@@ -217,7 +226,8 @@ export const runtimeSkillReferencesResult: RuntimeResultRule = (value, path) => 
 };
 
 /** 图片附件上限对齐 headless-one-shot-runner（4 张 / 总 256KB 解码后字节）。 */
-const MAX_INPUT_ATTACHMENTS = 4;
+const MAX_INPUT_ATTACHMENTS = 8;
+const MAX_INLINE_IMAGES = 4;
 
 const MAX_INPUT_ATTACHMENTS_TOTAL_BASE64_CHARS = Math.floor((256 * 1024 * 4) / 3);
 
@@ -225,10 +235,26 @@ const runtimeInputAttachmentsParam: RuntimeParamRule = (value, path) => {
   if (!Array.isArray(value)) throw invalidParams(`${path} 必须是附件数组`);
   if (value.length === 0) throw invalidParams(`${path} 不能为空数组（无附件时省略字段）`);
   if (value.length > MAX_INPUT_ATTACHMENTS) {
-    throw invalidParams(`${path} 最多 ${MAX_INPUT_ATTACHMENTS} 张图片`);
+    throw invalidParams(`${path} 最多 ${MAX_INPUT_ATTACHMENTS} 个附件`);
   }
   let totalChars = 0;
+  let inlineCount = 0;
   for (const [index, item] of value.entries()) {
+    if (isJsonObject(item) && item["type"] === "artifact") {
+      assertNestedShape(item, `${path}[${index}]`, {
+        type: oneOfParam(["artifact"]),
+        artifactId: boundedNonEmptyStringParam(4096),
+        digest: (digest, digestPath) => {
+          if (typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest)) {
+            throw invalidParams(`${digestPath} 必须是 SHA-256 摘要`);
+          }
+        },
+      });
+      continue;
+    }
+    if (++inlineCount > MAX_INLINE_IMAGES) {
+      throw invalidParams(`${path} 最多 4 张内联图片`);
+    }
     assertNestedShape(item, `${path}[${index}]`, {
       type: oneOfParam(["image_base64"]),
       mimeType: boundedNonEmptyStringParam(128),
