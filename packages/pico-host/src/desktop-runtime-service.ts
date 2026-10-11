@@ -55,6 +55,7 @@ import { SessionForkService } from "./session-fork-service.js";
 import { projectRuntimeSessionState } from "@pico/runtime/session-runtime-projection";
 import { globalSessionManager, Session } from "./session.js";
 import { resolveSessionMediaReferences } from "./session-media.js";
+import { resolveSessionInputAttachments } from "./session-input-attachments.js";
 import { canonicalResourceName, type PersistedSessionSettings } from "@pico/core";
 import {
   getOrCreateSessionSettings,
@@ -260,6 +261,7 @@ const UNSUPPORTED_DESKTOP_METHODS: ReadonlySet<string> = new Set([
 interface ResolvedRuntimeUserInput {
   readonly input?: RuntimeUserInput;
   readonly prompt: string;
+  readonly displayText?: string;
   readonly execution?: DaemonRunExecution;
   /** text 输入的图片附件（3-D 漏账补齐）：daemon 走 resumeExistingSession，
    * 用户消息由本层 commit——附件必须挂在本层而非 engine executor。 */
@@ -1750,7 +1752,11 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
             ...(targetMessage.images?.length ? { images: targetMessage.images } : {}),
           },
         );
-        const resolvedInput = await this.resolveRuntimeUserInput(idlePath, revisionInput);
+        const resolvedInput = await this.resolveRuntimeUserInput(
+          idlePath,
+          revisionInput,
+          targetSessionId,
+        );
         return {
           workspacePath: idlePath,
           input: revisionInput,
@@ -2941,6 +2947,14 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     readonly resolvedInput?: ResolvedRuntimeUserInput;
   }): Promise<JsonObject> {
     const behavior = params.behavior ?? "auto";
+    const hasAttachments =
+      params.input.kind === "text" && Boolean(params.input.attachments?.length);
+    if (hasAttachments && behavior === "steer") {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        "引导仅支持普通文本；包含附件的消息请继续排队。",
+      );
+    }
     if (params.sessionId && params.initialSettings) {
       throw new RuntimeProtocolError(
         RUNTIME_ERROR_CODES.INVALID_PARAMS,
@@ -3084,8 +3098,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       const resolution =
         params.resolvedInput ??
         initialResolution ??
-        (activation
-          ? await this.resolveRuntimeUserInput(params.workspacePath, params.input)
+        (activation || hasAttachments
+          ? await this.resolveRuntimeUserInput(params.workspacePath, params.input, sessionId)
           : undefined);
       const admittedInput = resolution?.input ?? params.input;
       if (activeRun) {
@@ -3096,7 +3110,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
             "Agent/Skill 激活必须在新 Run 中应用；请选择 Queue 或 Replace",
           );
         }
-        if (behavior === "queue" || behavior === "replace" || activation) {
+        if (behavior === "queue" || behavior === "replace" || activation || hasAttachments) {
           if (params.resolvedInput?.images?.length) {
             throw new RuntimeProtocolError(
               RUNTIME_ERROR_CODES.CONFLICT,
@@ -3261,7 +3275,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     },
   ): Promise<JsonObject> {
     try {
-      const resolved = resolvedInput ?? (await this.resolveRuntimeUserInput(workspacePath, input));
+      const resolved =
+        resolvedInput ?? (await this.resolveRuntimeUserInput(workspacePath, input, sessionId));
       // A conversation-first client is allowed to send its first message without opening the
       // settings screen. Materialize the effective user/project defaults before run.start so the
       // production host observes the same durable Session settings as an explicit settings.get.
@@ -3274,7 +3289,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         workspacePath,
         sessionId,
         resolved.prompt,
-        runtimeInputDisplay(canonicalInput),
+        resolved.displayText ?? runtimeInputDisplay(canonicalInput),
         canonicalInput,
         identity.inputKey,
         resolved.images,
@@ -3396,6 +3411,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const canonical = await this.requireTrustedSession(params.workspacePath, params.sessionId);
     const queueId = requireText(params.queueId, "queueId");
     const input = normalizeRuntimeUserInput(params.input);
+    if (input.kind === "text" && input.attachments?.length) {
+      await this.resolveRuntimeUserInput(canonical, input, params.sessionId);
+    }
     const queuedInput = await this.withSessionAdmission(canonical, params.sessionId, async () => {
       const steerKey = queueSteerKey(params.sessionId, queueId);
       if (
@@ -3855,12 +3873,32 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private async resolveRuntimeUserInput(
     workspacePath: string,
     input: RuntimeUserInput,
+    sessionId?: string,
   ): Promise<ResolvedRuntimeUserInput> {
+    const attachments =
+      input.kind === "text" && input.attachments?.length
+        ? await resolveSessionInputAttachments({
+            attachments: input.attachments,
+            ...(sessionId ? { sessionId } : {}),
+            repository: this.workbarRepository(await this.requireTrustedWorkspace(workspacePath)),
+          })
+        : undefined;
+    const attachmentFields = attachments
+      ? {
+          displayText: [runtimeInputDisplay(input) || "请查看附件", attachments.displaySuffix]
+            .filter(Boolean)
+            .join("\n\n"),
+          ...(attachments.images.length ? { images: attachments.images } : {}),
+        }
+      : {};
+    const withAttachments = (prompt: string) =>
+      [prompt || (attachments ? "请查看附件" : ""), attachments?.promptSuffix]
+        .filter(Boolean)
+        .join("\n\n");
     if (input.kind === "text" && !input.skills) {
-      const images = inputAttachmentsToImages(input.attachments);
       return {
-        prompt: input.text,
-        ...(images ? { images } : {}),
+        prompt: withAttachments(input.text),
+        ...attachmentFields,
         ...(input.orchestrationMode
           ? { execution: { orchestrationMode: input.orchestrationMode } }
           : {}),
@@ -3995,11 +4033,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         }).prompt,
     );
     if (input.kind === "text") prompts.push(`用户任务：\n${input.text}`);
-    const images = input.kind === "text" ? inputAttachmentsToImages(input.attachments) : undefined;
     return {
-      prompt: prompts.join("\n\n"),
+      prompt: withAttachments(prompts.join("\n\n")),
       ...(input.kind === "text" ? { input: { ...input, skills: canonicalReferences } } : {}),
-      ...(images ? { images } : {}),
+      ...attachmentFields,
       ...(Object.keys(execution).length > 0 ? { execution } : {}),
     };
   }
@@ -5645,8 +5682,8 @@ function normalizeRuntimeUserInput(value: RuntimeUserInput): RuntimeUserInput {
     return {
       kind,
       text:
-        value.skills && typeof value["text"] === "string"
-          ? value["text"].trim()
+        (value.skills || attachments?.length) && typeof value["text"] === "string"
+          ? value["text"].trim() || (attachments?.length ? "请查看附件" : "")
           : requireText(value["text"], "input.text"),
       ...(attachments ? { attachments } : {}),
       ...(value.skills ? { skills: value.skills as readonly RuntimeSkillReference[] } : {}),
@@ -5727,60 +5764,16 @@ function runtimeInputForRevisedMessage(
 /**
  * text 输入附件的 daemon 侧再校验（协议参数门已是第一道；本函数兜住内部
  * 调用方如队列重放）。合法形状原样保留，缺省返回 undefined，malformed 抛
- * INVALID_PARAMS——上限与协议层一致（4 张 / 总 256KB 解码后）。
+ * INVALID_PARAMS。引用附件大小、归属与摘要由会话解析器核验。
  */
 function normalizeInputAttachments(value: unknown): readonly RuntimeInputAttachment[] | undefined {
   if (value === undefined) return undefined;
-  if (!Array.isArray(value) || value.length === 0) {
-    throw new RuntimeProtocolError(
-      RUNTIME_ERROR_CODES.INVALID_PARAMS,
-      "input.attachments 必须是非空数组（无附件时省略字段）",
-    );
-  }
-  if (value.length > 4) {
-    throw new RuntimeProtocolError(
-      RUNTIME_ERROR_CODES.INVALID_PARAMS,
-      "input.attachments 最多 4 张图片",
-    );
-  }
-  let totalChars = 0;
-  const attachments = value.map((item, index) => {
-    if (!isJsonRecord(item) || item["type"] !== "image_base64") {
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.INVALID_PARAMS,
-        `input.attachments[${index}] 必须是 image_base64 附件对象`,
-      );
-    }
-    const mimeType = typeof item["mimeType"] === "string" ? item["mimeType"] : "";
-    const data = typeof item["data"] === "string" ? item["data"] : "";
-    if (!mimeType || !data) {
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.INVALID_PARAMS,
-        `input.attachments[${index}] 缺少 mimeType/data`,
-      );
-    }
-    totalChars += data.length;
-    return { type: "image_base64" as const, mimeType, data };
-  });
-  if (totalChars > Math.floor((256 * 1024 * 4) / 3)) {
-    throw new RuntimeProtocolError(
-      RUNTIME_ERROR_CODES.INVALID_PARAMS,
-      "input.attachments 解码后总大小超过 256KB 上限",
-    );
-  }
-  return attachments;
-}
-
-/** 协议 wire 附件 → 引擎 ImagePart（形状同一，独立类型面保持协议/引擎解耦）。 */
-function inputAttachmentsToImages(
-  attachments: readonly RuntimeInputAttachment[] | undefined,
-): ImagePart[] | undefined {
-  if (!attachments || attachments.length === 0) return undefined;
-  return attachments.map((attachment) => ({
-    type: "image_base64",
-    mimeType: attachment.mimeType,
-    data: attachment.data,
-  }));
+  // normalizeRuntimeUserInput has already applied the shared strict protocol gate.
+  return (value as readonly RuntimeInputAttachment[]).map((attachment) =>
+    attachment.type === "artifact"
+      ? { type: "artifact", artifactId: attachment.artifactId, digest: attachment.digest }
+      : { type: "image_base64", mimeType: attachment.mimeType, data: attachment.data },
+  );
 }
 
 function isRuntimeActivation(input: RuntimeUserInput): boolean {
