@@ -26,6 +26,7 @@ export const PICO_TOOL_GROUPS: readonly ToolGroupDef[] = [
     description: "基本文件操作、搜索、执行、交互与编排",
     toolNames: [
       "read_file",
+      "document",
       "archive_read",
       "write_file",
       "edit_file",
@@ -183,6 +184,7 @@ export function getSupportedToolNames(host: ToolHostKind): Set<string> {
 /** Plan 模式下允许进入 provider tools 数组的工具面。 */
 export const PLAN_MODE_TOOL_NAMES: ReadonlySet<string> = new Set([
   "read_file",
+  "document",
   "archive_read",
   "glob",
   "grep",

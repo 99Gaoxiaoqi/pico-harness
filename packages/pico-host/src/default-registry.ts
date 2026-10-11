@@ -1,3 +1,4 @@
+import { DocumentTool } from "./document-tool.js";
 import { ArchiveReadTool } from "./archive-read-tool.js";
 import type { BoundToolResultArchiveReader } from "@pico/runtime/tool-result-archive";
 import { SkillLoader, SkillViewTool, type Skill } from "@pico/pico-host/product-skill-catalog";
@@ -201,6 +202,7 @@ export function buildDefaultToolRegistry(
   // 必须先于 host 后续挂载的审批中间件,避免一次审批扩大文件系统边界。
   if (!deferWorkspaceBoundary) registry.useRequest(buildWorkspaceBoundaryMiddleware(roots));
   registry.register(fileTool(new ReadFileTool(roots, options.toolResultArchive)));
+  if (sessionArtifacts) registry.register(new DocumentTool(sessionArtifacts));
   if (options.toolResultArchive) registry.register(new ArchiveReadTool(options.toolResultArchive));
   registry.register(fileTool(new WriteFileTool(roots, sessionArtifacts)));
   registry.register(fileTool(new EditFileTool(roots)));

@@ -186,7 +186,11 @@ test(
     assert.deepEqual(await f.send(sessionId, attachments, "first"), sent);
     await until(() => f.prompts.length === 1);
     assert.match(f.prompts[0]!, /请查看附件/u);
-    assert.ok(f.prompts[0]!.includes(text.trim()));
+    assert.ok(!f.prompts[0]!.includes(text.trim()), "上传只注入概况，不注入完整正文");
+    assert.match(f.prompts[0]!, /有限预览|有限节选/u);
+    assert.match(f.prompts[0]!, /document/u);
+    assert.match(f.prompts[0]!, /不可据此声称已阅读或核对全文/u);
+    assert.ok(f.prompts[0]!.length < 10_000);
     assert.match(f.prompts[0]!, /用户提供的待分析资料/u);
     const state = await f.history(sessionId);
     const message = state.messages.find((item) => item.role === "user")!;
@@ -226,7 +230,7 @@ test(
   },
 );
 
-test("附件引用拒绝跨会话和摘要错误，文档总量有界且声明截断", { timeout: 30_000 }, async (t) => {
+test("附件拒绝越权和摘要错误，上传概况有界", { timeout: 30_000 }, async (t) => {
   const f = await fixture(t);
   const source = await f.createSession();
   const target = await f.createSession();
@@ -253,8 +257,8 @@ test("附件引用拒绝跨会话和摘要错误，文档总量有界且声明�
   );
   const started = await f.send(source, [artifact, second], "bounded");
   await until(() => f.prompts.length === 1);
-  assert.match(f.prompts[0]!, /截断|省略/u);
-  assert.ok(f.prompts[0]!.length < 201_000, `上下文未按总预算截断: ${f.prompts[0]!.length}`);
+  assert.match(f.prompts[0]!, /有限节选.*不代表已读取全文/u);
+  assert.ok(f.prompts[0]!.length < 10_000, `概况超出预览预算: ${f.prompts[0]!.length}`);
   assert.equal((await f.history(target)).messages.length, 0);
   assert.equal((await f.send(source, [artifact], "queued-before-delete")).disposition, "queued");
   const scope = { workspacePath: f.workspacePath, sessionId: source };
@@ -314,6 +318,7 @@ test("解析失败明确未接纳，保留草稿后可换文件发送而不陷�
     get length() {
       return data.size;
     },
+    clear: () => data.clear(),
     key: (index: number) => [...data.keys()][index] ?? null,
     getItem: (key: string) => data.get(key) ?? null,
     setItem: (key: string, value: string) => {

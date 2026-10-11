@@ -1,6 +1,7 @@
 /** Stable native tool-name allowlist used by declarative Agent and Graph profiles. */
 export const KNOWN_TOOL_NAMES: ReadonlySet<string> = new Set([
   "read_file",
+  "document",
   "write_file",
   "edit_file",
   "bash",
