@@ -51,6 +51,13 @@ test("PDF页图工具结果重开后进入真实provider请求，完成整批工
     mimeType: "image/png",
     content: png,
   });
+  const quoted = repository.publishArtifactSnapshot({
+    sessionId: session.id,
+    artifactId: "page-quoted",
+    title: "document example link",
+    mimeType: "image/png",
+    content: png,
+  });
   const run = await RuntimeRun.start({
     capability: session.runtimeEventCapability!,
     agentSwarmAuthorization: "none",
@@ -68,7 +75,7 @@ test("PDF页图工具结果重开后进入真实provider请求，完成整批工
   for (const [id, content] of [
     [
       "page",
-      `PDF report page 2\n![report page 2](pico://artifact/${local.artifactId})\n![foreign](pico://artifact/${other.artifactId})`,
+      `${JSON.stringify({ text: `A quoted document example: ![example](pico://artifact/${quoted.artifactId})` })}\nPDF report page 2\n![report page 2](pico://artifact/${local.artifactId})\n![foreign](pico://artifact/${other.artifactId})`,
     ],
     ["search", "Search found one match on page 2."],
   ] as const) {

@@ -5,7 +5,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { crc32, deflateSync } from "node:zlib";
 import test from "node:test";
-import { createCanvas } from "@napi-rs/canvas";
 import {
   createRuntimeRequest,
   type RuntimeArtifactInputAttachment,
@@ -18,7 +17,12 @@ import {
 } from "@pico/pico-host/input/user-config-store";
 import { globalSessionManager } from "@pico/pico-host/session";
 import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
-import { documentPdf, documentWord, documentExcel } from "../fixtures/document-attachments.js";
+import {
+  documentPdf,
+  documentWord,
+  documentExcel,
+  documentScannedPdf,
+} from "../fixtures/document-attachments.js";
 import { loadUserDefaultRealModel } from "./real-llm-user-model.js";
 
 test(
@@ -109,7 +113,7 @@ test(
         bytes: await documentExcel(),
       },
       { name: "color.png", mimeType: "image/png", bytes: redPng() },
-      { name: "scanned.pdf", mimeType: "application/pdf", bytes: scannedPdf(scanMarker) },
+      { name: "scanned.pdf", mimeType: "application/pdf", bytes: documentScannedPdf(scanMarker) },
     ];
     const attachments: RuntimeArtifactInputAttachment[] = [];
     for (const file of files) {
@@ -255,58 +259,4 @@ function redPng(): Buffer {
     chunk("IDAT", deflateSync(scanlines)),
     chunk("IEND", Buffer.alloc(0)),
   ]);
-}
-
-/** Image-only PDF: the verification code exists only as pixels, never PDF text. */
-function scannedPdf(code: string): Buffer {
-  const canvas = createCanvas(800, 400);
-  const ctx = canvas.getContext("2d");
-  ctx.fillStyle = "white";
-  ctx.fillRect(0, 0, 800, 400);
-  ctx.fillStyle = "black";
-  ctx.font = "bold 80px sans-serif";
-  ctx.fillText(`CODE ${code}`, 70, 220);
-  const jpeg = canvas.toBuffer("image/jpeg");
-  const page = Buffer.from("q 800 0 0 400 0 0 cm /Im1 Do Q");
-  const objects = [
-    Buffer.from("<< /Type /Catalog /Pages 2 0 R >>"),
-    Buffer.from("<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
-    Buffer.from(
-      "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 800 400] /Resources << /XObject << /Im1 4 0 R >> >> /Contents 5 0 R >>",
-    ),
-    Buffer.concat([
-      Buffer.from(
-        `<< /Type /XObject /Subtype /Image /Width 800 /Height 400 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpeg.length} >>\nstream\n`,
-      ),
-      jpeg,
-      Buffer.from("\nendstream"),
-    ]),
-    Buffer.concat([
-      Buffer.from(`<< /Length ${page.length} >>\nstream\n`),
-      page,
-      Buffer.from("\nendstream"),
-    ]),
-  ];
-  const chunks = [Buffer.from("%PDF-1.4\n")];
-  const offsets = [0];
-  let length = chunks[0]!.length;
-  objects.forEach((object, index) => {
-    offsets.push(length);
-    const chunk = Buffer.concat([
-      Buffer.from(`${index + 1} 0 obj\n`),
-      object,
-      Buffer.from("\nendobj\n"),
-    ]);
-    chunks.push(chunk);
-    length += chunk.length;
-  });
-  chunks.push(
-    Buffer.from(
-      `xref\n0 6\n0000000000 65535 f \n${offsets
-        .slice(1)
-        .map((offset) => `${String(offset).padStart(10, "0")} 00000 n \n`)
-        .join("")}trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${length}\n%%EOF\n`,
-    ),
-  );
-  return Buffer.concat(chunks);
 }

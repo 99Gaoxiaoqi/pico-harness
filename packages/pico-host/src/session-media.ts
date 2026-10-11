@@ -416,7 +416,7 @@ export function resolveSessionMediaReferences(
   // only explicit image links backed by this session's immutable artifacts.
   if (message.role === "user" && message.toolCallId !== undefined) {
     for (const match of message.content.matchAll(
-      /!\[[^\]\n]*\]\(pico:\/\/artifact\/([^/?#\s)]+)\)/gu,
+      /^!\[[^\]\n]*\]\(pico:\/\/artifact\/([^/?#\s)]+)\)[\t ]*$/gmu,
     )) {
       if (sourceImages.length >= MEDIA_MAX_REFERENCES) break;
       try {
