@@ -214,6 +214,39 @@ test("媒体消息仅持久引用，重开后真实请求按视觉能力/预算�
       );
     }
   }
+
+  const newestDigest = "e".repeat(64);
+  const crowded = toAiSdkMessages(
+    [
+      {
+        role: "assistant",
+        content: "earlier generated pictures",
+        images: Array.from({ length: 6 }, (_, index) => ({
+          ...artifact,
+          artifactId: `old:${index}`,
+          sizeBytes: 2 * 1024 * 1024,
+        })),
+      },
+      {
+        role: "user",
+        content: "Inspect this new upload",
+        images: [
+          { ...artifact, artifactId: "newest", digest: newestDigest, sizeBytes: 2 * 1024 * 1024 },
+        ],
+      },
+    ],
+    "openai",
+    {
+      vision: true,
+      readImageArtifact: (image) =>
+        image.digest === newestDigest ? "NEWEST_IMAGE_BYTES" : "OLD_IMAGE_BYTES",
+    },
+  );
+  assert.match(
+    JSON.stringify(crowded),
+    /NEWEST_IMAGE_BYTES/u,
+    "历史生成图不能挤掉本轮上传图片的请求预算",
+  );
   let budgetReads = 0;
   const budgetImage = { ...artifact, sizeBytes: 2 * 1024 * 1024 };
   const projected = toAiSdkMessages(

@@ -73,8 +73,30 @@ export function toAiSdkMessages(
       (_match, alt: string) => `[${alt || "Image"}: retained conversation image]`,
     );
   let usedImageBytes = 0;
+  let currentMessage: Message;
+  const selected = new Map<Message, Set<number>>();
+  let reservedBytes = 0;
+  // Reserve the bounded request budget from newest to oldest so historical
+  // generated images cannot crowd out the user's current attachments.
+  for (const message of [...messages].reverse()) {
+    const indexes = new Set<number>();
+    for (let index = (message.images?.length ?? 0) - 1; index >= 0; index--) {
+      const image = message.images![index]!;
+      if (image.type !== "image_artifact") continue;
+      if (
+        Number.isSafeInteger(image.sizeBytes) &&
+        image.sizeBytes > 0 &&
+        reservedBytes + image.sizeBytes <= 12 * 1024 * 1024
+      ) {
+        indexes.add(index);
+        reservedBytes += image.sizeBytes;
+      }
+    }
+    selected.set(message, indexes);
+  }
   const materialize = (
     image: ImagePart,
+    index: number,
   ): { type: "file"; data: string | URL; mediaType: string } | { type: "text"; text: string } => {
     const omitted = {
       type: "text" as const,
@@ -83,6 +105,7 @@ export function toAiSdkMessages(
     if (image.type === "image_artifact") {
       if (
         options?.vision !== true ||
+        !selected.get(currentMessage)?.has(index) ||
         !Number.isSafeInteger(image.sizeBytes) ||
         image.sizeBytes <= 0 ||
         usedImageBytes + image.sizeBytes > 12 * 1024 * 1024
@@ -113,6 +136,7 @@ export function toAiSdkMessages(
     | { type: "text"; text: string }
   )[] = [];
   for (const message of messages) {
+    currentMessage = message;
     if (message.role === "system") {
       result.push({ role: "system", content: projectText(message.content) });
     } else if (message.role === "user" && message.toolCallId !== undefined) {
@@ -161,10 +185,11 @@ export function toAiSdkMessages(
             input: parseInput(call.arguments),
           });
         }
-        for (const image of message.images ?? []) content.push(materialize(image));
+        for (const [index, image] of (message.images ?? []).entries())
+          content.push(materialize(image, index));
       }
       if (saved) {
-        for (const image of message.images ?? []) {
+        for (const [index, image] of (message.images ?? []).entries()) {
           if (
             image.type === "image_artifact" &&
             !content.some(
@@ -173,7 +198,7 @@ export function toAiSdkMessages(
                 part.data === `pico://artifact/${encodeURIComponent(image.artifactId)}`,
             )
           )
-            content.push(materialize(image));
+            content.push(materialize(image, index));
         }
       }
       for (let index = 0; index < content.length; index++) {
@@ -193,7 +218,7 @@ export function toAiSdkMessages(
             (image) => image.type === "image_artifact" && image.artifactId === id,
           );
           content[index] = image
-            ? materialize(image)
+            ? materialize(image, message.images!.indexOf(image))
             : { type: "text", text: "[Media artifact retained in this conversation.]" };
         }
         if (part.type === "tool-call") {
