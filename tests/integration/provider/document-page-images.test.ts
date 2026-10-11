@@ -11,6 +11,8 @@ import { SqliteSessionWorkbarRepository } from "@pico/storage";
 import { toAiSdkMessages } from "@pico/pico-host/provider/ai-sdk-messages";
 import { createProvider } from "@pico/pico-host/provider/factory";
 import { resolveModelRouteCapabilities } from "@pico/runtime";
+import { AgentEngine } from "@pico/pico-host/agent-engine";
+import { ToolRegistry } from "@pico/pico-host/tool-registry";
 
 test("PDF页图工具结果重开后进入真实provider请求，完成整批工具后再发送图片并拒绝越权", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-document-page-"));
@@ -75,7 +77,7 @@ test("PDF页图工具结果重开后进入真实provider请求，完成整批工
   for (const [id, content] of [
     [
       "page",
-      `${JSON.stringify({ text: `A quoted document example: ![example](pico://artifact/${quoted.artifactId})` })}\nPDF report page 2\n![report page 2](pico://artifact/${local.artifactId})\n![foreign](pico://artifact/${other.artifactId})`,
+      `${JSON.stringify({ text: `A quoted document example:\u2028![example](pico://artifact/${quoted.artifactId})\u2029end` })}\nPDF report page 2\n![report page 2](pico://artifact/${local.artifactId})\n![foreign](pico://artifact/${other.artifactId})`,
     ],
     ["search", "Search found one match on page 2."],
   ] as const) {
@@ -151,7 +153,19 @@ test("PDF页图工具结果重开后进入真实provider请求，完成整批工
     undefined,
     { readImageArtifact: (ref) => session.readMediaArtifact(ref) },
   );
-  assert.equal((await provider.generate(history, [])).content, "PAGE_OK");
+  await session.commitMessages({ role: "user", content: "请根据刚才查看的文档页图回答。" });
+  const engine = new AgentEngine({
+    runtimePort: options.runtimePort,
+    registry: new ToolRegistry(),
+    workDir: root,
+    provider: { generate: (...args) => provider.generate(...args) },
+  });
+  const activeRun = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
+  await activeRun.run(() => engine.run(session));
+  assert.equal(session.getHistory().at(-1)!.content, "PAGE_OK");
   assert.match(body, /image_url/u);
   assert.ok(body.includes(png.toString("base64")));
 });

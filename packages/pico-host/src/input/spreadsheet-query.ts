@@ -119,7 +119,8 @@ function cellData(cell?: ExcelJS.Cell): CellData {
   let isFormula = false;
   if (value && typeof value === "object" && ("formula" in value || "sharedFormula" in value)) {
     isFormula = true;
-    formula = "formula" in value ? value.formula : `共享公式 ${value.sharedFormula}`;
+    formula =
+      "formula" in value ? (value.formula ?? "[未记录公式]") : `共享公式 ${value.sharedFormula}`;
     // ExcelJS cell.value omits falsy formula results; cell.result preserves 0/false/"".
     const result = cell.result;
     if (result === undefined || result === null)

@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { extname } from "node:path";
 import { Worker } from "node:worker_threads";
+import { raceWithDeadlineReject } from "@pico/runtime/deadline";
 import {
   DOCUMENT_QUERY_MAX_CHARS,
   DOCUMENT_QUERY_MAX_IMAGE_BYTES,
@@ -92,7 +93,6 @@ async function runWorker(
   const bytes = new Uint8Array(input.bytes);
   activeWorkers++;
   let worker: Worker | undefined;
-  let timer: NodeJS.Timeout | undefined;
   let onAbort: (() => void) | undefined;
   try {
     worker = new Worker(workerUrl, {
@@ -101,31 +101,30 @@ async function runWorker(
       execArgv: [],
       resourceLimits: { maxOldGenerationSizeMb: 384, maxYoungGenerationSizeMb: 32, stackSizeMb: 8 },
     });
-    return await new Promise<unknown>((resolve, reject) => {
-      timer = setTimeout(
-        () => reject(new Error("附件解析超过 20 秒，已停止处理，请缩小文件后重试。")),
-        PARSE_TIMEOUT_MS,
-      );
-      onAbort = () => reject(aborted());
-      signal?.addEventListener("abort", onAbort, { once: true });
-      if (signal?.aborted) onAbort();
-      worker!.once("message", (response: unknown) => {
-        if (
-          response &&
-          typeof response === "object" &&
-          "error" in response &&
-          typeof response.error === "string"
-        )
-          reject(new Error(response.error));
-        else resolve(response);
-      });
-      worker!.once("error", (cause) =>
-        reject(new Error("附件解析失败，文件可能已损坏或超过解析资源限制。", { cause })),
-      );
-      worker!.once("exit", (code) => reject(new Error(`附件解析进程提前结束（${code}）。`)));
-    });
+    return await raceWithDeadlineReject(
+      new Promise<unknown>((resolve, reject) => {
+        onAbort = () => reject(aborted());
+        signal?.addEventListener("abort", onAbort, { once: true });
+        if (signal?.aborted) onAbort();
+        worker!.once("message", (response: unknown) => {
+          if (
+            response &&
+            typeof response === "object" &&
+            "error" in response &&
+            typeof response.error === "string"
+          )
+            reject(new Error(response.error));
+          else resolve(response);
+        });
+        worker!.once("error", (cause) =>
+          reject(new Error("附件解析失败，文件可能已损坏或超过解析资源限制。", { cause })),
+        );
+        worker!.once("exit", (code) => reject(new Error(`附件解析进程提前结束（${code}）。`)));
+      }),
+      PARSE_TIMEOUT_MS,
+      () => new Error("附件解析超过 20 秒，已停止处理，请缩小文件后重试。"),
+    );
   } finally {
-    if (timer) clearTimeout(timer);
     if (onAbort) signal?.removeEventListener("abort", onAbort);
     try {
       await worker?.terminate();

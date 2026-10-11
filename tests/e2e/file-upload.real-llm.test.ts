@@ -199,7 +199,20 @@ test(
       assert.equal(result.thirdCell, "仍在第三列");
       assert.match(String(result.imageColor), /^red$/iu);
       assert.equal(result.budgetSum, 42);
-      assert.equal(result.scanCode, scanMarker);
+      assert.equal(
+        result.scanCode,
+        scanMarker,
+        JSON.stringify({
+          answer,
+          steps: messages.map((message) => ({
+            role: message.role,
+            toolCallId: message.toolCallId,
+            calls: message.toolCalls,
+            images: message.images?.length,
+            observation: message.toolCallId ? message.content.slice(0, 1400) : undefined,
+          })),
+        }),
+      );
       const documentCalls = messages
         .flatMap((message) => message.toolCalls ?? [])
         .filter((call) => call.name === "document");

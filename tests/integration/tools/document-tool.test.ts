@@ -8,7 +8,7 @@ import { KNOWN_TOOL_NAMES } from "@pico/core/known-tool-names";
 import { findGroupForTool, isPlanModeTool } from "@pico/runtime/tool-surface";
 import { SqliteSessionWorkbarRepository } from "@pico/storage";
 import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
-import { buildDefaultToolRegistry } from "../../../packages/pico-host/src/default-registry.js";
+import { buildDefaultToolRegistry } from "@pico/pico-host/default-registry";
 import { publishSessionArtifact } from "../../../packages/pico-host/src/session-artifact-writer.js";
 import { readSessionInputArtifact } from "../../../packages/pico-host/src/session-input-attachments.js";
 import { isResearchToolAllowed } from "../../../packages/pico-host/src/research-mode.js";
