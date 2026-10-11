@@ -190,7 +190,12 @@ export function summaryFromRuntimeSession<TTranscriptEvent>(
 }
 
 export function compactSessionText(value: string | undefined): string | undefined {
-  const compacted = value?.replace(/\s+/gu, " ").trim();
+  const compacted = value
+    ?.replace(/\[((?:\\.|[^\]\\\n])*)\]\(pico:\/\/artifact\/[^)\s]+\)/gu, (_link, name: string) =>
+      name.replace(/\\([\\[\]])/gu, "$1"),
+    )
+    .replace(/\s+/gu, " ")
+    .trim();
   if (!compacted) return undefined;
   return compacted.length <= 240 ? compacted : `${compacted.slice(0, 239)}…`;
 }

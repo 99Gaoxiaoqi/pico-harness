@@ -239,6 +239,54 @@ test("sqlite catalog: incremental fold equals the full fold (title/settings/prev
   }
 });
 
+test("sqlite catalog: attachment display links use filenames in summaries and preserve ordinary text", async () => {
+  const fixture = createFixture("pico-sqlite-catalog-attachments-");
+  try {
+    const id = "catalog-attachments";
+    const { manifest, ownerFence } = await initializeRuntimeEventOwner(fixture.store, {
+      sessionId: id,
+      workDir: fixture.workspace,
+    });
+    const displayText = [
+      "请比较附件与 [文档](https://example.com)",
+      "[报告\\[终版\\]\\\\Q4.docx](pico://artifact/550e8400-e29b-41d4-a716-446655440000)",
+      "[chart.png](pico://artifact/550e8400-e29b-41d4-a716-446655440001)",
+    ].join("\n");
+    const event = userMessage(`${id}-e1`, id, "2026-08-18T00:00:01.000Z", "model-only content");
+    if (event.kind !== "message.committed") throw Error("expected message event");
+    event.data.message.providerData = { picoKind: "desktop_user_input", displayText };
+    await fixture.store.appendBatch([event], { ownerFence });
+
+    const expected = "请比较附件与 [文档](https://example.com) 报告[终版]\\Q4.docx chart.png";
+    const entry = await fixture.store.findSessionCatalogEntry(id);
+    assert.equal(entry?.summary.title, expected);
+    assert.equal(entry?.summary.firstMessage, expected);
+    assert.equal(entry?.summary.lastMessage, expected);
+    assert.equal(
+      (await fixture.store.readSessionMessages(id))[0]?.providerData?.["displayText"],
+      displayText,
+      "summary projection does not change the original attachment links",
+    );
+
+    const ordinaryText = "保留普通文本 [引用] 和 pico://artifact/plain";
+    await fixture.store.appendBatch(
+      [userMessage(`${id}-e2`, id, "2026-08-18T00:00:02.000Z", ordinaryText)],
+      { ownerFence },
+    );
+    await fixture.store.rebuildSessionCatalogRow(id);
+    const rebuilt = await fixture.store.findSessionCatalogEntry(id);
+    assert.equal(rebuilt?.summary.title, expected);
+    assert.equal(rebuilt?.summary.lastMessage, ordinaryText);
+    const entries = await fixture.store.readSessionEntries(id);
+    assert.deepEqual(
+      normalizedSummary(rebuilt!.summary),
+      normalizedSummary(summaryFromRuntimeSession(manifest, entries).summary),
+    );
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
 test("sqlite catalog: keyset pagination over activity_at DESC, session_id ASC", async () => {
   const fixture = createFixture("pico-sqlite-catalog-page-");
   try {
