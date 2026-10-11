@@ -3881,6 +3881,11 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
             attachments: input.attachments,
             ...(sessionId ? { sessionId } : {}),
             repository: this.workbarRepository(await this.requireTrustedWorkspace(workspacePath)),
+          }).catch((cause: unknown) => {
+            throw new RuntimeProtocolError(
+              RUNTIME_ERROR_CODES.ATTACHMENT_REJECTED,
+              cause instanceof Error ? cause.message : "附件解析失败，请更换文件后重试。",
+            );
           })
         : undefined;
     const attachmentFields = attachments

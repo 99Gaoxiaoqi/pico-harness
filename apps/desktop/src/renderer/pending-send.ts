@@ -206,7 +206,13 @@ export class PendingSendRepository {
       return { value, record, confirmed: this.complete(record) };
     } catch (cause) {
       // A rejection of recovery cannot prove that the original attempt did not execute.
-      if (!replay && (cause as { outcome?: unknown })?.outcome === "not_executed")
+      const rejected = cause as { outcome?: unknown; code?: unknown };
+      // This protocol error is issued only before attachment input admission;
+      // unlike a transport failure it proves the original send did not execute.
+      if (
+        !replay &&
+        (rejected?.outcome === "not_executed" || rejected?.code === "ATTACHMENT_REJECTED")
+      )
         this.complete(record);
       throw cause;
     } finally {

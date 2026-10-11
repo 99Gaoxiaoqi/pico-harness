@@ -9,6 +9,7 @@ import {
   createRuntimeRequest,
   type RuntimeInputAttachment,
   type RuntimeResult,
+  type RuntimeParams,
 } from "@pico/protocol";
 import { DesktopRuntimeService } from "@pico/pico-host/desktop-runtime-service";
 import { WorkspaceRuntimeService } from "@pico/pico-host/workspace-runtime-service";
@@ -17,6 +18,7 @@ import { globalSessionManager } from "@pico/pico-host/session";
 import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
 import { SqliteDesktopConversationStateStore } from "@pico/pico-host";
 import { toAiSdkMessages } from "../../../packages/pico-host/src/provider/ai-sdk-messages.js";
+import { PendingSendRepository } from "../../../apps/desktop/src/renderer/pending-send.js";
 import { writeDesktopModelRouting } from "../../fixtures/desktop-model-routing.js";
 
 const png = Buffer.from(
@@ -297,3 +299,62 @@ async function until(check: () => boolean) {
     await delay(10);
   }
 }
+
+test("解析失败明确未接纳，保留草稿后可换文件发送而不陷入未知结果恢复", async (t) => {
+  const f = await fixture(t);
+  const sessionId = await f.createSession();
+  const bad = await f.upload(
+    sessionId,
+    "broken.pdf",
+    "application/pdf",
+    Buffer.from("%PDF-1.4\nbroken"),
+  );
+  const data = new Map<string, string>();
+  const pending = new PendingSendRepository({
+    get length() {
+      return data.size;
+    },
+    key: (index: number) => [...data.keys()][index] ?? null,
+    getItem: (key: string) => data.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      data.set(key, value);
+    },
+    removeItem: (key: string) => {
+      data.delete(key);
+    },
+  });
+  const scope = { picoHome: "/test-home", sourceKey: sessionId };
+  const params = {
+    workspacePath: f.workspacePath,
+    sessionId,
+    input: { kind: "text" as const, text: "分析附件", attachments: [bad] },
+    idempotencyKey: "bad-pdf",
+  };
+  const dispatch = async (input: RuntimeParams<"session.send">) => {
+    try {
+      return (await f.desktop.handle(
+        createRuntimeRequest("session.send", input),
+      )) as RuntimeResult<"session.send">;
+    } catch (cause) {
+      throw Object.assign(cause as Error, { outcome: "unknown" });
+    }
+  };
+  await assert.rejects(
+    pending.send(scope, params, "保留的草稿", dispatch),
+    (error: unknown) => record(error).code === "ATTACHMENT_REJECTED",
+  );
+  assert.equal(pending.get(scope), undefined, "确定未接纳的附件不会锁住后续发送");
+  assert.equal(f.prompts.length, 0);
+  assert.equal((await f.history(sessionId)).messages.length, 0);
+  const good = await f.upload(sessionId, "fixed.txt", "text/plain", Buffer.from("修正后的内容"));
+  const sent = await pending.send(
+    scope,
+    { ...params, idempotencyKey: "fixed-file", input: { ...params.input, attachments: [good] } },
+    "保留的草稿",
+    dispatch,
+  );
+  assert.equal(sent.confirmed, true);
+  assert.equal(sent.record.draftSnapshot, "保留的草稿");
+  await until(() => f.prompts.length === 1);
+  assert.match(f.prompts[0]!, /修正后的内容/u);
+});
