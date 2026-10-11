@@ -1,0 +1,71 @@
+.conversation-composer__files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+}
+
+.conversation-composer__file {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 160px;
+  max-width: min(100%, 300px);
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-raised);
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.conversation-composer__file > svg,
+.conversation-composer__file button svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+.conversation-composer__file > div {
+  min-width: 0;
+  flex: 1;
+}
+.conversation-composer__file-name {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.conversation-composer__file-size {
+  display: block;
+  margin-top: 3px;
+  color: var(--ink-secondary);
+}
+.conversation-composer__file button {
+  display: flex;
+  padding: 0;
+  border: 0;
+  color: var(--ink-secondary);
+  background: transparent;
+  cursor: pointer;
+}
+.conversation-composer__file button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.conversation-composer__file[data-error] {
+  border-color: var(--danger);
+}
+.conversation-composer__file-error {
+  display: block;
+  margin-top: 4px;
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
+.conversation-composer__file-notice {
+  margin: 0 0 8px;
+  color: var(--ink-secondary);
+  font-size: 12px;
+}

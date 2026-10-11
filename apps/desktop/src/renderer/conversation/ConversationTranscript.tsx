@@ -122,6 +122,11 @@ function RunBoundary({ item }: { readonly item: RunBoundaryItemView }) {
         <span className="conversation-run-boundary__duration">{item.duration}</span>
       )}
       {item.detail && <span className="conversation-run-boundary__detail">{item.detail}</span>}
+      {item.status === "interrupted" && (
+        <span className="conversation-run-boundary__detail">
+          已停止本地等待；远端服务可能仍在处理。
+        </span>
+      )}
     </div>
   );
 }
@@ -157,6 +162,7 @@ function UserMessageBubble({
   readonly onEdit?: ConversationTranscriptProps["onEditUserMessage"];
 }) {
   const [copyStatus, setCopyStatus] = useState("");
+  const hasAttachments = Boolean(item.media?.length || item.text.includes("pico://artifact/"));
   const copyStatusTimer = useRef<number | undefined>(undefined);
   useEffect(
     () => () => {
@@ -230,8 +236,9 @@ function UserMessageBubble({
             <button
               className="conversation-message__action"
               type="button"
-              title="编辑并重发"
+              title={hasAttachments ? "含附件消息暂不支持编辑并重发" : "编辑并重发"}
               aria-label="编辑并重发"
+              disabled={hasAttachments}
               onClick={() => onEdit(item)}
             >
               <Pencil aria-hidden="true" />
