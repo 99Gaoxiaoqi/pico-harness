@@ -12,6 +12,7 @@ import { lexer, type Token, type Tokens } from "marked";
 import React, { useMemo, type ElementType } from "react";
 
 import { MediaPreview } from "./MediaPreview.js";
+import { ArtifactLink, artifactLinkId } from "./ArtifactLink.js";
 
 // Node integration tests use the classic JSX transform.
 void React;
@@ -64,8 +65,11 @@ export function MarkdownText({ text, dim = false, media = [] }: MarkdownTextProp
       },
       link: ({ href, children }) => {
         const reference = registeredMedia(href, media);
+        const artifactId = artifactLinkId(href);
         return reference?.kind === "video" ? (
           <MediaPreview reference={reference} />
+        ) : artifactId ? (
+          <ArtifactLink artifactId={artifactId}>{children}</ArtifactLink>
         ) : isSafeMarkdownHref(href) ? (
           <a href={href} rel="noopener noreferrer" target="_blank">
             {children}

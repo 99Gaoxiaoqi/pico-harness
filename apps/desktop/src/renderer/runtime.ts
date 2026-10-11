@@ -4,6 +4,8 @@ import {
   type PendingSendEntry,
 } from "./pending-send.js";
 import { clearPersistentDraftIfUnchanged } from "./conversation/usePersistentDraft.js";
+import { FileSendPreparation, FileUploadError } from "./file-upload.js";
+import { captureFileDraftClear } from "./conversation/useFileDraft.js";
 import { controlGoalRequest } from "./conversation/goal-control.js";
 import { parseDesktopToolApproval } from "./runtime-projections/approval.js";
 import { TerminalInteractions } from "./runtime-projections/terminal-interactions.js";
@@ -21,6 +23,7 @@ import {
   type RuntimeMemorySettings,
   type RuntimeNotification,
   type RuntimeParams,
+  type RuntimeArtifactInputAttachment,
   type RuntimeProviderInput,
   type RuntimeQueuedInput,
   type RuntimeUserInput,
@@ -398,6 +401,7 @@ export interface RuntimeActions {
     readonly draftSnapshot?: string;
     readonly sessionId?: string;
     readonly text: string;
+    readonly files?: readonly File[];
     readonly initialSettings?: RuntimeUserDefaults;
     readonly behavior?: ComposerBehavior;
     readonly expectedRunId?: string;
@@ -413,6 +417,7 @@ export interface RuntimeActions {
     readonly succeeded: boolean;
     readonly workspacePath?: string | undefined;
     readonly sessionId?: string | undefined;
+    readonly fileError?: { readonly file: File; readonly message: string };
   }>;
   renameSession(ref: WorkspaceSessionRef, title: string): Promise<boolean>;
   forkSession(ref: WorkspaceSessionRef): Promise<WorkspaceSessionRef | undefined>;
@@ -643,6 +648,8 @@ export function useRuntimeStore(): RuntimeStore {
   const resolvedInteractions = useRef(new ResolvedInteractionCache());
   const terminalInteractions = useRef(new TerminalInteractions());
   const pendingGoalControls = useRef(new Set<string>());
+  const fileSendPreparation = useRef(new FileSendPreparation());
+  const pendingFileDrafts = useRef(new Map<string, () => void>());
   const pendingSendRepositoryRef = useRef<PendingSendRepository | undefined>(undefined);
   const getPendingSendRepository = useCallback(() => {
     pendingSendRepositoryRef.current ??= new PendingSendRepository(window.localStorage);
@@ -2353,8 +2360,8 @@ export function useRuntimeStore(): RuntimeStore {
         return succeeded && loaded;
       },
       async sendMessage(input) {
-        const workspacePath = input.workspacePath;
-        if (!workspacePath || (!input.text.trim() && !input.skills?.length))
+        let workspacePath = input.workspacePath;
+        if (!workspacePath || (!input.text.trim() && !input.skills?.length && !input.files?.length))
           return { succeeded: false };
         const swarmCommand =
           !input.activation && !input.skills?.length ? parseSwarmCommand(input.text) : undefined;
@@ -2365,7 +2372,14 @@ export function useRuntimeStore(): RuntimeStore {
             ? workspaceSessionKey({ workspacePath, sessionId: input.sessionId })
             : `new:${workspacePath}`);
         let confirmedSend = false;
+        let fileError: { readonly file: File; readonly message: string } | undefined;
+        let preparationKey: string | undefined;
         const succeeded = await perform("send-message", async (bridge) => {
+          if (input.files?.length && (input.activation || input.skills?.length || swarmCommand))
+            throw new Error("附件暂不支持技能、Agent 或 Swarm 命令，请先移除附件或改为普通消息。");
+          if (input.files?.length && input.behavior === "steer")
+            throw new Error("附件需要新回合，请选择排队或停止并替换。");
+          if (input.files?.length && preview) throw new Error("预览模式不支持上传附件。");
           if (
             input.skills?.length &&
             !preview &&
@@ -2415,11 +2429,42 @@ export function useRuntimeStore(): RuntimeStore {
           }
           const picoHome = dataRef.current.picoHome;
           if (!picoHome) throw new Error("尚未确认 Pico 存储位置，请等待连接恢复后发送。");
+          if (getPendingSendRepository().get({ picoHome, sourceKey }))
+            throw new Error("这份草稿有待确认的发送，请先恢复发送结果或放弃恢复。");
+          preparationKey = JSON.stringify([picoHome, sourceKey]);
+          let attachments: readonly RuntimeArtifactInputAttachment[] = [];
+          if (input.files?.length || fileSendPreparation.current.session(preparationKey)) {
+            try {
+              const prepared = await fileSendPreparation.current.prepare(
+                (method, params) => invoke(bridge, method, params),
+                preparationKey,
+                {
+                  workspacePath,
+                  ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+                  ...(input.initialSettings ? { initialSettings: input.initialSettings } : {}),
+                  files: input.files ?? [],
+                },
+              );
+              resolvedSessionId = prepared.ref.sessionId;
+              workspacePath = prepared.ref.workspacePath;
+              attachments = prepared.attachments;
+            } catch (cause) {
+              resolvedSessionId ??= fileSendPreparation.current.session(preparationKey)?.sessionId;
+              if (cause instanceof FileUploadError)
+                fileError = { file: cause.file, message: cause.message };
+              throw cause;
+            }
+          }
+          if (input.files?.length)
+            pendingFileDrafts.current.set(
+              preparationKey,
+              captureFileDraftClear(sourceKey, input.files),
+            );
           const pending = await getPendingSendRepository().send(
             { picoHome, sourceKey },
             {
               workspacePath,
-              ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+              ...(resolvedSessionId ? { sessionId: resolvedSessionId } : {}),
               input:
                 input.activation?.kind === "skill"
                   ? { kind: "skill", name: input.activation.name, args: input.text.trim() }
@@ -2441,9 +2486,12 @@ export function useRuntimeStore(): RuntimeStore {
                       : {
                           kind: "text",
                           text: input.text.trim(),
+                          ...(attachments.length ? { attachments } : {}),
                           ...(input.skills?.length ? { skills: input.skills } : {}),
                         },
-              ...(input.initialSettings ? { initialSettings: input.initialSettings } : {}),
+              ...(!resolvedSessionId && input.initialSettings
+                ? { initialSettings: input.initialSettings }
+                : {}),
               behavior: input.behavior ?? "auto",
               ...(input.expectedRunId ? { expectedRunId: input.expectedRunId } : {}),
               idempotencyKey: crypto.randomUUID(),
@@ -2454,6 +2502,11 @@ export function useRuntimeStore(): RuntimeStore {
           );
           if (!pending.confirmed) return;
           confirmedSend = true;
+          if (preparationKey) {
+            fileSendPreparation.current.complete(preparationKey);
+            pendingFileDrafts.current.get(preparationKey)?.();
+            pendingFileDrafts.current.delete(preparationKey);
+          }
           clearPersistentDraftIfUnchanged(sourceKey, pending.record.draftSnapshot);
           const session = pending.value.session;
           resolvedSessionId = stringValue(session.sessionId, input.sessionId);
@@ -2480,6 +2533,7 @@ export function useRuntimeStore(): RuntimeStore {
           succeeded: succeeded && confirmedSend,
           ...(succeeded && confirmedSend ? { workspacePath } : {}),
           ...(resolvedSessionId ? { sessionId: resolvedSessionId } : {}),
+          ...(fileError ? { fileError } : {}),
         };
       },
       async recoverPendingSend(sourceKey) {
@@ -2497,6 +2551,10 @@ export function useRuntimeStore(): RuntimeStore {
           clearPersistentDraftIfUnchanged(sourceKey, pending.record.draftSnapshot);
           const sessionId = pending.value.session.sessionId;
           const workspacePath = pending.record.params.workspacePath;
+          const preparationKey = JSON.stringify([picoHome, sourceKey]);
+          fileSendPreparation.current.complete(preparationKey);
+          pendingFileDrafts.current.get(preparationKey)?.();
+          pendingFileDrafts.current.delete(preparationKey);
           recovered = { workspacePath, sessionId };
           setMessage("发送结果已确认。");
           void (async () => {

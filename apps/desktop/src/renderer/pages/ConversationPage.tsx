@@ -1,4 +1,5 @@
 import { PendingSendNotice } from "../PendingSendNotice.js";
+import { useFileDraft } from "../conversation/useFileDraft.js";
 import {
   getComposerResources,
   parseComposerDraft,
@@ -156,6 +157,7 @@ export function ConversationPage() {
       )?.title ?? "父任务")
     : undefined;
   const draftKey = conversationKey ?? `new:${workspacePath || "unbound"}`;
+  const fileDraft = useFileDraft(draftKey);
   const pendingSend = runtime.pendingSends?.find(
     (entry) => entry.scope.picoHome === data.picoHome && entry.scope.sourceKey === draftKey,
   );
@@ -544,8 +546,28 @@ export function ConversationPage() {
     blocked: Boolean(pendingPrompt || pendingApproval),
   });
 
+  const attachmentOrchestration = sessionId
+    ? conversation?.settings?.orchestrationMode
+    : newTaskSettings.orchestrationMode;
+  const filesDisabledReason = editingUserMessage
+    ? "编辑已发送消息时暂不支持附件；请取消编辑后发送。"
+    : preview
+      ? "预览模式不支持上传附件。"
+      : researchActive || attachmentOrchestration === "graph" || attachmentOrchestration === "swarm"
+        ? "当前模式暂不支持附件；请切换到普通对话后发送。"
+        : draftReferences.references.length || isDesktopCommandInput(draft)
+          ? "技能、Agent 与斜杠命令暂不支持附件；请使用普通消息发送。"
+          : undefined;
+
   const submit = async (text: string, nextBehavior: ComposerBehavior) => {
     if (sendingRef.current || commands.pending) return;
+    if (
+      fileDraft.files.length &&
+      (filesDisabledReason || fileDraft.validationErrors.some(Boolean))
+    ) {
+      setReferenceError(filesDisabledReason ?? "请移除或更换无效附件后发送。");
+      return;
+    }
     if (editingUserMessage) {
       if (!sessionRef || !text.trim()) return;
       setReferenceError(undefined);
@@ -584,7 +606,9 @@ export function ConversationPage() {
       !composerReady ||
       !composerModelRouteId ||
       usingOpenCodeFree ||
-      (!parsedDraft.text && !parsedDraft.references.some((ref) => ref.kind === "skill"))
+      (!parsedDraft.text &&
+        !parsedDraft.references.some((ref) => ref.kind === "skill") &&
+        !fileDraft.files.length)
     )
       return;
     if (pendingSend) {
@@ -595,7 +619,8 @@ export function ConversationPage() {
     sendingRef.current = true;
     setPreparingSend(true);
     const sourceDraftKey = draftKey;
-    if (!sessionId && workspacePath) {
+    const sentFiles = fileDraft.files;
+    if (!sessionId && workspacePath && !sentFiles.length) {
       firstSendSourceRef.current = sourceDraftKey;
       firstSendBaselineRef.current = new Set(
         data.sessions
@@ -619,6 +644,7 @@ export function ConversationPage() {
         ...(sessionId ? { sessionId } : {}),
         ...(!sessionId ? { initialSettings: newTaskSettings } : {}),
         text: parsedDraft.text,
+        ...(sentFiles.length ? { files: sentFiles.map(({ file }) => file) } : {}),
         behavior: nextBehavior,
         ...(activeRun ? { expectedRunId: activeRun.id } : {}),
         ...(parsedDraft.references.some((ref) => ref.kind === "skill")
@@ -637,10 +663,12 @@ export function ConversationPage() {
           : {}),
       });
       if (!result.succeeded) {
+        if (result.fileError) fileDraft.setError(result.fileError.file, result.fileError.message);
         setAwaitingFirstSession(false);
         return;
       }
       clearIfUnchanged(draft);
+      fileDraft.clearSent(sentFiles);
       if (sendRouteRef.current !== sourceDraftKey) return;
       setReferenceError(undefined);
       if (!sessionId && result.sessionId) {
@@ -876,6 +904,10 @@ export function ConversationPage() {
   const beginEditingUserMessage = (
     item: Extract<ConversationItemView, { kind: "userMessage" }>,
   ) => {
+    if (item.media?.length || item.text.includes("pico://artifact/")) {
+      actions.showMessage?.("含附件消息暂不支持编辑并重发，请新建消息发送。");
+      return;
+    }
     setEditingUserMessage({ item, previousDraft: draft });
     revisionRequestRef.current = undefined;
     handleDraftChange(item.text);
@@ -1473,6 +1505,11 @@ export function ConversationPage() {
                   resources={composerResources}
                   inputRef={composerInputRef}
                   value={draft}
+                  files={fileDraft.files}
+                  fileValidationErrors={fileDraft.validationErrors}
+                  onFilesAdd={fileDraft.add}
+                  onFileRemove={fileDraft.remove}
+                  filesDisabledReason={filesDisabledReason}
                   onValueChange={handleDraftChange}
                   onSubmit={(value) => void submit(value.text, value.behavior)}
                   status={composerStatus}

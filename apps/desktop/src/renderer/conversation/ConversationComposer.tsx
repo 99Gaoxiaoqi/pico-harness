@@ -10,7 +10,10 @@ import {
   type ChatComposerInputHandle,
 } from "@astryxdesign/core/Chat";
 import { Selector } from "@astryxdesign/core/Selector";
-import { ArrowUp, Pause, Play, Square } from "lucide-react";
+import { ArrowUp, File, Paperclip, Pause, Play, Square, X } from "lucide-react";
+import { FILE_UPLOAD_ACCEPT } from "../file-upload.js";
+import type { DraftFile } from "./useFileDraft.js";
+import "./composer-files.css";
 import {
   useEffect,
   useId,
@@ -58,6 +61,11 @@ export interface ConversationComposerProps {
   readonly selectedOption?: string | undefined;
   readonly onOptionChange?: ((value: string) => void) | undefined;
   readonly onAttach?: (() => void) | undefined;
+  readonly files?: readonly DraftFile[] | undefined;
+  readonly fileValidationErrors?: readonly (string | undefined)[] | undefined;
+  readonly onFilesAdd?: ((files: readonly globalThis.File[]) => void) | undefined;
+  readonly onFileRemove?: ((id: string) => void) | undefined;
+  readonly filesDisabledReason?: string | undefined;
   readonly modes?: ConversationComposerModes | undefined;
   readonly onSetGoal?: (() => void) | undefined;
   readonly goalDisabled?: boolean | undefined;
@@ -147,6 +155,11 @@ export function ConversationComposer({
   selectedOption,
   onOptionChange,
   onAttach,
+  files = [],
+  fileValidationErrors = [],
+  onFilesAdd,
+  onFileRemove,
+  filesDisabledReason,
   modes,
   onSetGoal,
   goalDisabled,
@@ -159,6 +172,11 @@ export function ConversationComposer({
   const editorRef = useRef<ChatComposerInputHandle>(null);
   const editableRef = useRef<HTMLDivElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const filesDisabled = disabled || busy || Boolean(filesDisabledReason);
+  const receiveFiles = (incoming: FileList | null) => {
+    if (incoming?.length && !filesDisabled) onFilesAdd?.(Array.from(incoming));
+  };
   useImperativeHandle(
     inputRef,
     () => ({
@@ -200,8 +218,21 @@ export function ConversationComposer({
   );
   const commandMenu = useCommandSuggestions(value, onValueChange, commands, resources, editableRef);
   const statusId = useId();
-  const canSubmit = value.trim().length > 0 && !disabled && !submitDisabled && !busy;
-  const effectiveBehavior = status === "idle" ? "auto" : behavior === "auto" ? "steer" : behavior;
+  const canSubmit =
+    (value.trim().length > 0 || files.length > 0) &&
+    !disabled &&
+    !submitDisabled &&
+    !busy &&
+    !fileValidationErrors.some(Boolean) &&
+    !(files.length && filesDisabledReason);
+  const effectiveBehavior =
+    status === "idle"
+      ? "auto"
+      : files.length && (behavior === "auto" || behavior === "steer")
+        ? "queue"
+        : behavior === "auto"
+          ? "steer"
+          : behavior;
   const defaultStatusText =
     statusText ??
     (busy
@@ -250,8 +281,77 @@ export function ConversationComposer({
       aria-label="消息输入"
       aria-busy={busy}
       onSubmit={handleSubmit}
+      onPasteCapture={(event) => {
+        if (!onFilesAdd || !event.clipboardData.files.length) return;
+        event.preventDefault();
+        event.stopPropagation();
+        receiveFiles(event.clipboardData.files);
+      }}
+      onDragOver={(event) => {
+        if (onFilesAdd && event.dataTransfer.types.includes("Files")) event.preventDefault();
+      }}
+      onDrop={(event) => {
+        if (!onFilesAdd || !event.dataTransfer.files.length) return;
+        event.preventDefault();
+        event.stopPropagation();
+        receiveFiles(event.dataTransfer.files);
+      }}
     >
       {commandMenu.menu}
+      {onFilesAdd && (
+        <input
+          ref={fileInputRef}
+          className="conversation-sr-only"
+          type="file"
+          multiple
+          accept={FILE_UPLOAD_ACCEPT}
+          aria-label="选择附件"
+          disabled={filesDisabled}
+          onChange={(event) => {
+            receiveFiles(event.currentTarget.files);
+            event.currentTarget.value = "";
+          }}
+        />
+      )}
+      {files.length > 0 && (
+        <ul className="conversation-composer__files" aria-label="待发送附件">
+          {files.map(({ id, file, error }, index) => (
+            <li
+              key={id}
+              className="conversation-composer__file"
+              data-error={Boolean(fileValidationErrors[index] || error) || undefined}
+            >
+              <File aria-hidden="true" />
+              <div>
+                <span className="conversation-composer__file-name" title={file.name}>
+                  {file.name}
+                </span>
+                <span className="conversation-composer__file-size">
+                  {file.size < 1024 * 1024
+                    ? `${Math.max(1, Math.ceil(file.size / 1024))} KiB`
+                    : `${(file.size / (1024 * 1024)).toFixed(1)} MiB`}
+                </span>
+                {(fileValidationErrors[index] || error) && (
+                  <span role="alert" className="conversation-composer__file-error">
+                    {fileValidationErrors[index] || error}
+                  </span>
+                )}
+              </div>
+              <button
+                type="button"
+                aria-label={`移除附件 ${file.name}`}
+                disabled={disabled || busy}
+                onClick={() => onFileRemove?.(id)}
+              >
+                <X aria-hidden="true" />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {onFilesAdd && filesDisabledReason && (
+        <p className="conversation-composer__file-notice">{filesDisabledReason}</p>
+      )}
       <ChatComposer
         className="pico-astryx-composer"
         value={value}
@@ -279,6 +379,17 @@ export function ConversationComposer({
         }
         footerActions={
           <div className="conversation-composer__controls">
+            {onFilesAdd && (
+              <Button
+                type="button"
+                label="添加文件"
+                icon={<Paperclip aria-hidden="true" />}
+                variant="ghost"
+                size="sm"
+                isDisabled={filesDisabled}
+                onClick={() => fileInputRef.current?.click()}
+              />
+            )}
             <ConversationComposerMenu
               onAttach={onAttach}
               onAttachAgent={
