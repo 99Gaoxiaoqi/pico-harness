@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type SetStateAction } from "react";
 import * as ImagePicker from "expo-image-picker";
 import { manipulateAsync, SaveFormat } from "expo-image-manipulator";
 import * as Crypto from "expo-crypto";
-import type { RuntimeInputAttachment, RuntimeSkillReference } from "@pico/protocol/mobile";
+import type { RuntimeInlineImageAttachment, RuntimeSkillReference } from "@pico/protocol/mobile";
 import type { TranscriptReplicaView } from "@pico/transcript-replica";
 import { validateAttachments } from "../core";
 import { usePico } from "../store";
@@ -184,7 +184,7 @@ export function useMessageComposer({
         ? await ImagePicker.launchCameraAsync({ mediaTypes: ["images"] })
         : await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"] });
       if (selectedImage.canceled || !current(selected)) return;
-      let image: RuntimeInputAttachment | undefined;
+      let image: RuntimeInlineImageAttachment | undefined;
       for (const width of [1024, 768, 512, 320, 192]) {
         const result = await manipulateAsync(
           selectedImage.assets[0]!.uri,
@@ -196,7 +196,7 @@ export function useMessageComposer({
           },
         );
         if (!result.base64) continue;
-        const candidate: RuntimeInputAttachment = {
+        const candidate: RuntimeInlineImageAttachment = {
           type: "image_base64",
           mimeType: "image/jpeg",
           data: result.base64,
