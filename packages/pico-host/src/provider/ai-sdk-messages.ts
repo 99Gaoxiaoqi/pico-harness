@@ -67,6 +67,11 @@ export function toAiSdkMessages(
   },
 ): ModelMessage[] {
   const result: ModelMessage[] = [];
+  const projectText = (text: string) =>
+    projectMediaTextForModel(text).replace(
+      /!\[([^\]\n]*)\]\(pico:\/\/artifact\/[^)]+\)/gu,
+      (_match, alt: string) => `[${alt || "Image"}: retained conversation image]`,
+    );
   let usedImageBytes = 0;
   const materialize = (
     image: ImagePart,
@@ -109,7 +114,7 @@ export function toAiSdkMessages(
   )[] = [];
   for (const message of messages) {
     if (message.role === "system") {
-      result.push({ role: "system", content: projectMediaTextForModel(message.content) });
+      result.push({ role: "system", content: projectText(message.content) });
     } else if (message.role === "user" && message.toolCallId !== undefined) {
       const toolName = toolNames.get(message.toolCallId);
       if (toolName === undefined) {
@@ -122,7 +127,7 @@ export function toAiSdkMessages(
             type: "tool-result",
             toolCallId: message.toolCallId,
             toolName,
-            output: { type: "text", value: projectMediaTextForModel(message.content) },
+            output: { type: "text", value: projectText(message.content) },
           },
         ],
       });
@@ -135,9 +140,9 @@ export function toAiSdkMessages(
             ? [
                 ...generatedReferences.splice(0),
                 ...(message.images ?? []).map(materialize),
-                { type: "text", text: projectMediaTextForModel(message.content) },
+                { type: "text", text: projectText(message.content) },
               ]
-            : projectMediaTextForModel(message.content),
+            : projectText(message.content),
       });
     } else {
       const saved = savedContent(message, wire);
@@ -147,8 +152,7 @@ export function toAiSdkMessages(
         if (message.reasoning && wire !== "claude") {
           content.push({ type: "reasoning", text: message.reasoning });
         }
-        if (message.content)
-          content.push({ type: "text", text: projectMediaTextForModel(message.content) });
+        if (message.content) content.push({ type: "text", text: projectText(message.content) });
         for (const call of message.toolCalls ?? []) {
           content.push({
             type: "tool-call",
@@ -177,7 +181,7 @@ export function toAiSdkMessages(
         // Validate replay against the original message before projecting request text.
         // Keep signatures, hosted tool records and explicit file parts untouched.
         if (part.type === "text") {
-          content[index] = { ...part, text: projectMediaTextForModel(part.text) };
+          content[index] = { ...part, text: projectText(part.text) };
         }
         if (
           part.type === "file" &&
@@ -245,7 +249,7 @@ export function toAiSdkMessages(
             part.output.type === "text"
               ? {
                   ...part,
-                  output: { ...part.output, value: projectMediaTextForModel(part.output.value) },
+                  output: { ...part.output, value: projectText(part.output.value) },
                 }
               : part,
           ),
