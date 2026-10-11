@@ -144,7 +144,8 @@
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.61.1",
-    "electron": "43.5.0"
+    "electron": "43.5.0",
+    "@types/yauzl": "3.4.0"
   },
   "overrides": {
     "@electron/packager": "20.3.0",

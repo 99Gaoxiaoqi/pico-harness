@@ -863,7 +863,11 @@
     "@pico/runtime-host": "*",
     "@pico/storage": "*",
     "ajv": "8.20.0",
-    "js-yaml": "5.4.1"
+    "js-yaml": "5.4.1",
+    "exceljs": "4.4.0",
+    "mammoth": "1.13.0",
+    "pdfjs-dist": "6.4.299",
+    "yauzl": "3.4.0"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
