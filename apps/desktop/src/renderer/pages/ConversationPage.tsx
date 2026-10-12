@@ -1933,6 +1933,8 @@ export function ConversationPage() {
                 const diagnostic = modelCommunicationDiagnostic(item.detail ?? "");
                 const status = providerStatusDiagnostic(item.detail ?? "");
                 if (!failureNotice && !diagnostic && !status) return fallback;
+                // The last retry describes an earlier attempt; a final local error takes priority.
+                const failureDetail = !diagnostic && !status ? item.detail : undefined;
                 const latestBoundary = items.findLast(
                   (candidate) => candidate.kind === "runBoundary" && candidate.status !== "started",
                 );
@@ -1949,11 +1951,16 @@ export function ConversationPage() {
                   Boolean(originalRequest.text.trim());
                 return (
                   <ProviderFailureCard
+                    failureDetail={failureDetail}
                     providerDetail={diagnostic?.providerDetail ?? status?.providerDetail}
                     diagnosticText={item.detail}
                     notice={failureNotice}
                     httpStatus={status?.httpStatus}
-                    title={diagnostic?.title ?? status?.title ?? "暂时无法连接模型"}
+                    title={
+                      failureDetail
+                        ? "运行失败"
+                        : (diagnostic?.title ?? status?.title ?? "暂时无法连接模型")
+                    }
                     canRetry={Boolean(canRetry)}
                     onRetry={() => {
                       if (originalRequest?.kind !== "userMessage" || draft.trim()) return;

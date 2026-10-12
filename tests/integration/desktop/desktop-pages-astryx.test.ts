@@ -141,7 +141,7 @@ import "./apps/desktop/src/renderer/layers.css";
 import * as React from "react";
 import {act,useState} from "react";
 import {createRoot} from "react-dom/client";
-import {MemoryRouter} from "react-router-dom";
+import {MemoryRouter,Routes,Route} from "react-router-dom";
 import {AutomationsPage} from "./apps/desktop/src/renderer/pages/AutomationsPage.tsx";
 import {SessionsPage} from "./apps/desktop/src/renderer/pages/SessionsPage.tsx";
 import {ConversationPage} from "./apps/desktop/src/renderer/pages/ConversationPage.tsx";
@@ -152,6 +152,8 @@ import {ConversationTranscript} from "./apps/desktop/src/renderer/conversation/C
 import {SideChatWorkbarPanel} from "./apps/desktop/src/renderer/workbar-panels/SideChatWorkbarPanel.tsx";
 import {RuntimeContext} from "./apps/desktop/src/renderer/runtime-context.tsx";
 import {previewData} from "./apps/desktop/src/renderer/fixture.ts";
+import {applyProviderRetryNotification,providerRetryKey} from "./apps/desktop/src/renderer/provider-retry.ts";
+import {sessionHref,workspaceSessionKey} from "./apps/desktop/src/renderer/workspace-session.ts";
 import {PicoTheme} from "./apps/desktop/src/renderer/astryx-provider.tsx";
 import "./apps/desktop/src/renderer/styles.css";
 import "./apps/desktop/src/renderer/astryx-controls.css";
@@ -450,6 +452,47 @@ async function scenario(){
   const importedAnswers=[...document.querySelectorAll('.conversation-message--assistant')];
   check(importedAnswers.length===2&&importedAnswers[0].textContent.includes("导入回复一")&&importedAnswers[1].textContent.includes("导入回复二"),"Imported history keeps every assistant message visible");
   check(!document.querySelector('.conversation-process'),"Imported history is not folded into an execution process");
+
+  // A retained retry failure must not replace the final error from a later attempt.
+  const retryScope={workspacePath:previewData.workspacePath,sessionId:"image-retry-session",runId:"image-retry-run"};
+  const retryKey=providerRetryKey(retryScope.workspacePath,retryScope.runId);
+  const retryConversationKey=workspaceSessionKey(retryScope);
+  const retryEvent=(topic,at,payload)=>({protocolVersion:2,eventId:topic+at,topic,scope:retryScope,resourceVersion:1,at,payload});
+  const retryPayload={phase:"scheduled",failedAttempt:1,nextAttempt:2,maxAttempts:10,delayMs:8000,httpStatus:429};
+  let providerRetries=applyProviderRetryNotification({},retryEvent("run.providerRetry",Date.now(),retryPayload));
+  const retryRequest={id:"image-user",kind:"userMessage",text:"请分析这张图片"};
+  const retryRun={id:retryScope.runId,...retryScope,status:"running",description:retryRequest.text,startedAt:100,updatedAt:110};
+  const retryActions={...taskRuntime.actions,loadSession:async()=>{},loadTranscriptAnchors:async()=>undefined};
+  const mountRetryPage=async(status,detail)=>{
+    const retryItems=[retryRequest,{id:"image-start",kind:"runBoundary",runId:retryRun.id,status:"started",label:"运行中"},
+      ...(status==="failed"?[{id:"image-failure",kind:"runBoundary",runId:retryRun.id,status:"failed",label:"运行失败",detail}]:[])];
+    const retryRuntime={...taskRuntime,preview:true,actions:retryActions,data:{...previewData,providerRetries,
+      providerConfig:{...previewData.providerConfig,providers:[]},timeline:[],approvals:[],prompts:[],
+      sessions:[{id:retryScope.sessionId,workspacePath:retryScope.workspacePath,title:"图片失败恢复",status:"active",updatedAt:120}],
+      runs:[{...retryRun,status}],conversations:{[retryConversationKey]:{...retryScope,items:retryItems,queuedCount:0}}}};
+    await act(async()=>root.render(<PicoTheme><RuntimeContext value={retryRuntime}><MemoryRouter initialEntries={[sessionHref(retryScope)]}><Routes><Route path="/session/:sessionId" element={<ConversationPage/>}/></Routes></MemoryRouter></RuntimeContext></PicoTheme>));
+  };
+  await mountRetryPage("running");
+  check(document.querySelector('.conversation-provider-retry')?.textContent.includes("连接中断，正在自动重试"),"429 still displays the automatic retry banner");
+  providerRetries=applyProviderRetryNotification(providerRetries,retryEvent("run.providerRetry",Date.now()+10,{...retryPayload,phase:"started"}));
+  await mountRetryPage("running");
+  check(document.querySelector('.conversation-provider-retry')?.textContent.includes("正在重新连接模型"),"Started retry still displays its active request");
+  const imageFailure="图片未发送（artifact_id=image-1）：附件已失效或无法读取，请重新上传。";
+  providerRetries=applyProviderRetryNotification(providerRetries,retryEvent("run.finished",Date.now()+20,{run:{...retryRun,status:"failed",error:imageFailure}}));
+  check(!providerRetries[retryKey].notice&&providerRetries[retryKey].lastFailure.httpStatus===429,"Production reducer closes retry and retains the previous failure");
+  await mountRetryPage("failed",imageFailure);
+  const failureCard=()=>document.querySelector('.conversation-provider-failure');
+  check(failureCard()?.textContent.includes(imageFailure),"Final image failure and reupload guidance must be visible after an earlier 429 retry");
+  check(!/暂时无法连接模型|模型服务当前请求过多/.test(failureCard().textContent),"Stale transport failure must not mask a local failure");
+  check(!document.querySelector('.conversation-provider-retry'),"Finished run closes its automatic retry banner");
+  await mountRetryPage("failed","Model API request failed [429]; response omitted");
+  check(failureCard()?.textContent.includes("模型服务请求过多")&&failureCard().textContent.includes("模型服务当前请求过多"),"Final 429 keeps the normal provider failure title and explanation");
+  await mountRetryPage("failed",imageFailure);
+  const sentBeforeRetry=sends.length;
+  await click("编辑后重试");
+  check(document.querySelector('[contenteditable="true"]').textContent===retryRequest.text,"Retry restores the original request to the composer");
+  check(sends.length===sentBeforeRetry&&!failureCard().textContent.includes("编辑后重试"),"Retry waits for editing and cannot overwrite an existing draft");
+
   await act(async()=>root.render(<SideChatWorkbarPanel child={{panelId:"side",sourceSessionId:"parent",targetSessionId:"child",state:"live"}} items={liveItems} activeRun={activeRun} draft="" active running loading={false} onSend={()=>{}} onStop={()=>{}} onDraftChange={()=>{}} onRetryCreate={()=>{}} onClose={()=>{}}/>));
   check(!process().open&&!thinkingRow().open,"Side chat starts with its live process and thinking collapsed");
   await act(async()=>root.unmount());
