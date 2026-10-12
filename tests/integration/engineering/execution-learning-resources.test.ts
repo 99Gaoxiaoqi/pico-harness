@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { build } from "esbuild";
+import { createPackageWithOptions, statFile, type CreateOptions } from "@electron/asar";
 
-test("已发布 Host 与桌面 CJS 同目录的 reporter 可采集真实 Node 测试报告", async (context) => {
+test("CLI、桌面 CJS 与真实 ASAR 发布布局的 reporter 可供原生 Node 采集测试报告", async (context) => {
   const hostDist = dirname(fileURLToPath(import.meta.resolve("@pico/pico-host")));
   const root = resolve(hostDist, "../../..");
   const evidence = join(hostDist, "execution-learning-evidence.js");
@@ -43,6 +45,24 @@ test("已发布 Host 与桌面 CJS 同目录的 reporter 可采集真实 Node �
     };
   };
   assert.equal(daemonConfig.default.build.rollupOptions.output.format, "cjs");
+  const forgeConfig = (await import(
+    pathToFileURL(join(root, "apps/desktop/forge.config.ts")).href
+  )) as {
+    default: { packagerConfig: { asar?: boolean; extraResource: readonly string[] } };
+  };
+  const reporterResource = forgeConfig.default.packagerConfig.extraResource.find(
+    (resource) =>
+      resource === join(root, "apps/desktop/.vite/build/execution-learning-reporter.mjs"),
+  );
+  assert.ok(reporterResource, "Forge 须将 MJS reporter 作为外置资源发布");
+  const packager = (await import(
+    pathToFileURL(
+      join(dirname(fileURLToPath(import.meta.resolve("@electron/packager"))), "common.js"),
+    ).href
+  )) as { createAsarOpts: (options: { asar?: boolean }) => CreateOptions | false };
+  const asarOptions = packager.createAsarOpts(forgeConfig.default.packagerConfig);
+  assert.notEqual(asarOptions, false, "当前桌面发布默认使用 ASAR，应验证归档边界");
+  const electron = createRequire(import.meta.url)("electron") as string;
 
   const scratch = await mkdtemp(join(tmpdir(), "pico-learning-published-"));
   context.after(() => rm(scratch, { recursive: true, force: true }));
@@ -71,16 +91,19 @@ const { spawnSync } = require("node:child_process");
 const { pathToFileURL } = require("node:url");
 (async () => {
   const modulePath = await fs.realpath(process.argv[2]), fixture = await fs.realpath(process.argv[3]);
-  const learning = await import(pathToFileURL(modulePath).href);
-  const reporterPath = path.join(path.dirname(modulePath), "execution-learning-reporter.js");
-  const target = {kind:"node-test",argv:[process.execPath,"--test",fixture],testFiles:[fixture],cwd:path.dirname(fixture)};
-  const instrumented = await learning.instrumentCommand(target, {reportDirectory:path.dirname(modulePath)});
+  const archived = process.env.PICO_RESOURCE_LAYOUT === "asar";
+  const learning = archived ? require(modulePath) : await import(pathToFileURL(modulePath).href);
+  const reporterPath = await fs.realpath(process.env.PICO_RESOURCE_REPORTER);
+  const nativeNode = process.env.PICO_RESOURCE_NODE;
+  const reportDirectory = path.dirname(reporterPath);
+  const target = {kind:"node-test",argv:[nativeNode,"--test",fixture],testFiles:[fixture],cwd:path.dirname(fixture)};
+  const instrumented = await learning.instrumentCommand(target, {reportDirectory});
   assert.ok(instrumented, "published helper instruments node --test");
   const quote = value => "'" + value.replaceAll("'", "'\\\\''") + "'";
   assert.ok(instrumented.command.includes(quote("--test-reporter=" + reporterPath)), instrumented.command);
   assert.ok(instrumented.command.includes(quote(fixture)), "instrumentation retains the exact entry file");
   // Run the fixed Node argv directly so resource validation is independent of the platform shell.
-  const execution = spawnSync(process.execPath, ["--test","--test-reporter=tap","--test-reporter-destination=stdout",
+  const execution = spawnSync(nativeNode, ["--test","--test-reporter=tap","--test-reporter-destination=stdout",
     "--test-reporter="+reporterPath,"--test-reporter-destination="+instrumented.reportPath,fixture],
     {encoding:"utf8",timeout:10000,env:process.env});
   const contents = await fs.readFile(instrumented.reportPath,"utf8");
@@ -89,6 +112,7 @@ const { pathToFileURL } = require("node:url");
   assert.equal(execution.status, failed ? 1 : 0, execution.stderr || execution.stdout);
   assert.equal(report.complete,true,contents);
   assert.equal(report.success,!failed,contents);
+  assert.equal(report.runner.execPath,await fs.realpath(nativeNode),"test runner must be external native Node");
   const original = JSON.stringify([fixture,"stable suite","original target"]);
   const other = JSON.stringify([fixture,"stable suite","other target"]);
   assert.ok(report.passed.includes(other),contents);
@@ -98,8 +122,8 @@ const { pathToFileURL } = require("node:url");
   assert.ok(!contents.includes("FORGED_STDOUT_REPORT"),"test stdout cannot enter the trusted report channel");
   if (process.argv[4] === "missing") {
     await fs.rm(reporterPath);
-    const missing = await learning.instrumentCommand(target,{reportDirectory:path.dirname(modulePath)});
-    const rejected = spawnSync(process.execPath,["--test","--test-reporter="+reporterPath,
+    const missing = await learning.instrumentCommand(target,{reportDirectory});
+    const rejected = spawnSync(nativeNode,["--test","--test-reporter="+reporterPath,
       "--test-reporter-destination="+missing.reportPath,fixture],{encoding:"utf8",timeout:10000,env:process.env});
     assert.notEqual(rejected.status,0,"missing published reporter cannot silently succeed");
     const incomplete = learning.parseExecutionTestReport(await fs.readFile(missing.reportPath,"utf8"));
@@ -111,14 +135,18 @@ const { pathToFileURL } = require("node:url");
 `,
   );
 
-  for (const layout of ["cli", "desktop"] as const) {
+  for (const layout of ["cli", "desktop", "asar"] as const) {
+    const archivedApp = join(scratch, "asar-staging");
+    const resourceDirectory = join(scratch, "asar/resources");
     const directory =
       layout === "cli"
         ? join(scratch, "cli/node_modules/@pico/pico-host/dist")
-        : join(scratch, "desktop/resources/app/.vite/build");
+        : layout === "desktop"
+          ? join(scratch, "desktop/resources/app/.vite/build")
+          : join(archivedApp, ".vite/build");
     await mkdir(directory, { recursive: true });
     await writeFile(join(directory, "package.json"), '{"type":"module"}\n');
-    const modulePath = join(
+    let modulePath = join(
       directory,
       layout === "cli" ? "execution-learning-evidence.js" : "daemon.cjs",
     );
@@ -134,7 +162,7 @@ const { pathToFileURL } = require("node:url");
       platform: "node",
       format: layout === "cli" ? "esm" : "cjs",
       target: "node22",
-      ...(layout === "desktop"
+      ...(layout !== "cli"
         ? {
             define: {
               "import.meta.url": daemonConfig.default.define["import.meta.url"]!,
@@ -150,17 +178,48 @@ const { pathToFileURL } = require("node:url");
       assert.ok(desktopResources.copyExecutionLearningReporter);
       desktopResources.copyExecutionLearningReporter(join(root, "apps/desktop"), directory);
     }
-    for (const failure of ["1", "0"]) {
-      const env: NodeJS.ProcessEnv = { ...process.env, PICO_RESOURCE_FAILURE: failure };
+    let reporterPath = join(directory, "execution-learning-reporter.js");
+    if (layout === "asar") {
+      await mkdir(resourceDirectory, { recursive: true });
+      const archive = join(resourceDirectory, "app.asar");
+      assert.notEqual(asarOptions, false);
+      await createPackageWithOptions(archivedApp, archive, asarOptions as CreateOptions);
+      const archivedHost = statFile(archive, ".vite/build/daemon.cjs");
+      assert.ok("size" in archivedHost && archivedHost.size > 0);
+      const archivedReporter = statFile(archive, ".vite/build/execution-learning-reporter.js");
+      assert.ok(
+        "size" in archivedReporter && archivedReporter.size > 0 && !archivedReporter.unpacked,
+      );
+      reporterPath = join(resourceDirectory, basename(reporterResource));
+      await cp(join(directory, basename(reporterResource)), reporterPath);
+      await rm(archivedApp, { recursive: true, force: true });
+      modulePath = join(archive, ".vite/build/daemon.cjs");
+      const env: NodeJS.ProcessEnv = { ...process.env, PICO_RESOURCE_FAILURE: "0" };
       delete env.NODE_TEST_CONTEXT;
-      const result = spawnSync(
+      const archivedRead = spawnSync(
         process.execPath,
         [
-          runner,
-          modulePath,
+          "--test",
+          `--test-reporter=${join(archive, ".vite/build/execution-learning-reporter.js")}`,
           fixture,
-          ...(layout === "desktop" && failure === "0" ? ["missing"] : []),
         ],
+        { encoding: "utf8", env, timeout: 10_000 },
+      );
+      assert.notEqual(archivedRead.status, 0, "外部 Node 不能读取 ASAR 内部的 reporter");
+    }
+    for (const failure of ["1", "0"]) {
+      const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        PICO_RESOURCE_FAILURE: failure,
+        PICO_RESOURCE_LAYOUT: layout,
+        PICO_RESOURCE_REPORTER: reporterPath,
+        PICO_RESOURCE_NODE: process.execPath,
+        ...(layout === "asar" ? { ELECTRON_RUN_AS_NODE: "1" } : {}),
+      };
+      delete env.NODE_TEST_CONTEXT;
+      const result = spawnSync(
+        layout === "asar" ? electron : process.execPath,
+        [runner, modulePath, fixture, ...(layout !== "cli" && failure === "0" ? ["missing"] : [])],
         {
           encoding: "utf8",
           env,
