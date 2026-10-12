@@ -253,7 +253,7 @@ test("媒体消息仅持久引用，重开后真实请求按视觉能力/预算�
   );
   assert.equal(selectionReads[0], "newest", "优先读取本轮图片");
   assert.equal(selectionReads.length, 6);
-  assert.match(JSON.stringify(crowded), /artifact_id=old:0;.*request image budget exceeded/u);
+  assert.match(JSON.stringify(crowded[0]), /artifact_id=old:5;.*request image budget exceeded/u);
   let budgetReads = 0;
   const budgetImage = { ...artifact, sizeBytes: 2 * 1024 * 1024 };
   await assert.rejects(

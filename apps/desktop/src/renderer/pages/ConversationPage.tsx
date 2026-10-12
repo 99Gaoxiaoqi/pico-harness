@@ -551,7 +551,8 @@ export function ConversationPage() {
     ? conversation?.settings?.orchestrationMode
     : newTaskSettings.orchestrationMode;
   const imageModelNotice =
-    composerCapabilities?.vision === false &&
+    isRecord(composerCapabilities) &&
+    composerCapabilities.vision === false &&
     fileDraft.files.some(({ file }) => uploadMimeType(file)?.startsWith("image/"))
       ? "当前模型不支持图片；请切换到支持视觉的模型，或移除图片后发送。"
       : undefined;
