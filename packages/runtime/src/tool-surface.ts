@@ -27,6 +27,7 @@ export const PICO_TOOL_GROUPS: readonly ToolGroupDef[] = [
     toolNames: [
       "read_file",
       "document",
+      "view_image",
       "archive_read",
       "write_file",
       "edit_file",
@@ -185,6 +186,7 @@ export function getSupportedToolNames(host: ToolHostKind): Set<string> {
 export const PLAN_MODE_TOOL_NAMES: ReadonlySet<string> = new Set([
   "read_file",
   "document",
+  "view_image",
   "archive_read",
   "glob",
   "grep",
