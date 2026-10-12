@@ -7,7 +7,6 @@ import type {
   MemoryItemSource,
 } from "@pico/core";
 import { Button, InlineNotice } from "./components.js";
-import "./ExecutionLearningPanel.css";
 
 export interface ExecutionLearningInspection {
   readonly claim?: ExecutionAcceptanceClaim;
