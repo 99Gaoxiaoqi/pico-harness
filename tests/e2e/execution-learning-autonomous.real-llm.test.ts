@@ -38,7 +38,7 @@ realModelTest(
   { timeout: 5 * 60_000 },
   async (t) => {
     const configured = await configuredUserDefaultRealModel();
-    const root = await mkdtemp(join(tmpdir(), "pico-autonomous-learning-real-"));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "pico-autonomous-learning-real-")));
     const workDir = join(root, "workspace"),
       picoHome = join(root, "home");
     await mkdir(workDir);
@@ -51,14 +51,21 @@ realModelTest(
     const repository = new SqliteMemoryItemStore(join(picoHome, "memory.sqlite"));
     const events = new SqliteRuntimeEventStore({ storageRoot: paths.workspace.root });
     const sessions = ["autonomous-real-source", "autonomous-real-reuse"];
+    const inheritedTestContext = process.env.NODE_TEST_CONTEXT;
+    delete process.env.NODE_TEST_CONTEXT;
     t.after(async () => {
-      await closeExecutionLearningWorker(picoHome);
-      await lifecycle.close();
-      for (const sessionId of sessions)
-        await globalSessionManager.delete(sessionId, workDir, { picoHome })?.close();
-      events.close();
-      repository.close();
-      await rm(root, { recursive: true, force: true });
+      try {
+        await closeExecutionLearningWorker(picoHome);
+        await lifecycle.close();
+        for (const sessionId of sessions)
+          await globalSessionManager.delete(sessionId, workDir, { picoHome })?.close();
+        events.close();
+        repository.close();
+        await rm(root, { recursive: true, force: true });
+      } finally {
+        if (inheritedTestContext === undefined) delete process.env.NODE_TEST_CONTEXT;
+        else process.env.NODE_TEST_CONTEXT = inheritedTestContext;
+      }
     });
     const requests: Message[][] = [];
     const main = createProvider(configured.provider, configured.config);

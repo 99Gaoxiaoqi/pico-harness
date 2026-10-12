@@ -40,7 +40,7 @@ const call = (id: string, name: string, input: object): ToolCall => ({
 });
 
 async function fixture(t: TestContext, prefix: string) {
-  const root = await mkdtemp(join(tmpdir(), prefix));
+  const root = await realpath(await mkdtemp(join(tmpdir(), prefix)));
   const workDir = join(root, "workspace"),
     picoHome = join(root, "home");
   await mkdir(workDir);
@@ -53,14 +53,22 @@ async function fixture(t: TestContext, prefix: string) {
   const repository = new SqliteMemoryItemStore(join(picoHome, "memory.sqlite"));
   const events = new SqliteRuntimeEventStore({ storageRoot: paths.workspace.root });
   const sessions: string[] = [];
+  // Native node:test invocations must behave like normal foreground commands.
+  const inheritedTestContext = process.env.NODE_TEST_CONTEXT;
+  delete process.env.NODE_TEST_CONTEXT;
   t.after(async () => {
-    await closeExecutionLearningWorker(picoHome);
-    await lifecycle.close();
-    for (const sessionId of sessions)
-      await globalSessionManager.delete(sessionId, workDir, { picoHome })?.close();
-    events.close();
-    repository.close();
-    await rm(root, { recursive: true, force: true });
+    try {
+      await closeExecutionLearningWorker(picoHome);
+      await lifecycle.close();
+      for (const sessionId of sessions)
+        await globalSessionManager.delete(sessionId, workDir, { picoHome })?.close();
+      events.close();
+      repository.close();
+      await rm(root, { recursive: true, force: true });
+    } finally {
+      if (inheritedTestContext === undefined) delete process.env.NODE_TEST_CONTEXT;
+      else process.env.NODE_TEST_CONTEXT = inheritedTestContext;
+    }
   });
   const run = async (
     sessionId: string,
@@ -119,7 +127,28 @@ test(
     assert.equal(result.finalMessage, "BuildCheck 已通过。");
     await f.finishLearning();
     const items = await f.repository.listItems({ workspaceKey: f.paths.workspace.id });
-    assert.equal(items.length, 1);
+    const observed = await f.events.readSession(seedSession);
+    assert.equal(
+      items.length,
+      1,
+      JSON.stringify({
+        candidates: (
+          await f.repository.executionLearning.listExecutionLearningCandidates(f.paths.workspace.id)
+        ).map((candidate) => ({
+          state: candidate.state,
+          reason: candidate.reason,
+          revision: candidate.claim.revision,
+          preparationCount: candidate.claim.recipe.length,
+        })),
+        outcomes: observed
+          .filter((event) => event.kind === "tool.result.recorded")
+          .map((event) => ({
+            toolName: event.data.toolName,
+            status: event.data.status,
+            exitCode: event.data.executionFacts?.exitCode,
+          })),
+      }),
+    );
     const saved = items[0]!;
     assert.equal(saved.sourceType, "execution-validated");
     assert.equal(saved.taskAcceptance?.predicateId, "test-target-pass.v1");
@@ -130,7 +159,6 @@ test(
       undefined,
       "the new acceptance must not reuse manual three-vote metadata",
     );
-    const observed = await f.events.readSession(seedSession);
     const outcomes = observed.filter((event) => event.kind === "tool.result.recorded");
     assert.deepEqual(
       outcomes
