@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -103,7 +103,11 @@ async function admittedClaim(
   return claim;
 }
 
-async function receiptAndJob(store: SqliteMemoryItemStore, claim: ExecutionAcceptanceClaim) {
+async function receiptAndJob(
+  store: SqliteMemoryItemStore,
+  claim: ExecutionAcceptanceClaim,
+  options: { settle?: boolean; enqueue?: boolean } = {},
+) {
   const observation = {
     complete: true,
     matches: true,
@@ -134,7 +138,7 @@ async function receiptAndJob(store: SqliteMemoryItemStore, claim: ExecutionAccep
     exitCode: 0,
     settledAt: 400,
   };
-  await store.executionLearning.settleExecutionVerification(result);
+  if (options.settle !== false) await store.executionLearning.settleExecutionVerification(result);
   const job: ExecutionLearningJob = {
     jobId: `job-${claim.candidateId}`,
     workspaceKey,
@@ -150,7 +154,7 @@ async function receiptAndJob(store: SqliteMemoryItemStore, claim: ExecutionAccep
     leaseUntil: 0,
     fencingToken: 0,
   };
-  await store.executionLearning.enqueueExecutionLearningJob(job);
+  if (options.enqueue !== false) await store.executionLearning.enqueueExecutionLearningJob(job);
   return { ticket, result, job };
 }
 
@@ -214,6 +218,89 @@ test("v9 and v10 memory databases upgrade to v11 without changing existing facts
       store.close();
     }
   }
+});
+
+test("restart recovers only settled commit-gap receipts once and a late reflection preserves saved state", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-learning-commit-gap-")),
+    path = join(root, "memory.sqlite");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  let store = new SqliteMemoryItemStore(path);
+  t.after(() => store.close());
+  const settled = await admittedClaim(store, "settled-gap");
+  const { ticket, result, job } = await receiptAndJob(store, settled, { enqueue: false });
+  const pendingSeed = await admittedClaim(store, "pending-gap");
+  const pending = {
+    ...pendingSeed,
+    revision: 2,
+    claimHash: hash("pending-gap-revision"),
+    conditions: [{ kind: "file" as const, path: join(root, "ready.flag"), hash: hash("ready") }],
+  };
+  await store.executionLearning.saveExecutionLearningClaim(pending);
+  const pendingReceipt = await receiptAndJob(store, pending, { settle: false, enqueue: false });
+  await writeFile(join(root, "ready.flag"), "ready");
+  store.close();
+  store = new SqliteMemoryItemStore(path);
+  await store.executionLearning.recoverSettledExecutionLearningJobs(600);
+  await store.executionLearning.recoverSettledExecutionLearningJobs(601);
+  assert.deepEqual(await store.executionLearning.readExecutionVerification(ticket.ticketId), {
+    ticket,
+    result,
+  });
+  assert.equal(
+    (await store.executionLearning.readExecutionVerification(pendingReceipt.ticket.ticketId))
+      ?.result,
+    undefined,
+  );
+  const db = new DatabaseSync(path, { readOnly: true });
+  try {
+    assert.equal(
+      db.prepare("SELECT count(*) AS count FROM execution_learning_jobs").get()?.count,
+      1,
+    );
+  } finally {
+    db.close();
+  }
+  const lease = await store.executionLearning.claimExecutionLearningJob(
+    "recovered-worker",
+    602,
+    1000,
+  );
+  assert.equal(lease?.ticketId, ticket.ticketId);
+  assert.ok(lease);
+  const saved = await store.executionLearning.completeExecutionLearningJob({
+    jobId: lease.jobId,
+    fencingToken: lease.fencingToken,
+    candidateRevision: settled.revision,
+    content: "BuildCheck 已通过完整验收，ready.flag 的内容保持 ready。",
+    now: 603,
+  });
+  assert.equal(saved.state, "saved");
+  const { ticketId: _ticketId, ...reflectionBase } = job;
+  await store.executionLearning.enqueueExecutionLearningJob({
+    ...reflectionBase,
+    jobId: "late-reflection",
+    kind: "reflect",
+    createdAt: 604,
+    updatedAt: 604,
+  });
+  const reflection = await store.executionLearning.claimExecutionLearningJob(
+    "late-worker",
+    605,
+    1000,
+  );
+  assert.equal(reflection?.kind, "reflect");
+  assert.ok(reflection);
+  const unchanged = await store.executionLearning.completeExecutionLearningJob({
+    jobId: reflection.jobId,
+    fencingToken: reflection.fencingToken,
+    candidateRevision: settled.revision,
+    reason: "late unsupported hypothesis",
+    hypothesis: "unverified",
+    now: 606,
+  });
+  assert.equal(unchanged.state, "saved");
+  assert.equal(unchanged.itemId, saved.itemId);
+  assert.equal((await store.listItems({ workspaceKey })).length, 1);
 });
 
 test("verification receipts and lease fences survive restart; publication is atomic and a damaged acceptance hash cannot fall back to ordinary recall", async (t) => {
