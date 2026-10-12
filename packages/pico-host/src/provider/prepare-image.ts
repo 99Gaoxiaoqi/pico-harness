@@ -8,8 +8,39 @@ export const MODEL_IMAGE_MAX_SOURCE_PIXELS = 32_000_000;
 const MAX_ACTIVE_PREPARATIONS = 2;
 const moduleRequire = createRequire(import.meta.url);
 let activePreparations = 0;
+const waitingPreparations = new Set<() => void>();
 
 type ImageHeader = { width: number; height: number; animated: boolean };
+
+async function acquirePreparation(signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
+  if (activePreparations < MAX_ACTIVE_PREPARATIONS) {
+    activePreparations++;
+    return;
+  }
+  await new Promise<void>((resolve, reject) => {
+    const start = () => {
+      signal?.removeEventListener("abort", cancel);
+      activePreparations++;
+      resolve();
+    };
+    const cancel = () => {
+      waitingPreparations.delete(start);
+      reject(signal!.reason);
+    };
+    waitingPreparations.add(start);
+    signal?.addEventListener("abort", cancel, { once: true });
+  });
+}
+
+function releasePreparation(): void {
+  activePreparations--;
+  const next = waitingPreparations.values().next().value;
+  if (next) {
+    waitingPreparations.delete(next);
+    next();
+  }
+}
 
 function invalidImage(): Error {
   return new Error("图片文件头无效或内容已损坏。");
@@ -122,7 +153,9 @@ function readHeader(bytes: Buffer, mimeType: string): ImageHeader {
 export async function prepareImageForModel(
   data: string,
   mimeType: string,
+  signal?: AbortSignal,
 ): Promise<{ data: string; mimeType: string; sizeBytes: number }> {
+  signal?.throwIfAborted();
   if (data.length > Math.ceil(MODEL_IMAGE_MAX_BYTES / 3) * 4)
     throw new Error("图片超过 10 MiB 输入上限。");
   if (!data || data.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/u.test(data))
@@ -138,16 +171,17 @@ export async function prepareImageForModel(
   checkDimensions(header.width, header.height);
   if (header.animated && Math.max(header.width, header.height) > MODEL_IMAGE_MAX_EDGE)
     throw new Error("GIF 或动画图片超过 2048 像素，无法在保留动画的同时缩放，请先导出静态图片。");
-  if (activePreparations >= MAX_ACTIVE_PREPARATIONS)
-    throw new Error("图片处理正在忙碌（最多 2 个并行任务），请稍后重试。");
-  activePreparations++;
+  await acquirePreparation(signal);
   let image: Image | undefined;
   let canvas: Canvas | undefined;
   try {
+    signal?.throwIfAborted();
     const { createCanvas, loadImage } = moduleRequire(
       "@napi-rs/canvas",
     ) as typeof import("@napi-rs/canvas");
     image = await loadImage(bytes);
+    // Native decoding cannot be interrupted; keep its slot until it settles and is cleaned up.
+    signal?.throwIfAborted();
     // Skia applies EXIF orientation during decode; use decoded dimensions and do not rotate again.
     checkDimensions(image.width, image.height);
     const largestEdge = Math.max(image.width, image.height);
@@ -167,17 +201,25 @@ export async function prepareImageForModel(
         : mimeType === "image/webp"
           ? await canvas.encode("webp", 90)
           : await canvas.encode("png");
+    signal?.throwIfAborted();
     if (output.byteLength > MODEL_IMAGE_MAX_BYTES)
       throw new Error("缩放后图片超过 10 MiB 输出上限。");
     return { data: output.toString("base64"), mimeType, sizeBytes: output.byteLength };
   } catch (cause) {
+    signal?.throwIfAborted();
     throw new Error(`图片准备失败：${cause instanceof Error ? cause.message : String(cause)}`, {
       cause,
     });
   } finally {
     // Release native bitmap/canvas storage promptly rather than waiting for a later GC pass.
-    if (image) image.src = new Uint8Array();
-    if (canvas) canvas.width = canvas.height = 0;
-    activePreparations--;
+    try {
+      if (image) image.src = new Uint8Array();
+    } finally {
+      try {
+        if (canvas) canvas.width = canvas.height = 0;
+      } finally {
+        releasePreparation();
+      }
+    }
   }
 }
