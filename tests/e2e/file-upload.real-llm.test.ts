@@ -48,7 +48,7 @@ test(
     await mkdir(skillDir, { recursive: true });
     await writeFile(
       join(skillDir, "SKILL.md"),
-      "---\nname: attachments-only\ndescription: Read and analyze the supplied attachments\nallowed-tools: [document]\n---\nUse the document tool to read/search/view/analyze the supplied files. Use only evidence from these attachments. Cite locations in the requested JSON fields.\n",
+      "---\nname: attachments-only\ndescription: Read and analyze the supplied attachments\nallowed-tools: [document, view_image]\n---\nUse the document tool to read/search/view/analyze the supplied files. Use only evidence from these attachments. Cite locations in the requested JSON fields.\n",
     );
     const userConfigStore = new UserConfigStore({ picoHome });
     const secretEnv = "PICO_FILE_UPLOAD_REAL_KEY";
@@ -165,7 +165,7 @@ test(
         ...scope,
         input: {
           kind: "text",
-          text: "请根据附件回答，完成必要工具调用后只输出JSON对象：搜索长文本中的VERIFICATION_TOKEN，txtToken为该标记值，txtSource为行号；pdfText为sample.pdf正文；wordTitle为Word标题；sheetNames为Excel全部工作表名称数组；emptySecondCell为Excel‘空列’那行第二列是否为空（布尔）；thirdCell为该行第三列文本；用document analyze计算预算工作表B2:B3，header=false，operation=sum，column=B，budgetSum为数值；imageColor为color.png主色英文单词；scanned.pdf是纯图片扫描页，用document view查看第1页，scanCode为图中的六位数字字符串。不要猜测未读取的内容。",
+          text: "请根据附件回答，完成必要工具调用后只输出JSON对象：搜索长文本中的VERIFICATION_TOKEN，txtToken为该标记值，txtSource为行号；pdfText为sample.pdf正文；wordTitle为Word标题；sheetNames为Excel全部工作表名称数组；emptySecondCell为Excel‘空列’那行第二列是否为空（布尔）；thirdCell为该行第三列文本；用document analyze计算预算工作表B2:B3，header=false，operation=sum，column=B，budgetSum为数值；必须调用view_image按附件ID重新读取color.png，imageColor为该图主色英文单词；scanned.pdf是纯图片扫描页，用document view查看第1页，scanCode为图中的六位数字字符串。不要猜测未读取的内容。",
           skills: [{ name: "attachments-only" }],
           attachments,
         },
@@ -213,6 +213,12 @@ test(
           })),
         }),
       );
+      assert.ok(
+        messages
+          .flatMap((message) => message.toolCalls ?? [])
+          .some((call) => call.name === "view_image"),
+        "真实模型通过附件ID重新查看图片",
+      );
       const documentCalls = messages
         .flatMap((message) => message.toolCalls ?? [])
         .filter((call) => call.name === "document");
@@ -234,7 +240,7 @@ test(
       assert.ok(!JSON.stringify(input).includes(files[4]!.bytes.toString("base64")));
       assert.ok(input.content.length < 20_000);
       t.diagnostic(
-        `真实附件验收通过：${model.route.id}；长文末尾定位、扫描页视觉、Excel计算；document调用${documentCalls.length}次。`,
+        `真实附件验收通过：${model.route.id}；长文末尾定位、扫描页视觉、Excel计算、大图缩放及按ID重新看图；document调用${documentCalls.length}次。`,
       );
     } finally {
       lease.release();
@@ -248,7 +254,7 @@ function record(value: unknown): Record<string, unknown> {
 }
 
 function redPng(): Buffer {
-  const dimension = 64;
+  const dimension = 3072;
   const scanlines = Buffer.alloc(dimension * (1 + dimension * 3));
   for (let row = 0; row < dimension; row++)
     for (let col = 0; col < dimension; col++)

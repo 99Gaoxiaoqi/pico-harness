@@ -264,7 +264,7 @@ async function scenario(){
   const sends=[];
   const taskRuntime={...runtime,preview:true,data:{...previewData,providerConfig:{...previewData.providerConfig,
     defaultModelRouteId:"test/a",userDefaults:{modelRouteId:"test/a",thinkingEffort:"unsupported"},
-    providers:[{id:"test",origin:"user",protocol:"openai",baseURL:"https://fixture.invalid",models:["a"],availableModels:["a","b","disabled"],disabledModels:["disabled"],resolvedModelCapabilities:{a:{reasoningLevels:["low","high"]},b:{reasoningLevels:["medium"]}}}]},
+    providers:[{id:"test",origin:"user",protocol:"openai",baseURL:"https://fixture.invalid",models:["a"],availableModels:["a","b","disabled"],disabledModels:["disabled"],resolvedModelCapabilities:{a:{reasoningLevels:["low","high"]},b:{reasoningLevels:["medium"],vision:false}}}]},
   },actions:{...runtime.actions,ensureTemporaryWorkspace:async()=>"/fixture",sendMessage:async request=>{sends.push(request);return {succeeded:false};}}};
   await act(async()=>root.render(<PicoTheme><RuntimeContext value={taskRuntime}><MemoryRouter initialEntries={["/task/new"]}><ConversationPage/></MemoryRouter></RuntimeContext></PicoTheme>));
   const thinking=()=>document.querySelector('[role="combobox"][name="initial-thinking-effort"]') ?? document.querySelector('[name="initial-thinking-effort"]')?.closest('.astryx-field')?.querySelector('[role="combobox"]');
@@ -289,6 +289,17 @@ async function scenario(){
   // Exercise the production transcript's disclosures across live updates and settlement.
   // Host run IDs and canonical execution IDs intentionally differ, as in real sessions.
   const activeRun={id:"host-1",status:"running"};
+  taskRuntime.preview=false;
+  await act(async()=>root.render(<PicoTheme><RuntimeContext value={{...taskRuntime}}><MemoryRouter initialEntries={["/task/new"]}><ConversationPage/></MemoryRouter></RuntimeContext></PicoTheme>));
+  const imageFiles = new DataTransfer();
+  imageFiles.items.add(new File([new Uint8Array([1])],"sample.png",{type:"image/png"}));
+  const filePicker=document.querySelector('input[type="file"]');
+  check(filePicker&&!filePicker.disabled,"Text model still allows attachment selection");
+  await act(async()=>{Object.defineProperty(filePicker,"files",{configurable:true,value:imageFiles.files});filePicker.dispatchEvent(new Event("change",{bubbles:true}));});
+  check(document.body.textContent.includes("当前模型不支持图片"),"Nonvision model explains why the image cannot be sent");
+  check(button("发送消息").disabled,"Nonvision image send is blocked before upload");
+  await click("移除附件 sample.png");
+  check(!document.body.textContent.includes("当前模型不支持图片"),"Removing image clears the model warning and retains draft");
   const tool=(id,state="done",runId="execution-1")=>({id,kind:"tool",runId,turnId:id,toolName:"grep",title:"grep",detail:JSON.stringify({pattern:"GoalEvaluator".repeat(40),path:"/workspace/"+"long-path/".repeat(30)+"source.ts"}),state,output:state==="failed"?"匹配表达式错误":"完整工具结果"});
   const reasoning={id:"thinking-1",kind:"thinking",runId:"execution-1",text:"检查配置\\n完整推理正文",streaming:true};
   const liveItems=[

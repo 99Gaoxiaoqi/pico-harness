@@ -1,6 +1,7 @@
 import { projectMediaTextForModel } from "@pico/core/media";
 import type { AssistantModelMessage, ModelMessage, ToolResultPart } from "ai";
-import type { ImagePart, Message } from "@pico/core";
+import { ModelCapabilityError, type ImagePart, type Message } from "@pico/core";
+import { prepareImageForModel } from "./prepare-image.js";
 
 export type AiSdkWire = "openai" | "claude" | "responses";
 type AssistantParts = Exclude<AssistantModelMessage["content"], string>;
@@ -55,78 +56,126 @@ function savedContent(message: Message, wire: AiSdkWire): SavedContent | undefin
 }
 
 /** Preserve the transcript order; Pico's user/toolCallId observations become SDK tool messages. */
-export function toAiSdkMessages(
+export async function toAiSdkMessages(
   messages: readonly Message[],
   wire: AiSdkWire,
   options?: {
     responsesWebSearchAnchors?: boolean;
     vision?: boolean;
+    signal?: AbortSignal;
     readImageArtifact?: (
       image: Extract<ImagePart, { type: "image_artifact" }>,
     ) => string | undefined;
   },
-): ModelMessage[] {
+): Promise<ModelMessage[]> {
   const result: ModelMessage[] = [];
   const projectText = (text: string) =>
     projectMediaTextForModel(text).replace(
       /!\[([^\]\n]*)\]\(pico:\/\/artifact\/[^)]+\)/gu,
       (_match, alt: string) => `[${alt || "Image"}: retained conversation image]`,
     );
+  type InputPart =
+    | { type: "file"; data: string | URL; mediaType: string }
+    | { type: "text"; text: string };
+  const prepared = new Map<Message, Map<number, InputPart>>();
+  const currentUser = messages.findLastIndex(
+    (message) => message.role === "user" && !message.toolCallId,
+  );
+  const lastToolBatch = messages.findLastIndex((message) => Boolean(message.toolCalls?.length));
+  const currentTool = (index: number) =>
+    index > currentUser && index > lastToolBatch && Boolean(messages[index]?.toolCallId);
+  // Keep the current user's evidence first, then the latest tool results, then history.
+  const order = messages
+    .map((message, index) => ({ message, index }))
+    .sort((a, b) => {
+      const priority = (index: number) => (index === currentUser ? 0 : currentTool(index) ? 1 : 2);
+      return priority(a.index) - priority(b.index) || b.index - a.index;
+    });
   let usedImageBytes = 0;
-  let currentMessage: Message;
-  const selected = new Map<Message, Set<number>>();
-  let reservedBytes = 0;
-  // Reserve the bounded request budget from newest to oldest so historical
-  // generated images cannot crowd out the user's current attachments.
-  for (const message of [...messages].reverse()) {
-    const indexes = new Set<number>();
-    for (let index = (message.images?.length ?? 0) - 1; index >= 0; index--) {
-      const image = message.images![index]!;
-      if (image.type !== "image_artifact") continue;
+  const maxImageBytes = 12 * 1024 * 1024;
+  for (const { message, index: messageIndex } of order) {
+    const parts = new Map<number, InputPart>();
+    prepared.set(message, parts);
+    for (const [index, image] of (message.images ?? []).entries()) {
+      options?.signal?.throwIfAborted();
+      const label =
+        image.type === "image_artifact" ? `artifact_id=${image.artifactId}` : `image #${index + 1}`;
+      const required = messageIndex === currentUser || currentTool(messageIndex);
+      const omit = (reason: string, remedy: string) => {
+        if (required) {
+          throw new ModelCapabilityError(
+            "current",
+            "vision",
+            `图片未发送（${label}）：${reason}。${remedy}`,
+          );
+        }
+        return {
+          type: "text" as const,
+          text: `[Image attachment omitted: ${label}; ${reason}. Use view_image with its artifact_id if this image is needed. Do not infer unseen image contents; explain the limitation if it cannot be inspected.]`,
+        };
+      };
       if (
-        Number.isSafeInteger(image.sizeBytes) &&
-        image.sizeBytes > 0 &&
-        reservedBytes + image.sizeBytes <= 12 * 1024 * 1024
+        options?.vision === false ||
+        (image.type === "image_artifact" && options?.vision !== true)
       ) {
-        indexes.add(index);
-        reservedBytes += image.sizeBytes;
+        parts.set(
+          index,
+          omit("当前模型不支持图像输入 (unsupported vision)", "请切换到支持视觉的模型后重试。"),
+        );
+        continue;
       }
-    }
-    selected.set(message, indexes);
-  }
-  const materialize = (
-    image: ImagePart,
-    index: number,
-  ): { type: "file"; data: string | URL; mediaType: string } | { type: "text"; text: string } => {
-    const omitted = {
-      type: "text" as const,
-      text: "[Image attachment omitted: unavailable, unsupported vision, or request image budget exceeded.]",
-    };
-    if (image.type === "image_artifact") {
-      if (
-        options?.vision !== true ||
-        !selected.get(currentMessage)?.has(index) ||
-        !Number.isSafeInteger(image.sizeBytes) ||
-        image.sizeBytes <= 0 ||
-        usedImageBytes + image.sizeBytes > 12 * 1024 * 1024
-      )
-        return omitted;
+      if (image.type === "image_url") {
+        parts.set(index, { type: "file", data: new URL(image.url), mediaType: "image" });
+        continue;
+      }
+      if (usedImageBytes >= maxImageBytes) {
+        parts.set(
+          index,
+          omit(
+            "本次请求的图片总量超过 12 MiB (request image budget exceeded)",
+            "请减少图片，或将图片分几次发送。",
+          ),
+        );
+        continue;
+      }
+      let value: Awaited<ReturnType<typeof prepareImageForModel>>;
       try {
-        const data = options.readImageArtifact?.(image);
-        if (data === undefined) return omitted;
-        usedImageBytes += image.sizeBytes;
-        return { type: "file", data, mediaType: image.mimeType };
-      } catch {
-        return omitted;
+        const data =
+          image.type === "image_artifact" ? options?.readImageArtifact?.(image) : image.data;
+        if (data === undefined) throw new Error("附件已失效或无法读取，请重新上传");
+        value =
+          image.type === "image_artifact"
+            ? await prepareImageForModel(data, image.mimeType)
+            : { data, mimeType: image.mimeType, sizeBytes: Buffer.byteLength(data, "base64") };
+      } catch (error) {
+        options?.signal?.throwIfAborted();
+        parts.set(
+          index,
+          omit(
+            error instanceof Error ? error.message : "图片无法读取",
+            "请重新上传有效的图片后重试。",
+          ),
+        );
+        continue;
       }
+      options?.signal?.throwIfAborted();
+      if (usedImageBytes + value.sizeBytes > maxImageBytes) {
+        parts.set(
+          index,
+          omit(
+            "本次请求的图片总量超过 12 MiB (request image budget exceeded)",
+            "请减少图片，或将图片分几次发送。",
+          ),
+        );
+        continue;
+      }
+      usedImageBytes += value.sizeBytes;
+      parts.set(index, { type: "file", data: value.data, mediaType: value.mimeType });
     }
-    if (options?.vision === false) return omitted;
-    return {
-      type: "file",
-      data: image.type === "image_base64" ? image.data : new URL(image.url),
-      mediaType: image.type === "image_base64" ? image.mimeType : "image",
-    };
-  };
+  }
+  let currentMessage: Message;
+  const materialize = (_image: ImagePart, index: number): InputPart =>
+    prepared.get(currentMessage)!.get(index)!;
   const searchAnchors = wire === "responses" && options?.responsesWebSearchAnchors === true;
   const toolNames = new Map<string, string>();
   // Chat Completions and Anthropic do not accept image inputs in assistant

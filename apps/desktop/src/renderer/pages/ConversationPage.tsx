@@ -1,3 +1,4 @@
+import { uploadMimeType } from "../file-upload.js";
 import { PendingSendNotice } from "../PendingSendNotice.js";
 import { useFileDraft } from "../conversation/useFileDraft.js";
 import {
@@ -549,15 +550,24 @@ export function ConversationPage() {
   const attachmentOrchestration = sessionId
     ? conversation?.settings?.orchestrationMode
     : newTaskSettings.orchestrationMode;
-  const filesDisabledReason = editingUserMessage
-    ? "编辑已发送消息时暂不支持附件；请取消编辑后发送。"
-    : preview
-      ? "预览模式不支持上传附件。"
-      : researchActive || attachmentOrchestration === "graph" || attachmentOrchestration === "swarm"
-        ? "当前模式暂不支持附件；请切换到普通对话后发送。"
-        : draftReferences.references.length || isDesktopCommandInput(draft)
-          ? "技能、Agent 与斜杠命令暂不支持附件；请使用普通消息发送。"
-          : undefined;
+  const imageModelNotice =
+    composerCapabilities?.vision === false &&
+    fileDraft.files.some(({ file }) => uploadMimeType(file)?.startsWith("image/"))
+      ? "当前模型不支持图片；请切换到支持视觉的模型，或移除图片后发送。"
+      : undefined;
+  const filesDisabledReason =
+    imageModelNotice ??
+    (editingUserMessage
+      ? "编辑已发送消息时暂不支持附件；请取消编辑后发送。"
+      : preview
+        ? "预览模式不支持上传附件。"
+        : researchActive ||
+            attachmentOrchestration === "graph" ||
+            attachmentOrchestration === "swarm"
+          ? "当前模式暂不支持附件；请切换到普通对话后发送。"
+          : draftReferences.references.length || isDesktopCommandInput(draft)
+            ? "技能、Agent 与斜杠命令暂不支持附件；请使用普通消息发送。"
+            : undefined);
 
   const submit = async (text: string, nextBehavior: ComposerBehavior) => {
     if (sendingRef.current || commands.pending) return;

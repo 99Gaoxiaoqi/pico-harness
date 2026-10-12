@@ -197,7 +197,7 @@ test(
     assert.equal(message.images?.[0]?.type, "image_artifact");
     assert.match(String(message.providerData?.displayText), /参考图\.png.*pico:\/\/artifact\//u);
     assert.match(String(message.providerData?.displayText), /资料\\\[一\\\]\.txt/u);
-    const wire = toAiSdkMessages([message], "openai", {
+    const wire = await toAiSdkMessages([message], "openai", {
       vision: true,
       readImageArtifact: state.readImage,
     });

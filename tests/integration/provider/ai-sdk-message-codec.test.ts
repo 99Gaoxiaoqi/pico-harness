@@ -8,7 +8,7 @@ import type { Message } from "@pico/core";
 import { projectMediaTextForModel } from "@pico/core/media";
 import { estimateMessagesTokens, MATERIALIZED_IMAGE_TOKENS } from "@pico/runtime/context-budget";
 
-test("canonical native replay contributes history tokens once and invalidated replay falls back", () => {
+test("canonical native replay contributes history tokens once and invalidated replay falls back", async () => {
   const query = { query: "查询内容".repeat(300) };
   const nativeResult = "搜索结果".repeat(400);
   const executedResult = { found: "local result".repeat(100) };
@@ -55,7 +55,7 @@ test("canonical native replay contributes history tokens once and invalidated re
     ],
     "claude",
   );
-  const replay = toAiSdkMessages([image, message], "claude");
+  const replay = await toAiSdkMessages([image, message], "claude");
   assert.deepEqual(
     replay.map((item) => item.role),
     ["user", "assistant", "tool"],
@@ -86,12 +86,14 @@ test("canonical native replay contributes history tokens once and invalidated re
     "claude",
   );
   for (const protocol of ["openai", "responses"] as const) {
-    assert.ok(!JSON.stringify(toAiSdkMessages([nativeOnly], protocol)).includes(nativeResult));
+    assert.ok(
+      !JSON.stringify(await toAiSdkMessages([nativeOnly], protocol)).includes(nativeResult),
+    );
     assert.equal(estimateMessagesTokens([nativeOnly], protocol), Math.ceil(text.length / 4));
   }
   assert.equal(estimateMessagesTokens([nativeOnly]), Math.ceil(text.length / 4));
   message.content = "Edited";
-  assert.ok(!JSON.stringify(toAiSdkMessages([message], "claude")).includes(nativeResult));
+  assert.ok(!JSON.stringify(await toAiSdkMessages([message], "claude")).includes(nativeResult));
   assert.equal(
     estimateMessagesTokens([message], "claude"),
     Math.ceil((message.content.length + "inspect".length + JSON.stringify(localInput).length) / 4),
@@ -117,7 +119,9 @@ test("canonical native replay contributes history tokens once and invalidated re
     "responses",
     [{ type: "web_search_call", id: "search", status: "completed", action }],
   );
-  const anchored = toAiSdkMessages([responses], "responses", { responsesWebSearchAnchors: true });
+  const anchored = await toAiSdkMessages([responses], "responses", {
+    responsesWebSearchAnchors: true,
+  });
   assert.ok(!JSON.stringify(anchored).includes(nativeResult));
   assert.equal(
     estimateMessagesTokens([responses], "responses"),
@@ -159,7 +163,7 @@ test("history estimation matches SDK replay for media inside text, reasoning and
     "claude",
   );
   assert.equal(estimateMessagesTokens([signed], "claude"), Math.ceil(reasoning.length / 4));
-  assert.ok(JSON.stringify(toAiSdkMessages([signed], "claude")).includes(data));
+  assert.ok(JSON.stringify(await toAiSdkMessages([signed], "claude")).includes(data));
   assert.equal(
     estimateMessagesTokens([{ ...signed, content: "Edited" }], "claude"),
     2,
@@ -184,7 +188,7 @@ test("history estimation matches SDK replay for media inside text, reasoning and
   });
   await generateText({
     model: anthropic("claude-sonnet-4-5"),
-    messages: toAiSdkMessages([{ role: "user", content: "Continue" }, signed], "claude"),
+    messages: await toAiSdkMessages([{ role: "user", content: "Continue" }, signed], "claude"),
     maxRetries: 0,
   });
   const claudeMessages = claudeRequest!.messages as { content: Record<string, unknown>[] }[];
@@ -225,7 +229,7 @@ test("history estimation matches SDK replay for media inside text, reasoning and
   });
   await generateText({
     model: openai.responses("gpt-5"),
-    messages: toAiSdkMessages(
+    messages: await toAiSdkMessages(
       [message, { role: "user", toolCallId: "write", content: "written" }],
       "responses",
     ),
@@ -291,7 +295,7 @@ test("AI SDK clients round-trip signed thinking, Responses metadata, images and 
   const first = await generateText({
     model: anthropic("claude-sonnet-4-5"),
     tools,
-    messages: toAiSdkMessages(history, "claude"),
+    messages: await toAiSdkMessages(history, "claude"),
     maxRetries: 0,
   });
   const answer = fromAiSdkContent(first.content, "claude");
@@ -306,7 +310,7 @@ test("AI SDK clients round-trip signed thinking, Responses metadata, images and 
     toolCallId: "call_one",
     content: "file contents",
   });
-  const replay = toAiSdkMessages(history, "claude");
+  const replay = await toAiSdkMessages(history, "claude");
   assert.deepEqual(
     replay.map((message) => message.role),
     ["user", "assistant", "tool"],
@@ -329,7 +333,7 @@ test("AI SDK clients round-trip signed thinking, Responses metadata, images and 
   ]);
   assert.equal((wireMessages[0]!.content[0] as { type: string }).type, "image");
   assert.deepEqual(answer, originalAnswer, "signed replay is preserved in the source message");
-  const edited = toAiSdkMessages(
+  const edited = await toAiSdkMessages(
     [{ ...answer, content: "compressed", toolCalls: undefined, reasoning: undefined }],
     "claude",
   );
@@ -349,7 +353,7 @@ test("AI SDK clients round-trip signed thinking, Responses metadata, images and 
     "openai",
   );
   assert.equal(badArguments.toolCalls?.[0]?.arguments, '{"path":');
-  assert.throws(
+  await assert.rejects(
     () => toAiSdkMessages([{ role: "user", content: "orphan", toolCallId: "missing" }], "openai"),
     /no preceding call/,
   );
@@ -411,7 +415,7 @@ test("AI SDK clients round-trip signed thinking, Responses metadata, images and 
   });
   const responseMessage = fromAiSdkContent(response.content, "responses");
   assert.equal(responseMessage.reasoning, "reasoning summary");
-  const savedResponse = toAiSdkMessages([responseMessage], "responses")[0]!;
+  const savedResponse = (await toAiSdkMessages([responseMessage], "responses"))[0]!;
   assert.ok(Array.isArray(savedResponse.content));
   const savedCall = savedResponse.content.find((part) => part.type === "tool-call");
   assert.equal(savedCall?.providerOptions?.openai?.itemId, "fc_1");
@@ -424,7 +428,7 @@ test("AI SDK clients round-trip signed thinking, Responses metadata, images and 
   );
   assert.equal(executed.toolCalls, undefined);
   assert.deepEqual(
-    toAiSdkMessages([executed], "responses").map((message) => message.role),
+    (await toAiSdkMessages([executed], "responses")).map((message) => message.role),
     ["assistant", "tool"],
   );
   await generateText({
@@ -432,7 +436,7 @@ test("AI SDK clients round-trip signed thinking, Responses metadata, images and 
     tools,
     providerOptions: { openai: { store: false } },
     maxRetries: 0,
-    messages: toAiSdkMessages(
+    messages: await toAiSdkMessages(
       [
         { role: "user", content: "Inspect" },
         JSON.parse(JSON.stringify(responseMessage)),

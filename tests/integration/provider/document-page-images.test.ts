@@ -108,7 +108,7 @@ test("PDF页图工具结果重开后进入真实provider请求，完成整批工
   const image = history[1]!.images![0]!;
   assert.equal(image.type, "image_artifact");
   for (const wire of ["openai", "responses", "claude"] as const) {
-    const projected = toAiSdkMessages(history, wire, {
+    const projected = await toAiSdkMessages(history, wire, {
       vision: true,
       readImageArtifact: (ref) => session.readMediaArtifact(ref),
     });
@@ -119,13 +119,15 @@ test("PDF页图工具结果重开后进入真实provider请求，完成整批工
     assert.ok(JSON.stringify(projected.at(-1)).includes(png.toString("base64")));
     assert.ok(!JSON.stringify(projected.slice(0, -1)).includes(png.toString("base64")));
   }
-  const unsupported = toAiSdkMessages(history, "openai", {
-    vision: false,
-    readImageArtifact: () => {
-      throw new Error("must not read bytes");
-    },
-  });
-  assert.match(JSON.stringify(unsupported), /unsupported vision/u);
+  await assert.rejects(
+    toAiSdkMessages(history, "openai", {
+      vision: false,
+      readImageArtifact: () => {
+        throw new Error("must not read bytes");
+      },
+    }),
+    /不支持图像输入/u,
+  );
   let body = "";
   globalThis.fetch = async (_input, init) => {
     body = String(init?.body);
