@@ -1,6 +1,7 @@
 import type { ToolDefinition } from "@pico/core";
 import { inspectMediaBytes, MODEL_IMAGE_MAX_BYTES } from "@pico/core/media";
 import { ToolAccesses } from "@pico/runtime/tool-access";
+import { prepareImageForModel } from "./provider/prepare-image.js";
 import type { BoundSessionArtifactAuthority } from "./session-artifact-writer.js";
 import { readSessionInputArtifact } from "./session-input-attachments.js";
 import {
@@ -65,6 +66,8 @@ export class ViewImageTool implements BaseTool {
     const inspected = inspectMediaBytes(bytes);
     if (inspected?.kind !== "image" || inspected.mimeType !== artifact.mimeType)
       throw new Error("该附件不是受支持的图片，或图片格式与声明的 MIME 不一致。");
+    // Detect corrupt or unsafe decoder input here so the model receives a recoverable tool error.
+    await prepareImageForModel(bytes.toString("base64"), inspected.mimeType, context?.signal);
     context?.signal?.throwIfAborted();
     // An independent Markdown image line lets session-media hydrate verified bytes for vision.
     return `![会话图片](pico://artifact/${encodeURIComponent(artifact.artifactId)})`;

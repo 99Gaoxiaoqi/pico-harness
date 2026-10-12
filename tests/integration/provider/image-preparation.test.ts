@@ -6,6 +6,52 @@ import {
   prepareImageForModel,
 } from "../../../packages/pico-host/src/provider/prepare-image.js";
 
+const PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jY1kAAAAASUVORK5CYII=",
+  "base64",
+);
+
+test("三个并发图片准备请求均能成功，不把等待名额当作图片失败", async () => {
+  const data = PNG.toString("base64");
+  const results = await Promise.all(
+    Array.from({ length: 3 }, () => prepareImageForModel(data, "image/png")),
+  );
+  for (const result of results)
+    assert.deepEqual(result, { data, mimeType: "image/png", sizeBytes: PNG.byteLength });
+});
+
+test("图片等待可取消，解码取消和失败均释放名额供后续请求使用", { timeout: 5000 }, async () => {
+  const data = PNG.toString("base64");
+  const corrupted = Buffer.from(PNG);
+  corrupted[25] = 7;
+  const running = new AbortController();
+  const waiting = new AbortController();
+  const runningReason = new Error("取消正在解码的图片");
+  const waitingReason = new Error("取消等待名额的图片");
+  const results = Promise.allSettled([
+    prepareImageForModel(data, "image/png", running.signal),
+    prepareImageForModel(corrupted.toString("base64"), "image/png"),
+    prepareImageForModel(data, "image/png", waiting.signal),
+    prepareImageForModel(data, "image/png"),
+  ]);
+  waiting.abort(waitingReason);
+  // Let the admitted preparations enter the native decoder before cancelling one of them.
+  await Promise.resolve();
+  running.abort(runningReason);
+  const [cancelledRunning, failed, cancelledWaiting, next] = await results;
+  assert.equal(cancelledRunning!.status, "rejected");
+  assert.equal(cancelledRunning!.status === "rejected" && cancelledRunning.reason, runningReason);
+  assert.equal(failed!.status, "rejected");
+  assert.match(String(failed!.status === "rejected" && failed.reason), /图片准备失败/u);
+  assert.equal(cancelledWaiting!.status, "rejected");
+  assert.equal(cancelledWaiting!.status === "rejected" && cancelledWaiting.reason, waitingReason);
+  assert.equal(next!.status, "fulfilled");
+  const later = await Promise.all(
+    Array.from({ length: 3 }, () => prepareImageForModel(data, "image/png")),
+  );
+  assert.ok(later.every((image) => image.data === data));
+});
+
 test("模型请求缩放大图，保持比例、格式、透明度和原始数据", async () => {
   for (const format of ["png", "jpeg", "webp"] as const) {
     const source = createCanvas(4096, 1024);
