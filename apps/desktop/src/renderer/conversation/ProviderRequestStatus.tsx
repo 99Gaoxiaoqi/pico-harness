@@ -57,6 +57,7 @@ export function ProviderFailureCard({
   canRetry,
   onRetry,
   onDiagnostics,
+  failureDetail,
   providerDetail,
   diagnosticText,
 }: {
@@ -66,11 +67,12 @@ export function ProviderFailureCard({
   readonly canRetry: boolean;
   readonly onRetry: () => void;
   readonly onDiagnostics: () => void;
+  readonly failureDetail?: string;
   readonly providerDetail?: string;
   readonly diagnosticText?: string;
 }) {
   const [copyStatus, setCopyStatus] = React.useState("");
-  const detail = providerFailureDescription(notice, httpStatus);
+  const detail = failureDetail ?? providerFailureDescription(notice, httpStatus);
   return (
     <section className="conversation-provider-failure" role="alert">
       <AlertCircle aria-hidden="true" className="conversation-provider-failure__icon" />
