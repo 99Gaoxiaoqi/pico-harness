@@ -1,6 +1,6 @@
 import { projectMediaTextForModel } from "@pico/core/media";
 import type { AssistantModelMessage, ModelMessage, ToolResultPart } from "ai";
-import { ModelCapabilityError, type ImagePart, type Message } from "@pico/core";
+import { ModelCapabilityError, isUserTaskMessage, type ImagePart, type Message } from "@pico/core";
 import { prepareImageForModel } from "./prepare-image.js";
 
 export type AiSdkWire = "openai" | "claude" | "responses";
@@ -78,9 +78,10 @@ export async function toAiSdkMessages(
     | { type: "file"; data: string | URL; mediaType: string }
     | { type: "text"; text: string };
   const prepared = new Map<Message, Map<number, InputPart>>();
-  const currentUser = messages.findLastIndex(
-    (message) => message.role === "user" && !message.toolCallId,
-  );
+  // Reuse only successfully verified immutable references within this one request.
+  const artifactImages = new Map<string, InputPart>();
+  const artifactParts = new Map<object, { key: string; id: string }>();
+  const currentUser = messages.findLastIndex(isUserTaskMessage);
   const lastToolBatch = messages.findLastIndex((message) => Boolean(message.toolCalls?.length));
   const currentTool = (index: number) =>
     index > currentUser && index > lastToolBatch && Boolean(messages[index]?.toolCallId);
@@ -128,6 +129,15 @@ export async function toAiSdkMessages(
         parts.set(index, { type: "file", data: new URL(image.url), mediaType: "image" });
         continue;
       }
+      const artifactKey =
+        image.type === "image_artifact"
+          ? JSON.stringify([image.artifactId, image.digest, image.sizeBytes, image.mimeType])
+          : undefined;
+      const reused = artifactKey === undefined ? undefined : artifactImages.get(artifactKey);
+      if (reused) {
+        parts.set(index, reused);
+        continue;
+      }
       if (usedImageBytes >= maxImageBytes) {
         parts.set(
           index,
@@ -170,7 +180,12 @@ export async function toAiSdkMessages(
         continue;
       }
       usedImageBytes += value.sizeBytes;
-      parts.set(index, { type: "file", data: value.data, mediaType: value.mimeType });
+      const part: InputPart = { type: "file", data: value.data, mediaType: value.mimeType };
+      parts.set(index, part);
+      if (image.type === "image_artifact" && artifactKey !== undefined) {
+        artifactImages.set(artifactKey, part);
+        artifactParts.set(part, { key: artifactKey, id: image.artifactId });
+      }
     }
   }
   let currentMessage: Message;
@@ -349,6 +364,25 @@ export async function toAiSdkMessages(
   }
   if (generatedReferences.length && toolNames.size === 0) {
     result.push({ role: "user", content: generatedReferences });
+  }
+  // Request projection preserves chronological order. Include each verified image once,
+  // with its ID; later occurrences retain their provenance as a textual reference.
+  const sent = new Set<string>();
+  for (const message of result) {
+    if (message.role !== "user" || typeof message.content === "string") continue;
+    message.content = message.content.flatMap((part) => {
+      const artifact = artifactParts.get(part);
+      if (!artifact) return [part];
+      const included = sent.has(artifact.key);
+      sent.add(artifact.key);
+      const label = {
+        type: "text" as const,
+        text: included
+          ? `[Image reference: artifact_id=${artifact.id}; the same image is already included earlier in this request.]`
+          : `[Image: artifact_id=${artifact.id}]`,
+      };
+      return included ? [label] : [label, part];
+    });
   }
   return result;
 }

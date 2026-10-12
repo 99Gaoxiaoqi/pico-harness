@@ -262,7 +262,10 @@ test("媒体消息仅持久引用，重开后真实请求按视觉能力/预算�
         {
           role: "user",
           content: "many images",
-          images: Array.from({ length: 8 }, () => budgetImage),
+          images: Array.from({ length: 8 }, (_, index) => ({
+            ...budgetImage,
+            artifactId: `budget-${index}`,
+          })),
         },
       ],
       "openai",

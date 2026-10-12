@@ -2,6 +2,7 @@ import { MATERIALIZED_IMAGE_TOKENS } from "./context-budget.js";
 import { projectMediaTextForModel } from "@pico/core/media";
 import {
   ModelCapabilityError,
+  isUserTaskMessage,
   type LLMProvider,
   type LLMProviderRequestOptions,
   type Message,
@@ -35,8 +36,7 @@ export function preflightModelRequest(
 ): CapabilityPreflightResult {
   if (
     capabilities.vision === false &&
-    request.messages.findLast((message) => message.role === "user" && !message.toolCallId)?.images
-      ?.length
+    request.messages.findLast(isUserTaskMessage)?.images?.length
   ) {
     throw new ModelCapabilityError(
       routeId,
