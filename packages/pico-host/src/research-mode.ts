@@ -2,6 +2,7 @@
 const RESEARCH_TOOLS = new Set([
   "read_file",
   "document",
+  "view_image",
   "memory_search",
   "archive_read",
   "glob",

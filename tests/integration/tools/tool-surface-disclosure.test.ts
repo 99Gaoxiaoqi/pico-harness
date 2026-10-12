@@ -96,9 +96,10 @@ test("core 工具只由活跃 surface 目录声明", () => {
   const core = PICO_TOOL_GROUPS.find((group) => group.id === "core");
   assert.ok(core);
   assert.equal(core.economy, "always");
-  assert.equal(core.toolNames.length, 12);
+  assert.equal(core.toolNames.length, 13);
   assert.ok(core.toolNames.includes("read_file"));
   assert.ok(core.toolNames.includes("document"));
+  assert.ok(core.toolNames.includes("view_image"));
   assert.ok(core.toolNames.includes("ask_user"));
   assert.ok(core.toolNames.includes("request_sandbox_boundary"));
 });
