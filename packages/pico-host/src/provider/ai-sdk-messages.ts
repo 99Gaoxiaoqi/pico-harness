@@ -155,7 +155,7 @@ export async function toAiSdkMessages(
         if (data === undefined) throw new Error("附件已失效或无法读取，请重新上传");
         value =
           image.type === "image_artifact"
-            ? await prepareImageForModel(data, image.mimeType)
+            ? await prepareImageForModel(data, image.mimeType, options?.signal)
             : { data, mimeType: image.mimeType, sizeBytes: Buffer.byteLength(data, "base64") };
       } catch (error) {
         options?.signal?.throwIfAborted();
