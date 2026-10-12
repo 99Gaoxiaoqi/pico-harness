@@ -9,11 +9,12 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { build } from "esbuild";
 import { createPackageWithOptions, statFile, type CreateOptions } from "@electron/asar";
 
-test("CLI、桌面 CJS 与真实 ASAR 发布布局的 reporter 可供原生 Node 采集测试报告", async (context) => {
+test("CLI 与真实 ASAR 的原生测试报告支持 Electron Host 按实际执行器召回", async (context) => {
   const hostDist = dirname(fileURLToPath(import.meta.resolve("@pico/pico-host")));
   const root = resolve(hostDist, "../../..");
   const evidence = join(hostDist, "execution-learning-evidence.js");
   const reporter = join(hostDist, "execution-learning-reporter.js");
+  const recall = join(hostDist, "execution-learning-recall.js");
   const manifest = JSON.parse(await readFile(join(hostDist, "../package.json"), "utf8")) as {
     type: string;
     files: readonly string[];
@@ -41,7 +42,9 @@ test("CLI、桌面 CJS 与真实 ASAR 发布布局的 reporter 可供原生 Node
   )) as {
     default: {
       define: Record<string, string>;
-      build: { rollupOptions: { output: { banner: string; format: string } } };
+      build: {
+        rollupOptions: { external: string[]; output: { banner: string; format: string } };
+      };
     };
   };
   assert.equal(daemonConfig.default.build.rollupOptions.output.format, "cjs");
@@ -113,6 +116,7 @@ const { pathToFileURL } = require("node:url");
   assert.equal(report.complete,true,contents);
   assert.equal(report.success,!failed,contents);
   assert.equal(report.runner.execPath,await fs.realpath(nativeNode),"test runner must be external native Node");
+  assert.match(report.runner.fingerprint,/^[a-f0-9]{64}$/,"native reporter records its executable fingerprint");
   const original = JSON.stringify([fixture,"stable suite","original target"]);
   const other = JSON.stringify([fixture,"stable suite","other target"]);
   assert.ok(report.passed.includes(other),contents);
@@ -120,6 +124,32 @@ const { pathToFileURL } = require("node:url");
   assert.equal(report.failed.length,failed ? 2 : 0,contents); // failing test plus its failing suite
   assert.deepEqual(report.skipped,[]);
   assert.ok(!contents.includes("FORGED_STDOUT_REPORT"),"test stdout cannot enter the trusted report channel");
+  if (archived && !failed) {
+    assert.notEqual(await fs.realpath(process.execPath),report.runner.execPath,"Electron Host differs from native Node");
+    const io = learning.createExecutionLearningIO(path.dirname(fixture));
+    for (const argv0 of [nativeNode,path.basename(nativeNode)]) {
+      const command = [argv0,"--test",fixture].map(quote).join(" ");
+      const resolved = await learning.resolveExecutionLearningTarget(command,path.dirname(fixture),io);
+      assert.ok(resolved,"real parser resolves the scoped test target");
+      const claim = {predicateId:"test-target-pass.v1",target:resolved,runner:report.runner,failedTestIds:[original]};
+      const store = {executionLearning:{listExecutionLearningCandidates:async workspaceKey => {
+        assert.equal(workspaceKey,"published-workspace");
+        return [{state:"saved",claim}];
+      }}};
+      const runnerEnv = {...process.env,PATH:path.dirname(nativeNode)};
+      const recall = () => learning.executionLearningRecallTargets(store,"published-workspace",io,
+        undefined,resolved.targetId,runnerEnv);
+      assert.deepEqual(await recall(),[{targetId:resolved.targetId,scopeHash:resolved.scopeHash}],
+        "scoped recall follows the actual command runner despite the Electron Host identity");
+      claim.runner = {...report.runner,fingerprint:"0".repeat(64)};
+      assert.deepEqual(await recall(),[],"changed executable fingerprint cannot reuse an accepted operation");
+      claim.runner = report.runner;
+      if (argv0 === path.basename(nativeNode)) {
+        assert.deepEqual(await learning.executionLearningRecallTargets(store,"published-workspace",io,
+          undefined,resolved.targetId,{...runnerEnv,PATH:""}),[],"recall must resolve PATH from the target environment");
+      }
+    }
+  }
   if (process.argv[4] === "missing") {
     await fs.rm(reporterPath);
     const missing = await learning.instrumentCommand(target,{reportDirectory});
@@ -153,7 +183,13 @@ const { pathToFileURL } = require("node:url");
     // Relocate the compiled Host exports; the desktop facade uses the production CJS URL banner.
     await build({
       stdin: {
-        contents: `export { instrumentCommand, parseExecutionTestReport } from ${JSON.stringify(evidence)};`,
+        contents: `export { instrumentCommand, parseExecutionTestReport } from ${JSON.stringify(evidence)};
+${
+  layout === "asar"
+    ? `export { resolveExecutionLearningTarget } from ${JSON.stringify(evidence)};
+export { createExecutionLearningIO, executionLearningRecallTargets } from ${JSON.stringify(recall)};`
+    : ""
+}`,
         resolveDir: root,
         loader: "js",
       },
@@ -162,6 +198,7 @@ const { pathToFileURL } = require("node:url");
       platform: "node",
       format: layout === "cli" ? "esm" : "cjs",
       target: "node22",
+      ...(layout === "asar" ? { external: daemonConfig.default.build.rollupOptions.external } : {}),
       ...(layout !== "cli"
         ? {
             define: {
@@ -174,12 +211,37 @@ const { pathToFileURL } = require("node:url");
     });
     if (layout === "cli") {
       await cp(reporter, join(directory, "execution-learning-reporter.js"));
+      await cp(
+        join(hostDist, "execution-learning-runner.js"),
+        join(directory, "execution-learning-runner.js"),
+      );
     } else {
       assert.ok(desktopResources.copyExecutionLearningReporter);
       desktopResources.copyExecutionLearningReporter(join(root, "apps/desktop"), directory);
     }
     let reporterPath = join(directory, "execution-learning-reporter.js");
     if (layout === "asar") {
+      for (const dependency of [
+        "web-tree-sitter",
+        "fs-native-extensions",
+        "require-addon",
+        "which-runtime",
+        "bare-addon-resolve",
+        "bare-module-resolve",
+        "bare-semver",
+      ]) {
+        await cp(
+          join(root, "node_modules", dependency),
+          join(directory, "node_modules", dependency),
+          {
+            recursive: true,
+            dereference: true,
+          },
+        );
+      }
+      await cp(join(root, "packages/runtime/assets/bash"), join(directory, "../assets/bash"), {
+        recursive: true,
+      });
       await mkdir(resourceDirectory, { recursive: true });
       const archive = join(resourceDirectory, "app.asar");
       assert.notEqual(asarOptions, false);
