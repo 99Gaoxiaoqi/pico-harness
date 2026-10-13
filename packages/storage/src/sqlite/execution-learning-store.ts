@@ -56,12 +56,6 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
         autoExtract: boolean;
       };
       deletionRevision: () => number;
-      createItem: (
-        claim: ExecutionAcceptanceClaim,
-        content: string,
-        result: ExecutionVerificationResult,
-        now: number,
-      ) => { itemId: string; contentHash: string };
       createExperienceItem: (
         candidate: TaskExperienceCandidate,
         now: number,
@@ -483,7 +477,7 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
       .all()
       .map((row) => ({ ticket: decode<ExecutionVerificationTicket>(row)! }));
   }
-  /** Requeue only already observed receipts; current filesystem state cannot fill a historical gap. */
+  /** Recover generic reflections only; native receipts remain internal evidence. */
   async recoverSettledExecutionLearningJobs(now: number): Promise<void> {
     // A pre-v2 writer may have committed a generic candidate immediately before its enqueue.
     this.tx(() => {
@@ -494,47 +488,6 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
         .all())
         this.ensureExperienceJob(decode<TaskExperienceCandidate>(row)!, now);
     });
-    const rows = this.db
-      .prepare(
-        "SELECT t.record_json FROM execution_learning_tickets t JOIN execution_learning_candidates c ON c.candidate_id=t.candidate_id WHERE t.result_json IS NOT NULL AND c.state IN ('waiting','ready') AND json_extract(c.record_json,'$.kind') IS NULL ORDER BY t.rowid LIMIT 100",
-      )
-      .all();
-    for (const row of rows) {
-      const ticket = decode<ExecutionVerificationTicket>(row)!;
-      const candidate = this.candidate(ticket.candidateId);
-      if (
-        !candidate ||
-        !["waiting", "ready"].includes(candidate.state) ||
-        candidate.claim.revision !== ticket.claimRevision ||
-        candidate.claim.claimHash !== ticket.claimHash
-      )
-        continue;
-      const jobId = `execution-job:${createHash("sha256")
-        .update(
-          JSON.stringify([
-            candidate.claim.candidateId,
-            candidate.claim.revision,
-            "verify",
-            ticket.ticketId,
-          ]),
-        )
-        .digest("hex")}`;
-      await this.enqueueExecutionLearningJob({
-        jobId,
-        workspaceKey: candidate.claim.admission.workspaceKey,
-        sessionId: ticket.sessionId,
-        runId: ticket.runId,
-        candidateId: ticket.candidateId,
-        ticketId: ticket.ticketId,
-        kind: "verify",
-        state: "ready",
-        inputEpoch: ticket.inputEpoch,
-        createdAt: now,
-        updatedAt: now,
-        leaseUntil: 0,
-        fencingToken: 0,
-      });
-    }
   }
   async enqueueExecutionLearningJob(job: ExecutionLearningJob): Promise<void> {
     this.tx(() => {
@@ -652,129 +605,14 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
         throw new Error("Stale execution learning fence");
       const candidate = this.candidate(job.candidateId);
       if (!candidate) throw new Error("Execution learning candidate missing");
-      if (job.state === "completed" || job.state === "skipped") return candidate;
-      if (job.state !== "working" || job.leaseUntil <= input.now)
-        throw new Error("Execution learning lease expired");
-      if (
-        job.kind === "reflect" &&
-        Number(
-          this.db
-            .prepare("SELECT input_epoch FROM execution_learning_control WHERE scope=?")
-            .get(job.workspaceKey)?.input_epoch ?? 0,
-        ) !== job.inputEpoch
-      ) {
+      // Native jobs are retired. Even a valid, late receipt cannot publish model prose.
+      // candidate() excludes task lessons, so generic reflection jobs are never consumed here.
+      if (job.state !== "completed" && job.state !== "skipped")
         this.writeJob({ ...job, state: "skipped", leaseUntil: 0, updatedAt: input.now });
-        return candidate;
-      }
-      if (["saved", "discarded", "invalidated", "expired"].includes(candidate.state)) {
-        this.writeJob({ ...job, state: "skipped", leaseUntil: 0, updatedAt: input.now });
-        return candidate;
-      }
-      let next = candidate;
-      try {
-        this.assertPolicy(candidate.claim.admission);
-        if (
-          candidate.claim.revision !== input.candidateRevision ||
-          this.db
-            .prepare("SELECT 1 FROM execution_learning_tombstones WHERE failure_key=?")
-            .get(candidate.claim.failureKey)
-        )
-          throw new Error("Candidate changed");
-        if (candidate.claim.createdAt + 30 * DAY <= input.now) {
-          next = {
-            ...candidate,
-            state: "expired",
-            updatedAt: input.now,
-            reason: "candidate_expired",
-          };
-        } else if (input.content && job.kind === "verify") {
-          const row = this.db
-            .prepare("SELECT * FROM execution_learning_tickets WHERE ticket_id=?")
-            .get(job.ticketId ?? "");
-          const ticket = decode<ExecutionVerificationTicket>(row),
-            result = row?.result_json
-              ? decode<ExecutionVerificationResult>(row, "result_json")
-              : undefined;
-          if (
-            !ticket ||
-            !result ||
-            ticket.candidateId !== candidate.claim.candidateId ||
-            ticket.claimRevision !== candidate.claim.revision ||
-            ticket.claimHash !== candidate.claim.claimHash ||
-            !result.complete ||
-            result.exitCode !== 0 ||
-            !ticket.before.complete ||
-            !ticket.before.matches ||
-            !result.after.complete ||
-            !result.after.matches ||
-            ticket.before.fingerprint !== result.after.fingerprint
-          )
-            throw new Error("Invalid acceptance receipt");
-          if (
-            candidate.claim.predicateId === "test-target-pass.v1" &&
-            (!result.report?.complete ||
-              !result.report.success ||
-              result.report.failed.length ||
-              result.report.skipped.length ||
-              !candidate.claim.failedTestIds.length ||
-              candidate.claim.failedTestIds.some((id) => !result.report!.passed.includes(id)))
-          )
-            throw new Error("Target tests did not pass");
-          if (candidate.state !== "saved") {
-            const saved = this.options.createItem(
-              candidate.claim,
-              input.content,
-              result,
-              input.now,
-            );
-            const metadata: ExecutionTaskAcceptance = {
-              candidateId: candidate.claim.candidateId,
-              predicateId: candidate.claim.predicateId,
-              targetId: candidate.claim.target.targetId,
-              targetLabel: candidate.claim.target.label,
-              acceptedAt: input.now,
-              claimHash: candidate.claim.claimHash,
-              scopeHash: candidate.claim.target.scopeHash,
-            };
-            this.db
-              .prepare("INSERT INTO execution_learning_items VALUES(?,?,?,'execution-validated',?)")
-              .run(
-                saved.itemId,
-                candidate.claim.candidateId,
-                saved.contentHash,
-                JSON.stringify(metadata),
-              );
-            next = { ...candidate, state: "saved", itemId: saved.itemId, updatedAt: input.now };
-          }
-        } else
-          next = {
-            ...candidate,
-            state: "insufficient",
-            updatedAt: input.now,
-            ...(input.reason ? { reason: input.reason } : {}),
-            ...(input.hypothesis ? { hypothesis: input.hypothesis } : {}),
-          };
-      } catch (error) {
-        // Policy conflicts are terminal, but unexpected storage failures must roll back publication.
-        if (
-          error instanceof Error &&
-          /policy changed|Candidate changed|superseded reflection/u.test(error.message)
-        )
-          next = {
-            ...candidate,
-            state: "invalidated",
-            updatedAt: input.now,
-            reason: "policy_changed",
-          };
-        else throw error;
-      }
-      this.writeCandidate(next);
-      this.writeJob({
-        ...job,
-        state: next.state === "invalidated" ? "skipped" : "completed",
-        leaseUntil: 0,
-        updatedAt: input.now,
-      });
+      const next = ["ready", "working"].includes(candidate.state)
+        ? { ...candidate, state: "waiting" as const, updatedAt: input.now }
+        : candidate;
+      if (next !== candidate) this.writeCandidate(next);
       return next;
     });
   }
@@ -836,8 +674,15 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
     workspaceKey: string,
     sessionId?: string,
   ): Promise<readonly ExecutionLearningStatus[]> {
-    return (await this.listExecutionLearningCandidates(workspaceKey))
-      .filter((c) => !sessionId || c.claim.admission.sessionId === sessionId)
+    const rows = this.db
+      .prepare(
+        `SELECT c.record_json FROM execution_learning_candidates c JOIN memory_items i ON i.item_id=c.item_id
+       WHERE c.workspace_key=? AND c.state='saved' AND json_extract(c.record_json,'$.claim') IS NOT NULL
+       ${sessionId ? "AND c.session_id=?" : ""} ORDER BY c.updated_at DESC LIMIT 100`,
+      )
+      .all(...(sessionId ? [workspaceKey, sessionId] : [workspaceKey]));
+    return rows
+      .map((row) => decode<ExecutionLearningCandidate>(row)!)
       .map((c) => ({
         candidateId: c.claim.candidateId,
         revision: c.claim.revision,
@@ -909,7 +754,7 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
       .run(claim.candidateId);
     const removedSources = new Set(
       [candidate.claim.failure, ...candidate.claim.recipe.map((step) => step.source)].map(
-        (source) => source.eventId,
+        sourceIdentity,
       ),
     );
     const retainedSources = new Set(
@@ -920,9 +765,9 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
         .all(claim.candidateId)
         .flatMap((row) => {
           const other = decode<ExecutionLearningCandidate | TaskExperienceCandidate>(row)!;
-          if ("kind" in other) return other.sources.map((source) => source.eventId);
+          if ("kind" in other) return other.sources.map(sourceIdentity);
           return [other.claim.failure, ...other.claim.recipe.map((step) => step.source)].map(
-            (source) => source.eventId,
+            sourceIdentity,
           );
         }),
     );
@@ -931,12 +776,12 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
     for (const row of this.db.prepare("SELECT * FROM execution_learning_native_facts").all()) {
       const fact = JSON.parse(String(row.record_json));
       const ids = [
-        fact.source?.eventId,
-        fact.result?.source?.eventId,
-        ...(fact.commits ?? []).map(
-          (commit: { source?: MemoryItemSource }) => commit.source?.eventId,
-        ),
-      ].filter((id): id is string => typeof id === "string");
+        fact.source,
+        fact.result?.source,
+        ...(fact.commits ?? []).map((commit: { source?: MemoryItemSource }) => commit.source),
+      ]
+        .filter((source): source is MemoryItemSource => !!source)
+        .map(sourceIdentity);
       if (ids.some((id) => removedSources.has(id)) && !ids.some((id) => retainedSources.has(id)))
         this.db
           .prepare(
@@ -1337,7 +1182,8 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
         candidate.recordRevision !== 1 ||
         candidate.enabled ||
         candidate.validation !== "unknown" ||
-        candidate.content !== ""
+        candidate.content !== "" ||
+        candidate.nativeEvidence !== undefined
       )
         throw new Error("Candidate task binding mismatch");
       const observations = this.db
@@ -1473,12 +1319,38 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
           )
         )
           throw new Error("Invalid task experience reflection evidence");
-        const { reason: _reason, ...withoutReason } = candidate;
+        if (input.nativeEvidence) {
+          const evidence = input.nativeEvidence;
+          const native = this.candidate(evidence.candidateId);
+          if (
+            !native ||
+            ["discarded", "expired", "invalidated"].includes(native.state) ||
+            native.claim.admission.workspaceKey !== candidate.workspaceKey ||
+            native.claim.revision !== evidence.claimRevision ||
+            native.claim.claimHash !== evidence.claimHash ||
+            native.claim.target.scopeHash !== evidence.scopeHash ||
+            !input.sources.some((source) => sameSource(source, native.claim.failure))
+          )
+            throw new Error("Invalid task experience native evidence");
+          // Private identity-only link survives edits so deletion can scrub derived templates.
+          this.db
+            .prepare("INSERT INTO task_experience_actions VALUES(?,?,?,?,?,?)")
+            .run(
+              `native-evidence:${candidate.candidateId}`,
+              candidate.workspaceKey,
+              candidate.candidateId,
+              experienceActionHash(evidence),
+              JSON.stringify({ kind: "native-evidence-link", candidateId: evidence.candidateId }),
+              input.now,
+            );
+        }
+        const { reason: _reason, nativeEvidence: _nativeEvidence, ...withoutReason } = candidate;
         return finish(
           {
             ...withoutReason,
             content,
             applicability: input.applicability,
+            ...(input.nativeEvidence ? { nativeEvidence: input.nativeEvidence } : {}),
             sources: input.sources,
             review: "pending",
             validation: "unknown",
@@ -1520,9 +1392,7 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
       )
         throw new Error("Task experience operation reused");
       const current = this.experience(input.candidateId);
-      return current?.state === "discarded"
-        ? current
-        : decode<TaskExperienceCandidate>(receipt, "result_json")!;
+      return current ?? decode<TaskExperienceCandidate>(receipt, "result_json")!;
     }
     const candidate = this.experience(input.candidateId);
     if (
@@ -1606,6 +1476,29 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
     this.db
       .prepare("INSERT OR IGNORE INTO execution_learning_tombstones VALUES(?,?)")
       .run(candidate.failureKey, now);
+    const link = decode<{ kind: string; candidateId: string }>(
+      this.db
+        .prepare("SELECT result_json FROM task_experience_actions WHERE operation_id=?")
+        .get(`native-evidence:${candidate.candidateId}`),
+      "result_json",
+    );
+    const nativeId =
+      candidate.nativeEvidence?.candidateId ??
+      (link?.kind === "native-evidence-link" ? link.candidateId : undefined);
+    // Scrub the generic record first: it must not count as a surviving evidence consumer.
+    this.db
+      .prepare("UPDATE execution_learning_candidates SET state=? WHERE candidate_id=?")
+      .run(state, candidate.candidateId);
+    if (nativeId) {
+      const native = this.candidate(nativeId);
+      const shared = this.db
+        .prepare(
+          "SELECT 1 FROM task_experience_actions a JOIN execution_learning_candidates c ON c.candidate_id=a.candidate_id WHERE a.candidate_id<>? AND c.state NOT IN ('discarded','invalidated','expired') AND json_extract(a.result_json,'$.kind')='native-evidence-link' AND json_extract(a.result_json,'$.candidateId')=? LIMIT 1",
+        )
+        .get(candidate.candidateId, nativeId);
+      if (native && native.state !== "saved" && !native.itemId && !shared)
+        this.clearCandidate(native, "discarded", now);
+    }
     scrubExperienceLedger(this.db, { candidateId: candidate.candidateId }, now);
     const protectedIds = new Set(
       this.db
@@ -1627,7 +1520,12 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
         leaseUntil: 0,
         updatedAt: now,
       });
-    const { itemId: _itemId, reason: _reason, ...withoutItem } = candidate;
+    const {
+      itemId: _itemId,
+      reason: _reason,
+      nativeEvidence: _nativeEvidence,
+      ...withoutItem
+    } = candidate;
     const next = {
       ...withoutItem,
       state,
@@ -1669,7 +1567,7 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
               input.applicability ?? candidate.applicability;
             if (candidate.itemId)
               this.db.prepare("DELETE FROM memory_items WHERE item_id=?").run(candidate.itemId);
-            const { itemId: _itemId, ...withoutItem } = next;
+            const { itemId: _itemId, nativeEvidence: _nativeEvidence, ...withoutItem } = next;
             next = this.publishExperience(
               {
                 ...withoutItem,
@@ -1753,11 +1651,15 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
             updatedAt: input.now,
           });
         if (input.action !== "not_applicable") this.bumpManagementRevision();
+        const { nativeEvidence, ...withoutEvidence } = candidate;
         const next = {
-          ...candidate,
+          ...withoutEvidence,
+          ...(input.action !== "correct" && nativeEvidence ? { nativeEvidence } : {}),
           enabled:
             input.action === "disable" || input.action === "correct" ? false : candidate.enabled,
-          ...(input.action === "correct" ? { reason: "user_correction" } : {}),
+          ...(input.action === "correct"
+            ? { reason: "user_correction", validation: "unknown" as const }
+            : {}),
           recordRevision: candidate.recordRevision + 1,
           updatedAt: input.now,
         };
@@ -1893,6 +1795,9 @@ function reuseProjection(use: ExperienceUse): TaskExperienceReuse {
     createdAt: use.createdAt,
     updatedAt: use.updatedAt,
   };
+}
+function sourceIdentity(source: MemoryItemSource): string {
+  return JSON.stringify([source.sessionId, source.runId, source.turnId, source.eventId]);
 }
 function sameSource(a: MemoryItemSource, b: MemoryItemSource): boolean {
   return (

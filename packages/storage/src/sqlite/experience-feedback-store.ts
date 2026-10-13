@@ -436,6 +436,8 @@ export class SqliteExperienceLedgerStore implements ExperienceLedgerStore {
         effect.adoption !== "observed"
       )
         return;
+      // Native/command outcomes remain scoped ledger evidence; they cannot validate
+      // arbitrary reviewed prose or disable the reference automatically.
       if (
         use.source.kind === "reviewed-reference" &&
         effect.validationScope === "spreadsheet-range" &&

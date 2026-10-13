@@ -389,7 +389,6 @@ test("反思以冻结短别名提交Host SHA证据，原ID与外来ID不能自�
         idleMs: 0,
         pollMs: 60000,
         now: () => 1000,
-        validateEvidence: async () => ({ status: "skip" }),
         validateTaskExperienceSources: async () => true,
         taskExperienceModelFactory: async () => {
           factoryCalls++;
@@ -665,7 +664,6 @@ test("通用worker固定输入IDs并且缺当前route不消费持久预算", asy
       idleMs: 0,
       pollMs: 60000,
       now: () => 1000,
-      validateEvidence: async () => ({ status: "skip" }),
       validateTaskExperienceSources: async () => true,
       taskExperienceModelFactory: async () => {
         throw new Error("Current route removed");
@@ -694,7 +692,6 @@ test("通用worker固定输入IDs并且缺当前route不消费持久预算", asy
       idleMs: 0,
       pollMs: 60000,
       now: () => 1100,
-      validateEvidence: async () => ({ status: "skip" }),
       validateTaskExperienceSources: async () => true,
       taskExperienceModelFactory: async () => ({
         model: {
@@ -721,7 +718,7 @@ test("通用worker固定输入IDs并且缺当前route不消费持久预算", asy
   }
 });
 
-test("101条settled receipt的恢复先过滤已完成候选，跨Run删除不伤其他候选", async () => {
+test("原生settled receipt恢复不再排新任务，跨Run删除不伤其他候选", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-learning-recover-"));
   const path = join(root, "memory.sqlite");
   const store = new SqliteMemoryItemStore(path);
@@ -820,7 +817,7 @@ test("101条settled receipt的恢复先过滤已完成候选，跨Run删除不�
           .prepare("SELECT count(*) n FROM execution_learning_jobs WHERE candidate_id='native'")
           .get()!.n,
       ),
-      1,
+      0,
     );
     db.prepare("INSERT INTO execution_learning_native_facts VALUES(?,?,?,?,?)").run(
       "repair-admission",
@@ -918,6 +915,307 @@ test("后台每次IO重新读持久权限，已撤销路径不会沿用旧read�
     await assert.rejects(authorize(join(workDir, "input.txt")));
   } finally {
     await session.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("原生附件只认冻结身份；编辑与纠正断开，删除清理派生数据且保留共享与历史记录", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-native-attachment-"));
+  const path = join(root, "memory.sqlite");
+  let store = new SqliteMemoryItemStore(path, { now: () => 1000 });
+  const db = new DatabaseSync(path);
+  try {
+    const initial = await seed(store);
+    db.prepare("DELETE FROM execution_learning_jobs WHERE candidate_id='lesson'").run();
+    await store.executionLearning.recoverSettledExecutionLearningJobs(150);
+    assert.equal(db.prepare("SELECT count(*) n FROM execution_learning_jobs WHERE candidate_id='lesson'").get()!.n, 1);
+    const claim: ExecutionAcceptanceClaim = {
+      candidateId: "native-attachment",
+      revision: 1,
+      failureKey: "native-attachment-key",
+      predicateId: "command-conditions.v1",
+      admission: {
+        admissionId: "native-admission",
+        workspaceKey: "workspace",
+        workDir: "/fixture",
+        sessionId: "session",
+        runId: "run",
+        inputEpoch: initial.candidate.inputEpoch,
+        settingsVersion: 1,
+        managementRevision: 0,
+        deletionRevision: 0,
+        createdAt: 100,
+      },
+      target: {
+        targetId: "check",
+        label: "check",
+        kind: "command",
+        command: "node check.js",
+        argv: ["node", "check.js"],
+        cwd: "/fixture",
+        scopeHash: hash("scope"),
+        entryFiles: [],
+      },
+      claimHash: hash("claim"),
+      conditions: [],
+      failedTestIds: [],
+      recipe: [
+        {
+          kind: "file",
+          path: "/fixture/check.js",
+          afterHash: hash("private-template"),
+          content: "private-template",
+          source: source("native-repair"),
+        },
+      ],
+      failure: initial.candidate.sources[0]!,
+      createdAt: 100,
+    };
+    const native = { claim, state: "waiting", hypothesis: "private-hypothesis", updatedAt: 100 };
+    for (const [id, state] of [
+      [claim.candidateId, "waiting"],
+      ["historical-native", "saved"],
+    ]) {
+      const record = {
+        ...native,
+        state,
+        claim: { ...claim, candidateId: id, failureKey: `${id}-key` },
+      };
+      db.prepare("INSERT INTO execution_learning_candidates VALUES(?,?,?,?,?,?,?,?,?,?)").run(
+        id!,
+        "workspace",
+        "session",
+        "run",
+        `${id}-key`,
+        state!,
+        1,
+        null,
+        100,
+        JSON.stringify(record),
+      );
+      db.prepare("INSERT INTO execution_learning_tickets VALUES(?,?,?,?)").run(
+        `ticket-${id}`,
+        id!,
+        JSON.stringify({ candidateId: id, body: "ticket-template" }),
+        "{}",
+      );
+    }
+    db.prepare("INSERT INTO execution_learning_native_facts VALUES(?,?,?,?,?)").run(
+      "native-admission",
+      "repair",
+      "prepared",
+      "file",
+      JSON.stringify({ source: source("native-repair"), commits: claim.recipe }),
+    );
+    const attachment = {
+      candidateId: claim.candidateId,
+      claimRevision: 1,
+      claimHash: claim.claimHash,
+      scopeHash: claim.target.scopeHash,
+    };
+    const job = await store.executionLearning.claimExecutionLearningJob("worker", 200, 90000);
+    assert.ok(job);
+    const completion = {
+      job,
+      expectedRecordRevision: 1,
+      content: "运行检查前核对输入条件。",
+      applicability: initial.candidate.applicability,
+      sources: initial.candidate.sources,
+      now: 300,
+    };
+    await assert.rejects(
+      store.executionLearning.completeExecutionLearningJob({
+        jobId: job.jobId,
+        fencingToken: job.fencingToken,
+        candidateRevision: 1,
+        content: "不得消耗通用任务",
+        now: 300,
+      }),
+      /candidate missing/,
+    );
+    for (const invalid of [
+      { ...attachment, claimRevision: 2 },
+      { ...attachment, claimHash: hash("foreign") },
+      { ...attachment, scopeHash: hash("foreign") },
+      { ...attachment, candidateId: "missing" },
+    ])
+      await assert.rejects(
+        store.taskExperiences.completeTaskExperienceJob({ ...completion, nativeEvidence: invalid }),
+        /native evidence/,
+      );
+    for (const state of ["discarded", "expired", "invalidated"]) {
+      db.prepare("UPDATE execution_learning_candidates SET record_json=? WHERE candidate_id=?")
+        .run(JSON.stringify({ ...native, state }), claim.candidateId);
+      await assert.rejects(store.taskExperiences.completeTaskExperienceJob({ ...completion, nativeEvidence: attachment }), /native evidence/);
+    }
+    const originalClaim = native.claim;
+    for (const changed of [
+      { ...originalClaim, admission: { ...originalClaim.admission, workspaceKey: "other" } },
+      { ...originalClaim, failure: { ...originalClaim.failure, runId: "other" } },
+    ]) {
+      db.prepare("UPDATE execution_learning_candidates SET record_json=? WHERE candidate_id=?").run(
+        JSON.stringify({ ...native, claim: changed }),
+        claim.candidateId,
+      );
+      await assert.rejects(
+        store.taskExperiences.completeTaskExperienceJob({
+          ...completion,
+          nativeEvidence: attachment,
+        }),
+        /native evidence/,
+      );
+    }
+    db.prepare("UPDATE execution_learning_candidates SET record_json=? WHERE candidate_id=?").run(
+      JSON.stringify(native),
+      claim.candidateId,
+    );
+    const pending = await store.taskExperiences.completeTaskExperienceJob({
+      ...completion,
+      nativeEvidence: attachment,
+    });
+    assert.deepEqual(pending?.nativeEvidence, attachment);
+    assert.equal(pending?.validation, "unknown");
+    assert.equal(pending?.enabled, false);
+    store.close();
+    store = new SqliteMemoryItemStore(path, { now: () => 1000 });
+    assert.deepEqual(
+      (await store.taskExperiences.readTaskExperienceCandidate("lesson"))?.nativeEvidence,
+      attachment,
+    );
+    const accept = {
+      workspaceKey: "workspace",
+      candidateId: "lesson",
+      expectedContentVersion: 1,
+      expectedRecordRevision: pending!.recordRevision,
+      operationId: "native-accept",
+      action: "accept" as const,
+      now: 400,
+    };
+    const saved = await store.taskExperiences.reviewTaskExperience(accept);
+    await store.taskExperiences.recordTaskExperienceReuse({
+      reuseId: "native-reuse",
+      workspaceKey: "workspace",
+      candidateId: "lesson",
+      contentVersion: 1,
+      itemId: saved.itemId!,
+      itemVersion: 1,
+      taskId: initial.task.taskId,
+      taskVersion: 1,
+      sessionId: "session",
+      runId: "run",
+      referenceHash: hash("reference"),
+      adoption: "unknown",
+      validation: "unknown",
+      excluded: false,
+      sources: [],
+      createdAt: 450,
+      updatedAt: 450,
+    });
+    const corrected = await store.taskExperiences.feedbackTaskExperience({
+      workspaceKey: "workspace",
+      candidateId: "lesson",
+      expectedContentVersion: 1,
+      operationId: "native-correct",
+      taskId: initial.task.taskId,
+      taskVersion: 1,
+      action: "correct",
+      now: 500,
+    });
+    assert.equal(corrected.nativeEvidence, undefined);
+    assert.equal(corrected.validation, "unknown");
+    assert.equal(
+      (await store.taskExperiences.reviewTaskExperience(accept)).nativeEvidence,
+      undefined,
+    );
+    // Simulate another active consumer and check that shared templates survive the first deletion.
+    const shared = { ...pending!, candidateId: "shared", failureKey: "shared-key" };
+    db.prepare("INSERT INTO execution_learning_candidates VALUES(?,?,?,?,?,?,?,?,?,?)").run(
+      "shared",
+      "workspace",
+      "session",
+      "run",
+      "shared-key",
+      "ready",
+      shared.recordRevision,
+      null,
+      500,
+      JSON.stringify(shared),
+    );
+    db.prepare("INSERT INTO task_experience_actions VALUES(?,?,?,?,?,?)").run(
+      "native-evidence:shared",
+      "workspace",
+      "shared",
+      hash("link"),
+      JSON.stringify({ kind: "native-evidence-link", candidateId: claim.candidateId }),
+      500,
+    );
+    const edited = await store.taskExperiences.reviewTaskExperience({
+      workspaceKey: "workspace",
+      candidateId: "shared",
+      expectedContentVersion: 1,
+      expectedRecordRevision: shared.recordRevision,
+      operationId: "native-edit",
+      action: "edit_accept",
+      content: "用户编辑后的独立检查方法。",
+      now: 600,
+    });
+    assert.equal(edited.nativeEvidence, undefined);
+    assert.equal(edited.validation, "unknown");
+    for (const candidate of [corrected, edited]) {
+      const deleted = await store.taskExperiences.reviewTaskExperience({
+        workspaceKey: "workspace",
+        candidateId: candidate.candidateId,
+        expectedContentVersion: candidate.contentVersion,
+        expectedRecordRevision: candidate.recordRevision,
+        operationId: `delete-${candidate.candidateId}`,
+        action: "delete",
+        now: 700,
+      });
+      assert.equal(deleted.nativeEvidence, undefined);
+      assert.equal(deleted.content, "");
+      if (candidate === corrected)
+        assert.equal(
+          (await store.executionLearning.readExecutionLearningCandidate(claim.candidateId))
+            ?.hypothesis,
+          "private-hypothesis",
+        );
+    }
+    const cleared = await store.executionLearning.readExecutionLearningCandidate(claim.candidateId);
+    assert.equal(cleared?.state, "discarded");
+    assert.equal(cleared?.hypothesis, undefined);
+    assert.deepEqual(cleared?.claim.recipe, []);
+    assert.equal(
+      await store.executionLearning.readExecutionVerification(`ticket-${claim.candidateId}`),
+      undefined,
+    );
+    assert.equal(
+      (await store.executionLearning.readExecutionLearningCandidate("historical-native"))?.state,
+      "saved",
+    );
+    assert.ok(await store.executionLearning.readExecutionVerification("ticket-historical-native"));
+    assert.equal((await store.taskExperiences.reviewTaskExperience(accept)).content, "");
+    assert.equal(
+      (
+        await store.taskExperiences.completeTaskExperienceJob({
+          ...completion,
+          nativeEvidence: attachment,
+        })
+      )?.nativeEvidence,
+      undefined,
+    );
+    assert.equal(
+      db
+        .prepare(
+          "SELECT count(*) n FROM task_experience_actions WHERE result_json LIKE '%nativeEvidence%' OR result_json LIKE '%运行检查前%'",
+        )
+        .get()!.n,
+      0,
+    );
+    // The saved native fixture shares the repair source, so its fact must remain.
+    assert.equal(db.prepare("SELECT count(*) n FROM execution_learning_native_facts").get()!.n, 1);
+  } finally {
+    db.close();
+    store.close();
     await rm(root, { recursive: true, force: true });
   }
 });
