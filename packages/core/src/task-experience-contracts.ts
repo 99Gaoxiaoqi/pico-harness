@@ -6,6 +6,13 @@ import type {
 
 export type ExperienceReview = "unneeded" | "pending" | "approved" | "rejected" | "deferred";
 export type ExperienceValidation = "unknown" | "pass" | "fail" | "stale";
+/** Host-owned evidence attachment, never a model-provided approval or public review input. */
+export interface TaskExperienceNativeEvidence {
+  readonly candidateId: string;
+  readonly claimRevision: number;
+  readonly claimHash: string;
+  readonly scopeHash: string;
+}
 export interface ExperienceApplicability {
   readonly taskFamily: "general" | "coding" | "spreadsheet";
   readonly toolNames: readonly string[];
@@ -62,7 +69,7 @@ export interface TaskExperienceSummary {
   readonly enabled: boolean;
   readonly applicability: ExperienceApplicability;
 }
-/** A model-derived suggestion is separate from a frozen native execution claim. */
+/** The single review lifecycle; optional native evidence only proves its frozen operation scope. */
 export interface TaskExperienceCandidate extends TaskExperienceSummary {
   readonly kind: "task-lesson";
   readonly lifecycleState: "active" | "archived";
@@ -81,6 +88,8 @@ export interface TaskExperienceCandidate extends TaskExperienceSummary {
   readonly content: string;
   readonly sources: readonly MemoryItemSource[];
   readonly observationIds: readonly string[];
+  /** Internal Host attachment; excluded from the existing public protocol projection. */
+  readonly nativeEvidence?: TaskExperienceNativeEvidence;
   readonly modelRoute?: {
     readonly providerId: string;
     readonly modelId: string;
@@ -188,6 +197,7 @@ export interface TaskExperienceStore {
     readonly content?: string;
     readonly applicability?: ExperienceApplicability;
     readonly sources?: readonly MemoryItemSource[];
+    readonly nativeEvidence?: TaskExperienceNativeEvidence;
     readonly reason?: string;
     readonly now: number;
   }): Promise<TaskExperienceCandidate | undefined>;
