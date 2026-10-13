@@ -571,3 +571,46 @@ test("旧删除残留仅凭匹配的删除回执修复，缺Item而无删除证�
     }
   }
 });
+
+test("审核经验的原生命令结果仅进入效果账本，不为正文赋权或自动停用", async () => {
+  const store = new SqliteMemoryItemStore(":memory:");
+  try {
+    const candidate = await generic(store);
+    const use = await useFor(
+      store,
+      candidate.itemId!,
+      {
+        kind: "reviewed-reference",
+        candidateId: candidate.candidateId,
+        contentVersion: 1,
+      },
+      "native-scope-use",
+    );
+    await store.experienceLedger.recordExperienceUse(use);
+    await deliver(store, use);
+    for (const [sequence, validation] of [
+      [6, "pass"],
+      [8, "fail"],
+    ] as const) {
+      await store.experienceLedger.appendExperienceEffect(
+        effectFor(use, sequence, validation, "native-claim"),
+        { allowStateChange: true },
+      );
+      const current = await store.taskExperiences.readTaskExperienceCandidate(
+        candidate.candidateId,
+      );
+      assert.equal(current?.validation, "unknown");
+      assert.equal(current?.enabled, true);
+    }
+    const effects = await store.experienceLedger.listExperienceEffects(use.useId);
+    assert.deepEqual(
+      effects.map((effect) => [effect.validationScope, effect.validation]),
+      [
+        ["native-claim", "pass"],
+        ["native-claim", "fail"],
+      ],
+    );
+  } finally {
+    store.close();
+  }
+});

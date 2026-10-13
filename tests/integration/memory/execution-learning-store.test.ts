@@ -49,6 +49,40 @@ async function createUserItem(store: SqliteMemoryItemStore, operationId = "user-
   return receipt.results[0]!.itemId;
 }
 
+/** Historical fixture: production can no longer publish execution-validated items. */
+async function seedSavedNative(
+  store: SqliteMemoryItemStore,
+  path: string,
+  claim: ExecutionAcceptanceClaim,
+) {
+  const itemId = await createUserItem(store, `historical-${claim.candidateId}`);
+  const item = (await store.readItem(itemId))!.item;
+  const saved = { claim, state: "saved" as const, itemId, updatedAt: 603 };
+  const db = new DatabaseSync(path);
+  try {
+    db.prepare(
+      "UPDATE execution_learning_candidates SET state='saved',item_id=?,record_json=? WHERE candidate_id=?",
+    ).run(itemId, JSON.stringify(saved), claim.candidateId);
+    db.prepare("INSERT INTO execution_learning_items VALUES(?,?,?,'execution-validated',?)").run(
+      itemId,
+      claim.candidateId,
+      item.contentHash,
+      JSON.stringify({
+        candidateId: claim.candidateId,
+        predicateId: claim.predicateId,
+        targetId: claim.target.targetId,
+        targetLabel: claim.target.label,
+        acceptedAt: 603,
+        claimHash: claim.claimHash,
+        scopeHash: claim.target.scopeHash,
+      }),
+    );
+  } finally {
+    db.close();
+  }
+  return saved;
+}
+
 async function admittedClaim(
   store: SqliteMemoryItemStore,
   suffix: string,
@@ -217,7 +251,7 @@ test("v9, v10 and v11 memory databases upgrade to v14 preserving facts and retir
   }
 });
 
-test("restart recovers only settled commit-gap receipts once and a late reflection preserves saved state", async (t) => {
+test("restart preserves internal receipts without native enqueue; retired jobs cannot publish and preserve historical saved state", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-learning-commit-gap-")),
     path = join(root, "memory.sqlite");
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -252,11 +286,12 @@ test("restart recovers only settled commit-gap receipts once and a late reflecti
   try {
     assert.equal(
       db.prepare("SELECT count(*) AS count FROM execution_learning_jobs").get()?.count,
-      1,
+      0,
     );
   } finally {
     db.close();
   }
+  await store.executionLearning.enqueueExecutionLearningJob(job); // Simulate an already queued pre-retirement job.
   const lease = await store.executionLearning.claimExecutionLearningJob(
     "recovered-worker",
     602,
@@ -264,14 +299,16 @@ test("restart recovers only settled commit-gap receipts once and a late reflecti
   );
   assert.equal(lease?.ticketId, ticket.ticketId);
   assert.ok(lease);
-  const saved = await store.executionLearning.completeExecutionLearningJob({
+  const skipped = await store.executionLearning.completeExecutionLearningJob({
     jobId: lease.jobId,
     fencingToken: lease.fencingToken,
     candidateRevision: settled.revision,
     content: "BuildCheck 已通过完整验收，ready.flag 的内容保持 ready。",
     now: 603,
   });
-  assert.equal(saved.state, "saved");
+  assert.equal(skipped.itemId, undefined);
+  assert.equal((await store.listItems({ workspaceKey })).length, 0);
+  const saved = await seedSavedNative(store, path, settled);
   const { ticketId: _ticketId, ...reflectionBase } = job;
   await store.executionLearning.enqueueExecutionLearningJob({
     ...reflectionBase,
@@ -300,7 +337,7 @@ test("restart recovers only settled commit-gap receipts once and a late reflecti
   assert.equal((await store.listItems({ workspaceKey })).length, 1);
 });
 
-test("verification receipts and lease fences survive restart; publication is atomic and a damaged acceptance hash cannot fall back to ordinary recall", async (t) => {
+test("verification receipts and fences survive restart; retired jobs cannot publish and historical damaged acceptance cannot fall back to recall", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-learning-persistence-")),
     path = join(root, "memory.sqlite");
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -338,15 +375,18 @@ test("verification receipts and lease fences survive restart; publication is ato
     /Stale execution learning fence/,
   );
   assert.equal((await store.listItems({ workspaceKey })).length, 0);
-  const saved = await store.executionLearning.completeExecutionLearningJob({
+  const skipped = await store.executionLearning.completeExecutionLearningJob({
     jobId: job.jobId,
     fencingToken: replacement.fencingToken,
     candidateRevision: claim.revision,
     content:
       "BuildCheck 已验证：准备 ready.flag 内容为 ready 后，同一静态命令完整退出 0，条件前后稳定。",
-    now: 702,
+    hypothesis: "旧模型不能再发布假设",
+    now: 9999,
   });
-  assert.equal(saved.state, "saved");
+  assert.equal(skipped.itemId, undefined);
+  assert.equal(skipped.hypothesis, undefined);
+  const saved = await seedSavedNative(store, path, claim);
   assert.ok(saved.itemId);
   assert.equal((await store.readItem(saved.itemId))?.sourceType, "execution-validated");
   assert.equal((await store.readItem(saved.itemId))?.taskAcceptance?.claimHash, claim.claimHash);
@@ -359,9 +399,12 @@ test("verification receipts and lease fences survive restart; publication is ato
   });
   assert.equal((await store.listItems({ workspaceKey })).length, 1);
   const targets = [{ targetId: claim.target.targetId, scopeHash: claim.target.scopeHash }];
-  const recall = await new AtomicMemoryContextBuilder(store, workspaceKey).build("BuildCheck", {
-    executionTargets: targets,
-  });
+  const recall = await new AtomicMemoryContextBuilder(store, workspaceKey).build(
+    "Legacy configuration",
+    {
+      executionTargets: targets,
+    },
+  );
   assert.equal(recall.items.length, 1);
   store.close();
   const damaged = new DatabaseSync(path);
@@ -376,7 +419,7 @@ test("verification receipts and lease fences survive restart; publication is ato
 
   assert.equal(
     (
-      await new AtomicMemoryContextBuilder(store, workspaceKey).build("BuildCheck", {
+      await new AtomicMemoryContextBuilder(store, workspaceKey).build("Legacy configuration", {
         executionTargets: targets,
       })
     ).items.length,
@@ -448,7 +491,7 @@ test("discard and a deletion during an active verification lease prevent publica
         content: "不得发布的过时验收",
         now: 700,
       });
-      assert.equal(completed.state, reason === "discard" ? "discarded" : "invalidated");
+      assert.equal(completed.state, reason === "discard" ? "discarded" : "waiting");
       assert.equal((await store.listItems({ workspaceKey })).length, 0);
       await assert.rejects(
         store.executionLearning.saveExecutionLearningClaim(claim),

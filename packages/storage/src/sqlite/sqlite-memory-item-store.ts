@@ -267,38 +267,6 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
         experienceLedger: this.experienceLedger,
         settings: (workspaceKey) => this.#readSettings(workspaceKey),
         deletionRevision: () => this.#deletionRevision(),
-        createItem: (claim, content, result, now) => {
-          const write = normalizeWrite({
-            content,
-            kind: "failure",
-            statementType: "fact",
-            temporalType: "undated",
-            scopeType: "workspace",
-            scopeKey: claim.admission.workspaceKey,
-            observedAt: result.settledAt,
-            origin: "agent_extracted",
-            keys: [
-              { key: claim.target.label, keyType: "exact", keyOrigin: "deterministic" },
-              ...claim.target.entryFiles.map((file) => ({
-                key: file.path,
-                keyType: "code" as const,
-                keyOrigin: "deterministic" as const,
-              })),
-            ],
-            sources: [claim.failure, ...claim.recipe.map((step) => step.source), result.source],
-          });
-          const saved = this.#createItem(write, 0, now);
-          const operationId = `execution-acceptance:${claim.candidateId}`;
-          this.#database
-            .prepare("INSERT INTO memory_write_operations VALUES(?,'create',?,?,?)")
-            .run(
-              operationId,
-              hashCanonical({ claimHash: claim.claimHash, ticketId: result.ticketId }),
-              JSON.stringify([saved]),
-              now,
-            );
-          return { itemId: saved.itemId, contentHash: write.contentHash };
-        },
         createExperienceItem: (candidate, now) => {
           const write = normalizeWrite({
             content: candidate.content,
