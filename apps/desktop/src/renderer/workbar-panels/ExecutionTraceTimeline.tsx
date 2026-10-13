@@ -687,6 +687,17 @@ function runReason(run: RuntimeExecutionRun, includeDiagnostic = false) {
 
 function MemoryRecallDetail({ memory }: { memory: NonNullable<RuntimeExecutionStep["memory"]> }) {
   const t = memory.trace;
+  const currentItems = t.selected.filter((item) => item.source !== "execution-evidence");
+  const hasLegacyItems = currentItems.length !== t.selected.length;
+  const sources = hasLegacyItems
+    ? memory.sources.filter((source) =>
+        currentItems.some((item) =>
+          item.sources.some(
+            (entry) => entry.eventId === source.eventId && entry.sessionId === source.sessionId,
+          ),
+        ),
+      )
+    : memory.sources;
   const labels = {
     selected: "已选中",
     no_hits: "零命中",
@@ -704,26 +715,41 @@ function MemoryRecallDetail({ memory }: { memory: NonNullable<RuntimeExecutionSt
   };
   return (
     <section aria-label="记忆召回诊断">
-      <p>
-        {labels[t.outcome]} · {t.budget.usedItems}/{t.budget.maxItems} 条 · {t.budget.usedTokens}/
-        {t.budget.maxTokens} tokens · {Math.round(t.elapsedMs)} ms
-      </p>
-      <p>
-        匹配：精确 {t.stages.exact}、前缀 {t.stages.prefix}、正文 {t.stages.content}、中文补充{" "}
-        {t.stages.compound}；合并候选 {t.stages.candidates}。
-      </p>
-      <p>
-        淘汰：重复 {t.counts.duplicate}、预算 {t.counts.budget}、条数 {t.counts.item_limit}。
-      </p>
-      {t.outcome === "no_hits" && <p>零命中只能说明本次检索未选中，不能确认记忆未保存。</p>}
-      {t.traceTruncated && (
-        <p>
-          诊断已裁剪：省略 {t.omittedDiagnosticCount} 个样本和 {t.omittedSourceCount} 个来源指针。
-        </p>
+      {hasLegacyItems ? (
+        <p>显示 {currentItems.length} 条召回记录；旧版引用已隐藏。</p>
+      ) : (
+        <>
+          <p>
+            {labels[t.outcome]} · {t.budget.usedItems}/{t.budget.maxItems} 条 ·{" "}
+            {t.budget.usedTokens}/{t.budget.maxTokens} tokens · {Math.round(t.elapsedMs)} ms
+          </p>
+          <p>
+            匹配：精确 {t.stages.exact}、前缀 {t.stages.prefix}、正文 {t.stages.content}、中文补充{" "}
+            {t.stages.compound}；合并候选 {t.stages.candidates}。
+          </p>
+          <p>
+            淘汰：重复 {t.counts.duplicate}、预算 {t.counts.budget}、条数 {t.counts.item_limit}。
+          </p>
+          {t.outcome === "no_hits" && <p>零命中只能说明本次检索未选中，不能确认记忆未保存。</p>}
+          {t.traceTruncated && (
+            <p>
+              诊断已裁剪：省略 {t.omittedDiagnosticCount} 个样本和 {t.omittedSourceCount}{" "}
+              个来源指针。
+            </p>
+          )}
+        </>
       )}
       <ul>
         {t.selected.map((item) => {
           const current = memory.items.find((i) => i.itemId === item.itemId);
+          if (item.source === "execution-evidence")
+            return (
+              <li key={item.itemId}>
+                {current?.state === "deleted"
+                  ? "旧版经验已移除"
+                  : "旧版经验不可用，请更新电脑端完成清理。"}
+              </li>
+            );
           return (
             <li key={item.itemId}>
               {current?.linkAvailable ? (
@@ -746,9 +772,9 @@ function MemoryRecallDetail({ memory }: { memory: NonNullable<RuntimeExecutionSt
           );
         })}
       </ul>
-      {memory.sources.length > 0 && (
+      {sources.length > 0 && (
         <ul>
-          {memory.sources.map((source, index) => (
+          {sources.map((source, index) => (
             <li key={`${source.eventId}-${index}`}>
               {source.available ? (
                 <a href={`/session/${encodeURIComponent(source.sessionId)}`}>{source.eventId}</a>
@@ -770,9 +796,11 @@ function MemoryRecallDetail({ memory }: { memory: NonNullable<RuntimeExecutionSt
                   : "请求已装配"}{" "}
               · {request.attemptId}
               <p>
-                {t.selected.length
-                  ? `原始引用仍存在 ${request.referencePresentCount}/${request.referenceCount}；引用块${request.blockPresent === true ? "存在" : request.blockPresent === false ? "不存在" : "未记录"}。`
-                  : "本次只关联检索，没有记忆引用块。"}
+                {hasLegacyItems
+                  ? "旧版引用已隐藏，历史请求计数不作为当前可用经验统计。"
+                  : t.selected.length
+                    ? `原始引用仍存在 ${request.referencePresentCount}/${request.referenceCount}；引用块${request.blockPresent === true ? "存在" : request.blockPresent === false ? "不存在" : "未记录"}。`
+                    : "本次只关联检索，没有记忆引用块。"}
               </p>
             </li>
           ))}

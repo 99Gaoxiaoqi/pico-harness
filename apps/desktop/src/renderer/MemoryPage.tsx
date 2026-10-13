@@ -44,6 +44,12 @@ const temporalLabels = {
   open_ended: "已知起点，未注明结束",
 };
 type MemoryListItem = RuntimeMemoryItem | RuntimeMemoryListItem;
+function isLegacyExecutionMemory(item: {
+  readonly sourceType?: string;
+  readonly executionEvidence?: unknown;
+}): boolean {
+  return item.sourceType === "execution-evidence" || item.executionEvidence !== undefined;
+}
 type TimeChoice = "preserve" | "clear" | "point" | "interval" | "open_ended";
 interface MemoryEditor {
   readonly id: string;
@@ -129,7 +135,7 @@ export function MemoryPage({
     generation: number;
     detail?: ExperienceDetail;
     item?: MemoryListItem;
-    status: "loading" | "ready" | "unavailable" | "error";
+    status: "loading" | "ready" | "unavailable" | "legacy" | "retired" | "error";
   }>();
   const resolvedTarget =
     targetState?.key === targetKey && targetState.generation === targetGeneration
@@ -160,6 +166,11 @@ export function MemoryPage({
         } else if (routeTarget.itemId) {
           item = await actions.getExperienceMemoryItem(workspacePath, routeTarget.itemId);
           if (!item) throw new RuntimeInvocationError("NOT_FOUND", "目标记忆不可用", false);
+          if (isLegacyExecutionMemory(item)) {
+            if (current())
+              setTargetState({ key: targetKey, generation: targetGeneration, status: "legacy" });
+            return;
+          }
           if (item.taskExperience && experience.supported)
             detail = await experience.onDetail(item.taskExperience.candidateId);
         } else throw new RuntimeInvocationError("NOT_FOUND", "目标经验不可用", false);
@@ -195,7 +206,11 @@ export function MemoryPage({
               : {
                   key: targetKey,
                   generation: targetGeneration,
-                  status: unavailable ? "unavailable" : "error",
+                  status: unavailable
+                    ? failure.message === "NOT_FOUND: 旧版经验已移除"
+                      ? "retired"
+                      : "unavailable"
+                    : "error",
                 },
           );
         }
@@ -446,7 +461,9 @@ export function MemoryPage({
       creatingRef.current = false;
     }
   };
-  const memoryItems =
+  const loadedMemoryItems = memory.items.filter((item) => !isLegacyExecutionMemory(item));
+  const hasLegacyItems = loadedMemoryItems.length !== memory.items.length;
+  const memoryItems = (
     targetItem && !targetDetail
       ? [
           ...memory.items.filter((item) => item.itemId !== targetItem.itemId),
@@ -454,7 +471,8 @@ export function MemoryPage({
             (item) => item.itemId === targetItem.itemId && item.version > targetItem.version,
           ) ?? targetItem,
         ]
-      : memory.items;
+      : memory.items
+  ).filter((item) => !isLegacyExecutionMemory(item));
   const refreshTargetItem = async (itemId: string) => {
     if (targetItem?.itemId !== itemId || !data.workspacePath) return;
     try {
@@ -468,8 +486,12 @@ export function MemoryPage({
             ? {
                 ...current,
                 item:
-                  item && current.item && current.item.version > item.version ? current.item : item,
-                status: item ? "ready" : "unavailable",
+                  item && isLegacyExecutionMemory(item)
+                    ? undefined
+                    : item && current.item && current.item.version > item.version
+                      ? current.item
+                      : item,
+                status: item ? (isLegacyExecutionMemory(item) ? "legacy" : "ready") : "unavailable",
               }
             : current,
         );
@@ -619,7 +641,8 @@ export function MemoryPage({
     panel === "pending"
       ? pendingCount
       : Math.max(
-          memory.pageInfo?.counts[panel === "saved" ? "active" : "archived"] ?? 0,
+          (!hasLegacyItems && memory.pageInfo?.counts[panel === "saved" ? "active" : "archived"]) ||
+            0,
           groups[panel].length +
             experience.items.filter((item) =>
               panel === "archived"
@@ -856,9 +879,11 @@ export function MemoryPage({
           <h2 id="memory-page-title">工作区记忆</h2>
           <p>管理已保存的信息。全局记忆可跨工作区使用，归档后不再参与召回。</p>
           <p>
-            {memory.pageInfo
-              ? `已加载 ${memory.items.length} / ${memory.pageInfo.counts.total} 条`
-              : `已加载 ${memory.items.length} 条，总数未知；更新电脑端可加载更多`}
+            {hasLegacyItems
+              ? `已加载 ${loadedMemoryItems.length} 条可用记忆；旧版经验已隐藏，请更新电脑端完成清理。`
+              : memory.pageInfo
+                ? `已加载 ${memory.items.length} / ${memory.pageInfo.counts.total} 条`
+                : `已加载 ${memory.items.length} 条，总数未知；更新电脑端可加载更多`}
           </p>
         </div>
         <div className="memory-page__actions">
@@ -897,6 +922,10 @@ export function MemoryPage({
           {resolvedTarget?.status === "unavailable" && (
             <InlineNotice tone="warning">该经验已删除或不可用，历史使用记录仍保留。</InlineNotice>
           )}
+          {resolvedTarget?.status === "legacy" && (
+            <InlineNotice tone="warning">旧版经验不可用，请更新电脑端完成清理。</InlineNotice>
+          )}
+          {resolvedTarget?.status === "retired" && <InlineNotice>旧版经验已移除</InlineNotice>}
           {resolvedTarget?.status === "error" && (
             <InlineNotice tone="error">
               无法读取链接目标，已打开的内容和更正草稿仍保留。{" "}
@@ -1003,7 +1032,13 @@ export function MemoryPage({
             {previewError && <InlineNotice tone="error">{previewError}</InlineNotice>}
             {previewLoading && <p role="status">正在读取召回预览…</p>}
             {preview?.key === contextKey && (
-              <RecallPreview query={preview.query} result={preview.result} />
+              <RecallPreview
+                query={preview.query}
+                result={preview.result}
+                legacyItemIds={memory.items
+                  .filter(isLegacyExecutionMemory)
+                  .map((item) => item.itemId)}
+              />
             )}
           </section>
           {adding && draft && (
@@ -1113,12 +1148,7 @@ export function MemoryPage({
                 >
                   <header>
                     <h3 id={`memory-column-${panel}`}>{panelLabels[panel]}</h3>
-                    <span
-                      aria-label={`${memory.pageInfo?.counts[panel === "saved" ? "active" : "archived"] ?? groups[panel].length} 项`}
-                    >
-                      {memory.pageInfo?.counts[panel === "saved" ? "active" : "archived"] ??
-                        groups[panel].length}
-                    </span>
+                    <span aria-label={`${panelCount(panel)} 项`}>{panelCount(panel)}</span>
                   </header>
                   {renderList(panel)}
                 </section>
@@ -1258,27 +1288,45 @@ function parseEventTime(value: string): number | null {
 function RecallPreview({
   query,
   result,
+  legacyItemIds,
 }: {
   query: string;
   result: RuntimeResult<"memory.context.preview">;
+  legacyItemIds: readonly string[];
 }) {
+  const excludedIds = new Set([
+    ...legacyItemIds,
+    ...result.items.filter(isLegacyExecutionMemory).map((item) => item.itemId),
+    ...(result.references ?? [])
+      .filter((reference) => reference.source === "execution-evidence")
+      .map((reference) => reference.itemId),
+  ]);
+  const references = result.references?.filter((reference) => !excludedIds.has(reference.itemId));
+  const diagnostics = result.diagnostics?.filter(
+    (diagnostic) => !excludedIds.has(diagnostic.itemId),
+  );
+  const hasLegacyReferences = references?.length !== result.references?.length;
   return (
     <div className="memory-preview-result" role="region" aria-label="召回预览结果">
       <p>问题：{query}</p>
-      <p>
-        选入 {result.budget.usedItems} / {result.budget.maxItems} 条 · {result.budget.usedTokens} /{" "}
-        {result.budget.maxTokens} Token
-        {result.budget.truncated ? " · 部分候选未选入" : ""}
-      </p>
-      {result.references === undefined ? (
+      {hasLegacyReferences ? (
+        <p>显示 {references?.length ?? 0} 条可用引用；旧版引用已隐藏，请更新电脑端完成清理。</p>
+      ) : (
+        <p>
+          选入 {result.budget.usedItems} / {result.budget.maxItems} 条 · {result.budget.usedTokens}{" "}
+          / {result.budget.maxTokens} Token
+          {result.budget.truncated ? " · 部分候选未选入" : ""}
+        </p>
+      )}
+      {references === undefined ? (
         <p>当前服务未提供实际引用详情，请更新电脑端后重试。</p>
-      ) : result.references.length === 0 ? (
+      ) : references.length === 0 ? (
         <p>
           当前管理预览没有选入记忆。条目可能未匹配、召回已关闭，或需要具体任务的工具权限、附件和适用范围。
         </p>
       ) : (
         <div className="memory-list">
-          {result.references.map((reference) => (
+          {references.map((reference) => (
             <article className="memory-card" key={reference.itemId}>
               <header className="memory-card__meta">
                 <span>{sourceLabels[reference.source]}</span>
@@ -1293,10 +1341,10 @@ function RecallPreview({
           ))}
         </div>
       )}
-      {(result.diagnostics?.length ?? 0) > 0 && (
+      {(diagnostics?.length ?? 0) > 0 && (
         <details className="memory-source">
           <summary>候选说明</summary>
-          {result.diagnostics?.map((diagnostic) => (
+          {diagnostics?.map((diagnostic) => (
             <p key={`${diagnostic.itemId}:${diagnostic.reason}`}>
               {diagnostic.itemId}：{diagnosticLabels[diagnostic.reason]} ·{" "}
               {matchLabels[diagnostic.match]}
