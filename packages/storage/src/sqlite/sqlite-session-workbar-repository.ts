@@ -439,7 +439,7 @@ export class SqliteSessionWorkbarRepository {
       if (input.artifactId) {
         return {
           revision,
-          artifacts: [this.#requireArtifact(database, input.sessionId, input.artifactId)],
+          artifacts: [this.#requireArtifact(database, input.sessionId, input.artifactId, true)],
         };
       }
       const limit = boundedLimit(input.limit, 50, 200);
@@ -475,7 +475,7 @@ export class SqliteSessionWorkbarRepository {
   } {
     return withWorkspaceSqliteLease(this.#storageRoot, ({ database }) => {
       requireSession(database, input.sessionId);
-      const artifact = this.#requireArtifact(database, input.sessionId, input.artifactId);
+      const artifact = this.#requireArtifact(database, input.sessionId, input.artifactId, true);
       const offsetBytes = Math.min(input.offsetBytes ?? 0, artifact.sizeBytes);
       const limitBytes = boundedLimit(
         input.limitBytes,
@@ -621,7 +621,7 @@ export class SqliteSessionWorkbarRepository {
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
               )
               .run(
-                this.#createId(),
+                inheritedMediaArtifactId(targetSessionId, row.artifact_id),
                 targetSessionId,
                 row.title,
                 row.mime_type,
@@ -738,10 +738,12 @@ export class SqliteSessionWorkbarRepository {
     database: DatabaseSync,
     sessionId: string,
     artifactId: string,
+    resolveInherited = false,
   ): SessionArtifactRecord {
-    const row = database
+    let row = database
       .prepare("SELECT * FROM session_artifacts WHERE session_id = ? AND artifact_id = ?")
       .get(sessionId, artifactId) as ArtifactRow | undefined;
+    if (!row && resolveInherited) row = findInheritedArtifact(database, sessionId, artifactId);
     if (!row) throw new WorkbarNotFoundError(`Artifact 不存在: ${artifactId}`);
     return artifactFromRow(row);
   }
@@ -881,6 +883,52 @@ function writeCommand(
 
 export function inheritedMediaArtifactId(sessionId: string, artifactId: string): string {
   return `media:fork:${createHash("sha256").update(`${sessionId}\0${artifactId}`).digest("hex")}`;
+}
+
+/** Resolve historical links only to immutable copies already owned by the requesting Session. */
+function findInheritedArtifact(
+  database: DatabaseSync,
+  sessionId: string,
+  artifactId: string,
+): ArtifactRow | undefined {
+  // Uploaded documents and tool-produced pages retain links in canonical text.
+  // Media snapshots use their existing projection to publish the clone's ID.
+  if (!/^(?:[A-Za-z0-9_-]{1,256}|media:fork:[a-f0-9]{64})$/u.test(artifactId)) return undefined;
+  const ancestry: string[] = [];
+  const visited = new Set<string>();
+  let ancestor: string | null = sessionId;
+  while (ancestor && !visited.has(ancestor)) {
+    visited.add(ancestor);
+    ancestry.unshift(ancestor);
+    // Each fork clones the immediate parent's ID. Try every inherited generation
+    // because canonical history can still refer to the original upload.
+    const inheritedId = ancestry.reduce(
+      (id, target) => inheritedMediaArtifactId(target, id),
+      artifactId,
+    );
+    const row = database
+      .prepare("SELECT * FROM session_artifacts WHERE session_id = ? AND artifact_id = ?")
+      .get(sessionId, inheritedId) as ArtifactRow | undefined;
+    if (row) return row;
+    const parent = database
+      .prepare("SELECT fork_parent_session_id FROM sessions WHERE session_id = ?")
+      .get(ancestor) as { fork_parent_session_id: string | null } | undefined;
+    ancestor = parent?.fork_parent_session_id ?? null;
+  }
+
+  // Older forks assigned random IDs. An ancestor may identify the inherited
+  // bytes, but only a complete matching current-session copy may be returned.
+  const source = database
+    .prepare("SELECT * FROM session_artifacts WHERE artifact_id = ?")
+    .get(artifactId) as ArtifactRow | undefined;
+  if (!source || !visited.has(source.session_id)) return undefined;
+  return database
+    .prepare(
+      `SELECT * FROM session_artifacts
+       WHERE session_id = ? AND digest = ? AND mime_type = ? AND size_bytes = ?
+       ORDER BY created_at ASC, artifact_id ASC LIMIT 1`,
+    )
+    .get(sessionId, source.digest, source.mime_type, source.size_bytes) as ArtifactRow | undefined;
 }
 
 /** Pure database projection: only frozen fork bootstrap facts may inherit an ancestor blob. */
