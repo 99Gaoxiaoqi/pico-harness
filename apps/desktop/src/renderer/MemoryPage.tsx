@@ -10,14 +10,21 @@ import {
   Trash2,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import type { RuntimeMemoryItem, RuntimeMemoryListItem, RuntimeResult } from "@pico/protocol";
 import { Button, EmptyState, IconButton, InlineNotice } from "./components.js";
+import { isExperienceSuggestion } from "./TaskExperiencePanel.js";
 import type { RuntimeStore } from "./runtime.js";
+import { ExecutionLearningPanel } from "./ExecutionLearningPanel.js";
+import { useExecutionLearning } from "./useExecutionLearning.js";
+import { TaskExperiencePanel } from "./TaskExperiencePanel.js";
+import { useTaskExperience } from "./useTaskExperience.js";
+import { useExperienceLedger } from "./useExperienceLedger.js";
+import { ExperienceUsagePanel } from "./ExperienceUsagePanel.js";
 
 const panels = ["saved", "archived"] as const;
-type PanelId = (typeof panels)[number];
-const panelLabels = { saved: "已保存", archived: "已归档" };
+type PanelId = "pending" | (typeof panels)[number];
+const panelLabels = { pending: "待审核", saved: "已保存", archived: "已归档" };
 const kindLabels: Record<RuntimeMemoryItem["kind"], string> = {
   preference: "偏好",
   identity: "身份",
@@ -49,6 +56,9 @@ const sourceLabels = {
   "user-evidence": "用户原始陈述",
   manual: "手动内容，无会话引用",
   "assistant-note": "用户保留的助手笔记（未经独立核实）",
+  "execution-evidence": "执行结果验证的经验（低信任参考）",
+  "execution-validated": "经自然验收的执行方案（低信任参考）",
+  "reviewed-reference": "用户确认的任务经验（参考）",
 };
 const matchLabels = { key: "关键词匹配", content: "正文匹配", preference: "常驻偏好" };
 const diagnosticLabels = {
@@ -92,8 +102,31 @@ export function MemoryPage({
 }) {
   const { data, actions, busy } = runtime;
   const memory = data.memory;
+  const experience = useTaskExperience(runtime, { workspacePath: data.workspacePath });
+  const ledger = useExperienceLedger(runtime, { workspacePath: data.workspacePath });
+  const learning = useExecutionLearning(runtime, {
+    workspacePath: data.workspacePath,
+  });
+  const [searchParams] = useSearchParams();
+  const displayPanels: readonly PanelId[] = experience.supported ? ["pending", ...panels] : panels;
+  const pendingCount = experience.items.filter(
+    (item) =>
+      isExperienceSuggestion(item) && (item.review === "pending" || item.review === "deferred"),
+  ).length;
   const narrow = useNarrowLayout(forceNarrow);
-  const [activePanel, setActivePanel] = useState<PanelId>("saved");
+  const [activePanel, setActivePanel] = useState<PanelId>(
+    searchParams.get("tab") === "pending" && experience.supported ? "pending" : "saved",
+  );
+  useEffect(() => {
+    const requested = searchParams.get("tab");
+    if (
+      requested === "saved" ||
+      requested === "archived" ||
+      (requested === "pending" && experience.supported)
+    )
+      setActivePanel(requested);
+    else if (activePanel === "pending" && !experience.supported) setActivePanel("saved");
+  }, [searchParams, experience.supported]);
   const [editor, setEditor] = useState<MemoryEditor>();
   const [editorError, setEditorError] = useState("");
   const [query, setQuery] = useState("");
@@ -204,8 +237,22 @@ export function MemoryPage({
     }
   };
   const groups = {
-    saved: memory.items.filter((item) => item.lifecycleState === "active"),
-    archived: memory.items.filter((item) => item.lifecycleState === "archived"),
+    saved: memory.items.filter(
+      (item) =>
+        item.lifecycleState === "active" &&
+        (!item.taskExperience ||
+          !experience.items.some(
+            (candidate) => candidate.candidateId === item.taskExperience?.candidateId,
+          )),
+    ),
+    archived: memory.items.filter(
+      (item) =>
+        item.lifecycleState === "archived" &&
+        (!item.taskExperience ||
+          !experience.items.some(
+            (candidate) => candidate.candidateId === item.taskExperience?.candidateId,
+          )),
+    ),
   };
   useEffect(() => {
     if (
@@ -286,7 +333,37 @@ export function MemoryPage({
       clearPreview();
     }
   };
-  const renderList = (panel: PanelId) =>
+  const renderExperience = (filter: PanelId) => (
+    <>
+      {experience.loading && experience.items.length === 0 && (
+        <p role="status">正在读取任务经验…</p>
+      )}
+      <TaskExperiencePanel
+        items={experience.items}
+        reuse={experience.reuse}
+        filter={filter}
+        workspacePath={data.workspacePath}
+        onDetail={experience.onDetail}
+        onReview={experience.onReview}
+        onFeedback={experience.onFeedback}
+      />
+    </>
+  );
+  const panelCount = (panel: PanelId) =>
+    panel === "pending"
+      ? pendingCount
+      : Math.max(
+          memory.pageInfo?.counts[panel === "saved" ? "active" : "archived"] ?? 0,
+          groups[panel].length +
+            experience.items.filter((item) =>
+              panel === "archived"
+                ? item.lifecycleState === "archived"
+                : item.review === "approved" &&
+                  isExperienceSuggestion(item) &&
+                  item.lifecycleState === "active",
+            ).length,
+        );
+  const renderMemoryList = (panel: (typeof panels)[number]) =>
     groups[panel].length ? (
       <div className="memory-list" role="list">
         {groups[panel].map((item) => (
@@ -405,6 +482,14 @@ export function MemoryPage({
                     取消
                   </Button>
                 </>
+              ) : item.taskExperience ? (
+                <Button
+                  variant="quiet"
+                  disabled={experience.loading}
+                  onClick={() => void experience.refresh()}
+                >
+                  重试读取经验管理
+                </Button>
               ) : (
                 <>
                   <IconButton
@@ -428,7 +513,7 @@ export function MemoryPage({
                     <Pencil aria-hidden="true" />
                   </IconButton>
                   <IconButton
-                    label={`${item.lifecycleState === "active" ? "归档" : "恢复"} ${memoryItemLabel(item)}`}
+                    label={`${item.lifecycleState === "active" ? (item.taskAcceptance || item.executionEvidence ? "归档并停止引用" : "归档") : "恢复"} ${memoryItemLabel(item)}`}
                     disabled={Boolean(busy)}
                     onClick={() => void changeState(item)}
                   >
@@ -470,6 +555,26 @@ export function MemoryPage({
         }
       />
     );
+  const renderList = (panel: PanelId) => {
+    const hasExperience =
+      experience.supported &&
+      experience.items.some(
+        (item) =>
+          item.review === "approved" &&
+          isExperienceSuggestion(item) &&
+          (panel === "archived"
+            ? item.lifecycleState === "archived"
+            : item.lifecycleState === "active"),
+      );
+    return (
+      <>
+        {experience.supported && renderExperience(panel)}
+        {panel !== "pending" && (groups[panel].length > 0 || !hasExperience)
+          ? renderMemoryList(panel)
+          : null}
+      </>
+    );
+  };
 
   return (
     <section className="memory-page" aria-labelledby="memory-page-title">
@@ -516,10 +621,72 @@ export function MemoryPage({
         <InlineNotice tone="warning">信任当前工作区后可管理记忆。</InlineNotice>
       ) : (
         <>
+          {experience.error && (
+            <InlineNotice tone="error">
+              {experience.error}{" "}
+              <Button variant="quiet" onClick={() => void experience.refresh()}>
+                重试
+              </Button>
+            </InlineNotice>
+          )}
+          {learning.error && (
+            <InlineNotice tone="error">
+              {learning.error}{" "}
+              <Button variant="quiet" onClick={() => void learning.refresh()}>
+                重试
+              </Button>
+            </InlineNotice>
+          )}
+          {experience.supported && memory.settings && !memory.settings.autoExtract && (
+            <InlineNotice>
+              自动学习已关闭，只停止新提案；仍可审核和管理历史经验。历史引用与效果记录继续，召回由独立开关控制。
+            </InlineNotice>
+          )}
+          {experience.supported &&
+            memory.settings &&
+            (!memory.settings.enabled || !memory.settings.recallEnabled) && (
+              <InlineNotice>
+                记忆召回已关闭。已确认的经验仍可管理，开启召回后才会提供给新任务。
+              </InlineNotice>
+            )}
+          <ExecutionLearningPanel
+            statuses={learning.statuses}
+            workspaceKey={learning.workspaceKey}
+            workspacePath={data.workspacePath}
+            onInspect={learning.onInspect}
+            onDiscard={learning.onDiscard}
+          />
+          {ledger.error && (
+            <InlineNotice tone="error">
+              {ledger.error}{" "}
+              <Button variant="quiet" onClick={() => void ledger.refresh()}>
+                重试
+              </Button>
+            </InlineNotice>
+          )}
+          <ExperienceUsagePanel
+            uses={ledger.uses}
+            diagnostics={ledger.diagnostics}
+            workspacePath={data.workspacePath}
+            onDetail={ledger.onDetail}
+            onFeedback={ledger.onFeedback}
+          />
+          {ledger.hasMore && (
+            <Button
+              variant="quiet"
+              disabled={ledger.loading}
+              onClick={() => void ledger.loadMore()}
+            >
+              加载更多使用记录
+            </Button>
+          )}
           {creationNotice && <InlineNotice tone="success">{creationNotice}</InlineNotice>}
           <section className="memory-add-form" aria-labelledby="memory-preview-title">
             <h3 id="memory-preview-title">召回预览</h3>
-            <p>输入一个问题，查看当前策略下会提供给模型的记忆引用。此操作不调用模型。</p>
+            <p>输入一个问题，查看当前管理预览中可选入的记忆。此操作不调用模型。</p>
+            <p>
+              预览不具备具体任务的工具权限、附件和执行范围；需要这些条件的经验可能省略。空结果不代表经验未保存，实际引用以任务中的使用记录为准。
+            </p>
             <form
               onSubmit={(event) => {
                 event.preventDefault();
@@ -612,7 +779,7 @@ export function MemoryPage({
               </div>
             </form>
           )}
-          {narrow ? (
+          {narrow || experience.supported ? (
             <div className="memory-tabs">
               <TabList
                 className="memory-tablist"
@@ -621,7 +788,7 @@ export function MemoryPage({
                 value={activePanel}
                 onChange={(value) => setActivePanel(value as PanelId)}
               >
-                {panels.map((panel) => (
+                {displayPanels.map((panel) => (
                   <Tab
                     key={panel}
                     value={panel}
@@ -629,12 +796,7 @@ export function MemoryPage({
                     id={`memory-tab-${panel}`}
                     panelId={`memory-panel-${panel}`}
                     label={panelLabels[panel]}
-                    endContent={
-                      <span>
-                        {memory.pageInfo?.counts[panel === "saved" ? "active" : "archived"] ??
-                          groups[panel].length}
-                      </span>
-                    }
+                    endContent={<span className="memory-tab__count">{panelCount(panel)}</span>}
                   />
                 ))}
               </TabList>
@@ -697,13 +859,21 @@ function SourceDetails({ item }: { readonly item: MemoryListItem }) {
   return (
     <details className="memory-source">
       <summary>
-        {item.origin === "user_requested"
-          ? source
-            ? "用户保存"
-            : "手动保存"
-          : item.origin === "agent_extracted"
-            ? "对话提取"
-            : "来源信息"}
+        {item.sourceType === "reviewed-reference"
+          ? "用户确认的任务经验 · 审核与验证分别记录"
+          : item.sourceType === "execution-validated"
+            ? item.taskAcceptance
+              ? "自然验收通过的执行方案"
+              : "执行来源不可用"
+            : item.executionEvidence
+              ? `执行验证经验（${item.executionEvidence.verificationCount} 次）`
+              : item.origin === "user_requested"
+                ? source
+                  ? "用户保存"
+                  : "手动保存"
+                : item.origin === "agent_extracted"
+                  ? "对话提取"
+                  : "来源信息"}
       </summary>
       <dl>
         {typeof sourceCount === "number" && sourceCount > 0 && (
@@ -760,6 +930,16 @@ function SourceDetails({ item }: { readonly item: MemoryListItem }) {
           )}
         </>
       </dl>
+      {item.taskAcceptance && (
+        <p>
+          保存时验收范围：{item.taskAcceptance.targetLabel}。验收摘要：
+          {item.taskAcceptance.claimHash}；适用范围摘要：{item.taskAcceptance.scopeHash}
+          。这项验收不等于根因或全文已验证。
+        </p>
+      )}
+      {item.executionEvidence && !item.taskAcceptance && (
+        <p>旧版执行证据只保留当时记录，验证范围未知；不能视为经验全文已验证。</p>
+      )}
       <p>记录和修改时间不代表事实开始生效；事件时间仅表示这条信息注明的发生时间。</p>
     </details>
   );
@@ -803,7 +983,9 @@ function RecallPreview({
       {result.references === undefined ? (
         <p>当前服务未提供实际引用详情，请更新电脑端后重试。</p>
       ) : result.references.length === 0 ? (
-        <p>当前问题没有选入记忆。相关条目可能未匹配，或记忆/召回已关闭。</p>
+        <p>
+          当前管理预览没有选入记忆。条目可能未匹配、召回已关闭，或需要具体任务的工具权限、附件和适用范围。
+        </p>
       ) : (
         <div className="memory-list">
           {result.references.map((reference) => (

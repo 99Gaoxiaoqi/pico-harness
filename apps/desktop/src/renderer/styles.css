@@ -3331,7 +3331,7 @@
     font-size: 13px;
   }
   .memory-column > header span,
-  .memory-tablist button span {
+  .memory-tab__count {
     display: inline-grid;
     min-width: 22px;
     min-height: 20px;

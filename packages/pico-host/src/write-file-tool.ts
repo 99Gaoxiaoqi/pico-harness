@@ -4,6 +4,9 @@
 // 独立文件实现,不进 registry-impl.ts,由 default-registry.ts 在合并阶段统一挂载。
 
 import { access, constants, mkdir } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { reportNativeFileCommit } from "./native-file-learning.js";
+import type { ToolExecutionContext } from "./tool-registry-contract.js";
 import { dirname, extname } from "node:path";
 import type { BaseTool, ToolFileSideEffects } from "./tool-registry-contract.js";
 import type { ToolDefinition } from "@pico/core";
@@ -77,7 +80,7 @@ export class WriteFileTool implements BaseTool {
     };
   }
 
-  async execute(args: string): Promise<string> {
+  async execute(args: string, context?: ToolExecutionContext): Promise<string> {
     let path: string;
     let content: string;
     let artifact: boolean;
@@ -108,6 +111,12 @@ export class WriteFileTool implements BaseTool {
       content,
       precondition,
       revalidateTarget: () => assertSameResolvedTarget(this.roots, path, fullPath),
+    });
+    await reportNativeFileCommit(context, {
+      path: fullPath,
+      ...(isNewFile ? { beforeHash: null } : {}),
+      afterHash: createHash("sha256").update(content).digest("hex"),
+      ...(Array.from(content).length <= 1500 ? { content } : {}),
     });
 
     const action = isNewFile ? "新建" : "覆盖";

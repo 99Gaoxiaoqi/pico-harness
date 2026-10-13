@@ -52,7 +52,13 @@ export interface MemoryRecallSelectedItem {
   readonly range: { readonly start: number; readonly end: number; readonly total: number };
   readonly excerpt: boolean;
   readonly match: "key" | "content" | "preference";
-  readonly source: "user-evidence" | "manual" | "assistant-note";
+  readonly source:
+    | "user-evidence"
+    | "manual"
+    | "assistant-note"
+    | "execution-evidence"
+    | "execution-validated"
+    | "reviewed-reference";
   readonly sourceCount: number;
   readonly sources: readonly MemoryItemSource[];
   readonly rank?: number;
@@ -206,7 +212,14 @@ function isMemoryRecallSelectedItem(v: unknown): v is MemoryRecallSelectedItem {
     r["end"] <= r["total"] &&
     typeof v["excerpt"] === "boolean" &&
     match(v["match"]) &&
-    ["user-evidence", "manual", "assistant-note"].includes(v["source"] as string) &&
+    [
+      "user-evidence",
+      "manual",
+      "assistant-note",
+      "execution-evidence",
+      "execution-validated",
+      "reviewed-reference",
+    ].includes(v["source"] as string) &&
     integer(v["sourceCount"]) &&
     Array.isArray(v["sources"]) &&
     v["sources"].length <= 3 &&

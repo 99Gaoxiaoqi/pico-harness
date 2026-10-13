@@ -77,7 +77,7 @@ import {
 import { resolveModelRouteCapabilities } from "@pico/runtime";
 import { loadEffectiveModelRuntime } from "./provider/effective-model-runtime.js";
 import { logger } from "./logger.js";
-import { resolvePicoHome } from "./pico-paths.js";
+import { resolvePicoHome, resolvePicoPaths } from "./pico-paths.js";
 import { coordinateReasoningLevel } from "@pico/runtime";
 import {
   BACKGROUND_HARDLINE_VERSION,
@@ -135,6 +135,15 @@ import {
   createBuiltinPluginCapabilityRegistry,
   type PluginCapabilityRegistry,
 } from "./plugins/plugin-capability.js";
+import {
+  configureExecutionLearningHost,
+  executionLearningHost,
+} from "./execution-learning-host.js";
+import { ProviderAtomicMemoryModel } from "./atomic-memory-runtime.js";
+import { createProvider } from "./provider/factory.js";
+import { CostTracker } from "./cost-tracker.js";
+import { billingRouteForProvider, requestContextForProvider } from "./runtime-assembly.js";
+import { SqliteRuntimeControlStore } from "@pico/storage/sqlite/sqlite-runtime-control-store";
 
 export interface ProductionLocalDaemonHostOptions {
   acquireMemoryResidency?: () => { release(): void };
@@ -263,6 +272,67 @@ export function createProductionRuntimeServices(
   const userMcpConfigStore = options.userMcpConfigStore ?? new UserMcpConfigStore({ picoHome });
   const effectiveConfigResolver =
     options.effectiveConfigResolver ?? new EffectiveConfigResolver({ userConfigStore });
+  configureExecutionLearningHost(picoHome, {
+    modelFactory: async (workDir, identity, sessionId) => {
+      const canonical = await trustStore.canonicalize(workDir);
+      if (!(await trustStore.isTrusted(canonical)))
+        throw new Error("Learning workspace trust revoked");
+      const routeId = `${identity.providerId}/${identity.modelId}`;
+      const runtime = await loadEffectiveModelRuntime({
+        workDir,
+        projectTrusted: true,
+        env,
+        userConfigStore,
+        configResolver: effectiveConfigResolver,
+        credentialVault,
+        preferredModelRouteId: routeId,
+      });
+      const route = runtime.router.routes.find(
+        (route) => route.providerId === identity.providerId && route.model === identity.modelId,
+      );
+      if (
+        !route ||
+        route.id !== routeId ||
+        ["missing", "unsupported"].includes(
+          runtime.credentials[identity.providerId]?.state ?? "missing",
+        )
+      )
+        throw new Error("Current learning model route unavailable");
+      const selected = runtime.router.providerConfig(route.id);
+      const configRevision = createHash("sha256")
+        .update(
+          JSON.stringify([
+            selected.provider,
+            selected.config.baseURL,
+            selected.route.id,
+            selected.config.model,
+          ]),
+        )
+        .digest("hex");
+      if (identity.configRevision && identity.configRevision !== configRevision)
+        throw new Error("Learning model authority changed");
+      const ledger = new SqliteRuntimeControlStore({
+        storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
+      });
+      try {
+        const provider = new CostTracker(
+          createProvider(selected.provider, selected.config),
+          billingRouteForProvider(selected.provider, selected.config),
+          undefined,
+          {
+            ledger,
+            recordRuntimeEvents: false,
+            contextFacts: requestContextForProvider(selected.provider, selected.config),
+            context: { purpose: "memory_review", sessionId },
+          },
+        );
+        return { model: new ProviderAtomicMemoryModel(provider), dispose: () => ledger.close() };
+      } catch (error) {
+        ledger.close();
+        throw error;
+      }
+    },
+  });
   const registrationStore =
     options.registrationStore ??
     new WorkspaceRegistrationStore(join(picoHome, "daemon-workspaces.json"));
@@ -630,6 +700,20 @@ export function createProductionRuntimeServices(
               }
             : {}),
           atomicMemoryLifecycle,
+          memoryLearningChangedSink: (change: {
+            workspacePath: string;
+            workspaceKey: string;
+            revision: number;
+          }) =>
+            service.publishDesktopNotification(
+              createRuntimeNotification({
+                topic: "memory.learning.changed",
+                scope: { workspacePath: change.workspacePath },
+                resourceVersion: nextDesktopResourceVersion(),
+                at: Date.now(),
+                payload: { workspaceKey: change.workspaceKey, revision: change.revision },
+              }),
+            ),
           memoryChangedSink: () =>
             service.publishDesktopNotification(
               createRuntimeNotification({
@@ -1291,6 +1375,20 @@ export function createProductionRuntimeServices(
                 }
               : {}),
             atomicMemoryLifecycle,
+            memoryLearningChangedSink: (change: {
+              workspacePath: string;
+              workspaceKey: string;
+              revision: number;
+            }) =>
+              service.publishDesktopNotification(
+                createRuntimeNotification({
+                  topic: "memory.learning.changed",
+                  scope: { workspacePath: change.workspacePath },
+                  resourceVersion: nextDesktopResourceVersion(),
+                  at: Date.now(),
+                  payload: { workspaceKey: change.workspaceKey, revision: change.revision },
+                }),
+              ),
             memoryChangedSink: () =>
               service.publishDesktopNotification(
                 createRuntimeNotification({
@@ -2051,6 +2149,21 @@ export function createProductionRuntimeServices(
         return { cancelled: outcome.accepted };
       },
     },
+  });
+  executionLearningHost({
+    picoHome,
+    lifecycle: atomicMemoryLifecycle,
+    gate: async (workDir) => trustStore.isTrusted(await trustStore.canonicalize(workDir)),
+    onChanged: (change) =>
+      service.publishDesktopNotification(
+        createRuntimeNotification({
+          topic: "memory.learning.changed",
+          scope: { workspacePath: change.workspacePath },
+          resourceVersion: nextDesktopResourceVersion(),
+          at: Date.now(),
+          payload: { workspaceKey: change.workspaceKey, revision: change.revision },
+        }),
+      ),
   });
   void registrationStore
     .list()

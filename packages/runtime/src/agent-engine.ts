@@ -735,7 +735,12 @@ export class AgentEngine {
   /** RuntimeEvent is the source of truth for production model history; Session is its UI projection. */
   private async readModelHistory(session: Session): Promise<Message[]> {
     const runtimeRun = this.runtimePort?.currentRun();
-    if (runtimeRun?.claimsSession(session)) return runtimeRun.readModelHistory(!!this.memoryHooks);
+    if (runtimeRun?.claimsSession(session)) {
+      const history = await runtimeRun.readModelHistory(!!this.memoryHooks);
+      return session.resolveModelMessageMedia
+        ? history.map((message) => session.resolveModelMessageMedia!(message))
+        : history;
+    }
     return session.getModelContext();
   }
 

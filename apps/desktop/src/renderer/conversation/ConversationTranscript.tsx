@@ -56,7 +56,7 @@ export interface ConversationTranscriptProps {
   ) => void;
   readonly onQuoteSelection?: (text: string) => void;
   readonly onAskInSideChat?: (text: string) => void;
-  readonly highlightItemId?: string | undefined;
+  readonly renderRunFooter?: (runId: string) => ReactNode;
 }
 
 interface ConversationTurnView {
@@ -122,6 +122,11 @@ function RunBoundary({ item }: { readonly item: RunBoundaryItemView }) {
         <span className="conversation-run-boundary__duration">{item.duration}</span>
       )}
       {item.detail && <span className="conversation-run-boundary__detail">{item.detail}</span>}
+      {item.status === "interrupted" && (
+        <span className="conversation-run-boundary__detail">
+          已停止本地等待；远端服务可能仍在处理。
+        </span>
+      )}
     </div>
   );
 }
@@ -157,6 +162,7 @@ function UserMessageBubble({
   readonly onEdit?: ConversationTranscriptProps["onEditUserMessage"];
 }) {
   const [copyStatus, setCopyStatus] = useState("");
+  const hasAttachments = Boolean(item.media?.length || item.text.includes("pico://artifact/"));
   const copyStatusTimer = useRef<number | undefined>(undefined);
   useEffect(
     () => () => {
@@ -230,8 +236,9 @@ function UserMessageBubble({
             <button
               className="conversation-message__action"
               type="button"
-              title="编辑并重发"
+              title={hasAttachments ? "含附件消息暂不支持编辑并重发" : "编辑并重发"}
               aria-label="编辑并重发"
+              disabled={hasAttachments}
               onClick={() => onEdit(item)}
             >
               <Pencil aria-hidden="true" />
@@ -419,12 +426,38 @@ const goalToolLabels: Readonly<Record<string, string>> = {
   clear_goal: "清除 Goal",
 };
 function toolLabel(name: string): string {
+  if (name === "document") return "文档";
   return goalToolLabels[name] ?? name;
 }
 
 // Keep the full invocation in the disclosure. The row only needs a readable
 // destination, command, or query, including while wire arguments are streaming.
 function toolTargetPreview(item: ToolItemView): string | undefined {
+  if (item.toolName === "document" && item.detail) {
+    try {
+      const args = JSON.parse(item.detail) as Record<string, unknown>;
+      const labels: Record<string, string> = {
+        inspect: "查看概况",
+        read: "读取内容",
+        search: "搜索内容",
+        view: "查看页面",
+        analyze: "计算表格",
+      };
+      if (args && typeof args.action === "string" && labels[args.action]) {
+        return [
+          labels[args.action],
+          typeof args.page === "number" ? `第 ${args.page} 页` : undefined,
+          typeof args.sheet === "string" ? args.sheet : undefined,
+          typeof args.range === "string" ? args.range : undefined,
+          typeof args.query === "string" ? args.query : undefined,
+        ]
+          .filter(Boolean)
+          .join(" · ");
+      }
+    } catch {
+      /* Streaming arguments may be incomplete. */
+    }
+  }
   let target = item.title !== item.toolName ? item.title : undefined;
   if (!target && item.detail) {
     try {
@@ -684,7 +717,7 @@ function renderDefaultItem(
       const loadedTools = loadedAgentTools(item);
       if (loadedTools) {
         return (
-          <details className="conversation-agent-activation" open>
+          <details className="conversation-agent-activation">
             <summary>
               <CheckCircle2 aria-hidden="true" />
               <strong>启用子智能体</strong>
@@ -878,7 +911,7 @@ export function ConversationTranscript({
   onEditUserMessage,
   onQuoteSelection,
   onAskInSideChat,
-  highlightItemId,
+  renderRunFooter,
 }: ConversationTranscriptProps) {
   const [selectedText, setSelectedText] = useState<
     { readonly text: string; readonly top: number; readonly left: number } | undefined
@@ -890,12 +923,6 @@ export function ConversationTranscript({
   const turns = groupConversationItemsIntoTurns(
     foldConversationProcess(visibleTurnItems(visibleItems), activeRun),
   );
-  useEffect(() => {
-    if (!highlightItemId) return;
-    const target = document.getElementById(transcriptItemDomId(highlightItemId));
-    target?.scrollIntoView?.({ block: "center", behavior: "smooth" });
-  }, [highlightItemId, visibleItems.length]);
-
   const captureSelection = () => {
     if (!onQuoteSelection && !onAskInSideChat) return;
     const selection = window.getSelection();
@@ -1029,8 +1056,6 @@ export function ConversationTranscript({
         <li
           className="conversation-transcript__item"
           data-kind={item.kind}
-          data-highlighted={highlightItemId === item.id || undefined}
-          id={transcriptItemDomId(item.id)}
           key={conversationItemKey(item)}
         >
           {renderItemContent(item)}
@@ -1083,6 +1108,25 @@ export function ConversationTranscript({
                   ),
                 )}
               </ol>
+              {renderRunFooter &&
+                [
+                  ...new Set(
+                    turn.items.flatMap((item) =>
+                      item.kind === "process" && item.boundary?.runId
+                        ? [item.boundary.runId]
+                        : item.kind === "runBoundary" && item.status !== "started" && item.runId
+                          ? [item.runId]
+                          : [],
+                    ),
+                  ),
+                ].map((runId) => {
+                  const footer = renderRunFooter(runId);
+                  return footer ? (
+                    <div key={`learning:${runId}`} className="conversation-turn__learning">
+                      {footer}
+                    </div>
+                  ) : null;
+                })}
             </li>
           ))}
         </ol>
@@ -1121,10 +1165,6 @@ export function ConversationTranscript({
       </div>
     </MediaProvider>
   );
-}
-
-function transcriptItemDomId(itemId: string): string {
-  return `transcript-item-${encodeURIComponent(itemId)}`;
 }
 
 function StandaloneMedia({

@@ -26,7 +26,7 @@ export class MemoryRecallRequestTracker {
     },
   ) {}
 
-  async record(trace: MemoryRecallTrace): Promise<void> {
+  async record(trace: MemoryRecallTrace): Promise<string | undefined> {
     if (trace.mode === "automatic") this.automatic = undefined;
     try {
       const eventId = await this.options.record(trace);
@@ -37,6 +37,7 @@ export class MemoryRecallRequestTracker {
       const recorded = { eventId, trace: structuredClone(trace) };
       if (trace.mode === "automatic") this.automatic = recorded;
       else this.addSearch(recorded);
+      return eventId;
     } catch {
       this.unavailable();
     }

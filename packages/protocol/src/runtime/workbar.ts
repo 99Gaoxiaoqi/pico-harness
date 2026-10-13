@@ -1,3 +1,4 @@
+import { learningVersionParam } from "./task-experience.js";
 import { isForegroundProcessFacts } from "@pico/core/execution-facts";
 import { isGoalEvidenceTrace } from "@pico/core/goal-evidence-trace";
 import { isMemoryRecallTrace } from "@pico/core/memory-recall-contract";
@@ -447,6 +448,7 @@ export type WorkbarMethodMap = {
       readonly sessionId: SessionId;
       readonly cursor?: string;
       readonly runId?: string;
+      readonly learningVersion?: 2;
     };
     readonly result: RuntimeExecutionPage;
   };
@@ -865,7 +867,11 @@ export const workbarParamValidators = {
   }),
   "session.execution.query": exactParamShape(
     { workspacePath: stringParam, sessionId: boundedNonEmptyStringParam(512) },
-    { cursor: boundedNonEmptyStringParam(2048), runId: boundedNonEmptyStringParam(512) },
+    {
+      cursor: boundedNonEmptyStringParam(2048),
+      runId: boundedNonEmptyStringParam(512),
+      learningVersion: learningVersionParam,
+    },
   ),
   "session.trace.query": exactParamShape(
     { workspacePath: stringParam, sessionId: stringParam },

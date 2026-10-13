@@ -14,6 +14,9 @@ import {
 } from "../../../packages/protocol/src/index.js";
 
 const memoryMethods = [
+  "memory.learning.list",
+  "memory.learning.inspect",
+  "memory.learning.discard",
   "memory.list",
   "memory.get",
   "memory.create",
@@ -223,3 +226,38 @@ function assertProtocolError(operation: () => unknown, code: string): void {
     return true;
   });
 }
+
+test("execution learning management requires scoped revisions and body-free notifications", () => {
+  const params = { workspacePath: "/workspace", candidateId: "candidate", expectedRevision: 2 };
+  assert.deepEqual(parseStrictRuntimeParams("memory.learning.discard", params), params);
+  assertProtocolError(
+    () => parseStrictRuntimeParams("memory.learning.discard", { ...params, expectedRevision: 0 }),
+    RUNTIME_ERROR_CODES.INVALID_PARAMS,
+  );
+  const notice = createRuntimeNotification({
+    topic: "memory.learning.changed",
+    scope: { workspacePath: "/workspace" },
+    resourceVersion: 1,
+    at: 1,
+    payload: { workspaceKey: "scope", revision: 2 },
+  });
+  assert.equal(isMemoryRuntimeNotification(notice), true);
+  assert.equal(
+    isMemoryRuntimeNotification({
+      ...notice,
+      payload: { ...notice.payload, hypothesis: "untrusted prose" },
+    }),
+    false,
+  );
+  assert.deepEqual(
+    parseRuntimeResult("memory.learning.list", { workspaceKey: "scope", revision: 2, items: [] }),
+    { workspaceKey: "scope", revision: 2, items: [] },
+  );
+  assertProtocolError(
+    () =>
+      parseRuntimeResult("memory.learning.inspect", {
+        candidate: { claim: { candidateId: "candidate", revision: 2, target: {}, recipe: [] } },
+      }),
+    RUNTIME_ERROR_CODES.INVALID_REQUEST,
+  );
+});

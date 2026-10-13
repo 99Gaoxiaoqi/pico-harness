@@ -1,4 +1,12 @@
+import { uploadMimeType } from "../file-upload.js";
 import { PendingSendNotice } from "../PendingSendNotice.js";
+import { ExecutionLearningPanel } from "../ExecutionLearningPanel.js";
+import { useExecutionLearning } from "../useExecutionLearning.js";
+import { useTaskExperience } from "../useTaskExperience.js";
+import { TaskExperiencePanel } from "../TaskExperiencePanel.js";
+import { useExperienceLedger } from "../useExperienceLedger.js";
+import { ExperienceUsagePanel } from "../ExperienceUsagePanel.js";
+import { useFileDraft } from "../conversation/useFileDraft.js";
 import {
   getComposerResources,
   parseComposerDraft,
@@ -15,7 +23,7 @@ import {
   subagentParent,
   subagentSessionHref,
 } from "../conversation/subagent-navigation.js";
-import type { RuntimeResult, RuntimeUserDefaults } from "@pico/protocol";
+import type { RuntimeUserDefaults } from "@pico/protocol";
 import {
   AlertTriangle,
   Bot,
@@ -27,7 +35,6 @@ import {
   PanelRightClose,
   PanelRightOpen,
   Pencil,
-  Search,
   Sparkles,
   TerminalSquare,
 } from "lucide-react";
@@ -156,6 +163,7 @@ export function ConversationPage() {
       )?.title ?? "父任务")
     : undefined;
   const draftKey = conversationKey ?? `new:${workspacePath || "unbound"}`;
+  const fileDraft = useFileDraft(draftKey);
   const pendingSend = runtime.pendingSends?.find(
     (entry) => entry.scope.picoHome === data.picoHome && entry.scope.sourceKey === draftKey,
   );
@@ -200,17 +208,6 @@ export function ConversationPage() {
   const [titleDraft, setTitleDraft] = useState("");
   const [modelOpenRequest, setModelOpenRequest] = useState(0);
   const [referenceError, setReferenceError] = useState<string>();
-  const [promptAnchors, setPromptAnchors] = useState<
-    RuntimeResult<"session.transcript.anchors">["anchors"]
-  >([]);
-  const [promptAnchorCursor, setPromptAnchorCursor] = useState<number>();
-  const [searchQuery, setSearchQuery] = useState("");
-  const [searchResults, setSearchResults] = useState<
-    RuntimeResult<"session.transcript.search">["hits"]
-  >([]);
-  const [searchCursor, setSearchCursor] = useState<number>();
-  const [searchPending, setSearchPending] = useState(false);
-  const [highlightItemId, setHighlightItemId] = useState<string>();
   const [sideChatQuoteRequest, setSideChatQuoteRequest] = useState<
     { readonly panelId: string; readonly id: string; readonly text: string } | undefined
   >();
@@ -245,54 +242,8 @@ export function ConversationPage() {
     revisionRequestRef.current = undefined;
     setReferenceError(undefined);
     setWorkbarError(undefined);
-    setPromptAnchors([]);
-    setPromptAnchorCursor(undefined);
-    setSearchQuery("");
-    setSearchResults([]);
-    setSearchCursor(undefined);
-    setHighlightItemId(undefined);
     setSideChatQuoteRequest(undefined);
   }, [sessionId, workspacePath]);
-
-  useEffect(() => {
-    if (!sessionRef) return;
-    let current = true;
-    void actions.loadTranscriptAnchors(sessionRef).then((result) => {
-      if (!current || !result) return;
-      setPromptAnchors(result.anchors);
-      setPromptAnchorCursor(result.nextBeforeSequence);
-    });
-    return () => {
-      current = false;
-    };
-  }, [actions, sessionRef]);
-
-  useEffect(() => {
-    if (!sessionRef || !searchQuery.trim()) {
-      setSearchResults([]);
-      setSearchCursor(undefined);
-      setSearchPending(false);
-      return;
-    }
-    let current = true;
-    const timer = window.setTimeout(() => {
-      setSearchPending(true);
-      void actions
-        .searchTranscript(sessionRef, searchQuery)
-        .then((result) => {
-          if (!current || !result) return;
-          setSearchResults(result.hits);
-          setSearchCursor(result.nextBeforeSequence);
-        })
-        .finally(() => {
-          if (current) setSearchPending(false);
-        });
-    }, 250);
-    return () => {
-      current = false;
-      window.clearTimeout(timer);
-    };
-  }, [actions, searchQuery, sessionRef]);
 
   useEffect(() => {
     if (typeof window !== "undefined") saveWorkbarState(window.localStorage, workbar);
@@ -328,6 +279,24 @@ export function ConversationPage() {
     (run) => run.workspacePath === workspacePath && run.sessionId === sessionId,
   );
   const activeRun = sessionRuns.find((run) => !isTerminalRun(run.status));
+  const experience = useTaskExperience(runtime, {
+    workspacePath,
+    sessionId,
+    enabled: Boolean(sessionRef),
+    refreshKey: `${activeRun?.id ?? "idle"}:${activeRun?.status ?? "idle"}`,
+  });
+  const ledger = useExperienceLedger(runtime, {
+    workspacePath,
+    sessionId,
+    enabled: Boolean(sessionRef),
+    refreshKey: `${activeRun?.id ?? "idle"}:${activeRun?.status ?? "idle"}`,
+  });
+  const learning = useExecutionLearning(runtime, {
+    workspacePath,
+    sessionId,
+    enabled: Boolean(sessionRef),
+    refreshKey: `${activeRun?.id ?? "idle"}:${activeRun?.status ?? "idle"}`,
+  });
   const retryState = activeRun
     ? data.providerRetries[providerRetryKey(workspacePath, activeRun.id)]
     : undefined;
@@ -479,7 +448,8 @@ export function ConversationPage() {
     );
     const live = activeRun
       ? data.timeline
-          .filter((item) => item.runId === activeRun.id)
+          // The process disclosure and composer already show live Run progress.
+          .filter((item) => item.runId === activeRun.id && item.eventType !== "assistant.thinking")
           .map(timelineItemToConversationItem)
       : [];
     const runIds = new Set(sessionRuns.map((run) => run.id));
@@ -544,8 +514,38 @@ export function ConversationPage() {
     blocked: Boolean(pendingPrompt || pendingApproval),
   });
 
+  const attachmentOrchestration = sessionId
+    ? conversation?.settings?.orchestrationMode
+    : newTaskSettings.orchestrationMode;
+  const imageModelNotice =
+    isRecord(composerCapabilities) &&
+    composerCapabilities.vision === false &&
+    fileDraft.files.some(({ file }) => uploadMimeType(file)?.startsWith("image/"))
+      ? "当前模型不支持图片；请切换到支持视觉的模型，或移除图片后发送。"
+      : undefined;
+  const filesDisabledReason =
+    imageModelNotice ??
+    (editingUserMessage
+      ? "编辑已发送消息时暂不支持附件；请取消编辑后发送。"
+      : preview
+        ? "预览模式不支持上传附件。"
+        : researchActive ||
+            attachmentOrchestration === "graph" ||
+            attachmentOrchestration === "swarm"
+          ? "当前模式暂不支持附件；请切换到普通对话后发送。"
+          : draftReferences.references.length || isDesktopCommandInput(draft)
+            ? "技能、Agent 与斜杠命令暂不支持附件；请使用普通消息发送。"
+            : undefined);
+
   const submit = async (text: string, nextBehavior: ComposerBehavior) => {
     if (sendingRef.current || commands.pending) return;
+    if (
+      fileDraft.files.length &&
+      (filesDisabledReason || fileDraft.validationErrors.some(Boolean))
+    ) {
+      setReferenceError(filesDisabledReason ?? "请移除或更换无效附件后发送。");
+      return;
+    }
     if (editingUserMessage) {
       if (!sessionRef || !text.trim()) return;
       setReferenceError(undefined);
@@ -584,7 +584,9 @@ export function ConversationPage() {
       !composerReady ||
       !composerModelRouteId ||
       usingOpenCodeFree ||
-      (!parsedDraft.text && !parsedDraft.references.some((ref) => ref.kind === "skill"))
+      (!parsedDraft.text &&
+        !parsedDraft.references.some((ref) => ref.kind === "skill") &&
+        !fileDraft.files.length)
     )
       return;
     if (pendingSend) {
@@ -595,7 +597,8 @@ export function ConversationPage() {
     sendingRef.current = true;
     setPreparingSend(true);
     const sourceDraftKey = draftKey;
-    if (!sessionId && workspacePath) {
+    const sentFiles = fileDraft.files;
+    if (!sessionId && workspacePath && !sentFiles.length) {
       firstSendSourceRef.current = sourceDraftKey;
       firstSendBaselineRef.current = new Set(
         data.sessions
@@ -619,6 +622,7 @@ export function ConversationPage() {
         ...(sessionId ? { sessionId } : {}),
         ...(!sessionId ? { initialSettings: newTaskSettings } : {}),
         text: parsedDraft.text,
+        ...(sentFiles.length ? { files: sentFiles.map(({ file }) => file) } : {}),
         behavior: nextBehavior,
         ...(activeRun ? { expectedRunId: activeRun.id } : {}),
         ...(parsedDraft.references.some((ref) => ref.kind === "skill")
@@ -637,10 +641,12 @@ export function ConversationPage() {
           : {}),
       });
       if (!result.succeeded) {
+        if (result.fileError) fileDraft.setError(result.fileError.file, result.fileError.message);
         setAwaitingFirstSession(false);
         return;
       }
       clearIfUnchanged(draft);
+      fileDraft.clearSent(sentFiles);
       if (sendRouteRef.current !== sourceDraftKey) return;
       setReferenceError(undefined);
       if (!sessionId && result.sessionId) {
@@ -802,29 +808,6 @@ export function ConversationPage() {
     }
   };
 
-  const jumpToTranscriptItem = async (itemId: string) => {
-    if (!sessionRef) return;
-    if (!(await actions.loadTranscriptAround(sessionRef, itemId))) return;
-    setHighlightItemId(undefined);
-    window.requestAnimationFrame(() => setHighlightItemId(itemId));
-  };
-
-  const loadMorePromptAnchors = async () => {
-    if (!sessionRef || promptAnchorCursor === undefined) return;
-    const result = await actions.loadTranscriptAnchors(sessionRef, promptAnchorCursor);
-    if (!result) return;
-    setPromptAnchors((current) => [...current, ...result.anchors]);
-    setPromptAnchorCursor(result.nextBeforeSequence);
-  };
-
-  const loadMoreSearchResults = async () => {
-    if (!sessionRef || searchCursor === undefined || !searchQuery.trim()) return;
-    const result = await actions.searchTranscript(sessionRef, searchQuery, searchCursor);
-    if (!result) return;
-    setSearchResults((current) => [...current, ...result.hits]);
-    setSearchCursor(result.nextBeforeSequence);
-  };
-
   const quoteIntoMainComposer = (text: string) => {
     const quoted = text
       .split("\n")
@@ -876,6 +859,10 @@ export function ConversationPage() {
   const beginEditingUserMessage = (
     item: Extract<ConversationItemView, { kind: "userMessage" }>,
   ) => {
+    if (item.media?.length || item.text.includes("pico://artifact/")) {
+      actions.showMessage?.("含附件消息暂不支持编辑并重发，请新建消息发送。");
+      return;
+    }
     setEditingUserMessage({ item, previousDraft: draft });
     revisionRequestRef.current = undefined;
     handleDraftChange(item.text);
@@ -1473,6 +1460,11 @@ export function ConversationPage() {
                   resources={composerResources}
                   inputRef={composerInputRef}
                   value={draft}
+                  files={fileDraft.files}
+                  fileValidationErrors={fileDraft.validationErrors}
+                  onFilesAdd={fileDraft.add}
+                  onFileRemove={fileDraft.remove}
+                  filesDisabledReason={filesDisabledReason}
                   onValueChange={handleDraftChange}
                   onSubmit={(value) => void submit(value.text, value.behavior)}
                   status={composerStatus}
@@ -1751,80 +1743,6 @@ export function ConversationPage() {
           </div>
         ) : (
           <>
-            {sessionRef && (
-              <section className="conversation-history-tools" aria-label="会话历史导航">
-                <label className="conversation-history-search">
-                  <Search aria-hidden="true" size={15} />
-                  <span className="conversation-sr-only">搜索当前会话</span>
-                  <input
-                    type="search"
-                    value={searchQuery}
-                    placeholder="搜索当前会话的全部历史…"
-                    onChange={(event) => setSearchQuery(event.target.value)}
-                  />
-                  {searchPending && <span role="status">搜索中…</span>}
-                </label>
-                {searchQuery.trim() && (
-                  <div className="conversation-search-results" aria-live="polite">
-                    {searchResults.length === 0 && !searchPending ? (
-                      <span className="conversation-history-empty">没有找到匹配内容。</span>
-                    ) : (
-                      searchResults.map((hit) => (
-                        <button
-                          type="button"
-                          key={`${hit.eventId}:${hit.itemId}`}
-                          onClick={() => void jumpToTranscriptItem(hit.itemId)}
-                        >
-                          <span>{hit.role === "user" ? "你" : "Pico"}</span>
-                          <span>
-                            {hit.summary.slice(0, hit.matchStart)}
-                            <mark>
-                              {hit.summary.slice(hit.matchStart, hit.matchStart + hit.matchLength)}
-                            </mark>
-                            {hit.summary.slice(hit.matchStart + hit.matchLength)}
-                          </span>
-                        </button>
-                      ))
-                    )}
-                    {searchCursor !== undefined && (
-                      <Button
-                        variant="quiet"
-                        type="button"
-                        onClick={() => void loadMoreSearchResults()}
-                      >
-                        更多搜索结果
-                      </Button>
-                    )}
-                  </div>
-                )}
-                {promptAnchors.length > 0 && (
-                  <nav className="conversation-prompt-rail" aria-label="按用户提问跳转">
-                    <span>提问</span>
-                    <div>
-                      {promptAnchors.map((anchor) => (
-                        <button
-                          type="button"
-                          key={anchor.eventId}
-                          title={anchor.prompt}
-                          onClick={() => void jumpToTranscriptItem(anchor.itemId)}
-                        >
-                          {anchor.prompt}
-                        </button>
-                      ))}
-                    </div>
-                    {promptAnchorCursor !== undefined && (
-                      <Button
-                        variant="quiet"
-                        type="button"
-                        onClick={() => void loadMorePromptAnchors()}
-                      >
-                        更早提问
-                      </Button>
-                    )}
-                  </nav>
-                )}
-              </section>
-            )}
             {sessionRef && conversation?.hasEarlier && (
               <div className="conversation-history-pagination">
                 <Button
@@ -1856,6 +1774,45 @@ export function ConversationPage() {
                     ]
                   : items
               }
+              renderRunFooter={
+                experience.supported || ledger.supported
+                  ? (runId) =>
+                      experience.items.some((item) => item.runId === runId) ||
+                      ledger.uses.some((use) => (use.hostRunId ?? use.runId) === runId) ||
+                      (!ledger.supported &&
+                        experience.reuse.some((reference) => reference.runId === runId)) ? (
+                        <>
+                          {experience.supported && (
+                            <TaskExperiencePanel
+                              mode="conversation"
+                              sessionId={sessionId}
+                              summaryRunId={runId}
+                              workspacePath={workspacePath}
+                              items={experience.items}
+                              reuse={
+                                ledger.supported
+                                  ? []
+                                  : experience.reuse.filter(
+                                      (reference) => reference.runId === runId,
+                                    )
+                              }
+                              onDetail={experience.onDetail}
+                              onReview={experience.onReview}
+                              onFeedback={experience.onFeedback}
+                            />
+                          )}
+                          <ExperienceUsagePanel
+                            uses={ledger.uses.filter(
+                              (use) => (use.hostRunId ?? use.runId) === runId,
+                            )}
+                            workspacePath={workspacePath}
+                            onDetail={ledger.onDetail}
+                            onFeedback={ledger.onFeedback}
+                          />
+                        </>
+                      ) : null
+                  : undefined
+              }
               assistantLabel={
                 parentRef
                   ? `子智能体 · ${childParent?.name ?? session?.title ?? "执行记录"}`
@@ -1868,7 +1825,6 @@ export function ConversationPage() {
               onAskInSideChat={
                 sessionRef && session?.status !== "archived" ? quoteIntoSideChat : undefined
               }
-              highlightItemId={highlightItemId}
               onOpenItem={openItem}
               renderItem={(item, fallback) => {
                 if (item.id === `provider-retry:${retryNotice?.runId}` && retryNotice) {
@@ -1885,6 +1841,8 @@ export function ConversationPage() {
                 const diagnostic = modelCommunicationDiagnostic(item.detail ?? "");
                 const status = providerStatusDiagnostic(item.detail ?? "");
                 if (!failureNotice && !diagnostic && !status) return fallback;
+                // The last retry describes an earlier attempt; a final local error takes priority.
+                const failureDetail = !diagnostic && !status ? item.detail : undefined;
                 const latestBoundary = items.findLast(
                   (candidate) => candidate.kind === "runBoundary" && candidate.status !== "started",
                 );
@@ -1901,11 +1859,16 @@ export function ConversationPage() {
                   Boolean(originalRequest.text.trim());
                 return (
                   <ProviderFailureCard
+                    failureDetail={failureDetail}
                     providerDetail={diagnostic?.providerDetail ?? status?.providerDetail}
                     diagnosticText={item.detail}
                     notice={failureNotice}
                     httpStatus={status?.httpStatus}
-                    title={diagnostic?.title ?? status?.title ?? "暂时无法连接模型"}
+                    title={
+                      failureDetail
+                        ? "运行失败"
+                        : (diagnostic?.title ?? status?.title ?? "暂时无法连接模型")
+                    }
                     canRetry={Boolean(canRetry)}
                     onRetry={() => {
                       if (originalRequest?.kind !== "userMessage" || draft.trim()) return;
@@ -1940,6 +1903,76 @@ export function ConversationPage() {
                   </div>
                 )
               }
+            />
+            {experience.error && (
+              <InlineNotice tone="error">
+                {experience.error}{" "}
+                <Button variant="quiet" onClick={() => void experience.refresh()}>
+                  重试
+                </Button>
+              </InlineNotice>
+            )}
+            {experience.supported && activeRun && (
+              <TaskExperiencePanel
+                mode="conversation"
+                sessionId={sessionId}
+                items={experience.items}
+                reuse={
+                  ledger.supported
+                    ? []
+                    : experience.reuse.filter((reference) => reference.runId === activeRun.id)
+                }
+                showSummary={false}
+                workspacePath={workspacePath}
+                onDetail={experience.onDetail}
+                onReview={experience.onReview}
+                onFeedback={experience.onFeedback}
+              />
+            )}
+            {ledger.error && (
+              <InlineNotice tone="error">
+                {ledger.error}{" "}
+                <Button variant="quiet" onClick={() => void ledger.refresh()}>
+                  重试
+                </Button>
+              </InlineNotice>
+            )}
+            <ExperienceUsagePanel
+              uses={
+                activeRun
+                  ? ledger.uses.filter((use) => (use.hostRunId ?? use.runId) === activeRun.id)
+                  : []
+              }
+              diagnostics={ledger.diagnostics}
+              workspacePath={workspacePath}
+              onDetail={ledger.onDetail}
+              onFeedback={ledger.onFeedback}
+            />
+            {ledger.hasMore && (
+              <Button
+                variant="quiet"
+                disabled={ledger.loading}
+                onClick={() => void ledger.loadMore()}
+              >
+                加载更多使用记录
+              </Button>
+            )}
+            {learning.error && (
+              <InlineNotice tone="error">
+                {learning.error}{" "}
+                <Button variant="quiet" onClick={() => void learning.refresh()}>
+                  重试
+                </Button>
+              </InlineNotice>
+            )}
+            <ExecutionLearningPanel
+              mode="conversation"
+              statuses={learning.statuses}
+              workspaceKey={learning.workspaceKey}
+              workspacePath={workspacePath}
+              sessionId={sessionId}
+              onInspect={learning.onInspect}
+              onDiscard={learning.onDiscard}
             />
           </>
         )}

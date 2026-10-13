@@ -18,15 +18,32 @@
  */
 
 import type { DatabaseSync } from "node:sqlite";
+import { EXECUTION_LEARNING_SCHEMA_SQL } from "./execution-learning-store.js";
+import { migrateExperienceFeedback } from "./experience-feedback-schema.js";
+import { TASK_EXPERIENCE_SCHEMA_SQL } from "./task-experience-schema.js";
 
-export const SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION = 9;
+export const SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION = 13;
+
+const EXECUTION_LESSON_SCHEMA_SQL = `
+CREATE TABLE execution_lesson_candidates (
+  candidate_id TEXT PRIMARY KEY CHECK(length(candidate_id) > 0),
+  workspace_key TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('candidate','confirmed','rejected','deleted','invalidated')),
+  item_id TEXT UNIQUE,
+  record_json TEXT NOT NULL,
+  FOREIGN KEY(item_id) REFERENCES memory_items(item_id) ON DELETE SET NULL
+);
+CREATE INDEX execution_lessons_by_scope ON execution_lesson_candidates(workspace_key,session_id,state);
+`;
 
 const SQLITE_INITIALIZATION_BUSY_TIMEOUT_MS = 5_000;
 const SQLITE_INITIALIZATION_RETRY_DELAY_MS = 10;
 const initializationRetryGate = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
 
-// A fresh database is created directly in the current shape. No historical upgrades.
-const CURRENT_SCHEMA_SQL = `
+// Additive upgrades preserve v9/v10/v11 memory while installing v12 task experience state.
+const CURRENT_SCHEMA_SQL =
+  `
 CREATE TABLE memory_compaction_policy_denials (
       session_id TEXT NOT NULL CHECK (length(session_id) > 0),
       compaction_checkpoint_id TEXT NOT NULL CHECK (length(compaction_checkpoint_id) > 0),
@@ -176,10 +193,24 @@ CREATE INDEX memory_item_sources_by_turn
 
 CREATE INDEX memory_items_by_scope_and_lifecycle
       ON memory_items(scope_type, scope_key, lifecycle_state, updated_at DESC, item_id);
-`;
+` +
+  EXECUTION_LESSON_SCHEMA_SQL +
+  EXECUTION_LEARNING_SCHEMA_SQL +
+  TASK_EXPERIENCE_SCHEMA_SQL;
 
 const CURRENT_SCHEMA_SHAPE = {
   tables: [
+    {
+      name: "execution_lesson_candidates",
+      requiredColumns: [
+        "candidate_id",
+        "workspace_key",
+        "session_id",
+        "state",
+        "item_id",
+        "record_json",
+      ],
+    },
     {
       name: "memory_compaction_policy_denials",
       requiredColumns: ["session_id", "compaction_checkpoint_id", "denied_at"],
@@ -286,6 +317,29 @@ export function initializeSqliteLongTermMemoryDatabase(db: DatabaseSync): void {
     assertSupportedSqliteLongTermMemorySchemaVersion(db);
     if (readSqliteLongTermMemorySchemaVersion(db) === 0) {
       db.exec(CURRENT_SCHEMA_SQL);
+      migrateExperienceFeedback(db);
+      db.exec(`PRAGMA user_version = ${SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION}`);
+    } else if (readSqliteLongTermMemorySchemaVersion(db) === 9) {
+      validateMinimumSchemaShape(db, false);
+      db.exec(EXECUTION_LESSON_SCHEMA_SQL);
+      db.exec(EXECUTION_LEARNING_SCHEMA_SQL);
+      db.exec(TASK_EXPERIENCE_SCHEMA_SQL);
+      migrateExperienceFeedback(db);
+      db.exec(`PRAGMA user_version = ${SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION}`);
+    } else if (readSqliteLongTermMemorySchemaVersion(db) === 10) {
+      validateMinimumSchemaShape(db);
+      db.exec(EXECUTION_LEARNING_SCHEMA_SQL);
+      db.exec(TASK_EXPERIENCE_SCHEMA_SQL);
+      migrateExperienceFeedback(db);
+      db.exec(`PRAGMA user_version = ${SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION}`);
+    } else if (readSqliteLongTermMemorySchemaVersion(db) === 11) {
+      validateMinimumSchemaShape(db);
+      db.exec(TASK_EXPERIENCE_SCHEMA_SQL);
+      migrateExperienceFeedback(db);
+      db.exec(`PRAGMA user_version = ${SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION}`);
+    } else if (readSqliteLongTermMemorySchemaVersion(db) === 12) {
+      validateMinimumSchemaShape(db);
+      migrateExperienceFeedback(db);
       db.exec(`PRAGMA user_version = ${SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION}`);
     }
     validateMinimumSchemaShape(db);
@@ -298,9 +352,16 @@ export function initializeSqliteLongTermMemoryDatabase(db: DatabaseSync): void {
 
 export function assertSupportedSqliteLongTermMemorySchemaVersion(db: DatabaseSync): void {
   const version = readSqliteLongTermMemorySchemaVersion(db);
-  if (version !== 0 && version !== SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION) {
+  if (
+    version !== 0 &&
+    version !== 9 &&
+    version !== 10 &&
+    version !== 11 &&
+    version !== 12 &&
+    version !== SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION
+  ) {
     throw new Error(
-      `Long-term memory SQLite schema ${version} is unsupported; expected ${SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION}. Automatic upgrades are not supported.`,
+      `Long-term memory SQLite schema ${version} is unsupported; expected ${SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION}. Only schemas 9, 10, 11 and 12 can be upgraded automatically.`,
     );
   }
   if (
@@ -383,10 +444,119 @@ function retryWhileSqliteBusy<T>(operation: () => T): T {
   }
 }
 
-function validateMinimumSchemaShape(db: DatabaseSync): void {
+function validateMinimumSchemaShape(db: DatabaseSync, includeExecutionLessons = true): void {
+  if (readSqliteLongTermMemorySchemaVersion(db) >= 11) {
+    const learningTables: Record<string, readonly string[]> = {
+      execution_learning_control: [
+        "scope",
+        "input_epoch",
+        "management_revision",
+        "resource_revision",
+      ],
+      execution_learning_admissions: [
+        "admission_id",
+        "workspace_key",
+        "session_id",
+        "run_id",
+        "record_json",
+      ],
+      execution_learning_native_facts: [
+        "admission_id",
+        "tool_call_id",
+        "prepared_event_id",
+        "kind",
+        "record_json",
+      ],
+      execution_learning_candidates: [
+        "candidate_id",
+        "workspace_key",
+        "session_id",
+        "run_id",
+        "failure_key",
+        "state",
+        "revision",
+        "item_id",
+        "updated_at",
+        "record_json",
+      ],
+      execution_learning_tickets: ["ticket_id", "candidate_id", "record_json", "result_json"],
+      execution_learning_jobs: [
+        "job_id",
+        "workspace_key",
+        "candidate_id",
+        "state",
+        "lease_until",
+        "fencing_token",
+        "updated_at",
+        "record_json",
+      ],
+      execution_learning_tombstones: ["failure_key", "created_at"],
+      execution_learning_attempts: ["failure_key", "workspace_key", "created_at"],
+      execution_learning_items: [
+        "item_id",
+        "candidate_id",
+        "item_content_hash",
+        "source_type",
+        "metadata_json",
+      ],
+    };
+    for (const [name, required] of Object.entries(learningTables)) {
+      if (!db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?").get(name))
+        throw incompleteSchemaError(`missing required table ${name}`);
+      const columns = new Set(
+        db
+          .prepare(`PRAGMA table_info(${name})`)
+          .all()
+          .map((row) => String(row.name)),
+      );
+      for (const column of required)
+        if (!columns.has(column))
+          throw incompleteSchemaError(`missing required column ${name}.${column}`);
+    }
+  }
+  if (readSqliteLongTermMemorySchemaVersion(db) >= 12) {
+    const experienceTables: Record<string, readonly string[]> = {
+      task_experience_tasks: [
+        "task_id",
+        "workspace_key",
+        "session_id",
+        "task_version",
+        "through_sequence",
+        "updated_at",
+        "record_json",
+      ],
+      task_experience_observations: ["observation_id", "task_id", "task_version", "record_json"],
+      ...(readSqliteLongTermMemorySchemaVersion(db) === 12 ? { task_experience_reuse: ["reuse_id", "workspace_key", "session_id", "candidate_id", "content_version", "record_json"] } : {
+        experience_uses: ["use_id", "workspace_key", "session_id", "item_id", "source_kind", "candidate_id", "record_json"],
+        experience_effects: ["effect_id", "use_id", "outcome_event_id", "record_json"],
+        experience_diagnostics: ["diagnostic_id", "workspace_key", "session_id", "created_at", "record_json"],
+        experience_feedback: ["operation_id", "workspace_key", "use_id", "request_hash", "result_json", "created_at"],
+      }),
+      task_experience_actions: [
+        "operation_id",
+        "workspace_key",
+        "candidate_id",
+        "request_hash",
+        "result_json",
+        "created_at",
+      ],
+    };
+    for (const [name, required] of Object.entries(experienceTables)) {
+      const columns = new Set(
+        db
+          .prepare(`PRAGMA table_info(${name})`)
+          .all()
+          .map((row) => String(row.name)),
+      );
+      for (const column of required)
+        if (!columns.has(column))
+          throw incompleteSchemaError(`missing required column ${name}.${column}`);
+    }
+  }
   const shape = CURRENT_SCHEMA_SHAPE;
   const readSchemaObject = db.prepare("SELECT type, tbl_name FROM sqlite_schema WHERE name = ?");
   for (const table of shape.tables) {
+    if (!includeExecutionLessons && table.name === "execution_lesson_candidates") continue;
     const object = readSchemaObject.get(table.name) as
       | { type?: unknown; tbl_name?: unknown }
       | undefined;

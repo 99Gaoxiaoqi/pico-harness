@@ -34,6 +34,9 @@ import {
   type FileWorkerRequest,
   type FileWorkerResponse,
 } from "./file-worker-protocol.js";
+import { WriteFileTool } from "./write-file-tool.js";
+import { EditFileTool } from "./edit-file-tool.js";
+import { reportNativeFileCommit } from "./native-file-learning.js";
 
 export interface FileWorkerSandboxDescriptor {
   readonly profile: SandboxProfile;
@@ -88,6 +91,9 @@ export class FileWorkerTool implements BaseTool {
 
   name() {
     return this.delegate.name();
+  }
+  get nativeFileWriter(): boolean {
+    return this.delegate instanceof WriteFileTool || this.delegate instanceof EditFileTool;
   }
   definition() {
     return this.delegate.definition();
@@ -339,6 +345,16 @@ export class FileWorkerTool implements BaseTool {
       } else {
         await writeAtomicWorkspaceFile(commit);
       }
+      await reportNativeFileCommit(context, {
+        path: fullPath,
+        ...(precondition.kind === "missing"
+          ? { beforeHash: null }
+          : response.sourceDigest
+            ? { beforeHash: response.sourceDigest }
+            : {}),
+        afterHash: createHash("sha256").update(preparedContent).digest("hex"),
+        ...(Array.from(preparedContent).length <= 1500 ? { content: preparedContent } : {}),
+      });
       if (operation === "edit_file") return response.result;
       const action = precondition.kind === "missing" ? "新建" : "覆盖";
       let artifactInfo = "";

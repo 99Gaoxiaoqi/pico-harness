@@ -37,6 +37,7 @@ const config = {
     appCategoryType: "public.app-category.developer-tools",
     executableName: "Pico",
     extraResource: [
+      join(import.meta.dirname, ".vite/build/execution-learning-reporter.mjs"),
       desktopAssetPath("icon.png"),
       "../../resources/sandbox",
       "../../resources/file-worker",

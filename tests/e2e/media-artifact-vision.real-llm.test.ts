@@ -13,7 +13,7 @@ const redPng =
   "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAb0lEQVR4nO3PAQkAAAyEwO9feoshgnABdLep8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3IPanc8OLDQitxAAAAAElFTkSuQmCC";
 
 realModelTest(
-  "重开后的Artifact图片引用在真实视觉请求中还原并识别颜色",
+  "重开后的生成图片在后续真实视觉请求中还原并识别颜色",
   { timeout: 90_000 },
   async (t) => {
     const model = await loadUserDefaultRealModel({
@@ -41,9 +41,13 @@ realModelTest(
     });
     await session.recover();
     await session.commitMessages({
+      role: "assistant",
+      content: `![generated image](data:image/png;base64,${redPng})`,
+    });
+    await session.commitMessages({
       role: "user",
-      content: "What is the dominant color of this image? Reply with just the English color name.",
-      images: [{ type: "image_base64", mimeType: "image/png", data: redPng }],
+      content:
+        "What is the dominant color of the previously generated image? Reply with just the English color name.",
     });
     const canonical = JSON.stringify(await session.runtimeEventStore!.readSession(session.id));
     assert.ok(!canonical.includes(redPng), "持久事件仅保留artifact引用");

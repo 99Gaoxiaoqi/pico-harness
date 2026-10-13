@@ -44,6 +44,7 @@ export async function runRendererBrowserScenario(contents: string): Promise<stri
       loader: "tsx",
     },
     outdir: "/virtual-pico-renderer-test",
+    loader: { ".svg": "dataurl" },
     bundle: true,
     write: false,
     format: "iife",

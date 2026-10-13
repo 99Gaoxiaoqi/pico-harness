@@ -84,6 +84,16 @@ export function isMessageHiddenFromTranscript(message: Message): boolean {
   );
 }
 
+/** Host reminders and steering continue the active task rather than replace its input. */
+export function isUserTaskMessage(message: Message): boolean {
+  return (
+    message.role === "user" &&
+    message.toolCallId === undefined &&
+    !isMessageHiddenFromTranscript(message) &&
+    message.providerData?.["picoKind"] !== "steer"
+  );
+}
+
 export type ImagePart =
   | { type: "image_base64"; mimeType: string; data: string }
   | { type: "image_url"; url: string }

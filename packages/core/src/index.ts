@@ -39,6 +39,7 @@ export * from "./transcript-tool-start.js";
 export * from "./tool-exchange.js";
 export * from "./workspace-trust-contract.js";
 export * from "./atomic-memory-contracts.js";
+export * from "./execution-learning-contracts.js";
 export * from "./atomic-memory-runtime-contracts.js";
 
 export * from "./deep-research.js";
@@ -46,3 +47,6 @@ export * from "./deep-research.js";
 export * from "./memory-recall-contract.js";
 export * from "./execution-facts.js";
 export * from "./goal-evidence-trace.js";
+export * from "./task-experience-contracts.js";
+
+export * from "./experience-feedback-contracts.js";

@@ -333,6 +333,61 @@ export interface MemoryItemRecord {
   readonly item: MemoryItem;
   readonly keys: readonly MemoryItemKey[];
   readonly sources: readonly MemoryItemSource[];
+  /** Persisted independently of optional metadata; invalid bindings must never become user evidence. */
+  readonly sourceType?: "execution-validated" | "reviewed-reference";
+  readonly taskExperience?: import("./task-experience-contracts.js").TaskExperienceSummary;
+  readonly taskAcceptance?: import("./execution-learning-contracts.js").ExecutionTaskAcceptance;
+  /** Trusted storage projection; never supplied by the memory extraction model. */
+  readonly executionEvidence?: {
+    readonly candidateId: string;
+    readonly confirmedAt: number;
+    readonly verificationCount: number;
+  };
+}
+
+export interface ExecutionLessonCandidate {
+  readonly candidateId: string;
+  readonly version: number;
+  readonly state: "candidate" | "confirmed" | "rejected" | "deleted" | "invalidated";
+  readonly workspaceKey: string;
+  readonly sessionId: string;
+  readonly content: string;
+  readonly taskFamily: string;
+  readonly commandHash: string;
+  readonly evidenceBoundary: number;
+  readonly failure: MemoryItemSource | null;
+  readonly verifications: readonly MemoryItemSource[];
+  readonly deletionRevision: number;
+  readonly settingsVersion: number;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+  readonly confirmedAt: number | null;
+  readonly itemId: string | null;
+  readonly itemContentHash: string | null;
+}
+
+/** All identities and policy generations are captured by the trusted Host. */
+export interface CreateExecutionLessonCandidateRequest {
+  readonly candidateId: string;
+  readonly workspaceKey: string;
+  readonly sessionId: string;
+  readonly content: string;
+  readonly taskFamily: string;
+  readonly commandHash: string;
+  readonly evidenceBoundary: number;
+  readonly failure: MemoryItemSource;
+  readonly observedAt: number;
+  readonly deletionRevision: number;
+  readonly settingsVersion: number;
+}
+
+export interface VerifyExecutionLessonRequest {
+  readonly candidateId: string;
+  readonly expectedVersion: number;
+  readonly workspaceKey: string;
+  readonly sessionId: string;
+  readonly verifications: readonly MemoryItemSource[];
+  readonly observedAt: number;
 }
 
 export interface SearchMemoryItemsByKeyRequest {

@@ -77,7 +77,11 @@ export function UserMemorySettingsPage() {
             {(
               [
                 ["enabled", "启用记忆", "关闭后，所有项目停止提取和召回；已保存的内容保留。"],
-                ["autoExtract", "自动提取长期信息", "从对话中提取经过验证的长期信息。"],
+                [
+                  "autoExtract",
+                  "自动提取长期信息",
+                  "从对话形成新的长期信息与经验提案。关闭只停止新提案；历史引用、效果记录和经验管理仍可继续，召回由独立开关控制。",
+                ],
                 ["recallEnabled", "会话召回", "根据当前问题召回相关记忆，遵循项目隔离。"],
               ] as const
             ).map(([key, label, detail]) => (
@@ -119,7 +123,7 @@ export function UserMemorySettingsPage() {
         {metrics?.key === metricsKey && <MemoryMetrics metrics={metrics.value} />}
       </section>
       <details className="settings-section health-report__raw">
-        <summary>管理已保存的记忆</summary>
+        <summary>管理工作区记忆</summary>
         <p>选择工作区查看内容；这里的选择不会改变用户级策略。</p>
         <div className="settings-list">
           {scopes.map((workspace) => (

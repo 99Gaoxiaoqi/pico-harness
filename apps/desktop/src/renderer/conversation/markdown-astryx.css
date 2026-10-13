@@ -1,4 +1,37 @@
 /* Keep Pico's existing prose rules authoritative over Astryx's list/table substrate. */
+.conversation-artifact-link {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.conversation-artifact-link button {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 4px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.conversation-artifact-link button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.conversation-artifact-link svg {
+  width: 14px;
+  height: 14px;
+}
+.conversation-artifact-link [role="alert"] {
+  color: var(--danger);
+  font-size: 12px;
+}
+
 .desktop-markdown.astryx-markdown {
   font-family: inherit;
   font-size: inherit;

@@ -1,0 +1,101 @@
+import { resolve } from "node:path";
+import type { TaskExperienceCandidate, TaskExperienceStore, TaskExperienceTask } from "@pico/core";
+import { memoryTextContainsSecret } from "@pico/runtime/atomic-memory/extraction-evidence";
+
+export interface ReviewedExperienceTarget {
+  readonly candidateId: string;
+  readonly contentVersion: number;
+  readonly recordRevision: number;
+}
+
+/** Every returned identity is checked against current Host permissions and task conditions. */
+export async function taskExperienceRecallTargets(options: {
+  readonly store: TaskExperienceStore;
+  readonly workspaceKey: string;
+  readonly workDir: string;
+  readonly query?: string;
+  readonly toolAllowed: (name: string) => boolean;
+  /** Host has checked that this task belongs to the currently executing canonical Run. */
+  readonly currentTask?: Pick<TaskExperienceTask, "taskId" | "taskVersion" | "sessionId" | "runId">;
+  readonly conditionMatches?: (candidate: TaskExperienceCandidate) => Promise<boolean | "unknown">;
+}): Promise<readonly ReviewedExperienceTarget[]> {
+  const query = options.query?.trim();
+  if (!query) return [];
+  const targets: ReviewedExperienceTarget[] = [];
+  const excluded = new Set<string>();
+  if (options.currentTask) {
+    const task = options.currentTask;
+    for (const receipt of await options.store.listTaskExperienceReuse(
+      options.workspaceKey,
+      task.sessionId,
+    )) {
+      if (
+        receipt.excluded &&
+        receipt.taskId === task.taskId &&
+        receipt.taskVersion === task.taskVersion &&
+        receipt.sessionId === task.sessionId
+      )
+        excluded.add(JSON.stringify([receipt.candidateId, receipt.contentVersion]));
+    }
+  }
+  for (const candidate of await options.store.queryTaskExperiences(options.workspaceKey, {
+    review: "approved",
+    limit: 100,
+  })) {
+    if (
+      candidate.kind !== "task-lesson" ||
+      excluded.has(JSON.stringify([candidate.candidateId, candidate.contentVersion])) ||
+      candidate.workspaceKey !== options.workspaceKey ||
+      resolve(candidate.workDir) !== resolve(options.workDir) ||
+      candidate.state !== "saved" ||
+      candidate.lifecycleState !== "active" ||
+      !candidate.enabled ||
+      candidate.review !== "approved" ||
+      !candidate.itemId ||
+      !candidate.content.trim() ||
+      candidate.validation === "fail" ||
+      candidate.validation === "stale" ||
+      memoryTextContainsSecret(candidate.content) ||
+      /pico:\/\/artifact\/|artifact[_-]id\s*[:=]/iu.test(candidate.content)
+    )
+      continue;
+    const applicability = candidate.applicability;
+    if (
+      !applicability ||
+      !Array.isArray(applicability.toolNames) ||
+      !Array.isArray(applicability.conditions) ||
+      applicability.toolNames.length > 8 ||
+      applicability.conditions.length > 8 ||
+      !applicability.conditions.every(
+        (condition) => typeof condition === "string" && !memoryTextContainsSecret(condition),
+      ) ||
+      !applicability.toolNames.every(
+        (name) => typeof name === "string" && options.toolAllowed(name),
+      )
+    )
+      continue;
+    if (
+      applicability.taskFamily === "spreadsheet" &&
+      !/(?:excel|xlsx|sheet|表格|电子表|求和|合计)/iu.test(query)
+    )
+      continue;
+    if (
+      applicability.taskFamily === "coding" &&
+      !/(?:代码|编程|测试|配置|依赖|修复|bug|test|node|code|config|build)/iu.test(query)
+    )
+      continue;
+    if (!["general", "coding", "spreadsheet"].includes(applicability.taskFamily)) continue;
+    if (applicability.spreadsheet || applicability.conditions.length) {
+      const match = options.conditionMatches
+        ? await options.conditionMatches(candidate)
+        : "unknown";
+      if (match === false || (applicability.spreadsheet && match !== true)) continue;
+    }
+    targets.push({
+      candidateId: candidate.candidateId,
+      contentVersion: candidate.contentVersion,
+      recordRevision: candidate.recordRevision,
+    });
+  }
+  return targets;
+}

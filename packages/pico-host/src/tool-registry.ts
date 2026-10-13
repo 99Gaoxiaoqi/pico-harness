@@ -31,6 +31,10 @@ import { isToolArgumentAuditRefusal } from "@pico/core/tool-argument-audit";
 import type { HookService } from "./hooks/service.js";
 import { HookProcessTreeTerminationError } from "./hooks/termination-error.js";
 import { BashTool } from "./bash-tool.js";
+import { WriteFileTool } from "./write-file-tool.js";
+import { EditFileTool } from "./edit-file-tool.js";
+import { FileWorkerTool } from "./file-worker-tool.js";
+import type { NativeLearningObserver, NativeFileLearningContext } from "./native-file-learning.js";
 import {
   validateNativeProcessFacts,
   type NativeProcessExecutionContext,
@@ -65,6 +69,10 @@ export function createToolRegistrationOwner(
  * 像忠实的前台总机:接线(收 ToolCall)→ 查黄页(map)→ 转接(Execute)。
  */
 export class ToolRegistry implements Registry {
+  private nativeLearningObserver?: NativeLearningObserver;
+  setNativeLearningObserver(observer: NativeLearningObserver): void {
+    this.nativeLearningObserver = observer;
+  }
   private readonly tools = new Map<string, BaseTool>();
   private readonly toolOwners = new Map<string, ToolRegistrationOwner>();
   /** 第 16 讲:全局挂载的安全拦截中间件链 */
@@ -615,9 +623,14 @@ export class ToolRegistry implements Registry {
           context?.signal?.throwIfAborted();
           if (this.tools.get(currentCall.name) !== tool)
             throw new ToolCommitBoundaryError("T1", new Error("Tool binding changed after T1"));
+          try {
+            await this.nativeLearningObserver?.beforeDispatch(currentCall, executionContext);
+          } catch {
+            /* optional evidence collection must not block the user task */
+          }
           // The collector is created here, after physical admission. Middleware, callers,
           // arbitrary tools and same-name plugin bindings cannot supply native process facts.
-          const nativeContext: NativeProcessExecutionContext =
+          const nativeContext: NativeProcessExecutionContext & NativeFileLearningContext =
             tool instanceof BashTool
               ? {
                   ...executionContext,
@@ -629,7 +642,16 @@ export class ToolRegistry implements Registry {
                         : undefined;
                   },
                 }
-              : executionContext;
+              : tool instanceof WriteFileTool ||
+                  tool instanceof EditFileTool ||
+                  (tool instanceof FileWorkerTool && tool.nativeFileWriter)
+                ? {
+                    ...executionContext,
+                    reportFileCommit: (fact) =>
+                      this.nativeLearningObserver?.fileCommitted(currentCall, fact) ??
+                      Promise.resolve(),
+                  }
+                : executionContext;
           return tool.execute(currentCall.arguments, nativeContext);
         })().catch((error: unknown) => {
           if (

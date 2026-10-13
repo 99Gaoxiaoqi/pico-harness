@@ -43,6 +43,7 @@ import type { RuntimeWorkspaceInitResult } from "./workspace.js";
 import { parseApprovalRequestedPayload } from "../runtime-normalize.js";
 
 export type RuntimeNotificationMap = {
+  readonly "memory.learning.changed": { readonly workspaceKey: string; readonly revision: number };
   readonly "workspace.registered": { readonly registered: true };
   readonly "workspace.unregistered": { readonly registered: false };
   readonly "workspace.trustChanged": { readonly trusted: boolean };
@@ -161,6 +162,7 @@ export const RUNTIME_NOTIFICATION_TOPICS = [
   "changes.applied",
   "rewind.completed",
   "memory.changed",
+  "memory.learning.changed",
   "memory.deleted",
   "job.updated",
   "job.runFinished",
@@ -272,6 +274,7 @@ const RUNTIME_NOTIFICATION_SCOPE_IDS = {
   "changes.applied": { required: ["sessionId", "runId"], optional: [] },
   "rewind.completed": { required: ["sessionId"], optional: [] },
   "memory.changed": { required: [], optional: [] },
+  "memory.learning.changed": { required: [], optional: [] },
   "memory.deleted": { required: [], optional: [] },
   "job.updated": { required: ["jobId"], optional: [] },
   "job.runFinished": { required: ["jobId", "runId"], optional: ["sessionId"] },
@@ -384,6 +387,12 @@ export function isRuntimeNotification(value: unknown): value is RuntimeNotificat
     case "memory.changed":
     case "memory.deleted":
       return isMemoryPayload(value.topic, payload);
+    case "memory.learning.changed":
+      return (
+        isExactObject(payload, ["workspaceKey", "revision"]) &&
+        nonEmptyString(payload.workspaceKey) &&
+        nonNegativeSafeInteger(payload.revision)
+      );
     case "job.updated":
       return isJobUpdatedPayload(payload, scope);
     case "job.runFinished":
@@ -444,8 +453,9 @@ export function isDiscoveryRuntimeNotification(
 /** Memory events are durable, so their payload is deliberately exact and body-free. */
 export function isMemoryRuntimeNotification(
   value: unknown,
-): value is RuntimeNotification<"memory.changed" | "memory.deleted"> {
+): value is RuntimeNotification<"memory.changed" | "memory.deleted" | "memory.learning.changed"> {
   if (!isJsonObject(value) || !isRuntimeNotificationEnvelope(value)) return false;
+  if (value.topic === "memory.learning.changed") return isRuntimeNotification(value);
   if (value.topic !== "memory.changed" && value.topic !== "memory.deleted") return false;
   return isMemoryPayload(value.topic, value.payload);
 }

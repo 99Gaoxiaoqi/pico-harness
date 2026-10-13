@@ -2,6 +2,10 @@ import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { sanitizeMemoryContent } from "@pico/runtime/atomic-memory/content-safety";
 import { AtomicMemoryContextBuilder } from "@pico/runtime/atomic-memory/context-builder";
+import {
+  createExecutionLearningIO,
+  executionLearningRecallTargets,
+} from "./execution-learning-recall.js";
 import type { MemoryItemRecord, MemoryItemWrite } from "@pico/core/atomic-memory-contracts";
 import {
   MemoryItemStoreConflictError,
@@ -9,6 +13,8 @@ import {
   validateMemoryTemporalBounds,
 } from "@pico/core/atomic-memory-contracts";
 import type { AtomicMemorySettings } from "@pico/core/atomic-memory-runtime-contracts";
+import { executionLearningPathAuthorizer } from "./execution-learning-host.js";
+import { taskExperienceRecallTargets } from "./task-experience-recall.js";
 import { resolvePicoPaths } from "./pico-paths.js";
 import {
   MemoryItemListCursorError,
@@ -27,7 +33,7 @@ import { RUNTIME_ERROR_CODES, RuntimeProtocolError } from "@pico/protocol";
 export interface DesktopAtomicMemoryServiceOptions {
   readonly picoHome: string;
   readonly now?: () => number;
-  readonly publish: <Topic extends "memory.changed" | "memory.deleted">(
+  readonly publish: <Topic extends "memory.changed" | "memory.deleted" | "memory.learning.changed">(
     workspacePath: string,
     topic: Topic,
     payload: RuntimeNotificationMap[Topic],
@@ -38,6 +44,190 @@ export interface DesktopAtomicMemoryServiceOptions {
 export class DesktopAtomicMemoryService {
   private closed = false;
   constructor(private readonly options: DesktopAtomicMemoryServiceOptions) {}
+  async queryExperienceUses(workspacePath: string, params: RuntimeParams<"memory.experience.query">): Promise<RuntimeResult<"memory.experience.query">> {
+    return this.withStore(workspacePath, async (store, workspaceKey) => ({
+      experienceVersion: 1 as const,
+      diagnostics: await store.experienceLedger.listExperienceDiagnostics(workspaceKey, params.sessionId),
+      ...await store.experienceLedger.queryExperienceUses(workspaceKey, {
+        ...(params.sessionId ? { sessionId: params.sessionId } : {}),
+        ...(params.itemId ? { itemId: params.itemId } : {}),
+        ...(params.cursor ? { cursor: params.cursor } : {}),
+        limit: params.limit ?? 50,
+      }),
+    }));
+  }
+  async detailExperienceUse(workspacePath: string, useId: string): Promise<RuntimeResult<"memory.experience.detail">> {
+    return this.withStore(workspacePath, async (store, workspaceKey) => {
+      const use = await store.experienceLedger.readExperienceUse(useId);
+      if (!use || use.workspaceKey !== workspaceKey) throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.NOT_FOUND, "当前工作区没有该经验引用");
+      return { experienceVersion: 1, use, effects: await store.experienceLedger.listExperienceEffects(useId) };
+    });
+  }
+  async feedbackExperienceUse(workspacePath: string, params: RuntimeParams<"memory.experience.feedback">): Promise<RuntimeResult<"memory.experience.feedback">> {
+    return this.withStore(workspacePath, async (store, workspaceKey) => {
+      const use = await store.experienceLedger.feedbackExperienceUse({workspaceKey, useId: params.useId, expectedItemVersion: params.expectedItemVersion, operationId: params.operationId, action: params.action, now: this.now()});
+      if (params.action === "disable") {
+        const currentItem = await store.readItem(use.itemId);
+        if (currentItem) this.changed(workspacePath, currentItem);
+      }
+      this.learningChanged(workspacePath, workspaceKey, store);
+      return { experienceVersion: 1, use };
+    });
+  }
+  async queryExperiences(
+    workspacePath: string,
+    params: RuntimeParams<"memory.learning.query">,
+  ): Promise<RuntimeResult<"memory.learning.query">> {
+    return this.withStore(workspacePath, async (store, workspaceKey) => {
+      const reuse = (
+        await store.taskExperiences.listTaskExperienceReuse(workspaceKey, params.sessionId)
+      ).slice(0, 100);
+      const items = new Map(
+        (
+          await store.taskExperiences.queryTaskExperiences(workspaceKey, {
+            ...(params.sessionId ? { sessionId: params.sessionId } : {}),
+            ...(params.review ? { review: params.review } : {}),
+            limit: Math.min(params.limit ?? 100, 100),
+          })
+        ).map((item) => [item.candidateId, item]),
+      );
+      if (params.sessionId && !params.review)
+        for (const receipt of reuse) {
+          if (items.has(receipt.candidateId)) continue;
+          const candidate = await store.taskExperiences.readTaskExperienceCandidate(
+            receipt.candidateId,
+          );
+          if (candidate?.workspaceKey === workspaceKey && candidate.state !== "discarded")
+            items.set(candidate.candidateId, candidate);
+        }
+      return {
+        learningVersion: 2,
+        workspaceKey,
+        revision: store.executionLearning.readRevision(),
+        items: [...items.values()],
+        reuse,
+      };
+    });
+  }
+  async detailExperience(
+    workspacePath: string,
+    candidateId: string,
+  ): Promise<RuntimeResult<"memory.learning.detail">> {
+    return this.withStore(workspacePath, async (store, workspaceKey) => {
+      const candidate = await store.taskExperiences.readTaskExperienceCandidate(candidateId);
+      if (!candidate || candidate.workspaceKey !== workspaceKey)
+        throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.NOT_FOUND, "当前工作区没有该经验");
+      const observations = await store.taskExperiences.listTaskExperienceObservations(
+        candidate.taskId,
+      );
+      const reuse = (await store.taskExperiences.listTaskExperienceReuse(workspaceKey))
+        .filter((r) => r.candidateId === candidateId)
+        .slice(0, 100);
+      return {
+        learningVersion: 2,
+        candidate,
+        observations: observations.filter((o) =>
+          candidate.observationIds.includes(o.observationId),
+        ),
+        reuse,
+      };
+    });
+  }
+  async reviewExperience(
+    workspacePath: string,
+    params: RuntimeParams<"memory.learning.review">,
+  ): Promise<RuntimeResult<"memory.learning.review">> {
+    if (
+      params.action !== "edit_accept" &&
+      (params.content !== undefined || params.applicability !== undefined)
+    )
+      throw invalid("只有更正并确认可以修改建议内容");
+    if (params.action === "edit_accept" && params.content === undefined)
+      throw invalid("更正需要建议内容");
+    return this.withStore(workspacePath, async (store, workspaceKey) => {
+      const candidate = await store.taskExperiences.reviewTaskExperience({
+        workspaceKey,
+        candidateId: params.candidateId,
+        expectedRecordRevision: params.expectedRecordRevision,
+        expectedContentVersion: params.expectedContentVersion,
+        operationId: params.operationId,
+        action: params.action,
+        ...(params.content !== undefined ? { content: safeContent(params.content) } : {}),
+        ...(params.applicability ? { applicability: params.applicability } : {}),
+        now: this.now(),
+      });
+      this.learningChanged(workspacePath, workspaceKey, store);
+      return { learningVersion: 2, candidate };
+    });
+  }
+  async feedbackExperience(
+    workspacePath: string,
+    params: RuntimeParams<"memory.learning.feedback">,
+  ): Promise<RuntimeResult<"memory.learning.feedback">> {
+    return this.withStore(workspacePath, async (store, workspaceKey) => {
+      const candidate = await store.taskExperiences.feedbackTaskExperience({
+        workspaceKey,
+        candidateId: params.candidateId,
+        expectedContentVersion: params.expectedContentVersion,
+        operationId: params.operationId,
+        taskId: params.taskId,
+        taskVersion: params.taskVersion,
+        action: params.action,
+        now: this.now(),
+      });
+      this.learningChanged(workspacePath, workspaceKey, store);
+      return { learningVersion: 2, candidate };
+    });
+  }
+  private learningChanged(
+    workspacePath: string,
+    workspaceKey: string,
+    store: SqliteMemoryItemStore,
+  ): void {
+    this.publish(() =>
+      this.options.publish(workspacePath, "memory.learning.changed", {
+        workspaceKey,
+        revision: store.executionLearning.readRevision(),
+      }),
+    );
+  }
+  async listLearning(
+    workspacePath: string,
+    sessionId?: string,
+  ): Promise<RuntimeResult<"memory.learning.list">> {
+    return this.withStore(workspacePath, async (store, workspaceKey) => ({
+      workspaceKey,
+      revision: store.executionLearning.readRevision(),
+      items: await store.executionLearning.listExecutionLearning(workspaceKey, sessionId),
+    }));
+  }
+  async inspectLearning(
+    workspacePath: string,
+    candidateId: string,
+  ): Promise<RuntimeResult<"memory.learning.inspect">> {
+    return this.withStore(workspacePath, async (store, workspaceKey) => {
+      const candidate = await store.executionLearning.readExecutionLearningCandidate(candidateId);
+      if (!candidate || candidate.claim.admission.workspaceKey !== workspaceKey)
+        throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.NOT_FOUND, "当前工作区没有该学习候选");
+      const legacy = JSON.parse(JSON.stringify(candidate));
+      delete legacy.claim.admission.modelRoute;
+      return { candidate: legacy as import("@pico/protocol").JsonObject };
+    });
+  }
+  async discardLearning(
+    workspacePath: string,
+    candidateId: string,
+    revision: number,
+  ): Promise<RuntimeResult<"memory.learning.discard">> {
+    return this.withStore(workspacePath, async (store, workspaceKey) => {
+      await store.executionLearning.discardExecutionLearning(candidateId, workspaceKey, revision);
+      this.options.publish(workspacePath, "memory.learning.changed", {
+        workspaceKey,
+        revision: store.executionLearning.readRevision(),
+      });
+      return { discarded: true };
+    });
+  }
 
   async list(
     workspacePath: string,
@@ -47,6 +237,7 @@ export class DesktopAtomicMemoryService {
       if (params.paged) {
         const page = await store.listItemsPage({
           workspaceKey,
+          ...(params.learningVersion === 2 ? { learningVersion: 2 as const } : {}),
           ...(params.lifecycleStates ? { lifecycleStates: params.lifecycleStates } : {}),
           ...(params.kinds ? { kinds: params.kinds } : {}),
           ...(params.cursor ? { cursor: params.cursor } : {}),
@@ -61,6 +252,19 @@ export class DesktopAtomicMemoryService {
           const candidate: RuntimeMemoryListItem = {
             ...record.item,
             sourceCount: record.sourceCount,
+            ...(record.sourceType ? { sourceType: record.sourceType } : {}),
+            ...(params.learningVersion === 2 && record.taskExperience
+              ? {
+                  taskExperience: JSON.parse(
+                    JSON.stringify(record.taskExperience),
+                  ) as import("@pico/core").TaskExperienceSummary &
+                    import("@pico/protocol").JsonObject,
+                }
+              : {}),
+            ...(record.taskAcceptance ? { taskAcceptance: { ...record.taskAcceptance } } : {}),
+            ...(record.executionEvidence
+              ? { executionEvidence: { ...record.executionEvidence } }
+              : {}),
             ...(record.firstSource ? { firstSource: { ...record.firstSource } } : {}),
           };
           const pageInfo = {
@@ -78,10 +282,20 @@ export class DesktopAtomicMemoryService {
           itemsBytes += candidateBytes;
         }
         const { nextCursor: _originalCursor, ...pageInfo } = page.pageInfo;
-        return { items, pageInfo: { ...pageInfo, ...(nextCursor ? { nextCursor } : {}) } };
+        return {
+          ...(params.learningVersion === 2 ? { learningVersion: 2 as const } : {}),
+          items,
+          pageInfo: { ...pageInfo, ...(nextCursor ? { nextCursor } : {}) },
+        };
       }
-      const records = await store.listItems({ workspaceKey, includeArchived: true, limit: 1000 });
+      const records = await store.listItems({
+        workspaceKey,
+        includeArchived: true,
+        limit: 1000,
+        ...(params.learningVersion === 2 ? { learningVersion: 2 as const } : {}),
+      });
       return {
+        ...(params.learningVersion === 2 ? { learningVersion: 2 as const } : {}),
         items: records
           .map(projectItem)
           .filter(
@@ -94,10 +308,20 @@ export class DesktopAtomicMemoryService {
     });
   }
 
-  async get(workspacePath: string, itemId: string): Promise<RuntimeResult<"memory.get">> {
-    return this.withStore(workspacePath, async (store, key) => ({
-      item: projectItem(await authorizedItem(store, key, itemId)),
-    }));
+  async get(
+    workspacePath: string,
+    itemId: string,
+    learningVersion?: 2,
+  ): Promise<RuntimeResult<"memory.get">> {
+    return this.withStore(workspacePath, async (store, key) => {
+      const record = await authorizedItem(store, key, itemId);
+      if (record.sourceType === "reviewed-reference" && learningVersion !== 2)
+        throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.NOT_FOUND, "当前视图没有该记忆");
+      return {
+        ...(learningVersion === 2 ? { learningVersion: 2 as const } : {}),
+        item: projectItem(record),
+      };
+    });
   }
 
   async create(workspacePath: string, text: string): Promise<RuntimeResult<"memory.create">> {
@@ -157,6 +381,8 @@ export class DesktopAtomicMemoryService {
   ): Promise<RuntimeResult<"memory.update">> {
     return this.withStore(workspacePath, async (store, key) => {
       const current = await authorizedItem(store, key, params.itemId);
+      if (current.sourceType === "reviewed-reference")
+        throw invalid("请通过经验审核入口更正或归档这条经验");
       const editing = [
         params.content,
         params.kind,
@@ -233,6 +459,7 @@ export class DesktopAtomicMemoryService {
   ): Promise<RuntimeResult<"memory.delete">> {
     return this.withStore(workspacePath, async (store, key) => {
       const record = await authorizedItem(store, key, params.itemId);
+      if (record.sourceType === "reviewed-reference") throw invalid("审核经验请在经验管理中删除");
       await store.deleteItem({
         itemId: params.itemId,
         expectedVersion: params.expectedVersion,
@@ -287,14 +514,46 @@ export class DesktopAtomicMemoryService {
       const maxItems = Math.min(params.maxItems ?? 3, 3);
       const maxTokens = Math.min(params.maxTokens ?? 320, 320);
       const result = await new AtomicMemoryContextBuilder(store, key).build(params.query, {
+        ...(params.learningVersion === 2
+          ? {
+              reviewedExperiences: await taskExperienceRecallTargets({
+                store: store.taskExperiences,
+                workspaceKey: key,
+                workDir: workspacePath,
+                ...(params.query ? { query: params.query } : {}),
+                // The management preview has no foreground Registry. Tool-dependent
+                // methods need that task's authorization and are omitted here.
+                toolAllowed: () => false,
+              }),
+            }
+          : {}),
+        executionTargets: await executionLearningRecallTargets(
+          store,
+          key,
+          createExecutionLearningIO(
+            workspacePath,
+            undefined,
+            params.sessionId
+              ? executionLearningPathAuthorizer(
+                  workspacePath,
+                  this.options.picoHome,
+                  params.sessionId,
+                )
+              : async () => {
+                  throw new Error("current_session_permission_required");
+                },
+          ),
+          params.query,
+        ),
         maxItems,
         maxTokens,
       });
       const items = result.items.map(projectItem);
       return {
+        ...(params.learningVersion === 2 ? { learningVersion: 2 as const } : {}),
         items,
         block: result.block,
-        references: result.references.map((reference) => ({
+        references: result.references.map(({ applicability: _applicability, ...reference }) => ({
           ...reference,
           range: { ...reference.range },
         })),
@@ -353,7 +612,12 @@ export class DesktopAtomicMemoryService {
             : RUNTIME_ERROR_CODES.CONFLICT,
           "记忆不存在或版本已改变，请刷新后重试",
         );
-      throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INTERNAL_ERROR, "记忆服务暂时不可用");
+      const failure = new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.INTERNAL_ERROR,
+        "记忆服务暂时不可用",
+      );
+      Object.defineProperty(failure, "cause", { value: error });
+      throw failure;
     }
   }
 
@@ -392,7 +656,14 @@ async function authorizedItem(
   return record;
 }
 
-function projectItem({ item, sources }: MemoryItemRecord): RuntimeMemoryItem {
+function projectItem({
+  item,
+  sources,
+  executionEvidence,
+  sourceType,
+  taskAcceptance,
+  taskExperience,
+}: MemoryItemRecord): RuntimeMemoryItem {
   return {
     itemId: item.itemId,
     version: item.version,
@@ -410,6 +681,16 @@ function projectItem({ item, sources }: MemoryItemRecord): RuntimeMemoryItem {
     contentHash: item.contentHash,
     createdAt: item.createdAt,
     updatedAt: item.updatedAt,
+    ...(executionEvidence ? { executionEvidence: { ...executionEvidence } } : {}),
+    ...(sourceType ? { sourceType } : {}),
+    ...(taskExperience
+      ? {
+          taskExperience: JSON.parse(
+            JSON.stringify(taskExperience),
+          ) as import("@pico/core").TaskExperienceSummary & import("@pico/protocol").JsonObject,
+        }
+      : {}),
+    ...(taskAcceptance ? { taskAcceptance: { ...taskAcceptance } } : {}),
     sources: sources.map((source) => ({
       sessionId: source.sessionId,
       runId: source.runId,

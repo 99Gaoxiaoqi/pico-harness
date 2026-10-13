@@ -7,6 +7,14 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
+    "./execution-learning-worker": {
+      "types": "./dist/execution-learning-worker.d.ts",
+      "import": "./dist/execution-learning-worker.js"
+    },
+    "./execution-learning-evidence": {
+      "types": "./dist/execution-learning-evidence.d.ts",
+      "import": "./dist/execution-learning-evidence.js"
+    },
     "./daemon-main": {
       "types": "./dist/daemon-main.d.ts",
       "import": "./dist/daemon-main.js"
@@ -849,21 +857,26 @@
   ],
   "dependencies": {
     "@ai-sdk/anthropic": "4.0.39",
+    "@ai-sdk/code-mode": "1.0.42",
+    "@ai-sdk/open-responses": "2.0.28",
     "@ai-sdk/openai": "4.0.42",
     "@ai-sdk/openai-compatible": "3.0.30",
-    "@ai-sdk/open-responses": "2.0.28",
-    "pathe": "^2.0.3",
-    "@ai-sdk/code-mode": "1.0.42",
-    "ai": "7.0.85",
-    "pino": "^10.1.0",
-    "pino-pretty": "^13.1.3",
+    "@napi-rs/canvas": "1.0.11",
     "@pico/core": "*",
     "@pico/protocol": "*",
     "@pico/runtime": "*",
     "@pico/runtime-host": "*",
     "@pico/storage": "*",
+    "ai": "7.0.85",
     "ajv": "8.20.0",
-    "js-yaml": "5.4.1"
+    "exceljs": "4.4.0",
+    "js-yaml": "5.4.1",
+    "mammoth": "1.13.0",
+    "pathe": "^2.0.3",
+    "pdfjs-dist": "6.4.299",
+    "pino": "^10.1.0",
+    "pino-pretty": "^13.1.3",
+    "yauzl": "3.4.0"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

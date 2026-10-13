@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { build } from "esbuild";
 
-test("Astryx 桌面外壳保留侧栏尺寸、任务菜单和搜索键盘焦点", { timeout: 45_000 }, async (t) => {
+test("Astryx 侧栏项目操作与键盘导航", { timeout: 45_000 }, async (t) => {
   const candidates = [
     process.env.PICO_TEST_CHROME,
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
@@ -136,11 +136,14 @@ import "./apps/desktop/src/renderer/shell-astryx.css";
 Object.assign(globalThis, {React, IS_REACT_ACT_ENVIRONMENT: true});
 const mainPath = "/workspace/maka-harness";
 const linkedPath = "/workspace/maka-harness-feature";
+const emptyWorktreePath = "/workspace/maka-harness-empty";
+const clonePath = "/workspace/independent-clone";
 const scenarioData = {
   ...previewData,
   workspaces: [
     {...previewData.workspaces[0], path: mainPath, name: "maka-harness", projectId: "shared-project", projectName: "maka-harness"},
     {...previewData.workspaces[0], path: linkedPath, name: "maka-harness-feature", projectId: "shared-project", projectName: "maka-harness"},
+    {...previewData.workspaces[0], path: emptyWorktreePath, name: "maka-harness-empty", projectId: "shared-project", projectName: "maka-harness"},
   ],
   sessions: previewData.sessions.map((session, index) => ({
     ...session,
@@ -153,17 +156,41 @@ const scenarioData = {
 const target = document.getElementById("app");
 target.style.height = "100%";
 const writes = [];
+let confirmResult = true;
+let failArchive = false;
+let failUnregister = false;
+window.confirm = () => confirmResult;
 const runtime = {
   data: scenarioData, preview: false, busy: false, message: "",
   actions: {
     setSessionPinned: async (...args) => writes.push(["pin", ...args]),
-    setSessionArchived: async (...args) => writes.push(["archive", ...args]),
+    setSessionArchived: async (ref, archived) => {
+      writes.push(["archive", ref, archived]);
+      if (failArchive) return false;
+      runtime.data = {...runtime.data, sessions: runtime.data.sessions.map(session =>
+        session.workspacePath === ref.workspacePath && session.id === ref.sessionId
+          ? {...session, status: archived ? "archived" : "active"} : session)};
+      render();
+      return true;
+    },
+    unregisterWorkspace: async (workspacePath) => {
+      writes.push(["unregister", workspacePath]);
+      if (failUnregister) return false;
+      runtime.data = {
+        ...runtime.data,
+        workspaces: runtime.data.workspaces.filter(workspace => workspace.path !== workspacePath),
+        sessions: runtime.data.sessions.filter(session => session.workspacePath !== workspacePath),
+        runs: runtime.data.runs.filter(run => run.workspacePath !== workspacePath),
+      };
+      render();
+      return true;
+    },
     deleteSession: async (...args) => writes.push(["delete", ...args]),
   }
 };
 function Page() {
   const location = useLocation();
-  return <div data-page>{location.pathname}</div>;
+  return <div data-page data-workspace={new URLSearchParams(location.search).get("workspace") || ""}>{location.pathname}</div>;
 }
 const root = createRoot(target);
 const check = (value, message) => { if (!value) throw new Error(message); };
@@ -177,8 +204,18 @@ const key = async (element, key, options = {}) => {
   await act(async () => element.dispatchEvent(new KeyboardEvent("keydown", {key, bubbles: true, cancelable: true, ...options})));
 };
 const frame = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+const render = () => root.render(<PicoTheme><RuntimeContext value={runtime}><MemoryRouter initialEntries={["/task/new"]}><Routes><Route element={<AppShell/>}><Route path="*" element={<Page/>}/></Route></Routes></MemoryRouter></RuntimeContext></PicoTheme>);
+const projectMenu = () => document.querySelector('[role="menu"][aria-label="项目操作 maka-harness"]');
+const projectItem = (name) => [...projectMenu().querySelectorAll('[role="menuitem"]')].find(item => item.textContent.includes(name));
+const clickProjectItem = async (name) => {
+  await click("项目操作 maka-harness");
+  await frame();
+  check(projectItem(name), "Missing project action " + name);
+  await act(async () => projectItem(name).click());
+  await frame();
+};
 async function scenario() {
-  await act(async () => root.render(<PicoTheme><RuntimeContext value={runtime}><MemoryRouter initialEntries={["/task/new"]}><Routes><Route element={<AppShell/>}><Route path="*" element={<Page/>}/></Route></Routes></MemoryRouter></RuntimeContext></PicoTheme>));
+  await act(async () => render());
   await frame();
   const sidebar = () => document.querySelector(".sidebar").getBoundingClientRect();
   check(Math.abs(sidebar().width - 226) < 1, "Expanded sidebar width: " + sidebar().width);
@@ -195,6 +232,25 @@ async function scenario() {
   await click("按项目分组");
   check(document.querySelectorAll(".sidebar-project__header").length === 1, "Linked worktrees share one project group");
   check(document.querySelectorAll(".sidebar-project__sessions .sidebar-task-link").length === 2, "Both worktree sessions remain visible in the shared group");
+  await click("项目操作 maka-harness");
+  await frame();
+  check(projectMenu().querySelectorAll('[role="menuitem"]').length === 2 && !projectItem("创建任务"), "Project menu contains only archive and removal");
+  const menuButtonRect = button("项目操作 maka-harness").getBoundingClientRect();
+  const newTaskButtonRect = button("新建任务 maka-harness").getBoundingClientRect();
+  check(menuButtonRect.right <= newTaskButtonRect.left && newTaskButtonRect.right <= sidebar().right, "Direct new-task button sits to the right of the project menu without overlap");
+  check(projectItem("归档聊天").getAttribute("aria-disabled") === "true", "Running project cannot archive chats");
+  check(projectItem("移除项目").getAttribute("aria-disabled") === "true", "Running project cannot be removed");
+  check(button("maka-harness").getAttribute("aria-expanded") === "true", "Opening project menu does not collapse chats");
+  await key(document.activeElement, "Escape");
+  check(document.activeElement === button("项目操作 maka-harness"), "Project menu Escape restores trigger focus");
+  const contextEvent = new MouseEvent("contextmenu", {bubbles: true, cancelable: true});
+  await act(async () => button("maka-harness").dispatchEvent(contextEvent));
+  await frame();
+  check(contextEvent.defaultPrevented && projectMenu(), "Right-click opens the project menu");
+  await key(document.activeElement, "Escape");
+  await click("新建任务 maka-harness");
+  check(document.querySelector('[data-page]').dataset.workspace === mainPath, "Project task uses the primary folder");
+  check(button("项目操作 maka-harness").getAttribute("aria-expanded") === "false" && button("maka-harness").getAttribute("aria-expanded") === "true", "Direct task creation does not open the menu or collapse the project");
   await click("按时间分组");
   const running = scenarioData.sessions[0];
   const idle = scenarioData.sessions[1];
@@ -234,6 +290,68 @@ async function scenario() {
   check(document.querySelector('[data-page]').textContent === "/session/" + running.id, "Enter opens the first task");
   await key(window, "n", {ctrlKey: true});
   check(document.querySelector('[data-page]').textContent === "/task/new", "New-task shortcut still works");
+  runtime.data = {
+    ...runtime.data,
+    runs: runtime.data.runs.map(run => ({...run, status: "completed"})),
+    workspaces: [...runtime.data.workspaces, {...previewData.workspaces[0], path: clonePath, name: "independent-clone", projectId: "clone-project", projectName: "independent-clone"}],
+    sessions: [...runtime.data.sessions, {...running, workspacePath: clonePath, projectId: "clone-project", projectName: "independent-clone"}],
+  };
+  await act(async () => render());
+  await click("按项目分组");
+  writes.length = 0;
+  confirmResult = false;
+  await clickProjectItem("归档聊天");
+  check(writes.length === 0, "Cancelling project archive makes no changes");
+  confirmResult = true;
+  failArchive = true;
+  await clickProjectItem("归档聊天");
+  check(writes.length === 1 && runtime.data.sessions.filter(session => session.status === "active").length === 3, "Failed archive stops the batch and keeps chats available");
+  failArchive = false;
+  writes.length = 0;
+  const activeLink = [...document.querySelectorAll('.sidebar-task-link')].find(link => link.getAttribute("href").includes(encodeURIComponent(mainPath)));
+  await act(async () => activeLink.click());
+  await clickProjectItem("归档聊天");
+  check(JSON.stringify(writes) === JSON.stringify([
+    ["archive", {workspacePath: mainPath, sessionId: running.id}, true],
+    ["archive", {workspacePath: linkedPath, sessionId: idle.id}, true],
+  ]), "Project archive includes linked worktrees and skips archived or independent-clone chats");
+  check(runtime.data.sessions.find(session => session.workspacePath === clonePath).status === "active", "Same session ID in another project stays active");
+  check(document.querySelector('[data-page]').textContent === "/task/new" && document.querySelector('[data-page]').dataset.workspace === mainPath, "Archiving current chat opens a new task in its workspace");
+  check(button("maka-harness").querySelector("small").textContent === "0", "Empty project remains available after archiving");
+  await click("项目操作 maka-harness");
+  await frame();
+  check(projectItem("归档聊天").getAttribute("aria-disabled") === "true", "Empty project cannot archive again");
+  await key(document.activeElement, "Escape");
+  await click("新建任务 maka-harness");
+  check(document.querySelector('[data-page]').dataset.workspace === mainPath, "Empty project still creates tasks in the primary folder");
+  writes.length = 0;
+  confirmResult = false;
+  await clickProjectItem("移除项目");
+  check(writes.length === 0, "Cancelling project removal makes no changes");
+  confirmResult = true;
+  failUnregister = true;
+  await clickProjectItem("移除项目");
+  check(writes.length === 1 && runtime.data.workspaces.length === 4, "Failed removal stops before unregistering other worktrees");
+  failUnregister = false;
+  writes.length = 0;
+  await clickProjectItem("移除项目");
+  check(JSON.stringify(writes) === JSON.stringify([["unregister", mainPath], ["unregister", linkedPath], ["unregister", emptyWorktreePath]]), "Removal unregisters every project folder, including an empty worktree");
+  check(runtime.data.workspaces.length === 1 && runtime.data.workspaces[0].path === clonePath, "Removing a project preserves other projects");
+  check(!document.querySelector('[aria-label="项目操作 maka-harness"]') && document.querySelector('[data-page]').dataset.workspace === "", "Removed project disappears and selected workspace is cleared");
+  check(!writes.some(write => write[0] === "delete"), "Project actions never delete chats");
+  runtime.data = {
+    ...runtime.data,
+    workspaces: [...runtime.data.workspaces, {...previewData.workspaces[0], path: "/workspace/scratch", temporary: true, projectId: null, projectName: null}],
+    sessions: [...runtime.data.sessions, {...idle, workspacePath: "/workspace/scratch", projectId: null, projectName: null}],
+  };
+  await act(async () => render());
+  await click("项目操作 未归属项目");
+  await frame();
+  const scratchMenu = document.querySelector('[role="menu"][aria-label="项目操作 未归属项目"]');
+  check(![...scratchMenu.querySelectorAll('[role="menuitem"]')].some(item => item.textContent.includes("移除项目")), "Managed scratch space cannot be removed");
+  await key(document.activeElement, "Escape");
+  await click("新建任务 未归属项目");
+  check(document.querySelector('[data-page]').dataset.workspace === "", "Unassigned task creates a fresh scratch workspace");
   await act(async () => document.querySelector('a[aria-label="设置"]').click());
   check(document.querySelector(".settings-sidebar"), "Settings replaces task sidebar");
   check(Math.abs(sidebar().width - 226) < 1, "Settings sidebar geometry stays unchanged");

@@ -1,3 +1,4 @@
+import { experienceFeedbackParamValidators, experienceFeedbackResultValidators } from "./runtime/experience-feedback.js";
 // Public runtime barrel: domain contracts and validators are owned by runtime/*.ts.
 export * from "./runtime/subagents.js";
 export * from "./runtime/config-patch.js";
@@ -31,6 +32,7 @@ const RUNTIME_RESULT_VALIDATORS = {
   ...configResultValidators,
   ...subagentsResultValidators,
   ...memoryResultValidators,
+  ...experienceFeedbackResultValidators,
   ...planningResultValidators,
   ...capabilitiesResultValidators,
   ...workspaceResultValidators,
@@ -45,6 +47,7 @@ const STRICT_RUNTIME_PARAM_VALIDATORS = {
   ...configParamValidators,
   ...subagentsParamValidators,
   ...memoryParamValidators,
+  ...experienceFeedbackParamValidators,
   ...planningParamValidators,
   ...capabilitiesParamValidators,
   ...workspaceParamValidators,
@@ -159,6 +162,8 @@ export type {
 export type {
   RuntimeSessionSettings,
   RuntimeInputAttachment,
+  RuntimeInlineImageAttachment,
+  RuntimeArtifactInputAttachment,
   RuntimeSkillReference,
   RuntimeTextUserInput,
   RuntimeSkillUserInput,

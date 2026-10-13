@@ -18,6 +18,8 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
+import { ExecutionLearningSqliteStore } from "./execution-learning-store.js";
+import { SqliteExperienceLedgerStore, scrubExperienceLedger } from "./experience-feedback-store.js";
 import {
   closeSync,
   mkdirSync,
@@ -64,6 +66,9 @@ import {
   type MemoryItemRecord,
   type MemoryItemSource,
   type MemoryItemWrite,
+  type ExecutionLessonCandidate,
+  type CreateExecutionLessonCandidateRequest,
+  type VerifyExecutionLessonRequest,
   type MemoryMutationResult,
   type MemoryWriteOperationResult,
   type PendingMemoryExtractionFailure,
@@ -90,6 +95,26 @@ const MAX_OPERATION_RESULT_JSON_CODE_UNITS = 128 * 1_024;
 
 const require = createRequire(import.meta.url);
 
+function clearExecutionLesson(
+  candidate: ExecutionLessonCandidate,
+  state: "rejected" | "deleted" | "invalidated",
+  now: number,
+): ExecutionLessonCandidate {
+  return {
+    ...candidate,
+    state,
+    version: candidate.version + 1,
+    content: "",
+    taskFamily: "",
+    failure: null,
+    verifications: [],
+    confirmedAt: null,
+    itemId: null,
+    itemContentHash: null,
+    updatedAt: now,
+  };
+}
+
 export type SqliteMemoryItemStoreFailpoint =
   | "after_item_write"
   | "after_keys_write"
@@ -109,7 +134,11 @@ export class MemoryItemListCursorError extends Error {}
 export interface MemoryItemListPage {
   readonly items: readonly {
     readonly item: MemoryItem;
+    readonly executionEvidence?: MemoryItemRecord["executionEvidence"];
     readonly sourceCount: number;
+    readonly sourceType?: MemoryItemRecord["sourceType"];
+    readonly taskAcceptance?: MemoryItemRecord["taskAcceptance"];
+    readonly taskExperience?: MemoryItemRecord["taskExperience"];
     readonly firstSource?: MemoryItemSource;
   }[];
   readonly pageInfo: {
@@ -231,6 +260,11 @@ interface SqliteMemoryKeySearchQuery {
 
 /** Atomic memory database. The composition root owns its private directory and lifetime. */
 export class SqliteMemoryItemStore implements AtomicMemoryStore {
+  readonly executionLearning: ExecutionLearningSqliteStore;
+  readonly experienceLedger: SqliteExperienceLedgerStore;
+  get taskExperiences(): ExecutionLearningSqliteStore {
+    return this.executionLearning;
+  }
   readonly #database: DatabaseSync;
   readonly #options: SqliteMemoryItemStoreOptions;
   #closed = false;
@@ -245,6 +279,78 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
       assertSupportedSqliteLongTermMemorySchemaVersion(this.#database);
       configureSqliteLongTermMemoryDatabase(this.#database);
       initializeSqliteLongTermMemoryDatabase(this.#database);
+      this.experienceLedger = new SqliteExperienceLedgerStore(this.#database, {
+        settings: (workspaceKey) => this.#readSettings(workspaceKey),
+        deletionRevision: () => this.#deletionRevision(),
+        itemAcceptance: (itemId, contentHash) =>
+          this.executionLearning.readItemAcceptance(itemId, contentHash),
+        cursorError: (message) => new MemoryItemListCursorError(message),
+      });
+      this.executionLearning = new ExecutionLearningSqliteStore(this.#database, {
+        experienceLedger: this.experienceLedger,
+        settings: (workspaceKey) => this.#readSettings(workspaceKey),
+        deletionRevision: () => this.#deletionRevision(),
+        createItem: (claim, content, result, now) => {
+          const write = normalizeWrite({
+            content,
+            kind: "failure",
+            statementType: "fact",
+            temporalType: "undated",
+            scopeType: "workspace",
+            scopeKey: claim.admission.workspaceKey,
+            observedAt: result.settledAt,
+            origin: "agent_extracted",
+            keys: [
+              { key: claim.target.label, keyType: "exact", keyOrigin: "deterministic" },
+              ...claim.target.entryFiles.map((file) => ({
+                key: file.path,
+                keyType: "code" as const,
+                keyOrigin: "deterministic" as const,
+              })),
+            ],
+            sources: [claim.failure, ...claim.recipe.map((step) => step.source), result.source],
+          });
+          const saved = this.#createItem(write, 0, now);
+          const operationId = `execution-acceptance:${claim.candidateId}`;
+          this.#database
+            .prepare("INSERT INTO memory_write_operations VALUES(?,'create',?,?,?)")
+            .run(
+              operationId,
+              hashCanonical({ claimHash: claim.claimHash, ticketId: result.ticketId }),
+              JSON.stringify([saved]),
+              now,
+            );
+          return { itemId: saved.itemId, contentHash: write.contentHash };
+        },
+        createExperienceItem: (candidate, now) => {
+          const write = normalizeWrite({
+            content: candidate.content,
+            kind: "failure",
+            statementType: "fact",
+            temporalType: "undated",
+            scopeType: "workspace",
+            scopeKey: candidate.workspaceKey,
+            observedAt: now,
+            origin: "agent_extracted",
+            keys: taskExperienceSearchKeys(candidate.goal, candidate.content),
+            sources: candidate.sources,
+          });
+          const saved = this.#createItem(write, 0, now);
+          this.#database
+            .prepare("INSERT INTO memory_write_operations VALUES(?,'create',?,?,?)")
+            .run(
+              `task-experience-review:${candidate.candidateId}:${candidate.contentVersion}`,
+              hashCanonical({
+                candidateId: candidate.candidateId,
+                contentVersion: candidate.contentVersion,
+              }),
+              JSON.stringify([saved]),
+              now,
+            );
+          return { itemId: saved.itemId, contentHash: write.contentHash };
+        },
+      });
+      this.executionLearning.repairDeletedExperiences();
       if (path !== ":memory:") secureExistingDatabaseFiles(path);
     } catch (error) {
       this.#database.close();
@@ -1061,6 +1167,7 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
     workspaceKey: string;
     includeArchived?: boolean;
     limit?: number;
+    learningVersion?: 2;
   }): Promise<readonly MemoryItemRecord[]> {
     this.#assertOpen();
     const workspaceKey = normalizeIdentifier(input.workspaceKey, "workspaceKey");
@@ -1075,6 +1182,7 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
           `SELECT item_id FROM memory_items
         WHERE (scope_type = 'global' OR (scope_type = 'workspace' AND scope_key = ?))
           AND ${input.includeArchived ? "1=1" : "lifecycle_state = 'active'"}
+          AND ${input.learningVersion === 2 ? "1=1" : "NOT EXISTS (SELECT 1 FROM execution_learning_items e WHERE e.item_id=memory_items.item_id AND e.source_type='reviewed-reference')"}
         ORDER BY updated_at DESC, item_id ASC LIMIT ?`,
         )
         .all(workspaceKey, limit) as { item_id: string }[];
@@ -1088,6 +1196,7 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
     kinds?: readonly MemoryItem["kind"][];
     cursor?: string;
     limit?: number;
+    learningVersion?: 2;
   }): Promise<MemoryItemListPage> {
     this.#assertOpen();
     const workspaceKey = normalizeIdentifier(input.workspaceKey, "workspaceKey");
@@ -1096,11 +1205,17 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
       throw new MemoryItemListCursorError("Memory list limit must be between 1 and 1000");
     const states = normalizeListFilter(input.lifecycleStates, isMemoryLifecycleState);
     const kinds = normalizeListFilter(input.kinds, isMemoryItemKind);
-    const binding = hashText(JSON.stringify([workspaceKey, states, kinds]));
+    const binding = hashText(
+      JSON.stringify([workspaceKey, states, kinds, input.learningVersion ?? 1]),
+    );
     const cursor = input.cursor === undefined ? undefined : decodeListCursor(input.cursor);
     if (cursor && cursor.binding !== binding)
       throw new MemoryItemListCursorError("Memory cursor does not match this workspace or filter");
     const conditions = ["(scope_type = 'global' OR (scope_type = 'workspace' AND scope_key = ?))"];
+    if (input.learningVersion !== 2)
+      conditions.push(
+        "NOT EXISTS (SELECT 1 FROM execution_learning_items e WHERE e.item_id=memory_items.item_id AND e.source_type='reviewed-reference')",
+      );
     const parameters: Array<string | number> = [workspaceKey];
     if (states !== undefined) {
       conditions.push(states.length ? `lifecycle_state IN (${placeholders(states.length)})` : "0");
@@ -1111,13 +1226,14 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
       parameters.push(...kinds);
     }
     return this.#readSnapshot(() => {
-      const revision = (
-        this.#database
-          .prepare("SELECT count(*) AS revision FROM memory_write_operations")
-          .get() as {
-          revision: number;
-        }
-      ).revision;
+      const revision =
+        (
+          this.#database
+            .prepare("SELECT count(*) AS revision FROM memory_write_operations")
+            .get() as {
+            revision: number;
+          }
+        ).revision + (input.learningVersion === 2 ? this.executionLearning.readRevision() : 0);
       if (cursor && cursor.revision !== revision)
         throw new MemoryItemStoreConflictError("version_conflict", "Memory list changed; refresh");
       const counts = this.#database
@@ -1154,9 +1270,12 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
              WHERE item_id = ? ORDER BY event_id ASC LIMIT 1`,
           )
           .get(item.itemId) as MemorySourceRow | undefined;
+        const executionEvidence = this.#readExecutionEvidence(item);
         return {
           item,
           sourceCount,
+          ...this.executionLearning.readItemAcceptance(item.itemId, item.contentHash),
+          ...(executionEvidence ? { executionEvidence } : {}),
           ...(firstSource ? { firstSource: decodeSource(firstSource) } : {}),
         };
       });
@@ -1267,6 +1386,271 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
     return this.#deletionRevision();
   }
 
+  async readExecutionLesson(candidateId: string): Promise<ExecutionLessonCandidate | undefined> {
+    this.#assertOpen();
+    const row = this.#database
+      .prepare("SELECT record_json FROM execution_lesson_candidates WHERE candidate_id = ?")
+      .get(normalizeIdentifier(candidateId, "candidateId"));
+    return row ? (JSON.parse(String(row.record_json)) as ExecutionLessonCandidate) : undefined;
+  }
+
+  async createExecutionLesson(
+    request: CreateExecutionLessonCandidateRequest,
+  ): Promise<ExecutionLessonCandidate> {
+    this.#assertOpen();
+    const id = normalizeIdentifier(request.candidateId, "candidateId");
+    const content = normalizeLongTermMemoryContent(request.content);
+    if (!content.ok) throw new Error(content.message);
+    const workspaceKey = normalizeIdentifier(request.workspaceKey, "workspaceKey");
+    const sessionId = normalizeIdentifier(request.sessionId, "sessionId");
+    const taskFamily = normalizeIdentifier(request.taskFamily, "taskFamily");
+    const failure = normalizeSources([request.failure], false)[0]!;
+    const observedAt = normalizeTimestamp(request.observedAt, "observedAt");
+    const now = normalizeTimestamp((this.#options.now ?? Date.now)(), "current time");
+    if (observedAt > now) throw new Error("Execution evidence cannot be in the future");
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      this.#assertExecutionLessonPolicy(
+        workspaceKey,
+        request.settingsVersion,
+        request.deletionRevision,
+      );
+      const existing = this.#database
+        .prepare("SELECT record_json FROM execution_lesson_candidates WHERE candidate_id = ?")
+        .get(id);
+      if (existing) {
+        const candidate = JSON.parse(String(existing.record_json)) as ExecutionLessonCandidate;
+        if (candidate.workspaceKey !== workspaceKey || candidate.sessionId !== sessionId)
+          throw new Error("Execution lesson scope mismatch");
+        if (
+          candidate.state === "confirmed" &&
+          (candidate.content !== content.value || candidate.taskFamily !== taskFamily)
+        )
+          throw new Error("Confirmed execution lessons cannot be revised; edit the memory item");
+        if (
+          candidate.state === "candidate" &&
+          (candidate.content !== content.value || candidate.taskFamily !== taskFamily)
+        ) {
+          this.#assertExecutionLessonPolicy(
+            workspaceKey,
+            candidate.settingsVersion,
+            candidate.deletionRevision,
+          );
+          const revised: ExecutionLessonCandidate = {
+            ...candidate,
+            version: candidate.version + 1,
+            content: content.value,
+            taskFamily,
+            evidenceBoundary: requiredNonNegativeInteger(
+              request.evidenceBoundary,
+              "evidenceBoundary",
+            ),
+            verifications: [],
+            updatedAt: now,
+          };
+          this.#writeExecutionLesson(revised);
+          this.#database.exec("COMMIT");
+          return revised;
+        }
+        this.#database.exec("COMMIT");
+        return candidate;
+      }
+      const candidate: ExecutionLessonCandidate = {
+        candidateId: id,
+        version: 1,
+        state: "candidate",
+        workspaceKey,
+        sessionId,
+        content: content.value,
+        taskFamily,
+        commandHash: requiredHash(request.commandHash, "commandHash"),
+        evidenceBoundary: requiredNonNegativeInteger(request.evidenceBoundary, "evidenceBoundary"),
+        failure,
+        verifications: [],
+        deletionRevision: request.deletionRevision,
+        settingsVersion: request.settingsVersion,
+        createdAt: now,
+        updatedAt: now,
+        confirmedAt: null,
+        itemId: null,
+        itemContentHash: null,
+      };
+      this.#database
+        .prepare(
+          "INSERT INTO execution_lesson_candidates(candidate_id,workspace_key,session_id,state,item_id,record_json) VALUES(?,?,?,?,NULL,?)",
+        )
+        .run(id, workspaceKey, sessionId, candidate.state, JSON.stringify(candidate));
+      this.#database.exec("COMMIT");
+      return candidate;
+    } catch (error) {
+      rollback(this.#database);
+      throw error;
+    }
+  }
+
+  async verifyExecutionLesson(
+    request: VerifyExecutionLessonRequest,
+  ): Promise<ExecutionLessonCandidate> {
+    this.#assertOpen();
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      const candidate = this.#requireExecutionLesson(
+        request.candidateId,
+        request.workspaceKey,
+        request.sessionId,
+      );
+      this.#assertExecutionLessonPolicy(
+        candidate.workspaceKey,
+        candidate.settingsVersion,
+        candidate.deletionRevision,
+      );
+      if (candidate.state !== "candidate") {
+        this.#database.exec("COMMIT");
+        return candidate;
+      }
+      if (candidate.version !== request.expectedVersion)
+        throw new MemoryItemStoreConflictError(
+          "version_conflict",
+          "Execution lesson changed during verification",
+        );
+      const sources = normalizeSources(
+        [...candidate.verifications, ...request.verifications],
+        false,
+      );
+      const unique = [...new Map(sources.map((source) => [source.eventId, source])).values()];
+      if (
+        unique.some(
+          (source) =>
+            source.sessionId !== candidate.sessionId ||
+            source.eventId === candidate.failure?.eventId,
+        )
+      )
+        throw new Error("Execution verification crosses the candidate evidence boundary");
+      if (!unique.length || unique.length > 32)
+        throw new Error("Invalid execution verification count");
+      const now = normalizeTimestamp((this.#options.now ?? Date.now)(), "current time");
+      const observedAt = normalizeTimestamp(request.observedAt, "observedAt");
+      if (observedAt > now) throw new Error("Execution evidence cannot be in the future");
+      let next: ExecutionLessonCandidate = {
+        ...candidate,
+        version: candidate.version + 1,
+        verifications: unique,
+        updatedAt: now,
+      };
+      if (unique.length >= 3) {
+        const operationId = `execution-lesson:${candidate.candidateId}`;
+        if (this.#readOperationRow(operationId))
+          throw new Error("Execution lesson was already committed");
+        const item = normalizeWrite({
+          content: candidate.content,
+          kind: "failure",
+          statementType: "fact",
+          temporalType: "undated",
+          scopeType: "workspace",
+          scopeKey: candidate.workspaceKey,
+          observedAt,
+          origin: "agent_extracted",
+          keys: [{ key: candidate.taskFamily, keyType: "concept", keyOrigin: "deterministic" }],
+          sources: [candidate.failure!, ...unique],
+        });
+        const result = this.#createItem(item, 0, now);
+        next = {
+          ...next,
+          state: "confirmed",
+          confirmedAt: now,
+          itemId: result.itemId,
+          itemContentHash: item.contentHash,
+        };
+        this.#options.failpoint?.("before_operation_write");
+        this.#database
+          .prepare(
+            "INSERT INTO memory_write_operations(operation_id,operation_type,request_hash,result_json,committed_at) VALUES(?, 'create', ?, ?, ?)",
+          )
+          .run(
+            operationId,
+            hashCanonical({ candidateId: candidate.candidateId, sources: unique }),
+            JSON.stringify([result]),
+            now,
+          );
+      }
+      this.#writeExecutionLesson(next);
+      this.#database.exec("COMMIT");
+      this.#options.failpoint?.("after_commit");
+      return next;
+    } catch (error) {
+      rollback(this.#database);
+      throw error;
+    }
+  }
+
+  async rejectExecutionLesson(
+    candidateId: string,
+    workspaceKey: string,
+    sessionId: string,
+  ): Promise<void> {
+    this.#assertOpen();
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      const candidate = this.#requireExecutionLesson(candidateId, workspaceKey, sessionId);
+      if (candidate.state !== "candidate") throw new Error("Only pending lessons can be discarded");
+      this.#writeExecutionLesson(
+        clearExecutionLesson(candidate, "rejected", (this.#options.now ?? Date.now)()),
+      );
+      this.#database.exec("COMMIT");
+    } catch (error) {
+      rollback(this.#database);
+      throw error;
+    }
+  }
+
+  #assertExecutionLessonPolicy(
+    workspaceKey: string,
+    version: number,
+    deletionRevision: number,
+  ): void {
+    this.#assertDeletionRevision(deletionRevision);
+    const settings = this.#readSettings(workspaceKey);
+    if (!settings.enabled || !settings.autoExtract || settings.version !== version)
+      throw new Error("Execution lesson memory policy changed");
+  }
+
+  #requireExecutionLesson(
+    id: string,
+    workspaceKey: string,
+    sessionId: string,
+  ): ExecutionLessonCandidate {
+    const row = this.#database
+      .prepare("SELECT record_json FROM execution_lesson_candidates WHERE candidate_id = ?")
+      .get(normalizeIdentifier(id, "candidateId"));
+    if (!row) throw new Error("Execution lesson not found");
+    const candidate = JSON.parse(String(row.record_json)) as ExecutionLessonCandidate;
+    if (candidate.workspaceKey !== workspaceKey || candidate.sessionId !== sessionId)
+      throw new Error("Execution lesson scope mismatch");
+    return candidate;
+  }
+
+  #writeExecutionLesson(candidate: ExecutionLessonCandidate): void {
+    this.#database
+      .prepare(
+        "UPDATE execution_lesson_candidates SET state=?,item_id=?,record_json=? WHERE candidate_id=?",
+      )
+      .run(candidate.state, candidate.itemId, JSON.stringify(candidate), candidate.candidateId);
+  }
+
+  #invalidateExecutionLesson(itemId: string, state: "deleted" | "invalidated", now: number): void {
+    const row = this.#database
+      .prepare("SELECT record_json FROM execution_lesson_candidates WHERE item_id=?")
+      .get(itemId);
+    if (row)
+      this.#writeExecutionLesson(
+        clearExecutionLesson(
+          JSON.parse(String(row.record_json)) as ExecutionLessonCandidate,
+          state,
+          now,
+        ),
+      );
+  }
+
   #deletionRevision(): number {
     // Delete receipts are append-only; retries do not increment this generation.
     const row = this.#database
@@ -1329,6 +1713,14 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
         );
       }
       this.#requireVersion(itemId, input.expectedVersion);
+      if (
+        this.#database
+          .prepare(
+            "SELECT 1 FROM execution_learning_items WHERE item_id=? AND source_type='reviewed-reference'",
+          )
+          .get(itemId)
+      )
+        throw new Error("Reviewed task experience must be deleted through experience review");
       // Operation results contain only IDs, versions and lifecycle metadata. Extraction
       // receipts also contain requested prose: redact every historical copy atomically.
       const receipts = this.#database
@@ -1350,7 +1742,12 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
           .prepare("UPDATE memory_extraction_receipts SET result_json = ? WHERE operation_id = ?")
           .run(JSON.stringify(redacted), receipt.operationId);
       }
+      const deletedAt = (this.#options.now ?? Date.now)();
+      this.#invalidateExecutionLesson(itemId, "deleted", deletedAt);
+      // Resolve provenance before the item's foreign-key cascade removes its mapping.
+      this.executionLearning.invalidateItem(itemId, deletedAt);
       this.#database.prepare("DELETE FROM memory_items WHERE item_id = ?").run(itemId);
+      scrubExperienceLedger(this.#database, { itemId }, deletedAt);
       this.#options.failpoint?.("after_item_write");
       this.#options.failpoint?.("before_operation_write");
       this.#database
@@ -1461,10 +1858,26 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
   ): MemoryMutationResult {
     const current = this.#requireVersion(mutation.itemId, mutation.expectedVersion);
     const currentRecord = this.#requireItemRecord(mutation.itemId);
-    if (recordMatchesWrite(currentRecord, mutation.item)) {
+    if (currentRecord.sourceType === "reviewed-reference")
+      throw new MemoryItemStoreConflictError(
+        "version_conflict",
+        "Reviewed task experience must be edited through experience review",
+        mutation.itemId,
+      );
+    if (
+      !currentRecord.executionEvidence &&
+      !currentRecord.sourceType &&
+      recordMatchesWrite(currentRecord, mutation.item)
+    ) {
       return mutationResult(mutationIndex, "update", current, "noop");
     }
     const updatedAt = Math.max(committedAt, current.updatedAt);
+    this.#invalidateExecutionLesson(mutation.itemId, "invalidated", updatedAt);
+    this.executionLearning.invalidateItem(
+      mutation.itemId,
+      updatedAt,
+      mutation.item.origin === "user_requested" && mutation.item.sources.length === 0,
+    );
     const result = this.#database
       .prepare(
         `UPDATE memory_items
@@ -1511,6 +1924,12 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
     target: MemoryItem["lifecycleState"],
   ): MemoryMutationResult {
     const current = this.#requireVersion(mutation.itemId, mutation.expectedVersion);
+    if (this.#requireItemRecord(mutation.itemId).sourceType === "reviewed-reference")
+      throw new MemoryItemStoreConflictError(
+        "version_conflict",
+        "Reviewed task experience lifecycle must be managed through experience review",
+        mutation.itemId,
+      );
     const expected = target === "archived" ? "active" : "archived";
     if (current.lifecycleState !== expected) {
       throw new MemoryItemStoreConflictError(
@@ -1601,10 +2020,14 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
     if (sources.length > 0 || row.origin !== "user_requested") {
       assertChildCardinality("sources", sources.length, MAX_SOURCES_PER_ITEM);
     }
+    const item = decodeItem(row);
+    const executionEvidence = this.#readExecutionEvidence(item);
     return {
-      item: decodeItem(row),
+      item,
       keys: keys.map(decodeKey),
       sources: sources.map(decodeSource),
+      ...this.executionLearning.readItemAcceptance(item.itemId, item.contentHash),
+      ...(executionEvidence ? { executionEvidence } : {}),
     };
   }
 
@@ -1612,6 +2035,28 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
     const record = this.#readItemRecord(itemId);
     if (!record) throw new Error(`Memory Item ${itemId} disappeared during transaction`);
     return record;
+  }
+
+  #readExecutionEvidence(item: MemoryItem): MemoryItemRecord["executionEvidence"] {
+    const row = this.#database
+      .prepare(
+        "SELECT record_json FROM execution_lesson_candidates WHERE item_id=? AND state='confirmed'",
+      )
+      .get(item.itemId);
+    const lesson = row
+      ? (JSON.parse(String(row.record_json)) as ExecutionLessonCandidate)
+      : undefined;
+    return lesson &&
+      lesson.itemId === item.itemId &&
+      lesson.itemContentHash === item.contentHash &&
+      lesson.confirmedAt !== null &&
+      lesson.verifications.length >= 3
+      ? {
+          candidateId: lesson.candidateId,
+          confirmedAt: lesson.confirmedAt,
+          verificationCount: lesson.verifications.length,
+        }
+      : undefined;
   }
 
   #readOperationRow(operationId: string): MemoryOperationRow | undefined {
@@ -1987,6 +2432,25 @@ function normalizeSearchTerm(input: unknown): string {
   return normalizeVisibleText(input, "Memory search term", MAX_KEY_CODE_POINTS)
     .replace(/\s+/gu, " ")
     .toLowerCase();
+}
+/** Derived keys are bounded visible labels; raw task input may contain attachment markup. */
+function taskExperienceSearchKeys(goal: string, content: string): readonly MemoryItemKeyInput[] {
+  const keys = [goal, content]
+    .map((value) =>
+      Array.from(
+        value
+          .normalize("NFC")
+          .replace(/pico:\/\/artifact\/[^\s)\]}>]*/giu, " ")
+          .replace(/[\p{Cc}\p{Cs}]/gu, " ")
+          .replace(/[\u200B-\u200D\uFEFF]/gu, "")
+          .replace(/\s+/gu, " ")
+          .trim(),
+      )
+        .slice(0, Math.min(512, MAX_KEY_CODE_POINTS))
+        .join(""),
+    )
+    .filter(Boolean);
+  return [...new Set(keys)].map((key) => ({ key, keyType: "concept", keyOrigin: "llm" }));
 }
 
 function normalizeVersion(value: unknown): number {

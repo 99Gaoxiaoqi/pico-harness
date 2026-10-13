@@ -26,6 +26,8 @@ export const PICO_TOOL_GROUPS: readonly ToolGroupDef[] = [
     description: "基本文件操作、搜索、执行、交互与编排",
     toolNames: [
       "read_file",
+      "document",
+      "view_image",
       "archive_read",
       "write_file",
       "edit_file",
@@ -85,8 +87,8 @@ export const PICO_TOOL_GROUPS: readonly ToolGroupDef[] = [
   {
     id: "memory",
     label: "Memory",
-    description: "只读检索已存记忆、显式记住与回合后提取",
-    toolNames: ["memory_search", "memory_remember", "memory_extract"],
+    description: "检索记忆、显式记住、回合后提取，以及验证失败经验",
+    toolNames: ["memory_search", "memory_remember", "memory_extract", "memory_learn"],
     economy: "deferred",
   },
   {
@@ -183,6 +185,8 @@ export function getSupportedToolNames(host: ToolHostKind): Set<string> {
 /** Plan 模式下允许进入 provider tools 数组的工具面。 */
 export const PLAN_MODE_TOOL_NAMES: ReadonlySet<string> = new Set([
   "read_file",
+  "document",
+  "view_image",
   "archive_read",
   "glob",
   "grep",

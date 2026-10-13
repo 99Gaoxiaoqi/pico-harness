@@ -136,6 +136,29 @@ test("媒体消息仅持久引用，重开后真实请求按视觉能力/预算�
   assert.ok(item.kind === "assistantMessage");
   assert.equal(item.media?.[0]?.sizeBytes, largePng.length, "桌面未过滤2–10MiB生成图片");
   const history = session.getModelContext();
+  const generatedHistory = history.find((message) =>
+    message.content.includes("generated image 1"),
+  )!;
+  assert.equal(
+    generatedHistory.images?.[0]?.type,
+    "image_artifact",
+    "生成图在重开后的模型上下文恢复成参考图",
+  );
+  const generatedRequest = await toAiSdkMessages(
+    [generatedHistory, { role: "user", content: "Edit the previous image" }],
+    "openai",
+    { vision: true, readImageArtifact: (image) => session.readMediaArtifact(image) },
+  );
+  const referenceTurn = generatedRequest.find((message) => message.role === "user")!;
+  assert.ok(
+    JSON.stringify(referenceTurn).includes(largePng.toString("base64")),
+    "参考图必须出现在模型支持的user图片输入中",
+  );
+  assert.ok(
+    !JSON.stringify(generatedRequest[0]).includes(largePng.toString("base64")),
+    "不把图片放进会被Chat Completions丢弃的assistant文件字段",
+  );
+
   assert.equal(
     session.readMediaArtifact(history[0]!.images![0] as typeof artifact),
     png.toString("base64"),
@@ -178,40 +201,126 @@ test("媒体消息仅持久引用，重开后真实请求按视觉能力/预算�
       undefined,
       { readImageArtifact: (image) => session.readMediaArtifact(image) },
     );
-    assert.equal((await provider.generate(history, [])).content, "MEDIA_OK");
-    if (!vision) {
+    if (vision === false) {
+      await assert.rejects(provider.generate(history, []), /不支持图像输入/u);
       assert.equal(reads, 0);
-      assert.ok(!bodies.at(-1)!.includes(png.toString("base64")));
+      assert.equal(bodies.length, 0, "当前上传图片不会被静默丢弃后发送请求");
+      assert.equal(
+        (await provider.generate([...history, { role: "user", content: "只回答文字" }], []))
+          .content,
+        "MEDIA_OK",
+      );
+      assert.ok(!bodies.at(-1)!.includes(png.toString("base64")), "历史图片不阻止新文字对话");
     } else {
+      assert.equal((await provider.generate(history, [])).content, "MEDIA_OK");
       assert.ok(reads > 0);
       assert.ok(bodies.at(-1)!.includes(png.toString("base64")));
-      assert.ok(
-        bodies.at(-1)!.includes(largePng.toString("base64")),
-        "explicit image above UI preview limit is materialized on wire",
-      );
+      assert.ok(bodies.at(-1)!.includes(largePng.toString("base64")), "大附件仍发送完整小尺寸原图");
     }
   }
-  let budgetReads = 0;
-  const budgetImage = { ...artifact, sizeBytes: 2 * 1024 * 1024 };
-  const projected = toAiSdkMessages(
+
+  const newestDigest = "e".repeat(64);
+  const paddedPng = Buffer.alloc(2 * 1024 * 1024);
+  png.copy(paddedPng);
+  const selectionReads: string[] = [];
+  const crowded = await toAiSdkMessages(
     [
       {
+        role: "assistant",
+        content: "earlier generated pictures",
+        images: Array.from({ length: 6 }, (_, index) => ({
+          ...artifact,
+          artifactId: `old:${index}`,
+          sizeBytes: 2 * 1024 * 1024,
+        })),
+      },
+      {
         role: "user",
-        content: "many images",
-        images: Array.from({ length: 8 }, () => budgetImage),
+        content: "Inspect this new upload",
+        images: [
+          { ...artifact, artifactId: "newest", digest: newestDigest, sizeBytes: 2 * 1024 * 1024 },
+        ],
       },
     ],
     "openai",
     {
       vision: true,
-      readImageArtifact: () => {
-        budgetReads++;
-        return png.toString("base64");
+      readImageArtifact: (image) => {
+        selectionReads.push(image.artifactId);
+        return paddedPng.toString("base64");
       },
     },
   );
-  assert.equal(budgetReads, 6, "12MiB budget is checked before any artifact byte read");
-  assert.match(JSON.stringify(projected), /request image budget exceeded/u);
+  assert.equal(selectionReads[0], "newest", "优先读取本轮图片");
+  assert.equal(selectionReads.length, 6);
+  assert.match(JSON.stringify(crowded[0]), /artifact_id=old:5;.*request image budget exceeded/u);
+  let budgetReads = 0;
+  const budgetImage = { ...artifact, sizeBytes: 2 * 1024 * 1024 };
+  await assert.rejects(
+    toAiSdkMessages(
+      [
+        {
+          role: "user",
+          content: "many images",
+          images: Array.from({ length: 8 }, (_, index) => ({
+            ...budgetImage,
+            artifactId: `budget-${index}`,
+          })),
+        },
+      ],
+      "openai",
+      {
+        vision: true,
+        readImageArtifact: () => {
+          budgetReads++;
+          return paddedPng.toString("base64");
+        },
+      },
+    ),
+    /图片未发送.*12 MiB/u,
+  );
+  assert.equal(budgetReads, 6, "预算耗尽后不再读取其他图片");
+  // Regression: tool images arriving later cannot silently evict current user evidence.
+  const sixMiB = Buffer.alloc(6 * 1024 * 1024);
+  png.copy(sixMiB);
+  for (const wire of ["openai", "responses", "claude"] as const) {
+    const seen: string[] = [];
+    await assert.rejects(
+      toAiSdkMessages(
+        [
+          {
+            role: "user",
+            content: "compare",
+            images: [
+              { ...artifact, artifactId: "A", sizeBytes: sixMiB.length },
+              { ...artifact, artifactId: "B", sizeBytes: sixMiB.length },
+            ],
+          },
+          {
+            role: "assistant",
+            content: "",
+            toolCalls: [{ id: "page", name: "document", arguments: "{}" }],
+          },
+          {
+            role: "user",
+            toolCallId: "page",
+            content: "page",
+            images: [{ ...artifact, artifactId: "page" }],
+          },
+        ],
+        wire,
+        {
+          vision: true,
+          readImageArtifact: (ref) => {
+            seen.push(ref.artifactId);
+            return sixMiB.toString("base64");
+          },
+        },
+      ),
+      /artifact_id=page.*12 MiB/u,
+    );
+    assert.deepEqual(seen, ["A", "B"], "保留用户两张原图；工具图装不下时明确失败");
+  }
   assert.ok(
     !JSON.stringify(history).includes(png.toString("base64")),
     "request hydration never mutates durable history",

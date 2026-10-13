@@ -287,8 +287,9 @@ export class AiSdkProvider implements LLMProvider {
     const sdkController = new AbortController();
     const request = {
       model,
-      messages: toAiSdkMessages(messages, this.wire, {
+      messages: await toAiSdkMessages(messages, this.wire, {
         responsesWebSearchAnchors: true,
+        signal,
         vision: this.config.capabilities?.vision !== false,
         ...(this.dependencies.readImageArtifact
           ? { readImageArtifact: this.dependencies.readImageArtifact }

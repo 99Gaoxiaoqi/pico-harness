@@ -141,7 +141,7 @@ import "./apps/desktop/src/renderer/layers.css";
 import * as React from "react";
 import {act,useState} from "react";
 import {createRoot} from "react-dom/client";
-import {MemoryRouter} from "react-router-dom";
+import {MemoryRouter,Routes,Route} from "react-router-dom";
 import {AutomationsPage} from "./apps/desktop/src/renderer/pages/AutomationsPage.tsx";
 import {SessionsPage} from "./apps/desktop/src/renderer/pages/SessionsPage.tsx";
 import {ConversationPage} from "./apps/desktop/src/renderer/pages/ConversationPage.tsx";
@@ -152,6 +152,8 @@ import {ConversationTranscript} from "./apps/desktop/src/renderer/conversation/C
 import {SideChatWorkbarPanel} from "./apps/desktop/src/renderer/workbar-panels/SideChatWorkbarPanel.tsx";
 import {RuntimeContext} from "./apps/desktop/src/renderer/runtime-context.tsx";
 import {previewData} from "./apps/desktop/src/renderer/fixture.ts";
+import {applyProviderRetryNotification,providerRetryKey} from "./apps/desktop/src/renderer/provider-retry.ts";
+import {sessionHref,workspaceSessionKey} from "./apps/desktop/src/renderer/workspace-session.ts";
 import {PicoTheme} from "./apps/desktop/src/renderer/astryx-provider.tsx";
 import "./apps/desktop/src/renderer/styles.css";
 import "./apps/desktop/src/renderer/astryx-controls.css";
@@ -264,7 +266,7 @@ async function scenario(){
   const sends=[];
   const taskRuntime={...runtime,preview:true,data:{...previewData,providerConfig:{...previewData.providerConfig,
     defaultModelRouteId:"test/a",userDefaults:{modelRouteId:"test/a",thinkingEffort:"unsupported"},
-    providers:[{id:"test",origin:"user",protocol:"openai",baseURL:"https://fixture.invalid",models:["a"],availableModels:["a","b","disabled"],disabledModels:["disabled"],resolvedModelCapabilities:{a:{reasoningLevels:["low","high"]},b:{reasoningLevels:["medium"]}}}]},
+    providers:[{id:"test",origin:"user",protocol:"openai",baseURL:"https://fixture.invalid",models:["a"],availableModels:["a","b","disabled"],disabledModels:["disabled"],resolvedModelCapabilities:{a:{reasoningLevels:["low","high"]},b:{reasoningLevels:["medium"],vision:false}}}]},
   },actions:{...runtime.actions,ensureTemporaryWorkspace:async()=>"/fixture",sendMessage:async request=>{sends.push(request);return {succeeded:false};}}};
   await act(async()=>root.render(<PicoTheme><RuntimeContext value={taskRuntime}><MemoryRouter initialEntries={["/task/new"]}><ConversationPage/></MemoryRouter></RuntimeContext></PicoTheme>));
   const thinking=()=>document.querySelector('[role="combobox"][name="initial-thinking-effort"]') ?? document.querySelector('[name="initial-thinking-effort"]')?.closest('.astryx-field')?.querySelector('[role="combobox"]');
@@ -289,6 +291,17 @@ async function scenario(){
   // Exercise the production transcript's disclosures across live updates and settlement.
   // Host run IDs and canonical execution IDs intentionally differ, as in real sessions.
   const activeRun={id:"host-1",status:"running"};
+  taskRuntime.preview=false;
+  await act(async()=>root.render(<PicoTheme><RuntimeContext value={{...taskRuntime}}><MemoryRouter initialEntries={["/task/new"]}><ConversationPage/></MemoryRouter></RuntimeContext></PicoTheme>));
+  const imageFiles = new DataTransfer();
+  imageFiles.items.add(new File([new Uint8Array([1])],"sample.png",{type:"image/png"}));
+  const filePicker=document.querySelector('input[type="file"]');
+  check(filePicker&&!filePicker.disabled,"Text model still allows attachment selection");
+  await act(async()=>{Object.defineProperty(filePicker,"files",{configurable:true,value:imageFiles.files});filePicker.dispatchEvent(new Event("change",{bubbles:true}));});
+  check(document.body.textContent.includes("当前模型不支持图片"),"Nonvision model explains why the image cannot be sent");
+  check(button("发送消息").disabled,"Nonvision image send is blocked before upload");
+  await click("移除附件 sample.png");
+  check(!document.body.textContent.includes("当前模型不支持图片"),"Removing image clears the model warning and retains draft");
   const tool=(id,state="done",runId="execution-1")=>({id,kind:"tool",runId,turnId:id,toolName:"grep",title:"grep",detail:JSON.stringify({pattern:"GoalEvaluator".repeat(40),path:"/workspace/"+"long-path/".repeat(30)+"source.ts"}),state,output:state==="failed"?"匹配表达式错误":"完整工具结果"});
   const reasoning={id:"thinking-1",kind:"thinking",runId:"execution-1",text:"检查配置\\n完整推理正文",streaming:true};
   const liveItems=[
@@ -298,6 +311,27 @@ async function scenario(){
     {id:"commentary",kind:"assistantMessage",runId:"execution-1",text:"正在继续检查"},
     tool("tool-3"),
   ];
+  const session=previewData.sessions[0];
+  const sessionRef={workspacePath:session.workspacePath,sessionId:session.id};
+  const sessionKey=workspaceSessionKey(sessionRef);
+  const earlierLoads=[];
+  const pageRuntime={...taskRuntime,data:{...taskRuntime.data,approvals:[],prompts:[],
+    conversations:{...previewData.conversations,[sessionKey]:{...previewData.conversations[sessionKey],hasEarlier:true,items:liveItems.map(item=>item.kind==="runBoundary"?{...item,runId:"run-atlas"}:item)}},
+    timeline:[
+      {id:"status:thinking:run-atlas:2",kind:"status",eventType:"assistant.thinking",runId:"run-atlas",title:"Pico 正在推理",state:"active",at:1},
+      {id:"status:warning",kind:"status",eventType:"model.warning",runId:"run-atlas",title:"模型返回了状态提醒",state:"failed",at:2},
+    ],
+  },actions:{...taskRuntime.actions,loadSession:async()=>true,loadEarlierSession:async ref=>earlierLoads.push(ref)}};
+  await act(async()=>root.render(<PicoTheme><RuntimeContext value={pageRuntime}><MemoryRouter key="inference-status" initialEntries={[sessionHref(sessionRef)]}><Routes><Route path="/session/:sessionId" element={<ConversationPage/>}/></Routes></MemoryRouter></RuntimeContext></PicoTheme>));
+  const pageTranscript=document.querySelector('.conversation-transcript');
+  check(!document.querySelector('[aria-label="会话历史导航"], [aria-label="按用户提问跳转"], input[placeholder="搜索当前会话的全部历史…"]'),"Conversation does not show history search or prompt navigation");
+  check(pageTranscript?.textContent.includes("检查项目")&&!pageTranscript.querySelector('[data-highlighted]'),"User messages remain visible without navigation highlighting");
+  await click("加载更早记录");
+  check(earlierLoads.length===1&&earlierLoads[0].workspacePath===sessionRef.workspacePath&&earlierLoads[0].sessionId===sessionRef.sessionId,"Earlier history remains loadable in the current session");
+  check(pageTranscript&&!pageTranscript.textContent.includes("Pico 正在推理"),"Live inference does not append a duplicate status to the conversation");
+  check(pageTranscript.querySelector('.conversation-process__summary')?.textContent.includes("执行过程 · 进行中")&&pageTranscript.querySelector('.conversation-process__spinner'),"The execution process continues to show live progress");
+  check(pageTranscript.textContent.includes("1 次工具失败")&&pageTranscript.textContent.includes("匹配表达式错误"),"Tool failures remain visible in the process summary");
+  check(pageTranscript.textContent.includes("模型返回了状态提醒"),"Other status notices remain visible");
   const mountTranscript=async(items,run,width=800)=>{
     const committed=Promise.withResolvers();
     await act(async()=>root.render(<React.Profiler id="transcript" onRender={()=>committed.resolve()}><PicoTheme><div className="conversation-surface" style={{width,display:"block",height:"auto"}}><ConversationTranscript items={items} activeRun={run} onOpenItem={item=>decisions.push(item.id)} renderItem={(item,fallback)=>item.kind==="runBoundary"&&item.status==="failed"?<aside data-recovery="true">重试运行</aside>:fallback}/></div></PicoTheme></React.Profiler>));
@@ -439,8 +473,65 @@ async function scenario(){
   const importedAnswers=[...document.querySelectorAll('.conversation-message--assistant')];
   check(importedAnswers.length===2&&importedAnswers[0].textContent.includes("导入回复一")&&importedAnswers[1].textContent.includes("导入回复二"),"Imported history keeps every assistant message visible");
   check(!document.querySelector('.conversation-process'),"Imported history is not folded into an execution process");
+
+  // A retained retry failure must not replace the final error from a later attempt.
+  const retryScope={workspacePath:previewData.workspacePath,sessionId:"image-retry-session",runId:"image-retry-run"};
+  const retryKey=providerRetryKey(retryScope.workspacePath,retryScope.runId);
+  const retryConversationKey=workspaceSessionKey(retryScope);
+  const retryEvent=(topic,at,payload)=>({protocolVersion:2,eventId:topic+at,topic,scope:retryScope,resourceVersion:1,at,payload});
+  const retryPayload={phase:"scheduled",failedAttempt:1,nextAttempt:2,maxAttempts:10,delayMs:8000,httpStatus:429};
+  let providerRetries=applyProviderRetryNotification({},retryEvent("run.providerRetry",Date.now(),retryPayload));
+  const retryRequest={id:"image-user",kind:"userMessage",text:"请分析这张图片"};
+  const retryRun={id:retryScope.runId,...retryScope,status:"running",description:retryRequest.text,startedAt:100,updatedAt:110};
+  const retryActions={...taskRuntime.actions,loadSession:async()=>{},loadTranscriptAnchors:async()=>undefined};
+  const mountRetryPage=async(status,detail)=>{
+    const retryItems=[retryRequest,{id:"image-start",kind:"runBoundary",runId:retryRun.id,status:"started",label:"运行中"},
+      ...(status==="failed"?[{id:"image-failure",kind:"runBoundary",runId:retryRun.id,status:"failed",label:"运行失败",detail}]:[])];
+    const retryRuntime={...taskRuntime,preview:true,actions:retryActions,data:{...previewData,providerRetries,
+      providerConfig:{...previewData.providerConfig,providers:[]},timeline:[],approvals:[],prompts:[],
+      sessions:[{id:retryScope.sessionId,workspacePath:retryScope.workspacePath,title:"图片失败恢复",status:"active",updatedAt:120}],
+      runs:[{...retryRun,status}],conversations:{[retryConversationKey]:{...retryScope,items:retryItems,queuedCount:0}}}};
+    await act(async()=>root.render(<PicoTheme><RuntimeContext value={retryRuntime}><MemoryRouter initialEntries={[sessionHref(retryScope)]}><Routes><Route path="/session/:sessionId" element={<ConversationPage/>}/></Routes></MemoryRouter></RuntimeContext></PicoTheme>));
+  };
+  await mountRetryPage("running");
+  check(document.querySelector('.conversation-provider-retry')?.textContent.includes("连接中断，正在自动重试"),"429 still displays the automatic retry banner");
+  providerRetries=applyProviderRetryNotification(providerRetries,retryEvent("run.providerRetry",Date.now()+10,{...retryPayload,phase:"started"}));
+  await mountRetryPage("running");
+  check(document.querySelector('.conversation-provider-retry')?.textContent.includes("正在重新连接模型"),"Started retry still displays its active request");
+  const imageFailure="图片未发送（artifact_id=image-1）：附件已失效或无法读取，请重新上传。";
+  providerRetries=applyProviderRetryNotification(providerRetries,retryEvent("run.finished",Date.now()+20,{run:{...retryRun,status:"failed",error:imageFailure}}));
+  check(!providerRetries[retryKey].notice&&providerRetries[retryKey].lastFailure.httpStatus===429,"Production reducer closes retry and retains the previous failure");
+  await mountRetryPage("failed",imageFailure);
+  const failureCard=()=>document.querySelector('.conversation-provider-failure');
+  check(failureCard()?.textContent.includes(imageFailure),"Final image failure and reupload guidance must be visible after an earlier 429 retry");
+  check(!/暂时无法连接模型|模型服务当前请求过多/.test(failureCard().textContent),"Stale transport failure must not mask a local failure");
+  check(!document.querySelector('.conversation-provider-retry'),"Finished run closes its automatic retry banner");
+  await mountRetryPage("failed","Model API request failed [429]; response omitted");
+  check(failureCard()?.textContent.includes("模型服务请求过多")&&failureCard().textContent.includes("模型服务当前请求过多"),"Final 429 keeps the normal provider failure title and explanation");
+  await mountRetryPage("failed",imageFailure);
+  const sentBeforeRetry=sends.length;
+  await click("编辑后重试");
+  check(document.querySelector('[contenteditable="true"]').textContent===retryRequest.text,"Retry restores the original request to the composer");
+  check(sends.length===sentBeforeRetry&&!failureCard().textContent.includes("编辑后重试"),"Retry waits for editing and cannot overwrite an existing draft");
+
   await act(async()=>root.render(<SideChatWorkbarPanel child={{panelId:"side",sourceSessionId:"parent",targetSessionId:"child",state:"live"}} items={liveItems} activeRun={activeRun} draft="" active running loading={false} onSend={()=>{}} onStop={()=>{}} onDraftChange={()=>{}} onRetryCreate={()=>{}} onClose={()=>{}}/>));
   check(!process().open&&!thinkingRow().open,"Side chat starts with its live process and thinking collapsed");
+  // The experience ledger retains canonical execution identity alongside Desktop Run identity.
+  const ledgerScope={workspacePath:previewData.workspacePath,sessionId:"ledger-session"};
+  const ledgerRun={id:"desktop-ledger-run",...ledgerScope,description:"求和",startedAt:1,updatedAt:2};
+  const ledgerConversationKey=workspaceSessionKey(ledgerScope);
+  const frozenUse={useId:"canonical-use",workspaceKey:"ledger-workspace",source:{kind:"reviewed-reference",candidateId:"lesson",contentVersion:1},itemId:"memory-ledger",itemVersion:1,contentHash:"hash",taskId:"task-ledger",taskVersion:1,sessionId:ledgerScope.sessionId,runId:"canonical-engine-run",hostRunId:ledgerRun.id,referenceHash:"reference",referenceContent:"求和范围内的有限数值",delivery:"carried",historical:false,managementRevision:1,settingsVersion:1,deletionRevision:0,adoption:"observed",validation:"pass",validationScope:"spreadsheet-range",excluded:false,deleted:false,sources:[],createdAt:1,updatedAt:2};
+  const fallbackUse={...frozenUse,useId:"fallback-use",hostRunId:undefined,runId:ledgerRun.id};
+  const wrongHostUse={...frozenUse,useId:"foreign-host-use",hostRunId:"other-desktop-run",runId:ledgerRun.id};
+  const ledgerActions={...taskRuntime.actions,loadSession:async()=>true,queryExperienceUses:async()=>({experienceVersion:1,diagnostics:[],uses:[frozenUse,fallbackUse,wrongHostUse]})};
+  for(const status of ["running","completed"]){
+    const ledgerItems=[{id:"ledger-user",kind:"userMessage",text:"求和 B2:B4"},{id:"ledger-start",kind:"runBoundary",runId:ledgerRun.id,status:"started",label:"运行中"},{id:"ledger-answer",kind:"assistantMessage",runId:"canonical-engine-run",text:"结果：18"},...(status==="completed"?[{id:"ledger-end",kind:"runBoundary",runId:ledgerRun.id,status:"completed",label:"完成"}]:[])];
+    const ledgerRuntime={...taskRuntime,preview:false,connection:{kind:"ready"},experienceFeedbackSupported:true,actions:ledgerActions,data:{...previewData,workspacePath:ledgerScope.workspacePath,trusted:true,timeline:[],approvals:[],prompts:[],sessions:[{id:ledgerScope.sessionId,workspacePath:ledgerScope.workspacePath,title:"账本任务",status:"active",updatedAt:2}],runs:[{...ledgerRun,status}],conversations:{[ledgerConversationKey]:{...ledgerScope,items:ledgerItems,queuedCount:0}}}};
+    await act(async()=>root.render(<PicoTheme><RuntimeContext value={ledgerRuntime}><MemoryRouter key={"ledger-"+status} initialEntries={[sessionHref(ledgerScope)]}><Routes><Route path="/session/:sessionId" element={<ConversationPage/>}/></Routes></MemoryRouter></RuntimeContext></PicoTheme>));
+    check(document.body.textContent.includes("结果：18")&&document.querySelector('[data-use-id="canonical-use"]'),"Canonical Run receipt remains visible for Desktop Run "+status);
+    check(document.querySelector('[data-use-id="fallback-use"]')&&!document.querySelector('[data-use-id="foreign-host-use"]'),"Host Run identity takes precedence, with legacy canonical fallback "+status);
+    if(status==="completed")check(document.querySelector('.conversation-turn__learning [data-use-id="canonical-use"]'),"Completed result retains the receipt in its actual Run footer");
+  }
   await act(async()=>root.unmount());
 }
 scenario().then(()=>fetch("/result",{method:"POST",body:"PASS: pages forms model picker and approval"})).catch(error=>fetch("/result",{method:"POST",body:String(error.stack||error)}));

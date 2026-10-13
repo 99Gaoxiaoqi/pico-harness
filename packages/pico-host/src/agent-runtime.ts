@@ -96,6 +96,37 @@ import { CostTracker, type CostTrackerOptions } from "@pico/pico-host/cost-track
 import type { ModelRouter } from "@pico/pico-host/provider/model-router";
 import { Tracer } from "@pico/pico-host/trace";
 import { logger } from "@pico/pico-host/logger";
+import { ExecutionLearningRuntime } from "./execution-learning-runtime.js";
+import {
+  TaskExperienceRuntime,
+  canonicalTaskArguments,
+  type TaskExperienceRuntimeOptions,
+} from "./task-experience-runtime.js";
+import { ExperienceFeedbackRuntime } from "./experience-feedback-runtime.js";
+import type { ExperienceDiagnostic } from "@pico/core";
+import { raceWithDeadlineReject } from "@pico/runtime/deadline";
+import {
+  taskExperienceRecallTargets,
+  type ReviewedExperienceTarget,
+} from "./task-experience-recall.js";
+import {
+  validateSpreadsheetTaskExperience,
+  taskInputArtifactIds,
+  spreadsheetInputHasFiniteNumbers,
+} from "./task-experience-validation.js";
+import { readSessionInputArtifact } from "./session-input-attachments.js";
+import {
+  executionLearningHost,
+  registerExecutionLearningModel,
+} from "./execution-learning-host.js";
+import {
+  createExecutionLearningIO,
+  executionLearningRecallTargets,
+} from "./execution-learning-recall.js";
+import {
+  getExecutionLearningWorker,
+  type ExecutionLearningWorkerOptions,
+} from "./execution-learning-worker.js";
 import { RuntimeEventStoreIntegrityError } from "@pico/storage/runtime-event-store-contracts";
 import {
   globalApprovalManager,
@@ -254,6 +285,7 @@ import {
   buildMemoryTriggerTools,
 } from "@pico/pico-host/memory-trigger-tools";
 import { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-store";
+import { ExecutionLessonTool } from "./execution-lesson-tool.js";
 import {
   AtomicMemoryRuntime,
   ProviderAtomicMemoryModel,
@@ -298,6 +330,12 @@ export interface RuntimeHost {
   approvalNotifier?: ApprovalNotifier;
   onEvent?: (event: RuntimeLifecycleEvent) => void;
   memoryChangedSink?: () => void;
+  memoryLearningChangedSink?: (change: {
+    workspacePath: string;
+    workspaceKey: string;
+    revision: number;
+  }) => void;
+  executionLearningWorkerOptions?: Pick<ExecutionLearningWorkerOptions, "idleMs" | "pollMs">;
   /** Metadata-only signal emitted after a Session Workbar authority changes. */
   sessionResourceChangedSink?: (notice: RuntimeSessionResourceChangedNotice) => void;
   /** Structured fail-closed safety/permission denial observer for non-interactive hosts. */
@@ -967,7 +1005,23 @@ export async function executeAgentRuntime(
   let memoryRepository: SqliteMemoryItemStore | undefined;
   let memoryContextBuilder: AtomicMemoryContextBuilder | undefined;
   let atomicMemoryRuntime: AtomicMemoryRuntime | undefined;
+  let executionLearningRuntime: ExecutionLearningRuntime | undefined;
+  let taskExperienceRuntime: TaskExperienceRuntime | undefined;
+  let experienceFeedbackRuntime: ExperienceFeedbackRuntime | undefined;
+  let currentExperienceInput = prompt;
+  let reviewedRecallTargets: (
+    query: string,
+  ) => Promise<readonly ReviewedExperienceTarget[]> = async () => [];
+  let experienceRecallAllowed: NonNullable<
+    import("@pico/runtime/atomic-memory/context-builder").AtomicMemoryContextOptions["experienceAllowed"]
+  > = async () => true;
+  let memoryModelFactory: (() => Promise<AtomicMemoryModelLease>) | undefined;
   let memoryRunAdmission: RuntimeMemoryExtractionBoundary | undefined;
+  let experienceDiagnosticSink: (
+    phase: ExperienceDiagnostic["phase"],
+    reason: string,
+  ) => void = () => {};
+  const experienceDiagnosticWrites = new Set<Promise<void>>();
   let unsubscribeMcpStatus: (() => void) | undefined;
   const cleanupScope = new RuntimeCleanupScope((resource, error) => {
     logger.warn(
@@ -978,7 +1032,10 @@ export async function executeAgentRuntime(
   cleanupScope.register("Session acquisition lease", () => {
     if (!sessionLeaseTransferred) sessionLease.release();
   });
-  cleanupScope.register("Workspace memory repository", () => memoryRepository?.close());
+  cleanupScope.register("Workspace memory repository", async () => {
+    await Promise.allSettled([...experienceDiagnosticWrites]);
+    memoryRepository?.close();
+  });
 
   try {
     let configuredChildBoundaryCeiling: ExecutionBoundary | undefined;
@@ -1245,7 +1302,10 @@ export async function executeAgentRuntime(
             : [],
         );
       },
-      onUnavailable: () => logger.warn("[Memory] recall trace unavailable"),
+      onUnavailable: () => {
+        logger.warn("[Memory] recall trace unavailable");
+        experienceDiagnosticSink("reference", "experience_feedback_unavailable");
+      },
     });
     const recordRecallOutcome = async (
       mode: MemoryRecallTrace["mode"],
@@ -1561,6 +1621,8 @@ export async function executeAgentRuntime(
     }
     const usageLedger = runtimeState.taskHostRuntime?.jobService ?? ownedUsageStore;
     const trackerOptions: CostTrackerOptions = {
+      onPreparedRecallDispatched: (input) =>
+        experienceFeedbackRuntime?.dispatched(input) ?? Promise.resolve(),
       onAccountingChanged: (record, revision) => {
         if (!record.sessionId) return;
         dependencies.sessionResourceChangedSink?.({
@@ -1651,7 +1713,7 @@ export async function executeAgentRuntime(
         contextWindowTokens: contextRuntime.budget.contextWindowTokens,
         reservedOutputTokens: contextRuntime.budget.reservedOutputTokens,
         ...(dependencies.memoryChangedSink ? { onChanged: dependencies.memoryChangedSink } : {}),
-        modelFactory:
+        modelFactory: (memoryModelFactory =
           dependencies.atomicMemoryModelFactory ??
           (async () => {
             const ledger = new SqliteRuntimeControlStore({ storageRoot: sessionStorageRoot });
@@ -1676,7 +1738,7 @@ export async function executeAgentRuntime(
               ledger.close();
               throw error;
             }
-          }),
+          })),
       });
     }
     const approvalManager = dependencies.approvalManager ?? globalApprovalManager;
@@ -2560,9 +2622,380 @@ export async function executeAgentRuntime(
     if (memoryContextBuilder && memoryRepository) {
       const builder = memoryContextBuilder;
       const repository = memoryRepository;
+      const recalledToolAllowed = (name: string): boolean =>
+        !!registry.getTool(name) &&
+        (effectiveOptions.allowedTools === undefined ||
+          effectiveOptions.allowedTools.includes(name)) &&
+        evaluateToolPermission(permissionMode(), registry.getPermissionCategory(name)).kind ===
+          "allow";
+      experienceRecallAllowed = async (record) => {
+        if (record.sourceType === "execution-validated" && !recalledToolAllowed("bash"))
+          return false;
+        const task = taskExperienceRuntime?.currentTaskIdentity();
+        if (!task) return true;
+        try {
+          return !(await repository.experienceLedger.isExperienceExcluded({
+            workspaceKey: memoryWorkspaceKey,
+            itemId: record.item.itemId,
+            taskId: task.taskId,
+            taskVersion: task.taskVersion,
+          }));
+        } catch {
+          experienceDiagnosticSink("reference", "experience_feedback_unavailable");
+          return false;
+        }
+      };
+      reviewedRecallTargets = (query: string) =>
+        taskExperienceRecallTargets({
+          store: repository.taskExperiences,
+          workspaceKey: memoryWorkspaceKey,
+          workDir,
+          query,
+          ...(() => {
+            const currentTask = taskExperienceRuntime?.currentTaskIdentity();
+            return currentTask ? { currentTask } : {};
+          })(),
+          toolAllowed: recalledToolAllowed,
+          conditionMatches: async (candidate) => {
+            if (!candidate.applicability.spreadsheet) return "unknown";
+            const request = currentExperienceInput.split("附件文件：")[0]!;
+            if (!/(?:sum|求和|合计|总和)/iu.test(request)) return false;
+            if (
+              !candidate.applicability.conditions.every((condition) =>
+                ["document.analyze.sum", "header=false", "finite-numbers"].includes(condition),
+              )
+            )
+              return false;
+            const references = [
+              ...currentExperienceInput.matchAll(/pico:\/\/artifact\/([^\s<>"')\]]+)/gu),
+            ];
+            if (!references.length || references.length > 4 || !recalledToolAllowed("document"))
+              return false;
+            for (const match of references) {
+              try {
+                const artifactId = decodeURIComponent(match[1]!);
+                const { bytes } = readSessionInputArtifact({
+                  repository: sessionTaskAuthority.repository,
+                  sessionId: session.id,
+                  artifactId,
+                  validateSize: (size) => {
+                    if (size > 5 * 1024 * 1024) throw new Error("Spreadsheet recall byte budget");
+                  },
+                });
+                const range = /\b([A-Z]{1,3}[1-9]\d{0,6}:[A-Z]{1,3}[1-9]\d{0,6})\b/iu.exec(
+                  request,
+                )?.[1];
+                const sheet = /(?:sheet|工作表)\s*[:=：]?\s*["“']([^"”']+)["”']/iu.exec(
+                  request,
+                )?.[1];
+                if (
+                  !range ||
+                  !(await spreadsheetInputHasFiniteNumbers(bytes, {
+                    range,
+                    ...(sheet ? { sheet } : {}),
+                  }))
+                )
+                  return false;
+              } catch {
+                return false;
+              }
+            }
+            return true;
+          },
+        });
+      const taskLearningGate = async () => {
+        if (
+          dependencies.atomicMemoryLifecycle?.isDraining ||
+          backgroundPolicy ||
+          dependencies.configuredSubagentChild ||
+          dependencies.agentGraph?.kind === "operator" ||
+          collaborationMode() !== "agent"
+        )
+          return { allowed: false };
+        return memoryExtractionAllowed();
+      };
+      const nativeLearningGate = async () => {
+        if (
+          process.platform === "win32" ||
+          (effectiveOptions.allowedTools !== undefined &&
+            !effectiveOptions.allowedTools.includes("memory_learn"))
+        )
+          return { allowed: false };
+        return taskLearningGate();
+      };
+      const taskFeedbackGate = async () => {
+        if (
+          dependencies.atomicMemoryLifecycle?.isDraining ||
+          backgroundPolicy ||
+          dependencies.configuredSubagentChild ||
+          dependencies.agentGraph?.kind === "operator"
+        )
+          return { allowed: false };
+        return memoryRecallAllowed();
+      };
+      const nativeFeedbackGate = async () => {
+        if (process.platform === "win32" || !recalledToolAllowed("bash")) return { allowed: false };
+        return taskFeedbackGate();
+      };
+      const referenceGate = async () => {
+        if (dependencies.atomicMemoryLifecycle?.isDraining) return { allowed: false };
+        return memoryRecallAllowed();
+      };
+      const recordExperienceDiagnostic = (
+        phase: ExperienceDiagnostic["phase"],
+        reason: string,
+      ): void => {
+        logger.warn({ phase, reason }, "[Experience] bookkeeping unavailable");
+        if (experienceDiagnosticWrites.size >= 16) return;
+        const runId = currentRuntimeRun()?.runId;
+        if (!runId) return;
+        let active = true;
+        const writing = (async () => {
+          if (!(await referenceGate()).allowed || !active) return;
+          await repository.experienceLedger.recordExperienceDiagnostic({
+            diagnosticId: `experience-diagnostic:${createHash("sha256")
+              .update(JSON.stringify([session.id, runId, phase, reason]))
+              .digest("hex")}`,
+            workspaceKey: memoryWorkspaceKey,
+            sessionId: session.id,
+            runId,
+            phase,
+            reason,
+            createdAt: Date.now(),
+          });
+          if (active)
+            dependencies.memoryLearningChangedSink?.({
+              workspacePath: workDir,
+              workspaceKey: memoryWorkspaceKey,
+              revision: repository.executionLearning.readRevision(),
+            });
+        })();
+        const pending = raceWithDeadlineReject(
+          writing,
+          100,
+          () => new Error("experience_diagnostic_deadline"),
+        )
+          .catch(() =>
+            logger.warn(
+              { phase, reason: "experience_diagnostic_store_unavailable" },
+              "[Experience] diagnostic unavailable",
+            ),
+          )
+          .finally(() => {
+            active = false;
+            experienceDiagnosticWrites.delete(pending);
+          });
+        experienceDiagnosticWrites.add(pending);
+      };
+      experienceDiagnosticSink = recordExperienceDiagnostic;
+      const learningIO = createExecutionLearningIO(workDir, processSandboxScratchRoot, (path) =>
+        workspaceRoots.assertAllowed(path, { access: "read", consumeAuthorization: false }),
+      );
+      const learningModelRoute = {
+        providerId: providerConfig.routeId?.split("/")[0] ?? kind,
+        modelId: providerConfig.routeId?.split("/").slice(1).join("/") || providerConfig.model,
+        configRevision: contextRouteIdentity,
+      };
+      let learningWorker: { wake(): void } = { wake() {} };
+      const validateReviewed: NonNullable<TaskExperienceRuntimeOptions["validateReuse"]> = async ({
+        candidate,
+        task,
+        observation,
+        event,
+        start,
+      }) => {
+        const canonicalArguments = canonicalTaskArguments(start);
+        if (
+          event.kind !== "tool.result.recorded" ||
+          event.data.toolName !== "document" ||
+          event.data.body.storage !== "inline" ||
+          typeof canonicalArguments?.artifact_id !== "string"
+        )
+          return { adoption: "unknown", validation: "unknown", sources: [] };
+        let artifactId = canonicalArguments.artifact_id;
+        if (artifactId.startsWith("pico://artifact/")) {
+          try {
+            artifactId = decodeURIComponent(artifactId.slice("pico://artifact/".length));
+          } catch {
+            return { adoption: "unknown", validation: "unknown", sources: [] };
+          }
+        }
+        try {
+          const goal = await session.runtimeEventStore?.readSessionEvent(
+            task.goalSource.sessionId,
+            task.goalSource.eventId,
+          );
+          const goalArtifacts =
+            goal?.event.kind === "message.committed"
+              ? taskInputArtifactIds(goal.event.data.message)
+              : [];
+          const currentArtifactId = goalArtifacts.includes(artifactId) ? artifactId : undefined;
+          if (
+            !currentArtifactId ||
+            !recalledToolAllowed("document") ||
+            !(await taskFeedbackGate()).allowed ||
+            !(await repository.readSettings(memoryWorkspaceKey)).enabled
+          )
+            return { adoption: "unknown", validation: "unknown", sources: [] };
+          const { artifact, bytes } = readSessionInputArtifact({
+            repository: sessionTaskAuthority.repository,
+            sessionId: session.id,
+            artifactId,
+            validateSize: (size) => {
+              if (size > 5 * 1024 * 1024) throw new Error("Spreadsheet validation byte budget");
+            },
+          });
+          return await validateSpreadsheetTaskExperience({
+            ...(currentArtifactId ? { currentArtifactId } : {}),
+            candidate,
+            task,
+            observation,
+            canonicalArguments,
+            canonicalResult: event.data.body.content,
+            artifactBytes: bytes,
+            artifactDigest: artifact.digest,
+            now: Date.now(),
+          });
+        } catch {
+          throw new Error("spreadsheet_validation_unavailable");
+        }
+      };
+      if ((await taskLearningGate()).allowed) {
+        const worker = executionLearningHost({
+          picoHome,
+          gate: async (sourceDir) => {
+            const canonical = await memoryTrustStore.canonicalize(sourceDir);
+            return memoryTrustStore.isTrusted(canonical);
+          },
+          ...(dependencies.atomicMemoryLifecycle
+            ? { lifecycle: dependencies.atomicMemoryLifecycle }
+            : {}),
+          ...(dependencies.memoryLearningChangedSink
+            ? { onChanged: dependencies.memoryLearningChangedSink }
+            : {}),
+          ...(dependencies.executionLearningWorkerOptions
+            ? { workerOptions: dependencies.executionLearningWorkerOptions }
+            : {}),
+        });
+        const foreground = worker.foregroundRun(memoryWorkspaceKey);
+        cleanupScope.register("执行学习前台占用", () => foreground.release());
+        learningWorker = worker;
+        if ((await nativeLearningGate()).allowed)
+          executionLearningRuntime = new ExecutionLearningRuntime({
+            session,
+            workspaceKey: memoryWorkspaceKey,
+            picoHome,
+            workDir,
+            store: repository,
+            io: learningIO,
+            gate: nativeLearningGate,
+            worker,
+            modelRoute: learningModelRoute,
+            onDiagnostic: () =>
+              recordExperienceDiagnostic("proposal", "execution_learning_collection_unavailable"),
+            onChanged: () =>
+              dependencies.memoryLearningChangedSink?.({
+                workspacePath: workDir,
+                workspaceKey: memoryWorkspaceKey,
+                revision: repository.executionLearning.readRevision(),
+              }),
+          });
+      } else if (
+        !backgroundPolicy &&
+        !dependencies.configuredSubagentChild &&
+        !dependencies.agentGraph
+      ) {
+        const worker = getExecutionLearningWorker(picoHome);
+        if (worker) {
+          const foreground = worker.foregroundRun(memoryWorkspaceKey);
+          cleanupScope.register("执行学习前台占用", () => foreground.release());
+        }
+      }
+      taskExperienceRuntime = new TaskExperienceRuntime({
+        session,
+        workspaceKey: memoryWorkspaceKey,
+        workDir,
+        ...(dependencies.hostRunId ? { hostRunId: dependencies.hostRunId } : {}),
+        store: repository,
+        gate: referenceGate,
+        proposalGate: taskLearningGate,
+        worker: learningWorker,
+        modelRoute: learningModelRoute,
+        onDiagnostic: (diagnostic) =>
+          recordExperienceDiagnostic(
+            diagnostic.phase === "admit" ? "identity" : "proposal",
+            diagnostic.reason,
+          ),
+        onChanged: () =>
+          dependencies.memoryLearningChangedSink?.({
+            workspacePath: workDir,
+            workspaceKey: memoryWorkspaceKey,
+            revision: repository.executionLearning.readRevision(),
+          }),
+        goalIdentity: () => {
+          const goal = goalManager.getActive();
+          return goal ? { goalId: goal.id, goalRevision: goal.revision } : undefined;
+        },
+      });
+      const onExperienceChanged = () =>
+        dependencies.memoryLearningChangedSink?.({
+          workspacePath: workDir,
+          workspaceKey: memoryWorkspaceKey,
+          revision: repository.executionLearning.readRevision(),
+        });
+      experienceFeedbackRuntime = new ExperienceFeedbackRuntime({
+        session,
+        workspaceKey: memoryWorkspaceKey,
+        workDir,
+        picoHome,
+        store: repository,
+        currentTask: () => taskExperienceRuntime?.currentTaskSnapshot(),
+        referenceGate,
+        effectGate: taskFeedbackGate,
+        nativeGate: nativeFeedbackGate,
+        io: learningIO,
+        env: runtimeEnv,
+        existingPreparedCommand: (call) => executionLearningRuntime?.preparedNativeCommand(call),
+        validateReviewed,
+        onChanged: onExperienceChanged,
+        onDiagnostic: (diagnostic) =>
+          recordExperienceDiagnostic(
+            ["reference", "delivery"].includes(diagnostic.phase) ? "reference" : "effect",
+            diagnostic.reason,
+          ),
+      });
+      registry.useRequest?.(async (call) => {
+        const learned = (await executionLearningRuntime?.prepare(call)) ?? call;
+        return { allowed: true, call: await experienceFeedbackRuntime!.prepare(learned) };
+      });
+      registry.setNativeLearningObserver?.({
+        beforeDispatch: async (call, context) => {
+          await executionLearningRuntime?.beforeDispatch(call, context);
+          await experienceFeedbackRuntime?.beforeDispatch(call, context);
+        },
+        fileCommitted: async (call, fact) => executionLearningRuntime?.fileCommitted(call, fact),
+      });
+      registry.register(
+        new ExecutionLessonTool({
+          store: repository,
+          session,
+          workspaceKey: memoryWorkspaceKey,
+          gate: async () => {
+            if (
+              (effectiveOptions.allowedTools !== undefined &&
+                !effectiveOptions.allowedTools.includes("memory_learn")) ||
+              (backgroundPolicy && !backgroundPolicy.allowedTools.has("memory_learn"))
+            )
+              return { allowed: false, reason: "tool_unavailable" };
+            return memoryExtractionAllowed();
+          },
+          isDraining: () => dependencies.atomicMemoryLifecycle?.isDraining ?? false,
+          ...(dependencies.memoryChangedSink ? { onChanged: dependencies.memoryChangedSink } : {}),
+        }),
+      );
       registry.register(
         buildMemorySearchTool({
-          search: async (query, context) => {
+          search: async (query, context, executionTargetId) => {
             const queryRef = context?.toolCallId ? { toolCallId: context.toolCallId } : undefined;
             let outcome: MemoryRecallTrace["outcome"] = "error";
             let settingsVersion: number | undefined;
@@ -2582,12 +3015,31 @@ export async function executeAgentRuntime(
             try {
               await checkSearchAdmission();
               const result = await builder.build(query, {
+                experienceAllowed: experienceRecallAllowed,
+                executionTargets: await executionLearningRecallTargets(
+                  repository,
+                  memoryWorkspaceKey,
+                  createExecutionLearningIO(workDir, undefined, (path) =>
+                    workspaceRoots.assertAllowed(path, {
+                      access: "read",
+                      consumeAuthorization: false,
+                    }),
+                  ),
+                  query,
+                  executionTargetId,
+                  runtimeEnv,
+                ),
+                reviewedExperiences: await reviewedRecallTargets(query),
                 mode: "search",
                 trace: { ...(queryRef ? { queryRef } : {}) },
               });
               await checkSearchAdmission();
-              if (result.trace) await recallTracker.record(result.trace);
-              else recallTracker.unavailable("search");
+              const recallEventId = result.trace
+                ? await recallTracker.record(result.trace)
+                : undefined;
+              if (!result.trace) recallTracker.unavailable("search");
+              await taskExperienceRuntime?.capture();
+              await experienceFeedbackRuntime?.recordReferences(result, recallEventId);
               return (
                 result.block ||
                 '<atomic-memory-reference trust="low">No matching active memory.</atomic-memory-reference>'
@@ -2609,6 +3061,7 @@ export async function executeAgentRuntime(
     if (options.steer) {
       steerQueue.push(options.steer);
     }
+    const learningUserInputs = new Set<string>();
     const promptLayersFactory = async ({
       currentUserPrompt,
       currentUserEventId,
@@ -2616,6 +3069,36 @@ export async function executeAgentRuntime(
       readonly currentUserPrompt: string;
       readonly currentUserEventId?: string;
     }) => {
+      currentExperienceInput = currentUserPrompt;
+      await taskExperienceRuntime?.capture(currentUserEventId);
+      if (
+        memoryRepository &&
+        !backgroundPolicy &&
+        !dependencies.configuredSubagentChild &&
+        !dependencies.agentGraph
+      ) {
+        const inputKey = currentUserEventId ?? currentUserPrompt;
+        if (!learningUserInputs.has(inputKey)) {
+          if (learningUserInputs.size > 0) {
+            getExecutionLearningWorker(picoHome)?.notifyForegroundInput(memoryWorkspaceKey);
+            await memoryRepository.executionLearning
+              .advanceExecutionLearningInput(memoryWorkspaceKey)
+              .catch(() => undefined);
+          }
+          learningUserInputs.add(inputKey);
+          if (
+            /(?:不要|别).{0,8}(?:保存|记录|学习|沉淀).{0,8}(?:这|该|错误|失败|经验|记忆)|(?:这条|这个|该|刚才的).{0,8}(?:记忆|经验|根因).{0,8}(?:不对|错误)|(?:撤销|删除).{0,8}(?:记忆|经验)/u.test(
+              currentUserPrompt.split(/\n\n附件文件：|\n<uploaded-attachments>/u)[0]!,
+            )
+          ) {
+            try {
+              memoryRepository.executionLearning.bumpManagementRevision();
+            } catch {
+              /* optional learning barrier */
+            }
+          }
+        }
+      }
       const composed = await new PromptComposer(workDir, collaborationMode() === "plan", {
         researchMode: collaborationMode() === "research",
         managedWorkspaceRead: currentMainProcessSandbox().bypass !== true,
@@ -2714,15 +3197,66 @@ export async function executeAgentRuntime(
         } else if (!memoryContextBuilder) {
           await recordRecallOutcome("automatic", currentUserPrompt, "error", recallQueryRef);
         } else {
-          const memory = await memoryContextBuilder.build(currentUserPrompt, {
-            trace: { ...(recallQueryRef ? { queryRef: recallQueryRef } : {}) },
-          });
-          if (memory.block) turnTailParts.push(memory.block);
-          if (memory.trace) await recallTracker.record(memory.trace);
-          else recallTracker.unavailable("automatic");
+          const initialSettings = await memoryRepository!.readSettings(memoryWorkspaceKey);
+          if (!initialSettings.enabled || !initialSettings.recallEnabled) {
+            await recordRecallOutcome(
+              "automatic",
+              currentUserPrompt,
+              "disabled",
+              recallQueryRef,
+              initialSettings.version,
+            );
+          } else {
+            const memory = await memoryContextBuilder.build(currentUserPrompt, {
+              experienceAllowed: experienceRecallAllowed,
+              executionTargets: memoryRepository
+                ? await executionLearningRecallTargets(
+                    memoryRepository,
+                    memoryWorkspaceKey,
+                    createExecutionLearningIO(workDir, undefined, (path) =>
+                      workspaceRoots.assertAllowed(path, {
+                        access: "read",
+                        consumeAuthorization: false,
+                      }),
+                    ),
+                    currentUserPrompt,
+                    undefined,
+                    runtimeEnv,
+                  )
+                : [],
+              reviewedExperiences: await reviewedRecallTargets(currentUserPrompt),
+              trace: { ...(recallQueryRef ? { queryRef: recallQueryRef } : {}) },
+            });
+            const finalSettings = await memoryRepository?.readSettings(memoryWorkspaceKey);
+            if (!(await memoryRecallAllowed()).allowed) {
+              await recordRecallOutcome(
+                "automatic",
+                currentUserPrompt,
+                "admission_denied",
+                recallQueryRef,
+                finalSettings?.version,
+              );
+            } else if (!finalSettings?.enabled || !finalSettings.recallEnabled) {
+              await recordRecallOutcome(
+                "automatic",
+                currentUserPrompt,
+                "disabled",
+                recallQueryRef,
+                finalSettings?.version,
+              );
+            } else {
+              if (memory.block) turnTailParts.push(memory.block);
+              const recallEventId = memory.trace
+                ? await recallTracker.record(memory.trace)
+                : undefined;
+              if (!memory.trace) recallTracker.unavailable("automatic");
+              await experienceFeedbackRuntime?.recordReferences(memory, recallEventId);
+            }
+          }
         }
       } catch (error) {
         await recordRecallOutcome("automatic", currentUserPrompt, "error", recallQueryRef);
+        experienceDiagnosticSink("reference", "experience_feedback_unavailable");
         logger.warn(
           { workDir, error: error instanceof Error ? error.message : String(error) },
           "[Memory] recall injection degraded",
@@ -2810,15 +3344,22 @@ export async function executeAgentRuntime(
         ? { waitAtSafeBoundary: dependencies.waitAtSafeBoundary }
         : {}),
       ...(activeHookService ? { hookService: activeHookService } : {}),
-      ...(backgroundPolicy?.hookRunner
+      ...(backgroundPolicy?.hookRunner ||
+      executionLearningRuntime ||
+      taskExperienceRuntime ||
+      experienceFeedbackRuntime
         ? {
-            postToolResultHook: (call, result) =>
-              backgroundPolicy.hookRunner!.runPostToolResult(
+            postToolResultHook: async (call, result) => {
+              await executionLearningRuntime?.committed(call, result);
+              await taskExperienceRuntime?.capture();
+              await experienceFeedbackRuntime?.committed(call, result);
+              await backgroundPolicy?.hookRunner?.runPostToolResult(
                 call.name,
                 parseHookToolInput(call.arguments),
                 result,
                 session.id,
-              ),
+              );
+            },
           }
         : {}),
       ...(rebuildProvider ? { rebuildProvider } : {}),
@@ -3272,6 +3813,25 @@ export async function executeAgentRuntime(
       ...(dependencies.hostRunId ? { hostRunId: dependencies.hostRunId } : {}),
       ...(dependencies.goalRunOrigin ? { goalRunOrigin: dependencies.goalRunOrigin } : {}),
       onRunAdmission: async (run) => {
+        if (
+          !executionLearningRuntime &&
+          memoryRepository &&
+          !backgroundPolicy &&
+          !dependencies.configuredSubagentChild &&
+          !dependencies.agentGraph
+        )
+          await memoryRepository.executionLearning
+            .advanceExecutionLearningInput(memoryWorkspaceKey)
+            .catch(() => undefined);
+        await executionLearningRuntime?.admit(run.runId);
+        await taskExperienceRuntime?.admit(run.runId);
+        experienceFeedbackRuntime?.admit(run.runId);
+        if (executionLearningRuntime && memoryModelFactory && memoryRepository) {
+          const admission = (await memoryRepository.executionLearning.listAdmissions()).find(
+            (value) => value.sessionId === session.id && value.runId === run.runId,
+          );
+          if (admission) registerExecutionLearningModel(admission.admissionId, memoryModelFactory);
+        }
         memoryRunAdmission = await readMemoryAdmission();
         await dependencies.onRunAdmission?.(run);
         if (collaborationMode() !== "plan" || !session.runtimeEventStore) return;
@@ -3300,8 +3860,14 @@ export async function executeAgentRuntime(
         ? { completionGuard: dependencies.runCompletionGuard }
         : {}),
       ...(dependencies.runFailureGuard ? { failureGuard: dependencies.runFailureGuard } : {}),
-      ...(atomicMemoryRuntime
-        ? { atomicMemoryCompleted: (runId: string) => atomicMemoryRuntime!.completed(runId) }
+      ...(atomicMemoryRuntime || executionLearningRuntime || taskExperienceRuntime
+        ? {
+            atomicMemoryCompleted: async (runId: string) => {
+              await executionLearningRuntime?.completed(runId);
+              await taskExperienceRuntime?.completed(runId);
+              await atomicMemoryRuntime?.completed(runId);
+            },
+          }
         : {}),
       atomicMemoryBoundary: async () => {
         const current = await readMemoryAdmission();

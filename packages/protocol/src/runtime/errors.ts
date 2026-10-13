@@ -14,6 +14,8 @@ export const RUNTIME_ERROR_CODES = {
   NOT_FOUND: "NOT_FOUND",
   FORBIDDEN: "FORBIDDEN",
   INTERNAL_ERROR: "INTERNAL_ERROR",
+  /** Attachment validation failed before a user message or run was accepted. */
+  ATTACHMENT_REJECTED: "ATTACHMENT_REJECTED",
   SEND_RECOVERY_UNAVAILABLE: "SEND_RECOVERY_UNAVAILABLE",
 } as const;
 

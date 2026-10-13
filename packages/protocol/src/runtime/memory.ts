@@ -1,5 +1,15 @@
 // Atomic Memory Item management, settings, and context-preview contracts.
 import type { JsonObject, WorkspaceParams } from "./base.js";
+import type { ExecutionLearningStatus, TaskExperienceSummary } from "@pico/core";
+import {
+  learningVersionParam,
+  experienceSummaryResult,
+  taskExperienceParamValidators,
+  taskExperienceResultValidators,
+} from "./task-experience.js";
+import type { TaskExperienceMethodMap } from "./task-experience.js";
+import { isJsonObject } from "./base.js";
+import { invalidResult } from "./errors.js";
 import { invalidParams } from "./errors.js";
 import {
   booleanParam,
@@ -49,6 +59,17 @@ export type RuntimeMemoryItemSource = JsonObject & {
 
 /** Direct projection of the authoritative atomic Item and its current provenance. */
 type RuntimeMemoryItemFields = JsonObject & {
+  readonly sourceType?: "execution-validated" | "reviewed-reference";
+  readonly taskExperience?: TaskExperienceSummary & JsonObject;
+  readonly taskAcceptance?: JsonObject & {
+    readonly candidateId: string;
+    readonly predicateId: "test-target-pass.v1" | "command-conditions.v1";
+    readonly targetId: string;
+    readonly targetLabel: string;
+    readonly acceptedAt: number;
+    readonly claimHash: string;
+    readonly scopeHash: string;
+  };
   readonly itemId: string;
   readonly version: number;
   readonly content: string;
@@ -65,6 +86,11 @@ type RuntimeMemoryItemFields = JsonObject & {
   readonly contentHash: string;
   readonly createdAt: number;
   readonly updatedAt: number;
+  readonly executionEvidence?: JsonObject & {
+    readonly candidateId: string;
+    readonly confirmedAt: number;
+    readonly verificationCount: number;
+  };
 };
 
 export type RuntimeMemoryItem = RuntimeMemoryItemFields & {
@@ -102,7 +128,13 @@ export type RuntimeMemoryContextBudget = JsonObject & {
 export type RuntimeMemoryReference = JsonObject & {
   readonly itemId: string;
   readonly content: string;
-  readonly source: "user-evidence" | "manual" | "assistant-note";
+  readonly source:
+    | "user-evidence"
+    | "manual"
+    | "assistant-note"
+    | "execution-evidence"
+    | "execution-validated"
+    | "reviewed-reference";
   readonly excerpt: boolean;
   readonly range: { readonly start: number; readonly end: number; readonly total: number };
   readonly match: "key" | "content" | "preference";
@@ -220,13 +252,39 @@ const memoryItemFieldsResult = {
   createdAt: resultNonNegativeInteger,
   updatedAt: resultNonNegativeInteger,
 };
-const memoryItemResult = exactResultShape({
-  ...memoryItemFieldsResult,
-  sources: resultArray(memorySourceResult),
+const executionEvidenceResult = exactResultShape({
+  candidateId: resultString,
+  confirmedAt: resultNonNegativeInteger,
+  verificationCount: resultNonNegativeInteger,
 });
+const taskAcceptanceResult = exactResultShape({
+  candidateId: resultString,
+  predicateId: resultOneOf(["test-target-pass.v1", "command-conditions.v1"]),
+  targetId: resultString,
+  targetLabel: resultString,
+  acceptedAt: resultNonNegativeInteger,
+  claimHash: resultString,
+  scopeHash: resultString,
+});
+const memoryItemResult = exactResultShape(
+  {
+    ...memoryItemFieldsResult,
+    sources: resultArray(memorySourceResult),
+  },
+  {
+    executionEvidence: executionEvidenceResult,
+    sourceType: resultOneOf(["execution-validated"]),
+    taskAcceptance: taskAcceptanceResult,
+  },
+);
 const memoryListItemResult = exactResultShape(
   { ...memoryItemFieldsResult, sourceCount: resultNonNegativeInteger },
-  { firstSource: memorySourceResult },
+  {
+    firstSource: memorySourceResult,
+    executionEvidence: executionEvidenceResult,
+    sourceType: resultOneOf(["execution-validated"]),
+    taskAcceptance: taskAcceptanceResult,
+  },
 );
 const memoryPageInfoResult = exactResultShape(
   {
@@ -248,6 +306,7 @@ function memoryListParams(value: Record<string, unknown>): void {
       limit: positiveIntegerParam,
       paged: booleanParam,
       cursor: boundedNonEmptyStringParam(4_096),
+      learningVersion: learningVersionParam,
     },
   )(value);
   if (("paged" in value && value.paged !== true) || ("cursor" in value && value.paged !== true))
@@ -269,7 +328,13 @@ const memorySettingsResult = exactResultShape({
 const memoryReferenceResult = exactResultShape({
   itemId: resultString,
   content: resultString,
-  source: resultOneOf(["user-evidence", "manual", "assistant-note"]),
+  source: resultOneOf([
+    "user-evidence",
+    "manual",
+    "assistant-note",
+    "execution-evidence",
+    "execution-validated",
+  ]),
   excerpt: resultBoolean,
   range: exactResultShape({
     start: resultNonNegativeInteger,
@@ -302,7 +367,26 @@ const memoryMetricsResult = exactResultShape({
   unknownReceiptCount: resultNonNegativeInteger,
 });
 
-export type MemoryMethodMap = {
+export type MemoryMethodMap = TaskExperienceMethodMap & {
+  readonly "memory.learning.list": {
+    readonly params: WorkspaceParams & { readonly sessionId?: string };
+    readonly result: {
+      readonly workspaceKey: string;
+      readonly revision: number;
+      readonly items: readonly ExecutionLearningStatus[];
+    };
+  };
+  readonly "memory.learning.inspect": {
+    readonly params: WorkspaceParams & { readonly candidateId: string };
+    readonly result: { readonly candidate: JsonObject };
+  };
+  readonly "memory.learning.discard": {
+    readonly params: WorkspaceParams & {
+      readonly candidateId: string;
+      readonly expectedRevision: number;
+    };
+    readonly result: { readonly discarded: true };
+  };
   readonly "memory.list": {
     readonly params: WorkspaceParams & {
       readonly lifecycleStates?: readonly RuntimeMemoryLifecycleState[];
@@ -310,17 +394,23 @@ export type MemoryMethodMap = {
       readonly limit?: number;
       readonly paged?: true;
       readonly cursor?: string;
+      readonly learningVersion?: 2;
     };
     readonly result:
-      | { readonly items: readonly RuntimeMemoryItem[]; readonly pageInfo?: never }
+      | {
+          readonly items: readonly RuntimeMemoryItem[];
+          readonly pageInfo?: never;
+          readonly learningVersion?: 2;
+        }
       | {
           readonly items: readonly RuntimeMemoryListItem[];
           readonly pageInfo: RuntimeMemoryPageInfo;
+          readonly learningVersion?: 2;
         };
   };
   readonly "memory.get": {
-    readonly params: WorkspaceParams & { readonly itemId: string };
-    readonly result: { readonly item: RuntimeMemoryItem };
+    readonly params: WorkspaceParams & { readonly itemId: string; readonly learningVersion?: 2 };
+    readonly result: { readonly item: RuntimeMemoryItem; readonly learningVersion?: 2 };
   };
   /** /memory remember（TUI 直写）：显式记住一条 workspace note（安全扫描 + 幂等 + 再激活）。 */
   readonly "memory.create": {
@@ -370,8 +460,11 @@ export type MemoryMethodMap = {
       readonly maxItems?: number;
       readonly maxTokens?: number;
       readonly query?: string;
+      readonly sessionId?: string;
+      readonly learningVersion?: 2;
     };
     readonly result: {
+      readonly learningVersion?: 2;
       readonly items: readonly RuntimeMemoryItem[];
       readonly budget: RuntimeMemoryContextBudget;
       readonly block?: string;
@@ -390,11 +483,28 @@ export type MemoryMethodMap = {
 };
 
 export const memoryParamValidators = {
-  "memory.list": memoryListParams,
-  "memory.get": exactParamShape({
+  ...taskExperienceParamValidators,
+  "memory.learning.list": exactParamShape(
+    { workspacePath: stringParam },
+    { sessionId: boundedNonEmptyStringParam(512) },
+  ),
+  "memory.learning.inspect": exactParamShape({
     workspacePath: stringParam,
-    itemId: boundedNonEmptyStringParam(512),
+    candidateId: boundedNonEmptyStringParam(512),
   }),
+  "memory.learning.discard": exactParamShape({
+    workspacePath: stringParam,
+    candidateId: boundedNonEmptyStringParam(512),
+    expectedRevision: positiveIntegerParam,
+  }),
+  "memory.list": memoryListParams,
+  "memory.get": exactParamShape(
+    {
+      workspacePath: stringParam,
+      itemId: boundedNonEmptyStringParam(512),
+    },
+    { learningVersion: learningVersionParam },
+  ),
   "memory.create": exactParamShape({
     workspacePath: stringParam,
     text: boundedNonEmptyStringParam(8192),
@@ -414,6 +524,8 @@ export const memoryParamValidators = {
       maxItems: positiveIntegerParam,
       maxTokens: positiveIntegerParam,
       query: boundedNonEmptyStringParam(4096),
+      sessionId: boundedNonEmptyStringParam(512),
+      learningVersion: learningVersionParam,
     },
   ),
   "memory.metrics.get": exactParamShape(
@@ -422,13 +534,246 @@ export const memoryParamValidators = {
   ),
 } satisfies Readonly<Record<keyof MemoryMethodMap, RuntimeParamValidator>>;
 
+const learningStates = [
+  "waiting",
+  "ready",
+  "working",
+  "saved",
+  "insufficient",
+  "invalidated",
+  "discarded",
+  "expired",
+] as const;
+const acceptancePredicates = ["test-target-pass.v1", "command-conditions.v1"] as const;
+const hashResult: RuntimeResultRule = (value, path) => {
+  if (typeof value !== "string" || !/^[a-f0-9]{64}$/u.test(value))
+    throw invalidResult(`${path}不是 SHA-256 摘要`);
+};
+const runnerResult = exactResultShape(
+  { execPath: resultString, version: resultString },
+  { fingerprint: hashResult },
+);
+const conditionResult: RuntimeResultRule = (value, path) => {
+  if (!isJsonObject(value)) throw invalidResult(`${path}不是条件`);
+  switch (value.kind) {
+    case "cwd":
+      return exactResultShape({ kind: resultOneOf(["cwd"]), path: resultString })(value, path);
+    case "file":
+      return exactResultShape({
+        kind: resultOneOf(["file"]),
+        path: resultString,
+        hash: hashResult,
+      })(value, path);
+    case "json":
+      return exactResultShape({
+        kind: resultOneOf(["json"]),
+        path: resultString,
+        field: resultArray(resultString),
+        value: (v, p) => {
+          if (v !== null && !["string", "number", "boolean"].includes(typeof v))
+            throw invalidResult(`${p}不是静态 JSON 字段`);
+        },
+      })(value, path);
+    case "node-package":
+      return exactResultShape({
+        kind: resultOneOf(["node-package"]),
+        path: resultString,
+        name: resultString,
+        version: resultString,
+        entryPath: resultString,
+        entryHash: hashResult,
+      })(value, path);
+    default:
+      throw invalidResult(`${path}条件类型未知`);
+  }
+};
+const preparationResult: RuntimeResultRule = (value, path) => {
+  if (!isJsonObject(value)) throw invalidResult(`${path}不是准备步骤`);
+  switch (value.kind) {
+    case "cwd":
+      return exactResultShape({
+        kind: resultOneOf(["cwd"]),
+        path: resultString,
+        source: memorySourceResult,
+      })(value, path);
+    case "file":
+      return exactResultShape(
+        {
+          kind: resultOneOf(["file"]),
+          path: resultString,
+          afterHash: hashResult,
+          source: memorySourceResult,
+        },
+        { beforeHash: resultNullable(hashResult), content: resultString },
+      )(value, path);
+    case "dependency":
+      return exactResultShape({
+        kind: resultOneOf(["dependency"]),
+        command: resultString,
+        manifestHash: hashResult,
+        source: memorySourceResult,
+      })(value, path);
+    default:
+      throw invalidResult(`${path}准备类型未知`);
+  }
+};
+const learningCandidateResult = exactResultShape(
+  {
+    state: resultOneOf(learningStates),
+    updatedAt: resultNonNegativeInteger,
+    claim: exactResultShape(
+      {
+        candidateId: resultString,
+        revision: resultNonNegativeInteger,
+        failureKey: hashResult,
+        predicateId: resultOneOf(acceptancePredicates),
+        claimHash: hashResult,
+        admission: exactResultShape({
+          admissionId: resultString,
+          workspaceKey: resultString,
+          sessionId: resultString,
+          runId: resultString,
+          workDir: resultString,
+          settingsVersion: resultNonNegativeInteger,
+          deletionRevision: resultNonNegativeInteger,
+          managementRevision: resultNonNegativeInteger,
+          inputEpoch: resultNonNegativeInteger,
+          createdAt: resultNonNegativeInteger,
+        }),
+        target: exactResultShape(
+          {
+            targetId: resultString,
+            label: resultString,
+            kind: resultOneOf(["node-test", "command"]),
+            command: resultString,
+            argv: resultArray(resultString),
+            cwd: resultString,
+            scopeHash: hashResult,
+            entryFiles: resultArray(exactResultShape({ path: resultString, hash: hashResult })),
+          },
+          { testFiles: resultArray(resultString) },
+        ),
+        conditions: resultArray(conditionResult),
+        recipe: resultArray(preparationResult),
+        failedTestIds: resultArray(resultString),
+        failure: memorySourceResult,
+        createdAt: resultNonNegativeInteger,
+      },
+      { runner: runnerResult },
+    ),
+  },
+  { itemId: resultString, reason: resultString, hypothesis: resultString },
+);
+
+const memoryItemV2Result = exactResultShape(
+  { ...memoryItemFieldsResult, sources: resultArray(memorySourceResult) },
+  {
+    executionEvidence: executionEvidenceResult,
+    sourceType: resultOneOf(["execution-validated", "reviewed-reference"]),
+    taskAcceptance: taskAcceptanceResult,
+    taskExperience: experienceSummaryResult,
+  },
+);
+const memoryListItemV2Result = exactResultShape(
+  { ...memoryItemFieldsResult, sourceCount: resultNonNegativeInteger },
+  {
+    firstSource: memorySourceResult,
+    executionEvidence: executionEvidenceResult,
+    sourceType: resultOneOf(["execution-validated", "reviewed-reference"]),
+    taskAcceptance: taskAcceptanceResult,
+    taskExperience: experienceSummaryResult,
+  },
+);
+const memoryReferenceV2Result = exactResultShape({
+  itemId: resultString,
+  content: resultString,
+  source: resultOneOf([
+    "user-evidence",
+    "manual",
+    "assistant-note",
+    "execution-evidence",
+    "execution-validated",
+    "reviewed-reference",
+  ]),
+  excerpt: resultBoolean,
+  range: exactResultShape({
+    start: resultNonNegativeInteger,
+    end: resultNonNegativeInteger,
+    total: resultNonNegativeInteger,
+  }),
+  match: resultOneOf(["key", "content", "preference"]),
+});
+const isV2 = (v: unknown) => isJsonObject(v) && v.learningVersion === 2;
+const previewRule = (v2: boolean) =>
+  exactResultShape(
+    {
+      items: resultArray(v2 ? memoryItemV2Result : memoryItemResult),
+      budget: exactResultShape({
+        maxItems: resultNonNegativeInteger,
+        maxTokens: resultNonNegativeInteger,
+        usedItems: resultNonNegativeInteger,
+        usedTokens: resultNonNegativeInteger,
+        truncated: resultBoolean,
+      }),
+      ...(v2 ? { learningVersion: resultOneOf([2]) } : {}),
+    },
+    {
+      block: resultString,
+      references: resultArray(v2 ? memoryReferenceV2Result : memoryReferenceResult),
+      diagnostics: resultArray(memoryDiagnosticResult),
+    },
+  );
 export const memoryResultValidators = {
+  ...taskExperienceResultValidators,
+  "memory.learning.list": exactResultShape({
+    workspaceKey: resultString,
+    revision: resultNonNegativeInteger,
+    items: resultArray(
+      exactResultShape(
+        {
+          candidateId: resultString,
+          revision: resultNonNegativeInteger,
+          workspaceKey: resultString,
+          sessionId: resultString,
+          runId: resultString,
+          state: resultOneOf([
+            "waiting",
+            "ready",
+            "working",
+            "saved",
+            "insufficient",
+            "invalidated",
+            "discarded",
+            "expired",
+          ]),
+          predicateId: resultOneOf(["test-target-pass.v1", "command-conditions.v1"]),
+          targetId: resultString,
+          targetLabel: resultString,
+          updatedAt: resultNonNegativeInteger,
+          sources: resultArray(memorySourceResult),
+        },
+        { itemId: resultString, reason: resultString },
+      ),
+    ),
+  }),
+  "memory.learning.inspect": exactResultShape({ candidate: learningCandidateResult }),
+  "memory.learning.discard": exactResultShape({ discarded: resultOneOf([true]) }),
   "memory.list": (value, path) => {
-    if (value && typeof value === "object" && Object.hasOwn(value, "pageInfo"))
+    if (isV2(value)) {
+      const paged = Object.hasOwn(value as object, "pageInfo");
+      exactResultShape({
+        learningVersion: resultOneOf([2]),
+        items: resultArray(paged ? memoryListItemV2Result : memoryItemV2Result),
+        ...(paged ? { pageInfo: memoryPageInfoResult } : {}),
+      })(value, path);
+    } else if (value && typeof value === "object" && Object.hasOwn(value, "pageInfo"))
       pagedMemoryListResult(value, path);
     else legacyMemoryListResult(value, path);
   },
-  "memory.get": exactResultShape({ item: memoryItemResult }),
+  "memory.get": (v, p) =>
+    (isV2(v)
+      ? exactResultShape({ learningVersion: resultOneOf([2]), item: memoryItemV2Result })
+      : exactResultShape({ item: memoryItemResult }))(v, p),
   "memory.create": exactResultShape({ item: memoryItemResult }),
   "memory.update": exactResultShape({ item: memoryItemResult }),
   "memory.delete": exactResultShape({
@@ -437,22 +782,6 @@ export const memoryResultValidators = {
   }),
   "memory.settings.get": exactResultShape({ settings: memorySettingsResult }),
   "memory.settings.update": exactResultShape({ settings: memorySettingsResult }),
-  "memory.context.preview": exactResultShape(
-    {
-      items: resultArray(memoryItemResult),
-      budget: exactResultShape({
-        maxItems: resultNonNegativeInteger,
-        maxTokens: resultNonNegativeInteger,
-        usedItems: resultNonNegativeInteger,
-        usedTokens: resultNonNegativeInteger,
-        truncated: resultBoolean,
-      }),
-    },
-    {
-      block: resultString,
-      references: resultArray(memoryReferenceResult),
-      diagnostics: resultArray(memoryDiagnosticResult),
-    },
-  ),
+  "memory.context.preview": (v, p) => previewRule(isV2(v))(v, p),
   "memory.metrics.get": exactResultShape({ metrics: memoryMetricsResult }),
 } satisfies Readonly<Record<keyof MemoryMethodMap, RuntimeResultRule>>;

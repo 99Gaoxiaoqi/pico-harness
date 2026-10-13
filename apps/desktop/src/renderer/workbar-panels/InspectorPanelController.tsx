@@ -103,10 +103,15 @@ export function InspectorPanelController({
       setError(undefined);
       try {
         // Re-read from the newest page with fresh cursors: new runs may shift every page.
+        const handshake = await invokeWorkbarRuntime(runtime, "runtime.ping", {}).catch(
+          () => undefined,
+        );
+        const learningV2 = handshake?.capabilities.includes("memory-learning-v2") === true;
         const result = await readExecutionWindow(
           (cursor) =>
             invokeWorkbarRuntime(runtime, "session.execution.query", {
               ...scope,
+              ...(learningV2 ? { learningVersion: 2 as const } : {}),
               ...(cursor ? { cursor } : {}),
             }),
           pageCount.current + (more ? 1 : 0),

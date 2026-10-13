@@ -1,5 +1,5 @@
 import type {
-  RuntimeInputAttachment,
+  RuntimeInlineImageAttachment,
   RuntimeSkillReference,
   RuntimeUserInput,
 } from "@pico/protocol/mobile";
@@ -11,7 +11,7 @@ export type ComposerAgent = { name: string; subagentId?: string };
 export type DraftScope = { hostId: string; workspaceId: string; sessionId: string };
 export type ComposerDraft = {
   text: string;
-  images: RuntimeInputAttachment[];
+  images: RuntimeInlineImageAttachment[];
   mode: ComposerMode;
   skills: RuntimeSkillReference[];
   agent?: ComposerAgent;

@@ -6,6 +6,9 @@
 // generateSimpleDiff 经 registry-impl 门面 re-export,供 approval/diff.ts 消费。
 
 import { access, constants } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { reportNativeFileCommit } from "./native-file-learning.js";
+import type { ToolExecutionContext } from "./tool-registry-contract.js";
 import type { BaseTool, ToolFileSideEffects } from "./tool-registry-contract.js";
 import type { ToolDefinition } from "@pico/core";
 import { ToolAccesses } from "@pico/runtime/tool-access";
@@ -269,7 +272,7 @@ export class EditFileTool implements BaseTool {
     };
   }
 
-  async execute(args: string): Promise<string> {
+  async execute(args: string, context?: ToolExecutionContext): Promise<string> {
     let path: string;
     let oldText: string;
     let newText: string;
@@ -299,6 +302,12 @@ export class EditFileTool implements BaseTool {
       content: prepared.content,
       precondition: snapshot.precondition,
       revalidateTarget: () => assertSameResolvedTarget(this.roots, path, fullPath),
+    });
+    await reportNativeFileCommit(context, {
+      path: fullPath,
+      beforeHash: createHash("sha256").update(snapshot.content).digest("hex"),
+      afterHash: createHash("sha256").update(prepared.content).digest("hex"),
+      ...(Array.from(prepared.content).length <= 1500 ? { content: prepared.content } : {}),
     });
 
     // 5. 生成 diff 预览(简单 before/after 对比,供用户审批时查看)

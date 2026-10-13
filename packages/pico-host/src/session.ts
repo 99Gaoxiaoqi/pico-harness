@@ -1604,7 +1604,11 @@ export class Session
   getModelContext(): Message[] {
     return this.messageLedger
       .getModelContext()
-      .map((message) => resolveSessionMediaReferences(this.runtimeStorageRoot, this.id, message));
+      .map((message) => this.resolveModelMessageMedia(message));
+  }
+
+  resolveModelMessageMedia(message: Message): Message {
+    return resolveSessionMediaReferences(this.runtimeStorageRoot, this.id, message);
   }
 
   /** True only while the tail tool exchange is still waiting for results. */

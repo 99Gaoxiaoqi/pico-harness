@@ -1,4 +1,4 @@
-import type { RuntimeInputAttachment } from "@pico/protocol/mobile";
+import type { RuntimeInlineImageAttachment } from "@pico/protocol/mobile";
 import type {
   RemoteMethod as RuntimeMethod,
   RemoteParams as RuntimeParams,
@@ -71,7 +71,7 @@ export function decodedBase64Size(data: string): number {
     throw new Error("图片编码无效");
   return (data.length / 4) * 3 - (data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0);
 }
-export function validateAttachments(images: readonly RuntimeInputAttachment[]) {
+export function validateAttachments(images: readonly RuntimeInlineImageAttachment[]) {
   if (images.length > 4) throw new Error("最多选择 4 张图片");
   const total = images.reduce((n, image) => n + decodedBase64Size(image.data), 0);
   if (total > 256 * 1024) throw new Error("图片总量超过 256 KiB，请缩小图片");

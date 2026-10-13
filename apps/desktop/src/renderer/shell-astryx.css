@@ -53,7 +53,7 @@
   height: auto;
   grid-template-columns: 16px minmax(0, 1fr) auto 14px;
   gap: 7px;
-  padding: 5px 8px;
+  padding: 5px 64px 5px 8px;
   border: 0;
   border-radius: 7px;
   font-size: 11px;
@@ -84,15 +84,25 @@
 }
 .pico-sidebar-menu-trigger.astryx-button {
   position: absolute;
-  top: 3px;
+  top: 4px;
   right: 4px;
-  width: 26px;
-  height: 24px;
+  width: 24px;
+  height: 22px;
+  min-width: 0;
+  padding: 0;
   border: 0;
   border-radius: 5px;
   background: var(--sidebar);
   opacity: 0;
 }
+.sidebar-project__row {
+  position: relative;
+}
+.sidebar-project__menu-trigger.astryx-button {
+  right: 32px;
+}
+.sidebar-project__row:hover .pico-sidebar-menu-trigger,
+.sidebar-project__row:focus-within .pico-sidebar-menu-trigger,
 .sidebar-session-row:hover .pico-sidebar-menu-trigger,
 .sidebar-session-row:focus-within .pico-sidebar-menu-trigger,
 .pico-sidebar-menu-trigger[aria-expanded="true"] {
@@ -102,20 +112,43 @@
   background: var(--sidebar-raised);
 }
 .pico-sidebar-menu-trigger svg {
-  width: 15px;
-  height: 15px;
+  width: 14px;
+  height: 14px;
+  stroke-width: 1.75;
 }
 .pico-sidebar-menu {
+  --_dropdown-menu-radius: 8px;
+  --_dropdown-menu-padding: 4px;
+  --text-body-size: 12px;
+  --text-body-leading: 1.5;
+  --text-supporting-size: 11px;
+  --text-supporting-leading: 1.45;
+  padding: 4px;
+  gap: 2px;
   border: 1px solid var(--line);
+  border-radius: 8px;
   background: var(--surface-raised);
   color: var(--sidebar-ink);
-  box-shadow: var(--shadow-sm);
+  box-shadow: none;
   -webkit-app-region: no-drag;
+}
+.astryx-popover:has(> .pico-sidebar-menu) {
+  --_popover-radius: 8px;
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgb(0 0 0 / 0.08);
 }
 .pico-sidebar-menu .astryx-dropdown-menu-item {
   min-height: 28px;
+  padding: 4px 8px;
+  gap: 8px;
+  border-radius: 4px;
   font-size: 12px;
   -webkit-app-region: no-drag;
+}
+.pico-sidebar-menu .astryx-dropdown-menu-item svg {
+  width: 14px;
+  height: 14px;
+  stroke-width: 1.75;
 }
 .pico-task-search.task-search {
   margin: 0 auto;

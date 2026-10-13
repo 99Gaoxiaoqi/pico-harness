@@ -100,6 +100,7 @@ export interface AtomicMemoryStore extends MemoryItemStore {
   listItems(input: {
     readonly workspaceKey: string;
     readonly includeArchived?: boolean;
+    readonly learningVersion?: 2;
     readonly limit?: number;
   }): Promise<readonly MemoryItemRecord[]>;
   readSettings(workspaceKey: string): Promise<AtomicMemorySettings>;

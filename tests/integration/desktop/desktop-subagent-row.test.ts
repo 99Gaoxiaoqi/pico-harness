@@ -66,6 +66,7 @@ test("真实工具组加载结果显示协作卡与折叠技术详情，失败�
     output,
   };
   const markup = render([activation, child]);
+  assert.match(markup, /<details class="conversation-agent-activation">/u);
   assert.match(markup, /子智能体协作已启用/u);
   assert.match(markup, /已加载 1 项协作工具/u);
   assert.match(markup, /启动子任务后，点击子 Agent 名称可查看运行记录/u);

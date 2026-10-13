@@ -23,6 +23,7 @@ import {
   Search,
   Settings,
   ShieldCheck,
+  SquarePen,
   Trash2,
   WandSparkles,
   X,
@@ -55,6 +56,14 @@ import {
 
 const primaryNav = [{ ...appPrimaryNavigation[0], icon: Clock3 }] as const;
 
+interface SidebarProjectGroup {
+  readonly key: string;
+  readonly label: string;
+  readonly git: boolean;
+  readonly workspacePaths: Set<string>;
+  readonly sessions: SessionView[];
+}
+
 export function AppShell() {
   const runtime = useRuntime();
   const { data, preview, message, actions, busy } = runtime;
@@ -66,6 +75,7 @@ export function AppShell() {
     () => window.localStorage.getItem("pico.sidebar-collapsed") === "true",
   );
   const [searchOpen, setSearchOpen] = useState(false);
+  const [projectActionBusy, setProjectActionBusy] = useState(false);
   useEffect(() => {
     const onShortcut = (event: globalThis.KeyboardEvent) => {
       if (
@@ -152,6 +162,62 @@ export function AppShell() {
     },
     [actions],
   );
+  const handleArchiveProject = async (project: SidebarProjectGroup) => {
+    if (
+      projectActionBusy ||
+      project.sessions.length === 0 ||
+      !window.confirm(
+        `归档“${project.label}”的 ${project.sessions.length} 条聊天？归档后可在任务列表中恢复。`,
+      )
+    )
+      return;
+    setProjectActionBusy(true);
+    try {
+      for (const session of project.sessions) {
+        const archived = await actions.setSessionArchived(
+          { workspacePath: session.workspacePath, sessionId: session.id },
+          true,
+        );
+        if (!archived) return;
+      }
+      const activeSession = project.sessions.find((session) =>
+        isActiveWorkspaceSession(
+          { workspacePath: session.workspacePath, sessionId: session.id },
+          location.pathname,
+          location.search,
+        ),
+      );
+      if (activeSession)
+        navigate(
+          newSessionHref(project.key === "unassigned" ? undefined : activeSession.workspacePath),
+        );
+      actions.showMessage?.(`已归档“${project.label}”的 ${project.sessions.length} 条聊天。`);
+    } finally {
+      setProjectActionBusy(false);
+    }
+  };
+  const handleRemoveProject = async (project: SidebarProjectGroup) => {
+    const workspacePaths = data.workspaces
+      .filter((workspace) => project.workspacePaths.has(workspace.path) && !workspace.temporary)
+      .map((workspace) => workspace.path);
+    if (
+      projectActionBusy ||
+      workspacePaths.length === 0 ||
+      !window.confirm(
+        `从 Pico 移除项目“${project.label}”？项目文件和聊天记录会保留，重新添加文件夹后可继续使用。`,
+      )
+    )
+      return;
+    setProjectActionBusy(true);
+    try {
+      for (const workspacePath of workspacePaths) {
+        if (!(await actions.unregisterWorkspace(workspacePath))) return;
+        if (routeWorkspacePath === workspacePath) navigate(newSessionHref());
+      }
+    } finally {
+      setProjectActionBusy(false);
+    }
+  };
   const handleDeleteSession = useCallback(
     async (session: SessionView) => {
       const confirmed = window.confirm(
@@ -269,10 +335,12 @@ export function AppShell() {
                 approvals={data.approvals}
                 prompts={data.prompts}
                 activeWorkspacePath={data.workspacePath}
-                busy={busy === "session-state" || busy === "choose-workspace"}
+                busy={Boolean(busy) || projectActionBusy}
                 onArchiveSession={handleArchiveSession}
                 onDeleteSession={handleDeleteSession}
                 onPinSession={handlePinSession}
+                onArchiveProject={handleArchiveProject}
+                onRemoveProject={handleRemoveProject}
               />
             </div>
             <div className="sidebar__footer">
@@ -441,6 +509,8 @@ function SidebarTasks({
   onArchiveSession,
   onDeleteSession,
   onPinSession,
+  onArchiveProject,
+  onRemoveProject,
 }: {
   readonly sessions: readonly SessionView[];
   readonly workspaces: readonly WorkspaceView[];
@@ -452,27 +522,22 @@ function SidebarTasks({
   readonly onArchiveSession: (session: SessionView) => void;
   readonly onDeleteSession: (session: SessionView) => void;
   readonly onPinSession: (session: SessionView) => void;
+  readonly onArchiveProject: (project: SidebarProjectGroup) => Promise<void>;
+  readonly onRemoveProject: (project: SidebarProjectGroup) => Promise<void>;
 }) {
+  const navigate = useNavigate();
   const [grouping, setGrouping] = useState<SidebarTaskGrouping>(() =>
     window.localStorage.getItem("pico.sidebar-task-grouping") === "time" ? "time" : "project",
   );
   const [collapsedProjects, setCollapsedProjects] = useState<ReadonlySet<string>>(new Set());
+  const [openProjectMenu, setOpenProjectMenu] = useState<string>();
   useEffect(() => {
     window.localStorage.setItem("pico.sidebar-task-grouping", grouping);
   }, [grouping]);
   const visibleSessions = sortSidebarTasks(
     sessions.filter((session) => session.status !== "archived"),
   );
-  const groupedProjects = new Map<
-    string,
-    {
-      readonly key: string;
-      readonly label: string;
-      readonly git: boolean;
-      readonly workspacePaths: Set<string>;
-      readonly sessions: SessionView[];
-    }
-  >();
+  const groupedProjects = new Map<string, SidebarProjectGroup>();
   for (const session of visibleSessions) {
     const workspace = workspaces.find((candidate) => candidate.path === session.workspacePath);
     const projectId = session.projectId !== undefined ? session.projectId : workspace?.projectId;
@@ -500,6 +565,24 @@ function SidebarTasks({
     }
     group.workspacePaths.add(session.workspacePath);
     group.sessions.push(session);
+  }
+  for (const workspace of workspaces) {
+    if (!workspace.registered || workspace.temporary || workspace.projectId === null) continue;
+    const key = workspace.projectId
+      ? `project:${workspace.projectId}`
+      : `workspace:${workspace.path}`;
+    let group = groupedProjects.get(key);
+    if (!group) {
+      group = {
+        key,
+        label: workspace.projectName ?? workspace.name,
+        git: workspace.mode === "git",
+        workspacePaths: new Set(),
+        sessions: [],
+      };
+      groupedProjects.set(key, group);
+    }
+    group.workspacePaths.add(workspace.path);
   }
   const groups = [...groupedProjects.values()];
   const renderSession = (session: SessionView, nested = false, workspaceLabel?: string) => {
@@ -560,50 +643,111 @@ function SidebarTasks({
           </AstryxButton>
         </div>
       </div>
-      {visibleSessions.length === 0 ? (
+      {(grouping === "time" ? visibleSessions.length === 0 : groups.length === 0) ? (
         <p className="sidebar-tasks__empty">发送第一条消息后，任务会出现在这里。</p>
       ) : grouping === "time" ? (
         <div className="sidebar-recent-sessions">
           {visibleSessions.map((session) => renderSession(session))}
         </div>
       ) : (
-        groups.map((group) => (
-          <div className="sidebar-project" key={group.key}>
-            <AstryxButton
-              label={group.label}
-              variant="ghost"
-              className="sidebar-project__header"
-              aria-expanded={!collapsedProjects.has(group.key)}
-              onClick={() =>
-                setCollapsedProjects((current) => {
-                  const next = new Set(current);
-                  if (next.has(group.key)) next.delete(group.key);
-                  else next.add(group.key);
-                  return next;
-                })
-              }
-            >
-              {group.git ? <FolderGit2 aria-hidden="true" /> : <Folder aria-hidden="true" />}
-              <span>{group.label}</span>
-              <small>{group.sessions.length}</small>
-              <ChevronDown aria-hidden="true" />
-            </AstryxButton>
-            {!collapsedProjects.has(group.key) && (
-              <div className="sidebar-project__sessions">
-                {group.sessions.map((session) => {
-                  const workspace = workspaces.find(
-                    (candidate) => candidate.path === session.workspacePath,
-                  );
-                  const workspaceLabel =
-                    group.workspacePaths.size > 1 && workspace?.temporary !== true
-                      ? (workspace?.name ?? workspaceName(session.workspacePath))
-                      : undefined;
-                  return renderSession(session, true, workspaceLabel);
-                })}
+        groups.map((group) => {
+          const projectWorkspaces = workspaces.filter(
+            (workspace) => group.workspacePaths.has(workspace.path) && !workspace.temporary,
+          );
+          const primaryWorkspace =
+            projectWorkspaces.find((workspace) => workspace.name === group.label) ??
+            projectWorkspaces[0];
+          const running = runs.some(
+            (run) => group.workspacePaths.has(run.workspacePath) && !isTerminalRun(run.status),
+          );
+          return (
+            <div className="sidebar-project" key={group.key}>
+              <div className="sidebar-project__row">
+                <AstryxButton
+                  label={group.label}
+                  variant="ghost"
+                  className="sidebar-project__header"
+                  aria-expanded={!collapsedProjects.has(group.key)}
+                  onContextMenu={(event) => {
+                    event.preventDefault();
+                    setOpenProjectMenu(group.key);
+                  }}
+                  onClick={() =>
+                    setCollapsedProjects((current) => {
+                      const next = new Set(current);
+                      if (next.has(group.key)) next.delete(group.key);
+                      else next.add(group.key);
+                      return next;
+                    })
+                  }
+                >
+                  {group.git ? <FolderGit2 aria-hidden="true" /> : <Folder aria-hidden="true" />}
+                  <span>{group.label}</span>
+                  <small>{group.sessions.length}</small>
+                  <ChevronDown aria-hidden="true" />
+                </AstryxButton>
+                <DropdownMenu
+                  className="pico-sidebar-menu"
+                  button={{
+                    label: `项目操作 ${group.label}`,
+                    icon: <MoreHorizontal aria-hidden="true" />,
+                    isIconOnly: true,
+                    variant: "ghost",
+                    className: "pico-sidebar-menu-trigger sidebar-project__menu-trigger",
+                  }}
+                  isMenuOpen={openProjectMenu === group.key}
+                  onOpenChange={(open) => setOpenProjectMenu(open ? group.key : undefined)}
+                  hasChevron={false}
+                  menuWidth={168}
+                  alignment="end"
+                  presentation="popover"
+                >
+                  <DropdownMenuItem
+                    icon={<Archive aria-hidden="true" />}
+                    label="归档聊天"
+                    description={running ? "有聊天正在运行，结束后可归档" : undefined}
+                    isDisabled={busy || running || group.sessions.length === 0}
+                    onClick={() => void onArchiveProject(group)}
+                  />
+                  {group.key !== "unassigned" && projectWorkspaces.length > 0 && (
+                    <DropdownMenuItem
+                      icon={<Trash2 aria-hidden="true" />}
+                      label="移除项目"
+                      description={running ? "有聊天正在运行，结束后可移除" : undefined}
+                      variant="destructive"
+                      isDisabled={busy || running}
+                      onClick={() => void onRemoveProject(group)}
+                    />
+                  )}
+                </DropdownMenu>
+                <AstryxButton
+                  label={`新建任务 ${group.label}`}
+                  tooltip="新建任务"
+                  icon={<SquarePen aria-hidden="true" />}
+                  isIconOnly
+                  variant="ghost"
+                  className="pico-sidebar-menu-trigger sidebar-project__new-task"
+                  isDisabled={busy}
+                  onClick={() => navigate(newSessionHref(primaryWorkspace?.path))}
+                />
               </div>
-            )}
-          </div>
-        ))
+              {!collapsedProjects.has(group.key) && (
+                <div className="sidebar-project__sessions">
+                  {group.sessions.map((session) => {
+                    const workspace = workspaces.find(
+                      (candidate) => candidate.path === session.workspacePath,
+                    );
+                    const workspaceLabel =
+                      group.workspacePaths.size > 1 && workspace?.temporary !== true
+                        ? (workspace?.name ?? workspaceName(session.workspacePath))
+                        : undefined;
+                    return renderSession(session, true, workspaceLabel);
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })
       )}
     </section>
   );
@@ -675,7 +819,7 @@ function SidebarSessionRow({
           className: "pico-sidebar-menu-trigger",
         }}
         hasChevron={false}
-        menuWidth={208}
+        menuWidth={168}
         alignment="end"
         presentation="popover"
       >

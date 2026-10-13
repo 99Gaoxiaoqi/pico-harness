@@ -1,3 +1,4 @@
+import type { ExperienceFeedbackMethodMap } from "./experience-feedback.js";
 // Method registry aggregation. Domain imports stay type-only; keep the Desktop allowlist explicit.
 import type { AutomationMethodMap } from "./automation.js";
 import { isJsonObject, isJsonValue } from "./base.js";
@@ -18,6 +19,7 @@ export type RuntimeMethodMap = SessionMethodMap &
   ConfigMethodMap &
   SubagentsMethodMap &
   MemoryMethodMap &
+  ExperienceFeedbackMethodMap &
   PlanningMethodMap &
   CapabilitiesMethodMap &
   WorkspaceMethodMap &
@@ -120,6 +122,16 @@ export const RUNTIME_METHODS = [
   "rewind.changes",
   "rewind.restoreFile",
   "memory.list",
+  "memory.learning.list",
+  "memory.learning.inspect",
+  "memory.learning.discard",
+  "memory.experience.query",
+  "memory.experience.detail",
+  "memory.experience.feedback",
+  "memory.learning.query",
+  "memory.learning.detail",
+  "memory.learning.review",
+  "memory.learning.feedback",
   "memory.get",
   "memory.create",
   "memory.update",
@@ -279,6 +291,16 @@ export const DESKTOP_RUNTIME_METHODS = [
   "rewind.changes",
   "rewind.restoreFile",
   "memory.list",
+  "memory.learning.list",
+  "memory.learning.inspect",
+  "memory.learning.discard",
+  "memory.experience.query",
+  "memory.experience.detail",
+  "memory.experience.feedback",
+  "memory.learning.query",
+  "memory.learning.detail",
+  "memory.learning.review",
+  "memory.learning.feedback",
   "memory.get",
   "memory.create",
   "memory.update",

@@ -4,6 +4,10 @@ export class AtomicMemoryLifecycle {
   private draining = false;
   private closed = false;
   private closePromise?: Promise<void>;
+  private readonly cleanup = new Set<() => void | Promise<void>>();
+  onClose(callback: () => void | Promise<void>): void {
+    this.cleanup.add(callback);
+  }
 
   constructor(private readonly acquireResidency?: () => { release(): void }) {}
 
@@ -44,6 +48,8 @@ export class AtomicMemoryLifecycle {
   }
 
   private async closeOnce(): Promise<void> {
+    await Promise.allSettled([...this.cleanup].map((callback) => Promise.resolve().then(callback)));
+    this.cleanup.clear();
     while (this.tasks.size > 0) await Promise.allSettled([...this.tasks]);
     this.closed = true;
   }

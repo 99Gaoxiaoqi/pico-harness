@@ -61,7 +61,10 @@ import {
   type PreparedRequestCapture,
   type PreparedRequestDiagnostic,
 } from "@pico/runtime/provider-request-diagnostics";
-import { capturePreparedMemoryRecall } from "./memory-recall-request.js";
+import {
+  capturePreparedMemoryRecall,
+  type PreparedMemoryRecallDiagnostic,
+} from "./memory-recall-request.js";
 
 export interface ProviderCallLedger {
   beginPhysicalAttemptOwner?(): string;
@@ -76,6 +79,13 @@ export interface ProviderCallLedger {
 }
 
 export interface CostTrackerOptions {
+  /** Host bookkeeping after an actual prepared request enters a physical attempt. */
+  onPreparedRecallDispatched?: (input: {
+    readonly providerCallId: string;
+    readonly physicalAttemptId: string;
+    readonly runId: string;
+    readonly diagnostic: PreparedMemoryRecallDiagnostic;
+  }) => Promise<void>;
   /** Host-owned route facts; cloned before each call, never refreshed at settlement. */
   contextFacts?: RequestContextFacts;
   onAccountingChanged?: (record: PhysicalAttemptRecord, revision: number) => void;
@@ -244,15 +254,18 @@ export class CostTracker implements LLMProvider {
         : {}),
     });
     let requestDiagnostic: PreparedRequestDiagnostic | undefined;
+    let preparedRecall: PreparedMemoryRecallDiagnostic | undefined;
     const requestRoute = preparedRequestRoute(this.modelRoute);
     const logicalCallPriors = new Map<string, PreparedRequestCapture | undefined>();
     const observeRequest = (request: PreparedProviderRequest): void => {
+      preparedRecall = undefined;
       try {
+        preparedRecall = contextFacts.memoryRecall
+          ? capturePreparedMemoryRecall(request, contextFacts.memoryRecall)
+          : undefined;
         const current = {
           ...capturePreparedProviderRequest(request),
-          ...(contextFacts.memoryRecall
-            ? { memoryRecall: capturePreparedMemoryRecall(request, contextFacts.memoryRecall) }
-            : {}),
+          ...(preparedRecall ? { memoryRecall: preparedRecall } : {}),
         };
         const key = preparedRequestKey(context, current, requestRoute);
         let prior: PreparedRequestCapture | undefined;
@@ -385,6 +398,26 @@ export class CostTracker implements LLMProvider {
         await options?.onProviderAttemptUpdate?.(snapshot);
       };
     }
+    const accountingStart = lifecycle.onProviderAttemptStart;
+    lifecycle.onProviderAttemptStart = async (snapshot) => {
+      if (accountingStart) await accountingStart(snapshot);
+      else await options?.onProviderAttemptStart?.(snapshot);
+      if (preparedRecall && runtimeRun && context.purpose === "main") {
+        try {
+          await this.options.onPreparedRecallDispatched?.({
+            providerCallId: callId,
+            physicalAttemptId: snapshot.physicalAttemptId,
+            runId: runtimeRun.runId,
+            diagnostic: structuredClone(preparedRecall),
+          });
+        } catch {
+          this.options.diagnostics?.warn(
+            { reason: "experience_delivery_callback_unavailable" },
+            "[Tracker] 经验交付记录失败",
+          );
+        }
+      }
+    };
     const start = Date.now();
     try {
       const response = await invoke(observeRequest, observeAttempt, lifecycle);

@@ -38,6 +38,10 @@ const MediaContext = createContext<
   | undefined
 >(undefined);
 
+export function useMediaScope(): MediaScope | undefined {
+  return useContext(MediaContext)?.scope;
+}
+
 function mediaReadQueue() {
   let active = 0;
   const pending: (() => void)[] = [];

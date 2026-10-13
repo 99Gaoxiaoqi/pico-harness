@@ -347,6 +347,8 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
           MODEL_CATALOG_RUNTIME_CAPABILITY,
           REVIEW_IDEMPOTENCY_RUNTIME_CAPABILITY,
           MEMORY_PAGINATION_RUNTIME_CAPABILITY,
+          "memory-learning-v2",
+          "memory-experience-feedback-v1",
           RUN_POINT_LOOKUP_RUNTIME_CAPABILITY,
           TERMINAL_STREAM_RUNTIME_CAPABILITY,
           "shared-config-v1",

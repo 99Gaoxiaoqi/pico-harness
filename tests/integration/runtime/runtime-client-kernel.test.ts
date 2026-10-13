@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { access, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { once } from "node:events";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -17,6 +19,8 @@ import {
   type LocalRuntimeClientOptions,
 } from "@pico/pico-host/local-runtime-client";
 import { resolvePicoPaths } from "@pico/pico-host";
+import { UserConfigStore } from "@pico/pico-host/input/user-config-store";
+import { SqliteRuntimeEventStore } from "@pico/storage/sqlite/sqlite-runtime-event-store";
 import { sessionOwnerLeaseDirectory, withWorkspaceSqliteLease } from "@pico/storage";
 import { TestRuntimeHostCandidateTracker } from "../helpers/test-runtime-daemon.js";
 import { writeDesktopModelRouting } from "../../fixtures/desktop-model-routing.js";
@@ -50,7 +54,10 @@ async function startKernelClientHarness(t: {
   await mkdir(workspaceDir, { recursive: true });
   process.env.PICO_HOME = picoHome;
   const candidates = new TestRuntimeHostCandidateTracker();
+  const clients = new Set<LocalRuntimeClient>();
   t.after(async () => {
+    // Stop subscription reconnect loops before shutting down their owned daemons.
+    for (const client of clients) client.close();
     await candidates.stopAll();
     await rm(root, { recursive: true, force: true }).catch(() => undefined);
   });
@@ -58,12 +65,15 @@ async function startKernelClientHarness(t: {
     picoHome,
     workspacePath: await realpath(workspaceDir),
     candidates,
-    createClient: (options = {}) =>
-      new LocalRuntimeClient({
+    createClient: (options = {}) => {
+      const client = new LocalRuntimeClient({
         ...options,
         runtimeHostRootPath: picoHome,
         candidateLauncher: candidates.launcher,
-      }),
+      });
+      clients.add(client);
+      return client;
+    },
     cleanup: async () => undefined,
   };
 }
@@ -156,6 +166,219 @@ test("kernel client: killing the daemon makes the next request respawn it", asyn
 
   // 重生实例由 harness 持有其稳定进程能力并统一清理。
 });
+
+test(
+  "kernel client: an active Run crash recovers one failed fact without replaying its effect",
+  { timeout: 40_000 },
+  async (t) => {
+    const harness = await startKernelClientHarness(t);
+    const workspacePath = harness.workspacePath;
+    const toolCallId = "call-crash-edit";
+    const effectPath = join(workspacePath, "crash-effect.log");
+    await writeFile(effectPath, "effect\n");
+    const requests: {
+      messages: { role: string; tool_call_id?: string }[];
+    }[] = [];
+    const server = createServer(async (request, response) => {
+      let body = "";
+      for await (const chunk of request) body += chunk;
+      requests.push(JSON.parse(body));
+      // The second request is the crash barrier: the actual tool has returned and
+      // its result is in the next model input, while the Run is still active.
+      if (requests.length > 1) return;
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.end(
+        [
+          {
+            choices: [
+              {
+                index: 0,
+                delta: {
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: toolCallId,
+                      type: "function",
+                      function: {
+                        name: "edit_file",
+                        arguments: JSON.stringify({
+                          path: "crash-effect.log",
+                          old_text: "effect\n",
+                          new_text: "effect\neffect\n",
+                          replace_all: true,
+                        }),
+                      },
+                    },
+                  ],
+                },
+                finish_reason: null,
+              },
+            ],
+          },
+          {
+            choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
+            usage: { prompt_tokens: 5, completion_tokens: 2 },
+          },
+        ]
+          .map((event) => `data: ${JSON.stringify(event)}\n\n`)
+          .join("") + "data: [DONE]\n\n",
+      );
+    });
+    t.after(
+      () =>
+        new Promise<void>((resolve, reject) => {
+          server.closeAllConnections();
+          server.close((error) => (error ? reject(error) : resolve()));
+        }),
+    );
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const config = new UserConfigStore({ picoHome: harness.picoHome });
+    await config.write(
+      {
+        version: 1,
+        defaults: { modelRouteId: "crash/coder" },
+        providers: {
+          crash: {
+            protocol: "openai",
+            baseURL: `http://127.0.0.1:${address.port}/v1`,
+            apiKeyEnv: "PICO_CRASH_FIXTURE_TOKEN",
+            apiKey: "crash-fixture-key",
+            discoverModels: false,
+            models: ["coder"],
+          },
+        },
+      },
+      { expectedRevision: (await config.read()).revision },
+    );
+    const client = harness.createClient({ reconnectDelayMs: 20, maxReconnectDelayMs: 20 });
+    t.after(() => client.close());
+    await client.request("workspace.trust", { workspacePath, trusted: true });
+    const { session } = await client.request("session.create", { workspacePath });
+    const sessionId = session.sessionId;
+    await client.request("session.settings.update", {
+      workspacePath,
+      sessionId,
+      permissionMode: "full-access",
+    });
+    const live: RuntimeNotification[] = [];
+    const subscription = await client.subscribe({ workspacePath }, (event) => live.push(event));
+    t.after(() => subscription.dispose());
+    const start = {
+      workspacePath,
+      sessionId,
+      prompt: "Duplicate each effect line once, then wait.",
+      idempotencyKey: "crash-after-effect",
+    };
+    const started = await client.request("run.start", start);
+    assert.ok(
+      await waitForCondition(() => requests.length >= 2, 15_000),
+      JSON.stringify(await client.request("run.get", { workspacePath, runId: started.runId })),
+    );
+    assert.equal(requests.length, 2);
+    assert.ok(
+      requests[1]?.messages.some(
+        (message) => message.role === "tool" && message.tool_call_id === toolCallId,
+      ),
+      "crash barrier must follow a real tool result reaching the next model request",
+    );
+    // This effect is deliberately non-idempotent: executing it again doubles the lines again.
+    assert.equal(await readFile(effectPath, "utf8"), "effect\neffect\n");
+    const { run: active } = await client.request("run.get", {
+      workspacePath,
+      runId: started.runId,
+    });
+    assert.ok(active);
+    assert.equal(active.status, "running");
+    const before = await client.request("events.replay", { workspacePath, limit: 100 });
+    assert.equal(before.hasMore, false);
+    assert.equal(before.events.filter((event) => event.topic === "run.finished").length, 0);
+    const cursor = before.highWatermarkEventId;
+    assert.ok(cursor);
+    const capability = await resolveStorageRoot({ path: harness.picoHome, kind: "interactive" });
+    const controlDirectory = join(resolveRootControlNamespace(), capability.rootId);
+    const previousHost = await readHostRegistration(controlDirectory);
+    assert.ok(previousHost);
+    await harness.candidates.terminateOwned(previousHost.pid);
+
+    // Inspect the tool facts committed by the killed process, rather than seeding crash residue.
+    const store = new SqliteRuntimeEventStore({
+      storageRoot: resolvePicoPaths(workspacePath, { picoHome: harness.picoHome }).workspace.root,
+    });
+    try {
+      const sessionEvents = await store.readSession(sessionId);
+      const admitted = sessionEvents.filter((event) => event.kind === "run.started");
+      assert.equal(admitted.length, 1);
+      // The daemon Run and the canonical execution Run have separate identities.
+      const events = sessionEvents.filter((event) => event.runId === admitted[0]!.runId);
+      assert.equal(events.filter((event) => event.kind === "run.terminal").length, 0);
+      assert.equal(events.filter((event) => event.kind === "model.call.started").length, 2);
+      assert.equal(events.filter((event) => event.kind === "model.call.settled").length, 1);
+      assert.equal(
+        events.filter(
+          (event) => event.kind === "tool.started" && event.refs?.toolCallId === toolCallId,
+        ).length,
+        1,
+      );
+      const results = events.filter(
+        (event) => event.kind === "tool.result.recorded" && event.refs.toolCallId === toolCallId,
+      );
+      assert.equal(results.length, 1);
+      assert.ok(results[0]?.kind === "tool.result.recorded");
+      assert.equal(results[0].data.status, "succeeded");
+    } finally {
+      store.close();
+    }
+
+    const { run: recovered } = await client.request("run.get", {
+      workspacePath,
+      runId: started.runId,
+    });
+    assert.ok(recovered);
+    assert.equal(recovered.status, "failed");
+    assert.equal(recovered.sessionId, sessionId);
+    assert.equal(recovered.version, active.version + 1);
+    assert.match(recovered.error ?? "", /重启前 Run 未进入终态/u);
+    const successor = await readHostRegistration(controlDirectory);
+    assert.ok(successor);
+    assert.notEqual(successor.hostEpoch, previousHost.hostEpoch);
+
+    const isFinished = (event: RuntimeNotification) =>
+      event.topic === "run.finished" && event.scope.runId === started.runId;
+    assert.ok(await waitForCondition(() => live.some(isFinished), 10_000));
+    const replay = await client.request("events.replay", {
+      workspacePath,
+      afterEventId: cursor,
+      limit: 100,
+    });
+    assert.equal(replay.hasMore, false);
+    assert.equal(replay.events.filter(isFinished).length, 1);
+    assert.deepEqual(live.filter(isFinished), replay.events.filter(isFinished));
+    assert.deepEqual(await client.request("run.start", start), recovered);
+    assert.deepEqual(
+      (await client.request("events.replay", { workspacePath, limit: 100 })).events.filter(
+        isFinished,
+      ),
+      replay.events.filter(isFinished),
+      "replaying the idempotent start must preserve the single durable terminal event",
+    );
+    assert.equal(live.filter(isFinished).length, 1);
+    assert.equal(
+      requests.length,
+      2,
+      "recovery and idempotent replay must not call the model again",
+    );
+    assert.equal(await readFile(effectPath, "utf8"), "effect\neffect\n");
+    assert.deepEqual(
+      (await client.request("runs.list", { workspacePath, sessionId })).runs.map(
+        (run) => run.runId,
+      ),
+      [started.runId],
+    );
+  },
+);
 
 test("kernel client: current shutdown waits for response, ownership drain and process exit", async (t) => {
   const harness = await startKernelClientHarness(t);

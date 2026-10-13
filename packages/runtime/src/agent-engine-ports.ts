@@ -25,6 +25,8 @@ export interface EngineSession
   flushPersistence(): Promise<void>;
   getHistory(): Message[];
   getModelContext(): Message[];
+  /** Host-owned, read-only hydration of validated media references in canonical runtime history. */
+  resolveModelMessageMedia?(message: Message): Message;
   commitMessages(...messages: Message[]): Promise<void>;
   truncateTo(fromIndex: number): Promise<void>;
   preparePromptCacheSharding(

@@ -7,6 +7,10 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
+    "./bash-parser": {
+      "types": "./dist/bash-parser.d.ts",
+      "import": "./dist/bash-parser.js"
+    },
     "./provider/*": {
       "types": "./dist/provider/*.d.ts",
       "import": "./dist/provider/*.js"

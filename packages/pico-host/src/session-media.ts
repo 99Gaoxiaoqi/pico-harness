@@ -3,7 +3,7 @@ import { constants } from "node:fs";
 import { open, realpath, stat } from "node:fs/promises";
 import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 import { lexer, walkTokens } from "marked";
-import type { ImagePart, Message } from "@pico/core";
+import { RUNTIME_MESSAGE_EVENT_ID, type ImagePart, type Message } from "@pico/core";
 import {
   rewriteSavedAiSdkMedia,
   isSavedAiSdkProjectionCurrent,
@@ -410,19 +410,81 @@ export function resolveSessionMediaReferences(
   sessionId: string,
   message: Message,
 ): Message {
-  if (!message.images?.some((image) => image.type === "image_artifact")) return message;
   const repository = new SqliteSessionWorkbarRepository({ storageRoot });
+  const sourceImages = [...(message.images ?? [])];
+  // Tool observations are canonical text, not message.committed media. Resolve
+  // only explicit image links backed by this session's immutable artifacts.
+  if (message.role === "user" && message.toolCallId !== undefined) {
+    for (const match of message.content.matchAll(
+      /(?:^|\n)!\[[^\]\r\n]*\]\(pico:\/\/artifact\/([^/?#\s)]+)\)[\t ]*(?=\r?\n|$)/gu,
+    )) {
+      if (sourceImages.length >= MEDIA_MAX_REFERENCES) break;
+      try {
+        const artifactId = decodeURIComponent(match[1]!);
+        if (
+          artifactId.length > 256 ||
+          sourceImages.some(
+            (image) => image.type === "image_artifact" && image.artifactId === artifactId,
+          )
+        )
+          continue;
+        const artifact = repository.queryArtifacts({ sessionId, artifactId }).artifacts[0];
+        if (
+          !artifact ||
+          !artifact.mimeType.startsWith("image/") ||
+          artifact.sizeBytes <= 0 ||
+          artifact.sizeBytes > MODEL_IMAGE_MAX_BYTES
+        )
+          continue;
+        sourceImages.push({
+          type: "image_artifact",
+          artifactId,
+          mimeType: artifact.mimeType,
+          sizeBytes: artifact.sizeBytes,
+          digest: artifact.digest,
+        });
+      } catch {
+        /* Missing, foreign or malformed references remain inert text. */
+      }
+    }
+  }
+  // Generated Markdown images remain compact output artifacts in the ledger, but
+  // become verified visual references in disposable model history for follow-up edits.
+  if (message.role === "assistant" && Array.isArray(message.providerData?.picoMedia)) {
+    for (const ref of message.providerData.picoMedia as RuntimeMediaReference[]) {
+      if (
+        ref.kind !== "image" ||
+        sourceImages.some(
+          (image) => image.type === "image_artifact" && image.artifactId === ref.artifactId,
+        )
+      )
+        continue;
+      const image: ArtifactImage = {
+        type: "image_artifact",
+        artifactId: ref.artifactId,
+        mimeType: ref.mimeType,
+        sizeBytes: ref.sizeBytes,
+        digest: ref.digest,
+      };
+      if (ownedImage(repository, sessionId, image)) sourceImages.push(image);
+    }
+  }
+  if (!sourceImages.some((image) => image.type === "image_artifact")) return message;
   const replacements = new Map<string, string>();
-  const images = message.images.map((image) => {
+  const images = sourceImages.map((image) => {
     if (image.type !== "image_artifact") return image;
     const artifact = ownedImage(repository, sessionId, image);
     if (!artifact || artifact.artifactId === image.artifactId) return image;
     replacements.set(image.artifactId, artifact.artifactId);
     return { ...image, artifactId: artifact.artifactId };
   });
-  if (!replacements.size) return message;
+  if (!replacements.size && sourceImages.length === (message.images?.length ?? 0)) return message;
   const replayWasValid = isSavedAiSdkProjectionCurrent(message);
   const projected = structuredClone({ ...message, images });
+  // structuredClone intentionally drops symbol keys. This one binds memory
+  // evidence to the canonical event and must survive disposable media hydration.
+  if (message[RUNTIME_MESSAGE_EVENT_ID] !== undefined)
+    projected[RUNTIME_MESSAGE_EVENT_ID] = message[RUNTIME_MESSAGE_EVENT_ID];
   const replace = (text: string) =>
     text.replace(/pico:\/\/artifact\/([^/?#\s)]+)/gu, (uri, id: string) => {
       const replacement = replacements.get(decodeURIComponent(id));

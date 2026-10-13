@@ -5,7 +5,6 @@ import { Button, EmptyState, WorkspaceModeCard } from "./components.js";
 import { useRuntime } from "./runtime-context.js";
 import {
   workspaceDisplayName,
-  workspaceHref,
   workspaceParent,
   workspacePathFromSearch,
 } from "./workspace-session.js";
@@ -39,9 +38,14 @@ function WorkspacePicker() {
   const { data, actions, busy } = useRuntime();
   const location = useLocation();
   const navigate = useNavigate();
+  const destination = (workspacePath: string) => {
+    const params = new URLSearchParams(location.search);
+    params.set("workspace", workspacePath);
+    return `${location.pathname}?${params.toString()}${location.hash}`;
+  };
   const addWorkspace = async () => {
     const workspacePath = await actions.chooseWorkspace();
-    if (workspacePath) navigate(workspaceHref(location.pathname, workspacePath));
+    if (workspacePath) navigate(destination(workspacePath));
   };
   return (
     <section className="workspace-picker" aria-labelledby="workspace-picker-title">
@@ -54,7 +58,7 @@ function WorkspacePicker() {
             <Link
               className="workspace-picker__item"
               key={workspace.path}
-              to={workspaceHref(location.pathname, workspace.path)}
+              to={destination(workspace.path)}
             >
               <span className="workspace-picker__icon">
                 {workspace.mode === "git" ? (

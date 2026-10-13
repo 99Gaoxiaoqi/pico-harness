@@ -1,0 +1,72 @@
+@layer components {
+  .execution-learning,
+  .execution-learning__runs {
+    min-width: 0;
+  }
+  .execution-learning {
+    border: 1px solid var(--line);
+    border-radius: var(--radius-md);
+    background: var(--surface-raised);
+  }
+  .execution-learning__runs {
+    display: grid;
+    gap: 8px;
+  }
+  .execution-learning > summary {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 13px;
+    color: var(--ink-secondary);
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .execution-learning > summary::before {
+    content: "›";
+  }
+  .execution-learning[open] > summary::before {
+    content: "⌄";
+  }
+  .execution-learning > summary:focus-visible {
+    outline: 2px solid var(--accent-strong);
+    outline-offset: 2px;
+    border-radius: var(--radius-md);
+  }
+  .execution-learning__summary-state,
+  .execution-learning > summary > span:last-child {
+    color: var(--ink-tertiary);
+  }
+  .execution-learning__candidate h4,
+  .execution-learning__inspection {
+    overflow-wrap: anywhere;
+  }
+  .execution-learning__inspection {
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid var(--line);
+    color: var(--ink-secondary);
+    font-size: 12px;
+  }
+  .execution-learning__inspection h5 {
+    margin: 0 0 6px;
+    font-size: 12px;
+  }
+  .execution-learning__inspection dl {
+    display: grid;
+    gap: 8px;
+  }
+  .execution-learning__inspection dl > div {
+    display: grid;
+    grid-template-columns: 64px minmax(0, 1fr);
+    gap: 8px;
+  }
+  .execution-learning__inspection dd {
+    min-width: 0;
+    margin: 0;
+  }
+  .execution-learning__inspection ul {
+    margin: 0;
+    padding-left: 16px;
+  }
+}

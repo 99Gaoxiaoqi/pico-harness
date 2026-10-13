@@ -36,12 +36,20 @@ These are records retrieved from the user's long-term memory. Use relevant facts
 const FOOTER = "</atomic-memory-reference>";
 
 type RecallMatch = "key" | "content" | "preference";
-type ReferenceSource = "user-evidence" | "manual" | "assistant-note";
+type ReferenceSource =
+  | "user-evidence"
+  | "manual"
+  | "assistant-note"
+  | "execution-evidence"
+  | "execution-validated"
+  | "reviewed-reference";
 
 export interface AtomicMemoryReference {
   readonly itemId: string;
   readonly content: string;
   readonly source: ReferenceSource;
+  /** Rendered alongside a reviewed suggestion, with no adoption or validation authority. */
+  readonly applicability?: string;
   readonly excerpt: boolean;
   /** Original Item code-point offsets, zero-based and half-open. */
   readonly range: { readonly start: number; readonly end: number; readonly total: number };
@@ -55,6 +63,16 @@ export interface AtomicMemoryRecallDiagnostic {
 }
 
 export interface AtomicMemoryContextOptions {
+  /** Host task exclusion/permission check for the three experience sources before selection. */
+  readonly experienceAllowed?: (record: MemoryItemRecord) => Promise<boolean>;
+  /** Host-checked current target scope, not model-provided taskFamily or inferred relevance. */
+  readonly executionTargets?: readonly { readonly targetId: string; readonly scopeHash: string }[];
+  /** Approved identities matched by Host against current conditions and tool/file permissions. */
+  readonly reviewedExperiences?: readonly {
+    readonly candidateId: string;
+    readonly contentVersion: number;
+    readonly recordRevision: number;
+  }[];
   readonly mode?: "automatic" | "search";
   readonly maxItems?: number;
   readonly maxTokens?: number;
@@ -176,21 +194,76 @@ export class AtomicMemoryContextBuilder {
             limit: SEARCH_LIMIT,
           })
         : [],
-      !search || signals.cjkBigrams.length >= 2
+      !search ||
+      signals.cjkBigrams.length >= 2 ||
+      !!options.executionTargets?.length ||
+      !!options.reviewedExperiences?.length
         ? this.store.listItems({
             workspaceKey: this.workspaceKey,
             includeArchived: false,
             limit: RESIDENT_WINDOW,
+            ...{ learningVersion: 2 as const },
           })
         : [],
     ]);
+    const excludedExperienceItems = new Set<string>();
+    if (options.experienceAllowed) {
+      const uniqueExperiences = new Map(
+        [...exact, ...prefix, ...content, ...residents]
+          .filter(
+            (record) =>
+              record.sourceType === "reviewed-reference" ||
+              record.sourceType === "execution-validated" ||
+              !!record.executionEvidence,
+          )
+          .map((record) => [record.item.itemId, record]),
+      );
+      await Promise.all(
+        [...uniqueExperiences.values()].map(async (record) => {
+          try {
+            if (!(await options.experienceAllowed!(record)))
+              excludedExperienceItems.add(record.item.itemId);
+          } catch {
+            excludedExperienceItems.add(record.item.itemId);
+          }
+        }),
+      );
+    }
     const visible = (record: MemoryItemRecord): boolean =>
+      !excludedExperienceItems.has(record.item.itemId) &&
+      (!record.taskExperience || record.sourceType === "reviewed-reference") &&
+      (record.sourceType !== "reviewed-reference" ||
+        (!!record.taskExperience &&
+          record.taskExperience.review === "approved" &&
+          record.taskExperience.enabled &&
+          record.taskExperience.validation !== "fail" &&
+          record.taskExperience.validation !== "stale" &&
+          (options.reviewedExperiences ?? []).some(
+            (target) =>
+              target.candidateId === record.taskExperience!.candidateId &&
+              target.contentVersion === record.taskExperience!.contentVersion &&
+              target.recordRevision === record.taskExperience!.recordRevision,
+          ))) &&
+      (record.sourceType !== "execution-validated" ||
+        (!!record.taskAcceptance &&
+          (options.executionTargets ?? []).some(
+            (target) =>
+              target.targetId === record.taskAcceptance!.targetId &&
+              target.scopeHash === record.taskAcceptance!.scopeHash,
+          ))) &&
       record.item.lifecycleState === "active" &&
       (record.item.scopeType === "global" ||
         (record.item.scopeType === "workspace" && record.item.scopeKey === this.workspaceKey));
     const compoundMatches = residents.filter((record) => cjkCompoundScore(record, signals) >= 2);
     const unique = new Map(
-      [...exact, ...prefix, ...content, ...compoundMatches]
+      [
+        ...exact,
+        ...prefix,
+        ...content,
+        ...compoundMatches,
+        ...residents.filter((record) => record.sourceType === "execution-validated"),
+        ...residents.filter((record) => record.sourceType === "reviewed-reference"),
+      ]
         .filter(visible)
         .map((record) => [record.item.itemId, record]),
     );
@@ -203,7 +276,12 @@ export class AtomicMemoryContextBuilder {
         );
         return {
           record,
-          score: Math.max(keyScore, contentScore),
+          score: Math.max(
+            keyScore,
+            contentScore,
+            record.sourceType === "execution-validated" ? 1 : 0,
+            record.sourceType === "reviewed-reference" ? 1 : 0,
+          ),
           match: keyScore > 0 ? ("key" as const) : ("content" as const),
         };
       })
@@ -239,9 +317,27 @@ export class AtomicMemoryContextBuilder {
     const duplicateKeys = new Set<string>();
     const lines: string[] = [];
     let truncated = false;
+    let executionSelected = false;
     for (const [index, { record, match, score }] of candidates.entries()) {
+      if (
+        (record.sourceType === "execution-validated" ||
+          record.sourceType === "reviewed-reference") &&
+        executionSelected
+      )
+        continue;
       const note = referenceNote(record);
-      const source = note ? "assistant-note" : record.sources.length ? "user-evidence" : "manual";
+      const source =
+        record.sourceType === "execution-validated"
+          ? "execution-validated"
+          : record.sourceType === "reviewed-reference"
+            ? "reviewed-reference"
+            : record.executionEvidence
+              ? "execution-evidence"
+              : note
+                ? "assistant-note"
+                : record.sources.length
+                  ? "user-evidence"
+                  : "manual";
       const duplicate = duplicateKey(record, source);
       const diagnostic = (reason: AtomicMemoryRecallDiagnostic["reason"]): void => {
         diagnostics.push({ itemId: record.item.itemId, reason, match });
@@ -268,12 +364,16 @@ export class AtomicMemoryContextBuilder {
       const render = (start: number, end: number): RenderedReference =>
         renderReference(record, note, source, match, start, end, search);
       const fits = ({ line }: RenderedReference): boolean =>
+        (source !== "reviewed-reference" || countTokens(line) <= AUTO_MAX_TOKENS) &&
         (!search || countTokens(line) <= SEARCH_ITEM_TOKENS) &&
         [false, true].every((cut) => countTokens(formatBlock([...lines, line], cut)) <= maxTokens);
       const body = note?.body ?? record.item.content;
       let rendered = render(0, Array.from(body).length);
       if (!fits(rendered)) {
-        const excerpt = note || search ? fitExcerpt(body, signals, render, fits) : undefined;
+        const excerpt =
+          note || search || source === "execution-validated" || source === "reviewed-reference"
+            ? fitExcerpt(body, signals, render, fits)
+            : undefined;
         if (!excerpt) {
           diagnostic("budget");
           truncated = true;
@@ -282,6 +382,8 @@ export class AtomicMemoryContextBuilder {
         rendered = excerpt;
       }
       selected.push(record);
+      if (source === "execution-validated" || source === "reviewed-reference")
+        executionSelected = true;
       references.push(rendered.reference);
       lines.push(rendered.line);
       diagnostic("selected");
@@ -411,6 +513,11 @@ function renderReference(
     itemId: item.itemId,
     content: note && !excerpt ? item.content : points.slice(start, end).join(""),
     source,
+    ...(source === "reviewed-reference"
+      ? {
+          applicability: `适用条件：${record.taskExperience!.applicability.conditions.join("；") || "按当前任务核对"}。当前任务需核对适用性；引用不代表采用或验证。`,
+        }
+      : {}),
     excerpt,
     match,
     range: {
@@ -424,7 +531,7 @@ function renderReference(
   const times = ` temporal="${item.temporalType}" observed-at="${item.observedAt}"${item.eventStartedAt === null ? "" : ` event-start="${item.eventStartedAt}"`}${item.eventEndedAt === null ? "" : ` event-end="${item.eventEndedAt}"`}`;
   const origin = source === "assistant-note" ? ' verified="false"' : "";
   const range = reference.range;
-  const line = `<memory${id} kind="${escapeXml(item.kind)}" scope="${escapeXml(item.scopeType)}" statement="${escapeXml(item.statementType)}"${times} source="${source}"${origin} excerpt="${excerpt}" range="${range.start}-${range.end}/${range.total}">${escapeXml(display)}</memory>`;
+  const line = `<memory${id} kind="${escapeXml(item.kind)}" scope="${escapeXml(item.scopeType)}" statement="${escapeXml(item.statementType)}"${times} source="${source}"${origin} excerpt="${excerpt}" range="${range.start}-${range.end}/${range.total}">${reference.applicability ? `${escapeXml(reference.applicability)}\n` : ""}${escapeXml(display)}</memory>`;
   return { line, reference };
 }
 

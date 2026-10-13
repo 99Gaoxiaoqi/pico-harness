@@ -4,6 +4,8 @@ import {
   type PendingSendEntry,
 } from "./pending-send.js";
 import { clearPersistentDraftIfUnchanged } from "./conversation/usePersistentDraft.js";
+import { FileSendPreparation, FileUploadError } from "./file-upload.js";
+import { captureFileDraftClear } from "./conversation/useFileDraft.js";
 import { controlGoalRequest } from "./conversation/goal-control.js";
 import { parseDesktopToolApproval } from "./runtime-projections/approval.js";
 import { TerminalInteractions } from "./runtime-projections/terminal-interactions.js";
@@ -21,6 +23,7 @@ import {
   type RuntimeMemorySettings,
   type RuntimeNotification,
   type RuntimeParams,
+  type RuntimeArtifactInputAttachment,
   type RuntimeProviderInput,
   type RuntimeQueuedInput,
   type RuntimeUserInput,
@@ -31,6 +34,12 @@ import {
   type RuntimeUserDefaults,
 } from "@pico/protocol";
 import type { TranscriptReplicaView } from "@pico/transcript-replica";
+import type {
+  ExecutionLearningCandidate,
+  ExperienceReview,
+  TaskExperienceCandidate,
+} from "@pico/core";
+import type { ExperienceFeedbackRequest, ExperienceReviewRequest } from "./useTaskExperience.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { DesktopBridge, DesktopResult } from "../preload/contract.js";
 import { ConversationLoadTracker } from "./conversation-load-tracker.js";
@@ -115,11 +124,15 @@ import {
 const SHARED_CONFIG_CAPABILITY = "shared-config-v1";
 
 const WORKSPACE_MEMORY_CAPABILITY = "workspace-memory-v1";
+const TASK_EXPERIENCE_CAPABILITY = "memory-learning-v2";
+const EXPERIENCE_FEEDBACK_CAPABILITY = "memory-experience-feedback-v1";
 
 const MAX_RENDERER_SEEN_EVENT_IDS = 10_000;
 
 export function isMemoryNotificationTopic(topic: string): boolean {
-  return topic === "memory.changed" || topic === "memory.deleted";
+  return (
+    topic === "memory.changed" || topic === "memory.deleted" || topic === "memory.learning.changed"
+  );
 }
 
 function latestUserMemorySettings(
@@ -364,7 +377,7 @@ export interface RuntimeActions {
   ensureTemporaryWorkspace(): Promise<string | undefined>;
   selectWorkspace(workspacePath: string): Promise<void>;
   trustWorkspace(workspacePath: string, trusted: boolean): Promise<void>;
-  unregisterWorkspace(workspacePath: string): Promise<void>;
+  unregisterWorkspace(workspacePath: string): Promise<boolean>;
   reload(): Promise<void>;
   createGoalSession(
     workspacePath: string,
@@ -376,16 +389,6 @@ export interface RuntimeActions {
   ): Promise<boolean>;
   loadSession(ref: WorkspaceSessionRef): Promise<void>;
   loadEarlierSession(ref: WorkspaceSessionRef): Promise<void>;
-  loadTranscriptAnchors(
-    ref: WorkspaceSessionRef,
-    beforeSequence?: number,
-  ): Promise<RuntimeResult<"session.transcript.anchors"> | undefined>;
-  searchTranscript(
-    ref: WorkspaceSessionRef,
-    query: string,
-    beforeSequence?: number,
-  ): Promise<RuntimeResult<"session.transcript.search"> | undefined>;
-  loadTranscriptAround(ref: WorkspaceSessionRef, itemId: string): Promise<boolean>;
   recoverPendingSend?(sourceKey: string): Promise<{
     readonly succeeded: boolean;
     readonly workspacePath?: string;
@@ -398,6 +401,7 @@ export interface RuntimeActions {
     readonly draftSnapshot?: string;
     readonly sessionId?: string;
     readonly text: string;
+    readonly files?: readonly File[];
     readonly initialSettings?: RuntimeUserDefaults;
     readonly behavior?: ComposerBehavior;
     readonly expectedRunId?: string;
@@ -413,6 +417,7 @@ export interface RuntimeActions {
     readonly succeeded: boolean;
     readonly workspacePath?: string | undefined;
     readonly sessionId?: string | undefined;
+    readonly fileError?: { readonly file: File; readonly message: string };
   }>;
   renameSession(ref: WorkspaceSessionRef, title: string): Promise<boolean>;
   forkSession(ref: WorkspaceSessionRef): Promise<WorkspaceSessionRef | undefined>;
@@ -446,7 +451,7 @@ export interface RuntimeActions {
       thinkingEffort?: string;
     }>,
   ): Promise<boolean>;
-  setSessionArchived(ref: WorkspaceSessionRef, archived: boolean): Promise<void>;
+  setSessionArchived(ref: WorkspaceSessionRef, archived: boolean): Promise<boolean>;
   setSessionPinned(ref: WorkspaceSessionRef, pinned: boolean): Promise<void>;
   deleteSession(ref: WorkspaceSessionRef): Promise<boolean>;
   pauseRun(runId: string): Promise<void>;
@@ -557,6 +562,51 @@ export interface RuntimeActions {
   ): Promise<boolean>;
   deleteProviderCredential(providerId: string, expectedRevision: string): Promise<boolean>;
   refreshMemory(): Promise<void>;
+  listExecutionLearning(
+    workspacePath: string,
+    sessionId?: string,
+  ): Promise<RuntimeResult<"memory.learning.list">>;
+  inspectExecutionLearning(
+    workspacePath: string,
+    candidateId: string,
+  ): Promise<ExecutionLearningCandidate>;
+  discardExecutionLearning(
+    workspacePath: string,
+    candidateId: string,
+    expectedRevision: number,
+  ): Promise<void>;
+  queryTaskExperiences(
+    workspacePath: string,
+    options?: { sessionId?: string; review?: ExperienceReview },
+  ): Promise<RuntimeResult<"memory.learning.query">>;
+  detailTaskExperience(
+    workspacePath: string,
+    candidateId: string,
+  ): Promise<RuntimeResult<"memory.learning.detail">>;
+  reviewTaskExperience(
+    workspacePath: string,
+    input: ExperienceReviewRequest,
+  ): Promise<TaskExperienceCandidate>;
+  feedbackTaskExperience(
+    workspacePath: string,
+    input: ExperienceFeedbackRequest,
+  ): Promise<TaskExperienceCandidate>;
+  queryExperienceUses(
+    workspacePath: string,
+    options?: Omit<RuntimeParams<"memory.experience.query">, "workspacePath">,
+  ): Promise<RuntimeResult<"memory.experience.query">>;
+  detailExperienceUse(
+    workspacePath: string,
+    useId: string,
+  ): Promise<RuntimeResult<"memory.experience.detail">>;
+  getExperienceMemoryItem(
+    workspacePath: string,
+    itemId: string,
+  ): Promise<RuntimeMemoryItem | undefined>;
+  feedbackExperienceUse(
+    workspacePath: string,
+    input: Omit<RuntimeParams<"memory.experience.feedback">, "workspacePath">,
+  ): Promise<RuntimeResult<"memory.experience.feedback">>;
   loadMoreMemory(): Promise<void>;
   createMemoryItem(text: string): Promise<RuntimeMemoryItem | undefined>;
   queryMemoryContext(query: string): Promise<RuntimeResult<"memory.context.preview"> | undefined>;
@@ -598,6 +648,9 @@ export interface RuntimeStore {
   readonly busy: string | undefined;
   readonly message: string | undefined;
   readonly actions: RuntimeActions;
+  readonly executionLearningRevision?: number;
+  readonly taskExperienceSupported?: boolean;
+  readonly experienceFeedbackSupported?: boolean;
   readonly pendingSends?: readonly PendingSendEntry[];
   readonly pendingSendBusy?: readonly string[];
   readonly sendRecoverySupported?: boolean;
@@ -612,6 +665,7 @@ export function useRuntimeStore(): RuntimeStore {
   const [data, setData] = useState<AppData>(preview ? previewData : emptyData);
   const [busy, setBusy] = useState<string>();
   const [message, setMessage] = useState<string>();
+  const [executionLearningRevision, setExecutionLearningRevision] = useState(0);
   const [pendingSends, setPendingSends] = useState<readonly PendingSendEntry[]>([]);
   const [pendingSendBusy, setPendingSendBusy] = useState<readonly string[]>([]);
   const dataRef = useRef(data);
@@ -643,6 +697,8 @@ export function useRuntimeStore(): RuntimeStore {
   const resolvedInteractions = useRef(new ResolvedInteractionCache());
   const terminalInteractions = useRef(new TerminalInteractions());
   const pendingGoalControls = useRef(new Set<string>());
+  const fileSendPreparation = useRef(new FileSendPreparation());
+  const pendingFileDrafts = useRef(new Map<string, () => void>());
   const pendingSendRepositoryRef = useRef<PendingSendRepository | undefined>(undefined);
   const getPendingSendRepository = useCallback(() => {
     pendingSendRepositoryRef.current ??= new PendingSendRepository(window.localStorage);
@@ -1181,6 +1237,9 @@ export function useRuntimeStore(): RuntimeStore {
             workspacePath,
             lifecycleStates: ["active", "archived"],
             limit: 50,
+            ...(runtimeCapabilitiesRef.current.has(TASK_EXPERIENCE_CAPABILITY)
+              ? { learningVersion: 2 as const }
+              : {}),
             ...(runtimeCapabilitiesRef.current.has(MEMORY_PAGINATION_RUNTIME_CAPABILITY)
               ? { paged: true as const }
               : {}),
@@ -1693,7 +1752,10 @@ export function useRuntimeStore(): RuntimeStore {
             : { ...current, providerRetries };
         });
       } else if (isMemoryNotificationTopic(topic)) {
-        if (topic === "memory.changed" && payload.entityType === "settings") {
+        if (topic === "memory.learning.changed") {
+          setExecutionLearningRevision((revision) => revision + 1);
+          scheduleMemoryRefresh();
+        } else if (topic === "memory.changed" && payload.entityType === "settings") {
           void loadUserMemorySettings(bridge).catch(reportFailure);
         } else {
           scheduleMemoryRefresh();
@@ -2195,8 +2257,8 @@ export function useRuntimeStore(): RuntimeStore {
         });
       },
       async unregisterWorkspace(workspacePath) {
-        if (!workspacePath) return;
-        await perform("unregister-workspace", async (bridge) => {
+        if (!workspacePath) return false;
+        return perform("unregister-workspace", async (bridge) => {
           if (!preview) {
             await invoke(bridge, "workspace.unregister", { workspacePath });
             await loadWorkspaceIndex(bridge);
@@ -2206,6 +2268,10 @@ export function useRuntimeStore(): RuntimeStore {
               workspaces: current.workspaces.filter(
                 (workspace) => workspace.path !== workspacePath,
               ),
+              sessions: current.sessions.filter(
+                (session) => session.workspacePath !== workspacePath,
+              ),
+              runs: current.runs.filter((run) => run.workspacePath !== workspacePath),
             }));
           }
           setMessage("项目已从 Pico 列表移除，磁盘文件未被删除。");
@@ -2300,61 +2366,9 @@ export function useRuntimeStore(): RuntimeStore {
           await loadConversation(bridge, workspacePath, sessionId);
         });
       },
-      async loadTranscriptAnchors(ref, beforeSequence) {
-        const { workspacePath, sessionId } = ref;
-        if (!workspacePath || !sessionId) return undefined;
-        let result: RuntimeResult<"session.transcript.anchors"> | undefined;
-        await perform("transcript-anchors", async (bridge) => {
-          if (!preview) {
-            result = await invoke(bridge, "session.transcript.anchors", {
-              workspacePath,
-              sessionId,
-              ...(beforeSequence !== undefined ? { beforeSequence } : {}),
-              limit: 80,
-            });
-          } else {
-            result = { anchors: [] };
-          }
-        });
-        return result;
-      },
-      async searchTranscript(ref, query, beforeSequence) {
-        const { workspacePath, sessionId } = ref;
-        if (!workspacePath || !sessionId || !query.trim()) return undefined;
-        let result: RuntimeResult<"session.transcript.search"> | undefined;
-        await perform("transcript-search", async (bridge) => {
-          if (!preview) {
-            result = await invoke(bridge, "session.transcript.search", {
-              workspacePath,
-              sessionId,
-              query: query.trim(),
-              ...(beforeSequence !== undefined ? { beforeSequence } : {}),
-              limit: 80,
-            });
-          } else {
-            result = { hits: [] };
-          }
-        });
-        return result;
-      },
-      async loadTranscriptAround(ref, itemId) {
-        const { workspacePath, sessionId } = ref;
-        if (!workspacePath || !sessionId) return false;
-        let loaded = false;
-        const succeeded = await perform("transcript-jump", async (bridge) => {
-          if (preview) return;
-          loaded = await ensureDesktopContinuity(bridge).loadAround(
-            workspacePath,
-            sessionId,
-            itemId,
-          );
-          if (!loaded) throw new Error("无法定位该消息，请刷新会话后重试。");
-        });
-        return succeeded && loaded;
-      },
       async sendMessage(input) {
-        const workspacePath = input.workspacePath;
-        if (!workspacePath || (!input.text.trim() && !input.skills?.length))
+        let workspacePath = input.workspacePath;
+        if (!workspacePath || (!input.text.trim() && !input.skills?.length && !input.files?.length))
           return { succeeded: false };
         const swarmCommand =
           !input.activation && !input.skills?.length ? parseSwarmCommand(input.text) : undefined;
@@ -2365,7 +2379,14 @@ export function useRuntimeStore(): RuntimeStore {
             ? workspaceSessionKey({ workspacePath, sessionId: input.sessionId })
             : `new:${workspacePath}`);
         let confirmedSend = false;
+        let fileError: { readonly file: File; readonly message: string } | undefined;
+        let preparationKey: string | undefined;
         const succeeded = await perform("send-message", async (bridge) => {
+          if (input.files?.length && (input.activation || input.skills?.length || swarmCommand))
+            throw new Error("附件暂不支持技能、Agent 或 Swarm 命令，请先移除附件或改为普通消息。");
+          if (input.files?.length && input.behavior === "steer")
+            throw new Error("附件需要新回合，请选择排队或停止并替换。");
+          if (input.files?.length && preview) throw new Error("预览模式不支持上传附件。");
           if (
             input.skills?.length &&
             !preview &&
@@ -2415,11 +2436,42 @@ export function useRuntimeStore(): RuntimeStore {
           }
           const picoHome = dataRef.current.picoHome;
           if (!picoHome) throw new Error("尚未确认 Pico 存储位置，请等待连接恢复后发送。");
+          if (getPendingSendRepository().get({ picoHome, sourceKey }))
+            throw new Error("这份草稿有待确认的发送，请先恢复发送结果或放弃恢复。");
+          preparationKey = JSON.stringify([picoHome, sourceKey]);
+          let attachments: readonly RuntimeArtifactInputAttachment[] = [];
+          if (input.files?.length || fileSendPreparation.current.session(preparationKey)) {
+            try {
+              const prepared = await fileSendPreparation.current.prepare(
+                (method, params) => invoke(bridge, method, params),
+                preparationKey,
+                {
+                  workspacePath,
+                  ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+                  ...(input.initialSettings ? { initialSettings: input.initialSettings } : {}),
+                  files: input.files ?? [],
+                },
+              );
+              resolvedSessionId = prepared.ref.sessionId;
+              workspacePath = prepared.ref.workspacePath;
+              attachments = prepared.attachments;
+            } catch (cause) {
+              resolvedSessionId ??= fileSendPreparation.current.session(preparationKey)?.sessionId;
+              if (cause instanceof FileUploadError)
+                fileError = { file: cause.file, message: cause.message };
+              throw cause;
+            }
+          }
+          if (input.files?.length)
+            pendingFileDrafts.current.set(
+              preparationKey,
+              captureFileDraftClear(sourceKey, input.files),
+            );
           const pending = await getPendingSendRepository().send(
             { picoHome, sourceKey },
             {
               workspacePath,
-              ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+              ...(resolvedSessionId ? { sessionId: resolvedSessionId } : {}),
               input:
                 input.activation?.kind === "skill"
                   ? { kind: "skill", name: input.activation.name, args: input.text.trim() }
@@ -2441,9 +2493,12 @@ export function useRuntimeStore(): RuntimeStore {
                       : {
                           kind: "text",
                           text: input.text.trim(),
+                          ...(attachments.length ? { attachments } : {}),
                           ...(input.skills?.length ? { skills: input.skills } : {}),
                         },
-              ...(input.initialSettings ? { initialSettings: input.initialSettings } : {}),
+              ...(!resolvedSessionId && input.initialSettings
+                ? { initialSettings: input.initialSettings }
+                : {}),
               behavior: input.behavior ?? "auto",
               ...(input.expectedRunId ? { expectedRunId: input.expectedRunId } : {}),
               idempotencyKey: crypto.randomUUID(),
@@ -2454,6 +2509,11 @@ export function useRuntimeStore(): RuntimeStore {
           );
           if (!pending.confirmed) return;
           confirmedSend = true;
+          if (preparationKey) {
+            fileSendPreparation.current.complete(preparationKey);
+            pendingFileDrafts.current.get(preparationKey)?.();
+            pendingFileDrafts.current.delete(preparationKey);
+          }
           clearPersistentDraftIfUnchanged(sourceKey, pending.record.draftSnapshot);
           const session = pending.value.session;
           resolvedSessionId = stringValue(session.sessionId, input.sessionId);
@@ -2480,6 +2540,7 @@ export function useRuntimeStore(): RuntimeStore {
           succeeded: succeeded && confirmedSend,
           ...(succeeded && confirmedSend ? { workspacePath } : {}),
           ...(resolvedSessionId ? { sessionId: resolvedSessionId } : {}),
+          ...(fileError ? { fileError } : {}),
         };
       },
       async recoverPendingSend(sourceKey) {
@@ -2497,6 +2558,10 @@ export function useRuntimeStore(): RuntimeStore {
           clearPersistentDraftIfUnchanged(sourceKey, pending.record.draftSnapshot);
           const sessionId = pending.value.session.sessionId;
           const workspacePath = pending.record.params.workspacePath;
+          const preparationKey = JSON.stringify([picoHome, sourceKey]);
+          fileSendPreparation.current.complete(preparationKey);
+          pendingFileDrafts.current.get(preparationKey)?.();
+          pendingFileDrafts.current.delete(preparationKey);
           recovered = { workspacePath, sessionId };
           setMessage("发送结果已确认。");
           void (async () => {
@@ -2743,8 +2808,8 @@ export function useRuntimeStore(): RuntimeStore {
       },
       async setSessionArchived(ref, archived) {
         const { workspacePath, sessionId } = ref;
-        if (!workspacePath) return;
-        await perform("session-state", async (bridge) => {
+        if (!workspacePath) return false;
+        return perform("session-state", async (bridge) => {
           if (!preview)
             await invoke(bridge, archived ? "session.archive" : "session.restore", {
               workspacePath,
@@ -3678,7 +3743,179 @@ export function useRuntimeStore(): RuntimeStore {
         if (!workspacePath || !dataRef.current.trusted) return;
         await perform("memory-refresh", async (bridge) => {
           await loadMemory(bridge, workspacePath);
+          if (dataRef.current.workspacePath === workspacePath)
+            setExecutionLearningRevision((revision) => revision + 1);
         });
+      },
+      async listExecutionLearning(workspacePath, sessionId) {
+        if (preview) return { workspaceKey: "", revision: 0, items: [] };
+        const current = dataRef.current;
+        if (current.workspacePath !== workspacePath || !current.trusted)
+          throw new Error("当前工作区未授权执行经验学习。");
+        const bridge = getBridge();
+        if (!bridge) throw new Error("本地 Runtime 未连接");
+        return invoke(bridge, "memory.learning.list", {
+          workspacePath,
+          ...(sessionId ? { sessionId } : {}),
+        });
+      },
+      async inspectExecutionLearning(workspacePath, candidateId) {
+        const current = dataRef.current;
+        if (preview || current.workspacePath !== workspacePath || !current.trusted)
+          throw new Error("当前工作区未授权执行经验学习。");
+        const bridge = getBridge();
+        if (!bridge) throw new Error("本地 Runtime 未连接");
+        const { candidate } = await invoke(bridge, "memory.learning.inspect", {
+          workspacePath,
+          candidateId,
+        });
+        return candidate as unknown as ExecutionLearningCandidate;
+      },
+      async discardExecutionLearning(workspacePath, candidateId, expectedRevision) {
+        const current = dataRef.current;
+        if (preview || current.workspacePath !== workspacePath || !current.trusted)
+          throw new Error("当前工作区未授权执行经验学习。");
+        const bridge = getBridge();
+        if (!bridge) throw new Error("本地 Runtime 未连接");
+        await invoke(bridge, "memory.learning.discard", {
+          workspacePath,
+          candidateId,
+          expectedRevision,
+        });
+        if (dataRef.current.workspacePath === workspacePath && dataRef.current.trusted)
+          setExecutionLearningRevision((revision) => revision + 1);
+      },
+      async queryTaskExperiences(workspacePath, options = {}) {
+        const bridge = getBridge();
+        if (
+          preview ||
+          !bridge ||
+          !runtimeCapabilitiesRef.current.has(TASK_EXPERIENCE_CAPABILITY) ||
+          dataRef.current.workspacePath !== workspacePath ||
+          !dataRef.current.trusted
+        )
+          throw new Error("当前 Runtime 不支持任务经验管理。");
+        return invoke(bridge, "memory.learning.query", {
+          workspacePath,
+          ...(options.sessionId ? { sessionId: options.sessionId } : {}),
+          ...(options.review ? { review: options.review } : {}),
+        });
+      },
+      async detailTaskExperience(workspacePath, candidateId) {
+        const bridge = getBridge();
+        if (
+          preview ||
+          !bridge ||
+          !runtimeCapabilitiesRef.current.has(TASK_EXPERIENCE_CAPABILITY) ||
+          dataRef.current.workspacePath !== workspacePath ||
+          !dataRef.current.trusted
+        )
+          throw new Error("当前 Runtime 不支持任务经验管理。");
+        return invoke(bridge, "memory.learning.detail", { workspacePath, candidateId });
+      },
+      async reviewTaskExperience(workspacePath, input) {
+        const bridge = getBridge();
+        if (
+          preview ||
+          !bridge ||
+          !runtimeCapabilitiesRef.current.has(TASK_EXPERIENCE_CAPABILITY) ||
+          dataRef.current.workspacePath !== workspacePath ||
+          !dataRef.current.trusted
+        )
+          throw new Error("当前 Runtime 不支持任务经验管理。");
+        const result = await invoke(bridge, "memory.learning.review", { workspacePath, ...input });
+        if (dataRef.current.workspacePath === workspacePath) {
+          setExecutionLearningRevision((revision) => revision + 1);
+          void loadMemory(bridge, workspacePath).catch(() => undefined);
+        }
+        return result.candidate;
+      },
+      async feedbackTaskExperience(workspacePath, input) {
+        const bridge = getBridge();
+        if (
+          preview ||
+          !bridge ||
+          !runtimeCapabilitiesRef.current.has(TASK_EXPERIENCE_CAPABILITY) ||
+          dataRef.current.workspacePath !== workspacePath ||
+          !dataRef.current.trusted
+        )
+          throw new Error("当前 Runtime 不支持任务经验管理。");
+        const result = await invoke(bridge, "memory.learning.feedback", {
+          workspacePath,
+          ...input,
+        });
+        if (dataRef.current.workspacePath === workspacePath)
+          setExecutionLearningRevision((revision) => revision + 1);
+        return result.candidate;
+      },
+      async queryExperienceUses(workspacePath, options = {}) {
+        const bridge = getBridge();
+        if (
+          preview ||
+          !bridge ||
+          !runtimeCapabilitiesRef.current.has(EXPERIENCE_FEEDBACK_CAPABILITY) ||
+          dataRef.current.workspacePath !== workspacePath ||
+          !dataRef.current.trusted
+        )
+          throw new Error("当前 Runtime 不支持经验使用记录。");
+        return invoke(bridge, "memory.experience.query", { workspacePath, ...options });
+      },
+      async detailExperienceUse(workspacePath, useId) {
+        const bridge = getBridge();
+        if (
+          preview ||
+          !bridge ||
+          !runtimeCapabilitiesRef.current.has(EXPERIENCE_FEEDBACK_CAPABILITY) ||
+          dataRef.current.workspacePath !== workspacePath ||
+          !dataRef.current.trusted
+        )
+          throw new Error("当前 Runtime 不支持经验使用记录。");
+        return invoke(bridge, "memory.experience.detail", { workspacePath, useId });
+      },
+      async feedbackExperienceUse(workspacePath, input) {
+        const bridge = getBridge();
+        if (
+          preview ||
+          !bridge ||
+          !runtimeCapabilitiesRef.current.has(EXPERIENCE_FEEDBACK_CAPABILITY) ||
+          dataRef.current.workspacePath !== workspacePath ||
+          !dataRef.current.trusted
+        )
+          throw new Error("当前 Runtime 不支持经验使用记录。");
+        const result = await invoke(bridge, "memory.experience.feedback", {
+          workspacePath,
+          ...input,
+        });
+        if (dataRef.current.workspacePath === workspacePath) {
+          setExecutionLearningRevision((revision) => revision + 1);
+          void loadMemory(bridge, workspacePath).catch(() => undefined);
+        }
+        return result;
+      },
+      async getExperienceMemoryItem(workspacePath, itemId) {
+        const bridge = getBridge();
+        if (
+          preview ||
+          !bridge ||
+          dataRef.current.workspacePath !== workspacePath ||
+          !dataRef.current.trusted
+        )
+          throw new Error("当前工作区无法读取经验管理状态。");
+        try {
+          return (
+            await invoke(bridge, "memory.get", {
+              workspacePath,
+              itemId,
+              ...(runtimeCapabilitiesRef.current.has(TASK_EXPERIENCE_CAPABILITY)
+                ? { learningVersion: 2 as const }
+                : {}),
+            })
+          ).item;
+        } catch (failure) {
+          if (failure instanceof RuntimeInvocationError && failure.code === "NOT_FOUND")
+            return undefined;
+          throw failure;
+        }
       },
       async loadMoreMemory() {
         const current = dataRef.current;
@@ -3704,6 +3941,9 @@ export function useRuntimeStore(): RuntimeStore {
               limit: 50,
               cursor: page.nextCursor,
               lifecycleStates: ["active", "archived"],
+              ...(runtimeCapabilitiesRef.current.has(TASK_EXPERIENCE_CAPABILITY)
+                ? { learningVersion: 2 as const }
+                : {}),
             });
             if (
               read !== memoryLoadGenerationRef.current ||
@@ -3845,6 +4085,9 @@ export function useRuntimeStore(): RuntimeStore {
             : await invoke(bridge, "memory.context.preview", {
                 workspacePath,
                 query: query.trim(),
+                ...(runtimeCapabilitiesRef.current.has(TASK_EXPERIENCE_CAPABILITY)
+                  ? { learningVersion: 2 as const }
+                  : {}),
               });
         });
         return dataRef.current.workspacePath === workspacePath ? result : undefined;
@@ -4126,6 +4369,9 @@ export function useRuntimeStore(): RuntimeStore {
     busy,
     message,
     actions,
+    executionLearningRevision,
+    taskExperienceSupported: runtimeCapabilitiesRef.current.has(TASK_EXPERIENCE_CAPABILITY),
+    experienceFeedbackSupported: runtimeCapabilitiesRef.current.has(EXPERIENCE_FEEDBACK_CAPABILITY),
     pendingSends,
     pendingSendBusy,
     sendRecoverySupported: runtimeCapabilitiesRef.current.has(SESSION_SEND_REPLAY_CAPABILITY),

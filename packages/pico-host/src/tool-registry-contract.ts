@@ -125,6 +125,9 @@ export interface BaseTool {
 
 /** 工具的注册与分发接口 */
 export interface Registry extends RuntimeToolRegistry {
+  setNativeLearningObserver?(
+    observer: import("./native-file-learning.js").NativeLearningObserver,
+  ): void;
   /** 挂载一个新的工具到系统中 */
   register(tool: BaseTool): void;
   /** 按名称卸载工具,用于动态工具生命周期清理 */
