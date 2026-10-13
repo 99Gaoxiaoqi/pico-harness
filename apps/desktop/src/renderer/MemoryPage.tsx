@@ -15,8 +15,6 @@ import type { RuntimeMemoryItem, RuntimeMemoryListItem, RuntimeResult } from "@p
 import { Button, EmptyState, IconButton, InlineNotice } from "./components.js";
 import { isExperienceSuggestion } from "./TaskExperiencePanel.js";
 import type { RuntimeStore } from "./runtime.js";
-import { ExecutionLearningPanel } from "./ExecutionLearningPanel.js";
-import { useExecutionLearning } from "./useExecutionLearning.js";
 import { TaskExperiencePanel } from "./TaskExperiencePanel.js";
 import { useTaskExperience } from "./useTaskExperience.js";
 import { useExperienceLedger } from "./useExperienceLedger.js";
@@ -66,7 +64,7 @@ const sourceLabels = {
   manual: "手动内容，无会话引用",
   "assistant-note": "用户保留的助手笔记（未经独立核实）",
   "execution-evidence": "执行结果验证的经验（低信任参考）",
-  "execution-validated": "经自然验收的执行方案（低信任参考）",
+  "execution-validated": "历史执行经验（仅限定目标验收，低信任参考）",
   "reviewed-reference": "用户确认的任务经验（参考）",
 };
 const matchLabels = { key: "关键词匹配", content: "正文匹配", preference: "常驻偏好" };
@@ -113,16 +111,15 @@ export function MemoryPage({
   const memory = data.memory;
   const experience = useTaskExperience(runtime, { workspacePath: data.workspacePath });
   const ledger = useExperienceLedger(runtime, { workspacePath: data.workspacePath });
-  const learning = useExecutionLearning(runtime, {
-    workspacePath: data.workspacePath,
-  });
   const location = useLocation();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const routeTarget = useMemo(
-    () => readExperienceManagementTarget(new URLSearchParams(location.search), location.hash),
-    [location.search, location.hash],
-  );
+  const routeTarget = useMemo(() => {
+    const params = new URLSearchParams(location.search);
+    // Older native candidate links now open shared memory/history, without inspecting internal candidates.
+    if (params.get("tab") === "native") params.delete("candidate");
+    return readExperienceManagementTarget(params, location.hash);
+  }, [location.search, location.hash]);
   const targetKey = JSON.stringify([data.workspacePath, routeTarget]);
   const targetScope = useRef({ key: targetKey, generation: 0 });
   if (targetScope.current.key !== targetKey)
@@ -304,7 +301,8 @@ export function MemoryPage({
       (requested === "pending" && experience.supported)
     )
       setActivePanel(requested);
-    else if (activePanel === "pending" && !experience.supported) setActivePanel("saved");
+    else if (requested === "native" || (activePanel === "pending" && !experience.supported))
+      setActivePanel("saved");
   }, [searchParams, experience.supported]);
   useEffect(() => {
     if (resolvedTarget?.status !== "ready") return;
@@ -319,6 +317,7 @@ export function MemoryPage({
         : "saved";
     if (searchParams.get("tab") !== desired) {
       const next = new URLSearchParams(searchParams);
+      if (next.get("tab") === "native") next.delete("candidate");
       next.set("tab", desired);
       navigate(
         { pathname: location.pathname, search: next.toString(), hash: location.hash },
@@ -918,6 +917,11 @@ export function MemoryPage({
         <InlineNotice tone="warning">信任当前工作区后可管理记忆。</InlineNotice>
       ) : (
         <>
+          {searchParams.get("tab") === "native" && (
+            <InlineNotice>
+              原生学习入口已合并到工作区记忆。已保存经验与历史使用记录仍可在此管理。
+            </InlineNotice>
+          )}
           {resolvedTarget?.status === "loading" && <p role="status">正在打开链接目标…</p>}
           {resolvedTarget?.status === "unavailable" && (
             <InlineNotice tone="warning">该经验已删除或不可用，历史使用记录仍保留。</InlineNotice>
@@ -948,14 +952,6 @@ export function MemoryPage({
               </Button>
             </InlineNotice>
           )}
-          {learning.error && (
-            <InlineNotice tone="error">
-              {learning.error}{" "}
-              <Button variant="quiet" onClick={() => void learning.refresh()}>
-                重试
-              </Button>
-            </InlineNotice>
-          )}
           {experience.supported && memory.settings && !memory.settings.autoExtract && (
             <InlineNotice>
               自动学习已关闭，只停止新提案；仍可审核和管理历史经验。历史引用与效果记录继续，召回由独立开关控制。
@@ -968,13 +964,6 @@ export function MemoryPage({
                 记忆召回已关闭。已确认的经验仍可管理，开启召回后才会提供给新任务。
               </InlineNotice>
             )}
-          <ExecutionLearningPanel
-            statuses={learning.statuses}
-            workspaceKey={learning.workspaceKey}
-            workspacePath={data.workspacePath}
-            onInspect={learning.onInspect}
-            onDiscard={learning.onDiscard}
-          />
           {ledger.error && (
             <InlineNotice tone="error">
               {ledger.error}{" "}
@@ -1183,7 +1172,7 @@ function SourceDetails({ item }: { readonly item: MemoryListItem }) {
           ? "用户确认的任务经验 · 审核与验证分别记录"
           : item.sourceType === "execution-validated"
             ? item.taskAcceptance
-              ? "自然验收通过的执行方案"
+              ? "历史执行经验 · 仅限定目标验收通过"
               : "执行来源不可用"
             : item.executionEvidence
               ? `执行验证经验（${item.executionEvidence.verificationCount} 次）`

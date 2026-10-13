@@ -34,11 +34,7 @@ import {
   type RuntimeUserDefaults,
 } from "@pico/protocol";
 import type { TranscriptReplicaView } from "@pico/transcript-replica";
-import type {
-  ExecutionLearningCandidate,
-  ExperienceReview,
-  TaskExperienceCandidate,
-} from "@pico/core";
+import type { ExperienceReview, TaskExperienceCandidate } from "@pico/core";
 import type { ExperienceFeedbackRequest, ExperienceReviewRequest } from "./useTaskExperience.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { DesktopBridge, DesktopResult } from "../preload/contract.js";
@@ -562,19 +558,6 @@ export interface RuntimeActions {
   ): Promise<boolean>;
   deleteProviderCredential(providerId: string, expectedRevision: string): Promise<boolean>;
   refreshMemory(): Promise<void>;
-  listExecutionLearning(
-    workspacePath: string,
-    sessionId?: string,
-  ): Promise<RuntimeResult<"memory.learning.list">>;
-  inspectExecutionLearning(
-    workspacePath: string,
-    candidateId: string,
-  ): Promise<ExecutionLearningCandidate>;
-  discardExecutionLearning(
-    workspacePath: string,
-    candidateId: string,
-    expectedRevision: number,
-  ): Promise<void>;
   queryTaskExperiences(
     workspacePath: string,
     options?: { sessionId?: string; review?: ExperienceReview },
@@ -3746,44 +3729,6 @@ export function useRuntimeStore(): RuntimeStore {
           if (dataRef.current.workspacePath === workspacePath)
             setExecutionLearningRevision((revision) => revision + 1);
         });
-      },
-      async listExecutionLearning(workspacePath, sessionId) {
-        if (preview) return { workspaceKey: "", revision: 0, items: [] };
-        const current = dataRef.current;
-        if (current.workspacePath !== workspacePath || !current.trusted)
-          throw new Error("当前工作区未授权执行经验学习。");
-        const bridge = getBridge();
-        if (!bridge) throw new Error("本地 Runtime 未连接");
-        return invoke(bridge, "memory.learning.list", {
-          workspacePath,
-          ...(sessionId ? { sessionId } : {}),
-        });
-      },
-      async inspectExecutionLearning(workspacePath, candidateId) {
-        const current = dataRef.current;
-        if (preview || current.workspacePath !== workspacePath || !current.trusted)
-          throw new Error("当前工作区未授权执行经验学习。");
-        const bridge = getBridge();
-        if (!bridge) throw new Error("本地 Runtime 未连接");
-        const { candidate } = await invoke(bridge, "memory.learning.inspect", {
-          workspacePath,
-          candidateId,
-        });
-        return candidate as unknown as ExecutionLearningCandidate;
-      },
-      async discardExecutionLearning(workspacePath, candidateId, expectedRevision) {
-        const current = dataRef.current;
-        if (preview || current.workspacePath !== workspacePath || !current.trusted)
-          throw new Error("当前工作区未授权执行经验学习。");
-        const bridge = getBridge();
-        if (!bridge) throw new Error("本地 Runtime 未连接");
-        await invoke(bridge, "memory.learning.discard", {
-          workspacePath,
-          candidateId,
-          expectedRevision,
-        });
-        if (dataRef.current.workspacePath === workspacePath && dataRef.current.trusted)
-          setExecutionLearningRevision((revision) => revision + 1);
       },
       async queryTaskExperiences(workspacePath, options = {}) {
         const bridge = getBridge();

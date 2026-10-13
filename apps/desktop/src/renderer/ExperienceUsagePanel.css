@@ -1,18 +1,13 @@
 @layer components {
-  .execution-learning,
-  .execution-learning__runs {
+  .experience-record {
     min-width: 0;
   }
-  .execution-learning {
+  .experience-record {
     border: 1px solid var(--line);
     border-radius: var(--radius-md);
     background: var(--surface-raised);
   }
-  .execution-learning__runs {
-    display: grid;
-    gap: 8px;
-  }
-  .execution-learning > summary {
+  .experience-record > summary {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
@@ -22,50 +17,48 @@
     font-size: 12px;
     cursor: pointer;
   }
-  .execution-learning > summary::before {
+  .experience-record > summary::before {
     content: "›";
   }
-  .execution-learning[open] > summary::before {
+  .experience-record[open] > summary::before {
     content: "⌄";
   }
-  .execution-learning > summary:focus-visible {
+  .experience-record > summary:focus-visible {
     outline: 2px solid var(--accent-strong);
     outline-offset: 2px;
     border-radius: var(--radius-md);
   }
-  .execution-learning__summary-state,
-  .execution-learning > summary > span:last-child {
+  .experience-record > summary > span:last-child {
     color: var(--ink-tertiary);
   }
-  .execution-learning__candidate h4,
-  .execution-learning__inspection {
+  .experience-record__inspection {
     overflow-wrap: anywhere;
   }
-  .execution-learning__inspection {
+  .experience-record__inspection {
     margin-top: 10px;
     padding-top: 10px;
     border-top: 1px solid var(--line);
     color: var(--ink-secondary);
     font-size: 12px;
   }
-  .execution-learning__inspection h5 {
+  .experience-record__inspection h5 {
     margin: 0 0 6px;
     font-size: 12px;
   }
-  .execution-learning__inspection dl {
+  .experience-record__inspection dl {
     display: grid;
     gap: 8px;
   }
-  .execution-learning__inspection dl > div {
+  .experience-record__inspection dl > div {
     display: grid;
     grid-template-columns: 64px minmax(0, 1fr);
     gap: 8px;
   }
-  .execution-learning__inspection dd {
+  .experience-record__inspection dd {
     min-width: 0;
     margin: 0;
   }
-  .execution-learning__inspection ul {
+  .experience-record__inspection ul {
     margin: 0;
     padding-left: 16px;
   }

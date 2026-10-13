@@ -19,7 +19,7 @@ interface ExperienceUsagePanelProps {
 }
 const sourceLabels = {
   "reviewed-reference": "用户确认的任务经验",
-  "execution-validated": "自然验收的执行方案",
+  "execution-validated": "历史执行经验",
   "execution-evidence": "旧版执行证据经验",
 };
 const adoptionLabels = { unknown: "未知", observed: "已观察到采用要点", not_applied: "未采用" };
@@ -69,10 +69,7 @@ export function ExperienceUsagePanel({
   return (
     <>
       {uses.length > 0 && (
-        <details
-          className="execution-learning task-experience__usage"
-          aria-label="本次经验使用记录"
-        >
+        <details className="experience-record task-experience__usage" aria-label="本次经验使用记录">
           <summary>
             <span>经验使用记录</span>
             <span>{carried} 条已引用</span>
@@ -130,7 +127,7 @@ function ExperienceDiagnostics({
     execution_learning_collection_unavailable: "这次执行经验采集未能完成。",
   };
   return (
-    <details className="execution-learning" aria-label="最近记录诊断">
+    <details className="experience-record" aria-label="最近记录诊断">
       <summary>
         <span>最近记录诊断</span>
         <span>{diagnostics.length} 项</span>
@@ -294,7 +291,7 @@ function UseCard({
           <span>
             {use.source.kind === "reviewed-reference"
               ? "用户确认：已确认此版本"
-              : "用户确认：无需逐例审核"}
+              : "用户确认：历史自动保存，未逐条审核"}
           </span>
           <span>
             {use.source.kind === "execution-validated"
@@ -324,6 +321,9 @@ function UseCard({
         <p className="task-experience__content">{referenceBody(current.referenceContent)}</p>
       )}
       {unconfirmed && <p>引用尚未确认，独立执行结果仍保留，但不能归因于这条经验。</p>}
+      {!unconfirmed && current.validationScope !== "unknown" && (
+        <p>本次结果只验证列明范围内的操作，不代表经验正文、根因或整个任务已验证。</p>
+      )}
       {(use.historical || current.validationScope === "unknown") && (
         <p>历史记录或未知范围的 pass 不能证明建议全文、当前用户目标或最终回答正确。</p>
       )}
@@ -375,7 +375,7 @@ function UseCard({
         </InlineNotice>
       )}
       {open && (
-        <div className="execution-learning__inspection">
+        <div className="experience-record__inspection">
           {!current.deleted && current.referenceContent && (
             <details className="memory-source">
               <summary>原始引用片段</summary>

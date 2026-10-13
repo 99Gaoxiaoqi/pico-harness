@@ -1,7 +1,5 @@
 import { uploadMimeType } from "../file-upload.js";
 import { PendingSendNotice } from "../PendingSendNotice.js";
-import { ExecutionLearningPanel } from "../ExecutionLearningPanel.js";
-import { useExecutionLearning } from "../useExecutionLearning.js";
 import { useTaskExperience } from "../useTaskExperience.js";
 import { TaskExperiencePanel } from "../TaskExperiencePanel.js";
 import { useExperienceLedger } from "../useExperienceLedger.js";
@@ -287,12 +285,6 @@ export function ConversationPage() {
     refreshKey: `${activeRun?.id ?? "idle"}:${activeRun?.status ?? "idle"}`,
   });
   const ledger = useExperienceLedger(runtime, {
-    workspacePath,
-    sessionId,
-    enabled: Boolean(sessionRef),
-    refreshKey: `${activeRun?.id ?? "idle"}:${activeRun?.status ?? "idle"}`,
-  });
-  const learning = useExecutionLearning(runtime, {
     workspacePath,
     sessionId,
     enabled: Boolean(sessionRef),
@@ -1961,23 +1953,6 @@ export function ConversationPage() {
                 加载更多使用记录
               </Button>
             )}
-            {learning.error && (
-              <InlineNotice tone="error">
-                {learning.error}{" "}
-                <Button variant="quiet" onClick={() => void learning.refresh()}>
-                  重试
-                </Button>
-              </InlineNotice>
-            )}
-            <ExecutionLearningPanel
-              mode="conversation"
-              statuses={learning.statuses}
-              workspaceKey={learning.workspaceKey}
-              workspacePath={workspacePath}
-              sessionId={sessionId}
-              onInspect={learning.onInspect}
-              onDiscard={learning.onDiscard}
-            />
           </>
         )}
       </ConversationSurface>

@@ -1,5 +1,5 @@
 import "./layers.css";
-import "./ExecutionLearningPanel.css";
+import "./ExperienceUsagePanel.css";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { AppErrorBoundary, DesktopApp } from "./App.js";

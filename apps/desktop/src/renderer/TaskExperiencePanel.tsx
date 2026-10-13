@@ -57,6 +57,7 @@ export interface TaskExperiencePanelProps {
 
 export function isExperienceSuggestion(item: TaskExperienceCandidate): boolean {
   return (
+    item.kind === "task-lesson" &&
     Boolean(item.content.trim()) &&
     item.review !== "unneeded" &&
     item.state !== "invalidated" &&
@@ -301,7 +302,7 @@ function ConversationLearning(props: TaskExperiencePanelProps) {
       {props.showSummary === false && renderReferences(references)}
       {[...runs].map(([runId, items]) => (
         <details
-          className="execution-learning task-experience__summary"
+          className="experience-record task-experience__summary"
           key={runId}
           data-run-id={runId}
           aria-label="本轮任务学习摘要"
@@ -776,6 +777,7 @@ function ExperienceDetailCard({
             {unavailable ? "经验已删除或不可用。" : current.content || "经验尚在整理中。"}
           </p>
           <Applicability candidate={current} />
+          <p>确认表示允许作为参考使用，不代表经验正文或整个任务已通过验证。</p>
           {current.enabled && <p>开始更正会先停止使用旧版本。取消更正后，可单独重新启用。</p>}
           <div className="memory-card__actions">
             {(current.review === "pending" || current.review === "deferred") && (

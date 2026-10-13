@@ -79,15 +79,19 @@ export function useTaskExperience(
               generation,
               result: {
                 ...result,
-                items: result.items.map((item) => {
-                  const previous =
-                    current?.scope === scope && current.generation === generation
-                      ? current.result.items.find((value) => value.candidateId === item.candidateId)
-                      : undefined;
-                  return previous && previous.recordRevision > item.recordRevision
-                    ? previous
-                    : item;
-                }),
+                items: result.items
+                  .filter((item) => item.kind === "task-lesson")
+                  .map((item) => {
+                    const previous =
+                      current?.scope === scope && current.generation === generation
+                        ? current.result.items.find(
+                            (value) => value.candidateId === item.candidateId,
+                          )
+                        : undefined;
+                    return previous && previous.recordRevision > item.recordRevision
+                      ? previous
+                      : item;
+                  }),
               },
             },
       );

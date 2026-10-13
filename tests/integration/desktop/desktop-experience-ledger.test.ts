@@ -79,26 +79,25 @@ import { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { useTaskExperience } from './apps/desktop/src/renderer/useTaskExperience.ts';
 import { useExperienceLedger } from './apps/desktop/src/renderer/useExperienceLedger.ts';
-import { useExecutionLearning } from './apps/desktop/src/renderer/useExecutionLearning.ts';
 globalThis.IS_REACT_ACT_ENVIRONMENT=true;
 const check=(value,message)=>{if(!value)throw new Error(message)};
 const deferred=()=>{let resolve;const promise=new Promise(ok=>resolve=ok);return{promise,resolve}};
-const oldQuery=deferred(),oldReview=deferred(),oldUse=deferred(),oldFeedback=deferred(),oldInspect=deferred();
-let aQueries=0,feedbackState='';
-const lesson=(content,recordRevision)=>({candidateId:'lesson',content,recordRevision,contentVersion:1});
+const oldQuery=deferred(),oldReview=deferred(),oldUse=deferred(),oldFeedback=deferred();
+let aQueries=0,feedbackState='';const rejected=[];
+const lesson=(content,recordRevision)=>({kind:'task-lesson',candidateId:'lesson',content,recordRevision,contentVersion:1});
 const use=(content,revision)=>({useId:'use',referenceContent:content,managementRevision:revision,deletionRevision:0,updatedAt:revision});
-const actions={queryTaskExperiences:async path=>{if(path==='/a'&&++aQueries===1)return oldQuery.promise;return{learningVersion:2,workspaceKey:path,revision:2,items:[lesson(path+' new',2)],reuse:[]}},detailTaskExperience:async()=>({}),reviewTaskExperience:async()=>oldReview.promise,feedbackTaskExperience:async()=>{},queryExperienceUses:async path=>{if(path==='/a'&&aQueries===1)return oldUse.promise;return{experienceVersion:1,diagnostics:[],uses:[use(path+' new',2)]}},detailExperienceUse:async()=>({}),feedbackExperienceUse:async()=>oldFeedback.promise,listExecutionLearning:async path=>({workspaceKey:path,revision:2,items:[]}),inspectExecutionLearning:async()=>oldInspect.promise,discardExecutionLearning:async()=>{}};
+const actions={queryTaskExperiences:async path=>{if(path==='/a'&&++aQueries===1)return oldQuery.promise;return{learningVersion:2,workspaceKey:path,revision:2,items:[lesson(path+' new',2)],reuse:[]}},detailTaskExperience:async()=>({}),reviewTaskExperience:async()=>oldReview.promise,feedbackTaskExperience:async()=>{},queryExperienceUses:async path=>{if(path==='/a'&&aQueries===1)return oldUse.promise;return{experienceVersion:1,diagnostics:[],uses:[use(path+' new',2)]}},detailExperienceUse:async()=>({}),feedbackExperienceUse:async()=>oldFeedback.promise};
 const make=(path,supported=true)=>({preview:false,connection:{kind:'ready'},taskExperienceSupported:supported,experienceFeedbackSupported:supported,executionLearningRevision:0,actions,data:{workspacePath:path,trusted:true,memory:{settings:{version:1}}}});
-function Host({runtime}){const input={workspacePath:runtime.data.workspacePath};const task=useTaskExperience(runtime,input),ledger=useExperienceLedger(runtime,input),native=useExecutionLearning(runtime,input);return <><p id='task'>{task.items.map(value=>value.content).join()}</p><p id='ledger'>{ledger.uses.map(value=>value.referenceContent).join()}</p><p id='feedback'>{feedbackState}</p><button id='review' onClick={()=>void task.onReview({}).catch(()=>feedbackState='old task rejected')}>review</button><button id='feedback' onClick={()=>void ledger.onFeedback({}).catch(()=>feedbackState='old use rejected')}>feedback</button><button id='inspect' onClick={()=>void native.onInspect('candidate').then(value=>feedbackState=value?'old native leaked':'old native ignored')}>inspect</button></>}
+function Host({runtime}){const input={workspacePath:runtime.data.workspacePath};const task=useTaskExperience(runtime,input),ledger=useExperienceLedger(runtime,input);return <><p id='task'>{task.items.map(value=>value.content).join()}</p><p id='ledger'>{ledger.uses.map(value=>value.referenceContent).join()}</p><p id='feedback'>{feedbackState}</p><button id='review' onClick={()=>void task.onReview({}).catch(()=>rejected.push('task'))}>review</button><button id='feedback' onClick={()=>void ledger.onFeedback({}).catch(()=>rejected.push('use'))}>feedback</button></>}
 const root=createRoot(document.getElementById('app'));
 (async()=>{
  await act(async()=>root.render(<Host runtime={make('/a')}/>));
- await act(async()=>{document.querySelector('#review').click();document.querySelector('button#feedback').click();document.querySelector('#inspect').click();});
+ await act(async()=>{document.querySelector('#review').click();document.querySelector('button#feedback').click();});
  await act(async()=>root.render(<Host runtime={make('/b')}/>));
  await act(async()=>root.render(<Host runtime={make('/a')}/>));
  check(document.querySelector('#task').textContent==='/a new'&&document.querySelector('#ledger').textContent==='/a new','new A projection loads');
- await act(async()=>{oldQuery.resolve({learningVersion:2,workspaceKey:'/a',revision:99,items:[lesson('STALE QUERY',99)],reuse:[]});oldUse.resolve({experienceVersion:1,diagnostics:[],uses:[use('STALE USE',99)]});oldReview.resolve(lesson('STALE REVIEW',99));oldFeedback.resolve({experienceVersion:1,use:use('STALE FEEDBACK',99)});oldInspect.resolve({hypothesis:'STALE INSPECT'});await Promise.resolve();});
- check(document.querySelector('#task').textContent==='/a new'&&document.querySelector('#ledger').textContent==='/a new'&&feedbackState==='old native ignored','old A generation cannot return after route roundtrip');
+ await act(async()=>{oldQuery.resolve({learningVersion:2,workspaceKey:'/a',revision:99,items:[lesson('STALE QUERY',99)],reuse:[]});oldUse.resolve({experienceVersion:1,diagnostics:[],uses:[use('STALE USE',99)]});oldReview.resolve(lesson('STALE REVIEW',99));oldFeedback.resolve({experienceVersion:1,use:use('STALE FEEDBACK',99)});await Promise.resolve();});
+ check(document.querySelector('#task').textContent==='/a new'&&document.querySelector('#ledger').textContent==='/a new'&&rejected.includes('task')&&rejected.includes('use'),'old A generation cannot return after route roundtrip');
  const before=aQueries;
  await act(async()=>root.render(<Host runtime={make('/legacy',false)}/>));
  check(aQueries===before&&!document.querySelector('#ledger').textContent&&!document.querySelector('#task').textContent,'legacy capability suppresses newer methods');
@@ -124,7 +123,7 @@ test("样式层声明最先导入，记忆标签计数只作用于专属节点",
 });
 
 test(
-  "原生与通用候选共存，观察不计建议，工作区选择保留审核路由与锚点",
+  "通用审核隐藏原生候选，观察不计建议，工作区选择保留审核路由与锚点",
   { timeout: 45_000 },
   async () => {
     const result = await runRendererBrowserScenario(`
@@ -155,12 +154,7 @@ const wrap=child=><PicoTheme><RuntimeContext.Provider value={runtime}><MemoryRou
 function Probe(){const location=useLocation();return <p id='route'>{location.pathname+location.search+location.hash}</p>}
 (async()=>{
  await act(async()=>root.render(wrap(<MemoryPage runtime={runtime} forceNarrow/>)));
- check(nativeCalls===1&&document.querySelector('[data-candidate-id=native]'),'v2 does not hide native learning or management');
- const nativeCard=document.querySelector('[data-candidate-id=native]');
- await act(async()=>[...nativeCard.querySelectorAll('button')].find(node=>node.textContent==='查看详情').click());
- check(nativeCard.textContent.includes('真实原生候选详情'),'native detail still uses existing mechanism');
- await act(async()=>[...nativeCard.querySelectorAll('button')].find(node=>node.textContent==='丢弃').click());
- check(discarded.length===1&&discarded[0][0]==='native','waiting native candidate can be discarded');
+ check(nativeCalls===0&&!document.querySelector('[data-candidate-id=native]')&&discarded.length===0,'generic management neither reads nor exposes internal native candidates');
  check(document.querySelector('#memory-tab-pending .memory-tab__count').textContent==='1','raw observation is not counted as pending suggestion');
  const tab=document.querySelector('#memory-tab-pending'),count=tab.querySelector('.memory-tab__count');
  check(count.getBoundingClientRect().width>=22&&getComputedStyle(tab).color!==getComputedStyle(tab).backgroundColor,'tabs and counts retain visible computed styles');
@@ -202,7 +196,7 @@ const check=(value,message)=>{if(!value)throw new Error(message)};
 const workspacePath='/private/tmp/中文 项目/# rate%20目录&step=1';
 const raw='<memory kind="failure" source="reviewed-reference" range="0-40/40">按 B2:B4 求和：18 &amp; 20 &lt; 30。字面量 &amp;lt; 保留。</memory>';
 const use={useId:'use-hash',workspaceKey:'scope',source:{kind:'reviewed-reference',candidateId:'lesson',contentVersion:1},itemId:'memory-id',itemVersion:1,contentHash:'content',taskId:'task',taskVersion:1,sessionId:'session',runId:'engine-run',hostRunId:'desktop-run',referenceHash:'raw-hash',referenceContent:raw,delivery:'carried',historical:false,managementRevision:1,settingsVersion:1,deletionRevision:0,adoption:'unknown',validation:'unknown',validationScope:'unknown',excluded:false,deleted:false,sources:[],createdAt:1,updatedAt:1};
-const lesson={candidateId:'lesson',workspaceKey:'scope',sessionId:'session',runId:'desktop-run',content:'建议',goal:'求和',review:'pending',contentVersion:1,recordRevision:1,validation:'unknown',enabled:false,lifecycleState:'active',state:'saved',sources:[],applicability:{taskFamily:'general',toolNames:[],conditions:[]}};
+const lesson={kind:'task-lesson',candidateId:'lesson',workspaceKey:'scope',sessionId:'session',runId:'desktop-run',content:'建议',goal:'求和',review:'pending',contentVersion:1,recordRevision:1,validation:'unknown',enabled:false,lifecycleState:'active',state:'saved',sources:[],applicability:{taskFamily:'general',toolNames:[],conditions:[]}};
 const root=createRoot(document.getElementById('app'));
 function Probe(){const location=useLocation();return <p id='location'>{JSON.stringify(location)}</p>}
 const onDetail=async()=>({experienceVersion:1,use,effects:[]});
