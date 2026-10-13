@@ -40,6 +40,14 @@ export function retireExecutionLessons(db: DatabaseSync, now = Date.now()): bool
   if (db.prepare("PRAGMA foreign_key_check").get()) invalid();
   const candidates = new Set<string>();
   const items = new Set<string>();
+  const candidateItems = new Map<string, string>();
+  const registerItem = (candidateId: string, itemId: string) => {
+    const existingItemId = candidateItems.get(candidateId);
+    if (existingItemId !== undefined && existingItemId !== itemId) invalid();
+    candidateItems.set(candidateId, itemId);
+    candidates.add(candidateId);
+    items.add(itemId);
+  };
   for (const row of db.prepare("SELECT * FROM execution_lesson_candidates").all()) {
     const candidate = json(row.record_json);
     const candidateId = identifier(row.candidate_id);
@@ -59,7 +67,7 @@ export function retireExecutionLessons(db: DatabaseSync, now = Date.now()): bool
     identifier(candidate.workspaceKey);
     identifier(candidate.sessionId);
     candidates.add(candidateId);
-    if (candidate.itemId !== null) items.add(identifier(candidate.itemId));
+    if (candidate.itemId !== null) registerItem(candidateId, identifier(candidate.itemId));
   }
   // Manual edits clear candidate.itemId. The original immutable create receipt is
   // still authoritative ownership evidence, including for an edited ordinary fact.
@@ -84,8 +92,7 @@ export function retireExecutionLessons(db: DatabaseSync, now = Date.now()): bool
       Number(result.version) < 1
     )
       invalid();
-    candidates.add(candidateId);
-    items.add(identifier(result.itemId));
+    registerItem(candidateId, identifier(result.itemId));
   }
   const legacyUses = db
     .prepare("SELECT * FROM experience_uses WHERE source_kind='execution-evidence'")
@@ -105,8 +112,7 @@ export function retireExecutionLessons(db: DatabaseSync, now = Date.now()): bool
     identifier(use.useId);
     identifier(use.workspaceKey);
     identifier(use.sessionId);
-    candidates.add(identifier(source.candidateId));
-    items.add(identifier(use.itemId));
+    registerItem(identifier(source.candidateId), identifier(use.itemId));
   }
   // A feedback replay can retain an old result even after a damaged/missing use row.
   // Its frozen source identity is sufficient; unrelated content is never guessed.
@@ -116,8 +122,7 @@ export function retireExecutionLessons(db: DatabaseSync, now = Date.now()): bool
       source = record(use.source);
     if (source.kind !== "execution-evidence") continue;
     if (use.useId !== row.use_id || use.workspaceKey !== row.workspace_key) invalid();
-    candidates.add(identifier(source.candidateId));
-    items.add(identifier(use.itemId));
+    registerItem(identifier(source.candidateId), identifier(use.itemId));
   }
   for (const itemId of items) {
     // Conflicting ownership is corruption, never permission to erase a new source.

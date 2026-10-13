@@ -261,7 +261,16 @@ test("v14 retires all workspaces, edited and orphan-owned lessons atomically; au
 });
 
 test("corrupt legacy evidence or conflicting new ownership fails closed and rolls all v14 changes back", async (t) => {
-  for (const corruption of ["candidate", "receipt", "use", "effect", "ownership"] as const) {
+  for (const corruption of [
+    "candidate",
+    "receipt",
+    "use",
+    "effect",
+    "ownership",
+    "receipt-identity",
+    "use-identity",
+    "feedback-identity",
+  ] as const) {
     const f = await fixture(t),
       db = new DatabaseSync(f.path);
     if (corruption === "candidate")
@@ -269,6 +278,18 @@ test("corrupt legacy evidence or conflicting new ownership fails closed and roll
     if (corruption === "receipt")
       db.exec(
         "UPDATE memory_write_operations SET result_json='[]' WHERE operation_id='execution-lesson:confirmed'",
+      );
+    if (corruption === "receipt-identity")
+      db.prepare(
+        "UPDATE memory_write_operations SET result_json=json_set(result_json,'$[0].itemId',?) WHERE operation_id='execution-lesson:confirmed'",
+      ).run(f.ids[4]!);
+    if (corruption === "use-identity")
+      db.exec(
+        "UPDATE experience_uses SET candidate_id='confirmed',record_json=json_set(record_json,'$.source.candidateId','confirmed')",
+      );
+    if (corruption === "feedback-identity")
+      db.exec(
+        "UPDATE experience_feedback SET result_json=json_set(result_json,'$.source.candidateId','confirmed')",
       );
     if (corruption === "use") db.exec("UPDATE experience_uses SET record_json='broken'");
     if (corruption === "effect") db.exec("UPDATE experience_effects SET record_json='broken'");
