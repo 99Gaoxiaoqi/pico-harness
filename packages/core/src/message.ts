@@ -89,7 +89,7 @@ export function isUserTaskMessage(message: Message): boolean {
   return (
     message.role === "user" &&
     message.toolCallId === undefined &&
-    !isMessageHiddenFromTranscript(message) &&
+    message.providerData?.["picoHiddenFromTranscript"] !== true &&
     message.providerData?.["picoKind"] !== "steer"
   );
 }
@@ -104,6 +104,13 @@ export type ImagePart =
       sizeBytes: number;
       digest: string;
     };
+
+/** Shared identity for immutable image references within a single model request. */
+export function imageArtifactKey(image: ImagePart): string | undefined {
+  return image.type === "image_artifact"
+    ? JSON.stringify([image.artifactId, image.digest, image.sizeBytes, image.mimeType])
+    : undefined;
+}
 
 export interface ToolResult {
   readonly executionFacts?: ForegroundProcessFacts;

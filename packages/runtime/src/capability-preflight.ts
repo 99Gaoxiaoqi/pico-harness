@@ -1,4 +1,4 @@
-import { MATERIALIZED_IMAGE_TOKENS } from "./context-budget.js";
+import { estimateImageTokens } from "./context-budget.js";
 import { projectMediaTextForModel } from "@pico/core/media";
 import {
   ModelCapabilityError,
@@ -153,10 +153,9 @@ export function estimateRequestTokens(
   messages: readonly Message[],
   availableTools: readonly ToolDefinition[],
 ): number {
-  let total = 0;
+  let total = estimateImageTokens(messages);
   for (const message of messages) {
     total += countTokens(projectMediaTextForModel(message.content));
-    total += (message.images?.length ?? 0) * MATERIALIZED_IMAGE_TOKENS;
     for (const toolCall of message.toolCalls ?? []) {
       total += countTokens(toolCall.name) + countTokens(toolCall.arguments);
     }

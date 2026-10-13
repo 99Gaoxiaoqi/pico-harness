@@ -1,6 +1,12 @@
 import { projectMediaTextForModel } from "@pico/core/media";
 import type { AssistantModelMessage, ModelMessage, ToolResultPart } from "ai";
-import { ModelCapabilityError, isUserTaskMessage, type ImagePart, type Message } from "@pico/core";
+import {
+  ModelCapabilityError,
+  imageArtifactKey,
+  isUserTaskMessage,
+  type ImagePart,
+  type Message,
+} from "@pico/core";
 import { prepareImageForModel } from "./prepare-image.js";
 
 export type AiSdkWire = "openai" | "claude" | "responses";
@@ -129,10 +135,7 @@ export async function toAiSdkMessages(
         parts.set(index, { type: "file", data: new URL(image.url), mediaType: "image" });
         continue;
       }
-      const artifactKey =
-        image.type === "image_artifact"
-          ? JSON.stringify([image.artifactId, image.digest, image.sizeBytes, image.mimeType])
-          : undefined;
+      const artifactKey = imageArtifactKey(image);
       const reused = artifactKey === undefined ? undefined : artifactImages.get(artifactKey);
       if (reused) {
         parts.set(index, reused);

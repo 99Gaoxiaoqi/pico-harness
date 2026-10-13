@@ -1,5 +1,11 @@
 import { projectMediaTextForModel } from "@pico/core/media";
-import type { Message, ProviderProfile, ProviderProtocol, ToolDefinition } from "@pico/core";
+import {
+  imageArtifactKey,
+  type Message,
+  type ProviderProfile,
+  type ProviderProtocol,
+  type ToolDefinition,
+} from "@pico/core";
 
 export const DEFAULT_SAFETY_MARGIN_TOKENS = 1024;
 /** Character-based context diagnostic estimate. */
@@ -102,6 +108,23 @@ export function estimateMessageTokens(message: Message, protocol?: ProviderProto
   return estimateMessagesTokens([message], protocol);
 }
 
+/** Match request projection: immutable artifact references share one image input. */
+export function estimateImageTokens(messages: readonly Message[]): number {
+  const seen = new Set<string>();
+  let images = 0;
+  for (const message of messages) {
+    for (const image of message.images ?? []) {
+      const key = imageArtifactKey(image);
+      if (key !== undefined) {
+        if (seen.has(key)) continue;
+        seen.add(key);
+      }
+      images++;
+    }
+  }
+  return images * MATERIALIZED_IMAGE_TOKENS;
+}
+
 export function estimateMessagesTokens(
   messages: readonly Message[],
   protocol?: ProviderProtocol,
@@ -113,9 +136,7 @@ export function estimateMessagesTokens(
     for (const call of message.toolCalls ?? []) names.set(call.id, call.name);
     if (message.toolCallId) chars += names.get(message.toolCallId)?.length ?? 0;
   }
-  // Durable image references still materialize pixels and consume model context.
-  const images = messages.reduce((total, message) => total + (message.images?.length ?? 0), 0);
-  return Math.ceil(chars / CHARS_PER_TOKEN) + images * MATERIALIZED_IMAGE_TOKENS;
+  return Math.ceil(chars / CHARS_PER_TOKEN) + estimateImageTokens(messages);
 }
 
 export function estimateToolDefinitionsTokens(tools: readonly ToolDefinition[]): number {
