@@ -71,6 +71,8 @@ export interface AtomicMemoryContextOptions {
     readonly candidateId: string;
     readonly contentVersion: number;
     readonly recordRevision: number;
+    /** Host-owned indivisible preparation prefix, measured in original code points. */
+    readonly requiredPrefixLength?: number;
   }[];
   readonly mode?: "automatic" | "search";
   readonly maxItems?: number;
@@ -365,12 +367,23 @@ export class AtomicMemoryContextBuilder {
         (!search || countTokens(line) <= SEARCH_ITEM_TOKENS) &&
         [false, true].every((cut) => countTokens(formatBlock([...lines, line], cut)) <= maxTokens);
       const body = note?.body ?? record.item.content;
+      const requiredPrefixLength =
+        source === "reviewed-reference"
+          ? options.reviewedExperiences?.find(
+              (target) =>
+                target.candidateId === record.taskExperience!.candidateId &&
+                target.contentVersion === record.taskExperience!.contentVersion &&
+                target.recordRevision === record.taskExperience!.recordRevision,
+            )?.requiredPrefixLength
+          : undefined;
       let rendered = render(0, Array.from(body).length);
       if (!fits(rendered)) {
         const excerpt =
-          note || search || source === "execution-validated" || source === "reviewed-reference"
-            ? fitExcerpt(body, signals, render, fits)
-            : undefined;
+          requiredPrefixLength !== undefined
+            ? fitRequiredPrefix(body, requiredPrefixLength, render, fits)
+            : note || search || source === "execution-validated" || source === "reviewed-reference"
+              ? fitExcerpt(body, signals, render, fits)
+              : undefined;
         if (!excerpt) {
           diagnostic("budget");
           truncated = true;
@@ -530,6 +543,27 @@ function renderReference(
   const range = reference.range;
   const line = `<memory${id} kind="${escapeXml(item.kind)}" scope="${escapeXml(item.scopeType)}" statement="${escapeXml(item.statementType)}"${times} source="${source}"${origin} excerpt="${excerpt}" range="${range.start}-${range.end}/${range.total}">${reference.applicability ? `${escapeXml(reference.applicability)}\n` : ""}${escapeXml(display)}</memory>`;
   return { line, reference };
+}
+
+/** Never excerpt inside Host-authored preparation, including under competing-item budgets. */
+function fitRequiredPrefix(
+  body: string,
+  minimum: number,
+  render: (start: number, end: number) => RenderedReference,
+  fits: (value: RenderedReference) => boolean,
+): RenderedReference | undefined {
+  const total = Array.from(body).length;
+  if (!Number.isSafeInteger(minimum) || minimum < 1 || minimum > total) return undefined;
+  const required = render(0, minimum);
+  if (!fits(required)) return undefined;
+  let low = minimum;
+  let high = total;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (fits(render(0, middle))) low = middle;
+    else high = middle - 1;
+  }
+  return render(0, low);
 }
 
 /** Keep original characters around a dense query anchor; never synthesize a summary. */

@@ -222,15 +222,22 @@ realModelTest(
       sessions[1]!,
       `完成 BuildCheck 验收，检查入口为 ${command}。先依据已有项目经验准备必要配置，再执行这个检查入口，通过后结束。写文件使用 write_file，Bash 只用于检查入口，保持检查源码不变，不查阅旧会话。`,
     );
+    const preparationEnd = saved.item.content.lastIndexOf("方法：");
+    assert.ok(preparationEnd > 0, "accepted lesson must contain the Host preparation record");
+    const escapedPreparation = saved.item.content
+      .slice(0, preparationEnd)
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&apos;");
     assert.ok(
-      requests.some((messages) =>
-        messages.some(
-          (message) =>
-            message.content.includes('source="reviewed-reference"') &&
-            message.content.includes(saved.item.content.slice(0, 80)),
-        ),
+      requests[0]?.some(
+        (message) =>
+          message.content.includes('source="reviewed-reference"') &&
+          message.content.includes(escapedPreparation),
       ),
-      "the new Session must receive the accepted execution recipe",
+      "the first Provider request must carry the complete accepted preparation before any tool",
     );
     const reused = await events.readSession(sessions[1]!);
     const reusedOutcomes = reused.filter((event) => event.kind === "tool.result.recorded");

@@ -6,6 +6,8 @@ export interface ReviewedExperienceTarget {
   readonly candidateId: string;
   readonly contentVersion: number;
   readonly recordRevision: number;
+  /** Host-authored preparation must survive recall intact, in code points. */
+  readonly requiredPrefixLength?: number;
 }
 
 /** Every returned identity is checked against current Host permissions and task conditions. */
@@ -97,6 +99,19 @@ export async function taskExperienceRecallTargets(options: {
       candidateId: candidate.candidateId,
       contentVersion: candidate.contentVersion,
       recordRevision: candidate.recordRevision,
+      ...(candidate.nativeEvidence &&
+      candidate.content.startsWith("本工作区同一检查范围的准备记录（不代表整段建议已验证）：")
+        ? {
+            requiredPrefixLength: Array.from(
+              candidate.content.slice(
+                0,
+                candidate.content.lastIndexOf("方法：") >= 0
+                  ? candidate.content.lastIndexOf("方法：")
+                  : candidate.content.length,
+              ),
+            ).length,
+          }
+        : {}),
     });
   }
   return targets;

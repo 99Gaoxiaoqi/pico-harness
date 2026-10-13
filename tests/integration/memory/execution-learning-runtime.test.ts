@@ -8,6 +8,8 @@ import { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
 import type { Message, ToolCall } from "@pico/core";
 import { isForegroundProcessFacts } from "@pico/core";
+import { AtomicMemoryContextBuilder } from "../../../packages/runtime/src/atomic-memory/context-builder.js";
+import { taskExperienceRecallTargets } from "../../../packages/pico-host/src/task-experience-recall.js";
 import { AtomicMemoryLifecycle, countTokens } from "@pico/runtime";
 import { SilentReporter } from "@pico/runtime/silent-reporter";
 import { ApprovalManager } from "@pico/pico-host/global-approval-manager";
@@ -119,6 +121,11 @@ test(
   { timeout: 30_000 },
   async (t) => {
     const f = await fixture(t, "pico-learning-runtime-");
+    configureReviewedFixture(
+      f.picoHome,
+      "观察失败信息，做最小修复，然后原样复测同一检查入口。" +
+        "将失败输出视为需求来源，仅针对项目配置缺口进行最小变更；保留验收逻辑与其他内容不变；随后使用同一检查入口重新评估，并以原始断言是否被消除作为结束条件。该方法适用于配置驱动的构建验收，可减少无关改动并保留可追溯性。",
+    );
     let step = 0;
     const seedSession = "autonomous-source";
     const result = await f.run(seedSession, async () => {
@@ -270,6 +277,18 @@ test(
         assert.match(memory, /source="reviewed-reference"/u);
         assert.match(memory, /config\.json/u);
         assert.match(memory, /FixtureNorth/u);
+        const prefix = saved.item.content.slice(0, saved.item.content.lastIndexOf("方法："));
+        assert.ok(
+          memory.includes(
+            prefix
+              .replaceAll("&", "&amp;")
+              .replaceAll("<", "&lt;")
+              .replaceAll(">", "&gt;")
+              .replaceAll('"', "&quot;")
+              .replaceAll("'", "&apos;"),
+          ),
+          "first request must preserve the entire preparation including escaped JSON",
+        );
         return {
           role: "assistant",
           content: "",
@@ -314,6 +333,65 @@ test(
       (await f.repository.listItems({ learningVersion: 2, workspaceKey: f.paths.workspace.id }))
         .length,
       1,
+    );
+    const identities = await taskExperienceRecallTargets({
+      store: f.repository.taskExperiences,
+      workspaceKey: f.paths.workspace.id,
+      workDir: f.workDir,
+      query: "BuildCheck config",
+      toolAllowed: () => true,
+      nativeEvidenceMatches: async () => true,
+    });
+    const prefixLength = identities[0]?.requiredPrefixLength;
+    assert.ok(prefixLength && prefixLength > 0);
+    const builder = new AtomicMemoryContextBuilder(f.repository, f.paths.workspace.id);
+    const intact = await builder.build("BuildCheck config", { reviewedExperiences: identities });
+    assert.equal(intact.references[0]?.range.start, 0);
+    assert.ok(intact.references[0]!.range.end >= prefixLength);
+    assert.ok(intact.tokenCount <= 320);
+    const tooSmall = await builder.build("BuildCheck config", {
+      reviewedExperiences: identities,
+      maxTokens: 210,
+    });
+    assert.equal(tooSmall.references.length, 0, "insufficient budget omits the whole preparation");
+    assert.equal(tooSmall.diagnostics[0]?.reason, "budget");
+    await f.repository.applyMutations({
+      operationId: "competing-memory",
+      expectedDeletionRevision: 0,
+      mutations: [
+        {
+          type: "create",
+          item: {
+            content:
+              "BuildCheck config priority：" +
+              "当前项目验收范围固定，保留相关配置与原检查入口。".repeat(4),
+            kind: "knowledge",
+            statementType: "fact",
+            temporalType: "undated",
+            scopeType: "workspace",
+            scopeKey: f.paths.workspace.id,
+            observedAt: Date.now(),
+            origin: "user_requested",
+            keys: ["priority", "config", "BuildCheck"].map((key) => ({
+              key,
+              keyType: "concept",
+              keyOrigin: "user",
+            })),
+            sources: [],
+          },
+        },
+      ],
+    });
+    const competing = await builder.build("priority config BuildCheck", {
+      reviewedExperiences: identities,
+    });
+    assert.equal(competing.references.length, 1);
+    assert.notEqual(competing.references[0]?.source, "reviewed-reference");
+    assert.ok(
+      competing.diagnostics.some(
+        (entry) => entry.itemId === saved.item.itemId && entry.reason === "budget",
+      ),
+      "other memory may consume the budget but cannot split the preparation",
     );
   },
 );
