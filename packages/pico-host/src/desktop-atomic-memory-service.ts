@@ -13,7 +13,7 @@ import {
   validateMemoryTemporalBounds,
 } from "@pico/core/atomic-memory-contracts";
 import type { AtomicMemorySettings } from "@pico/core/atomic-memory-runtime-contracts";
-import type { TaskExperienceReuse } from "@pico/core";
+import type { TaskExperienceCandidate, TaskExperienceReuse } from "@pico/core";
 import { executionLearningPathAuthorizer } from "./execution-learning-host.js";
 import { projectExperienceDelivery } from "./experience-delivery-evidence.js";
 import { taskExperienceRecallTargets } from "./task-experience-recall.js";
@@ -153,7 +153,7 @@ export class DesktopAtomicMemoryService {
         learningVersion: 2,
         workspaceKey,
         revision: store.executionLearning.readRevision(),
-        items: [...items.values()],
+        items: [...items.values()].map(publicExperienceCandidate),
         reuse,
       };
     });
@@ -178,7 +178,7 @@ export class DesktopAtomicMemoryService {
       );
       return {
         learningVersion: 2,
-        candidate,
+        candidate: publicExperienceCandidate(candidate),
         observations: observations.filter((o) =>
           candidate.observationIds.includes(o.observationId),
         ),
@@ -210,7 +210,7 @@ export class DesktopAtomicMemoryService {
         now: this.now(),
       });
       this.learningChanged(workspacePath, workspaceKey, store);
-      return { learningVersion: 2, candidate };
+      return { learningVersion: 2, candidate: publicExperienceCandidate(candidate) };
     });
   }
   async feedbackExperience(
@@ -229,7 +229,7 @@ export class DesktopAtomicMemoryService {
         now: this.now(),
       });
       this.learningChanged(workspacePath, workspaceKey, store);
-      return { learningVersion: 2, candidate };
+      return { learningVersion: 2, candidate: publicExperienceCandidate(candidate) };
     });
   }
   private learningChanged(
@@ -251,7 +251,10 @@ export class DesktopAtomicMemoryService {
     return this.withStore(workspacePath, async (store, workspaceKey) => ({
       workspaceKey,
       revision: store.executionLearning.readRevision(),
-      items: await store.executionLearning.listExecutionLearning(workspaceKey, sessionId),
+      // The old RPC is a read-only historical projection, not a second proposal queue.
+      items: (await store.executionLearning.listExecutionLearning(workspaceKey, sessionId)).filter(
+        (candidate) => candidate.state === "saved" && candidate.itemId,
+      ),
     }));
   }
   async inspectLearning(
@@ -260,10 +263,15 @@ export class DesktopAtomicMemoryService {
   ): Promise<RuntimeResult<"memory.learning.inspect">> {
     return this.withStore(workspacePath, async (store, workspaceKey) => {
       const candidate = await store.executionLearning.readExecutionLearningCandidate(candidateId);
-      if (!candidate || candidate.claim.admission.workspaceKey !== workspaceKey)
+      if (
+        !candidate ||
+        candidate.claim.admission.workspaceKey !== workspaceKey ||
+        candidate.state !== "saved"
+      )
         throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.NOT_FOUND, "当前工作区没有该学习候选");
       const legacy = JSON.parse(JSON.stringify(candidate));
       delete legacy.claim.admission.modelRoute;
+      delete legacy.hypothesis;
       return { candidate: legacy as import("@pico/protocol").JsonObject };
     });
   }
@@ -273,6 +281,16 @@ export class DesktopAtomicMemoryService {
     revision: number,
   ): Promise<RuntimeResult<"memory.learning.discard">> {
     return this.withStore(workspacePath, async (store, workspaceKey) => {
+      const candidate = await store.executionLearning.readExecutionLearningCandidate(candidateId);
+      if (
+        !candidate ||
+        candidate.claim.admission.workspaceKey !== workspaceKey ||
+        candidate.state !== "saved"
+      )
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.NOT_FOUND,
+          "独立原生学习已停用，请通过经验审核管理建议",
+        );
       await store.executionLearning.discardExecutionLearning(candidateId, workspaceKey, revision);
       this.options.publish(workspacePath, "memory.learning.changed", {
         workspaceKey,
@@ -838,6 +856,12 @@ function operationKey(workspaceKey: string, value: string): string {
     .update(JSON.stringify([workspaceKey, value]))
     .digest("hex")}`;
 }
+/** Internal verifier attachments never expand the version-2 wire contract. */
+function publicExperienceCandidate(candidate: TaskExperienceCandidate): TaskExperienceCandidate {
+  const { nativeEvidence: _nativeEvidence, ...publicCandidate } = candidate;
+  return publicCandidate;
+}
+
 function invalid(message: string): RuntimeProtocolError {
   return new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, message);
 }

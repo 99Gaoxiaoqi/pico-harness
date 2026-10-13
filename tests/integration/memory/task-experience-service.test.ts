@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import type {
   TaskExperienceCandidate,
@@ -127,6 +128,39 @@ async function seedPendingExperience(
 
 const protocolError = (code: RuntimeProtocolError["code"]) => (error: unknown) =>
   error instanceof RuntimeProtocolError && error.code === code;
+
+test("Host 验证附件不泄漏到既有审核协议，也不向用户暴露内部证据候选", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-internal-experience-evidence-"));
+  const workspacePath = join(root, "workspace"), picoHome = join(root, "home");
+  await mkdir(workspacePath);
+  const workspaceKey = resolvePicoPaths(workspacePath, { picoHome }).workspace.id;
+  const store = new SqliteMemoryItemStore(join(picoHome, "memory.sqlite"), { now: () => 1000 });
+  const service = new DesktopAtomicMemoryService({ picoHome, now: () => 1000, publish: () => {} });
+  t.after(async () => { service.close(); store.close(); await rm(root, { recursive: true, force: true }); });
+  const pending = await seedPendingExperience(store, workspacePath, workspaceKey);
+  // Simulate a persisted Host-only attachment. No model or public review input can supply it.
+  const db = new DatabaseSync(join(picoHome, "memory.sqlite"));
+  try {
+    db.prepare("UPDATE execution_learning_candidates SET record_json=json_set(record_json,'$.nativeEvidence',json(?)) WHERE candidate_id=?")
+      .run(JSON.stringify({ candidateId: "internal-proof", claimRevision: 1, claimHash: "a".repeat(64), scopeHash: "b".repeat(64) }), pending.candidateId);
+  } finally { db.close(); }
+  assert.ok((await store.taskExperiences.readTaskExperienceCandidate(pending.candidateId))?.nativeEvidence);
+  const query = await service.queryExperiences(workspacePath, { workspacePath });
+  parseRuntimeResult("memory.learning.query", query);
+  assert.equal("nativeEvidence" in query.items[0]!, false);
+  const detail = await service.detailExperience(workspacePath, pending.candidateId);
+  parseRuntimeResult("memory.learning.detail", detail);
+  assert.equal("nativeEvidence" in detail.candidate, false);
+  const review = await service.reviewExperience(workspacePath, {
+    workspacePath, candidateId: pending.candidateId, expectedRecordRevision: pending.recordRevision,
+    expectedContentVersion: pending.contentVersion, operationId: "disable-internal-evidence", action: "disable",
+  });
+  parseRuntimeResult("memory.learning.review", review);
+  assert.equal("nativeEvidence" in review.candidate, false);
+  assert.deepEqual((await service.listLearning(workspacePath)).items, []);
+  await assert.rejects(service.inspectLearning(workspacePath, "internal-proof"), protocolError(RUNTIME_ERROR_CODES.NOT_FOUND));
+  await assert.rejects(service.discardLearning(workspacePath, "internal-proof", 1), protocolError(RUNTIME_ERROR_CODES.NOT_FOUND));
+});
 
 test("真实 SQLite 与 Desktop v2 审核闭环隔离旧视图、保留未验证参考并支持关闭自动学习后管理", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-task-experience-service-"));
