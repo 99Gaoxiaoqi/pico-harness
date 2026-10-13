@@ -1,10 +1,23 @@
-import { resolve } from "node:path";
-import type { TaskExperienceCandidate } from "@pico/core";
+import { basename, isAbsolute, relative, resolve } from "node:path";
+import type {
+  ExecutionAcceptanceClaim,
+  MemoryItemSource,
+  TaskExperienceCandidate,
+} from "@pico/core";
 import { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-store";
 import { SqliteRuntimeEventStore } from "./product-runtime-event-store.js";
 import { atomicMemoryDatabasePath } from "./atomic-memory-runtime.js";
 import { resolvePicoPaths } from "./pico-paths.js";
-import { validateCanonicalExecutionSource } from "./execution-learning-runtime.js";
+import {
+  validateCanonicalExecutionSource,
+  type ExecutionNativeCommandFact,
+  type ExecutionNativeFileFact,
+} from "./execution-learning-runtime.js";
+import { safeTemplate } from "./execution-learning-evidence.js";
+import { createExecutionLearningIO } from "./execution-learning-recall.js";
+import { countTokens, primeTokenizer } from "@pico/runtime";
+import { sanitizeMemoryContent } from "@pico/runtime/atomic-memory/content-safety";
+import { isSensitiveCredentialPath } from "./session-permissions.js";
 import {
   getExecutionLearningWorker,
   acquireExecutionLearningWorker,
@@ -274,15 +287,30 @@ export function executionLearningHost(options: {
             failure.result.data.executionFacts.exitCode === 0
           )
             continue;
-          matches.push({
+          matches.push(claim);
+        }
+        // Ambiguous evidence must never grant the model's prose a broader validation scope.
+        const claim = matches.length === 1 ? matches[0] : undefined;
+        if (!claim) return undefined;
+        const preparation = await nativePreparation({
+          claim,
+          candidate,
+          repository,
+          events,
+          picoHome: options.picoHome,
+          signal,
+        }).catch(() => undefined);
+        return {
+          evidence: {
             candidateId: claim.candidateId,
             claimRevision: claim.revision,
             claimHash: claim.claimHash,
             scopeHash: claim.target.scopeHash,
-          });
-        }
-        // Ambiguous evidence must never grant the model's prose a broader validation scope.
-        return matches.length === 1 ? matches[0] : undefined;
+          },
+          ...(preparation
+            ? { preparation: preparation.content, sources: preparation.sources }
+            : {}),
+        };
       } finally {
         events.close();
       }
@@ -298,4 +326,140 @@ export function executionLearningHost(options: {
       ),
   );
   return worker;
+}
+
+/** Render only journal-bound native preparation within the candidate's already frozen evidence. */
+async function nativePreparation(options: {
+  claim: ExecutionAcceptanceClaim;
+  candidate: TaskExperienceCandidate;
+  repository: SqliteMemoryItemStore;
+  events: SqliteRuntimeEventStore;
+  picoHome: string;
+  signal: AbortSignal;
+}): Promise<{ content: string; sources: MemoryItemSource[] } | undefined> {
+  const { claim, candidate, repository, events, signal } = options;
+  const io = createExecutionLearningIO(
+    candidate.workDir,
+    undefined,
+    executionLearningPathAuthorizer(candidate.workDir, options.picoHome, candidate.sessionId),
+  );
+  const workspace = await io.realpath(candidate.workDir);
+  if (!workspace || signal.aborted) return undefined;
+  const localPath = (path: string) => {
+    const local = relative(workspace, path);
+    return isAbsolute(path) &&
+      !isSensitiveCredentialPath(path) &&
+      !local.startsWith("..") &&
+      !isAbsolute(local)
+      ? local
+        ? `./${local}`
+        : "."
+      : undefined;
+  };
+  const sameSource = (a: MemoryItemSource, b: MemoryItemSource) =>
+    a.eventId === b.eventId &&
+    a.sessionId === b.sessionId &&
+    a.runId === b.runId &&
+    a.turnId === b.turnId;
+  const lines = ["本工作区同一检查范围的准备记录（不代表整段建议已验证）："];
+  const sources: MemoryItemSource[] = [];
+  const admissions = await repository.executionLearning.listAdmissions();
+  await primeTokenizer();
+  for (const step of claim.recipe) {
+    if (signal.aborted) return undefined;
+    if (!candidate.sources.some((source) => sameSource(source, step.source))) continue;
+    const canonical = await validateCanonicalExecutionSource(events, step.source, {
+      workDir: candidate.workDir,
+    });
+    if (!canonical || canonical.result.data.status !== "succeeded") continue;
+    const admission = admissions.find(
+      (a) =>
+        a.sessionId === step.source.sessionId &&
+        a.runId === step.source.runId &&
+        a.workspaceKey === candidate.workspaceKey,
+    );
+    if (!admission) continue;
+    const records = await repository.executionLearning.listNativeFacts(admission.admissionId);
+    const record = records.find(
+      (record) =>
+        record.preparedEventId === canonical.operation.preparedEventId &&
+        record.toolCallId === canonical.operation.toolCallId &&
+        record.kind === (step.kind === "file" ? "file" : "command"),
+    );
+    if (!record) continue;
+    let line: string | undefined;
+    if (step.kind === "file") {
+      const fact = record.fact as ExecutionNativeFileFact;
+      const path = localPath(step.path);
+      if (
+        !path ||
+        (await io.realpath(step.path)) !== step.path ||
+        !fact.source ||
+        !sameSource(fact.source, step.source) ||
+        !fact.commits.some(
+          (commit) =>
+            commit.path === step.path &&
+            commit.afterHash === step.afterHash &&
+            commit.content === step.content,
+        )
+      )
+        continue;
+      const configuration =
+        /(?:^|[._-])(?:config|configuration|settings)(?:[._-]|$)/iu.test(basename(step.path)) ||
+        /^(?:package|tsconfig|jsconfig|pyproject|Cargo|go)\.(?:json|toml|mod)$/u.test(
+          basename(step.path),
+        );
+      const template = configuration ? safeTemplate(step.content) : undefined;
+      // Relative paths in an existing configuration are scoped data; absolute paths and artifact IDs are not replayed.
+      const content =
+        template &&
+        !/(?:pico:\/\/artifact\/|(?:^|["'\s])(?:\/[A-Za-z]|[A-Za-z]:\\))/u.test(template)
+          ? template
+          : undefined;
+      line = `准备文件 ${path}${content === undefined ? "（未保留可复用内容）" : `，完整内容 ${JSON.stringify(content)}`}`;
+      if (countTokens([...lines, line].join("\n")) > 120)
+        line = `准备文件 ${path}（内容超出引用预算，未保留）`;
+    } else {
+      const fact = record.fact as ExecutionNativeCommandFact;
+      if (
+        !fact.result ||
+        !sameSource(fact.result.source, step.source) ||
+        fact.result.exitCode !== 0
+      )
+        continue;
+      if (step.kind === "dependency") {
+        if (
+          fact.installedDependency?.command !== step.command ||
+          fact.installedDependency.manifestHash !== step.manifestHash ||
+          !localPath(fact.installedDependency.cwd) ||
+          (await io.realpath(fact.installedDependency.cwd)) !== fact.installedDependency.cwd ||
+          !claim.conditions.some(
+            (condition) =>
+              condition.kind === "node-package" &&
+              JSON.stringify(condition) === JSON.stringify(fact.installedDependency!.condition),
+          )
+        )
+          continue;
+        line = `准备依赖（目录 ${localPath(fact.installedDependency.cwd)}）：${step.command}`;
+      } else {
+        const path = localPath(step.path);
+        if (
+          !path ||
+          (await io.realpath(step.path)) !== step.path ||
+          (fact.cwdPreparation !== step.path && fact.target?.cwd !== step.path)
+        )
+          continue;
+        line = `准备目录：${path}`;
+      }
+    }
+    if (
+      !line ||
+      sanitizeMemoryContent({ title: "", content: line, reason: "" }).disposition !== "allow" ||
+      countTokens([...lines, line].join("\n")) > 120
+    )
+      continue;
+    lines.push(line);
+    sources.push(step.source);
+  }
+  return sources.length ? { content: lines.join("\n"), sources } : undefined;
 }

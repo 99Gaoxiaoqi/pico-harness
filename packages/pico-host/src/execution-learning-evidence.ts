@@ -511,7 +511,7 @@ export function evaluateAcceptance(
   return { accepted: true };
 }
 
-function safeTemplate(content: string | undefined): string | undefined {
+export function safeTemplate(content: string | undefined): string | undefined {
   if (content === undefined || [...content].length > 800) return undefined;
   const safety = sanitizeMemoryContent({ title: "配置模板", content, reason: "原生文件提交内容" });
   return safety.disposition === "allow" ? content : undefined;

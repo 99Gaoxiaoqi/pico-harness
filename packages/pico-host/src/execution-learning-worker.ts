@@ -14,6 +14,7 @@ import type {
   TaskExperienceObservation,
   ExperienceApplicability,
 } from "@pico/core";
+import { countTokens, primeTokenizer } from "@pico/runtime";
 import { sanitizeMemoryContent } from "@pico/runtime/atomic-memory/content-safety";
 import type { AtomicMemoryModelLease } from "./atomic-memory-runtime.js";
 
@@ -40,7 +41,14 @@ export interface ExecutionLearningWorkerOptions {
     readonly candidate: TaskExperienceCandidate;
     readonly sources: TaskExperienceCandidate["sources"];
     readonly signal: AbortSignal;
-  }) => Promise<TaskExperienceCandidate["nativeEvidence"]>;
+  }) => Promise<
+    | {
+        readonly evidence: NonNullable<TaskExperienceCandidate["nativeEvidence"]>;
+        readonly preparation?: string;
+        readonly sources?: TaskExperienceCandidate["sources"];
+      }
+    | undefined
+  >;
   readonly onTaskExperienceChanged?: (candidate: TaskExperienceCandidate) => void;
   readonly contentSafety?: (content: string) => boolean | Promise<boolean>;
   readonly onChanged?: (candidate: ExecutionLearningCandidate) => void;
@@ -411,17 +419,34 @@ export class ExecutionLearningWorker {
       const sources = observations
         .filter((observation) => proposal.evidenceIds.includes(observation.observationId))
         .map((observation) => observation.source);
-      const nativeEvidence = await this.options.taskExperienceNativeEvidence?.({
+      const native = await this.options.taskExperienceNativeEvidence?.({
         candidate,
         sources,
         signal: modelSignal,
       });
       if (!allowed() || modelSignal.aborted) return;
+      await primeTokenizer();
+      const content = native?.preparation
+        ? composeNativeProposal(native.preparation, proposal.content)
+        : proposal.content;
+      // Native preparation is visible in the same reviewed body; scan the final composition too.
+      if (!(await this.safe(content, modelSignal)) || !allowed() || modelSignal.aborted) {
+        await complete({ reason: "reflection_output_invalid" });
+        return;
+      }
+      const combinedSources = [
+        ...new Map(
+          [...sources, ...(native?.sources ?? [])].map((source) => [
+            JSON.stringify(source),
+            source,
+          ]),
+        ).values(),
+      ];
       await complete({
-        content: proposal.content,
+        content,
         applicability,
-        sources,
-        ...(nativeEvidence ? { nativeEvidence } : {}),
+        sources: combinedSources,
+        ...(native ? { nativeEvidence: native.evidence } : {}),
       });
     } catch (error) {
       if (!modelSignal.aborted && this.current(job, signal)) {
@@ -654,4 +679,15 @@ function abortable<T>(task: Promise<T>, signal: AbortSignal): Promise<T> {
       .then(resolveTask, rejectTask)
       .finally(() => signal.removeEventListener("abort", aborted));
   });
+}
+
+/** Leave room for the 320-token recall envelope; never truncate a configuration template. */
+function composeNativeProposal(preparation: string, method: string): string {
+  if (countTokens(preparation) > 120 || [...preparation].length > 1200) return method;
+  const points = [...method];
+  const compose = () =>
+    `${preparation}\n方法：${points.join("")}${points.length < [...method].length ? "…" : ""}`;
+  while (points.length && (countTokens(compose()) > 160 || [...compose()].length > 2000))
+    points.pop();
+  return points.length ? compose() : method;
 }

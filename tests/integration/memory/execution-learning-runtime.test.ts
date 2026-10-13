@@ -8,7 +8,7 @@ import { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
 import type { Message, ToolCall } from "@pico/core";
 import { isForegroundProcessFacts } from "@pico/core";
-import { AtomicMemoryLifecycle } from "@pico/runtime";
+import { AtomicMemoryLifecycle, countTokens } from "@pico/runtime";
 import { SilentReporter } from "@pico/runtime/silent-reporter";
 import { ApprovalManager } from "@pico/pico-host/global-approval-manager";
 import { executeAgentRuntime } from "@pico/pico-host/agent-runtime";
@@ -54,10 +54,7 @@ async function fixture(t: TestContext, prefix: string, trusted = true) {
   const paths = resolvePicoPaths(workDir, { picoHome });
   const repository = new SqliteMemoryItemStore(join(picoHome, "memory.sqlite"));
   const events = new SqliteRuntimeEventStore({ storageRoot: paths.workspace.root });
-  configureReviewedFixture(
-    picoHome,
-    "BuildCheck 检查依赖 config.json 中的 project 字段；准备 FixtureNorth 项目配置，再运行 check.test.cjs。",
-  );
+  configureReviewedFixture(picoHome, "观察失败信息，做最小修复，然后原样复测同一检查入口。");
   const sessions: string[] = [];
   // Native node:test invocations must behave like normal foreground commands.
   const inheritedTestContext = process.env.NODE_TEST_CONTEXT;
@@ -127,6 +124,14 @@ test(
     const result = await f.run(seedSession, async () => {
       const next = [
         call("failed-check", "bash", { command }),
+        call("sensitive-config", "write_file", {
+          path: "sensitive-config.json",
+          content: '{"token":"sk-fixtureOnlySecretToken0123456789"}',
+        }),
+        call("oversized-config", "write_file", {
+          path: "large-config.json",
+          content: JSON.stringify({ description: "not-a-reusable-template ".repeat(80) }),
+        }),
         call("repair-config", "write_file", { path: "config.json", content: configuration }),
         call("passed-check", "bash", { command }),
       ][step++];
@@ -136,6 +141,29 @@ test(
     });
     assert.equal(result.finalMessage, "BuildCheck 已通过。");
     await f.finishLearning();
+    const pending = (
+      await f.repository.taskExperiences.queryTaskExperiences(f.paths.workspace.id, {
+        review: "pending",
+      })
+    )[0];
+    assert.ok(pending, "abstract model method still produces a reviewable proposal");
+    assert.match(pending.content, /准备文件 \.\/config\.json/u);
+    assert.ok(
+      pending.content.includes(JSON.stringify(configuration)),
+      "review sees the complete canonical configuration, not only an invisible evidence reference",
+    );
+    assert.match(pending.content, /观察失败信息/u);
+    assert.doesNotMatch(
+      pending.content,
+      /sk-fixtureOnlySecretToken|sensitive-config|not-a-reusable-template/u,
+    );
+    assert.equal(pending.validation, "unknown");
+    assert.ok(countTokens(pending.content) <= 160 && [...pending.content].length <= 2000);
+    assert.equal(
+      (await f.repository.listItems({ workspaceKey: f.paths.workspace.id, learningVersion: 2 }))
+        .length,
+      0,
+    );
     const reviewed = await approveReviewedFixture(f.repository, f.paths.workspace.id);
     const items = await f.repository.listItems({
       learningVersion: 2,
@@ -215,7 +243,7 @@ test(
     const committed = fileFact.commits[0]!;
     assert.equal(
       fileFact.source.eventId,
-      outcomes.find((event) => event.data.toolName === "write_file")?.eventId,
+      outcomes.find((event) => event.refs.toolCallId === "repair-config")?.eventId,
     );
     assert.equal(await realpath(committed.path), await realpath(join(f.workDir, "config.json")));
     assert.equal(committed.beforeHash, null);
