@@ -79,7 +79,7 @@ export interface ProviderCallLedger {
 }
 
 export interface CostTrackerOptions {
-  /** Host bookkeeping after an actual prepared request enters a physical attempt. */
+  /** Host bookkeeping after a physical attempt receives a trusted HTTP 2xx response. */
   onPreparedRecallDispatched?: (input: {
     readonly providerCallId: string;
     readonly physicalAttemptId: string;
@@ -399,16 +399,38 @@ export class CostTracker implements LLMProvider {
       };
     }
     const accountingStart = lifecycle.onProviderAttemptStart;
+    const accountingUpdate = lifecycle.onProviderAttemptUpdate;
+    const attemptRecalls = new Map<string, PreparedMemoryRecallDiagnostic | undefined>();
     lifecycle.onProviderAttemptStart = async (snapshot) => {
+      // A prepared admission can still be cancelled before fetch. Freeze this body's
+      // evidence now; compatibility retries may prepare another body before updates drain.
+      attemptRecalls.set(
+        snapshot.physicalAttemptId,
+        preparedRecall ? structuredClone(preparedRecall) : undefined,
+      );
       if (accountingStart) await accountingStart(snapshot);
       else await options?.onProviderAttemptStart?.(snapshot);
-      if (preparedRecall && runtimeRun && context.purpose === "main") {
+    };
+    lifecycle.onProviderAttemptUpdate = async (snapshot) => {
+      if (accountingUpdate) await accountingUpdate(snapshot);
+      else await options?.onProviderAttemptUpdate?.(snapshot);
+      const recall = attemptRecalls.get(snapshot.physicalAttemptId);
+      if (
+        recall &&
+        runtimeRun &&
+        context.purpose === "main" &&
+        snapshot.status !== "prepared" &&
+        snapshot.httpStatus !== undefined &&
+        Number.isSafeInteger(snapshot.httpStatus) &&
+        snapshot.httpStatus >= 200 &&
+        snapshot.httpStatus < 300
+      ) {
         try {
           await this.options.onPreparedRecallDispatched?.({
             providerCallId: callId,
             physicalAttemptId: snapshot.physicalAttemptId,
             runId: runtimeRun.runId,
-            diagnostic: structuredClone(preparedRecall),
+            diagnostic: structuredClone(recall),
           });
         } catch {
           this.options.diagnostics?.warn(

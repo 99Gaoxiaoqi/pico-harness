@@ -63,7 +63,14 @@ function provider(
         await options?.onProviderAttemptUpdate?.({
           ...snapshot,
           revision: 1,
+          status: "observed",
+          httpStatus: 200,
+        });
+        await options?.onProviderAttemptUpdate?.({
+          ...snapshot,
+          revision: 2,
           status: "succeeded",
+          httpStatus: 200,
           completedAt: new Date().toISOString(),
           latencyMs: 0,
         });
