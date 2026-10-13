@@ -4,7 +4,8 @@ import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import test from "node:test";
-import type { ToolCall } from "@pico/core";
+import { DatabaseSync } from "node:sqlite";
+import type { ExecutionVerificationTicket, ToolCall } from "@pico/core";
 import { AtomicMemoryLifecycle } from "@pico/runtime";
 import { SilentReporter } from "@pico/runtime/silent-reporter";
 import { executeAgentRuntime } from "@pico/pico-host/agent-runtime";
@@ -18,6 +19,7 @@ import {
   observeInstalledDependency,
 } from "../../../packages/pico-host/src/execution-learning-dependency.js";
 import {
+  evaluateAcceptance,
   observeExecutionConditions,
   type ExecutionEvidenceIO,
 } from "../../../packages/pico-host/src/execution-learning-evidence.js";
@@ -114,15 +116,21 @@ console.log('added local fixture-package');
     );
     assert.equal(run.finalMessage, "检查已完成。");
     const workspaceKey = resolvePicoPaths(workDir, { picoHome }).workspace.id;
-    let candidate = (
+    const candidate = (
       await store.executionLearning.listExecutionLearningCandidates(workspaceKey)
     )[0];
-    for (let attempt = 0; candidate?.state !== "saved" && attempt < 100; attempt++) {
-      await new Promise((done) => setTimeout(done, 20));
-      candidate = (await store.executionLearning.listExecutionLearningCandidates(workspaceKey))[0];
-    }
     assert.ok(candidate);
-    assert.equal(candidate.state, "saved", candidate.reason);
+    assert.equal(
+      candidate.state,
+      "waiting",
+      "native dependency preparation stays internal evidence",
+    );
+    assert.equal(candidate.itemId, undefined);
+    assert.equal(
+      (await store.listItems({ workspaceKey, learningVersion: 2 })).length,
+      0,
+      "native receipts cannot publish a memory without generic proposal review",
+    );
     assert.equal(candidate.claim.predicateId, "command-conditions.v1");
     const preparation = candidate.claim.recipe.find((step) => step.kind === "dependency");
     assert.ok(preparation);
@@ -147,6 +155,43 @@ console.log('added local fixture-package');
     assert.equal(installOutcome?.event.kind, "tool.result.recorded");
     if (installOutcome?.event.kind === "tool.result.recorded") {
       assert.ok(installOutcome.event.data.projection.text.includes("added local fixture-package"));
+    }
+    const db = new DatabaseSync(join(picoHome, "memory.sqlite"), { readOnly: true });
+    try {
+      const rows = db
+        .prepare(
+          "SELECT record_json FROM execution_learning_tickets WHERE candidate_id=? AND result_json IS NOT NULL",
+        )
+        .all(candidate.claim.candidateId);
+      assert.equal(
+        rows.length,
+        1,
+        "the natural retry must persist exactly one completed native receipt",
+      );
+      const ticket = JSON.parse(String(rows[0]!.record_json)) as ExecutionVerificationTicket;
+      const verification = await store.executionLearning.readExecutionVerification(ticket.ticketId);
+      assert.ok(verification?.result);
+      assert.equal(ticket.claimRevision, candidate.claim.revision);
+      assert.equal(ticket.claimHash, candidate.claim.claimHash);
+      const check = await events.readToolOperation(sessionId, ticket.runId, "same-check");
+      assert.equal(check?.preparedEventId, ticket.preparedEventId);
+      assert.equal(check?.outcomeEventId, verification.result.source.eventId);
+      assert.equal(
+        evaluateAcceptance(candidate.claim, ticket, verification.result).accepted,
+        true,
+        "the receipt proves only the frozen dependency conditions and command outcome",
+      );
+      assert.equal(
+        Number(
+          db
+            .prepare("SELECT count(*) n FROM execution_learning_jobs WHERE candidate_id=?")
+            .get(candidate.claim.candidateId)!.n,
+        ),
+        0,
+        "native verification must not enqueue its own learning job",
+      );
+    } finally {
+      db.close();
     }
     const records = await store.executionLearning.listNativeFacts(
       candidate.claim.admission.admissionId,
