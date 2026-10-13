@@ -13,7 +13,9 @@ import {
   validateMemoryTemporalBounds,
 } from "@pico/core/atomic-memory-contracts";
 import type { AtomicMemorySettings } from "@pico/core/atomic-memory-runtime-contracts";
+import type { TaskExperienceReuse } from "@pico/core";
 import { executionLearningPathAuthorizer } from "./execution-learning-host.js";
+import { projectExperienceDelivery } from "./experience-delivery-evidence.js";
 import { taskExperienceRecallTargets } from "./task-experience-recall.js";
 import { resolvePicoPaths } from "./pico-paths.js";
 import {
@@ -45,22 +47,30 @@ export class DesktopAtomicMemoryService {
   private closed = false;
   constructor(private readonly options: DesktopAtomicMemoryServiceOptions) {}
   async queryExperienceUses(workspacePath: string, params: RuntimeParams<"memory.experience.query">): Promise<RuntimeResult<"memory.experience.query">> {
-    return this.withStore(workspacePath, async (store, workspaceKey) => ({
-      experienceVersion: 1 as const,
-      diagnostics: await store.experienceLedger.listExperienceDiagnostics(workspaceKey, params.sessionId),
-      ...await store.experienceLedger.queryExperienceUses(workspaceKey, {
+    return this.withStore(workspacePath, async (store, workspaceKey) => {
+      const page = await store.experienceLedger.queryExperienceUses(workspaceKey, {
         ...(params.sessionId ? { sessionId: params.sessionId } : {}),
         ...(params.itemId ? { itemId: params.itemId } : {}),
         ...(params.cursor ? { cursor: params.cursor } : {}),
         limit: params.limit ?? 50,
-      }),
-    }));
+      });
+      return {
+        experienceVersion: 1,
+        diagnostics: await store.experienceLedger.listExperienceDiagnostics(workspaceKey, params.sessionId),
+        ...page,
+        uses: page.uses.map(use => projectExperienceDelivery(use, { workDir: workspacePath, picoHome: this.options.picoHome })),
+      };
+    });
   }
   async detailExperienceUse(workspacePath: string, useId: string): Promise<RuntimeResult<"memory.experience.detail">> {
     return this.withStore(workspacePath, async (store, workspaceKey) => {
       const use = await store.experienceLedger.readExperienceUse(useId);
       if (!use || use.workspaceKey !== workspaceKey) throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.NOT_FOUND, "当前工作区没有该经验引用");
-      return { experienceVersion: 1, use, effects: await store.experienceLedger.listExperienceEffects(useId) };
+      return {
+        experienceVersion: 1,
+        use: projectExperienceDelivery(use, { workDir: workspacePath, picoHome: this.options.picoHome }),
+        effects: await store.experienceLedger.listExperienceEffects(useId),
+      };
     });
   }
   async feedbackExperienceUse(workspacePath: string, params: RuntimeParams<"memory.experience.feedback">): Promise<RuntimeResult<"memory.experience.feedback">> {
@@ -79,9 +89,11 @@ export class DesktopAtomicMemoryService {
     params: RuntimeParams<"memory.learning.query">,
   ): Promise<RuntimeResult<"memory.learning.query">> {
     return this.withStore(workspacePath, async (store, workspaceKey) => {
-      const reuse = (
-        await store.taskExperiences.listTaskExperienceReuse(workspaceKey, params.sessionId)
-      ).slice(0, 100);
+      const reuse = await this.projectLegacyExperienceReuse(
+        workspacePath,
+        store,
+        (await store.taskExperiences.listTaskExperienceReuse(workspaceKey, params.sessionId)).slice(0, 100),
+      );
       const items = new Map(
         (
           await store.taskExperiences.queryTaskExperiences(workspaceKey, {
@@ -120,9 +132,13 @@ export class DesktopAtomicMemoryService {
       const observations = await store.taskExperiences.listTaskExperienceObservations(
         candidate.taskId,
       );
-      const reuse = (await store.taskExperiences.listTaskExperienceReuse(workspaceKey))
-        .filter((r) => r.candidateId === candidateId)
-        .slice(0, 100);
+      const reuse = await this.projectLegacyExperienceReuse(
+        workspacePath,
+        store,
+        (await store.taskExperiences.listTaskExperienceReuse(workspaceKey))
+          .filter((r) => r.candidateId === candidateId)
+          .slice(0, 100),
+      );
       return {
         learningVersion: 2,
         candidate,
@@ -458,14 +474,32 @@ export class DesktopAtomicMemoryService {
     params: RuntimeParams<"memory.delete">,
   ): Promise<RuntimeResult<"memory.delete">> {
     return this.withStore(workspacePath, async (store, key) => {
-      const record = await authorizedItem(store, key, params.itemId);
-      if (record.sourceType === "reviewed-reference") throw invalid("审核经验请在经验管理中删除");
+      const operationId = operationKey(key, params.idempotencyKey);
+      if (!(await store.readOperation(operationId))) {
+        let record: MemoryItemRecord | undefined;
+        try {
+          record = await authorizedItem(store, key, params.itemId);
+        } catch (error) {
+          // Another request may commit after the first receipt lookup but before
+          // the Item lookup. Only its durable receipt can authorize a replay.
+          if (
+            !(error instanceof RuntimeProtocolError) ||
+            error.code !== RUNTIME_ERROR_CODES.NOT_FOUND ||
+            !(await store.readOperation(operationId))
+          )
+            throw error;
+        }
+        if (record?.sourceType === "reviewed-reference")
+          throw invalid("审核经验请在经验管理中删除");
+      }
+      // A receipt's presence is not proof of a matching delete. The store checks
+      // the operation type and Item/version hash in its deletion transaction.
       await store.deleteItem({
         itemId: params.itemId,
         expectedVersion: params.expectedVersion,
-        operationId: operationKey(key, params.idempotencyKey),
+        operationId,
       });
-      const version = record.item.version + 1;
+      const version = params.expectedVersion + 1;
       this.publish(() =>
         this.options.publish(workspacePath, "memory.deleted", {
           itemId: params.itemId,
@@ -585,6 +619,28 @@ export class DesktopAtomicMemoryService {
 
   close(): void {
     this.closed = true;
+  }
+
+  private async projectLegacyExperienceReuse(
+    workspacePath: string,
+    store: SqliteMemoryItemStore,
+    reuse: readonly TaskExperienceReuse[],
+  ): Promise<readonly TaskExperienceReuse[]> {
+    const projected = await Promise.all(
+      reuse.map(async (receipt) => {
+        const use = await store.experienceLedger.readExperienceUse(receipt.reuseId);
+        if (!use) return undefined;
+        // The v2 shape cannot represent pending or unknown delivery. Keep genuine
+        // historical receipts, and expose new references only with native proof.
+        if (use.historical) return receipt;
+        const current = projectExperienceDelivery(use, {
+          workDir: workspacePath,
+          picoHome: this.options.picoHome,
+        });
+        return current.delivery === "carried" ? receipt : undefined;
+      }),
+    );
+    return projected.filter((receipt): receipt is TaskExperienceReuse => receipt !== undefined);
   }
 
   private async withStore<T>(
