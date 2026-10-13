@@ -47,7 +47,7 @@ const renderPanel=(props)=>root.render(<PicoTheme><MemoryRouter><TaskExperienceP
   check(document.querySelector('.task-experience__row'),'pending experience loads with automatic learning off');
   check(detailCalls===0,'list never reads detail or grabs focus automatically');
   await act(async()=>document.querySelector('.task-experience__row').click());
-  check(text().includes('审核：待审核')&&text().includes('验证：验证通过'),'review and validation are independent');
+  check(text().includes('审核：待审核')&&text().includes('历史验证：验证通过（范围见使用记录）')&&text().includes('确认表示允许作为参考使用，不代表经验正文或整个任务已通过验证。'),'review and bounded validation are independent');
   check(text().includes('没有表头')&&text().includes('用户指出首行也是数据')&&text().includes('user-correction-event'),'conditions and correction provenance are inspectable');
   await act(async()=>button('编辑并确认').click());
   await act(async()=>input(document.querySelector('textarea'),'我的更正草稿：保留第一行。'));
@@ -117,8 +117,8 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const check=(v,m)=>{if(!v)throw new Error(m)};
 const deferred=()=>{let resolve,reject;const promise=new Promise((ok,fail)=>{resolve=ok;reject=fail});return{promise,resolve,reject}};
 const a=deferred();let fail=false,calls=0,revision=2;
-const result=path=>({learningVersion:2,workspaceKey:path,revision,items:[{candidateId:path,recordRevision:1,contentVersion:1,content:path+' content'}],reuse:[]});
-const actions={queryTaskExperiences:async path=>{calls++;if(path==='/a')return a.promise;if(fail)throw new Error('read failed');return result(path)},detailTaskExperience:async()=>({learningVersion:2,candidate:{candidateId:'/b',recordRevision:2,contentVersion:2,content:'/b updated'},observations:[],reuse:[]}),reviewTaskExperience:async()=>{},feedbackTaskExperience:async()=>{}};
+const result=path=>({learningVersion:2,workspaceKey:path,revision,items:[{kind:'task-lesson',candidateId:path,recordRevision:1,contentVersion:1,content:path+' content'}],reuse:[]});
+const actions={queryTaskExperiences:async path=>{calls++;if(path==='/a')return a.promise;if(fail)throw new Error('read failed');return result(path)},detailTaskExperience:async()=>({learningVersion:2,candidate:{kind:'task-lesson',candidateId:'/b',recordRevision:2,contentVersion:2,content:'/b updated'},observations:[],reuse:[]}),reviewTaskExperience:async()=>{},feedbackTaskExperience:async()=>{}};
 const make=(path,supported=true)=>({preview:false,connection:{kind:'ready'},taskExperienceSupported:supported,executionLearningRevision:0,actions,data:{workspacePath:path,trusted:true,memory:{settings:{enabled:false,autoExtract:false,recallEnabled:false}}}});
 function Host({runtime}){const learning=useTaskExperience(runtime,{workspacePath:runtime.data.workspacePath});return <><p id='items'>{learning.items.map(item=>item.content).join()}</p><p id='error'>{learning.error}</p><button onClick={()=>void learning.refresh()}>retry</button><button id='detail' onClick={()=>void learning.onDetail('/b')}>detail</button></>}
 const root=createRoot(document.getElementById('app'));

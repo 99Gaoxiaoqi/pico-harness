@@ -32,7 +32,7 @@ const click=async(selector)=>{await act(async()=>document.querySelector(selector
 (async()=>{
  await act(async()=>root.render(<PicoTheme><MemoryRouter initialEntries={['/memory?tab=saved']}><MemoryPage runtime={runtime} forceNarrow/><Navigation/></MemoryRouter></PicoTheme>));
  check(!text().includes('LEGACY_')&&!document.getElementById('memory-legacy')&&!document.getElementById('memory-edited-legacy'),'saved and manually edited legacy records never appear');
- check(text().includes('当前原生执行方案')&&text().includes('当前审核经验')&&text().includes('当前原生验收候选'),'both current sources and native candidate panel remain available');
+ check(text().includes('当前原生执行方案')&&text().includes('当前审核经验')&&!text().includes('当前原生验收候选'),'saved current sources remain available without native candidates');
  check(document.querySelector('#memory-tab-saved .memory-tab__count').textContent==='2'&&document.querySelector('#memory-tab-archived .memory-tab__count').textContent==='0','old Host list counts exclude loaded legacy entries');
  await click('#memory-tab-archived');check(!text().includes('LEGACY_')&&!document.getElementById('memory-edited-legacy'),'archived tab cannot expose manually edited legacy record');
  const input=document.querySelector('input[type=search]');await act(async()=>{Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'BuildCheck');input.dispatchEvent(new Event('input',{bubbles:true}));});
