@@ -285,7 +285,6 @@ import {
   buildMemoryTriggerTools,
 } from "@pico/pico-host/memory-trigger-tools";
 import { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-store";
-import { ExecutionLessonTool } from "./execution-lesson-tool.js";
 import {
   AtomicMemoryRuntime,
   ProviderAtomicMemoryModel,
@@ -2715,10 +2714,14 @@ export async function executeAgentRuntime(
         return memoryExtractionAllowed();
       };
       const nativeLearningGate = async () => {
+        // A prompt keeps learning eligible; the normal dispatch chain still authorizes Bash.
         if (
           process.platform === "win32" ||
+          !registry.getTool("bash") ||
           (effectiveOptions.allowedTools !== undefined &&
-            !effectiveOptions.allowedTools.includes("memory_learn"))
+            !effectiveOptions.allowedTools.includes("bash")) ||
+          evaluateToolPermission(permissionMode(), registry.getPermissionCategory("bash")).kind ===
+            "deny"
         )
           return { allowed: false };
         return taskLearningGate();
@@ -2975,24 +2978,6 @@ export async function executeAgentRuntime(
         },
         fileCommitted: async (call, fact) => executionLearningRuntime?.fileCommitted(call, fact),
       });
-      registry.register(
-        new ExecutionLessonTool({
-          store: repository,
-          session,
-          workspaceKey: memoryWorkspaceKey,
-          gate: async () => {
-            if (
-              (effectiveOptions.allowedTools !== undefined &&
-                !effectiveOptions.allowedTools.includes("memory_learn")) ||
-              (backgroundPolicy && !backgroundPolicy.allowedTools.has("memory_learn"))
-            )
-              return { allowed: false, reason: "tool_unavailable" };
-            return memoryExtractionAllowed();
-          },
-          isDraining: () => dependencies.atomicMemoryLifecycle?.isDraining ?? false,
-          ...(dependencies.memoryChangedSink ? { onChanged: dependencies.memoryChangedSink } : {}),
-        }),
-      );
       registry.register(
         buildMemorySearchTool({
           search: async (query, context, executionTargetId) => {

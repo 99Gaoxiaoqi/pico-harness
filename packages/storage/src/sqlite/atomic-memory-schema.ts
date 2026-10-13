@@ -21,8 +21,12 @@ import type { DatabaseSync } from "node:sqlite";
 import { EXECUTION_LEARNING_SCHEMA_SQL } from "./execution-learning-store.js";
 import { migrateExperienceFeedback } from "./experience-feedback-schema.js";
 import { TASK_EXPERIENCE_SCHEMA_SQL } from "./task-experience-schema.js";
+import {
+  checkpointRetiredExecutionLessons,
+  retireExecutionLessons,
+} from "./retire-execution-lessons.js";
 
-export const SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION = 13;
+export const SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION = 14;
 
 const EXECUTION_LESSON_SCHEMA_SQL = `
 CREATE TABLE execution_lesson_candidates (
@@ -41,7 +45,7 @@ const SQLITE_INITIALIZATION_BUSY_TIMEOUT_MS = 5_000;
 const SQLITE_INITIALIZATION_RETRY_DELAY_MS = 10;
 const initializationRetryGate = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
 
-// Additive upgrades preserve v9/v10/v11 memory while installing v12 task experience state.
+// Historical baseline used only inside the upgrade transaction; v14 retires its old lesson table.
 const CURRENT_SCHEMA_SQL =
   `
 CREATE TABLE memory_compaction_policy_denials (
@@ -309,37 +313,26 @@ export function initializeSqliteLongTermMemoryDatabase(db: DatabaseSync): void {
   assertSupportedSqliteLongTermMemorySchemaVersion(db);
   if (readSqliteLongTermMemorySchemaVersion(db) === SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION) {
     validateMinimumSchemaShape(db);
+    checkpointRetiredExecutionLessons(db);
     return;
   }
   db.exec("BEGIN IMMEDIATE");
   try {
-    // Another connection may have initialized the database before we acquired the lock.
+    // Another connection may have initialized while this writer waited.
     assertSupportedSqliteLongTermMemorySchemaVersion(db);
-    if (readSqliteLongTermMemorySchemaVersion(db) === 0) {
-      db.exec(CURRENT_SCHEMA_SQL);
-      migrateExperienceFeedback(db);
-      db.exec(`PRAGMA user_version = ${SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION}`);
-    } else if (readSqliteLongTermMemorySchemaVersion(db) === 9) {
-      validateMinimumSchemaShape(db, false);
-      db.exec(EXECUTION_LESSON_SCHEMA_SQL);
-      db.exec(EXECUTION_LEARNING_SCHEMA_SQL);
-      db.exec(TASK_EXPERIENCE_SCHEMA_SQL);
-      migrateExperienceFeedback(db);
-      db.exec(`PRAGMA user_version = ${SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION}`);
-    } else if (readSqliteLongTermMemorySchemaVersion(db) === 10) {
-      validateMinimumSchemaShape(db);
-      db.exec(EXECUTION_LEARNING_SCHEMA_SQL);
-      db.exec(TASK_EXPERIENCE_SCHEMA_SQL);
-      migrateExperienceFeedback(db);
-      db.exec(`PRAGMA user_version = ${SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION}`);
-    } else if (readSqliteLongTermMemorySchemaVersion(db) === 11) {
-      validateMinimumSchemaShape(db);
-      db.exec(TASK_EXPERIENCE_SCHEMA_SQL);
-      migrateExperienceFeedback(db);
-      db.exec(`PRAGMA user_version = ${SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION}`);
-    } else if (readSqliteLongTermMemorySchemaVersion(db) === 12) {
-      validateMinimumSchemaShape(db);
-      migrateExperienceFeedback(db);
+    const version = readSqliteLongTermMemorySchemaVersion(db);
+    if (version < SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION) {
+      if (version === 0) {
+        db.exec(CURRENT_SCHEMA_SQL);
+        migrateExperienceFeedback(db);
+      } else {
+        validateMinimumSchemaShape(db, version !== 9);
+        if (version === 9) db.exec(EXECUTION_LESSON_SCHEMA_SQL);
+        if (version <= 10) db.exec(EXECUTION_LEARNING_SCHEMA_SQL);
+        if (version <= 11) db.exec(TASK_EXPERIENCE_SCHEMA_SQL);
+        if (version <= 12) migrateExperienceFeedback(db);
+      }
+      retireExecutionLessons(db);
       db.exec(`PRAGMA user_version = ${SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION}`);
     }
     validateMinimumSchemaShape(db);
@@ -348,6 +341,7 @@ export function initializeSqliteLongTermMemoryDatabase(db: DatabaseSync): void {
     rollback(db);
     throw error;
   }
+  checkpointRetiredExecutionLessons(db);
 }
 
 export function assertSupportedSqliteLongTermMemorySchemaVersion(db: DatabaseSync): void {
@@ -358,10 +352,11 @@ export function assertSupportedSqliteLongTermMemorySchemaVersion(db: DatabaseSyn
     version !== 10 &&
     version !== 11 &&
     version !== 12 &&
+    version !== 13 &&
     version !== SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION
   ) {
     throw new Error(
-      `Long-term memory SQLite schema ${version} is unsupported; expected ${SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION}. Only schemas 9, 10, 11 and 12 can be upgraded automatically.`,
+      `Long-term memory SQLite schema ${version} is unsupported; expected ${SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION}. Only schemas 9, 10, 11, 12 and 13 can be upgraded automatically.`,
     );
   }
   if (
@@ -444,7 +439,15 @@ function retryWhileSqliteBusy<T>(operation: () => T): T {
   }
 }
 
-function validateMinimumSchemaShape(db: DatabaseSync, includeExecutionLessons = true): void {
+function validateMinimumSchemaShape(
+  db: DatabaseSync,
+  includeExecutionLessons = readSqliteLongTermMemorySchemaVersion(db) < 14,
+): void {
+  if (
+    readSqliteLongTermMemorySchemaVersion(db) >= 14 &&
+    db.prepare("SELECT 1 FROM sqlite_schema WHERE name='execution_lesson_candidates'").get()
+  )
+    throw incompleteSchemaError("retired execution lesson table is still present");
   if (readSqliteLongTermMemorySchemaVersion(db) >= 11) {
     const learningTables: Record<string, readonly string[]> = {
       execution_learning_control: [

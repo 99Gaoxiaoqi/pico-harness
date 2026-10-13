@@ -54,7 +54,6 @@ flowchart LR
 | 显式保留上一条助手回复                  | Host 唯一定位授权用户事件与紧邻的已完成助手原文，直接保存参考笔记，无辅助模型调用                            |
 | memory.create / /memory remember <text> | 本地安全校验后直接创建 workspace note；同文创建有操作级幂等复用                                              |
 | memory.update                           | 用户显式更正，本地校验与版本 CAS；不自动覆盖其他历史条目                                                     |
-| memory_learn                            | 从当前 Session 的原生 Bash 失败提出教训，经三次后续成功执行确认后保存工作区经验                              |
 
 两个写入触发工具严格接受空对象，不能传入主模型任意生成的正文。Host 决定证据与身份。助手参考笔记是单独的确定性保存路径，保留用户授权和助手原文双来源，标识“未经独立核实”；每段正文最多1800 code points、最多32段。它保留资料，不把助手陈述提升为用户事实。Responses 的记住入口会先拒绝不支持的 Provider，也不能借此路径保存助手笔记。
 
@@ -208,23 +207,19 @@ memory.metrics.get默认最近7天，统计范围为整个用户记忆库，按t
 
 ## 8. 源码与验证入口
 
-### 执行失败经验
+### 旧执行经验退役
 
-`memory_learn` 是 memory 工具组的延迟发现工具，只能直接调用并独占步骤。受信 Agent 模式、`enabled` 与 `autoExtract` 开启、工具授权允许、Session 仍拥有原有 lease/fence 且未取消或退出时才准入；Plan、Research、隔离子代理和默认后台任务不开放此写入路径。无需辅助提取模型，使用主模型提出正文，Host 核实执行证据。
+v14 完整退役 `memory_learn` 及三次同命令成功保存。工具不可发现、不可调用；历史工具名称仅保留回放解析，不转发到新学习器。
 
-1. `propose` 接收 `lesson`、`taskFamily` 和 `failure: {toolCallId, runId?}`。失败必须是本 Session 已结算的前台 Bash 原生结果，退出码非零；不能用助手陈述、fork 导入、恢复结果、不完整输出或含敏感参数的命令充当证据。返回稳定的 `candidateId`，候选不参与召回。
-2. 完成任务所需的后续检查之后，调用 `verify({candidateId, verifications?})`。省略引用时，Host 从后续原生结果中筛选；明确提供引用时，任何不合法引用都会拒绝。需要三次不同工具调用，派发及结果都晚于提案，原始命令、工作目录及声明的执行边界参数相同，完整退出码为零。重复引用只计一次，改过命令的检查不计入。
-3. 确认时，候选状态、Item、keys、四条以上实际来源和幂等回执在同一事务提交；正式条目为 workspace 范围的 `failure` / `agent_extracted`。稳定身份支持重启恢复及提交后重放，不重复保存。`inspect` 查看候选，`discard` 清除待确认正文；重提 pending 教训可修改正文并重置验证票，confirmed 教训的不同提案会被拒绝。
+升级在一个事务内按旧候选、创建回执与旧来源引用的明确身份清退全部工作区旧经验，包括后来手工改写的条目。清理正文、索引、派生片段与回包，保留原始 journal 和无正文删除审计；归属损坏或冲突时整体回滚。旧候选表删除，旧构建不得打开 v14。旧操作不能恢复正文，历史界面只显示“旧版经验已移除”；连接未升级 Host 时提示更新。
 
-工具不会自动执行或重放命令，也不能为凑票额外重复有副作用的命令；调用者应仅引用当前任务实际需要的检查。三次成功只能说明这些执行成功，不能证明教训的普遍正确性。召回仍是低信任参考，来源标识为 `execution-evidence`，记忆页显示执行验证次数。
-
-设置版本或删除代次变化会使旧候选失效。删除已确认 Item 同步清除候选正文及来源并保留墓碑，旧提案不能复活；人工更正撤销执行验证标识，即使正文未变也重新视为人工内容；归档/恢复保留证据并控制召回。当前只覆盖前台原生 Bash，未覆盖其他工具的业务语义判定，也没有自动泛化、跨工作区传播或独立因果评分。
+升级前须停止旧 Host、结束在途调用并备份。提交后执行 WAL checkpoint，忙或失败时记录诊断，不声称已完全物理擦除。回退仅使用兼容 v14 的构建，不恢复已清退的旧经验。
 
 ### 自然验收执行方案
 
 受信前台 Agent 自动收集真实失败及原生修复提交，在任务实际需要的复测派发前冻结验收主张、条件和 T1 票据。完整 T2 结果落盘后入持久队列；每个 PICO_HOME 用独立连接和带 fence 的租约串行校验，空闲 10 秒后整理。主流程只做每次最多 100ms 的可选登记，不等待反思模型，也不主动重放命令。
 
-首版包含两个固定谓词：`test-target-pass.v1` 核对 Node `node:test` 固定文件、失败节点、完整 reporter 结果及实际运行器身份；`command-conditions.v1` 核对静态入口、真实目录、配置摘要或本地 Node 包清单/版本/入口。仅完整成功且条件前后稳定的操作方案晋升，测试入口改动不能凭退出 0 通过；模型根因仍是隔离假设。配置模板限小型普通数据文件，依赖只覆盖单个静态 `npm install` 和不含 exports 的本地普通入口；复杂包装命令及其他测试框架暂不自动验收。首版只接入 POSIX shell；Windows PowerShell 不做自动插桩。
+首版包含两个固定谓词：`test-target-pass.v1` 核对 Node `node:test` 固定文件、失败节点、完整 reporter 结果及实际运行器身份；`command-conditions.v1` 核对静态入口、真实目录、配置摘要或本地 Node 包清单/版本/入口。仅完整成功且条件前后稳定的操作方案晋升，测试入口改动不能凭退出 0 通过；模型根因仍是隔离假设。配置模板限小型普通数据文件，依赖只覆盖单个静态 `npm install` 和不含 exports 的本地普通入口；复杂包装命令及其他测试框架暂不自动验收。首版只接入 POSIX shell；Windows PowerShell 不做自动插桩。准入要求 Bash 存在、白名单允许且权限不为拒绝；ask/auto 在正常审批后采集，不要求预先直接允许，也不依赖旧工具白名单。
 
 普通新输入抢占反思并保留冻结候选，明确经验纠正及管理操作阻断旧晋升。反思最多每个失败两次、每工作区每小时四次，超时/取消也计入；设置关闭时在扣预算前拒绝。重启恢复租约及已经持久化的验收回执，不用当前文件状态补造历史观测。候选保留 30 天，终态任务保留 7 天，丢弃或删除会清除待学习模板并保留墓碑。
 
@@ -235,7 +230,7 @@ memory.metrics.get默认最近7天，统计范围为整个用户记忆库，按t
 | 关注点                    | 源码                                                                                                                                                                                                                                                                    |
 | ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 装配、自动注入与工具门禁  | [agent-runtime.ts](../../packages/pico-host/src/agent-runtime.ts)、[memory-trigger-tools.ts](../../packages/pico-host/src/memory-trigger-tools.ts)                                                                                                                      |
-| 执行经验与原生证据核验    | [execution-lesson-tool.ts](../../packages/pico-host/src/execution-lesson-tool.ts)                                                                                                                                                                                       |
+| 执行经验与原生证据核验    | [execution-learning-runtime.ts](../../packages/pico-host/src/execution-learning-runtime.ts)                                                                                                                                                                                       |
 | 快照、自动边界与参考笔记  | [atomic-memory-runtime.ts](../../packages/pico-host/src/atomic-memory-runtime.ts)、[atomic-memory-reference-note.ts](../../packages/pico-host/src/atomic-memory-reference-note.ts)                                                                                      |
 | 提取、证据与窗口预算      | [extraction-engine.ts](../../packages/runtime/src/atomic-memory/extraction-engine.ts)、[extraction-evidence.ts](../../packages/runtime/src/atomic-memory/extraction-evidence.ts)、[extraction-budget.ts](../../packages/runtime/src/atomic-memory/extraction-budget.ts) |
 | 统一召回与词法规则        | [context-builder.ts](../../packages/runtime/src/atomic-memory/context-builder.ts)、[atomic-memory-search.ts](../../packages/core/src/atomic-memory-search.ts)                                                                                                           |
@@ -246,20 +241,20 @@ memory.metrics.get默认最近7天，统计范围为整个用户记忆库，按t
 
 集成验收覆盖正文缺key、旧笔记、原文范围/预算/去重、动态准入、时间更正、UI并发和历史统计；真实模型覆盖自动提取、显式笔记、跨会话召回、注入抵抗、主动搜索与日期判断。命令、性能和测试结果见[验收记录](../plans/2026-10-08-memory-acceptance.md)，历史通过次数不代表全面的模型准确率。
 
-执行经验的针对性验收为 [存储与迁移](../../tests/integration/memory/execution-lesson-store.test.ts)、[生产运行链路与所有权撤销](../../tests/integration/memory/execution-lesson-runtime.test.ts)、[真实模型学习及新会话召回](../../tests/e2e/execution-lesson-production.real-llm.test.ts)。真实模型命令：`RUN_LLM_E2E=1 node --import tsx --import @pico/cli/tui/preload-env --test --test-concurrency=1 tests/e2e/execution-lesson-production.real-llm.test.ts`。
+执行经验的针对性验收为 [退役迁移](../../tests/integration/memory/execution-lesson-store.test.ts)、[旧工具拒绝与新准入](../../tests/integration/memory/execution-lesson-runtime.test.ts)、[原生跨会话闭环](../../tests/e2e/execution-learning-autonomous.real-llm.test.ts) 和 [Excel 审核复用](../../tests/e2e/task-experience-review.real-llm.test.ts)。真实模型验收设置 `RUN_LLM_E2E=1`。
 
 当前方案仍为本地词法检索，没有embedding、向量服务、Mem0托管依赖、语义去重或自动冲突裁决。正文检索解决key遗漏和旧笔记窗口遗漏，但大幅同义改写仍可能不命中。
 
 ## 统一经验引用与反馈
 
-三条经验生产路径保留：原生执行谓词验收后自动保存、旧 `memory_learn` 三次同命令成功后保存、通用模型建议经用户审核后作为参考。普通事实、偏好和笔记继续人工管理，不进入自动效果账本。
+保留两条经验生产路径：原生执行谓词验收后自动保存、通用模型建议经用户审核后作为参考。普通事实、偏好和笔记继续人工管理，不进入自动效果账本。
 
-`experience_uses` 冻结来源版本、任务/Run、Item、recall 事件及实际片段；只有真实 Provider 请求携带该片段且实际物理调用开始，交付状态才为 carried。`experience_effects` 按引用和工具结算事件幂等追加，工具准备必须在交付后。`experience_feedback` 保留用户操作身份、CAS 和无正文删除墓碑。旧 v2 读取继续使用通用建议投影，新 `memory-experience-feedback-v1` capability 下的 `memory.experience.query/detail/feedback` 才返回三来源判别及逐次效果。
+`experience_uses` 冻结来源版本、任务/Run、Item、recall 事件及实际片段；只有真实 Provider 请求携带该片段且实际物理调用开始，交付状态才为 carried。`experience_effects` 按引用和工具结算事件幂等追加，工具准备必须在交付后。`experience_feedback` 保留用户操作身份、CAS 和无正文删除墓碑。旧 v2 读取继续使用通用建议投影，新 `memory-experience-feedback-v1` capability 下的 `memory.experience.query/detail/feedback` 返回来源判别及逐次效果；旧 `execution-evidence` 判别仅用于历史已删除记录兼容，不产生新业务记录。
 
 自动学习关闭只停止新提案与反思调用，历史引用和自然执行效果仍可记录；召回关闭停止新引用，已有引用仍可结算。总开关关闭后不读取新证据或自动改变启用状态；权限撤销停止后续读取、验证和引用。验证不重跑命令，不新增模型调用。
 
-用户确认、保存时验收、本次观察到采用与本次执行结果分别显示。原生 Node 仅在命令/入口/runner/范围及完整报告匹配时验证原谓词；Excel 仅校验当前用户明确指定的附件、Sheet、范围和有限纯数值求和。遗漏目标范围、复杂表格或模型最终回答都不能自证方法成功或失效。旧经验的三次成功不验证正文中的全部方法。
+用户确认、保存时验收、本次观察到采用与本次执行结果分别显示。原生 Node 仅在命令/入口/runner/范围及完整报告匹配时验证原谓词；Excel 仅校验当前用户明确指定的附件、Sheet、范围和有限纯数值求和。遗漏目标范围、复杂表格或模型最终回答都不能自证方法成功或失效。
 
-通用经验更正停止旧版引用，新版不继承旧验证。原生和旧经验使用归档/恢复控制引用，手工编辑撤销原执行来源；本次不适用只排除当前任务及目标版本。迟到结果须重查来源/Item 版本、管理和删除屏障，不能覆盖用户决定，也不能自动启用。合法删除事务清理所有经验派生正文和队列，保留原始 journal、共享证据与无正文操作审计。
+通用经验更正停止旧版引用，新版不继承旧验证。原生经验使用归档/恢复控制引用，手工编辑撤销原执行来源；本次不适用只排除当前任务及目标版本。迟到结果须重查来源/Item 版本、管理和删除屏障，不能覆盖用户决定，也不能自动启用。合法删除事务清理所有经验派生正文和队列，保留原始 journal、共享证据与无正文操作审计。
 
 `experience_diagnostics` 仅保存有界、无任务正文的稳定诊断码；每工作区最多100条，界面查询最多10条，正常关闭开关不记为故障。

@@ -94,7 +94,7 @@ console.log('added local fixture-package');
         provider: "openai",
         modelRouteId: "test/test",
         permissionMode: "full-access",
-        allowedTools: ["bash", "memory_learn"],
+        allowedTools: ["bash"],
       },
       {
         picoHome,

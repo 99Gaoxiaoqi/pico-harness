@@ -46,7 +46,10 @@ export interface DesktopAtomicMemoryServiceOptions {
 export class DesktopAtomicMemoryService {
   private closed = false;
   constructor(private readonly options: DesktopAtomicMemoryServiceOptions) {}
-  async queryExperienceUses(workspacePath: string, params: RuntimeParams<"memory.experience.query">): Promise<RuntimeResult<"memory.experience.query">> {
+  async queryExperienceUses(
+    workspacePath: string,
+    params: RuntimeParams<"memory.experience.query">,
+  ): Promise<RuntimeResult<"memory.experience.query">> {
     return this.withStore(workspacePath, async (store, workspaceKey) => {
       const page = await store.experienceLedger.queryExperienceUses(workspaceKey, {
         ...(params.sessionId ? { sessionId: params.sessionId } : {}),
@@ -56,16 +59,28 @@ export class DesktopAtomicMemoryService {
       });
       return {
         experienceVersion: 1,
-        diagnostics: await store.experienceLedger.listExperienceDiagnostics(workspaceKey, params.sessionId),
+        diagnostics: await store.experienceLedger.listExperienceDiagnostics(
+          workspaceKey,
+          params.sessionId,
+        ),
         ...page,
-        uses: page.uses.map(use => projectExperienceDelivery(use, { workDir: workspacePath, picoHome: this.options.picoHome })),
+        uses: page.uses.map((use) =>
+          projectExperienceDelivery(use, {
+            workDir: workspacePath,
+            picoHome: this.options.picoHome,
+          }),
+        ),
       };
     });
   }
-  async detailExperienceUse(workspacePath: string, useId: string): Promise<RuntimeResult<"memory.experience.detail">> {
+  async detailExperienceUse(
+    workspacePath: string,
+    useId: string,
+  ): Promise<RuntimeResult<"memory.experience.detail">> {
     return this.withStore(workspacePath, async (store, workspaceKey) => {
       const use = await store.experienceLedger.readExperienceUse(useId);
-      if (!use || use.workspaceKey !== workspaceKey) throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.NOT_FOUND, "当前工作区没有该经验引用");
+      if (!use || use.workspaceKey !== workspaceKey)
+        throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.NOT_FOUND, "当前工作区没有该经验引用");
       return {
         experienceVersion: 1,
         use: projectExperienceDelivery(use, {
@@ -76,9 +91,19 @@ export class DesktopAtomicMemoryService {
       };
     });
   }
-  async feedbackExperienceUse(workspacePath: string, params: RuntimeParams<"memory.experience.feedback">): Promise<RuntimeResult<"memory.experience.feedback">> {
+  async feedbackExperienceUse(
+    workspacePath: string,
+    params: RuntimeParams<"memory.experience.feedback">,
+  ): Promise<RuntimeResult<"memory.experience.feedback">> {
     return this.withStore(workspacePath, async (store, workspaceKey) => {
-      const use = await store.experienceLedger.feedbackExperienceUse({workspaceKey, useId: params.useId, expectedItemVersion: params.expectedItemVersion, operationId: params.operationId, action: params.action, now: this.now()});
+      const use = await store.experienceLedger.feedbackExperienceUse({
+        workspaceKey,
+        useId: params.useId,
+        expectedItemVersion: params.expectedItemVersion,
+        operationId: params.operationId,
+        action: params.action,
+        now: this.now(),
+      });
       if (params.action === "disable") {
         const currentItem = await store.readItem(use.itemId);
         if (currentItem) this.changed(workspacePath, currentItem);
@@ -86,7 +111,10 @@ export class DesktopAtomicMemoryService {
       this.learningChanged(workspacePath, workspaceKey, store);
       return {
         experienceVersion: 1,
-        use: projectExperienceDelivery(use, { workDir: workspacePath, picoHome: this.options.picoHome }),
+        use: projectExperienceDelivery(use, {
+          workDir: workspacePath,
+          picoHome: this.options.picoHome,
+        }),
       };
     });
   }
@@ -98,7 +126,10 @@ export class DesktopAtomicMemoryService {
       const reuse = await this.projectLegacyExperienceReuse(
         workspacePath,
         store,
-        (await store.taskExperiences.listTaskExperienceReuse(workspaceKey, params.sessionId)).slice(0, 100),
+        (await store.taskExperiences.listTaskExperienceReuse(workspaceKey, params.sessionId)).slice(
+          0,
+          100,
+        ),
       );
       const items = new Map(
         (
@@ -712,7 +743,21 @@ async function authorizedItem(
   itemId: string,
 ): Promise<MemoryItemRecord> {
   const record = await store.readItem(itemId);
-  if (!record || (record.item.scopeType === "workspace" && record.item.scopeKey !== key)) {
+  if (!record) {
+    for (const scope of [
+      ["workspace", key],
+      ["global", null],
+    ] as const) {
+      const identity = createHash("sha256")
+        .update(JSON.stringify([...scope, itemId]))
+        .digest("hex");
+      const retired = await store.readOperation(`retire-execution-lesson:v14:item:${identity}`);
+      if (retired?.operationType === "delete")
+        throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.NOT_FOUND, "旧版经验已移除");
+    }
+    throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.NOT_FOUND, "当前工作区没有这条记忆");
+  }
+  if (record.item.scopeType === "workspace" && record.item.scopeKey !== key) {
     throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.NOT_FOUND, "当前工作区没有这条记忆");
   }
   return record;

@@ -59,10 +59,13 @@ export function ExperienceUsagePanel({
   ...props
 }: ExperienceUsagePanelProps) {
   if (!uses.length && !diagnostics.length) return null;
-  const carried = uses.filter((use) => use.delivery === "carried" && !use.historical).length;
-  const pending = uses.filter((use) => use.delivery === "pending" && !use.historical).length;
-  const historical = uses.filter((use) => use.historical).length;
-  const unconfirmed = uses.filter((use) => !use.historical && use.delivery === "unknown").length;
+  const currentUses = uses.filter((use) => use.source.kind !== "execution-evidence");
+  const carried = currentUses.filter((use) => use.delivery === "carried" && !use.historical).length;
+  const pending = currentUses.filter((use) => use.delivery === "pending" && !use.historical).length;
+  const historical = currentUses.filter((use) => use.historical).length;
+  const unconfirmed = currentUses.filter(
+    (use) => !use.historical && use.delivery === "unknown",
+  ).length;
   return (
     <>
       {uses.length > 0 && (
@@ -81,13 +84,19 @@ export function ExperienceUsagePanel({
             <p>
               用户确认、保存时验收、是否采用与本次执行结果分别记录。只有已携带到模型请求的记录显示“已引用”。
             </p>
-            {uses.map((use) => (
-              <UseCard
-                key={JSON.stringify([props.workspacePath, use.useId])}
-                use={use}
-                {...props}
-              />
-            ))}
+            {uses.map((use) =>
+              use.source.kind === "execution-evidence" ? (
+                <p key={JSON.stringify([props.workspacePath, use.useId])} data-use-id={use.useId}>
+                  {use.deleted ? "旧版经验已移除" : "旧版经验不可用，请更新电脑端完成清理。"}
+                </p>
+              ) : (
+                <UseCard
+                  key={JSON.stringify([props.workspacePath, use.useId])}
+                  use={use}
+                  {...props}
+                />
+              ),
+            )}
           </div>
         </details>
       )}

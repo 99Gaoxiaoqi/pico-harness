@@ -5,6 +5,7 @@ import type { ExperienceValidation, TaskExperienceReuse } from './task-experienc
 export type ExperienceSourceVersion =
   | { readonly kind: 'reviewed-reference'; readonly candidateId: string; readonly contentVersion: number }
   | { readonly kind: 'execution-validated'; readonly candidateId: string; readonly claimRevision: number; readonly claimHash: string; readonly scopeHash: string }
+  /** Retired source: readable only for historical, body-free deletion receipts. */
   | { readonly kind: 'execution-evidence'; readonly candidateId: string; readonly candidateVersion: number; readonly contentHash: string };
 export interface ExperienceUse {
   readonly useId: string;

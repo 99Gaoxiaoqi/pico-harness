@@ -135,7 +135,7 @@ test(
           provider: "openai",
           modelRouteId: "test/test",
           permissionMode: "full-access",
-          allowedTools: ["bash", "write_file", "memory_learn"],
+          allowedTools: ["bash", "write_file"],
         },
         {
           picoHome,

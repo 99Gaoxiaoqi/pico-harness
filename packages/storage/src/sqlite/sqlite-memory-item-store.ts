@@ -66,9 +66,6 @@ import {
   type MemoryItemRecord,
   type MemoryItemSource,
   type MemoryItemWrite,
-  type ExecutionLessonCandidate,
-  type CreateExecutionLessonCandidateRequest,
-  type VerifyExecutionLessonRequest,
   type MemoryMutationResult,
   type MemoryWriteOperationResult,
   type PendingMemoryExtractionFailure,
@@ -94,26 +91,6 @@ const MAX_KEY_CODE_POINTS = 256;
 const MAX_OPERATION_RESULT_JSON_CODE_UNITS = 128 * 1_024;
 
 const require = createRequire(import.meta.url);
-
-function clearExecutionLesson(
-  candidate: ExecutionLessonCandidate,
-  state: "rejected" | "deleted" | "invalidated",
-  now: number,
-): ExecutionLessonCandidate {
-  return {
-    ...candidate,
-    state,
-    version: candidate.version + 1,
-    content: "",
-    taskFamily: "",
-    failure: null,
-    verifications: [],
-    confirmedAt: null,
-    itemId: null,
-    itemContentHash: null,
-    updatedAt: now,
-  };
-}
 
 export type SqliteMemoryItemStoreFailpoint =
   | "after_item_write"
@@ -1270,12 +1247,10 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
              WHERE item_id = ? ORDER BY event_id ASC LIMIT 1`,
           )
           .get(item.itemId) as MemorySourceRow | undefined;
-        const executionEvidence = this.#readExecutionEvidence(item);
         return {
           item,
           sourceCount,
           ...this.executionLearning.readItemAcceptance(item.itemId, item.contentHash),
-          ...(executionEvidence ? { executionEvidence } : {}),
           ...(firstSource ? { firstSource: decodeSource(firstSource) } : {}),
         };
       });
@@ -1386,271 +1361,6 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
     return this.#deletionRevision();
   }
 
-  async readExecutionLesson(candidateId: string): Promise<ExecutionLessonCandidate | undefined> {
-    this.#assertOpen();
-    const row = this.#database
-      .prepare("SELECT record_json FROM execution_lesson_candidates WHERE candidate_id = ?")
-      .get(normalizeIdentifier(candidateId, "candidateId"));
-    return row ? (JSON.parse(String(row.record_json)) as ExecutionLessonCandidate) : undefined;
-  }
-
-  async createExecutionLesson(
-    request: CreateExecutionLessonCandidateRequest,
-  ): Promise<ExecutionLessonCandidate> {
-    this.#assertOpen();
-    const id = normalizeIdentifier(request.candidateId, "candidateId");
-    const content = normalizeLongTermMemoryContent(request.content);
-    if (!content.ok) throw new Error(content.message);
-    const workspaceKey = normalizeIdentifier(request.workspaceKey, "workspaceKey");
-    const sessionId = normalizeIdentifier(request.sessionId, "sessionId");
-    const taskFamily = normalizeIdentifier(request.taskFamily, "taskFamily");
-    const failure = normalizeSources([request.failure], false)[0]!;
-    const observedAt = normalizeTimestamp(request.observedAt, "observedAt");
-    const now = normalizeTimestamp((this.#options.now ?? Date.now)(), "current time");
-    if (observedAt > now) throw new Error("Execution evidence cannot be in the future");
-    this.#database.exec("BEGIN IMMEDIATE");
-    try {
-      this.#assertExecutionLessonPolicy(
-        workspaceKey,
-        request.settingsVersion,
-        request.deletionRevision,
-      );
-      const existing = this.#database
-        .prepare("SELECT record_json FROM execution_lesson_candidates WHERE candidate_id = ?")
-        .get(id);
-      if (existing) {
-        const candidate = JSON.parse(String(existing.record_json)) as ExecutionLessonCandidate;
-        if (candidate.workspaceKey !== workspaceKey || candidate.sessionId !== sessionId)
-          throw new Error("Execution lesson scope mismatch");
-        if (
-          candidate.state === "confirmed" &&
-          (candidate.content !== content.value || candidate.taskFamily !== taskFamily)
-        )
-          throw new Error("Confirmed execution lessons cannot be revised; edit the memory item");
-        if (
-          candidate.state === "candidate" &&
-          (candidate.content !== content.value || candidate.taskFamily !== taskFamily)
-        ) {
-          this.#assertExecutionLessonPolicy(
-            workspaceKey,
-            candidate.settingsVersion,
-            candidate.deletionRevision,
-          );
-          const revised: ExecutionLessonCandidate = {
-            ...candidate,
-            version: candidate.version + 1,
-            content: content.value,
-            taskFamily,
-            evidenceBoundary: requiredNonNegativeInteger(
-              request.evidenceBoundary,
-              "evidenceBoundary",
-            ),
-            verifications: [],
-            updatedAt: now,
-          };
-          this.#writeExecutionLesson(revised);
-          this.#database.exec("COMMIT");
-          return revised;
-        }
-        this.#database.exec("COMMIT");
-        return candidate;
-      }
-      const candidate: ExecutionLessonCandidate = {
-        candidateId: id,
-        version: 1,
-        state: "candidate",
-        workspaceKey,
-        sessionId,
-        content: content.value,
-        taskFamily,
-        commandHash: requiredHash(request.commandHash, "commandHash"),
-        evidenceBoundary: requiredNonNegativeInteger(request.evidenceBoundary, "evidenceBoundary"),
-        failure,
-        verifications: [],
-        deletionRevision: request.deletionRevision,
-        settingsVersion: request.settingsVersion,
-        createdAt: now,
-        updatedAt: now,
-        confirmedAt: null,
-        itemId: null,
-        itemContentHash: null,
-      };
-      this.#database
-        .prepare(
-          "INSERT INTO execution_lesson_candidates(candidate_id,workspace_key,session_id,state,item_id,record_json) VALUES(?,?,?,?,NULL,?)",
-        )
-        .run(id, workspaceKey, sessionId, candidate.state, JSON.stringify(candidate));
-      this.#database.exec("COMMIT");
-      return candidate;
-    } catch (error) {
-      rollback(this.#database);
-      throw error;
-    }
-  }
-
-  async verifyExecutionLesson(
-    request: VerifyExecutionLessonRequest,
-  ): Promise<ExecutionLessonCandidate> {
-    this.#assertOpen();
-    this.#database.exec("BEGIN IMMEDIATE");
-    try {
-      const candidate = this.#requireExecutionLesson(
-        request.candidateId,
-        request.workspaceKey,
-        request.sessionId,
-      );
-      this.#assertExecutionLessonPolicy(
-        candidate.workspaceKey,
-        candidate.settingsVersion,
-        candidate.deletionRevision,
-      );
-      if (candidate.state !== "candidate") {
-        this.#database.exec("COMMIT");
-        return candidate;
-      }
-      if (candidate.version !== request.expectedVersion)
-        throw new MemoryItemStoreConflictError(
-          "version_conflict",
-          "Execution lesson changed during verification",
-        );
-      const sources = normalizeSources(
-        [...candidate.verifications, ...request.verifications],
-        false,
-      );
-      const unique = [...new Map(sources.map((source) => [source.eventId, source])).values()];
-      if (
-        unique.some(
-          (source) =>
-            source.sessionId !== candidate.sessionId ||
-            source.eventId === candidate.failure?.eventId,
-        )
-      )
-        throw new Error("Execution verification crosses the candidate evidence boundary");
-      if (!unique.length || unique.length > 32)
-        throw new Error("Invalid execution verification count");
-      const now = normalizeTimestamp((this.#options.now ?? Date.now)(), "current time");
-      const observedAt = normalizeTimestamp(request.observedAt, "observedAt");
-      if (observedAt > now) throw new Error("Execution evidence cannot be in the future");
-      let next: ExecutionLessonCandidate = {
-        ...candidate,
-        version: candidate.version + 1,
-        verifications: unique,
-        updatedAt: now,
-      };
-      if (unique.length >= 3) {
-        const operationId = `execution-lesson:${candidate.candidateId}`;
-        if (this.#readOperationRow(operationId))
-          throw new Error("Execution lesson was already committed");
-        const item = normalizeWrite({
-          content: candidate.content,
-          kind: "failure",
-          statementType: "fact",
-          temporalType: "undated",
-          scopeType: "workspace",
-          scopeKey: candidate.workspaceKey,
-          observedAt,
-          origin: "agent_extracted",
-          keys: [{ key: candidate.taskFamily, keyType: "concept", keyOrigin: "deterministic" }],
-          sources: [candidate.failure!, ...unique],
-        });
-        const result = this.#createItem(item, 0, now);
-        next = {
-          ...next,
-          state: "confirmed",
-          confirmedAt: now,
-          itemId: result.itemId,
-          itemContentHash: item.contentHash,
-        };
-        this.#options.failpoint?.("before_operation_write");
-        this.#database
-          .prepare(
-            "INSERT INTO memory_write_operations(operation_id,operation_type,request_hash,result_json,committed_at) VALUES(?, 'create', ?, ?, ?)",
-          )
-          .run(
-            operationId,
-            hashCanonical({ candidateId: candidate.candidateId, sources: unique }),
-            JSON.stringify([result]),
-            now,
-          );
-      }
-      this.#writeExecutionLesson(next);
-      this.#database.exec("COMMIT");
-      this.#options.failpoint?.("after_commit");
-      return next;
-    } catch (error) {
-      rollback(this.#database);
-      throw error;
-    }
-  }
-
-  async rejectExecutionLesson(
-    candidateId: string,
-    workspaceKey: string,
-    sessionId: string,
-  ): Promise<void> {
-    this.#assertOpen();
-    this.#database.exec("BEGIN IMMEDIATE");
-    try {
-      const candidate = this.#requireExecutionLesson(candidateId, workspaceKey, sessionId);
-      if (candidate.state !== "candidate") throw new Error("Only pending lessons can be discarded");
-      this.#writeExecutionLesson(
-        clearExecutionLesson(candidate, "rejected", (this.#options.now ?? Date.now)()),
-      );
-      this.#database.exec("COMMIT");
-    } catch (error) {
-      rollback(this.#database);
-      throw error;
-    }
-  }
-
-  #assertExecutionLessonPolicy(
-    workspaceKey: string,
-    version: number,
-    deletionRevision: number,
-  ): void {
-    this.#assertDeletionRevision(deletionRevision);
-    const settings = this.#readSettings(workspaceKey);
-    if (!settings.enabled || !settings.autoExtract || settings.version !== version)
-      throw new Error("Execution lesson memory policy changed");
-  }
-
-  #requireExecutionLesson(
-    id: string,
-    workspaceKey: string,
-    sessionId: string,
-  ): ExecutionLessonCandidate {
-    const row = this.#database
-      .prepare("SELECT record_json FROM execution_lesson_candidates WHERE candidate_id = ?")
-      .get(normalizeIdentifier(id, "candidateId"));
-    if (!row) throw new Error("Execution lesson not found");
-    const candidate = JSON.parse(String(row.record_json)) as ExecutionLessonCandidate;
-    if (candidate.workspaceKey !== workspaceKey || candidate.sessionId !== sessionId)
-      throw new Error("Execution lesson scope mismatch");
-    return candidate;
-  }
-
-  #writeExecutionLesson(candidate: ExecutionLessonCandidate): void {
-    this.#database
-      .prepare(
-        "UPDATE execution_lesson_candidates SET state=?,item_id=?,record_json=? WHERE candidate_id=?",
-      )
-      .run(candidate.state, candidate.itemId, JSON.stringify(candidate), candidate.candidateId);
-  }
-
-  #invalidateExecutionLesson(itemId: string, state: "deleted" | "invalidated", now: number): void {
-    const row = this.#database
-      .prepare("SELECT record_json FROM execution_lesson_candidates WHERE item_id=?")
-      .get(itemId);
-    if (row)
-      this.#writeExecutionLesson(
-        clearExecutionLesson(
-          JSON.parse(String(row.record_json)) as ExecutionLessonCandidate,
-          state,
-          now,
-        ),
-      );
-  }
-
   #deletionRevision(): number {
     // Delete receipts are append-only; retries do not increment this generation.
     const row = this.#database
@@ -1743,7 +1453,6 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
           .run(JSON.stringify(redacted), receipt.operationId);
       }
       const deletedAt = (this.#options.now ?? Date.now)();
-      this.#invalidateExecutionLesson(itemId, "deleted", deletedAt);
       // Resolve provenance before the item's foreign-key cascade removes its mapping.
       this.executionLearning.invalidateItem(itemId, deletedAt);
       this.#database.prepare("DELETE FROM memory_items WHERE item_id = ?").run(itemId);
@@ -1864,15 +1573,10 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
         "Reviewed task experience must be edited through experience review",
         mutation.itemId,
       );
-    if (
-      !currentRecord.executionEvidence &&
-      !currentRecord.sourceType &&
-      recordMatchesWrite(currentRecord, mutation.item)
-    ) {
+    if (!currentRecord.sourceType && recordMatchesWrite(currentRecord, mutation.item)) {
       return mutationResult(mutationIndex, "update", current, "noop");
     }
     const updatedAt = Math.max(committedAt, current.updatedAt);
-    this.#invalidateExecutionLesson(mutation.itemId, "invalidated", updatedAt);
     this.executionLearning.invalidateItem(
       mutation.itemId,
       updatedAt,
@@ -2021,13 +1725,11 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
       assertChildCardinality("sources", sources.length, MAX_SOURCES_PER_ITEM);
     }
     const item = decodeItem(row);
-    const executionEvidence = this.#readExecutionEvidence(item);
     return {
       item,
       keys: keys.map(decodeKey),
       sources: sources.map(decodeSource),
       ...this.executionLearning.readItemAcceptance(item.itemId, item.contentHash),
-      ...(executionEvidence ? { executionEvidence } : {}),
     };
   }
 
@@ -2035,28 +1737,6 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
     const record = this.#readItemRecord(itemId);
     if (!record) throw new Error(`Memory Item ${itemId} disappeared during transaction`);
     return record;
-  }
-
-  #readExecutionEvidence(item: MemoryItem): MemoryItemRecord["executionEvidence"] {
-    const row = this.#database
-      .prepare(
-        "SELECT record_json FROM execution_lesson_candidates WHERE item_id=? AND state='confirmed'",
-      )
-      .get(item.itemId);
-    const lesson = row
-      ? (JSON.parse(String(row.record_json)) as ExecutionLessonCandidate)
-      : undefined;
-    return lesson &&
-      lesson.itemId === item.itemId &&
-      lesson.itemContentHash === item.contentHash &&
-      lesson.confirmedAt !== null &&
-      lesson.verifications.length >= 3
-      ? {
-          candidateId: lesson.candidateId,
-          confirmedAt: lesson.confirmedAt,
-          verificationCount: lesson.verifications.length,
-        }
-      : undefined;
   }
 
   #readOperationRow(operationId: string): MemoryOperationRow | undefined {
