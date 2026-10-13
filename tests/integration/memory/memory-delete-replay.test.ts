@@ -183,45 +183,6 @@ async function seedNative(f: Fixture): Promise<string> {
   return itemId;
 }
 
-async function seedLegacy(f: Fixture): Promise<string> {
-  const settings = await f.store.readSettings(f.workspaceKey);
-  const candidate = await f.store.createExecutionLesson({
-    candidateId: "legacy",
-    workspaceKey: f.workspaceKey,
-    sessionId: "session",
-    content: "旧路径三次成功的经验。",
-    taskFamily: "检查",
-    commandHash: hash("command"),
-    evidenceBoundary: 1,
-    failure: source("legacy-failure"),
-    observedAt: 1,
-    settingsVersion: settings.version,
-    deletionRevision: await f.store.readDeletionRevision(),
-  });
-  const confirmed = await f.store.verifyExecutionLesson({
-    candidateId: "legacy",
-    workspaceKey: f.workspaceKey,
-    sessionId: "session",
-    expectedVersion: candidate.version,
-    verifications: [source("pass1"), source("pass2"), source("pass3")],
-    observedAt: 1,
-  });
-  assert.equal(confirmed.state, "confirmed");
-  assert.ok((await f.store.readItem(confirmed.itemId!))!.executionEvidence);
-  await recordUse(
-    f,
-    confirmed.itemId!,
-    {
-      kind: "execution-evidence",
-      candidateId: "legacy",
-      candidateVersion: confirmed.version,
-      contentHash: confirmed.itemContentHash!,
-    },
-    "legacy-use",
-  );
-  return confirmed.itemId!;
-}
-
 async function recordUse(
   f: Fixture,
   itemId: string,
@@ -341,14 +302,10 @@ async function seedReviewed(f: Fixture) {
   ).candidate;
 }
 
-test("原生与旧执行经验删除的即时及冷重放成功，回执和删除代次不重复且正文不恢复", async (t) => {
+test("原生执行经验删除的即时及冷重放成功，回执和删除代次不重复且正文不恢复", async (t) => {
   const f = await fixture(t),
-    nativeId = await seedNative(f),
-    legacyId = await seedLegacy(f);
-  for (const [itemId, useId] of [
-    [nativeId, "native-use"],
-    [legacyId, "legacy-use"],
-  ] as const) {
+    nativeId = await seedNative(f);
+  for (const [itemId, useId] of [[nativeId, "native-use"]] as const) {
     const params = deleteParams(f, itemId, `delete-${useId}`);
     const before = await f.store.readDeletionRevision();
     for (let index = 0; index < 2; index++)
@@ -379,7 +336,7 @@ test("原生与旧执行经验删除的即时及冷重放成功，回执和删�
       db
         .prepare("SELECT count(*) n FROM memory_write_operations WHERE operation_type='delete'")
         .get()!.n,
-      2,
+      1,
     );
   } finally {
     db.close();

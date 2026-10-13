@@ -166,7 +166,7 @@ async function fixture(
 
 test("atomic memory persists scoped assertions with transaction replay, rollback, CAS and private files", async () => {
   await fixture(async ({ store, path, setFailpoint }) => {
-    assert.equal(store.schemaVersion(), 13);
+    assert.equal(store.schemaVersion(), 14);
     assert.equal(store.journalMode(), "wal");
     assert.equal(store.foreignKeysEnabled(), true);
     if (process.platform !== "win32") {

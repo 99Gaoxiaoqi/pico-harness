@@ -64,7 +64,7 @@ async function generic(store: SqliteMemoryItemStore) {
     failureKey: "lesson-key",
     inputEpoch: epoch.inputEpoch,
     settingsVersion: 1,
-    deletionRevision: 0,
+    deletionRevision: await store.readDeletionRevision(),
     state: "waiting",
     lifecycleState: "active",
     goal: task.goal,
@@ -320,7 +320,7 @@ test("统一账本：只有实际交付后的工具效果控制当前通用版�
   }
 });
 
-test("统一账本：native权威反例归档，legacy保留unknown；fence/分页作用域与三类删除清理", async (t) => {
+test("统一账本：native权威反例归档；fence/分页作用域与当前来源删除清理", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-feedback-native-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const path = join(root, "memory.sqlite"),
@@ -448,52 +448,30 @@ test("统一账本：native权威反例归档，legacy保留unknown；fence/分�
     "",
   );
   const settings = await store.readSettings("workspace");
-  const legacy = await store.createExecutionLesson({
-    candidateId: "legacy",
-    workspaceKey: "workspace",
-    sessionId: "session",
-    content: "旧验证路径经验。",
-    taskFamily: "检查",
-    commandHash: hash("command"),
-    evidenceBoundary: 1,
-    failure: source("legacy-fail"),
-    observedAt: 1,
-    settingsVersion: settings.version,
-    deletionRevision: await store.readDeletionRevision(),
-  });
-  const confirmed = await store.verifyExecutionLesson({
-    candidateId: "legacy",
-    workspaceKey: "workspace",
-    sessionId: "session",
-    expectedVersion: legacy.version,
-    verifications: [source("success1"), source("success2"), source("success3")],
-    observedAt: 1,
-  });
-  assert.equal(confirmed.state, "confirmed");
-  const legacyUse = await useFor(
+  const confirmed = await generic(store);
+  const reviewedUse = await useFor(
     store,
     confirmed.itemId!,
     {
-      kind: "execution-evidence",
-      candidateId: "legacy",
-      candidateVersion: confirmed.version,
-      contentHash: confirmed.itemContentHash!,
+      kind: "reviewed-reference",
+      candidateId: confirmed.candidateId,
+      contentVersion: confirmed.contentVersion,
     },
-    "legacy-use",
+    "reviewed-use",
   );
-  await store.experienceLedger.recordExperienceUse(legacyUse);
-  await deliver(store, legacyUse);
+  await store.experienceLedger.recordExperienceUse(reviewedUse);
+  await deliver(store, reviewedUse);
   await store.experienceLedger.appendExperienceEffect(
-    effectFor(legacyUse, 6, "fail", "native-claim"),
+    effectFor(reviewedUse, 6, "fail", "native-claim"),
     { allowStateChange: true },
   );
   assert.equal(
-    (await store.experienceLedger.readExperienceUse(legacyUse.useId))!.validation,
-    "unknown",
+    (await store.experienceLedger.readExperienceUse(reviewedUse.useId))!.validation,
+    "fail",
   );
   assert.equal((await store.readItem(confirmed.itemId!))!.item.lifecycleState, "active");
   for (let index = 0; index < 3; index++)
-    await store.experienceLedger.recordExperienceUse({ ...legacyUse, useId: `page-${index}` });
+    await store.experienceLedger.recordExperienceUse({ ...reviewedUse, useId: `page-${index}` });
   const page = await store.experienceLedger.queryExperienceUses("workspace", { limit: 2 });
   assert.equal(page.uses.length, 2);
   assert.ok(page.nextCursor);
@@ -519,29 +497,37 @@ test("统一账本：native权威反例归档，legacy保留unknown；fence/分�
     recallEnabled: false,
   });
   await assert.rejects(
-    store.experienceLedger.recordExperienceUse({ ...legacyUse, useId: "old-fence" }),
+    store.experienceLedger.recordExperienceUse({ ...reviewedUse, useId: "old-fence" }),
     /policy changed/u,
   );
   const feedback = {
     workspaceKey: "workspace",
-    useId: legacyUse.useId,
+    useId: reviewedUse.useId,
     expectedItemVersion: 1,
-    operationId: "disable-legacy",
+    operationId: "disable-reviewed",
     action: "disable" as const,
     now: 80,
   };
   await store.experienceLedger.feedbackExperienceUse(feedback);
-  assert.equal((await store.readItem(confirmed.itemId!))!.item.lifecycleState, "archived");
-  await store.deleteItem({
-    itemId: confirmed.itemId!,
-    expectedVersion: 2,
-    operationId: "delete-legacy",
+  const current = (await store.taskExperiences.readTaskExperienceCandidate(confirmed.candidateId))!;
+  assert.equal(current.enabled, false);
+  await store.taskExperiences.reviewTaskExperience({
+    workspaceKey: "workspace",
+    candidateId: current.candidateId,
+    expectedContentVersion: current.contentVersion,
+    expectedRecordRevision: current.recordRevision,
+    operationId: "delete-reviewed",
+    action: "delete",
+    now: 90,
   });
   assert.equal(
     (await store.experienceLedger.feedbackExperienceUse({ ...feedback, now: 90 })).referenceContent,
     undefined,
   );
-  assert.equal((await store.readExecutionLesson("legacy"))!.content, "");
+  assert.equal(
+    (await store.taskExperiences.readTaskExperienceCandidate(confirmed.candidateId))!.content,
+    "",
+  );
 });
 
 test("旧删除残留仅凭匹配的删除回执修复，缺Item而无删除证据不猜测；冷恢复修复只做一次", async (t) => {

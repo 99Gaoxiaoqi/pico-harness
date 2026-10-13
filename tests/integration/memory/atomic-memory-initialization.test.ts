@@ -19,7 +19,7 @@ const retiredTables = [
 test("opening an incompatible memory database rejects it without upgrading or clearing it", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-memory-incompatible-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  for (const version of [0, 7, 8, 14]) {
+  for (const version of [0, 7, 8, 15]) {
     const path = join(root, `memory-${version}.sqlite`);
     const db = new DatabaseSync(path);
     db.exec(
@@ -32,7 +32,7 @@ test("opening an incompatible memory database rejects it without upgrading or cl
       () => new SqliteMemoryItemStore(path),
       version === 0
         ? /non-empty unversioned/
-        : /Only schemas 9, 10, 11 and 12 can be upgraded automatically/,
+        : /Only schemas 9, 10, 11, 12 and 13 can be upgraded automatically/,
     );
     assert.deepEqual(await readFile(path), before);
   }
@@ -70,9 +70,9 @@ function assertCurrentTables(path: string) {
       .prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
       .all()
       .map((row) => row.name);
-    assert.equal(names.length, 26);
+    assert.equal(names.length, 25);
     assert.ok(names.includes("execution_learning_native_facts"));
-    assert.ok(names.includes("execution_lesson_candidates"));
+    assert.equal(names.includes("execution_lesson_candidates"), false);
     assert.ok(names.includes("memory_settings"));
     assert.ok(names.includes("experience_uses"));
     assert.equal(names.includes("task_experience_reuse"), false);

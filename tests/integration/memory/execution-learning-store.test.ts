@@ -12,6 +12,7 @@ import type {
   ExecutionVerificationResult,
   ExecutionVerificationTicket,
 } from "@pico/core";
+import { LEGACY_LESSON_SCHEMA_SQL, seedLegacyLesson } from "../helpers/legacy-memory-schema.js";
 import { AtomicMemoryContextBuilder } from "@pico/runtime/atomic-memory/context-builder";
 import { SqliteMemoryItemStore } from "../../../packages/storage/src/sqlite/sqlite-memory-item-store.js";
 
@@ -158,7 +159,7 @@ async function receiptAndJob(
   return { ticket, result, job };
 }
 
-test("v9, v10 and v11 memory databases upgrade to v13 without changing existing facts or pending lessons", async (t) => {
+test("v9, v10 and v11 memory databases upgrade to v14 preserving facts and retiring pending old lessons", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-learning-migration-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   for (const version of [9, 10, 11]) {
@@ -166,24 +167,17 @@ test("v9, v10 and v11 memory databases upgrade to v13 without changing existing 
     let store = new SqliteMemoryItemStore(path);
     const itemId = await createUserItem(store);
     const before = await store.readItem(itemId);
-    const legacy =
-      version === 10
-        ? await store.createExecutionLesson({
-            candidateId: "v10-pending",
-            workspaceKey,
-            sessionId: "session",
-            content: "BuildCheck needs its ready config.",
-            taskFamily: "BuildCheck",
-            commandHash: hash("node check.cjs"),
-            evidenceBoundary: 0,
-            failure: source("legacy-failure"),
-            observedAt: 1,
-            deletionRevision: 0,
-            settingsVersion: 1,
-          })
-        : undefined;
+    const existingNative =
+      version === 11 ? await admittedClaim(store, "existing-native") : undefined;
+    const nativeBefore = existingNative
+      ? await store.executionLearning.readExecutionLearningCandidate(existingNative.candidateId)
+      : undefined;
     store.close();
     const old = new DatabaseSync(path);
+    if (version !== 9) {
+      old.exec(LEGACY_LESSON_SCHEMA_SQL);
+      seedLegacyLesson(old, { candidateId: "legacy-pending", workspaceKey });
+    }
     for (const row of old
       .prepare(
         `SELECT name FROM sqlite_schema WHERE type='table' AND (name LIKE 'experience_%' OR name LIKE 'task_experience_%' OR (name LIKE 'execution_learning_%' AND ${version} != 11))`,
@@ -191,14 +185,17 @@ test("v9, v10 and v11 memory databases upgrade to v13 without changing existing 
       .all()) {
       old.exec(`DROP TABLE "${String(row.name).replaceAll('"', '""')}"`);
     }
-    if (version === 9) old.exec("DROP TABLE execution_lesson_candidates");
     old.exec(`PRAGMA user_version=${version}`);
     old.close();
     store = new SqliteMemoryItemStore(path);
     try {
-      assert.equal(store.schemaVersion(), 13);
+      assert.equal(store.schemaVersion(), 14);
       assert.deepEqual(await store.readItem(itemId), before);
-      if (legacy) assert.deepEqual(await store.readExecutionLesson(legacy.candidateId), legacy);
+      if (existingNative)
+        assert.deepEqual(
+          await store.executionLearning.readExecutionLearningCandidate(existingNative.candidateId),
+          nativeBefore,
+        );
       const claim = await admittedClaim(store, `migration-${version}`);
       assert.equal(
         (await store.executionLearning.readExecutionLearningCandidate(claim.candidateId))?.state,
