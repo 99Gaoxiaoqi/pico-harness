@@ -196,7 +196,7 @@ function parseArtifactId(value: unknown): string {
       throw new Error("artifact_id 引用编码无效。");
     }
   }
-  if (!/^[A-Za-z0-9_-]{1,256}$/u.test(id))
+  if (!/^(?:[A-Za-z0-9_-]{1,256}|media:fork:[a-f0-9]{64})$/u.test(id))
     throw new Error("artifact_id 必须是附件 ID，不支持文件路径或外部 URL。");
   return id;
 }
