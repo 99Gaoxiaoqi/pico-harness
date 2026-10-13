@@ -50,6 +50,14 @@ export function useFileDraft(key: string) {
         ...(drafts.get(key) ?? empty),
         ...incoming.map((file) => ({ id: crypto.randomUUID(), file })),
       ]),
+    moveTo: (targetKey: string) => {
+      if (targetKey === key) return;
+      const source = drafts.get(key);
+      if (!source?.length) return;
+      const target = drafts.get(targetKey) ?? empty;
+      drafts.delete(key);
+      update(targetKey, [...target, ...source]);
+    },
     remove: (id: string) =>
       update(
         key,

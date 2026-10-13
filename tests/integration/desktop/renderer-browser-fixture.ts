@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
-import { access, mkdtemp, rm } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -45,6 +45,21 @@ export async function runRendererBrowserScenario(contents: string): Promise<stri
     },
     outdir: "/virtual-pico-renderer-test",
     loader: { ".svg": "dataurl" },
+    plugins: [
+      {
+        name: "vite-provider-brand-assets",
+        setup(bundler) {
+          // Vite expands these decorative icons in production; page interaction tests use the fallback.
+          bundler.onLoad({ filter: /ComposerModelPicker\.tsx$/ }, async ({ path }) => ({
+            contents: (await readFile(path, "utf8")).replace(
+              /import\.meta\.glob<string>\([\s\S]*?\);/u,
+              "{};",
+            ),
+            loader: "tsx",
+          }));
+        },
+      },
+    ],
     bundle: true,
     write: false,
     format: "iife",
