@@ -128,7 +128,7 @@ export function MemoryPage({
     key: string;
     generation: number;
     detail?: ExperienceDetail;
-    item?: RuntimeMemoryItem;
+    item?: MemoryListItem;
     status: "loading" | "ready" | "unavailable" | "error";
   }>();
   const resolvedTarget =
@@ -144,7 +144,11 @@ export function MemoryPage({
       targetScope.current.key === targetKey &&
       targetScope.current.generation === targetGeneration &&
       targetRequest.current === sequence;
-    setTargetState({ key: targetKey, generation: targetGeneration, status: "loading" });
+    setTargetState((current) =>
+      current?.key === targetKey && current.generation === targetGeneration
+        ? { ...current, status: "loading" }
+        : { key: targetKey, generation: targetGeneration, status: "loading" },
+    );
     void (async () => {
       try {
         let detail: ExperienceDetail | undefined;
@@ -160,23 +164,41 @@ export function MemoryPage({
             detail = await experience.onDetail(item.taskExperience.candidateId);
         } else throw new RuntimeInvocationError("NOT_FOUND", "目标经验不可用", false);
         if (current())
-          setTargetState({
+          setTargetState((previous) => ({
             key: targetKey,
             generation: targetGeneration,
-            detail,
-            item,
+            detail:
+              previous?.key === targetKey &&
+              previous.generation === targetGeneration &&
+              previous.detail &&
+              detail &&
+              previous.detail.candidate.recordRevision > detail.candidate.recordRevision
+                ? previous.detail
+                : detail,
+            item:
+              previous?.key === targetKey &&
+              previous.generation === targetGeneration &&
+              previous.item &&
+              item &&
+              previous.item.version > item.version
+                ? previous.item
+                : item,
             status: "ready",
-          });
+          }));
       } catch (failure) {
-        if (current())
-          setTargetState({
-            key: targetKey,
-            generation: targetGeneration,
-            status:
-              failure instanceof RuntimeInvocationError && failure.code === "NOT_FOUND"
-                ? "unavailable"
-                : "error",
-          });
+        if (current()) {
+          const unavailable =
+            failure instanceof RuntimeInvocationError && failure.code === "NOT_FOUND";
+          setTargetState((previous) =>
+            !unavailable && previous?.key === targetKey && previous.generation === targetGeneration
+              ? { ...previous, status: "error" }
+              : {
+                  key: targetKey,
+                  generation: targetGeneration,
+                  status: unavailable ? "unavailable" : "error",
+                },
+          );
+        }
       }
     })();
     return () => {
@@ -201,6 +223,36 @@ export function MemoryPage({
     currentTargetCandidate.recordRevision > targetDetail!.candidate.recordRevision
       ? currentTargetCandidate
       : targetDetail?.candidate;
+  const listedTargetItem =
+    resolvedTarget?.item &&
+    memory.items.find((item) => item.itemId === resolvedTarget.item!.itemId);
+  const targetItem =
+    listedTargetItem && listedTargetItem.version > resolvedTarget!.item!.version
+      ? listedTargetItem
+      : resolvedTarget?.item;
+  useEffect(() => {
+    if (
+      resolvedTarget?.status !== "ready" ||
+      (targetCandidate === resolvedTarget.detail?.candidate && targetItem === resolvedTarget.item)
+    )
+      return;
+    setTargetState((current) => {
+      if (current?.key !== targetKey || current.generation !== targetGeneration) return current;
+      const detail =
+        current.detail &&
+        targetCandidate &&
+        current.detail.candidate.recordRevision < targetCandidate.recordRevision
+          ? { ...current.detail, candidate: targetCandidate }
+          : current.detail;
+      const item =
+        targetItem && current.item && current.item.version < targetItem.version
+          ? targetItem
+          : current.item;
+      return detail === current.detail && item === current.item
+        ? current
+        : { ...current, detail, item };
+    });
+  }, [resolvedTarget, targetCandidate, targetItem, targetKey, targetGeneration]);
   const reviewExperience = useCallback(
     async (request: ExperienceReviewRequest) => {
       const candidate = await experience.onReview(request);
@@ -247,7 +299,7 @@ export function MemoryPage({
         : targetCandidate.review === "pending" || targetCandidate.review === "deferred"
           ? "pending"
           : "saved"
-      : resolvedTarget.item?.lifecycleState === "archived"
+      : targetItem?.lifecycleState === "archived"
         ? "archived"
         : "saved";
     if (searchParams.get("tab") !== desired) {
@@ -259,7 +311,15 @@ export function MemoryPage({
       );
     }
     setActivePanel(desired);
-  }, [resolvedTarget, targetCandidate, searchParams, navigate, location.pathname, location.hash]);
+  }, [
+    resolvedTarget,
+    targetCandidate,
+    targetItem,
+    searchParams,
+    navigate,
+    location.pathname,
+    location.hash,
+  ]);
   const [editor, setEditor] = useState<MemoryEditor>();
   const [editorError, setEditorError] = useState("");
   useEffect(() => {
@@ -386,7 +446,6 @@ export function MemoryPage({
       creatingRef.current = false;
     }
   };
-  const targetItem = resolvedTarget?.item;
   const memoryItems =
     targetItem && !targetDetail
       ? [
@@ -406,7 +465,12 @@ export function MemoryPage({
       )
         setTargetState((current) =>
           current?.key === targetKey && current.generation === targetGeneration
-            ? { ...current, item, status: item ? "ready" : "unavailable" }
+            ? {
+                ...current,
+                item:
+                  item && current.item && current.item.version > item.version ? current.item : item,
+                status: item ? "ready" : "unavailable",
+              }
             : current,
         );
     } catch {
