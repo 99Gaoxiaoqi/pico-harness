@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import { runRendererBrowserScenario } from "./renderer-browser-fixture.js";
 
 test(
-  "经验使用账本统一三类来源，区分注入与验证，反馈重试不重复或纠正旧版本",
+  "经验使用账本保留两类来源，旧经验仅占位且反馈不重复或纠正旧版本",
   { timeout: 45_000 },
   async () => {
     const result = await runRendererBrowserScenario(`
@@ -22,13 +22,14 @@ const source={sessionId:'source-session',runId:'source-run',turnId:'turn',eventI
 const base={workspaceKey:'/project',itemId:'memory',itemVersion:3,contentHash:'hash',taskId:'task',taskVersion:2,sessionId:'current-session',runId:'current-run',referenceHash:'frozen-reference',referenceContent:'冻结的旧引用内容',delivery:'carried',historical:false,managementRevision:1,settingsVersion:1,deletionRevision:0,adoption:'unknown',validation:'unknown',validationScope:'unknown',excluded:false,deleted:false,sources:[source],createdAt:1,updatedAt:1};
 const reviewed={...base,useId:'reviewed',source:{kind:'reviewed-reference',candidateId:'lesson',contentVersion:1},delivery:'pending'};
 const native={...base,useId:'native',itemId:'native-item',source:{kind:'execution-validated',candidateId:'native-candidate',claimRevision:2,claimHash:'claim',scopeHash:'scope'},validation:'pass',validationScope:'native-claim',adoption:'observed',deliverySequence:8};
-const legacy={...base,useId:'legacy',source:{kind:'execution-evidence',candidateId:'legacy-candidate',candidateVersion:1,contentHash:'old'},delivery:'unknown',historical:true,validation:'pass'};
+const legacy={...base,useId:'legacy',source:{kind:'execution-evidence',candidateId:'legacy-candidate',candidateVersion:1,contentHash:'old'},delivery:'unknown',historical:true,validation:'pass',deleted:true};
+const oldHost={...legacy,useId:'old-host',deleted:false,delivery:'carried',historical:false};
 let failure=true,pendingResolve;const calls=[];
 const onFeedback=async input=>{calls.push(input);if(failure){failure=false;throw new Error('uncertain write')}return new Promise(resolve=>{pendingResolve=()=>resolve({...native,managementRevision:2,updatedAt:2,excluded:true})})};
 const onDetail=async id=>({experienceVersion:1,use:id==='native'?native:reviewed,effects:[{effectId:'effect',useId:id,preparedEventId:'prepared-7',outcomeEventId:'outcome-9',preparedSequence:7,outcomeSequence:9,adoption:'observed',validation:'pass',validationScope:'native-claim',reason:'固定目标自然验收通过',sources:[source],trustedContradiction:false,createdAt:2}]});
 const diagnostics=[{diagnosticId:'diagnostic',workspaceKey:'/project',sessionId:'current-session',runId:'current-run',phase:'effect',reason:'experience_validation_unavailable',createdAt:1}];
 const root=createRoot(document.getElementById('app'));
-const render=()=>root.render(<PicoTheme><MemoryRouter><ExperienceUsagePanel uses={[reviewed,native,legacy]} diagnostics={diagnostics} workspacePath='/project' onDetail={onDetail} onFeedback={onFeedback}/></MemoryRouter></PicoTheme>);
+const render=()=>root.render(<PicoTheme><MemoryRouter><ExperienceUsagePanel uses={[reviewed,native,legacy,oldHost]} diagnostics={diagnostics} workspacePath='/project' onDetail={onDetail} onFeedback={onFeedback}/></MemoryRouter></PicoTheme>);
 const card=id=>document.querySelector('[data-use-id="'+id+'"]');
 const button=(id,label)=>[...card(id).querySelectorAll('button')].find(node=>node.textContent===label);
 (async()=>{
@@ -36,10 +37,11 @@ const button=(id,label)=>[...card(id).querySelectorAll('button')].find(node=>nod
  const diagnosis=document.querySelector('[aria-label="最近记录诊断"]');
  check(diagnosis&&!diagnosis.open&&diagnosis.textContent.includes('执行核对')&&diagnosis.textContent.includes('这次执行核对未能完成')&&!document.querySelector('[role=alert]'),'historical diagnosis is collapsed and never presented as current outage');
  const summary=document.querySelector('summary').textContent;
- check(summary.includes('1 条已引用')&&summary.includes('1 条待注入')&&summary.includes('1 条旧记录'),'delivery counts never promote pending or historical records');
+ check(summary.includes('1 条已引用')&&summary.includes('1 条待注入')&&!summary.includes('条旧记录'),'delivery counts never promote pending or historical records');
  check(card('reviewed').textContent.includes('待注入')&&card('reviewed').textContent.includes('用户确认：已确认此版本'),'review confirmation is independent of delivery');
  check(card('native').textContent.includes('保存时验收：限定执行目标通过')&&card('native').textContent.includes('采用：已观察到采用要点')&&card('native').textContent.includes('本次结果：验证通过'),'native saved acceptance, adoption and current outcome are distinct');
- check(card('legacy').textContent.includes('旧记录，注入时序不完整')&&card('legacy').textContent.includes('范围未知')&&card('legacy').textContent.includes('不能证明建议全文'),'legacy pass cannot claim full text verified');
+ check(card('legacy').textContent==='旧版经验已移除'&&!card('legacy').querySelector('button,a'),'removed legacy use has no body, provenance, results or actions');
+ check(card('old-host').textContent==='旧版经验不可用，请更新电脑端完成清理。'&&!card('old-host').querySelector('button,a'),'old Host response never claims deletion or exposes reference content');
  check(!document.body.textContent.includes('纠正经验'),'ledger feedback only excludes or stops references');
  const params=new URLSearchParams(new URL(card('native').querySelector('a').href).search);
  check(params.get('workspace')==='/project'&&params.get('tab')==='saved','management retains workspace and tab');
@@ -51,10 +53,10 @@ const button=(id,label)=>[...card(id).querySelectorAll('button')].find(node=>nod
  check(calls.length===2&&calls[0].operationId===calls[1].operationId&&calls[1].expectedItemVersion===3,'sync double click sends one retry and retains expected version and operation identity');
  await act(async()=>{pendingResolve();await Promise.resolve();});
  check(card('native').textContent.includes('其他任务仍可使用')&&card('native').textContent.includes('冻结的旧引用内容'),'exclusion retains original receipt content');
- await act(async()=>button('legacy','归档并停止引用').click());
- check(calls.at(-1).action==='disable','all source kinds use the unified stop action');
+ await act(async()=>button('native','归档并停止引用').click());
+ check(calls.at(-1).action==='disable','supported sources retain the unified stop action');
  await act(async()=>{pendingResolve();await Promise.resolve();});
- check(button('legacy','归档并停止引用').disabled&&card('legacy').textContent.includes('已归档并停止引用'),'successful native or legacy stop is visibly archived and cannot repeat');
+ check(button('native','归档并停止引用').disabled&&card('native').textContent.includes('已归档并停止引用'),'successful native stop is visibly archived and cannot repeat');
  let managementReads=0;
  const runtime={preview:false,connection:{kind:'ready'},experienceFeedbackSupported:true,data:{workspacePath:'/project',trusted:true},actions:{queryExperienceUses:async()=>({experienceVersion:1,diagnostics:[],uses:[native]}),detailExperienceUse:onDetail,feedbackExperienceUse:async()=>({experienceVersion:1,use:native}),getExperienceMemoryItem:async()=>{managementReads++;return{itemId:'native-item',version:4,lifecycleState:'archived'}}}};
  function Reopen(){const ledger=useExperienceLedger(runtime,{workspacePath:'/project'});return <ExperienceUsagePanel uses={ledger.uses} workspacePath='/project' onDetail={ledger.onDetail} onFeedback={ledger.onFeedback}/>}
