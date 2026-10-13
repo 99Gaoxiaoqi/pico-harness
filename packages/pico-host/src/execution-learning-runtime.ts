@@ -219,7 +219,10 @@ export interface ExecutionLearningRuntimeOptions {
   readonly workspaceKey: string;
   readonly picoHome: string;
   readonly workDir: string;
-  readonly store: Pick<SqliteMemoryItemStore, "readSettings" | "readDeletionRevision"> & {
+  readonly store: Pick<
+    SqliteMemoryItemStore,
+    "readSettings" | "readDeletionRevision" | "taskExperiences"
+  > & {
     readonly executionLearning: ExecutionLearningNativeStore;
   };
   readonly io: ExecutionEvidenceIO;
@@ -281,13 +284,6 @@ export class ExecutionLearningRuntime implements NativeLearningObserver {
       this.options.onChanged?.();
     } catch {
       /* optional UI */
-    }
-  }
-  private wake(): void {
-    try {
-      this.options.worker.wake();
-    } catch {
-      /* optional worker */
     }
   }
 
@@ -476,7 +472,18 @@ export class ExecutionLearningRuntime implements NativeLearningObserver {
         this.options.workspaceKey,
       );
       check();
+      const attached = new Set(
+        (
+          await this.options.store.taskExperiences.queryTaskExperiences(this.options.workspaceKey, {
+            limit: 100,
+          })
+        ).flatMap((candidate) =>
+          candidate.nativeEvidence ? [candidate.nativeEvidence.candidateId] : [],
+        ),
+      );
+      check();
       for (const candidate of candidates) {
+        if (attached.has(candidate.claim.candidateId)) continue;
         if (
           !["waiting", "insufficient"].includes(candidate.state) ||
           !sameSourceTarget(candidate.claim.target, fact.target)
@@ -681,8 +688,7 @@ export class ExecutionLearningRuntime implements NativeLearningObserver {
       };
       await this.store.settleExecutionVerification(result);
       check();
-      await this.enqueue(candidate, "verify", ticket, check);
-      this.wake();
+      this.changed();
     }
     if (exitCode !== null && exitCode !== 0 && record.target) await this.saveFailure(record, check);
   }
@@ -897,35 +903,6 @@ export class ExecutionLearningRuntime implements NativeLearningObserver {
     return saved.claim;
   }
 
-  private async enqueue(
-    candidate: ExecutionLearningCandidate,
-    kind: "verify" | "reflect",
-    ticket: ExecutionVerificationTicket | undefined,
-    check: () => void,
-  ): Promise<void> {
-    const admission = this.admission;
-    if (!admission) return;
-    const now = Date.now();
-    check();
-    await this.store.enqueueExecutionLearningJob({
-      jobId: `execution-job:${digest([candidate.claim.candidateId, candidate.claim.revision, kind, ticket?.ticketId ?? admission.runId])}`,
-      workspaceKey: this.options.workspaceKey,
-      sessionId: ticket?.sessionId ?? admission.sessionId,
-      runId: ticket?.runId ?? admission.runId,
-      candidateId: candidate.claim.candidateId,
-      ...(ticket ? { ticketId: ticket.ticketId } : {}),
-      kind,
-      state: "ready",
-      inputEpoch: admission.inputEpoch,
-      createdAt: now,
-      updatedAt: now,
-      leaseUntil: 0,
-      fencingToken: 0,
-    });
-    check();
-    this.changed();
-  }
-
   async completed(runId: string): Promise<void> {
     await this.bounded(undefined, async (check) => {
       const admission = this.admission,
@@ -978,18 +955,6 @@ export class ExecutionLearningRuntime implements NativeLearningObserver {
         );
         check();
       }
-      const candidates = await this.store.listExecutionLearningCandidates(
-        this.options.workspaceKey,
-      );
-      check();
-      for (const candidate of candidates) {
-        if (
-          candidate.claim.admission.admissionId === admission.admissionId &&
-          candidate.state === "waiting"
-        )
-          await this.enqueue(candidate, "reflect", undefined, check);
-      }
-      this.wake();
     });
   }
 }

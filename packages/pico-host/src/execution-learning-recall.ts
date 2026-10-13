@@ -3,6 +3,7 @@ import { realpath } from "node:fs/promises";
 import { readBoundedFileSnapshot } from "./atomic-workspace-file.js";
 import { isSensitiveCredentialPath } from "./session-permissions.js";
 import { currentExecutionRunner } from "./execution-learning-runner.js";
+import type { ExecutionAcceptanceClaim } from "@pico/core";
 import type { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-store";
 import {
   resolveExecutionLearningTarget,
@@ -79,41 +80,55 @@ export async function executionLearningRecallTargets(
     workspaceKey,
   )) {
     if (candidate.state !== "saved") continue;
-    const target = candidate.claim.target;
-    const names = [
-      target.label,
-      ...target.entryFiles.map((f) => basename(f.path)),
-      ...candidate.claim.failedTestIds.flatMap((id) => {
-        try {
-          const parts: unknown = JSON.parse(id);
-          return Array.isArray(parts) && typeof parts.at(-1) === "string"
-            ? [String(parts.at(-1))]
-            : [];
-        } catch {
-          return [];
-        }
-      }),
-    ].filter((name) => name.length >= 4);
-    if (
-      executionTargetId
-        ? executionTargetId !== target.targetId
-        : !query || !names.some((name) => query.includes(name))
-    )
-      continue;
-    if (candidate.claim.predicateId === "test-target-pass.v1") {
-      const recorded = candidate.claim.runner;
-      if (!recorded?.fingerprint) continue;
-      const currentRunner = await currentExecutionRunner(target.argv[0]!, target.cwd, env);
-      if (
-        currentRunner?.execPath !== recorded.execPath ||
-        currentRunner.fingerprint !== recorded.fingerprint
-      )
-        continue;
-    }
-    const current = await resolveExecutionLearningTarget(target.command, target.cwd, io);
-    if (current?.scopeHash === target.scopeHash)
-      result.push({ targetId: target.targetId, scopeHash: target.scopeHash });
+    if (await executionClaimMatches(candidate.claim, io, query, executionTargetId, env))
+      result.push({
+        targetId: candidate.claim.target.targetId,
+        scopeHash: candidate.claim.target.scopeHash,
+      });
     if (result.length >= 1) break;
   }
   return result;
+}
+
+/** Shared scope guard for historical native memories and reviewed native attachments. */
+export async function executionClaimMatches(
+  claim: ExecutionAcceptanceClaim,
+  io: ExecutionEvidenceIO,
+  query: string | undefined,
+  executionTargetId?: string,
+  env: Readonly<NodeJS.ProcessEnv> = process.env,
+): Promise<boolean> {
+  const target = claim.target;
+  const names = [
+    target.label,
+    ...target.entryFiles.map((f) => basename(f.path)),
+    ...claim.failedTestIds.flatMap((id) => {
+      try {
+        const parts: unknown = JSON.parse(id);
+        return Array.isArray(parts) && typeof parts.at(-1) === "string"
+          ? [String(parts.at(-1))]
+          : [];
+      } catch {
+        return [];
+      }
+    }),
+  ].filter((name) => name.length >= 4);
+  if (
+    executionTargetId
+      ? executionTargetId !== target.targetId
+      : !query || !names.some((name) => query.includes(name))
+  )
+    return false;
+  if (claim.predicateId === "test-target-pass.v1") {
+    const recorded = claim.runner;
+    if (!recorded?.fingerprint) return false;
+    const currentRunner = await currentExecutionRunner(target.argv[0]!, target.cwd, env);
+    if (
+      currentRunner?.execPath !== recorded.execPath ||
+      currentRunner.fingerprint !== recorded.fingerprint
+    )
+      return false;
+  }
+  const current = await resolveExecutionLearningTarget(target.command, target.cwd, io);
+  return current?.scopeHash === target.scopeHash;
 }

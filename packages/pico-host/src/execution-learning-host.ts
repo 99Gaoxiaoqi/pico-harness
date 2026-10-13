@@ -1,16 +1,10 @@
-import { isAbsolute, relative } from "node:path";
-import type { ExecutionAcceptanceClaim, TaskExperienceCandidate } from "@pico/core";
+import { resolve } from "node:path";
+import type { TaskExperienceCandidate } from "@pico/core";
 import { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-store";
 import { SqliteRuntimeEventStore } from "./product-runtime-event-store.js";
 import { atomicMemoryDatabasePath } from "./atomic-memory-runtime.js";
 import { resolvePicoPaths } from "./pico-paths.js";
-import {
-  validateCanonicalExecutionSource,
-  type ExecutionNativeCommandFact,
-  type ExecutionNativeFileFact,
-} from "./execution-learning-runtime.js";
-import { evaluateAcceptance } from "./execution-learning-evidence.js";
-import { createExecutionLearningIO } from "./execution-learning-recall.js";
+import { validateCanonicalExecutionSource } from "./execution-learning-runtime.js";
 import {
   getExecutionLearningWorker,
   acquireExecutionLearningWorker,
@@ -84,14 +78,6 @@ export function executionLearningPathAuthorizer(
   };
 }
 
-const modelFactories = new Map<string, () => Promise<AtomicMemoryModelLease>>();
-export function registerExecutionLearningModel(
-  admissionId: string,
-  factory: () => Promise<AtomicMemoryModelLease>,
-): void {
-  modelFactories.set(admissionId, factory);
-  if (modelFactories.size > 100) modelFactories.delete(modelFactories.keys().next().value!);
-}
 export function executionLearningHost(options: {
   picoHome: string;
   gate: (workDir: string) => Promise<boolean>;
@@ -136,27 +122,6 @@ export function executionLearningHost(options: {
           },
         }
       : {}),
-    modelFactory: async ({ candidate }) => {
-      const route = candidate.claim.admission.modelRoute;
-      const configured = hostConfigurations.get(options.picoHome);
-      const factory = configured
-        ? route
-          ? () =>
-              configured.modelFactory(
-                candidate.claim.admission.workDir,
-                route,
-                candidate.claim.admission.sessionId,
-              )
-          : undefined
-        : modelFactories.get(candidate.claim.admission.admissionId);
-      if (
-        !factory ||
-        !(await options.gate(candidate.claim.admission.workDir)) ||
-        !repository.executionLearning.executionLearningAllowed(candidate.claim)
-      )
-        throw new Error("No current admission model route");
-      return factory();
-    },
     taskExperienceModelFactory: async ({ candidate }) => {
       const configured = hostConfigurations.get(options.picoHome);
       if (
@@ -177,7 +142,9 @@ export function executionLearningHost(options: {
       try {
         const task = await repository.taskExperiences.readTaskExperienceTask(candidate.taskId);
         if (!task || task.taskVersion !== candidate.taskVersion) return undefined;
-        const goal = await validateCanonicalTaskExperienceSource(events, task.goalSource, {workDir: candidate.workDir});
+        const goal = await validateCanonicalTaskExperienceSource(events, task.goalSource, {
+          workDir: candidate.workDir,
+        });
         if (goal?.event.kind !== "message.committed") return undefined;
         const inputArtifactIds = taskInputArtifactIds(goal.event.data.message);
         const artifacts = new SqliteSessionWorkbarRepository({ storageRoot });
@@ -205,7 +172,12 @@ export function executionLearningHost(options: {
             const id = args.artifact_id.startsWith("pico://artifact/")
               ? decodeURIComponent(args.artifact_id.slice("pico://artifact/".length))
               : args.artifact_id;
-            if (!inputArtifactIds.includes(id) || signal.aborted || !(await options.gate(candidate.workDir))) continue;
+            if (
+              !inputArtifactIds.includes(id) ||
+              signal.aborted ||
+              !(await options.gate(candidate.workDir))
+            )
+              continue;
             const { artifact, bytes } = readSessionInputArtifact({
               repository: artifacts,
               sessionId: candidate.sessionId,
@@ -264,141 +236,53 @@ export function executionLearningHost(options: {
         events.close();
       }
     },
-    validateEvidence: async ({ candidate, ticket, result, signal }) => {
-      const claim = candidate.claim;
-      if (signal.aborted || !(await options.gate(claim.admission.workDir)))
-        return { status: "skip", reason: "workspace_untrusted" };
-      const paths = resolvePicoPaths(claim.admission.workDir, { picoHome: options.picoHome });
-      const events = new SqliteRuntimeEventStore({ storageRoot: paths.workspace.root });
+    taskExperienceNativeEvidence: async ({ candidate, sources, signal }) => {
+      if (signal.aborted || !(await options.gate(candidate.workDir))) return undefined;
+      const events = new SqliteRuntimeEventStore({
+        storageRoot: resolvePicoPaths(candidate.workDir, { picoHome: options.picoHome }).workspace
+          .root,
+      });
       try {
-        const current = await validateCanonicalExecutionSource(events, result.source, {
-          workDir: claim.admission.workDir,
-          toolName: "bash",
-        });
-        const failure = await validateCanonicalExecutionSource(events, claim.failure, {
-          workDir: claim.admission.workDir,
-          toolName: "bash",
-        });
-        if (
-          !current ||
-          !failure ||
-          failure.result.data.executionFacts?.exitCode === 0 ||
-          current.operation.preparedEventId !== ticket.preparedEventId ||
-          current.operation.argumentsHash !== ticket.argumentsHash ||
-          current.result.data.executionFacts?.exitCode !== 0
-        )
-          return { status: "insufficient", reason: "native_evidence_unavailable" };
-        const run = await events.readRun(ticket.sessionId, ticket.runId);
-        if (
-          !run.some(
-            (event) =>
-              event.kind === "run.terminal" &&
-              event.data.status === "completed" &&
-              !event.data.recovered,
+        const matches = [];
+        for (const native of await repository.executionLearning.listExecutionLearningCandidates(
+          candidate.workspaceKey,
+        )) {
+          const claim = native.claim;
+          if (signal.aborted) return undefined;
+          if (
+            !["waiting", "insufficient", "saved"].includes(native.state) ||
+            resolve(claim.admission.workDir) !== resolve(candidate.workDir) ||
+            (native.state !== "saved" && claim.createdAt + 30 * 86400000 <= Date.now()) ||
+            !claim.recipe.length ||
+            !claim.conditions.length ||
+            !sources.some(
+              (source) =>
+                source.sessionId === claim.failure.sessionId &&
+                source.runId === claim.failure.runId &&
+                source.turnId === claim.failure.turnId &&
+                source.eventId === claim.failure.eventId,
+            )
           )
-        )
-          return { status: "insufficient", reason: "run_not_completed" };
-        for (const step of claim.recipe) {
-          const source = await validateCanonicalExecutionSource(events, step.source, {
-            workDir: claim.admission.workDir,
+            continue;
+          const failure = await validateCanonicalExecutionSource(events, claim.failure, {
+            workDir: candidate.workDir,
+            toolName: "bash",
           });
-          if (!source || source.result.data.status !== "succeeded")
-            return { status: "insufficient", reason: "preparation_source_unavailable" };
-          const admissions = await repository.executionLearning.listAdmissions();
-          const admission = admissions.find(
-            (a) => a.sessionId === step.source.sessionId && a.runId === step.source.runId,
-          );
-          if (!admission) return { status: "insufficient", reason: "preparation_not_admitted" };
-          const facts = await repository.executionLearning.listNativeFacts(admission.admissionId);
-          if (step.kind === "file") {
-            const fact = facts.find(
-              (f) => f.kind === "file" && f.preparedEventId === source.operation.preparedEventId,
-            )?.fact as ExecutionNativeFileFact | undefined;
-            if (
-              !fact?.commits.some(
-                (commit) =>
-                  commit.path === step.path &&
-                  commit.afterHash === step.afterHash &&
-                  commit.content === step.content,
-              ) ||
-              fact.source?.eventId !== step.source.eventId
-            )
-              return { status: "insufficient", reason: "file_commit_unavailable" };
-          }
-          if (step.kind === "dependency") {
-            const fact = facts.find(
-              (f) => f.kind === "command" && f.preparedEventId === source.operation.preparedEventId,
-            )?.fact as ExecutionNativeCommandFact | undefined;
-            const installed = fact?.installedDependency;
-            if (
-              !installed ||
-              installed.command !== step.command ||
-              installed.manifestHash !== step.manifestHash ||
-              fact.result?.source.eventId !== step.source.eventId ||
-              fact.result.exitCode !== 0 ||
-              !claim.conditions.some(
-                (c) =>
-                  c.kind === "node-package" &&
-                  JSON.stringify(c) === JSON.stringify(installed.condition),
-              )
-            )
-              return { status: "insufficient", reason: "dependency_commit_unavailable" };
-          }
-          if (step.kind === "cwd") {
-            const fact = facts.find(
-              (f) => f.kind === "command" && f.preparedEventId === source.operation.preparedEventId,
-            )?.fact as ExecutionNativeCommandFact | undefined;
-            if (
-              fact?.result?.exitCode !== 0 ||
-              (fact.cwdPreparation !== step.path && fact.target?.cwd !== step.path)
-            )
-              return { status: "insufficient", reason: "directory_commit_unavailable" };
-          }
+          if (
+            !failure ||
+            typeof failure.result.data.executionFacts?.exitCode !== "number" ||
+            failure.result.data.executionFacts.exitCode === 0
+          )
+            continue;
+          matches.push({
+            candidateId: claim.candidateId,
+            claimRevision: claim.revision,
+            claimHash: claim.claimHash,
+            scopeHash: claim.target.scopeHash,
+          });
         }
-        const fact = (await repository.executionLearning.listNativeFacts(ticket.admissionId)).find(
-          (f) => f.kind === "command" && f.preparedEventId === ticket.preparedEventId,
-        )?.fact as ExecutionNativeCommandFact | undefined;
-        if (
-          fact?.target?.scopeHash !== claim.target.scopeHash ||
-          fact.argumentsJson !== current.start.data.argumentsJson ||
-          fact.result?.source.eventId !== result.source.eventId
-        )
-          return { status: "insufficient", reason: "target_binding_changed" };
-        const accepted = evaluateAcceptance(claim, ticket, result);
-        if (
-          claim.predicateId === "test-target-pass.v1" &&
-          (!claim.runner?.fingerprint ||
-            claim.runner.execPath !== result.report?.runner?.execPath ||
-            claim.runner.version !== result.report?.runner?.version ||
-            claim.runner.fingerprint !== result.report?.runner?.fingerprint)
-        )
-          return { status: "insufficient", reason: "runner_changed" };
-        if (!accepted.accepted)
-          return { status: "insufficient", reason: accepted.reason ?? "acceptance_unknown" };
-        // Current scope is checked separately from preparation state; a missing config remains recallable.
-        const io = createExecutionLearningIO(
-          claim.admission.workDir,
-          undefined,
-          executionLearningPathAuthorizer(
-            claim.admission.workDir,
-            options.picoHome,
-            ticket.sessionId,
-          ),
-        );
-        const { resolveExecutionLearningTarget } = await import("./execution-learning-evidence.js");
-        const target = await resolveExecutionLearningTarget(
-          claim.target.command,
-          claim.target.cwd,
-          io,
-        );
-        if (target?.scopeHash !== claim.target.scopeHash)
-          return { status: "insufficient", reason: "entry_changed" };
-        const canonicalWorkspace = await io.realpath(claim.admission.workDir);
-        if (!canonicalWorkspace) return { status: "insufficient", reason: "workspace_unavailable" };
-        const content = compactLesson(claim, canonicalWorkspace);
-        return content
-          ? { status: "pass", content }
-          : { status: "insufficient", reason: "lesson_budget" };
+        // Ambiguous evidence must never grant the model's prose a broader validation scope.
+        return matches.length === 1 ? matches[0] : undefined;
       } finally {
         events.close();
       }
@@ -414,52 +298,4 @@ export function executionLearningHost(options: {
       ),
   );
   return worker;
-}
-function compactLesson(
-  claim: ExecutionAcceptanceClaim,
-  canonicalWorkspace: string,
-): string | undefined {
-  const quote = (arg: string) => `'${arg.replaceAll("'", "'\\''")}'`;
-  const path = (value: string) => {
-    const local = relative(canonicalWorkspace, value);
-    return local ? `./${local}` : ".";
-  };
-  const command = claim.target.argv
-    .map((arg, index) => {
-      if (!isAbsolute(arg) || !claim.target.entryFiles.some((file) => file.path === arg))
-        return quote(arg);
-      const local = relative(claim.target.cwd, arg);
-      return quote(index === 0 && !local.startsWith(".") ? `./${local}` : local);
-    })
-    .join(" ");
-  const lines = [
-    `已验证执行方案：${command}`,
-    `工作目录：${path(claim.target.cwd)}`,
-    "适用于本工作区同一检查入口。准备文件或依赖缺失时，参考以下步骤。",
-  ];
-  for (const step of claim.recipe) {
-    if (step.kind === "cwd") lines.push(`准备目录：${path(step.path)}`);
-    else if (step.kind === "dependency") lines.push(`准备依赖：${step.command}`);
-    else
-      lines.push(
-        `准备文件：${path(step.path)}${step.content === undefined ? "" : `；可复用内容 ${JSON.stringify(step.content)}`}`,
-      );
-  }
-  for (const condition of claim.conditions) {
-    if (condition.kind === "json")
-      lines.push(
-        `验收字段：${path(condition.path)} ${JSON.stringify(condition.field)} = ${JSON.stringify(condition.value)}`,
-      );
-    else if (condition.kind === "node-package")
-      lines.push(
-        `验收依赖：${condition.name}@${condition.version}；入口 ${path(condition.entryPath)}`,
-      );
-  }
-  lines.push(
-    claim.predicateId === "test-target-pass.v1"
-      ? "固定目标测试已通过；这是操作方案验收，不是根因证明。"
-      : "所列条件满足时，目标命令完整成功；不证明唯一根因。",
-  );
-  const content = lines.join("\n");
-  return [...content].length <= 2000 ? content : undefined;
 }

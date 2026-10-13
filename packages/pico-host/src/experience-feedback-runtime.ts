@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
   isForegroundProcessFacts,
   type ExecutionAcceptanceClaim,
@@ -387,7 +387,7 @@ export class ExperienceFeedbackRuntime implements NativeLearningObserver {
       if (call.name !== "bash" || !(await this.allowed(this.options.nativeGate, check, false)))
         return call;
       const uses = await this.carriedUses(check);
-      if (!uses.some((use) => use.source.kind === "execution-validated")) return call;
+      if (!uses.length) return call;
       let args: Record<string, unknown>;
       try {
         args = JSON.parse(call.arguments);
@@ -521,14 +521,38 @@ export class ExperienceFeedbackRuntime implements NativeLearningObserver {
     use: ExperienceUse,
     check: () => void,
   ): Promise<ExecutionAcceptanceClaim | undefined> {
-    if (use.source.kind !== "execution-validated") return undefined;
-    const source = use.source;
+    let source: TaskExperienceCandidate["nativeEvidence"];
+    if (use.source.kind === "execution-validated") source = use.source;
+    else if (use.source.kind === "reviewed-reference") {
+      const reviewed = await this.options.store.taskExperiences.readTaskExperienceCandidate(
+        use.source.candidateId,
+      );
+      check();
+      if (
+        !reviewed ||
+        reviewed.itemId !== use.itemId ||
+        reviewed.workspaceKey !== this.options.workspaceKey ||
+        reviewed.contentVersion !== use.source.contentVersion ||
+        reviewed.review !== "approved" ||
+        !reviewed.enabled ||
+        reviewed.state !== "saved" ||
+        reviewed.lifecycleState !== "active"
+      )
+        return undefined;
+      source = reviewed.nativeEvidence;
+    }
+    if (!source) return undefined;
     const candidate = await this.options.store.executionLearning.readExecutionLearningCandidate(
       source.candidateId,
     );
     check();
-    return candidate?.state === "saved" &&
-      candidate.itemId === use.itemId &&
+    return candidate &&
+      (use.source.kind === "execution-validated"
+        ? candidate.state === "saved" && candidate.itemId === use.itemId
+        : ["waiting", "insufficient", "saved"].includes(candidate.state)) &&
+      (candidate.state === "saved" || candidate.claim.createdAt + 30 * 86400000 > Date.now()) &&
+      candidate.claim.admission.workspaceKey === this.options.workspaceKey &&
+      resolve(candidate.claim.admission.workDir) === resolve(this.options.workDir) &&
       candidate.claim.revision === source.claimRevision &&
       candidate.claim.claimHash === source.claimHash &&
       candidate.claim.target.scopeHash === source.scopeHash
@@ -616,7 +640,8 @@ export class ExperienceFeedbackRuntime implements NativeLearningObserver {
         let scope: ExperienceUse["validationScope"] = "unknown";
         let reason: string;
         let contradiction = false;
-        if (use.source.kind === "reviewed-reference") {
+        const nativeClaim = await this.currentClaim(use, check);
+        if (use.source.kind === "reviewed-reference" && !nativeClaim) {
           const args = canonicalTaskArguments(canonical.start);
           if (
             outcome.event.data.toolName !== "document" ||
@@ -702,7 +727,7 @@ export class ExperienceFeedbackRuntime implements NativeLearningObserver {
             reason = "host_spreadsheet_verification";
             contradiction = verdict.validation === "fail";
           } else if (verdict.adoption === "not_applied") reason = "spreadsheet_method_not_applied";
-        } else if (use.source.kind === "execution-validated") {
+        } else if (nativeClaim) {
           if (!(await this.allowed(this.options.nativeGate, check, false))) continue;
           const preparedNative = this.nativePrepared.get(call.id);
           const claim = await this.currentClaim(use, check);
@@ -716,7 +741,7 @@ export class ExperienceFeedbackRuntime implements NativeLearningObserver {
               check,
             );
             verdict = native.verdict;
-            contradiction = native.contradiction;
+            contradiction = use.source.kind === "execution-validated" && native.contradiction;
             scope = native.scope;
             reason = native.reason;
           } catch {
@@ -728,11 +753,7 @@ export class ExperienceFeedbackRuntime implements NativeLearningObserver {
           verdict = { ...verdict, sources: [...verdict.sources, sourceOf(outcome.event)] };
         check();
         if (!(await this.allowed(this.options.effectGate, check, false))) continue;
-        if (
-          use.source.kind === "execution-validated" &&
-          !(await this.allowed(this.options.nativeGate, check, false))
-        )
-          continue;
+        if (nativeClaim && !(await this.allowed(this.options.nativeGate, check, false))) continue;
         check();
         await this.options.store.experienceLedger.appendExperienceEffect(
           {

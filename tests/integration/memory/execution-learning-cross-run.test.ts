@@ -25,7 +25,7 @@ import { resolvePicoPaths } from "@pico/pico-host";
 import { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-store";
 
 test(
-  "普通新输入在反思前继续修复可取得跨 Run T1 验收票，旧反思不降级候选或消耗模型额度",
+  "普通新输入继续跨 Run 修复并保存完整原生 T1 证据，内部候选不再创建独立 verify/reflect 学习任务或自动发布",
   { timeout: 30_000 },
   async (t) => {
     const inheritedTestContext = process.env.NODE_TEST_CONTEXT;
@@ -147,7 +147,7 @@ test(
       seed.claim.candidateId,
     );
     assert.ok(frozen);
-    assert.equal(frozen.state, "ready");
+    assert.equal(frozen.state, "waiting");
     assert.equal(frozen.claim.revision, seed.claim.revision + 1);
     assert.equal(frozen.claim.recipe[0]?.source.sessionId, sessionIds[1]);
 
@@ -157,8 +157,8 @@ test(
     assert.equal(
       (await repository.executionLearning.readExecutionLearningCandidate(seed.claim.candidateId))
         ?.state,
-      "ready",
-      "the old input epoch settles only its reflection job and leaves the verified claim eligible",
+      "waiting",
+      "native receipt remains an internal evidence record",
     );
     assert.equal(
       inspect((db) =>
@@ -170,13 +170,23 @@ test(
     await worker.flushOnce();
     await worker.drain();
     const items = await repository.listItems({ workspaceKey: paths.workspace.id });
-    assert.equal(items.length, 1);
-    assert.equal(items[0]?.sourceType, "execution-validated");
-    assert.equal(items[0]?.taskAcceptance?.predicateId, "test-target-pass.v1");
+    assert.equal(items.length, 0);
     assert.equal(
       (await repository.executionLearning.readExecutionLearningCandidate(seed.claim.candidateId))
         ?.state,
-      "saved",
+      "waiting",
+    );
+    assert.equal(
+      inspect((db) =>
+        Number(
+          db
+            .prepare(
+              "SELECT count(*) n FROM execution_learning_jobs j JOIN execution_learning_candidates c ON j.candidate_id=c.candidate_id WHERE json_extract(c.record_json,'$.kind') IS NULL",
+            )
+            .get()!.n,
+        ),
+      ),
+      0,
     );
   },
 );
@@ -260,8 +270,7 @@ test("反思入队后关闭自动提取会在模型工厂和额度扣减之前�
     store: repository.executionLearning,
     idleMs: 0,
     pollMs: 60_000,
-    validateEvidence: async () => ({ status: "insufficient" }),
-    modelFactory: async () => {
+    taskExperienceModelFactory: async () => {
       factoryCalls++;
       return { model: { call: async () => '{"hypothesis":"Possibly configuration related"}' } };
     },
@@ -281,6 +290,6 @@ test("反思入队后关闭自动提取会在模型工厂和额度扣减之前�
   }
   assert.equal(
     (await repository.executionLearning.readExecutionLearningCandidate(claim.candidateId))?.state,
-    "invalidated",
+    "waiting",
   );
 });

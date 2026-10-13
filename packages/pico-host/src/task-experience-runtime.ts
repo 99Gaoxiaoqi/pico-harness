@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import {
   isMessageHiddenFromTranscript,
+  isForegroundProcessFacts,
   type ExecutionLearningStore,
   type MemoryItemSource,
   type RuntimeEvent,
@@ -452,13 +453,25 @@ export class TaskExperienceRuntime {
               : event.data.projection.text;
           const limited =
             event.partial || !!event.data.recovery || !args || event.data.body.storage !== "inline";
+          const facts = event.data.executionFacts;
+          const processFailed =
+            event.data.toolName === "bash" &&
+            isForegroundProcessFacts(facts) &&
+            facts.exitCode !== null &&
+            facts.exitCode !== 0 &&
+            facts.terminationSignal === null &&
+            !facts.timedOut &&
+            !facts.outputIncomplete &&
+            !facts.spawnFailed &&
+            !limited;
+          const status = processFailed ? "failed" : event.data.status;
           await this.append(
             event,
             sequence,
             {
               kind: "tool-result",
-              summary: boundedText(`${event.data.toolName}: ${event.data.status}\n${raw}`),
-              status: event.data.status,
+              summary: boundedText(`${event.data.toolName}: ${status}\n${raw}`),
+              status,
               toolName: event.data.toolName,
               ...(start ? { preparedEventId: start.eventId } : {}),
               ...(args ? { arguments: safeArguments(args) } : {}),

@@ -1,3 +1,4 @@
+import { configureReviewedFixture, approveReviewedFixture } from "./unified-experience-fixture.js";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
@@ -53,6 +54,10 @@ async function fixture(t: TestContext, prefix: string, trusted = true) {
   const paths = resolvePicoPaths(workDir, { picoHome });
   const repository = new SqliteMemoryItemStore(join(picoHome, "memory.sqlite"));
   const events = new SqliteRuntimeEventStore({ storageRoot: paths.workspace.root });
+  configureReviewedFixture(
+    picoHome,
+    "BuildCheck 检查依赖 config.json 中的 project 字段；准备 FixtureNorth 项目配置，再运行 check.test.cjs。",
+  );
   const sessions: string[] = [];
   // Native node:test invocations must behave like normal foreground commands.
   const inheritedTestContext = process.env.NODE_TEST_CONTEXT;
@@ -113,7 +118,7 @@ async function fixture(t: TestContext, prefix: string, trusted = true) {
 }
 
 test(
-  "production execution learning autonomously saves one named-test repair and prepares a new Session before its first check",
+  "统一通用提案从自然失败生成并经用户审核后跨 Session 复用，原生执行只保存冻结证据且不会自动发布另一条经验",
   { timeout: 30_000 },
   async (t) => {
     const f = await fixture(t, "pico-learning-runtime-");
@@ -131,7 +136,11 @@ test(
     });
     assert.equal(result.finalMessage, "BuildCheck 已通过。");
     await f.finishLearning();
-    const items = await f.repository.listItems({ workspaceKey: f.paths.workspace.id });
+    const reviewed = await approveReviewedFixture(f.repository, f.paths.workspace.id);
+    const items = await f.repository.listItems({
+      learningVersion: 2,
+      workspaceKey: f.paths.workspace.id,
+    });
     const observed = await f.events.readSession(seedSession);
     assert.equal(
       items.length,
@@ -155,8 +164,8 @@ test(
       }),
     );
     const saved = items[0]!;
-    assert.equal(saved.sourceType, "execution-validated");
-    assert.equal(saved.taskAcceptance?.predicateId, "test-target-pass.v1");
+    assert.equal(saved.sourceType, "reviewed-reference");
+    assert.ok(reviewed.nativeEvidence);
     assert.match(saved.item.content, /config\.json/u);
     assert.match(saved.item.content, /FixtureNorth/u);
     assert.equal(
@@ -165,6 +174,11 @@ test(
       "the new acceptance must not reuse manual three-vote metadata",
     );
     const outcomes = observed.filter((event) => event.kind === "tool.result.recorded");
+    assert.equal(
+      outcomes[0]?.data.status,
+      "succeeded",
+      "derived process failure must not rewrite the tool journal status",
+    );
     assert.deepEqual(
       outcomes
         .filter((event) => event.data.toolName === "bash")
@@ -177,10 +191,6 @@ test(
       ),
       false,
     );
-    assert.deepEqual(
-      new Set(saved.sources.map((source) => source.eventId)),
-      new Set(outcomes.map((event) => event.eventId)),
-    );
     assert.ok(
       outcomes.some(
         (event) => event.data.toolName === "write_file" && event.data.status === "succeeded",
@@ -188,7 +198,7 @@ test(
     );
     const candidate = (
       await f.repository.executionLearning.listExecutionLearningCandidates(f.paths.workspace.id)
-    ).find((entry) => entry.itemId === saved.item.itemId);
+    ).find((entry) => entry.claim.candidateId === reviewed.nativeEvidence!.candidateId);
     assert.ok(candidate);
     const nativeFacts = await f.repository.executionLearning.listNativeFacts(
       candidate.claim.admission.admissionId,
@@ -218,8 +228,8 @@ test(
     try {
       assert.equal(
         Number(db.prepare("SELECT count(*) AS n FROM execution_learning_attempts").get()!.n),
-        0,
-        "deterministic verification must not consume a model attempt",
+        1,
+        "only the generic proposal consumes a model attempt",
       );
     } finally {
       db.close();
@@ -229,7 +239,7 @@ test(
     await f.run("autonomous-reuse", async (messages) => {
       if (reuse++ === 0) {
         const memory = messages.map((message) => message.content).join("\n");
-        assert.match(memory, /source="execution-validated"/u);
+        assert.match(memory, /source="reviewed-reference"/u);
         assert.match(memory, /config\.json/u);
         assert.match(memory, /FixtureNorth/u);
         return {
@@ -262,8 +272,21 @@ test(
       ["write_file", "bash"],
     );
     assert.equal(await readFile(join(f.workDir, "check.test.cjs"), "utf8"), checker);
+    assert.equal(
+      (
+        await f.repository.executionLearning.readExecutionLearningCandidate(
+          candidate.claim.candidateId,
+        )
+      )?.claim.revision,
+      candidate.claim.revision,
+      "reviewed evidence remains frozen across reuse",
+    );
     await f.finishLearning();
-    assert.equal((await f.repository.listItems({ workspaceKey: f.paths.workspace.id })).length, 1);
+    assert.equal(
+      (await f.repository.listItems({ learningVersion: 2, workspaceKey: f.paths.workspace.id }))
+        .length,
+      1,
+    );
   },
 );
 
@@ -288,7 +311,11 @@ test(
         : { role: "assistant", content: "另一个测试节点已通过。" };
     });
     await f.finishLearning();
-    assert.equal((await f.repository.listItems({ workspaceKey: f.paths.workspace.id })).length, 0);
+    assert.equal(
+      (await f.repository.listItems({ learningVersion: 2, workspaceKey: f.paths.workspace.id }))
+        .length,
+      0,
+    );
     const outcomes = (await f.events.readSession("unrelated-test-node"))
       .filter((event) => event.kind === "tool.result.recorded")
       .filter((event) => event.data.toolName === "bash");

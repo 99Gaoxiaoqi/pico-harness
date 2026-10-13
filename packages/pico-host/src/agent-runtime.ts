@@ -115,13 +115,11 @@ import {
   spreadsheetInputHasFiniteNumbers,
 } from "./task-experience-validation.js";
 import { readSessionInputArtifact } from "./session-input-attachments.js";
-import {
-  executionLearningHost,
-  registerExecutionLearningModel,
-} from "./execution-learning-host.js";
+import { executionLearningHost } from "./execution-learning-host.js";
 import {
   createExecutionLearningIO,
   executionLearningRecallTargets,
+  executionClaimMatches,
 } from "./execution-learning-recall.js";
 import {
   getExecutionLearningWorker,
@@ -1014,7 +1012,6 @@ export async function executeAgentRuntime(
   let experienceRecallAllowed: NonNullable<
     import("@pico/runtime/atomic-memory/context-builder").AtomicMemoryContextOptions["experienceAllowed"]
   > = async () => true;
-  let memoryModelFactory: (() => Promise<AtomicMemoryModelLease>) | undefined;
   let memoryRunAdmission: RuntimeMemoryExtractionBoundary | undefined;
   let experienceDiagnosticSink: (
     phase: ExperienceDiagnostic["phase"],
@@ -1712,7 +1709,7 @@ export async function executeAgentRuntime(
         contextWindowTokens: contextRuntime.budget.contextWindowTokens,
         reservedOutputTokens: contextRuntime.budget.reservedOutputTokens,
         ...(dependencies.memoryChangedSink ? { onChanged: dependencies.memoryChangedSink } : {}),
-        modelFactory: (memoryModelFactory =
+        modelFactory:
           dependencies.atomicMemoryModelFactory ??
           (async () => {
             const ledger = new SqliteRuntimeControlStore({ storageRoot: sessionStorageRoot });
@@ -1737,7 +1734,7 @@ export async function executeAgentRuntime(
               ledger.close();
               throw error;
             }
-          })),
+          }),
       });
     }
     const approvalManager = dependencies.approvalManager ?? globalApprovalManager;
@@ -2655,6 +2652,26 @@ export async function executeAgentRuntime(
             return currentTask ? { currentTask } : {};
           })(),
           toolAllowed: recalledToolAllowed,
+          nativeEvidenceMatches: async (candidate) => {
+            if (!recalledToolAllowed("bash") || !(await nativeFeedbackGate()).allowed) return false;
+            const evidence = candidate.nativeEvidence;
+            if (!evidence) return false;
+            const native = await repository.executionLearning.readExecutionLearningCandidate(
+              evidence.candidateId,
+            );
+            if (
+              !native ||
+              !["waiting", "insufficient", "saved"].includes(native.state) ||
+              native.claim.admission.workspaceKey !== memoryWorkspaceKey ||
+              resolve(native.claim.admission.workDir) !== resolve(workDir) ||
+              (native.state !== "saved" && native.claim.createdAt + 30 * 86400000 <= Date.now()) ||
+              native.claim.revision !== evidence.claimRevision ||
+              native.claim.claimHash !== evidence.claimHash ||
+              native.claim.target.scopeHash !== evidence.scopeHash
+            )
+              return false;
+            return executionClaimMatches(native.claim, learningIO, query, undefined, runtimeEnv);
+          },
           conditionMatches: async (candidate) => {
             if (!candidate.applicability.spreadsheet) return "unknown";
             const request = currentExperienceInput.split("附件文件：")[0]!;
@@ -3811,12 +3828,6 @@ export async function executeAgentRuntime(
         await executionLearningRuntime?.admit(run.runId);
         await taskExperienceRuntime?.admit(run.runId);
         experienceFeedbackRuntime?.admit(run.runId);
-        if (executionLearningRuntime && memoryModelFactory && memoryRepository) {
-          const admission = (await memoryRepository.executionLearning.listAdmissions()).find(
-            (value) => value.sessionId === session.id && value.runId === run.runId,
-          );
-          if (admission) registerExecutionLearningModel(admission.admissionId, memoryModelFactory);
-        }
         memoryRunAdmission = await readMemoryAdmission();
         await dependencies.onRunAdmission?.(run);
         if (collaborationMode() !== "plan" || !session.runtimeEventStore) return;

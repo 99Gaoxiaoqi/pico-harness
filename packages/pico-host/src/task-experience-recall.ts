@@ -17,6 +17,7 @@ export async function taskExperienceRecallTargets(options: {
   readonly toolAllowed: (name: string) => boolean;
   /** Host has checked that this task belongs to the currently executing canonical Run. */
   readonly currentTask?: Pick<TaskExperienceTask, "taskId" | "taskVersion" | "sessionId" | "runId">;
+  readonly nativeEvidenceMatches?: (candidate: TaskExperienceCandidate) => Promise<boolean>;
   readonly conditionMatches?: (candidate: TaskExperienceCandidate) => Promise<boolean | "unknown">;
 }): Promise<readonly ReviewedExperienceTarget[]> {
   const query = options.query?.trim();
@@ -59,6 +60,7 @@ export async function taskExperienceRecallTargets(options: {
       /pico:\/\/artifact\/|artifact[_-]id\s*[:=]/iu.test(candidate.content)
     )
       continue;
+    if (candidate.nativeEvidence && !(await options.nativeEvidenceMatches?.(candidate))) continue;
     const applicability = candidate.applicability;
     if (
       !applicability ||
