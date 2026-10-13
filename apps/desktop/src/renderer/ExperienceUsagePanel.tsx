@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import type { ExperienceDiagnostic, ExperienceUse } from "@pico/core";
 import { Button, InlineNotice } from "./components.js";
 import { isMemoryConflict } from "./runtime.js";
+import { experienceManagementHref } from "./experience-management-route.js";
 import {
   newerExperienceUse,
   type ExperienceUseDetail,
@@ -60,7 +61,8 @@ export function ExperienceUsagePanel({
   if (!uses.length && !diagnostics.length) return null;
   const carried = uses.filter((use) => use.delivery === "carried" && !use.historical).length;
   const pending = uses.filter((use) => use.delivery === "pending" && !use.historical).length;
-  const historical = uses.filter((use) => use.historical || use.delivery === "unknown").length;
+  const historical = uses.filter((use) => use.historical).length;
+  const unconfirmed = uses.filter((use) => !use.historical && use.delivery === "unknown").length;
   return (
     <>
       {uses.length > 0 && (
@@ -73,6 +75,7 @@ export function ExperienceUsagePanel({
             <span>{carried} 条已引用</span>
             {pending > 0 && <span>{pending} 条待注入</span>}
             {historical > 0 && <span>{historical} 条旧记录</span>}
+            {unconfirmed > 0 && <span>{unconfirmed} 条引用未确认</span>}
           </summary>
           <div className="task-experience__summary-content">
             <p>
@@ -244,7 +247,21 @@ function UseCard({
       : use.source.kind === "execution-validated"
         ? use.source.claimRevision
         : use.source.candidateVersion;
-  const management = `/memory?${new URLSearchParams({ ...(workspacePath ? { workspace: workspacePath } : {}), tab: stopped && use.source.kind !== "reviewed-reference" ? "archived" : "saved" })}#memory-${encodeURIComponent(use.itemId)}`;
+  const management = experienceManagementHref(
+    workspacePath,
+    {
+      itemId: use.itemId,
+      referenceItemVersion: use.itemVersion,
+      ...(use.source.kind === "reviewed-reference"
+        ? {
+            candidateId: use.source.candidateId,
+            referenceContentVersion: use.source.contentVersion,
+          }
+        : {}),
+    },
+    stopped && use.source.kind !== "reviewed-reference" ? "archived" : "saved",
+  );
+  const unconfirmed = !use.historical && use.delivery !== "carried";
   return (
     <article
       className="memory-card task-experience__reference"
@@ -257,11 +274,13 @@ function UseCard({
         </strong>
         <span className="task-experience__meta">
           <span>
-            {use.historical || use.delivery === "unknown"
+            {use.historical
               ? "旧记录，注入时序不完整"
               : use.delivery === "carried"
                 ? "已引用"
-                : "待注入"}
+                : use.delivery === "pending"
+                  ? "待注入"
+                  : "引用未确认"}
           </span>
           <span>
             {use.source.kind === "reviewed-reference"
@@ -275,10 +294,10 @@ function UseCard({
                 ? "保存时证据：历史执行记录，范围未知"
                 : "保存时验收：用户确认不等于执行验证"}
           </span>
-          <span>采用：{adoptionLabels[current.adoption]}</span>
+          <span>采用：{unconfirmed ? "未知（引用未确认）" : adoptionLabels[current.adoption]}</span>
           <span>
-            本次结果：{validationLabels[current.validation]} ·{" "}
-            {scopeLabels[current.validationScope]}
+            本次结果：{unconfirmed ? "尚无经验效果归因" : validationLabels[current.validation]} ·{" "}
+            {unconfirmed ? "引用未确认" : scopeLabels[current.validationScope]}
           </span>
           {current.excluded && <span>本次已排除</span>}
           {current.deleted || detail?.currentItemUnavailable ? (
@@ -295,6 +314,7 @@ function UseCard({
       {current.referenceContent && (
         <p className="task-experience__content">{referenceBody(current.referenceContent)}</p>
       )}
+      {unconfirmed && <p>引用尚未确认，独立执行结果仍保留，但不能归因于这条经验。</p>}
       {(use.historical || current.validationScope === "unknown") && (
         <p>历史记录或未知范围的 pass 不能证明建议全文、当前用户目标或最终回答正确。</p>
       )}
@@ -382,8 +402,9 @@ function UseCard({
             detail?.effects.map((effect) => (
               <div key={effect.effectId}>
                 <p>
-                  采用：{adoptionLabels[effect.adoption]} · 本次结果：
-                  {validationLabels[effect.validation]} · {scopeLabels[effect.validationScope]}
+                  {unconfirmed ? "独立执行观察" : "采用"}：{adoptionLabels[effect.adoption]} ·{" "}
+                  {unconfirmed ? "独立执行结果" : "本次结果"}：{validationLabels[effect.validation]}{" "}
+                  · {scopeLabels[effect.validationScope]}
                 </p>
                 <p>{effect.reason}</p>
                 <p>
