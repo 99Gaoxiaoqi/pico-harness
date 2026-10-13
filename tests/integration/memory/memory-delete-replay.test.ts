@@ -345,16 +345,16 @@ test("原生执行经验删除的即时及冷重放成功，回执和删除代�
 
 test("反馈与重放保持未确认携带投影，用户排除不会改写历史证据", async (t) => {
   const f = await fixture(t);
-  const itemId = await seedLegacy(f);
+  const itemId = await seedNative(f);
   await f.store.experienceLedger.deliverExperienceUse({
-    useId: "legacy-use",
+    useId: "native-use",
     providerCallId: "missing-call",
     physicalAttemptId: "missing-attempt",
     deliverySequence: 2,
     now: 20,
   });
   assert.equal(
-    (await f.store.experienceLedger.readExperienceUse("legacy-use"))?.delivery,
+    (await f.store.experienceLedger.readExperienceUse("native-use"))?.delivery,
     "carried",
   );
   assert.equal(
@@ -367,12 +367,12 @@ test("反馈与重放保持未确认携带投影，用户排除不会改写历�
     "unknown",
   );
   assert.equal(
-    (await f.service.detailExperienceUse(f.workspacePath, "legacy-use")).use.delivery,
+    (await f.service.detailExperienceUse(f.workspacePath, "native-use")).use.delivery,
     "unknown",
   );
   const params: RuntimeParams<"memory.experience.feedback"> = {
     workspacePath: f.workspacePath,
-    useId: "legacy-use",
+    useId: "native-use",
     expectedItemVersion: 1,
     operationId: "exclude-unconfirmed",
     action: "not_applicable",
@@ -385,7 +385,7 @@ test("反馈与重放保持未确认携带投影，用户排除不会改写历�
     assert.equal(response.use.delivery, "unknown");
     assert.equal(response.use.excluded, true);
   }
-  const canonical = await f.store.experienceLedger.readExperienceUse("legacy-use");
+  const canonical = await f.store.experienceLedger.readExperienceUse("native-use");
   assert.equal(canonical?.delivery, "carried");
   assert.equal(canonical?.excluded, true);
 });
