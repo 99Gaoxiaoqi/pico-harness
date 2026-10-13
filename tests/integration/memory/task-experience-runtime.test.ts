@@ -1,7 +1,7 @@
 import type { RuntimeEvent } from "@pico/storage/runtime-event";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -10,6 +10,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { RuntimeToolStartedEvent, TaskExperienceStore } from "@pico/core";
 import { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-store";
 import { SqliteRuntimeEventStore } from "@pico/storage/sqlite/sqlite-runtime-event-store";
+import { SqliteRuntimeControlStore } from "@pico/storage/sqlite/sqlite-runtime-control-store";
 import { AtomicMemoryContextBuilder } from "../../../packages/runtime/src/atomic-memory/context-builder.js";
 import {
   TaskExperienceRuntime,
@@ -784,16 +785,19 @@ test(
 );
 
 test("非Excel通用建议的自然语言条件经审核后可低信任引用，采用与验证保持unknown", async (t) => {
-  const root = await mkdtemp(join(tmpdir(), "pico-general-conditions-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "pico-general-conditions-")));
   const workDir = join(root, "workspace"),
-    workspaceKey = "general-workspace",
     sessionId = "general-session";
   await mkdir(workDir);
+  const paths = resolvePicoPaths(workDir, { picoHome: workDir });
+  const workspaceKey = paths.workspace.id;
   const store = new SqliteMemoryItemStore(join(root, "memory.sqlite"));
-  const events = new SqliteRuntimeEventStore({ storageRoot: join(root, "events") });
+  const events = new SqliteRuntimeEventStore({ storageRoot: paths.workspace.root });
+  const physicalStore = new SqliteRuntimeControlStore({ storageRoot: paths.workspace.root });
   await events.initializeSession({ sessionId, workDir });
   const ownerFence = await events.advanceOwnerFence(sessionId, 0);
   t.after(async () => {
+    physicalStore.close();
     events.close();
     store.close();
     await rm(root, { recursive: true, force: true });
@@ -1066,26 +1070,58 @@ test("非Excel通用建议的自然语言条件经审核后可低信任引用，
     },
     { ownerFence },
   );
+  const diagnostic = {
+    version: 1 as const,
+    coverage: "recorded" as const,
+    recalls: [
+      {
+        recallEventId: "gate-revoke-reference-recall",
+        references: [
+          {
+            itemId: selected.items[0]!.item.itemId,
+            referenceHash: selected.trace!.selected[0]!.referenceHash,
+            present: true,
+          },
+        ],
+      },
+    ],
+  };
+  // This deterministic gate fixture models an observed 2xx request, not a prepared admission.
+  const physical: Parameters<SqliteRuntimeControlStore["recordPhysicalAttempt"]>[0] = {
+    physicalAttemptId: "gate-physical",
+    providerCallId: "gate-provider",
+    logicalCallId: "gate-provider",
+    sessionId,
+    runId: "gate-revoke",
+    provider: "openai",
+    model: "test",
+    purpose: "main",
+    accountingVersion: 1,
+    accountingSource: "physical",
+    ownerId: physicalStore.beginPhysicalAttemptOwner(),
+    revision: 1,
+    attempt: 0,
+    retryAttempt: 0,
+    startedAt: new Date().toISOString(),
+    status: "observed",
+    httpStatus: 200,
+    usageBasis: "missing",
+    costStatus: "unknown",
+    pricingVersion: "fixture",
+    requestDiagnostic: { memoryRecall: diagnostic },
+  };
+  physicalStore.recordPhysicalAttempt({
+    ...physical,
+    status: "prepared",
+    revision: 0,
+    httpStatus: undefined,
+  });
+  physicalStore.recordPhysicalAttempt(physical);
   await feedback.dispatched({
     providerCallId: "gate-provider",
     physicalAttemptId: "gate-physical",
     runId: "gate-revoke",
-    diagnostic: {
-      version: 1,
-      coverage: "recorded",
-      recalls: [
-        {
-          recallEventId: "gate-revoke-reference-recall",
-          references: [
-            {
-              itemId: selected.items[0]!.item.itemId,
-              referenceHash: selected.trace!.selected[0]!.referenceHash,
-              present: true,
-            },
-          ],
-        },
-      ],
-    },
+    diagnostic,
   });
   const args = JSON.stringify({
     artifact_id: "current-sheet",

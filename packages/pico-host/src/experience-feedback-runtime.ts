@@ -37,6 +37,7 @@ import {
   type ExecutionEvidenceIO,
 } from "./execution-learning-evidence.js";
 import { currentExecutionRunner } from "./execution-learning-runner.js";
+import { hasConfirmedExperienceDelivery } from "./experience-delivery-evidence.js";
 import type { NativeFileCommit, NativeLearningObserver } from "./native-file-learning.js";
 import type { ToolExecutionContext } from "./tool-registry-contract.js";
 import { spreadsheetTargetFromGoal, taskInputArtifactIds } from "./task-experience-validation.js";
@@ -568,7 +569,11 @@ export class ExperienceFeedbackRuntime implements NativeLearningObserver {
         !use.deleted &&
         use.runId === this.runId &&
         use.taskId === task.taskId &&
-        use.taskVersion === task.taskVersion
+        use.taskVersion === task.taskVersion &&
+        hasConfirmedExperienceDelivery(use, {
+          workDir: this.options.workDir,
+          picoHome: this.options.picoHome,
+        })
       )
         result.push(use);
     }
