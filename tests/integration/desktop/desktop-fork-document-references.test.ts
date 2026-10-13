@@ -3,7 +3,6 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import {
@@ -19,12 +18,12 @@ import { globalSessionManager } from "@pico/pico-host/session";
 import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
 import { resolvePicoPaths } from "@pico/pico-host";
 import { RuntimeRun } from "@pico/pico-host/product-runtime-run";
-import { operationalDatabasePath, SqliteSessionWorkbarRepository } from "@pico/storage";
+import { SqliteSessionWorkbarRepository } from "@pico/storage";
 import { buildDefaultToolRegistry } from "@pico/pico-host/default-registry";
 import { writeDesktopModelRouting } from "../../fixtures/desktop-model-routing.js";
 import { documentPdf } from "../../fixtures/document-attachments.js";
 
-test("上传文档及页图在分叉、再次分叉与重开后沿历史引用读取，兼容旧副本且隔离无关会话", async (t) => {
+test("上传文档及页图在分叉、再次分叉与重开后沿历史引用读取，并隔离无关会话", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-fork-documents-"));
   await mkdir(join(root, "workspace"));
   const workspacePath = await realpath(join(root, "workspace"));
@@ -196,27 +195,4 @@ test("上传文档及页图在分叉、再次分叉与重开后沿历史引用�
   }
   const later = await upload(source, "分叉之后.txt", "text/plain", Buffer.from("later upload"));
   await assert.rejects(read(second, later.artifactId), /不属于当前会话/u);
-
-  // Preserve a real fork's bytes and lineage while recreating the random IDs used by older builds.
-  const legacy = await fork(source);
-  const clone = repository.queryArtifacts({ sessionId: legacy, artifactId: document.artifactId })
-    .artifacts[0]!;
-  const legacyId = randomUUID();
-  const database = new DatabaseSync(operationalDatabasePath(storageRoot));
-  try {
-    database
-      .prepare(
-        "UPDATE session_artifacts SET artifact_id = ? WHERE session_id = ? AND artifact_id = ?",
-      )
-      .run(legacyId, legacy, clone.artifactId);
-  } finally {
-    database.close();
-  }
-  assert.equal(
-    JSON.parse(await read(legacy, originalRef)).source.ref,
-    `pico://artifact/${legacyId}`,
-  );
-  const legacyChild = await fork(legacy);
-  assert.match(await read(legacyChild, originalRef), /unique-ending/u);
-  await assert.rejects(read(legacyChild, foreign.artifactId), /不属于当前会话/u);
 });

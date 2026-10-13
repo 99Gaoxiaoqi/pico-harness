@@ -916,19 +916,7 @@ function findInheritedArtifact(
     ancestor = parent?.fork_parent_session_id ?? null;
   }
 
-  // Older forks assigned random IDs. An ancestor may identify the inherited
-  // bytes, but only a complete matching current-session copy may be returned.
-  const source = database
-    .prepare("SELECT * FROM session_artifacts WHERE artifact_id = ?")
-    .get(artifactId) as ArtifactRow | undefined;
-  if (!source || !visited.has(source.session_id)) return undefined;
-  return database
-    .prepare(
-      `SELECT * FROM session_artifacts
-       WHERE session_id = ? AND digest = ? AND mime_type = ? AND size_bytes = ?
-       ORDER BY created_at ASC, artifact_id ASC LIMIT 1`,
-    )
-    .get(sessionId, source.digest, source.mime_type, source.size_bytes) as ArtifactRow | undefined;
+  return undefined;
 }
 
 /** Pure database projection: only frozen fork bootstrap facts may inherit an ancestor blob. */
