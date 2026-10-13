@@ -159,7 +159,7 @@ test("Host 验证附件不泄漏到既有审核协议，也不向用户暴露内
   assert.equal("nativeEvidence" in review.candidate, false);
   assert.deepEqual((await service.listLearning(workspacePath)).items, []);
   await assert.rejects(service.inspectLearning(workspacePath, "internal-proof"), protocolError(RUNTIME_ERROR_CODES.NOT_FOUND));
-  await assert.rejects(service.discardLearning(workspacePath, "internal-proof", 1), protocolError(RUNTIME_ERROR_CODES.NOT_FOUND));
+  await assert.rejects(service.discardLearning(workspacePath, "internal-proof", 1), protocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS));
 });
 
 test("真实 SQLite 与 Desktop v2 审核闭环隔离旧视图、保留未验证参考并支持关闭自动学习后管理", async () => {

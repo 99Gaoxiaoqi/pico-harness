@@ -2,12 +2,12 @@
 /// <reference lib="dom.iterable" />
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { registerHooks } from "node:module";
 import { test } from "node:test";
 import type {} from "../../../apps/desktop/src/preload/global.js";
 import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
-import { MemoryPage, nextMemoryTabIndex } from "../../../apps/desktop/src/renderer/MemoryPage.js";
 import { previewData } from "../../../apps/desktop/src/renderer/fixture.js";
 import {
   isMemoryConflict,
@@ -16,6 +16,17 @@ import {
   type RuntimeStore,
 } from "../../../apps/desktop/src/renderer/runtime.js";
 Object.assign(globalThis, { React });
+
+// This SSR test loads the real page, whose child panels import styles handled by Vite in production.
+const styles = registerHooks({
+  load(url, context, nextLoad) {
+    return url.endsWith(".css")
+      ? { format: "module", source: "export {};", shortCircuit: true }
+      : nextLoad(url, context);
+  },
+});
+const { MemoryPage, nextMemoryTabIndex } = await import("../../../apps/desktop/src/renderer/MemoryPage.js");
+styles.deregister();
 
 function renderMemoryPage(props: React.ComponentProps<typeof MemoryPage>): string {
   return renderToStaticMarkup(

@@ -276,28 +276,11 @@ export class DesktopAtomicMemoryService {
     });
   }
   async discardLearning(
-    workspacePath: string,
-    candidateId: string,
-    revision: number,
+    _workspacePath: string,
+    _candidateId: string,
+    _revision: number,
   ): Promise<RuntimeResult<"memory.learning.discard">> {
-    return this.withStore(workspacePath, async (store, workspaceKey) => {
-      const candidate = await store.executionLearning.readExecutionLearningCandidate(candidateId);
-      if (
-        !candidate ||
-        candidate.claim.admission.workspaceKey !== workspaceKey ||
-        candidate.state !== "saved"
-      )
-        throw new RuntimeProtocolError(
-          RUNTIME_ERROR_CODES.NOT_FOUND,
-          "独立原生学习已停用，请通过经验审核管理建议",
-        );
-      await store.executionLearning.discardExecutionLearning(candidateId, workspaceKey, revision);
-      this.options.publish(workspacePath, "memory.learning.changed", {
-        workspaceKey,
-        revision: store.executionLearning.readRevision(),
-      });
-      return { discarded: true };
-    });
+    throw invalid("独立原生学习已停用。建议请通过经验审核管理；已保存经验请在记忆页归档或删除。");
   }
 
   async list(
