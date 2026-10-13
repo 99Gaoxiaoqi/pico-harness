@@ -40,7 +40,6 @@ type ReferenceSource =
   | "user-evidence"
   | "manual"
   | "assistant-note"
-  | "execution-evidence"
   | "execution-validated"
   | "reviewed-reference";
 
@@ -63,7 +62,7 @@ export interface AtomicMemoryRecallDiagnostic {
 }
 
 export interface AtomicMemoryContextOptions {
-  /** Host task exclusion/permission check for the three experience sources before selection. */
+  /** Host task exclusion/permission check for current experience sources before selection. */
   readonly experienceAllowed?: (record: MemoryItemRecord) => Promise<boolean>;
   /** Host-checked current target scope, not model-provided taskFamily or inferred relevance. */
   readonly executionTargets?: readonly { readonly targetId: string; readonly scopeHash: string }[];
@@ -213,8 +212,7 @@ export class AtomicMemoryContextBuilder {
           .filter(
             (record) =>
               record.sourceType === "reviewed-reference" ||
-              record.sourceType === "execution-validated" ||
-              !!record.executionEvidence,
+              record.sourceType === "execution-validated",
           )
           .map((record) => [record.item.itemId, record]),
       );
@@ -230,6 +228,7 @@ export class AtomicMemoryContextBuilder {
       );
     }
     const visible = (record: MemoryItemRecord): boolean =>
+      !record.executionEvidence &&
       !excludedExperienceItems.has(record.item.itemId) &&
       (!record.taskExperience || record.sourceType === "reviewed-reference") &&
       (record.sourceType !== "reviewed-reference" ||
@@ -331,13 +330,11 @@ export class AtomicMemoryContextBuilder {
           ? "execution-validated"
           : record.sourceType === "reviewed-reference"
             ? "reviewed-reference"
-            : record.executionEvidence
-              ? "execution-evidence"
-              : note
-                ? "assistant-note"
-                : record.sources.length
-                  ? "user-evidence"
-                  : "manual";
+            : note
+              ? "assistant-note"
+              : record.sources.length
+                ? "user-evidence"
+                : "manual";
       const duplicate = duplicateKey(record, source);
       const diagnostic = (reason: AtomicMemoryRecallDiagnostic["reason"]): void => {
         diagnostics.push({ itemId: record.item.itemId, reason, match });

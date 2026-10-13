@@ -61,7 +61,7 @@ export interface ExperienceFeedbackRuntimeOptions {
   readonly picoHome: string;
   readonly store: Pick<
     SqliteMemoryItemStore,
-    "readSettings" | "readItem" | "readExecutionLesson" | "taskExperiences" | "executionLearning"
+    "readSettings" | "readItem" | "taskExperiences" | "executionLearning"
   > & {
     readonly experienceLedger: ExperienceLedgerStore;
   };
@@ -200,12 +200,7 @@ export class ExperienceFeedbackRuntime implements NativeLearningObserver {
       check();
       for (const selected of recall.event.data.selected) {
         if (this.uses.size >= 128) throw new Error("experience_use_budget");
-        if (
-          !["reviewed-reference", "execution-validated", "execution-evidence"].includes(
-            selected.source,
-          )
-        )
-          continue;
+        if (!["reviewed-reference", "execution-validated"].includes(selected.source)) continue;
         const record = result.items.find((entry) => entry.item.itemId === selected.itemId);
         const reference = [...result.block.matchAll(/<memory\b[^>]*>[\s\S]*?<\/memory>/gu)]
           .map((match) => match[0])
@@ -307,20 +302,6 @@ export class ExperienceFeedbackRuntime implements NativeLearningObserver {
             claimRevision: candidate.claim.revision,
             claimHash: acceptance.claimHash,
             scopeHash: acceptance.scopeHash,
-          }
-        : undefined;
-    }
-    if (record.executionEvidence) {
-      const candidate = await this.options.store.readExecutionLesson(
-        record.executionEvidence.candidateId,
-      );
-      check();
-      return candidate?.state === "confirmed" && candidate.itemId === record.item.itemId
-        ? {
-            kind: "execution-evidence",
-            candidateId: candidate.candidateId,
-            candidateVersion: candidate.version,
-            contentHash: record.item.contentHash,
           }
         : undefined;
     }
