@@ -1076,6 +1076,11 @@ test("原生附件只认冻结身份；编辑与纠正断开，删除清理派�
     assert.deepEqual(pending?.nativeEvidence, attachment);
     assert.equal(pending?.validation, "unknown");
     assert.equal(pending?.enabled, false);
+    await store.executionLearning.admitExecutionLearning(claim.admission);
+    await assert.rejects(store.executionLearning.saveExecutionLearningClaim({
+      ...claim, revision: 2, claimHash: hash("later-operation"),
+    }), /Attached native evidence is frozen/);
+    assert.equal((await store.executionLearning.readExecutionLearningCandidate(claim.candidateId))?.claim.claimHash, claim.claimHash);
     store.close();
     store = new SqliteMemoryItemStore(path, { now: () => 1000 });
     assert.deepEqual(

@@ -373,6 +373,10 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
       if (old) {
         if (old.claim.failureKey !== claim.failureKey) throw new Error("Candidate identity reused");
         if (old.claim.claimHash === claim.claimHash) return old;
+        if (this.db.prepare(
+          "SELECT 1 FROM execution_learning_candidates WHERE json_extract(record_json,'$.kind')='task-lesson' AND json_extract(record_json,'$.nativeEvidence.candidateId')=? AND state NOT IN ('discarded','invalidated','expired') LIMIT 1",
+        ).get(claim.candidateId))
+          throw new Error("Attached native evidence is frozen");
         if (old.state !== "waiting" && old.state !== "insufficient")
           throw new Error("Candidate cannot be revised");
         if (claim.revision !== old.claim.revision + 1)
