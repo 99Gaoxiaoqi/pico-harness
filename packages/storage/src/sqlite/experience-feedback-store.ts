@@ -10,7 +10,6 @@ import type {
   TaskExperienceCandidate,
   TaskExperienceTask,
   ExecutionLearningCandidate,
-  ExecutionLessonCandidate,
 } from "@pico/core";
 
 type Row = Record<string, unknown>;
@@ -136,24 +135,8 @@ export class SqliteExperienceLedgerStore implements ExperienceLedgerStore {
     )
       return false;
     const source = use.source;
-    if (source.kind === "execution-evidence") {
-      const candidate = decode<ExecutionLessonCandidate>(
-        this.db
-          .prepare("SELECT record_json FROM execution_lesson_candidates WHERE candidate_id=?")
-          .get(source.candidateId),
-      );
-      return (
-        !!candidate &&
-        candidate.state === "confirmed" &&
-        candidate.workspaceKey === use.workspaceKey &&
-        candidate.version === source.candidateVersion &&
-        candidate.itemId === use.itemId &&
-        candidate.itemContentHash === source.contentHash &&
-        source.contentHash === use.contentHash &&
-        candidate.verifications.length >= 3 &&
-        candidate.confirmedAt !== null
-      );
-    }
+    // Retired sources remain readable only as body-free audit receipts.
+    if (source.kind === "execution-evidence") return false;
     const mapping = this.db
       .prepare("SELECT * FROM execution_learning_items WHERE item_id=?")
       .get(use.itemId);
