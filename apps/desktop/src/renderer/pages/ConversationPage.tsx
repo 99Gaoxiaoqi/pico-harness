@@ -54,6 +54,7 @@ import {
   mergeConversationItemGroups,
   omitApprovalAuditItems,
   removeSupersededActiveTools,
+  readPersistentDraft,
   usePersistentDraft,
   writePersistentDraft,
   type ComposerBehavior,
@@ -736,13 +737,25 @@ export function ConversationPage() {
     await actions.updateSessionSettings(sessionRef, { orchestrationMode });
   };
 
+  const changeNewTaskProject = (path: string) => {
+    const targetDraftKey = `new:${path || "unbound"}`;
+    if (targetDraftKey === draftKey) return;
+    setNewTaskSettingOverrides((current) => ({ ...current, [path || "unbound"]: newTaskSettings }));
+    const sourceDraft = readPersistentDraft(draftKey);
+    if (sourceDraft) {
+      const targetDraft = readPersistentDraft(targetDraftKey);
+      writePersistentDraft(targetDraftKey, [targetDraft, sourceDraft].filter(Boolean).join("\n\n"));
+      clearDraft();
+    }
+    fileDraft.moveTo(targetDraftKey);
+    navigate(newSessionHref(path));
+  };
+
   const chooseProjectFolder = async () => {
     const sourceDraftKey = draftKey;
     const path = await actions.chooseWorkspace();
     if (path && sendRouteRef.current === sourceDraftKey) {
-      setNewTaskSettingOverrides((current) => ({ ...current, [path]: newTaskSettings }));
-      if (draft) writePersistentDraft(`new:${path}`, draft);
-      navigate(newSessionHref(path));
+      changeNewTaskProject(path);
     }
   };
 
@@ -1550,16 +1563,7 @@ export function ConversationPage() {
                                   return;
                                 }
                                 if (nextWorkspacePath === TEMPORARY_PROJECT_OPTION_VALUE) return;
-                                setNewTaskSettingOverrides((current) => ({
-                                  ...current,
-                                  [nextWorkspacePath || "unbound"]: newTaskSettings,
-                                }));
-                                if (draft)
-                                  writePersistentDraft(
-                                    `new:${nextWorkspacePath || "unbound"}`,
-                                    draft,
-                                  );
-                                navigate(newSessionHref(nextWorkspacePath));
+                                changeNewTaskProject(nextWorkspacePath);
                               }}
                               options={[
                                 { value: "", label: "无项目" },

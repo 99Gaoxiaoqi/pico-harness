@@ -3,6 +3,99 @@ import test from "node:test";
 import { runRendererBrowserScenario } from "./renderer-browser-fixture.js";
 
 test(
+  "新任务切换已有项目或打开文件夹时移交附件与错误，合并目标草稿且不重复",
+  { timeout: 45_000 },
+  async () => {
+    const result = await runRendererBrowserScenario(`
+import * as React from 'react';
+import { act } from 'react';
+import { createRoot } from 'react-dom/client';
+import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom';
+import { ConversationPage } from './apps/desktop/src/renderer/pages/ConversationPage.tsx';
+import { RuntimeContext } from './apps/desktop/src/renderer/runtime-context.tsx';
+import { previewData } from './apps/desktop/src/renderer/fixture.ts';
+import { newSessionHref } from './apps/desktop/src/renderer/workspace-session.ts';
+import { readPersistentDraft } from './apps/desktop/src/renderer/conversation/usePersistentDraft.ts';
+import { PicoTheme } from './apps/desktop/src/renderer/astryx-provider.tsx';
+globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+const check = (ok, message) => { if (!ok) throw new Error(message); };
+const sends = [];
+let route, failure, mounts = 0, folderChoices = 0;
+const project = '/fixture', folder = '/chosen-folder';
+const data = {...previewData,picoHome:'/fixture-home',workspacePath:project,trusted:true,
+  workspaces:[{path:project,name:'Existing project',mode:'git',registered:true,trusted:true},{path:folder,name:'Chosen folder',mode:'git',registered:true,trusted:true}],
+  sessions:[],runs:[],timeline:[],approvals:[],prompts:[],conversations:{},providerRetries:{},
+  modelRoutes:[{id:'test/a',label:'test/a'}],providerConfig:{...previewData.providerConfig,defaultModelRouteId:'test/a',userDefaults:{modelRouteId:'test/a'},providers:[{id:'test',origin:'user',protocol:'openai',baseURL:'https://fixture.invalid',models:['a']}]}};
+const noop = async () => undefined;
+const runtime = {data,preview:false,busy:false,pendingSends:[],actions:new Proxy({
+  ensureTemporaryWorkspace:async()=>'/fixture-temp',
+  chooseWorkspace:async()=>{folderChoices++;data.workspacePath=folder;return folder;},
+  sendMessage:async input=>{
+    sends.push(input);
+    if(failure){const message=failure;failure=undefined;return {succeeded:false,fileError:{file:input.files[0],message}};}
+    return {succeeded:true};
+  },
+},{get:(target,key)=>target[key]??noop})};
+function RouteObserver(){const location=useLocation();route=location.pathname+location.search;return null;}
+const root=createRoot(document.getElementById('app'));
+const mount=async path=>act(async()=>root.render(<PicoTheme><RuntimeContext value={runtime}><MemoryRouter key={++mounts} initialEntries={[path]}><RouteObserver/><Routes><Route path='/task/new' element={<ConversationPage/>}/></Routes></MemoryRouter></RuntimeContext></PicoTheme>));
+const editor=()=>document.querySelector('[contenteditable=true]');
+const cards=()=>[...document.querySelectorAll('.conversation-composer__file')];
+const type=async text=>act(async()=>{editor().focus();document.execCommand('insertText',false,text);});
+const pick=async file=>act(async()=>{const input=document.querySelector('input[type=file]');check(input&&!input.disabled,'file picker enabled');const transfer=new DataTransfer();transfer.items.add(file);input.files=transfer.files;input.dispatchEvent(new Event('change',{bubbles:true}));});
+const submit=async()=>act(async()=>{const button=document.querySelector('button[aria-label="发送消息"]');check(button&&!button.disabled,'send enabled at '+route+' after '+sends.length+' sends: '+document.body.textContent);button.click();});
+const selectProject=async label=>{
+  await act(async()=>{const field=document.querySelector('[name=workspace]');check(field,'project field');const button=field.tagName==='BUTTON'?field:field.closest('.astryx-field')?.querySelector('[role=combobox]')??field.parentElement.querySelector('[role=combobox]');check(button,'project selector');button.click();});
+  await act(async()=>{await new Promise(resolve=>setTimeout(resolve,30));});
+  await act(async()=>{const option=[...document.querySelectorAll('[role=option]')].find(node=>node.textContent.trim()===label);check(option,'project option '+label);option.click();});
+};
+(async()=>{
+  localStorage.clear();
+  const targetFile=new File(['target content'],'target.txt');
+  const sourceFile=new File(['source content'],'source.txt');
+  await mount(newSessionHref(project));
+  await type('Existing target draft');await pick(targetFile);
+  failure='target upload failed';await submit();
+  await mount('/task/new');
+  await type('Source draft');await pick(sourceFile);
+  failure='source upload failed';await submit();
+  await selectProject('Existing project');
+  check(route===newSessionHref(project),'existing project route');
+  const merged='Existing target draft\\n\\nSource draft';
+  check(readPersistentDraft('new:'+project)===merged&&editor().textContent.includes('Existing target draft')&&editor().textContent.includes('Source draft'),'target and source text retained');
+  check(cards().length===2&&cards()[0].textContent.includes('target.txt')&&cards()[1].textContent.includes('source.txt'),'target and source attachments retained in order');
+  check(cards()[0].textContent.includes('target upload failed')&&cards()[1].textContent.includes('source upload failed'),'both upload errors retained');
+  await mount('/task/new');
+  check(cards().length===0&&editor().textContent==='','source draft consumed');
+  await mount(newSessionHref(project));
+  await selectProject('无项目');
+  await selectProject('Existing project');
+  check(cards().length===2&&readPersistentDraft('new:'+project)===merged,'round trip does not duplicate files or text');
+  await submit();
+  const sent=sends.at(-1);
+  check(sent.workspacePath===project&&sent.text===merged&&sent.files.length===2,'merged draft sends to selected project');
+  check(sent.files[0]===targetFile&&sent.files[1]===sourceFile&&await sent.files[1].text()==='source content','original File objects and bytes retained');
+  check(cards().length===0&&editor().textContent==='','successful send consumes merged draft');
+
+  await mount('/task/new');
+  const onlyFile=new File(['file only content'],'only.txt');
+  await pick(onlyFile);failure='file only upload failed';await submit();
+  await selectProject('打开项目文件夹…');
+  check(folderChoices===1&&route===newSessionHref(folder),'folder picker switches project');
+  check(cards().length===1&&cards()[0].textContent.includes('file only upload failed')&&editor().textContent==='','file-only draft and error survive folder selection');
+  await submit();
+  check(sends.at(-1).workspacePath===folder&&sends.at(-1).text===''&&sends.at(-1).files[0]===onlyFile,'file-only draft sends original file to chosen folder');
+  await mount('/task/new');
+  check(cards().length===0,'file-only source is consumed');
+  await act(async()=>root.unmount());
+  await fetch('/result',{method:'POST',body:'PASS: project file drafts'});
+})().catch(error=>fetch('/result',{method:'POST',body:'FAIL: '+error.stack}));
+`);
+    assert.equal(result, "PASS: project file drafts", result);
+  },
+);
+
+test(
   "桌面附件选择、粘贴、拖放经分块上传发送，失败保留会话与草稿",
   { timeout: 45_000 },
   async () => {
