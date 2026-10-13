@@ -4,10 +4,11 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import type { ExperienceUse, RuntimeEvent } from "@pico/core";
+import type { ExperienceUse } from "@pico/core";
+import type { RuntimeEvent } from "@pico/storage/runtime-event";
 import type { PhysicalAttemptRecord } from "@pico/storage/runtime-control-types";
-import { SqliteRuntimeControlStore } from "../../../packages/storage/src/sqlite/sqlite-runtime-control-store.js";
-import { SqliteRuntimeEventStore } from "../../../packages/storage/src/sqlite/sqlite-runtime-event-store.js";
+import { SqliteRuntimeControlStore } from "@pico/storage/sqlite/sqlite-runtime-control-store";
+import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
 import { resolvePicoPaths } from "../../../packages/pico-host/src/pico-paths.js";
 import {
   hasConfirmedExperienceDelivery,

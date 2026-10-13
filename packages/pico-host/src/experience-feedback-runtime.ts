@@ -633,7 +633,7 @@ export class ExperienceFeedbackRuntime implements NativeLearningObserver {
           sources: [sourceOf(outcome.event)],
         };
         let scope: ExperienceUse["validationScope"] = "unknown";
-        let reason = "reference_only";
+        let reason: string;
         let contradiction = false;
         if (use.source.kind === "reviewed-reference") {
           const args = canonicalTaskArguments(canonical.start);

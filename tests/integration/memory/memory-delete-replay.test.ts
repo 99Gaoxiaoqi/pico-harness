@@ -386,6 +386,53 @@ test("原生与旧执行经验删除的即时及冷重放成功，回执和删�
   }
 });
 
+test("反馈与重放保持未确认携带投影，用户排除不会改写历史证据", async (t) => {
+  const f = await fixture(t);
+  const itemId = await seedLegacy(f);
+  await f.store.experienceLedger.deliverExperienceUse({
+    useId: "legacy-use",
+    providerCallId: "missing-call",
+    physicalAttemptId: "missing-attempt",
+    deliverySequence: 2,
+    now: 20,
+  });
+  assert.equal(
+    (await f.store.experienceLedger.readExperienceUse("legacy-use"))?.delivery,
+    "carried",
+  );
+  assert.equal(
+    (
+      await f.service.queryExperienceUses(f.workspacePath, {
+        workspacePath: f.workspacePath,
+        itemId,
+      })
+    ).uses[0]?.delivery,
+    "unknown",
+  );
+  assert.equal(
+    (await f.service.detailExperienceUse(f.workspacePath, "legacy-use")).use.delivery,
+    "unknown",
+  );
+  const params: RuntimeParams<"memory.experience.feedback"> = {
+    workspacePath: f.workspacePath,
+    useId: "legacy-use",
+    expectedItemVersion: 1,
+    operationId: "exclude-unconfirmed",
+    action: "not_applicable",
+  };
+  for (let index = 0; index < 2; index++) {
+    const response = parseRuntimeResult(
+      "memory.experience.feedback",
+      await f.service.feedbackExperienceUse(f.workspacePath, params),
+    );
+    assert.equal(response.use.delivery, "unknown");
+    assert.equal(response.use.excluded, true);
+  }
+  const canonical = await f.store.experienceLedger.readExperienceUse("legacy-use");
+  assert.equal(canonical?.delivery, "carried");
+  assert.equal(canonical?.excluded, true);
+});
+
 test("删除重放核对参数与操作类型，拒绝跨工作区、无回执和审核经验普通删除", async (t) => {
   const f = await fixture(t);
   const first = (await f.service.create(f.workspacePath, "第一个本地记忆。")).item;

@@ -68,7 +68,10 @@ export class DesktopAtomicMemoryService {
       if (!use || use.workspaceKey !== workspaceKey) throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.NOT_FOUND, "当前工作区没有该经验引用");
       return {
         experienceVersion: 1,
-        use: projectExperienceDelivery(use, { workDir: workspacePath, picoHome: this.options.picoHome }),
+        use: projectExperienceDelivery(use, {
+          workDir: workspacePath,
+          picoHome: this.options.picoHome,
+        }),
         effects: await store.experienceLedger.listExperienceEffects(useId),
       };
     });
@@ -81,7 +84,10 @@ export class DesktopAtomicMemoryService {
         if (currentItem) this.changed(workspacePath, currentItem);
       }
       this.learningChanged(workspacePath, workspaceKey, store);
-      return { experienceVersion: 1, use };
+      return {
+        experienceVersion: 1,
+        use: projectExperienceDelivery(use, { workDir: workspacePath, picoHome: this.options.picoHome }),
+      };
     });
   }
   async queryExperiences(

@@ -345,12 +345,26 @@ test(
         createRuntimeRequest("memory.learning.query", { workspacePath, sessionId: currentSession }),
       ),
     );
-    const receipt = query.reuse.find(
-      (receipt) => receipt.candidateId === approved.candidate.candidateId,
+    // The v2 projection cannot represent an unconfirmed physical delivery.
+    assert.equal(query.reuse.length, 0);
+    const uses = parseRuntimeResult(
+      "memory.experience.query",
+      await services.desktopService.handle(
+        createRuntimeRequest("memory.experience.query", {
+          workspacePath,
+          sessionId: currentSession,
+        }),
+      ),
+    );
+    const receipt = uses.uses.find(
+      (receipt) =>
+        receipt.source.kind === "reviewed-reference" &&
+        receipt.source.candidateId === approved.candidate.candidateId,
     );
     assert.ok(receipt);
-    assert.equal(receipt.runId, reuseHostRun);
+    assert.equal(receipt.hostRunId, reuseHostRun);
     // This deterministic provider does not expose a physical request lifecycle.
+    assert.equal(receipt.delivery, "pending");
     assert.equal(receipt.adoption, "unknown");
     assert.equal(receipt.validation, "unknown");
     assert.ok(receipt.referenceContent);
