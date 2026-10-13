@@ -9,8 +9,8 @@ import {
   RefreshCw,
   Trash2,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Link, useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import type { RuntimeMemoryItem, RuntimeMemoryListItem, RuntimeResult } from "@pico/protocol";
 import { Button, EmptyState, IconButton, InlineNotice } from "./components.js";
 import { isExperienceSuggestion } from "./TaskExperiencePanel.js";
@@ -21,6 +21,9 @@ import { TaskExperiencePanel } from "./TaskExperiencePanel.js";
 import { useTaskExperience } from "./useTaskExperience.js";
 import { useExperienceLedger } from "./useExperienceLedger.js";
 import { ExperienceUsagePanel } from "./ExperienceUsagePanel.js";
+import { RuntimeInvocationError } from "./runtime.js";
+import { readExperienceManagementTarget } from "./experience-management-route.js";
+import type { ExperienceDetail, ExperienceReviewRequest } from "./useTaskExperience.js";
 
 const panels = ["saved", "archived"] as const;
 type PanelId = "pending" | (typeof panels)[number];
@@ -107,7 +110,116 @@ export function MemoryPage({
   const learning = useExecutionLearning(runtime, {
     workspacePath: data.workspacePath,
   });
+  const location = useLocation();
+  const navigate = useNavigate();
   const [searchParams] = useSearchParams();
+  const routeTarget = useMemo(
+    () => readExperienceManagementTarget(new URLSearchParams(location.search), location.hash),
+    [location.search, location.hash],
+  );
+  const targetKey = JSON.stringify([data.workspacePath, routeTarget]);
+  const targetScope = useRef({ key: targetKey, generation: 0 });
+  if (targetScope.current.key !== targetKey)
+    targetScope.current = { key: targetKey, generation: targetScope.current.generation + 1 };
+  const targetGeneration = targetScope.current.generation;
+  const targetRequest = useRef(0);
+  const [targetRetry, setTargetRetry] = useState(0);
+  const [targetState, setTargetState] = useState<{
+    key: string;
+    generation: number;
+    detail?: ExperienceDetail;
+    item?: RuntimeMemoryItem;
+    status: "loading" | "ready" | "unavailable" | "error";
+  }>();
+  const resolvedTarget =
+    targetState?.key === targetKey && targetState.generation === targetGeneration
+      ? targetState
+      : undefined;
+  useEffect(() => {
+    const sequence = ++targetRequest.current;
+    if (!routeTarget || !data.workspacePath || !data.trusted || runtime.connection.kind !== "ready")
+      return;
+    const workspacePath = data.workspacePath;
+    const current = () =>
+      targetScope.current.key === targetKey &&
+      targetScope.current.generation === targetGeneration &&
+      targetRequest.current === sequence;
+    setTargetState({ key: targetKey, generation: targetGeneration, status: "loading" });
+    void (async () => {
+      try {
+        let detail: ExperienceDetail | undefined;
+        let item: RuntimeMemoryItem | undefined;
+        if (routeTarget.candidateId && experience.supported) {
+          detail = await experience.onDetail(routeTarget.candidateId);
+          if (routeTarget.itemId && detail.candidate.itemId !== routeTarget.itemId)
+            throw new RuntimeInvocationError("NOT_FOUND", "目标经验不可用", false);
+        } else if (routeTarget.itemId) {
+          item = await actions.getExperienceMemoryItem(workspacePath, routeTarget.itemId);
+          if (!item) throw new RuntimeInvocationError("NOT_FOUND", "目标记忆不可用", false);
+          if (item.taskExperience && experience.supported)
+            detail = await experience.onDetail(item.taskExperience.candidateId);
+        } else throw new RuntimeInvocationError("NOT_FOUND", "目标经验不可用", false);
+        if (current())
+          setTargetState({
+            key: targetKey,
+            generation: targetGeneration,
+            detail,
+            item,
+            status: "ready",
+          });
+      } catch (failure) {
+        if (current())
+          setTargetState({
+            key: targetKey,
+            generation: targetGeneration,
+            status:
+              failure instanceof RuntimeInvocationError && failure.code === "NOT_FOUND"
+                ? "unavailable"
+                : "error",
+          });
+      }
+    })();
+    return () => {
+      targetRequest.current += 1;
+    };
+  }, [
+    targetKey,
+    targetGeneration,
+    targetRetry,
+    data.trusted,
+    runtime.connection.kind,
+    actions,
+    experience.onDetail,
+    experience.supported,
+  ]);
+  const targetDetail = resolvedTarget?.detail;
+  const currentTargetCandidate =
+    targetDetail &&
+    experience.items.find((item) => item.candidateId === targetDetail.candidate.candidateId);
+  const targetCandidate =
+    currentTargetCandidate &&
+    currentTargetCandidate.recordRevision > targetDetail!.candidate.recordRevision
+      ? currentTargetCandidate
+      : targetDetail?.candidate;
+  const reviewExperience = useCallback(
+    async (request: ExperienceReviewRequest) => {
+      const candidate = await experience.onReview(request);
+      if (
+        targetScope.current.key === targetKey &&
+        targetScope.current.generation === targetGeneration
+      )
+        setTargetState((current) =>
+          current?.key === targetKey &&
+          current.generation === targetGeneration &&
+          current.detail?.candidate.candidateId === candidate.candidateId &&
+          current.detail.candidate.recordRevision <= candidate.recordRevision
+            ? { ...current, detail: { ...current.detail, candidate } }
+            : current,
+        );
+      return candidate;
+    },
+    [experience.onReview, targetKey, targetGeneration],
+  );
   const displayPanels: readonly PanelId[] = experience.supported ? ["pending", ...panels] : panels;
   const pendingCount = experience.items.filter(
     (item) =>
@@ -127,8 +239,46 @@ export function MemoryPage({
       setActivePanel(requested);
     else if (activePanel === "pending" && !experience.supported) setActivePanel("saved");
   }, [searchParams, experience.supported]);
+  useEffect(() => {
+    if (resolvedTarget?.status !== "ready") return;
+    const desired: PanelId = targetCandidate
+      ? targetCandidate.lifecycleState === "archived"
+        ? "archived"
+        : targetCandidate.review === "pending" || targetCandidate.review === "deferred"
+          ? "pending"
+          : "saved"
+      : resolvedTarget.item?.lifecycleState === "archived"
+        ? "archived"
+        : "saved";
+    if (searchParams.get("tab") !== desired) {
+      const next = new URLSearchParams(searchParams);
+      next.set("tab", desired);
+      navigate(
+        { pathname: location.pathname, search: next.toString(), hash: location.hash },
+        { replace: true },
+      );
+    }
+    setActivePanel(desired);
+  }, [resolvedTarget, targetCandidate, searchParams, navigate, location.pathname, location.hash]);
   const [editor, setEditor] = useState<MemoryEditor>();
   const [editorError, setEditorError] = useState("");
+  useEffect(() => {
+    if (
+      resolvedTarget?.status !== "ready" ||
+      !resolvedTarget.item ||
+      resolvedTarget.detail ||
+      editor
+    )
+      return;
+    const frame = requestAnimationFrame(() => {
+      const target = document.getElementById(
+        `memory-${encodeURIComponent(resolvedTarget.item!.itemId)}`,
+      );
+      target?.scrollIntoView({ block: "nearest" });
+      target?.focus({ preventScroll: true });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [resolvedTarget, activePanel, editor]);
   const [query, setQuery] = useState("");
   const [preview, setPreview] = useState<{
     key: string;
@@ -236,8 +386,41 @@ export function MemoryPage({
       creatingRef.current = false;
     }
   };
+  const targetItem = resolvedTarget?.item;
+  const memoryItems =
+    targetItem && !targetDetail
+      ? [
+          ...memory.items.filter((item) => item.itemId !== targetItem.itemId),
+          memory.items.find(
+            (item) => item.itemId === targetItem.itemId && item.version > targetItem.version,
+          ) ?? targetItem,
+        ]
+      : memory.items;
+  const refreshTargetItem = async (itemId: string) => {
+    if (targetItem?.itemId !== itemId || !data.workspacePath) return;
+    try {
+      const item = await actions.getExperienceMemoryItem(data.workspacePath, itemId);
+      if (
+        targetScope.current.key === targetKey &&
+        targetScope.current.generation === targetGeneration
+      )
+        setTargetState((current) =>
+          current?.key === targetKey && current.generation === targetGeneration
+            ? { ...current, item, status: item ? "ready" : "unavailable" }
+            : current,
+        );
+    } catch {
+      if (
+        targetScope.current.key === targetKey &&
+        targetScope.current.generation === targetGeneration
+      )
+        setTargetState((current) =>
+          current?.key === targetKey ? { ...current, status: "error" } : current,
+        );
+    }
+  };
   const groups = {
-    saved: memory.items.filter(
+    saved: memoryItems.filter(
       (item) =>
         item.lifecycleState === "active" &&
         (!item.taskExperience ||
@@ -245,7 +428,7 @@ export function MemoryPage({
             (candidate) => candidate.candidateId === item.taskExperience?.candidateId,
           )),
     ),
-    archived: memory.items.filter(
+    archived: memoryItems.filter(
       (item) =>
         item.lifecycleState === "archived" &&
         (!item.taskExperience ||
@@ -266,6 +449,7 @@ export function MemoryPage({
   const changeState = async (item: MemoryListItem) => {
     const lifecycleState = item.lifecycleState === "active" ? "archived" : "active";
     if (await actions.updateMemoryItem(item.itemId, item.version, { lifecycleState })) {
+      await refreshTargetItem(item.itemId);
       setAnnouncement(lifecycleState === "active" ? "记忆已恢复。" : "记忆已归档，不再参与召回。");
       clearPreview();
     }
@@ -312,6 +496,7 @@ export function MemoryPage({
         return;
       }
       setEditor((current) => (current === submitted ? undefined : current));
+      await refreshTargetItem(submitted.id);
       setAnnouncement("记忆已更正。");
       clearPreview();
     } catch {
@@ -328,6 +513,12 @@ export function MemoryPage({
     )
       return;
     if (await actions.deleteMemoryItem(item.itemId, item.version)) {
+      if (targetItem?.itemId === item.itemId)
+        setTargetState((current) =>
+          current?.key === targetKey
+            ? { ...current, item: undefined, status: "unavailable" }
+            : current,
+        );
       setEditor(undefined);
       setAnnouncement("记忆已删除。");
       clearPreview();
@@ -344,8 +535,19 @@ export function MemoryPage({
         filter={filter}
         workspacePath={data.workspacePath}
         onDetail={experience.onDetail}
-        onReview={experience.onReview}
+        onReview={reviewExperience}
         onFeedback={experience.onFeedback}
+        target={
+          targetDetail && routeTarget
+            ? { key: `${targetKey}:${location.key}`, detail: targetDetail, reference: routeTarget }
+            : undefined
+        }
+        unavailableTarget={
+          resolvedTarget?.status === "unavailable"
+            ? { key: `${targetKey}:${location.key}`, candidateId: routeTarget?.candidateId }
+            : undefined
+        }
+        targetNavigationKey={routeTarget ? `${targetKey}:${location.key}` : undefined}
       />
     </>
   );
@@ -372,6 +574,7 @@ export function MemoryPage({
             role="listitem"
             key={item.itemId}
             id={`memory-${encodeURIComponent(item.itemId)}`}
+            tabIndex={item.itemId === targetItem?.itemId ? -1 : undefined}
           >
             <header className="memory-card__meta">
               <span>{kindLabels[item.kind]}</span>
@@ -558,14 +761,19 @@ export function MemoryPage({
   const renderList = (panel: PanelId) => {
     const hasExperience =
       experience.supported &&
-      experience.items.some(
-        (item) =>
-          item.review === "approved" &&
-          isExperienceSuggestion(item) &&
-          (panel === "archived"
-            ? item.lifecycleState === "archived"
-            : item.lifecycleState === "active"),
-      );
+      ((targetCandidate &&
+        targetCandidate.review === "approved" &&
+        (panel === "archived"
+          ? targetCandidate.lifecycleState === "archived"
+          : targetCandidate.lifecycleState === "active")) ||
+        experience.items.some(
+          (item) =>
+            item.review === "approved" &&
+            isExperienceSuggestion(item) &&
+            (panel === "archived"
+              ? item.lifecycleState === "archived"
+              : item.lifecycleState === "active"),
+        ));
     return (
       <>
         {experience.supported && renderExperience(panel)}
@@ -621,6 +829,24 @@ export function MemoryPage({
         <InlineNotice tone="warning">信任当前工作区后可管理记忆。</InlineNotice>
       ) : (
         <>
+          {resolvedTarget?.status === "loading" && <p role="status">正在打开链接目标…</p>}
+          {resolvedTarget?.status === "unavailable" && (
+            <InlineNotice tone="warning">该经验已删除或不可用，历史使用记录仍保留。</InlineNotice>
+          )}
+          {resolvedTarget?.status === "error" && (
+            <InlineNotice tone="error">
+              无法读取链接目标，已打开的内容和更正草稿仍保留。{" "}
+              <Button variant="quiet" onClick={() => setTargetRetry((value) => value + 1)}>
+                重试打开目标
+              </Button>
+            </InlineNotice>
+          )}
+          {targetItem && !targetDetail && routeTarget?.referenceItemVersion !== undefined && (
+            <InlineNotice>
+              跳转来源：引用记忆 v{routeTarget.referenceItemVersion}；当前管理记忆 v
+              {targetItem.version}。本页操作作用于当前管理版本，旧使用记录保持原版本。
+            </InlineNotice>
+          )}
           {experience.error && (
             <InlineNotice tone="error">
               {experience.error}{" "}

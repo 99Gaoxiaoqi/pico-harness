@@ -9,6 +9,10 @@ import type {
 import { Button, EmptyState, InlineNotice } from "./components.js";
 import { SelectField, TextAreaField, TextField } from "./ui-controls.js";
 import { isMemoryConflict, RuntimeInvocationError } from "./runtime.js";
+import {
+  experienceManagementHref,
+  type ExperienceManagementTarget,
+} from "./experience-management-route.js";
 import type {
   ExperienceDetail,
   ExperienceFeedbackRequest,
@@ -39,6 +43,13 @@ export interface TaskExperiencePanelProps {
   readonly workspacePath?: string;
   readonly showSummary?: boolean;
   readonly summaryRunId?: string;
+  readonly target?: {
+    readonly key: string;
+    readonly detail: ExperienceDetail;
+    readonly reference: ExperienceManagementTarget;
+  };
+  readonly unavailableTarget?: { readonly key: string; readonly candidateId?: string };
+  readonly targetNavigationKey?: string;
   readonly onDetail: (candidateId: string) => Promise<ExperienceDetail>;
   readonly onReview: (request: ExperienceReviewRequest) => Promise<TaskExperienceCandidate>;
   readonly onFeedback: (request: ExperienceFeedbackRequest) => Promise<TaskExperienceCandidate>;
@@ -89,13 +100,64 @@ function ExperienceReviewBoard({
     candidate: TaskExperienceCandidate;
   }>();
   const snapshot = selection?.scope === scope ? selection.candidate : undefined;
-  const latest = snapshot && items.find((item) => item.candidateId === snapshot.candidateId);
+  const listed = snapshot && items.find((item) => item.candidateId === snapshot.candidateId);
+  const targeted =
+    snapshot?.candidateId === actions.target?.detail.candidate.candidateId
+      ? actions.target?.detail.candidate
+      : undefined;
+  const latest =
+    targeted && (!listed || targeted.recordRevision > listed.recordRevision) ? targeted : listed;
   const selected = latest && latest.recordRevision >= snapshot!.recordRevision ? latest : snapshot;
+  const [draftOwner, setDraftOwner] = useState<string>();
+  const draftOwnerRef = useRef<string | undefined>(undefined);
+  const hasDraft = Boolean(selected && draftOwner === selected.candidateId);
+  const [pendingTarget, setPendingTarget] = useState<TaskExperiencePanelProps["target"]>();
+  const consumedTarget = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    setPendingTarget(undefined);
+    setDraftOwner(undefined);
+    draftOwnerRef.current = undefined;
+  }, [scope]);
+  useEffect(() => {
+    setPendingTarget(undefined);
+  }, [actions.targetNavigationKey]);
+  useEffect(() => {
+    const target = actions.target;
+    if (!target || consumedTarget.current === JSON.stringify([scope, target.key])) return;
+    consumedTarget.current = JSON.stringify([scope, target.key]);
+    if (
+      selected &&
+      draftOwnerRef.current === selected?.candidateId &&
+      selected?.candidateId !== target.detail.candidate.candidateId
+    ) {
+      setPendingTarget(target);
+      return;
+    }
+    setPendingTarget(undefined);
+    setSelection({ scope, candidate: target.detail.candidate });
+  }, [actions.target, scope, hasDraft, selected?.candidateId]);
+  useEffect(() => {
+    if (actions.unavailableTarget) {
+      setPendingTarget(undefined);
+      if (!hasDraft) setSelection(undefined);
+    }
+  }, [actions.unavailableTarget?.key, hasDraft]);
   useEffect(() => {
     if (latest && snapshot && latest.recordRevision > snapshot.recordRevision)
       setSelection({ scope, candidate: latest });
   }, [latest, snapshot, scope]);
   const detailId = useId();
+  const detailRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (
+      actions.target &&
+      selected?.candidateId === actions.target.detail.candidate.candidateId &&
+      !hasDraft
+    ) {
+      detailRef.current?.scrollIntoView({ block: "nearest" });
+      detailRef.current?.focus({ preventScroll: true });
+    }
+  }, [actions.target?.key, selected?.candidateId, hasDraft]);
   if (visible.length === 0 && !selected)
     return filter === "pending" ? (
       <EmptyState
@@ -105,14 +167,33 @@ function ExperienceReviewBoard({
     ) : null;
   return (
     <div className="task-experience__review-board">
+      {pendingTarget && (
+        <div style={{ gridColumn: "1 / -1" }}>
+          <InlineNotice>
+            已找到链接目标“{pendingTarget.detail.candidate.goal || "任务经验"}
+            ”，当前更正草稿已保留。请先保存或取消当前更正，再打开目标。{" "}
+            <Button
+              variant="quiet"
+              disabled={hasDraft}
+              onClick={() => {
+                setSelection({ scope, candidate: pendingTarget.detail.candidate });
+                setPendingTarget(undefined);
+              }}
+            >
+              打开链接目标
+            </Button>
+          </InlineNotice>
+        </div>
+      )}
       <div
         className="task-experience__list"
         aria-label={filter === "pending" ? "待审核的任务经验" : "任务经验"}
       >
         {visible.length === 0 && (
           <p className="task-experience__placeholder">
-            {filter === "pending" ? "没有待审核的任务经验。" : "当前标签没有经验。"}
-            已选详情和更正草稿仍保留。
+            {selected && actions.target?.detail.candidate.candidateId === selected.candidateId
+              ? "已按链接打开目标经验，该条目不在当前已加载列表中。"
+              : `${filter === "pending" ? "没有待审核的任务经验。" : "当前标签没有经验。"}已选详情和更正草稿仍保留。`}
           </p>
         )}
         {visible.map((item) => (
@@ -134,13 +215,36 @@ function ExperienceReviewBoard({
           </button>
         ))}
       </div>
-      <section id={detailId} className="task-experience__detail" aria-label="任务经验详情">
+      <section
+        ref={detailRef}
+        tabIndex={-1}
+        id={detailId}
+        className="task-experience__detail"
+        aria-label="任务经验详情"
+      >
         {selected ? (
           <ExperienceDetailCard
             key={JSON.stringify([scope, selected.candidateId])}
             candidate={selected}
             onDetail={actions.onDetail}
             onReview={actions.onReview}
+            initialDetail={
+              actions.target?.detail.candidate.candidateId === selected.candidateId
+                ? actions.target.detail
+                : undefined
+            }
+            reference={
+              actions.target?.detail.candidate.candidateId === selected.candidateId
+                ? actions.target.reference
+                : undefined
+            }
+            targetUnavailable={actions.unavailableTarget?.candidateId === selected.candidateId}
+            onDraftChange={(present) => {
+              if (present) draftOwnerRef.current = selected.candidateId;
+              else if (draftOwnerRef.current === selected.candidateId)
+                draftOwnerRef.current = undefined;
+              setDraftOwner(draftOwnerRef.current);
+            }}
           />
         ) : (
           <p className="task-experience__placeholder">
@@ -186,6 +290,7 @@ function ConversationLearning(props: TaskExperiencePanelProps) {
             onDetail={props.onDetail}
             onReview={props.onReview}
             onFeedback={props.onFeedback}
+            workspacePath={props.workspacePath}
           />
         ))}
       </section>
@@ -328,12 +433,20 @@ function ExperienceDetailCard({
   onReview,
   correction = false,
   onSaved,
+  initialDetail,
+  reference,
+  onDraftChange,
+  targetUnavailable,
 }: Pick<TaskExperiencePanelProps, "onDetail" | "onReview"> & {
   readonly candidate: TaskExperienceCandidate;
   readonly correction?: boolean;
   readonly onSaved?: (candidate: TaskExperienceCandidate) => void;
+  readonly initialDetail?: ExperienceDetail;
+  readonly reference?: ExperienceManagementTarget;
+  readonly onDraftChange?: (present: boolean) => void;
+  readonly targetUnavailable?: boolean;
 }) {
-  const [detail, setDetail] = useState<ExperienceDetail>();
+  const [detail, setDetail] = useState<ExperienceDetail | undefined>(initialDetail);
   const [current, setCurrent] = useState(candidate);
   const [draft, setDraft] = useState<ExperienceDraft | undefined>(() =>
     correction ? draftFrom(candidate) : undefined,
@@ -352,6 +465,15 @@ function ExperienceDetailCard({
   const request = useRef(0);
   const operation = useRef<{ fingerprint: string; operationId: string } | undefined>(undefined);
   const lastAction = useRef<ExperienceReviewAction | undefined>(undefined);
+  useEffect(() => {
+    onDraftChange?.(Boolean(draft));
+  }, [Boolean(draft), onDraftChange]);
+  useEffect(() => {
+    if (targetUnavailable) {
+      setUnavailable(true);
+      setError("经验已删除或不可用。更正草稿保留供复制，不能再次保存或启用。");
+    }
+  }, [targetUnavailable]);
   useEffect(() => {
     mounted.current = true;
     return () => {
@@ -407,8 +529,20 @@ function ExperienceDetailCard({
     }
   };
   useEffect(() => {
+    if (initialDetail && initialDetail.candidate.recordRevision >= candidate.recordRevision) {
+      setDetail(initialDetail);
+      return;
+    }
     void load();
   }, [candidate.candidateId, onDetail]);
+  useEffect(() => {
+    if (initialDetail)
+      setDetail((value) =>
+        value && value.candidate.recordRevision > initialDetail.candidate.recordRevision
+          ? value
+          : initialDetail,
+      );
+  }, [initialDetail]);
   const act = async (
     action: ExperienceReviewAction,
   ): Promise<TaskExperienceCandidate | undefined> => {
@@ -483,6 +617,7 @@ function ExperienceDetailCard({
     if (busy) return;
     const base = current.enabled ? await act("disable") : current;
     if (!base || !mounted.current) return;
+    onDraftChange?.(true);
     setDraft(draftFrom(base));
     setConflict(false);
     setError("");
@@ -498,6 +633,18 @@ function ExperienceDetailCard({
         <h4>{current.goal || "任务经验"}</h4>
         {unavailable ? <p>经验已删除或不可用。</p> : <ExperienceState candidate={current} />}
       </header>
+      {reference &&
+        (reference.referenceContentVersion !== undefined ||
+          reference.referenceItemVersion !== undefined) && (
+          <InlineNotice>
+            跳转来源：
+            {reference.referenceContentVersion !== undefined
+              ? `引用内容 v${reference.referenceContentVersion}`
+              : `引用记忆 v${reference.referenceItemVersion}`}
+            ；当前管理内容 v{current.contentVersion}
+            。本页操作作用于当前管理版本，旧使用记录保持原版本。
+          </InlineNotice>
+        )}
       {current.reason && <p>{current.reason}</p>}
       {notice && <InlineNotice tone="success">{notice}</InlineNotice>}
       {error && (
@@ -789,7 +936,8 @@ function ExperienceReference({
   onDetail,
   onReview,
   onFeedback,
-}: Pick<TaskExperiencePanelProps, "onDetail" | "onReview" | "onFeedback"> & {
+  workspacePath,
+}: Pick<TaskExperiencePanelProps, "onDetail" | "onReview" | "onFeedback" | "workspacePath"> & {
   readonly reference: TaskExperienceReuse;
   readonly candidate?: TaskExperienceCandidate;
 }) {
@@ -923,7 +1071,19 @@ function ExperienceReference({
         <InlineNotice tone="error">
           {error}{" "}
           {feedbackConflict ? (
-            <Link className="button" to="/memory">
+            <Link
+              className="button"
+              to={experienceManagementHref(
+                workspacePath,
+                {
+                  candidateId: reference.candidateId,
+                  itemId: reference.itemId,
+                  referenceContentVersion: reference.contentVersion,
+                  referenceItemVersion: reference.itemVersion,
+                },
+                current?.lifecycleState === "archived" ? "archived" : "saved",
+              )}
+            >
               管理最新经验
             </Link>
           ) : (
