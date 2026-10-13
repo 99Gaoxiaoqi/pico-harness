@@ -873,7 +873,13 @@ function resolveRecallState(
       }
       return { itemId: item.itemId, state, linkAvailable };
     });
-    const sources = memory.trace.selected.flatMap((item) =>
+    // Keep the original journal intact; retired references expose identity only.
+    const selected = memory.trace.selected.map((item, index) =>
+      item.source === "execution-evidence" && items[index]?.state === "deleted"
+        ? { ...item, sourceCount: 0, sources: [] }
+        : item,
+    );
+    const sources = selected.flatMap((item) =>
       item.sources.map((source) => ({
         eventId: source.eventId,
         sessionId: source.sessionId,
@@ -884,7 +890,7 @@ function resolveRecallState(
           .get(source.sessionId, source.eventId, source.runId, source.turnId),
       })),
     );
-    return { ...memory, items, sources };
+    return { ...memory, trace: { ...memory.trace, selected }, items, sources };
   } catch {
     return memory;
   } finally {
