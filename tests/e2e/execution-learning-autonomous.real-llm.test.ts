@@ -99,7 +99,7 @@ realModelTest(
           model: configured.config.model,
           modelCapabilities: configured.route.capabilities,
           permissionMode: "full-access",
-          allowedTools: ["bash", "write_file", "memory_learn"],
+          allowedTools: ["bash", "write_file"],
         },
         {
           picoHome,

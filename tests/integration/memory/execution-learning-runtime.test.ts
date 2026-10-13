@@ -9,6 +9,7 @@ import type { Message, ToolCall } from "@pico/core";
 import { isForegroundProcessFacts } from "@pico/core";
 import { AtomicMemoryLifecycle } from "@pico/runtime";
 import { SilentReporter } from "@pico/runtime/silent-reporter";
+import { ApprovalManager } from "@pico/pico-host/global-approval-manager";
 import { executeAgentRuntime } from "@pico/pico-host/agent-runtime";
 import {
   closeExecutionLearningWorker,
@@ -39,7 +40,7 @@ const call = (id: string, name: string, input: object): ToolCall => ({
   arguments: JSON.stringify(input),
 });
 
-async function fixture(t: TestContext, prefix: string) {
+async function fixture(t: TestContext, prefix: string, trusted = true) {
   const root = await realpath(await mkdtemp(join(tmpdir(), prefix)));
   const workDir = join(root, "workspace"),
     picoHome = join(root, "home");
@@ -47,7 +48,7 @@ async function fixture(t: TestContext, prefix: string) {
   await mkdir(picoHome);
   await writeFile(join(workDir, "check.test.cjs"), checker);
   const trust = new WorkspaceTrustStore({ userStateDirectory: picoHome });
-  await trust.trust(await trust.canonicalize(workDir));
+  if (trusted) await trust.trust(await trust.canonicalize(workDir));
   const lifecycle = new AtomicMemoryLifecycle();
   const paths = resolvePicoPaths(workDir, { picoHome });
   const repository = new SqliteMemoryItemStore(join(picoHome, "memory.sqlite"));
@@ -73,6 +74,8 @@ async function fixture(t: TestContext, prefix: string) {
   const run = async (
     sessionId: string,
     generate: (messages: readonly Message[]) => Promise<Message>,
+    options: Partial<Parameters<typeof executeAgentRuntime>[0]> = {},
+    dependencies: Parameters<typeof executeAgentRuntime>[1] = {},
   ) => {
     sessions.push(sessionId);
     return executeAgentRuntime(
@@ -83,7 +86,8 @@ async function fixture(t: TestContext, prefix: string) {
         provider: "openai",
         modelRouteId: "test/test",
         permissionMode: "full-access",
-        allowedTools: ["bash", "write_file", "memory_learn"],
+        allowedTools: ["bash", "write_file"],
+        ...options,
       },
       {
         picoHome,
@@ -95,6 +99,7 @@ async function fixture(t: TestContext, prefix: string) {
         atomicMemoryModelFactory: async () => {
           throw new Error("User-fact inference is disabled in this fixture");
         },
+        ...dependencies,
       },
     );
   };
@@ -295,5 +300,106 @@ test(
       outcomes[1]!.data.body.storage === "inline" &&
         outcomes[1]!.data.body.content.includes("UnrelatedCheck"),
     );
+  },
+);
+
+test(
+  "native learning uses Bash availability and retains approval, mode, trust and extraction gates",
+  { timeout: 60_000, skip: process.platform === "win32" },
+  async (t) => {
+    for (const mode of ["ask", "auto"] as const) {
+      for (const approved of [true, false]) {
+        await t.test(`${mode}: ${approved ? "approved" : "rejected"} command`, async (t) => {
+          const f = await fixture(t, "pico-learning-permission-");
+          const manager = new ApprovalManager(5_000);
+          let approvals = 0;
+          let step = 0;
+          const sessionId = `${mode}-${approved}`;
+          await f.run(
+            sessionId,
+            async () =>
+              step++ === 0
+                ? {
+                    role: "assistant",
+                    content: "",
+                    toolCalls: [call("check", "bash", { command: "node check.test.cjs" })],
+                  }
+                : { role: "assistant", content: "done" },
+            { permissionMode: mode, allowedTools: ["bash"] },
+            {
+              approvalManager: manager,
+              approvalNotifier: (notice) => {
+                approvals++;
+                manager.resolveApproval(notice.taskId, approved, "fixture decision");
+              },
+              executionLearningWorkerOptions: { idleMs: 60_000 },
+            },
+          );
+          assert.ok(approvals > 0, "learning must preserve normal command authorization");
+          const candidates = await f.repository.executionLearning.listExecutionLearningCandidates(
+            f.paths.workspace.id,
+          );
+          assert.equal(candidates.length, approved ? 1 : 0);
+          const outcomes = (await f.events.readSession(sessionId)).filter(
+            (event) => event.kind === "tool.result.recorded" && event.data.toolName === "bash",
+          );
+          assert.equal(
+            outcomes.some(
+              (event) =>
+                event.kind === "tool.result.recorded" && event.data.executionFacts?.exitCode === 1,
+            ),
+            approved,
+          );
+        });
+      }
+    }
+    for (const scenario of [
+      "no-bash",
+      "plan",
+      "research",
+      "untrusted",
+      "extraction-off",
+    ] as const) {
+      await t.test(scenario, async (t) => {
+        const f = await fixture(t, "pico-learning-disabled-", scenario !== "untrusted");
+        if (scenario === "extraction-off") {
+          const settings = await f.repository.readSettings(f.paths.workspace.id);
+          await f.repository.updateSettings({
+            workspaceKey: f.paths.workspace.id,
+            expectedVersion: settings.version,
+            autoExtract: false,
+          });
+        }
+        await f.run(
+          `disabled-${scenario}`,
+          async () =>
+            scenario === "plan"
+              ? {
+                  role: "assistant",
+                  content: "",
+                  toolCalls: [
+                    call("submit-plan", "submit_plan", {
+                      title: "Inspect BuildCheck",
+                      steps: [{ title: "Verify", description: "Inspect the existing check." }],
+                    }),
+                  ],
+                }
+              : { role: "assistant", content: "done" },
+          {
+            allowedTools: scenario === "no-bash" ? ["memory_search"] : ["bash"],
+            ...(scenario === "plan" || scenario === "research"
+              ? { collaborationMode: scenario }
+              : {}),
+          },
+        );
+        assert.deepEqual(await f.repository.executionLearning.listAdmissions(), []);
+        assert.deepEqual(
+          await f.repository.executionLearning.listExecutionLearningCandidates(
+            f.paths.workspace.id,
+          ),
+          [],
+        );
+      });
+    }
   },
 );
