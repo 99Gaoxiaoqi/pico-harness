@@ -6,6 +6,7 @@ export const KNOWN_TOOL_NAMES: ReadonlySet<string> = new Set([
   "write_file",
   "edit_file",
   "bash",
+  // Historical profile compatibility only; no runtime tool is registered.
   "memory_learn",
   "skill_view",
   "glob",
