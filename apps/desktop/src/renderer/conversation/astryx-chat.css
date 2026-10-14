@@ -91,6 +91,30 @@
   font: inherit;
 }
 
+.conversation-composer .conversation-composer__attach {
+  height: 28px;
+  min-height: 28px;
+  padding: 3px 6px;
+  gap: 4px;
+  border-radius: 6px;
+  color: var(--conversation-ink-muted);
+  font: 500 11px var(--font-ui);
+}
+
+.conversation-composer__attach span {
+  font: inherit;
+}
+
+.conversation-composer__attach svg {
+  width: 14px;
+  height: 14px;
+}
+
+.conversation-composer .conversation-composer__attach:hover:not(:disabled) {
+  background: var(--conversation-bg-subtle);
+  color: var(--conversation-ink);
+}
+
 .pico-astryx-composer > div:hover,
 .pico-astryx-composer > div:focus-within {
   box-shadow: none;

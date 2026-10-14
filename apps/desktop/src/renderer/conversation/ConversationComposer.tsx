@@ -381,6 +381,7 @@ export function ConversationComposer({
           <div className="conversation-composer__controls">
             {onFilesAdd && (
               <Button
+                className="conversation-composer__attach"
                 type="button"
                 label="添加文件"
                 icon={<Paperclip aria-hidden="true" />}
