@@ -1,7 +1,8 @@
 import { uploadMimeType } from "../file-upload.js";
 import { PendingSendNotice } from "../PendingSendNotice.js";
 import { useTaskExperience } from "../useTaskExperience.js";
-import { TaskExperiencePanel } from "../TaskExperiencePanel.js";
+import { ExperienceDrawerTrigger } from "../ExperienceDrawer.js";
+import { TaskExperiencePanel, isExperienceSuggestion } from "../TaskExperiencePanel.js";
 import { useExperienceLedger } from "../useExperienceLedger.js";
 import { ExperienceUsagePanel } from "../ExperienceUsagePanel.js";
 import { useFileDraft } from "../conversation/useFileDraft.js";
@@ -1778,26 +1779,64 @@ export function ConversationPage() {
                       (!ledger.supported &&
                         experience.reuse.some((reference) => reference.runId === runId)) ? (
                         <>
-                          {experience.supported && (
-                            <TaskExperiencePanel
-                              mode="conversation"
-                              sessionId={sessionId}
-                              summaryRunId={runId}
-                              workspacePath={workspacePath}
-                              items={experience.items}
-                              reuse={
-                                ledger.supported
-                                  ? []
-                                  : experience.reuse.filter(
+                          {experience.supported &&
+                            (experience.items.some(
+                              (item) =>
+                                item.runId === runId &&
+                                isExperienceSuggestion(item) &&
+                                (item.review === "pending" || item.review === "deferred"),
+                            ) ? (
+                              <ExperienceDrawerTrigger
+                                key={JSON.stringify([workspacePath, sessionId, runId])}
+                                title="审核本轮任务经验"
+                              >
+                                <TaskExperiencePanel
+                                  sessionId={sessionId}
+                                  workspacePath={workspacePath}
+                                  items={experience.items.filter((item) => item.runId === runId)}
+                                  reuse={[]}
+                                  onDetail={experience.onDetail}
+                                  onReview={experience.onReview}
+                                  onFeedback={experience.onFeedback}
+                                />
+                                {!ledger.supported && (
+                                  <TaskExperiencePanel
+                                    mode="conversation"
+                                    showSummary={false}
+                                    sessionId={sessionId}
+                                    workspacePath={workspacePath}
+                                    items={experience.items}
+                                    reuse={experience.reuse.filter(
                                       (reference) => reference.runId === runId,
-                                    )
-                              }
-                              onDetail={experience.onDetail}
-                              onReview={experience.onReview}
-                              onFeedback={experience.onFeedback}
-                            />
-                          )}
+                                    )}
+                                    onDetail={experience.onDetail}
+                                    onReview={experience.onReview}
+                                    onFeedback={experience.onFeedback}
+                                  />
+                                )}
+                              </ExperienceDrawerTrigger>
+                            ) : (
+                              <TaskExperiencePanel
+                                mode="conversation"
+                                sessionId={sessionId}
+                                summaryRunId={runId}
+                                workspacePath={workspacePath}
+                                items={experience.items}
+                                reuse={
+                                  ledger.supported
+                                    ? []
+                                    : experience.reuse.filter(
+                                        (reference) => reference.runId === runId,
+                                      )
+                                }
+                                onDetail={experience.onDetail}
+                                onReview={experience.onReview}
+                                onFeedback={experience.onFeedback}
+                              />
+                            ))}
                           <ExperienceUsagePanel
+                            presentation="drawer"
+                            sessionId={sessionId}
                             uses={ledger.uses.filter(
                               (use) => (use.hostRunId ?? use.runId) === runId,
                             )}
@@ -1934,6 +1973,8 @@ export function ConversationPage() {
               </InlineNotice>
             )}
             <ExperienceUsagePanel
+              presentation="drawer"
+              sessionId={sessionId}
               uses={
                 activeRun
                   ? ledger.uses.filter((use) => (use.hostRunId ?? use.runId) === activeRun.id)
