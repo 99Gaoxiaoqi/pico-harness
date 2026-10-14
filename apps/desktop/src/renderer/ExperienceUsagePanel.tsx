@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import type { ExperienceDiagnostic, ExperienceUse } from "@pico/core";
+import { ExperienceDrawer } from "./ExperienceDrawer.js";
+import "./ExperienceUsagePanel.css";
 import { Button, InlineNotice } from "./components.js";
 import { isMemoryConflict } from "./runtime.js";
 import { experienceManagementHref } from "./experience-management-route.js";
@@ -12,6 +14,8 @@ import {
 
 interface ExperienceUsagePanelProps {
   readonly uses: readonly ExperienceUse[];
+  readonly presentation?: "inline" | "drawer";
+  readonly sessionId?: string;
   readonly diagnostics?: readonly ExperienceDiagnostic[];
   readonly workspacePath?: string;
   readonly onDetail: (useId: string) => Promise<ExperienceUseDetail>;
@@ -56,9 +60,19 @@ function referenceBody(content: string): string {
 export function ExperienceUsagePanel({
   uses,
   diagnostics = [],
+  presentation = "inline",
   ...props
 }: ExperienceUsagePanelProps) {
   if (!uses.length && !diagnostics.length) return null;
+  if (presentation === "drawer")
+    return (
+      <DrawerUsage
+        key={JSON.stringify([props.workspacePath, props.sessionId])}
+        uses={uses}
+        diagnostics={diagnostics}
+        {...props}
+      />
+    );
   const currentUses = uses.filter((use) => use.source.kind !== "execution-evidence");
   const carried = currentUses.filter((use) => use.delivery === "carried" && !use.historical).length;
   const pending = currentUses.filter((use) => use.delivery === "pending" && !use.historical).length;
@@ -96,6 +110,59 @@ export function ExperienceUsagePanel({
             )}
           </div>
         </details>
+      )}
+      {diagnostics.length > 0 && <ExperienceDiagnostics diagnostics={diagnostics} />}
+    </>
+  );
+}
+function DrawerUsage({ uses, diagnostics = [], ...props }: ExperienceUsagePanelProps) {
+  const [selectedId, setSelectedId] = useState<string>();
+  const selected = uses.find((use) => use.useId === selectedId);
+  return (
+    <>
+      {uses.length > 0 && (
+        <section className="experience-usage-strip" aria-label="本次经验使用记录">
+          <span>本次经验使用 · {uses.length} 条</span>
+          {uses.map((use) =>
+            use.source.kind === "execution-evidence" ? (
+              <span key={use.useId} data-use-id={use.useId}>
+                {use.deleted ? "旧版经验已移除" : "旧版经验不可用，请更新电脑端完成清理。"}
+              </span>
+            ) : (
+              <button
+                key={use.useId}
+                type="button"
+                data-use-id={use.useId}
+                aria-haspopup="dialog"
+                className="experience-usage-strip__entry"
+                onClick={() => setSelectedId(use.useId)}
+              >
+                <span>
+                  {use.source.kind === "reviewed-reference" ? "任务经验" : "历史执行经验"}
+                </span>
+                <span>
+                  {use.historical
+                    ? "旧记录"
+                    : use.delivery === "carried"
+                      ? "已引用"
+                      : use.delivery === "pending"
+                        ? "待注入"
+                        : "引用未确认"}
+                  {" · 引用版本 v"}
+                  {use.source.kind === "reviewed-reference"
+                    ? use.source.contentVersion
+                    : use.source.claimRevision}
+                </span>
+                <span aria-hidden="true">›</span>
+              </button>
+            ),
+          )}
+        </section>
+      )}
+      {selected && (
+        <ExperienceDrawer title="本次经验使用详情" onClose={() => setSelectedId(undefined)}>
+          <UseCard key={selected.useId} use={selected} inspectOnMount {...props} />
+        </ExperienceDrawer>
       )}
       {diagnostics.length > 0 && <ExperienceDiagnostics diagnostics={diagnostics} />}
     </>
@@ -152,7 +219,12 @@ function UseCard({
   workspacePath,
   onDetail,
   onFeedback,
-}: Omit<ExperienceUsagePanelProps, "uses"> & { readonly use: ExperienceUse }) {
+  inspectOnMount = false,
+}: Omit<ExperienceUsagePanelProps, "uses"> & {
+  readonly use: ExperienceUse;
+  readonly inspectOnMount?: boolean;
+}) {
+  const location = useLocation();
   const [current, setCurrent] = useState(use);
   const [detail, setDetail] = useState<ExperienceUseDetail>();
   const [open, setOpen] = useState(false);
@@ -174,6 +246,7 @@ function UseCard({
     return () => {
       mounted.current = false;
       request.current += 1;
+      inFlight.current = false;
     };
   }, []);
   useEffect(() => {
@@ -203,10 +276,15 @@ function UseCard({
     } catch {
       if (mounted.current && request.current === sequence) setError("无法读取使用详情，请重试。");
     } finally {
-      inFlight.current = false;
-      if (mounted.current && request.current === sequence) setBusy(false);
+      if (mounted.current && request.current === sequence) {
+        inFlight.current = false;
+        setBusy(false);
+      }
     }
   };
+  useEffect(() => {
+    if (inspectOnMount) void load();
+  }, [inspectOnMount]);
   const feedback = async (action: ExperienceUseFeedbackRequest["action"]) => {
     if (inFlight.current || conflict || current.deleted) return;
     inFlight.current = true;
@@ -328,16 +406,18 @@ function UseCard({
         <p>历史记录或未知范围的 pass 不能证明建议全文、当前用户目标或最终回答正确。</p>
       )}
       <div className="memory-card__actions">
-        <Button
-          variant="quiet"
-          disabled={busy}
-          onClick={() => {
-            if (open) setOpen(false);
-            else void load();
-          }}
-        >
-          {open ? "收起使用详情" : "查看使用详情"}
-        </Button>
+        {!inspectOnMount && (
+          <Button
+            variant="quiet"
+            disabled={busy}
+            onClick={() => {
+              if (open) setOpen(false);
+              else void load();
+            }}
+          >
+            {open ? "收起使用详情" : "查看使用详情"}
+          </Button>
+        )}
         <Button
           variant="quiet"
           disabled={busy || conflict || current.excluded || current.deleted || stopped}
@@ -352,7 +432,17 @@ function UseCard({
         >
           {use.source.kind === "reviewed-reference" ? "停止引用" : "归档并停止引用"}
         </Button>
-        <Link className="button" to={management}>
+        <Link
+          className="button"
+          to={management}
+          onClick={() => {
+            if (location.pathname !== "/settings" && !location.pathname.startsWith("/settings/"))
+              window.sessionStorage.setItem(
+                "pico.settings-return-to",
+                location.pathname + location.search + location.hash,
+              );
+          }}
+        >
           管理工作区记忆
         </Link>
       </div>
@@ -374,6 +464,7 @@ function UseCard({
           )}
         </InlineNotice>
       )}
+      {busy && inspectOnMount && <p role="status">正在读取使用详情…</p>}
       {open && (
         <div className="experience-record__inspection">
           {!current.deleted && current.referenceContent && (

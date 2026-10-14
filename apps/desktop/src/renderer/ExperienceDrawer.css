@@ -1,0 +1,66 @@
+@layer components {
+  .experience-drawer {
+    position: fixed;
+    inset: 0 0 0 auto;
+    width: min(440px, 100vw);
+    height: 100dvh;
+    max-width: 100vw;
+    max-height: 100dvh;
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    border-left: 1px solid var(--line);
+    background: var(--surface-raised);
+    color: var(--ink);
+    box-shadow: -12px 0 40px #00000014;
+  }
+  .experience-drawer[open] {
+    display: flex;
+    flex-direction: column;
+  }
+  .experience-drawer::backdrop {
+    background: #00000012;
+  }
+  .experience-drawer__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 18px 22px;
+    border-bottom: 1px solid var(--line);
+  }
+  .experience-drawer__header h2 {
+    margin: 0;
+    font-size: 14px;
+  }
+  .experience-drawer__body {
+    min-height: 0;
+    flex: 1;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 22px;
+    overflow-wrap: anywhere;
+  }
+  .experience-drawer__body .task-experience__reference {
+    border: 0;
+    padding: 0;
+    box-shadow: none;
+  }
+  .experience-drawer__body .task-experience__review-board {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .experience-drawer__body .task-experience__list {
+    max-height: 220px;
+    overflow-y: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .experience-drawer__footer {
+    margin: 0;
+    padding: 14px 22px;
+    border-top: 1px solid var(--line);
+    color: var(--ink-tertiary);
+    font-size: 11px;
+  }
+}

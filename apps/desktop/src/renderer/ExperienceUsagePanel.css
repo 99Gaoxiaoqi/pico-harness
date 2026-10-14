@@ -63,3 +63,37 @@
     padding-left: 16px;
   }
 }
+
+@layer components {
+  .experience-usage-strip {
+    display: grid;
+    gap: 8px;
+    padding: 10px 13px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-md);
+    background: var(--surface-raised);
+    color: var(--ink-secondary);
+    font-size: 12px;
+  }
+  .experience-usage-strip__entry {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 8px 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .experience-usage-strip__entry > span:nth-child(2) {
+    margin-left: auto;
+    color: var(--ink-tertiary);
+  }
+  .experience-usage-strip__entry:focus-visible {
+    outline: 2px solid var(--accent-strong);
+    outline-offset: 3px;
+    border-radius: 4px;
+  }
+}
