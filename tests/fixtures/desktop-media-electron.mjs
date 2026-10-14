@@ -4,9 +4,16 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
+import { createHash } from "node:crypto";
 const root = process.argv[2];
-const assets = JSON.parse(readFileSync(join(root, "assets.json"), "utf8"));
+let assets = JSON.parse(readFileSync(join(root, "assets.json"), "utf8"));
+let blockedRequests = 0;
 const server = createServer((req, res) => {
+  if (req.url === "/probe") {
+    blockedRequests++;
+    res.writeHead(204).end();
+    return;
+  }
   const name = req.url === "/" ? "index.html" : req.url.slice(1);
   if (!["index.html", "renderer.js", "renderer.css"].includes(name)) {
     res.writeHead(404).end();
@@ -14,7 +21,11 @@ const server = createServer((req, res) => {
   }
   res.setHeader(
     "Content-Type",
-    name.endsWith("js") ? "text/javascript" : name.endsWith("css") ? "text/css" : "text/html",
+    name.endsWith("js")
+      ? "text/javascript"
+      : name.endsWith("css")
+        ? "text/css"
+        : "text/html; charset=utf-8",
   );
   res.end(readFileSync(join(root, name)));
 });
@@ -22,6 +33,11 @@ let window;
 app.whenReady().then(async () => {
   try {
     await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const htmlAsset = assets.find((item) => item.reference.artifactId === "inline-html");
+    const htmlBytes = Buffer.from(atob(htmlAsset.base64).replaceAll("PORT", server.address().port));
+    htmlAsset.base64 = htmlBytes.toString("base64");
+    htmlAsset.reference.sizeBytes = htmlBytes.length;
+    htmlAsset.reference.digest = createHash("sha256").update(htmlBytes).digest("hex");
     window = new BrowserWindow({
       show: false,
       width: 980,
@@ -44,7 +60,7 @@ app.whenReady().then(async () => {
       ]);
     await window.loadURL(`http://127.0.0.1:${server.address().port}/`);
     await run(
-      `window.mediaAssets=${JSON.stringify(assets)};window.queries=[];window.saves=[];window.revoked=[];window.created=[];const create=URL.createObjectURL.bind(URL),revoke=URL.revokeObjectURL.bind(URL);URL.createObjectURL=(blob)=>{const url=create(blob);created.push(url);return url};URL.revokeObjectURL=(url)=>{revoked.push(url);revoke(url)};window.pico={artifacts:{saveAs:async(ref)=>{saves.push(ref);return {ok:true}}},runtime:{'session.artifacts.query':async(params)=>{queries.push(params);if(params.sessionId==='bounded'){window.activeReads=(window.activeReads||0)+1;window.maxReads=Math.max(window.maxReads||0,window.activeReads);await new Promise(r=>setTimeout(r,60));window.activeReads--;}if(params.sessionId==='old')await new Promise(r=>setTimeout(r,300));const item=mediaAssets.find(i=>i.reference.artifactId===params.artifactId);if(!item||params.workspacePath!=='/fixture')return {ok:false,error:{code:'not_found',message:'unknown',retryable:false}};const artifact={artifactId:item.reference.artifactId,title:item.reference.alt,mimeType:item.reference.mimeType,sizeBytes:item.reference.sizeBytes,digest:item.reference.digest};if(params.action==='get')return {ok:true,value:{revision:1,artifacts:[artifact]}};const binary=atob(item.base64),offset=params.offsetBytes,end=Math.min(binary.length,offset+params.limitBytes);let slice=binary.slice(offset,end);if(window.corrupt)slice=slice.slice(0,-1)+String.fromCharCode(slice.charCodeAt(slice.length-1)^1);return {ok:true,value:{artifact,contentBase64:btoa(slice),offsetBytes:offset,endOffsetBytes:end,totalBytes:binary.length,truncated:end<binary.length,...(end<binary.length?{nextOffsetBytes:end}:{})}}}}};void 0;`,
+      `window.mediaAssets=${JSON.stringify(assets)};window.queries=[];window.inlineHtmlMessages=[];window.addEventListener('message',event=>inlineHtmlMessages.push(event.data));window.saves=[];window.revoked=[];window.created=[];const create=URL.createObjectURL.bind(URL),revoke=URL.revokeObjectURL.bind(URL);URL.createObjectURL=(blob)=>{const url=create(blob);created.push(url);return url};URL.revokeObjectURL=(url)=>{revoked.push(url);revoke(url)};window.pico={artifacts:{saveAs:async(ref)=>{saves.push(ref);return {ok:true}}},runtime:{'session.artifacts.query':async(params)=>{queries.push(params);if(params.sessionId==='bounded'){window.activeReads=(window.activeReads||0)+1;window.maxReads=Math.max(window.maxReads||0,window.activeReads);await new Promise(r=>setTimeout(r,60));window.activeReads--;}if(params.sessionId==='old')await new Promise(r=>setTimeout(r,300));const item=mediaAssets.find(i=>i.reference.artifactId===params.artifactId);if(!item||params.workspacePath!=='/fixture')return {ok:false,error:{code:'not_found',message:'unknown',retryable:false}};const artifact={artifactId:item.reference.artifactId,title:item.reference.alt,mimeType:item.reference.mimeType,sizeBytes:item.reference.sizeBytes,digest:item.reference.digest};if(params.action==='get')return {ok:true,value:{revision:1,artifacts:[artifact]}};const binary=atob(item.base64),offset=params.offsetBytes,end=Math.min(binary.length,offset+params.limitBytes);let slice=binary.slice(offset,end);if(window.corrupt)slice=slice.slice(0,-1)+String.fromCharCode(slice.charCodeAt(slice.length-1)^1);return {ok:true,value:{artifact,contentBase64:btoa(slice),offsetBytes:offset,endOffsetBytes:end,totalBytes:binary.length,truncated:end<binary.length,...(end<binary.length?{nextOffsetBytes:end}:{})}}}}};void 0;`,
     );
     const waitFor = async (condition, timeout = 6000) => {
       const deadline = Date.now() + timeout;
@@ -57,6 +73,11 @@ app.whenReady().then(async () => {
     const mount = async (reference, text = "", sessionId = "main", side = false) => {
       await run(
         `mediaFixture.mount([{id:'answer',kind:'assistantMessage',text:${JSON.stringify(text)},media:[${JSON.stringify(reference)}]}],{workspacePath:'/fixture',sessionId:${JSON.stringify(sessionId)}},${side})`,
+      );
+    };
+    const mountHtmlLink = async (assistant = true) => {
+      await run(
+        `mediaFixture.mountArtifactLink('[预览](pico://artifact/inline-html)',{workspacePath:'/fixture',sessionId:'html'},${assistant})`,
       );
     };
     const streamedText =
@@ -125,7 +146,7 @@ app.whenReady().then(async () => {
     const loadedSource = await run("document.querySelector('img').src");
     await run("mediaFixture.clear()");
     await waitFor(`revoked.includes(${JSON.stringify(loadedSource)})`);
-    for (const asset of assets.slice(1)) {
+    for (const asset of assets.filter((item) => item.reference.kind === "video")) {
       await mount(asset.reference, `[播放](pico://artifact/${asset.reference.artifactId})`);
       await waitFor("document.querySelector('video')?.readyState>=1");
       const metadata = await run(
@@ -164,6 +185,43 @@ app.whenReady().then(async () => {
         `MEDIA_CODEC_OK ${asset.reference.mimeType} ${metadata.width}x90 duration=${metadata.duration}`,
       );
     }
+    await mountHtmlLink();
+    await waitFor(
+      "document.querySelector('.conversation-artifact-link__html iframe') && inlineHtmlMessages.some(message=>message?.type==='inline-html-ready')",
+    );
+    assert.equal(
+      await run(
+        "inlineHtmlMessages.find(message=>message?.type==='inline-html-ready').parentBlocked",
+      ),
+      true,
+    );
+    assert.equal(await run("document.body.dataset.pwned"), undefined);
+    assert.equal(
+      await run("document.querySelector('.conversation-artifact-link__html iframe').sandbox.value"),
+      "allow-scripts",
+    );
+    const htmlFrame = window.webContents.mainFrame.frames.find(
+      (frame) => frame.url === "about:srcdoc",
+    );
+    assert.ok(htmlFrame, "inline HTML opens in a sandboxed srcdoc frame");
+    const clickedLabel = await htmlFrame.executeJavaScript(
+      "(()=>{const button=document.querySelector('#start');button.click();return button.textContent})()",
+    );
+    assert.equal(clickedLabel, "GAME STARTED", "inline script responds to interaction");
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(blockedRequests, 0, "内嵌文档不能向宿主或网络发起请求");
+    const htmlQueries = await run("queries.filter(query=>query.artifactId==='inline-html').length");
+    assert.ok(htmlQueries >= 2, "助手消息读取 HTML 元数据和内容分块");
+    await mountHtmlLink(false);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(
+      await run("document.querySelectorAll('.conversation-artifact-link__html iframe').length"),
+      0,
+    );
+    assert.equal(
+      await run("queries.filter(query=>query.artifactId==='inline-html').length"),
+      htmlQueries,
+    );
     // Entire offscreen history stays inert until it approaches the viewport.
     const beforeOffscreen = await run("queries.length");
     await run("document.querySelector('#root').style.marginTop='2400px'");

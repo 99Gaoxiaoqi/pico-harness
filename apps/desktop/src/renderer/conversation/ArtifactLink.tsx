@@ -1,5 +1,6 @@
 import { Download } from "lucide-react";
 import { useState, type ReactNode } from "react";
+import { InlineHtmlArtifactPreview } from "./InlineHtmlArtifactPreview.js";
 import { useMediaScope } from "./MediaPreview.js";
 
 export function artifactLinkId(href: string): string | undefined {
@@ -11,9 +12,11 @@ export function artifactLinkId(href: string): string | undefined {
 export function ArtifactLink({
   artifactId,
   children,
+  previewHtml = false,
 }: {
   readonly artifactId: string;
   readonly children: ReactNode;
+  readonly previewHtml?: boolean;
 }) {
   const scope = useMediaScope();
   const [error, setError] = useState<string>();
@@ -46,6 +49,7 @@ export function ArtifactLink({
       >
         <Download aria-hidden="true" />
       </button>
+      {previewHtml && <InlineHtmlArtifactPreview artifactId={artifactId} scope={scope} />}
       {error && <span role="alert">{error}</span>}
     </span>
   );

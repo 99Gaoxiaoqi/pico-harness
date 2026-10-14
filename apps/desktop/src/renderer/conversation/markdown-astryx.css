@@ -31,6 +31,30 @@
   color: var(--danger);
   font-size: 12px;
 }
+.conversation-artifact-link__html {
+  display: block;
+  flex-basis: 100%;
+  width: min(640px, 100%);
+  max-width: 100%;
+  margin-block: 8px;
+  overflow: hidden;
+  border: 1px solid var(--conversation-line, var(--line, #e5e5e5));
+  border-radius: 10px;
+  background: #fff;
+}
+.conversation-artifact-link__html iframe {
+  display: block;
+  width: 100%;
+  height: min(460px, 62vh);
+  min-height: 340px;
+  border: 0;
+}
+.conversation-artifact-link__html [role="alert"] {
+  display: block;
+  padding: 12px;
+  color: var(--danger);
+  font-size: 12px;
+}
 
 .desktop-markdown.astryx-markdown {
   font-family: inherit;

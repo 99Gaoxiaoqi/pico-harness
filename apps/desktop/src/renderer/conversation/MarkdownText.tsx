@@ -21,6 +21,7 @@ export interface MarkdownTextProps {
   readonly text: string;
   readonly dim?: boolean | undefined;
   readonly media?: readonly RuntimeMediaReference[] | undefined;
+  readonly previewHtmlArtifacts?: boolean | undefined;
 }
 
 const components: MarkdownComponents = {
@@ -51,7 +52,12 @@ const components: MarkdownComponents = {
 };
 
 /** Astryx renders the document; Pico retains its text, URL and inert-image policy. */
-export function MarkdownText({ text, dim = false, media = [] }: MarkdownTextProps) {
+export function MarkdownText({
+  text,
+  dim = false,
+  media = [],
+  previewHtmlArtifacts = false,
+}: MarkdownTextProps) {
   const mediaComponents = useMemo<MarkdownComponents>(
     () => ({
       ...components,
@@ -69,7 +75,9 @@ export function MarkdownText({ text, dim = false, media = [] }: MarkdownTextProp
         return reference?.kind === "video" ? (
           <MediaPreview reference={reference} />
         ) : artifactId ? (
-          <ArtifactLink artifactId={artifactId}>{children}</ArtifactLink>
+          <ArtifactLink artifactId={artifactId} previewHtml={previewHtmlArtifacts}>
+            {children}
+          </ArtifactLink>
         ) : isSafeMarkdownHref(href) ? (
           <a href={href} rel="noopener noreferrer" target="_blank">
             {children}

@@ -16,6 +16,12 @@ const assets = [
   ["clip.mp4", "video/mp4", "video"],
 ] as const;
 
+const inlineHtml = `<!doctype html><meta charset="utf-8"><button id="start" onclick="this.textContent='GAME STARTED'">START GAME</button><script>
+let parentBlocked=false;try{parent.document.body.dataset.pwned='yes'}catch{parentBlocked=true}
+parent.postMessage({type:'inline-html-ready',parentBlocked},'*');
+fetch('http://127.0.0.1:PORT/probe').catch(()=>{});
+</script>`;
+
 test("媒体单独消息从 Runtime 投影到正文，非法媒体不成为展示能力", async () => {
   const bytes = await readFile(
     new URL("../../fixtures/desktop-media-assets/pixel.png", import.meta.url),
@@ -82,7 +88,7 @@ test(
     });
     await writeFile(
       join(root, "index.html"),
-      "<!doctype html><html><head><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src blob:; connect-src 'self'\"><link rel=\"stylesheet\" href=\"renderer.css\"></head><body><div id=\"root\"></div><script src=\"renderer.js\"></script></body></html>",
+      "<!doctype html><html><head><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src blob:; connect-src 'self'\"><link rel=\"stylesheet\" href=\"renderer.css\"></head><body><div id=\"root\"></div><script src=\"renderer.js\"></script></body></html>",
     );
     const payload = await Promise.all(
       assets.map(async ([name, mimeType, kind]) => {
@@ -102,6 +108,18 @@ test(
         };
       }),
     );
+    const htmlBytes = Buffer.from(inlineHtml);
+    payload.push({
+      reference: {
+        artifactId: "inline-html",
+        kind: "html",
+        alt: "内嵌预览.html",
+        mimeType: "text/html",
+        sizeBytes: htmlBytes.length,
+        digest: createHash("sha256").update(htmlBytes).digest("hex"),
+      },
+      base64: htmlBytes.toString("base64"),
+    });
     await writeFile(join(root, "assets.json"), JSON.stringify(payload));
     const child = spawn(
       process.env.PICO_TEST_ELECTRON!,

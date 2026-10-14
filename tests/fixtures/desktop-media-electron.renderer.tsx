@@ -43,6 +43,18 @@ Object.assign(globalThis, {
         ),
       );
     },
+    mountArtifactLink(text: string, scope: MediaScope, assistant = true) {
+      root.render(
+        <ConversationTranscript
+          items={[
+            assistant
+              ? { id: "html-assistant", kind: "assistantMessage", text }
+              : { id: "html-user", kind: "userMessage", text },
+          ]}
+          mediaScope={scope}
+        />,
+      );
+    },
     stream(text: string) {
       const item = overlayRuntimeItem({
         runId: "stream-run",

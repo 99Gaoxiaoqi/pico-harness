@@ -902,6 +902,7 @@ export function ConversationTranscript({
     <MarkdownText
       text={text}
       dim={item.kind === "thinking"}
+      previewHtmlArtifacts={item.kind === "assistantMessage"}
       media={
         item.kind === "userMessage" || item.kind === "assistantMessage" ? item.media : undefined
       }
