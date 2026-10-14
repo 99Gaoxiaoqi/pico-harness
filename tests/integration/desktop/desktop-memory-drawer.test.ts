@@ -23,7 +23,7 @@ const use={useId:'use',workspaceKey:scope.workspacePath,source:{kind:'reviewed-r
 const candidate={kind:'task-lesson',candidateId:'lesson',itemId:'memory',workspaceKey:scope.workspacePath,sessionId:scope.sessionId,runId:'desktop-run',taskId:'task',taskVersion:1,contentVersion:1,recordRevision:1,goal:'先核对范围',content:'核对用户指定范围',review:'pending',validation:'unknown',enabled:false,lifecycleState:'active',state:'ready',sources:[],applicability:{taskFamily:'general',toolNames:[],conditions:[]}};
 let reads=0;const feedback=[];
 const effect={effectId:'effect',adoption:'observed',validation:'pass',validationScope:'spreadsheet-range',reason:'仅核对 B2:B3 求和',preparedEventId:'prepared',preparedSequence:2,outcomeEventId:'outcome',outcomeSequence:3,sources:[]};
-const actions={queryTaskExperiences:async()=>({learningVersion:2,workspaceKey:scope.workspacePath,revision:1,items:[candidate],reuse:[]}),detailTaskExperience:async()=>({learningVersion:2,candidate,observations:[],reuse:[]}),loadSession:async()=>true,queryExperienceUses:async()=>({experienceVersion:1,diagnostics:[],uses:[use]}),detailExperienceUse:async()=>{reads++;return{experienceVersion:1,use,effects:[effect]}},getExperienceMemoryItem:async()=>({...previewData.memory.items[0],itemId:'memory',version:3,lifecycleState:'active'}),feedbackExperienceUse:async(_,request)=>{feedback.push(request);return{experienceVersion:1,use:{...use,excluded:true,managementRevision:2}}}};
+const actions={queryTaskExperiences:async()=>({learningVersion:2,workspaceKey:scope.workspacePath,revision:1,items:[candidate],reuse:[]}),detailTaskExperience:async()=>({learningVersion:2,candidate,observations:[],reuse:[]}),reviewTaskExperience:async()=>candidate,loadSession:async()=>true,queryExperienceUses:async()=>({experienceVersion:1,diagnostics:[],uses:[use]}),detailExperienceUse:async()=>{reads++;return{experienceVersion:1,use,effects:[effect]}},getExperienceMemoryItem:async()=>({...previewData.memory.items[0],itemId:'memory',version:3,lifecycleState:'active'}),feedbackExperienceUse:async(_,request)=>{feedback.push(request);return{experienceVersion:1,use:{...use,excluded:true,managementRevision:2}}}};
 const items=[{id:'user',kind:'userMessage',text:'汇总 B2:B3'},{id:'start',kind:'runBoundary',runId:'desktop-run',status:'started',label:'运行中'},...Array.from({length:25},(_,i)=>({id:'answer'+i,kind:'assistantMessage',text:'保留的任务消息 '+i,runId:'canonical'})),{id:'end',kind:'runBoundary',runId:'desktop-run',status:'completed',label:'完成'}];
 const runtime={preview:false,connection:{kind:'ready'},experienceFeedbackSupported:true,taskExperienceSupported:true,actions,data:{...previewData,trusted:true,timeline:[],approvals:[],prompts:[],sessions:[{id:scope.sessionId,workspacePath:scope.workspacePath,title:'汇总本月销售额',status:'active',updatedAt:2}],runs:[{id:'desktop-run',...scope,status:'completed',description:'求和',startedAt:1,updatedAt:2}],conversations:{[workspaceSessionKey(scope)]:{...scope,items,queuedCount:0}}}};
 function Probe(){const location=useLocation();return <output id='route'>{location.pathname+location.search}</output>}
@@ -53,10 +53,16 @@ check(!document.querySelector('dialog[open]'),'native Escape cancel closes drawe
 await act(async()=>button('审核本轮任务经验').click());
 await act(async()=>document.querySelector('.experience-drawer .task-experience__row').click());
 check(document.querySelector('.experience-drawer').textContent.includes('核对用户指定范围'),'pending review uses existing review detail inside drawer');
+await act(async()=>button('编辑并确认').click());const reviewEditor=document.querySelector('.experience-drawer[open] textarea');check(reviewEditor,'review editor exists');
+await act(async()=>{Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(reviewEditor,'关闭后继续编辑的经验草稿');reviewEditor.dispatchEvent(new Event('input',{bubbles:true}));});
+await act(async()=>button('关闭经验详情').click());
+await act(async()=>button('审核本轮任务经验').click());check(document.querySelector('.experience-drawer[open] textarea')===reviewEditor&&reviewEditor.value==='关闭后继续编辑的经验草稿','review draft survives close and reopen');
+await act(async()=>document.querySelector('.experience-drawer[open]').dispatchEvent(new Event('cancel',{cancelable:true})));
+await act(async()=>button('审核本轮任务经验').click());check(document.querySelector('.experience-drawer[open] textarea')===reviewEditor,'Escape preserves review draft');
 await act(async()=>button('关闭经验详情').click());
 check(composer.textContent==='请保留这段草稿，稍后继续。'&&document.querySelector('#route').textContent===route,'review closes back to unchanged task');
 await act(async()=>trigger.click());
-await act(async()=>document.querySelector('.experience-drawer a').click());
+await act(async()=>document.querySelector('.experience-drawer[open] a').click());
 check(sessionStorage.getItem('pico.settings-return-to')===route,'management preserves exact conversation return route');
 // Change scope while an older detail request is still pending; returning to A must not revive it.
 let resolveOld;const old=new Promise(resolve=>resolveOld=resolve);let path='/a',session='a';

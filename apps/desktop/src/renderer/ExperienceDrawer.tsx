@@ -7,14 +7,17 @@ export function ExperienceDrawer({
   title,
   onClose,
   children,
+  open = true,
 }: {
   readonly title: string;
   readonly onClose: () => void;
   readonly children: ReactNode;
+  readonly open?: boolean;
 }) {
   const titleId = useId();
   const dialogRef = useRef<HTMLDialogElement>(null);
   useEffect(() => {
+    if (!open) return;
     const trigger = document.activeElement;
     const dialog = dialogRef.current;
     dialog?.showModal();
@@ -23,7 +26,7 @@ export function ExperienceDrawer({
       if (trigger instanceof HTMLElement && trigger.isConnected)
         trigger.focus({ preventScroll: true });
     };
-  }, []);
+  }, [open]);
   return (
     <dialog
       ref={dialogRef}
@@ -41,7 +44,7 @@ export function ExperienceDrawer({
         </Button>
       </header>
       <div className="experience-drawer__body">{children}</div>
-      <p className="experience-drawer__footer">关闭详情后继续当前任务，输入草稿保持不变。</p>
+      <p className="experience-drawer__footer">关闭详情后继续当前任务，不清空任务输入。</p>
     </dialog>
   );
 }
@@ -54,13 +57,21 @@ export function ExperienceDrawerTrigger({
   readonly children: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
+  const [visited, setVisited] = useState(false);
   return (
     <>
-      <Button variant="quiet" aria-haspopup="dialog" onClick={() => setOpen(true)}>
+      <Button
+        variant="quiet"
+        aria-haspopup="dialog"
+        onClick={() => {
+          setVisited(true);
+          setOpen(true);
+        }}
+      >
         {title}
       </Button>
-      {open && (
-        <ExperienceDrawer title={title} onClose={() => setOpen(false)}>
+      {visited && (
+        <ExperienceDrawer title={title} open={open} onClose={() => setOpen(false)}>
           {children}
         </ExperienceDrawer>
       )}

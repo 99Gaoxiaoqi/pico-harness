@@ -677,6 +677,7 @@ export function MemoryPage({
         reuse={experience.reuse}
         searchQuery={embedded ? listQuery : undefined}
         onDraftStateChange={embedded ? setExperienceEditing : undefined}
+        selectionLocked={embedded && editing}
         onSelectExperience={embedded ? () => setSelectedMemoryId(undefined) : undefined}
         supplementalRows={embedded ? renderMemoryRows(filter) : undefined}
         supplementalDetail={
@@ -854,9 +855,9 @@ export function MemoryPage({
                 <>
                   <IconButton
                     label={`更正 ${memoryItemLabel(item)}`}
-                    disabled={Boolean(busy)}
+                    disabled={Boolean(busy) || Boolean(editor && editor.id !== item.itemId)}
                     onClick={() => {
-                      if (!data.workspacePath) return;
+                      if (!data.workspacePath || (editor && editor.id !== item.itemId)) return;
                       setEditorError("");
                       setEditor({
                         id: item.itemId,
@@ -944,7 +945,10 @@ export function MemoryPage({
             key={item.itemId}
             className="task-experience__row memory-content__row"
             aria-pressed={selectedMemoryId === item.itemId}
-            onClick={() => setSelectedMemoryId(item.itemId)}
+            disabled={editing && selectedMemoryId !== item.itemId}
+            onClick={() => {
+              if (!editing) setSelectedMemoryId(item.itemId);
+            }}
           >
             <span className="task-experience__meta">
               <span>{item.scopeType === "global" ? "全局" : "当前工作区"}</span>
@@ -1254,7 +1258,7 @@ export function MemoryPage({
           )}
           {embedded && editing && (
             <p className="memory-content__editing" role="status">
-              请先保存或取消当前编辑，再切换标签与范围。
+              请先保存或取消当前编辑，再切换条目、标签或范围。
             </p>
           )}
           {embedded && (

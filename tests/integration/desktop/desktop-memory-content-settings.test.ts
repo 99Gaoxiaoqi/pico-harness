@@ -26,7 +26,7 @@ const use={useId:'receipt',workspaceKey:workspace,source:{kind:'reviewed-referen
 const writes=[],drafts=[];let refreshes=0;
 const detail=candidate=>({learningVersion:2,candidate,observations:[],reuse:[]});
 const actions={
- queryTaskExperiences:async()=>({learningVersion:2,workspaceKey:workspace,revision:1,items:[saved,pending],reuse:[]}),
+ queryTaskExperiences:async()=>({learningVersion:2,workspaceKey:workspace,revision:1,items:[saved,{...saved,candidateId:"second",itemId:"second-memory",goal:"另一条已保存经验"},pending],reuse:[]}),
  detailTaskExperience:async(_,id)=>detail(id==='pending'?pending:saved),
  reviewTaskExperience:async(_,request)=>{writes.push(request);pending={...pending,review:'approved',recordRevision:5,enabled:true};return pending;},
  feedbackTaskExperience:async()=>saved,
@@ -34,7 +34,7 @@ const actions={
  refreshMemory:async()=>{refreshes++},
  updateMemoryItem:async(id,version,patch)=>{writes.push({id,version,patch});return {...ordinary,...patch,version:version+1}},
 };
-let runtime={preview:false,connection:{kind:'ready'},taskExperienceSupported:true,experienceFeedbackSupported:true,actions,data:{...previewData,workspacePath:workspace,trusted:true,memory:{...previewData.memory,workspacePath:workspace,status:'ready',items:[ordinary,globalItem,archived],pageInfo:undefined}}};
+let runtime={preview:false,connection:{kind:'ready'},taskExperienceSupported:true,experienceFeedbackSupported:true,actions,data:{...previewData,workspacePath:workspace,trusted:true,memory:{...previewData.memory,workspacePath:workspace,status:'ready',items:[ordinary,{...ordinary,itemId:"ordinary-two",content:"第二条项目记忆"},globalItem,archived],pageInfo:undefined}}};
 const root=createRoot(document.getElementById('app'));let scope='workspace';
 const onDraft=editing=>drafts.push(editing);
 const mount=()=>act(async()=>root.render(<PicoTheme><MemoryRouter><MemoryPage runtime={runtime} embedded scopeFilter={scope} onDraftStateChange={onDraft}/></MemoryRouter></PicoTheme>));
@@ -51,12 +51,14 @@ const input=async(label,value)=>{const node=[...document.querySelectorAll('input
  check(!document.querySelector('.memory-content__preview').open,'recall preview starts collapsed');
  await row(ordinary.content);await click('更正 '+ordinary.content);await input('记忆内容','编辑中的项目约定');
  check(drafts.at(-1)===true,'ordinary correction reports active draft');
+await row(saved.goal);check(document.querySelector('textarea').value==='编辑中的项目约定','experience selection cannot hide ordinary draft');
+await row('第二条项目记忆');check(document.querySelector('textarea').value==='编辑中的项目约定','another memory cannot replace ordinary draft');
  await tab('usage');check(document.getElementById('memory-panel-saved')&&document.querySelector('textarea').value==='编辑中的项目约定','tab switch cannot discard an editor');
  await click('取消');check(drafts.at(-1)===false,'cancel clears draft guard');
  await input('搜索记忆内容','确认完整');
  check(document.querySelector('.task-experience__list').textContent.includes(saved.goal)&&!document.querySelector('.task-experience__list').textContent.includes(ordinary.content),'search filters ordinary and experience rows together');
  await input('搜索记忆内容','');await row(saved.goal);await click('编辑并确认');
- check(drafts.at(-1)===true,'experience correction reports active draft');await click('取消更正');check(drafts.at(-1)===false,'experience cancel releases draft guard');
+ check(drafts.at(-1)===true,'experience correction reports active draft');await input('经验内容','经验草稿不得丢失');await row('另一条已保存经验');await row(ordinary.content);check(document.querySelector('textarea').value==='经验草稿不得丢失','list selections preserve experience draft');await click('取消更正');check(drafts.at(-1)===false,'experience cancel releases draft guard');
  await tab('pending');await row(pending.goal);await click('确认并启用');
  check(writes[0].candidateId==='pending'&&writes[0].expectedContentVersion===2&&writes[0].expectedRecordRevision===4,'review uses original version safeguards');
  await tab('archived');check(document.querySelector('.task-experience__list').textContent.includes(archived.content),'archive tab contains archived ordinary memory');

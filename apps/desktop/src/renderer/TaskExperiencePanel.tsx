@@ -45,6 +45,7 @@ export interface TaskExperiencePanelProps {
   readonly searchQuery?: string;
   readonly onSelectExperience?: () => void;
   readonly onDraftStateChange?: (editing: boolean) => void;
+  readonly selectionLocked?: boolean;
   readonly sessionId?: string;
   readonly workspacePath?: string;
   readonly showSummary?: boolean;
@@ -183,6 +184,11 @@ function ExperienceReviewBoard({
     ) : null;
   return (
     <div className="task-experience__review-board">
+      {hasDraft && !actions.supplementalRows && (
+        <p style={{ gridColumn: "1 / -1" }} role="status">
+          请先保存或取消当前更正，再选择其他经验。
+        </p>
+      )}
       {pendingTarget && (
         <div style={{ gridColumn: "1 / -1" }}>
           <InlineNotice>
@@ -225,7 +231,12 @@ function ExperienceReviewBoard({
             className="task-experience__row"
             aria-pressed={!actions.supplementalDetail && selected?.candidateId === item.candidateId}
             aria-controls={detailId}
+            disabled={
+              (hasDraft || actions.selectionLocked) &&
+              (Boolean(actions.supplementalDetail) || selected?.candidateId !== item.candidateId)
+            }
             onClick={() => {
+              if (draftOwnerRef.current || actions.selectionLocked) return;
               setSelection({ scope, candidate: item });
               actions.onSelectExperience?.();
             }}
@@ -234,7 +245,10 @@ function ExperienceReviewBoard({
             <span>{item.content || "正在整理任务结果…"}</span>
             <span className="task-experience__meta">
               <span>{reviewLabels[item.review]}</span>
-              <span>{validationLabels[item.validation]}</span>
+              {item.review === "approved" && <span>{item.enabled ? "可引用" : "已停用"}</span>}
+              <span>
+                {item.validation === "pass" ? "历史验证通过" : validationLabels[item.validation]}
+              </span>
               <span>v{item.contentVersion}</span>
             </span>
           </button>
