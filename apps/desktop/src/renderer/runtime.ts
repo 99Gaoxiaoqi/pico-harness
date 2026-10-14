@@ -1,3 +1,4 @@
+import type { MemoryScopePage, MemoryScopeTab } from "./memory-scope.js";
 import {
   PendingSendRepository,
   SESSION_SEND_REPLAY_CAPABILITY,
@@ -558,6 +559,11 @@ export interface RuntimeActions {
   ): Promise<boolean>;
   deleteProviderCredential(providerId: string, expectedRevision: string): Promise<boolean>;
   refreshMemory(): Promise<void>;
+  queryMemoryScope?(
+    workspacePath: string,
+    tab: MemoryScopeTab,
+    cursor?: string,
+  ): Promise<MemoryScopePage>;
   queryTaskExperiences(
     workspacePath: string,
     options?: { sessionId?: string; review?: ExperienceReview },
@@ -3720,6 +3726,56 @@ export function useRuntimeStore(): RuntimeStore {
           }
           setMessage(`Provider ${providerId} 在 ~/.pico/config.json 中的 API Key 已删除。`);
         });
+      },
+      async queryMemoryScope(workspacePath, tab, cursor) {
+        const home = dataRef.current.picoHome;
+        const allowed = () =>
+          dataRef.current.picoHome === home &&
+          (dataRef.current.workspacePath !== workspacePath || dataRef.current.trusted) &&
+          dataRef.current.workspaces.some(
+            (workspace) => workspace.path === workspacePath && workspace.trusted,
+          );
+        if (!allowed()) throw new Error("该工作区不可用或尚未信任，未读取记忆。");
+        if (preview) return { memory: { items: previewData.memory.items } };
+        const bridge = getBridge();
+        if (!bridge) throw new Error("当前连接不可用。");
+        let result: MemoryScopePage;
+        if (tab === "pending") {
+          if (!runtimeCapabilitiesRef.current.has(TASK_EXPERIENCE_CAPABILITY))
+            throw new Error("当前 Host 不支持经验审核，请更新后重试。");
+          result = {
+            suggestions: await invoke(bridge, "memory.learning.query", { workspacePath }),
+          };
+        } else if (tab === "usage") {
+          if (!runtimeCapabilitiesRef.current.has(EXPERIENCE_FEEDBACK_CAPABILITY))
+            throw new Error("当前 Host 不支持经验使用记录，请更新后重试。");
+          result = {
+            usage: await invoke(bridge, "memory.experience.query", {
+              workspacePath,
+              limit: 50,
+              ...(cursor ? { cursor } : {}),
+            }),
+          };
+        } else {
+          if (!runtimeCapabilitiesRef.current.has("workspace-memory-v1"))
+            throw new Error("当前 Host 不支持记忆管理。");
+          result = {
+            memory: await invoke(bridge, "memory.list", {
+              workspacePath,
+              lifecycleStates: [tab === "archived" ? "archived" : "active"],
+              limit: 50,
+              ...(runtimeCapabilitiesRef.current.has(TASK_EXPERIENCE_CAPABILITY)
+                ? { learningVersion: 2 as const }
+                : {}),
+              ...(runtimeCapabilitiesRef.current.has(MEMORY_PAGINATION_RUNTIME_CAPABILITY)
+                ? { paged: true as const, ...(cursor ? { cursor } : {}) }
+                : {}),
+            }),
+          };
+        }
+        // A trust revocation or host switch invalidates even an already returned read.
+        if (!allowed()) throw new Error("工作区权限或连接已变化，请重新选择范围。");
+        return result;
       },
       async refreshMemory() {
         const workspacePath = dataRef.current.workspacePath;

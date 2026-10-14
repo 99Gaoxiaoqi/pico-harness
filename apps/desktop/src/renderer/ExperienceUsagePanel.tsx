@@ -41,7 +41,7 @@ const scopeLabels = {
 };
 
 /** Decode only the known Host memory wrapper; retain the original receipt as evidence. */
-function referenceBody(content: string): string {
+export function referenceBody(content: string): string {
   const wrapped = /^<memory\b[^>]*>([\s\S]*)<\/memory>$/u.exec(content.trim());
   if (!wrapped) return content;
   const entities: Readonly<Record<string, string>> = {

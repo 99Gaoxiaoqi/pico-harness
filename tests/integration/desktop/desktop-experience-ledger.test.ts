@@ -171,7 +171,7 @@ function Probe(){const location=useLocation();return <p id='route'>{location.pat
  const route=document.querySelector('#route').textContent;params=new URLSearchParams(route.split('?')[1].split('#')[0]);
  check(params.get('tab')==='pending'&&params.get('context')==='keep'&&params.get('workspace')==='/b'&&route.endsWith('#anchor'),'adding workspace preserves query and hash');
  await act(async()=>root.render(wrap(<UserMemorySettingsPage/>)));
- check(document.body.textContent.includes('关闭只停止新提案')&&document.body.textContent.includes('历史引用、效果记录和经验管理仍可继续')&&document.body.textContent.includes('管理工作区记忆'),'settings explain independent automatic learning gate');
+ check(document.body.textContent.includes('关闭只停止新提案')&&document.body.textContent.includes('历史引用、效果记录和经验管理仍可继续')&&document.body.textContent.includes('管理范围'),'settings explain independent automatic learning gate');
  await act(async()=>root.unmount());await fetch('/result',{method:'POST',body:'PASS: experience management routes'});
 })().catch(async error=>fetch('/result',{method:'POST',body:'FAIL: '+error.stack}));
 `);

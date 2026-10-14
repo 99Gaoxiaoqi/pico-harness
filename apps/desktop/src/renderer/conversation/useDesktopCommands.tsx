@@ -165,7 +165,7 @@ export function useDesktopCommands({
       workspaces: "/settings/workspaces",
       system: "/settings/system",
       usage: "/settings/usage",
-      memory: "/memory",
+      memory: "/settings/memory",
       providers: "/settings/models",
       automations: "/automations",
       mcp: "/extensions/mcp",

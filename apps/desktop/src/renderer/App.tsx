@@ -9,9 +9,16 @@ import "./workbar-panels/workbar-panels.css";
 
 import { Folder, RefreshCw, ShieldCheck } from "lucide-react";
 import { Component, useEffect, useState, type ReactNode } from "react";
-import { HashRouter, Link, Navigate, Route, Routes, useNavigate } from "react-router-dom";
+import {
+  HashRouter,
+  Link,
+  Navigate,
+  Route,
+  Routes,
+  useLocation,
+  useNavigate,
+} from "react-router-dom";
 import { AppShell } from "./AppShell.js";
-import { MemoryPage } from "./MemoryPage.js";
 import { UserMemorySettingsPage } from "./pages/UserMemorySettingsPage.js";
 import { ProviderPage } from "./ProviderPage.js";
 import { Button, EmptyState, InlineNotice, PreviewBadge } from "./components.js";
@@ -123,14 +130,7 @@ function AppStateRouter() {
         <Route path="settings/usage" element={<UsagePage />} />
         <Route path="settings/mobile" element={<MobileConnectionSettingsPage />} />
         <Route path="settings/system" element={<SystemSettingsPage />} />
-        <Route
-          path="memory"
-          element={
-            <WorkspaceRoute>
-              <MemoryPageRoute />
-            </WorkspaceRoute>
-          }
-        />
+        <Route path="memory" element={<LegacyMemoryRoute />} />
         <Route path="*" element={<NotFound />} />
       </Route>
     </Routes>
@@ -254,8 +254,14 @@ function ProviderPageRoute() {
   return <ProviderPage runtime={useRuntime()} />;
 }
 
-function MemoryPageRoute() {
-  return <MemoryPage runtime={useRuntime()} />;
+export function LegacyMemoryRoute() {
+  const location = useLocation();
+  return (
+    <Navigate
+      replace
+      to={{ pathname: "/settings/memory", search: location.search, hash: location.hash }}
+    />
+  );
 }
 
 function NotFound() {

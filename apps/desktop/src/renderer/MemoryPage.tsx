@@ -631,6 +631,21 @@ export function MemoryPage({
         setEditorError("更正未保存，请检查内容或刷新后重试。输入已保留。");
     }
   };
+  const choosePanel = (panel: PanelId) => {
+    if (embedded && editing) return;
+    setActivePanel(panel);
+    if (embedded) {
+      const params = new URLSearchParams(location.search);
+      if (params.get("tab") === panel) return;
+      params.set("tab", panel);
+      for (const key of ["item", "candidate", "referenceItemVersion", "referenceContentVersion"])
+        params.delete(key);
+      navigate(
+        { pathname: location.pathname, search: params.toString(), hash: "" },
+        { replace: true },
+      );
+    }
+  };
   const deleteItem = async (item: MemoryListItem) => {
     if (
       typeof window === "undefined" ||
@@ -1262,7 +1277,7 @@ export function MemoryPage({
                 aria-label="记忆状态"
                 value={activePanel}
                 onChange={(value) => {
-                  if (!embedded || !editing) setActivePanel(value as PanelId);
+                  choosePanel(value as PanelId);
                 }}
               >
                 {displayPanels.map((panel) => (
@@ -1270,7 +1285,7 @@ export function MemoryPage({
                     key={panel}
                     value={panel}
                     onFocus={() => {
-                      if (!embedded || !editing) setActivePanel(panel);
+                      choosePanel(panel);
                     }}
                     id={`memory-tab-${panel}`}
                     panelId={`memory-panel-${panel}`}

@@ -526,6 +526,7 @@ function SidebarTasks({
   readonly onRemoveProject: (project: SidebarProjectGroup) => Promise<void>;
 }) {
   const navigate = useNavigate();
+  const location = useLocation();
   const [grouping, setGrouping] = useState<SidebarTaskGrouping>(() =>
     window.localStorage.getItem("pico.sidebar-task-grouping") === "time" ? "time" : "project",
   );
@@ -702,6 +703,21 @@ function SidebarTasks({
                   alignment="end"
                   presentation="popover"
                 >
+                  <DropdownMenuItem
+                    icon={<BrainCircuit aria-hidden="true" />}
+                    label="查看项目记忆"
+                    onClick={() => {
+                      window.sessionStorage.setItem(
+                        "pico.settings-return-to",
+                        `${location.pathname}${location.search}${location.hash}`,
+                      );
+                      navigate(
+                        primaryWorkspace
+                          ? workspaceHref("/settings/memory", primaryWorkspace.path)
+                          : "/settings/memory?scope=unassigned",
+                      );
+                    }}
+                  />
                   <DropdownMenuItem
                     icon={<Archive aria-hidden="true" />}
                     label="归档聊天"

@@ -18,7 +18,7 @@ export function experienceManagementHref(
     params.set("referenceItemVersion", String(target.referenceItemVersion));
   if (target.referenceContentVersion !== undefined)
     params.set("referenceContentVersion", String(target.referenceContentVersion));
-  return `/memory?${params}${target.itemId ? `#memory-${encodeURIComponent(target.itemId)}` : ""}`;
+  return `/settings/memory?${params}${target.itemId ? `#memory-${encodeURIComponent(target.itemId)}` : ""}`;
 }
 
 export function readExperienceManagementTarget(

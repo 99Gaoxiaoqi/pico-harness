@@ -1,0 +1,159 @@
+@layer components {
+  .unified-memory-settings {
+    max-width: 1440px;
+    gap: 22px;
+  }
+  .unified-memory-settings .page-intro {
+    margin-bottom: 0;
+  }
+  .unified-memory-policy {
+    border: 1px solid var(--border-default);
+    border-radius: 10px;
+    background: var(--surface-muted);
+  }
+  .unified-memory-policy > summary {
+    cursor: pointer;
+    padding: 14px 17px;
+    display: flex;
+    gap: 18px;
+    align-items: center;
+    font-size: 13px;
+    list-style: none;
+  }
+  .unified-memory-policy > summary > span:first-child {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    font-weight: 500;
+  }
+  .unified-memory-policy > summary small {
+    color: var(--ink-secondary);
+    font-size: 11px;
+  }
+  .unified-memory-policy__hint {
+    margin-left: auto;
+    font-size: 12px;
+    color: var(--ink-secondary);
+  }
+  .memory-policy-content {
+    padding: 0 17px 17px;
+  }
+  .memory-policy-actions {
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: 12px;
+  }
+  .memory-policy-content fieldset {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 20px;
+  }
+  .memory-policy-content .settings-field {
+    margin: 0;
+  }
+  .memory-policy-content .settings-field small {
+    line-height: 1.7;
+  }
+  .memory-metrics {
+    margin-top: 18px;
+    font-size: 12px;
+  }
+  .memory-metrics > summary {
+    cursor: pointer;
+    padding: 8px 0;
+  }
+  .unified-memory-scope {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  .unified-memory-scope > :first-child {
+    width: 240px;
+    flex-shrink: 0;
+  }
+  .unified-memory-scope p {
+    margin: 0;
+    color: var(--ink-secondary);
+    font-size: 12px;
+    line-height: 1.7;
+  }
+  .memory-scope-overview__toolbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 18px;
+  }
+  .memory-scope-overview__toolbar > :first-child {
+    width: min(400px, 70%);
+  }
+  .memory-scope-overview__help {
+    color: var(--ink-secondary);
+    font-size: 12px;
+    line-height: 1.8;
+  }
+  .memory-scope-overview__rows {
+    display: grid;
+    gap: 12px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    margin: 18px 0;
+  }
+  .memory-overview-row {
+    text-decoration: none;
+    color: inherit;
+    border: 1px solid var(--border-default);
+    border-radius: 10px;
+    padding: 18px;
+    background: var(--surface-raised);
+  }
+  .memory-overview-row:hover {
+    background: var(--surface-muted);
+  }
+  .memory-overview-row > div {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    align-items: center;
+    font-size: 12px;
+  }
+  .memory-overview-row > div span {
+    background: var(--surface-muted);
+    padding: 3px 7px;
+    border-radius: 5px;
+  }
+  .memory-overview-row small {
+    color: var(--ink-secondary);
+    font-size: 11px;
+  }
+  .memory-overview-row p {
+    line-height: 1.8;
+    font-size: 13px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  @media (max-width: 900px) {
+    .memory-policy-content fieldset {
+      grid-template-columns: 1fr;
+    }
+    .memory-scope-overview__rows {
+      grid-template-columns: 1fr;
+    }
+    .unified-memory-policy > summary {
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+  }
+  @media (max-width: 600px) {
+    .unified-memory-scope {
+      align-items: stretch;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .unified-memory-scope > :first-child {
+      width: 100%;
+    }
+  }
+}

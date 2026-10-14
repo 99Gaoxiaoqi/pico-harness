@@ -276,7 +276,9 @@ function ExperienceReviewBoard({
             />
           ) : (
             <p className="task-experience__placeholder">
-              选择一条经验，查看内容、适用条件和来源后审核。
+              {actions.supplementalRows
+                ? "选择一条记忆或经验，查看内容与来源。"
+                : "选择一条经验，查看内容、适用条件和来源后审核。"}
             </p>
           )}
         </div>
