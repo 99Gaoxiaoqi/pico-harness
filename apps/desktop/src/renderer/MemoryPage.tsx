@@ -23,9 +23,11 @@ import { RuntimeInvocationError } from "./runtime.js";
 import { readExperienceManagementTarget } from "./experience-management-route.js";
 import type { ExperienceDetail, ExperienceReviewRequest } from "./useTaskExperience.js";
 
+import "./MemoryPage.css";
+
 const panels = ["saved", "archived"] as const;
-type PanelId = "pending" | (typeof panels)[number];
-const panelLabels = { pending: "待审核", saved: "已保存", archived: "已归档" };
+type PanelId = "pending" | "usage" | (typeof panels)[number];
+const panelLabels = { pending: "待审核", saved: "已保存", archived: "已归档", usage: "使用记录" };
 const kindLabels: Record<RuntimeMemoryItem["kind"], string> = {
   preference: "偏好",
   identity: "身份",
@@ -103,14 +105,27 @@ function useNarrowLayout(forceNarrow?: boolean): boolean {
 export function MemoryPage({
   runtime,
   forceNarrow,
+  embedded = false,
+  scopeFilter = "all",
+  onDraftStateChange,
 }: {
   readonly runtime: RuntimeStore;
   readonly forceNarrow?: boolean;
+  readonly embedded?: boolean;
+  readonly onDraftStateChange?: (editing: boolean) => void;
+  readonly scopeFilter?: "all" | "global" | "workspace";
 }) {
   const { data, actions, busy } = runtime;
   const memory = data.memory;
-  const experience = useTaskExperience(runtime, { workspacePath: data.workspacePath });
-  const ledger = useExperienceLedger(runtime, { workspacePath: data.workspacePath });
+  const experience = useTaskExperience(runtime, {
+    workspacePath: data.workspacePath,
+    enabled: scopeFilter !== "global",
+  });
+  const ledger = useExperienceLedger(runtime, {
+    workspacePath: data.workspacePath,
+    enabled: scopeFilter !== "global",
+  });
+  const showExperience = experience.supported && scopeFilter !== "global";
   const location = useLocation();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
@@ -284,8 +299,12 @@ export function MemoryPage({
     },
     [experience.onReview, targetKey, targetGeneration],
   );
-  const displayPanels: readonly PanelId[] = experience.supported ? ["pending", ...panels] : panels;
-  const pendingCount = experience.items.filter(
+  const displayPanels: readonly PanelId[] = embedded
+    ? ["saved", "pending", "archived", "usage"]
+    : experience.supported
+      ? ["pending", ...panels]
+      : panels;
+  const pendingCount = (showExperience ? experience.items : []).filter(
     (item) =>
       isExperienceSuggestion(item) && (item.review === "pending" || item.review === "deferred"),
   ).length;
@@ -298,12 +317,13 @@ export function MemoryPage({
     if (
       requested === "saved" ||
       requested === "archived" ||
-      (requested === "pending" && experience.supported)
+      (requested === "usage" && embedded) ||
+      (requested === "pending" && (embedded || experience.supported))
     )
       setActivePanel(requested);
     else if (requested === "native" || (activePanel === "pending" && !experience.supported))
       setActivePanel("saved");
-  }, [searchParams, experience.supported]);
+  }, [searchParams, experience.supported, embedded]);
   useEffect(() => {
     if (resolvedTarget?.status !== "ready") return;
     const desired: PanelId = targetCandidate
@@ -334,6 +354,17 @@ export function MemoryPage({
     location.pathname,
     location.hash,
   ]);
+  const [experienceEditing, setExperienceEditing] = useState(false);
+  const [listQuery, setListQuery] = useState("");
+  const [selectedMemoryId, setSelectedMemoryId] = useState<string>();
+  useEffect(() => {
+    setSelectedMemoryId(undefined);
+    setListQuery("");
+  }, [data.workspacePath, scopeFilter]);
+  useEffect(() => {
+    if (targetItem && !targetDetail && resolvedTarget?.status === "ready")
+      setSelectedMemoryId(targetItem.itemId);
+  }, [targetItem, targetDetail, resolvedTarget?.status]);
   const [editor, setEditor] = useState<MemoryEditor>();
   const [editorError, setEditorError] = useState("");
   useEffect(() => {
@@ -382,6 +413,11 @@ export function MemoryPage({
   const workspaceRef = useRef(data.workspacePath);
   workspaceRef.current = data.workspacePath;
   const adding = Boolean(draft && draft.workspacePath === data.workspacePath);
+  const editing = adding || Boolean(editor) || experienceEditing;
+  useEffect(() => {
+    onDraftStateChange?.(editing);
+    return () => onDraftStateChange?.(false);
+  }, [editing, onDraftStateChange]);
   useEffect(() => {
     returnFocusRef.current = false;
     setDraft(undefined);
@@ -453,6 +489,7 @@ export function MemoryPage({
       if (!item || workspaceRef.current !== submitted.workspacePath) return;
       setDraft((current) => (current === submitted ? undefined : current));
       setActivePanel("saved");
+      setSelectedMemoryId(item.itemId);
       setCreationNotice("记忆已保存到当前工作区。");
       setAnnouncement("记忆已保存到当前工作区。");
       clearPreview();
@@ -471,7 +508,12 @@ export function MemoryPage({
           ) ?? targetItem,
         ]
       : memory.items
-  ).filter((item) => !isLegacyExecutionMemory(item));
+  ).filter(
+    (item) =>
+      !isLegacyExecutionMemory(item) &&
+      (scopeFilter === "all" || item.scopeType === scopeFilter) &&
+      (scopeFilter !== "global" || !item.taskExperience),
+  );
   const refreshTargetItem = async (itemId: string) => {
     if (targetItem?.itemId !== itemId || !data.workspacePath) return;
     try {
@@ -609,21 +651,31 @@ export function MemoryPage({
       clearPreview();
     }
   };
-  const renderExperience = (filter: PanelId) => (
+  const renderExperience = (filter: Exclude<PanelId, "usage">) => (
     <>
       {experience.loading && experience.items.length === 0 && (
         <p role="status">正在读取任务经验…</p>
       )}
       <TaskExperiencePanel
-        items={experience.items}
+        key={scopeFilter}
+        items={showExperience ? experience.items : []}
         reuse={experience.reuse}
+        searchQuery={embedded ? listQuery : undefined}
+        onDraftStateChange={embedded ? setExperienceEditing : undefined}
+        onSelectExperience={embedded ? () => setSelectedMemoryId(undefined) : undefined}
+        supplementalRows={embedded ? renderMemoryRows(filter) : undefined}
+        supplementalDetail={
+          embedded && selectedMemoryId && filter !== "pending"
+            ? renderSelectedMemory(filter)
+            : undefined
+        }
         filter={filter}
         workspacePath={data.workspacePath}
         onDetail={experience.onDetail}
         onReview={reviewExperience}
         onFeedback={experience.onFeedback}
         target={
-          targetDetail && routeTarget
+          showExperience && targetDetail && routeTarget
             ? { key: `${targetKey}:${location.key}`, detail: targetDetail, reference: routeTarget }
             : undefined
         }
@@ -637,24 +689,28 @@ export function MemoryPage({
     </>
   );
   const panelCount = (panel: PanelId) =>
-    panel === "pending"
-      ? pendingCount
-      : Math.max(
-          (!hasLegacyItems && memory.pageInfo?.counts[panel === "saved" ? "active" : "archived"]) ||
-            0,
-          groups[panel].length +
-            experience.items.filter((item) =>
-              panel === "archived"
-                ? item.lifecycleState === "archived"
-                : item.review === "approved" &&
-                  isExperienceSuggestion(item) &&
-                  item.lifecycleState === "active",
-            ).length,
-        );
-  const renderMemoryList = (panel: (typeof panels)[number]) =>
-    groups[panel].length ? (
+    panel === "usage"
+      ? ledger.uses.length
+      : panel === "pending"
+        ? pendingCount
+        : Math.max(
+            (scopeFilter === "all" &&
+              !hasLegacyItems &&
+              memory.pageInfo?.counts[panel === "saved" ? "active" : "archived"]) ||
+              0,
+            groups[panel].length +
+              (showExperience ? experience.items : []).filter((item) =>
+                panel === "archived"
+                  ? item.lifecycleState === "archived"
+                  : item.review === "approved" &&
+                    isExperienceSuggestion(item) &&
+                    item.lifecycleState === "active",
+              ).length,
+          );
+  const renderMemoryList = (panel: (typeof panels)[number], items = groups[panel]) =>
+    items.length ? (
       <div className="memory-list" role="list">
-        {groups[panel].map((item) => (
+        {items.map((item) => (
           <article
             className="memory-card"
             role="listitem"
@@ -844,9 +900,105 @@ export function MemoryPage({
         }
       />
     );
+  const renderMemoryRows = (panel: Exclude<PanelId, "usage">) => {
+    const query = listQuery.trim().toLocaleLowerCase();
+    const items =
+      panel === "pending"
+        ? []
+        : groups[panel].filter((item) =>
+            `${item.content} ${kindLabels[item.kind]}`.toLocaleLowerCase().includes(query),
+          );
+    const matchingExperience =
+      showExperience &&
+      experience.items.some(
+        (item) =>
+          (panel === "pending"
+            ? isExperienceSuggestion(item) && ["pending", "deferred"].includes(item.review)
+            : panel === "saved"
+              ? isExperienceSuggestion(item) &&
+                item.review === "approved" &&
+                item.lifecycleState === "active"
+              : item.lifecycleState === "archived") &&
+          `${item.goal} ${item.content}`.toLocaleLowerCase().includes(query),
+      );
+    return (
+      <>
+        {items.map((item) => (
+          <button
+            type="button"
+            key={item.itemId}
+            className="task-experience__row memory-content__row"
+            aria-pressed={selectedMemoryId === item.itemId}
+            onClick={() => setSelectedMemoryId(item.itemId)}
+          >
+            <span className="task-experience__meta">
+              <span>{item.scopeType === "global" ? "全局" : "当前工作区"}</span>
+              <span>{kindLabels[item.kind]}</span>
+            </span>
+            <span className="task-experience__row-title">{memoryItemLabel(item)}</span>
+            <span>{item.content}</span>
+          </button>
+        ))}
+        {!items.length && !matchingExperience && (
+          <p className="task-experience__placeholder memory-content__empty">
+            {query
+              ? "没有匹配的记忆或经验。"
+              : panel === "pending"
+                ? "没有待审核的任务经验。"
+                : `没有${panelLabels[panel]}的记忆。`}
+          </p>
+        )}
+      </>
+    );
+  };
+  const renderSelectedMemory = (panel: (typeof panels)[number]) => {
+    const item = groups[panel].find((item) => item.itemId === selectedMemoryId);
+    return item ? renderMemoryList(panel, [item]) : undefined;
+  };
+  const renderUsage = () => (
+    <>
+      {ledger.error && (
+        <InlineNotice tone="error">
+          {ledger.error}{" "}
+          <Button variant="quiet" onClick={() => void ledger.refresh()}>
+            重试
+          </Button>
+        </InlineNotice>
+      )}
+      {embedded &&
+        scopeFilter !== "global" &&
+        !ledger.uses.length &&
+        !ledger.diagnostics.length &&
+        !ledger.error && (
+          <p className="task-experience__placeholder">
+            {ledger.loading ? "正在读取使用记录…" : "当前工作区还没有经验使用记录。"}
+          </p>
+        )}
+      {scopeFilter === "global" ? (
+        <p className="task-experience__placeholder">
+          任务经验使用记录属于对应工作区，请选择工作区查看。
+        </p>
+      ) : (
+        <ExperienceUsagePanel
+          uses={ledger.uses}
+          diagnostics={ledger.diagnostics}
+          workspacePath={data.workspacePath}
+          onDetail={ledger.onDetail}
+          onFeedback={ledger.onFeedback}
+        />
+      )}
+      {ledger.hasMore && (
+        <Button variant="quiet" disabled={ledger.loading} onClick={() => void ledger.loadMore()}>
+          加载更多使用记录
+        </Button>
+      )}
+    </>
+  );
   const renderList = (panel: PanelId) => {
+    if (panel === "usage") return renderUsage();
+    if (embedded) return renderExperience(panel);
     const hasExperience =
-      experience.supported &&
+      showExperience &&
       ((targetCandidate &&
         targetCandidate.review === "approved" &&
         (panel === "archived"
@@ -862,7 +1014,7 @@ export function MemoryPage({
         ));
     return (
       <>
-        {experience.supported && renderExperience(panel)}
+        {showExperience && renderExperience(panel)}
         {panel !== "pending" && (groups[panel].length > 0 || !hasExperience)
           ? renderMemoryList(panel)
           : null}
@@ -871,25 +1023,37 @@ export function MemoryPage({
   };
 
   return (
-    <section className="memory-page" aria-labelledby="memory-page-title">
+    <section
+      className={`memory-page${embedded ? " memory-page--embedded" : ""}`}
+      aria-label={embedded ? "记忆内容管理" : undefined}
+      aria-labelledby={embedded ? undefined : "memory-page-title"}
+    >
       <header className="memory-page__intro">
-        <div>
-          <span className="eyebrow">Memory</span>
-          <h2 id="memory-page-title">工作区记忆</h2>
-          <p>管理已保存的信息。全局记忆可跨工作区使用，归档后不再参与召回。</p>
-          <p>
-            {hasLegacyItems
-              ? `已加载 ${loadedMemoryItems.length} 条可用记忆；旧版经验已隐藏，请更新电脑端完成清理。`
-              : memory.pageInfo
-                ? `已加载 ${memory.items.length} / ${memory.pageInfo.counts.total} 条`
-                : `已加载 ${memory.items.length} 条，总数未知；更新电脑端可加载更多`}
-          </p>
-        </div>
+        {!embedded && (
+          <div>
+            <span className="eyebrow">Memory</span>
+            <h2 id="memory-page-title">工作区记忆</h2>
+            <p>管理已保存的信息。全局记忆可跨工作区使用，归档后不再参与召回。</p>
+            <p>
+              {hasLegacyItems
+                ? `已加载 ${loadedMemoryItems.length} 条可用记忆；旧版经验已隐藏，请更新电脑端完成清理。`
+                : memory.pageInfo
+                  ? `已加载 ${memory.items.length} / ${memory.pageInfo.counts.total} 条`
+                  : `已加载 ${memory.items.length} 条，总数未知；更新电脑端可加载更多`}
+            </p>
+          </div>
+        )}
         <div className="memory-page__actions">
           <Button
             ref={addButtonRef}
             variant="primary"
-            disabled={Boolean(busy) || !data.trusted || !data.workspacePath || adding}
+            disabled={
+              Boolean(busy) ||
+              !data.trusted ||
+              !data.workspacePath ||
+              adding ||
+              scopeFilter === "global"
+            }
             aria-expanded={adding}
             aria-controls="memory-add-form"
             onClick={openAdd}
@@ -964,72 +1128,52 @@ export function MemoryPage({
                 记忆召回已关闭。已确认的经验仍可管理，开启召回后才会提供给新任务。
               </InlineNotice>
             )}
-          {ledger.error && (
-            <InlineNotice tone="error">
-              {ledger.error}{" "}
-              <Button variant="quiet" onClick={() => void ledger.refresh()}>
-                重试
-              </Button>
-            </InlineNotice>
-          )}
-          <ExperienceUsagePanel
-            uses={ledger.uses}
-            diagnostics={ledger.diagnostics}
-            workspacePath={data.workspacePath}
-            onDetail={ledger.onDetail}
-            onFeedback={ledger.onFeedback}
-          />
-          {ledger.hasMore && (
-            <Button
-              variant="quiet"
-              disabled={ledger.loading}
-              onClick={() => void ledger.loadMore()}
-            >
-              加载更多使用记录
-            </Button>
-          )}
+          {!embedded && renderUsage()}
           {creationNotice && <InlineNotice tone="success">{creationNotice}</InlineNotice>}
-          <section className="memory-add-form" aria-labelledby="memory-preview-title">
-            <h3 id="memory-preview-title">召回预览</h3>
-            <p>输入一个问题，查看当前管理预览中可选入的记忆。此操作不调用模型。</p>
-            <p>
-              预览不具备具体任务的工具权限、附件和执行范围；需要这些条件的经验可能省略。空结果不代表经验未保存，实际引用以任务中的使用记录为准。
-            </p>
-            <form
-              onSubmit={(event) => {
-                event.preventDefault();
-                void queryPreview();
-              }}
-            >
-              <div className="settings-field">
-                预览问题
-                <TextField
-                  label="召回预览问题"
-                  type="search"
-                  maxLength={4096}
-                  value={query}
-                  onValueChange={(value) => {
-                    setQuery(value);
-                    clearPreview();
-                  }}
+          <details className="memory-content__preview" open={embedded ? undefined : true}>
+            <summary>召回预览</summary>
+            <section className="memory-add-form" aria-labelledby="memory-preview-title">
+              <h3 id="memory-preview-title">召回预览</h3>
+              <p>输入一个问题，查看当前管理预览中可选入的记忆。此操作不调用模型。</p>
+              <p>
+                预览不具备具体任务的工具权限、附件和执行范围；需要这些条件的经验可能省略。空结果不代表经验未保存，实际引用以任务中的使用记录为准。
+              </p>
+              <form
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void queryPreview();
+                }}
+              >
+                <div className="settings-field">
+                  预览问题
+                  <TextField
+                    label="召回预览问题"
+                    type="search"
+                    maxLength={4096}
+                    value={query}
+                    onValueChange={(value) => {
+                      setQuery(value);
+                      clearPreview();
+                    }}
+                  />
+                </div>
+                <Button type="submit" disabled={!query.trim() || Boolean(busy)}>
+                  {previewLoading ? "正在查询…" : "查询召回"}
+                </Button>
+              </form>
+              {previewError && <InlineNotice tone="error">{previewError}</InlineNotice>}
+              {previewLoading && <p role="status">正在读取召回预览…</p>}
+              {preview?.key === contextKey && (
+                <RecallPreview
+                  query={preview.query}
+                  result={preview.result}
+                  legacyItemIds={memory.items
+                    .filter(isLegacyExecutionMemory)
+                    .map((item) => item.itemId)}
                 />
-              </div>
-              <Button type="submit" disabled={!query.trim() || Boolean(busy)}>
-                {previewLoading ? "正在查询…" : "查询召回"}
-              </Button>
-            </form>
-            {previewError && <InlineNotice tone="error">{previewError}</InlineNotice>}
-            {previewLoading && <p role="status">正在读取召回预览…</p>}
-            {preview?.key === contextKey && (
-              <RecallPreview
-                query={preview.query}
-                result={preview.result}
-                legacyItemIds={memory.items
-                  .filter(isLegacyExecutionMemory)
-                  .map((item) => item.itemId)}
-              />
-            )}
-          </section>
+              )}
+            </section>
+          </details>
           {adding && draft && (
             <form
               id="memory-add-form"
@@ -1093,20 +1237,41 @@ export function MemoryPage({
               </div>
             </form>
           )}
-          {narrow || experience.supported ? (
+          {embedded && editing && (
+            <p className="memory-content__editing" role="status">
+              请先保存或取消当前编辑，再切换标签与范围。
+            </p>
+          )}
+          {embedded && (
+            <div className="memory-content__search">
+              <TextField
+                label="搜索记忆内容"
+                type="search"
+                placeholder="搜索记忆内容"
+                value={listQuery}
+                onValueChange={setListQuery}
+              />
+              <span>搜索当前已加载的记忆与经验</span>
+            </div>
+          )}
+          {embedded || narrow || experience.supported ? (
             <div className="memory-tabs">
               <TabList
                 className="memory-tablist"
                 role="tablist"
                 aria-label="记忆状态"
                 value={activePanel}
-                onChange={(value) => setActivePanel(value as PanelId)}
+                onChange={(value) => {
+                  if (!embedded || !editing) setActivePanel(value as PanelId);
+                }}
               >
                 {displayPanels.map((panel) => (
                   <Tab
                     key={panel}
                     value={panel}
-                    onFocus={() => setActivePanel(panel)}
+                    onFocus={() => {
+                      if (!embedded || !editing) setActivePanel(panel);
+                    }}
                     id={`memory-tab-${panel}`}
                     panelId={`memory-panel-${panel}`}
                     label={panelLabels[panel]}
@@ -1144,7 +1309,7 @@ export function MemoryPage({
               ))}
             </div>
           )}
-          {memory.pageInfo?.nextCursor && (
+          {activePanel !== "usage" && memory.pageInfo?.nextCursor && (
             <Button
               variant="quiet"
               disabled={Boolean(busy) || memory.status === "loading"}
@@ -1155,9 +1320,11 @@ export function MemoryPage({
           )}
         </>
       )}
-      <Link className="button" to="/settings/memory">
-        用户级记忆设置
-      </Link>
+      {!embedded && (
+        <Link className="button" to="/settings/memory">
+          用户级记忆设置
+        </Link>
+      )}
     </section>
   );
 }

@@ -1,5 +1,5 @@
-import { useEffect, useId, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { Link, useLocation } from "react-router-dom";
 import type {
   ExperienceApplicability,
   ExperienceReviewAction,
@@ -39,6 +39,12 @@ export interface TaskExperiencePanelProps {
   readonly reuse: readonly TaskExperienceReuse[];
   readonly mode?: "memory" | "conversation";
   readonly filter?: "pending" | "saved" | "archived";
+  /** Optional settings layout slots; review and correction state stays owned by this panel. */
+  readonly supplementalRows?: ReactNode;
+  readonly supplementalDetail?: ReactNode;
+  readonly searchQuery?: string;
+  readonly onSelectExperience?: () => void;
+  readonly onDraftStateChange?: (editing: boolean) => void;
   readonly sessionId?: string;
   readonly workspacePath?: string;
   readonly showSummary?: boolean;
@@ -69,7 +75,7 @@ export function isExperienceSuggestion(item: TaskExperienceCandidate): boolean {
 function memoryLink(workspacePath?: string, tab = "saved"): string {
   const params = new URLSearchParams({ tab });
   if (workspacePath) params.set("workspace", workspacePath);
-  return `/memory?${params}`;
+  return `/settings/memory?${params}`;
 }
 
 export function TaskExperiencePanel(props: TaskExperiencePanelProps) {
@@ -91,6 +97,10 @@ function ExperienceReviewBoard({
           item.lifecycleState === "active"
         : item.lifecycleState === "archived",
   );
+  const query = actions.searchQuery?.trim().toLocaleLowerCase();
+  const matching = query
+    ? visible.filter((item) => `${item.goal} ${item.content}`.toLocaleLowerCase().includes(query))
+    : visible;
   const routeScope = JSON.stringify([actions.workspacePath, actions.sessionId]);
   const scopeRef = useRef({ scope: routeScope, generation: 0 });
   if (scopeRef.current.scope !== routeScope)
@@ -112,6 +122,10 @@ function ExperienceReviewBoard({
   const [draftOwner, setDraftOwner] = useState<string>();
   const draftOwnerRef = useRef<string | undefined>(undefined);
   const hasDraft = Boolean(selected && draftOwner === selected.candidateId);
+  useEffect(() => {
+    actions.onDraftStateChange?.(hasDraft);
+    return () => actions.onDraftStateChange?.(false);
+  }, [hasDraft, actions.onDraftStateChange]);
   const [pendingTarget, setPendingTarget] = useState<TaskExperiencePanelProps["target"]>();
   const consumedTarget = useRef<string | undefined>(undefined);
   useEffect(() => {
@@ -136,6 +150,7 @@ function ExperienceReviewBoard({
     }
     setPendingTarget(undefined);
     setSelection({ scope, candidate: target.detail.candidate });
+    actions.onSelectExperience?.();
   }, [actions.target, scope, hasDraft, selected?.candidateId]);
   useEffect(() => {
     if (actions.unavailableTarget) {
@@ -159,7 +174,7 @@ function ExperienceReviewBoard({
       detailRef.current?.focus({ preventScroll: true });
     }
   }, [actions.target?.key, selected?.candidateId, hasDraft]);
-  if (visible.length === 0 && !selected)
+  if (visible.length === 0 && !selected && !actions.supplementalRows)
     return filter === "pending" ? (
       <EmptyState
         title="没有待审核的任务经验"
@@ -188,23 +203,32 @@ function ExperienceReviewBoard({
       )}
       <div
         className="task-experience__list"
-        aria-label={filter === "pending" ? "待审核的任务经验" : "任务经验"}
+        aria-label={
+          actions.supplementalRows
+            ? "记忆与经验"
+            : filter === "pending"
+              ? "待审核的任务经验"
+              : "任务经验"
+        }
       >
-        {visible.length === 0 && (
+        {!actions.supplementalRows && matching.length === 0 && (
           <p className="task-experience__placeholder">
             {selected && actions.target?.detail.candidate.candidateId === selected.candidateId
               ? "已按链接打开目标经验，该条目不在当前已加载列表中。"
               : `${filter === "pending" ? "没有待审核的任务经验。" : "当前标签没有经验。"}已选详情和更正草稿仍保留。`}
           </p>
         )}
-        {visible.map((item) => (
+        {matching.map((item) => (
           <button
             key={item.candidateId}
             type="button"
             className="task-experience__row"
-            aria-pressed={selected?.candidateId === item.candidateId}
+            aria-pressed={!actions.supplementalDetail && selected?.candidateId === item.candidateId}
             aria-controls={detailId}
-            onClick={() => setSelection({ scope, candidate: item })}
+            onClick={() => {
+              setSelection({ scope, candidate: item });
+              actions.onSelectExperience?.();
+            }}
           >
             <span className="task-experience__row-title">{item.goal || "任务经验"}</span>
             <span>{item.content || "正在整理任务结果…"}</span>
@@ -215,49 +239,54 @@ function ExperienceReviewBoard({
             </span>
           </button>
         ))}
+        {actions.supplementalRows}
       </div>
       <section
         ref={detailRef}
         tabIndex={-1}
         id={detailId}
         className="task-experience__detail"
-        aria-label="任务经验详情"
+        aria-label={actions.supplementalDetail ? "记忆详情" : "任务经验详情"}
       >
-        {selected ? (
-          <ExperienceDetailCard
-            key={JSON.stringify([scope, selected.candidateId])}
-            candidate={selected}
-            onDetail={actions.onDetail}
-            onReview={actions.onReview}
-            initialDetail={
-              actions.target?.detail.candidate.candidateId === selected.candidateId
-                ? actions.target.detail
-                : undefined
-            }
-            reference={
-              actions.target?.detail.candidate.candidateId === selected.candidateId
-                ? actions.target.reference
-                : undefined
-            }
-            targetUnavailable={actions.unavailableTarget?.candidateId === selected.candidateId}
-            onDraftChange={(present) => {
-              if (present) draftOwnerRef.current = selected.candidateId;
-              else if (draftOwnerRef.current === selected.candidateId)
-                draftOwnerRef.current = undefined;
-              setDraftOwner(draftOwnerRef.current);
-            }}
-          />
-        ) : (
-          <p className="task-experience__placeholder">
-            选择一条经验，查看内容、适用条件和来源后审核。
-          </p>
-        )}
+        {actions.supplementalDetail}
+        <div hidden={Boolean(actions.supplementalDetail)}>
+          {selected ? (
+            <ExperienceDetailCard
+              key={JSON.stringify([scope, selected.candidateId])}
+              candidate={selected}
+              onDetail={actions.onDetail}
+              onReview={actions.onReview}
+              initialDetail={
+                actions.target?.detail.candidate.candidateId === selected.candidateId
+                  ? actions.target.detail
+                  : undefined
+              }
+              reference={
+                actions.target?.detail.candidate.candidateId === selected.candidateId
+                  ? actions.target.reference
+                  : undefined
+              }
+              targetUnavailable={actions.unavailableTarget?.candidateId === selected.candidateId}
+              onDraftChange={(present) => {
+                if (present) draftOwnerRef.current = selected.candidateId;
+                else if (draftOwnerRef.current === selected.candidateId)
+                  draftOwnerRef.current = undefined;
+                setDraftOwner(draftOwnerRef.current);
+              }}
+            />
+          ) : (
+            <p className="task-experience__placeholder">
+              选择一条经验，查看内容、适用条件和来源后审核。
+            </p>
+          )}
+        </div>
       </section>
     </div>
   );
 }
 
 function ConversationLearning(props: TaskExperiencePanelProps) {
+  const location = useLocation();
   const candidates =
     props.showSummary === false
       ? []
@@ -351,6 +380,12 @@ function ConversationLearning(props: TaskExperiencePanelProps) {
               references.some((reference) => reference.runId === runId)) && (
               <Link
                 className="button"
+                onClick={() => {
+                  sessionStorage.setItem(
+                    "pico.settings-return-to",
+                    location.pathname + location.search,
+                  );
+                }}
                 to={memoryLink(
                   props.workspacePath,
                   items.some(
