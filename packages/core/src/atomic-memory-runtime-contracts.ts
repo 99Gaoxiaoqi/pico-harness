@@ -4,6 +4,11 @@ import type {
   MemoryItemStore,
   MemoryExtractionReceipt,
   MemoryExtractionMetrics,
+  MemoryConsolidationClaim,
+  MemoryConsolidationReceipt,
+  CommitMemoryConsolidationRequest,
+  UndoMemoryConsolidationRequest,
+  UndoMemoryConsolidationResult,
 } from "./atomic-memory-contracts.js";
 
 /** Host identity, never an LLM-selected session identifier. */
@@ -118,6 +123,30 @@ export interface AtomicMemoryStore extends MemoryItemStore {
   }): Promise<void>;
   readDeletionRevision(): Promise<number>;
   readExtractionMetrics(input: { from: number; to: number }): Promise<MemoryExtractionMetrics>;
+  /** Atomically claim the global cooldown lease and snapshot up to 256 eligible Items. */
+  claimMemoryConsolidation(input: {
+    readonly ownerId: string;
+    readonly now: number;
+    readonly leaseDurationMs: number;
+  }): Promise<MemoryConsolidationClaim | undefined>;
+  /** Release only the matching claim generation; a stale owner cannot clear a newer lease. */
+  releaseMemoryConsolidationClaim(input: {
+    readonly claimId: string;
+    readonly ownerId: string;
+    readonly fencingToken: number;
+  }): Promise<void>;
+  /** Atomically archive a claimed subset and save a body-free, idempotent undo receipt. */
+  commitMemoryConsolidation(
+    input: CommitMemoryConsolidationRequest,
+  ): Promise<MemoryConsolidationReceipt>;
+  /** Lists only 30-day records that still have undo value or were already undone. */
+  listMemoryConsolidationHistory(input: {
+    readonly now: number;
+  }): Promise<readonly MemoryConsolidationReceipt[]>;
+  /** Restore every Item in a batch or none; each archived version is checked under one write lock. */
+  undoMemoryConsolidation(
+    input: UndoMemoryConsolidationRequest,
+  ): Promise<UndoMemoryConsolidationResult>;
 }
 
 export interface AtomicMemoryEngineOptions {

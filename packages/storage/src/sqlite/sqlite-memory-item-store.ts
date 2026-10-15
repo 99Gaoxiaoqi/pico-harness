@@ -59,6 +59,14 @@ import {
   type MemoryExtractionSummary,
   type MemoryExtractionMetrics,
   type MemoryExtractionMetricGroup,
+  type MemoryConsolidationArchiveInput,
+  type MemoryConsolidationArchiveReason,
+  type MemoryConsolidationClaim,
+  type MemoryConsolidationReceipt,
+  type MemoryConsolidationArchivedItem,
+  type CommitMemoryConsolidationRequest,
+  type UndoMemoryConsolidationRequest,
+  type UndoMemoryConsolidationResult,
   type MemoryItem,
   type MemoryItemKey,
   type MemoryItemKeyInput,
@@ -89,6 +97,10 @@ const MAX_SEARCH_RESULTS = 100;
 const MAX_IDENTIFIER_CODE_POINTS = 512;
 const MAX_KEY_CODE_POINTS = 256;
 const MAX_OPERATION_RESULT_JSON_CODE_UNITS = 128 * 1_024;
+const MAX_MEMORY_CONSOLIDATION_CANDIDATES = 256;
+const MAX_MEMORY_CONSOLIDATION_JSON_CODE_UNITS = 512 * 1_024;
+const MEMORY_CONSOLIDATION_COOLDOWN_MS = 6 * 60 * 60 * 1_000;
+const MEMORY_CONSOLIDATION_UNDO_WINDOW_MS = 30 * 24 * 60 * 60 * 1_000;
 
 const require = createRequire(import.meta.url);
 
@@ -1108,6 +1120,412 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
     });
   }
 
+  async claimMemoryConsolidation(input: {
+    readonly ownerId: string;
+    readonly now: number;
+    readonly leaseDurationMs: number;
+  }): Promise<MemoryConsolidationClaim | undefined> {
+    this.#assertOpen();
+    const ownerId = normalizeIdentifier(input.ownerId, "ownerId");
+    const now = normalizeTimestamp(input.now, "now");
+    if (!Number.isSafeInteger(input.leaseDurationMs) || input.leaseDurationMs < 1)
+      throw new Error("leaseDurationMs must be a positive safe integer");
+    const leaseUntil = now + input.leaseDurationMs;
+    if (!Number.isSafeInteger(leaseUntil)) throw new Error("leaseUntil exceeds safe integer range");
+
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      const state = this.#database
+        .prepare("SELECT * FROM memory_consolidation_state WHERE singleton=1")
+        .get() as Record<string, unknown> | undefined;
+      if (!state) throw new Error("Memory consolidation state is missing");
+      const lastCommittedAt = requiredNonNegativeInteger(
+        state.last_committed_at,
+        "last_committed_at",
+      );
+      const currentLeaseId = nullableIdentifierString(state.lease_id, "lease_id");
+      const currentLeaseUntil = requiredNonNegativeInteger(state.lease_until, "lease_until");
+      if (currentLeaseId && currentLeaseUntil > now) {
+        this.#database.exec("COMMIT");
+        return undefined;
+      }
+      if (lastCommittedAt > 0 && now - lastCommittedAt < MEMORY_CONSOLIDATION_COOLDOWN_MS) {
+        this.#database.exec("COMMIT");
+        return undefined;
+      }
+
+      const ids = this.#database
+        .prepare(
+          `SELECT i.item_id FROM memory_items i
+           WHERE i.origin='agent_extracted' AND i.lifecycle_state='active'
+             AND NOT EXISTS (
+               SELECT 1 FROM execution_learning_items e
+               WHERE e.item_id=i.item_id
+             )
+           ORDER BY i.updated_at DESC, i.item_id ASC LIMIT ?`,
+        )
+        .all(MAX_MEMORY_CONSOLIDATION_CANDIDATES) as Array<{ item_id: unknown }>;
+      const candidates: MemoryItemRecord[] = [];
+      for (const row of ids) {
+        const itemId = requiredIdentifierString(row.item_id, "item_id");
+        const record = this.#readItemRecord(itemId);
+        if (record && isMemoryConsolidationEligible(record)) candidates.push(record);
+      }
+      if (candidates.length === 0) {
+        if (currentLeaseId) this.#clearMemoryConsolidationLease();
+        this.#database.exec("COMMIT");
+        return undefined;
+      }
+
+      const fencingToken = requiredNonNegativeInteger(state.fencing_token, "fencing_token") + 1;
+      if (!Number.isSafeInteger(fencingToken))
+        throw new Error("Memory consolidation fencing token exceeds safe integer range");
+      const claimId = randomUUID();
+      const claimItems = candidates.map(({ item }) => ({
+        itemId: item.itemId,
+        expectedVersion: item.version,
+      }));
+      this.#database
+        .prepare(
+          `UPDATE memory_consolidation_state
+           SET lease_id=?, lease_owner=?, lease_until=?, fencing_token=?, lease_items_json=?
+           WHERE singleton=1`,
+        )
+        .run(claimId, ownerId, leaseUntil, fencingToken, JSON.stringify(claimItems));
+      this.#database.exec("COMMIT");
+      return { claimId, ownerId, fencingToken, claimedAt: now, leaseUntil, candidates };
+    } catch (error) {
+      rollback(this.#database);
+      throw error;
+    }
+  }
+
+  async releaseMemoryConsolidationClaim(input: {
+    readonly claimId: string;
+    readonly ownerId: string;
+    readonly fencingToken: number;
+  }): Promise<void> {
+    this.#assertOpen();
+    const claimId = normalizeIdentifier(input.claimId, "claimId");
+    const ownerId = normalizeIdentifier(input.ownerId, "ownerId");
+    const fencingToken = normalizeVersion(input.fencingToken);
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      if (!this.#ownsMemoryConsolidationLease(claimId, ownerId, fencingToken)) {
+        throw new MemoryItemStoreConflictError(
+          "consolidation_claim_conflict",
+          "Memory consolidation claim is no longer owned by this worker",
+        );
+      }
+      this.#clearMemoryConsolidationLease();
+      this.#database.exec("COMMIT");
+    } catch (error) {
+      rollback(this.#database);
+      throw error;
+    }
+  }
+
+  async commitMemoryConsolidation(
+    input: CommitMemoryConsolidationRequest,
+  ): Promise<MemoryConsolidationReceipt> {
+    this.#assertOpen();
+    const batchId = normalizeIdentifier(input.batchId, "batchId");
+    const claimId = normalizeIdentifier(input.claimId, "claimId");
+    const ownerId = normalizeIdentifier(input.ownerId, "ownerId");
+    const fencingToken = normalizeVersion(input.fencingToken);
+    const now = normalizeTimestamp(input.now, "now");
+    const archive = normalizeMemoryConsolidationArchive(input.archive);
+    const requestHash = hashCanonical({ claimId, archive });
+    const internalOperationId = memoryConsolidationOperationId(batchId, "commit");
+
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      const existing = this.#readMemoryConsolidationReceiptRow(batchId);
+      if (existing) {
+        if (requiredHash(existing.request_hash, "request_hash") !== requestHash)
+          throw new MemoryItemStoreConflictError(
+            "operation_reused",
+            `Memory consolidation batch ${batchId} was reused for different changes`,
+          );
+        const receipt = decodeMemoryConsolidationReceipt(existing);
+        this.#database.exec("COMMIT");
+        return receipt;
+      }
+      if (!this.#ownsMemoryConsolidationLease(claimId, ownerId, fencingToken, now))
+        throw new MemoryItemStoreConflictError(
+          "consolidation_claim_conflict",
+          "Memory consolidation claim expired or changed before commit",
+        );
+      if (this.#readOperationRow(internalOperationId))
+        throw new MemoryItemStoreConflictError(
+          "operation_reused",
+          "Memory consolidation operation identity is already in use",
+        );
+
+      const state = this.#database
+        .prepare("SELECT lease_items_json FROM memory_consolidation_state WHERE singleton=1")
+        .get() as { lease_items_json?: unknown } | undefined;
+      const claimedItems = decodeMemoryConsolidationClaimItems(state?.lease_items_json);
+      const claimed = new Map(claimedItems.map((item) => [item.itemId, item.expectedVersion]));
+      for (const item of archive) {
+        if (claimed.get(item.itemId) !== item.expectedVersion)
+          throw new MemoryItemStoreConflictError(
+            "consolidation_claim_conflict",
+            `Memory Item ${item.itemId} is not in this consolidation claim snapshot`,
+            item.itemId,
+          );
+      }
+
+      const receiptItems: MemoryConsolidationArchivedItem[] = [];
+      for (const [index, selected] of archive.entries()) {
+        const current = this.#database
+          .prepare(
+            `SELECT i.version, i.updated_at, i.lifecycle_state
+             FROM memory_items i WHERE i.item_id=?`,
+          )
+          .get(selected.itemId) as
+          | {
+              version: unknown;
+              updated_at: unknown;
+              lifecycle_state: unknown;
+            }
+          | undefined;
+        if (!current)
+          throw new MemoryItemStoreConflictError(
+            "item_not_found",
+            `Memory Item ${selected.itemId} no longer exists`,
+            selected.itemId,
+          );
+        const currentVersion = requiredPositiveInteger(current.version, "version");
+        const currentRecord = this.#readItemRecord(selected.itemId);
+        if (
+          currentVersion !== selected.expectedVersion ||
+          current.lifecycle_state !== "active" ||
+          !currentRecord ||
+          !hasMemoryConsolidationEligibleMetadata(currentRecord)
+        )
+          throw new MemoryItemStoreConflictError(
+            "version_conflict",
+            `Memory Item ${selected.itemId} changed or is not eligible for automatic consolidation`,
+            selected.itemId,
+          );
+        const archivedVersion = currentVersion + 1;
+        const updatedAt = Math.max(
+          now,
+          requiredNonNegativeInteger(current.updated_at, "updated_at"),
+        );
+        const changed = this.#database
+          .prepare(
+            `UPDATE memory_items SET lifecycle_state='archived', version=version+1, updated_at=?
+             WHERE item_id=? AND version=? AND lifecycle_state='active' AND origin='agent_extracted'
+               AND NOT EXISTS(SELECT 1 FROM execution_learning_items e
+                 WHERE e.item_id=memory_items.item_id)`,
+          )
+          .run(updatedAt, selected.itemId, selected.expectedVersion);
+        assertChanged(changed.changes, selected.itemId);
+        receiptItems.push({
+          itemId: selected.itemId,
+          fromVersion: selected.expectedVersion,
+          archivedVersion,
+          reason: selected.reason,
+        });
+        this.#options.failpoint?.(
+          index === archive.length - 1 ? "before_operation_write" : "after_item_write",
+        );
+      }
+
+      const receipt: MemoryConsolidationReceipt = {
+        batchId,
+        status: "undoable",
+        consideredCount: claimedItems.length,
+        changes: receiptItems.length,
+        createdAt: now,
+        expiresAt: now + MEMORY_CONSOLIDATION_UNDO_WINDOW_MS,
+        items: receiptItems,
+      };
+      if (!Number.isSafeInteger(receipt.expiresAt))
+        throw new Error("Memory consolidation undo expiry exceeds safe integer range");
+      this.#database
+        .prepare(
+          `INSERT INTO memory_consolidation_receipts(
+             operation_id, request_hash, claim_id, committed_at, undo_expires_at, undone_at, result_json
+           ) VALUES (?, ?, ?, ?, ?, NULL, ?)`,
+        )
+        .run(batchId, requestHash, claimId, now, receipt.expiresAt, JSON.stringify(receipt));
+      this.#database
+        .prepare(
+          `INSERT INTO memory_write_operations(
+             operation_id, operation_type, request_hash, result_json, committed_at
+           ) VALUES (?, 'batch', ?, '[]', ?)`,
+        )
+        .run(internalOperationId, requestHash, now);
+      this.#database
+        .prepare(
+          `UPDATE memory_consolidation_state SET last_committed_at=?,
+             lease_id=NULL, lease_owner=NULL, lease_until=0, lease_items_json='[]'
+           WHERE singleton=1 AND lease_id=? AND lease_owner=? AND fencing_token=?`,
+        )
+        .run(now, claimId, ownerId, fencingToken);
+      this.#database.exec("COMMIT");
+      return receipt;
+    } catch (error) {
+      rollback(this.#database);
+      throw error;
+    }
+  }
+
+  async listMemoryConsolidationHistory(input: {
+    readonly now: number;
+  }): Promise<readonly MemoryConsolidationReceipt[]> {
+    this.#assertOpen();
+    const now = normalizeTimestamp(input.now, "now");
+    const cutoff = Math.max(0, now - MEMORY_CONSOLIDATION_UNDO_WINDOW_MS);
+    return this.#readSnapshot(() =>
+      this.#database
+        .prepare(
+          `SELECT operation_id, request_hash, committed_at, undo_expires_at, undone_at, result_json
+           FROM memory_consolidation_receipts
+           WHERE committed_at >= ? AND committed_at <= ?
+             AND (undo_expires_at > ? OR undone_at IS NOT NULL)
+           ORDER BY committed_at DESC, operation_id ASC`,
+        )
+        .all(cutoff, now, now)
+        .map((row) => decodeMemoryConsolidationReceipt(row as Record<string, unknown>))
+        .filter((receipt) => receipt.changes > 0),
+    );
+  }
+
+  async undoMemoryConsolidation(
+    input: UndoMemoryConsolidationRequest,
+  ): Promise<UndoMemoryConsolidationResult> {
+    this.#assertOpen();
+    const batchId = normalizeIdentifier(input.batchId, "batchId");
+    const now = normalizeTimestamp(input.now, "now");
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.#readMemoryConsolidationReceiptRow(batchId);
+      if (!row) {
+        this.#database.exec("COMMIT");
+        return { status: "not_found", batchId };
+      }
+      const receipt = decodeMemoryConsolidationReceipt(row);
+      const undoneAt = nullableNonNegativeInteger(row.undone_at, "undone_at");
+      if (undoneAt !== null) {
+        this.#database.exec("COMMIT");
+        return { status: "already_undone", receipt };
+      }
+      if (now >= receipt.expiresAt) {
+        this.#database.exec("COMMIT");
+        return { status: "expired", receipt };
+      }
+
+      const conflicts: Array<{
+        itemId: string;
+        expectedVersion: number;
+        actualVersion?: number;
+        reason: "missing" | "version_changed" | "not_archived" | "ineligible";
+      }> = [];
+      const restoreUpdatedAt = new Map<string, number>();
+      for (const item of receipt.items) {
+        const current = this.#database
+          .prepare(
+            `SELECT i.version, i.updated_at, i.lifecycle_state
+             FROM memory_items i WHERE i.item_id=?`,
+          )
+          .get(item.itemId) as
+          | {
+              version: unknown;
+              updated_at: unknown;
+              lifecycle_state: unknown;
+            }
+          | undefined;
+        if (!current) {
+          conflicts.push({
+            itemId: item.itemId,
+            expectedVersion: item.archivedVersion,
+            reason: "missing",
+          });
+          continue;
+        }
+        const currentVersion = requiredPositiveInteger(current.version, "version");
+        const currentRecord = this.#readItemRecord(item.itemId);
+        if (currentVersion !== item.archivedVersion) {
+          conflicts.push({
+            itemId: item.itemId,
+            expectedVersion: item.archivedVersion,
+            actualVersion: currentVersion,
+            reason: "version_changed",
+          });
+        } else if (current.lifecycle_state !== "archived") {
+          conflicts.push({
+            itemId: item.itemId,
+            expectedVersion: item.archivedVersion,
+            actualVersion: currentVersion,
+            reason: "not_archived",
+          });
+        } else if (!currentRecord || !hasMemoryConsolidationEligibleMetadata(currentRecord)) {
+          conflicts.push({
+            itemId: item.itemId,
+            expectedVersion: item.archivedVersion,
+            actualVersion: currentVersion,
+            reason: "ineligible",
+          });
+        } else {
+          restoreUpdatedAt.set(
+            item.itemId,
+            requiredNonNegativeInteger(current.updated_at, "updated_at"),
+          );
+        }
+      }
+      if (conflicts.length) {
+        this.#database.exec("COMMIT");
+        return { status: "conflict", batchId, conflicts };
+      }
+
+      const undoOperationId = memoryConsolidationOperationId(batchId, "undo");
+      const undoRequestHash = hashCanonical({ batchId, action: "undo", items: receipt.items });
+      if (this.#readOperationRow(undoOperationId))
+        throw new MemoryItemStoreConflictError(
+          "operation_reused",
+          "Memory consolidation undo operation identity is already in use",
+        );
+      for (const item of receipt.items) {
+        const updatedAt = Math.max(now, restoreUpdatedAt.get(item.itemId)!);
+        const changed = this.#database
+          .prepare(
+            `UPDATE memory_items SET lifecycle_state='active', version=version+1, updated_at=?
+             WHERE item_id=? AND version=? AND lifecycle_state='archived' AND origin='agent_extracted'
+               AND NOT EXISTS(SELECT 1 FROM execution_learning_items e
+                 WHERE e.item_id=memory_items.item_id)`,
+          )
+          .run(updatedAt, item.itemId, item.archivedVersion);
+        assertChanged(changed.changes, item.itemId);
+      }
+      const undone: MemoryConsolidationReceipt = {
+        ...receipt,
+        status: "undone",
+        undoneAt: now,
+      };
+      this.#database
+        .prepare(
+          "UPDATE memory_consolidation_receipts SET undone_at=?, result_json=? WHERE operation_id=? AND undone_at IS NULL",
+        )
+        .run(now, JSON.stringify(undone), batchId);
+      this.#database
+        .prepare(
+          `INSERT INTO memory_write_operations(
+             operation_id, operation_type, request_hash, result_json, committed_at
+           ) VALUES (?, 'batch', ?, '[]', ?)`,
+        )
+        .run(undoOperationId, undoRequestHash, now);
+      this.#database.exec("COMMIT");
+      return { status: "undone", receipt: undone };
+    } catch (error) {
+      rollback(this.#database);
+      throw error;
+    }
+  }
+
   async listItems(input: {
     workspaceKey: string;
     includeArchived?: boolean;
@@ -1745,6 +2163,48 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
       .get(operationId) as MemoryExtractionReceiptRow | undefined;
   }
 
+  #readMemoryConsolidationReceiptRow(batchId: string): Record<string, unknown> | undefined {
+    return this.#database
+      .prepare(
+        `SELECT operation_id, request_hash, claim_id, committed_at, undo_expires_at,
+                undone_at, result_json
+         FROM memory_consolidation_receipts WHERE operation_id=?`,
+      )
+      .get(batchId) as Record<string, unknown> | undefined;
+  }
+
+  #ownsMemoryConsolidationLease(
+    claimId: string,
+    ownerId: string,
+    fencingToken: number,
+    now?: number,
+  ): boolean {
+    const row = this.#database
+      .prepare(
+        `SELECT lease_id, lease_owner, lease_until, fencing_token
+         FROM memory_consolidation_state WHERE singleton=1`,
+      )
+      .get() as Record<string, unknown> | undefined;
+    if (
+      !row ||
+      row.lease_id !== claimId ||
+      row.lease_owner !== ownerId ||
+      requiredNonNegativeInteger(row.fencing_token, "fencing_token") !== fencingToken
+    )
+      return false;
+    return now === undefined || requiredNonNegativeInteger(row.lease_until, "lease_until") > now;
+  }
+
+  #clearMemoryConsolidationLease(): void {
+    this.#database
+      .prepare(
+        `UPDATE memory_consolidation_state
+         SET lease_id=NULL, lease_owner=NULL, lease_until=0, lease_items_json='[]'
+         WHERE singleton=1`,
+      )
+      .run();
+  }
+
   #assertOpen(): void {
     if (this.#closed) throw new Error("SQLite Memory Item Store is closed");
   }
@@ -1764,6 +2224,146 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
 
 function loadDatabaseSync(): typeof import("node:sqlite").DatabaseSync {
   return (require("node:sqlite") as typeof import("node:sqlite")).DatabaseSync;
+}
+
+function isMemoryConsolidationEligible(record: MemoryItemRecord): boolean {
+  return hasMemoryConsolidationEligibleMetadata(record) && record.item.lifecycleState === "active";
+}
+
+function hasMemoryConsolidationEligibleMetadata(record: MemoryItemRecord): boolean {
+  return (
+    record.item.origin === "agent_extracted" &&
+    record.sourceType === undefined &&
+    record.taskExperience === undefined
+  );
+}
+
+function normalizeMemoryConsolidationArchive(
+  value: readonly MemoryConsolidationArchiveInput[],
+): MemoryConsolidationArchiveInput[] {
+  if (!Array.isArray(value) || value.length > MAX_MEMORY_CONSOLIDATION_CANDIDATES)
+    throw new Error(
+      `Memory consolidation accepts at most ${MAX_MEMORY_CONSOLIDATION_CANDIDATES} Items`,
+    );
+  const seen = new Set<string>();
+  return value
+    .map((entry) => {
+      if (!entry || typeof entry !== "object")
+        throw new Error("Invalid Memory consolidation archive entry");
+      const itemId = normalizeIdentifier(entry.itemId, "itemId");
+      const expectedVersion = normalizeVersion(entry.expectedVersion);
+      const reason = normalizeMemoryConsolidationArchiveReason(entry.reason);
+      if (seen.has(itemId)) throw new Error(`Memory Item ${itemId} is repeated in archive batch`);
+      seen.add(itemId);
+      return { itemId, expectedVersion, reason };
+    })
+    .sort((left, right) => compareText(left.itemId, right.itemId));
+}
+
+function normalizeMemoryConsolidationArchiveReason(
+  value: unknown,
+): MemoryConsolidationArchiveReason {
+  if (value !== "duplicate" && value !== "superseded" && value !== "stale" && value !== "low_value")
+    throw new Error("Invalid Memory consolidation archive reason");
+  return value;
+}
+
+function decodeMemoryConsolidationClaimItems(value: unknown): Array<{
+  itemId: string;
+  expectedVersion: number;
+}> {
+  const json = requiredString(value, "lease_items_json");
+  if (json.length > MAX_MEMORY_CONSOLIDATION_JSON_CODE_UNITS)
+    throw invalidColumn("lease_items_json");
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(json);
+  } catch {
+    throw invalidColumn("lease_items_json");
+  }
+  if (!Array.isArray(decoded) || decoded.length > MAX_MEMORY_CONSOLIDATION_CANDIDATES)
+    throw invalidColumn("lease_items_json");
+  const seen = new Set<string>();
+  return decoded.map((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry))
+      throw invalidColumn("lease_items_json");
+    const record = entry as Record<string, unknown>;
+    const itemId = requiredIdentifierString(record.itemId, "lease itemId");
+    const expectedVersion = requiredPositiveInteger(
+      record.expectedVersion,
+      "lease expectedVersion",
+    );
+    if (seen.has(itemId)) throw invalidColumn("lease_items_json");
+    seen.add(itemId);
+    return { itemId, expectedVersion };
+  });
+}
+
+function decodeMemoryConsolidationReceipt(
+  row: Record<string, unknown>,
+): MemoryConsolidationReceipt {
+  const batchId = requiredIdentifierString(row.operation_id, "operation_id");
+  requiredHash(row.request_hash, "request_hash");
+  const committedAt = requiredNonNegativeInteger(row.committed_at, "committed_at");
+  const expiresAt = requiredNonNegativeInteger(row.undo_expires_at, "undo_expires_at");
+  const undoneAt = nullableNonNegativeInteger(row.undone_at, "undone_at");
+  const encoded = requiredString(row.result_json, "result_json");
+  if (encoded.length > MAX_MEMORY_CONSOLIDATION_JSON_CODE_UNITS) throw invalidColumn("result_json");
+  let value: unknown;
+  try {
+    value = JSON.parse(encoded);
+  } catch {
+    throw invalidColumn("result_json");
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw invalidColumn("result_json");
+  const receipt = value as Record<string, unknown>;
+  if (
+    receipt.batchId !== batchId ||
+    receipt.createdAt !== committedAt ||
+    receipt.expiresAt !== expiresAt ||
+    receipt.status !== (undoneAt === null ? "undoable" : "undone")
+  )
+    throw invalidColumn("result_json");
+  const consideredCount = requiredNonNegativeInteger(receipt.consideredCount, "consideredCount");
+  const changes = requiredNonNegativeInteger(receipt.changes, "changes");
+  if (
+    changes > consideredCount ||
+    !Array.isArray(receipt.items) ||
+    receipt.items.length !== changes
+  )
+    throw invalidColumn("result_json");
+  const seen = new Set<string>();
+  const items = receipt.items.map((value): MemoryConsolidationArchivedItem => {
+    if (!value || typeof value !== "object" || Array.isArray(value))
+      throw invalidColumn("result_json");
+    const item = value as Record<string, unknown>;
+    const itemId = requiredIdentifierString(item.itemId, "itemId");
+    const fromVersion = requiredPositiveInteger(item.fromVersion, "fromVersion");
+    const archivedVersion = requiredPositiveInteger(item.archivedVersion, "archivedVersion");
+    if (archivedVersion !== fromVersion + 1 || seen.has(itemId)) throw invalidColumn("result_json");
+    seen.add(itemId);
+    return {
+      itemId,
+      fromVersion,
+      archivedVersion,
+      reason: normalizeMemoryConsolidationArchiveReason(item.reason),
+    };
+  });
+  return {
+    batchId,
+    status: undoneAt === null ? "undoable" : "undone",
+    consideredCount,
+    changes,
+    createdAt: committedAt,
+    expiresAt,
+    ...(undoneAt !== null ? { undoneAt } : {}),
+    items,
+  };
+}
+
+function memoryConsolidationOperationId(batchId: string, action: "commit" | "undo"): string {
+  return `memory-consolidation:${action}:${hashText(batchId)}`;
 }
 
 function normalizeListFilter<T extends string>(

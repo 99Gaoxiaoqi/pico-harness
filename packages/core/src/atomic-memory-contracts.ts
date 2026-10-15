@@ -262,6 +262,74 @@ export interface MemoryExtractionMetrics {
   readonly unknownReceiptCount: number;
 }
 
+export type MemoryConsolidationArchiveReason = "duplicate" | "superseded" | "stale" | "low_value";
+
+export interface MemoryConsolidationClaim {
+  readonly claimId: string;
+  readonly ownerId: string;
+  readonly fencingToken: number;
+  readonly claimedAt: number;
+  readonly leaseUntil: number;
+  /** Snapshot of up to 256 recent active agent-extracted Items. */
+  readonly candidates: readonly MemoryItemRecord[];
+}
+
+export interface MemoryConsolidationArchiveInput {
+  readonly itemId: string;
+  readonly expectedVersion: number;
+  readonly reason: MemoryConsolidationArchiveReason;
+}
+
+export interface MemoryConsolidationArchivedItem {
+  readonly itemId: string;
+  readonly fromVersion: number;
+  /** Version after the atomic archive commit. */
+  readonly archivedVersion: number;
+  readonly reason: MemoryConsolidationArchiveReason;
+}
+
+export interface MemoryConsolidationReceipt {
+  readonly batchId: string;
+  readonly status: "undoable" | "undone";
+  readonly consideredCount: number;
+  readonly changes: number;
+  readonly createdAt: number;
+  readonly expiresAt: number;
+  readonly undoneAt?: number;
+  readonly items: readonly MemoryConsolidationArchivedItem[];
+}
+
+export interface CommitMemoryConsolidationRequest {
+  readonly batchId: string;
+  readonly claimId: string;
+  readonly ownerId: string;
+  readonly fencingToken: number;
+  /** Empty means the consolidation ran but found nothing safe to archive. */
+  readonly archive: readonly MemoryConsolidationArchiveInput[];
+  readonly now: number;
+}
+
+export interface UndoMemoryConsolidationRequest {
+  readonly batchId: string;
+  readonly now: number;
+}
+
+export type UndoMemoryConsolidationResult =
+  | { readonly status: "undone"; readonly receipt: MemoryConsolidationReceipt }
+  | { readonly status: "already_undone"; readonly receipt: MemoryConsolidationReceipt }
+  | { readonly status: "expired"; readonly receipt: MemoryConsolidationReceipt }
+  | {
+      readonly status: "conflict";
+      readonly batchId: string;
+      readonly conflicts: readonly {
+        readonly itemId: string;
+        readonly expectedVersion: number;
+        readonly actualVersion?: number;
+        readonly reason: "missing" | "version_changed" | "not_archived" | "ineligible";
+      }[];
+    }
+  | { readonly status: "not_found"; readonly batchId: string };
+
 export interface MemoryExtractionReceipt {
   readonly operationId: string;
   readonly sessionId: string;
@@ -397,7 +465,8 @@ export type MemoryItemStoreConflictReason =
   | "item_not_found"
   | "cursor_conflict"
   | "deletion_conflict"
-  | "invalid_lifecycle_transition";
+  | "invalid_lifecycle_transition"
+  | "consolidation_claim_conflict";
 
 export class MemoryItemStoreConflictError extends Error {
   override readonly name = "MemoryItemStoreConflictError";

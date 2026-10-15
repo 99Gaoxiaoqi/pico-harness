@@ -26,7 +26,38 @@ import {
   retireExecutionLessons,
 } from "./retire-execution-lessons.js";
 
-export const SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION = 14;
+export const SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION = 15;
+
+const MEMORY_CONSOLIDATION_SCHEMA_SQL = `
+CREATE TABLE memory_consolidation_state (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  last_committed_at INTEGER NOT NULL DEFAULT 0 CHECK (last_committed_at >= 0),
+  lease_id TEXT,
+  lease_owner TEXT,
+  lease_until INTEGER NOT NULL DEFAULT 0 CHECK (lease_until >= 0),
+  fencing_token INTEGER NOT NULL DEFAULT 0 CHECK (fencing_token >= 0),
+  lease_items_json TEXT NOT NULL DEFAULT '[]',
+  CHECK (
+    (lease_id IS NULL AND lease_owner IS NULL AND lease_until = 0 AND lease_items_json = '[]')
+    OR
+    (lease_id IS NOT NULL AND length(lease_id) > 0 AND lease_owner IS NOT NULL
+      AND length(lease_owner) > 0 AND lease_until > 0)
+  )
+) WITHOUT ROWID;
+INSERT INTO memory_consolidation_state(singleton) VALUES (1);
+
+CREATE TABLE memory_consolidation_receipts (
+  operation_id TEXT PRIMARY KEY,
+  request_hash TEXT NOT NULL CHECK (length(request_hash) = 64),
+  claim_id TEXT NOT NULL UNIQUE,
+  committed_at INTEGER NOT NULL CHECK (committed_at >= 0),
+  undo_expires_at INTEGER NOT NULL CHECK (undo_expires_at >= committed_at),
+  undone_at INTEGER CHECK (undone_at IS NULL OR undone_at >= committed_at),
+  result_json TEXT NOT NULL
+);
+CREATE INDEX memory_consolidation_receipts_recent
+  ON memory_consolidation_receipts(committed_at DESC, operation_id ASC);
+`;
 
 const EXECUTION_LESSON_SCHEMA_SQL = `
 CREATE TABLE execution_lesson_candidates (
@@ -200,7 +231,8 @@ CREATE INDEX memory_items_by_scope_and_lifecycle
 ` +
   EXECUTION_LESSON_SCHEMA_SQL +
   EXECUTION_LEARNING_SCHEMA_SQL +
-  TASK_EXPERIENCE_SCHEMA_SQL;
+  TASK_EXPERIENCE_SCHEMA_SQL +
+  MEMORY_CONSOLIDATION_SCHEMA_SQL;
 
 const CURRENT_SCHEMA_SHAPE = {
   tables: [
@@ -291,12 +323,41 @@ const CURRENT_SCHEMA_SHAPE = {
         "committed_at",
       ],
     },
+    {
+      name: "memory_consolidation_state",
+      requiredColumns: [
+        "singleton",
+        "last_committed_at",
+        "lease_id",
+        "lease_owner",
+        "lease_until",
+        "fencing_token",
+        "lease_items_json",
+      ],
+    },
+    {
+      name: "memory_consolidation_receipts",
+      requiredColumns: [
+        "operation_id",
+        "request_hash",
+        "claim_id",
+        "committed_at",
+        "undo_expires_at",
+        "undone_at",
+        "result_json",
+      ],
+    },
   ],
   indexes: [
     {
       name: "memory_item_keys_by_normalized_key",
       tableName: "memory_item_keys",
       requiredColumnPrefix: ["normalized_key", "item_id"],
+    },
+    {
+      name: "memory_consolidation_receipts_recent",
+      tableName: "memory_consolidation_receipts",
+      requiredColumnPrefix: ["committed_at", "operation_id"],
     },
   ],
 };
@@ -331,6 +392,7 @@ export function initializeSqliteLongTermMemoryDatabase(db: DatabaseSync): void {
         if (version <= 10) db.exec(EXECUTION_LEARNING_SCHEMA_SQL);
         if (version <= 11) db.exec(TASK_EXPERIENCE_SCHEMA_SQL);
         if (version <= 12) migrateExperienceFeedback(db);
+        if (version <= 14) db.exec(MEMORY_CONSOLIDATION_SCHEMA_SQL);
       }
       retireExecutionLessons(db);
       db.exec(`PRAGMA user_version = ${SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION}`);
@@ -353,10 +415,11 @@ export function assertSupportedSqliteLongTermMemorySchemaVersion(db: DatabaseSyn
     version !== 11 &&
     version !== 12 &&
     version !== 13 &&
+    version !== 14 &&
     version !== SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION
   ) {
     throw new Error(
-      `Long-term memory SQLite schema ${version} is unsupported; expected ${SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION}. Only schemas 9, 10, 11, 12 and 13 can be upgraded automatically.`,
+      `Long-term memory SQLite schema ${version} is unsupported; expected ${SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION}. Only schemas 9, 10, 11, 12, 13 and 14 can be upgraded automatically.`,
     );
   }
   if (
@@ -557,9 +620,11 @@ function validateMinimumSchemaShape(
     }
   }
   const shape = CURRENT_SCHEMA_SHAPE;
+  const schemaVersion = readSqliteLongTermMemorySchemaVersion(db);
   const readSchemaObject = db.prepare("SELECT type, tbl_name FROM sqlite_schema WHERE name = ?");
   for (const table of shape.tables) {
     if (!includeExecutionLessons && table.name === "execution_lesson_candidates") continue;
+    if (schemaVersion < 15 && table.name.startsWith("memory_consolidation_")) continue;
     const object = readSchemaObject.get(table.name) as
       | { type?: unknown; tbl_name?: unknown }
       | undefined;
@@ -584,6 +649,7 @@ function validateMinimumSchemaShape(
   }
 
   for (const index of shape.indexes) {
+    if (schemaVersion < 15 && index.tableName.startsWith("memory_consolidation_")) continue;
     const object = readSchemaObject.get(index.name) as
       | { type?: unknown; tbl_name?: unknown }
       | undefined;
