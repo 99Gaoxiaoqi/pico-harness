@@ -75,7 +75,7 @@ class DesktopLearningRuntime extends AgentRuntime {
 }
 
 test(
-  "Desktop RPC的独立input/engine/Host Run正确绑定，附件warnings不触发纠正且新文件采用可验证",
+  "Desktop RPC独立身份绑定与低风险自动试用，附件warnings不纠正且未交付不晋级",
   { timeout: 30_000 },
   async (t) => {
     const root = await realpath(await mkdtemp(join(tmpdir(), "pico-desktop-task-binding-")));
@@ -298,40 +298,38 @@ test(
     assert.deepEqual(sums, [20, 30]);
     const worker = getExecutionLearningWorker(picoHome);
     assert.ok(worker);
-    let pending;
+    let trial;
     const reflectionDeadline = Date.now() + 12_000;
     while (Date.now() < reflectionDeadline) {
       await worker.flushOnce();
       await worker.drain();
-      pending = (await memory.taskExperiences.queryTaskExperiences(paths.workspace.id)).find(
-        (candidate) => candidate.review === "pending",
+      trial = (await memory.taskExperiences.queryTaskExperiences(paths.workspace.id)).find(
+        (candidate) => candidate.state === "saved" && candidate.maturity === "trial",
       );
-      if (pending) break;
+      if (trial) break;
       await delay(250);
     }
     assert.ok(
-      pending,
+      trial,
       JSON.stringify(await memory.taskExperiences.queryTaskExperiences(paths.workspace.id)),
     );
-    assert.equal(pending.runId, correctionHostRun);
-    assert.deepEqual(pending.applicability.spreadsheet, {
+    assert.equal(trial.runId, correctionHostRun);
+    assert.equal(
+      trial.review,
+      "unneeded",
+      "low-risk candidates enter restricted trial without review RPC",
+    );
+    assert.equal(trial.risk, "low");
+    assert.equal(trial.enabled, true);
+    assert.equal(trial.validation, "unknown");
+    assert.equal(trial.positiveReuseCount, 0);
+    assert.equal(trial.promotionReason, "none");
+    assert.ok(trial.itemId);
+    assert.deepEqual(trial.applicability.spreadsheet, {
       operation: "sum",
       header: false,
       dataKind: "finite-numbers",
     });
-    const approved = parseRuntimeResult(
-      "memory.learning.review",
-      await services.desktopService.handle(
-        createRuntimeRequest("memory.learning.review", {
-          workspacePath,
-          candidateId: pending.candidateId,
-          expectedRecordRevision: pending.recordRevision,
-          expectedContentVersion: pending.contentVersion,
-          operationId: randomUUID(),
-          action: "accept",
-        }),
-      ),
-    );
     const currentSession = await createSession(),
       currentFile = await upload(currentSession, "新预算.xlsx", [7, 11]);
     const reuseHostRun = await send(
@@ -359,7 +357,7 @@ test(
     const receipt = uses.uses.find(
       (receipt) =>
         receipt.source.kind === "reviewed-reference" &&
-        receipt.source.candidateId === approved.candidate.candidateId,
+        receipt.source.candidateId === trial.candidateId,
     );
     assert.ok(receipt);
     assert.equal(receipt.hostRunId, reuseHostRun);
@@ -368,6 +366,17 @@ test(
     assert.equal(receipt.adoption, "unknown");
     assert.equal(receipt.validation, "unknown");
     assert.ok(receipt.referenceContent);
+    const afterReuse = await memory.taskExperiences.readTaskExperienceCandidate(trial.candidateId);
+    assert.equal(afterReuse?.review, "unneeded");
+    assert.equal(
+      afterReuse?.maturity,
+      "trial",
+      "without confirmed physical delivery a successful tool result cannot promote the trial",
+    );
+    assert.equal(afterReuse?.enabled, true);
+    assert.equal(afterReuse?.validation, "unknown");
+    assert.equal(afterReuse?.positiveReuseCount, 0);
+    assert.equal(afterReuse?.promotionReason, "none");
     assert.equal(
       (
         await memory.taskExperiences.queryTaskExperiences(paths.workspace.id, {
