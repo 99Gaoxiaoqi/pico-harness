@@ -165,6 +165,40 @@ export type RuntimeMemoryMetrics = JsonObject & {
   readonly unknownReceiptCount: number;
 };
 
+export type RuntimeMemoryConsolidationReason = "duplicate" | "superseded" | "stale" | "low_value";
+
+export type RuntimeMemoryConsolidationReceipt = JsonObject & {
+  readonly batchId: string;
+  readonly status: "undoable" | "undone";
+  readonly consideredCount: number;
+  readonly createdAt: number;
+  readonly expiresAt: number;
+  readonly undoneAt?: number;
+  readonly items: readonly (JsonObject & {
+    readonly itemId: string;
+    readonly fromVersion: number;
+    readonly archivedVersion: number;
+    readonly reason: RuntimeMemoryConsolidationReason;
+  })[];
+};
+
+export type RuntimeMemoryConsolidationUndoResult =
+  | {
+      readonly status: "undone" | "already_undone" | "expired";
+      readonly receipt: RuntimeMemoryConsolidationReceipt;
+    }
+  | {
+      readonly status: "conflict";
+      readonly batchId: string;
+      readonly conflicts: readonly (JsonObject & {
+        readonly itemId: string;
+        readonly expectedVersion: number;
+        readonly actualVersion?: number;
+        readonly reason: string;
+      })[];
+    }
+  | { readonly status: "not_found"; readonly batchId: string };
+
 const memoryItemKindParam = oneOfParam([
   "preference",
   "identity",
@@ -367,6 +401,63 @@ const memoryMetricsResult = exactResultShape({
   unknownReceiptCount: resultNonNegativeInteger,
 });
 
+const memoryConsolidationReceiptResult = exactResultShape(
+  {
+    batchId: resultString,
+    status: resultOneOf(["undoable", "undone"]),
+    consideredCount: resultNonNegativeInteger,
+    createdAt: resultNonNegativeInteger,
+    expiresAt: resultNonNegativeInteger,
+    items: resultArray(
+      exactResultShape({
+        itemId: resultString,
+        fromVersion: resultNonNegativeInteger,
+        archivedVersion: resultNonNegativeInteger,
+        reason: resultOneOf(["duplicate", "superseded", "stale", "low_value"]),
+      }),
+    ),
+  },
+  { undoneAt: resultNonNegativeInteger },
+);
+
+const memoryConsolidationUndoResult: RuntimeResultRule = (value, path) => {
+  if (!isJsonObject(value) || typeof value.status !== "string")
+    throw invalidResult(`${path}.status 必须是字符串`);
+  if (
+    value.status === "undone" ||
+    value.status === "already_undone" ||
+    value.status === "expired"
+  ) {
+    exactResultShape({
+      status: resultOneOf(["undone", "already_undone", "expired"]),
+      receipt: memoryConsolidationReceiptResult,
+    })(value, path);
+    return;
+  }
+  if (value.status === "conflict") {
+    exactResultShape({
+      status: resultOneOf(["conflict"]),
+      batchId: resultString,
+      conflicts: resultArray(
+        exactResultShape(
+          {
+            itemId: resultString,
+            expectedVersion: resultNonNegativeInteger,
+            reason: resultString,
+          },
+          { actualVersion: resultNonNegativeInteger },
+        ),
+      ),
+    })(value, path);
+    return;
+  }
+  if (value.status === "not_found") {
+    exactResultShape({ status: resultOneOf(["not_found"]), batchId: resultString })(value, path);
+    return;
+  }
+  throw invalidResult(`${path}.status 不受支持`);
+};
+
 export type MemoryMethodMap = TaskExperienceMethodMap & {
   readonly "memory.learning.list": {
     readonly params: WorkspaceParams & { readonly sessionId?: string };
@@ -480,6 +571,14 @@ export type MemoryMethodMap = TaskExperienceMethodMap & {
     };
     readonly result: { readonly metrics: RuntimeMemoryMetrics };
   };
+  readonly "memory.consolidation.history": {
+    readonly params: WorkspaceParams;
+    readonly result: { readonly receipts: readonly RuntimeMemoryConsolidationReceipt[] };
+  };
+  readonly "memory.consolidation.undo": {
+    readonly params: WorkspaceParams & { readonly batchId: string };
+    readonly result: RuntimeMemoryConsolidationUndoResult;
+  };
 };
 
 export const memoryParamValidators = {
@@ -532,6 +631,11 @@ export const memoryParamValidators = {
     {},
     { workspacePath: stringParam, from: nonNegativeIntegerParam, to: nonNegativeIntegerParam },
   ),
+  "memory.consolidation.history": exactParamShape({ workspacePath: stringParam }),
+  "memory.consolidation.undo": exactParamShape({
+    workspacePath: stringParam,
+    batchId: boundedNonEmptyStringParam(512),
+  }),
 } satisfies Readonly<Record<keyof MemoryMethodMap, RuntimeParamValidator>>;
 
 const learningStates = [
@@ -784,4 +888,8 @@ export const memoryResultValidators = {
   "memory.settings.update": exactResultShape({ settings: memorySettingsResult }),
   "memory.context.preview": (v, p) => previewRule(isV2(v))(v, p),
   "memory.metrics.get": exactResultShape({ metrics: memoryMetricsResult }),
+  "memory.consolidation.history": exactResultShape({
+    receipts: resultArray(memoryConsolidationReceiptResult),
+  }),
+  "memory.consolidation.undo": memoryConsolidationUndoResult,
 } satisfies Readonly<Record<keyof MemoryMethodMap, RuntimeResultRule>>;

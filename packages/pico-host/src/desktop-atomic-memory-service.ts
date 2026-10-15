@@ -25,6 +25,8 @@ import {
 import type {
   RuntimeMemoryItem,
   RuntimeMemoryListItem,
+  RuntimeMemoryConsolidationReceipt,
+  RuntimeMemoryConsolidationUndoResult,
   RuntimeMemorySettings,
   RuntimeNotificationMap,
   RuntimeParams,
@@ -655,6 +657,35 @@ export class DesktopAtomicMemoryService {
     });
   }
 
+  async listConsolidationHistory(
+    workspacePath: string,
+  ): Promise<RuntimeResult<"memory.consolidation.history">> {
+    return this.withStore(workspacePath, async (store) => {
+      const receipts = await store.listMemoryConsolidationHistory({ now: this.now() });
+      return {
+        receipts: receipts.slice(0, 20).map(projectConsolidationReceipt),
+      };
+    });
+  }
+
+  async undoConsolidation(
+    workspacePath: string,
+    batchId: string,
+  ): Promise<RuntimeResult<"memory.consolidation.undo">> {
+    return this.withStore(workspacePath, async (store) => {
+      const result = await store.undoMemoryConsolidation({ batchId, now: this.now() });
+      if (result.status === "undone") {
+        for (const item of result.receipt.items) {
+          const current = await store.readItem(item.itemId);
+          if (current) this.changed(workspacePath, current);
+        }
+      }
+      if ("receipt" in result)
+        return { ...result, receipt: projectConsolidationReceipt(result.receipt) };
+      return result;
+    });
+  }
+
   close(): void {
     this.closed = true;
   }
@@ -736,6 +767,36 @@ export class DesktopAtomicMemoryService {
       /* The renderer can refetch canonical state. */
     }
   }
+}
+
+function projectConsolidationReceipt(receipt: {
+  readonly batchId: string;
+  readonly status: "undoable" | "undone";
+  readonly consideredCount: number;
+  readonly createdAt: number;
+  readonly expiresAt: number;
+  readonly undoneAt?: number;
+  readonly items: readonly {
+    readonly itemId: string;
+    readonly fromVersion: number;
+    readonly archivedVersion: number;
+    readonly reason: RuntimeMemoryConsolidationReceipt["items"][number]["reason"];
+  }[];
+}): RuntimeMemoryConsolidationReceipt {
+  return {
+    batchId: receipt.batchId,
+    status: receipt.status,
+    consideredCount: receipt.consideredCount,
+    createdAt: receipt.createdAt,
+    expiresAt: receipt.expiresAt,
+    ...(receipt.undoneAt !== undefined ? { undoneAt: receipt.undoneAt } : {}),
+    items: receipt.items.map((item) => ({
+      itemId: item.itemId,
+      fromVersion: item.fromVersion,
+      archivedVersion: item.archivedVersion,
+      reason: item.reason,
+    })),
+  };
 }
 
 async function authorizedItem(

@@ -11,7 +11,12 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useSearchParams } from "react-router-dom";
-import type { RuntimeMemoryItem, RuntimeMemoryListItem, RuntimeResult } from "@pico/protocol";
+import type {
+  RuntimeMemoryConsolidationReceipt,
+  RuntimeMemoryItem,
+  RuntimeMemoryListItem,
+  RuntimeResult,
+} from "@pico/protocol";
 import { Button, EmptyState, IconButton, InlineNotice } from "./components.js";
 import {
   experienceIsSaved,
@@ -79,6 +84,20 @@ const diagnosticLabels = {
   duplicate: "重复展示已省略",
   budget: "超过 Token 预算",
   item_limit: "超过条数限制",
+};
+const consolidationReasonLabels: Record<
+  RuntimeMemoryConsolidationReceipt["items"][number]["reason"],
+  string
+> = {
+  duplicate: "重复内容",
+  superseded: "已被新记忆替代",
+  stale: "信息已过时",
+  low_value: "长期价值较低",
+};
+
+type ConsolidationNotice = {
+  readonly tone: "warning" | "error" | "success";
+  readonly message: string;
 };
 
 export function nextMemoryTabIndex(current: number, key: string, count = panels.length): number {
@@ -315,6 +334,47 @@ export function MemoryPage({
   const [activePanel, setActivePanel] = useState<PanelId>(
     searchParams.get("tab") === "pending" && experience.supported ? "pending" : "saved",
   );
+  const [consolidationHistory, setConsolidationHistory] = useState<{
+    readonly workspacePath?: string;
+    readonly status: "idle" | "loading" | "ready" | "error";
+    readonly receipts: readonly RuntimeMemoryConsolidationReceipt[];
+    readonly error?: string;
+  }>({ status: "idle", receipts: [] });
+  const [consolidationRefresh, setConsolidationRefresh] = useState(0);
+  const [consolidationNotice, setConsolidationNotice] = useState<ConsolidationNotice>();
+  const [undoingBatchId, setUndoingBatchId] = useState<string>();
+  useEffect(() => {
+    const workspacePath = data.workspacePath;
+    if (!workspacePath || !data.trusted || runtime.connection.kind !== "ready") {
+      setConsolidationHistory({ status: "idle", receipts: [] });
+      return;
+    }
+    let active = true;
+    setConsolidationHistory({ workspacePath, status: "loading", receipts: [] });
+    void actions
+      .queryMemoryConsolidationHistory(workspacePath)
+      .then(({ receipts }) => {
+        if (active) setConsolidationHistory({ workspacePath, status: "ready", receipts });
+      })
+      .catch((error: unknown) => {
+        if (active)
+          setConsolidationHistory({
+            workspacePath,
+            status: "error",
+            receipts: [],
+            error: error instanceof Error ? error.message : "读取自动整理记录失败。",
+          });
+      });
+    return () => {
+      active = false;
+    };
+  }, [
+    actions.queryMemoryConsolidationHistory,
+    consolidationRefresh,
+    data.trusted,
+    data.workspacePath,
+    runtime.connection.kind,
+  ]);
   useEffect(() => {
     const requested = searchParams.get("tab");
     if (
@@ -667,6 +727,44 @@ export function MemoryPage({
       setEditor(undefined);
       setAnnouncement("记忆已删除。");
       clearPreview();
+    }
+  };
+  const undoConsolidation = async (batchId: string) => {
+    const workspacePath = data.workspacePath;
+    if (!workspacePath || undoingBatchId) return;
+    setUndoingBatchId(batchId);
+    setConsolidationNotice(undefined);
+    try {
+      const result = await actions.undoMemoryConsolidation(workspacePath, batchId);
+      if (result.status === "undone") {
+        setConsolidationNotice({
+          tone: "success",
+          message: `已撤销本批自动整理，恢复 ${result.receipt.items.length} 条记忆。`,
+        });
+        void actions.refreshMemory().catch(() => undefined);
+      } else if (result.status === "already_undone") {
+        setConsolidationNotice({ tone: "success", message: "本批自动整理此前已撤销。" });
+      } else if (result.status === "expired") {
+        setConsolidationNotice({ tone: "warning", message: "本批整理的 30 天撤销期限已过。" });
+      } else if (result.status === "conflict") {
+        setConsolidationNotice({
+          tone: "error",
+          message: `未能撤销：${result.conflicts.length} 条相关记忆已发生变化，当前记录均已保留，没有部分恢复。`,
+        });
+      } else {
+        setConsolidationNotice({
+          tone: "warning",
+          message: "找不到这批整理记录，可能已过期清理。",
+        });
+      }
+    } catch (error) {
+      setConsolidationNotice({
+        tone: "error",
+        message: error instanceof Error ? error.message : "撤销自动整理失败，请重试。",
+      });
+    } finally {
+      setUndoingBatchId(undefined);
+      setConsolidationRefresh((revision) => revision + 1);
     }
   };
   const renderExperience = (filter: Exclude<PanelId, "usage">) => (
@@ -1041,6 +1139,93 @@ export function MemoryPage({
       </>
     );
   };
+  const renderConsolidationHistory = () => (
+    <section className="memory-maintenance" aria-labelledby="memory-maintenance-title">
+      <header className="memory-maintenance__header">
+        <div>
+          <h3 id="memory-maintenance-title">最近自动整理</h3>
+          <p>整理范围：全部工作区的自动提取记忆。每批整理可在 30 天内撤销。</p>
+        </div>
+        <Button
+          variant="quiet"
+          disabled={consolidationHistory.status === "loading"}
+          onClick={() => setConsolidationRefresh((revision) => revision + 1)}
+        >
+          <RefreshCw aria-hidden="true" size={14} />
+          刷新记录
+        </Button>
+      </header>
+      {consolidationNotice && (
+        <InlineNotice tone={consolidationNotice.tone}>{consolidationNotice.message}</InlineNotice>
+      )}
+      {consolidationHistory.status === "loading" && <p role="status">正在读取自动整理记录…</p>}
+      {consolidationHistory.status === "error" && (
+        <InlineNotice tone="error">
+          {consolidationHistory.error ?? "读取自动整理记录失败。"}{" "}
+          <Button
+            variant="quiet"
+            onClick={() => setConsolidationRefresh((revision) => revision + 1)}
+          >
+            重试
+          </Button>
+        </InlineNotice>
+      )}
+      {consolidationHistory.status === "ready" && consolidationHistory.receipts.length === 0 && (
+        <p className="memory-maintenance__empty">暂无自动整理记录。</p>
+      )}
+      {consolidationHistory.status === "ready" && consolidationHistory.receipts.length > 0 && (
+        <div className="memory-maintenance__list" role="list" aria-label="自动整理批次">
+          {consolidationHistory.receipts.map((receipt) => {
+            const expired = receipt.expiresAt <= Date.now();
+            const reasonCounts = receipt.items.reduce<Partial<Record<string, number>>>(
+              (counts, item) => ({ ...counts, [item.reason]: (counts[item.reason] ?? 0) + 1 }),
+              {},
+            );
+            return (
+              <article className="memory-maintenance__batch" role="listitem" key={receipt.batchId}>
+                <div className="memory-maintenance__batch-main">
+                  <strong>{formatTime(receipt.createdAt)}</strong>
+                  <span>
+                    检查 {receipt.consideredCount} 条 · 归档 {receipt.items.length} 条
+                  </span>
+                  {Object.entries(consolidationReasonLabels).some(
+                    ([reason]) => (reasonCounts[reason] ?? 0) > 0,
+                  ) && (
+                    <ul className="memory-maintenance__reasons" aria-label="归档原因和数量">
+                      {Object.entries(consolidationReasonLabels).map(([reason, label]) => {
+                        const count = reasonCounts[reason] ?? 0;
+                        return count > 0 ? (
+                          <li key={reason}>
+                            {label} {count} 条
+                          </li>
+                        ) : null;
+                      })}
+                    </ul>
+                  )}
+                  <span className="memory-maintenance__deadline">
+                    {receipt.status === "undone"
+                      ? `已于 ${formatTime(receipt.undoneAt ?? receipt.createdAt)} 撤销`
+                      : expired
+                        ? `撤销期限已于 ${formatTime(receipt.expiresAt)} 结束`
+                        : `可撤销至 ${formatTime(receipt.expiresAt)}`}
+                  </span>
+                </div>
+                {receipt.status === "undoable" && (
+                  <Button
+                    variant="quiet"
+                    disabled={expired || Boolean(undoingBatchId) || !data.trusted}
+                    onClick={() => void undoConsolidation(receipt.batchId)}
+                  >
+                    {undoingBatchId === receipt.batchId ? "正在撤销…" : "撤销本批整理"}
+                  </Button>
+                )}
+              </article>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
 
   return (
     <section
@@ -1101,6 +1286,7 @@ export function MemoryPage({
         <InlineNotice tone="warning">信任当前工作区后可管理记忆。</InlineNotice>
       ) : (
         <>
+          {renderConsolidationHistory()}
           {searchParams.get("tab") === "native" && (
             <InlineNotice>
               原生学习入口已合并到工作区记忆。已保存经验与历史使用记录仍可在此管理。

@@ -494,6 +494,14 @@ function ConversationLearning(props: TaskExperiencePanelProps) {
               <div key={item.candidateId} className="task-experience__summary-row">
                 <span>{item.goal || "任务经验"}</span>
                 <ExperienceState candidate={item} />
+                {isExperienceSuggestion(item) && experienceNeedsReview(item) && (
+                  <ConversationReviewCard
+                    candidate={item}
+                    workspacePath={props.workspacePath}
+                    onDetail={props.onDetail}
+                    onReview={props.onReview}
+                  />
+                )}
               </div>
             ))}
             {(items.some(isExperienceSuggestion) ||
@@ -522,6 +530,182 @@ function ConversationLearning(props: TaskExperiencePanelProps) {
         </details>
       ))}
     </div>
+  );
+}
+
+function ConversationReviewCard({
+  candidate,
+  workspacePath,
+  onDetail,
+  onReview,
+}: Pick<TaskExperiencePanelProps, "onDetail" | "onReview"> & {
+  readonly candidate: TaskExperienceCandidate;
+  readonly workspacePath?: string;
+}) {
+  const location = useLocation();
+  const [current, setCurrent] = useState(candidate);
+  const [busy, setBusy] = useState(false);
+  const [loadingSources, setLoadingSources] = useState(true);
+  const [notice, setNotice] = useState("");
+  const [error, setError] = useState("");
+  const [detail, setDetail] = useState<ExperienceDetail>();
+  const operation = useRef<{ fingerprint: string; operationId: string } | undefined>(undefined);
+  useEffect(() => {
+    let active = true;
+    setDetail(undefined);
+    setLoadingSources(true);
+    void onDetail(candidate.candidateId)
+      .then((value) => {
+        if (active) setDetail(value);
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (active) setLoadingSources(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [candidate.candidateId, candidate.recordRevision, onDetail]);
+  useEffect(() => {
+    setCurrent((previous) =>
+      previous.recordRevision > candidate.recordRevision ? previous : candidate,
+    );
+  }, [candidate]);
+
+  const act = async (action: Extract<ExperienceReviewAction, "accept" | "defer" | "reject">) => {
+    if (busy || !experienceNeedsReview(current)) return;
+    const payload = {
+      candidateId: current.candidateId,
+      expectedRecordRevision: current.recordRevision,
+      expectedContentVersion: current.contentVersion,
+      action,
+    };
+    const fingerprint = JSON.stringify(payload);
+    if (operation.current?.fingerprint !== fingerprint)
+      operation.current = { fingerprint, operationId: crypto.randomUUID() };
+    setBusy(true);
+    setNotice("");
+    setError("");
+    try {
+      const result = await onReview({ ...payload, operationId: operation.current.operationId });
+      setCurrent(result);
+      operation.current = undefined;
+      setNotice(
+        action === "accept"
+          ? "已确认并启用；这不代表经验已经通过验证。"
+          : action === "defer"
+            ? "已暂缓，这条经验不会用于后续任务。"
+            : "已拒绝，这条经验不会用于后续任务。",
+      );
+    } catch (failure) {
+      setError(
+        isMemoryConflict(failure)
+          ? "审核状态已变化，请到记忆页读取最新详情后再操作。"
+          : "审核操作未保存，请重试或到记忆页查看当前状态。",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+  const detailHref = experienceManagementHref(
+    workspacePath,
+    { candidateId: current.candidateId },
+    "pending",
+  );
+  const firstSource = current.sources[0];
+
+  return (
+    <section className="task-experience__summary-review" aria-label="任务经验审核卡片">
+      <header>
+        <strong>
+          {current.risk === "high"
+            ? riskLabels.high
+            : current.risk === "unclear"
+              ? riskLabels.unclear
+              : "待审核"}
+        </strong>
+        <span>审核前不会用于后续任务</span>
+      </header>
+      <p>{experienceReviewReason(current)}</p>
+      <p className="task-experience__summary-review-content">{current.content}</p>
+      <Applicability candidate={current} />
+      <p>来源：{current.sources.length} 条本轮任务记录</p>
+      {detail?.observations.length ? (
+        <section className="task-experience__summary-review-sources" aria-label="来源摘要">
+          <strong>来源摘要</strong>
+          {detail.observations.slice(0, 3).map((observation) => (
+            <p key={observation.observationId}>
+              {observation.correction
+                ? "用户纠正"
+                : observation.kind === "user-input"
+                  ? "用户输入"
+                  : "执行观察"}
+              ：{observation.summary}
+            </p>
+          ))}
+          {detail.observations.length > 3 && (
+            <p>另有 {detail.observations.length - 3} 条来源摘要。</p>
+          )}
+        </section>
+      ) : (
+        <p>
+          {loadingSources
+            ? "正在读取来源摘要…"
+            : current.sources.length
+              ? `有 ${current.sources.length} 条来源记录，摘要暂不可用。`
+              : "来源事件暂不可用。"}
+        </p>
+      )}
+      {firstSource && (
+        <details className="memory-source">
+          <summary>查看来源引用</summary>
+          {current.sources.map((source) => (
+            <dl key={`${source.sessionId}:${source.eventId}`}>
+              <div>
+                <dt>来源会话</dt>
+                <dd>{source.sessionId}</dd>
+              </div>
+              <div>
+                <dt>来源运行</dt>
+                <dd>{source.runId}</dd>
+              </div>
+              <div>
+                <dt>来源事件</dt>
+                <dd>{source.eventId}</dd>
+              </div>
+            </dl>
+          ))}
+        </details>
+      )}
+      {notice && <InlineNotice tone="success">{notice}</InlineNotice>}
+      {error && <InlineNotice tone="error">{error}</InlineNotice>}
+      {experienceNeedsReview(current) && (
+        <div className="task-experience__summary-review-actions">
+          <Button
+            variant="primary"
+            disabled={busy || !current.content.trim()}
+            onClick={() => void act("accept")}
+          >
+            {busy ? "处理中…" : "确认并启用"}
+          </Button>
+          <Link
+            className="button button--quiet"
+            onClick={() =>
+              sessionStorage.setItem("pico.settings-return-to", location.pathname + location.search)
+            }
+            to={detailHref}
+          >
+            编辑详情
+          </Link>
+          <Button variant="quiet" disabled={busy} onClick={() => void act("defer")}>
+            暂缓
+          </Button>
+          <Button variant="quiet" disabled={busy} onClick={() => void act("reject")}>
+            拒绝
+          </Button>
+        </div>
+      )}
+    </section>
   );
 }
 

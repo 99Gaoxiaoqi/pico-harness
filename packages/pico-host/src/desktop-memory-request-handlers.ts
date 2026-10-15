@@ -45,6 +45,12 @@ export interface DesktopMemoryRequestContext {
   readonly getMetrics: (
     params: RuntimeRequest<"memory.metrics.get">["params"],
   ) => Awaitable<JsonValue>;
+  readonly listConsolidationHistory: (
+    params: RuntimeRequest<"memory.consolidation.history">["params"],
+  ) => Awaitable<JsonValue>;
+  readonly undoConsolidation: (
+    params: RuntimeRequest<"memory.consolidation.undo">["params"],
+  ) => Awaitable<JsonValue>;
 }
 
 export function createDesktopMemoryRequestHandlers(
@@ -70,6 +76,8 @@ export function createDesktopMemoryRequestHandlers(
   | "memory.settings.update"
   | "memory.context.preview"
   | "memory.metrics.get"
+  | "memory.consolidation.history"
+  | "memory.consolidation.undo"
 > {
   return {
     "memory.experience.query": request => context.queryExperienceUses?.(request.params) ?? Promise.reject(new Error("Experience feedback unavailable")),
@@ -104,5 +112,7 @@ export function createDesktopMemoryRequestHandlers(
     "memory.settings.update": (request) => context.updateSettings(request.params),
     "memory.context.preview": (request) => context.previewContext(request.params),
     "memory.metrics.get": (request) => context.getMetrics(request.params),
+    "memory.consolidation.history": (request) => context.listConsolidationHistory(request.params),
+    "memory.consolidation.undo": (request) => context.undoConsolidation(request.params),
   };
 }

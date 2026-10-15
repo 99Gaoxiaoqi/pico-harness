@@ -1030,6 +1030,14 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
                 this.memoryService.getMetrics(canonical, params),
               )
             : this.memoryService.getMetrics(this.picoHome, params),
+        listConsolidationHistory: (params) =>
+          this.withTrustedMemory(params.workspacePath, (canonical) =>
+            this.memoryService.listConsolidationHistory(canonical),
+          ),
+        undoConsolidation: (params) =>
+          this.withTrustedMemory(params.workspacePath, (canonical) =>
+            this.memoryService.undoConsolidation(canonical, params.batchId),
+          ),
       }),
     };
   }

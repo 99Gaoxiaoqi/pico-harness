@@ -148,6 +148,9 @@ export type {
   RuntimeMemoryRecallDiagnostic,
   RuntimeMemoryMetrics,
   RuntimeMemoryMetricGroup,
+  RuntimeMemoryConsolidationReason,
+  RuntimeMemoryConsolidationReceipt,
+  RuntimeMemoryConsolidationUndoResult,
 } from "./runtime/memory.js";
 
 export type {

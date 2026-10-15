@@ -21,6 +21,8 @@ import {
   type RuntimeMcpServerInput,
   type RuntimeRun,
   type RuntimeMemoryItem,
+  type RuntimeMemoryConsolidationReceipt,
+  type RuntimeMemoryConsolidationUndoResult,
   type RuntimeGoalSnapshot,
   type RuntimeMemorySettings,
   type RuntimeNotification,
@@ -575,6 +577,13 @@ export interface RuntimeActions {
     tab: MemoryScopeTab,
     cursor?: string,
   ): Promise<MemoryScopePage>;
+  queryMemoryConsolidationHistory(
+    workspacePath: string,
+  ): Promise<{ readonly receipts: readonly RuntimeMemoryConsolidationReceipt[] }>;
+  undoMemoryConsolidation(
+    workspacePath: string,
+    batchId: string,
+  ): Promise<RuntimeMemoryConsolidationUndoResult>;
   queryTaskExperiences(
     workspacePath: string,
     options?: { sessionId?: string; review?: ExperienceReview },
@@ -3811,6 +3820,41 @@ export function useRuntimeStore(): RuntimeStore {
           };
         }
         // A trust revocation or host switch invalidates even an already returned read.
+        if (!allowed()) throw new Error("工作区权限或连接已变化，请重新选择范围。");
+        return result;
+      },
+      async queryMemoryConsolidationHistory(workspacePath) {
+        const home = dataRef.current.picoHome;
+        const allowed = () =>
+          dataRef.current.picoHome === home &&
+          dataRef.current.workspacePath === workspacePath &&
+          dataRef.current.trusted &&
+          dataRef.current.workspaces.some(
+            (workspace) => workspace.path === workspacePath && workspace.trusted,
+          );
+        const bridge = getBridge();
+        if (preview || !bridge || !allowed())
+          throw new Error("需要连接并信任当前工作区后才能读取自动整理记录。");
+        const result = await invoke(bridge, "memory.consolidation.history", { workspacePath });
+        if (!allowed()) throw new Error("工作区权限或连接已变化，请重新选择范围。");
+        return result;
+      },
+      async undoMemoryConsolidation(workspacePath, batchId) {
+        const home = dataRef.current.picoHome;
+        const allowed = () =>
+          dataRef.current.picoHome === home &&
+          dataRef.current.workspacePath === workspacePath &&
+          dataRef.current.trusted &&
+          dataRef.current.workspaces.some(
+            (workspace) => workspace.path === workspacePath && workspace.trusted,
+          );
+        const bridge = getBridge();
+        if (preview || !bridge || !allowed())
+          throw new Error("需要连接并信任当前工作区后才能撤销自动整理。");
+        const result = await invoke(bridge, "memory.consolidation.undo", {
+          workspacePath,
+          batchId,
+        });
         if (!allowed()) throw new Error("工作区权限或连接已变化，请重新选择范围。");
         return result;
       },
