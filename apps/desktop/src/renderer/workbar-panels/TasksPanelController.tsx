@@ -41,8 +41,11 @@ export function TasksPanelController({
     try {
       const next = await queryAllWorkbarTasks(runtime, scope);
       if (request === requestRef.current) setLedger(next);
+      return undefined;
     } catch (cause) {
-      if (request === requestRef.current) setError(workbarErrorMessage(cause));
+      const message = workbarErrorMessage(cause);
+      if (request === requestRef.current) setError(message);
+      return message;
     } finally {
       if (request === requestRef.current) setLoading(false);
     }
@@ -64,7 +67,7 @@ export function TasksPanelController({
 
   const create = useCallback(
     async (request: WorkbarTaskCreateRequest) => {
-      if (readOnly || creating) return;
+      if (readOnly || creating) return false;
       setCreating(true);
       setError(undefined);
       try {
@@ -75,9 +78,14 @@ export function TasksPanelController({
           expectedRevision: request.expectedLedgerRevision,
           idempotencyKey: workbarIdempotencyKey(instanceId, "task-create"),
         });
-        await refresh();
+        const refreshError = await refresh();
+        if (refreshError) {
+          setError(`待办已创建，但列表刷新失败：${refreshError}。请刷新确认，避免重复创建。`);
+        }
+        return true;
       } catch (cause) {
         setError(workbarErrorMessage(cause));
+        return false;
       } finally {
         setCreating(false);
       }
@@ -127,7 +135,7 @@ export function TasksPanelController({
       creating={creating}
       updatingTaskIds={updatingTaskIds}
       onRefresh={() => void refresh()}
-      onCreate={(request) => void create(request)}
+      onCreate={create}
       onUpdate={(request) => void update(request)}
     />
   );

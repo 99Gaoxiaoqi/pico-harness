@@ -50,7 +50,9 @@ export interface TasksWorkbarPanelProps {
   readonly creating?: boolean;
   readonly updatingTaskIds?: ReadonlySet<string>;
   readonly onRefresh: () => void;
-  readonly onCreate: (request: WorkbarTaskCreateRequest) => void;
+  readonly onCreate: (
+    request: WorkbarTaskCreateRequest,
+  ) => void | boolean | Promise<void | boolean>;
   readonly onUpdate: (request: WorkbarTaskUpdateRequest) => void;
 }
 
@@ -65,6 +67,16 @@ export function createTaskUpdateRequest(
     expectedTaskRevision: task.revision,
     expectedLedgerRevision: ledgerRevision,
   };
+}
+
+export async function taskCreateConfirmed(
+  result: void | boolean | Promise<void | boolean>,
+): Promise<boolean> {
+  try {
+    return (await result) !== false;
+  } catch {
+    return false;
+  }
 }
 
 export function TasksWorkbarPanel({
@@ -83,8 +95,11 @@ export function TasksWorkbarPanel({
     event.preventDefault();
     const nextTitle = title.trim();
     if (!nextTitle || !ledger || readOnly || creating) return;
-    onCreate({ title: nextTitle, expectedLedgerRevision: ledger.revision });
-    setTitle("");
+    void taskCreateConfirmed(
+      onCreate({ title: nextTitle, expectedLedgerRevision: ledger.revision }),
+    ).then((confirmed) => {
+      if (confirmed) setTitle("");
+    });
   };
 
   return (

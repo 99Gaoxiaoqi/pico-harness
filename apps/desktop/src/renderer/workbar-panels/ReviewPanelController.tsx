@@ -31,23 +31,82 @@ export function ReviewPanelController({ workspacePath, active }: WorkbarPanelHos
   const [error, setError] = useState<string>();
   const [diffError, setDiffError] = useState<string>();
   const requestRef = useRef(0);
+  const diffRequestRef = useRef(0);
+  const snapshotRef = useRef<ReviewSnapshot | undefined>(undefined);
+  const selectionRef = useRef<ReviewSelection | undefined>(undefined);
 
   const refresh = useCallback(async () => {
     const request = ++requestRef.current;
+    ++diffRequestRef.current;
+    setDiffLoading(false);
     setLoading(true);
     setError(undefined);
     try {
       const next = await loadConsistentReviewSnapshot(runtime, workspacePath);
       if (request !== requestRef.current) return;
+      snapshotRef.current = next;
       setSnapshot(next);
       setDiff(undefined);
       setDiffError(undefined);
-      setSelection((current) => {
-        if (current && reviewContains(next, current)) return current;
+      const current = selectionRef.current;
+      if (current && reviewContains(next, current)) {
+        const diffRequest = ++diffRequestRef.current;
+        setDiffLoading(true);
+        try {
+          const refreshedDiff = await loadReviewDiff(
+            runtime,
+            workspacePath,
+            next.revision,
+            current,
+          );
+          if (
+            request === requestRef.current &&
+            reviewDiffRequestIsCurrent(
+              diffRequest,
+              diffRequestRef.current,
+              current,
+              selectionRef.current,
+              next.revision,
+              snapshotRef.current?.revision,
+            )
+          ) {
+            setDiff(refreshedDiff);
+          }
+        } catch (cause) {
+          if (
+            request === requestRef.current &&
+            reviewDiffRequestIsCurrent(
+              diffRequest,
+              diffRequestRef.current,
+              current,
+              selectionRef.current,
+              next.revision,
+              snapshotRef.current?.revision,
+            )
+          ) {
+            setDiffError(workbarErrorMessage(cause));
+          }
+        } finally {
+          if (
+            request === requestRef.current &&
+            reviewDiffRequestIsCurrent(
+              diffRequest,
+              diffRequestRef.current,
+              current,
+              selectionRef.current,
+              next.revision,
+              snapshotRef.current?.revision,
+            )
+          ) {
+            setDiffLoading(false);
+          }
+        }
+      } else {
+        selectionRef.current = undefined;
+        setSelection(undefined);
         setDiff(undefined);
         setDiffError(undefined);
-        return undefined;
-      });
+      }
     } catch (cause) {
       if (request === requestRef.current) setError(workbarErrorMessage(cause));
     } finally {
@@ -61,20 +120,60 @@ export function ReviewPanelController({ workspacePath, active }: WorkbarPanelHos
 
   const select = useCallback(
     async (next: ReviewSelection) => {
+      const diffRequest = ++diffRequestRef.current;
+      selectionRef.current = next;
       setSelection(next);
       setDiff(undefined);
       setDiffError(undefined);
-      if (!snapshot) return;
+      const currentSnapshot = snapshotRef.current;
+      if (!currentSnapshot) return;
       setDiffLoading(true);
       try {
-        setDiff(await loadReviewDiff(runtime, workspacePath, snapshot.revision, next));
+        const nextDiff = await loadReviewDiff(
+          runtime,
+          workspacePath,
+          currentSnapshot.revision,
+          next,
+        );
+        if (
+          reviewDiffRequestIsCurrent(
+            diffRequest,
+            diffRequestRef.current,
+            next,
+            selectionRef.current,
+            currentSnapshot.revision,
+            snapshotRef.current?.revision,
+          )
+        ) {
+          setDiff(nextDiff);
+        }
       } catch (cause) {
-        setDiffError(workbarErrorMessage(cause));
+        if (
+          reviewDiffRequestIsCurrent(
+            diffRequest,
+            diffRequestRef.current,
+            next,
+            selectionRef.current,
+            currentSnapshot.revision,
+            snapshotRef.current?.revision,
+          )
+        )
+          setDiffError(workbarErrorMessage(cause));
       } finally {
-        setDiffLoading(false);
+        if (
+          reviewDiffRequestIsCurrent(
+            diffRequest,
+            diffRequestRef.current,
+            next,
+            selectionRef.current,
+            currentSnapshot.revision,
+            snapshotRef.current?.revision,
+          )
+        )
+          setDiffLoading(false);
       }
     },
-    [runtime, snapshot, workspacePath],
+    [runtime, workspacePath],
   );
 
   return (
@@ -138,6 +237,22 @@ export async function loadReviewDiff(
     content: value.patch,
     truncated: value.truncated,
   };
+}
+
+export function reviewDiffRequestIsCurrent(
+  request: number,
+  currentRequest: number,
+  selection: ReviewSelection,
+  currentSelection: ReviewSelection | undefined,
+  expectedRevision: string,
+  currentRevision: string | undefined,
+): boolean {
+  return (
+    request === currentRequest &&
+    selection.path === currentSelection?.path &&
+    selection.source === currentSelection?.source &&
+    expectedRevision === currentRevision
+  );
 }
 
 function reviewFileView(

@@ -169,6 +169,8 @@ async function run(){
   Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,"value").set.call(input,"原评论");
   input.dispatchEvent(new Event("input",{bubbles:true}));
  });
+ await click("刷新审阅");
+ check(document.querySelector(".review-composer input").value==="原评论","Refresh preserves the unsent review comment");
  await click("发送意见");
  check(writes.length===1,"One initial dispatch");
  check(document.querySelector(".review-composer input").value==="原评论","Unknown result preserves comment");

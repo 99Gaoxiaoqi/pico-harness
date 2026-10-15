@@ -198,7 +198,7 @@ function InteractiveDecisionPanel({
       setFeedback((current) => current.slice(0, -1));
       return;
     }
-    if (!key.ctrl && !key.meta && input.length > 0 && !/[jkney]/iu.test(input)) {
+    if (!key.ctrl && !key.meta && input.length > 0) {
       setFeedback((current) => `${current}${input}`);
     }
   });
@@ -442,10 +442,16 @@ export function resolveApprovalPanelKey(
     upArrow?: boolean | undefined;
     downArrow?: boolean | undefined;
   };
-  if (arrowKey.upArrow || (input.toLowerCase() === "k" && !key.ctrl && !key.meta)) return "move-up";
-  if (arrowKey.downArrow || (input.toLowerCase() === "j" && !key.ctrl && !key.meta))
-    return "move-down";
+  if (arrowKey.upArrow) return "move-up";
+  if (arrowKey.downArrow) return "move-down";
   const normalized = input.toLowerCase();
+  if (planControl && !interruptedPlan && selectedIndex === 1) {
+    if (key.return && !key.ctrl && !key.meta) return "continue-editing";
+    if (key.escape) return "reject-exit";
+    return null;
+  }
+  if (normalized === "k" && !key.ctrl && !key.meta) return "move-up";
+  if (normalized === "j" && !key.ctrl && !key.meta) return "move-down";
   if (key.return && !key.ctrl && !key.meta) {
     return planControl
       ? interruptedPlan

@@ -44,6 +44,7 @@ export function ReviewPage() {
   const requestedRunId = searchParams.get("runId");
   const runId = runs.find((run) => run.id === requestedRunId)?.id ?? runs[0]?.id;
   const scopeKey = JSON.stringify([workspacePath, sessionId]);
+  const commentDraftKey = JSON.stringify(["pico-review-comment", workspacePath, sessionId, runId]);
   const operationStore = useMemo(() => new DesktopReviewOperationStorage(scopeKey), [scopeKey]);
   const restored = useMemo(() => {
     try {
@@ -100,7 +101,12 @@ export function ReviewPage() {
     patch: string;
     fingerprint: string;
   }>();
-  const [comment, setComment] = useState("");
+  const [commentDraft, setCommentDraft] = useState<{ key: string; value: string }>();
+  const comment =
+    commentDraft?.key === commentDraftKey
+      ? commentDraft.value
+      : (readReviewCommentDraft(commentDraftKey) ??
+        (recovery.operation?.target.runId === runId ? (recovery.operation?.message ?? "") : ""));
   const [rewindOpen, setRewindOpen] = useState(false);
   const [rewindPreview, setRewindPreview] = useState<{
     readonly key: string;
@@ -111,7 +117,6 @@ export function ReviewPage() {
   useEffect(() => {
     setRewindOpen(false);
     setRewindPreview(undefined);
-    setComment(recovery.operation?.message ?? "");
     setDiff(undefined);
     setError(undefined);
     if (preview || !runId || !sessionId) {
@@ -191,7 +196,10 @@ export function ReviewPage() {
       if (!mounted.current || currentScope.current !== scope) return;
       operationStore.clear(operation.target.idempotencyKey);
       setOperationState({ scope, operation: undefined, error: undefined });
-      setComment("");
+      if (operation.decision === "request_changes") {
+        clearReviewCommentDraft(commentDraftKey);
+        setCommentDraft({ key: commentDraftKey, value: "" });
+      }
       setError(undefined);
       if (operation.decision === "request_changes" && sessionId)
         navigate(sessionHref({ workspacePath, sessionId }));
@@ -403,7 +411,11 @@ export function ReviewPage() {
                   id="review-comment"
                   value={comment}
                   autoComplete="off"
-                  onChange={(event) => setComment(event.target.value)}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    setCommentDraft({ key: commentDraftKey, value });
+                    writeReviewCommentDraft(commentDraftKey, value);
+                  }}
                   placeholder="例如：保留现有错误类型，不要改变公开接口…"
                 />
                 <Button
@@ -441,6 +453,30 @@ export function ReviewPage() {
       )}
     </div>
   );
+}
+
+function readReviewCommentDraft(key: string): string | undefined {
+  try {
+    return globalThis.localStorage.getItem(key) ?? undefined;
+  } catch {
+    return;
+  }
+}
+
+function writeReviewCommentDraft(key: string, value: string): void {
+  try {
+    globalThis.localStorage.setItem(key, value);
+  } catch {
+    return;
+  }
+}
+
+function clearReviewCommentDraft(key: string): void {
+  try {
+    globalThis.localStorage.removeItem(key);
+  } catch {
+    return;
+  }
 }
 
 function renderPatch(change: ChangeView): string {

@@ -17,6 +17,7 @@ import { buildStatusBarText } from "@pico/cli/tui/status-bar";
 import {
   formatApprovalPanel,
   formatPlanControlPanel,
+  InteractivePlanControlPanel,
   resolveApprovalPanelKey,
 } from "@pico/cli/tui/approval-panel";
 import { createTuiTerminalGridSession } from "@pico/cli/terminal-grid";
@@ -167,6 +168,64 @@ test("中断计划卡片提供继续、取消与重新规划入口", () => {
     resolveApprovalPanelKey("", { escape: true }, undefined, 0, false, true, true),
     "cancel-execution",
   );
+});
+
+test("PlanControl 修改意见编辑保留快捷键字符与粘贴文本", async () => {
+  const stdin = new PassThrough();
+  const stdout = new PassThrough();
+  Object.defineProperty(stdin, "isTTY", { value: true });
+  Object.assign(stdin, {
+    setRawMode: () => undefined,
+    ref: () => undefined,
+    unref: () => undefined,
+  });
+  Object.defineProperty(stdout, "columns", { value: 100 });
+  const received: { action: string; feedback?: string }[] = [];
+  const instance = render(
+    React.createElement(InteractivePlanControlPanel, {
+      kind: "plan-control",
+      mode: "review",
+      controlId: "review:plan-1:epoch-1",
+      sessionId: "session-1",
+      planId: "plan-1",
+      expectedRevision: 1,
+      expectedSessionSequence: 7,
+      controlEpoch: "epoch-1",
+      message: "Plan ready",
+      proposal: {
+        planId: "plan-1",
+        revision: 1,
+        title: "Plan ready",
+        steps: [],
+        status: "pending",
+        proposedAt: "2026-09-12T00:00:00.000Z",
+      },
+      onAction: (action, feedback) => {
+        received.push({ action, ...(feedback ? { feedback } : {}) });
+        return true;
+      },
+    }),
+    {
+      stdin: stdin as unknown as NodeJS.ReadStream,
+      stdout: stdout as unknown as NodeJS.WriteStream,
+      debug: true,
+      patchConsole: false,
+      exitOnCtrlC: false,
+    },
+  );
+  const press = async (input: string) => {
+    stdin.write(input);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await instance.waitUntilRenderFlush();
+  };
+  try {
+    await press("\u001b[B");
+    await press("retry key.json");
+    await press("\r");
+    assert.deepEqual(received, [{ action: "continue-editing", feedback: "retry key.json" }]);
+  } finally {
+    instance.unmount();
+  }
 });
 
 test("名为 submit_plan 的普通工具审批不会被识别为 PlanControl", () => {

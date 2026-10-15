@@ -15,6 +15,7 @@ import { tracePageView } from "../../../apps/desktop/src/renderer/workbar-panels
 import {
   WorkbarReviewConflictError,
   loadConsistentReviewSnapshot,
+  reviewDiffRequestIsCurrent,
 } from "../../../apps/desktop/src/renderer/workbar-panels/ReviewPanelController.js";
 import { queryAllWorkbarTasks } from "../../../apps/desktop/src/renderer/workbar-panels/TasksPanelController.js";
 import { appendTerminalOutput } from "../../../apps/desktop/src/renderer/workbar-panels/TerminalPanelController.js";
@@ -137,6 +138,14 @@ test("review controller retries mismatched staged and unstaged revisions", async
     () => loadConsistentReviewSnapshot(conflicting, "/workspace", 1),
     WorkbarReviewConflictError,
   );
+});
+
+test("review diff results are ignored after selection or snapshot revision changes", () => {
+  const first = { source: "unstaged", path: "a.ts" } as const;
+  const second = { source: "unstaged", path: "b.ts" } as const;
+  assert.equal(reviewDiffRequestIsCurrent(2, 2, second, second, "rev-b", "rev-b"), true);
+  assert.equal(reviewDiffRequestIsCurrent(1, 2, first, second, "rev-b", "rev-b"), false);
+  assert.equal(reviewDiffRequestIsCurrent(2, 2, second, second, "rev-a", "rev-b"), false);
 });
 
 test("artifact controller preserves split UTF-8 code points and canonical binary base64", () => {

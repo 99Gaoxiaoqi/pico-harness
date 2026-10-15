@@ -23,6 +23,7 @@ import {
 import {
   TasksWorkbarPanel,
   createTaskUpdateRequest,
+  taskCreateConfirmed,
   type WorkbarTaskItem,
 } from "../../../apps/desktop/src/renderer/workbar-panels/TasksWorkbarPanel.js";
 import { TerminalWorkbarPanel } from "../../../apps/desktop/src/renderer/workbar-panels/TerminalWorkbarPanel.js";
@@ -64,6 +65,13 @@ test("Workbar Host assembles all six authority panels through its public entry p
     );
     assert.ok(markup.includes(`aria-label="${label}"`), `${kind} panel is rendered`);
   }
+});
+
+test("task draft is cleared only after create confirmation", async () => {
+  assert.equal(await taskCreateConfirmed(false), false);
+  assert.equal(await taskCreateConfirmed(Promise.reject(new Error("revision conflict"))), false);
+  assert.equal(await taskCreateConfirmed(true), true);
+  assert.equal(await taskCreateConfirmed(undefined), true);
 });
 
 test("Graph detail derives execution state from formal output and Runtime terminal facts", () => {
