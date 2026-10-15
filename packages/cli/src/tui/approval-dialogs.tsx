@@ -161,16 +161,38 @@ export function resolveApprovalActionVia(
   action: PlainApprovalAction,
   taskId: string,
   deps: Pick<ApprovalDialogDeps, "reporter" | "closeDialog">,
-): boolean {
-  const outcome = resolve(action, taskId);
-  deps.closeDialog?.(approvalDialogId(taskId));
-  if (outcome instanceof Promise) {
-    void outcome.then((ok) =>
-      deps.reporter.pushSystemMessage(approvalResolutionMessage(action, ok)),
-    );
-    return true;
+): boolean | Promise<boolean> {
+  let outcome: boolean | Promise<boolean>;
+  try {
+    outcome = resolve(action, taskId);
+  } catch (error) {
+    deps.reporter.pushSystemMessage("审批提交失败；请求仍可重试。 " + errorMessage(error));
+    return false;
   }
-  deps.reporter.pushSystemMessage(approvalResolutionMessage(action, outcome));
+  if (outcome instanceof Promise) {
+    deps.reporter.pushSystemMessage("正在提交审批…");
+    return outcome.then(
+      (ok) => {
+        if (ok) {
+          deps.closeDialog?.(approvalDialogId(taskId));
+          deps.reporter.pushSystemMessage(approvalResolutionMessage(action, true));
+        } else {
+          deps.reporter.pushSystemMessage("审批结果未确认；请求仍可重试。");
+        }
+        return ok;
+      },
+      (error: unknown) => {
+        deps.reporter.pushSystemMessage("审批提交失败；请求仍可重试。 " + errorMessage(error));
+        return false;
+      },
+    );
+  }
+  if (outcome) {
+    deps.closeDialog?.(approvalDialogId(taskId));
+    deps.reporter.pushSystemMessage(approvalResolutionMessage(action, true));
+  } else {
+    deps.reporter.pushSystemMessage("审批结果未确认；请求仍可重试。");
+  }
   return outcome;
 }
 
@@ -214,4 +236,8 @@ export function approvalResolutionMessage(
           ? "已拒绝。"
           : "已带修改批准。"
     : "审批请求已失效。";
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

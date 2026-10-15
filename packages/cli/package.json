@@ -147,6 +147,10 @@
       "types": "./dist/tui/client-session-runtime.d.ts",
       "import": "./dist/tui/client-session-runtime.js"
     },
+    "./tui/pending-send-store": {
+      "types": "./dist/tui/pending-send-store.d.ts",
+      "import": "./dist/tui/pending-send-store.js"
+    },
     "./tui/commands/automation-commands": {
       "types": "./dist/tui/commands/automation-commands.d.ts",
       "import": "./dist/tui/commands/automation-commands.js"

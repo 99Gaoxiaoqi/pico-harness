@@ -17,6 +17,7 @@ import {
   type RuntimeSessionSubscriptionFrame,
   type RuntimeUserInput,
   type RuntimeUserDefaults,
+  SESSION_SEND_REPLAY_RUNTIME_CAPABILITY,
 } from "@pico/protocol";
 import { TranscriptReplica } from "@pico/transcript-replica";
 import type { ApprovalNotice } from "@pico/pico-host/global-approval-manager";
@@ -26,6 +27,7 @@ import { DaemonEventReporter } from "./daemon-event-reporter.js";
 import { planControlNoticeFromProjection, type PlanControlNotice } from "./plan-control-notice.js";
 import { transcriptEventsFromRuntimeItems } from "./transcript-item-hydration.js";
 import type { TuiReporter } from "./tui-reporter.js";
+import type { PendingSendRecord, PendingSendStore } from "./pending-send-store.js";
 
 /**
  * 客户端侧 ask-user 请求（wire prompt 的结构化投影——AskUserRequest 的
@@ -81,6 +83,7 @@ export interface ClientSessionRuntimeOptions {
   readonly workspacePath: string;
   readonly sessionId?: string | undefined;
   readonly reporter: TuiReporter;
+  readonly pendingSendStore?: PendingSendStore | undefined;
   /** 审批请求到达（notice 已从 wire request 映射；对话框由宿主开）。 */
   readonly onApproval?: ((notice: ApprovalNotice) => void) | undefined;
   /** 审批被解析（含对端/超时解析）——宿主清理残留对话框。 */
@@ -268,6 +271,9 @@ export class ClientSessionRuntime {
     for (const event of subscription.replay.events) {
       this.handleNotification(event);
     }
+    if (await this.recoverPendingSend()) {
+      this.reporter.pushSystemMessage("已恢复上次发送结果；原请求未重复执行。");
+    }
   }
 
   /** No-session TUI settings are applied atomically by the first session.send. */
@@ -300,6 +306,14 @@ export class ClientSessionRuntime {
     return true;
   }
 
+  setPreSessionModelRoute(modelRouteId: string): boolean {
+    if (!modelRouteId || this.sessionId !== undefined || this.running) return false;
+    this.pendingInitialSettingsTouched = true;
+    this.pendingInitialSettings = { ...this.pendingInitialSettings, modelRouteId };
+    this.publishPreSessionSettings();
+    return true;
+  }
+
   /** 发送用户文本。behavior 供 /steer /queue /replace 映射；attachments 为
    * 图片附件（3-D 漏账补齐：仅 idle 发送，running 态由宿主本地拒绝）。 */
   async sendText(
@@ -321,42 +335,124 @@ export class ClientSessionRuntime {
     );
   }
 
-  /** 按 RuntimeUserInput 类型上送（text/skill/agent）；idempotencyKey 每次新生成。 */
+  /** 按 RuntimeUserInput 类型上送（text/skill/agent）。 */
   async sendInput(
     input: RuntimeUserInput,
     behavior: "auto" | "steer" | "queue" | "replace" = "auto",
     execution?: { orchestrationMode?: ("graph" | "swarm") | undefined },
   ): Promise<boolean> {
-    if (input.kind === "text") this.reporter.pushUserMessage(input.text);
-    try {
-      const result = await this.client.request("session.send", {
-        workspacePath: this.workspacePath,
-        ...(this.sessionId ? { sessionId: this.sessionId } : {}),
-        ...(this.sessionId ? {} : { initialSettings: this.pendingInitialSettings }),
-        input:
-          input.kind === "text" && execution?.orchestrationMode
-            ? { ...input, orchestrationMode: execution.orchestrationMode }
-            : input,
-        behavior,
-        idempotencyKey: randomUUID(),
-      });
-      if (this.sessionId === undefined) {
-        this.startupOrchestrationMode = undefined;
-        this.sessionId = result.session.sessionId;
-        void this.hydrateSerial();
-        await this.refreshSettingsSnapshot();
-        await this.applyStartupOverrides();
-      } else {
-        // BYOK 覆盖若曾失败（applied 尚未置位），此后每次成功发送都是廉价重试
-        // 触发点（对抗评审二轮 P1：否则 -S 启动失败一次即永久丢失 --model）。
-        void this.applyStartupOverrides();
+    const pendingStore = this.options.pendingSendStore;
+    if (pendingStore) {
+      let pending: PendingSendRecord | undefined;
+      try {
+        pending = await pendingStore.load();
+      } catch (error) {
+        this.reporter.pushError(errorMessage(error), {
+          retryable: false,
+          action: "session.send.recover",
+        });
+        return false;
       }
-      return true;
+      if (pending) {
+        const recovered = await this.recoverPendingSend(pending);
+        if (recovered) {
+          this.reporter.pushSystemMessage("上一条发送结果已恢复；本次新消息尚未发送，请重新提交。");
+        }
+        return false;
+      }
+    }
+    const outboundInput =
+      input.kind === "text" && execution?.orchestrationMode
+        ? { ...input, orchestrationMode: execution.orchestrationMode }
+        : input;
+    const params: RuntimeParams<"session.send"> = {
+      workspacePath: this.workspacePath,
+      ...(this.sessionId ? { sessionId: this.sessionId } : {}),
+      ...(this.sessionId ? {} : { initialSettings: this.pendingInitialSettings }),
+      input: outboundInput,
+      behavior,
+      idempotencyKey: randomUUID(),
+    };
+    try {
+      await pendingStore?.save(params);
     } catch (error) {
-      this.reporter.pushError(error instanceof Error ? error.message : String(error), {
-        retryable: true,
+      this.reporter.pushError(errorMessage(error), {
+        retryable: false,
         action: "session.send",
       });
+      return false;
+    }
+    if (input.kind === "text") this.reporter.pushUserMessage(input.text);
+    try {
+      const result = await this.client.request("session.send", params);
+      await this.completeSend(params.idempotencyKey, result);
+      return true;
+    } catch (error) {
+      if (isDefinitelyNotExecuted(error)) {
+        await pendingStore?.clear(params.idempotencyKey).catch(() => undefined);
+        this.reporter.pushError(errorMessage(error), {
+          retryable: false,
+          action: "session.send",
+        });
+      } else {
+        this.reporter.pushError(
+          "发送结果未知，原请求已保留；再次提交时将只恢复原结果，不会发送新请求。 " +
+            errorMessage(error),
+          { retryable: true, action: "session.send.recover" },
+        );
+      }
+      return false;
+    }
+  }
+
+  private async completeSend(
+    idempotencyKey: string,
+    result: RuntimeResult<"session.send">,
+  ): Promise<void> {
+    try {
+      await this.options.pendingSendStore?.clear(idempotencyKey);
+    } catch (error) {
+      this.reporter.pushError(
+        "发送已确认，但待确认记录未能清理；重启后会安全读取原结果。 " + errorMessage(error),
+        { retryable: true, action: "session.send.recover" },
+      );
+    }
+    if (this.sessionId === undefined || this.sessionId !== result.session.sessionId) {
+      this.startupOrchestrationMode = undefined;
+      this.sessionId = result.session.sessionId;
+      void this.hydrateSerial();
+      await this.refreshSettingsSnapshot();
+      await this.applyStartupOverrides();
+    } else {
+      void this.applyStartupOverrides();
+    }
+  }
+
+  private async recoverPendingSend(record?: PendingSendRecord): Promise<boolean> {
+    const store = this.options.pendingSendStore;
+    if (!store) return false;
+    try {
+      const pending = record ?? (await store.load());
+      if (!pending) return false;
+      if (this.sessionId && this.sessionId !== pending.params.sessionId) {
+        throw new Error("待确认发送属于另一个会话；已保留原请求，未切换当前会话。");
+      }
+      const ping = await this.client.request("runtime.ping", {});
+      if (!ping.capabilities.includes(SESSION_SEND_REPLAY_RUNTIME_CAPABILITY)) {
+        throw new Error("当前 Runtime 不支持安全恢复发送结果；原请求已保留，未重新发送。");
+      }
+      const result = await this.client.request("session.send", {
+        ...pending.params,
+        replayOnly: true,
+      });
+      await this.completeSend(pending.params.idempotencyKey, result);
+      return true;
+    } catch (error) {
+      this.reporter.pushError(
+        "上次发送结果尚未确认，原请求已保留；发送新内容会先安全恢复此请求，恢复后需再次提交新内容。 " +
+          errorMessage(error),
+        { retryable: true, action: "session.send.recover" },
+      );
       return false;
     }
   }
@@ -396,21 +492,17 @@ export class ClientSessionRuntime {
     action: "approve" | "approve-session" | "reject",
     taskId: string,
   ): Promise<boolean> => {
-    try {
-      await this.client.request("approval.respond", {
-        workspacePath: this.workspacePath,
-        approvalId: taskId,
-        decision:
-          action === "approve"
-            ? "allow_once"
-            : action === "approve-session"
-              ? "allow_session"
-              : "deny",
-      });
-      return true;
-    } catch {
-      return false;
-    }
+    await this.client.request("approval.respond", {
+      workspacePath: this.workspacePath,
+      approvalId: taskId,
+      decision:
+        action === "approve"
+          ? "allow_once"
+          : action === "approve-session"
+            ? "allow_session"
+            : "deny",
+    });
+    return true;
   };
 
   /** 持久化 PlanControl 动作端口 → plan.respond RPC。 */
@@ -1035,4 +1127,14 @@ function resolvePreSessionDefaults(defaults: RuntimeUserDefaults): RuntimeUserDe
     ...(defaults.orchestrationMode ? { orchestrationMode: defaults.orchestrationMode } : {}),
     ...(defaults.thinkingEffort ? { thinkingEffort: defaults.thinkingEffort } : {}),
   };
+}
+
+function isDefinitelyNotExecuted(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const value = error as { outcome?: unknown; code?: unknown };
+  return value.outcome === "not_executed" || value.code === "ATTACHMENT_REJECTED";
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

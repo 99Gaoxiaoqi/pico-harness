@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   createRuntimeNotification,
   TRANSCRIPT_PROJECTOR_VERSION,
@@ -18,7 +21,8 @@ import {
 import { TuiReporter } from "@pico/cli/tui/tui-reporter";
 import type { ApprovalNotice } from "@pico/pico-host/global-approval-manager";
 import type { PlanControlNotice } from "@pico/cli/tui/plan-control-notice";
-import { resolvePlanControlAction } from "@pico/cli/tui/approval-dialogs";
+import { resolveApprovalActionVia, resolvePlanControlAction } from "@pico/cli/tui/approval-dialogs";
+import { FilePendingSendStore } from "@pico/cli/tui/pending-send-store";
 
 /**
  * 3-D Phase 2 TUI 客户端 tracer：驱动组件层之下（无 Ink）——
@@ -291,6 +295,8 @@ interface FakeClientHarness {
   deferNextSubscription(): void;
   releaseNextSubscription(): void;
   disconnect(): void;
+  failNextSendResponse(error: Error): void;
+  sendExecutions(): number;
 }
 
 function createFakeClient(): FakeClientHarness {
@@ -304,6 +310,9 @@ function createFakeClient(): FakeClientHarness {
   let nextSubscriptionWait: Promise<void> | undefined;
   let releaseNextSubscription: (() => void) | undefined;
   let disconnectListener: (() => void) | undefined;
+  let nextSendResponseError: Error | undefined;
+  let sendExecutionCount = 0;
+  const sendResults = new Map<string, Record<string, unknown>>();
   const session = {
     sessionId: "s1",
     workspacePath: "C:\\ws",
@@ -335,7 +344,33 @@ function createFakeClient(): FakeClientHarness {
     request: async (method: string, params: Record<string, unknown>) => {
       requests.push({ method, params });
       if (method === "session.send") {
-        return { session, run: { runId: "run_1", status: "running" }, disposition: "started" };
+        const key = String(params["idempotencyKey"]);
+        const previous = sendResults.get(key);
+        if (params["replayOnly"] === true) {
+          if (!previous)
+            throw Object.assign(new Error("not found"), { code: "SEND_RECOVERY_UNAVAILABLE" });
+          return previous;
+        }
+        if (previous) return previous;
+        const result = {
+          session,
+          run: { runId: "run_1", status: "running" },
+          disposition: "started",
+        };
+        sendResults.set(key, result);
+        sendExecutionCount += 1;
+        if (nextSendResponseError) {
+          const error = nextSendResponseError;
+          nextSendResponseError = undefined;
+          throw error;
+        }
+        return result;
+      }
+      if (method === "runtime.ping") {
+        return {
+          pong: true,
+          capabilities: ["session-send-replay-v1"],
+        };
       }
       if (method === "session.subscription.open") {
         if (nextSubscriptionWait) {
@@ -456,8 +491,96 @@ function createFakeClient(): FakeClientHarness {
       releaseNextSubscription = undefined;
     },
     disconnect: () => disconnectListener?.(),
+    failNextSendResponse: (error) => {
+      nextSendResponseError = error;
+    },
+    sendExecutions: () => sendExecutionCount,
   };
 }
+
+test("client session runtime: lost first-send response survives restart and replays only the original result", async () => {
+  const picoHome = await mkdtemp(join(tmpdir(), "pico-tui-pending-send-"));
+  const workspacePath = join(picoHome, "workspace");
+  const harness = createFakeClient();
+  harness.failNextSendResponse(new Error("response lost"));
+
+  try {
+    const firstRuntime = new ClientSessionRuntime({
+      client: harness.client,
+      workspacePath,
+      reporter: new TuiReporter(),
+      pendingSendStore: new FilePendingSendStore({ picoHome, workspacePath }),
+    });
+    await firstRuntime.start();
+    assert.equal(await firstRuntime.sendText("first request"), false);
+    const original = harness.requests.find((entry) => entry.method === "session.send");
+    assert.ok(original);
+    const key = original.params["idempotencyKey"];
+    assert.equal(typeof key, "string");
+    assert.equal(original.params["replayOnly"], undefined);
+    assert.equal(harness.sendExecutions(), 1);
+    firstRuntime.dispose();
+
+    const secondStore = new FilePendingSendStore({ picoHome, workspacePath });
+    const secondRuntime = new ClientSessionRuntime({
+      client: harness.client,
+      workspacePath,
+      reporter: new TuiReporter(),
+      pendingSendStore: secondStore,
+    });
+    await secondRuntime.start();
+    assert.equal(secondRuntime.activeSessionId, "s1");
+    const sends = harness.requests.filter((entry) => entry.method === "session.send");
+    assert.equal(sends.length, 2);
+    assert.deepEqual(sends[1]?.params, { ...original.params, replayOnly: true });
+    assert.equal(harness.sendExecutions(), 1, "恢复必须只读回原结果，不得再次接纳输入");
+    assert.equal(await secondStore.load(), undefined, "确认后应清除待恢复记录");
+    secondRuntime.dispose();
+  } finally {
+    await rm(picoHome, { recursive: true, force: true });
+  }
+});
+
+test("approval dialog: keep panel open until async approval succeeds and show retry reason", async () => {
+  const closed: string[] = [];
+  const messages: string[] = [];
+  let rejectApproval: ((error: Error) => void) | undefined;
+  const pending = resolveApprovalActionVia(
+    () => new Promise<boolean>((_resolve, reject) => (rejectApproval = reject)),
+    "approve",
+    "approval-1",
+    {
+      reporter: { pushSystemMessage: (message) => messages.push(message) },
+      closeDialog: (id) => closed.push(id),
+    },
+  );
+  assert.ok(pending instanceof Promise);
+  assert.deepEqual(closed, []);
+  assert.ok(messages.some((message) => message.includes("提交审批")));
+
+  rejectApproval?.(new Error("connection reset"));
+  assert.equal(await pending, false);
+  assert.deepEqual(closed, []);
+  assert.ok(messages.some((message) => message.includes("connection reset")));
+  assert.ok(!messages.some((message) => message.includes("已失效")));
+
+  let resolveApproval: ((accepted: boolean) => void) | undefined;
+  const successfulClosures: string[] = [];
+  const accepted = resolveApprovalActionVia(
+    () => new Promise<boolean>((resolve) => (resolveApproval = resolve)),
+    "approve",
+    "approval-2",
+    {
+      reporter: { pushSystemMessage: (message) => messages.push(message) },
+      closeDialog: (id) => successfulClosures.push(id),
+    },
+  );
+  assert.ok(accepted instanceof Promise);
+  assert.deepEqual(closed, []);
+  resolveApproval?.(true);
+  assert.equal(await accepted, true);
+  assert.deepEqual(successfulClosures, ["approval:pending:approval-2"]);
+});
 
 test("client session runtime: hydrates every fixed-watermark transcript page", async () => {
   const harness = createFakeClient();

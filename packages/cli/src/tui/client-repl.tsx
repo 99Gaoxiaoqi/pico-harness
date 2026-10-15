@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { useCallback, useEffect, useState } from "react";
 import { render } from "ink";
 import { LocalRuntimeClient } from "@pico/pico-host/local-runtime-client";
+import { resolveCanonicalPicoHome } from "@pico/pico-host/pico-paths";
 import {
   projectTranscriptEntriesForRendering,
   type TranscriptProjection,
@@ -16,6 +17,7 @@ import { askUserDialogId, createAskUserDialogRequest } from "./ask-user-dialog.j
 import type { AskUserRequest } from "@pico/pico-host/ask-user-tool";
 import type { InputBoxSubmission } from "./input-box.js";
 import { ClientSessionRuntime } from "./client-session-runtime.js";
+import { FilePendingSendStore } from "./pending-send-store.js";
 import { createClientCommandRegistry, processClientInput } from "./client-commands.js";
 import { clientSlashSuggestions, handleClientLocalCommand } from "./client-command-host.js";
 import { TuiReporter } from "./tui-reporter.js";
@@ -74,6 +76,10 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
   const runtime = new ClientSessionRuntime({
     client,
     workspacePath: options.workDir,
+    pendingSendStore: new FilePendingSendStore({
+      picoHome: resolveCanonicalPicoHome(),
+      workspacePath: options.workDir,
+    }),
     ...(options.sessionId ? { sessionId: options.sessionId } : {}),
     reporter,
     ...(options.model ? { modelOverride: options.model } : {}),

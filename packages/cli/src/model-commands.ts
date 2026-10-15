@@ -55,7 +55,14 @@ export function createModelCommands(deps: ModelCommandRegistryDeps) {
           };
         }
         const sid = needSession();
-        if (typeof sid === "object") return sid;
+        if (typeof sid === "object") {
+          if (!runtime.setPreSessionModelRoute?.(matched.id)) return sid;
+          return {
+            type: "local",
+            action: "model",
+            message: "首次发送模型已设置：" + matched.id,
+          };
+        }
         const updated = await runtime.request("session.settings.update", {
           workspacePath,
           sessionId: sid,

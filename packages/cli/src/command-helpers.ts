@@ -7,6 +7,7 @@ import {
 
 export interface CommandSessionRuntime {
   readonly activeSessionId: string | undefined;
+  setPreSessionModelRoute?(modelRouteId: string): boolean;
 }
 
 const ARGUMENT_COMPLETER_CACHE_TTL_MS = 5_000;

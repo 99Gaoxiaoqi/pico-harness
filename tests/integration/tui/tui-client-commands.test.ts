@@ -881,6 +881,29 @@ test("TUI 模型选择：厂商分组、筛选后确认保留完整路由，同�
   );
 });
 
+test("TUI 首条消息前可选择模型并原子携带到首次发送", async () => {
+  const harness = createHarness();
+  const selected = await run(harness, "/model p1/m2");
+
+  assert.match(String(selected.result?.message), /首次发送模型已设置：p1\/m2/);
+  assert.equal(harness.runtime.activeSessionId, undefined);
+  assert.equal(harness.runtime.preSessionSettings.modelRouteId, "p1/m2");
+  assert.ok(
+    !harness.requests.some(
+      (request) =>
+        request.method === "session.send" || request.method === "session.settings.update",
+    ),
+    "选择模型不得创建会话或发起模型调用",
+  );
+
+  assert.equal(await harness.runtime.sendText("first request"), true);
+  const firstSend = harness.requests.find((request) => request.method === "session.send");
+  assert.equal(
+    (firstSend?.params.initialSettings as { modelRouteId?: string } | undefined)?.modelRouteId,
+    "p1/m2",
+  );
+});
+
 test("client commands: settings-class commands map to session.settings.update", async () => {
   const harness = createHarness({ sessionId: "s1" });
 
