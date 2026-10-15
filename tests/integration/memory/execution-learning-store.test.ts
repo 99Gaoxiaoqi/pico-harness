@@ -193,7 +193,7 @@ async function receiptAndJob(
   return { ticket, result, job };
 }
 
-test("v9, v10 and v11 memory databases upgrade to v14 preserving facts and retiring pending old lessons", async (t) => {
+test("v9, v10 and v11 memory databases upgrade to v15 preserving facts and retiring pending old lessons", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-learning-migration-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   for (const version of [9, 10, 11]) {
@@ -214,7 +214,7 @@ test("v9, v10 and v11 memory databases upgrade to v14 preserving facts and retir
     }
     for (const row of old
       .prepare(
-        `SELECT name FROM sqlite_schema WHERE type='table' AND (name LIKE 'experience_%' OR name LIKE 'task_experience_%' OR (name LIKE 'execution_learning_%' AND ${version} != 11))`,
+        `SELECT name FROM sqlite_schema WHERE type='table' AND (name LIKE 'memory_consolidation_%' OR name LIKE 'experience_%' OR name LIKE 'task_experience_%' OR (name LIKE 'execution_learning_%' AND ${version} != 11))`,
       )
       .all()) {
       old.exec(`DROP TABLE "${String(row.name).replaceAll('"', '""')}"`);
@@ -223,7 +223,7 @@ test("v9, v10 and v11 memory databases upgrade to v14 preserving facts and retir
     old.close();
     store = new SqliteMemoryItemStore(path);
     try {
-      assert.equal(store.schemaVersion(), 14);
+      assert.equal(store.schemaVersion(), 15);
       assert.deepEqual(await store.readItem(itemId), before);
       if (existingNative)
         assert.deepEqual(

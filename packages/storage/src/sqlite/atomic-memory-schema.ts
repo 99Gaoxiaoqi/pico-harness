@@ -387,14 +387,14 @@ export function initializeSqliteLongTermMemoryDatabase(db: DatabaseSync): void {
         db.exec(CURRENT_SCHEMA_SQL);
         migrateExperienceFeedback(db);
       } else {
-        validateMinimumSchemaShape(db, version !== 9);
+        validateMinimumSchemaShape(db, version !== 9 && version < 14);
         if (version === 9) db.exec(EXECUTION_LESSON_SCHEMA_SQL);
         if (version <= 10) db.exec(EXECUTION_LEARNING_SCHEMA_SQL);
         if (version <= 11) db.exec(TASK_EXPERIENCE_SCHEMA_SQL);
         if (version <= 12) migrateExperienceFeedback(db);
         if (version <= 14) db.exec(MEMORY_CONSOLIDATION_SCHEMA_SQL);
       }
-      retireExecutionLessons(db);
+      if (version < 14) retireExecutionLessons(db);
       db.exec(`PRAGMA user_version = ${SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION}`);
     }
     validateMinimumSchemaShape(db);

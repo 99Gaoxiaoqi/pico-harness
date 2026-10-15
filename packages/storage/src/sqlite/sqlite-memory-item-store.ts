@@ -1145,11 +1145,14 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
       );
       const currentLeaseId = nullableIdentifierString(state.lease_id, "lease_id");
       const currentLeaseUntil = requiredNonNegativeInteger(state.lease_until, "lease_until");
+      const previousFencingToken = requiredNonNegativeInteger(state.fencing_token, "fencing_token");
       if (currentLeaseId && currentLeaseUntil > now) {
         this.#database.exec("COMMIT");
         return undefined;
       }
-      if (lastCommittedAt > 0 && now - lastCommittedAt < MEMORY_CONSOLIDATION_COOLDOWN_MS) {
+      // This existing watermark now includes the latest claimed attempt. Failed
+      // model requests must cool down too, instead of retrying every extraction.
+      if (previousFencingToken > 0 && now - lastCommittedAt < MEMORY_CONSOLIDATION_COOLDOWN_MS) {
         this.#database.exec("COMMIT");
         return undefined;
       }
@@ -1177,7 +1180,7 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
         return undefined;
       }
 
-      const fencingToken = requiredNonNegativeInteger(state.fencing_token, "fencing_token") + 1;
+      const fencingToken = previousFencingToken + 1;
       if (!Number.isSafeInteger(fencingToken))
         throw new Error("Memory consolidation fencing token exceeds safe integer range");
       const claimId = randomUUID();
@@ -1188,10 +1191,11 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
       this.#database
         .prepare(
           `UPDATE memory_consolidation_state
-           SET lease_id=?, lease_owner=?, lease_until=?, fencing_token=?, lease_items_json=?
+           SET lease_id=?, lease_owner=?, lease_until=?, fencing_token=?, lease_items_json=?,
+             last_committed_at=?
            WHERE singleton=1`,
         )
-        .run(claimId, ownerId, leaseUntil, fencingToken, JSON.stringify(claimItems));
+        .run(claimId, ownerId, leaseUntil, fencingToken, JSON.stringify(claimItems), now);
       this.#database.exec("COMMIT");
       return { claimId, ownerId, fencingToken, claimedAt: now, leaseUntil, candidates };
     } catch (error) {
@@ -1276,6 +1280,23 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
           );
       }
 
+      // The model chose archives relative to the entire claim, including the
+      // Items it kept. Recheck that snapshot in this writer transaction so a
+      // concurrent edit/delete/archive of a keeper cannot invalidate the choice.
+      for (const selected of claimedItems) {
+        const current = this.#readItemRecord(selected.itemId);
+        if (
+          !current ||
+          current.item.version !== selected.expectedVersion ||
+          !isMemoryConsolidationEligible(current)
+        )
+          throw new MemoryItemStoreConflictError(
+            "consolidation_claim_conflict",
+            `Memory Item ${selected.itemId} changed after consolidation was captured`,
+            selected.itemId,
+          );
+      }
+
       const receiptItems: MemoryConsolidationArchivedItem[] = [];
       for (const [index, selected] of archive.entries()) {
         const current = this.#database
@@ -1310,18 +1331,16 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
             selected.itemId,
           );
         const archivedVersion = currentVersion + 1;
-        const updatedAt = Math.max(
-          now,
-          requiredNonNegativeInteger(current.updated_at, "updated_at"),
-        );
+        // Lifecycle maintenance must not make old content appear newer than
+        // the fact that superseded it, including after a later undo.
         const changed = this.#database
           .prepare(
-            `UPDATE memory_items SET lifecycle_state='archived', version=version+1, updated_at=?
+            `UPDATE memory_items SET lifecycle_state='archived', version=version+1
              WHERE item_id=? AND version=? AND lifecycle_state='active' AND origin='agent_extracted'
                AND NOT EXISTS(SELECT 1 FROM execution_learning_items e
                  WHERE e.item_id=memory_items.item_id)`,
           )
-          .run(updatedAt, selected.itemId, selected.expectedVersion);
+          .run(selected.itemId, selected.expectedVersion);
         assertChanged(changed.changes, selected.itemId);
         receiptItems.push({
           itemId: selected.itemId,
@@ -1425,7 +1444,6 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
         actualVersion?: number;
         reason: "missing" | "version_changed" | "not_archived" | "ineligible";
       }> = [];
-      const restoreUpdatedAt = new Map<string, number>();
       for (const item of receipt.items) {
         const current = this.#database
           .prepare(
@@ -1470,11 +1488,6 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
             actualVersion: currentVersion,
             reason: "ineligible",
           });
-        } else {
-          restoreUpdatedAt.set(
-            item.itemId,
-            requiredNonNegativeInteger(current.updated_at, "updated_at"),
-          );
         }
       }
       if (conflicts.length) {
@@ -1490,15 +1503,14 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
           "Memory consolidation undo operation identity is already in use",
         );
       for (const item of receipt.items) {
-        const updatedAt = Math.max(now, restoreUpdatedAt.get(item.itemId)!);
         const changed = this.#database
           .prepare(
-            `UPDATE memory_items SET lifecycle_state='active', version=version+1, updated_at=?
+            `UPDATE memory_items SET lifecycle_state='active', version=version+1
              WHERE item_id=? AND version=? AND lifecycle_state='archived' AND origin='agent_extracted'
                AND NOT EXISTS(SELECT 1 FROM execution_learning_items e
                  WHERE e.item_id=memory_items.item_id)`,
           )
-          .run(updatedAt, item.itemId, item.archivedVersion);
+          .run(item.itemId, item.archivedVersion);
         assertChanged(changed.changes, item.itemId);
       }
       const undone: MemoryConsolidationReceipt = {

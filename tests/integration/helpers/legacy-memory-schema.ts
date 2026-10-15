@@ -2,6 +2,8 @@ import type { DatabaseSync } from "node:sqlite";
 
 /** SQL-only historical fixture. Retired production APIs must never seed new data. */
 export const LEGACY_LESSON_SCHEMA_SQL = `
+DROP TABLE IF EXISTS memory_consolidation_receipts;
+DROP TABLE IF EXISTS memory_consolidation_state;
 CREATE TABLE execution_lesson_candidates (
   candidate_id TEXT PRIMARY KEY, workspace_key TEXT NOT NULL, session_id TEXT NOT NULL,
   state TEXT NOT NULL, item_id TEXT UNIQUE, record_json TEXT NOT NULL,

@@ -9,7 +9,6 @@ import type {
 } from "@pico/core/atomic-memory-runtime-contracts";
 import { memoryRequestFits } from "@pico/runtime/atomic-memory/extraction-budget";
 
-const MEMORY_CONSOLIDATION_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 const MEMORY_CONSOLIDATION_CLAIM_MS = 3 * 60 * 1000;
 const MEMORY_CONSOLIDATION_MAX_PROMPT_CHARS = 55_000;
 const MEMORY_CONSOLIDATION_GROUP_ITEM_LIMIT = 24;
@@ -240,6 +239,7 @@ function validateArchiveProposal(
       shown.set(itemId, membership);
     }
   const seen = new Map<string, string>();
+  const keepers = new Set<string>();
   const archive: {
     itemId: string;
     expectedVersion: number;
@@ -284,12 +284,17 @@ function validateArchiveProposal(
     const decision = JSON.stringify([value.keepItemId, value.reason]);
     if (seen.has(value.itemId)) continue;
     seen.set(value.itemId, decision);
+    keepers.add(value.keepItemId);
     archive.push({
       itemId: candidate.item.itemId,
       expectedVersion: candidate.item.version,
       reason: value.reason,
     });
   }
+  // An Item may belong to more than one key group. A later decision must not
+  // archive the keeper on which another decision depends.
+  if (archive.some(({ itemId }) => keepers.has(itemId)))
+    throw new Error("memory_consolidation_keeper_archived");
   return archive;
 }
 

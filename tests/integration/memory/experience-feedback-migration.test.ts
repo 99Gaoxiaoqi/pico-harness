@@ -24,7 +24,7 @@ async function v12(path: string, corrupt = false) {
 test('v12 receipts migrate once without inventing delivery; existing items and switches survive',async t=>{
  const dir=await mkdtemp(join(tmpdir(),'pico-feedback-upgrade-'));t.after(()=>rm(dir,{recursive:true,force:true}));const path=join(dir,'memory.sqlite');const itemId=await v12(path);
  for(let i=0;i<2;i++){
-  const store=new SqliteMemoryItemStore(path);assert.equal(store.schemaVersion(),14);assert.equal((await store.readItem(itemId))?.item.content,'已有经验方法');assert.equal((await store.readSettings('workspace')).autoExtract,false);store.close();
+  const store=new SqliteMemoryItemStore(path);assert.equal(store.schemaVersion(),15);assert.equal((await store.readItem(itemId))?.item.content,'已有经验方法');assert.equal((await store.readSettings('workspace')).autoExtract,false);store.close();
   const db=new DatabaseSync(path);const rows=db.prepare('SELECT record_json FROM experience_uses').all();assert.equal(rows.length,1);const use=JSON.parse(String(rows[0]!.record_json));assert.equal(use.useId,'old-use');assert.equal(use.historical,true);assert.equal(use.delivery,'unknown');assert.equal(use.validation,'pass');assert.equal(use.recallEventId,undefined);assert.equal(db.prepare("SELECT 1 FROM sqlite_schema WHERE name='task_experience_reuse'").get(),undefined);db.close();
  }
 });

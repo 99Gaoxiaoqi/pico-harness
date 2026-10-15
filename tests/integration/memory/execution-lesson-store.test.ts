@@ -157,7 +157,7 @@ async function fixture(t: TestContext) {
 test("v14 retires all workspaces, edited and orphan-owned lessons atomically; audit stays readable without old tables", async (t) => {
   const { path, ids, fence, use } = await fixture(t);
   let store = new SqliteMemoryItemStore(path);
-  assert.equal(store.schemaVersion(), 14);
+  assert.equal(store.schemaVersion(), 15);
   assert.equal("createExecutionLesson" in store, false);
   for (const itemId of ids.slice(0, 4)) assert.equal(await store.readItem(itemId), undefined);
   assert.equal((await store.readItem(ids[4]!))!.item.content, "ordinary survives");
@@ -321,7 +321,7 @@ test("busy WAL checkpoint reports pending cleanup without rolling back retiremen
   reader.prepare("SELECT * FROM execution_lesson_candidates").all();
   const warnings = t.mock.method(process, "emitWarning", () => {});
   const store = new SqliteMemoryItemStore(path);
-  assert.equal(store.schemaVersion(), 14);
+  assert.equal(store.schemaVersion(), 15);
   assert.equal(warnings.mock.callCount(), 1);
   assert.equal(
     (warnings.mock.calls[0]!.arguments[1] as { code: string }).code,
