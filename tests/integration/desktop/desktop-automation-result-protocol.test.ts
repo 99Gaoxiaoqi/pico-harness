@@ -67,12 +67,27 @@ test("durable automation CRUD and run history decode through the Runtime result 
   assert.equal(created.enabled, true);
   assert.equal(created.status, "idle");
   assert.equal(created.timeZone, Intl.DateTimeFormat().resolvedOptions().timeZone);
+  assert.ok(created.nextRunAt && created.nextRunAt > Date.now());
   assert.equal(created.version, 2);
   assert.equal(created.modelRouteId, security.modelRouteId);
   assert.equal(created.latestRunId, undefined);
   assert.deepEqual(parseRuntimeResult("jobs.list", { jobs: service.list(workspacePath) }), {
     jobs: [created],
   });
+  const tokyoPreview = service.previewSchedule("0 9 * * *", "Asia/Tokyo");
+  const tokyoHour = new Intl.DateTimeFormat("en", {
+    hour: "2-digit",
+    hourCycle: "h23",
+    timeZone: "Asia/Tokyo",
+  }).format(tokyoPreview.nextRunAt);
+  assert.equal(tokyoHour, "09");
+  assert.deepEqual(
+    parseRuntimeResult("jobs.list", {
+      jobs: [created],
+      schedulePreview: tokyoPreview,
+    }).schedulePreview,
+    tokyoPreview,
+  );
 
   const { job: updated } = parseRuntimeResult("jobs.update", {
     job: service.update(workspacePath, created.jobId, {
@@ -113,6 +128,7 @@ test("durable automation CRUD and run history decode through the Runtime result 
       leaseEpoch: lease.leaseEpoch,
       expectedVersion: run.version,
       status: "succeeded",
+      result: { sessionId: "automation-session" },
     });
   } finally {
     cron.close();
@@ -121,6 +137,7 @@ test("durable automation CRUD and run history decode through the Runtime result 
     runs: service.history(workspacePath, created.jobId),
   });
   assert.equal(completed.runs[0]?.status, "succeeded");
+  assert.equal(completed.runs[0]?.sessionId, "automation-session");
   assert.equal(typeof completed.runs[0]?.finishedAt, "number");
   const listed = parseRuntimeResult("jobs.list", { jobs: service.list(workspacePath) });
   assert.equal(listed.jobs[0]?.status, "succeeded");

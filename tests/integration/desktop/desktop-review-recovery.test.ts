@@ -144,7 +144,18 @@ const writes=[];
 let supported=true;
 const workspacePath=previewData.workspacePath;
 const sessionId="session-atlas";
-const runtime={preview:false,busy:undefined,data:{...previewData,runs:previewData.runs.map(run=>({...run,status:"succeeded"}))},actions:{
+const runId="review-evidence-run";
+const conversationKey=JSON.stringify([workspacePath,sessionId]);
+const successfulShellResult={version:1,toolCallId:"shell-check",toolName:"bash",status:"succeeded",rawSizeBytes:0,sha256:"0".repeat(64),deliveryTruncated:false,projection:{version:1,mode:"full",text:"",strategy:"none",truncated:false}};
+const failedShellResult={...successfulShellResult,toolCallId:"shell-failed",status:"failed"};
+const runtime={preview:false,busy:undefined,data:{...previewData,
+ sessions:[{id:sessionId,workspacePath,title:"审阅运行",status:"active",updatedAt:100}],
+ runs:[{id:runId,workspacePath,sessionId,status:"succeeded",startedAt:10,updatedAt:20}],
+ conversations:{...previewData.conversations,[conversationKey]:{sessionId,workspacePath,items:[
+  {id:"shell-check-item",kind:"tool",runId,toolName:"bash",title:"bash",detail:"npm test",state:"done",result:successfulShellResult},
+  {id:"shell-failed-item",kind:"tool",runId,toolName:"bash",title:"bash",detail:"npm lint",state:"failed",result:failedShellResult},
+ ],queuedCount:0}},
+},actions:{
  queryReview:async()=>({changes:[{path:"a.ts",status:"modified",additions:1,deletions:1,patch:"-old\n+new"}],fingerprint:"review-fingerprint"}),
  supportsReviewIdempotency:()=>supported,
  reviewChanges:async(decision,message,target)=>{
@@ -164,6 +175,10 @@ const mount=()=>act(async()=>{root.render(<PicoTheme><MemoryRouter key={++genera
 async function run(){
  localStorage.clear();
  await mount();
+ check(document.body.textContent.includes("文件完整性")&&document.body.textContent.includes("命令执行成功（不代表功能验证通过）"),"Review separates file integrity from successful command execution");
+ check(document.body.textContent.includes("命令失败"),"Review reports failed command execution without promoting it to feature verification");
+ check(document.body.textContent.includes("尚未确认功能验证")&&!document.body.textContent.includes("核验并确认"),"Arbitrary shell success never becomes confirmed feature verification");
+ check(button("确认文件一致性"),"Fingerprint action uses integrity-only wording");
  await act(async()=>{
   const input=document.querySelector(".review-composer input");check(input,"Missing comment");
   Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,"value").set.call(input,"原评论");

@@ -175,8 +175,19 @@ const enter=async(selector,value)=>act(async()=>{
   el.dispatchEvent(new Event("input",{bubbles:true}));
 });
 const writes=[];
+const schedulePreviews=[];
 let createSuccess=false;
-const runtime={data:previewData,busy:false,actions:{createJob:async value=>{writes.push(value);return createSuccess;}}};
+const historyRuns=[
+ {runId:"run-running",workspacePath:previewData.workspacePath,description:"正在执行",status:"running",startedAt:1,updatedAt:1,version:1,cronStatus:"running"},
+ {runId:"run-interrupted",workspacePath:previewData.workspacePath,description:"中断记录",status:"failed",startedAt:2,updatedAt:3,version:2,cronStatus:"failed",error:"daemon_interrupted_after_lease_expiry"},
+ {runId:"run-unknown",workspacePath:previewData.workspacePath,description:"未知记录",status:"succeeded",startedAt:4,updatedAt:5,version:3,cronStatus:"new-status"},
+ {runId:"run-success",workspacePath:previewData.workspacePath,sessionId:"automation-session",description:"已完成",status:"succeeded",startedAt:6,updatedAt:7,version:4,cronStatus:"succeeded"},
+];
+const runtime={data:previewData,busy:false,actions:{
+ createJob:async value=>{writes.push(value);return createSuccess;},
+ previewJobSchedule:async value=>{schedulePreviews.push(value);return Date.now()+60000;},
+ loadJobHistory:async()=>historyRuns,
+}};
 let finishSwitch;
 let rejectSwitch;
 let setLocked;
@@ -202,20 +213,32 @@ async function scenario(){
   document.execCommand=command=>{check(command==="copy","Only copy is requested");copied=document.activeElement.value;return true;};
   await click("复制数据文件夹路径");document.execCommand=originalExec;
   check(copied==="/custom/Pico data"&&document.body.textContent.includes("已复制数据文件夹路径"),"Copy preserves the real usable path and reports success");
-  await act(async()=>root.render(<RuntimeContext value={runtime}><AutomationsPage/></RuntimeContext>));
+  await act(async()=>root.render(<MemoryRouter><RuntimeContext value={runtime}><AutomationsPage/></RuntimeContext></MemoryRouter>));
   await click("新建定时任务");
   await enter('[name="name"]',"每周检查");
   await enter('[name="schedule"]',"0 9 * * 1");
   await enter('[name="prompt"]',"检查依赖并总结");
+  await act(async()=>new Promise(resolve=>setTimeout(resolve,300)));
+  check(schedulePreviews.at(-1)?.timeZone===Intl.DateTimeFormat().resolvedOptions().timeZone,"Schedule preview binds to the device IANA timezone");
+  check(document.body.textContent.includes("每周周一 09:00")&&document.body.textContent.includes("下次执行："),"Schedule preview explains cadence and next execution before creation");
   check(document.querySelector("form").checkValidity(),"Astryx inputs retain required/native validity");
   await act(async()=>document.querySelector("form").requestSubmit());
   check(writes.length===1&&writes[0].name==="每周检查"&&writes[0].prompt==="检查依赖并总结"&&writes[0].schedule==="0 9 * * 1","FormData retains field names and values");
+  check(writes[0].timeZone===Intl.DateTimeFormat().resolvedOptions().timeZone,"Created schedule persists the previewed timezone");
   check(document.querySelector('[name="name"]').value==="每周检查","Save failure preserves draft");
   createSuccess=true;
   await act(async()=>document.querySelector("form").requestSubmit());
   check(!document.querySelector("form"),"Success closes form");
   await click("新建定时任务");
   check(document.querySelector('[name="name"]').value==="","New form resets draft");
+  await click("取消");
+  await click("运行记录");
+  const history=document.querySelector(".automation-card__history");
+  check(history?.textContent.includes("运行中")&&history.textContent.includes("中断")&&history.textContent.includes("结果未知"),"History distinguishes running, interrupted, and unknown from success");
+  check(history?.textContent.includes("打开运行会话与结果"),"Successful automation history links to its session");
+  const runningRuntime={...runtime,data:{...previewData,jobs:previewData.jobs.map((job,index)=>index===0?{...job,status:"running"}:job)}};
+  await act(async()=>root.render(<MemoryRouter><RuntimeContext value={runningRuntime}><AutomationsPage/></RuntimeContext></MemoryRouter>));
+  check(button("立即运行").disabled,"An automation with a running state cannot be triggered again");
   await act(async()=>root.render(<RuntimeContext value={runtime}><MemoryRouter><SessionsPage/></MemoryRouter></RuntimeContext>));
   const before=document.querySelectorAll(".session-row").length;
   await act(async()=>document.querySelector('input[type="checkbox"]').click());

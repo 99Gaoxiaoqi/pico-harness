@@ -166,7 +166,10 @@ test("production startup leaves a fresh config empty; a local anonymous connecti
     env: {},
   });
   assert.equal(ordinary.validate(ordinary.routes[0]!.id).ok, false);
-  assert.throws(() => ordinary.providerConfig(undefined), /缺少凭证/);
+  assert.throws(
+    () => ordinary.providerConfig(undefined),
+    /缺少凭证.*PICO_HOME.*pico --daemon-stop.*Provider 设置/s,
+  );
 });
 
 test("reading config preserves existing providers and defaults", async (context) => {

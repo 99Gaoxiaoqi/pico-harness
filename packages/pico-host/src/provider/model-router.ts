@@ -124,7 +124,7 @@ export class ModelRouter {
     if (route.auth !== "none" && !this.readCredential(route)) {
       return {
         ok: false,
-        message: `模型路由 ${route.id} 缺少凭证环境变量 ${route.apiKeyEnv}，且系统凭证库中无可用凭证。`,
+        message: missingCredentialMessage(route),
       };
     }
     return { ok: true, route };
@@ -140,9 +140,7 @@ export class ModelRouter {
     }
     const apiKey = this.readCredential(route);
     if (route.auth !== "none" && !apiKey) {
-      throw new Error(
-        `模型路由 ${route.id} 缺少凭证环境变量 ${route.apiKeyEnv}，且系统凭证库中无可用凭证。`,
-      );
+      throw new Error(missingCredentialMessage(route));
     }
     return {
       provider: route.provider,
@@ -183,6 +181,13 @@ export class ModelRouter {
   private readCredential(route: ModelRoute): string | undefined {
     return this.credentialCandidates(route.id)[0];
   }
+}
+
+function missingCredentialMessage(route: ModelRoute): string {
+  return (
+    `模型路由 ${route.id} 缺少凭证环境变量 ${route.apiKeyEnv}，且系统凭证库中无可用凭证。` +
+    "本机 Runtime daemon 会沿用启动时的环境；设置变量后仍缺凭证时，请在相同 PICO_HOME 下执行 `pico --daemon-stop`（源码运行可用 `npm run dev -- --daemon-stop`），再从已设置变量的终端启动 Pico。也可在 Desktop 的 Provider 设置中配置用户级凭证。"
+  );
 }
 
 export async function loadModelRouter(options: LoadModelRouterOptions): Promise<ModelRouter> {

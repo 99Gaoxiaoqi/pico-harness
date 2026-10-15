@@ -8,8 +8,9 @@ import {
   reviewOutcomeUnknown,
   type PersistedReviewOperation,
 } from "../review-operation-storage.js";
-import { useLocation, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { Button, EmptyState, InlineNotice } from "../components.js";
+import type { ConversationItemView } from "../conversation/types.js";
 import type { ChangeView } from "../model.js";
 import { useRuntime } from "../runtime-context.js";
 import {
@@ -43,6 +44,13 @@ export function ReviewPage() {
     .sort((left, right) => right.startedAt - left.startedAt);
   const requestedRunId = searchParams.get("runId");
   const runId = runs.find((run) => run.id === requestedRunId)?.id ?? runs[0]?.id;
+  const shellExecutions =
+    conversation?.items.filter(
+      (item): item is Extract<ConversationItemView, { readonly kind: "tool" }> =>
+        item.kind === "tool" &&
+        item.runId === runId &&
+        ["bash", "shell", "terminal"].includes(item.toolName.toLowerCase()),
+    ) ?? [];
   const scopeKey = JSON.stringify([workspacePath, sessionId]);
   const commentDraftKey = JSON.stringify(["pico-review-comment", workspacePath, sessionId, runId]);
   const operationStore = useMemo(() => new DesktopReviewOperationStorage(scopeKey), [scopeKey]);
@@ -444,15 +452,61 @@ export function ReviewPage() {
                   disabled={Boolean(busy) || !target || Boolean(error) || reviewBlocked}
                   onClick={() => void actions.applyChanges(target)}
                 >
-                  核验并确认
+                  确认文件一致性
                 </Button>
               </div>
             </footer>
+            <section className="review-verification" aria-label="检查与验证证据">
+              <div>
+                <h3>文件完整性</h3>
+                <p>指纹确认只验证审阅期间文件快照一致，不会运行测试或判断功能是否完成。</p>
+              </div>
+              <div>
+                <h3>命令执行记录</h3>
+                {shellExecutions.length === 0 ? (
+                  <p>当前运行没有可识别的 Shell 命令记录。</p>
+                ) : (
+                  <ul>
+                    {shellExecutions.map((item) => (
+                      <li key={item.id}>
+                        {item.toolName}：{shellExecutionStatus(item)}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {sessionRef && <Link to={sessionHref(sessionRef)}>打开会话查看原始命令与结果</Link>}
+              </div>
+              <div>
+                <h3>功能验证</h3>
+                <p>
+                  尚未确认功能验证。命令执行成功不等于测试通过；此页面不会推断命令是否属于测试。
+                </p>
+              </div>
+            </section>
           </section>
         </div>
       )}
     </div>
   );
+}
+
+function shellExecutionStatus(
+  item: Extract<ConversationItemView, { readonly kind: "tool" }>,
+): string {
+  if (!item.result) return item.state === "active" ? "运行中" : "结果未知";
+  switch (item.result.status) {
+    case "succeeded":
+      return "命令执行成功（不代表功能验证通过）";
+    case "failed":
+    case "rejected":
+      return "命令失败";
+    case "cancelled":
+      return "已取消";
+    case "interrupted":
+      return "中断";
+    default:
+      return "结果未知";
+  }
 }
 
 function readReviewCommentDraft(key: string): string | undefined {

@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 interface DesktopPackageManifest {
@@ -116,4 +117,22 @@ test("Desktop cold workflows build the complete dependency chain before invoking
       `${lifecycle} must finish every workspace build in dependency order before invoking Forge`,
     );
   }
+});
+
+test("macOS Desktop build fails early with Swift toolchain recovery steps", async (t) => {
+  if (process.platform !== "darwin") {
+    t.skip("macOS toolchain preflight only runs on macOS");
+    return;
+  }
+  const emptyPath = await mkdtemp(join(tmpdir(), "pico-no-xcrun-"));
+  t.after(() => rm(emptyPath, { recursive: true, force: true }));
+  const script = fileURLToPath(new URL("../../../scripts/run-desktop-forge.mjs", import.meta.url));
+  const result = spawnSync(process.execPath, [script, "start"], {
+    encoding: "utf8",
+    env: { ...process.env, PATH: emptyPath },
+    timeout: 10_000,
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(`${result.stdout}\n${result.stderr}`, /xcrun swiftc/);
+  assert.match(`${result.stdout}\n${result.stderr}`, /xcode-select --install/);
 });

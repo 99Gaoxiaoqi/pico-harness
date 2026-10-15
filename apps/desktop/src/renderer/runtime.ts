@@ -19,6 +19,7 @@ import {
   type DesktopRuntimeMethod,
   type RuntimeDiagnosticCheck,
   type RuntimeMcpServerInput,
+  type RuntimeRun,
   type RuntimeMemoryItem,
   type RuntimeGoalSnapshot,
   type RuntimeMemorySettings,
@@ -299,12 +300,16 @@ function mergeLoadedData(
     runs: mergeRunViews(base.runs, parseRuns(results.runs, workspacePath)),
     jobs: recordArray(jobResult.jobs).map((item) => ({
       id: stringValue(item.jobId),
+      workspacePath: stringValue(item.workspacePath, workspacePath),
       name: stringValue(item.name, "未命名自动化"),
       prompt: stringValue(item.prompt),
       schedule: stringValue(item.schedule),
       enabled: booleanValue(item.enabled),
       status: stringValue(item.status, "idle"),
       updatedAt: numberValue(item.updatedAt, Date.now()),
+      ...(typeof item.timeZone === "string" ? { timeZone: item.timeZone } : {}),
+      ...(typeof item.nextRunAt === "number" ? { nextRunAt: item.nextRunAt } : {}),
+      ...(typeof item.latestRunId === "string" ? { latestRunId: item.latestRunId } : {}),
     })),
     modelRoutes:
       isRecord(results.effectiveConfig) && isRecord(results.effectiveConfig.config)
@@ -528,7 +533,13 @@ export interface RuntimeActions {
     readonly name: string;
     readonly prompt: string;
     readonly schedule: string;
+    readonly timeZone?: string;
   }): Promise<boolean>;
+  loadJobHistory(id: string): Promise<readonly RuntimeRun[]>;
+  previewJobSchedule(input: {
+    readonly schedule: string;
+    readonly timeZone: string;
+  }): Promise<number | undefined>;
   runJob(id: string): Promise<void>;
   deleteJob(id: string): Promise<void>;
   loadCapabilityScope(kind: "skills" | "mcp", workspacePath?: string): Promise<void>;
@@ -3226,6 +3237,7 @@ export function useRuntimeStore(): RuntimeStore {
                 ...current.jobs,
                 {
                   id: `preview-job-${Date.now()}`,
+                  workspacePath,
                   name: input.name.trim(),
                   prompt: input.prompt.trim(),
                   schedule: input.schedule.trim(),
@@ -3241,11 +3253,36 @@ export function useRuntimeStore(): RuntimeStore {
               name: input.name.trim(),
               prompt: input.prompt.trim(),
               schedule: input.schedule.trim(),
+              ...(input.timeZone ? { timeZone: input.timeZone } : {}),
               enabled: true,
             });
             await loadWorkspace(bridge, workspacePath);
           }
         });
+      },
+      async loadJobHistory(id) {
+        const workspacePath = dataRef.current.workspacePath;
+        if (!workspacePath) return [];
+        const bridge = preview ? createPreviewBridge() : getBridge();
+        if (!bridge) throw new Error("桌面安全桥接不可用。");
+        const result = await invoke(bridge, "jobs.history", {
+          workspacePath,
+          jobId: id,
+          limit: 10,
+        });
+        return result.runs;
+      },
+      async previewJobSchedule(input) {
+        const workspacePath = dataRef.current.workspacePath;
+        if (!workspacePath) return undefined;
+        const bridge = preview ? createPreviewBridge() : getBridge();
+        if (!bridge) throw new Error("桌面安全桥接不可用。");
+        const result = await invoke(bridge, "jobs.list", {
+          workspacePath,
+          schedule: input.schedule,
+          timeZone: input.timeZone,
+        });
+        return result.schedulePreview?.nextRunAt;
       },
       async runJob(id) {
         const workspacePath = dataRef.current.workspacePath;

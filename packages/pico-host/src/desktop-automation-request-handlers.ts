@@ -4,6 +4,7 @@ import type { DesktopRequestHandlers } from "./desktop-request-router.js";
 
 export interface DesktopAutomationPort {
   list(workspacePath: string): readonly JsonValue[];
+  previewSchedule?(schedule: string, timeZone: string): { readonly nextRunAt: number };
   create(
     workspacePath: string,
     params: RuntimeRequest<"jobs.create">["params"],
@@ -61,12 +62,17 @@ export function createDesktopAutomationRequestHandlers(
     );
   };
 
-  const listJobs = async (workspacePath: string): Promise<JsonValue> => {
+  const listJobs = async (params: RuntimeRequest<"jobs.list">["params"]): Promise<JsonValue> => {
     const [canonical, automations] = await Promise.all([
-      context.requireTrustedWorkspace(workspacePath),
+      context.requireTrustedWorkspace(params.workspacePath),
       Promise.resolve(requireAutomations()),
     ]);
-    return { jobs: automations.list(canonical) };
+    return {
+      jobs: automations.list(canonical),
+      ...(params.schedule && params.timeZone && automations.previewSchedule
+        ? { schedulePreview: automations.previewSchedule(params.schedule, params.timeZone) }
+        : {}),
+    };
   };
 
   const createTrustedAutomation = async (
@@ -126,7 +132,7 @@ export function createDesktopAutomationRequestHandlers(
   };
 
   return {
-    "jobs.list": (request) => listJobs(request.params.workspacePath),
+    "jobs.list": (request) => listJobs(request.params),
     "jobs.create": (request) => context.withProviderDependencyLock(() => createJob(request.params)),
     "jobs.update": (request) => updateJob(request.params),
     "jobs.delete": (request) => deleteJob(request.params.workspacePath, request.params.jobId),

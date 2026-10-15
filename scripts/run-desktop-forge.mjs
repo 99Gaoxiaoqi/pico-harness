@@ -3,7 +3,7 @@ import { accessSync, constants, mkdirSync, readFileSync, rmSync, writeFileSync }
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 
 const supportedCommands = new Set(["start", "package", "make"]);
 const command = process.argv[2];
@@ -27,6 +27,8 @@ async function run(forgeCommand, forgeArgs) {
   const desktopRoot = join(repositoryRoot, "apps", "desktop");
   const lockDirectory = forgeLockDirectory(repositoryRoot);
   let child;
+
+  if (process.platform === "darwin") assertMacComputerUseToolchain();
 
   acquireLock(lockDirectory, forgeCommand, repositoryRoot);
   const forwardSignal = (signal) => {
@@ -98,6 +100,19 @@ async function run(forgeCommand, forgeArgs) {
     process.off("SIGINT", forwardInterrupt);
     process.off("SIGTERM", forwardTermination);
     rmSync(lockDirectory, { recursive: true, force: true });
+  }
+}
+
+function assertMacComputerUseToolchain() {
+  const result = spawnSync("xcrun", ["--find", "swiftc"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    shell: false,
+  });
+  if (result.error || result.status !== 0 || !result.stdout.trim()) {
+    throw new Error(
+      "缺少 macOS Swift 工具链（xcrun swiftc）。请安装并启用 Xcode Command Line Tools（可运行 `xcode-select --install`），确认 `xcrun --find swiftc` 有效后重试。",
+    );
   }
 }
 

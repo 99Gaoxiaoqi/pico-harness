@@ -240,6 +240,7 @@ export const previewData: AppData = {
   jobs: [
     {
       id: "job-deps",
+      workspacePath: previewWorkspacePath,
       name: "每周依赖健康检查",
       prompt: "检查高危依赖与过期的直接依赖，给出可执行建议。",
       schedule: "每周一 09:30",
@@ -249,6 +250,7 @@ export const previewData: AppData = {
     },
     {
       id: "job-release",
+      workspacePath: previewWorkspacePath,
       name: "发布说明草稿",
       prompt: "根据本周提交生成面向用户的发布说明。",
       schedule: "每周五 17:00",

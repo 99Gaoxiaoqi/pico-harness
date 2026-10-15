@@ -257,12 +257,16 @@ export interface ChangeView {
 
 export interface JobView {
   readonly id: string;
+  readonly workspacePath: string;
   readonly name: string;
   readonly prompt: string;
   readonly schedule: string;
   readonly enabled: boolean;
   readonly status: string;
   readonly updatedAt: number;
+  readonly timeZone?: string | undefined;
+  readonly nextRunAt?: number | undefined;
+  readonly latestRunId?: string | undefined;
 }
 
 export interface CapabilityView {

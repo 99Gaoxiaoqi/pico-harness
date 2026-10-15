@@ -17,6 +17,10 @@ test("Desktop Automation handlers preserve CRUD routing and dependency locking",
       calls.push(`list:${workspacePath}`);
       return [job];
     },
+    previewSchedule: (schedule: string, timeZone: string) => {
+      calls.push(`preview:${schedule}:${timeZone}`);
+      return { nextRunAt: 123 };
+    },
     create: async (workspacePath: string, input: { name: string }) => {
       calls.push(`create:${workspacePath}:${input.name}`);
       return job;
@@ -67,6 +71,16 @@ test("Desktop Automation handlers preserve CRUD routing and dependency locking",
       createTypedRuntimeRequest("jobs.list", { workspacePath: "/workspace" }),
     ),
     { jobs: [job] },
+  );
+  assert.deepEqual(
+    await handlers["jobs.list"]!(
+      createTypedRuntimeRequest("jobs.list", {
+        workspacePath: "/workspace",
+        schedule: "0 9 * * *",
+        timeZone: "Asia/Tokyo",
+      }),
+    ),
+    { jobs: [job], schedulePreview: { nextRunAt: 123 } },
   );
   assert.deepEqual(
     await handlers["jobs.create"]!(
@@ -130,6 +144,9 @@ test("Desktop Automation handlers preserve CRUD routing and dependency locking",
   assert.deepEqual(calls, [
     "trust:/workspace",
     "list:/canonical",
+    "trust:/workspace",
+    "list:/canonical",
+    "preview:0 9 * * *:Asia/Tokyo",
     "lock:start",
     "trust:/workspace",
     "create:/canonical:daily",

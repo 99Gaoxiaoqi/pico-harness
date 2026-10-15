@@ -65,6 +65,10 @@ $env:LLM_API_KEY = 'your-api-key'
 
 环境变量须由 Provider 的 `apiKeyEnv` 引用；仅设置密钥不会自动创建模型路由。
 
+本机 Runtime daemon 是常驻进程，会沿用启动时的环境变量；如果先启动 Pico、之后才设置密钥，已运行的 TUI 或 Desktop 可能继续连接到不含新变量的 daemon。请在相同 `PICO_HOME` 下运行 `pico --daemon-stop`（源码运行可用 `npm run dev -- --daemon-stop`），然后从已设置密钥的终端重新启动 Pico。使用 Desktop 时也可以在 Provider 设置中配置用户级凭证；从 Finder 启动的 Desktop 不会自动继承某个终端的环境变量。
+
+macOS Desktop 的构建还需要 Xcode Command Line Tools 提供的 `xcrun swiftc`；缺少时运行 `xcode-select --install` 安装后再构建。
+
 ### 3. 启动
 
 ```bash

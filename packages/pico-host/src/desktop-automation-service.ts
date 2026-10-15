@@ -1,5 +1,5 @@
 import { parseProviderCredentialRef, type CredentialRef } from "@pico/core/provider-identity";
-import { automationDeniedTools, CronService } from "@pico/runtime";
+import { automationDeniedTools, CronService, nextCronRuns } from "@pico/runtime";
 import { RuntimeConflictError } from "@pico/storage/sqlite/sqlite-runtime-control-store";
 import type {
   AutonomousPolicySnapshot,
@@ -94,9 +94,26 @@ export class DesktopAutomationService {
     );
   }
 
+  previewSchedule(schedule: string, timeZone: string): { readonly nextRunAt: number } {
+    const nextRunAt = nextCronRuns(
+      requiredText(schedule, "schedule"),
+      requiredText(timeZone, "timeZone"),
+      this.options.now?.() ?? Date.now(),
+      1,
+    )[0];
+    if (nextRunAt === undefined) throw new Error("无法计算该计划的下次执行时间。");
+    return { nextRunAt };
+  }
+
   async create(
     workspacePath: string,
-    input: { name: string; prompt: string; schedule: string; enabled?: boolean },
+    input: {
+      name: string;
+      prompt: string;
+      schedule: string;
+      timeZone?: string;
+      enabled?: boolean;
+    },
   ): Promise<RuntimeJob> {
     const security = await this.options.prepareSecurity(workspacePath);
     return this.createWithSecurity(workspacePath, input, security);
@@ -295,6 +312,7 @@ export class DesktopAutomationService {
       status: jobStatus(latest),
       updatedAt: Math.max(job.updatedAt, latest?.finishedAt ?? latest?.createdAt ?? 0),
       timeZone: job.timeZone,
+      ...nextAutomationRun(job, this.options.now?.() ?? Date.now()),
       version: job.version,
       ...(job.modelRouteId ? { modelRouteId: job.modelRouteId } : {}),
       ...(latest ? { latestRunId: latest.cronRunId } : {}),
@@ -509,6 +527,9 @@ function projectRun(job: CronJobRecord, run: CronRunRecord): RuntimeRun {
   return {
     runId: run.cronRunId,
     workspacePath: run.workspacePath,
+    ...(typeof run.result?.["sessionId"] === "string"
+      ? { sessionId: run.result["sessionId"] }
+      : {}),
     description: job.prompt,
     status,
     startedAt: run.startedAt ?? run.scheduledFor,
@@ -519,6 +540,15 @@ function projectRun(job: CronJobRecord, run: CronRunRecord): RuntimeRun {
     scheduledFor: run.scheduledFor,
     cronStatus: run.status,
   };
+}
+
+function nextAutomationRun(job: CronJobRecord, now: number): { nextRunAt?: number } {
+  try {
+    const nextRunAt = nextCronRuns(job.schedule, job.timeZone, now, 1)[0];
+    return nextRunAt === undefined ? {} : { nextRunAt };
+  } catch {
+    return {};
+  }
 }
 
 function jobStatus(run: CronRunRecord | undefined): RuntimeJob["status"] {

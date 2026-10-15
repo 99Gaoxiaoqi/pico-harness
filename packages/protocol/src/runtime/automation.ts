@@ -18,7 +18,6 @@ import {
   stringArrayParam,
   stringParam,
   workspaceJobParams,
-  workspaceParams,
 } from "./validation.js";
 import type { RuntimeParamValidator, RuntimeResultRule } from "./validation.js";
 
@@ -32,6 +31,7 @@ export type RuntimeJob = {
   readonly status: RuntimeJobStatus;
   readonly updatedAt: number;
   readonly timeZone?: string;
+  readonly nextRunAt?: number;
   readonly version?: number;
   readonly modelRouteId?: string;
   readonly latestRunId?: RunId;
@@ -50,6 +50,7 @@ export const runtimeJobResult = exactResultShape(
   },
   {
     timeZone: resultNonEmptyString,
+    nextRunAt: resultFiniteNumber,
     version: resultPositiveInteger,
     modelRouteId: resultNonEmptyString,
     latestRunId: resultNonEmptyString,
@@ -58,14 +59,21 @@ export const runtimeJobResult = exactResultShape(
 
 export type AutomationMethodMap = {
   readonly "jobs.list": {
-    readonly params: WorkspaceParams;
-    readonly result: { readonly jobs: readonly RuntimeJob[] };
+    readonly params: WorkspaceParams & {
+      readonly schedule?: string;
+      readonly timeZone?: string;
+    };
+    readonly result: {
+      readonly jobs: readonly RuntimeJob[];
+      readonly schedulePreview?: { readonly nextRunAt: number };
+    };
   };
   readonly "jobs.create": {
     readonly params: WorkspaceParams & {
       readonly name: string;
       readonly prompt: string;
       readonly schedule: string;
+      readonly timeZone?: string;
       readonly enabled?: boolean;
     };
     readonly result: { readonly job: RuntimeJob };
@@ -129,7 +137,10 @@ export type AutomationMethodMap = {
 };
 
 export const automationParamValidators = {
-  "jobs.list": workspaceParams,
+  "jobs.list": exactParamShape(
+    { workspacePath: stringParam },
+    { schedule: stringParam, timeZone: stringParam },
+  ),
   "jobs.create": exactParamShape(
     {
       workspacePath: stringParam,
@@ -137,7 +148,7 @@ export const automationParamValidators = {
       prompt: stringParam,
       schedule: stringParam,
     },
-    { enabled: booleanParam },
+    { timeZone: stringParam, enabled: booleanParam },
   ),
   "jobs.update": exactParamShape(
     { workspacePath: stringParam, jobId: stringParam },
@@ -180,7 +191,12 @@ export const automationParamValidators = {
 } satisfies Readonly<Record<keyof AutomationMethodMap, RuntimeParamValidator>>;
 
 export const automationResultValidators = {
-  "jobs.list": exactResultShape({ jobs: resultArray(runtimeJobResult) }),
+  "jobs.list": exactResultShape(
+    { jobs: resultArray(runtimeJobResult) },
+    {
+      schedulePreview: exactResultShape({ nextRunAt: resultFiniteNumber }),
+    },
+  ),
   "jobs.create": exactResultShape({ job: runtimeJobResult }),
   "jobs.update": exactResultShape({ job: runtimeJobResult }),
   "jobs.delete": exactResultShape({ deleted: resultBoolean }),

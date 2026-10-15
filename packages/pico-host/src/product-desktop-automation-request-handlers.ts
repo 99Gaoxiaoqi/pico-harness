@@ -88,6 +88,8 @@ export function createDesktopAutomationRequestHandlers(
   const automations: DesktopAutomationPort | undefined = context.automations
     ? {
         list: (workspacePath) => context.automations!.list(workspacePath),
+        previewSchedule: (schedule, timeZone) =>
+          context.automations!.previewSchedule(schedule, timeZone),
         create: (workspacePath, params) => context.automations!.create(workspacePath, params),
         createTrusted: (workspacePath, params, foregroundOnlyTools) =>
           createTrustedDesktopAutomation(
