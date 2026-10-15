@@ -389,6 +389,7 @@ export function MemoryPage({
   }, [
     actions.queryMemoryConsolidationHistory,
     consolidationRefresh,
+    data.picoHome,
     data.trusted,
     data.workspacePath,
     runtime.connection.kind,
