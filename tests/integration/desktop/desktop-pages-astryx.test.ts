@@ -239,6 +239,9 @@ async function scenario(){
   const runningRuntime={...runtime,data:{...previewData,jobs:previewData.jobs.map((job,index)=>index===0?{...job,status:"running"}:job)}};
   await act(async()=>root.render(<MemoryRouter><RuntimeContext value={runningRuntime}><AutomationsPage/></RuntimeContext></MemoryRouter>));
   check(button("立即运行").disabled,"An automation with a running state cannot be triggered again");
+  const disabledRuntime={...runtime,data:{...previewData,jobs:previewData.jobs.map((job,index)=>index===0?{...job,enabled:false,nextRunAt:Date.now()+60_000}:job)}};
+  await act(async()=>root.render(<MemoryRouter><RuntimeContext value={disabledRuntime}><AutomationsPage/></RuntimeContext></MemoryRouter>));
+  check(document.body.textContent.includes("已停用，无下次执行"),"A disabled automation does not present a scheduled timestamp as its next execution");
   await act(async()=>root.render(<RuntimeContext value={runtime}><MemoryRouter><SessionsPage/></MemoryRouter></RuntimeContext>));
   const before=document.querySelectorAll(".session-row").length;
   await act(async()=>document.querySelector('input[type="checkbox"]').click());

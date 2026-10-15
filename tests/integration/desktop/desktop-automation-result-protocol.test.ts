@@ -105,6 +105,8 @@ test("durable automation CRUD and run history decode through the Runtime result 
       job: await service.setEnabled(workspacePath, created.jobId, enabled),
     });
     assert.equal(result.job.enabled, enabled);
+    if (enabled) assert.ok(result.job.nextRunAt);
+    else assert.equal(result.job.nextRunAt, undefined);
   }
 
   const started = parseRuntimeResult(

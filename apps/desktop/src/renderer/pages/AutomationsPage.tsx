@@ -227,9 +227,11 @@ export function AutomationsPage() {
                 <p>任务时区：{job.timeZone ?? "未知"}</p>
                 <p>
                   下次执行：
-                  {job.nextRunAt !== undefined && job.timeZone
-                    ? formatAutomationTime(job.nextRunAt, job.timeZone)
-                    : "未知"}
+                  {!job.enabled
+                    ? "已停用，无下次执行"
+                    : job.nextRunAt !== undefined && job.timeZone
+                      ? formatAutomationTime(job.nextRunAt, job.timeZone)
+                      : "未知"}
                 </p>
               </div>
               <footer>

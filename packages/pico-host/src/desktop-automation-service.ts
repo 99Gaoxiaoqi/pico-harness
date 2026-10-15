@@ -543,6 +543,7 @@ function projectRun(job: CronJobRecord, run: CronRunRecord): RuntimeRun {
 }
 
 function nextAutomationRun(job: CronJobRecord, now: number): { nextRunAt?: number } {
+  if (!job.enabled) return {};
   try {
     const nextRunAt = nextCronRuns(job.schedule, job.timeZone, now, 1)[0];
     return nextRunAt === undefined ? {} : { nextRunAt };
