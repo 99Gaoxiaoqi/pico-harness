@@ -4,6 +4,7 @@ import type {
   ExperienceApplicability,
   ExperienceReviewAction,
   TaskExperienceCandidate,
+  TaskExperienceSummary,
   TaskExperienceReuse,
 } from "@pico/core";
 import { Button, EmptyState, InlineNotice } from "./components.js";
@@ -20,19 +21,25 @@ import type {
 } from "./useTaskExperience.js";
 import "./TaskExperiencePanel.css";
 
-const reviewLabels = {
-  unneeded: "无需审核",
-  pending: "待审核",
-  approved: "已确认",
-  rejected: "已拒绝",
-  deferred: "暂缓",
-};
 const validationLabels = {
   unknown: "尚未验证",
   pass: "验证通过",
   fail: "验证失败",
   stale: "需重新验证",
 };
+const maturityLabels = {
+  unassessed: "待验证",
+  trial: "试用中",
+  active: "已启用",
+  suspended: "已暂停",
+};
+const promotionReasonLabels = {
+  none: "等待可核实的正向复用",
+  two_positive_reuses: "两次独立正向复用",
+  deterministic_validation: "确定性验证通过",
+  human_approved: "经用户审核启用",
+};
+const riskLabels = { low: "低风险", high: "高风险", unclear: "原因待核实" };
 const familyLabels = { general: "通用任务", coding: "代码任务", spreadsheet: "表格任务" };
 export interface TaskExperiencePanelProps {
   readonly items: readonly TaskExperienceCandidate[];
@@ -66,11 +73,69 @@ export function isExperienceSuggestion(item: TaskExperienceCandidate): boolean {
   return (
     item.kind === "task-lesson" &&
     Boolean(item.content.trim()) &&
-    item.review !== "unneeded" &&
+    (item.maturity !== undefined || item.review !== "unneeded") &&
     item.state !== "invalidated" &&
     item.state !== "discarded" &&
     item.state !== "expired"
   );
+}
+
+type ExperienceSummaryView = Pick<
+  TaskExperienceSummary,
+  | "maturity"
+  | "risk"
+  | "review"
+  | "enabled"
+  | "promotionReason"
+  | "positiveReuseCount"
+  | "reviewReason"
+>;
+
+export function experienceMaturity(
+  item: ExperienceSummaryView,
+): NonNullable<TaskExperienceSummary["maturity"]> {
+  if (item.maturity) return item.maturity;
+  if (item.review === "approved") return item.enabled ? "active" : "suspended";
+  return "unassessed";
+}
+
+export function experienceNeedsReview(item: ExperienceSummaryView): boolean {
+  return (
+    item.review === "pending" ||
+    item.review === "deferred" ||
+    ((item.risk === "high" || item.risk === "unclear") && item.review !== "approved")
+  );
+}
+
+export function experienceStatusLabel(item: ExperienceSummaryView): string {
+  return experienceNeedsReview(item) ? "待审核" : maturityLabels[experienceMaturity(item)];
+}
+
+export function experiencePromotionLabel(item: ExperienceSummaryView): string {
+  const reason = item.promotionReason;
+  if (reason && reason !== "none") return promotionReasonLabels[reason];
+  if (experienceMaturity(item) === "trial") {
+    return item.positiveReuseCount === undefined
+      ? promotionReasonLabels.none
+      : `正向复用 ${Math.min(item.positiveReuseCount, 2)}/2 次`;
+  }
+  return item.positiveReuseCount === undefined
+    ? "尚无晋级记录"
+    : `正向复用 ${item.positiveReuseCount} 次`;
+}
+
+export function experienceReviewReason(
+  item: ExperienceSummaryView & { readonly reason?: string },
+): string {
+  return (
+    item.reviewReason?.trim() ||
+    item.reason?.trim() ||
+    (item.risk === "high" ? "这条经验可能影响高风险操作。" : "经验来源或适用条件还需要核实。")
+  );
+}
+
+export function experienceIsSaved(item: ExperienceSummaryView): boolean {
+  return !experienceNeedsReview(item) && experienceMaturity(item) !== "unassessed";
 }
 
 function memoryLink(workspacePath?: string, tab = "saved"): string {
@@ -91,12 +156,12 @@ function ExperienceReviewBoard({
 }: TaskExperiencePanelProps) {
   const visible = items.filter((item) =>
     filter === "pending"
-      ? isExperienceSuggestion(item) && (item.review === "pending" || item.review === "deferred")
+      ? isExperienceSuggestion(item) && experienceNeedsReview(item)
       : filter === "saved"
         ? isExperienceSuggestion(item) &&
-          item.review === "approved" &&
+          experienceIsSaved(item) &&
           item.lifecycleState === "active"
-        : item.lifecycleState === "archived",
+        : isExperienceSuggestion(item) && item.lifecycleState === "archived",
   );
   const query = actions.searchQuery?.trim().toLocaleLowerCase();
   const matching = query
@@ -178,8 +243,8 @@ function ExperienceReviewBoard({
   if (visible.length === 0 && !selected && !actions.supplementalRows)
     return filter === "pending" ? (
       <EmptyState
-        title="没有待审核的任务经验"
-        detail="任务完成后，有依据的经验会出现在这里。关闭自动学习后，仍可管理历史经验。"
+        title="没有需要审核的任务经验"
+        detail="低风险经验会先进入受限试用；只有风险较高或来源需要核实的建议才会等待审核。"
       />
     ) : null;
   return (
@@ -244,8 +309,13 @@ function ExperienceReviewBoard({
             <span className="task-experience__row-title">{item.goal || "任务经验"}</span>
             <span>{item.content || "正在整理任务结果…"}</span>
             <span className="task-experience__meta">
-              <span>{reviewLabels[item.review]}</span>
-              {item.review === "approved" && <span>{item.enabled ? "可引用" : "已停用"}</span>}
+              <span>{experienceStatusLabel(item)}</span>
+              {experienceMaturity(item) === "trial" && (
+                <span>{experiencePromotionLabel(item)}</span>
+              )}
+              {experienceMaturity(item) === "active" && (
+                <span>晋级依据：{experiencePromotionLabel(item)}</span>
+              )}
               <span>
                 {item.validation === "pass" ? "历史验证通过" : validationLabels[item.validation]}
               </span>
@@ -356,24 +426,58 @@ function ConversationLearning(props: TaskExperiencePanelProps) {
             <span>本轮任务学习</span>
             {items.some(isExperienceSuggestion) ? (
               <>
-                <span>
-                  {
-                    items.filter(
-                      (item) =>
-                        isExperienceSuggestion(item) &&
-                        (item.review === "pending" || item.review === "deferred"),
-                    ).length
-                  }{" "}
-                  条待审核
-                </span>
-                <span>
-                  {
-                    items.filter(
-                      (item) => isExperienceSuggestion(item) && item.review === "approved",
-                    ).length
-                  }{" "}
-                  条已保存经验
-                </span>
+                {items.some(
+                  (item) => isExperienceSuggestion(item) && experienceNeedsReview(item),
+                ) && (
+                  <span>
+                    {
+                      items.filter(
+                        (item) => isExperienceSuggestion(item) && experienceNeedsReview(item),
+                      ).length
+                    }{" "}
+                    条待审核
+                  </span>
+                )}
+                {items.some(
+                  (item) => isExperienceSuggestion(item) && experienceMaturity(item) === "trial",
+                ) && (
+                  <span>
+                    {
+                      items.filter(
+                        (item) =>
+                          isExperienceSuggestion(item) && experienceMaturity(item) === "trial",
+                      ).length
+                    }{" "}
+                    条试用中
+                  </span>
+                )}
+                {items.some(
+                  (item) => isExperienceSuggestion(item) && experienceMaturity(item) === "active",
+                ) && (
+                  <span>
+                    {
+                      items.filter(
+                        (item) =>
+                          isExperienceSuggestion(item) && experienceMaturity(item) === "active",
+                      ).length
+                    }{" "}
+                    条已启用
+                  </span>
+                )}
+                {items.some(
+                  (item) =>
+                    isExperienceSuggestion(item) && experienceMaturity(item) === "suspended",
+                ) && (
+                  <span>
+                    {
+                      items.filter(
+                        (item) =>
+                          isExperienceSuggestion(item) && experienceMaturity(item) === "suspended",
+                      ).length
+                    }{" "}
+                    条已暂停
+                  </span>
+                )}
               </>
             ) : items.length > 0 ? (
               <span>{items.length} 条观察</span>
@@ -404,22 +508,14 @@ function ConversationLearning(props: TaskExperiencePanelProps) {
                 }}
                 to={memoryLink(
                   props.workspacePath,
-                  items.some(
-                    (item) =>
-                      isExperienceSuggestion(item) &&
-                      (item.review === "pending" || item.review === "deferred"),
-                  )
+                  items.some((item) => isExperienceSuggestion(item) && experienceNeedsReview(item))
                     ? "pending"
                     : "saved",
                 )}
               >
-                {items.some(
-                  (item) =>
-                    isExperienceSuggestion(item) &&
-                    (item.review === "pending" || item.review === "deferred"),
-                )
-                  ? "审核任务经验"
-                  : "管理工作区记忆"}
+                {items.some((item) => isExperienceSuggestion(item) && experienceNeedsReview(item))
+                  ? "查看待审核经验"
+                  : "查看经验进度"}
               </Link>
             )}
           </div>
@@ -442,9 +538,23 @@ function ExperienceState({ candidate }: { readonly candidate: TaskExperienceCand
     );
   return (
     <span className="task-experience__meta">
-      <span>审核：{reviewLabels[candidate.review]}</span>
+      <span>
+        {experienceNeedsReview(candidate)
+          ? "需审核"
+          : experienceMaturity(candidate) === "trial"
+            ? "已记录待验证"
+            : experienceMaturity(candidate) === "active"
+              ? "已晋级并启用"
+              : maturityLabels[experienceMaturity(candidate)]}
+      </span>
+      {experienceNeedsReview(candidate) && <span>{experienceReviewReason(candidate)}</span>}
+      {experienceMaturity(candidate) === "trial" && (
+        <span>{experiencePromotionLabel(candidate)}</span>
+      )}
+      {experienceMaturity(candidate) === "active" && (
+        <span>晋级依据：{experiencePromotionLabel(candidate)}</span>
+      )}
       <span>历史验证：{validationLabels[candidate.validation]}（范围见使用记录）</span>
-      <span>{candidate.enabled ? "已启用" : "未启用"}</span>
       <span>内容 v{candidate.contentVersion}</span>
     </span>
   );
@@ -697,7 +807,36 @@ function ExperienceDetailCard({
             。本页操作作用于当前管理版本，旧使用记录保持原版本。
           </InlineNotice>
         )}
-      {current.reason && <p>{current.reason}</p>}
+      {current.reason && !experienceNeedsReview(current) && <p>{current.reason}</p>}
+      {experienceNeedsReview(current) && !unavailable && (
+        <section className="task-experience__review-context" aria-label="审核原因和来源">
+          <strong>
+            {current.risk === "high"
+              ? riskLabels.high
+              : current.risk === "unclear"
+                ? riskLabels.unclear
+                : "需要审核"}
+          </strong>
+          <p>{experienceReviewReason(current)}</p>
+          <p>
+            来源：{current.sources.length} 条任务记录
+            {current.sources[0] ? ` · 事件 ${current.sources[0].eventId}` : " · 来源事件暂不可用"}
+          </p>
+          <p>审核通过前，这条建议不会用于后续任务。</p>
+        </section>
+      )}
+      {!experienceNeedsReview(current) && experienceMaturity(current) !== "unassessed" && (
+        <section className="task-experience__promotion-context" aria-label="经验状态和晋级依据">
+          <strong>{maturityLabels[experienceMaturity(current)]}</strong>
+          <span>{experiencePromotionLabel(current)}</span>
+          {experienceMaturity(current) === "trial" && (
+            <span>只在适用范围匹配时作为待验证提示，不会自动执行。</span>
+          )}
+          {experienceMaturity(current) === "suspended" && (
+            <span>这条经验当前不会用于后续任务。</span>
+          )}
+        </section>
+      )}
       {notice && <InlineNotice tone="success">{notice}</InlineNotice>}
       {error && (
         <InlineNotice tone="error">
@@ -828,7 +967,9 @@ function ExperienceDetailCard({
             {unavailable ? "经验已删除或不可用。" : current.content || "经验尚在整理中。"}
           </p>
           <Applicability candidate={current} />
-          <p>确认表示允许作为参考使用，不代表经验正文或整个任务已通过验证。</p>
+          {experienceNeedsReview(current) && (
+            <p>确认表示允许作为参考使用，不代表经验正文或整个任务已通过验证。</p>
+          )}
           {current.enabled && <p>开始更正会先停止使用旧版本。取消更正后，可单独重新启用。</p>}
           <div className="memory-card__actions">
             {(current.review === "pending" || current.review === "deferred") && (

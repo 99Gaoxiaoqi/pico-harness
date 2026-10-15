@@ -13,7 +13,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import type { RuntimeMemoryItem, RuntimeMemoryListItem, RuntimeResult } from "@pico/protocol";
 import { Button, EmptyState, IconButton, InlineNotice } from "./components.js";
-import { isExperienceSuggestion } from "./TaskExperiencePanel.js";
+import {
+  experienceIsSaved,
+  experienceNeedsReview,
+  isExperienceSuggestion,
+} from "./TaskExperiencePanel.js";
 import type { RuntimeStore } from "./runtime.js";
 import { TaskExperiencePanel } from "./TaskExperiencePanel.js";
 import { useTaskExperience } from "./useTaskExperience.js";
@@ -305,8 +309,7 @@ export function MemoryPage({
       ? ["pending", ...panels]
       : panels;
   const pendingCount = (showExperience ? experience.items : []).filter(
-    (item) =>
-      isExperienceSuggestion(item) && (item.review === "pending" || item.review === "deferred"),
+    (item) => isExperienceSuggestion(item) && experienceNeedsReview(item),
   ).length;
   const narrow = useNarrowLayout(forceNarrow);
   const [activePanel, setActivePanel] = useState<PanelId>(
@@ -329,7 +332,7 @@ export function MemoryPage({
     const desired: PanelId = targetCandidate
       ? targetCandidate.lifecycleState === "archived"
         ? "archived"
-        : targetCandidate.review === "pending" || targetCandidate.review === "deferred"
+        : experienceNeedsReview(targetCandidate)
           ? "pending"
           : "saved"
       : targetItem?.lifecycleState === "archived"
@@ -718,8 +721,8 @@ export function MemoryPage({
               (showExperience ? experience.items : []).filter((item) =>
                 panel === "archived"
                   ? item.lifecycleState === "archived"
-                  : item.review === "approved" &&
-                    isExperienceSuggestion(item) &&
+                  : isExperienceSuggestion(item) &&
+                    experienceIsSaved(item) &&
                     item.lifecycleState === "active",
               ).length,
           );
@@ -929,12 +932,12 @@ export function MemoryPage({
       experience.items.some(
         (item) =>
           (panel === "pending"
-            ? isExperienceSuggestion(item) && ["pending", "deferred"].includes(item.review)
+            ? isExperienceSuggestion(item) && experienceNeedsReview(item)
             : panel === "saved"
               ? isExperienceSuggestion(item) &&
-                item.review === "approved" &&
+                experienceIsSaved(item) &&
                 item.lifecycleState === "active"
-              : item.lifecycleState === "archived") &&
+              : isExperienceSuggestion(item) && item.lifecycleState === "archived") &&
           `${item.goal} ${item.content}`.toLocaleLowerCase().includes(query),
       );
     return (
@@ -1019,17 +1022,15 @@ export function MemoryPage({
     const hasExperience =
       showExperience &&
       ((targetCandidate &&
-        targetCandidate.review === "approved" &&
         (panel === "archived"
           ? targetCandidate.lifecycleState === "archived"
-          : targetCandidate.lifecycleState === "active")) ||
+          : experienceIsSaved(targetCandidate) && targetCandidate.lifecycleState === "active")) ||
         experience.items.some(
           (item) =>
-            item.review === "approved" &&
             isExperienceSuggestion(item) &&
             (panel === "archived"
               ? item.lifecycleState === "archived"
-              : item.lifecycleState === "active"),
+              : experienceIsSaved(item) && item.lifecycleState === "active"),
         ));
     return (
       <>

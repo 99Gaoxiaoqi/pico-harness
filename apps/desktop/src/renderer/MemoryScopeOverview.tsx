@@ -6,7 +6,14 @@ import { Button, EmptyState, InlineNotice } from "./components.js";
 import { TextField } from "./ui-controls.js";
 import type { RuntimeStore } from "./runtime.js";
 import type { MemoryScopePage, MemoryScopeTab } from "./memory-scope.js";
-import { isExperienceSuggestion } from "./TaskExperiencePanel.js";
+import {
+  experienceIsSaved,
+  experienceNeedsReview,
+  experiencePromotionLabel,
+  experienceReviewReason,
+  experienceStatusLabel,
+  isExperienceSuggestion,
+} from "./TaskExperiencePanel.js";
 import { referenceBody } from "./ExperienceUsagePanel.js";
 import { experienceManagementHref } from "./experience-management-route.js";
 import { sessionHref, workspaceDisplayName } from "./workspace-session.js";
@@ -69,10 +76,19 @@ export function MemoryScopeOverview({
         try {
           if (!actions.queryMemoryScope)
             throw new Error("当前连接不支持集中查看，请选择具体项目管理。");
-          const page =
+          let page: MemoryScopePage =
             scope === "global" && (tab === "pending" || tab === "usage")
               ? {}
               : await actions.queryMemoryScope(workspace.path, tab);
+          if (tab === "saved" && scope !== "global") {
+            try {
+              const experiencePage = await actions.queryMemoryScope(workspace.path, "pending");
+              if (experiencePage.suggestions)
+                page = { ...page, suggestions: experiencePage.suggestions };
+            } catch {
+              // Keep saved memory visible if this Host predates task-experience support.
+            }
+          }
           if (disposed || generation.current.value !== epoch) return;
           setReads((previous) => ({
             key,
@@ -143,6 +159,7 @@ export function MemoryScopeOverview({
   const rows: Array<{ key: string; label: string; content: string; status: string; href: string }> =
     [];
   const seen = new Set<string>();
+  const projectedCandidateIds = new Set<string>();
   for (const workspace of workspaces.filter((w) => w.trusted)) {
     const page = snapshot[workspace.path]?.page;
     const workspaceLabel = workspace.temporary
@@ -165,7 +182,12 @@ export function MemoryScopeOverview({
         label: item.scopeType === "global" ? "全局" : workspaceLabel,
         content: item.content,
         status: item.taskExperience
-          ? "用户确认的经验"
+          ? item.lifecycleState === "archived"
+            ? "已归档"
+            : experienceStatusLabel(item.taskExperience) +
+              (item.taskExperience.maturity === "active" || item.taskExperience.maturity === "trial"
+                ? " · " + experiencePromotionLabel(item.taskExperience)
+                : "")
           : item.kind === "preference"
             ? "偏好"
             : "记忆",
@@ -175,24 +197,29 @@ export function MemoryScopeOverview({
           tab === "archived" ? "archived" : "saved",
         ),
       });
+      if (item.taskExperience) projectedCandidateIds.add(item.taskExperience.candidateId);
     }
     for (const candidate of page?.suggestions?.items ?? []) {
       if (
         candidate.kind !== "task-lesson" ||
         !isExperienceSuggestion(candidate) ||
         candidate.lifecycleState === "archived" ||
-        !["pending", "deferred"].includes(candidate.review)
+        projectedCandidateIds.has(candidate.candidateId) ||
+        (tab === "pending" ? !experienceNeedsReview(candidate) : !experienceIsSaved(candidate))
       )
         continue;
+      const needsReview = experienceNeedsReview(candidate);
       rows.push({
         key: `${workspace.path}:${candidate.candidateId}`,
         label: workspaceLabel,
         content: candidate.content,
-        status: candidate.review === "deferred" ? "稍后审核" : "待审核经验",
+        status: needsReview
+          ? "待审核 · " + experienceReviewReason(candidate)
+          : experienceStatusLabel(candidate) + " · " + experiencePromotionLabel(candidate),
         href: experienceManagementHref(
           workspace.path,
           { candidateId: candidate.candidateId },
-          "pending",
+          needsReview ? "pending" : "saved",
         ),
       });
     }
