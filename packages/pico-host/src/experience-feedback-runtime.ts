@@ -275,7 +275,10 @@ export class ExperienceFeedbackRuntime implements NativeLearningObserver {
         summary.candidateId,
       );
       check();
-      return candidate?.review === "approved" &&
+      return (candidate?.review === "approved" ||
+        (candidate?.review === "unneeded" &&
+          candidate.maturity === "trial" &&
+          candidate.risk === "low")) &&
         candidate.enabled &&
         candidate.contentVersion === summary.contentVersion &&
         candidate.itemId === record.item.itemId
@@ -533,7 +536,12 @@ export class ExperienceFeedbackRuntime implements NativeLearningObserver {
         reviewed.itemId !== use.itemId ||
         reviewed.workspaceKey !== this.options.workspaceKey ||
         reviewed.contentVersion !== use.source.contentVersion ||
-        reviewed.review !== "approved" ||
+        !(
+          reviewed.review === "approved" ||
+          (reviewed.review === "unneeded" &&
+            reviewed.maturity === "trial" &&
+            reviewed.risk === "low")
+        ) ||
         !reviewed.enabled ||
         reviewed.state !== "saved" ||
         reviewed.lifecycleState !== "active"
@@ -657,7 +665,12 @@ export class ExperienceFeedbackRuntime implements NativeLearningObserver {
             !candidate ||
             !candidate.applicability.spreadsheet ||
             candidate.contentVersion !== use.source.contentVersion ||
-            candidate.review !== "approved" ||
+            !(
+              candidate.review === "approved" ||
+              (candidate.review === "unneeded" &&
+                candidate.maturity === "trial" &&
+                candidate.risk === "low")
+            ) ||
             !candidate.enabled
           )
             continue;
@@ -741,7 +754,7 @@ export class ExperienceFeedbackRuntime implements NativeLearningObserver {
               check,
             );
             verdict = native.verdict;
-            contradiction = use.source.kind === "execution-validated" && native.contradiction;
+            contradiction = native.contradiction;
             scope = native.scope;
             reason = native.reason;
           } catch {

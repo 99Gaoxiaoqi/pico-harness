@@ -54,10 +54,7 @@ function registerAutomaticExtractionCleanup(lifecycle: AtomicMemoryLifecycle): v
   });
 }
 
-function resetAutomaticExtractionTimer(
-  laneKey: string,
-  pending: PendingAutomaticExtraction,
-): void {
+function resetAutomaticExtractionTimer(laneKey: string, pending: PendingAutomaticExtraction): void {
   if (pending.timer !== undefined) clearTimeout(pending.timer);
   pending.timer = setTimeout(() => {
     if (pendingAutomaticExtractions.get(laneKey) !== pending) return;
@@ -232,10 +229,8 @@ export class AtomicMemoryRuntime {
   async capture(messages: readonly Message[], tools: readonly ToolDefinition[]): Promise<void> {
     if (!this.options.supported) return;
     if (messages.some((message) => message.role === "user"))
-      notifyAutomaticExtractionActivity(
-        this.laneKey,
-        this.lifecycle,
-        (trigger, prepare) => this.enqueue(trigger, prepare),
+      notifyAutomaticExtractionActivity(this.laneKey, this.lifecycle, (trigger, prepare) =>
+        this.enqueue(trigger, prepare),
       );
     try {
       this.source = await this.snapshot("remember", await this.readDeletionRevision(), undefined, {
@@ -252,7 +247,8 @@ export class AtomicMemoryRuntime {
   async remember(signal?: AbortSignal): Promise<AtomicMemoryResult> {
     if (!this.options.supported) return unavailable("provider_unsupported");
     if (!this.source) return unavailable("source_unavailable");
-    this.explicitlyRememberedRuns.add(this.source.runId);
+    if (!this.completedRuns.has(this.source.runId))
+      this.explicitlyRememberedRuns.add(this.source.runId);
     cancelAutomaticExtractionsForRun(this.laneKey, this.source.runId);
     const snapshot = { ...this.source, ...(signal ? { signal } : {}) };
     return this.lifecycle.run(
@@ -373,7 +369,7 @@ export class AtomicMemoryRuntime {
     this.completedRuns.add(runId);
     const requestedRevision = this.extractRequestedRevision;
     this.extractRequestedRevision = undefined;
-    if (this.explicitlyRememberedRuns.has(runId)) return;
+    if (this.explicitlyRememberedRuns.delete(runId)) return;
     scheduleAutomaticExtraction(
       this.laneKey,
       this.lifecycle,

@@ -6,6 +6,7 @@ export interface ReviewedExperienceTarget {
   readonly candidateId: string;
   readonly contentVersion: number;
   readonly recordRevision: number;
+  readonly maturity?: "trial" | "active";
   /** Host-authored preparation must survive recall intact, in code points. */
   readonly requiredPrefixLength?: number;
 }
@@ -42,9 +43,11 @@ export async function taskExperienceRecallTargets(options: {
     }
   }
   for (const candidate of await options.store.queryTaskExperiences(options.workspaceKey, {
-    review: "approved",
     limit: 100,
   })) {
+    const approved = candidate.review === "approved";
+    const trial =
+      candidate.review === "unneeded" && candidate.maturity === "trial" && candidate.risk === "low";
     if (
       candidate.kind !== "task-lesson" ||
       excluded.has(JSON.stringify([candidate.candidateId, candidate.contentVersion])) ||
@@ -53,7 +56,7 @@ export async function taskExperienceRecallTargets(options: {
       candidate.state !== "saved" ||
       candidate.lifecycleState !== "active" ||
       !candidate.enabled ||
-      candidate.review !== "approved" ||
+      (!approved && !trial) ||
       !candidate.itemId ||
       !candidate.content.trim() ||
       candidate.validation === "fail" ||
@@ -79,6 +82,12 @@ export async function taskExperienceRecallTargets(options: {
     )
       continue;
     if (
+      trial &&
+      (!applicability.toolNames.length ||
+        (applicability.taskFamily === "general" && !applicability.conditions.length))
+    )
+      continue;
+    if (
       applicability.taskFamily === "spreadsheet" &&
       !/(?:excel|xlsx|sheet|表格|电子表|求和|合计)/iu.test(query)
     )
@@ -93,12 +102,18 @@ export async function taskExperienceRecallTargets(options: {
       const match = options.conditionMatches
         ? await options.conditionMatches(candidate)
         : "unknown";
-      if (match === false || (applicability.spreadsheet && match !== true)) continue;
+      if (
+        match === false ||
+        (applicability.spreadsheet && match !== true) ||
+        (trial && applicability.conditions.length > 0 && match !== true)
+      )
+        continue;
     }
     targets.push({
       candidateId: candidate.candidateId,
       contentVersion: candidate.contentVersion,
       recordRevision: candidate.recordRevision,
+      maturity: trial ? "trial" : "active",
       ...(candidate.nativeEvidence &&
       candidate.content.startsWith("本工作区同一检查范围的准备记录（不代表整段建议已验证）：")
         ? {

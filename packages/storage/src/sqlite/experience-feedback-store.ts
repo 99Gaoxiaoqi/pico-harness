@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { MemoryItemStoreConflictError } from "@pico/core";
 import type {
-  ExperienceDiagnostic, ExperienceLedgerStore,
+  ExperienceDiagnostic,
+  ExperienceLedgerStore,
   ExperienceUse,
   ExperienceEffect,
   ExperienceFeedbackInput,
@@ -75,23 +76,72 @@ export class SqliteExperienceLedgerStore implements ExperienceLedgerStore {
     };
   }
   async recordExperienceDiagnostic(diagnostic: ExperienceDiagnostic): Promise<void> {
-    for (const value of [diagnostic.diagnosticId, diagnostic.workspaceKey, diagnostic.sessionId, diagnostic.runId]) identifier(value);
-    if (!["identity", "proposal", "reference", "effect", "worker"].includes(diagnostic.phase) || !/^[a-z][a-z0-9_-]{0,95}$/u.test(diagnostic.reason)) throw new Error("Invalid experience diagnostic code");
+    for (const value of [
+      diagnostic.diagnosticId,
+      diagnostic.workspaceKey,
+      diagnostic.sessionId,
+      diagnostic.runId,
+    ])
+      identifier(value);
+    if (
+      !["identity", "proposal", "reference", "effect", "worker"].includes(diagnostic.phase) ||
+      !/^[a-z][a-z0-9_-]{0,95}$/u.test(diagnostic.reason)
+    )
+      throw new Error("Invalid experience diagnostic code");
     integer(diagnostic.createdAt);
     this.tx(() => {
-      const prior = decode<ExperienceDiagnostic>(this.db.prepare("SELECT record_json FROM experience_diagnostics WHERE diagnostic_id=?").get(diagnostic.diagnosticId));
-      if (prior && (prior.workspaceKey !== diagnostic.workspaceKey || prior.sessionId !== diagnostic.sessionId || prior.runId !== diagnostic.runId || prior.phase !== diagnostic.phase || prior.reason !== diagnostic.reason)) throw new Error("Experience diagnostic identity reused");
-      this.db.prepare("INSERT INTO experience_diagnostics VALUES(?,?,?,?,?) ON CONFLICT(diagnostic_id) DO UPDATE SET created_at=excluded.created_at,record_json=excluded.record_json").run(diagnostic.diagnosticId, diagnostic.workspaceKey, diagnostic.sessionId, diagnostic.createdAt, JSON.stringify(diagnostic));
+      const prior = decode<ExperienceDiagnostic>(
+        this.db
+          .prepare("SELECT record_json FROM experience_diagnostics WHERE diagnostic_id=?")
+          .get(diagnostic.diagnosticId),
+      );
+      if (
+        prior &&
+        (prior.workspaceKey !== diagnostic.workspaceKey ||
+          prior.sessionId !== diagnostic.sessionId ||
+          prior.runId !== diagnostic.runId ||
+          prior.phase !== diagnostic.phase ||
+          prior.reason !== diagnostic.reason)
+      )
+        throw new Error("Experience diagnostic identity reused");
+      this.db
+        .prepare(
+          "INSERT INTO experience_diagnostics VALUES(?,?,?,?,?) ON CONFLICT(diagnostic_id) DO UPDATE SET created_at=excluded.created_at,record_json=excluded.record_json",
+        )
+        .run(
+          diagnostic.diagnosticId,
+          diagnostic.workspaceKey,
+          diagnostic.sessionId,
+          diagnostic.createdAt,
+          JSON.stringify(diagnostic),
+        );
       // Diagnostics never carry task prose and are bounded independently of candidate/model budgets.
-      this.db.prepare("DELETE FROM experience_diagnostics WHERE workspace_key=? AND diagnostic_id NOT IN (SELECT diagnostic_id FROM experience_diagnostics WHERE workspace_key=? ORDER BY created_at DESC,rowid DESC LIMIT 100)").run(diagnostic.workspaceKey,diagnostic.workspaceKey);
+      this.db
+        .prepare(
+          "DELETE FROM experience_diagnostics WHERE workspace_key=? AND diagnostic_id NOT IN (SELECT diagnostic_id FROM experience_diagnostics WHERE workspace_key=? ORDER BY created_at DESC,rowid DESC LIMIT 100)",
+        )
+        .run(diagnostic.workspaceKey, diagnostic.workspaceKey);
     });
   }
-  async listExperienceDiagnostics(workspaceKey: string, sessionId?: string): Promise<readonly ExperienceDiagnostic[]> {
-    identifier(workspaceKey); if (sessionId !== undefined) identifier(sessionId);
-    const rows = sessionId === undefined
-      ? this.db.prepare("SELECT record_json FROM experience_diagnostics WHERE workspace_key=? ORDER BY created_at DESC,rowid DESC LIMIT 10").all(workspaceKey)
-      : this.db.prepare("SELECT record_json FROM experience_diagnostics WHERE workspace_key=? AND session_id=? ORDER BY created_at DESC,rowid DESC LIMIT 10").all(workspaceKey,sessionId);
-    return rows.map(row => decode<ExperienceDiagnostic>(row)!);
+  async listExperienceDiagnostics(
+    workspaceKey: string,
+    sessionId?: string,
+  ): Promise<readonly ExperienceDiagnostic[]> {
+    identifier(workspaceKey);
+    if (sessionId !== undefined) identifier(sessionId);
+    const rows =
+      sessionId === undefined
+        ? this.db
+            .prepare(
+              "SELECT record_json FROM experience_diagnostics WHERE workspace_key=? ORDER BY created_at DESC,rowid DESC LIMIT 10",
+            )
+            .all(workspaceKey)
+        : this.db
+            .prepare(
+              "SELECT record_json FROM experience_diagnostics WHERE workspace_key=? AND session_id=? ORDER BY created_at DESC,rowid DESC LIMIT 10",
+            )
+            .all(workspaceKey, sessionId);
+    return rows.map((row) => decode<ExperienceDiagnostic>(row)!);
   }
   async readExperienceFence(workspaceKey: string) {
     identifier(workspaceKey);
@@ -159,7 +209,10 @@ export class SqliteExperienceLedgerStore implements ExperienceLedgerStore {
         candidate.kind === "task-lesson" &&
         candidate.workspaceKey === use.workspaceKey &&
         candidate.state === "saved" &&
-        candidate.review === "approved" &&
+        (candidate.review === "approved" ||
+          (candidate.review === "unneeded" &&
+            candidate.maturity === "trial" &&
+            candidate.risk === "low")) &&
         candidate.itemId === use.itemId &&
         candidate.contentVersion === source.contentVersion &&
         !!acceptance.taskExperience &&
@@ -440,9 +493,14 @@ export class SqliteExperienceLedgerStore implements ExperienceLedgerStore {
       // arbitrary reviewed prose or disable the reference automatically.
       if (
         use.source.kind === "reviewed-reference" &&
-        effect.validationScope === "spreadsheet-range" &&
+        ["spreadsheet-range", "native-claim", "command"].includes(effect.validationScope) &&
         ["pass", "fail"].includes(effect.validation)
       ) {
+        if (
+          effect.validationScope === "native-claim" &&
+          !this.hasNativeEvidence(use.source.candidateId)
+        )
+          return;
         if (effect.validation === "fail" && !effect.trustedContradiction) return;
         this.updateGeneric(use, effect.validation === "fail", effect.createdAt, effect.validation);
       } else if (
@@ -477,6 +535,13 @@ export class SqliteExperienceLedgerStore implements ExperienceLedgerStore {
       )
       .run();
   }
+  private bumpResourceRevision(): void {
+    this.db
+      .prepare(
+        "INSERT INTO execution_learning_control(scope,resource_revision) VALUES('*',1) ON CONFLICT(scope) DO UPDATE SET resource_revision=resource_revision+1",
+      )
+      .run();
+  }
   private updateGeneric(
     use: ExperienceUse,
     disable: boolean,
@@ -488,10 +553,36 @@ export class SqliteExperienceLedgerStore implements ExperienceLedgerStore {
         .prepare("SELECT record_json FROM execution_learning_candidates WHERE candidate_id=?")
         .get(use.source.candidateId),
     )!;
+    const positiveReuseCount = this.positiveTaskExperienceReuseCount(candidate);
+    const validationScope = this.useValidationScope(use.useId);
+    const deterministicPass =
+      !disable &&
+      validation === "pass" &&
+      ["spreadsheet-range", "native-claim"].includes(validationScope);
+    const twoPositiveReuses =
+      !disable && validation === "pass" && validationScope === "command" && positiveReuseCount >= 2;
+    const autoPromoted =
+      (deterministicPass || twoPositiveReuses) &&
+      candidate.maturity === "trial" &&
+      candidate.risk === "low";
+    const { reviewReason: _reviewReason, ...candidateWithoutReviewReason } = candidate;
     const next: TaskExperienceCandidate = {
-      ...candidate,
+      ...candidateWithoutReviewReason,
       enabled: disable ? false : candidate.enabled,
       ...(validation ? { validation } : {}),
+      ...(candidate.reviewReason !== undefined ? { reviewReason: candidate.reviewReason } : {}),
+      ...(candidate.positiveReuseCount !== undefined || positiveReuseCount > 0
+        ? { positiveReuseCount }
+        : {}),
+      ...(disable ? { maturity: "suspended" as const } : {}),
+      ...(autoPromoted
+        ? {
+            maturity: "active" as const,
+            promotionReason: deterministicPass
+              ? ("deterministic_validation" as const)
+              : ("two_positive_reuses" as const),
+          }
+        : {}),
       ...(disable
         ? { reason: validation === "fail" ? "trusted_reuse_contradiction" : "user_disable" }
         : {}),
@@ -511,11 +602,72 @@ export class SqliteExperienceLedgerStore implements ExperienceLedgerStore {
       validation: next.validation,
       enabled: next.enabled,
       applicability: next.applicability,
+      ...(next.maturity ? { maturity: next.maturity } : {}),
+      ...(next.risk ? { risk: next.risk } : {}),
+      ...(next.promotionReason ? { promotionReason: next.promotionReason } : {}),
+      ...(next.positiveReuseCount !== undefined
+        ? { positiveReuseCount: next.positiveReuseCount }
+        : {}),
+      ...(next.reviewReason ? { reviewReason: next.reviewReason } : {}),
     };
     this.db
       .prepare("UPDATE execution_learning_items SET metadata_json=? WHERE item_id=?")
       .run(JSON.stringify(metadata), use.itemId);
-    if (disable) this.bumpManagement();
+    if (disable || autoPromoted) this.bumpManagement();
+    else this.bumpResourceRevision();
+  }
+  private useValidationScope(useId: string): ExperienceUse["validationScope"] {
+    const use = decode<ExperienceUse>(
+      this.db.prepare("SELECT record_json FROM experience_uses WHERE use_id=?").get(useId),
+    );
+    return use?.validationScope ?? "unknown";
+  }
+  private hasNativeEvidence(candidateId: string): boolean {
+    const candidate = decode<TaskExperienceCandidate>(
+      this.db
+        .prepare("SELECT record_json FROM execution_learning_candidates WHERE candidate_id=?")
+        .get(candidateId),
+    );
+    return candidate?.kind === "task-lesson" && !!candidate.nativeEvidence;
+  }
+  private positiveTaskExperienceReuseCount(candidate: TaskExperienceCandidate): number {
+    const identities = new Set<string>();
+    const uses = this.db
+      .prepare(
+        "SELECT record_json FROM experience_uses WHERE candidate_id=? AND source_kind='reviewed-reference'",
+      )
+      .all(candidate.candidateId)
+      .map((row) => decode<ExperienceUse>(row)!)
+      .filter(
+        (use) =>
+          use.source.kind === "reviewed-reference" &&
+          use.source.contentVersion === candidate.contentVersion &&
+          use.itemId === candidate.itemId &&
+          use.delivery === "carried" &&
+          !use.historical &&
+          !use.deleted &&
+          !use.excluded &&
+          use.adoption === "observed" &&
+          use.validation === "pass" &&
+          ["spreadsheet-range", "native-claim", "command"].includes(use.validationScope),
+      );
+    for (const use of uses) {
+      const effects = this.db
+        .prepare("SELECT record_json FROM experience_effects WHERE use_id=?")
+        .all(use.useId)
+        .map((row) => decode<ExperienceEffect>(row)!);
+      if (
+        effects.some(
+          (effect) =>
+            effect.adoption === "observed" &&
+            effect.validation === "pass" &&
+            ["spreadsheet-range", "native-claim", "command"].includes(effect.validationScope) &&
+            !effect.trustedContradiction,
+        )
+      )
+        identities.add(JSON.stringify([use.taskId, use.taskVersion]));
+    }
+    return identities.size;
   }
   private archive(use: ExperienceUse, now: number): void {
     this.db
@@ -663,7 +815,7 @@ function integer(value: number, minimum = 0): void {
     throw new Error("Invalid experience integer");
 }
 function validateUse(use: ExperienceUse): void {
-  if(use.hostRunId !== undefined) identifier(use.hostRunId);
+  if (use.hostRunId !== undefined) identifier(use.hostRunId);
   for (const value of [
     use.useId,
     use.workspaceKey,

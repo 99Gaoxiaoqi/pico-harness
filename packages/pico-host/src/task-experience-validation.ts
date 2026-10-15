@@ -118,7 +118,12 @@ export async function validateSpreadsheetTaskExperience(input: {
 }): Promise<Verdict> {
   const { candidate, task, observation } = input;
   if (
-    candidate.review !== "approved" ||
+    !(
+      candidate.review === "approved" ||
+      (candidate.review === "unneeded" &&
+        candidate.maturity === "trial" &&
+        candidate.risk === "low")
+    ) ||
     !candidate.enabled ||
     !candidate.applicability.spreadsheet ||
     observation.taskId !== task.taskId ||
@@ -311,8 +316,28 @@ export function spreadsheetTargetFromGoal(
 export function taskInputArtifactIds(message: Message): readonly string[] {
   if (message.role !== "user") return [];
   const marker = message.content.lastIndexOf("<uploaded-attachments>");
-  const refs = marker >= 0
-    ? [...message.content.slice(marker).matchAll(/<attachment\b[^>]*\breference="pico:\/\/artifact\/([^"<>]+)"[^>]*>/gu)].map(match => match[1]!)
-    : [...(typeof message.providerData?.displayText === "string" ? message.providerData.displayText : message.content).matchAll(/pico:\/\/artifact\/([^\s"<>\])]+)/gu)].map(match => match[1]!);
-  return [...new Set(refs.flatMap(ref => { try { return [decodeURIComponent(ref)]; } catch { return []; } }))].slice(0,20);
+  const refs =
+    marker >= 0
+      ? [
+          ...message.content
+            .slice(marker)
+            .matchAll(/<attachment\b[^>]*\breference="pico:\/\/artifact\/([^"<>]+)"[^>]*>/gu),
+        ].map((match) => match[1]!)
+      : [
+          ...(typeof message.providerData?.displayText === "string"
+            ? message.providerData.displayText
+            : message.content
+          ).matchAll(/pico:\/\/artifact\/([^\s"<>\])]+)/gu),
+        ].map((match) => match[1]!);
+  return [
+    ...new Set(
+      refs.flatMap((ref) => {
+        try {
+          return [decodeURIComponent(ref)];
+        } catch {
+          return [];
+        }
+      }),
+    ),
+  ].slice(0, 20);
 }

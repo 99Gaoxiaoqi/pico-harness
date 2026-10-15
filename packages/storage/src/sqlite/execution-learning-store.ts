@@ -373,9 +373,13 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
       if (old) {
         if (old.claim.failureKey !== claim.failureKey) throw new Error("Candidate identity reused");
         if (old.claim.claimHash === claim.claimHash) return old;
-        if (this.db.prepare(
-          "SELECT 1 FROM execution_learning_candidates WHERE json_extract(record_json,'$.kind')='task-lesson' AND json_extract(record_json,'$.nativeEvidence.candidateId')=? AND state NOT IN ('discarded','invalidated','expired') LIMIT 1",
-        ).get(claim.candidateId))
+        if (
+          this.db
+            .prepare(
+              "SELECT 1 FROM execution_learning_candidates WHERE json_extract(record_json,'$.kind')='task-lesson' AND json_extract(record_json,'$.nativeEvidence.candidateId')=? AND state NOT IN ('discarded','invalidated','expired') LIMIT 1",
+            )
+            .get(claim.candidateId)
+        )
           throw new Error("Attached native evidence is frozen");
         if (old.state !== "waiting" && old.state !== "insufficient")
           throw new Error("Candidate cannot be revised");
@@ -1349,20 +1353,44 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
             );
         }
         const { reason: _reason, nativeEvidence: _nativeEvidence, ...withoutReason } = candidate;
+        const assessment = assessExperienceDraft({
+          content,
+          applicability: input.applicability,
+          sources: input.sources,
+          observations: this.db
+            .prepare(
+              "SELECT record_json FROM task_experience_observations WHERE task_id=? AND task_version=?",
+            )
+            .all(candidate.taskId, candidate.taskVersion)
+            .map((row) => decode<TaskExperienceObservation>(row)!),
+        });
+        const lowRisk = assessment.risk === "low";
+        const next: TaskExperienceCandidate = {
+          ...withoutReason,
+          content,
+          applicability: input.applicability,
+          ...(input.nativeEvidence ? { nativeEvidence: input.nativeEvidence } : {}),
+          sources: input.sources,
+          review: lowRisk ? "unneeded" : "pending",
+          validation: "unknown",
+          enabled: lowRisk,
+          maturity: lowRisk ? "trial" : "unassessed",
+          risk: assessment.risk,
+          promotionReason: "none",
+          positiveReuseCount: 0,
+          ...(assessment.reviewReason ? { reviewReason: assessment.reviewReason } : {}),
+          state: "ready",
+          recordRevision: candidate.recordRevision + 1,
+          updatedAt: input.now,
+        };
         return finish(
-          {
-            ...withoutReason,
-            content,
-            applicability: input.applicability,
-            ...(input.nativeEvidence ? { nativeEvidence: input.nativeEvidence } : {}),
-            sources: input.sources,
-            review: "pending",
-            validation: "unknown",
-            enabled: false,
-            state: "ready",
-            recordRevision: candidate.recordRevision + 1,
-            updatedAt: input.now,
-          },
+          lowRisk
+            ? this.publishExperience(next, input.now, {
+                review: "unneeded",
+                maturity: "trial",
+                promotionReason: "none",
+              })
+            : next,
           "completed",
         );
       }
@@ -1427,6 +1455,11 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
   private publishExperience(
     candidate: TaskExperienceCandidate,
     now: number,
+    options: {
+      readonly review?: TaskExperienceCandidate["review"];
+      readonly maturity?: TaskExperienceCandidate["maturity"];
+      readonly promotionReason?: TaskExperienceCandidate["promotionReason"];
+    } = {},
   ): TaskExperienceCandidate {
     const normalized = { ...candidate, content: normalizeExperienceContent(candidate.content) };
     const saved = this.options.createExperienceItem(normalized, now);
@@ -1434,8 +1467,10 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
       ...normalized,
       state: "saved",
       lifecycleState: "active",
-      review: "approved",
+      review: options.review ?? "approved",
       enabled: true,
+      ...(options.maturity ? { maturity: options.maturity } : {}),
+      ...(options.promotionReason ? { promotionReason: options.promotionReason } : {}),
       itemId: saved.itemId,
     };
     this.db
@@ -1561,9 +1596,32 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
         };
         switch (input.action) {
           case "accept":
-            if (!["pending", "deferred"].includes(candidate.review) || candidate.itemId)
+            if (
+              !["pending", "deferred"].includes(candidate.review) &&
+              candidate.maturity !== "trial"
+            )
               throw new Error("Task experience is not pending");
-            next = this.publishExperience(next, input.now);
+            if (candidate.maturity === "trial" && candidate.itemId) {
+              const { reviewReason: _reviewReason, ...withoutReviewReason } = next;
+              next = {
+                ...withoutReviewReason,
+                review: "approved",
+                maturity: "active",
+                promotionReason: "human_approved",
+                enabled: true,
+              };
+            } else {
+              if (candidate.itemId) throw new Error("Pending task experience already has an item");
+              const { reviewReason: _reviewReason, ...withoutReviewReason } = next;
+              next = this.publishExperience(
+                {
+                  ...withoutReviewReason,
+                  maturity: "active",
+                  promotionReason: "human_approved",
+                },
+                input.now,
+              );
+            }
             break;
           case "edit_accept": {
             const content = normalizeExperienceContent(input.content ?? "");
@@ -1571,7 +1629,12 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
               input.applicability ?? candidate.applicability;
             if (candidate.itemId)
               this.db.prepare("DELETE FROM memory_items WHERE item_id=?").run(candidate.itemId);
-            const { itemId: _itemId, nativeEvidence: _nativeEvidence, ...withoutItem } = next;
+            const {
+              itemId: _itemId,
+              nativeEvidence: _nativeEvidence,
+              reviewReason: _reviewReason,
+              ...withoutItem
+            } = next;
             next = this.publishExperience(
               {
                 ...withoutItem,
@@ -1579,6 +1642,8 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
                 contentVersion: candidate.contentVersion + 1,
                 validation: "unknown",
                 applicability,
+                maturity: "active",
+                promotionReason: "human_approved",
               },
               input.now,
             );
@@ -1613,12 +1678,14 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
           case "restore":
             if (!candidate.itemId || candidate.review !== "approved")
               throw new Error("Task experience has no reviewed item");
+            if (candidate.maturity === "suspended" && candidate.validation === "fail")
+              throw new Error("Contradicted task experience must be edited before re-enabling");
             this.db
               .prepare(
                 "UPDATE memory_items SET lifecycle_state='active',version=version+1,updated_at=? WHERE item_id=?",
               )
               .run(input.now, candidate.itemId);
-            next = { ...next, enabled: true, lifecycleState: "active" };
+            next = { ...next, enabled: true, lifecycleState: "active", maturity: "active" };
             break;
         }
         this.refreshExperienceMetadata(next);
@@ -1662,7 +1729,11 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
           enabled:
             input.action === "disable" || input.action === "correct" ? false : candidate.enabled,
           ...(input.action === "correct"
-            ? { reason: "user_correction", validation: "unknown" as const }
+            ? {
+                reason: "user_correction",
+                validation: "unknown" as const,
+                maturity: "suspended" as const,
+              }
             : {}),
           recordRevision: candidate.recordRevision + 1,
           updatedAt: input.now,
@@ -1791,7 +1862,9 @@ function reuseProjection(use: ExperienceUse): TaskExperienceReuse {
     sessionId: use.sessionId,
     runId: use.hostRunId ?? use.runId,
     referenceHash: use.referenceHash,
-    ...(use.referenceContent !== undefined ? { referenceContent: legacyReferenceExcerpt(use.referenceContent) } : {}),
+    ...(use.referenceContent !== undefined
+      ? { referenceContent: legacyReferenceExcerpt(use.referenceContent) }
+      : {}),
     adoption: use.adoption,
     validation: use.validation,
     excluded: use.excluded,
@@ -1916,12 +1989,73 @@ function experienceSummary(candidate: TaskExperienceCandidate): TaskExperienceSu
     validation,
     enabled,
     applicability,
+    ...(candidate.maturity ? { maturity: candidate.maturity } : {}),
+    ...(candidate.risk ? { risk: candidate.risk } : {}),
+    ...(candidate.promotionReason ? { promotionReason: candidate.promotionReason } : {}),
+    ...(candidate.positiveReuseCount !== undefined
+      ? { positiveReuseCount: candidate.positiveReuseCount }
+      : {}),
+    ...(candidate.reviewReason ? { reviewReason: candidate.reviewReason } : {}),
   };
+}
+
+function assessExperienceDraft(input: {
+  readonly content: string;
+  readonly applicability: TaskExperienceCandidate["applicability"];
+  readonly sources: readonly MemoryItemSource[];
+  readonly observations: readonly TaskExperienceObservation[];
+}): { readonly risk: "low" | "high" | "unclear"; readonly reviewReason?: string } {
+  const highRisk =
+    /(?:\bdelete\b|\bremove\b|\berase\b|\brm\s+-rf\b|\bdrop\s+(?:table|database)\b|删除|清空|销毁|\bpublish\b|\brelease\b|\bdeploy\b|发布|部署|外部发送|\bsend\s+(?:an?\s+)?(?:email|message|request)|发(?:送|邮件)|转账|付款|\btransfer\b|\bpayment\b|\bpermission(?:s)?\b|\bsecurity\b|\bcredential(?:s)?\b|\bsudo\b|\bchmod\b|权限|授权|凭据|绕过(?:审批|确认|权限)|\b(?:bypass|skip)\s+(?:approval|review|permission|confirmation)\b)/iu.test(
+      `${input.content}\n${input.applicability.conditions.join("\n")}`,
+    );
+  if (highRisk)
+    return {
+      risk: "high",
+      reviewReason: "经验涉及删除、发布、外部发送、资金、权限或安全相关操作，需要人工审核。",
+    };
+
+  const selected = input.sources.map((source) =>
+    input.observations.find((observation) => sameSource(source, observation.source)),
+  );
+  const latestRelevant = [...input.observations]
+    .filter((observation) => observation.kind === "tool-result" || observation.correction)
+    .sort((left, right) => right.sequence - left.sequence)[0];
+  const includesLatestEvidence =
+    !!latestRelevant && input.sources.some((source) => sameSource(source, latestRelevant.source));
+  const completeEvidence =
+    input.sources.length >= 2 &&
+    selected.every((observation) => observation?.coverage === "complete") &&
+    includesLatestEvidence;
+  const failure = selected.some(
+    (observation) =>
+      !!observation &&
+      (observation.correction ||
+        observation.status === "failed" ||
+        observation.status === "rejected"),
+  );
+  const recovery = selected.some((observation) => observation?.status === "succeeded");
+  const boundedScope =
+    input.applicability.toolNames.length > 0 &&
+    (input.applicability.taskFamily !== "general" || input.applicability.conditions.length > 0);
+  if (!completeEvidence || !failure || !recovery || !boundedScope)
+    return {
+      risk: "unclear",
+      reviewReason: !boundedScope
+        ? "适用范围还不够明确，需审核经验内容和适用条件。"
+        : !includesLatestEvidence
+          ? "候选来源没有包含本轮最新结果，可能遗漏冲突或后续修正。"
+          : "缺少完整的失败与成功对照证据，暂不能确认经验原因。",
+    };
+  return { risk: "low" };
 }
 
 function legacyReferenceExcerpt(content: string): string {
   const rendered = /^<memory\b[^>]*>([\s\S]*)<\/memory>$/u.exec(content);
   if (!rendered) return content;
-  const entities: Record<string,string> = {amp:"&",lt:"<",gt:">",quot:'"',apos:"'"};
-  return rendered[1]!.replace(/&(amp|lt|gt|quot|apos);/gu, (_match, entity: string) => entities[entity]!);
+  const entities: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };
+  return rendered[1]!.replace(
+    /&(amp|lt|gt|quot|apos);/gu,
+    (_match, entity: string) => entities[entity]!,
+  );
 }

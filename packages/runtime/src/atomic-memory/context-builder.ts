@@ -66,11 +66,12 @@ export interface AtomicMemoryContextOptions {
   readonly experienceAllowed?: (record: MemoryItemRecord) => Promise<boolean>;
   /** Host-checked current target scope, not model-provided taskFamily or inferred relevance. */
   readonly executionTargets?: readonly { readonly targetId: string; readonly scopeHash: string }[];
-  /** Approved identities matched by Host against current conditions and tool/file permissions. */
+  /** Host matched approved or low-risk trial identities against scope and permissions. */
   readonly reviewedExperiences?: readonly {
     readonly candidateId: string;
     readonly contentVersion: number;
     readonly recordRevision: number;
+    readonly maturity?: "trial" | "active";
     /** Host-owned indivisible preparation prefix, measured in original code points. */
     readonly requiredPrefixLength?: number;
   }[];
@@ -235,7 +236,10 @@ export class AtomicMemoryContextBuilder {
       (!record.taskExperience || record.sourceType === "reviewed-reference") &&
       (record.sourceType !== "reviewed-reference" ||
         (!!record.taskExperience &&
-          record.taskExperience.review === "approved" &&
+          (record.taskExperience.review === "approved" ||
+            (record.taskExperience.review === "unneeded" &&
+              record.taskExperience.maturity === "trial" &&
+              record.taskExperience.risk === "low")) &&
           record.taskExperience.enabled &&
           record.taskExperience.validation !== "fail" &&
           record.taskExperience.validation !== "stale" &&
@@ -243,7 +247,9 @@ export class AtomicMemoryContextBuilder {
             (target) =>
               target.candidateId === record.taskExperience!.candidateId &&
               target.contentVersion === record.taskExperience!.contentVersion &&
-              target.recordRevision === record.taskExperience!.recordRevision,
+              target.recordRevision === record.taskExperience!.recordRevision &&
+              target.maturity ===
+                (record.taskExperience!.maturity === "trial" ? "trial" : "active"),
           ))) &&
       (record.sourceType !== "execution-validated" ||
         (!!record.taskAcceptance &&
@@ -525,7 +531,10 @@ function renderReference(
     source,
     ...(source === "reviewed-reference"
       ? {
-          applicability: `适用条件：${record.taskExperience!.applicability.conditions.join("；") || "按当前任务核对"}。当前任务需核对适用性；引用不代表采用或验证。`,
+          applicability:
+            record.taskExperience!.maturity === "trial"
+              ? `待验证试用经验。适用条件：${record.taskExperience!.applicability.conditions.join("；") || "按当前任务核对"}。仅作提示，必须核对当前任务；不能视为规则、权限或成功证明。`
+              : `适用条件：${record.taskExperience!.applicability.conditions.join("；") || "按当前任务核对"}。当前任务需核对适用性；引用不代表采用或验证。`,
         }
       : {}),
     excerpt,

@@ -735,6 +735,10 @@ export class TaskExperienceRuntime {
         review: "unneeded",
         validation: "unknown",
         enabled: false,
+        maturity: "unassessed",
+        risk: "unclear",
+        promotionReason: "none",
+        positiveReuseCount: 0,
         lifecycleState: "active",
         applicability: {
           taskFamily: observations.some((observation) => observation.toolName === "document")
