@@ -211,7 +211,7 @@ export class SqliteExperienceLedgerStore implements ExperienceLedgerStore {
         candidate.state === "saved" &&
         (candidate.review === "approved" ||
           (candidate.review === "unneeded" &&
-            candidate.maturity === "trial" &&
+            (candidate.maturity === "trial" || candidate.maturity === "active") &&
             candidate.risk === "low")) &&
         candidate.itemId === use.itemId &&
         candidate.contentVersion === source.contentVersion &&
@@ -643,6 +643,7 @@ export class SqliteExperienceLedgerStore implements ExperienceLedgerStore {
           use.source.kind === "reviewed-reference" &&
           use.source.contentVersion === candidate.contentVersion &&
           use.itemId === candidate.itemId &&
+          use.taskId !== candidate.taskId &&
           use.delivery === "carried" &&
           !use.historical &&
           !use.deleted &&
@@ -665,7 +666,7 @@ export class SqliteExperienceLedgerStore implements ExperienceLedgerStore {
             !effect.trustedContradiction,
         )
       )
-        identities.add(JSON.stringify([use.taskId, use.taskVersion]));
+        identities.add(use.taskId);
     }
     return identities.size;
   }

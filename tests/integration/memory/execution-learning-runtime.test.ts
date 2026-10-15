@@ -149,11 +149,12 @@ test(
     assert.equal(result.finalMessage, "BuildCheck 已通过。");
     await f.finishLearning();
     const pending = (
-      await f.repository.taskExperiences.queryTaskExperiences(f.paths.workspace.id, {
-        review: "pending",
-      })
+      await f.repository.taskExperiences.queryTaskExperiences(f.paths.workspace.id)
     )[0];
-    assert.ok(pending, "abstract model method still produces a reviewable proposal");
+    assert.ok(pending, "abstract model method produces a restricted low-risk trial");
+    assert.equal(pending.review, "unneeded");
+    assert.equal(pending.maturity, "trial");
+    assert.equal(pending.risk, "low");
     assert.match(pending.content, /准备文件 \.\/config\.json/u);
     assert.ok(
       pending.content.includes(JSON.stringify(configuration)),
@@ -169,7 +170,8 @@ test(
     assert.equal(
       (await f.repository.listItems({ workspaceKey: f.paths.workspace.id, learningVersion: 2 }))
         .length,
-      0,
+      1,
+      "the generic trial is published once; native facts do not publish an additional memory",
     );
     const reviewed = await approveReviewedFixture(f.repository, f.paths.workspace.id);
     const items = await f.repository.listItems({

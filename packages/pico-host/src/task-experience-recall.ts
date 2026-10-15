@@ -44,10 +44,14 @@ export async function taskExperienceRecallTargets(options: {
   }
   for (const candidate of await options.store.queryTaskExperiences(options.workspaceKey, {
     limit: 100,
+    recallable: true,
   })) {
     const approved = candidate.review === "approved";
-    const trial =
-      candidate.review === "unneeded" && candidate.maturity === "trial" && candidate.risk === "low";
+    const automatic =
+      candidate.review === "unneeded" &&
+      (candidate.maturity === "trial" || candidate.maturity === "active") &&
+      candidate.risk === "low";
+    const trial = automatic && candidate.maturity === "trial";
     if (
       candidate.kind !== "task-lesson" ||
       excluded.has(JSON.stringify([candidate.candidateId, candidate.contentVersion])) ||
@@ -56,7 +60,7 @@ export async function taskExperienceRecallTargets(options: {
       candidate.state !== "saved" ||
       candidate.lifecycleState !== "active" ||
       !candidate.enabled ||
-      (!approved && !trial) ||
+      (!approved && !automatic) ||
       !candidate.itemId ||
       !candidate.content.trim() ||
       candidate.validation === "fail" ||
@@ -84,7 +88,9 @@ export async function taskExperienceRecallTargets(options: {
     if (
       trial &&
       (!applicability.toolNames.length ||
-        (applicability.taskFamily === "general" && !applicability.conditions.length))
+        (!candidate.nativeEvidence &&
+          !applicability.spreadsheet &&
+          !applicability.conditions.length))
     )
       continue;
     if (

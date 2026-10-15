@@ -238,7 +238,8 @@ export class AtomicMemoryContextBuilder {
         (!!record.taskExperience &&
           (record.taskExperience.review === "approved" ||
             (record.taskExperience.review === "unneeded" &&
-              record.taskExperience.maturity === "trial" &&
+              (record.taskExperience.maturity === "trial" ||
+                record.taskExperience.maturity === "active") &&
               record.taskExperience.risk === "low")) &&
           record.taskExperience.enabled &&
           record.taskExperience.validation !== "fail" &&
@@ -248,7 +249,7 @@ export class AtomicMemoryContextBuilder {
               target.candidateId === record.taskExperience!.candidateId &&
               target.contentVersion === record.taskExperience!.contentVersion &&
               target.recordRevision === record.taskExperience!.recordRevision &&
-              target.maturity ===
+              (target.maturity ?? "active") ===
                 (record.taskExperience!.maturity === "trial" ? "trial" : "active"),
           ))) &&
       (record.sourceType !== "execution-validated" ||

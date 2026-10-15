@@ -121,7 +121,7 @@ export async function validateSpreadsheetTaskExperience(input: {
     !(
       candidate.review === "approved" ||
       (candidate.review === "unneeded" &&
-        candidate.maturity === "trial" &&
+        (candidate.maturity === "trial" || candidate.maturity === "active") &&
         candidate.risk === "low")
     ) ||
     !candidate.enabled ||

@@ -1231,6 +1231,7 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
     options: {
       sessionId?: string;
       review?: TaskExperienceCandidate["review"];
+      recallable?: boolean;
       limit?: number;
     } = {},
   ): Promise<readonly TaskExperienceCandidate[]> {
@@ -1244,6 +1245,15 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
     if (options.review) {
       clauses.push("json_extract(record_json,'$.review')=?");
       args.push(options.review);
+    }
+    if (options.recallable) {
+      clauses.push(
+        "state='saved'",
+        "json_extract(record_json,'$.enabled')=1",
+        "json_extract(record_json,'$.lifecycleState')='active'",
+        "json_extract(record_json,'$.validation') NOT IN ('fail','stale')",
+        "(json_extract(record_json,'$.review')='approved' OR (json_extract(record_json,'$.review')='unneeded' AND json_extract(record_json,'$.risk')='low' AND json_extract(record_json,'$.maturity') IN ('trial','active')))",
+      );
     }
     return this.db
       .prepare(
@@ -1357,9 +1367,10 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
           content,
           applicability: input.applicability,
           sources: input.sources,
+          hasNativeEvidence: !!input.nativeEvidence,
           observations: this.db
             .prepare(
-              "SELECT record_json FROM task_experience_observations WHERE task_id=? AND task_version=?",
+              "SELECT record_json FROM task_experience_observations WHERE task_id=? AND task_version<=?",
             )
             .all(candidate.taskId, candidate.taskVersion)
             .map((row) => decode<TaskExperienceObservation>(row)!),
@@ -1641,6 +1652,7 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
                 content,
                 contentVersion: candidate.contentVersion + 1,
                 validation: "unknown",
+                positiveReuseCount: 0,
                 applicability,
                 maturity: "active",
                 promotionReason: "human_approved",
@@ -1676,16 +1688,29 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
             next = { ...next, enabled: false, lifecycleState: "archived" };
             break;
           case "restore":
-            if (!candidate.itemId || candidate.review !== "approved")
-              throw new Error("Task experience has no reviewed item");
             if (candidate.maturity === "suspended" && candidate.validation === "fail")
               throw new Error("Contradicted task experience must be edited before re-enabling");
+            if (
+              !candidate.itemId ||
+              !(
+                candidate.review === "approved" ||
+                (candidate.review === "unneeded" &&
+                  candidate.risk === "low" &&
+                  (candidate.maturity === "trial" || candidate.maturity === "active"))
+              )
+            )
+              throw new Error("Task experience has no reusable item");
             this.db
               .prepare(
                 "UPDATE memory_items SET lifecycle_state='active',version=version+1,updated_at=? WHERE item_id=?",
               )
               .run(input.now, candidate.itemId);
-            next = { ...next, enabled: true, lifecycleState: "active", maturity: "active" };
+            next = {
+              ...next,
+              enabled: true,
+              lifecycleState: "active",
+              maturity: candidate.maturity === "trial" ? "trial" : "active",
+            };
             break;
         }
         this.refreshExperienceMetadata(next);
@@ -2004,6 +2029,7 @@ function assessExperienceDraft(input: {
   readonly applicability: TaskExperienceCandidate["applicability"];
   readonly sources: readonly MemoryItemSource[];
   readonly observations: readonly TaskExperienceObservation[];
+  readonly hasNativeEvidence: boolean;
 }): { readonly risk: "low" | "high" | "unclear"; readonly reviewReason?: string } {
   const highRisk =
     /(?:\bdelete\b|\bremove\b|\berase\b|\brm\s+-rf\b|\bdrop\s+(?:table|database)\b|删除|清空|销毁|\bpublish\b|\brelease\b|\bdeploy\b|发布|部署|外部发送|\bsend\s+(?:an?\s+)?(?:email|message|request)|发(?:送|邮件)|转账|付款|\btransfer\b|\bpayment\b|\bpermission(?:s)?\b|\bsecurity\b|\bcredential(?:s)?\b|\bsudo\b|\bchmod\b|权限|授权|凭据|绕过(?:审批|确认|权限)|\b(?:bypass|skip)\s+(?:approval|review|permission|confirmation)\b)/iu.test(
@@ -2040,7 +2066,12 @@ function assessExperienceDraft(input: {
   }
   const conflictingSource = [...sourceStatuses.values()].some((statuses) => statuses.size > 1);
   const latestRelevant = [...input.observations]
-    .filter((observation) => observation.kind === "tool-result" || observation.correction)
+    .filter(
+      (observation) =>
+        observation.kind === "tool-result" ||
+        observation.correction ||
+        (observation.kind === "terminal" && observation.status !== "succeeded"),
+    )
     .sort((left, right) => right.sequence - left.sequence)[0];
   const includesLatestEvidence =
     !!latestRelevant && input.sources.some((source) => sameSource(source, latestRelevant.source));
@@ -2056,17 +2087,25 @@ function assessExperienceDraft(input: {
         observation.status === "rejected"),
   );
   const recovery = selected.some((observation) => observation?.status === "succeeded");
-  const failureBeforeRecovery = selected.some(
-    (failed) =>
-      !!failed &&
-      (failed.correction || failed.status === "failed" || failed.status === "rejected") &&
-      selected.some(
-        (recovered) => recovered?.status === "succeeded" && recovered.sequence > failed.sequence,
-      ),
-  );
+  const latestFailure = [...input.observations]
+    .filter(
+      (observation) =>
+        observation.correction ||
+        observation.status === "failed" ||
+        observation.status === "rejected",
+    )
+    .sort((left, right) => right.sequence - left.sequence)[0];
+  const failureBeforeRecovery =
+    !!latestFailure &&
+    input.sources.some((source) => sameSource(source, latestFailure.source)) &&
+    latestRelevant?.kind === "tool-result" &&
+    latestRelevant.status === "succeeded" &&
+    latestRelevant.sequence > latestFailure.sequence;
   const boundedScope =
     input.applicability.toolNames.length > 0 &&
-    (input.applicability.taskFamily !== "general" || input.applicability.conditions.length > 0);
+    (input.hasNativeEvidence ||
+      !!input.applicability.spreadsheet ||
+      input.applicability.conditions.length > 0);
   if (
     !completeEvidence ||
     !failure ||
@@ -2084,7 +2123,7 @@ function assessExperienceDraft(input: {
           : !includesLatestEvidence
             ? "候选来源没有包含本轮最新结果，可能遗漏冲突或后续修正。"
             : !failureBeforeRecovery
-              ? "失败与成功记录没有明确的先后关系，暂不能判断经验是否解决了问题。"
+              ? "最新失败或纠正之后还缺少完整的成功证据，暂不能判断经验是否解决了问题。"
               : "缺少完整的失败与成功对照证据，暂不能确认经验原因。",
     };
   return { risk: "low" };

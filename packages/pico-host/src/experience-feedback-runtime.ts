@@ -277,7 +277,7 @@ export class ExperienceFeedbackRuntime implements NativeLearningObserver {
       check();
       return (candidate?.review === "approved" ||
         (candidate?.review === "unneeded" &&
-          candidate.maturity === "trial" &&
+          (candidate.maturity === "trial" || candidate.maturity === "active") &&
           candidate.risk === "low")) &&
         candidate.enabled &&
         candidate.contentVersion === summary.contentVersion &&
@@ -539,7 +539,7 @@ export class ExperienceFeedbackRuntime implements NativeLearningObserver {
         !(
           reviewed.review === "approved" ||
           (reviewed.review === "unneeded" &&
-            reviewed.maturity === "trial" &&
+            (reviewed.maturity === "trial" || reviewed.maturity === "active") &&
             reviewed.risk === "low")
         ) ||
         !reviewed.enabled ||
@@ -668,7 +668,7 @@ export class ExperienceFeedbackRuntime implements NativeLearningObserver {
             !(
               candidate.review === "approved" ||
               (candidate.review === "unneeded" &&
-                candidate.maturity === "trial" &&
+                (candidate.maturity === "trial" || candidate.maturity === "active") &&
                 candidate.risk === "low")
             ) ||
             !candidate.enabled
@@ -849,6 +849,23 @@ export class ExperienceFeedbackRuntime implements NativeLearningObserver {
       ticket.before.fingerprint !== after.fingerprint
     )
       return unknown;
+    if (claim.predicateId === "command-conditions.v1") {
+      // This proves only the frozen command and stable preparation conditions.
+      // Ordinary exit 0 without this claim is never positive experience evidence.
+      if (
+        claim.target.kind !== "command" ||
+        !claim.conditions.length ||
+        !claim.recipe.length ||
+        facts.exitCode !== 0
+      )
+        return unknown;
+      return {
+        verdict: { adoption: "observed", validation: "pass", sources: [sourceOf(event)] },
+        scope: "command",
+        reason: "frozen_command_conditions_passed",
+        contradiction: false,
+      };
+    }
     if (claim.predicateId !== "test-target-pass.v1") return unknown;
     if (!native.reportPath || !claim.runner?.fingerprint || !claim.failedTestIds.length)
       return unknown;

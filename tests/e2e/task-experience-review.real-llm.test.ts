@@ -75,7 +75,7 @@ class LearningFixtureRuntime extends AgentRuntime {
 }
 
 enabledTest(
-  "reviewed Excel method is learned in the background and used on a new attachment by the real model",
+  "low-risk Excel method enters restricted trial and one real-model verified reuse enables it",
   { timeout: 360_000 },
   async (t) => {
     const model = await loadUserDefaultRealModel();
@@ -238,7 +238,7 @@ enabledTest(
     );
     const worker = getExecutionLearningWorker(picoHome);
     assert.ok(worker);
-    let pending: RuntimeResult<"memory.learning.query">["items"][number] | undefined;
+    let trial: RuntimeResult<"memory.learning.query">["items"][number] | undefined;
     const deadline = Date.now() + 100_000;
     while (Date.now() < deadline) {
       await worker.flushOnce();
@@ -252,34 +252,21 @@ enabledTest(
           }),
         ),
       );
-      pending = list.items.find((item) => item.review === "pending" && item.content.length > 0);
-      if (pending) break;
+      trial = list.items.find((item) => item.content.length > 0);
+      if (trial) break;
       await new Promise((resolve) => setTimeout(resolve, 1000));
     }
-    assert.ok(pending, "canonical correction did not produce a background review suggestion");
-    assert.equal(pending.validation, "unknown");
-    assert.equal(pending.enabled, false);
-    assert.equal(pending.itemId, undefined);
+    assert.ok(trial, "canonical correction did not produce a restricted automatic trial");
+    assert.equal(trial.validation, "unknown");
+    assert.equal(trial.review, "unneeded", trial.reviewReason);
+    assert.equal(trial.enabled, true);
+    assert.equal(trial.maturity, "trial");
+    assert.equal(trial.risk, "low");
+    assert.ok(trial.itemId);
     assert.ok(
-      !pending.content.includes(old.artifactId),
+      !trial.content.includes(old.artifactId),
       "method must not embed the previous artifact ID",
     );
-    const approved = parseRuntimeResult(
-      "memory.learning.review",
-      await services.desktopService.handle(
-        createRuntimeRequest("memory.learning.review", {
-          workspacePath,
-          candidateId: pending.candidateId,
-          expectedRecordRevision: pending.recordRevision,
-          expectedContentVersion: pending.contentVersion,
-          operationId: randomUUID(),
-          action: "accept",
-        }),
-      ),
-    );
-    assert.equal(approved.candidate.review, "approved");
-    assert.equal(approved.candidate.validation, "unknown");
-    assert.equal(approved.candidate.enabled, true);
     const legacy = parseRuntimeResult(
       "memory.list",
       await services.desktopService.handle(
@@ -287,7 +274,7 @@ enabledTest(
       ),
     );
     assert.equal(
-      legacy.items.some((item) => item.itemId === approved.candidate.itemId),
+      legacy.items.some((item) => item.itemId === trial.itemId),
       false,
       "old clients must not receive the new provenance enum",
     );
@@ -298,11 +285,23 @@ enabledTest(
       ),
     );
     assert.equal(
-      modern.items.find((item) => item.itemId === approved.candidate.itemId)?.sourceType,
+      modern.items.find((item) => item.itemId === trial.itemId)?.sourceType,
       "reviewed-reference",
     );
-    const beforeReuseSettings = parseRuntimeResult("memory.settings.get", await services.desktopService.handle(createRuntimeRequest("memory.settings.get", {workspacePath})));
-    await services.desktopService.handle(createRuntimeRequest("memory.settings.update", {workspacePath, expectedVersion: beforeReuseSettings.settings.version, idempotencyKey: randomUUID(), autoExtract: false}));
+    const beforeReuseSettings = parseRuntimeResult(
+      "memory.settings.get",
+      await services.desktopService.handle(
+        createRuntimeRequest("memory.settings.get", { workspacePath }),
+      ),
+    );
+    await services.desktopService.handle(
+      createRuntimeRequest("memory.settings.update", {
+        workspacePath,
+        expectedVersion: beforeReuseSettings.settings.version,
+        idempotencyKey: randomUUID(),
+        autoExtract: false,
+      }),
+    );
     const reusedSession = await createSession();
     const current = await upload(reusedSession, "新预算.xlsx", [7, 11]);
     assert.notEqual(current.artifactId, old.artifactId);
@@ -319,21 +318,62 @@ enabledTest(
         createRuntimeRequest("memory.learning.query", { workspacePath, sessionId: reusedSession }),
       ),
     );
-    const reuse = query.reuse.find((receipt) => receipt.candidateId === pending!.candidateId && receipt.adoption === "observed" && receipt.validation === "pass");
+    const reuse = query.reuse.find(
+      (receipt) =>
+        receipt.candidateId === trial!.candidateId &&
+        receipt.adoption === "observed" &&
+        receipt.validation === "pass",
+    );
     assert.ok(reuse, "the new task did not receive the reviewed method");
-    assert.equal(reuse.contentVersion, approved.candidate.contentVersion);
+    assert.equal(reuse.contentVersion, trial.contentVersion);
     assert.ok(reuse.referenceContent);
     assert.equal(reuse.adoption, "observed");
     assert.equal(reuse.validation, "pass");
-    const ledger = parseRuntimeResult("memory.experience.query", await services.desktopService.handle(createRuntimeRequest("memory.experience.query", {workspacePath, sessionId: reusedSession})));
-    const actualUse = ledger.uses.find(use => use.useId === reuse.reuseId && use.source.kind === "reviewed-reference");
-    assert.ok(actualUse, "new shared ledger must contain the actual reviewed method use while learning is off");
+    const ledger = parseRuntimeResult(
+      "memory.experience.query",
+      await services.desktopService.handle(
+        createRuntimeRequest("memory.experience.query", {
+          workspacePath,
+          sessionId: reusedSession,
+        }),
+      ),
+    );
+    const actualUse = ledger.uses.find(
+      (use) => use.useId === reuse.reuseId && use.source.kind === "reviewed-reference",
+    );
+    assert.ok(
+      actualUse,
+      "new shared ledger must contain the actual reviewed method use while learning is off",
+    );
     assert.equal(actualUse.delivery, "carried");
     assert.equal(actualUse.historical, false);
     assert.equal(actualUse.validation, "pass");
     assert.equal(actualUse.validationScope, "spreadsheet-range");
-    const actualDetail = parseRuntimeResult("memory.experience.detail", await services.desktopService.handle(createRuntimeRequest("memory.experience.detail", {workspacePath, useId:actualUse.useId})));
-    assert.ok(actualDetail.effects.some(effect => effect.validation === "pass" && effect.preparedSequence > actualUse.deliverySequence!));
+    const actualDetail = parseRuntimeResult(
+      "memory.experience.detail",
+      await services.desktopService.handle(
+        createRuntimeRequest("memory.experience.detail", { workspacePath, useId: actualUse.useId }),
+      ),
+    );
+    assert.ok(
+      actualDetail.effects.some(
+        (effect) =>
+          effect.validation === "pass" && effect.preparedSequence > actualUse.deliverySequence!,
+      ),
+    );
+    const promoted = parseRuntimeResult(
+      "memory.learning.detail",
+      await services.desktopService.handle(
+        createRuntimeRequest("memory.learning.detail", {
+          workspacePath,
+          candidateId: trial.candidateId,
+        }),
+      ),
+    );
+    assert.equal(promoted.candidate?.review, "unneeded");
+    assert.equal(promoted.candidate?.maturity, "active");
+    assert.equal(promoted.candidate?.promotionReason, "deterministic_validation");
+    assert.equal(promoted.candidate?.positiveReuseCount, 1);
     const paths = resolvePicoPaths(workspacePath, { picoHome });
     const events = new SqliteRuntimeEventStore({ storageRoot: paths.workspace.root });
     try {

@@ -18,6 +18,7 @@ import { SqliteMemoryItemStore } from "../../../packages/storage/src/sqlite/sqli
 import { ExecutionLearningWorker } from "../../../packages/pico-host/src/execution-learning-worker.js";
 import { executionLearningPathAuthorizer } from "../../../packages/pico-host/src/execution-learning-host.js";
 import { Session } from "../../../packages/pico-host/src/session.js";
+import { taskExperienceRecallTargets } from "../../../packages/pico-host/src/task-experience-recall.js";
 import {
   createDefaultSessionSettings,
   snapshotSessionSettings,
@@ -38,6 +39,8 @@ async function seed(
   observationFixture: Partial<
     Pick<TaskExperienceObservation, "observationId" | "summary" | "toolName" | "arguments">
   > = {},
+  failureBeforeSuccess = false,
+  tailKind?: "late-failure" | "late-correction" | "failed-terminal",
 ) {
   const settings = await store.readSettings("workspace");
   const epoch = await store.executionLearning.advanceExecutionLearningInput("workspace");
@@ -51,7 +54,7 @@ async function seed(
     goal,
     goalSource: source(`${id}-goal`),
     coverage: "complete",
-    throughSequence: 2,
+    throughSequence: tailKind ? 3 : 2,
     createdAt: 100,
     updatedAt: 100,
   };
@@ -69,7 +72,36 @@ async function seed(
     createdAt: 100,
     ...observationFixture,
   };
-  await store.taskExperiences.appendTaskExperienceObservations(task, [observation]);
+  const failure: TaskExperienceObservation = {
+    ...observation,
+    observationId: `${id}-failure-observation`,
+    source: source(`${id}-failure`),
+    sequence: 1,
+    status: "failed",
+    summary: "原检查失败",
+  };
+  const observations: TaskExperienceObservation[] = failureBeforeSuccess
+    ? [failure, observation]
+    : [observation];
+  if (tailKind)
+    observations.push({
+      observationId: `${id}-tail`,
+      taskId,
+      taskVersion: 1,
+      source: source(`${id}-tail`),
+      sequence: 3,
+      kind:
+        tailKind === "late-correction"
+          ? "user-input"
+          : tailKind === "failed-terminal"
+            ? "terminal"
+            : "tool-result",
+      summary: "最新结果仍未解决",
+      coverage: "complete",
+      createdAt: 100,
+      ...(tailKind === "late-correction" ? { correction: true } : { status: "failed" }),
+    });
+  await store.taskExperiences.appendTaskExperienceObservations(task, observations);
   const candidate: TaskExperienceCandidate = {
     candidateId: id,
     kind: "task-lesson",
@@ -93,8 +125,8 @@ async function seed(
     validation: "unknown",
     enabled: false,
     applicability: { taskFamily: "general", toolNames: [], conditions: [] },
-    sources: [observation.source],
-    observationIds: [observation.observationId],
+    sources: observations.map((entry) => entry.source),
+    observationIds: observations.map((entry) => entry.observationId),
     createdAt: 100,
     updatedAt: 100,
   };
@@ -116,6 +148,211 @@ async function seed(
   await store.executionLearning.enqueueExecutionLearningJob(job);
   return { candidate, job, task, observation };
 }
+
+test("风险审核隔离高风险、范围不清与冲突来源；明确低风险只在条件已核实的任务试用", async () => {
+  const store = new SqliteMemoryItemStore(":memory:", { now: () => 1000 });
+  try {
+    for (const kind of [
+      "high",
+      "unbounded",
+      "conflict",
+      "late-failure",
+      "late-correction",
+      "failed-terminal",
+      "low",
+    ] as const) {
+      const initial = await seed(
+        store,
+        kind,
+        `${kind}-task`,
+        "修复配置加载代码",
+        {},
+        true,
+        kind === "late-failure" || kind === "late-correction" || kind === "failed-terminal"
+          ? kind
+          : undefined,
+      );
+      if (kind === "conflict")
+        await store.taskExperiences.appendTaskExperienceObservations(
+          { ...initial.task, throughSequence: 3 },
+          [
+            {
+              ...initial.observation,
+              observationId: "conflicting-event",
+              sequence: 3,
+              status: "failed",
+            },
+          ],
+        );
+      const job = await store.executionLearning.claimExecutionLearningJob(
+        "risk-worker",
+        200,
+        90000,
+      );
+      assert.ok(job);
+      const candidate = await store.taskExperiences.completeTaskExperienceJob({
+        job,
+        expectedRecordRevision: 1,
+        content:
+          kind === "high" ? "修复配置后部署并发布到生产环境。" : "先核对配置输入再运行同一检查。",
+        applicability: {
+          taskFamily: "coding",
+          toolNames: ["read_file"],
+          conditions: kind === "unbounded" ? [] : ["修改现有配置加载逻辑时"],
+        },
+        sources: initial.candidate.sources,
+        now: 300,
+      });
+      assert.ok(candidate);
+      assert.equal(candidate.risk, kind === "high" ? "high" : kind === "low" ? "low" : "unclear");
+      assert.equal(candidate.review, kind === "low" ? "unneeded" : "pending");
+      assert.equal(candidate.maturity, kind === "low" ? "trial" : "unassessed");
+      assert.equal(candidate.enabled, kind === "low");
+      assert.equal(!!candidate.itemId, kind === "low");
+      if (kind === "conflict") assert.match(candidate.reviewReason!, /互相冲突/);
+    }
+    const { itemId: _itemId, ...lowSeed } =
+      (await store.taskExperiences.readTaskExperienceCandidate("low"))!;
+    for (let index = 0; index < 101; index++) {
+      await store.taskExperiences.createTaskExperienceCandidate({
+        ...lowSeed,
+        candidateId: `unavailable-${index}`,
+        failureKey: `unavailable-${index}`,
+        state: "waiting",
+        review: index % 2 ? "pending" : "unneeded",
+        content: "",
+        enabled: false,
+        contentVersion: 1,
+        recordRevision: 1,
+        maturity: "unassessed",
+        risk: "unclear",
+        createdAt: 500,
+        updatedAt: 500,
+      });
+      const job = await store.executionLearning.claimExecutionLearningJob(
+        "unavailable-worker",
+        501,
+        1000,
+      );
+      assert.ok(job);
+      await store.taskExperiences.completeTaskExperienceJob({
+        job,
+        expectedRecordRevision: 1,
+        reason: "reflection_unavailable",
+        now: 502,
+      });
+    }
+    assert.equal(
+      (await store.taskExperiences.queryTaskExperiences("workspace")).some(
+        (candidate) => candidate.candidateId === "low",
+      ),
+      false,
+      "new unavailable records fill the default management window",
+    );
+    const options = {
+      store: store.taskExperiences,
+      workspaceKey: "workspace",
+      workDir: "/fixture",
+      query: "修复配置代码",
+      toolAllowed: () => true,
+    };
+    assert.equal(
+      (await taskExperienceRecallTargets(options)).length,
+      0,
+      "unknown conditions cannot trial",
+    );
+    assert.equal(
+      (await taskExperienceRecallTargets({ ...options, conditionMatches: async () => false }))
+        .length,
+      0,
+    );
+    const targets = await taskExperienceRecallTargets({
+      ...options,
+      conditionMatches: async () => true,
+    });
+    assert.deepEqual(
+      targets.map((target) => target.candidateId),
+      ["low"],
+    );
+    assert.equal(targets[0]?.maturity, "trial");
+  } finally {
+    store.close();
+  }
+});
+
+test("同一任务用户纠正后的新版本保留原始来源，并在最新纠正后成功才进入试用", async () => {
+  const store = new SqliteMemoryItemStore(":memory:", { now: () => 1000 });
+  try {
+    const initial = await seed(store, "original", "corrected-task", "修复配置代码", {}, true);
+    const oldJob = (await store.executionLearning.claimExecutionLearningJob(
+      "old-worker",
+      200,
+      1000,
+    ))!;
+    await store.taskExperiences.completeTaskExperienceJob({
+      job: oldJob,
+      expectedRecordRevision: 1,
+      reason: "reflection_unavailable",
+      now: 201,
+    });
+    const task = { ...initial.task, taskVersion: 2, throughSequence: 4, updatedAt: 202 };
+    const correction: TaskExperienceObservation = {
+      observationId: "user-correction",
+      taskId: task.taskId,
+      taskVersion: 2,
+      source: source("user-correction"),
+      sequence: 3,
+      kind: "user-input",
+      summary: "刚才结果有误，配置输入也需核对",
+      coverage: "complete",
+      correction: true,
+      createdAt: 202,
+    };
+    const success: TaskExperienceObservation = {
+      ...initial.observation,
+      observationId: "corrected-success",
+      taskVersion: 2,
+      source: source("corrected-success"),
+      sequence: 4,
+      createdAt: 203,
+    };
+    await store.taskExperiences.appendTaskExperienceObservations(task, [correction, success]);
+    const candidate = await store.taskExperiences.createTaskExperienceCandidate({
+      ...initial.candidate,
+      candidateId: "corrected",
+      failureKey: "corrected-key",
+      taskVersion: 2,
+      sources: [...initial.candidate.sources, correction.source, success.source],
+      observationIds: [
+        ...initial.candidate.observationIds,
+        correction.observationId,
+        success.observationId,
+      ],
+    });
+    const job = (await store.executionLearning.claimExecutionLearningJob(
+      "corrected-worker",
+      210,
+      1000,
+    ))!;
+    const trial = await store.taskExperiences.completeTaskExperienceJob({
+      job,
+      expectedRecordRevision: candidate.recordRevision,
+      content: "先核对配置输入，再运行原检查。",
+      applicability: {
+        taskFamily: "coding",
+        toolNames: ["read_file"],
+        conditions: ["配置加载输入完整时"],
+      },
+      sources: candidate.sources,
+      now: 211,
+    });
+    assert.equal(trial?.review, "unneeded", trial?.reviewReason);
+    assert.equal(trial?.maturity, "trial");
+    assert.equal(trial?.risk, "low");
+  } finally {
+    store.close();
+  }
+});
 
 test("通用经验同队列反思、审阅原子发布、旧视图隔离、CAS与复用纠正优先于后台", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-task-experience-"));
@@ -928,7 +1165,12 @@ test("原生附件只认冻结身份；编辑与纠正断开，删除清理派�
     const initial = await seed(store);
     db.prepare("DELETE FROM execution_learning_jobs WHERE candidate_id='lesson'").run();
     await store.executionLearning.recoverSettledExecutionLearningJobs(150);
-    assert.equal(db.prepare("SELECT count(*) n FROM execution_learning_jobs WHERE candidate_id='lesson'").get()!.n, 1);
+    assert.equal(
+      db
+        .prepare("SELECT count(*) n FROM execution_learning_jobs WHERE candidate_id='lesson'")
+        .get()!.n,
+      1,
+    );
     const claim: ExecutionAcceptanceClaim = {
       candidateId: "native-attachment",
       revision: 1,
@@ -1044,9 +1286,17 @@ test("原生附件只认冻结身份；编辑与纠正断开，删除清理派�
         /native evidence/,
       );
     for (const state of ["discarded", "expired", "invalidated"]) {
-      db.prepare("UPDATE execution_learning_candidates SET record_json=? WHERE candidate_id=?")
-        .run(JSON.stringify({ ...native, state }), claim.candidateId);
-      await assert.rejects(store.taskExperiences.completeTaskExperienceJob({ ...completion, nativeEvidence: attachment }), /native evidence/);
+      db.prepare("UPDATE execution_learning_candidates SET record_json=? WHERE candidate_id=?").run(
+        JSON.stringify({ ...native, state }),
+        claim.candidateId,
+      );
+      await assert.rejects(
+        store.taskExperiences.completeTaskExperienceJob({
+          ...completion,
+          nativeEvidence: attachment,
+        }),
+        /native evidence/,
+      );
     }
     const originalClaim = native.claim;
     for (const changed of [
@@ -1077,10 +1327,19 @@ test("原生附件只认冻结身份；编辑与纠正断开，删除清理派�
     assert.equal(pending?.validation, "unknown");
     assert.equal(pending?.enabled, false);
     await store.executionLearning.admitExecutionLearning(claim.admission);
-    await assert.rejects(store.executionLearning.saveExecutionLearningClaim({
-      ...claim, revision: 2, claimHash: hash("later-operation"),
-    }), /Attached native evidence is frozen/);
-    assert.equal((await store.executionLearning.readExecutionLearningCandidate(claim.candidateId))?.claim.claimHash, claim.claimHash);
+    await assert.rejects(
+      store.executionLearning.saveExecutionLearningClaim({
+        ...claim,
+        revision: 2,
+        claimHash: hash("later-operation"),
+      }),
+      /Attached native evidence is frozen/,
+    );
+    assert.equal(
+      (await store.executionLearning.readExecutionLearningCandidate(claim.candidateId))?.claim
+        .claimHash,
+      claim.claimHash,
+    );
     store.close();
     store = new SqliteMemoryItemStore(path, { now: () => 1000 });
     assert.deepEqual(

@@ -24,9 +24,7 @@ export function configureReviewedFixture(picoHome: string, content: string): voi
 }
 
 export async function approveReviewedFixture(store: SqliteMemoryItemStore, workspaceKey: string) {
-  const candidates = await store.taskExperiences.queryTaskExperiences(workspaceKey, {
-    review: "pending",
-  });
+  const candidates = await store.taskExperiences.queryTaskExperiences(workspaceKey, {});
   assert.equal(
     candidates.length,
     1,
@@ -39,8 +37,8 @@ export async function approveReviewedFixture(store: SqliteMemoryItemStore, works
   );
   assert.equal(
     (await store.listItems({ workspaceKey, learningVersion: 2 })).length,
-    0,
-    "only review publishes the proposal",
+    candidate.maturity === "trial" ? 1 : 0,
+    "low-risk trials publish restricted hints; risky proposals still require review",
   );
   const accepted = await store.taskExperiences.reviewTaskExperience({
     workspaceKey,

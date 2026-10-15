@@ -87,7 +87,7 @@ function provider(
 
 for (const legacy of [false, true])
   test(
-    `关闭学习仍核验${legacy ? "历史原生" : "已审核通用"}引用，只有历史原生反证自动停用`,
+    `关闭学习仍核验${legacy ? "历史原生" : "已审核通用"}引用，可靠反证会暂停当前经验`,
     { timeout: 45_000 },
     async (t) => {
       const root = await realpath(await mkdtemp(join(tmpdir(), "pico-experience-feedback-")));
@@ -402,12 +402,19 @@ for (const legacy of [false, true])
       );
       assert.equal(effect?.adoption, "observed");
       assert.equal(effect?.validationScope, "native-claim");
-      assert.equal(effect?.trustedContradiction, legacy);
+      assert.equal(effect?.trustedContradiction, true);
       assert.ok(effect!.preparedSequence > failed.deliverySequence!);
       assert.equal(
         (await store.readItem(saved.itemId))?.item.lifecycleState,
         legacy ? "archived" : "active",
       );
+      if (!legacy) {
+        const contradicted = await store.taskExperiences.readTaskExperienceCandidate(
+          reviewed.candidateId,
+        );
+        assert.equal(contradicted?.maturity, "suspended");
+        assert.equal(contradicted?.enabled, false);
+      }
       assert.equal(
         (await store.taskExperiences.queryTaskExperiences(workspaceKey)).length,
         initialCandidateCount,
@@ -482,5 +489,265 @@ for (const legacy of [false, true])
         1,
         "重新开启不补生成关闭期间的失败",
       );
+    },
+  );
+
+for (const deterministic of [false, true])
+  test(
+    `${deterministic ? "完整冻结测试一次" : "两个独立冻结命令任务"}晋级后仍实际召回，普通成功与未交付不计证据`,
+    { timeout: 45_000 },
+    async (t) => {
+      const root = await realpath(await mkdtemp(join(tmpdir(), "pico-trial-promotion-")));
+      const workDir = join(root, "workspace"),
+        picoHome = join(root, "home");
+      await mkdir(workDir);
+      await mkdir(picoHome);
+      const checkFile = deterministic ? "check.test.cjs" : "check.cjs";
+      const target = `node ${deterministic ? "--test " : ""}${checkFile}`;
+      const check =
+        'assert.equal(fs.readFileSync("config.json","utf8"),"ready\\n");assert.notEqual(process.env.PICO_EXPERIENCE_FAIL,"1");';
+      await writeFile(
+        join(workDir, checkFile),
+        'const assert=require("node:assert/strict"),fs=require("node:fs");\n' +
+          (deterministic ? `require("node:test").test("BuildCheck",()=>{${check}});\n` : check),
+      );
+      const trust = new WorkspaceTrustStore({ userStateDirectory: picoHome });
+      await trust.trust(await trust.canonicalize(workDir));
+      const lifecycle = new AtomicMemoryLifecycle();
+      const store = new SqliteMemoryItemStore(join(picoHome, "memory.sqlite"));
+      const workspaceKey = resolvePicoPaths(workDir, { picoHome }).workspace.id;
+      configureReviewedFixture(
+        picoHome,
+        `BuildCheck 依赖 ready 配置。准备配置后运行 ${checkFile}。`,
+      );
+      const sessions: string[] = [];
+      const env = { ...process.env };
+      delete env.NODE_TEST_CONTEXT;
+      const inheritedContext = process.env.NODE_TEST_CONTEXT;
+      delete process.env.NODE_TEST_CONTEXT;
+      t.after(async () => {
+        await closeExecutionLearningWorker(picoHome);
+        await lifecycle.close();
+        for (const sessionId of sessions)
+          await globalSessionManager.delete(sessionId, workDir, { picoHome })?.close();
+        store.close();
+        await rm(root, { recursive: true, force: true });
+        if (inheritedContext !== undefined) process.env.NODE_TEST_CONTEXT = inheritedContext;
+      });
+      await initializeBashParser();
+      const run = async (
+        sessionId: string,
+        calls: readonly ToolCall[],
+        carrier: "present" | "removed" | "unobserved" = "present",
+        fail = false,
+        resume = false,
+      ) => {
+        if (!sessions.includes(sessionId)) sessions.push(sessionId);
+        await executeAgentRuntime(
+          {
+            prompt: resume
+              ? `刚才的结果不对，请重新核对 BuildCheck，检查入口 ${target}。`
+              : `完成 BuildCheck，检查入口 ${target}。`,
+            dir: workDir,
+            sessionSelection: { mode: resume ? "resume" : "new", sessionId },
+            provider: "openai",
+            modelRouteId: "test/test",
+            permissionMode: "full-access",
+            allowedTools: ["bash", "write_file"],
+          },
+          {
+            picoHome,
+            env: { ...env, PICO_EXPERIENCE_FAIL: fail ? "1" : "0" },
+            memoryTrustStore: trust,
+            atomicMemoryLifecycle: lifecycle,
+            reporter: new SilentReporter(),
+            provider: provider(calls, carrier),
+            executionLearningWorkerOptions: { idleMs: 0, pollMs: 60_000 },
+            atomicMemoryModelFactory: async () => {
+              throw new Error("No general extraction model in this fixture");
+            },
+          },
+        );
+      };
+      await run(
+        "trial-source",
+        [
+          call("original-failure", "bash", { command: target }),
+          call("prepare-config", "write_file", { path: "config.json", content: "ready\n" }),
+          call("original-pass", "bash", { command: target }),
+        ],
+        "unobserved",
+      );
+      const worker = getExecutionLearningWorker(picoHome)!;
+      await worker.flushOnce();
+      await worker.drain();
+      const candidate = (await store.taskExperiences.queryTaskExperiences(workspaceKey))[0]!;
+      assert.equal(candidate.review, "unneeded");
+      assert.equal(candidate.maturity, "trial");
+      assert.equal(candidate.risk, "low");
+      assert.ok(candidate.nativeEvidence);
+      const native = (await store.executionLearning.readExecutionLearningCandidate(
+        candidate.nativeEvidence.candidateId,
+      ))!;
+      assert.equal(
+        native.claim.predicateId,
+        deterministic ? "test-target-pass.v1" : "command-conditions.v1",
+      );
+      assert.ok(native.claim.recipe.length && native.claim.conditions.length);
+      await store.updateSettings({
+        workspaceKey,
+        expectedVersion: (await store.readSettings(workspaceKey)).version,
+        autoExtract: false,
+      });
+      const current = () =>
+        store.taskExperiences.readTaskExperienceCandidate(candidate.candidateId);
+      await run("ordinary-zero", [
+        call("unrelated-success", "bash", { command: "node -e 'process.exit(0)'" }),
+      ]);
+      assert.equal((await current())!.positiveReuseCount, 0);
+      await run("not-carried", [call("omitted-success", "bash", { command: target })], "removed");
+      assert.equal((await current())!.positiveReuseCount, 0);
+      await run("independent-one", [
+        call("first-pass", "bash", { command: target }),
+        call("same-task-retry", "bash", { command: target }),
+      ]);
+      let after = (await current())!;
+      assert.equal(after.positiveReuseCount, 1, "multiple successful calls in one task count once");
+      assert.equal(after.maturity, deterministic ? "active" : "trial");
+      assert.equal(after.promotionReason, deterministic ? "deterministic_validation" : "none");
+      const firstUses = (
+        await store.experienceLedger.queryExperienceUses(workspaceKey, {
+          sessionId: "independent-one",
+        })
+      ).uses;
+      assert.ok(
+        firstUses.some(
+          (use) =>
+            use.delivery === "carried" &&
+            use.adoption === "observed" &&
+            use.validation === "pass" &&
+            use.validationScope === (deterministic ? "native-claim" : "command"),
+        ),
+      );
+      if (!deterministic) {
+        const disabled = await store.taskExperiences.reviewTaskExperience({
+          workspaceKey,
+          candidateId: after.candidateId,
+          expectedContentVersion: after.contentVersion,
+          expectedRecordRevision: after.recordRevision,
+          operationId: "disable-trial",
+          action: "disable",
+          now: Date.now(),
+        });
+        after = await store.taskExperiences.reviewTaskExperience({
+          workspaceKey,
+          candidateId: after.candidateId,
+          expectedContentVersion: after.contentVersion,
+          expectedRecordRevision: disabled.recordRevision,
+          operationId: "restore-trial",
+          action: "restore",
+          now: Date.now(),
+        });
+        assert.equal(after.maturity, "trial");
+        assert.equal(after.positiveReuseCount, 1);
+        await run(
+          "independent-one",
+          [call("corrected-task-retry", "bash", { command: target })],
+          "present",
+          false,
+          true,
+        );
+        after = (await current())!;
+        assert.equal(
+          after.positiveReuseCount,
+          1,
+          "a correction creates another version of the same task, not an independent task",
+        );
+        assert.equal(after.maturity, "trial");
+        const versions = (
+          await store.experienceLedger.queryExperienceUses(workspaceKey, {
+            sessionId: "independent-one",
+          })
+        ).uses;
+        assert.equal(new Set(versions.map((use) => use.taskId)).size, 1);
+        assert.ok(versions.some((use) => use.taskVersion === 2 && use.validation === "pass"));
+      }
+      await run("independent-two", [call("second-pass", "bash", { command: target })]);
+      after = (await current())!;
+      assert.equal(after.maturity, "active");
+      assert.equal(after.review, "unneeded", "evidence maturity does not fabricate human approval");
+      assert.equal(after.positiveReuseCount, 2);
+      assert.equal(
+        after.promotionReason,
+        deterministic ? "deterministic_validation" : "two_positive_reuses",
+      );
+      await run("active-reuse", [call("active-pass", "bash", { command: target })]);
+      const activeUses = (
+        await store.experienceLedger.queryExperienceUses(workspaceKey, {
+          sessionId: "active-reuse",
+        })
+      ).uses;
+      assert.ok(
+        activeUses.some(
+          (use) =>
+            use.delivery === "carried" && use.adoption === "observed" && use.validation === "pass",
+        ),
+        "auto-promoted active experience remains usable end to end",
+      );
+      await run(
+        "same-scope-failure",
+        [call("contradicted", "bash", { command: target })],
+        "present",
+        true,
+      );
+      after = (await current())!;
+      assert.equal(
+        after.maturity,
+        deterministic ? "suspended" : "active",
+        "ordinary process failure is not trusted counter-evidence",
+      );
+      if (deterministic) {
+        assert.equal(after.enabled, false);
+        await assert.rejects(
+          store.taskExperiences.reviewTaskExperience({
+            workspaceKey,
+            candidateId: after.candidateId,
+            expectedContentVersion: after.contentVersion,
+            expectedRecordRevision: after.recordRevision,
+            operationId: "restore-contradiction",
+            action: "restore",
+            now: Date.now(),
+          }),
+          /must be edited/,
+        );
+        await run("after-suspension", [call("no-reference", "bash", { command: target })]);
+        assert.equal(
+          (
+            await store.experienceLedger.queryExperienceUses(workspaceKey, {
+              sessionId: "after-suspension",
+            })
+          ).uses.length,
+          0,
+        );
+      }
+      const edited = await store.taskExperiences.reviewTaskExperience({
+        workspaceKey,
+        candidateId: after.candidateId,
+        expectedContentVersion: after.contentVersion,
+        expectedRecordRevision: after.recordRevision,
+        operationId: "edit-resets-evidence",
+        action: "edit_accept",
+        content: "人工修订后的新检查方法。",
+        now: Date.now(),
+      });
+      assert.equal(edited.contentVersion, after.contentVersion + 1);
+      assert.equal(
+        edited.positiveReuseCount,
+        0,
+        "verification counts belong to the previous content version",
+      );
+      assert.equal(edited.validation, "unknown");
+      assert.equal(edited.nativeEvidence, undefined);
+      assert.equal(edited.promotionReason, "human_approved");
     },
   );

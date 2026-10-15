@@ -201,6 +201,8 @@ export interface TaskExperienceStore {
     options?: {
       readonly sessionId?: string;
       readonly review?: ExperienceReview;
+      /** Host recall prefilter, applied before pagination; permissions and scope still require validation. */
+      readonly recallable?: boolean;
       readonly limit?: number;
     },
   ): Promise<readonly TaskExperienceCandidate[]>;
