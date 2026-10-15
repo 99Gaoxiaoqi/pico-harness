@@ -53,6 +53,8 @@ export class OwnerLease {
   private readonly ownerPath: string;
   private readonly lostController = new AbortController();
   private heartbeatTimer?: NodeJS.Timeout | undefined;
+  private heartbeatPromise?: Promise<void> | undefined;
+  private releasing = false;
   private released = false;
   private releasePromise?: Promise<void> | undefined;
   private releaseCleanupStarted = false;
@@ -129,14 +131,19 @@ export class OwnerLease {
       await release;
     } catch (error) {
       if (this.releasePromise === release) this.releasePromise = undefined;
+      this.releasing = false;
       if (!this.released && !this.lostSignal.aborted) this.startHeartbeat();
       throw error;
     }
   }
 
   private async releaseOnce(): Promise<void> {
+    this.releasing = true;
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     this.heartbeatTimer = undefined;
+    // A cleared interval may already be writing owner.json. Drain that writer before
+    // removing its directory so it cannot recreate the lease after release returns.
+    await this.heartbeatPromise?.catch(() => undefined);
 
     const current = await readLeaseRecord(this.ownerPath);
     if (current && current.leaseId !== this.leaseId) {
@@ -211,7 +218,7 @@ export class OwnerLease {
   }
 
   private startHeartbeat(): void {
-    if (this.heartbeatTimer || this.released || this.lostSignal.aborted) return;
+    if (this.heartbeatTimer || this.releasing || this.released || this.lostSignal.aborted) return;
     this.heartbeatTimer = setInterval(() => {
       void this.heartbeat().catch((error: unknown) => {
         if (error instanceof LeaseConflictError) {
@@ -228,9 +235,17 @@ export class OwnerLease {
     this.heartbeatTimer.unref();
   }
 
-  private async heartbeat(): Promise<void> {
-    await this.assertOwnership();
-    await this.writeRecord();
+  private heartbeat(): Promise<void> {
+    if (this.releasing || this.released || this.lostSignal.aborted) return Promise.resolve();
+    if (this.heartbeatPromise) return this.heartbeatPromise;
+    const heartbeat = (async () => {
+      await this.assertOwnership();
+      await this.writeRecord();
+    })().finally(() => {
+      if (this.heartbeatPromise === heartbeat) this.heartbeatPromise = undefined;
+    });
+    this.heartbeatPromise = heartbeat;
+    return heartbeat;
   }
 
   private markLost(reason: unknown): void {
