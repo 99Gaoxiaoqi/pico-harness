@@ -26,7 +26,6 @@ import type {
   RuntimeMemoryItem,
   RuntimeMemoryListItem,
   RuntimeMemoryConsolidationReceipt,
-  RuntimeMemoryConsolidationUndoResult,
   RuntimeMemorySettings,
   RuntimeNotificationMap,
   RuntimeParams,
@@ -663,7 +662,7 @@ export class DesktopAtomicMemoryService {
     return this.withStore(workspacePath, async (store) => {
       const receipts = await store.listMemoryConsolidationHistory({ now: this.now() });
       return {
-        receipts: receipts.slice(0, 20).map(projectConsolidationReceipt),
+        receipts: receipts.map(projectConsolidationReceipt),
       };
     });
   }

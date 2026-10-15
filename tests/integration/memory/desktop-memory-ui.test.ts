@@ -25,7 +25,8 @@ const styles = registerHooks({
       : nextLoad(url, context);
   },
 });
-const { MemoryPage, nextMemoryTabIndex } = await import("../../../apps/desktop/src/renderer/MemoryPage.js");
+const { MemoryPage, nextMemoryTabIndex } =
+  await import("../../../apps/desktop/src/renderer/MemoryPage.js");
 styles.deregister();
 
 function renderMemoryPage(props: React.ComponentProps<typeof MemoryPage>): string {
@@ -146,7 +147,8 @@ test("memory route, notifications, conflict refetch and Item provenance remain u
   );
   assert.match(app, /path="settings\/memory"/);
   assert.match(app, /path="settings\/memory" element=\{<UserMemorySettingsPage \/>\}/);
-  assert.match(app, /path="memory"[\s\S]*?<WorkspaceRoute>\s*<MemoryPageRoute \/>/);
+  assert.match(app, /path="memory" element=\{<LegacyMemoryRoute \/>\}/);
+  assert.match(app, /pathname: "\/settings\/memory", search: location.search, hash: location.hash/);
   assert.doesNotMatch(app, /LegacySurfaceRedirect to="\/settings\/memory"/);
   assert.equal(isMemoryNotificationTopic("memory.changed"), true);
   assert.equal(isMemoryNotificationTopic("memory.deleted"), true);

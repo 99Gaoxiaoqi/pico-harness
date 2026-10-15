@@ -103,12 +103,19 @@ export function experienceNeedsReview(item: ExperienceSummaryView): boolean {
   return (
     item.review === "pending" ||
     item.review === "deferred" ||
-    ((item.risk === "high" || item.risk === "unclear") && item.review !== "approved")
+    ((item.risk === "high" || item.risk === "unclear") &&
+      item.review !== "approved" &&
+      item.review !== "rejected")
   );
 }
 
-export function experienceStatusLabel(item: ExperienceSummaryView): string {
-  return experienceNeedsReview(item) ? "待审核" : maturityLabels[experienceMaturity(item)];
+export function experienceStatusLabel(
+  item: ExperienceSummaryView & { readonly lifecycleState?: "active" | "archived" },
+): string {
+  if (item.lifecycleState === "archived") return "已归档";
+  if (experienceNeedsReview(item)) return "待审核";
+  if (experienceMaturity(item) === "suspended") return "已暂停";
+  return item.enabled ? maturityLabels[experienceMaturity(item)] : "已停用";
 }
 
 export function experiencePromotionLabel(item: ExperienceSummaryView): string {
@@ -439,26 +446,36 @@ function ConversationLearning(props: TaskExperiencePanelProps) {
                   </span>
                 )}
                 {items.some(
-                  (item) => isExperienceSuggestion(item) && experienceMaturity(item) === "trial",
+                  (item) =>
+                    isExperienceSuggestion(item) &&
+                    item.enabled &&
+                    experienceMaturity(item) === "trial",
                 ) && (
                   <span>
                     {
                       items.filter(
                         (item) =>
-                          isExperienceSuggestion(item) && experienceMaturity(item) === "trial",
+                          isExperienceSuggestion(item) &&
+                          item.enabled &&
+                          experienceMaturity(item) === "trial",
                       ).length
                     }{" "}
                     条试用中
                   </span>
                 )}
                 {items.some(
-                  (item) => isExperienceSuggestion(item) && experienceMaturity(item) === "active",
+                  (item) =>
+                    isExperienceSuggestion(item) &&
+                    item.enabled &&
+                    experienceMaturity(item) === "active",
                 ) && (
                   <span>
                     {
                       items.filter(
                         (item) =>
-                          isExperienceSuggestion(item) && experienceMaturity(item) === "active",
+                          isExperienceSuggestion(item) &&
+                          item.enabled &&
+                          experienceMaturity(item) === "active",
                       ).length
                     }{" "}
                     条已启用
@@ -466,16 +483,18 @@ function ConversationLearning(props: TaskExperiencePanelProps) {
                 )}
                 {items.some(
                   (item) =>
-                    isExperienceSuggestion(item) && experienceMaturity(item) === "suspended",
+                    isExperienceSuggestion(item) && !experienceNeedsReview(item) && !item.enabled,
                 ) && (
                   <span>
                     {
                       items.filter(
                         (item) =>
-                          isExperienceSuggestion(item) && experienceMaturity(item) === "suspended",
+                          isExperienceSuggestion(item) &&
+                          !experienceNeedsReview(item) &&
+                          !item.enabled,
                       ).length
                     }{" "}
-                    条已暂停
+                    条已停用
                   </span>
                 )}
               </>
@@ -550,6 +569,7 @@ function ConversationReviewCard({
   const [error, setError] = useState("");
   const [detail, setDetail] = useState<ExperienceDetail>();
   const operation = useRef<{ fingerprint: string; operationId: string } | undefined>(undefined);
+  const inFlight = useRef(false);
   useEffect(() => {
     let active = true;
     setDetail(undefined);
@@ -573,7 +593,8 @@ function ConversationReviewCard({
   }, [candidate]);
 
   const act = async (action: Extract<ExperienceReviewAction, "accept" | "defer" | "reject">) => {
-    if (busy || !experienceNeedsReview(current)) return;
+    if (inFlight.current || !experienceNeedsReview(current)) return;
+    inFlight.current = true;
     const payload = {
       candidateId: current.candidateId,
       expectedRecordRevision: current.recordRevision,
@@ -588,7 +609,9 @@ function ConversationReviewCard({
     setError("");
     try {
       const result = await onReview({ ...payload, operationId: operation.current.operationId });
-      setCurrent(result);
+      setCurrent((previous) =>
+        previous.recordRevision > result.recordRevision ? previous : result,
+      );
       operation.current = undefined;
       setNotice(
         action === "accept"
@@ -604,6 +627,7 @@ function ConversationReviewCard({
           : "审核操作未保存，请重试或到记忆页查看当前状态。",
       );
     } finally {
+      inFlight.current = false;
       setBusy(false);
     }
   };
@@ -725,11 +749,13 @@ function ExperienceState({ candidate }: { readonly candidate: TaskExperienceCand
       <span>
         {experienceNeedsReview(candidate)
           ? "需审核"
-          : experienceMaturity(candidate) === "trial"
-            ? "已记录待验证"
-            : experienceMaturity(candidate) === "active"
-              ? "已晋级并启用"
-              : maturityLabels[experienceMaturity(candidate)]}
+          : !candidate.enabled || candidate.lifecycleState === "archived"
+            ? experienceStatusLabel(candidate)
+            : experienceMaturity(candidate) === "trial"
+              ? "已记录待验证"
+              : experienceMaturity(candidate) === "active"
+                ? "已晋级并启用"
+                : maturityLabels[experienceMaturity(candidate)]}
       </span>
       {experienceNeedsReview(candidate) && <span>{experienceReviewReason(candidate)}</span>}
       {experienceMaturity(candidate) === "trial" && (
@@ -1011,14 +1037,12 @@ function ExperienceDetailCard({
       )}
       {!experienceNeedsReview(current) && experienceMaturity(current) !== "unassessed" && (
         <section className="task-experience__promotion-context" aria-label="经验状态和晋级依据">
-          <strong>{maturityLabels[experienceMaturity(current)]}</strong>
+          <strong>{experienceStatusLabel(current)}</strong>
           <span>{experiencePromotionLabel(current)}</span>
-          {experienceMaturity(current) === "trial" && (
+          {current.enabled && experienceMaturity(current) === "trial" && (
             <span>只在适用范围匹配时作为待验证提示，不会自动执行。</span>
           )}
-          {experienceMaturity(current) === "suspended" && (
-            <span>这条经验当前不会用于后续任务。</span>
-          )}
+          {!current.enabled && <span>这条经验当前不会用于后续任务。</span>}
         </section>
       )}
       {notice && <InlineNotice tone="success">{notice}</InlineNotice>}
@@ -1190,15 +1214,19 @@ function ExperienceDetailCard({
                 {current.enabled ? "开始更正" : "编辑并确认"}
               </Button>
             )}
-            {current.review === "approved" &&
+            {(current.review === "approved" ||
+              (current.review === "unneeded" &&
+                current.risk === "low" &&
+                (current.maturity === "trial" || current.maturity === "active"))) &&
               !current.enabled &&
+              !(current.maturity === "suspended" && current.validation === "fail") &&
               current.lifecycleState !== "archived" && (
                 <Button
                   variant="quiet"
                   disabled={busy || unavailable}
                   onClick={() => void act("restore")}
                 >
-                  重新启用
+                  {current.maturity === "trial" ? "恢复受限试用" : "重新启用"}
                 </Button>
               )}
             {current.enabled && (
@@ -1210,14 +1238,21 @@ function ExperienceDetailCard({
                 停用
               </Button>
             )}
-            {(current.review === "approved" || current.lifecycleState === "archived") && (
+            {(current.review === "approved" ||
+              (current.review === "unneeded" &&
+                current.risk === "low" &&
+                (current.maturity === "trial" || current.maturity === "active")) ||
+              current.lifecycleState === "archived") && (
               <Button
                 variant="quiet"
                 disabled={
                   busy ||
                   unavailable ||
                   current.review === "rejected" ||
-                  current.state === "discarded"
+                  current.state === "discarded" ||
+                  (current.lifecycleState === "archived" &&
+                    current.maturity === "suspended" &&
+                    current.validation === "fail")
                 }
                 onClick={() =>
                   void act(current.lifecycleState === "archived" ? "restore" : "archive")

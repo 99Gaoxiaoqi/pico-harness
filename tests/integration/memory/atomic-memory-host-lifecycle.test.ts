@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
 import { createProductionRuntimeServices } from "@pico/pico-host/production-host";
 import { globalSessionManager } from "@pico/pico-host/session";
@@ -26,6 +25,7 @@ test(
   "production shutdown waits for background memory and disposal after the foreground completes",
   { timeout: 20_000 },
   async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
     const root = await mkdtemp(join(tmpdir(), "pico-memory-host-"));
     const picoHome = join(root, "home");
     await mkdir(join(root, "workspace"));
@@ -129,17 +129,18 @@ test(
     })) as { runId: string };
     const result = await runtime.waitForRun(started.runId);
     assert.equal(result.status, "succeeded", result.error);
+    t.mock.timers.tick(30_000);
     await entered.promise;
     assert.equal(residencies, 1);
     let closed = false;
     const closing = services.desktopService.close().then(() => {
       closed = true;
     });
-    await delay(30);
+    await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(closed, false, "host must wait for memory model");
     modelRelease.resolve();
     await disposing.promise;
-    await delay(30);
+    await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(closed, false, "host must also wait for model disposal");
     assert.equal(residencies, 1);
     disposeRelease.resolve();

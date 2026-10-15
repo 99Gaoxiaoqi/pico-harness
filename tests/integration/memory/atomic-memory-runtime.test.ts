@@ -172,14 +172,15 @@ test("atomic memory runtime saves before the next model call and rejects sibling
   const store = new SqliteMemoryItemStore(join(picoHome, "memory.sqlite"));
   const cursor = await store.readExtractionCursor(memorySessionKey(paths.workspace.id, sessionId));
   store.close();
-  assert.equal(
-    cursor?.processedOrdinal,
-    entries.find((e) => e.event.kind === "run.terminal")!.sequence,
-    "the empty automatic tail advances coverage without another memory model call",
+  assert.ok(cursor);
+  assert.ok(
+    cursor.processedOrdinal < entries.find((e) => e.event.kind === "run.terminal")!.sequence,
+    "explicit remembering covers its frozen source and cancels automatic work for this run",
   );
 });
 
 test("atomic memory extraction waits for a successful durable terminal and stops after session deletion", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const root = await mkdtemp(join(tmpdir(), "pico-atomic-trigger-"));
   const workDir = join(root, "workspace"),
     picoHome = join(root, "home"),
@@ -216,6 +217,7 @@ test("atomic memory extraction waits for a successful durable terminal and stops
   });
   await runtime.requestExtract();
   await runtime.completed("missing-run");
+  t.mock.timers.tick(30_000);
   await runtime.drain();
   assert.equal(modelCalls, 0);
   let calls = 0;
@@ -261,6 +263,7 @@ test("atomic memory extraction waits for a successful durable terminal and stops
     "captured foreground work is invalidated",
   );
   await runtime.completed(terminal.event.runId);
+  t.mock.timers.tick(30_000);
   await runtime.drain();
   assert.equal(
     modelCalls,
@@ -269,6 +272,7 @@ test("atomic memory extraction waits for a successful durable terminal and stops
   );
   await runtime.requestExtract();
   await runtime.completed(terminal.event.runId);
+  t.mock.timers.tick(30_000);
   await runtime.drain();
   assert.equal(modelCalls, 0, "a denied or deleted completed run cannot be re-admitted");
   // Already committed memory remains independent of Session lifecycle; new work must stop.
@@ -276,6 +280,7 @@ test("atomic memory extraction waits for a successful durable terminal and stops
   events.close();
   await runtime.requestExtract();
   await runtime.completed(terminal.event.runId);
+  t.mock.timers.tick(30_000);
   await runtime.drain();
   assert.equal(modelCalls, 0);
 });

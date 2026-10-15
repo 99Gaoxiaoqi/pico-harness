@@ -68,7 +68,7 @@ await row('第二条项目记忆');check(document.querySelector('textarea').valu
  check(document.querySelector('.task-experience__list').textContent.includes(globalItem.content)&&!document.querySelector('.task-experience__list').textContent.includes(ordinary.content)&&!document.body.textContent.includes(saved.goal),'global scope excludes workspace memories and experience');
  scope='all';await mount();check(document.querySelector('.task-experience__list').textContent.includes(globalItem.content)&&document.querySelector('.task-experience__list').textContent.includes(ordinary.content),'all is limited to the current workspace result plus its global entries');
  await act(async()=>root.render(<PicoTheme><MemoryRouter key='summary' initialEntries={['/conversation?workspace=%2Fproject&session=active']}><TaskExperiencePanel mode='conversation' workspacePath={workspace} items={[pending]} reuse={[]} onDetail={async()=>detail(pending)} onReview={async()=>pending} onFeedback={async()=>pending}/></MemoryRouter></PicoTheme>));
- const management=[...document.querySelectorAll('a')].find(n=>n.textContent==='管理工作区记忆');
+ const management=[...document.querySelectorAll('a')].find(n=>n.textContent==='查看经验进度');
  check(management?.getAttribute('href')?.startsWith('/settings/memory?'),'conversation management opens memory inside settings');
  await act(async()=>management.click());check(sessionStorage.getItem('pico.settings-return-to')==='/conversation?workspace=%2Fproject&session=active','settings remembers exact conversation return route');
  await act(async()=>root.unmount());await fetch('/result',{method:'POST',body:'PASS: embedded memory content'});

@@ -38,6 +38,18 @@ const emptyProposal = JSON.stringify({
 });
 
 async function fixture(t: TestContext) {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const pending = new Set<Promise<void>>();
+  const lifecycle = new AtomicMemoryLifecycle(() => {
+    const completion = Promise.withResolvers<void>();
+    pending.add(completion.promise);
+    return {
+      release: () => {
+        pending.delete(completion.promise);
+        completion.resolve();
+      },
+    };
+  });
   const root = await mkdtemp(join(tmpdir(), "pico-memory-auto-"));
   const workDir = join(root, "workspace"),
     picoHome = join(root, "home"),
@@ -54,6 +66,7 @@ async function fixture(t: TestContext) {
   const dependencies: AgentRuntimeDependencies = {
     picoHome,
     memoryTrustStore: trust,
+    atomicMemoryLifecycle: lifecycle,
     reporter: new SilentReporter(),
     provider: {
       async generate() {
@@ -69,9 +82,13 @@ async function fixture(t: TestContext) {
       },
     }),
   };
-  const drain = () =>
-    sessionMemoryLane.run(`${picoHome}:${sessionKey}`, "background", async () => undefined);
+  const drain = async () => {
+    t.mock.timers.tick(30_000);
+    while (pending.size) await Promise.allSettled([...pending]);
+    await sessionMemoryLane.run(`${picoHome}:${sessionKey}`, "background", async () => undefined);
+  };
   t.after(async () => {
+    await lifecycle.close();
     await drain();
     await globalSessionManager.delete(sessionId, workDir, { picoHome })?.close();
     events.close();
@@ -88,6 +105,7 @@ async function fixture(t: TestContext) {
     events,
     requests,
     dependencies,
+    lifecycle,
     drain,
     async autoExtract(value: boolean) {
       const settings = await store.readSettings(paths.workspace.id);
@@ -178,10 +196,12 @@ test("ordinary completion automatically persists memory without memory_extract a
     supported: true,
     gate: async () => ({ allowed: true }),
     modelFactory: f.dependencies.atomicMemoryModelFactory!,
+    lifecycle: f.lifecycle,
   });
   await runtime.requestExtract();
   await runtime.completed(terminal.event.runId);
   await runtime.completed(terminal.event.runId);
+  await f.drain();
   await runtime.drain();
   assert.equal(f.requests.length, 2);
 });

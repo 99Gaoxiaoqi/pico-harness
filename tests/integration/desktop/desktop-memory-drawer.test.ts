@@ -39,7 +39,7 @@ const scroll=scroller.scrollTop,route=document.querySelector('#route').textConte
 check(scroll>0&&trigger,'scroll position and completed-run receipt exist');check(reads===0,'collapsed entry performs no detail read');
 await act(async()=>{trigger.focus({preventScroll:true});trigger.click();});await frame();
 let dialog=document.querySelector('dialog[open]');check(dialog&&reads===1,'one explicit click opens one detail read');
-check(dialog.textContent.includes('实际注入的旧版本正文')&&dialog.textContent.includes('用户确认的任务经验 · v2')&&dialog.textContent.includes('本次使用记录保持记忆版本 v3'),'drawer keeps frozen content and version');
+check(dialog.textContent.includes('实际注入的旧版本正文')&&dialog.textContent.includes('任务经验参考 · v2')&&dialog.textContent.includes('本次使用记录保持记忆版本 v3'),'drawer keeps frozen content and version');
 check(dialog.textContent.includes('仅核对 B2:B3 求和')&&dialog.textContent.includes('不代表经验正文、根因或整个任务已验证'),'native evidence and result boundary remain visible');
 await act(async()=>button('本次不适用').click());
 check(feedback.length===1&&feedback[0].expectedItemVersion===3&&dialog.textContent.includes('其他任务仍可使用'),'feedback uses actual referenced version');

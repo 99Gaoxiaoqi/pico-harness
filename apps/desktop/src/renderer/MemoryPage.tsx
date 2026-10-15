@@ -76,7 +76,7 @@ const sourceLabels = {
   "assistant-note": "用户保留的助手笔记（未经独立核实）",
   "execution-evidence": "执行结果验证的经验（低信任参考）",
   "execution-validated": "历史执行经验（仅限定目标验收，低信任参考）",
-  "reviewed-reference": "用户确认的任务经验（参考）",
+  "reviewed-reference": "任务经验（参考）",
 };
 const matchLabels = { key: "关键词匹配", content: "正文匹配", preference: "常驻偏好" };
 const diagnosticLabels = {
@@ -343,9 +343,27 @@ export function MemoryPage({
   const [consolidationRefresh, setConsolidationRefresh] = useState(0);
   const [consolidationNotice, setConsolidationNotice] = useState<ConsolidationNotice>();
   const [undoingBatchId, setUndoingBatchId] = useState<string>();
+  const consolidationScope = JSON.stringify([data.picoHome, data.workspacePath, data.trusted]);
+  const consolidationScopeRef = useRef({ key: consolidationScope, generation: 0 });
+  if (consolidationScopeRef.current.key !== consolidationScope)
+    consolidationScopeRef.current = {
+      key: consolidationScope,
+      generation: consolidationScopeRef.current.generation + 1,
+    };
+  const consolidationGeneration = consolidationScopeRef.current.generation;
+  useEffect(() => {
+    setConsolidationNotice(undefined);
+    setUndoingBatchId(undefined);
+  }, [consolidationScope]);
   useEffect(() => {
     const workspacePath = data.workspacePath;
-    if (!workspacePath || !data.trusted || runtime.connection.kind !== "ready") {
+    if (
+      runtime.preview ||
+      !actions.queryMemoryConsolidationHistory ||
+      !workspacePath ||
+      !data.trusted ||
+      runtime.connection.kind !== "ready"
+    ) {
       setConsolidationHistory({ status: "idle", receipts: [] });
       return;
     }
@@ -374,6 +392,7 @@ export function MemoryPage({
     data.trusted,
     data.workspacePath,
     runtime.connection.kind,
+    runtime.preview,
   ]);
   useEffect(() => {
     const requested = searchParams.get("tab");
@@ -732,10 +751,12 @@ export function MemoryPage({
   const undoConsolidation = async (batchId: string) => {
     const workspacePath = data.workspacePath;
     if (!workspacePath || undoingBatchId) return;
+    const submittedScope = consolidationGeneration;
     setUndoingBatchId(batchId);
     setConsolidationNotice(undefined);
     try {
       const result = await actions.undoMemoryConsolidation(workspacePath, batchId);
+      if (consolidationScopeRef.current.generation !== submittedScope) return;
       if (result.status === "undone") {
         setConsolidationNotice({
           tone: "success",
@@ -758,13 +779,16 @@ export function MemoryPage({
         });
       }
     } catch (error) {
+      if (consolidationScopeRef.current.generation !== submittedScope) return;
       setConsolidationNotice({
         tone: "error",
         message: error instanceof Error ? error.message : "撤销自动整理失败，请重试。",
       });
     } finally {
-      setUndoingBatchId(undefined);
-      setConsolidationRefresh((revision) => revision + 1);
+      if (consolidationScopeRef.current.generation === submittedScope) {
+        setUndoingBatchId(undefined);
+        setConsolidationRefresh((revision) => revision + 1);
+      }
     }
   };
   const renderExperience = (filter: Exclude<PanelId, "usage">) => (
@@ -1331,7 +1355,7 @@ export function MemoryPage({
             memory.settings &&
             (!memory.settings.enabled || !memory.settings.recallEnabled) && (
               <InlineNotice>
-                记忆召回已关闭。已确认的经验仍可管理，开启召回后才会提供给新任务。
+                记忆召回已关闭。已保存的经验仍可管理，开启召回后才会提供给新任务。
               </InlineNotice>
             )}
           {!embedded && renderUsage()}
@@ -1542,7 +1566,7 @@ function SourceDetails({ item }: { readonly item: MemoryListItem }) {
     <details className="memory-source">
       <summary>
         {item.sourceType === "reviewed-reference"
-          ? "用户确认的任务经验 · 审核与验证分别记录"
+          ? "任务经验 · 审核与验证分别记录"
           : item.sourceType === "execution-validated"
             ? item.taskAcceptance
               ? "历史执行经验 · 仅限定目标验收通过"

@@ -43,6 +43,7 @@ const summary = [
 
 for (const scenario of ["stable", "delete", "toggle", "admission-failure"] as const) {
   test(`automatic checkpoint keeps its original admission after PostCompact: ${scenario}`, async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
     const root = await mkdtemp(join(tmpdir(), "pico-memory-checkpoint-admission-"));
     const workDir = join(root, "workspace"),
       picoHome = join(root, "home"),
@@ -252,6 +253,7 @@ for (const scenario of ["stable", "delete", "toggle", "admission-failure"] as co
     await run.run(async () => {
       await run.commitMessages(session, [{ role: "user", content: fact + " 请读取代码并检查。" }]);
       await engine.run(session);
+      t.mock.timers.tick(30_000);
       await runtime.drain();
     });
     assert.equal(compactions, 1, "memory admission must not prevent context compaction");

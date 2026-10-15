@@ -89,7 +89,7 @@ const metricsResult=count=>({metrics:{scope:"user",from:1000,to:2000,unknownRece
     check(metricsRequests.length===1&&metricsRequests[0].input.to-metricsRequests[0].input.from===7*86400000&&!Object.hasOwn(metricsRequests[0].input,"workspacePath"),"metrics must query the last seven days at user scope");
     await act(async()=>metricsRequests[0].resolve(metricsResult(7)));
     check(document.body.textContent.includes("历史创建数")&&document.body.textContent.includes("不代表当前已保存")&&document.body.textContent.includes("50.0%")&&document.body.textContent.includes("未知（无有效评估）")&&document.body.textContent.includes("0.0%"),"metrics confused historical creation, unknown and zero");
-    await click("刷新");await click("刷新");
+    await click("刷新策略与统计");await click("刷新策略与统计");
     check(metricsRequests.length===3,"refresh requests missing");
     await act(async()=>metricsRequests[2].resolve(metricsResult(9)));
     await act(async()=>metricsRequests[1].resolve(metricsResult(88)));

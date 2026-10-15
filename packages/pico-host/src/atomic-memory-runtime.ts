@@ -65,6 +65,8 @@ function resetAutomaticExtractionTimer(laneKey: string, pending: PendingAutomati
       if (prepare) pending.dispatch(trigger, prepare);
     }
   }, AUTOMATIC_EXTRACTION_IDLE_MS);
+  // A short-lived CLI may exit; its durable boundaries recover on the next run.
+  pending.timer.unref();
 }
 
 function notifyAutomaticExtractionActivity(

@@ -22,7 +22,7 @@ interface ExperienceUsagePanelProps {
   readonly onFeedback: (request: ExperienceUseFeedbackRequest) => Promise<ExperienceUse>;
 }
 const sourceLabels = {
-  "reviewed-reference": "用户确认的任务经验",
+  "reviewed-reference": "任务经验参考",
   "execution-validated": "历史执行经验",
   "execution-evidence": "旧版执行证据经验",
 };
@@ -93,7 +93,7 @@ export function ExperienceUsagePanel({
           </summary>
           <div className="task-experience__summary-content">
             <p>
-              用户确认、保存时验收、是否采用与本次执行结果分别记录。只有已携带到模型请求的记录显示“已引用”。
+              用户审核、证据成熟度、是否采用与本次执行结果分别记录。只有已携带到模型请求的记录显示“已引用”。
             </p>
             {uses.map((use) =>
               use.source.kind === "execution-evidence" ? (
@@ -368,7 +368,7 @@ function UseCard({
           </span>
           <span>
             {use.source.kind === "reviewed-reference"
-              ? "用户确认：已确认此版本"
+              ? "用户审核：请在经验详情查看"
               : "用户确认：历史自动保存，未逐条审核"}
           </span>
           <span>
@@ -376,7 +376,7 @@ function UseCard({
               ? "保存时验收：限定执行目标通过"
               : use.source.kind === "execution-evidence"
                 ? "保存时证据：历史执行记录，范围未知"
-                : "保存时验收：用户确认不等于执行验证"}
+                : "保存时验收：试用或用户审核均不等于执行验证"}
           </span>
           <span>采用：{unconfirmed ? "未知（引用未确认）" : adoptionLabels[current.adoption]}</span>
           <span>

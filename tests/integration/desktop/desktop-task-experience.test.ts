@@ -47,7 +47,7 @@ const renderPanel=(props)=>root.render(<PicoTheme><MemoryRouter><TaskExperienceP
   check(document.querySelector('.task-experience__row'),'pending experience loads with automatic learning off');
   check(detailCalls===0,'list never reads detail or grabs focus automatically');
   await act(async()=>document.querySelector('.task-experience__row').click());
-  check(text().includes('审核：待审核')&&text().includes('历史验证：验证通过（范围见使用记录）')&&text().includes('确认表示允许作为参考使用，不代表经验正文或整个任务已通过验证。'),'review and bounded validation are independent');
+  check(text().includes('需审核')&&text().includes('历史验证：验证通过（范围见使用记录）')&&text().includes('确认表示允许作为参考使用，不代表经验正文或整个任务已通过验证。'),'review and bounded validation are independent');
   check(text().includes('没有表头')&&text().includes('用户指出首行也是数据')&&text().includes('user-correction-event'),'conditions and correction provenance are inspectable');
   await act(async()=>button('编辑并确认').click());
   await act(async()=>input(document.querySelector('textarea'),'我的更正草稿：保留第一行。'));
