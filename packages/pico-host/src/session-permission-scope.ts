@@ -9,6 +9,7 @@ export interface PermissionSessionGrantStore {
 /** 产品宿主对目录授权的写入能力。 */
 export interface PermissionDirectoryAuthority {
   addDirectory(directory: string): Promise<{ path: string }>;
+  addReadOnlyDirectory(directory: string): Promise<{ path: string }>;
 }
 
 /** 产品宿主对 session 设置的读写投影。 */
@@ -40,6 +41,12 @@ export async function applySessionPermissionScope<TSettings>(
     return;
   }
   if (scope.type === "directories") {
+    if (scope.access === "read") {
+      for (const directory of scope.directories) {
+        await options.workspaceRoots.addReadOnlyDirectory(directory);
+      }
+      return;
+    }
     const added: string[] = [];
     for (const directory of scope.directories) {
       const result = await options.workspaceRoots.addDirectory(directory);

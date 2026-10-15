@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -12,12 +12,17 @@ import type { LLMProvider } from "@pico/core";
 import { executeAgentRuntime } from "@pico/pico-host/agent-runtime";
 import {
   canWritePath,
+  canReadPath,
   compileRuntimePermissionProfile,
   type ExecutionBoundary,
   type RuntimePermissionMode,
   type SandboxBoundaryScope,
 } from "@pico/core/permission-profile";
 import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
+import { forgetSessionSettings } from "@pico/pico-host/input/session-settings";
+import { globalSessionPermissionGrants } from "@pico/pico-host/session-permissions";
+import { compileRuntimeProcessSandbox } from "@pico/pico-host/runtime-process-sandbox";
+import { createSandboxPolicy, isWithinRoot } from "@pico/pico-host/process-sandbox";
 
 const REQUEST_BOUNDARY_TOOL = "request_sandbox_boundary";
 
@@ -27,6 +32,167 @@ interface RuntimeFixture {
   readonly sessionId: string;
   readonly externalDir: string;
 }
+
+test("session read-directory approval stays read-only across file tools, sandbox refresh and resume", async (t) => {
+  const fixture = await createFixture(t, "read-only-directory");
+  const externalDir = await realpath(fixture.externalDir);
+  const target = join(externalDir, "read.txt");
+  const sibling = join(externalDir, "sibling.txt");
+  await writeFile(target, "read-only fixture\n");
+  await writeFile(sibling, "sibling fixture\n");
+  const manager = new ApprovalManager(60_000);
+  const notices: ApprovalNotice[] = [];
+  for (const mode of ["new", "resume"] as const) {
+    const operations = [
+      { name: "read_file", path: target },
+      { name: "read_file", path: sibling },
+      { name: "write_file", path: target },
+      { name: "write_file", path: sibling },
+    ];
+    let step = 0;
+    const provider: LLMProvider = {
+      async generate(messages) {
+        if (step > 0 && step <= 2) {
+          const result = messages.findLast(
+            (message) => message.toolCallId === `${mode}-${step - 1}`,
+          );
+          assert.match(
+            result?.content ?? "",
+            /fixture/u,
+            "approved reads must execute successfully",
+          );
+        }
+        const operation = operations[step];
+        if (!operation) return { role: "assistant", content: "read-only checks complete" };
+        return {
+          role: "assistant",
+          content: "",
+          toolCalls: [
+            {
+              id: `${mode}-${step++}`,
+              name: operation.name,
+              arguments: JSON.stringify({
+                path: operation.path,
+                ...(operation.name === "write_file" ? { content: "must not be written" } : {}),
+              }),
+            },
+          ],
+        };
+      },
+    };
+    const result = await executeAgentRuntime(
+      {
+        prompt: "Read the approved external directory, then attempt edits for host approval.",
+        dir: fixture.workDir,
+        sessionSelection: { mode, sessionId: fixture.sessionId },
+        provider: "openai",
+        modelRouteId: "test/test",
+        collaborationMode: "agent",
+        permissionMode: "auto",
+        allowedTools: ["read_file", "write_file"],
+      },
+      {
+        picoHome: fixture.picoHome,
+        provider,
+        reporter: new SilentReporter(),
+        approvalManager: manager,
+        approvalNotifier: (notice) => {
+          notices.push(notice);
+          if (notice.toolName === "read_file") {
+            assert.equal(mode, "new", "restored reads must not ask again");
+            assert.equal(notice.sessionScope?.type, "directories");
+            assert.equal((notice.sessionScope as { access: string }).access, "read");
+            manager.resolveApprovalForSession(notice.taskId, "approve directory reads only");
+          } else {
+            manager.resolveApproval(notice.taskId, false, "reject all external writes");
+          }
+        },
+      },
+    );
+    assert.equal(result.finalMessage, "read-only checks complete");
+    assert.equal(await readFile(target, "utf8"), "read-only fixture\n");
+    assert.equal(await readFile(sibling, "utf8"), "sibling fixture\n");
+    const state = await readDurableState(fixture);
+    assert.ok(state.boundary?.kind === "managed");
+    assert.equal(
+      canReadPath(state.boundary.profile, target, boundaryMatchContext(fixture.workDir)),
+      true,
+    );
+    assert.equal(
+      canWritePath(state.boundary.profile, target, boundaryMatchContext(fixture.workDir)),
+      false,
+    );
+    assert.equal(
+      canWritePath(state.boundary.profile, sibling, boundaryMatchContext(fixture.workDir)),
+      false,
+    );
+    assert.deepEqual(state.settings?.additionalDirectories, []);
+    const descriptor = compileRuntimeProcessSandbox({
+      collaborationMode: "agent",
+      executionBoundary: state.boundary,
+      workspaceGeneration: 0,
+      scratchRoot: join(fixture.picoHome, "sandbox-test"),
+    });
+    const policy = createSandboxPolicy({ ...descriptor, workspaceRoots: [fixture.workDir] });
+    assert.ok(policy.readRoots.some((root) => isWithinRoot(root, target)));
+    assert.ok(!policy.writeRoots.some((root) => isWithinRoot(root, target)));
+    const released = globalSessionManager.delete(fixture.sessionId, fixture.workDir, {
+      picoHome: fixture.picoHome,
+    });
+    await released?.close();
+    forgetSessionSettings(fixture.sessionId, fixture.workDir, fixture.picoHome);
+    globalSessionPermissionGrants.clear(fixture.sessionId, fixture.workDir, fixture.picoHome);
+  }
+  assert.deepEqual(
+    notices.map((notice) => notice.toolName),
+    ["read_file", "write_file", "write_file", "write_file", "write_file"],
+  );
+
+  // An explicit session-edit approval can still upgrade this directory after resume.
+  let writeStep = 0;
+  const writeNotices: ApprovalNotice[] = [];
+  await executeAgentRuntime(
+    {
+      prompt: "Apply the separately approved external edits.",
+      dir: fixture.workDir,
+      sessionSelection: { mode: "resume", sessionId: fixture.sessionId },
+      provider: "openai",
+      modelRouteId: "test/test",
+      allowedTools: ["write_file"],
+    },
+    {
+      picoHome: fixture.picoHome,
+      provider: {
+        async generate() {
+          const path = [target, sibling][writeStep];
+          if (!path) return { role: "assistant", content: "approved writes complete" };
+          return {
+            role: "assistant",
+            content: "",
+            toolCalls: [
+              {
+                id: `approved-write-${writeStep++}`,
+                name: "write_file",
+                arguments: JSON.stringify({ path, content: "explicitly approved edit\n" }),
+              },
+            ],
+          };
+        },
+      },
+      reporter: new SilentReporter(),
+      approvalManager: manager,
+      approvalNotifier: (notice) => {
+        writeNotices.push(notice);
+        assert.equal(notice.sessionScope?.type, "directories");
+        assert.equal((notice.sessionScope as { access: string }).access, "edit");
+        manager.resolveApprovalForSession(notice.taskId, "approve directory edits separately");
+      },
+    },
+  );
+  assert.equal(writeNotices.length, 1);
+  assert.equal(await readFile(target, "utf8"), "explicitly approved edit\n");
+  assert.equal(await readFile(sibling, "utf8"), "explicitly approved edit\n");
+});
 
 test("foreground ask/auto sessions durably apply host-approved sandbox boundary requests", async (t) => {
   const cases: readonly {
@@ -330,7 +496,10 @@ function boundaryMatchContext(workDir: string) {
 }
 
 async function readDurableState(fixture: RuntimeFixture): Promise<{
-  readonly settings?: { readonly permissionMode: string };
+  readonly settings?: {
+    readonly permissionMode: string;
+    readonly additionalDirectories: readonly string[];
+  };
   readonly boundary?: ExecutionBoundary;
 }> {
   const store = new SqliteRuntimeEventStore({

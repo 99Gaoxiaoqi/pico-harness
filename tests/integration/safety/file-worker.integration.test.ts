@@ -44,7 +44,8 @@ test("native file-worker process reads only its target and cannot connect to loo
   const scratchRoot = join(root, "scratch");
   await mkdir(workspace);
   await mkdir(scratchRoot);
-  const allowed = join(workspace, "allowed.txt");
+  // An external target does not implicitly grant metadata access to the cwd.
+  const allowed = join(root, "allowed.txt");
   const sibling = join(workspace, "sibling.txt");
   await writeFile(allowed, "allowed-secret");
   await writeFile(sibling, "sibling-secret");
@@ -64,6 +65,12 @@ test("native file-worker process reads only its target and cannot connect to loo
     'const net = require("node:net");',
     `process.stdout.write(${JSON.stringify(startedMarker)}, () => {`,
     `if (fs.readFileSync(${JSON.stringify(allowed)}, "utf8") !== "allowed-secret") process.exit(10);`,
+    ...(process.platform === "darwin"
+      ? [
+          `if (!fs.statSync(${JSON.stringify(workspace)}).isDirectory()) process.exit(13);`,
+          `try { fs.readdirSync(${JSON.stringify(workspace)}); process.exit(14); } catch {}`,
+        ]
+      : []),
     `try { fs.readFileSync(${JSON.stringify(sibling)}, "utf8"); process.exit(11); } catch {}`,
     `const socket = net.connect(${address.port}, "127.0.0.1");`,
     `const complete = () => { socket.destroy(); process.stdout.write(${JSON.stringify(completedMarker)}, () => process.exit(0)); };`,
