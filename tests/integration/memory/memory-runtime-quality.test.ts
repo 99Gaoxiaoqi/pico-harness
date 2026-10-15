@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 import { SilentReporter } from "@pico/runtime/silent-reporter";
 import { getOrCreateSessionSettings } from "@pico/pico-host/input/session-settings";
 import { AtomicMemoryLifecycle } from "@pico/runtime";
@@ -25,6 +25,28 @@ import { BACKGROUND_HARDLINE_VERSION } from "@pico/pico-host/background-autonomo
 
 const MEMORY_CANARY = "npm run reviewed-memory-canary";
 
+class DrainableMemoryLifecycle extends AtomicMemoryLifecycle {
+  private readonly pending = new Set<Promise<unknown>>();
+
+  override run<Value>(
+    trigger: "remember" | "extract" | "compaction",
+    operation: () => Promise<Value>,
+    unavailable: () => Value,
+  ): Promise<Value> {
+    const task = super.run(trigger, operation, unavailable);
+    this.pending.add(task);
+    void task.then(
+      () => this.pending.delete(task),
+      () => this.pending.delete(task),
+    );
+    return task;
+  }
+
+  async drain(): Promise<void> {
+    while (this.pending.size) await Promise.allSettled([...this.pending]);
+  }
+}
+
 test("Memory admission separates recall from extraction across runtime profiles", async (t) => {
   const profiles = [
     "plan",
@@ -36,14 +58,14 @@ test("Memory admission separates recall from extraction across runtime profiles"
     "untrusted",
   ] as const;
   for (const profile of profiles) {
-    await t.test(profile, async () => {
-      const fixture = await createFixture(`profile-${profile}`);
+    await t.test(profile, async (context) => {
+      const fixture = await createFixture(`profile-${profile}`, context);
       const sessionId = `memory-profile-${profile}`;
       const trust =
         profile === "untrusted"
           ? new WorkspaceTrustStore({ userStateDirectory: fixture.picoHome })
           : await trustWorkspaces(fixture.picoHome, fixture.workspace);
-      const lifecycle = new AtomicMemoryLifecycle();
+      const lifecycle = fixture.lifecycle;
       const triggers = ["memory_remember", "memory_extract"];
       const background = profile.startsWith("background");
       const toolsAllowed = profile !== "background-restricted";
@@ -206,8 +228,8 @@ test("Memory admission separates recall from extraction across runtime profiles"
   }
 });
 
-test("committed Session A atomic memory reaches Session B AgentRuntime prompt but not another workspace", async () => {
-  const fixture = await createFixture("cross-session");
+test("committed Session A atomic memory reaches Session B AgentRuntime prompt but not another workspace", async (context) => {
+  const fixture = await createFixture("cross-session", context);
   const otherWorkspace = join(fixture.root, "other-workspace");
   await mkdir(otherWorkspace, { recursive: true });
   const trustStore = await trustWorkspaces(fixture.picoHome, fixture.workspace, otherWorkspace);
@@ -224,6 +246,7 @@ test("committed Session A atomic memory reaches Session B AgentRuntime prompt bu
       {
         picoHome: fixture.picoHome,
         memoryTrustStore: trustStore,
+        atomicMemoryLifecycle: fixture.lifecycle,
         provider: finalAnswerProvider("session A complete", "memory_remember"),
         atomicMemoryModelFactory: async () => ({
           model: {
@@ -259,6 +282,7 @@ test("committed Session A atomic memory reaches Session B AgentRuntime prompt bu
         {
           picoHome: fixture.picoHome,
           memoryTrustStore: trustStore,
+          atomicMemoryLifecycle: fixture.lifecycle,
           provider: capturingProvider(prompts, "recall complete"),
           atomicMemoryModelFactory: async () => {
             throw new Error("recall must not dispatch extraction");
@@ -307,8 +331,11 @@ test("atomic memory settings independently gate recall and extraction work", asy
     },
   ] as const;
   for (const settingCase of cases) {
-    await context.test(settingCase.name, async () => {
-      const fixture = await createFixture(`settings-${settingCase.name.replaceAll(/\W/gu, "-")}`);
+    await context.test(settingCase.name, async (child) => {
+      const fixture = await createFixture(
+        `settings-${settingCase.name.replaceAll(/\W/gu, "-")}`,
+        child,
+      );
       const sessionId = `quality-${settingCase.name}`;
       const trustStore = await trustWorkspaces(fixture.picoHome, fixture.workspace);
       let mainCalls = 0,
@@ -352,6 +379,7 @@ test("atomic memory settings independently gate recall and extraction work", asy
           {
             picoHome: fixture.picoHome,
             memoryTrustStore: trustStore,
+            atomicMemoryLifecycle: fixture.lifecycle,
             provider: {
               async generate(messages, tools) {
                 prompts.push(structuredClone(messages));
@@ -409,8 +437,8 @@ test("atomic memory settings independently gate recall and extraction work", asy
 test(
   "foreground streaming completion does not wait for blocked atomic extraction",
   { timeout: 10_000 },
-  async () => {
-    const fixture = await createFixture("streaming-nonblocking");
+  async (context) => {
+    const fixture = await createFixture("streaming-nonblocking", context);
     const trustStore = await trustWorkspaces(fixture.picoHome, fixture.workspace);
     const sessionId = "quality-streaming-nonblocking";
     const deferred = createDeferred<string>();
@@ -429,6 +457,7 @@ test(
         {
           picoHome: fixture.picoHome,
           memoryTrustStore: trustStore,
+          atomicMemoryLifecycle: fixture.lifecycle,
           provider: {
             async generate() {
               throw new Error("streaming provider must use generateStream");
@@ -463,6 +492,10 @@ test(
       );
       assert.equal(result.finalMessage, "streamed");
       assert.deepEqual(reporter.deltas, ["stream", "ed"]);
+      assert.equal(extractionCalls, 0, "foreground returns before idle extraction starts");
+      fixture.advanceIdle(29_999);
+      assert.equal(extractionCalls, 0);
+      fixture.advanceIdle(1);
       await extractionStarted.promise;
       assert.equal(extractionCalls, 1);
       const store = openStore(fixture);
@@ -487,8 +520,8 @@ test(
   },
 );
 
-test("atomic extraction failure cannot replace foreground terminal success", async () => {
-  const fixture = await createFixture("extraction-failure");
+test("atomic extraction failure cannot replace foreground terminal success", async (context) => {
+  const fixture = await createFixture("extraction-failure", context);
   const trustStore = await trustWorkspaces(fixture.picoHome, fixture.workspace);
   const sessionId = "quality-extraction-failure";
   let extractionCalls = 0;
@@ -503,6 +536,7 @@ test("atomic extraction failure cannot replace foreground terminal success", asy
       {
         picoHome: fixture.picoHome,
         memoryTrustStore: trustStore,
+        atomicMemoryLifecycle: fixture.lifecycle,
         provider: finalAnswerProvider("foreground survived", "memory_extract"),
         atomicMemoryModelFactory: async () => ({
           model: {
@@ -544,8 +578,8 @@ test("atomic extraction failure cannot replace foreground terminal success", asy
   }
 });
 
-test("default priced atomic extraction accounts memory_review separately from main physical requests", async () => {
-  const fixture = await createFixture("priced-worker");
+test("default priced atomic extraction accounts memory_review separately from main physical requests", async (context) => {
+  const fixture = await createFixture("priced-worker", context);
   const trustStore = await trustWorkspaces(fixture.picoHome, fixture.workspace);
   const sessionId = "quality-priced-worker";
   let providerInstances = 0,
@@ -625,6 +659,7 @@ test("default priced atomic extraction accounts memory_review separately from ma
       {
         picoHome: fixture.picoHome,
         memoryTrustStore: trustStore,
+        atomicMemoryLifecycle: fixture.lifecycle,
         providerFactory,
         reporter: new SilentReporter(),
       },
@@ -806,8 +841,10 @@ function sessionKey(fixture: RuntimeFixture, sessionId: string): string {
 }
 
 async function drainExtraction(fixture: RuntimeFixture, sessionId: string): Promise<void> {
-  // Runtime enqueues extraction before returning. A barrier in its session lane lets
-  // assertions observe settled background work, including policy-denied no-ops.
+  // Idle expiry starts snapshot preparation before the session lane is entered.
+  // Drain that lifecycle work first, then observe a final lane barrier.
+  fixture.advanceIdle();
+  await fixture.lifecycle.drain();
   await sessionMemoryLane.run(
     `${fixture.picoHome}:${sessionKey(fixture, sessionId)}`,
     "background",
@@ -827,7 +864,7 @@ async function waitForProviderCalls(fixture: RuntimeFixture, expected: number): 
     } finally {
       ledger.close();
     }
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await new Promise((resolve) => setImmediate(resolve));
   }
   throw new Error(`Timed out waiting for ${expected} provider calls`);
 }
@@ -849,14 +886,28 @@ interface RuntimeFixture {
   readonly root: string;
   readonly workspace: string;
   readonly picoHome: string;
+  readonly lifecycle: DrainableMemoryLifecycle;
+  readonly advanceIdle: (milliseconds?: number) => void;
 }
 
-async function createFixture(name: string): Promise<RuntimeFixture> {
+async function createFixture(name: string, context: TestContext): Promise<RuntimeFixture> {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const lifecycle = new DrainableMemoryLifecycle();
+  context.after(async () => {
+    await lifecycle.close();
+    context.mock.timers.reset();
+  });
   const root = await mkdtemp(join(tmpdir(), `pico-memory-runtime-quality-${name}-`));
   const workspace = join(root, "workspace");
   const picoHome = join(root, "pico-home");
   await Promise.all([mkdir(workspace, { recursive: true }), mkdir(picoHome, { recursive: true })]);
-  return { root, workspace, picoHome };
+  return {
+    root,
+    workspace,
+    picoHome,
+    lifecycle,
+    advanceIdle: (milliseconds = 30_000) => context.mock.timers.tick(milliseconds),
+  };
 }
 
 async function trustWorkspaces(

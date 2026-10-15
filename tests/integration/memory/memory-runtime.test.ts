@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
+import { AtomicMemoryLifecycle } from "@pico/runtime";
 import { DesktopAtomicMemoryService } from "@pico/pico-host/desktop-atomic-memory-service";
 import { globalSessionManager } from "@pico/pico-host/session";
 import {
@@ -27,6 +28,28 @@ import { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-s
 import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
 import { initializeRuntimeEventOwner } from "../helpers/runtime-event-owner.js";
 
+class DrainableMemoryLifecycle extends AtomicMemoryLifecycle {
+  private readonly pending = new Set<Promise<unknown>>();
+
+  override run<Value>(
+    trigger: "remember" | "extract" | "compaction",
+    operation: () => Promise<Value>,
+    unavailable: () => Value,
+  ): Promise<Value> {
+    const task = super.run(trigger, operation, unavailable);
+    this.pending.add(task);
+    void task.then(
+      () => this.pending.delete(task),
+      () => this.pending.delete(task),
+    );
+    return task;
+  }
+
+  async drain(): Promise<void> {
+    while (this.pending.size) await Promise.allSettled([...this.pending]);
+  }
+}
+
 /** Windows: release SQLite owners before retrying temporary directory cleanup. */
 async function rmRetry(target: string): Promise<void> {
   for (let attempt = 0; ; attempt++) {
@@ -47,7 +70,7 @@ async function rmRetry(target: string): Promise<void> {
 }
 
 test("foreground Runtime injects atomic recall ephemerally and respects disabled and untrusted gates", async (context) => {
-  const fixture = await createFixture("runtime");
+  const fixture = await createFixture("runtime", context);
   context.after(() => rmRetry(fixture.root));
   const trustStore = await trustFixture(fixture);
   const service = new DesktopAtomicMemoryService({ picoHome: fixture.picoHome, publish: () => {} });
@@ -84,6 +107,7 @@ test("foreground Runtime injects atomic recall ephemerally and respects disabled
       provider,
       picoHome: fixture.picoHome,
       memoryTrustStore: trustStore,
+      atomicMemoryLifecycle: fixture.lifecycle,
       atomicMemoryModelFactory: async () => ({
         model: createAtomicModel(fixture, sessionId, false, () => {
           extractionCalls++;
@@ -150,10 +174,11 @@ test("foreground Runtime injects atomic recall ephemerally and respects disabled
         provider,
         picoHome: fixture.picoHome,
         memoryTrustStore: trustStore,
+        atomicMemoryLifecycle: fixture.lifecycle,
         atomicMemoryModelFactory: disabledModel,
       },
     );
-    await waitForImmediate();
+    await drainAutomaticMemory(fixture, `memory-runtime-${scenario}`);
     assert.equal(JSON.stringify(captured).includes("hidden-recall-policy"), false);
     assert.equal(extractionCalls, 1);
     assert.equal(disabledFactoryCalls, 0);
@@ -162,7 +187,7 @@ test("foreground Runtime injects atomic recall ephemerally and respects disabled
 });
 
 test("memory_remember persists requested memory before the next model step and before terminal", async (context) => {
-  const fixture = await createFixture("remember-synchronous");
+  const fixture = await createFixture("remember-synchronous", context);
   context.after(() => rmRetry(fixture.root));
   const sessionId = "memory-remember-synchronous";
   const trustStore = await trustFixture(fixture);
@@ -180,6 +205,7 @@ test("memory_remember persists requested memory before the next model step and b
     {
       picoHome: fixture.picoHome,
       memoryTrustStore: trustStore,
+      atomicMemoryLifecycle: fixture.lifecycle,
       atomicMemoryModelFactory: async () => ({
         model: createAtomicModel(fixture, sessionId, true),
       }),
@@ -215,7 +241,7 @@ test("memory_remember persists requested memory before the next model step and b
 });
 
 test("the second turn in one Session respects denied tool admission before an eligible extraction", async (context) => {
-  const fixture = await createFixture("multi-turn-signal-gate");
+  const fixture = await createFixture("multi-turn-signal-gate", context);
   const workspace = await realpath(fixture.workspace);
   const trustStore = await trustFixture(fixture);
   const sessionId = "memory-multi-turn-signal-gate";
@@ -292,6 +318,7 @@ test("the second turn in one Session respects denied tool admission before an el
         provider,
         picoHome: fixture.picoHome,
         memoryTrustStore: trustStore,
+        atomicMemoryLifecycle: fixture.lifecycle,
         atomicMemoryModelFactory: async () => ({
           model: createAtomicModel(fixture, sessionId, false),
         }),
@@ -299,11 +326,7 @@ test("the second turn in one Session respects denied tool admission before an el
         resumeExistingSession: true,
       },
     );
-    await sessionMemoryLane.run(
-      `${fixture.picoHome}:${memorySessionKey(resolvePicoPaths(workspace, { picoHome: fixture.picoHome }).workspace.id, sessionId)}`,
-      "background",
-      async () => undefined,
-    );
+    await drainAutomaticMemory(fixture, sessionId);
   };
 
   await executeDesktopTurn("What is 2 + 2?", "desktop-user-ordinary");
@@ -338,7 +361,7 @@ test("the second turn in one Session respects denied tool admission before an el
 
 test("ordinary startup extracts its own completion without replaying unmarked historical Sessions", async (context) => {
   let startupModelCalls = 0;
-  const fixture = await createFixture("terminal-job-gap-recovery");
+  const fixture = await createFixture("terminal-job-gap-recovery", context);
   context.after(async () => {
     // executeAgentRuntime(mode:new) 会把会话留在 globalSessionManager;其
     // SqliteRuntimeEventStore 持有 pico.sqlite 句柄,清理前先删除并关闭。
@@ -438,6 +461,7 @@ test("ordinary startup extracts its own completion without replaying unmarked hi
       },
       picoHome: fixture.picoHome,
       memoryTrustStore: trustStore,
+      atomicMemoryLifecycle: fixture.lifecycle,
       atomicMemoryModelFactory: async () => {
         startupModelCalls++;
         return {
@@ -458,11 +482,7 @@ test("ordinary startup extracts its own completion without replaying unmarked hi
   );
   assert.equal(result.finalMessage, "4");
 
-  await sessionMemoryLane.run(
-    `${fixture.picoHome}:${memorySessionKey(paths.workspace.id, "memory-gap-restart-trigger")}`,
-    "background",
-    async () => undefined,
-  );
+  await drainAutomaticMemory(fixture, "memory-gap-restart-trigger");
   const atomic = new SqliteMemoryItemStore(join(fixture.picoHome, "memory.sqlite"));
   assert.equal((await atomic.listItems({ workspaceKey: paths.workspace.id })).length, 0);
   assert.equal(
@@ -476,7 +496,7 @@ test("ordinary startup extracts its own completion without replaying unmarked hi
 
 test("ordinary startup processes its new completion without repeating another Session's extracted range", async (context) => {
   let startupModelCalls = 0;
-  const fixture = await createFixture("obsolete-debounce");
+  const fixture = await createFixture("obsolete-debounce", context);
   context.after(() => rmRetry(fixture.root));
   const trustStore = await trustFixture(fixture);
   const sessionId = "memory-obsolete-debounce";
@@ -494,6 +514,7 @@ test("ordinary startup processes its new completion without repeating another Se
     {
       picoHome: fixture.picoHome,
       memoryTrustStore: trustStore,
+      atomicMemoryLifecycle: fixture.lifecycle,
       atomicMemoryModelFactory: async () => ({
         model: createAtomicModel(fixture, sessionId, false, () => {
           extractionCalls++;
@@ -525,6 +546,7 @@ test("ordinary startup processes its new completion without repeating another Se
     {
       picoHome: fixture.picoHome,
       memoryTrustStore: trustStore,
+      atomicMemoryLifecycle: fixture.lifecycle,
       provider: {
         async generate() {
           return { role: "assistant", content: "6" };
@@ -548,17 +570,13 @@ test("ordinary startup processes its new completion without repeating another Se
       },
     },
   );
-  await sessionMemoryLane.run(
-    `${fixture.picoHome}:${memorySessionKey(resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome }).workspace.id, "ordinary-after-extract")}`,
-    "background",
-    async () => undefined,
-  );
+  await drainAutomaticMemory(fixture, "ordinary-after-extract");
   assert.equal(extractionCalls, 1);
   assert.equal(startupModelCalls, 1);
 });
 
 test("manifest pages keep a fixed upper bound and DESC keyset across concurrent mutations", async (context) => {
-  const fixture = await createFixture("manifest-keyset");
+  const fixture = await createFixture("manifest-keyset", context);
   context.after(() => rmRetry(fixture.root));
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
   const store = new SqliteRuntimeEventStore({ storageRoot: paths.workspace.root });
@@ -611,12 +629,24 @@ test.after(async () => {
   closeAllOperationalDatabasesForTest();
 });
 
-async function createFixture(name: string) {
+async function createFixture(name: string, context: TestContext) {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const lifecycle = new DrainableMemoryLifecycle();
+  context.after(async () => {
+    await lifecycle.close();
+    context.mock.timers.reset();
+  });
   const root = await mkdtemp(join(tmpdir(), `pico-memory-runtime-${name}-`));
   const workspace = join(root, "workspace");
   const picoHome = join(root, "pico-home");
   await mkdir(workspace, { recursive: true });
-  return { root, workspace, picoHome };
+  return {
+    root,
+    workspace,
+    picoHome,
+    lifecycle,
+    advanceIdle: () => context.mock.timers.tick(30_000),
+  };
 }
 
 async function trustFixture(fixture: { workspace: string; picoHome: string }) {
@@ -676,9 +706,10 @@ function createAtomicModel(
 }
 
 async function waitForAtomicCursor(
-  fixture: { workspace: string; picoHome: string },
+  fixture: Awaited<ReturnType<typeof createFixture>>,
   sessionId: string,
 ): Promise<void> {
+  await drainAutomaticMemory(fixture, sessionId);
   const key = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome }).workspace.id;
   for (let attempt = 0; attempt < 300; attempt++) {
     await waitForImmediate();
@@ -688,6 +719,21 @@ async function waitForAtomicCursor(
     if (cursor && cursor.processedOrdinal > 0) return;
   }
   assert.fail(`atomic extraction did not settle for ${sessionId}`);
+}
+
+async function drainAutomaticMemory(
+  fixture: Awaited<ReturnType<typeof createFixture>>,
+  sessionId: string,
+): Promise<void> {
+  fixture.advanceIdle();
+  await fixture.lifecycle.drain();
+  const workspaceKey = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome }).workspace
+    .id;
+  await sessionMemoryLane.run(
+    `${fixture.picoHome}:${memorySessionKey(workspaceKey, sessionId)}`,
+    "background",
+    async () => undefined,
+  );
 }
 
 function waitForImmediate(): Promise<void> {
