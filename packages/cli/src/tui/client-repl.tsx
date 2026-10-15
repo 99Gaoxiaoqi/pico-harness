@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { useCallback, useEffect, useState } from "react";
 import { render } from "ink";
 import { LocalRuntimeClient } from "@pico/pico-host/local-runtime-client";
@@ -16,6 +16,7 @@ import { createApprovalDialogRequest, createPlanControlDialogRequest } from "./a
 import { askUserDialogId, createAskUserDialogRequest } from "./ask-user-dialog.js";
 import type { AskUserRequest } from "@pico/pico-host/ask-user-tool";
 import type { InputBoxSubmission } from "./input-box.js";
+import type { InputImageAttachment } from "./image-attachments.js";
 import { ClientSessionRuntime } from "./client-session-runtime.js";
 import { FilePendingSendStore } from "./pending-send-store.js";
 import { createClientCommandRegistry, processClientInput } from "./client-commands.js";
@@ -188,12 +189,26 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
   // rewind 后输入回填桥（fork 会话携带原 prompt 供编辑——与 in-process
   // setInputReplacement 同语义，经 App.inputReplacement 通道）。
   const inputReplacementSink: {
-    current: ((value: { sequence: number; text: string } | undefined) => void) | undefined;
+    current:
+      | ((
+          value:
+            | {
+                sequence: number;
+                text: string;
+                attachments?: readonly InputImageAttachment[];
+              }
+            | undefined,
+        ) => void)
+      | undefined;
   } = { current: undefined };
   let inputReplacementSeq = 0;
-  const restoreInputDraft = (text: string): void => {
+  const restoreInputDraft = (text: string, attachments?: readonly InputImageAttachment[]): void => {
     inputReplacementSeq += 1;
-    inputReplacementSink.current?.({ sequence: inputReplacementSeq, text });
+    inputReplacementSink.current?.({
+      sequence: inputReplacementSeq,
+      text,
+      ...(attachments?.length ? { attachments } : {}),
+    });
   };
   // rewind preview 的指纹缓存（preview→apply 间一致性校验；键 = sessionId/checkpointId）。
   const rewindFingerprints = new Map<string, string>();
@@ -314,7 +329,42 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
       applyLocalCommand(outcome.result);
       const restoreDraft = (outcome.result.data as { restoreDraft?: unknown } | undefined)
         ?.restoreDraft;
-      if (typeof restoreDraft === "string") restoreInputDraft(restoreDraft);
+      if (
+        restoreDraft &&
+        typeof restoreDraft === "object" &&
+        "text" in restoreDraft &&
+        typeof restoreDraft.text === "string"
+      ) {
+        const attachments =
+          "attachments" in restoreDraft && Array.isArray(restoreDraft.attachments)
+            ? restoreDraft.attachments.flatMap((attachment, index) => {
+                if (
+                  !attachment ||
+                  typeof attachment !== "object" ||
+                  !("type" in attachment) ||
+                  attachment.type !== "image_base64" ||
+                  !("mimeType" in attachment) ||
+                  typeof attachment.mimeType !== "string" ||
+                  !("data" in attachment) ||
+                  typeof attachment.data !== "string"
+                ) {
+                  return [];
+                }
+                return [
+                  {
+                    id: randomUUID(),
+                    name: `recovered-image-${index + 1}`,
+                    image: {
+                      type: "image_base64" as const,
+                      mimeType: attachment.mimeType,
+                      data: attachment.data,
+                    },
+                  },
+                ];
+              })
+            : [];
+        restoreInputDraft(restoreDraft.text, attachments);
+      }
     } else if (outcome.kind === "unknown" && outcome.message) {
       reporter.pushSystemMessage(outcome.message);
     }
@@ -329,7 +379,12 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
     const [running, setRunning] = useState(false);
     const [settings, setSettings] = useState<NonNullable<typeof currentSettings.current>>({});
     const [inputReplacement, setInputReplacement] = useState<
-      { sequence: number; text: string } | undefined
+      | {
+          sequence: number;
+          text: string;
+          attachments?: readonly InputImageAttachment[];
+        }
+      | undefined
     >(undefined);
     // 用户自定义键位（tier2 收口）：settings.json 的 keybindings 覆盖——加载
     // 前空表（resolver 用 DEFAULT_KEYBINDINGS 兜底）。加载失败静默用默认。

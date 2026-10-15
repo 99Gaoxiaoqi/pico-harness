@@ -603,7 +603,77 @@ test("explicitly abandoning an unavailable send recovery returns the original dr
   try {
     await runtime.start();
     assert.equal(harness.sendExecutions(), 0, "不可用结果不能当作未执行或重新发送");
-    assert.equal(await runtime.abandonPendingSend(), "original draft");
+    assert.deepEqual(await runtime.abandonPendingSend(), { text: "original draft" });
+    assert.equal(await store.load(), undefined);
+  } finally {
+    runtime.dispose();
+    await rm(picoHome, { recursive: true, force: true });
+  }
+});
+
+test("abandoning a pending send with unsupported attachments keeps the recovery record", async () => {
+  const picoHome = await mkdtemp(join(tmpdir(), "pico-tui-pending-abandon-artifact-"));
+  const workspacePath = join(picoHome, "workspace");
+  const store = new FilePendingSendStore({ picoHome, workspacePath });
+  await store.save({
+    workspacePath,
+    input: {
+      kind: "text",
+      text: "review this artifact",
+      attachments: [{ type: "artifact", artifactId: "artifact-1", digest: "a".repeat(64) }],
+    },
+    behavior: "auto",
+    idempotencyKey: "unavailable-artifact-key",
+  });
+  const harness = createFakeClient();
+  const runtime = new ClientSessionRuntime({
+    client: harness.client,
+    workspacePath,
+    reporter: new TuiReporter(),
+    pendingSendStore: store,
+  });
+
+  try {
+    await runtime.start();
+    await assert.rejects(runtime.abandonPendingSend(), /无法还原的附件；记录仍保留/u);
+    assert.equal((await store.load())?.params.idempotencyKey, "unavailable-artifact-key");
+  } finally {
+    runtime.dispose();
+    await rm(picoHome, { recursive: true, force: true });
+  }
+});
+
+test("abandoning unavailable send recovery preserves inline image attachments", async () => {
+  const picoHome = await mkdtemp(join(tmpdir(), "pico-tui-pending-abandon-image-"));
+  const workspacePath = join(picoHome, "workspace");
+  const store = new FilePendingSendStore({ picoHome, workspacePath });
+  const attachments = [
+    {
+      type: "image_base64" as const,
+      mimeType: "image/png",
+      data: "aW1hZ2U=",
+    },
+  ];
+  await store.save({
+    workspacePath,
+    input: { kind: "text", text: "describe this", attachments },
+    behavior: "auto",
+    idempotencyKey: "unavailable-image-key",
+  });
+  const harness = createFakeClient();
+  const runtime = new ClientSessionRuntime({
+    client: harness.client,
+    workspacePath,
+    reporter: new TuiReporter(),
+    pendingSendStore: store,
+  });
+
+  try {
+    await runtime.start();
+    assert.deepEqual(await runtime.abandonPendingSend(), {
+      text: "describe this",
+      attachments,
+    });
     assert.equal(await store.load(), undefined);
   } finally {
     runtime.dispose();

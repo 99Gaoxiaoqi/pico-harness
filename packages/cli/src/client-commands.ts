@@ -4,6 +4,7 @@ import { processUserInput } from "./process-user-input.js";
 import { parseSlashInput } from "@pico/core/slash-parser";
 import { getCommandAvailability } from "@pico/cli/command-availability";
 import { type InputProcessResult, type LocalCommandResult } from "@pico/cli/command-contracts";
+import type { PendingSendDraft } from "./tui/client-session-runtime.js";
 import { createModelCommands } from "@pico/cli/model-commands";
 import { createSettingsCommands } from "@pico/cli/settings-commands";
 import { createSessionCommands } from "@pico/cli/session-commands";
@@ -20,7 +21,7 @@ import type { AutomationCredentialImportProposalStore } from "./tui/automation-c
 export interface ClientCommandRuntime
   extends SessionCommandRuntime, Omit<SettingsCommandRuntime, "request"> {
   readonly running: boolean;
-  abandonPendingSend?(): Promise<string | null>;
+  abandonPendingSend?(): Promise<PendingSendDraft | null>;
 }
 export interface ClientCommandRegistryDeps {
   readonly runtime: ClientCommandRuntime;

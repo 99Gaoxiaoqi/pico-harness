@@ -17,6 +17,7 @@ import { Box, Text, useApp, useInput, useWindowSize } from "ink";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { InputBox, type InputBoxStateSnapshot, type InputBoxSubmission } from "./input-box.js";
+import type { InputImageAttachment } from "./image-attachments.js";
 import type { SlashArgumentSuggestionSource, SuggestionSource } from "./input-controller.js";
 import { pickFocusedDialog, type DialogRequest } from "./dialog-arbiter.js";
 import { Spinner } from "./spinner.js";
@@ -140,7 +141,13 @@ export interface AppProps {
   /** User keybinding overrides loaded once at TUI startup. */
   keybindings?: UserKeybindingConfig | undefined;
   /** /rewind 等外部动作请求替换输入草稿。 */
-  inputReplacement?: { sequence: number; text: string } | undefined;
+  inputReplacement?:
+    | {
+        sequence: number;
+        text: string;
+        attachments?: readonly InputImageAttachment[];
+      }
+    | undefined;
   /** 当前终端实际支持的剪贴板图片快捷键提示。 */
   imagePasteShortcutLabel?: string | undefined;
   /** Ctrl+L 经 Ink renderer 输出的过渡空帧，避免绕过帧记账。 */

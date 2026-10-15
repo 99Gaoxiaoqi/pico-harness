@@ -54,7 +54,13 @@ export interface InputBoxProps {
   /** User overrides loaded from .pico/config.json. */
   keybindings?: UserKeybindingConfig | undefined;
   /** /rewind 等外部动作请求原子替换当前草稿。 */
-  inputReplacement?: { sequence: number; text: string } | undefined;
+  inputReplacement?:
+    | {
+        sequence: number;
+        text: string;
+        attachments?: readonly InputImageAttachment[];
+      }
+    | undefined;
   /** 当前终端实际支持的剪贴板图片快捷键文案；未提供时不展示。 */
   imagePasteShortcutLabel?: string | undefined;
 }
@@ -117,6 +123,9 @@ export function InputBox({
     };
     controllerRef.current = next;
     setController(next);
+    setAttachments(inputReplacement.attachments ?? []);
+    setAttachmentCursor(undefined);
+    setAttachmentNotice(undefined);
     onTextChange?.(next.text);
     onStateChange?.(inputBoxStateSnapshot(next));
   }, [inputReplacement, onStateChange, onTextChange]);

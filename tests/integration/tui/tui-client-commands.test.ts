@@ -909,7 +909,16 @@ test("send recovery abandonment requires an explicit risk confirmation and resto
   let abandonCalls = 0;
   harness.runtime.abandonPendingSend = async () => {
     abandonCalls += 1;
-    return "original draft";
+    return {
+      text: "original draft",
+      attachments: [
+        {
+          type: "image_base64",
+          mimeType: "image/png",
+          data: "aW1hZ2U=",
+        },
+      ],
+    };
   };
 
   const instructions = await run(harness, "/send-recovery");
@@ -920,7 +929,12 @@ test("send recovery abandonment requires an explicit risk confirmation and resto
   const confirmed = await run(harness, "/send-recovery abandon --confirm");
   assert.equal(abandonCalls, 1);
   assert.match(String(confirmed.result?.message), /草稿已放回输入框/u);
-  assert.deepEqual(confirmed.result?.data, { restoreDraft: "original draft" });
+  assert.deepEqual(confirmed.result?.data, {
+    restoreDraft: {
+      text: "original draft",
+      attachments: [{ type: "image_base64", mimeType: "image/png", data: "aW1hZ2U=" }],
+    },
+  });
 });
 
 test("client commands: settings-class commands map to session.settings.update", async () => {

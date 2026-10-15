@@ -41,6 +41,11 @@ export interface ClientPromptRequest {
   readonly freeText?: boolean | undefined;
 }
 
+export interface PendingSendDraft {
+  readonly text: string;
+  readonly attachments?: readonly RuntimeInputAttachment[];
+}
+
 /**
  * TUI 客户端会话核心（3-D Phase 2，无 Ink——集成测试用 fake client 驱动）。
  *
@@ -465,7 +470,7 @@ export class ClientSessionRuntime {
     }
   }
 
-  async abandonPendingSend(): Promise<string | null> {
+  async abandonPendingSend(): Promise<PendingSendDraft | null> {
     const store = this.options.pendingSendStore;
     if (!store || !this.pendingSendRecoveryUnavailable) return null;
     const pending = await store.load();
@@ -473,9 +478,13 @@ export class ClientSessionRuntime {
       this.pendingSendRecoveryUnavailable = false;
       return null;
     }
+    const draft = draftFromPendingInput(pending.params.input);
+    if (draft.attachments?.some((attachment) => attachment.type !== "image_base64")) {
+      throw new Error("待恢复请求含有当前输入框无法还原的附件；记录仍保留，尚未放弃。");
+    }
     await store.clear(pending.params.idempotencyKey);
     this.pendingSendRecoveryUnavailable = false;
-    return draftFromPendingInput(pending.params.input);
+    return draft;
   }
 
   /** RPC 透传（客户端命令注册表的查询/设置类命令使用）。 */
@@ -1161,10 +1170,17 @@ function errorCode(error: unknown): string | undefined {
   return typeof error.code === "string" ? error.code : undefined;
 }
 
-function draftFromPendingInput(input: RuntimeUserInput): string {
-  if (input.kind === "text") return input.text;
-  if (input.kind === "skill") return `/skill ${input.name}${input.args ? ` ${input.args}` : ""}`;
-  return `/agent ${input.name} ${input.task}`;
+function draftFromPendingInput(input: RuntimeUserInput): PendingSendDraft {
+  if (input.kind === "text") {
+    return {
+      text: input.text,
+      ...(input.attachments ? { attachments: input.attachments } : {}),
+    };
+  }
+  if (input.kind === "skill") {
+    return { text: `/skill ${input.name}${input.args ? ` ${input.args}` : ""}` };
+  }
+  return { text: `/agent ${input.name} ${input.task}` };
 }
 
 function errorMessage(error: unknown): string {
