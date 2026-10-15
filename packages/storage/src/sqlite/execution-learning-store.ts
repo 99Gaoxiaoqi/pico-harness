@@ -2015,9 +2015,30 @@ function assessExperienceDraft(input: {
       reviewReason: "经验涉及删除、发布、外部发送、资金、权限或安全相关操作，需要人工审核。",
     };
 
-  const selected = input.sources.map((source) =>
-    input.observations.find((observation) => sameSource(source, observation.source)),
+  const selected = input.sources.map(
+    (source) =>
+      input.observations
+        .filter((observation) => sameSource(source, observation.source))
+        .sort((left, right) => right.sequence - left.sequence)[0],
   );
+  const sourceStatuses = new Map<string, Set<NonNullable<TaskExperienceObservation["status"]>>>();
+  for (const observation of input.observations) {
+    if (
+      !input.sources.some((source) => sameSource(source, observation.source)) ||
+      !observation.status
+    )
+      continue;
+    const sourceKey = JSON.stringify([
+      observation.source.sessionId,
+      observation.source.runId,
+      observation.source.turnId,
+      observation.source.eventId,
+    ]);
+    const statuses = sourceStatuses.get(sourceKey) ?? new Set();
+    statuses.add(observation.status);
+    sourceStatuses.set(sourceKey, statuses);
+  }
+  const conflictingSource = [...sourceStatuses.values()].some((statuses) => statuses.size > 1);
   const latestRelevant = [...input.observations]
     .filter((observation) => observation.kind === "tool-result" || observation.correction)
     .sort((left, right) => right.sequence - left.sequence)[0];
@@ -2035,17 +2056,36 @@ function assessExperienceDraft(input: {
         observation.status === "rejected"),
   );
   const recovery = selected.some((observation) => observation?.status === "succeeded");
+  const failureBeforeRecovery = selected.some(
+    (failed) =>
+      !!failed &&
+      (failed.correction || failed.status === "failed" || failed.status === "rejected") &&
+      selected.some(
+        (recovered) => recovered?.status === "succeeded" && recovered.sequence > failed.sequence,
+      ),
+  );
   const boundedScope =
     input.applicability.toolNames.length > 0 &&
     (input.applicability.taskFamily !== "general" || input.applicability.conditions.length > 0);
-  if (!completeEvidence || !failure || !recovery || !boundedScope)
+  if (
+    !completeEvidence ||
+    !failure ||
+    !recovery ||
+    !failureBeforeRecovery ||
+    conflictingSource ||
+    !boundedScope
+  )
     return {
       risk: "unclear",
-      reviewReason: !boundedScope
-        ? "适用范围还不够明确，需审核经验内容和适用条件。"
-        : !includesLatestEvidence
-          ? "候选来源没有包含本轮最新结果，可能遗漏冲突或后续修正。"
-          : "缺少完整的失败与成功对照证据，暂不能确认经验原因。",
+      reviewReason: conflictingSource
+        ? "同一来源事件记录了互相冲突的结果，需人工核对。"
+        : !boundedScope
+          ? "适用范围还不够明确，需审核经验内容和适用条件。"
+          : !includesLatestEvidence
+            ? "候选来源没有包含本轮最新结果，可能遗漏冲突或后续修正。"
+            : !failureBeforeRecovery
+              ? "失败与成功记录没有明确的先后关系，暂不能判断经验是否解决了问题。"
+              : "缺少完整的失败与成功对照证据，暂不能确认经验原因。",
     };
   return { risk: "low" };
 }
