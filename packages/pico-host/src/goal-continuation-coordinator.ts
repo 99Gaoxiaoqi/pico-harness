@@ -170,14 +170,17 @@ export class GoalContinuationCoordinator {
       if (
         completion.status !== "succeeded" ||
         completion.stopReason === "step_limit" ||
-        completion.stopReason === "budget_limit"
+        completion.stopReason === "budget_limit" ||
+        completion.stopReason === "output_limit"
       ) {
         manager.pause(
           goal.id,
           completion.error ??
             (completion.status === "cancelled"
               ? "用户中断了运行"
-              : `运行结束：${completion.stopReason ?? completion.status}`),
+              : completion.stopReason === "output_limit"
+                ? "模型输出达到长度上限，当前答复可能不完整（output_limit）"
+                : `运行结束：${completion.stopReason ?? completion.status}`),
         );
         manager.setCoordinator({
           lastSettledRunId: completion.runId,

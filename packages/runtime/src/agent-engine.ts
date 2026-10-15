@@ -1475,6 +1475,38 @@ export class AgentEngine {
           );
           const scheduled: Array<Promise<ToolExecutionOutcome>> = [];
           const completedToolReportIndexes: number[] = [];
+          let hasFileEffects = false;
+          let fileEffectToolNames: string[] = [];
+          let abortSettlement: Promise<void> | undefined;
+          const waitForAbortSettlement = (): Promise<void> => {
+            abortSettlement ??= (async () => {
+              const settledBeforeDeadline = await raceWithDeadline(
+                scheduled,
+                TOOL_SETTLE_TIMEOUT_MS,
+              );
+              if (!settledBeforeDeadline) {
+                try {
+                  reporter.onMessage(
+                    "取消尚未完成：工作区写操作仍在执行，当前运行与工作区隔离会保持到操作收口。",
+                  );
+                } catch (error) {
+                  this.diagnostics.warn(
+                    { error: String(error) },
+                    "[Engine] 取消未收口提示未能显示",
+                  );
+                }
+                this.diagnostics.warn(
+                  { timeoutMs: TOOL_SETTLE_TIMEOUT_MS, toolNames: fileEffectToolNames },
+                  "[Engine] 取消期限已到，但工作区写工具仍未收口；继续保留 Run/Session 隔离",
+                );
+              }
+              await Promise.allSettled(scheduled);
+            })();
+            return abortSettlement;
+          };
+          const onAbort = () => {
+            if (hasFileEffects) void waitForAbortSettlement();
+          };
           let toolProtocolClosed = toolCalls.length === 0;
           let toolStartsRecorded = toolCalls.length === 0;
           const closeToolProtocol = async (failure: ToolProtocolFailure): Promise<void> => {
@@ -1534,6 +1566,15 @@ export class AgentEngine {
             // 模型回复纯文本时广播 (通常是思考过程或最终结果)
             if (responseMsg.content) {
               await this.reportMessage(reporter, responseMsg.content, signal);
+            }
+
+            if (toolCalls.length === 0 && responseMsg.providerData?.["finishReason"] === "length") {
+              stopReason = "output_limit";
+              reporter.onMessage(
+                "模型输出达到长度上限；以上为部分回复，尚未完整完成。请继续提问以接着处理。",
+              );
+              reporter.onFinish();
+              break;
             }
 
             // 3. 退出条件:模型没有请求任何工具调用,说明任务完成,挂起等待下一条指令
@@ -1633,7 +1674,10 @@ export class AgentEngine {
               const fileSideEffectKinds = toolCalls.map((call) =>
                 fileSideEffectKind(this.registry, call),
               );
-              const hasFileEffects = fileSideEffectKinds.some((kind) => kind !== "none");
+              hasFileEffects = fileSideEffectKinds.some((kind) => kind !== "none");
+              fileEffectToolNames = toolCalls
+                .filter((_, index) => fileSideEffectKinds[index] !== "none")
+                .map((toolCall) => toolCall.name);
               if (hasFileEffects) {
                 await fileHistory.beginJournal(signal);
                 if (toolCalls.some((call) => isBackgroundBashCall(call))) {
@@ -1691,14 +1735,30 @@ export class AgentEngine {
                   }),
                 );
               }
+              if (hasFileEffects && signal) {
+                signal.addEventListener("abort", onAbort, { once: true });
+                if (signal.aborted) onAbort();
+              }
               results = await Promise.all(scheduled);
               signal?.throwIfAborted();
             } finally {
-              // 异常时也要先等已启动任务收口，再提交文件 journal 和协议闭合结果。
-              // loop-1 兜底:与 failToolProtocol 一致,TOOL_SETTLE_TIMEOUT_MS 超时强制继续,
-              // 避免 settleOnAbort 任务(文件类工具)不协作 signal 时永久挂起主循环。
-              // 定时器清理收敛进 raceWithDeadline。
-              await raceWithDeadline(scheduled, TOOL_SETTLE_TIMEOUT_MS);
+              const settledBeforeDeadline = await raceWithDeadline(
+                scheduled,
+                TOOL_SETTLE_TIMEOUT_MS,
+              );
+              if (!settledBeforeDeadline && hasFileEffects) {
+                if (signal?.aborted) {
+                  await waitForAbortSettlement();
+                } else {
+                  this.diagnostics.warn(
+                    { timeoutMs: TOOL_SETTLE_TIMEOUT_MS, toolNames: fileEffectToolNames },
+                    "[Engine] 工作区写工具超过收口期限仍未结束；保留 Run/Session 隔离",
+                  );
+                  await Promise.allSettled(scheduled);
+                }
+              }
+              if (signal?.aborted && hasFileEffects) await waitForAbortSettlement();
+              signal?.removeEventListener("abort", onAbort);
               scheduler?.dispose();
             }
           } catch (error) {

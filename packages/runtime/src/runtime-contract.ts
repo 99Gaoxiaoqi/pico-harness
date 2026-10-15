@@ -95,7 +95,8 @@ export type AgentRunStopReason =
   | "step_limit"
   | "plan_handoff"
   | "failed"
-  | "interrupted";
+  | "interrupted"
+  | "output_limit";
 
 export interface AgentRunOutcome {
   readonly stopReason: AgentRunStopReason;

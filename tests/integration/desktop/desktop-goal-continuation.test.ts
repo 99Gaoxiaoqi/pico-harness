@@ -715,6 +715,25 @@ test("Engine step limit pauses the Goal without invoking evaluator", async (t) =
   assert.equal(f.runs.length, 1);
 });
 
+test("output limit pauses the Goal without evaluating a partial answer or continuing", async (t) => {
+  const f = await fixture(t, {
+    work: async () => ({
+      role: "assistant",
+      content: "部分生成的目标答复",
+      providerData: { finishReason: "length" },
+    }),
+  });
+  const id = await f.create();
+  await f.arm(id);
+  await f.send(id);
+
+  const final = await f.wait(id, "paused");
+
+  assert.match(final.currentGoal!.lastReason!, /长度上限.*output_limit/u);
+  assert.equal(f.evaluationCalls(), 0);
+  assert.equal(f.runs.length, 1);
+});
+
 test("external waiting wakes after the initial backoff and finishes through a new Host Run", async (t) => {
   const f = await fixture(t, {
     evaluations: [
