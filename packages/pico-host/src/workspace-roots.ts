@@ -14,6 +14,7 @@ import {
   canWritePath,
   isDeniedPath,
   isProtectedWritePath,
+  assessSandboxBoundaryExpansion,
   type ManagedPermissionProfile,
 } from "@pico/core/permission-profile";
 
@@ -240,6 +241,27 @@ export class WorkspaceRoots {
     }
     this.roots.push(canonicalPath);
     this.policyGeneration++;
+    return { added: true, path: canonicalPath };
+  }
+
+  /** A read approval must never join the generic, writable workspace roots. */
+  async addReadOnlyDirectory(path: string): Promise<AddDirectoryResult> {
+    const canonicalPath = await normalizeDirectory(path, this.primaryRoot);
+    if (this.isAllowed(canonicalPath, "read")) return { added: false, path: canonicalPath };
+    if (this.boundaryProfile) {
+      const assessment = assessSandboxBoundaryExpansion(
+        this.boundaryProfile,
+        { filesystem: { entries: [{ path: canonicalPath, access: "read", scope: "subtree" }] } },
+        this.boundaryMatchContext(),
+      );
+      if (assessment.outcome === "conflict") throw outsideWorkspaceError(path);
+      this.replaceBoundaryProfile(assessment.profile);
+    } else {
+      this.replaceBoundaryEntries([
+        ...this.boundaryEntries,
+        { path: canonicalPath, access: "read", scope: "subtree" },
+      ]);
+    }
     return { added: true, path: canonicalPath };
   }
 

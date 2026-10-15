@@ -79,6 +79,9 @@ export function buildManagedSpawnPlan(request: ManagedSpawnRequest): SandboxSpaw
           buildMacosProfile(
             policy,
             runtimeReadAliases(request.command, env, platform, policy.readRoots),
+            // File Worker verifies the cwd identity even when reading an external target.
+            // Grant only exact metadata access, never cwd contents or descendants.
+            request.origin === "file-worker" ? normalizeRoots([request.cwd]) : [],
           ),
           request.command,
           ...request.args,
@@ -233,14 +236,21 @@ export function isVerifiedBundledExecutable(
 export function buildMacosProfile(
   policy: SandboxPolicy,
   readAliases: readonly string[] = [],
+  metadataPaths: readonly string[] = [],
 ): string {
-  const metadataRoots = macosMetadataAncestors([
-    ...policy.readRoots,
-    ...policy.writeRoots,
-    ...(policy.readFiles ?? []),
-    ...(policy.writeFiles ?? []),
-    ...readAliases,
-  ]);
+  const metadataRoots = [
+    ...new Set([
+      ...metadataPaths,
+      ...macosMetadataAncestors([
+        ...policy.readRoots,
+        ...policy.writeRoots,
+        ...(policy.readFiles ?? []),
+        ...(policy.writeFiles ?? []),
+        ...readAliases,
+        ...metadataPaths,
+      ]),
+    ]),
+  ];
   const rules = [
     "(version 1)",
     "(deny default)",

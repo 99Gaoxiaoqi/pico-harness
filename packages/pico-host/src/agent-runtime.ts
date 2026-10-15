@@ -3398,6 +3398,34 @@ export async function executeAgentRuntime(
           dependencies.onPolicyDenied,
           permissionMode,
           {
+            onApprovedReadDirectories: async (directories) => {
+              await session.withSerializedExecution(async () => {
+                const current = session.getRuntimeStateSnapshot().boundary;
+                if (!current) throw new Error("Session 缺少持久执行边界，无法授予目录读取权限");
+                const applied = applyExecutionBoundaryExpansion(
+                  current,
+                  current.revision,
+                  {
+                    filesystem: {
+                      entries: directories.map((path) => ({
+                        path,
+                        access: "read" as const,
+                        scope: "subtree" as const,
+                      })),
+                    },
+                  },
+                  executionBoundaryContext(),
+                );
+                if (applied.outcome === "conflict") {
+                  throw new Error(`目录读取权限与当前执行边界冲突：${applied.reason}`);
+                }
+                if (applied.outcome === "applied") {
+                  session.updateRuntimeState({ boundary: applied.boundary });
+                  await session.flushPersistence();
+                }
+              });
+              await refreshRuntimeBoundary();
+            },
             onSessionPolicyChanged: async () => {
               if (
                 globalSessionPermissionGrants.allowsNetwork(session.id, workDir, session.picoHome)
@@ -4474,6 +4502,8 @@ export function buildPermissionMiddleware(
   permissionMode?: () => RuntimePermissionMode,
   options: {
     onSessionPolicyChanged?: () => Promise<void>;
+    /** Persist read scopes before projecting them into the live file/process boundary. */
+    onApprovedReadDirectories?: (directories: readonly string[]) => Promise<void>;
     onOneShotMcpAuthorization?: (
       call: ToolCall,
       externalDirectories: readonly string[],
@@ -4687,6 +4717,9 @@ export function buildPermissionMiddleware(
       if (callRequiresProcessNetwork(call)) {
         globalSessionPermissionGrants.addNetwork(sessionId, workDir, picoHome);
       }
+      if (scope.type === "directories" && scope.access === "read") {
+        await options.onApprovedReadDirectories?.(scope.directories);
+      }
       await applySessionPermissionScope(scope, {
         sessionId,
         workDir,
@@ -4695,6 +4728,9 @@ export function buildPermissionMiddleware(
         ...(picoHome !== undefined ? { picoHome } : {}),
       });
       if (safetyPath !== undefined && externalScope?.type === "directories") {
+        if (externalScope.access === "read") {
+          await options.onApprovedReadDirectories?.(externalScope.directories);
+        }
         await applySessionPermissionScope(
           { ...externalScope, enableAutoEdits: false },
           {
