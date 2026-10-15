@@ -3,6 +3,7 @@ import { link, lstat, mkdir, open, readFile, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { parseStrictRuntimeParams, type RuntimeParams } from "@pico/protocol";
 import { resolveCanonicalPicoHome } from "@pico/pico-host/pico-paths";
+import { withFileLock } from "@pico/storage/local-file-storage";
 import { canonicalizeWorkspacePath } from "@pico/storage/workspace-path";
 
 export interface PendingSendRecord {
@@ -18,12 +19,14 @@ export interface PendingSendStore {
 
 export class FilePendingSendStore implements PendingSendStore {
   private readonly recordPath: string;
+  private readonly lockPath: string;
 
   constructor(options: { picoHome?: string; workspacePath: string }) {
     const picoHome = options.picoHome ?? resolveCanonicalPicoHome();
     const workspace = canonicalizeWorkspacePath(options.workspacePath);
     const workspaceKey = createHash("sha256").update(workspace).digest("hex");
     this.recordPath = join(picoHome, "tui", "pending-sends", workspaceKey + ".json");
+    this.lockPath = this.recordPath + ".lock";
   }
 
   async load(): Promise<PendingSendRecord | undefined> {
@@ -68,32 +71,41 @@ export class FilePendingSendStore implements PendingSendStore {
       throw new Error("待确认发送缺少有效的原始幂等请求。");
     }
     await mkdir(dirname(this.recordPath), { recursive: true, mode: 0o700 });
-    if (await this.load()) {
-      throw new Error("已有发送结果待确认；先恢复原请求，不能提交新内容。");
-    }
-    const temporaryPath = this.recordPath + "." + process.pid + "." + randomUUID() + ".tmp";
-    try {
-      const file = await open(temporaryPath, "wx", 0o600);
+    await this.withLock(async () => {
+      if (await this.load()) {
+        throw new Error("已有发送结果待确认；先恢复原请求，不能提交新内容。");
+      }
+      const temporaryPath = this.recordPath + "." + process.pid + "." + randomUUID() + ".tmp";
       try {
-        await file.writeFile(JSON.stringify({ version: 1, params: checked }), "utf8");
-        await file.sync();
+        const file = await open(temporaryPath, "wx", 0o600);
+        try {
+          await file.writeFile(JSON.stringify({ version: 1, params: checked }), "utf8");
+          await file.sync();
+        } finally {
+          await file.close();
+        }
+        await link(temporaryPath, this.recordPath);
+      } catch (error) {
+        if (isAlreadyExists(error)) {
+          throw new Error("已有发送结果待确认；先恢复原请求，不能提交新内容。", { cause: error });
+        }
+        throw error;
       } finally {
-        await file.close();
+        await unlink(temporaryPath).catch(() => undefined);
       }
-      await link(temporaryPath, this.recordPath);
-    } catch (error) {
-      if (isAlreadyExists(error)) {
-        throw new Error("已有发送结果待确认；先恢复原请求，不能提交新内容。", { cause: error });
-      }
-      throw error;
-    } finally {
-      await unlink(temporaryPath).catch(() => undefined);
-    }
+    });
   }
 
   async clear(idempotencyKey: string): Promise<void> {
-    const current = await this.load();
-    if (current?.params.idempotencyKey === idempotencyKey) await unlink(this.recordPath);
+    await mkdir(dirname(this.recordPath), { recursive: true, mode: 0o700 });
+    await this.withLock(async () => {
+      const current = await this.load();
+      if (current?.params.idempotencyKey === idempotencyKey) await unlink(this.recordPath);
+    });
+  }
+
+  private async withLock<T>(operation: () => Promise<T>): Promise<T> {
+    return withFileLock(this.lockPath, randomUUID(), operation);
   }
 }
 

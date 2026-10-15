@@ -191,6 +191,10 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
     current: ((value: { sequence: number; text: string } | undefined) => void) | undefined;
   } = { current: undefined };
   let inputReplacementSeq = 0;
+  const restoreInputDraft = (text: string): void => {
+    inputReplacementSeq += 1;
+    inputReplacementSink.current?.({ sequence: inputReplacementSeq, text });
+  };
   // rewind preview 的指纹缓存（preview→apply 间一致性校验；键 = sessionId/checkpointId）。
   const rewindFingerprints = new Map<string, string>();
   const getRewindDiffStat = async (messageId: string): Promise<FileHistoryDiffStat> => {
@@ -304,13 +308,17 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
     if (effect.exit) requestExit();
   };
 
-  const handleSubmittedText = async (text: string): Promise<void> => {
+  const handleSubmittedText = async (text: string) => {
     const outcome = await processClientInput(text, commandRegistry, runtime);
     if (outcome.kind === "local" && outcome.result) {
       applyLocalCommand(outcome.result);
+      const restoreDraft = (outcome.result.data as { restoreDraft?: unknown } | undefined)
+        ?.restoreDraft;
+      if (typeof restoreDraft === "string") restoreInputDraft(restoreDraft);
     } else if (outcome.kind === "unknown" && outcome.message) {
       reporter.pushSystemMessage(outcome.message);
     }
+    return outcome;
   };
 
   function ClientReplApp() {
@@ -369,10 +377,14 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
             reporter.pushSystemMessage("仅支持内联图片附件（base64），本次发送已取消。");
             return;
           }
-          void runtime.sendText(submission.text, "auto", wireAttachments);
+          void runtime.sendText(submission.text, "auto", wireAttachments).then((sent) => {
+            if (!sent) restoreInputDraft(submission.text);
+          });
           return;
         }
-        void handleSubmittedText(submission.text);
+        void handleSubmittedText(submission.text).then((outcome) => {
+          if (outcome.kind === "rejected") restoreInputDraft(submission.text);
+        });
       },
       [running],
     );

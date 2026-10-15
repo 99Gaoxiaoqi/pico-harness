@@ -166,6 +166,11 @@ export function resolveApprovalActionVia(
   try {
     outcome = resolve(action, taskId);
   } catch (error) {
+    if (isNotFound(error)) {
+      deps.closeDialog?.(approvalDialogId(taskId));
+      deps.reporter.pushSystemMessage("审批请求已失效或过期，面板已关闭。");
+      return false;
+    }
     deps.reporter.pushSystemMessage("审批提交失败；请求仍可重试。 " + errorMessage(error));
     return false;
   }
@@ -182,6 +187,11 @@ export function resolveApprovalActionVia(
         return ok;
       },
       (error: unknown) => {
+        if (isNotFound(error)) {
+          deps.closeDialog?.(approvalDialogId(taskId));
+          deps.reporter.pushSystemMessage("审批请求已失效或过期，面板已关闭。");
+          return false;
+        }
         deps.reporter.pushSystemMessage("审批提交失败；请求仍可重试。 " + errorMessage(error));
         return false;
       },
@@ -240,4 +250,10 @@ export function approvalResolutionMessage(
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isNotFound(error: unknown): boolean {
+  return Boolean(
+    error && typeof error === "object" && "code" in error && error.code === "NOT_FOUND",
+  );
 }

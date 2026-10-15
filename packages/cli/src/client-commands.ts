@@ -20,6 +20,7 @@ import type { AutomationCredentialImportProposalStore } from "./tui/automation-c
 export interface ClientCommandRuntime
   extends SessionCommandRuntime, Omit<SettingsCommandRuntime, "request"> {
   readonly running: boolean;
+  abandonPendingSend?(): Promise<string | null>;
 }
 export interface ClientCommandRegistryDeps {
   readonly runtime: ClientCommandRuntime;
@@ -42,8 +43,41 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
   const resources = createResourcesCommands(deps);
   const workspace = createWorkspaceCommands(deps);
   const automation = createAutomationCommands(createAutomationCommandServices(deps));
+  const sendRecovery = {
+    name: "send-recovery",
+    description: "处理无法确认结果的待发送请求；原请求可能已执行",
+    usage: "/send-recovery abandon --confirm",
+    category: "system" as const,
+    kind: "local" as const,
+    availability: "always" as const,
+    execute: async (input: { argv: readonly string[] }) => {
+      if (input.argv.length !== 2 || input.argv[0] !== "abandon" || input.argv[1] !== "--confirm") {
+        return {
+          type: "local" as const,
+          action: "message" as const,
+          message:
+            "仅在接受风险时执行 /send-recovery abandon --confirm：原请求可能已执行；此操作不会取消 Host 执行，并会把原请求草稿放回输入框。",
+        };
+      }
+      const draft = await deps.runtime.abandonPendingSend?.();
+      return draft === null || draft === undefined
+        ? {
+            type: "local" as const,
+            action: "message" as const,
+            message: "当前没有可显式放弃的待恢复发送；原请求未更改。",
+          }
+        : {
+            type: "local" as const,
+            action: "message" as const,
+            message:
+              "已放弃本地恢复记录；原请求可能已执行，此操作不会取消 Host 执行。原请求草稿已放回输入框，请检查后决定是否重新发送。",
+            data: { restoreDraft: draft },
+          };
+    },
+  };
   return new CommandRegistry([
     ...createBuiltinCommands().filter((command) => command.name !== "skill"),
+    ...(deps.runtime.abandonPendingSend ? [sendRecovery] : []),
     model.model,
     model.thinking,
     settings.mode,

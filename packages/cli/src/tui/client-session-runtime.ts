@@ -202,6 +202,7 @@ export class ClientSessionRuntime {
   private surfacedRevisionRequestId: string | undefined;
   private pendingModelRouteId: string | undefined;
   private startupOrchestrationMode: "graph" | "swarm" | undefined;
+  private pendingSendRecoveryUnavailable = false;
   private settingsOverrideApplied = false;
   private settingsOverrideInFlight = false;
   private configuredInitialSettings: RuntimeUserDefaults = {
@@ -361,6 +362,7 @@ export class ClientSessionRuntime {
         return false;
       }
     }
+    this.pendingSendRecoveryUnavailable = false;
     const outboundInput =
       input.kind === "text" && execution?.orchestrationMode
         ? { ...input, orchestrationMode: execution.orchestrationMode }
@@ -446,15 +448,34 @@ export class ClientSessionRuntime {
         replayOnly: true,
       });
       await this.completeSend(pending.params.idempotencyKey, result);
+      this.pendingSendRecoveryUnavailable = false;
       return true;
     } catch (error) {
+      this.pendingSendRecoveryUnavailable = errorCode(error) === "SEND_RECOVERY_UNAVAILABLE";
+      const abandonmentGuidance = this.pendingSendRecoveryUnavailable
+        ? " 原请求可能已执行且不会被取消；若接受此风险，可运行 /send-recovery abandon --confirm，原请求草稿会保留在输入框。"
+        : "";
       this.reporter.pushError(
         "上次发送结果尚未确认，原请求已保留；发送新内容会先安全恢复此请求，恢复后需再次提交新内容。 " +
-          errorMessage(error),
+          errorMessage(error) +
+          abandonmentGuidance,
         { retryable: true, action: "session.send.recover" },
       );
       return false;
     }
+  }
+
+  async abandonPendingSend(): Promise<string | null> {
+    const store = this.options.pendingSendStore;
+    if (!store || !this.pendingSendRecoveryUnavailable) return null;
+    const pending = await store.load();
+    if (!pending) {
+      this.pendingSendRecoveryUnavailable = false;
+      return null;
+    }
+    await store.clear(pending.params.idempotencyKey);
+    this.pendingSendRecoveryUnavailable = false;
+    return draftFromPendingInput(pending.params.input);
   }
 
   /** RPC 透传（客户端命令注册表的查询/设置类命令使用）。 */
@@ -1133,6 +1154,17 @@ function isDefinitelyNotExecuted(error: unknown): boolean {
   if (!error || typeof error !== "object") return false;
   const value = error as { outcome?: unknown; code?: unknown };
   return value.outcome === "not_executed" || value.code === "ATTACHMENT_REJECTED";
+}
+
+function errorCode(error: unknown): string | undefined {
+  if (!error || typeof error !== "object" || !("code" in error)) return undefined;
+  return typeof error.code === "string" ? error.code : undefined;
+}
+
+function draftFromPendingInput(input: RuntimeUserInput): string {
+  if (input.kind === "text") return input.text;
+  if (input.kind === "skill") return `/skill ${input.name}${input.args ? ` ${input.args}` : ""}`;
+  return `/agent ${input.name} ${input.task}`;
 }
 
 function errorMessage(error: unknown): string {

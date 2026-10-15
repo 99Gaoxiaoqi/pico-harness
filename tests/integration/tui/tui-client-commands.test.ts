@@ -904,6 +904,25 @@ test("TUI 首条消息前可选择模型并原子携带到首次发送", async (
   );
 });
 
+test("send recovery abandonment requires an explicit risk confirmation and restores the draft", async () => {
+  const harness = createHarness();
+  let abandonCalls = 0;
+  harness.runtime.abandonPendingSend = async () => {
+    abandonCalls += 1;
+    return "original draft";
+  };
+
+  const instructions = await run(harness, "/send-recovery");
+  assert.match(String(instructions.result?.message), /原请求可能已执行/u);
+  assert.match(String(instructions.result?.message), /不会取消 Host 执行/u);
+  assert.equal(abandonCalls, 0, "查看说明不能放弃记录");
+
+  const confirmed = await run(harness, "/send-recovery abandon --confirm");
+  assert.equal(abandonCalls, 1);
+  assert.match(String(confirmed.result?.message), /草稿已放回输入框/u);
+  assert.deepEqual(confirmed.result?.data, { restoreDraft: "original draft" });
+});
+
 test("client commands: settings-class commands map to session.settings.update", async () => {
   const harness = createHarness({ sessionId: "s1" });
 
@@ -1947,6 +1966,14 @@ test("client commands preserve public metadata and registration order", () => {
       usage: "/exit",
       category: "system",
       availability: "idle",
+    },
+    {
+      name: "send-recovery",
+      aliases: [],
+      description: "处理无法确认结果的待发送请求；原请求可能已执行",
+      usage: "/send-recovery abandon --confirm",
+      category: "system",
+      availability: "always",
     },
     {
       name: "model",

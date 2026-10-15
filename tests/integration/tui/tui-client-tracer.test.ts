@@ -541,6 +541,76 @@ test("client session runtime: lost first-send response survives restart and repl
   }
 });
 
+test("pending-send file mutations serialize across store instances and never clear a replacement", async () => {
+  const picoHome = await mkdtemp(join(tmpdir(), "pico-tui-pending-race-"));
+  const workspacePath = join(picoHome, "workspace");
+  const first = new FilePendingSendStore({ picoHome, workspacePath });
+  const second = new FilePendingSendStore({ picoHome, workspacePath });
+  const original = {
+    workspacePath,
+    input: { kind: "text" as const, text: "original" },
+    behavior: "auto" as const,
+    idempotencyKey: "original-key",
+  };
+  const replacement = {
+    ...original,
+    input: { kind: "text" as const, text: "replacement" },
+    idempotencyKey: "replacement-key",
+  };
+
+  try {
+    for (let index = 0; index < 20; index++) {
+      await first.save(original);
+      const [clearOne, clearTwo, saveReplacement] = await Promise.allSettled([
+        first.clear(original.idempotencyKey),
+        second.clear(original.idempotencyKey),
+        first.save(replacement),
+      ]);
+      const stored = await second.load();
+      if (saveReplacement.status === "fulfilled") {
+        assert.equal(stored?.params.idempotencyKey, replacement.idempotencyKey);
+      }
+      if (clearOne.status === "rejected") throw clearOne.reason;
+      if (clearTwo.status === "rejected") throw clearTwo.reason;
+      if (saveReplacement.status === "rejected") {
+        assert.match(String(saveReplacement.reason), /已有发送结果待确认/u);
+      }
+      if (stored) await second.clear(stored.params.idempotencyKey);
+    }
+  } finally {
+    await rm(picoHome, { recursive: true, force: true });
+  }
+});
+
+test("explicitly abandoning an unavailable send recovery returns the original draft", async () => {
+  const picoHome = await mkdtemp(join(tmpdir(), "pico-tui-pending-abandon-"));
+  const workspacePath = join(picoHome, "workspace");
+  const store = new FilePendingSendStore({ picoHome, workspacePath });
+  await store.save({
+    workspacePath,
+    input: { kind: "text", text: "original draft" },
+    behavior: "auto",
+    idempotencyKey: "unavailable-key",
+  });
+  const harness = createFakeClient();
+  const runtime = new ClientSessionRuntime({
+    client: harness.client,
+    workspacePath,
+    reporter: new TuiReporter(),
+    pendingSendStore: store,
+  });
+
+  try {
+    await runtime.start();
+    assert.equal(harness.sendExecutions(), 0, "不可用结果不能当作未执行或重新发送");
+    assert.equal(await runtime.abandonPendingSend(), "original draft");
+    assert.equal(await store.load(), undefined);
+  } finally {
+    runtime.dispose();
+    await rm(picoHome, { recursive: true, force: true });
+  }
+});
+
 test("approval dialog: keep panel open until async approval succeeds and show retry reason", async () => {
   const closed: string[] = [];
   const messages: string[] = [];
@@ -580,6 +650,23 @@ test("approval dialog: keep panel open until async approval succeeds and show re
   resolveApproval?.(true);
   assert.equal(await accepted, true);
   assert.deepEqual(successfulClosures, ["approval:pending:approval-2"]);
+
+  const expiredClosures: string[] = [];
+  const expired = resolveApprovalActionVia(
+    async () => {
+      throw Object.assign(new Error("审批不存在或已过期"), { code: "NOT_FOUND" });
+    },
+    "approve",
+    "approval-expired",
+    {
+      reporter: { pushSystemMessage: (message) => messages.push(message) },
+      closeDialog: (id) => expiredClosures.push(id),
+    },
+  );
+  assert.ok(expired instanceof Promise);
+  assert.equal(await expired, false);
+  assert.deepEqual(expiredClosures, ["approval:pending:approval-expired"]);
+  assert.ok(messages.some((message) => message.includes("已失效或过期")));
 });
 
 test("client session runtime: hydrates every fixed-watermark transcript page", async () => {
