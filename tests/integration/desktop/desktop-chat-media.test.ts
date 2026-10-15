@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { build } from "esbuild";
+import type { RuntimeMediaReference } from "@pico/protocol";
 import { parseConversation } from "../../../apps/desktop/src/renderer/conversation/runtime-projection.js";
 import { stopTestChildProcess } from "../helpers/test-runtime-daemon.js";
 
@@ -90,7 +91,12 @@ test(
       join(root, "index.html"),
       "<!doctype html><html><head><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src blob:; connect-src 'self'\"><link rel=\"stylesheet\" href=\"renderer.css\"></head><body><div id=\"root\"></div><script src=\"renderer.js\"></script></body></html>",
     );
-    const payload = await Promise.all(
+    const payload: {
+      reference: Omit<RuntimeMediaReference, "kind"> & {
+        kind: RuntimeMediaReference["kind"] | "html";
+      };
+      base64: string;
+    }[] = await Promise.all(
       assets.map(async ([name, mimeType, kind]) => {
         const bytes = await readFile(
           new URL(`../../fixtures/desktop-media-assets/${name}`, import.meta.url),

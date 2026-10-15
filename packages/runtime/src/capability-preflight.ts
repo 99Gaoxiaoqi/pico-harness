@@ -19,6 +19,7 @@ export interface CapabilityPreflightRequest {
   messages: readonly Message[];
   availableTools: readonly ToolDefinition[];
   thinkingEffort: ReasoningLevel;
+  maxOutputTokens?: number;
 }
 
 export interface CapabilityPreflightResult {
@@ -76,7 +77,16 @@ export function preflightModelRequest(
   }
 
   const estimatedInputTokens = estimateRequestTokens(request.messages, request.availableTools);
-  const reservedOutputTokens = capabilities.maxOutputTokens ?? 4096;
+  const requestedOutputTokens = request.maxOutputTokens;
+  if (
+    requestedOutputTokens !== undefined &&
+    (!Number.isSafeInteger(requestedOutputTokens) || requestedOutputTokens <= 0)
+  )
+    throw new RangeError("Provider output budget must be a positive integer");
+  const reservedOutputTokens =
+    requestedOutputTokens === undefined
+      ? (capabilities.maxOutputTokens ?? 4096)
+      : Math.min(requestedOutputTokens, capabilities.maxOutputTokens ?? requestedOutputTokens);
   const remainingTokens =
     capabilities.contextWindowTokens -
     estimatedInputTokens -
@@ -128,6 +138,9 @@ export class CapabilityPreflightProvider implements LLMProvider {
       messages,
       availableTools,
       thinkingEffort: this.thinkingEffort,
+      ...(options?.maxOutputTokens !== undefined && !options.promptCachePrewarm
+        ? { maxOutputTokens: options.maxOutputTokens }
+        : {}),
     });
     return this.next.generate(messages, availableTools, options);
   }
@@ -142,6 +155,9 @@ export class CapabilityPreflightProvider implements LLMProvider {
       messages,
       availableTools,
       thinkingEffort: this.thinkingEffort,
+      ...(options?.maxOutputTokens !== undefined && !options.promptCachePrewarm
+        ? { maxOutputTokens: options.maxOutputTokens }
+        : {}),
     });
     return this.next.generateStream
       ? this.next.generateStream(messages, availableTools, onDelta, options)

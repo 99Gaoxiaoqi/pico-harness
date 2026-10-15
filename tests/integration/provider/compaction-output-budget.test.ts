@@ -3,6 +3,7 @@ import { createServer } from "node:http";
 import test from "node:test";
 import { createProvider } from "@pico/pico-host/provider/factory";
 import { resolveModelRouteCapabilities } from "@pico/runtime";
+import { FullCompactor } from "@pico/runtime/full-compactor";
 
 test("bounded summary requests preserve route ceilings and report truncation on all protocol transports", async (context) => {
   const requests: Record<string, unknown>[] = [];
@@ -163,5 +164,53 @@ test("bounded summary requests preserve route ceilings and report truncation on 
       /positive integer/,
     );
     assert.equal(requests.length, count);
+
+    // The summary fits with its own 8k ceiling, but not the route's 16k default.
+    const bounded = createProvider(wire, {
+      model: wire === "claude" ? "glm-5.2" : "test",
+      apiKey: "fixture",
+      baseURL: `http://127.0.0.1:${address.port}/${wire}`,
+      capabilities: resolveModelRouteCapabilities(wire, wire === "claude" ? "glm-5.2" : "test", {
+        context: 20000,
+        output: 16000,
+        streamUsage: true,
+        outputTokenField: "max_completion_tokens",
+      }),
+    });
+    const source = [{ role: "user" as const, content: "word ".repeat(5000) }];
+    const field =
+      wire === "responses"
+        ? "max_output_tokens"
+        : wire === "claude"
+          ? "max_tokens"
+          : "max_completion_tokens";
+    for (const streaming of [false, true]) {
+      const generate = (messages = source, maxOutputTokens?: number) => {
+        const options = maxOutputTokens === undefined ? undefined : { maxOutputTokens };
+        return streaming
+          ? bounded.generateStream!(messages, [], () => {}, options)
+          : bounded.generate(messages, [], options);
+      };
+      const before = requests.length;
+      await assert.rejects(generate(), /context/);
+      await assert.rejects(generate(source, 32000), /context/);
+      await assert.rejects(
+        generate([{ role: "user", content: "word ".repeat(16000) }], 8000),
+        /context/,
+      );
+      assert.equal(requests.length, before, "genuine overflow must stay local");
+      assert.equal((await generate(source, 8000)).content, "partial");
+      assert.equal(requests.length, before + 1);
+      assert.equal(requests.at(-1)![field], 8000);
+    }
+    const beforeCompaction = requests.length;
+    await new FullCompactor({ provider: bounded, maxAttempts: 1 }).preview(
+      { id: `bounded-summary-${wire}` },
+      [...source, { role: "assistant", content: "prior answer" }],
+      { trigger: "manual", inputBudgetTokens: 2976, phase: "standalone" },
+    );
+    // The fixture deliberately returns length, so the compactor tries its bounded repair.
+    assert.equal(requests.length, beforeCompaction + 2);
+    for (const request of requests.slice(beforeCompaction)) assert.equal(request[field], 8000);
   }
 });
