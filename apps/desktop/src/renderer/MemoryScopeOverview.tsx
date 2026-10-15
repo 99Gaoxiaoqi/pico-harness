@@ -56,6 +56,7 @@ export function MemoryScopeOverview({
     workspaces.map((w) => [w.path, w.trusted]),
     refresh,
     runtime.executionLearningRevision,
+    runtime.taskExperienceSupported,
   ]);
   const generation = useRef({ key, value: 0 });
   if (generation.current.key !== key)
@@ -80,7 +81,7 @@ export function MemoryScopeOverview({
             scope === "global" && (tab === "pending" || tab === "usage")
               ? {}
               : await actions.queryMemoryScope(workspace.path, tab);
-          if (tab === "saved" && scope !== "global") {
+          if (tab === "saved" && scope !== "global" && runtime.taskExperienceSupported) {
             try {
               const experiencePage = await actions.queryMemoryScope(workspace.path, "pending");
               if (experiencePage.suggestions)
