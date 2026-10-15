@@ -23,6 +23,7 @@ import {
 import { logger } from "@pico/pico-host/logger";
 import { MemoryItemStoreConflictError } from "@pico/core/atomic-memory-contracts";
 import { resolveRequestedReferenceNote } from "./atomic-memory-reference-note.js";
+import { consolidateAutomaticMemory } from "./atomic-memory-consolidation.js";
 
 const AUTOMATIC_EXTRACTION_IDLE_MS = 30_000;
 type AutomaticExtractionTrigger = "extract" | "compaction";
@@ -530,6 +531,27 @@ export class AtomicMemoryRuntime {
       const result = await new AtomicMemoryExtractionEngine({ store, model, gate }).execute(
         snapshot,
       );
+      if (
+        snapshot.trigger !== "remember" &&
+        result.status !== "unavailable" &&
+        !result.skipReason
+      ) {
+        try {
+          await consolidateAutomaticMemory({
+            store,
+            model,
+            ...(this.options.contextWindowTokens !== undefined
+              ? { contextWindowTokens: this.options.contextWindowTokens }
+              : {}),
+            ...(this.options.reservedOutputTokens !== undefined
+              ? { reservedOutputTokens: this.options.reservedOutputTokens }
+              : {}),
+            isAllowed: async () => (await gate(snapshot.trigger)).allowed,
+          });
+        } catch (error) {
+          logger.debug({ error: String(error) }, "[Memory] automatic consolidation unavailable");
+        }
+      }
       if (result.status === "unavailable" && result.reason === "retry_later") {
         const pending = await store.readPendingExtractionFailure(snapshot.sessionId);
         if (pending)
