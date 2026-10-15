@@ -71,7 +71,25 @@ const summaryFields = {
   enabled: resultBoolean,
   applicability: experienceApplicabilityResult,
 };
-export const experienceSummaryResult = exactResultShape(summaryFields);
+const experienceMaturityResult = resultOneOf(["unassessed", "trial", "active", "suspended"]);
+const experienceRiskResult = resultOneOf(["low", "high", "unclear"]);
+const experiencePromotionReasonResult = resultOneOf([
+  "none",
+  "two_positive_reuses",
+  "deterministic_validation",
+  "human_approved",
+]);
+const experienceSummaryOptionalFields = {
+  maturity: experienceMaturityResult,
+  risk: experienceRiskResult,
+  promotionReason: experiencePromotionReasonResult,
+  positiveReuseCount: resultNonNegativeInteger,
+  reviewReason: resultString,
+};
+export const experienceSummaryResult = exactResultShape(
+  summaryFields,
+  experienceSummaryOptionalFields,
+);
 export const experienceCandidateResult = exactResultShape(
   {
     ...summaryFields,
@@ -105,6 +123,7 @@ export const experienceCandidateResult = exactResultShape(
     updatedAt: resultNonNegativeInteger,
   },
   {
+    ...experienceSummaryOptionalFields,
     itemId: resultString,
     reason: resultString,
     modelRoute: exactResultShape(

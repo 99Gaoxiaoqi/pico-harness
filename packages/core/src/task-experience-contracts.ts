@@ -6,6 +6,13 @@ import type {
 
 export type ExperienceReview = "unneeded" | "pending" | "approved" | "rejected" | "deferred";
 export type ExperienceValidation = "unknown" | "pass" | "fail" | "stale";
+export type TaskExperienceMaturity = "unassessed" | "trial" | "active" | "suspended";
+export type TaskExperienceRisk = "low" | "high" | "unclear";
+export type TaskExperiencePromotionReason =
+  | "none"
+  | "two_positive_reuses"
+  | "deterministic_validation"
+  | "human_approved";
 /** Host-owned evidence attachment, never a model-provided approval or public review input. */
 export interface TaskExperienceNativeEvidence {
   readonly candidateId: string;
@@ -68,6 +75,12 @@ export interface TaskExperienceSummary {
   readonly validation: ExperienceValidation;
   readonly enabled: boolean;
   readonly applicability: ExperienceApplicability;
+  /** Optional for records created before evidence-based promotion was introduced. */
+  readonly maturity?: TaskExperienceMaturity;
+  readonly risk?: TaskExperienceRisk;
+  readonly promotionReason?: TaskExperiencePromotionReason;
+  readonly positiveReuseCount?: number;
+  readonly reviewReason?: string;
 }
 /** The single review lifecycle; optional native evidence only proves its frozen operation scope. */
 export interface TaskExperienceCandidate extends TaskExperienceSummary {
