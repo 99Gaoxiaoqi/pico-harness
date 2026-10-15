@@ -24,6 +24,102 @@ import { logger } from "@pico/pico-host/logger";
 import { MemoryItemStoreConflictError } from "@pico/core/atomic-memory-contracts";
 import { resolveRequestedReferenceNote } from "./atomic-memory-reference-note.js";
 
+const AUTOMATIC_EXTRACTION_IDLE_MS = 30_000;
+type AutomaticExtractionTrigger = "extract" | "compaction";
+type AutomaticExtractionPrepare = () => Promise<MemoryExtractionSnapshot | undefined>;
+type AutomaticExtractionDispatch = (
+  trigger: AutomaticExtractionTrigger,
+  prepare: AutomaticExtractionPrepare,
+) => void;
+
+interface PendingAutomaticExtraction {
+  lifecycle: AtomicMemoryLifecycle;
+  dispatch: AutomaticExtractionDispatch;
+  timer?: ReturnType<typeof setTimeout>;
+  readonly prepares: Map<AutomaticExtractionTrigger, Map<string, AutomaticExtractionPrepare>>;
+}
+
+const pendingAutomaticExtractions = new Map<string, PendingAutomaticExtraction>();
+const registeredAutomaticExtractionLifecycles = new WeakSet<AtomicMemoryLifecycle>();
+
+function registerAutomaticExtractionCleanup(lifecycle: AtomicMemoryLifecycle): void {
+  if (registeredAutomaticExtractionLifecycles.has(lifecycle)) return;
+  registeredAutomaticExtractionLifecycles.add(lifecycle);
+  lifecycle.onClose(() => {
+    for (const [laneKey, pending] of pendingAutomaticExtractions) {
+      if (pending.lifecycle !== lifecycle) continue;
+      if (pending.timer !== undefined) clearTimeout(pending.timer);
+      pendingAutomaticExtractions.delete(laneKey);
+    }
+  });
+}
+
+function resetAutomaticExtractionTimer(
+  laneKey: string,
+  pending: PendingAutomaticExtraction,
+): void {
+  if (pending.timer !== undefined) clearTimeout(pending.timer);
+  pending.timer = setTimeout(() => {
+    if (pendingAutomaticExtractions.get(laneKey) !== pending) return;
+    pendingAutomaticExtractions.delete(laneKey);
+    for (const [trigger, byRun] of pending.prepares) {
+      const prepare = [...byRun.values()].at(-1);
+      if (prepare) pending.dispatch(trigger, prepare);
+    }
+  }, AUTOMATIC_EXTRACTION_IDLE_MS);
+}
+
+function notifyAutomaticExtractionActivity(
+  laneKey: string,
+  lifecycle: AtomicMemoryLifecycle,
+  dispatch: AutomaticExtractionDispatch,
+): void {
+  const pending = pendingAutomaticExtractions.get(laneKey);
+  if (!pending) return;
+  registerAutomaticExtractionCleanup(lifecycle);
+  pending.lifecycle = lifecycle;
+  pending.dispatch = dispatch;
+  resetAutomaticExtractionTimer(laneKey, pending);
+}
+
+function scheduleAutomaticExtraction(
+  laneKey: string,
+  lifecycle: AtomicMemoryLifecycle,
+  dispatch: AutomaticExtractionDispatch,
+  trigger: AutomaticExtractionTrigger,
+  runId: string | undefined,
+  prepare: AutomaticExtractionPrepare,
+): void {
+  registerAutomaticExtractionCleanup(lifecycle);
+  let pending = pendingAutomaticExtractions.get(laneKey);
+  if (!pending) {
+    pending = { lifecycle, dispatch, prepares: new Map() };
+    pendingAutomaticExtractions.set(laneKey, pending);
+  }
+  pending.lifecycle = lifecycle;
+  pending.dispatch = dispatch;
+  // The latest boundary for each trigger includes earlier durable boundaries.
+  let byRun = pending.prepares.get(trigger);
+  if (!byRun) {
+    byRun = new Map();
+    pending.prepares.set(trigger, byRun);
+  }
+  byRun.set(runId ?? "__unknown_run__", prepare);
+  resetAutomaticExtractionTimer(laneKey, pending);
+}
+
+function cancelAutomaticExtractionsForRun(laneKey: string, runId: string): void {
+  const pending = pendingAutomaticExtractions.get(laneKey);
+  if (!pending) return;
+  for (const [trigger, byRun] of pending.prepares) {
+    byRun.delete(runId);
+    if (byRun.size === 0) pending.prepares.delete(trigger);
+  }
+  if (pending.prepares.size > 0) return;
+  if (pending.timer !== undefined) clearTimeout(pending.timer);
+  pendingAutomaticExtractions.delete(laneKey);
+}
+
 export function atomicMemoryDatabasePath(picoHome: string): string {
   return join(picoHome, "memory.sqlite");
 }
@@ -118,6 +214,7 @@ export class AtomicMemoryRuntime {
   private source: MemoryExtractionSnapshot | undefined;
   private extractRequestedRevision: number | undefined;
   private readonly completedRuns = new Set<string>();
+  private readonly explicitlyRememberedRuns = new Set<string>();
   private readonly background = new Set<Promise<unknown>>();
   private readonly workspaceKey: string;
   private readonly laneKey: string;
@@ -125,6 +222,7 @@ export class AtomicMemoryRuntime {
 
   constructor(private readonly options: AtomicMemoryRuntimeOptions) {
     this.lifecycle = options.lifecycle ?? new AtomicMemoryLifecycle();
+    registerAutomaticExtractionCleanup(this.lifecycle);
     this.workspaceKey = resolvePicoPaths(options.workDir, {
       picoHome: options.picoHome,
     }).workspace.id;
@@ -133,6 +231,12 @@ export class AtomicMemoryRuntime {
 
   async capture(messages: readonly Message[], tools: readonly ToolDefinition[]): Promise<void> {
     if (!this.options.supported) return;
+    if (messages.some((message) => message.role === "user"))
+      notifyAutomaticExtractionActivity(
+        this.laneKey,
+        this.lifecycle,
+        (trigger, prepare) => this.enqueue(trigger, prepare),
+      );
     try {
       this.source = await this.snapshot("remember", await this.readDeletionRevision(), undefined, {
         messages: structuredClone(messages),
@@ -148,6 +252,8 @@ export class AtomicMemoryRuntime {
   async remember(signal?: AbortSignal): Promise<AtomicMemoryResult> {
     if (!this.options.supported) return unavailable("provider_unsupported");
     if (!this.source) return unavailable("source_unavailable");
+    this.explicitlyRememberedRuns.add(this.source.runId);
+    cancelAutomaticExtractionsForRun(this.laneKey, this.source.runId);
     const snapshot = { ...this.source, ...(signal ? { signal } : {}) };
     return this.lifecycle.run(
       "remember",
@@ -267,22 +373,30 @@ export class AtomicMemoryRuntime {
     this.completedRuns.add(runId);
     const requestedRevision = this.extractRequestedRevision;
     this.extractRequestedRevision = undefined;
-    this.enqueue("extract", async () => {
-      const entries = await this.readEntries();
-      const terminal = entries.find(
-        ({ event }) =>
-          event.kind === "run.terminal" &&
-          event.runId === runId &&
-          event.data.status === "completed" &&
-          !event.data.recovered,
-      );
-      if (!terminal || terminal.event.kind !== "run.terminal") return;
-      const admission = terminal.event.data.memoryExtractionBoundary;
-      if (!admission && requestedRevision === undefined) return;
-      const revision = requestedRevision ?? admission?.deletionRevision;
-      if (revision === undefined) return;
-      return this.snapshot("extract", revision, terminal.sequence);
-    });
+    if (this.explicitlyRememberedRuns.has(runId)) return;
+    scheduleAutomaticExtraction(
+      this.laneKey,
+      this.lifecycle,
+      (trigger, prepare) => this.enqueue(trigger, prepare),
+      "extract",
+      runId,
+      async () => {
+        const entries = await this.readEntries();
+        const terminal = entries.find(
+          ({ event }) =>
+            event.kind === "run.terminal" &&
+            event.runId === runId &&
+            event.data.status === "completed" &&
+            !event.data.recovered,
+        );
+        if (!terminal || terminal.event.kind !== "run.terminal") return;
+        const admission = terminal.event.data.memoryExtractionBoundary;
+        if (!admission && requestedRevision === undefined) return;
+        const revision = requestedRevision ?? admission?.deletionRevision;
+        if (revision === undefined) return;
+        return this.snapshot("extract", revision, terminal.sequence);
+      },
+    );
   }
 
   async compactionAdmission(): Promise<RuntimeMemoryExtractionBoundary | undefined> {
@@ -315,34 +429,50 @@ export class AtomicMemoryRuntime {
 
   async checkpoint(checkpointId: string): Promise<void> {
     if (!this.options.supported) return;
-    const deletionRevision = await this.readDeletionRevision();
-    this.enqueue("compaction", async () => {
-      const entries = await this.readEntries();
-      const checkpoint = entries.find(
-        ({ event }) =>
-          event.kind === "context.checkpoint.recorded" && event.data.checkpointId === checkpointId,
-      );
-      if (
-        !checkpoint ||
-        checkpoint.event.kind !== "context.checkpoint.recorded" ||
-        !checkpoint.event.data.memoryExtractionBoundary
-      )
-        return;
-      const snapshot = await this.snapshot("compaction", deletionRevision, checkpoint.sequence);
-      const checkpointEvent = checkpoint.event;
-      const through =
-        checkpointEvent.kind === "context.checkpoint.recorded"
-          ? entries.find((entry) => entry.event.eventId === checkpointEvent.data.throughEventId)
-          : undefined;
-      if (snapshot && through)
-        return {
-          ...snapshot,
-          boundaryOrdinal: through.sequence,
-          boundaryEventId: through.event.eventId,
-          compactionCheckpointId: checkpointId,
-        };
-      return undefined;
-    });
+    const [deletionRevision, entries] = await Promise.all([
+      this.readDeletionRevision(),
+      this.readEntries(),
+    ]);
+    const checkpointRunId = entries.find(
+      ({ event }) =>
+        event.kind === "context.checkpoint.recorded" && event.data.checkpointId === checkpointId,
+    )?.event.runId;
+    if (checkpointRunId && this.explicitlyRememberedRuns.has(checkpointRunId)) return;
+    scheduleAutomaticExtraction(
+      this.laneKey,
+      this.lifecycle,
+      (trigger, prepare) => this.enqueue(trigger, prepare),
+      "compaction",
+      checkpointRunId,
+      async () => {
+        const entries = await this.readEntries();
+        const checkpoint = entries.find(
+          ({ event }) =>
+            event.kind === "context.checkpoint.recorded" &&
+            event.data.checkpointId === checkpointId,
+        );
+        if (
+          !checkpoint ||
+          checkpoint.event.kind !== "context.checkpoint.recorded" ||
+          !checkpoint.event.data.memoryExtractionBoundary
+        )
+          return;
+        const snapshot = await this.snapshot("compaction", deletionRevision, checkpoint.sequence);
+        const checkpointEvent = checkpoint.event;
+        const through =
+          checkpointEvent.kind === "context.checkpoint.recorded"
+            ? entries.find((entry) => entry.event.eventId === checkpointEvent.data.throughEventId)
+            : undefined;
+        if (snapshot && through)
+          return {
+            ...snapshot,
+            boundaryOrdinal: through.sequence,
+            boundaryEventId: through.event.eventId,
+            compactionCheckpointId: checkpointId,
+          };
+        return undefined;
+      },
+    );
   }
 
   async drain(): Promise<void> {
