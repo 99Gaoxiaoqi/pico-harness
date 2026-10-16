@@ -9,7 +9,7 @@ import {
   type MemoryConsolidationClaim,
   type MemoryItemWrite,
 } from "@pico/core/atomic-memory-contracts";
-import { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-store";
+import { SqliteMemoryItemStore } from "../../../packages/storage/src/sqlite/sqlite-memory-item-store.js";
 import { consolidateAutomaticMemory } from "../../../packages/pico-host/src/atomic-memory-consolidation.js";
 
 const HOUR = 60 * 60 * 1_000;
@@ -56,8 +56,8 @@ async function fixture() {
   };
 }
 
-function archiveProposal(itemId: string, keepItemId: string) {
-  return JSON.stringify({ archive: [{ itemId, keepItemId, reason: "superseded" }] });
+function archiveProposal(itemId: string, keepItemId: string, reason = "duplicate") {
+  return JSON.stringify({ archive: [{ itemId, keepItemId, reason }] });
 }
 
 function commitClaim(
@@ -80,10 +80,215 @@ function commitClaim(
   });
 }
 
+for (const reason of ["superseded", "stale", "low_value"] as const) {
+  test(`consolidation never executes ${reason}, even for identical facts`, async (t) => {
+    const f = await fixture();
+    t.after(() => f.close());
+    const old = await f.create();
+    f.setNow(2_000);
+    const latest = await f.create();
+    await assert.rejects(
+      consolidateAutomaticMemory({
+        store: f.store,
+        model: { call: async () => archiveProposal(old, latest, reason) },
+        isAllowed: async () => true,
+      }),
+      /memory_consolidation_invalid_archive_item/,
+    );
+    for (const id of [old, latest]) {
+      assert.equal((await f.store.readItem(id))?.item.lifecycleState, "active");
+      assert.equal((await f.store.readItem(id))?.item.version, 1);
+    }
+  });
+}
+
+test("the original cross-year proposal is rejected, including when relabelled duplicate", async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  f.setNow(1_800_000_000_000);
+  const old = await f.create({
+    content: "项目默认使用 Node.js 18。",
+    temporalType: "interval",
+    eventStartedAt: 1_704_067_200_000,
+    eventEndedAt: 1_735_689_600_000,
+  });
+  f.setNow(1_800_000_000_001);
+  const latest = await f.create({
+    content: "项目默认使用 Node.js 22。",
+    temporalType: "interval",
+    eventStartedAt: 1_735_689_600_000,
+    eventEndedAt: 1_767_225_600_000,
+  });
+  let clock = 1_800_000_001_000;
+  t.mock.method(Date, "now", () => clock);
+  for (const reason of ["superseded", "duplicate"]) {
+    await assert.rejects(
+      consolidateAutomaticMemory({
+        store: f.store,
+        model: {
+          call: async ({ prompt }) => {
+            const groups = JSON.parse(prompt.split("\n").at(-1)!);
+            const item = groups[0].items.find(
+              (record: { itemId: string }) => record.itemId === old,
+            );
+            assert.equal(item.temporalType, "interval");
+            assert.equal(item.eventStartedAt, 1_704_067_200_000);
+            assert.equal(item.eventEndedAt, 1_735_689_600_000);
+            assert.equal(item.observedAt, 100);
+            assert.deepEqual(item.sources, memoryWrite().sources);
+            assert.equal(item.keys[0].normalizedKey, "回答风格");
+            return archiveProposal(old, latest, reason);
+          },
+        },
+        isAllowed: async () => true,
+      }),
+      /memory_consolidation_(invalid_archive_item|lossy_archive)/,
+    );
+    clock += 6 * HOUR;
+    for (const id of [old, latest])
+      assert.equal((await f.store.readItem(id))?.item.lifecycleState, "active");
+  }
+});
+
+const unsafeDuplicates: readonly {
+  title: string;
+  old?: Partial<MemoryItemWrite>;
+  keeper?: Partial<MemoryItemWrite>;
+}[] = [
+  {
+    title: "disjoint validity periods",
+    old: { temporalType: "interval", eventStartedAt: 100, eventEndedAt: 200 },
+    keeper: { temporalType: "interval", eventStartedAt: 200, eventEndedAt: 300 },
+  },
+  {
+    title: "overlapping validity periods",
+    old: { temporalType: "interval", eventStartedAt: 100, eventEndedAt: 300 },
+    keeper: { temporalType: "interval", eventStartedAt: 200, eventEndedAt: 400 },
+  },
+  {
+    title: "unknown versus known validity",
+    keeper: { temporalType: "point", eventStartedAt: 100 },
+  },
+  {
+    title: "different temporal types",
+    old: { temporalType: "point", eventStartedAt: 100 },
+    keeper: { temporalType: "open_ended", eventStartedAt: 100 },
+  },
+  { title: "different observations", keeper: { observedAt: 200 } },
+  { title: "unknown-time contradictory facts", keeper: { content: "用户偏好详细回答。" } },
+  { title: "complementary facts", keeper: { content: "用户偏好简洁回答，并附来源。" } },
+  {
+    title: "multiple values at the same time",
+    old: { content: "项目支持 Node.js 18。", temporalType: "point", eventStartedAt: 100 },
+    keeper: { content: "项目支持 Node.js 22。", temporalType: "point", eventStartedAt: 100 },
+  },
+  {
+    title: "uncovered source identity",
+    keeper: {
+      sources: [{ sessionId: "session", runId: "run", turnId: "other", eventId: "event" }],
+    },
+  },
+  {
+    title: "an extra retrieval key on the removed record",
+    old: {
+      keys: [...memoryWrite().keys, { key: "语言", keyType: "entity", keyOrigin: "deterministic" }],
+    },
+  },
+  {
+    title: "different retrieval key provenance",
+    keeper: { keys: [{ key: "回答风格", keyType: "exact", keyOrigin: "llm" }] },
+  },
+];
+for (const scenario of unsafeDuplicates) {
+  test(`consolidation preserves ${scenario.title}`, async (t) => {
+    const f = await fixture();
+    t.after(() => f.close());
+    const old = await f.create(scenario.old);
+    f.setNow(2_000);
+    const latest = await f.create(scenario.keeper);
+    await assert.rejects(
+      consolidateAutomaticMemory({
+        store: f.store,
+        model: { call: async () => archiveProposal(old, latest) },
+        isAllowed: async () => true,
+      }),
+      /memory_consolidation_lossy_archive/,
+    );
+    for (const id of [old, latest]) {
+      assert.equal((await f.store.readItem(id))?.item.lifecycleState, "active");
+      assert.equal((await f.store.readItem(id))?.item.version, 1);
+    }
+    assert.deepEqual(await f.store.listMemoryConsolidationHistory({ now: Date.now() }), []);
+  });
+}
+
+test("lossless duplicates may share an edit timestamp and retain all source and key metadata", async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const keeper = await f.create({
+    temporalType: "interval",
+    eventStartedAt: 100,
+    eventEndedAt: 200,
+    sources: [
+      ...memoryWrite().sources,
+      { sessionId: "session", runId: "run", turnId: "turn", eventId: "extra" },
+    ],
+    keys: [...memoryWrite().keys, { key: "风格", keyType: "alias", keyOrigin: "user" }],
+  });
+  const duplicate = await f.create({
+    temporalType: "interval",
+    eventStartedAt: 100,
+    eventEndedAt: 200,
+  });
+  const before = await f.store.readItem(keeper);
+  assert.deepEqual(
+    await consolidateAutomaticMemory({
+      store: f.store,
+      model: { call: async () => archiveProposal(duplicate, keeper) },
+      isAllowed: async () => true,
+    }),
+    { changed: true },
+  );
+  assert.deepEqual(await f.store.readItem(keeper), before);
+  const [receipt] = await f.store.listMemoryConsolidationHistory({ now: Date.now() });
+  assert.equal(receipt!.items[0]!.reason, "duplicate");
+  assert.equal((await f.store.readItem(duplicate))?.item.version, 2);
+  assert.equal(
+    (await f.store.undoMemoryConsolidation({ batchId: receipt!.batchId, now: Date.now() })).status,
+    "undone",
+  );
+  assert.equal((await f.store.readItem(duplicate))?.item.lifecycleState, "active");
+});
+
+test("explicit user corrections still replace current facts through their independent CAS path", async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const itemId = await f.create();
+  await f.store.applyMutations({
+    operationId: "user-correction",
+    mutations: [
+      {
+        type: "update",
+        itemId,
+        expectedVersion: 1,
+        item: memoryWrite({
+          content: "用户明确更正为详细回答。",
+          origin: "user_requested",
+          sources: [],
+        }),
+      },
+    ],
+  });
+  const corrected = await f.store.readItem(itemId);
+  assert.equal(corrected?.item.content, "用户明确更正为详细回答。");
+  assert.equal(corrected?.item.version, 2);
+  assert.equal(corrected?.item.lifecycleState, "active");
+});
+
 test("consolidation archives atomically, cools down, and undo preserves content recency", async (t) => {
   const f = await fixture();
   t.after(() => f.close());
-  const old = await f.create({ content: "用户偏好详细回答。" });
+  const old = await f.create();
   f.setNow(2_000);
   const latest = await f.create();
   let clock = 3_000;
@@ -144,7 +349,7 @@ for (const change of ["delete", "update", "archive"] as const) {
   test(`consolidation rolls back when its keeper is concurrently ${change}d`, async (t) => {
     const f = await fixture();
     t.after(() => f.close());
-    const old = await f.create({ content: "用户偏好详细回答。" });
+    const old = await f.create();
     f.setNow(2_000);
     const latest = await f.create();
     const concurrent = new SqliteMemoryItemStore(f.path, { now: () => 3_000 });
@@ -195,7 +400,7 @@ for (const change of ["delete", "update", "archive"] as const) {
   });
 }
 
-test("consolidation rejects proposals that archive a keeper through an overlapping key", async (t) => {
+test("consolidation rejects proposals that lose a keeper retrieval key", async (t) => {
   const f = await fixture();
   t.after(() => f.close());
   const old = await f.create();
@@ -217,14 +422,14 @@ test("consolidation rejects proposals that archive a keeper through an overlappi
         call: async () =>
           JSON.stringify({
             archive: [
-              { itemId: old, keepItemId: middle, reason: "superseded" },
-              { itemId: middle, keepItemId: latest, reason: "superseded" },
+              { itemId: old, keepItemId: middle, reason: "duplicate" },
+              { itemId: middle, keepItemId: latest, reason: "duplicate" },
             ],
           }),
       },
       isAllowed: async () => true,
     }),
-    /memory_consolidation_keeper_archived/,
+    /memory_consolidation_lossy_archive/,
   );
   for (const itemId of [old, middle, latest])
     assert.equal((await f.store.readItem(itemId))?.item.lifecycleState, "active");
