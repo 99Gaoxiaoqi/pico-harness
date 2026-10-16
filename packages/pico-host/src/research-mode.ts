@@ -4,6 +4,7 @@ const RESEARCH_TOOLS = new Set([
   "document",
   "view_image",
   "memory_search",
+  "memory_read",
   "archive_read",
   "glob",
   "grep",

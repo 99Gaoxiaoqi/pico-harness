@@ -122,7 +122,7 @@ export function readGoalEvidenceRunSlice(
     return message(r);
   });
   const mutationPredicate =
-    "kind IN ('tool.started','tool.result.recorded') AND lower(json_extract(payload_json,'$.data.toolName')) NOT IN ('read_file','grep','glob','list_files','memory_search','memory_get','search','read_tool_result','read_tool_result_archive')";
+    "kind IN ('tool.started','tool.result.recorded') AND lower(json_extract(payload_json,'$.data.toolName')) NOT IN ('read_file','grep','glob','list_files','memory_search','memory_read','memory_get','search','read_tool_result','read_tool_result_archive')";
   const potentialMutations = rows(
     `SELECT event_id,event_seq,json_extract(payload_json,'$.data.toolName') AS tool_name ${base} AND ${mutationPredicate} ORDER BY event_seq DESC LIMIT 12`,
     sessionId,

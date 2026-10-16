@@ -287,6 +287,7 @@ import { resolveMemoryRecallQuery } from "./memory-recall-query.js";
 import type { MemoryRecallTrace } from "@pico/core";
 import {
   buildMemorySearchTool,
+  buildMemoryReadTool,
   buildMemoryTriggerTools,
 } from "@pico/pico-host/memory-trigger-tools";
 import { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-store";
@@ -3074,6 +3075,76 @@ export async function executeAgentRuntime(
         },
         fileCommitted: async (call, fact) => executionLearningRuntime?.fileCommitted(call, fact),
       });
+      registry.register(
+        buildMemoryReadTool({
+          read: async (input, context) => {
+            const query = JSON.stringify(input);
+            const queryRef = context?.toolCallId ? { toolCallId: context.toolCallId } : undefined;
+            const signals = [context?.signal, dependencies.signal].filter(
+              (signal): signal is AbortSignal => !!signal,
+            );
+            const signal = signals.length ? AbortSignal.any(signals) : undefined;
+            let outcome: MemoryRecallTrace["outcome"] = "error";
+            let settingsVersion: number | undefined;
+            const checkAdmission = async () => {
+              signal?.throwIfAborted();
+              const gate = await memoryRecallAllowed();
+              if (!gate.allowed) {
+                outcome = "admission_denied";
+                throw new Error("Memory read unavailable: admission_denied");
+              }
+              const settings = await repository.readSettings(memoryWorkspaceKey);
+              settingsVersion = settings.version;
+              if (!settings.enabled || !settings.recallEnabled) {
+                outcome = "disabled";
+                throw new Error("Memory read unavailable: memory_disabled");
+              }
+              signal?.throwIfAborted();
+            };
+            try {
+              await checkAdmission();
+              const result = await builder.read(input.item_id, input.expected_version, {
+                ...(input.start === undefined ? {} : { start: input.start }),
+                ...(input.end === undefined ? {} : { end: input.end }),
+                ...(signal ? { signal } : {}),
+                trace: { ...(queryRef ? { queryRef } : {}) },
+              });
+              await checkAdmission();
+              if (result.trace?.settingsVersion !== settingsVersion)
+                throw new Error("Memory read unavailable: changed");
+              if (result.trace) await recallTracker.record(result.trace);
+              else recallTracker.unavailable("search");
+              // Register exact fragments for the normal pre-Provider freshness filter.
+              // Plain facts/notes do not create experience-use/adoption records.
+              await experienceFeedbackRuntime?.recordReferences(result, undefined);
+              const current = await repository.readItem(input.item_id);
+              await checkAdmission();
+              if (
+                !current ||
+                current.item.version !== input.expected_version ||
+                current.item.contentHash !== result.items[0]?.item.contentHash ||
+                current.item.lifecycleState !== "active" ||
+                !(
+                  (current.item.scopeType === "global" && current.item.scopeKey === null) ||
+                  (current.item.scopeType === "workspace" &&
+                    current.item.scopeKey === memoryWorkspaceKey)
+                ) ||
+                current.sourceType ||
+                current.taskExperience ||
+                current.taskAcceptance ||
+                current.executionEvidence ||
+                current.item.statementType !== "fact" ||
+                result.trace?.settingsVersion !== settingsVersion
+              )
+                throw new Error("Memory read unavailable: changed");
+              return result.block;
+            } catch (error) {
+              await recordRecallOutcome("search", query, outcome, queryRef, settingsVersion);
+              throw error;
+            }
+          },
+        }),
+      );
       registry.register(
         buildMemorySearchTool({
           search: async (query, context, executionTargetId, recordType) => {
