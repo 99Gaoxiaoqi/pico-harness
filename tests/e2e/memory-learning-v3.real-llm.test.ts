@@ -6,7 +6,10 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { test, type TestContext } from "node:test";
 import type { LLMProvider, Message, TaskExperienceCandidate } from "@pico/core";
-import type { MemoryModelRequest } from "@pico/core/atomic-memory-runtime-contracts";
+import {
+  memorySessionKey,
+  type MemoryModelRequest,
+} from "@pico/core/atomic-memory-runtime-contracts";
 import { AtomicMemoryLifecycle } from "@pico/runtime";
 import { projectRuntimeSessionState } from "@pico/runtime/session-runtime-projection";
 import { SilentReporter } from "@pico/runtime/silent-reporter";
@@ -79,6 +82,7 @@ async function fixture(t: TestContext, category: Category, variant: number) {
     prompt: string;
     answer?: string;
     durationMs?: number;
+    usage?: { promptTokens: number; completionTokens: number; costCNY: number };
   }[] = [];
   const assertions: string[] = [];
   const controlledFixtures: string[] = [];
@@ -251,6 +255,7 @@ async function fixture(t: TestContext, category: Category, variant: number) {
       },
     );
     entry.answer = result.finalMessage;
+    entry.usage = result.usage;
     entry.durationMs = Date.now() - startedAt;
     const journal = await readEvents(sessionId, path);
     const terminal = journal.findLast((event) => event.kind === "run.terminal");
@@ -309,13 +314,17 @@ async function fixture(t: TestContext, category: Category, variant: number) {
           (value) => !value.taskExperience && value.item.content.includes(marker),
         );
         if (!record) return undefined;
-        const receipts = await repository.listExtractionReceipts(sessionId);
+        const receipts = await repository.listExtractionReceipts(
+          memorySessionKey(workspaceKey(), sessionId),
+        );
         assert.ok(
           receipts.some((receipt) => (receipt.summary?.createdItemCount ?? 0) > 0),
           "fact requires a committed extraction receipt",
         );
         assert.ok(
-          record.sources.some((source) => source.sessionId === sessionId),
+          record.sources.some(
+            (source) => source.sessionId === memorySessionKey(workspaceKey(), sessionId),
+          ),
           "fact must cite actual original user input",
         );
         return record;
@@ -338,6 +347,32 @@ async function fixture(t: TestContext, category: Category, variant: number) {
         workspace: path,
         events: await readEvents(sessionId, path).catch(() => []),
       });
+    const receipts = await Promise.all(
+      [...sessions].map(async ([sessionId, path]) => ({
+        sessionId,
+        workspace: path,
+        receipts: await repository.listExtractionReceipts(
+          memorySessionKey(workspaceKey(path), sessionId),
+        ),
+      })),
+    );
+    const ledgers = await Promise.all(
+      [...new Set(sessions.values())].map(async (path) => {
+        const page = await repository.experienceLedger.queryExperienceUses(workspaceKey(path), {
+          limit: 100,
+        });
+        return {
+          workspace: path,
+          uses: page.uses,
+          effects: await Promise.all(
+            page.uses.map(async (use) => ({
+              useId: use.useId,
+              effects: await repository.experienceLedger.listExperienceEffects(use.useId),
+            })),
+          ),
+        };
+      }),
+    );
     // No Provider configuration, headers or credential is serialized.
     await writeFile(
       reportPath,
@@ -369,6 +404,8 @@ async function fixture(t: TestContext, category: Category, variant: number) {
           auxiliary,
           candidates: snapshots,
           sourceEvents,
+          receipts,
+          ledgers,
         },
         null,
         2,
