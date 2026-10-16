@@ -94,10 +94,17 @@ async function extract(
     ],
   };
   let calls = 0;
+  const rejections: Array<{
+    trigger: "extract" | "remember" | "compaction";
+    stage: "proposal" | "localized" | "canonicalize";
+    requested: boolean;
+    safetyCodes: readonly string[];
+  }> = [];
   const safeProposal = { ...item(safe), evidence: [{ sourceRef: "e1", quote: safe }] };
   const engine = new AtomicMemoryExtractionEngine({
     store,
     gate: async () => ({ allowed: true }),
+    onContentRejected: (input) => rejections.push(input),
     model: {
       async call(request) {
         calls++;
@@ -134,7 +141,12 @@ async function extract(
     },
   });
   const result = await engine.execute(snapshot);
-  return { result, calls, records: await store.listItems({ workspaceKey: "synthetic-workspace" }) };
+  return {
+    result,
+    calls,
+    rejections,
+    records: await store.listItems({ workspaceKey: "synthetic-workspace" }),
+  };
 }
 
 test("fact memory rejects existing PII categories at proposal and canonicalization for automatic and explicit scopes", async (t) => {
@@ -152,6 +164,12 @@ test("fact memory rejects existing PII categories at proposal and canonicalizati
             assert.equal(outcome.records.length, 0);
             assert.equal(outcome.result.requestedItems.length, 0);
             assert.notEqual(outcome.result.status, "remembered");
+            assert.ok(outcome.rejections.length > 0);
+            assert.ok(outcome.rejections.every((entry) => entry.trigger === trigger));
+            assert.ok(
+              outcome.rejections.every((entry) => entry.requested === (trigger === "remember")),
+            );
+            assert.ok(outcome.rejections.every((entry) => entry.safetyCodes.length > 0));
             if (trigger === "remember") {
               assert.equal(outcome.result.status, "not_applicable");
               assert.ok(

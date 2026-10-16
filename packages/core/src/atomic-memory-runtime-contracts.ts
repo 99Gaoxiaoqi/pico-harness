@@ -154,6 +154,12 @@ export interface AtomicMemoryEngineOptions {
   readonly store: AtomicMemoryStore;
   readonly model: MemoryExtractionModel;
   readonly gate: (trigger: MemoryExtractionSnapshot["trigger"]) => Promise<MemoryGateResult>;
+  readonly onContentRejected?: (input: {
+    readonly trigger: MemoryExtractionSnapshot["trigger"];
+    readonly stage: MemoryModelRequest["stage"];
+    readonly requested: boolean;
+    readonly safetyCodes: readonly string[];
+  }) => void;
 }
 
 export type AtomicMemoryResult =

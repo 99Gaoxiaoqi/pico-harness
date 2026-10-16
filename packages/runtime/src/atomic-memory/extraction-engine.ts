@@ -393,15 +393,17 @@ export class AtomicMemoryExtractionEngine {
       snapshot.sourceMessages,
       snapshot.sourceEventMessagePositions,
     );
-    if (
-      snapshot.trigger === "remember" &&
-      evidence.some(
-        (entry) =>
-          entry.event.runId === snapshot.runId &&
-          entry.event.turnId === snapshot.turnId &&
-          entry.rawTexts.some(memoryTextRejected),
-      )
-    ) {
+    const requestedRawTexts =
+      snapshot.trigger === "remember"
+        ? evidence
+            .filter(
+              (entry) =>
+                entry.event.runId === snapshot.runId && entry.event.turnId === snapshot.turnId,
+            )
+            .flatMap((entry) => entry.rawTexts)
+        : [];
+    if (requestedRawTexts.some(memoryTextRejected)) {
+      reportContentRejected(this.options, snapshot, "proposal", true, requestedRawTexts);
       return this.commit(range, [], [], "sensitive_information");
     }
     const fitted = fitAtomicMemoryEvidence(evidence);
@@ -543,11 +545,11 @@ export class AtomicMemoryExtractionEngine {
       // user text need not be part of the original provider prefix to become visible.
       const localized = fitAtomicMemoryEvidence(projectAtomicMemoryEvidence(found));
       if (!localized) return { kind: "failed", failureClass: "localization", range };
-      if (
-        snapshot.trigger === "remember" &&
-        localized.some((entry) => entry.rawTexts.some(memoryTextRejected))
-      )
+      const localizedRawTexts = localized.flatMap((entry) => entry.rawTexts);
+      if (snapshot.trigger === "remember" && localizedRawTexts.some(memoryTextRejected)) {
+        reportContentRejected(this.options, snapshot, "localized", true, localizedRawTexts);
         return this.commit(range, [], [], "sensitive_information");
+      }
       interpretationContext = memoryInterpretationContext(found);
       if (snapshot.trigger === "remember") requestedEvidence = localized;
       const localizedRaw = await this.call(
@@ -585,6 +587,11 @@ export class AtomicMemoryExtractionEngine {
     ] as const) {
       for (const item of items) {
         if (itemSensitive(item, item.evidence)) {
+          reportContentRejected(this.options, snapshot, "proposal", requested, [
+            item.content,
+            ...item.keys.map((key) => key.key),
+            ...item.evidence.map((entry) => entry.quote),
+          ]);
           if (requested) return this.commit(range, [], [], "sensitive_information");
           continue;
         }
@@ -647,6 +654,11 @@ export class AtomicMemoryExtractionEngine {
           continue;
         }
         if (itemSensitive(result.item, candidate.item.evidence)) {
+          reportContentRejected(this.options, snapshot, "canonicalize", candidate.requested, [
+            result.item.content,
+            ...result.item.keys.map((key) => key.key),
+            ...candidate.item.evidence.map((entry) => entry.quote),
+          ]);
           if (candidate.requested) return this.commit(range, [], [], "sensitive_information");
           continue;
         }
@@ -911,6 +923,33 @@ function memoryTextRejected(content: string): boolean {
     memoryTextContainsSecret(content) ||
     sanitizeMemoryContent({ title: "", content, reason: "" }).disposition !== "allow"
   );
+}
+
+function reportContentRejected(
+  options: AtomicMemoryEngineOptions,
+  snapshot: MemoryExtractionSnapshot,
+  stage: MemoryModelRequest["stage"],
+  requested: boolean,
+  content: readonly string[],
+): void {
+  if (!options.onContentRejected) return;
+  const safetyCodes = new Set<string>();
+  for (const text of content) {
+    const sanitized = sanitizeMemoryContent({ title: "", content: text, reason: "" });
+    for (const code of sanitized.safetyCodes) safetyCodes.add(code);
+    if (memoryTextContainsSecret(text) && sanitized.safetyCodes.length === 0)
+      safetyCodes.add("secret_detected");
+  }
+  try {
+    options.onContentRejected({
+      trigger: snapshot.trigger,
+      stage,
+      requested,
+      safetyCodes: [...safetyCodes].sort(),
+    });
+  } catch {
+    return;
+  }
 }
 
 function historicalSnapshot(

@@ -16,6 +16,7 @@ import { sessionMemoryLane } from "@pico/runtime/atomic-memory/session-lane";
 import {
   memorySessionKey,
   type AtomicMemoryResult,
+  type AtomicMemoryEngineOptions,
   type MemoryExtractionModel,
   type MemoryExtractionSnapshot,
   type MemoryGateResult,
@@ -199,6 +200,7 @@ export interface AtomicMemoryRuntimeOptions {
   readonly reservedOutputTokens?: number;
   readonly lifecycle?: AtomicMemoryLifecycle;
   readonly onChanged?: () => void;
+  readonly onContentRejected?: AtomicMemoryEngineOptions["onContentRejected"];
 }
 
 /** One foreground run owns snapshots; background tasks own their own connections/model leases. */
@@ -627,6 +629,118 @@ export class AtomicMemoryRuntime {
     }
   }
 
+  async reconcileAdmittedBoundaries(): Promise<number> {
+    if (!this.options.supported) return 0;
+    const entries = await this.readEntries();
+    const store = new SqliteMemoryItemStore(atomicMemoryDatabasePath(this.options.picoHome));
+    let reconciled = 0;
+    try {
+      for (const entry of entries) {
+        const { event } = entry;
+        if (event.kind === "run.terminal") {
+          const admission = event.data.memoryExtractionBoundary;
+          if (
+            event.data.status !== "completed" ||
+            event.data.recovered ||
+            admission?.disposition !== "eligible" ||
+            admission.deletionRevision === undefined ||
+            admission.settingsVersion === undefined
+          )
+            continue;
+          const jobId = extractionJobId({
+            workspaceKey: this.workspaceKey,
+            sessionId: memorySessionKey(this.workspaceKey, this.options.sessionId),
+            sourceEventId: event.eventId,
+            trigger: "extract",
+          });
+          if (await store.readExtractionJob(jobId)) continue;
+          const snapshot = await this.snapshot(
+            "extract",
+            admission.deletionRevision,
+            entry.sequence,
+          );
+          if (!snapshot) continue;
+          const frozen = {
+            ...snapshot,
+            sourceKind: "terminal" as const,
+            settingsVersion: admission.settingsVersion,
+          };
+          await this.persistJob({
+            jobId,
+            snapshot: frozen,
+            sourceEventId: event.eventId,
+            sourceKind: "terminal",
+            sourceOrdinal: entry.sequence,
+            throughOrdinal: entry.sequence,
+          });
+          scheduleAutomaticExtraction(
+            this.laneKey,
+            this.lifecycle,
+            (trigger, prepare) => this.enqueue(trigger, prepare),
+            "extract",
+            event.runId,
+            async () => frozen,
+          );
+          reconciled++;
+          continue;
+        }
+        if (event.kind !== "context.checkpoint.recorded") continue;
+        const admission = event.data.memoryExtractionBoundary;
+        if (
+          admission?.disposition !== "eligible" ||
+          admission.deletionRevision === undefined ||
+          admission.settingsVersion === undefined
+        )
+          continue;
+        const jobId = extractionJobId({
+          workspaceKey: this.workspaceKey,
+          sessionId: memorySessionKey(this.workspaceKey, this.options.sessionId),
+          sourceEventId: event.data.checkpointId,
+          trigger: "compaction",
+        });
+        if (await store.readExtractionJob(jobId)) continue;
+        const through = entries.find(
+          (candidate) => candidate.event.eventId === event.data.throughEventId,
+        );
+        if (!through) continue;
+        const snapshot = await this.snapshot(
+          "compaction",
+          admission.deletionRevision,
+          entry.sequence,
+        );
+        if (!snapshot) continue;
+        const frozen = {
+          ...snapshot,
+          sourceKind: "checkpoint" as const,
+          settingsVersion: admission.settingsVersion,
+          boundaryOrdinal: through.sequence,
+          boundaryEventId: through.event.eventId,
+          compactionCheckpointId: event.data.checkpointId,
+        };
+        await this.persistJob({
+          jobId,
+          snapshot: frozen,
+          sourceEventId: event.data.checkpointId,
+          sourceKind: "checkpoint",
+          sourceOrdinal: through.sequence,
+          throughOrdinal: through.sequence,
+        });
+        scheduleAutomaticExtraction(
+          this.laneKey,
+          this.lifecycle,
+          (trigger, prepare) => this.enqueue(trigger, prepare),
+          "compaction",
+          event.runId,
+          async () => frozen,
+        );
+        reconciled++;
+      }
+      return reconciled;
+    } finally {
+      store.close();
+    }
+  }
+
   private async snapshotForJob(
     job: MemoryExtractionJob,
   ): Promise<MemoryExtractionSnapshot | undefined> {
@@ -644,7 +758,7 @@ export class AtomicMemoryRuntime {
       )
         return undefined;
       const snapshot = await this.snapshot("extract", job.deletionRevision, job.throughOrdinal);
-      return snapshot
+      return snapshot && (!this.options.preserveSourceTools || snapshot.sourceTools !== undefined)
         ? { ...snapshot, sourceKind: "terminal", settingsVersion: job.settingsVersion }
         : undefined;
     }
@@ -668,7 +782,7 @@ export class AtomicMemoryRuntime {
       );
       if (!through || through.sequence !== job.throughOrdinal) return undefined;
       const snapshot = await this.snapshot("compaction", job.deletionRevision, checkpoint.sequence);
-      return snapshot
+      return snapshot && (!this.options.preserveSourceTools || snapshot.sourceTools !== undefined)
         ? {
             ...snapshot,
             sourceKind: "checkpoint",
@@ -689,7 +803,7 @@ export class AtomicMemoryRuntime {
     )
       return undefined;
     const snapshot = await this.snapshot("extract", job.deletionRevision, job.throughOrdinal);
-    return snapshot
+    return snapshot && (!this.options.preserveSourceTools || snapshot.sourceTools !== undefined)
       ? {
           ...snapshot,
           sourceKind: "explicit",
@@ -829,6 +943,9 @@ export class AtomicMemoryRuntime {
         store: engineStore,
         model,
         gate,
+        ...(this.options.onContentRejected
+          ? { onContentRejected: this.options.onContentRejected }
+          : {}),
       }).execute(snapshot);
       if (
         snapshot.trigger !== "remember" &&
