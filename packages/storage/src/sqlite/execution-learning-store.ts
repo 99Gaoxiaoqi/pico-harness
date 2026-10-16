@@ -697,14 +697,21 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
       } catch {
         return false;
       }
-      if (
-        Number(
+      const currentEpoch = Number(
+        this.db
+          .prepare("SELECT input_epoch FROM execution_learning_control WHERE scope=?")
+          .get(workspaceKey)?.input_epoch ?? 0,
+      );
+      if ("kind" in candidate) {
+        const lease = decode<ExecutionLearningJob>(
           this.db
-            .prepare("SELECT input_epoch FROM execution_learning_control WHERE scope=?")
-            .get(workspaceKey)?.input_epoch ?? 0,
-        ) !== ("kind" in candidate ? candidate.inputEpoch : candidate.claim.admission.inputEpoch)
-      )
-        return false;
+            .prepare(
+              "SELECT record_json FROM execution_learning_jobs WHERE candidate_id=? AND state='working' AND lease_until>? ORDER BY fencing_token DESC LIMIT 1",
+            )
+            .get(candidate.candidateId, now),
+        );
+        if (!lease || lease.inputEpoch !== currentEpoch) return false;
+      } else if (candidate.claim.admission.inputEpoch !== currentEpoch) return false;
       const count = Number(
         this.db
           .prepare("SELECT count(*) AS n FROM execution_learning_attempts WHERE failure_key=?")
@@ -1840,8 +1847,16 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
             const risk = experienceContentRisk(
               `${content}\n${applicability.conditions.join("\n")}`,
             );
+            const scope = experienceConditions(
+              { applicability },
+              input.requiredConditions,
+              candidate.scopeUnresolved === true,
+            );
             const changedScope =
-              JSON.stringify(applicability) !== JSON.stringify(candidate.applicability);
+              JSON.stringify(applicability) !== JSON.stringify(candidate.applicability) ||
+              JSON.stringify(scope.requiredConditions) !==
+                JSON.stringify(candidate.requiredConditions ?? []) ||
+              (candidate.scopeUnresolved === true && !scope.scopeUnresolved);
             const explicitApproval = input.action === "edit_accept";
             const policy =
               risk === "blocked"
@@ -1851,11 +1866,6 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
                   : !explicitApproval && (risk === "high" || changedScope)
                     ? "review_required"
                     : "suggestion";
-            const scope = experienceConditions(
-              { applicability },
-              input.requiredConditions,
-              candidate.scopeUnresolved === true && input.requiredConditions === undefined,
-            );
             archiveItem();
             const {
               itemId: _itemId,
@@ -1896,7 +1906,7 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
                       ? ("scope_expansion" as const)
                       : ("high_impact" as const),
                     reviewReason: changedScope
-                      ? `旧做法：${candidate.content.slice(0, 320)}；旧范围：${candidate.applicability.conditions.join("；").slice(0, 240)}；拟议做法：${content.slice(0, 320)}；新范围：${applicability.conditions.join("；").slice(0, 240)}。请明确决定是否在新范围内使用。`
+                      ? `旧做法：${candidate.content.slice(0, 320)}；旧范围：${`${candidate.applicability.conditions.join("；")} ${JSON.stringify(candidate.requiredConditions ?? [])}${candidate.scopeUnresolved ? "（历史条件未核实）" : ""}`.slice(0, 320)}；拟议做法：${content.slice(0, 320)}；新范围：${`${applicability.conditions.join("；")} ${JSON.stringify(scope.requiredConditions)}`.slice(0, 320)}。请明确决定是否在新范围内使用。`
                       : "该方法涉及具体高影响操作，需要明确批准。",
                   }
                 : {}),

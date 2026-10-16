@@ -9,7 +9,13 @@ export type TaskExperienceUsagePolicy = "case_only" | "suggestion" | "review_req
 export type TaskExperienceDecisionKind = "high_impact" | "scope_expansion" | "long_term_conflict";
 /** Frozen Host identities; unknown condition kinds are never implicitly satisfied. */
 export type TaskExperienceRequiredCondition =
-  | ({ readonly kind: "native-scope" } & TaskExperienceNativeEvidence)
+  | {
+      readonly kind: "native-scope";
+      readonly candidateId: string;
+      readonly claimRevision: number;
+      readonly claimHash: string;
+      readonly scopeHash: string;
+    }
   | {
       readonly kind: "spreadsheet-range";
       readonly operation: "sum";
