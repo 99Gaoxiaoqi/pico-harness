@@ -266,7 +266,9 @@ export class DesktopAtomicMemoryService {
         expectedContentVersion: params.expectedContentVersion,
         operationId: params.operationId,
         action: params.action,
-        ...(params.content !== undefined ? { content: safeContent(params.content) } : {}),
+        ...(params.content !== undefined
+          ? { content: safeContent(params.content, "task-experience") }
+          : {}),
         ...(params.applicability ? { applicability: params.applicability } : {}),
         ...(params.representation ? { representation: params.representation } : {}),
         ...(params.matchHints ? { matchHints: params.matchHints } : {}),
@@ -963,14 +965,17 @@ function projectItem(
   };
 }
 
-function safeContent(value: string): string {
+function safeContent(value: string, context: "memory" | "task-experience" = "memory"): string {
   const normalized = normalizeLongTermMemoryContent(value);
   if (!normalized.ok) throw invalid(normalized.message);
-  const sanitized = sanitizeMemoryContent({
-    title: "记忆",
-    content: normalized.value,
-    reason: "用户手动保存",
-  });
+  const sanitized = sanitizeMemoryContent(
+    {
+      title: "记忆",
+      content: normalized.value,
+      reason: "用户手动保存",
+    },
+    { context },
+  );
   if (sanitized.disposition !== "allow")
     throw invalid(`记忆安全扫描未通过：${sanitized.safetyCodes.join(", ")}`);
   const stored = normalizeLongTermMemoryContent(sanitized.content);
