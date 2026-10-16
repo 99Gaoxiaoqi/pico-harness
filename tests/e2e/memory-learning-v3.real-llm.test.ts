@@ -41,7 +41,7 @@ export const MEMORY_V3_REAL_MODEL_MATRIX = [
   { category: "method", runs: 3 },
   { category: "success", runs: 1 },
   { category: "case", runs: 2 },
-  { category: "correction", runs: 4 },
+  { category: "correction", runs: 5 },
   { category: "isolation", runs: 3 },
 ] as const;
 const LIMITS = {
@@ -791,8 +791,16 @@ for (const variant of [0, 1]) {
         false,
         "nested Node test context cannot masquerade as a successful check",
       );
+      f.controlledFixtures.push(
+        "The observed failure → repair → successful rerun may remain a case when causal evidence is insufficient. One fixed, same-session user feedback Run supplies a new real source that endorses the concrete method only within the frozen check scope; it does not assert that the recovery alone proved causality.",
+      );
+      await f.run(
+        "source",
+        "这次这个具体做法：“先定位缺失配置，再只补配置，最后原样复测”有用，请沉淀为同一冻结检查范围的建议，不能扩大范围。",
+      );
       const method = await f.learned(
         (item) =>
+          item.taskVersion > 1 &&
           item.representation === "method" &&
           item.usagePolicy === "suggestion" &&
           Boolean(item.requiredConditions?.length),
@@ -904,7 +912,7 @@ for (const variant of [0, 1]) {
         "new version evidence starts from zero actual deliveries",
       );
       f.assertions.push(
-        "changed native scope blocks actual request; real carried use binds exact correction; restore rejected; next request excludes old version",
+        "real recovery plus one fixed same-session useful-method feedback supplies the source; changed native scope blocks actual request; real carried use binds exact correction; restore rejected; next request excludes old version",
       );
       f.pass();
     },
