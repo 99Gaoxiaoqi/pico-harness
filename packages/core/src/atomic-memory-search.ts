@@ -121,3 +121,19 @@ export function scoreMemoryContent(content: string, signals: MemorySearchSignals
   const cjkCount = signals.cjkBigrams.filter((term) => text.includes(term)).length;
   return pathCount * 8 + tokenCount * 4 + (cjkCount >= 2 ? Math.min(cjkCount, 8) : 0);
 }
+
+/** Unbounded document lexemes for the optional local index; not query expansion. */
+export function collectMemoryContentLexemes(content: string): MemorySearchSignals {
+  const text = normalizeMemorySearchText(content);
+  const cjk = new Set<string>();
+  for (const run of text.match(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]+/gu) ?? []) {
+    const points = [...run];
+    for (let index = 0; index + 1 < points.length; index++)
+      cjk.add(`${points[index]}${points[index + 1]}`);
+  }
+  return {
+    paths: [...new Set((text.match(/(?:\.{0,2}\/|\/)[^\s"'<>]+/gu) ?? []).map(trimPunctuation))],
+    tokens: [...new Set((text.match(/[\p{L}\p{N}_@.-]+/gu) ?? []).map(trimPunctuation))],
+    cjkBigrams: [...cjk],
+  };
+}
