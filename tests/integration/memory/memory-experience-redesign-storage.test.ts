@@ -1,3 +1,4 @@
+import { removeFutureRecallSchemaForLegacyFixture } from "../helpers/future-memory-schema.js";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -580,6 +581,7 @@ test("v15到v16同事务迁移案例、硬条件、暂停和metadata；不伪造
   const bareTerm = (await seed(store, "legacy-bare-term")).candidate;
   store.close();
   const db = new DatabaseSync(path);
+  removeFutureRecallSchemaForLegacyFixture(db);
   for (const candidate of [method, unknown, corrected, bareTerm]) {
     const {
       representation: _representation,
@@ -787,6 +789,7 @@ test("v16迁移失败回滚候选、metadata与schema，秘密输出和未观察
   const { candidate } = await seed(store, "rollback");
   store.close();
   const db = new DatabaseSync(path);
+  removeFutureRecallSchemaForLegacyFixture(db);
   db.prepare("INSERT INTO task_experience_actions VALUES(?,?,?,?,?,?)").run(
     "corrupt",
     "workspace",

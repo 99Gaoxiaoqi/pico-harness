@@ -1,3 +1,4 @@
+import { removeFutureRecallSchemaForLegacyFixture } from "../helpers/future-memory-schema.js";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -208,6 +209,7 @@ test("v9, v10 and v11 memory databases upgrade to v16 preserving facts and retir
       : undefined;
     store.close();
     const old = new DatabaseSync(path);
+    removeFutureRecallSchemaForLegacyFixture(old);
     if (version !== 9) {
       old.exec(LEGACY_LESSON_SCHEMA_SQL);
       seedLegacyLesson(old, { candidateId: "legacy-pending", workspaceKey });

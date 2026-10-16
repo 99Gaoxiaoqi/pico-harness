@@ -1,3 +1,4 @@
+import { removeFutureRecallSchemaForLegacyFixture } from "../helpers/future-memory-schema.js";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -49,6 +50,7 @@ async function fixture(t: TestContext) {
   const fence = await store.readDeletionRevision();
   store.close();
   const db = new DatabaseSync(path);
+  removeFutureRecallSchemaForLegacyFixture(db);
   db.exec(LEGACY_LESSON_SCHEMA_SQL);
   db.exec("PRAGMA user_version=13");
   seedLegacyLesson(db, { candidateId: "confirmed", itemId: ids[0]! });
