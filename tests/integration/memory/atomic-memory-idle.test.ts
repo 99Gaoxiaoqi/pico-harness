@@ -35,7 +35,7 @@ const summary = [
 ].join("\n\n");
 
 async function fixture(t: TestContext) {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
   const root = await mkdtemp(join(tmpdir(), "pico-memory-idle-"));
   const workDir = join(root, "workspace"),
     picoHome = join(root, "home"),

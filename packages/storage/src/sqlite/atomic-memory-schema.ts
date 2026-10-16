@@ -27,7 +27,7 @@ import {
   retireExecutionLessons,
 } from "./retire-execution-lessons.js";
 
-export const SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION = 17;
+export const SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION = 18;
 
 const MEMORY_EXTRACTION_JOB_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS memory_extraction_jobs (
@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS memory_extraction_jobs (
   lease_until INTEGER NOT NULL DEFAULT 0 CHECK(lease_until >= 0),
   fencing_token INTEGER NOT NULL DEFAULT 0 CHECK(fencing_token >= 0),
   model_calls INTEGER NOT NULL DEFAULT 0 CHECK(model_calls >= 0),
+  model_call_budget INTEGER NOT NULL DEFAULT 6 CHECK(model_call_budget >= 1),
   reason TEXT,
   created_at INTEGER NOT NULL CHECK(created_at >= 0),
   updated_at INTEGER NOT NULL CHECK(updated_at >= created_at),
@@ -94,6 +95,58 @@ CREATE TABLE memory_consolidation_receipts (
 );
 CREATE INDEX memory_consolidation_receipts_recent
   ON memory_consolidation_receipts(committed_at DESC, operation_id ASC);
+`;
+
+const MEMORY_RECALL_REVISION_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS memory_recall_revision (
+  singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+  revision INTEGER NOT NULL CHECK(revision >= 0)
+);
+INSERT OR IGNORE INTO memory_recall_revision(singleton, revision) VALUES (1, 0);
+CREATE TRIGGER IF NOT EXISTS memory_recall_revision_item_insert AFTER INSERT ON memory_items BEGIN
+  UPDATE memory_recall_revision SET revision=revision+1 WHERE singleton=1;
+END;
+CREATE TRIGGER IF NOT EXISTS memory_recall_revision_item_update AFTER UPDATE OF content,kind,statement_type,
+  temporal_type,scope_type,scope_key,event_started_at,event_ended_at,lifecycle_state,origin,content_hash
+  ON memory_items BEGIN
+  UPDATE memory_recall_revision SET revision=revision+1 WHERE singleton=1;
+END;
+CREATE TRIGGER IF NOT EXISTS memory_recall_revision_item_delete AFTER DELETE ON memory_items BEGIN
+  UPDATE memory_recall_revision SET revision=revision+1 WHERE singleton=1;
+END;
+CREATE TRIGGER IF NOT EXISTS memory_recall_revision_settings_insert AFTER INSERT ON memory_settings BEGIN
+  UPDATE memory_recall_revision SET revision=revision+1 WHERE singleton=1;
+END;
+CREATE TRIGGER IF NOT EXISTS memory_recall_revision_settings_update AFTER UPDATE OF version,enabled,auto_extract,recall_enabled
+  ON memory_settings BEGIN
+  UPDATE memory_recall_revision SET revision=revision+1 WHERE singleton=1;
+END;
+CREATE TRIGGER IF NOT EXISTS memory_recall_revision_key_insert AFTER INSERT ON memory_item_keys BEGIN
+  UPDATE memory_recall_revision SET revision=revision+1 WHERE singleton=1;
+END;
+CREATE TRIGGER IF NOT EXISTS memory_recall_revision_key_delete AFTER DELETE ON memory_item_keys BEGIN
+  UPDATE memory_recall_revision SET revision=revision+1 WHERE singleton=1;
+END;
+CREATE TRIGGER IF NOT EXISTS memory_recall_revision_candidate_insert AFTER INSERT ON execution_learning_candidates BEGIN
+  UPDATE memory_recall_revision SET revision=revision+1 WHERE singleton=1;
+END;
+CREATE TRIGGER IF NOT EXISTS memory_recall_revision_candidate_update AFTER UPDATE OF state,revision,item_id,record_json
+  ON execution_learning_candidates BEGIN
+  UPDATE memory_recall_revision SET revision=revision+1 WHERE singleton=1;
+END;
+CREATE TRIGGER IF NOT EXISTS memory_recall_revision_candidate_delete AFTER DELETE ON execution_learning_candidates BEGIN
+  UPDATE memory_recall_revision SET revision=revision+1 WHERE singleton=1;
+END;
+CREATE TRIGGER IF NOT EXISTS memory_recall_revision_learning_item_insert AFTER INSERT ON execution_learning_items BEGIN
+  UPDATE memory_recall_revision SET revision=revision+1 WHERE singleton=1;
+END;
+CREATE TRIGGER IF NOT EXISTS memory_recall_revision_learning_item_update AFTER UPDATE OF item_content_hash,source_type,metadata_json
+  ON execution_learning_items BEGIN
+  UPDATE memory_recall_revision SET revision=revision+1 WHERE singleton=1;
+END;
+CREATE TRIGGER IF NOT EXISTS memory_recall_revision_learning_item_delete AFTER DELETE ON execution_learning_items BEGIN
+  UPDATE memory_recall_revision SET revision=revision+1 WHERE singleton=1;
+END;
 `;
 
 const EXECUTION_LESSON_SCHEMA_SQL = `
@@ -270,7 +323,8 @@ CREATE INDEX memory_items_by_scope_and_lifecycle
   EXECUTION_LEARNING_SCHEMA_SQL +
   TASK_EXPERIENCE_SCHEMA_SQL +
   MEMORY_CONSOLIDATION_SCHEMA_SQL +
-  MEMORY_EXTRACTION_JOB_SCHEMA_SQL;
+  MEMORY_EXTRACTION_JOB_SCHEMA_SQL +
+  MEMORY_RECALL_REVISION_SCHEMA_SQL;
 
 const CURRENT_SCHEMA_SHAPE = {
   tables: [
@@ -340,10 +394,15 @@ const CURRENT_SCHEMA_SHAPE = {
         "lease_until",
         "fencing_token",
         "model_calls",
+        "model_call_budget",
         "reason",
         "created_at",
         "updated_at",
       ],
+    },
+    {
+      name: "memory_recall_revision",
+      requiredColumns: ["singleton", "revision"],
     },
     {
       name: "memory_item_keys",
@@ -462,6 +521,14 @@ export function initializeSqliteLongTermMemoryDatabase(db: DatabaseSync): void {
       if (version < 14) retireExecutionLessons(db);
       if (version < 16) migrateTaskExperienceV16(db);
       if (version < 17) db.exec(MEMORY_EXTRACTION_JOB_SCHEMA_SQL);
+      if (version >= 17 && version < 18) {
+        db.exec(
+          "ALTER TABLE memory_extraction_jobs ADD COLUMN model_call_budget INTEGER NOT NULL DEFAULT 6 CHECK(model_call_budget >= 1)",
+        );
+      }
+      if (version > 0 && version < 18) {
+        db.exec(MEMORY_RECALL_REVISION_SCHEMA_SQL);
+      }
       db.exec(`PRAGMA user_version = ${SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION}`);
     }
     validateMinimumSchemaShape(db);
@@ -484,10 +551,12 @@ export function assertSupportedSqliteLongTermMemorySchemaVersion(db: DatabaseSyn
     version !== 13 &&
     version !== 14 &&
     version !== 15 &&
+    version !== 16 &&
+    version !== 17 &&
     version !== SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION
   ) {
     throw new Error(
-      `Long-term memory SQLite schema ${version} is unsupported; expected ${SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION}. Only schemas 9, 10, 11, 12, 13, 14 and 15 can be upgraded automatically.`,
+      `Long-term memory SQLite schema ${version} is unsupported; expected ${SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION}. Only schemas 9, 10, 11, 12, 13, 14, 15, 16 and 17 can be upgraded automatically.`,
     );
   }
   if (
@@ -728,6 +797,8 @@ function validateMinimumSchemaShape(
   for (const table of shape.tables) {
     if (!includeExecutionLessons && table.name === "execution_lesson_candidates") continue;
     if (schemaVersion < 15 && table.name.startsWith("memory_consolidation_")) continue;
+    if (schemaVersion < 17 && table.name === "memory_extraction_jobs") continue;
+    if (schemaVersion < 18 && table.name === "memory_recall_revision") continue;
     const object = readSchemaObject.get(table.name) as
       | { type?: unknown; tbl_name?: unknown }
       | undefined;
@@ -745,6 +816,12 @@ function validateMinimumSchemaShape(
         .filter((name): name is string => typeof name === "string"),
     );
     for (const column of table.requiredColumns) {
+      if (
+        schemaVersion === 17 &&
+        table.name === "memory_extraction_jobs" &&
+        column === "model_call_budget"
+      )
+        continue;
       if (!columns.has(column)) {
         throw incompleteSchemaError(`table ${table.name} is missing required column ${column}`);
       }

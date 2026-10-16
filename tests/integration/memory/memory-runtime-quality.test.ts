@@ -1063,7 +1063,7 @@ interface RuntimeFixture {
 }
 
 async function createFixture(name: string, context: TestContext): Promise<RuntimeFixture> {
-  context.mock.timers.enable({ apis: ["setTimeout"] });
+  context.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.now() });
   const lifecycle = new DrainableMemoryLifecycle();
   context.after(async () => {
     await lifecycle.close();
