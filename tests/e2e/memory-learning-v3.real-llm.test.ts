@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { access, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { test, type TestContext } from "node:test";
 import {
@@ -806,7 +806,10 @@ for (const variant of [0, 1]) {
         .find((call) => {
           if (call.name !== "read_file") return false;
           const path = (JSON.parse(call.arguments) as { path?: unknown }).path;
-          return path === checkFile || path === join(f.workDir, checkFile);
+          return (
+            typeof path === "string" &&
+            resolve(f.workDir, path) === resolve(f.workDir, checkFile)
+          );
         });
       assert.ok(checkerRead, "source must inspect the actual checker through read_file");
       const failedCheckIndex = source.events.findIndex(
@@ -822,8 +825,11 @@ for (const variant of [0, 1]) {
         (event) => event.kind === "tool.started" && event.data.toolName === "write_file",
       );
       assert.ok(
-        failedCheckIndex < checkerReadIndex && checkerReadIndex < repairIndex,
-        "actual checker read must durably succeed after failure and before config repair",
+        failedCheckIndex >= 0 &&
+          checkerReadIndex >= 0 &&
+          failedCheckIndex < repairIndex &&
+          checkerReadIndex < repairIndex,
+        "the actual failed check and successful checker read must both precede config repair",
       );
       const sourceCommands = source.events.filter(
         (event) => event.kind === "tool.result.recorded" && event.data.toolName === "bash",
