@@ -350,7 +350,7 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
           "memory-learning-v2",
           "memory-learning-v3",
           "memory-experience-feedback-v1",
-      "memory-extraction-durable-v1",
+          "memory-extraction-durable-v1",
           RUN_POINT_LOOKUP_RUNTIME_CAPABILITY,
           TERMINAL_STREAM_RUNTIME_CAPABILITY,
           "shared-config-v1",

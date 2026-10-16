@@ -19,7 +19,7 @@ const retiredTables = [
 test("opening an incompatible memory database rejects it without upgrading or clearing it", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-memory-incompatible-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  for (const version of [0, 7, 8, 17]) {
+  for (const version of [0, 7, 8, 19]) {
     const path = join(root, `memory-${version}.sqlite`);
     const db = new DatabaseSync(path);
     db.exec(
@@ -32,9 +32,69 @@ test("opening an incompatible memory database rejects it without upgrading or cl
       () => new SqliteMemoryItemStore(path),
       version === 0
         ? /non-empty unversioned/
-        : /Only schemas 9, 10, 11, 12, 13, 14 and 15 can be upgraded automatically/,
+        : /Only schemas 9, 10, 11, 12, 13, 14, 15, 16 and 17 can be upgraded automatically/,
     );
     assert.deepEqual(await readFile(path), before);
+  }
+});
+
+test("a real v16 memory schema upgrades while preserving facts, settings, and experience", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-memory-v16-upgrade-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const path = join(root, "memory.sqlite");
+  const fixture = await readFile(new URL("./fixtures/memory-v16.sql", import.meta.url), "utf8");
+  const before = new DatabaseSync(path);
+  before.exec(fixture);
+  assert.equal(before.prepare("PRAGMA user_version").get()?.user_version, 16);
+  const itemBefore = before
+    .prepare(
+      "SELECT item_id,content,content_hash FROM memory_items WHERE content='Historical v16 fact fixture'",
+    )
+    .get();
+  const settingsBefore = before
+    .prepare("SELECT * FROM memory_settings WHERE workspace_key='fixture-workspace'")
+    .get();
+  const experienceBefore = before
+    .prepare("SELECT * FROM execution_learning_candidates WHERE candidate_id='fixture-experience'")
+    .get();
+  before.close();
+
+  const store = new SqliteMemoryItemStore(path);
+  try {
+    assert.equal(store.schemaVersion(), 18);
+  } finally {
+    store.close();
+  }
+  const after = new DatabaseSync(path, { readOnly: true });
+  try {
+    assert.deepEqual(
+      after
+        .prepare(
+          "SELECT item_id,content,content_hash FROM memory_items WHERE content='Historical v16 fact fixture'",
+        )
+        .get(),
+      itemBefore,
+    );
+    assert.deepEqual(
+      after.prepare("SELECT * FROM memory_settings WHERE workspace_key='fixture-workspace'").get(),
+      settingsBefore,
+    );
+    assert.deepEqual(
+      after
+        .prepare(
+          "SELECT * FROM execution_learning_candidates WHERE candidate_id='fixture-experience'",
+        )
+        .get(),
+      experienceBefore,
+    );
+    assert.ok(
+      after
+        .prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='memory_extraction_jobs'")
+        .get(),
+    );
+    assert.deepEqual(after.prepare("PRAGMA foreign_key_check").all(), []);
+  } finally {
+    after.close();
   }
 });
 
@@ -70,7 +130,7 @@ function assertCurrentTables(path: string) {
       .prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
       .all()
       .map((row) => row.name);
-    assert.equal(names.length, 27);
+    assert.equal(names.length, 29);
     assert.ok(names.includes("execution_learning_native_facts"));
     assert.equal(names.includes("execution_lesson_candidates"), false);
     assert.ok(names.includes("memory_settings"));

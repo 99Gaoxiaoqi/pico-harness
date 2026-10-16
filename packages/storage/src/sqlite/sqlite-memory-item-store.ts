@@ -326,6 +326,18 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
     return readSqliteLongTermMemorySchemaVersion(this.#database);
   }
 
+  async readRecallRevision(): Promise<string> {
+    this.#assertOpen();
+    return this.#readSnapshot(() => {
+      const row = this.#database
+        .prepare("SELECT revision FROM memory_recall_revision WHERE singleton=1")
+        .get() as { revision: unknown } | undefined;
+      if (!row || !Number.isSafeInteger(Number(row.revision)) || Number(row.revision) < 0)
+        throw new Error("memory_recall_revision_unavailable");
+      return String(row.revision);
+    });
+  }
+
   journalMode(): string {
     this.#assertOpen();
     const row = this.#database.prepare("PRAGMA journal_mode").get() as
@@ -595,26 +607,6 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
            ) VALUES (?, ?, ?, ?, ?)`,
         )
         .run(operationId, sessionId, requestHash, JSON.stringify(receipt), committedAt);
-      if (request.jobClaim) {
-        const settled = this.#database
-          .prepare(
-            `UPDATE memory_extraction_jobs
-             SET state='settled', owner_id=NULL, lease_until=0, reason=NULL, updated_at=?
-             WHERE job_id=? AND state='working' AND owner_id=? AND fencing_token=? AND lease_until>?`,
-          )
-          .run(
-            committedAt,
-            request.jobClaim.jobId,
-            request.jobClaim.ownerId,
-            request.jobClaim.fencingToken,
-            committedAt,
-          );
-        if (settled.changes !== 1)
-          throw new MemoryItemStoreConflictError(
-            "cursor_conflict",
-            "Memory extraction job claim was fenced",
-          );
-      }
       this.#database.exec("COMMIT");
       this.#options.failpoint?.("after_commit");
       return {
@@ -964,7 +956,6 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
            ) VALUES (?, ?, ?, ?, ?)`,
         )
         .run(operationId, sessionId, requestHash, JSON.stringify(receipt), recordedAt);
-      if (request.jobClaim) this.#settleExtractionJobClaim(request.jobClaim, recordedAt);
       this.#database.exec("COMMIT");
       this.#options.failpoint?.("after_commit");
       return {
@@ -1014,6 +1005,11 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
       "settingsVersion",
       false,
     );
+    const modelCallBudget = normalizeCursorOrdinal(
+      request.modelCallBudget ?? 6,
+      "modelCallBudget",
+      false,
+    );
     const notBefore = normalizeTimestamp(request.notBefore, "notBefore");
     this.#database.exec("BEGIN IMMEDIATE");
     try {
@@ -1022,8 +1018,8 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
           `INSERT INTO memory_extraction_jobs(
           job_id,session_id,workspace_key,work_dir,source_event_id,source_hash,source_kind,source_ordinal,through_ordinal,
           trigger,compaction_checkpoint_id,deletion_revision,settings_version,state,not_before,
-          created_at,updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?,?)
+          model_call_budget,created_at,updated_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?,?,?)
         ON CONFLICT(session_id,source_event_id,trigger) DO NOTHING`,
         )
         .run(
@@ -1041,6 +1037,7 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
           deletionRevision,
           settingsVersion,
           notBefore,
+          modelCallBudget,
           now,
           now,
         );
@@ -1061,7 +1058,8 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
         Number(row.source_ordinal) !== sourceOrdinal ||
         Number(row.through_ordinal) !== throughOrdinal ||
         Number(row.deletion_revision) !== deletionRevision ||
-        Number(row.settings_version) !== settingsVersion
+        Number(row.settings_version) !== settingsVersion ||
+        Number(row.model_call_budget) !== modelCallBudget
       )
         throw new MemoryItemStoreConflictError(
           "operation_reused",
@@ -1136,7 +1134,7 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
       .prepare(
         `UPDATE memory_extraction_jobs SET model_calls=model_calls+1, updated_at=?
        WHERE job_id=? AND state='working' AND owner_id=? AND fencing_token=? AND lease_until>?
-         AND model_calls < 6`,
+         AND model_calls < model_call_budget`,
       )
       .run(now, claim.jobId, claim.ownerId, claim.fencingToken, now);
     if (updated.changes !== 1) {
@@ -1151,7 +1149,7 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
 
   async transitionExtractionJob(input: {
     claim: MemoryExtractionJobClaim;
-    state: "pending" | "blocked";
+    state: "pending" | "blocked" | "settled";
     notBefore?: number;
     reason?: string;
   }): Promise<void> {
@@ -1215,6 +1213,37 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
     });
   }
 
+  async listExtractionJobs(input: {
+    workspaceKey: string;
+    sessionId: string;
+    afterJobId?: string;
+    limit?: number;
+  }): Promise<readonly MemoryExtractionJob[]> {
+    this.#assertOpen();
+    const workspaceKey = normalizeIdentifier(input.workspaceKey, "workspaceKey");
+    const sessionId = normalizeIdentifier(input.sessionId, "sessionId");
+    const afterJobId = input.afterJobId
+      ? normalizeIdentifier(input.afterJobId, "afterJobId")
+      : undefined;
+    const limit =
+      input.limit === undefined ? 100 : normalizeCursorOrdinal(input.limit, "limit", false);
+    return this.#readSnapshot(() => {
+      const query = afterJobId
+        ? `SELECT * FROM memory_extraction_jobs
+           WHERE workspace_key=? AND session_id=? AND state IN ('pending','working') AND job_id>?
+           ORDER BY job_id LIMIT ?`
+        : `SELECT * FROM memory_extraction_jobs
+           WHERE workspace_key=? AND session_id=? AND state IN ('pending','working')
+           ORDER BY job_id LIMIT ?`;
+      const rows = afterJobId
+        ? this.#database
+            .prepare(query)
+            .all(workspaceKey, sessionId, afterJobId, Math.min(limit, 500))
+        : this.#database.prepare(query).all(workspaceKey, sessionId, Math.min(limit, 500));
+      return (rows as Array<Record<string, unknown>>).map(decodeMemoryExtractionJob);
+    });
+  }
+
   #assertExtractionJobClaim(claim: MemoryExtractionJobClaim, now: number): void {
     const row = this.#database
       .prepare(
@@ -1245,21 +1274,6 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
         claim.fencingToken,
         now,
       );
-    if (updated.changes !== 1)
-      throw new MemoryItemStoreConflictError(
-        "cursor_conflict",
-        "Memory extraction job claim was fenced",
-      );
-  }
-
-  #settleExtractionJobClaim(claim: MemoryExtractionJobClaim, now: number): void {
-    const updated = this.#database
-      .prepare(
-        `UPDATE memory_extraction_jobs SET state='settled', owner_id=NULL, lease_until=0,
-         reason=NULL, updated_at=?
-         WHERE job_id=? AND state='working' AND owner_id=? AND fencing_token=? AND lease_until>?`,
-      )
-      .run(now, claim.jobId, claim.ownerId, claim.fencingToken, now);
     if (updated.changes !== 1)
       throw new MemoryItemStoreConflictError(
         "cursor_conflict",
@@ -1441,12 +1455,47 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
         ...group,
         emptyRate: group.evaluatedCount ? group.emptyCount / group.evaluatedCount : null,
       }));
+      const jobGroups = this.#database
+        .prepare(
+          `SELECT state, reason, COUNT(*) AS count
+           FROM memory_extraction_jobs WHERE state IN ('pending','working','blocked')
+           GROUP BY state, reason`,
+        )
+        .all() as Array<{ state: unknown; reason: unknown; count: unknown }>;
+      const jobMetrics = { pending: 0, working: 0, blocked: 0 };
+      const reasons = new Map<
+        NonNullable<MemoryExtractionMetrics["jobs"]>["reasons"][number]["reason"],
+        number
+      >();
+      for (const row of jobGroups) {
+        const state = row.state;
+        const count = requiredNonNegativeInteger(row.count, "count");
+        if (state === "pending" || state === "working" || state === "blocked")
+          jobMetrics[state] += count;
+        if (typeof row.reason === "string") {
+          const reason = publicExtractionJobReason(row.reason);
+          reasons.set(reason, (reasons.get(reason) ?? 0) + count);
+        }
+      }
+      const oldestPendingAt = this.#database
+        .prepare(
+          "SELECT MIN(created_at) AS oldest FROM memory_extraction_jobs WHERE state='pending'",
+        )
+        .get() as { oldest: unknown };
+      const oldest = oldestPendingAt.oldest;
       return {
         scope: "user",
         from,
         to,
         groups: projected.sort((a, b) => compareText(a.trigger, b.trigger)),
         unknownReceiptCount,
+        jobs: {
+          ...jobMetrics,
+          ...(oldest === null || oldest === undefined
+            ? {}
+            : { oldestPendingAt: requiredNonNegativeInteger(oldest, "oldest_pending_at") }),
+          reasons: [...reasons].map(([reason, count]) => ({ reason, count })),
+        },
       };
     });
   }
@@ -3482,6 +3531,7 @@ function decodeMemoryExtractionJob(row: Record<string, unknown>): MemoryExtracti
     ...(leaseUntil > 0 ? { leaseUntil } : {}),
     fencingToken: requiredNonNegativeInteger(row.fencing_token, "fencing_token"),
     modelCalls: requiredNonNegativeInteger(row.model_calls, "model_calls"),
+    modelCallBudget: requiredPositiveInteger(row.model_call_budget, "model_call_budget"),
     ...(row.reason === null ? {} : { reason: requiredIdentifierString(row.reason, "reason") }),
   };
 }
@@ -3686,6 +3736,22 @@ function databaseSidecars(path: string): readonly string[] {
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return typeof error === "object" && error !== null && "code" in error;
+}
+
+function publicExtractionJobReason(
+  reason: string,
+): NonNullable<MemoryExtractionMetrics["jobs"]>["reasons"][number]["reason"] {
+  if (reason === "memory_disabled") return "auto_extract_disabled";
+  if (reason === "provider_unsupported" || reason === "model_unavailable")
+    return "model_unavailable";
+  if (reason === "retry_exhausted") return "retry_exhausted";
+  if (reason === "source_unavailable" || reason === "session_unavailable")
+    return "workspace_unavailable";
+  if (reason === "policy_denied" || reason === "policy_disabled") return "policy_disabled";
+  if (reason === "untrusted_workspace") return "untrusted_workspace";
+  if (reason === "workspace_unavailable") return "workspace_unavailable";
+  if (reason === "extraction_failed" || reason === "invalid_response") return "extraction_failed";
+  return "unknown";
 }
 
 function rollback(database: DatabaseSync): void {

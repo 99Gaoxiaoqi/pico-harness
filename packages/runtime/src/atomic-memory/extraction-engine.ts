@@ -102,7 +102,7 @@ export class AtomicMemoryExtractionEngine {
 
   private async executeFrozen(snapshot: MemoryExtractionSnapshot): Promise<AtomicMemoryResult> {
     const store = this.options.store;
-    const operationId = extractionOperationId(snapshot);
+    const operationId = atomicMemoryExtractionOperationId(snapshot);
     const gate = await this.options.gate(snapshot.trigger);
     if (!gate.allowed || snapshot.signal?.aborted) {
       if (!gate.allowed && !temporaryDenial(gate.reason)) await this.recordDenial(snapshot);
@@ -291,7 +291,7 @@ export class AtomicMemoryExtractionEngine {
       );
       const range = this.range(
         boundarySnapshot,
-        extractionOperationId(boundarySnapshot),
+        atomicMemoryExtractionOperationId(boundarySnapshot),
         after,
         covered.throughOrdinal,
         historyAfter(covered.throughOrdinal),
@@ -821,7 +821,13 @@ export class AtomicMemoryExtractionEngine {
     const after = cursor?.processedOrdinal ?? 0;
     if (after < snapshot.boundaryOrdinal)
       await this.commit(
-        this.range(snapshot, extractionOperationId(snapshot), after, snapshot.boundaryOrdinal, 0),
+        this.range(
+          snapshot,
+          atomicMemoryExtractionOperationId(snapshot),
+          after,
+          snapshot.boundaryOrdinal,
+          0,
+        ),
         [],
         [],
         undefined,
@@ -1195,7 +1201,8 @@ function validCheckpoint(
   );
 }
 
-function extractionOperationId(snapshot: MemoryExtractionSnapshot): string {
+export function atomicMemoryExtractionOperationId(snapshot: MemoryExtractionSnapshot): string {
+  if (snapshot.recoveryOperationId) return snapshot.recoveryOperationId;
   return `memory_${snapshot.trigger}_${hash([snapshot.sessionId, snapshot.compactionCheckpointId ?? snapshot.boundaryEventId, snapshot.trigger === "compaction" ? null : snapshot.runId, snapshot.trigger === "compaction" ? null : snapshot.turnId])}`;
 }
 function hash(value: unknown): string {

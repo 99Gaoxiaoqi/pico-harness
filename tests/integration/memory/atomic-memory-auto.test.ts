@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { test, type TestContext } from "node:test";
 import { AtomicMemoryLifecycle } from "@pico/runtime";
 import { SilentReporter } from "@pico/runtime/silent-reporter";
@@ -38,7 +39,7 @@ const emptyProposal = JSON.stringify({
 });
 
 async function fixture(t: TestContext) {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
   const pending = new Set<Promise<void>>();
   const lifecycle = new AtomicMemoryLifecycle(() => {
     const completion = Promise.withResolvers<void>();
@@ -65,6 +66,7 @@ async function fixture(t: TestContext) {
   const requests: MemoryModelRequest[] = [];
   const dependencies: AgentRuntimeDependencies = {
     picoHome,
+    atomicMemoryExtractionIdleMs: 0,
     memoryTrustStore: trust,
     atomicMemoryLifecycle: lifecycle,
     reporter: new SilentReporter(),
@@ -136,17 +138,86 @@ async function fixture(t: TestContext) {
       assert.equal(terminal.event.kind, "run.terminal");
       return terminal;
     },
+    async runWithoutDrain(prompt: string) {
+      await executeAgentRuntime(
+        {
+          prompt,
+          dir: workDir,
+          provider: "openai",
+          modelRouteId: "test/test",
+          sessionSelection: { mode: runs++ === 0 ? "new" : "resume", sessionId },
+        },
+        dependencies,
+      );
+      const entries = await events.readSessionEntries(sessionId);
+      return entries.filter((entry) => entry.event.kind === "run.terminal").at(-1)!;
+    },
   };
 }
 
 test("ordinary completion automatically persists memory without memory_extract and repeated dispatch stays idempotent", async (t) => {
   const f = await fixture(t);
+  const older = await f.store.applyMutations({
+    operationId: "consolidation-seed-older",
+    mutations: [
+      {
+        type: "create",
+        item: {
+          content: "I prefer long answers.",
+          kind: "preference",
+          statementType: "fact",
+          temporalType: "undated",
+          scopeType: "global",
+          observedAt: 0,
+          origin: "agent_extracted",
+          keys: [{ key: "answer style", keyType: "exact", keyOrigin: "deterministic" }],
+          sources: [{ sessionId: f.sessionId, runId: "older", turnId: "older", eventId: "older" }],
+        },
+      },
+    ],
+  });
+  t.mock.timers.tick(1);
+  const newer = await f.store.applyMutations({
+    operationId: "consolidation-seed-newer",
+    mutations: [
+      {
+        type: "create",
+        item: {
+          content: "I prefer concise answers.",
+          kind: "preference",
+          statementType: "fact",
+          temporalType: "undated",
+          scopeType: "global",
+          observedAt: 1,
+          origin: "agent_extracted",
+          keys: [{ key: "answer style", keyType: "exact", keyOrigin: "deterministic" }],
+          sources: [{ sessionId: f.sessionId, runId: "newer", turnId: "newer", eventId: "newer" }],
+        },
+      },
+    ],
+  });
   const terminal = await f.run(fact, {
     dependencies: {
       atomicMemoryModelFactory: async () => ({
         model: {
           async call(request) {
             f.requests.push(structuredClone(request));
+            if (request.prompt.startsWith("你在整理长期记忆。")) {
+              const groups = JSON.parse(request.prompt.split("\n").at(-1)!) as Array<{
+                items: Array<{ itemId: string }>;
+                newestItemId: string;
+              }>;
+              const group = groups[0]!;
+              return JSON.stringify({
+                archive: [
+                  {
+                    itemId: group.items.find(({ itemId }) => itemId !== group.newestItemId)?.itemId,
+                    keepItemId: group.newestItemId,
+                    reason: "superseded",
+                  },
+                ],
+              });
+            }
             if (request.stage === "canonicalize")
               return JSON.stringify({
                 results: [{ candidateId: "candidate_0", status: "accepted", item }],
@@ -173,8 +244,7 @@ test("ordinary completion automatically persists memory without memory_extract a
       }),
     },
   });
-  assert.equal(f.requests.length, 2);
-  assert.equal((await f.store.listItems({ workspaceKey: f.paths.workspace.id })).length, 1);
+  assert.equal(f.requests.length, 3);
   assert.equal(
     (await f.store.readExtractionCursor(f.sessionKey))?.processedOrdinal,
     terminal.sequence,
@@ -194,6 +264,7 @@ test("ordinary completion automatically persists memory without memory_extract a
     picoHome: f.picoHome,
     sessionId: f.sessionId,
     supported: true,
+    automaticExtractionIdleMs: 0,
     gate: async () => ({ allowed: true }),
     modelFactory: f.dependencies.atomicMemoryModelFactory!,
     lifecycle: f.lifecycle,
@@ -203,7 +274,70 @@ test("ordinary completion automatically persists memory without memory_extract a
   await runtime.completed(terminal.event.runId);
   await f.drain();
   await runtime.drain();
-  assert.equal(f.requests.length, 2);
+  assert.equal(f.requests.length, 3);
+  const seededStates = await Promise.all(
+    [older, newer].map(
+      async ({ results }) => (await f.store.readItem(results[0]!.itemId))?.item.lifecycleState,
+    ),
+  );
+  assert.deepEqual(seededStates.sort(), ["active", "archived"]);
+  assert.equal((await f.store.listItems({ workspaceKey: f.paths.workspace.id })).length, 2);
+});
+
+test("three admitted terminal boundaries commit under one durable multi-range worker", async (t) => {
+  const f = await fixture(t);
+  const terminals = [];
+  for (const prompt of ["First fact.", "Second fact.", "Third fact."]) {
+    const terminal = await f.runWithoutDrain(prompt);
+    assert.equal(terminal.event.kind, "run.terminal");
+    terminals.push(terminal);
+  }
+  const runtime = new AtomicMemoryRuntime({
+    workDir: f.workDir,
+    picoHome: f.picoHome,
+    sessionId: f.sessionId,
+    supported: true,
+    automaticExtractionIdleMs: 0,
+    gate: async () => ({ allowed: true }),
+    modelFactory: async () => ({
+      model: {
+        async call(request) {
+          recoveredRequests.push(structuredClone(request));
+          return emptyProposal;
+        },
+      },
+    }),
+  });
+  const recoveredRequests: MemoryModelRequest[] = [];
+  assert.equal(await runtime.reconcileAdmittedBoundaries(), 0);
+  const persisted = await f.store.listExtractionJobs({
+    workspaceKey: f.paths.workspace.id,
+    sessionId: f.sessionKey,
+  });
+  assert.equal(persisted.length, 3);
+  await f.lifecycle.close();
+  const database = new DatabaseSync(join(f.picoHome, "memory.sqlite"));
+  try {
+    database
+      .prepare("UPDATE memory_extraction_jobs SET not_before=? WHERE workspace_key=?")
+      .run(Date.now(), f.paths.workspace.id);
+  } finally {
+    database.close();
+  }
+  assert.equal(await runtime.recoverPendingJobs(), 3);
+  await runtime.drain();
+  assert.ok(recoveredRequests.length >= 3);
+  assert.equal(
+    (await f.store.readExtractionCursor(f.sessionKey))?.processedOrdinal,
+    terminals.at(-1)!.sequence,
+  );
+  assert.deepEqual(
+    await f.store.listExtractionJobs({
+      workspaceKey: f.paths.workspace.id,
+      sessionId: f.sessionKey,
+    }),
+    [],
+  );
 });
 
 for (const scenario of ["disabled", "tools_denied", "settings_changed", "deleted"] as const) {

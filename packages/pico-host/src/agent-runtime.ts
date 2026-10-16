@@ -471,6 +471,7 @@ export interface RunAgentCliDependencies extends RuntimeHost {
   /** Explicit user-level trust authority for memory recall and review. */
   memoryTrustStore?: WorkspaceTrustStore;
   atomicMemoryLifecycle?: AtomicMemoryLifecycle;
+  atomicMemoryExtractionIdleMs?: number;
   atomicMemoryModelFactory?: () => Promise<AtomicMemoryModelLease>;
   /** @internal Host opt-in for experimental learning from purely successful runs. */
   allowSuccessfulLearning?: boolean;
@@ -1744,6 +1745,9 @@ export async function executeAgentRuntime(
           trigger === "remember" ? memoryExtractionAllowed() : memoryAutomaticAllowed(),
         ...(dependencies.atomicMemoryLifecycle
           ? { lifecycle: dependencies.atomicMemoryLifecycle }
+          : {}),
+        ...(dependencies.atomicMemoryExtractionIdleMs !== undefined
+          ? { automaticExtractionIdleMs: dependencies.atomicMemoryExtractionIdleMs }
           : {}),
         supported: true,
         preserveSourceTools: !!trackedProvider.requestCapabilities?.toolChoiceNoneWithTools,
