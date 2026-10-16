@@ -539,7 +539,7 @@ test("startup wakes an abandoned lease at expiry with cumulative budget, while s
           leaseDurationMs: 10_000,
         });
         assert.ok(abandoned);
-        await store.reserveExtractionModelCall(abandoned);
+        await store.reserveExtractionModelCall(abandoned, "abandoned-operation");
         let calls = 0;
         await recoverRegisteredAtomicMemory({
           ...f,
@@ -581,7 +581,9 @@ test("startup wakes an abandoned lease at expiry with cumulative budget, while s
             2,
             "lease recovery does not reset the prior model call",
           );
-          await assert.rejects(() => store.reserveExtractionModelCall(abandoned));
+          await assert.rejects(() =>
+            store.reserveExtractionModelCall(abandoned, "abandoned-operation"),
+          );
           await f.lifecycle.close();
         }
       },

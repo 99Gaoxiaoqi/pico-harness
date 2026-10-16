@@ -80,7 +80,7 @@ test("v12 receipts migrate once without inventing delivery; existing items and s
   const itemId = await v12(path);
   for (let i = 0; i < 2; i++) {
     const store = new SqliteMemoryItemStore(path);
-    assert.equal(store.schemaVersion(), 19);
+    assert.equal(store.schemaVersion(), 20);
     assert.equal((await store.readItem(itemId))?.item.content, "已有经验方法");
     assert.equal((await store.readSettings("workspace")).autoExtract, false);
     store.close();

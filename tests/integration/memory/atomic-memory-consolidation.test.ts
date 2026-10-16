@@ -677,7 +677,7 @@ test("schema v14 upgrades consolidation tables without rewriting existing memory
   db.close();
   const upgraded = new SqliteMemoryItemStore(f.path);
   t.after(() => upgraded.close());
-  assert.equal(upgraded.schemaVersion(), 19);
+  assert.equal(upgraded.schemaVersion(), 20);
   const item = await upgraded.readItem(itemId);
   assert.equal(item?.item.content, memoryWrite().content);
   assert.equal(item?.item.version, 1);

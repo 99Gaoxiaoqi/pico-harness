@@ -996,9 +996,7 @@ export class AtomicMemoryRuntime {
       const retrySnapshot = pendingFailure
         ? {
             ...executionSnapshot,
-            recoveryOperationId: `memory_recovery_${createHash("sha256")
-              .update(jobId)
-              .digest("hex")}`,
+            recoveryForOperationId: pendingFailure.firstOperationId,
           }
         : executionSnapshot;
       const result =
@@ -1086,7 +1084,10 @@ export class AtomicMemoryRuntime {
       };
       const model: MemoryExtractionModel = {
         call: async (request) => {
-          if (jobClaim) await store.reserveExtractionModelCall(jobClaim);
+          if (jobClaim) {
+            if (!request.operationId) throw new Error("memory_extraction_operation_identity_missing");
+            await store.reserveExtractionModelCall(jobClaim, request.operationId);
+          }
           lease ??= await this.options.modelFactory();
           return lease.model.call(request);
         },
