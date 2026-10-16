@@ -1104,7 +1104,8 @@ export class AtomicMemoryRuntime {
       const model: MemoryExtractionModel = {
         call: async (request) => {
           if (jobClaim) {
-            if (!request.operationId) throw new Error("memory_extraction_operation_identity_missing");
+            if (!request.operationId)
+              throw new Error("memory_extraction_operation_identity_missing");
             await store.reserveExtractionModelCall(jobClaim, request.operationId);
           }
           lease ??= await this.options.modelFactory();
