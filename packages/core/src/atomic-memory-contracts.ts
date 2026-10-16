@@ -383,6 +383,7 @@ export interface MemoryExtractionJob {
   readonly workspaceKey: string;
   readonly workDir: string;
   readonly sourceEventId: string;
+  readonly sourceHash: string;
   readonly sourceKind: "terminal" | "checkpoint" | "explicit";
   readonly sourceOrdinal: number;
   readonly throughOrdinal: number;
@@ -410,6 +411,7 @@ export interface EnqueueMemoryExtractionJobRequest {
   readonly workspaceKey: string;
   readonly workDir: string;
   readonly sourceEventId: string;
+  readonly sourceHash: string;
   readonly sourceKind: "terminal" | "checkpoint" | "explicit";
   readonly sourceOrdinal: number;
   readonly throughOrdinal: number;

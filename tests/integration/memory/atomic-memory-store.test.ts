@@ -303,6 +303,7 @@ test("durable extraction jobs serialize claims and fence expired workers at comm
       workspaceKey: "/workspace/a",
       workDir: "/workspace/a",
       sourceEventId: "terminal-1",
+      sourceHash: "source-hash-1",
       sourceKind: "terminal" as const,
       sourceOrdinal: 2,
       throughOrdinal: 2,

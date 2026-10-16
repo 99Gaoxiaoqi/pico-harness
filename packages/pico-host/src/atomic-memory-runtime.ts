@@ -378,6 +378,7 @@ export class AtomicMemoryRuntime {
         workspaceKey: this.workspaceKey,
         workDir: this.options.workDir,
         sourceEventId: sourceEvent.eventId,
+        sourceHash: extractionSourceHash(snapshot),
         sourceKind: "explicit",
         sourceOrdinal: sourceEvent.ordinal,
         throughOrdinal: sourceEvent.ordinal,
@@ -574,6 +575,7 @@ export class AtomicMemoryRuntime {
         workspaceKey: this.workspaceKey,
         workDir: this.options.workDir,
         sourceEventId: input.sourceEventId,
+        sourceHash: extractionSourceHash(input.snapshot),
         sourceKind: input.sourceKind,
         sourceOrdinal: input.sourceOrdinal,
         throughOrdinal: input.throughOrdinal,
@@ -758,7 +760,9 @@ export class AtomicMemoryRuntime {
       )
         return undefined;
       const snapshot = await this.snapshot("extract", job.deletionRevision, job.throughOrdinal);
-      return snapshot && (!this.options.preserveSourceTools || snapshot.sourceTools !== undefined)
+      return snapshot &&
+        extractionSourceHash(snapshot) === job.sourceHash &&
+        (!this.options.preserveSourceTools || snapshot.sourceTools !== undefined)
         ? { ...snapshot, sourceKind: "terminal", settingsVersion: job.settingsVersion }
         : undefined;
     }
@@ -782,7 +786,9 @@ export class AtomicMemoryRuntime {
       );
       if (!through || through.sequence !== job.throughOrdinal) return undefined;
       const snapshot = await this.snapshot("compaction", job.deletionRevision, checkpoint.sequence);
-      return snapshot && (!this.options.preserveSourceTools || snapshot.sourceTools !== undefined)
+      return snapshot &&
+        extractionSourceHash(snapshot) === job.sourceHash &&
+        (!this.options.preserveSourceTools || snapshot.sourceTools !== undefined)
         ? {
             ...snapshot,
             sourceKind: "checkpoint",
@@ -803,7 +809,9 @@ export class AtomicMemoryRuntime {
     )
       return undefined;
     const snapshot = await this.snapshot("extract", job.deletionRevision, job.throughOrdinal);
-    return snapshot && (!this.options.preserveSourceTools || snapshot.sourceTools !== undefined)
+    return snapshot &&
+      extractionSourceHash(snapshot) === job.sourceHash &&
+      (!this.options.preserveSourceTools || snapshot.sourceTools !== undefined)
       ? {
           ...snapshot,
           sourceKind: "explicit",
@@ -1194,6 +1202,28 @@ function extractionJobId(input: {
       JSON.stringify([input.workspaceKey, input.sessionId, input.sourceEventId, input.trigger]),
     )
     .digest("hex")}`;
+}
+
+function extractionSourceHash(snapshot: MemoryExtractionSnapshot): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        trigger: snapshot.trigger,
+        boundaryOrdinal: snapshot.boundaryOrdinal,
+        boundaryEventId: snapshot.boundaryEventId,
+        compactionCheckpointId: snapshot.compactionCheckpointId,
+        events: snapshot.events.map((event) => [
+          event.ordinal,
+          event.eventId,
+          event.runId,
+          event.turnId,
+          event.observedAt,
+          event.role,
+          event.text,
+        ]),
+      }),
+    )
+    .digest("hex");
 }
 
 function extractionWorkerId(): string {

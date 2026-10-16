@@ -998,6 +998,7 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
     const workspaceKey = normalizeIdentifier(request.workspaceKey, "workspaceKey");
     const workDir = normalizeIdentifier(request.workDir, "workDir");
     const sourceEventId = normalizeIdentifier(request.sourceEventId, "sourceEventId");
+    const sourceHash = normalizeIdentifier(request.sourceHash, "sourceHash");
     const sourceOrdinal = normalizeCursorOrdinal(request.sourceOrdinal, "sourceOrdinal", false);
     const throughOrdinal = normalizeCursorOrdinal(request.throughOrdinal, "throughOrdinal", false);
     if (throughOrdinal < sourceOrdinal) throw new Error("Invalid extraction job source range");
@@ -1019,10 +1020,10 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
       this.#database
         .prepare(
           `INSERT INTO memory_extraction_jobs(
-          job_id,session_id,workspace_key,work_dir,source_event_id,source_kind,source_ordinal,through_ordinal,
+          job_id,session_id,workspace_key,work_dir,source_event_id,source_hash,source_kind,source_ordinal,through_ordinal,
           trigger,compaction_checkpoint_id,deletion_revision,settings_version,state,not_before,
           created_at,updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?,?)
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?,?)
         ON CONFLICT(session_id,source_event_id,trigger) DO NOTHING`,
         )
         .run(
@@ -1031,6 +1032,7 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
           workspaceKey,
           workDir,
           sourceEventId,
+          sourceHash,
           request.sourceKind,
           sourceOrdinal,
           throughOrdinal,
@@ -3454,6 +3456,7 @@ function decodeMemoryExtractionJob(row: Record<string, unknown>): MemoryExtracti
     workspaceKey: requiredIdentifierString(row.workspace_key, "workspace_key"),
     workDir: requiredIdentifierString(row.work_dir, "work_dir"),
     sourceEventId: requiredIdentifierString(row.source_event_id, "source_event_id"),
+    sourceHash: requiredIdentifierString(row.source_hash, "source_hash"),
     sourceKind: row.source_kind as MemoryExtractionJob["sourceKind"],
     sourceOrdinal: requiredPositiveInteger(row.source_ordinal, "source_ordinal"),
     throughOrdinal: requiredPositiveInteger(row.through_ordinal, "through_ordinal"),
