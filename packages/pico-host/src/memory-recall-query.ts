@@ -96,7 +96,8 @@ export async function resolveMemoryRecallQuery(options: {
     )
       continue;
     const text = requestText(event.data.message.content);
-    if (!text || continuation(text)) continue;
+    if (!text) return unchanged;
+    if (continuation(text)) continue;
     // A cancellation/reset is a boundary, never a new task anchor.
     if (
       /^(?:停止|停下|取消|算了|不要继续|重新开始|清空|stop|cancel|reset)(?:[\s。.!！?？]|$)/iu.test(

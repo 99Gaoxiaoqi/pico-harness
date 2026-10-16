@@ -1,4 +1,5 @@
 import { countTokens, primeTokenizer } from "../token-counter.js";
+import { collectMemoryRecallSignals } from "./recall-signals.js";
 import type { MemoryItemRecord, MemorySearchSignals } from "@pico/core/atomic-memory-contracts";
 import type { AtomicMemoryStore } from "@pico/core/atomic-memory-runtime-contracts";
 import type {
@@ -7,11 +8,7 @@ import type {
   MemoryRecallDiagnostic,
 } from "@pico/core";
 import { createMemoryRecallTrace, memoryRecallSelectedItem } from "../memory-recall-trace.js";
-import {
-  collectMemorySearchSignals,
-  normalizeMemorySearchText,
-  scoreMemoryContent,
-} from "@pico/core/atomic-memory-search";
+import { normalizeMemorySearchText, scoreMemoryContent } from "@pico/core/atomic-memory-search";
 
 const AUTO_MAX_ITEMS = 3;
 const SEARCH_MAX_ITEMS = 10;
@@ -171,9 +168,9 @@ export class AtomicMemoryContextBuilder {
     };
     if (!settings.enabled || !settings.recallEnabled) return finish(emptyResult(), "disabled");
 
-    const signals = collectMemorySearchSignals(query);
+    const { primary: signals, aliases } = collectMemoryRecallSignals(query);
     const terms = [...new Set([...signals.paths, ...signals.tokens, ...signals.cjkBigrams])];
-    const [exact, prefix, content, residents] = await Promise.all([
+    const [primaryExact, primaryPrefix, primaryContent, residents] = await Promise.all([
       terms.length
         ? this.store.searchByKeys({
             terms,
@@ -211,6 +208,35 @@ export class AtomicMemoryContextBuilder {
           })
         : [],
     ]);
+    // Preserve the original candidate windows: broad aliases cannot crowd out
+    // an exact current-query match. Extra candidates rank below all primary hits.
+    const aliasTerms = [...new Set([...aliases.tokens, ...aliases.cjkBigrams])];
+    const [aliasExact, aliasPrefix, aliasContent] = aliasTerms.length
+      ? await Promise.all([
+          this.store.searchByKeys({
+            terms: aliasTerms,
+            match: "exact",
+            workspaceKey: this.workspaceKey,
+            includeArchived: false,
+            limit: SEARCH_LIMIT,
+          }),
+          this.store.searchByKeys({
+            terms: aliasTerms,
+            match: "prefix",
+            workspaceKey: this.workspaceKey,
+            includeArchived: false,
+            limit: SEARCH_LIMIT,
+          }),
+          this.store.searchByContent({
+            ...aliases,
+            workspaceKey: this.workspaceKey,
+            limit: SEARCH_LIMIT,
+          }),
+        ])
+      : [[], [], []];
+    const exact = [...primaryExact, ...aliasExact];
+    const prefix = [...primaryPrefix, ...aliasPrefix];
+    const content = [...primaryContent, ...aliasContent];
     // Host-qualified identities are not restricted to the recent resident window.
     const targeted = (
       await Promise.all(
@@ -300,6 +326,13 @@ export class AtomicMemoryContextBuilder {
           referenceNote(record)?.body ?? record.item.content,
           signals,
         );
+        const aliasScore = Math.min(
+          0.25,
+          Math.max(
+            relevanceScore(record, aliases),
+            scoreMemoryContent(referenceNote(record)?.body ?? record.item.content, aliases),
+          ) / 100,
+        );
         return {
           record,
           score:
@@ -316,6 +349,7 @@ export class AtomicMemoryContextBuilder {
               : Math.max(
                   keyScore,
                   contentScore,
+                  aliasScore,
                   record.sourceType === "execution-validated" ? 1 : 0,
                 ),
           match: keyScore > 0 ? ("key" as const) : ("content" as const),

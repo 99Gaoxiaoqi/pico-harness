@@ -3,7 +3,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import type { RuntimeEvent, RuntimeTerminalStatus } from "@pico/core";
+import type { RuntimeTerminalStatus } from "@pico/core";
+import type { RuntimeEvent } from "@pico/storage/runtime-event";
 import { SqliteRuntimeEventStore } from "@pico/storage/sqlite/sqlite-runtime-event-store";
 import { resolveMemoryRecallQuery } from "../../../packages/pico-host/src/memory-recall-query.js";
 
