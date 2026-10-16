@@ -510,7 +510,11 @@ export class ExecutionLearningWorker {
 
   private async safe(content: string, signal: AbortSignal): Promise<boolean> {
     if (!content.trim() || content.length > 8_000) return false;
-    if (sanitizeMemoryContent({ title: "", content, reason: "" }).disposition !== "allow")
+    // Only called for reflection output after frozen canonical sources passed validation.
+    if (
+      sanitizeMemoryContent({ title: "", content, reason: "" }, { context: "task-experience" })
+        .disposition !== "allow"
+    )
       return false;
     return this.options.contentSafety
       ? abortable(Promise.resolve(this.options.contentSafety(content)), signal)

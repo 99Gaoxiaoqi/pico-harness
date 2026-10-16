@@ -27,22 +27,29 @@ const INJECTION_PATTERNS = [
   /\bignore\s+(?:all\s+)?(?:previous|prior|above)\s+(?:instructions?|rules?|prompts?)\b/iu,
   /\b(?:reveal|show|leak|print)\b.{0,30}\b(?:system\s+prompt|developer\s+message|hidden\s+instructions?)\b/iu,
   /\b(?:bypass|disable|override)\b.{0,24}\b(?:safety|guardrails?|policy)\b/iu,
-  /\b(?:call|invoke|execute|run)\b.{0,20}\b(?:tool|command|shell)\b/iu,
   /忽略.{0,20}(?:之前|上面|所有).{0,20}(?:指令|规则|提示)/iu,
   /(?:泄露|显示|输出).{0,24}(?:系统提示|开发者消息|隐藏指令)/iu,
   /(?:绕过|关闭|覆盖).{0,20}(?:安全|防护|策略)/iu,
+] as const;
+const TOOL_ACTION_PATTERNS = [
+  /\b(?:call|invoke|execute|run)\b.{0,20}\b(?:tool|command|shell)\b/iu,
   /(?:调用|执行|运行).{0,16}(?:工具|命令|脚本)/iu,
 ] as const;
 
 export function sanitizeMemoryContent(
   candidate: MemoryContentCandidate,
+  options: { readonly context?: "memory" | "task-experience" } = {},
 ): MemoryContentSanitization {
   const title = normalizeStoredText(candidate.title);
   const content = normalizeStoredText(candidate.content);
   const reason = normalizeStoredText(candidate.reason);
   const combined = `${title}\n${content}\n${reason}`;
   const rejectCodes = secretCodes(combined);
-  if (INJECTION_PATTERNS.some((pattern) => pattern.test(combined))) {
+  if (
+    INJECTION_PATTERNS.some((pattern) => pattern.test(combined)) ||
+    (options.context !== "task-experience" &&
+      TOOL_ACTION_PATTERNS.some((pattern) => pattern.test(combined)))
+  ) {
     rejectCodes.push("prompt_injection");
   }
   if (rejectCodes.length > 0) {
