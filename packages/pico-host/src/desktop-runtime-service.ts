@@ -929,7 +929,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       }),
       ...createDesktopMemoryRequestHandlers({
         queryExperienceUses: (params) => this.withTrustedMemory(params.workspacePath, async canonical => (await this.memoryService.queryExperienceUses(canonical, params)) as unknown as JsonValue),
-        detailExperienceUse: (params) => this.withTrustedMemory(params.workspacePath, async canonical => (await this.memoryService.detailExperienceUse(canonical, params.useId)) as unknown as JsonValue),
+        detailExperienceUse: (params) => this.withTrustedMemory(params.workspacePath, async canonical => (await this.memoryService.detailExperienceUse(canonical, params.useId, params.learningVersion)) as unknown as JsonValue),
         feedbackExperienceUse: (params) => this.withTrustedMemory(params.workspacePath, async canonical => (await this.memoryService.feedbackExperienceUse(canonical, params)) as unknown as JsonValue),
         queryExperiences: (params) =>
           this.withTrustedMemory(
@@ -947,6 +947,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
               (await this.memoryService.detailExperience(
                 canonical,
                 params.candidateId,
+                params.learningVersion,
               )) as unknown as JsonValue,
           ),
         reviewExperience: (params) =>
@@ -2466,7 +2467,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           workspaceKey: paths.workspace.id,
         },
       );
-      if (params.learningVersion === 2) return toJsonValue(page);
+      if (params.learningVersion === 2 || params.learningVersion === 3) return toJsonValue(page);
       // Old trace decoders cannot represent the new provenance enum. Omit only its detail.
       return toJsonValue({
         ...page,
