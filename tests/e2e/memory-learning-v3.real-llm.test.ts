@@ -5,7 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { test, type TestContext } from "node:test";
-import type { LLMProvider, Message, TaskExperienceCandidate } from "@pico/core";
+import {
+  isForegroundProcessFacts,
+  type LLMProvider,
+  type Message,
+  type TaskExperienceCandidate,
+} from "@pico/core";
 import {
   memorySessionKey,
   type MemoryModelRequest,
@@ -49,6 +54,14 @@ const LIMITS = {
 type Category = (typeof MEMORY_V3_REAL_MODEL_MATRIX)[number]["category"];
 
 async function fixture(t: TestContext, category: Category, variant: number) {
+  if (category === "correction") {
+    const inheritedTestContext = process.env.NODE_TEST_CONTEXT;
+    delete process.env.NODE_TEST_CONTEXT;
+    t.after(() => {
+      if (inheritedTestContext === undefined) delete process.env.NODE_TEST_CONTEXT;
+      else process.env.NODE_TEST_CONTEXT = inheritedTestContext;
+    });
+  }
   const model = await loadUserDefaultRealModel();
   const root = await realpath(
     await mkdtemp(join(tmpdir(), `pico-memory-v3-${category}-${variant}-`)),
@@ -86,6 +99,14 @@ async function fixture(t: TestContext, category: Category, variant: number) {
   }[] = [];
   const assertions: string[] = [];
   const controlledFixtures: string[] = [];
+  if (category === "success")
+    controlledFixtures.push(
+      "实验 Host 入口显式启用 allowSuccessfulLearning；生产默认关闭。只有实际纯成功源、产物登记与真实反思构成通过，不据此主张因果复用收益。",
+    );
+  if (category === "fact" && variant === 1)
+    controlledFixtures.push(
+      "初批交接识别码输入的真实 proposal 返回空，原因未明；本次改为明确公开、长期稳定的交接文档标题前缀偏好。原失败保留，不当作随机重试。",
+    );
   let reflectionCalls = 0,
     extractionCalls = 0,
     passed = false,
@@ -249,6 +270,7 @@ async function fixture(t: TestContext, category: Category, variant: number) {
         reporter: new SilentReporter(),
         atomicMemoryLifecycle: lifecycle,
         maxTurns: LIMITS.turnsPerRun,
+        allowSuccessfulLearning: category === "success",
         signal,
         executionLearningWorkerOptions: { idleMs: 10, pollMs: 60_000 },
         atomicMemoryModelFactory: auxiliaryFactory("extraction"),
@@ -386,6 +408,7 @@ async function fixture(t: TestContext, category: Category, variant: number) {
           limits: LIMITS,
           maxRuns,
           controlledFixtures,
+          experimentalHostOptions: { allowSuccessfulLearning: category === "success" },
           assertions,
           runs,
           dispatches: {
@@ -454,7 +477,9 @@ for (const variant of [0, 1]) {
       const f = await fixture(t, "fact", variant);
       const source = await f.run(
         "source",
-        `这个项目的${variant ? "交接识别码" : "发布代号"}是 ${f.marker}。这是本项目持续使用的背景信息。只回复收到，不调用工具，也不要声称已经保存。`,
+        variant
+          ? `这个项目交接文档的公开标题前缀固定使用 ${f.marker}。以后本项目交接文档均沿用此前缀，这是长期稳定的项目文档格式偏好。只回复收到，不调用工具，也不要声称已经保存。`
+          : `这个项目的发布代号是 ${f.marker}。这是本项目持续使用的背景信息。只回复收到，不调用工具，也不要声称已经保存。`,
       );
       const saved = await f.fact(source.sessionId);
       assert.equal(saved.item.scopeType, "workspace");
@@ -471,7 +496,7 @@ for (const variant of [0, 1]) {
       await f.freezeLearning();
       const recalled = await f.run(
         "recall",
-        `本项目的${variant ? "交接识别码" : "发布代号"}是什么？只依据已有记忆输出完整标识；未知输出 UNKNOWN。不要调用工具。`,
+        `本项目的${variant ? "交接文档公开标题前缀" : "发布代号"}是什么？只依据已有记忆输出完整标识；未知输出 UNKNOWN。不要调用工具。`,
       );
       assert.ok(
         f.memoryTexts(recalled.runNumber).some((text) => text.includes(f.marker)),
@@ -518,9 +543,13 @@ for (const variant of [0, 1]) {
       );
       const sourceEvents = await f.readEvents(source.sessionId);
       assert.equal(
-        sourceEvents.some((event) => event.kind === "tool.started"),
+        sourceEvents.some(
+          (event) =>
+            event.kind === "tool.started" &&
+            !["memory_extract", "memory_remember", "memory_search"].includes(event.data.toolName),
+        ),
         false,
-        "tool-free source really has no tool invocation",
+        "tool-free source has no business tool invocation; memory control calls are recorded separately",
       );
       await f.freezeLearning();
       const reuse = await f.run(
@@ -562,7 +591,7 @@ for (const variant of [0, 1]) {
       );
       const result = await f.run(
         "source",
-        `完成一次可重复交接流程：先用 read_file 读取 ${input}，再用 write_file 生成 ${output}，内容为负责人和 items 合计，最后再次 read_file 核对 ${output} 与原始数据一致。不要运行 bash，不改原始输入。完成后说明核对结果。`,
+        `完成一次可重复交接流程：先用 read_file 读取 ${input}，再用 write_file 设置 artifact:true 生成供用户下载的交付文件 ${output}，内容为负责人和 items 合计，最后再次 read_file 核对 ${output} 与原始数据一致。不要运行 bash，不改原始输入。完成后说明核对结果。`,
         { tools: ["memory_extract", "memory_search", "read_file", "write_file"] },
       );
       const body = await readFile(join(f.workDir, output), "utf8");
@@ -719,10 +748,48 @@ for (const variant of [0, 1]) {
       f.controlledFixtures.push(
         "The input checker initially requires a missing config file. The actual model runs, diagnoses, repairs and verifies it; only the initial missing fixture is controlled.",
       );
-      await f.run(
+      const source = await f.run(
         "source",
         `完成 Scope${variant} 验收：先运行 ${command}；根据实际失败信息，仅用 write_file 修复 ${config}；然后原样复测同一个命令，检查通过即结束。不得修改 ${checkFile}。`,
         { tools: ["memory_extract", "memory_search", "bash", "write_file"] },
+      );
+      const sourceCommands = source.events.filter(
+        (event) => event.kind === "tool.result.recorded" && event.data.toolName === "bash",
+      );
+      assert.ok(
+        sourceCommands.some(
+          (event) =>
+            event.kind === "tool.result.recorded" &&
+            isForegroundProcessFacts(event.data.executionFacts) &&
+            event.data.executionFacts.exitCode !== null &&
+            event.data.executionFacts.exitCode !== 0,
+        ),
+        "source must contain a real failed checker execution",
+      );
+      assert.ok(
+        source.events.some(
+          (event) => event.kind === "tool.started" && event.data.toolName === "write_file",
+        ),
+        "source must really repair config through write_file",
+      );
+      assert.ok(
+        sourceCommands.some(
+          (event) =>
+            event.kind === "tool.result.recorded" &&
+            isForegroundProcessFacts(event.data.executionFacts) &&
+            event.data.executionFacts.exitCode === 0,
+        ),
+        "source must contain a real successful checker rerun",
+      );
+      assert.equal(
+        sourceCommands.some(
+          (event) =>
+            event.kind === "tool.result.recorded" &&
+            event.data.body.storage === "inline" &&
+            event.data.body.content.includes("skipping running files"),
+        ),
+        false,
+        "nested Node test context cannot masquerade as a successful check",
       );
       const method = await f.learned(
         (item) =>
