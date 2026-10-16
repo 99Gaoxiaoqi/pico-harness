@@ -277,7 +277,12 @@ import {
   AtomicMemoryContextBuilder,
   ATOMIC_MEMORY_CONTEXT_LIMITS,
 } from "@pico/runtime/atomic-memory/context-builder";
-import { createMemoryRecallTrace, MemoryRecallRequestTracker } from "@pico/runtime";
+import {
+  createMemoryRecallTrace,
+  MemoryRecallRequestTracker,
+  createCaseRecallTrace,
+  memoryRecallCaseSelectedItem,
+} from "@pico/runtime";
 import { resolveMemoryRecallQuery } from "./memory-recall-query.js";
 import type { MemoryRecallTrace } from "@pico/core";
 import {
@@ -1014,6 +1019,7 @@ export async function executeAgentRuntime(
   let reviewedRecallTargets: (
     query: string,
     candidateId?: string,
+    onLimited?: () => void,
   ) => Promise<readonly ReviewedExperienceTarget[]> = async () => [];
   let experienceRecallAllowed: NonNullable<
     import("@pico/runtime/atomic-memory/context-builder").AtomicMemoryContextOptions["experienceAllowed"]
@@ -2693,7 +2699,11 @@ export async function executeAgentRuntime(
         }
       };
       experienceRecallAllowed = (record) => experienceRecordAllowed(record, currentExperienceInput);
-      reviewedRecallTargets = async (query: string, candidateId?: string) => {
+      reviewedRecallTargets = async (
+        query: string,
+        candidateId?: string,
+        onLimited?: () => void,
+      ) => {
         const candidate = candidateId
           ? await repository.taskExperiences.readTaskExperienceCandidate(candidateId)
           : undefined;
@@ -2709,6 +2719,7 @@ export async function executeAgentRuntime(
             return currentTask ? { currentTask } : {};
           })(),
           toolAllowed: recalledToolAllowed,
+          ...(onLimited ? { onLimited } : {}),
           nativeEvidenceMatches: async (candidate) => {
             if (!recalledToolAllowed("bash") || !(await nativeFeedbackGate()).allowed) return false;
             const evidence = candidate.nativeEvidence;
@@ -3065,6 +3076,7 @@ export async function executeAgentRuntime(
             const queryRef = context?.toolCallId ? { toolCallId: context.toolCallId } : undefined;
             let outcome: MemoryRecallTrace["outcome"] = "error";
             let settingsVersion: number | undefined;
+            let limited = false;
             const checkSearchAdmission = async () => {
               const gate = await memoryRecallAllowed();
               if (!gate.allowed) {
@@ -3081,13 +3093,54 @@ export async function executeAgentRuntime(
             try {
               await checkSearchAdmission();
               if (recordType === "case") {
+                const startedAt = performance.now();
+                const selected: ReturnType<typeof memoryRecallCaseSelectedItem>[] = [];
+                let summary: Parameters<typeof createCaseRecallTrace>[0]["summary"];
                 const result = await searchTaskExperienceCases({
                   store: repository.taskExperiences,
                   workspaceKey: memoryWorkspaceKey,
                   workDir,
                   query,
+                  onSelected: (selection) => selected.push(memoryRecallCaseSelectedItem(selection)),
+                  onSelectionSummary: (value) => {
+                    summary = value;
+                  },
                 });
                 await checkSearchAdmission();
+                for (const item of selected) {
+                  const candidate = await repository.taskExperiences.readTaskExperienceCandidate(
+                    item.candidateId,
+                  );
+                  if (
+                    !candidate ||
+                    candidate.contentVersion !== item.contentVersion ||
+                    candidate.recordRevision !== item.recordRevision ||
+                    candidate.workspaceKey !== memoryWorkspaceKey ||
+                    resolve(candidate.workDir) !== resolve(workDir) ||
+                    candidate.representation !== "case" ||
+                    candidate.usagePolicy !== "case_only" ||
+                    candidate.lifecycleState !== "active" ||
+                    (candidate.expiresAt !== undefined && candidate.expiresAt <= Date.now())
+                  )
+                    throw new Error("Memory search unavailable: case_changed");
+                }
+                try {
+                  await recallTracker.record(
+                    createCaseRecallTrace({
+                      workspaceKey: memoryWorkspaceKey,
+                      query,
+                      ...(queryRef ? { queryRef } : {}),
+                      queryPolicyVersion: 1,
+                      ...(settingsVersion !== undefined ? { settingsVersion } : {}),
+                      block: result,
+                      selected,
+                      ...(summary ? { summary } : {}),
+                      elapsedMs: Math.max(0, performance.now() - startedAt),
+                    }),
+                  );
+                } catch {
+                  recallTracker.unavailable("search");
+                }
                 return result;
               }
               const result = await builder.build(query, {
@@ -3105,7 +3158,9 @@ export async function executeAgentRuntime(
                   executionTargetId,
                   runtimeEnv,
                 ),
-                reviewedExperiences: await reviewedRecallTargets(query),
+                reviewedExperiences: await reviewedRecallTargets(query, undefined, () => {
+                  limited = true;
+                }),
                 mode: "search",
                 trace: { ...(queryRef ? { queryRef } : {}) },
               });
@@ -3121,7 +3176,11 @@ export async function executeAgentRuntime(
               )
                 throw new Error("Memory search unavailable: experience_changed");
               const recallEventId = result.trace
-                ? await recallTracker.record(result.trace)
+                ? await recallTracker.record({
+                    ...result.trace,
+                    queryPolicyVersion: 1,
+                    ...(limited ? { outcome: "limited" as const } : {}),
+                  })
                 : undefined;
               if (!result.trace) recallTracker.unavailable("search");
               for (const record of result.items)
@@ -3130,10 +3189,26 @@ export async function executeAgentRuntime(
               await experienceFeedbackRuntime?.recordReferences(result, recallEventId);
               return (
                 result.block ||
-                '<atomic-memory-reference trust="low">No matching active memory.</atomic-memory-reference>'
+                (limited
+                  ? '<atomic-memory-reference trust="low">Search reached its bounded deadline. No matching memory was found in the inspected candidates; this is not a complete search.</atomic-memory-reference>'
+                  : '<atomic-memory-reference trust="low">No matching active memory.</atomic-memory-reference>')
               );
             } catch (error) {
-              await recordRecallOutcome("search", query, outcome, queryRef, settingsVersion);
+              if (recordType === "case") {
+                try {
+                  await recallTracker.record(
+                    createCaseRecallTrace({
+                      workspaceKey: memoryWorkspaceKey,
+                      query,
+                      outcome,
+                      ...(queryRef ? { queryRef } : {}),
+                      ...(settingsVersion !== undefined ? { settingsVersion } : {}),
+                    }),
+                  );
+                } catch {
+                  recallTracker.unavailable("search");
+                }
+              } else await recordRecallOutcome("search", query, outcome, queryRef, settingsVersion);
               throw error;
             }
           },
@@ -3280,8 +3355,14 @@ export async function executeAgentRuntime(
         workDir,
         ...(session.runtimeEventStore ? { events: session.runtimeEventStore } : {}),
         inheritedConversation: !!sideConversation || !!dependencies.configuredSubagentChild,
-      }).catch(() => ({ query: currentUserPrompt }));
-      const recallQueryRef = currentUserEventId ? { eventId: currentUserEventId } : undefined;
+      }).catch((): { query: string; anchorEventId?: string } => ({ query: currentUserPrompt }));
+      const recallQueryRef = currentUserEventId
+        ? {
+            eventId: currentUserEventId,
+            ...(recallQuery.anchorEventId ? { anchorEventId: recallQuery.anchorEventId } : {}),
+          }
+        : undefined;
+      let recallLimited = false;
       try {
         if (!(await memoryRecallAllowed()).allowed) {
           await recordRecallOutcome(
@@ -3320,7 +3401,9 @@ export async function executeAgentRuntime(
                     runtimeEnv,
                   )
                 : [],
-              reviewedExperiences: await reviewedRecallTargets(recallQuery.query),
+              reviewedExperiences: await reviewedRecallTargets(recallQuery.query, undefined, () => {
+                recallLimited = true;
+              }),
               trace: { ...(recallQueryRef ? { queryRef: recallQueryRef } : {}) },
             });
             const finalSettings = await memoryRepository?.readSettings(memoryWorkspaceKey);
@@ -3353,7 +3436,11 @@ export async function executeAgentRuntime(
                 throw new Error("experience_changed");
               if (memory.block) turnTailParts.push(memory.block);
               const recallEventId = memory.trace
-                ? await recallTracker.record(memory.trace)
+                ? await recallTracker.record({
+                    ...memory.trace,
+                    queryPolicyVersion: 1,
+                    ...(recallLimited ? { outcome: "limited" as const } : {}),
+                  })
                 : undefined;
               if (!memory.trace) recallTracker.unavailable("automatic");
               for (const record of memory.items)

@@ -28,7 +28,7 @@ for (const [english, chinese] of pairs) {
       store.close();
       await rm(root, { recursive: true, force: true });
     });
-    const results = [];
+    const results: string[] = [];
     for (const word of [english, chinese]) {
       const saved = await store.applyMutations({
         operationId: `seed-${word}`,
