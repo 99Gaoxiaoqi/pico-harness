@@ -135,7 +135,21 @@ test(
             ).find((candidate) => candidate.taskVersion === 2 && candidate.review === "unneeded");
             assert.ok(candidate);
             const evidence = JSON.parse(request.prompt.slice(request.prompt.lastIndexOf("\n") + 1))
-              .evidence as readonly { evidenceId: string }[];
+              .evidence as readonly { evidenceId: string; summary: string }[];
+            assert.ok(
+              evidence.some(
+                ({ summary }) =>
+                  summary.includes('"result":20') && summary.includes('"header":true'),
+              ),
+              "bounded evidence must retain the initial actual outcome before verbose semantics",
+            );
+            assert.ok(
+              evidence.some(
+                ({ summary }) =>
+                  summary.includes('"result":30') && summary.includes('"header":false'),
+              ),
+              "bounded evidence must retain the corrected actual outcome",
+            );
             return JSON.stringify({
               representation: "method",
               matchHints: ["计算附件", "纯数值范围求和"],

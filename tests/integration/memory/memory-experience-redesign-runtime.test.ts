@@ -326,8 +326,29 @@ test("所有maturity与审核状态共享硬条件；重叠双字词和泛词不
     0,
   );
   assert.equal(scoreExperienceMatch(["代码", "任务", "测试"], "代码任务测试"), 0);
+  assert.equal(scoreExperienceMatch(["代码文件测试任务"], "代码文件测试任务"), 0);
   assert.equal(scoreExperienceMatch(["计算器"], "计算器"), 0);
   assert.ok(scoreExperienceMatch(["具体边界"], "具体边界") > 0);
+  const longQuery =
+    "请为新的实验交接任务给出简短建议：联系人改为新同事，还没有确定日期。使用已有的实验交接方法，先明确具体边界再给出建议，已知和未知分开；不调用工具。";
+  const longHints = ["先明确具体边界", "已知信息和未知日期必须分开", "不要把未知日期补造成事实"];
+  assert.ok(scoreExperienceMatch(longHints, longQuery) > 0);
+  assert.equal(
+    (
+      await taskExperienceRecallTargets({
+        store: {
+          queryTaskExperiences: async () => [{ ...base, matchHints: longHints }],
+        } as unknown as TaskExperienceStore,
+        workspaceKey: "workspace",
+        workDir: "/fixture",
+        query: longQuery,
+        toolAllowed: () => false,
+        conditionMatches: async () => true,
+      })
+    ).length,
+    1,
+    "a distinctive Chinese hint at the end of a long task must survive actual recall gates",
+  );
   assert.equal(scoreExperienceMatch(["boundary"], "boundaries"), 0);
   assert.ok(
     scoreExperienceMatch(

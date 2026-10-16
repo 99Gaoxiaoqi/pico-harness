@@ -482,7 +482,13 @@ export class TaskExperienceRuntime {
             sequence,
             {
               kind: "tool-result",
-              summary: boundedText(`${event.data.toolName}: ${status}\n${raw}`),
+              summary: boundedText(
+                `${event.data.toolName}: ${status}\n${
+                  event.data.toolName === "document" && args?.action === "analyze"
+                    ? compactSpreadsheetResult(raw)
+                    : raw
+                }`,
+              ),
               status,
               toolName: event.data.toolName,
               ...(start ? { preparedEventId: start.eventId } : {}),
@@ -1006,6 +1012,44 @@ function explicitRemember(text: string): boolean {
 }
 function userRequest(content: string): string {
   return content.split(/\n\n附件文件：|\n<uploaded-attachments>/u)[0]!.trim();
+}
+/** Keep observed outcomes ahead of verbose tool semantics within the existing evidence limit. */
+function compactSpreadsheetResult(raw: string): string {
+  try {
+    const envelope = object(JSON.parse(raw));
+    if (envelope?.kind !== "spreadsheet" || typeof envelope.text !== "string") return raw;
+    const analysis = object(JSON.parse(envelope.text));
+    if (!analysis) return raw;
+    const fields = [
+      "result",
+      "sheet",
+      "range",
+      "dataRange",
+      "header",
+      "operation",
+      "column",
+      "totalRows",
+      "matchedRows",
+      "numericValues",
+      "emptyValues",
+      "nonNumericValues",
+      "formulaCacheMissing",
+      "formulaCacheUsed",
+      "filterAndGroupFormulaCacheUsed",
+      "completeNumericCoverage",
+      "groupBy",
+      "filters",
+    ];
+    return JSON.stringify({
+      kind: "spreadsheet",
+      analysis: Object.fromEntries(
+        fields.filter((key) => Object.hasOwn(analysis, key)).map((key) => [key, analysis[key]]),
+      ),
+      warnings: envelope.warnings,
+    });
+  } catch {
+    return raw;
+  }
 }
 function boundedText(text: string, limit = 800): string {
   const redacted = redactSensitiveText(text).replace(

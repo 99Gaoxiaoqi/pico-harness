@@ -170,6 +170,10 @@ export function scoreExperienceMatch(hints: readonly string[], query: string): n
     "method",
     "tool",
   ]);
+  // Hints are bounded to eight phrases; check their Han terms across the whole
+  // task request instead of the shared search collector's first 32 signals.
+  // Removing generic words also prevents their joined boundaries forming hits.
+  const chineseText = text.replace(/任务|代码|文件|测试|方法|使用|项目|工具/gu, " ");
   let score = 0;
   const chineseTerms = new Set<string>();
   for (const raw of hints.slice(0, 8)) {
@@ -194,12 +198,12 @@ export function scoreExperienceMatch(hints: readonly string[], query: string): n
     }
     for (const match of hint.matchAll(/(?=([\p{Script=Han}]{2}))/gu)) {
       const term = match[1]!;
-      if (!generic.has(term) && signals.cjkBigrams.includes(term)) chineseTerms.add(term);
+      if (!generic.has(term) && chineseText.includes(term)) chineseTerms.add(term);
     }
   }
   let lastEnd = -1;
   const matchedTerms = new Set<string>();
-  for (const match of text.matchAll(/(?=([\p{Script=Han}]{2}))/gu)) {
+  for (const match of chineseText.matchAll(/(?=([\p{Script=Han}]{2}))/gu)) {
     if (chineseTerms.has(match[1]!) && !matchedTerms.has(match[1]!) && match.index >= lastEnd) {
       matchedTerms.add(match[1]!);
       lastEnd = match.index + 2;
