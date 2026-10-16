@@ -1,5 +1,6 @@
 import { subagentThinkingLevel } from "./configured-subagent-executor.js";
 import { AtomicMemoryLifecycle } from "@pico/runtime";
+import { recoverRegisteredAtomicMemory } from "./atomic-memory-recovery-host.js";
 import type { Session } from "./session.js";
 import { createConfiguredSubagentCatalog } from "./configured-subagent-catalog.js";
 import { listSubagentConnections } from "./subagent-connections.js";
@@ -272,67 +273,68 @@ export function createProductionRuntimeServices(
   const userMcpConfigStore = options.userMcpConfigStore ?? new UserMcpConfigStore({ picoHome });
   const effectiveConfigResolver =
     options.effectiveConfigResolver ?? new EffectiveConfigResolver({ userConfigStore });
-  configureExecutionLearningHost(picoHome, {
-    modelFactory: async (workDir, identity, sessionId) => {
-      const canonical = await trustStore.canonicalize(workDir);
-      if (!(await trustStore.isTrusted(canonical)))
-        throw new Error("Learning workspace trust revoked");
-      const routeId = `${identity.providerId}/${identity.modelId}`;
-      const runtime = await loadEffectiveModelRuntime({
-        workDir,
-        projectTrusted: true,
-        env,
-        userConfigStore,
-        configResolver: effectiveConfigResolver,
-        credentialVault,
-        preferredModelRouteId: routeId,
-      });
-      const route = runtime.router.routes.find(
-        (route) => route.providerId === identity.providerId && route.model === identity.modelId,
-      );
-      if (
-        !route ||
-        route.id !== routeId ||
-        ["missing", "unsupported"].includes(
-          runtime.credentials[identity.providerId]?.state ?? "missing",
-        )
+  const sharedMemoryModelFactory: Parameters<
+    typeof configureExecutionLearningHost
+  >[1]["modelFactory"] = async (workDir, identity, sessionId) => {
+    const canonical = await trustStore.canonicalize(workDir);
+    if (!(await trustStore.isTrusted(canonical)))
+      throw new Error("Learning workspace trust revoked");
+    const routeId = `${identity.providerId}/${identity.modelId}`;
+    const runtime = await loadEffectiveModelRuntime({
+      workDir,
+      projectTrusted: true,
+      env,
+      userConfigStore,
+      configResolver: effectiveConfigResolver,
+      credentialVault,
+      preferredModelRouteId: routeId,
+    });
+    const route = runtime.router.routes.find(
+      (route) => route.providerId === identity.providerId && route.model === identity.modelId,
+    );
+    if (
+      !route ||
+      route.id !== routeId ||
+      ["missing", "unsupported"].includes(
+        runtime.credentials[identity.providerId]?.state ?? "missing",
       )
-        throw new Error("Current learning model route unavailable");
-      const selected = runtime.router.providerConfig(route.id);
-      const configRevision = createHash("sha256")
-        .update(
-          JSON.stringify([
-            selected.provider,
-            selected.config.baseURL,
-            selected.route.id,
-            selected.config.model,
-          ]),
-        )
-        .digest("hex");
-      if (identity.configRevision && identity.configRevision !== configRevision)
-        throw new Error("Learning model authority changed");
-      const ledger = new SqliteRuntimeControlStore({
-        storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
-      });
-      try {
-        const provider = new CostTracker(
-          createProvider(selected.provider, selected.config),
-          billingRouteForProvider(selected.provider, selected.config),
-          undefined,
-          {
-            ledger,
-            recordRuntimeEvents: false,
-            contextFacts: requestContextForProvider(selected.provider, selected.config),
-            context: { purpose: "memory_review", sessionId },
-          },
-        );
-        return { model: new ProviderAtomicMemoryModel(provider), dispose: () => ledger.close() };
-      } catch (error) {
-        ledger.close();
-        throw error;
-      }
-    },
-  });
+    )
+      throw new Error("Current learning model route unavailable");
+    const selected = runtime.router.providerConfig(route.id);
+    const configRevision = createHash("sha256")
+      .update(
+        JSON.stringify([
+          selected.provider,
+          selected.config.baseURL,
+          selected.route.id,
+          selected.config.model,
+        ]),
+      )
+      .digest("hex");
+    if (identity.configRevision && identity.configRevision !== configRevision)
+      throw new Error("Learning model authority changed");
+    const ledger = new SqliteRuntimeControlStore({
+      storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
+    });
+    try {
+      const provider = new CostTracker(
+        createProvider(selected.provider, selected.config),
+        billingRouteForProvider(selected.provider, selected.config),
+        undefined,
+        {
+          ledger,
+          recordRuntimeEvents: false,
+          contextFacts: requestContextForProvider(selected.provider, selected.config),
+          context: { purpose: "memory_review", sessionId },
+        },
+      );
+      return { model: new ProviderAtomicMemoryModel(provider), dispose: () => ledger.close() };
+    } catch (error) {
+      ledger.close();
+      throw error;
+    }
+  };
+  configureExecutionLearningHost(picoHome, { modelFactory: sharedMemoryModelFactory });
   const registrationStore =
     options.registrationStore ??
     new WorkspaceRegistrationStore(join(picoHome, "daemon-workspaces.json"));
@@ -2168,6 +2170,31 @@ export function createProductionRuntimeServices(
   void registrationStore
     .list()
     .then(async (workspaces) => {
+      // Discovery is detached from UI startup and Plan recovery. Runtime owns job admission/retries.
+      void recoverRegisteredAtomicMemory({
+        picoHome,
+        workspacePaths: workspaces,
+        registrationStore,
+        trustStore,
+        lifecycle: atomicMemoryLifecycle,
+        modelFactory: sharedMemoryModelFactory,
+        onChanged: (workspacePath) =>
+          service.publishDesktopNotification(
+            createRuntimeNotification({
+              topic: "memory.changed",
+              scope: { workspacePath },
+              resourceVersion: nextDesktopResourceVersion(),
+              at: Date.now(),
+              payload: {
+                entityType: "source",
+                entityId: "atomic-extraction",
+                version: Date.now(),
+                change: "updated",
+              },
+            }),
+          ),
+        onUnavailable: () => logger.warn("[Memory] registered workspace recovery unavailable"),
+      }).catch(() => logger.warn("[Memory] registered workspace recovery unavailable"));
       for (const workspacePath of workspaces) {
         const sessionIds = new Set(
           (await service.listPlanReviewRunIntents(workspacePath)).map(
