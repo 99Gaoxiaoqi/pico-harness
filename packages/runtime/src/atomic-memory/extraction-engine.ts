@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { memoryRequestFits, type MemoryRequestBudgetInput } from "./extraction-budget.js";
+import { sanitizeMemoryContent } from "./content-safety.js";
 import {
   normalizeLongTermMemoryContent,
   validateMemoryTemporalBounds,
@@ -398,7 +399,7 @@ export class AtomicMemoryExtractionEngine {
         (entry) =>
           entry.event.runId === snapshot.runId &&
           entry.event.turnId === snapshot.turnId &&
-          entry.rawTexts.some(memoryTextContainsSecret),
+          entry.rawTexts.some(memoryTextRejected),
       )
     ) {
       return this.commit(range, [], [], "sensitive_information");
@@ -544,7 +545,7 @@ export class AtomicMemoryExtractionEngine {
       if (!localized) return { kind: "failed", failureClass: "localization", range };
       if (
         snapshot.trigger === "remember" &&
-        localized.some((entry) => entry.rawTexts.some(memoryTextContainsSecret))
+        localized.some((entry) => entry.rawTexts.some(memoryTextRejected))
       )
         return this.commit(range, [], [], "sensitive_information");
       interpretationContext = memoryInterpretationContext(found);
@@ -896,10 +897,19 @@ function admitItem(
 }
 
 function itemSensitive(item: CanonicalMemoryItem, citations: readonly MemoryCitation[]): boolean {
+  // All new writes share the manual/reference/experience admission policy. A
+  // quarantine result rejects the candidate; never store its redacted rewrite.
+  return [
+    item.content,
+    ...item.keys.map((key) => key.key),
+    ...citations.map((citation) => citation.quote),
+  ].some(memoryTextRejected);
+}
+
+function memoryTextRejected(content: string): boolean {
   return (
-    memoryTextContainsSecret(item.content) ||
-    item.keys.some((key) => memoryTextContainsSecret(key.key)) ||
-    citations.some((citation) => memoryTextContainsSecret(citation.quote))
+    memoryTextContainsSecret(content) ||
+    sanitizeMemoryContent({ title: "", content, reason: "" }).disposition !== "allow"
   );
 }
 
