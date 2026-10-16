@@ -112,7 +112,7 @@ async function seedPendingExperience(
     expectedRecordRevision: initial.recordRevision,
     content,
     representation: "method",
-    matchHints: ["项目文档"],
+    matchHints: ["文档来源核对"],
     requiredConditions: [],
     applicability: {
       taskFamily: "general",
@@ -296,7 +296,7 @@ test("真实 SQLite 与 Desktop v2 审核闭环隔离旧视图、保留未验证
   try {
     const manual = await service.create(workspacePath, "项目文档位于 docs 目录。");
     const pending = await seedPendingExperience(store, workspacePath, workspaceKey);
-    const params = { workspacePath, query: "处理项目文档任务" };
+    const params = { workspacePath, query: "处理项目文档来源核对任务" };
     const pendingPreview = parseRuntimeResult(
       "memory.context.preview",
       await service.previewContext(workspacePath, { ...params, learningVersion: 2 }),
@@ -423,7 +423,7 @@ test("真实 SQLite 与 Desktop v2 审核闭环隔离旧视图、保留未验证
     assert.ok(block);
     assert.equal(block.includes(content), true);
     assert.equal(block.includes(accepted.applicability.conditions[0]!), true);
-    assert.match(block, /引用不代表采用或验证/);
+    assert.match(block, /引用不代表采用、验证或权限/);
     assert.deepEqual(
       await store.taskExperiences.listTaskExperienceReuse(workspaceKey),
       beforeReuse,

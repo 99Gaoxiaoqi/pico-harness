@@ -295,6 +295,9 @@ async function run(input: ReplayInput): Promise<void> {
       answer,
       answerContainsMarker: answer.includes(input.marker),
       modelCalls: requests.length,
+      usage: result.usage,
+      learningDuringComparison: false,
+      requestMemoryBlocks: memoryBlocks,
       inputCharacters: requests.reduce(
         (sum, messages) => sum + messages.reduce((n, message) => n + message.content.length, 0),
         0,
@@ -307,6 +310,10 @@ async function run(input: ReplayInput): Promise<void> {
       adoption: "unknown unless separately supported by recorded tool effects",
       validation: "unknown for generic method",
     };
+    await writeFile(
+      input.reportPath,
+      JSON.stringify({ ...report, status: "observed" }, null, 2) + "\n",
+    );
     assert.ok(
       report.toolNames.every((name) => name === "memory_search"),
       "memory cannot grant additional tools",
@@ -347,7 +354,10 @@ async function run(input: ReplayInput): Promise<void> {
         "case lookup did not recover its actual outcome",
       );
     }
-    await writeFile(input.reportPath, JSON.stringify(report, null, 2) + "\n");
+    await writeFile(
+      input.reportPath,
+      JSON.stringify({ ...report, status: "passed" }, null, 2) + "\n",
+    );
   } finally {
     await globalSessionManager.delete(sessionId, activeDir, { picoHome })?.close();
   }

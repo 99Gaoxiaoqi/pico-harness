@@ -19,7 +19,7 @@ const retiredTables = [
 test("opening an incompatible memory database rejects it without upgrading or clearing it", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-memory-incompatible-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  for (const version of [0, 7, 8, 16]) {
+  for (const version of [0, 7, 8, 17]) {
     const path = join(root, `memory-${version}.sqlite`);
     const db = new DatabaseSync(path);
     db.exec(
@@ -32,7 +32,7 @@ test("opening an incompatible memory database rejects it without upgrading or cl
       () => new SqliteMemoryItemStore(path),
       version === 0
         ? /non-empty unversioned/
-        : /Only schemas 9, 10, 11, 12, 13 and 14 can be upgraded automatically/,
+        : /Only schemas 9, 10, 11, 12, 13, 14 and 15 can be upgraded automatically/,
     );
     assert.deepEqual(await readFile(path), before);
   }

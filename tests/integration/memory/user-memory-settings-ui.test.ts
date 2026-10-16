@@ -68,13 +68,13 @@ const event=(workspacePath,entityType,id)=>({protocolVersion:1,eventId:id,topic:
     localStorage.clear();
     await act(async()=>root.render(<Harness/>));
     await until(()=>store.connection.kind==="ready"&&store.data.memory.settings,"bootstrap");
-    check(checked("会话召回"),"initial policy missing");
+    check(checked("召回记忆"),"initial policy missing");
     holdGlobal=true;
     let oldGlobal;
     await act(async()=>{oldGlobal=store.actions.loadUserMemorySettings();});
     await act(async()=>{await store.actions.updateUserMemorySettings(1,{recallEnabled:false});});
     await act(async()=>{releaseGlobal();await oldGlobal;});
-    check(store.data.memory.settings.version===2&&!checked("会话召回"),"late global read reverted the page");
+    check(store.data.memory.settings.version===2&&!checked("召回记忆"),"late global read reverted the page");
 
     const a="/project/a",b="/project/b";
     await act(async()=>{await store.actions.selectWorkspace(a);});
@@ -94,7 +94,7 @@ const event=(workspacePath,entityType,id)=>({protocolVersion:1,eventId:id,topic:
     const beforeLists=lists;
     await act(async()=>listeners.get(b)(event(b,"settings","settings-4")));
     await until(()=>store.data.memory.settings.version===4,"settings notice");
-    check(checked("会话召回")&&lists===beforeLists,"settings notice must refresh shared policy without loading project items");
+    check(checked("召回记忆")&&lists===beforeLists,"settings notice must refresh shared policy without loading project items");
     await act(async()=>listeners.get(b)(event(a,"item","foreign-item")));
     await settle();
     check(lists===beforeLists,"foreign project item escaped workspace filter");
