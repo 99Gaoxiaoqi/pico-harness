@@ -18,6 +18,7 @@
  */
 
 import type { DatabaseSync } from "node:sqlite";
+import { MEMORY_CONTENT_INDEX_SCHEMA_SQL } from "./memory-content-index.js";
 import { EXECUTION_LEARNING_SCHEMA_SQL } from "./execution-learning-store.js";
 import { migrateExperienceFeedback } from "./experience-feedback-schema.js";
 import { migrateTaskExperienceV16 } from "./task-experience-migration.js";
@@ -27,7 +28,7 @@ import {
   retireExecutionLessons,
 } from "./retire-execution-lessons.js";
 
-export const SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION = 18;
+export const SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION = 20;
 
 const MEMORY_EXTRACTION_JOB_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS memory_extraction_jobs (
@@ -328,6 +329,7 @@ CREATE INDEX memory_items_by_scope_and_lifecycle
 
 const CURRENT_SCHEMA_SHAPE = {
   tables: [
+    { name: "memory_extraction_call_slots", requiredColumns: ["operation_id", "model_calls"] },
     {
       name: "execution_lesson_candidates",
       requiredColumns: [
@@ -529,6 +531,17 @@ export function initializeSqliteLongTermMemoryDatabase(db: DatabaseSync): void {
       if (version > 0 && version < 18) {
         db.exec(MEMORY_RECALL_REVISION_SCHEMA_SQL);
       }
+      if (version < 19) db.exec(MEMORY_CONTENT_INDEX_SCHEMA_SQL);
+      if (version < 20) {
+        db.exec(`CREATE TABLE memory_extraction_call_slots (
+          operation_id TEXT PRIMARY KEY CHECK(length(operation_id)>0),
+          model_calls INTEGER NOT NULL CHECK(model_calls BETWEEN 0 AND 3)
+        )`);
+        // Older experimental jobs cannot prove the range identity of spent calls.
+        db.exec(`UPDATE memory_extraction_jobs SET state='blocked', owner_id=NULL,
+          lease_until=0, reason='retry_exhausted'
+          WHERE model_calls>0 AND state IN ('pending','working')`);
+      }
       db.exec(`PRAGMA user_version = ${SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION}`);
     }
     validateMinimumSchemaShape(db);
@@ -553,10 +566,12 @@ export function assertSupportedSqliteLongTermMemorySchemaVersion(db: DatabaseSyn
     version !== 15 &&
     version !== 16 &&
     version !== 17 &&
+    version !== 18 &&
+    version !== 19 &&
     version !== SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION
   ) {
     throw new Error(
-      `Long-term memory SQLite schema ${version} is unsupported; expected ${SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION}. Only schemas 9, 10, 11, 12, 13, 14, 15, 16 and 17 can be upgraded automatically.`,
+      `Long-term memory SQLite schema ${version} is unsupported; expected ${SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION}. Only schemas 9, 10, 11, 12, 13, 14, 15, 16, 17, 18 and 19 can be upgraded automatically.`,
     );
   }
   if (
@@ -797,6 +812,7 @@ function validateMinimumSchemaShape(
   for (const table of shape.tables) {
     if (!includeExecutionLessons && table.name === "execution_lesson_candidates") continue;
     if (schemaVersion < 15 && table.name.startsWith("memory_consolidation_")) continue;
+    if (schemaVersion < 20 && table.name === "memory_extraction_call_slots") continue;
     if (schemaVersion < 17 && table.name === "memory_extraction_jobs") continue;
     if (schemaVersion < 18 && table.name === "memory_recall_revision") continue;
     const object = readSchemaObject.get(table.name) as

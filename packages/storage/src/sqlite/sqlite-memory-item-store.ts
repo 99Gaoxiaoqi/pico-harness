@@ -1,3 +1,4 @@
+import { queryMemoryContentIndex } from "./memory-content-index.js";
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -1126,25 +1127,41 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
     }
   }
 
-  async reserveExtractionModelCall(claim: MemoryExtractionJobClaim): Promise<number> {
+  async reserveExtractionModelCall(
+    claim: MemoryExtractionJobClaim,
+    operationId: string,
+  ): Promise<number> {
     this.#assertOpen();
     const now = normalizeTimestamp((this.#options.now ?? Date.now)(), "current time");
-    this.#assertExtractionJobClaim(claim, now);
-    const updated = this.#database
-      .prepare(
-        `UPDATE memory_extraction_jobs SET model_calls=model_calls+1, updated_at=?
-       WHERE job_id=? AND state='working' AND owner_id=? AND fencing_token=? AND lease_until>?
-         AND model_calls < model_call_budget`,
-      )
-      .run(now, claim.jobId, claim.ownerId, claim.fencingToken, now);
-    if (updated.changes !== 1) {
+    const identity = normalizeIdentifier(operationId, "operationId");
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
       this.#assertExtractionJobClaim(claim, now);
-      throw new Error("memory_extraction_budget_exhausted");
+      const slot = this.#database
+        .prepare(
+          `INSERT INTO memory_extraction_call_slots(operation_id,model_calls)
+        VALUES (?,1) ON CONFLICT(operation_id) DO UPDATE SET model_calls=model_calls+1
+        WHERE model_calls<3`,
+        )
+        .run(identity);
+      if (slot.changes !== 1) throw new Error("memory_extraction_range_budget_exhausted");
+      const updated = this.#database
+        .prepare(
+          `UPDATE memory_extraction_jobs
+        SET model_calls=model_calls+1,updated_at=? WHERE job_id=? AND state='working'
+        AND owner_id=? AND fencing_token=? AND lease_until>? AND model_calls<model_call_budget`,
+        )
+        .run(now, claim.jobId, claim.ownerId, claim.fencingToken, now);
+      if (updated.changes !== 1) throw new Error("memory_extraction_budget_exhausted");
+      const row = this.#database
+        .prepare("SELECT model_calls FROM memory_extraction_jobs WHERE job_id=?")
+        .get(claim.jobId) as { model_calls: unknown };
+      this.#database.exec("COMMIT");
+      return requiredNonNegativeInteger(row.model_calls, "model_calls");
+    } catch (error) {
+      rollback(this.#database);
+      throw error;
     }
-    const row = this.#database
-      .prepare("SELECT model_calls FROM memory_extraction_jobs WHERE job_id=?")
-      .get(claim.jobId) as { model_calls: unknown };
-    return requiredNonNegativeInteger(row.model_calls, "model_calls");
   }
 
   async transitionExtractionJob(input: {
@@ -1368,6 +1385,9 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
       throw new Error(`Memory content search accepts at most ${MAX_SEARCH_TERMS} terms`);
     if (!count) return [];
     return this.#readSnapshot(() => {
+      const indexed = queryMemoryContentIndex(this.#database, { workspaceKey, signals, limit });
+      if (indexed !== undefined)
+        return indexed.map(({ itemId }) => this.#requireItemRecord(itemId));
       const ranked: Array<{ id: string; score: number; updatedAt: number }> = [];
       const rows = this.#database
         .prepare(

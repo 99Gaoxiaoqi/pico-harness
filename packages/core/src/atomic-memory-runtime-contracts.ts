@@ -54,8 +54,8 @@ export interface MemoryExtractionSnapshot {
   readonly turnId: string;
   readonly boundaryOrdinal: number;
   readonly boundaryEventId: string;
-  /** Stable retry identity used only after the first durable attempt fails. */
-  readonly recoveryOperationId?: string;
+  /** Trusted recovery must match the original failed operation, never an outer job identity. */
+  readonly recoveryForOperationId?: string;
   readonly events: readonly MemoryEvidenceEvent[];
   readonly sourceMessages?: readonly Message[];
   readonly sourceTools?: readonly ToolDefinition[];

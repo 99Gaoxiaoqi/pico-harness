@@ -8,7 +8,6 @@ import type { MemoryItemWrite, MemorySearchSignals } from "@pico/core/atomic-mem
 import { collectMemorySearchSignals } from "@pico/core/atomic-memory-search";
 import { SqliteMemoryItemStore } from "../../../packages/storage/src/sqlite/sqlite-memory-item-store.js";
 import {
-  MEMORY_CONTENT_INDEX_SCHEMA_SQL,
   flushMemoryContentIndex,
   rebuildMemoryContentIndex,
   queryMemoryContentIndex,
@@ -27,6 +26,52 @@ const memory = (content: string, scopeKey = workspaceKey): MemoryItemWrite => ({
   keys: [{ key: "background", keyType: "concept", keyOrigin: "user" }],
   sources: [],
 });
+// Frozen pre-index scorer: deliberately does not call the index lexeme helper or Store search.
+function referenceScore(content: string, signals: MemorySearchSignals): number {
+  const text = content.normalize("NFKC").toLocaleLowerCase("en-US");
+  const trim = (value: string) => value.replace(/^[.,:;!?()[\]{}]+|[.,:;!?()[\]{}]+$/gu, "");
+  const tokenTerms = signals.tokens.filter((term) => text.includes(term));
+  const pathTerms = signals.paths.filter((term) => text.includes(term));
+  const tokens = tokenTerms.length
+    ? new Set((text.match(/[\p{L}\p{N}_@.-]+/gu) ?? []).map(trim))
+    : new Set<string>();
+  const paths = pathTerms.length
+    ? new Set((text.match(/(?:\.{0,2}\/|\/)[^\s"'<>]+/gu) ?? []).map(trim))
+    : new Set<string>();
+  const cjkCount = signals.cjkBigrams.filter((term) => text.includes(term)).length;
+  return (
+    pathTerms.filter((term) => paths.has(term)).length * 8 +
+    tokenTerms.filter((term) => tokens.has(term)).length * 4 +
+    (cjkCount >= 2 ? Math.min(cjkCount, 8) : 0)
+  );
+}
+function referenceScan(db: DatabaseSync, signals: MemorySearchSignals, limit = 100) {
+  const ranked: { itemId: string; score: number; updatedAt: number }[] = [];
+  for (const row of db
+    .prepare(
+      "SELECT item_id,content,updated_at FROM memory_items WHERE lifecycle_state='active' AND (scope_type='global' OR (scope_type='workspace' AND scope_key=?))",
+    )
+    .iterate(workspaceKey)) {
+    assert.equal(typeof row.content, "string");
+    assert.equal(typeof row.item_id, "string");
+    assert.equal(typeof row.updated_at, "number");
+    const body = (row.content as string).replace(
+      /^用户要求保留的助手笔记（未经独立核实） \[[1-9]\d*\/[1-9]\d*\]：/u,
+      "",
+    );
+    const score = referenceScore(body, signals);
+    if (score > 0)
+      ranked.push({ itemId: row.item_id as string, score, updatedAt: row.updated_at as number });
+  }
+  return ranked
+    .sort(
+      (a, b) =>
+        b.score - a.score ||
+        b.updatedAt - a.updatedAt ||
+        (a.itemId < b.itemId ? -1 : a.itemId > b.itemId ? 1 : 0),
+    )
+    .slice(0, limit);
+}
 async function fixture(t: test.TestContext) {
   const root = await mkdtemp(join(tmpdir(), "pico-memory-content-index-"));
   const path = join(root, "memory.sqlite");
@@ -42,13 +87,19 @@ async function fixture(t: test.TestContext) {
       })
     ).results[0]!;
   const oracle = async (signals: MemorySearchSignals, limit = 100) => {
-    const expected = await store.searchByContent({ workspaceKey, ...signals, limit });
+    const expected = referenceScan(db, signals, limit);
+    const production = await store.searchByContent({ workspaceKey, ...signals, limit });
+    assert.deepEqual(
+      production.map((record) => record.item.itemId),
+      expected.map((hit) => hit.itemId),
+    );
     const actual = queryMemoryContentIndex(db, { workspaceKey, signals, limit });
     assert.ok(actual, "supported index query must not silently fall back");
     assert.deepEqual(
       actual.map((hit) => hit.itemId),
-      expected.map((record) => record.item.itemId),
+      expected.map((hit) => hit.itemId),
     );
+    assert.deepEqual(actual, expected);
     return actual;
   };
   t.after(async () => {
@@ -84,7 +135,6 @@ test("typed content index exactly matches production scan for Unicode, paths, CJ
       },
     ],
   });
-  f.db.exec(MEMORY_CONTENT_INDEX_SCHEMA_SQL);
   assert.equal(flushMemoryContentIndex(f.db), contents.length + 2);
   assert.equal(flushMemoryContentIndex(f.db), 0);
   for (const query of [
@@ -133,7 +183,6 @@ test("typed content index exactly matches production scan for Unicode, paths, CJ
 test("index triggers transactionally remove old terms across connections, archive/restore/delete and rollback", async (t) => {
   const f = await fixture(t);
   const item = await f.create("oldmarker 星河计划");
-  f.db.exec(MEMORY_CONTENT_INDEX_SCHEMA_SQL);
   await f.oracle(collectMemorySearchSignals("oldmarker"));
   await f.other.applyMutations({
     operationId: "edit",
@@ -200,12 +249,25 @@ test("missing or failed index is explicit fallback; flush failure retains dirty 
   const f = await fixture(t);
   await f.create("safemarker");
   const input = { workspaceKey, signals: collectMemorySearchSignals("safemarker"), limit: 100 };
+  f.db.exec("ALTER TABLE memory_content_index_state RENAME TO fixture_missing_index_state");
   assert.equal(queryMemoryContentIndex(f.db, input), undefined);
-  f.db.exec(MEMORY_CONTENT_INDEX_SCHEMA_SQL);
+  assert.deepEqual(
+    (await f.store.searchByContent({ workspaceKey, ...input.signals, limit: 100 })).map(
+      (record) => record.item.itemId,
+    ),
+    referenceScan(f.db, input.signals).map((hit) => hit.itemId),
+  );
+  f.db.exec("ALTER TABLE fixture_missing_index_state RENAME TO memory_content_index_state");
   f.db.exec(
     "CREATE TRIGGER fail_posting BEFORE INSERT ON memory_content_postings BEGIN SELECT RAISE(ABORT,'synthetic index failure'); END",
   );
   assert.equal(queryMemoryContentIndex(f.db, input), undefined);
+  assert.deepEqual(
+    (await f.store.searchByContent({ workspaceKey, ...input.signals, limit: 100 })).map(
+      (record) => record.item.itemId,
+    ),
+    referenceScan(f.db, input.signals).map((hit) => hit.itemId),
+  );
   assert.equal(f.db.prepare("SELECT count(*) n FROM memory_content_dirty").get()!.n, 1);
   assert.equal(f.db.prepare("SELECT count(*) n FROM memory_content_postings").get()!.n, 0);
   f.db.exec("DROP TRIGGER fail_posting");
@@ -222,25 +284,20 @@ test("missing or failed index is explicit fallback; flush failure retains dirty 
 test("TopK tie boundary matches reference JS ordering and index survives reopening without rebuild", async (t) => {
   const f = await fixture(t);
   for (let i = 0; i < 140; i++) await f.create(`boundarymarker row${i}`);
-  f.db.exec(MEMORY_CONTENT_INDEX_SCHEMA_SQL);
   await f.oracle(collectMemorySearchSignals("boundarymarker"), 10);
   assert.equal(flushMemoryContentIndex(f.db), 0);
   const path = f.db.location()!;
   const reopened = new DatabaseSync(path);
   try {
     assert.equal(flushMemoryContentIndex(reopened), 0);
-    const expected = await f.store.searchByContent({
-      workspaceKey,
-      ...collectMemorySearchSignals("boundarymarker"),
-      limit: 10,
-    });
+    const expected = referenceScan(reopened, collectMemorySearchSignals("boundarymarker"), 10);
     assert.deepEqual(
       queryMemoryContentIndex(reopened, {
         workspaceKey,
         signals: collectMemorySearchSignals("boundarymarker"),
         limit: 10,
       })!.map((hit) => hit.itemId),
-      expected.map((record) => record.item.itemId),
+      expected.map((hit) => hit.itemId),
     );
   } finally {
     reopened.close();

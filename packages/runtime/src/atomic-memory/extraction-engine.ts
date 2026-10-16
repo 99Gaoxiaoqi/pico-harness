@@ -210,7 +210,11 @@ export class AtomicMemoryExtractionEngine {
       }
     }
     let after = cursor?.processedOrdinal ?? 0;
-    if (pending?.firstOperationId === operationId) return unavailable("retry_later");
+    if (
+      pending?.firstOperationId === operationId &&
+      snapshot.recoveryForOperationId !== operationId
+    )
+      return unavailable("retry_later");
     const historyAfter = (through: number): number =>
       boundaries.reduce(
         (max, boundary) =>
@@ -245,7 +249,7 @@ export class AtomicMemoryExtractionEngine {
       );
       const range = this.range(
         retrySnapshot,
-        `memory_retry_${hash([operationId, pending.firstOperationId])}`,
+        `memory_retry_${hash([snapshot.sessionId, pending.firstOperationId, pending.fromOrdinal, pending.throughOrdinal, pending.coverageHash, pending.deletionRevision])}`,
         after,
         pending.throughOrdinal,
         historyAfter(pending.throughOrdinal),
@@ -1202,7 +1206,6 @@ function validCheckpoint(
 }
 
 export function atomicMemoryExtractionOperationId(snapshot: MemoryExtractionSnapshot): string {
-  if (snapshot.recoveryOperationId) return snapshot.recoveryOperationId;
   return `memory_${snapshot.trigger}_${hash([snapshot.sessionId, snapshot.compactionCheckpointId ?? snapshot.boundaryEventId, snapshot.trigger === "compaction" ? null : snapshot.runId, snapshot.trigger === "compaction" ? null : snapshot.turnId])}`;
 }
 function hash(value: unknown): string {

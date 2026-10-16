@@ -537,7 +537,7 @@ export interface MemoryItemStore {
     readonly now: number;
     readonly leaseDurationMs: number;
   }): Promise<MemoryExtractionJobClaim | undefined>;
-  reserveExtractionModelCall(claim: MemoryExtractionJobClaim): Promise<number>;
+  reserveExtractionModelCall(claim: MemoryExtractionJobClaim, operationId: string): Promise<number>;
   transitionExtractionJob(input: {
     readonly claim: MemoryExtractionJobClaim;
     readonly state: "pending" | "blocked" | "settled";

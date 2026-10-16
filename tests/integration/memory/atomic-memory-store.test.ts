@@ -220,7 +220,7 @@ async function fixture(
 
 test("atomic memory persists scoped assertions with transaction replay, rollback, CAS and private files", async () => {
   await fixture(async ({ store, path, setFailpoint }) => {
-    assert.equal(store.schemaVersion(), 18);
+    assert.equal(store.schemaVersion(), 20);
     assert.equal(store.journalMode(), "wal");
     assert.equal(store.foreignKeysEnabled(), true);
     if (process.platform !== "win32") {
@@ -445,8 +445,8 @@ test("durable extraction jobs serialize claims and fence expired workers at comm
         leaseDurationMs: 100,
       });
       assert.ok(currentClaim);
-      await assert.rejects(firstStore.reserveExtractionModelCall(oldClaim));
-      assert.equal(await secondStore.reserveExtractionModelCall(currentClaim), 1);
+      await assert.rejects(firstStore.reserveExtractionModelCall(oldClaim, "fenced-operation"));
+      assert.equal(await secondStore.reserveExtractionModelCall(currentClaim, "live-operation"), 1);
       const committed = await secondStore.commitExtraction(
         extraction({
           operationId: "durable-job-result",
@@ -638,6 +638,91 @@ test("deletion from another connection rejects stale extraction commits and fail
       );
     } finally {
       management.close();
+    }
+  });
+});
+
+test("durable model slots bind the actual range across jobs, reconnects and lease owners", async () => {
+  await fixture(async ({ path }) => {
+    let now = 1000;
+    const first = new SqliteMemoryItemStore(path, { now: () => now });
+    let second = new SqliteMemoryItemStore(path, { now: () => now });
+    const job = {
+      sessionId: source().sessionId,
+      workspaceKey: "/workspace/a",
+      workDir: "/workspace/a",
+      sourceHash: "canonical-source",
+      sourceKind: "terminal" as const,
+      sourceOrdinal: 2,
+      throughOrdinal: 2,
+      trigger: "extract" as const,
+      deletionRevision: 0,
+      settingsVersion: 1,
+      modelCallBudget: 60,
+      notBefore: now,
+    };
+    try {
+      await first.enqueueExtractionJob({ ...job, jobId: "slots-a", sourceEventId: "terminal-a" });
+      await second.enqueueExtractionJob({ ...job, jobId: "slots-b", sourceEventId: "terminal-b" });
+      const a = await first.claimExtractionJob({
+        jobId: "slots-a",
+        ownerId: "host-a",
+        now,
+        leaseDurationMs: 100,
+      });
+      const b = await second.claimExtractionJob({
+        jobId: "slots-b",
+        ownerId: "host-b",
+        now,
+        leaseDurationMs: 100,
+      });
+      assert.ok(a && b);
+      for (let call = 1; call <= 3; call++)
+        assert.equal(await first.reserveExtractionModelCall(a, "canonical-range-one"), call);
+      await assert.rejects(
+        first.reserveExtractionModelCall(a, "canonical-range-one"),
+        /range_budget_exhausted/,
+      );
+      await assert.rejects(
+        second.reserveExtractionModelCall(b, "canonical-range-one"),
+        /range_budget_exhausted/,
+      );
+      assert.equal(
+        (await second.readExtractionJob(b.jobId))?.modelCalls,
+        0,
+        "rejected slot does not debit another job",
+      );
+      assert.equal(await second.reserveExtractionModelCall(b, "canonical-range-two"), 1);
+      second.close();
+      second = new SqliteMemoryItemStore(path, { now: () => now });
+      assert.equal(await second.reserveExtractionModelCall(b, "canonical-range-two"), 2);
+      assert.equal(await second.reserveExtractionModelCall(b, "canonical-range-two"), 3);
+      await assert.rejects(
+        second.reserveExtractionModelCall(b, "canonical-range-two"),
+        /range_budget_exhausted/,
+      );
+      now = 1101;
+      const takeover = await second.claimExtractionJob({
+        jobId: a.jobId,
+        ownerId: "host-c",
+        now,
+        leaseDurationMs: 100,
+      });
+      assert.ok(takeover);
+      await assert.rejects(first.reserveExtractionModelCall(a, "new-range"));
+      await assert.rejects(
+        second.reserveExtractionModelCall(takeover, "canonical-range-one"),
+        /range_budget_exhausted/,
+      );
+      assert.equal((await second.readExtractionJob(a.jobId))?.modelCalls, 3);
+      assert.equal(
+        await second.reserveExtractionModelCall(takeover, "canonical-range-three"),
+        4,
+        "later independent range retains its own slots",
+      );
+    } finally {
+      first.close();
+      second.close();
     }
   });
 });

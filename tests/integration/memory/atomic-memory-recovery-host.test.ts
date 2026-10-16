@@ -496,3 +496,96 @@ test("recovery leaves queued source fenced after disabling auto memory or advanc
       );
     });
 });
+
+test("startup wakes an abandoned lease at expiry with cumulative budget, while shutdown cancels its future claim", async (t) => {
+  for (const stopBeforeExpiry of [false, true])
+    await t.test(
+      stopBeforeExpiry ? "shutdown before expiry" : "recover after expiry",
+      async (t) => {
+        const f = await fixture(t);
+        const workDir = await f.workspace("leased");
+        const target = await f.session(workDir, "leased");
+        const store = new SqliteMemoryItemStore(join(f.picoHome, "memory.sqlite"));
+        t.after(() => store.close());
+        const workspaceKey = resolvePicoPaths(workDir, { picoHome: f.picoHome }).workspace.id;
+        const sessionId = memorySessionKey(workspaceKey, "leased");
+        await appendAdmittedTerminal(target, {
+          disposition: "eligible",
+          deletionRevision: await store.readDeletionRevision(),
+          settingsVersion: (await store.readSettings(workspaceKey)).version,
+        });
+        const priorLifecycle = new AtomicMemoryLifecycle();
+        await new AtomicMemoryRuntime({
+          workDir,
+          picoHome: f.picoHome,
+          sessionId: "leased",
+          supported: true,
+          preserveSourceTools: false,
+          lifecycle: priorLifecycle,
+          gate: async () => ({ allowed: true }),
+          modelFactory: async () => {
+            throw new Error("prior process only enqueues");
+          },
+        }).completed("source-run");
+        await priorLifecycle.close();
+        const [job] = await store.listExtractionJobs({ workspaceKey, sessionId, limit: 100 });
+        assert.ok(job);
+        t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
+        t.mock.timers.tick(Math.max(0, job.notBefore - Date.now()));
+        const abandoned = await store.claimExtractionJob({
+          jobId: job.jobId,
+          ownerId: "abandoned-fixture-owner",
+          now: Date.now(),
+          leaseDurationMs: 10_000,
+        });
+        assert.ok(abandoned);
+        await store.reserveExtractionModelCall(abandoned, "abandoned-operation");
+        let calls = 0;
+        await recoverRegisteredAtomicMemory({
+          ...f,
+          workspacePaths: await f.registrationStore.list(),
+          modelFactory: async () => ({
+            model: {
+              call: async () => {
+                calls++;
+                return completeReview;
+              },
+            },
+          }),
+        });
+        assert.equal(calls, 0);
+        assert.equal(
+          (await store.readExtractionJob(job.jobId))?.fencingToken,
+          abandoned.fencingToken,
+        );
+        if (stopBeforeExpiry) await f.lifecycle.close();
+        t.mock.timers.tick(9_999);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        assert.equal(calls, 0, "an unexpired foreign lease cannot be reclaimed");
+        t.mock.timers.tick(1);
+        if (stopBeforeExpiry) {
+          for (let n = 0; n < 40; n++) await new Promise<void>((resolve) => setImmediate(resolve));
+          const current = await store.readExtractionJob(job.jobId);
+          assert.equal(calls, 0);
+          assert.equal(current?.state, "working");
+          assert.equal(current?.fencingToken, abandoned.fencingToken);
+          assert.equal(current?.modelCalls, 1);
+        } else {
+          await flushUntil(async () => !!(await store.readExtractionCursor(sessionId)));
+          const current = await store.readExtractionJob(job.jobId);
+          assert.equal(calls, 1);
+          assert.equal(current?.state, "settled");
+          assert.ok(current!.fencingToken > abandoned.fencingToken);
+          assert.equal(
+            current?.modelCalls,
+            2,
+            "lease recovery does not reset the prior model call",
+          );
+          await assert.rejects(() =>
+            store.reserveExtractionModelCall(abandoned, "abandoned-operation"),
+          );
+          await f.lifecycle.close();
+        }
+      },
+    );
+});
