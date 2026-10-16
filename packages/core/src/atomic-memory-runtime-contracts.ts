@@ -45,6 +45,7 @@ export interface MemoryExtractionSnapshot {
   readonly deletionRevision: number;
   readonly settingsVersion?: number;
   readonly trigger: "remember" | "extract" | "compaction";
+  readonly sourceKind?: "terminal" | "checkpoint" | "explicit";
   /** Composite workspace/session identity used by cursors and provenance. */
   readonly sessionId: string;
   readonly workspaceKey: string;
@@ -153,6 +154,12 @@ export interface AtomicMemoryEngineOptions {
   readonly store: AtomicMemoryStore;
   readonly model: MemoryExtractionModel;
   readonly gate: (trigger: MemoryExtractionSnapshot["trigger"]) => Promise<MemoryGateResult>;
+  readonly onContentRejected?: (input: {
+    readonly trigger: MemoryExtractionSnapshot["trigger"];
+    readonly stage: MemoryModelRequest["stage"];
+    readonly requested: boolean;
+    readonly safetyCodes: readonly string[];
+  }) => void;
 }
 
 export type AtomicMemoryResult =

@@ -25,7 +25,7 @@ test(
   "production shutdown waits for background memory and disposal after the foreground completes",
   { timeout: 20_000 },
   async (t) => {
-    t.mock.timers.enable({ apis: ["setTimeout"] });
+    t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
     const root = await mkdtemp(join(tmpdir(), "pico-memory-host-"));
     const picoHome = join(root, "home");
     await mkdir(join(root, "workspace"));
@@ -57,6 +57,7 @@ test(
           let calls = 0;
           return super.execute(options, {
             ...dependencies,
+            executionLearningWorkerOptions: { idleMs: 60_000, pollMs: 60_000 },
             provider: {
               async generate() {
                 return calls++ === 0
@@ -146,7 +147,7 @@ test(
     disposeRelease.resolve();
     await closing;
     assert.equal(residencies, 0);
-    assert.equal(acquisitions, 1);
+    assert.equal(acquisitions, 2);
     assert.equal(modelCalls, 1);
     const store = new SqliteMemoryItemStore(join(picoHome, "memory.sqlite"));
     try {

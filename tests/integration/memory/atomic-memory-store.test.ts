@@ -166,7 +166,7 @@ async function fixture(
 
 test("atomic memory persists scoped assertions with transaction replay, rollback, CAS and private files", async () => {
   await fixture(async ({ store, path, setFailpoint }) => {
-    assert.equal(store.schemaVersion(), 16);
+    assert.equal(store.schemaVersion(), 17);
     assert.equal(store.journalMode(), "wal");
     assert.equal(store.foreignKeysEnabled(), true);
     if (process.platform !== "win32") {
@@ -288,6 +288,78 @@ test("atomic memory persists scoped assertions with transaction replay, rollback
       assert.equal((await second.readSettings("/workspace/b")).recallEnabled, false);
     } finally {
       second.close();
+    }
+  });
+});
+
+test("durable extraction jobs serialize claims and fence expired workers at commit", async () => {
+  await fixture(async ({ path }) => {
+    let now = 1000;
+    const firstStore = new SqliteMemoryItemStore(path, { now: () => now });
+    const secondStore = new SqliteMemoryItemStore(path, { now: () => now });
+    const jobRequest = {
+      jobId: "memory-job-1",
+      sessionId: source().sessionId,
+      workspaceKey: "/workspace/a",
+      workDir: "/workspace/a",
+      sourceEventId: "terminal-1",
+      sourceHash: "source-hash-1",
+      sourceKind: "terminal" as const,
+      sourceOrdinal: 2,
+      throughOrdinal: 2,
+      trigger: "extract" as const,
+      deletionRevision: 0,
+      settingsVersion: 1,
+      notBefore: 1000,
+    };
+    try {
+      const persisted = await firstStore.enqueueExtractionJob(jobRequest);
+      assert.equal(persisted.state, "pending");
+      assert.equal((await secondStore.enqueueExtractionJob(jobRequest)).jobId, persisted.jobId);
+      await assert.rejects(
+        secondStore.enqueueExtractionJob({ ...jobRequest, sourceHash: "changed-source" }),
+        conflict("operation_reused"),
+      );
+      const oldClaim = await firstStore.claimExtractionJob({
+        jobId: persisted.jobId,
+        ownerId: "host-a",
+        now,
+        leaseDurationMs: 100,
+      });
+      assert.ok(oldClaim);
+      assert.equal(
+        await secondStore.claimExtractionJob({
+          jobId: persisted.jobId,
+          ownerId: "host-b",
+          now,
+          leaseDurationMs: 100,
+        }),
+        undefined,
+      );
+      now = 1101;
+      const currentClaim = await secondStore.claimExtractionJob({
+        jobId: persisted.jobId,
+        ownerId: "host-b",
+        now,
+        leaseDurationMs: 100,
+      });
+      assert.ok(currentClaim);
+      await assert.rejects(firstStore.reserveExtractionModelCall(oldClaim));
+      assert.equal(await secondStore.reserveExtractionModelCall(currentClaim), 1);
+      const committed = await secondStore.commitExtraction(
+        extraction({
+          operationId: "durable-job-result",
+          trigger: "extract",
+          items: [],
+          requestedItemIndexes: [],
+          jobClaim: currentClaim,
+        }),
+      );
+      assert.equal(committed.receipt.status, "extracted");
+      assert.deepEqual(await secondStore.listRecoverableExtractionJobs({ now }), []);
+    } finally {
+      firstStore.close();
+      secondStore.close();
     }
   });
 });

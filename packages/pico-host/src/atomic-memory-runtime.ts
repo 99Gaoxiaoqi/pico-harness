@@ -1,6 +1,6 @@
 import { AtomicMemoryLifecycle } from "@pico/runtime";
 import { join } from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { withProviderCallContext } from "@pico/runtime";
 import type { Message, ToolDefinition, RuntimeMemoryExtractionBoundary } from "@pico/core";
 import { RUNTIME_MESSAGE_EVENT_ID, isMessageHiddenFromTranscript } from "@pico/core";
@@ -16,12 +16,17 @@ import { sessionMemoryLane } from "@pico/runtime/atomic-memory/session-lane";
 import {
   memorySessionKey,
   type AtomicMemoryResult,
+  type AtomicMemoryEngineOptions,
   type MemoryExtractionModel,
   type MemoryExtractionSnapshot,
   type MemoryGateResult,
 } from "@pico/core/atomic-memory-runtime-contracts";
 import { logger } from "@pico/pico-host/logger";
 import { MemoryItemStoreConflictError } from "@pico/core/atomic-memory-contracts";
+import type {
+  MemoryExtractionJob,
+  MemoryExtractionJobClaim,
+} from "@pico/core/atomic-memory-contracts";
 import { resolveRequestedReferenceNote } from "./atomic-memory-reference-note.js";
 import { consolidateAutomaticMemory } from "./atomic-memory-consolidation.js";
 
@@ -42,6 +47,7 @@ interface PendingAutomaticExtraction {
 
 const pendingAutomaticExtractions = new Map<string, PendingAutomaticExtraction>();
 const registeredAutomaticExtractionLifecycles = new WeakSet<AtomicMemoryLifecycle>();
+const pendingExplicitExtractions = new Set<string>();
 
 function registerAutomaticExtractionCleanup(lifecycle: AtomicMemoryLifecycle): void {
   if (registeredAutomaticExtractionLifecycles.has(lifecycle)) return;
@@ -61,8 +67,7 @@ function resetAutomaticExtractionTimer(laneKey: string, pending: PendingAutomati
     if (pendingAutomaticExtractions.get(laneKey) !== pending) return;
     pendingAutomaticExtractions.delete(laneKey);
     for (const [trigger, byRun] of pending.prepares) {
-      const prepare = [...byRun.values()].at(-1);
-      if (prepare) pending.dispatch(trigger, prepare);
+      for (const prepare of byRun.values()) pending.dispatch(trigger, prepare);
     }
   }, AUTOMATIC_EXTRACTION_IDLE_MS);
   // A short-lived CLI may exit; its durable boundaries recover on the next run.
@@ -106,18 +111,6 @@ function scheduleAutomaticExtraction(
   }
   byRun.set(runId ?? "__unknown_run__", prepare);
   resetAutomaticExtractionTimer(laneKey, pending);
-}
-
-function cancelAutomaticExtractionsForRun(laneKey: string, runId: string): void {
-  const pending = pendingAutomaticExtractions.get(laneKey);
-  if (!pending) return;
-  for (const [trigger, byRun] of pending.prepares) {
-    byRun.delete(runId);
-    if (byRun.size === 0) pending.prepares.delete(trigger);
-  }
-  if (pending.prepares.size > 0) return;
-  if (pending.timer !== undefined) clearTimeout(pending.timer);
-  pendingAutomaticExtractions.delete(laneKey);
 }
 
 export function atomicMemoryDatabasePath(picoHome: string): string {
@@ -207,6 +200,7 @@ export interface AtomicMemoryRuntimeOptions {
   readonly reservedOutputTokens?: number;
   readonly lifecycle?: AtomicMemoryLifecycle;
   readonly onChanged?: () => void;
+  readonly onContentRejected?: AtomicMemoryEngineOptions["onContentRejected"];
 }
 
 /** One foreground run owns snapshots; background tasks own their own connections/model leases. */
@@ -214,7 +208,7 @@ export class AtomicMemoryRuntime {
   private source: MemoryExtractionSnapshot | undefined;
   private extractRequestedRevision: number | undefined;
   private readonly completedRuns = new Set<string>();
-  private readonly explicitlyRememberedRuns = new Set<string>();
+  private explicitExtractionSnapshot: MemoryExtractionSnapshot | undefined;
   private readonly background = new Set<Promise<unknown>>();
   private readonly workspaceKey: string;
   private readonly laneKey: string;
@@ -250,9 +244,6 @@ export class AtomicMemoryRuntime {
   async remember(signal?: AbortSignal): Promise<AtomicMemoryResult> {
     if (!this.options.supported) return unavailable("provider_unsupported");
     if (!this.source) return unavailable("source_unavailable");
-    if (!this.completedRuns.has(this.source.runId))
-      this.explicitlyRememberedRuns.add(this.source.runId);
-    cancelAutomaticExtractionsForRun(this.laneKey, this.source.runId);
     const snapshot = { ...this.source, ...(signal ? { signal } : {}) };
     return this.lifecycle.run(
       "remember",
@@ -360,11 +351,52 @@ export class AtomicMemoryRuntime {
       const settings = await store.readSettings(this.workspaceKey);
       if (!settings.enabled || !settings.autoExtract)
         return { status: "unavailable", reason: "memory_disabled" };
+      const sourceEvent = [...(this.source?.events ?? [])]
+        .reverse()
+        .find((event) => event.role === "user");
+      if (!this.source || !sourceEvent)
+        return { status: "unavailable", reason: "source_unavailable" };
+      const snapshot: MemoryExtractionSnapshot = {
+        ...this.source,
+        trigger: "extract",
+        sourceKind: "explicit",
+        deletionRevision,
+        settingsVersion: settings.version,
+        boundaryOrdinal: sourceEvent.ordinal,
+        boundaryEventId: sourceEvent.eventId,
+        events: this.source.events.filter((event) => event.ordinal <= sourceEvent.ordinal),
+      };
+      const jobId = extractionJobId({
+        workspaceKey: this.workspaceKey,
+        sessionId: snapshot.sessionId,
+        sourceEventId: sourceEvent.eventId,
+        trigger: "extract",
+      });
+      await store.enqueueExtractionJob({
+        jobId,
+        sessionId: snapshot.sessionId,
+        workspaceKey: this.workspaceKey,
+        workDir: this.options.workDir,
+        sourceEventId: sourceEvent.eventId,
+        sourceHash: extractionSourceHash(snapshot),
+        sourceKind: "explicit",
+        sourceOrdinal: sourceEvent.ordinal,
+        throughOrdinal: sourceEvent.ordinal,
+        trigger: "extract",
+        deletionRevision,
+        settingsVersion: settings.version,
+        notBefore: Date.now() + AUTOMATIC_EXTRACTION_IDLE_MS,
+      });
+      this.explicitExtractionSnapshot = snapshot;
+      this.extractRequestedRevision = deletionRevision;
+      pendingExplicitExtractions.add(this.laneKey);
+      return { status: "accepted" };
+    } catch (error) {
+      logger.debug({ error: String(error) }, "[Memory] explicit extraction admission unavailable");
+      return { status: "unavailable", reason: "unavailable" };
     } finally {
       store.close();
     }
-    this.extractRequestedRevision = deletionRevision;
-    return { status: "accepted" };
   }
 
   async completed(runId: string): Promise<void> {
@@ -372,29 +404,68 @@ export class AtomicMemoryRuntime {
     this.completedRuns.add(runId);
     const requestedRevision = this.extractRequestedRevision;
     this.extractRequestedRevision = undefined;
-    if (this.explicitlyRememberedRuns.delete(runId)) return;
+    const hasExplicitExtraction =
+      requestedRevision !== undefined || pendingExplicitExtractions.has(this.laneKey);
+    if (hasExplicitExtraction) {
+      const explicitSnapshot = this.explicitExtractionSnapshot;
+      this.explicitExtractionSnapshot = undefined;
+      if (explicitSnapshot?.runId === runId)
+        scheduleAutomaticExtraction(
+          this.laneKey,
+          this.lifecycle,
+          (trigger, prepare) => this.enqueue(trigger, prepare),
+          "extract",
+          explicitSnapshot.boundaryEventId,
+          async () => explicitSnapshot,
+        );
+    }
+    const entries = await this.readEntries();
+    const terminal = entries.find(
+      ({ event }) =>
+        event.kind === "run.terminal" &&
+        event.runId === runId &&
+        event.data.status === "completed" &&
+        !event.data.recovered,
+    );
+    if (!terminal || terminal.event.kind !== "run.terminal") return;
+    if (hasExplicitExtraction) return;
+    const admission = terminal.event.data.memoryExtractionBoundary;
+    if (
+      !admission ||
+      admission.disposition !== "eligible" ||
+      admission.deletionRevision === undefined ||
+      admission.settingsVersion === undefined ||
+      (requestedRevision !== undefined && requestedRevision !== admission.deletionRevision)
+    )
+      return;
+    const snapshot = await this.snapshot("extract", admission.deletionRevision, terminal.sequence);
+    if (!snapshot) return;
+    const frozen = {
+      ...snapshot,
+      sourceKind: "terminal" as const,
+      settingsVersion: admission.settingsVersion,
+    };
+    const jobId = extractionJobId({
+      workspaceKey: this.workspaceKey,
+      sessionId: frozen.sessionId,
+      sourceEventId: terminal.event.eventId,
+      trigger: "extract",
+    });
+    await this.persistJob({
+      jobId,
+      snapshot: frozen,
+      sourceEventId: terminal.event.eventId,
+      sourceKind: "terminal",
+      sourceOrdinal: terminal.sequence,
+      throughOrdinal: terminal.sequence,
+    });
     scheduleAutomaticExtraction(
       this.laneKey,
       this.lifecycle,
       (trigger, prepare) => this.enqueue(trigger, prepare),
       "extract",
       runId,
-      async () => {
-        const entries = await this.readEntries();
-        const terminal = entries.find(
-          ({ event }) =>
-            event.kind === "run.terminal" &&
-            event.runId === runId &&
-            event.data.status === "completed" &&
-            !event.data.recovered,
-        );
-        if (!terminal || terminal.event.kind !== "run.terminal") return;
-        const admission = terminal.event.data.memoryExtractionBoundary;
-        if (!admission && requestedRevision === undefined) return;
-        const revision = requestedRevision ?? admission?.deletionRevision;
-        if (revision === undefined) return;
-        return this.snapshot("extract", revision, terminal.sequence);
-      },
+      async () => frozen,
     );
   }
 
@@ -428,54 +499,380 @@ export class AtomicMemoryRuntime {
 
   async checkpoint(checkpointId: string): Promise<void> {
     if (!this.options.supported) return;
-    const [deletionRevision, entries] = await Promise.all([
-      this.readDeletionRevision(),
-      this.readEntries(),
-    ]);
+    const entries = await this.readEntries();
     const checkpointRunId = entries.find(
       ({ event }) =>
         event.kind === "context.checkpoint.recorded" && event.data.checkpointId === checkpointId,
     )?.event.runId;
-    if (checkpointRunId && this.explicitlyRememberedRuns.has(checkpointRunId)) return;
+    const checkpoint = entries.find(
+      ({ event }) =>
+        event.kind === "context.checkpoint.recorded" && event.data.checkpointId === checkpointId,
+    );
+    if (!checkpoint || checkpoint.event.kind !== "context.checkpoint.recorded") return;
+    const checkpointEvent = checkpoint.event;
+    const admission = checkpointEvent.data.memoryExtractionBoundary;
+    if (
+      admission?.disposition !== "eligible" ||
+      admission.deletionRevision === undefined ||
+      admission.settingsVersion === undefined
+    )
+      return;
+    const through = entries.find(
+      (entry) => entry.event.eventId === checkpointEvent.data.throughEventId,
+    );
+    if (!through) return;
+    const base = await this.snapshot("compaction", admission.deletionRevision, checkpoint.sequence);
+    if (!base) return;
+    const frozen = {
+      ...base,
+      sourceKind: "checkpoint" as const,
+      settingsVersion: admission.settingsVersion,
+      boundaryOrdinal: through.sequence,
+      boundaryEventId: through.event.eventId,
+      compactionCheckpointId: checkpointId,
+    };
+    const jobId = extractionJobId({
+      workspaceKey: this.workspaceKey,
+      sessionId: frozen.sessionId,
+      sourceEventId: checkpointId,
+      trigger: "compaction",
+    });
+    await this.persistJob({
+      jobId,
+      snapshot: frozen,
+      sourceEventId: checkpointId,
+      sourceKind: "checkpoint",
+      sourceOrdinal: through.sequence,
+      throughOrdinal: through.sequence,
+    });
     scheduleAutomaticExtraction(
       this.laneKey,
       this.lifecycle,
       (trigger, prepare) => this.enqueue(trigger, prepare),
       "compaction",
       checkpointRunId,
-      async () => {
-        const entries = await this.readEntries();
-        const checkpoint = entries.find(
-          ({ event }) =>
-            event.kind === "context.checkpoint.recorded" &&
-            event.data.checkpointId === checkpointId,
-        );
-        if (
-          !checkpoint ||
-          checkpoint.event.kind !== "context.checkpoint.recorded" ||
-          !checkpoint.event.data.memoryExtractionBoundary
-        )
-          return;
-        const snapshot = await this.snapshot("compaction", deletionRevision, checkpoint.sequence);
-        const checkpointEvent = checkpoint.event;
-        const through =
-          checkpointEvent.kind === "context.checkpoint.recorded"
-            ? entries.find((entry) => entry.event.eventId === checkpointEvent.data.throughEventId)
-            : undefined;
-        if (snapshot && through)
-          return {
-            ...snapshot,
-            boundaryOrdinal: through.sequence,
-            boundaryEventId: through.event.eventId,
-            compactionCheckpointId: checkpointId,
-          };
-        return undefined;
-      },
+      async () => frozen,
     );
   }
 
   async drain(): Promise<void> {
     while (this.background.size > 0) await Promise.allSettled([...this.background]);
+  }
+
+  private async persistJob(input: {
+    jobId: string;
+    snapshot: MemoryExtractionSnapshot;
+    sourceEventId: string;
+    sourceKind: "terminal" | "checkpoint" | "explicit";
+    sourceOrdinal: number;
+    throughOrdinal: number;
+  }): Promise<void> {
+    const store = new SqliteMemoryItemStore(atomicMemoryDatabasePath(this.options.picoHome));
+    try {
+      await store.enqueueExtractionJob({
+        jobId: input.jobId,
+        sessionId: input.snapshot.sessionId,
+        workspaceKey: this.workspaceKey,
+        workDir: this.options.workDir,
+        sourceEventId: input.sourceEventId,
+        sourceHash: extractionSourceHash(input.snapshot),
+        sourceKind: input.sourceKind,
+        sourceOrdinal: input.sourceOrdinal,
+        throughOrdinal: input.throughOrdinal,
+        trigger: input.snapshot.trigger,
+        ...(input.snapshot.compactionCheckpointId
+          ? { compactionCheckpointId: input.snapshot.compactionCheckpointId }
+          : {}),
+        deletionRevision: input.snapshot.deletionRevision,
+        settingsVersion: input.snapshot.settingsVersion ?? 1,
+        notBefore: Date.now() + AUTOMATIC_EXTRACTION_IDLE_MS,
+      });
+    } finally {
+      store.close();
+    }
+  }
+
+  async recoverPendingJobs(): Promise<number> {
+    if (!this.options.supported) return 0;
+    const store = new SqliteMemoryItemStore(atomicMemoryDatabasePath(this.options.picoHome));
+    try {
+      const jobs = await store.listRecoverableExtractionJobs({ now: Date.now(), limit: 500 });
+      let recovered = 0;
+      for (const job of jobs) {
+        if (
+          job.workspaceKey !== this.workspaceKey ||
+          job.workDir !== this.options.workDir ||
+          job.sessionId !== memorySessionKey(this.workspaceKey, this.options.sessionId)
+        )
+          continue;
+        const snapshot = await this.snapshotForJob(job);
+        if (!snapshot) {
+          const claim = await store.claimExtractionJob({
+            jobId: job.jobId,
+            ownerId: extractionWorkerId(),
+            now: Date.now(),
+            leaseDurationMs: 10 * 60_000,
+          });
+          if (claim)
+            await store.transitionExtractionJob({
+              claim,
+              state: "blocked",
+              reason: "source_unavailable",
+            });
+          continue;
+        }
+        if (job.sourceKind === "explicit") pendingExplicitExtractions.add(this.laneKey);
+        this.enqueue(job.trigger === "remember" ? "extract" : job.trigger, async () => snapshot);
+        recovered += 1;
+      }
+      return recovered;
+    } finally {
+      store.close();
+    }
+  }
+
+  async reconcileAdmittedBoundaries(): Promise<number> {
+    if (!this.options.supported) return 0;
+    const entries = await this.readEntries();
+    const store = new SqliteMemoryItemStore(atomicMemoryDatabasePath(this.options.picoHome));
+    let reconciled = 0;
+    try {
+      for (const entry of entries) {
+        const { event } = entry;
+        if (event.kind === "run.terminal") {
+          const admission = event.data.memoryExtractionBoundary;
+          if (
+            event.data.status !== "completed" ||
+            event.data.recovered ||
+            admission?.disposition !== "eligible" ||
+            admission.deletionRevision === undefined ||
+            admission.settingsVersion === undefined
+          )
+            continue;
+          const jobId = extractionJobId({
+            workspaceKey: this.workspaceKey,
+            sessionId: memorySessionKey(this.workspaceKey, this.options.sessionId),
+            sourceEventId: event.eventId,
+            trigger: "extract",
+          });
+          if (await store.readExtractionJob(jobId)) continue;
+          const snapshot = await this.snapshot(
+            "extract",
+            admission.deletionRevision,
+            entry.sequence,
+          );
+          if (!snapshot) continue;
+          const frozen = {
+            ...snapshot,
+            sourceKind: "terminal" as const,
+            settingsVersion: admission.settingsVersion,
+          };
+          await this.persistJob({
+            jobId,
+            snapshot: frozen,
+            sourceEventId: event.eventId,
+            sourceKind: "terminal",
+            sourceOrdinal: entry.sequence,
+            throughOrdinal: entry.sequence,
+          });
+          scheduleAutomaticExtraction(
+            this.laneKey,
+            this.lifecycle,
+            (trigger, prepare) => this.enqueue(trigger, prepare),
+            "extract",
+            event.runId,
+            async () => frozen,
+          );
+          reconciled++;
+          continue;
+        }
+        if (event.kind !== "context.checkpoint.recorded") continue;
+        const admission = event.data.memoryExtractionBoundary;
+        if (
+          admission?.disposition !== "eligible" ||
+          admission.deletionRevision === undefined ||
+          admission.settingsVersion === undefined
+        )
+          continue;
+        const jobId = extractionJobId({
+          workspaceKey: this.workspaceKey,
+          sessionId: memorySessionKey(this.workspaceKey, this.options.sessionId),
+          sourceEventId: event.data.checkpointId,
+          trigger: "compaction",
+        });
+        if (await store.readExtractionJob(jobId)) continue;
+        const through = entries.find(
+          (candidate) => candidate.event.eventId === event.data.throughEventId,
+        );
+        if (!through) continue;
+        const snapshot = await this.snapshot(
+          "compaction",
+          admission.deletionRevision,
+          entry.sequence,
+        );
+        if (!snapshot) continue;
+        const frozen = {
+          ...snapshot,
+          sourceKind: "checkpoint" as const,
+          settingsVersion: admission.settingsVersion,
+          boundaryOrdinal: through.sequence,
+          boundaryEventId: through.event.eventId,
+          compactionCheckpointId: event.data.checkpointId,
+        };
+        await this.persistJob({
+          jobId,
+          snapshot: frozen,
+          sourceEventId: event.data.checkpointId,
+          sourceKind: "checkpoint",
+          sourceOrdinal: through.sequence,
+          throughOrdinal: through.sequence,
+        });
+        scheduleAutomaticExtraction(
+          this.laneKey,
+          this.lifecycle,
+          (trigger, prepare) => this.enqueue(trigger, prepare),
+          "compaction",
+          event.runId,
+          async () => frozen,
+        );
+        reconciled++;
+      }
+      return reconciled;
+    } finally {
+      store.close();
+    }
+  }
+
+  private async snapshotForJob(
+    job: MemoryExtractionJob,
+  ): Promise<MemoryExtractionSnapshot | undefined> {
+    const entries = await this.readEntries();
+    if (job.sourceKind === "terminal") {
+      const source = entries.find((entry) => entry.event.eventId === job.sourceEventId);
+      if (
+        !source ||
+        source.event.kind !== "run.terminal" ||
+        source.event.data.status !== "completed" ||
+        source.event.data.recovered ||
+        source.event.data.memoryExtractionBoundary?.disposition !== "eligible" ||
+        source.event.data.memoryExtractionBoundary.deletionRevision !== job.deletionRevision ||
+        source.event.data.memoryExtractionBoundary.settingsVersion !== job.settingsVersion
+      )
+        return undefined;
+      const snapshot = await this.snapshot("extract", job.deletionRevision, job.throughOrdinal);
+      return snapshot &&
+        extractionSourceHash(snapshot) === job.sourceHash &&
+        (!this.options.preserveSourceTools || snapshot.sourceTools !== undefined)
+        ? { ...snapshot, sourceKind: "terminal", settingsVersion: job.settingsVersion }
+        : undefined;
+    }
+    if (job.sourceKind === "checkpoint") {
+      const checkpoint = entries.find(
+        (entry) =>
+          entry.event.kind === "context.checkpoint.recorded" &&
+          entry.event.data.checkpointId === job.sourceEventId,
+      );
+      if (
+        !checkpoint ||
+        checkpoint.event.kind !== "context.checkpoint.recorded" ||
+        checkpoint.event.data.memoryExtractionBoundary?.disposition !== "eligible" ||
+        checkpoint.event.data.memoryExtractionBoundary.deletionRevision !== job.deletionRevision ||
+        checkpoint.event.data.memoryExtractionBoundary.settingsVersion !== job.settingsVersion
+      )
+        return undefined;
+      const checkpointEvent = checkpoint.event;
+      const through = entries.find(
+        (entry) => entry.event.eventId === checkpointEvent.data.throughEventId,
+      );
+      if (!through || through.sequence !== job.throughOrdinal) return undefined;
+      const snapshot = await this.snapshot("compaction", job.deletionRevision, checkpoint.sequence);
+      return snapshot &&
+        extractionSourceHash(snapshot) === job.sourceHash &&
+        (!this.options.preserveSourceTools || snapshot.sourceTools !== undefined)
+        ? {
+            ...snapshot,
+            sourceKind: "checkpoint",
+            boundaryOrdinal: through.sequence,
+            boundaryEventId: through.event.eventId,
+            settingsVersion: job.settingsVersion,
+            compactionCheckpointId: checkpoint.event.data.checkpointId,
+          }
+        : undefined;
+    }
+    const source = entries.find(
+      (entry) => entry.event.eventId === job.sourceEventId && entry.sequence === job.throughOrdinal,
+    );
+    if (
+      !source ||
+      source.event.kind !== "message.committed" ||
+      source.event.data.message.role !== "user"
+    )
+      return undefined;
+    const snapshot = await this.snapshot("extract", job.deletionRevision, job.throughOrdinal);
+    return snapshot &&
+      extractionSourceHash(snapshot) === job.sourceHash &&
+      (!this.options.preserveSourceTools || snapshot.sourceTools !== undefined)
+      ? {
+          ...snapshot,
+          sourceKind: "explicit",
+          boundaryOrdinal: source.sequence,
+          boundaryEventId: source.event.eventId,
+          settingsVersion: job.settingsVersion,
+        }
+      : undefined;
+  }
+
+  private async executeScheduled(snapshot: MemoryExtractionSnapshot): Promise<void> {
+    const sourceKind = snapshot.sourceKind ?? "terminal";
+    const sourceEventId =
+      sourceKind === "checkpoint" ? snapshot.compactionCheckpointId : snapshot.boundaryEventId;
+    if (!sourceEventId) return;
+    const jobId = extractionJobId({
+      workspaceKey: this.workspaceKey,
+      sessionId: snapshot.sessionId,
+      sourceEventId,
+      trigger: snapshot.trigger,
+    });
+    const store = new SqliteMemoryItemStore(atomicMemoryDatabasePath(this.options.picoHome));
+    try {
+      const claim = await store.claimExtractionJob({
+        jobId,
+        ownerId: extractionWorkerId(),
+        now: Date.now(),
+        leaseDurationMs: 10 * 60_000,
+      });
+      if (!claim) return;
+      const result = await this.execute(
+        {
+          ...snapshot,
+          deletionRevision: claim.deletionRevision,
+          settingsVersion: claim.settingsVersion,
+        },
+        claim,
+      );
+      const current = await store.readExtractionJob(jobId);
+      if (
+        result.status === "unavailable" &&
+        current?.state === "working" &&
+        current.fencingToken === claim.fencingToken
+      ) {
+        await store.transitionExtractionJob({
+          claim,
+          state: "blocked",
+          reason: result.reason ?? "extraction_unavailable",
+        });
+      }
+      const settled = await store.readExtractionJob(jobId);
+      if (
+        claim.sourceKind === "explicit" &&
+        settled &&
+        settled.state !== "pending" &&
+        settled.state !== "working"
+      )
+        pendingExplicitExtractions.delete(this.laneKey);
+    } finally {
+      store.close();
+    }
   }
 
   private enqueue(
@@ -487,7 +884,9 @@ export class AtomicMemoryRuntime {
       async () => {
         const snapshot = await prepare();
         if (snapshot)
-          await sessionMemoryLane.run(this.laneKey, "background", () => this.execute(snapshot));
+          await sessionMemoryLane.run(this.laneKey, "background", () =>
+            this.executeScheduled(snapshot),
+          );
       },
       () => undefined,
     );
@@ -499,7 +898,10 @@ export class AtomicMemoryRuntime {
       .finally(() => this.background.delete(task));
   }
 
-  private async execute(snapshot: MemoryExtractionSnapshot): Promise<AtomicMemoryResult> {
+  private async execute(
+    snapshot: MemoryExtractionSnapshot,
+    jobClaim?: MemoryExtractionJobClaim,
+  ): Promise<AtomicMemoryResult> {
     const store = new SqliteMemoryItemStore(atomicMemoryDatabasePath(this.options.picoHome));
     let lease: AtomicMemoryModelLease | undefined;
     try {
@@ -526,13 +928,33 @@ export class AtomicMemoryRuntime {
       };
       const model: MemoryExtractionModel = {
         call: async (request) => {
+          if (jobClaim) await store.reserveExtractionModelCall(jobClaim);
           lease ??= await this.options.modelFactory();
           return lease.model.call(request);
         },
       };
-      const result = await new AtomicMemoryExtractionEngine({ store, model, gate }).execute(
-        snapshot,
-      );
+      const engineStore = jobClaim
+        ? new Proxy(store, {
+            get(target, property) {
+              if (property === "commitExtraction")
+                return (request: Parameters<typeof store.commitExtraction>[0]) =>
+                  store.commitExtraction({ ...request, jobClaim });
+              if (property === "settleExtractionFailure")
+                return (request: Parameters<typeof store.settleExtractionFailure>[0]) =>
+                  store.settleExtractionFailure({ ...request, jobClaim });
+              const value = Reflect.get(target, property, target) as unknown;
+              return typeof value === "function" ? value.bind(target) : value;
+            },
+          })
+        : store;
+      const result = await new AtomicMemoryExtractionEngine({
+        store: engineStore,
+        model,
+        gate,
+        ...(this.options.onContentRejected
+          ? { onContentRejected: this.options.onContentRejected }
+          : {}),
+      }).execute(snapshot);
       if (
         snapshot.trigger !== "remember" &&
         result.status !== "unavailable" &&
@@ -767,6 +1189,45 @@ export class AtomicMemoryRuntime {
 
 function unavailable(reason: string): AtomicMemoryResult {
   return { status: "unavailable", reason, requestedItems: [] };
+}
+
+function extractionJobId(input: {
+  workspaceKey: string;
+  sessionId: string;
+  sourceEventId: string;
+  trigger: MemoryExtractionSnapshot["trigger"];
+}): string {
+  return `memory_job_${createHash("sha256")
+    .update(
+      JSON.stringify([input.workspaceKey, input.sessionId, input.sourceEventId, input.trigger]),
+    )
+    .digest("hex")}`;
+}
+
+function extractionSourceHash(snapshot: MemoryExtractionSnapshot): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        trigger: snapshot.trigger,
+        boundaryOrdinal: snapshot.boundaryOrdinal,
+        boundaryEventId: snapshot.boundaryEventId,
+        compactionCheckpointId: snapshot.compactionCheckpointId,
+        events: snapshot.events.map((event) => [
+          event.ordinal,
+          event.eventId,
+          event.runId,
+          event.turnId,
+          event.observedAt,
+          event.role,
+          event.text,
+        ]),
+      }),
+    )
+    .digest("hex");
+}
+
+function extractionWorkerId(): string {
+  return `${process.pid}_${randomUUID()}`;
 }
 
 function isDesktopInputWrapper(entries: readonly RuntimeEventStoreEntry[]): boolean {

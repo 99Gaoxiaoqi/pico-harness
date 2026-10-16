@@ -51,6 +51,9 @@ import {
   validateMemoryTemporalBounds,
   type ApplyMemoryMutationsRequest,
   type CommitMemoryExtractionRequest,
+  type EnqueueMemoryExtractionJobRequest,
+  type MemoryExtractionJob,
+  type MemoryExtractionJobClaim,
   type MemoryExtractionCommitResult,
   type MemoryCompactionPolicyDenial,
   type MemoryExtractionCursor,
@@ -482,6 +485,8 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
         };
       }
 
+      if (request.jobClaim) this.#assertExtractionJobClaim(request.jobClaim, committedAt);
+
       this.#assertDeletionRevision(request.expectedDeletionRevision);
       const currentCursor = this.#readExtractionCursorRow(sessionId);
       const currentOrdinal = currentCursor
@@ -590,6 +595,26 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
            ) VALUES (?, ?, ?, ?, ?)`,
         )
         .run(operationId, sessionId, requestHash, JSON.stringify(receipt), committedAt);
+      if (request.jobClaim) {
+        const settled = this.#database
+          .prepare(
+            `UPDATE memory_extraction_jobs
+             SET state='settled', owner_id=NULL, lease_until=0, reason=NULL, updated_at=?
+             WHERE job_id=? AND state='working' AND owner_id=? AND fencing_token=? AND lease_until>?`,
+          )
+          .run(
+            committedAt,
+            request.jobClaim.jobId,
+            request.jobClaim.ownerId,
+            request.jobClaim.fencingToken,
+            committedAt,
+          );
+        if (settled.changes !== 1)
+          throw new MemoryItemStoreConflictError(
+            "cursor_conflict",
+            "Memory extraction job claim was fenced",
+          );
+      }
       this.#database.exec("COMMIT");
       this.#options.failpoint?.("after_commit");
       return {
@@ -748,6 +773,7 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
     this.#database.exec("BEGIN IMMEDIATE");
     try {
       this.#assertNotDeleteOperation(operationId);
+      if (request.jobClaim) this.#assertExtractionJobClaim(request.jobClaim, recordedAt);
       const existingReceipt = this.#readExtractionReceiptRow(operationId);
       if (existingReceipt) {
         const receipt = decodeExtractionReceipt(existingReceipt);
@@ -835,6 +861,8 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
             pending.failedAt,
             pending.deletionRevision,
           );
+        if (request.jobClaim)
+          this.#releaseExtractionJobClaim(request.jobClaim, recordedAt, "provider_retry");
         this.#database.exec("COMMIT");
         return { status: "retry_later", replayed: false, pending };
       }
@@ -854,6 +882,8 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
             `Memory operation ${operationId} was already used for a different failed range`,
           );
         }
+        if (request.jobClaim)
+          this.#releaseExtractionJobClaim(request.jobClaim, recordedAt, "provider_retry");
         this.#database.exec("COMMIT");
         return { status: "retry_later", replayed: true, pending };
       }
@@ -934,6 +964,7 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
            ) VALUES (?, ?, ?, ?, ?)`,
         )
         .run(operationId, sessionId, requestHash, JSON.stringify(receipt), recordedAt);
+      if (request.jobClaim) this.#settleExtractionJobClaim(request.jobClaim, recordedAt);
       this.#database.exec("COMMIT");
       this.#options.failpoint?.("after_commit");
       return {
@@ -955,6 +986,285 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
       const row = this.#readExtractionReceiptRow(normalizedOperationId);
       return row ? decodeExtractionReceipt(row) : undefined;
     });
+  }
+
+  async enqueueExtractionJob(
+    request: EnqueueMemoryExtractionJobRequest,
+  ): Promise<MemoryExtractionJob> {
+    this.#assertOpen();
+    const now = normalizeTimestamp((this.#options.now ?? Date.now)(), "current time");
+    const jobId = normalizeIdentifier(request.jobId, "jobId");
+    const sessionId = normalizeIdentifier(request.sessionId, "sessionId");
+    const workspaceKey = normalizeIdentifier(request.workspaceKey, "workspaceKey");
+    const workDir = normalizeIdentifier(request.workDir, "workDir");
+    const sourceEventId = normalizeIdentifier(request.sourceEventId, "sourceEventId");
+    const sourceHash = normalizeIdentifier(request.sourceHash, "sourceHash");
+    const sourceOrdinal = normalizeCursorOrdinal(request.sourceOrdinal, "sourceOrdinal", false);
+    const throughOrdinal = normalizeCursorOrdinal(request.throughOrdinal, "throughOrdinal", false);
+    if (throughOrdinal < sourceOrdinal) throw new Error("Invalid extraction job source range");
+    const trigger = normalizeExtractionTrigger(request.trigger);
+    const checkpointId = normalizeCompactionCheckpointId(trigger, request.compactionCheckpointId);
+    const deletionRevision = normalizeCursorOrdinal(
+      request.deletionRevision,
+      "deletionRevision",
+      true,
+    );
+    const settingsVersion = normalizeCursorOrdinal(
+      request.settingsVersion,
+      "settingsVersion",
+      false,
+    );
+    const notBefore = normalizeTimestamp(request.notBefore, "notBefore");
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      this.#database
+        .prepare(
+          `INSERT INTO memory_extraction_jobs(
+          job_id,session_id,workspace_key,work_dir,source_event_id,source_hash,source_kind,source_ordinal,through_ordinal,
+          trigger,compaction_checkpoint_id,deletion_revision,settings_version,state,not_before,
+          created_at,updated_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?,?)
+        ON CONFLICT(session_id,source_event_id,trigger) DO NOTHING`,
+        )
+        .run(
+          jobId,
+          sessionId,
+          workspaceKey,
+          workDir,
+          sourceEventId,
+          sourceHash,
+          request.sourceKind,
+          sourceOrdinal,
+          throughOrdinal,
+          trigger,
+          checkpointId ?? null,
+          deletionRevision,
+          settingsVersion,
+          notBefore,
+          now,
+          now,
+        );
+      const row = this.#database
+        .prepare(
+          "SELECT * FROM memory_extraction_jobs WHERE job_id=? OR (session_id=? AND source_event_id=? AND trigger=?)",
+        )
+        .get(jobId, sessionId, sourceEventId, trigger) as Record<string, unknown> | undefined;
+      if (!row) throw new Error("Memory extraction job was not persisted");
+      if (row.job_id !== jobId)
+        throw new MemoryItemStoreConflictError(
+          "operation_reused",
+          "Memory extraction source already has a different job identity",
+        );
+      if (
+        row.source_hash !== sourceHash ||
+        row.source_kind !== request.sourceKind ||
+        Number(row.source_ordinal) !== sourceOrdinal ||
+        Number(row.through_ordinal) !== throughOrdinal ||
+        Number(row.deletion_revision) !== deletionRevision ||
+        Number(row.settings_version) !== settingsVersion
+      )
+        throw new MemoryItemStoreConflictError(
+          "operation_reused",
+          "Memory extraction source identity was reused with different frozen inputs",
+        );
+      this.#database.exec("COMMIT");
+      return decodeMemoryExtractionJob(row);
+    } catch (error) {
+      rollback(this.#database);
+      throw error;
+    }
+  }
+
+  async claimExtractionJob(input: {
+    jobId: string;
+    ownerId: string;
+    now: number;
+    leaseDurationMs: number;
+  }): Promise<MemoryExtractionJobClaim | undefined> {
+    this.#assertOpen();
+    const jobId = normalizeIdentifier(input.jobId, "jobId");
+    const ownerId = normalizeIdentifier(input.ownerId, "ownerId");
+    const now = normalizeTimestamp(input.now, "now");
+    const leaseDurationMs = normalizeCursorOrdinal(input.leaseDurationMs, "leaseDurationMs", false);
+    const leaseUntil = now + leaseDurationMs;
+    if (!Number.isSafeInteger(leaseUntil))
+      throw new Error("Extraction job lease exceeds safe integer range");
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.#database
+        .prepare("SELECT * FROM memory_extraction_jobs WHERE job_id=?")
+        .get(jobId) as Record<string, unknown> | undefined;
+      if (!row) {
+        this.#database.exec("COMMIT");
+        return undefined;
+      }
+      const job = decodeMemoryExtractionJob(row);
+      if (
+        !(
+          (job.state === "pending" && job.notBefore <= now) ||
+          (job.state === "working" && (job.leaseUntil ?? 0) <= now)
+        )
+      ) {
+        this.#database.exec("COMMIT");
+        return undefined;
+      }
+      const fencingToken = job.fencingToken + 1;
+      if (!Number.isSafeInteger(fencingToken))
+        throw new Error("Extraction job fencing token overflow");
+      this.#database
+        .prepare(
+          `UPDATE memory_extraction_jobs SET state='working', owner_id=?, lease_until=?,
+         fencing_token=?, updated_at=? WHERE job_id=?`,
+        )
+        .run(ownerId, leaseUntil, fencingToken, now, jobId);
+      const claimed = this.#database
+        .prepare("SELECT * FROM memory_extraction_jobs WHERE job_id=?")
+        .get(jobId) as Record<string, unknown>;
+      this.#database.exec("COMMIT");
+      return decodeMemoryExtractionJob(claimed) as MemoryExtractionJobClaim;
+    } catch (error) {
+      rollback(this.#database);
+      throw error;
+    }
+  }
+
+  async reserveExtractionModelCall(claim: MemoryExtractionJobClaim): Promise<number> {
+    this.#assertOpen();
+    const now = normalizeTimestamp((this.#options.now ?? Date.now)(), "current time");
+    this.#assertExtractionJobClaim(claim, now);
+    const updated = this.#database
+      .prepare(
+        `UPDATE memory_extraction_jobs SET model_calls=model_calls+1, updated_at=?
+       WHERE job_id=? AND state='working' AND owner_id=? AND fencing_token=? AND lease_until>?
+         AND model_calls < 6`,
+      )
+      .run(now, claim.jobId, claim.ownerId, claim.fencingToken, now);
+    if (updated.changes !== 1) {
+      this.#assertExtractionJobClaim(claim, now);
+      throw new Error("memory_extraction_budget_exhausted");
+    }
+    const row = this.#database
+      .prepare("SELECT model_calls FROM memory_extraction_jobs WHERE job_id=?")
+      .get(claim.jobId) as { model_calls: unknown };
+    return requiredNonNegativeInteger(row.model_calls, "model_calls");
+  }
+
+  async transitionExtractionJob(input: {
+    claim: MemoryExtractionJobClaim;
+    state: "pending" | "blocked";
+    notBefore?: number;
+    reason?: string;
+  }): Promise<void> {
+    this.#assertOpen();
+    const now = normalizeTimestamp((this.#options.now ?? Date.now)(), "current time");
+    const claim = input.claim;
+    this.#assertExtractionJobClaim(claim, now);
+    const notBefore =
+      input.state === "pending" ? normalizeTimestamp(input.notBefore ?? now, "notBefore") : now;
+    const reason = input.reason === undefined ? null : normalizeIdentifier(input.reason, "reason");
+    const updated = this.#database
+      .prepare(
+        `UPDATE memory_extraction_jobs SET state=?, not_before=?, owner_id=NULL, lease_until=0,
+       reason=?, updated_at=? WHERE job_id=? AND state='working' AND owner_id=? AND fencing_token=? AND lease_until>?`,
+      )
+      .run(
+        input.state,
+        notBefore,
+        reason,
+        now,
+        claim.jobId,
+        claim.ownerId,
+        claim.fencingToken,
+        now,
+      );
+    if (updated.changes !== 1)
+      throw new MemoryItemStoreConflictError(
+        "cursor_conflict",
+        "Memory extraction job claim was fenced",
+      );
+  }
+
+  async listRecoverableExtractionJobs(input: {
+    now: number;
+    limit?: number;
+  }): Promise<readonly MemoryExtractionJob[]> {
+    this.#assertOpen();
+    const now = normalizeTimestamp(input.now, "now");
+    const limit =
+      input.limit === undefined ? 100 : normalizeCursorOrdinal(input.limit, "limit", false);
+    return this.#readSnapshot(() =>
+      (
+        this.#database
+          .prepare(
+            `SELECT * FROM memory_extraction_jobs WHERE (state='pending' AND not_before<=?)
+       OR (state='working' AND lease_until<=?) ORDER BY not_before,created_at,job_id LIMIT ?`,
+          )
+          .all(now, now, Math.min(limit, 500)) as Array<Record<string, unknown>>
+      ).map(decodeMemoryExtractionJob),
+    );
+  }
+
+  async readExtractionJob(jobId: string): Promise<MemoryExtractionJob | undefined> {
+    this.#assertOpen();
+    const id = normalizeIdentifier(jobId, "jobId");
+    return this.#readSnapshot(() => {
+      const row = this.#database
+        .prepare("SELECT * FROM memory_extraction_jobs WHERE job_id=?")
+        .get(id) as Record<string, unknown> | undefined;
+      return row ? decodeMemoryExtractionJob(row) : undefined;
+    });
+  }
+
+  #assertExtractionJobClaim(claim: MemoryExtractionJobClaim, now: number): void {
+    const row = this.#database
+      .prepare(
+        `SELECT 1 FROM memory_extraction_jobs WHERE job_id=? AND state='working' AND owner_id=?
+       AND fencing_token=? AND lease_until>?`,
+      )
+      .get(claim.jobId, claim.ownerId, claim.fencingToken, now);
+    if (!row)
+      throw new MemoryItemStoreConflictError(
+        "cursor_conflict",
+        "Memory extraction job claim was fenced",
+      );
+  }
+
+  #releaseExtractionJobClaim(claim: MemoryExtractionJobClaim, now: number, reason: string): void {
+    const updated = this.#database
+      .prepare(
+        `UPDATE memory_extraction_jobs SET state='pending', not_before=?, owner_id=NULL,
+         lease_until=0, reason=?, updated_at=?
+         WHERE job_id=? AND state='working' AND owner_id=? AND fencing_token=? AND lease_until>?`,
+      )
+      .run(
+        now + 60_000,
+        normalizeIdentifier(reason, "reason"),
+        now,
+        claim.jobId,
+        claim.ownerId,
+        claim.fencingToken,
+        now,
+      );
+    if (updated.changes !== 1)
+      throw new MemoryItemStoreConflictError(
+        "cursor_conflict",
+        "Memory extraction job claim was fenced",
+      );
+  }
+
+  #settleExtractionJobClaim(claim: MemoryExtractionJobClaim, now: number): void {
+    const updated = this.#database
+      .prepare(
+        `UPDATE memory_extraction_jobs SET state='settled', owner_id=NULL, lease_until=0,
+         reason=NULL, updated_at=?
+         WHERE job_id=? AND state='working' AND owner_id=? AND fencing_token=? AND lease_until>?`,
+      )
+      .run(now, claim.jobId, claim.ownerId, claim.fencingToken, now);
+    if (updated.changes !== 1)
+      throw new MemoryItemStoreConflictError(
+        "cursor_conflict",
+        "Memory extraction job claim was fenced",
+      );
   }
 
   async listExtractionReceipts(
@@ -3137,6 +3447,42 @@ function decodeOperation(row: MemoryOperationRow): MemoryWriteOperationResult {
     replayed: false,
     committedAt: requiredNonNegativeInteger(row.committed_at, "committed_at"),
     results: decodedResults,
+  };
+}
+
+function decodeMemoryExtractionJob(row: Record<string, unknown>): MemoryExtractionJob {
+  const state = requiredString(row.state, "state");
+  if (!(["pending", "working", "settled", "blocked"] as const).includes(state as never))
+    throw invalidColumn("state");
+  const trigger = normalizeExtractionTrigger(row.trigger);
+  const ownerId = nullableIdentifierString(row.owner_id, "owner_id");
+  const leaseUntil = requiredNonNegativeInteger(row.lease_until, "lease_until");
+  if ((state === "working") !== (ownerId !== null && leaseUntil > 0)) throw invalidColumn("lease");
+  const checkpointId = normalizeCompactionCheckpointId(
+    trigger,
+    row.compaction_checkpoint_id === null ? undefined : row.compaction_checkpoint_id,
+  );
+  return {
+    jobId: requiredIdentifierString(row.job_id, "job_id"),
+    sessionId: requiredIdentifierString(row.session_id, "session_id"),
+    workspaceKey: requiredIdentifierString(row.workspace_key, "workspace_key"),
+    workDir: requiredIdentifierString(row.work_dir, "work_dir"),
+    sourceEventId: requiredIdentifierString(row.source_event_id, "source_event_id"),
+    sourceHash: requiredIdentifierString(row.source_hash, "source_hash"),
+    sourceKind: row.source_kind as MemoryExtractionJob["sourceKind"],
+    sourceOrdinal: requiredPositiveInteger(row.source_ordinal, "source_ordinal"),
+    throughOrdinal: requiredPositiveInteger(row.through_ordinal, "through_ordinal"),
+    trigger,
+    ...(checkpointId ? { compactionCheckpointId: checkpointId } : {}),
+    deletionRevision: requiredNonNegativeInteger(row.deletion_revision, "deletion_revision"),
+    settingsVersion: requiredPositiveInteger(row.settings_version, "settings_version"),
+    state: state as MemoryExtractionJob["state"],
+    notBefore: requiredNonNegativeInteger(row.not_before, "not_before"),
+    ...(ownerId ? { ownerId } : {}),
+    ...(leaseUntil > 0 ? { leaseUntil } : {}),
+    fencingToken: requiredNonNegativeInteger(row.fencing_token, "fencing_token"),
+    modelCalls: requiredNonNegativeInteger(row.model_calls, "model_calls"),
+    ...(row.reason === null ? {} : { reason: requiredIdentifierString(row.reason, "reason") }),
   };
 }
 

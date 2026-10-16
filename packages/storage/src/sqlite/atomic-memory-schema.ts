@@ -27,7 +27,43 @@ import {
   retireExecutionLessons,
 } from "./retire-execution-lessons.js";
 
-export const SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION = 16;
+export const SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION = 17;
+
+const MEMORY_EXTRACTION_JOB_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS memory_extraction_jobs (
+  job_id TEXT PRIMARY KEY CHECK(length(job_id) > 0),
+  session_id TEXT NOT NULL CHECK(length(session_id) > 0),
+  workspace_key TEXT NOT NULL CHECK(length(workspace_key) > 0),
+  work_dir TEXT NOT NULL CHECK(length(work_dir) > 0),
+  source_event_id TEXT NOT NULL CHECK(length(source_event_id) > 0),
+  source_hash TEXT NOT NULL CHECK(length(source_hash) > 0),
+  source_kind TEXT NOT NULL CHECK(source_kind IN ('terminal','checkpoint','explicit')),
+  source_ordinal INTEGER NOT NULL CHECK(source_ordinal > 0),
+  through_ordinal INTEGER NOT NULL CHECK(through_ordinal >= source_ordinal),
+  trigger TEXT NOT NULL CHECK(trigger IN ('remember','extract','compaction')),
+  compaction_checkpoint_id TEXT,
+  deletion_revision INTEGER NOT NULL CHECK(deletion_revision >= 0),
+  settings_version INTEGER NOT NULL CHECK(settings_version >= 1),
+  state TEXT NOT NULL CHECK(state IN ('pending','working','settled','blocked')),
+  not_before INTEGER NOT NULL CHECK(not_before >= 0),
+  owner_id TEXT,
+  lease_until INTEGER NOT NULL DEFAULT 0 CHECK(lease_until >= 0),
+  fencing_token INTEGER NOT NULL DEFAULT 0 CHECK(fencing_token >= 0),
+  model_calls INTEGER NOT NULL DEFAULT 0 CHECK(model_calls >= 0),
+  reason TEXT,
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  updated_at INTEGER NOT NULL CHECK(updated_at >= created_at),
+  UNIQUE(session_id, source_event_id, trigger),
+  CHECK((state = 'working' AND owner_id IS NOT NULL AND lease_until > 0)
+    OR (state != 'working' AND owner_id IS NULL AND lease_until = 0)),
+  CHECK((trigger = 'compaction' AND compaction_checkpoint_id IS NOT NULL)
+    OR (trigger != 'compaction' AND compaction_checkpoint_id IS NULL))
+);
+CREATE INDEX IF NOT EXISTS memory_extraction_jobs_ready
+  ON memory_extraction_jobs(state, not_before, created_at);
+CREATE INDEX IF NOT EXISTS memory_extraction_jobs_scope
+  ON memory_extraction_jobs(workspace_key, session_id, state, source_ordinal);
+`;
 
 const MEMORY_CONSOLIDATION_SCHEMA_SQL = `
 CREATE TABLE memory_consolidation_state (
@@ -233,7 +269,8 @@ CREATE INDEX memory_items_by_scope_and_lifecycle
   EXECUTION_LESSON_SCHEMA_SQL +
   EXECUTION_LEARNING_SCHEMA_SQL +
   TASK_EXPERIENCE_SCHEMA_SQL +
-  MEMORY_CONSOLIDATION_SCHEMA_SQL;
+  MEMORY_CONSOLIDATION_SCHEMA_SQL +
+  MEMORY_EXTRACTION_JOB_SCHEMA_SQL;
 
 const CURRENT_SCHEMA_SHAPE = {
   tables: [
@@ -279,6 +316,33 @@ const CURRENT_SCHEMA_SHAPE = {
         "request_hash",
         "result_json",
         "committed_at",
+      ],
+    },
+    {
+      name: "memory_extraction_jobs",
+      requiredColumns: [
+        "job_id",
+        "session_id",
+        "workspace_key",
+        "work_dir",
+        "source_event_id",
+        "source_hash",
+        "source_kind",
+        "source_ordinal",
+        "through_ordinal",
+        "trigger",
+        "compaction_checkpoint_id",
+        "deletion_revision",
+        "settings_version",
+        "state",
+        "not_before",
+        "owner_id",
+        "lease_until",
+        "fencing_token",
+        "model_calls",
+        "reason",
+        "created_at",
+        "updated_at",
       ],
     },
     {
@@ -397,6 +461,7 @@ export function initializeSqliteLongTermMemoryDatabase(db: DatabaseSync): void {
       }
       if (version < 14) retireExecutionLessons(db);
       if (version < 16) migrateTaskExperienceV16(db);
+      if (version < 17) db.exec(MEMORY_EXTRACTION_JOB_SCHEMA_SQL);
       db.exec(`PRAGMA user_version = ${SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION}`);
     }
     validateMinimumSchemaShape(db);

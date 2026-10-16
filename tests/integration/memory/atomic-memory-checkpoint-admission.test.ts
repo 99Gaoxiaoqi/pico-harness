@@ -43,7 +43,7 @@ const summary = [
 
 for (const scenario of ["stable", "delete", "toggle", "admission-failure"] as const) {
   test(`automatic checkpoint keeps its original admission after PostCompact: ${scenario}`, async (t) => {
-    t.mock.timers.enable({ apis: ["setTimeout"] });
+    t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
     const root = await mkdtemp(join(tmpdir(), "pico-memory-checkpoint-admission-"));
     const workDir = join(root, "workspace"),
       picoHome = join(root, "home"),
@@ -270,7 +270,7 @@ for (const scenario of ["stable", "delete", "toggle", "admission-failure"] as co
       assert.equal(
         (await store.readExtractionCursor(memorySessionKey(paths.workspace.id, sessionId)))
           ?.processedOrdinal,
-        checkpointThrough,
+        scenario === "stable" || scenario === "toggle" ? checkpointThrough : undefined,
       );
     } finally {
       store.close();
