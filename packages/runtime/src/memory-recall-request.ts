@@ -60,7 +60,7 @@ export class MemoryRecallRequestTracker {
     const searchCallIds = new Set(
       messages.flatMap((message) =>
         (message.toolCalls ?? [])
-          .filter((call) => call.name === "memory_search")
+          .filter((call) => ["memory_search", "memory_read"].includes(call.name))
           .map((call) => call.id),
       ),
     );

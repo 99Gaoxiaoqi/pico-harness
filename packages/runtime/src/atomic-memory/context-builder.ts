@@ -122,6 +122,135 @@ export class AtomicMemoryContextBuilder {
     private readonly workspaceKey: string,
   ) {}
 
+  /** Exact saved-body access; workspace identity belongs to this Host-owned builder. */
+  async read(
+    itemId: string,
+    expectedVersion: number,
+    options: {
+      readonly start?: number;
+      readonly end?: number;
+      readonly signal?: AbortSignal;
+      readonly trace?: AtomicMemoryContextOptions["trace"];
+    } = {},
+  ): Promise<AtomicMemoryContextResult> {
+    const startedAt = performance.now();
+    const unavailable = (reason: string): never => {
+      throw new Error(`Memory read unavailable: ${reason}`);
+    };
+    const checkAbort = () => {
+      if (options.signal?.aborted) unavailable("aborted");
+    };
+    checkAbort();
+    if (
+      typeof itemId !== "string" ||
+      !itemId.trim() ||
+      itemId.length > 512 ||
+      !Number.isSafeInteger(expectedVersion) ||
+      expectedVersion < 1 ||
+      [options.start, options.end].some(
+        (value) => value !== undefined && (!Number.isSafeInteger(value) || value < 0),
+      )
+    )
+      unavailable("invalid_request");
+    const settings = await this.store.readSettings(this.workspaceKey);
+    checkAbort();
+    if (!settings.enabled || !settings.recallEnabled) unavailable("memory_disabled");
+    const visible = (record: MemoryItemRecord) =>
+      record.item.lifecycleState === "active" &&
+      ((record.item.scopeType === "global" && record.item.scopeKey === null) ||
+        (record.item.scopeType === "workspace" && record.item.scopeKey === this.workspaceKey));
+    const supported = (record: MemoryItemRecord) =>
+      record.item.statementType === "fact" &&
+      !record.sourceType &&
+      !record.taskExperience &&
+      !record.taskAcceptance &&
+      !record.executionEvidence;
+    const record = await this.store.readItem(itemId);
+    checkAbort();
+    if (!record || !visible(record)) return unavailable("not_available");
+    if (!supported(record)) unavailable("unsupported");
+    if (record.item.version !== expectedVersion) unavailable("version_changed");
+    const points = Array.from(record.item.content);
+    const start = options.start ?? 0;
+    let end = options.end ?? points.length;
+    if (start >= end || end > points.length) unavailable("invalid_range");
+    await primeTokenizer();
+    checkAbort();
+    const source: ReferenceSource = referenceNote(record)
+      ? "assistant-note"
+      : record.sources.length
+        ? "user-evidence"
+        : "manual";
+    const render = (through: number) =>
+      renderReference(record, undefined, source, "content", start, through, true);
+    let rendered = render(end);
+    let truncated = rendered.reference.excerpt;
+    let block = formatBlock([rendered.line], truncated);
+    while (end > start && countTokens(block) > SEARCH_MAX_TOKENS) {
+      end--;
+      rendered = render(end);
+      truncated = rendered.reference.excerpt;
+      block = formatBlock([rendered.line], truncated);
+    }
+    if (end === start) unavailable("budget_exhausted");
+    const [current, currentSettings] = await Promise.all([
+      this.store.readItem(itemId),
+      this.store.readSettings(this.workspaceKey),
+    ]);
+    checkAbort();
+    if (!current || !visible(current) || !currentSettings.enabled || !currentSettings.recallEnabled)
+      unavailable("not_available");
+    if (!supported(current!)) unavailable("unsupported");
+    if (
+      current!.item.version !== expectedVersion ||
+      current!.item.contentHash !== record.item.contentHash ||
+      current!.item.content !== record.item.content ||
+      currentSettings.version !== settings.version
+    )
+      unavailable("changed");
+    const tokenCount = countTokens(block);
+    const result: AtomicMemoryContextResult = {
+      block,
+      items: [record],
+      references: [rendered.reference],
+      diagnostics: [{ itemId, reason: "selected", match: "content" }],
+      tokenCount,
+      truncated,
+    };
+    if (options.trace) {
+      const trace = createMemoryRecallTrace({
+        mode: "search",
+        workspaceKey: this.workspaceKey,
+        settingsVersion: settings.version,
+        query: JSON.stringify({ itemId, expectedVersion, start, end: options.end }),
+        queryRef: options.trace.queryRef,
+        outcome: "selected",
+        block,
+        budget: {
+          maxItems: 1,
+          maxTokens: SEARCH_MAX_TOKENS,
+          usedItems: 1,
+          usedTokens: tokenCount,
+          truncated,
+        },
+        selected: [
+          memoryRecallSelectedItem({
+            record,
+            match: "content",
+            source,
+            rank: 1,
+            score: 1,
+            reference: rendered.reference,
+            renderedLine: rendered.line,
+          }),
+        ],
+        elapsedMs: performance.now() - startedAt,
+      });
+      return { ...result, trace };
+    }
+    return result;
+  }
+
   async build(
     query?: string,
     options: AtomicMemoryContextOptions = {},
