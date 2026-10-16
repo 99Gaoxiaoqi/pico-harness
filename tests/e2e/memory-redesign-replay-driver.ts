@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type {
   LLMProvider,
@@ -17,6 +17,7 @@ import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
 import { globalSessionManager } from "@pico/pico-host/session";
 import { resolvePicoPaths } from "@pico/pico-host";
 import { SilentReporter } from "@pico/runtime/silent-reporter";
+import { operationalDatabasePath, type PhysicalAttemptRecord } from "@pico/storage";
 import { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-store";
 import { loadUserDefaultRealModel } from "./real-llm-user-model.js";
 
@@ -28,6 +29,60 @@ export interface ReplayInput {
   readonly marker: string;
   readonly frozenAt: number;
   readonly reportPath: string;
+}
+const redact = (value: string): string =>
+  value
+    .replace(/Bearer\s+\S+/giu, "Bearer [redacted]")
+    .replace(
+      /(["']?(?:api[_-]?key|authorization|access[_-]?token)["']?\s*[:=]\s*["']?)[^"'\s,}]+/giu,
+      "$1[redacted]",
+    );
+
+function providerLedger(input: ReplayInput) {
+  const activeDir = join(input.root, input.scenario === "scope" ? "other" : "workspace");
+  const storageRoot = resolvePicoPaths(activeDir, { picoHome: join(input.root, "home") }).workspace
+    .root;
+  try {
+    const db = new DatabaseSync(operationalDatabasePath(storageRoot), { readOnly: true });
+    try {
+      const rows = db
+        .prepare(
+          "SELECT record_json FROM usage_physical_attempts WHERE session_id=? ORDER BY created_at, physical_attempt_id",
+        )
+        .all(`replay-${input.scenario}-${input.variant}-${input.arm}`);
+      return {
+        status: "reported",
+        entries: rows.map((row) => {
+          const record = JSON.parse(String(row.record_json)) as PhysicalAttemptRecord;
+          return {
+            physicalAttemptId: record.physicalAttemptId,
+            logicalCallId: record.logicalCallId,
+            providerCallId: record.providerCallId,
+            provider: record.provider,
+            model: record.model,
+            route: record.route,
+            purpose: record.purpose,
+            status: record.status,
+            retryAttempt: record.retryAttempt,
+            startedAt: record.startedAt,
+            completedAt: record.completedAt,
+            latencyMs: record.latencyMs,
+            usageBasis: record.usageBasis,
+            usage: record.usage ?? null,
+            reportedCostCNY: record.costCNY ?? null,
+            reportedCostStatus: record.costStatus,
+            pricingVersion: record.pricingVersion,
+            costCNY: null,
+            costStatus: "unpriced",
+          };
+        }),
+      };
+    } finally {
+      db.close();
+    }
+  } catch (error) {
+    return { status: "unavailable", entries: [], reason: redact(String(error)).slice(0, 1000) };
+  }
 }
 
 async function run(input: ReplayInput): Promise<void> {
@@ -211,6 +266,16 @@ async function run(input: ReplayInput): Promise<void> {
     await fact(`${title}当前项目代号是 ${input.marker}。`, "frozen-fact");
   }
   const activeKey = resolvePicoPaths(activeDir, { picoHome }).workspace.id;
+  const frozenContents = candidate
+    ? [candidate.content]
+    : (await store.listItems({ workspaceKey: key, includeArchived: true }))
+        .map((record) => record.item.content)
+        .sort();
+  const sourceFreezeDigest = createHash("sha256")
+    .update(
+      JSON.stringify({ marker: input.marker, frozenAt: input.frozenAt, contents: frozenContents }),
+    )
+    .digest("hex");
   const settings = await store.readSettings(activeKey);
   await store.updateSettings({
     workspaceKey: activeKey,
@@ -289,6 +354,7 @@ async function run(input: ReplayInput): Promise<void> {
       route: model.route.id,
       promptHash: createHash("sha256").update(prompt).digest("hex"),
       frozenAt: input.frozenAt,
+      sourceFreezeDigest,
       marker: input.marker,
       initialMemoryContainsMarker: memoryBlocks.some((block) => block.includes(input.marker)),
       anyRequestContainsMarker: requests.some((messages) =>
@@ -297,7 +363,8 @@ async function run(input: ReplayInput): Promise<void> {
       answer,
       answerContainsMarker: answer.includes(input.marker),
       modelCalls: requests.length,
-      usage: result.usage,
+      usage: { ...result.usage, costCNY: null, costStatus: "unpriced" },
+      providerLedger: providerLedger(input),
       learningDuringComparison: false,
       requestMemoryBlocks: memoryBlocks,
       inputCharacters: requests.reduce(
@@ -306,8 +373,19 @@ async function run(input: ReplayInput): Promise<void> {
       ),
       elapsedMs: Math.round(performance.now() - started),
       toolNames: [...new Set(toolCalls.map((call) => call.name))],
-      caseSearch: toolCalls.some(
-        (call) => call.name === "memory_search" && call.arguments.includes('"case"'),
+      caseSearch: toolCalls.some((call) => {
+        try {
+          return call.name === "memory_search" && JSON.parse(call.arguments).record_type === "case";
+        } catch {
+          return false;
+        }
+      }),
+      caseReferenceDelivered: requests.some((messages) =>
+        messages.some(
+          (message) =>
+            message.content.includes('<task-case-reference trust="low">') &&
+            message.content.includes(input.marker),
+        ),
       ),
       adoption: "unknown unless separately supported by recorded tool effects",
       validation: "unknown for generic method",
@@ -351,6 +429,11 @@ async function run(input: ReplayInput): Promise<void> {
     if (input.scenario === "case" && input.arm === "new") {
       assert.equal(report.caseSearch, true, "explicit case lookup was not performed");
       assert.equal(
+        report.caseReferenceDelivered,
+        true,
+        "case source fragment was not sent to the Provider",
+      );
+      assert.equal(
         report.answerContainsMarker,
         true,
         "case lookup did not recover its actual outcome",
@@ -365,4 +448,43 @@ async function run(input: ReplayInput): Promise<void> {
   }
 }
 
-if (process.argv[2]) await run(JSON.parse(await readFile(process.argv[2], "utf8")) as ReplayInput);
+if (process.argv[2]) {
+  const input = JSON.parse(await readFile(process.argv[2], "utf8")) as ReplayInput;
+  const started = performance.now();
+  try {
+    await run(input);
+  } catch (error) {
+    let observed: Record<string, unknown> = {};
+    try {
+      observed = JSON.parse(await readFile(input.reportPath, "utf8")) as Record<string, unknown>;
+    } catch {
+      /* failure before the first observed result */
+    }
+    const detail = redact(
+      error instanceof Error ? (error.stack ?? error.message) : String(error),
+    ).slice(0, 8000);
+    await mkdir(dirname(input.reportPath), { recursive: true });
+    await writeFile(
+      input.reportPath,
+      JSON.stringify(
+        {
+          scenario: input.scenario,
+          variant: input.variant,
+          arm: input.arm,
+          marker: input.marker,
+          frozenAt: input.frozenAt,
+          seed: "controlled frozen memory fixture, not natural learning",
+          ...observed,
+          status: "failed",
+          failure: detail,
+          elapsedMs: observed.elapsedMs ?? Math.round(performance.now() - started),
+          usage: observed.usage ?? null,
+          providerLedger: providerLedger(input),
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    throw new Error(`replay ${input.scenario}-${input.variant}-${input.arm}: ${detail}`);
+  }
+}
