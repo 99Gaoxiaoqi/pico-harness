@@ -64,6 +64,7 @@ DatabaseSync.prototype.prepare = function (sql) {
 };
 const contentSearch = store.searchByContent.bind(store);
 store.searchByContent = async (...args) => {
+  if (counters) counters.contentSearchCalls++;
   const start = performance.now();
   try {
     return await contentSearch(...args);
@@ -247,6 +248,7 @@ try {
   const builder = new AtomicMemoryContextBuilder(store, workspaceKey);
   const run = async (entry, phase, repetition, queryIndex) => {
     counters = {
+      contentSearchCalls: 0,
       bodyScanCalls: 0,
       bodyRowsScored: 0,
       contentSearchMs: 0,
@@ -320,9 +322,54 @@ try {
   const afterDelete = await run(mutationQuery, "after-delete", 0, 0);
   const deleted = await builder.build(mutationQuery.query, { mode: "search" });
   assert.ok(!deleted.items.some((record) => record.item.itemId === created.results[0].itemId));
+  const summarize = (values) => ({
+    count: values.length,
+    p50Ms: percentile(
+      values.map((sample) => sample.elapsedMs),
+      0.5,
+    ),
+    p95Ms: percentile(
+      values.map((sample) => sample.elapsedMs),
+      0.95,
+    ),
+    contentSearchP50Ms: percentile(
+      values.map((sample) => sample.contentSearchMs),
+      0.5,
+    ),
+    contentSearchP95Ms: percentile(
+      values.map((sample) => sample.contentSearchMs),
+      0.95,
+    ),
+    contentSearchCalls: values.reduce((sum, sample) => sum + sample.contentSearchCalls, 0),
+    bodyRowsScored: values.reduce((sum, sample) => sum + sample.bodyRowsScored, 0),
+  });
+  const firstQueries = summarize([
+    cold,
+    ...samples.filter((sample) => sample.repetition === 0 && sample.queryIndex !== 0),
+  ]);
+  const repeatedQueries = summarize(samples.filter((sample) => sample.repetition > 0));
+  const sizing = new DatabaseSync(path);
+  let logicalDatabaseBytes;
+  try {
+    logicalDatabaseBytes =
+      sizing.prepare("PRAGMA page_count").get().page_count *
+      sizing.prepare("PRAGMA page_size").get().page_size;
+  } finally {
+    sizing.close();
+  }
+  let walBytes = 0;
+  try {
+    walBytes = (await stat(`${path}-wal`)).size;
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
   console.log(
     JSON.stringify(
       {
+        firstQueries,
+        repeatedQueries,
+        logicalDatabaseBytes,
+        walBytes,
         mutations: { writeMs, deleteMs, afterWrite, afterDelete },
         commit: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
         node: process.version,
