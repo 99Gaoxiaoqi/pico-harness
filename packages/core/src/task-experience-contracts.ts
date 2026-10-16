@@ -254,6 +254,20 @@ export interface TaskExperienceStore {
       readonly lifecycleState?: "active" | "archived";
       readonly workDir?: string;
       readonly query?: string;
+      /** Recall scans the eligible scope before applying limit; never a recent-row window. */
+      readonly recall?: {
+        readonly score: (candidate: TaskExperienceCandidate) => number;
+        readonly accept?: (
+          candidate: TaskExperienceCandidate,
+          metadata: { readonly itemVersion?: number },
+        ) => boolean | Promise<boolean>;
+        readonly budgetMs?: number;
+        readonly onLimited?: (diagnostic: {
+          readonly reason: "deadline";
+          readonly scanned: number;
+          readonly matched: number;
+        }) => void;
+      };
       readonly now?: number;
       readonly limit?: number;
     },

@@ -2,20 +2,29 @@ import type { MemoryItemSource } from "./atomic-memory-contracts.js";
 
 /** No query, key or memory body is permitted in this durable diagnostic. */
 export interface MemoryRecallTrace {
-  readonly version: 1;
+  readonly version: 1 | 2;
+  readonly recordType?: "memory" | "case";
+  readonly caseSelected?: readonly MemoryRecallCaseSelectedItem[];
+  readonly queryPolicyVersion?: number;
+  readonly limited?: boolean;
   readonly mode: "automatic" | "search";
   readonly workspaceKey: string;
   readonly settingsVersion?: number;
   readonly queryHash: string;
   readonly blockHash?: string;
-  readonly queryRef?: { readonly eventId?: string; readonly toolCallId?: string };
+  readonly queryRef?: {
+    readonly eventId?: string;
+    readonly toolCallId?: string;
+    readonly anchorEventId?: string;
+  };
   readonly outcome:
     | "selected"
     | "no_hits"
     | "budget_exhausted"
     | "disabled"
     | "admission_denied"
-    | "error";
+    | "error"
+    | "limited";
   readonly stages: {
     readonly exact: number;
     readonly prefix: number;
@@ -64,6 +73,16 @@ export interface MemoryRecallSelectedItem {
   readonly rank?: number;
   readonly score?: number;
 }
+export interface MemoryRecallCaseSelectedItem {
+  readonly candidateId: string;
+  readonly contentVersion: number;
+  readonly recordRevision: number;
+  readonly referenceHash: string;
+  readonly range: { readonly start: number; readonly end: number; readonly total: number };
+  readonly excerpt: boolean;
+  readonly sourceCount: number;
+  readonly sources: readonly MemoryItemSource[];
+}
 export interface MemoryRecallDiagnostic {
   readonly itemId: string;
   readonly reason: "duplicate" | "budget" | "item_limit";
@@ -72,12 +91,18 @@ export interface MemoryRecallDiagnostic {
   readonly score?: number;
 }
 export interface MemoryRecallRequestFacts {
-  readonly version: 1;
+  readonly version: 1 | 2;
   readonly coverage: "recorded" | "unrecorded";
   readonly recalls: readonly {
     readonly recallEventId: string;
     readonly blockHash?: string;
     readonly references: readonly { readonly itemId: string; readonly referenceHash: string }[];
+    readonly caseReferences?: readonly {
+      readonly candidateId: string;
+      readonly contentVersion: number;
+      readonly recordRevision: number;
+      readonly referenceHash: string;
+    }[];
   }[];
 }
 
@@ -97,6 +122,10 @@ export function isMemoryRecallTrace(v: unknown): v is MemoryRecallTrace {
     !record(v) ||
     !keys(v, [
       "version",
+      "recordType",
+      "caseSelected",
+      "queryPolicyVersion",
+      "limited",
       "mode",
       "workspaceKey",
       "settingsVersion",
@@ -122,7 +151,26 @@ export function isMemoryRecallTrace(v: unknown): v is MemoryRecallTrace {
     counts = v["counts"],
     ref = v["queryRef"];
   return (
-    v["version"] === 1 &&
+    (v["version"] === 1
+      ? v["recordType"] !== "case" && v["caseSelected"] === undefined && v["limited"] === undefined
+      : v["version"] === 2 &&
+        v["recordType"] === "case" &&
+        v["mode"] === "search" &&
+        Array.isArray(v["caseSelected"]) &&
+        v["caseSelected"].length <= 3 &&
+        v["caseSelected"].every(isMemoryRecallCaseSelectedItem) &&
+        Array.isArray(v["selected"]) &&
+        v["selected"].length === 0 &&
+        Array.isArray(v["diagnostics"]) &&
+        v["diagnostics"].length === 0 &&
+        record(budget) &&
+        budget["maxItems"] === 3 &&
+        budget["maxTokens"] === 1500 &&
+        (budget["usedTokens"] as number) <= 1500 &&
+        budget["usedItems"] === v["caseSelected"].length &&
+        (v["limited"] === undefined || typeof v["limited"] === "boolean")) &&
+    (v["recordType"] === undefined || ["memory", "case"].includes(v["recordType"] as string)) &&
+    (v["queryPolicyVersion"] === undefined || integer(v["queryPolicyVersion"])) &&
     ["automatic", "search"].includes(v["mode"] as string) &&
     text(v["workspaceKey"]) &&
     hash(v["queryHash"]) &&
@@ -130,12 +178,19 @@ export function isMemoryRecallTrace(v: unknown): v is MemoryRecallTrace {
     (v["settingsVersion"] === undefined || integer(v["settingsVersion"])) &&
     (ref === undefined ||
       (record(ref) &&
-        keys(ref, ["eventId", "toolCallId"]) &&
+        keys(ref, ["eventId", "toolCallId", "anchorEventId"]) &&
+        (ref["anchorEventId"] === undefined || text(ref["anchorEventId"])) &&
         (ref["eventId"] === undefined || text(ref["eventId"])) &&
         (ref["toolCallId"] === undefined || text(ref["toolCallId"])))) &&
-    ["selected", "no_hits", "budget_exhausted", "disabled", "admission_denied", "error"].includes(
-      v["outcome"] as string,
-    ) &&
+    [
+      "selected",
+      "no_hits",
+      "budget_exhausted",
+      "disabled",
+      "admission_denied",
+      "error",
+      "limited",
+    ].includes(v["outcome"] as string) &&
     record(stages) &&
     keys(stages, ["exact", "prefix", "content", "compound", "candidates"]) &&
     ["exact", "prefix", "content", "compound", "candidates"].every((k) => integer(stages[k])) &&
@@ -157,7 +212,10 @@ export function isMemoryRecallTrace(v: unknown): v is MemoryRecallTrace {
     Array.isArray(v["selected"]) &&
     v["selected"].length <= 10 &&
     v["selected"].every(isMemoryRecallSelectedItem) &&
-    counts["selected"] === v["selected"].length &&
+    counts["selected"] ===
+      (v["recordType"] === "case"
+        ? (v["caseSelected"] as unknown[]).length
+        : v["selected"].length) &&
     Array.isArray(v["diagnostics"]) &&
     v["diagnostics"].length <= 24 &&
     v["diagnostics"].every(
@@ -233,17 +291,78 @@ function isMemoryRecallSelectedItem(v: unknown): v is MemoryRecallSelectedItem {
     rankScore(v)
   );
 }
+function isMemoryRecallCaseSelectedItem(v: unknown): v is MemoryRecallCaseSelectedItem {
+  if (
+    !record(v) ||
+    !keys(v, [
+      "candidateId",
+      "contentVersion",
+      "recordRevision",
+      "referenceHash",
+      "range",
+      "excerpt",
+      "sourceCount",
+      "sources",
+    ])
+  )
+    return false;
+  const r = v["range"];
+  return (
+    text(v["candidateId"]) &&
+    integer(v["contentVersion"]) &&
+    v["contentVersion"] > 0 &&
+    integer(v["recordRevision"]) &&
+    v["recordRevision"] > 0 &&
+    hash(v["referenceHash"]) &&
+    record(r) &&
+    keys(r, ["start", "end", "total"]) &&
+    integer(r["start"]) &&
+    integer(r["end"]) &&
+    integer(r["total"]) &&
+    r["start"] <= r["end"] &&
+    r["end"] <= r["total"] &&
+    typeof v["excerpt"] === "boolean" &&
+    integer(v["sourceCount"]) &&
+    Array.isArray(v["sources"]) &&
+    v["sources"].length <= 3 &&
+    v["sourceCount"] >= v["sources"].length &&
+    v["sources"].every(
+      (s) =>
+        record(s) &&
+        keys(s, ["sessionId", "runId", "turnId", "eventId"]) &&
+        ["sessionId", "runId", "turnId", "eventId"].every((k) => text(s[k])),
+    )
+  );
+}
 export function isMemoryRecallRequestFacts(v: unknown): v is MemoryRecallRequestFacts {
   return (
     record(v) &&
     keys(v, ["version", "coverage", "recalls"]) &&
-    v["version"] === 1 &&
+    (v["version"] === 1 || v["version"] === 2) &&
+    new TextEncoder().encode(JSON.stringify(v)).length <= 8192 &&
     ["recorded", "unrecorded"].includes(v["coverage"] as string) &&
     Array.isArray(v["recalls"]) &&
     v["recalls"].every(
       (r) =>
         record(r) &&
-        keys(r, ["recallEventId", "blockHash", "references"]) &&
+        keys(r, ["recallEventId", "blockHash", "references", "caseReferences"]) &&
+        (r["caseReferences"] === undefined ||
+          (v["version"] === 2 &&
+            Array.isArray(r["references"]) &&
+            r["references"].length === 0 &&
+            Array.isArray(r["caseReferences"]) &&
+            r["caseReferences"].length <= 3 &&
+            r["caseReferences"].every(
+              (i) =>
+                record(i) &&
+                keys(i, ["candidateId", "contentVersion", "recordRevision", "referenceHash"]) &&
+                text(i["candidateId"]) &&
+                integer(i["contentVersion"]) &&
+                i["contentVersion"] > 0 &&
+                integer(i["recordRevision"]) &&
+                i["recordRevision"] > 0 &&
+                hash(i["referenceHash"]),
+            ))) &&
         text(r["recallEventId"]) &&
         (r["blockHash"] === undefined || hash(r["blockHash"])) &&
         Array.isArray(r["references"]) &&

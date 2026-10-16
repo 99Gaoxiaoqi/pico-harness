@@ -278,6 +278,7 @@ import {
   ATOMIC_MEMORY_CONTEXT_LIMITS,
 } from "@pico/runtime/atomic-memory/context-builder";
 import { createMemoryRecallTrace, MemoryRecallRequestTracker } from "@pico/runtime";
+import { resolveMemoryRecallQuery } from "./memory-recall-query.js";
 import type { MemoryRecallTrace } from "@pico/core";
 import {
   buildMemorySearchTool,
@@ -3272,6 +3273,14 @@ export async function executeAgentRuntime(
           "[SessionTasks] prompt injection degraded",
         );
       }
+      const recallQuery = await resolveMemoryRecallQuery({
+        query: currentUserPrompt,
+        ...(currentUserEventId ? { currentEventId: currentUserEventId } : {}),
+        sessionId: session.id,
+        workDir,
+        ...(session.runtimeEventStore ? { events: session.runtimeEventStore } : {}),
+        inheritedConversation: !!sideConversation || !!dependencies.configuredSubagentChild,
+      }).catch(() => ({ query: currentUserPrompt }));
       const recallQueryRef = currentUserEventId ? { eventId: currentUserEventId } : undefined;
       try {
         if (!(await memoryRecallAllowed()).allowed) {
@@ -3294,7 +3303,7 @@ export async function executeAgentRuntime(
               initialSettings.version,
             );
           } else {
-            const memory = await memoryContextBuilder.build(currentUserPrompt, {
+            const memory = await memoryContextBuilder.build(recallQuery.query, {
               experienceAllowed: experienceRecallAllowed,
               executionTargets: memoryRepository
                 ? await executionLearningRecallTargets(
@@ -3306,12 +3315,12 @@ export async function executeAgentRuntime(
                         consumeAuthorization: false,
                       }),
                     ),
-                    currentUserPrompt,
+                    recallQuery.query,
                     undefined,
                     runtimeEnv,
                   )
                 : [],
-              reviewedExperiences: await reviewedRecallTargets(currentUserPrompt),
+              reviewedExperiences: await reviewedRecallTargets(recallQuery.query),
               trace: { ...(recallQueryRef ? { queryRef: recallQueryRef } : {}) },
             });
             const finalSettings = await memoryRepository?.readSettings(memoryWorkspaceKey);
