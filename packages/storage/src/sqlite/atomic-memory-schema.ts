@@ -20,13 +20,14 @@
 import type { DatabaseSync } from "node:sqlite";
 import { EXECUTION_LEARNING_SCHEMA_SQL } from "./execution-learning-store.js";
 import { migrateExperienceFeedback } from "./experience-feedback-schema.js";
+import { migrateTaskExperienceV16 } from "./task-experience-migration.js";
 import { TASK_EXPERIENCE_SCHEMA_SQL } from "./task-experience-schema.js";
 import {
   checkpointRetiredExecutionLessons,
   retireExecutionLessons,
 } from "./retire-execution-lessons.js";
 
-export const SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION = 15;
+export const SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION = 16;
 
 const MEMORY_CONSOLIDATION_SCHEMA_SQL = `
 CREATE TABLE memory_consolidation_state (
@@ -395,6 +396,7 @@ export function initializeSqliteLongTermMemoryDatabase(db: DatabaseSync): void {
         if (version <= 14) db.exec(MEMORY_CONSOLIDATION_SCHEMA_SQL);
       }
       if (version < 14) retireExecutionLessons(db);
+      if (version < 16) migrateTaskExperienceV16(db);
       db.exec(`PRAGMA user_version = ${SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION}`);
     }
     validateMinimumSchemaShape(db);
@@ -416,10 +418,11 @@ export function assertSupportedSqliteLongTermMemorySchemaVersion(db: DatabaseSyn
     version !== 12 &&
     version !== 13 &&
     version !== 14 &&
+    version !== 15 &&
     version !== SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION
   ) {
     throw new Error(
-      `Long-term memory SQLite schema ${version} is unsupported; expected ${SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION}. Only schemas 9, 10, 11, 12, 13 and 14 can be upgraded automatically.`,
+      `Long-term memory SQLite schema ${version} is unsupported; expected ${SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION}. Only schemas 9, 10, 11, 12, 13, 14 and 15 can be upgraded automatically.`,
     );
   }
   if (
@@ -592,12 +595,47 @@ function validateMinimumSchemaShape(
         "record_json",
       ],
       task_experience_observations: ["observation_id", "task_id", "task_version", "record_json"],
-      ...(readSqliteLongTermMemorySchemaVersion(db) === 12 ? { task_experience_reuse: ["reuse_id", "workspace_key", "session_id", "candidate_id", "content_version", "record_json"] } : {
-        experience_uses: ["use_id", "workspace_key", "session_id", "item_id", "source_kind", "candidate_id", "record_json"],
-        experience_effects: ["effect_id", "use_id", "outcome_event_id", "record_json"],
-        experience_diagnostics: ["diagnostic_id", "workspace_key", "session_id", "created_at", "record_json"],
-        experience_feedback: ["operation_id", "workspace_key", "use_id", "request_hash", "result_json", "created_at"],
-      }),
+      ...(readSqliteLongTermMemorySchemaVersion(db) === 12
+        ? {
+            task_experience_reuse: [
+              "reuse_id",
+              "workspace_key",
+              "session_id",
+              "candidate_id",
+              "content_version",
+              "record_json",
+            ],
+          }
+        : {
+            experience_uses: [
+              "use_id",
+              "workspace_key",
+              "session_id",
+              "item_id",
+              "source_kind",
+              "candidate_id",
+              "record_json",
+            ],
+            experience_effects: ["effect_id", "use_id", "outcome_event_id", "record_json"],
+            experience_diagnostics: [
+              "diagnostic_id",
+              "workspace_key",
+              "session_id",
+              "created_at",
+              "record_json",
+            ],
+            experience_feedback: [
+              "operation_id",
+              "workspace_key",
+              "use_id",
+              "request_hash",
+              "result_json",
+              "created_at",
+              ...(readSqliteLongTermMemorySchemaVersion(db) >= 16
+                ? ["action", "source_json", "content_version"]
+                : []),
+            ],
+          }),
       task_experience_actions: [
         "operation_id",
         "workspace_key",

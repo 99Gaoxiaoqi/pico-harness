@@ -193,6 +193,7 @@ test("风险审核隔离高风险、范围不清与冲突来源；明确低风�
       const candidate = await store.taskExperiences.completeTaskExperienceJob({
         job,
         expectedRecordRevision: 1,
+        representation: kind === "high" || kind === "low" ? "method" : "case",
         content:
           kind === "high" ? "修复配置后部署并发布到生产环境。" : "先核对配置输入再运行同一检查。",
         applicability: {
@@ -204,12 +205,13 @@ test("风险审核隔离高风险、范围不清与冲突来源；明确低风�
         now: 300,
       });
       assert.ok(candidate);
-      assert.equal(candidate.risk, kind === "high" ? "high" : kind === "low" ? "low" : "unclear");
-      assert.equal(candidate.review, kind === "low" ? "unneeded" : "pending");
+      assert.equal(candidate.risk, kind === "high" ? "high" : "low");
+      assert.equal(candidate.representation, kind === "high" || kind === "low" ? "method" : "case");
+      assert.equal(candidate.review, kind === "high" ? "pending" : "unneeded");
       assert.equal(candidate.maturity, kind === "low" ? "trial" : "unassessed");
       assert.equal(candidate.enabled, kind === "low");
       assert.equal(!!candidate.itemId, kind === "low");
-      if (kind === "conflict") assert.match(candidate.reviewReason!, /互相冲突/);
+      if (kind === "conflict") assert.match(candidate.reason!, /互相冲突/);
     }
     const { itemId: _itemId, ...lowSeed } =
       (await store.taskExperiences.readTaskExperienceCandidate("low"))!;
@@ -371,14 +373,15 @@ test("通用经验同队列反思、审阅原子发布、旧视图隔离、CAS�
       job,
       expectedRecordRevision: 1,
       content: "运行当前检查入口并读取可信工具结果。",
+      representation: "method",
       applicability: { taskFamily: "general", toolNames: ["bash"], conditions: [] },
       sources: initial.candidate.sources,
       now: 300,
     });
     assert.ok(pending);
-    assert.equal(pending.review, "pending");
+    assert.equal(pending.review, "unneeded");
     assert.equal(pending.validation, "unknown");
-    assert.equal(pending.enabled, false);
+    assert.equal(pending.enabled, true);
     const request = {
       workspaceKey: "workspace",
       candidateId: "lesson",
@@ -664,7 +667,10 @@ test("反思以冻结短别名提交Host SHA证据，原ID与外来ID不能自�
       worker = undefined;
       const candidate = await store.taskExperiences.readTaskExperienceCandidate(suffix);
       assert.ok(candidate);
-      assert.equal(expected === "pending" ? candidate.review : candidate.reason, expected);
+      assert.equal(
+        expected === "pending" ? candidate.representation : candidate.reason,
+        expected === "pending" ? "case" : expected,
+      );
       assert.equal(factoryCalls, expected === "reflection_input_unsafe" ? 0 : 1);
       if (expected === "pending") assert.deepEqual(candidate.sources, [initial.observation.source]);
       const persisted = await store.taskExperiences.listTaskExperienceObservations(
@@ -806,6 +812,7 @@ test("审批发布规范化多行Unicode正文及附件目标键，编辑批准�
       job,
       expectedRecordRevision: 1,
       content: "  cafe\u0301 方法\n核对\u200b当前结果。  ",
+      representation: "method",
       applicability,
       sources: initial.candidate.sources,
       now: 300,
@@ -944,7 +951,8 @@ test("通用worker固定输入IDs并且缺当前route不消费持久预算", asy
     await worker.flushOnce();
     await worker.drain();
     const pending = await store.taskExperiences.readTaskExperienceCandidate("success");
-    assert.equal(pending?.review, "pending", JSON.stringify(pending));
+    assert.equal(pending?.review, "unneeded", JSON.stringify(pending));
+    assert.equal(pending?.representation, "case");
     assert.equal(pending?.validation, "unknown");
     assert.equal(pending?.enabled, false);
     assert.deepEqual(pending?.sources, [successful.observation.source]);
@@ -1261,6 +1269,7 @@ test("原生附件只认冻结身份；编辑与纠正断开，删除清理派�
       job,
       expectedRecordRevision: 1,
       content: "运行检查前核对输入条件。",
+      representation: "method" as const,
       applicability: initial.candidate.applicability,
       sources: initial.candidate.sources,
       now: 300,
@@ -1325,7 +1334,7 @@ test("原生附件只认冻结身份；编辑与纠正断开，删除清理派�
     });
     assert.deepEqual(pending?.nativeEvidence, attachment);
     assert.equal(pending?.validation, "unknown");
-    assert.equal(pending?.enabled, false);
+    assert.equal(pending?.enabled, true);
     await store.executionLearning.admitExecutionLearning(claim.admission);
     await assert.rejects(
       store.executionLearning.saveExecutionLearningClaim({

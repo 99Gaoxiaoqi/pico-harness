@@ -10,7 +10,12 @@ export type TaskExperienceDecisionKind = "high_impact" | "scope_expansion" | "lo
 /** Frozen Host identities; unknown condition kinds are never implicitly satisfied. */
 export type TaskExperienceRequiredCondition =
   | ({ readonly kind: "native-scope" } & TaskExperienceNativeEvidence)
-  | { readonly kind: "spreadsheet-range"; readonly operation: "sum"; readonly header: false; readonly dataKind: "finite-numbers" };
+  | {
+      readonly kind: "spreadsheet-range";
+      readonly operation: "sum";
+      readonly header: false;
+      readonly dataKind: "finite-numbers";
+    };
 export interface TaskExperienceEvidenceSummary {
   readonly deliveredCount: number;
   readonly independentTaskCount: number;

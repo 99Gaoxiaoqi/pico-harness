@@ -269,6 +269,7 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
       configureSqliteLongTermMemoryDatabase(this.#database);
       initializeSqliteLongTermMemoryDatabase(this.#database);
       this.experienceLedger = new SqliteExperienceLedgerStore(this.#database, {
+        now: this.#options.now ?? Date.now,
         settings: (workspaceKey) => this.#readSettings(workspaceKey),
         deletionRevision: () => this.#deletionRevision(),
         itemAcceptance: (itemId, contentHash) =>
@@ -277,6 +278,7 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
       });
       this.executionLearning = new ExecutionLearningSqliteStore(this.#database, {
         experienceLedger: this.experienceLedger,
+        now: this.#options.now ?? Date.now,
         settings: (workspaceKey) => this.#readSettings(workspaceKey),
         deletionRevision: () => this.#deletionRevision(),
         createExperienceItem: (candidate, now) => {
@@ -953,6 +955,25 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
       const row = this.#readExtractionReceiptRow(normalizedOperationId);
       return row ? decodeExtractionReceipt(row) : undefined;
     });
+  }
+
+  async listExtractionReceipts(
+    sessionId: string,
+    limit = 100,
+  ): Promise<readonly MemoryExtractionReceipt[]> {
+    this.#assertOpen();
+    const session = normalizeIdentifier(sessionId, "sessionId");
+    if (!Number.isSafeInteger(limit) || limit < 1)
+      throw new Error("Invalid extraction receipt limit");
+    return this.#readSnapshot(() =>
+      (
+        this.#database
+          .prepare(
+            "SELECT * FROM memory_extraction_receipts WHERE session_id=? ORDER BY committed_at DESC,operation_id ASC LIMIT ?",
+          )
+          .all(session, Math.min(100, limit)) as unknown as MemoryExtractionReceiptRow[]
+      ).map(decodeExtractionReceipt),
+    );
   }
 
   async readItem(itemId: string): Promise<MemoryItemRecord | undefined> {

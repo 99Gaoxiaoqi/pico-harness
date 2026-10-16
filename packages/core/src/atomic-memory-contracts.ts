@@ -453,6 +453,10 @@ export interface MemoryItemStore {
     request: SettleMemoryExtractionFailureRequest,
   ): Promise<SettleMemoryExtractionFailureResult>;
   readExtractionReceipt(operationId: string): Promise<MemoryExtractionReceipt | undefined>;
+  listExtractionReceipts?(
+    sessionId: string,
+    limit?: number,
+  ): Promise<readonly MemoryExtractionReceipt[]>;
   readItem(itemId: string): Promise<MemoryItemRecord | undefined>;
   searchByKeys(request: SearchMemoryItemsByKeyRequest): Promise<readonly MemoryItemRecord[]>;
   searchByContent(request: SearchMemoryItemsByContentRequest): Promise<readonly MemoryItemRecord[]>;

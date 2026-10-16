@@ -1,0 +1,117 @@
+import type {
+  TaskExperienceCandidate,
+  TaskExperienceRequiredCondition,
+  TaskExperienceSummary,
+} from "@pico/core";
+
+export function experienceSummary(candidate: TaskExperienceCandidate): TaskExperienceSummary {
+  const {
+    candidateId,
+    contentVersion,
+    recordRevision,
+    review,
+    validation,
+    enabled,
+    applicability,
+  } = candidate;
+  return {
+    candidateId,
+    contentVersion,
+    recordRevision,
+    review,
+    validation,
+    enabled,
+    applicability,
+    ...(candidate.representation ? { representation: candidate.representation } : {}),
+    ...(candidate.usagePolicy ? { usagePolicy: candidate.usagePolicy } : {}),
+    ...(candidate.matchHints ? { matchHints: candidate.matchHints } : {}),
+    ...(candidate.requiredConditions ? { requiredConditions: candidate.requiredConditions } : {}),
+    ...(candidate.scopeUnresolved ? { scopeUnresolved: true } : {}),
+    ...(candidate.decisionKind ? { decisionKind: candidate.decisionKind } : {}),
+    ...(candidate.expiresAt !== undefined ? { expiresAt: candidate.expiresAt } : {}),
+    ...(candidate.maturity ? { maturity: candidate.maturity } : {}),
+    ...(candidate.risk ? { risk: candidate.risk } : {}),
+    ...(candidate.promotionReason ? { promotionReason: candidate.promotionReason } : {}),
+    ...(candidate.positiveReuseCount !== undefined
+      ? { positiveReuseCount: candidate.positiveReuseCount }
+      : {}),
+    ...(candidate.reviewReason ? { reviewReason: candidate.reviewReason } : {}),
+  };
+}
+export function experienceLocked(candidate: TaskExperienceCandidate): boolean {
+  return (
+    candidate.reason === "user_correction" ||
+    candidate.reason === "trusted_reuse_contradiction" ||
+    candidate.validation === "fail" ||
+    candidate.validation === "stale"
+  );
+}
+export function experienceUsable(candidate: TaskExperienceCandidate, now: number): boolean {
+  return (
+    candidate.representation === "method" &&
+    candidate.usagePolicy === "suggestion" &&
+    candidate.enabled &&
+    candidate.lifecycleState === "active" &&
+    candidate.state === "saved" &&
+    !candidate.scopeUnresolved &&
+    !experienceLocked(candidate) &&
+    (candidate.expiresAt === undefined || candidate.expiresAt > now)
+  );
+}
+export function experienceHints(
+  hints: readonly string[] | undefined,
+  content = "",
+): readonly string[] {
+  const generic =
+    /^(?:(?:task|code|file|test|tool|run|任务|代码|文件|测试|工具|方法|经验|检查|结果)[\s、,，-]*)+$/iu;
+  const values = hints ?? content.match(/[A-Za-z][\w./-]{2,}|[\p{Script=Han}]{2,10}/gu) ?? [];
+  return [
+    ...new Set(
+      values
+        .map((value) => value.trim())
+        .filter((value) => value.length >= 2 && value.length <= 80 && !generic.test(value)),
+    ),
+  ].slice(0, 8);
+}
+export function experienceConditions(
+  candidate: Pick<TaskExperienceCandidate, "nativeEvidence" | "applicability">,
+  requested?: readonly TaskExperienceRequiredCondition[],
+  legacy = false,
+): { requiredConditions: readonly TaskExperienceRequiredCondition[]; scopeUnresolved: boolean } {
+  const conditions: TaskExperienceRequiredCondition[] = [];
+  if (candidate.nativeEvidence)
+    conditions.push({ kind: "native-scope", ...candidate.nativeEvidence });
+  if (candidate.applicability.spreadsheet)
+    conditions.push({ kind: "spreadsheet-range", ...candidate.applicability.spreadsheet });
+  if (requested)
+    for (const condition of requested) {
+      if (!conditions.some((value) => JSON.stringify(value) === JSON.stringify(condition)))
+        throw new Error("Task experience condition is not observed");
+    }
+  const unknownLegacy =
+    legacy &&
+    candidate.applicability.conditions.some(
+      (value) =>
+        !/^(?:sum|求和|无表头|有限数值|finite[- ]numbers|header[:= ]false|spreadsheet|range|范围|表格|纯数字|数值区域|所有输入均为有限数值|数据区域不含表头|当前纯数值范围|当前数值范围|数值范围没有表头|当前选择区域是有限数值)$/iu.test(
+          value.trim(),
+        ),
+    );
+  return { requiredConditions: requested ?? conditions, scopeUnresolved: !!unknownLegacy };
+}
+export function experienceContentRisk(content: string): "low" | "high" | "blocked" {
+  const proposal = content.replace(
+    /(?:不要|避免|不得|不应|禁止|不允许|切勿|do not|never|avoid)[^。；;，,\n]*/giu,
+    "",
+  );
+  if (
+    /(?:绕过|跳过|无需|不需|bypass|skip)[\s\S]{0,24}(?:审批|权限|确认|凭据|approval|permission|confirmation|credential)/iu.test(
+      proposal,
+    )
+  )
+    return "blocked";
+  return /(?:\bdelete\b|\bremove\b|\berase\b|\brm\s+-rf\b|\bdrop\s+(?:table|database)\b|删除|清空|销毁|\bpublish\b|\brelease\b|\bdeploy\b|发布|部署|外部发送|\bsend\s+(?:an?\s+)?(?:email|message|request)|发送|邮件|转账|付款|\btransfer\b|\bpayment\b|\bsudo\b|\bchmod\b|更改权限|修改权限)/iu.test(
+    proposal,
+  )
+    ? "high"
+    : "low";
+}

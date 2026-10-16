@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
+import { experienceSummary, experienceUsable, experienceLocked } from "./task-experience-policy.js";
 import { MemoryItemStoreConflictError } from "@pico/core";
 import type {
   ExperienceDiagnostic,
@@ -10,6 +11,7 @@ import type {
   ExperienceUsePage,
   TaskExperienceCandidate,
   TaskExperienceTask,
+  TaskExperienceEvidenceSummary,
   ExecutionLearningCandidate,
 } from "@pico/core";
 
@@ -36,6 +38,7 @@ export class SqliteExperienceLedgerStore implements ExperienceLedgerStore {
   constructor(
     private readonly db: DatabaseSync,
     private readonly options: {
+      now?: () => number;
       settings: (workspaceKey: string) => {
         version: number;
         enabled: boolean;
@@ -177,7 +180,7 @@ export class SqliteExperienceLedgerStore implements ExperienceLedgerStore {
     const item = this.db.prepare("SELECT * FROM memory_items WHERE item_id=?").get(use.itemId);
     if (
       !item ||
-      item.version !== use.itemVersion ||
+      (requireEnabled && item.version !== use.itemVersion) ||
       item.content_hash !== use.contentHash ||
       (requireEnabled && item.lifecycle_state !== "active") ||
       item.scope_type !== "workspace" ||
@@ -209,14 +212,10 @@ export class SqliteExperienceLedgerStore implements ExperienceLedgerStore {
         candidate.kind === "task-lesson" &&
         candidate.workspaceKey === use.workspaceKey &&
         candidate.state === "saved" &&
-        (candidate.review === "approved" ||
-          (candidate.review === "unneeded" &&
-            (candidate.maturity === "trial" || candidate.maturity === "active") &&
-            candidate.risk === "low")) &&
         candidate.itemId === use.itemId &&
         candidate.contentVersion === source.contentVersion &&
         !!acceptance.taskExperience &&
-        (!requireEnabled || (candidate.enabled && candidate.lifecycleState === "active"))
+        (!requireEnabled || experienceUsable(candidate, (this.options.now ?? Date.now)()))
       );
     }
     const candidate = decode<ExecutionLearningCandidate>(
@@ -433,7 +432,10 @@ export class SqliteExperienceLedgerStore implements ExperienceLedgerStore {
           )
           .get(effect.useId, effect.outcomeEventId),
       );
-      if (old) return;
+      if (old) {
+        if (hash(old) !== hash(effect)) throw new Error("Experience effect identity reused");
+        return;
+      }
       if (
         this.db.prepare("SELECT 1 FROM experience_effects WHERE effect_id=?").get(effect.effectId)
       )
@@ -480,13 +482,14 @@ export class SqliteExperienceLedgerStore implements ExperienceLedgerStore {
         sources: verdict.sources,
         updatedAt: Math.max(use.updatedAt, verdict.createdAt),
       });
+      const contradiction = effect.validation === "fail" && effect.trustedContradiction;
       if (
         !options?.allowStateChange ||
-        verdict.outcomeEventId !== effect.outcomeEventId ||
-        !this.effectFence(use) ||
-        !this.sourceCurrent(use, true) ||
+        effect.adoption !== "observed" ||
         this.excluded(use) ||
-        effect.adoption !== "observed"
+        (!contradiction && verdict.outcomeEventId !== effect.outcomeEventId) ||
+        !this.sourceCurrent(use, !contradiction) ||
+        (!contradiction && !this.effectFence(use))
       )
         return;
       // Native/command outcomes remain scoped ledger evidence; they cannot validate
@@ -553,85 +556,51 @@ export class SqliteExperienceLedgerStore implements ExperienceLedgerStore {
         .prepare("SELECT record_json FROM execution_learning_candidates WHERE candidate_id=?")
         .get(use.source.candidateId),
     )!;
-    const positiveReuseCount = this.positiveTaskExperienceReuseCount(candidate);
-    const validationScope = this.useValidationScope(use.useId);
-    const deterministicPass =
-      !disable &&
-      validation === "pass" &&
-      ["spreadsheet-range", "native-claim"].includes(validationScope);
-    const twoPositiveReuses =
-      !disable && validation === "pass" && validationScope === "command" && positiveReuseCount >= 2;
-    const autoPromoted =
-      (deterministicPass || twoPositiveReuses) &&
-      candidate.maturity === "trial" &&
-      candidate.risk === "low";
-    const { reviewReason: _reviewReason, ...candidateWithoutReviewReason } = candidate;
+    if (
+      use.source.kind !== "reviewed-reference" ||
+      use.source.contentVersion !== candidate.contentVersion ||
+      candidate.itemId !== use.itemId
+    )
+      return;
+    // A local result never promotes arbitrary prose. Locks survive later successes.
+    const locked = experienceLocked(candidate);
     const next: TaskExperienceCandidate = {
-      ...candidateWithoutReviewReason,
+      ...candidate,
       enabled: disable ? false : candidate.enabled,
-      ...(validation ? { validation } : {}),
-      ...(candidate.reviewReason !== undefined ? { reviewReason: candidate.reviewReason } : {}),
-      ...(candidate.positiveReuseCount !== undefined || positiveReuseCount > 0
-        ? { positiveReuseCount }
-        : {}),
-      ...(disable ? { maturity: "suspended" as const } : {}),
-      ...(autoPromoted
-        ? {
-            maturity: "active" as const,
-            promotionReason: deterministicPass
-              ? ("deterministic_validation" as const)
-              : ("two_positive_reuses" as const),
-          }
+      ...(validation && (!locked || disable) ? { validation } : {}),
+      ...(validation === "pass" && !locked && candidate.expiresAt !== undefined
+        ? { expiresAt: now + 90 * 86400000 }
         : {}),
       ...(disable
-        ? { reason: validation === "fail" ? "trusted_reuse_contradiction" : "user_disable" }
+        ? {
+            maturity: "suspended",
+            usagePolicy: "blocked",
+            reason: validation === "fail" ? "trusted_reuse_contradiction" : "user_disable",
+          }
         : {}),
       recordRevision: candidate.recordRevision + 1,
-      updatedAt: now,
+      updatedAt: Math.max(candidate.updatedAt, now),
     };
+    this.writeCandidate(next);
+    if (disable) this.bumpManagement();
+    else this.bumpResourceRevision();
+  }
+  private writeCandidate(candidate: TaskExperienceCandidate): void {
     this.db
       .prepare(
         "UPDATE execution_learning_candidates SET revision=?,updated_at=?,record_json=? WHERE candidate_id=?",
       )
-      .run(next.recordRevision, now, JSON.stringify(next), next.candidateId);
-    const metadata = {
-      candidateId: next.candidateId,
-      contentVersion: next.contentVersion,
-      recordRevision: next.recordRevision,
-      review: next.review,
-      validation: next.validation,
-      enabled: next.enabled,
-      applicability: next.applicability,
-      ...(next.maturity ? { maturity: next.maturity } : {}),
-      ...(next.risk ? { risk: next.risk } : {}),
-      ...(next.promotionReason ? { promotionReason: next.promotionReason } : {}),
-      ...(next.positiveReuseCount !== undefined
-        ? { positiveReuseCount: next.positiveReuseCount }
-        : {}),
-      ...(next.reviewReason ? { reviewReason: next.reviewReason } : {}),
-    };
+      .run(
+        candidate.recordRevision,
+        candidate.updatedAt,
+        JSON.stringify(candidate),
+        candidate.candidateId,
+      );
     this.db
-      .prepare("UPDATE execution_learning_items SET metadata_json=? WHERE item_id=?")
-      .run(JSON.stringify(metadata), use.itemId);
-    if (disable || autoPromoted) this.bumpManagement();
-    else this.bumpResourceRevision();
+      .prepare("UPDATE execution_learning_items SET metadata_json=? WHERE candidate_id=?")
+      .run(JSON.stringify(experienceSummary(candidate)), candidate.candidateId);
   }
-  private useValidationScope(useId: string): ExperienceUse["validationScope"] {
-    const use = decode<ExperienceUse>(
-      this.db.prepare("SELECT record_json FROM experience_uses WHERE use_id=?").get(useId),
-    );
-    return use?.validationScope ?? "unknown";
-  }
-  private hasNativeEvidence(candidateId: string): boolean {
-    const candidate = decode<TaskExperienceCandidate>(
-      this.db
-        .prepare("SELECT record_json FROM execution_learning_candidates WHERE candidate_id=?")
-        .get(candidateId),
-    );
-    return candidate?.kind === "task-lesson" && !!candidate.nativeEvidence;
-  }
-  private positiveTaskExperienceReuseCount(candidate: TaskExperienceCandidate): number {
-    const identities = new Set<string>();
+  evidenceSummary(candidate: TaskExperienceCandidate): TaskExperienceEvidenceSummary {
     const uses = this.db
       .prepare(
         "SELECT record_json FROM experience_uses WHERE candidate_id=? AND source_kind='reviewed-reference'",
@@ -642,33 +611,88 @@ export class SqliteExperienceLedgerStore implements ExperienceLedgerStore {
         (use) =>
           use.source.kind === "reviewed-reference" &&
           use.source.contentVersion === candidate.contentVersion &&
-          use.itemId === candidate.itemId &&
-          use.taskId !== candidate.taskId &&
           use.delivery === "carried" &&
           !use.historical &&
-          !use.deleted &&
-          !use.excluded &&
-          use.adoption === "observed" &&
-          use.validation === "pass" &&
-          ["spreadsheet-range", "native-claim", "command"].includes(use.validationScope),
+          !use.deleted,
       );
+    const roots = new Set<string>();
+    const taskFamily = (id: string): string => {
+      const seen = new Set<string>();
+      let taskId = id;
+      while (!seen.has(taskId)) {
+        seen.add(taskId);
+        const task = decode<TaskExperienceTask>(
+          this.db
+            .prepare("SELECT record_json FROM task_experience_tasks WHERE task_id=?")
+            .get(taskId),
+        );
+        if (!task || task.workspaceKey !== candidate.workspaceKey) return taskId;
+        if (task.goalId) return `goal:${task.goalId}`;
+        if (!task.previousTaskId) return taskId;
+        taskId = task.previousTaskId;
+      }
+      return [...seen].sort()[0]!;
+    };
+    const results = new Map<
+      string,
+      {
+        validation: ExperienceUse["validation"];
+        scope: ExperienceUse["validationScope"];
+        count: number;
+      }
+    >();
+    let adoptedCount = 0,
+      contradictionCount = 0;
     for (const use of uses) {
-      const effects = this.db
+      roots.add(taskFamily(use.taskId));
+      if (use.adoption === "observed" && !use.excluded) adoptedCount++;
+      for (const row of this.db
         .prepare("SELECT record_json FROM experience_effects WHERE use_id=?")
-        .all(use.useId)
-        .map((row) => decode<ExperienceEffect>(row)!);
-      if (
-        effects.some(
-          (effect) =>
-            effect.adoption === "observed" &&
-            effect.validation === "pass" &&
-            ["spreadsheet-range", "native-claim", "command"].includes(effect.validationScope) &&
-            !effect.trustedContradiction,
-        )
-      )
-        identities.add(use.taskId);
+        .all(use.useId)) {
+        const effect = decode<ExperienceEffect>(row)!;
+        if (effect.trustedContradiction && effect.validation === "fail") contradictionCount++;
+        if (effect.validation === "unknown") continue;
+        const key = `${effect.validation}:${effect.validationScope}`;
+        const result = results.get(key) ?? {
+          validation: effect.validation,
+          scope: effect.validationScope,
+          count: 0,
+        };
+        result.count++;
+        results.set(key, result);
+      }
     }
-    return identities.size;
+    const helpful = new Set<string>(),
+      corrections = new Set<string>();
+    for (const row of this.db
+      .prepare(
+        "SELECT use_id,action,content_version FROM experience_feedback WHERE workspace_key=?",
+      )
+      .all(candidate.workspaceKey)) {
+      if (
+        row.content_version !== candidate.contentVersion ||
+        !uses.some((use) => use.useId === row.use_id)
+      )
+        continue;
+      if (row.action === "helpful") helpful.add(String(row.use_id));
+      if (row.action === "correct") corrections.add(String(row.use_id));
+    }
+    return {
+      deliveredCount: uses.length,
+      independentTaskCount: roots.size,
+      adoptedCount,
+      helpfulCount: helpful.size,
+      contradictionCount: contradictionCount + corrections.size,
+      results: [...results.values()],
+    };
+  }
+  private hasNativeEvidence(candidateId: string): boolean {
+    const candidate = decode<TaskExperienceCandidate>(
+      this.db
+        .prepare("SELECT record_json FROM execution_learning_candidates WHERE candidate_id=?")
+        .get(candidateId),
+    );
+    return candidate?.kind === "task-lesson" && !!candidate.nativeEvidence;
   }
   private archive(use: ExperienceUse, now: number): void {
     this.db
@@ -684,7 +708,7 @@ export class SqliteExperienceLedgerStore implements ExperienceLedgerStore {
     identifier(input.operationId);
     integer(input.expectedItemVersion, 1);
     integer(input.now);
-    if (!["disable", "not_applicable"].includes(input.action))
+    if (!["disable", "not_applicable", "helpful", "correct"].includes(input.action))
       throw new Error("Invalid experience feedback action");
     return this.tx(() => {
       const { now: _now, ...request } = input;
@@ -710,12 +734,21 @@ export class SqliteExperienceLedgerStore implements ExperienceLedgerStore {
         use.workspaceKey !== input.workspaceKey ||
         use.deleted ||
         use.itemVersion !== input.expectedItemVersion ||
+        (input.expectedContentVersion !== undefined &&
+          (use.source.kind !== "reviewed-reference" ||
+            use.source.contentVersion !== input.expectedContentVersion)) ||
         !this.sourceCurrent(use, false)
       )
         throw new MemoryItemStoreConflictError(
           "version_conflict",
           "Experience feedback version conflict",
         );
+      if (
+        input.source &&
+        (input.source.sessionId !== use.sessionId ||
+          Object.values(input.source).some((value) => typeof value !== "string" || !value.trim()))
+      )
+        throw new Error("Invalid correction source");
       if (input.action === "not_applicable") {
         for (const row of this.db
           .prepare("SELECT record_json FROM experience_uses WHERE workspace_key=? AND item_id=?")
@@ -728,11 +761,64 @@ export class SqliteExperienceLedgerStore implements ExperienceLedgerStore {
           )
             this.writeUse({ ...matching, excluded: true, updatedAt: input.now });
         }
-      } else if (use.source.kind === "reviewed-reference") this.updateGeneric(use, true, input.now);
-      else this.archive(use, input.now);
+      } else if (input.action === "helpful") {
+        if (use.delivery !== "carried" || use.historical)
+          throw new Error("Helpful feedback requires actual delivery");
+        if (use.source.kind === "reviewed-reference") {
+          const candidate = decode<TaskExperienceCandidate>(
+            this.db
+              .prepare("SELECT record_json FROM execution_learning_candidates WHERE candidate_id=?")
+              .get(use.source.candidateId),
+          )!;
+          if (candidate.expiresAt !== undefined && !experienceLocked(candidate))
+            this.writeCandidate({
+              ...candidate,
+              expiresAt: input.now + 90 * 86400000,
+              recordRevision: candidate.recordRevision + 1,
+              updatedAt: input.now,
+            });
+        }
+        this.bumpResourceRevision();
+      } else if (input.action === "correct") {
+        if (use.source.kind !== "reviewed-reference")
+          throw new Error("Correction requires a method reference");
+        const candidate = decode<TaskExperienceCandidate>(
+          this.db
+            .prepare("SELECT record_json FROM execution_learning_candidates WHERE candidate_id=?")
+            .get(use.source.candidateId),
+        )!;
+        this.writeCandidate({
+          ...candidate,
+          enabled: false,
+          usagePolicy: "blocked",
+          maturity: "suspended",
+          reason: "user_correction",
+          recordRevision: candidate.recordRevision + 1,
+          updatedAt: input.now,
+        });
+        this.bumpManagement();
+      } else if (use.source.kind === "reviewed-reference") {
+        const candidate = decode<TaskExperienceCandidate>(
+          this.db
+            .prepare("SELECT record_json FROM execution_learning_candidates WHERE candidate_id=?")
+            .get(use.source.candidateId),
+        )!;
+        this.writeCandidate({
+          ...candidate,
+          enabled: false,
+          reason: experienceLocked(candidate)
+            ? (candidate.reason ?? "validation_invalid")
+            : "user_disable",
+          recordRevision: candidate.recordRevision + 1,
+          updatedAt: input.now,
+        });
+        this.bumpManagement();
+      } else this.archive(use, input.now);
       const next = this.use(use.useId)!;
       this.db
-        .prepare("INSERT INTO experience_feedback VALUES(?,?,?,?,?,?)")
+        .prepare(
+          "INSERT INTO experience_feedback(operation_id,workspace_key,use_id,request_hash,result_json,created_at,action,source_json,content_version) VALUES(?,?,?,?,?,?,?,?,?)",
+        )
         .run(
           input.operationId,
           input.workspaceKey,
@@ -740,6 +826,9 @@ export class SqliteExperienceLedgerStore implements ExperienceLedgerStore {
           requestHash,
           JSON.stringify(next),
           input.now,
+          input.action,
+          input.source ? JSON.stringify(input.source) : null,
+          use.source.kind === "reviewed-reference" ? use.source.contentVersion : null,
         );
       return next;
     });
@@ -774,6 +863,7 @@ export function scrubExperienceLedger(
         effect.effectId,
       );
     }
+    db.prepare("UPDATE experience_feedback SET source_json=NULL WHERE use_id=?").run(use.useId);
     db.prepare("UPDATE experience_feedback SET result_json=? WHERE use_id=?").run(
       JSON.stringify(next),
       use.useId,

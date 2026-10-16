@@ -87,6 +87,7 @@ async function generic(store: SqliteMemoryItemStore) {
     job,
     expectedRecordRevision: 1,
     content: "对当前数值范围做独立工具验证。",
+    representation: "method",
     applicability: {
       taskFamily: "spreadsheet",
       toolNames: ["document"],
@@ -195,9 +196,12 @@ test("统一账本：只有实际交付后的工具效果控制当前通用版�
   await store.experienceLedger.appendExperienceEffect(effectFor(use, 6), {
     allowStateChange: true,
   });
-  await store.experienceLedger.appendExperienceEffect(
-    { ...effectFor(use, 6), effectId: "duplicate-effect" },
-    { allowStateChange: true },
+  await assert.rejects(
+    store.experienceLedger.appendExperienceEffect(
+      { ...effectFor(use, 6), effectId: "duplicate-effect" },
+      { allowStateChange: true },
+    ),
+    /identity reused/,
   );
   await store.experienceLedger.appendExperienceEffect(effectFor(use, 8), {
     allowStateChange: true,
