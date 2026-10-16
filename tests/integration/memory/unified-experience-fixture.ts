@@ -9,6 +9,8 @@ export function configureReviewedFixture(picoHome: string, content: string): voi
         call: async ({ prompt }) => {
           const input = JSON.parse(prompt.slice(prompt.lastIndexOf("\n") + 1));
           return JSON.stringify({
+            representation: "method",
+            matchHints: ["BuildCheck", "check.test.cjs", "check.cjs"],
             content,
             applicability: {
               taskFamily: "coding",

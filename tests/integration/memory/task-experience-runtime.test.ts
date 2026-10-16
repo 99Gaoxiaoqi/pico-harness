@@ -21,7 +21,10 @@ import {
   type ExperienceFeedbackRuntimeOptions,
 } from "../../../packages/pico-host/src/experience-feedback-runtime.js";
 import { createExecutionLearningIO } from "../../../packages/pico-host/src/execution-learning-recall.js";
-import { taskExperienceRecallTargets } from "../../../packages/pico-host/src/task-experience-recall.js";
+import {
+  taskExperienceRecallTargets,
+  scoreExperienceMatch,
+} from "../../../packages/pico-host/src/task-experience-recall.js";
 import { executeAgentRuntime } from "@pico/pico-host/agent-runtime";
 import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
 import { closeExecutionLearningWorker } from "@pico/pico-host/execution-learning-worker";
@@ -80,7 +83,7 @@ async function recordPendingReference(
   return feedback;
 }
 
-test("普通任务按 canonical 用户消息关联纠正并版本化；只有批准引用才记实际引用且采用保持 unknown", async (t) => {
+test("普通任务按 canonical 用户消息关联纠正并版本化；建议引用与采用保持分离", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-task-experience-runtime-"));
   const workDir = join(root, "workspace");
   await mkdir(workDir);
@@ -263,13 +266,16 @@ test("普通任务按 canonical 用户消息关联纠正并版本化；只有批
   const pending = await store.taskExperiences.completeTaskExperienceJob({
     job,
     expectedRecordRevision: candidate.recordRevision,
+    representation: "method",
+    matchHints: ["重新求和"],
+    requiredConditions: [],
     content: "求和前先明确当前文件和完整范围；只根据实际完整读取结果计算。",
     applicability: { taskFamily: "general", toolNames: ["document"], conditions: [] },
     sources: candidate.sources,
     now: Date.now(),
   });
   assert.ok(pending);
-  assert.equal(pending.review, "pending");
+  assert.equal(pending.review, "unneeded");
   const builder = new AtomicMemoryContextBuilder(store, workspaceKey);
   assert.equal((await builder.build("重新求和")).references.length, 0);
   const approved = await store.taskExperiences.reviewTaskExperience({
@@ -501,6 +507,82 @@ test("普通任务按 canonical 用户消息关联纠正并版本化；只有批
     (await builder.build("重新求和")).references.length,
     0,
     "没有Host准入不得fallback为用户证据",
+  );
+  const nextMemory = await builder.build("重新求和", {
+    reviewedExperiences: nextTaskTargets,
+    trace: {},
+  });
+  const nextFeedback = await recordPendingReference(
+    store,
+    events,
+    ownerFence,
+    nextReuseRuntime,
+    sessionId,
+    "next-reuse",
+    workspaceKey,
+    workDir,
+    nextMemory,
+  );
+  const nextUse = (
+    await store.experienceLedger.queryExperienceUses(workspaceKey, { sessionId })
+  ).uses.find((use) => use.runId === "next-reuse")!;
+  await append({
+    ...base("next-reuse", "next-reference-provider-start"),
+    kind: "model.call.started",
+    data: {
+      providerCallId: "next-reference-provider",
+      provider: "openai",
+      model: "test",
+      purpose: "main",
+      recallEventIds: ["next-reuse-reference-recall"],
+    },
+  });
+  await nextFeedback.dispatched({
+    providerCallId: "next-reference-provider",
+    physicalAttemptId: "next-reference-physical",
+    runId: "next-reuse",
+    diagnostic: {
+      version: 1,
+      coverage: "recorded",
+      recalls: [
+        {
+          recallEventId: "next-reuse-reference-recall",
+          references: [
+            { itemId: nextUse.itemId, referenceHash: nextUse.referenceHash, present: true },
+          ],
+        },
+      ],
+    },
+  });
+  await start("vague-correction", "刚才结果错了，请重新处理。");
+  const vague = runtime();
+  await vague.admit("vague-correction");
+  await vague.capture();
+  assert.equal(
+    (await store.taskExperiences.readTaskExperienceCandidate(approved.candidateId))!.enabled,
+    true,
+    "模糊任务纠正不能批量暂停建议",
+  );
+  await start("precise-correction", "刚才这条建议不对，请修正。");
+  const precise = runtime();
+  await precise.admit("precise-correction");
+  await precise.capture();
+  const suspended = (await store.taskExperiences.readTaskExperienceCandidate(
+    approved.candidateId,
+  ))!;
+  assert.equal(suspended.usagePolicy, "blocked", "输入版本递增前用实际投递身份暂停旧建议");
+  assert.equal(suspended.enabled, false);
+  await assert.rejects(
+    store.taskExperiences.reviewTaskExperience({
+      workspaceKey,
+      candidateId: suspended.candidateId,
+      expectedRecordRevision: suspended.recordRevision,
+      expectedContentVersion: suspended.contentVersion,
+      operationId: "restore-corrected",
+      action: "restore",
+      now: Date.now(),
+    }),
+    /must be (?:edited|revised)/,
   );
   const raw = new DatabaseSync(memoryPath);
   raw
@@ -784,7 +866,7 @@ test(
   },
 );
 
-test("非Excel通用建议的自然语言条件经审核后可低信任引用，采用与验证保持unknown", async (t) => {
+test("非Excel通用建议的使用说明不充当硬条件，采用与验证保持unknown", async (t) => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "pico-general-conditions-")));
   const workDir = join(root, "workspace"),
     sessionId = "general-session";
@@ -865,6 +947,9 @@ test("非Excel通用建议的自然语言条件经审核后可低信任引用，
   const pending = await store.taskExperiences.completeTaskExperienceJob({
     job,
     expectedRecordRevision: candidate.recordRevision,
+    representation: "method",
+    matchHints: ["配置加载"],
+    requiredConditions: [],
     content: "修复代码前先读取现有实现，完成后运行相关检查。",
     applicability: { taskFamily: "coding", toolNames: ["read_file"], conditions: [condition] },
     sources: candidate.sources,
@@ -888,7 +973,7 @@ test("非Excel通用建议的自然语言条件经审核后可低信任引用，
     store: store.taskExperiences,
     workspaceKey,
     workDir,
-    query: "修复代码",
+    query: "修复配置加载",
     toolAllowed: (name: string) => name === "read_file",
     conditionMatches: async () => "unknown" as const,
   };
@@ -896,22 +981,22 @@ test("非Excel通用建议的自然语言条件经审核后可低信任引用，
   assert.equal(identities.length, 1);
   assert.equal(
     (await taskExperienceRecallTargets({ ...options, conditionMatches: async () => false })).length,
-    0,
-    "Host已证明不匹配仍排除",
+    1,
+    "自由文本说明不作为未声明的硬条件",
   );
   assert.equal(
     (await taskExperienceRecallTargets({ ...options, workspaceKey: "other-workspace" })).length,
     0,
   );
-  const recalled = await new AtomicMemoryContextBuilder(store, workspaceKey).build("修复代码", {
+  const recalled = await new AtomicMemoryContextBuilder(store, workspaceKey).build("修复配置加载", {
     reviewedExperiences: identities,
     trace: {},
   });
   assert.equal(recalled.references[0]?.source, "reviewed-reference");
   assert.match(recalled.block, /trust="low"/);
   assert.ok(recalled.block.includes(condition));
-  assert.ok(recalled.block.includes("当前任务需核对适用性"));
-  assert.ok(recalled.block.includes("引用不代表采用或验证"));
+  assert.ok(recalled.block.includes("当前任务仍需核对"));
+  assert.ok(recalled.block.includes("引用不代表采用、验证或权限"));
   assert.ok(recalled.tokenCount <= 320);
   await recordPendingReference(
     store,
@@ -986,6 +1071,11 @@ test("非Excel通用建议的自然语言条件经审核后可低信任引用，
   const sheetPending = await store.taskExperiences.completeTaskExperienceJob({
     job: sheetJob,
     expectedRecordRevision: sheetSeed.recordRevision,
+    representation: "method",
+    matchHints: ["Excel"],
+    requiredConditions: [
+      { kind: "spreadsheet-range", operation: "sum", header: false, dataKind: "finite-numbers" },
+    ],
     content: "Excel 求和需使用完整范围。",
     applicability: {
       taskFamily: "spreadsheet",
@@ -1019,6 +1109,7 @@ test("非Excel通用建议的自然语言条件经审核后可低信任引用，
         candidateId: sheetCandidate.candidateId,
         contentVersion: sheetCandidate.contentVersion,
         recordRevision: sheetCandidate.recordRevision,
+        relevanceScore: scoreExperienceMatch(["Excel"], "Excel 求和"),
       },
     ],
     trace: {},

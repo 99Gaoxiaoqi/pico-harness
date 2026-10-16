@@ -4,6 +4,7 @@ import {
   isMessageHiddenFromTranscript,
   isForegroundProcessFacts,
   type ExecutionLearningStore,
+  type ExperienceLedgerStore,
   type MemoryItemSource,
   type RuntimeEvent,
   type RuntimeToolStartedEvent,
@@ -130,6 +131,12 @@ export interface TaskExperienceRuntimeOptions {
   readonly workDir: string;
   readonly hostRunId?: string;
   readonly store: Pick<AtomicMemoryStore, "readSettings" | "readDeletionRevision"> & {
+    readonly listItems?: AtomicMemoryStore["listItems"];
+    readonly applyMutations?: AtomicMemoryStore["applyMutations"];
+    readonly experienceLedger?: Pick<
+      ExperienceLedgerStore,
+      "queryExperienceUses" | "feedbackExperienceUse"
+    >;
     readonly taskExperiences: TaskExperienceStore;
     readonly executionLearning: Pick<
       ExecutionLearningStore,
@@ -401,9 +408,12 @@ export class TaskExperienceRuntime {
         }
         const now = Date.now();
         const prior = this.task;
+        // The old task/version identifies delivered references. Suspend before changing it.
+        if (correctionIntent) await this.correctPrecisely(content, sourceOf(event), prior, check);
+        const methodFeedback = !!prior && usefulMethodSignal(content);
         const goalIdentity = this.options.goalIdentity?.();
         this.task =
-          correction && prior
+          (correction || methodFeedback) && prior
             ? {
                 ...prior,
                 taskVersion: prior.taskVersion + 1,
@@ -525,6 +535,99 @@ export class TaskExperienceRuntime {
       check();
       await this.recoverTerminalCandidate(events, check, observations);
     }
+  }
+
+  private async correctPrecisely(
+    content: string,
+    source: MemoryItemSource,
+    prior: TaskExperienceTask | undefined,
+    check: () => void,
+  ): Promise<void> {
+    const quoted = [...content.matchAll(/[“"「]([^”"」\n]{4,300})[”"」]/gu)].map(
+      (match) => match[1]!,
+    );
+    const ledger = this.options.store.experienceLedger;
+    if (prior && ledger) {
+      const page = await ledger.queryExperienceUses(this.options.workspaceKey, {
+        sessionId: prior.sessionId,
+        limit: 100,
+      });
+      check();
+      const matches = new Map<string, (typeof page.uses)[number]>();
+      for (const use of page.uses) {
+        if (
+          use.delivery !== "carried" ||
+          use.deleted ||
+          use.taskId !== prior.taskId ||
+          use.taskVersion > prior.taskVersion ||
+          use.source.kind !== "reviewed-reference"
+        )
+          continue;
+        const candidate = await this.options.store.taskExperiences.readTaskExperienceCandidate(
+          use.source.candidateId,
+        );
+        check();
+        if (!candidate || candidate.contentVersion !== use.source.contentVersion) continue;
+        if (
+          content.includes(candidate.candidateId) ||
+          quoted.some((quote) => candidate.content.includes(quote)) ||
+          /(?:这条|该条|刚才的|上条).{0,6}(?:经验|建议|方法|记忆).{0,12}(?:不对|错了|错误|纠正|修正)/u.test(
+            content,
+          )
+        )
+          matches.set(`${candidate.candidateId}:${candidate.contentVersion}`, use);
+      }
+      if (matches.size === 1) {
+        const use = [...matches.values()][0]!;
+        await ledger.feedbackExperienceUse({
+          workspaceKey: this.options.workspaceKey,
+          useId: use.useId,
+          expectedItemVersion: use.itemVersion,
+          ...(use.source.kind === "reviewed-reference"
+            ? { expectedContentVersion: use.source.contentVersion }
+            : {}),
+          operationId: `task-experience-correction:${hash([source.eventId, use.useId])}`,
+          action: "correct",
+          source,
+          now: Date.now(),
+        });
+        check();
+        this.options.onChanged?.();
+      }
+    }
+    // Facts use exact quoted old text and a single current CAS identity. A vague
+    // result correction must never archive a category or all recalled facts.
+    if (
+      !quoted.length ||
+      !/[”"」]\s*(?:不对|错了|错误|已过时|不再准确)|(?:纠正|修正|更正).{0,20}[“"「]/u.test(
+        content,
+      ) ||
+      !this.options.store.listItems ||
+      !this.options.store.applyMutations
+    )
+      return;
+    const records = await this.options.store.listItems({
+      workspaceKey: this.options.workspaceKey,
+      includeArchived: false,
+      limit: 500,
+    });
+    check();
+    const matches = records.filter(
+      (record) =>
+        !record.sourceType &&
+        !record.taskExperience &&
+        quoted.some((quote) => record.item.content === quote),
+    );
+    if (matches.length !== 1) return;
+    const record = matches[0]!;
+    await this.options.store.applyMutations({
+      operationId: `memory-fact-correction:${hash([source.eventId, record.item.itemId])}`,
+      mutations: [
+        { type: "archive", itemId: record.item.itemId, expectedVersion: record.item.version },
+      ],
+    });
+    check();
+    this.options.onChanged?.();
   }
 
   private async validInputIdentity(
@@ -673,6 +776,12 @@ export class TaskExperienceRuntime {
     // Explicit long-term rules use the existing user-evidence path, including
     // corrections that retain the preceding task's original goal.
     if (userInput && explicitRemember(userInput.summary)) return;
+    const explicitMethod = observations.findLast(
+      (observation) =>
+        observation.taskVersion === task.taskVersion &&
+        observation.kind === "user-input" &&
+        usefulMethodSignal(observation.summary),
+    );
     const trigger = observations.findLast(
       (observation) =>
         observation.taskVersion === task.taskVersion &&
@@ -687,7 +796,10 @@ export class TaskExperienceRuntime {
           observation.taskVersion === task.taskVersion && observation.status === "succeeded",
       ) &&
       observations.some((observation) => observation.status === "failed" || observation.correction);
-    if (!trigger && !recovery) return;
+    const success = successfulLearningSignal(
+      observations.filter((observation) => observation.taskVersion === task.taskVersion),
+    );
+    if (!trigger && !recovery && !explicitMethod && !success) return;
     const evidence = [
       ...new Map(
         [
@@ -705,7 +817,9 @@ export class TaskExperienceRuntime {
       this.options.workspaceKey,
       task.taskId,
       task.taskVersion,
-      trigger?.source.eventId ?? "recovery",
+      trigger?.source.eventId ??
+        explicitMethod?.source.eventId ??
+        (success ? "successful-workflow" : "recovery"),
     ]);
     const candidateId = `task-experience-candidate:${failureKey}`;
     const existing =
@@ -737,6 +851,10 @@ export class TaskExperienceRuntime {
         enabled: false,
         maturity: "unassessed",
         risk: "unclear",
+        representation: "case",
+        usagePolicy: "case_only",
+        matchHints: [],
+        requiredConditions: [],
         promotionReason: "none",
         positiveReuseCount: 0,
         lifecycleState: "active",
@@ -786,6 +904,54 @@ function explicitCorrection(text: string): boolean {
   return /(?:刚才|上(?:一个|次|面|个)?(?:任务|回答|结果|计算)?|前(?:一个|次|面)|previous|last)\s*[\s\S]{0,80}(?:不对|错|纠正|修正|应(?:该|当)|不是|wrong|incorrect|correct)/iu.test(
     text,
   );
+}
+function usefulMethodSignal(text: string): boolean {
+  return (
+    /(?:这个|这种|该|上述|刚才|先.{2,60}再).{0,80}(?:做法|方法|流程|步骤|方式).{0,40}(?:有用|有效|管用|保留|沉淀|复用)|(?:做法|方法|流程|步骤).{2,80}(?:有用|有效|管用|保留|沉淀|复用)/u.test(
+      text,
+    ) &&
+    (/[“"「][^”"」\n]{6,200}[”"」]/u.test(text) ||
+      /(?:先.{2,60}再|(?:做法|方法|流程|步骤)[：:].{6,100})/u.test(text))
+  );
+}
+function successfulLearningSignal(observations: readonly TaskExperienceObservation[]): boolean {
+  const terminal = observations.findLast((observation) => observation.kind === "terminal");
+  if (
+    !terminal ||
+    terminal.status !== "succeeded" ||
+    observations.some((observation) => observation.coverage !== "complete")
+  )
+    return false;
+  const operations = observations.filter(
+    (observation) => observation.kind === "tool-result" && observation.status === "succeeded",
+  );
+  const categories = new Set(
+    operations.flatMap((observation) => {
+      if (["write_file", "edit_file"].includes(observation.toolName ?? "")) return ["commit"];
+      if (observation.toolName === "read_file") return ["read"];
+      if (observation.toolName === "document") {
+        if (["read", "inspect", "search", "view"].includes(String(observation.arguments?.action)))
+          return ["read"];
+        if (observation.arguments?.action === "analyze") return ["analyze"];
+      }
+      return [];
+    }),
+  );
+  const artifactReceipt = operations.some(
+    (observation) =>
+      observation.toolName === "write_file" && /\n已登记生成文件:/u.test(observation.summary),
+  );
+  const workflow =
+    operations.length >= 3 &&
+    operations.some(
+      (observation, index) => index > 0 && observation.toolName === operations[0]!.toolName,
+    );
+  const explicitWorkflow = observations.some(
+    (observation) =>
+      observation.kind === "user-input" &&
+      /(?:先.{2,60}再|依次.{6,100}|流程[：:].{6,100})/u.test(observation.summary),
+  );
+  return categories.size >= 2 && artifactReceipt && (workflow || explicitWorkflow);
 }
 function correctionSignal(text: string): boolean {
   return /(?:不对|错|纠正|修正|应该|不是|重算|重新计算|wrong|incorrect|correct)/iu.test(text);

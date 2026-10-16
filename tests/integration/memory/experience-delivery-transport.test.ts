@@ -20,7 +20,11 @@ import { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-s
 import { SqliteRuntimeControlStore } from "@pico/storage/sqlite/sqlite-runtime-control-store";
 import { ExperienceFeedbackRuntime } from "../../../packages/pico-host/src/experience-feedback-runtime.js";
 import { canonicalTaskArguments } from "../../../packages/pico-host/src/task-experience-runtime.js";
-import { validateSpreadsheetTaskExperience } from "../../../packages/pico-host/src/task-experience-validation.js";
+import {
+  validateSpreadsheetTaskExperience,
+  spreadsheetInputHasFiniteNumbers,
+} from "../../../packages/pico-host/src/task-experience-validation.js";
+import { taskExperienceRecallTargets } from "../../../packages/pico-host/src/task-experience-recall.js";
 
 const sha = (text: string | Buffer) => createHash("sha256").update(text).digest("hex");
 const args = {
@@ -189,6 +193,11 @@ async function fixture(t: TestContext, reply = respond) {
   const pending = await store.taskExperiences.completeTaskExperienceJob({
     job,
     expectedRecordRevision: 1,
+    representation: "method",
+    matchHints: ["Excel"],
+    requiredConditions: [
+      { kind: "spreadsheet-range", operation: "sum", header: false, dataKind: "finite-numbers" },
+    ],
     content: "对当前数值范围求和，明确 header=false。",
     applicability: {
       taskFamily: "spreadsheet",
@@ -209,22 +218,26 @@ async function fixture(t: TestContext, reply = respond) {
     operationId: "accept",
     now: now + 3,
   });
-  const memory = await new AtomicMemoryContextBuilder(store, workspaceKey).build("Excel 求和", {
-    reviewedExperiences: [
-      {
-        candidateId: candidate.candidateId,
-        contentVersion: candidate.contentVersion,
-        recordRevision: candidate.recordRevision,
-      },
-    ],
-    trace: {},
-  });
   const workbook = new ExcelJS.Workbook();
   const sheet = workbook.addWorksheet("Sheet1");
   sheet.getCell("B2").value = 7;
   sheet.getCell("B3").value = 11;
   const bytes = Buffer.from(await workbook.xlsx.writeBuffer()),
     digest = sha(bytes);
+  const targets = await taskExperienceRecallTargets({
+    store: store.taskExperiences,
+    workspaceKey,
+    workDir: root,
+    query: "Excel 求和",
+    toolAllowed: (name) => name === "document",
+    conditionMatches: async () =>
+      spreadsheetInputHasFiniteNumbers(bytes, { range: "B2:B3", sheet: "Sheet1" }),
+  });
+  const memory = await new AtomicMemoryContextBuilder(store, workspaceKey).build("Excel 求和", {
+    reviewedExperiences: targets,
+    trace: {},
+  });
+  assert.equal(memory.items[0]?.taskExperience?.candidateId, candidate.candidateId);
   const feedback = new ExperienceFeedbackRuntime({
     session,
     workspaceKey,

@@ -21,6 +21,7 @@ import { globalSessionManager } from "@pico/pico-host/session";
 import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
 import { resolvePicoPaths } from "@pico/pico-host";
 import { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-store";
+import { scoreExperienceMatch } from "../../../packages/pico-host/src/task-experience-recall.js";
 
 const command = "node --test check.test.cjs";
 const call = (id: string, name: string, input: object): ToolCall => ({
@@ -308,6 +309,7 @@ for (const legacy of [false, true])
             candidateId: reviewed.candidateId,
             contentVersion: reviewed.contentVersion,
             recordRevision: reviewed.recordRevision,
+            relevanceScore: scoreExperienceMatch(["check.test.cjs"], command),
           },
         ],
         trace: {},
@@ -494,7 +496,7 @@ for (const legacy of [false, true])
 
 for (const deterministic of [false, true])
   test(
-    `${deterministic ? "完整冻结测试一次" : "两个独立冻结命令任务"}晋级后仍实际召回，普通成功与未交付不计证据`,
+    `${deterministic ? "完整冻结测试" : "独立冻结命令任务"}结果保留具体证据且不触发成熟度晋级`,
     { timeout: 45_000 },
     async (t) => {
       const root = await realpath(await mkdtemp(join(tmpdir(), "pico-trial-promotion-")));
@@ -612,9 +614,9 @@ for (const deterministic of [false, true])
         call("same-task-retry", "bash", { command: target }),
       ]);
       let after = (await current())!;
-      assert.equal(after.positiveReuseCount, 1, "multiple successful calls in one task count once");
-      assert.equal(after.maturity, deterministic ? "active" : "trial");
-      assert.equal(after.promotionReason, deterministic ? "deterministic_validation" : "none");
+      assert.equal(after.positiveReuseCount, 0, "历史计数不再由复用更新");
+      assert.equal(after.maturity, "trial");
+      assert.equal(after.promotionReason, "none");
       const firstUses = (
         await store.experienceLedger.queryExperienceUses(workspaceKey, {
           sessionId: "independent-one",
@@ -649,7 +651,7 @@ for (const deterministic of [false, true])
           now: Date.now(),
         });
         assert.equal(after.maturity, "trial");
-        assert.equal(after.positiveReuseCount, 1);
+        assert.equal(after.positiveReuseCount, 0);
         await run(
           "independent-one",
           [call("corrected-task-retry", "bash", { command: target })],
@@ -660,7 +662,7 @@ for (const deterministic of [false, true])
         after = (await current())!;
         assert.equal(
           after.positiveReuseCount,
-          1,
+          0,
           "a correction creates another version of the same task, not an independent task",
         );
         assert.equal(after.maturity, "trial");
@@ -674,13 +676,10 @@ for (const deterministic of [false, true])
       }
       await run("independent-two", [call("second-pass", "bash", { command: target })]);
       after = (await current())!;
-      assert.equal(after.maturity, "active");
+      assert.equal(after.maturity, "trial");
       assert.equal(after.review, "unneeded", "evidence maturity does not fabricate human approval");
-      assert.equal(after.positiveReuseCount, 2);
-      assert.equal(
-        after.promotionReason,
-        deterministic ? "deterministic_validation" : "two_positive_reuses",
-      );
+      assert.equal(after.positiveReuseCount, 0);
+      assert.equal(after.promotionReason, "none");
       await run("active-reuse", [call("active-pass", "bash", { command: target })]);
       const activeUses = (
         await store.experienceLedger.queryExperienceUses(workspaceKey, {
@@ -692,7 +691,7 @@ for (const deterministic of [false, true])
           (use) =>
             use.delivery === "carried" && use.adoption === "observed" && use.validation === "pass",
         ),
-        "auto-promoted active experience remains usable end to end",
+        "具体范围证据不改变建议的使用边界",
       );
       await run(
         "same-scope-failure",
@@ -703,7 +702,7 @@ for (const deterministic of [false, true])
       after = (await current())!;
       assert.equal(
         after.maturity,
-        deterministic ? "suspended" : "active",
+        deterministic ? "suspended" : "trial",
         "ordinary process failure is not trusted counter-evidence",
       );
       if (deterministic) {
@@ -718,7 +717,7 @@ for (const deterministic of [false, true])
             action: "restore",
             now: Date.now(),
           }),
-          /must be edited/,
+          /must be (?:edited|revised)/,
         );
         await run("after-suspension", [call("no-reference", "bash", { command: target })]);
         assert.equal(

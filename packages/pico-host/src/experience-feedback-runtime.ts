@@ -11,6 +11,7 @@ import {
   type ExperienceUse,
   type MemoryItemRecord,
   type MemoryItemSource,
+  type Message,
   type RuntimeEvent,
   type RuntimeToolStartedEvent,
   type TaskExperienceCandidate,
@@ -67,6 +68,7 @@ export interface ExperienceFeedbackRuntimeOptions {
   };
   readonly currentTask: () => TaskExperienceTask | undefined;
   readonly referenceGate: () => Promise<{ readonly allowed: boolean }>;
+  readonly referenceAllowed?: (record: MemoryItemRecord) => Promise<boolean>;
   readonly effectGate: () => Promise<{ readonly allowed: boolean }>;
   readonly nativeGate: () => Promise<{ readonly allowed: boolean }>;
   readonly io: ExecutionEvidenceIO;
@@ -112,6 +114,69 @@ export class ExperienceFeedbackRuntime implements NativeLearningObserver {
     this.uses.clear();
     this.nativePrepared.clear();
     this.nativeUses.clear();
+  }
+
+  /** Recheck the original fragments at every Provider boundary, including tool continuations. */
+  async filterProviderMessages(messages: Message[]): Promise<Message[]> {
+    const fragments = new Set(
+      messages.flatMap((message) =>
+        [
+          ...message.content.matchAll(
+            /<memory\b[^>]*source="(?:reviewed-reference|execution-validated)"[^>]*>[\s\S]*?<\/memory>|<case\b[^>]*>[\s\S]*?<\/case>/gu,
+          ),
+        ].map((match) => match[0]),
+      ),
+    );
+    if (!fragments.size) return messages;
+    const remove = (rejected: ReadonlySet<string>): Message[] =>
+      messages.map((message) => {
+        let content = message.content;
+        for (const fragment of rejected) content = content.replaceAll(fragment, "");
+        return content === message.content ? message : { ...message, content };
+      });
+    return this.bounded("reference", remove(fragments), async (check) => {
+      if (!(await this.allowed(this.options.referenceGate, check))) return remove(fragments);
+      const rejected = new Set<string>();
+      for (const fragment of fragments) {
+        if (fragment.startsWith("<case ")) {
+          const id = /\bid="([A-Za-z0-9:_-]+)"/u.exec(fragment)?.[1];
+          const version = Number(/\bversion="(\d+)"/u.exec(fragment)?.[1]);
+          const candidate = id
+            ? await this.options.store.taskExperiences.readTaskExperienceCandidate(id)
+            : undefined;
+          check();
+          if (
+            !candidate ||
+            candidate.workspaceKey !== this.options.workspaceKey ||
+            resolve(candidate.workDir) !== resolve(this.options.workDir) ||
+            candidate.contentVersion !== version ||
+            candidate.representation !== "case" ||
+            candidate.usagePolicy !== "case_only" ||
+            candidate.lifecycleState !== "active" ||
+            (candidate.expiresAt !== undefined && candidate.expiresAt <= Date.now())
+          )
+            rejected.add(fragment);
+          continue;
+        }
+        const use = [...this.uses.values()].find((entry) => entry.referenceContent === fragment);
+        const id = use?.itemId ?? /\bid="([A-Za-z0-9:_-]+)"/u.exec(fragment)?.[1];
+        const record = id ? await this.options.store.readItem(id) : undefined;
+        check();
+        const fragmentVersion =
+          use?.itemVersion ?? Number(/\bitem-version="(\d+)"/u.exec(fragment)?.[1]);
+        if (
+          !record ||
+          record.item.lifecycleState !== "active" ||
+          record.item.version !== fragmentVersion ||
+          (use && record.item.contentHash !== use.contentHash) ||
+          !(await this.sourceVersion(record, check)) ||
+          (this.options.referenceAllowed && !(await this.options.referenceAllowed(record)))
+        )
+          rejected.add(fragment);
+        check();
+      }
+      return remove(rejected);
+    });
   }
 
   private async bounded<T>(
@@ -275,12 +340,9 @@ export class ExperienceFeedbackRuntime implements NativeLearningObserver {
         summary.candidateId,
       );
       check();
-      return (candidate?.review === "approved" ||
-        (candidate?.review === "unneeded" &&
-          (candidate.maturity === "trial" || candidate.maturity === "active") &&
-          candidate.risk === "low")) &&
-        candidate.enabled &&
+      return methodAvailable(candidate) &&
         candidate.contentVersion === summary.contentVersion &&
+        candidate.recordRevision === summary.recordRevision &&
         candidate.itemId === record.item.itemId
         ? {
             kind: "reviewed-reference",
@@ -344,6 +406,16 @@ export class ExperienceFeedbackRuntime implements NativeLearningObserver {
           use.settingsVersion !== fence.settingsVersion ||
           use.managementRevision !== fence.managementRevision ||
           use.deletionRevision !== fence.deletionRevision
+        )
+          continue;
+        const record = await this.options.store.readItem(use.itemId);
+        check();
+        if (
+          !record ||
+          record.item.version !== use.itemVersion ||
+          record.item.contentHash !== use.contentHash ||
+          record.item.lifecycleState !== "active" ||
+          !(await this.sourceVersion(record, check))
         )
           continue;
         const recall = input.diagnostic.recalls.find(
@@ -532,19 +604,11 @@ export class ExperienceFeedbackRuntime implements NativeLearningObserver {
       );
       check();
       if (
-        !reviewed ||
+        !methodAvailable(reviewed) ||
         reviewed.itemId !== use.itemId ||
         reviewed.workspaceKey !== this.options.workspaceKey ||
         reviewed.contentVersion !== use.source.contentVersion ||
-        !(
-          reviewed.review === "approved" ||
-          (reviewed.review === "unneeded" &&
-            (reviewed.maturity === "trial" || reviewed.maturity === "active") &&
-            reviewed.risk === "low")
-        ) ||
-        !reviewed.enabled ||
-        reviewed.state !== "saved" ||
-        reviewed.lifecycleState !== "active"
+        reviewed.scopeUnresolved
       )
         return undefined;
       source = reviewed.nativeEvidence;
@@ -662,16 +726,10 @@ export class ExperienceFeedbackRuntime implements NativeLearningObserver {
           );
           check();
           if (
-            !candidate ||
+            !methodAvailable(candidate) ||
             !candidate.applicability.spreadsheet ||
             candidate.contentVersion !== use.source.contentVersion ||
-            !(
-              candidate.review === "approved" ||
-              (candidate.review === "unneeded" &&
-                (candidate.maturity === "trial" || candidate.maturity === "active") &&
-                candidate.risk === "low")
-            ) ||
-            !candidate.enabled
+            candidate.scopeUnresolved
           )
             continue;
           const target = spreadsheetTargetFromGoal(task.goal);
@@ -908,4 +966,21 @@ export class ExperienceFeedbackRuntime implements NativeLearningObserver {
 }
 function sameTarget(claim: ExecutionAcceptanceClaim, target: ExecutionLearningTarget): boolean {
   return claim.target.targetId === target.targetId && claim.target.scopeHash === target.scopeHash;
+}
+function methodAvailable(
+  candidate: TaskExperienceCandidate | undefined,
+): candidate is TaskExperienceCandidate {
+  return (
+    !!candidate &&
+    candidate.representation === "method" &&
+    candidate.usagePolicy === "suggestion" &&
+    candidate.enabled &&
+    candidate.state === "saved" &&
+    candidate.lifecycleState === "active" &&
+    ["approved", "unneeded"].includes(candidate.review) &&
+    !candidate.scopeUnresolved &&
+    candidate.validation !== "fail" &&
+    candidate.validation !== "stale" &&
+    (candidate.expiresAt === undefined || candidate.expiresAt > Date.now())
+  );
 }

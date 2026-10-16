@@ -107,6 +107,7 @@ import type { ExperienceDiagnostic } from "@pico/core";
 import { raceWithDeadlineReject } from "@pico/runtime/deadline";
 import {
   taskExperienceRecallTargets,
+  searchTaskExperienceCases,
   type ReviewedExperienceTarget,
 } from "./task-experience-recall.js";
 import {
@@ -1006,8 +1007,10 @@ export async function executeAgentRuntime(
   let taskExperienceRuntime: TaskExperienceRuntime | undefined;
   let experienceFeedbackRuntime: ExperienceFeedbackRuntime | undefined;
   let currentExperienceInput = prompt;
+  const experienceReferenceQueries = new Map<string, string>();
   let reviewedRecallTargets: (
     query: string,
+    candidateId?: string,
   ) => Promise<readonly ReviewedExperienceTarget[]> = async () => [];
   let experienceRecallAllowed: NonNullable<
     import("@pico/runtime/atomic-memory/context-builder").AtomicMemoryContextOptions["experienceAllowed"]
@@ -1647,7 +1650,36 @@ export async function executeAgentRuntime(
         provider,
         pluginActivationScope,
       );
-      return dependencies.providerDecorator ? dependencies.providerDecorator(activated) : activated;
+      const next = dependencies.providerDecorator
+        ? dependencies.providerDecorator(activated)
+        : activated;
+      return {
+        modelName: next.modelName,
+        requestCapabilities: next.requestCapabilities,
+        isRetryableError: next.isRetryableError?.bind(next),
+        generate: async (messages, tools, options) =>
+          next.generate(
+            (await experienceFeedbackRuntime?.filterProviderMessages(messages)) ?? messages,
+            tools,
+            options,
+          ),
+        ...(next.generateStream
+          ? {
+              generateStream: async (
+                messages: Parameters<NonNullable<LLMProvider["generateStream"]>>[0],
+                tools: Parameters<NonNullable<LLMProvider["generateStream"]>>[1],
+                onDelta: Parameters<NonNullable<LLMProvider["generateStream"]>>[2],
+                options?: Parameters<NonNullable<LLMProvider["generateStream"]>>[3],
+              ) =>
+                next.generateStream!(
+                  (await experienceFeedbackRuntime?.filterProviderMessages(messages)) ?? messages,
+                  tools,
+                  onDelta,
+                  options,
+                ),
+            }
+          : {}),
+      };
     };
     const modelAssembly = assembleRuntimeModels({
       kind,
@@ -2624,9 +2656,25 @@ export async function executeAgentRuntime(
           effectiveOptions.allowedTools.includes(name)) &&
         evaluateToolPermission(permissionMode(), registry.getPermissionCategory(name)).kind ===
           "allow";
-      experienceRecallAllowed = async (record) => {
+      const experienceRecordAllowed = async (
+        record: Parameters<typeof experienceRecallAllowed>[0],
+        query: string,
+      ) => {
         if (record.sourceType === "execution-validated" && !recalledToolAllowed("bash"))
           return false;
+        if (record.sourceType === "reviewed-reference") {
+          const summary = record.taskExperience;
+          if (
+            !summary ||
+            !(await reviewedRecallTargets(query, summary.candidateId)).some(
+              (target) =>
+                target.candidateId === summary.candidateId &&
+                target.contentVersion === summary.contentVersion &&
+                target.recordRevision === summary.recordRevision,
+            )
+          )
+            return false;
+        }
         const task = taskExperienceRuntime?.currentTaskIdentity();
         if (!task) return true;
         try {
@@ -2641,12 +2689,18 @@ export async function executeAgentRuntime(
           return false;
         }
       };
-      reviewedRecallTargets = (query: string) =>
-        taskExperienceRecallTargets({
+      experienceRecallAllowed = (record) => experienceRecordAllowed(record, currentExperienceInput);
+      reviewedRecallTargets = async (query: string, candidateId?: string) => {
+        const candidate = candidateId
+          ? await repository.taskExperiences.readTaskExperienceCandidate(candidateId)
+          : undefined;
+        if (candidateId && !candidate) return [];
+        return taskExperienceRecallTargets({
           store: repository.taskExperiences,
           workspaceKey: memoryWorkspaceKey,
           workDir,
           query,
+          ...(candidate ? { candidate } : {}),
           ...(() => {
             const currentTask = taskExperienceRuntime?.currentTaskIdentity();
             return currentTask ? { currentTask } : {};
@@ -2719,6 +2773,7 @@ export async function executeAgentRuntime(
             return true;
           },
         });
+      };
       const taskLearningGate = async () => {
         if (
           dependencies.atomicMemoryLifecycle?.isDraining ||
@@ -2971,6 +3026,11 @@ export async function executeAgentRuntime(
         store: repository,
         currentTask: () => taskExperienceRuntime?.currentTaskSnapshot(),
         referenceGate,
+        referenceAllowed: (record) =>
+          experienceRecordAllowed(
+            record,
+            experienceReferenceQueries.get(record.item.itemId) ?? currentExperienceInput,
+          ),
         effectGate: taskFeedbackGate,
         nativeGate: nativeFeedbackGate,
         io: learningIO,
@@ -2997,7 +3057,7 @@ export async function executeAgentRuntime(
       });
       registry.register(
         buildMemorySearchTool({
-          search: async (query, context, executionTargetId) => {
+          search: async (query, context, executionTargetId, recordType) => {
             const queryRef = context?.toolCallId ? { toolCallId: context.toolCallId } : undefined;
             let outcome: MemoryRecallTrace["outcome"] = "error";
             let settingsVersion: number | undefined;
@@ -3016,8 +3076,18 @@ export async function executeAgentRuntime(
             };
             try {
               await checkSearchAdmission();
+              if (recordType === "case") {
+                const result = await searchTaskExperienceCases({
+                  store: repository.taskExperiences,
+                  workspaceKey: memoryWorkspaceKey,
+                  workDir,
+                  query,
+                });
+                await checkSearchAdmission();
+                return result;
+              }
               const result = await builder.build(query, {
-                experienceAllowed: experienceRecallAllowed,
+                experienceAllowed: (record) => experienceRecordAllowed(record, query),
                 executionTargets: await executionLearningRecallTargets(
                   repository,
                   memoryWorkspaceKey,
@@ -3036,10 +3106,22 @@ export async function executeAgentRuntime(
                 trace: { ...(queryRef ? { queryRef } : {}) },
               });
               await checkSearchAdmission();
+              if (
+                !(
+                  await Promise.all(
+                    result.items
+                      .filter((record) => !!record.sourceType)
+                      .map((record) => experienceRecordAllowed(record, query)),
+                  )
+                ).every(Boolean)
+              )
+                throw new Error("Memory search unavailable: experience_changed");
               const recallEventId = result.trace
                 ? await recallTracker.record(result.trace)
                 : undefined;
               if (!result.trace) recallTracker.unavailable("search");
+              for (const record of result.items)
+                if (record.sourceType) experienceReferenceQueries.set(record.item.itemId, query);
               await taskExperienceRuntime?.capture();
               await experienceFeedbackRuntime?.recordReferences(result, recallEventId);
               return (
@@ -3072,7 +3154,6 @@ export async function executeAgentRuntime(
       readonly currentUserEventId?: string;
     }) => {
       currentExperienceInput = currentUserPrompt;
-      await taskExperienceRuntime?.capture(currentUserEventId);
       if (
         memoryRepository &&
         !backgroundPolicy &&
@@ -3101,6 +3182,7 @@ export async function executeAgentRuntime(
           }
         }
       }
+      await taskExperienceRuntime?.capture(currentUserEventId);
       const composed = await new PromptComposer(workDir, collaborationMode() === "plan", {
         researchMode: collaborationMode() === "research",
         managedWorkspaceRead: currentMainProcessSandbox().bypass !== true,
@@ -3247,11 +3329,24 @@ export async function executeAgentRuntime(
                 finalSettings?.version,
               );
             } else {
+              if (
+                !(
+                  await Promise.all(
+                    memory.items
+                      .filter((record) => !!record.sourceType)
+                      .map(experienceRecallAllowed),
+                  )
+                ).every(Boolean)
+              )
+                throw new Error("experience_changed");
               if (memory.block) turnTailParts.push(memory.block);
               const recallEventId = memory.trace
                 ? await recallTracker.record(memory.trace)
                 : undefined;
               if (!memory.trace) recallTracker.unavailable("automatic");
+              for (const record of memory.items)
+                if (record.sourceType)
+                  experienceReferenceQueries.set(record.item.itemId, currentUserPrompt);
               await experienceFeedbackRuntime?.recordReferences(memory, recallEventId);
             }
           }

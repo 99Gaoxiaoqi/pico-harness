@@ -14,6 +14,7 @@ export interface AtomicMemorySearchPort {
     query: string,
     context?: ToolExecutionContext,
     executionTargetId?: string,
+    recordType?: "memory" | "case",
   ): Promise<string>;
 }
 
@@ -38,6 +39,12 @@ class MemorySearchTool implements BaseTool {
         type: "object",
         properties: {
           query: { type: "string", minLength: 1, maxLength: 4096 },
+          record_type: {
+            type: "string",
+            enum: ["memory", "case"],
+            description:
+              "Defaults to memory. Case explicitly reads at most three low-trust historical task cases; cases are never automatically adopted.",
+          },
           execution_target_id: {
             type: "string",
             minLength: 1,
@@ -60,11 +67,15 @@ class MemorySearchTool implements BaseTool {
       !input ||
       Array.isArray(input) ||
       typeof input !== "object" ||
-      Object.keys(input).some((key) => key !== "query" && key !== "execution_target_id") ||
+      Object.keys(input).some(
+        (key) => key !== "query" && key !== "execution_target_id" && key !== "record_type",
+      ) ||
       !("query" in input) ||
       typeof input.query !== "string" ||
       !input.query.trim() ||
       input.query.length > 4096 ||
+      ("record_type" in input && input.record_type !== "memory" && input.record_type !== "case") ||
+      ("record_type" in input && input.record_type === "case" && "execution_target_id" in input) ||
       ("execution_target_id" in input &&
         (typeof input.execution_target_id !== "string" ||
           !input.execution_target_id.trim() ||
@@ -75,6 +86,7 @@ class MemorySearchTool implements BaseTool {
       input.query.trim(),
       context,
       "execution_target_id" in input ? (input.execution_target_id as string) : undefined,
+      "record_type" in input ? (input.record_type as "memory" | "case") : "memory",
     );
   }
 }

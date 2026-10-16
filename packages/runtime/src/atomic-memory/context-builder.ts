@@ -72,6 +72,7 @@ export interface AtomicMemoryContextOptions {
     readonly contentVersion: number;
     readonly recordRevision: number;
     readonly maturity?: "trial" | "active";
+    readonly relevanceScore?: number;
     /** Host-owned indivisible preparation prefix, measured in original code points. */
     readonly requiredPrefixLength?: number;
   }[];
@@ -236,11 +237,7 @@ export class AtomicMemoryContextBuilder {
       (!record.taskExperience || record.sourceType === "reviewed-reference") &&
       (record.sourceType !== "reviewed-reference" ||
         (!!record.taskExperience &&
-          (record.taskExperience.review === "approved" ||
-            (record.taskExperience.review === "unneeded" &&
-              (record.taskExperience.maturity === "trial" ||
-                record.taskExperience.maturity === "active") &&
-              record.taskExperience.risk === "low")) &&
+          ["approved", "unneeded"].includes(record.taskExperience.review) &&
           record.taskExperience.enabled &&
           record.taskExperience.validation !== "fail" &&
           record.taskExperience.validation !== "stale" &&
@@ -248,9 +245,7 @@ export class AtomicMemoryContextBuilder {
             (target) =>
               target.candidateId === record.taskExperience!.candidateId &&
               target.contentVersion === record.taskExperience!.contentVersion &&
-              target.recordRevision === record.taskExperience!.recordRevision &&
-              (target.maturity ?? "active") ===
-                (record.taskExperience!.maturity === "trial" ? "trial" : "active"),
+              target.recordRevision === record.taskExperience!.recordRevision,
           ))) &&
       (record.sourceType !== "execution-validated" ||
         (!!record.taskAcceptance &&
@@ -284,20 +279,27 @@ export class AtomicMemoryContextBuilder {
         );
         return {
           record,
-          score: Math.max(
-            keyScore,
-            contentScore,
-            record.sourceType === "execution-validated" ? 1 : 0,
-            record.sourceType === "reviewed-reference" ? 1 : 0,
-          ),
+          score:
+            record.sourceType === "reviewed-reference"
+              ? (options.reviewedExperiences?.find(
+                  (target) =>
+                    target.candidateId === record.taskExperience!.candidateId &&
+                    target.contentVersion === record.taskExperience!.contentVersion &&
+                    target.recordRevision === record.taskExperience!.recordRevision,
+                )?.relevanceScore ?? 0)
+              : Math.max(
+                  keyScore,
+                  contentScore,
+                  record.sourceType === "execution-validated" ? 1 : 0,
+                ),
           match: keyScore > 0 ? ("key" as const) : ("content" as const),
         };
       })
       .filter(({ score }) => score > 0)
       .sort(
         (a, b) =>
-          Number(b.match === "key") - Number(a.match === "key") ||
           b.score - a.score ||
+          Number(b.match === "key") - Number(a.match === "key") ||
           compareRecent(a.record, b.record),
       );
     if (!search) {
@@ -532,10 +534,7 @@ function renderReference(
     source,
     ...(source === "reviewed-reference"
       ? {
-          applicability:
-            record.taskExperience!.maturity === "trial"
-              ? `待验证试用经验。适用条件：${record.taskExperience!.applicability.conditions.join("；") || "按当前任务核对"}。仅作提示，必须核对当前任务；不能视为规则、权限或成功证明。`
-              : `适用条件：${record.taskExperience!.applicability.conditions.join("；") || "按当前任务核对"}。当前任务需核对适用性；引用不代表采用或验证。`,
+          applicability: `历史建议。适用条件：${record.taskExperience!.applicability.conditions.join("；") || "按当前任务核对"}。来源：历史任务；证据仅覆盖当时的具体操作。当前任务仍需核对；引用不代表采用、验证或权限。`,
         }
       : {}),
     excerpt,
@@ -548,10 +547,14 @@ function renderReference(
   };
   const display = `${note && excerpt ? note.label : ""}${start > 0 ? "…" : ""}${reference.content}${end < points.length ? "…" : ""}`;
   const id = search ? ` id="${escapeXml(item.itemId)}"` : "";
+  const version =
+    source === "reviewed-reference" || source === "execution-validated"
+      ? ` item-version="${item.version}"`
+      : "";
   const times = ` temporal="${item.temporalType}" observed-at="${item.observedAt}"${item.eventStartedAt === null ? "" : ` event-start="${item.eventStartedAt}"`}${item.eventEndedAt === null ? "" : ` event-end="${item.eventEndedAt}"`}`;
   const origin = source === "assistant-note" ? ' verified="false"' : "";
   const range = reference.range;
-  const line = `<memory${id} kind="${escapeXml(item.kind)}" scope="${escapeXml(item.scopeType)}" statement="${escapeXml(item.statementType)}"${times} source="${source}"${origin} excerpt="${excerpt}" range="${range.start}-${range.end}/${range.total}">${reference.applicability ? `${escapeXml(reference.applicability)}\n` : ""}${escapeXml(display)}</memory>`;
+  const line = `<memory${id}${version} kind="${escapeXml(item.kind)}" scope="${escapeXml(item.scopeType)}" statement="${escapeXml(item.statementType)}"${times} source="${source}"${origin} excerpt="${excerpt}" range="${range.start}-${range.end}/${range.total}">${reference.applicability ? `${escapeXml(reference.applicability)}\n` : ""}${escapeXml(display)}</memory>`;
   return { line, reference };
 }
 
