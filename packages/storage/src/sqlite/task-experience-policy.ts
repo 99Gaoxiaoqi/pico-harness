@@ -103,11 +103,11 @@ export function experienceConditions(
 export function experienceContentRisk(content: string): "low" | "high" | "blocked" {
   // Remove only a directly negated action, never the rest of a sentence.
   const proposal = content.replace(
-    /(?:不要|避免|不得|不应|禁止|不允许|切勿)\s*(?:绕过(?:审批|权限|确认)|删除|清空|销毁|发布|部署|外部发送|转账|付款)|(?:do not|never|avoid)\s+(?:bypass\s+(?:approval|permission|confirmation)|delete|remove|erase|publish|release|deploy|send|transfer|pay)\b/giu,
+    /(?:不要|避免|不得|不应|禁止|不允许|切勿)\s*(?:绕过(?:审批|批准|权限|确认)|删除|清空|销毁|发布|部署|外部发送|转账|付款)|(?:do not|never|avoid)\s+(?:bypass\s+(?:approval|permission|confirmation)|delete|remove|erase|publish|release|deploy|send|transfer|pay)\b/giu,
     "",
   );
   if (
-    /(?:绕过|跳过|无需|不需|bypass|skip)[\s\S]{0,24}(?:审批|权限|确认|凭据|approval|permission|confirmation|credential)|(?:never|do not)\s+(?:ask|request|require)[\s\S]{0,20}(?:approval|permission|confirmation)|(?:不要|无需|不必)(?:询问|请求|要求|等待)[\s\S]{0,12}(?:审批|权限|确认)/iu.test(
+    /(?:绕过|跳过|无需|不需|不用|bypass|skip)[\s\S]{0,24}(?:审批|批准|权限|确认|凭据|approval|permission|confirmation|credential)|(?:never|do not)\s+(?:ask|request|require)[\s\S]{0,20}(?:approval|permission|confirmation)|(?:不要|无需|不必)(?:询问|请求|要求|等待)[\s\S]{0,12}(?:审批|批准|权限|确认)/iu.test(
       proposal,
     )
   )
