@@ -35,7 +35,12 @@ const source = (eventId: string) => ({
   turnId: "turn",
   eventId,
 });
-async function waiting(store: SqliteMemoryItemStore, workDir: string, useful = true) {
+async function waiting(
+  store: SqliteMemoryItemStore,
+  workDir: string,
+  useful = true,
+  extraObservations: readonly TaskExperienceObservation[] = [],
+) {
   const now = Date.now();
   const settings = await store.readSettings("workspace");
   const epoch = await store.executionLearning.advanceExecutionLearningInput("workspace");
@@ -49,7 +54,7 @@ async function waiting(store: SqliteMemoryItemStore, workDir: string, useful = t
     goal: "整理需求边界",
     goalSource: source("input"),
     coverage: "complete",
-    throughSequence: 1,
+    throughSequence: Math.max(1, ...extraObservations.map((entry) => entry.sequence)),
     createdAt: now,
     updatedAt: now,
   };
@@ -67,7 +72,8 @@ async function waiting(store: SqliteMemoryItemStore, workDir: string, useful = t
     ...(useful ? {} : { status: "succeeded" as const, toolName: "read_file" }),
     createdAt: now,
   };
-  await store.taskExperiences.appendTaskExperienceObservations(task, [observation]);
+  const observations = [observation, ...extraObservations];
+  await store.taskExperiences.appendTaskExperienceObservations(task, observations);
   const candidate: TaskExperienceCandidate = {
     candidateId: "candidate",
     kind: "task-lesson",
@@ -91,8 +97,8 @@ async function waiting(store: SqliteMemoryItemStore, workDir: string, useful = t
     validation: "unknown",
     enabled: false,
     applicability: { taskFamily: "general", toolNames: [], conditions: [] },
-    sources: [observation.source],
-    observationIds: [observation.observationId],
+    sources: observations.map((entry) => entry.source),
+    observationIds: observations.map((entry) => entry.observationId),
     representation: "case",
     usagePolicy: "case_only",
     matchHints: [],
@@ -236,6 +242,128 @@ test("有来源的命令方法通过经验上下文，秘密和越权仍拒绝�
           await store.taskExperiences.queryTaskExperiences("workspace", { recallable: true }),
           [],
           name,
+        );
+      }
+    } finally {
+      await worker.close();
+      store.close();
+    }
+  }
+});
+
+test("Host只为已引用完整表格成功证据补检索锚点，未引用或不完整来源不补", async () => {
+  for (const kind of [
+    "supported",
+    "unreferenced",
+    "limited",
+    "unproven",
+    "unresolved",
+    "case",
+  ] as const) {
+    const store = new SqliteMemoryItemStore(":memory:");
+    const document: TaskExperienceObservation = {
+      observationId: "document-result",
+      taskId: "task",
+      taskVersion: 1,
+      source: source("document-result"),
+      sequence: 2,
+      kind: "tool-result",
+      summary: "document: succeeded with current numeric range",
+      status: "succeeded",
+      toolName: "document",
+      arguments: {
+        action: "analyze",
+        sheet: "Sheet1",
+        range: "B2:B3",
+        header: false,
+        operation: "sum",
+      },
+      coverage: kind === "limited" ? "limited" : "complete",
+      createdAt: Date.now(),
+    };
+    const extra = [document];
+    if (kind === "unresolved")
+      extra.push({
+        ...document,
+        observationId: "later-correction",
+        source: source("later-correction"),
+        sequence: 3,
+        kind: "user-input",
+        correction: true,
+        status: undefined,
+        toolName: undefined,
+        arguments: undefined,
+        summary: "刚才结果仍然有误，需继续核对。",
+      });
+    await waiting(store, "/fixture", true, extra);
+    const worker = new ExecutionLearningWorker({
+      picoHome: `/fixture-anchor-${kind}`,
+      store: store.executionLearning,
+      taskExperiences: store.taskExperiences,
+      idleMs: 0,
+      pollMs: 60_000,
+      validateTaskExperienceSources: async () => true,
+      taskExperienceApplicability: async () =>
+        kind === "unproven"
+          ? undefined
+          : { operation: "sum", header: false, dataKind: "finite-numbers" },
+      taskExperienceModelFactory: async () => ({
+        model: {
+          call: async () =>
+            JSON.stringify({
+              representation: kind === "case" ? "case" : "method",
+              content: "对当前纯数值表格明确范围，包含首行数据后使用sum。",
+              matchHints: ["header:false"],
+              applicability: { taskFamily: "spreadsheet", toolNames: ["document"], conditions: [] },
+              evidenceIds:
+                kind === "unreferenced"
+                  ? ["e1"]
+                  : extra.map((_, index) => `e${index + 2}`).concat("e1"),
+            }),
+        },
+        dispose() {},
+      }),
+    });
+    try {
+      await worker.flushOnce();
+      await worker.drain();
+      const saved = await store.taskExperiences.readTaskExperienceCandidate("candidate");
+      assert.ok(saved, kind);
+      assert.deepEqual(
+        saved.matchHints,
+        kind === "supported" ? ["header:false", "Sheet1!B2:B3"] : ["header:false"],
+        kind,
+      );
+      const query =
+        '请用 document 计算这份新 Excel 附件 Sheet1 的 B2:B3 合计，只返回 JSON {"sum":数值} 与来源。';
+      const targets = await taskExperienceRecallTargets({
+        store: store.taskExperiences,
+        workspaceKey: "workspace",
+        workDir: "/fixture",
+        query,
+        toolAllowed: (name) => name === "document",
+        conditionMatches: async () => true,
+      });
+      assert.equal(targets.length, kind === "supported" ? 1 : 0, kind);
+      if (kind === "supported") {
+        const context = await new AtomicMemoryContextBuilder(store, "workspace").build(query, {
+          reviewedExperiences: targets,
+        });
+        assert.equal(context.items.length, 1);
+        assert.ok(context.references.some((reference) => reference.itemId === saved.itemId));
+        assert.deepEqual(saved.requiredConditions, [
+          {
+            kind: "spreadsheet-range",
+            operation: "sum",
+            header: false,
+            dataKind: "finite-numbers",
+          },
+        ]);
+        assert.equal(saved.validation, "unknown");
+        assert.equal(
+          (await store.experienceLedger.queryExperienceUses("workspace")).uses.length,
+          0,
+          "retrieval anchors do not create adoption or delivery",
         );
       }
     } finally {

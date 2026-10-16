@@ -488,12 +488,25 @@ export class ExecutionLearningWorker {
           : []),
         ...(native ? [{ kind: "native-scope" as const, ...native.evidence }] : []),
       ];
+      const spreadsheetAnchor =
+        representation === "method" && spreadsheet
+          ? spreadsheetRetrievalAnchor(selectedObservations, observations)
+          : undefined;
+      const matchHints =
+        spreadsheetAnchor &&
+        !proposal.matchHints.some(
+          (hint) =>
+            hint.normalize("NFKC").toLowerCase() ===
+            spreadsheetAnchor.normalize("NFKC").toLowerCase(),
+        )
+          ? [...proposal.matchHints.slice(0, 7), spreadsheetAnchor]
+          : proposal.matchHints;
       await complete({
         content,
         applicability,
         sources: combinedSources,
         representation,
-        matchHints: proposal.matchHints,
+        matchHints,
         requiredConditions,
         ...(native ? { nativeEvidence: native.evidence } : {}),
       });
@@ -565,6 +578,54 @@ export class ExecutionLearningWorker {
       // Diagnostics must never turn a background task into a foreground error.
     }
   }
+}
+
+/** Retrieval only: the Host spreadsheet proof and selected canonical source checks run first. */
+function spreadsheetRetrievalAnchor(
+  selected: readonly TaskExperienceObservation[],
+  frozen: readonly TaskExperienceObservation[],
+): string | undefined {
+  const problemSequence = Math.max(
+    0,
+    ...frozen
+      .filter(
+        (entry) =>
+          entry.correction || ["failed", "rejected", "interrupted"].includes(entry.status ?? ""),
+      )
+      .map((entry) => entry.sequence),
+  );
+  for (const entry of [...selected].sort((a, b) => b.sequence - a.sequence)) {
+    const args = entry.arguments;
+    if (
+      entry.kind !== "tool-result" ||
+      entry.toolName !== "document" ||
+      entry.coverage !== "complete" ||
+      entry.status !== "succeeded" ||
+      entry.sequence <= problemSequence ||
+      args?.action !== "analyze" ||
+      args.operation !== "sum" ||
+      args.header !== false ||
+      typeof args.sheet !== "string" ||
+      !/^[\p{L}\p{N}_-]{1,64}$/u.test(args.sheet) ||
+      typeof args.range !== "string"
+    )
+      continue;
+    const range = args.range
+      .toUpperCase()
+      .match(/^\$?([A-Z]{1,3})\$?([1-9]\d{0,6}):\$?([A-Z]{1,3})\$?([1-9]\d{0,6})$/u);
+    if (!range) continue;
+    const column = (value: string): number =>
+      [...value].reduce((total, char) => total * 26 + char.charCodeAt(0) - 64, 0);
+    if (
+      column(range[1]!) > column(range[3]!) ||
+      column(range[3]!) > 16_384 ||
+      Number(range[2]) > Number(range[4]) ||
+      Number(range[4]) > 1_048_576
+    )
+      continue;
+    return `${args.sheet}!${args.range.toUpperCase()}`;
+  }
+  return undefined;
 }
 
 interface RegisteredWorker {

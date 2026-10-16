@@ -152,7 +152,7 @@ test(
             );
             return JSON.stringify({
               representation: "method",
-              matchHints: ["计算附件", "纯数值范围求和"],
+              matchHints: ["header:false"],
               content:
                 "对当前表格明确工作表和范围。纯数值范围求和时包含首行，设置header=false，并报告来源范围。",
               applicability: {
@@ -340,6 +340,7 @@ test(
     assert.equal(trial.validation, "unknown");
     assert.equal(trial.positiveReuseCount, 0);
     assert.equal(trial.promotionReason, "none");
+    assert.deepEqual(trial.matchHints, ["header:false", "Sheet1!B2:B3"]);
     assert.ok(trial.itemId);
     assert.deepEqual(trial.applicability.spreadsheet, {
       operation: "sum",
