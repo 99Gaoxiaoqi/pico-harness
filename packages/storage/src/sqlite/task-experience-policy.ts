@@ -88,13 +88,15 @@ export function experienceConditions(
       if (!conditions.some((value) => sameExperienceCondition(value, condition)))
         throw new Error("Task experience condition is not observed");
     }
+  const spreadsheetWords =
+    /^(?:sum|求和|无表头|有限数值|finite[- ]numbers|header[:= ]false|spreadsheet|range|范围|表格|纯数字|数值区域|所有输入均为有限数值|数据区域不含表头|当前纯数值范围|当前数值范围|数值范围没有表头|当前选择区域是有限数值)$/iu;
+  const nativeWords = /^(?:native[- ]scope|冻结操作范围|当前冻结范围)$/iu;
   const unknownLegacy =
     legacy &&
     candidate.applicability.conditions.some(
       (value) =>
-        !/^(?:sum|求和|无表头|有限数值|finite[- ]numbers|header[:= ]false|spreadsheet|range|范围|表格|纯数字|数值区域|所有输入均为有限数值|数据区域不含表头|当前纯数值范围|当前数值范围|数值范围没有表头|当前选择区域是有限数值)$/iu.test(
-          value.trim(),
-        ),
+        !(candidate.applicability.spreadsheet && spreadsheetWords.test(value.trim())) &&
+        !(candidate.nativeEvidence && nativeWords.test(value.trim())),
     );
   return { requiredConditions: conditions, scopeUnresolved: !!unknownLegacy };
 }

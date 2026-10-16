@@ -413,9 +413,10 @@ test("v15到v16同事务迁移案例、硬条件、暂停和metadata；不伪造
   const method = (await seed(store, "legacy-method")).candidate;
   const unknown = (await seed(store, "legacy-unclear", "case")).candidate;
   const corrected = (await seed(store, "legacy-corrected")).candidate;
+  const bareTerm = (await seed(store, "legacy-bare-term")).candidate;
   store.close();
   const db = new DatabaseSync(path);
-  for (const candidate of [method, unknown, corrected]) {
+  for (const candidate of [method, unknown, corrected, bareTerm]) {
     const {
       representation: _representation,
       usagePolicy: _usagePolicy,
@@ -431,7 +432,10 @@ test("v15到v16同事务迁移案例、硬条件、暂停和metadata；不伪造
         ? { risk: "unclear", review: "pending" }
         : {
             validation: "pass",
-            applicability: { ...old.applicability, conditions: ["只在未知平台版本使用"] },
+            applicability: {
+              ...old.applicability,
+              conditions: [candidate === bareTerm ? "有限数值" : "只在未知平台版本使用"],
+            },
           }),
       ...(candidate === corrected
         ? { enabled: false, reason: "user_correction", validation: "unknown" }
@@ -466,6 +470,9 @@ test("v15到v16同事务迁移案例、硬条件、暂停和metadata；不伪造
     assert.equal(migrated.validation, "pass");
     assert.equal(migrated.expiresAt, undefined);
     assert.equal(migrated.evidenceSummary?.deliveredCount, 0);
+    const bare = (await store.taskExperiences.readTaskExperienceCandidate(bareTerm.candidateId))!;
+    assert.equal(bare.scopeUnresolved, true);
+    assert.deepEqual(bare.requiredConditions, []);
     assert.equal(
       (await store.taskExperiences.queryTaskExperiences("workspace", { recallable: true })).length,
       0,
