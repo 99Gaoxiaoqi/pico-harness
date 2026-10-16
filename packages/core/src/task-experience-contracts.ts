@@ -4,6 +4,25 @@ import type {
   ExecutionLearningState,
 } from "./execution-learning-contracts.js";
 
+export type TaskExperienceRepresentation = "case" | "method";
+export type TaskExperienceUsagePolicy = "case_only" | "suggestion" | "review_required" | "blocked";
+export type TaskExperienceDecisionKind = "high_impact" | "scope_expansion" | "long_term_conflict";
+/** Frozen Host identities; unknown condition kinds are never implicitly satisfied. */
+export type TaskExperienceRequiredCondition =
+  | ({ readonly kind: "native-scope" } & TaskExperienceNativeEvidence)
+  | { readonly kind: "spreadsheet-range"; readonly operation: "sum"; readonly header: false; readonly dataKind: "finite-numbers" };
+export interface TaskExperienceEvidenceSummary {
+  readonly deliveredCount: number;
+  readonly independentTaskCount: number;
+  readonly adoptedCount: number;
+  readonly helpfulCount: number;
+  readonly contradictionCount: number;
+  readonly results: readonly {
+    readonly validation: ExperienceValidation;
+    readonly scope: "unknown" | "native-claim" | "spreadsheet-range" | "command";
+    readonly count: number;
+  }[];
+}
 export type ExperienceReview = "unneeded" | "pending" | "approved" | "rejected" | "deferred";
 export type ExperienceValidation = "unknown" | "pass" | "fail" | "stale";
 export type TaskExperienceMaturity = "unassessed" | "trial" | "active" | "suspended";
@@ -68,6 +87,16 @@ export interface TaskExperienceObservation {
   readonly createdAt: number;
 }
 export interface TaskExperienceSummary {
+  /** Optional only for historical/v2 callers. Store fills these on persisted v3 records. */
+  readonly representation?: TaskExperienceRepresentation;
+  readonly usagePolicy?: TaskExperienceUsagePolicy;
+  readonly matchHints?: readonly string[];
+  readonly requiredConditions?: readonly TaskExperienceRequiredCondition[];
+  /** Legacy hard conditions that cannot be checked; always blocks automatic use. */
+  readonly scopeUnresolved?: boolean;
+  readonly decisionKind?: TaskExperienceDecisionKind;
+  readonly expiresAt?: number;
+  readonly evidenceSummary?: TaskExperienceEvidenceSummary;
   readonly candidateId: string;
   readonly contentVersion: number;
   readonly recordRevision: number;
@@ -137,6 +166,8 @@ export interface TaskExperienceReuse {
 export type ExperienceReviewAction =
   | "accept"
   | "edit_accept"
+  | "revise"
+  | "keep_case"
   | "defer"
   | "reject"
   | "disable"
@@ -152,6 +183,9 @@ export interface TaskExperienceReviewInput {
   readonly action: ExperienceReviewAction;
   readonly content?: string;
   readonly applicability?: ExperienceApplicability;
+  readonly representation?: TaskExperienceRepresentation;
+  readonly matchHints?: readonly string[];
+  readonly requiredConditions?: readonly TaskExperienceRequiredCondition[];
   readonly now: number;
 }
 export interface TaskExperienceFeedbackInput {
@@ -162,6 +196,7 @@ export interface TaskExperienceFeedbackInput {
   readonly taskId: string;
   readonly taskVersion: number;
   readonly action: "not_applicable" | "correct" | "disable";
+  readonly source?: MemoryItemSource;
   readonly now: number;
 }
 /** Host audit identity only; contains no task prose or model-provided authority. */
@@ -203,6 +238,12 @@ export interface TaskExperienceStore {
       readonly review?: ExperienceReview;
       /** Host recall prefilter, applied before pagination; permissions and scope still require validation. */
       readonly recallable?: boolean;
+      readonly representation?: TaskExperienceRepresentation;
+      readonly usagePolicy?: TaskExperienceUsagePolicy;
+      readonly lifecycleState?: "active" | "archived";
+      readonly workDir?: string;
+      readonly query?: string;
+      readonly now?: number;
       readonly limit?: number;
     },
   ): Promise<readonly TaskExperienceCandidate[]>;
@@ -210,12 +251,17 @@ export interface TaskExperienceStore {
     readonly job: ExecutionLearningJob;
     readonly expectedRecordRevision: number;
     readonly content?: string;
+    readonly representation?: TaskExperienceRepresentation;
+    readonly matchHints?: readonly string[];
+    readonly requiredConditions?: readonly TaskExperienceRequiredCondition[];
     readonly applicability?: ExperienceApplicability;
     readonly sources?: readonly MemoryItemSource[];
     readonly nativeEvidence?: TaskExperienceNativeEvidence;
     readonly reason?: string;
     readonly now: number;
   }): Promise<TaskExperienceCandidate | undefined>;
+  /** Deterministic idle maintenance; never runs model consolidation. */
+  maintainTaskExperiences?(now: number): Promise<void>;
   reviewTaskExperience(input: TaskExperienceReviewInput): Promise<TaskExperienceCandidate>;
   feedbackTaskExperience(input: TaskExperienceFeedbackInput): Promise<TaskExperienceCandidate>;
   recordTaskExperienceReuse(reuse: TaskExperienceReuse): Promise<void>;

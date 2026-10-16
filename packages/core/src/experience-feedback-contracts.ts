@@ -62,7 +62,9 @@ export interface ExperienceFeedbackInput {
   readonly useId: string;
   readonly expectedItemVersion: number;
   readonly operationId: string;
-  readonly action: 'not_applicable' | 'disable';
+  readonly action: 'not_applicable' | 'disable' | 'helpful' | 'correct';
+  readonly expectedContentVersion?: number;
+  readonly source?: MemoryItemSource;
   readonly now: number;
 }
 export interface ExperienceDiagnostic {
