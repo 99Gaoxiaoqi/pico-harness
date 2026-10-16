@@ -1,6 +1,6 @@
-# Pico 原子长期记忆架构
+# Pico 原子长期记忆架构（历史快照）
 
-> 当前实现，核对日期：2026-10-12。涵盖正文召回、只读搜索、查询预览、执行经验、时间更正与提取观测。[改造方案](../plans/2026-10-08-memory-optimization.md) · [验收记录](../plans/2026-10-08-memory-acceptance.md)。
+> **本文已由 [2026-10-16 记忆整改现状](2026-10-16-memory-remediation.md) 替代。** 当前事实/经验分层、已准入持久恢复、PII、query/case trace 与性能验证边界请从新文进入。下文保留2026-10-12历史实现；其中“当前”、v13/26表、迁移与召回描述均仅指当时，不能作为现版本部署或验收依据。历史[改造方案](../plans/2026-10-08-memory-optimization.md) · [验收记录](../plans/2026-10-08-memory-acceptance.md)。
 
 Pico 使用一个用户级 SQLite 记忆库。写入时，辅助模型理解用户证据，程序校验后原子提交；读取时，本地词法检索构造有预算的原文参考。自动召回、主动搜索和查询预览共用 ContextBuilder；用户管理操作同一份 Item。提取统计与实际模型费用分别来自回执和物理调用账本。
 
@@ -230,7 +230,7 @@ v14 完整退役 `memory_learn` 及三次同命令成功保存。工具不可发
 | 关注点                    | 源码                                                                                                                                                                                                                                                                    |
 | ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 装配、自动注入与工具门禁  | [agent-runtime.ts](../../packages/pico-host/src/agent-runtime.ts)、[memory-trigger-tools.ts](../../packages/pico-host/src/memory-trigger-tools.ts)                                                                                                                      |
-| 执行经验与原生证据核验    | [execution-learning-runtime.ts](../../packages/pico-host/src/execution-learning-runtime.ts)                                                                                                                                                                                       |
+| 执行经验与原生证据核验    | [execution-learning-runtime.ts](../../packages/pico-host/src/execution-learning-runtime.ts)                                                                                                                                                                             |
 | 快照、自动边界与参考笔记  | [atomic-memory-runtime.ts](../../packages/pico-host/src/atomic-memory-runtime.ts)、[atomic-memory-reference-note.ts](../../packages/pico-host/src/atomic-memory-reference-note.ts)                                                                                      |
 | 提取、证据与窗口预算      | [extraction-engine.ts](../../packages/runtime/src/atomic-memory/extraction-engine.ts)、[extraction-evidence.ts](../../packages/runtime/src/atomic-memory/extraction-evidence.ts)、[extraction-budget.ts](../../packages/runtime/src/atomic-memory/extraction-budget.ts) |
 | 统一召回与词法规则        | [context-builder.ts](../../packages/runtime/src/atomic-memory/context-builder.ts)、[atomic-memory-search.ts](../../packages/core/src/atomic-memory-search.ts)                                                                                                           |
