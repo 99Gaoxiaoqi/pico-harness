@@ -316,6 +316,10 @@ test("durable extraction jobs serialize claims and fence expired workers at comm
       const persisted = await firstStore.enqueueExtractionJob(jobRequest);
       assert.equal(persisted.state, "pending");
       assert.equal((await secondStore.enqueueExtractionJob(jobRequest)).jobId, persisted.jobId);
+      await assert.rejects(
+        secondStore.enqueueExtractionJob({ ...jobRequest, sourceHash: "changed-source" }),
+        conflict("operation_reused"),
+      );
       const oldClaim = await firstStore.claimExtractionJob({
         jobId: persisted.jobId,
         ownerId: "host-a",

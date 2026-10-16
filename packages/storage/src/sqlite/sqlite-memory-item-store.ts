@@ -1055,6 +1055,18 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
           "operation_reused",
           "Memory extraction source already has a different job identity",
         );
+      if (
+        row.source_hash !== sourceHash ||
+        row.source_kind !== request.sourceKind ||
+        Number(row.source_ordinal) !== sourceOrdinal ||
+        Number(row.through_ordinal) !== throughOrdinal ||
+        Number(row.deletion_revision) !== deletionRevision ||
+        Number(row.settings_version) !== settingsVersion
+      )
+        throw new MemoryItemStoreConflictError(
+          "operation_reused",
+          "Memory extraction source identity was reused with different frozen inputs",
+        );
       this.#database.exec("COMMIT");
       return decodeMemoryExtractionJob(row);
     } catch (error) {
