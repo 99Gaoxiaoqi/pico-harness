@@ -535,7 +535,7 @@ test("明确引用旧事实的纠正在capture中同步归档，模糊结果纠�
   assert.equal(filtered[1]!.content, correction, "当前用户纠正原文必须保留");
 });
 
-test("成功预筛仅接受有产物回执及结构流程的任务", async (t) => {
+test("纯成功反思默认关闭，显式开启仍须产物回执及结构流程", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-memory-redesign-runtime-"));
   const store = new SqliteMemoryItemStore(":memory:");
   const events = new SqliteRuntimeEventStore({ storageRoot: join(root, "events") });
@@ -545,7 +545,11 @@ test("成功预筛仅接受有产物回执及结构流程的任务", async (t) =
     await rm(root, { recursive: true, force: true });
   });
   let index = 0;
-  for (const valuable of [false, true]) {
+  for (const { allowSuccessfulLearning, valuable } of [
+    { allowSuccessfulLearning: undefined, valuable: true },
+    { allowSuccessfulLearning: true, valuable: false },
+    { allowSuccessfulLearning: true, valuable: true },
+  ]) {
     const sessionId = `session-${index++}`,
       runId = "run";
     await events.initializeSession({ sessionId, workDir: root });
@@ -632,13 +636,15 @@ test("成功预筛仅接受有产物回执及结构流程的任务", async (t) =
       store,
       gate: async () => ({ allowed: true }),
       worker: { wake() {} },
+      ...(allowSuccessfulLearning === undefined ? {} : { allowSuccessfulLearning }),
     });
     await runtime.admit(runId);
     await runtime.capture();
     await runtime.completed(runId);
     assert.equal(
       (await store.taskExperiences.queryTaskExperiences("workspace", { sessionId })).length,
-      valuable ? 1 : 0,
+      allowSuccessfulLearning && valuable ? 1 : 0,
+      `allowSuccessfulLearning=${allowSuccessfulLearning}, valuable=${valuable}`,
     );
   }
 });

@@ -146,6 +146,8 @@ export interface TaskExperienceRuntimeOptions {
   /** Identity/reference gate is independent of generating new proposals. */
   readonly gate: () => Promise<{ readonly allowed: boolean }>;
   readonly proposalGate?: () => Promise<{ readonly allowed: boolean }>;
+  /** @internal Host opt-in for experimental learning from purely successful runs. */
+  readonly allowSuccessfulLearning?: boolean;
   readonly worker: { wake(): void };
   readonly modelRoute?: TaskExperienceCandidate["modelRoute"];
   readonly goalIdentity?: () =>
@@ -796,9 +798,11 @@ export class TaskExperienceRuntime {
           observation.taskVersion === task.taskVersion && observation.status === "succeeded",
       ) &&
       observations.some((observation) => observation.status === "failed" || observation.correction);
-    const success = successfulLearningSignal(
-      observations.filter((observation) => observation.taskVersion === task.taskVersion),
-    );
+    const success =
+      this.options.allowSuccessfulLearning === true &&
+      successfulLearningSignal(
+        observations.filter((observation) => observation.taskVersion === task.taskVersion),
+      );
     if (!trigger && !recovery && !explicitMethod && !success) return;
     const evidence = [
       ...new Map(

@@ -466,6 +466,8 @@ export interface RunAgentCliDependencies extends RuntimeHost {
   memoryTrustStore?: WorkspaceTrustStore;
   atomicMemoryLifecycle?: AtomicMemoryLifecycle;
   atomicMemoryModelFactory?: () => Promise<AtomicMemoryModelLease>;
+  /** @internal Host opt-in for experimental learning from purely successful runs. */
+  allowSuccessfulLearning?: boolean;
   /** @internal Ignore project/user extension catalogs and host compatibility resources. */
   isolatedHeadless?: boolean;
   /** Visible Electron browser authority. Omitted for CLI, background and headless hosts. */
@@ -2994,6 +2996,7 @@ export async function executeAgentRuntime(
         store: repository,
         gate: referenceGate,
         proposalGate: taskLearningGate,
+        allowSuccessfulLearning: dependencies.allowSuccessfulLearning === true,
         worker: learningWorker,
         modelRoute: learningModelRoute,
         onDiagnostic: (diagnostic) =>
