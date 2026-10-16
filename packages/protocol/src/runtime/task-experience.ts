@@ -311,7 +311,7 @@ export type TaskExperienceMethodMap = {
     readonly params: WorkspaceParams & {
       readonly learningVersion?: 2 | 3;
       readonly representation?: "case" | "method";
-      readonly usagePolicy?: TaskExperienceCandidate["usagePolicy"];
+      readonly usagePolicy?: NonNullable<TaskExperienceCandidate["usagePolicy"]>;
       readonly lifecycleState?: "active" | "archived";
       readonly query?: string;
       readonly sessionId?: string;
