@@ -548,7 +548,7 @@ function renderReference(
   const display = `${note && excerpt ? note.label : ""}${start > 0 ? "…" : ""}${reference.content}${end < points.length ? "…" : ""}`;
   const id = search ? ` id="${escapeXml(item.itemId)}"` : "";
   const version =
-    source === "reviewed-reference" || source === "execution-validated"
+    search || source === "reviewed-reference" || source === "execution-validated"
       ? ` item-version="${item.version}"`
       : "";
   const times = ` temporal="${item.temporalType}" observed-at="${item.observedAt}"${item.eventStartedAt === null ? "" : ` event-start="${item.eventStartedAt}"`}${item.eventEndedAt === null ? "" : ` event-end="${item.eventEndedAt}"`}`;

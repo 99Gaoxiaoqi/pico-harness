@@ -469,7 +469,9 @@ export class ExecutionLearningWorker {
         proposal.representation === "method" &&
         proposal.matchHints.length > 0 &&
         applicability.toolNames.every((name) => observedTools.has(name)) &&
-        (native !== undefined || supportsBoundedMethod(selectedObservations))
+        (native !== undefined ||
+          spreadsheet !== undefined ||
+          supportsBoundedMethod(selectedObservations))
           ? "method"
           : "case";
       const requiredConditions: NonNullable<TaskExperienceCandidate["requiredConditions"]> = [

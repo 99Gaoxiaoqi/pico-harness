@@ -329,6 +329,13 @@ test("所有maturity与审核状态共享硬条件；重叠双字词和泛词不
   assert.equal(scoreExperienceMatch(["计算器"], "计算器"), 0);
   assert.ok(scoreExperienceMatch(["具体边界"], "具体边界") > 0);
   assert.equal(scoreExperienceMatch(["boundary"], "boundaries"), 0);
+  assert.ok(
+    scoreExperienceMatch(
+      ["计算附件"],
+      `请用document计算这份新Excel附件Sheet1的B2:B3合计。\n\n附件文件：${Array.from({ length: 40 }, (_, index) => `metadata_token_${index}`).join(" ")}`,
+    ) > 0,
+    "附件元数据不能挤掉用户请求中的两个有信息双字词",
+  );
 });
 
 test("memory_search显式case模式保持缺省memory且拒绝混合原生目标", async () => {
@@ -434,6 +441,33 @@ test("明确引用旧事实的纠正在capture中同步归档，模糊结果纠�
   const sessionId = "fact-correction";
   await events.initializeSession({ sessionId, workDir: root });
   const ownerFence = await events.advanceOwnerFence(sessionId, 0);
+  const builder = new AtomicMemoryContextBuilder(store, "workspace");
+  const oldSearch = await builder.build("部署命令", { mode: "search" });
+  const oldAutomatic = await builder.build("部署命令");
+  const feedback = new ExperienceFeedbackRuntime({
+    session: { id: sessionId, runtimeEventStore: events },
+    workspaceKey: "workspace",
+    workDir: root,
+    picoHome: root,
+    store,
+    currentTask: () => undefined,
+    referenceGate: async () => ({ allowed: true }),
+    effectGate: async () => ({ allowed: true }),
+    nativeGate: async () => ({ allowed: true }),
+    io: { realpath: async () => undefined, readFile: async () => undefined },
+    validateReviewed: async () => ({ adoption: "unknown", validation: "unknown", sources: [] }),
+  });
+  feedback.admit("run-0");
+  await feedback.recordReferences(oldAutomatic, undefined);
+  assert.equal(
+    (
+      await feedback.filterProviderMessages([
+        { role: "user", toolCallId: "search", content: oldSearch.block },
+      ])
+    )[0]!.content,
+    oldSearch.block,
+    "当前事实片段可以实际投递",
+  );
   for (const [index, content] of [
     "刚才结果错了，请重新处理。",
     "“部署命令是 old.sh”不对，应该是 new.sh。",
@@ -484,6 +518,21 @@ test("明确引用旧事实的纠正在capture中同步归档，模糊结果纠�
     (await new AtomicMemoryContextBuilder(store, "workspace").build("部署命令")).items.length,
     0,
   );
+  const correction = "“部署命令是 old.sh”不对，应该是 new.sh。";
+  const filtered = await feedback.filterProviderMessages([
+    {
+      role: "user",
+      toolCallId: "old-search",
+      content: `${oldSearch.block}\n${oldAutomatic.block}`,
+    },
+    { role: "user", content: correction },
+  ]);
+  assert.doesNotMatch(
+    filtered[0]!.content,
+    /<memory /,
+    "归档后的主动及自动事实原XML都必须退出下一次Provider请求",
+  );
+  assert.equal(filtered[1]!.content, correction, "当前用户纠正原文必须保留");
 });
 
 test("成功预筛仅接受有产物回执及结构流程的任务", async (t) => {

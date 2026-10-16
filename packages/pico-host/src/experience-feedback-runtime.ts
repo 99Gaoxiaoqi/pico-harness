@@ -105,6 +105,10 @@ interface NativeUsePreparation {
 export class ExperienceFeedbackRuntime implements NativeLearningObserver {
   private runId = "";
   private readonly uses = new Map<string, ExperienceUse>();
+  private readonly referenceIdentities = new Map<
+    string,
+    { readonly itemId: string; readonly itemVersion: number; readonly contentHash: string }
+  >();
   private readonly nativePrepared = new Map<string, NativePrepared>();
   private readonly nativeUses = new Map<string, NativeUsePreparation>();
   constructor(private readonly options: ExperienceFeedbackRuntimeOptions) {}
@@ -112,6 +116,7 @@ export class ExperienceFeedbackRuntime implements NativeLearningObserver {
   admit(runId: string): void {
     this.runId = runId.startsWith("fork-bootstrap:") ? "" : runId;
     this.uses.clear();
+    this.referenceIdentities.clear();
     this.nativePrepared.clear();
     this.nativeUses.clear();
   }
@@ -122,7 +127,7 @@ export class ExperienceFeedbackRuntime implements NativeLearningObserver {
       messages.flatMap((message) =>
         [
           ...message.content.matchAll(
-            /<memory\b[^>]*source="(?:reviewed-reference|execution-validated)"[^>]*>[\s\S]*?<\/memory>|<case\b[^>]*>[\s\S]*?<\/case>/gu,
+            /<memory\b[^>]*>[\s\S]*?<\/memory>|<case\b[^>]*>[\s\S]*?<\/case>/gu,
           ),
         ].map((match) => match[0]),
       ),
@@ -159,18 +164,30 @@ export class ExperienceFeedbackRuntime implements NativeLearningObserver {
           continue;
         }
         const use = [...this.uses.values()].find((entry) => entry.referenceContent === fragment);
-        const id = use?.itemId ?? /\bid="([A-Za-z0-9:_-]+)"/u.exec(fragment)?.[1];
+        const identity = this.referenceIdentities.get(fragment) ?? use;
+        const id = identity?.itemId ?? /\bid="([A-Za-z0-9:_-]+)"/u.exec(fragment)?.[1];
         const record = id ? await this.options.store.readItem(id) : undefined;
         check();
         const fragmentVersion =
-          use?.itemVersion ?? Number(/\bitem-version="(\d+)"/u.exec(fragment)?.[1]);
+          identity?.itemVersion ?? Number(/\bitem-version="(\d+)"/u.exec(fragment)?.[1]);
+        const experience =
+          record?.sourceType === "reviewed-reference" ||
+          record?.sourceType === "execution-validated";
         if (
           !record ||
           record.item.lifecycleState !== "active" ||
           record.item.version !== fragmentVersion ||
-          (use && record.item.contentHash !== use.contentHash) ||
-          !(await this.sourceVersion(record, check)) ||
-          (this.options.referenceAllowed && !(await this.options.referenceAllowed(record)))
+          !(
+            record.item.scopeType === "global" ||
+            (record.item.scopeType === "workspace" &&
+              record.item.scopeKey === this.options.workspaceKey)
+          ) ||
+          (identity && record.item.contentHash !== identity.contentHash) ||
+          (experience &&
+            (!(await this.sourceVersion(record, check)) ||
+              (this.options.referenceAllowed && !(await this.options.referenceAllowed(record))))) ||
+          (!experience &&
+            (!!record.taskExperience || !!record.taskAcceptance || !!record.executionEvidence))
         )
           rejected.add(fragment);
         check();
@@ -241,6 +258,21 @@ export class ExperienceFeedbackRuntime implements NativeLearningObserver {
     result: AtomicMemoryContextResult,
     recallEventId: string | undefined,
   ): Promise<void> {
+    const fragments = [...result.block.matchAll(/<memory\b[^>]*>[\s\S]*?<\/memory>/gu)].map(
+      (match) => match[0],
+    );
+    for (const [index, reference] of result.references.entries()) {
+      const record = result.items.find((entry) => entry.item.itemId === reference.itemId);
+      const fragment = fragments[index];
+      if (!record || !fragment) continue;
+      if (this.referenceIdentities.size >= 128)
+        this.referenceIdentities.delete(this.referenceIdentities.keys().next().value!);
+      this.referenceIdentities.set(fragment, {
+        itemId: record.item.itemId,
+        itemVersion: record.item.version,
+        contentHash: record.item.contentHash,
+      });
+    }
     await this.bounded("reference", undefined, async (check) => {
       const events = this.options.session.runtimeEventStore;
       const task = this.options.currentTask();

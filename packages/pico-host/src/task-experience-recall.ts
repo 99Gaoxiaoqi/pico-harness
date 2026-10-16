@@ -149,8 +149,11 @@ export async function taskExperienceRecallTargets(options: {
 
 /** Complete local tokens/phrases, or two non-overlapping informative Han bigrams. */
 export function scoreExperienceMatch(hints: readonly string[], query: string): number {
-  const text = normalizeMemorySearchText(query);
-  const signals = collectMemorySearchSignals(query);
+  // Attachment descriptors are input evidence, not the user's task query. Their
+  // hashes and metadata must not consume all 32 local search signals first.
+  const request = query.split(/\n\n附件文件：|\n<uploaded-attachments>/u)[0]!;
+  const text = normalizeMemorySearchText(request);
+  const signals = collectMemorySearchSignals(request);
   const generic = new Set([
     "任务",
     "代码",

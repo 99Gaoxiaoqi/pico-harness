@@ -137,6 +137,8 @@ test(
             const evidence = JSON.parse(request.prompt.slice(request.prompt.lastIndexOf("\n") + 1))
               .evidence as readonly { evidenceId: string }[];
             return JSON.stringify({
+              representation: "method",
+              matchHints: ["计算附件", "纯数值范围求和"],
               content:
                 "对当前表格明确工作表和范围。纯数值范围求和时包含首行，设置header=false，并报告来源范围。",
               applicability: {
@@ -359,7 +361,14 @@ test(
         receipt.source.kind === "reviewed-reference" &&
         receipt.source.candidateId === trial.candidateId,
     );
-    assert.ok(receipt);
+    assert.ok(
+      receipt,
+      JSON.stringify(
+        (await events.readSessionEntries(currentSession)).flatMap(({ event }) =>
+          event.kind === "memory.recall.recorded" ? [event.data] : [],
+        ),
+      ),
+    );
     assert.equal(receipt.hostRunId, reuseHostRun);
     // This deterministic provider does not expose a physical request lifecycle.
     assert.equal(receipt.delivery, "pending");

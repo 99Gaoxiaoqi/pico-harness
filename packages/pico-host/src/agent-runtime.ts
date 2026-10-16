@@ -1351,7 +1351,7 @@ export async function executeAgentRuntime(
       captureAtomicMemoryAdmission({
         workDir,
         picoHome,
-        supported: !!atomicMemoryRuntime && kind !== "responses",
+        supported: !!atomicMemoryRuntime,
         gate: memoryAutomaticAllowed,
       });
     try {
@@ -1736,7 +1736,7 @@ export async function executeAgentRuntime(
         ...(dependencies.atomicMemoryLifecycle
           ? { lifecycle: dependencies.atomicMemoryLifecycle }
           : {}),
-        supported: kind !== "responses",
+        supported: true,
         preserveSourceTools: !!trackedProvider.requestCapabilities?.toolChoiceNoneWithTools,
         contextWindowTokens: contextRuntime.budget.contextWindowTokens,
         reservedOutputTokens: contextRuntime.budget.reservedOutputTokens,
@@ -2641,7 +2641,7 @@ export async function executeAgentRuntime(
       registry.register(new ScheduleTaskTool(dependencies.scheduleDraftCoordinator));
     }
     // remember 同步提交；extract 在 completed terminal 落盘后入队。
-    // Responses 保留工具入口，但明确返回 provider_unsupported，不执行提取。
+    // 各协议共用受预算与来源约束的 ProviderAtomicMemoryModel。
     if (atomicMemoryRuntime) {
       for (const tool of buildMemoryTriggerTools(atomicMemoryRuntime)) {
         registry.register(tool);

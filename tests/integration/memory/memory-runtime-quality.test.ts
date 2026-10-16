@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer } from "node:http";
 import test, { type TestContext } from "node:test";
 import { SilentReporter } from "@pico/runtime/silent-reporter";
 import { getOrCreateSessionSettings } from "@pico/pico-host/input/session-settings";
@@ -22,6 +23,8 @@ import { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-s
 import { SqliteRuntimeControlStore } from "@pico/storage/sqlite/sqlite-runtime-control-store";
 import { SqliteRuntimeEventStore } from "@pico/pico-host/product-runtime-event-store";
 import { BACKGROUND_HARDLINE_VERSION } from "@pico/pico-host/background-autonomous-policy";
+import { createProvider } from "@pico/pico-host/provider/factory";
+import { closeExecutionLearningWorker } from "@pico/pico-host/execution-learning-worker";
 
 const MEMORY_CANARY = "npm run reviewed-memory-canary";
 
@@ -70,8 +73,8 @@ test("Memory admission separates recall from extraction across runtime profiles"
       const background = profile.startsWith("background");
       const toolsAllowed = profile !== "background-restricted";
       const canRecall = profile !== "headless" && profile !== "untrusted";
-      const canExtract = profile === "side" || profile === "background";
-      const hasTriggers = canExtract || profile === "responses";
+      const canExtract = profile === "side" || profile === "background" || profile === "responses";
+      const hasTriggers = canExtract;
       let calls = 0;
       let extractionCalls = 0;
       const store = openStore(fixture);
@@ -184,24 +187,7 @@ test("Memory admission separates recall from extraction across runtime profiles"
                     ],
                   };
                 }
-                if (profile === "responses") {
-                  if (calls > 1)
-                    assert.ok(
-                      messages.some(
-                        (message) =>
-                          message.toolCallId === `unsupported-${calls - 1}` &&
-                          message.content.includes("provider_unsupported"),
-                      ),
-                    );
-                  if (calls <= 2)
-                    return {
-                      role: "assistant" as const,
-                      content: "",
-                      toolCalls: [
-                        { id: `unsupported-${calls}`, name: triggers[calls - 1]!, arguments: "{}" },
-                      ],
-                    };
-                } else if (canExtract && calls === 1) {
+                if (canExtract && calls === 1) {
                   return {
                     role: "assistant" as const,
                     content: "",
@@ -226,6 +212,192 @@ test("Memory admission separates recall from extraction across runtime profiles"
       }
     });
   }
+});
+
+test("Responses真实HTTP适配器经原文证据提取并同步保存事实", { timeout: 20_000 }, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-responses-memory-"));
+  const workspace = join(root, "workspace"),
+    picoHome = join(root, "home"),
+    sessionId = "responses-memory";
+  await mkdir(workspace);
+  const trust = await trustWorkspaces(picoHome, workspace);
+  const paths = resolvePicoPaths(workspace, { picoHome });
+  const lifecycle = new AtomicMemoryLifecycle();
+  const content = "npm run responses-memory-canary";
+  const prompt = `请记住：这个项目的构建命令是 ${content}。`;
+  const item = {
+    content,
+    kind: "knowledge",
+    statementType: "fact",
+    temporalType: "undated",
+    eventStartedAt: null,
+    eventEndedAt: null,
+    scope: "workspace",
+    keys: [{ key: "build", type: "concept" }],
+  };
+  const requests: Record<string, unknown>[] = [];
+  const errors: unknown[] = [];
+  const server = createServer(async (req, res) => {
+    try {
+      assert.equal(req.url, "/responses");
+      let raw = "";
+      for await (const chunk of req) raw += chunk;
+      const body = JSON.parse(raw) as Record<string, unknown>;
+      requests.push(body);
+      assert.notEqual(body.stream, true);
+      const input = body.input as Array<Record<string, unknown>>;
+      const text = [
+        typeof body.instructions === "string" ? body.instructions : "",
+        ...input.flatMap((entry) =>
+          typeof entry.content === "string"
+            ? [entry.content]
+            : Array.isArray(entry.content)
+              ? entry.content.flatMap((part: Record<string, unknown>) =>
+                  typeof part.text === "string" ? [part.text] : [],
+                )
+              : [],
+        ),
+      ].join("\n");
+      let answer: string | undefined;
+      let tool = false;
+      if (text.includes("<user_evidence_candidates>"))
+        answer = JSON.stringify({
+          results: [{ candidateId: "candidate_0", status: "accepted", item }],
+        });
+      else if (text.includes("<memory_evidence>")) {
+        const evidence = JSON.parse(
+          text.split("<memory_evidence>\n")[1]!.split("\n</memory_evidence>")[0]!,
+        ) as Array<{ sourceRef: string }>;
+        const events = new SqliteRuntimeEventStore({ storageRoot: paths.workspace.root });
+        let sourceRef: string;
+        try {
+          const user = (await events.readSessionEntries(sessionId)).find(
+            ({ event }) =>
+              event.kind === "message.committed" &&
+              event.data.message.role === "user" &&
+              event.data.message.content === prompt,
+          );
+          assert.ok(user);
+          sourceRef = `event:${user.event.eventId}`;
+          assert.ok(
+            evidence.some((entry) => entry.sourceRef === sourceRef),
+            "Responses请求必须保留真实canonical用户来源",
+          );
+        } finally {
+          events.close();
+        }
+        assert.ok(text.includes(content));
+        answer = JSON.stringify({
+          status: "complete",
+          coverageStatus: "processed",
+          requestedStatus: "resolved",
+          requestedItems: [{ ...item, evidence: [{ sourceRef, quote: content }] }],
+          incidentalItems: [],
+        });
+      } else if (input.some((entry) => entry.type === "function_call_output"))
+        answer = "已保存构建命令。";
+      else tool = true;
+      const output = tool
+        ? [
+            {
+              type: "function_call",
+              id: "fc_remember",
+              call_id: "remember-call",
+              name: "memory_remember",
+              arguments: "{}",
+              status: "completed",
+            },
+          ]
+        : [
+            {
+              type: "message",
+              id: `msg_${requests.length}`,
+              role: "assistant",
+              status: "completed",
+              content: [{ type: "output_text", text: answer, annotations: [] }],
+            },
+          ];
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(
+        JSON.stringify({
+          id: `resp_${requests.length}`,
+          object: "response",
+          created_at: 1,
+          model: "test-model",
+          status: "completed",
+          output,
+          usage: { input_tokens: 16, output_tokens: 8, total_tokens: 24 },
+        }),
+      );
+    } catch (error) {
+      errors.push(error);
+      res.writeHead(400);
+      res.end('{"error":{"message":"fixture assertion failed"}}');
+    }
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  t.after(async () => {
+    await closeExecutionLearningWorker(picoHome);
+    await lifecycle.close();
+    await closeSessions([sessionId], [workspace], picoHome);
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  });
+  await executeAgentRuntime(
+    {
+      ...runtimeRequest(workspace, sessionId, prompt, "memory_remember"),
+      provider: "responses",
+      baseURL: `http://127.0.0.1:${address.port}`,
+      apiKey: "test-key",
+      model: "test-model",
+    },
+    {
+      picoHome,
+      maxTurns: 4,
+      memoryTrustStore: trust,
+      atomicMemoryLifecycle: lifecycle,
+      reporter: new SilentReporter(),
+      providerFactory: (kind, config, effort, dependencies) => {
+        assert.equal(kind, "responses");
+        const adapter = createProvider(
+          kind,
+          {
+            ...config,
+            baseURL: `http://127.0.0.1:${address.port}`,
+            apiKey: "test-key",
+            capabilities: resolveModelRouteCapabilities(kind, "test-model", {
+              output: 4096,
+              toolCall: true,
+              cache: false,
+              toolChoiceNoneWithTools: true,
+            }),
+          },
+          effort,
+          dependencies,
+        );
+        return {
+          modelName: adapter.modelName,
+          requestCapabilities: adapter.requestCapabilities,
+          generate: adapter.generate.bind(adapter),
+        };
+      },
+    },
+  );
+  assert.deepEqual(errors, []);
+  const store = new SqliteMemoryItemStore(atomicMemoryDatabasePath(picoHome));
+  try {
+    const saved = await store.listItems({ workspaceKey: paths.workspace.id });
+    assert.equal(saved.length, 1);
+    assert.equal(saved[0]!.item.content, content);
+    assert.equal(saved[0]!.sources[0]!.sessionId, memorySessionKey(paths.workspace.id, sessionId));
+    assert.equal(saved[0]!.item.origin, "user_requested");
+  } finally {
+    store.close();
+  }
+  assert.equal(requests.length, 4, "两次前台和两次受限提取请求完成闭环");
 });
 
 test("committed Session A atomic memory reaches Session B AgentRuntime prompt but not another workspace", async (context) => {
