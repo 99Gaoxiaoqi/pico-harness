@@ -1,3 +1,4 @@
+import { queryMemoryContentIndex } from "./memory-content-index.js";
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -1368,6 +1369,9 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
       throw new Error(`Memory content search accepts at most ${MAX_SEARCH_TERMS} terms`);
     if (!count) return [];
     return this.#readSnapshot(() => {
+      const indexed = queryMemoryContentIndex(this.#database, { workspaceKey, signals, limit });
+      if (indexed !== undefined)
+        return indexed.map(({ itemId }) => this.#requireItemRecord(itemId));
       const ranked: Array<{ id: string; score: number; updatedAt: number }> = [];
       const rows = this.#database
         .prepare(

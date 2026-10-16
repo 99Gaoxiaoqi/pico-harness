@@ -223,7 +223,7 @@ test("v9, v10 and v11 memory databases upgrade to v16 preserving facts and retir
     old.close();
     store = new SqliteMemoryItemStore(path);
     try {
-      assert.equal(store.schemaVersion(), 18);
+      assert.equal(store.schemaVersion(), 19);
       assert.deepEqual(await store.readItem(itemId), before);
       if (existingNative)
         assert.deepEqual(

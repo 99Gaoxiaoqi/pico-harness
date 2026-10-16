@@ -626,7 +626,7 @@ test("v15到v16同事务迁移案例、硬条件、暂停和metadata；不伪造
   db.close();
   store = new SqliteMemoryItemStore(path, { now: () => 1000 });
   try {
-    assert.equal(store.schemaVersion(), 18);
+    assert.equal(store.schemaVersion(), 19);
     const migrated = (await store.taskExperiences.readTaskExperienceCandidate(method.candidateId))!;
     assert.equal(migrated.representation, "method");
     assert.equal(migrated.usagePolicy, "suggestion");

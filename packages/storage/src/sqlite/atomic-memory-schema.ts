@@ -18,6 +18,7 @@
  */
 
 import type { DatabaseSync } from "node:sqlite";
+import { MEMORY_CONTENT_INDEX_SCHEMA_SQL } from "./memory-content-index.js";
 import { EXECUTION_LEARNING_SCHEMA_SQL } from "./execution-learning-store.js";
 import { migrateExperienceFeedback } from "./experience-feedback-schema.js";
 import { migrateTaskExperienceV16 } from "./task-experience-migration.js";
@@ -27,7 +28,7 @@ import {
   retireExecutionLessons,
 } from "./retire-execution-lessons.js";
 
-export const SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION = 18;
+export const SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION = 19;
 
 const MEMORY_EXTRACTION_JOB_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS memory_extraction_jobs (
@@ -529,6 +530,7 @@ export function initializeSqliteLongTermMemoryDatabase(db: DatabaseSync): void {
       if (version > 0 && version < 18) {
         db.exec(MEMORY_RECALL_REVISION_SCHEMA_SQL);
       }
+      if (version < 19) db.exec(MEMORY_CONTENT_INDEX_SCHEMA_SQL);
       db.exec(`PRAGMA user_version = ${SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION}`);
     }
     validateMinimumSchemaShape(db);
@@ -553,10 +555,11 @@ export function assertSupportedSqliteLongTermMemorySchemaVersion(db: DatabaseSyn
     version !== 15 &&
     version !== 16 &&
     version !== 17 &&
+    version !== 18 &&
     version !== SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION
   ) {
     throw new Error(
-      `Long-term memory SQLite schema ${version} is unsupported; expected ${SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION}. Only schemas 9, 10, 11, 12, 13, 14, 15, 16 and 17 can be upgraded automatically.`,
+      `Long-term memory SQLite schema ${version} is unsupported; expected ${SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION}. Only schemas 9, 10, 11, 12, 13, 14, 15, 16, 17 and 18 can be upgraded automatically.`,
     );
   }
   if (

@@ -19,7 +19,7 @@ const retiredTables = [
 test("opening an incompatible memory database rejects it without upgrading or clearing it", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-memory-incompatible-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  for (const version of [0, 7, 8, 19]) {
+  for (const version of [0, 7, 8, 20]) {
     const path = join(root, `memory-${version}.sqlite`);
     const db = new DatabaseSync(path);
     db.exec(
@@ -32,7 +32,7 @@ test("opening an incompatible memory database rejects it without upgrading or cl
       () => new SqliteMemoryItemStore(path),
       version === 0
         ? /non-empty unversioned/
-        : /Only schemas 9, 10, 11, 12, 13, 14, 15, 16 and 17 can be upgraded automatically/,
+        : /Only schemas 9, 10, 11, 12, 13, 14, 15, 16, 17 and 18 can be upgraded automatically/,
     );
     assert.deepEqual(await readFile(path), before);
   }
@@ -61,7 +61,7 @@ test("a real v16 memory schema upgrades while preserving facts, settings, and ex
 
   const store = new SqliteMemoryItemStore(path);
   try {
-    assert.equal(store.schemaVersion(), 18);
+    assert.equal(store.schemaVersion(), 19);
   } finally {
     store.close();
   }
@@ -130,7 +130,7 @@ function assertCurrentTables(path: string) {
       .prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
       .all()
       .map((row) => row.name);
-    assert.equal(names.length, 29);
+    assert.equal(names.length, 32);
     assert.ok(names.includes("execution_learning_native_facts"));
     assert.equal(names.includes("execution_lesson_candidates"), false);
     assert.ok(names.includes("memory_settings"));
