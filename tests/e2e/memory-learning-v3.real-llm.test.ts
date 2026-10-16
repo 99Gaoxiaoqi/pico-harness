@@ -748,11 +748,12 @@ for (const variant of [0, 1]) {
       f.controlledFixtures.push(
         "The input checker initially requires a missing config file. The actual model runs, diagnoses, repairs and verifies it; only the initial missing fixture is controlled.",
         "This fixture validates the supported native-scope single-command entry. The original model bash check command must equal the specified command exactly; earlier compound-entry failure evidence is preserved. Host reporter/cwd instrumentation is checked through the same toolCallId, not mistaken for model-added shell syntax.",
+        "read_file is available to inspect the actual existing checker after failure, so exact bash checks do not force config-field guessing. Prior source timeout/budget failures remain preserved; no expected field or marker is supplied in the prompt.",
       );
       const source = await f.run(
         "source",
-        `完成 Scope${variant} 验收：首次 bash 调用的 command 字段必须逐字等于 "${command}"，不得添加 pwd、ls、&& 或任何前后缀，cwd 由 Host 提供；根据实际失败信息，仅用 write_file 修复 ${config}；随后复测的 bash command 字段也必须逐字等于 "${command}"，检查通过即结束。不得修改 ${checkFile}。`,
-        { tools: ["memory_extract", "memory_search", "bash", "write_file"] },
+        `完成 Scope${variant} 验收：首次 bash 调用的 command 字段必须逐字等于 "${command}"，不得添加 pwd、ls、&& 或任何前后缀，cwd 由 Host 提供；失败后用 read_file 读取现存 ${checkFile} 的实际要求，再根据失败信息仅用 write_file 修复 ${config}；随后复测的 bash command 字段也必须逐字等于 "${command}"，检查通过即结束。不得修改 ${checkFile}。`,
+        { tools: ["memory_extract", "memory_search", "read_file", "bash", "write_file"] },
       );
       const originalBashCalls = source.events
         .flatMap((event) =>
@@ -798,6 +799,32 @@ for (const variant of [0, 1]) {
           "exact native check calls require actual failure then successful rerun",
         );
       }
+      const checkerRead = source.events
+        .flatMap((event) =>
+          event.kind === "message.committed" ? (event.data.message.toolCalls ?? []) : [],
+        )
+        .find((call) => {
+          if (call.name !== "read_file") return false;
+          const path = (JSON.parse(call.arguments) as { path?: unknown }).path;
+          return path === checkFile || path === join(f.workDir, checkFile);
+        });
+      assert.ok(checkerRead, "source must inspect the actual checker through read_file");
+      const failedCheckIndex = source.events.findIndex(
+        (event) => event.kind === "tool.result.recorded" && event.refs.toolCallId === firstCheck.id,
+      );
+      const checkerReadIndex = source.events.findIndex(
+        (event) =>
+          event.kind === "tool.result.recorded" &&
+          event.refs.toolCallId === checkerRead.id &&
+          event.data.status === "succeeded",
+      );
+      const repairIndex = source.events.findIndex(
+        (event) => event.kind === "tool.started" && event.data.toolName === "write_file",
+      );
+      assert.ok(
+        failedCheckIndex < checkerReadIndex && checkerReadIndex < repairIndex,
+        "actual checker read must durably succeed after failure and before config repair",
+      );
       const sourceCommands = source.events.filter(
         (event) => event.kind === "tool.result.recorded" && event.data.toolName === "bash",
       );
@@ -861,8 +888,8 @@ for (const variant of [0, 1]) {
       await writeFile(join(f.workDir, checkFile), checker(`${f.marker}CHANGED`));
       const changed = await f.run(
         "changed",
-        `完成 Scope${variant} 验收，入口 ${command}。读取实际要求，按当前检查修复 ${config} 后原样复测；不得改检查入口。`,
-        { tools: ["memory_extract", "memory_search", "bash", "write_file"] },
+        `完成 Scope${variant} 验收，入口 ${command}。先用 read_file 读取 ${checkFile} 的实际要求，按当前检查修复 ${config} 后运行同一命令 ${command}；不得修改 ${checkFile} 或检查入口。`,
+        { tools: ["memory_extract", "memory_search", "read_file", "bash", "write_file"] },
       );
       assert.equal(
         await f.useFor(method, changed.sessionId),
@@ -879,7 +906,7 @@ for (const variant of [0, 1]) {
       const valid = await f.run(
         "valid",
         `完成 Scope${variant} 验收，运行 ${command} 并报告已核实的结果。可参考同一项目的 Scope${variant} 排障方法。`,
-        { tools: ["memory_extract", "memory_search", "bash", "write_file"] },
+        { tools: ["memory_extract", "memory_search", "read_file", "bash", "write_file"] },
       );
       const use = await f.useFor(method, valid.sessionId);
       assert.ok(
@@ -915,7 +942,7 @@ for (const variant of [0, 1]) {
       const after = await f.run(
         "after-correction",
         `完成 Scope${variant} 验收，运行 ${command} 并报告结果。`,
-        { tools: ["memory_extract", "memory_search", "bash", "write_file"] },
+        { tools: ["memory_extract", "memory_search", "read_file", "bash", "write_file"] },
       );
       assert.equal(
         await f.useFor(method, after.sessionId),
