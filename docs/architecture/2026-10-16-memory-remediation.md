@@ -1,8 +1,8 @@
 # Pico 记忆整改：集成候选的行为与验证边界
 
-核对日期：2026-10-16；生产接线核对基线为集成候选 `9336f6f0`，实际范围调用槽按最终 Schema v20 收口说明。本文不是已发布版本或全部验收完成的声明。本文替代旧[架构说明](14-workspace-memory.md)和[技术长文](../pico-memory-technical-guide.md)中的当前状态、Schema、恢复和召回说明；旧文保留为历史快照。
+核对日期：2026-10-16；生产接线与性能测量基线为 Schema v20 集成候选 `2a8be62f31cd128fc1f9955cbf6d88d6808cae78`。本文不是已发布版本或全部验收完成的声明。本文替代旧[架构说明](14-workspace-memory.md)和[技术长文](../pico-memory-technical-guide.md)中的当前状态、Schema、恢复和召回说明；旧文保留为历史快照。
 
-本轮保留用户级 SQLite、原始事件来源、事实与经验分层、版本检查和删除屏障。主要改变是：自动整理只做可证明的无损重复归档；新写入统一个人信息准入；续接问题可以找到原任务检索锚点；案例有独立身份与实际请求证据；持久待办、已登记工作区恢复、可失效候选缓存与单一本地词法索引已接入生产路径。受控恢复回归已通过；新增实际范围预算槽的最终组合及真实模型行为仍须分别验收。
+本轮保留用户级 SQLite、原始事件来源、事实与经验分层、版本检查和删除屏障。主要改变是：自动整理只做可证明的无损重复归档；新写入统一个人信息准入；续接问题可以找到原任务检索锚点；案例有独立身份与实际请求证据；持久待办、已登记工作区恢复、可失效候选缓存与单一本地词法索引已接入生产路径。受控恢复回归已通过；实际范围预算与有限模型脚本的同候选结果见交付验收记录，不能据此推导自然学习或所有意图的质量。
 
 ## 已实现与尚未验收
 
@@ -10,12 +10,12 @@
 | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
 | 无损重复整理、统一新写入安全准入                                          | 已实现，已有真实临时 SQLite＋脚本模型回归；没有批量改写历史数据                                               |
 | 查询续接锚点、本地有限别名、旧候选发现、方法/case trace                   | 已接线，已有本地确定性回归；检索成功不能推导采用或验证成功                                                    |
-| 持久提取待办、源事件 reconciliation、跨登记工作区启动 helper、任务观测 UI | 已接线，未到期待办、租约到期、撤权、删除与关停回归通过；v20 实际范围共享调用槽的最终组合仍待验收              |
+| 持久提取待办、源事件 reconciliation、跨登记工作区启动 helper、任务观测 UI | 已接线，未到期待办、租约到期、撤权、删除与关停回归通过；v20 将实际范围调用槽跨 job/重领/重启共享              |
 | 候选缓存                                                                  | 生产 Store 已提供独立持久 revision，Builder 按 revision 启用缓存；跨连接修改/删除仍重验，不缓存授权或最终正文 |
 | 单一本地词法索引                                                          | v19 已接入生产 Schema/Store；独立旧扫描 oracle 与实际生产路径等价性回归通过，已有真实生产候选测量             |
-| 真实模型验收                                                              | 尚未执行；已有受控 E2E 脚本。脚本存在、类型检查或默认跳过均不等于真实模型验收通过                             |
+| 真实模型验收                                                              | 有限脚本及同候选结果见交付验收记录；脚本存在、类型检查或默认跳过不等于通过，也不证明自然学习/全意图质量       |
 
-Schema 由 storage 单一所有者维护，最终组合正收口为 v20：v17 引入持久提取 jobs，v18 增加独立 revision，v19 接入词法索引，v20 将调用预算绑定到实际处理范围的 operationId 槽。v20 新增预算表后的最终组合检查与性能复测仍待完成。旧文的 v9/九表或 v13/26表不代表现状；实际打开与迁移以 [atomic-memory-schema.ts](../../packages/storage/src/sqlite/atomic-memory-schema.ts) 的最终组合为准，不能手动修改 user_version 代替迁移。
+Schema 由 storage 单一所有者维护，当前集成候选为 v20：v17 引入持久提取 jobs，v18 增加独立 revision，v19 接入词法索引，v20 将调用预算绑定到实际处理范围的 operationId 槽。v20 新增预算表后的生产性能已单独复测；预算、恢复与迁移的同候选验证范围见交付验收记录。旧文的 v9/九表或 v13/26表不代表现状；实际打开与迁移以 [atomic-memory-schema.ts](../../packages/storage/src/sqlite/atomic-memory-schema.ts) 的最终组合为准，不能手动修改 user_version 代替迁移。
 
 实验版本 v17–v19 的活动 job 若无法可靠重构已经花费的范围/调用身份，迁移保守标为 blocked，不能猜测余额并继续调用。真实升级基线 v16 尚不存在这些活动 job 状态，不受该实验状态兼容分支影响。此规则不批量删除已保存的 Item，也不重新授予源准入。
 
@@ -48,7 +48,7 @@ Schema 由 storage 单一所有者维护，最终组合正收口为 v20：v17 �
 
 受控合成 SQLite 回归已验证：A 的合法源 terminal→job 窗口、B 重启时尚未到期待办在无新输入下自动恢复；未过期外部租约不抢占，到期以新 fence 唤醒；关闭前停止后续 claim，已开始模型与 lease disposal 会被等待；当前撤权、自动开关和删除代次阻断旧工作。此前 pending job 缺唤醒的问题已修复，不再作为当前已知失败。空登记列表不申请无用 daemon residency。
 
-每范围的调用预算不能仅靠 job 计数。v20 将实际模型调用槽绑定到稳定 operationId：初始处理范围最多3次，失败后的同一固定恢复范围最多额外3次；跨 job、重领与重启共享对应槽，不能每换一个 job 就重置。proposal、localized、canonicalize、失败尝试都占用额度；不允许扩大/改写恢复范围来重新取得额度。源证据、operationId、花费身份不能可靠重构时暂停，不推定存在未花费预算。恢复 helper 不另造第二套 timer 或无限重试；v20 最终组合验证仍须完成，现有本地回归不等于真实进程故障注入或真实模型验收。
+每范围的调用预算不能仅靠 job 计数。v20 将实际模型调用槽绑定到稳定 operationId：初始处理范围最多3次，失败后的同一固定恢复范围最多额外3次；跨 job、重领与重启共享对应槽，不能每换一个 job 就重置。proposal、localized、canonicalize、失败尝试都占用额度；不允许扩大/改写恢复范围来重新取得额度。源证据、operationId、花费身份不能可靠重构时暂停，不推定存在未花费预算。恢复 helper 不另造第二套 timer 或无限重试；预算与恢复的同候选验证范围见交付验收记录；本地回归不等于真实进程故障注入或自然学习行为证明。
 
 ## 程序可以归档哪些内容
 
@@ -90,28 +90,28 @@ superseded、stale、low_value 不自动执行。updatedAt 是编辑时间，不
 
 索引是同一 SQLite 的 path/token/CJK posting，复用原词法与分数，不使用默认 FTS 分词或向量库。写/删/归档在原事务中清旧 posting、标记 dirty；查询以当前 scope/lifecycle JOIN 并同步 flush，最多命中项再做原评分复核。未知 query 形态、缺表/损坏/写入失败或复核不符，显式回退原扫描，不能吞成权威无命中。DDL/迁移、Store revision 与生产查询接线均由 storage 单一所有者实现；正常打开不重建健康索引。
 
-性能必须分完整 cold、首次不同 query 与重复 query。正式生产候选 `21b0bb0bd9b1c75453790774e3b2d5b40af1bf1d`（基于 v19 接线）在本机 macOS arm64/Node 26.7.0、同一固定合成 fixture 上，直接使用默认生产 Store/Builder 测量，没有外部 revision/index wrapper，也没有提前建好索引：
+性能必须分完整 cold、首次不同 query 与重复 query。正式生产候选 `2a8be62f31cd128fc1f9955cbf6d88d6808cae78`（Schema v20）在本机 macOS arm64/Node 26.7.0、同一固定合成 fixture 上，直接使用默认生产 Store/Builder 测量，没有外部 revision/index wrapper，也没有提前建好索引：
 
-| 合成 facts | 完整 cold | 首次40个不同query正文 p95 | 首次40个完整build p95 | 重复160个完整build p95 | 逻辑库大小 |
+| 合成 facts | 完整 cold | 首次40个不同query正文 p95 | 首次40个完整build p95 | 全部200个完整build p95 | 逻辑库大小 |
 | ---------: | --------: | ------------------------: | --------------------: | ---------------------: | ---------: |
-|         1k |  259.68ms |                   31.15ms |               75.60ms |                66.79ms |    8.75MiB |
-|        10k |    1.211s |                   95.12ms |              139.94ms |                68.93ms |   82.45MiB |
-|        50k |    6.903s |                  427.96ms |              471.15ms |                67.50ms |  409.51MiB |
+|         1k |  211.52ms |                   32.21ms |               79.45ms |                70.92ms |    8.77MiB |
+|        10k |    1.400s |                   91.91ms |              135.22ms |                85.10ms |   82.50MiB |
+|        50k |    7.330s |                  409.63ms |              454.85ms |                74.53ms |  408.72MiB |
 
-10k/50k首次正文检索 p95 达到主方案纯检索100/500ms目标；10k完整 Builder p95 约140ms，不能声称完整链路也达到100ms。后160次重复 query 没有再调用 contentSearch；旧全正文评分循环扫描数均为0，不代表索引不访问 SQL 或不复核原文。真实写/删后的下一次 build 重新发现候选，新增可见、删除不可见。
+10k/50k首次正文检索 p95 达到主方案纯检索100/500ms目标；10k完整 Builder p95 约135ms，不能声称完整链路也达到100ms。全部200次指标包含160次重复 query，不能冒充首次发现性能。后160次重复 query 没有再调用 contentSearch；旧全正文评分循环扫描数均为0，不代表索引不访问 SQL 或不复核原文。真实写/删后的下一次 build 均重新调用 contentSearch 1次，新增可见、删除不可见。
 
-50k完整首次读取仍需约6.9秒，其中 contentSearch（含当场 dirty flush、查询及等待）约6.795秒，不能把该值说成精确纯初建时间。同步初建会阻塞召回并持有写事务，其他连接可能遇 busy timeout；这是已知的一次性成本。50k旧基准库约231.36MiB，生产索引候选约409.51MiB，空间开销明显。测量末尾 WAL 为0不等于测过 WAL 峰值，RSS也不是缓存/索引净内存。
+50k完整首次读取仍需约7.330秒，其中 contentSearch（含当场 dirty flush、查询及等待）约7.222秒，不能把该值说成精确纯初建时间。同步初建会阻塞召回并持有写事务，其他连接可能遇 busy timeout；这是已知的一次性成本。50k旧基准库约231.36MiB，生产索引候选约408.72MiB，空间开销明显。测量末尾 WAL 为0不等于测过 WAL 峰值；50k峰值 RSS约350.20MiB，包含 seed、tokenizer及整个进程，不是缓存/索引净内存。
 
-早期 wrapper 的约16秒初建仅属诊断，不再作为最终生产数字。此次正式测量是本机、固定语料的一次采样，不外推其他机器或真实用户分布；达到既定目标后不继续增加索引或调参。**v20 实际范围预算表加入后仍待最终生产复测**，不能把 v19 候选数字直接标成 v20 的最终测量。
+Schema v19 候选 `21b0bb0b` 的测量与早期 wrapper 约16秒初建只留作历史对照，不替代当前 v20 结果；计时与库大小波动也不能归因为预算表带来优化。此次正式测量是本机、固定语料的一次采样，不外推其他机器或真实用户分布；达到既定目标后不继续增加索引或调参。本轮 v20 已按相同 fixture 完成必要生产复测，不以性能达标替代模型行为验收。
 
-基准入口见 [scripts/eval/README.md](../../scripts/eval/README.md)，默认不调用模型或用户库。本轮交付 `performance/final-production.md`、`final-production-21b0bb0b.json` 与对应源码 SHA256 文件保留测量候选、全部样本、fixture/query hash、写删失效和限制；旧基准为 `baseline-6859241a.json`。
+基准入口见 [scripts/eval/README.md](../../scripts/eval/README.md)，默认不调用模型或用户库。本轮交付 `performance/final-production.md`、`final-production-v20-2a8be62f.json` 与对应源码 SHA256 文件保留测量候选、全部样本、fixture/query hash、写删失效和限制；旧基准为 `baseline-6859241a.json`。
 
 ## 验收入口与仍然存在的边界
 
 - [无损重复回归](../../tests/integration/memory/atomic-memory-consolidation.test.ts)、[新写入PII回归](../../tests/integration/memory/atomic-memory-pii-admission.test.ts)。
 - [续接查询](../../tests/integration/memory/memory-recall-query.test.ts)、[候选覆盖](../../tests/integration/memory/recall-coverage-improvements.test.ts)、[case trace](../../tests/integration/memory/case-recall-trace.test.ts)、[Host接线](../../tests/integration/memory/case-recall-host.test.ts)。
-- [跨登记workspace恢复与屏障](../../tests/integration/memory/atomic-memory-recovery-host.test.ts)：未到期待办、租约、撤权、删除及关停矩阵已通过；仍需检查 v20 新预算槽的最终组合。
-- [候选缓存](../../tests/integration/memory/recall-candidate-cache.test.ts)、[索引等价性](../../tests/integration/memory/memory-content-index.test.ts)；已接线生产路径，并有 v19 正式测量；v20 预算表加入后的最终性能结果待补。
-- [受控真实模型脚本](../../tests/e2e/memory-remediation.real-llm.test.ts)：尚未执行，需显式开关和候选 SHA，范围有限；默认 skip 不是验收通过，亦不代表自然语言意图触发质量已全面评估。
+- [跨登记workspace恢复与屏障](../../tests/integration/memory/atomic-memory-recovery-host.test.ts)：未到期待办、租约、撤权、删除及关停矩阵已通过；预算槽及恢复的同候选验证范围见交付验收记录。
+- [候选缓存](../../tests/integration/memory/recall-candidate-cache.test.ts)、[索引等价性](../../tests/integration/memory/memory-content-index.test.ts)；已接线生产路径，并有 v20 同语料正式测量，原始样本和限制见交付性能记录。
+- [受控真实模型脚本](../../tests/e2e/memory-remediation.real-llm.test.ts)：需显式开关和候选 SHA，范围有限；同候选结果见交付验收记录。默认 skip 不是通过，有限脚本也不等于自然学习/全意图质量证明。
 
 本轮不引入语义检索、无限重试、任意目录发现、成功任务全自动反思、新的整库内容版本系统或实际用户库批量改写。日期、引文、规则和准入降低错误风险，仍不能保证模型概括完全正确；词法召回可能漏掉大幅同义改写。恢复可靠性、真实模型行为与性能分别验收，不能用其中一项替代其他项。
