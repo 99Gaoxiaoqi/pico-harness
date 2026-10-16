@@ -747,12 +747,57 @@ for (const variant of [0, 1]) {
       await writeFile(join(f.workDir, checkFile), checker(f.marker));
       f.controlledFixtures.push(
         "The input checker initially requires a missing config file. The actual model runs, diagnoses, repairs and verifies it; only the initial missing fixture is controlled.",
+        "This fixture validates the supported native-scope single-command entry. The original model bash check command must equal the specified command exactly; earlier compound-entry failure evidence is preserved. Host reporter/cwd instrumentation is checked through the same toolCallId, not mistaken for model-added shell syntax.",
       );
       const source = await f.run(
         "source",
-        `完成 Scope${variant} 验收：先运行 ${command}；根据实际失败信息，仅用 write_file 修复 ${config}；然后原样复测同一个命令，检查通过即结束。不得修改 ${checkFile}。`,
+        `完成 Scope${variant} 验收：首次 bash 调用的 command 字段必须逐字等于 "${command}"，不得添加 pwd、ls、&& 或任何前后缀，cwd 由 Host 提供；根据实际失败信息，仅用 write_file 修复 ${config}；随后复测的 bash command 字段也必须逐字等于 "${command}"，检查通过即结束。不得修改 ${checkFile}。`,
         { tools: ["memory_extract", "memory_search", "bash", "write_file"] },
       );
+      const originalBashCalls = source.events
+        .flatMap((event) =>
+          event.kind === "message.committed" ? (event.data.message.toolCalls ?? []) : [],
+        )
+        .filter((call) => call.name === "bash")
+        .map((call) => ({
+          id: call.id,
+          command: (JSON.parse(call.arguments) as { command?: unknown }).command,
+        }));
+      const firstCheck = originalBashCalls[0],
+        lastCheck = originalBashCalls.at(-1);
+      assert.ok(firstCheck && lastCheck, "source requires original model check calls");
+      assert.equal(
+        firstCheck.command,
+        command,
+        "unsupported original native check entry: first model bash command must match exactly",
+      );
+      assert.equal(
+        lastCheck.command,
+        command,
+        "unsupported original native check entry: model rerun command must match exactly",
+      );
+      assert.notEqual(firstCheck.id, lastCheck.id, "source requires a distinct actual rerun");
+      for (const [check, expectedExit] of [
+        [firstCheck, 1],
+        [lastCheck, 0],
+      ] as const) {
+        assert.ok(
+          source.events.some(
+            (event) => event.kind === "tool.started" && event.refs?.toolCallId === check.id,
+          ),
+          "original model check must bind to a canonical actual tool start",
+        );
+        assert.ok(
+          source.events.some(
+            (event) =>
+              event.kind === "tool.result.recorded" &&
+              event.refs.toolCallId === check.id &&
+              isForegroundProcessFacts(event.data.executionFacts) &&
+              event.data.executionFacts.exitCode === expectedExit,
+          ),
+          "exact native check calls require actual failure then successful rerun",
+        );
+      }
       const sourceCommands = source.events.filter(
         (event) => event.kind === "tool.result.recorded" && event.data.toolName === "bash",
       );

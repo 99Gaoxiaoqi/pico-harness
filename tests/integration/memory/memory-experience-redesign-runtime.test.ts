@@ -257,7 +257,29 @@ test("无工具方法由明确来源成为建议；未支持因果的输出留�
       pollMs: 60_000,
       validateTaskExperienceSources: async () => true,
       taskExperienceModelFactory: async () => ({
-        model: { call: async () => (kind === "skip" ? '{"representation":"skip"}' : proposal()) },
+        model: {
+          call: async ({ prompt }) => {
+            assert.match(
+              prompt,
+              /every tool named in applicability\.toolNames must have a cited tool-result evidence ID/,
+            );
+            assert.match(
+              prompt,
+              /failure-recovery method must cite the actual failure, concrete change and subsequent result/,
+            );
+            assert.match(
+              prompt,
+              /earlier tool actions or a frozen check scope must cite those earlier tool-result IDs/,
+            );
+            assert.match(prompt, /do not rewrite such a method as tool-free or scope-free/);
+            assert.match(
+              prompt,
+              /genuinely tool-free method may rely only on a concrete useful-method user statement/,
+            );
+            assert.match(prompt, /Case or skip remains valid/);
+            return kind === "skip" ? '{"representation":"skip"}' : proposal();
+          },
+        },
         dispose() {},
       }),
     });
