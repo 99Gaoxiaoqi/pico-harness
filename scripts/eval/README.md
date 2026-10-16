@@ -26,3 +26,17 @@ tests/e2e/code-mode-selection.real-llm.test.ts
 ```sh
 node --import tsx --test tests/integration/engineering/eval-experiment.test.ts
 ```
+
+## Atomic Memory 本地召回基准
+
+先在当前 checkout 安装依赖并构建，避免链接到其他 worktree 的旧 dist：
+
+```sh
+npm ci --ignore-scripts
+npm run build:core && npm run build:storage && npm run build:runtime
+node scripts/eval/atomic-memory-recall-benchmark.mjs > /tmp/memory-recall-benchmark.json
+```
+
+默认每个独立子进程创建临时 SQLite：1k/10k/50k facts（80% 当前 workspace、10% 其他 workspace、10% global），另加 20 个经真实 API 审批的方法和 20 个案例。每个规模固定 40 个 query，先单列首次 build（包括 tokenizer 冷启动），再串行重复 5 轮；没有预热剔除，也不读取用户 DB 或调用模型。`MEMORY_BENCHMARK_SIZES=1000` 可运行相同采样规则的快速检查。
+
+输出保留全部样本、fixture/query SHA-256、总 build 与 content search 的 p50/p95、SQLite 正文评分实际遍历行数、key/resident 返回行数、RSS 高水位和临时 DB 大小。content search 时间包含生产 Store 调用等待，不等于整个 build；正文扫描计数通过包装原有 SQLite `iterate` 观察生产全正文评分 SQL，不把 top-100 返回行数当作全表扫描量。case 保存在真实 Store 中，不冒充可投递 method。fixture hash 覆盖确定性输入（不含 Store 随机 ID）；冷启动是新进程首次 build，OS 文件页缓存不受控。计时保留统计结果供验收比较，不因机器性能不同而让脚本退出失败；结果内容和 token 预算有断言。临时数据库在完成后删除。
