@@ -270,7 +270,7 @@ test("风险审核隔离高风险、范围不清与冲突来源；明确低风�
       store: store.taskExperiences,
       workspaceKey: "workspace",
       workDir: "/fixture",
-      query: "核对配置输入",
+      query: "核对表格配置输入求和范围",
       now: 1000,
       toolAllowed: () => true,
     };
