@@ -26,6 +26,7 @@ export interface ReplayInput {
   readonly variant: number;
   readonly root: string;
   readonly marker: string;
+  readonly frozenAt: number;
   readonly reportPath: string;
 }
 
@@ -42,7 +43,7 @@ async function run(input: ReplayInput): Promise<void> {
   const activeDir = input.scenario === "scope" ? otherDir : workDir;
   const key = resolvePicoPaths(workDir, { picoHome }).workspace.id;
   const store = new SqliteMemoryItemStore(join(picoHome, "memory.sqlite"));
-  const now = Date.now();
+  const now = input.frozenAt;
   const modern = store.schemaVersion() >= 16;
   const title = `回放专题${input.variant}`;
   const fact = async (content: string, operationId: string) => {
@@ -287,6 +288,7 @@ async function run(input: ReplayInput): Promise<void> {
       seed: "controlled frozen evidence fixture",
       route: model.route.id,
       promptHash: createHash("sha256").update(prompt).digest("hex"),
+      frozenAt: input.frozenAt,
       marker: input.marker,
       initialMemoryContainsMarker: memoryBlocks.some((block) => block.includes(input.marker)),
       anyRequestContainsMarker: requests.some((messages) =>

@@ -31,6 +31,7 @@ runTest(
     for (const scenario of scenarios)
       for (const variant of [1, 2]) {
         const marker = `Replay${scenario}${variant}${randomUUID().replaceAll("-", "").slice(0, 12)}`;
+        const frozenAt = Date.now();
         // Rotate the condition order; no run reads another condition's answer or mutable DB.
         const arms =
           variant === 1
@@ -43,7 +44,15 @@ runTest(
           const inputPath = join(root, `${task}.input.json`);
           await writeFile(
             inputPath,
-            JSON.stringify({ scenario, variant, arm, root: taskRoot, marker, reportPath }),
+            JSON.stringify({
+              scenario,
+              variant,
+              arm,
+              root: taskRoot,
+              marker,
+              frozenAt,
+              reportPath,
+            }),
           );
           const codeRoot = arm === "baseline" ? baseline : current;
           try {
