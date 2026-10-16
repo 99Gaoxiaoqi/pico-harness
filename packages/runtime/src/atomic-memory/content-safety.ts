@@ -25,11 +25,15 @@ const CARD_CANDIDATE_RE = /(?<!\d)(?:\d[ -]?){13,19}(?!\d)/gu;
 
 const INJECTION_PATTERNS = [
   /\bignore\s+(?:all\s+)?(?:previous|prior|above)\s+(?:instructions?|rules?|prompts?)\b/iu,
+  /\b(?:ignore|disregard|override)\b.{0,24}\b(?:system|developer)(?:['’]s)?\s+(?:instructions?|rules?|prompts?|messages?)\b/iu,
   /\b(?:reveal|show|leak|print)\b.{0,30}\b(?:system\s+prompt|developer\s+message|hidden\s+instructions?)\b/iu,
   /\b(?:bypass|disable|override)\b.{0,24}\b(?:safety|guardrails?|policy)\b/iu,
+  /\bwithout\s+(?:(?:the|explicit|prior)\s+)?(?:user(?:['’]s)?\s+)?(?:authorization|authorisation|permission|approval|confirmation)\b/iu,
   /忽略.{0,20}(?:之前|上面|所有).{0,20}(?:指令|规则|提示)/iu,
+  /(?:忽略|无视|覆盖).{0,16}(?:系统|开发者).{0,8}(?:指令|规则|提示|消息)/iu,
   /(?:泄露|显示|输出).{0,24}(?:系统提示|开发者消息|隐藏指令)/iu,
   /(?:绕过|关闭|覆盖).{0,20}(?:安全|防护|策略)/iu,
+  /(?:未经|无需|不经|不需要).{0,8}用户.{0,4}(?:授权|许可|批准|确认)/iu,
 ] as const;
 const TOOL_ACTION_PATTERNS = [
   /\b(?:call|invoke|execute|run)\b.{0,20}\b(?:tool|command|shell)\b/iu,
