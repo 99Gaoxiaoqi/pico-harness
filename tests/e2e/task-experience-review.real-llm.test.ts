@@ -75,7 +75,7 @@ class LearningFixtureRuntime extends AgentRuntime {
 }
 
 enabledTest(
-  "low-risk Excel method enters restricted trial and one real-model verified reuse enables it",
+  "low-risk Excel method remains a bounded suggestion after one real-model verified reuse",
   { timeout: 360_000 },
   async (t) => {
     const model = await loadUserDefaultRealModel();
@@ -249,6 +249,7 @@ enabledTest(
           createRuntimeRequest("memory.learning.query", {
             workspacePath,
             sessionId: sourceSession,
+            learningVersion: 3,
           }),
         ),
       );
@@ -256,11 +257,12 @@ enabledTest(
       if (trial) break;
       await new Promise((resolve) => setTimeout(resolve, 1000));
     }
-    assert.ok(trial, "canonical correction did not produce a restricted automatic trial");
+    assert.ok(trial, "canonical correction did not produce a bounded automatic suggestion");
     assert.equal(trial.validation, "unknown");
     assert.equal(trial.review, "unneeded", trial.reviewReason);
     assert.equal(trial.enabled, true);
-    assert.equal(trial.maturity, "trial");
+    assert.equal(trial.representation, "method");
+    assert.equal(trial.usagePolicy, "suggestion");
     assert.equal(trial.risk, "low");
     assert.ok(trial.itemId);
     assert.ok(
@@ -367,13 +369,24 @@ enabledTest(
         createRuntimeRequest("memory.learning.detail", {
           workspacePath,
           candidateId: trial.candidateId,
+          learningVersion: 3,
         }),
       ),
     );
     assert.equal(promoted.candidate?.review, "unneeded");
-    assert.equal(promoted.candidate?.maturity, "active");
-    assert.equal(promoted.candidate?.promotionReason, "deterministic_validation");
-    assert.equal(promoted.candidate?.positiveReuseCount, 1);
+    assert.equal(promoted.candidate?.representation, "method");
+    assert.equal(promoted.candidate?.usagePolicy, "suggestion");
+    assert.equal(promoted.candidate?.enabled, true);
+    assert.ok(
+      promoted.candidate?.evidenceSummary?.results.some(
+        (result) => result.scope === "spreadsheet-range" && result.validation === "pass",
+      ),
+    );
+    assert.ok(
+      promoted.candidate?.requiredConditions?.some(
+        (condition) => condition.kind === "spreadsheet-range",
+      ),
+    );
     const paths = resolvePicoPaths(workspacePath, { picoHome });
     const events = new SqliteRuntimeEventStore({ storageRoot: paths.workspace.root });
     try {
