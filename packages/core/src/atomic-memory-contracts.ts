@@ -212,6 +212,7 @@ export interface SettleMemoryExtractionFailureRequest {
   readonly failureClass: MemoryExtractionFailureClass;
   readonly trigger: "remember" | "extract" | "compaction";
   readonly compactionCheckpointId?: string;
+  readonly jobClaim?: MemoryExtractionJobClaim;
 }
 
 export type SettleMemoryExtractionFailureResult =
@@ -371,6 +372,52 @@ export interface CommitMemoryExtractionRequest {
   readonly compactionCheckpointId?: string;
   /** Observations never participate in business idempotency or cursor authority. */
   readonly summary?: Pick<MemoryExtractionSummary, "modelCallCount" | "durationMs">;
+  readonly jobClaim?: MemoryExtractionJobClaim;
+}
+
+export type MemoryExtractionJobState = "pending" | "working" | "settled" | "blocked";
+
+export interface MemoryExtractionJob {
+  readonly jobId: string;
+  readonly sessionId: string;
+  readonly workspaceKey: string;
+  readonly workDir: string;
+  readonly sourceEventId: string;
+  readonly sourceKind: "terminal" | "checkpoint" | "explicit";
+  readonly sourceOrdinal: number;
+  readonly throughOrdinal: number;
+  readonly trigger: "remember" | "extract" | "compaction";
+  readonly compactionCheckpointId?: string;
+  readonly deletionRevision: number;
+  readonly settingsVersion: number;
+  readonly state: MemoryExtractionJobState;
+  readonly notBefore: number;
+  readonly ownerId?: string;
+  readonly leaseUntil?: number;
+  readonly fencingToken: number;
+  readonly modelCalls: number;
+  readonly reason?: string;
+}
+
+export interface MemoryExtractionJobClaim extends MemoryExtractionJob {
+  readonly ownerId: string;
+  readonly leaseUntil: number;
+}
+
+export interface EnqueueMemoryExtractionJobRequest {
+  readonly jobId: string;
+  readonly sessionId: string;
+  readonly workspaceKey: string;
+  readonly workDir: string;
+  readonly sourceEventId: string;
+  readonly sourceKind: "terminal" | "checkpoint" | "explicit";
+  readonly sourceOrdinal: number;
+  readonly throughOrdinal: number;
+  readonly trigger: "remember" | "extract" | "compaction";
+  readonly compactionCheckpointId?: string;
+  readonly deletionRevision: number;
+  readonly settingsVersion: number;
+  readonly notBefore: number;
 }
 
 export type MemoryMutationOutcome = "created" | "updated" | "archived" | "restored" | "noop";
@@ -461,6 +508,25 @@ export interface MemoryItemStore {
   searchByKeys(request: SearchMemoryItemsByKeyRequest): Promise<readonly MemoryItemRecord[]>;
   searchByContent(request: SearchMemoryItemsByContentRequest): Promise<readonly MemoryItemRecord[]>;
   readOperation(operationId: string): Promise<MemoryWriteOperationResult | undefined>;
+  enqueueExtractionJob(request: EnqueueMemoryExtractionJobRequest): Promise<MemoryExtractionJob>;
+  claimExtractionJob(input: {
+    readonly jobId: string;
+    readonly ownerId: string;
+    readonly now: number;
+    readonly leaseDurationMs: number;
+  }): Promise<MemoryExtractionJobClaim | undefined>;
+  reserveExtractionModelCall(claim: MemoryExtractionJobClaim): Promise<number>;
+  transitionExtractionJob(input: {
+    readonly claim: MemoryExtractionJobClaim;
+    readonly state: "pending" | "blocked";
+    readonly notBefore?: number;
+    readonly reason?: string;
+  }): Promise<void>;
+  listRecoverableExtractionJobs(input: {
+    readonly now: number;
+    readonly limit?: number;
+  }): Promise<readonly MemoryExtractionJob[]>;
+  readExtractionJob(jobId: string): Promise<MemoryExtractionJob | undefined>;
 }
 
 export type MemoryItemStoreConflictReason =

@@ -45,6 +45,7 @@ export interface MemoryExtractionSnapshot {
   readonly deletionRevision: number;
   readonly settingsVersion?: number;
   readonly trigger: "remember" | "extract" | "compaction";
+  readonly sourceKind?: "terminal" | "checkpoint" | "explicit";
   /** Composite workspace/session identity used by cursors and provenance. */
   readonly sessionId: string;
   readonly workspaceKey: string;
