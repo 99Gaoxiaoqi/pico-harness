@@ -327,6 +327,21 @@ export class AtomicMemoryRuntime {
       if (!settings.enabled) return unavailable("memory_disabled");
       if (snapshot.signal?.aborted) return unavailable("aborted");
       if (!lastUser) return unavailable("source_unavailable");
+      if (snapshot.deletionRevision !== (await store.readDeletionRevision()))
+        return unavailable("memory_deleted");
+      const referenceOperationId =
+        reference.status === "resolved"
+          ? `memory_reference_${createHash("sha256")
+              .update(
+                JSON.stringify([
+                  snapshot.sessionId,
+                  reference.authorizationEventId,
+                  reference.targetEventId,
+                ]),
+              )
+              .digest("hex")}`
+          : undefined;
+      let replayedReference: Awaited<ReturnType<SqliteMemoryItemStore["readOperation"]>>;
       if (!activeClaim) {
         const jobId = extractionJobId({
           workspaceKey: this.workspaceKey,
@@ -334,34 +349,43 @@ export class AtomicMemoryRuntime {
           sourceEventId: lastUser.eventId,
           trigger: "remember",
         });
-        await store.enqueueExtractionJob({
-          jobId,
-          sessionId: snapshot.sessionId,
-          workspaceKey: this.workspaceKey,
-          workDir: this.options.workDir,
-          sourceEventId: lastUser.eventId,
-          sourceHash: extractionSourceHash(snapshot),
-          sourceKind: "explicit",
-          sourceOrdinal: lastUser.ordinal,
-          throughOrdinal: lastUser.ordinal,
-          trigger: "remember",
-          deletionRevision: snapshot.deletionRevision,
-          settingsVersion: settings.version,
-          modelCallBudget: extractionModelCallBudget(snapshot),
-          notBefore: Date.now(),
-        });
-        activeClaim = await store.claimExtractionJob({
-          jobId,
-          ownerId: extractionWorkerId(),
-          now: Date.now(),
-          leaseDurationMs: 10 * 60_000,
-        });
-        if (!activeClaim) {
-          const existing = await store.readExtractionJob(jobId);
-          if (existing?.state === "pending") this.scheduleRecoveryWake(existing.notBefore);
-          if (existing?.state === "working" && existing.leaseUntil !== undefined)
-            this.scheduleRecoveryWake(existing.leaseUntil);
-          if (existing?.state !== "settled") return unavailable("remember_in_progress");
+        const existingJob = await store.readExtractionJob(jobId);
+        if (existingJob?.state === "settled" && referenceOperationId) {
+          // A repeated tool call can add transcript context while retaining the same
+          // human authorization and target. Replay only an actually committed note;
+          // never reopen a settled job or recreate a corrected/deleted Item.
+          replayedReference = await store.readOperation(referenceOperationId);
+          if (!replayedReference) return unavailable("unavailable");
+        } else {
+          await store.enqueueExtractionJob({
+            jobId,
+            sessionId: snapshot.sessionId,
+            workspaceKey: this.workspaceKey,
+            workDir: this.options.workDir,
+            sourceEventId: lastUser.eventId,
+            sourceHash: extractionSourceHash(snapshot),
+            sourceKind: "explicit",
+            sourceOrdinal: lastUser.ordinal,
+            throughOrdinal: lastUser.ordinal,
+            trigger: "remember",
+            deletionRevision: snapshot.deletionRevision,
+            settingsVersion: settings.version,
+            modelCallBudget: extractionModelCallBudget(snapshot),
+            notBefore: Date.now(),
+          });
+          activeClaim = await store.claimExtractionJob({
+            jobId,
+            ownerId: extractionWorkerId(),
+            now: Date.now(),
+            leaseDurationMs: 10 * 60_000,
+          });
+          if (!activeClaim) {
+            const existing = await store.readExtractionJob(jobId);
+            if (existing?.state === "pending") this.scheduleRecoveryWake(existing.notBefore);
+            if (existing?.state === "working" && existing.leaseUntil !== undefined)
+              this.scheduleRecoveryWake(existing.leaseUntil);
+            if (existing?.state !== "settled") return unavailable("remember_in_progress");
+          }
         }
       }
       if (reference.status === "not_requested") {
@@ -369,27 +393,22 @@ export class AtomicMemoryRuntime {
         if (!jobClaim && activeClaim) await this.finishDirectRememberJob(store, activeClaim);
         return result;
       }
-      const operationId = `memory_reference_${createHash("sha256")
-        .update(
-          JSON.stringify([
-            snapshot.sessionId,
-            reference.authorizationEventId,
-            reference.targetEventId,
-          ]),
-        )
-        .digest("hex")}`;
-      const result = await store.applyMutations({
-        operationId,
-        expectedDeletionRevision: snapshot.deletionRevision,
-        mutations: reference.items.map((item) => ({ type: "create", item })),
-      });
+      const operationId = referenceOperationId!;
+      const result =
+        replayedReference ??
+        (await store.applyMutations({
+          operationId,
+          expectedDeletionRevision: snapshot.deletionRevision,
+          mutations: reference.items.map((item) => ({ type: "create", item })),
+        }));
       if (activeClaim)
         await store.transitionExtractionJob({ claim: activeClaim, state: "settled" });
       const records = await Promise.all(
         result.results.map(({ itemId }) => store!.readItem(itemId)),
       );
       const requestedItems = records.flatMap((record) =>
-        record?.item.lifecycleState === "active"
+        record?.item.lifecycleState === "active" &&
+        (record.item.scopeType === "global" || record.item.scopeKey === this.workspaceKey)
           ? [{ itemId: record.item.itemId, content: record.item.content }]
           : [],
       );

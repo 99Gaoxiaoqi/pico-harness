@@ -121,11 +121,6 @@ test("Runtime saves a host-bound preceding reply exactly once, exposes ambiguity
   assert.equal(notes.length, 1);
   assert.equal(notes[0]!.item.kind, "note");
   assert.equal(notes[0]!.sources.length, 2);
-  await store.deleteItem({
-    itemId: notes[0]!.item.itemId,
-    expectedVersion: 1,
-    operationId: "delete-reference",
-  });
   const replay = new AtomicMemoryRuntime({
     workDir,
     picoHome,
@@ -136,6 +131,73 @@ test("Runtime saves a host-bound preceding reply exactly once, exposes ambiguity
       modelAcquisitions++;
       throw new Error("replay cannot call a model");
     },
+  });
+  await replay.capture([], []);
+  const missingReceipt = t.mock.method(
+    SqliteMemoryItemStore.prototype,
+    "readOperation",
+    async () => undefined,
+  );
+  try {
+    assert.equal(
+      (await replay.remember()).status,
+      "unavailable",
+      "a settled job without the exact mutation receipt cannot authorize another write",
+    );
+    assert.equal((await store.listItems({ workspaceKey })).length, 1);
+  } finally {
+    missingReceipt.mock.restore();
+  }
+  const note = notes[0]!;
+  const corrected = "用户已更正的当前笔记 CurrentNote318。";
+  await store.applyMutations({
+    operationId: "correct-reference",
+    mutations: [
+      {
+        type: "update",
+        itemId: note.item.itemId,
+        expectedVersion: 1,
+        item: { ...note.item, keys: note.keys, sources: note.sources, content: corrected },
+      },
+    ],
+  });
+  await replay.capture([], []);
+  const current = await replay.remember();
+  assert.equal(current.status, "remembered");
+  assert.deepEqual(
+    current.requestedItems.map((item) => item.content),
+    [corrected],
+    "replay reads current content instead of rewriting the original quote",
+  );
+  await store.applyMutations({
+    operationId: "move-reference-scope",
+    mutations: [
+      {
+        type: "update",
+        itemId: note.item.itemId,
+        expectedVersion: 2,
+        item: {
+          ...note.item,
+          keys: note.keys,
+          sources: note.sources,
+          content: corrected,
+          scopeKey: "other-workspace",
+        },
+      },
+    ],
+  });
+  await replay.capture([], []);
+  const moved = await replay.remember();
+  assert.equal(moved.status, "not_applicable");
+  assert.deepEqual(
+    moved.requestedItems,
+    [],
+    "an old receipt cannot expose a note moved to another workspace",
+  );
+  await store.deleteItem({
+    itemId: note.item.itemId,
+    expectedVersion: 3,
+    operationId: "delete-reference",
   });
   await replay.capture([], []);
   const replayed = await replay.remember();
