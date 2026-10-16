@@ -621,6 +621,7 @@ export interface RuntimeActions {
   createMemoryItem(text: string): Promise<RuntimeMemoryItem | undefined>;
   queryMemoryContext(query: string): Promise<RuntimeResult<"memory.context.preview"> | undefined>;
   queryMemoryMetrics(input?: {
+    includeJobs?: boolean;
     from?: number;
     to?: number;
   }): Promise<RuntimeResult<"memory.metrics.get"> | undefined>;
@@ -662,6 +663,7 @@ export interface RuntimeStore {
   readonly taskExperienceSupported?: boolean;
   readonly memoryLearningVersion?: 2 | 3;
   readonly experienceFeedbackSupported?: boolean;
+  readonly memoryExtractionDurableSupported?: boolean;
   readonly pendingSends?: readonly PendingSendEntry[];
   readonly pendingSendBusy?: readonly string[];
   readonly sendRecoverySupported?: boolean;
@@ -4297,7 +4299,14 @@ export function useRuntimeStore(): RuntimeStore {
                   unknownReceiptCount: 0,
                 },
               }
-            : await invoke(bridge, "memory.metrics.get", input);
+            : await invoke(bridge, "memory.metrics.get", {
+                ...(input.from === undefined ? {} : { from: input.from }),
+                ...(input.to === undefined ? {} : { to: input.to }),
+                ...(input.includeJobs &&
+                runtimeCapabilitiesRef.current.has("memory-extraction-durable-v1")
+                  ? { includeJobs: true }
+                  : {}),
+              });
         });
         return result;
       },
@@ -4568,6 +4577,9 @@ export function useRuntimeStore(): RuntimeStore {
       ? 3
       : 2,
     experienceFeedbackSupported: runtimeCapabilitiesRef.current.has(EXPERIENCE_FEEDBACK_CAPABILITY),
+    memoryExtractionDurableSupported: runtimeCapabilitiesRef.current.has(
+      "memory-extraction-durable-v1",
+    ),
     pendingSends,
     pendingSendBusy,
     sendRecoverySupported: runtimeCapabilitiesRef.current.has(SESSION_SEND_REPLAY_CAPABILITY),

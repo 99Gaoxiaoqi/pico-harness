@@ -24,6 +24,7 @@ import {
   SqliteMemoryItemStore,
 } from "@pico/storage/sqlite/sqlite-memory-item-store";
 import type {
+  RuntimeMemoryMetrics,
   RuntimeMemoryItem,
   RuntimeMemoryListItem,
   RuntimeMemoryConsolidationReceipt,
@@ -745,7 +746,43 @@ export class DesktopAtomicMemoryService {
       throw invalid("统计时间范围无效");
     return this.withStore(workspacePath, async (store) => {
       const metrics = await store.readExtractionMetrics({ from, to });
-      return { metrics: { ...metrics, groups: metrics.groups.map((group) => ({ ...group })) } };
+      // Optional producer field is projected explicitly: legacy callers retain their exact shape.
+      const jobs = (metrics as typeof metrics & { jobs?: RuntimeMemoryMetrics["jobs"] }).jobs;
+      return {
+        metrics: {
+          scope: metrics.scope,
+          from: metrics.from,
+          to: metrics.to,
+          groups: metrics.groups.map((group) => ({ ...group })),
+          unknownReceiptCount: metrics.unknownReceiptCount,
+          ...(params.includeJobs && jobs
+            ? {
+                jobs: {
+                  pending: jobs.pending,
+                  working: jobs.working,
+                  blocked: jobs.blocked,
+                  ...(jobs.oldestPendingAt === undefined
+                    ? {}
+                    : { oldestPendingAt: jobs.oldestPendingAt }),
+                  reasons: jobs.reasons.map(({ reason, count }) => ({
+                    reason: [
+                      "policy_disabled",
+                      "auto_extract_disabled",
+                      "untrusted_workspace",
+                      "workspace_unavailable",
+                      "model_unavailable",
+                      "extraction_failed",
+                      "retry_exhausted",
+                    ].includes(reason)
+                      ? reason
+                      : "unknown",
+                    count,
+                  })),
+                },
+              }
+            : {}),
+        },
+      };
     });
   }
 
