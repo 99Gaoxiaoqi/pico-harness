@@ -40,6 +40,7 @@ export class MemoryRecallRequestTracker {
       return eventId;
     } catch {
       this.unavailable();
+      return undefined;
     }
   }
 
@@ -76,7 +77,7 @@ export class MemoryRecallRequestTracker {
         candidates.push(recall);
     }
     const facts: {
-      version: 1;
+      version: 1 | 2;
       coverage: MemoryRecallRequestFacts["coverage"];
       recalls: MemoryRecallRequestFacts["recalls"][number][];
     } = {
@@ -85,9 +86,22 @@ export class MemoryRecallRequestTracker {
       recalls: [],
     };
     for (const { eventId, trace } of candidates) {
+      if (trace.recordType === "case") facts.version = 2;
       facts.recalls.push({
         recallEventId: eventId,
         ...(trace.blockHash ? { blockHash: trace.blockHash } : {}),
+        ...(trace.recordType === "case"
+          ? {
+              caseReferences: (trace.caseSelected ?? []).map(
+                ({ candidateId, contentVersion, recordRevision, referenceHash }) => ({
+                  candidateId,
+                  contentVersion,
+                  recordRevision,
+                  referenceHash,
+                }),
+              ),
+            }
+          : {}),
         references: trace.selected.map((item) => ({
           itemId: item.itemId,
           referenceHash: item.referenceHash,
@@ -131,37 +145,47 @@ function matchSearchRecall(
   );
   if (exactBlocks.length) return exactBlocks.length === 1 ? exactBlocks[0] : undefined;
   const references = possible.filter(({ trace }) =>
-    trace.selected.some((item) => hashes.references.has(item.referenceHash)),
+    [...trace.selected, ...(trace.caseSelected ?? [])].some((item) =>
+      hashes.references.has(item.referenceHash),
+    ),
   );
   if (references.length) return references.length === 1 ? references[0] : undefined;
   // A single empty/error result can still be identified by its one actual tool carrier.
   // With collisions it has no distinguishing text hash, so the association is unknown.
   return possible.length === 1 &&
     !possible[0]!.trace.blockHash &&
-    !possible[0]!.trace.selected.length
+    !possible[0]!.trace.selected.length &&
+    !possible[0]!.trace.caseSelected?.length
     ? possible[0]
     : undefined;
 }
 
 function memoryTextHashes(text: string): { blocks: Set<string>; references: Set<string> } {
-  const blocks = new Set<string>();
+  const blocks = new Set<string>([memoryRecallTextHash(text)]);
   const references = new Set<string>();
   for (const match of text.matchAll(
-    /<atomic-memory-reference\b[^>]*>[\s\S]*?<\/atomic-memory-reference>/gu,
+    /<(atomic-memory-reference|task-case-reference)\b[^>]*>[\s\S]*?<\/\1>/gu,
   ))
     blocks.add(memoryRecallTextHash(match[0]));
   // Tool projection may remove the outer footer while keeping complete references.
-  for (const reference of text.matchAll(/<memory\b[^>]*>[\s\S]*?<\/memory>/gu))
+  for (const reference of text.matchAll(/<(memory|case)\b[^>]*>[\s\S]*?<\/\1>/gu))
     references.add(memoryRecallTextHash(reference[0]));
   return { blocks, references };
 }
 
 export interface PreparedMemoryRecallDiagnostic {
-  readonly version: 1;
+  readonly version: 1 | 2;
   readonly coverage: MemoryRecallRequestFacts["coverage"];
   readonly recalls: readonly {
     readonly recallEventId: string;
     readonly blockPresent?: boolean;
+    readonly caseReferences?: readonly {
+      readonly candidateId: string;
+      readonly contentVersion: number;
+      readonly recordRevision: number;
+      readonly referenceHash: string;
+      readonly present: boolean;
+    }[];
     readonly references: readonly {
       readonly itemId: string;
       readonly referenceHash: string;
@@ -181,15 +205,42 @@ export function isPreparedMemoryRecallDiagnostic(
   const identifier = (v: unknown) => typeof v === "string" && v.length > 0 && v.length <= 1024;
   const hash = (v: unknown) => typeof v === "string" && /^[a-f0-9]{64}$/u.test(v);
   return (
-    value["version"] === 1 &&
+    (value["version"] === 1 || value["version"] === 2) &&
+    Buffer.byteLength(JSON.stringify(value), "utf8") <= MEMORY_RECALL_TRACE_MAX_BYTES &&
     ["recorded", "unrecorded"].includes(value["coverage"] as string) &&
     Array.isArray(value["recalls"]) &&
     value["recalls"].every(
       (recall) =>
         isRecord(recall) &&
         Object.keys(recall).every((key) =>
-          ["recallEventId", "blockPresent", "references"].includes(key),
+          ["recallEventId", "blockPresent", "references", "caseReferences"].includes(key),
         ) &&
+        (recall["caseReferences"] === undefined ||
+          (value["version"] === 2 &&
+            Array.isArray(recall["references"]) &&
+            recall["references"].length === 0 &&
+            Array.isArray(recall["caseReferences"]) &&
+            recall["caseReferences"].length <= 3 &&
+            recall["caseReferences"].every(
+              (reference) =>
+                isRecord(reference) &&
+                Object.keys(reference).every((key) =>
+                  [
+                    "candidateId",
+                    "contentVersion",
+                    "recordRevision",
+                    "referenceHash",
+                    "present",
+                  ].includes(key),
+                ) &&
+                identifier(reference["candidateId"]) &&
+                Number.isSafeInteger(reference["contentVersion"]) &&
+                (reference["contentVersion"] as number) > 0 &&
+                Number.isSafeInteger(reference["recordRevision"]) &&
+                (reference["recordRevision"] as number) > 0 &&
+                hash(reference["referenceHash"]) &&
+                typeof reference["present"] === "boolean",
+            ))) &&
         identifier(recall["recallEventId"]) &&
         (recall["blockPresent"] === undefined || typeof recall["blockPresent"] === "boolean") &&
         Array.isArray(recall["references"]) &&
@@ -220,12 +271,24 @@ export function capturePreparedMemoryRecall(
     for (const hash of hashes.blocks) blocks.add(hash);
     for (const hash of hashes.references) references.add(hash);
   }
-  return {
-    version: 1,
+  const diagnostic: {
+    version: 1 | 2;
+    coverage: MemoryRecallRequestFacts["coverage"];
+    recalls: PreparedMemoryRecallDiagnostic["recalls"][number][];
+  } = {
+    version: facts.version,
     coverage: facts.coverage,
     recalls: facts.recalls.map((recall) => ({
       recallEventId: recall.recallEventId,
       ...(recall.blockHash ? { blockPresent: blocks.has(recall.blockHash) } : {}),
+      ...(recall.caseReferences
+        ? {
+            caseReferences: recall.caseReferences.map((reference) => ({
+              ...reference,
+              present: references.has(reference.referenceHash),
+            })),
+          }
+        : {}),
       references: recall.references.map((reference) => ({
         itemId: reference.itemId,
         referenceHash: reference.referenceHash,
@@ -233,6 +296,11 @@ export function capturePreparedMemoryRecall(
       })),
     })),
   };
+  while (Buffer.byteLength(JSON.stringify(diagnostic), "utf8") > MEMORY_RECALL_TRACE_MAX_BYTES) {
+    diagnostic.recalls.pop();
+    diagnostic.coverage = "unrecorded";
+  }
+  return diagnostic;
 }
 
 function requestTextStrings(request: PreparedProviderRequest): string[] {

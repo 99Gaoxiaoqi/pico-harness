@@ -1113,37 +1113,53 @@ const runtimeExecutionAttemptResult = exactResultShape(
     costUnknownReason: resultString,
   },
 );
-const memoryRecallDetailResult = exactResultShape({
-  trace: (value, path) => {
-    if (!isMemoryRecallTrace(value)) throw invalidResult(`${path} 召回追踪无效`);
-  },
-  items: resultArray(
-    exactResultShape({
-      itemId: resultNonEmptyString,
-      state: resultOneOf(["unchanged", "changed", "archived", "deleted", "unknown"]),
-      linkAvailable: resultBoolean,
-    }),
-  ),
-  sources: resultArray(
-    exactResultShape({
-      eventId: resultNonEmptyString,
-      sessionId: resultNonEmptyString,
-      available: resultBoolean,
-    }),
-  ),
-  requests: resultArray(
-    exactResultShape(
-      {
-        attemptId: resultNonEmptyString,
-        providerCallId: resultNonEmptyString,
-        evidenceLevel: resultOneOf(["prepared", "response_observed", "assembly_unrecorded"]),
-        referenceCount: resultNonNegativeInteger,
-        referencePresentCount: resultNonNegativeInteger,
-      },
-      { blockPresent: resultBoolean },
+const memoryRecallDetailResult = exactResultShape(
+  {
+    trace: (value, path) => {
+      if (!isMemoryRecallTrace(value)) throw invalidResult(`${path} 召回追踪无效`);
+    },
+    items: resultArray(
+      exactResultShape({
+        itemId: resultNonEmptyString,
+        state: resultOneOf(["unchanged", "changed", "archived", "deleted", "unknown"]),
+        linkAvailable: resultBoolean,
+      }),
     ),
-  ),
-});
+    sources: resultArray(
+      exactResultShape({
+        eventId: resultNonEmptyString,
+        sessionId: resultNonEmptyString,
+        available: resultBoolean,
+      }),
+    ),
+    requests: resultArray(
+      exactResultShape(
+        {
+          attemptId: resultNonEmptyString,
+          providerCallId: resultNonEmptyString,
+          evidenceLevel: resultOneOf(["prepared", "response_observed", "assembly_unrecorded"]),
+          referenceCount: resultNonNegativeInteger,
+          referencePresentCount: resultNonNegativeInteger,
+        },
+        { blockPresent: resultBoolean },
+      ),
+    ),
+  },
+  {
+    cases: resultArray(
+      exactResultShape(
+        {
+          candidateId: resultNonEmptyString,
+          contentVersion: resultNonNegativeInteger,
+          recordRevision: resultNonNegativeInteger,
+          state: resultOneOf(["unchanged", "changed", "archived", "deleted", "unknown"]),
+          linkAvailable: resultBoolean,
+        },
+        { workDir: resultNonEmptyString },
+      ),
+    ),
+  },
+);
 const goalEvaluationDetailResult = exactResultShape(
   { goalId: resultNonEmptyString, condition: resultString, reason: resultString },
   {
