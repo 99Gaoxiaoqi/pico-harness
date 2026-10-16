@@ -1,5 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 import {
   experienceSummary,
   experienceUsable,
@@ -1357,7 +1358,7 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
       const score = recall ? recall.score(projected) : 0;
       if (recall && (!Number.isFinite(score) || score <= 0)) continue;
       if (recall?.accept) {
-        let timer: ReturnType<typeof setTimeout> | undefined;
+        const deadlineTimer = new AbortController();
         try {
           const accepted = await Promise.race([
             Promise.resolve(
@@ -1367,11 +1368,8 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
                   : {}),
               }),
             ),
-            new Promise<"deadline">((resolve) => {
-              timer = setTimeout(
-                () => resolve("deadline"),
-                Math.max(0, deadline - performance.now()),
-              );
+            delay(Math.max(0, deadline - performance.now()), "deadline" as const, {
+              signal: deadlineTimer.signal,
             }),
           ]);
           if (accepted === "deadline") {
@@ -1380,7 +1378,7 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
           }
           if (!accepted) continue;
         } finally {
-          if (timer !== undefined) clearTimeout(timer);
+          deadlineTimer.abort();
         }
       }
       matched++;
