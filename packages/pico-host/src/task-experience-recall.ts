@@ -179,6 +179,11 @@ export function scoreExperienceMatch(hints: readonly string[], query: string): n
   for (const raw of hints.slice(0, 8)) {
     const hint = normalizeMemorySearchText(raw).trim();
     if (!hint || generic.has(hint) || memoryTextContainsSecret(hint)) continue;
+    const sheetRange = matchesSheetRange(hint, text);
+    if (sheetRange !== undefined) {
+      if (sheetRange) score += 6;
+      continue;
+    }
     if (signals.paths.includes(hint)) {
       score += 8;
       continue;
@@ -211,6 +216,30 @@ export function scoreExperienceMatch(hints: readonly string[], query: string): n
   }
   if (matchedTerms.size >= 2) score += Math.min(matchedTerms.size, 8);
   return score;
+}
+
+/** A bounded unquoted Sheet!A1:B2 hint requires both identities together, never partial tokens. */
+function matchesSheetRange(hint: string, query: string): boolean | undefined {
+  const match = hint.match(
+    /^([\p{L}\p{N}_-]{1,64})!\$?([a-z]{1,3})\$?([1-9]\d{0,6}):\$?([a-z]{1,3})\$?([1-9]\d{0,6})$/u,
+  );
+  if (!match) return undefined;
+  const sheet = match[1]!;
+  const column = (value: string): number =>
+    [...value].reduce((total, char) => total * 26 + char.charCodeAt(0) - 96, 0);
+  if (
+    column(match[2]!) > 16_384 ||
+    column(match[4]!) > 16_384 ||
+    Number(match[3]) > 1_048_576 ||
+    Number(match[5]) > 1_048_576
+  )
+    return false;
+  const boundary = /\p{Script=Han}/u.test(sheet) ? "[\\p{L}\\p{N}_-]" : "[a-z0-9_-]";
+  const range = `\\$?${match[2]}\\$?${match[3]}\\s*:\\s*\\$?${match[4]}\\$?${match[5]}`;
+  return new RegExp(
+    `(?<!${boundary})${sheet}(?:\\s*!\\s*|\\s*的\\s*|\\s+)${range}(?![a-z0-9_$:]|\\s*:)`,
+    "u",
+  ).test(query);
 }
 
 /** Explicit historical lookup: no Memory Item, reference use or adoption is created. */

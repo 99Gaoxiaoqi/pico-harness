@@ -469,6 +469,49 @@ test("所有maturity与审核状态共享硬条件；重叠双字词和泛词不
     "a distinctive Chinese hint at the end of a long task must survive actual recall gates",
   );
   assert.equal(scoreExperienceMatch(["boundary"], "boundaries"), 0);
+  const sheetHint = ["Sheet1!B2:B3"];
+  const sheetQuery =
+    '请用 document 计算这份新 Excel 附件 Sheet1 的 B2:B3 合计，只返回 JSON {"sum":数值} 与来源。';
+  for (const query of [
+    sheetQuery,
+    "Sheet1!B2:B3",
+    "Sheet1 B2:B3",
+    "Sheet1的B2:B3",
+    "Sheet1 ! $B$2:$B$3",
+  ])
+    assert.ok(scoreExperienceMatch(sheetHint, query) > 0, query);
+  for (const query of [
+    "Sheet1",
+    "B2:B3",
+    "Sheet2 的 B2:B3",
+    "Sheet10 的 B2:B3",
+    "OtherSheet1 的 B2:B3",
+    "Sheet1 的 B2:B30",
+    "Sheet1 的 B2:B3A",
+    "Sheet1 的 A2:B3",
+    "Sheet1 的 B2:B4",
+    "Sheet1 的 B2:B3:C4",
+    "Sheet1 与 Sheet2 的 B2:B3",
+  ])
+    assert.equal(scoreExperienceMatch(sheetHint, query), 0, query);
+  for (const match of [false, "unknown", true] as const) {
+    assert.equal(
+      (
+        await taskExperienceRecallTargets({
+          store: {
+            queryTaskExperiences: async () => [{ ...base, matchHints: sheetHint }],
+          } as unknown as TaskExperienceStore,
+          workspaceKey: "workspace",
+          workDir: "/fixture",
+          query: sheetQuery,
+          toolAllowed: () => false,
+          conditionMatches: async () => match,
+        })
+      ).length,
+      match === true ? 1 : 0,
+      "a matching sheet/range never bypasses the Host hard-condition gate",
+    );
+  }
   assert.ok(
     scoreExperienceMatch(
       ["计算附件"],

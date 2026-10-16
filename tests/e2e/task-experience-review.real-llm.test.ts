@@ -130,8 +130,25 @@ enabledTest(
           createRuntimeRequest("session.create", { workspacePath }),
         ),
       );
-      sessions.push(result.session.sessionId);
-      return result.session.sessionId;
+      const sessionId = result.session.sessionId;
+      sessions.push(sessionId);
+      // Controlled permissions belong only to this isolated compatibility fixture.
+      await services.desktopService.handle(
+        createRuntimeRequest("session.settings.update", {
+          workspacePath,
+          sessionId,
+          permissionMode: "full-access",
+        }),
+      );
+      const actual = parseRuntimeResult(
+        "session.settings.get",
+        await services.desktopService.handle(
+          createRuntimeRequest("session.settings.get", { workspacePath, sessionId }),
+        ),
+      );
+      assert.equal(actual.settings.permissionMode, "full-access");
+      t.diagnostic(`controlled isolated session permission: ${actual.settings.permissionMode}`);
+      return sessionId;
     };
     const upload = async (
       sessionId: string,
