@@ -5,7 +5,7 @@ import { Button, InlineNotice } from "../components.js";
 import { useRuntime } from "../runtime-context.js";
 
 export function MemoryPolicySection() {
-  const { data, actions } = useRuntime();
+  const { data, actions, memoryExtractionDurableSupported } = useRuntime();
   const settings = data.memory.settings;
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
@@ -14,7 +14,12 @@ export function MemoryPolicySection() {
   const [metricsError, setMetricsError] = useState("");
   const [metricsLoading, setMetricsLoading] = useState(false);
   const metricsSequence = useRef(0);
-  const metricsKey = JSON.stringify([data.workspacePath, settings?.version, refresh]);
+  const metricsKey = JSON.stringify([
+    data.workspacePath,
+    settings?.version,
+    refresh,
+    memoryExtractionDurableSupported,
+  ]);
   const metricsKeyRef = useRef(metricsKey);
   metricsKeyRef.current = metricsKey;
   useEffect(() => {
@@ -34,23 +39,29 @@ export function MemoryPolicySection() {
     setMetricsError("");
     setMetricsLoading(true);
     const to = Date.now();
-    void actions.queryMemoryMetrics({ from: Math.max(0, to - 7 * 86_400_000), to }).then(
-      (result) => {
-        if (sequence !== metricsSequence.current || key !== metricsKeyRef.current) return;
-        if (result?.metrics.scope === "user") setMetrics({ key, value: result.metrics });
-        else setMetricsError("无法读取记忆提取统计，请刷新后重试。");
-        setMetricsLoading(false);
-      },
-      () => {
-        if (sequence !== metricsSequence.current || key !== metricsKeyRef.current) return;
-        setMetricsError("无法读取记忆提取统计，请刷新后重试。");
-        setMetricsLoading(false);
-      },
-    );
+    void actions
+      .queryMemoryMetrics({
+        from: Math.max(0, to - 7 * 86_400_000),
+        to,
+        ...(memoryExtractionDurableSupported ? { includeJobs: true } : {}),
+      })
+      .then(
+        (result) => {
+          if (sequence !== metricsSequence.current || key !== metricsKeyRef.current) return;
+          if (result?.metrics.scope === "user") setMetrics({ key, value: result.metrics });
+          else setMetricsError("无法读取记忆提取统计，请刷新后重试。");
+          setMetricsLoading(false);
+        },
+        () => {
+          if (sequence !== metricsSequence.current || key !== metricsKeyRef.current) return;
+          setMetricsError("无法读取记忆提取统计，请刷新后重试。");
+          setMetricsLoading(false);
+        },
+      );
     return () => {
       metricsSequence.current += 1;
     };
-  }, [actions, metricsKey]);
+  }, [actions, metricsKey, memoryExtractionDurableSupported]);
   return (
     <div className="memory-policy-content">
       <div className="memory-policy-actions">
@@ -114,6 +125,22 @@ export function MemoryPolicySection() {
       <p>
         有依据的事实自动保存；范围明确的低风险方法可作为建议；案例只留记录；需要改变长期做法或扩大范围时由你决定。
       </p>
+      <section aria-label="待保存记忆状态">
+        <h3>待保存状态</h3>
+        <p>
+          用户级当前待办，覆盖所有工作区，不受 7
+          天范围限制。排队和处理中不等于已保存；可手动刷新查看最新状态。
+        </p>
+        {metricsLoading ? (
+          <p role="status">正在读取待保存状态…</p>
+        ) : metricsError ? (
+          <InlineNotice tone="warning">{metricsError}</InlineNotice>
+        ) : (
+          <MemoryExtractionJobs
+            jobs={metrics?.key === metricsKey ? metrics.value.jobs : undefined}
+          />
+        )}
+      </section>
       <details className="settings-section memory-metrics" aria-labelledby="memory-metrics-title">
         <summary id="memory-metrics-title">最近 7 天记忆提取统计</summary>
         <p>
@@ -180,6 +207,52 @@ function MemoryMetrics({ metrics }: { metrics: RuntimeMemoryMetrics }) {
         历史记录中有 {metrics.unknownReceiptCount}{" "}
         段未提供完整统计，无法判断是否为空提取。空提取率只使用已评估且统计完整的记录。
       </p>
+    </>
+  );
+}
+
+export function MemoryExtractionJobs({
+  jobs,
+  now = Date.now(),
+}: {
+  jobs?: RuntimeMemoryMetrics["jobs"];
+  now?: number;
+}) {
+  if (!jobs) return <p>当前宿主未提供待保存状态，无法判断待办数量。</p>;
+  const reasons: Readonly<Record<string, string>> = {
+    policy_disabled: "记忆策略已关闭",
+    auto_extract_disabled: "自动提取已关闭",
+    untrusted_workspace: "工作区尚未信任",
+    workspace_unavailable: "工作区暂不可用",
+    model_unavailable: "模型暂不可用",
+    extraction_failed: "提取失败",
+    retry_exhausted: "重试次数已用尽",
+  };
+  const age =
+    jobs.oldestPendingAt === undefined ? undefined : Math.max(0, now - jobs.oldestPendingAt);
+  const ageText =
+    age === undefined
+      ? "未提供"
+      : age < 60_000
+        ? "不足 1 分钟"
+        : age < 3_600_000
+          ? `${Math.floor(age / 60_000)} 分钟`
+          : `${Math.floor(age / 3_600_000)} 小时`;
+  return (
+    <>
+      <p>
+        排队：{jobs.pending}；处理中：{jobs.working}；需处理：{jobs.blocked}
+      </p>
+      <p>最老排队待办已等待：{ageText}</p>
+      {jobs.reasons.length > 0 && (
+        <ul>
+          {jobs.reasons.map(({ reason, count }, index) => (
+            <li key={index}>
+              {reasons[reason] ?? "其他原因，暂无法保存"}：{count}
+            </li>
+          ))}
+        </ul>
+      )}
     </>
   );
 }

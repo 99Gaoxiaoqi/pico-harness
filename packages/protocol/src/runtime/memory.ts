@@ -164,6 +164,13 @@ export type RuntimeMemoryMetrics = JsonObject & {
   readonly to: number;
   readonly groups: readonly RuntimeMemoryMetricGroup[];
   readonly unknownReceiptCount: number;
+  readonly jobs?: JsonObject & {
+    readonly pending: number;
+    readonly working: number;
+    readonly blocked: number;
+    readonly oldestPendingAt?: number;
+    readonly reasons: readonly (JsonObject & { readonly reason: string; readonly count: number })[];
+  };
 };
 
 export type RuntimeMemoryConsolidationReason = "duplicate" | "superseded" | "stale" | "low_value";
@@ -383,24 +390,51 @@ const memoryDiagnosticResult = exactResultShape({
   reason: resultOneOf(["selected", "duplicate", "budget", "item_limit"]),
   match: resultOneOf(["key", "content", "preference"]),
 });
-const memoryMetricsResult = exactResultShape({
-  scope: resultOneOf(["user"]),
-  from: resultNonNegativeInteger,
-  to: resultNonNegativeInteger,
-  groups: resultArray(
-    exactResultShape({
-      trigger: resultOneOf(["remember", "extract", "compaction"]),
-      settledCount: resultNonNegativeInteger,
-      evaluatedCount: resultNonNegativeInteger,
-      createdItemCount: resultNonNegativeInteger,
-      modelCallCount: resultNonNegativeInteger,
-      emptyCount: resultNonNegativeInteger,
-      emptyRate: resultNullable(resultFiniteNumber),
-      durationMs: resultFiniteNumber,
-    }),
-  ),
-  unknownReceiptCount: resultNonNegativeInteger,
-});
+const memoryMetricsResult = exactResultShape(
+  {
+    scope: resultOneOf(["user"]),
+    from: resultNonNegativeInteger,
+    to: resultNonNegativeInteger,
+    groups: resultArray(
+      exactResultShape({
+        trigger: resultOneOf(["remember", "extract", "compaction"]),
+        settledCount: resultNonNegativeInteger,
+        evaluatedCount: resultNonNegativeInteger,
+        createdItemCount: resultNonNegativeInteger,
+        modelCallCount: resultNonNegativeInteger,
+        emptyCount: resultNonNegativeInteger,
+        emptyRate: resultNullable(resultFiniteNumber),
+        durationMs: resultFiniteNumber,
+      }),
+    ),
+    unknownReceiptCount: resultNonNegativeInteger,
+  },
+  {
+    jobs: exactResultShape(
+      {
+        pending: resultNonNegativeInteger,
+        working: resultNonNegativeInteger,
+        blocked: resultNonNegativeInteger,
+        reasons: resultArray(
+          exactResultShape({
+            reason: resultOneOf([
+              "policy_disabled",
+              "auto_extract_disabled",
+              "untrusted_workspace",
+              "workspace_unavailable",
+              "model_unavailable",
+              "extraction_failed",
+              "retry_exhausted",
+              "unknown",
+            ]),
+            count: resultNonNegativeInteger,
+          }),
+        ),
+      },
+      { oldestPendingAt: resultNonNegativeInteger },
+    ),
+  },
+);
 
 const memoryConsolidationReceiptResult = exactResultShape(
   {
@@ -569,6 +603,7 @@ export type MemoryMethodMap = TaskExperienceMethodMap & {
   };
   readonly "memory.metrics.get": {
     readonly params: {
+      readonly includeJobs?: boolean;
       readonly workspacePath?: string;
       readonly from?: number;
       readonly to?: number;
@@ -633,7 +668,12 @@ export const memoryParamValidators = {
   ),
   "memory.metrics.get": exactParamShape(
     {},
-    { workspacePath: stringParam, from: nonNegativeIntegerParam, to: nonNegativeIntegerParam },
+    {
+      workspacePath: stringParam,
+      from: nonNegativeIntegerParam,
+      to: nonNegativeIntegerParam,
+      includeJobs: booleanParam,
+    },
   ),
   "memory.consolidation.history": exactParamShape({ workspacePath: stringParam }),
   "memory.consolidation.undo": exactParamShape({
