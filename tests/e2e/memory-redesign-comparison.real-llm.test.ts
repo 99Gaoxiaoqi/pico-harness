@@ -11,6 +11,12 @@ import test from "node:test";
 const execute = promisify(execFile);
 const enabled = process.env.RUN_LLM_E2E === "1" && process.env.RUN_MEMORY_COMPARISON === "1";
 const runTest = enabled ? test : test.skip;
+const selection = process.env.PICO_MEMORY_COMPARISON_SCENARIOS;
+assert.ok(!selection || selection === "method,expired", "unsupported comparison selection");
+const scenarios = selection
+  ? (["method", "expired"] as const)
+  : (["fact", "method", "case", "expired", "correction", "scope"] as const);
+const expectedRuns = scenarios.length * 6;
 const redact = (value: string): string =>
   value
     .replace(/Bearer\s+\S+/giu, "Bearer [redacted]")
@@ -44,7 +50,7 @@ function compare(
 }
 
 runTest(
-  "frozen v15/new/off production Runtime comparison has 36 isolated real-model runs",
+  `frozen v15/new/off production Runtime comparison has ${expectedRuns} isolated real-model runs`,
   { timeout: 60 * 60_000 },
   async (t) => {
     const current = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -58,7 +64,6 @@ runTest(
     const legacyDriver = join(baseline, "tests/e2e/memory-redesign-replay-driver.ts");
     await copyFile(driver, legacyDriver);
     const reports: Record<string, unknown>[] = [];
-    const scenarios = ["fact", "method", "case", "expired", "correction", "scope"] as const;
     for (const scenario of scenarios)
       for (const variant of [1, 2]) {
         const marker = `Replay${scenario}${variant}${randomUUID().replaceAll("-", "").slice(0, 12)}`;
@@ -136,14 +141,18 @@ runTest(
           reports.push(report);
           await writeFile(
             join(root, "comparison-progress.json"),
-            JSON.stringify({ completed: reports.length, planned: 36, reports }, null, 2) + "\n",
+            JSON.stringify(
+              { completed: reports.length, planned: expectedRuns, scenarios, reports },
+              null,
+              2,
+            ) + "\n",
           );
           t.diagnostic(
-            `${reports.length}/36 ${task}: ${JSON.stringify({ status: report.status, schema: report.schema, initialMemory: report.initialMemoryContainsMarker, answerMarker: report.answerContainsMarker, calls: report.modelCalls })}`,
+            `${reports.length}/${expectedRuns} ${task}: ${JSON.stringify({ status: report.status, schema: report.schema, initialMemory: report.initialMemoryContainsMarker, answerMarker: report.answerContainsMarker, calls: report.modelCalls })}`,
           );
         }
       }
-    assert.equal(reports.length, 36);
+    assert.equal(reports.length, expectedRuns);
     const method = reports.filter((report) => report.scenario === "method" && report.arm === "new");
     assert.equal(method.length, 2);
     const methodObserved = method.some(
@@ -245,7 +254,9 @@ runTest(
     );
     const summary = {
       status: failures.length || !methodObserved ? "failed" : "passed",
-      runs: 36,
+      runs: expectedRuns,
+      scenarios,
+      selection: selection ? "affected-method-and-expiry" : "full-matrix",
       sourceBaseline: "cef587d11f2cdfb9240946e87d283f37a30c22d5",
       seed: "controlled frozen memory fixture, not natural learning",
       scope:
