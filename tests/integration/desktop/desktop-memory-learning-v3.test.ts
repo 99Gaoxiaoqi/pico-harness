@@ -25,7 +25,7 @@ test("v3 建议与案例无需批准，普通修订、明确决定和暂停锁�
       memoryLearningV3Fixture +
       `
 let current=method;const reviews=[];
-const onReview=async request=>{reviews.push(request);current={...current,recordRevision:current.recordRevision+1,...(request.action==='disable'?{enabled:false}:request.action==='revise'?{content:request.content,contentVersion:current.contentVersion+1,usagePolicy:'suggestion',enabled:true}:request.action==='keep_case'?{representation:'case',usagePolicy:'case_only',enabled:false,state:'ready'}:request.action==='accept'?{usagePolicy:'suggestion',review:'approved',enabled:true}:request.action==='defer'?{review:'deferred'}:{})};return current};
+const onReview=async request=>{reviews.push(request);current={...current,recordRevision:current.recordRevision+1,...(request.action==='disable'?{enabled:false}:request.action==='revise'?{content:request.content,contentVersion:current.contentVersion+1,usagePolicy:'suggestion',enabled:true,reason:'user_edit',expiresAt:undefined}:request.action==='keep_case'?{representation:'case',usagePolicy:'case_only',enabled:false,state:'ready'}:request.action==='accept'?{usagePolicy:'suggestion',review:'approved',enabled:true}:request.action==='defer'?{review:'deferred'}:{})};return current};
 const detail=async()=>({learningVersion:3,candidate:current,observations:[{observationId:'o',kind:'tool-result',summary:'实际结果：检查产物通过。',source}],reuse:[]});
 const panel=(mode='memory',filter='saved')=><TaskExperiencePanel learningVersion={3} mode={mode} filter={filter} workspacePath='/project' sessionId='session' items={[current]} reuse={[]} onDetail={detail} onReview={onReview} onFeedback={async()=>current}/>;
 (async()=>{
@@ -40,8 +40,10 @@ const panel=(mode='memory',filter='saved')=><TaskExperiencePanel learningVersion
  await act(async()=>button('编辑更正').click());await act(async()=>input('按新的限定线索检查结果。'));
  await act(async()=>{button('保存更正').click();button('保存更正').click()});
  check(reviews.length===2&&reviews[0].action==='disable'&&reviews[1].action==='revise'&&reviews[1].content==='按新的限定线索检查结果。','ordinary correction stops old version and submits revise once');
+ check(document.body.textContent.includes('内容已按你的修改更新。')&&!document.body.textContent.includes('user_edit')&&!document.querySelector('[aria-label="变化、范围与影响"]'),'ordinary revision shows a human receipt without an empty decision box');
  current=blocked;await act(async()=>root.render(wrap(panel())));await act(async()=>document.querySelector('.task-experience__row').click());
  check(document.body.textContent.includes('已暂停')&&!button('重新启用建议')&&!button('恢复'),'corrected old content cannot show a restore action');
+ check(document.body.textContent.includes('已按你的纠正暂停这个版本。')&&!document.body.textContent.includes('user_correction'),'correction reason is readable');
  current=decision;await act(async()=>root.render(wrap(panel('conversation'))));
  check(document.body.textContent.includes('将高影响操作作为默认做法')&&document.body.textContent.includes(decision.reviewReason)&&document.body.textContent.includes('实际结果：检查产物通过。'),'decision exposes concrete change, scope and source');
  check(reviews.length===2,'opening a decision does not submit anything');

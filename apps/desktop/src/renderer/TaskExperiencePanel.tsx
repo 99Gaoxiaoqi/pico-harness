@@ -41,6 +41,18 @@ const promotionReasonLabels = {
 };
 const riskLabels = { low: "低风险", high: "高风险", unclear: "原因待核实" };
 const familyLabels = { general: "通用任务", coding: "代码任务", spreadsheet: "表格任务" };
+function experienceReasonLabel(reason?: string): string | undefined {
+  if (!reason) return undefined;
+  const labels: Record<string, string> = {
+    user_edit: "内容已按你的修改更新。",
+    user_correction: "已按你的纠正暂停这个版本。",
+    trusted_reuse_contradiction: "实际使用结果与这个版本矛盾，已暂停使用。",
+    unproven_case: "过程已记录，原因尚未证实。",
+    historical_unproven_case: "历史过程已保留，原因尚未证实。",
+    authority_change_forbidden: "涉及更改权限或绕过审批，不能作为建议使用。",
+  };
+  return labels[reason] ?? (/^[a-z][a-z0-9_-]*$/iu.test(reason) ? undefined : reason);
+}
 export interface TaskExperiencePanelProps {
   readonly items: readonly TaskExperienceCandidate[];
   readonly learningVersion?: 2 | 3;
@@ -196,7 +208,18 @@ export function experienceCanRestore(item: TaskExperienceCandidate): boolean {
 }
 
 function DecisionContext({ candidate }: { readonly candidate: TaskExperienceCandidate }) {
-  if (!candidate.usagePolicy) return null;
+  if (
+    !candidate.usagePolicy ||
+    !(
+      candidate.decisionKind ||
+      experienceNeedsReview(candidate) ||
+      candidate.scopeUnresolved ||
+      candidate.usagePolicy === "blocked" ||
+      candidate.expiresAt !== undefined ||
+      candidate.review === "approved"
+    )
+  )
+    return null;
   const labels = {
     high_impact: "将高影响操作作为默认做法",
     scope_expansion: "扩大方法适用范围",
@@ -210,7 +233,10 @@ function DecisionContext({ candidate }: { readonly candidate: TaskExperienceCand
           <p>当前状态：该提案未获允许；既有做法见下方来源记录。</p>
           <p>拟议做法：{candidate.content}</p>
           <p>
-            影响：{candidate.reviewReason || candidate.reason || "仅允许下面列明的做法和范围。"}
+            影响：
+            {candidate.reviewReason ||
+              experienceReasonLabel(candidate.reason) ||
+              "仅允许下面列明的做法和范围。"}
           </p>
         </>
       )}
@@ -222,7 +248,7 @@ function DecisionContext({ candidate }: { readonly candidate: TaskExperienceCand
             ? "用户纠正了这个版本，需要保存新版本后重新判断。"
             : candidate.reason === "trusted_reuse_contradiction"
               ? "具体使用结果与这个版本矛盾，需要修订。"
-              : candidate.reason || "当前版本不能引用。"}
+              : experienceReasonLabel(candidate.reason) || "当前版本不能引用。"}
         </p>
       )}
       {candidate.expiresAt && (
@@ -1255,7 +1281,9 @@ function ExperienceDetailCard({
             。本页操作作用于当前管理版本，旧使用记录保持原版本。
           </InlineNotice>
         )}
-      {current.reason && !experienceNeedsReview(current) && <p>{current.reason}</p>}
+      {experienceReasonLabel(current.reason) && !experienceNeedsReview(current) && (
+        <p>{experienceReasonLabel(current.reason)}</p>
+      )}
       {v3 && <DecisionContext candidate={current} />}
       {v3 && <EvidenceSummary candidate={current} />}
       {experienceNeedsReview(current) && !unavailable && (
