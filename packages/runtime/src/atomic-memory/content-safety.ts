@@ -84,10 +84,15 @@ export function sanitizeMemoryContent(
 }
 
 function normalizeStoredText(value: string): string {
-  return value
-    .normalize("NFKC")
-    .replaceAll(/[\s\u00a0]+/gu, " ")
-    .trim();
+  return (
+    value
+      .normalize("NFKC")
+      // Persistence removes these code points; scan that spelling as well so a
+      // split identifier cannot become readable only after it has been admitted.
+      .replaceAll(/[\u200b-\u200d\ufeff]/gu, "")
+      .replaceAll(/[\s\u00a0]+/gu, " ")
+      .trim()
+  );
 }
 
 function secretCodes(value: string): string[] {
