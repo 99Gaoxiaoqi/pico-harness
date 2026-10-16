@@ -163,7 +163,7 @@ test("ordinary completion automatically persists memory without memory_extract a
       {
         type: "create",
         item: {
-          content: "I prefer long answers.",
+          content: "I prefer concise answers.",
           kind: "preference",
           statementType: "fact",
           temporalType: "undated",
@@ -188,10 +188,13 @@ test("ordinary completion automatically persists memory without memory_extract a
           statementType: "fact",
           temporalType: "undated",
           scopeType: "global",
-          observedAt: 1,
+          observedAt: 0,
           origin: "agent_extracted",
           keys: [{ key: "answer style", keyType: "exact", keyOrigin: "deterministic" }],
-          sources: [{ sessionId: f.sessionId, runId: "newer", turnId: "newer", eventId: "newer" }],
+          sources: [
+            { sessionId: f.sessionId, runId: "older", turnId: "older", eventId: "older" },
+            { sessionId: f.sessionId, runId: "newer", turnId: "newer", eventId: "newer" },
+          ],
         },
       },
     ],
@@ -213,7 +216,7 @@ test("ordinary completion automatically persists memory without memory_extract a
                   {
                     itemId: group.items.find(({ itemId }) => itemId !== group.newestItemId)?.itemId,
                     keepItemId: group.newestItemId,
-                    reason: "superseded",
+                    reason: "duplicate",
                   },
                 ],
               });
@@ -281,6 +284,7 @@ test("ordinary completion automatically persists memory without memory_extract a
     ),
   );
   assert.deepEqual(seededStates.sort(), ["active", "archived"]);
+  assert.equal((await f.store.readItem(newer.results[0]!.itemId))?.sources.length, 2);
   assert.equal((await f.store.listItems({ workspaceKey: f.paths.workspace.id })).length, 2);
 });
 
