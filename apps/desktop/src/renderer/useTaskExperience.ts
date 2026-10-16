@@ -35,7 +35,13 @@ export function useTaskExperience(
     data.workspacePath === workspacePath &&
     data.trusted,
   );
-  const scope = JSON.stringify([workspacePath, sessionId, review, enabled]);
+  const scope = JSON.stringify([
+    workspacePath,
+    sessionId,
+    review,
+    enabled,
+    runtime.memoryLearningVersion,
+  ]);
   const scopeRef = useRef({ scope, generation: 0 });
   if (scopeRef.current.scope !== scope)
     scopeRef.current = { scope, generation: scopeRef.current.generation + 1 };
@@ -61,7 +67,39 @@ export function useTaskExperience(
     const request = ++sequence.current;
     setLoading(true);
     try {
-      const result = await actions.queryTaskExperiences(workspacePath, { sessionId, review });
+      const results =
+        runtime.memoryLearningVersion === 3
+          ? await Promise.all(
+              ["method", "case"].map((representation) =>
+                actions.queryTaskExperiences(workspacePath, {
+                  sessionId,
+                  review,
+                  representation: representation as "method" | "case",
+                }),
+              ),
+            )
+          : [await actions.queryTaskExperiences(workspacePath, { sessionId, review })];
+      const result = {
+        ...results[0]!,
+        revision: Math.max(...results.map((page) => page.revision)),
+        items: [
+          ...new Map(
+            results.flatMap((page) => page.items).map((item) => [item.candidateId, item]),
+          ).values(),
+        ],
+        reuse: [
+          ...new Map(
+            results.flatMap((page) => page.reuse).map((item) => [item.reuseId, item]),
+          ).values(),
+        ],
+        receipts: [
+          ...new Map(
+            results
+              .flatMap((page) => page.receipts ?? [])
+              .map((receipt) => [receipt.operationId, receipt]),
+          ).values(),
+        ],
+      };
       if (
         !mounted.current ||
         scopeRef.current.scope !== scope ||
@@ -113,7 +151,16 @@ export function useTaskExperience(
       )
         setLoading(false);
     }
-  }, [actions, enabled, workspacePath, scope, generation, sessionId, review]);
+  }, [
+    actions,
+    enabled,
+    workspacePath,
+    scope,
+    generation,
+    sessionId,
+    review,
+    runtime.memoryLearningVersion,
+  ]);
   useEffect(() => {
     void refresh();
     return () => {
@@ -208,6 +255,8 @@ export function useTaskExperience(
       : undefined;
   return {
     supported: Boolean(runtime.taskExperienceSupported),
+    learningVersion: runtime.memoryLearningVersion ?? 2,
+    receipts: result?.receipts ?? [],
     items: result?.items ?? [],
     reuse: result?.reuse ?? [],
     workspaceKey: result?.workspaceKey ?? "",

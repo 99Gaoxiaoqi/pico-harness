@@ -11,7 +11,7 @@ export interface MemoryScopePage {
   readonly memory?: {
     readonly items: readonly (RuntimeMemoryItem | RuntimeMemoryListItem)[];
     readonly pageInfo?: RuntimeMemoryPageInfo;
-    readonly learningVersion?: 2;
+    readonly learningVersion?: 2 | 3;
   };
   readonly suggestions?: RuntimeResult<"memory.learning.query">;
   readonly usage?: RuntimeResult<"memory.experience.query">;

@@ -36,7 +36,7 @@ import "./MemoryPage.css";
 
 const panels = ["saved", "archived"] as const;
 type PanelId = "pending" | "usage" | (typeof panels)[number];
-const panelLabels = { pending: "待审核", saved: "已保存", archived: "已归档", usage: "使用记录" };
+const panelLabels = { pending: "需你决定", saved: "已保存", archived: "已归档", usage: "使用记录" };
 const kindLabels: Record<RuntimeMemoryItem["kind"], string> = {
   preference: "偏好",
   identity: "身份",
@@ -439,6 +439,7 @@ export function MemoryPage({
   ]);
   const [experienceEditing, setExperienceEditing] = useState(false);
   const [listQuery, setListQuery] = useState("");
+  const [recordType, setRecordType] = useState("all");
   const [selectedMemoryId, setSelectedMemoryId] = useState<string>();
   useEffect(() => {
     setSelectedMemoryId(undefined);
@@ -629,10 +630,30 @@ export function MemoryPage({
         );
     }
   };
+  const selectedRecordType = activePanel === "pending" ? "all" : recordType;
+  const filteredExperience = experience.items
+    .filter(
+      (item) =>
+        selectedRecordType === "all" ||
+        (selectedRecordType === "method" && item.representation !== "case") ||
+        (selectedRecordType === "case" && item.representation === "case"),
+    )
+    .sort(
+      (left, right) =>
+        Number(left.representation === "case") - Number(right.representation === "case"),
+    );
+  const matchesRecordType = (item: MemoryListItem) =>
+    (selectedRecordType === "all" ||
+      (selectedRecordType === "fact" && !item.taskExperience) ||
+      (selectedRecordType === "method" && Boolean(item.taskExperience))) &&
+    `${item.content} ${kindLabels[item.kind]}`
+      .toLocaleLowerCase()
+      .includes(listQuery.trim().toLocaleLowerCase());
   const groups = {
     saved: memoryItems.filter(
       (item) =>
         item.lifecycleState === "active" &&
+        matchesRecordType(item) &&
         (!item.taskExperience ||
           !experience.items.some(
             (candidate) => candidate.candidateId === item.taskExperience?.candidateId,
@@ -641,6 +662,7 @@ export function MemoryPage({
     archived: memoryItems.filter(
       (item) =>
         item.lifecycleState === "archived" &&
+        matchesRecordType(item) &&
         (!item.taskExperience ||
           !experience.items.some(
             (candidate) => candidate.candidateId === item.taskExperience?.candidateId,
@@ -799,9 +821,10 @@ export function MemoryPage({
       )}
       <TaskExperiencePanel
         key={scopeFilter}
-        items={showExperience ? experience.items : []}
+        items={showExperience ? filteredExperience : []}
+        learningVersion={experience.learningVersion}
         reuse={experience.reuse}
-        searchQuery={embedded ? listQuery : undefined}
+        searchQuery={listQuery}
         onDraftStateChange={embedded ? setExperienceEditing : undefined}
         selectionLocked={embedded && editing}
         onSelectExperience={embedded ? () => setSelectedMemoryId(undefined) : undefined}
@@ -837,11 +860,12 @@ export function MemoryPage({
         ? pendingCount
         : Math.max(
             (scopeFilter === "all" &&
+              selectedRecordType === "all" &&
               !hasLegacyItems &&
               memory.pageInfo?.counts[panel === "saved" ? "active" : "archived"]) ||
               0,
             groups[panel].length +
-              (showExperience ? experience.items : []).filter((item) =>
+              (showExperience ? filteredExperience : []).filter((item) =>
                 panel === "archived"
                   ? item.lifecycleState === "archived"
                   : isExperienceSuggestion(item) &&
@@ -1052,7 +1076,7 @@ export function MemoryPage({
           );
     const matchingExperience =
       showExperience &&
-      experience.items.some(
+      filteredExperience.some(
         (item) =>
           (panel === "pending"
             ? isExperienceSuggestion(item) && experienceNeedsReview(item)
@@ -1089,7 +1113,9 @@ export function MemoryPage({
             {query
               ? "没有匹配的记忆或经验。"
               : panel === "pending"
-                ? "没有待审核的任务经验。"
+                ? experience.learningVersion === 3
+                  ? "没有需要你决定的任务经验。"
+                  : "没有待审核的任务经验。"
                 : `没有${panelLabels[panel]}的记忆。`}
           </p>
         )}
@@ -1126,6 +1152,7 @@ export function MemoryPage({
       ) : (
         <ExperienceUsagePanel
           uses={ledger.uses}
+          learningVersion={ledger.learningVersion}
           diagnostics={ledger.diagnostics}
           workspacePath={data.workspacePath}
           onDetail={ledger.onDetail}
@@ -1473,7 +1500,7 @@ export function MemoryPage({
               请先保存或取消当前编辑，再切换条目、标签或范围。
             </p>
           )}
-          {embedded && (
+          {(embedded || experience.learningVersion === 3) && (
             <div className="memory-content__search">
               <TextField
                 label="搜索记忆内容"
@@ -1482,6 +1509,22 @@ export function MemoryPage({
                 value={listQuery}
                 onValueChange={setListQuery}
               />
+              {experience.learningVersion === 3 &&
+                activePanel !== "pending" &&
+                activePanel !== "usage" && (
+                  <SelectField
+                    label="记忆类型"
+                    value={recordType}
+                    disabled={editing}
+                    options={[
+                      { value: "all", label: "全部类型" },
+                      { value: "fact", label: "事实" },
+                      { value: "method", label: "方法建议" },
+                      { value: "case", label: "案例" },
+                    ]}
+                    onValueChange={setRecordType}
+                  />
+                )}
               <span>搜索当前已加载的记忆与经验</span>
             </div>
           )}
@@ -1505,7 +1548,11 @@ export function MemoryPage({
                     }}
                     id={`memory-tab-${panel}`}
                     panelId={`memory-panel-${panel}`}
-                    label={panelLabels[panel]}
+                    label={
+                      panel === "pending" && experience.learningVersion !== 3
+                        ? "待审核"
+                        : panelLabels[panel]
+                    }
                     endContent={<span className="memory-tab__count">{panelCount(panel)}</span>}
                   />
                 ))}

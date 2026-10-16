@@ -66,13 +66,21 @@ export function MemoryPolicySection() {
             <legend>用户级记忆策略</legend>
             {(
               [
-                ["enabled", "启用记忆", "关闭后，所有项目停止提取和召回；已保存的内容保留。"],
+                [
+                  "enabled",
+                  "启用记忆",
+                  "关闭自动记忆读写与召回；仍可管理和明确删除记忆，普通运行日志继续记录。",
+                ],
                 [
                   "autoExtract",
                   "自动提取长期信息",
-                  "从对话形成新的长期信息与经验提案。关闭只停止新提案；历史引用、效果记录和经验管理仍可继续，召回由独立开关控制。",
+                  "控制自动事实提取、经验反思和派生案例。关闭后仍可使用已有记忆并记录允许的实际效果；明确记住需由你授权。",
                 ],
-                ["recallEnabled", "会话召回", "根据当前问题召回相关记忆，遵循项目隔离。"],
+                [
+                  "recallEnabled",
+                  "召回记忆",
+                  "控制自动注入与主动记忆搜索。关闭后仍可学习，管理页仍可查看。",
+                ],
               ] as const
             ).map(([key, label, detail]) => (
               <div className="settings-field" key={key}>
@@ -103,6 +111,9 @@ export function MemoryPolicySection() {
           </fieldset>
         </section>
       )}
+      <p>
+        有依据的事实自动保存；范围明确的低风险方法可作为建议；案例只留记录；需要改变长期做法或扩大范围时由你决定。
+      </p>
       <details className="settings-section memory-metrics" aria-labelledby="memory-metrics-title">
         <summary id="memory-metrics-title">最近 7 天记忆提取统计</summary>
         <p>

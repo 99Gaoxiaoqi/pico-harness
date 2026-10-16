@@ -2,7 +2,11 @@ import { uploadMimeType } from "../file-upload.js";
 import { PendingSendNotice } from "../PendingSendNotice.js";
 import { useTaskExperience } from "../useTaskExperience.js";
 import { ExperienceDrawerTrigger } from "../ExperienceDrawer.js";
-import { TaskExperiencePanel, isExperienceSuggestion } from "../TaskExperiencePanel.js";
+import {
+  TaskExperiencePanel,
+  isExperienceSuggestion,
+  experienceNeedsReview,
+} from "../TaskExperiencePanel.js";
 import { useExperienceLedger } from "../useExperienceLedger.js";
 import { ExperienceUsagePanel } from "../ExperienceUsagePanel.js";
 import { useFileDraft } from "../conversation/useFileDraft.js";
@@ -1784,13 +1788,18 @@ export function ConversationPage() {
                               (item) =>
                                 item.runId === runId &&
                                 isExperienceSuggestion(item) &&
-                                (item.review === "pending" || item.review === "deferred"),
+                                experienceNeedsReview(item),
                             ) ? (
                               <ExperienceDrawerTrigger
                                 key={JSON.stringify([workspacePath, sessionId, runId])}
-                                title="审核本轮任务经验"
+                                title={
+                                  experience.learningVersion === 3
+                                    ? "本轮需你决定"
+                                    : "审核本轮任务经验"
+                                }
                               >
                                 <TaskExperiencePanel
+                                  learningVersion={experience.learningVersion}
                                   sessionId={sessionId}
                                   workspacePath={workspacePath}
                                   items={experience.items.filter((item) => item.runId === runId)}
@@ -1801,6 +1810,7 @@ export function ConversationPage() {
                                 />
                                 {!ledger.supported && (
                                   <TaskExperiencePanel
+                                    learningVersion={experience.learningVersion}
                                     mode="conversation"
                                     showSummary={false}
                                     sessionId={sessionId}
@@ -1817,6 +1827,7 @@ export function ConversationPage() {
                               </ExperienceDrawerTrigger>
                             ) : (
                               <TaskExperiencePanel
+                                learningVersion={experience.learningVersion}
                                 mode="conversation"
                                 sessionId={sessionId}
                                 summaryRunId={runId}
@@ -1835,6 +1846,7 @@ export function ConversationPage() {
                               />
                             ))}
                           <ExperienceUsagePanel
+                            learningVersion={ledger.learningVersion}
                             presentation="drawer"
                             sessionId={sessionId}
                             uses={ledger.uses.filter(
@@ -1939,6 +1951,20 @@ export function ConversationPage() {
                 )
               }
             />
+            {experience.learningVersion === 3 && experience.receipts.length > 0 && (
+              <TaskExperiencePanel
+                learningVersion={3}
+                receipts={experience.receipts}
+                mode="conversation"
+                sessionId={sessionId}
+                workspacePath={workspacePath}
+                items={[]}
+                reuse={[]}
+                onDetail={experience.onDetail}
+                onReview={experience.onReview}
+                onFeedback={experience.onFeedback}
+              />
+            )}
             {experience.error && (
               <InlineNotice tone="error">
                 {experience.error}{" "}
@@ -1949,6 +1975,7 @@ export function ConversationPage() {
             )}
             {experience.supported && activeRun && (
               <TaskExperiencePanel
+                learningVersion={experience.learningVersion}
                 mode="conversation"
                 sessionId={sessionId}
                 items={experience.items}
@@ -1973,6 +2000,7 @@ export function ConversationPage() {
               </InlineNotice>
             )}
             <ExperienceUsagePanel
+              learningVersion={ledger.learningVersion}
               presentation="drawer"
               sessionId={sessionId}
               uses={

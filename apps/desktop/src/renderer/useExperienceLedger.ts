@@ -50,7 +50,7 @@ export function useExperienceLedger(
     data.workspacePath === workspacePath &&
     data.trusted,
   );
-  const scope = JSON.stringify([workspacePath, sessionId, enabled]);
+  const scope = JSON.stringify([workspacePath, sessionId, enabled, runtime.memoryLearningVersion]);
   const scopeRef = useRef({ scope, generation: 0 });
   if (scopeRef.current.scope !== scope)
     scopeRef.current = { scope, generation: scopeRef.current.generation + 1 };
@@ -208,6 +208,7 @@ export function useExperienceLedger(
   }, [read, result?.nextCursor]);
   return {
     supported,
+    learningVersion: runtime.memoryLearningVersion ?? 2,
     uses: result?.uses ?? [],
     diagnostics: result?.diagnostics ?? [],
     hasMore: Boolean(result?.nextCursor),

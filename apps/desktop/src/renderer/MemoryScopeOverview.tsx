@@ -20,7 +20,7 @@ import { sessionHref, workspaceDisplayName } from "./workspace-session.js";
 
 const labels: Record<MemoryScopeTab, string> = {
   saved: "已保存",
-  pending: "待审核",
+  pending: "需你决定",
   archived: "已归档",
   usage: "使用记录",
 };
@@ -81,7 +81,11 @@ export function MemoryScopeOverview({
             scope === "global" && (tab === "pending" || tab === "usage")
               ? {}
               : await actions.queryMemoryScope(workspace.path, tab);
-          if (tab === "saved" && scope !== "global" && runtime.taskExperienceSupported) {
+          if (
+            (tab === "saved" || tab === "archived") &&
+            scope !== "global" &&
+            runtime.taskExperienceSupported
+          ) {
             try {
               const experiencePage = await actions.queryMemoryScope(workspace.path, "pending");
               if (experiencePage.suggestions)
@@ -204,7 +208,9 @@ export function MemoryScopeOverview({
       if (
         candidate.kind !== "task-lesson" ||
         !isExperienceSuggestion(candidate) ||
-        candidate.lifecycleState === "archived" ||
+        (tab === "archived"
+          ? candidate.lifecycleState !== "archived"
+          : candidate.lifecycleState === "archived") ||
         projectedCandidateIds.has(candidate.candidateId) ||
         (tab === "pending" ? !experienceNeedsReview(candidate) : !experienceIsSaved(candidate))
       )
@@ -215,7 +221,7 @@ export function MemoryScopeOverview({
         label: workspaceLabel,
         content: candidate.content,
         status: needsReview
-          ? "待审核 · " + experienceReviewReason(candidate)
+          ? "需你决定 · " + experienceReviewReason(candidate)
           : experienceStatusLabel(candidate) + " · " + experiencePromotionLabel(candidate),
         href: experienceManagementHref(
           workspace.path,

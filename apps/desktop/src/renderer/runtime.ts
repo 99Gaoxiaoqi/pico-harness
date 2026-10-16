@@ -125,6 +125,7 @@ const SHARED_CONFIG_CAPABILITY = "shared-config-v1";
 
 const WORKSPACE_MEMORY_CAPABILITY = "workspace-memory-v1";
 const TASK_EXPERIENCE_CAPABILITY = "memory-learning-v2";
+const MEMORY_LEARNING_V3_CAPABILITY = "memory-learning-v3";
 const EXPERIENCE_FEEDBACK_CAPABILITY = "memory-experience-feedback-v1";
 
 const MAX_RENDERER_SEEN_EVENT_IDS = 10_000;
@@ -586,7 +587,7 @@ export interface RuntimeActions {
   ): Promise<RuntimeMemoryConsolidationUndoResult>;
   queryTaskExperiences(
     workspacePath: string,
-    options?: { sessionId?: string; review?: ExperienceReview },
+    options?: { sessionId?: string; review?: ExperienceReview; representation?: "case" | "method" },
   ): Promise<RuntimeResult<"memory.learning.query">>;
   detailTaskExperience(
     workspacePath: string,
@@ -659,6 +660,7 @@ export interface RuntimeStore {
   readonly actions: RuntimeActions;
   readonly executionLearningRevision?: number;
   readonly taskExperienceSupported?: boolean;
+  readonly memoryLearningVersion?: 2 | 3;
   readonly experienceFeedbackSupported?: boolean;
   readonly pendingSends?: readonly PendingSendEntry[];
   readonly pendingSendBusy?: readonly string[];
@@ -1246,8 +1248,15 @@ export function useRuntimeStore(): RuntimeStore {
             workspacePath,
             lifecycleStates: ["active", "archived"],
             limit: 50,
-            ...(runtimeCapabilitiesRef.current.has(TASK_EXPERIENCE_CAPABILITY)
-              ? { learningVersion: 2 as const }
+            ...(runtimeCapabilitiesRef.current.has(TASK_EXPERIENCE_CAPABILITY) ||
+            runtimeCapabilitiesRef.current.has(MEMORY_LEARNING_V3_CAPABILITY)
+              ? {
+                  learningVersion: (runtimeCapabilitiesRef.current.has(
+                    MEMORY_LEARNING_V3_CAPABILITY,
+                  )
+                    ? 3
+                    : 2) as 2 | 3,
+                }
               : {}),
             ...(runtimeCapabilitiesRef.current.has(MEMORY_PAGINATION_RUNTIME_CAPABILITY)
               ? { paged: true as const }
@@ -3787,10 +3796,20 @@ export function useRuntimeStore(): RuntimeStore {
         if (!bridge) throw new Error("当前连接不可用。");
         let result: MemoryScopePage;
         if (tab === "pending") {
-          if (!runtimeCapabilitiesRef.current.has(TASK_EXPERIENCE_CAPABILITY))
+          if (
+            !(
+              runtimeCapabilitiesRef.current.has(TASK_EXPERIENCE_CAPABILITY) ||
+              runtimeCapabilitiesRef.current.has(MEMORY_LEARNING_V3_CAPABILITY)
+            )
+          )
             throw new Error("当前 Host 不支持经验审核，请更新后重试。");
           result = {
-            suggestions: await invoke(bridge, "memory.learning.query", { workspacePath }),
+            suggestions: await invoke(bridge, "memory.learning.query", {
+              workspacePath,
+              ...(runtimeCapabilitiesRef.current.has(MEMORY_LEARNING_V3_CAPABILITY)
+                ? { learningVersion: 3 as const }
+                : {}),
+            }),
           };
         } else if (tab === "usage") {
           if (!runtimeCapabilitiesRef.current.has(EXPERIENCE_FEEDBACK_CAPABILITY))
@@ -3798,6 +3817,9 @@ export function useRuntimeStore(): RuntimeStore {
           result = {
             usage: await invoke(bridge, "memory.experience.query", {
               workspacePath,
+              ...(runtimeCapabilitiesRef.current.has(MEMORY_LEARNING_V3_CAPABILITY)
+                ? { learningVersion: 3 as const }
+                : {}),
               limit: 50,
               ...(cursor ? { cursor } : {}),
             }),
@@ -3810,8 +3832,15 @@ export function useRuntimeStore(): RuntimeStore {
               workspacePath,
               lifecycleStates: [tab === "archived" ? "archived" : "active"],
               limit: 50,
-              ...(runtimeCapabilitiesRef.current.has(TASK_EXPERIENCE_CAPABILITY)
-                ? { learningVersion: 2 as const }
+              ...(runtimeCapabilitiesRef.current.has(TASK_EXPERIENCE_CAPABILITY) ||
+              runtimeCapabilitiesRef.current.has(MEMORY_LEARNING_V3_CAPABILITY)
+                ? {
+                    learningVersion: (runtimeCapabilitiesRef.current.has(
+                      MEMORY_LEARNING_V3_CAPABILITY,
+                    )
+                      ? 3
+                      : 2) as 2 | 3,
+                  }
                 : {}),
               ...(runtimeCapabilitiesRef.current.has(MEMORY_PAGINATION_RUNTIME_CAPABILITY)
                 ? { paged: true as const, ...(cursor ? { cursor } : {}) }
@@ -3872,15 +3901,25 @@ export function useRuntimeStore(): RuntimeStore {
         if (
           preview ||
           !bridge ||
-          !runtimeCapabilitiesRef.current.has(TASK_EXPERIENCE_CAPABILITY) ||
+          !(
+            runtimeCapabilitiesRef.current.has(TASK_EXPERIENCE_CAPABILITY) ||
+            runtimeCapabilitiesRef.current.has(MEMORY_LEARNING_V3_CAPABILITY)
+          ) ||
           dataRef.current.workspacePath !== workspacePath ||
           !dataRef.current.trusted
         )
           throw new Error("当前 Runtime 不支持任务经验管理。");
         return invoke(bridge, "memory.learning.query", {
+          ...(runtimeCapabilitiesRef.current.has(MEMORY_LEARNING_V3_CAPABILITY)
+            ? { learningVersion: 3 as const }
+            : {}),
           workspacePath,
           ...(options.sessionId ? { sessionId: options.sessionId } : {}),
           ...(options.review ? { review: options.review } : {}),
+          ...(runtimeCapabilitiesRef.current.has(MEMORY_LEARNING_V3_CAPABILITY) &&
+          options.representation
+            ? { representation: options.representation }
+            : {}),
         });
       },
       async detailTaskExperience(workspacePath, candidateId) {
@@ -3888,24 +3927,47 @@ export function useRuntimeStore(): RuntimeStore {
         if (
           preview ||
           !bridge ||
-          !runtimeCapabilitiesRef.current.has(TASK_EXPERIENCE_CAPABILITY) ||
+          !(
+            runtimeCapabilitiesRef.current.has(TASK_EXPERIENCE_CAPABILITY) ||
+            runtimeCapabilitiesRef.current.has(MEMORY_LEARNING_V3_CAPABILITY)
+          ) ||
           dataRef.current.workspacePath !== workspacePath ||
           !dataRef.current.trusted
         )
           throw new Error("当前 Runtime 不支持任务经验管理。");
-        return invoke(bridge, "memory.learning.detail", { workspacePath, candidateId });
+        return invoke(bridge, "memory.learning.detail", {
+          workspacePath,
+          candidateId,
+          ...(runtimeCapabilitiesRef.current.has(MEMORY_LEARNING_V3_CAPABILITY)
+            ? { learningVersion: 3 as const }
+            : {}),
+        });
       },
       async reviewTaskExperience(workspacePath, input) {
         const bridge = getBridge();
         if (
           preview ||
           !bridge ||
-          !runtimeCapabilitiesRef.current.has(TASK_EXPERIENCE_CAPABILITY) ||
+          !(
+            runtimeCapabilitiesRef.current.has(TASK_EXPERIENCE_CAPABILITY) ||
+            runtimeCapabilitiesRef.current.has(MEMORY_LEARNING_V3_CAPABILITY)
+          ) ||
           dataRef.current.workspacePath !== workspacePath ||
           !dataRef.current.trusted
         )
           throw new Error("当前 Runtime 不支持任务经验管理。");
-        const result = await invoke(bridge, "memory.learning.review", { workspacePath, ...input });
+        if (
+          !runtimeCapabilitiesRef.current.has(MEMORY_LEARNING_V3_CAPABILITY) &&
+          (input.action === "revise" || input.action === "keep_case")
+        )
+          throw new Error("当前 Host 不支持此操作，请更新后重试。");
+        const result = await invoke(bridge, "memory.learning.review", {
+          workspacePath,
+          ...input,
+          ...(runtimeCapabilitiesRef.current.has(MEMORY_LEARNING_V3_CAPABILITY)
+            ? { learningVersion: 3 as const }
+            : {}),
+        });
         if (dataRef.current.workspacePath === workspacePath) {
           setExecutionLearningRevision((revision) => revision + 1);
           void loadMemory(bridge, workspacePath).catch(() => undefined);
@@ -3917,12 +3979,18 @@ export function useRuntimeStore(): RuntimeStore {
         if (
           preview ||
           !bridge ||
-          !runtimeCapabilitiesRef.current.has(TASK_EXPERIENCE_CAPABILITY) ||
+          !(
+            runtimeCapabilitiesRef.current.has(TASK_EXPERIENCE_CAPABILITY) ||
+            runtimeCapabilitiesRef.current.has(MEMORY_LEARNING_V3_CAPABILITY)
+          ) ||
           dataRef.current.workspacePath !== workspacePath ||
           !dataRef.current.trusted
         )
           throw new Error("当前 Runtime 不支持任务经验管理。");
         const result = await invoke(bridge, "memory.learning.feedback", {
+          ...(runtimeCapabilitiesRef.current.has(MEMORY_LEARNING_V3_CAPABILITY)
+            ? { learningVersion: 3 as const }
+            : {}),
           workspacePath,
           ...input,
         });
@@ -3940,7 +4008,13 @@ export function useRuntimeStore(): RuntimeStore {
           !dataRef.current.trusted
         )
           throw new Error("当前 Runtime 不支持经验使用记录。");
-        return invoke(bridge, "memory.experience.query", { workspacePath, ...options });
+        return invoke(bridge, "memory.experience.query", {
+          workspacePath,
+          ...options,
+          ...(runtimeCapabilitiesRef.current.has(MEMORY_LEARNING_V3_CAPABILITY)
+            ? { learningVersion: 3 }
+            : {}),
+        });
       },
       async detailExperienceUse(workspacePath, useId) {
         const bridge = getBridge();
@@ -3952,7 +4026,13 @@ export function useRuntimeStore(): RuntimeStore {
           !dataRef.current.trusted
         )
           throw new Error("当前 Runtime 不支持经验使用记录。");
-        return invoke(bridge, "memory.experience.detail", { workspacePath, useId });
+        return invoke(bridge, "memory.experience.detail", {
+          workspacePath,
+          useId,
+          ...(runtimeCapabilitiesRef.current.has(MEMORY_LEARNING_V3_CAPABILITY)
+            ? { learningVersion: 3 }
+            : {}),
+        });
       },
       async feedbackExperienceUse(workspacePath, input) {
         const bridge = getBridge();
@@ -3964,7 +4044,15 @@ export function useRuntimeStore(): RuntimeStore {
           !dataRef.current.trusted
         )
           throw new Error("当前 Runtime 不支持经验使用记录。");
+        if (
+          !runtimeCapabilitiesRef.current.has(MEMORY_LEARNING_V3_CAPABILITY) &&
+          (input.action === "helpful" || input.action === "correct")
+        )
+          throw new Error("当前 Host 不支持此操作，请更新后重试。");
         const result = await invoke(bridge, "memory.experience.feedback", {
+          ...(runtimeCapabilitiesRef.current.has(MEMORY_LEARNING_V3_CAPABILITY)
+            ? { learningVersion: 3 }
+            : {}),
           workspacePath,
           ...input,
         });
@@ -3988,8 +4076,15 @@ export function useRuntimeStore(): RuntimeStore {
             await invoke(bridge, "memory.get", {
               workspacePath,
               itemId,
-              ...(runtimeCapabilitiesRef.current.has(TASK_EXPERIENCE_CAPABILITY)
-                ? { learningVersion: 2 as const }
+              ...(runtimeCapabilitiesRef.current.has(TASK_EXPERIENCE_CAPABILITY) ||
+              runtimeCapabilitiesRef.current.has(MEMORY_LEARNING_V3_CAPABILITY)
+                ? {
+                    learningVersion: (runtimeCapabilitiesRef.current.has(
+                      MEMORY_LEARNING_V3_CAPABILITY,
+                    )
+                      ? 3
+                      : 2) as 2 | 3,
+                  }
                 : {}),
             })
           ).item;
@@ -4023,8 +4118,15 @@ export function useRuntimeStore(): RuntimeStore {
               limit: 50,
               cursor: page.nextCursor,
               lifecycleStates: ["active", "archived"],
-              ...(runtimeCapabilitiesRef.current.has(TASK_EXPERIENCE_CAPABILITY)
-                ? { learningVersion: 2 as const }
+              ...(runtimeCapabilitiesRef.current.has(TASK_EXPERIENCE_CAPABILITY) ||
+              runtimeCapabilitiesRef.current.has(MEMORY_LEARNING_V3_CAPABILITY)
+                ? {
+                    learningVersion: (runtimeCapabilitiesRef.current.has(
+                      MEMORY_LEARNING_V3_CAPABILITY,
+                    )
+                      ? 3
+                      : 2) as 2 | 3,
+                  }
                 : {}),
             });
             if (
@@ -4167,8 +4269,15 @@ export function useRuntimeStore(): RuntimeStore {
             : await invoke(bridge, "memory.context.preview", {
                 workspacePath,
                 query: query.trim(),
-                ...(runtimeCapabilitiesRef.current.has(TASK_EXPERIENCE_CAPABILITY)
-                  ? { learningVersion: 2 as const }
+                ...(runtimeCapabilitiesRef.current.has(TASK_EXPERIENCE_CAPABILITY) ||
+                runtimeCapabilitiesRef.current.has(MEMORY_LEARNING_V3_CAPABILITY)
+                  ? {
+                      learningVersion: (runtimeCapabilitiesRef.current.has(
+                        MEMORY_LEARNING_V3_CAPABILITY,
+                      )
+                        ? 3
+                        : 2) as 2 | 3,
+                    }
                   : {}),
               });
         });
@@ -4452,7 +4561,12 @@ export function useRuntimeStore(): RuntimeStore {
     message,
     actions,
     executionLearningRevision,
-    taskExperienceSupported: runtimeCapabilitiesRef.current.has(TASK_EXPERIENCE_CAPABILITY),
+    taskExperienceSupported:
+      runtimeCapabilitiesRef.current.has(TASK_EXPERIENCE_CAPABILITY) ||
+      runtimeCapabilitiesRef.current.has(MEMORY_LEARNING_V3_CAPABILITY),
+    memoryLearningVersion: runtimeCapabilitiesRef.current.has(MEMORY_LEARNING_V3_CAPABILITY)
+      ? 3
+      : 2,
     experienceFeedbackSupported: runtimeCapabilitiesRef.current.has(EXPERIENCE_FEEDBACK_CAPABILITY),
     pendingSends,
     pendingSendBusy,

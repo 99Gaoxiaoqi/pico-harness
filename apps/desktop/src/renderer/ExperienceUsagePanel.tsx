@@ -14,6 +14,7 @@ import {
 
 interface ExperienceUsagePanelProps {
   readonly uses: readonly ExperienceUse[];
+  readonly learningVersion?: 2 | 3;
   readonly presentation?: "inline" | "drawer";
   readonly sessionId?: string;
   readonly diagnostics?: readonly ExperienceDiagnostic[];
@@ -93,7 +94,7 @@ export function ExperienceUsagePanel({
           </summary>
           <div className="task-experience__summary-content">
             <p>
-              用户审核、证据成熟度、是否采用与本次执行结果分别记录。只有已携带到模型请求的记录显示“已引用”。
+              用户审核、实际使用证据、是否采用与本次执行结果分别记录。只有已携带到模型请求的记录显示“已引用”。
             </p>
             {uses.map((use) =>
               use.source.kind === "execution-evidence" ? (
@@ -220,6 +221,7 @@ function UseCard({
   onDetail,
   onFeedback,
   inspectOnMount = false,
+  learningVersion,
 }: Omit<ExperienceUsagePanelProps, "uses"> & {
   readonly use: ExperienceUse;
   readonly inspectOnMount?: boolean;
@@ -288,7 +290,14 @@ function UseCard({
   const feedback = async (action: ExperienceUseFeedbackRequest["action"]) => {
     if (inFlight.current || conflict || current.deleted) return;
     inFlight.current = true;
-    const payload = { useId: use.useId, expectedItemVersion: use.itemVersion, action };
+    const payload = {
+      useId: use.useId,
+      expectedItemVersion: use.itemVersion,
+      action,
+      ...(learningVersion === 3 && use.source.kind === "reviewed-reference"
+        ? { expectedContentVersion: use.source.contentVersion }
+        : {}),
+    };
     const fingerprint = JSON.stringify(payload);
     if (operation.current?.fingerprint !== fingerprint)
       operation.current = {
@@ -302,13 +311,17 @@ function UseCard({
       const result = await onFeedback(operation.current.request);
       if (!mounted.current) return;
       setCurrent((previous) => newerExperienceUse(previous, result));
-      if (action === "disable") setStopped(true);
+      if (action === "disable" || action === "correct") setStopped(true);
       setNotice(
         action === "not_applicable"
           ? "仅本次任务排除这条经验，其他任务仍可使用。"
-          : use.source.kind === "reviewed-reference"
-            ? "已停用这条经验，停止后续任务引用。旧使用记录仍保留。"
-            : "已归档并停止引用这条经验。旧使用记录仍保留。",
+          : action === "helpful"
+            ? "已记录这条有用；只关联本次引用，不改变方法范围或验证结论。"
+            : action === "correct"
+              ? "已暂停这条引用对应的内容版本，旧使用记录保留。请在记忆页保存更正。"
+              : use.source.kind === "reviewed-reference"
+                ? "已停用这条经验，停止后续任务引用。旧使用记录仍保留。"
+                : "已归档并停止引用这条经验。旧使用记录仍保留。",
       );
       operation.current = undefined;
     } catch (failure) {
@@ -376,7 +389,9 @@ function UseCard({
               ? "保存时验收：限定执行目标通过"
               : use.source.kind === "execution-evidence"
                 ? "保存时证据：历史执行记录，范围未知"
-                : "保存时验收：试用或用户审核均不等于执行验证"}
+                : learningVersion === 3
+                  ? "保存为建议与用户批准均不等于执行验证"
+                  : "保存时验收：试用或用户审核均不等于执行验证"}
           </span>
           <span>采用：{unconfirmed ? "未知（引用未确认）" : adoptionLabels[current.adoption]}</span>
           <span>
@@ -417,6 +432,26 @@ function UseCard({
           >
             {open ? "收起使用详情" : "查看使用详情"}
           </Button>
+        )}
+        {learningVersion === 3 && (
+          <>
+            <Button
+              variant="quiet"
+              disabled={busy || conflict || current.deleted || unconfirmed || use.historical}
+              onClick={() => void feedback("helpful")}
+            >
+              这条有用
+            </Button>
+            <Button
+              variant="quiet"
+              disabled={
+                busy || conflict || current.deleted || stopped || unconfirmed || use.historical
+              }
+              onClick={() => void feedback("correct")}
+            >
+              纠正这条
+            </Button>
+          </>
         )}
         <Button
           variant="quiet"

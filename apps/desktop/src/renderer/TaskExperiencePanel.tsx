@@ -43,6 +43,13 @@ const riskLabels = { low: "低风险", high: "高风险", unclear: "原因待核
 const familyLabels = { general: "通用任务", coding: "代码任务", spreadsheet: "表格任务" };
 export interface TaskExperiencePanelProps {
   readonly items: readonly TaskExperienceCandidate[];
+  readonly learningVersion?: 2 | 3;
+  readonly receipts?: readonly {
+    operationId: string;
+    sessionId: string;
+    committedAt: number;
+    createdItemCount: number;
+  }[];
   readonly reuse: readonly TaskExperienceReuse[];
   readonly mode?: "memory" | "conversation";
   readonly filter?: "pending" | "saved" | "archived";
@@ -73,7 +80,9 @@ export function isExperienceSuggestion(item: TaskExperienceCandidate): boolean {
   return (
     item.kind === "task-lesson" &&
     Boolean(item.content.trim()) &&
-    (item.maturity !== undefined || item.review !== "unneeded") &&
+    (item.representation !== undefined ||
+      item.maturity !== undefined ||
+      item.review !== "unneeded") &&
     item.state !== "invalidated" &&
     item.state !== "discarded" &&
     item.state !== "expired"
@@ -89,6 +98,10 @@ type ExperienceSummaryView = Pick<
   | "promotionReason"
   | "positiveReuseCount"
   | "reviewReason"
+  | "representation"
+  | "usagePolicy"
+  | "expiresAt"
+  | "scopeUnresolved"
 >;
 
 export function experienceMaturity(
@@ -100,6 +113,7 @@ export function experienceMaturity(
 }
 
 export function experienceNeedsReview(item: ExperienceSummaryView): boolean {
+  if (item.usagePolicy) return item.usagePolicy === "review_required";
   return (
     item.review === "pending" ||
     item.review === "deferred" ||
@@ -113,12 +127,23 @@ export function experienceStatusLabel(
   item: ExperienceSummaryView & { readonly lifecycleState?: "active" | "archived" },
 ): string {
   if (item.lifecycleState === "archived") return "已归档";
+  if (item.usagePolicy) {
+    if (item.expiresAt && item.expiresAt <= Date.now()) return "已暂停";
+    if (item.usagePolicy === "blocked") return "已暂停";
+    if (item.usagePolicy === "case_only" || item.representation === "case") return "仅作案例";
+    if (item.usagePolicy === "review_required") return "需你决定";
+    return item.enabled ? "可用建议" : "已停用";
+  }
   if (experienceNeedsReview(item)) return "待审核";
   if (experienceMaturity(item) === "suspended") return "已暂停";
   return item.enabled ? maturityLabels[experienceMaturity(item)] : "已停用";
 }
 
 export function experiencePromotionLabel(item: ExperienceSummaryView): string {
+  if (item.usagePolicy)
+    return item.representation === "case"
+      ? "保留本次过程，尚不能推出通用方法"
+      : "仅在所列范围内作为建议";
   const reason = item.promotionReason;
   if (reason && reason !== "none") return promotionReasonLabels[reason];
   if (experienceMaturity(item) === "trial") {
@@ -142,7 +167,100 @@ export function experienceReviewReason(
 }
 
 export function experienceIsSaved(item: ExperienceSummaryView): boolean {
+  if (item.usagePolicy) return item.usagePolicy !== "review_required";
   return !experienceNeedsReview(item) && experienceMaturity(item) !== "unassessed";
+}
+
+export function experienceCanRestore(item: TaskExperienceCandidate): boolean {
+  if (
+    item.review === "rejected" ||
+    item.state === "discarded" ||
+    item.scopeUnresolved ||
+    item.reason === "user_correction" ||
+    item.reason === "trusted_reuse_contradiction" ||
+    item.usagePolicy === "blocked" ||
+    (item.maturity === "suspended" && item.validation === "fail")
+  )
+    return false;
+  if (item.usagePolicy)
+    return (
+      item.usagePolicy === "suggestion" ||
+      (item.representation === "case" && item.lifecycleState === "archived")
+    );
+  return (
+    item.review === "approved" ||
+    (item.review === "unneeded" &&
+      item.risk === "low" &&
+      (item.maturity === "trial" || item.maturity === "active"))
+  );
+}
+
+function DecisionContext({ candidate }: { readonly candidate: TaskExperienceCandidate }) {
+  if (!candidate.usagePolicy) return null;
+  const labels = {
+    high_impact: "将高影响操作作为默认做法",
+    scope_expansion: "扩大方法适用范围",
+    long_term_conflict: "改变既有长期做法",
+  };
+  return (
+    <section className="task-experience__review-context" aria-label="变化、范围与影响">
+      {candidate.decisionKind && <p>拟议变化：{labels[candidate.decisionKind]}</p>}
+      {experienceNeedsReview(candidate) && (
+        <>
+          <p>当前状态：该提案未获允许；既有做法见下方来源记录。</p>
+          <p>拟议做法：{candidate.content}</p>
+          <p>
+            影响：{candidate.reviewReason || candidate.reason || "仅允许下面列明的做法和范围。"}
+          </p>
+        </>
+      )}
+      {candidate.scopeUnresolved && <p>条件尚未核实，需要重新限定适用范围。</p>}
+      {candidate.usagePolicy === "blocked" && (
+        <p>
+          已暂停：
+          {candidate.reason === "user_correction"
+            ? "用户纠正了这个版本，需要保存新版本后重新判断。"
+            : candidate.reason === "trusted_reuse_contradiction"
+              ? "具体使用结果与这个版本矛盾，需要修订。"
+              : candidate.reason || "当前版本不能引用。"}
+        </p>
+      )}
+      {candidate.expiresAt && (
+        <p>保留期限：{new Date(candidate.expiresAt).toLocaleString("zh-CN")}</p>
+      )}
+      {candidate.review === "approved" && (
+        <p>人工决定：已允许在所列范围作为建议，未扩大验证结论。</p>
+      )}
+      {candidate.decisionKind === "long_term_conflict" && (
+        <p>
+          既有长期做法需在对应记忆编辑器明确保存后更新。
+          <Link className="button" to="/settings/memory?tab=saved">
+            打开记忆编辑器
+          </Link>
+        </p>
+      )}
+    </section>
+  );
+}
+function EvidenceSummary({ candidate }: { readonly candidate: TaskExperienceCandidate }) {
+  const evidence = candidate.evidenceSummary;
+  if (!evidence) return null;
+  return (
+    <section aria-label="实际使用证据">
+      <h5>实际使用证据 · 内容 v{candidate.contentVersion}</h5>
+      <p>
+        实际引用 {evidence.deliveredCount} 次 · 独立任务 {evidence.independentTaskCount} 个 ·
+        观察到采用 {evidence.adoptedCount} 次 · 明确有用 {evidence.helpfulCount} 次 · 反证{" "}
+        {evidence.contradictionCount} 次
+      </p>
+      {evidence.results.map((result) => (
+        <p key={result.scope + result.validation}>
+          范围 {result.scope}：{validationLabels[result.validation]} {result.count} 次
+        </p>
+      ))}
+      <p>每项结果只支持所列范围，人工批准与验证结果分别记录。</p>
+    </section>
+  );
 }
 
 function memoryLink(workspacePath?: string, tab = "saved"): string {
@@ -250,8 +368,14 @@ function ExperienceReviewBoard({
   if (visible.length === 0 && !selected && !actions.supplementalRows)
     return filter === "pending" ? (
       <EmptyState
-        title="没有需要审核的任务经验"
-        detail="低风险经验会先进入受限试用；只有风险较高或来源需要核实的建议才会等待审核。"
+        title={
+          actions.learningVersion === 3 ? "没有需要你决定的任务经验" : "没有需要审核的任务经验"
+        }
+        detail={
+          actions.learningVersion === 3
+            ? "范围明确的低风险方法可以直接作为建议；原因不明的过程保留为案例。"
+            : "低风险经验会先进入受限试用；只有风险较高或来源需要核实的建议才会等待审核。"
+        }
       />
     ) : null;
   return (
@@ -285,7 +409,9 @@ function ExperienceReviewBoard({
           actions.supplementalRows
             ? "记忆与经验"
             : filter === "pending"
-              ? "待审核的任务经验"
+              ? actions.learningVersion === 3
+                ? "需你决定的任务经验"
+                : "待审核的任务经验"
               : "任务经验"
         }
       >
@@ -317,10 +443,10 @@ function ExperienceReviewBoard({
             <span>{item.content || "正在整理任务结果…"}</span>
             <span className="task-experience__meta">
               <span>{experienceStatusLabel(item)}</span>
-              {experienceMaturity(item) === "trial" && (
+              {!item.usagePolicy && experienceMaturity(item) === "trial" && (
                 <span>{experiencePromotionLabel(item)}</span>
               )}
-              {experienceMaturity(item) === "active" && (
+              {!item.usagePolicy && experienceMaturity(item) === "active" && (
                 <span>晋级依据：{experiencePromotionLabel(item)}</span>
               )}
               <span>
@@ -345,6 +471,7 @@ function ExperienceReviewBoard({
             <ExperienceDetailCard
               key={JSON.stringify([scope, selected.candidateId])}
               candidate={selected}
+              learningVersion={actions.learningVersion}
               onDetail={actions.onDetail}
               onReview={actions.onReview}
               initialDetail={
@@ -379,6 +506,85 @@ function ExperienceReviewBoard({
 }
 
 function ConversationLearning(props: TaskExperiencePanelProps) {
+  return props.learningVersion === 3 || props.items.some((item) => item.representation) ? (
+    <ConversationLearningV3 {...props} />
+  ) : (
+    <ConversationLearningV2 {...props} />
+  );
+}
+
+function ConversationLearningV3(props: TaskExperiencePanelProps) {
+  const items =
+    props.showSummary === false
+      ? []
+      : props.items.filter(
+          (item) =>
+            (!props.sessionId || item.sessionId === props.sessionId) &&
+            (!props.summaryRunId || item.runId === props.summaryRunId),
+        );
+  const committed = items.filter((item) =>
+    item.representation === "case"
+      ? item.state === "ready"
+      : item.state === "saved" && Boolean(item.itemId),
+  );
+  const decisions = items.filter(
+    (item) => isExperienceSuggestion(item) && experienceNeedsReview(item),
+  );
+  const processing = items.some((item) => item.state === "working" || item.state === "waiting");
+  const receipts = [
+    ...new Map(
+      (props.summaryRunId ? [] : (props.receipts ?? []))
+        .filter((receipt) => !props.sessionId || receipt.sessionId === props.sessionId)
+        .map((receipt) => [receipt.operationId, receipt]),
+    ).values(),
+  ];
+  const facts = receipts.reduce((count, receipt) => count + receipt.createdItemCount, 0);
+  const methods = committed.filter(
+    (item) => item.usagePolicy === "suggestion" && item.enabled,
+  ).length;
+  const cases = committed.filter((item) => item.representation === "case").length;
+  if (!facts && !committed.length && !decisions.length && !processing) return null;
+  return (
+    <details
+      className="experience-record task-experience__summary"
+      aria-label={props.summaryRunId ? "本轮任务学习摘要" : "本会话最近保存"}
+    >
+      <summary>
+        <span>{props.summaryRunId ? "本轮任务学习" : "本会话最近保存"}</span>
+        {facts > 0 && <span>已保存 {facts} 条事实</span>}
+        {methods > 0 && <span>{methods} 条可用建议</span>}
+        {cases > 0 && <span>保留 {cases} 条任务案例</span>}
+        {decisions.length > 0 && <span>{decisions.length} 条需你决定</span>}
+        {processing && <span>正在整理，尚未保存</span>}
+      </summary>
+      <div className="task-experience__summary-content">
+        {committed.map((item) => (
+          <div key={item.candidateId} className="task-experience__summary-row">
+            <span>{item.goal}</span>
+            <ExperienceState candidate={item} />
+          </div>
+        ))}
+        {decisions.map((item) => (
+          <ConversationReviewCard
+            key={item.candidateId}
+            candidate={item}
+            workspacePath={props.workspacePath}
+            onDetail={props.onDetail}
+            onReview={props.onReview}
+          />
+        ))}
+        <Link
+          className="button"
+          to={memoryLink(props.workspacePath, decisions.length ? "pending" : "saved")}
+        >
+          查看记忆与案例
+        </Link>
+      </div>
+    </details>
+  );
+}
+
+function ConversationLearningV2(props: TaskExperiencePanelProps) {
   const location = useLocation();
   const candidates =
     props.showSummary === false
@@ -592,7 +798,9 @@ function ConversationReviewCard({
     );
   }, [candidate]);
 
-  const act = async (action: Extract<ExperienceReviewAction, "accept" | "defer" | "reject">) => {
+  const act = async (
+    action: Extract<ExperienceReviewAction, "accept" | "defer" | "reject" | "keep_case">,
+  ) => {
     if (inFlight.current || !experienceNeedsReview(current)) return;
     inFlight.current = true;
     const payload = {
@@ -618,7 +826,9 @@ function ConversationReviewCard({
           ? "已确认并启用；这不代表经验已经通过验证。"
           : action === "defer"
             ? "已暂缓，这条经验不会用于后续任务。"
-            : "已拒绝，这条经验不会用于后续任务。",
+            : action === "keep_case"
+              ? "已保留为案例，取消本次决定请求。"
+              : "已删除，这条经验不会用于后续任务。",
       );
     } catch (failure) {
       setError(
@@ -646,11 +856,14 @@ function ConversationReviewCard({
             ? riskLabels.high
             : current.risk === "unclear"
               ? riskLabels.unclear
-              : "待审核"}
+              : current.usagePolicy
+                ? "需你决定"
+                : "待审核"}
         </strong>
-        <span>审核前不会用于后续任务</span>
+        <span>{current.usagePolicy ? "决定前不会用于后续任务" : "审核前不会用于后续任务"}</span>
       </header>
       <p>{experienceReviewReason(current)}</p>
+      <DecisionContext candidate={current} />
       <p className="task-experience__summary-review-content">{current.content}</p>
       <Applicability candidate={current} />
       <p>来源：{current.sources.length} 条本轮任务记录</p>
@@ -707,10 +920,12 @@ function ConversationReviewCard({
         <div className="task-experience__summary-review-actions">
           <Button
             variant="primary"
-            disabled={busy || !current.content.trim()}
+            disabled={
+              busy || !current.content.trim() || current.decisionKind === "long_term_conflict"
+            }
             onClick={() => void act("accept")}
           >
-            {busy ? "处理中…" : "确认并启用"}
+            {busy ? "处理中…" : current.usagePolicy ? "允许在所列范围使用" : "确认并启用"}
           </Button>
           <Link
             className="button button--quiet"
@@ -719,13 +934,18 @@ function ConversationReviewCard({
             }
             to={detailHref}
           >
-            编辑详情
+            {current.usagePolicy ? "编辑后决定" : "编辑详情"}
           </Link>
+          {current.usagePolicy && (
+            <Button variant="quiet" disabled={busy} onClick={() => void act("keep_case")}>
+              保留为案例
+            </Button>
+          )}
           <Button variant="quiet" disabled={busy} onClick={() => void act("defer")}>
-            暂缓
+            {current.usagePolicy ? "稍后决定" : "暂缓"}
           </Button>
           <Button variant="quiet" disabled={busy} onClick={() => void act("reject")}>
-            拒绝
+            {current.usagePolicy ? "删除" : "拒绝"}
           </Button>
         </div>
       )}
@@ -734,6 +954,14 @@ function ConversationReviewCard({
 }
 
 function ExperienceState({ candidate }: { readonly candidate: TaskExperienceCandidate }) {
+  if (candidate.usagePolicy)
+    return (
+      <span className="task-experience__meta">
+        <span>{experienceStatusLabel(candidate)}</span>
+        {candidate.representation === "case" && <span>保留本次过程，尚不能推出通用方法</span>}
+        <span>内容 v{candidate.contentVersion}</span>
+      </span>
+    );
   if (!isExperienceSuggestion(candidate))
     return (
       <span className="task-experience__meta">
@@ -775,6 +1003,7 @@ interface ExperienceDraft {
   readonly tools: string;
   readonly conditions: string;
   readonly base: TaskExperienceCandidate;
+  readonly representation?: "case" | "method";
 }
 function draftFrom(candidate: TaskExperienceCandidate): ExperienceDraft {
   return {
@@ -783,6 +1012,7 @@ function draftFrom(candidate: TaskExperienceCandidate): ExperienceDraft {
     tools: candidate.applicability.toolNames.join(", "),
     conditions: candidate.applicability.conditions.join("\n"),
     base: candidate,
+    representation: candidate.representation,
   };
 }
 function applicabilityFrom(draft: ExperienceDraft): ExperienceApplicability {
@@ -804,12 +1034,13 @@ function ExperienceDetailCard({
   onDetail,
   onReview,
   correction = false,
+  learningVersion,
   onSaved,
   initialDetail,
   reference,
   onDraftChange,
   targetUnavailable,
-}: Pick<TaskExperiencePanelProps, "onDetail" | "onReview"> & {
+}: Pick<TaskExperiencePanelProps, "onDetail" | "onReview" | "learningVersion"> & {
   readonly candidate: TaskExperienceCandidate;
   readonly correction?: boolean;
   readonly onSaved?: (candidate: TaskExperienceCandidate) => void;
@@ -818,6 +1049,7 @@ function ExperienceDetailCard({
   readonly onDraftChange?: (present: boolean) => void;
   readonly targetUnavailable?: boolean;
 }) {
+  const v3 = learningVersion === 3 || Boolean(candidate.usagePolicy);
   const [detail, setDetail] = useState<ExperienceDetail | undefined>(initialDetail);
   const [current, setCurrent] = useState(candidate);
   const [draft, setDraft] = useState<ExperienceDraft | undefined>(() =>
@@ -921,8 +1153,8 @@ function ExperienceDetailCard({
     if (
       inFlight.current ||
       unavailable ||
-      (action === "restore" && (current.review === "rejected" || current.state === "discarded")) ||
-      (action === "edit_accept" &&
+      (action === "restore" && !experienceCanRestore(current)) ||
+      ((action === "edit_accept" || action === "revise") &&
         (!draft?.content.trim() ||
           conflict ||
           current.review === "rejected" ||
@@ -931,14 +1163,18 @@ function ExperienceDetailCard({
       return;
     inFlight.current = true;
     lastAction.current = action;
-    const base = action === "edit_accept" && draft ? draft.base : current;
+    const base = (action === "edit_accept" || action === "revise") && draft ? draft.base : current;
     const payload = {
       candidateId: base.candidateId,
       expectedRecordRevision: base.recordRevision,
       expectedContentVersion: base.contentVersion,
       action,
-      ...(action === "edit_accept" && draft
-        ? { content: draft.content.trim(), applicability: applicabilityFrom(draft) }
+      ...((action === "edit_accept" || action === "revise") && draft
+        ? {
+            content: draft.content.trim(),
+            applicability: applicabilityFrom(draft),
+            ...(v3 && draft.representation ? { representation: draft.representation } : {}),
+          }
         : {}),
     };
     const fingerprint = JSON.stringify(payload);
@@ -963,11 +1199,13 @@ function ExperienceDetailCard({
       setConflict(false);
       operation.current = undefined;
       setNotice(
-        action === "edit_accept"
-          ? `已保存并启用内容 v${result.contentVersion}，验证状态已重置，等待后续任务验证。`
-          : "操作已保存。",
+        action === "revise"
+          ? `已保存更正为内容 v${result.contentVersion}，${experienceStatusLabel(result)}；证据按新版本重新积累。`
+          : action === "edit_accept"
+            ? `已保存并启用内容 v${result.contentVersion}，验证状态已重置，等待后续任务验证。`
+            : "操作已保存。",
       );
-      if (action === "edit_accept") onSaved?.(result);
+      if (action === "edit_accept" || action === "revise") onSaved?.(result);
       return result;
     } catch (failure) {
       if (!mounted.current) return;
@@ -1018,6 +1256,8 @@ function ExperienceDetailCard({
           </InlineNotice>
         )}
       {current.reason && !experienceNeedsReview(current) && <p>{current.reason}</p>}
+      {v3 && <DecisionContext candidate={current} />}
+      {v3 && <EvidenceSummary candidate={current} />}
       {experienceNeedsReview(current) && !unavailable && (
         <section className="task-experience__review-context" aria-label="审核原因和来源">
           <strong>
@@ -1035,7 +1275,7 @@ function ExperienceDetailCard({
           <p>审核通过前，这条建议不会用于后续任务。</p>
         </section>
       )}
-      {!experienceNeedsReview(current) && experienceMaturity(current) !== "unassessed" && (
+      {!v3 && !experienceNeedsReview(current) && experienceMaturity(current) !== "unassessed" && (
         <section className="task-experience__promotion-context" aria-label="经验状态和晋级依据">
           <strong>{experienceStatusLabel(current)}</strong>
           <span>{experiencePromotionLabel(current)}</span>
@@ -1070,14 +1310,30 @@ function ExperienceDetailCard({
           className="task-experience__editor"
           onSubmit={(event) => {
             event.preventDefault();
-            void act("edit_accept");
+            void act(v3 ? "revise" : "edit_accept");
           }}
         >
           <p>
-            {correction
-              ? "旧版本已停止用于后续引用。本次保存将确认并启用一个新内容版本，验证结果会重置。"
-              : "更正期间这条经验保持停用。保存时一次性确认并启用更正版本；验证结果会重置。"}
+            {v3
+              ? "更正期间旧版本停止引用。普通保存后由系统按内容和范围判断是否可用；保存不会批准高影响做法。"
+              : correction
+                ? "旧版本已停止用于后续引用。本次保存将确认并启用一个新内容版本，验证结果会重置。"
+                : "更正期间这条经验保持停用。保存时一次性确认并启用更正版本；验证结果会重置。"}
           </p>
+          {v3 && draft.base.representation === "case" && (
+            <SelectField
+              label="保存形式"
+              value={draft.representation ?? "case"}
+              disabled={busy}
+              options={[
+                { value: "case", label: "保留案例" },
+                { value: "method", label: "保存为方法" },
+              ]}
+              onValueChange={(representation) =>
+                setDraft({ ...draft, representation: representation as "case" | "method" })
+              }
+            />
+          )}
           <label>
             经验内容
             <TextAreaField
@@ -1161,8 +1417,25 @@ function ExperienceDetailCard({
                 !draft.content.trim()
               }
             >
-              {busy ? "保存中…" : "保存更正并启用"}
+              {busy
+                ? "保存中…"
+                : v3
+                  ? draft.base.representation === "case" && draft.representation === "method"
+                    ? "保存为方法"
+                    : "保存更正"
+                  : "保存更正并启用"}
             </Button>
+            {v3 &&
+              experienceNeedsReview(draft.base) &&
+              draft.base.decisionKind !== "long_term_conflict" && (
+                <Button
+                  variant="quiet"
+                  disabled={busy || conflict || unavailable || !draft.content.trim()}
+                  onClick={() => void act("edit_accept")}
+                >
+                  保存并允许在所列范围使用
+                </Button>
+              )}
             <Button variant="quiet" disabled={busy} onClick={() => setDraft(undefined)}>
               取消更正
             </Button>
@@ -1180,28 +1453,39 @@ function ExperienceDetailCard({
           )}
           {current.enabled && <p>开始更正会先停止使用旧版本。取消更正后，可单独重新启用。</p>}
           <div className="memory-card__actions">
-            {(current.review === "pending" || current.review === "deferred") && (
+            {experienceNeedsReview(current) && (
               <>
                 <Button
                   variant="primary"
-                  disabled={busy || !current.content.trim()}
+                  disabled={
+                    busy || !current.content.trim() || current.decisionKind === "long_term_conflict"
+                  }
                   onClick={() => void act("accept")}
                 >
-                  确认并启用
+                  {v3 ? "允许在所列范围使用" : "确认并启用"}
                 </Button>
+                {v3 && (
+                  <Button
+                    variant="quiet"
+                    disabled={busy || unavailable}
+                    onClick={() => void act("keep_case")}
+                  >
+                    保留为案例
+                  </Button>
+                )}
                 <Button
                   variant="quiet"
                   disabled={busy || unavailable}
                   onClick={() => void act("defer")}
                 >
-                  暂缓
+                  {v3 ? "稍后决定" : "暂缓"}
                 </Button>
                 <Button
                   variant="quiet"
                   disabled={busy || unavailable}
                   onClick={() => void act("reject")}
                 >
-                  拒绝
+                  {v3 ? "删除并拒绝" : "拒绝"}
                 </Button>
               </>
             )}
@@ -1211,22 +1495,24 @@ function ExperienceDetailCard({
                 disabled={busy || unavailable}
                 onClick={() => void beginEditing()}
               >
-                {current.enabled ? "开始更正" : "编辑并确认"}
+                {v3
+                  ? experienceNeedsReview(current)
+                    ? "编辑后决定"
+                    : "编辑更正"
+                  : current.enabled
+                    ? "开始更正"
+                    : "编辑并确认"}
               </Button>
             )}
-            {(current.review === "approved" ||
-              (current.review === "unneeded" &&
-                current.risk === "low" &&
-                (current.maturity === "trial" || current.maturity === "active"))) &&
+            {experienceCanRestore(current) &&
               !current.enabled &&
-              !(current.maturity === "suspended" && current.validation === "fail") &&
               current.lifecycleState !== "archived" && (
                 <Button
                   variant="quiet"
                   disabled={busy || unavailable}
                   onClick={() => void act("restore")}
                 >
-                  {current.maturity === "trial" ? "恢复受限试用" : "重新启用"}
+                  {v3 ? "重新启用建议" : current.maturity === "trial" ? "恢复受限试用" : "重新启用"}
                 </Button>
               )}
             {current.enabled && (
@@ -1238,29 +1524,32 @@ function ExperienceDetailCard({
                 停用
               </Button>
             )}
-            {(current.review === "approved" ||
-              (current.review === "unneeded" &&
-                current.risk === "low" &&
-                (current.maturity === "trial" || current.maturity === "active")) ||
-              current.lifecycleState === "archived") && (
-              <Button
-                variant="quiet"
-                disabled={
-                  busy ||
-                  unavailable ||
-                  current.review === "rejected" ||
-                  current.state === "discarded" ||
-                  (current.lifecycleState === "archived" &&
-                    current.maturity === "suspended" &&
-                    current.validation === "fail")
-                }
-                onClick={() =>
-                  void act(current.lifecycleState === "archived" ? "restore" : "archive")
-                }
-              >
-                {current.lifecycleState === "archived" ? "恢复" : "归档并停止引用"}
-              </Button>
-            )}
+            {(v3 ||
+              current.review === "approved" ||
+              current.lifecycleState === "archived" ||
+              (current.review === "unneeded" && current.risk === "low")) &&
+              (current.lifecycleState !== "archived" || experienceCanRestore(current)) && (
+                <Button
+                  variant="quiet"
+                  disabled={
+                    busy ||
+                    unavailable ||
+                    current.review === "rejected" ||
+                    current.state === "discarded"
+                  }
+                  onClick={() =>
+                    void act(current.lifecycleState === "archived" ? "restore" : "archive")
+                  }
+                >
+                  {current.lifecycleState === "archived"
+                    ? v3 && current.expiresAt
+                      ? `恢复并重新保留 ${current.representation === "case" ? 30 : 90} 天`
+                      : "恢复"
+                    : current.representation === "case"
+                      ? "归档案例"
+                      : "归档并停止引用"}
+                </Button>
+              )}
             <Button
               variant="quiet"
               disabled={busy || unavailable}
@@ -1330,6 +1619,21 @@ function Applicability({ candidate }: { readonly candidate: TaskExperienceCandid
           ? ` · ${candidate.applicability.toolNames.join("、")}`
           : ""}
       </p>
+      {candidate.requiredConditions && candidate.requiredConditions.length > 0 && (
+        <>
+          <h5>宿主必须核实的条件</h5>
+          <ul>
+            {candidate.requiredConditions.map((condition, index) => (
+              <li key={index}>
+                {condition.kind === "spreadsheet-range"
+                  ? "当前附件与目标范围：无表头、有限数值求和"
+                  : "当前执行目标必须与冻结的证据范围一致"}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+      {candidate.usagePolicy && <p>使用说明与例外：</p>}
       {candidate.applicability.conditions.length > 0 ? (
         <ul>
           {candidate.applicability.conditions.map((condition, index) => (
