@@ -280,6 +280,7 @@ export class AtomicMemoryRuntime {
     jobClaim?: MemoryExtractionJobClaim,
   ): Promise<AtomicMemoryResult> {
     let store: SqliteMemoryItemStore | undefined;
+    let activeClaim = jobClaim;
     try {
       const entries = await this.readEntries();
       const completedRunIds = new Set(
@@ -326,7 +327,6 @@ export class AtomicMemoryRuntime {
       if (!settings.enabled) return unavailable("memory_disabled");
       if (snapshot.signal?.aborted) return unavailable("aborted");
       if (!lastUser) return unavailable("source_unavailable");
-      let activeClaim = jobClaim;
       if (!activeClaim) {
         const jobId = extractionJobId({
           workspaceKey: this.workspaceKey,
@@ -356,10 +356,19 @@ export class AtomicMemoryRuntime {
           now: Date.now(),
           leaseDurationMs: 10 * 60_000,
         });
-        if (!activeClaim && (await store.readExtractionJob(jobId))?.state !== "settled")
-          return unavailable("remember_in_progress");
+        if (!activeClaim) {
+          const existing = await store.readExtractionJob(jobId);
+          if (existing?.state === "pending") this.scheduleRecoveryWake(existing.notBefore);
+          if (existing?.state === "working" && existing.leaseUntil !== undefined)
+            this.scheduleRecoveryWake(existing.leaseUntil);
+          if (existing?.state !== "settled") return unavailable("remember_in_progress");
+        }
       }
-      if (reference.status === "not_requested") return this.execute(snapshot, activeClaim);
+      if (reference.status === "not_requested") {
+        const result = await this.execute(snapshot, activeClaim);
+        if (!jobClaim && activeClaim) await this.finishDirectRememberJob(store, activeClaim);
+        return result;
+      }
       const operationId = `memory_reference_${createHash("sha256")
         .update(
           JSON.stringify([
@@ -393,9 +402,24 @@ export class AtomicMemoryRuntime {
         committedAt: result.committedAt,
       };
     } catch (error) {
-      if (error instanceof MemoryItemStoreConflictError && error.reason === "deletion_conflict")
+      if (error instanceof MemoryItemStoreConflictError && error.reason === "deletion_conflict") {
+        if (!jobClaim && activeClaim && store)
+          await this.finishDirectRememberJob(store, activeClaim).catch((settlementError) =>
+            logger.debug(
+              { error: String(settlementError) },
+              "[Memory] remember recovery unavailable",
+            ),
+          );
         return unavailable("memory_deleted");
+      }
       logger.debug({ error: String(error) }, "[Memory] reference note unavailable");
+      if (!jobClaim && activeClaim && store)
+        await this.finishDirectRememberJob(store, activeClaim).catch((settlementError) =>
+          logger.debug(
+            { error: String(settlementError) },
+            "[Memory] remember recovery unavailable",
+          ),
+        );
       return unavailable("unavailable");
     } finally {
       store?.close();
@@ -740,6 +764,20 @@ export class AtomicMemoryRuntime {
       Math.max(1, Math.min(2_147_483_647, at - Date.now())),
     );
     this.recoveryTimer.unref();
+  }
+
+  private async finishDirectRememberJob(
+    store: SqliteMemoryItemStore,
+    claim: MemoryExtractionJobClaim,
+  ): Promise<void> {
+    const current = await store.readExtractionJob(claim.jobId);
+    if (!current) return;
+    if (current.state === "pending") {
+      this.scheduleRecoveryWake(current.notBefore);
+      return;
+    }
+    if (current.state === "working" && current.leaseUntil !== undefined)
+      this.scheduleRecoveryWake(current.leaseUntil);
   }
 
   async reconcileAdmittedBoundaries(): Promise<number> {
