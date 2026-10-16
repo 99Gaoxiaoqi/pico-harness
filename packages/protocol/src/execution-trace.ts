@@ -7,6 +7,14 @@ export interface RuntimeMemoryRecallDetail {
     readonly state: "unchanged" | "changed" | "archived" | "deleted" | "unknown";
     readonly linkAvailable: boolean;
   }[];
+  readonly cases?: readonly {
+    readonly candidateId: string;
+    readonly contentVersion: number;
+    readonly recordRevision: number;
+    readonly state: "unchanged" | "changed" | "archived" | "deleted" | "unknown";
+    readonly linkAvailable: boolean;
+    readonly workDir?: string;
+  }[];
   readonly sources: readonly {
     readonly eventId: string;
     readonly sessionId: string;

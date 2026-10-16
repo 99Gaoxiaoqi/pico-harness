@@ -558,7 +558,11 @@ function projectRun(
         const i = add(
           event,
           "memory",
-          event.data.mode === "automatic" ? "自动记忆召回" : "主动记忆搜索",
+          event.data.recordType === "case"
+            ? "任务案例搜索"
+            : event.data.mode === "automatic"
+              ? "自动记忆召回"
+              : "主动记忆搜索",
           "completed",
         );
         const requests = physical.flatMap((record) => {
@@ -571,6 +575,7 @@ function projectRun(
                     recallEventId: string;
                     blockPresent?: boolean;
                     references: { present: boolean }[];
+                    caseReferences?: { present: boolean }[];
                   }[];
                 };
               }
@@ -594,8 +599,12 @@ function projectRun(
               ...(assembly?.blockPresent !== undefined
                 ? { blockPresent: assembly.blockPresent }
                 : {}),
-              referenceCount: event.data.selected.length,
-              referencePresentCount: assembly?.references.filter((r) => r.present).length ?? 0,
+              referenceCount: event.data.caseSelected?.length ?? event.data.selected.length,
+              referencePresentCount:
+                (event.data.recordType === "case"
+                  ? assembly?.caseReferences
+                  : assembly?.references
+                )?.filter((r) => r.present).length ?? 0,
             },
           ];
         });
@@ -608,6 +617,17 @@ function projectRun(
               state: "unknown" as const,
               linkAvailable: false,
             })),
+            ...(event.data.recordType === "case"
+              ? {
+                  cases: (event.data.caseSelected ?? []).map((item) => ({
+                    candidateId: item.candidateId,
+                    contentVersion: item.contentVersion,
+                    recordRevision: item.recordRevision,
+                    state: "unknown" as const,
+                    linkAvailable: false,
+                  })),
+                }
+              : {}),
             sources: [],
             requests,
           },
@@ -851,6 +871,63 @@ function resolveRecallState(
   let memoryDb: DatabaseSync | undefined;
   try {
     if (options) memoryDb = new DatabaseSync(options.memoryDatabasePath, { readOnly: true });
+    if (memory.trace.recordType === "case") {
+      const cases = (memory.trace.caseSelected ?? []).map((item) => {
+        let state: "unchanged" | "changed" | "archived" | "deleted" | "unknown" = "unknown";
+        let workDir: string | undefined;
+        if (memoryDb && options) {
+          const row = memoryDb
+            .prepare("SELECT record_json FROM execution_learning_candidates WHERE candidate_id=?")
+            .get(item.candidateId);
+          if (!row) state = "deleted";
+          else {
+            const current = JSON.parse(String(row.record_json));
+            if (
+              current.kind === "task-lesson" &&
+              current.workspaceKey === options.workspaceKey &&
+              current.candidateId === item.candidateId
+            ) {
+              state =
+                current.state === "discarded"
+                  ? "deleted"
+                  : current.lifecycleState === "archived" ||
+                      current.state === "expired" ||
+                      (typeof current.expiresAt === "number" && current.expiresAt <= Date.now())
+                    ? "archived"
+                    : current.representation !== "case" ||
+                        current.contentVersion !== item.contentVersion ||
+                        current.recordRevision !== item.recordRevision
+                      ? "changed"
+                      : "unchanged";
+              if (state !== "deleted" && typeof current.workDir === "string")
+                workDir = current.workDir;
+            }
+          }
+        }
+        return {
+          candidateId: item.candidateId,
+          contentVersion: item.contentVersion,
+          recordRevision: item.recordRevision,
+          state,
+          linkAvailable: !!workDir,
+          ...(workDir ? { workDir } : {}),
+        };
+      });
+      const sources = (memory.trace.caseSelected ?? []).flatMap((item, index) =>
+        item.sources.map((source) => ({
+          eventId: source.eventId,
+          sessionId: source.sessionId,
+          available:
+            cases[index]?.state === "unchanged" &&
+            !!db
+              .prepare(
+                "SELECT 1 FROM runtime_events WHERE session_id=? AND event_id=? AND run_id=? AND json_extract(payload_json,'$.turnId')=?",
+              )
+              .get(source.sessionId, source.eventId, source.runId, source.turnId),
+        })),
+      );
+      return { ...memory, cases, sources };
+    }
     const items = memory.trace.selected.map((item) => {
       let state: NonNullable<RuntimeExecutionStep["memory"]>["items"][number]["state"] = "unknown",
         linkAvailable = false;
@@ -905,10 +982,17 @@ function trimRunDetails(run: RuntimeExecutionRun, budget: number): RuntimeExecut
     const trace: MemoryRecallTrace = {
       ...original,
       selected: original.selected.map((i) => ({ ...i, sources: [] })),
+      ...(original.caseSelected
+        ? { caseSelected: original.caseSelected.map((i) => ({ ...i, sources: [] })) }
+        : {}),
       diagnostics: [],
       omittedDiagnosticCount: original.omittedDiagnosticCount + original.diagnostics.length,
       omittedSourceCount:
-        original.omittedSourceCount + original.selected.reduce((n, i) => n + i.sources.length, 0),
+        original.omittedSourceCount +
+        [...original.selected, ...(original.caseSelected ?? [])].reduce(
+          (n, i) => n + i.sources.length,
+          0,
+        ),
       traceTruncated: true,
     };
     return {

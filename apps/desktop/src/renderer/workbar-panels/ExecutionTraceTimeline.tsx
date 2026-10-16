@@ -1,3 +1,4 @@
+import { experienceManagementHref } from "../experience-management-route.js";
 import { Button, IconButton } from "../components.js";
 import { useEffect, useId, useState } from "react";
 import { Check, ChevronDown, ChevronRight, Copy } from "lucide-react";
@@ -700,6 +701,7 @@ function MemoryRecallDetail({ memory }: { memory: NonNullable<RuntimeExecutionSt
     : memory.sources;
   const labels = {
     selected: "已选中",
+    limited: "检索范围受限",
     no_hits: "零命中",
     budget_exhausted: "预算耗尽",
     disabled: "已禁用",
@@ -715,6 +717,12 @@ function MemoryRecallDetail({ memory }: { memory: NonNullable<RuntimeExecutionSt
   };
   return (
     <section aria-label="记忆召回诊断">
+      {t.recordType === "case" && (
+        <p>
+          历史任务案例；检索或携带引用不表示已采用或已验证。
+          {t.limited ? "本次扫描受限，结果可能不完整。" : ""}
+        </p>
+      )}
       {hasLegacyItems ? (
         <p>显示 {currentItems.length} 条召回记录；旧版引用已隐藏。</p>
       ) : (
@@ -724,8 +732,14 @@ function MemoryRecallDetail({ memory }: { memory: NonNullable<RuntimeExecutionSt
             {t.budget.usedTokens}/{t.budget.maxTokens} tokens · {Math.round(t.elapsedMs)} ms
           </p>
           <p>
-            匹配：精确 {t.stages.exact}、前缀 {t.stages.prefix}、正文 {t.stages.content}、中文补充{" "}
-            {t.stages.compound}；合并候选 {t.stages.candidates}。
+            {t.recordType === "case" ? (
+              `符合案例 ${t.stages.content}；扫描候选 ${t.stages.candidates}。`
+            ) : (
+              <>
+                匹配：精确 {t.stages.exact}、前缀 {t.stages.prefix}、正文 {t.stages.content}
+                、中文补充 {t.stages.compound}；合并候选 {t.stages.candidates}。
+              </>
+            )}
           </p>
           <p>
             淘汰：重复 {t.counts.duplicate}、预算 {t.counts.budget}、条数 {t.counts.item_limit}。
@@ -740,6 +754,37 @@ function MemoryRecallDetail({ memory }: { memory: NonNullable<RuntimeExecutionSt
         </>
       )}
       <ul>
+        {(t.caseSelected ?? []).map((item) => {
+          const current = memory.cases?.find((c) => c.candidateId === item.candidateId);
+          return (
+            <li key={item.candidateId}>
+              {current?.linkAvailable ? (
+                <a
+                  href={experienceManagementHref(
+                    current.workDir,
+                    { candidateId: item.candidateId, referenceContentVersion: item.contentVersion },
+                    current.state === "archived" ? "archived" : "saved",
+                  )}
+                >
+                  {item.candidateId}
+                </a>
+              ) : (
+                item.candidateId
+              )}{" "}
+              · 内容 v{item.contentVersion} · 修订 {item.recordRevision} ·{" "}
+              {current ? states[current.state] : "状态未知"}
+              <p>
+                来源 {item.sourceCount} · 原文区间 {item.range.start}–{item.range.end}/
+                {item.range.total}
+                {item.excerpt ? "（摘录）" : ""}
+              </p>
+              <details>
+                <summary>引用 hash</summary>
+                <Detail label="引用 hash" value={item.referenceHash} />
+              </details>
+            </li>
+          );
+        })}
         {t.selected.map((item) => {
           const current = memory.items.find((i) => i.itemId === item.itemId);
           if (item.source === "execution-evidence")
@@ -798,7 +843,7 @@ function MemoryRecallDetail({ memory }: { memory: NonNullable<RuntimeExecutionSt
               <p>
                 {hasLegacyItems
                   ? "旧版引用已隐藏，历史请求计数不作为当前可用经验统计。"
-                  : t.selected.length
+                  : (t.caseSelected?.length ?? t.selected.length)
                     ? `原始引用仍存在 ${request.referencePresentCount}/${request.referenceCount}；引用块${request.blockPresent === true ? "存在" : request.blockPresent === false ? "不存在" : "未记录"}。`
                     : "本次只关联检索，没有记忆引用块。"}
               </p>
