@@ -99,19 +99,49 @@ interface Candidate {
   readonly match: RecallMatch;
 }
 
+type RecallStore = Pick<
+  AtomicMemoryStore,
+  "readSettings" | "searchByKeys" | "searchByContent" | "listItems" | "readItem"
+> & { readonly readRecallRevision?: () => Promise<string> };
+type CandidateWindows = readonly (readonly MemoryItemRecord[])[];
+interface CachedCandidates {
+  readonly expiresAt: number;
+  readonly windows: readonly (readonly { readonly itemId: string; readonly version: number }[])[];
+}
+const CANDIDATE_CACHE_LIMIT = 64;
+const CANDIDATE_CACHE_IDENTITY_LIMIT = 50_000;
+const CANDIDATE_CACHE_TTL_MS = 60_000;
+const CANDIDATE_CACHE_KEY_CODE_UNITS = 65_536;
+
 /** Local indexed keys plus content recall; no model/vector retrieval. */
 export class AtomicMemoryContextBuilder {
+  // Builder instances are owned by a Run. Never share authorization or rendered blocks.
+  readonly #candidateCache = new Map<string, CachedCandidates>();
   constructor(
-    private readonly store: Pick<
-      AtomicMemoryStore,
-      "readSettings" | "searchByKeys" | "searchByContent" | "listItems" | "readItem"
-    >,
+    private readonly store: RecallStore,
     private readonly workspaceKey: string,
   ) {}
 
   async build(
     query?: string,
     options: AtomicMemoryContextOptions = {},
+  ): Promise<AtomicMemoryContextResult> {
+    if (!this.store.readRecallRevision) return this.#build(query, options);
+    // Fence the entire asynchronous delivery, including Host permission callbacks/tokenization.
+    // A concurrent write must not turn a previously fetched body into current evidence.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const revision = await this.store.readRecallRevision();
+      const result = await this.#build(query, options, revision);
+      if (revision === (await this.store.readRecallRevision())) return result;
+      this.#candidateCache.clear();
+    }
+    return { ...emptyResult(), ...(options.trace ? { traceUnavailable: true as const } : {}) };
+  }
+
+  async #build(
+    query?: string,
+    options: AtomicMemoryContextOptions = {},
+    revision?: string,
   ): Promise<AtomicMemoryContextResult> {
     const search = options.mode === "search";
     const maxItems = boundedLimit(options.maxItems, search ? SEARCH_MAX_ITEMS : AUTO_MAX_ITEMS);
@@ -170,70 +200,100 @@ export class AtomicMemoryContextBuilder {
 
     const { primary: signals, aliases } = collectMemoryRecallSignals(query);
     const terms = [...new Set([...signals.paths, ...signals.tokens, ...signals.cjkBigrams])];
-    const [primaryExact, primaryPrefix, primaryContent, residents] = await Promise.all([
-      terms.length
-        ? this.store.searchByKeys({
-            terms,
-            match: "exact",
-            workspaceKey: this.workspaceKey,
-            includeArchived: false,
-            limit: SEARCH_LIMIT,
-          })
-        : [],
-      terms.length
-        ? this.store.searchByKeys({
-            terms,
-            match: "prefix",
-            workspaceKey: this.workspaceKey,
-            includeArchived: false,
-            limit: SEARCH_LIMIT,
-          })
-        : [],
-      terms.length
-        ? this.store.searchByContent({
-            ...signals,
-            workspaceKey: this.workspaceKey,
-            limit: SEARCH_LIMIT,
-          })
-        : [],
-      !search ||
-      signals.cjkBigrams.length >= 2 ||
-      !!options.executionTargets?.length ||
-      !!options.reviewedExperiences?.length
-        ? this.store.listItems({
-            workspaceKey: this.workspaceKey,
-            includeArchived: false,
-            limit: RESIDENT_WINDOW,
-            ...{ learningVersion: 2 as const },
-          })
-        : [],
-    ]);
-    // Preserve the original candidate windows: broad aliases cannot crowd out
-    // an exact current-query match. Extra candidates rank below all primary hits.
-    const aliasTerms = [...new Set([...aliases.tokens, ...aliases.cjkBigrams])];
-    const [aliasExact, aliasPrefix, aliasContent] = aliasTerms.length
-      ? await Promise.all([
-          this.store.searchByKeys({
-            terms: aliasTerms,
-            match: "exact",
-            workspaceKey: this.workspaceKey,
-            includeArchived: false,
-            limit: SEARCH_LIMIT,
-          }),
-          this.store.searchByKeys({
-            terms: aliasTerms,
-            match: "prefix",
-            workspaceKey: this.workspaceKey,
-            includeArchived: false,
-            limit: SEARCH_LIMIT,
-          }),
-          this.store.searchByContent({
-            ...aliases,
-            workspaceKey: this.workspaceKey,
-            limit: SEARCH_LIMIT,
-          }),
-        ])
-      : [[], [], []];
+    const candidateKey =
+      revision === undefined
+        ? undefined
+        : JSON.stringify([
+            revision,
+            this.workspaceKey,
+            settings.version,
+            signals,
+            aliases,
+            search,
+            maxItems,
+            maxTokens,
+            options.executionTargets ?? [],
+            options.reviewedExperiences ?? [],
+          ]);
+    const cacheKey =
+      candidateKey && candidateKey.length <= CANDIDATE_CACHE_KEY_CODE_UNITS
+        ? candidateKey
+        : undefined;
+    const [
+      primaryExact = [],
+      primaryPrefix = [],
+      primaryContent = [],
+      residents = [],
+      aliasExact = [],
+      aliasPrefix = [],
+      aliasContent = [],
+    ] = await this.#candidateWindows(cacheKey, async () => {
+      const primary = await Promise.all([
+        terms.length
+          ? this.store.searchByKeys({
+              terms,
+              match: "exact",
+              workspaceKey: this.workspaceKey,
+              includeArchived: false,
+              limit: SEARCH_LIMIT,
+            })
+          : [],
+        terms.length
+          ? this.store.searchByKeys({
+              terms,
+              match: "prefix",
+              workspaceKey: this.workspaceKey,
+              includeArchived: false,
+              limit: SEARCH_LIMIT,
+            })
+          : [],
+        terms.length
+          ? this.store.searchByContent({
+              ...signals,
+              workspaceKey: this.workspaceKey,
+              limit: SEARCH_LIMIT,
+            })
+          : [],
+        !search ||
+        signals.cjkBigrams.length >= 2 ||
+        !!options.executionTargets?.length ||
+        !!options.reviewedExperiences?.length
+          ? this.store.listItems({
+              workspaceKey: this.workspaceKey,
+              includeArchived: false,
+              limit: RESIDENT_WINDOW,
+              ...{ learningVersion: 2 as const },
+            })
+          : [],
+      ]);
+      // Preserve the original candidate windows: broad aliases cannot crowd out
+      // an exact current-query match. Extra candidates rank below all primary hits.
+      const aliasTerms = [...new Set([...aliases.tokens, ...aliases.cjkBigrams])];
+      const alias = aliasTerms.length
+        ? await Promise.all([
+            this.store.searchByKeys({
+              terms: aliasTerms,
+              match: "exact",
+              workspaceKey: this.workspaceKey,
+              includeArchived: false,
+              limit: SEARCH_LIMIT,
+            }),
+            this.store.searchByKeys({
+              terms: aliasTerms,
+              match: "prefix",
+              workspaceKey: this.workspaceKey,
+              includeArchived: false,
+              limit: SEARCH_LIMIT,
+            }),
+            this.store.searchByContent({
+              ...aliases,
+              workspaceKey: this.workspaceKey,
+              limit: SEARCH_LIMIT,
+            }),
+          ])
+        : [[], [], []];
+      return [...primary, ...alias];
+    });
     const exact = [...primaryExact, ...aliasExact];
     const prefix = [...primaryPrefix, ...aliasPrefix];
     const content = [...primaryContent, ...aliasContent];
@@ -506,6 +566,58 @@ export class AtomicMemoryContextBuilder {
       "selected",
       stages,
     );
+  }
+
+  async #candidateWindows(
+    key: string | undefined,
+    discover: () => Promise<CandidateWindows>,
+  ): Promise<CandidateWindows> {
+    if (key !== undefined) {
+      const cached = this.#candidateCache.get(key);
+      if (cached && cached.expiresAt > Date.now()) {
+        const identities = new Map(cached.windows.flat().map((entry) => [entry.itemId, entry]));
+        const records = new Map<string, MemoryItemRecord>();
+        let valid = true;
+        await Promise.all(
+          [...identities.values()].map(async ({ itemId, version }) => {
+            const record = await this.store.readItem(itemId);
+            if (!record || record.item.version !== version) valid = false;
+            else records.set(itemId, record);
+          }),
+        );
+        if (valid) {
+          this.#candidateCache.delete(key);
+          this.#candidateCache.set(key, cached);
+          return cached.windows.map((window) => window.map(({ itemId }) => records.get(itemId)!));
+        }
+      }
+      this.#candidateCache.delete(key);
+    }
+    const windows = await discover();
+    if (key !== undefined) {
+      this.#candidateCache.set(key, {
+        expiresAt: Date.now() + CANDIDATE_CACHE_TTL_MS,
+        windows: windows.map((window) =>
+          window.map(({ item }) => ({ itemId: item.itemId, version: item.version })),
+        ),
+      });
+      let identities = [...this.#candidateCache.values()].reduce(
+        (sum, entry) => sum + entry.windows.reduce((count, window) => count + window.length, 0),
+        0,
+      );
+      while (
+        this.#candidateCache.size > CANDIDATE_CACHE_LIMIT ||
+        identities > CANDIDATE_CACHE_IDENTITY_LIMIT
+      ) {
+        const oldest = this.#candidateCache.keys().next().value;
+        if (oldest === undefined) break;
+        identities -= this.#candidateCache
+          .get(oldest)!
+          .windows.reduce((count, window) => count + window.length, 0);
+        this.#candidateCache.delete(oldest);
+      }
+    }
+    return windows;
   }
 }
 
