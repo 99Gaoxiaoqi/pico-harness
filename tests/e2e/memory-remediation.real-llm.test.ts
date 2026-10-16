@@ -21,6 +21,8 @@ import { SilentReporter } from "@pico/runtime/silent-reporter";
 import { executeAgentRuntime } from "@pico/pico-host/agent-runtime";
 import { createProvider } from "@pico/pico-host/provider/factory";
 import { globalSessionManager } from "@pico/pico-host/session";
+import { createEngineRuntimePort } from "@pico/pico-host/engine-runtime-port-adapter";
+import { getOrCreateSessionSettings } from "@pico/pico-host/input/session-settings";
 import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
 import { closeExecutionLearningWorker } from "@pico/pico-host/execution-learning-worker";
 import { resolvePicoPaths } from "@pico/pico-host";
@@ -35,14 +37,21 @@ const enabled = process.env.RUN_LLM_E2E === "1" && process.env.RUN_MEMORY_REMEDI
 const realTest = enabled ? test : test.skip;
 const scenarios = ["continue", "new-topic", "cancelled", "compare-methods"] as const;
 type Scenario = (typeof scenarios)[number];
-const MAX_RUNS = 8;
+// The initial authorized suite used four physical dispatches for the two passing
+// comparison runs. A failed-only continuation reserves those calls permanently.
+const failedOnly = process.env.RUN_MEMORY_REMEDIATION_FAILED_ONLY === "1";
+const selectedScenarios = failedOnly
+  ? scenarios.filter((scenario) => scenario !== "compare-methods")
+  : scenarios;
+const priorAttempts = failedOnly ? 4 : 0;
+const MAX_RUNS = selectedScenarios.length * 2;
 const MAX_ATTEMPTS = 24;
 const MAX_ATTEMPTS_PER_RUN = 3;
 const MAX_INPUT_TOKENS = 20_000;
 const MAX_OUTPUT_TOKENS = 2_048;
 
 realTest(
-  "bounded memory remediation acceptance: four controlled scenarios, two repetitions",
+  `bounded memory remediation acceptance: ${failedOnly ? "failed boundary scenarios only" : "four controlled scenarios"}, two repetitions`,
   { timeout: 520_000 },
   async (t) => {
     const codeRoot = fileURLToPath(new URL("../../", import.meta.url));
@@ -72,15 +81,16 @@ realTest(
       480_000,
     );
     t.after(() => clearTimeout(timer));
-    let attempts = 0;
+    let attempts = priorAttempts;
     let runs = 0;
     const failures: string[] = [];
-    for (const scenario of scenarios)
+    for (const scenario of selectedScenarios)
       for (const repetition of [1, 2]) {
         overall.signal.throwIfAborted();
         assert.ok(runs < MAX_RUNS);
         runs++;
         let runAttempts = 0;
+        const runStartedAt = Date.now();
         const signal = AbortSignal.any([overall.signal, AbortSignal.timeout(60_000)]);
         const fixture = await makeFixture(model, scenario, repetition, signal, async () => {
           signal.throwIfAborted();
@@ -101,6 +111,9 @@ realTest(
               scenario,
               repetition,
               routeId: model.route.id,
+              durationMs: Date.now() - runStartedAt,
+              priorAttempts,
+              cumulativeAttempts: attempts,
               runAttempts,
               ...result,
             }),
@@ -111,7 +124,17 @@ realTest(
             `${scenario}/${repetition}: ${error instanceof assert.AssertionError ? error.message.split("\n")[0] : error instanceof Error ? error.name : "UnknownError"}`,
           );
           t.diagnostic(
-            JSON.stringify({ sha, scenario, repetition, runAttempts, status: "failed" }),
+            JSON.stringify({
+              sha,
+              scenario,
+              repetition,
+              runAttempts,
+              durationMs: Date.now() - runStartedAt,
+              priorAttempts,
+              cumulativeAttempts: attempts,
+              ...fixture.diagnostics(),
+              status: "failed",
+            }),
           );
         } finally {
           await fixture.close();
@@ -119,6 +142,17 @@ realTest(
       }
     assert.equal(runs, MAX_RUNS);
     assert.ok(attempts <= MAX_ATTEMPTS);
+    t.diagnostic(
+      JSON.stringify({
+        sha,
+        failedOnly,
+        runs,
+        priorAttempts,
+        physicalAttemptsThisRun: attempts - priorAttempts,
+        cumulativeAttempts: attempts,
+        physicalCap: MAX_ATTEMPTS,
+      }),
+    );
     assert.deepEqual(failures, [], "failed runs are reported, never rerun or used to tune gold");
   },
 );
@@ -207,6 +241,31 @@ async function makeFixture(
       },
     ];
     for (const event of history) await events.append(event, { ownerFence: fence });
+    // A resumable Host session needs durable settings/boundary as well as events.
+    // Use the same public Session persistence path as a real initial Host run;
+    // endpoint/credential data remain process-local in the existing model router.
+    const lease = await globalSessionManager.getOrCreatePinned(sessionId, workDir, {
+      picoHome,
+      persistence: true,
+      runtimePort: createEngineRuntimePort(),
+    });
+    try {
+      getOrCreateSessionSettings(
+        {
+          sessionId,
+          cwd: workDir,
+          picoHome,
+          provider: model.provider,
+          model: model.config.model,
+          modelRouteId: model.route.id,
+        },
+        { persistence: lease.session },
+      );
+      await lease.session.flushPersistence();
+      assert.ok(lease.session.getRuntimeStateSnapshot().settings);
+    } finally {
+      lease.release();
+    }
     assert.ok(
       !history.some(
         (event) =>
@@ -274,6 +333,7 @@ async function makeFixture(
       : {}),
   };
   return {
+    diagnostics: () => ({ logicalCalls: requests.length, auxiliaryCalls }),
     run: () =>
       executeAgentRuntime(
         {
