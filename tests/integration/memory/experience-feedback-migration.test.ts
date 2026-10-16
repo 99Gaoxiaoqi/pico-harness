@@ -1,3 +1,4 @@
+import { removeFutureRecallSchemaForLegacyFixture } from "../helpers/future-memory-schema.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -38,6 +39,7 @@ async function v12(path: string, corrupt = false) {
   });
   store.close();
   const db = new DatabaseSync(path);
+  removeFutureRecallSchemaForLegacyFixture(db);
   db.exec(LEGACY_LESSON_SCHEMA_SQL);
   db.exec(
     "DROP TABLE experience_diagnostics; DROP TABLE experience_effects; DROP TABLE experience_feedback; DROP TABLE experience_uses; CREATE TABLE task_experience_reuse(reuse_id TEXT PRIMARY KEY,workspace_key TEXT NOT NULL,session_id TEXT NOT NULL,candidate_id TEXT NOT NULL,content_version INTEGER NOT NULL,record_json TEXT NOT NULL); CREATE INDEX task_experience_reuse_scope ON task_experience_reuse(workspace_key,session_id); PRAGMA user_version=12",

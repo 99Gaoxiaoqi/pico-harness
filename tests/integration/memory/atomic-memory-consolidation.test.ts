@@ -1,3 +1,4 @@
+import { removeFutureRecallSchemaForLegacyFixture } from "../helpers/future-memory-schema.js";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -671,6 +672,7 @@ test("schema v14 upgrades consolidation tables without rewriting existing memory
   const itemId = await f.create();
   f.store.close();
   const db = new DatabaseSync(f.path);
+  removeFutureRecallSchemaForLegacyFixture(db);
   db.exec(
     "DROP TABLE memory_consolidation_receipts; DROP TABLE memory_consolidation_state; PRAGMA user_version=14",
   );
