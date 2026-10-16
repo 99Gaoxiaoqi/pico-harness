@@ -1315,26 +1315,84 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
       }
     }
     const now = options.now ?? (this.options.now ?? Date.now)();
-    return this.db
+    const recall = options.recall;
+    const budgetMs = recall?.budgetMs ?? 250;
+    if (recall && (!Number.isFinite(budgetMs) || budgetMs <= 0 || budgetMs > 5000))
+      throw new RangeError("Recall query budget must be between 0 and 5000ms");
+    const deadline = performance.now() + budgetMs;
+    let scanned = 0;
+    let matched = 0;
+    const limited = () => recall?.onLimited?.({ reason: "deadline", scanned, matched });
+    const ranked: { candidate: TaskExperienceCandidate; score: number }[] = [];
+    const compare = (a: (typeof ranked)[number], b: (typeof ranked)[number]) =>
+      b.score - a.score ||
+      b.candidate.updatedAt - a.candidate.updatedAt ||
+      a.candidate.candidateId.localeCompare(b.candidate.candidateId, "en");
+    const rows = this.db
       .prepare(
-        `SELECT record_json FROM execution_learning_candidates WHERE ${clauses.join(" AND ")} ORDER BY updated_at DESC`,
+        `SELECT record_json, (SELECT version FROM memory_items m WHERE m.item_id=execution_learning_candidates.item_id) AS recall_item_version
+       FROM execution_learning_candidates WHERE ${clauses.join(" AND ")}
+       ORDER BY updated_at DESC, candidate_id ASC`,
       )
-      .all(...args)
-      .map((row) => decode<TaskExperienceCandidate>(row)!)
-      .filter((candidate) => !options.recallable || experienceUsable(candidate, now))
-      .filter(
-        (candidate) =>
-          !options.query ||
-          `${candidate.goal} ${candidate.content} ${(candidate.matchHints ?? []).join(" ")}`
-            .toLocaleLowerCase()
-            .includes(options.query.toLocaleLowerCase()),
+      .iterate(...args);
+    for (const row of rows) {
+      if (recall && performance.now() >= deadline) {
+        limited();
+        break;
+      }
+      scanned++;
+      const candidate = decode<TaskExperienceCandidate>(row)!;
+      if (options.recallable && !experienceUsable(candidate, now)) continue;
+      if (
+        options.query &&
+        !`${candidate.goal} ${candidate.content} ${(candidate.matchHints ?? []).join(" ")}`
+          .toLocaleLowerCase()
+          .includes(options.query.toLocaleLowerCase())
       )
-      .slice(0, limit)
-      .map((candidate) => ({
+        continue;
+      const projected = {
         ...candidate,
         ...(experienceConditions(candidate).scopeUnresolved ? { scopeUnresolved: true } : {}),
-        evidenceSummary: this.options.experienceLedger.evidenceSummary(candidate),
-      }));
+      };
+      const score = recall ? recall.score(projected) : 0;
+      if (recall && (!Number.isFinite(score) || score <= 0)) continue;
+      if (recall?.accept) {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          const accepted = await Promise.race([
+            Promise.resolve(
+              recall.accept(projected, {
+                ...(typeof row.recall_item_version === "number"
+                  ? { itemVersion: row.recall_item_version }
+                  : {}),
+              }),
+            ),
+            new Promise<"deadline">((resolve) => {
+              timer = setTimeout(
+                () => resolve("deadline"),
+                Math.max(0, deadline - performance.now()),
+              );
+            }),
+          ]);
+          if (accepted === "deadline") {
+            limited();
+            break;
+          }
+          if (!accepted) continue;
+        } finally {
+          if (timer !== undefined) clearTimeout(timer);
+        }
+      }
+      matched++;
+      ranked.push({ candidate: projected, score });
+      ranked.sort(compare);
+      if (ranked.length > limit) ranked.pop();
+      if (!recall && ranked.length >= limit) break;
+    }
+    return ranked.map(({ candidate }) => ({
+      ...candidate,
+      evidenceSummary: this.options.experienceLedger.evidenceSummary(candidate),
+    }));
   }
   async maintainTaskExperiences(now: number): Promise<void> {
     this.tx(() => this.maintainExperiences(now));

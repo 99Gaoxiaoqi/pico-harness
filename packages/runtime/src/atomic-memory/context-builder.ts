@@ -71,6 +71,8 @@ export interface AtomicMemoryContextOptions {
     readonly candidateId: string;
     readonly contentVersion: number;
     readonly recordRevision: number;
+    readonly itemId?: string;
+    readonly itemVersion?: number;
     readonly maturity?: "trial" | "active";
     readonly relevanceScore?: number;
     /** Host-owned indivisible preparation prefix, measured in original code points. */
@@ -105,7 +107,7 @@ export class AtomicMemoryContextBuilder {
   constructor(
     private readonly store: Pick<
       AtomicMemoryStore,
-      "readSettings" | "searchByKeys" | "searchByContent" | "listItems"
+      "readSettings" | "searchByKeys" | "searchByContent" | "listItems" | "readItem"
     >,
     private readonly workspaceKey: string,
   ) {}
@@ -209,10 +211,28 @@ export class AtomicMemoryContextBuilder {
           })
         : [],
     ]);
+    // Host-qualified identities are not restricted to the recent resident window.
+    const targeted = (
+      await Promise.all(
+        (options.reviewedExperiences ?? [])
+          .filter((target) => target.itemId && target.itemVersion !== undefined)
+          .map(async (target) => {
+            const record = await this.store.readItem(target.itemId!);
+            return record &&
+              record.item.version === target.itemVersion &&
+              record.sourceType === "reviewed-reference" &&
+              record.taskExperience?.candidateId === target.candidateId &&
+              record.taskExperience.contentVersion === target.contentVersion &&
+              record.taskExperience.recordRevision === target.recordRevision
+              ? record
+              : undefined;
+          }),
+      )
+    ).filter((record): record is MemoryItemRecord => record !== undefined);
     const excludedExperienceItems = new Set<string>();
     if (options.experienceAllowed) {
       const uniqueExperiences = new Map(
-        [...exact, ...prefix, ...content, ...residents]
+        [...exact, ...prefix, ...content, ...residents, ...targeted]
           .filter(
             (record) =>
               record.sourceType === "reviewed-reference" ||
@@ -245,7 +265,9 @@ export class AtomicMemoryContextBuilder {
             (target) =>
               target.candidateId === record.taskExperience!.candidateId &&
               target.contentVersion === record.taskExperience!.contentVersion &&
-              target.recordRevision === record.taskExperience!.recordRevision,
+              target.recordRevision === record.taskExperience!.recordRevision &&
+              (target.itemId === undefined || target.itemId === record.item.itemId) &&
+              (target.itemVersion === undefined || target.itemVersion === record.item.version),
           ))) &&
       (record.sourceType !== "execution-validated" ||
         (!!record.taskAcceptance &&
@@ -266,6 +288,7 @@ export class AtomicMemoryContextBuilder {
         ...compoundMatches,
         ...residents.filter((record) => record.sourceType === "execution-validated"),
         ...residents.filter((record) => record.sourceType === "reviewed-reference"),
+        ...targeted,
       ]
         .filter(visible)
         .map((record) => [record.item.itemId, record]),
@@ -285,7 +308,10 @@ export class AtomicMemoryContextBuilder {
                   (target) =>
                     target.candidateId === record.taskExperience!.candidateId &&
                     target.contentVersion === record.taskExperience!.contentVersion &&
-                    target.recordRevision === record.taskExperience!.recordRevision,
+                    target.recordRevision === record.taskExperience!.recordRevision &&
+                    (target.itemId === undefined || target.itemId === record.item.itemId) &&
+                    (target.itemVersion === undefined ||
+                      target.itemVersion === record.item.version),
                 )?.relevanceScore ?? 0)
               : Math.max(
                   keyScore,
@@ -327,14 +353,9 @@ export class AtomicMemoryContextBuilder {
     const duplicateKeys = new Set<string>();
     const lines: string[] = [];
     let truncated = false;
-    let executionSelected = false;
+    let executionSelected = 0;
+    const maxExperiences = search ? 3 : 1;
     for (const [index, { record, match, score }] of candidates.entries()) {
-      if (
-        (record.sourceType === "execution-validated" ||
-          record.sourceType === "reviewed-reference") &&
-        executionSelected
-      )
-        continue;
       const note = referenceNote(record);
       const source =
         record.sourceType === "execution-validated"
@@ -359,6 +380,14 @@ export class AtomicMemoryContextBuilder {
           });
         }
       };
+      if (
+        (source === "execution-validated" || source === "reviewed-reference") &&
+        executionSelected >= maxExperiences
+      ) {
+        diagnostic("item_limit");
+        truncated = true;
+        continue;
+      }
       if (duplicate && duplicateKeys.has(duplicate)) {
         diagnostic("duplicate");
         continue;
@@ -382,7 +411,9 @@ export class AtomicMemoryContextBuilder {
               (target) =>
                 target.candidateId === record.taskExperience!.candidateId &&
                 target.contentVersion === record.taskExperience!.contentVersion &&
-                target.recordRevision === record.taskExperience!.recordRevision,
+                target.recordRevision === record.taskExperience!.recordRevision &&
+                (target.itemId === undefined || target.itemId === record.item.itemId) &&
+                (target.itemVersion === undefined || target.itemVersion === record.item.version),
             )?.requiredPrefixLength
           : undefined;
       let rendered = render(0, Array.from(body).length);
@@ -392,7 +423,9 @@ export class AtomicMemoryContextBuilder {
             ? fitRequiredPrefix(body, requiredPrefixLength, render, fits)
             : note || search || source === "execution-validated" || source === "reviewed-reference"
               ? fitExcerpt(body, signals, render, fits)
-              : undefined;
+              : record.item.statementType === "fact"
+                ? fitFactSentence(body, signals, render, fits)
+                : undefined;
         if (!excerpt) {
           diagnostic("budget");
           truncated = true;
@@ -401,8 +434,7 @@ export class AtomicMemoryContextBuilder {
         rendered = excerpt;
       }
       selected.push(record);
-      if (source === "execution-validated" || source === "reviewed-reference")
-        executionSelected = true;
+      if (source === "execution-validated" || source === "reviewed-reference") executionSelected++;
       references.push(rendered.reference);
       lines.push(rendered.line);
       diagnostic("selected");
@@ -556,6 +588,46 @@ function renderReference(
   const range = reference.range;
   const line = `<memory${id}${version} kind="${escapeXml(item.kind)}" scope="${escapeXml(item.scopeType)}" statement="${escapeXml(item.statementType)}"${times} source="${source}"${origin} excerpt="${excerpt}" range="${range.start}-${range.end}/${range.total}">${reference.applicability ? `${escapeXml(reference.applicability)}\n` : ""}${escapeXml(display)}</memory>`;
   return { line, reference };
+}
+
+/** Ordinary facts retain whole original sentences, including their conditions and negations. */
+function fitFactSentence(
+  body: string,
+  signals: MemorySearchSignals,
+  render: (start: number, end: number) => RenderedReference,
+  fits: (value: RenderedReference) => boolean,
+): RenderedReference | undefined {
+  const sentences: { start: number; end: number; score: number }[] = [];
+  let start = 0;
+  let previousStart = 0;
+  const boundaries = [...body.matchAll(/[。！？!?]+|\.(?=\s+[A-Z])|\n/gu)].map(
+    (match) => match.index + match[0].length,
+  );
+  if (boundaries.at(-1) !== body.length) boundaries.push(body.length);
+  for (const end of boundaries) {
+    const text = body.slice(start, end);
+    const score = /[.!?。！？]["”’')]*$/u.test(text.trim()) ? scoreMemoryContent(text, signals) : 0;
+    const previous = body.slice(previousStart, start).trim();
+    const needsPrevious =
+      /^(?:if\b|unless\b|only\b|do not\b|never\b|仅|只有|除非|不可|不得|禁止)/iu.test(previous);
+    if (score > 0)
+      sentences.push({
+        start: Array.from(body.slice(0, needsPrevious ? previousStart : start)).length,
+        end: Array.from(body.slice(0, end)).length,
+        score,
+      });
+    previousStart = start;
+    start = end;
+  }
+  sentences.sort((a, b) => b.score - a.score || a.start - b.start);
+  for (const sentence of sentences) {
+    // Leading continuation markers depend on a preceding clause; never excerpt them alone.
+    const text = Array.from(body).slice(sentence.start, sentence.end).join("").trim();
+    if (/^(?:但|否则|因此|所以|仅此时|but\b|otherwise\b|therefore\b|then\b)/iu.test(text)) continue;
+    const reference = render(sentence.start, sentence.end);
+    if (fits(reference)) return reference;
+  }
+  return undefined;
 }
 
 /** Never excerpt inside Host-authored preparation, including under competing-item budgets. */
