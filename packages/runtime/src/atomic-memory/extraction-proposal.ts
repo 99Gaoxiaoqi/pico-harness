@@ -241,7 +241,7 @@ function json(raw: string): unknown {
 }
 
 export const MEMORY_ITEM_SHAPE =
-  '{"content":"...","kind":"preference|identity|context|knowledge|failure|note","statementType":"fact|plan|prediction","temporalType":"undated|point|interval|open_ended","eventStartedAt":null,"eventEndedAt":null,"scope":"global|workspace","keys":[{"key":"...","type":"exact|entity|concept|alias|code"}],"evidence":[{"sourceRef":"event:...","quote":"verbatim user excerpt"}]}';
+  '{"content":"...","kind":"preference|identity|context|knowledge|failure|note","statementType":"fact|plan|prediction","temporalType":"undated|point|interval|open_ended","eventStartedAt":null,"eventEndedAt":null,"scope":"global|workspace","keys":[{"key":"...","type":"exact|entity|concept|alias|code"}],"evidence":[{"sourceRef":"e1","quote":"verbatim user excerpt"}]}';
 
 const CANONICAL_MEMORY_ITEM_SHAPE =
   '{"content":"...","kind":"preference|identity|context|knowledge|failure|note","statementType":"fact|plan|prediction","temporalType":"undated|point|interval|open_ended","eventStartedAt":null,"eventEndedAt":null,"scope":"global|workspace","keys":[{"key":"...","type":"exact|entity|concept|alias|code"}]}';
@@ -260,7 +260,7 @@ export function proposalPrompt(
     trigger === "remember"
       ? "The user explicitly requested memory. Put exactly the requested information in requestedItems; incidentalItems may contain other durable user assertions. If the referent is missing, request one narrow history search. Do not invent a request."
       : "Incidental extraction: requestedItems must be empty and requestedStatus must be not_applicable. A narrow history search may resolve an elliptical user assertion.",
-    "Use exact sourceRef and verbatim quotes. Both requested and incidental items may be global or workspace scoped; global requires evidence of reuse across workspaces. Timestamps are Unix milliseconds; never invent precision.",
+    "Copy the short sourceAlias (for example e1) from the evidence record into each citation's sourceRef, with a verbatim quote. Do not reconstruct the long event identity or invent aliases. Aliases refer only to the evidence records in this request. Both requested and incidental items may be global or workspace scoped; global requires evidence of reuse across workspaces. Timestamps are Unix milliseconds; never invent precision.",
     "An evidence record with messagePositions points to zero-based messages in the sourceMessages conversation prefix above. Read the user text there; it is intentionally not duplicated in memory_evidence. Without messagePositions, use only the bounded texts in the evidence record.",
     TEMPORAL_RULES,
     'Complete: {"status":"complete","coverageStatus":"processed","requestedStatus":"resolved|not_applicable","requestedItems":[],"incidentalItems":[]}. resolved requires 1-10 requestedItems; not_applicable requires none. At most 10 incidentalItems.',

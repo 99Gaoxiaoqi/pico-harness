@@ -38,6 +38,133 @@ test("automatic empty extraction records one model call and does not recount its
   assert.equal(model.calls.length, 1);
 });
 
+test("automatic extraction resolves short evidence aliases to canonical sources and keeps only supported items", async (t) => {
+  const fixture = memoryFixture(t);
+  const user = {
+    ...event(1, "user", "Across workspaces I prefer concise Chinese answers."),
+    eventId: "user-message:cd8a44f5-4e79-4379-9398-5e3d780a47e7",
+  };
+  const supported = item("The user prefers concise Chinese answers.", user, user.text);
+  const aliased = { ...supported, evidence: [{ sourceRef: "e1", quote: user.text }] };
+  const fabricated = {
+    ...supported,
+    evidence: [{ sourceRef: "e99", quote: user.text }],
+  };
+  const secret = { ...aliased, content: "password=12345" };
+  const model = scriptedModel([
+    () => {
+      const records = JSON.parse(
+        model.calls[0]!.prompt.match(/<memory_evidence>\n([\s\S]*?)\n<\/memory_evidence>/u)![1]!,
+      ) as { sourceRef: string; sourceAlias: string }[];
+      assert.equal(records[0]!.sourceAlias, "e1");
+      return proposal([], [aliased, fabricated, secret]);
+    },
+    canonicalization(aliased),
+  ]);
+  const engine = new AtomicMemoryExtractionEngine({
+    store: fixture.store,
+    model,
+    gate: async () => ({ allowed: true }),
+  });
+  assert.equal(
+    (await engine.execute(source([user, event(2, "other", "")], { trigger: "extract" }))).status,
+    "extracted",
+  );
+  assert.equal(model.calls.length, 2);
+  assert.equal(fixture.commits[0]!.items.length, 1);
+  assert.deepEqual((await fixture.store.readItem("item-1"))!.sources, [
+    { sessionId: SESSION, eventId: user.eventId, runId: user.runId, turnId: user.turnId },
+  ]);
+});
+
+test("invalid-only incidental citations keep the cursor pending and recover within existing call budgets", async (t) => {
+  const fixture = memoryFixture(t);
+  const user = event(1, "user", "Across workspaces I prefer concise Chinese answers.");
+  const firstBoundary = event(2, "other", "");
+  const supported = item("The user prefers concise Chinese answers.", user, user.text);
+  const invalid = {
+    ...supported,
+    evidence: [{ sourceRef: "event:event-typographical-error", quote: user.text }],
+  };
+  const aliased = { ...supported, evidence: [{ sourceRef: "e1", quote: user.text }] };
+  const model = scriptedModel([
+    ...Array.from({ length: 3 }, () => proposal([], [invalid])),
+    proposal([], [aliased]),
+    canonicalization(aliased),
+    proposal([], []),
+  ]);
+  const engine = new AtomicMemoryExtractionEngine({
+    store: fixture.store,
+    model,
+    gate: async () => ({ allowed: true }),
+  });
+  const first = source([user, firstBoundary], { trigger: "extract" });
+  assert.equal((await engine.execute(first)).status, "unavailable");
+  assert.equal(model.calls.length, 3);
+  assert.equal(fixture.commits.length, 0, "bad references are not a successful empty extraction");
+  assert.equal(await fixture.cursor(), undefined);
+  assert.equal((await fixture.pending())?.firstFailureClass, "evidence");
+  assert.equal((await engine.execute(first)).status, "unavailable");
+  assert.equal(model.calls.length, 3, "the same boundary never gets an extra retry budget");
+  const later = source(
+    [user, firstBoundary, event(3, "user", "Continue.", "2"), event(4, "other", "", "2")],
+    { trigger: "extract" },
+  );
+  assert.equal((await engine.execute(later)).status, "extracted");
+  assert.equal(model.calls.length, 6, "recovery uses two old-range calls and one empty-tail call");
+  assert.equal(await fixture.pending(), undefined);
+  assert.equal((await fixture.cursor())?.processedOrdinal, 4);
+  assert.deepEqual((await fixture.store.readItem("item-1"))!.sources, [
+    { sessionId: SESSION, eventId: user.eventId, runId: user.runId, turnId: user.turnId },
+  ]);
+});
+
+test("short evidence aliases cannot cite old ranges, assistant text, future events or unmatched quotes", async (t) => {
+  for (const sourceRef of ["e1", "e4", "e6", "e999", "E3", "e3"]) {
+    const fixture = memoryFixture(t);
+    const old = event(1, "user", "Old user preference.");
+    const oldBoundary = event(2, "other", "");
+    const current = event(3, "user", "Current visible preference.", "2");
+    const assistant = event(4, "assistant", "Assistant invented preference.", "2");
+    const boundary = event(5, "other", "", "2");
+    const outside = event(6, "user", "Future user preference.", "3");
+    const quote =
+      sourceRef === "e1" ? old.text : sourceRef === "e4" ? assistant.text : outside.text;
+    const invalid = {
+      ...item("Unsupported preference.", current, quote),
+      evidence: [{ sourceRef, quote }],
+    };
+    const model = scriptedModel([
+      proposal([], []),
+      ...Array.from({ length: 3 }, () => proposal([], [invalid])),
+    ]);
+    const engine = new AtomicMemoryExtractionEngine({
+      store: fixture.store,
+      model,
+      gate: async () => ({ allowed: true }),
+    });
+    await engine.execute(source([old, oldBoundary], { trigger: "extract" }));
+    assert.equal(
+      (
+        await engine.execute(
+          source([old, oldBoundary, current, assistant, boundary, outside], {
+            trigger: "extract",
+            boundaryOrdinal: 5,
+            boundaryEventId: boundary.eventId,
+            runId: boundary.runId,
+            turnId: boundary.turnId,
+          }),
+        )
+      ).status,
+      "unavailable",
+      sourceRef,
+    );
+    assert.equal((await fixture.cursor())?.processedOrdinal, 2, sourceRef);
+    assert.equal((await fixture.pending())?.firstFailureClass, "evidence", sourceRef);
+    assert.deepEqual(await fixture.store.listItems({ workspaceKey: "/workspace" }), []);
+  }
+});
+
 test("atomic engine commits canonical user evidence synchronously, honors provider visibility, scope and forget", async (t) => {
   const fixture = memoryFixture(t);
   const user = event(1, "user", "Remember I prefer concise Chinese. Hidden ledger text.");
@@ -167,7 +294,12 @@ test("descriptive history terms recover deleted preferences using bounded origin
         )![1]!,
       ) as unknown[];
       assert.ok(context.length <= 7, "localization retains its existing seven-turn cap");
-      return proposal([candidate]);
+      return proposal([
+        {
+          ...candidate,
+          evidence: [{ sourceRef: `e${historical.ordinal}`, quote: candidate.evidence[0]!.quote }],
+        },
+      ]);
     },
     canonicalization(candidate),
   ]);

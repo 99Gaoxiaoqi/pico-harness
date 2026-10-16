@@ -18,6 +18,7 @@ import type {
 import {
   evidenceSource,
   fitAtomicMemoryEvidence,
+  indexAtomicMemoryEvidence,
   localizeAtomicMemoryHistory,
   memoryConversationMessages,
   memoryEvidenceCoverageHash,
@@ -573,9 +574,10 @@ export class AtomicMemoryExtractionEngine {
       (proposal.requestedStatus !== "not_applicable" || proposal.requestedItems.length)
     )
       return { kind: "failed", failureClass: "schema", range };
-    const requestedByRef = new Map(requestedEvidence.map((entry) => [entry.sourceRef, entry]));
-    const incidentalByRef = new Map(evidence.map((entry) => [entry.sourceRef, entry]));
+    const requestedByRef = indexAtomicMemoryEvidence(requestedEvidence);
+    const incidentalByRef = indexAtomicMemoryEvidence(evidence);
     const candidates: Candidate[] = [];
+    let rejectedEvidence = false;
     for (const [requested, items] of [
       [true, proposal.requestedItems],
       [false, proposal.incidentalItems],
@@ -589,6 +591,7 @@ export class AtomicMemoryExtractionEngine {
         const admitted = admitItem(snapshot, item, item.evidence, byRef, requested);
         if (typeof admitted === "string") {
           if (requested) return { kind: "failed", failureClass: admitted, range };
+          if (admitted === "evidence") rejectedEvidence = true;
           continue;
         }
         candidates.push({
@@ -599,7 +602,10 @@ export class AtomicMemoryExtractionEngine {
         });
       }
     }
-    if (!candidates.length) return this.commit(range, [], []);
+    if (!candidates.length)
+      return rejectedEvidence
+        ? { kind: "failed", failureClass: "evidence", range }
+        : this.commit(range, [], []);
     const prompt = canonicalizationPrompt(
       candidates.map((candidate) => ({
         candidateId: candidate.candidateId,

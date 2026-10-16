@@ -151,9 +151,22 @@ export function fitAtomicMemoryEvidence(
 export function renderAtomicMemoryEvidence(evidence: readonly AtomicMemoryEvidence[]): unknown {
   return evidence.map(({ sourceRef, event, texts, messagePositions }) => ({
     sourceRef,
+    sourceAlias: `e${event.ordinal}`,
     observedAt: event.observedAt,
     ...(messagePositions ? { messagePositions } : { texts }),
   }));
+}
+
+/** Ordinals stay fixed across fitting, split ranges and localization; aliases grant no new scope. */
+export function indexAtomicMemoryEvidence(
+  evidence: readonly AtomicMemoryEvidence[],
+): ReadonlyMap<string, AtomicMemoryEvidence> {
+  return new Map(
+    evidence.flatMap((entry) => [
+      [entry.sourceRef, entry] as const,
+      [`e${entry.event.ordinal}`, entry] as const,
+    ]),
+  );
 }
 
 export function memoryTextContainsSecret(text: string): boolean {

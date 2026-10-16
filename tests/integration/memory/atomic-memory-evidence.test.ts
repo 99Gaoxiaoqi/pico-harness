@@ -18,7 +18,7 @@ test("indexed evidence preserves long user-message tails and binds similar messa
     { role: "user", content: firstText },
     { role: "user", content: secondText },
   ];
-  const events = [event("first", firstText), event("second", secondText)];
+  const events = [event("first", firstText), event("second", secondText, 2)];
   const evidence = fitAtomicMemoryEvidence(
     projectAtomicMemoryEvidence(events, messages, { first: [1], second: [2, 2] }),
   );
@@ -28,8 +28,8 @@ test("indexed evidence preserves long user-message tails and binds similar messa
     [[firstText], [secondText]],
   );
   assert.deepEqual(renderAtomicMemoryEvidence(evidence), [
-    { sourceRef: "event:first", observedAt: 1, messagePositions: [1] },
-    { sourceRef: "event:second", observedAt: 1, messagePositions: [2] },
+    { sourceRef: "event:first", sourceAlias: "e1", observedAt: 1, messagePositions: [1] },
+    { sourceRef: "event:second", sourceAlias: "e2", observedAt: 1, messagePositions: [2] },
   ]);
   const prompt = proposalPrompt("remember", renderAtomicMemoryEvidence(evidence));
   assert.match(prompt, /zero-based messages/);
@@ -68,12 +68,12 @@ test("indexed evidence cannot promote tool observations, hidden messages or extr
   assert.deepEqual(projectAtomicMemoryEvidence([hiddenLedger], messages, { hidden: [2] }), []);
 });
 
-function event(eventId: string, text: string): MemoryEvidenceEvent {
+function event(eventId: string, text: string, ordinal = 1): MemoryEvidenceEvent {
   return {
     eventId,
     text,
     role: "user",
-    ordinal: 1,
+    ordinal,
     runId: "run",
     turnId: "turn",
     observedAt: 1,
