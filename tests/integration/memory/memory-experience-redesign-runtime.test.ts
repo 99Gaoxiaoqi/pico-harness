@@ -523,6 +523,22 @@ test("无工具方法由明确来源成为建议；未支持因果的输出留�
 });
 
 test("所有maturity与审核状态共享硬条件；重叠双字词和泛词不构成相关命中", async () => {
+  // This fixture models the query contract: score and Host qualification run before limit.
+  // A bare returned candidate would skip accept's metadata/qualified-target collection entirely.
+  const recallStore = (candidate: TaskExperienceCandidate): TaskExperienceStore => {
+    const queryTaskExperiences: TaskExperienceStore["queryTaskExperiences"] = async (
+      workspaceKey,
+      options,
+    ) => {
+      assert.equal(workspaceKey, candidate.workspaceKey);
+      assert.ok(options?.recall, "fixture must exercise the ranked recall query");
+      assert.ok(options.recall.accept, "fixture must execute Host qualification");
+      const score = options.recall.score(candidate);
+      if (!Number.isFinite(score) || score <= 0) return [];
+      return (await options.recall.accept(candidate, { itemVersion: 1 })) ? [candidate] : [];
+    };
+    return { queryTaskExperiences } as TaskExperienceStore;
+  };
   const base: TaskExperienceCandidate = {
     candidateId: "method",
     kind: "task-lesson",
@@ -560,9 +576,8 @@ test("所有maturity与审核状态共享硬条件；重叠双字词和泛词不
   };
   for (const maturity of ["trial", "active"] as const)
     for (const match of [false, "unknown", true] as const) {
-      const store = {
-        queryTaskExperiences: async () => [{ ...base, maturity }],
-      } as unknown as TaskExperienceStore;
+      const store = recallStore({ ...base, maturity });
+      let conditionCalls = 0;
       assert.equal(
         (
           await taskExperienceRecallTargets({
@@ -571,17 +586,17 @@ test("所有maturity与审核状态共享硬条件；重叠双字词和泛词不
             workDir: "/fixture",
             query: "具体边界",
             toolAllowed: () => false,
-            conditionMatches: async () => match,
+            conditionMatches: async () => {
+              conditionCalls++;
+              return match;
+            },
           })
         ).length,
         match === true ? 1 : 0,
       );
+      assert.equal(conditionCalls, 1, "false/unknown/true all reach the hard-condition gate");
     }
-  const expired = {
-    queryTaskExperiences: async () => [
-      { ...base, requiredConditions: [], expiresAt: Date.now() - 1 },
-    ],
-  } as unknown as TaskExperienceStore;
+  const expired = recallStore({ ...base, requiredConditions: [], expiresAt: Date.now() - 1 });
   assert.equal(
     (
       await taskExperienceRecallTargets({
@@ -605,9 +620,7 @@ test("所有maturity与审核状态共享硬条件；重叠双字词和泛词不
   assert.equal(
     (
       await taskExperienceRecallTargets({
-        store: {
-          queryTaskExperiences: async () => [{ ...base, matchHints: longHints }],
-        } as unknown as TaskExperienceStore,
+        store: recallStore({ ...base, matchHints: longHints }),
         workspaceKey: "workspace",
         workDir: "/fixture",
         query: longQuery,
@@ -645,21 +658,28 @@ test("所有maturity与审核状态共享硬条件；重叠双字词和泛词不
   ])
     assert.equal(scoreExperienceMatch(sheetHint, query), 0, query);
   for (const match of [false, "unknown", true] as const) {
+    let conditionCalls = 0;
     assert.equal(
       (
         await taskExperienceRecallTargets({
-          store: {
-            queryTaskExperiences: async () => [{ ...base, matchHints: sheetHint }],
-          } as unknown as TaskExperienceStore,
+          store: recallStore({ ...base, matchHints: sheetHint }),
           workspaceKey: "workspace",
           workDir: "/fixture",
           query: sheetQuery,
           toolAllowed: () => false,
-          conditionMatches: async () => match,
+          conditionMatches: async () => {
+            conditionCalls++;
+            return match;
+          },
         })
       ).length,
       match === true ? 1 : 0,
       "a matching sheet/range never bypasses the Host hard-condition gate",
+    );
+    assert.equal(
+      conditionCalls,
+      1,
+      "sheet false/unknown cases must not pass through an empty stub",
     );
   }
   assert.ok(
