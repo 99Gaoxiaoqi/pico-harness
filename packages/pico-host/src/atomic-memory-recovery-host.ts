@@ -43,6 +43,8 @@ interface RecoveryHostOptions {
 
 /** Startup discovery only: the Runtime owns durable admission, claims and bounded retries. */
 export function recoverRegisteredAtomicMemory(options: RecoveryHostOptions): Promise<void> {
+  // An empty startup snapshot owns no recovery work and must not pin the daemon.
+  if (options.workspacePaths.length === 0) return Promise.resolve();
   const unavailable = () => {
     try {
       options.onUnavailable?.();

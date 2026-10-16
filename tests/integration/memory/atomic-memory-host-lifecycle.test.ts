@@ -100,6 +100,11 @@ test(
       await globalSessionManager.clearAndDrain();
       await rm(root, { recursive: true, force: true });
     });
+    assert.deepEqual(
+      await services.registrationStore.list(),
+      [],
+      "empty startup discovery must not acquire a memory residency",
+    );
     const sessionId = "memory-host-shutdown";
     const lease = await globalSessionManager.getOrCreatePinned(sessionId, workspacePath, {
       picoHome,
