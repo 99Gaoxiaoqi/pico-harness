@@ -14,7 +14,7 @@ import { resolvePicoPaths } from "@pico/pico-host/pico-paths";
 import { parseRuntimeResult, RUNTIME_ERROR_CODES, RuntimeProtocolError } from "@pico/protocol";
 import { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-store";
 
-const content = "处理文档任务时，先核对来源与用户更正，再整理结论，并明确尚未确认的部分。";
+const content = "发布项目文档整理结果前，先核对来源与用户更正，并明确尚未确认的部分。";
 
 async function seedPendingExperience(
   store: SqliteMemoryItemStore,
@@ -111,6 +111,9 @@ async function seedPendingExperience(
     job,
     expectedRecordRevision: initial.recordRevision,
     content,
+    representation: "method",
+    matchHints: ["项目文档"],
+    requiredConditions: [],
     applicability: {
       taskFamily: "general",
       toolNames: [],
@@ -129,22 +132,127 @@ async function seedPendingExperience(
 const protocolError = (code: RuntimeProtocolError["code"]) => (error: unknown) =>
   error instanceof RuntimeProtocolError && error.code === code;
 
+test("v3 projects method decisions and preserves a case without leaking new fields into v2", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-learning-v3-service-"));
+  const workspacePath = join(root, "workspace"),
+    picoHome = join(root, "home");
+  await mkdir(workspacePath);
+  await mkdir(picoHome);
+  const workspaceKey = resolvePicoPaths(workspacePath, { picoHome }).workspace.id;
+  const store = new SqliteMemoryItemStore(join(picoHome, "memory.sqlite"), { now: () => 1000 });
+  const service = new DesktopAtomicMemoryService({ picoHome, now: () => 1000, publish: () => {} });
+  t.after(async () => {
+    service.close();
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const pending = await seedPendingExperience(store, workspacePath, workspaceKey);
+  const modern = parseRuntimeResult(
+    "memory.learning.query",
+    await service.queryExperiences(workspacePath, {
+      workspacePath,
+      learningVersion: 3,
+      representation: "method",
+    }),
+  );
+  assert.equal(modern.learningVersion, 3);
+  assert.equal(modern.items[0]?.usagePolicy, "review_required");
+  const legacy = parseRuntimeResult(
+    "memory.learning.query",
+    await service.queryExperiences(workspacePath, { workspacePath }),
+  );
+  assert.equal("representation" in legacy.items[0]!, false);
+  const approved = (
+    await service.reviewExperience(workspacePath, {
+      workspacePath,
+      learningVersion: 3,
+      candidateId: pending.candidateId,
+      expectedContentVersion: pending.contentVersion,
+      expectedRecordRevision: pending.recordRevision,
+      operationId: "v3-approve",
+      action: "accept",
+    })
+  ).candidate;
+  assert.ok(approved.itemId);
+  const list = parseRuntimeResult(
+    "memory.list",
+    await service.list(workspacePath, { workspacePath, learningVersion: 3, paged: true }),
+  );
+  assert.equal(list.learningVersion, 3);
+  assert.equal(list.items[0]?.taskExperience?.representation, "method");
+  parseRuntimeResult(
+    "memory.context.preview",
+    await service.previewContext(workspacePath, {
+      workspacePath,
+      learningVersion: 3,
+      query: "项目文档",
+    }),
+  );
+  const asCase = parseRuntimeResult(
+    "memory.learning.review",
+    await service.reviewExperience(workspacePath, {
+      workspacePath,
+      learningVersion: 3,
+      candidateId: approved.candidateId,
+      expectedContentVersion: approved.contentVersion,
+      expectedRecordRevision: approved.recordRevision,
+      operationId: "v3-case",
+      action: "keep_case",
+    }),
+  ).candidate;
+  assert.equal(asCase.representation, "case");
+  assert.equal(asCase.itemId, undefined);
+  assert.equal(asCase.enabled, false);
+  const cases = parseRuntimeResult(
+    "memory.learning.query",
+    await service.queryExperiences(workspacePath, {
+      workspacePath,
+      learningVersion: 3,
+      representation: "case",
+    }),
+  );
+  assert.equal(cases.items.length, 1);
+  assert.equal((await service.queryExperiences(workspacePath, { workspacePath })).items.length, 0);
+  await assert.rejects(
+    service.detailExperience(workspacePath, asCase.candidateId),
+    protocolError(RUNTIME_ERROR_CODES.NOT_FOUND),
+  );
+});
+
 test("Host 验证附件不泄漏到既有审核协议，也不向用户暴露内部证据候选", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-internal-experience-evidence-"));
-  const workspacePath = join(root, "workspace"), picoHome = join(root, "home");
+  const workspacePath = join(root, "workspace"),
+    picoHome = join(root, "home");
   await mkdir(workspacePath);
   const workspaceKey = resolvePicoPaths(workspacePath, { picoHome }).workspace.id;
   const store = new SqliteMemoryItemStore(join(picoHome, "memory.sqlite"), { now: () => 1000 });
   const service = new DesktopAtomicMemoryService({ picoHome, now: () => 1000, publish: () => {} });
-  t.after(async () => { service.close(); store.close(); await rm(root, { recursive: true, force: true }); });
+  t.after(async () => {
+    service.close();
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  });
   const pending = await seedPendingExperience(store, workspacePath, workspaceKey);
   // Simulate a persisted Host-only attachment. No model or public review input can supply it.
   const db = new DatabaseSync(join(picoHome, "memory.sqlite"));
   try {
-    db.prepare("UPDATE execution_learning_candidates SET record_json=json_set(record_json,'$.nativeEvidence',json(?)) WHERE candidate_id=?")
-      .run(JSON.stringify({ candidateId: "internal-proof", claimRevision: 1, claimHash: "a".repeat(64), scopeHash: "b".repeat(64) }), pending.candidateId);
-  } finally { db.close(); }
-  assert.ok((await store.taskExperiences.readTaskExperienceCandidate(pending.candidateId))?.nativeEvidence);
+    db.prepare(
+      "UPDATE execution_learning_candidates SET record_json=json_set(record_json,'$.nativeEvidence',json(?)) WHERE candidate_id=?",
+    ).run(
+      JSON.stringify({
+        candidateId: "internal-proof",
+        claimRevision: 1,
+        claimHash: "a".repeat(64),
+        scopeHash: "b".repeat(64),
+      }),
+      pending.candidateId,
+    );
+  } finally {
+    db.close();
+  }
+  assert.ok(
+    (await store.taskExperiences.readTaskExperienceCandidate(pending.candidateId))?.nativeEvidence,
+  );
   const query = await service.queryExperiences(workspacePath, { workspacePath });
   parseRuntimeResult("memory.learning.query", query);
   assert.equal("nativeEvidence" in query.items[0]!, false);
@@ -152,14 +260,24 @@ test("Host 验证附件不泄漏到既有审核协议，也不向用户暴露内
   parseRuntimeResult("memory.learning.detail", detail);
   assert.equal("nativeEvidence" in detail.candidate, false);
   const review = await service.reviewExperience(workspacePath, {
-    workspacePath, candidateId: pending.candidateId, expectedRecordRevision: pending.recordRevision,
-    expectedContentVersion: pending.contentVersion, operationId: "disable-internal-evidence", action: "disable",
+    workspacePath,
+    candidateId: pending.candidateId,
+    expectedRecordRevision: pending.recordRevision,
+    expectedContentVersion: pending.contentVersion,
+    operationId: "disable-internal-evidence",
+    action: "disable",
   });
   parseRuntimeResult("memory.learning.review", review);
   assert.equal("nativeEvidence" in review.candidate, false);
   assert.deepEqual((await service.listLearning(workspacePath)).items, []);
-  await assert.rejects(service.inspectLearning(workspacePath, "internal-proof"), protocolError(RUNTIME_ERROR_CODES.NOT_FOUND));
-  await assert.rejects(service.discardLearning(workspacePath, "internal-proof", 1), protocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS));
+  await assert.rejects(
+    service.inspectLearning(workspacePath, "internal-proof"),
+    protocolError(RUNTIME_ERROR_CODES.NOT_FOUND),
+  );
+  await assert.rejects(
+    service.discardLearning(workspacePath, "internal-proof", 1),
+    protocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS),
+  );
 });
 
 test("真实 SQLite 与 Desktop v2 审核闭环隔离旧视图、保留未验证参考并支持关闭自动学习后管理", async () => {
@@ -386,34 +504,131 @@ test("真实 SQLite 与 Desktop v2 审核闭环隔离旧视图、保留未验证
   }
 });
 
-test("shared experience RPC projects history, enforces deletion route, and replays feedback without resurrecting prose", async t => {
+test("shared experience RPC projects history, enforces deletion route, and replays feedback without resurrecting prose", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-experience-rpc-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const workspacePath = join(root, "workspace"), picoHome = join(root, "home");
-  await mkdir(workspacePath); await mkdir(picoHome);
-  const workspaceKey = resolvePicoPaths(workspacePath, {picoHome}).workspace.id;
-  const store = new SqliteMemoryItemStore(join(picoHome, "memory.sqlite"), {now:()=>1000});
-  const service = new DesktopAtomicMemoryService({picoHome,now:()=>1000,publish:()=>{}});
-  t.after(()=>{service.close();store.close();});
-  const pending=await seedPendingExperience(store,workspacePath,workspaceKey);
-  const accepted=(await service.reviewExperience(workspacePath,{workspacePath,candidateId:pending.candidateId,expectedContentVersion:pending.contentVersion,expectedRecordRevision:pending.recordRevision,operationId:'rpc-accept',action:'accept'})).candidate;
-  const itemId=accepted.itemId!;
-  await store.taskExperiences.recordTaskExperienceReuse({reuseId:'historical-rpc-use',workspaceKey,candidateId:accepted.candidateId,contentVersion:accepted.contentVersion,itemId,itemVersion:1,taskId:accepted.taskId,taskVersion:accepted.taskVersion,sessionId:accepted.sessionId,runId:accepted.runId,referenceHash:'a'.repeat(64),referenceContent:content,adoption:'unknown',validation:'unknown',excluded:false,sources:[],createdAt:500,updatedAt:500});
-  await store.experienceLedger.recordExperienceDiagnostic({diagnosticId:'rpc-diagnostic',workspaceKey,sessionId:accepted.sessionId,runId:accepted.runId,phase:'effect',reason:'experience_validation_unavailable',createdAt:600});
-  await assert.rejects(store.experienceLedger.recordExperienceDiagnostic({diagnosticId:'bad-diagnostic',workspaceKey,sessionId:accepted.sessionId,runId:accepted.runId,phase:'effect',reason:'private /home/path or raw error',createdAt:601}));
-  const query=parseRuntimeResult('memory.experience.query',await service.queryExperienceUses(workspacePath,{workspacePath,sessionId:accepted.sessionId}));
-  assert.equal(query.diagnostics.length,1);
-  assert.equal(query.diagnostics[0]!.reason,'experience_validation_unavailable');
-  assert.equal(query.uses.length,1);assert.equal(query.uses[0]!.source.kind,'reviewed-reference');assert.equal(query.uses[0]!.historical,true);assert.equal(query.uses[0]!.delivery,'unknown');
-  parseRuntimeResult('memory.experience.detail',await service.detailExperienceUse(workspacePath,'historical-rpc-use'));
-  await assert.rejects(service.delete(workspacePath,{workspacePath,itemId,expectedVersion:1,idempotencyKey:'wrong-route'}),/经验管理中删除/u);
+  const workspacePath = join(root, "workspace"),
+    picoHome = join(root, "home");
+  await mkdir(workspacePath);
+  await mkdir(picoHome);
+  const workspaceKey = resolvePicoPaths(workspacePath, { picoHome }).workspace.id;
+  const store = new SqliteMemoryItemStore(join(picoHome, "memory.sqlite"), { now: () => 1000 });
+  const service = new DesktopAtomicMemoryService({ picoHome, now: () => 1000, publish: () => {} });
+  t.after(() => {
+    service.close();
+    store.close();
+  });
+  const pending = await seedPendingExperience(store, workspacePath, workspaceKey);
+  const accepted = (
+    await service.reviewExperience(workspacePath, {
+      workspacePath,
+      candidateId: pending.candidateId,
+      expectedContentVersion: pending.contentVersion,
+      expectedRecordRevision: pending.recordRevision,
+      operationId: "rpc-accept",
+      action: "accept",
+    })
+  ).candidate;
+  const itemId = accepted.itemId!;
+  await store.taskExperiences.recordTaskExperienceReuse({
+    reuseId: "historical-rpc-use",
+    workspaceKey,
+    candidateId: accepted.candidateId,
+    contentVersion: accepted.contentVersion,
+    itemId,
+    itemVersion: 1,
+    taskId: accepted.taskId,
+    taskVersion: accepted.taskVersion,
+    sessionId: accepted.sessionId,
+    runId: accepted.runId,
+    referenceHash: "a".repeat(64),
+    referenceContent: content,
+    adoption: "unknown",
+    validation: "unknown",
+    excluded: false,
+    sources: [],
+    createdAt: 500,
+    updatedAt: 500,
+  });
+  await store.experienceLedger.recordExperienceDiagnostic({
+    diagnosticId: "rpc-diagnostic",
+    workspaceKey,
+    sessionId: accepted.sessionId,
+    runId: accepted.runId,
+    phase: "effect",
+    reason: "experience_validation_unavailable",
+    createdAt: 600,
+  });
+  await assert.rejects(
+    store.experienceLedger.recordExperienceDiagnostic({
+      diagnosticId: "bad-diagnostic",
+      workspaceKey,
+      sessionId: accepted.sessionId,
+      runId: accepted.runId,
+      phase: "effect",
+      reason: "private /home/path or raw error",
+      createdAt: 601,
+    }),
+  );
+  const query = parseRuntimeResult(
+    "memory.experience.query",
+    await service.queryExperienceUses(workspacePath, {
+      workspacePath,
+      sessionId: accepted.sessionId,
+    }),
+  );
+  assert.equal(query.diagnostics.length, 1);
+  assert.equal(query.diagnostics[0]!.reason, "experience_validation_unavailable");
+  assert.equal(query.uses.length, 1);
+  assert.equal(query.uses[0]!.source.kind, "reviewed-reference");
+  assert.equal(query.uses[0]!.historical, true);
+  assert.equal(query.uses[0]!.delivery, "unknown");
+  parseRuntimeResult(
+    "memory.experience.detail",
+    await service.detailExperienceUse(workspacePath, "historical-rpc-use"),
+  );
+  await assert.rejects(
+    service.delete(workspacePath, {
+      workspacePath,
+      itemId,
+      expectedVersion: 1,
+      idempotencyKey: "wrong-route",
+    }),
+    /经验管理中删除/u,
+  );
   assert.ok(await store.readItem(itemId));
-  const feedback={workspacePath,useId:'historical-rpc-use',expectedItemVersion:1,operationId:'rpc-disable',action:'disable' as const};
-  parseRuntimeResult('memory.experience.feedback',await service.feedbackExperienceUse(workspacePath,feedback));
-  assert.equal((await store.taskExperiences.readTaskExperienceCandidate(accepted.candidateId))?.enabled,false);
-  const current=(await store.taskExperiences.readTaskExperienceCandidate(accepted.candidateId))!;
-  await service.reviewExperience(workspacePath,{workspacePath,candidateId:current.candidateId,expectedContentVersion:current.contentVersion,expectedRecordRevision:current.recordRevision,operationId:'rpc-delete',action:'delete'});
-  const replay=parseRuntimeResult('memory.experience.feedback',await service.feedbackExperienceUse(workspacePath,feedback));
-  assert.equal(replay.use.deleted,true);assert.equal(replay.use.referenceContent,undefined);
-  await assert.rejects(service.detailExperienceUse(join(root,'another-workspace'),'historical-rpc-use'),/当前工作区没有/u);
+  const feedback = {
+    workspacePath,
+    useId: "historical-rpc-use",
+    expectedItemVersion: 1,
+    operationId: "rpc-disable",
+    action: "disable" as const,
+  };
+  parseRuntimeResult(
+    "memory.experience.feedback",
+    await service.feedbackExperienceUse(workspacePath, feedback),
+  );
+  assert.equal(
+    (await store.taskExperiences.readTaskExperienceCandidate(accepted.candidateId))?.enabled,
+    false,
+  );
+  const current = (await store.taskExperiences.readTaskExperienceCandidate(accepted.candidateId))!;
+  await service.reviewExperience(workspacePath, {
+    workspacePath,
+    candidateId: current.candidateId,
+    expectedContentVersion: current.contentVersion,
+    expectedRecordRevision: current.recordRevision,
+    operationId: "rpc-delete",
+    action: "delete",
+  });
+  const replay = parseRuntimeResult(
+    "memory.experience.feedback",
+    await service.feedbackExperienceUse(workspacePath, feedback),
+  );
+  assert.equal(replay.use.deleted, true);
+  assert.equal(replay.use.referenceContent, undefined);
+  await assert.rejects(
+    service.detailExperienceUse(join(root, "another-workspace"), "historical-rpc-use"),
+    /当前工作区没有/u,
+  );
 });

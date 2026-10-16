@@ -13,6 +13,21 @@ export type ExperienceFeedbackRequest = Omit<
 >;
 export type ExperienceDetail = RuntimeResult<"memory.learning.detail">;
 
+export interface TaskExperienceState {
+  readonly supported: boolean;
+  readonly learningVersion: 2 | 3;
+  readonly receipts: NonNullable<RuntimeResult<"memory.learning.query">["receipts"]>;
+  readonly items: RuntimeResult<"memory.learning.query">["items"];
+  readonly reuse: RuntimeResult<"memory.learning.query">["reuse"];
+  readonly workspaceKey: string;
+  readonly error: string | undefined;
+  readonly loading: boolean;
+  readonly refresh: () => Promise<void>;
+  readonly onDetail: (candidateId: string) => Promise<ExperienceDetail>;
+  readonly onReview: (request: ExperienceReviewRequest) => Promise<TaskExperienceCandidate>;
+  readonly onFeedback: (request: ExperienceFeedbackRequest) => Promise<TaskExperienceCandidate>;
+}
+
 /** Management remains available when automatic learning or recall is switched off. */
 export function useTaskExperience(
   runtime: RuntimeStore,
@@ -23,7 +38,7 @@ export function useTaskExperience(
     readonly refreshKey?: string;
     readonly enabled?: boolean;
   },
-) {
+): TaskExperienceState {
   const { workspacePath, sessionId, review, refreshKey } = input;
   const { actions, data, connection, preview, executionLearningRevision } = runtime;
   const enabled = Boolean(

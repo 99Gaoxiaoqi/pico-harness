@@ -46,7 +46,7 @@ const click=async(selector)=>act(async()=>document.querySelector(selector).click
  check(!text().includes('隐藏的原生候选')&&nativeCalls===0,'no internal candidate is displayed, counted or requested');
  check(text().includes('自动学习已关闭')&&text().includes('记忆召回已关闭'),'disabled settings preserve review and history');
  await click('.task-experience__row');
- check(text().includes('审核：待审核')&&text().includes('历史验证：尚未验证'),'review does not imply validation');
+ check(text().includes('需审核')&&text().includes('历史验证：尚未验证'),'review does not imply validation');
  await act(async()=>button('确认并启用').click());
  check(candidate.review==='approved'&&candidate.validation==='unknown','confirmation leaves unvalidated evidence unknown');
  await click('#native-link');
