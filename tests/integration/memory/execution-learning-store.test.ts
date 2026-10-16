@@ -193,7 +193,7 @@ async function receiptAndJob(
   return { ticket, result, job };
 }
 
-test("v9, v10 and v11 memory databases upgrade to v15 preserving facts and retiring pending old lessons", async (t) => {
+test("v9, v10 and v11 memory databases upgrade to v16 preserving facts and retiring pending old lessons", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-learning-migration-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   for (const version of [9, 10, 11]) {
@@ -223,7 +223,7 @@ test("v9, v10 and v11 memory databases upgrade to v15 preserving facts and retir
     old.close();
     store = new SqliteMemoryItemStore(path);
     try {
-      assert.equal(store.schemaVersion(), 15);
+      assert.equal(store.schemaVersion(), 16);
       assert.deepEqual(await store.readItem(itemId), before);
       if (existingNative)
         assert.deepEqual(
