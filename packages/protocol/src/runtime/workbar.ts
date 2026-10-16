@@ -448,7 +448,7 @@ export type WorkbarMethodMap = {
       readonly sessionId: SessionId;
       readonly cursor?: string;
       readonly runId?: string;
-      readonly learningVersion?: 2;
+      readonly learningVersion?: 2 | 3;
     };
     readonly result: RuntimeExecutionPage;
   };

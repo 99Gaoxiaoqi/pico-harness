@@ -4,6 +4,7 @@ import type { ExecutionLearningStatus, TaskExperienceSummary } from "@pico/core"
 import {
   learningVersionParam,
   experienceSummaryResult,
+  experienceSummaryV3Result,
   taskExperienceParamValidators,
   taskExperienceResultValidators,
 } from "./task-experience.js";
@@ -485,23 +486,26 @@ export type MemoryMethodMap = TaskExperienceMethodMap & {
       readonly limit?: number;
       readonly paged?: true;
       readonly cursor?: string;
-      readonly learningVersion?: 2;
+      readonly learningVersion?: 2 | 3;
     };
     readonly result:
       | {
           readonly items: readonly RuntimeMemoryItem[];
           readonly pageInfo?: never;
-          readonly learningVersion?: 2;
+          readonly learningVersion?: 2 | 3;
         }
       | {
           readonly items: readonly RuntimeMemoryListItem[];
           readonly pageInfo: RuntimeMemoryPageInfo;
-          readonly learningVersion?: 2;
+          readonly learningVersion?: 2 | 3;
         };
   };
   readonly "memory.get": {
-    readonly params: WorkspaceParams & { readonly itemId: string; readonly learningVersion?: 2 };
-    readonly result: { readonly item: RuntimeMemoryItem; readonly learningVersion?: 2 };
+    readonly params: WorkspaceParams & {
+      readonly itemId: string;
+      readonly learningVersion?: 2 | 3;
+    };
+    readonly result: { readonly item: RuntimeMemoryItem; readonly learningVersion?: 2 | 3 };
   };
   /** /memory remember（TUI 直写）：显式记住一条 workspace note（安全扫描 + 幂等 + 再激活）。 */
   readonly "memory.create": {
@@ -552,10 +556,10 @@ export type MemoryMethodMap = TaskExperienceMethodMap & {
       readonly maxTokens?: number;
       readonly query?: string;
       readonly sessionId?: string;
-      readonly learningVersion?: 2;
+      readonly learningVersion?: 2 | 3;
     };
     readonly result: {
-      readonly learningVersion?: 2;
+      readonly learningVersion?: 2 | 3;
       readonly items: readonly RuntimeMemoryItem[];
       readonly budget: RuntimeMemoryContextBudget;
       readonly block?: string;
@@ -788,6 +792,25 @@ const memoryListItemV2Result = exactResultShape(
     taskExperience: experienceSummaryResult,
   },
 );
+const memoryItemV3Result = exactResultShape(
+  { ...memoryItemFieldsResult, sources: resultArray(memorySourceResult) },
+  {
+    executionEvidence: executionEvidenceResult,
+    sourceType: resultOneOf(["execution-validated", "reviewed-reference"]),
+    taskAcceptance: taskAcceptanceResult,
+    taskExperience: experienceSummaryV3Result,
+  },
+);
+const memoryListItemV3Result = exactResultShape(
+  { ...memoryItemFieldsResult, sourceCount: resultNonNegativeInteger },
+  {
+    firstSource: memorySourceResult,
+    executionEvidence: executionEvidenceResult,
+    sourceType: resultOneOf(["execution-validated", "reviewed-reference"]),
+    taskAcceptance: taskAcceptanceResult,
+    taskExperience: experienceSummaryV3Result,
+  },
+);
 const memoryReferenceV2Result = exactResultShape({
   itemId: resultString,
   content: resultString,
@@ -807,11 +830,16 @@ const memoryReferenceV2Result = exactResultShape({
   }),
   match: resultOneOf(["key", "content", "preference"]),
 });
-const isV2 = (v: unknown) => isJsonObject(v) && v.learningVersion === 2;
-const previewRule = (v2: boolean) =>
+const isV2 = (v: unknown) =>
+  isJsonObject(v) && (v.learningVersion === 2 || v.learningVersion === 3);
+const learningResultVersion = (v: unknown): 2 | 3 =>
+  isJsonObject(v) && v.learningVersion === 3 ? 3 : 2;
+const previewRule = (v2: boolean, version: 2 | 3 = 2) =>
   exactResultShape(
     {
-      items: resultArray(v2 ? memoryItemV2Result : memoryItemResult),
+      items: resultArray(
+        v2 ? (version === 3 ? memoryItemV3Result : memoryItemV2Result) : memoryItemResult,
+      ),
       budget: exactResultShape({
         maxItems: resultNonNegativeInteger,
         maxTokens: resultNonNegativeInteger,
@@ -819,7 +847,7 @@ const previewRule = (v2: boolean) =>
         usedTokens: resultNonNegativeInteger,
         truncated: resultBoolean,
       }),
-      ...(v2 ? { learningVersion: resultOneOf([2]) } : {}),
+      ...(v2 ? { learningVersion: resultOneOf([version]) } : {}),
     },
     {
       block: resultString,
@@ -866,8 +894,16 @@ export const memoryResultValidators = {
     if (isV2(value)) {
       const paged = Object.hasOwn(value as object, "pageInfo");
       exactResultShape({
-        learningVersion: resultOneOf([2]),
-        items: resultArray(paged ? memoryListItemV2Result : memoryItemV2Result),
+        learningVersion: resultOneOf([learningResultVersion(value)]),
+        items: resultArray(
+          learningResultVersion(value) === 3
+            ? paged
+              ? memoryListItemV3Result
+              : memoryItemV3Result
+            : paged
+              ? memoryListItemV2Result
+              : memoryItemV2Result,
+        ),
         ...(paged ? { pageInfo: memoryPageInfoResult } : {}),
       })(value, path);
     } else if (value && typeof value === "object" && Object.hasOwn(value, "pageInfo"))
@@ -876,7 +912,10 @@ export const memoryResultValidators = {
   },
   "memory.get": (v, p) =>
     (isV2(v)
-      ? exactResultShape({ learningVersion: resultOneOf([2]), item: memoryItemV2Result })
+      ? exactResultShape({
+          learningVersion: resultOneOf([learningResultVersion(v)]),
+          item: learningResultVersion(v) === 3 ? memoryItemV3Result : memoryItemV2Result,
+        })
       : exactResultShape({ item: memoryItemResult }))(v, p),
   "memory.create": exactResultShape({ item: memoryItemResult }),
   "memory.update": exactResultShape({ item: memoryItemResult }),
@@ -886,7 +925,7 @@ export const memoryResultValidators = {
   }),
   "memory.settings.get": exactResultShape({ settings: memorySettingsResult }),
   "memory.settings.update": exactResultShape({ settings: memorySettingsResult }),
-  "memory.context.preview": (v, p) => previewRule(isV2(v))(v, p),
+  "memory.context.preview": (v, p) => previewRule(isV2(v), learningResultVersion(v))(v, p),
   "memory.metrics.get": exactResultShape({ metrics: memoryMetricsResult }),
   "memory.consolidation.history": exactResultShape({
     receipts: resultArray(memoryConsolidationReceiptResult),

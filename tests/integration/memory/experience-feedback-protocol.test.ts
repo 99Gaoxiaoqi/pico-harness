@@ -120,3 +120,111 @@ test("retired experience keeps the historical wire shape without introducing a w
     false,
   );
 });
+
+test("v3 negotiates case policy and exact feedback while preserving strict legacy envelopes", () => {
+  assert.equal(
+    parseStrictRuntimeParams("memory.learning.query", {
+      workspacePath: "/ws",
+      learningVersion: 3,
+      representation: "case",
+      usagePolicy: "case_only",
+    }).learningVersion,
+    3,
+  );
+  assert.throws(() =>
+    parseStrictRuntimeParams("memory.learning.query", {
+      workspacePath: "/ws",
+      representation: "case",
+    }),
+  );
+  const review = {
+    workspacePath: "/ws",
+    candidateId: "c",
+    expectedRecordRevision: 1,
+    expectedContentVersion: 1,
+    operationId: "edit",
+    action: "revise",
+    content: "有来源的建议",
+  };
+  assert.throws(() => parseStrictRuntimeParams("memory.learning.review", review));
+  assert.equal(
+    parseStrictRuntimeParams("memory.learning.review", { ...review, learningVersion: 3 }).action,
+    "revise",
+  );
+  assert.throws(() =>
+    parseStrictRuntimeParams("memory.learning.review", {
+      ...review,
+      learningVersion: 3,
+      requiredConditions: [{ kind: "arbitrary", allow: true }],
+    }),
+  );
+  const feedback = {
+    workspacePath: "/ws",
+    useId: "use",
+    expectedItemVersion: 1,
+    operationId: "helpful",
+    action: "helpful",
+  };
+  assert.throws(() => parseStrictRuntimeParams("memory.experience.feedback", feedback));
+  assert.equal(
+    parseStrictRuntimeParams("memory.experience.feedback", {
+      ...feedback,
+      learningVersion: 3,
+      expectedContentVersion: 1,
+    }).action,
+    "helpful",
+  );
+  const candidate = {
+    candidateId: "c",
+    contentVersion: 1,
+    recordRevision: 1,
+    review: "unneeded",
+    validation: "unknown",
+    enabled: false,
+    applicability: { taskFamily: "general", toolNames: [], conditions: [] },
+    kind: "task-lesson",
+    lifecycleState: "active",
+    taskId: "t",
+    taskVersion: 1,
+    workspaceKey: "ws",
+    workDir: "/ws",
+    sessionId: "s",
+    runId: "r",
+    failureKey: "f",
+    inputEpoch: 1,
+    settingsVersion: 1,
+    deletionRevision: 0,
+    state: "ready",
+    goal: "g",
+    content: "只记录已发生的过程",
+    sources: [],
+    observationIds: [],
+    createdAt: 1,
+    updatedAt: 1,
+    representation: "case",
+    usagePolicy: "case_only",
+    matchHints: [],
+    requiredConditions: [],
+  };
+  const envelope = {
+    learningVersion: 3,
+    workspaceKey: "ws",
+    revision: 1,
+    items: [candidate],
+    reuse: [],
+    receipts: [{ operationId: "receipt", sessionId: "s", committedAt: 1, createdItemCount: 2 }],
+  };
+  assert.equal(
+    parseRuntimeResult("memory.learning.query", envelope).items[0]?.representation,
+    "case",
+  );
+  assert.throws(() =>
+    parseRuntimeResult("memory.learning.query", { ...envelope, learningVersion: 2 }),
+  );
+  assert.throws(() =>
+    parseRuntimeResult("memory.learning.query", {
+      ...envelope,
+      items: [{ ...candidate, nativeEvidence: { claimHash: "private" } }],
+    }),
+  );
+});
