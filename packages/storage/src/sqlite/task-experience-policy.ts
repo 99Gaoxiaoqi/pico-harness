@@ -54,6 +54,7 @@ export function experienceUsable(candidate: TaskExperienceCandidate, now: number
     candidate.lifecycleState === "active" &&
     candidate.state === "saved" &&
     !candidate.scopeUnresolved &&
+    !experienceConditions(candidate).scopeUnresolved &&
     !experienceLocked(candidate) &&
     (candidate.expiresAt === undefined || candidate.expiresAt > now)
   );
@@ -74,7 +75,8 @@ export function experienceHints(
   ].slice(0, 8);
 }
 export function experienceConditions(
-  candidate: Pick<TaskExperienceCandidate, "nativeEvidence" | "applicability">,
+  candidate: Pick<TaskExperienceCandidate, "nativeEvidence" | "applicability"> &
+    Partial<Pick<TaskExperienceCandidate, "content">>,
   requested?: readonly TaskExperienceRequiredCondition[],
   legacy = false,
 ): { requiredConditions: readonly TaskExperienceRequiredCondition[]; scopeUnresolved: boolean } {
@@ -98,7 +100,14 @@ export function experienceConditions(
         !(candidate.applicability.spreadsheet && spreadsheetWords.test(value.trim())) &&
         !(candidate.nativeEvidence && nativeWords.test(value.trim())),
     );
-  return { requiredConditions: conditions, scopeUnresolved: !!unknownLegacy };
+  // A textual claim is not a native predicate. Recognize only explicit frozen/native
+  // scope declarations; ordinary usage notes and tool-free methods remain advisory.
+  const missingNativeScope =
+    !candidate.nativeEvidence &&
+    /冻结(?:的)?(?:检查|操作|执行|原生|验收)?范围|\bnative[-\s]+scope\b|\bfrozen[-\s]+(?:(?:check|operation|execution|native|inspection|verification)[-\s]+)?scope\b/iu.test(
+      `${candidate.content ?? ""}\n${candidate.applicability.conditions.join("\n")}`,
+    );
+  return { requiredConditions: conditions, scopeUnresolved: unknownLegacy || missingNativeScope };
 }
 export function experienceContentRisk(content: string): "low" | "high" | "blocked" {
   // Remove only a directly negated action, never the rest of a sentence.

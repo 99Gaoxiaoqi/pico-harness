@@ -356,6 +356,7 @@ test("同一任务用户纠正后的新版本保留原始来源，并在最新�
       job,
       expectedRecordRevision: candidate.recordRevision,
       content: "先核对配置输入，再运行原检查。",
+      representation: "method",
       applicability: {
         taskFamily: "coding",
         toolNames: ["read_file"],
@@ -1284,7 +1285,7 @@ test("原生附件只认冻结身份；编辑与纠正断开，删除清理派�
     const completion = {
       job,
       expectedRecordRevision: 1,
-      content: "运行检查前核对输入条件。",
+      content: "仅适用于同一冻结检查范围，运行检查前核对输入条件。",
       representation: "method" as const,
       applicability: initial.candidate.applicability,
       sources: initial.candidate.sources,
@@ -1351,6 +1352,9 @@ test("原生附件只认冻结身份；编辑与纠正断开，删除清理派�
     assert.deepEqual(pending?.nativeEvidence, attachment);
     assert.equal(pending?.validation, "unknown");
     assert.equal(pending?.enabled, true);
+    assert.equal(pending?.usagePolicy, "suggestion");
+    assert.equal(pending?.scopeUnresolved, false);
+    assert.equal(pending?.requiredConditions?.[0]?.kind, "native-scope");
     await store.executionLearning.admitExecutionLearning(claim.admission);
     await assert.rejects(
       store.executionLearning.saveExecutionLearningClaim({

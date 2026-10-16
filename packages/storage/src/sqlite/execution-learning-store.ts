@@ -1001,7 +1001,10 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
         .prepare("SELECT record_json FROM execution_learning_candidates WHERE candidate_id=?")
         .get(id),
     );
-    return value && "kind" in value && value.kind === "task-lesson" ? value : undefined;
+    if (!value || !("kind" in value) || value.kind !== "task-lesson") return undefined;
+    return experienceConditions(value).scopeUnresolved
+      ? { ...value, scopeUnresolved: true }
+      : value;
   }
   private writeExperience(value: TaskExperienceCandidate): void {
     const { evidenceSummary: _evidenceSummary, ...candidate } = value;
@@ -1329,6 +1332,7 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
       .slice(0, limit)
       .map((candidate) => ({
         ...candidate,
+        ...(experienceConditions(candidate).scopeUnresolved ? { scopeUnresolved: true } : {}),
         evidenceSummary: this.options.experienceLedger.evidenceSummary(candidate),
       }));
   }
@@ -1523,18 +1527,20 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
             group.every((observation) => observation.coverage === "complete") &&
             new Set(group.map((observation) => observation.status).filter(Boolean)).size <= 1,
         );
-        const representation = !sourceComplete
-          ? "case"
-          : (input.representation ??
-            (assessment.risk === "low" || risk === "high" ? "method" : "case"));
         const scope = experienceConditions(
           {
+            content,
             applicability: input.applicability,
             ...(input.nativeEvidence ? { nativeEvidence: input.nativeEvidence } : {}),
           },
           input.requiredConditions,
           input.representation === undefined,
         );
+        const representation =
+          !sourceComplete || scope.scopeUnresolved
+            ? "case"
+            : (input.representation ??
+              (assessment.risk === "low" || risk === "high" ? "method" : "case"));
         const policy =
           risk === "blocked"
             ? "blocked"
@@ -1567,7 +1573,11 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
               }
             : {}),
           ...(representation === "case"
-            ? { reason: assessment.reviewReason ?? "unproven_case" }
+            ? {
+                reason: scope.scopeUnresolved
+                  ? "适用范围尚未核实，已保留为案例；请重新限定范围。"
+                  : (assessment.reviewReason ?? "unproven_case"),
+              }
             : {}),
           ...(risk === "blocked" ? { reason: "authority_change_forbidden" } : {}),
           expiresAt: input.now + (representation === "case" ? 30 : 90) * DAY,
@@ -1654,7 +1664,12 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
     } = {},
   ): TaskExperienceCandidate {
     const normalized = { ...candidate, content: normalizeExperienceContent(candidate.content) };
-    if (normalized.representation === "case" || normalized.usagePolicy === "blocked")
+    if (
+      normalized.representation === "case" ||
+      normalized.usagePolicy === "blocked" ||
+      normalized.scopeUnresolved ||
+      experienceConditions(normalized).scopeUnresolved
+    )
       throw new Error("Task experience is not a publishable method");
     const saved = this.options.createExperienceItem(normalized, now);
     const next: TaskExperienceCandidate = {
@@ -1805,6 +1820,7 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
             if (
               candidate.representation === "case" ||
               candidate.usagePolicy === "blocked" ||
+              candidate.scopeUnresolved ||
               experienceLocked(candidate)
             )
               throw new Error("Task experience must be revised before approval");
@@ -1842,22 +1858,24 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
             const content = normalizeExperienceContent(input.content ?? "");
             const { spreadsheet: _spreadsheet, ...applicability } =
               input.applicability ?? candidate.applicability;
-            const representation = input.representation ?? candidate.representation ?? "method";
             if (!candidate.sources.length) throw new Error("Task experience has no valid sources");
             const risk = experienceContentRisk(
               `${content}\n${applicability.conditions.join("\n")}`,
             );
             const scope = experienceConditions(
-              { applicability },
+              { content, applicability },
               input.requiredConditions,
               candidate.scopeUnresolved === true,
             );
+            const representation = scope.scopeUnresolved
+              ? "case"
+              : (input.representation ?? candidate.representation ?? "method");
             const changedScope =
               JSON.stringify(applicability) !== JSON.stringify(candidate.applicability) ||
               JSON.stringify(scope.requiredConditions) !==
                 JSON.stringify(candidate.requiredConditions ?? []) ||
               (candidate.scopeUnresolved === true && !scope.scopeUnresolved);
-            const explicitApproval = input.action === "edit_accept";
+            const explicitApproval = input.action === "edit_accept" && !scope.scopeUnresolved;
             const policy =
               risk === "blocked"
                 ? "blocked"
@@ -1899,7 +1917,12 @@ export class ExecutionLearningSqliteStore implements ExecutionLearningStore, Tas
               enabled: policy === "suggestion",
               lifecycleState: "active",
               state: "ready",
-              reason: risk === "blocked" ? "authority_change_forbidden" : "user_edit",
+              reason:
+                risk === "blocked"
+                  ? "authority_change_forbidden"
+                  : scope.scopeUnresolved
+                    ? "适用范围尚未核实，已保留为案例；请重新限定范围。"
+                    : "user_edit",
               ...(policy === "review_required"
                 ? {
                     decisionKind: changedScope

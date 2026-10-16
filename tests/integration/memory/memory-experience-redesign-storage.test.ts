@@ -12,6 +12,10 @@ import type {
   ExperienceEffect,
 } from "@pico/core";
 import { SqliteMemoryItemStore } from "../../../packages/storage/src/sqlite/sqlite-memory-item-store.js";
+import { AtomicMemoryContextBuilder } from "@pico/runtime/atomic-memory/context-builder";
+import { taskExperienceRecallTargets } from "../../../packages/pico-host/src/task-experience-recall.js";
+import { resolveExecutionLearningTarget } from "../../../packages/pico-host/src/execution-learning-evidence.js";
+import { buildMemorySearchTool } from "../../../packages/pico-host/src/memory-trigger-tools.js";
 
 const DAY = 86400000;
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -184,6 +188,166 @@ const effect = (
   sources: [source(`outcome-${sequence}`)],
   trustedContradiction: validation === "fail",
   createdAt: sequence + 30,
+});
+
+test("未支持的compound检查不能仅凭方法中的冻结范围声明生成自动建议", async () => {
+  assert.equal(
+    await resolveExecutionLearningTarget("node --test scope.test.cjs && echo PASS", "/fixture", {
+      readFile: async () => undefined,
+      realpath: async () => undefined,
+    }),
+    undefined,
+  );
+  const store = new SqliteMemoryItemStore(":memory:", { now: () => 1000 });
+  try {
+    for (const [id, content, conditions] of [
+      ["body", "仅适用于同一冻结检查范围，先核对配置输入再原样复测。", []],
+      ["condition", "先核对配置输入再原样复测。", ["Only within the same frozen check scope."]],
+      ["native-condition", "先核对配置输入。", ["native-scope"]],
+    ] as const) {
+      const candidate = (
+        await seed(store, id, "method", content, {
+          taskFamily: "coding",
+          toolNames: ["bash", "write_file"],
+          conditions,
+        })
+      ).candidate;
+      assert.equal(candidate.scopeUnresolved, true, id);
+      assert.equal(candidate.representation, "case", id);
+      assert.equal(candidate.usagePolicy, "case_only", id);
+      assert.equal(candidate.enabled, false, id);
+      assert.equal(candidate.itemId, undefined, id);
+      assert.match(candidate.reason!, /范围.*未.*核实/u);
+      await assert.rejects(
+        store.taskExperiences.reviewTaskExperience(review(candidate, "accept", `accept-${id}`)),
+        /revised/,
+      );
+      const revised = await store.taskExperiences.reviewTaskExperience({
+        ...review(candidate, "edit_accept", `edit-${id}`),
+        representation: "method",
+        content,
+        requiredConditions: [],
+      });
+      assert.equal(revised.scopeUnresolved, true, id);
+      assert.equal(revised.usagePolicy, "case_only", id);
+      assert.equal(revised.enabled, false, id);
+      assert.equal(revised.itemId, undefined, id);
+      const archived = await store.taskExperiences.reviewTaskExperience(
+        review(revised, "archive", `archive-${id}`),
+      );
+      await assert.rejects(
+        store.taskExperiences.reviewTaskExperience(review(archived, "restore", `restore-${id}`)),
+        /conditions.*revised/,
+      );
+    }
+    const ordinary = (
+      await seed(store, "ordinary-usage", "method", "先明确需求边界再逐项讨论。", {
+        taskFamily: "general",
+        toolNames: [],
+        conditions: ["当需求边界不明确时作为讨论线索"],
+      })
+    ).candidate;
+    assert.equal(ordinary.scopeUnresolved, false);
+    assert.equal(ordinary.usagePolicy, "suggestion");
+    assert.equal(ordinary.enabled, true);
+  } finally {
+    store.close();
+  }
+});
+
+test("旧scopefalse记录及其旧item metadata不能旁路Host范围门禁或主动搜索", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-unresolved-native-scope-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const path = join(root, "memory.sqlite");
+  const store = new SqliteMemoryItemStore(path, { now: () => 1000 });
+  const db = new DatabaseSync(path);
+  try {
+    const { candidate } = await seed(store, "old-scope-false");
+    const options = {
+      store: store.taskExperiences,
+      workspaceKey: "workspace",
+      workDir: "/fixture",
+      query: "配置输入",
+      toolAllowed: () => true,
+      now: 1000,
+    };
+    const staleTargets = await taskExperienceRecallTargets(options);
+    assert.equal(staleTargets.length, 1);
+    const original = (await store.readItem(candidate.itemId!))!;
+    const content = "仅适用于同一冻结操作范围，先核对配置输入。";
+    const stale = { ...candidate, content, scopeUnresolved: false };
+    db.prepare("UPDATE execution_learning_candidates SET record_json=? WHERE candidate_id=?").run(
+      JSON.stringify(stale),
+      candidate.candidateId,
+    );
+    db.prepare("UPDATE memory_items SET content=?,content_hash=? WHERE item_id=?").run(
+      content,
+      hash(content),
+      candidate.itemId!,
+    );
+    db.prepare("UPDATE execution_learning_items SET item_content_hash=? WHERE item_id=?").run(
+      hash(content),
+      candidate.itemId!,
+    );
+    assert.equal(original.taskExperience?.scopeUnresolved, undefined);
+    const current = (await store.taskExperiences.readTaskExperienceCandidate(
+      candidate.candidateId,
+    ))!;
+    assert.equal(current.scopeUnresolved, true);
+    assert.equal(
+      (await store.taskExperiences.queryTaskExperiences("workspace"))[0]!.scopeUnresolved,
+      true,
+    );
+    assert.deepEqual(await taskExperienceRecallTargets(options), []);
+    assert.deepEqual(await taskExperienceRecallTargets({ ...options, candidate: current }), []);
+    const oldItem = (await store.readItem(candidate.itemId!))!;
+    assert.equal(oldItem.sourceType, "reviewed-reference");
+    assert.equal(
+      oldItem.taskExperience,
+      undefined,
+      "旧metadata不能把未决范围伪装成普通事实或有效建议",
+    );
+    const builder = new AtomicMemoryContextBuilder(store, "workspace");
+    assert.equal(
+      (await builder.build("配置输入", { reviewedExperiences: staleTargets })).items.length,
+      0,
+    );
+    const search = buildMemorySearchTool({
+      search: async (query) =>
+        (
+          await builder.build(query, {
+            mode: "search",
+            reviewedExperiences: await taskExperienceRecallTargets({ ...options, query }),
+          })
+        ).block,
+    });
+    assert.doesNotMatch(await search.execute(JSON.stringify({ query: "配置输入" })), /<memory /u);
+    await assert.rejects(
+      store.taskExperiences.reviewTaskExperience(
+        review(current, "accept", "accept-old-unresolved"),
+      ),
+      /revised/,
+    );
+    const revised = await store.taskExperiences.reviewTaskExperience({
+      ...review(current, "revise", "revise-old-unresolved"),
+      content,
+    });
+    assert.equal(revised.usagePolicy, "case_only");
+    assert.equal(revised.itemId, undefined);
+    const narrowed = await store.taskExperiences.reviewTaskExperience({
+      ...review(revised, "revise", "explicit-new-scope"),
+      representation: "method",
+      content: "先核对当前配置输入，作为讨论线索。",
+      applicability: { taskFamily: "general", toolNames: [], conditions: [] },
+    });
+    assert.equal(narrowed.scopeUnresolved, false);
+    assert.equal(narrowed.usagePolicy, "review_required");
+    assert.equal(narrowed.decisionKind, "scope_expansion");
+    assert.equal(narrowed.itemId, undefined);
+  } finally {
+    db.close();
+    store.close();
+  }
 });
 
 test("v3存储：无工具方法可建议，案例不发布；到期即时排除、归档可续期且prune不删正文", async () => {
