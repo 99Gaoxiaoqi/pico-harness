@@ -457,3 +457,117 @@ test("explicit remember survives provider failure and recovers from its authoriz
     verification.close();
   }
 });
+
+test("explicit remember retries once after its due time without restart or new input", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-memory-remember-retry-"));
+  const workDir = join(root, "workspace"),
+    picoHome = join(root, "home");
+  const sessionId = "remember-retry-session";
+  await mkdir(workDir);
+  const paths = resolvePicoPaths(workDir, { picoHome });
+  const sessionKey = memorySessionKey(paths.workspace.id, sessionId);
+  const session = new Session(sessionId, workDir, { persistence: true, picoHome });
+  t.after(async () => {
+    await session.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await session.recover();
+  let providerUnavailable = true;
+  let providerFailures = 0;
+  let recoveryCalls = 0;
+  const originalNow = Date.now;
+  const originalSetTimeout = globalThis.setTimeout;
+  let timeOffset = 0;
+  let recoveryWake: (() => void) | undefined;
+  let recoveryDelay: number | undefined;
+  globalThis.setTimeout = ((
+    callback: (...args: never[]) => void,
+    delay?: number,
+    ...args: never[]
+  ) => {
+    if (delay !== undefined && delay >= 50_000) {
+      recoveryWake = () => callback(...args);
+      recoveryDelay = delay;
+      return { unref() {} } as ReturnType<typeof setTimeout>;
+    }
+    return originalSetTimeout(callback, delay, ...args);
+  }) as unknown as typeof setTimeout;
+  t.after(() => {
+    Date.now = originalNow;
+    globalThis.setTimeout = originalSetTimeout;
+  });
+  const runtime = new AtomicMemoryRuntime({
+    workDir,
+    picoHome,
+    sessionId,
+    supported: true,
+    gate: async () => ({ allowed: true }),
+    modelFactory: async () => {
+      if (providerUnavailable) {
+        providerFailures++;
+        throw new Error("simulated provider interruption");
+      }
+      return {
+        model: {
+          async call() {
+            recoveryCalls++;
+            return JSON.stringify({
+              status: "complete",
+              coverageStatus: "processed",
+              requestedStatus: "not_applicable",
+              requestedItems: [],
+              incidentalItems: [],
+            });
+          },
+        },
+      };
+    },
+  });
+  const run = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
+  let authorizationEventId = "";
+  await run.run(async () => {
+    await run.commitMessages(session, [{ role: "user", content: "Please remember this fact." }]);
+    const entries = await session.runtimeEventStore!.readSessionEntries(sessionId);
+    const user = entries.find(
+      ({ event }) => event.kind === "message.committed" && event.data.message.role === "user",
+    )!;
+    authorizationEventId = user.event.eventId;
+    await runtime.capture(await run.readModelHistory(), []);
+    assert.equal((await runtime.remember()).status, "unavailable");
+  });
+  Date.now = () => originalNow() + timeOffset;
+  assert.equal(providerFailures, 3, "the initial proposal exhausts its three bounded attempts");
+  providerUnavailable = false;
+  const store = new SqliteMemoryItemStore(join(picoHome, "memory.sqlite"));
+  try {
+    const jobs = await store.listExtractionJobs({
+      workspaceKey: paths.workspace.id,
+      sessionId: sessionKey,
+    });
+    assert.equal(jobs[0]?.state, "pending");
+    assert.equal(jobs[0]?.trigger, "remember");
+    assert.equal(jobs[0]?.sourceEventId, authorizationEventId);
+    assert.ok(jobs[0]!.notBefore > Date.now());
+    assert.ok(jobs[0]!.notBefore <= Date.now() + 60_000);
+  } finally {
+    store.close();
+  }
+  assert.ok(recoveryWake, `the due wake is scheduled at ${recoveryDelay}`);
+  timeOffset += recoveryDelay!;
+  recoveryWake!();
+  for (let attempt = 0; attempt < 10 && recoveryCalls === 0; attempt++) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await runtime.drain();
+  }
+  assert.equal(recoveryCalls, 1, "the same runtime retries the durable remember job once");
+  timeOffset += 60_000;
+  recoveryWake?.();
+  for (let attempt = 0; attempt < 10; attempt++) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await runtime.drain();
+  }
+  assert.equal(recoveryCalls, 1, "a settled remember job does not run again");
+});
