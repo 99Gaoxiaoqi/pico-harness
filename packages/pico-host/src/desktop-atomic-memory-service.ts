@@ -13,6 +13,7 @@ import {
   validateMemoryTemporalBounds,
 } from "@pico/core/atomic-memory-contracts";
 import type { AtomicMemorySettings } from "@pico/core/atomic-memory-runtime-contracts";
+import { memorySessionKey } from "@pico/core/atomic-memory-runtime-contracts";
 import type { TaskExperienceCandidate, TaskExperienceReuse } from "@pico/core";
 import { executionLearningPathAuthorizer } from "./execution-learning-host.js";
 import { projectExperienceDelivery } from "./experience-delivery-evidence.js";
@@ -191,13 +192,16 @@ export class DesktopAtomicMemoryService {
                   workspaceKey,
                   params.sessionId,
                 ))
-                  ? store.listExtractionReceipts(params.sessionId, 100)
+                  ? store.listExtractionReceipts(
+                      memorySessionKey(workspaceKey, params.sessionId),
+                      100,
+                    )
                   : Promise.resolve([]))
               )
                 .filter((receipt) => receipt.summary !== undefined)
                 .map((receipt) => ({
                   operationId: receipt.operationId,
-                  sessionId: receipt.sessionId,
+                  sessionId: params.sessionId!,
                   committedAt: receipt.committedAt,
                   createdItemCount: receipt.summary!.createdItemCount,
                 })),

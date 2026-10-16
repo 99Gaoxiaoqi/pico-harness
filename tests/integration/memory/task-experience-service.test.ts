@@ -13,6 +13,7 @@ import { DesktopAtomicMemoryService } from "@pico/pico-host/desktop-atomic-memor
 import { resolvePicoPaths } from "@pico/pico-host/pico-paths";
 import { parseRuntimeResult, RUNTIME_ERROR_CODES, RuntimeProtocolError } from "@pico/protocol";
 import { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-store";
+import { memorySessionKey } from "@pico/core/atomic-memory-runtime-contracts";
 
 const content = "发布项目文档整理结果前，先核对来源与用户更正，并明确尚未确认的部分。";
 
@@ -147,16 +148,62 @@ test("v3 projects method decisions and preserves a case without leaking new fiel
     await rm(root, { recursive: true, force: true });
   });
   const pending = await seedPendingExperience(store, workspacePath, workspaceKey);
+  await store.commitExtraction({
+    operationId: "session-fact-receipt",
+    sessionId: memorySessionKey(workspaceKey, pending.sessionId),
+    expectedCursorOrdinal: 0,
+    expectedDeletionRevision: 0,
+    nextCursorOrdinal: 1,
+    coverageHash: "a".repeat(64),
+    trigger: "extract",
+    requestedItemIndexes: [],
+    summary: { modelCallCount: 2, durationMs: 100 },
+    items: [
+      {
+        content: "文档事实来自当前会话的用户原文。",
+        kind: "note",
+        statementType: "fact",
+        temporalType: "undated",
+        scopeType: "workspace",
+        scopeKey: workspaceKey,
+        observedAt: 1000,
+        origin: "agent_extracted",
+        keys: [{ key: "文档会话事实", keyType: "concept", keyOrigin: "llm" }],
+        sources: pending.sources,
+      },
+    ],
+  });
   const modern = parseRuntimeResult(
     "memory.learning.query",
     await service.queryExperiences(workspacePath, {
       workspacePath,
       learningVersion: 3,
       representation: "method",
+      sessionId: pending.sessionId,
     }),
   );
   assert.equal(modern.learningVersion, 3);
   assert.equal(modern.items[0]?.usagePolicy, "review_required");
+  assert.deepEqual(modern.receipts, [
+    {
+      operationId: "session-fact-receipt",
+      sessionId: pending.sessionId,
+      committedAt: 1000,
+      createdItemCount: 1,
+    },
+  ]);
+  const otherPath = join(root, "other");
+  await mkdir(otherPath);
+  assert.deepEqual(
+    (
+      await service.queryExperiences(otherPath, {
+        workspacePath: otherPath,
+        learningVersion: 3,
+        sessionId: pending.sessionId,
+      })
+    ).receipts,
+    [],
+  );
   const legacy = parseRuntimeResult(
     "memory.learning.query",
     await service.queryExperiences(workspacePath, { workspacePath }),
@@ -179,7 +226,10 @@ test("v3 projects method decisions and preserves a case without leaking new fiel
     await service.list(workspacePath, { workspacePath, learningVersion: 3, paged: true }),
   );
   assert.equal(list.learningVersion, 3);
-  assert.equal(list.items[0]?.taskExperience?.representation, "method");
+  assert.equal(
+    list.items.find((item) => item.itemId === approved.itemId)?.taskExperience?.representation,
+    "method",
+  );
   parseRuntimeResult(
     "memory.context.preview",
     await service.previewContext(workspacePath, {
