@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import type { RuntimeMemoryExtractionBoundary } from "@pico/core";
 import { FullCompactor } from "@pico/pico-host/product-full-compactor";
@@ -350,3 +351,109 @@ for (const scenario of [
     }
   });
 }
+
+test("explicit remember survives provider failure and recovers from its authorized user event", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-memory-remember-recovery-"));
+  const workDir = join(root, "workspace"),
+    picoHome = join(root, "home");
+  const sessionId = "remember-recovery-session";
+  await mkdir(workDir);
+  const paths = resolvePicoPaths(workDir, { picoHome });
+  const sessionKey = memorySessionKey(paths.workspace.id, sessionId);
+  let session = new Session(sessionId, workDir, { persistence: true, picoHome });
+  t.after(async () => {
+    await session.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await session.recover();
+  const first = new AtomicMemoryRuntime({
+    workDir,
+    picoHome,
+    sessionId,
+    supported: true,
+    gate: async () => ({ allowed: true }),
+    modelFactory: async () => {
+      throw new Error("simulated provider interruption");
+    },
+  });
+  const run = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
+  let authorizationEventId = "";
+  await run.run(async () => {
+    await run.commitMessages(session, [{ role: "user", content: "Please remember this fact." }]);
+    const entries = await session.runtimeEventStore!.readSessionEntries(sessionId);
+    const user = entries.find(
+      ({ event }) => event.kind === "message.committed" && event.data.message.role === "user",
+    )!;
+    authorizationEventId = user.event.eventId;
+    await first.capture(await run.readModelHistory(), []);
+    assert.equal((await first.remember()).status, "unavailable");
+  });
+  session.close();
+  const db = new DatabaseSync(join(picoHome, "memory.sqlite"));
+  try {
+    const job = db
+      .prepare(
+        "SELECT source_event_id,trigger,state,model_calls,model_call_budget FROM memory_extraction_jobs WHERE session_id=?",
+      )
+      .get(sessionKey) as
+      | {
+          source_event_id: string;
+          trigger: string;
+          state: string;
+          model_calls: number;
+          model_call_budget: number;
+        }
+      | undefined;
+    assert.equal(job?.source_event_id, authorizationEventId);
+    assert.equal(job?.trigger, "remember");
+    assert.equal(job?.state, "pending");
+    assert.ok(job.model_call_budget >= 6);
+    db.prepare("UPDATE memory_extraction_jobs SET not_before=? WHERE session_id=?").run(
+      Date.now(),
+      sessionKey,
+    );
+  } finally {
+    db.close();
+  }
+  session = new Session(sessionId, workDir, { persistence: true, picoHome });
+  await session.recover();
+  let recoveredCalls = 0;
+  const recovered = new AtomicMemoryRuntime({
+    workDir,
+    picoHome,
+    sessionId,
+    supported: true,
+    gate: async () => ({ allowed: true }),
+    modelFactory: async () => ({
+      model: {
+        async call(request) {
+          assert.equal(request.sourceTools?.length ?? 0, 0);
+          recoveredCalls++;
+          return JSON.stringify({
+            status: "complete",
+            coverageStatus: "processed",
+            requestedStatus: "not_applicable",
+            requestedItems: [],
+            incidentalItems: [],
+          });
+        },
+      },
+    }),
+  });
+  assert.equal(await recovered.recoverPendingJobs(), 1);
+  await recovered.drain();
+  assert.equal(recoveredCalls, 1);
+  const verification = new SqliteMemoryItemStore(join(picoHome, "memory.sqlite"));
+  try {
+    const jobs = await verification.listExtractionJobs({
+      workspaceKey: paths.workspace.id,
+      sessionId: sessionKey,
+    });
+    assert.equal(jobs.length, 0);
+  } finally {
+    verification.close();
+  }
+});

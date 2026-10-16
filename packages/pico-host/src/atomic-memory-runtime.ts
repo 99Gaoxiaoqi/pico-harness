@@ -31,6 +31,7 @@ import { resolveRequestedReferenceNote } from "./atomic-memory-reference-note.js
 import { consolidateAutomaticMemory } from "./atomic-memory-consolidation.js";
 
 const AUTOMATIC_EXTRACTION_IDLE_MS = 30_000;
+const GLOBAL_MEMORY_BACKGROUND_LANE = "atomic-memory-global";
 type AutomaticExtractionTrigger = "extract" | "compaction";
 type AutomaticExtractionPrepare = () => Promise<MemoryExtractionSnapshot | undefined>;
 type AutomaticExtractionDispatch = (
@@ -41,6 +42,7 @@ type AutomaticExtractionDispatch = (
 interface PendingAutomaticExtraction {
   lifecycle: AtomicMemoryLifecycle;
   dispatch: AutomaticExtractionDispatch;
+  idleMs: number;
   timer?: ReturnType<typeof setTimeout>;
   readonly prepares: Map<AutomaticExtractionTrigger, Map<string, AutomaticExtractionPrepare>>;
 }
@@ -69,7 +71,7 @@ function resetAutomaticExtractionTimer(laneKey: string, pending: PendingAutomati
     for (const [trigger, byRun] of pending.prepares) {
       for (const prepare of byRun.values()) pending.dispatch(trigger, prepare);
     }
-  }, AUTOMATIC_EXTRACTION_IDLE_MS);
+  }, pending.idleMs);
   // A short-lived CLI may exit; its durable boundaries recover on the next run.
   pending.timer.unref();
 }
@@ -78,12 +80,14 @@ function notifyAutomaticExtractionActivity(
   laneKey: string,
   lifecycle: AtomicMemoryLifecycle,
   dispatch: AutomaticExtractionDispatch,
+  idleMs: number,
 ): void {
   const pending = pendingAutomaticExtractions.get(laneKey);
   if (!pending) return;
   registerAutomaticExtractionCleanup(lifecycle);
   pending.lifecycle = lifecycle;
   pending.dispatch = dispatch;
+  pending.idleMs = idleMs;
   resetAutomaticExtractionTimer(laneKey, pending);
 }
 
@@ -91,6 +95,7 @@ function scheduleAutomaticExtraction(
   laneKey: string,
   lifecycle: AtomicMemoryLifecycle,
   dispatch: AutomaticExtractionDispatch,
+  idleMs: number,
   trigger: AutomaticExtractionTrigger,
   runId: string | undefined,
   prepare: AutomaticExtractionPrepare,
@@ -98,11 +103,12 @@ function scheduleAutomaticExtraction(
   registerAutomaticExtractionCleanup(lifecycle);
   let pending = pendingAutomaticExtractions.get(laneKey);
   if (!pending) {
-    pending = { lifecycle, dispatch, prepares: new Map() };
+    pending = { lifecycle, dispatch, idleMs, prepares: new Map() };
     pendingAutomaticExtractions.set(laneKey, pending);
   }
   pending.lifecycle = lifecycle;
   pending.dispatch = dispatch;
+  pending.idleMs = idleMs;
   // The latest boundary for each trigger includes earlier durable boundaries.
   let byRun = pending.prepares.get(trigger);
   if (!byRun) {
@@ -199,6 +205,7 @@ export interface AtomicMemoryRuntimeOptions {
   readonly contextWindowTokens?: number;
   readonly reservedOutputTokens?: number;
   readonly lifecycle?: AtomicMemoryLifecycle;
+  readonly automaticExtractionIdleMs?: number;
   readonly onChanged?: () => void;
   readonly onContentRejected?: AtomicMemoryEngineOptions["onContentRejected"];
 }
@@ -207,27 +214,40 @@ export interface AtomicMemoryRuntimeOptions {
 export class AtomicMemoryRuntime {
   private source: MemoryExtractionSnapshot | undefined;
   private extractRequestedRevision: number | undefined;
-  private readonly completedRuns = new Set<string>();
   private explicitExtractionSnapshot: MemoryExtractionSnapshot | undefined;
+  private readonly completedRuns = new Set<string>();
   private readonly background = new Set<Promise<unknown>>();
   private readonly workspaceKey: string;
   private readonly laneKey: string;
   private readonly lifecycle: AtomicMemoryLifecycle;
+  private readonly automaticExtractionIdleMs: number;
+  private recoveryTimer: ReturnType<typeof setTimeout> | undefined;
+  private recoveryWakeAt: number | undefined;
 
   constructor(private readonly options: AtomicMemoryRuntimeOptions) {
     this.lifecycle = options.lifecycle ?? new AtomicMemoryLifecycle();
+    this.automaticExtractionIdleMs =
+      options.automaticExtractionIdleMs ?? AUTOMATIC_EXTRACTION_IDLE_MS;
     registerAutomaticExtractionCleanup(this.lifecycle);
     this.workspaceKey = resolvePicoPaths(options.workDir, {
       picoHome: options.picoHome,
     }).workspace.id;
     this.laneKey = `${options.picoHome}:${memorySessionKey(this.workspaceKey, options.sessionId)}`;
+    this.lifecycle.onClose(() => {
+      if (this.recoveryTimer !== undefined) clearTimeout(this.recoveryTimer);
+      this.recoveryTimer = undefined;
+      this.recoveryWakeAt = undefined;
+    });
   }
 
   async capture(messages: readonly Message[], tools: readonly ToolDefinition[]): Promise<void> {
     if (!this.options.supported) return;
     if (messages.some((message) => message.role === "user"))
-      notifyAutomaticExtractionActivity(this.laneKey, this.lifecycle, (trigger, prepare) =>
-        this.enqueue(trigger, prepare),
+      notifyAutomaticExtractionActivity(
+        this.laneKey,
+        this.lifecycle,
+        (trigger, prepare) => this.enqueue(trigger, prepare),
+        this.automaticExtractionIdleMs,
       );
     try {
       this.source = await this.snapshot("remember", await this.readDeletionRevision(), undefined, {
@@ -247,12 +267,18 @@ export class AtomicMemoryRuntime {
     const snapshot = { ...this.source, ...(signal ? { signal } : {}) };
     return this.lifecycle.run(
       "remember",
-      () => sessionMemoryLane.run(this.laneKey, "foreground", () => this.rememberFrozen(snapshot)),
+      () =>
+        sessionMemoryLane.run(GLOBAL_MEMORY_BACKGROUND_LANE, "foreground", () =>
+          sessionMemoryLane.run(this.laneKey, "foreground", () => this.rememberFrozen(snapshot)),
+        ),
       () => unavailable("draining"),
     );
   }
 
-  private async rememberFrozen(snapshot: MemoryExtractionSnapshot): Promise<AtomicMemoryResult> {
+  private async rememberFrozen(
+    snapshot: MemoryExtractionSnapshot,
+    jobClaim?: MemoryExtractionJobClaim,
+  ): Promise<AtomicMemoryResult> {
     let store: SqliteMemoryItemStore | undefined;
     try {
       const entries = await this.readEntries();
@@ -289,7 +315,6 @@ export class AtomicMemoryRuntime {
           ? { authorizationEventId: lastUser.eventId }
           : {}),
       });
-      if (reference.status === "not_requested") return this.execute(snapshot);
       if (reference.status === "unresolved") return unavailable(reference.reason);
       if (snapshot.signal?.aborted) return unavailable("aborted");
       const gate = await this.options.gate("remember");
@@ -297,9 +322,44 @@ export class AtomicMemoryRuntime {
       if (this.lifecycle.isDraining) return unavailable("draining");
       if (!(await this.sessionAvailable())) return unavailable("session_unavailable");
       store = new SqliteMemoryItemStore(atomicMemoryDatabasePath(this.options.picoHome));
-      if (!(await store.readSettings(this.workspaceKey)).enabled)
-        return unavailable("memory_disabled");
+      const settings = await store.readSettings(this.workspaceKey);
+      if (!settings.enabled) return unavailable("memory_disabled");
       if (snapshot.signal?.aborted) return unavailable("aborted");
+      if (!lastUser) return unavailable("source_unavailable");
+      let activeClaim = jobClaim;
+      if (!activeClaim) {
+        const jobId = extractionJobId({
+          workspaceKey: this.workspaceKey,
+          sessionId: snapshot.sessionId,
+          sourceEventId: lastUser.eventId,
+          trigger: "remember",
+        });
+        await store.enqueueExtractionJob({
+          jobId,
+          sessionId: snapshot.sessionId,
+          workspaceKey: this.workspaceKey,
+          workDir: this.options.workDir,
+          sourceEventId: lastUser.eventId,
+          sourceHash: extractionSourceHash(snapshot),
+          sourceKind: "explicit",
+          sourceOrdinal: lastUser.ordinal,
+          throughOrdinal: lastUser.ordinal,
+          trigger: "remember",
+          deletionRevision: snapshot.deletionRevision,
+          settingsVersion: settings.version,
+          modelCallBudget: extractionModelCallBudget(snapshot),
+          notBefore: Date.now(),
+        });
+        activeClaim = await store.claimExtractionJob({
+          jobId,
+          ownerId: extractionWorkerId(),
+          now: Date.now(),
+          leaseDurationMs: 10 * 60_000,
+        });
+        if (!activeClaim && (await store.readExtractionJob(jobId))?.state !== "settled")
+          return unavailable("remember_in_progress");
+      }
+      if (reference.status === "not_requested") return this.execute(snapshot, activeClaim);
       const operationId = `memory_reference_${createHash("sha256")
         .update(
           JSON.stringify([
@@ -314,6 +374,8 @@ export class AtomicMemoryRuntime {
         expectedDeletionRevision: snapshot.deletionRevision,
         mutations: reference.items.map((item) => ({ type: "create", item })),
       });
+      if (activeClaim)
+        await store.transitionExtractionJob({ claim: activeClaim, state: "settled" });
       const records = await Promise.all(
         result.results.map(({ itemId }) => store!.readItem(itemId)),
       );
@@ -362,6 +424,8 @@ export class AtomicMemoryRuntime {
         sourceKind: "explicit",
         deletionRevision,
         settingsVersion: settings.version,
+        runId: sourceEvent.runId,
+        turnId: sourceEvent.turnId,
         boundaryOrdinal: sourceEvent.ordinal,
         boundaryEventId: sourceEvent.eventId,
         events: this.source.events.filter((event) => event.ordinal <= sourceEvent.ordinal),
@@ -385,7 +449,8 @@ export class AtomicMemoryRuntime {
         trigger: "extract",
         deletionRevision,
         settingsVersion: settings.version,
-        notBefore: Date.now() + AUTOMATIC_EXTRACTION_IDLE_MS,
+        modelCallBudget: extractionModelCallBudget(snapshot),
+        notBefore: Date.now() + this.automaticExtractionIdleMs,
       });
       this.explicitExtractionSnapshot = snapshot;
       this.extractRequestedRevision = deletionRevision;
@@ -409,11 +474,12 @@ export class AtomicMemoryRuntime {
     if (hasExplicitExtraction) {
       const explicitSnapshot = this.explicitExtractionSnapshot;
       this.explicitExtractionSnapshot = undefined;
-      if (explicitSnapshot?.runId === runId)
+      if (explicitSnapshot)
         scheduleAutomaticExtraction(
           this.laneKey,
           this.lifecycle,
           (trigger, prepare) => this.enqueue(trigger, prepare),
+          this.automaticExtractionIdleMs,
           "extract",
           explicitSnapshot.boundaryEventId,
           async () => explicitSnapshot,
@@ -463,6 +529,7 @@ export class AtomicMemoryRuntime {
       this.laneKey,
       this.lifecycle,
       (trigger, prepare) => this.enqueue(trigger, prepare),
+      this.automaticExtractionIdleMs,
       "extract",
       runId,
       async () => frozen,
@@ -549,6 +616,7 @@ export class AtomicMemoryRuntime {
       this.laneKey,
       this.lifecycle,
       (trigger, prepare) => this.enqueue(trigger, prepare),
+      this.automaticExtractionIdleMs,
       "compaction",
       checkpointRunId,
       async () => frozen,
@@ -585,7 +653,8 @@ export class AtomicMemoryRuntime {
           : {}),
         deletionRevision: input.snapshot.deletionRevision,
         settingsVersion: input.snapshot.settingsVersion ?? 1,
-        notBefore: Date.now() + AUTOMATIC_EXTRACTION_IDLE_MS,
+        modelCallBudget: extractionModelCallBudget(input.snapshot),
+        notBefore: Date.now() + this.automaticExtractionIdleMs,
       });
     } finally {
       store.close();
@@ -594,41 +663,83 @@ export class AtomicMemoryRuntime {
 
   async recoverPendingJobs(): Promise<number> {
     if (!this.options.supported) return 0;
+    if (this.recoveryTimer !== undefined) clearTimeout(this.recoveryTimer);
+    this.recoveryTimer = undefined;
+    this.recoveryWakeAt = undefined;
     const store = new SqliteMemoryItemStore(atomicMemoryDatabasePath(this.options.picoHome));
     try {
-      const jobs = await store.listRecoverableExtractionJobs({ now: Date.now(), limit: 500 });
+      const now = Date.now();
+      const sessionId = memorySessionKey(this.workspaceKey, this.options.sessionId);
+      const currentWorkspaceRoot = resolvePicoPaths(this.options.workDir, {
+        picoHome: this.options.picoHome,
+      }).workspace.root;
+      let afterJobId: string | undefined;
+      let nextWakeAt: number | undefined;
       let recovered = 0;
-      for (const job of jobs) {
-        if (
-          job.workspaceKey !== this.workspaceKey ||
-          job.workDir !== this.options.workDir ||
-          job.sessionId !== memorySessionKey(this.workspaceKey, this.options.sessionId)
-        )
-          continue;
-        const snapshot = await this.snapshotForJob(job);
-        if (!snapshot) {
-          const claim = await store.claimExtractionJob({
-            jobId: job.jobId,
-            ownerId: extractionWorkerId(),
-            now: Date.now(),
-            leaseDurationMs: 10 * 60_000,
-          });
-          if (claim)
-            await store.transitionExtractionJob({
-              claim,
-              state: "blocked",
-              reason: "source_unavailable",
+      for (;;) {
+        const jobs = await store.listExtractionJobs({
+          workspaceKey: this.workspaceKey,
+          sessionId,
+          ...(afterJobId ? { afterJobId } : {}),
+          limit: 100,
+        });
+        if (jobs.length === 0) break;
+        for (const job of jobs) {
+          afterJobId = job.jobId;
+          const jobWorkspaceRoot = resolvePicoPaths(job.workDir, {
+            picoHome: this.options.picoHome,
+          }).workspace.root;
+          if (jobWorkspaceRoot !== currentWorkspaceRoot) continue;
+          const dueAt = job.state === "working" ? (job.leaseUntil ?? now) : job.notBefore;
+          if (dueAt > now) {
+            nextWakeAt = nextWakeAt === undefined ? dueAt : Math.min(nextWakeAt, dueAt);
+            continue;
+          }
+          const snapshot = await this.snapshotForJob(job);
+          if (!snapshot) {
+            const claim = await store.claimExtractionJob({
+              jobId: job.jobId,
+              ownerId: extractionWorkerId(),
+              now: Date.now(),
+              leaseDurationMs: 10 * 60_000,
             });
-          continue;
+            if (claim)
+              await store.transitionExtractionJob({
+                claim,
+                state: "blocked",
+                reason: "source_unavailable",
+              });
+            continue;
+          }
+          if (job.sourceKind === "explicit") pendingExplicitExtractions.add(this.laneKey);
+          this.enqueue(job.trigger === "remember" ? "extract" : job.trigger, async () => snapshot);
+          recovered += 1;
         }
-        if (job.sourceKind === "explicit") pendingExplicitExtractions.add(this.laneKey);
-        this.enqueue(job.trigger === "remember" ? "extract" : job.trigger, async () => snapshot);
-        recovered += 1;
+        if (jobs.length < 100) break;
       }
+      if (nextWakeAt !== undefined) this.scheduleRecoveryWake(nextWakeAt);
       return recovered;
     } finally {
       store.close();
     }
+  }
+
+  private scheduleRecoveryWake(at: number): void {
+    if (this.lifecycle.isDraining) return;
+    if (this.recoveryWakeAt !== undefined && this.recoveryWakeAt <= at) return;
+    if (this.recoveryTimer !== undefined) clearTimeout(this.recoveryTimer);
+    this.recoveryWakeAt = at;
+    this.recoveryTimer = setTimeout(
+      () => {
+        this.recoveryTimer = undefined;
+        this.recoveryWakeAt = undefined;
+        void this.recoverPendingJobs().catch((error) =>
+          logger.warn({ error: String(error) }, "[Memory] scheduled recovery unavailable"),
+        );
+      },
+      Math.max(1, Math.min(2_147_483_647, at - Date.now())),
+    );
+    this.recoveryTimer.unref();
   }
 
   async reconcileAdmittedBoundaries(): Promise<number> {
@@ -679,6 +790,7 @@ export class AtomicMemoryRuntime {
             this.laneKey,
             this.lifecycle,
             (trigger, prepare) => this.enqueue(trigger, prepare),
+            this.automaticExtractionIdleMs,
             "extract",
             event.runId,
             async () => frozen,
@@ -731,6 +843,7 @@ export class AtomicMemoryRuntime {
           this.laneKey,
           this.lifecycle,
           (trigger, prepare) => this.enqueue(trigger, prepare),
+          this.automaticExtractionIdleMs,
           "compaction",
           event.runId,
           async () => frozen,
@@ -760,9 +873,7 @@ export class AtomicMemoryRuntime {
       )
         return undefined;
       const snapshot = await this.snapshot("extract", job.deletionRevision, job.throughOrdinal);
-      return snapshot &&
-        extractionSourceHash(snapshot) === job.sourceHash &&
-        (!this.options.preserveSourceTools || snapshot.sourceTools !== undefined)
+      return snapshot && extractionSourceHash(snapshot) === job.sourceHash
         ? { ...snapshot, sourceKind: "terminal", settingsVersion: job.settingsVersion }
         : undefined;
     }
@@ -786,9 +897,7 @@ export class AtomicMemoryRuntime {
       );
       if (!through || through.sequence !== job.throughOrdinal) return undefined;
       const snapshot = await this.snapshot("compaction", job.deletionRevision, checkpoint.sequence);
-      return snapshot &&
-        extractionSourceHash(snapshot) === job.sourceHash &&
-        (!this.options.preserveSourceTools || snapshot.sourceTools !== undefined)
+      return snapshot && extractionSourceHash(snapshot) === job.sourceHash
         ? {
             ...snapshot,
             sourceKind: "checkpoint",
@@ -808,10 +917,8 @@ export class AtomicMemoryRuntime {
       source.event.data.message.role !== "user"
     )
       return undefined;
-    const snapshot = await this.snapshot("extract", job.deletionRevision, job.throughOrdinal);
-    return snapshot &&
-      extractionSourceHash(snapshot) === job.sourceHash &&
-      (!this.options.preserveSourceTools || snapshot.sourceTools !== undefined)
+    const snapshot = await this.snapshot(job.trigger, job.deletionRevision, job.throughOrdinal);
+    return snapshot && extractionSourceHash(snapshot) === job.sourceHash
       ? {
           ...snapshot,
           sourceKind: "explicit",
@@ -842,14 +949,24 @@ export class AtomicMemoryRuntime {
         leaseDurationMs: 10 * 60_000,
       });
       if (!claim) return;
-      const result = await this.execute(
-        {
-          ...snapshot,
-          deletionRevision: claim.deletionRevision,
-          settingsVersion: claim.settingsVersion,
-        },
-        claim,
-      );
+      const executionSnapshot = {
+        ...snapshot,
+        deletionRevision: claim.deletionRevision,
+        settingsVersion: claim.settingsVersion,
+      };
+      const pendingFailure = await store.readPendingExtractionFailure(snapshot.sessionId);
+      const retrySnapshot = pendingFailure
+        ? {
+            ...executionSnapshot,
+            recoveryOperationId: `memory_recovery_${createHash("sha256")
+              .update(jobId)
+              .digest("hex")}`,
+          }
+        : executionSnapshot;
+      const result =
+        claim.trigger === "remember"
+          ? await this.rememberFrozen(retrySnapshot, claim)
+          : await this.execute(retrySnapshot, claim);
       const current = await store.readExtractionJob(jobId);
       if (
         result.status === "unavailable" &&
@@ -863,6 +980,7 @@ export class AtomicMemoryRuntime {
         });
       }
       const settled = await store.readExtractionJob(jobId);
+      if (settled?.state === "pending") this.scheduleRecoveryWake(settled.notBefore);
       if (
         claim.sourceKind === "explicit" &&
         settled &&
@@ -884,8 +1002,10 @@ export class AtomicMemoryRuntime {
       async () => {
         const snapshot = await prepare();
         if (snapshot)
-          await sessionMemoryLane.run(this.laneKey, "background", () =>
-            this.executeScheduled(snapshot),
+          await sessionMemoryLane.run(GLOBAL_MEMORY_BACKGROUND_LANE, "background", () =>
+            sessionMemoryLane.run(this.laneKey, "background", () =>
+              this.executeScheduled(snapshot),
+            ),
           );
       },
       () => undefined,
@@ -955,15 +1075,23 @@ export class AtomicMemoryRuntime {
           ? { onContentRejected: this.options.onContentRejected }
           : {}),
       }).execute(snapshot);
+      if (jobClaim && result.status !== "unavailable")
+        await store.transitionExtractionJob({ claim: jobClaim, state: "settled" });
       if (
         snapshot.trigger !== "remember" &&
         result.status !== "unavailable" &&
         !result.skipReason
       ) {
+        let consolidationLease: AtomicMemoryModelLease | undefined;
         try {
           await consolidateAutomaticMemory({
             store,
-            model,
+            model: {
+              call: async (request) => {
+                consolidationLease ??= await this.options.modelFactory();
+                return consolidationLease.model.call(request);
+              },
+            },
             ...(this.options.contextWindowTokens !== undefined
               ? { contextWindowTokens: this.options.contextWindowTokens }
               : {}),
@@ -974,6 +1102,8 @@ export class AtomicMemoryRuntime {
           });
         } catch (error) {
           logger.debug({ error: String(error) }, "[Memory] automatic consolidation unavailable");
+        } finally {
+          await consolidationLease?.dispose?.();
         }
       }
       if (result.status === "unavailable" && result.reason === "retry_later") {
@@ -1189,6 +1319,17 @@ export class AtomicMemoryRuntime {
 
 function unavailable(reason: string): AtomicMemoryResult {
   return { status: "unavailable", reason, requestedItems: [] };
+}
+
+function extractionModelCallBudget(snapshot: MemoryExtractionSnapshot): number {
+  const ranges = new Set<number>([
+    ...(snapshot.completedBoundaries ?? []).map((boundary) => boundary.ordinal),
+    ...(snapshot.checkpoints ?? [])
+      .filter((checkpoint) => !checkpoint.bootstrap)
+      .map((checkpoint) => checkpoint.throughOrdinal),
+    snapshot.boundaryOrdinal,
+  ]);
+  return Math.min(600, Math.max(6, ranges.size * 6));
 }
 
 function extractionJobId(input: {

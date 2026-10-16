@@ -1,6 +1,7 @@
 import type { Message, ToolDefinition } from "./message.js";
 import type {
   MemoryItemRecord,
+  MemoryExtractionJob,
   MemoryItemStore,
   MemoryExtractionReceipt,
   MemoryExtractionMetrics,
@@ -53,6 +54,8 @@ export interface MemoryExtractionSnapshot {
   readonly turnId: string;
   readonly boundaryOrdinal: number;
   readonly boundaryEventId: string;
+  /** Stable retry identity used only after the first durable attempt fails. */
+  readonly recoveryOperationId?: string;
   readonly events: readonly MemoryEvidenceEvent[];
   readonly sourceMessages?: readonly Message[];
   readonly sourceTools?: readonly ToolDefinition[];
@@ -123,6 +126,12 @@ export interface AtomicMemoryStore extends MemoryItemStore {
     readonly operationId: string;
   }): Promise<void>;
   readDeletionRevision(): Promise<number>;
+  listExtractionJobs(input: {
+    readonly workspaceKey: string;
+    readonly sessionId: string;
+    readonly afterJobId?: string;
+    readonly limit?: number;
+  }): Promise<readonly MemoryExtractionJob[]>;
   readExtractionMetrics(input: { from: number; to: number }): Promise<MemoryExtractionMetrics>;
   /** Atomically claim the global cooldown lease and snapshot up to 256 eligible Items. */
   claimMemoryConsolidation(input: {

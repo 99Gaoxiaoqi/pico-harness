@@ -134,6 +134,60 @@ test("legacy Atomic Memory store entry preserves the Storage package implementat
   assert.equal(LegacySqliteMemoryItemStore, SqliteMemoryItemStore);
 });
 
+test("recall revision changes with durable memory eligibility and settings, not extraction jobs", async () => {
+  await fixture(async ({ store, path }) => {
+    const otherConnection = new SqliteMemoryItemStore(path);
+    try {
+      const initial = await store.readRecallRevision();
+      const committed = await store.applyMutations({
+        operationId: "recall-revision-create",
+        expectedDeletionRevision: 0,
+        mutations: [{ type: "create", item: write() }],
+      });
+      const afterCreate = await otherConnection.readRecallRevision();
+      assert.notEqual(afterCreate, initial);
+      await store.applyMutations({
+        operationId: "recall-revision-archive",
+        expectedDeletionRevision: 0,
+        mutations: [
+          {
+            type: "archive",
+            itemId: committed.results[0]!.itemId,
+            expectedVersion: 1,
+          },
+        ],
+      });
+      const afterArchive = await otherConnection.readRecallRevision();
+      assert.notEqual(afterArchive, afterCreate);
+      await store.enqueueExtractionJob({
+        jobId: "recall-revision-job",
+        sessionId: source().sessionId,
+        workspaceKey: "/workspace/a",
+        workDir: "/workspace/a",
+        sourceEventId: "terminal-revision",
+        sourceHash: "source-revision",
+        sourceKind: "terminal",
+        sourceOrdinal: 2,
+        throughOrdinal: 2,
+        trigger: "extract",
+        deletionRevision: 0,
+        settingsVersion: 1,
+        notBefore: 10_000,
+      });
+      assert.equal(await otherConnection.readRecallRevision(), afterArchive);
+      const settings = await store.readSettings("/workspace/a");
+      await store.updateSettings({
+        workspaceKey: "/workspace/a",
+        expectedVersion: settings.version,
+        recallEnabled: !settings.recallEnabled,
+      });
+      assert.notEqual(await otherConnection.readRecallRevision(), afterArchive);
+    } finally {
+      otherConnection.close();
+    }
+  });
+});
+
 async function fixture(
   run: (input: {
     store: SqliteMemoryItemStore;
@@ -166,7 +220,7 @@ async function fixture(
 
 test("atomic memory persists scoped assertions with transaction replay, rollback, CAS and private files", async () => {
   await fixture(async ({ store, path, setFailpoint }) => {
-    assert.equal(store.schemaVersion(), 17);
+    assert.equal(store.schemaVersion(), 18);
     assert.equal(store.journalMode(), "wal");
     assert.equal(store.foreignKeysEnabled(), true);
     if (process.platform !== "win32") {
@@ -310,12 +364,59 @@ test("durable extraction jobs serialize claims and fence expired workers at comm
       trigger: "extract" as const,
       deletionRevision: 0,
       settingsVersion: 1,
+      modelCallBudget: 12,
       notBefore: 1000,
     };
     try {
       const persisted = await firstStore.enqueueExtractionJob(jobRequest);
       assert.equal(persisted.state, "pending");
+      assert.equal(persisted.modelCallBudget, 12);
       assert.equal((await secondStore.enqueueExtractionJob(jobRequest)).jobId, persisted.jobId);
+      await secondStore.enqueueExtractionJob({
+        ...jobRequest,
+        jobId: "memory-job-2",
+        sourceEventId: "terminal-2",
+        sourceHash: "source-hash-2",
+        notBefore: now + 100_000,
+      });
+      await secondStore.enqueueExtractionJob({
+        ...jobRequest,
+        jobId: "memory-job-other-session",
+        sessionId: "other-session",
+        sourceEventId: "terminal-other",
+        sourceHash: "source-hash-other",
+        notBefore: now + 100_000,
+      });
+      assert.deepEqual((await firstStore.readExtractionMetrics({ from: 0, to: 1000 })).jobs, {
+        pending: 3,
+        working: 0,
+        blocked: 0,
+        oldestPendingAt: 1000,
+        reasons: [],
+      });
+      const firstPage = await secondStore.listExtractionJobs({
+        workspaceKey: "/workspace/a",
+        sessionId: source().sessionId,
+        limit: 1,
+      });
+      assert.equal(firstPage.length, 1);
+      const secondPage = await secondStore.listExtractionJobs({
+        workspaceKey: "/workspace/a",
+        sessionId: source().sessionId,
+        afterJobId: firstPage[0]!.jobId,
+        limit: 1,
+      });
+      assert.equal(secondPage.length, 1);
+      assert.notEqual(firstPage[0]!.jobId, secondPage[0]!.jobId);
+      assert.equal(
+        (
+          await secondStore.listExtractionJobs({
+            workspaceKey: "/workspace/a",
+            sessionId: "other-session",
+          })
+        )[0]?.jobId,
+        "memory-job-other-session",
+      );
       await assert.rejects(
         secondStore.enqueueExtractionJob({ ...jobRequest, sourceHash: "changed-source" }),
         conflict("operation_reused"),

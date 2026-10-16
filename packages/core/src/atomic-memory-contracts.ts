@@ -261,6 +261,24 @@ export interface MemoryExtractionMetrics {
   readonly to: number;
   readonly groups: readonly MemoryExtractionMetricGroup[];
   readonly unknownReceiptCount: number;
+  readonly jobs?: {
+    readonly pending: number;
+    readonly working: number;
+    readonly blocked: number;
+    readonly oldestPendingAt?: number;
+    readonly reasons: readonly {
+      readonly reason:
+        | "policy_disabled"
+        | "auto_extract_disabled"
+        | "untrusted_workspace"
+        | "workspace_unavailable"
+        | "model_unavailable"
+        | "extraction_failed"
+        | "retry_exhausted"
+        | "unknown";
+      readonly count: number;
+    }[];
+  };
 }
 
 export type MemoryConsolidationArchiveReason = "duplicate" | "superseded" | "stale" | "low_value";
@@ -397,6 +415,7 @@ export interface MemoryExtractionJob {
   readonly leaseUntil?: number;
   readonly fencingToken: number;
   readonly modelCalls: number;
+  readonly modelCallBudget: number;
   readonly reason?: string;
 }
 
@@ -419,6 +438,7 @@ export interface EnqueueMemoryExtractionJobRequest {
   readonly compactionCheckpointId?: string;
   readonly deletionRevision: number;
   readonly settingsVersion: number;
+  readonly modelCallBudget?: number;
   readonly notBefore: number;
 }
 
@@ -520,7 +540,7 @@ export interface MemoryItemStore {
   reserveExtractionModelCall(claim: MemoryExtractionJobClaim): Promise<number>;
   transitionExtractionJob(input: {
     readonly claim: MemoryExtractionJobClaim;
-    readonly state: "pending" | "blocked";
+    readonly state: "pending" | "blocked" | "settled";
     readonly notBefore?: number;
     readonly reason?: string;
   }): Promise<void>;
