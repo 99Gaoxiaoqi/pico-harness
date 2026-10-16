@@ -196,10 +196,25 @@ test("风险审核隔离高风险、范围不清与冲突来源；明确低风�
         representation: kind === "high" || kind === "low" ? "method" : "case",
         content:
           kind === "high" ? "修复配置后部署并发布到生产环境。" : "先核对配置输入再运行同一检查。",
+        matchHints: ["配置输入"],
         applicability: {
-          taskFamily: "coding",
-          toolNames: ["read_file"],
-          conditions: kind === "unbounded" ? [] : ["修改现有配置加载逻辑时"],
+          taskFamily: kind === "low" ? "spreadsheet" : "coding",
+          toolNames: kind === "low" ? ["document"] : ["read_file"],
+          conditions:
+            kind === "unbounded"
+              ? []
+              : kind === "low"
+                ? ["document.analyze.sum", "header=false", "finite-numbers"]
+                : ["修改现有配置加载逻辑时"],
+          ...(kind === "low"
+            ? {
+                spreadsheet: {
+                  operation: "sum" as const,
+                  header: false as const,
+                  dataKind: "finite-numbers" as const,
+                },
+              }
+            : {}),
         },
         sources: initial.candidate.sources,
         now: 300,
@@ -255,7 +270,8 @@ test("风险审核隔离高风险、范围不清与冲突来源；明确低风�
       store: store.taskExperiences,
       workspaceKey: "workspace",
       workDir: "/fixture",
-      query: "修复配置代码",
+      query: "核对配置输入",
+      now: 1000,
       toolAllowed: () => true,
     };
     assert.equal(
