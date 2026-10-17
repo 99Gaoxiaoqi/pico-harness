@@ -106,15 +106,37 @@ export interface ApprovedWriteFileCommitState {
   readonly precondition: AtomicFilePrecondition;
 }
 
-export async function captureApprovedWriteFileCommitState(
+export interface ApprovedWriteFileReadState extends ApprovedWriteFileCommitState {
+  readonly content?: string;
+}
+
+export type ApprovedFileReadChunk = (
+  handle: FileHandle,
+  buffer: Buffer,
+  length: number,
+  position: number,
+) => Promise<number>;
+
+export async function readApprovedWriteFileSnapshot(
   targetPath: string,
-): Promise<ApprovedWriteFileCommitState> {
+  options: {
+    readonly signal?: AbortSignal;
+    readonly readChunk?: ApprovedFileReadChunk;
+    readonly includeContent?: boolean;
+  } = {},
+): Promise<ApprovedWriteFileReadState> {
+  options.signal?.throwIfAborted();
   let pathInfo: BigIntStats;
   try {
     pathInfo = await lstat(targetPath, { bigint: true });
   } catch (error) {
     if (hasErrnoCode(error, "ENOENT")) {
-      return { snapshot: { kind: "missing" }, precondition: { kind: "missing" } };
+      options.signal?.throwIfAborted();
+      return {
+        snapshot: { kind: "missing" },
+        precondition: { kind: "missing" },
+        content: "",
+      };
     }
     throw error;
   }
@@ -122,29 +144,45 @@ export async function captureApprovedWriteFileCommitState(
   assertRegularNonSymlink(pathInfo, targetPath);
   const handle = await open(targetPath, constants.O_RDONLY | NO_FOLLOW_FLAG);
   try {
+    options.signal?.throwIfAborted();
     const opened = await handle.stat({ bigint: true });
     assertRegularNonSymlink(opened, targetPath);
     if (!sameApprovalFileVersion(pathInfo, opened)) {
       throw new Error(`读取审批目标时文件已被替换: ${targetPath}`);
     }
+    if (opened.size > BigInt(Number.MAX_SAFE_INTEGER)) {
+      throw new Error(`审批目标过大，无法安全读取: ${targetPath}`);
+    }
+
+    const initialSize = Number(opened.size);
     const hash = createHash("sha256");
+    const chunks: Buffer[] = [];
     const buffer = Buffer.alloc(64 * 1024);
     let offset = 0;
-    while (true) {
-      const { bytesRead } = await handle.read(buffer, 0, buffer.length, offset);
-      if (bytesRead === 0) break;
-      hash.update(buffer.subarray(0, bytesRead));
+    while (offset < initialSize) {
+      options.signal?.throwIfAborted();
+      const length = Math.min(buffer.length, initialSize - offset);
+      const bytesRead = await (options.readChunk ?? readFileChunk)(handle, buffer, length, offset);
+      options.signal?.throwIfAborted();
+      if (bytesRead <= 0 || bytesRead > length) {
+        throw new Error(`读取审批目标时文件被截短: ${targetPath}`);
+      }
+      const chunk = buffer.subarray(0, bytesRead);
+      if (options.includeContent !== false) chunks.push(Buffer.from(chunk));
+      hash.update(chunk);
       offset += bytesRead;
     }
+    options.signal?.throwIfAborted();
     const afterHandle = await handle.stat({ bigint: true });
     const afterPath = await lstat(targetPath, { bigint: true });
     if (
-      BigInt(offset) !== opened.size ||
+      offset !== initialSize ||
       !sameApprovalFileVersion(opened, afterHandle) ||
       !sameApprovalFileVersion(opened, afterPath)
     ) {
       throw new Error(`读取审批目标时文件内容发生变化: ${targetPath}`);
     }
+    options.signal?.throwIfAborted();
     return {
       snapshot: {
         kind: "file",
@@ -155,10 +193,35 @@ export async function captureApprovedWriteFileCommitState(
         contentSha256: hash.digest("hex"),
       },
       precondition: filePrecondition(afterPath),
+      ...(options.includeContent === false
+        ? {}
+        : { content: Buffer.concat(chunks, initialSize).toString("utf8") }),
     };
   } finally {
     await handle.close();
   }
+}
+
+export async function captureApprovedWriteFileCommitState(
+  targetPath: string,
+  signal?: AbortSignal,
+  readChunk?: ApprovedFileReadChunk,
+): Promise<ApprovedWriteFileCommitState> {
+  const { snapshot, precondition } = await readApprovedWriteFileSnapshot(targetPath, {
+    ...(signal ? { signal } : {}),
+    ...(readChunk ? { readChunk } : {}),
+    includeContent: false,
+  });
+  return { snapshot, precondition };
+}
+
+async function readFileChunk(
+  handle: FileHandle,
+  buffer: Buffer,
+  length: number,
+  position: number,
+): Promise<number> {
+  return (await handle.read(buffer, 0, length, position)).bytesRead;
 }
 
 export function sameApprovedWriteFileSnapshot(

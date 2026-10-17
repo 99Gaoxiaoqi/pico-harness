@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readApprovedWriteFileSnapshot } from "./atomic-workspace-file.js";
 
 export interface ApprovalDiffPathResolver {
   resolve(path: string): string;
@@ -9,6 +9,7 @@ export interface ApprovalDiffPathResolver {
 export interface ApprovalDiffToolPort {
   generateSimpleDiff(oldText: string, newText: string): string;
   safeResolve(workDir: string, input: string): string;
+  readFileSnapshot?: (path: string, signal?: AbortSignal) => Promise<string>;
 }
 
 /**
@@ -21,7 +22,9 @@ export async function computeApprovalDiff(
   workDir: string,
   workspaceRoots: ApprovalDiffPathResolver | undefined,
   tools: ApprovalDiffToolPort,
+  signal?: AbortSignal,
 ): Promise<string | undefined> {
+  signal?.throwIfAborted();
   try {
     let parsed: unknown;
     try {
@@ -31,22 +34,41 @@ export async function computeApprovalDiff(
     }
     if (parsed === null || typeof parsed !== "object") return undefined;
     const input = parsed as Record<string, unknown>;
-    if (toolName === "edit_file") return computeEditFileDiff(input, tools);
+    if (toolName === "edit_file") return computeEditFileDiff(input, tools, signal);
     if (toolName === "write_file")
-      return await computeWriteFileDiff(input, workDir, workspaceRoots, tools);
-    if (toolName === "bash") return await computeBashDiff(input, workDir, workspaceRoots, tools);
+      return await computeWriteFileDiff(input, workDir, workspaceRoots, tools, signal);
+    if (toolName === "bash")
+      return await computeBashDiff(input, workDir, workspaceRoots, tools, signal);
     return undefined;
-  } catch {
+  } catch (error) {
+    if (signal?.aborted || isAbortError(error)) throw error;
     return undefined;
   }
 }
 
-async function readFileOrEmpty(path: string): Promise<string> {
+async function readFileOrEmpty(
+  path: string,
+  tools: ApprovalDiffToolPort,
+  signal?: AbortSignal,
+): Promise<string> {
+  signal?.throwIfAborted();
   try {
-    return await readFile(path, "utf8");
-  } catch {
+    const content = tools.readFileSnapshot
+      ? await tools.readFileSnapshot(path, signal)
+      : (await readApprovedWriteFileSnapshot(path, signal ? { signal } : {})).content;
+    signal?.throwIfAborted();
+    return content ?? "";
+  } catch (error) {
+    if (signal?.aborted || isAbortError(error)) throw error;
     return "";
   }
+}
+
+function isAbortError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    (error.name === "AbortError" || (error as NodeJS.ErrnoException).code === "ABORT_ERR")
+  );
 }
 
 function isString(value: unknown): value is string {
@@ -56,11 +78,14 @@ function isString(value: unknown): value is string {
 function computeEditFileDiff(
   input: Record<string, unknown>,
   tools: ApprovalDiffToolPort,
+  signal?: AbortSignal,
 ): string | undefined {
   const oldText = input["old_text"];
   const newText = input["new_text"];
   if (!isString(oldText) || !isString(newText)) return undefined;
-  return tools.generateSimpleDiff(oldText, newText);
+  const diff = tools.generateSimpleDiff(oldText, newText);
+  signal?.throwIfAborted();
+  return diff;
 }
 
 async function computeWriteFileDiff(
@@ -68,6 +93,7 @@ async function computeWriteFileDiff(
   workDir: string,
   workspaceRoots: ApprovalDiffPathResolver | undefined,
   tools: ApprovalDiffToolPort,
+  signal?: AbortSignal,
 ): Promise<string | undefined> {
   const path = input["path"];
   const content = input["content"];
@@ -76,7 +102,12 @@ async function computeWriteFileDiff(
     workspaceRoots?.resolveUnchecked?.(path) ??
     workspaceRoots?.resolve(path) ??
     tools.safeResolve(workDir, path);
-  return tools.generateSimpleDiff(await readFileOrEmpty(absolutePath), content);
+  const diff = tools.generateSimpleDiff(
+    await readFileOrEmpty(absolutePath, tools, signal),
+    content,
+  );
+  signal?.throwIfAborted();
+  return diff;
 }
 
 async function computeBashDiff(
@@ -84,6 +115,7 @@ async function computeBashDiff(
   workDir: string,
   workspaceRoots: ApprovalDiffPathResolver | undefined,
   tools: ApprovalDiffToolPort,
+  signal?: AbortSignal,
 ): Promise<string | undefined> {
   const command = input["command"];
   if (!isString(command)) return undefined;
@@ -97,5 +129,10 @@ async function computeBashDiff(
     workspaceRoots?.resolveUnchecked?.(target) ??
     workspaceRoots?.resolve(target) ??
     tools.safeResolve(workDir, target);
-  return tools.generateSimpleDiff(await readFileOrEmpty(absoluteTarget), sourceCommand);
+  const diff = tools.generateSimpleDiff(
+    await readFileOrEmpty(absoluteTarget, tools, signal),
+    sourceCommand,
+  );
+  signal?.throwIfAborted();
+  return diff;
 }

@@ -150,6 +150,7 @@ import { computeApprovalDiff } from "@pico/pico-host/product-approval-diff";
 import {
   captureApprovedWriteFileCommitState,
   sameApprovedWriteFileSnapshot,
+  type ApprovedFileReadChunk,
   type ApprovedWriteFileState,
 } from "./atomic-workspace-file.js";
 import {
@@ -4716,6 +4717,7 @@ export function buildPermissionMiddleware(
     /** Hard ceiling for a configured child; human approval cannot widen it. */
     executionBoundaryCeiling?: ExecutionBoundary;
     getToolPermissionCategory?: (name: string) => ToolPermissionCategory;
+    readApprovalFileChunk?: ApprovedFileReadChunk;
   } = {},
 ): MiddlewareFunc {
   return async (call, context) => {
@@ -4869,9 +4871,24 @@ export function buildPermissionMiddleware(
         throw new Error("write_file 审批缺少有效目标路径");
       }
       const targetPath = workspaceRoots.resolveUnchecked(input.path);
-      const approvedSnapshot = await captureApprovedWriteFileCommitState(targetPath);
-      approvalDiff = await computeApprovalDiff(call.name, call.arguments, workDir, workspaceRoots);
-      const previewSnapshot = await captureApprovedWriteFileCommitState(targetPath);
+      const approvedSnapshot = await captureApprovedWriteFileCommitState(
+        targetPath,
+        signal,
+        options.readApprovalFileChunk,
+      );
+      approvalDiff = await computeApprovalDiff(
+        call.name,
+        call.arguments,
+        workDir,
+        workspaceRoots,
+        signal,
+        options.readApprovalFileChunk,
+      );
+      const previewSnapshot = await captureApprovedWriteFileCommitState(
+        targetPath,
+        signal,
+        options.readApprovalFileChunk,
+      );
       if (!sameApprovedWriteFileSnapshot(approvedSnapshot.snapshot, previewSnapshot.snapshot)) {
         throw new Error("生成 write_file 审批预览期间目标已变化，请重新提交工具调用");
       }
@@ -4882,7 +4899,14 @@ export function buildPermissionMiddleware(
         snapshot: approvedSnapshot.snapshot,
       };
     } else {
-      approvalDiff = await computeApprovalDiff(call.name, call.arguments, workDir, workspaceRoots);
+      approvalDiff = await computeApprovalDiff(
+        call.name,
+        call.arguments,
+        workDir,
+        workspaceRoots,
+        signal,
+        options.readApprovalFileChunk,
+      );
     }
     const approvalId = `approval_${randomUUID()}`;
     const runtimeRun = currentRuntimeRun();

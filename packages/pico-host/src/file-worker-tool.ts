@@ -281,7 +281,7 @@ export class FileWorkerTool implements BaseTool {
       }
       const approvedCommitState =
         operation === "write_file" && approvedState
-          ? await captureApprovedWriteFileCommitState(fullPath)
+          ? await captureApprovedWriteFileCommitState(fullPath, context?.signal)
           : undefined;
       if (
         operation === "write_file" &&

@@ -116,7 +116,7 @@ export class WriteFileTool implements BaseTool {
       throw new Error("write_file 审批状态与最终调用不匹配，请重新审批");
     }
     const commitState = approvedState
-      ? await captureApprovedWriteFileCommitState(fullPath)
+      ? await captureApprovedWriteFileCommitState(fullPath, context?.signal)
       : undefined;
     if (
       approvedState &&
