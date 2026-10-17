@@ -77,9 +77,16 @@ export function collectMemorySearchSignals(value?: string): MemorySearchSignals 
   const paths = [
     ...new Set(text.match(/(?:\.{0,2}\/|\/)[^\s"'<>]+/gu)?.map(trimPunctuation) ?? []),
   ].filter((term) => [...term].length <= 256);
-  const tokens = [
-    ...new Set((text.match(/[\p{L}\p{N}_@.-]+/gu) ?? []).map(trimPunctuation)),
-  ].filter(
+  const rawTokens = (text.match(/[\p{L}\p{N}_@.-]+/gu) ?? []).map(trimPunctuation);
+  // Chinese questions often attach a project name without spaces (e.g. “查看Aster活动”).
+  // Keep the original lexeme, but also expose the literal Latin identifier for exact keys.
+  // This is query-only: changing document lexemes would require rebuilding existing indexes.
+  const boundaryTokens = rawTokens.flatMap((term) =>
+    /\p{Script=Han}/u.test(term) && /\p{Script=Latin}/u.test(term)
+      ? (term.match(/[\p{Script=Latin}\p{N}_@.-]+/gu) ?? []).map(trimPunctuation)
+      : [],
+  );
+  const tokens = [...new Set([...boundaryTokens, ...rawTokens])].filter(
     (term) =>
       term.length >= 2 &&
       [...term].length <= 256 &&

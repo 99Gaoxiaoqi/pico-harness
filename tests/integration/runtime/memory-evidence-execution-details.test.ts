@@ -72,8 +72,8 @@ test("reopened execution details retain recall/request levels, native process fa
           itemVersion: item.version,
           contentHash: item.contentHash,
           referenceHash: sha("reference"),
-          range: { start: 0, end: 4, total: 4 },
-          excerpt: false,
+          range: { start: 0, end: 2, total: 4 },
+          excerpt: true,
           match: "preference",
           source: "user-evidence",
           sourceCount: 1,
@@ -275,6 +275,8 @@ test("reopened execution details retain recall/request levels, native process fa
       );
     assert.match(renderStep(recall.id), /请求已装配/u);
     assert.match(renderStep(recall.id), /当前版本一致/u);
+    assert.match(renderStep(recall.id), /未携带不代表未保存/u);
+    assert.match(renderStep(recall.id), /本次引用包含原文摘录/u);
     assert.match(renderStep(page.runs[0]!.steps.find((s) => s.kind === "tool")!.id), /退出码.*1/u);
     assert.match(
       renderStep(page.runs[0]!.steps.find((s) => s.kind === "goal_evaluation")!.id),

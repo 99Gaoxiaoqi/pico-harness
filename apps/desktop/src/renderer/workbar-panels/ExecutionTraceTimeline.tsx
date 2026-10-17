@@ -744,6 +744,10 @@ function MemoryRecallDetail({ memory }: { memory: NonNullable<RuntimeExecutionSt
           <p>
             淘汰：重复 {t.counts.duplicate}、预算 {t.counts.budget}、条数 {t.counts.item_limit}。
           </p>
+          {t.mode === "automatic" && <p>自动召回只携带有限的相关记录；未携带不代表未保存。</p>}
+          {currentItems.some((item) => item.excerpt) && (
+            <p>本次引用包含原文摘录；请按下方区间核对日期、条件和例外是否覆盖。</p>
+          )}
           {t.outcome === "no_hits" && <p>零命中只能说明本次检索未选中，不能确认记忆未保存。</p>}
           {t.traceTruncated && (
             <p>
