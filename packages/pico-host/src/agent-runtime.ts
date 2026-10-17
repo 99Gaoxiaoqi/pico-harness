@@ -3104,8 +3104,6 @@ export async function executeAgentRuntime(
             try {
               await checkAdmission();
               const result = await builder.read(input.item_id, input.expected_version, {
-                ...(input.start === undefined ? {} : { start: input.start }),
-                ...(input.end === undefined ? {} : { end: input.end }),
                 ...(signal ? { signal } : {}),
                 trace: { ...(queryRef ? { queryRef } : {}) },
               });
