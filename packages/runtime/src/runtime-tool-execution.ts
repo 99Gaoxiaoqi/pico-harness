@@ -19,6 +19,8 @@ export interface ToolExecutionContext {
   readonly beforeDispatch?: (call: ToolCall) => Promise<void>;
   readonly sanitizeResult?: (result: ToolResult) => ToolResult;
   readonly onCommittedResult?: (call: ToolCall, envelope: ToolResultEnvelope) => Promise<void>;
+  /** Host-owned approval state; never populated from model tool arguments. */
+  readonly approvedWriteFileState?: unknown;
 }
 
 export interface ToolRecoveryProbeInput {

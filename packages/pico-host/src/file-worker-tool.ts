@@ -11,9 +11,12 @@ import { NO_FILE_SIDE_EFFECTS } from "./tool-registry-contract.js";
 import type { WorkspaceRoots } from "./workspace-roots.js";
 import {
   captureAtomicFilePrecondition,
+  captureApprovedWriteFileCommitState,
+  sameApprovedWriteFileSnapshot,
   readBoundedFileSnapshot,
   writeAtomicWorkspaceFile,
   type AtomicWorkspaceFileWrite,
+  type ApprovedWriteFileState,
 } from "./atomic-workspace-file.js";
 import { assertSameResolvedTarget, READ_FILE_MAX_BYTES } from "./file-tool-helpers.js";
 import {
@@ -266,7 +269,29 @@ export class FileWorkerTool implements BaseTool {
       }
       const fullPath = await this.options.roots.assertAllowed(originalPath, { access: "write" });
       if (fullPath !== target.path) throw new Error("写入前目标真实路径发生变化");
-      const precondition = await captureAtomicFilePrecondition(fullPath);
+      const approvedState = context?.approvedWriteFileState as ApprovedWriteFileState | undefined;
+      if (
+        operation === "write_file" &&
+        approvedState &&
+        (approvedState.toolCallId !== context?.toolCallId ||
+          approvedState.argumentsJson !== args ||
+          approvedState.targetPath !== fullPath)
+      ) {
+        throw new Error("write_file 审批状态与最终调用不匹配，请重新审批");
+      }
+      const approvedCommitState =
+        operation === "write_file" && approvedState
+          ? await captureApprovedWriteFileCommitState(fullPath)
+          : undefined;
+      if (
+        operation === "write_file" &&
+        approvedState &&
+        !sameApprovedWriteFileSnapshot(approvedState.snapshot, approvedCommitState!.snapshot)
+      ) {
+        throw new Error("write_file 审批后目标状态已变化，已拒绝覆盖；请重新读取并审批");
+      }
+      const precondition =
+        approvedCommitState?.precondition ?? (await captureAtomicFilePrecondition(fullPath));
       if (!sameFileTargetIdentity(target.identity, await fileTargetIdentity(fullPath))) {
         throw new Error("写入前目标身份发生变化");
       }

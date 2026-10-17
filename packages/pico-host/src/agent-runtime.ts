@@ -148,6 +148,11 @@ import {
 import { bashCommandFromArgs } from "@pico/runtime/bash-paths";
 import { computeApprovalDiff } from "@pico/pico-host/product-approval-diff";
 import {
+  captureApprovedWriteFileCommitState,
+  sameApprovedWriteFileSnapshot,
+  type ApprovedWriteFileState,
+} from "./atomic-workspace-file.js";
+import {
   classifyToolPermission,
   evaluateToolPermission,
   permissionReasonForCategory,
@@ -4856,7 +4861,29 @@ export function buildPermissionMiddleware(
           : {}),
       autoEditsAlreadyEnabled: mode === "auto",
     });
-    const diff = await computeApprovalDiff(call.name, call.arguments, workDir, workspaceRoots);
+    let approvalDiff: string | undefined;
+    let approvedWriteFileState: ApprovedWriteFileState | undefined;
+    if (call.name === "write_file" && workspaceRoots) {
+      const input = JSON.parse(call.arguments) as { path?: unknown };
+      if (typeof input.path !== "string" || input.path.length === 0) {
+        throw new Error("write_file 审批缺少有效目标路径");
+      }
+      const targetPath = workspaceRoots.resolveUnchecked(input.path);
+      const approvedSnapshot = await captureApprovedWriteFileCommitState(targetPath);
+      approvalDiff = await computeApprovalDiff(call.name, call.arguments, workDir, workspaceRoots);
+      const previewSnapshot = await captureApprovedWriteFileCommitState(targetPath);
+      if (!sameApprovedWriteFileSnapshot(approvedSnapshot.snapshot, previewSnapshot.snapshot)) {
+        throw new Error("生成 write_file 审批预览期间目标已变化，请重新提交工具调用");
+      }
+      approvedWriteFileState = {
+        toolCallId: call.id,
+        argumentsJson: call.arguments,
+        targetPath,
+        snapshot: approvedSnapshot.snapshot,
+      };
+    } else {
+      approvalDiff = await computeApprovalDiff(call.name, call.arguments, workDir, workspaceRoots);
+    }
     const approvalId = `approval_${randomUUID()}`;
     const runtimeRun = currentRuntimeRun();
     let runtimeApprovalRecorded = false;
@@ -4871,7 +4898,7 @@ export function buildPermissionMiddleware(
         call.name,
         call.arguments,
         notifier,
-        diff,
+        approvalDiff,
         signal,
         { sessionScope: scope, providerCallId: call.id, reason: approvalReason },
       );
@@ -4893,7 +4920,9 @@ export function buildPermissionMiddleware(
       });
     }
     if (!result.allowed || !workspaceRoots || !settings) {
-      return result.allowed ? result : { ...result, denialSource: "human" };
+      return result.allowed
+        ? { ...result, ...(approvedWriteFileState ? { approvedWriteFileState } : {}) }
+        : { ...result, denialSource: "human" };
     }
 
     if (callRequiresProcessNetwork(call)) {
@@ -4950,7 +4979,9 @@ export function buildPermissionMiddleware(
         await options.onOneShotMcpAuthorization?.(call, externalDirectories);
       }
     }
-    return result;
+    return result.allowed && approvedWriteFileState
+      ? { ...result, approvedWriteFileState }
+      : result;
   };
 }
 

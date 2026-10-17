@@ -58,6 +58,8 @@ export interface RequestMiddlewareResult {
   call?: ToolCall;
   /** 供 PermissionDenied Hook 诊断使用，不影响旧 middleware 协议。 */
   denialSource?: string;
+  /** Trusted state captured by the permission middleware for this exact call. */
+  approvedWriteFileState?: unknown;
 }
 
 export interface RequestMiddlewareContext {
