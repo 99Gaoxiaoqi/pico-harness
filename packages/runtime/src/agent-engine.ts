@@ -2156,7 +2156,9 @@ export class AgentEngine {
         );
       }
       const readOnly = this.registry.isReadOnlyTool?.(toolCall.name) ?? false;
-      const reminder = this.guardrail.afterCall(toolCall, result, { readOnly });
+      const reminder = guardDecision.allowed
+        ? this.guardrail.afterCall(toolCall, result, { readOnly })
+        : null;
       const builtResult = runtimeRun
         ? await this.buildRuntimeToolResultMessage(
             runtimeRun,

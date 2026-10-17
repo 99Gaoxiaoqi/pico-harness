@@ -34,3 +34,28 @@ test("ToolGuardrailController 在阈值后阻断重复失败，并在成功后�
   );
   assert.equal(guardrail.beforeCall(toolCall).allowed, true);
 });
+
+test("ToolGuardrailController 对不同参数完整累计同工具失败并阻断后续调用", () => {
+  const guardrail = new ToolGuardrailController({
+    exactFailureWarnAt: 3,
+    exactFailureBlockAt: 20,
+    sameToolFailureWarnAt: 20,
+    sameToolFailureBlockAt: 8,
+  });
+
+  for (const [path, repetitions] of [
+    ["first.ts", 3],
+    ["second.ts", 3],
+    ["third.ts", 2],
+  ] as const) {
+    for (let index = 0; index < repetitions; index++) {
+      const call = { ...toolCall, arguments: JSON.stringify({ path }) };
+      guardrail.afterCall(call, { toolCallId: call.id, output: "failed", isError: true });
+    }
+  }
+
+  assert.equal(
+    guardrail.beforeCall({ ...toolCall, arguments: '{"path":"new-file.ts"}' }).allowed,
+    false,
+  );
+});

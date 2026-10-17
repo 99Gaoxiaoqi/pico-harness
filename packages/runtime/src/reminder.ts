@@ -123,10 +123,20 @@ export class ToolGuardrailController {
     const exactKey = this.exactKey(toolCall);
     const exactCount = (this.exactFailures.get(exactKey) ?? 0) + 1;
     this.exactFailures.set(exactKey, exactCount);
+    const toolKey = this.toolKey(toolCall.name);
+    const toolCount = (this.sameToolFailures.get(toolKey) ?? 0) + 1;
+    this.sameToolFailures.set(toolKey, toolCount);
+
     if (exactCount >= this.exactFailureBlockAt) {
       this.blockedReasons.set(
         exactKey,
         `重复失败: ${toolCall.name} 使用相同参数连续失败 ${exactCount} 次`,
+      );
+    }
+    if (toolCount >= this.sameToolFailureBlockAt) {
+      this.blockedReasons.set(
+        toolKey,
+        `同一工具重复失败: ${toolCall.name} 连续失败 ${toolCount} 次`,
       );
     }
     if (exactCount >= this.exactFailureWarnAt) {
@@ -135,15 +145,6 @@ export class ToolGuardrailController {
       );
     }
 
-    const toolKey = this.toolKey(toolCall.name);
-    const toolCount = (this.sameToolFailures.get(toolKey) ?? 0) + 1;
-    this.sameToolFailures.set(toolKey, toolCount);
-    if (toolCount >= this.sameToolFailureBlockAt) {
-      this.blockedReasons.set(
-        toolKey,
-        `同一工具重复失败: ${toolCall.name} 连续失败 ${toolCount} 次`,
-      );
-    }
     if (toolCount >= this.sameToolFailureWarnAt) {
       return makeReminder(
         `同一工具 '${toolCall.name}' 已连续失败 ${toolCount} 次,即使参数不同也说明方向可能错了。请换用观察/读取/定位策略。`,
