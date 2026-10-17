@@ -186,13 +186,45 @@ export class AtomicMemoryContextBuilder {
     let rendered = render(end);
     let truncated = rendered.reference.excerpt;
     let block = formatBlock([rendered.line], truncated);
-    while (end > start && countTokens(block) > SEARCH_MAX_TOKENS) {
-      end--;
-      rendered = render(end);
+    if (countTokens(block) > SEARCH_MAX_TOKENS) {
+      let rejectedEnd = end;
+      // Token counts need not be monotone. Only an actually measured fitting
+      // wrapper may become the result; the probes do not promise a longest prefix.
+      const probe = async (through: number) => {
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        checkAbort();
+        const candidate = render(through);
+        const candidateBlock = formatBlock([candidate.line], candidate.reference.excerpt);
+        return {
+          rendered: candidate,
+          block: candidateBlock,
+          fits: countTokens(candidateBlock) <= SEARCH_MAX_TOKENS,
+        };
+      };
+      for (;;) {
+        end = start + Math.floor((end - start) * 0.875);
+        if (end === start) unavailable("budget_exhausted");
+        const candidate = await probe(end);
+        if (candidate.fits) {
+          rendered = candidate.rendered;
+          block = candidate.block;
+          break;
+        }
+        rejectedEnd = end;
+      }
+      // A fixed number of measured probes recovers useful space without a
+      // character-by-character scan or an assumption needed for budget safety.
+      for (let attempts = 0; attempts < 6 && rejectedEnd - end > 1; attempts++) {
+        const middle = end + Math.floor((rejectedEnd - end) / 2);
+        const candidate = await probe(middle);
+        if (candidate.fits) {
+          end = middle;
+          rendered = candidate.rendered;
+          block = candidate.block;
+        } else rejectedEnd = middle;
+      }
       truncated = rendered.reference.excerpt;
-      block = formatBlock([rendered.line], truncated);
     }
-    if (end === start) unavailable("budget_exhausted");
     const [current, currentSettings] = await Promise.all([
       this.store.readItem(itemId),
       this.store.readSettings(this.workspaceKey),
