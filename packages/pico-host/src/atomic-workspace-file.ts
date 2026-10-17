@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { constants, type BigIntStats } from "node:fs";
 import { lstat, open, rename, stat, statfs, unlink, type FileHandle } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -81,6 +81,98 @@ export interface AtomicWorkspaceFileWrite {
    * 调用方保留 WorkspaceRoots 的授权语义，原子 helper 不自行扩大根目录。
    */
   readonly revalidateTarget: () => void | Promise<void>;
+}
+
+export interface ApprovedWriteFileState {
+  readonly toolCallId: string;
+  readonly argumentsJson: string;
+  readonly targetPath: string;
+  readonly snapshot: ApprovedWriteFileSnapshot;
+}
+
+export type ApprovedWriteFileSnapshot =
+  | { readonly kind: "missing" }
+  | {
+      readonly kind: "file";
+      readonly dev: bigint;
+      readonly ino: bigint;
+      readonly size: bigint;
+      readonly mtimeNs: bigint;
+      readonly contentSha256: string;
+    };
+
+export interface ApprovedWriteFileCommitState {
+  readonly snapshot: ApprovedWriteFileSnapshot;
+  readonly precondition: AtomicFilePrecondition;
+}
+
+export async function captureApprovedWriteFileCommitState(
+  targetPath: string,
+): Promise<ApprovedWriteFileCommitState> {
+  let pathInfo: BigIntStats;
+  try {
+    pathInfo = await lstat(targetPath, { bigint: true });
+  } catch (error) {
+    if (hasErrnoCode(error, "ENOENT")) {
+      return { snapshot: { kind: "missing" }, precondition: { kind: "missing" } };
+    }
+    throw error;
+  }
+
+  assertRegularNonSymlink(pathInfo, targetPath);
+  const handle = await open(targetPath, constants.O_RDONLY | NO_FOLLOW_FLAG);
+  try {
+    const opened = await handle.stat({ bigint: true });
+    assertRegularNonSymlink(opened, targetPath);
+    if (!sameApprovalFileVersion(pathInfo, opened)) {
+      throw new Error(`读取审批目标时文件已被替换: ${targetPath}`);
+    }
+    const hash = createHash("sha256");
+    const buffer = Buffer.alloc(64 * 1024);
+    let offset = 0;
+    while (true) {
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, offset);
+      if (bytesRead === 0) break;
+      hash.update(buffer.subarray(0, bytesRead));
+      offset += bytesRead;
+    }
+    const afterHandle = await handle.stat({ bigint: true });
+    const afterPath = await lstat(targetPath, { bigint: true });
+    if (
+      BigInt(offset) !== opened.size ||
+      !sameApprovalFileVersion(opened, afterHandle) ||
+      !sameApprovalFileVersion(opened, afterPath)
+    ) {
+      throw new Error(`读取审批目标时文件内容发生变化: ${targetPath}`);
+    }
+    return {
+      snapshot: {
+        kind: "file",
+        dev: opened.dev,
+        ino: opened.ino,
+        size: opened.size,
+        mtimeNs: opened.mtimeNs,
+        contentSha256: hash.digest("hex"),
+      },
+      precondition: filePrecondition(afterPath),
+    };
+  } finally {
+    await handle.close();
+  }
+}
+
+export function sameApprovedWriteFileSnapshot(
+  expected: ApprovedWriteFileSnapshot,
+  actual: ApprovedWriteFileSnapshot,
+): boolean {
+  return expected.kind === "missing"
+    ? actual.kind === "missing"
+    : actual.kind === "file" &&
+        expected.dev === actual.dev &&
+        expected.ino === actual.ino &&
+        expected.size === actual.size &&
+        expected.mtimeNs === actual.mtimeNs &&
+        expected.contentSha256 === actual.contentSha256;
 }
 
 /**
@@ -1038,6 +1130,15 @@ function sameFileVersion(left: FileVersion, right: FileVersion): boolean {
     left.size === right.size &&
     left.mtimeNs === right.mtimeNs &&
     left.ctimeNs === right.ctimeNs
+  );
+}
+
+function sameApprovalFileVersion(left: BigIntStats, right: BigIntStats): boolean {
+  return (
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.size === right.size &&
+    left.mtimeNs === right.mtimeNs
   );
 }
 

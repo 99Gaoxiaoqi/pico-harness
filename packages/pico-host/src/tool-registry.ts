@@ -380,6 +380,7 @@ export class ToolRegistry implements Registry {
   async execute(call: ToolCall, context?: ToolExecutionContext): Promise<ToolResult> {
     // 1. 路由查找:找不到说明模型幻觉,返回 isError 让模型自纠
     let currentCall = Object.freeze({ ...call });
+    let approvedWriteFileState: unknown;
     const tool = this.tools.get(currentCall.name);
     if (!tool) {
       return {
@@ -478,6 +479,7 @@ export class ToolRegistry implements Registry {
           reason,
           call: rewrittenCall,
           denialSource,
+          approvedWriteFileState: middlewareApprovedWriteFileState,
         } = await mw(currentCall, {
           forceApproval,
         });
@@ -497,6 +499,9 @@ export class ToolRegistry implements Registry {
             output: `执行被系统拦截。原因: ${reason}`,
             isError: true,
           };
+        }
+        if (middlewareApprovedWriteFileState !== undefined) {
+          approvedWriteFileState = middlewareApprovedWriteFileState;
         }
         if (rewrittenCall) {
           currentCall = { ...rewrittenCall };
@@ -572,6 +577,7 @@ export class ToolRegistry implements Registry {
       const executionContext: ToolExecutionContext = {
         ...(context ?? {}),
         toolCallId: currentCall.id,
+        ...(approvedWriteFileState !== undefined ? { approvedWriteFileState } : {}),
       };
       let dispatchEntered = false;
       let dispatchClosed = false;

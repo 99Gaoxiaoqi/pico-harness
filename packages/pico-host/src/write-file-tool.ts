@@ -18,7 +18,10 @@ import {
 } from "./session-artifact-writer.js";
 import {
   captureAtomicFilePrecondition,
+  captureApprovedWriteFileCommitState,
+  sameApprovedWriteFileSnapshot,
   writeAtomicWorkspaceFile,
+  type ApprovedWriteFileState,
 } from "./atomic-workspace-file.js";
 import {
   assertSameResolvedTarget,
@@ -103,7 +106,26 @@ export class WriteFileTool implements BaseTool {
     await mkdir(dirname(initialPath), { recursive: true });
     const fullPath = await this.roots.assertAllowed(path, { access: "write" });
 
-    const precondition = await captureAtomicFilePrecondition(fullPath);
+    const approvedState = context?.approvedWriteFileState as ApprovedWriteFileState | undefined;
+    if (
+      approvedState &&
+      (approvedState.toolCallId !== context?.toolCallId ||
+        approvedState.argumentsJson !== args ||
+        approvedState.targetPath !== fullPath)
+    ) {
+      throw new Error("write_file 审批状态与最终调用不匹配，请重新审批");
+    }
+    const commitState = approvedState
+      ? await captureApprovedWriteFileCommitState(fullPath)
+      : undefined;
+    if (
+      approvedState &&
+      !sameApprovedWriteFileSnapshot(approvedState.snapshot, commitState!.snapshot)
+    ) {
+      throw new Error("write_file 审批后目标状态已变化，已拒绝覆盖；请重新读取并审批");
+    }
+    const precondition =
+      commitState?.precondition ?? (await captureAtomicFilePrecondition(fullPath));
     const isNewFile = precondition.kind === "missing";
     if (!isNewFile) await access(fullPath, constants.W_OK);
     await writeAtomicWorkspaceFile({
