@@ -21,8 +21,6 @@ export interface AtomicMemorySearchPort {
 export interface AtomicMemoryReadInput {
   readonly item_id: string;
   readonly expected_version: number;
-  readonly start?: number;
-  readonly end?: number;
 }
 export function buildMemoryReadTool(port: {
   read(input: AtomicMemoryReadInput, context?: ToolExecutionContext): Promise<string>;
@@ -35,14 +33,12 @@ export function buildMemoryReadTool(port: {
     definition: () => ({
       name: "memory_read",
       description:
-        "Read the saved original body of one active ordinary fact or note found by memory_search. Requires its exact item ID and version. Optional start/end are zero-based Unicode code-point offsets (half-open). Returns at most 5120 tokens including low-trust wrapper; use returned range to continue if excerpted. Never reads source conversations or grants permissions. Plans, predictions and experience methods/cases are unsupported.",
+        "Read the saved original body of one active ordinary fact or note already found by memory_search, using its exact item ID and version. When that known item needs more context, prefer this read over repeatedly searching for the same item. The host reads from the beginning with a fixed 5120-token limit including the low-trust wrapper; an excerpt is not complete coverage, and repeating the same read does not advance it. This tool accepts no offsets. Never reads source conversations or grants permissions. Plans, predictions and experience methods/cases are unsupported.",
       inputSchema: {
         type: "object",
         properties: {
           item_id: { type: "string", minLength: 1, maxLength: 512 },
           expected_version: { type: "integer", minimum: 1 },
-          start: { type: "integer", minimum: 0 },
-          end: { type: "integer", minimum: 0 },
         },
         required: ["item_id", "expected_version"],
         additionalProperties: false,
@@ -55,26 +51,16 @@ export function buildMemoryReadTool(port: {
         !input ||
         typeof input !== "object" ||
         Array.isArray(input) ||
-        Object.keys(input).some(
-          (key) => !["item_id", "expected_version", "start", "end"].includes(key),
-        ) ||
+        Object.keys(input).some((key) => !["item_id", "expected_version"].includes(key)) ||
         !("item_id" in input) ||
         typeof input.item_id !== "string" ||
         !input.item_id.trim() ||
         input.item_id.length > 512 ||
         !("expected_version" in input) ||
         !Number.isSafeInteger(input.expected_version) ||
-        (input.expected_version as number) < 1 ||
-        ["start", "end"].some(
-          (key) =>
-            key in input &&
-            (!Number.isSafeInteger(input[key as keyof typeof input]) ||
-              Number(input[key as keyof typeof input]) < 0),
-        )
+        (input.expected_version as number) < 1
       )
-        throw new Error(
-          "memory_read requires an exact item_id/version and optional nonnegative code-point range only",
-        );
+        throw new Error("memory_read requires only an exact item_id and expected_version");
       return port.read(input as AtomicMemoryReadInput, context);
     },
   };
