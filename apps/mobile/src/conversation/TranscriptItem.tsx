@@ -11,6 +11,7 @@ import { MessageMarkdown } from "../MessageMarkdown";
 import { referencedMediaIds } from "../markdown";
 import { MessageMedia } from "../MessageMedia";
 import { streamingMediaText } from "../media";
+import { InteractionCard } from "./InteractionCard";
 
 export function ProcessGroup({
   records,
@@ -130,7 +131,6 @@ export function TranscriptItem({
 }) {
   const pico = usePico();
   const [expanded, setExpanded] = useState(false);
-  const [answer, setAnswer] = useState("");
   const label =
     item.kind === "userMessage"
       ? "你"
@@ -159,7 +159,6 @@ export function TranscriptItem({
         : "summary" in item
           ? String(item.summary ?? "")
           : "";
-  const waiting = (item.kind === "approval" || item.kind === "prompt") && item.state === "waiting";
   const message = item.kind === "userMessage" || item.kind === "assistantMessage";
   const process = item.kind === "thinking" || item.kind === "tool" || item.kind === "skill";
   if (message) {
@@ -188,23 +187,46 @@ export function TranscriptItem({
       </View>
     );
   }
-  if (item.kind === "changes" && onReview)
+  if (item.kind === "approval" || item.kind === "prompt")
     return (
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel={`查看改动：${item.title}`}
-        onPress={onReview}
-        style={styles.resultRow}
-      >
-        <Text style={s.text}>查看改动</Text>
-        <Text numberOfLines={1} style={[s.muted, { flex: 1 }]}>
-          {content || item.title}
+      <InteractionCard
+        item={item}
+        sessionId={sessionId}
+        syncReason={syncReason}
+        onResize={onResize}
+      />
+    );
+  if (item.kind === "changes")
+    return (
+      <View style={styles.resultCard}>
+        <Label>{item.state === "applied" ? "改动已应用" : "改动已更新"}</Label>
+        <Text style={styles.resultTitle}>
+          {item.title === "Changes applied" || item.title === "Changes updated"
+            ? "代码改动"
+            : item.title}
         </Text>
-        <Text style={s.muted}>›</Text>
-      </Pressable>
+        {!!content && (
+          <Text selectable style={s.text}>
+            {content}
+          </Text>
+        )}
+        {onReview && (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`查看改动：${item.title}`}
+            onPress={onReview}
+            style={styles.resultRow}
+          >
+            <Text style={styles.resultAction}>查看改动</Text>
+            <Text style={s.muted}>›</Text>
+          </Pressable>
+        )}
+        {item.truncated && <Label>此记录因传输预算截断</Label>}
+        <Detail value={item} title="改动详情" />
+      </View>
     );
   return (
-    <View style={[styles.process, waiting && styles.interaction]}>
+    <View style={styles.process}>
       <Pressable
         accessibilityRole="button"
         accessibilityState={{ expanded }}
@@ -244,65 +266,6 @@ export function TranscriptItem({
         </>
       )}
       {item.truncated && <Label>此记录因传输预算截断</Label>}
-      {waiting && item.kind === "approval" && item.data.kind !== "plan" && (
-        <View style={s.row}>
-          {(["allow_once", "allow_session", "deny"] as const).map((decision, i) => (
-            <Button
-              key={decision}
-              title={["允许一次", "本会话允许", "拒绝"][i]!}
-              reason={syncReason ?? pico.reason("approval.respond")}
-              onPress={() =>
-                void pico.perform(() =>
-                  pico.request("approval.respond", {
-                    sessionId,
-                    approvalId: String(item.data.approvalId ?? item.id),
-                    decision,
-                    idempotencyKey: `approval:${item.id}:${decision}`,
-                  }),
-                )
-              }
-            />
-          ))}
-        </View>
-      )}
-      {waiting && item.kind === "prompt" && (
-        <>
-          <PromptOptions data={item.data} onChoose={setAnswer} />
-          <Field label="回答" placeholder="输入回答" value={answer} onChange={setAnswer} compact />
-          <View style={s.row}>
-            <Button
-              title="提交回答"
-              reason={syncReason ?? pico.reason("prompt.respond")}
-              onPress={() =>
-                void pico.perform(() =>
-                  pico.request("prompt.respond", {
-                    sessionId,
-                    promptId: String(item.data.promptId ?? item.id),
-                    answer,
-                    idempotencyKey: `prompt:${item.id}:${answer}`,
-                  }),
-                )
-              }
-            />
-            <Button
-              title="取消"
-              secondary
-              reason={syncReason ?? pico.reason("prompt.cancel")}
-              onPress={() =>
-                void pico.perform(() =>
-                  pico.request("prompt.cancel", {
-                    sessionId,
-                    promptId: String(item.data.promptId ?? item.id),
-                  }),
-                )
-              }
-            />
-          </View>
-        </>
-      )}
-      {item.kind === "changes" && onReview && (
-        <Button title="查看改动 →" quiet onPress={onReview} />
-      )}
       {item.kind === "subagent" &&
         (typeof item.data?.childSessionId === "string" &&
         typeof item.data?.childWorkspacePath === "string" &&
@@ -322,37 +285,6 @@ export function TranscriptItem({
           <Label>子会话身份未明确，请在电脑查看。</Label>
         ))}
       {expanded && <Detail value={item} />}
-    </View>
-  );
-}
-function PromptOptions({
-  data,
-  onChoose,
-}: {
-  data: Record<string, unknown>;
-  onChoose: (x: string) => void;
-}) {
-  const options = Array.isArray(data.options) ? data.options : [];
-  return (
-    <View style={s.row}>
-      {options.map((x, i) => (
-        <Button
-          key={i}
-          secondary
-          title={typeof x === "string" ? x : String((x as Record<string, unknown>).label ?? i + 1)}
-          onPress={() =>
-            onChoose(
-              typeof x === "string"
-                ? x
-                : String(
-                    (x as Record<string, unknown>).value ??
-                      (x as Record<string, unknown>).label ??
-                      i,
-                  ),
-            )
-          }
-        />
-      ))}
     </View>
   );
 }
@@ -449,20 +381,25 @@ const styles = StyleSheet.create({
   assistantMessage: { gap: 6, marginTop: 10, marginBottom: 16 },
   process: { gap: 4, paddingVertical: 3 },
   groupContents: { paddingLeft: 12, borderLeftWidth: 1, borderLeftColor: color.line },
-  resultRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    minHeight: 44,
-    marginVertical: 6,
-  },
-  disclosure: { minHeight: 44, justifyContent: "center" },
-  interaction: {
-    backgroundColor: color.panel,
-    padding: 12,
-    marginVertical: 10,
+  resultCard: {
+    gap: 8,
+    padding: 16,
     borderWidth: 1,
     borderColor: color.line,
-    borderRadius: 12,
+    borderRadius: 16,
+    marginVertical: 10,
   },
+  resultTitle: { color: color.text, fontSize: 16, lineHeight: 24, fontWeight: "600" },
+  resultAction: { color: color.text, fontSize: 14, fontWeight: "600" },
+  resultRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: 10,
+    minHeight: 48,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+    backgroundColor: color.surface,
+  },
+  disclosure: { minHeight: 44, justifyContent: "center" },
 });
