@@ -48,6 +48,7 @@ function fixture(item: Interaction) {
       },
       "@pico/protocol/mobile": { parseApprovalSessionScope },
       "../store": { usePico: () => pico },
+      "../ActionsSheet": mobileTags(["ActionsSheet"]),
       "../ui": { ...mobileTags(["Detail", "Label"]), s: {}, color: colors },
     },
   );
@@ -73,8 +74,19 @@ function fixture(item: Interaction) {
     button,
     press,
     content: () => textContent(tree),
+    sheet: () => screen.nodes("ActionsSheet")[0],
+    open() {
+      press(
+        flatten(tree).some((node) => node.props.title === "继续填写") ? "继续填写" : "填写回答",
+      );
+      render();
+    },
+    close() {
+      (screen.nodes("ActionsSheet")[0]!.props.onClose as () => void)();
+      render();
+    },
     titles: () =>
-      flatten(tree)
+      flatten(screen.nodes("ActionsSheet")[0] ?? tree)
         .filter((node) => typeof node.props.onPress === "function")
         .map((node) => node.props.title),
     input: () => screen.nodes("TextInput")[0]!,
@@ -160,7 +172,7 @@ test("手机审批按真实范围展示主次操作，锁定重复提交，失�
   assert.equal(card.requests.length, 2);
 });
 
-test("手机提问保留选项与回答草稿，拒绝结果可重试，旧会话和旧连接响应不覆盖当前卡", async (t) => {
+test("手机提问在回答弹层填写，关闭保留草稿，提交与会话切换安全收起", async (t) => {
   const item: Interaction = {
     id: "prompt-card",
     kind: "prompt",
@@ -176,6 +188,11 @@ test("手机提问保留选项与回答草稿，拒绝结果可重试，旧会�
   };
   const card = fixture(item);
   t.after(() => card.screen.dispose());
+  assert.equal(card.screen.nodes("TextInput").length, 0, "内联卡不挂载回答输入框");
+  assert.deepEqual(card.titles(), ["填写回答"]);
+  card.open();
+  assert.equal(card.sheet()?.props.open, true);
+  assert.match(textContent(card.sheet()), /选择运行范围/);
   card.press("相关检查");
   card.render();
   assert.equal(card.input().props.value, "targeted");
@@ -185,6 +202,12 @@ test("手机提问保留选项与回答草稿，拒绝结果可重试，旧会�
   );
   card.edit("保留这段回答");
   card.render();
+  card.close();
+  assert.equal(card.sheet(), undefined);
+  assert.equal(card.screen.nodes("TextInput").length, 0);
+  assert.deepEqual(card.titles(), ["继续填写"]);
+  card.open();
+  assert.equal(card.input().props.value, "保留这段回答");
   card.press("提交回答");
   card.press("取消提问");
   assert.equal(card.requests.length, 1);
@@ -200,6 +223,8 @@ test("手机提问保留选项与回答草稿，拒绝结果可重试，旧会�
   assert.deepEqual(card.requests[1]!.params, card.requests[0]!.params);
   card.props.sessionId = "another-session";
   card.render();
+  assert.equal(card.sheet(), undefined, "切换会话关闭旧回答弹层");
+  card.open();
   assert.equal(card.input().props.value, "");
   card.edit("新会话回答");
   card.render();
@@ -210,10 +235,14 @@ test("手机提问保留选项与回答草稿，拒绝结果可重试，旧会�
   assert.doesNotMatch(card.content(), /已提交回答/);
   card.props.sessionId = "session";
   card.render();
+  assert.equal(card.sheet(), undefined);
+  card.open();
   assert.equal(card.input().props.value, "保留这段回答");
   card.press("提交回答");
   card.pico.generation++;
   card.render();
+  assert.equal(card.sheet(), undefined, "连接切换关闭旧回答弹层");
+  card.open();
   card.requests[2]!.response.reject(new Error("旧连接失败"));
   await settleScreen();
   card.render();
@@ -221,12 +250,15 @@ test("手机提问保留选项与回答草稿，拒绝结果可重试，旧会�
   assert.equal(card.input().props.value, "保留这段回答");
   card.screen.dispose();
   card.render();
+  assert.equal(card.sheet(), undefined);
+  card.open();
   assert.equal(card.input().props.value, "保留这段回答", "虚拟列表重挂载仍恢复本题草稿");
   card.press("提交回答");
   card.requests[3]!.response.resolve({ accepted: true, alreadyResolved: false });
   await settleScreen();
   card.render();
   assert.match(card.content(), /已提交回答/);
+  assert.equal(card.sheet(), undefined, "提交成功关闭弹层");
   assert.match(card.content(), /保留这段回答/);
   assert.equal(card.screen.nodes("TextInput").length, 0);
   card.props.item = { ...item, id: "answered", state: "answered", data: { promptId: "answered" } };
@@ -236,6 +268,7 @@ test("手机提问保留选项与回答草稿，拒绝结果可重试，旧会�
 
   card.props.item = { ...item, id: "uncertain", data: { promptId: "uncertain" } };
   card.render();
+  card.open();
   card.edit("原回答");
   card.render();
   card.press("提交回答");
@@ -243,6 +276,9 @@ test("手机提问保留选项与回答草稿，拒绝结果可重试，旧会�
   await settleScreen();
   card.render();
   assert.deepEqual(card.titles(), ["重试上次操作"]);
+  card.close();
+  card.open();
+  assert.deepEqual(card.titles(), ["重试上次操作"], "重开弹层仍只能重试原操作");
   assert.equal(card.input().props.editable, false);
   card.press("重试上次操作");
   assert.deepEqual(card.requests[5]!.params, card.requests[4]!.params);
@@ -253,6 +289,7 @@ test("手机提问保留选项与回答草稿，拒绝结果可重试，旧会�
 
   card.props.item = { ...item, id: "cancel", data: { promptId: "cancel" } };
   card.render();
+  card.open();
   card.press("取消提问");
   assert.equal(card.requests[6]!.method, "prompt.cancel");
   assert.equal(card.requests[6]!.params.promptId, "cancel");
@@ -260,6 +297,7 @@ test("手机提问保留选项与回答草稿，拒绝结果可重试，旧会�
   await settleScreen();
   card.render();
   assert.match(card.content(), /已取消提问/);
+  assert.equal(card.sheet(), undefined);
 });
 
 test("手机结果卡展示真实摘要并打开改动，不从无文件计数的事件推测文件数", () => {
