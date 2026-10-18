@@ -54,7 +54,18 @@ function fixture(item: Interaction) {
   );
   const props = { item, sessionId: "session", syncReason: undefined as string | undefined };
   let tree: Node;
-  const render = () => (tree = screen.render("InteractionCard", props));
+  const render = () => {
+    tree = screen.render("InteractionCard", props);
+    const sheet = screen.nodes("ActionsSheet")[0];
+    if (sheet) {
+      // Model the sheet's scrollable body and pinned footer as separate native regions.
+      sheet.props.children = [
+        { type: "SheetBody", props: { children: sheet.props.children } },
+        { type: "SheetFooter", props: { children: [sheet.props.footer] } },
+      ];
+    }
+    return tree;
+  };
   render();
   function button(title: string) {
     const button = flatten(tree).find(
@@ -75,6 +86,8 @@ function fixture(item: Interaction) {
     press,
     content: () => textContent(tree),
     sheet: () => screen.nodes("ActionsSheet")[0],
+    body: () => screen.nodes("SheetBody")[0],
+    footer: () => screen.nodes("SheetFooter")[0],
     open() {
       press(
         flatten(tree).some((node) => node.props.title === "继续填写") ? "继续填写" : "填写回答",
@@ -193,6 +206,24 @@ test("手机提问在回答弹层填写，关闭保留草稿，提交与会话�
   card.open();
   assert.equal(card.sheet()?.props.open, true);
   assert.match(textContent(card.sheet()), /选择运行范围/);
+  assert.ok(card.sheet()?.props.footer, "提问操作由 ActionsSheet 固定 footer 承载");
+  assert.deepEqual(
+    flatten(card.body())
+      .filter((node) => node.props.title)
+      .map((node) => node.props.title),
+    ["相关检查", "全部检查"],
+  );
+  assert.deepEqual(
+    flatten(card.footer())
+      .filter((node) => node.props.title)
+      .map((node) => node.props.title),
+    ["提交回答", "取消提问"],
+  );
+  const actionRow = flatten(card.footer()).find(
+    (node) => (node.props.style as { flexDirection?: string } | undefined)?.flexDirection === "row",
+  );
+  assert.ok(actionRow, "固定 footer 将主提交和取消并排放置");
+  assert.equal((actionRow.props.children as unknown[]).flat().length, 2);
   card.press("相关检查");
   card.render();
   assert.equal(card.input().props.value, "targeted");

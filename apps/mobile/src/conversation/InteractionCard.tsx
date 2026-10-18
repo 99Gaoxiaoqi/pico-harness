@@ -191,6 +191,44 @@ export function InteractionCard({
       />
     </View>
   );
+  const retryAnswer = view?.error && (view.action !== "answer" || view.answer === answer);
+  const promptFooter = (
+    <View style={styles.promptFooter}>
+      {view?.error && (
+        <Text accessibilityRole="alert" numberOfLines={2} style={styles.dangerText}>
+          {view.unknown ? "结果尚未确认。" : "提交未完成。"}
+          {view.error}
+        </Text>
+      )}
+      {(syncReason ?? pico.reason("prompt.respond")) && (
+        <Label>{syncReason ?? pico.reason("prompt.respond")}</Label>
+      )}
+      {busy && <Label>正在提交，请稍候…</Label>}
+      <View style={styles.footerActions}>
+        <View style={styles.footerAction}>
+          <ActionButton
+            title={retryAnswer ? "重试上次操作" : "提交回答"}
+            reason={
+              retryAnswer
+                ? disabledReason(view.action)
+                : (disabledReason("answer") ?? (!answer.trim() ? "请先输入或选择回答" : undefined))
+            }
+            onPress={() => void (retryAnswer ? submit(view.action, view.answer) : submit("answer"))}
+          />
+        </View>
+        {!view?.unknown && (
+          <View style={styles.footerAction}>
+            <ActionButton
+              title="取消提问"
+              secondary
+              reason={disabledReason("cancel")}
+              onPress={() => void submit("cancel")}
+            />
+          </View>
+        )}
+      </View>
+    </View>
+  );
   return (
     <View style={styles.card}>
       <Text
@@ -279,13 +317,13 @@ export function InteractionCard({
           {answerSheet === selection && (
             <ActionsSheet
               title="回答问题"
+              footer={promptFooter}
               open
               onClose={() => {
                 if (selected.current === selection) setAnswerSheet(undefined);
               }}
             >
               <Text style={styles.title}>{item.title}</Text>
-              {busy && <Label>正在提交，请稍候…</Label>}
               {item.detail && <Text style={s.text}>{item.detail}</Text>}
               <View style={styles.actions}>
                 {options.map((option, index) => {
@@ -325,29 +363,7 @@ export function InteractionCard({
                   textAlignVertical="top"
                   style={[s.input, styles.answer]}
                 />
-                {!view?.unknown && (
-                  <>
-                    <ActionButton
-                      title="提交回答"
-                      reason={
-                        disabledReason("answer") ??
-                        (!answer.trim() ? "请先输入或选择回答" : undefined)
-                      }
-                      onPress={() => void submit("answer")}
-                    />
-                    <ActionButton
-                      title="取消提问"
-                      secondary
-                      reason={disabledReason("cancel")}
-                      onPress={() => void submit("cancel")}
-                    />
-                  </>
-                )}
               </View>
-              {(syncReason ?? pico.reason("prompt.respond")) && (
-                <Label>{syncReason ?? pico.reason("prompt.respond")}</Label>
-              )}
-              {submissionError}
             </ActionsSheet>
           )}
         </>
@@ -486,6 +502,9 @@ const styles = StyleSheet.create({
   scope: { gap: 4, borderLeftWidth: 2, borderLeftColor: color.lineStrong, paddingLeft: 10 },
   actions: { gap: 8 },
   answer: { minHeight: 88 },
+  promptFooter: { gap: 8 },
+  footerActions: { flexDirection: "row", gap: 8 },
+  footerAction: { flex: 1, minWidth: 0 },
   error: { gap: 8, padding: 12, backgroundColor: color.dangerSoft, borderRadius: 10 },
   button: {
     minHeight: 48,
