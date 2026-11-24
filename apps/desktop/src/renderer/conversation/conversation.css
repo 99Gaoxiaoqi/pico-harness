@@ -907,13 +907,20 @@
   background: transparent;
   color: var(--conversation-ink);
   cursor: pointer;
-  transition: background-color 120ms ease;
+  transition:
+    background-color var(--motion-fast) var(--motion-ease),
+    transform var(--motion-fast) var(--motion-ease);
+}
+
+.conversation-message__action:active:not(:disabled) {
+  transform: scale(0.92);
 }
 
 .conversation-message__action svg {
   width: 17px;
   height: 17px;
   stroke-width: 1.8;
+  animation: motion-badge-in var(--motion-fast) var(--motion-ease);
 }
 
 .conversation-message__action:hover {
@@ -929,6 +936,7 @@
   padding-left: 2px;
   color: var(--conversation-ink-muted);
   font-size: 11px;
+  animation: motion-fade-in var(--motion-fast) var(--motion-ease);
 }
 
 .conversation-transcript--empty {

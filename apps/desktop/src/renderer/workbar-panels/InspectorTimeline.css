@@ -243,6 +243,9 @@
     background var(--motion-fast) var(--motion-ease),
     color var(--motion-fast) var(--motion-ease);
 }
+.tool-panel--inspector .inspector-timeline__copy > button svg {
+  animation: motion-badge-in var(--motion-fast) var(--motion-ease);
+}
 .tool-panel--inspector .inspector-timeline__copy > button:hover {
   background: var(--inspector-subtle);
   color: var(--inspector-ink);
