@@ -16,6 +16,7 @@
     "verify:release": "node scripts/verify-release.mjs"
   },
   "dependencies": {
+    "@expo-google-fonts/material-symbols": "^0.4.54",
     "@pico/protocol": "*",
     "@pico/remote-client": "*",
     "@pico/transcript-replica": "*",
