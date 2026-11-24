@@ -19,6 +19,7 @@ import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { assertPrivatePermissions } from "../helpers/private-file-mode.js";
 import {
   EMPTY_USER_CONFIG_REVISION,
   UserConfigLockTimeoutError,
@@ -45,8 +46,8 @@ test("first read removes only strict orphan temporaries while preserving secure 
     expectedRevision: EMPTY_USER_CONFIG_REVISION,
   });
   assert.equal(written.config.providers.secure?.models[0], "secure-model");
-  assert.equal((await stat(root)).mode & 0o777, 0o700);
-  assert.equal((await stat(store.filePath)).mode & 0o777, 0o600);
+  await assertPrivatePermissions(root, "directory");
+  await assertPrivatePermissions(store.filePath, "file");
 });
 
 test("active lock prevents recovery from deleting a live writer temporary", async (context) => {
@@ -151,8 +152,8 @@ test("concurrent writers serialize normally and leave no plaintext temporaries",
 
   const snapshot = await left.read();
   assert.equal(Object.keys(snapshot.config.providers).length, 1);
-  assert.equal((await stat(root)).mode & 0o777, 0o700);
-  assert.equal((await stat(left.filePath)).mode & 0o777, 0o600);
+  await assertPrivatePermissions(root, "directory");
+  await assertPrivatePermissions(left.filePath, "file");
   assert.deepEqual(
     (await readdir(root)).filter((name) => /^\.config\.json\..+\.tmp$/u.test(name)),
     [],
