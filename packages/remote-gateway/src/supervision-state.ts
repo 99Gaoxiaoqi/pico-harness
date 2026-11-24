@@ -43,7 +43,10 @@ async function locked<T>(home: string, action: (canonicalHome: string) => Promis
     join(canonical, "service-state.lock"),
     `${process.pid}:${randomUUID()}`,
     () => action(canonical),
-    { timeoutMs: 15_000 },
+    // Windows re-verifies the private DACL through PowerShell on every state
+    // read/write, so a critical section takes seconds. Four contending
+    // processes need more than the old 15s budget to drain their queued turns.
+    { timeoutMs: 60_000 },
   );
 }
 function validateState(value: GatewayServiceState): GatewayServiceState {
