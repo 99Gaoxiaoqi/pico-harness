@@ -45,6 +45,12 @@
     display: none;
   }
 
+  /* Expanding a dock is a layout change we cannot cheaply animate; the panel
+   * itself fades in from the edge so the new surface reads as sliding out. */
+  .session-workbar-shell[data-state="expanded"] .session-workbar {
+    animation: motion-slide-in-right var(--motion-base) var(--motion-ease);
+  }
+
   .session-workbar-restore {
     display: grid;
     width: 34px;
@@ -82,7 +88,7 @@
     border-radius: 999px;
     background: transparent;
     content: "";
-    transition: background var(--motion);
+    transition: background var(--motion-fast) var(--motion-ease);
   }
 
   .session-workbar[data-dock="right"] .session-workbar__resize-handle::after {
@@ -147,6 +153,13 @@
     border-radius: var(--radius-sm);
   }
 
+  .session-workbar__icon-button,
+  .session-workbar__close {
+    transition:
+      background var(--motion-fast) var(--motion-ease),
+      color var(--motion-fast) var(--motion-ease);
+  }
+
   .session-workbar__icon-button:hover,
   .session-workbar__close:hover {
     background: var(--surface-muted);
@@ -176,6 +189,8 @@
     border-radius: var(--radius-md);
     background: var(--surface-raised);
     box-shadow: var(--shadow-lg);
+    transform-origin: top right;
+    animation: motion-pop-down var(--motion-fast) var(--motion-ease);
   }
 
   .session-workbar__launcher-menu button {
@@ -275,9 +290,9 @@
     border-radius: var(--radius-sm);
     color: var(--ink-secondary);
     transition:
-      border-color var(--motion),
-      background var(--motion),
-      color var(--motion);
+      border-color var(--motion-fast) var(--motion-ease),
+      background var(--motion-fast) var(--motion-ease),
+      color var(--motion-fast) var(--motion-ease);
   }
 
   .session-workbar__tab-item:hover {
@@ -303,7 +318,7 @@
     color: var(--ink-tertiary);
     cursor: grab;
     opacity: 0;
-    transition: opacity var(--motion);
+    transition: opacity var(--motion-fast) var(--motion-ease);
   }
 
   .session-workbar__tab-item:hover .session-workbar__drag-mark,
@@ -347,6 +362,7 @@
     font-size: 10px;
     font-weight: 730;
     line-height: 1;
+    animation: motion-badge-in var(--motion-fast) var(--motion-spring);
   }
 
   .session-workbar__preview-dot {
@@ -379,6 +395,12 @@
 
   .session-workbar__panel[hidden] {
     display: none;
+  }
+
+  /* Switching tabs swaps the visible panel; a short fade-up keeps the panel
+   * chrome still while the content is replaced. */
+  .session-workbar__panel[data-active] {
+    animation: motion-rise-in var(--motion-fast) var(--motion-ease);
   }
 
   .session-workbar__empty {
@@ -422,6 +444,7 @@
     border-radius: var(--radius-md);
     background: var(--surface-raised);
     box-shadow: var(--shadow-lg);
+    animation: motion-pop-down var(--motion-fast) var(--motion-ease);
   }
 
   .session-workbar__context-menu button {

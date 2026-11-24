@@ -28,7 +28,14 @@ import {
   WandSparkles,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useState, type KeyboardEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type KeyboardEvent,
+} from "react";
 import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { TaskSearchDialog } from "./TaskSearchDialog.js";
 import { PreviewBadge } from "./components.js";
@@ -135,6 +142,28 @@ export function AppShell() {
   useEffect(() => {
     window.localStorage.setItem("pico.sidebar-collapsed", String(sidebarCollapsed));
   }, [sidebarCollapsed]);
+  // Route changes swap the whole page instantly; a short shared fade-up ties the
+  // new surface to the navigation that produced it. Driven through WAAPI so the
+  // timing comes from the motion tokens and no remount (and no data refetch) is
+  // needed to retrigger it.
+  const pageRef = useRef<HTMLDivElement>(null);
+  const pageAnimationRef = useRef<Animation | null>(null);
+  useLayoutEffect(() => {
+    const node = pageRef.current;
+    if (!node || typeof node.animate !== "function") return;
+    if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+    const styles = window.getComputedStyle(node);
+    const duration = Number.parseFloat(styles.getPropertyValue("--motion-base")) || 180;
+    const easing = styles.getPropertyValue("--motion-ease").trim() || "ease-out";
+    pageAnimationRef.current?.cancel();
+    pageAnimationRef.current = node.animate(
+      [
+        { opacity: 0, transform: "translateY(6px)" },
+        { opacity: 1, transform: "translateY(0)" },
+      ],
+      { duration, easing },
+    );
+  }, [location.pathname]);
   const handleArchiveSession = useCallback(
     (session: SessionView) => {
       const isRunning = data.runs.some(
@@ -416,6 +445,7 @@ export function AppShell() {
             </div>
           )}
         <div
+          ref={pageRef}
           className={`page ${conversationRoute ? "page--conversation" : ""}`}
           id="main-content"
           tabIndex={-1}

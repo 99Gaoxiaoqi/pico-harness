@@ -43,7 +43,7 @@ export function ProviderRetryBanner({ notice }: { readonly notice: ProviderRetry
         </div>
         <p>{reason}</p>
         <div className="conversation-provider-retry__track" aria-hidden="true">
-          <span style={{ width: `${progress}%` }} />
+          <span style={{ transform: `scaleX(${progress / 100})` }} />
         </div>
       </div>
     </section>

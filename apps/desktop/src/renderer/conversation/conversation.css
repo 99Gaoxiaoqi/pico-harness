@@ -333,6 +333,7 @@
   color: var(--conversation-ink-muted);
   box-shadow: 0 2px 6px rgb(0 0 0 / 0.06);
   cursor: pointer;
+  animation: motion-badge-in var(--motion-fast) var(--motion-spring);
 }
 
 .conversation-scroll-to-bottom:hover {
@@ -463,6 +464,7 @@
   justify-content: space-between;
   gap: 12px;
   padding: 7px 12px;
+  animation: motion-rise-in var(--motion-fast) var(--motion-ease);
 }
 
 .conversation-queue li + li {
@@ -578,6 +580,7 @@
   border-radius: 12px;
   background: var(--conversation-bg);
   box-shadow: 0 18px 50px rgb(25 25 22 / 0.16);
+  animation: motion-pop-up var(--motion-fast) var(--motion-ease);
 }
 
 .conversation-context-menu > header {
@@ -714,6 +717,7 @@
   border-radius: 12px;
   background: color-mix(in srgb, var(--conversation-warning-soft) 36%, var(--conversation-bg));
   box-shadow: var(--conversation-composer-shadow);
+  animation: motion-rise-in var(--motion-base) var(--motion-ease);
 }
 
 .conversation-interaction-slot__heading > span {
@@ -941,6 +945,7 @@
   position: relative;
   padding-bottom: 12px;
   list-style: none;
+  animation: motion-rise-in var(--motion-base) var(--motion-ease);
 }
 
 .conversation-turn + .conversation-turn {
@@ -1365,7 +1370,7 @@
   flex: none;
   margin-left: auto;
   color: var(--conversation-ink-faint);
-  transition: transform 140ms ease;
+  transition: transform var(--motion-fast) var(--motion-ease);
 }
 
 .conversation-thinking__label > .conversation-disclosure-chevron,
@@ -1587,6 +1592,7 @@
 .conversation-provider-retry {
   border: 1px solid color-mix(in srgb, var(--conversation-warning) 17%, transparent);
   background: color-mix(in srgb, var(--conversation-warning) 6%, var(--conversation-bg));
+  animation: motion-rise-in var(--motion-base) var(--motion-ease);
 }
 
 .conversation-provider-retry__icon,
@@ -1643,10 +1649,12 @@
 
 .conversation-provider-retry__track span {
   display: block;
+  width: 100%;
   height: 100%;
+  transform-origin: left center;
   border-radius: inherit;
   background: var(--conversation-warning);
-  transition: width 180ms linear;
+  transition: transform var(--motion-base) linear;
 }
 
 .conversation-provider-failure {
@@ -2060,7 +2068,7 @@
   flex: none;
   margin-left: auto;
   color: var(--conversation-ink-faint);
-  transition: transform 140ms ease;
+  transition: transform var(--motion-fast) var(--motion-ease);
 }
 
 .conversation-tool-group__count {
@@ -2377,8 +2385,8 @@
   background: var(--conversation-bg);
   box-shadow: var(--conversation-composer-shadow);
   transition:
-    border-color 140ms ease,
-    box-shadow 140ms ease;
+    border-color var(--motion-base) var(--motion-ease),
+    box-shadow var(--motion-base) var(--motion-ease);
 }
 
 .conversation-composer[data-status="running"],
@@ -2457,6 +2465,15 @@
   background: transparent;
   color: var(--conversation-ink-muted);
   cursor: pointer;
+  transition:
+    background var(--motion-fast) var(--motion-ease),
+    color var(--motion-fast) var(--motion-ease),
+    transform var(--motion-fast) var(--motion-ease);
+}
+
+.conversation-icon-button:active:not(:disabled),
+.conversation-send-button:active:not(:disabled) {
+  transform: scale(0.94);
 }
 
 .conversation-icon-button:hover:not(:disabled) {
@@ -2468,6 +2485,7 @@
 .conversation-send-button svg {
   width: 15px;
   height: 15px;
+  animation: motion-badge-in var(--motion-fast) var(--motion-ease);
 }
 
 .conversation-plus-trigger[aria-expanded="true"] {
@@ -2490,6 +2508,7 @@
     0 3px 8px rgb(0 0 0 / 0.08),
     0 10px 28px rgb(0 0 0 / 0.06);
   font-size: 12px;
+  animation: motion-pop-up var(--motion-fast) var(--motion-ease);
 }
 
 .conversation-plus-menu > button {
@@ -2887,6 +2906,7 @@
     0 3px 8px rgb(0 0 0 / 0.08),
     0 10px 28px rgb(0 0 0 / 0.06);
   font-size: 12px;
+  animation: motion-pop-up var(--motion-fast) var(--motion-ease);
 }
 .composer-model-heading {
   padding: 9px 7px 5px;
@@ -3009,6 +3029,12 @@
   font-size: 11px;
   color: var(--conversation-muted);
   white-space: nowrap;
+}
+
+/* The ring is driven by stroke-dasharray (no layout); let a new reading travel
+ * to its value instead of snapping. */
+.conversation-context-gauge circle:last-of-type {
+  transition: stroke-dasharray var(--motion-slow) var(--motion-ease);
 }
 
 .conversation-goal {

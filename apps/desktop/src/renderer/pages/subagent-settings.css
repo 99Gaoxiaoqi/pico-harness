@@ -75,7 +75,7 @@
   height: 14px;
   border-radius: 50%;
   background: white;
-  transition: transform var(--motion);
+  transition: transform var(--motion-fast) var(--motion-ease);
 }
 .subagent-settings__switch input:checked + span {
   background: var(--accent);

@@ -94,6 +94,10 @@
   border-radius: 5px;
   background: var(--sidebar);
   opacity: 0;
+  transition:
+    opacity var(--motion-fast) var(--motion-ease),
+    background var(--motion-fast) var(--motion-ease),
+    transform var(--motion-fast) var(--motion-ease);
 }
 .sidebar-project__row {
   position: relative;
@@ -155,7 +159,7 @@
   inset-inline: 0;
   left: 0;
   transform: none;
-  animation: none;
+  animation: motion-dialog-rise var(--motion-base) var(--motion-ease);
   border: 1px solid var(--line);
   border-radius: 16px;
   background: var(--surface-raised);
@@ -166,6 +170,7 @@
 .pico-task-search::backdrop {
   background: rgb(0 0 0 / 0.14);
   backdrop-filter: none;
+  animation: motion-fade-in var(--motion-fast) var(--motion-ease);
 }
 .pico-task-search .task-search__input > .astryx-field {
   flex: 1;

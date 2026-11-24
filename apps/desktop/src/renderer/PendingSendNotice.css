@@ -5,6 +5,7 @@
     overflow: auto;
     padding: 8px 16px;
     border-bottom: 1px solid var(--line, #dedcd5);
+    animation: motion-rise-in var(--motion-base) var(--motion-ease);
   }
   .pending-send-list summary {
     cursor: pointer;
@@ -24,6 +25,9 @@
     background: var(--surface-raised, #fff);
     color: var(--ink, #252522);
     cursor: pointer;
+    transition:
+      background var(--motion-fast) var(--motion-ease),
+      border-color var(--motion-fast) var(--motion-ease);
   }
   .pending-send-notice button:disabled {
     cursor: default;

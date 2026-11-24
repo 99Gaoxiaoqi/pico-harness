@@ -6,6 +6,7 @@
   max-height: 38vh;
   overflow: auto;
   font-size: 13px;
+  animation: motion-rise-in var(--motion-base) var(--motion-ease);
 }
 .deep-research-heading,
 .deep-research-actions {
