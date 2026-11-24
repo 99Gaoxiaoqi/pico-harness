@@ -48,6 +48,7 @@
   height: 7px;
   border-radius: 50%;
   background: var(--ink-tertiary, #7c7c85);
+  transition: background-color var(--motion-fast) var(--motion-ease);
 }
 .mobile-status-dot.is-online {
   background: #29976a;
