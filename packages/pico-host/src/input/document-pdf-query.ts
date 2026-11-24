@@ -83,11 +83,14 @@ async function withPdf<T>(
     throw new Error("PDF 文件头无效，附件可能已损坏。");
   const { getDocument } = await import("pdfjs-dist/legacy/build/pdf.mjs");
   const pdfRoot = dirname(moduleRequire.resolve("pdfjs-dist/package.json"));
+  // PDF.js validates these as URLs and rejects Windows separators, so emit
+  // forward-slash paths with the trailing slash it requires.
+  const pdfResourceUrl = (name: string) => `${join(pdfRoot, name).split(sep).join("/")}/`;
   const task = getDocument({
     data: new Uint8Array(bytes),
     verbosity: 0,
-    cMapUrl: join(pdfRoot, "cmaps") + sep,
-    standardFontDataUrl: join(pdfRoot, "standard_fonts") + sep,
+    cMapUrl: pdfResourceUrl("cmaps"),
+    standardFontDataUrl: pdfResourceUrl("standard_fonts"),
     useWorkerFetch: false,
     useWasm: false,
     useSystemFonts: false,
