@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { builtinModules } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -58,7 +58,14 @@ console.log("PASS: Desktop main bundle reached Electron startup");
 `,
   );
   const result = spawnSync(process.execPath, [fixture], {
-    env: { ...process.env, PICO_HOME: join(scratch, "pico-home") },
+    env: {
+      ...process.env,
+      PICO_HOME: join(scratch, "pico-home"),
+      // The bundle is relocated to a temporary directory; a packaged app
+      // resolves its external CommonJS requires from the installation beside
+      // the entry file.
+      NODE_PATH: join(root, "node_modules"),
+    },
     encoding: "utf8",
     timeout: 30_000,
   });
@@ -80,27 +87,11 @@ process.argv = [process.execPath, event];
 const updaterPath = path.resolve(path.dirname(process.execPath), "..", "Update.exe");
 const realpath = fs.realpathSync.native;
 fs.realpathSync.native = (target, ...args) => target === updaterPath ? target : realpath(target, ...args);
-let exitCode;
+const nativeExtensions = Module.createRequire(${JSON.stringify(join(root, "package.json"))})("fs-native-extensions");
+const childProcess = require("node:child_process");
 const calls = [];
-const originalLoad = Module._load;
-Module._load = function(name, ...args) {
-  if (name === "electron") return { app: {
-    quit: () => { exitCode = 0; },
-    exit: code => { exitCode = code; },
-    getPath: () => { throw new Error("installer callback entered normal startup"); },
-  } };
-  if (name === "node:child_process") return { spawn: (command, argv, options) => {
-    calls.push({command, argv, options});
-    const child = new EventEmitter();
-    process.nextTick(() => child.emit("close", 0));
-    return child;
-  } };
-  if (name === "fs-native-extensions") throw new Error("installer loaded runtime dependencies");
-  return originalLoad.call(this, name, ...args);
-};
-require("./main.cjs");
-setImmediate(() => {
-  assert.equal(exitCode, 0);
+const settle = code => {
+  assert.equal(code, 0);
   if (event === "--squirrel-obsolete") assert.deepEqual(calls, []);
   else assert.deepEqual(calls, [{
     command: path.resolve(path.dirname(process.execPath), "..", "Update.exe"),
@@ -108,9 +99,43 @@ setImmediate(() => {
     options: {windowsHide: true},
   }]);
   console.log("PASS: installer callback exited before runtime startup");
-});
+};
+const originalLoad = Module._load;
+Module._load = function(name, ...args) {
+  if (name === "electron") return { app: {
+    isPackaged: false,
+    getVersion: () => "0.0.0",
+    quit: () => settle(0),
+    exit: code => settle(code),
+    getPath: key => {
+      if (key === "userData") return process.env.PICO_HOME;
+      throw new Error("installer callback entered normal startup: " + key);
+    },
+  } };
+  if (name === "node:child_process") return {
+    ...childProcess,
+    spawn: (command, argv, options) => {
+      calls.push({command, argv, options});
+      const child = new EventEmitter();
+      process.nextTick(() => child.emit("close", 0));
+      return child;
+    },
+    // The gateway transition privately protects its state with PowerShell;
+    // the installer contract only requires the transition to settle.
+    execFile: (_file, _argv, _options, callback) => callback(null, "", ""),
+    exec: (_command, _options, callback) => callback(null, "", ""),
+    execFileSync: () => Buffer.alloc(0),
+  };
+  // Installer callbacks run the gateway transition, which is part of the
+  // packaged runtime; only normal application startup must stay unloaded.
+  if (name === "fs-native-extensions") return nativeExtensions;
+  return originalLoad.call(this, name, ...args);
+};
+require("./main.cjs");
 `,
   );
+  const installerHome = join(scratch, "installer-home");
+  await mkdir(installerHome, { recursive: true });
   for (const event of [
     "--squirrel-install",
     "--squirrel-updated",
@@ -118,6 +143,14 @@ setImmediate(() => {
     "--squirrel-obsolete",
   ]) {
     const installer = spawnSync(process.execPath, [installerFixture, event], {
+      // The gateway transition keeps its state under the user home.
+      env: {
+        ...process.env,
+        PICO_HOME: installerHome,
+        HOME: installerHome,
+        USERPROFILE: installerHome,
+        NODE_PATH: join(root, "node_modules"),
+      },
       encoding: "utf8",
       timeout: 15_000,
     });

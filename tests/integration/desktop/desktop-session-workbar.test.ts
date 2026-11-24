@@ -38,7 +38,7 @@ test("desktop Workbar renders one accessible right panel with persistent tab pan
   assert.match(html, /role="tab"[^>]+aria-selected="true"/u);
   assert.match(html, /hidden=""[^>]+tabindex="-1"/u);
   assert.match(html, /aria-valuemin="320"/u);
-  assert.match(html, /aria-valuemax="600"/u);
+  assert.match(html, /aria-valuemax="960"/u);
   assert.match(html, /--session-workbar-width:480px/u);
   assert.match(html, /aria-label="关闭“变更”"/u);
 });
