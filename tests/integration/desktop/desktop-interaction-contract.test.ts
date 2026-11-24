@@ -109,6 +109,9 @@ test("reading session settings does not refresh task recency", async (context) =
     trustStore,
     env,
   });
+  // The teardown must be registered before the session exists; the single later
+  // assignment is intentional.
+  // eslint-disable-next-line prefer-const -- assigned after teardown registration
   let sessionId: string | undefined;
   context.after(async () => {
     await desktop.close();

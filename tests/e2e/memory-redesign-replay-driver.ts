@@ -485,6 +485,8 @@ if (process.argv[2]) {
         2,
       ) + "\n",
     );
-    throw new Error(`replay ${input.scenario}-${input.variant}-${input.arm}: ${detail}`);
+    throw new Error(`replay ${input.scenario}-${input.variant}-${input.arm}: ${detail}`, {
+      cause: error,
+    });
   }
 }

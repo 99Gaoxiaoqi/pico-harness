@@ -36,10 +36,13 @@
       <main id="top">
         <section class="intro" aria-labelledby="page-title">
           <div class="intro-copy">
-            <p class="eyebrow"><span class="eyebrow-line"></span> 一次任务 · 七个站点 · 不需要 API Key</p>
+            <p class="eyebrow">
+              <span class="eyebrow-line"></span> 一次任务 · 七个站点 · 不需要 API Key
+            </p>
             <h1 id="page-title">把一句任务，<br /><em>送过整座</em> Harness。</h1>
             <p class="intro-text">
-              Agent 会读文件、改代码、跑验证。跟着这张任务票往前走，看看模型之外的系统怎样让每一步有边界、留得下证据，也接得住失败。
+              Agent
+              会读文件、改代码、跑验证。跟着这张任务票往前走，看看模型之外的系统怎样让每一步有边界、留得下证据，也接得住失败。
             </p>
           </div>
           <div class="intro-stamp" aria-label="交互课程说明">
@@ -108,7 +111,9 @@
                 </div>
                 <div class="step-controls">
                   <button id="prev-step" class="button button-quiet" type="button">← 上一步</button>
-                  <button id="next-step" class="button button-primary" type="button">下一步 <span aria-hidden="true">→</span></button>
+                  <button id="next-step" class="button button-primary" type="button">
+                    下一步 <span aria-hidden="true">→</span>
+                  </button>
                 </div>
               </div>
             </article>
@@ -117,7 +122,10 @@
 
         <section class="run-rule" aria-label="运行规律">
           <div class="rule-symbol" aria-hidden="true">✳</div>
-          <p><strong>先记住一条线：</strong>模型提出下一步，Harness 决定能力边界、执行时机和状态怎样落账。</p>
+          <p>
+            <strong>先记住一条线：</strong>模型提出下一步，Harness
+            决定能力边界、执行时机和状态怎样落账。
+          </p>
           <span class="rule-side">PROMPT ≠ RUNTIME</span>
         </section>
 
@@ -131,26 +139,58 @@
           </div>
           <div class="fault-layout">
             <div class="fault-picker" role="group" aria-label="选择故障场景">
-              <button class="fault-choice is-active" type="button" data-fault="approval" aria-pressed="true">
-                <span class="fault-number">A</span><span><strong>审批被拒绝</strong><small>副作用发生了吗？</small></span><span class="choice-arrow">↗</span>
+              <button
+                class="fault-choice is-active"
+                type="button"
+                data-fault="approval"
+                aria-pressed="true"
+              >
+                <span class="fault-number">A</span
+                ><span><strong>审批被拒绝</strong><small>副作用发生了吗？</small></span
+                ><span class="choice-arrow">↗</span>
               </button>
-              <button class="fault-choice" type="button" data-fault="oversized" aria-pressed="false">
-                <span class="fault-number">B</span><span><strong>工具结果太大</strong><small>要把整份文件塞给模型吗？</small></span><span class="choice-arrow">↗</span>
+              <button
+                class="fault-choice"
+                type="button"
+                data-fault="oversized"
+                aria-pressed="false"
+              >
+                <span class="fault-number">B</span
+                ><span><strong>工具结果太大</strong><small>要把整份文件塞给模型吗？</small></span
+                ><span class="choice-arrow">↗</span>
               </button>
-              <button class="fault-choice" type="button" data-fault="interrupt" aria-pressed="false">
-                <span class="fault-number">C</span><span><strong>工具执行时进程退出</strong><small>系统能无损接着跑吗？</small></span><span class="choice-arrow">↗</span>
+              <button
+                class="fault-choice"
+                type="button"
+                data-fault="interrupt"
+                aria-pressed="false"
+              >
+                <span class="fault-number">C</span
+                ><span><strong>工具执行时进程退出</strong><small>系统能无损接着跑吗？</small></span
+                ><span class="choice-arrow">↗</span>
               </button>
               <button class="fault-choice" type="button" data-fault="context" aria-pressed="false">
-                <span class="fault-number">D</span><span><strong>上下文超出窗口</strong><small>压缩会删掉原始事实吗？</small></span><span class="choice-arrow">↗</span>
+                <span class="fault-number">D</span
+                ><span><strong>上下文超出窗口</strong><small>压缩会删掉原始事实吗？</small></span
+                ><span class="choice-arrow">↗</span>
               </button>
             </div>
             <article id="fault-result" class="fault-result" aria-live="polite" aria-atomic="true">
-              <div class="result-header"><span class="warning-icon" aria-hidden="true">!</span><span id="fault-label">场景 A · 执行前被拦下</span></div>
+              <div class="result-header">
+                <span class="warning-icon" aria-hidden="true">!</span
+                ><span id="fault-label">场景 A · 执行前被拦下</span>
+              </div>
               <h3 id="fault-heading">审批被拒绝</h3>
               <p id="fault-explanation"></p>
               <div class="result-facts">
-                <div><span>系统可以确认</span><p id="fault-known"></p></div>
-                <div><span>边界提醒</span><p id="fault-boundary"></p></div>
+                <div>
+                  <span>系统可以确认</span>
+                  <p id="fault-known"></p>
+                </div>
+                <div>
+                  <span>边界提醒</span>
+                  <p id="fault-boundary"></p>
+                </div>
               </div>
             </article>
           </div>
@@ -165,8 +205,12 @@
             </div>
             <div class="quiz-area">
               <div class="quiz-buttons" role="group" aria-label="选择答案">
-                <button class="quiz-choice" type="button" data-answer="yes">能，Schema 已经发过去了</button>
-                <button class="quiz-choice" type="button" data-answer="no">不能，还要经过运行时检查</button>
+                <button class="quiz-choice" type="button" data-answer="yes">
+                  能，Schema 已经发过去了
+                </button>
+                <button class="quiz-choice" type="button" data-answer="no">
+                  不能，还要经过运行时检查
+                </button>
               </div>
               <div id="quiz-feedback" class="quiz-feedback" aria-live="polite">
                 <span class="feedback-icon" aria-hidden="true">↳</span>
@@ -208,7 +252,9 @@
       </main>
 
       <footer class="footer">
-        <a class="brand footer-brand" href="#top"><span class="brand-mark" aria-hidden="true">↗</span><span>RUN QUEST</span></a>
+        <a class="brand footer-brand" href="#top"
+          ><span class="brand-mark" aria-hidden="true">↗</span><span>RUN QUEST</span></a
+        >
         <p>用一次真实执行，学会追问：谁做决定？事实存在哪里？失败后还能确认什么？</p>
         <a href="../../README.md">返回项目文档 ↗</a>
       </footer>

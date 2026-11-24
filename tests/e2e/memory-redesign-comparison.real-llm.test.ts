@@ -93,8 +93,8 @@ runTest(
           const codeRoot = arm === "baseline" ? baseline : current;
           const started = performance.now();
           let processFailure: string | undefined;
-          let stdout = "",
-            stderr = "";
+          let stdout: string | undefined;
+          let stderr: string | undefined;
           try {
             const output = await execute(
               process.execPath,
@@ -116,8 +116,8 @@ runTest(
             stdout = output.stdout ?? "";
             stderr = output.stderr ?? "";
           }
-          await writeFile(join(root, `${task}.stdout.log`), redact(stdout));
-          await writeFile(join(root, `${task}.stderr.log`), redact(stderr));
+          await writeFile(join(root, `${task}.stdout.log`), redact(stdout ?? ""));
+          await writeFile(join(root, `${task}.stderr.log`), redact(stderr ?? ""));
           let observed: Record<string, unknown> = {};
           try {
             observed = JSON.parse(await readFile(reportPath, "utf8")) as Record<string, unknown>;

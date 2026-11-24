@@ -142,8 +142,24 @@ test("Excel当前范围独立求和只信canonical工具，不采纳模型最终
     validation: "pass",
     sources: [source],
   });
-  assert.equal((await validateSpreadsheetTaskExperience({...input, task:{...task,goal:"请用document计算Excel附件Sheet1的B2:B4合计。"}})).validation, "pass");
-  assert.equal((await validateSpreadsheetTaskExperience({...input, task:{...task,goal:"请读取Sheet1的B2:B4数据。"}})).validation, "unknown");
+  assert.equal(
+    (
+      await validateSpreadsheetTaskExperience({
+        ...input,
+        task: { ...task, goal: "请用document计算Excel附件Sheet1的B2:B4合计。" },
+      })
+    ).validation,
+    "pass",
+  );
+  assert.equal(
+    (
+      await validateSpreadsheetTaskExperience({
+        ...input,
+        task: { ...task, goal: "请读取Sheet1的B2:B4数据。" },
+      })
+    ).validation,
+    "unknown",
+  );
   assert.equal(
     (
       await validateSpreadsheetTaskExperience({

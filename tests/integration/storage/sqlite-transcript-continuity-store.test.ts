@@ -222,10 +222,9 @@ test("transcript prompt anchors, literal search, and around-item pages reach unl
       message("search-assistant-event", sessionId, "assistant", "The needle was found."),
       { ownerFence },
     );
-    await store.append(
-      message("search-unicode-event", sessionId, "user", "İstanbul ΑΛΦΑ"),
-      { ownerFence },
-    );
+    await store.append(message("search-unicode-event", sessionId, "user", "İstanbul ΑΛΦΑ"), {
+      ownerFence,
+    });
     const anchors = await store.readTranscriptPromptAnchors(sessionId, undefined, 10);
     assert.deepEqual(
       anchors.anchors.map(({ eventId, prompt }) => ({ eventId, prompt })),

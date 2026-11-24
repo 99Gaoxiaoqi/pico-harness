@@ -308,9 +308,12 @@ export async function toAiSdkMessages(
           // SDK skips hosted search with store:false. This text item carries only an
           // ordering anchor; restoreResponsesWebSearch restores the raw item before dispatch.
           if (searchAnchors && record(part.providerOptions?.openai?.picoWebSearchItem)) {
+            // SDK skips hosted search with store:false and no longer keeps the item id on
+            // the projected assistant message, so the anchor text carries the id itself.
+            // restoreResponsesWebSearch swaps the anchor back for the raw item before dispatch.
             content[index] = {
               type: "text",
-              text: "[provider search]",
+              text: `[provider search ${part.toolCallId}]`,
               providerOptions: {
                 openai: { itemId: part.toolCallId },
               },
@@ -419,6 +422,10 @@ export function fromAiSdkContent(
         if (typeof part.text !== "string") break;
         if (part.type === "text") message.content += part.text;
         else message.reasoning = (message.reasoning ?? "") + part.text;
+        // The SDK 7 source parts carry the URL alone; citation titles remain in the
+        // text part, so merge them back before the projection drops citations.
+        if (Array.isArray(part.citations))
+          for (const citation of part.citations) addSource(record(citation)?.source);
         parts.push({ type: part.type, text: part.text, ...options });
         break;
       }
@@ -590,9 +597,13 @@ export function restoreResponsesWebSearch(
     ...body,
     input: body.input.map((value: unknown) => {
       const part = record(value);
-      return part?.role === "assistant" && typeof part.id === "string" && items.has(part.id)
-        ? structuredClone(items.get(part.id)!)
-        : value;
+      if (part?.role !== "assistant") return value;
+      const anchor =
+        typeof part.content === "string"
+          ? /^\[provider search ([^\]]+)\]$/u.exec(part.content)
+          : null;
+      const id = typeof part.id === "string" ? part.id : anchor?.[1];
+      return id !== undefined && items.has(id) ? structuredClone(items.get(id)!) : value;
     }),
   };
 }

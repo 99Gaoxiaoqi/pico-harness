@@ -81,6 +81,7 @@ export class ExternalSessionUnreadableError extends Error {
 export function titleText(value: unknown, fallback: string): string {
   if (typeof value !== "string") return fallback;
   const normalized = value
+    // eslint-disable-next-line no-control-regex -- strip C0 controls and DEL from titles
     .replace(/[\u0000-\u001f\u007f]/gu, " ")
     .replace(/\s+/gu, " ")
     .trim();

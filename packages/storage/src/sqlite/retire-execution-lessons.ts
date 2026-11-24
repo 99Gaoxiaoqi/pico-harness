@@ -29,6 +29,7 @@ function identifier(value: unknown): string {
     typeof value !== "string" ||
     !value.trim() ||
     value.length > 512 ||
+    // eslint-disable-next-line no-control-regex -- identifiers must reject C0 controls
     /[\u0000-\u001f]/u.test(value)
   )
     return invalid();

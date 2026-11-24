@@ -897,6 +897,7 @@ function identifier(value: string): void {
     typeof value !== "string" ||
     !value.trim() ||
     value.length > 512 ||
+    // eslint-disable-next-line no-control-regex -- identifiers must reject C0 controls
     /[\u0000-\u001f]/u.test(value)
   )
     throw new Error("Invalid experience identifier");
