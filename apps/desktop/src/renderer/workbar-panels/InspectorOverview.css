@@ -83,6 +83,9 @@
   color: var(--inspector-muted);
   font-size: 12px;
 }
+.tool-panel--inspector .inspector-overview__chart [data-dimmed] {
+  transition: opacity var(--motion-fast) var(--motion-ease);
+}
 .tool-panel--inspector .inspector-overview__chart [data-dimmed="true"] {
   opacity: 0.35;
 }

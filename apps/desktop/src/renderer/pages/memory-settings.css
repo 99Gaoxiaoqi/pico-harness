@@ -104,6 +104,7 @@
     border-radius: 10px;
     padding: 18px;
     background: var(--surface-raised);
+    transition: background var(--motion-fast) var(--motion-ease);
   }
   .memory-overview-row:hover {
     background: var(--surface-muted);

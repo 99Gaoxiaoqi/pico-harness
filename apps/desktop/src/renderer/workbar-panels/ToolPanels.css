@@ -316,6 +316,7 @@
   background: transparent;
   color: inherit;
   text-align: left;
+  transition: background var(--motion-fast) var(--motion-ease);
 }
 
 .tool-panel__timeline li > button:hover,
@@ -472,6 +473,7 @@
   background: transparent;
   color: inherit;
   text-align: left;
+  transition: background var(--motion-fast) var(--motion-ease);
 }
 
 .tool-panel__file-group li > button {

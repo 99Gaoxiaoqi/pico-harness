@@ -271,6 +271,9 @@
     font-size: 11px;
     font-weight: 680;
     white-space: nowrap;
+    transition:
+      background-color var(--motion-fast) var(--motion-ease),
+      color var(--motion-fast) var(--motion-ease);
   }
   .status-pill::before {
     width: 5px;
@@ -301,6 +304,10 @@
     background: var(--surface-muted);
     color: var(--ink-secondary);
     font-size: 13px;
+    transition:
+      background-color var(--motion-fast) var(--motion-ease),
+      border-color var(--motion-fast) var(--motion-ease),
+      color var(--motion-fast) var(--motion-ease);
   }
   .inline-notice svg {
     flex: none;
@@ -789,6 +796,9 @@
     height: 5px;
     border-radius: 50%;
     background: #aaa9a4;
+    transition:
+      background-color var(--motion-fast) var(--motion-ease),
+      box-shadow var(--motion-fast) var(--motion-ease);
   }
   .sidebar-task-link__status.is-running {
     background: var(--accent);
@@ -896,6 +906,9 @@
     color: var(--sidebar-muted);
     font-size: 12px;
     font-weight: 580;
+    transition:
+      background var(--motion-fast) var(--motion-ease),
+      color var(--motion-fast) var(--motion-ease);
   }
   .settings-sidebar__back:hover {
     background: var(--sidebar-raised);
@@ -2684,6 +2697,7 @@
     color: inherit;
     text-align: left;
     cursor: pointer;
+    transition: background var(--motion-fast) var(--motion-ease);
   }
   .provider-card__entry:hover,
   .provider-card__entry:focus-visible {
@@ -3555,6 +3569,10 @@
     border-radius: var(--radius-sm);
     background: transparent;
     color: var(--ink-secondary);
+    transition:
+      background var(--motion-fast) var(--motion-ease),
+      color var(--motion-fast) var(--motion-ease),
+      box-shadow var(--motion-fast) var(--motion-ease);
   }
   .memory-tablist button[aria-selected="true"] {
     background: var(--surface-raised);
@@ -4088,6 +4106,7 @@
   color: var(--ink);
   text-align: left;
   cursor: pointer;
+  transition: background var(--motion-fast) var(--motion-ease);
 }
 .provider-catalog-row:hover {
   background: var(--surface-muted);
@@ -4208,6 +4227,9 @@
 }
 .provider-advanced-toggle[aria-expanded="true"] svg {
   transform: rotate(180deg);
+}
+.provider-advanced-toggle svg {
+  transition: transform var(--motion-fast) var(--motion-ease);
 }
 .provider-advanced-fields {
   display: grid;

@@ -24,6 +24,7 @@
     font: inherit;
     font-size: 12px;
     overflow-wrap: anywhere;
+    transition: background var(--motion-fast) var(--motion-ease);
   }
   .task-experience__row[aria-pressed="true"] {
     background: var(--surface-raised);

@@ -25,6 +25,9 @@
   border-radius: 6px;
   color: var(--text-secondary, #6b7280);
   background: transparent;
+  transition:
+    background var(--motion-fast) var(--motion-ease),
+    color var(--motion-fast) var(--motion-ease);
 }
 
 .workbar-browser__toolbar > button:hover:not(:disabled) {
