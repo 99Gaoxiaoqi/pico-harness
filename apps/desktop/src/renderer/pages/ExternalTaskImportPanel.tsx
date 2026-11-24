@@ -78,7 +78,6 @@ export function ExternalTaskImportPanel() {
     }, 150);
     return () => window.clearTimeout(timer);
     // Source and query changes trigger a debounced first-page search.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [adapterId, query, sources]);
 
   async function loadPage(

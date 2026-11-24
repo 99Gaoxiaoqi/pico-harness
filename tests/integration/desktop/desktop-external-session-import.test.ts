@@ -52,6 +52,9 @@ test("外部会话导入要求信任、持久注册且同源并发导入幂等",
     trustStore,
     env,
   });
+  // The teardown must be registered before the import runs; the single later
+  // assignment is intentional.
+  // eslint-disable-next-line prefer-const -- assigned after teardown registration
   let importedSessionId: string | undefined;
   context.after(async () => {
     await desktop.close();
