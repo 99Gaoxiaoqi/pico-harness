@@ -3,6 +3,7 @@ import { execFile, spawn } from "node:child_process";
 import { access, chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
@@ -50,7 +51,7 @@ test("共享状态锁跨进程保持代次，旧更新不能覆盖停止，过�
   const childScript = join(home, "state-writer.mjs");
   await writeFile(
     childScript,
-    `import { beginGatewayMaintenance } from ${JSON.stringify(stateModule)}; for(let i=0;i<8;i++) await beginGatewayMaintenance(process.argv[2], 'writer-'+process.pid);`,
+    `import { beginGatewayMaintenance } from ${JSON.stringify(pathToFileURL(stateModule).href)}; for(let i=0;i<8;i++) await beginGatewayMaintenance(process.argv[2], 'writer-'+process.pid);`,
   );
   await Promise.all(
     Array.from({ length: 4 }, () => promisify(execFile)(process.execPath, [childScript, home])),
