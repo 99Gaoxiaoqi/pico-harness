@@ -11,6 +11,7 @@ import { jsonSchema, tool } from "ai";
 /** Product ceilings: callers may tighten these limits, never disable or widen them. */
 export const DEFAULT_CODE_MODE_EXECUTION_POLICY = Object.freeze({
   timeoutMs: 30_000,
+  cpuTimeoutMs: 10_000,
   memoryLimitBytes: 64 * 1024 * 1024,
   maxStackSizeBytes: 2 * 1024 * 1024,
   maxResultBytes: 1024 * 1024,

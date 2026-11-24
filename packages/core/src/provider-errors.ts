@@ -59,7 +59,14 @@ export interface ModelResponseDiagnostic {
     | "content_filter"
     | "error"
     | "unknown";
-  readonly finishReason?: "stop" | "length" | "tool-calls" | "content-filter" | "error" | "other";
+  readonly finishReason?:
+    | "stop"
+    | "length"
+    | "tool-calls"
+    | "content-filter"
+    | "error"
+    | "interrupted"
+    | "other";
   readonly sdkError?:
     | "APICallError"
     | "JSONParseError"

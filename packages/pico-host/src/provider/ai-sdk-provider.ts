@@ -6,7 +6,14 @@ import { anthropic, createAnthropic } from "@ai-sdk/anthropic";
 import { openai, createOpenAI } from "@ai-sdk/openai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { createOpenResponses } from "@ai-sdk/open-responses";
-import { generateText, streamText, jsonSchema, type LanguageModelUsage, type ToolSet } from "ai";
+import {
+  generateText,
+  streamText,
+  jsonSchema,
+  InvalidResponseDataError,
+  type LanguageModelUsage,
+  type ToolSet,
+} from "ai";
 import type {
   LLMProvider,
   LLMProviderRequestOptions,
@@ -314,8 +321,9 @@ export class AiSdkProvider implements LLMProvider {
         if (!onDelta) {
           const result = await generateText(request);
           responseDiagnostic = { ...responseDiagnostic, finishReason: result.finishReason };
-          if (result.finishReason === "error") {
-            failureCategory = "rejected_completion";
+          if (result.finishReason === "error" || result.finishReason === "interrupted") {
+            failureCategory =
+              result.finishReason === "error" ? "rejected_completion" : "incomplete_stream";
             throw new Error("Model response failed");
           }
           const usage = translateUsage(
@@ -414,12 +422,26 @@ export class AiSdkProvider implements LLMProvider {
           else if (chunk.type === "reasoning-delta" && !signal.aborted)
             options?.onReasoningDelta?.(chunk.text);
           else if (chunk.type === "error") {
+            // The OpenAI-compatible parser reports a stream that ends without a finish
+            // reason as InvalidResponseDataError. That is an incomplete response, not a
+            // malformed provider payload, so it stays retryable.
+            if (
+              InvalidResponseDataError.isInstance(chunk.error) &&
+              chunk.error.message === "Response stream ended without a finish reason."
+            ) {
+              failureCategory = "incomplete_stream";
+              throw new Error("Model stream ended without a valid completion");
+            }
             throw chunk.error;
           } else if (chunk.type === "abort")
             throw signal.reason ?? new DOMException("Aborted", "AbortError");
           else if (chunk.type === "finish") {
             responseDiagnostic = { ...responseDiagnostic, finishReason: chunk.finishReason };
-            if (chunk.finishReason === "error" || chunk.finishReason === "other") {
+            if (
+              chunk.finishReason === "error" ||
+              chunk.finishReason === "interrupted" ||
+              chunk.finishReason === "other"
+            ) {
               failureCategory =
                 chunk.finishReason === "error" || responseDiagnostic.rawFinishReason === "error"
                   ? "rejected_completion"
