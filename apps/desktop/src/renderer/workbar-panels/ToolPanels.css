@@ -209,9 +209,12 @@
 
 .tool-panel__progress > span {
   display: block;
+  width: 100%;
   height: 100%;
+  transform-origin: left center;
   border-radius: inherit;
   background: var(--focus-ring, #2563eb);
+  transition: transform var(--motion-base) var(--motion-ease);
 }
 
 .tool-panel__compact-list,
@@ -313,6 +316,7 @@
   background: transparent;
   color: inherit;
   text-align: left;
+  transition: background var(--motion-fast) var(--motion-ease);
 }
 
 .tool-panel__timeline li > button:hover,
@@ -469,6 +473,7 @@
   background: transparent;
   color: inherit;
   text-align: left;
+  transition: background var(--motion-fast) var(--motion-ease);
 }
 
 .tool-panel__file-group li > button {
@@ -843,6 +848,9 @@
   margin-top: 5px;
   border: 2px solid var(--text-tertiary, #9ca3af);
   border-radius: 999px;
+  transition:
+    border-color var(--motion-fast) var(--motion-ease),
+    background var(--motion-fast) var(--motion-ease);
 }
 
 .tool-panel__task-list > li[data-status="in_progress"] .tool-panel__task-marker {

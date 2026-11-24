@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 import { AppErrorBoundary, DesktopApp } from "./App.js";
 import { PicoTheme } from "./astryx-provider.js";
 import "./styles.css";
+import "./motion.css";
 import "./workbar-panels/artifact-preview.css";
 import "./astryx-controls.css";
 import "./shell-astryx.css";

@@ -112,6 +112,7 @@
   display: block;
   padding: 10px;
   border-radius: var(--radius-sm);
+  transition: background var(--motion-fast) var(--motion-ease);
 }
 .memory-settings fieldset > .settings-field:hover {
   background: var(--surface);

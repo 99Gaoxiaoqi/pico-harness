@@ -328,9 +328,11 @@
   background: #151a1d;
   color: #fff;
   overflow: auto;
+  animation: motion-dialog-rise var(--motion-base) var(--motion-ease);
 }
 .conversation-media__dialog::backdrop {
   background: rgb(10 12 15 / 80%);
+  animation: motion-fade-in var(--motion-fast) var(--motion-ease);
 }
 .conversation-media__dialog-toolbar {
   display: flex;

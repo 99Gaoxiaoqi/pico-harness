@@ -108,6 +108,9 @@
   color: var(--ink, #242424);
   font-weight: 650;
   white-space: nowrap;
+  transition:
+    background var(--motion-fast) var(--motion-ease),
+    color var(--motion-fast) var(--motion-ease);
 }
 
 .external-task-import .external-task-import__action:hover:not(:disabled) {

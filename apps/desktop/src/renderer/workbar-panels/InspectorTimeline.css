@@ -35,6 +35,7 @@
   border-radius: 6px;
   background: transparent;
   padding: 12px 0;
+  transition: background var(--motion-fast) var(--motion-ease);
 }
 .tool-panel--inspector .inspector-timeline__run-toggle:hover,
 .tool-panel--inspector .inspector-timeline__empty-toggle:hover {
@@ -53,6 +54,9 @@
   color: var(--inspector-muted);
   background: var(--inspector-subtle);
   white-space: nowrap;
+  transition:
+    color var(--motion-fast) var(--motion-ease),
+    background-color var(--motion-fast) var(--motion-ease);
 }
 .tool-panel--inspector .inspector-timeline__badge[data-status="completed"] {
   color: var(--inspector-success);
@@ -136,6 +140,7 @@
   border-radius: 8px;
   background: transparent;
   padding: 8px;
+  transition: background var(--motion-fast) var(--motion-ease);
 }
 .tool-panel--inspector .inspector-timeline__step-toggle:hover,
 .tool-panel--inspector .inspector-timeline__step-toggle[aria-expanded="true"] {
@@ -234,6 +239,12 @@
   border: 0;
   padding: 4px;
   border-radius: 4px;
+  transition:
+    background var(--motion-fast) var(--motion-ease),
+    color var(--motion-fast) var(--motion-ease);
+}
+.tool-panel--inspector .inspector-timeline__copy > button svg {
+  animation: motion-badge-in var(--motion-fast) var(--motion-ease);
 }
 .tool-panel--inspector .inspector-timeline__copy > button:hover {
   background: var(--inspector-subtle);
@@ -323,6 +334,7 @@
   border-radius: 6px;
   padding: 16px 0;
   text-align: left;
+  transition: background var(--motion-fast) var(--motion-ease);
 }
 .tool-panel--inspector .inspector-timeline__empty-runs {
   margin: 0 0 16px;

@@ -241,7 +241,7 @@ export function FilesWorkbarPanel({
                         aria-valuemax={100}
                         aria-valuenow={Math.round(progress.percent)}
                       >
-                        <span style={{ width: `${progress.percent}%` }} />
+                        <span style={{ transform: `scaleX(${progress.percent / 100})` }} />
                       </div>
                       <Button
                         variant="quiet"

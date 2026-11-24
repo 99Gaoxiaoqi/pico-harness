@@ -15,6 +15,10 @@
   background: var(--surface-raised);
   color: var(--ink-secondary);
   cursor: pointer;
+  transition:
+    background var(--motion-fast) var(--motion-ease),
+    border-color var(--motion-fast) var(--motion-ease),
+    color var(--motion-fast) var(--motion-ease);
 }
 .usage-settings button:hover:not(:disabled) {
   background: var(--surface-muted);
@@ -69,6 +73,10 @@
   border-color: transparent;
   background: transparent;
   font-size: 12px;
+  transition:
+    background var(--motion-fast) var(--motion-ease),
+    border-color var(--motion-fast) var(--motion-ease),
+    color var(--motion-fast) var(--motion-ease);
 }
 .usage-ranges button[aria-pressed="true"] {
   background: var(--surface-raised);
@@ -170,6 +178,9 @@
   background: transparent;
   padding: 10px 0;
   font-size: 12px;
+  transition:
+    color var(--motion-fast) var(--motion-ease),
+    border-color var(--motion-fast) var(--motion-ease);
 }
 .usage-tabs button[aria-selected="true"] {
   color: var(--ink);

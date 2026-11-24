@@ -94,7 +94,20 @@
     --radius-sm: 7px;
     --radius-md: 11px;
     --radius-lg: 16px;
-    --motion: 160ms cubic-bezier(0.2, 0, 0, 1);
+    /*
+     * Motion language (see docs/motion-audit.md).
+     * fast: press/tick/hover feedback that must never lag the pointer.
+     * base: popovers, menus, content swaps, page transitions.
+     * slow: large surfaces (drawers, panels) where travel is visible.
+     * The ease matches Astryx's --ease-standard so design-system components
+     * and Pico's own surfaces share one curve.
+     */
+    --motion-fast: 120ms;
+    --motion-base: 180ms;
+    --motion-slow: 280ms;
+    --motion-ease: cubic-bezier(0.24, 1, 0.4, 1);
+    --motion-ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+    --motion-spring: cubic-bezier(0.34, 1.32, 0.64, 1);
   }
 }
 
@@ -182,9 +195,9 @@
     font-weight: 620;
     line-height: 1;
     transition:
-      background var(--motion),
-      border-color var(--motion),
-      transform var(--motion);
+      background var(--motion-fast) var(--motion-ease),
+      border-color var(--motion-fast) var(--motion-ease),
+      transform var(--motion-fast) var(--motion-ease);
   }
   .button:hover:not(:disabled) {
     background: var(--surface-muted);
@@ -258,6 +271,9 @@
     font-size: 11px;
     font-weight: 680;
     white-space: nowrap;
+    transition:
+      background-color var(--motion-fast) var(--motion-ease),
+      color var(--motion-fast) var(--motion-ease);
   }
   .status-pill::before {
     width: 5px;
@@ -288,6 +304,10 @@
     background: var(--surface-muted);
     color: var(--ink-secondary);
     font-size: 13px;
+    transition:
+      background-color var(--motion-fast) var(--motion-ease),
+      border-color var(--motion-fast) var(--motion-ease),
+      color var(--motion-fast) var(--motion-ease);
   }
   .inline-notice svg {
     flex: none;
@@ -455,7 +475,7 @@
     inset: 0;
     background: rgb(24 24 21 / 0.45);
     backdrop-filter: blur(2px);
-    animation: fade-in var(--motion);
+    animation: motion-fade-in var(--motion-fast) var(--motion-ease);
   }
   .dialog {
     position: fixed;
@@ -469,7 +489,7 @@
     border-radius: 16px;
     background: var(--surface-raised);
     box-shadow: var(--shadow-lg);
-    animation: dialog-in var(--motion);
+    animation: motion-dialog-in var(--motion-base) var(--motion-ease);
     overscroll-behavior: contain;
   }
   .dialog h2 {
@@ -491,17 +511,6 @@
     position: absolute;
     top: 17px;
     right: 17px;
-  }
-  @keyframes fade-in {
-    from {
-      opacity: 0;
-    }
-  }
-  @keyframes dialog-in {
-    from {
-      opacity: 0;
-      transform: translate(-50%, calc(-50% + 8px)) scale(0.985);
-    }
   }
 }
 
@@ -606,8 +615,8 @@
     font-weight: 500;
     box-shadow: none;
     transition:
-      background var(--motion),
-      transform var(--motion);
+      background var(--motion-fast) var(--motion-ease),
+      transform var(--motion-fast) var(--motion-ease);
   }
   .sidebar-new-task:hover {
     background: var(--sidebar-raised);
@@ -714,6 +723,7 @@
     font-size: 11px;
     font-weight: 680;
     text-align: left;
+    transition: background var(--motion-fast) var(--motion-ease);
   }
   .sidebar-project__header:hover {
     background: var(--sidebar-raised);
@@ -735,7 +745,7 @@
   }
   .sidebar-project__header svg:last-child {
     width: 12px;
-    transition: transform var(--motion);
+    transition: transform var(--motion-fast) var(--motion-ease);
   }
   .sidebar-project__header[aria-expanded="false"] svg:last-child {
     transform: rotate(-90deg);
@@ -747,6 +757,9 @@
   .sidebar-session-row {
     position: relative;
     min-width: 0;
+    /* New sessions (and workspace switches) fade their row in; the list height
+       change itself stays instant so nothing below shifts visibly. */
+    animation: motion-fade-in var(--motion-fast) var(--motion-ease);
   }
   .sidebar-session-row.is-nested .sidebar-task-link {
     padding-left: 27px;
@@ -762,6 +775,9 @@
     border-radius: 7px;
     color: var(--sidebar-muted);
     font-size: 12px;
+    transition:
+      background var(--motion-fast) var(--motion-ease),
+      color var(--motion-fast) var(--motion-ease);
   }
   .sidebar-task-link:hover {
     background: var(--sidebar-raised);
@@ -780,6 +796,9 @@
     height: 5px;
     border-radius: 50%;
     background: #aaa9a4;
+    transition:
+      background-color var(--motion-fast) var(--motion-ease),
+      box-shadow var(--motion-fast) var(--motion-ease);
   }
   .sidebar-task-link__status.is-running {
     background: var(--accent);
@@ -801,7 +820,7 @@
     background: var(--sidebar-raised);
     opacity: 0;
     pointer-events: none;
-    transition: opacity var(--motion);
+    transition: opacity var(--motion-fast) var(--motion-ease);
   }
   .sidebar-session-row:has(.sidebar-task-link.is-active) .sidebar-task-actions {
     background: #e8e8e8;
@@ -852,8 +871,8 @@
     font-size: 13px;
     font-weight: 560;
     transition:
-      background var(--motion),
-      color var(--motion);
+      background var(--motion-fast) var(--motion-ease),
+      color var(--motion-fast) var(--motion-ease);
   }
   .nav-link svg {
     width: 16px;
@@ -887,6 +906,9 @@
     color: var(--sidebar-muted);
     font-size: 12px;
     font-weight: 580;
+    transition:
+      background var(--motion-fast) var(--motion-ease),
+      color var(--motion-fast) var(--motion-ease);
   }
   .settings-sidebar__back:hover {
     background: var(--sidebar-raised);
@@ -1057,6 +1079,10 @@
     font-size: 12px;
     font-weight: 620;
     text-align: center;
+    transition:
+      background var(--motion-fast) var(--motion-ease),
+      color var(--motion-fast) var(--motion-ease),
+      box-shadow var(--motion-fast) var(--motion-ease);
   }
   .surface-tabs a:hover,
   .surface-tabs a.is-active {
@@ -1080,6 +1106,7 @@
     box-shadow: var(--shadow-sm);
     color: var(--ink-secondary);
     font-size: 12px;
+    animation: motion-toast-in var(--motion-base) var(--motion-ease);
   }
   .toast__dismiss {
     display: inline-grid;
@@ -1421,8 +1448,8 @@
     background: var(--surface-raised);
     box-shadow: var(--shadow-sm);
     transition:
-      border-color var(--motion),
-      transform var(--motion);
+      border-color var(--motion-base) var(--motion-ease),
+      transform var(--motion-base) var(--motion-ease);
   }
   .workspace-picker__item:hover {
     border-color: var(--accent);
@@ -2197,6 +2224,7 @@
     position: relative;
     display: flex;
     align-items: center;
+    animation: motion-fade-in var(--motion-fast) var(--motion-ease);
   }
   .session-row-wrap + .session-row-wrap {
     border-top: 1px solid var(--line);
@@ -2214,7 +2242,7 @@
   }
   .session-row h3 {
     font-size: 13px;
-    transition: color var(--motion);
+    transition: color var(--motion-fast) var(--motion-ease);
   }
   .session-row p {
     margin-top: 3px;
@@ -2419,7 +2447,7 @@
     border: 1px solid var(--line-strong);
     border-radius: 999px;
     background: var(--surface-strong);
-    transition: background var(--motion);
+    transition: background var(--motion-fast) var(--motion-ease);
   }
   .switch > span::after {
     display: block;
@@ -2431,7 +2459,7 @@
     background: var(--surface-raised);
     box-shadow: 0 1px 3px rgb(0 0 0 / 0.2);
     content: "";
-    transition: transform var(--motion);
+    transition: transform var(--motion-fast) var(--motion-ease);
   }
   .switch input:checked + span {
     border-color: var(--accent);
@@ -2669,6 +2697,7 @@
     color: inherit;
     text-align: left;
     cursor: pointer;
+    transition: background var(--motion-fast) var(--motion-ease);
   }
   .provider-card__entry:hover,
   .provider-card__entry:focus-visible {
@@ -2831,7 +2860,7 @@
     border-radius: 50%;
     background: white;
     box-shadow: 0 1px 3px rgb(0 0 0 / 0.2);
-    transition: transform var(--motion);
+    transition: transform var(--motion-fast) var(--motion-ease);
   }
   .provider-detail__switch[aria-checked="true"] {
     background: var(--accent);
@@ -3540,6 +3569,10 @@
     border-radius: var(--radius-sm);
     background: transparent;
     color: var(--ink-secondary);
+    transition:
+      background var(--motion-fast) var(--motion-ease),
+      color var(--motion-fast) var(--motion-ease),
+      box-shadow var(--motion-fast) var(--motion-ease);
   }
   .memory-tablist button[aria-selected="true"] {
     background: var(--surface-raised);
@@ -3683,7 +3716,8 @@
   @media (prefers-reduced-motion: reduce) {
     *,
     *::before,
-    *::after {
+    *::after,
+    ::backdrop {
       scroll-behavior: auto !important;
       animation-duration: 0.01ms !important;
       animation-iteration-count: 1 !important;
@@ -4072,6 +4106,7 @@
   color: var(--ink);
   text-align: left;
   cursor: pointer;
+  transition: background var(--motion-fast) var(--motion-ease);
 }
 .provider-catalog-row:hover {
   background: var(--surface-muted);
@@ -4192,6 +4227,9 @@
 }
 .provider-advanced-toggle[aria-expanded="true"] svg {
   transform: rotate(180deg);
+}
+.provider-advanced-toggle svg {
+  transition: transform var(--motion-fast) var(--motion-ease);
 }
 .provider-advanced-fields {
   display: grid;

@@ -62,6 +62,9 @@
   color: var(--inspector-muted);
   background: transparent;
   cursor: pointer;
+  transition:
+    color var(--motion-fast) var(--motion-ease),
+    border-color var(--motion-fast) var(--motion-ease);
 }
 
 .tool-panel--inspector .inspector-tabs button[aria-selected="true"] {

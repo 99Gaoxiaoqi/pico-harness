@@ -14,13 +14,38 @@
     background: var(--surface-raised);
     color: var(--ink);
     box-shadow: -12px 0 40px #00000014;
+    /* The drawer reports where it came from: it slides off the right edge and
+       returns there on close (allow-discrete keeps it painted while closing). */
+    translate: 100% 0;
+    transition:
+      translate var(--motion-slow) var(--motion-ease),
+      display var(--motion-slow) allow-discrete,
+      overlay var(--motion-slow) allow-discrete;
   }
   .experience-drawer[open] {
     display: flex;
     flex-direction: column;
+    translate: 0 0;
+  }
+  @starting-style {
+    .experience-drawer[open] {
+      translate: 100% 0;
+    }
   }
   .experience-drawer::backdrop {
-    background: #00000012;
+    background-color: transparent;
+    transition:
+      background-color var(--motion-base) var(--motion-ease),
+      display var(--motion-base) allow-discrete,
+      overlay var(--motion-base) allow-discrete;
+  }
+  .experience-drawer[open]::backdrop {
+    background-color: #00000012;
+  }
+  @starting-style {
+    .experience-drawer[open]::backdrop {
+      background-color: transparent;
+    }
   }
   .experience-drawer__header {
     display: flex;

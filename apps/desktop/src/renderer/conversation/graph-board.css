@@ -16,6 +16,7 @@
   background: var(--conversation-bg-subtle);
   padding: 5px 9px;
   white-space: nowrap;
+  transition: background var(--motion-fast) var(--motion-ease);
 }
 .conversation-graph-board button:hover {
   background: var(--conversation-line);
@@ -115,6 +116,7 @@
   flex: 0 0 6px;
   border-radius: 50%;
   background: #a1a1aa;
+  transition: background-color var(--motion-fast) var(--motion-ease);
 }
 .conversation-graph-board li[data-state="completed"] .conversation-graph-board__dot {
   background: #3da65a;

@@ -1,0 +1,102 @@
+/*
+ * Shared motion vocabulary. Durations/easings live as tokens in styles.css;
+ * this file only defines the named transitions used across surfaces.
+ *
+ * Rules of the house:
+ * - Only composited properties (opacity, transform, filter, clip-path).
+ * - Entrance-only for conditionally rendered nodes: React unmounts them
+ *   synchronously, and no exit animation is worth retaining stale DOM or
+ *   deferring business state.
+ * - Everything here is disabled by the global prefers-reduced-motion policy
+ *   in styles.css (animation/transition duration floored to 0.01ms).
+ */
+@layer components {
+  /* Soft fade for content that already carries its own position change. */
+  @keyframes motion-fade-in {
+    from {
+      opacity: 0;
+    }
+  }
+
+  /* Arriving content: a few pixels of travel explains where it came from. */
+  @keyframes motion-rise-in {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+  }
+
+  /* Popovers anchored above their trigger (menus, suggestion lists). */
+  @keyframes motion-pop-up {
+    from {
+      opacity: 0;
+      transform: translateY(5px) scale(0.985);
+    }
+  }
+
+  /* Popovers anchored below their trigger (context menus, pickers). */
+  @keyframes motion-pop-down {
+    from {
+      opacity: 0;
+      transform: translateY(-5px) scale(0.985);
+    }
+  }
+
+  /* Centered dialogs: scale from near-final size, never from zero. */
+  @keyframes motion-dialog-in {
+    from {
+      opacity: 0;
+      transform: translate(-50%, calc(-50% + 8px)) scale(0.985);
+    }
+  }
+
+  /* Dialogs that own their own positioning (Astryx <dialog>, drawers). */
+  @keyframes motion-dialog-rise {
+    from {
+      opacity: 0;
+      transform: translateY(8px) scale(0.985);
+    }
+  }
+
+  /* Transient status surfaces sliding in from an edge. */
+  @keyframes motion-toast-in {
+    from {
+      opacity: 0;
+      transform: translateY(10px);
+    }
+  }
+
+  @keyframes motion-slide-in-right {
+    from {
+      opacity: 0;
+      transform: translateX(12px);
+    }
+  }
+
+  /* Small confirmation/dot/badge births. */
+  @keyframes motion-badge-in {
+    from {
+      opacity: 0;
+      transform: scale(0.6);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    /* Belt and braces on top of the global duration floor: never delay content. */
+    *,
+    *::before,
+    *::after,
+    ::backdrop {
+      animation-delay: 0s !important;
+    }
+  }
+
+  /*
+   * Astryx owns the <dialog> shell and animates it with --duration-medium-max
+   * (400ms in this theme). One motion language: modal shells run at base speed.
+   * Its keyframe (16px rise + 0.985 scale) and easing are already compatible.
+   */
+  dialog:modal {
+    animation-duration: var(--motion-base);
+  }
+}

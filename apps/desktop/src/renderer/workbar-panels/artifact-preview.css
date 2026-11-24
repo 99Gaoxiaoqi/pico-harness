@@ -13,6 +13,9 @@
   background: transparent;
   color: inherit;
   cursor: pointer;
+  transition:
+    background var(--motion-fast) var(--motion-ease),
+    border-color var(--motion-fast) var(--motion-ease);
 }
 .artifact-preview__toolbar button[aria-pressed="true"] {
   background: #80808024;
