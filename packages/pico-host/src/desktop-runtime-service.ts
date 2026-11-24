@@ -928,9 +928,34 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         "session.graph.stop": this.stopSessionGraph.bind(this),
       }),
       ...createDesktopMemoryRequestHandlers({
-        queryExperienceUses: (params) => this.withTrustedMemory(params.workspacePath, async canonical => (await this.memoryService.queryExperienceUses(canonical, params)) as unknown as JsonValue),
-        detailExperienceUse: (params) => this.withTrustedMemory(params.workspacePath, async canonical => (await this.memoryService.detailExperienceUse(canonical, params.useId, params.learningVersion)) as unknown as JsonValue),
-        feedbackExperienceUse: (params) => this.withTrustedMemory(params.workspacePath, async canonical => (await this.memoryService.feedbackExperienceUse(canonical, params)) as unknown as JsonValue),
+        queryExperienceUses: (params) =>
+          this.withTrustedMemory(
+            params.workspacePath,
+            async (canonical) =>
+              (await this.memoryService.queryExperienceUses(
+                canonical,
+                params,
+              )) as unknown as JsonValue,
+          ),
+        detailExperienceUse: (params) =>
+          this.withTrustedMemory(
+            params.workspacePath,
+            async (canonical) =>
+              (await this.memoryService.detailExperienceUse(
+                canonical,
+                params.useId,
+                params.learningVersion,
+              )) as unknown as JsonValue,
+          ),
+        feedbackExperienceUse: (params) =>
+          this.withTrustedMemory(
+            params.workspacePath,
+            async (canonical) =>
+              (await this.memoryService.feedbackExperienceUse(
+                canonical,
+                params,
+              )) as unknown as JsonValue,
+          ),
         queryExperiences: (params) =>
           this.withTrustedMemory(
             params.workspacePath,

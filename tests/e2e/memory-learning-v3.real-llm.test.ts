@@ -807,8 +807,7 @@ for (const variant of [0, 1]) {
           if (call.name !== "read_file") return false;
           const path = (JSON.parse(call.arguments) as { path?: unknown }).path;
           return (
-            typeof path === "string" &&
-            resolve(f.workDir, path) === resolve(f.workDir, checkFile)
+            typeof path === "string" && resolve(f.workDir, path) === resolve(f.workDir, checkFile)
           );
         });
       assert.ok(checkerRead, "source must inspect the actual checker through read_file");

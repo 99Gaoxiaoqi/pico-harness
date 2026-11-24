@@ -4,9 +4,15 @@ import type { DesktopRequestHandlers } from "./desktop-request-router.js";
 type Awaitable<T> = T | Promise<T>;
 
 export interface DesktopMemoryRequestContext {
-  readonly queryExperienceUses?: (params: RuntimeRequest<"memory.experience.query">["params"]) => Awaitable<JsonValue>;
-  readonly detailExperienceUse?: (params: RuntimeRequest<"memory.experience.detail">["params"]) => Awaitable<JsonValue>;
-  readonly feedbackExperienceUse?: (params: RuntimeRequest<"memory.experience.feedback">["params"]) => Awaitable<JsonValue>;
+  readonly queryExperienceUses?: (
+    params: RuntimeRequest<"memory.experience.query">["params"],
+  ) => Awaitable<JsonValue>;
+  readonly detailExperienceUse?: (
+    params: RuntimeRequest<"memory.experience.detail">["params"],
+  ) => Awaitable<JsonValue>;
+  readonly feedbackExperienceUse?: (
+    params: RuntimeRequest<"memory.experience.feedback">["params"],
+  ) => Awaitable<JsonValue>;
   readonly queryExperiences?: (
     params: RuntimeRequest<"memory.learning.query">["params"],
   ) => Awaitable<JsonValue>;
@@ -80,9 +86,15 @@ export function createDesktopMemoryRequestHandlers(
   | "memory.consolidation.undo"
 > {
   return {
-    "memory.experience.query": request => context.queryExperienceUses?.(request.params) ?? Promise.reject(new Error("Experience feedback unavailable")),
-    "memory.experience.detail": request => context.detailExperienceUse?.(request.params) ?? Promise.reject(new Error("Experience feedback unavailable")),
-    "memory.experience.feedback": request => context.feedbackExperienceUse?.(request.params) ?? Promise.reject(new Error("Experience feedback unavailable")),
+    "memory.experience.query": (request) =>
+      context.queryExperienceUses?.(request.params) ??
+      Promise.reject(new Error("Experience feedback unavailable")),
+    "memory.experience.detail": (request) =>
+      context.detailExperienceUse?.(request.params) ??
+      Promise.reject(new Error("Experience feedback unavailable")),
+    "memory.experience.feedback": (request) =>
+      context.feedbackExperienceUse?.(request.params) ??
+      Promise.reject(new Error("Experience feedback unavailable")),
     "memory.learning.query": (request) =>
       context.queryExperiences?.(request.params) ??
       Promise.reject(new Error("Learning unavailable")),

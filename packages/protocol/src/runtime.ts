@@ -1,4 +1,7 @@
-import { experienceFeedbackParamValidators, experienceFeedbackResultValidators } from "./runtime/experience-feedback.js";
+import {
+  experienceFeedbackParamValidators,
+  experienceFeedbackResultValidators,
+} from "./runtime/experience-feedback.js";
 // Public runtime barrel: domain contracts and validators are owned by runtime/*.ts.
 export * from "./runtime/subagents.js";
 export * from "./runtime/config-patch.js";

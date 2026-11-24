@@ -329,8 +329,14 @@ test("SessionForkService can create an empty prefix before a first user message"
       runtimePort: createEngineRuntimePort(),
     });
     await target.recover();
-    assert.deepEqual(target.getHistory().map((message) => message.content), []);
-    assert.deepEqual(source.getHistory().map((message) => message.content), ["original"]);
+    assert.deepEqual(
+      target.getHistory().map((message) => message.content),
+      [],
+    );
+    assert.deepEqual(
+      source.getHistory().map((message) => message.content),
+      ["original"],
+    );
   } finally {
     await manager.delete(sourceSessionId, workDir, { picoHome })?.close();
     await manager.delete(targetSessionId, workDir, { picoHome })?.close();

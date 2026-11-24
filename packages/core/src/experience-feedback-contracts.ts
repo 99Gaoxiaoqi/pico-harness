@@ -102,9 +102,7 @@ export interface ExperienceLedgerStore {
     workspaceKey: string,
     sessionId?: string,
   ): Promise<readonly ExperienceDiagnostic[]>;
-  readExperienceFence(
-    workspaceKey: string,
-  ): Promise<{
+  readExperienceFence(workspaceKey: string): Promise<{
     readonly settingsVersion: number;
     readonly deletionRevision: number;
     readonly managementRevision: number;

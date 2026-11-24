@@ -599,7 +599,9 @@ export function restoreResponsesWebSearch(
       const part = record(value);
       if (part?.role !== "assistant") return value;
       const anchor =
-        typeof part.content === "string" ? /^\[provider search ([^\]]+)\]$/u.exec(part.content) : null;
+        typeof part.content === "string"
+          ? /^\[provider search ([^\]]+)\]$/u.exec(part.content)
+          : null;
       const id = typeof part.id === "string" ? part.id : anchor?.[1];
       return id !== undefined && items.has(id) ? structuredClone(items.get(id)!) : value;
     }),

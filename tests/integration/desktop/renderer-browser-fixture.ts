@@ -50,13 +50,16 @@ export async function runRendererBrowserScenario(contents: string): Promise<stri
         name: "vite-provider-brand-assets",
         setup(bundler) {
           // Vite expands these decorative icons in production; page interaction tests use the fallback.
-          bundler.onLoad({ filter: /(?:ComposerModelPicker|ProviderOnboarding)\.tsx$/ }, async ({ path }) => ({
-            contents: (await readFile(path, "utf8")).replace(
-              /import\.meta\.glob<string>\([\s\S]*?\);/u,
-              "{};",
-            ),
-            loader: "tsx",
-          }));
+          bundler.onLoad(
+            { filter: /(?:ComposerModelPicker|ProviderOnboarding)\.tsx$/ },
+            async ({ path }) => ({
+              contents: (await readFile(path, "utf8")).replace(
+                /import\.meta\.glob<string>\([\s\S]*?\);/u,
+                "{};",
+              ),
+              loader: "tsx",
+            }),
+          );
         },
       },
     ],
