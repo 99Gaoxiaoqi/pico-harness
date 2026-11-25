@@ -83,3 +83,25 @@ final result: passed
 
 徽标槽位 `getBoundingClientRect` 为 `y=587, h=40`，卡片顶边 `y=632`（间隔 5px）；徽标挂载与卸载时 composer 与输入框矩形完全一致，正文流内不再出现 `[aria-label="最近记录诊断"]`。新增 `tests/integration/desktop/desktop-composer-geometry.test.ts` 覆盖徽标出现/消失、空闲/运行、空草稿/换行草稿四类几何对比，去掉底栏预留后该测试以 34px 跳动失败。
 
+
+
+## 运行态底栏独立槽位（2026-11-25）
+
+final result: passed
+
+发送消息进入运行态后，状态文字、行为选择器和暂停/停止按钮会与模型/权限/思考强度控件争抢同一行宽度；长模型名和排队提示把控件行压到约 484px，思考强度 `max` 与权限选择器被挤到第二行（`max` 掉底），空闲态与运行态的底栏排布不一致。现把底栏改成常驻两行：第一行固定放附件、菜单、模型、上下文、权限、思考强度等控件与发送按钮，第二行专用于运行态行为选择器、状态文字和暂停/停止，三态都不改变第一行宽度与成员。
+
+在 800px 宽输入卡片（1000×700 视口）下用 `getBoundingClientRect` 量测，修改前后 `max` 控件的顶边与控件行高度：
+
+| 状态   | 修改前 max 顶边 / 控件行高 | 修改后 max 顶边 / 控件行高 |
+| ------ | -------------------------- | -------------------------- |
+| 空闲   | 627 / 28px                 | 610 / 28px                 |
+| 运行中 | 644 / 62px                 | 610 / 28px                 |
+| 发送中 | 627 / 28px                 | 610 / 28px                 |
+
+修改后空闲、运行、发送三态的控件行成员（附件、加号、模型、上下文用量、权限、思考强度、模式徽标）、逐项 `x/y/w/h`、发送按钮，以及 composer/输入框矩形完全一致；运行态状态行独占 `y=644, h=28`，不再压缩第一行。附件按钮在运行态也保留在原位，页面不再因运行状态移除该控件。
+
+- [修改前·空闲](docs/assets/composer-running/before-idle.png)、[修改前·运行中](docs/assets/composer-running/before-running.png)、[修改前·发送中](docs/assets/composer-running/before-sending.png)
+- [修改后·空闲](docs/assets/composer-running/after-idle.png)、[修改后·运行中](docs/assets/composer-running/after-running.png)、[修改后·发送中](docs/assets/composer-running/after-sending.png)
+
+截图由 headless Chrome 渲染与集成测试相同的 composer 场景后裁取输入卡片区域，比例 2×（1640×320 像素）。`tests/integration/desktop/desktop-composer-geometry.test.ts` 新增三态 DOM 几何断言；回退本次 CSS 后该用例在“运行态控件使用独立行”处失败，量测到控件行高 62px、状态行与控件同行。renderer 类型检查（应用 `patches/` 后）通过。

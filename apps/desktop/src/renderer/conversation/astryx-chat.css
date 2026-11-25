@@ -49,10 +49,7 @@
 }
 
 /* Reserve the runtime row permanently: the status text, behavior selector and
-   pause/stop buttons appear mid-run and make the wide model/permission/thinking
-   controls wrap onto a second 28px row. Reserving that row (two control rows
-   plus their 6px gap) keeps the composer and the input geometry identical in
-   idle and running states instead of jumping 34px when a run starts. */
+   pause/stop buttons appear mid-run without changing the composer height. */
 .pico-astryx-composer > div > div:last-child {
   min-height: calc(28px * 2 + 6px);
   gap: 8px;
@@ -63,26 +60,42 @@
   flex: 1;
 }
 
-/* Keep running controls beside model/context settings on one row: the footer
-   height must not change when status text, the behavior selector or the
-   pause/stop buttons appear, otherwise the whole composer jumps mid-run. The
-   status text ellipsizes instead of wrapping the row. */
-.conversation-composer:not([data-status="idle"]) .pico-astryx-composer > div > div:last-child {
-  flex-wrap: nowrap;
+/* Permanent two-row footer. Row 1 owns the attach/menu/model/context controls
+   and the send button; row 2 is a dedicated runtime slot for the behavior
+   selector, status text, and pause/stop. The runtime controls therefore never
+   take width from row 1, so a run starting cannot wrap "max" and the other
+   trailing controls onto a second line. The grid rows stay identical in idle,
+   sending, and running states; the empty runtime row is what keeps the card at
+   the same 62px height before a run starts. */
+.conversation-composer .pico-astryx-composer > div > div:last-child {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: auto 28px;
+  align-items: center;
+  column-gap: 8px;
+  row-gap: 6px;
 }
-.conversation-composer:not([data-status="idle"])
-  .pico-astryx-composer
-  > div
-  > div:last-child
-  > div:last-child {
-  width: auto;
-  flex: 0 1 auto;
+
+.conversation-composer .pico-astryx-composer > div > div:last-child > div:first-child {
+  grid-column: 1;
+  grid-row: 1;
   min-width: 0;
 }
-.conversation-composer:not([data-status="idle"]) .conversation-composer__actions {
-  flex: 1;
-  align-self: center;
+
+/* Unwrap the actions+send wrapper: send stays in row 1, the runtime slot moves
+   to row 2 instead of sharing a flex line with the context controls. */
+.conversation-composer .pico-astryx-composer > div > div:last-child > div:last-child {
+  display: contents;
 }
+
+.conversation-composer__actions {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  align-self: center;
+  min-width: 0;
+  overflow: hidden;
+}
+
 .conversation-composer__actions > .astryx-field:has(.conversation-behavior) {
   min-width: 0;
   flex: none;
@@ -94,11 +107,10 @@
   flex: 0 1 auto;
 }
 
-/* Let the dynamic run controls shrink and ellipsize instead of widening the
-   footer, which would push the control row onto another line. */
-.conversation-composer__actions {
-  min-width: 0;
-  overflow: hidden;
+.conversation-composer .conversation-send-button {
+  grid-column: 2;
+  grid-row: 1;
+  align-self: center;
 }
 .conversation-composer .conversation-behavior {
   min-width: 0;
