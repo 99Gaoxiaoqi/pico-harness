@@ -73,13 +73,54 @@
 .provider-advanced-toggle > span {
   display: contents;
 }
-.provider-catalog-row > span > span:nth-child(2) {
-  flex: 1;
+/*
+ * 目录行由 Astryx Button 渲染，其内容被包在 label span 中。通用
+ * `.button > span > span` 会把该包装层设为 display: contents，行的
+ * justify-content: center 于是逐行居中随文案宽度收缩的盒子，图标、文案与箭头
+ * 三列左右漂移。这里恢复固定三列网格：图标 32px、文案自适应、箭头 16px。
+ */
+.provider-catalog-row {
+  min-height: 56px;
+  padding: 9px 10px;
+}
+.provider-catalog-row > span > span {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) 16px;
+  align-items: center;
+  column-gap: 12px;
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  overflow: visible;
+  text-overflow: clip;
+}
+.provider-catalog-row .provider-catalog-copy {
+  display: grid;
+  gap: 2px;
   min-width: 0;
 }
-.provider-catalog-row > span > svg {
+.provider-catalog-row strong,
+.provider-catalog-row small {
+  display: block;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.provider-catalog-row .provider-catalog-chevron {
   flex-shrink: 0;
+  justify-self: end;
   color: var(--ink-secondary);
+}
+.provider-catalog-mark {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+}
+.provider-catalog-mark img,
+.provider-catalog-mark > svg {
+  width: 20px;
+  height: 20px;
 }
 .provider-model-choices .settings-field {
   display: flex;

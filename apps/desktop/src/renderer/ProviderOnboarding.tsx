@@ -127,11 +127,11 @@ export function ProviderOnboarding({
                 onClick={() => setPreset(item)}
               >
                 <ProviderMark preset={item} />
-                <span>
+                <span className="provider-catalog-copy">
                   <strong>{item.name}</strong>
                   <small>{item.description}</small>
                 </span>
-                <ChevronRight size={16} aria-hidden="true" />
+                <ChevronRight className="provider-catalog-chevron" size={16} aria-hidden="true" />
               </Button>
             ))}
           </div>
