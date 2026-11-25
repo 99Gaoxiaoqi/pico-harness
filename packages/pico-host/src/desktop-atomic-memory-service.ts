@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { sanitizeMemoryContent } from "@pico/runtime/atomic-memory/content-safety";
 import { AtomicMemoryContextBuilder } from "@pico/runtime/atomic-memory/context-builder";
+import { sleepForRetry } from "@pico/runtime/provider-retry";
 import {
   createExecutionLearningIO,
   executionLearningRecallTargets,
@@ -859,7 +860,7 @@ export class DesktopAtomicMemoryService {
           // unchanged and every mutation carries an operation identity, so one
           // reopen + replay is safe; a real corruption still surfaces.
           if (attempt > 0 || !isMemoryStoreCorruption(error)) throw error;
-          await new Promise((resolve) => setTimeout(resolve, 100));
+          await sleepForRetry(100);
         } finally {
           store?.close();
         }
