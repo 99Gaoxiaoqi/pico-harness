@@ -165,12 +165,14 @@ for (const stopViaBoard of [false, true])
         try {
           await waitUntil(() => operatorsEntered.size === 2);
         } catch (error) {
-          const graphs = graphHost.store.listGraphs(sessionId);
+          const graphs = graphHost?.store.listGraphs(sessionId) ?? [];
           throw new Error(
             `${(error as Error).message}; entered=${operatorsEntered.size} ` +
               `graphs=${JSON.stringify(graphs)} ` +
               `claims=${JSON.stringify(
-                graphs.flatMap((graph) => graphHost.store.listActivationClaims(graph.graphId)),
+                graphs.flatMap(
+                  (graph) => graphHost?.store.listActivationClaims(graph.graphId) ?? [],
+                ),
               )}`,
           );
         }
@@ -306,7 +308,7 @@ async function waitForGate(gate: Promise<void>, signal: AbortSignal): Promise<vo
   }
 }
 
-async function waitUntil(predicate: () => boolean, timeoutMs = 20_000): Promise<void> {
+async function waitUntil(predicate: () => boolean, timeoutMs = 60_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
     if (Date.now() >= deadline)

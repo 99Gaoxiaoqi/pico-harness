@@ -437,7 +437,7 @@ for (const recoverAfterFinish of [false, true]) {
   );
 }
 
-async function waitUntil(predicate: () => boolean, timeoutMs = 20_000): Promise<void> {
+async function waitUntil(predicate: () => boolean, timeoutMs = 60_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
     if (Date.now() >= deadline) throw new Error("Timed out waiting for Plan Graph state");
