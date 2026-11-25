@@ -228,7 +228,7 @@ export async function prepareSessionMedia(options: {
         consumeAuthorization: false,
         access: "read",
       });
-      const canonical = await realpath(path);
+      const canonical = await realpathWhenVisible(path);
       const allowedRoots = roots.list();
       if (!allowedRoots.some((root) => within(root, canonical))) continue;
       const file = await open(
@@ -299,6 +299,34 @@ export async function prepareSessionMedia(options: {
         providerData: { ...message.providerData, picoMedia: media, picoMediaInputHash: inputHash },
       }
     : message;
+}
+
+const MEDIA_FILE_VISIBILITY_RETRY_LIMIT = 10;
+const MEDIA_FILE_VISIBILITY_RETRY_MS = 20;
+
+/**
+ * A command can report completion before Windows exposes its fresh writes to a
+ * concurrent reader (AV/indexer delay). Missing media must stay inert, but a
+ * file that appears within the retry window belongs to this reply.
+ */
+async function realpathWhenVisible(path: string): Promise<string> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await realpath(path);
+    } catch (error) {
+      if (
+        process.platform !== "win32" ||
+        attempt >= MEDIA_FILE_VISIBILITY_RETRY_LIMIT ||
+        !(error instanceof Error) ||
+        !("code" in error) ||
+        error.code !== "ENOENT"
+      )
+        throw error;
+      const retryDelay = Promise.withResolvers<void>();
+      setTimeout(retryDelay.resolve, MEDIA_FILE_VISIBILITY_RETRY_MS);
+      await retryDelay.promise;
+    }
+  }
 }
 
 function within(root: string, path: string): boolean {
