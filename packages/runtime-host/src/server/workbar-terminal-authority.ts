@@ -819,9 +819,7 @@ class NodePtyProcessFactory implements WorkbarTerminalProcessFactory {
           // node-pty throws synchronously for any signal on Windows, and its deferred
           // form rethrows from a socket callback (uncaught → daemon exit). Force-kill
           // the tree with taskkill like the pipe fallback, then release the ConPTY.
-          await Promise.resolve(terminateProcessGroup(pty.pid, signal)).catch(
-            () => undefined,
-          );
+          await Promise.resolve(terminateProcessGroup(pty.pid, signal)).catch(() => undefined);
           try {
             pty.kill();
           } catch {
