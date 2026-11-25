@@ -871,6 +871,9 @@ export class DesktopAtomicMemoryService {
         "记忆服务暂时不可用",
       );
       Object.defineProperty(failure, "cause", { value: error });
+      // The protocol keeps the cause off the wire; the daemon's stderr is the only
+      // place a store-level fault (schema, lock, permissions) can be traced.
+      console.error(`[atomic-memory] ${error instanceof Error ? error.message : String(error)}`);
       throw failure;
     }
   }
