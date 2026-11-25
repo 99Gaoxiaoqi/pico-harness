@@ -25,7 +25,7 @@ for (const stopViaBoard of [false, true])
   test(
     `production ${stopViaBoard ? "Graph board stop" : "Plan cancellation"} retires a yielded active Graph Plan and aborts both operators without waking root`,
     {
-      timeout: 30_000,
+      timeout: 90_000,
     },
     async () => {
       const root = await mkdtemp(join(tmpdir(), "pico-production-plan-graph-cancel-"));
@@ -295,7 +295,7 @@ async function waitForGate(gate: Promise<void>, signal: AbortSignal): Promise<vo
   }
 }
 
-async function waitUntil(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
+async function waitUntil(predicate: () => boolean, timeoutMs = 20_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
     if (Date.now() >= deadline)

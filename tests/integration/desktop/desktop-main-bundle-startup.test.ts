@@ -136,25 +136,40 @@ require("./main.cjs");
   );
   const installerHome = join(scratch, "installer-home");
   await mkdir(installerHome, { recursive: true });
-  for (const event of [
-    "--squirrel-install",
-    "--squirrel-updated",
-    "--squirrel-uninstall",
-    "--squirrel-obsolete",
-  ]) {
-    const installer = spawnSync(process.execPath, [installerFixture, event], {
-      // The gateway transition keeps its state under the user home.
-      env: {
-        ...process.env,
-        PICO_HOME: installerHome,
-        HOME: installerHome,
-        USERPROFILE: installerHome,
-        NODE_PATH: join(root, "node_modules"),
-      },
-      encoding: "utf8",
-      timeout: 15_000,
-    });
-    assert.equal(installer.status, 0, `${event}: ${installer.error ?? ""}\n${installer.stderr}`);
-    assert.match(installer.stdout, /PASS: installer callback exited before runtime startup/);
-  }
+  await t.test(
+    "Desktop installer callbacks exit before runtime startup",
+    {
+      skip:
+        process.platform === "win32"
+          ? false
+          : "Squirrel installer events and Update.exe only exist on Windows; win32 Desktop CI verifies them",
+    },
+    () => {
+      for (const event of [
+        "--squirrel-install",
+        "--squirrel-updated",
+        "--squirrel-uninstall",
+        "--squirrel-obsolete",
+      ]) {
+        const installer = spawnSync(process.execPath, [installerFixture, event], {
+          // The gateway transition keeps its state under the user home.
+          env: {
+            ...process.env,
+            PICO_HOME: installerHome,
+            HOME: installerHome,
+            USERPROFILE: installerHome,
+            NODE_PATH: join(root, "node_modules"),
+          },
+          encoding: "utf8",
+          timeout: 15_000,
+        });
+        assert.equal(
+          installer.status,
+          0,
+          `${event}: ${installer.error ?? ""}\n${installer.stderr}`,
+        );
+        assert.match(installer.stdout, /PASS: installer callback exited before runtime startup/);
+      }
+    },
+  );
 });

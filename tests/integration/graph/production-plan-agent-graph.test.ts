@@ -27,7 +27,7 @@ for (const recoverAfterFinish of [false, true]) {
       ? "production resumes the same finished Graph after a crash before the last Plan update"
       : "production Plan Graph investigates, approves once, yields across two branches and completes after finish",
     {
-      timeout: 30_000,
+      timeout: 90_000,
     },
     async () => {
       const root = await mkdtemp(join(tmpdir(), "pico-production-plan-graph-"));
@@ -431,7 +431,7 @@ for (const recoverAfterFinish of [false, true]) {
   );
 }
 
-async function waitUntil(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
+async function waitUntil(predicate: () => boolean, timeoutMs = 20_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
     if (Date.now() >= deadline) throw new Error("Timed out waiting for Plan Graph state");

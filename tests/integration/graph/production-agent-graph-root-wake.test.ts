@@ -201,9 +201,11 @@ async function runProductionRootWakeScenario(
       },
     });
     const initialRunId = String((initial as Record<string, unknown>)["runId"]);
+    const initialRun = await workspaceRuntime.waitForRun(initialRunId);
     assert.equal(
-      (await workspaceRuntime.waitForRun(initialRunId)).status,
+      initialRun.status,
       scenario === "root-failure" ? "failed" : "succeeded",
+      `${scenario}: initial run ${initialRunId} ended ${initialRun.status}: ${initialRun.error ?? "no error"}`,
     );
     await waitUntil(() => (host?.store.listActivationClaims(graphId).length ?? 0) === 1);
     const claim = host.store.listActivationClaims(graphId)[0]!;
