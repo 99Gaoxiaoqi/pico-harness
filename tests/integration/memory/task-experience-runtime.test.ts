@@ -1,7 +1,7 @@
 import type { RuntimeEvent } from "@pico/storage/runtime-event";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -11,6 +11,7 @@ import type { RuntimeToolStartedEvent, TaskExperienceStore } from "@pico/core";
 import { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-store";
 import { SqliteRuntimeEventStore } from "@pico/storage/sqlite/sqlite-runtime-event-store";
 import { SqliteRuntimeControlStore } from "@pico/storage/sqlite/sqlite-runtime-control-store";
+import { canonicalizeWorkspacePath } from "@pico/storage/workspace-path";
 import { AtomicMemoryContextBuilder } from "../../../packages/runtime/src/atomic-memory/context-builder.js";
 import {
   TaskExperienceRuntime,
@@ -784,6 +785,70 @@ test("首次Task尚未写入且临时input身份丢失时，冷恢复从durable 
   assert.ok(candidate);
   assert.equal(candidate.runId, hostRun);
   assert.ok(candidate.sources.some((source) => source.eventId === "tool-failure"));
+});
+
+test("Run绑定按物理工作区身份比较，不因大小写或目录链接别名误判", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-task-binding-canonical-"));
+  const workDir = join(root, "workspace");
+  const alias = join(root, "workspace-alias");
+  const other = join(root, "other");
+  await mkdir(workDir);
+  await mkdir(other);
+  await symlink(workDir, alias, process.platform === "win32" ? "junction" : "dir");
+  const workspaceKey = "binding-workspace",
+    sessionId = "binding-session",
+    runId = "bound-run",
+    hostRun = "host-run";
+  const store = new SqliteMemoryItemStore(join(root, "memory.sqlite"));
+  const events = new SqliteRuntimeEventStore({ storageRoot: join(root, "events") });
+  await events.initializeSession({ sessionId, workDir });
+  const ownerFence = await events.advanceOwnerFence(sessionId, 0);
+  t.after(async () => {
+    events.close();
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  // canonical run.started 记录物理小写路径，与宿主持有的原样路径在 Windows 上必然大小写不同。
+  await events.append(
+    {
+      schemaVersion: 2,
+      sessionId,
+      runId,
+      eventId: "bound-start",
+      invocationId: runId,
+      turnId: `${runId}-turn`,
+      at: new Date().toISOString(),
+      partial: false,
+      visibility: "internal",
+      kind: "run.started",
+      data: {
+        workDir: canonicalizeWorkspacePath(workDir),
+        agentSwarmAuthorization: "none",
+      },
+    },
+    { ownerFence },
+  );
+  const diagnostics: string[] = [];
+  const runtime = (dir: string, hostRunId: string) =>
+    new TaskExperienceRuntime({
+      session: { id: sessionId, runtimeEventStore: events },
+      workspaceKey,
+      workDir: dir,
+      hostRunId,
+      store,
+      gate: async () => ({ allowed: true }),
+      worker: { wake() {} },
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic.reason),
+    });
+  await runtime(alias, hostRun).admit(runId);
+  assert.equal(
+    (await store.taskExperiences.readTaskExperienceRunBinding(workspaceKey, sessionId, runId))
+      ?.hostRunId,
+    hostRun,
+  );
+  assert.deepEqual(diagnostics, []);
+  await runtime(other, "other-host-run").admit(runId);
+  assert.deepEqual(diagnostics, ["canonical_run_binding_unavailable"]);
 });
 
 test(

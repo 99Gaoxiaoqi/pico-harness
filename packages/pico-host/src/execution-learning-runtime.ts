@@ -24,6 +24,7 @@ import { sanitizeMemoryContent } from "@pico/runtime/atomic-memory/content-safet
 import { raceWithDeadlineReject } from "@pico/runtime/deadline";
 import type { RuntimeToolOperation } from "@pico/storage/runtime-event-store-contracts";
 import type { SqliteRuntimeEventStore } from "@pico/storage/sqlite/sqlite-runtime-event-store";
+import { canonicalizeWorkspacePath } from "@pico/storage/workspace-path";
 import type { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-store";
 import {
   conditionsFromFileCommit,
@@ -191,7 +192,9 @@ export async function validateCanonicalExecutionSource(
     starts.length !== 1 ||
     starts[0]?.kind !== "run.started" ||
     starts[0].data.continuationOf ||
-    (options.workDir && resolve(starts[0].data.workDir) !== resolve(options.workDir)) ||
+    (options.workDir &&
+      canonicalizeWorkspacePath(starts[0].data.workDir) !==
+        canonicalizeWorkspacePath(options.workDir)) ||
     run.some((event) => event.kind === "run.terminal" && event.data.recovered)
   )
     return undefined;

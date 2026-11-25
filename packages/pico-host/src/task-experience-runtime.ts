@@ -19,6 +19,7 @@ import { memoryTextContainsSecret } from "@pico/runtime/atomic-memory/extraction
 import { redactSensitiveText } from "@pico/runtime/sensitive-data-redaction";
 import { raceWithDeadlineReject } from "@pico/runtime/deadline";
 import type { SqliteRuntimeEventStore } from "@pico/storage/sqlite/sqlite-runtime-event-store";
+import { canonicalizeWorkspacePath } from "@pico/storage/workspace-path";
 
 type Journal = Pick<
   SqliteRuntimeEventStore,
@@ -84,7 +85,9 @@ export async function validateCanonicalTaskExperienceSource(
   if (
     starts.length !== 1 ||
     starts[0]?.kind !== "run.started" ||
-    (options.workDir && resolve(starts[0].data.workDir) !== resolve(options.workDir))
+    (options.workDir &&
+      canonicalizeWorkspacePath(starts[0].data.workDir) !==
+        canonicalizeWorkspacePath(options.workDir))
   )
     return undefined;
   if (event.kind === "message.committed") {
@@ -195,7 +198,8 @@ export class TaskExperienceRuntime {
           starts.length !== 1 ||
           starts[0]?.kind !== "run.started" ||
           starts[0].sessionId !== this.options.session.id ||
-          resolve(starts[0].data.workDir) !== resolve(this.options.workDir)
+          canonicalizeWorkspacePath(starts[0].data.workDir) !==
+            canonicalizeWorkspacePath(this.options.workDir)
         )
           throw new Error("canonical_run_binding_unavailable");
         const existing = await this.options.store.taskExperiences.readTaskExperienceRunBinding?.(
@@ -657,7 +661,8 @@ export class TaskExperienceRuntime {
     return canonical?.event.kind === "message.committed" &&
       starts.length === 1 &&
       starts[0]?.kind === "run.started" &&
-      resolve(starts[0].data.workDir) === resolve(this.options.workDir)
+      canonicalizeWorkspacePath(starts[0].data.workDir) ===
+        canonicalizeWorkspacePath(this.options.workDir)
       ? eventId
       : undefined;
   }
