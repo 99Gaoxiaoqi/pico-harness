@@ -48,8 +48,13 @@
   box-shadow: none;
 }
 
+/* Reserve the runtime row permanently: the status text, behavior selector and
+   pause/stop buttons appear mid-run and make the wide model/permission/thinking
+   controls wrap onto a second 28px row. Reserving that row (two control rows
+   plus their 6px gap) keeps the composer and the input geometry identical in
+   idle and running states instead of jumping 34px when a run starts. */
 .pico-astryx-composer > div > div:last-child {
-  min-height: 28px;
+  min-height: calc(28px * 2 + 6px);
   gap: 8px;
 }
 
@@ -58,10 +63,12 @@
   flex: 1;
 }
 
-/* Keep running controls beside model/context settings while they fit; let the
-   footer wrap naturally on narrow composer widths. */
+/* Keep running controls beside model/context settings on one row: the footer
+   height must not change when status text, the behavior selector or the
+   pause/stop buttons appear, otherwise the whole composer jumps mid-run. The
+   status text ellipsizes instead of wrapping the row. */
 .conversation-composer:not([data-status="idle"]) .pico-astryx-composer > div > div:last-child {
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
 }
 .conversation-composer:not([data-status="idle"])
   .pico-astryx-composer
@@ -78,7 +85,20 @@
 }
 .conversation-composer__actions > .astryx-field:has(.conversation-behavior) {
   min-width: 0;
+  flex: none;
   margin-inline-end: auto;
+}
+
+.conversation-composer__actions > .conversation-composer__status {
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+/* Let the dynamic run controls shrink and ellipsize instead of widening the
+   footer, which would push the control row onto another line. */
+.conversation-composer__actions {
+  min-width: 0;
+  overflow: hidden;
 }
 .conversation-composer .conversation-behavior {
   min-width: 0;

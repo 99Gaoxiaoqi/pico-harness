@@ -8,7 +8,7 @@ import {
   experienceNeedsReview,
 } from "../TaskExperiencePanel.js";
 import { useExperienceLedger } from "../useExperienceLedger.js";
-import { ExperienceUsagePanel } from "../ExperienceUsagePanel.js";
+import { ExperienceDiagnostics, ExperienceUsagePanel } from "../ExperienceUsagePanel.js";
 import { useFileDraft } from "../conversation/useFileDraft.js";
 import {
   getComposerResources,
@@ -1470,6 +1470,11 @@ export function ConversationPage() {
                   resources={composerResources}
                   inputRef={composerInputRef}
                   value={draft}
+                  overlay={
+                    ledger.diagnostics.length > 0 ? (
+                      <ExperienceDiagnostics diagnostics={ledger.diagnostics} />
+                    ) : undefined
+                  }
                   files={fileDraft.files}
                   fileValidationErrors={fileDraft.validationErrors}
                   onFilesAdd={fileDraft.add}
@@ -2008,7 +2013,6 @@ export function ConversationPage() {
                   ? ledger.uses.filter((use) => (use.hostRunId ?? use.runId) === activeRun.id)
                   : []
               }
-              diagnostics={ledger.diagnostics}
               workspacePath={workspacePath}
               onDetail={ledger.onDetail}
               onFeedback={ledger.onFeedback}

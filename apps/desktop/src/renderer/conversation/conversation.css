@@ -2391,6 +2391,7 @@
 }
 
 .conversation-composer {
+  position: relative;
   display: grid;
   width: min(100%, var(--conversation-content-width));
   min-height: 84px;
@@ -2404,6 +2405,27 @@
   transition:
     border-color var(--motion-base) var(--motion-ease),
     box-shadow var(--motion-base) var(--motion-ease);
+}
+
+/* Status badges belong to the composer, not to the transcript flow: pin them
+   above the card so typing, wrapping and message growth never move them and
+   their appearance never reflows the input. */
+.conversation-composer__overlay {
+  position: absolute;
+  z-index: 3;
+  inset-inline: 0;
+  bottom: calc(100% + 6px);
+  display: flex;
+  max-height: min(320px, 40vh);
+  overflow: auto;
+  overscroll-behavior: contain;
+  pointer-events: none;
+}
+
+.conversation-composer__overlay > * {
+  width: fit-content;
+  max-width: 100%;
+  pointer-events: auto;
 }
 
 .conversation-composer[data-status="running"],
