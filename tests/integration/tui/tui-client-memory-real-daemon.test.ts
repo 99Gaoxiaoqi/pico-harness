@@ -109,6 +109,9 @@ test("TUI memory commands persist and archive atomic memories through the real d
     store.close();
   }
   const largeStatus = await command("/memory status");
+  if (!/Active items: 1100/u.test(largeStatus))
+    // The protocol hides the store-level cause; dump the daemon log before failing.
+    await candidates.diagnoseFailure(t, "memory status after bulk seed", new Error(largeStatus));
   assert.match(largeStatus, /Active items: 1100/u);
   assert.match(largeStatus, /Archived items: 1/u);
   assert.match(largeStatus, /Total items: 1101/u);

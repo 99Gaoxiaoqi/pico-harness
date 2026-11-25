@@ -601,6 +601,19 @@ test("kernel client: trusted terminal owners isolate control, cleanup and reconn
   );
   assert.equal(attached.terminal.controlAllowed, true);
   if (process.platform !== "win32") {
+    // A freshly spawned PTY shell needs its prompt before it can accept command
+    // input; loaded CI runners can take seconds to reach it.
+    assert.equal(
+      await waitForCondition(async () => {
+        const output = await reconnected.request("terminal.attach", {
+          ...scope,
+          terminalId: target.terminalId,
+        });
+        return output.snapshot.length > 0;
+      }, 15_000),
+      true,
+      "PTY shell must produce prompt output before input",
+    );
     // Mobile xterm sends individual keystrokes, including whitespace and Enter.
     for (const data of ["\t", "\x15", ..."printf 'mobile-owner-ready\\n'\r"]) {
       await reconnected.request("terminal.input", { ...target, data });
@@ -618,8 +631,9 @@ test("kernel client: trusted terminal owners isolate control, cleanup and reconn
           terminalId: target.terminalId,
         });
         return /(?:^|[\r\n])mobile-owner-ready[\r\n]/.test(output.snapshot);
-      }, 5_000),
+      }, 15_000),
       true,
+      "typed command output must reach the attached snapshot",
     );
     await reconnected.request("terminal.resize", { ...target, cols: 100, rows: 30 });
   }
