@@ -848,11 +848,21 @@ export class DesktopAtomicMemoryService {
     try {
       if (this.closed) throw new Error("Memory service is closed");
       const key = resolvePicoPaths(workspacePath, { picoHome: this.options.picoHome }).workspace.id;
-      const store = await this.openStore();
-      try {
-        return await operation(store, key);
-      } finally {
-        store.close();
+      for (let attempt = 0; ; attempt += 1) {
+        let store: SqliteMemoryItemStore | undefined;
+        try {
+          store = this.openStore();
+          return await operation(store, key);
+        } catch (error) {
+          // A concurrent WAL checkpoint/writer in another process can make this
+          // connection observe a transient corrupt image. The durable state is
+          // unchanged and every mutation carries an operation identity, so one
+          // reopen + replay is safe; a real corruption still surfaces.
+          if (attempt > 0 || !isMemoryStoreCorruption(error)) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        } finally {
+          store?.close();
+        }
       }
     } catch (error) {
       if (error instanceof RuntimeProtocolError) throw error;
@@ -876,18 +886,10 @@ export class DesktopAtomicMemoryService {
     }
   }
 
-  private async openStore(): Promise<SqliteMemoryItemStore> {
-    const path = join(this.options.picoHome, "memory.sqlite");
-    try {
-      return new SqliteMemoryItemStore(path, { now: () => this.now() });
-    } catch (error) {
-      // A concurrent WAL checkpoint/writer in another process can make a fresh
-      // reader observe a transient corrupt image. The durable state is unchanged;
-      // reopen once before surfacing a service failure.
-      if (!isMemoryStoreCorruption(error)) throw error;
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      return new SqliteMemoryItemStore(path, { now: () => this.now() });
-    }
+  private openStore(): SqliteMemoryItemStore {
+    return new SqliteMemoryItemStore(join(this.options.picoHome, "memory.sqlite"), {
+      now: () => this.now(),
+    });
   }
 
   private now(): number {
