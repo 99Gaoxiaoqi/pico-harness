@@ -32,7 +32,7 @@ jobs:
       - name: Install filesystem metadata tools
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y acl attr libcap2-bin libcap-dev meson ninja-build python3-venv ripgrep xz-utils
+          sudo apt-get install --no-install-recommends -y acl attr libcap2-bin libcap-dev meson ninja-build python3-venv ripgrep xvfb xz-utils
 
       - name: Install dependencies
         run: npm ci
@@ -137,7 +137,7 @@ jobs:
       - name: Install filesystem metadata tools
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y acl attr libcap2-bin libcap-dev meson ninja-build python3-venv ripgrep xz-utils
+          sudo apt-get install --no-install-recommends -y acl attr libcap2-bin libcap-dev meson ninja-build python3-venv ripgrep xvfb xz-utils
 
       - name: Install dependencies for this Node ABI
         run: npm ci
@@ -188,7 +188,7 @@ jobs:
       - name: Install filesystem metadata tools
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y acl attr libcap2-bin libcap-dev meson ninja-build python3-venv ripgrep xz-utils
+          sudo apt-get install --no-install-recommends -y acl attr libcap2-bin libcap-dev meson ninja-build python3-venv ripgrep xvfb xz-utils
 
       - name: Install dependencies
         run: npm ci
@@ -209,7 +209,7 @@ jobs:
         run: |
           node_executable="$(command -v node)"
           npm_executable="$(command -v npm)"
-          PATH="/usr/bin:/bin:$PATH" "$node_executable" "$npm_executable" run test:integration -- --shard ${{ matrix.shard }}/6
+          PATH="/usr/bin:/bin:$PATH" xvfb-run -a "$node_executable" "$npm_executable" run test:integration -- --shard ${{ matrix.shard }}/6
 
   node-compatibility-integration:
     name: Node.js ${{ matrix.node }} integration shard ${{ matrix.shard }}/6
@@ -235,7 +235,7 @@ jobs:
       - name: Install filesystem metadata tools
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y acl attr libcap2-bin libcap-dev meson ninja-build python3-venv ripgrep xz-utils
+          sudo apt-get install --no-install-recommends -y acl attr libcap2-bin libcap-dev meson ninja-build python3-venv ripgrep xvfb xz-utils
 
       - name: Install dependencies for this Node ABI
         run: npm ci
@@ -256,7 +256,7 @@ jobs:
         run: |
           node_executable="$(command -v node)"
           npm_executable="$(command -v npm)"
-          PATH="/usr/bin:/bin:$PATH" "$node_executable" "$npm_executable" run test:integration -- --shard ${{ matrix.shard }}/6
+          PATH="/usr/bin:/bin:$PATH" xvfb-run -a "$node_executable" "$npm_executable" run test:integration -- --shard ${{ matrix.shard }}/6
 
   windows-security:
     name: Windows security integration

@@ -104,6 +104,9 @@ if (listOnly) {
       "@pico/cli/tui/preload-env",
       "--test",
       "--test-concurrency=1",
+      // A failed production-graph test can leave timers behind; the runner must
+      // still report and terminate instead of stalling the CI job.
+      "--test-force-exit",
       ...selectedFiles,
     ],
     { cwd: root, stdio: "inherit" },
