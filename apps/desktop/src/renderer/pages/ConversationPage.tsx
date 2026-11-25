@@ -1519,7 +1519,7 @@ export function ConversationPage() {
                   onStop={activeRun ? () => void actions.stopRun(activeRun.id) : undefined}
                   onSetGoal={goalControls.openDialog}
                   goalDisabled={!goalControls.canSetGoal}
-                  onAttach={!researchActive && composerStatus === "idle" ? openCatalog : undefined}
+                  onAttach={!researchActive ? openCatalog : undefined}
                   modes={
                     composerReady && (!sessionRef || conversation?.settings)
                       ? {
