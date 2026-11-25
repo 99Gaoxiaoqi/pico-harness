@@ -104,4 +104,4 @@ final result: passed
 - [修改前·空闲](docs/assets/composer-running/before-idle.png)、[修改前·运行中](docs/assets/composer-running/before-running.png)、[修改前·发送中](docs/assets/composer-running/before-sending.png)
 - [修改后·空闲](docs/assets/composer-running/after-idle.png)、[修改后·运行中](docs/assets/composer-running/after-running.png)、[修改后·发送中](docs/assets/composer-running/after-sending.png)
 
-截图由 headless Chrome 渲染与集成测试相同的 composer 场景后裁取输入卡片区域，比例 2×（1640×320 像素）。`tests/integration/desktop/desktop-composer-geometry.test.ts` 新增三态 DOM 几何断言；回退本次 CSS 后该用例在“运行态控件使用独立行”处失败，量测到控件行高 62px、状态行与控件同行。renderer 类型检查仍命中仓库既有的 `ConversationSurface.tsx:77` `ChatLayoutProps.autoScroll` 报错，与本次改动无关。
+截图由 headless Chrome 渲染与集成测试相同的 composer 场景后裁取输入卡片区域，比例 2×（1640×320 像素）。`tests/integration/desktop/desktop-composer-geometry.test.ts` 新增三态 DOM 几何断言；回退本次 CSS 后该用例在“运行态控件使用独立行”处失败，量测到控件行高 62px、状态行与控件同行。renderer 类型检查（应用 `patches/` 后）通过。
