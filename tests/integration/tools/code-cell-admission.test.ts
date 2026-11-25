@@ -1,11 +1,18 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import { CodeCellAdmission, codeCellAdmissionFor } from "@pico/runtime/code-cell-admission";
 import { createCodeModeTool } from "@pico/pico-host/code-mode-tool";
 import type { CodeModeExecutionResult } from "@pico/pico-host/code-mode";
 import { ToolRegistry } from "@pico/pico-host/product-tool-registry";
 import type { ToolExecutionContext } from "@pico/pico-host/tool-registry-contract";
 import { ToolAccesses } from "@pico/runtime/tool-access";
+import { experimental_setMaxWorkers } from "@ai-sdk/code-mode";
+
+// The default worker cap is derived from host available memory; a low-memory
+// CI runner can compute one worker, which cannot express two independent
+// Sessions executing concurrently. Pin the cap for this file only.
+experimental_setMaxWorkers(4);
+after(() => experimental_setMaxWorkers(undefined));
 
 function deferred() {
   let resolve!: () => void;
