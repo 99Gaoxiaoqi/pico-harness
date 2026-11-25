@@ -174,6 +174,7 @@ for (const stopViaBoard of [false, true])
                   (graph) => graphHost?.store.listActivationClaims(graph.graphId) ?? [],
                 ),
               )}`,
+            { cause: error },
           );
         }
         const active = await readProjection();
