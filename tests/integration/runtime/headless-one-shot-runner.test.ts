@@ -337,7 +337,12 @@ test("headless image attachments preserve mixed path order and deduplicate physi
 test("headless sends image bytes only through Runtime and keeps result and trace payload-free", async (context) => {
   const fixture = await createFixture(context, "images-runtime-wire");
   await configureFixture(fixture, "secret-canary-images-runtime-wire", true, undefined, true);
-  const bytes = imageBytes("image/png", 31);
+  // The model pipeline validates and decodes real image headers, so this path
+  // needs a genuine 1x1 PNG rather than a synthetic header-only buffer.
+  const bytes = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+    "base64",
+  );
   const encoded = bytes.toString("base64");
   await writeFile(join(fixture.workspace, "runtime.png"), bytes);
   const request = {
