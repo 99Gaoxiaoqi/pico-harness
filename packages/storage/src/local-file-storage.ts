@@ -30,6 +30,11 @@ import { LeaseConflictError, OwnerLease, type OwnerLeaseRecord } from "./owner-l
 
 const DEFAULT_LOCK_TIMEOUT_MS = 5_000;
 const DEFAULT_LOCK_RETRY_MS = 10;
+const TRANSIENT_ACQUIRE_ERROR_CODES: Record<string, true> = {
+  EPERM: true,
+  EACCES: true,
+  EBUSY: true,
+};
 const heldAsyncLocks = new AsyncLocalStorage<ReadonlySet<string>>();
 const localAsyncLockTails = new Map<string, Promise<void>>();
 
@@ -232,8 +237,17 @@ async function acquireFileLock(
         ...(options.staleAfterMs !== undefined ? { staleAfterMs: options.staleAfterMs } : {}),
       });
     } catch (error) {
-      if (!(error instanceof LeaseConflictError)) throw error;
-      lastOwner = error.owner;
+      if (error instanceof LeaseConflictError) lastOwner = error.owner;
+      // Windows 原子替换与 AV/索引器会让锁目录内的 open/rename 瞬时返回
+      // EPERM/EACCES/EBUSY；它是竞争而非终态，继续等到锁预算耗尽。
+      else if (
+        !(
+          error instanceof Error &&
+          "code" in error &&
+          TRANSIENT_ACQUIRE_ERROR_CODES[String(error.code)]
+        )
+      )
+        throw error;
       if (Date.now() >= deadline) {
         throw new FileLockTimeoutError(
           `Timed out waiting for file lock ${lockDirectory}${
@@ -245,7 +259,9 @@ async function acquireFileLock(
           lastOwner,
         );
       }
-      await new Promise<void>((resolveRetry) => setTimeout(resolveRetry, retryIntervalMs));
+      const retryDelay = Promise.withResolvers<void>();
+      setTimeout(retryDelay.resolve, retryIntervalMs);
+      await retryDelay.promise;
     }
   }
 }
