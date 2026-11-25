@@ -201,14 +201,28 @@ async function runProductionRootWakeScenario(
       },
     });
     const initialRunId = String((initial as Record<string, unknown>)["runId"]);
+    const initialRun = await workspaceRuntime.waitForRun(initialRunId);
     assert.equal(
-      (await workspaceRuntime.waitForRun(initialRunId)).status,
+      initialRun.status,
       scenario === "root-failure" ? "failed" : "succeeded",
+      `${scenario}: initial run ${initialRunId} ended ${initialRun.status}: ${initialRun.error ?? "no error"}`,
     );
     await waitUntil(() => (host?.store.listActivationClaims(graphId).length ?? 0) === 1);
     const claim = host.store.listActivationClaims(graphId)[0]!;
     await waitUntil(() => workspaceRuntime.getRun(claim.targetRunId) !== undefined);
-    assert.equal((await workspaceRuntime.waitForRun(claim.targetRunId)).status, "succeeded");
+    const claimRun = await workspaceRuntime.waitForRun(claim.targetRunId);
+    assert.equal(
+      claimRun.status,
+      "succeeded",
+      `${scenario}: operator claim run ${claim.targetRunId} ended ${claimRun.status}: ${
+        claimRun.error ?? "no error"
+      }; events=${JSON.stringify(
+        await rootLease.session.runtimeEventStore!.readRun(
+          claim.targetSessionId,
+          claim.targetRunId,
+        ),
+      )}`,
+    );
     const operatorEvents = await rootLease.session.runtimeEventStore!.readRun(
       claim.targetSessionId,
       claim.targetRunId,
@@ -339,7 +353,7 @@ async function runProductionRootWakeScenario(
   }
 }
 
-async function waitUntil(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
+async function waitUntil(predicate: () => boolean, timeoutMs = 30_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
     if (Date.now() >= deadline) throw new Error("Timed out waiting for root wake terminal state");

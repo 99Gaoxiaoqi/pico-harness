@@ -204,6 +204,13 @@ const key = async (element, key, options = {}) => {
   await act(async () => element.dispatchEvent(new KeyboardEvent("keydown", {key, bubbles: true, cancelable: true, ...options})));
 };
 const frame = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+const waitFor = async (predicate, message, timeout = 5000) => {
+  const deadline = performance.now() + timeout;
+  while (!predicate()) {
+    if (performance.now() >= deadline) throw new Error(message);
+    await frame();
+  }
+};
 const render = () => root.render(<PicoTheme><RuntimeContext value={runtime}><MemoryRouter initialEntries={["/task/new"]}><Routes><Route element={<AppShell/>}><Route path="*" element={<Page/>}/></Route></Routes></MemoryRouter></RuntimeContext></PicoTheme>);
 const projectMenu = () => document.querySelector('[role="menu"][aria-label="项目操作 maka-harness"]');
 const projectItem = (name) => [...projectMenu().querySelectorAll('[role="menuitem"]')].find(item => item.textContent.includes(name));
@@ -233,8 +240,14 @@ async function scenario() {
   check(document.querySelectorAll(".sidebar-project__header").length === 1, "Linked worktrees share one project group");
   check(document.querySelectorAll(".sidebar-project__sessions .sidebar-task-link").length === 2, "Both worktree sessions remain visible in the shared group");
   await click("项目操作 maka-harness");
-  await frame();
-  check(projectMenu().querySelectorAll('[role="menuitem"]').length === 2 && !projectItem("创建任务"), "Project menu contains only archive and removal");
+  await waitFor(
+    () =>
+      projectMenu()?.querySelectorAll('[role="menuitem"]').length === 3 &&
+      Boolean(projectItem("查看项目记忆")) &&
+      !projectItem("创建任务"),
+    "Project menu contains only memory, archive and removal: " +
+      [...(projectMenu()?.querySelectorAll('[role="menuitem"]') ?? [])].map(item => item.textContent).join(" | "),
+  );
   const menuButtonRect = button("项目操作 maka-harness").getBoundingClientRect();
   const newTaskButtonRect = button("新建任务 maka-harness").getBoundingClientRect();
   check(menuButtonRect.right <= newTaskButtonRect.left && newTaskButtonRect.right <= sidebar().right, "Direct new-task button sits to the right of the project menu without overlap");

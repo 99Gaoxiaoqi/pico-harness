@@ -8,7 +8,11 @@ import { coordinateEventLogHardCut } from "../../../packages/storage/src/event-l
 import { CURRENT_EVENT_LOG_PROTOCOL_MARKER } from "../../../packages/storage/src/sqlite/event-log-hard-cut-scope.js";
 import { SqliteRuntimeEventStore } from "../../../packages/storage/src/sqlite/sqlite-runtime-event-store.js";
 import { ALL_WORKSPACE_SQLITE_SCOPES } from "../../../packages/storage/src/sqlite/workspace-scopes.js";
-import { migrateOperationalDatabaseSync } from "../../../packages/storage/src/sqlite/sqlite-schema.js";
+import { CONTROL_SCOPE } from "../../../packages/storage/src/sqlite/control-scope.js";
+import {
+  migrateOperationalDatabaseSync,
+  scopeCurrentVersion,
+} from "../../../packages/storage/src/sqlite/sqlite-schema.js";
 import {
   configureSqliteLongTermMemoryDatabase,
   initializeSqliteLongTermMemoryDatabase,
@@ -37,6 +41,8 @@ function seed(database: DatabaseSync, version: 7 | 8 | 9) {
       UPDATE operational_schema_migrations SET version=7 WHERE scope='control';`);
   } else if (version === 8) {
     database.exec("UPDATE operational_schema_migrations SET version=8 WHERE scope='control'");
+  } else {
+    database.exec("UPDATE operational_schema_migrations SET version=9 WHERE scope='control'");
   }
   database.exec(`
     INSERT INTO event_log_epoch VALUES(1,1,'retired-protocol','previous-cut','now');
@@ -136,7 +142,7 @@ test("offline context reset clears v7/v8/v9 execution facts atomically and prese
         verify
           .prepare("SELECT version FROM operational_schema_migrations WHERE scope='control'")
           .get()!.version,
-        version === 7 ? 9 : version,
+        version === 7 ? scopeCurrentVersion(CONTROL_SCOPE) : version,
       );
       const initialized = coordinateEventLogHardCut(verify);
       assert.equal(initialized.status, "cut");

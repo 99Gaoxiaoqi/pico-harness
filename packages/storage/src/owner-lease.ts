@@ -7,6 +7,12 @@ import { reportTransientOwnerLeaseHeartbeatError } from "./owner-lease-diagnosti
 
 const LEASE_SCHEMA_VERSION = 1 as const;
 const ACQUIRE_RETRY_LIMIT = 8;
+const RECORD_READ_RETRY_LIMIT = 5;
+const TRANSIENT_RECORD_READ_CODES: Record<string, true> = {
+  EPERM: true,
+  EACCES: true,
+  EBUSY: true,
+};
 
 export interface OwnerLeaseOptions {
   leaseDirectory: string;
@@ -409,12 +415,28 @@ function leaseConflict(owner: OwnerLeaseRecord): LeaseConflictError {
 
 async function readLeaseRecord(path: string): Promise<OwnerLeaseRecord | undefined> {
   let parsed: unknown;
-  try {
-    parsed = JSON.parse(await readFile(path, "utf8")) as unknown;
-  } catch (error) {
-    if (isNodeCode(error, "ENOENT")) return undefined;
-    if (error instanceof SyntaxError) return undefined;
-    throw error;
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      parsed = JSON.parse(await readFile(path, "utf8")) as unknown;
+      break;
+    } catch (error) {
+      if (isNodeCode(error, "ENOENT")) return undefined;
+      if (error instanceof SyntaxError) return undefined;
+      // Windows 下 owner.json 的原子替换与 AV/索引器扫描会让 open 瞬时返回
+      // EPERM/EACCES/EBUSY；跨进程获取锁时把它当致命错误会直接中断整个操作。
+      if (
+        attempt < RECORD_READ_RETRY_LIMIT &&
+        error instanceof Error &&
+        "code" in error &&
+        TRANSIENT_RECORD_READ_CODES[String(error.code)]
+      ) {
+        const retryDelay = Promise.withResolvers<void>();
+        setTimeout(retryDelay.resolve, 10 * (attempt + 1));
+        await retryDelay.promise;
+        continue;
+      }
+      throw error;
+    }
   }
   return parseLeaseRecord(parsed);
 }

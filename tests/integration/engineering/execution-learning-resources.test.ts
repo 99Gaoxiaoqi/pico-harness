@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { build } from "esbuild";
@@ -97,17 +97,18 @@ const { pathToFileURL } = require("node:url");
   const archived = process.env.PICO_RESOURCE_LAYOUT === "asar";
   const learning = archived ? require(modulePath) : await import(pathToFileURL(modulePath).href);
   const reporterPath = await fs.realpath(process.env.PICO_RESOURCE_REPORTER);
+  const reporterUrl = pathToFileURL(reporterPath).href;
   const nativeNode = process.env.PICO_RESOURCE_NODE;
   const reportDirectory = path.dirname(reporterPath);
   const target = {kind:"node-test",argv:[nativeNode,"--test",fixture],testFiles:[fixture],cwd:path.dirname(fixture)};
   const instrumented = await learning.instrumentCommand(target, {reportDirectory});
   assert.ok(instrumented, "published helper instruments node --test");
   const quote = value => "'" + value.replaceAll("'", "'\\\\''") + "'";
-  assert.ok(instrumented.command.includes(quote("--test-reporter=" + reporterPath)), instrumented.command);
+  assert.ok(instrumented.command.includes(quote("--test-reporter=" + reporterUrl)), instrumented.command);
   assert.ok(instrumented.command.includes(quote(fixture)), "instrumentation retains the exact entry file");
   // Run the fixed Node argv directly so resource validation is independent of the platform shell.
   const execution = spawnSync(nativeNode, ["--test","--test-reporter=tap","--test-reporter-destination=stdout",
-    "--test-reporter="+reporterPath,"--test-reporter-destination="+instrumented.reportPath,fixture],
+    "--test-reporter="+reporterUrl,"--test-reporter-destination="+instrumented.reportPath,fixture],
     {encoding:"utf8",timeout:10000,env:process.env});
   const contents = await fs.readFile(instrumented.reportPath,"utf8");
   const report = learning.parseExecutionTestReport(contents);
@@ -115,7 +116,7 @@ const { pathToFileURL } = require("node:url");
   assert.equal(execution.status, failed ? 1 : 0, execution.stderr || execution.stdout);
   assert.equal(report.complete,true,contents);
   assert.equal(report.success,!failed,contents);
-  assert.equal(report.runner.execPath,await fs.realpath(nativeNode),"test runner must be external native Node");
+  assert.equal(await fs.realpath(report.runner.execPath),await fs.realpath(nativeNode),"test runner must be external native Node");
   assert.match(report.runner.fingerprint,/^[a-f0-9]{64}$/,"native reporter records its executable fingerprint");
   const original = JSON.stringify([fixture,"stable suite","original target"]);
   const other = JSON.stringify([fixture,"stable suite","other target"]);
@@ -227,6 +228,7 @@ export { createExecutionLearningIO, executionLearningRecallTargets } from ${JSON
         "require-addon",
         "which-runtime",
         "bare-addon-resolve",
+        "bare-host-parser",
         "bare-module-resolve",
         "bare-semver",
       ]) {
@@ -246,9 +248,15 @@ export { createExecutionLearningIO, executionLearningRecallTargets } from ${JSON
       const archive = join(resourceDirectory, "app.asar");
       assert.notEqual(asarOptions, false);
       await createPackageWithOptions(archivedApp, archive, asarOptions as CreateOptions);
-      const archivedHost = statFile(archive, ".vite/build/daemon.cjs");
+      // @electron/asar stores Windows entries with backslashes but accepts
+      // forward-slash lookups only on POSIX.
+      const archiveEntry = (entry: string) => entry.split("/").join(sep);
+      const archivedHost = statFile(archive, archiveEntry(".vite/build/daemon.cjs"));
       assert.ok("size" in archivedHost && archivedHost.size > 0);
-      const archivedReporter = statFile(archive, ".vite/build/execution-learning-reporter.js");
+      const archivedReporter = statFile(
+        archive,
+        archiveEntry(".vite/build/execution-learning-reporter.js"),
+      );
       assert.ok(
         "size" in archivedReporter && archivedReporter.size > 0 && !archivedReporter.unpacked,
       );

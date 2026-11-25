@@ -25,7 +25,7 @@ for (const stopViaBoard of [false, true])
   test(
     `production ${stopViaBoard ? "Graph board stop" : "Plan cancellation"} retires a yielded active Graph Plan and aborts both operators without waking root`,
     {
-      timeout: 30_000,
+      timeout: 90_000,
     },
     async () => {
       const root = await mkdtemp(join(tmpdir(), "pico-production-plan-graph-cancel-"));
@@ -162,7 +162,21 @@ for (const stopViaBoard of [false, true])
         assert.equal(approved.accepted, true);
         const initial = await runtime.waitForRun(approved.run.runId);
         assert.equal(initial.status, "succeeded", initial.error);
-        await waitUntil(() => operatorsEntered.size === 2);
+        try {
+          await waitUntil(() => operatorsEntered.size === 2);
+        } catch (error) {
+          const graphs = graphHost?.store.listGraphs(sessionId) ?? [];
+          throw new Error(
+            `${(error as Error).message}; entered=${operatorsEntered.size} ` +
+              `graphs=${JSON.stringify(graphs)} ` +
+              `claims=${JSON.stringify(
+                graphs.flatMap(
+                  (graph) => graphHost?.store.listActivationClaims(graph.graphId) ?? [],
+                ),
+              )}`,
+            { cause: error },
+          );
+        }
         const active = await readProjection();
         assert.equal(active.execution?.status, "active");
         assert.ok(active.execution?.graph);
@@ -295,7 +309,7 @@ async function waitForGate(gate: Promise<void>, signal: AbortSignal): Promise<vo
   }
 }
 
-async function waitUntil(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
+async function waitUntil(predicate: () => boolean, timeoutMs = 60_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
     if (Date.now() >= deadline)

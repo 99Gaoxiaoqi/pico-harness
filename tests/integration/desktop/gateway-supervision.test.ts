@@ -3,6 +3,7 @@ import { execFile, spawn } from "node:child_process";
 import { access, chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
@@ -50,7 +51,7 @@ test("共享状态锁跨进程保持代次，旧更新不能覆盖停止，过�
   const childScript = join(home, "state-writer.mjs");
   await writeFile(
     childScript,
-    `import { beginGatewayMaintenance } from ${JSON.stringify(stateModule)}; for(let i=0;i<8;i++) await beginGatewayMaintenance(process.argv[2], 'writer-'+process.pid);`,
+    `import { beginGatewayMaintenance } from ${JSON.stringify(pathToFileURL(stateModule).href)}; for(let i=0;i<8;i++) await beginGatewayMaintenance(process.argv[2], 'writer-'+process.pid);`,
   );
   await Promise.all(
     Array.from({ length: 4 }, () => promisify(execFile)(process.execPath, [childScript, home])),
@@ -333,6 +334,18 @@ test("启动中的真实Gateway子进程遇到停止或维护会退出，维护�
     }
     throw new Error(`child marker ${expected} did not arrive`);
   }
+  async function waitExited(pid: number) {
+    for (let i = 0; i < 200; i += 1) {
+      try {
+        process.kill(pid, 0);
+      } catch (error) {
+        assert.match(String(error), /ESRCH/u);
+        return;
+      }
+      await delay(20);
+    }
+    assert.fail(`child process ${pid} is still alive`);
+  }
   const first = launch();
   t.after(() => {
     first.kill("SIGKILL");
@@ -343,7 +356,7 @@ test("启动中的真实Gateway子进程遇到停止或维护会退出，维护�
   await setGatewayDesiredRunning(home, false);
   await waitMarker(exitMarker, 1);
   assert.equal(await firstExit, 0);
-  assert.throws(() => process.kill(started.pid, 0), /ESRCH/u);
+  await waitExited(started.pid);
   await setGatewayDesiredRunning(home, true);
   const second = launch();
   t.after(() => {
@@ -353,7 +366,7 @@ test("启动中的真实Gateway子进程遇到停止或维护会退出，维护�
   const beforeUpdate = await waitMarker(marker, 2);
   const maintenance = await beginGatewayMaintenance(home, "1.2.3", 5_000);
   await waitMarker(exitMarker, 2);
-  assert.throws(() => process.kill(beforeUpdate.pid, 0), /ESRCH/u);
+  await waitExited(beforeUpdate.pid);
   assert.equal(await finishGatewayMaintenance(home, maintenance.generation), true);
   const afterUpdate = await waitMarker(marker, 3);
   assert.equal(afterUpdate.generation, maintenance.generation + 1);
@@ -364,7 +377,7 @@ test("启动中的真实Gateway子进程遇到停止或维护会退出，维护�
   second.kill("SIGCONT");
   await waitMarker(exitMarker, 3);
   const reopenedChild = await waitMarker(marker, 4);
-  assert.throws(() => process.kill(afterUpdate.pid, 0), /ESRCH/u);
+  await waitExited(afterUpdate.pid);
   assert.notEqual(reopenedChild.pid, afterUpdate.pid);
   assert.equal(reopenedChild.generation, reopened.generation);
   assert.equal((await setGatewayDesiredRunning(home, true)).generation, reopened.generation);
@@ -382,7 +395,7 @@ test("启动中的真实Gateway子进程遇到停止或维护会退出，维护�
   second.kill("SIGCONT");
   await waitMarker(exitMarker, 4);
   const newestChild = await waitMarker(marker, 5);
-  assert.throws(() => process.kill(reopenedChild.pid, 0), /ESRCH/u);
+  await waitExited(reopenedChild.pid);
   assert.equal(newestChild.generation, fastMaintenance.generation + 1);
   assert.equal(newestChild.buildId, "1.2.4");
   await setGatewayDesiredRunning(home, false);

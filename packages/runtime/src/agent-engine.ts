@@ -181,7 +181,23 @@ function appendTurnTail(
       };
       return requestMessages;
     }
-    if (checkpointIndex < 0 || !taskAnchor) throw new Error("任务上下文载体不可用");
+    if (checkpointIndex < 0 || !taskAnchor) {
+      // Host control input (Graph Operator activation and Supervisor wakes) is
+      // hidden from the transcript but still the Run's task carrier. Anchor the
+      // current-turn context on it instead of failing an otherwise valid Run.
+      const hiddenUserIndex = messages.findLastIndex(
+        (message) => message.role === "user" && message.toolCallId === undefined,
+      );
+      if (hiddenUserIndex < 0) throw new Error("任务上下文载体不可用");
+      if (!normalizedTail) return messages;
+      const hiddenUser = messages[hiddenUserIndex]!;
+      const requestMessages = [...messages];
+      requestMessages[hiddenUserIndex] = {
+        ...hiddenUser,
+        content: `${hiddenUser.content}\n\n<current-turn-context>\n${normalizedTail}\n</current-turn-context>`,
+      };
+      return requestMessages;
+    }
     const checkpoint = messages[checkpointIndex]!;
     const end =
       checkpoint.content.indexOf(COMPACTION_SUMMARY_CLOSE_TAG) +

@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { sanitizeMemoryContent } from "@pico/runtime/atomic-memory/content-safety";
 import { AtomicMemoryContextBuilder } from "@pico/runtime/atomic-memory/context-builder";
+import { sleepForRetry } from "@pico/runtime/provider-retry";
 import {
   createExecutionLearningIO,
   executionLearningRecallTargets,
@@ -848,13 +849,21 @@ export class DesktopAtomicMemoryService {
     try {
       if (this.closed) throw new Error("Memory service is closed");
       const key = resolvePicoPaths(workspacePath, { picoHome: this.options.picoHome }).workspace.id;
-      const store = new SqliteMemoryItemStore(join(this.options.picoHome, "memory.sqlite"), {
-        now: () => this.now(),
-      });
-      try {
-        return await operation(store, key);
-      } finally {
-        store.close();
+      for (let attempt = 0; ; attempt += 1) {
+        let store: SqliteMemoryItemStore | undefined;
+        try {
+          store = this.openStore();
+          return await operation(store, key);
+        } catch (error) {
+          // A concurrent WAL checkpoint/writer in another process can make this
+          // connection observe a transient corrupt image. The durable state is
+          // unchanged and every mutation carries an operation identity, so one
+          // reopen + replay is safe; a real corruption still surfaces.
+          if (attempt > 0 || !isMemoryStoreCorruption(error)) throw error;
+          await sleepForRetry(100);
+        } finally {
+          store?.close();
+        }
       }
     } catch (error) {
       if (error instanceof RuntimeProtocolError) throw error;
@@ -871,8 +880,21 @@ export class DesktopAtomicMemoryService {
         "记忆服务暂时不可用",
       );
       Object.defineProperty(failure, "cause", { value: error });
+      // The protocol keeps the cause off the wire; the daemon's stderr is the only
+      // place a store-level fault (schema, lock, permissions) can be traced.
+      console.error(
+        `[atomic-memory] ${join(this.options.picoHome, "memory.sqlite")} ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
       throw failure;
     }
+  }
+
+  private openStore(): SqliteMemoryItemStore {
+    return new SqliteMemoryItemStore(join(this.options.picoHome, "memory.sqlite"), {
+      now: () => this.now(),
+    });
   }
 
   private now(): number {
@@ -1108,6 +1130,17 @@ function publicExperienceCandidate(
         .map((key) => [key, (candidate as unknown as Record<string, unknown>)[key]]),
     ),
   } as TaskExperienceCandidate;
+}
+
+/** SQLite reports a transient cross-process WAL race as corruption. */
+function isMemoryStoreCorruption(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const code = "code" in error ? String(error.code) : "";
+  return (
+    code === "SQLITE_CORRUPT" ||
+    code === "SQLITE_NOTADB" ||
+    /database disk image is malformed|file is not a database/i.test(error.message)
+  );
 }
 
 function invalid(message: string): RuntimeProtocolError {

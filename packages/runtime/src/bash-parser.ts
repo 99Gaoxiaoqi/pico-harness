@@ -105,6 +105,15 @@ export function initializeBashParser(): Promise<void> {
       });
       const loaded = await Language.load(grammar);
       if (loaded.abiVersion !== 15) throw new Error("Unsupported Bash grammar ABI");
+      // Compile the grammar once here so the per-command analysis budget measures
+      // the command, not the first cold parse on a loaded machine.
+      const warmup = new Parser();
+      try {
+        warmup.setLanguage(loaded);
+        warmup.parse("true")?.delete();
+      } finally {
+        warmup.delete();
+      }
       language = loaded;
     } catch (cause) {
       throw new BashParserUnavailableError(

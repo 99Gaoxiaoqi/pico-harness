@@ -9,6 +9,7 @@ import { WorkspaceRuntimeService } from "@pico/pico-host/workspace-runtime-servi
 import { globalSessionManager } from "@pico/pico-host/session";
 import { WorkspaceTrustStore } from "@pico/pico-host/workspace-trust";
 import { writeDesktopModelRouting } from "../../fixtures/desktop-model-routing.js";
+import { sameWorkspacePath } from "../helpers/path-identity.js";
 
 test("外部会话导入要求信任、持久注册且同源并发导入幂等", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-desktop-external-import-"));
@@ -83,7 +84,10 @@ test("外部会话导入要求信任、持久注册且同源并发导入幂等",
   };
   assert.match(imported.session.sessionId, /^cli-ext-[0-9a-f]{32}$/u);
   importedSessionId = imported.session.sessionId;
-  assert.equal(imported.session.workspacePath, canonicalWorkspace);
+  assert.ok(
+    sameWorkspacePath(imported.session.workspacePath, canonicalWorkspace),
+    `imported session must bind the trusted workspace: ${imported.session.workspacePath}`,
+  );
   assert.deepEqual(concurrentImport.session, imported.session);
   const reimported = (await desktop.handle(request)) as {
     session: { sessionId: string; workspacePath: string };
@@ -95,7 +99,7 @@ test("外部会话导入要求信任、持久注册且同源并发导入幂等",
   };
   assert.ok(
     workspaceResult.workspaces.some(
-      (entry) => entry.workspacePath === canonicalWorkspace && entry.registered,
+      (entry) => sameWorkspacePath(entry.workspacePath, canonicalWorkspace) && entry.registered,
     ),
   );
 });

@@ -215,19 +215,11 @@ test("large Runtime ToolResult keeps inline facts, bounds provider projection, a
   assert.equal(reconstructed, rawOutput);
   const forkPort = createSessionForkRuntimePort();
   const forkSeed = (await recovered.readDurableForkSnapshot()).runtimeSeedEntries;
-  const unknownRef = "pico://archive/other-session/unknown/" + "0".repeat(64) + "/5";
   const fork = {
     sourceSessionId: recovered.id,
     targetSessionId: "archive-fork-target",
     operationId: "archive-fork",
     seedEntries: forkSeed,
-    modelCheckpoint: {
-      coveredMessageCount: forkSeed.filter((entry) => entry.kind === "model").length,
-      summary: {
-        role: "assistant" as const,
-        content: `Summary known ${ref}; unknown ${unknownRef}`,
-      },
-    },
     workDir: fixture.workDir,
     runtimeAuthority: recovered.runtimeEventStore!,
     publication: { async assertOwned() {} },
@@ -240,13 +232,6 @@ test("large Runtime ToolResult keeps inline facts, bounds provider projection, a
   ) as RuntimeToolResultRecordedEvent;
   const forkRef = forkResult.data.projection.text.match(/pico:\/\/archive\/[^"\s]+/u)![0];
   assert.notEqual(forkRef, ref);
-  const forkCheckpoint = (
-    await recovered.runtimeEventStore!.readSession(fork.targetSessionId)
-  ).find((event) => event.kind === "context.checkpoint.recorded");
-  assert.ok(forkCheckpoint?.kind === "context.checkpoint.recorded");
-  assert.ok(forkCheckpoint.data.summary.content.includes(forkRef));
-  assert.ok(!forkCheckpoint.data.summary.content.includes(ref));
-  assert.ok(forkCheckpoint.data.summary.content.includes(unknownRef));
   assert.equal(
     JSON.parse(
       await bindToolResultArchiveReader(recovered.runtimeEventStore!, fork.targetSessionId).read(

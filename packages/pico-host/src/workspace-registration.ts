@@ -157,11 +157,14 @@ export class WorkspaceRegistrationStore {
       );
       if (changed) await this.write(state);
       const normalized = await normalizeRegistrations(state.workspaces, dirname(this.filePath));
-      canonical =
-        candidates.find((candidate) =>
-          normalized.some((entry) => entry.workspacePath === candidate),
-        ) ?? canonical;
-      const workspaces = normalized.filter((entry) => !candidates.includes(entry.workspacePath));
+      const registeredCandidate = candidates.find((candidate) =>
+        normalized.some((entry) => samePhysicalPath(entry.workspacePath, candidate)),
+      );
+      canonical = registeredCandidate ?? canonical;
+      const workspaces = normalized.filter(
+        (entry) =>
+          !candidates.some((candidate) => samePhysicalPath(entry.workspacePath, candidate)),
+      );
       if (!sameRegistrations(state.workspaces, workspaces)) {
         // Keep the project record so re-registering a worktree retains its identity.
         await this.write({ ...state, workspaces });
@@ -176,10 +179,10 @@ export class WorkspaceRegistrationStore {
     await this.mutate(async () => {
       const state = await this.read();
       const normalized = await normalizeRegistrations(state.workspaces, dirname(this.filePath));
-      canonical =
-        candidates.find((candidate) =>
-          normalized.some((entry) => entry.workspacePath === candidate),
-        ) ?? canonical;
+      const registeredCandidate = candidates.find((candidate) =>
+        normalized.some((entry) => samePhysicalPath(entry.workspacePath, candidate)),
+      );
+      canonical = registeredCandidate ?? canonical;
     });
     return canonical;
   }
@@ -507,6 +510,11 @@ function projectMetadata(
 function normalizePath(path: string): string {
   const normalized = resolve(path).normalize("NFC");
   return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+/** Windows paths are case-insensitive, so compare the storage identity form. */
+function samePhysicalPath(left: string, right: string): boolean {
+  return normalizePath(left) === normalizePath(right);
 }
 
 function sameRegistrations(
