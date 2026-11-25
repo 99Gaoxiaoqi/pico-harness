@@ -210,7 +210,19 @@ async function runProductionRootWakeScenario(
     await waitUntil(() => (host?.store.listActivationClaims(graphId).length ?? 0) === 1);
     const claim = host.store.listActivationClaims(graphId)[0]!;
     await waitUntil(() => workspaceRuntime.getRun(claim.targetRunId) !== undefined);
-    assert.equal((await workspaceRuntime.waitForRun(claim.targetRunId)).status, "succeeded");
+    const claimRun = await workspaceRuntime.waitForRun(claim.targetRunId);
+    assert.equal(
+      claimRun.status,
+      "succeeded",
+      `${scenario}: operator claim run ${claim.targetRunId} ended ${claimRun.status}: ${
+        claimRun.error ?? "no error"
+      }; events=${JSON.stringify(
+        await rootLease.session.runtimeEventStore!.readRun(
+          claim.targetSessionId,
+          claim.targetRunId,
+        ),
+      )}`,
+    );
     const operatorEvents = await rootLease.session.runtimeEventStore!.readRun(
       claim.targetSessionId,
       claim.targetRunId,

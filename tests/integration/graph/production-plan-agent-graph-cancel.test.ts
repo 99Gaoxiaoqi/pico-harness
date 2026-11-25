@@ -162,7 +162,15 @@ for (const stopViaBoard of [false, true])
         assert.equal(approved.accepted, true);
         const initial = await runtime.waitForRun(approved.run.runId);
         assert.equal(initial.status, "succeeded", initial.error);
-        await waitUntil(() => operatorsEntered.size === 2);
+        try {
+          await waitUntil(() => operatorsEntered.size === 2);
+        } catch (error) {
+          throw new Error(
+            `${(error as Error).message}; entered=${operatorsEntered.size} ` +
+              `graph=${JSON.stringify(graphHost.store.getGraph(graphId) ?? null)} ` +
+              `claims=${JSON.stringify(graphHost.store.listActivationClaims(graphId))}`,
+          );
+        }
         const active = await readProjection();
         assert.equal(active.execution?.status, "active");
         assert.ok(active.execution?.graph);

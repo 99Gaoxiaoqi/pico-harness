@@ -315,7 +315,13 @@ for (const recoverAfterFinish of [false, true]) {
         gates[0]!.resolve();
         await waitUntil(() => wakeRuns.length === 1);
         const firstWake = await runtime.waitForRun(wakeRuns[0]!);
-        assert.equal(firstWake.status, "succeeded", firstWake.error);
+        assert.equal(
+          firstWake.status,
+          "succeeded",
+          `${firstWake.error ?? "no error"}; events=${JSON.stringify(
+            await session.runtimeEventStore!.readRun(sessionId, firstWake.runId),
+          )}`,
+        );
         const partial = await readProjection();
         assert.equal(partial.execution?.status, "active");
         assert.deepEqual(
