@@ -57,7 +57,8 @@ test("CI builds workspace packages after each install and before JavaScript test
     [...testedJobs].sort(),
     [
       "test",
-      "node-compatibility",
+      "integration",
+      "node-compatibility-integration",
       "windows-security",
       "macos-process-sandbox",
       "linux-process-sandbox",

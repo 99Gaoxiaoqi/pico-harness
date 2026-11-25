@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { build } from "esbuild";
@@ -248,9 +248,15 @@ export { createExecutionLearningIO, executionLearningRecallTargets } from ${JSON
       const archive = join(resourceDirectory, "app.asar");
       assert.notEqual(asarOptions, false);
       await createPackageWithOptions(archivedApp, archive, asarOptions as CreateOptions);
-      const archivedHost = statFile(archive, ".vite/build/daemon.cjs");
+      // @electron/asar stores Windows entries with backslashes but accepts
+      // forward-slash lookups only on POSIX.
+      const archiveEntry = (entry: string) => entry.split("/").join(sep);
+      const archivedHost = statFile(archive, archiveEntry(".vite/build/daemon.cjs"));
       assert.ok("size" in archivedHost && archivedHost.size > 0);
-      const archivedReporter = statFile(archive, ".vite/build/execution-learning-reporter.js");
+      const archivedReporter = statFile(
+        archive,
+        archiveEntry(".vite/build/execution-learning-reporter.js"),
+      );
       assert.ok(
         "size" in archivedReporter && archivedReporter.size > 0 && !archivedReporter.unpacked,
       );

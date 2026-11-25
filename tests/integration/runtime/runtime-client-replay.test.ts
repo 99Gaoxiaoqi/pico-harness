@@ -18,7 +18,9 @@ import {
   RUNTIME_HOST_BRIDGE_SESSION_SUBSCRIPTION_CLOSE,
   RUNTIME_HOST_BRIDGE_SESSION_SUBSCRIPTION_OPEN,
   RUNTIME_HOST_BRIDGE_SESSION_TRANSCRIPT_ADVANCE,
+  RUNTIME_HOST_BRIDGE_SESSION_TRANSCRIPT_ANCHORS,
   RUNTIME_HOST_BRIDGE_SESSION_TRANSCRIPT_PAGE,
+  RUNTIME_HOST_BRIDGE_SESSION_TRANSCRIPT_SEARCH,
   RUNTIME_HOST_BRIDGE_RUNTIME_SHUTDOWN,
 } from "@pico/pico-host/runtime-host-operations";
 import type {
@@ -141,6 +143,8 @@ test("Runtime client keeps a recovery fence after replay overflow", async (conte
         [RUNTIME_HOST_BRIDGE_SESSION_SUBSCRIPTION_CLOSE]: unavailableSessionContinuity,
         [RUNTIME_HOST_BRIDGE_SESSION_TRANSCRIPT_PAGE]: unavailableSessionContinuity,
         [RUNTIME_HOST_BRIDGE_SESSION_TRANSCRIPT_ADVANCE]: unavailableSessionContinuity,
+        [RUNTIME_HOST_BRIDGE_SESSION_TRANSCRIPT_ANCHORS]: unavailableSessionContinuity,
+        [RUNTIME_HOST_BRIDGE_SESSION_TRANSCRIPT_SEARCH]: unavailableSessionContinuity,
         [RUNTIME_HOST_BRIDGE_RUNTIME_SHUTDOWN]: async () => ({ ok: true, result: {} }),
       },
     };
