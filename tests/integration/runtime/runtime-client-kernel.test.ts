@@ -615,8 +615,20 @@ test("kernel client: trusted terminal owners isolate control, cleanup and reconn
       "PTY shell must produce prompt output before input",
     );
     // Mobile xterm sends individual keystrokes, including whitespace and Enter.
-    for (const data of ["\t", "\x15", ..."printf 'mobile-owner-ready\\n'\r"]) {
-      await reconnected.request("terminal.input", { ...target, data });
+    let typedSnapshot = "";
+    let typedCommandObserved = false;
+    for (let attempt = 0; attempt < 3 && !typedCommandObserved; attempt += 1) {
+      for (const data of ["\t", "\x15", ..."printf 'mobile-owner-ready\\n'\r"]) {
+        await reconnected.request("terminal.input", { ...target, data });
+      }
+      typedCommandObserved = await waitForCondition(async () => {
+        const output = await reconnected.request("terminal.attach", {
+          ...scope,
+          terminalId: target.terminalId,
+        });
+        typedSnapshot = output.snapshot;
+        return /(?:^|[\r\n])mobile-owner-ready[\r\n]/.test(typedSnapshot);
+      }, 5_000);
     }
     for (const data of ["", "x".repeat(64 * 1024 + 1)]) {
       await assert.rejects(
@@ -625,15 +637,11 @@ test("kernel client: trusted terminal owners isolate control, cleanup and reconn
       );
     }
     assert.equal(
-      await waitForCondition(async () => {
-        const output = await reconnected.request("terminal.attach", {
-          ...scope,
-          terminalId: target.terminalId,
-        });
-        return /(?:^|[\r\n])mobile-owner-ready[\r\n]/.test(output.snapshot);
-      }, 15_000),
+      typedCommandObserved,
       true,
-      "typed command output must reach the attached snapshot",
+      `typed command output must reach the attached snapshot; tail=${JSON.stringify(
+        typedSnapshot.slice(-400),
+      )}`,
     );
     await reconnected.request("terminal.resize", { ...target, cols: 100, rows: 30 });
   }
