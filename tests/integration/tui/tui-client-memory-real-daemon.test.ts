@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -45,7 +45,19 @@ test("TUI memory commands persist and archive atomic memories through the real d
     return String(result.result?.message);
   };
   assert.match(await command("/memory remember 未信任工作区不能保存记忆"), /Memory unavailable/);
-  await assert.rejects(access(join(picoHome, "memory.sqlite")), { code: "ENOENT" });
+  // The daemon may open the global memory database while starting; the contract
+  // under test is that an untrusted workspace persists no items.
+  const untrustedStore = new SqliteMemoryItemStore(join(picoHome, "memory.sqlite"));
+  try {
+    assert.deepEqual(
+      await untrustedStore.listItems({
+        workspaceKey: resolvePicoPaths(workspacePath, { picoHome }).workspace.id,
+      }),
+      [],
+    );
+  } finally {
+    untrustedStore.close();
+  }
   await client.request("workspace.trust", { workspacePath, trusted: true });
   await runtime.start();
   const content = "项目结构说明请使用简体中文,并先给结论。";
