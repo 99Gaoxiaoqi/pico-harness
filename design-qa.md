@@ -63,3 +63,23 @@ final result: passed
 按用户最新要求，菜单图标改为 Pico 自绘 SVG：22 个命令及 Skill、Agent、参数、通用命令共 26 个字形。统一 24px 坐标、1.6px 圆角线条和 18px 显示尺寸，使用 currentColor 继承主题；该菜单不再使用上文记录的 Lucide 图标。保留已有的两行排版和命令行为。
 
 重新打包并安装后，通过 computer use 查看命令与 Skill 列表、使用方向键选中 aihot，确认图标、文字和选中背景正常显示。[桌面效果](docs/assets/command-menu/menu-icons.png)。Chrome／Electron 既有集成测试 2/2、相关 ESLint、renderer 类型检查及桌面打包通过。只核查了浅色主题的实际 18px 显示，没有额外进行全主题图标审计。
+
+
+## 输入框几何与诊断徽标（2026-11-25）
+
+final result: passed
+
+对话页的“最近记录诊断”徽标原本作为正文流内的最后一个面板，随消息滚动并推挤正文；运行状态出现时，模型、权限、思考强度等底栏控件换到第二行，输入框在空闲态与运行态之间跳动 34px。现把徽标改到输入卡片上方的绝对定位槽位，不占布局；底栏永久预留两行控件槽位，动态状态文字省略而不换行。renderer 单独 dev server（`vite --config vite.renderer.config.ts`，`?demo=1` 预览数据）在 1280×800 CSS 像素下量测：
+
+| 状态     | 修改前 dock / composer / 输入框顶边 | 修改后 dock / composer / 输入框顶边 |
+| -------- | ----------------------------------- | ----------------------------------- |
+| 空闲     | 142 / 116 / 710px                   | 176 / 150 / 676px                   |
+| 运行中   | 176 / 150 / 676px                   | 176 / 150 / 676px                   |
+| 4 行草稿 | 202 高，底栏仍贴卡片底边            | 202 高，底栏仍贴卡片底边            |
+
+- [修改前·空闲](docs/assets/composer-stable/before-idle.png)、[修改前·运行中](docs/assets/composer-stable/before-running.png)
+- [修改后·空闲](docs/assets/composer-stable/after-idle.png)、[修改后·运行中](docs/assets/composer-stable/after-running.png)
+- [诊断徽标钉在输入框上方](docs/assets/composer-stable/tag-pinned-empty.png)、[多行草稿时仍钉在卡片上方](docs/assets/composer-stable/tag-pinned-multiline.png)
+
+徽标槽位 `getBoundingClientRect` 为 `y=587, h=40`，卡片顶边 `y=632`（间隔 5px）；徽标挂载与卸载时 composer 与输入框矩形完全一致，正文流内不再出现 `[aria-label="最近记录诊断"]`。新增 `tests/integration/desktop/desktop-composer-geometry.test.ts` 覆盖徽标出现/消失、空闲/运行、空草稿/换行草稿四类几何对比，去掉底栏预留后该测试以 34px 跳动失败。
+

@@ -74,6 +74,8 @@ export interface ConversationComposerProps {
   readonly onStop?: (() => void) | undefined;
   readonly leadingAccessory?: ReactNode | undefined;
   readonly trailingAccessory?: ReactNode | undefined;
+  /** Pinned above the composer card; absolutely positioned so it never reflows the input. */
+  readonly overlay?: ReactNode | undefined;
 }
 
 const behaviorLabels: Readonly<Record<Exclude<ComposerBehavior, "auto">, string>> = {
@@ -168,6 +170,7 @@ export function ConversationComposer({
   onStop,
   leadingAccessory,
   trailingAccessory,
+  overlay,
 }: ConversationComposerProps) {
   const editorRef = useRef<ChatComposerInputHandle>(null);
   const editableRef = useRef<HTMLDivElement>(null);
@@ -297,6 +300,7 @@ export function ConversationComposer({
         receiveFiles(event.dataTransfer.files);
       }}
     >
+      {overlay && <div className="conversation-composer__overlay">{overlay}</div>}
       {commandMenu.menu}
       {onFilesAdd && (
         <input

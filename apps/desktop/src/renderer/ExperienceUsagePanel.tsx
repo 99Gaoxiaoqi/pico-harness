@@ -169,7 +169,7 @@ function DrawerUsage({ uses, diagnostics = [], ...props }: ExperienceUsagePanelP
     </>
   );
 }
-function ExperienceDiagnostics({
+export function ExperienceDiagnostics({
   diagnostics,
 }: {
   readonly diagnostics: readonly ExperienceDiagnostic[];
