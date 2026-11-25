@@ -319,6 +319,15 @@
   flex: 1;
 }
 
+/* Sibling panels (experience diagnostics, learning summaries) share the
+   transcript's flex column but do not constrain their own width, so they would
+   stretch edge to edge. Match the transcript's centered reading column and keep
+   a gap above the composer dock. */
+.conversation-surface__content > .experience-record {
+  width: min(calc(100% - 48px), var(--conversation-content-width));
+  margin: 0 auto 24px;
+}
+
 .conversation-scroll-to-bottom {
   position: absolute;
   right: max(24px, calc((100% - var(--conversation-content-width)) / 2));
