@@ -165,10 +165,13 @@ for (const stopViaBoard of [false, true])
         try {
           await waitUntil(() => operatorsEntered.size === 2);
         } catch (error) {
+          const graphs = graphHost.store.listGraphs(sessionId);
           throw new Error(
             `${(error as Error).message}; entered=${operatorsEntered.size} ` +
-              `graph=${JSON.stringify(graphHost.store.getGraph(graphId) ?? null)} ` +
-              `claims=${JSON.stringify(graphHost.store.listActivationClaims(graphId))}`,
+              `graphs=${JSON.stringify(graphs)} ` +
+              `claims=${JSON.stringify(
+                graphs.flatMap((graph) => graphHost.store.listActivationClaims(graph.graphId)),
+              )}`,
           );
         }
         const active = await readProjection();
