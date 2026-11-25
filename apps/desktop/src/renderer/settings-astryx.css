@@ -63,7 +63,8 @@
   flex: 0 0 150px;
 }
 .provider-catalog-filters .pico-select-field {
-  height: 30px;
+  height: 32px;
+  min-height: 32px;
   background: var(--surface);
   font-size: 12px;
 }
