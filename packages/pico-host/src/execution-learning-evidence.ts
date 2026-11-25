@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { open } from "node:fs/promises";
 import { basename, isAbsolute, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import type {
   ExecutionAcceptanceClaim,
   ExecutionCondition,
@@ -334,12 +334,15 @@ export async function instrumentCommand(
   const reportPath = resolve(options.reportDirectory, `execution-learning-${randomUUID()}.jsonl`);
   const file = await open(reportPath, "wx", 0o600);
   await file.close();
+  // Node loads custom reporters as ES module specifiers, so an absolute Windows
+  // path is rejected; the file URL form is valid on every platform.
+  const reporterUrl = pathToFileURL(reporterPath).href;
   const argv = [
     target.argv[0]!,
     "--test",
     "--test-reporter=tap",
     "--test-reporter-destination=stdout",
-    `--test-reporter=${reporterPath}`,
+    `--test-reporter=${reporterUrl}`,
     `--test-reporter-destination=${reportPath}`,
     ...target.testFiles,
   ];
