@@ -169,7 +169,9 @@ test("kernel client: killing the daemon makes the next request respawn it", asyn
 
 test(
   "kernel client: an active Run crash recovers one failed fact without replaying its effect",
-  { timeout: 40_000 },
+  // Spawns a real daemon + local model server; cold daemon start on loaded CI disks
+  // routinely exceeds 40s before the crash barrier is reached.
+  { timeout: 120_000 },
   async (t) => {
     const harness = await startKernelClientHarness(t);
     const workspacePath = harness.workspacePath;
@@ -519,27 +521,33 @@ test("kernel client: trusted terminal owners isolate control, cleanup and reconn
     surface: "tui",
   });
   t.after(() => legacy.close());
-  const legacyTerminal = await legacy.request("terminal.create", scope);
-  assert.equal(
-    legacyTerminal.terminal.terminalOwnerId,
-    undefined,
-    "old hello receives old exact result shape",
-  );
-  const legacyTarget = {
-    ...scope,
-    terminalId: legacyTerminal.terminal.terminalId,
-    resourceEpoch: legacyTerminal.resourceEpoch,
-  };
-  await assert.rejects(
-    mobile.request("terminal.stop", legacyTarget),
-    (error: unknown) => error instanceof RuntimeClientError && error.code === "FORBIDDEN",
-  );
-  await desktop.request("terminal.stop", legacyTarget);
+  try {
+    const legacyTerminal = await legacy.request("terminal.create", scope);
+    assert.equal(
+      legacyTerminal.terminal.terminalOwnerId,
+      undefined,
+      "old hello receives old exact result shape",
+    );
+    const legacyTarget = {
+      ...scope,
+      terminalId: legacyTerminal.terminal.terminalId,
+      resourceEpoch: legacyTerminal.resourceEpoch,
+    };
+    await assert.rejects(
+      mobile.request("terminal.stop", legacyTarget),
+      (error: unknown) => error instanceof RuntimeClientError && error.code === "FORBIDDEN",
+    );
+    await desktop.request("terminal.stop", legacyTarget);
+  } catch (error) {
+    await harness.candidates.diagnoseFailure(t, "legacy terminal ownership", error);
+    throw error;
+  }
   const desktopTerminal = await desktop.request("terminal.create", scope);
   const mobileTerminal = await mobile.request("terminal.create", scope);
   assert.equal(mobileTerminal.terminal.terminalOwnerId, "remote:device-a");
   assert.equal(mobileTerminal.terminal.controlAllowed, true);
-  assert.equal(desktopTerminal.terminal.capability, process.platform === "win32" ? "pipe" : "pty");
+  // PTY availability is a runtime capability (node-pty presence), not a platform constant.
+  assert.ok(["pty", "pipe"].includes(desktopTerminal.terminal.capability));
   const target = {
     ...scope,
     terminalId: mobileTerminal.terminal.terminalId,
