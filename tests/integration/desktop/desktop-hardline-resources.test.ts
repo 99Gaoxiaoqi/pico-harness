@@ -121,8 +121,12 @@ assert.equal(packageMetadata.version, ${JSON.stringify(manifest.runtime.version)
     return;
   }
   await initialization;
-  const parsed = loader.parseBashScript("rm -rf /tmp/pico-hardline-fixture", loader.createBashAnalysisBudget());
-  assert.equal(parsed.ambiguous, false);
+  // This test exercises resource loading, not the production 50ms analysis budget;
+  // a loaded CI runner can exceed it on the first command even after warmup.
+  const budget = loader.createBashAnalysisBudget();
+  budget.deadline = performance.now() + 5_000;
+  const parsed = loader.parseBashScript("rm -rf /tmp/pico-hardline-fixture", budget);
+  assert.equal(parsed.ambiguous, false, JSON.stringify(parsed));
   assert.equal(parsed.commands[0][0].value, "rm");
   console.log("PASS: Hardline copied resources loaded");
 })().catch(error => { console.error(error); process.exitCode = 1; });
