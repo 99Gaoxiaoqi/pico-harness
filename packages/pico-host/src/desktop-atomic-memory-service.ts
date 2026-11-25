@@ -882,7 +882,11 @@ export class DesktopAtomicMemoryService {
       Object.defineProperty(failure, "cause", { value: error });
       // The protocol keeps the cause off the wire; the daemon's stderr is the only
       // place a store-level fault (schema, lock, permissions) can be traced.
-      console.error(`[atomic-memory] ${error instanceof Error ? error.message : String(error)}`);
+      console.error(
+        `[atomic-memory] ${join(this.options.picoHome, "memory.sqlite")} ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
       throw failure;
     }
   }

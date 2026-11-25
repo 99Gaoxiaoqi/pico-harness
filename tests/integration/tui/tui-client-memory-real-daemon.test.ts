@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { LocalRuntimeClient } from "@pico/pico-host/local-runtime-client";
 import { ClientSessionRuntime } from "@pico/cli/tui/client-session-runtime";
@@ -11,123 +12,134 @@ import { TestRuntimeHostCandidateTracker } from "../helpers/test-runtime-daemon.
 import { resolvePicoPaths } from "@pico/pico-host";
 import { SqliteMemoryItemStore } from "@pico/storage/sqlite/sqlite-memory-item-store";
 
-test("TUI memory commands persist and archive atomic memories through the real daemon", async (t) => {
-  const root = await mkdtemp(join(tmpdir(), "pico-client-memory-"));
-  const picoHome = join(root, "home");
-  await mkdir(picoHome);
-  await mkdir(join(root, "workspace"));
-  const workspacePath = await realpath(join(root, "workspace"));
-  const previousHome = process.env.PICO_HOME;
-  process.env.PICO_HOME = picoHome;
-  const candidates = new TestRuntimeHostCandidateTracker();
-  const client = new LocalRuntimeClient({
-    runtimeHostRootPath: picoHome,
-    candidateLauncher: candidates.launcher,
-  });
-  const runtime = new ClientSessionRuntime({ client, workspacePath, reporter: new TuiReporter() });
-  t.after(async () => {
+test(
+  "TUI memory commands persist and archive atomic memories through the real daemon",
+  { timeout: 240_000 },
+  async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "pico-client-memory-"));
+    const picoHome = join(root, "home");
+    await mkdir(picoHome);
+    await mkdir(join(root, "workspace"));
+    const workspacePath = await realpath(join(root, "workspace"));
+    const previousHome = process.env.PICO_HOME;
+    process.env.PICO_HOME = picoHome;
+    const candidates = new TestRuntimeHostCandidateTracker();
+    const client = new LocalRuntimeClient({
+      runtimeHostRootPath: picoHome,
+      candidateLauncher: candidates.launcher,
+    });
+    const runtime = new ClientSessionRuntime({
+      client,
+      workspacePath,
+      reporter: new TuiReporter(),
+    });
+    t.after(async () => {
+      try {
+        runtime.dispose();
+        client.close();
+        await candidates.stopAll();
+      } finally {
+        if (previousHome === undefined) delete process.env.PICO_HOME;
+        else process.env.PICO_HOME = previousHome;
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+    await client.request("runtime.ping", {});
+    await client.request("workspace.register", { workspacePath });
+    const registry = createClientCommandRegistry({ runtime, workspacePath });
+    const command = async (input: string) => {
+      const result = await processClientInput(input, registry, runtime);
+      assert.equal(result.kind, "local");
+      return String(result.result?.message);
+    };
+    assert.match(await command("/memory remember 未信任工作区不能保存记忆"), /Memory unavailable/);
+    // The daemon may open the global memory database while starting; the contract
+    // under test is that an untrusted workspace persists no items.
+    const untrustedStore = new SqliteMemoryItemStore(join(picoHome, "memory.sqlite"));
     try {
-      runtime.dispose();
-      client.close();
-      await candidates.stopAll();
+      assert.deepEqual(
+        await untrustedStore.listItems({
+          workspaceKey: resolvePicoPaths(workspacePath, { picoHome }).workspace.id,
+        }),
+        [],
+      );
     } finally {
-      if (previousHome === undefined) delete process.env.PICO_HOME;
-      else process.env.PICO_HOME = previousHome;
-      await rm(root, { recursive: true, force: true });
+      untrustedStore.close();
     }
-  });
-  await client.request("runtime.ping", {});
-  await client.request("workspace.register", { workspacePath });
-  const registry = createClientCommandRegistry({ runtime, workspacePath });
-  const command = async (input: string) => {
-    const result = await processClientInput(input, registry, runtime);
-    assert.equal(result.kind, "local");
-    return String(result.result?.message);
-  };
-  assert.match(await command("/memory remember 未信任工作区不能保存记忆"), /Memory unavailable/);
-  // The daemon may open the global memory database while starting; the contract
-  // under test is that an untrusted workspace persists no items.
-  const untrustedStore = new SqliteMemoryItemStore(join(picoHome, "memory.sqlite"));
-  try {
-    assert.deepEqual(
-      await untrustedStore.listItems({
-        workspaceKey: resolvePicoPaths(workspacePath, { picoHome }).workspace.id,
-      }),
-      [],
-    );
-  } finally {
-    untrustedStore.close();
-  }
-  await client.request("workspace.trust", { workspacePath, trusted: true });
-  await runtime.start();
-  const content = "项目结构说明请使用简体中文,并先给结论。";
-  const remembered = await command(`/memory remember ${content}`);
-  const undo = remembered.match(/\/memory undo (\S+)/)?.[1];
-  assert.ok(undo, remembered);
-  const { items } = await client.request("memory.list", {
-    workspacePath,
-    lifecycleStates: ["active"],
-  });
-  assert.equal(items.length, 1);
-  assert.equal(items[0]?.content, content);
-  assert.equal(items[0]?.kind, "note", "the daemon must return the atomic Memory Item");
-  const status = await command("/memory status");
-  assert.match(status, /Automatic extraction: on/);
-  assert.match(status, /Active items: 1/);
-  assert.doesNotMatch(status, /Review mode|Pending proposals/);
-  assert.match(await command(`/memory undo ${undo}`), /archived/);
-  const archived = await client.request("memory.get", {
-    workspacePath,
-    itemId: items[0]!.itemId,
-  });
-  assert.equal(archived.item.lifecycleState, "archived");
-  assert.match(await command("/memory status"), /Archived items: 1/);
-  const store = new SqliteMemoryItemStore(join(picoHome, "memory.sqlite"));
-  try {
-    const scopeKey = resolvePicoPaths(workspacePath, { picoHome }).workspace.id;
+    await client.request("workspace.trust", { workspacePath, trusted: true });
+    await runtime.start();
+    const content = "项目结构说明请使用简体中文,并先给结论。";
+    const remembered = await command(`/memory remember ${content}`);
+    const undo = remembered.match(/\/memory undo (\S+)/)?.[1];
+    assert.ok(undo, remembered);
+    const { items } = await client.request("memory.list", {
+      workspacePath,
+      lifecycleStates: ["active"],
+    });
+    assert.equal(items.length, 1);
+    assert.equal(items[0]?.content, content);
+    assert.equal(items[0]?.kind, "note", "the daemon must return the atomic Memory Item");
+    const status = await command("/memory status");
+    assert.match(status, /Automatic extraction: on/);
+    assert.match(status, /Active items: 1/);
+    assert.doesNotMatch(status, /Review mode|Pending proposals/);
+    assert.match(await command(`/memory undo ${undo}`), /archived/);
+    const archived = await client.request("memory.get", {
+      workspacePath,
+      itemId: items[0]!.itemId,
+    });
+    assert.equal(archived.item.lifecycleState, "archived");
+    assert.match(await command("/memory status"), /Archived items: 1/);
+    // The daemon is the sole writer of memory.sqlite; seeding from the test process
+    // makes a second writer race its WAL and yields transient corruption on slow
+    // CI disks. Seed through the supported RPC path instead.
     for (let first = 0; first < 1100; first += 32) {
-      await store.applyMutations({
-        operationId: `tui-count-seed-${first}`,
-        mutations: Array.from({ length: Math.min(32, 1100 - first) }, (_, offset) => ({
-          type: "create" as const,
-          item: {
-            content: `项目状态统计记忆 ${first + offset}`,
-            kind: "note" as const,
-            statementType: "fact" as const,
-            temporalType: "undated" as const,
-            scopeType: "workspace" as const,
-            scopeKey,
-            observedAt: Date.now(),
-            origin: "user_requested" as const,
-            keys: [{ key: "统计", keyType: "concept" as const, keyOrigin: "user" as const }],
-            sources: [],
-          },
-        })),
-      });
+      await Promise.all(
+        Array.from({ length: Math.min(32, 1100 - first) }, (_, offset) =>
+          client.request("memory.create", {
+            workspacePath,
+            text: `项目状态统计记忆 ${first + offset}`,
+          }),
+        ),
+      );
     }
-  } finally {
-    store.close();
-  }
-  const largeStatus = await command("/memory status");
-  if (!/Active items: 1100/u.test(largeStatus))
-    // The protocol hides the store-level cause; dump the daemon log before failing.
-    await candidates.diagnoseFailure(t, "memory status after bulk seed", new Error(largeStatus));
-  assert.match(largeStatus, /Active items: 1100/u);
-  assert.match(largeStatus, /Archived items: 1/u);
-  assert.match(largeStatus, /Total items: 1101/u);
-  await command("/memory off");
-  assert.equal(
-    (await client.request("memory.settings.get", { workspacePath })).settings.enabled,
-    false,
-  );
-  await command("/memory on");
-  assert.equal(
-    (await client.request("memory.settings.get", { workspacePath })).settings.enabled,
-    true,
-  );
-  assert.equal(
-    (await client.request("runs.list", { workspacePath })).runs.length,
-    0,
-    "manual memory commands must not start model runs",
-  );
-});
+    const largeStatus = await command("/memory status");
+    if (!/Active items: 1100/u.test(largeStatus)) {
+      const probe = new DatabaseSync(join(picoHome, "memory.sqlite"), { readOnly: true });
+      try {
+        t.diagnostic(
+          `[tui-memory-fixture] ${JSON.stringify({
+            integrity: probe.prepare("PRAGMA integrity_check").all(),
+            journal: probe.prepare("PRAGMA journal_mode").get(),
+            tables: probe
+              .prepare("SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name")
+              .all()
+              .map((row) => String(row.name)),
+          })}`,
+        );
+      } finally {
+        probe.close();
+      }
+      // The protocol hides the store-level cause; dump the daemon log before failing.
+      await candidates.diagnoseFailure(t, "memory status after bulk seed", new Error(largeStatus));
+    }
+    assert.match(largeStatus, /Active items: 1100/u);
+    assert.match(largeStatus, /Archived items: 1/u);
+    assert.match(largeStatus, /Total items: 1101/u);
+    await command("/memory off");
+    assert.equal(
+      (await client.request("memory.settings.get", { workspacePath })).settings.enabled,
+      false,
+    );
+    await command("/memory on");
+    assert.equal(
+      (await client.request("memory.settings.get", { workspacePath })).settings.enabled,
+      true,
+    );
+    assert.equal(
+      (await client.request("runs.list", { workspacePath })).runs.length,
+      0,
+      "manual memory commands must not start model runs",
+    );
+  },
+);
