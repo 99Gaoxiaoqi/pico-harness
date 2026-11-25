@@ -268,12 +268,16 @@ test("one provider and key survive RPC round trips and route Chat, Messages and 
   assert.equal(succeeded, true);
   assert.deepEqual(requests.at(-1), { path: "/v1/messages", model: "minimax-m3", key: secret });
 
-  const current = await store.read();
   const invalidMaps: Record<string, string>[] = [
     { "minimax-m3": "unsupported" },
     { absent: "claude" },
   ];
   for (const modelProtocols of invalidMaps) {
+    // Background job finalization may still publish unrelated config revisions;
+    // read the service's authoritative revision immediately before each write.
+    const current = (await services.desktopService.handle(
+      createRuntimeRequest("config.user.get", {}),
+    )) as RuntimeResult<"config.user.get">;
     await assert.rejects(
       services.desktopService.handle(
         createRuntimeRequest("provider.upsert", {
@@ -283,6 +287,9 @@ test("one provider and key survive RPC round trips and route Chat, Messages and 
       ),
       /modelProtocols/u,
     );
-    assert.equal((await store.read()).revision, current.revision);
+    const after = (await services.desktopService.handle(
+      createRuntimeRequest("config.user.get", {}),
+    )) as RuntimeResult<"config.user.get">;
+    assert.equal(after.revision, current.revision);
   }
 });

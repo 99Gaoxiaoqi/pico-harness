@@ -274,7 +274,10 @@ test("10,000 physical requests retain bounded pages and measured summary latency
       let start = performance.now();
       const page = querySessionExecution(root, { sessionId: "session" });
       times.page.push(performance.now() - start);
-      if (times.page.at(-1)! > 5000)
+      // Cold-cache first reads on shared CI disks can take seconds; this guards
+      // a pathological stop, while the p95 assertion below still measures the
+      // warm steady state.
+      if (times.page.at(-1)! > 30_000)
         throw new Error(
           `benchmark first page ${times.page.at(-1)}ms exceeds diagnostic stop limit`,
         );
