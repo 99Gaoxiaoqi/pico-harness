@@ -151,9 +151,11 @@ test("daemon candidate: connectOrSpawn spawns the pico daemon entrypoint and rea
       surface: "tui",
       protocol: { min: RUNTIME_HOST_PROTOCOL_VERSION, max: RUNTIME_HOST_PROTOCOL_VERSION },
       clientInstanceId: "candidate-spawn-test-client",
-      electionDeadlineMs: 45_000,
-      connectTimeoutMs: 5_000,
-      handshakeTimeoutMs: 5_000,
+      electionDeadlineMs: 60_000,
+      // A cold daemon on a loaded macOS runner was observed taking >20s to open
+      // its control socket; 5s connect/handshake abandoned every candidate.
+      connectTimeoutMs: 15_000,
+      handshakeTimeoutMs: 15_000,
       candidateEntrypoint: pathToFileURL(mainPath).href,
       env: harness.env,
       candidateLauncher: harness.candidates.launcher,
@@ -162,7 +164,7 @@ test("daemon candidate: connectOrSpawn spawns the pico daemon entrypoint and rea
     if (result.kind !== "connected") return;
     const connection = result.connection;
 
-    const status = await waitForReadyStatus(connection, 15_000);
+    const status = await waitForReadyStatus(connection, 45_000);
     assert.equal(status.state, "ready");
 
     const ping = await connection.requestRegistered<{ result: unknown }>(
