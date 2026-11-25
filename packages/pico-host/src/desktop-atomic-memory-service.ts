@@ -848,9 +848,7 @@ export class DesktopAtomicMemoryService {
     try {
       if (this.closed) throw new Error("Memory service is closed");
       const key = resolvePicoPaths(workspacePath, { picoHome: this.options.picoHome }).workspace.id;
-      const store = new SqliteMemoryItemStore(join(this.options.picoHome, "memory.sqlite"), {
-        now: () => this.now(),
-      });
+      const store = await this.openStore();
       try {
         return await operation(store, key);
       } finally {
@@ -875,6 +873,20 @@ export class DesktopAtomicMemoryService {
       // place a store-level fault (schema, lock, permissions) can be traced.
       console.error(`[atomic-memory] ${error instanceof Error ? error.message : String(error)}`);
       throw failure;
+    }
+  }
+
+  private async openStore(): Promise<SqliteMemoryItemStore> {
+    const path = join(this.options.picoHome, "memory.sqlite");
+    try {
+      return new SqliteMemoryItemStore(path, { now: () => this.now() });
+    } catch (error) {
+      // A concurrent WAL checkpoint/writer in another process can make a fresh
+      // reader observe a transient corrupt image. The durable state is unchanged;
+      // reopen once before surfacing a service failure.
+      if (!isMemoryStoreCorruption(error)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      return new SqliteMemoryItemStore(path, { now: () => this.now() });
     }
   }
 
@@ -1111,6 +1123,17 @@ function publicExperienceCandidate(
         .map((key) => [key, (candidate as unknown as Record<string, unknown>)[key]]),
     ),
   } as TaskExperienceCandidate;
+}
+
+/** SQLite reports a transient cross-process WAL race as corruption. */
+function isMemoryStoreCorruption(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const code = "code" in error ? String(error.code) : "";
+  return (
+    code === "SQLITE_CORRUPT" ||
+    code === "SQLITE_NOTADB" ||
+    /database disk image is malformed|file is not a database/i.test(error.message)
+  );
 }
 
 function invalid(message: string): RuntimeProtocolError {
