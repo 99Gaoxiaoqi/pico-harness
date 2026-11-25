@@ -80,6 +80,8 @@ export const CLEARED_TABLES = Object.freeze([
   "deep_research_events",
 ]);
 const SIDE_CHAT_KEY = "desktop.side-chat.leases.v1";
+/** Offline reset understands every control shape from v7 up to the v10 baseline. */
+const SUPPORTED_CONTROL_SCHEMAS = new Set([7, 8, 9, 10]);
 const quote = (name) => `"${name.replaceAll('"', '""')}"`;
 
 /** Reset only this existing operational SQLite file, atomically; external files are never followed. */
@@ -120,8 +122,12 @@ export function resetContextHistory(path, { execute = false, runtimeStopped = fa
         .prepare("SELECT scope, version FROM operational_schema_migrations ORDER BY scope")
         .all();
       const controlVersion = schemaVersions.find((row) => row.scope === "control")?.version;
-      if (controlVersion !== 7 && controlVersion !== 8 && controlVersion !== 9)
-        throw new Error(`Unsupported control schema ${controlVersion}; expected 7, 8, or 9.`);
+      if (!SUPPORTED_CONTROL_SCHEMAS.has(controlVersion))
+        throw new Error(
+          `Unsupported control schema ${controlVersion}; expected one of ${[
+            ...SUPPORTED_CONTROL_SCHEMAS,
+          ].join(", ")}.`,
+        );
       assertIntegrity(database);
       const preserved = tables.filter((name) => PRESERVED_TABLES.includes(name));
       const clearing = deleteOrder(

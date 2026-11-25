@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { ALL_WORKSPACE_SQLITE_SCOPES } from "../../../packages/storage/src/sqlite/workspace-scopes.js";
+import { CONTROL_SCOPE } from "../../../packages/storage/src/sqlite/control-scope.js";
 import {
   assertCurrentOperationalTargetSchemaSync,
   migrateOperationalDatabaseSync,
+  scopeCurrentVersion,
 } from "../../../packages/storage/src/sqlite/sqlite-schema.js";
 import { LEGACY_CONTROL_SCOPE } from "../helpers/legacy-control-schema.js";
 
@@ -36,7 +38,7 @@ test("current baseline has only current context tables and reopens idempotently"
     assert.equal(
       db.prepare("SELECT version FROM operational_schema_migrations WHERE scope='control'").get()!
         .version,
-      9,
+      scopeCurrentVersion(CONTROL_SCOPE),
     );
   } finally {
     db.close();
