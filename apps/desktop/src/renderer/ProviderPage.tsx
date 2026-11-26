@@ -19,6 +19,7 @@ import {
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { Button, EmptyState, IconButton, InlineNotice } from "./components.js";
+import { requestConfirm } from "./confirm-dialog.js";
 import type {
   ProviderCredentialStatus,
   ProviderDraft,
@@ -142,16 +143,19 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
     void actions.setDefaultModelRoute(modelRouteId || undefined);
   };
 
-  const handleDeleteProvider = (provider: ProviderView) => {
+  const handleDeleteProvider = async (provider: ProviderView) => {
     if (
-      window.confirm(
-        `删除服务商/渠道“${provider.id}”？已有会话不会被删除，但恢复时可能需要重新选择模型。`,
-      )
-    ) {
-      void actions.deleteProvider(provider.id).then((deleted) => {
-        if (deleted) navigate("/settings/models");
-      });
-    }
+      !(await requestConfirm({
+        title: `删除服务商/渠道「${provider.id}」？`,
+        body: "已有会话不会被删除，但恢复时可能需要重新选择模型。",
+        confirmLabel: "删除",
+        tone: "danger",
+      }))
+    )
+      return;
+    void actions.deleteProvider(provider.id).then((deleted) => {
+      if (deleted) navigate("/settings/models");
+    });
   };
 
   if (adding) return <ProviderOnboarding runtime={runtime} onClose={() => setAdding(false)} />;
@@ -225,7 +229,7 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
           onDefault={actions.setDefaultModelRoute}
           onRefresh={actions.refreshProviders}
           onTest={actions.testProviderConnection}
-          onDelete={() => handleDeleteProvider(selectedProvider)}
+          onDelete={() => void handleDeleteProvider(selectedProvider)}
         />
       )}
 
@@ -896,9 +900,16 @@ function CredentialDialog({
   const handleDelete = async () => {
     if (!provider || !expectedRevision) return;
     if (
-      !window.confirm(
-        `删除 ${provider.id} 保存在当前设备上的 API Key？删除后，使用该服务商的新请求将无法发送，直到重新配置凭证。`,
-      )
+      !(await requestConfirm({
+        title: `删除 ${provider.id} 保存在当前设备上的 API Key？`,
+        body: "删除后，使用该服务商的新请求将无法发送，直到重新配置凭证。",
+        confirmLabel: "删除 API Key",
+        tone: "danger",
+        requireText: {
+          text: provider.id,
+          label: `输入「${provider.id}」确认删除`,
+        },
+      }))
     ) {
       return;
     }

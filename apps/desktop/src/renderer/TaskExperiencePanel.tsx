@@ -8,6 +8,7 @@ import type {
   TaskExperienceReuse,
 } from "@pico/core";
 import { Button, EmptyState, InlineNotice } from "./components.js";
+import { requestConfirm } from "./confirm-dialog.js";
 import { SelectField, TextAreaField, TextField } from "./ui-controls.js";
 import { isMemoryConflict, RuntimeInvocationError } from "./runtime.js";
 import {
@@ -1581,9 +1582,17 @@ function ExperienceDetailCard({
             <Button
               variant="quiet"
               disabled={busy || unavailable}
-              onClick={() => {
-                if (window.confirm("删除这条任务经验？此操作无法恢复，原聊天记录仍保留。"))
-                  void act("delete");
+              onClick={async () => {
+                if (
+                  !(await requestConfirm({
+                    title: "删除这条任务经验？",
+                    body: "此操作无法恢复，原聊天记录仍保留。",
+                    confirmLabel: "删除",
+                    tone: "danger",
+                  }))
+                )
+                  return;
+                await act("delete");
               }}
             >
               删除

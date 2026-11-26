@@ -1,0 +1,24 @@
+@layer pages {
+  .confirm-dialog h2 {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .confirm-dialog h2 svg {
+    flex: 0 0 auto;
+    color: var(--danger, #b3261e);
+  }
+  .confirm-dialog__body {
+    margin-top: 8px;
+    color: var(--ink-secondary);
+    line-height: 1.55;
+  }
+  .confirm-dialog__require {
+    margin-top: 16px;
+  }
+  .confirm-dialog__require p {
+    margin-bottom: 6px;
+    color: var(--ink-secondary);
+    font-size: 13px;
+  }
+}
