@@ -12,6 +12,7 @@ import {
   type NavigateFunction,
 } from "react-router-dom";
 import { SessionsPage } from "../../apps/desktop/src/renderer/pages/SessionsPage.tsx";
+import { ArchiveUndoProvider } from "../../apps/desktop/src/renderer/archive-undo.tsx";
 import { UsagePage } from "../../apps/desktop/src/renderer/usage/UsagePage.tsx";
 import { ConversationPage } from "../../apps/desktop/src/renderer/pages/ConversationPage.tsx";
 import { SideChatPanelController } from "../../apps/desktop/src/renderer/workbar-panels/SideChatPanelController.tsx";
@@ -550,7 +551,14 @@ async function mount(side = false, key = crypto.randomUUID()) {
         <RuntimeContext value={runtime}>
           <MemoryRouter key={key} initialEntries={["/session/s1?workspace=%2Ffixture"]}>
             <Routes>
-              <Route path="/sessions" element={<SessionsPage />} />
+              <Route
+                path="/sessions"
+                element={
+                  <ArchiveUndoProvider>
+                    <SessionsPage />
+                  </ArchiveUndoProvider>
+                }
+              />
               <Route path="/settings/usage" element={<UsagePage />} />
               <Route
                 path="/task/new"
