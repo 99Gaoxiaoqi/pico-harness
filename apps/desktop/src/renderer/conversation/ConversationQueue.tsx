@@ -36,6 +36,7 @@ export function ConversationQueue({
   readonly steerSupported: boolean;
 }) {
   const [editingQueueId, setEditingQueueId] = useState<string>();
+  const [steerNotice, setSteerNotice] = useState<{ queueId: string; text: string }>();
   const [draft, setDraft] = useState("");
   const [pending, setPending] = useState(false);
   const inFlight = useRef(false);
@@ -73,6 +74,22 @@ export function ConversationQueue({
     [queueIds[index], queueIds[target]] = [queueIds[target]!, queueIds[index]!];
     void mutate(() => actions.reorderQueuedInputs(sessionRef, queueIds));
   };
+  const requestSteer = (item: RuntimeQueuedInput) => {
+    if (locked || !steerSupported) return;
+    if (!runId) {
+      setSteerNotice({
+        queueId: item.queueId,
+        text: "当前会话没有正在执行的运行，消息将在下一轮发送。",
+      });
+      return;
+    }
+    if (!isSteerableQueuedInput(item.input)) {
+      setSteerNotice({ queueId: item.queueId, text: "包含附件的消息需继续排队。" });
+      return;
+    }
+    setSteerNotice(undefined);
+    void mutate(() => actions.steerQueuedInput(sessionRef, item.queueId, runId));
+  };
 
   return (
     <section
@@ -82,13 +99,6 @@ export function ConversationQueue({
     >
       <ol>
         {items.map((item, index) => {
-          const reason = !steerSupported
-            ? "当前 Runtime 不支持队列引导，请更新并重启 Pico。"
-            : !runId
-              ? "当前会话没有正在执行的运行，消息将在下一轮发送。"
-              : !isSteerableQueuedInput(item.input)
-                ? "包含附件、技能或子任务的消息需继续排队。"
-                : "在当前运行的下一次模型调用前追加这条指令";
           return (
             <li key={item.queueId}>
               {editingQueueId === item.queueId ? (
@@ -129,17 +139,9 @@ export function ConversationQueue({
                     <button
                       type="button"
                       className="conversation-queue__steer"
-                      title={reason}
                       aria-label={`引导第 ${index + 1} 条消息`}
-                      disabled={
-                        locked || !steerSupported || !runId || !isSteerableQueuedInput(item.input)
-                      }
-                      onClick={() => {
-                        if (runId)
-                          void mutate(() =>
-                            actions.steerQueuedInput(sessionRef, item.queueId, runId),
-                          );
-                      }}
+                      disabled={locked || !steerSupported}
+                      onClick={() => requestSteer(item)}
                     >
                       <CornerDownRight aria-hidden="true" />
                       引导
@@ -197,6 +199,11 @@ export function ConversationQueue({
                       />
                     </DropdownMenu>
                   </div>
+                  {steerNotice?.queueId === item.queueId && (
+                    <p className="conversation-queue__item-notice" role="status">
+                      {steerNotice.text}
+                    </p>
+                  )}
                 </>
               )}
             </li>

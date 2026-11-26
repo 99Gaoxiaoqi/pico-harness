@@ -299,8 +299,8 @@ async function scenario(){
   check(thinking(),"New task must expose thinking before the first message");
   await act(async()=>thinking().click());await frame();
   const option=text=>[...document.querySelectorAll('[role="option"]')].find(el=>el.textContent.trim()===text);
-  check(option("low")&&option("high")&&!option("unsupported"),"Only supported thinking levels are offered");
-  await act(async()=>option("high").click());
+  check(option("低")&&option("高")&&!option("unsupported"),"Only supported thinking levels are offered");
+  await act(async()=>option("高").click());
   const editor=document.querySelector('[contenteditable="true"]');
   await act(async()=>{editor.focus();document.execCommand("insertText",false,"test first send");});
   await click("发送消息");
@@ -309,8 +309,8 @@ async function scenario(){
   check(radio("b")&&!document.querySelector('.composer-model-menu')?.textContent.includes("disabled"),"New task includes discovered models and excludes disabled ones");
   await act(async()=>radio("b").click());
   await act(async()=>thinking().click());await frame();
-  check(option("medium")&&!option("high"),"Changing model refreshes supported reasoning levels");
-  await act(async()=>option("思考：默认").click());
+  check(option("中")&&!option("高"),"Changing model refreshes supported reasoning levels");
+  await act(async()=>option("默认").click());
   await click("发送消息");
   check(sends.length===2&&!Object.hasOwn(sends[1].initialSettings,"thinkingEffort"),"Model change/default selection leaves reconciliation to the Host");
 

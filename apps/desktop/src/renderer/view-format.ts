@@ -1,3 +1,12 @@
+/** One wording for a provider cost outcome everywhere in the renderer. */
+export const costStatusLabels = {
+  none: "无费用",
+  estimated: "估算",
+  included: "套餐内",
+  unknown: "未知",
+  partial: "已知部分",
+} as const satisfies Readonly<Record<string, string>>;
+
 export function isTerminalRun(status: string): boolean {
   return ["cancelled", "failed", "succeeded", "completed"].includes(status);
 }
