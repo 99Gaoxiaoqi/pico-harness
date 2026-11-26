@@ -706,11 +706,27 @@ async function command(text: string) {
       "未知命令丢失草稿",
     );
     await type("/resume s");
+    // Electron resolves argument completion over IPC; wait for the async result
+    // instead of assuming one frame is enough on slower runners.
+    let firstResumeOption = "";
+    let allResumeOptions = "";
+    const resumeDeadline = performance.now() + 1000;
+    while (performance.now() < resumeDeadline) {
+      firstResumeOption =
+        document.querySelector('.command-suggestions [role="option"]')?.textContent ?? "";
+      allResumeOptions = [
+        ...document.querySelectorAll<HTMLElement>('.command-suggestions [role="option"]'),
+      ]
+        .map((item) => item.textContent ?? "")
+        .join(" | ");
+      if (firstResumeOption.includes("第二个会话")) break;
+      await act(async () => {
+        await wait();
+      });
+    }
     check(
-      document
-        .querySelector('.command-suggestions [role="option"]')
-        ?.textContent.includes("第二个会话"),
-      "参数补全未显示标题",
+      firstResumeOption.includes("第二个会话"),
+      "参数补全未显示标题: first=" + firstResumeOption + " all=" + allResumeOptions,
     );
     await key("Tab");
     check(editor().textContent.trim() === "/resume s2", "会话补全没使用 ID");
