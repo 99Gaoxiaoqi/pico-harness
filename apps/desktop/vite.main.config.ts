@@ -1,4 +1,5 @@
 import { defineConfig } from "vite";
+import { nodeSqliteExternal } from "./vite.node-externals.js";
 
 const updateFeedUrl = readOptionalHttpsUrl("PICO_UPDATE_FEED_URL");
 const bundledModuleUrlGlobal = "__PICO_MAIN_IMPORT_META_URL__";
@@ -14,7 +15,7 @@ export default defineConfig({
     sourcemap: false,
     rollupOptions: {
       // Preserve package-relative native addon and parser WASM lookups.
-      external: ["electron", "fs-native-extensions", "web-tree-sitter"],
+      external: ["electron", "fs-native-extensions", "web-tree-sitter", nodeSqliteExternal],
       output: {
         codeSplitting: true,
         banner: `globalThis.${bundledModuleUrlGlobal} = require("node:url").pathToFileURL(__filename).href;`,
